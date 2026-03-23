@@ -8,27 +8,27 @@ import (
 	"time"
 )
 
-// SignatureEntry holds a cached thinking signature with timestamp
-type SignatureEntry struct {
+// signatureEntry holds a cached thinking signature with timestamp
+type signatureEntry struct {
 	Signature string
 	Timestamp time.Time
 }
 
 const (
-	// SignatureCacheTTL is how long signatures are valid
-	SignatureCacheTTL = 3 * time.Hour
+	// signatureCacheTTL is how long signatures are valid
+	signatureCacheTTL = 3 * time.Hour
 
-	// SignatureTextHashLen is the length of the hash key (16 hex chars = 64-bit key space)
-	SignatureTextHashLen = 16
+	// signatureTextHashLen is the length of the hash key (16 hex chars = 64-bit key space)
+	signatureTextHashLen = 16
 
-	// MinValidSignatureLen is the minimum length for a signature to be considered valid
-	MinValidSignatureLen = 50
+	// minValidSignatureLen is the minimum length for a signature to be considered valid
+	minValidSignatureLen = 50
 
-	// CacheCleanupInterval controls how often stale entries are purged
-	CacheCleanupInterval = 10 * time.Minute
+	// cleanupInterval controls how often stale entries are purged
+	cleanupInterval = 10 * time.Minute
 )
 
-// signatureCache stores signatures by model group -> textHash -> SignatureEntry
+// signatureCache stores signatures by model group -> textHash -> signatureEntry
 var signatureCache sync.Map
 
 // cacheCleanupOnce ensures the background cleanup goroutine starts only once
@@ -37,13 +37,13 @@ var cacheCleanupOnce sync.Once
 // groupCache is the inner map type
 type groupCache struct {
 	mu      sync.RWMutex
-	entries map[string]SignatureEntry
+	entries map[string]signatureEntry
 }
 
 // hashText creates a stable, Unicode-safe key from text content
 func hashText(text string) string {
 	h := sha256.Sum256([]byte(text))
-	return hex.EncodeToString(h[:])[:SignatureTextHashLen]
+	return hex.EncodeToString(h[:])[:signatureTextHashLen]
 }
 
 // getOrCreateGroupCache gets or creates a cache bucket for a model group
@@ -54,7 +54,7 @@ func getOrCreateGroupCache(groupKey string) *groupCache {
 	if val, ok := signatureCache.Load(groupKey); ok {
 		return val.(*groupCache)
 	}
-	sc := &groupCache{entries: make(map[string]SignatureEntry)}
+	sc := &groupCache{entries: make(map[string]signatureEntry)}
 	actual, _ := signatureCache.LoadOrStore(groupKey, sc)
 	return actual.(*groupCache)
 }
@@ -63,7 +63,7 @@ func getOrCreateGroupCache(groupKey string) *groupCache {
 // removes caches where all entries have expired.
 func startCacheCleanup() {
 	go func() {
-		ticker := time.NewTicker(CacheCleanupInterval)
+		ticker := time.NewTicker(cleanupInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			purgeExpiredCaches()
@@ -74,32 +74,34 @@ func startCacheCleanup() {
 // purgeExpiredCaches removes caches with no valid (non-expired) entries.
 func purgeExpiredCaches() {
 	now := time.Now()
-	signatureCache.Range(func(key, value any) bool {
-		sc := value.(*groupCache)
-		sc.mu.Lock()
-		// Remove expired entries
-		for k, entry := range sc.entries {
-			if now.Sub(entry.Timestamp) > SignatureCacheTTL {
-				delete(sc.entries, k)
+	signatureCache.Range(
+		func(key, value any) bool {
+			sc := value.(*groupCache)
+			sc.mu.Lock()
+			// Remove expired entries
+			for k, entry := range sc.entries {
+				if now.Sub(entry.Timestamp) > signatureCacheTTL {
+					delete(sc.entries, k)
+				}
 			}
-		}
-		isEmpty := len(sc.entries) == 0
-		sc.mu.Unlock()
-		// Remove cache bucket if empty
-		if isEmpty {
-			signatureCache.Delete(key)
-		}
-		return true
-	})
+			isEmpty := len(sc.entries) == 0
+			sc.mu.Unlock()
+			// Remove cache bucket if empty
+			if isEmpty {
+				signatureCache.Delete(key)
+			}
+			return true
+		},
+	)
 }
 
-// CacheSignature stores a thinking signature for a given model group and text.
+// StoreSignature stores a thinking signature for a given model group and text.
 // Used for Claude models that require signed thinking blocks in multi-turn conversations.
-func CacheSignature(modelName, text, signature string) {
+func StoreSignature(modelName, text, signature string) {
 	if text == "" || signature == "" {
 		return
 	}
-	if len(signature) < MinValidSignatureLen {
+	if len(signature) < minValidSignatureLen {
 		return
 	}
 
@@ -109,7 +111,7 @@ func CacheSignature(modelName, text, signature string) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	sc.entries[textHash] = SignatureEntry{
+	sc.entries[textHash] = signatureEntry{
 		Signature: signature,
 		Timestamp: time.Now(),
 	}
@@ -148,7 +150,7 @@ func GetCachedSignature(modelName, text string) string {
 		}
 		return ""
 	}
-	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
+	if now.Sub(entry.Timestamp) > signatureCacheTTL {
 		delete(sc.entries, textHash)
 		sc.mu.Unlock()
 		if groupKey == "gemini" {
@@ -168,10 +170,12 @@ func GetCachedSignature(modelName, text string) string {
 // ClearSignatureCache clears signature cache for a specific model group or all groups.
 func ClearSignatureCache(modelName string) {
 	if modelName == "" {
-		signatureCache.Range(func(key, _ any) bool {
-			signatureCache.Delete(key)
-			return true
-		})
+		signatureCache.Range(
+			func(key, _ any) bool {
+				signatureCache.Delete(key)
+				return true
+			},
+		)
 		return
 	}
 	groupKey := GetModelGroup(modelName)
@@ -180,7 +184,8 @@ func ClearSignatureCache(modelName string) {
 
 // HasValidSignature checks if a signature is valid (non-empty and long enough)
 func HasValidSignature(modelName, signature string) bool {
-	return (signature != "" && len(signature) >= MinValidSignatureLen) || (signature == "skip_thought_signature_validator" && GetModelGroup(modelName) == "gemini")
+	return (signature != "" && len(signature) >= minValidSignatureLen) ||
+		(signature == "skip_thought_signature_validator" && GetModelGroup(modelName) == "gemini")
 }
 
 func GetModelGroup(modelName string) string {

@@ -6,12 +6,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/iflow"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -30,7 +28,10 @@ func (a *IFlowAuthenticator) RefreshLead() *time.Duration {
 }
 
 // Login performs the OAuth code flow using a local callback server.
-func (a *IFlowAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+func (a *IFlowAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (
+	*coreauth.Auth,
+	error,
+) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
 	}
@@ -46,7 +47,7 @@ func (a *IFlowAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		callbackPort = opts.CallbackPort
 	}
 
-	authSvc := iflow.NewIFlowAuth(cfg)
+	authSvc := iflow.NewAuth(cfg)
 
 	oauthServer := iflow.NewOAuthServer(callbackPort)
 	if err := oauthServer.Start(); err != nil {
@@ -70,21 +71,7 @@ func (a *IFlowAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 
 	authURL, redirectURI := authSvc.AuthorizationURL(state, callbackPort)
 
-	if !opts.NoBrowser {
-		fmt.Println("Opening browser for iFlow authentication")
-		if !browser.IsAvailable() {
-			log.Warn("No browser available; please open the URL manually")
-			util.PrintSSHTunnelInstructions(callbackPort)
-			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-		} else if err = browser.OpenURL(authURL); err != nil {
-			log.Warnf("Failed to open browser automatically: %v", err)
-			util.PrintSSHTunnelInstructions(callbackPort)
-			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-		}
-	} else {
-		util.PrintSSHTunnelInstructions(callbackPort)
-		fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-	}
+	openBrowserForAuth("iFlow", authURL, callbackPort, opts.NoBrowser)
 
 	fmt.Println("Waiting for iFlow authentication callback...")
 

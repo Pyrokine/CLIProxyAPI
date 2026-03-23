@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 )
 
 func TestRegisterManagementRoutes(t *testing.T) {
@@ -14,21 +14,25 @@ func TestRegisterManagementRoutes(t *testing.T) {
 	r := gin.New()
 
 	// Create module with proxy for testing
-	m := &AmpModule{
+	m := &Module{
 		restrictToLocalhost: false, // disable localhost restriction for tests
 	}
 
 	// Create a mock proxy that tracks calls
 	proxyCalled := false
-	mockProxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxyCalled = true
-		w.WriteHeader(200)
-		w.Write([]byte("proxied"))
-	}))
+	mockProxy := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				proxyCalled = true
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte("proxied"))
+			},
+		),
+	)
 	defer mockProxy.Close()
 
 	// Create real proxy to mock server
-	proxy, _ := createReverseProxy(mockProxy.URL, NewStaticSecretSource(""))
+	proxy, _ := createReverseProxy(mockProxy.URL, newStaticSecretSource(""))
 	m.setProxy(proxy)
 
 	base := &handlers.BaseAPIHandler{}
@@ -63,25 +67,27 @@ func TestRegisterManagementRoutes(t *testing.T) {
 	}
 
 	for _, path := range managementPaths {
-		t.Run(path.path, func(t *testing.T) {
-			proxyCalled = false
-			req, err := http.NewRequest(path.method, srv.URL+path.path, nil)
-			if err != nil {
-				t.Fatalf("failed to build request: %v", err)
-			}
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatalf("request failed: %v", err)
-			}
-			defer resp.Body.Close()
+		t.Run(
+			path.path, func(t *testing.T) {
+				proxyCalled = false
+				req, err := http.NewRequest(path.method, srv.URL+path.path, nil)
+				if err != nil {
+					t.Fatalf("failed to build request: %v", err)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatalf("request failed: %v", err)
+				}
+				defer func() { _ = resp.Body.Close() }()
 
-			if resp.StatusCode == http.StatusNotFound {
-				t.Fatalf("route %s not registered", path.path)
-			}
-			if !proxyCalled {
-				t.Fatalf("proxy handler not called for %s", path.path)
-			}
-		})
+				if resp.StatusCode == http.StatusNotFound {
+					t.Fatalf("route %s not registered", path.path)
+				}
+				if !proxyCalled {
+					t.Fatalf("proxy handler not called for %s", path.path)
+				}
+			},
+		)
 	}
 }
 
@@ -101,7 +107,7 @@ func TestRegisterProviderAliases_AllProvidersRegistered(t *testing.T) {
 		c.AbortWithStatus(http.StatusOK)
 	}
 
-	m := &AmpModule{authMiddleware_: authMiddleware}
+	m := &Module{authMiddleware_: authMiddleware}
 	m.registerProviderAliases(r, base, authMiddleware)
 
 	paths := []struct {
@@ -118,22 +124,24 @@ func TestRegisterProviderAliases_AllProvidersRegistered(t *testing.T) {
 	}
 
 	for _, tc := range paths {
-		t.Run(tc.path, func(t *testing.T) {
-			authCalled = false
-			req := httptest.NewRequest(tc.method, tc.path, nil)
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
+		t.Run(
+			tc.path, func(t *testing.T) {
+				authCalled = false
+				req := httptest.NewRequest(tc.method, tc.path, nil)
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
 
-			if w.Code == http.StatusNotFound {
-				t.Fatalf("route %s %s not registered", tc.method, tc.path)
-			}
-			if !authCalled {
-				t.Fatalf("auth middleware not executed for %s", tc.path)
-			}
-			if w.Header().Get("X-Auth") != "ok" {
-				t.Fatalf("auth middleware header not set for %s", tc.path)
-			}
-		})
+				if w.Code == http.StatusNotFound {
+					t.Fatalf("route %s %s not registered", tc.method, tc.path)
+				}
+				if !authCalled {
+					t.Fatalf("auth middleware not executed for %s", tc.path)
+				}
+				if w.Header().Get("X-Auth") != "ok" {
+					t.Fatalf("auth middleware header not set for %s", tc.path)
+				}
+			},
+		)
 	}
 }
 
@@ -143,23 +151,25 @@ func TestRegisterProviderAliases_DynamicModelsHandler(t *testing.T) {
 
 	base := &handlers.BaseAPIHandler{}
 
-	m := &AmpModule{authMiddleware_: func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }}
+	m := &Module{authMiddleware_: func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }}
 	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) })
 
 	providers := []string{"openai", "anthropic", "google", "groq", "cerebras"}
 
 	for _, provider := range providers {
-		t.Run(provider, func(t *testing.T) {
-			path := "/api/provider/" + provider + "/models"
-			req := httptest.NewRequest(http.MethodGet, path, nil)
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
+		t.Run(
+			provider, func(t *testing.T) {
+				path := "/api/provider/" + provider + "/models"
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
 
-			// Should not 404
-			if w.Code == http.StatusNotFound {
-				t.Fatalf("models route not found for provider: %s", provider)
-			}
-		})
+				// Should not 404
+				if w.Code == http.StatusNotFound {
+					t.Fatalf("models route not found for provider: %s", provider)
+				}
+			},
+		)
 	}
 }
 
@@ -169,7 +179,7 @@ func TestRegisterProviderAliases_V1Routes(t *testing.T) {
 
 	base := &handlers.BaseAPIHandler{}
 
-	m := &AmpModule{authMiddleware_: func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }}
+	m := &Module{authMiddleware_: func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }}
 	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) })
 
 	v1Paths := []struct {
@@ -184,15 +194,17 @@ func TestRegisterProviderAliases_V1Routes(t *testing.T) {
 	}
 
 	for _, tc := range v1Paths {
-		t.Run(tc.path, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.path, nil)
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
+		t.Run(
+			tc.path, func(t *testing.T) {
+				req := httptest.NewRequest(tc.method, tc.path, nil)
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
 
-			if w.Code == http.StatusNotFound {
-				t.Fatalf("v1 route %s %s not registered", tc.method, tc.path)
-			}
-		})
+				if w.Code == http.StatusNotFound {
+					t.Fatalf("v1 route %s %s not registered", tc.method, tc.path)
+				}
+			},
+		)
 	}
 }
 
@@ -202,7 +214,7 @@ func TestRegisterProviderAliases_V1BetaRoutes(t *testing.T) {
 
 	base := &handlers.BaseAPIHandler{}
 
-	m := &AmpModule{authMiddleware_: func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }}
+	m := &Module{authMiddleware_: func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) }}
 	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) })
 
 	v1betaPaths := []struct {
@@ -214,15 +226,17 @@ func TestRegisterProviderAliases_V1BetaRoutes(t *testing.T) {
 	}
 
 	for _, tc := range v1betaPaths {
-		t.Run(tc.path, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.path, nil)
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
+		t.Run(
+			tc.path, func(t *testing.T) {
+				req := httptest.NewRequest(tc.method, tc.path, nil)
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
 
-			if w.Code == http.StatusNotFound {
-				t.Fatalf("v1beta route %s %s not registered", tc.method, tc.path)
-			}
-		})
+				if w.Code == http.StatusNotFound {
+					t.Fatalf("v1beta route %s %s not registered", tc.method, tc.path)
+				}
+			},
+		)
 	}
 }
 
@@ -233,7 +247,7 @@ func TestRegisterProviderAliases_NoAuthMiddleware(t *testing.T) {
 
 	base := &handlers.BaseAPIHandler{}
 
-	m := &AmpModule{authMiddleware_: nil} // No auth middleware
+	m := &Module{authMiddleware_: nil} // No auth middleware
 	m.registerProviderAliases(r, base, func(c *gin.Context) { c.AbortWithStatus(http.StatusOK) })
 
 	req := httptest.NewRequest(http.MethodGet, "/api/provider/openai/models", nil)
@@ -251,15 +265,17 @@ func TestLocalhostOnlyMiddleware_PreventsSpoofing(t *testing.T) {
 	r := gin.New()
 
 	// Create module with localhost restriction enabled
-	m := &AmpModule{
+	m := &Module{
 		restrictToLocalhost: true,
 	}
 
 	// Apply dynamic localhost-only middleware
 	r.Use(m.localhostOnlyMiddleware())
-	r.GET("/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "ok")
-	})
+	r.GET(
+		"/test", func(c *gin.Context) {
+			c.String(http.StatusOK, "ok")
+		},
+	)
 
 	tests := []struct {
 		name           string
@@ -313,20 +329,22 @@ func TestLocalhostOnlyMiddleware_PreventsSpoofing(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/test", nil)
-			req.RemoteAddr = tt.remoteAddr
-			if tt.forwardedFor != "" {
-				req.Header.Set("X-Forwarded-For", tt.forwardedFor)
-			}
+		t.Run(
+			tt.name, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, "/test", nil)
+				req.RemoteAddr = tt.remoteAddr
+				if tt.forwardedFor != "" {
+					req.Header.Set("X-Forwarded-For", tt.forwardedFor)
+				}
 
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
 
-			if w.Code != tt.expectedStatus {
-				t.Errorf("%s: expected status %d, got %d", tt.description, tt.expectedStatus, w.Code)
-			}
-		})
+				if w.Code != tt.expectedStatus {
+					t.Errorf("%s: expected status %d, got %d", tt.description, tt.expectedStatus, w.Code)
+				}
+			},
+		)
 	}
 }
 
@@ -335,15 +353,17 @@ func TestLocalhostOnlyMiddleware_HotReload(t *testing.T) {
 	r := gin.New()
 
 	// Create module with localhost restriction initially enabled
-	m := &AmpModule{
+	m := &Module{
 		restrictToLocalhost: true,
 	}
 
 	// Apply dynamic localhost-only middleware
 	r.Use(m.localhostOnlyMiddleware())
-	r.GET("/test", func(c *gin.Context) {
-		c.String(http.StatusOK, "ok")
-	})
+	r.GET(
+		"/test", func(c *gin.Context) {
+			c.String(http.StatusOK, "ok")
+		},
+	)
 
 	// Test 1: Remote IP should be blocked when restriction is enabled
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)

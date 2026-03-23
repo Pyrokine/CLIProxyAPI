@@ -10,7 +10,9 @@ import (
 )
 
 // userIDPattern matches Claude Code format: user_[64-hex]_account_[uuid]_session_[uuid]
-var userIDPattern = regexp.MustCompile(`^user_[a-fA-F0-9]{64}_account_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var userIDPattern = regexp.MustCompile(
+	`^user_[a-fA-F0-9]{64}_account_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`,
+)
 
 // generateFakeUserID generates a fake user ID in Claude Code format.
 // Format: user_[64-hex-chars]_account_[UUID-v4]_session_[UUID-v4]

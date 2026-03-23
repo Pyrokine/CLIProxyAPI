@@ -11,15 +11,15 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
 // Helper: compress data with gzip
 func gzipBytes(b []byte) []byte {
 	var buf bytes.Buffer
 	zw := gzip.NewWriter(&buf)
-	zw.Write(b)
-	zw.Close()
+	_, _ = zw.Write(b)
+	_ = zw.Close()
 	return buf.Bytes()
 }
 
@@ -36,8 +36,9 @@ func mkResp(status int, hdr http.Header, body []byte) *http.Response {
 	}
 }
 
+// noinspection HttpUrlsUsage
 func TestCreateReverseProxy_ValidURL(t *testing.T) {
-	proxy, err := createReverseProxy("http://example.com", NewStaticSecretSource("key"))
+	proxy, err := createReverseProxy("http://example.com", newStaticSecretSource("key"))
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -47,14 +48,15 @@ func TestCreateReverseProxy_ValidURL(t *testing.T) {
 }
 
 func TestCreateReverseProxy_InvalidURL(t *testing.T) {
-	_, err := createReverseProxy("://invalid", NewStaticSecretSource("key"))
+	_, err := createReverseProxy("://invalid", newStaticSecretSource("key"))
 	if err == nil {
 		t.Fatal("expected error for invalid URL")
 	}
 }
 
+// noinspection HttpUrlsUsage
 func TestModifyResponse_GzipScenarios(t *testing.T) {
-	proxy, err := createReverseProxy("http://example.com", NewStaticSecretSource("k"))
+	proxy, err := createReverseProxy("http://example.com", newStaticSecretSource("k"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,27 +141,30 @@ func TestModifyResponse_GzipScenarios(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			resp := mkResp(tc.status, tc.header, tc.body)
-			if err := proxy.ModifyResponse(resp); err != nil {
-				t.Fatalf("ModifyResponse error: %v", err)
-			}
-			got, err := io.ReadAll(resp.Body)
-			if err != nil {
-				t.Fatalf("ReadAll error: %v", err)
-			}
-			if !bytes.Equal(got, tc.wantBody) {
-				t.Fatalf("body mismatch:\nwant: %q\ngot:  %q", tc.wantBody, got)
-			}
-			if ce := resp.Header.Get("Content-Encoding"); ce != tc.wantCE {
-				t.Fatalf("Content-Encoding: want %q, got %q", tc.wantCE, ce)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				resp := mkResp(tc.status, tc.header, tc.body)
+				if err := proxy.ModifyResponse(resp); err != nil {
+					t.Fatalf("ModifyResponse error: %v", err)
+				}
+				got, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Fatalf("ReadAll error: %v", err)
+				}
+				if !bytes.Equal(got, tc.wantBody) {
+					t.Fatalf("body mismatch:\nwant: %q\ngot:  %q", tc.wantBody, got)
+				}
+				if ce := resp.Header.Get("Content-Encoding"); ce != tc.wantCE {
+					t.Fatalf("Content-Encoding: want %q, got %q", tc.wantCE, ce)
+				}
+			},
+		)
 	}
 }
 
+// noinspection HttpUrlsUsage
 func TestModifyResponse_UpdatesContentLengthHeader(t *testing.T) {
-	proxy, err := createReverseProxy("http://example.com", NewStaticSecretSource("k"))
+	proxy, err := createReverseProxy("http://example.com", newStaticSecretSource("k"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,9 +174,11 @@ func TestModifyResponse_UpdatesContentLengthHeader(t *testing.T) {
 
 	// Simulate upstream response with gzip body AND Content-Length header
 	// (this is the scenario the bot flagged - stale Content-Length after decompression)
-	resp := mkResp(200, http.Header{
-		"Content-Length": []string{fmt.Sprintf("%d", len(gzipped))}, // Compressed size
-	}, gzipped)
+	resp := mkResp(
+		200, http.Header{
+			"Content-Length": []string{fmt.Sprintf("%d", len(gzipped))}, // Compressed size
+		}, gzipped,
+	)
 
 	if err := proxy.ModifyResponse(resp); err != nil {
 		t.Fatalf("ModifyResponse error: %v", err)
@@ -196,8 +203,9 @@ func TestModifyResponse_UpdatesContentLengthHeader(t *testing.T) {
 	}
 }
 
+// noinspection HttpUrlsUsage
 func TestModifyResponse_SkipsStreamingResponses(t *testing.T) {
-	proxy, err := createReverseProxy("http://example.com", NewStaticSecretSource("k"))
+	proxy, err := createReverseProxy("http://example.com", newStaticSecretSource("k"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,21 +213,24 @@ func TestModifyResponse_SkipsStreamingResponses(t *testing.T) {
 	goodJSON := []byte(`{"ok":true}`)
 	gzipped := gzipBytes(goodJSON)
 
-	t.Run("sse_skips_decompression", func(t *testing.T) {
-		resp := mkResp(200, http.Header{"Content-Type": []string{"text/event-stream"}}, gzipped)
-		if err := proxy.ModifyResponse(resp); err != nil {
-			t.Fatalf("ModifyResponse error: %v", err)
-		}
-		// SSE should NOT be decompressed
-		got, _ := io.ReadAll(resp.Body)
-		if !bytes.Equal(got, gzipped) {
-			t.Fatal("SSE response should not be decompressed")
-		}
-	})
+	t.Run(
+		"sse_skips_decompression", func(t *testing.T) {
+			resp := mkResp(200, http.Header{"Content-Type": []string{"text/event-stream"}}, gzipped)
+			if err := proxy.ModifyResponse(resp); err != nil {
+				t.Fatalf("ModifyResponse error: %v", err)
+			}
+			// SSE should NOT be decompressed
+			got, _ := io.ReadAll(resp.Body)
+			if !bytes.Equal(got, gzipped) {
+				t.Fatal("SSE response should not be decompressed")
+			}
+		},
+	)
 }
 
+// noinspection HttpUrlsUsage
 func TestModifyResponse_DecompressesChunkedJSON(t *testing.T) {
-	proxy, err := createReverseProxy("http://example.com", NewStaticSecretSource("k"))
+	proxy, err := createReverseProxy("http://example.com", newStaticSecretSource("k"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,44 +238,54 @@ func TestModifyResponse_DecompressesChunkedJSON(t *testing.T) {
 	goodJSON := []byte(`{"ok":true}`)
 	gzipped := gzipBytes(goodJSON)
 
-	t.Run("chunked_json_decompresses", func(t *testing.T) {
-		// Chunked JSON responses (like thread APIs) should be decompressed
-		resp := mkResp(200, http.Header{"Transfer-Encoding": []string{"chunked"}}, gzipped)
-		if err := proxy.ModifyResponse(resp); err != nil {
-			t.Fatalf("ModifyResponse error: %v", err)
-		}
-		// Should decompress because it's not SSE
-		got, _ := io.ReadAll(resp.Body)
-		if !bytes.Equal(got, goodJSON) {
-			t.Fatalf("chunked JSON should be decompressed, got: %q, want: %q", got, goodJSON)
-		}
-	})
+	t.Run(
+		"chunked_json_decompresses", func(t *testing.T) {
+			// Chunked JSON responses (like thread APIs) should be decompressed
+			resp := mkResp(200, http.Header{"Transfer-Encoding": []string{"chunked"}}, gzipped)
+			if err := proxy.ModifyResponse(resp); err != nil {
+				t.Fatalf("ModifyResponse error: %v", err)
+			}
+			// Should decompress because it's not SSE
+			got, _ := io.ReadAll(resp.Body)
+			if !bytes.Equal(got, goodJSON) {
+				t.Fatalf("chunked JSON should be decompressed, got: %q, want: %q", got, goodJSON)
+			}
+		},
+	)
 }
 
 func TestReverseProxy_InjectsHeaders(t *testing.T) {
 	gotHeaders := make(chan http.Header, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeaders <- r.Header.Clone()
-		w.WriteHeader(200)
-		w.Write([]byte(`ok`))
-	}))
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				gotHeaders <- r.Header.Clone()
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`ok`))
+			},
+		),
+	)
 	defer upstream.Close()
 
-	proxy, err := createReverseProxy(upstream.URL, NewStaticSecretSource("secret"))
+	proxy, err := createReverseProxy(upstream.URL, newStaticSecretSource("secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxy.ServeHTTP(w, r)
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				proxy.ServeHTTP(w, r)
+			},
+		),
+	)
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	hdr := <-gotHeaders
 	if hdr.Get("X-Api-Key") != "secret" {
@@ -277,28 +298,36 @@ func TestReverseProxy_InjectsHeaders(t *testing.T) {
 
 func TestReverseProxy_EmptySecret(t *testing.T) {
 	gotHeaders := make(chan http.Header, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeaders <- r.Header.Clone()
-		w.WriteHeader(200)
-		w.Write([]byte(`ok`))
-	}))
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				gotHeaders <- r.Header.Clone()
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`ok`))
+			},
+		),
+	)
 	defer upstream.Close()
 
-	proxy, err := createReverseProxy(upstream.URL, NewStaticSecretSource(""))
+	proxy, err := createReverseProxy(upstream.URL, newStaticSecretSource(""))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxy.ServeHTTP(w, r)
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				proxy.ServeHTTP(w, r)
+			},
+		),
+	)
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	hdr := <-gotHeaders
 	// Should NOT inject headers when secret is empty
@@ -316,26 +345,36 @@ func TestReverseProxy_StripsClientCredentialsFromHeadersAndQuery(t *testing.T) {
 		query   string
 	}
 	got := make(chan captured, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got <- captured{headers: r.Header.Clone(), query: r.URL.RawQuery}
-		w.WriteHeader(200)
-		w.Write([]byte(`ok`))
-	}))
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				got <- captured{headers: r.Header.Clone(), query: r.URL.RawQuery}
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`ok`))
+			},
+		),
+	)
 	defer upstream.Close()
 
-	proxy, err := createReverseProxy(upstream.URL, NewStaticSecretSource("upstream"))
+	proxy, err := createReverseProxy(upstream.URL, newStaticSecretSource("upstream"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate clientAPIKeyMiddleware injection (per-request)
-		ctx := context.WithValue(r.Context(), clientAPIKeyContextKey{}, "client-key")
-		proxy.ServeHTTP(w, r.WithContext(ctx))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				// Simulate clientAPIKeyMiddleware injection (per-request)
+				ctx := context.WithValue(r.Context(), clientAPIKeyContextKey{}, "client-key")
+				proxy.ServeHTTP(w, r.WithContext(ctx))
+			},
+		),
+	)
 	defer srv.Close()
 
-	req, err := http.NewRequest(http.MethodGet, srv.URL+"/test?key=client-key&key=keep&auth_token=client-key&foo=bar", nil)
+	req, err := http.NewRequest(
+		http.MethodGet, srv.URL+"/test?key=client-key&key=keep&auth_token=client-key&foo=bar", nil,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +386,7 @@ func TestReverseProxy_StripsClientCredentialsFromHeadersAndQuery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	c := <-got
 
@@ -376,39 +415,49 @@ func TestReverseProxy_StripsClientCredentialsFromHeadersAndQuery(t *testing.T) {
 
 func TestReverseProxy_InjectsMappedSecret_FromRequestContext(t *testing.T) {
 	gotHeaders := make(chan http.Header, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeaders <- r.Header.Clone()
-		w.WriteHeader(200)
-		w.Write([]byte(`ok`))
-	}))
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				gotHeaders <- r.Header.Clone()
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`ok`))
+			},
+		),
+	)
 	defer upstream.Close()
 
-	defaultSource := NewStaticSecretSource("default")
-	mapped := NewMappedSecretSource(defaultSource)
-	mapped.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
-		{
-			UpstreamAPIKey: "u1",
-			APIKeys:        []string{"k1"},
+	defaultSource := newStaticSecretSource("default")
+	mapped := newMappedSecretSource(defaultSource)
+	mapped.updateMappings(
+		[]config.AmpUpstreamAPIKeyEntry{
+			{
+				UpstreamAPIKey: "u1",
+				APIKeys:        []string{"k1"},
+			},
 		},
-	})
+	)
 
 	proxy, err := createReverseProxy(upstream.URL, mapped)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate clientAPIKeyMiddleware injection (per-request)
-		ctx := context.WithValue(r.Context(), clientAPIKeyContextKey{}, "k1")
-		proxy.ServeHTTP(w, r.WithContext(ctx))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				// Simulate clientAPIKeyMiddleware injection (per-request)
+				ctx := context.WithValue(r.Context(), clientAPIKeyContextKey{}, "k1")
+				proxy.ServeHTTP(w, r.WithContext(ctx))
+			},
+		),
+	)
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	hdr := <-gotHeaders
 	if hdr.Get("X-Api-Key") != "u1" {
@@ -421,38 +470,48 @@ func TestReverseProxy_InjectsMappedSecret_FromRequestContext(t *testing.T) {
 
 func TestReverseProxy_MappedSecret_FallsBackToDefault(t *testing.T) {
 	gotHeaders := make(chan http.Header, 1)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHeaders <- r.Header.Clone()
-		w.WriteHeader(200)
-		w.Write([]byte(`ok`))
-	}))
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				gotHeaders <- r.Header.Clone()
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`ok`))
+			},
+		),
+	)
 	defer upstream.Close()
 
-	defaultSource := NewStaticSecretSource("default")
-	mapped := NewMappedSecretSource(defaultSource)
-	mapped.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
-		{
-			UpstreamAPIKey: "u1",
-			APIKeys:        []string{"k1"},
+	defaultSource := newStaticSecretSource("default")
+	mapped := newMappedSecretSource(defaultSource)
+	mapped.updateMappings(
+		[]config.AmpUpstreamAPIKeyEntry{
+			{
+				UpstreamAPIKey: "u1",
+				APIKeys:        []string{"k1"},
+			},
 		},
-	})
+	)
 
 	proxy, err := createReverseProxy(upstream.URL, mapped)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), clientAPIKeyContextKey{}, "k2")
-		proxy.ServeHTTP(w, r.WithContext(ctx))
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				ctx := context.WithValue(r.Context(), clientAPIKeyContextKey{}, "k2")
+				proxy.ServeHTTP(w, r.WithContext(ctx))
+			},
+		),
+	)
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/test")
 	if err != nil {
 		t.Fatal(err)
 	}
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	hdr := <-gotHeaders
 	if hdr.Get("X-Api-Key") != "default" {
@@ -465,14 +524,18 @@ func TestReverseProxy_MappedSecret_FallsBackToDefault(t *testing.T) {
 
 func TestReverseProxy_ErrorHandler(t *testing.T) {
 	// Point proxy to a non-routable address to trigger error
-	proxy, err := createReverseProxy("http://127.0.0.1:1", NewStaticSecretSource(""))
+	proxy, err := createReverseProxy("http://127.0.0.1:1", newStaticSecretSource(""))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxy.ServeHTTP(w, r)
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				proxy.ServeHTTP(w, r)
+			},
+		),
+	)
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/any")
@@ -480,7 +543,7 @@ func TestReverseProxy_ErrorHandler(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(res.Body)
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	if res.StatusCode != http.StatusBadGateway {
 		t.Fatalf("want 502, got %d", res.StatusCode)
@@ -493,9 +556,10 @@ func TestReverseProxy_ErrorHandler(t *testing.T) {
 	}
 }
 
+// noinspection HttpUrlsUsage
 func TestReverseProxy_ErrorHandler_ContextCanceled(t *testing.T) {
 	// Test that context.Canceled errors return 499 without generic error response
-	proxy, err := createReverseProxy("http://example.com", NewStaticSecretSource(""))
+	proxy, err := createReverseProxy("http://example.com", newStaticSecretSource(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,20 +583,28 @@ func TestReverseProxy_ErrorHandler_ContextCanceled(t *testing.T) {
 
 func TestReverseProxy_FullRoundTrip_Gzip(t *testing.T) {
 	// Upstream returns gzipped JSON without Content-Encoding header
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		w.Write(gzipBytes([]byte(`{"upstream":"ok"}`)))
-	}))
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(200)
+				_, _ = w.Write(gzipBytes([]byte(`{"upstream":"ok"}`)))
+			},
+		),
+	)
 	defer upstream.Close()
 
-	proxy, err := createReverseProxy(upstream.URL, NewStaticSecretSource("key"))
+	proxy, err := createReverseProxy(upstream.URL, newStaticSecretSource("key"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxy.ServeHTTP(w, r)
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				proxy.ServeHTTP(w, r)
+			},
+		),
+	)
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/test")
@@ -540,7 +612,7 @@ func TestReverseProxy_FullRoundTrip_Gzip(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(res.Body)
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	expected := []byte(`{"upstream":"ok"}`)
 	if !bytes.Equal(body, expected) {
@@ -550,21 +622,29 @@ func TestReverseProxy_FullRoundTrip_Gzip(t *testing.T) {
 
 func TestReverseProxy_FullRoundTrip_PlainJSON(t *testing.T) {
 	// Upstream returns plain JSON
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		w.Write([]byte(`{"plain":"json"}`))
-	}))
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(200)
+				_, _ = w.Write([]byte(`{"plain":"json"}`))
+			},
+		),
+	)
 	defer upstream.Close()
 
-	proxy, err := createReverseProxy(upstream.URL, NewStaticSecretSource("key"))
+	proxy, err := createReverseProxy(upstream.URL, newStaticSecretSource("key"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxy.ServeHTTP(w, r)
-	}))
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				proxy.ServeHTTP(w, r)
+			},
+		),
+	)
 	defer srv.Close()
 
 	res, err := http.Get(srv.URL + "/test")
@@ -572,7 +652,7 @@ func TestReverseProxy_FullRoundTrip_PlainJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(res.Body)
-	res.Body.Close()
+	_ = res.Body.Close()
 
 	expected := []byte(`{"plain":"json"}`)
 	if !bytes.Equal(body, expected) {
@@ -609,13 +689,15 @@ func TestIsStreamingResponse(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			resp := &http.Response{Header: tc.header}
-			got := isStreamingResponse(resp)
-			if got != tc.want {
-				t.Fatalf("want %v, got %v", tc.want, got)
-			}
-		})
+		t.Run(
+			tc.name, func(t *testing.T) {
+				resp := &http.Response{Header: tc.header}
+				got := isStreamingResponse(resp)
+				if got != tc.want {
+					t.Fatalf("want %v, got %v", tc.want, got)
+				}
+			},
+		)
 	}
 }
 
@@ -671,11 +753,13 @@ func TestFilterBetaFeatures(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := filterBetaFeatures(tt.header, tt.featureToRemove)
-			if result != tt.expected {
-				t.Errorf("filterBetaFeatures() = %q, want %q", result, tt.expected)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				result := filterBetaFeatures(tt.header, tt.featureToRemove)
+				if result != tt.expected {
+					t.Errorf("filterBetaFeatures() = %q, want %q", result, tt.expected)
+				}
+			},
+		)
 	}
 }

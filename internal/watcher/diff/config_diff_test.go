@@ -3,8 +3,8 @@ package diff
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 func TestBuildConfigChangeDetails(t *testing.T) {
@@ -230,7 +230,9 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		ClaudeKey:              []config.ClaudeKey{{APIKey: "c1"}},
 		CodexKey:               []config.CodexKey{{APIKey: "x1"}},
 		AmpCode:                config.AmpCode{UpstreamAPIKey: "keep", RestrictManagementToLocalhost: false},
-		RemoteManagement:       config.RemoteManagement{DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep"},
+		RemoteManagement: config.RemoteManagement{
+			DisableControlPanel: false, PanelGitHubRepository: "old/repo", SecretKey: "keep",
+		},
 		SDKConfig: sdkconfig.SDKConfig{
 			RequestLog:                 false,
 			ProxyURL:                   "http://old-proxy",
@@ -252,11 +254,17 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 		WebsocketAuth:          true,
 		QuotaExceeded:          config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true},
 		ClaudeKey: []config.ClaudeKey{
-			{APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"a"}},
+			{
+				APIKey: "c1", BaseURL: "http://new", ProxyURL: "http://p", Headers: map[string]string{"H": "1"},
+				ExcludedModels: []string{"a"},
+			},
 			{APIKey: "c2"},
 		},
 		CodexKey: []config.CodexKey{
-			{APIKey: "x1", BaseURL: "http://x", ProxyURL: "http://px", Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"b"}},
+			{
+				APIKey: "x1", BaseURL: "http://x", ProxyURL: "http://px", Headers: map[string]string{"H": "2"},
+				ExcludedModels: []string{"b"},
+			},
 			{APIKey: "x2"},
 		},
 		AmpCode: config.AmpCode{
@@ -320,13 +328,22 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 			{APIKey: "g-old", BaseURL: "http://g-old", ProxyURL: "http://gp-old", Headers: map[string]string{"A": "1"}},
 		},
 		ClaudeKey: []config.ClaudeKey{
-			{APIKey: "c-old", BaseURL: "http://c-old", ProxyURL: "http://cp-old", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"}},
+			{
+				APIKey: "c-old", BaseURL: "http://c-old", ProxyURL: "http://cp-old",
+				Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"},
+			},
 		},
 		CodexKey: []config.CodexKey{
-			{APIKey: "x-old", BaseURL: "http://x-old", ProxyURL: "http://xp-old", Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"}},
+			{
+				APIKey: "x-old", BaseURL: "http://x-old", ProxyURL: "http://xp-old",
+				Headers: map[string]string{"H": "1"}, ExcludedModels: []string{"x"},
+			},
 		},
 		VertexCompatAPIKey: []config.VertexCompatKey{
-			{APIKey: "v-old", BaseURL: "http://v-old", ProxyURL: "http://vp-old", Headers: map[string]string{"H": "1"}, Models: []config.VertexCompatModel{{Name: "m1"}}},
+			{
+				APIKey: "v-old", BaseURL: "http://v-old", ProxyURL: "http://vp-old",
+				Headers: map[string]string{"H": "1"}, Models: []config.VertexCompatModel{{Name: "m1"}},
+			},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamURL:                   "http://amp-old",
@@ -370,16 +387,28 @@ func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 		WebsocketAuth:          true,
 		QuotaExceeded:          config.QuotaExceeded{SwitchProject: true, SwitchPreviewModel: true},
 		GeminiKey: []config.GeminiKey{
-			{APIKey: "g-new", BaseURL: "http://g-new", ProxyURL: "http://gp-new", Headers: map[string]string{"A": "2"}, ExcludedModels: []string{"x", "y"}},
+			{
+				APIKey: "g-new", BaseURL: "http://g-new", ProxyURL: "http://gp-new",
+				Headers: map[string]string{"A": "2"}, ExcludedModels: []string{"x", "y"},
+			},
 		},
 		ClaudeKey: []config.ClaudeKey{
-			{APIKey: "c-new", BaseURL: "http://c-new", ProxyURL: "http://cp-new", Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"}},
+			{
+				APIKey: "c-new", BaseURL: "http://c-new", ProxyURL: "http://cp-new",
+				Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"},
+			},
 		},
 		CodexKey: []config.CodexKey{
-			{APIKey: "x-new", BaseURL: "http://x-new", ProxyURL: "http://xp-new", Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"}},
+			{
+				APIKey: "x-new", BaseURL: "http://x-new", ProxyURL: "http://xp-new",
+				Headers: map[string]string{"H": "2"}, ExcludedModels: []string{"x", "y"},
+			},
 		},
 		VertexCompatAPIKey: []config.VertexCompatKey{
-			{APIKey: "v-new", BaseURL: "http://v-new", ProxyURL: "http://vp-new", Headers: map[string]string{"H": "2"}, Models: []config.VertexCompatModel{{Name: "m1"}, {Name: "m2"}}},
+			{
+				APIKey: "v-new", BaseURL: "http://v-new", ProxyURL: "http://vp-new",
+				Headers: map[string]string{"H": "2"}, Models: []config.VertexCompatModel{{Name: "m1"}, {Name: "m2"}},
+			},
 		},
 		AmpCode: config.AmpCode{
 			UpstreamURL:                   "http://amp-new",
@@ -473,19 +502,27 @@ func TestFormatProxyURL(t *testing.T) {
 	}{
 		{name: "empty", in: "", want: "<none>"},
 		{name: "invalid", in: "http://[::1", want: "<redacted>"},
-		{name: "fullURLRedactsUserinfoAndPath", in: "http://user:pass@example.com:8080/path?x=1#frag", want: "http://example.com:8080"},
-		{name: "socks5RedactsUserinfoAndPath", in: "socks5://user:pass@192.168.1.1:1080/path?x=1", want: "socks5://192.168.1.1:1080"},
+		{
+			name: "fullURLRedactsUserinfoAndPath", in: "http://user:pass@example.com:8080/path?x=1#frag",
+			want: "http://example.com:8080",
+		},
+		{
+			name: "socks5RedactsUserinfoAndPath", in: "socks5://user:pass@192.168.1.1:1080/path?x=1",
+			want: "socks5://192.168.1.1:1080",
+		},
 		{name: "socks5HostPort", in: "socks5://proxy.example.com:1080/", want: "socks5://proxy.example.com:1080"},
 		{name: "hostPortNoScheme", in: "example.com:1234/path?x=1", want: "example.com:1234"},
 		{name: "relativePathRedacted", in: "/just/path", want: "<redacted>"},
 		{name: "schemeAndHost", in: "https://example.com", want: "https://example.com"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := formatProxyURL(tt.in); got != tt.want {
-				t.Fatalf("expected %q, got %q", tt.want, got)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				if got := formatProxyURL(tt.in); got != tt.want {
+					t.Fatalf("expected %q, got %q", tt.want, got)
+				}
+			},
+		)
 	}
 }
 

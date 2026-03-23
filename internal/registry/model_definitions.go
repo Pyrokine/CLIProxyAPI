@@ -52,18 +52,22 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 			if modelID == "" || entry == nil {
 				continue
 			}
-			models = append(models, &ModelInfo{
-				ID:                  modelID,
-				Object:              "model",
-				OwnedBy:             "antigravity",
-				Type:                "antigravity",
-				Thinking:            entry.Thinking,
-				MaxCompletionTokens: entry.MaxCompletionTokens,
-			})
+			models = append(
+				models, &ModelInfo{
+					ID:                  modelID,
+					Object:              "model",
+					OwnedBy:             "antigravity",
+					Type:                "antigravity",
+					Thinking:            entry.Thinking,
+					MaxCompletionTokens: entry.MaxCompletionTokens,
+				},
+			)
 		}
-		sort.Slice(models, func(i, j int) bool {
-			return strings.ToLower(models[i].ID) < strings.ToLower(models[j].ID)
-		})
+		sort.Slice(
+			models, func(i, j int) bool {
+				return strings.ToLower(models[i].ID) < strings.ToLower(models[j].ID)
+			},
+		)
 		return models
 	default:
 		return nil

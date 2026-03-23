@@ -11,17 +11,17 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 )
 
 var functionNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
 
-// SanitizeFunctionName ensures a function name matches the requirements for Gemini/Vertex AI.
+// sanitizeFunctionName ensures a function name matches the requirements for Gemini/Vertex AI.
 // It replaces invalid characters with underscores, ensures it starts with a letter or underscore,
 // and truncates it to 64 characters if necessary.
 // Regex Rule: [^a-zA-Z0-9_.:-] replaced with _.
-func SanitizeFunctionName(name string) string {
+func sanitizeFunctionName(name string) string {
 	if name == "" {
 		return ""
 	}
@@ -95,9 +95,11 @@ func ResolveAuthDir(authDir string) (string, error) {
 
 // CountAuthFiles returns the number of auth records available through the provided Store.
 // For filesystem-backed stores, this reflects the number of JSON auth files under the configured directory.
-func CountAuthFiles[T any](ctx context.Context, store interface {
-	List(context.Context) ([]T, error)
-}) int {
+func CountAuthFiles[T any](
+	ctx context.Context, store interface {
+		List(context.Context) ([]T, error)
+	},
+) int {
 	if store == nil {
 		return 0
 	}

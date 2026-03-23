@@ -1,4 +1,4 @@
-// events.go implements fsnotify event handling for config and auth file changes.
+// Package watcher implements fsnotify event handling for config and auth file changes.
 // It normalizes paths, debounces noisy events, and triggers reload/update logic.
 package watcher
 
@@ -72,7 +72,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(normalizedName, ".json") && event.Op&authOps != 0
+	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(
+		normalizedName, ".json",
+	) && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
@@ -83,7 +85,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 	// Handle config file changes
 	if isConfigEvent {
-		log.Debugf("config file change details - operation: %s, timestamp: %s", event.Op.String(), now.Format("2006-01-02 15:04:05.000"))
+		log.Debugf(
+			"config file change details - operation: %s, timestamp: %s", event.Op.String(),
+			now.Format("2006-01-02 15:04:05.000"),
+		)
 		w.scheduleConfigReload()
 		return
 	}
@@ -102,7 +107,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 				return
 			}
-			log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
+			log.Infof(
+				"auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name),
+			)
 			w.addOrUpdateClient(event.Name)
 			return
 		}

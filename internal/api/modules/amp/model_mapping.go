@@ -3,42 +3,43 @@
 package amp
 
 import (
+	"maps"
 	"regexp"
 	"strings"
 	"sync"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
-// ModelMapper provides model name mapping/aliasing for Amp CLI requests.
+// modelMapper provides model name mapping/aliasing for Amp CLI requests.
 // When an Amp request comes in for a model that isn't available locally,
 // this mapper can redirect it to an alternative model that IS available.
-type ModelMapper interface {
+type modelMapper interface {
 	// MapModel returns the target model name if a mapping exists and the target
 	// model has available providers. Returns empty string if no mapping applies.
 	MapModel(requestedModel string) string
 
-	// UpdateMappings refreshes the mapping configuration (for hot-reload).
-	UpdateMappings(mappings []config.AmpModelMapping)
+	// updateMappings refreshes the mapping configuration (for hot-reload).
+	updateMappings(mappings []config.AmpModelMapping)
 }
 
-// DefaultModelMapper implements ModelMapper with thread-safe mapping storage.
-type DefaultModelMapper struct {
+// defaultModelMapper implements ModelMapper with thread-safe mapping storage.
+type defaultModelMapper struct {
 	mu       sync.RWMutex
 	mappings map[string]string // exact: from -> to (normalized lowercase keys)
 	regexps  []regexMapping    // regex rules evaluated in order
 }
 
-// NewModelMapper creates a new model mapper with the given initial mappings.
-func NewModelMapper(mappings []config.AmpModelMapping) *DefaultModelMapper {
-	m := &DefaultModelMapper{
+// newModelMapper creates a new model mapper with the given initial mappings.
+func newModelMapper(mappings []config.AmpModelMapping) *defaultModelMapper {
+	m := &defaultModelMapper{
 		mappings: make(map[string]string),
 		regexps:  nil,
 	}
-	m.UpdateMappings(mappings)
+	m.updateMappings(mappings)
 	return m
 }
 
@@ -50,7 +51,7 @@ func NewModelMapper(mappings []config.AmpModelMapping) *DefaultModelMapper {
 // the suffix is preserved in the returned model name (e.g., "gemini-2.5-pro(8192)").
 // However, if the mapping target already contains a suffix, the config suffix
 // takes priority over the user's suffix.
-func (m *DefaultModelMapper) MapModel(requestedModel string) string {
+func (m *defaultModelMapper) MapModel(requestedModel string) string {
 	if requestedModel == "" {
 		return ""
 	}
@@ -108,9 +109,9 @@ func (m *DefaultModelMapper) MapModel(requestedModel string) string {
 	return targetModel
 }
 
-// UpdateMappings refreshes the mapping configuration from config.
+// updateMappings refreshes the mapping configuration from config.
 // This is called during initialization and on config hot-reload.
-func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
+func (m *defaultModelMapper) updateMappings(mappings []config.AmpModelMapping) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -153,15 +154,13 @@ func (m *DefaultModelMapper) UpdateMappings(mappings []config.AmpModelMapping) {
 	}
 }
 
-// GetMappings returns a copy of current mappings (for debugging/status).
-func (m *DefaultModelMapper) GetMappings() map[string]string {
+// getMappings returns a copy of current mappings (for debugging/status).
+func (m *defaultModelMapper) getMappings() map[string]string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	result := make(map[string]string, len(m.mappings))
-	for k, v := range m.mappings {
-		result[k] = v
-	}
+	maps.Copy(result, m.mappings)
 	return result
 }
 

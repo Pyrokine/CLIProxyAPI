@@ -26,26 +26,28 @@ func Walk(value gjson.Result, path, field string, paths *[]string) {
 	switch value.Type {
 	case gjson.JSON:
 		// For JSON objects and arrays, iterate through each child
-		value.ForEach(func(key, val gjson.Result) bool {
-			var childPath string
-			// Escape special characters for gjson/sjson path syntax
-			// . -> \.
-			// * -> \*
-			// ? -> \?
-			keyStr := key.String()
-			safeKey := escapeGJSONPathKey(keyStr)
+		value.ForEach(
+			func(key, val gjson.Result) bool {
+				var childPath string
+				// Escape special characters for gjson/sjson path syntax
+				// . -> \.
+				// * -> \*
+				// ? -> \?
+				keyStr := key.String()
+				safeKey := escapeGJSONPathKey(keyStr)
 
-			if path == "" {
-				childPath = safeKey
-			} else {
-				childPath = path + "." + safeKey
-			}
-			if keyStr == field {
-				*paths = append(*paths, childPath)
-			}
-			Walk(val, childPath, field, paths)
-			return true
-		})
+				if path == "" {
+					childPath = safeKey
+				} else {
+					childPath = path + "." + safeKey
+				}
+				if keyStr == field {
+					*paths = append(*paths, childPath)
+				}
+				Walk(val, childPath, field, paths)
+				return true
+			},
+		)
 	case gjson.String, gjson.Number, gjson.True, gjson.False, gjson.Null:
 		// Terminal types - no further traversal needed
 	}
@@ -168,7 +170,8 @@ func FixJSON(input string) string {
 					for k := 0; k < 4 && i+1 < len(runes); k++ {
 						peek := runes[i+1]
 						// simple hex check
-						if (peek >= '0' && peek <= '9') || (peek >= 'a' && peek <= 'f') || (peek >= 'A' && peek <= 'F') {
+						if (peek >= '0' && peek <= '9') || (peek >= 'a' && peek <= 'f') ||
+							(peek >= 'A' && peek <= 'F') {
 							out.WriteRune(peek)
 							i++
 						} else {

@@ -13,14 +13,14 @@ import (
 // zeroWidthSpace is the Unicode zero-width space character used for obfuscation.
 const zeroWidthSpace = "\u200B"
 
-// SensitiveWordMatcher holds the compiled regex for matching sensitive words.
-type SensitiveWordMatcher struct {
+// sensitiveWordMatcher holds the compiled regex for matching sensitive words.
+type sensitiveWordMatcher struct {
 	regex *regexp.Regexp
 }
 
 // buildSensitiveWordMatcher compiles a regex from the word list.
 // Words are sorted by length (longest first) for proper matching.
-func buildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
+func buildSensitiveWordMatcher(words []string) *sensitiveWordMatcher {
 	if len(words) == 0 {
 		return nil
 	}
@@ -39,9 +39,11 @@ func buildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 	}
 
 	// Sort by length (longest first) for proper matching
-	sort.Slice(validWords, func(i, j int) bool {
-		return len(validWords[i]) > len(validWords[j])
-	})
+	sort.Slice(
+		validWords, func(i, j int) bool {
+			return len(validWords[i]) > len(validWords[j])
+		},
+	)
 
 	// Escape and join
 	escaped := make([]string, len(validWords))
@@ -55,7 +57,7 @@ func buildSensitiveWordMatcher(words []string) *SensitiveWordMatcher {
 		return nil
 	}
 
-	return &SensitiveWordMatcher{regex: re}
+	return &sensitiveWordMatcher{regex: re}
 }
 
 // obfuscateWord inserts a zero-width space after the first grapheme.
@@ -74,7 +76,7 @@ func obfuscateWord(word string) string {
 }
 
 // obfuscateText replaces all sensitive words in the text.
-func (m *SensitiveWordMatcher) obfuscateText(text string) string {
+func (m *sensitiveWordMatcher) obfuscateText(text string) string {
 	if m == nil || m.regex == nil {
 		return text
 	}
@@ -83,7 +85,7 @@ func (m *SensitiveWordMatcher) obfuscateText(text string) string {
 
 // obfuscateSensitiveWords processes the payload and obfuscates sensitive words
 // in system blocks and message content.
-func obfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []byte {
+func obfuscateSensitiveWords(payload []byte, matcher *sensitiveWordMatcher) []byte {
 	if matcher == nil || matcher.regex == nil {
 		return payload
 	}
@@ -98,7 +100,7 @@ func obfuscateSensitiveWords(payload []byte, matcher *SensitiveWordMatcher) []by
 }
 
 // obfuscateSystemBlocks obfuscates sensitive words in system blocks.
-func obfuscateSystemBlocks(payload []byte, matcher *SensitiveWordMatcher) []byte {
+func obfuscateSystemBlocks(payload []byte, matcher *sensitiveWordMatcher) []byte {
 	system := gjson.GetBytes(payload, "system")
 	if !system.Exists() {
 		return payload
@@ -106,18 +108,20 @@ func obfuscateSystemBlocks(payload []byte, matcher *SensitiveWordMatcher) []byte
 
 	if system.IsArray() {
 		modified := false
-		system.ForEach(func(key, value gjson.Result) bool {
-			if value.Get("type").String() == "text" {
-				text := value.Get("text").String()
-				obfuscated := matcher.obfuscateText(text)
-				if obfuscated != text {
-					path := "system." + key.String() + ".text"
-					payload, _ = sjson.SetBytes(payload, path, obfuscated)
-					modified = true
+		system.ForEach(
+			func(key, value gjson.Result) bool {
+				if value.Get("type").String() == "text" {
+					text := value.Get("text").String()
+					obfuscated := matcher.obfuscateText(text)
+					if obfuscated != text {
+						path := "system." + key.String() + ".text"
+						payload, _ = sjson.SetBytes(payload, path, obfuscated)
+						modified = true
+					}
 				}
-			}
-			return true
-		})
+				return true
+			},
+		)
 		if modified {
 			return payload
 		}
@@ -133,44 +137,48 @@ func obfuscateSystemBlocks(payload []byte, matcher *SensitiveWordMatcher) []byte
 }
 
 // obfuscateMessages obfuscates sensitive words in message content.
-func obfuscateMessages(payload []byte, matcher *SensitiveWordMatcher) []byte {
+func obfuscateMessages(payload []byte, matcher *sensitiveWordMatcher) []byte {
 	messages := gjson.GetBytes(payload, "messages")
 	if !messages.Exists() || !messages.IsArray() {
 		return payload
 	}
 
-	messages.ForEach(func(msgKey, msg gjson.Result) bool {
-		content := msg.Get("content")
-		if !content.Exists() {
-			return true
-		}
-
-		msgPath := "messages." + msgKey.String()
-
-		if content.Type == gjson.String {
-			// Simple string content
-			text := content.String()
-			obfuscated := matcher.obfuscateText(text)
-			if obfuscated != text {
-				payload, _ = sjson.SetBytes(payload, msgPath+".content", obfuscated)
-			}
-		} else if content.IsArray() {
-			// Array of content blocks
-			content.ForEach(func(blockKey, block gjson.Result) bool {
-				if block.Get("type").String() == "text" {
-					text := block.Get("text").String()
-					obfuscated := matcher.obfuscateText(text)
-					if obfuscated != text {
-						path := msgPath + ".content." + blockKey.String() + ".text"
-						payload, _ = sjson.SetBytes(payload, path, obfuscated)
-					}
-				}
+	messages.ForEach(
+		func(msgKey, msg gjson.Result) bool {
+			content := msg.Get("content")
+			if !content.Exists() {
 				return true
-			})
-		}
+			}
 
-		return true
-	})
+			msgPath := "messages." + msgKey.String()
+
+			if content.Type == gjson.String {
+				// Simple string content
+				text := content.String()
+				obfuscated := matcher.obfuscateText(text)
+				if obfuscated != text {
+					payload, _ = sjson.SetBytes(payload, msgPath+".content", obfuscated)
+				}
+			} else if content.IsArray() {
+				// Array of content blocks
+				content.ForEach(
+					func(blockKey, block gjson.Result) bool {
+						if block.Get("type").String() == "text" {
+							text := block.Get("text").String()
+							obfuscated := matcher.obfuscateText(text)
+							if obfuscated != text {
+								path := msgPath + ".content." + blockKey.String() + ".text"
+								payload, _ = sjson.SetBytes(payload, path, obfuscated)
+							}
+						}
+						return true
+					},
+				)
+			}
+
+			return true
+		},
+	)
 
 	return payload
 }

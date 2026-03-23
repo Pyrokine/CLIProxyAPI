@@ -18,7 +18,8 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // gcInterval defines minimum time between garbage collection runs.
@@ -115,7 +116,12 @@ func (s *GitTokenStore) EnsureRepository() error {
 	gitDir := filepath.Join(repoDir, ".git")
 	authMethod := s.gitAuth()
 	var initPaths []string
-	if _, err := os.Stat(gitDir); errors.Is(err, fs.ErrNotExist) {
+	_, statErr := os.Stat(gitDir)
+	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		s.dirLock.Unlock()
+		return fmt.Errorf("git token store: stat repo: %w", statErr)
+	}
+	if errors.Is(statErr, fs.ErrNotExist) {
 		if errMk := os.MkdirAll(repoDir, 0o700); errMk != nil {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: create repo dir: %w", errMk)
@@ -129,10 +135,12 @@ func (s *GitTokenStore) EnsureRepository() error {
 					return fmt.Errorf("git token store: init empty repo: %w", errInit)
 				}
 				if _, errRemote := repo.Remote("origin"); errRemote != nil {
-					if _, errCreate := repo.CreateRemote(&config.RemoteConfig{
-						Name: "origin",
-						URLs: []string{s.remote},
-					}); errCreate != nil && !errors.Is(errCreate, git.ErrRemoteExists) {
+					if _, errCreate := repo.CreateRemote(
+						&config.RemoteConfig{
+							Name: "origin",
+							URLs: []string{s.remote},
+						},
+					); errCreate != nil && !errors.Is(errCreate, git.ErrRemoteExists) {
 						s.dirLock.Unlock()
 						return fmt.Errorf("git token store: configure remote: %w", errCreate)
 					}
@@ -162,9 +170,6 @@ func (s *GitTokenStore) EnsureRepository() error {
 				return fmt.Errorf("git token store: clone remote: %w", errClone)
 			}
 		}
-	} else if err != nil {
-		s.dirLock.Unlock()
-		return fmt.Errorf("git token store: stat repo: %w", err)
 	} else {
 		repo, errOpen := git.PlainOpen(repoDir)
 		if errOpen != nil {
@@ -254,7 +259,7 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
 		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
+			if util.JSONEqual(existing, raw) {
 				return path, nil
 			}
 		} else if !os.IsNotExist(errRead) {
@@ -288,7 +293,9 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 	if strings.TrimSpace(messageID) == "" {
 		messageID = filepath.Base(path)
 	}
-	if errCommit := s.commitAndPushLocked(fmt.Sprintf("Update auth %s", strings.TrimSpace(messageID)), relPath); errCommit != nil {
+	if errCommit := s.commitAndPushLocked(
+		fmt.Sprintf("Update auth %s", strings.TrimSpace(messageID)), relPath,
+	); errCommit != nil {
 		return "", errCommit
 	}
 
@@ -305,25 +312,27 @@ func (s *GitTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 		return nil, fmt.Errorf("auth filestore: directory not configured")
 	}
 	entries := make([]*cliproxyauth.Auth, 0)
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
+	err := filepath.WalkDir(
+		dir, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+				return nil
+			}
+			auth, err := s.readAuthFile(path, dir)
+			if err != nil {
+				return nil
+			}
+			if auth != nil {
+				entries = append(entries, auth)
+			}
 			return nil
-		}
-		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
-			return nil
-		}
-		auth, err := s.readAuthFile(path, dir)
-		if err != nil {
-			return nil
-		}
-		if auth != nil {
-			entries = append(entries, auth)
-		}
-		return nil
-	})
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +443,7 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 		ID:               id,
 		Provider:         provider,
 		FileName:         id,
-		Label:            s.labelFor(metadata),
+		Label:            labelFor(metadata),
 		Status:           cliproxyauth.StatusActive,
 		Attributes:       map[string]string{"path": path},
 		Metadata:         metadata,
@@ -491,21 +500,6 @@ func (s *GitTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error)
 	return filepath.Join(dir, auth.ID), nil
 }
 
-func (s *GitTokenStore) labelFor(metadata map[string]any) string {
-	if metadata == nil {
-		return ""
-	}
-	if v, ok := metadata["label"].(string); ok && v != "" {
-		return v
-	}
-	if v, ok := metadata["email"].(string); ok && v != "" {
-		return v
-	}
-	if project, ok := metadata["project_id"].(string); ok && project != "" {
-		return project
-	}
-	return ""
-}
 
 func (s *GitTokenStore) baseDirSnapshot() string {
 	s.dirLock.RLock()
@@ -600,9 +594,11 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		Email: "cliproxy@local",
 		When:  time.Now(),
 	}
-	commitHash, err := worktree.Commit(message, &git.CommitOptions{
-		Author: signature,
-	})
+	commitHash, err := worktree.Commit(
+		message, &git.CommitOptions{
+			Author: signature,
+		},
+	)
 	if err != nil {
 		if errors.Is(err, git.ErrEmptyCommit) {
 			return nil
@@ -614,7 +610,9 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		if !errors.Is(errHead, plumbing.ErrReferenceNotFound) {
 			return fmt.Errorf("git token store: get head: %w", errHead)
 		}
-	} else if errRewrite := s.rewriteHeadAsSingleCommit(repo, headRef.Name(), commitHash, message, signature); errRewrite != nil {
+	} else if errRewrite := s.rewriteHeadAsSingleCommit(
+		repo, headRef.Name(), commitHash, message, signature,
+	); errRewrite != nil {
 		return errRewrite
 	}
 	s.maybeRunGC(repo)
@@ -628,7 +626,13 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 }
 
 // rewriteHeadAsSingleCommit rewrites the current branch tip to a single-parentless commit and leaves history squashed.
-func (s *GitTokenStore) rewriteHeadAsSingleCommit(repo *git.Repository, branch plumbing.ReferenceName, commitHash plumbing.Hash, message string, signature *object.Signature) error {
+func (s *GitTokenStore) rewriteHeadAsSingleCommit(
+	repo *git.Repository,
+	branch plumbing.ReferenceName,
+	commitHash plumbing.Hash,
+	message string,
+	signature *object.Signature,
+) error {
 	commitObj, err := repo.CommitObject(commitHash)
 	if err != nil {
 		return fmt.Errorf("git token store: inspect head commit: %w", err)
@@ -708,64 +712,3 @@ func ensureEmptyFile(path string) error {
 	return nil
 }
 
-func jsonEqual(a, b []byte) bool {
-	var objA any
-	var objB any
-	if err := json.Unmarshal(a, &objA); err != nil {
-		return false
-	}
-	if err := json.Unmarshal(b, &objB); err != nil {
-		return false
-	}
-	return deepEqualJSON(objA, objB)
-}
-
-func deepEqualJSON(a, b any) bool {
-	switch valA := a.(type) {
-	case map[string]any:
-		valB, ok := b.(map[string]any)
-		if !ok || len(valA) != len(valB) {
-			return false
-		}
-		for key, subA := range valA {
-			subB, ok1 := valB[key]
-			if !ok1 || !deepEqualJSON(subA, subB) {
-				return false
-			}
-		}
-		return true
-	case []any:
-		sliceB, ok := b.([]any)
-		if !ok || len(valA) != len(sliceB) {
-			return false
-		}
-		for i := range valA {
-			if !deepEqualJSON(valA[i], sliceB[i]) {
-				return false
-			}
-		}
-		return true
-	case float64:
-		valB, ok := b.(float64)
-		if !ok {
-			return false
-		}
-		return valA == valB
-	case string:
-		valB, ok := b.(string)
-		if !ok {
-			return false
-		}
-		return valA == valB
-	case bool:
-		valB, ok := b.(bool)
-		if !ok {
-			return false
-		}
-		return valA == valB
-	case nil:
-		return b == nil
-	default:
-		return false
-	}
-}

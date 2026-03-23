@@ -3,7 +3,7 @@ package auth
 import (
 	"testing"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
 func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
@@ -127,19 +127,21 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+		t.Run(
+			tt.name, func(t *testing.T) {
+				t.Parallel()
 
-			mgr := NewManager(nil, nil, nil)
-			mgr.SetConfig(&internalconfig.Config{})
-			mgr.SetOAuthModelAlias(tt.aliases)
+				mgr := NewManager(nil, nil, nil)
+				mgr.SetConfig(&internalconfig.Config{})
+				mgr.SetOAuthModelAlias(tt.aliases)
 
-			auth := createAuthForChannel(tt.channel)
-			got := mgr.resolveOAuthUpstreamModel(auth, tt.input)
-			if got != tt.want {
-				t.Errorf("resolveOAuthUpstreamModel(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
+				auth := createAuthForChannel(tt.channel)
+				got := mgr.resolveOAuthUpstreamModel(auth, tt.input)
+				if got != tt.want {
+					t.Errorf("resolveOAuthUpstreamModel(%q) = %q, want %q", tt.input, got, tt.want)
+				}
+			},
+		)
 	}
 }
 

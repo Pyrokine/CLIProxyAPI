@@ -61,7 +61,10 @@ func TestNormalizeKimiToolMessageLinks_AmbiguousMissingIDIsNotInferred(t *testin
 	}
 
 	if gjson.GetBytes(out, "messages.1.tool_call_id").Exists() {
-		t.Fatalf("messages.1.tool_call_id should be absent for ambiguous case, got %q", gjson.GetBytes(out, "messages.1.tool_call_id").String())
+		t.Fatalf(
+			"messages.1.tool_call_id should be absent for ambiguous case, got %q",
+			gjson.GetBytes(out, "messages.1.tool_call_id").String(),
+		)
 	}
 }
 

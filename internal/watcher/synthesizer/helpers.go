@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // StableIDGenerator generates stable, deterministic IDs for auth entries.
@@ -24,9 +24,9 @@ func NewStableIDGenerator() *StableIDGenerator {
 	return &StableIDGenerator{counters: make(map[string]int)}
 }
 
-// Next generates a stable ID based on the kind and parts.
+// next generates a stable ID based on the kind and parts.
 // Returns the full ID (kind:hash) and the short hash portion.
-func (g *StableIDGenerator) Next(kind string, parts ...string) (string, string) {
+func (g *StableIDGenerator) next(kind string, parts ...string) (string, string) {
 	if g == nil {
 		return kind + ":000000000000", "000000000000"
 	}

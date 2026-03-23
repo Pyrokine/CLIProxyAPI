@@ -1,11 +1,11 @@
-// auth_diff.go computes human-readable diffs for auth file field changes.
+// Package diff computes human-readable diffs for auth file field changes.
 package diff
 
 import (
 	"fmt"
 	"strings"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // BuildAuthChangeDetails computes a redacted, human-readable list of auth field changes.
@@ -32,7 +32,9 @@ func BuildAuthChangeDetails(oldAuth, newAuth *coreauth.Auth) []string {
 	oldProxy := strings.TrimSpace(oldAuth.ProxyURL)
 	newProxy := strings.TrimSpace(newAuth.ProxyURL)
 	if oldProxy != newProxy {
-		changes = append(changes, fmt.Sprintf("proxy_url: %s -> %s", formatProxyURL(oldProxy), formatProxyURL(newProxy)))
+		changes = append(
+			changes, fmt.Sprintf("proxy_url: %s -> %s", formatProxyURL(oldProxy), formatProxyURL(newProxy)),
+		)
 	}
 
 	// Compare disabled

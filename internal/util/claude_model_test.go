@@ -32,11 +32,13 @@ func TestIsClaudeThinkingModel(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := IsClaudeThinkingModel(tt.model)
-			if result != tt.expected {
-				t.Errorf("IsClaudeThinkingModel(%q) = %v, expected %v", tt.model, result, tt.expected)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				result := IsClaudeThinkingModel(tt.model)
+				if result != tt.expected {
+					t.Errorf("IsClaudeThinkingModel(%q) = %v, expected %v", tt.model, result, tt.expected)
+				}
+			},
+		)
 	}
 }

@@ -13,11 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/codex"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/oauthcommon"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/browser"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -61,7 +63,11 @@ func shouldUseCodexDeviceFlow(opts *LoginOptions) bool {
 	return strings.EqualFold(strings.TrimSpace(opts.Metadata[codexLoginModeMetadataKey]), codexLoginModeDevice)
 }
 
-func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+func (a *CodexAuthenticator) loginWithDeviceFlow(
+	ctx context.Context,
+	cfg *config.Config,
+	opts *LoginOptions,
+) (*coreauth.Auth, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -108,18 +114,18 @@ func (a *CodexAuthenticator) loginWithDeviceFlow(ctx context.Context, cfg *confi
 		return nil, fmt.Errorf("codex device flow token response missing required fields")
 	}
 
-	authSvc := codex.NewCodexAuth(cfg)
+	authSvc := codex.NewAuth(cfg)
 	authBundle, err := authSvc.ExchangeCodeForTokensWithRedirect(
 		ctx,
 		authCode,
 		codexDeviceTokenExchangeRedirectURI,
-		&codex.PKCECodes{
+		&misc.PKCECodes{
 			CodeVerifier:  codeVerifier,
 			CodeChallenge: codeChallenge,
 		},
 	)
 	if err != nil {
-		return nil, codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, err)
+		return nil, oauthcommon.NewAuthenticationError(oauthcommon.ErrCodeExchangeFailed, err)
 	}
 
 	return a.buildAuthRecord(authSvc, authBundle)
@@ -168,7 +174,12 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	return &parsed, nil
 }
 
-func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID, userCode string, interval time.Duration) (*codexDeviceTokenResponse, error) {
+func pollCodexDeviceToken(
+	ctx context.Context,
+	client *http.Client,
+	deviceAuthID, userCode string,
+	interval time.Duration,
+) (*codexDeviceTokenResponse, error) {
 	deadline := time.Now().Add(codexDeviceTimeout)
 
 	for {
@@ -176,10 +187,12 @@ func pollCodexDeviceToken(ctx context.Context, client *http.Client, deviceAuthID
 			return nil, fmt.Errorf("codex device authentication timed out after 15 minutes")
 		}
 
-		body, err := json.Marshal(codexDeviceTokenRequest{
-			DeviceAuthID: deviceAuthID,
-			UserCode:     userCode,
-		})
+		body, err := json.Marshal(
+			codexDeviceTokenRequest{
+				DeviceAuthID: deviceAuthID,
+				UserCode:     userCode,
+			},
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encode codex device poll request: %w", err)
 		}
@@ -251,7 +264,10 @@ func codexDeviceIsSuccessStatus(code int) bool {
 	return code >= 200 && code < 300
 }
 
-func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundle *codex.CodexAuthBundle) (*coreauth.Auth, error) {
+func (a *CodexAuthenticator) buildAuthRecord(
+	authSvc *codex.Auth,
+	authBundle *codex.AuthBundle,
+) (*coreauth.Auth, error) {
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
 
 	if tokenStorage == nil || tokenStorage.Email == "" {
@@ -262,8 +278,8 @@ func (a *CodexAuthenticator) buildAuthRecord(authSvc *codex.CodexAuth, authBundl
 	hashAccountID := ""
 	if tokenStorage.IDToken != "" {
 		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
-			planType = strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType)
-			accountID := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID)
+			planType = strings.TrimSpace(claims.AuthInfo.ChatgptPlanType)
+			accountID := strings.TrimSpace(claims.AuthInfo.ChatgptAccountID)
 			if accountID != "" {
 				digest := sha256.Sum256([]byte(accountID))
 				hashAccountID = hex.EncodeToString(digest[:])[:8]

@@ -1,6 +1,7 @@
 package translator
 
 // Common format identifiers exposed for SDK users.
+// noinspection GoUnusedConst
 const (
 	FormatOpenAI         Format = "openai"
 	FormatOpenAIResponse Format = "openai-response"

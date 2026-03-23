@@ -11,12 +11,22 @@ type RequestTransform func(model string, rawJSON []byte, stream bool) []byte
 // ResponseStreamTransform is a function type that converts a streaming response from a source schema to a target schema.
 // It takes a context, the model name, the raw JSON of the original and converted requests, the raw JSON of the current response chunk, and an optional parameter.
 // It returns a slice of strings, where each string is a chunk of the converted streaming response.
-type ResponseStreamTransform func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string
+type ResponseStreamTransform func(
+	ctx context.Context,
+	model string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) []string
 
 // ResponseNonStreamTransform is a function type that converts a non-streaming response from a source schema to a target schema.
 // It takes a context, the model name, the raw JSON of the original and converted requests, the raw JSON of the response, and an optional parameter.
 // It returns the converted response as a single string.
-type ResponseNonStreamTransform func(ctx context.Context, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string
+type ResponseNonStreamTransform func(
+	ctx context.Context,
+	model string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) string
 
 // ResponseTokenCountTransform is a function type that transforms a token count from a source format to a target format.
 // It takes a context and the token count as an int64, and returns the transformed token count as a string.

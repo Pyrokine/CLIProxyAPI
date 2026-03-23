@@ -5,10 +5,11 @@ import (
 	"errors"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+// noinspection GoUnusedGlobalVariable
 var ErrRefreshNotSupported = errors.New("cliproxy auth: refresh not supported")
 
 // LoginOptions captures generic knobs shared across authenticators.

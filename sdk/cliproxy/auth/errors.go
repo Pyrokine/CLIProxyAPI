@@ -1,10 +1,10 @@
 package auth
 
-// Error describes an authentication related failure in a provider agnostic format.
+// Error describes an authentication related failure in a provider-agnostic format.
 type Error struct {
-	// Code is a short machine readable identifier.
+	// Code is a short machine-readable identifier.
 	Code string `json:"code,omitempty"`
-	// Message is a human readable description of the failure.
+	// Message is a human-readable description of the failure.
 	Message string `json:"message"`
 	// Retryable indicates whether a retry might fix the issue automatically.
 	Retryable bool `json:"retryable"`
@@ -23,7 +23,7 @@ func (e *Error) Error() string {
 	return e.Code + ": " + e.Message
 }
 
-// StatusCode implements optional status accessor for manager decision making.
+// StatusCode implements optional status accessor for manager decision-making.
 func (e *Error) StatusCode() int {
 	if e == nil {
 		return 0

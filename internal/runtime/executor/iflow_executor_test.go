@@ -3,7 +3,7 @@ package executor
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 )
 
 func TestIFlowExecutorParseSuffix(t *testing.T) {
@@ -20,12 +20,14 @@ func TestIFlowExecutorParseSuffix(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := thinking.ParseSuffix(tt.model)
-			if result.ModelName != tt.wantBase {
-				t.Errorf("ParseSuffix(%q).ModelName = %q, want %q", tt.model, result.ModelName, tt.wantBase)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				result := thinking.ParseSuffix(tt.model)
+				if result.ModelName != tt.wantBase {
+					t.Errorf("ParseSuffix(%q).ModelName = %q, want %q", tt.model, result.ModelName, tt.wantBase)
+				}
+			},
+		)
 	}
 }
 
@@ -47,21 +49,25 @@ func TestPreserveReasoningContentInMessages(t *testing.T) {
 		},
 		{
 			"glm model preserves existing reasoning_content",
-			[]byte(`{"model":"glm-4","messages":[{"role":"assistant","content":"hi","reasoning_content":"thinking..."}]}`),
+			[]byte(
+				`{"model":"glm-4","messages":[{"role":"assistant","content":"hi","reasoning_content":"thinking..."}]}`,
+			),
 			nil,
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := preserveReasoningContentInMessages(tt.input)
-			want := tt.want
-			if want == nil {
-				want = tt.input
-			}
-			if string(got) != string(want) {
-				t.Errorf("preserveReasoningContentInMessages() = %s, want %s", got, want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				got := preserveReasoningContentInMessages(tt.input)
+				want := tt.want
+				if want == nil {
+					want = tt.input
+				}
+				if string(got) != string(want) {
+					t.Errorf("preserveReasoningContentInMessages() = %s, want %s", got, want)
+				}
+			},
+		)
 	}
 }

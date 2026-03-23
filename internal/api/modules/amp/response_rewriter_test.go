@@ -5,7 +5,7 @@ import (
 )
 
 func TestRewriteModelInResponse_TopLevel(t *testing.T) {
-	rw := &ResponseRewriter{originalModel: "gpt-5.2-codex"}
+	rw := &responseRewriter{originalModel: "gpt-5.2-codex"}
 
 	input := []byte(`{"id":"resp_1","model":"gpt-5.3-codex","output":[]}`)
 	result := rw.rewriteModelInResponse(input)
@@ -17,9 +17,11 @@ func TestRewriteModelInResponse_TopLevel(t *testing.T) {
 }
 
 func TestRewriteModelInResponse_ResponseModel(t *testing.T) {
-	rw := &ResponseRewriter{originalModel: "gpt-5.2-codex"}
+	rw := &responseRewriter{originalModel: "gpt-5.2-codex"}
 
-	input := []byte(`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex","status":"completed"}}`)
+	input := []byte(
+		`{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.3-codex","status":"completed"}}`,
+	)
 	result := rw.rewriteModelInResponse(input)
 
 	expected := `{"type":"response.completed","response":{"id":"resp_1","model":"gpt-5.2-codex","status":"completed"}}`
@@ -29,9 +31,11 @@ func TestRewriteModelInResponse_ResponseModel(t *testing.T) {
 }
 
 func TestRewriteModelInResponse_ResponseCreated(t *testing.T) {
-	rw := &ResponseRewriter{originalModel: "gpt-5.2-codex"}
+	rw := &responseRewriter{originalModel: "gpt-5.2-codex"}
 
-	input := []byte(`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.3-codex","status":"in_progress"}}`)
+	input := []byte(
+		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.3-codex","status":"in_progress"}}`,
+	)
 	result := rw.rewriteModelInResponse(input)
 
 	expected := `{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.2-codex","status":"in_progress"}}`
@@ -41,7 +45,7 @@ func TestRewriteModelInResponse_ResponseCreated(t *testing.T) {
 }
 
 func TestRewriteModelInResponse_NoModelField(t *testing.T) {
-	rw := &ResponseRewriter{originalModel: "gpt-5.2-codex"}
+	rw := &responseRewriter{originalModel: "gpt-5.2-codex"}
 
 	input := []byte(`{"type":"response.output_item.added","item":{"id":"item_1","type":"message"}}`)
 	result := rw.rewriteModelInResponse(input)
@@ -52,7 +56,7 @@ func TestRewriteModelInResponse_NoModelField(t *testing.T) {
 }
 
 func TestRewriteModelInResponse_EmptyOriginalModel(t *testing.T) {
-	rw := &ResponseRewriter{originalModel: ""}
+	rw := &responseRewriter{originalModel: ""}
 
 	input := []byte(`{"model":"gpt-5.3-codex"}`)
 	result := rw.rewriteModelInResponse(input)
@@ -63,9 +67,11 @@ func TestRewriteModelInResponse_EmptyOriginalModel(t *testing.T) {
 }
 
 func TestRewriteStreamChunk_SSEWithResponseModel(t *testing.T) {
-	rw := &ResponseRewriter{originalModel: "gpt-5.2-codex"}
+	rw := &responseRewriter{originalModel: "gpt-5.2-codex"}
 
-	chunk := []byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.3-codex\",\"status\":\"completed\"}}\n\n")
+	chunk := []byte(
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.3-codex\",\"status\":\"completed\"}}\n\n",
+	)
 	result := rw.rewriteStreamChunk(chunk)
 
 	expected := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.2-codex\",\"status\":\"completed\"}}\n\n"
@@ -75,9 +81,11 @@ func TestRewriteStreamChunk_SSEWithResponseModel(t *testing.T) {
 }
 
 func TestRewriteStreamChunk_MultipleEvents(t *testing.T) {
-	rw := &ResponseRewriter{originalModel: "gpt-5.2-codex"}
+	rw := &responseRewriter{originalModel: "gpt-5.2-codex"}
 
-	chunk := []byte("data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.3-codex\"}}\n\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"item_1\"}}\n\n")
+	chunk := []byte(
+		"data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.3-codex\"}}\n\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"item_1\"}}\n\n",
+	)
 	result := rw.rewriteStreamChunk(chunk)
 
 	if string(result) == string(chunk) {
@@ -89,7 +97,7 @@ func TestRewriteStreamChunk_MultipleEvents(t *testing.T) {
 }
 
 func TestRewriteStreamChunk_MessageModel(t *testing.T) {
-	rw := &ResponseRewriter{originalModel: "claude-opus-4.5"}
+	rw := &responseRewriter{originalModel: "claude-opus-4.5"}
 
 	chunk := []byte("data: {\"message\":{\"model\":\"claude-sonnet-4\",\"role\":\"assistant\"}}\n\n")
 	result := rw.rewriteStreamChunk(chunk)

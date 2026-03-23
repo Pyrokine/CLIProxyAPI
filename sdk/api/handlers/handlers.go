@@ -5,6 +5,7 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,15 +15,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
-	"golang.org/x/net/context"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -128,15 +128,19 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 		}
 	}
 
-	payload, err := json.Marshal(ErrorResponse{
-		Error: ErrorDetail{
-			Message: errText,
-			Type:    errType,
-			Code:    code,
+	payload, err := json.Marshal(
+		ErrorResponse{
+			Error: ErrorDetail{
+				Message: errText,
+				Type:    errType,
+				Code:    code,
+			},
 		},
-	})
+	)
 	if err != nil {
-		return []byte(fmt.Sprintf(`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText))
+		return fmt.Appendf(nil,
+			`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText,
+		)
 	}
 	return payload
 }
@@ -156,6 +160,7 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 
 // NonStreamingKeepAliveInterval returns the keep-alive interval for non-streaming responses.
 // Returning 0 disables keep-alives (default when unset).
+// noinspection GoUnusedExportedFunction
 func NonStreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := 0
 	if cfg != nil {
@@ -168,6 +173,7 @@ func NonStreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 }
 
 // StreamingBootstrapRetries returns how many times a streaming request may be retried before any bytes are sent.
+// noinspection GoUnusedExportedFunction
 func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	retries := defaultStreamingBootstrapRetries
 	if cfg != nil {
@@ -190,7 +196,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// It is forwarded as execution metadata; when absent we generate a UUID.
 	key := ""
 	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 		}
 	}
@@ -320,7 +326,11 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 // Returns:
 //   - context.Context: The new context with cancellation and embedded values.
 //   - APIHandlerCancelFunc: A function to cancel the context and log the response.
-func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *gin.Context, ctx context.Context) (context.Context, APIHandlerCancelFunc) {
+func (h *BaseAPIHandler) GetContextWithCancel(
+	_ interfaces.APIHandler,
+	c *gin.Context,
+	ctx context.Context,
+) (context.Context, APIHandlerCancelFunc) {
 	parentCtx := ctx
 	if parentCtx == nil {
 		parentCtx = context.Background()
@@ -348,9 +358,8 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			}
 		}()
 	}
-	newCtx = context.WithValue(newCtx, "gin", c)
-	newCtx = context.WithValue(newCtx, "handler", handler)
-	return newCtx, func(params ...interface{}) {
+	newCtx = util.WithGinContext(newCtx, c)
+	return newCtx, func(params ...any) {
 		if h.Cfg.RequestLog && len(params) == 1 {
 			if existing, exists := c.Get("API_RESPONSE"); exists {
 				if existingBytes, ok := existing.([]byte); ok && len(bytes.TrimSpace(existingBytes)) > 0 {
@@ -412,9 +421,7 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 	stopChan := make(chan struct{})
 	var stopOnce sync.Once
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -428,12 +435,14 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 				flusher.Flush()
 			}
 		}
-	}()
+	})
 
 	return func() {
-		stopOnce.Do(func() {
-			close(stopChan)
-		})
+		stopOnce.Do(
+			func() {
+				close(stopChan)
+			},
+		)
 		wg.Wait()
 	}
 }
@@ -467,53 +476,33 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
-func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
-	if errMsg != nil {
-		return nil, nil, errMsg
-	}
-	reqMeta := requestExecutionMetadata(ctx)
-	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
-	req := coreexecutor.Request{
-		Model:   normalizedModel,
-		Payload: payload,
-	}
-	opts := coreexecutor.Options{
-		Stream:          false,
-		Alt:             alt,
-		OriginalRequest: rawJSON,
-		SourceFormat:    sdktranslator.FromString(handlerType),
-	}
-	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-	}
-	if !PassthroughHeadersEnabled(h.Cfg) {
-		return resp.Payload, nil, nil
-	}
-	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
+func (h *BaseAPIHandler) ExecuteWithAuthManager(
+	ctx context.Context,
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	return h.executeNonStream(ctx, handlerType, modelName, rawJSON, alt, h.AuthManager.Execute)
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
-func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) ExecuteCountWithAuthManager(
+	ctx context.Context,
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	return h.executeNonStream(ctx, handlerType, modelName, rawJSON, alt, h.AuthManager.ExecuteCount)
+}
+
+func (h *BaseAPIHandler) executeNonStream(
+	ctx context.Context,
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+	execFn func(context.Context, []string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error),
+) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
@@ -535,7 +524,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.ExecuteCount(ctx, providers, req, opts)
+	resp, err := execFn(ctx, providers, req, opts)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
@@ -560,7 +549,12 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
-func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(
+	ctx context.Context,
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -734,7 +728,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 }
 
 func validateSSEDataJSON(chunk []byte) error {
-	for _, line := range bytes.Split(chunk, []byte("\n")) {
+	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
 			continue
@@ -752,10 +746,10 @@ func validateSSEDataJSON(chunk []byte) error {
 		if json.Valid(data) {
 			continue
 		}
-		const max = 512
+		const previewLimit = 512
 		preview := data
-		if len(preview) > max {
-			preview = preview[:max]
+		if len(preview) > previewLimit {
+			preview = preview[:previewLimit]
 		}
 		return fmt.Errorf("invalid SSE data JSON (len=%d): %q", len(data), preview)
 	}
@@ -774,7 +768,11 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetails(modelName string) (
+	providers []string,
+	normalizedModel string,
+	err *interfaces.ErrorMessage,
+) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -802,7 +800,9 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	}
 
 	if len(providers) == 0 {
-		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName),
+		}
 	}
 
 	// The thinking suffix is preserved in the model name itself, so no
@@ -891,7 +891,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
 	if h.Cfg.RequestLog {
-		if ginContext, ok := ctx.Value("gin").(*gin.Context); ok {
+		if ginContext, ok := util.GinContextValue(ctx).(*gin.Context); ok {
 			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
 				if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
 					slicesAPIResponseError = append(slicesAPIResponseError, err)
@@ -907,4 +907,4 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.
 // It can optionally accept parameters, which are used for logging the response.
-type APIHandlerCancelFunc func(params ...interface{})
+type APIHandlerCancelFunc func(params ...any)

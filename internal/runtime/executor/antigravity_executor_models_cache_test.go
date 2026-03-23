@@ -3,7 +3,7 @@ package executor
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
 func resetAntigravityPrimaryModelsCacheForTest() {
@@ -44,15 +44,19 @@ func TestLoadAntigravityPrimaryModels_ReturnsClone(t *testing.T) {
 	resetAntigravityPrimaryModelsCacheForTest()
 	t.Cleanup(resetAntigravityPrimaryModelsCacheForTest)
 
-	if updated := storeAntigravityPrimaryModels([]*registry.ModelInfo{{
-		ID:                         "gpt-5",
-		DisplayName:                "GPT-5",
-		SupportedGenerationMethods: []string{"generateContent"},
-		SupportedParameters:        []string{"temperature"},
-		Thinking: &registry.ThinkingSupport{
-			Levels: []string{"high"},
+	if updated := storeAntigravityPrimaryModels(
+		[]*registry.ModelInfo{
+			{
+				ID:                         "gpt-5",
+				DisplayName:                "GPT-5",
+				SupportedGenerationMethods: []string{"generateContent"},
+				SupportedParameters:        []string{"temperature"},
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{"high"},
+				},
+			},
 		},
-	}}); !updated {
+	); !updated {
 		t.Fatal("expected model cache update")
 	}
 

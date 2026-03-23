@@ -7,13 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	// legacy client removed
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/claude"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/oauthcommon"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -35,7 +33,10 @@ func (a *ClaudeAuthenticator) RefreshLead() *time.Duration {
 	return new(4 * time.Hour)
 }
 
-func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (
+	*coreauth.Auth,
+	error,
+) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
 	}
@@ -51,7 +52,7 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		callbackPort = opts.CallbackPort
 	}
 
-	pkceCodes, err := claude.GeneratePKCECodes()
+	pkceCodes, err := misc.GeneratePKCECodes()
 	if err != nil {
 		return nil, fmt.Errorf("claude pkce generation failed: %w", err)
 	}
@@ -61,12 +62,16 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		return nil, fmt.Errorf("claude state generation failed: %w", err)
 	}
 
-	oauthServer := claude.NewOAuthServer(callbackPort)
+	oauthServer := oauthcommon.NewOAuthServer(callbackPort, oauthcommon.ServerConfig{
+		CallbackPath:       "/callback",
+		DefaultPlatformURL: "https://console.anthropic.com/",
+		ProviderName:       "Claude",
+	})
 	if err = oauthServer.Start(); err != nil {
 		if strings.Contains(err.Error(), "already in use") {
-			return nil, claude.NewAuthenticationError(claude.ErrPortInUse, err)
+			return nil, oauthcommon.NewAuthenticationError(oauthcommon.ErrPortInUse, err)
 		}
-		return nil, claude.NewAuthenticationError(claude.ErrServerStartFailed, err)
+		return nil, oauthcommon.NewAuthenticationError(oauthcommon.ErrServerStartFailed, err)
 	}
 	defer func() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -76,7 +81,7 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		}
 	}()
 
-	authSvc := claude.NewClaudeAuth(cfg)
+	authSvc := claude.NewAuth(cfg)
 
 	authURL, returnedState, err := authSvc.GenerateAuthURL(state, pkceCodes)
 	if err != nil {
@@ -84,99 +89,21 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	}
 	state = returnedState
 
-	if !opts.NoBrowser {
-		fmt.Println("Opening browser for Claude authentication")
-		if !browser.IsAvailable() {
-			log.Warn("No browser available; please open the URL manually")
-			util.PrintSSHTunnelInstructions(callbackPort)
-			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-		} else if err = browser.OpenURL(authURL); err != nil {
-			log.Warnf("Failed to open browser automatically: %v", err)
-			util.PrintSSHTunnelInstructions(callbackPort)
-			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-		}
-	} else {
-		util.PrintSSHTunnelInstructions(callbackPort)
-		fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-	}
-
+	openBrowserForAuth("Claude", authURL, callbackPort, opts.NoBrowser)
 	fmt.Println("Waiting for Claude authentication callback...")
 
-	callbackCh := make(chan *claude.OAuthResult, 1)
-	callbackErrCh := make(chan error, 1)
-	manualDescription := ""
-
-	go func() {
-		result, errWait := oauthServer.WaitForCallback(5 * time.Minute)
-		if errWait != nil {
-			callbackErrCh <- errWait
-			return
-		}
-		callbackCh <- result
-	}()
-
-	var result *claude.OAuthResult
-	var manualPromptTimer *time.Timer
-	var manualPromptC <-chan time.Time
-	if opts.Prompt != nil {
-		manualPromptTimer = time.NewTimer(15 * time.Second)
-		manualPromptC = manualPromptTimer.C
-		defer manualPromptTimer.Stop()
-	}
-
-waitForCallback:
-	for {
-		select {
-		case result = <-callbackCh:
-			break waitForCallback
-		case err = <-callbackErrCh:
-			if strings.Contains(err.Error(), "timeout") {
-				return nil, claude.NewAuthenticationError(claude.ErrCallbackTimeout, err)
-			}
-			return nil, err
-		case <-manualPromptC:
-			manualPromptC = nil
-			if manualPromptTimer != nil {
-				manualPromptTimer.Stop()
-			}
-			select {
-			case result = <-callbackCh:
-				break waitForCallback
-			case err = <-callbackErrCh:
-				if strings.Contains(err.Error(), "timeout") {
-					return nil, claude.NewAuthenticationError(claude.ErrCallbackTimeout, err)
-				}
-				return nil, err
-			default:
-			}
-			input, errPrompt := opts.Prompt("Paste the Claude callback URL (or press Enter to keep waiting): ")
-			if errPrompt != nil {
-				return nil, errPrompt
-			}
-			parsed, errParse := misc.ParseOAuthCallback(input)
-			if errParse != nil {
-				return nil, errParse
-			}
-			if parsed == nil {
-				continue
-			}
-			manualDescription = parsed.ErrorDescription
-			result = &claude.OAuthResult{
-				Code:  parsed.Code,
-				State: parsed.State,
-				Error: parsed.Error,
-			}
-			break waitForCallback
-		}
+	result, manualDescription, err := waitForOAuthCallback(oauthServer, "Claude", opts.Prompt)
+	if err != nil {
+		return nil, err
 	}
 
 	if result.Error != "" {
-		return nil, claude.NewOAuthError(result.Error, manualDescription, http.StatusBadRequest)
+		return nil, oauthcommon.NewOAuthError(result.Error, manualDescription, http.StatusBadRequest)
 	}
 
 	if result.State != state {
 		log.Errorf("State mismatch: expected %s, got %s", state, result.State)
-		return nil, claude.NewAuthenticationError(claude.ErrInvalidState, fmt.Errorf("state mismatch"))
+		return nil, oauthcommon.NewAuthenticationError(oauthcommon.ErrInvalidState, fmt.Errorf("state mismatch"))
 	}
 
 	log.Debug("Claude authorization code received; exchanging for tokens")
@@ -185,7 +112,7 @@ waitForCallback:
 	authBundle, err := authSvc.ExchangeCodeForTokens(ctx, result.Code, state, pkceCodes)
 	if err != nil {
 		log.Errorf("Token exchange failed: %v", err)
-		return nil, claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, err)
+		return nil, oauthcommon.NewAuthenticationError(oauthcommon.ErrCodeExchangeFailed, err)
 	}
 
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)

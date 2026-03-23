@@ -1,4 +1,4 @@
-// clients.go implements watcher client lifecycle logic and persistence helpers.
+// Package watcher implements watcher client lifecycle logic and persistence helpers.
 // It reloads clients, handles incremental auth file changes, and persists updates when supported.
 package watcher
 
@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -55,7 +55,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		w.clientsMutex.Unlock()
 	}
 
-	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(cfg)
+	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(
+		cfg,
+	)
 	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
 
@@ -78,24 +80,26 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
 		} else if resolvedAuthDir != "" {
-			_ = filepath.Walk(resolvedAuthDir, func(path string, info fs.FileInfo, err error) error {
-				if err != nil {
-					return nil
-				}
-				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
-					if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
-						sum := sha256.Sum256(data)
-						normalizedPath := w.normalizeAuthPath(path)
-						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
-						// Parse and cache auth content for future diff comparisons
-						var auth coreauth.Auth
-						if errParse := json.Unmarshal(data, &auth); errParse == nil {
-							w.lastAuthContents[normalizedPath] = &auth
+			_ = filepath.Walk(
+				resolvedAuthDir, func(path string, info fs.FileInfo, err error) error {
+					if err != nil {
+						return nil
+					}
+					if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+						if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
+							sum := sha256.Sum256(data)
+							normalizedPath := w.normalizeAuthPath(path)
+							w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
+							// Parse and cache auth content for future diff comparisons
+							var auth coreauth.Auth
+							if errParse := json.Unmarshal(data, &auth); errParse == nil {
+								w.lastAuthContents[normalizedPath] = &auth
+							}
 						}
 					}
-				}
-				return nil
-			})
+					return nil
+				},
+			)
 		}
 		w.clientsMutex.Unlock()
 	}
@@ -109,7 +113,8 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	w.refreshAuthState(forceAuthRefresh)
 
-	log.Infof("full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
+	log.Infof(
+		"full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
 		totalNewClients,
 		authFileCount,
 		geminiAPIKeyCount,
@@ -220,20 +225,22 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 		return 0
 	}
 
-	errWalk := filepath.Walk(authDir, func(path string, info fs.FileInfo, err error) error {
-		if err != nil {
-			log.Debugf("error accessing path %s: %v", path, err)
-			return err
-		}
-		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
-			authFileCount++
-			log.Debugf("processing auth file %d: %s", authFileCount, filepath.Base(path))
-			if data, errCreate := os.ReadFile(path); errCreate == nil && len(data) > 0 {
-				successfulAuthCount++
+	errWalk := filepath.Walk(
+		authDir, func(path string, info fs.FileInfo, err error) error {
+			if err != nil {
+				log.Debugf("error accessing path %s: %v", path, err)
+				return err
 			}
-		}
-		return nil
-	})
+			if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+				authFileCount++
+				log.Debugf("processing auth file %d: %s", authFileCount, filepath.Base(path))
+				if data, errCreate := os.ReadFile(path); errCreate == nil && len(data) > 0 {
+					successfulAuthCount++
+				}
+			}
+			return nil
+		},
+	)
 
 	if errWalk != nil {
 		log.Errorf("error walking auth directory: %v", errWalk)

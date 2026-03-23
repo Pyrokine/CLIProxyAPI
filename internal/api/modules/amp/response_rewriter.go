@@ -11,18 +11,18 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ResponseRewriter wraps a gin.ResponseWriter to intercept and modify the response body
+// responseRewriter wraps a gin.ResponseWriter to intercept and modify the response body
 // It's used to rewrite model names in responses when model mapping is used
-type ResponseRewriter struct {
+type responseRewriter struct {
 	gin.ResponseWriter
 	body          *bytes.Buffer
 	originalModel string
 	isStreaming   bool
 }
 
-// NewResponseRewriter creates a new response rewriter for model name substitution
-func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRewriter {
-	return &ResponseRewriter{
+// newResponseRewriter creates a new response rewriter for model name substitution
+func newResponseRewriter(w gin.ResponseWriter, originalModel string) *responseRewriter {
+	return &responseRewriter{
 		ResponseWriter: w,
 		body:           &bytes.Buffer{},
 		originalModel:  originalModel,
@@ -30,7 +30,7 @@ func NewResponseRewriter(w gin.ResponseWriter, originalModel string) *ResponseRe
 }
 
 // Write intercepts response writes and buffers them for model name replacement
-func (rw *ResponseRewriter) Write(data []byte) (int, error) {
+func (rw *responseRewriter) Write(data []byte) (int, error) {
 	// Detect streaming on first write
 	if rw.body.Len() == 0 && !rw.isStreaming {
 		contentType := rw.Header().Get("Content-Type")
@@ -51,7 +51,7 @@ func (rw *ResponseRewriter) Write(data []byte) (int, error) {
 }
 
 // Flush writes the buffered response with model names rewritten
-func (rw *ResponseRewriter) Flush() {
+func (rw *responseRewriter) Flush() {
 	if rw.isStreaming {
 		if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
 			flusher.Flush()
@@ -70,7 +70,7 @@ var modelFieldPaths = []string{"message.model", "model", "modelVersion", "respon
 
 // rewriteModelInResponse replaces all occurrences of the mapped model with the original model in JSON
 // It also suppresses "thinking" blocks if "tool_use" is present to ensure Amp client compatibility
-func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
+func (rw *responseRewriter) rewriteModelInResponse(data []byte) []byte {
 	// 1. Amp Compatibility: Suppress thinking blocks if tool use is detected
 	// The Amp client struggles when both thinking and tool_use blocks are present
 	if gjson.GetBytes(data, `content.#(type=="tool_use")`).Exists() {
@@ -85,7 +85,10 @@ func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 				if err != nil {
 					log.Warnf("Amp ResponseRewriter: failed to suppress thinking blocks: %v", err)
 				} else {
-					log.Debugf("Amp ResponseRewriter: Suppressed %d thinking blocks due to tool usage", originalCount-filteredCount)
+					log.Debugf(
+						"Amp ResponseRewriter: Suppressed %d thinking blocks due to tool usage",
+						originalCount-filteredCount,
+					)
 					// Log the result for verification
 					log.Debugf("Amp ResponseRewriter: Resulting content: %s", gjson.GetBytes(data, "content").String())
 				}
@@ -105,7 +108,7 @@ func (rw *ResponseRewriter) rewriteModelInResponse(data []byte) []byte {
 }
 
 // rewriteStreamChunk rewrites model names in SSE stream chunks
-func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
+func (rw *responseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 	if rw.originalModel == "" {
 		return chunk
 	}
@@ -113,8 +116,8 @@ func (rw *ResponseRewriter) rewriteStreamChunk(chunk []byte) []byte {
 	// SSE format: "data: {json}\n\n"
 	lines := bytes.Split(chunk, []byte("\n"))
 	for i, line := range lines {
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			jsonData := bytes.TrimPrefix(line, []byte("data: "))
+		if after, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
+			jsonData := after
 			if len(jsonData) > 0 && jsonData[0] == '{' {
 				// Rewrite JSON in the data line
 				rewritten := rw.rewriteModelInResponse(jsonData)

@@ -8,32 +8,32 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// AmpRouteType represents the type of routing decision made for an Amp request
-type AmpRouteType string
+// routeType represents the type of routing decision made for an Amp request
+type routeType string
 
 const (
-	// RouteTypeLocalProvider indicates the request is handled by a local OAuth provider (free)
-	RouteTypeLocalProvider AmpRouteType = "LOCAL_PROVIDER"
-	// RouteTypeModelMapping indicates the request was remapped to another available model (free)
-	RouteTypeModelMapping AmpRouteType = "MODEL_MAPPING"
-	// RouteTypeAmpCredits indicates the request is forwarded to ampcode.com (uses Amp credits)
-	RouteTypeAmpCredits AmpRouteType = "AMP_CREDITS"
-	// RouteTypeNoProvider indicates no provider or fallback available
-	RouteTypeNoProvider AmpRouteType = "NO_PROVIDER"
+	// routeTypeLocalProvider indicates the request is handled by a local OAuth provider (free)
+	routeTypeLocalProvider routeType = "LOCAL_PROVIDER"
+	// routeTypeModelMapping indicates the request was remapped to another available model (free)
+	routeTypeModelMapping routeType = "MODEL_MAPPING"
+	// routeTypeAmpCredits indicates the request is forwarded to ampcode.com (uses Amp credits)
+	routeTypeAmpCredits routeType = "AMP_CREDITS"
+	// routeTypeNoProvider indicates no provider or fallback available
+	routeTypeNoProvider routeType = "NO_PROVIDER"
 )
 
-// MappedModelContextKey is the Gin context key for passing mapped model names.
-const MappedModelContextKey = "mapped_model"
+// mappedModelContextKey is the Gin context key for passing mapped model names.
+const mappedModelContextKey = "mapped_model"
 
 // logAmpRouting logs the routing decision for an Amp request with structured fields
-func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provider, path string) {
+func logAmpRouting(routeType routeType, requestedModel, resolvedModel, provider, path string) {
 	fields := log.Fields{
 		"component":       "amp-routing",
 		"route_type":      string(routeType),
@@ -50,24 +50,27 @@ func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provid
 	}
 
 	switch routeType {
-	case RouteTypeLocalProvider:
+	case routeTypeLocalProvider:
 		fields["cost"] = "free"
 		fields["source"] = "local_oauth"
 		log.WithFields(fields).Debugf("amp using local provider for model: %s", requestedModel)
 
-	case RouteTypeModelMapping:
+	case routeTypeModelMapping:
 		fields["cost"] = "free"
 		fields["source"] = "local_oauth"
 		fields["mapping"] = requestedModel + " -> " + resolvedModel
 		// model mapping already logged in mapper; avoid duplicate here
 
-	case RouteTypeAmpCredits:
+	case routeTypeAmpCredits:
 		fields["cost"] = "amp_credits"
 		fields["source"] = "ampcode.com"
 		fields["model_id"] = requestedModel // Explicit model_id for easy config reference
-		log.WithFields(fields).Warnf("forwarding to ampcode.com (uses amp credits) - model_id: %s | To use local provider, add to config: ampcode.model-mappings: [{from: \"%s\", to: \"<your-local-model>\"}]", requestedModel, requestedModel)
+		log.WithFields(fields).Warnf(
+			"forwarding to ampcode.com (uses amp credits) - model_id: %s | To use local provider, add to config: ampcode.model-mappings: [{from: \"%s\", to: \"<your-local-model>\"}]",
+			requestedModel, requestedModel,
+		)
 
-	case RouteTypeNoProvider:
+	case routeTypeNoProvider:
 		fields["cost"] = "none"
 		fields["source"] = "error"
 		fields["model_id"] = requestedModel // Explicit model_id for easy config reference
@@ -75,43 +78,33 @@ func logAmpRouting(routeType AmpRouteType, requestedModel, resolvedModel, provid
 	}
 }
 
-// FallbackHandler wraps a standard handler with fallback logic to ampcode.com
+// fallbackHandler wraps a standard handler with fallback logic to ampcode.com
 // when the model's provider is not available in CLIProxyAPI
-type FallbackHandler struct {
+type fallbackHandler struct {
 	getProxy           func() *httputil.ReverseProxy
-	modelMapper        ModelMapper
+	modelMapper        modelMapper
 	forceModelMappings func() bool
 }
 
-// NewFallbackHandler creates a new fallback handler wrapper
-// The getProxy function allows lazy evaluation of the proxy (useful when proxy is created after routes)
-func NewFallbackHandler(getProxy func() *httputil.ReverseProxy) *FallbackHandler {
-	return &FallbackHandler{
-		getProxy:           getProxy,
-		forceModelMappings: func() bool { return false },
-	}
-}
-
-// NewFallbackHandlerWithMapper creates a new fallback handler with model mapping support
-func NewFallbackHandlerWithMapper(getProxy func() *httputil.ReverseProxy, mapper ModelMapper, forceModelMappings func() bool) *FallbackHandler {
+// newFallbackHandlerWithMapper creates a new fallback handler with model mapping support
+func newFallbackHandlerWithMapper(
+	getProxy func() *httputil.ReverseProxy,
+	mapper modelMapper,
+	forceModelMappings func() bool,
+) *fallbackHandler {
 	if forceModelMappings == nil {
 		forceModelMappings = func() bool { return false }
 	}
-	return &FallbackHandler{
+	return &fallbackHandler{
 		getProxy:           getProxy,
 		modelMapper:        mapper,
 		forceModelMappings: forceModelMappings,
 	}
 }
 
-// SetModelMapper sets the model mapper for this handler (allows late binding)
-func (fh *FallbackHandler) SetModelMapper(mapper ModelMapper) {
-	fh.modelMapper = mapper
-}
-
-// WrapHandler wraps a gin.HandlerFunc with fallback logic
+// wrapHandler wraps a gin.HandlerFunc with fallback logic
 // If the model's provider is not configured in CLIProxyAPI, it forwards to ampcode.com
-func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc {
+func (fh *fallbackHandler) wrapHandler(handler gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
 
@@ -190,7 +183,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 				bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
 				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				// Store mapped model in context for handlers that check it (like gemini bridge)
-				c.Set(MappedModelContextKey, mappedModel)
+				c.Set(mappedModelContextKey, mappedModel)
 				resolvedModel = mappedModel
 				usedMapping = true
 				providers = mappedProviders
@@ -211,7 +204,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 					bodyBytes = rewriteModelInRequest(bodyBytes, mappedModel)
 					c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 					// Store mapped model in context for handlers that check it (like gemini bridge)
-					c.Set(MappedModelContextKey, mappedModel)
+					c.Set(mappedModelContextKey, mappedModel)
 					resolvedModel = mappedModel
 					usedMapping = true
 					providers = mappedProviders
@@ -224,7 +217,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			proxy := fh.getProxy()
 			if proxy != nil {
 				// Log: Forwarding to ampcode.com (uses Amp credits)
-				logAmpRouting(RouteTypeAmpCredits, modelName, "", "", requestPath)
+				logAmpRouting(routeTypeAmpCredits, modelName, "", "", requestPath)
 
 				// Restore body again for the proxy
 				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -235,7 +228,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			}
 
 			// No proxy available, let the normal handler return the error
-			logAmpRouting(RouteTypeNoProvider, modelName, "", "", requestPath)
+			logAmpRouting(routeTypeNoProvider, modelName, "", "", requestPath)
 		}
 
 		// Log the routing decision
@@ -247,8 +240,8 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		if usedMapping {
 			// Log: Model was mapped to another model
 			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
-			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
-			rewriter := NewResponseRewriter(c.Writer, modelName)
+			logAmpRouting(routeTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
+			rewriter := newResponseRewriter(c.Writer, modelName)
 			c.Writer = rewriter
 			// Filter Anthropic-Beta header only for local handling paths
 			filterAntropicBetaHeader(c)
@@ -258,7 +251,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			log.Debugf("amp model mapping: response %s -> %s", resolvedModel, modelName)
 		} else if len(providers) > 0 {
 			// Log: Using local provider (free)
-			logAmpRouting(RouteTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
+			logAmpRouting(routeTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
 			// Filter Anthropic-Beta header only for local handling paths
 			filterAntropicBetaHeader(c)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
@@ -318,8 +311,8 @@ func extractModelFromRequest(body []byte, c *gin.Context) string {
 	// Example: /publishers/google/models/gemini-3-pro-preview:streamGenerateContent
 	if path := c.Param("path"); path != "" {
 		// Look for /models/{model}:method pattern
-		if idx := strings.Index(path, "/models/"); idx >= 0 {
-			modelPart := path[idx+8:] // Skip "/models/"
+		if _, after, ok := strings.Cut(path, "/models/"); ok {
+			modelPart := after // Skip "/models/"
 			// Split by colon to get model name
 			if colonIdx := strings.Index(modelPart, ":"); colonIdx > 0 {
 				return modelPart[:colonIdx]

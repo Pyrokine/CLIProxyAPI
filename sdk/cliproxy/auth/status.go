@@ -3,6 +3,8 @@ package auth
 // Status represents the lifecycle state of an Auth entry.
 type Status string
 
+// noinspection GoUnusedConst
+
 const (
 	// StatusUnknown means the auth state could not be determined.
 	StatusUnknown Status = "unknown"

@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func TestNewConfigSynthesizer(t *testing.T) {
@@ -129,28 +129,30 @@ func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			synth := NewConfigSynthesizer()
-			ctx := &SynthesisContext{
-				Config: &config.Config{
-					GeminiKey: tt.geminiKeys,
-				},
-				Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
-				IDGenerator: NewStableIDGenerator(),
-			}
+		t.Run(
+			tt.name, func(t *testing.T) {
+				synth := NewConfigSynthesizer()
+				ctx := &SynthesisContext{
+					Config: &config.Config{
+						GeminiKey: tt.geminiKeys,
+					},
+					Now:         time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+					IDGenerator: NewStableIDGenerator(),
+				}
 
-			auths, err := synth.Synthesize(ctx)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(auths) != tt.wantLen {
-				t.Fatalf("expected %d auths, got %d", tt.wantLen, len(auths))
-			}
+				auths, err := synth.Synthesize(ctx)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(auths) != tt.wantLen {
+					t.Fatalf("expected %d auths, got %d", tt.wantLen, len(auths))
+				}
 
-			if tt.validate != nil && len(auths) > 0 {
-				tt.validate(t, auths)
-			}
-		})
+				if tt.validate != nil && len(auths) > 0 {
+					tt.validate(t, auths)
+				}
+			},
+		)
 	}
 }
 
@@ -348,24 +350,26 @@ func TestConfigSynthesizer_OpenAICompat(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			synth := NewConfigSynthesizer()
-			ctx := &SynthesisContext{
-				Config: &config.Config{
-					OpenAICompatibility: tt.compat,
-				},
-				Now:         time.Now(),
-				IDGenerator: NewStableIDGenerator(),
-			}
+		t.Run(
+			tt.name, func(t *testing.T) {
+				synth := NewConfigSynthesizer()
+				ctx := &SynthesisContext{
+					Config: &config.Config{
+						OpenAICompatibility: tt.compat,
+					},
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
 
-			auths, err := synth.Synthesize(ctx)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(auths) != tt.wantLen {
-				t.Fatalf("expected %d auths, got %d", tt.wantLen, len(auths))
-			}
-		})
+				auths, err := synth.Synthesize(ctx)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(auths) != tt.wantLen {
+					t.Fatalf("expected %d auths, got %d", tt.wantLen, len(auths))
+				}
+			},
+		)
 	}
 }
 

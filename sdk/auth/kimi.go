@@ -3,13 +3,12 @@ package auth
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/kimi"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/browser"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -44,7 +43,7 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 		opts = &LoginOptions{}
 	}
 
-	authSvc := kimi.NewKimiAuth(cfg)
+	authSvc := kimi.NewAuth(cfg)
 
 	// Start the device flow
 	fmt.Println("Starting Kimi authentication...")
@@ -89,23 +88,7 @@ func (a KimiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *
 	// Create the token storage
 	tokenStorage := authSvc.CreateTokenStorage(authBundle)
 
-	// Build metadata with token information
-	metadata := map[string]any{
-		"type":          "kimi",
-		"access_token":  authBundle.TokenData.AccessToken,
-		"refresh_token": authBundle.TokenData.RefreshToken,
-		"token_type":    authBundle.TokenData.TokenType,
-		"scope":         authBundle.TokenData.Scope,
-		"timestamp":     time.Now().UnixMilli(),
-	}
-
-	if authBundle.TokenData.ExpiresAt > 0 {
-		exp := time.Unix(authBundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
-		metadata["expired"] = exp
-	}
-	if strings.TrimSpace(authBundle.DeviceID) != "" {
-		metadata["device_id"] = strings.TrimSpace(authBundle.DeviceID)
-	}
+	metadata := kimi.BuildMetadata(authBundle)
 
 	// Generate a unique filename
 	fileName := fmt.Sprintf("kimi-%d.json", time.Now().UnixMilli())

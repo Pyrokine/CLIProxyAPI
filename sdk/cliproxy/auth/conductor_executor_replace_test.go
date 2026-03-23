@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 type replaceAwareExecutor struct {
@@ -20,11 +20,21 @@ func (e *replaceAwareExecutor) Identifier() string {
 	return e.id
 }
 
-func (e *replaceAwareExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *replaceAwareExecutor) Execute(
+	context.Context,
+	*Auth,
+	cliproxyexecutor.Request,
+	cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e *replaceAwareExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *replaceAwareExecutor) ExecuteStream(
+	context.Context,
+	*Auth,
+	cliproxyexecutor.Request,
+	cliproxyexecutor.Options,
+) (*cliproxyexecutor.StreamResult, error) {
 	ch := make(chan cliproxyexecutor.StreamChunk)
 	close(ch)
 	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
@@ -34,7 +44,12 @@ func (e *replaceAwareExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, er
 	return auth, nil
 }
 
-func (e *replaceAwareExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *replaceAwareExecutor) CountTokens(
+	context.Context,
+	*Auth,
+	cliproxyexecutor.Request,
+	cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
 }
 

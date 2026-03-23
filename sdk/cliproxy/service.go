@@ -5,24 +5,26 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
+	internalUsage "github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/wsrelay"
+	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
+	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -89,6 +91,9 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// usagePersister handles periodic persistence of usage statistics.
+	usagePersister *internalUsage.Persister
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -245,11 +250,13 @@ func (s *Service) wsOnConnected(channelID string) {
 		Metadata:   map[string]any{"email": channelID}, // metadata drives logging and usage tracking
 	}
 	log.Infof("websocket provider connected: %s", channelID)
-	s.emitAuthUpdate(context.Background(), watcher.AuthUpdate{
-		Action: watcher.AuthUpdateActionAdd,
-		ID:     auth.ID,
-		Auth:   auth,
-	})
+	s.emitAuthUpdate(
+		context.Background(), watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionAdd,
+			ID:     auth.ID,
+			Auth:   auth,
+		},
+	)
 }
 
 func (s *Service) wsOnDisconnected(channelID string, reason error) {
@@ -266,10 +273,12 @@ func (s *Service) wsOnDisconnected(channelID string, reason error) {
 		log.Infof("websocket provider disconnected: %s", channelID)
 	}
 	ctx := context.Background()
-	s.emitAuthUpdate(ctx, watcher.AuthUpdate{
-		Action: watcher.AuthUpdateActionDelete,
-		ID:     channelID,
-	})
+	s.emitAuthUpdate(
+		ctx, watcher.AuthUpdate{
+			Action: watcher.AuthUpdateActionDelete,
+			ID:     channelID,
+		},
+	)
 }
 
 func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.Auth) {
@@ -283,7 +292,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// This ensures that configuration changes (proxy_url, prefix, etc.) take effect
 	// immediately for API calls, rather than waiting for model registration to complete.
 	// Model registration may involve network calls (e.g., FetchAntigravityModels) that
-	// could timeout if the new proxy_url is unreachable.
+	// could time out if the new proxy_url is unreachable.
 	op := "register"
 	var err error
 	if existing, ok := s.coreManager.GetByID(auth.ID); ok {
@@ -445,9 +454,9 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
-// Run starts the service and blocks until the context is cancelled or the server stops.
+// Run starts the service and blocks until the context is canceled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
-// and starts processing requests. The method blocks until the context is cancelled.
+// and starts processing requests. The method blocks until the context is canceled.
 //
 // Parameters:
 //   - ctx: The context for controlling the service lifecycle
@@ -463,6 +472,24 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	usage.StartDefault(ctx)
+
+	// Start usage statistics persistence if enabled
+	if s.cfg.UsageStatisticsEnabled && !strings.EqualFold(s.cfg.UsageStatisticsFile, "disabled") {
+		baseDir := internalUsage.ResolveDataDir(s.cfg.UsageDataDir, s.configPath)
+		if baseDir != "" {
+			// Check for legacy data that needs migration
+			if oldPath, needed := internalUsage.NeedsMigration(s.configPath, s.cfg.UsageStatisticsFile); needed {
+				if err := internalUsage.MigrateV1ToV2(oldPath, baseDir, nil); err != nil {
+					log.Warnf("usage: migration failed: %v", err)
+				}
+			}
+
+			s.usagePersister = internalUsage.NewPersister(baseDir, s.cfg.UsageRetention)
+			s.usagePersister.SetPriceFunc(buildPriceFunc(s.configPath))
+			internalUsage.SetGlobalPersister(s.usagePersister)
+			s.usagePersister.Start(ctx)
+		}
+	}
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -505,6 +532,10 @@ func (s *Service) Run(ctx context.Context) error {
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
 
+	if s.usagePersister != nil {
+		s.server.SetUsagePersister(s.usagePersister)
+	}
+
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()
 	}
@@ -512,22 +543,27 @@ func (s *Service) Run(ctx context.Context) error {
 	s.ensureWebsocketGateway()
 	if s.server != nil && s.wsGateway != nil {
 		s.server.AttachWebsocketRoute(s.wsGateway.Path(), s.wsGateway.Handler())
-		s.server.SetWebsocketAuthChangeHandler(func(oldEnabled, newEnabled bool) {
-			if oldEnabled == newEnabled {
-				return
-			}
-			if !oldEnabled && newEnabled {
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				if errStop := s.wsGateway.Stop(ctx); errStop != nil {
-					log.Warnf("failed to reset websocket connections after ws-auth change %t -> %t: %v", oldEnabled, newEnabled, errStop)
+		s.server.SetWebsocketAuthChangeHandler(
+			func(oldEnabled, newEnabled bool) {
+				if oldEnabled == newEnabled {
 					return
 				}
-				log.Debugf("ws-auth enabled; existing websocket sessions terminated to enforce authentication")
-				return
-			}
-			log.Debugf("ws-auth disabled; existing websocket sessions remain connected")
-		})
+				if !oldEnabled && newEnabled {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if errStop := s.wsGateway.Stop(ctx); errStop != nil {
+						log.Warnf(
+							"failed to reset websocket connections after ws-auth change %t -> %t: %v", oldEnabled,
+							newEnabled, errStop,
+						)
+						return
+					}
+					log.Debugf("ws-auth enabled; existing websocket sessions terminated to enforce authentication")
+					return
+				}
+				log.Debugf("ws-auth disabled; existing websocket sessions remain connected")
+			},
+		)
 	}
 
 	if s.hooks.OnBeforeStart != nil {
@@ -655,60 +691,68 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	var shutdownErr error
-	s.shutdownOnce.Do(func() {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-
-		// legacy refresh loop removed; only stopping core auth manager below
-
-		if s.watcherCancel != nil {
-			s.watcherCancel()
-		}
-		if s.coreManager != nil {
-			s.coreManager.StopAutoRefresh()
-		}
-		if s.watcher != nil {
-			if err := s.watcher.Stop(); err != nil {
-				log.Errorf("failed to stop file watcher: %v", err)
-				shutdownErr = err
+	s.shutdownOnce.Do(
+		func() {
+			if ctx == nil {
+				ctx = context.Background()
 			}
-		}
-		if s.wsGateway != nil {
-			if err := s.wsGateway.Stop(ctx); err != nil {
-				log.Errorf("failed to stop websocket gateway: %v", err)
-				if shutdownErr == nil {
+
+			// legacy refresh loop removed; only stopping core auth manager below
+
+			if s.watcherCancel != nil {
+				s.watcherCancel()
+			}
+			if s.coreManager != nil {
+				s.coreManager.StopAutoRefresh()
+			}
+			if s.watcher != nil {
+				if err := s.watcher.Stop(); err != nil {
+					log.Errorf("failed to stop file watcher: %v", err)
 					shutdownErr = err
 				}
 			}
-		}
-		if s.authQueueStop != nil {
-			s.authQueueStop()
-			s.authQueueStop = nil
-		}
-
-		if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
-			log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
-			if shutdownErr == nil {
-				shutdownErr = errShutdownPprof
-			}
-		}
-
-		// no legacy clients to persist
-
-		if s.server != nil {
-			shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			if err := s.server.Stop(shutdownCtx); err != nil {
-				log.Errorf("error stopping API server: %v", err)
-				if shutdownErr == nil {
-					shutdownErr = err
+			if s.wsGateway != nil {
+				if err := s.wsGateway.Stop(ctx); err != nil {
+					log.Errorf("failed to stop websocket gateway: %v", err)
+					if shutdownErr == nil {
+						shutdownErr = err
+					}
 				}
 			}
-		}
+			if s.authQueueStop != nil {
+				s.authQueueStop()
+				s.authQueueStop = nil
+			}
 
-		usage.StopDefault()
-	})
+			if errShutdownPprof := s.shutdownPprof(ctx); errShutdownPprof != nil {
+				log.Errorf("failed to stop pprof server: %v", errShutdownPprof)
+				if shutdownErr == nil {
+					shutdownErr = errShutdownPprof
+				}
+			}
+
+			// no legacy clients to persist
+
+			if s.server != nil {
+				shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				if err := s.server.Stop(shutdownCtx); err != nil {
+					log.Errorf("error stopping API server: %v", err)
+					if shutdownErr == nil {
+						shutdownErr = err
+					}
+				}
+			}
+
+			// Save usage statistics before stopping
+			if s.usagePersister != nil {
+				s.usagePersister.Stop()
+				internalUsage.SetGlobalPersister(nil)
+			}
+
+			usage.StopDefault()
+		},
+	)
 	return shutdownErr
 }
 
@@ -716,7 +760,7 @@ func (s *Service) ensureAuthDir() error {
 	info, err := os.Stat(s.cfg.AuthDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o755); mkErr != nil {
+			if mkErr := os.MkdirAll(s.cfg.AuthDir, 0o700); mkErr != nil {
 				return fmt.Errorf("cliproxy: failed to create auth directory %s: %w", s.cfg.AuthDir, mkErr)
 			}
 			log.Infof("created missing auth directory: %s", s.cfg.AuthDir)
@@ -888,22 +932,26 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						if modelID == "" {
 							modelID = m.Name
 						}
-						ms = append(ms, &ModelInfo{
-							ID:          modelID,
-							Object:      "model",
-							Created:     time.Now().Unix(),
-							OwnedBy:     compat.Name,
-							Type:        "openai-compatibility",
-							DisplayName: modelID,
-							UserDefined: true,
-						})
+						ms = append(
+							ms, &ModelInfo{
+								ID:          modelID,
+								Object:      "model",
+								Created:     time.Now().Unix(),
+								OwnedBy:     compat.Name,
+								Type:        "openai-compatibility",
+								DisplayName: modelID,
+								UserDefined: true,
+							},
+						)
 					}
 					// Register and return
 					if len(ms) > 0 {
 						if providerKey == "" {
 							providerKey = "openai-compatibility"
 						}
-						GlobalModelRegistry().RegisterClient(a.ID, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
+						GlobalModelRegistry().RegisterClient(
+							a.ID, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix),
+						)
 					} else {
 						// Ensure stale registrations are cleared when model list becomes empty.
 						GlobalModelRegistry().UnregisterClient(a.ID)
@@ -924,7 +972,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		if key == "" {
 			key = strings.ToLower(strings.TrimSpace(a.Provider))
 		}
-		GlobalModelRegistry().RegisterClient(a.ID, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		GlobalModelRegistry().RegisterClient(
+			a.ID, key, applyModelPrefixes(models, a.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix),
+		)
 		if provider == "antigravity" {
 			s.backfillAntigravityModels(a, models)
 		}
@@ -973,19 +1023,19 @@ func (s *Service) resolveConfigClaudeKey(auth *coreauth.Auth) *config.ClaudeKey 
 	return nil
 }
 
-func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
-	if auth == nil || s.cfg == nil {
-		return nil
-	}
-	var attrKey, attrBase string
-	if auth.Attributes != nil {
-		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
-		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
-	}
-	for i := range s.cfg.GeminiKey {
-		entry := &s.cfg.GeminiKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
+// keyEntry abstracts a config entry with APIKey and BaseURL for the generic resolver.
+type keyEntry interface {
+	GetAPIKey() string
+	GetBaseURL() string
+}
+
+// resolveConfigKey performs the common key+baseURL matching logic shared by
+// resolveConfigGeminiKey, resolveConfigVertexCompatKey, and resolveConfigCodexKey.
+func resolveConfigKey[T keyEntry](entries []T, attrKey, attrBase string) *T {
+	for i := range entries {
+		entry := &entries[i]
+		cfgKey := strings.TrimSpace((*entry).GetAPIKey())
+		cfgBase := strings.TrimSpace((*entry).GetBaseURL())
 		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
 			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
 				return entry
@@ -999,6 +1049,18 @@ func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey 
 	return nil
 }
 
+func (s *Service) resolveConfigGeminiKey(auth *coreauth.Auth) *config.GeminiKey {
+	if auth == nil || s.cfg == nil {
+		return nil
+	}
+	var attrKey, attrBase string
+	if auth.Attributes != nil {
+		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
+		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
+	}
+	return resolveConfigKey(s.cfg.GeminiKey, attrKey, attrBase)
+}
+
 func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.VertexCompatKey {
 	if auth == nil || s.cfg == nil {
 		return nil
@@ -1008,19 +1070,8 @@ func (s *Service) resolveConfigVertexCompatKey(auth *coreauth.Auth) *config.Vert
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.VertexCompatAPIKey {
-		entry := &s.cfg.VertexCompatAPIKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
+	if entry := resolveConfigKey(s.cfg.VertexCompatAPIKey, attrKey, attrBase); entry != nil {
+		return entry
 	}
 	if attrKey != "" {
 		for i := range s.cfg.VertexCompatAPIKey {
@@ -1042,21 +1093,7 @@ func (s *Service) resolveConfigCodexKey(auth *coreauth.Auth) *config.CodexKey {
 		attrKey = strings.TrimSpace(auth.Attributes["api_key"])
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
-	for i := range s.cfg.CodexKey {
-		entry := &s.cfg.CodexKey[i]
-		cfgKey := strings.TrimSpace(entry.APIKey)
-		cfgBase := strings.TrimSpace(entry.BaseURL)
-		if attrKey != "" && strings.EqualFold(cfgKey, attrKey) {
-			if cfgBase == "" || strings.EqualFold(cfgBase, attrBase) {
-				return entry
-			}
-			continue
-		}
-		if attrKey == "" && attrBase != "" && strings.EqualFold(cfgBase, attrBase) {
-			return entry
-		}
-	}
-	return nil
+	return resolveConfigKey(s.cfg.CodexKey, attrKey, attrBase)
 }
 
 func (s *Service) oauthExcludedModels(provider, authKind string) []string {
@@ -1117,7 +1154,10 @@ func (s *Service) backfillAntigravityModels(source *coreauth.Auth, primaryModels
 			continue
 		}
 
-		reg.RegisterClient(candidateID, "antigravity", applyModelPrefixes(models, candidate.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix))
+		reg.RegisterClient(
+			candidateID, "antigravity",
+			applyModelPrefixes(models, candidate.Prefix, s.cfg != nil && s.cfg.ForceModelPrefix),
+		)
 		log.Debugf("antigravity models backfilled for auth %s using primary model list", candidateID)
 	}
 }
@@ -1449,4 +1489,60 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		}
 	}
 	return out
+}
+
+// buildPriceFunc creates a cached PriceFunc that reads model prices from model-prices.json.
+func buildPriceFunc(configPath string) internalUsage.PriceFunc {
+	if configPath == "" {
+		return nil
+	}
+
+	filePath := filepath.Join(filepath.Dir(configPath), "model-prices.json")
+
+	type priceInfo struct {
+		Prompt     float64 `json:"prompt"`
+		Completion float64 `json:"completion"`
+		Cache      float64 `json:"cache"`
+	}
+
+	var mu sync.RWMutex
+	var cached map[string]priceInfo
+	var loadedAt time.Time
+
+	load := func() {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return
+		}
+		var m map[string]priceInfo
+		if err := json.Unmarshal(data, &m); err != nil {
+			return
+		}
+		mu.Lock()
+		cached = m
+		loadedAt = time.Now()
+		mu.Unlock()
+	}
+
+	// Initial load
+	load()
+
+	return func(model string) (prompt, completion, cache float64, found bool) {
+		mu.RLock()
+		age := time.Since(loadedAt)
+		p, ok := cached[model]
+		mu.RUnlock()
+
+		if age > 5*time.Minute {
+			load()
+			mu.RLock()
+			p, ok = cached[model]
+			mu.RUnlock()
+		}
+
+		if !ok {
+			return 0, 0, 0, false
+		}
+		return p.Prompt, p.Completion, p.Cache, true
+	}
 }

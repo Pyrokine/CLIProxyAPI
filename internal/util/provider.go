@@ -5,10 +5,10 @@ package util
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -84,55 +84,6 @@ func ResolveAutoModel(modelName string) string {
 	return firstModel
 }
 
-// IsOpenAICompatibilityAlias checks if the given model name is an alias
-// configured for OpenAI compatibility routing.
-//
-// Parameters:
-//   - modelName: The model name to check
-//   - cfg: The application configuration containing OpenAI compatibility settings
-//
-// Returns:
-//   - bool: True if the model name is an OpenAI compatibility alias, false otherwise
-func IsOpenAICompatibilityAlias(modelName string, cfg *config.Config) bool {
-	if cfg == nil {
-		return false
-	}
-
-	for _, compat := range cfg.OpenAICompatibility {
-		for _, model := range compat.Models {
-			if model.Alias == modelName {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// GetOpenAICompatibilityConfig returns the OpenAI compatibility configuration
-// and model details for the given alias.
-//
-// Parameters:
-//   - alias: The model alias to find configuration for
-//   - cfg: The application configuration containing OpenAI compatibility settings
-//
-// Returns:
-//   - *config.OpenAICompatibility: The matching compatibility configuration, or nil if not found
-//   - *config.OpenAICompatibilityModel: The matching model configuration, or nil if not found
-func GetOpenAICompatibilityConfig(alias string, cfg *config.Config) (*config.OpenAICompatibility, *config.OpenAICompatibilityModel) {
-	if cfg == nil {
-		return nil, nil
-	}
-
-	for _, compat := range cfg.OpenAICompatibility {
-		for _, model := range compat.Models {
-			if model.Alias == alias {
-				return &compat, &model
-			}
-		}
-	}
-	return nil, nil
-}
-
 // InArray checks if a string exists in a slice of strings.
 // It iterates through the slice and returns true if the target string is found,
 // otherwise it returns false.
@@ -144,12 +95,7 @@ func GetOpenAICompatibilityConfig(alias string, cfg *config.Config) (*config.Ope
 // Returns:
 //   - bool: True if the string is found, false otherwise
 func InArray(hystack []string, needle string) bool {
-	for _, item := range hystack {
-		if needle == item {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(hystack, needle)
 }
 
 // HideAPIKey obscures an API key for logging purposes, showing only the first and last few characters.
@@ -179,7 +125,7 @@ func HideAPIKey(apiKey string) string {
 //
 // Returns:
 //   - string: The masked Authorization value with prefix preserved
-func MaskAuthorizationHeader(value string) string {
+func maskAuthorizationHeader(value string) string {
 	parts := strings.SplitN(strings.TrimSpace(value), " ", 2)
 	if len(parts) < 2 {
 		return HideAPIKey(value)
@@ -204,7 +150,7 @@ func MaskSensitiveHeaderValue(key, value string) string {
 	lowerKey := strings.ToLower(strings.TrimSpace(key))
 	switch {
 	case strings.Contains(lowerKey, "authorization"):
-		return MaskAuthorizationHeader(value)
+		return maskAuthorizationHeader(value)
 	case strings.Contains(lowerKey, "api-key"),
 		strings.Contains(lowerKey, "apikey"),
 		strings.Contains(lowerKey, "token"),
@@ -228,9 +174,9 @@ func MaskSensitiveQuery(raw string) string {
 		}
 		keyPart := part
 		valuePart := ""
-		if idx := strings.Index(part, "="); idx >= 0 {
-			keyPart = part[:idx]
-			valuePart = part[idx+1:]
+		if before, after, ok := strings.Cut(part, "="); ok {
+			keyPart = before
+			valuePart = after
 		}
 		decodedKey, err := url.QueryUnescape(keyPart)
 		if err != nil {
@@ -259,7 +205,9 @@ func shouldMaskQueryParam(key string) bool {
 		return false
 	}
 	key = strings.TrimSuffix(key, "[]")
-	if key == "key" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(key, "api_key") {
+	if key == "key" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(
+		key, "api_key",
+	) {
 		return true
 	}
 	if strings.Contains(key, "token") || strings.Contains(key, "secret") {

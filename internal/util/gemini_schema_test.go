@@ -292,8 +292,8 @@ func TestCleanJSONSchemaForAntigravity_CyclicRefDefaults(t *testing.T) {
 
 	result := CleanJSONSchemaForAntigravity(input)
 
-	var resMap map[string]interface{}
-	json.Unmarshal([]byte(result), &resMap)
+	var resMap map[string]any
+	_ = json.Unmarshal([]byte(result), &resMap)
 
 	if resMap["type"] != "object" {
 		t.Errorf("Expected type: object, got: %v", resMap["type"])
@@ -387,9 +387,9 @@ func TestCleanJSONSchemaForAntigravity_PropertyNameCollision(t *testing.T) {
 	result := CleanJSONSchemaForAntigravity(input)
 	compareJSON(t, expected, result)
 
-	var resMap map[string]interface{}
-	json.Unmarshal([]byte(result), &resMap)
-	props, _ := resMap["properties"].(map[string]interface{})
+	var resMap map[string]any
+	_ = json.Unmarshal([]byte(result), &resMap)
+	props, _ := resMap["properties"].(map[string]any)
 	if _, ok := props["description"]; ok {
 		t.Errorf("Invalid 'description' property injected into properties map")
 	}
@@ -411,12 +411,12 @@ func TestCleanJSONSchemaForAntigravity_DotKeys(t *testing.T) {
 
 	result := CleanJSONSchemaForAntigravity(input)
 
-	var resMap map[string]interface{}
+	var resMap map[string]any
 	if err := json.Unmarshal([]byte(result), &resMap); err != nil {
 		t.Fatalf("Failed to unmarshal result: %v", err)
 	}
 
-	props, ok := resMap["properties"].(map[string]interface{})
+	props, ok := resMap["properties"].(map[string]any)
 	if !ok {
 		t.Fatalf("properties missing")
 	}
@@ -424,7 +424,7 @@ func TestCleanJSONSchemaForAntigravity_DotKeys(t *testing.T) {
 	if val, ok := props["my.param"]; !ok {
 		t.Fatalf("Key 'my.param' is missing. Result: %s", result)
 	} else {
-		valMap, _ := val.(map[string]interface{})
+		valMap, _ := val.(map[string]any)
 		if _, hasRef := valMap["$ref"]; hasRef {
 			t.Errorf("Key 'my.param' still contains $ref")
 		}
@@ -611,13 +611,15 @@ func TestCleanJSONSchemaForAntigravity_MultipleNonNullTypes(t *testing.T) {
 	if !strings.Contains(result, "Accepts:") {
 		t.Errorf("Expected multiple types hint, got: %s", result)
 	}
-	if !strings.Contains(result, "string") || !strings.Contains(result, "integer") || !strings.Contains(result, "boolean") {
+	if !strings.Contains(result, "string") || !strings.Contains(result, "integer") || !strings.Contains(
+		result, "boolean",
+	) {
 		t.Errorf("Expected all types in hint, got: %s", result)
 	}
 }
 
 func compareJSON(t *testing.T, expectedJSON, actualJSON string) {
-	var expMap, actMap map[string]interface{}
+	var expMap, actMap map[string]any
 	errExp := json.Unmarshal([]byte(expectedJSON), &expMap)
 	errAct := json.Unmarshal([]byte(actualJSON), &actMap)
 
@@ -1040,9 +1042,11 @@ func TestRemoveExtensionFields(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			actual := removeExtensionFields(tt.input)
-			compareJSON(t, tt.expected, actual)
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				actual := removeExtensionFields(tt.input)
+				compareJSON(t, tt.expected, actual)
+			},
+		)
 	}
 }

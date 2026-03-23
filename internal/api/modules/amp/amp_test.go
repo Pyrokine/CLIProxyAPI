@@ -9,24 +9,24 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/modules"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 )
 
-func TestAmpModule_Name(t *testing.T) {
+func TestModule_Name(t *testing.T) {
 	m := New()
 	if m.Name() != "amp-routing" {
 		t.Fatalf("want amp-routing, got %s", m.Name())
 	}
 }
 
-func TestAmpModule_New(t *testing.T) {
+func TestModule_New(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	authMiddleware := func(c *gin.Context) { c.Next() }
 
-	m := NewLegacy(accessManager, authMiddleware)
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(authMiddleware))
 
 	if m.accessManager != accessManager {
 		t.Fatal("accessManager not set")
@@ -42,7 +42,7 @@ func TestAmpModule_New(t *testing.T) {
 	}
 }
 
-func TestAmpModule_Register_WithUpstream(t *testing.T) {
+func TestModule_Register_WithUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
@@ -53,7 +53,7 @@ func TestAmpModule_Register_WithUpstream(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
 	cfg := &config.Config{
 		AmpCode: config.AmpCode{
@@ -78,14 +78,14 @@ func TestAmpModule_Register_WithUpstream(t *testing.T) {
 	}
 }
 
-func TestAmpModule_Register_WithoutUpstream(t *testing.T) {
+func TestModule_Register_WithoutUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
 	cfg := &config.Config{
 		AmpCode: config.AmpCode{
@@ -115,14 +115,14 @@ func TestAmpModule_Register_WithoutUpstream(t *testing.T) {
 	}
 }
 
-func TestAmpModule_Register_InvalidUpstream(t *testing.T) {
+func TestModule_Register_InvalidUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
 	cfg := &config.Config{
 		AmpCode: config.AmpCode{
@@ -136,15 +136,15 @@ func TestAmpModule_Register_InvalidUpstream(t *testing.T) {
 	}
 }
 
-func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
+func TestModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 	tmpDir := t.TempDir()
 	p := filepath.Join(tmpDir, "secrets.json")
 	if err := os.WriteFile(p, []byte(`{"apiKey@https://ampcode.com/":"v1"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	m := &AmpModule{enabled: true}
-	ms := NewMultiSourceSecretWithPath("", p, time.Minute)
+	m := &Module{enabled: true}
+	ms := newMultiSourceSecretWithPath("", p, time.Minute)
 	m.secretSource = ms
 	m.lastConfig = &config.AmpCode{
 		UpstreamAPIKey: "old-key",
@@ -160,7 +160,13 @@ func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 	}
 
 	// Update config - should invalidate cache
-	if err := m.OnConfigUpdated(&config.Config{AmpCode: config.AmpCode{UpstreamURL: "http://x", UpstreamAPIKey: "new-key"}}); err != nil {
+	if err := m.OnConfigUpdated(
+		&config.Config{
+			AmpCode: config.AmpCode{
+				UpstreamURL: "http://x", UpstreamAPIKey: "new-key",
+			},
+		},
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -169,8 +175,8 @@ func TestAmpModule_OnConfigUpdated_CacheInvalidation(t *testing.T) {
 	}
 }
 
-func TestAmpModule_OnConfigUpdated_NotEnabled(t *testing.T) {
-	m := &AmpModule{enabled: false}
+func TestModule_OnConfigUpdated_NotEnabled(t *testing.T) {
+	m := &Module{enabled: false}
 
 	// Should not error or panic when disabled
 	if err := m.OnConfigUpdated(&config.Config{}); err != nil {
@@ -178,9 +184,9 @@ func TestAmpModule_OnConfigUpdated_NotEnabled(t *testing.T) {
 	}
 }
 
-func TestAmpModule_OnConfigUpdated_URLRemoved(t *testing.T) {
-	m := &AmpModule{enabled: true}
-	ms := NewMultiSourceSecret("", 0)
+func TestModule_OnConfigUpdated_URLRemoved(t *testing.T) {
+	m := &Module{enabled: true}
+	ms := newMultiSourceSecret("", 0)
 	m.secretSource = ms
 
 	// Config update with empty URL - should log warning but not error
@@ -191,11 +197,12 @@ func TestAmpModule_OnConfigUpdated_URLRemoved(t *testing.T) {
 	}
 }
 
-func TestAmpModule_OnConfigUpdated_NonMultiSourceSecret(t *testing.T) {
+func TestModule_OnConfigUpdated_NonMultiSourceSecret(t *testing.T) {
 	// Test that OnConfigUpdated doesn't panic with StaticSecretSource
-	m := &AmpModule{enabled: true}
-	m.secretSource = NewStaticSecretSource("static-key")
+	m := &Module{enabled: true}
+	m.secretSource = newStaticSecretSource("static-key")
 
+	// noinspection HttpUrlsUsage
 	cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: "http://example.com"}}
 
 	// Should not error or panic
@@ -204,12 +211,12 @@ func TestAmpModule_OnConfigUpdated_NonMultiSourceSecret(t *testing.T) {
 	}
 }
 
-func TestAmpModule_AuthMiddleware_Fallback(t *testing.T) {
+func TestModule_AuthMiddleware_Fallback(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
 	// Create module with no auth middleware
-	m := &AmpModule{authMiddleware_: nil}
+	m := &Module{authMiddleware_: nil}
 
 	// Get the fallback middleware via getAuthMiddleware
 	ctx := modules.Context{Engine: r, AuthMiddleware: nil}
@@ -221,10 +228,12 @@ func TestAmpModule_AuthMiddleware_Fallback(t *testing.T) {
 
 	// Test that it works
 	called := false
-	r.GET("/test", middleware, func(c *gin.Context) {
-		called = true
-		c.String(200, "ok")
-	})
+	r.GET(
+		"/test", middleware, func(c *gin.Context) {
+			called = true
+			c.String(200, "ok")
+		},
+	)
 
 	req := httptest.NewRequest("GET", "/test", nil)
 	w := httptest.NewRecorder()
@@ -235,7 +244,7 @@ func TestAmpModule_AuthMiddleware_Fallback(t *testing.T) {
 	}
 }
 
-func TestAmpModule_SecretSource_FromConfig(t *testing.T) {
+func TestModule_SecretSource_FromConfig(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 
@@ -245,7 +254,7 @@ func TestAmpModule_SecretSource_FromConfig(t *testing.T) {
 	accessManager := sdkaccess.NewManager()
 	base := &handlers.BaseAPIHandler{}
 
-	m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+	m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
 	// Config with explicit API key
 	cfg := &config.Config{
@@ -275,9 +284,10 @@ func TestAmpModule_SecretSource_FromConfig(t *testing.T) {
 	}
 }
 
-func TestAmpModule_ProviderAliasesAlwaysRegistered(t *testing.T) {
+func TestModule_ProviderAliasesAlwaysRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	// noinspection HttpUrlsUsage
 	scenarios := []struct {
 		name      string
 		configURL string
@@ -287,34 +297,38 @@ func TestAmpModule_ProviderAliasesAlwaysRegistered(t *testing.T) {
 	}
 
 	for _, scenario := range scenarios {
-		t.Run(scenario.name, func(t *testing.T) {
-			r := gin.New()
-			accessManager := sdkaccess.NewManager()
-			base := &handlers.BaseAPIHandler{}
+		t.Run(
+			scenario.name, func(t *testing.T) {
+				r := gin.New()
+				accessManager := sdkaccess.NewManager()
+				base := &handlers.BaseAPIHandler{}
 
-			m := NewLegacy(accessManager, func(c *gin.Context) { c.Next() })
+				m := New(WithAccessManager(accessManager), WithAuthMiddleware(func(c *gin.Context) { c.Next() }))
 
-			cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: scenario.configURL}}
+				cfg := &config.Config{AmpCode: config.AmpCode{UpstreamURL: scenario.configURL}}
 
-			ctx := modules.Context{Engine: r, BaseHandler: base, Config: cfg, AuthMiddleware: func(c *gin.Context) { c.Next() }}
-			if err := m.Register(ctx); err != nil && scenario.configURL != "" {
-				t.Fatalf("register error: %v", err)
-			}
+				ctx := modules.Context{
+					Engine: r, BaseHandler: base, Config: cfg, AuthMiddleware: func(c *gin.Context) { c.Next() },
+				}
+				if err := m.Register(ctx); err != nil && scenario.configURL != "" {
+					t.Fatalf("register error: %v", err)
+				}
 
-			// Provider aliases should always be available
-			req := httptest.NewRequest("GET", "/api/provider/openai/models", nil)
-			w := httptest.NewRecorder()
-			r.ServeHTTP(w, req)
+				// Provider aliases should always be available
+				req := httptest.NewRequest("GET", "/api/provider/openai/models", nil)
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
 
-			if w.Code == 404 {
-				t.Fatal("provider aliases should be registered")
-			}
-		})
+				if w.Code == 404 {
+					t.Fatal("provider aliases should be registered")
+				}
+			},
+		)
 	}
 }
 
-func TestAmpModule_hasUpstreamAPIKeysChanged_DetectsRemovedKeyWithDuplicateInput(t *testing.T) {
-	m := &AmpModule{}
+func TestModule_hasUpstreamAPIKeysChanged_DetectsRemovedKeyWithDuplicateInput(t *testing.T) {
+	m := &Module{}
 
 	oldCfg := &config.AmpCode{
 		UpstreamAPIKeys: []config.AmpUpstreamAPIKeyEntry{
@@ -332,8 +346,8 @@ func TestAmpModule_hasUpstreamAPIKeysChanged_DetectsRemovedKeyWithDuplicateInput
 	}
 }
 
-func TestAmpModule_hasUpstreamAPIKeysChanged_IgnoresEmptyAndWhitespaceKeys(t *testing.T) {
-	m := &AmpModule{}
+func TestModule_hasUpstreamAPIKeysChanged_IgnoresEmptyAndWhitespaceKeys(t *testing.T) {
+	m := &Module{}
 
 	oldCfg := &config.AmpCode{
 		UpstreamAPIKeys: []config.AmpUpstreamAPIKeyEntry{

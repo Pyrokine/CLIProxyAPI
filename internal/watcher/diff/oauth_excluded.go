@@ -3,22 +3,16 @@ package diff
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
-type ExcludedModelsSummary struct {
-	hash  string
-	count int
-}
-
-// SummarizeExcludedModels normalizes and hashes an excluded-model list.
-func SummarizeExcludedModels(list []string) ExcludedModelsSummary {
+// summarizeExcludedModels normalizes and hashes an excluded-model list.
+func summarizeExcludedModels(list []string) modelsSummary {
 	if len(list) == 0 {
-		return ExcludedModelsSummary{}
+		return modelsSummary{}
 	}
 	seen := make(map[string]struct{}, len(list))
 	normalized := make([]string, 0, len(list))
@@ -32,70 +26,41 @@ func SummarizeExcludedModels(list []string) ExcludedModelsSummary {
 		}
 	}
 	sort.Strings(normalized)
-	return ExcludedModelsSummary{
+	return modelsSummary{
 		hash:  ComputeExcludedModelsHash(normalized),
 		count: len(normalized),
 	}
 }
 
-// SummarizeOAuthExcludedModels summarizes OAuth excluded models per provider.
-func SummarizeOAuthExcludedModels(entries map[string][]string) map[string]ExcludedModelsSummary {
+// summarizeOAuthExcludedModels summarizes OAuth excluded models per provider.
+func summarizeOAuthExcludedModels(entries map[string][]string) map[string]modelsSummary {
 	if len(entries) == 0 {
 		return nil
 	}
-	out := make(map[string]ExcludedModelsSummary, len(entries))
+	out := make(map[string]modelsSummary, len(entries))
 	for k, v := range entries {
 		key := strings.ToLower(strings.TrimSpace(k))
 		if key == "" {
 			continue
 		}
-		out[key] = SummarizeExcludedModels(v)
+		out[key] = summarizeExcludedModels(v)
 	}
 	return out
 }
 
-// DiffOAuthExcludedModelChanges compares OAuth excluded models maps.
-func DiffOAuthExcludedModelChanges(oldMap, newMap map[string][]string) ([]string, []string) {
-	oldSummary := SummarizeOAuthExcludedModels(oldMap)
-	newSummary := SummarizeOAuthExcludedModels(newMap)
-	keys := make(map[string]struct{}, len(oldSummary)+len(newSummary))
-	for k := range oldSummary {
-		keys[k] = struct{}{}
-	}
-	for k := range newSummary {
-		keys[k] = struct{}{}
-	}
-	changes := make([]string, 0, len(keys))
-	affected := make([]string, 0, len(keys))
-	for key := range keys {
-		oldInfo, okOld := oldSummary[key]
-		newInfo, okNew := newSummary[key]
-		switch {
-		case okOld && !okNew:
-			changes = append(changes, fmt.Sprintf("oauth-excluded-models[%s]: removed", key))
-			affected = append(affected, key)
-		case !okOld && okNew:
-			changes = append(changes, fmt.Sprintf("oauth-excluded-models[%s]: added (%d entries)", key, newInfo.count))
-			affected = append(affected, key)
-		case okOld && okNew && oldInfo.hash != newInfo.hash:
-			changes = append(changes, fmt.Sprintf("oauth-excluded-models[%s]: updated (%d -> %d entries)", key, oldInfo.count, newInfo.count))
-			affected = append(affected, key)
-		}
-	}
-	sort.Strings(changes)
-	sort.Strings(affected)
-	return changes, affected
+// OAuthExcludedModelChanges compares OAuth excluded models maps.
+func OAuthExcludedModelChanges(oldMap, newMap map[string][]string) ([]string, []string) {
+	return diffSummaryMapChanges(
+		summarizeOAuthExcludedModels(oldMap),
+		summarizeOAuthExcludedModels(newMap),
+		"oauth-excluded-models",
+	)
 }
 
-type AmpModelMappingsSummary struct {
-	hash  string
-	count int
-}
-
-// SummarizeAmpModelMappings hashes Amp model mappings for change detection.
-func SummarizeAmpModelMappings(mappings []config.AmpModelMapping) AmpModelMappingsSummary {
+// summarizeAmpModelMappings hashes Amp model mappings for change detection.
+func summarizeAmpModelMappings(mappings []config.AmpModelMapping) modelsSummary {
 	if len(mappings) == 0 {
-		return AmpModelMappingsSummary{}
+		return modelsSummary{}
 	}
 	entries := make([]string, 0, len(mappings))
 	for _, mapping := range mappings {
@@ -107,11 +72,11 @@ func SummarizeAmpModelMappings(mappings []config.AmpModelMapping) AmpModelMappin
 		entries = append(entries, from+"->"+to)
 	}
 	if len(entries) == 0 {
-		return AmpModelMappingsSummary{}
+		return modelsSummary{}
 	}
 	sort.Strings(entries)
 	sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
-	return AmpModelMappingsSummary{
+	return modelsSummary{
 		hash:  hex.EncodeToString(sum[:]),
 		count: len(entries),
 	}

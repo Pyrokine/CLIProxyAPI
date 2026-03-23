@@ -23,11 +23,27 @@ func TestSanitizeFunctionName(t *testing.T) {
 		{"Starts with colon", ":name", "_:name"},
 		{"Starts with dash", "-name", "_-name"},
 		{"Starts with invalid char", "!name", "_name"},
-		{"Exactly 64 chars", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact"},
-		{"Too long (65 chars)", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charactX", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact"},
-		{"Very long", "this_is_a_very_long_name_that_exceeds_the_sixty_four_character_limit_for_function_names", "this_is_a_very_long_name_that_exceeds_the_sixty_four_character_l"},
-		{"Starts with digit (64 chars total)", "1234567890123456789012345678901234567890123456789012345678901234", "_123456789012345678901234567890123456789012345678901234567890123"},
-		{"Starts with invalid char (64 chars total)", "!234567890123456789012345678901234567890123456789012345678901234", "_234567890123456789012345678901234567890123456789012345678901234"},
+		{
+			"Exactly 64 chars", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact",
+			"this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact",
+		},
+		{
+			"Too long (65 chars)", "this_is_a_very_long_name_that_exactly_reaches_sixty_four_charactX",
+			"this_is_a_very_long_name_that_exactly_reaches_sixty_four_charact",
+		},
+		{
+			"Very long", "this_is_a_very_long_name_that_exceeds_the_sixty_four_character_limit_for_function_names",
+			"this_is_a_very_long_name_that_exceeds_the_sixty_four_character_l",
+		},
+		{
+			"Starts with digit (64 chars total)", "1234567890123456789012345678901234567890123456789012345678901234",
+			"_123456789012345678901234567890123456789012345678901234567890123",
+		},
+		{
+			"Starts with invalid char (64 chars total)",
+			"!234567890123456789012345678901234567890123456789012345678901234",
+			"_234567890123456789012345678901234567890123456789012345678901234",
+		},
 		{"Empty", "", ""},
 		{"Single character invalid", "@", "_"},
 		{"Single character valid", "a", "a"},
@@ -36,21 +52,23 @@ func TestSanitizeFunctionName(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := SanitizeFunctionName(tt.input)
-			if got != tt.expected {
-				t.Errorf("SanitizeFunctionName(%q) = %v, want %v", tt.input, got, tt.expected)
-			}
-			// Verify Gemini compliance
-			if len(got) > 64 {
-				t.Errorf("SanitizeFunctionName(%q) result too long: %d", tt.input, len(got))
-			}
-			if len(got) > 0 {
-				first := got[0]
-				if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
-					t.Errorf("SanitizeFunctionName(%q) result starts with invalid char: %c", tt.input, first)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				got := sanitizeFunctionName(tt.input)
+				if got != tt.expected {
+					t.Errorf("sanitizeFunctionName(%q) = %v, want %v", tt.input, got, tt.expected)
 				}
-			}
-		})
+				// Verify Gemini compliance
+				if len(got) > 64 {
+					t.Errorf("sanitizeFunctionName(%q) result too long: %d", tt.input, len(got))
+				}
+				if len(got) > 0 {
+					first := got[0]
+					if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
+						t.Errorf("sanitizeFunctionName(%q) result starts with invalid char: %c", tt.input, first)
+					}
+				}
+			},
+		)
 	}
 }

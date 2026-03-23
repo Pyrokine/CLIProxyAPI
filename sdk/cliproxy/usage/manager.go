@@ -56,7 +56,7 @@ type Manager struct {
 }
 
 // NewManager constructs a manager with a buffered queue.
-func NewManager(buffer int) *Manager {
+func NewManager(_ int) *Manager {
 	m := &Manager{}
 	m.cond = sync.NewCond(&m.mu)
 	return m
@@ -67,14 +67,16 @@ func (m *Manager) Start(ctx context.Context) {
 	if m == nil {
 		return
 	}
-	m.once.Do(func() {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		var workerCtx context.Context
-		workerCtx, m.cancel = context.WithCancel(ctx)
-		go m.run(workerCtx)
-	})
+	m.once.Do(
+		func() {
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			var workerCtx context.Context
+			workerCtx, m.cancel = context.WithCancel(ctx)
+			go m.run(workerCtx)
+		},
+	)
 }
 
 // Stop stops the dispatcher and drains the queue.
@@ -82,15 +84,17 @@ func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
-	m.stopOnce.Do(func() {
-		if m.cancel != nil {
-			m.cancel()
-		}
-		m.mu.Lock()
-		m.closed = true
-		m.mu.Unlock()
-		m.cond.Broadcast()
-	})
+	m.stopOnce.Do(
+		func() {
+			if m.cancel != nil {
+				m.cancel()
+			}
+			m.mu.Lock()
+			m.closed = true
+			m.mu.Unlock()
+			m.cond.Broadcast()
+		},
+	)
 }
 
 // Register appends a plugin to the delivery list.
@@ -121,7 +125,7 @@ func (m *Manager) Publish(ctx context.Context, record Record) {
 	m.cond.Signal()
 }
 
-func (m *Manager) run(ctx context.Context) {
+func (m *Manager) run(_ context.Context) {
 	for {
 		m.mu.Lock()
 		for !m.closed && len(m.queue) == 0 {

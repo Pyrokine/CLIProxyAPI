@@ -9,7 +9,7 @@ import (
 
 func newTestModelRegistry() *ModelRegistry {
 	return &ModelRegistry{
-		models:           make(map[string]*ModelRegistration),
+		models:           make(map[string]*modelRegistration),
 		clientModels:     make(map[string][]string),
 		clientModelInfos: make(map[string]map[string]*ModelInfo),
 		clientProviders:  make(map[string]string),
@@ -33,11 +33,11 @@ type capturingHook struct {
 	unregisteredCh chan unregisteredCall
 }
 
-func (h *capturingHook) OnModelsRegistered(ctx context.Context, provider, clientID string, models []*ModelInfo) {
+func (h *capturingHook) OnModelsRegistered(_ context.Context, provider, clientID string, models []*ModelInfo) {
 	h.registeredCh <- registeredCall{provider: provider, clientID: clientID, models: models}
 }
 
-func (h *capturingHook) OnModelsUnregistered(ctx context.Context, provider, clientID string) {
+func (h *capturingHook) OnModelsUnregistered(_ context.Context, provider, clientID string) {
 	h.unregisteredCh <- unregisteredCall{provider: provider, clientID: clientID}
 }
 
@@ -112,7 +112,7 @@ type blockingHook struct {
 	unblock chan struct{}
 }
 
-func (h *blockingHook) OnModelsRegistered(ctx context.Context, provider, clientID string, models []*ModelInfo) {
+func (h *blockingHook) OnModelsRegistered(_ context.Context, _, _ string, _ []*ModelInfo) {
 	select {
 	case <-h.started:
 	default:
@@ -121,7 +121,7 @@ func (h *blockingHook) OnModelsRegistered(ctx context.Context, provider, clientI
 	<-h.unblock
 }
 
-func (h *blockingHook) OnModelsUnregistered(ctx context.Context, provider, clientID string) {}
+func (h *blockingHook) OnModelsUnregistered(_ context.Context, _, _ string) {}
 
 func TestModelRegistryHook_DoesNotBlockRegisterClient(t *testing.T) {
 	r := newTestModelRegistry()
@@ -160,14 +160,14 @@ type panicHook struct {
 	unregisteredCalled chan struct{}
 }
 
-func (h *panicHook) OnModelsRegistered(ctx context.Context, provider, clientID string, models []*ModelInfo) {
+func (h *panicHook) OnModelsRegistered(_ context.Context, _, _ string, _ []*ModelInfo) {
 	if h.registeredCalled != nil {
 		h.registeredCalled <- struct{}{}
 	}
 	panic("boom")
 }
 
-func (h *panicHook) OnModelsUnregistered(ctx context.Context, provider, clientID string) {
+func (h *panicHook) OnModelsUnregistered(_ context.Context, _, _ string) {
 	if h.unregisteredCalled != nil {
 		h.unregisteredCalled <- struct{}{}
 	}

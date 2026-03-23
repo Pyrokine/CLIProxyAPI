@@ -9,16 +9,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 func TestApplyClaudeToolPrefix(t *testing.T) {
-	input := []byte(`{"tools":[{"name":"alpha"},{"name":"proxy_bravo"}],"tool_choice":{"type":"tool","name":"charlie"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"delta","id":"t1","input":{}}]}]}`)
+	input := []byte(
+		`{"tools":[{"name":"alpha"},{"name":"proxy_bravo"}],"tool_choice":{"type":"tool","name":"charlie"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"delta","id":"t1","input":{}}]}]}`,
+	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "proxy_alpha" {
@@ -36,7 +38,9 @@ func TestApplyClaudeToolPrefix(t *testing.T) {
 }
 
 func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
-	input := []byte(`{"tools":[{"name":"alpha"}],"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"beta"},{"type":"tool_reference","tool_name":"proxy_gamma"}]}]}`)
+	input := []byte(
+		`{"tools":[{"name":"alpha"}],"messages":[{"role":"user","content":[{"type":"tool_reference","tool_name":"beta"},{"type":"tool_reference","tool_name":"proxy_gamma"}]}]}`,
+	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 
 	if got := gjson.GetBytes(out, "messages.0.content.0.tool_name").String(); got != "proxy_beta" {
@@ -48,7 +52,9 @@ func TestApplyClaudeToolPrefix_WithToolReference(t *testing.T) {
 }
 
 func TestApplyClaudeToolPrefix_SkipsBuiltinTools(t *testing.T) {
-	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"my_custom_tool","input_schema":{"type":"object"}}]}`)
+	input := []byte(
+		`{"tools":[{"type":"web_search_20250305","name":"web_search"},{"name":"my_custom_tool","input_schema":{"type":"object"}}]}`,
+	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 
 	if got := gjson.GetBytes(out, "tools.0.name").String(); got != "web_search" {
@@ -151,7 +157,9 @@ func TestApplyClaudeToolPrefix_ToolChoiceBuiltin(t *testing.T) {
 }
 
 func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
-	input := []byte(`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`)
+	input := []byte(
+		`{"content":[{"type":"tool_use","name":"proxy_alpha","id":"t1","input":{}},{"type":"tool_use","name":"bravo","id":"t2","input":{}}]}`,
+	)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
 
 	if got := gjson.GetBytes(out, "content.0.name").String(); got != "alpha" {
@@ -163,7 +171,9 @@ func TestStripClaudeToolPrefixFromResponse(t *testing.T) {
 }
 
 func TestStripClaudeToolPrefixFromResponse_WithToolReference(t *testing.T) {
-	input := []byte(`{"content":[{"type":"tool_reference","tool_name":"proxy_alpha"},{"type":"tool_reference","tool_name":"bravo"}]}`)
+	input := []byte(
+		`{"content":[{"type":"tool_reference","tool_name":"proxy_alpha"},{"type":"tool_reference","tool_name":"bravo"}]}`,
+	)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
 
 	if got := gjson.GetBytes(out, "content.0.tool_name").String(); got != "alpha" {
@@ -175,7 +185,9 @@ func TestStripClaudeToolPrefixFromResponse_WithToolReference(t *testing.T) {
 }
 
 func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
-	line := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"proxy_alpha","id":"t1"},"index":0}`)
+	line := []byte(
+		`data: {"type":"content_block_start","content_block":{"type":"tool_use","name":"proxy_alpha","id":"t1"},"index":0}`,
+	)
 	out := stripClaudeToolPrefixFromStreamLine(line, "proxy_")
 
 	payload := bytes.TrimSpace(out)
@@ -188,7 +200,9 @@ func TestStripClaudeToolPrefixFromStreamLine(t *testing.T) {
 }
 
 func TestStripClaudeToolPrefixFromStreamLine_WithToolReference(t *testing.T) {
-	line := []byte(`data: {"type":"content_block_start","content_block":{"type":"tool_reference","tool_name":"proxy_beta"},"index":0}`)
+	line := []byte(
+		`data: {"type":"content_block_start","content_block":{"type":"tool_reference","tool_name":"proxy_beta"},"index":0}`,
+	)
 	out := stripClaudeToolPrefixFromStreamLine(line, "proxy_")
 
 	payload := bytes.TrimSpace(out)
@@ -201,7 +215,9 @@ func TestStripClaudeToolPrefixFromStreamLine_WithToolReference(t *testing.T) {
 }
 
 func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
-	input := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"mcp__nia__manage_resource"}]}]}]}`)
+	input := []byte(
+		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"mcp__nia__manage_resource"}]}]}]}`,
+	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
 	if got != "proxy_mcp__nia__manage_resource" {
@@ -214,48 +230,61 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 
 	var userIDs []string
 	var requestModels []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		userID := gjson.GetBytes(body, "metadata.user_id").String()
-		model := gjson.GetBytes(body, "model").String()
-		userIDs = append(userIDs, userID)
-		requestModels = append(requestModels, model)
-		t.Logf("HTTP Server received request: model=%s, user_id=%s, url=%s", model, userID, r.URL.String())
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				userID := gjson.GetBytes(body, "metadata.user_id").String()
+				model := gjson.GetBytes(body, "model").String()
+				userIDs = append(userIDs, userID)
+				requestModels = append(requestModels, model)
+				t.Logf("HTTP Server received request: model=%s, user_id=%s, url=%s", model, userID, r.URL.String())
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(
+					[]byte(
+						`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+					),
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	t.Logf("End-to-end test: Fake HTTP server started at %s", server.URL)
 
-	cacheEnabled := true
-	executor := NewClaudeExecutor(&config.Config{
-		ClaudeKey: []config.ClaudeKey{
-			{
-				APIKey:  "key-123",
-				BaseURL: server.URL,
-				Cloak: &config.CloakConfig{
-					CacheUserID: &cacheEnabled,
+	executor := NewClaudeExecutor(
+		&config.Config{
+			ClaudeKey: []config.ClaudeKey{
+				{
+					APIKey:  "key-123",
+					BaseURL: server.URL,
+					Cloak: &config.CloakConfig{
+						CacheUserID: new(true),
+					},
 				},
 			},
 		},
-	})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-123",
-		"base_url": server.URL,
-	}}
+	)
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "key-123",
+			"base_url": server.URL,
+		},
+	}
 
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 	models := []string{"claude-3-5-sonnet", "claude-3-5-haiku"}
 	for _, model := range models {
 		t.Logf("Sending request for model: %s", model)
 		modelPayload, _ := sjson.SetBytes(payload, "model", model)
-		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-			Model:   model,
-			Payload: modelPayload,
-		}, cliproxyexecutor.Options{
-			SourceFormat: sdktranslator.FromString("claude"),
-		}); err != nil {
+		if _, err := executor.Execute(
+			context.Background(), auth, cliproxyexecutor.Request{
+				Model:   model,
+				Payload: modelPayload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("claude"),
+			},
+		); err != nil {
 			t.Fatalf("Execute(%s) error: %v", model, err)
 		}
 	}
@@ -281,29 +310,41 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	resetUserIDCache()
 
 	var userIDs []string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		userIDs = append(userIDs, gjson.GetBytes(body, "metadata.user_id").String())
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				userIDs = append(userIDs, gjson.GetBytes(body, "metadata.user_id").String())
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write(
+					[]byte(
+						`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`,
+					),
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	executor := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-123",
-		"base_url": server.URL,
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "key-123",
+			"base_url": server.URL,
+		},
+	}
 
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
-	for i := 0; i < 2; i++ {
-		if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-			Model:   "claude-3-5-sonnet",
-			Payload: payload,
-		}, cliproxyexecutor.Options{
-			SourceFormat: sdktranslator.FromString("claude"),
-		}); err != nil {
+	for i := range 2 {
+		if _, err := executor.Execute(
+			context.Background(), auth, cliproxyexecutor.Request{
+				Model:   "claude-3-5-sonnet",
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("claude"),
+			},
+		); err != nil {
 			t.Fatalf("Execute call %d error: %v", i, err)
 		}
 	}
@@ -323,7 +364,9 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 }
 
 func TestStripClaudeToolPrefixFromResponse_NestedToolReference(t *testing.T) {
-	input := []byte(`{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"proxy_mcp__nia__manage_resource"}]}]}`)
+	input := []byte(
+		`{"content":[{"type":"tool_result","tool_use_id":"toolu_123","content":[{"type":"tool_reference","tool_name":"proxy_mcp__nia__manage_resource"}]}]}`,
+	)
 	out := stripClaudeToolPrefixFromResponse(input, "proxy_")
 	got := gjson.GetBytes(out, "content.0.content.0.tool_name").String()
 	if got != "mcp__nia__manage_resource" {
@@ -333,7 +376,9 @@ func TestStripClaudeToolPrefixFromResponse_NestedToolReference(t *testing.T) {
 
 func TestApplyClaudeToolPrefix_NestedToolReferenceWithStringContent(t *testing.T) {
 	// tool_result.content can be a string - should not be processed
-	input := []byte(`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"plain string result"}]}]}`)
+	input := []byte(
+		`{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_123","content":"plain string result"}]}]}`,
+	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 	got := gjson.GetBytes(out, "messages.0.content.0.content").String()
 	if got != "plain string result" {
@@ -342,7 +387,9 @@ func TestApplyClaudeToolPrefix_NestedToolReferenceWithStringContent(t *testing.T
 }
 
 func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
-	input := []byte(`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}]}`)
+	input := []byte(
+		`{"tools":[{"type":"web_search_20250305","name":"web_search"}],"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"tool_reference","tool_name":"web_search"}]}]}]}`,
+	)
 	out := applyClaudeToolPrefix(input, "proxy_")
 	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
 	if got != "web_search" {
@@ -391,7 +438,9 @@ func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) 
 	if !gjson.GetBytes(out, "tools.1.cache_control").Exists() {
 		t.Fatalf("tools.1.cache_control (last tool) should be preserved")
 	}
-	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() || !gjson.GetBytes(out, "messages.1.content.0.cache_control").Exists() {
+	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() || !gjson.GetBytes(
+		out, "messages.1.content.0.cache_control",
+	).Exists() {
 		t.Fatalf("message cache_control blocks should be preserved when non-last tool removal is enough")
 	}
 }
@@ -422,19 +471,25 @@ func TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit(t *testing.T
 
 func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 	var seenBody []byte
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		seenBody = bytes.Clone(body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"input_tokens":42}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				seenBody = bytes.Clone(body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"input_tokens":42}`))
+			},
+		),
+	)
 	defer server.Close()
 
 	executor := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-123",
-		"base_url": server.URL,
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "key-123",
+			"base_url": server.URL,
+		},
+	}
 
 	payload := []byte(`{
 		"tools": [
@@ -451,10 +506,12 @@ func TestClaudeExecutor_CountTokens_AppliesCacheControlGuards(t *testing.T) {
 		]
 	}`)
 
-	_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
-		Model:   "claude-3-5-haiku-20241022",
-		Payload: payload,
-	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	_, err := executor.CountTokens(
+		context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "claude-3-5-haiku-20241022",
+			Payload: payload,
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+	)
 	if err != nil {
 		t.Fatalf("CountTokens error: %v", err)
 	}
@@ -490,65 +547,85 @@ func hasTTLOrderingViolation(payload []byte) bool {
 
 	tools := gjson.GetBytes(payload, "tools")
 	if tools.IsArray() {
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			checkCC(tool.Get("cache_control"))
-			return !violates
-		})
+		tools.ForEach(
+			func(_, tool gjson.Result) bool {
+				checkCC(tool.Get("cache_control"))
+				return !violates
+			},
+		)
 	}
 
 	system := gjson.GetBytes(payload, "system")
 	if system.IsArray() {
-		system.ForEach(func(_, item gjson.Result) bool {
-			checkCC(item.Get("cache_control"))
-			return !violates
-		})
+		system.ForEach(
+			func(_, item gjson.Result) bool {
+				checkCC(item.Get("cache_control"))
+				return !violates
+			},
+		)
 	}
 
 	messages := gjson.GetBytes(payload, "messages")
 	if messages.IsArray() {
-		messages.ForEach(func(_, msg gjson.Result) bool {
-			content := msg.Get("content")
-			if content.IsArray() {
-				content.ForEach(func(_, item gjson.Result) bool {
-					checkCC(item.Get("cache_control"))
-					return !violates
-				})
-			}
-			return !violates
-		})
+		messages.ForEach(
+			func(_, msg gjson.Result) bool {
+				content := msg.Get("content")
+				if content.IsArray() {
+					content.ForEach(
+						func(_, item gjson.Result) bool {
+							checkCC(item.Get("cache_control"))
+							return !violates
+						},
+					)
+				}
+				return !violates
+			},
+		)
 	}
 
 	return violates
 }
 
 func TestClaudeExecutor_Execute_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
-	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
-		_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
-			Model:   "claude-3-5-sonnet-20241022",
-			Payload: payload,
-		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
-		return err
-	})
+	testClaudeExecutorInvalidCompressedErrorBody(
+		t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+			_, err := executor.Execute(
+				context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "claude-3-5-sonnet-20241022",
+					Payload: payload,
+				}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+			)
+			return err
+		},
+	)
 }
 
 func TestClaudeExecutor_ExecuteStream_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
-	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
-		_, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
-			Model:   "claude-3-5-sonnet-20241022",
-			Payload: payload,
-		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
-		return err
-	})
+	testClaudeExecutorInvalidCompressedErrorBody(
+		t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+			_, err := executor.ExecuteStream(
+				context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "claude-3-5-sonnet-20241022",
+					Payload: payload,
+				}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+			)
+			return err
+		},
+	)
 }
 
 func TestClaudeExecutor_CountTokens_InvalidGzipErrorBodyReturnsDecodeMessage(t *testing.T) {
-	testClaudeExecutorInvalidCompressedErrorBody(t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
-		_, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
-			Model:   "claude-3-5-sonnet-20241022",
-			Payload: payload,
-		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
-		return err
-	})
+	testClaudeExecutorInvalidCompressedErrorBody(
+		t, func(executor *ClaudeExecutor, auth *cliproxyauth.Auth, payload []byte) error {
+			_, err := executor.CountTokens(
+				context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "claude-3-5-sonnet-20241022",
+					Payload: payload,
+				}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+			)
+			return err
+		},
+	)
 }
 
 func testClaudeExecutorInvalidCompressedErrorBody(
@@ -557,19 +634,25 @@ func testClaudeExecutorInvalidCompressedErrorBody(
 ) {
 	t.Helper()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Content-Encoding", "gzip")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte("not-a-valid-gzip-stream"))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Encoding", "gzip")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte("not-a-valid-gzip-stream"))
+			},
+		),
+	)
 	defer server.Close()
 
 	executor := NewClaudeExecutor(&config.Config{})
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{
-		"api_key":  "key-123",
-		"base_url": server.URL,
-	}}
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":  "key-123",
+			"base_url": server.URL,
+		},
+	}
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
 
 	err := invoke(executor, auth, payload)
@@ -579,7 +662,8 @@ func testClaudeExecutorInvalidCompressedErrorBody(
 	if !strings.Contains(err.Error(), "failed to decode error response body") {
 		t.Fatalf("expected decode failure message, got: %v", err)
 	}
-	if statusProvider, ok := err.(interface{ StatusCode() int }); !ok || statusProvider.StatusCode() != http.StatusBadRequest {
+	if statusProvider, ok := err.(interface{ StatusCode() int }); !ok ||
+		statusProvider.StatusCode() != http.StatusBadRequest {
 		t.Fatalf("expected status code 400, got: %v", err)
 	}
 }

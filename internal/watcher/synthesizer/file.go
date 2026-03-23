@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // FileSynthesizer generates Auth entries from OAuth JSON files.
@@ -126,7 +126,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 		if provider == "gemini-cli" {
-			if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
+			if virtuals := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
 				for _, v := range virtuals {
 					ApplyAuthExcludedModelsMeta(v, cfg, perAccountExcluded, "oauth")
 				}
@@ -140,9 +140,9 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 	return out, nil
 }
 
-// SynthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.
+// synthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.
 // It disables the primary auth and creates one virtual auth per project.
-func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]any, now time.Time) []*coreauth.Auth {
+func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]any, _ time.Time) []*coreauth.Auth {
 	if primary == nil || metadata == nil {
 		return nil
 	}
@@ -278,7 +278,7 @@ func extractExcludedModelsFromMetadata(metadata map[string]any) []string {
 	switch v := raw.(type) {
 	case []string:
 		stringSlice = v
-	case []interface{}:
+	case []any:
 		stringSlice = make([]string, 0, len(v))
 		for _, item := range v {
 			if s, ok := item.(string); ok {

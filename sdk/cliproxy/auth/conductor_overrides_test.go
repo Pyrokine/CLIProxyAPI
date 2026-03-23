@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testing.T) {
@@ -36,7 +37,9 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 	}
 
 	_, _, maxWait := m.retrySettings()
-	wait, shouldRetry := m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait)
+	wait, shouldRetry := m.shouldRetryAfterError(
+		&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait,
+	)
 	if shouldRetry {
 		t.Fatalf("expected shouldRetry=false for request_retry=0, got true (wait=%v)", wait)
 	}
@@ -46,7 +49,9 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 		t.Fatalf("update auth: %v", errUpdate)
 	}
 
-	wait, shouldRetry = m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait)
+	wait, shouldRetry = m.shouldRetryAfterError(
+		&Error{HTTPStatus: 500, Message: "boom"}, 0, []string{"claude"}, model, maxWait,
+	)
 	if !shouldRetry {
 		t.Fatalf("expected shouldRetry=true for request_retry=1, got false")
 	}
@@ -54,7 +59,9 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 		t.Fatalf("expected wait > 0, got %v", wait)
 	}
 
-	_, shouldRetry = m.shouldRetryAfterError(&Error{HTTPStatus: 500, Message: "boom"}, 1, []string{"claude"}, model, maxWait)
+	_, shouldRetry = m.shouldRetryAfterError(
+		&Error{HTTPStatus: 500, Message: "boom"}, 1, []string{"claude"}, model, maxWait,
+	)
 	if shouldRetry {
 		t.Fatalf("expected shouldRetry=false on attempt=1 for request_retry=1, got true")
 	}
@@ -71,12 +78,22 @@ func (e *credentialRetryLimitExecutor) Identifier() string {
 	return e.id
 }
 
-func (e *credentialRetryLimitExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *credentialRetryLimitExecutor) Execute(
+	context.Context,
+	*Auth,
+	cliproxyexecutor.Request,
+	cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	e.recordCall()
 	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "boom"}
 }
 
-func (e *credentialRetryLimitExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *credentialRetryLimitExecutor) ExecuteStream(
+	context.Context,
+	*Auth,
+	cliproxyexecutor.Request,
+	cliproxyexecutor.Options,
+) (*cliproxyexecutor.StreamResult, error) {
 	e.recordCall()
 	return nil, &Error{HTTPStatus: 500, Message: "boom"}
 }
@@ -85,7 +102,12 @@ func (e *credentialRetryLimitExecutor) Refresh(_ context.Context, auth *Auth) (*
 	return auth, nil
 }
 
-func (e *credentialRetryLimitExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *credentialRetryLimitExecutor) CountTokens(
+	context.Context,
+	*Auth,
+	cliproxyexecutor.Request,
+	cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	e.recordCall()
 	return cliproxyexecutor.Response{}, &Error{HTTPStatus: 500, Message: "boom"}
 }
@@ -106,7 +128,10 @@ func (e *credentialRetryLimitExecutor) Calls() int {
 	return e.calls
 }
 
-func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (*Manager, *credentialRetryLimitExecutor) {
+func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
+	*Manager,
+	*credentialRetryLimitExecutor,
+) {
 	t.Helper()
 
 	m := NewManager(nil, nil, nil)
@@ -117,6 +142,17 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 
 	auth1 := &Auth{ID: "auth-1", Provider: "claude"}
 	auth2 := &Auth{ID: "auth-2", Provider: "claude"}
+
+	// Register clients in the global ModelRegistry so pickNextMixed can find them.
+	globalReg := registry.GetGlobalRegistry()
+	testModel := []*registry.ModelInfo{{ID: "test-model"}}
+	globalReg.RegisterClient("auth-1", "claude", testModel)
+	globalReg.RegisterClient("auth-2", "claude", testModel)
+	t.Cleanup(func() {
+		globalReg.UnregisterClient("auth-1")
+		globalReg.UnregisterClient("auth-2")
+	})
+
 	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
 		t.Fatalf("register auth1: %v", errRegister)
 	}
@@ -136,45 +172,52 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 		{
 			name: "execute",
 			invoke: func(m *Manager) error {
-				_, errExecute := m.Execute(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+				_, errExecute := m.Execute(
+					context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{},
+				)
 				return errExecute
 			},
 		},
 		{
 			name: "execute_count",
 			invoke: func(m *Manager) error {
-				_, errExecute := m.ExecuteCount(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+				_, errExecute := m.ExecuteCount(
+					context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{},
+				)
 				return errExecute
 			},
 		},
 		{
 			name: "execute_stream",
 			invoke: func(m *Manager) error {
-				_, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{})
+				_, errExecute := m.ExecuteStream(
+					context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{},
+				)
 				return errExecute
 			},
 		},
 	}
 
 	for _, tc := range testCases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			limitedManager, limitedExecutor := newCredentialRetryLimitTestManager(t, 1)
-			if errInvoke := tc.invoke(limitedManager); errInvoke == nil {
-				t.Fatalf("expected error for limited retry execution")
-			}
-			if calls := limitedExecutor.Calls(); calls != 1 {
-				t.Fatalf("expected 1 call with max-retry-credentials=1, got %d", calls)
-			}
+		t.Run(
+			tc.name, func(t *testing.T) {
+				limitedManager, limitedExecutor := newCredentialRetryLimitTestManager(t, 1)
+				if errInvoke := tc.invoke(limitedManager); errInvoke == nil {
+					t.Fatalf("expected error for limited retry execution")
+				}
+				if calls := limitedExecutor.Calls(); calls != 1 {
+					t.Fatalf("expected 1 call with max-retry-credentials=1, got %d", calls)
+				}
 
-			unlimitedManager, unlimitedExecutor := newCredentialRetryLimitTestManager(t, 0)
-			if errInvoke := tc.invoke(unlimitedManager); errInvoke == nil {
-				t.Fatalf("expected error for unlimited retry execution")
-			}
-			if calls := unlimitedExecutor.Calls(); calls != 2 {
-				t.Fatalf("expected 2 calls with max-retry-credentials=0, got %d", calls)
-			}
-		})
+				unlimitedManager, unlimitedExecutor := newCredentialRetryLimitTestManager(t, 0)
+				if errInvoke := tc.invoke(unlimitedManager); errInvoke == nil {
+					t.Fatalf("expected error for unlimited retry execution")
+				}
+				if calls := unlimitedExecutor.Calls(); calls != 2 {
+					t.Fatalf("expected 2 calls with max-retry-credentials=0, got %d", calls)
+				}
+			},
+		)
 	}
 }
 
@@ -197,13 +240,15 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	}
 
 	model := "test-model"
-	m.MarkResult(context.Background(), Result{
-		AuthID:   "auth-1",
-		Provider: "claude",
-		Model:    model,
-		Success:  false,
-		Error:    &Error{HTTPStatus: 500, Message: "boom"},
-	})
+	m.MarkResult(
+		context.Background(), Result{
+			AuthID:   "auth-1",
+			Provider: "claude",
+			Model:    model,
+			Success:  false,
+			Error:    &Error{HTTPStatus: 500, Message: "boom"},
+		},
+	)
 
 	updated, ok := m.GetByID("auth-1")
 	if !ok || updated == nil {

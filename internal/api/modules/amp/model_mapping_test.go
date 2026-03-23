@@ -3,8 +3,8 @@ package amp
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
 func TestNewModelMapper(t *testing.T) {
@@ -13,24 +13,24 @@ func TestNewModelMapper(t *testing.T) {
 		{From: "gpt-5", To: "gemini-2.5-pro"},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 	if mapper == nil {
 		t.Fatal("Expected non-nil mapper")
 	}
 
-	result := mapper.GetMappings()
+	result := mapper.getMappings()
 	if len(result) != 2 {
 		t.Errorf("Expected 2 mappings, got %d", len(result))
 	}
 }
 
 func TestNewModelMapper_Empty(t *testing.T) {
-	mapper := NewModelMapper(nil)
+	mapper := newModelMapper(nil)
 	if mapper == nil {
 		t.Fatal("Expected non-nil mapper")
 	}
 
-	result := mapper.GetMappings()
+	result := mapper.getMappings()
 	if len(result) != 0 {
 		t.Errorf("Expected 0 mappings, got %d", len(result))
 	}
@@ -41,7 +41,7 @@ func TestModelMapper_MapModel_NoProvider(t *testing.T) {
 		{From: "claude-opus-4.5", To: "claude-sonnet-4"},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	// Without a registered provider for the target, mapping should return empty
 	result := mapper.MapModel("claude-opus-4.5")
@@ -53,16 +53,18 @@ func TestModelMapper_MapModel_NoProvider(t *testing.T) {
 func TestModelMapper_MapModel_WithProvider(t *testing.T) {
 	// Register a mock provider for the target model
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("test-client", "claude", []*registry.ModelInfo{
-		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
-	})
+	reg.RegisterClient(
+		"test-client", "claude", []*registry.ModelInfo{
+			{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+		},
+	)
 	defer reg.UnregisterClient("test-client")
 
 	mappings := []config.AmpModelMapping{
 		{From: "claude-opus-4.5", To: "claude-sonnet-4"},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	// With a registered provider, mapping should work
 	result := mapper.MapModel("claude-opus-4.5")
@@ -73,16 +75,18 @@ func TestModelMapper_MapModel_WithProvider(t *testing.T) {
 
 func TestModelMapper_MapModel_TargetWithThinkingSuffix(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("test-client-thinking", "codex", []*registry.ModelInfo{
-		{ID: "gpt-5.2", OwnedBy: "openai", Type: "codex"},
-	})
+	reg.RegisterClient(
+		"test-client-thinking", "codex", []*registry.ModelInfo{
+			{ID: "gpt-5.2", OwnedBy: "openai", Type: "codex"},
+		},
+	)
 	defer reg.UnregisterClient("test-client-thinking")
 
 	mappings := []config.AmpModelMapping{
 		{From: "gpt-5.2-alias", To: "gpt-5.2(xhigh)"},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	result := mapper.MapModel("gpt-5.2-alias")
 	if result != "gpt-5.2(xhigh)" {
@@ -92,16 +96,18 @@ func TestModelMapper_MapModel_TargetWithThinkingSuffix(t *testing.T) {
 
 func TestModelMapper_MapModel_CaseInsensitive(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("test-client2", "claude", []*registry.ModelInfo{
-		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
-	})
+	reg.RegisterClient(
+		"test-client2", "claude", []*registry.ModelInfo{
+			{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+		},
+	)
 	defer reg.UnregisterClient("test-client2")
 
 	mappings := []config.AmpModelMapping{
 		{From: "Claude-Opus-4.5", To: "claude-sonnet-4"},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	// Should match case-insensitively
 	result := mapper.MapModel("claude-opus-4.5")
@@ -115,7 +121,7 @@ func TestModelMapper_MapModel_NotFound(t *testing.T) {
 		{From: "claude-opus-4.5", To: "claude-sonnet-4"},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	// Unknown model should return empty
 	result := mapper.MapModel("unknown-model")
@@ -129,7 +135,7 @@ func TestModelMapper_MapModel_EmptyInput(t *testing.T) {
 		{From: "claude-opus-4.5", To: "claude-sonnet-4"},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	result := mapper.MapModel("")
 	if result != "" {
@@ -138,46 +144,52 @@ func TestModelMapper_MapModel_EmptyInput(t *testing.T) {
 }
 
 func TestModelMapper_UpdateMappings(t *testing.T) {
-	mapper := NewModelMapper(nil)
+	mapper := newModelMapper(nil)
 
 	// Initially empty
-	if len(mapper.GetMappings()) != 0 {
+	if len(mapper.getMappings()) != 0 {
 		t.Error("Expected 0 initial mappings")
 	}
 
 	// Update with new mappings
-	mapper.UpdateMappings([]config.AmpModelMapping{
-		{From: "model-a", To: "model-b"},
-		{From: "model-c", To: "model-d"},
-	})
+	mapper.updateMappings(
+		[]config.AmpModelMapping{
+			{From: "model-a", To: "model-b"},
+			{From: "model-c", To: "model-d"},
+		},
+	)
 
-	result := mapper.GetMappings()
+	result := mapper.getMappings()
 	if len(result) != 2 {
 		t.Errorf("Expected 2 mappings after update, got %d", len(result))
 	}
 
 	// Update again should replace, not append
-	mapper.UpdateMappings([]config.AmpModelMapping{
-		{From: "model-x", To: "model-y"},
-	})
+	mapper.updateMappings(
+		[]config.AmpModelMapping{
+			{From: "model-x", To: "model-y"},
+		},
+	)
 
-	result = mapper.GetMappings()
+	result = mapper.getMappings()
 	if len(result) != 1 {
 		t.Errorf("Expected 1 mapping after second update, got %d", len(result))
 	}
 }
 
 func TestModelMapper_UpdateMappings_SkipsInvalid(t *testing.T) {
-	mapper := NewModelMapper(nil)
+	mapper := newModelMapper(nil)
 
-	mapper.UpdateMappings([]config.AmpModelMapping{
-		{From: "", To: "model-b"},        // Invalid: empty from
-		{From: "model-a", To: ""},        // Invalid: empty to
-		{From: "  ", To: "model-b"},      // Invalid: whitespace from
-		{From: "model-c", To: "model-d"}, // Valid
-	})
+	mapper.updateMappings(
+		[]config.AmpModelMapping{
+			{From: "", To: "model-b"},        // Invalid: empty from
+			{From: "model-a", To: ""},        // Invalid: empty to
+			{From: "  ", To: "model-b"},      // Invalid: whitespace from
+			{From: "model-c", To: "model-d"}, // Valid
+		},
+	)
 
-	result := mapper.GetMappings()
+	result := mapper.getMappings()
 	if len(result) != 1 {
 		t.Errorf("Expected 1 valid mapping, got %d", len(result))
 	}
@@ -188,14 +200,14 @@ func TestModelMapper_GetMappings_ReturnsCopy(t *testing.T) {
 		{From: "model-a", To: "model-b"},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	// Get mappings and modify the returned map
-	result := mapper.GetMappings()
+	result := mapper.getMappings()
 	result["new-key"] = "new-value"
 
 	// Original should be unchanged
-	original := mapper.GetMappings()
+	original := mapper.getMappings()
 	if len(original) != 1 {
 		t.Errorf("Expected original to have 1 mapping, got %d", len(original))
 	}
@@ -206,16 +218,18 @@ func TestModelMapper_GetMappings_ReturnsCopy(t *testing.T) {
 
 func TestModelMapper_Regex_MatchBaseWithoutParens(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("test-client-regex-1", "gemini", []*registry.ModelInfo{
-		{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
-	})
+	reg.RegisterClient(
+		"test-client-regex-1", "gemini", []*registry.ModelInfo{
+			{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
+		},
+	)
 	defer reg.UnregisterClient("test-client-regex-1")
 
 	mappings := []config.AmpModelMapping{
 		{From: "^gpt-5$", To: "gemini-2.5-pro", Regex: true},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	// Incoming model has reasoning suffix, regex matches base, suffix is preserved
 	result := mapper.MapModel("gpt-5(high)")
@@ -226,12 +240,16 @@ func TestModelMapper_Regex_MatchBaseWithoutParens(t *testing.T) {
 
 func TestModelMapper_Regex_ExactPrecedence(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("test-client-regex-2", "claude", []*registry.ModelInfo{
-		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
-	})
-	reg.RegisterClient("test-client-regex-3", "gemini", []*registry.ModelInfo{
-		{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
-	})
+	reg.RegisterClient(
+		"test-client-regex-2", "claude", []*registry.ModelInfo{
+			{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+		},
+	)
+	reg.RegisterClient(
+		"test-client-regex-3", "gemini", []*registry.ModelInfo{
+			{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
+		},
+	)
 	defer reg.UnregisterClient("test-client-regex-2")
 	defer reg.UnregisterClient("test-client-regex-3")
 
@@ -240,7 +258,7 @@ func TestModelMapper_Regex_ExactPrecedence(t *testing.T) {
 		{From: "^gpt-5.*$", To: "gemini-2.5-pro", Regex: true}, // regex
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	// Exact match should win over regex
 	result := mapper.MapModel("gpt-5")
@@ -255,7 +273,7 @@ func TestModelMapper_Regex_InvalidPattern_Skipped(t *testing.T) {
 		{From: "(", To: "target", Regex: true},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	result := mapper.MapModel("anything")
 	if result != "" {
@@ -265,16 +283,18 @@ func TestModelMapper_Regex_InvalidPattern_Skipped(t *testing.T) {
 
 func TestModelMapper_Regex_CaseInsensitive(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("test-client-regex-4", "claude", []*registry.ModelInfo{
-		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
-	})
+	reg.RegisterClient(
+		"test-client-regex-4", "claude", []*registry.ModelInfo{
+			{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+		},
+	)
 	defer reg.UnregisterClient("test-client-regex-4")
 
 	mappings := []config.AmpModelMapping{
 		{From: "^CLAUDE-OPUS-.*$", To: "claude-sonnet-4", Regex: true},
 	}
 
-	mapper := NewModelMapper(mappings)
+	mapper := newModelMapper(mappings)
 
 	result := mapper.MapModel("claude-opus-4.5")
 	if result != "claude-sonnet-4" {
@@ -286,12 +306,16 @@ func TestModelMapper_SuffixPreservation(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 
 	// Register test models
-	reg.RegisterClient("test-client-suffix", "gemini", []*registry.ModelInfo{
-		{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
-	})
-	reg.RegisterClient("test-client-suffix-2", "claude", []*registry.ModelInfo{
-		{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
-	})
+	reg.RegisterClient(
+		"test-client-suffix", "gemini", []*registry.ModelInfo{
+			{ID: "gemini-2.5-pro", OwnedBy: "google", Type: "gemini"},
+		},
+	)
+	reg.RegisterClient(
+		"test-client-suffix-2", "claude", []*registry.ModelInfo{
+			{ID: "claude-sonnet-4", OwnedBy: "anthropic", Type: "claude"},
+		},
+	)
 	defer reg.UnregisterClient("test-client-suffix")
 	defer reg.UnregisterClient("test-client-suffix-2")
 
@@ -364,12 +388,14 @@ func TestModelMapper_SuffixPreservation(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			mapper := NewModelMapper(tt.mappings)
-			got := mapper.MapModel(tt.input)
-			if got != tt.want {
-				t.Errorf("MapModel(%q) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				mapper := newModelMapper(tt.mappings)
+				got := mapper.MapModel(tt.input)
+				if got != tt.want {
+					t.Errorf("MapModel(%q) = %q, want %q", tt.input, got, tt.want)
+				}
+			},
+		)
 	}
 }

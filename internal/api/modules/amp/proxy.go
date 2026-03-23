@@ -13,8 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -57,52 +56,50 @@ func (rc *readCloser) Close() error               { return rc.c.Close() }
 
 // createReverseProxy creates a reverse proxy handler for Amp upstream
 // with automatic gzip decompression via ModifyResponse
-func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputil.ReverseProxy, error) {
+func createReverseProxy(upstreamURL string, secretSource secretSource) (*httputil.ReverseProxy, error) {
 	parsed, err := url.Parse(upstreamURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid amp upstream url: %w", err)
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(parsed)
-	originalDirector := proxy.Director
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(parsed)
+			pr.Out.Host = parsed.Host
 
-	// Modify outgoing requests to inject API key and fix routing
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.Host = parsed.Host
+			// Remove client's Authorization header - it was only used for CLI Proxy API authentication
+			// We will set our own Authorization using the configured upstream-api-key
+			pr.Out.Header.Del("Authorization")
+			pr.Out.Header.Del("X-Api-Key")
+			pr.Out.Header.Del("X-Goog-Api-Key")
 
-		// Remove client's Authorization header - it was only used for CLI Proxy API authentication
-		// We will set our own Authorization using the configured upstream-api-key
-		req.Header.Del("Authorization")
-		req.Header.Del("X-Api-Key")
-		req.Header.Del("X-Goog-Api-Key")
+			// Remove proxy, client identity, and browser fingerprint headers
+			misc.ScrubProxyAndFingerprintHeaders(pr.Out)
 
-		// Remove proxy, client identity, and browser fingerprint headers
-		misc.ScrubProxyAndFingerprintHeaders(req)
+			// Remove query-based credentials if they match the authenticated client API key.
+			// This prevents leaking client auth material to the Amp upstream while avoiding
+			// breaking unrelated upstream query parameters.
+			clientKey := getClientAPIKeyFromContext(pr.In.Context())
+			removeQueryValuesMatching(pr.Out, "key", clientKey)
+			removeQueryValuesMatching(pr.Out, "auth_token", clientKey)
 
-		// Remove query-based credentials if they match the authenticated client API key.
-		// This prevents leaking client auth material to the Amp upstream while avoiding
-		// breaking unrelated upstream query parameters.
-		clientKey := getClientAPIKeyFromContext(req.Context())
-		removeQueryValuesMatching(req, "key", clientKey)
-		removeQueryValuesMatching(req, "auth_token", clientKey)
+			// Preserve correlation headers for debugging
+			if pr.Out.Header.Get("X-Request-ID") == "" {
+				// Could generate one here if needed
+			}
 
-		// Preserve correlation headers for debugging
-		if req.Header.Get("X-Request-ID") == "" {
-			// Could generate one here if needed
-		}
+			// Note: We do NOT filter Anthropic-Beta headers in the proxy path
+			// Users going through ampcode.com proxy are paying for the service and should get all features
+			// including 1M context window (context-1m-2025-08-07)
 
-		// Note: We do NOT filter Anthropic-Beta headers in the proxy path
-		// Users going through ampcode.com proxy are paying for the service and should get all features
-		// including 1M context window (context-1m-2025-08-07)
-
-		// Inject API key from secret source (only uses upstream-api-key from config)
-		if key, err := secretSource.Get(req.Context()); err == nil && key != "" {
-			req.Header.Set("X-Api-Key", key)
-			req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
-		} else if err != nil {
-			log.Warnf("amp secret source error (continuing without auth): %v", err)
-		}
+			// Inject API key from secret source (only uses upstream-api-key from config)
+			if key, err := secretSource.Get(pr.In.Context()); err == nil && key != "" {
+				pr.Out.Header.Set("X-Api-Key", key)
+				pr.Out.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
+			} else if err != nil {
+				log.Warnf("amp secret source error (continuing without auth): %v", err)
+			}
+		},
 	}
 
 	// Modify incoming responses to handle gzip without Content-Encoding
@@ -175,8 +172,10 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 			resp.ContentLength = int64(len(decompressed))
 
 			// Update headers to reflect decompressed state
-			resp.Header.Del("Content-Encoding")                                          // No longer compressed
-			resp.Header.Del("Content-Length")                                            // Remove stale compressed length
+			resp.Header.Del("Content-Encoding") // No longer compressed
+			resp.Header.Del(
+				"Content-Length",
+			) // Remove stale compressed length
 			resp.Header.Set("Content-Length", strconv.FormatInt(resp.ContentLength, 10)) // Set decompressed length
 
 			log.Debugf("amp proxy: decompressed gzip response (%d -> %d bytes)", len(gzippedData), len(decompressed))
@@ -220,13 +219,6 @@ func isStreamingResponse(resp *http.Response) bool {
 	}
 
 	return false
-}
-
-// proxyHandler converts httputil.ReverseProxy to gin.HandlerFunc
-func proxyHandler(proxy *httputil.ReverseProxy) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		proxy.ServeHTTP(c.Writer, c.Request)
-	}
 }
 
 // filterBetaFeatures removes a specific beta feature from comma-separated list

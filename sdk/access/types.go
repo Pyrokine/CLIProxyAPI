@@ -1,13 +1,13 @@
 package access
 
-// AccessConfig groups request authentication providers.
-type AccessConfig struct {
+// Config groups request authentication providers.
+type Config struct {
 	// Providers lists configured authentication providers.
-	Providers []AccessProvider `yaml:"providers,omitempty" json:"providers,omitempty"`
+	Providers []ProviderEntry `yaml:"providers,omitempty" json:"providers,omitempty"`
 }
 
-// AccessProvider describes a request authentication provider entry.
-type AccessProvider struct {
+// ProviderEntry describes a request authentication provider entry.
+type ProviderEntry struct {
 	// Name is the instance identifier for the provider.
 	Name string `yaml:"name" json:"name"`
 
@@ -25,8 +25,8 @@ type AccessProvider struct {
 }
 
 const (
-	// AccessProviderTypeConfigAPIKey is the built-in provider validating inline API keys.
-	AccessProviderTypeConfigAPIKey = "config-api-key"
+	// ProviderTypeConfigAPIKey is the built-in provider validating inline API keys.
+	ProviderTypeConfigAPIKey = "config-api-key"
 
 	// DefaultAccessProviderName is applied when no provider name is supplied.
 	DefaultAccessProviderName = "config-inline"
@@ -34,13 +34,14 @@ const (
 
 // MakeInlineAPIKeyProvider constructs an inline API key provider configuration.
 // It returns nil when no keys are supplied.
-func MakeInlineAPIKeyProvider(keys []string) *AccessProvider {
+// noinspection GoUnusedExportedFunction
+func MakeInlineAPIKeyProvider(keys []string) *ProviderEntry {
 	if len(keys) == 0 {
 		return nil
 	}
-	provider := &AccessProvider{
+	provider := &ProviderEntry{
 		Name:    DefaultAccessProviderName,
-		Type:    AccessProviderTypeConfigAPIKey,
+		Type:    ProviderTypeConfigAPIKey,
 		APIKeys: append([]string(nil), keys...),
 	}
 	return provider

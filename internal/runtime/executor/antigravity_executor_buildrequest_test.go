@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
@@ -76,7 +76,9 @@ func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any 
 		}
 	}`)
 
-	req, err := executor.buildRequest(context.Background(), auth, "token", modelName, payload, false, "", "https://example.com")
+	req, err := executor.buildRequest(
+		context.Background(), auth, "token", modelName, payload, false, "", "https://example.com",
+	)
 	if err != nil {
 		t.Fatalf("buildRequest error: %v", err)
 	}

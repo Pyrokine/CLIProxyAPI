@@ -121,226 +121,186 @@ func GetClaudeModels() []*ModelInfo {
 	}
 }
 
-// GetGeminiModels returns the standard Gemini model definitions
-func GetGeminiModels() []*ModelInfo {
+// geminiStableModels returns the Gemini 2.5 stable models shared across all Gemini providers.
+// Returns a fresh slice each call to prevent cross-caller mutation.
+func geminiStableModels() []*ModelInfo {
 	return []*ModelInfo{
 		{
-			ID:                         "gemini-2.5-pro",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-pro",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Pro",
-			Description:                "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+			ID:               "gemini-2.5-pro",
+			Object:           "model",
+			Created:          1750118400,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-2.5-pro",
+			Version:          "2.5",
+			DisplayName:      "Gemini 2.5 Pro",
+			Description:      "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
+			},
 		},
 		{
-			ID:                         "gemini-2.5-flash",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash",
-			Version:                    "001",
-			DisplayName:                "Gemini 2.5 Flash",
-			Description:                "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+			ID:               "gemini-2.5-flash",
+			Object:           "model",
+			Created:          1750118400,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-2.5-flash",
+			Version:          "001",
+			DisplayName:      "Gemini 2.5 Flash",
+			Description:      "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
+			Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                         "gemini-2.5-flash-lite",
-			Object:                     "model",
-			Created:                    1753142400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash-lite",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Flash Lite",
-			Description:                "Our smallest and most cost effective model, built for at scale usage.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-3-pro-preview",
-			Object:                     "model",
-			Created:                    1737158400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-pro-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Pro Preview",
-			Description:                "Gemini 3 Pro Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}},
-		},
-		{
-			ID:                         "gemini-3.1-pro-preview",
-			Object:                     "model",
-			Created:                    1771459200,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3.1-pro-preview",
-			Version:                    "3.1",
-			DisplayName:                "Gemini 3.1 Pro Preview",
-			Description:                "Gemini 3.1 Pro Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}},
-		},
-		{
-			ID:                         "gemini-3-flash-preview",
-			Object:                     "model",
-			Created:                    1765929600,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-flash-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Flash Preview",
-			Description:                "Gemini 3 Flash Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}},
-		},
-		{
-			ID:                         "gemini-3-pro-image-preview",
-			Object:                     "model",
-			Created:                    1737158400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-pro-image-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Pro Image Preview",
-			Description:                "Gemini 3 Pro Image Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}},
+			ID:               "gemini-2.5-flash-lite",
+			Object:           "model",
+			Created:          1753142400,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-2.5-flash-lite",
+			Version:          "2.5",
+			DisplayName:      "Gemini 2.5 Flash Lite",
+			Description:      "Our smallest and most cost effective model, built for at scale usage.",
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
+			Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
 		},
 	}
 }
 
-func GetGeminiVertexModels() []*ModelInfo {
+// geminiPreviewParams holds per-provider differences for the Gemini 3.x preview models.
+type geminiPreviewParams struct {
+	proDescription   string
+	proLevels        []string
+	flashDescription string
+	flashLevels      []string
+}
+
+// geminiPreviewModels returns the Gemini 3.x preview models shared across all Gemini providers.
+// Each caller provides the per-model config via the params argument.
+func geminiPreviewModels(params geminiPreviewParams) []*ModelInfo {
 	return []*ModelInfo{
 		{
-			ID:                         "gemini-2.5-pro",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-pro",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Pro",
-			Description:                "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+			ID:               "gemini-3-pro-preview",
+			Object:           "model",
+			Created:          1737158400,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-3-pro-preview",
+			Version:          "3.0",
+			DisplayName:      "Gemini 3 Pro Preview",
+			Description:      params.proDescription,
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: params.proLevels,
+			},
 		},
 		{
-			ID:                         "gemini-2.5-flash",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash",
-			Version:                    "001",
-			DisplayName:                "Gemini 2.5 Flash",
-			Description:                "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+			ID:               "gemini-3.1-pro-preview",
+			Object:           "model",
+			Created:          1771459200,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-3.1-pro-preview",
+			Version:          "3.1",
+			DisplayName:      "Gemini 3.1 Pro Preview",
+			Description:      "Gemini 3.1 Pro Preview",
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: params.proLevels,
+			},
 		},
 		{
-			ID:                         "gemini-2.5-flash-lite",
-			Object:                     "model",
-			Created:                    1753142400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash-lite",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Flash Lite",
-			Description:                "Our smallest and most cost effective model, built for at scale usage.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+			ID:               "gemini-3-flash-preview",
+			Object:           "model",
+			Created:          1765929600,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-3-flash-preview",
+			Version:          "3.0",
+			DisplayName:      "Gemini 3 Flash Preview",
+			Description:      params.flashDescription,
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: params.flashLevels,
+			},
 		},
-		{
-			ID:                         "gemini-3-pro-preview",
-			Object:                     "model",
-			Created:                    1737158400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-pro-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Pro Preview",
-			Description:                "Gemini 3 Pro Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}},
+	}
+}
+
+// geminiProImagePreview returns the Gemini 3 Pro Image Preview model definition.
+func geminiProImagePreview() *ModelInfo {
+	return &ModelInfo{
+		ID:               "gemini-3-pro-image-preview",
+		Object:           "model",
+		Created:          1737158400,
+		OwnedBy:          "google",
+		Type:             "gemini",
+		Name:             "models/gemini-3-pro-image-preview",
+		Version:          "3.0",
+		DisplayName:      "Gemini 3 Pro Image Preview",
+		Description:      "Gemini 3 Pro Image Preview",
+		InputTokenLimit:  1048576,
+		OutputTokenLimit: 65536,
+		SupportedGenerationMethods: []string{
+			"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
 		},
-		{
-			ID:                         "gemini-3-flash-preview",
-			Object:                     "model",
-			Created:                    1765929600,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-flash-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Flash Preview",
-			Description:                "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}},
+		Thinking: &ThinkingSupport{
+			Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"},
 		},
-		{
-			ID:                         "gemini-3.1-pro-preview",
-			Object:                     "model",
-			Created:                    1771459200,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3.1-pro-preview",
-			Version:                    "3.1",
-			DisplayName:                "Gemini 3.1 Pro Preview",
-			Description:                "Gemini 3.1 Pro Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}},
-		},
-		{
-			ID:                         "gemini-3-pro-image-preview",
-			Object:                     "model",
-			Created:                    1737158400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-pro-image-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Pro Image Preview",
-			Description:                "Gemini 3 Pro Image Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}},
-		},
+	}
+}
+
+// GetGeminiModels returns the standard Gemini model definitions
+func GetGeminiModels() []*ModelInfo {
+	models := geminiStableModels()
+	models = append(models, geminiPreviewModels(geminiPreviewParams{
+		proDescription:   "Gemini 3 Pro Preview",
+		proLevels:        []string{"low", "high"},
+		flashDescription: "Gemini 3 Flash Preview",
+		flashLevels:      []string{"minimal", "low", "medium", "high"},
+	})...)
+	models = append(models, geminiProImagePreview())
+	return models
+}
+
+func GetGeminiVertexModels() []*ModelInfo {
+	models := geminiStableModels()
+	models = append(models, geminiPreviewModels(geminiPreviewParams{
+		proDescription:   "Gemini 3 Pro Preview",
+		proLevels:        []string{"low", "high"},
+		flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+		flashLevels:      []string{"minimal", "low", "medium", "high"},
+	})...)
+	models = append(models,
+		geminiProImagePreview(),
 		// Imagen image generation models - use :predict action
-		{
+		&ModelInfo{
 			ID:                         "imagen-4.0-generate-001",
 			Object:                     "model",
 			Created:                    1750000000,
@@ -352,7 +312,7 @@ func GetGeminiVertexModels() []*ModelInfo {
 			Description:                "Imagen 4.0 image generation model",
 			SupportedGenerationMethods: []string{"predict"},
 		},
-		{
+		&ModelInfo{
 			ID:                         "imagen-4.0-ultra-generate-001",
 			Object:                     "model",
 			Created:                    1750000000,
@@ -361,34 +321,10 @@ func GetGeminiVertexModels() []*ModelInfo {
 			Name:                       "models/imagen-4.0-ultra-generate-001",
 			Version:                    "4.0",
 			DisplayName:                "Imagen 4.0 Ultra Generate",
-			Description:                "Imagen 4.0 Ultra high-quality image generation model",
+			Description:                "Imagen 4.0 ultra image generation model",
 			SupportedGenerationMethods: []string{"predict"},
 		},
-		{
-			ID:                         "imagen-3.0-generate-002",
-			Object:                     "model",
-			Created:                    1740000000,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/imagen-3.0-generate-002",
-			Version:                    "3.0",
-			DisplayName:                "Imagen 3.0 Generate",
-			Description:                "Imagen 3.0 image generation model",
-			SupportedGenerationMethods: []string{"predict"},
-		},
-		{
-			ID:                         "imagen-3.0-fast-generate-001",
-			Object:                     "model",
-			Created:                    1740000000,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/imagen-3.0-fast-generate-001",
-			Version:                    "3.0",
-			DisplayName:                "Imagen 3.0 Fast Generate",
-			Description:                "Imagen 3.0 fast image generation model",
-			SupportedGenerationMethods: []string{"predict"},
-		},
-		{
+		&ModelInfo{
 			ID:                         "imagen-4.0-fast-generate-001",
 			Object:                     "model",
 			Created:                    1750000000,
@@ -400,242 +336,82 @@ func GetGeminiVertexModels() []*ModelInfo {
 			Description:                "Imagen 4.0 fast image generation model",
 			SupportedGenerationMethods: []string{"predict"},
 		},
-	}
+	)
+	return models
 }
 
 // GetGeminiCLIModels returns the standard Gemini model definitions
 func GetGeminiCLIModels() []*ModelInfo {
-	return []*ModelInfo{
-		{
-			ID:                         "gemini-2.5-pro",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-pro",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Pro",
-			Description:                "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-2.5-flash",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash",
-			Version:                    "001",
-			DisplayName:                "Gemini 2.5 Flash",
-			Description:                "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-2.5-flash-lite",
-			Object:                     "model",
-			Created:                    1753142400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash-lite",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Flash Lite",
-			Description:                "Our smallest and most cost effective model, built for at scale usage.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-3-pro-preview",
-			Object:                     "model",
-			Created:                    1737158400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-pro-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Pro Preview",
-			Description:                "Our most intelligent model with SOTA reasoning and multimodal understanding, and powerful agentic and vibe coding capabilities",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}},
-		},
-		{
-			ID:                         "gemini-3.1-pro-preview",
-			Object:                     "model",
-			Created:                    1771459200,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3.1-pro-preview",
-			Version:                    "3.1",
-			DisplayName:                "Gemini 3.1 Pro Preview",
-			Description:                "Gemini 3.1 Pro Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}},
-		},
-		{
-			ID:                         "gemini-3-flash-preview",
-			Object:                     "model",
-			Created:                    1765929600,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-flash-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Flash Preview",
-			Description:                "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}},
-		},
-	}
+	models := geminiStableModels()
+	models = append(models, geminiPreviewModels(geminiPreviewParams{
+		proDescription:   "Our most intelligent model with SOTA reasoning and multimodal understanding, and powerful agentic and vibe coding capabilities",
+		proLevels:        []string{"low", "high"},
+		flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+		flashLevels:      []string{"minimal", "low", "medium", "high"},
+	})...)
+	return models
 }
 
 // GetAIStudioModels returns the Gemini model definitions for AI Studio integrations
 func GetAIStudioModels() []*ModelInfo {
-	return []*ModelInfo{
-		{
-			ID:                         "gemini-2.5-pro",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-pro",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Pro",
-			Description:                "Stable release (June 17th, 2025) of Gemini 2.5 Pro",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
+	models := geminiStableModels()
+	models = append(models, geminiPreviewModels(geminiPreviewParams{
+		proDescription:   "Gemini 3 Pro Preview",
+		flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+	})...)
+	models = append(models,
+		&ModelInfo{
+			ID:               "gemini-pro-latest",
+			Object:           "model",
+			Created:          1750118400,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-pro-latest",
+			Version:          "2.5",
+			DisplayName:      "Gemini Pro Latest",
+			Description:      "Latest release of Gemini Pro",
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
+			},
 		},
-		{
-			ID:                         "gemini-2.5-flash",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash",
-			Version:                    "001",
-			DisplayName:                "Gemini 2.5 Flash",
-			Description:                "Stable version of Gemini 2.5 Flash, our mid-size multimodal model that supports up to 1 million tokens, released in June of 2025.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+		&ModelInfo{
+			ID:               "gemini-flash-latest",
+			Object:           "model",
+			Created:          1750118400,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-flash-latest",
+			Version:          "2.5",
+			DisplayName:      "Gemini Flash Latest",
+			Description:      "Latest release of Gemini Flash",
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
+			Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
 		},
-		{
-			ID:                         "gemini-2.5-flash-lite",
-			Object:                     "model",
-			Created:                    1753142400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash-lite",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Flash Lite",
-			Description:                "Our smallest and most cost effective model, built for at scale usage.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-3-pro-preview",
-			Object:                     "model",
-			Created:                    1737158400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-pro-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Pro Preview",
-			Description:                "Gemini 3 Pro Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-3.1-pro-preview",
-			Object:                     "model",
-			Created:                    1771459200,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3.1-pro-preview",
-			Version:                    "3.1",
-			DisplayName:                "Gemini 3.1 Pro Preview",
-			Description:                "Gemini 3.1 Pro Preview",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-3-flash-preview",
-			Object:                     "model",
-			Created:                    1765929600,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-3-flash-preview",
-			Version:                    "3.0",
-			DisplayName:                "Gemini 3 Flash Preview",
-			Description:                "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-pro-latest",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-pro-latest",
-			Version:                    "2.5",
-			DisplayName:                "Gemini Pro Latest",
-			Description:                "Latest release of Gemini Pro",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-flash-latest",
-			Object:                     "model",
-			Created:                    1750118400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-flash-latest",
-			Version:                    "2.5",
-			DisplayName:                "Gemini Flash Latest",
-			Description:                "Latest release of Gemini Flash",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
-		},
-		{
-			ID:                         "gemini-flash-lite-latest",
-			Object:                     "model",
-			Created:                    1753142400,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-flash-lite-latest",
-			Version:                    "2.5",
-			DisplayName:                "Gemini Flash-Lite Latest",
-			Description:                "Latest release of Gemini Flash-Lite",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           65536,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
-			Thinking:                   &ThinkingSupport{Min: 512, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
+		&ModelInfo{
+			ID:               "gemini-flash-lite-latest",
+			Object:           "model",
+			Created:          1753142400,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-flash-lite-latest",
+			Version:          "2.5",
+			DisplayName:      "Gemini Flash-Lite Latest",
+			Description:      "Latest release of Gemini Flash-Lite",
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 65536,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
+			Thinking: &ThinkingSupport{Min: 512, Max: 24576, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		// {
 		// 	ID:                         "gemini-2.5-flash-image-preview",
@@ -652,22 +428,25 @@ func GetAIStudioModels() []*ModelInfo {
 		// 	SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
 		// 	// image models don't support thinkingConfig; leave Thinking nil
 		// },
-		{
-			ID:                         "gemini-2.5-flash-image",
-			Object:                     "model",
-			Created:                    1759363200,
-			OwnedBy:                    "google",
-			Type:                       "gemini",
-			Name:                       "models/gemini-2.5-flash-image",
-			Version:                    "2.5",
-			DisplayName:                "Gemini 2.5 Flash Image",
-			Description:                "State-of-the-art image generation and editing model.",
-			InputTokenLimit:            1048576,
-			OutputTokenLimit:           8192,
-			SupportedGenerationMethods: []string{"generateContent", "countTokens", "createCachedContent", "batchGenerateContent"},
+		&ModelInfo{
+			ID:               "gemini-2.5-flash-image",
+			Object:           "model",
+			Created:          1759363200,
+			OwnedBy:          "google",
+			Type:             "gemini",
+			Name:             "models/gemini-2.5-flash-image",
+			Version:          "2.5",
+			DisplayName:      "Gemini 2.5 Flash Image",
+			Description:      "State-of-the-art image generation and editing model.",
+			InputTokenLimit:  1048576,
+			OutputTokenLimit: 8192,
+			SupportedGenerationMethods: []string{
+				"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
+			},
 			// image models don't support thinkingConfig; leave Thinking nil
 		},
-	}
+	)
+	return models
 }
 
 // GetOpenAIModels returns the standard OpenAI model definitions
@@ -904,60 +683,138 @@ func GetIFlowModels() []*ModelInfo {
 		Created     int64
 		Thinking    *ThinkingSupport
 	}{
-		{ID: "qwen3-coder-plus", DisplayName: "Qwen3-Coder-Plus", Description: "Qwen3 Coder Plus code generation", Created: 1753228800},
+		{
+			ID: "qwen3-coder-plus", DisplayName: "Qwen3-Coder-Plus", Description: "Qwen3 Coder Plus code generation",
+			Created: 1753228800,
+		},
 		{ID: "qwen3-max", DisplayName: "Qwen3-Max", Description: "Qwen3 flagship model", Created: 1758672000},
-		{ID: "qwen3-vl-plus", DisplayName: "Qwen3-VL-Plus", Description: "Qwen3 multimodal vision-language", Created: 1758672000},
-		{ID: "qwen3-max-preview", DisplayName: "Qwen3-Max-Preview", Description: "Qwen3 Max preview build", Created: 1757030400, Thinking: iFlowThinkingSupport},
-		{ID: "glm-4.6", DisplayName: "GLM-4.6", Description: "Zhipu GLM 4.6 general model", Created: 1759190400, Thinking: iFlowThinkingSupport},
+		{
+			ID: "qwen3-vl-plus", DisplayName: "Qwen3-VL-Plus", Description: "Qwen3 multimodal vision-language",
+			Created: 1758672000,
+		},
+		{
+			ID: "qwen3-max-preview", DisplayName: "Qwen3-Max-Preview", Description: "Qwen3 Max preview build",
+			Created: 1757030400, Thinking: iFlowThinkingSupport,
+		},
+		{
+			ID: "glm-4.6", DisplayName: "GLM-4.6", Description: "Zhipu GLM 4.6 general model", Created: 1759190400,
+			Thinking: iFlowThinkingSupport,
+		},
 		{ID: "kimi-k2", DisplayName: "Kimi-K2", Description: "Moonshot Kimi K2 general model", Created: 1752192000},
-		{ID: "deepseek-v3.2", DisplayName: "DeepSeek-V3.2-Exp", Description: "DeepSeek V3.2 experimental", Created: 1759104000, Thinking: iFlowThinkingSupport},
-		{ID: "deepseek-v3.1", DisplayName: "DeepSeek-V3.1-Terminus", Description: "DeepSeek V3.1 Terminus", Created: 1756339200, Thinking: iFlowThinkingSupport},
-		{ID: "deepseek-r1", DisplayName: "DeepSeek-R1", Description: "DeepSeek reasoning model R1", Created: 1737331200},
+		{
+			ID: "deepseek-v3.2", DisplayName: "DeepSeek-V3.2-Exp", Description: "DeepSeek V3.2 experimental",
+			Created: 1759104000, Thinking: iFlowThinkingSupport,
+		},
+		{
+			ID: "deepseek-v3.1", DisplayName: "DeepSeek-V3.1-Terminus", Description: "DeepSeek V3.1 Terminus",
+			Created: 1756339200, Thinking: iFlowThinkingSupport,
+		},
+		{
+			ID: "deepseek-r1", DisplayName: "DeepSeek-R1", Description: "DeepSeek reasoning model R1",
+			Created: 1737331200,
+		},
 		{ID: "deepseek-v3", DisplayName: "DeepSeek-V3-671B", Description: "DeepSeek V3 671B", Created: 1734307200},
 		{ID: "qwen3-32b", DisplayName: "Qwen3-32B", Description: "Qwen3 32B", Created: 1747094400},
-		{ID: "qwen3-235b-a22b-thinking-2507", DisplayName: "Qwen3-235B-A22B-Thinking", Description: "Qwen3 235B A22B Thinking (2507)", Created: 1753401600},
-		{ID: "qwen3-235b-a22b-instruct", DisplayName: "Qwen3-235B-A22B-Instruct", Description: "Qwen3 235B A22B Instruct", Created: 1753401600},
+		{
+			ID: "qwen3-235b-a22b-thinking-2507", DisplayName: "Qwen3-235B-A22B-Thinking",
+			Description: "Qwen3 235B A22B Thinking (2507)", Created: 1753401600,
+		},
+		{
+			ID: "qwen3-235b-a22b-instruct", DisplayName: "Qwen3-235B-A22B-Instruct",
+			Description: "Qwen3 235B A22B Instruct", Created: 1753401600,
+		},
 		{ID: "qwen3-235b", DisplayName: "Qwen3-235B-A22B", Description: "Qwen3 235B A22B", Created: 1753401600},
-		{ID: "iflow-rome-30ba3b", DisplayName: "iFlow-ROME", Description: "iFlow Rome 30BA3B model", Created: 1736899200},
+		{
+			ID: "iflow-rome-30ba3b", DisplayName: "iFlow-ROME", Description: "iFlow Rome 30BA3B model",
+			Created: 1736899200,
+		},
 	}
 	models := make([]*ModelInfo, 0, len(entries))
 	for _, entry := range entries {
-		models = append(models, &ModelInfo{
-			ID:          entry.ID,
-			Object:      "model",
-			Created:     entry.Created,
-			OwnedBy:     "iflow",
-			Type:        "iflow",
-			DisplayName: entry.DisplayName,
-			Description: entry.Description,
-			Thinking:    entry.Thinking,
-		})
+		models = append(
+			models, &ModelInfo{
+				ID:          entry.ID,
+				Object:      "model",
+				Created:     entry.Created,
+				OwnedBy:     "iflow",
+				Type:        "iflow",
+				DisplayName: entry.DisplayName,
+				Description: entry.Description,
+				Thinking:    entry.Thinking,
+			},
+		)
 	}
 	return models
 }
 
-// AntigravityModelConfig captures static antigravity model overrides, including
+// antigravityModelConfig captures static antigravity model overrides, including
 // Thinking budget limits and provider max completion tokens.
-type AntigravityModelConfig struct {
+type antigravityModelConfig struct {
 	Thinking            *ThinkingSupport
 	MaxCompletionTokens int
 }
 
 // GetAntigravityModelConfig returns static configuration for antigravity models.
 // Keys use upstream model names returned by the Antigravity models endpoint.
-func GetAntigravityModelConfig() map[string]*AntigravityModelConfig {
-	return map[string]*AntigravityModelConfig{
-		"gemini-2.5-flash":         {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}},
-		"gemini-2.5-flash-lite":    {Thinking: &ThinkingSupport{Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true}},
-		"gemini-3-pro-high":        {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
-		"gemini-3-pro-low":         {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
-		"gemini-3.1-pro-high":      {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
-		"gemini-3.1-pro-low":       {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"low", "high"}}},
-		"gemini-3.1-flash-image":   {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "high"}}},
-		"gemini-3-flash":           {Thinking: &ThinkingSupport{Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "low", "medium", "high"}}},
-		"claude-opus-4-6-thinking": {Thinking: &ThinkingSupport{Min: 1024, Max: 64000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
-		"claude-sonnet-4-6":        {Thinking: &ThinkingSupport{Min: 1024, Max: 64000, ZeroAllowed: true, DynamicAllowed: true}, MaxCompletionTokens: 64000},
-		"gpt-oss-120b-medium":      {},
+func GetAntigravityModelConfig() map[string]*antigravityModelConfig {
+	return map[string]*antigravityModelConfig{
+		"gemini-2.5-flash": {
+			Thinking: &ThinkingSupport{
+				Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true,
+			},
+		},
+		"gemini-2.5-flash-lite": {
+			Thinking: &ThinkingSupport{
+				Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true,
+			},
+		},
+		"gemini-3-pro-high": {
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
+				Levels: []string{"low", "high"},
+			},
+		},
+		"gemini-3-pro-low": {
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
+				Levels: []string{"low", "high"},
+			},
+		},
+		"gemini-3.1-pro-high": {
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
+				Levels: []string{"low", "high"},
+			},
+		},
+		"gemini-3.1-pro-low": {
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
+				Levels: []string{"low", "high"},
+			},
+		},
+		"gemini-3.1-flash-image": {
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
+				Levels: []string{"minimal", "high"},
+			},
+		},
+		"gemini-3-flash": {
+			Thinking: &ThinkingSupport{
+				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
+				Levels: []string{"minimal", "low", "medium", "high"},
+			},
+		},
+		"claude-opus-4-6-thinking": {
+			Thinking: &ThinkingSupport{
+				Min: 1024, Max: 64000, ZeroAllowed: true, DynamicAllowed: true,
+			}, MaxCompletionTokens: 64000,
+		},
+		"claude-sonnet-4-6": {
+			Thinking: &ThinkingSupport{
+				Min: 1024, Max: 64000, ZeroAllowed: true, DynamicAllowed: true,
+			}, MaxCompletionTokens: 64000,
+		},
+		"gpt-oss-120b-medium": {},
 	}
 }
 

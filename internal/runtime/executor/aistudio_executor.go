@@ -13,12 +13,12 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/wsrelay"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -52,7 +52,10 @@ func (e *AIStudioExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth)
 }
 
 // HttpRequest forwards an arbitrary HTTP request through the websocket relay.
-func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (
+	*http.Response,
+	error,
+) {
 	if req == nil {
 		return nil, fmt.Errorf("aistudio executor: request is nil")
 	}
@@ -109,75 +112,30 @@ func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 	return resp, nil
 }
 
-// Execute performs a non-streaming request to the AI Studio API.
-func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	if opts.Alt == "responses/compact" {
-		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
-	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
-
-	translatedReq, body, err := e.translateRequest(req, opts, false)
-	if err != nil {
-		return resp, err
-	}
-
-	endpoint := e.buildEndpoint(baseModel, body.action, opts.Alt)
-	wsReq := &wsrelay.HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     endpoint,
-		Headers: http.Header{"Content-Type": []string{"application/json"}},
-		Body:    body.payload,
-	}
-
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       endpoint,
-		Method:    http.MethodPost,
-		Headers:   wsReq.Headers.Clone(),
-		Body:      body.payload,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
-	wsResp, err := e.relay.NonStream(ctx, authID, wsReq)
-	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	recordAPIResponseMetadata(ctx, e.cfg, wsResp.Status, wsResp.Headers.Clone())
-	if len(wsResp.Body) > 0 {
-		appendAPIResponseChunk(ctx, e.cfg, wsResp.Body)
-	}
-	if wsResp.Status < 200 || wsResp.Status >= 300 {
-		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body)}
-	}
-	reporter.publish(ctx, parseGeminiUsage(wsResp.Body))
-	var param any
-	out := sdktranslator.TranslateNonStream(ctx, body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, translatedReq, wsResp.Body, &param)
-	resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON([]byte(out)), Headers: wsResp.Headers.Clone()}
-	return resp, nil
+type aistudioPrepared struct {
+	baseModel     string
+	reporter      *usageReporter
+	translatedReq []byte
+	body          translatedPayload
+	endpoint      string
+	wsReq         *wsrelay.HTTPRequest
+	authID        string
 }
 
-// ExecuteStream performs a streaming request to the AI Studio API.
-func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+func (e *AIStudioExecutor) prepareRequest(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	stream bool,
+) (*aistudioPrepared, error) {
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
 
-	translatedReq, body, err := e.translateRequest(req, opts, true)
+	translatedReq, body, err := e.translateRequest(req, opts, stream)
 	if err != nil {
 		return nil, err
 	}
@@ -189,24 +147,71 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		Headers: http.Header{"Content-Type": []string{"application/json"}},
 		Body:    body.payload,
 	}
-	var authID, authLabel, authType, authValue string
+	var authID string
 	if auth != nil {
 		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       endpoint,
-		Method:    http.MethodPost,
-		Headers:   wsReq.Headers.Clone(),
-		Body:      body.payload,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-	wsStream, err := e.relay.Stream(ctx, authID, wsReq)
+	recordUpstreamRequest(ctx, e.cfg, endpoint, wsReq.Headers.Clone(), body.payload, e.Identifier(), auth)
+
+	return &aistudioPrepared{
+		baseModel:     baseModel,
+		reporter:      reporter,
+		translatedReq: translatedReq,
+		body:          body,
+		endpoint:      endpoint,
+		wsReq:         wsReq,
+		authID:        authID,
+	}, nil
+}
+
+// Execute performs a non-streaming request to the AI Studio API.
+func (e *AIStudioExecutor) Execute(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (resp cliproxyexecutor.Response, err error) {
+	p, err := e.prepareRequest(ctx, auth, req, opts, false)
+	if err != nil {
+		return resp, err
+	}
+	defer p.reporter.trackFailure(ctx, &err)
+
+	wsResp, err := e.relay.NonStream(ctx, p.authID, p.wsReq)
+	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	recordAPIResponseMetadata(ctx, e.cfg, wsResp.Status, wsResp.Headers.Clone())
+	if len(wsResp.Body) > 0 {
+		appendAPIResponseChunk(ctx, e.cfg, wsResp.Body)
+	}
+	if wsResp.Status < 200 || wsResp.Status >= 300 {
+		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body)}
+	}
+	p.reporter.publish(ctx, parseGeminiUsage(wsResp.Body))
+	var param any
+	out := sdktranslator.TranslateNonStream(
+		ctx, p.body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, p.translatedReq, wsResp.Body, &param,
+	)
+	resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON([]byte(out)), Headers: wsResp.Headers.Clone()}
+	return resp, nil
+}
+
+// ExecuteStream performs a streaming request to the AI Studio API.
+func (e *AIStudioExecutor) ExecuteStream(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (_ *cliproxyexecutor.StreamResult, err error) {
+	p, err := e.prepareRequest(ctx, auth, req, opts, true)
+	if err != nil {
+		return nil, err
+	}
+	defer p.reporter.trackFailure(ctx, &err)
+
+	wsStream, err := e.relay.Stream(ctx, p.authID, p.wsReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -261,7 +266,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		processEvent := func(event wsrelay.StreamEvent) bool {
 			if event.Err != nil {
 				recordAPIResponseError(ctx, e.cfg, event.Err)
-				reporter.publishFailure(ctx)
+				p.reporter.publishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}
 				return false
 			}
@@ -274,11 +279,14 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			case wsrelay.MessageTypeStreamChunk:
 				if len(event.Payload) > 0 {
 					appendAPIResponseChunk(ctx, e.cfg, event.Payload)
-					filtered := FilterSSEUsageMetadata(event.Payload)
+					filtered := filterSSEUsageMetadata(event.Payload)
 					if detail, ok := parseGeminiStreamUsage(filtered); ok {
-						reporter.publish(ctx, detail)
+						p.reporter.publish(ctx, detail)
 					}
-					lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, translatedReq, filtered, &param)
+					lines := sdktranslator.TranslateStream(
+						ctx, p.body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, p.translatedReq, filtered,
+						&param,
+					)
 					for i := range lines {
 						out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}
 					}
@@ -294,15 +302,18 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 				if len(event.Payload) > 0 {
 					appendAPIResponseChunk(ctx, e.cfg, event.Payload)
 				}
-				lines := sdktranslator.TranslateStream(ctx, body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, translatedReq, event.Payload, &param)
+				lines := sdktranslator.TranslateStream(
+					ctx, p.body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, p.translatedReq,
+					event.Payload, &param,
+				)
 				for i := range lines {
 					out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}
 				}
-				reporter.publish(ctx, parseGeminiUsage(event.Payload))
+				p.reporter.publish(ctx, parseGeminiUsage(event.Payload))
 				return false
 			case wsrelay.MessageTypeError:
 				recordAPIResponseError(ctx, e.cfg, event.Err)
-				reporter.publishFailure(ctx)
+				p.reporter.publishFailure(ctx)
 				out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}
 				return false
 			}
@@ -321,7 +332,12 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 }
 
 // CountTokens counts tokens for the given request using the AI Studio API.
-func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *AIStudioExecutor) CountTokens(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	_, body, err := e.translateRequest(req, opts, false)
 	if err != nil {
@@ -339,23 +355,11 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 		Headers: http.Header{"Content-Type": []string{"application/json"}},
 		Body:    body.payload,
 	}
-	var authID, authLabel, authType, authValue string
+	var authID string
 	if auth != nil {
 		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       endpoint,
-		Method:    http.MethodPost,
-		Headers:   wsReq.Headers.Clone(),
-		Body:      body.payload,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	recordUpstreamRequest(ctx, e.cfg, endpoint, wsReq.Headers.Clone(), body.payload, e.Identifier(), auth)
 	resp, err := e.relay.NonStream(ctx, authID, wsReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
@@ -387,7 +391,11 @@ type translatedPayload struct {
 	toFormat sdktranslator.Format
 }
 
-func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream bool) ([]byte, translatedPayload, error) {
+func (e *AIStudioExecutor) translateRequest(
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	stream bool,
+) ([]byte, translatedPayload, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat
@@ -459,7 +467,7 @@ func ensureColonSpacedJSON(payload []byte) []byte {
 	inString := false
 	skipSpace := false
 
-	for i := 0; i < len(indented); i++ {
+	for i := range indented {
 		ch := indented[i]
 		if ch == '"' {
 			// A quote is escaped only when preceded by an odd number of consecutive backslashes.

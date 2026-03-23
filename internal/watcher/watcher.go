@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"gopkg.in/yaml.v3"
 
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -54,18 +54,18 @@ type Watcher struct {
 	oldConfigYaml     []byte
 }
 
-// AuthUpdateAction represents the type of change detected in auth sources.
-type AuthUpdateAction string
+// authUpdateAction represents the type of change detected in auth sources.
+type authUpdateAction string
 
 const (
-	AuthUpdateActionAdd    AuthUpdateAction = "add"
-	AuthUpdateActionModify AuthUpdateAction = "modify"
-	AuthUpdateActionDelete AuthUpdateAction = "delete"
+	AuthUpdateActionAdd    authUpdateAction = "add"
+	AuthUpdateActionModify authUpdateAction = "modify"
+	AuthUpdateActionDelete authUpdateAction = "delete"
 )
 
 // AuthUpdate describes an incremental change to auth configuration.
 type AuthUpdate struct {
-	Action AuthUpdateAction
+	Action authUpdateAction
 	ID     string
 	Auth   *coreauth.Auth
 }

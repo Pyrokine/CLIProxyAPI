@@ -4,7 +4,7 @@
 // embed CLIProxyAPI without importing internal packages.
 package config
 
-import internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+import internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 
 type SDKConfig = internalconfig.SDKConfig
 
@@ -31,24 +31,35 @@ type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 
 type TLS = internalconfig.TLSConfig
 
+// noinspection GoCommentStart,GoUnusedConst,GoUnusedExportedFunction
+
 const (
 	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
 )
 
+// LoadConfig loads configuration from the specified file.
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }
 
+// LoadConfigOptional loads configuration, optionally allowing a missing file.
+// noinspection GoUnusedExportedFunction
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	return internalconfig.LoadConfigOptional(configFile, optional)
 }
 
+// SaveConfigPreserveComments saves the configuration while preserving YAML comments.
+// noinspection GoUnusedExportedFunction
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	return internalconfig.SaveConfigPreserveComments(configFile, cfg)
 }
 
+// SaveConfigPreserveCommentsUpdateNestedScalar updates a single nested scalar value.
+// noinspection GoUnusedExportedFunction
 func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []string, value string) error {
 	return internalconfig.SaveConfigPreserveCommentsUpdateNestedScalar(configFile, path, value)
 }
 
+// NormalizeCommentIndentation fixes indentation of YAML comments.
+// noinspection GoUnusedExportedFunction
 func NormalizeCommentIndentation(data []byte) []byte {
 	return internalconfig.NormalizeCommentIndentation(data)
 }

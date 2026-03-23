@@ -9,24 +9,28 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
 func TestFallbackHandler_ModelMapping_PreservesThinkingSuffixAndRewritesResponse(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	reg := registry.GetGlobalRegistry()
-	reg.RegisterClient("test-client-amp-fallback", "codex", []*registry.ModelInfo{
-		{ID: "test/gpt-5.2", OwnedBy: "openai", Type: "codex"},
-	})
+	reg.RegisterClient(
+		"test-client-amp-fallback", "codex", []*registry.ModelInfo{
+			{ID: "test/gpt-5.2", OwnedBy: "openai", Type: "codex"},
+		},
+	)
 	defer reg.UnregisterClient("test-client-amp-fallback")
 
-	mapper := NewModelMapper([]config.AmpModelMapping{
-		{From: "gpt-5.2", To: "test/gpt-5.2"},
-	})
+	mapper := newModelMapper(
+		[]config.AmpModelMapping{
+			{From: "gpt-5.2", To: "test/gpt-5.2"},
+		},
+	)
 
-	fallback := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy { return nil }, mapper, nil)
+	fallback := newFallbackHandlerWithMapper(func() *httputil.ReverseProxy { return nil }, mapper, nil)
 
 	handler := func(c *gin.Context) {
 		var req struct {
@@ -37,14 +41,16 @@ func TestFallbackHandler_ModelMapping_PreservesThinkingSuffixAndRewritesResponse
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{
-			"model":      req.Model,
-			"seen_model": req.Model,
-		})
+		c.JSON(
+			http.StatusOK, gin.H{
+				"model":      req.Model,
+				"seen_model": req.Model,
+			},
+		)
 	}
 
 	r := gin.New()
-	r.POST("/chat/completions", fallback.WrapHandler(handler))
+	r.POST("/chat/completions", fallback.wrapHandler(handler))
 
 	reqBody := []byte(`{"model":"gpt-5.2(xhigh)"}`)
 	req := httptest.NewRequest(http.MethodPost, "/chat/completions", bytes.NewReader(reqBody))

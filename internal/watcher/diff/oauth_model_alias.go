@@ -3,24 +3,18 @@ package diff
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
-type OAuthModelAliasSummary struct {
-	hash  string
-	count int
-}
-
-// SummarizeOAuthModelAlias summarizes OAuth model alias per channel.
-func SummarizeOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[string]OAuthModelAliasSummary {
+// summarizeOAuthModelAlias summarizes OAuth model alias per channel.
+func summarizeOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[string]modelsSummary {
 	if len(entries) == 0 {
 		return nil
 	}
-	out := make(map[string]OAuthModelAliasSummary, len(entries))
+	out := make(map[string]modelsSummary, len(entries))
 	for k, v := range entries {
 		key := strings.ToLower(strings.TrimSpace(k))
 		if key == "" {
@@ -34,42 +28,18 @@ func SummarizeOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[s
 	return out
 }
 
-// DiffOAuthModelAliasChanges compares OAuth model alias maps.
-func DiffOAuthModelAliasChanges(oldMap, newMap map[string][]config.OAuthModelAlias) ([]string, []string) {
-	oldSummary := SummarizeOAuthModelAlias(oldMap)
-	newSummary := SummarizeOAuthModelAlias(newMap)
-	keys := make(map[string]struct{}, len(oldSummary)+len(newSummary))
-	for k := range oldSummary {
-		keys[k] = struct{}{}
-	}
-	for k := range newSummary {
-		keys[k] = struct{}{}
-	}
-	changes := make([]string, 0, len(keys))
-	affected := make([]string, 0, len(keys))
-	for key := range keys {
-		oldInfo, okOld := oldSummary[key]
-		newInfo, okNew := newSummary[key]
-		switch {
-		case okOld && !okNew:
-			changes = append(changes, fmt.Sprintf("oauth-model-alias[%s]: removed", key))
-			affected = append(affected, key)
-		case !okOld && okNew:
-			changes = append(changes, fmt.Sprintf("oauth-model-alias[%s]: added (%d entries)", key, newInfo.count))
-			affected = append(affected, key)
-		case okOld && okNew && oldInfo.hash != newInfo.hash:
-			changes = append(changes, fmt.Sprintf("oauth-model-alias[%s]: updated (%d -> %d entries)", key, oldInfo.count, newInfo.count))
-			affected = append(affected, key)
-		}
-	}
-	sort.Strings(changes)
-	sort.Strings(affected)
-	return changes, affected
+// oAuthModelAliasChanges compares OAuth model alias maps.
+func oAuthModelAliasChanges(oldMap, newMap map[string][]config.OAuthModelAlias) ([]string, []string) {
+	return diffSummaryMapChanges(
+		summarizeOAuthModelAlias(oldMap),
+		summarizeOAuthModelAlias(newMap),
+		"oauth-model-alias",
+	)
 }
 
-func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAliasSummary {
+func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) modelsSummary {
 	if len(list) == 0 {
-		return OAuthModelAliasSummary{}
+		return modelsSummary{}
 	}
 	seen := make(map[string]struct{}, len(list))
 	normalized := make([]string, 0, len(list))
@@ -90,11 +60,11 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) OAuthModelAlias
 		normalized = append(normalized, key)
 	}
 	if len(normalized) == 0 {
-		return OAuthModelAliasSummary{}
+		return modelsSummary{}
 	}
 	sort.Strings(normalized)
 	sum := sha256.Sum256([]byte(strings.Join(normalized, "|")))
-	return OAuthModelAliasSummary{
+	return modelsSummary{
 		hash:  hex.EncodeToString(sum[:]),
 		count: len(normalized),
 	}

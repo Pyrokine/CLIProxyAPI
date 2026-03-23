@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -16,12 +16,19 @@ import (
 // and restricts matches to the given protocol when supplied. Defaults are checked
 // against the original payload when provided. requestedModel carries the client-visible
 // model name before alias resolution so payload rules can target aliases precisely.
-func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string, payload, original []byte, requestedModel string) []byte {
+func applyPayloadConfigWithRoot(
+	cfg *config.Config,
+	model, protocol, root string,
+	payload, original []byte,
+	requestedModel string,
+) []byte {
 	if cfg == nil || len(payload) == 0 {
 		return payload
 	}
 	rules := cfg.Payload
-	if len(rules.Default) == 0 && len(rules.DefaultRaw) == 0 && len(rules.Override) == 0 && len(rules.OverrideRaw) == 0 && len(rules.Filter) == 0 {
+	if len(rules.Default) == 0 && len(rules.DefaultRaw) == 0 && len(rules.Override) == 0 &&
+		len(rules.OverrideRaw) == 0 &&
+		len(rules.Filter) == 0 {
 		return payload
 	}
 	model = strings.TrimSpace(model)
@@ -220,9 +227,7 @@ func buildPayloadPath(root, path string) string {
 	if p == "" {
 		return r
 	}
-	if strings.HasPrefix(p, ".") {
-		p = p[1:]
-	}
+	p = strings.TrimPrefix(p, ".")
 	return r + "." + p
 }
 
@@ -316,4 +321,34 @@ func matchModelPattern(pattern, model string) bool {
 		pi++
 	}
 	return pi == len(pattern)
+}
+
+// maxTokensByModel returns the output token cap for a given model name.
+// Falls back to 128000 (Anthropic's general maximum as of 2025) for unknown models.
+func maxTokensByModel(model string) int64 {
+	lower := strings.ToLower(model)
+	switch {
+	case strings.Contains(lower, "haiku"):
+		return 64000
+	default:
+		return 128000
+	}
+}
+
+// capMaxTokens clamps max_tokens in the request body to the model's documented limit.
+// This works around Claude Code SDK sending max_tokens=128001 (off-by-one above the API cap).
+func capMaxTokens(body []byte, model string) []byte {
+	mt := gjson.GetBytes(body, "max_tokens")
+	if !mt.Exists() {
+		return body
+	}
+	limit := maxTokensByModel(model)
+	if mt.Int() <= limit {
+		return body
+	}
+	out, err := sjson.SetBytes(body, "max_tokens", limit)
+	if err != nil {
+		return body
+	}
+	return out
 }

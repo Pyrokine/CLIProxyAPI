@@ -63,17 +63,18 @@ func newAuthError(code AuthErrorCode, message string, statusCode int, cause erro
 }
 
 func NewNoCredentialsError() *AuthError {
-	return newAuthError(AuthErrorCodeNoCredentials, "Missing API key", http.StatusUnauthorized, nil)
+	return newAuthError(AuthErrorCodeNoCredentials, "Unauthorized", http.StatusUnauthorized, nil)
 }
 
 func NewInvalidCredentialError() *AuthError {
-	return newAuthError(AuthErrorCodeInvalidCredential, "Invalid API key", http.StatusUnauthorized, nil)
+	return newAuthError(AuthErrorCodeInvalidCredential, "Unauthorized", http.StatusUnauthorized, nil)
 }
 
 func NewNotHandledError() *AuthError {
 	return newAuthError(AuthErrorCodeNotHandled, "authentication provider did not handle request", 0, nil)
 }
 
+// noinspection GoUnusedExportedFunction
 func NewInternalAuthError(message string, cause error) *AuthError {
 	normalizedMessage := strings.TrimSpace(message)
 	if normalizedMessage == "" {

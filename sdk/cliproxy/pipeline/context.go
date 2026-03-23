@@ -4,9 +4,9 @@ import (
 	"context"
 	"net/http"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
 
 // Context encapsulates execution state shared across middleware, translators, and executors.
@@ -19,7 +19,7 @@ type Context struct {
 	Auth *cliproxyauth.Auth
 	// Translator represents the pipeline responsible for schema adaptation.
 	Translator *sdktranslator.Pipeline
-	// HTTPClient allows middleware to customise the outbound transport per request.
+	// HTTPClient allows middleware to customize the outbound transport per request.
 	HTTPClient *http.Client
 }
 

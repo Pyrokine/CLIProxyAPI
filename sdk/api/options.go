@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	internalapi "github.com/router-for-me/CLIProxyAPI/v6/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/logging"
+	internalapi "github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/logging"
 )
 
 // ServerOption customises HTTP server construction.
@@ -21,21 +21,25 @@ type ServerOption = internalapi.ServerOption
 func WithMiddleware(mw ...gin.HandlerFunc) ServerOption { return internalapi.WithMiddleware(mw...) }
 
 // WithEngineConfigurator allows callers to mutate the Gin engine prior to middleware setup.
+// noinspection GoUnusedExportedFunction
 func WithEngineConfigurator(fn func(*gin.Engine)) ServerOption {
 	return internalapi.WithEngineConfigurator(fn)
 }
 
 // WithRouterConfigurator appends a callback after default routes are registered.
+// noinspection GoUnusedExportedFunction
 func WithRouterConfigurator(fn func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)) ServerOption {
 	return internalapi.WithRouterConfigurator(fn)
 }
 
 // WithLocalManagementPassword stores a runtime-only management password accepted for localhost requests.
+// noinspection GoUnusedExportedFunction
 func WithLocalManagementPassword(password string) ServerOption {
 	return internalapi.WithLocalManagementPassword(password)
 }
 
 // WithKeepAliveEndpoint enables a keep-alive endpoint with the provided timeout and callback.
+// noinspection GoUnusedExportedFunction
 func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption {
 	return internalapi.WithKeepAliveEndpoint(timeout, onTimeout)
 }

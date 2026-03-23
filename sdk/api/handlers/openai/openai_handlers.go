@@ -14,42 +14,42 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	responsesconverter "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// OpenAIAPIHandler contains the handlers for OpenAI API endpoints.
+// APIHandler contains the handlers for OpenAI API endpoints.
 // It holds a pool of clients to interact with the backend service.
-type OpenAIAPIHandler struct {
+type APIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
-// NewOpenAIAPIHandler creates a new OpenAI API handlers instance.
-// It takes an BaseAPIHandler instance as input and returns an OpenAIAPIHandler.
+// NewAPIHandler creates a new OpenAI API handlers instance.
+// It takes an BaseAPIHandler instance as input and returns an APIHandler.
 //
 // Parameters:
 //   - apiHandlers: The base API handlers instance
 //
 // Returns:
-//   - *OpenAIAPIHandler: A new OpenAI API handlers instance
-func NewOpenAIAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIAPIHandler {
-	return &OpenAIAPIHandler{
+//   - *APIHandler: A new OpenAI API handlers instance
+func NewAPIHandler(apiHandlers *handlers.BaseAPIHandler) *APIHandler {
+	return &APIHandler{
 		BaseAPIHandler: apiHandlers,
 	}
 }
 
 // HandlerType returns the identifier for this handler implementation.
-func (h *OpenAIAPIHandler) HandlerType() string {
+func (h *APIHandler) HandlerType() string {
 	return OpenAI
 }
 
 // Models returns the OpenAI-compatible model metadata supported by this handler.
-func (h *OpenAIAPIHandler) Models() []map[string]any {
+func (h *APIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
 	return modelRegistry.GetAvailableModels("openai")
@@ -58,7 +58,7 @@ func (h *OpenAIAPIHandler) Models() []map[string]any {
 // OpenAIModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAI-compatible format.
-func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
+func (h *APIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
 
@@ -83,10 +83,12 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 		filteredModels[i] = filteredModel
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"object": "list",
-		"data":   filteredModels,
-	})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"object": "list",
+			"data":   filteredModels,
+		},
+	)
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.
@@ -95,16 +97,18 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
-func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
+func (h *APIHandler) ChatCompletions(c *gin.Context) {
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
+		c.JSON(
+			http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
 			},
-		})
+		)
 		return
 	}
 
@@ -150,16 +154,18 @@ func shouldTreatAsResponsesFormat(rawJSON []byte) bool {
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
-func (h *OpenAIAPIHandler) Completions(c *gin.Context) {
+func (h *APIHandler) Completions(c *gin.Context) {
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
+		c.JSON(
+			http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
 			},
-		})
+		)
 		return
 	}
 
@@ -245,6 +251,21 @@ func convertCompletionsRequestToChatCompletions(rawJSON []byte) []byte {
 	return []byte(out)
 }
 
+// copyCompletionsBaseFields copies id, created, and model from a parsed chat completions
+// response into a text_completion template string.
+func copyCompletionsBaseFields(out string, root gjson.Result) string {
+	if id := root.Get("id"); id.Exists() {
+		out, _ = sjson.Set(out, "id", id.String())
+	}
+	if created := root.Get("created"); created.Exists() {
+		out, _ = sjson.Set(out, "created", created.Int())
+	}
+	if model := root.Get("model"); model.Exists() {
+		out, _ = sjson.Set(out, "model", model.String())
+	}
+	return out
+}
+
 // convertChatCompletionsResponseToCompletions converts chat completions API response back to completions format.
 // This ensures the completions endpoint returns data in the expected format.
 //
@@ -258,57 +279,47 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 
 	// Base completions response structure
 	out := `{"id":"","object":"text_completion","created":0,"model":"","choices":[]}`
-
-	// Copy basic fields
-	if id := root.Get("id"); id.Exists() {
-		out, _ = sjson.Set(out, "id", id.String())
-	}
-
-	if created := root.Get("created"); created.Exists() {
-		out, _ = sjson.Set(out, "created", created.Int())
-	}
-
-	if model := root.Get("model"); model.Exists() {
-		out, _ = sjson.Set(out, "model", model.String())
-	}
+	out = copyCompletionsBaseFields(out, root)
 
 	if usage := root.Get("usage"); usage.Exists() {
 		out, _ = sjson.SetRaw(out, "usage", usage.Raw)
 	}
 
 	// Convert choices from chat completions to completions format
-	var choices []interface{}
+	var choices []any
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
-		chatChoices.ForEach(func(_, choice gjson.Result) bool {
-			completionsChoice := map[string]interface{}{
-				"index": choice.Get("index").Int(),
-			}
-
-			// Extract text content from message.content
-			if message := choice.Get("message"); message.Exists() {
-				if content := message.Get("content"); content.Exists() {
-					completionsChoice["text"] = content.String()
+		chatChoices.ForEach(
+			func(_, choice gjson.Result) bool {
+				completionsChoice := map[string]any{
+					"index": choice.Get("index").Int(),
 				}
-			} else if delta := choice.Get("delta"); delta.Exists() {
-				// For streaming responses, use delta.content
-				if content := delta.Get("content"); content.Exists() {
-					completionsChoice["text"] = content.String()
+
+				// Extract text content from message.content
+				if message := choice.Get("message"); message.Exists() {
+					if content := message.Get("content"); content.Exists() {
+						completionsChoice["text"] = content.String()
+					}
+				} else if delta := choice.Get("delta"); delta.Exists() {
+					// For streaming responses, use delta.content
+					if content := delta.Get("content"); content.Exists() {
+						completionsChoice["text"] = content.String()
+					}
 				}
-			}
 
-			// Copy finish_reason
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-				completionsChoice["finish_reason"] = finishReason.String()
-			}
+				// Copy finish_reason
+				if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+					completionsChoice["finish_reason"] = finishReason.String()
+				}
 
-			// Copy logprobs if present
-			if logprobs := choice.Get("logprobs"); logprobs.Exists() {
-				completionsChoice["logprobs"] = logprobs.Value()
-			}
+				// Copy logprobs if present
+				if logprobs := choice.Get("logprobs"); logprobs.Exists() {
+					completionsChoice["logprobs"] = logprobs.Value()
+				}
 
-			choices = append(choices, completionsChoice)
-			return true
-		})
+				choices = append(choices, completionsChoice)
+				return true
+			},
+		)
 	}
 
 	if len(choices) > 0 {
@@ -334,21 +345,24 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 	hasContent := false
 	hasUsage := root.Get("usage").Exists()
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
-		chatChoices.ForEach(func(_, choice gjson.Result) bool {
-			// Check if delta has content or finish_reason
-			if delta := choice.Get("delta"); delta.Exists() {
-				if content := delta.Get("content"); content.Exists() && content.String() != "" {
+		chatChoices.ForEach(
+			func(_, choice gjson.Result) bool {
+				// Check if delta has content or finish_reason
+				if delta := choice.Get("delta"); delta.Exists() {
+					if content := delta.Get("content"); content.Exists() && content.String() != "" {
+						hasContent = true
+						return false // Break out of forEach
+					}
+				}
+				// Also check for finish_reason to ensure we don't skip final chunks
+				if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "" &&
+					finishReason.String() != "null" {
 					hasContent = true
 					return false // Break out of forEach
 				}
-			}
-			// Also check for finish_reason to ensure we don't skip final chunks
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "" && finishReason.String() != "null" {
-				hasContent = true
-				return false // Break out of forEach
-			}
-			return true
-		})
+				return true
+			},
+		)
 	}
 
 	// If no meaningful content and no usage, return nil to indicate this chunk should be skipped
@@ -358,52 +372,43 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 
 	// Base completions stream response structure
 	out := `{"id":"","object":"text_completion","created":0,"model":"","choices":[]}`
-
-	// Copy basic fields
-	if id := root.Get("id"); id.Exists() {
-		out, _ = sjson.Set(out, "id", id.String())
-	}
-
-	if created := root.Get("created"); created.Exists() {
-		out, _ = sjson.Set(out, "created", created.Int())
-	}
-
-	if model := root.Get("model"); model.Exists() {
-		out, _ = sjson.Set(out, "model", model.String())
-	}
+	out = copyCompletionsBaseFields(out, root)
 
 	// Convert choices from chat completions delta to completions format
-	var choices []interface{}
+	var choices []any
 	if chatChoices := root.Get("choices"); chatChoices.Exists() && chatChoices.IsArray() {
-		chatChoices.ForEach(func(_, choice gjson.Result) bool {
-			completionsChoice := map[string]interface{}{
-				"index": choice.Get("index").Int(),
-			}
+		chatChoices.ForEach(
+			func(_, choice gjson.Result) bool {
+				completionsChoice := map[string]any{
+					"index": choice.Get("index").Int(),
+				}
 
-			// Extract text content from delta.content
-			if delta := choice.Get("delta"); delta.Exists() {
-				if content := delta.Get("content"); content.Exists() && content.String() != "" {
-					completionsChoice["text"] = content.String()
+				// Extract text content from delta.content
+				if delta := choice.Get("delta"); delta.Exists() {
+					if content := delta.Get("content"); content.Exists() && content.String() != "" {
+						completionsChoice["text"] = content.String()
+					} else {
+						completionsChoice["text"] = ""
+					}
 				} else {
 					completionsChoice["text"] = ""
 				}
-			} else {
-				completionsChoice["text"] = ""
-			}
 
-			// Copy finish_reason
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "null" {
-				completionsChoice["finish_reason"] = finishReason.String()
-			}
+				// Copy finish_reason
+				if finishReason := choice.Get("finish_reason"); finishReason.Exists() &&
+					finishReason.String() != "null" {
+					completionsChoice["finish_reason"] = finishReason.String()
+				}
 
-			// Copy logprobs if present
-			if logprobs := choice.Get("logprobs"); logprobs.Exists() {
-				completionsChoice["logprobs"] = logprobs.Value()
-			}
+				// Copy logprobs if present
+				if logprobs := choice.Get("logprobs"); logprobs.Exists() {
+					completionsChoice["logprobs"] = logprobs.Value()
+				}
 
-			choices = append(choices, completionsChoice)
-			return true
-		})
+				choices = append(choices, completionsChoice)
+				return true
+			},
+		)
 	}
 
 	if len(choices) > 0 {
@@ -426,7 +431,7 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAI-compatible request
-func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *APIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
@@ -449,22 +454,26 @@ func (h *OpenAIAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAI-compatible request
-func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *APIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: "Streaming not supported",
-				Type:    "server_error",
+		c.JSON(
+			http.StatusInternalServerError, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "Streaming not supported",
+					Type:    "server_error",
+				},
 			},
-		})
+		)
 		return
 	}
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c))
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(
+		cliCtx, h.HandlerType(), modelName, rawJSON, h.GetAlt(c),
+	)
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -525,7 +534,7 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAI-compatible completions request
-func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *APIHandler) handleCompletionsNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
 	// Convert completions request to chat completions format
@@ -534,7 +543,9 @@ func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context,
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(
+		cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "",
+	)
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -554,16 +565,18 @@ func (h *OpenAIAPIHandler) handleCompletionsNonStreamingResponse(c *gin.Context,
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAI-compatible completions request
-func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *APIHandler) handleCompletionsStreamingResponse(c *gin.Context, rawJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: "Streaming not supported",
-				Type:    "server_error",
+		c.JSON(
+			http.StatusInternalServerError, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "Streaming not supported",
+					Type:    "server_error",
+				},
 			},
-		})
+		)
 		return
 	}
 
@@ -572,7 +585,9 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 
 	modelName := gjson.GetBytes(chatCompletionsJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "")
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(
+		cliCtx, h.HandlerType(), modelName, chatCompletionsJSON, "",
+	)
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
@@ -649,36 +664,46 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 				}
 			}()
 
-			h.handleStreamResult(c, flusher, func(err error) {
-				stop()
-				cliCancel(err)
-			}, convertedChan, errChan)
+			h.handleStreamResult(
+				c, flusher, func(err error) {
+					stop()
+					cliCancel(err)
+				}, convertedChan, errChan,
+			)
 			return
 		}
 	}
 }
-func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
-	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-		WriteChunk: func(chunk []byte) {
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+func (h *APIHandler) handleStreamResult(
+	c *gin.Context,
+	flusher http.Flusher,
+	cancel func(error),
+	data <-chan []byte,
+	errs <-chan *interfaces.ErrorMessage,
+) {
+	h.ForwardStream(
+		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+			WriteChunk: func(chunk []byte) {
+				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
+			},
+			WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+				if errMsg == nil {
+					return
+				}
+				status := http.StatusInternalServerError
+				if errMsg.StatusCode > 0 {
+					status = errMsg.StatusCode
+				}
+				errText := http.StatusText(status)
+				if errMsg.Error != nil && errMsg.Error.Error() != "" {
+					errText = errMsg.Error.Error()
+				}
+				body := handlers.BuildErrorResponseBody(status, errText)
+				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(body))
+			},
+			WriteDone: func() {
+				_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
+			},
 		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			if errMsg == nil {
-				return
-			}
-			status := http.StatusInternalServerError
-			if errMsg.StatusCode > 0 {
-				status = errMsg.StatusCode
-			}
-			errText := http.StatusText(status)
-			if errMsg.Error != nil && errMsg.Error.Error() != "" {
-				errText = errMsg.Error.Error()
-			}
-			body := handlers.BuildErrorResponseBody(status, errText)
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(body))
-		},
-		WriteDone: func() {
-			_, _ = fmt.Fprint(c.Writer, "data: [DONE]\n\n")
-		},
-	})
+	)
 }

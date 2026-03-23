@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	misc "github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -78,8 +78,8 @@ type ThinkingSupport struct {
 	Levels []string `json:"levels,omitempty"`
 }
 
-// ModelRegistration tracks a model's availability
-type ModelRegistration struct {
+// modelRegistration tracks a model's availability
+type modelRegistration struct {
 	// Info contains the model metadata
 	Info *ModelInfo
 	// InfoByProvider maps provider identifiers to specific ModelInfo to support differing capabilities.
@@ -106,7 +106,7 @@ type ModelRegistryHook interface {
 // ModelRegistry manages the global registry of available models
 type ModelRegistry struct {
 	// models maps model ID to registration information
-	models map[string]*ModelRegistration
+	models map[string]*modelRegistration
 	// clientModels maps client ID to the models it provides
 	clientModels map[string][]string
 	// clientModelInfos maps client ID to a map of model ID -> ModelInfo
@@ -126,15 +126,17 @@ var registryOnce sync.Once
 
 // GetGlobalRegistry returns the global model registry instance
 func GetGlobalRegistry() *ModelRegistry {
-	registryOnce.Do(func() {
-		globalRegistry = &ModelRegistry{
-			models:           make(map[string]*ModelRegistration),
-			clientModels:     make(map[string][]string),
-			clientModelInfos: make(map[string]map[string]*ModelInfo),
-			clientProviders:  make(map[string]string),
-			mutex:            &sync.RWMutex{},
-		}
-	})
+	registryOnce.Do(
+		func() {
+			globalRegistry = &ModelRegistry{
+				models:           make(map[string]*modelRegistration),
+				clientModels:     make(map[string][]string),
+				clientModelInfos: make(map[string]map[string]*ModelInfo),
+				clientProviders:  make(map[string]string),
+				mutex:            &sync.RWMutex{},
+			}
+		},
+	)
 	return globalRegistry
 }
 
@@ -150,7 +152,7 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 		p = strings.ToLower(strings.TrimSpace(provider[0]))
 	}
 
-	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
+	if info := GetGlobalRegistry().getModelInfo(modelID, p); info != nil {
 		return info
 	}
 	return LookupStaticModelInfo(modelID)
@@ -298,10 +300,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 			if oldCount == 0 {
 				continue
 			}
-			toRemove := newCount
-			if oldCount < toRemove {
-				toRemove = oldCount
-			}
+			toRemove := min(oldCount, newCount)
 			if reg, ok := r.models[id]; ok && reg.Providers != nil {
 				if count, okProv := reg.Providers[oldProvider]; okProv {
 					if count <= toRemove {
@@ -320,7 +319,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 	// Apply removals first to keep counters accurate.
 	for _, id := range removed {
 		oldCount := oldCounts[id]
-		for i := 0; i < oldCount; i++ {
+		for range oldCount {
 			r.removeModelRegistration(clientID, id, oldProvider, now)
 		}
 	}
@@ -331,7 +330,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 			continue
 		}
 		overage := oldCount - newCount
-		for i := 0; i < overage; i++ {
+		for range overage {
 			r.removeModelRegistration(clientID, id, oldProvider, now)
 		}
 	}
@@ -344,7 +343,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		}
 		model := newModels[id]
 		diff := newCount - oldCount
-		for i := 0; i < diff; i++ {
+		for range diff {
 			r.addModelRegistration(id, provider, model, now)
 		}
 	}
@@ -441,7 +440,7 @@ func (r *ModelRegistry) addModelRegistration(modelID, provider string, model *Mo
 		return
 	}
 
-	registration := &ModelRegistration{
+	registration := &modelRegistration{
 		Info:                 cloneModelInfo(model),
 		InfoByProvider:       make(map[string]*ModelInfo),
 		Count:                1,
@@ -742,13 +741,11 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 			}
 		}
 
-		effectiveClients := availableClients - expiredClients - otherSuspended
-		if effectiveClients < 0 {
-			effectiveClients = 0
-		}
+		effectiveClients := max(availableClients-expiredClients-otherSuspended, 0)
 
 		// Include models that have available clients, or those solely cooling down.
-		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+		if effectiveClients > 0 ||
+			(availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			model := r.convertModelToMap(registration.Info, handlerType)
 			if model != nil {
 				models = append(models, model)
@@ -865,12 +862,10 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 		}
 
 		availableClients := entry.count
-		effectiveClients := availableClients - expiredClients - otherSuspended
-		if effectiveClients < 0 {
-			effectiveClients = 0
-		}
+		effectiveClients := max(availableClients-expiredClients-otherSuspended, 0)
 
-		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
+		if effectiveClients > 0 ||
+			(availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			if entry.info != nil {
 				result = append(result, entry.info)
 				continue
@@ -884,13 +879,13 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 	return result
 }
 
-// GetModelCount returns the number of available clients for a specific model
+// getModelCount returns the number of available clients for a specific model
 // Parameters:
 //   - modelID: The model ID to check
 //
 // Returns:
 //   - int: Number of available clients for the model
-func (r *ModelRegistry) GetModelCount(modelID string) int {
+func (r *ModelRegistry) getModelCount(modelID string) int {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
@@ -961,12 +956,14 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 		return nil
 	}
 
-	sort.Slice(providers, func(i, j int) bool {
-		if providers[i].count == providers[j].count {
-			return providers[i].name < providers[j].name
-		}
-		return providers[i].count > providers[j].count
-	})
+	sort.Slice(
+		providers, func(i, j int) bool {
+			if providers[i].count == providers[j].count {
+				return providers[i].name < providers[j].name
+			}
+			return providers[i].count > providers[j].count
+		},
+	)
 
 	result := make([]string, 0, len(providers))
 	for _, item := range providers {
@@ -975,8 +972,8 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 	return result
 }
 
-// GetModelInfo returns ModelInfo, prioritizing provider-specific definition if available.
-func (r *ModelRegistry) GetModelInfo(modelID, provider string) *ModelInfo {
+// getModelInfo returns ModelInfo, prioritizing provider-specific definition if available.
+func (r *ModelRegistry) getModelInfo(modelID, provider string) *ModelInfo {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 	if reg, ok := r.models[modelID]; ok && reg != nil {
@@ -1104,24 +1101,6 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 	}
 }
 
-// CleanupExpiredQuotas removes expired quota tracking entries
-func (r *ModelRegistry) CleanupExpiredQuotas() {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-
-	now := time.Now()
-	quotaExpiredDuration := 5 * time.Minute
-
-	for modelID, registration := range r.models {
-		for clientID, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime != nil && now.Sub(*quotaTime) >= quotaExpiredDuration {
-				delete(registration.QuotaExceededClients, clientID)
-				log.Debugf("Cleaned up expired quota tracking for model %s, client %s", modelID, clientID)
-			}
-		}
-	}
-}
-
 // GetFirstAvailableModel returns the first available model for the given handler type.
 // It prioritizes models by their creation timestamp (newest first) and checks if they have
 // available clients that are not suspended or over quota.
@@ -1143,20 +1122,22 @@ func (r *ModelRegistry) GetFirstAvailableModel(handlerType string) (string, erro
 	}
 
 	// Sort models by creation timestamp (newest first)
-	sort.Slice(models, func(i, j int) bool {
-		// Extract created timestamps from map
-		createdI, okI := models[i]["created"].(int64)
-		createdJ, okJ := models[j]["created"].(int64)
-		if !okI || !okJ {
-			return false
-		}
-		return createdI > createdJ
-	})
+	sort.Slice(
+		models, func(i, j int) bool {
+			// Extract created timestamps from map
+			createdI, okI := models[i]["created"].(int64)
+			createdJ, okJ := models[j]["created"].(int64)
+			if !okI || !okJ {
+				return false
+			}
+			return createdI > createdJ
+		},
+	)
 
 	// Find the first model with available clients
 	for _, model := range models {
 		if modelID, ok := model["id"].(string); ok {
-			if count := r.GetModelCount(modelID); count > 0 {
+			if count := r.getModelCount(modelID); count > 0 {
 				return modelID, nil
 			}
 		}

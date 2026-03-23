@@ -7,14 +7,14 @@ import (
 
 const testModelName = "claude-sonnet-4-5"
 
-func TestCacheSignature_BasicStorageAndRetrieval(t *testing.T) {
+func TestStoreSignature_BasicStorageAndRetrieval(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "This is some thinking text content"
 	signature := "abc123validSignature1234567890123456789012345678901234567890"
 
 	// Store signature
-	CacheSignature(testModelName, text, signature)
+	StoreSignature(testModelName, text, signature)
 
 	// Retrieve signature
 	retrieved := GetCachedSignature(testModelName, text)
@@ -23,7 +23,7 @@ func TestCacheSignature_BasicStorageAndRetrieval(t *testing.T) {
 	}
 }
 
-func TestCacheSignature_DifferentModelGroups(t *testing.T) {
+func TestStoreSignature_DifferentModelGroups(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "Same text across models"
@@ -31,8 +31,8 @@ func TestCacheSignature_DifferentModelGroups(t *testing.T) {
 	sig2 := "signature2_1234567890123456789012345678901234567890123456"
 
 	geminiModel := "gemini-3-pro-preview"
-	CacheSignature(testModelName, text, sig1)
-	CacheSignature(geminiModel, text, sig2)
+	StoreSignature(testModelName, text, sig1)
+	StoreSignature(geminiModel, text, sig2)
 
 	if GetCachedSignature(testModelName, text) != sig1 {
 		t.Error("Claude signature mismatch")
@@ -42,7 +42,7 @@ func TestCacheSignature_DifferentModelGroups(t *testing.T) {
 	}
 }
 
-func TestCacheSignature_NotFound(t *testing.T) {
+func TestStoreSignature_NotFound(t *testing.T) {
 	ClearSignatureCache("")
 
 	// Non-existent session
@@ -51,32 +51,32 @@ func TestCacheSignature_NotFound(t *testing.T) {
 	}
 
 	// Existing session but different text
-	CacheSignature(testModelName, "text-a", "sigA12345678901234567890123456789012345678901234567890")
+	StoreSignature(testModelName, "text-a", "sigA12345678901234567890123456789012345678901234567890")
 	if got := GetCachedSignature(testModelName, "text-b"); got != "" {
 		t.Errorf("Expected empty string for different text, got '%s'", got)
 	}
 }
 
-func TestCacheSignature_EmptyInputs(t *testing.T) {
+func TestStoreSignature_EmptyInputs(t *testing.T) {
 	ClearSignatureCache("")
 
 	// All empty/invalid inputs should be no-ops
-	CacheSignature(testModelName, "", "sig12345678901234567890123456789012345678901234567890")
-	CacheSignature(testModelName, "text", "")
-	CacheSignature(testModelName, "text", "short") // Too short
+	StoreSignature(testModelName, "", "sig12345678901234567890123456789012345678901234567890")
+	StoreSignature(testModelName, "text", "")
+	StoreSignature(testModelName, "text", "short") // Too short
 
 	if got := GetCachedSignature(testModelName, "text"); got != "" {
 		t.Errorf("Expected empty after invalid cache attempts, got '%s'", got)
 	}
 }
 
-func TestCacheSignature_ShortSignatureRejected(t *testing.T) {
+func TestStoreSignature_ShortSignatureRejected(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "Some text"
 	shortSig := "abc123" // Less than 50 chars
 
-	CacheSignature(testModelName, text, shortSig)
+	StoreSignature(testModelName, text, shortSig)
 
 	if got := GetCachedSignature(testModelName, text); got != "" {
 		t.Errorf("Short signature should be rejected, got '%s'", got)
@@ -87,8 +87,8 @@ func TestClearSignatureCache_ModelGroup(t *testing.T) {
 	ClearSignatureCache("")
 
 	sig := "validSig1234567890123456789012345678901234567890123456"
-	CacheSignature(testModelName, "text", sig)
-	CacheSignature(testModelName, "text-2", sig)
+	StoreSignature(testModelName, "text", sig)
+	StoreSignature(testModelName, "text-2", sig)
 
 	ClearSignatureCache("session-1")
 
@@ -101,8 +101,8 @@ func TestClearSignatureCache_AllSessions(t *testing.T) {
 	ClearSignatureCache("")
 
 	sig := "validSig1234567890123456789012345678901234567890123456"
-	CacheSignature(testModelName, "text", sig)
-	CacheSignature(testModelName, "text-2", sig)
+	StoreSignature(testModelName, "text", sig)
+	StoreSignature(testModelName, "text-2", sig)
 
 	ClearSignatureCache("")
 
@@ -130,16 +130,18 @@ func TestHasValidSignature(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := HasValidSignature(tt.modelName, tt.signature)
-			if result != tt.expected {
-				t.Errorf("HasValidSignature(%q) = %v, expected %v", tt.signature, result, tt.expected)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				result := HasValidSignature(tt.modelName, tt.signature)
+				if result != tt.expected {
+					t.Errorf("HasValidSignature(%q) = %v, expected %v", tt.signature, result, tt.expected)
+				}
+			},
+		)
 	}
 }
 
-func TestCacheSignature_TextHashCollisionResistance(t *testing.T) {
+func TestStoreSignature_TextHashCollisionResistance(t *testing.T) {
 	ClearSignatureCache("")
 
 	// Different texts should produce different hashes
@@ -148,8 +150,8 @@ func TestCacheSignature_TextHashCollisionResistance(t *testing.T) {
 	sig1 := "signature1_1234567890123456789012345678901234567890123456"
 	sig2 := "signature2_1234567890123456789012345678901234567890123456"
 
-	CacheSignature(testModelName, text1, sig1)
-	CacheSignature(testModelName, text2, sig2)
+	StoreSignature(testModelName, text1, sig1)
+	StoreSignature(testModelName, text2, sig2)
 
 	if GetCachedSignature(testModelName, text1) != sig1 {
 		t.Error("text1 signature mismatch")
@@ -159,28 +161,28 @@ func TestCacheSignature_TextHashCollisionResistance(t *testing.T) {
 	}
 }
 
-func TestCacheSignature_UnicodeText(t *testing.T) {
+func TestStoreSignature_UnicodeText(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "한글 텍스트와 이모지 🎉 그리고 特殊文字"
 	sig := "unicodeSig123456789012345678901234567890123456789012345"
 
-	CacheSignature(testModelName, text, sig)
+	StoreSignature(testModelName, text, sig)
 
 	if got := GetCachedSignature(testModelName, text); got != sig {
 		t.Errorf("Unicode text signature retrieval failed, got '%s'", got)
 	}
 }
 
-func TestCacheSignature_Overwrite(t *testing.T) {
+func TestStoreSignature_Overwrite(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "Same text"
 	sig1 := "firstSignature12345678901234567890123456789012345678901"
 	sig2 := "secondSignature1234567890123456789012345678901234567890"
 
-	CacheSignature(testModelName, text, sig1)
-	CacheSignature(testModelName, text, sig2) // Overwrite
+	StoreSignature(testModelName, text, sig1)
+	StoreSignature(testModelName, text, sig2) // Overwrite
 
 	if got := GetCachedSignature(testModelName, text); got != sig2 {
 		t.Errorf("Expected overwritten signature '%s', got '%s'", sig2, got)
@@ -189,7 +191,7 @@ func TestCacheSignature_Overwrite(t *testing.T) {
 
 // Note: TTL expiration test is tricky to test without mocking time
 // We test the logic path exists but actual expiration would require time manipulation
-func TestCacheSignature_ExpirationLogic(t *testing.T) {
+func TestStoreSignature_ExpirationLogic(t *testing.T) {
 	ClearSignatureCache("")
 
 	// This test verifies the expiration check exists
@@ -197,7 +199,7 @@ func TestCacheSignature_ExpirationLogic(t *testing.T) {
 	text := "text"
 	sig := "validSig1234567890123456789012345678901234567890123456"
 
-	CacheSignature(testModelName, text, sig)
+	StoreSignature(testModelName, text, sig)
 
 	// Fresh entry should be retrievable
 	if got := GetCachedSignature(testModelName, text); got != sig {

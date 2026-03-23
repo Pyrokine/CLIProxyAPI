@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	kimiauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	kimiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/kimi"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -28,6 +28,14 @@ import (
 type KimiExecutor struct {
 	ClaudeExecutor
 	cfg *config.Config
+}
+
+// kimiRequest holds the prepared artifacts shared by Execute and ExecuteStream.
+type kimiRequest struct {
+	from, to sdktranslator.Format
+	body     []byte
+	httpReq  *http.Request
+	reporter *usageReporter
 }
 
 // NewKimiExecutor creates a new Kimi executor.
@@ -49,7 +57,10 @@ func (e *KimiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 }
 
 // HttpRequest injects Kimi credentials into the request and executes it.
-func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (*http.Response, error) {
+func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, req *http.Request) (
+	*http.Response,
+	error,
+) {
 	if req == nil {
 		return nil, fmt.Errorf("kimi executor: request is nil")
 	}
@@ -64,75 +75,93 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 	return httpClient.Do(httpReq)
 }
 
-// Execute performs a non-streaming chat completion request to Kimi.
-func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	from := opts.SourceFormat
-	if from.String() == "claude" {
-		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
-		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
-	}
-
+// prepareKimiRequest builds the translated, config-applied HTTP request shared by Execute and ExecuteStream.
+func (e *KimiExecutor) prepareKimiRequest(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	isStream bool,
+) (*kimiRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-
 	token := kimiCreds(auth)
 
 	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
 
+	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := bytes.Clone(originalPayloadSource)
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, isStream)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), isStream)
 
 	// Strip kimi- prefix for upstream API
 	upstreamModel := stripKimiPrefix(baseModel)
+	var err error
 	body, err = sjson.SetBytes(body, "model", upstreamModel)
 	if err != nil {
-		return resp, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
+		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
 	}
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "kimi", e.Identifier())
 	if err != nil {
-		return resp, err
+		return nil, err
 	}
 
+	if isStream {
+		body, err = sjson.SetBytes(body, "stream_options.include_usage", true)
+		if err != nil {
+			return nil, fmt.Errorf("kimi executor: failed to set stream_options in payload: %w", err)
+		}
+	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, err = normalizeKimiToolMessageLinks(body)
 	if err != nil {
-		return resp, err
+		return nil, err
 	}
 
-	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
+	url := kimiauth.APIBaseURL + "/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	applyKimiHeadersWithAuth(httpReq, token, isStream, auth)
+	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
+
+	return &kimiRequest{
+		from:     from,
+		to:       to,
+		body:     body,
+		httpReq:  httpReq,
+		reporter: reporter,
+	}, nil
+}
+
+// Execute performs a non-streaming chat completion request to Kimi.
+func (e *KimiExecutor) Execute(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (resp cliproxyexecutor.Response, err error) {
+	from := opts.SourceFormat
+	if from.String() == "claude" {
+		auth.Attributes["base_url"] = kimiauth.APIBaseURL
+		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
+	}
+
+	prepared, err := e.prepareKimiRequest(ctx, auth, req, opts, false)
 	if err != nil {
 		return resp, err
 	}
-	applyKimiHeadersWithAuth(httpReq, token, false, auth)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -146,7 +175,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		logWithRequestID(ctx).Debugf(
+			"request error, error status: %d, error message: %s", httpResp.StatusCode,
+			summarizeErrorBody(httpResp.Header.Get("Content-Type"), b),
+		)
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
@@ -156,87 +188,36 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.publish(ctx, parseOpenAIUsage(data))
+	prepared.reporter.publish(ctx, parseOpenAIUsage(data))
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.body, data, &param)
 	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
 // ExecuteStream performs a streaming chat completion request to Kimi.
-func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+func (e *KimiExecutor) ExecuteStream(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (_ *cliproxyexecutor.StreamResult, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
-		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+		auth.Attributes["base_url"] = kimiauth.APIBaseURL
 		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
 
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	token := kimiCreds(auth)
-
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
-
-	to := sdktranslator.FromString("openai")
-	originalPayloadSource := req.Payload
-	if len(opts.OriginalRequest) > 0 {
-		originalPayloadSource = opts.OriginalRequest
-	}
-	originalPayload := bytes.Clone(originalPayloadSource)
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
-
-	// Strip kimi- prefix for upstream API
-	upstreamModel := stripKimiPrefix(baseModel)
-	body, err = sjson.SetBytes(body, "model", upstreamModel)
-	if err != nil {
-		return nil, fmt.Errorf("kimi executor: failed to set model in payload: %w", err)
-	}
-
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "kimi", e.Identifier())
+	prepared, err := e.prepareKimiRequest(ctx, auth, req, opts, true)
 	if err != nil {
 		return nil, err
 	}
-
-	body, err = sjson.SetBytes(body, "stream_options.include_usage", true)
-	if err != nil {
-		return nil, fmt.Errorf("kimi executor: failed to set stream_options in payload: %w", err)
-	}
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	body, err = normalizeKimiToolMessageLinks(body)
-	if err != nil {
-		return nil, err
-	}
-
-	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	applyKimiHeadersWithAuth(httpReq, token, true, auth)
-	var authID, authLabel, authType, authValue string
-	if auth != nil {
-		authID = auth.ID
-		authLabel = auth.Label
-		authType, authValue = auth.AccountInfo()
-	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	defer prepared.reporter.trackFailure(ctx, &err)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, err := httpClient.Do(httpReq)
+	httpResp, err := httpClient.Do(prepared.httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -245,7 +226,10 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
-		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		logWithRequestID(ctx).Debugf(
+			"request error, error status: %d, error message: %s", httpResp.StatusCode,
+			summarizeErrorBody(httpResp.Header.Get("Content-Type"), b),
+		)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("kimi executor: close response body error: %v", errClose)
 		}
@@ -253,6 +237,10 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
+	reporter := prepared.reporter
+	body := prepared.body
+	from = prepared.from
+	to := prepared.to
 	go func() {
 		defer close(out)
 		defer func() {
@@ -269,12 +257,16 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
+			chunks := sdktranslator.TranslateStream(
+				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
+			)
 			for i := range chunks {
 				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
 			}
 		}
-		doneChunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+		doneChunks := sdktranslator.TranslateStream(
+			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
+		)
 		for i := range doneChunks {
 			out <- cliproxyexecutor.StreamChunk{Payload: []byte(doneChunks[i])}
 		}
@@ -288,8 +280,13 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 // CountTokens estimates token count for Kimi requests.
-func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
+func (e *KimiExecutor) CountTokens(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
+	auth.Attributes["base_url"] = kimiauth.APIBaseURL
 	return e.ClaudeExecutor.CountTokens(ctx, auth, req, opts)
 }
 
@@ -394,16 +391,20 @@ func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
 	}
 
 	if patched > 0 || patchedReasoning > 0 {
-		log.WithFields(log.Fields{
-			"patched_tool_messages":      patched,
-			"patched_reasoning_messages": patchedReasoning,
-		}).Debug("kimi executor: normalized tool message fields")
+		log.WithFields(
+			log.Fields{
+				"patched_tool_messages":      patched,
+				"patched_reasoning_messages": patchedReasoning,
+			},
+		).Debug("kimi executor: normalized tool message fields")
 	}
 	if ambiguous > 0 {
-		log.WithFields(log.Fields{
-			"ambiguous_tool_messages": ambiguous,
-			"pending_tool_calls":      len(pending),
-		}).Warn("kimi executor: tool messages missing tool_call_id with ambiguous candidates")
+		log.WithFields(
+			log.Fields{
+				"ambiguous_tool_messages": ambiguous,
+				"pending_tool_calls":      len(pending),
+			},
+		).Warn("kimi executor: tool messages missing tool_call_id with ambiguous candidates")
 	}
 
 	return out, nil
@@ -519,7 +520,7 @@ func resolveKimiDeviceIDFromStorage(auth *cliproxyauth.Auth) string {
 		return ""
 	}
 
-	storage, ok := auth.Storage.(*kimiauth.KimiTokenStorage)
+	storage, ok := auth.Storage.(*kimiauth.TokenStorage)
 	if !ok || storage == nil {
 		return ""
 	}

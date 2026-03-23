@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // Manager aggregates authenticators and coordinates persistence via a token store.
@@ -44,7 +44,11 @@ func (m *Manager) SetStore(store coreauth.Store) {
 }
 
 // Login executes the provider login flow and persists the resulting auth record.
-func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, string, error) {
+func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config, opts *LoginOptions) (
+	*coreauth.Auth,
+	string,
+	error,
+) {
 	auth, ok := m.authenticators[provider]
 	if !ok {
 		return nil, "", fmt.Errorf("cliproxy auth: authenticator %s not registered", provider)

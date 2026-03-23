@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func TestNewFileSynthesizer(t *testing.T) {
@@ -192,7 +192,7 @@ func TestFileSynthesizer_Synthesize_SkipsInvalidFiles(t *testing.T) {
 func TestFileSynthesizer_Synthesize_SkipsDirectories(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create a subdirectory with a json file inside
+	// Create a subdirectory with a JSON file inside
 	subDir := filepath.Join(tempDir, "subdir.json")
 	err := os.Mkdir(subDir, 0755)
 	if err != nil {
@@ -266,34 +266,36 @@ func TestFileSynthesizer_Synthesize_PrefixValidation(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tempDir := t.TempDir()
-			authData := map[string]any{
-				"type":   "claude",
-				"prefix": tt.prefix,
-			}
-			data, _ := json.Marshal(authData)
-			_ = os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				tempDir := t.TempDir()
+				authData := map[string]any{
+					"type":   "claude",
+					"prefix": tt.prefix,
+				}
+				data, _ := json.Marshal(authData)
+				_ = os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
 
-			synth := NewFileSynthesizer()
-			ctx := &SynthesisContext{
-				Config:      &config.Config{},
-				AuthDir:     tempDir,
-				Now:         time.Now(),
-				IDGenerator: NewStableIDGenerator(),
-			}
+				synth := NewFileSynthesizer()
+				ctx := &SynthesisContext{
+					Config:      &config.Config{},
+					AuthDir:     tempDir,
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
 
-			auths, err := synth.Synthesize(ctx)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(auths) != 1 {
-				t.Fatalf("expected 1 auth, got %d", len(auths))
-			}
-			if auths[0].Prefix != tt.wantPrefix {
-				t.Errorf("expected prefix %q, got %q", tt.wantPrefix, auths[0].Prefix)
-			}
-		})
+				auths, err := synth.Synthesize(ctx)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(auths) != 1 {
+					t.Fatalf("expected 1 auth, got %d", len(auths))
+				}
+				if auths[0].Prefix != tt.wantPrefix {
+					t.Errorf("expected prefix %q, got %q", tt.wantPrefix, auths[0].Prefix)
+				}
+			},
+		)
 	}
 }
 
@@ -324,48 +326,50 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tempDir := t.TempDir()
-			authData := map[string]any{
-				"type":     "claude",
-				"priority": tt.priority,
-			}
-			data, _ := json.Marshal(authData)
-			errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
-			if errWriteFile != nil {
-				t.Fatalf("failed to write auth file: %v", errWriteFile)
-			}
-
-			synth := NewFileSynthesizer()
-			ctx := &SynthesisContext{
-				Config:      &config.Config{},
-				AuthDir:     tempDir,
-				Now:         time.Now(),
-				IDGenerator: NewStableIDGenerator(),
-			}
-
-			auths, errSynthesize := synth.Synthesize(ctx)
-			if errSynthesize != nil {
-				t.Fatalf("unexpected error: %v", errSynthesize)
-			}
-			if len(auths) != 1 {
-				t.Fatalf("expected 1 auth, got %d", len(auths))
-			}
-
-			value, ok := auths[0].Attributes["priority"]
-			if tt.hasValue {
-				if !ok {
-					t.Fatal("expected priority attribute to be set")
+		t.Run(
+			tt.name, func(t *testing.T) {
+				tempDir := t.TempDir()
+				authData := map[string]any{
+					"type":     "claude",
+					"priority": tt.priority,
 				}
-				if value != tt.want {
-					t.Fatalf("expected priority %q, got %q", tt.want, value)
+				data, _ := json.Marshal(authData)
+				errWriteFile := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644)
+				if errWriteFile != nil {
+					t.Fatalf("failed to write auth file: %v", errWriteFile)
 				}
-				return
-			}
-			if ok {
-				t.Fatalf("expected priority attribute to be absent, got %q", value)
-			}
-		})
+
+				synth := NewFileSynthesizer()
+				ctx := &SynthesisContext{
+					Config:      &config.Config{},
+					AuthDir:     tempDir,
+					Now:         time.Now(),
+					IDGenerator: NewStableIDGenerator(),
+				}
+
+				auths, errSynthesize := synth.Synthesize(ctx)
+				if errSynthesize != nil {
+					t.Fatalf("unexpected error: %v", errSynthesize)
+				}
+				if len(auths) != 1 {
+					t.Fatalf("expected 1 auth, got %d", len(auths))
+				}
+
+				value, ok := auths[0].Attributes["priority"]
+				if tt.hasValue {
+					if !ok {
+						t.Fatal("expected priority attribute to be set")
+					}
+					if value != tt.want {
+						t.Fatalf("expected priority %q, got %q", tt.want, value)
+					}
+					return
+				}
+				if ok {
+					t.Fatalf("expected priority attribute to be absent, got %q", value)
+				}
+			},
+		)
 	}
 }
 
@@ -411,13 +415,13 @@ func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 func TestSynthesizeGeminiVirtualAuths_NilInputs(t *testing.T) {
 	now := time.Now()
 
-	if SynthesizeGeminiVirtualAuths(nil, nil, now) != nil {
+	if synthesizeGeminiVirtualAuths(nil, nil, now) != nil {
 		t.Error("expected nil for nil primary")
 	}
-	if SynthesizeGeminiVirtualAuths(&coreauth.Auth{}, nil, now) != nil {
+	if synthesizeGeminiVirtualAuths(&coreauth.Auth{}, nil, now) != nil {
 		t.Error("expected nil for nil metadata")
 	}
-	if SynthesizeGeminiVirtualAuths(nil, map[string]any{}, now) != nil {
+	if synthesizeGeminiVirtualAuths(nil, map[string]any{}, now) != nil {
 		t.Error("expected nil for nil primary with metadata")
 	}
 }
@@ -435,7 +439,7 @@ func TestSynthesizeGeminiVirtualAuths_SingleProject(t *testing.T) {
 		"type":       "gemini",
 	}
 
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
+	virtuals := synthesizeGeminiVirtualAuths(primary, metadata, now)
 	if virtuals != nil {
 		t.Error("single project should not create virtuals")
 	}
@@ -462,7 +466,7 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 		"disable_cooling": true,
 	}
 
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
+	virtuals := synthesizeGeminiVirtualAuths(primary, metadata, now)
 
 	if len(virtuals) != 3 {
 		t.Fatalf("expected 3 virtuals, got %d", len(virtuals))
@@ -510,7 +514,9 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 			t.Errorf("expected gemini_virtual_parent=primary-id, got %s", v.Attributes["gemini_virtual_parent"])
 		}
 		if v.Attributes["gemini_virtual_project"] != projectIDs[i] {
-			t.Errorf("expected gemini_virtual_project=%s, got %s", projectIDs[i], v.Attributes["gemini_virtual_project"])
+			t.Errorf(
+				"expected gemini_virtual_project=%s, got %s", projectIDs[i], v.Attributes["gemini_virtual_project"],
+			)
 		}
 		if !strings.Contains(v.Label, "["+projectIDs[i]+"]") {
 			t.Errorf("expected label to contain [%s], got %s", projectIDs[i], v.Label)
@@ -533,7 +539,7 @@ func TestSynthesizeGeminiVirtualAuths_EmptyProviderAndLabel(t *testing.T) {
 		"type":       "gemini",
 	}
 
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
+	virtuals := synthesizeGeminiVirtualAuths(primary, metadata, now)
 
 	if len(virtuals) != 2 {
 		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
@@ -563,7 +569,7 @@ func TestSynthesizeGeminiVirtualAuths_NilPrimaryAttributes(t *testing.T) {
 		"type":       "gemini",
 	}
 
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
+	virtuals := synthesizeGeminiVirtualAuths(primary, metadata, now)
 
 	if len(virtuals) != 2 {
 		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
@@ -621,18 +627,20 @@ func TestSplitGeminiProjectIDs(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := splitGeminiProjectIDs(tt.metadata)
-			if len(got) != len(tt.want) {
-				t.Fatalf("expected %v, got %v", tt.want, got)
-			}
-			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("expected %v, got %v", tt.want, got)
-					break
+		t.Run(
+			tt.name, func(t *testing.T) {
+				got := splitGeminiProjectIDs(tt.metadata)
+				if len(got) != len(tt.want) {
+					t.Fatalf("expected %v, got %v", tt.want, got)
 				}
-			}
-		})
+				for i := range got {
+					if got[i] != tt.want[i] {
+						t.Errorf("expected %v, got %v", tt.want, got)
+						break
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -688,7 +696,9 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 			t.Errorf("expected virtual %d to be active, got %s", i, v.Status)
 		}
 		if v.Attributes["gemini_virtual_parent"] != primary.ID {
-			t.Errorf("expected virtual %d parent to be %s, got %s", i, primary.ID, v.Attributes["gemini_virtual_parent"])
+			t.Errorf(
+				"expected virtual %d parent to be %s, got %s", i, primary.ID, v.Attributes["gemini_virtual_parent"],
+			)
 		}
 		if gotPriority := v.Attributes["priority"]; gotPriority != "10" {
 			t.Errorf("expected virtual %d priority 10, got %q", i, gotPriority)
@@ -736,11 +746,13 @@ func TestBuildGeminiVirtualID(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := buildGeminiVirtualID(tt.baseID, tt.projectID)
-			if got != tt.want {
-				t.Errorf("expected %q, got %q", tt.want, got)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				got := buildGeminiVirtualID(tt.baseID, tt.projectID)
+				if got != tt.want {
+					t.Errorf("expected %q, got %q", tt.want, got)
+				}
+			},
+		)
 	}
 }

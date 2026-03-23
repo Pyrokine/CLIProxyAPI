@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
@@ -136,12 +136,10 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 
 	goroutines := 32
 	iterations := 100
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range goroutines {
+		wg.Go(func() {
 			<-start
-			for j := 0; j < iterations; j++ {
+			for range iterations {
 				got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
 				if err != nil {
 					select {
@@ -152,20 +150,20 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 				}
 				if got == nil {
 					select {
-					case errCh <- errors.New("Pick() returned nil auth"):
+					case errCh <- errors.New("pick() returned nil auth"):
 					default:
 					}
 					return
 				}
 				if got.ID == "" {
 					select {
-					case errCh <- errors.New("Pick() returned auth with empty ID"):
+					case errCh <- errors.New("pick() returned auth with empty ID"):
 					default:
 					}
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	close(start)
@@ -215,70 +213,74 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 		},
 	}
 
-	t.Run("mixed provider redacts provider field", func(t *testing.T) {
-		t.Parallel()
+	t.Run(
+		"mixed provider redacts provider field", func(t *testing.T) {
+			t.Parallel()
 
-		selector := &FillFirstSelector{}
-		_, err := selector.Pick(context.Background(), "mixed", model, cliproxyexecutor.Options{}, auths)
-		if err == nil {
-			t.Fatalf("Pick() error = nil")
-		}
+			selector := &FillFirstSelector{}
+			_, err := selector.Pick(context.Background(), "mixed", model, cliproxyexecutor.Options{}, auths)
+			if err == nil {
+				t.Fatalf("Pick() error = nil")
+			}
 
-		var mce *modelCooldownError
-		if !errors.As(err, &mce) {
-			t.Fatalf("Pick() error = %T, want *modelCooldownError", err)
-		}
-		if mce.StatusCode() != http.StatusTooManyRequests {
-			t.Fatalf("StatusCode() = %d, want %d", mce.StatusCode(), http.StatusTooManyRequests)
-		}
+			var mce *modelCooldownError
+			if !errors.As(err, &mce) {
+				t.Fatalf("Pick() error = %T, want *modelCooldownError", err)
+			}
+			if mce.StatusCode() != http.StatusTooManyRequests {
+				t.Fatalf("StatusCode() = %d, want %d", mce.StatusCode(), http.StatusTooManyRequests)
+			}
 
-		headers := mce.Headers()
-		if got := headers.Get("Retry-After"); got == "" {
-			t.Fatalf("Headers().Get(Retry-After) = empty")
-		}
+			headers := mce.Headers()
+			if got := headers.Get("Retry-After"); got == "" {
+				t.Fatalf("Headers().Get(Retry-After) = empty")
+			}
 
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(mce.Error()), &payload); err != nil {
-			t.Fatalf("json.Unmarshal(Error()) error = %v", err)
-		}
-		rawErr, ok := payload["error"].(map[string]any)
-		if !ok {
-			t.Fatalf("Error() payload missing error object: %v", payload)
-		}
-		if got, _ := rawErr["code"].(string); got != "model_cooldown" {
-			t.Fatalf("Error().error.code = %q, want %q", got, "model_cooldown")
-		}
-		if _, ok := rawErr["provider"]; ok {
-			t.Fatalf("Error().error.provider exists for mixed provider: %v", rawErr["provider"])
-		}
-	})
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(mce.Error()), &payload); err != nil {
+				t.Fatalf("json.Unmarshal(Error()) error = %v", err)
+			}
+			rawErr, ok := payload["error"].(map[string]any)
+			if !ok {
+				t.Fatalf("Error() payload missing error object: %v", payload)
+			}
+			if got, _ := rawErr["code"].(string); got != "model_cooldown" {
+				t.Fatalf("Error().error.code = %q, want %q", got, "model_cooldown")
+			}
+			if _, ok := rawErr["provider"]; ok {
+				t.Fatalf("Error().error.provider exists for mixed provider: %v", rawErr["provider"])
+			}
+		},
+	)
 
-	t.Run("non-mixed provider includes provider field", func(t *testing.T) {
-		t.Parallel()
+	t.Run(
+		"non-mixed provider includes provider field", func(t *testing.T) {
+			t.Parallel()
 
-		selector := &FillFirstSelector{}
-		_, err := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, auths)
-		if err == nil {
-			t.Fatalf("Pick() error = nil")
-		}
+			selector := &FillFirstSelector{}
+			_, err := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, auths)
+			if err == nil {
+				t.Fatalf("Pick() error = nil")
+			}
 
-		var mce *modelCooldownError
-		if !errors.As(err, &mce) {
-			t.Fatalf("Pick() error = %T, want *modelCooldownError", err)
-		}
+			var mce *modelCooldownError
+			if !errors.As(err, &mce) {
+				t.Fatalf("Pick() error = %T, want *modelCooldownError", err)
+			}
 
-		var payload map[string]any
-		if err := json.Unmarshal([]byte(mce.Error()), &payload); err != nil {
-			t.Fatalf("json.Unmarshal(Error()) error = %v", err)
-		}
-		rawErr, ok := payload["error"].(map[string]any)
-		if !ok {
-			t.Fatalf("Error() payload missing error object: %v", payload)
-		}
-		if got, _ := rawErr["provider"].(string); got != "gemini" {
-			t.Fatalf("Error().error.provider = %q, want %q", got, "gemini")
-		}
-	})
+			var payload map[string]any
+			if err := json.Unmarshal([]byte(mce.Error()), &payload); err != nil {
+				t.Fatalf("json.Unmarshal(Error()) error = %v", err)
+			}
+			rawErr, ok := payload["error"].(map[string]any)
+			if !ok {
+				t.Fatalf("Error() payload missing error object: %v", payload)
+			}
+			if got, _ := rawErr["provider"].(string); got != "gemini" {
+				t.Fatalf("Error().error.provider = %q, want %q", got, "gemini")
+			}
+		},
+	)
 }
 
 func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testing.T) {
@@ -339,7 +341,9 @@ func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testin
 		Attributes: map[string]string{"priority": "0"},
 	}
 
-	got, err := selector.Pick(context.Background(), "mixed", requestedModel, cliproxyexecutor.Options{}, []*Auth{high, low})
+	got, err := selector.Pick(
+		context.Background(), "mixed", requestedModel, cliproxyexecutor.Options{}, []*Auth{high, low},
+	)
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
@@ -424,8 +428,10 @@ func TestRoundRobinSelectorPick_GeminiCLICredentialGrouping(t *testing.T) {
 	// advances by 1, so consecutive picks should cycle through different parents.
 	picks := make([]string, 6)
 	parents := make([]string, 6)
-	for i := 0; i < 6; i++ {
-		got, err := selector.Pick(context.Background(), "gemini-cli", "gemini-2.5-pro", cliproxyexecutor.Options{}, auths)
+	for i := range 6 {
+		got, err := selector.Pick(
+			context.Background(), "gemini-cli", "gemini-2.5-pro", cliproxyexecutor.Options{}, auths,
+		)
 		if err != nil {
 			t.Fatalf("Pick() #%d error = %v", i, err)
 		}
@@ -439,8 +445,10 @@ func TestRoundRobinSelectorPick_GeminiCLICredentialGrouping(t *testing.T) {
 	// Verify property: consecutive picks must alternate between credential groups.
 	for i := 1; i < len(parents); i++ {
 		if parents[i] == parents[i-1] {
-			t.Fatalf("Pick() #%d and #%d both from same parent %q (IDs: %q, %q); expected alternating credentials",
-				i-1, i, parents[i], picks[i-1], picks[i])
+			t.Fatalf(
+				"Pick() #%d and #%d both from same parent %q (IDs: %q, %q); expected alternating credentials",
+				i-1, i, parents[i], picks[i-1], picks[i],
+			)
 		}
 	}
 
@@ -481,7 +489,9 @@ func TestRoundRobinSelectorPick_SingleParentFallsBackToFlat(t *testing.T) {
 	}
 
 	for i, expectedID := range want {
-		got, err := selector.Pick(context.Background(), "gemini-cli", "gemini-2.5-pro", cliproxyexecutor.Options{}, auths)
+		got, err := selector.Pick(
+			context.Background(), "gemini-cli", "gemini-2.5-pro", cliproxyexecutor.Options{}, auths,
+		)
 		if err != nil {
 			t.Fatalf("Pick() #%d error = %v", i, err)
 		}

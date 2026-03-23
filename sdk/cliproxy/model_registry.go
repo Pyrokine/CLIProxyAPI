@@ -1,6 +1,6 @@
 package cliproxy
 
-import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+import "github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 
 // ModelInfo re-exports the registry model info structure.
 type ModelInfo = registry.ModelInfo
@@ -25,6 +25,7 @@ func GlobalModelRegistry() ModelRegistry {
 }
 
 // SetGlobalModelRegistryHook registers an optional hook on the shared global registry instance.
+// noinspection GoUnusedExportedFunction
 func SetGlobalModelRegistryHook(hook ModelRegistryHook) {
 	registry.GetGlobalRegistry().SetHook(hook)
 }

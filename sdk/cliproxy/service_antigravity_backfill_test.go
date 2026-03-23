@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 func TestBackfillAntigravityModels_RegistersMissingAuth(t *testing.T) {
@@ -44,10 +44,12 @@ func TestBackfillAntigravityModels_RegistersMissingAuth(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.UnregisterClient(source.ID)
 	reg.UnregisterClient(target.ID)
-	t.Cleanup(func() {
-		reg.UnregisterClient(source.ID)
-		reg.UnregisterClient(target.ID)
-	})
+	t.Cleanup(
+		func() {
+			reg.UnregisterClient(source.ID)
+			reg.UnregisterClient(target.ID)
+		},
+	)
 
 	primary := []*ModelInfo{
 		{ID: "claude-sonnet-4-5"},
@@ -112,10 +114,12 @@ func TestBackfillAntigravityModels_RespectsExcludedModels(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	reg.UnregisterClient(source.ID)
 	reg.UnregisterClient(target.ID)
-	t.Cleanup(func() {
-		reg.UnregisterClient(source.ID)
-		reg.UnregisterClient(target.ID)
-	})
+	t.Cleanup(
+		func() {
+			reg.UnregisterClient(source.ID)
+			reg.UnregisterClient(target.ID)
+		},
+	)
 
 	primary := []*ModelInfo{
 		{ID: "claude-sonnet-4-5"},

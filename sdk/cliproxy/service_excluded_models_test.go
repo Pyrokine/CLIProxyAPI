@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T) {
@@ -28,9 +28,11 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 
 	registry := GlobalModelRegistry()
 	registry.UnregisterClient(auth.ID)
-	t.Cleanup(func() {
-		registry.UnregisterClient(auth.ID)
-	})
+	t.Cleanup(
+		func() {
+			registry.UnregisterClient(auth.ID)
+		},
+	)
 
 	service.registerModelsForAuth(auth)
 

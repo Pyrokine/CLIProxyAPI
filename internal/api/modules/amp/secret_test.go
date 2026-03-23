@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 	"github.com/sirupsen/logrus/hooks/test"
 )
@@ -34,28 +34,29 @@ func TestMultiSourceSecret_PrecedenceOrder(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc // capture range variable
-		t.Run(tc.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-			secretsPath := filepath.Join(tmpDir, "secrets.json")
+		t.Run(
+			tc.name, func(t *testing.T) {
+				tmpDir := t.TempDir()
+				secretsPath := filepath.Join(tmpDir, "secrets.json")
 
-			if tc.fileJSON != "" {
-				if err := os.WriteFile(secretsPath, []byte(tc.fileJSON), 0600); err != nil {
-					t.Fatal(err)
+				if tc.fileJSON != "" {
+					if err := os.WriteFile(secretsPath, []byte(tc.fileJSON), 0600); err != nil {
+						t.Fatal(err)
+					}
 				}
-			}
 
-			t.Setenv("AMP_API_KEY", tc.envKey)
+				t.Setenv("AMP_API_KEY", tc.envKey)
 
-			s := NewMultiSourceSecretWithPath(tc.configKey, secretsPath, 100*time.Millisecond)
-			got, err := s.Get(ctx)
-			if err != nil && tc.fileJSON != "" && json.Valid([]byte(tc.fileJSON)) {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("want %q, got %q", tc.want, got)
-			}
-		})
+				s := newMultiSourceSecretWithPath(tc.configKey, secretsPath, 100*time.Millisecond)
+				got, err := s.Get(ctx)
+				if err != nil && tc.fileJSON != "" && json.Valid([]byte(tc.fileJSON)) {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if got != tc.want {
+					t.Fatalf("want %q, got %q", tc.want, got)
+				}
+			},
+		)
 	}
 }
 
@@ -69,7 +70,7 @@ func TestMultiSourceSecret_CacheBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := NewMultiSourceSecretWithPath("", p, 50*time.Millisecond)
+	s := newMultiSourceSecretWithPath("", p, 50*time.Millisecond)
 
 	// First read - should return v1
 	got1, err := s.Get(ctx)
@@ -100,7 +101,7 @@ func TestMultiSourceSecret_CacheBehavior(t *testing.T) {
 	if err := os.WriteFile(p, []byte(`{"apiKey@https://ampcode.com/":"v3"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s.InvalidateCache()
+	s.invalidateCache()
 	got4, _ := s.Get(ctx)
 	if got4 != "v3" {
 		t.Fatalf("invalidate expected v3, got %s", got4)
@@ -110,61 +111,69 @@ func TestMultiSourceSecret_CacheBehavior(t *testing.T) {
 func TestMultiSourceSecret_FileHandling(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("missing_file_no_error", func(t *testing.T) {
-		s := NewMultiSourceSecretWithPath("", "/nonexistent/path/secrets.json", 100*time.Millisecond)
-		got, err := s.Get(ctx)
-		if err != nil {
-			t.Fatalf("expected no error for missing file, got: %v", err)
-		}
-		if got != "" {
-			t.Fatalf("expected empty string, got %q", got)
-		}
-	})
+	t.Run(
+		"missing_file_no_error", func(t *testing.T) {
+			s := newMultiSourceSecretWithPath("", "/nonexistent/path/secrets.json", 100*time.Millisecond)
+			got, err := s.Get(ctx)
+			if err != nil {
+				t.Fatalf("expected no error for missing file, got: %v", err)
+			}
+			if got != "" {
+				t.Fatalf("expected empty string, got %q", got)
+			}
+		},
+	)
 
-	t.Run("invalid_json", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		p := filepath.Join(tmpDir, "secrets.json")
-		if err := os.WriteFile(p, []byte(`{invalid json`), 0600); err != nil {
-			t.Fatal(err)
-		}
+	t.Run(
+		"invalid_json", func(t *testing.T) {
+			tmpDir := t.TempDir()
+			p := filepath.Join(tmpDir, "secrets.json")
+			if err := os.WriteFile(p, []byte(`{invalid json`), 0600); err != nil {
+				t.Fatal(err)
+			}
 
-		s := NewMultiSourceSecretWithPath("", p, 100*time.Millisecond)
-		_, err := s.Get(ctx)
-		if err == nil {
-			t.Fatal("expected error for invalid JSON")
-		}
-	})
+			s := newMultiSourceSecretWithPath("", p, 100*time.Millisecond)
+			_, err := s.Get(ctx)
+			if err == nil {
+				t.Fatal("expected error for invalid JSON")
+			}
+		},
+	)
 
-	t.Run("missing_key_in_json", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		p := filepath.Join(tmpDir, "secrets.json")
-		if err := os.WriteFile(p, []byte(`{"other":"value"}`), 0600); err != nil {
-			t.Fatal(err)
-		}
+	t.Run(
+		"missing_key_in_json", func(t *testing.T) {
+			tmpDir := t.TempDir()
+			p := filepath.Join(tmpDir, "secrets.json")
+			if err := os.WriteFile(p, []byte(`{"other":"value"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
 
-		s := NewMultiSourceSecretWithPath("", p, 100*time.Millisecond)
-		got, err := s.Get(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if got != "" {
-			t.Fatalf("expected empty string for missing key, got %q", got)
-		}
-	})
+			s := newMultiSourceSecretWithPath("", p, 100*time.Millisecond)
+			got, err := s.Get(ctx)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != "" {
+				t.Fatalf("expected empty string for missing key, got %q", got)
+			}
+		},
+	)
 
-	t.Run("empty_key_value", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		p := filepath.Join(tmpDir, "secrets.json")
-		if err := os.WriteFile(p, []byte(`{"apiKey@https://ampcode.com/":"   "}`), 0600); err != nil {
-			t.Fatal(err)
-		}
+	t.Run(
+		"empty_key_value", func(t *testing.T) {
+			tmpDir := t.TempDir()
+			p := filepath.Join(tmpDir, "secrets.json")
+			if err := os.WriteFile(p, []byte(`{"apiKey@https://ampcode.com/":"   "}`), 0600); err != nil {
+				t.Fatal(err)
+			}
 
-		s := NewMultiSourceSecretWithPath("", p, 100*time.Millisecond)
-		got, _ := s.Get(ctx)
-		if got != "" {
-			t.Fatalf("expected empty after trim, got %q", got)
-		}
-	})
+			s := newMultiSourceSecretWithPath("", p, 100*time.Millisecond)
+			got, _ := s.Get(ctx)
+			if got != "" {
+				t.Fatalf("expected empty after trim, got %q", got)
+			}
+		},
+	)
 }
 
 func TestMultiSourceSecret_Concurrency(t *testing.T) {
@@ -174,7 +183,7 @@ func TestMultiSourceSecret_Concurrency(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := NewMultiSourceSecretWithPath("", p, 5*time.Second)
+	s := newMultiSourceSecretWithPath("", p, 5*time.Second)
 	ctx := context.Background()
 
 	// Spawn many goroutines calling Get concurrently
@@ -184,11 +193,9 @@ func TestMultiSourceSecret_Concurrency(t *testing.T) {
 	var wg sync.WaitGroup
 	errors := make(chan error, goroutines)
 
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < iterations; j++ {
+	for range goroutines {
+		wg.Go(func() {
+			for range iterations {
 				val, err := s.Get(ctx)
 				if err != nil {
 					errors <- err
@@ -199,7 +206,7 @@ func TestMultiSourceSecret_Concurrency(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -213,38 +220,44 @@ func TestMultiSourceSecret_Concurrency(t *testing.T) {
 func TestStaticSecretSource(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("returns_provided_key", func(t *testing.T) {
-		s := NewStaticSecretSource("test-key-123")
-		got, err := s.Get(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if got != "test-key-123" {
-			t.Fatalf("want test-key-123, got %q", got)
-		}
-	})
+	t.Run(
+		"returns_provided_key", func(t *testing.T) {
+			s := newStaticSecretSource("test-key-123")
+			got, err := s.Get(ctx)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != "test-key-123" {
+				t.Fatalf("want test-key-123, got %q", got)
+			}
+		},
+	)
 
-	t.Run("trims_whitespace", func(t *testing.T) {
-		s := NewStaticSecretSource("  test-key  ")
-		got, err := s.Get(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if got != "test-key" {
-			t.Fatalf("want test-key, got %q", got)
-		}
-	})
+	t.Run(
+		"trims_whitespace", func(t *testing.T) {
+			s := newStaticSecretSource("  test-key  ")
+			got, err := s.Get(ctx)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != "test-key" {
+				t.Fatalf("want test-key, got %q", got)
+			}
+		},
+	)
 
-	t.Run("empty_string", func(t *testing.T) {
-		s := NewStaticSecretSource("")
-		got, err := s.Get(ctx)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if got != "" {
-			t.Fatalf("want empty string, got %q", got)
-		}
-	})
+	t.Run(
+		"empty_string", func(t *testing.T) {
+			s := newStaticSecretSource("")
+			got, err := s.Get(ctx)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != "" {
+				t.Fatalf("want empty string, got %q", got)
+			}
+		},
+	)
 }
 
 func TestMultiSourceSecret_CacheEmptyResult(t *testing.T) {
@@ -252,7 +265,7 @@ func TestMultiSourceSecret_CacheEmptyResult(t *testing.T) {
 	tmpDir := t.TempDir()
 	p := filepath.Join(tmpDir, "nonexistent.json")
 
-	s := NewMultiSourceSecretWithPath("", p, 100*time.Millisecond)
+	s := newMultiSourceSecretWithPath("", p, 100*time.Millisecond)
 	ctx := context.Background()
 
 	// First call - file doesn't exist, should cache empty result
@@ -284,14 +297,16 @@ func TestMultiSourceSecret_CacheEmptyResult(t *testing.T) {
 }
 
 func TestMappedSecretSource_UsesMappingFromContext(t *testing.T) {
-	defaultSource := NewStaticSecretSource("default")
-	s := NewMappedSecretSource(defaultSource)
-	s.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
-		{
-			UpstreamAPIKey: "u1",
-			APIKeys:        []string{"k1"},
+	defaultSource := newStaticSecretSource("default")
+	s := newMappedSecretSource(defaultSource)
+	s.updateMappings(
+		[]config.AmpUpstreamAPIKeyEntry{
+			{
+				UpstreamAPIKey: "u1",
+				APIKeys:        []string{"k1"},
+			},
 		},
-	})
+	)
 
 	ctx := context.WithValue(context.Background(), clientAPIKeyContextKey{}, "k1")
 	got, err := s.Get(ctx)
@@ -313,18 +328,20 @@ func TestMappedSecretSource_UsesMappingFromContext(t *testing.T) {
 }
 
 func TestMappedSecretSource_DuplicateClientKey_FirstWins(t *testing.T) {
-	defaultSource := NewStaticSecretSource("default")
-	s := NewMappedSecretSource(defaultSource)
-	s.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
-		{
-			UpstreamAPIKey: "u1",
-			APIKeys:        []string{"k1"},
+	defaultSource := newStaticSecretSource("default")
+	s := newMappedSecretSource(defaultSource)
+	s.updateMappings(
+		[]config.AmpUpstreamAPIKeyEntry{
+			{
+				UpstreamAPIKey: "u1",
+				APIKeys:        []string{"k1"},
+			},
+			{
+				UpstreamAPIKey: "u2",
+				APIKeys:        []string{"k1"},
+			},
 		},
-		{
-			UpstreamAPIKey: "u2",
-			APIKeys:        []string{"k1"},
-		},
-	})
+	)
 
 	ctx := context.WithValue(context.Background(), clientAPIKeyContextKey{}, "k1")
 	got, err := s.Get(ctx)
@@ -340,22 +357,25 @@ func TestMappedSecretSource_DuplicateClientKey_LogsWarning(t *testing.T) {
 	hook := test.NewLocal(log.StandardLogger())
 	defer hook.Reset()
 
-	defaultSource := NewStaticSecretSource("default")
-	s := NewMappedSecretSource(defaultSource)
-	s.UpdateMappings([]config.AmpUpstreamAPIKeyEntry{
-		{
-			UpstreamAPIKey: "u1",
-			APIKeys:        []string{"k1"},
+	defaultSource := newStaticSecretSource("default")
+	s := newMappedSecretSource(defaultSource)
+	s.updateMappings(
+		[]config.AmpUpstreamAPIKeyEntry{
+			{
+				UpstreamAPIKey: "u1",
+				APIKeys:        []string{"k1"},
+			},
+			{
+				UpstreamAPIKey: "u2",
+				APIKeys:        []string{"k1"},
+			},
 		},
-		{
-			UpstreamAPIKey: "u2",
-			APIKeys:        []string{"k1"},
-		},
-	})
+	)
 
 	foundWarning := false
 	for _, entry := range hook.AllEntries() {
-		if entry.Level == log.WarnLevel && entry.Message == "amp upstream-api-keys: client API key appears in multiple entries; using first mapping." {
+		if entry.Level == log.WarnLevel &&
+			entry.Message == "amp upstream-api-keys: client API key appears in multiple entries; using first mapping." {
 			foundWarning = true
 			break
 		}

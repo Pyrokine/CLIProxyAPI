@@ -16,41 +16,41 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
 
-// ClaudeCodeAPIHandler contains the handlers for Claude API endpoints.
+// CodeAPIHandler contains the handlers for Claude API endpoints.
 // It holds a pool of clients to interact with the backend service.
-type ClaudeCodeAPIHandler struct {
+type CodeAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
-// NewClaudeCodeAPIHandler creates a new Claude API handlers instance.
-// It takes an BaseAPIHandler instance as input and returns a ClaudeCodeAPIHandler.
+// NewCodeAPIHandler creates a new Claude API handlers instance.
+// It takes an BaseAPIHandler instance as input and returns a CodeAPIHandler.
 //
 // Parameters:
 //   - apiHandlers: The base API handler instance.
 //
 // Returns:
-//   - *ClaudeCodeAPIHandler: A new Claude code API handler instance.
-func NewClaudeCodeAPIHandler(apiHandlers *handlers.BaseAPIHandler) *ClaudeCodeAPIHandler {
-	return &ClaudeCodeAPIHandler{
+//   - *CodeAPIHandler: A new Claude code API handler instance.
+func NewCodeAPIHandler(apiHandlers *handlers.BaseAPIHandler) *CodeAPIHandler {
+	return &CodeAPIHandler{
 		BaseAPIHandler: apiHandlers,
 	}
 }
 
 // HandlerType returns the identifier for this handler implementation.
-func (h *ClaudeCodeAPIHandler) HandlerType() string {
+func (h *CodeAPIHandler) HandlerType() string {
 	return Claude
 }
 
 // Models returns a list of models supported by this handler.
-func (h *ClaudeCodeAPIHandler) Models() []map[string]any {
+func (h *CodeAPIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
 	return modelRegistry.GetAvailableModels("claude")
@@ -62,17 +62,19 @@ func (h *ClaudeCodeAPIHandler) Models() []map[string]any {
 //
 // Parameters:
 //   - c: The Gin context for the request.
-func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
+func (h *CodeAPIHandler) ClaudeMessages(c *gin.Context) {
 	// Extract raw JSON data from the incoming request
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
+		c.JSON(
+			http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
 			},
-		})
+		)
 		return
 	}
 
@@ -85,23 +87,25 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 	}
 }
 
-// ClaudeMessages handles Claude-compatible streaming chat completions.
+// ClaudeCountTokens handles Claude-compatible streaming chat completions.
 // This function implements a sophisticated client rotation and quota management system
 // to ensure high availability and optimal resource utilization across multiple backend clients.
 //
 // Parameters:
 //   - c: The Gin context for the request.
-func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
+func (h *CodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	// Extract raw JSON data from the incoming request
 	rawJSON, err := c.GetRawData()
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
-		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: fmt.Sprintf("Invalid request: %v", err),
-				Type:    "invalid_request_error",
+		c.JSON(
+			http.StatusBadRequest, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: fmt.Sprintf("Invalid request: %v", err),
+					Type:    "invalid_request_error",
+				},
 			},
-		})
+		)
 		return
 	}
 
@@ -128,7 +132,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 //
 // Parameters:
 //   - c: The Gin context for the request.
-func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
+func (h *CodeAPIHandler) ClaudeModels(c *gin.Context) {
 	models := h.Models()
 	firstID := ""
 	lastID := ""
@@ -141,12 +145,14 @@ func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data":     models,
-		"has_more": false,
-		"first_id": firstID,
-		"last_id":  lastID,
-	})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"data":     models,
+			"has_more": false,
+			"first_id": firstID,
+			"last_id":  lastID,
+		},
+	)
 }
 
 // handleNonStreamingResponse handles non-streaming content generation requests for Claude models.
@@ -158,7 +164,7 @@ func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
 //   - c: The Gin context for the request
 //   - modelName: The name of the Gemini model to use for content generation
 //   - rawJSON: The raw JSON request body containing generation parameters and content
-func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *CodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 	alt := h.GetAlt(c)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
@@ -207,17 +213,19 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 // Parameters:
 //   - c: The Gin context for the request.
 //   - rawJSON: The raw JSON request body.
-func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *CodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	// This is crucial for streaming as it allows immediate sending of data chunks
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{
-			Error: handlers.ErrorDetail{
-				Message: "Streaming not supported",
-				Type:    "server_error",
+		c.JSON(
+			http.StatusInternalServerError, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "Streaming not supported",
+					Type:    "server_error",
+				},
 			},
-		})
+		)
 		return
 	}
 
@@ -227,7 +235,9 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	// This allows proper cleanup and cancellation of ongoing requests
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(
+		cliCtx, h.HandlerType(), modelName, rawJSON, "",
+	)
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
@@ -282,28 +292,36 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	}
 }
 
-func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
-	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-		WriteChunk: func(chunk []byte) {
-			if len(chunk) == 0 {
-				return
-			}
-			_, _ = c.Writer.Write(chunk)
-		},
-		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
-			if errMsg == nil {
-				return
-			}
-			status := http.StatusInternalServerError
-			if errMsg.StatusCode > 0 {
-				status = errMsg.StatusCode
-			}
-			c.Status(status)
+func (h *CodeAPIHandler) forwardClaudeStream(
+	c *gin.Context,
+	flusher http.Flusher,
+	cancel func(error),
+	data <-chan []byte,
+	errs <-chan *interfaces.ErrorMessage,
+) {
+	h.ForwardStream(
+		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+			WriteChunk: func(chunk []byte) {
+				if len(chunk) == 0 {
+					return
+				}
+				_, _ = c.Writer.Write(chunk)
+			},
+			WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+				if errMsg == nil {
+					return
+				}
+				status := http.StatusInternalServerError
+				if errMsg.StatusCode > 0 {
+					status = errMsg.StatusCode
+				}
+				c.Status(status)
 
-			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
-			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
+				errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+				_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
+			},
 		},
-	})
+	)
 }
 
 type claudeErrorDetail struct {
@@ -316,7 +334,7 @@ type claudeErrorResponse struct {
 	Error claudeErrorDetail `json:"error"`
 }
 
-func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
+func (h *CodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{

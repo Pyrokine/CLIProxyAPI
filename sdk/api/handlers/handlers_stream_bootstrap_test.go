@@ -6,10 +6,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 type failOnceStreamExecutor struct {
@@ -19,11 +19,21 @@ type failOnceStreamExecutor struct {
 
 func (e *failOnceStreamExecutor) Identifier() string { return "codex" }
 
-func (e *failOnceStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *failOnceStreamExecutor) Execute(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
 }
 
-func (e *failOnceStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *failOnceStreamExecutor) ExecuteStream(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (*coreexecutor.StreamResult, error) {
 	e.mu.Lock()
 	e.calls++
 	call := e.calls
@@ -54,15 +64,24 @@ func (e *failOnceStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, 
 	}, nil
 }
 
-func (e *failOnceStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+func (e *failOnceStreamExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	return auth, nil
 }
 
-func (e *failOnceStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *failOnceStreamExecutor) CountTokens(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
 }
 
-func (e *failOnceStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+func (e *failOnceStreamExecutor) HttpRequest(
+	_ context.Context,
+	_ *coreauth.Auth,
+	_ *http.Request,
+) (*http.Response, error) {
 	return nil, &coreauth.Error{
 		Code:       "not_implemented",
 		Message:    "HttpRequest not implemented",
@@ -83,11 +102,21 @@ type payloadThenErrorStreamExecutor struct {
 
 func (e *payloadThenErrorStreamExecutor) Identifier() string { return "codex" }
 
-func (e *payloadThenErrorStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *payloadThenErrorStreamExecutor) Execute(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
 }
 
-func (e *payloadThenErrorStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *payloadThenErrorStreamExecutor) ExecuteStream(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (*coreexecutor.StreamResult, error) {
 	e.mu.Lock()
 	e.calls++
 	e.mu.Unlock()
@@ -106,15 +135,24 @@ func (e *payloadThenErrorStreamExecutor) ExecuteStream(context.Context, *coreaut
 	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
 
-func (e *payloadThenErrorStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+func (e *payloadThenErrorStreamExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	return auth, nil
 }
 
-func (e *payloadThenErrorStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *payloadThenErrorStreamExecutor) CountTokens(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
 }
 
-func (e *payloadThenErrorStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+func (e *payloadThenErrorStreamExecutor) HttpRequest(
+	_ context.Context,
+	_ *coreauth.Auth,
+	_ *http.Request,
+) (*http.Response, error) {
 	return nil, &coreauth.Error{
 		Code:       "not_implemented",
 		Message:    "HttpRequest not implemented",
@@ -138,26 +176,45 @@ type invalidJSONStreamExecutor struct{}
 
 func (e *invalidJSONStreamExecutor) Identifier() string { return "codex" }
 
-func (e *invalidJSONStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *invalidJSONStreamExecutor) Execute(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
 }
 
-func (e *invalidJSONStreamExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *invalidJSONStreamExecutor) ExecuteStream(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (*coreexecutor.StreamResult, error) {
 	ch := make(chan coreexecutor.StreamChunk, 1)
 	ch <- coreexecutor.StreamChunk{Payload: []byte("event: response.completed\ndata: {\"type\"")}
 	close(ch)
 	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
 
-func (e *invalidJSONStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+func (e *invalidJSONStreamExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	return auth, nil
 }
 
-func (e *invalidJSONStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *invalidJSONStreamExecutor) CountTokens(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
 }
 
-func (e *invalidJSONStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+func (e *invalidJSONStreamExecutor) HttpRequest(
+	_ context.Context,
+	_ *coreauth.Auth,
+	_ *http.Request,
+) (*http.Response, error) {
 	return nil, &coreauth.Error{
 		Code:       "not_implemented",
 		Message:    "HttpRequest not implemented",
@@ -167,11 +224,21 @@ func (e *invalidJSONStreamExecutor) HttpRequest(ctx context.Context, auth *corea
 
 func (e *authAwareStreamExecutor) Identifier() string { return "codex" }
 
-func (e *authAwareStreamExecutor) Execute(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *authAwareStreamExecutor) Execute(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "Execute not implemented"}
 }
 
-func (e *authAwareStreamExecutor) ExecuteStream(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+func (e *authAwareStreamExecutor) ExecuteStream(
+	ctx context.Context,
+	auth *coreauth.Auth,
+	req coreexecutor.Request,
+	opts coreexecutor.Options,
+) (*coreexecutor.StreamResult, error) {
 	_ = ctx
 	_ = req
 	_ = opts
@@ -205,15 +272,24 @@ func (e *authAwareStreamExecutor) ExecuteStream(ctx context.Context, auth *corea
 	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
 
-func (e *authAwareStreamExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+func (e *authAwareStreamExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	return auth, nil
 }
 
-func (e *authAwareStreamExecutor) CountTokens(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+func (e *authAwareStreamExecutor) CountTokens(
+	context.Context,
+	*coreauth.Auth,
+	coreexecutor.Request,
+	coreexecutor.Options,
+) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, &coreauth.Error{Code: "not_implemented", Message: "CountTokens not implemented"}
 }
 
-func (e *authAwareStreamExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (*http.Response, error) {
+func (e *authAwareStreamExecutor) HttpRequest(
+	_ context.Context,
+	_ *coreauth.Auth,
+	_ *http.Request,
+) (*http.Response, error) {
 	return nil, &coreauth.Error{
 		Code:       "not_implemented",
 		Message:    "HttpRequest not implemented",
@@ -262,18 +338,24 @@ func TestExecuteStreamWithAuthManager_RetriesBeforeFirstByte(t *testing.T) {
 
 	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
 	registry.GetGlobalRegistry().RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{{ID: "test-model"}})
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
-		registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
-	})
-
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
-		PassthroughHeaders: true,
-		Streaming: sdkconfig.StreamingConfig{
-			BootstrapRetries: 1,
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+			registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
 		},
-	}, manager)
-	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	)
+
+	handler := NewBaseAPIHandlers(
+		&sdkconfig.SDKConfig{
+			PassthroughHeaders: true,
+			Streaming: sdkconfig.StreamingConfig{
+				BootstrapRetries: 1,
+			},
+		}, manager,
+	)
+	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(
+		context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "",
+	)
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
@@ -328,17 +410,23 @@ func TestExecuteStreamWithAuthManager_HeaderPassthroughDisabledByDefault(t *test
 
 	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
 	registry.GetGlobalRegistry().RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{{ID: "test-model"}})
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
-		registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
-	})
-
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
-		Streaming: sdkconfig.StreamingConfig{
-			BootstrapRetries: 1,
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+			registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
 		},
-	}, manager)
-	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	)
+
+	handler := NewBaseAPIHandlers(
+		&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				BootstrapRetries: 1,
+			},
+		}, manager,
+	)
+	dataChan, upstreamHeaders, errChan := handler.ExecuteStreamWithAuthManager(
+		context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "",
+	)
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
@@ -388,17 +476,23 @@ func TestExecuteStreamWithAuthManager_DoesNotRetryAfterFirstByte(t *testing.T) {
 
 	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
 	registry.GetGlobalRegistry().RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{{ID: "test-model"}})
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
-		registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
-	})
-
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
-		Streaming: sdkconfig.StreamingConfig{
-			BootstrapRetries: 1,
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+			registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
 		},
-	}, manager)
-	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	)
+
+	handler := NewBaseAPIHandlers(
+		&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				BootstrapRetries: 1,
+			},
+		}, manager,
+	)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+		context.Background(), "openai", "test-model", []byte(`{"model":"test-model"}`), "",
+	)
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
@@ -458,18 +552,24 @@ func TestExecuteStreamWithAuthManager_PinnedAuthKeepsSameUpstream(t *testing.T) 
 
 	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
 	registry.GetGlobalRegistry().RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{{ID: "test-model"}})
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
-		registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
-	})
-
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
-		Streaming: sdkconfig.StreamingConfig{
-			BootstrapRetries: 1,
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+			registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
 		},
-	}, manager)
+	)
+
+	handler := NewBaseAPIHandlers(
+		&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				BootstrapRetries: 1,
+			},
+		}, manager,
+	)
 	ctx := WithPinnedAuthID(context.Background(), "auth1")
-	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+		ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "",
+	)
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
@@ -519,21 +619,29 @@ func TestExecuteStreamWithAuthManager_SelectedAuthCallbackReceivesAuthID(t *test
 	}
 
 	registry.GetGlobalRegistry().RegisterClient(auth2.ID, auth2.Provider, []*registry.ModelInfo{{ID: "test-model"}})
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
-	})
-
-	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
-		Streaming: sdkconfig.StreamingConfig{
-			BootstrapRetries: 0,
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth2.ID)
 		},
-	}, manager)
+	)
+
+	handler := NewBaseAPIHandlers(
+		&sdkconfig.SDKConfig{
+			Streaming: sdkconfig.StreamingConfig{
+				BootstrapRetries: 0,
+			},
+		}, manager,
+	)
 
 	selectedAuthID := ""
-	ctx := WithSelectedAuthIDCallback(context.Background(), func(authID string) {
-		selectedAuthID = authID
-	})
-	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "")
+	ctx := WithSelectedAuthIDCallback(
+		context.Background(), func(authID string) {
+			selectedAuthID = authID
+		},
+	)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+		ctx, "openai", "test-model", []byte(`{"model":"test-model"}`), "",
+	)
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}
@@ -572,12 +680,16 @@ func TestExecuteStreamWithAuthManager_ValidatesOpenAIResponsesStreamDataJSON(t *
 	}
 
 	registry.GetGlobalRegistry().RegisterClient(auth1.ID, auth1.Provider, []*registry.ModelInfo{{ID: "test-model"}})
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
-	})
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth1.ID)
+		},
+	)
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai-response", "test-model", []byte(`{"model":"test-model"}`), "")
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+		context.Background(), "openai-response", "test-model", []byte(`{"model":"test-model"}`), "",
+	)
 	if dataChan == nil || errChan == nil {
 		t.Fatalf("expected non-nil channels")
 	}

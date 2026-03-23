@@ -1,4 +1,4 @@
-// dispatcher.go implements auth update dispatching and queue management.
+// Package watcher implements auth update dispatching and queue management.
 // It batches, deduplicates, and delivers auth updates to registered consumers.
 package watcher
 
@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/synthesizer"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func (w *Watcher) setAuthUpdateQueue(queue chan<- AuthUpdate) {

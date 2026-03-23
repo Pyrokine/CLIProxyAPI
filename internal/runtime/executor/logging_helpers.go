@@ -11,9 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -47,6 +48,37 @@ type upstreamAttempt struct {
 	bodyStarted          bool
 	bodyHasContent       bool
 	errorWritten         bool
+}
+
+// recordUpstreamRequest records an upstream API request with auth info extracted from the given auth.
+// This is a convenience wrapper that combines auth info extraction with recordAPIRequest,
+// eliminating the repeated auth variable extraction pattern across all executors.
+func recordUpstreamRequest(
+	ctx context.Context,
+	cfg *config.Config,
+	url string,
+	headers http.Header,
+	body []byte,
+	provider string,
+	auth *cliproxyauth.Auth,
+) {
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIRequest(ctx, cfg, upstreamRequestLog{
+		URL:       url,
+		Method:    http.MethodPost,
+		Headers:   headers,
+		Body:      body,
+		Provider:  provider,
+		AuthID:    authID,
+		AuthLabel: authLabel,
+		AuthType:  authType,
+		AuthValue: authValue,
+	})
 }
 
 // recordAPIRequest stores the upstream request metadata in Gin context for request logging.
@@ -183,7 +215,7 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 }
 
 func ginContextFrom(ctx context.Context) *gin.Context {
-	ginCtx, _ := ctx.Value("gin").(*gin.Context)
+	ginCtx, _ := util.GinContextValue(ctx).(*gin.Context)
 	return ginCtx
 }
 

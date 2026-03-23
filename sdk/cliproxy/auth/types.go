@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -12,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	baseauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth"
+	baseauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -35,6 +36,7 @@ func WithRequestInfo(ctx context.Context, info *RequestInfo) context.Context {
 }
 
 // GetRequestInfo retrieves the RequestInfo from the context, if present.
+// noinspection GoUnusedExportedFunction
 func GetRequestInfo(ctx context.Context) *RequestInfo {
 	if val, ok := ctx.Value(requestInfoKey{}).(*RequestInfo); ok {
 		return val
@@ -56,7 +58,7 @@ type Auth struct {
 	FileName string `json:"-"`
 	// Storage holds the token persistence implementation used during login flows.
 	Storage baseauth.TokenStorage `json:"-"`
-	// Label is an optional human readable label for logging.
+	// Label is an optional human-readable label for logging.
 	Label string `json:"label,omitempty"`
 	// Status is the lifecycle status managed by the AuthManager.
 	Status Status `json:"status"`
@@ -89,10 +91,10 @@ type Auth struct {
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
-	// Runtime carries non-serialisable data used during execution (in-memory only).
+	// Runtime carries non-serializable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
-	indexAssigned bool `json:"-"`
+	indexAssigned bool
 }
 
 // QuotaState contains limiter tracking data for a credential.
@@ -133,15 +135,11 @@ func (a *Auth) Clone() *Auth {
 	copyAuth := *a
 	if len(a.Attributes) > 0 {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
-		for key, value := range a.Attributes {
-			copyAuth.Attributes[key] = value
-		}
+		maps.Copy(copyAuth.Attributes, a.Attributes)
 	}
 	if len(a.Metadata) > 0 {
 		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
-		for key, value := range a.Metadata {
-			copyAuth.Metadata[key] = value
-		}
+		maps.Copy(copyAuth.Metadata, a.Metadata)
 	}
 	if len(a.ModelStates) > 0 {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))

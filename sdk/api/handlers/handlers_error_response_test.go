@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
+	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
@@ -19,14 +19,16 @@ func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 
 	handler := NewBaseAPIHandlers(nil, nil)
-	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error:      errors.New("rate limit"),
-		Addon: http.Header{
-			"Retry-After":  {"30"},
-			"X-Request-Id": {"req-1"},
+	handler.WriteErrorResponse(
+		c, &interfaces.ErrorMessage{
+			StatusCode: http.StatusTooManyRequests,
+			Error:      errors.New("rate limit"),
+			Addon: http.Header{
+				"Retry-After":  {"30"},
+				"X-Request-Id": {"req-1"},
+			},
 		},
-	})
+	)
 
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)
@@ -47,14 +49,16 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 	c.Writer.Header().Set("X-Request-Id", "old-value")
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil)
-	handler.WriteErrorResponse(c, &interfaces.ErrorMessage{
-		StatusCode: http.StatusTooManyRequests,
-		Error:      errors.New("rate limit"),
-		Addon: http.Header{
-			"Retry-After":  {"30"},
-			"X-Request-Id": {"new-1", "new-2"},
+	handler.WriteErrorResponse(
+		c, &interfaces.ErrorMessage{
+			StatusCode: http.StatusTooManyRequests,
+			Error:      errors.New("rate limit"),
+			Addon: http.Header{
+				"Retry-After":  {"30"},
+				"X-Request-Id": {"new-1", "new-2"},
+			},
 		},
-	})
+	)
 
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusTooManyRequests)

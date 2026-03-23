@@ -5,25 +5,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	now := time.Now().Unix()
 
-	modelRegistry.RegisterClient("test-request-details-gemini", "gemini", []*registry.ModelInfo{
-		{ID: "gemini-2.5-pro", Created: now + 30},
-		{ID: "gemini-2.5-flash", Created: now + 25},
-	})
-	modelRegistry.RegisterClient("test-request-details-openai", "openai", []*registry.ModelInfo{
-		{ID: "gpt-5.2", Created: now + 20},
-	})
-	modelRegistry.RegisterClient("test-request-details-claude", "claude", []*registry.ModelInfo{
-		{ID: "claude-sonnet-4-5", Created: now + 5},
-	})
+	modelRegistry.RegisterClient(
+		"test-request-details-gemini", "gemini", []*registry.ModelInfo{
+			{ID: "gemini-2.5-pro", Created: now + 30},
+			{ID: "gemini-2.5-flash", Created: now + 25},
+		},
+	)
+	modelRegistry.RegisterClient(
+		"test-request-details-openai", "openai", []*registry.ModelInfo{
+			{ID: "gpt-5.2", Created: now + 20},
+		},
+	)
+	modelRegistry.RegisterClient(
+		"test-request-details-claude", "claude", []*registry.ModelInfo{
+			{ID: "claude-sonnet-4-5", Created: now + 5},
+		},
+	)
 
 	// Ensure cleanup of all test registrations.
 	clientIDs := []string{
@@ -33,9 +39,11 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	}
 	for _, clientID := range clientIDs {
 		id := clientID
-		t.Cleanup(func() {
-			modelRegistry.UnregisterClient(id)
-		})
+		t.Cleanup(
+			func() {
+				modelRegistry.UnregisterClient(id)
+			},
+		)
 	}
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
@@ -99,20 +107,22 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			providers, model, errMsg := handler.getRequestDetails(tt.inputModel)
-			if (errMsg != nil) != tt.wantErr {
-				t.Fatalf("getRequestDetails() error = %v, wantErr %v", errMsg, tt.wantErr)
-			}
-			if errMsg != nil {
-				return
-			}
-			if !reflect.DeepEqual(providers, tt.wantProviders) {
-				t.Fatalf("getRequestDetails() providers = %v, want %v", providers, tt.wantProviders)
-			}
-			if model != tt.wantModel {
-				t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				providers, model, errMsg := handler.getRequestDetails(tt.inputModel)
+				if (errMsg != nil) != tt.wantErr {
+					t.Fatalf("getRequestDetails() error = %v, wantErr %v", errMsg, tt.wantErr)
+				}
+				if errMsg != nil {
+					return
+				}
+				if !reflect.DeepEqual(providers, tt.wantProviders) {
+					t.Fatalf("getRequestDetails() providers = %v, want %v", providers, tt.wantProviders)
+				}
+				if model != tt.wantModel {
+					t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
+				}
+			},
+		)
 	}
 }

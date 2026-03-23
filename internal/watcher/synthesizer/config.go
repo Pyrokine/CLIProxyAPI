@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.
@@ -55,7 +55,7 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		prefix := strings.TrimSpace(entry.Prefix)
 		base := strings.TrimSpace(entry.BaseURL)
 		proxyURL := strings.TrimSpace(entry.ProxyURL)
-		id, token := idGen.Next("gemini:apikey", key, base)
+		id, token := idGen.next("gemini:apikey", key, base)
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:gemini[%s]", token),
 			"api_key": key,
@@ -102,7 +102,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		}
 		prefix := strings.TrimSpace(ck.Prefix)
 		base := strings.TrimSpace(ck.BaseURL)
-		id, token := idGen.Next("claude:apikey", key, base)
+		id, token := idGen.next("claude:apikey", key, base)
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:claude[%s]", token),
 			"api_key": key,
@@ -149,7 +149,7 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			continue
 		}
 		prefix := strings.TrimSpace(ck.Prefix)
-		id, token := idGen.Next("codex:apikey", key, ck.BaseURL)
+		id, token := idGen.next("codex:apikey", key, ck.BaseURL)
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:codex[%s]", token),
 			"api_key": key,
@@ -208,7 +208,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			key := strings.TrimSpace(entry.APIKey)
 			proxyURL := strings.TrimSpace(entry.ProxyURL)
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-			id, token := idGen.Next(idKind, key, base, proxyURL)
+			id, token := idGen.next(idKind, key, base, proxyURL)
 			attrs := map[string]string{
 				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
 				"base_url":     base,
@@ -242,7 +242,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 		// Fallback: create entry without API key if no APIKeyEntries
 		if createdEntries == 0 {
 			idKind := fmt.Sprintf("openai-compatibility:%s", providerName)
-			id, token := idGen.Next(idKind, base)
+			id, token := idGen.next(idKind, base)
 			attrs := map[string]string{
 				"source":       fmt.Sprintf("config:%s[%s]", providerName, token),
 				"base_url":     base,
@@ -288,7 +288,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		prefix := strings.TrimSpace(compat.Prefix)
 		proxyURL := strings.TrimSpace(compat.ProxyURL)
 		idKind := "vertex:apikey"
-		id, token := idGen.Next(idKind, key, base, proxyURL)
+		id, token := idGen.next(idKind, key, base, proxyURL)
 		attrs := map[string]string{
 			"source":       fmt.Sprintf("config:vertex-apikey[%s]", token),
 			"base_url":     base,

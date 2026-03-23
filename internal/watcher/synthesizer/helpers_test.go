@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func TestNewStableIDGenerator(t *testing.T) {
@@ -48,20 +48,22 @@ func TestStableIDGenerator_Next(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gen := NewStableIDGenerator()
-			id, short := gen.Next(tt.kind, tt.parts...)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				gen := NewStableIDGenerator()
+				id, short := gen.next(tt.kind, tt.parts...)
 
-			if !strings.Contains(id, tt.wantPrefix) {
-				t.Errorf("expected id to contain %q, got %q", tt.wantPrefix, id)
-			}
-			if short == "" {
-				t.Error("expected non-empty short id")
-			}
-			if len(short) != 12 {
-				t.Errorf("expected short id length 12, got %d", len(short))
-			}
-		})
+				if !strings.Contains(id, tt.wantPrefix) {
+					t.Errorf("expected id to contain %q, got %q", tt.wantPrefix, id)
+				}
+				if short == "" {
+					t.Error("expected non-empty short id")
+				}
+				if len(short) != 12 {
+					t.Errorf("expected short id length 12, got %d", len(short))
+				}
+			},
+		)
 	}
 }
 
@@ -69,8 +71,8 @@ func TestStableIDGenerator_Stability(t *testing.T) {
 	gen1 := NewStableIDGenerator()
 	gen2 := NewStableIDGenerator()
 
-	id1, _ := gen1.Next("gemini:apikey", "test-key", "https://api.example.com")
-	id2, _ := gen2.Next("gemini:apikey", "test-key", "https://api.example.com")
+	id1, _ := gen1.next("gemini:apikey", "test-key", "https://api.example.com")
+	id2, _ := gen2.next("gemini:apikey", "test-key", "https://api.example.com")
 
 	if id1 != id2 {
 		t.Errorf("same inputs should produce same ID: got %q and %q", id1, id2)
@@ -80,8 +82,8 @@ func TestStableIDGenerator_Stability(t *testing.T) {
 func TestStableIDGenerator_CollisionHandling(t *testing.T) {
 	gen := NewStableIDGenerator()
 
-	id1, short1 := gen.Next("gemini:apikey", "same-key")
-	id2, short2 := gen.Next("gemini:apikey", "same-key")
+	id1, short1 := gen.next("gemini:apikey", "same-key")
+	id2, short2 := gen.next("gemini:apikey", "same-key")
 
 	if id1 == id2 {
 		t.Error("collision should be handled with suffix")
@@ -96,7 +98,7 @@ func TestStableIDGenerator_CollisionHandling(t *testing.T) {
 
 func TestStableIDGenerator_NilReceiver(t *testing.T) {
 	var gen *StableIDGenerator = nil
-	id, short := gen.Next("test:kind", "part")
+	id, short := gen.next("test:kind", "part")
 
 	if id != "test:kind:000000000000" {
 		t.Errorf("expected test:kind:000000000000, got %q", id)
@@ -182,22 +184,24 @@ func TestApplyAuthExcludedModelsMeta(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ApplyAuthExcludedModelsMeta(tt.auth, tt.cfg, tt.perKey, tt.authKind)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				ApplyAuthExcludedModelsMeta(tt.auth, tt.cfg, tt.perKey, tt.authKind)
 
-			if tt.auth != nil && tt.cfg != nil {
-				if tt.wantHash {
-					if _, ok := tt.auth.Attributes["excluded_models_hash"]; !ok {
-						t.Error("expected excluded_models_hash in attributes")
+				if tt.auth != nil && tt.cfg != nil {
+					if tt.wantHash {
+						if _, ok := tt.auth.Attributes["excluded_models_hash"]; !ok {
+							t.Error("expected excluded_models_hash in attributes")
+						}
+					}
+					if tt.wantKind != "" {
+						if got := tt.auth.Attributes["auth_kind"]; got != tt.wantKind {
+							t.Errorf("expected auth_kind=%s, got %s", tt.wantKind, got)
+						}
 					}
 				}
-				if tt.wantKind != "" {
-					if got := tt.auth.Attributes["auth_kind"]; got != tt.wantKind {
-						t.Errorf("expected auth_kind=%s, got %s", tt.wantKind, got)
-					}
-				}
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -279,11 +283,13 @@ func TestAddConfigHeadersToAttrs(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			addConfigHeadersToAttrs(tt.headers, tt.attrs)
-			if !reflect.DeepEqual(tt.attrs, tt.want) {
-				t.Errorf("expected %v, got %v", tt.want, tt.attrs)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				addConfigHeadersToAttrs(tt.headers, tt.attrs)
+				if !reflect.DeepEqual(tt.attrs, tt.want) {
+					t.Errorf("expected %v, got %v", tt.want, tt.attrs)
+				}
+			},
+		)
 	}
 }

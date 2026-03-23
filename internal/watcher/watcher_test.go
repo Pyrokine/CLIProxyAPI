@@ -14,11 +14,11 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/synthesizer"
+	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"gopkg.in/yaml.v3"
 )
 
@@ -93,7 +93,8 @@ func TestNormalizeAuthStripsTemporalFields(t *testing.T) {
 	}
 
 	normalized := normalizeAuth(auth)
-	if !normalized.CreatedAt.IsZero() || !normalized.UpdatedAt.IsZero() || !normalized.LastRefreshedAt.IsZero() || !normalized.NextRefreshAfter.IsZero() {
+	if !normalized.CreatedAt.IsZero() || !normalized.UpdatedAt.IsZero() || !normalized.LastRefreshedAt.IsZero() ||
+		!normalized.NextRefreshAfter.IsZero() {
 		t.Fatal("expected time fields to be zeroed")
 	}
 	if normalized.Runtime != nil {
@@ -171,7 +172,10 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 	}
 	expectedAPIKeyHash := diff.ComputeExcludedModelsHash([]string{"Model-A", "model-b"})
 	if geminiAPIKeyAuth.Attributes["excluded_models_hash"] != expectedAPIKeyHash {
-		t.Fatalf("expected API key excluded hash %s, got %s", expectedAPIKeyHash, geminiAPIKeyAuth.Attributes["excluded_models_hash"])
+		t.Fatalf(
+			"expected API key excluded hash %s, got %s", expectedAPIKeyHash,
+			geminiAPIKeyAuth.Attributes["excluded_models_hash"],
+		)
 	}
 	if geminiAPIKeyAuth.Attributes["auth_kind"] != "apikey" {
 		t.Fatalf("expected auth_kind=apikey, got %s", geminiAPIKeyAuth.Attributes["auth_kind"])
@@ -185,7 +189,10 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 	}
 	expectedOAuthHash := diff.ComputeExcludedModelsHash([]string{"Foo", "bar"})
 	if geminiPrimary.Attributes["excluded_models_hash"] != expectedOAuthHash {
-		t.Fatalf("expected OAuth excluded hash %s, got %s", expectedOAuthHash, geminiPrimary.Attributes["excluded_models_hash"])
+		t.Fatalf(
+			"expected OAuth excluded hash %s, got %s", expectedOAuthHash,
+			geminiPrimary.Attributes["excluded_models_hash"],
+		)
 	}
 	if geminiPrimary.Attributes["auth_kind"] != "oauth" {
 		t.Fatalf("expected auth_kind=oauth, got %s", geminiPrimary.Attributes["auth_kind"])
@@ -199,7 +206,9 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 			t.Fatalf("virtual auth missing parent link to %s", geminiPrimary.ID)
 		}
 		if v.Attributes["excluded_models_hash"] != expectedOAuthHash {
-			t.Fatalf("expected virtual excluded hash %s, got %s", expectedOAuthHash, v.Attributes["excluded_models_hash"])
+			t.Fatalf(
+				"expected virtual excluded hash %s, got %s", expectedOAuthHash, v.Attributes["excluded_models_hash"],
+			)
 		}
 		if v.Status != coreauth.StatusActive {
 			t.Fatalf("expected virtual auth to be active, got %s", v.Status)
@@ -276,9 +285,11 @@ func TestStartAndStopSuccess(t *testing.T) {
 	}
 
 	var reloads int32
-	w, err := NewWatcher(configPath, authDir, func(*config.Config) {
-		atomic.AddInt32(&reloads, 1)
-	})
+	w, err := NewWatcher(
+		configPath, authDir, func(*config.Config) {
+			atomic.AddInt32(&reloads, 1)
+		},
+	)
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
@@ -311,10 +322,9 @@ func TestStartFailsWhenConfigMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
-	defer w.Stop()
+	defer func() { _ = w.Stop() }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := w.Start(ctx); err == nil {
 		t.Fatal("expected Start to fail for missing config file")
@@ -564,7 +574,7 @@ func TestReloadClientsFiltersProvidersWithNilCurrentAuths(t *testing.T) {
 		config:  &config.Config{AuthDir: tmp},
 	}
 	w.reloadClients(false, []string{"match"}, false)
-	if w.currentAuths != nil && len(w.currentAuths) != 0 {
+	if len(w.currentAuths) != 0 {
 		t.Fatalf("expected currentAuths to be nil or empty, got %d", len(w.currentAuths))
 	}
 }
@@ -669,13 +679,15 @@ func TestDispatchAuthUpdatesFlushesQueue(t *testing.T) {
 	w.SetAuthUpdateQueue(queue)
 	defer w.stopDispatch()
 
-	w.dispatchAuthUpdates([]AuthUpdate{
-		{Action: AuthUpdateActionAdd, ID: "a"},
-		{Action: AuthUpdateActionModify, ID: "b"},
-	})
+	w.dispatchAuthUpdates(
+		[]AuthUpdate{
+			{Action: AuthUpdateActionAdd, ID: "a"},
+			{Action: AuthUpdateActionModify, ID: "b"},
+		},
+	)
 
 	got := make([]AuthUpdate, 0, 2)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		select {
 		case u := <-queue:
 			got = append(got, u)
@@ -725,8 +737,7 @@ func TestProcessEventsHandlesEventErrorAndChannelClose(t *testing.T) {
 		authDir:    "auth",
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	done := make(chan struct{})
 	go func() {
@@ -758,8 +769,7 @@ func TestProcessEventsReturnsWhenErrorsChannelClosed(t *testing.T) {
 
 	close(w.watcher.Errors)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	done := make(chan struct{})
 	go func() {
@@ -1025,7 +1035,7 @@ func TestNormalizeAuthPathAndDebounceCleanup(t *testing.T) {
 	w.clientsMutex.Lock()
 	w.lastRemoveTimes = make(map[string]time.Time, 140)
 	old := time.Now().Add(-3 * authRemoveDebounceWindow)
-	for i := 0; i < 129; i++ {
+	for i := range 129 {
 		w.lastRemoveTimes[fmt.Sprintf("old-%d", i)] = old
 	}
 	w.clientsMutex.Unlock()
@@ -1182,7 +1192,9 @@ func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "config.yaml")
 
 	// Ensure SnapshotCoreAuths yields a provider that is NOT affected, so we can assert it survives.
-	if err := os.WriteFile(filepath.Join(authDir, "provider-b.json"), []byte(`{"type":"provider-b","email":"b@example.com"}`), 0o644); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(authDir, "provider-b.json"), []byte(`{"type":"provider-b","email":"b@example.com"}`), 0o644,
+	); err != nil {
 		t.Fatalf("failed to write auth file: %v", err)
 	}
 
@@ -1303,7 +1315,9 @@ func TestReloadConfigTriggersCallbackForMaxRetryCredentialsChange(t *testing.T) 
 func TestStartFailsWhenAuthDirMissing(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(configPath, []byte("auth_dir: "+filepath.Join(tmpDir, "missing-auth")+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(
+		configPath, []byte("auth_dir: "+filepath.Join(tmpDir, "missing-auth")+"\n"), 0o644,
+	); err != nil {
 		t.Fatalf("failed to write config file: %v", err)
 	}
 	authDir := filepath.Join(tmpDir, "missing-auth")
@@ -1312,11 +1326,10 @@ func TestStartFailsWhenAuthDirMissing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create watcher: %v", err)
 	}
-	defer w.Stop()
+	defer func() { _ = w.Stop() }()
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	if err := w.Start(ctx); err == nil {
 		t.Fatal("expected Start to fail for missing auth dir")
@@ -1328,7 +1341,11 @@ func TestDispatchRuntimeAuthUpdateReturnsFalseWithoutQueue(t *testing.T) {
 	if ok := w.DispatchRuntimeAuthUpdate(AuthUpdate{Action: AuthUpdateActionAdd, Auth: &coreauth.Auth{ID: "a"}}); ok {
 		t.Fatal("expected DispatchRuntimeAuthUpdate to return false when no queue configured")
 	}
-	if ok := w.DispatchRuntimeAuthUpdate(AuthUpdate{Action: AuthUpdateActionDelete, Auth: &coreauth.Auth{ID: "a"}}); ok {
+	if ok := w.DispatchRuntimeAuthUpdate(
+		AuthUpdate{
+			Action: AuthUpdateActionDelete, Auth: &coreauth.Auth{ID: "a"},
+		},
+	); ok {
 		t.Fatal("expected DispatchRuntimeAuthUpdate delete to return false when no queue configured")
 	}
 }

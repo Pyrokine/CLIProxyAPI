@@ -17,8 +17,9 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -118,10 +119,6 @@ func NewObjectTokenStore(cfg ObjectStoreConfig) (*ObjectTokenStore, error) {
 	}, nil
 }
 
-// SetBaseDir implements the optional interface used by authenticators; it is a no-op because
-// the object store controls its own workspace.
-func (s *ObjectTokenStore) SetBaseDir(string) {}
-
 // ConfigPath returns the managed configuration file path inside the spool directory.
 func (s *ObjectTokenStore) ConfigPath() string {
 	if s == nil {
@@ -192,11 +189,12 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		if errMarshal != nil {
 			return "", fmt.Errorf("object store: marshal metadata: %w", errMarshal)
 		}
+		// noinspection GoDfaConstantCondition — errRead is non-nil in else branch; checking error kind is intentional.
 		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
+			if util.JSONEqual(existing, raw) {
 				return path, nil
 			}
-		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
+		} else if !errors.Is(errRead, fs.ErrNotExist) {
 			return "", fmt.Errorf("object store: read existing metadata: %w", errRead)
 		}
 		tmp := path + ".tmp"
@@ -232,26 +230,28 @@ func (s *ObjectTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error)
 		return nil, fmt.Errorf("object store: auth directory not configured")
 	}
 	entries := make([]*cliproxyauth.Auth, 0, 32)
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
+	err := filepath.WalkDir(
+		dir, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+				return nil
+			}
+			auth, err := s.readAuthFile(path, dir)
+			if err != nil {
+				log.WithError(err).Warnf("object store: skip auth %s", path)
+				return nil
+			}
+			if auth != nil {
+				entries = append(entries, auth)
+			}
 			return nil
-		}
-		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
-			return nil
-		}
-		auth, err := s.readAuthFile(path, dir)
-		if err != nil {
-			log.WithError(err).Warnf("object store: skip auth %s", path)
-			return nil
-		}
-		if auth != nil {
-			entries = append(entries, auth)
-		}
-		return nil
-	})
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("object store: walk auth directory: %w", err)
 	}
@@ -347,7 +347,7 @@ func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example str
 		if errGet != nil {
 			return fmt.Errorf("object store: fetch config: %w", errGet)
 		}
-		defer object.Close()
+		defer func() { _ = object.Close() }()
 		data, errRead := io.ReadAll(object)
 		if errRead != nil {
 			return fmt.Errorf("object store: read config: %w", errRead)
@@ -395,10 +395,12 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 	}
 
 	prefix := s.prefixedKey(objectStoreAuthPrefix + "/")
-	objectCh := s.client.ListObjects(ctx, s.cfg.Bucket, minio.ListObjectsOptions{
-		Prefix:    prefix,
-		Recursive: true,
-	})
+	objectCh := s.client.ListObjects(
+		ctx, s.cfg.Bucket, minio.ListObjectsOptions{
+			Prefix:    prefix,
+			Recursive: true,
+		},
+	)
 	for object := range objectCh {
 		if object.Err != nil {
 			return fmt.Errorf("object store: list auth objects: %w", object.Err)
@@ -477,9 +479,11 @@ func (s *ObjectTokenStore) putObject(ctx context.Context, key string, data []byt
 	}
 	fullKey := s.prefixedKey(key)
 	reader := bytes.NewReader(data)
-	_, err := s.client.PutObject(ctx, s.cfg.Bucket, fullKey, reader, int64(len(data)), minio.PutObjectOptions{
-		ContentType: contentType,
-	})
+	_, err := s.client.PutObject(
+		ctx, s.cfg.Bucket, fullKey, reader, int64(len(data)), minio.PutObjectOptions{
+			ContentType: contentType,
+		},
+	)
 	if err != nil {
 		return fmt.Errorf("object store: put object %s: %w", fullKey, err)
 	}

@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
@@ -64,10 +64,7 @@ func (e *modelCooldownError) Error() string {
 	if e.provider != "" {
 		message = fmt.Sprintf("%s via provider %s", message, e.provider)
 	}
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
-	}
+	resetSeconds := max(int(math.Ceil(e.resetIn.Seconds())), 0)
 	displayDuration := e.resetIn
 	if displayDuration > 0 && displayDuration < time.Second {
 		displayDuration = time.Second
@@ -99,10 +96,7 @@ func (e *modelCooldownError) StatusCode() int {
 func (e *modelCooldownError) Headers() http.Header {
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
-	resetSeconds := int(math.Ceil(e.resetIn.Seconds()))
-	if resetSeconds < 0 {
-		resetSeconds = 0
-	}
+	resetSeconds := max(int(math.Ceil(e.resetIn.Seconds())), 0)
 	headers.Set("Retry-After", strconv.Itoa(resetSeconds))
 	return headers
 }
@@ -179,7 +173,7 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	}
 
 	wsEnabled := make([]*Auth, 0, len(available))
-	for i := 0; i < len(available); i++ {
+	for i := range available {
 		candidate := available[i]
 		if authWebsocketsEnabled(candidate) {
 			wsEnabled = append(wsEnabled, candidate)
@@ -191,9 +185,13 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 	return available
 }
 
-func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
+func collectAvailableByPriority(
+	auths []*Auth,
+	model string,
+	now time.Time,
+) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
-	for i := 0; i < len(auths); i++ {
+	for i := range auths {
 		candidate := auths[i]
 		blocked, reason, next := isAuthBlockedForModel(candidate, model, now)
 		if !blocked {
@@ -223,10 +221,7 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 			if providerForError == "mixed" {
 				providerForError = ""
 			}
-			resetIn := earliest.Sub(now)
-			if resetIn < 0 {
-				resetIn = 0
-			}
+			resetIn := max(earliest.Sub(now), 0)
 			return nil, newModelCooldownError(model, providerForError, resetIn)
 		}
 		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
@@ -252,7 +247,12 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 // For gemini-cli virtual auths (identified by the gemini_virtual_parent attribute),
 // a two-level round-robin is used: first cycling across credential groups (parent
 // accounts), then cycling within each group's project auths.
-func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (s *RoundRobinSelector) Pick(
+	ctx context.Context,
+	provider, model string,
+	opts cliproxyexecutor.Options,
+	auths []*Auth,
+) (*Auth, error) {
 	_ = opts
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
@@ -351,7 +351,12 @@ func groupByVirtualParent(auths []*Auth) (map[string][]*Auth, []string) {
 }
 
 // Pick selects the first available auth for the provider in a deterministic manner.
-func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (s *FillFirstSelector) Pick(
+	ctx context.Context,
+	provider, model string,
+	opts cliproxyexecutor.Options,
+	auths []*Auth,
+) (*Auth, error) {
 	_ = opts
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
@@ -372,7 +377,8 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
 			state, ok := auth.ModelStates[model]
-			if (!ok || state == nil) && model != "" {
+			// noinspection GoDfaConstantCondition — state can be nil even when ok is true (nil map value).
+			if !ok || state == nil {
 				baseModel := canonicalModelKey(model)
 				if baseModel != "" && baseModel != model {
 					state, ok = auth.ModelStates[baseModel]

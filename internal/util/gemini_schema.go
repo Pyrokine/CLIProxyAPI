@@ -3,6 +3,7 @@ package util
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -176,7 +177,7 @@ func convertConstToEnum(jsonStr string) string {
 		}
 		enumPath := trimSuffix(p, ".const") + ".enum"
 		if !gjson.Get(jsonStr, enumPath).Exists() {
-			jsonStr, _ = sjson.Set(jsonStr, enumPath, []interface{}{val.Value()})
+			jsonStr, _ = sjson.Set(jsonStr, enumPath, []any{val.Value()})
 		}
 	}
 	return jsonStr
@@ -271,11 +272,13 @@ func mergeAllOf(jsonStr string) string {
 
 		for _, item := range allOf.Array() {
 			if props := item.Get("properties"); props.IsObject() {
-				props.ForEach(func(key, value gjson.Result) bool {
-					destPath := joinPath(parentPath, "properties."+escapeGJSONPathKey(key.String()))
-					jsonStr, _ = sjson.SetRaw(jsonStr, destPath, value.Raw)
-					return true
-				})
+				props.ForEach(
+					func(key, value gjson.Result) bool {
+						destPath := joinPath(parentPath, "properties."+escapeGJSONPathKey(key.String()))
+						jsonStr, _ = sjson.SetRaw(jsonStr, destPath, value.Raw)
+						return true
+					},
+				)
 			}
 			if req := item.Get("required"); req.IsArray() {
 				reqPath := joinPath(parentPath, "required")
@@ -427,7 +430,8 @@ func flattenTypeArrays(jsonStr string) string {
 }
 
 func removeUnsupportedKeywords(jsonStr string) string {
-	keywords := append(unsupportedConstraints,
+	keywords := append(
+		unsupportedConstraints,
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
 		"enumTitles", "prefill", // Claude/OpenCode schema metadata fields unsupported by Gemini
@@ -478,20 +482,22 @@ func walkForExtensions(value gjson.Result, path string, paths *[]string) {
 	}
 
 	if value.IsObject() {
-		value.ForEach(func(key, val gjson.Result) bool {
-			keyStr := key.String()
-			safeKey := escapeGJSONPathKey(keyStr)
-			childPath := joinPath(path, safeKey)
+		value.ForEach(
+			func(key, val gjson.Result) bool {
+				keyStr := key.String()
+				safeKey := escapeGJSONPathKey(keyStr)
+				childPath := joinPath(path, safeKey)
 
-			// If it's an extension field, we delete it and don't need to look at its children.
-			if strings.HasPrefix(keyStr, "x-") && !isPropertyDefinition(path) {
-				*paths = append(*paths, childPath)
+				// If it's an extension field, we delete it and don't need to look at its children.
+				if strings.HasPrefix(keyStr, "x-") && !isPropertyDefinition(path) {
+					*paths = append(*paths, childPath)
+					return true
+				}
+
+				walkForExtensions(val, childPath, paths)
 				return true
-			}
-
-			walkForExtensions(val, childPath, paths)
-			return true
-		})
+			},
+		)
 	}
 }
 
@@ -609,24 +615,26 @@ func findPathsByFields(jsonStr string, fields []string) map[string][]string {
 func walkForFields(value gjson.Result, path string, fields map[string]struct{}, paths map[string][]string) {
 	switch value.Type {
 	case gjson.JSON:
-		value.ForEach(func(key, val gjson.Result) bool {
-			keyStr := key.String()
-			safeKey := escapeGJSONPathKey(keyStr)
+		value.ForEach(
+			func(key, val gjson.Result) bool {
+				keyStr := key.String()
+				safeKey := escapeGJSONPathKey(keyStr)
 
-			var childPath string
-			if path == "" {
-				childPath = safeKey
-			} else {
-				childPath = path + "." + safeKey
-			}
+				var childPath string
+				if path == "" {
+					childPath = safeKey
+				} else {
+					childPath = path + "." + safeKey
+				}
 
-			if _, ok := fields[keyStr]; ok {
-				paths[keyStr] = append(paths[keyStr], childPath)
-			}
+				if _, ok := fields[keyStr]; ok {
+					paths[keyStr] = append(paths[keyStr], childPath)
+				}
 
-			walkForFields(val, childPath, fields, paths)
-			return true
-		})
+				walkForFields(val, childPath, fields, paths)
+				return true
+			},
+		)
 	case gjson.String, gjson.Number, gjson.True, gjson.False, gjson.Null:
 		// Terminal types - no further traversal needed
 	}
@@ -702,12 +710,7 @@ func getStrings(jsonStr, path string) []string {
 }
 
 func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(slice, item)
 }
 
 func orDefault(val, def string) string {
@@ -718,7 +721,7 @@ func orDefault(val, def string) string {
 }
 
 func escapeGJSONPathKey(key string) string {
-	if strings.IndexAny(key, ".*?") == -1 {
+	if !strings.ContainsAny(key, ".*?") {
 		return key
 	}
 	return gjsonPathKeyReplacer.Replace(key)

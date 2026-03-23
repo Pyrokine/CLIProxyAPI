@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 )
 
-// SecretSource provides Amp API keys with configurable precedence and caching
-type SecretSource interface {
+// secretSource provides Amp API keys with configurable precedence and caching
+type secretSource interface {
 	Get(ctx context.Context) (string, error)
 }
 
@@ -25,11 +25,11 @@ type cachedSecret struct {
 	expiresAt time.Time
 }
 
-// MultiSourceSecret implements precedence-based secret lookup:
+// multiSourceSecret implements precedence-based secret lookup:
 // 1. Explicit config value (highest priority)
 // 2. Environment variable AMP_API_KEY
 // 3. File-based secret (lowest priority)
-type MultiSourceSecret struct {
+type multiSourceSecret struct {
 	explicitKey string
 	envKey      string
 	filePath    string
@@ -39,8 +39,8 @@ type MultiSourceSecret struct {
 	cache *cachedSecret
 }
 
-// NewMultiSourceSecret creates a secret source with precedence and caching
-func NewMultiSourceSecret(explicitKey string, cacheTTL time.Duration) *MultiSourceSecret {
+// newMultiSourceSecret creates a secret source with precedence and caching
+func newMultiSourceSecret(explicitKey string, cacheTTL time.Duration) *multiSourceSecret {
 	if cacheTTL == 0 {
 		cacheTTL = 5 * time.Minute // Default 5 minute cache
 	}
@@ -48,7 +48,7 @@ func NewMultiSourceSecret(explicitKey string, cacheTTL time.Duration) *MultiSour
 	home, _ := os.UserHomeDir()
 	filePath := filepath.Join(home, ".local", "share", "amp", "secrets.json")
 
-	return &MultiSourceSecret{
+	return &multiSourceSecret{
 		explicitKey: strings.TrimSpace(explicitKey),
 		envKey:      "AMP_API_KEY",
 		filePath:    filePath,
@@ -56,13 +56,13 @@ func NewMultiSourceSecret(explicitKey string, cacheTTL time.Duration) *MultiSour
 	}
 }
 
-// NewMultiSourceSecretWithPath creates a secret source with a custom file path (for testing)
-func NewMultiSourceSecretWithPath(explicitKey string, filePath string, cacheTTL time.Duration) *MultiSourceSecret {
+// newMultiSourceSecretWithPath creates a secret source with a custom file path (for testing)
+func newMultiSourceSecretWithPath(explicitKey string, filePath string, cacheTTL time.Duration) *multiSourceSecret {
 	if cacheTTL == 0 {
 		cacheTTL = 5 * time.Minute
 	}
 
-	return &MultiSourceSecret{
+	return &multiSourceSecret{
 		explicitKey: strings.TrimSpace(explicitKey),
 		envKey:      "AMP_API_KEY",
 		filePath:    filePath,
@@ -72,7 +72,7 @@ func NewMultiSourceSecretWithPath(explicitKey string, filePath string, cacheTTL 
 
 // Get retrieves the Amp API key using precedence: config > env > file
 // Results are cached for cacheTTL duration to avoid excessive file reads
-func (s *MultiSourceSecret) Get(ctx context.Context) (string, error) {
+func (s *multiSourceSecret) Get(_ context.Context) (string, error) {
 	// Precedence 1: Explicit config key (highest priority, no caching needed)
 	if s.explicitKey != "" {
 		return s.explicitKey, nil
@@ -107,7 +107,7 @@ func (s *MultiSourceSecret) Get(ctx context.Context) (string, error) {
 }
 
 // readFromFile reads the Amp API key from the secrets file
-func (s *MultiSourceSecret) readFromFile() (string, error) {
+func (s *multiSourceSecret) readFromFile() (string, error) {
 	content, err := os.ReadFile(s.filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -126,7 +126,7 @@ func (s *MultiSourceSecret) readFromFile() (string, error) {
 }
 
 // updateCache updates the cached secret value
-func (s *MultiSourceSecret) updateCache(value string) {
+func (s *multiSourceSecret) updateCache(value string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cache = &cachedSecret{
@@ -135,15 +135,15 @@ func (s *MultiSourceSecret) updateCache(value string) {
 	}
 }
 
-// InvalidateCache clears the cached secret, forcing a fresh read on next Get
-func (s *MultiSourceSecret) InvalidateCache() {
+// invalidateCache clears the cached secret, forcing a fresh read on next Get
+func (s *multiSourceSecret) invalidateCache() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cache = nil
 }
 
-// UpdateExplicitKey refreshes the config-provided key and clears cache.
-func (s *MultiSourceSecret) UpdateExplicitKey(key string) {
+// updateExplicitKey refreshes the config-provided key and clears cache.
+func (s *multiSourceSecret) updateExplicitKey(key string) {
 	if s == nil {
 		return
 	}
@@ -153,33 +153,33 @@ func (s *MultiSourceSecret) UpdateExplicitKey(key string) {
 	s.mu.Unlock()
 }
 
-// StaticSecretSource returns a fixed API key (for testing)
-type StaticSecretSource struct {
+// staticSecretSource returns a fixed API key (for testing)
+type staticSecretSource struct {
 	key string
 }
 
-// NewStaticSecretSource creates a secret source with a fixed key
-func NewStaticSecretSource(key string) *StaticSecretSource {
-	return &StaticSecretSource{key: strings.TrimSpace(key)}
+// newStaticSecretSource creates a secret source with a fixed key
+func newStaticSecretSource(key string) *staticSecretSource {
+	return &staticSecretSource{key: strings.TrimSpace(key)}
 }
 
 // Get returns the static API key
-func (s *StaticSecretSource) Get(ctx context.Context) (string, error) {
+func (s *staticSecretSource) Get(_ context.Context) (string, error) {
 	return s.key, nil
 }
 
-// MappedSecretSource wraps a default SecretSource and adds per-client API key mapping.
+// mappedSecretSource wraps a default SecretSource and adds per-client API key mapping.
 // When a request context contains a client API key that matches a configured mapping,
 // the corresponding upstream key is returned. Otherwise, falls back to the default source.
-type MappedSecretSource struct {
-	defaultSource SecretSource
+type mappedSecretSource struct {
+	defaultSource secretSource
 	mu            sync.RWMutex
 	lookup        map[string]string // clientKey -> upstreamKey
 }
 
-// NewMappedSecretSource creates a MappedSecretSource wrapping the given default source.
-func NewMappedSecretSource(defaultSource SecretSource) *MappedSecretSource {
-	return &MappedSecretSource{
+// newMappedSecretSource creates a MappedSecretSource wrapping the given default source.
+func newMappedSecretSource(defaultSource secretSource) *mappedSecretSource {
+	return &mappedSecretSource{
 		defaultSource: defaultSource,
 		lookup:        make(map[string]string),
 	}
@@ -188,7 +188,7 @@ func NewMappedSecretSource(defaultSource SecretSource) *MappedSecretSource {
 // Get retrieves the Amp API key, checking per-client mappings first.
 // If the request context contains a client API key that matches a configured mapping,
 // returns the corresponding upstream key. Otherwise, falls back to the default source.
-func (s *MappedSecretSource) Get(ctx context.Context) (string, error) {
+func (s *mappedSecretSource) Get(ctx context.Context) (string, error) {
 	// Try to get client API key from request context
 	clientKey := getClientAPIKeyFromContext(ctx)
 	if clientKey != "" {
@@ -204,9 +204,9 @@ func (s *MappedSecretSource) Get(ctx context.Context) (string, error) {
 	return s.defaultSource.Get(ctx)
 }
 
-// UpdateMappings rebuilds the client-to-upstream key mapping from configuration entries.
+// updateMappings rebuilds the client-to-upstream key mapping from configuration entries.
 // If the same client key appears in multiple entries, logs a warning and uses the first one.
-func (s *MappedSecretSource) UpdateMappings(entries []config.AmpUpstreamAPIKeyEntry) {
+func (s *mappedSecretSource) updateMappings(entries []config.AmpUpstreamAPIKeyEntry) {
 	newLookup := make(map[string]string)
 
 	for _, entry := range entries {
@@ -233,16 +233,16 @@ func (s *MappedSecretSource) UpdateMappings(entries []config.AmpUpstreamAPIKeyEn
 	s.mu.Unlock()
 }
 
-// UpdateDefaultExplicitKey updates the explicit key on the underlying MultiSourceSecret (if applicable).
-func (s *MappedSecretSource) UpdateDefaultExplicitKey(key string) {
-	if ms, ok := s.defaultSource.(*MultiSourceSecret); ok {
-		ms.UpdateExplicitKey(key)
+// updateDefaultExplicitKey updates the explicit key on the underlying MultiSourceSecret (if applicable).
+func (s *mappedSecretSource) updateDefaultExplicitKey(key string) {
+	if ms, ok := s.defaultSource.(*multiSourceSecret); ok {
+		ms.updateExplicitKey(key)
 	}
 }
 
-// InvalidateCache invalidates cache on the underlying MultiSourceSecret (if applicable).
-func (s *MappedSecretSource) InvalidateCache() {
-	if ms, ok := s.defaultSource.(*MultiSourceSecret); ok {
-		ms.InvalidateCache()
+// invalidateCache invalidates cache on the underlying MultiSourceSecret (if applicable).
+func (s *mappedSecretSource) invalidateCache() {
+	if ms, ok := s.defaultSource.(*multiSourceSecret); ok {
+		ms.invalidateCache()
 	}
 }

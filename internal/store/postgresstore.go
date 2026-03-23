@@ -14,8 +14,9 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -107,8 +108,8 @@ func (s *PostgresStore) Close() error {
 	return s.db.Close()
 }
 
-// EnsureSchema creates the required tables (and schema when provided).
-func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
+// ensureSchema creates the required tables (and schema when provided).
+func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("postgres store: not initialized")
 	}
@@ -119,25 +120,33 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		}
 	}
 	configTable := s.fullTableName(s.cfg.ConfigTable)
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+	if _, err := s.db.ExecContext(
+		ctx, fmt.Sprintf(
+			`
 		CREATE TABLE IF NOT EXISTS %s (
 			id TEXT PRIMARY KEY,
 			content TEXT NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)
-	`, configTable)); err != nil {
+	`, configTable,
+		),
+	); err != nil {
 		return fmt.Errorf("postgres store: create config table: %w", err)
 	}
 	authTable := s.fullTableName(s.cfg.AuthTable)
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`
+	if _, err := s.db.ExecContext(
+		ctx, fmt.Sprintf(
+			`
 		CREATE TABLE IF NOT EXISTS %s (
 			id TEXT PRIMARY KEY,
 			content JSONB NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)
-	`, authTable)); err != nil {
+	`, authTable,
+		),
+	); err != nil {
 		return fmt.Errorf("postgres store: create auth table: %w", err)
 	}
 	return nil
@@ -145,7 +154,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 
 // Bootstrap synchronizes configuration and auth records between PostgreSQL and the local workspace.
 func (s *PostgresStore) Bootstrap(ctx context.Context, exampleConfigPath string) error {
-	if err := s.EnsureSchema(ctx); err != nil {
+	if err := s.ensureSchema(ctx); err != nil {
 		return err
 	}
 	if err := s.syncConfigFromDatabase(ctx, exampleConfigPath); err != nil {
@@ -180,10 +189,6 @@ func (s *PostgresStore) WorkDir() string {
 	}
 	return s.spoolRoot
 }
-
-// SetBaseDir implements the optional interface used by authenticators; it is a no-op because
-// the Postgres-backed store controls its own workspace.
-func (s *PostgresStore) SetBaseDir(string) {}
 
 // Save persists authentication metadata to disk and PostgreSQL.
 func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
@@ -222,11 +227,12 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		if errMarshal != nil {
 			return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
 		}
+		// noinspection GoDfaConstantCondition — errRead is non-nil in else branch; checking error kind is intentional.
 		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
+			if util.JSONEqual(existing, raw) {
 				return path, nil
 			}
-		} else if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
+		} else if !errors.Is(errRead, fs.ErrNotExist) {
 			return "", fmt.Errorf("postgres store: read existing metadata: %w", errRead)
 		}
 		tmp := path + ".tmp"
@@ -261,12 +267,14 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 
 // List enumerates all auth records stored in PostgreSQL.
 func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) {
-	query := fmt.Sprintf("SELECT id, content, created_at, updated_at FROM %s ORDER BY id", s.fullTableName(s.cfg.AuthTable))
+	query := fmt.Sprintf(
+		"SELECT id, content, created_at, updated_at FROM %s ORDER BY id", s.fullTableName(s.cfg.AuthTable),
+	)
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("postgres store: list auth: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	auths := make([]*cliproxyauth.Auth, 0, 32)
 	for rows.Next() {
@@ -440,7 +448,7 @@ func (s *PostgresStore) syncAuthFromDatabase(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("postgres store: load auth from database: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	if err = os.RemoveAll(s.authDir); err != nil {
 		return fmt.Errorf("postgres store: reset auth directory: %w", err)
@@ -502,12 +510,14 @@ func (s *PostgresStore) upsertAuthRecord(ctx context.Context, relID, path string
 
 func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []byte) error {
 	jsonPayload := json.RawMessage(data)
-	query := fmt.Sprintf(`
+	query := fmt.Sprintf(
+		`
 		INSERT INTO %s (id, content, created_at, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
 		ON CONFLICT (id)
 		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
-	`, s.fullTableName(s.cfg.AuthTable))
+	`, s.fullTableName(s.cfg.AuthTable),
+	)
 	if _, err := s.db.ExecContext(ctx, query, relID, jsonPayload); err != nil {
 		return fmt.Errorf("postgres store: upsert auth record: %w", err)
 	}
@@ -523,12 +533,14 @@ func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) erro
 }
 
 func (s *PostgresStore) persistConfig(ctx context.Context, data []byte) error {
-	query := fmt.Sprintf(`
+	query := fmt.Sprintf(
+		`
 		INSERT INTO %s (id, content, created_at, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
 		ON CONFLICT (id)
 		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
-	`, s.fullTableName(s.cfg.ConfigTable))
+	`, s.fullTableName(s.cfg.ConfigTable),
+	)
 	normalized := normalizeLineEndings(string(data))
 	if _, err := s.db.ExecContext(ctx, query, defaultConfigKey, normalized); err != nil {
 		return fmt.Errorf("postgres store: upsert config: %w", err)

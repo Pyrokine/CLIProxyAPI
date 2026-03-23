@@ -7,11 +7,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
-// DiffOpenAICompatibility produces human-readable change descriptions.
-func DiffOpenAICompatibility(oldList, newList []config.OpenAICompatibility) []string {
+// openAICompatibility produces human-readable change descriptions.
+func openAICompatibility(oldList, newList []config.OpenAICompatibility) []string {
 	changes := make([]string, 0)
 	oldMap := make(map[string]config.OpenAICompatibility, len(oldList))
 	oldLabels := make(map[string]string, len(oldList))
@@ -48,9 +48,19 @@ func DiffOpenAICompatibility(oldList, newList []config.OpenAICompatibility) []st
 		}
 		switch {
 		case !oldOk:
-			changes = append(changes, fmt.Sprintf("provider added: %s (api-keys=%d, models=%d)", label, countAPIKeys(newEntry), countOpenAIModels(newEntry.Models)))
+			changes = append(
+				changes, fmt.Sprintf(
+					"provider added: %s (api-keys=%d, models=%d)", label, countAPIKeys(newEntry),
+					countOpenAIModels(newEntry.Models),
+				),
+			)
 		case !newOk:
-			changes = append(changes, fmt.Sprintf("provider removed: %s (api-keys=%d, models=%d)", label, countAPIKeys(oldEntry), countOpenAIModels(oldEntry.Models)))
+			changes = append(
+				changes, fmt.Sprintf(
+					"provider removed: %s (api-keys=%d, models=%d)", label, countAPIKeys(oldEntry),
+					countOpenAIModels(oldEntry.Models),
+				),
+			)
 		default:
 			if detail := describeOpenAICompatibilityUpdate(oldEntry, newEntry); detail != "" {
 				changes = append(changes, fmt.Sprintf("provider updated: %s %s", label, detail))

@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
-func TestDiffOpenAICompatibility(t *testing.T) {
+func TestOpenAICompatibility(t *testing.T) {
 	oldList := []config.OpenAICompatibility{
 		{
 			Name: "provider-a",
@@ -38,12 +38,12 @@ func TestDiffOpenAICompatibility(t *testing.T) {
 		},
 	}
 
-	changes := DiffOpenAICompatibility(oldList, newList)
+	changes := openAICompatibility(oldList, newList)
 	expectContains(t, changes, "provider added: provider-b (api-keys=1, models=0)")
 	expectContains(t, changes, "provider updated: provider-a (api-keys 1 -> 2, models 1 -> 2, headers updated)")
 }
 
-func TestDiffOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
+func TestOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 	oldList := []config.OpenAICompatibility{
 		{
 			Name:          "provider-a",
@@ -58,12 +58,12 @@ func TestDiffOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 			Models:        []config.OpenAICompatibilityModel{{Name: "m1"}},
 		},
 	}
-	if changes := DiffOpenAICompatibility(oldList, newList); len(changes) != 0 {
+	if changes := openAICompatibility(oldList, newList); len(changes) != 0 {
 		t.Fatalf("expected no changes, got %v", changes)
 	}
 
 	newList = nil
-	changes := DiffOpenAICompatibility(oldList, newList)
+	changes := openAICompatibility(oldList, newList)
 	expectContains(t, changes, "provider removed: provider-a (api-keys=1, models=1)")
 }
 

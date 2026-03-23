@@ -8,15 +8,15 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 func TestForwardResponsesStreamTerminalErrorUsesResponsesErrorChunk(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
-	h := NewOpenAIResponsesAPIHandler(base)
+	h := NewResponsesAPIHandler(base)
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)

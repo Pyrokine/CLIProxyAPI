@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/gemini"
 	// legacy client removed
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // GeminiAuthenticator implements the login flow for Google Gemini CLI accounts.
@@ -27,7 +27,10 @@ func (a *GeminiAuthenticator) RefreshLead() *time.Duration {
 	return nil
 }
 
-func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (
+	*coreauth.Auth,
+	error,
+) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
 	}
@@ -38,17 +41,19 @@ func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		opts = &LoginOptions{}
 	}
 
-	var ts gemini.GeminiTokenStorage
+	var ts gemini.TokenStorage
 	if opts.ProjectID != "" {
 		ts.ProjectID = opts.ProjectID
 	}
 
-	geminiAuth := gemini.NewGeminiAuth()
-	_, err := geminiAuth.GetAuthenticatedClient(ctx, &ts, cfg, &gemini.WebLoginOptions{
-		NoBrowser:    opts.NoBrowser,
-		CallbackPort: opts.CallbackPort,
-		Prompt:       opts.Prompt,
-	})
+	geminiAuth := gemini.NewAuth()
+	_, err := geminiAuth.GetAuthenticatedClient(
+		ctx, &ts, cfg, &gemini.WebLoginOptions{
+			NoBrowser:    opts.NoBrowser,
+			CallbackPort: opts.CallbackPort,
+			Prompt:       opts.Prompt,
+		},
+	)
 	if err != nil {
 		return nil, fmt.Errorf("gemini authentication failed: %w", err)
 	}

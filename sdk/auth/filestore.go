@@ -14,7 +14,8 @@ import (
 	"sync"
 	"time"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // FileTokenStore persists token records and auth metadata using the filesystem as backing storage.
@@ -38,7 +39,7 @@ func (s *FileTokenStore) SetBaseDir(dir string) {
 }
 
 // Save persists token storage and metadata to the resolved auth file path.
-func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+func (s *FileTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
@@ -84,7 +85,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
 		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if jsonEqual(existing, raw) {
+			if util.JSONEqual(existing, raw) {
 				return path, nil
 			}
 			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -122,31 +123,33 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 }
 
 // List enumerates all auth JSON files under the configured directory.
-func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) {
+func (s *FileTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 	dir := s.baseDirSnapshot()
 	if dir == "" {
 		return nil, fmt.Errorf("auth filestore: directory not configured")
 	}
 	entries := make([]*cliproxyauth.Auth, 0)
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
+	err := filepath.WalkDir(
+		dir, func(path string, d fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+				return nil
+			}
+			auth, err := s.readAuthFile(path, dir)
+			if err != nil {
+				return nil
+			}
+			if auth != nil {
+				entries = append(entries, auth)
+			}
 			return nil
-		}
-		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
-			return nil
-		}
-		auth, err := s.readAuthFile(path, dir)
-		if err != nil {
-			return nil
-		}
-		if auth != nil {
-			entries = append(entries, auth)
-		}
-		return nil
-	})
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +157,7 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 }
 
 // Delete removes the auth file.
-func (s *FileTokenStore) Delete(ctx context.Context, id string) error {
+func (s *FileTokenStore) Delete(_ context.Context, id string) error {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return fmt.Errorf("auth filestore: id is empty")
@@ -207,13 +210,17 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 			// Refresh it using the long-lived refresh_token before querying.
 			if provider == "gemini" {
 				if tokenMap, ok := metadata["token"].(map[string]any); ok {
-					if refreshed, errRefresh := refreshGeminiAccessToken(tokenMap, http.DefaultClient); errRefresh == nil {
+					if refreshed, errRefresh := refreshGeminiAccessToken(
+						tokenMap, http.DefaultClient,
+					); errRefresh == nil {
 						accessToken = refreshed
 					}
 				}
 			}
 			if accessToken != "" {
-				fetchedProjectID, errFetch := FetchAntigravityProjectID(context.Background(), accessToken, http.DefaultClient)
+				fetchedProjectID, errFetch := FetchAntigravityProjectID(
+					context.Background(), accessToken, http.DefaultClient,
+				)
 				if errFetch == nil && strings.TrimSpace(fetchedProjectID) != "" {
 					metadata["project_id"] = strings.TrimSpace(fetchedProjectID)
 					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
@@ -381,65 +388,3 @@ func refreshGeminiAccessToken(tokenMap map[string]any, httpClient *http.Client) 
 	return newAccessToken, nil
 }
 
-// jsonEqual compares two JSON blobs by parsing them into Go objects and deep comparing.
-func jsonEqual(a, b []byte) bool {
-	var objA any
-	var objB any
-	if err := json.Unmarshal(a, &objA); err != nil {
-		return false
-	}
-	if err := json.Unmarshal(b, &objB); err != nil {
-		return false
-	}
-	return deepEqualJSON(objA, objB)
-}
-
-func deepEqualJSON(a, b any) bool {
-	switch valA := a.(type) {
-	case map[string]any:
-		valB, ok := b.(map[string]any)
-		if !ok || len(valA) != len(valB) {
-			return false
-		}
-		for key, subA := range valA {
-			subB, ok1 := valB[key]
-			if !ok1 || !deepEqualJSON(subA, subB) {
-				return false
-			}
-		}
-		return true
-	case []any:
-		sliceB, ok := b.([]any)
-		if !ok || len(valA) != len(sliceB) {
-			return false
-		}
-		for i := range valA {
-			if !deepEqualJSON(valA[i], sliceB[i]) {
-				return false
-			}
-		}
-		return true
-	case float64:
-		valB, ok := b.(float64)
-		if !ok {
-			return false
-		}
-		return valA == valB
-	case string:
-		valB, ok := b.(string)
-		if !ok {
-			return false
-		}
-		return valA == valB
-	case bool:
-		valB, ok := b.(bool)
-		if !ok {
-			return false
-		}
-		return valA == valB
-	case nil:
-		return b == nil
-	default:
-		return false
-	}
-}

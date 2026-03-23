@@ -66,7 +66,13 @@ func (r *Registry) HasResponseTransformer(from, to Format) bool {
 }
 
 // TranslateStream applies the registered streaming response translator.
-func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+func (r *Registry) TranslateStream(
+	ctx context.Context,
+	from, to Format,
+	model string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -79,7 +85,13 @@ func (r *Registry) TranslateStream(ctx context.Context, from, to Format, model s
 }
 
 // TranslateNonStream applies the registered non-stream response translator.
-func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
+func (r *Registry) TranslateNonStream(
+	ctx context.Context,
+	from, to Format,
+	model string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -91,7 +103,7 @@ func (r *Registry) TranslateNonStream(ctx context.Context, from, to Format, mode
 	return string(rawJSON)
 }
 
-// TranslateNonStream applies the registered non-stream response translator.
+// TranslateTokenCount applies the registered non-stream response translator.
 func (r *Registry) TranslateTokenCount(ctx context.Context, from, to Format, count int64, rawJSON []byte) string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -127,13 +139,27 @@ func HasResponseTransformer(from, to Format) bool {
 }
 
 // TranslateStream is a helper on the default registry.
-func TranslateStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+func TranslateStream(
+	ctx context.Context,
+	from, to Format,
+	model string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) []string {
 	return defaultRegistry.TranslateStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 
 // TranslateNonStream is a helper on the default registry.
-func TranslateNonStream(ctx context.Context, from, to Format, model string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) string {
-	return defaultRegistry.TranslateNonStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+func TranslateNonStream(
+	ctx context.Context,
+	from, to Format,
+	model string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) string {
+	return defaultRegistry.TranslateNonStream(
+		ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param,
+	)
 }
 
 // TranslateTokenCount is a helper on the default registry.

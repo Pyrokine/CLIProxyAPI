@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -128,7 +128,12 @@ func (p *pprofServer) stopServer(server *http.Server, addr string, reason string
 	_ = p.stopServerWithContext(context.Background(), server, addr, reason)
 }
 
-func (p *pprofServer) stopServerWithContext(ctx context.Context, server *http.Server, addr string, reason string) error {
+func (p *pprofServer) stopServerWithContext(
+	ctx context.Context,
+	server *http.Server,
+	addr string,
+	reason string,
+) error {
 	if server == nil {
 		return nil
 	}

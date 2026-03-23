@@ -8,12 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/browser"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/antigravity"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -32,7 +30,10 @@ func (AntigravityAuthenticator) RefreshLead() *time.Duration {
 }
 
 // Login launches a local OAuth flow to obtain antigravity tokens and persists them.
-func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (*coreauth.Auth, error) {
+func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, opts *LoginOptions) (
+	*coreauth.Auth,
+	error,
+) {
 	if cfg == nil {
 		return nil, fmt.Errorf("cliproxy auth: configuration is required")
 	}
@@ -48,7 +49,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 		callbackPort = opts.CallbackPort
 	}
 
-	authSvc := antigravity.NewAntigravityAuth(cfg, nil)
+	authSvc := antigravity.NewAuth(cfg, nil)
 
 	state, err := misc.GenerateRandomState()
 	if err != nil {
@@ -68,21 +69,7 @@ func (AntigravityAuthenticator) Login(ctx context.Context, cfg *config.Config, o
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", port)
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
-	if !opts.NoBrowser {
-		fmt.Println("Opening browser for antigravity authentication")
-		if !browser.IsAvailable() {
-			log.Warn("No browser available; please open the URL manually")
-			util.PrintSSHTunnelInstructions(port)
-			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-		} else if errOpen := browser.OpenURL(authURL); errOpen != nil {
-			log.Warnf("Failed to open browser automatically: %v", errOpen)
-			util.PrintSSHTunnelInstructions(port)
-			fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-		}
-	} else {
-		util.PrintSSHTunnelInstructions(port)
-		fmt.Printf("Visit the following URL to continue authentication:\n%s\n", authURL)
-	}
+	openBrowserForAuth("antigravity", authURL, port, opts.NoBrowser)
 
 	fmt.Println("Waiting for antigravity authentication callback...")
 
@@ -178,21 +165,7 @@ waitForCallback:
 		}
 	}
 
-	now := time.Now()
-	metadata := map[string]any{
-		"type":          "antigravity",
-		"access_token":  tokenResp.AccessToken,
-		"refresh_token": tokenResp.RefreshToken,
-		"expires_in":    tokenResp.ExpiresIn,
-		"timestamp":     now.UnixMilli(),
-		"expired":       now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
-	}
-	if email != "" {
-		metadata["email"] = email
-	}
-	if projectID != "" {
-		metadata["project_id"] = projectID
-	}
+	metadata := antigravity.BuildMetadata(tokenResp, email, projectID)
 
 	fileName := antigravity.CredentialFileName(email)
 	label := email
@@ -232,20 +205,22 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 	resultCh := make(chan callbackResult, 1)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		res := callbackResult{
-			Code:  strings.TrimSpace(q.Get("code")),
-			Error: strings.TrimSpace(q.Get("error")),
-			State: strings.TrimSpace(q.Get("state")),
-		}
-		resultCh <- res
-		if res.Code != "" && res.Error == "" {
-			_, _ = w.Write([]byte("<h1>Login successful</h1><p>You can close this window.</p>"))
-		} else {
-			_, _ = w.Write([]byte("<h1>Login failed</h1><p>Please check the CLI output.</p>"))
-		}
-	})
+	mux.HandleFunc(
+		"/oauth-callback", func(w http.ResponseWriter, r *http.Request) {
+			q := r.URL.Query()
+			res := callbackResult{
+				Code:  strings.TrimSpace(q.Get("code")),
+				Error: strings.TrimSpace(q.Get("error")),
+				State: strings.TrimSpace(q.Get("state")),
+			}
+			resultCh <- res
+			if res.Code != "" && res.Error == "" {
+				_, _ = w.Write([]byte("<h1>Login successful</h1><p>You can close this window.</p>"))
+			} else {
+				_, _ = w.Write([]byte("<h1>Login failed</h1><p>Please check the CLI output.</p>"))
+			}
+		},
+	)
 
 	srv := &http.Server{Handler: mux}
 	go func() {
@@ -260,6 +235,6 @@ func startAntigravityCallbackServer(port int) (*http.Server, int, <-chan callbac
 // FetchAntigravityProjectID exposes project discovery for external callers.
 func FetchAntigravityProjectID(ctx context.Context, accessToken string, httpClient *http.Client) (string, error) {
 	cfg := &config.Config{}
-	authSvc := antigravity.NewAntigravityAuth(cfg, httpClient)
+	authSvc := antigravity.NewAuth(cfg, httpClient)
 	return authSvc.FetchProjectID(ctx, accessToken)
 }
