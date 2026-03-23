@@ -6,17 +6,21 @@ import (
 	"sort"
 	"strings"
 
-	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+	configaccess "github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 	log "github.com/sirupsen/logrus"
 )
 
-// ReconcileProviders builds the desired provider list by reusing existing providers when possible
+// reconcileProviders builds the desired provider list by reusing existing providers when possible
 // and creating or removing providers only when their configuration changed. It returns the final
 // ordered provider slice along with the identifiers of providers that were added, updated, or
 // removed compared to the previous configuration.
-func ReconcileProviders(oldCfg, newCfg *config.Config, existing []sdkaccess.Provider) (result []sdkaccess.Provider, added, updated, removed []string, err error) {
+func reconcileProviders(oldCfg, newCfg *config.Config, existing []sdkaccess.Provider) (
+	result []sdkaccess.Provider,
+	added, updated, removed []string,
+	err error,
+) {
 	_ = oldCfg
 	if newCfg == nil {
 		return nil, nil, nil, nil, nil
@@ -86,7 +90,7 @@ func ApplyAccessProviders(manager *sdkaccess.Manager, oldCfg, newCfg *config.Con
 
 	existing := manager.Providers()
 	configaccess.Register(&newCfg.SDKConfig)
-	providers, added, updated, removed, err := ReconcileProviders(oldCfg, newCfg, existing)
+	providers, added, updated, removed, err := reconcileProviders(oldCfg, newCfg, existing)
 	if err != nil {
 		log.Errorf("failed to reconcile request auth providers: %v", err)
 		return false, fmt.Errorf("reconciling access providers: %w", err)

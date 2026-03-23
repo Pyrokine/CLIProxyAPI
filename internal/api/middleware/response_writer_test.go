@@ -12,8 +12,8 @@ func TestExtractRequestBodyPrefersOverride(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
-	wrapper := &ResponseWriterWrapper{
-		requestInfo: &RequestInfo{Body: []byte("original-body")},
+	wrapper := &responseWriterWrapper{
+		requestInfo: &requestInfo{Body: []byte("original-body")},
 	}
 
 	body := wrapper.extractRequestBody(c)
@@ -33,7 +33,7 @@ func TestExtractRequestBodySupportsStringOverride(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
-	wrapper := &ResponseWriterWrapper{}
+	wrapper := &responseWriterWrapper{}
 	c.Set(requestBodyOverrideContextKey, "override-as-string")
 
 	body := wrapper.extractRequestBody(c)

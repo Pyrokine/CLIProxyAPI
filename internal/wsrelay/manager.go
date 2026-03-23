@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -57,7 +58,16 @@ func NewManager(opts Options) *Manager {
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 			CheckOrigin: func(r *http.Request) bool {
-				return true
+				origin := r.Header.Get("Origin")
+				if origin == "" {
+					return true // non-browser clients don't send Origin
+				}
+				u, err := url.Parse(origin)
+				if err != nil {
+					return false
+				}
+				host := u.Hostname()
+				return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == r.Host || host+":"+u.Port() == r.Host
 			},
 		},
 		providerFactory: opts.ProviderFactory,
@@ -159,9 +169,9 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	go s.run(context.Background())
 }
 
-// Send forwards the message to the specific provider connection and returns a channel
+// send forwards the message to the specific provider connection and returns a channel
 // yielding response messages.
-func (m *Manager) Send(ctx context.Context, provider string, msg Message) (<-chan Message, error) {
+func (m *Manager) send(ctx context.Context, provider string, msg message) (<-chan message, error) {
 	s := m.session(provider)
 	if s == nil {
 		return nil, fmt.Errorf("wsrelay: provider %s not connected", provider)

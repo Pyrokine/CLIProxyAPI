@@ -2,38 +2,40 @@ package configaccess
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
+	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 // Register ensures the config-access provider is available to the access manager.
 func Register(cfg *sdkconfig.SDKConfig) {
 	if cfg == nil {
-		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
+		sdkaccess.UnregisterProvider(sdkaccess.ProviderTypeConfigAPIKey)
 		return
 	}
 
 	keys := normalizeKeys(cfg.APIKeys)
 	if len(keys) == 0 {
-		sdkaccess.UnregisterProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
+		sdkaccess.UnregisterProvider(sdkaccess.ProviderTypeConfigAPIKey)
 		return
 	}
 
 	sdkaccess.RegisterProvider(
-		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		sdkaccess.ProviderTypeConfigAPIKey,
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.AllowQueryAuth),
 	)
 }
 
 type provider struct {
-	name string
-	keys map[string]struct{}
+	name           string
+	keys           map[string]struct{}
+	allowQueryAuth bool
 }
 
-func newProvider(name string, keys []string) *provider {
+func newProvider(name string, keys []string, allowQueryAuth bool) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
@@ -42,7 +44,7 @@ func newProvider(name string, keys []string) *provider {
 	for _, key := range keys {
 		keySet[key] = struct{}{}
 	}
-	return &provider{name: providerName, keys: keySet}
+	return &provider{name: providerName, keys: keySet, allowQueryAuth: allowQueryAuth}
 }
 
 func (p *provider) Identifier() string {
@@ -62,12 +64,14 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 	authHeader := r.Header.Get("Authorization")
 	authHeaderGoogle := r.Header.Get("X-Goog-Api-Key")
 	authHeaderAnthropic := r.Header.Get("X-Api-Key")
+
 	queryKey := ""
 	queryAuthToken := ""
-	if r.URL != nil {
+	if p.allowQueryAuth {
 		queryKey = r.URL.Query().Get("key")
 		queryAuthToken = r.URL.Query().Get("auth_token")
 	}
+
 	if authHeader == "" && authHeaderGoogle == "" && authHeaderAnthropic == "" && queryKey == "" && queryAuthToken == "" {
 		return nil, sdkaccess.NewNoCredentialsError()
 	}
@@ -85,11 +89,19 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		{queryAuthToken, "query-auth-token"},
 	}
 
+	// Use constant-time comparison and always iterate all keys to avoid timing leaks.
 	for _, candidate := range candidates {
 		if candidate.value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
+		candidateBytes := []byte(candidate.value)
+		matched := false
+		for storedKey := range p.keys {
+			if subtle.ConstantTimeCompare(candidateBytes, []byte(storedKey)) == 1 {
+				matched = true
+			}
+		}
+		if matched {
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,

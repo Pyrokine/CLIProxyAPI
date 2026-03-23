@@ -10,8 +10,8 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -30,7 +30,10 @@ var (
 type LogFormatter struct{}
 
 // logFieldOrder defines the display order for common log fields.
-var logFieldOrder = []string{"provider", "model", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to", "error"}
+var logFieldOrder = []string{
+	"provider", "model", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to",
+	"error",
+}
 
 // Format renders a single log entry with custom formatting.
 func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
@@ -71,7 +74,10 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 
 	var formatted string
 	if entry.Caller != nil {
-		formatted = fmt.Sprintf("[%s] [%s] [%s] [%s:%d] %s%s\n", timestamp, reqID, levelStr, filepath.Base(entry.Caller.File), entry.Caller.Line, message, fieldsStr)
+		formatted = fmt.Sprintf(
+			"[%s] [%s] [%s] [%s:%d] %s%s\n", timestamp, reqID, levelStr, filepath.Base(entry.Caller.File),
+			entry.Caller.Line, message, fieldsStr,
+		)
 	} else {
 		formatted = fmt.Sprintf("[%s] [%s] [%s] %s%s\n", timestamp, reqID, levelStr, message, fieldsStr)
 	}
@@ -83,22 +89,24 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 // SetupBaseLogger configures the shared logrus instance and Gin writers.
 // It is safe to call multiple times; initialization happens only once.
 func SetupBaseLogger() {
-	setupOnce.Do(func() {
-		log.SetOutput(os.Stdout)
-		log.SetReportCaller(true)
-		log.SetFormatter(&LogFormatter{})
+	setupOnce.Do(
+		func() {
+			log.SetOutput(os.Stdout)
+			log.SetReportCaller(true)
+			log.SetFormatter(&LogFormatter{})
 
-		ginInfoWriter = log.StandardLogger().Writer()
-		gin.DefaultWriter = ginInfoWriter
-		ginErrorWriter = log.StandardLogger().WriterLevel(log.ErrorLevel)
-		gin.DefaultErrorWriter = ginErrorWriter
-		gin.DebugPrintFunc = func(format string, values ...interface{}) {
-			format = strings.TrimRight(format, "\r\n")
-			log.StandardLogger().Infof(format, values...)
-		}
+			ginInfoWriter = log.StandardLogger().Writer()
+			gin.DefaultWriter = ginInfoWriter
+			ginErrorWriter = log.StandardLogger().WriterLevel(log.ErrorLevel)
+			gin.DefaultErrorWriter = ginErrorWriter
+			gin.DebugPrintFunc = func(format string, values ...any) {
+				format = strings.TrimRight(format, "\r\n")
+				log.StandardLogger().Infof(format, values...)
+			}
 
-		log.RegisterExitHandler(closeLogOutputs)
-	})
+			log.RegisterExitHandler(closeLogOutputs)
+		},
+	)
 }
 
 // isDirWritable checks if the specified directory exists and is writable by attempting to create and remove a test file.

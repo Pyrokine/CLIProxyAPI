@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -12,26 +13,15 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	geminiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/gemini"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 const defaultAPICallTimeout = 60 * time.Second
-
-const (
-	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
-	geminiOAuthClientSecret = "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"
-)
-
-var geminiOAuthScopes = []string{
-	"https://www.googleapis.com/auth/cloud-platform",
-	"https://www.googleapis.com/auth/userinfo.email",
-	"https://www.googleapis.com/auth/userinfo.profile",
-}
 
 const (
 	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -129,6 +119,15 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid url"})
 		return
 	}
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only http and https schemes are allowed"})
+		return
+	}
+	pinnedAddr, private := resolveAndCheckHost(parsedURL.Hostname())
+	if private {
+		c.JSON(http.StatusForbidden, gin.H{"error": "requests to private/internal addresses are not allowed"})
+		return
+	}
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
@@ -189,7 +188,16 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.Transport = h.apiCallTransport(auth)
+	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return fmt.Errorf("too many redirects")
+		}
+		if isPrivateHost(req.URL.Hostname()) {
+			return fmt.Errorf("redirect to private address blocked")
+		}
+		return nil
+	}
+	httpClient.Transport = pinnedTransport(h.apiCallTransport(auth), parsedURL.Hostname(), pinnedAddr)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -203,17 +211,19 @@ func (h *Handler) APICall(c *gin.Context) {
 		}
 	}()
 
-	respBody, errReadAll := io.ReadAll(resp.Body)
+	respBody, errReadAll := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if errReadAll != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
 
-	c.JSON(http.StatusOK, apiCallResponse{
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header,
-		Body:       string(respBody),
-	})
+	c.JSON(
+		http.StatusOK, apiCallResponse{
+			StatusCode: resp.StatusCode,
+			Header:     resp.Header,
+			Body:       string(respBody),
+		},
+	)
 }
 
 func firstNonEmptyString(values ...*string) string {
@@ -279,41 +289,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 		return "", fmt.Errorf("gemini oauth metadata missing")
 	}
 
-	base := make(map[string]any)
-	if tokenRaw, ok := metadata["token"].(map[string]any); ok && tokenRaw != nil {
-		base = cloneMap(tokenRaw)
-	}
-
-	var token oauth2.Token
-	if len(base) > 0 {
-		if raw, errMarshal := json.Marshal(base); errMarshal == nil {
-			_ = json.Unmarshal(raw, &token)
-		}
-	}
-
-	if token.AccessToken == "" {
-		token.AccessToken = stringValue(metadata, "access_token")
-	}
-	if token.RefreshToken == "" {
-		token.RefreshToken = stringValue(metadata, "refresh_token")
-	}
-	if token.TokenType == "" {
-		token.TokenType = stringValue(metadata, "token_type")
-	}
-	if token.Expiry.IsZero() {
-		if expiry := stringValue(metadata, "expiry"); expiry != "" {
-			if ts, errParseTime := time.Parse(time.RFC3339, expiry); errParseTime == nil {
-				token.Expiry = ts
-			}
-		}
-	}
-
-	conf := &oauth2.Config{
-		ClientID:     geminiOAuthClientID,
-		ClientSecret: geminiOAuthClientSecret,
-		Scopes:       geminiOAuthScopes,
-		Endpoint:     google.Endpoint,
-	}
+	base, token, conf := geminiauth.TokenAndConfigFromMetadata(metadata)
 
 	ctxToken := ctx
 	httpClient := &http.Client{
@@ -322,7 +298,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
-	src := conf.TokenSource(ctxToken, &token)
+	src := conf.TokenSource(ctxToken, token)
 	currentToken, errToken := src.Token()
 	if errToken != nil {
 		return "", errToken
@@ -389,12 +365,15 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(resp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if errRead != nil {
 		return "", errRead
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("antigravity oauth token refresh failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return "", fmt.Errorf(
+			"antigravity oauth token refresh failed: status %d: %s", resp.StatusCode,
+			strings.TrimSpace(string(bodyBytes)),
+		)
 	}
 
 	var tokenResp struct {
@@ -469,7 +448,7 @@ func int64Value(raw any) int64 {
 	case uint32:
 		return int64(typed)
 	case uint64:
-		if typed > uint64(^uint64(0)>>1) {
+		if typed > ^uint64(0)>>1 {
 			return 0
 		}
 		return int64(typed)
@@ -503,9 +482,7 @@ func geminiOAuthMetadata(auth *coreauth.Auth) (map[string]any, func(map[string]a
 		if auth.Metadata == nil {
 			auth.Metadata = make(map[string]any)
 		}
-		for k, v := range fields {
-			auth.Metadata[k] = v
-		}
+		maps.Copy(auth.Metadata, fields)
 	}
 }
 
@@ -524,9 +501,7 @@ func cloneMap(in map[string]any) map[string]any {
 		return nil
 	}
 	out := make(map[string]any, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -541,9 +516,7 @@ func buildOAuthTokenMap(base map[string]any, tok *oauth2.Token) map[string]any {
 	if raw, errMarshal := json.Marshal(tok); errMarshal == nil {
 		var tokenMap map[string]any
 		if errUnmarshal := json.Unmarshal(raw, &tokenMap); errUnmarshal == nil {
-			for k, v := range tokenMap {
-				merged[k] = v
-			}
+			maps.Copy(merged, tokenMap)
 		}
 	}
 	return merged
@@ -674,6 +647,10 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 		log.Debug("proxy URL missing scheme/host")
 		return nil
 	}
+	if isPrivateHost(proxyURL.Hostname()) {
+		log.Debug("proxy URL points to private address, blocked")
+		return nil
+	}
 
 	if proxyURL.Scheme == "socks5" {
 		var proxyAuth *proxy.Auth
@@ -701,4 +678,100 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 
 	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
 	return nil
+}
+
+// isPrivateHost returns true if the given hostname resolves to a private,
+// loopback, or link-local address that should not be reachable via the
+// APICall proxy endpoint.
+func isPrivateHost(hostname string) bool {
+	_, priv := resolveAndCheckHost(hostname)
+	return priv
+}
+
+// resolveAndCheckHost resolves the hostname and returns the first non-private IP address.
+// If the hostname is private or resolution fails, returns ("", true).
+// The returned IP can be used for DNS pinning to prevent TOCTOU rebinding attacks.
+func resolveAndCheckHost(hostname string) (pinnedAddr string, private bool) {
+	if hostname == "" {
+		return "", true
+	}
+	ip := net.ParseIP(hostname)
+	if ip != nil {
+		if isPrivateIP(ip) {
+			return "", true
+		}
+		return hostname, false
+	}
+	addrs, err := net.LookupHost(hostname)
+	if err != nil {
+		return "", true
+	}
+	for _, addr := range addrs {
+		if parsed := net.ParseIP(addr); parsed != nil && isPrivateIP(parsed) {
+			return "", true
+		}
+	}
+	if len(addrs) > 0 {
+		return addrs[0], false
+	}
+	return "", true
+}
+
+// pinnedTransport wraps a base RoundTripper with a custom DialContext that
+// forces the initial hostname to connect to the pre-resolved pinnedAddr,
+// preventing DNS rebinding TOCTOU attacks.
+func pinnedTransport(base http.RoundTripper, hostname, pinnedAddr string) http.RoundTripper {
+	if pinnedAddr == "" || hostname == "" {
+		return base
+	}
+	t, ok := base.(*http.Transport)
+	if !ok {
+		return base
+	}
+	clone := t.Clone()
+	originalDial := clone.DialContext
+	if originalDial == nil {
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		originalDial = dialer.DialContext
+	}
+	clone.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return originalDial(ctx, network, addr)
+		}
+		if host == hostname {
+			addr = net.JoinHostPort(pinnedAddr, port)
+		}
+		return originalDial(ctx, network, addr)
+	}
+	return clone
+}
+
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []struct {
+		network *net.IPNet
+	}{
+		{mustParseCIDR("10.0.0.0/8")},
+		{mustParseCIDR("172.16.0.0/12")},
+		{mustParseCIDR("192.168.0.0/16")},
+		{mustParseCIDR("127.0.0.0/8")},
+		{mustParseCIDR("169.254.0.0/16")},
+		{mustParseCIDR("::1/128")},
+		{mustParseCIDR("fc00::/7")},
+		{mustParseCIDR("fe80::/10")},
+	}
+	for _, r := range privateRanges {
+		if r.network.Contains(ip) {
+			return true
+		}
+	}
+	return ip.IsUnspecified()
+}
+
+func mustParseCIDR(cidr string) *net.IPNet {
+	_, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		panic("invalid CIDR: " + cidr)
+	}
+	return network
 }

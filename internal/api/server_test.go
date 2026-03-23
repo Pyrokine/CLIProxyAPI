@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,12 +10,13 @@ import (
 	"testing"
 	"time"
 
-	gin "github.com/gin-gonic/gin"
-	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/gin-gonic/gin"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
+	proxyconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -92,23 +94,27 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			server := newTestServer(t)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				server := newTestServer(t)
 
-			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
-			req.Header.Set("Authorization", "Bearer test-key")
+				req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+				req.Header.Set("Authorization", "Bearer test-key")
 
-			rr := httptest.NewRecorder()
-			server.engine.ServeHTTP(rr, req)
+				rr := httptest.NewRecorder()
+				server.engine.ServeHTTP(rr, req)
 
-			if rr.Code != tc.wantStatus {
-				t.Fatalf("unexpected status code for %s: got %d want %d; body=%s", tc.path, rr.Code, tc.wantStatus, rr.Body.String())
-			}
-			if body := rr.Body.String(); !strings.Contains(body, tc.wantContains) {
-				t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
-			}
-		})
+				if rr.Code != tc.wantStatus {
+					t.Fatalf(
+						"unexpected status code for %s: got %d want %d; body=%s", tc.path, rr.Code, tc.wantStatus,
+						rr.Body.String(),
+					)
+				}
+				if body := rr.Body.String(); !strings.Contains(body, tc.wantContains) {
+					t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
+				}
+			},
+		)
 	}
 }
 
@@ -132,7 +138,9 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	}()
 
 	// Force ResolveLogDirectory to fallback to auth-dir/logs by making ./logs not a writable directory.
-	if errWriteFile := os.WriteFile(filepath.Join(tmpDir, "logs"), []byte("not-a-directory"), 0o644); errWriteFile != nil {
+	if errWriteFile := os.WriteFile(
+		filepath.Join(tmpDir, "logs"), []byte("not-a-directory"), 0o644,
+	); errWriteFile != nil {
 		t.Fatalf("failed to create blocking logs file: %v", errWriteFile)
 	}
 
@@ -164,10 +172,10 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	errLog := fileLogger.LogRequestWithOptions(
 		"/v1/chat/completions",
 		http.MethodPost,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"input":"hello"}`),
 		http.StatusBadGateway,
-		map[string][]string{"Content-Type": []string{"application/json"}},
+		map[string][]string{"Content-Type": {"application/json"}},
 		[]byte(`{"error":"upstream failure"}`),
 		nil,
 		nil,
@@ -206,5 +214,161 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
 		}
+	}
+}
+
+// --- authMiddleware tests ---
+
+func setupAuthMiddlewareEngine(manager *sdkaccess.Manager) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(authMiddleware(manager, nil))
+	engine.GET("/test", func(c *gin.Context) {
+		apiKey, _ := c.Get("apiKey")
+		c.JSON(http.StatusOK, gin.H{"apiKey": apiKey})
+	})
+	return engine
+}
+
+func TestAuthMiddleware_NilManager_LoopbackAllowed(t *testing.T) {
+	engine := setupAuthMiddlewareEngine(nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for loopback with nil manager, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAuthMiddleware_NilManager_NonLoopbackRejected(t *testing.T) {
+	engine := setupAuthMiddlewareEngine(nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "192.168.1.1:12345"
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for non-loopback with nil manager, got %d", rr.Code)
+	}
+}
+
+func TestAuthMiddleware_NilManager_IPv6LoopbackAllowed(t *testing.T) {
+	engine := setupAuthMiddlewareEngine(nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "[::1]:12345"
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 for IPv6 loopback with nil manager, got %d", rr.Code)
+	}
+}
+
+// stubProvider implements sdkaccess.Provider for testing.
+type stubProvider struct {
+	keys map[string]struct{}
+}
+
+func (s *stubProvider) Identifier() string { return "stub" }
+
+func (s *stubProvider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		return nil, sdkaccess.NewNoCredentialsError()
+	}
+	key := strings.TrimPrefix(authHeader, "Bearer ")
+	if _, ok := s.keys[key]; ok {
+		return &sdkaccess.Result{
+			Provider:  "stub",
+			Principal: key,
+		}, nil
+	}
+	return nil, sdkaccess.NewInvalidCredentialError()
+}
+
+func TestAuthMiddleware_ValidAPIKey(t *testing.T) {
+	manager := sdkaccess.NewManager()
+	manager.SetProviders([]sdkaccess.Provider{
+		&stubProvider{keys: map[string]struct{}{"valid-key": {}}},
+	})
+	engine := gin.New()
+	gin.SetMode(gin.TestMode)
+	engine.Use(authMiddleware(manager, nil))
+	engine.GET("/test", func(c *gin.Context) {
+		apiKey, _ := c.Get("apiKey")
+		c.JSON(http.StatusOK, gin.H{"apiKey": apiKey})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer valid-key")
+	req.RemoteAddr = "10.0.0.1:9999"
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "valid-key") {
+		t.Fatalf("expected apiKey in context, body: %s", rr.Body.String())
+	}
+}
+
+func TestAuthMiddleware_InvalidAPIKey(t *testing.T) {
+	manager := sdkaccess.NewManager()
+	manager.SetProviders([]sdkaccess.Provider{
+		&stubProvider{keys: map[string]struct{}{"valid-key": {}}},
+	})
+	engine := gin.New()
+	gin.SetMode(gin.TestMode)
+	engine.Use(authMiddleware(manager, nil))
+	engine.GET("/test", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer bad-key")
+	req.RemoteAddr = "10.0.0.1:9999"
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAuthMiddleware_RateLimited(t *testing.T) {
+	manager := sdkaccess.NewManager()
+	manager.SetProviders([]sdkaccess.Provider{
+		&stubProvider{keys: map[string]struct{}{"valid-key": {}}},
+	})
+
+	rl := access.NewAuthRateLimiter()
+	defer rl.Stop()
+
+	// Trigger lockout for the IP.
+	for i := 0; i < 10; i++ {
+		rl.RecordFailure("10.0.0.99")
+	}
+
+	engine := gin.New()
+	gin.SetMode(gin.TestMode)
+	engine.Use(authMiddleware(manager, rl))
+	engine.GET("/test", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{})
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer valid-key")
+	req.RemoteAddr = "10.0.0.99:9999"
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d: %s", rr.Code, rr.Body.String())
 	}
 }

@@ -40,8 +40,8 @@ func (m *Manager) NonStream(ctx context.Context, provider string, req *HTTPReque
 	if req == nil {
 		return nil, fmt.Errorf("wsrelay: request is nil")
 	}
-	msg := Message{ID: uuid.NewString(), Type: MessageTypeHTTPReq, Payload: encodeRequest(req)}
-	respCh, err := m.Send(ctx, provider, msg)
+	msg := message{ID: uuid.NewString(), Type: messageTypeHTTPReq, Payload: encodeRequest(req)}
+	respCh, err := m.send(ctx, provider, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -116,8 +116,8 @@ func (m *Manager) Stream(ctx context.Context, provider string, req *HTTPRequest)
 	if req == nil {
 		return nil, fmt.Errorf("wsrelay: request is nil")
 	}
-	msg := Message{ID: uuid.NewString(), Type: MessageTypeHTTPReq, Payload: encodeRequest(req)}
-	respCh, err := m.Send(ctx, provider, msg)
+	msg := message{ID: uuid.NewString(), Type: messageTypeHTTPReq, Payload: encodeRequest(req)}
+	respCh, err := m.send(ctx, provider, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +148,11 @@ func (m *Manager) Stream(ctx context.Context, provider string, req *HTTPRequest)
 				switch msg.Type {
 				case MessageTypeStreamStart:
 					resp := decodeResponse(msg.Payload)
-					if okSend := send(StreamEvent{Type: MessageTypeStreamStart, Status: resp.Status, Headers: resp.Headers}); !okSend {
+					if okSend := send(
+						StreamEvent{
+							Type: MessageTypeStreamStart, Status: resp.Status, Headers: resp.Headers,
+						},
+					); !okSend {
 						return
 					}
 				case MessageTypeStreamChunk:
@@ -164,7 +168,11 @@ func (m *Manager) Stream(ctx context.Context, provider string, req *HTTPRequest)
 					return
 				case MessageTypeHTTPResp:
 					resp := decodeResponse(msg.Payload)
-					_ = send(StreamEvent{Type: MessageTypeHTTPResp, Status: resp.Status, Headers: resp.Headers, Payload: resp.Body})
+					_ = send(
+						StreamEvent{
+							Type: MessageTypeHTTPResp, Status: resp.Status, Headers: resp.Headers, Payload: resp.Body,
+						},
+					)
 					return
 				default:
 				}

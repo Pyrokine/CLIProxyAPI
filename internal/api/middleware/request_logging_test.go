@@ -1,11 +1,15 @@
 package middleware
 
 import (
+	"bytes"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestShouldSkipMethodForRequestLogging(t *testing.T) {
@@ -134,5 +138,38 @@ func TestShouldCaptureRequestBody(t *testing.T) {
 		if got != tests[i].want {
 			t.Fatalf("%s: got %t, want %t", tests[i].name, got, tests[i].want)
 		}
+	}
+}
+
+func TestCaptureRequestInfo_BodyLimited(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+
+	var capturedBodyLen int
+	engine.POST("/test", func(c *gin.Context) {
+		info, err := captureRequestInfo(c, true)
+		if err != nil {
+			t.Errorf("captureRequestInfo error: %v", err)
+			return
+		}
+		capturedBodyLen = len(info.Body)
+		c.Status(http.StatusOK)
+	})
+
+	// Create a body larger than 10MB.
+	bigBody := make([]byte, 11<<20) // 11MB
+	for i := range bigBody {
+		bigBody[i] = 'A'
+	}
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/test", bytes.NewReader(bigBody))
+	req.Header.Set("Content-Type", "application/json")
+	engine.ServeHTTP(w, req)
+
+	// The body should be truncated to 10MB.
+	maxExpected := 10 << 20
+	if capturedBodyLen > maxExpected {
+		t.Fatalf("expected body capped at %d bytes, got %d", maxExpected, capturedBodyLen)
 	}
 }

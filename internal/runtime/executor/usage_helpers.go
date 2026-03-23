@@ -9,8 +9,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -69,22 +70,28 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 			detail.TotalTokens = total
 		}
 	}
-	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 && detail.TotalTokens == 0 && !failed {
+	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 &&
+		detail.TotalTokens == 0 &&
+		!failed {
 		return
 	}
-	r.once.Do(func() {
-		usage.PublishRecord(ctx, usage.Record{
-			Provider:    r.provider,
-			Model:       r.model,
-			Source:      r.source,
-			APIKey:      r.apiKey,
-			AuthID:      r.authID,
-			AuthIndex:   r.authIndex,
-			RequestedAt: r.requestedAt,
-			Failed:      failed,
-			Detail:      detail,
-		})
-	})
+	r.once.Do(
+		func() {
+			usage.PublishRecord(
+				ctx, usage.Record{
+					Provider:    r.provider,
+					Model:       r.model,
+					Source:      r.source,
+					APIKey:      r.apiKey,
+					AuthID:      r.authID,
+					AuthIndex:   r.authIndex,
+					RequestedAt: r.requestedAt,
+					Failed:      failed,
+					Detail:      detail,
+				},
+			)
+		},
+	)
 }
 
 // ensurePublished guarantees that a usage record is emitted exactly once.
@@ -95,26 +102,30 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	r.once.Do(func() {
-		usage.PublishRecord(ctx, usage.Record{
-			Provider:    r.provider,
-			Model:       r.model,
-			Source:      r.source,
-			APIKey:      r.apiKey,
-			AuthID:      r.authID,
-			AuthIndex:   r.authIndex,
-			RequestedAt: r.requestedAt,
-			Failed:      false,
-			Detail:      usage.Detail{},
-		})
-	})
+	r.once.Do(
+		func() {
+			usage.PublishRecord(
+				ctx, usage.Record{
+					Provider:    r.provider,
+					Model:       r.model,
+					Source:      r.source,
+					APIKey:      r.apiKey,
+					AuthID:      r.authID,
+					AuthIndex:   r.authIndex,
+					RequestedAt: r.requestedAt,
+					Failed:      false,
+					Detail:      usage.Detail{},
+				},
+			)
+		},
+	)
 }
 
 func apiKeyFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	ginCtx, ok := util.GinContextValue(ctx).(*gin.Context)
 	if !ok || ginCtx == nil {
 		return ""
 	}
@@ -165,14 +176,28 @@ func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
 		}
 		if auth.Attributes != nil {
 			if key := strings.TrimSpace(auth.Attributes["api_key"]); key != "" {
-				return key
+				return maskAPIKey(key)
 			}
 		}
 	}
 	if trimmed := strings.TrimSpace(ctxAPIKey); trimmed != "" {
-		return trimmed
+		return maskAPIKey(trimmed)
 	}
 	return ""
+}
+
+// maskAPIKey redacts an API key to prefix + last 4 characters (e.g. "sk-pyro-...d878").
+func maskAPIKey(key string) string {
+	if len(key) <= 8 {
+		return "***"
+	}
+	dashIdx := strings.LastIndex(key, "-")
+	if dashIdx == -1 || dashIdx >= len(key)-4 {
+		return key[:4] + "..." + key[len(key)-4:]
+	}
+	prefix := key[:dashIdx+1]
+	suffix := key[len(key)-4:]
+	return prefix + "..." + suffix
 }
 
 func parseCodexUsage(data []byte) (usage.Detail, bool) {
@@ -399,10 +424,10 @@ func rememberStopWithoutUsage(traceID string) {
 	time.AfterFunc(10*time.Minute, func() { stopChunkWithoutUsage.Delete(traceID) })
 }
 
-// FilterSSEUsageMetadata removes usageMetadata from SSE events that are not
+// filterSSEUsageMetadata removes usageMetadata from SSE events that are not
 // terminal (finishReason != "stop"). Stop chunks are left untouched. This
 // function is shared between aistudio and antigravity executors.
-func FilterSSEUsageMetadata(payload []byte) []byte {
+func filterSSEUsageMetadata(payload []byte) []byte {
 	if len(payload) == 0 {
 		return payload
 	}
@@ -416,11 +441,11 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 			continue
 		}
 		foundData = true
-		dataIdx := bytes.Index(line, []byte("data:"))
-		if dataIdx < 0 {
+		before, after, ok := bytes.Cut(line, []byte("data:"))
+		if !ok {
 			continue
 		}
-		rawJSON := bytes.TrimSpace(line[dataIdx+5:])
+		rawJSON := bytes.TrimSpace(after)
 		traceID := gjson.GetBytes(rawJSON, "traceId").String()
 		if isStopChunkWithoutUsage(rawJSON) && traceID != "" {
 			rememberStopWithoutUsage(traceID)
@@ -433,12 +458,12 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 			}
 		}
 
-		cleaned, changed := StripUsageMetadataFromJSON(rawJSON)
+		cleaned, changed := stripUsageMetadataFromJSON(rawJSON)
 		if !changed {
 			continue
 		}
 		var rebuilt []byte
-		rebuilt = append(rebuilt, line[:dataIdx]...)
+		rebuilt = append(rebuilt, before...)
 		rebuilt = append(rebuilt, []byte("data:")...)
 		if len(cleaned) > 0 {
 			rebuilt = append(rebuilt, ' ')
@@ -451,7 +476,7 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 		if !foundData {
 			// Handle payloads that are raw JSON without SSE data: prefix.
 			trimmed := bytes.TrimSpace(payload)
-			cleaned, changed := StripUsageMetadataFromJSON(trimmed)
+			cleaned, changed := stripUsageMetadataFromJSON(trimmed)
 			if !changed {
 				return payload
 			}
@@ -462,11 +487,11 @@ func FilterSSEUsageMetadata(payload []byte) []byte {
 	return bytes.Join(lines, []byte("\n"))
 }
 
-// StripUsageMetadataFromJSON drops usageMetadata unless finishReason is present (terminal).
+// stripUsageMetadataFromJSON drops usageMetadata unless finishReason is present (terminal).
 // It handles both formats:
 // - Aistudio: candidates.0.finishReason
 // - Antigravity: response.candidates.0.finishReason
-func StripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
+func stripUsageMetadataFromJSON(rawJSON []byte) ([]byte, bool) {
 	jsonBytes := bytes.TrimSpace(rawJSON)
 	if len(jsonBytes) == 0 || !gjson.ValidBytes(jsonBytes) {
 		return rawJSON, false

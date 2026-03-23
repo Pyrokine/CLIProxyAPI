@@ -20,7 +20,7 @@ const (
 var errClosed = errors.New("websocket session closed")
 
 type pendingRequest struct {
-	ch        chan Message
+	ch        chan message
 	closeOnce sync.Once
 }
 
@@ -28,9 +28,11 @@ func (pr *pendingRequest) close() {
 	if pr == nil {
 		return
 	}
-	pr.closeOnce.Do(func() {
-		close(pr.ch)
-	})
+	pr.closeOnce.Do(
+		func() {
+			close(pr.ch)
+		},
+	)
 }
 
 type session struct {
@@ -53,11 +55,13 @@ func newSession(conn *websocket.Conn, mgr *Manager, id string) *session {
 		closed:   make(chan struct{}),
 	}
 	conn.SetReadLimit(maxInboundMessageLen)
-	conn.SetReadDeadline(time.Now().Add(readTimeout))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(readTimeout))
-		return nil
-	})
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	conn.SetPongHandler(
+		func(string) error {
+			_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+			return nil
+		},
+	)
 	s.startHeartbeat()
 	return s
 }
@@ -86,10 +90,10 @@ func (s *session) startHeartbeat() {
 	}()
 }
 
-func (s *session) run(ctx context.Context) {
+func (s *session) run(_ context.Context) {
 	defer s.cleanup(errClosed)
 	for {
-		var msg Message
+		var msg message
 		if err := s.conn.ReadJSON(&msg); err != nil {
 			s.cleanup(err)
 			return
@@ -98,9 +102,9 @@ func (s *session) run(ctx context.Context) {
 	}
 }
 
-func (s *session) dispatch(msg Message) {
-	if msg.Type == MessageTypePing {
-		_ = s.send(context.Background(), Message{ID: msg.ID, Type: MessageTypePong})
+func (s *session) dispatch(msg message) {
+	if msg.Type == messageTypePing {
+		_ = s.send(context.Background(), message{ID: msg.ID, Type: messageTypePong})
 		return
 	}
 	if value, ok := s.pending.Load(msg.ID); ok {
@@ -121,7 +125,7 @@ func (s *session) dispatch(msg Message) {
 	}
 }
 
-func (s *session) send(ctx context.Context, msg Message) error {
+func (s *session) send(_ context.Context, msg message) error {
 	select {
 	case <-s.closed:
 		return errClosed
@@ -138,11 +142,11 @@ func (s *session) send(ctx context.Context, msg Message) error {
 	return nil
 }
 
-func (s *session) request(ctx context.Context, msg Message) (<-chan Message, error) {
+func (s *session) request(ctx context.Context, msg message) (<-chan message, error) {
 	if msg.ID == "" {
 		return nil, fmt.Errorf("wsrelay: message id is required")
 	}
-	if _, loaded := s.pending.LoadOrStore(msg.ID, &pendingRequest{ch: make(chan Message, 8)}); loaded {
+	if _, loaded := s.pending.LoadOrStore(msg.ID, &pendingRequest{ch: make(chan message, 8)}); loaded {
 		return nil, fmt.Errorf("wsrelay: duplicate message id %s", msg.ID)
 	}
 	value, _ := s.pending.Load(msg.ID)
@@ -167,22 +171,28 @@ func (s *session) request(ctx context.Context, msg Message) (<-chan Message, err
 }
 
 func (s *session) cleanup(cause error) {
-	s.closeOnce.Do(func() {
-		close(s.closed)
-		s.pending.Range(func(key, value any) bool {
-			req := value.(*pendingRequest)
-			msg := Message{ID: key.(string), Type: MessageTypeError, Payload: map[string]any{"error": cause.Error()}}
-			select {
-			case req.ch <- msg:
-			default:
+	s.closeOnce.Do(
+		func() {
+			close(s.closed)
+			s.pending.Range(
+				func(key, value any) bool {
+					req := value.(*pendingRequest)
+					msg := message{
+						ID: key.(string), Type: MessageTypeError, Payload: map[string]any{"error": cause.Error()},
+					}
+					select {
+					case req.ch <- msg:
+					default:
+					}
+					req.close()
+					return true
+				},
+			)
+			s.pending = sync.Map{}
+			_ = s.conn.Close()
+			if s.manager != nil {
+				s.manager.handleSessionClosed(s, cause)
 			}
-			req.close()
-			return true
-		})
-		s.pending = sync.Map{}
-		_ = s.conn.Close()
-		if s.manager != nil {
-			s.manager.handleSessionClosed(s, cause)
-		}
-	})
+		},
+	)
 }

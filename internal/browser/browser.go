@@ -79,18 +79,13 @@ func openURLPlatformSpecific(url string) error {
 }
 
 // IsAvailable checks if the system has a command available to open a web browser.
-// It verifies the presence of necessary commands for the current operating system.
+// It verifies the presence of necessary commands for the current operating system
+// without side effects (no browser windows are opened).
 //
 // Returns:
 //   - true if a browser can be opened, false otherwise.
 func IsAvailable() bool {
-	// First check if open-golang can work
-	testErr := open.Run("about:blank")
-	if testErr == nil {
-		return true
-	}
-
-	// Check platform-specific commands
+	// Check platform-specific commands (no side effects)
 	switch runtime.GOOS {
 	case "darwin":
 		_, err := exec.LookPath("open")
@@ -116,8 +111,8 @@ func IsAvailable() bool {
 //
 // Returns:
 //   - A map with platform-specific browser support information.
-func GetPlatformInfo() map[string]interface{} {
-	info := map[string]interface{}{
+func GetPlatformInfo() map[string]any {
+	info := map[string]any{
 		"os":        runtime.GOOS,
 		"arch":      runtime.GOARCH,
 		"available": IsAvailable(),

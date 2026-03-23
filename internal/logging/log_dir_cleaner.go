@@ -121,11 +121,13 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 			continue
 		}
 		path := filepath.Join(dir, name)
-		files = append(files, logFile{
-			path:    path,
-			size:    info.Size(),
-			modTime: info.ModTime(),
-		})
+		files = append(
+			files, logFile{
+				path:    path,
+				size:    info.Size(),
+				modTime: info.ModTime(),
+			},
+		)
 		total += info.Size()
 	}
 
@@ -133,9 +135,11 @@ func enforceLogDirSizeLimit(logDir string, maxBytes int64, protectedPath string)
 		return 0, nil
 	}
 
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.Before(files[j].modTime)
-	})
+	sort.Slice(
+		files, func(i, j int) bool {
+			return files[i].modTime.Before(files[j].modTime)
+		},
+	)
 
 	deleted := 0
 	for _, file := range files {

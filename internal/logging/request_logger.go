@@ -21,9 +21,9 @@ import (
 	"github.com/klauspost/compress/zstd"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
 var requestLogID atomic.Uint64
@@ -49,7 +49,17 @@ type RequestLogger interface {
 	//
 	// Returns:
 	//   - error: An error if logging fails, nil otherwise
-	LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error
+	LogRequest(
+		url, method string,
+		requestHeaders map[string][]string,
+		body []byte,
+		statusCode int,
+		responseHeaders map[string][]string,
+		response, apiRequest, apiResponse []byte,
+		apiResponseErrors []*interfaces.ErrorMessage,
+		requestID string,
+		requestTimestamp, apiResponseTimestamp time.Time,
+	) error
 
 	// LogStreamingRequest initiates logging for a streaming request and returns a writer for chunks.
 	//
@@ -63,7 +73,12 @@ type RequestLogger interface {
 	// Returns:
 	//   - StreamingLogWriter: A writer for streaming response chunks
 	//   - error: An error if logging initialization fails, nil otherwise
-	LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error)
+	LogStreamingRequest(
+		url, method string,
+		headers map[string][]string,
+		body []byte,
+		requestID string,
+	) (StreamingLogWriter, error)
 
 	// IsEnabled returns whether request logging is currently enabled.
 	//
@@ -171,20 +186,6 @@ func (l *FileRequestLogger) IsEnabled() bool {
 	return l.enabled
 }
 
-// SetEnabled updates the request logging enabled state.
-// This method allows dynamic enabling/disabling of request logging.
-//
-// Parameters:
-//   - enabled: Whether request logging should be enabled
-func (l *FileRequestLogger) SetEnabled(enabled bool) {
-	l.enabled = enabled
-}
-
-// SetErrorLogsMaxFiles updates the maximum number of error log files to retain.
-func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
-	l.errorLogsMaxFiles = maxFiles
-}
-
 // LogRequest logs a complete non-streaming request/response cycle to a file.
 //
 // Parameters:
@@ -203,17 +204,55 @@ func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
 //
 // Returns:
 //   - error: An error if logging fails, nil otherwise
-func (l *FileRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
-	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse, apiResponseErrors, false, requestID, requestTimestamp, apiResponseTimestamp)
+func (l *FileRequestLogger) LogRequest(
+	url, method string,
+	requestHeaders map[string][]string,
+	body []byte,
+	statusCode int,
+	responseHeaders map[string][]string,
+	response, apiRequest, apiResponse []byte,
+	apiResponseErrors []*interfaces.ErrorMessage,
+	requestID string,
+	requestTimestamp, apiResponseTimestamp time.Time,
+) error {
+	return l.logRequest(
+		url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse,
+		apiResponseErrors, false, requestID, requestTimestamp, apiResponseTimestamp,
+	)
 }
 
 // LogRequestWithOptions logs a request with optional forced logging behavior.
 // The force flag allows writing error logs even when regular request logging is disabled.
-func (l *FileRequestLogger) LogRequestWithOptions(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
-	return l.logRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse, apiResponseErrors, force, requestID, requestTimestamp, apiResponseTimestamp)
+func (l *FileRequestLogger) LogRequestWithOptions(
+	url, method string,
+	requestHeaders map[string][]string,
+	body []byte,
+	statusCode int,
+	responseHeaders map[string][]string,
+	response, apiRequest, apiResponse []byte,
+	apiResponseErrors []*interfaces.ErrorMessage,
+	force bool,
+	requestID string,
+	requestTimestamp, apiResponseTimestamp time.Time,
+) error {
+	return l.logRequest(
+		url, method, requestHeaders, body, statusCode, responseHeaders, response, apiRequest, apiResponse,
+		apiResponseErrors, force, requestID, requestTimestamp, apiResponseTimestamp,
+	)
 }
 
-func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, apiRequest, apiResponse []byte, apiResponseErrors []*interfaces.ErrorMessage, force bool, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+func (l *FileRequestLogger) logRequest(
+	url, method string,
+	requestHeaders map[string][]string,
+	body []byte,
+	statusCode int,
+	responseHeaders map[string][]string,
+	response, apiRequest, apiResponse []byte,
+	apiResponseErrors []*interfaces.ErrorMessage,
+	force bool,
+	requestID string,
+	requestTimestamp, apiResponseTimestamp time.Time,
+) error {
 	if !l.enabled && !force {
 		return nil
 	}
@@ -248,7 +287,7 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		responseToWrite = response
 	}
 
-	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if errOpen != nil {
 		return fmt.Errorf("failed to create log file: %w", errOpen)
 	}
@@ -301,9 +340,14 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 // Returns:
 //   - StreamingLogWriter: A writer for streaming response chunks
 //   - error: An error if logging initialization fails, nil otherwise
-func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (StreamingLogWriter, error) {
+func (l *FileRequestLogger) LogStreamingRequest(
+	url, method string,
+	headers map[string][]string,
+	body []byte,
+	requestID string,
+) (StreamingLogWriter, error) {
 	if !l.enabled {
-		return &NoOpStreamingLogWriter{}, nil
+		return &noOpStreamingLogWriter{}, nil
 	}
 
 	// Ensure logs directory exists
@@ -335,7 +379,7 @@ func (l *FileRequestLogger) LogStreamingRequest(url, method string, headers map[
 	responseBodyPath := responseBodyFile.Name()
 
 	// Create streaming writer
-	writer := &FileStreamingLogWriter{
+	writer := &fileStreamingLogWriter{
 		logFilePath:      filePath,
 		url:              url,
 		method:           method,
@@ -366,7 +410,7 @@ func (l *FileRequestLogger) generateErrorFilename(url string, requestID ...strin
 //   - error: An error if directory creation fails, nil otherwise
 func (l *FileRequestLogger) ensureLogsDir() error {
 	if _, err := os.Stat(l.logsDir); os.IsNotExist(err) {
-		return os.MkdirAll(l.logsDir, 0755)
+		return os.MkdirAll(l.logsDir, 0o700)
 	}
 	return nil
 }
@@ -388,9 +432,7 @@ func (l *FileRequestLogger) generateFilename(url string, requestID ...string) st
 	}
 
 	// Remove leading slash
-	if strings.HasPrefix(path, "/") {
-		path = path[1:]
-	}
+	path = strings.TrimPrefix(path, "/")
 
 	// Sanitize path for filename
 	sanitized := l.sanitizeForFilename(path)
@@ -480,9 +522,11 @@ func (l *FileRequestLogger) cleanupOldErrorLogs() error {
 		return nil
 	}
 
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].modTime.After(files[j].modTime)
-	})
+	sort.Slice(
+		files, func(i, j int) bool {
+			return files[i].modTime.After(files[j].modTime)
+		},
+	)
 
 	for _, file := range files[l.errorLogsMaxFiles:] {
 		if errRemove := os.Remove(filepath.Join(l.logsDir, file.name)); errRemove != nil {
@@ -531,16 +575,22 @@ func (l *FileRequestLogger) writeNonStreamingLog(
 	if requestTimestamp.IsZero() {
 		requestTimestamp = time.Now()
 	}
-	if errWrite := writeRequestInfoWithBody(w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp); errWrite != nil {
+	if errWrite := writeRequestInfoWithBody(
+		w, url, method, requestHeaders, requestBody, requestBodyPath, requestTimestamp,
+	); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPISection(w, "=== API REQUEST ===\n", "=== API REQUEST", apiRequest, time.Time{}); errWrite != nil {
+	if errWrite := writeAPISection(
+		w, "=== API REQUEST ===\n", "=== API REQUEST", apiRequest, time.Time{},
+	); errWrite != nil {
 		return errWrite
 	}
 	if errWrite := writeAPIErrorResponses(w, apiResponseErrors); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPISection(w, "=== API RESPONSE ===\n", "=== API RESPONSE", apiResponse, apiResponseTimestamp); errWrite != nil {
+	if errWrite := writeAPISection(
+		w, "=== API RESPONSE ===\n", "=== API RESPONSE", apiResponse, apiResponseTimestamp,
+	); errWrite != nil {
 		return errWrite
 	}
 	return writeResponseSection(w, statusCode, true, responseHeaders, bytes.NewReader(response), decompressErr, true)
@@ -566,7 +616,9 @@ func writeRequestInfoWithBody(
 	if _, errWrite := io.WriteString(w, fmt.Sprintf("Method: %s\n", method)); errWrite != nil {
 		return errWrite
 	}
-	if _, errWrite := io.WriteString(w, fmt.Sprintf("Timestamp: %s\n", timestamp.Format(time.RFC3339Nano))); errWrite != nil {
+	if _, errWrite := io.WriteString(
+		w, fmt.Sprintf("Timestamp: %s\n", timestamp.Format(time.RFC3339Nano)),
+	); errWrite != nil {
 		return errWrite
 	}
 	if _, errWrite := io.WriteString(w, "\n"); errWrite != nil {
@@ -614,7 +666,13 @@ func writeRequestInfoWithBody(
 	return nil
 }
 
-func writeAPISection(w io.Writer, sectionHeader string, sectionPrefix string, payload []byte, timestamp time.Time) error {
+func writeAPISection(
+	w io.Writer,
+	sectionHeader string,
+	sectionPrefix string,
+	payload []byte,
+	timestamp time.Time,
+) error {
 	if len(payload) == 0 {
 		return nil
 	}
@@ -633,7 +691,9 @@ func writeAPISection(w io.Writer, sectionHeader string, sectionPrefix string, pa
 			return errWrite
 		}
 		if !timestamp.IsZero() {
-			if _, errWrite := io.WriteString(w, fmt.Sprintf("Timestamp: %s\n", timestamp.Format(time.RFC3339Nano))); errWrite != nil {
+			if _, errWrite := io.WriteString(
+				w, fmt.Sprintf("Timestamp: %s\n", timestamp.Format(time.RFC3339Nano)),
+			); errWrite != nil {
 				return errWrite
 			}
 		}
@@ -652,14 +712,16 @@ func writeAPISection(w io.Writer, sectionHeader string, sectionPrefix string, pa
 }
 
 func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMessage) error {
-	for i := 0; i < len(apiResponseErrors); i++ {
+	for i := range apiResponseErrors {
 		if apiResponseErrors[i] == nil {
 			continue
 		}
 		if _, errWrite := io.WriteString(w, "=== API ERROR RESPONSE ===\n"); errWrite != nil {
 			return errWrite
 		}
-		if _, errWrite := io.WriteString(w, fmt.Sprintf("HTTP Status: %d\n", apiResponseErrors[i].StatusCode)); errWrite != nil {
+		if _, errWrite := io.WriteString(
+			w, fmt.Sprintf("HTTP Status: %d\n", apiResponseErrors[i].StatusCode),
+		); errWrite != nil {
 			return errWrite
 		}
 		if apiResponseErrors[i].Error != nil {
@@ -674,7 +736,15 @@ func writeAPIErrorResponses(w io.Writer, apiResponseErrors []*interfaces.ErrorMe
 	return nil
 }
 
-func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, responseHeaders map[string][]string, responseReader io.Reader, decompressErr error, trailingNewline bool) error {
+func writeResponseSection(
+	w io.Writer,
+	statusCode int,
+	statusWritten bool,
+	responseHeaders map[string][]string,
+	responseReader io.Reader,
+	decompressErr error,
+	trailingNewline bool,
+) error {
 	if _, errWrite := io.WriteString(w, "=== RESPONSE ===\n"); errWrite != nil {
 		return errWrite
 	}
@@ -684,12 +754,10 @@ func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, respo
 		}
 	}
 
-	if responseHeaders != nil {
-		for key, values := range responseHeaders {
-			for _, value := range values {
-				if _, errWrite := io.WriteString(w, fmt.Sprintf("%s: %s\n", key, value)); errWrite != nil {
-					return errWrite
-				}
+	for key, values := range responseHeaders {
+		for _, value := range values {
+			if _, errWrite := io.WriteString(w, fmt.Sprintf("%s: %s\n", key, value)); errWrite != nil {
+				return errWrite
 			}
 		}
 	}
@@ -704,7 +772,9 @@ func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, respo
 		}
 	}
 	if decompressErr != nil {
-		if _, errWrite := io.WriteString(w, fmt.Sprintf("\n[DECOMPRESSION ERROR: %v]", decompressErr)); errWrite != nil {
+		if _, errWrite := io.WriteString(
+			w, fmt.Sprintf("\n[DECOMPRESSION ERROR: %v]", decompressErr),
+		); errWrite != nil {
 			return errWrite
 		}
 	}
@@ -715,81 +785,6 @@ func writeResponseSection(w io.Writer, statusCode int, statusWritten bool, respo
 		}
 	}
 	return nil
-}
-
-// formatLogContent creates the complete log content for non-streaming requests.
-//
-// Parameters:
-//   - url: The request URL
-//   - method: The HTTP method
-//   - headers: The request headers
-//   - body: The request body
-//   - apiRequest: The API request data
-//   - apiResponse: The API response data
-//   - response: The raw response data
-//   - status: The response status code
-//   - responseHeaders: The response headers
-//
-// Returns:
-//   - string: The formatted log content
-func (l *FileRequestLogger) formatLogContent(url, method string, headers map[string][]string, body, apiRequest, apiResponse, response []byte, status int, responseHeaders map[string][]string, apiResponseErrors []*interfaces.ErrorMessage) string {
-	var content strings.Builder
-
-	// Request info
-	content.WriteString(l.formatRequestInfo(url, method, headers, body))
-
-	if len(apiRequest) > 0 {
-		if bytes.HasPrefix(apiRequest, []byte("=== API REQUEST")) {
-			content.Write(apiRequest)
-			if !bytes.HasSuffix(apiRequest, []byte("\n")) {
-				content.WriteString("\n")
-			}
-		} else {
-			content.WriteString("=== API REQUEST ===\n")
-			content.Write(apiRequest)
-			content.WriteString("\n")
-		}
-		content.WriteString("\n")
-	}
-
-	for i := 0; i < len(apiResponseErrors); i++ {
-		content.WriteString("=== API ERROR RESPONSE ===\n")
-		content.WriteString(fmt.Sprintf("HTTP Status: %d\n", apiResponseErrors[i].StatusCode))
-		content.WriteString(apiResponseErrors[i].Error.Error())
-		content.WriteString("\n\n")
-	}
-
-	if len(apiResponse) > 0 {
-		if bytes.HasPrefix(apiResponse, []byte("=== API RESPONSE")) {
-			content.Write(apiResponse)
-			if !bytes.HasSuffix(apiResponse, []byte("\n")) {
-				content.WriteString("\n")
-			}
-		} else {
-			content.WriteString("=== API RESPONSE ===\n")
-			content.Write(apiResponse)
-			content.WriteString("\n")
-		}
-		content.WriteString("\n")
-	}
-
-	// Response section
-	content.WriteString("=== RESPONSE ===\n")
-	content.WriteString(fmt.Sprintf("Status: %d\n", status))
-
-	if responseHeaders != nil {
-		for key, values := range responseHeaders {
-			for _, value := range values {
-				content.WriteString(fmt.Sprintf("%s: %s\n", key, value))
-			}
-		}
-	}
-
-	content.WriteString("\n")
-	content.Write(response)
-	content.WriteString("\n")
-
-	return content.String()
 }
 
 // decompressResponse decompresses response data based on Content-Encoding header.
@@ -923,46 +918,10 @@ func (l *FileRequestLogger) decompressZstd(data []byte) ([]byte, error) {
 	return decompressed, nil
 }
 
-// formatRequestInfo creates the request information section of the log.
-//
-// Parameters:
-//   - url: The request URL
-//   - method: The HTTP method
-//   - headers: The request headers
-//   - body: The request body
-//
-// Returns:
-//   - string: The formatted request information
-func (l *FileRequestLogger) formatRequestInfo(url, method string, headers map[string][]string, body []byte) string {
-	var content strings.Builder
-
-	content.WriteString("=== REQUEST INFO ===\n")
-	content.WriteString(fmt.Sprintf("Version: %s\n", buildinfo.Version))
-	content.WriteString(fmt.Sprintf("URL: %s\n", url))
-	content.WriteString(fmt.Sprintf("Method: %s\n", method))
-	content.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
-	content.WriteString("\n")
-
-	content.WriteString("=== HEADERS ===\n")
-	for key, values := range headers {
-		for _, value := range values {
-			masked := util.MaskSensitiveHeaderValue(key, value)
-			content.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
-		}
-	}
-	content.WriteString("\n")
-
-	content.WriteString("=== REQUEST BODY ===\n")
-	content.Write(body)
-	content.WriteString("\n\n")
-
-	return content.String()
-}
-
-// FileStreamingLogWriter implements StreamingLogWriter for file-based streaming logs.
+// fileStreamingLogWriter implements StreamingLogWriter for file-based streaming logs.
 // It spools streaming response chunks to a temporary file to avoid retaining large responses in memory.
 // The final log file is assembled when Close is called.
-type FileStreamingLogWriter struct {
+type fileStreamingLogWriter struct {
 	// logFilePath is the final log file path.
 	logFilePath string
 
@@ -1019,7 +978,7 @@ type FileStreamingLogWriter struct {
 //
 // Parameters:
 //   - chunk: The response chunk to write
-func (w *FileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
+func (w *fileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
 	if w.chunkChan == nil {
 		return
 	}
@@ -1044,7 +1003,7 @@ func (w *FileStreamingLogWriter) WriteChunkAsync(chunk []byte) {
 //
 // Returns:
 //   - error: Always returns nil (buffering cannot fail)
-func (w *FileStreamingLogWriter) WriteStatus(status int, headers map[string][]string) error {
+func (w *fileStreamingLogWriter) WriteStatus(status int, headers map[string][]string) error {
 	if status == 0 {
 		return nil
 	}
@@ -1069,7 +1028,7 @@ func (w *FileStreamingLogWriter) WriteStatus(status int, headers map[string][]st
 //
 // Returns:
 //   - error: Always returns nil (buffering cannot fail)
-func (w *FileStreamingLogWriter) WriteAPIRequest(apiRequest []byte) error {
+func (w *fileStreamingLogWriter) WriteAPIRequest(apiRequest []byte) error {
 	if len(apiRequest) == 0 {
 		return nil
 	}
@@ -1084,7 +1043,7 @@ func (w *FileStreamingLogWriter) WriteAPIRequest(apiRequest []byte) error {
 //
 // Returns:
 //   - error: Always returns nil (buffering cannot fail)
-func (w *FileStreamingLogWriter) WriteAPIResponse(apiResponse []byte) error {
+func (w *fileStreamingLogWriter) WriteAPIResponse(apiResponse []byte) error {
 	if len(apiResponse) == 0 {
 		return nil
 	}
@@ -1092,7 +1051,7 @@ func (w *FileStreamingLogWriter) WriteAPIResponse(apiResponse []byte) error {
 	return nil
 }
 
-func (w *FileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
+func (w *fileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 	if !timestamp.IsZero() {
 		w.apiResponseTimestamp = timestamp
 	}
@@ -1104,7 +1063,7 @@ func (w *FileStreamingLogWriter) SetFirstChunkTimestamp(timestamp time.Time) {
 //
 // Returns:
 //   - error: An error if closing fails, nil otherwise
-func (w *FileStreamingLogWriter) Close() error {
+func (w *fileStreamingLogWriter) Close() error {
 	if w.chunkChan != nil {
 		close(w.chunkChan)
 	}
@@ -1127,7 +1086,7 @@ func (w *FileStreamingLogWriter) Close() error {
 		return nil
 	}
 
-	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	logFile, errOpen := os.OpenFile(w.logFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if errOpen != nil {
 		w.cleanupTempFiles()
 		return fmt.Errorf("failed to create log file: %w", errOpen)
@@ -1147,7 +1106,7 @@ func (w *FileStreamingLogWriter) Close() error {
 
 // asyncWriter runs in a goroutine to buffer chunks from the channel.
 // It continuously reads chunks from the channel and appends them to a temp file for later assembly.
-func (w *FileStreamingLogWriter) asyncWriter() {
+func (w *fileStreamingLogWriter) asyncWriter() {
 	defer close(w.closeChan)
 
 	for chunk := range w.chunkChan {
@@ -1181,14 +1140,20 @@ func (w *FileStreamingLogWriter) asyncWriter() {
 	w.responseBodyFile = nil
 }
 
-func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
-	if errWrite := writeRequestInfoWithBody(logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp); errWrite != nil {
+func (w *fileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
+	if errWrite := writeRequestInfoWithBody(
+		logFile, w.url, w.method, w.requestHeaders, nil, w.requestBodyPath, w.timestamp,
+	); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPISection(logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{}); errWrite != nil {
+	if errWrite := writeAPISection(
+		logFile, "=== API REQUEST ===\n", "=== API REQUEST", w.apiRequest, time.Time{},
+	); errWrite != nil {
 		return errWrite
 	}
-	if errWrite := writeAPISection(logFile, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTimestamp); errWrite != nil {
+	if errWrite := writeAPISection(
+		logFile, "=== API RESPONSE ===\n", "=== API RESPONSE", w.apiResponse, w.apiResponseTimestamp,
+	); errWrite != nil {
 		return errWrite
 	}
 
@@ -1202,10 +1167,12 @@ func (w *FileStreamingLogWriter) writeFinalLog(logFile *os.File) error {
 		}
 	}()
 
-	return writeResponseSection(logFile, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false)
+	return writeResponseSection(
+		logFile, w.responseStatus, w.statusWritten, w.responseHeaders, responseBodyFile, nil, false,
+	)
 }
 
-func (w *FileStreamingLogWriter) cleanupTempFiles() {
+func (w *fileStreamingLogWriter) cleanupTempFiles() {
 	if w.requestBodyPath != "" {
 		if errRemove := os.Remove(w.requestBodyPath); errRemove != nil {
 			log.WithError(errRemove).Warn("failed to remove request body temp file")
@@ -1221,15 +1188,15 @@ func (w *FileStreamingLogWriter) cleanupTempFiles() {
 	}
 }
 
-// NoOpStreamingLogWriter is a no-operation implementation for when logging is disabled.
+// noOpStreamingLogWriter is a no-operation implementation for when logging is disabled.
 // It implements the StreamingLogWriter interface but performs no actual logging operations.
-type NoOpStreamingLogWriter struct{}
+type noOpStreamingLogWriter struct{}
 
 // WriteChunkAsync is a no-op implementation that does nothing.
 //
 // Parameters:
 //   - chunk: The response chunk (ignored)
-func (w *NoOpStreamingLogWriter) WriteChunkAsync(_ []byte) {}
+func (w *noOpStreamingLogWriter) WriteChunkAsync(_ []byte) {}
 
 // WriteStatus is a no-op implementation that does nothing and always returns nil.
 //
@@ -1239,7 +1206,7 @@ func (w *NoOpStreamingLogWriter) WriteChunkAsync(_ []byte) {}
 //
 // Returns:
 //   - error: Always returns nil
-func (w *NoOpStreamingLogWriter) WriteStatus(_ int, _ map[string][]string) error {
+func (w *noOpStreamingLogWriter) WriteStatus(_ int, _ map[string][]string) error {
 	return nil
 }
 
@@ -1250,7 +1217,7 @@ func (w *NoOpStreamingLogWriter) WriteStatus(_ int, _ map[string][]string) error
 //
 // Returns:
 //   - error: Always returns nil
-func (w *NoOpStreamingLogWriter) WriteAPIRequest(_ []byte) error {
+func (w *noOpStreamingLogWriter) WriteAPIRequest(_ []byte) error {
 	return nil
 }
 
@@ -1261,14 +1228,14 @@ func (w *NoOpStreamingLogWriter) WriteAPIRequest(_ []byte) error {
 //
 // Returns:
 //   - error: Always returns nil
-func (w *NoOpStreamingLogWriter) WriteAPIResponse(_ []byte) error {
+func (w *noOpStreamingLogWriter) WriteAPIResponse(_ []byte) error {
 	return nil
 }
 
-func (w *NoOpStreamingLogWriter) SetFirstChunkTimestamp(_ time.Time) {}
+func (w *noOpStreamingLogWriter) SetFirstChunkTimestamp(_ time.Time) {}
 
 // Close is a no-op implementation that does nothing and always returns nil.
 //
 // Returns:
 //   - error: Always returns nil
-func (w *NoOpStreamingLogWriter) Close() error { return nil }
+func (w *noOpStreamingLogWriter) Close() error { return nil }

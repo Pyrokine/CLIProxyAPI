@@ -9,11 +9,11 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers/claude"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers/gemini"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -50,10 +50,10 @@ func getClientAPIKeyFromContext(ctx context.Context) string {
 
 // localhostOnlyMiddleware returns a middleware that dynamically checks the module's
 // localhost restriction setting. This allows hot-reload of the restriction without restarting.
-func (m *AmpModule) localhostOnlyMiddleware() gin.HandlerFunc {
+func (m *Module) localhostOnlyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Check current setting (hot-reloadable)
-		if !m.IsRestrictedToLocalhost() {
+		if !m.isRestrictedToLocalhost() {
 			c.Next()
 			return
 		}
@@ -73,18 +73,22 @@ func (m *AmpModule) localhostOnlyMiddleware() gin.HandlerFunc {
 		ip := net.ParseIP(host)
 		if ip == nil {
 			log.Warnf("amp management: invalid RemoteAddr %s, denying access", remoteAddr)
-			c.AbortWithStatusJSON(403, gin.H{
-				"error": "Access denied: management routes restricted to localhost",
-			})
+			c.AbortWithStatusJSON(
+				403, gin.H{
+					"error": "Access denied: management routes restricted to localhost",
+				},
+			)
 			return
 		}
 
 		// Check if IP is loopback (127.0.0.1 or ::1)
 		if !ip.IsLoopback() {
 			log.Warnf("amp management: non-localhost connection from %s attempted access, denying", remoteAddr)
-			c.AbortWithStatusJSON(403, gin.H{
-				"error": "Access denied: management routes restricted to localhost",
-			})
+			c.AbortWithStatusJSON(
+				403, gin.H{
+					"error": "Access denied: management routes restricted to localhost",
+				},
+			)
 			return
 		}
 
@@ -114,30 +118,18 @@ func noCORSMiddleware() gin.HandlerFunc {
 
 // managementAvailabilityMiddleware short-circuits management routes when the upstream
 // proxy is disabled, preventing noisy localhost warnings and accidental exposure.
-func (m *AmpModule) managementAvailabilityMiddleware() gin.HandlerFunc {
+func (m *Module) managementAvailabilityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if m.getProxy() == nil {
 			logging.SkipGinRequestLogging(c)
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
-				"error": "amp upstream proxy not available",
-			})
+			c.AbortWithStatusJSON(
+				http.StatusServiceUnavailable, gin.H{
+					"error": "amp upstream proxy not available",
+				},
+			)
 			return
 		}
 		c.Next()
-	}
-}
-
-// wrapManagementAuth skips auth for selected management paths while keeping authentication elsewhere.
-func wrapManagementAuth(auth gin.HandlerFunc, prefixes ...string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		path := c.Request.URL.Path
-		for _, prefix := range prefixes {
-			if strings.HasPrefix(path, prefix) && (len(path) == len(prefix) || path[len(prefix)] == '/') {
-				c.Next()
-				return
-			}
-		}
-		auth(c)
 	}
 }
 
@@ -145,20 +137,22 @@ func wrapManagementAuth(auth gin.HandlerFunc, prefixes ...string) gin.HandlerFun
 // These routes proxy through to the Amp control plane for OAuth, user management, etc.
 // Uses dynamic middleware and proxy getter for hot-reload support.
 // The auth middleware validates Authorization header against configured API keys.
-func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc) {
+func (m *Module) registerManagementRoutes(
+	engine *gin.Engine,
+	baseHandler *handlers.BaseAPIHandler,
+	auth gin.HandlerFunc,
+) {
 	ampAPI := engine.Group("/api")
 
 	// Always disable CORS for management routes to prevent browser-based attacks
 	ampAPI.Use(m.managementAvailabilityMiddleware(), noCORSMiddleware())
 
-	// Apply dynamic localhost-only restriction (hot-reloadable via m.IsRestrictedToLocalhost())
+	// Apply dynamic localhost-only restriction (hot-reloadable via m.isRestrictedToLocalhost())
 	ampAPI.Use(m.localhostOnlyMiddleware())
 
 	// Apply authentication middleware - requires valid API key in Authorization header
-	var authWithBypass gin.HandlerFunc
 	if auth != nil {
 		ampAPI.Use(auth)
-		authWithBypass = wrapManagementAuth(auth, "/threads", "/auth", "/docs", "/settings")
 	}
 
 	// Inject client API key into request context for per-client upstream routing
@@ -206,9 +200,11 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 
 	// Root-level routes that AMP CLI expects without /api prefix
 	// These need the same security middleware as the /api/* routes (dynamic for hot-reload)
-	rootMiddleware := []gin.HandlerFunc{m.managementAvailabilityMiddleware(), noCORSMiddleware(), m.localhostOnlyMiddleware()}
-	if authWithBypass != nil {
-		rootMiddleware = append(rootMiddleware, authWithBypass)
+	rootMiddleware := []gin.HandlerFunc{
+		m.managementAvailabilityMiddleware(), noCORSMiddleware(), m.localhostOnlyMiddleware(),
+	}
+	if auth != nil {
+		rootMiddleware = append(rootMiddleware, auth)
 	}
 	// Add clientAPIKeyMiddleware after auth for per-client upstream routing
 	rootMiddleware = append(rootMiddleware, clientAPIKeyMiddleware())
@@ -232,28 +228,32 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	// AMP CLI uses non-standard paths like /publishers/google/models/...
 	// We bridge these to our standard Gemini handler to enable local OAuth.
 	// If no local OAuth is available, falls back to ampcode.com proxy.
-	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
+	geminiHandlers := gemini.NewAPIHandler(baseHandler)
 	geminiBridge := createGeminiBridgeHandler(geminiHandlers.GeminiHandler)
-	geminiV1Beta1Fallback := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
-		return m.getProxy()
-	}, m.modelMapper, m.forceModelMappings)
-	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
+	geminiV1Beta1Fallback := newFallbackHandlerWithMapper(
+		func() *httputil.ReverseProxy {
+			return m.getProxy()
+		}, m.modelMapper, m.forceModelMappings,
+	)
+	geminiV1Beta1Handler := geminiV1Beta1Fallback.wrapHandler(geminiBridge)
 
 	// Route POST model calls through Gemini bridge with FallbackHandler.
 	// FallbackHandler checks provider -> mapping -> proxy fallback automatically.
 	// All other methods (e.g., GET model listing) always proxy to upstream to preserve Amp CLI behavior.
-	ampAPI.Any("/provider/google/v1beta1/*path", func(c *gin.Context) {
-		if c.Request.Method == "POST" {
-			if path := c.Param("path"); strings.Contains(path, "/models/") {
-				// POST with /models/ path -> use Gemini bridge with fallback handler
-				// FallbackHandler will check provider/mapping and proxy if needed
-				geminiV1Beta1Handler(c)
-				return
+	ampAPI.Any(
+		"/provider/google/v1beta1/*path", func(c *gin.Context) {
+			if c.Request.Method == "POST" {
+				if path := c.Param("path"); strings.Contains(path, "/models/") {
+					// POST with /models/ path -> use Gemini bridge with fallback handler
+					// FallbackHandler will check provider/mapping and proxy if needed
+					geminiV1Beta1Handler(c)
+					return
+				}
 			}
-		}
-		// Non-POST or no local provider available -> proxy upstream
-		proxyHandler(c)
-	})
+			// Non-POST or no local provider available -> proxy upstream
+			proxyHandler(c)
+		},
+	)
 }
 
 // registerProviderAliases registers /api/provider/{provider}/... routes
@@ -262,19 +262,25 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 //	/api/provider/openai/v1/chat/completions
 //	/api/provider/anthropic/v1/messages
 //	/api/provider/google/v1beta/models
-func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *handlers.BaseAPIHandler, auth gin.HandlerFunc) {
+func (m *Module) registerProviderAliases(
+	engine *gin.Engine,
+	baseHandler *handlers.BaseAPIHandler,
+	auth gin.HandlerFunc,
+) {
 	// Create handler instances for different providers
-	openaiHandlers := openai.NewOpenAIAPIHandler(baseHandler)
-	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
-	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(baseHandler)
-	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(baseHandler)
+	openaiHandlers := openai.NewAPIHandler(baseHandler)
+	geminiHandlers := gemini.NewAPIHandler(baseHandler)
+	claudeCodeHandlers := claude.NewCodeAPIHandler(baseHandler)
+	openaiResponsesHandlers := openai.NewResponsesAPIHandler(baseHandler)
 
 	// Create fallback handler wrapper that forwards to ampcode.com when provider not found
 	// Uses m.getProxy() for hot-reload support (proxy can be updated at runtime)
 	// Also includes model mapping support for routing unavailable models to alternatives
-	fallbackHandler := NewFallbackHandlerWithMapper(func() *httputil.ReverseProxy {
-		return m.getProxy()
-	}, m.modelMapper, m.forceModelMappings)
+	fallbackHandler := newFallbackHandlerWithMapper(
+		func() *httputil.ReverseProxy {
+			return m.getProxy()
+		}, m.modelMapper, m.forceModelMappings,
+	)
 
 	// Provider-specific routes under /api/provider/:provider
 	ampProviders := engine.Group("/api/provider")
@@ -304,9 +310,9 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	// Root-level routes (for providers that omit /v1, like groq/cerebras)
 	// Wrap handlers with fallback logic to forward to ampcode.com when provider not found
 	provider.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback (no body to check)
-	provider.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
-	provider.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
-	provider.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
+	provider.POST("/chat/completions", fallbackHandler.wrapHandler(openaiHandlers.ChatCompletions))
+	provider.POST("/completions", fallbackHandler.wrapHandler(openaiHandlers.Completions))
+	provider.POST("/responses", fallbackHandler.wrapHandler(openaiResponsesHandlers.Responses))
 
 	// /v1 routes (OpenAI/Claude-compatible endpoints)
 	v1Amp := provider.Group("/v1")
@@ -314,13 +320,13 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 		v1Amp.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback
 
 		// OpenAI-compatible endpoints with fallback
-		v1Amp.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
-		v1Amp.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
-		v1Amp.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
+		v1Amp.POST("/chat/completions", fallbackHandler.wrapHandler(openaiHandlers.ChatCompletions))
+		v1Amp.POST("/completions", fallbackHandler.wrapHandler(openaiHandlers.Completions))
+		v1Amp.POST("/responses", fallbackHandler.wrapHandler(openaiResponsesHandlers.Responses))
 
 		// Claude/Anthropic-compatible endpoints with fallback
-		v1Amp.POST("/messages", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeMessages))
-		v1Amp.POST("/messages/count_tokens", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeCountTokens))
+		v1Amp.POST("/messages", fallbackHandler.wrapHandler(claudeCodeHandlers.ClaudeMessages))
+		v1Amp.POST("/messages/count_tokens", fallbackHandler.wrapHandler(claudeCodeHandlers.ClaudeCountTokens))
 	}
 
 	// /v1beta routes (Gemini native API)
@@ -328,7 +334,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	v1betaAmp := provider.Group("/v1beta")
 	{
 		v1betaAmp.GET("/models", geminiHandlers.GeminiModels)
-		v1betaAmp.POST("/models/*action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
+		v1betaAmp.POST("/models/*action", fallbackHandler.wrapHandler(geminiHandlers.GeminiHandler))
 		v1betaAmp.GET("/models/*action", geminiHandlers.GeminiGetHandler)
 	}
 }

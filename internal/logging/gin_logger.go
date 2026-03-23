@@ -4,7 +4,6 @@
 package logging
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"runtime/debug"
@@ -12,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -46,8 +45,8 @@ func GinLogrusLogger() gin.HandlerFunc {
 		// Only generate request ID for AI API paths
 		var requestID string
 		if isAIAPIPath(path) {
-			requestID = GenerateRequestID()
-			SetGinRequestID(c, requestID)
+			requestID = generateRequestID()
+			setGinRequestID(c, requestID)
 			ctx := WithRequestID(c.Request.Context(), requestID)
 			c.Request = c.Request.WithContext(ctx)
 		}
@@ -112,20 +111,22 @@ func isAIAPIPath(path string) bool {
 // Returns:
 //   - gin.HandlerFunc: A middleware handler for panic recovery
 func GinLogrusRecovery() gin.HandlerFunc {
-	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
-		if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
-			// Let net/http handle ErrAbortHandler so the connection is aborted without noisy stack logs.
-			panic(http.ErrAbortHandler)
-		}
+	return gin.CustomRecovery(
+		func(c *gin.Context, recovered any) {
+			// gin v1.12.0 handles http.ErrAbortHandler internally as broken pipe,
+			// so only non-ErrAbortHandler panics reach this callback.
 
-		log.WithFields(log.Fields{
-			"panic": recovered,
-			"stack": string(debug.Stack()),
-			"path":  c.Request.URL.Path,
-		}).Error("recovered from panic")
+			log.WithFields(
+				log.Fields{
+					"panic": recovered,
+					"stack": string(debug.Stack()),
+					"path":  c.Request.URL.Path,
+				},
+			).Error("recovered from panic")
 
-		c.AbortWithStatus(http.StatusInternalServerError)
-	})
+			c.AbortWithStatus(http.StatusInternalServerError)
+		},
+	)
 }
 
 // SkipGinRequestLogging marks the provided Gin context so that GinLogrusLogger
