@@ -1,6 +1,8 @@
 # @sdk/access SDK Reference
 
-The `github.com/router-for-me/CLIProxyAPI/v6/sdk/access` package centralizes inbound request authentication for the proxy. It offers a lightweight manager that chains credential providers, so servers can reuse the same access control logic inside or outside the CLI runtime.
+The `github.com/router-for-me/CLIProxyAPI/v6/sdk/access` package centralizes inbound request authentication for the
+proxy. It offers a lightweight manager that chains credential providers, so servers can reuse the same access control
+logic inside or outside the CLI runtime.
 
 ## Importing
 
@@ -31,7 +33,8 @@ manager.SetProviders(sdkaccess.RegisteredProviders())
 * `SetProviders` replaces the provider slice using a defensive copy.
 * `Providers` retrieves a snapshot that can be iterated safely from other goroutines.
 
-If the manager itself is `nil` or no providers are configured, the call returns `nil, nil`, allowing callers to treat access control as disabled.
+If the manager itself is `nil` or no providers are configured, the call returns `nil, nil`, allowing callers to treat
+access control as disabled.
 
 ## Authenticating Requests
 
@@ -49,17 +52,20 @@ default:
 }
 ```
 
-`Manager.Authenticate` walks the configured providers in order. It returns on the first success, skips providers that return `AuthErrorCodeNotHandled`, and aggregates `AuthErrorCodeNoCredentials` / `AuthErrorCodeInvalidCredential` for a final result.
+`Manager.Authenticate` walks the configured providers in order. It returns on the first success, skips providers that
+return `AuthErrorCodeNotHandled`, and aggregates `AuthErrorCodeNoCredentials` / `AuthErrorCodeInvalidCredential` for a
+final result.
 
-Each `Result` includes the provider identifier, the resolved principal, and optional metadata (for example, which header carried the credential).
+Each `Result` includes the provider identifier, the resolved principal, and optional metadata (for example, which header
+carried the credential).
 
 ## Built-in `config-api-key` Provider
 
 The proxy includes one built-in access provider:
 
 - `config-api-key`: Validates API keys declared under top-level `api-keys`.
-  - Credential sources: `Authorization: Bearer`, `X-Goog-Api-Key`, `X-Api-Key`, `?key=`, `?auth_token=`
-  - Metadata: `Result.Metadata["source"]` is set to the matched source label.
+    - Credential sources: `Authorization: Bearer`, `X-Goog-Api-Key`, `X-Api-Key`, `?key=`, `?auth_token=`
+    - Metadata: `Result.Metadata["source"]` is set to the matched source label.
 
 In the CLI server and `sdk/cliproxy`, this provider is registered automatically based on the loaded configuration.
 
@@ -80,11 +86,14 @@ import (
 )
 ```
 
-The blank identifier import ensures `init` runs so `sdkaccess.RegisterProvider` executes before you call `RegisteredProviders()` (or before `cliproxy.NewBuilder().Build()`).
+The blank identifier import ensures `init` runs so `sdkaccess.RegisterProvider` executes before you call
+`RegisteredProviders()` (or before `cliproxy.NewBuilder().Build()`).
 
 ### Metadata and auditing
 
-`Result.Metadata` carries provider-specific context. The built-in `config-api-key` provider, for example, stores the credential source (`authorization`, `x-goog-api-key`, `x-api-key`, `query-key`, `query-auth-token`). Populate this map in custom providers to enrich logs and downstream auditing.
+`Result.Metadata` carries provider-specific context. The built-in `config-api-key` provider, for example, stores the
+credential source (`authorization`, `x-goog-api-key`, `x-api-key`, `query-key`, `query-auth-token`). Populate this map
+in custom providers to enrich logs and downstream auditing.
 
 ## Writing Custom Providers
 
@@ -113,7 +122,8 @@ func init() {
 }
 ```
 
-A provider must implement `Identifier()` and `Authenticate()`. To make it available to the access manager, call `RegisterProvider` inside `init` with an initialized provider instance.
+A provider must implement `Identifier()` and `Authenticate()`. To make it available to the access manager, call
+`RegisterProvider` inside `init` with an initialized provider instance.
 
 ## Error Semantics
 
@@ -122,11 +132,13 @@ A provider must implement `Identifier()` and `Authenticate()`. To make it availa
 - `NewNotHandledError()` (`AuthErrorCodeNotHandled`): fall through to the next provider.
 - `NewInternalAuthError(message, cause)` (`AuthErrorCodeInternal`): transport/system failure. (HTTP 500)
 
-Errors propagate immediately to the caller unless they are classified as `not_handled` / `no_credentials` / `invalid_credential` and can be aggregated by the manager.
+Errors propagate immediately to the caller unless they are classified as `not_handled` / `no_credentials` /
+`invalid_credential` and can be aggregated by the manager.
 
 ## Integration with cliproxy Service
 
-`sdk/cliproxy` wires `@sdk/access` automatically when you build a CLI service via `cliproxy.NewBuilder`. Supplying a manager lets you reuse the same instance in your host process:
+`sdk/cliproxy` wires `@sdk/access` automatically when you build a CLI service via `cliproxy.NewBuilder`. Supplying a
+manager lets you reuse the same instance in your host process:
 
 ```go
 coreCfg, _ := config.LoadConfig("config.yaml")
@@ -139,7 +151,8 @@ svc, _ := cliproxy.NewBuilder().
   Build()
 ```
 
-Register any custom providers (typically via blank imports) before calling `Build()` so they are present in the global registry snapshot.
+Register any custom providers (typically via blank imports) before calling `Build()` so they are present in the global
+registry snapshot.
 
 ### Hot reloading
 
@@ -151,4 +164,5 @@ configaccess.Register(&newCfg.SDKConfig)
 accessManager.SetProviders(sdkaccess.RegisteredProviders())
 ```
 
-This mirrors the behaviour in `internal/access.ApplyAccessProviders`, enabling runtime updates without restarting the process.
+This mirrors the behaviour in `internal/access.ApplyAccessProviders`, enabling runtime updates without restarting the
+process.

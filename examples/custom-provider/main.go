@@ -24,14 +24,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	clipexec "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/logging"
-	sdktr "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api"
+	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	clipexec "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/logging"
+	sdktr "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
 
 const (
@@ -49,25 +49,36 @@ const (
 // In a real implementation, you would implement proper request/response
 // transformation logic between OpenAI format and your provider's format.
 func init() {
-	sdktr.Register(fOpenAI, fMyProv,
+	sdktr.Register(
+		fOpenAI, fMyProv,
 		func(model string, raw []byte, stream bool) []byte { return raw },
 		sdktr.ResponseTransform{
-			Stream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) []string {
+			Stream: func(
+				ctx context.Context,
+				model string,
+				originalReq, translatedReq, raw []byte,
+				param *any,
+			) []string {
 				return []string{string(raw)}
 			},
-			NonStream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) string {
+			NonStream: func(
+				ctx context.Context,
+				model string,
+				originalReq, translatedReq, raw []byte,
+				param *any,
+			) string {
 				return string(raw)
 			},
 		},
 	)
 }
 
-// MyExecutor is a minimal provider implementation for demonstration purposes.
+// myExecutor is a minimal provider implementation for demonstration purposes.
 // It implements the Executor interface to handle requests to a custom AI provider.
-type MyExecutor struct{}
+type myExecutor struct{}
 
 // Identifier returns the unique identifier for this executor.
-func (MyExecutor) Identifier() string { return providerKey }
+func (myExecutor) Identifier() string { return providerKey }
 
 // PrepareRequest optionally injects credentials to raw HTTP requests.
 // This method is called before each request to allow the executor to modify
@@ -79,7 +90,7 @@ func (MyExecutor) Identifier() string { return providerKey }
 //
 // Returns:
 //   - error: An error if request preparation fails
-func (MyExecutor) PrepareRequest(req *http.Request, a *coreauth.Auth) error {
+func (myExecutor) PrepareRequest(req *http.Request, a *coreauth.Auth) error {
 	if req == nil || a == nil {
 		return nil
 	}
@@ -112,7 +123,12 @@ func upstreamEndpoint(a *coreauth.Auth) string {
 	return "https://httpbin.org/post"
 }
 
-func (MyExecutor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (clipexec.Response, error) {
+func (myExecutor) Execute(
+	ctx context.Context,
+	a *coreauth.Auth,
+	req clipexec.Request,
+	_ clipexec.Options,
+) (clipexec.Response, error) {
 	client := buildHTTPClient(a)
 	endpoint := upstreamEndpoint(a)
 
@@ -123,7 +139,7 @@ func (MyExecutor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Re
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	// Inject credentials via PrepareRequest hook.
-	if errPrep := (MyExecutor{}).PrepareRequest(httpReq, a); errPrep != nil {
+	if errPrep := (myExecutor{}).PrepareRequest(httpReq, a); errPrep != nil {
 		return clipexec.Response{}, errPrep
 	}
 
@@ -133,14 +149,14 @@ func (MyExecutor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Re
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
-			fmt.Fprintf(os.Stderr, "close response body error: %v\n", errClose)
+			_, _ = fmt.Fprintf(os.Stderr, "close response body error: %v\n", errClose)
 		}
 	}()
 	body, _ := io.ReadAll(resp.Body)
 	return clipexec.Response{Payload: body}, nil
 }
 
-func (MyExecutor) HttpRequest(ctx context.Context, a *coreauth.Auth, req *http.Request) (*http.Response, error) {
+func (myExecutor) HttpRequest(ctx context.Context, a *coreauth.Auth, req *http.Request) (*http.Response, error) {
 	if req == nil {
 		return nil, fmt.Errorf("myprov executor: request is nil")
 	}
@@ -148,18 +164,26 @@ func (MyExecutor) HttpRequest(ctx context.Context, a *coreauth.Auth, req *http.R
 		ctx = req.Context()
 	}
 	httpReq := req.WithContext(ctx)
-	if errPrep := (MyExecutor{}).PrepareRequest(httpReq, a); errPrep != nil {
+	if errPrep := (myExecutor{}).PrepareRequest(httpReq, a); errPrep != nil {
 		return nil, errPrep
 	}
 	client := buildHTTPClient(a)
 	return client.Do(httpReq)
 }
 
-func (MyExecutor) CountTokens(context.Context, *coreauth.Auth, clipexec.Request, clipexec.Options) (clipexec.Response, error) {
+func (myExecutor) CountTokens(context.Context, *coreauth.Auth, clipexec.Request, clipexec.Options) (
+	clipexec.Response,
+	error,
+) {
 	return clipexec.Response{}, errors.New("count tokens not implemented")
 }
 
-func (MyExecutor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (*clipexec.StreamResult, error) {
+func (myExecutor) ExecuteStream(
+	_ context.Context,
+	_ *coreauth.Auth,
+	_ clipexec.Request,
+	_ clipexec.Options,
+) (*clipexec.StreamResult, error) {
 	ch := make(chan clipexec.StreamChunk, 1)
 	go func() {
 		defer close(ch)
@@ -168,7 +192,7 @@ func (MyExecutor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipe
 	return &clipexec.StreamResult{Chunks: ch}, nil
 }
 
-func (MyExecutor) Refresh(ctx context.Context, a *coreauth.Auth) (*coreauth.Auth, error) {
+func (myExecutor) Refresh(_ context.Context, a *coreauth.Auth) (*coreauth.Auth, error) {
 	return a, nil
 }
 
@@ -183,12 +207,16 @@ func main() {
 		dirSetter.SetBaseDir(cfg.AuthDir)
 	}
 	core := coreauth.NewManager(tokenStore, nil, nil)
-	core.RegisterExecutor(MyExecutor{})
+	core.RegisterExecutor(myExecutor{})
 
 	hooks := cliproxy.Hooks{
 		OnAfterStart: func(s *cliproxy.Service) {
 			// Register demo models for the custom provider so they appear in /v1/models.
-			models := []*cliproxy.ModelInfo{{ID: "myprov-pro-1", Object: "model", Type: providerKey, DisplayName: "MyProv Pro 1"}}
+			models := []*cliproxy.ModelInfo{
+				{
+					ID: "myprov-pro-1", Object: "model", Type: providerKey, DisplayName: "MyProv Pro 1",
+				},
+			}
 			for _, a := range core.List() {
 				if strings.EqualFold(a.Provider, providerKey) {
 					cliproxy.GlobalModelRegistry().RegisterClient(a.ID, providerKey, models)
@@ -204,9 +232,13 @@ func main() {
 		WithServerOptions(
 			// Optional: add a simple middleware + custom request logger
 			api.WithMiddleware(func(c *gin.Context) { c.Header("X-Example", "custom-provider"); c.Next() }),
-			api.WithRequestLoggerFactory(func(cfg *config.Config, cfgPath string) logging.RequestLogger {
-				return logging.NewFileRequestLoggerWithOptions(true, "logs", filepath.Dir(cfgPath), cfg.ErrorLogsMaxFiles)
-			}),
+			api.WithRequestLoggerFactory(
+				func(cfg *config.Config, cfgPath string) logging.RequestLogger {
+					return logging.NewFileRequestLoggerWithOptions(
+						true, "logs", filepath.Dir(cfgPath), cfg.ErrorLogsMaxFiles,
+					)
+				},
+			),
 		).
 		WithHooks(hooks).
 		Build()

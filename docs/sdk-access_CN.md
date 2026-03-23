@@ -1,6 +1,7 @@
 # @sdk/access 开发指引
 
-`github.com/router-for-me/CLIProxyAPI/v6/sdk/access` 包负责代理的入站访问认证。它提供一个轻量的管理器，用于按顺序链接多种凭证校验实现，让服务器在 CLI 运行时内外都能复用相同的访问控制逻辑。
+`github.com/router-for-me/CLIProxyAPI/v6/sdk/access` 包负责代理的入站访问认证。它提供一个轻量的管理器，用于按顺序链接多种凭证校验实现，让服务器在
+CLI 运行时内外都能复用相同的访问控制逻辑。
 
 ## 引用方式
 
@@ -49,7 +50,8 @@ default:
 }
 ```
 
-`Manager.Authenticate` 会按顺序遍历 provider：遇到成功立即返回，`AuthErrorCodeNotHandled` 会继续尝试下一个；`AuthErrorCodeNoCredentials` / `AuthErrorCodeInvalidCredential` 会在遍历结束后汇总给调用方。
+`Manager.Authenticate` 会按顺序遍历 provider：遇到成功立即返回，`AuthErrorCodeNotHandled` 会继续尝试下一个；
+`AuthErrorCodeNoCredentials` / `AuthErrorCodeInvalidCredential` 会在遍历结束后汇总给调用方。
 
 `Result` 提供认证提供者标识、解析出的主体以及可选元数据（例如凭证来源）。
 
@@ -58,8 +60,8 @@ default:
 代理内置一个访问提供者：
 
 - `config-api-key`：校验 `config.yaml` 顶层的 `api-keys`。
-  - 凭证来源：`Authorization: Bearer`、`X-Goog-Api-Key`、`X-Api-Key`、`?key=`、`?auth_token=`
-  - 元数据：`Result.Metadata["source"]` 会写入匹配到的来源标识
+    - 凭证来源：`Authorization: Bearer`、`X-Goog-Api-Key`、`X-Api-Key`、`?key=`、`?auth_token=`
+    - 元数据：`Result.Metadata["source"]` 会写入匹配到的来源标识
 
 在 CLI 服务端与 `sdk/cliproxy` 中，该 provider 会根据加载到的配置自动注册。
 
@@ -80,11 +82,13 @@ import (
 )
 ```
 
-空白导入可确保 `init` 先执行，从而在你调用 `RegisteredProviders()`（或 `cliproxy.NewBuilder().Build()`）之前完成 `sdkaccess.RegisterProvider`。
+空白导入可确保 `init` 先执行，从而在你调用 `RegisteredProviders()`（或 `cliproxy.NewBuilder().Build()`）之前完成
+`sdkaccess.RegisterProvider`。
 
 ### 元数据与审计
 
-`Result.Metadata` 用于携带提供者特定的上下文信息。内建的 `config-api-key` 会记录凭证来源（`authorization`、`x-goog-api-key`、`x-api-key`、`query-key`、`query-auth-token`）。自定义提供者同样可以填充该 Map，以便丰富日志与审计场景。
+`Result.Metadata` 用于携带提供者特定的上下文信息。内建的 `config-api-key` 会记录凭证来源（`authorization`、
+`x-goog-api-key`、`x-api-key`、`query-key`、`query-auth-token`）。自定义提供者同样可以填充该 Map，以便丰富日志与审计场景。
 
 ## 编写自定义提供者
 
@@ -113,7 +117,8 @@ func init() {
 }
 ```
 
-自定义提供者需要实现 `Identifier()` 与 `Authenticate()`。在 `init` 中用已初始化实例调用 `RegisterProvider` 注册到全局 registry。
+自定义提供者需要实现 `Identifier()` 与 `Authenticate()`。在 `init` 中用已初始化实例调用 `RegisterProvider` 注册到全局
+registry。
 
 ## 错误语义
 

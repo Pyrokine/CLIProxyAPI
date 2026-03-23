@@ -1,6 +1,7 @@
 # CLI Proxy SDK 使用指南
 
-`sdk/cliproxy` 模块将代理能力以 Go 库的形式对外暴露，方便在其它服务中内嵌路由、鉴权、热更新与翻译层，而无需依赖可执行的 CLI 程序。
+`sdk/cliproxy` 模块将代理能力以 Go 库的形式对外暴露，方便在其它服务中内嵌路由、鉴权、热更新与翻译层，而无需依赖可执行的 CLI
+程序。
 
 ## 安装与导入
 
@@ -113,7 +114,8 @@ chunks, err := core.ExecuteStream(ctx, []string{"gemini"}, req, opts)
 for ch := range chunks { /* ... */ }
 ```
 
-说明：运行 `Service` 时会自动注册内置的提供商执行器；若仅单独使用 `Manager` 而不启动 HTTP 服务器，则需要自行实现并注册满足 `auth.ProviderExecutor` 的执行器。
+说明：运行 `Service` 时会自动注册内置的提供商执行器；若仅单独使用 `Manager` 而不启动 HTTP 服务器，则需要自行实现并注册满足
+`auth.ProviderExecutor` 的执行器。
 
 ## 自定义凭据来源
 

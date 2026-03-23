@@ -1,6 +1,6 @@
-# Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
-# Use "127.0.0.1" or "localhost" to restrict access to local machine only.
-host: ""
+# Server host/interface to bind to. Default is "127.0.0.1" for local-only access.
+# Use "" to bind all interfaces (IPv4 + IPv6) if remote access is needed.
+host: "127.0.0.1"
 
 # Server port
 port: 8317
@@ -62,6 +62,17 @@ error-logs-max-files: 10
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
 
+# File path for persisting usage statistics across restarts.
+# Defaults to "usage-statistics.json" next to config.yaml. Set to "disabled" to turn off.
+# usage-statistics-file: ""
+
+# Retention policy for detailed usage records (logrotate-style).
+# Only per-request Details are trimmed; aggregate counters are preserved forever.
+# usage-retention:
+#   days: 30              # Keep details for this many days. Older entries are archived and removed.
+#   max-file-size-mb: 50  # Maximum active file size (MB). Exceeding triggers progressive trimming.
+#   archive-months: 3     # Keep monthly archive files for this many months. 0 = discard immediately.
+
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
 
@@ -91,8 +102,21 @@ quota-exceeded:
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
 
-# When true, enable authentication for the WebSocket API (/v1/ws).
-ws-auth: false
+# CORS allowed origins. Empty = allow all (*) for CLI tool compatibility.
+# Set to restrict browser access: ["http://localhost:5173", "http://127.0.0.1:5173"]
+# cors-allowed-origins: []
+
+# When true (default), enable authentication for the WebSocket API (/v1/ws).
+# Set to false to disable (NOT RECOMMENDED — unauthenticated WebSocket access allows anonymous AI proxy usage).
+ws-auth: true
+
+# Allow API key authentication via URL query parameters (?key= / ?auth_token=).
+# Disabled by default — query parameters leak credentials to server logs, Referer headers, and browser history.
+# allow-query-auth: false
+
+# Auto-refresh interval (seconds) for the management panel when the browser window regains focus.
+# Set to 0 to disable auto-refresh. Default: 60.
+auto-refresh-interval: 60
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0

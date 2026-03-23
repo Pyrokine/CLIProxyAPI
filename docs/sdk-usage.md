@@ -1,6 +1,7 @@
 # CLI Proxy SDK Guide
 
-The `sdk/cliproxy` module exposes the proxy as a reusable Go library so external programs can embed the routing, authentication, hot‑reload, and translation layers without depending on the CLI binary.
+The `sdk/cliproxy` module exposes the proxy as a reusable Go library so external programs can embed the routing,
+authentication, hot‑reload, and translation layers without depending on the CLI binary.
 
 ## Install & Import
 
@@ -41,7 +42,8 @@ if err := svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 }
 ```
 
-The service manages config/auth watching, background token refresh, and graceful shutdown. Cancel the context to stop it.
+The service manages config/auth watching, background token refresh, and graceful shutdown. Cancel the context to stop
+it.
 
 ## Server Options (middleware, routes, logs)
 
@@ -78,7 +80,8 @@ These options mirror the internals used by the CLI server.
 
 ## Using the Core Auth Manager
 
-The service uses a core `auth.Manager` for selection, execution, and auto‑refresh. When embedding, you can provide your own manager to customize transports or hooks:
+The service uses a core `auth.Manager` for selection, execution, and auto‑refresh. When embedding, you can provide your
+own manager to customize transports or hooks:
 
 ```go
 core := coreauth.NewManager(coreauth.NewFileStore(cfg.AuthDir), nil, nil)
@@ -113,7 +116,8 @@ chunks, err := core.ExecuteStream(ctx, []string{"gemini"}, req, opts)
 for ch := range chunks { /* ... */ }
 ```
 
-Note: Built‑in provider executors are wired automatically when you run the `Service`. If you want to use `Manager` stand‑alone without the HTTP server, you must register your own executors that implement `auth.ProviderExecutor`.
+Note: Built‑in provider executors are wired automatically when you run the `Service`. If you want to use `Manager`
+stand‑alone without the HTTP server, you must register your own executors that implement `auth.ProviderExecutor`.
 
 ## Custom Client Sources
 

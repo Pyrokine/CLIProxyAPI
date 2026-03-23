@@ -1,6 +1,7 @@
 # SDK Advanced: Executors & Translators
 
 This guide explains how to extend the embedded proxy with custom providers and schemas using the SDK. You will:
+
 - Implement a provider executor that talks to your upstream API
 - Register request/response translators for schema conversion
 - Register models so they appear in `/v1/models`
@@ -9,8 +10,11 @@ The examples use Go 1.24+ and the v6 module path.
 
 ## Concepts
 
-- Provider executor: a runtime component implementing `auth.ProviderExecutor` that performs outbound calls for a given provider key (e.g., `gemini`, `claude`, `codex`). Executors can also implement `RequestPreparer` to inject credentials on raw HTTP requests.
-- Translator registry: schema conversion functions routed by `sdk/translator`. The built‑in handlers translate between OpenAI/Gemini/Claude/Codex formats; you can register new ones.
+- Provider executor: a runtime component implementing `auth.ProviderExecutor` that performs outbound calls for a given
+  provider key (e.g., `gemini`, `claude`, `codex`). Executors can also implement `RequestPreparer` to inject credentials
+  on raw HTTP requests.
+- Translator registry: schema conversion functions routed by `sdk/translator`. The built‑in handlers translate between
+  OpenAI/Gemini/Claude/Codex formats; you can register new ones.
 - Model registry: publishes the list of available models per client/provider to power `/v1/models` and routing hints.
 
 ## 1) Implement a Provider Executor
@@ -69,9 +73,11 @@ If your auth entries use provider `"myprov"`, the manager routes requests to you
 
 ## 2) Register Translators
 
-The handlers accept OpenAI/Gemini/Claude/Codex inputs. To support a new provider format, register translation functions in `sdk/translator`’s default registry.
+The handlers accept OpenAI/Gemini/Claude/Codex inputs. To support a new provider format, register translation functions
+in `sdk/translator`’s default registry.
 
 Direction matters:
+
 - Request: register from inbound schema to provider schema
 - Response: register from provider schema back to inbound schema
 
@@ -107,11 +113,13 @@ func init() {
 }
 ```
 
-When the OpenAI handler receives a request that should route to `myprov`, the pipeline uses the registered transforms automatically.
+When the OpenAI handler receives a request that should route to `myprov`, the pipeline uses the registered transforms
+automatically.
 
 ## 3) Register Models
 
-Expose models under `/v1/models` by registering them in the global model registry using the auth ID (client ID) and provider name.
+Expose models under `/v1/models` by registering them in the global model registry using the auth ID (client ID) and
+provider name.
 
 ```go
 models := []*cliproxy.ModelInfo{
@@ -120,7 +128,8 @@ models := []*cliproxy.ModelInfo{
 cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 ```
 
-The embedded server calls this automatically for built‑in providers; for custom providers, register during startup (e.g., after loading auths) or upon auth registration hooks.
+The embedded server calls this automatically for built‑in providers; for custom providers, register during startup (
+e.g., after loading auths) or upon auth registration hooks.
 
 ## Credentials & Transports
 
