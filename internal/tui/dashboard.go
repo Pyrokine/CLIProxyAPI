@@ -41,14 +41,14 @@ func newDashboardModel(client *Client) dashboardModel {
 	}
 }
 
-func (m dashboardModel) Init() tea.Cmd {
+func (m *dashboardModel) Init() tea.Cmd {
 	return m.fetchData
 }
 
-func (m dashboardModel) fetchData() tea.Msg {
+func (m *dashboardModel) fetchData() tea.Msg {
 	cfg, cfgErr := m.client.GetConfig()
-	usage, usageErr := m.client.GetUsage()
-	authFiles, authErr := m.client.GetAuthFiles()
+	usage, usageErr := m.client.getUsage()
+	authFiles, authErr := m.client.getAuthFiles()
 	apiKeys, keysErr := m.client.GetAPIKeys()
 
 	var err error
@@ -61,14 +61,14 @@ func (m dashboardModel) fetchData() tea.Msg {
 	return dashboardDataMsg{config: cfg, usage: usage, authFiles: authFiles, apiKeys: apiKeys, err: err}
 }
 
-func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
+func (m *dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		// Re-render immediately with cached data using new locale
 		m.content = m.renderDashboard(m.lastConfig, m.lastUsage, m.lastAuthFiles, m.lastAPIKeys)
 		m.viewport.SetContent(m.content)
 		// Also fetch fresh data in background
-		return m, m.fetchData
+		return *m, m.fetchData
 
 	case dashboardDataMsg:
 		if msg.err != nil {
@@ -85,20 +85,20 @@ func (m dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 			m.content = m.renderDashboard(msg.config, msg.usage, msg.authFiles, msg.apiKeys)
 		}
 		m.viewport.SetContent(m.content)
-		return m, nil
+		return *m, nil
 
 	case tea.KeyMsg:
 		if msg.String() == "r" {
-			return m, m.fetchData
+			return *m, m.fetchData
 		}
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
-		return m, cmd
+		return *m, cmd
 	}
 
 	var cmd tea.Cmd
 	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
+	return *m, cmd
 }
 
 func (m *dashboardModel) SetSize(w, h int) {
@@ -114,34 +114,35 @@ func (m *dashboardModel) SetSize(w, h int) {
 	}
 }
 
-func (m dashboardModel) View() string {
+func (m *dashboardModel) View() string {
 	if !m.ready {
-		return T("loading")
+		return t("loading")
 	}
 	return m.viewport.View()
 }
 
-func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []map[string]any, apiKeys []string) string {
+func (m *dashboardModel) renderDashboard(
+	cfg, usage map[string]any,
+	authFiles []map[string]any,
+	apiKeys []string,
+) string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render(T("dashboard_title")))
+	sb.WriteString(titleStyle.Render(t("dashboard_title")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(T("dashboard_help")))
+	sb.WriteString(helpStyle.Render(t("dashboard_help")))
 	sb.WriteString("\n\n")
 
 	// ━━━ Connection Status ━━━
 	connStyle := lipgloss.NewStyle().Bold(true).Foreground(colorSuccess)
-	sb.WriteString(connStyle.Render(T("connected")))
+	sb.WriteString(connStyle.Render(t("connected")))
 	sb.WriteString(fmt.Sprintf("  %s", m.client.baseURL))
 	sb.WriteString("\n\n")
 
 	// ━━━ Stats Cards ━━━
 	cardWidth := 25
 	if m.width > 0 {
-		cardWidth = (m.width - 6) / 4
-		if cardWidth < 18 {
-			cardWidth = 18
-		}
+		cardWidth = max((m.width-6)/4, 18)
 	}
 
 	cardStyle := lipgloss.NewStyle().
@@ -153,11 +154,13 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 
 	// Card 1: API Keys
 	keyCount := len(apiKeys)
-	card1 := cardStyle.Render(fmt.Sprintf(
-		"%s\n%s",
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")).Render(fmt.Sprintf("🔑 %d", keyCount)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(T("mgmt_keys")),
-	))
+	card1 := cardStyle.Render(
+		fmt.Sprintf(
+			"%s\n%s",
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")).Render(fmt.Sprintf("🔑 %d", keyCount)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(t("mgmt_keys")),
+		),
+	)
 
 	// Card 2: Auth Files
 	authCount := len(authFiles)
@@ -167,11 +170,17 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 			activeAuth++
 		}
 	}
-	card2 := cardStyle.Render(fmt.Sprintf(
-		"%s\n%s",
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("76")).Render(fmt.Sprintf("📄 %d", authCount)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s (%d %s)", T("auth_files_label"), activeAuth, T("active_suffix"))),
-	))
+	card2 := cardStyle.Render(
+		fmt.Sprintf(
+			"%s\n%s",
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("76")).Render(fmt.Sprintf("📄 %d", authCount)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(
+				fmt.Sprintf(
+					"%s (%d %s)", t("auth_files_label"), activeAuth, t("active_suffix"),
+				),
+			),
+		),
+	)
 
 	// Card 3: Total Requests
 	totalReqs := int64(0)
@@ -186,25 +195,33 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 			totalTokens = int64(getFloat(usageMap, "total_tokens"))
 		}
 	}
-	card3 := cardStyle.Render(fmt.Sprintf(
-		"%s\n%s",
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("📈 %d", totalReqs)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(fmt.Sprintf("%s (✓%d ✗%d)", T("total_requests"), successReqs, failedReqs)),
-	))
+	card3 := cardStyle.Render(
+		fmt.Sprintf(
+			"%s\n%s",
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(fmt.Sprintf("📈 %d", totalReqs)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(
+				fmt.Sprintf(
+					"%s (✓%d ✗%d)", t("total_requests"), successReqs, failedReqs,
+				),
+			),
+		),
+	)
 
 	// Card 4: Total Tokens
 	tokenStr := formatLargeNumber(totalTokens)
-	card4 := cardStyle.Render(fmt.Sprintf(
-		"%s\n%s",
-		lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("🔤 %s", tokenStr)),
-		lipgloss.NewStyle().Foreground(colorMuted).Render(T("total_tokens")),
-	))
+	card4 := cardStyle.Render(
+		fmt.Sprintf(
+			"%s\n%s",
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("170")).Render(fmt.Sprintf("🔤 %s", tokenStr)),
+			lipgloss.NewStyle().Foreground(colorMuted).Render(t("total_tokens")),
+		),
+	)
 
 	sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, card1, " ", card2, " ", card3, " ", card4))
 	sb.WriteString("\n\n")
 
 	// ━━━ Current Config ━━━
-	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("current_config")))
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(t("current_config")))
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 	sb.WriteString("\n")
@@ -225,23 +242,29 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 			label string
 			value string
 		}{
-			{T("debug_mode"), boolEmoji(debug)},
-			{T("usage_stats"), boolEmoji(usageEnabled)},
-			{T("log_to_file"), boolEmoji(loggingToFile)},
-			{T("retry_count"), fmt.Sprintf("%.0f", retry)},
+			{t("debug_mode"), boolEmoji(debug)},
+			{t("usage_stats"), boolEmoji(usageEnabled)},
+			{t("log_to_file"), boolEmoji(loggingToFile)},
+			{t("retry_count"), fmt.Sprintf("%.0f", retry)},
 		}
 		if proxyURL != "" {
-			configItems = append(configItems, struct {
-				label string
-				value string
-			}{T("proxy_url"), proxyURL})
+			configItems = append(
+				configItems, struct {
+					label string
+					value string
+				}{t("proxy_url"), proxyURL},
+			)
 		}
 
 		// Render config items as a compact row
 		for _, item := range configItems {
-			sb.WriteString(fmt.Sprintf("  %s %s\n",
-				labelStyle.Render(item.label+":"),
-				valueStyle.Render(item.value)))
+			sb.WriteString(
+				fmt.Sprintf(
+					"  %s %s\n",
+					labelStyle.Render(item.label+":"),
+					valueStyle.Render(item.value),
+				),
+			)
 		}
 
 		// Routing strategy
@@ -251,9 +274,13 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 				strategy = s
 			}
 		}
-		sb.WriteString(fmt.Sprintf("  %s %s\n",
-			labelStyle.Render(T("routing_strategy")+":"),
-			valueStyle.Render(strategy)))
+		sb.WriteString(
+			fmt.Sprintf(
+				"  %s %s\n",
+				labelStyle.Render(t("routing_strategy")+":"),
+				valueStyle.Render(strategy),
+			),
+		)
 	}
 
 	sb.WriteString("\n")
@@ -262,12 +289,12 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	if usage != nil {
 		if usageMap, ok := usage["usage"].(map[string]any); ok {
 			if apis, ok := usageMap["apis"].(map[string]any); ok && len(apis) > 0 {
-				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(T("model_stats")))
+				sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorHighlight).Render(t("model_stats")))
 				sb.WriteString("\n")
 				sb.WriteString(strings.Repeat("─", minInt(m.width, 60)))
 				sb.WriteString("\n")
 
-				header := fmt.Sprintf("  %-40s %10s %12s", T("model"), T("requests"), T("tokens"))
+				header := fmt.Sprintf("  %-40s %10s %12s", t("model"), t("requests"), t("tokens"))
 				sb.WriteString(tableHeaderStyle.Render(header))
 				sb.WriteString("\n")
 
@@ -278,7 +305,9 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 								if stats, ok := v.(map[string]any); ok {
 									reqs := int64(getFloat(stats, "total_requests"))
 									toks := int64(getFloat(stats, "total_tokens"))
-									row := fmt.Sprintf("  %-40s %10d %12s", truncate(model, 40), reqs, formatLargeNumber(toks))
+									row := fmt.Sprintf(
+										"  %-40s %10d %12s", truncate(model, 40), reqs, formatLargeNumber(toks),
+									)
 									sb.WriteString(tableCellStyle.Render(row))
 									sb.WriteString("\n")
 								}
@@ -291,10 +320,6 @@ func (m dashboardModel) renderDashboard(cfg, usage map[string]any, authFiles []m
 	}
 
 	return sb.String()
-}
-
-func formatKV(key, value string) string {
-	return fmt.Sprintf("  %s %s\n", labelStyle.Render(key+":"), valueStyle.Render(value))
 }
 
 func getString(m map[string]any, key string) string {
@@ -330,9 +355,9 @@ func getBool(m map[string]any, key string) bool {
 
 func boolEmoji(b bool) string {
 	if b {
-		return T("bool_yes")
+		return t("bool_yes")
 	}
-	return T("bool_no")
+	return t("bool_no")
 }
 
 func formatLargeNumber(n int64) string {

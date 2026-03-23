@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/handlers/management"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
 func init() {
@@ -244,7 +244,9 @@ func TestDeleteAmpUpstreamAPIKeys_ClearsAll(t *testing.T) {
 
 	// Seed with one entry
 	putBody := `{"value":[{"upstream-api-key":"u1","api-keys":["k1"]}]}`
-	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/upstream-api-keys", bytes.NewBufferString(putBody))
+	req := httptest.NewRequest(
+		http.MethodPut, "/v0/management/ampcode/upstream-api-keys", bytes.NewBufferString(putBody),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -253,7 +255,9 @@ func TestDeleteAmpUpstreamAPIKeys_ClearsAll(t *testing.T) {
 	}
 
 	deleteBody := `{"value":[]}`
-	req = httptest.NewRequest(http.MethodDelete, "/v0/management/ampcode/upstream-api-keys", bytes.NewBufferString(deleteBody))
+	req = httptest.NewRequest(
+		http.MethodDelete, "/v0/management/ampcode/upstream-api-keys", bytes.NewBufferString(deleteBody),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -271,7 +275,7 @@ func TestDeleteAmpUpstreamAPIKeys_ClearsAll(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to unmarshal response: %v", err)
 	}
-	if resp["upstream-api-keys"] != nil && len(resp["upstream-api-keys"]) != 0 {
+	if len(resp["upstream-api-keys"]) != 0 {
 		t.Fatalf("expected cleared list, got %#v", resp["upstream-api-keys"])
 	}
 }
@@ -319,7 +323,9 @@ func TestPutAmpRestrictManagementToLocalhost(t *testing.T) {
 	r := setupAmpRouter(h)
 
 	body := `{"value": false}`
-	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/restrict-management-to-localhost", bytes.NewBufferString(body))
+	req := httptest.NewRequest(
+		http.MethodPut, "/v0/management/ampcode/restrict-management-to-localhost", bytes.NewBufferString(body),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -447,7 +453,9 @@ func TestPutAmpForceModelMappings(t *testing.T) {
 	r := setupAmpRouter(h)
 
 	body := `{"value": true}`
-	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/force-model-mappings", bytes.NewBufferString(body))
+	req := httptest.NewRequest(
+		http.MethodPut, "/v0/management/ampcode/force-model-mappings", bytes.NewBufferString(body),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -548,7 +556,9 @@ func TestDeleteAmpModelMappings_VerifyState(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	delBody := `{"value": ["a", "c"]}`
-	req = httptest.NewRequest(http.MethodDelete, "/v0/management/ampcode/model-mappings", bytes.NewBufferString(delBody))
+	req = httptest.NewRequest(
+		http.MethodDelete, "/v0/management/ampcode/model-mappings", bytes.NewBufferString(delBody),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -581,7 +591,9 @@ func TestDeleteAmpModelMappings_NonExistent(t *testing.T) {
 	r := setupAmpRouter(h)
 
 	delBody := `{"value": ["non-existent-model"]}`
-	req := httptest.NewRequest(http.MethodDelete, "/v0/management/ampcode/model-mappings", bytes.NewBufferString(delBody))
+	req := httptest.NewRequest(
+		http.MethodDelete, "/v0/management/ampcode/model-mappings", bytes.NewBufferString(delBody),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -751,7 +763,9 @@ func TestPutAmpRestrictManagementToLocalhost_VerifyState(t *testing.T) {
 	r := setupAmpRouter(h)
 
 	body := `{"value": false}`
-	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/restrict-management-to-localhost", bytes.NewBufferString(body))
+	req := httptest.NewRequest(
+		http.MethodPut, "/v0/management/ampcode/restrict-management-to-localhost", bytes.NewBufferString(body),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -780,7 +794,9 @@ func TestPutAmpForceModelMappings_VerifyState(t *testing.T) {
 	r := setupAmpRouter(h)
 
 	body := `{"value": true}`
-	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/force-model-mappings", bytes.NewBufferString(body))
+	req := httptest.NewRequest(
+		http.MethodPut, "/v0/management/ampcode/force-model-mappings", bytes.NewBufferString(body),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -809,7 +825,9 @@ func TestPutBoolField_EmptyObject(t *testing.T) {
 	r := setupAmpRouter(h)
 
 	body := `{}`
-	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/force-model-mappings", bytes.NewBufferString(body))
+	req := httptest.NewRequest(
+		http.MethodPut, "/v0/management/ampcode/force-model-mappings", bytes.NewBufferString(body),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -831,13 +849,17 @@ func TestComplexMappingsWorkflow(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	patchBody := `{"value": [{"from": "m2", "to": "t2-updated"}, {"from": "m5", "to": "t5"}]}`
-	req = httptest.NewRequest(http.MethodPatch, "/v0/management/ampcode/model-mappings", bytes.NewBufferString(patchBody))
+	req = httptest.NewRequest(
+		http.MethodPatch, "/v0/management/ampcode/model-mappings", bytes.NewBufferString(patchBody),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
 	delBody := `{"value": ["m1", "m3"]}`
-	req = httptest.NewRequest(http.MethodDelete, "/v0/management/ampcode/model-mappings", bytes.NewBufferString(delBody))
+	req = httptest.NewRequest(
+		http.MethodDelete, "/v0/management/ampcode/model-mappings", bytes.NewBufferString(delBody),
+	)
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)

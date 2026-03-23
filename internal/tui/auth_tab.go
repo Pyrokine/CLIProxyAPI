@@ -65,20 +65,20 @@ func newAuthTabModel(client *Client) authTabModel {
 	}
 }
 
-func (m authTabModel) Init() tea.Cmd {
+func (m *authTabModel) Init() tea.Cmd {
 	return m.fetchFiles
 }
 
-func (m authTabModel) fetchFiles() tea.Msg {
-	files, err := m.client.GetAuthFiles()
+func (m *authTabModel) fetchFiles() tea.Msg {
+	files, err := m.client.getAuthFiles()
 	return authFilesMsg{files: files, err: err}
 }
 
-func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
+func (m *authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 	case authFilesMsg:
 		if msg.err != nil {
 			m.err = msg.err
@@ -91,7 +91,7 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 			m.status = ""
 		}
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 
 	case authActionMsg:
 		if msg.err != nil {
@@ -101,7 +101,7 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 		}
 		m.confirm = -1
 		m.viewport.SetContent(m.renderContent())
-		return m, m.fetchFiles
+		return *m, m.fetchFiles
 
 	case tea.KeyMsg:
 		// ---- Editing mode ----
@@ -120,7 +120,7 @@ func (m authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
+	return *m, cmd
 }
 
 // startEdit activates inline editing for a field on the currently selected auth file.
@@ -157,21 +157,21 @@ func (m *authTabModel) SetSize(w, h int) {
 	}
 }
 
-func (m authTabModel) View() string {
+func (m *authTabModel) View() string {
 	if !m.ready {
-		return T("loading")
+		return t("loading")
 	}
 	return m.viewport.View()
 }
 
-func (m authTabModel) renderContent() string {
+func (m *authTabModel) renderContent() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render(T("auth_title")))
+	sb.WriteString(titleStyle.Render(t("auth_title")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(T("auth_help1")))
+	sb.WriteString(helpStyle.Render(t("auth_help1")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(T("auth_help2")))
+	sb.WriteString(helpStyle.Render(t("auth_help2")))
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", m.width))
 	sb.WriteString("\n")
@@ -183,7 +183,7 @@ func (m authTabModel) renderContent() string {
 	}
 
 	if len(m.files) == 0 {
-		sb.WriteString(subtitleStyle.Render(T("no_auth_files")))
+		sb.WriteString(subtitleStyle.Render(t("no_auth_files")))
 		sb.WriteString("\n")
 		return sb.String()
 	}
@@ -195,10 +195,10 @@ func (m authTabModel) renderContent() string {
 		disabled := getBool(f, "disabled")
 
 		statusIcon := successStyle.Render("●")
-		statusText := T("status_active")
+		statusText := t("status_active")
 		if disabled {
 			statusIcon = lipgloss.NewStyle().Foreground(colorMuted).Render("○")
-			statusText = T("status_disabled")
+			statusText = t("status_disabled")
 		}
 
 		cursor := "  "
@@ -217,14 +217,16 @@ func (m authTabModel) renderContent() string {
 			displayEmail = displayEmail[:25] + "..."
 		}
 
-		row := fmt.Sprintf("%s%s %-24s %-12s %-28s %s",
-			cursor, statusIcon, displayName, channel, displayEmail, statusText)
+		row := fmt.Sprintf(
+			"%s%s %-24s %-12s %-28s %s",
+			cursor, statusIcon, displayName, channel, displayEmail, statusText,
+		)
 		sb.WriteString(rowStyle.Render(row))
 		sb.WriteString("\n")
 
 		// Delete confirmation
 		if m.confirm == i {
-			sb.WriteString(warningStyle.Render(fmt.Sprintf("    "+T("confirm_delete"), name)))
+			sb.WriteString(warningStyle.Render(fmt.Sprintf("    "+t("confirm_delete"), name)))
 			sb.WriteString("\n")
 		}
 
@@ -232,7 +234,7 @@ func (m authTabModel) renderContent() string {
 		if m.editing && i == m.cursor {
 			sb.WriteString(m.editInput.View())
 			sb.WriteString("\n")
-			sb.WriteString(helpStyle.Render("    " + T("enter_save") + " • " + T("esc_cancel")))
+			sb.WriteString(helpStyle.Render("    " + t("enter_save") + " • " + t("esc_cancel")))
 			sb.WriteString("\n")
 		}
 
@@ -251,7 +253,7 @@ func (m authTabModel) renderContent() string {
 	return sb.String()
 }
 
-func (m authTabModel) renderDetail(f map[string]any) string {
+func (m *authTabModel) renderDetail(f map[string]any) string {
 	var sb strings.Builder
 
 	labelStyle := lipgloss.NewStyle().
@@ -290,7 +292,7 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		val := getAnyString(f, field.key)
 		if val == "" || val == "<nil>" {
 			if field.editable {
-				val = T("not_set")
+				val = t("not_set")
 			} else {
 				continue
 			}
@@ -299,10 +301,12 @@ func (m authTabModel) renderDetail(f map[string]any) string {
 		if field.editable {
 			editMark = editableMarker
 		}
-		line := fmt.Sprintf("    │ %s %s%s",
+		line := fmt.Sprintf(
+			"    │ %s %s%s",
 			labelStyle.Render(fmt.Sprintf("%-12s:", field.label)),
 			valueStyle.Render(val),
-			editMark)
+			editMark,
+		)
 		sb.WriteString(line)
 		sb.WriteString("\n")
 	}
@@ -320,14 +324,7 @@ func getAnyString(m map[string]any, key string) string {
 	return fmt.Sprintf("%v", v)
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func (m authTabModel) handleEditInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+func (m *authTabModel) handleEditInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
 		value := m.editInput.Value()
@@ -339,73 +336,73 @@ func (m authTabModel) handleEditInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 		if fieldKey == "priority" {
 			p, err := strconv.Atoi(value)
 			if err != nil {
-				return m, func() tea.Msg {
-					return authActionMsg{err: fmt.Errorf("%s: %s", T("invalid_int"), value)}
+				return *m, func() tea.Msg {
+					return authActionMsg{err: fmt.Errorf("%s: %s", t("invalid_int"), value)}
 				}
 			}
 			fields[fieldKey] = p
 		} else {
 			fields[fieldKey] = value
 		}
-		return m, func() tea.Msg {
+		return *m, func() tea.Msg {
 			err := m.client.PatchAuthFileFields(fileName, fields)
 			if err != nil {
 				return authActionMsg{err: err}
 			}
-			return authActionMsg{action: fmt.Sprintf(T("updated_field"), fieldKey, fileName)}
+			return authActionMsg{action: fmt.Sprintf(t("updated_field"), fieldKey, fileName)}
 		}
 	case "esc":
 		m.editing = false
 		m.editInput.Blur()
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 	default:
 		var cmd tea.Cmd
 		m.editInput, cmd = m.editInput.Update(msg)
 		m.viewport.SetContent(m.renderContent())
-		return m, cmd
+		return *m, cmd
 	}
 }
 
-func (m authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+func (m *authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		idx := m.confirm
 		m.confirm = -1
 		if idx < len(m.files) {
 			name := getString(m.files[idx], "name")
-			return m, func() tea.Msg {
+			return *m, func() tea.Msg {
 				err := m.client.DeleteAuthFile(name)
 				if err != nil {
 					return authActionMsg{err: err}
 				}
-				return authActionMsg{action: fmt.Sprintf(T("deleted"), name)}
+				return authActionMsg{action: fmt.Sprintf(t("deleted"), name)}
 			}
 		}
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 	case "n", "N", "esc":
 		m.confirm = -1
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 	}
-	return m, nil
+	return *m, nil
 }
 
-func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
+func (m *authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
 		if len(m.files) > 0 {
 			m.cursor = (m.cursor + 1) % len(m.files)
 			m.viewport.SetContent(m.renderContent())
 		}
-		return m, nil
+		return *m, nil
 	case "k", "up":
 		if len(m.files) > 0 {
 			m.cursor = (m.cursor - 1 + len(m.files)) % len(m.files)
 			m.viewport.SetContent(m.renderContent())
 		}
-		return m, nil
+		return *m, nil
 	case "enter", " ":
 		if m.expanded == m.cursor {
 			m.expanded = -1
@@ -413,44 +410,44 @@ func (m authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) 
 			m.expanded = m.cursor
 		}
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 	case "d", "D":
 		if m.cursor < len(m.files) {
 			m.confirm = m.cursor
 			m.viewport.SetContent(m.renderContent())
 		}
-		return m, nil
+		return *m, nil
 	case "e", "E":
 		if m.cursor < len(m.files) {
 			f := m.files[m.cursor]
 			name := getString(f, "name")
 			disabled := getBool(f, "disabled")
 			newDisabled := !disabled
-			return m, func() tea.Msg {
-				err := m.client.ToggleAuthFile(name, newDisabled)
+			return *m, func() tea.Msg {
+				err := m.client.toggleAuthFile(name, newDisabled)
 				if err != nil {
 					return authActionMsg{err: err}
 				}
-				action := T("enabled")
+				action := t("enabled")
 				if newDisabled {
-					action = T("disabled")
+					action = t("disabled")
 				}
 				return authActionMsg{action: fmt.Sprintf("%s %s", action, name)}
 			}
 		}
-		return m, nil
+		return *m, nil
 	case "1":
-		return m, m.startEdit(0) // prefix
+		return *m, m.startEdit(0) // prefix
 	case "2":
-		return m, m.startEdit(1) // proxy_url
+		return *m, m.startEdit(1) // proxy_url
 	case "3":
-		return m, m.startEdit(2) // priority
+		return *m, m.startEdit(2) // priority
 	case "r":
 		m.status = ""
-		return m, m.fetchFiles
+		return *m, m.fetchFiles
 	default:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
-		return m, cmd
+		return *m, cmd
 	}
 }

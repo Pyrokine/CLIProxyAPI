@@ -22,8 +22,8 @@ const (
 	tabLogs
 )
 
-// App is the root bubbletea model that contains all tab sub-models.
-type App struct {
+// app is the root bubbletea model that contains all tab sub-models.
+type app struct {
 	activeTab int
 	tabs      []string
 
@@ -58,8 +58,8 @@ type authConnectMsg struct {
 	err error
 }
 
-// NewApp creates the root TUI application model.
-func NewApp(port int, secretKey string, hook *LogHook) App {
+// newApp creates the root TUI application model.
+func newApp(port int, secretKey string, hook *LogHook) app {
 	standalone := hook != nil
 	authRequired := !standalone
 	ti := textinput.New()
@@ -70,7 +70,7 @@ func NewApp(port int, secretKey string, hook *LogHook) App {
 	ti.Focus()
 
 	client := NewClient(port, secretKey)
-	app := App{
+	app := app{
 		activeTab:     tabDashboard,
 		standalone:    standalone,
 		logsEnabled:   true,
@@ -98,7 +98,7 @@ func NewApp(port int, secretKey string, hook *LogHook) App {
 	return app
 }
 
-func (a App) Init() tea.Cmd {
+func (a *app) Init() tea.Cmd {
 	if !a.authenticated {
 		return textinput.Blink
 	}
@@ -109,7 +109,7 @@ func (a App) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
@@ -118,10 +118,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.width > 0 {
 			a.authInput.Width = a.width - 6
 		}
-		contentH := a.height - 4 // tab bar + status bar
-		if contentH < 1 {
-			contentH = 1
-		}
+		contentH := max(a.height-4, 1) // tab bar + status bar
 		contentW := a.width
 		a.dashboard.SetSize(contentW, contentH)
 		a.config.SetSize(contentW, contentH)
@@ -135,7 +132,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case authConnectMsg:
 		a.authConnecting = false
 		if msg.err != nil {
-			a.authError = fmt.Sprintf(T("auth_gate_connect_fail"), msg.err.Error())
+			a.authError = fmt.Sprintf(t("auth_gate_connect_fail"), msg.err.Error())
 			return a, nil
 		}
 		a.authError = ""
@@ -187,7 +184,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c", "q":
 				return a, tea.Quit
 			case "L":
-				ToggleLocale()
+				toggleLocale()
 				a.refreshTabs()
 				a.setAuthInputPrompt()
 				return a, nil
@@ -197,7 +194,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				password := strings.TrimSpace(a.authInput.Value())
 				if password == "" {
-					a.authError = T("auth_gate_password_required")
+					a.authError = t("auth_gate_password_required")
 					return a, nil
 				}
 				a.authError = ""
@@ -219,7 +216,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, tea.Quit
 			}
 		case "L":
-			ToggleLocale()
+			toggleLocale()
 			a.refreshTabs()
 			return a.broadcastToAllTabs(localeChangedMsg{})
 		case "tab":
@@ -282,8 +279,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // localeChangedMsg is broadcast to all tabs when the user toggles locale.
 type localeChangedMsg struct{}
 
-func (a *App) refreshTabs() {
-	names := TabNames()
+func (a *app) refreshTabs() {
+	names := tabNames()
 	if a.logsEnabled {
 		a.tabs = names
 	} else {
@@ -306,7 +303,7 @@ func (a *App) refreshTabs() {
 	}
 }
 
-func (a *App) initTabIfNeeded(_ int) tea.Cmd {
+func (a *app) initTabIfNeeded(_ int) tea.Cmd {
 	if a.initialized[a.activeTab] {
 		return nil
 	}
@@ -333,13 +330,13 @@ func (a *App) initTabIfNeeded(_ int) tea.Cmd {
 	return nil
 }
 
-func (a App) View() string {
+func (a *app) View() string {
 	if !a.authenticated {
 		return a.renderAuthView()
 	}
 
 	if !a.ready {
-		return T("initializing_tui")
+		return t("initializing_tui")
 	}
 
 	var sb strings.Builder
@@ -375,15 +372,15 @@ func (a App) View() string {
 	return sb.String()
 }
 
-func (a App) renderAuthView() string {
+func (a *app) renderAuthView() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render(T("auth_gate_title")))
+	sb.WriteString(titleStyle.Render(t("auth_gate_title")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(T("auth_gate_help")))
+	sb.WriteString(helpStyle.Render(t("auth_gate_help")))
 	sb.WriteString("\n\n")
 	if a.authConnecting {
-		sb.WriteString(warningStyle.Render(T("auth_gate_connecting")))
+		sb.WriteString(warningStyle.Render(t("auth_gate_connecting")))
 		sb.WriteString("\n\n")
 	}
 	if strings.TrimSpace(a.authError) != "" {
@@ -392,11 +389,11 @@ func (a App) renderAuthView() string {
 	}
 	sb.WriteString(a.authInput.View())
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(T("auth_gate_enter")))
+	sb.WriteString(helpStyle.Render(t("auth_gate_enter")))
 	return sb.String()
 }
 
-func (a App) renderTabBar() string {
+func (a *app) renderTabBar() string {
 	var tabs []string
 	for i, name := range a.tabs {
 		if i == a.activeTab {
@@ -409,38 +406,26 @@ func (a App) renderTabBar() string {
 	return tabBarStyle.Width(a.width).Render(tabBar)
 }
 
-func (a App) renderStatusBar() string {
-	left := strings.TrimRight(T("status_left"), " ")
-	right := strings.TrimRight(T("status_right"), " ")
+func (a *app) renderStatusBar() string {
+	left := strings.TrimRight(t("status_left"), " ")
+	right := strings.TrimRight(t("status_right"), " ")
 
-	width := a.width
-	if width < 1 {
-		width = 1
-	}
+	width := max(a.width, 1)
 
 	// statusBarStyle has left/right padding(1), so content area is width-2.
-	contentWidth := width - 2
-	if contentWidth < 0 {
-		contentWidth = 0
-	}
+	contentWidth := max(width-2, 0)
 
 	if lipgloss.Width(left) > contentWidth {
 		left = fitStringWidth(left, contentWidth)
 		right = ""
 	}
 
-	remaining := contentWidth - lipgloss.Width(left)
-	if remaining < 0 {
-		remaining = 0
-	}
+	remaining := max(contentWidth-lipgloss.Width(left), 0)
 	if lipgloss.Width(right) > remaining {
 		right = fitStringWidth(right, remaining)
 	}
 
-	gap := contentWidth - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 0 {
-		gap = 0
-	}
+	gap := max(contentWidth-lipgloss.Width(left)-lipgloss.Width(right), 0)
 	return statusBarStyle.Width(width).Render(left + strings.Repeat(" ", gap) + right)
 }
 
@@ -478,16 +463,16 @@ func isLogsEnabledFromConfig(cfg map[string]any) bool {
 	return enabled
 }
 
-func (a *App) setAuthInputPrompt() {
+func (a *app) setAuthInputPrompt() {
 	if a == nil {
 		return
 	}
-	a.authInput.Prompt = fmt.Sprintf("  %s: ", T("auth_gate_password"))
+	a.authInput.Prompt = fmt.Sprintf("  %s: ", t("auth_gate_password"))
 }
 
-func (a App) connectWithPassword(password string) tea.Cmd {
+func (a *app) connectWithPassword(password string) tea.Cmd {
 	return func() tea.Msg {
-		a.client.SetSecretKey(password)
+		a.client.setSecretKey(password)
 		cfg, errGetConfig := a.client.GetConfig()
 		return authConnectMsg{cfg: cfg, err: errGetConfig}
 	}
@@ -499,13 +484,13 @@ func Run(port int, secretKey string, hook *LogHook, output io.Writer) error {
 	if output == nil {
 		output = os.Stdout
 	}
-	app := NewApp(port, secretKey, hook)
+	app := new(newApp(port, secretKey, hook))
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithOutput(output))
 	_, err := p.Run()
 	return err
 }
 
-func (a App) broadcastToAllTabs(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (a *app) broadcastToAllTabs(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 

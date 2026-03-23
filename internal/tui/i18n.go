@@ -5,20 +5,8 @@ package tui
 
 var currentLocale = "en"
 
-// SetLocale changes the active locale.
-func SetLocale(locale string) {
-	if _, ok := locales[locale]; ok {
-		currentLocale = locale
-	}
-}
-
-// CurrentLocale returns the active locale code.
-func CurrentLocale() string {
-	return currentLocale
-}
-
-// ToggleLocale switches between zh and en.
-func ToggleLocale() {
+// toggleLocale switches between zh and en.
+func toggleLocale() {
 	if currentLocale == "zh" {
 		currentLocale = "en"
 	} else {
@@ -26,8 +14,8 @@ func ToggleLocale() {
 	}
 }
 
-// T returns the translated string for the given key.
-func T(key string) string {
+// t returns the translated string for the given key.
+func t(key string) string {
 	if m, ok := locales[currentLocale]; ok {
 		if v, ok := m[key]; ok {
 			return v
@@ -53,8 +41,8 @@ var locales = map[string]map[string]string{
 var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "使用统计", "日志"}
 var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Usage", "Logs"}
 
-// TabNames returns tab names in the current locale.
-func TabNames() []string {
+// tabNames returns tab names in the current locale.
+func tabNames() []string {
 	if currentLocale == "zh" {
 		return zhTabNames
 	}

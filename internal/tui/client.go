@@ -29,14 +29,14 @@ func NewClient(port int, secretKey string) *Client {
 	}
 }
 
-// SetSecretKey updates management API bearer token used by this client.
-func (c *Client) SetSecretKey(secretKey string) {
+// setSecretKey updates management API bearer token used by this client.
+func (c *Client) setSecretKey(secretKey string) {
 	c.secretKey = strings.TrimSpace(secretKey)
 }
 
 func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, error) {
-	url := c.baseURL + path
-	req, err := http.NewRequest(method, url, body)
+	rawURL := c.baseURL + path
+	req, err := http.NewRequest(method, rawURL, body)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -50,7 +50,7 @@ func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, er
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, resp.StatusCode, err
@@ -140,14 +140,14 @@ func (c *Client) PutConfigYAML(yamlContent string) error {
 	return err
 }
 
-// GetUsage fetches usage statistics.
-func (c *Client) GetUsage() (map[string]any, error) {
+// getUsage fetches usage statistics.
+func (c *Client) getUsage() (map[string]any, error) {
 	return c.getJSON("/v0/management/usage")
 }
 
-// GetAuthFiles lists auth credential files.
+// getAuthFiles lists auth credential files.
 // API returns {"files": [...]}.
-func (c *Client) GetAuthFiles() ([]map[string]any, error) {
+func (c *Client) getAuthFiles() ([]map[string]any, error) {
 	wrapper, err := c.getJSON("/v0/management/auth-files")
 	if err != nil {
 		return nil, err
@@ -170,8 +170,8 @@ func (c *Client) DeleteAuthFile(name string) error {
 	return nil
 }
 
-// ToggleAuthFile enables or disables an auth file.
-func (c *Client) ToggleAuthFile(name string, disabled bool) error {
+// toggleAuthFile enables or disables an auth file.
+func (c *Client) toggleAuthFile(name string, disabled bool) error {
 	body, _ := json.Marshal(map[string]any{"name": name, "disabled": disabled})
 	_, err := c.patch("/v0/management/auth-files/status", strings.NewReader(string(body)))
 	return err
@@ -206,7 +206,7 @@ func (c *Client) GetLogs(after int64, limit int) ([]string, int64, error) {
 		return nil, after, err
 	}
 
-	lines := []string{}
+	var lines []string
 	if rawLines, ok := wrapper["lines"]; ok && rawLines != nil {
 		rawJSON, errMarshal := json.Marshal(rawLines)
 		if errMarshal != nil {
@@ -261,24 +261,24 @@ func (c *Client) GetAPIKeys() ([]string, error) {
 	return result, nil
 }
 
-// AddAPIKey adds a new API key by sending old=nil, new=key which appends.
-func (c *Client) AddAPIKey(key string) error {
+// addAPIKey adds a new API key by sending old=nil, new=key which appends.
+func (c *Client) addAPIKey(key string) error {
 	body := map[string]any{"old": nil, "new": key}
 	jsonBody, _ := json.Marshal(body)
 	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
 	return err
 }
 
-// EditAPIKey replaces an API key at the given index.
-func (c *Client) EditAPIKey(index int, newValue string) error {
+// editAPIKey replaces an API key at the given index.
+func (c *Client) editAPIKey(index int, newValue string) error {
 	body := map[string]any{"index": index, "value": newValue}
 	jsonBody, _ := json.Marshal(body)
 	_, err := c.patch("/v0/management/api-keys", strings.NewReader(string(jsonBody)))
 	return err
 }
 
-// DeleteAPIKey deletes an API key by index.
-func (c *Client) DeleteAPIKey(index int) error {
+// deleteAPIKey deletes an API key by index.
+func (c *Client) deleteAPIKey(index int) error {
 	_, code, err := c.doRequest("DELETE", fmt.Sprintf("/v0/management/api-keys?index=%d", index), nil)
 	if err != nil {
 		return err
@@ -305,8 +305,8 @@ func (c *Client) GetCodexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/codex-api-key", "codex-api-key")
 }
 
-// GetVertexKeys fetches Vertex API keys.
-func (c *Client) GetVertexKeys() ([]map[string]any, error) {
+// getVertexKeys fetches Vertex API keys.
+func (c *Client) getVertexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/vertex-api-key", "vertex-api-key")
 }
 
@@ -372,29 +372,24 @@ func (c *Client) GetAuthStatus(state string) (string, string, error) {
 
 // ----- Config field update methods -----
 
-// PutBoolField updates a boolean config field.
-func (c *Client) PutBoolField(path string, value bool) error {
+// putBoolField updates a boolean config field.
+func (c *Client) putBoolField(path string, value bool) error {
 	body, _ := json.Marshal(map[string]any{"value": value})
 	_, err := c.put("/v0/management/"+path, strings.NewReader(string(body)))
 	return err
 }
 
-// PutIntField updates an integer config field.
-func (c *Client) PutIntField(path string, value int) error {
+// putIntField updates an integer config field.
+func (c *Client) putIntField(path string, value int) error {
 	body, _ := json.Marshal(map[string]any{"value": value})
 	_, err := c.put("/v0/management/"+path, strings.NewReader(string(body)))
 	return err
 }
 
-// PutStringField updates a string config field.
-func (c *Client) PutStringField(path string, value string) error {
+// putStringField updates a string config field.
+func (c *Client) putStringField(path string, value string) error {
 	body, _ := json.Marshal(map[string]any{"value": value})
 	_, err := c.put("/v0/management/"+path, strings.NewReader(string(body)))
 	return err
 }
 
-// DeleteField sends a DELETE request for a config field.
-func (c *Client) DeleteField(path string) error {
-	_, _, err := c.doRequest("DELETE", "/v0/management/"+path, nil)
-	return err
-}

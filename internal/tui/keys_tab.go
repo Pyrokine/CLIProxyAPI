@@ -62,11 +62,11 @@ func newKeysTabModel(client *Client) keysTabModel {
 	}
 }
 
-func (m keysTabModel) Init() tea.Cmd {
+func (m *keysTabModel) Init() tea.Cmd {
 	return m.fetchKeys
 }
 
-func (m keysTabModel) fetchKeys() tea.Msg {
+func (m *keysTabModel) fetchKeys() tea.Msg {
 	result := keysDataMsg{}
 	apiKeys, err := m.client.GetAPIKeys()
 	if err != nil {
@@ -77,16 +77,16 @@ func (m keysTabModel) fetchKeys() tea.Msg {
 	result.gemini, _ = m.client.GetGeminiKeys()
 	result.claude, _ = m.client.GetClaudeKeys()
 	result.codex, _ = m.client.GetCodexKeys()
-	result.vertex, _ = m.client.GetVertexKeys()
+	result.vertex, _ = m.client.getVertexKeys()
 	result.openai, _ = m.client.GetOpenAICompat()
 	return result
 }
 
-func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
+func (m *keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 	case keysDataMsg:
 		if msg.err != nil {
 			m.err = msg.err
@@ -103,7 +103,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 			}
 		}
 		m.viewport.SetContent(m.renderContent())
-		return m, nil
+		return *m, nil
 
 	case keyActionMsg:
 		if msg.err != nil {
@@ -113,7 +113,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 		}
 		m.confirm = -1
 		m.viewport.SetContent(m.renderContent())
-		return m, m.fetchKeys
+		return *m, m.fetchKeys
 
 	case tea.KeyMsg:
 		// ---- Editing / Adding mode ----
@@ -126,7 +126,7 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 					m.adding = false
 					m.editInput.Blur()
 					m.viewport.SetContent(m.renderContent())
-					return m, nil
+					return *m, nil
 				}
 				isAdding := m.adding
 				editIdx := m.editIdx
@@ -134,32 +134,32 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 				m.adding = false
 				m.editInput.Blur()
 				if isAdding {
-					return m, func() tea.Msg {
-						err := m.client.AddAPIKey(value)
+					return *m, func() tea.Msg {
+						err := m.client.addAPIKey(value)
 						if err != nil {
 							return keyActionMsg{err: err}
 						}
-						return keyActionMsg{action: T("key_added")}
+						return keyActionMsg{action: t("key_added")}
 					}
 				}
-				return m, func() tea.Msg {
-					err := m.client.EditAPIKey(editIdx, value)
+				return *m, func() tea.Msg {
+					err := m.client.editAPIKey(editIdx, value)
 					if err != nil {
 						return keyActionMsg{err: err}
 					}
-					return keyActionMsg{action: T("key_updated")}
+					return keyActionMsg{action: t("key_updated")}
 				}
 			case "esc":
 				m.editing = false
 				m.adding = false
 				m.editInput.Blur()
 				m.viewport.SetContent(m.renderContent())
-				return m, nil
+				return *m, nil
 			default:
 				var cmd tea.Cmd
 				m.editInput, cmd = m.editInput.Update(msg)
 				m.viewport.SetContent(m.renderContent())
-				return m, cmd
+				return *m, cmd
 			}
 		}
 
@@ -169,19 +169,19 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 			case "y", "Y":
 				idx := m.confirm
 				m.confirm = -1
-				return m, func() tea.Msg {
-					err := m.client.DeleteAPIKey(idx)
+				return *m, func() tea.Msg {
+					err := m.client.deleteAPIKey(idx)
 					if err != nil {
 						return keyActionMsg{err: err}
 					}
-					return keyActionMsg{action: T("key_deleted")}
+					return keyActionMsg{action: t("key_deleted")}
 				}
 			case "n", "N", "esc":
 				m.confirm = -1
 				m.viewport.SetContent(m.renderContent())
-				return m, nil
+				return *m, nil
 			}
-			return m, nil
+			return *m, nil
 		}
 
 		// ---- Normal mode ----
@@ -191,22 +191,22 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 				m.cursor = (m.cursor + 1) % len(m.keys)
 				m.viewport.SetContent(m.renderContent())
 			}
-			return m, nil
+			return *m, nil
 		case "k", "up":
 			if len(m.keys) > 0 {
 				m.cursor = (m.cursor - 1 + len(m.keys)) % len(m.keys)
 				m.viewport.SetContent(m.renderContent())
 			}
-			return m, nil
+			return *m, nil
 		case "a":
 			// Add new key
 			m.adding = true
 			m.editing = false
 			m.editInput.SetValue("")
-			m.editInput.Prompt = T("new_key_prompt")
+			m.editInput.Prompt = t("new_key_prompt")
 			m.editInput.Focus()
 			m.viewport.SetContent(m.renderContent())
-			return m, textinput.Blink
+			return *m, textinput.Blink
 		case "e":
 			// Edit selected key
 			if m.cursor < len(m.keys) {
@@ -214,44 +214,44 @@ func (m keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 				m.adding = false
 				m.editIdx = m.cursor
 				m.editInput.SetValue(m.keys[m.cursor])
-				m.editInput.Prompt = T("edit_key_prompt")
+				m.editInput.Prompt = t("edit_key_prompt")
 				m.editInput.Focus()
 				m.viewport.SetContent(m.renderContent())
-				return m, textinput.Blink
+				return *m, textinput.Blink
 			}
-			return m, nil
+			return *m, nil
 		case "d":
 			// Delete selected key
 			if m.cursor < len(m.keys) {
 				m.confirm = m.cursor
 				m.viewport.SetContent(m.renderContent())
 			}
-			return m, nil
+			return *m, nil
 		case "c":
 			// Copy selected key to clipboard
 			if m.cursor < len(m.keys) {
 				key := m.keys[m.cursor]
 				if err := clipboard.WriteAll(key); err != nil {
-					m.status = errorStyle.Render(T("copy_failed") + ": " + err.Error())
+					m.status = errorStyle.Render(t("copy_failed") + ": " + err.Error())
 				} else {
-					m.status = successStyle.Render(T("copied"))
+					m.status = successStyle.Render(t("copied"))
 				}
 				m.viewport.SetContent(m.renderContent())
 			}
-			return m, nil
+			return *m, nil
 		case "r":
 			m.status = ""
-			return m, m.fetchKeys
+			return *m, m.fetchKeys
 		default:
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
-			return m, cmd
+			return *m, cmd
 		}
 	}
 
 	var cmd tea.Cmd
 	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
+	return *m, cmd
 }
 
 func (m *keysTabModel) SetSize(w, h int) {
@@ -268,35 +268,35 @@ func (m *keysTabModel) SetSize(w, h int) {
 	}
 }
 
-func (m keysTabModel) View() string {
+func (m *keysTabModel) View() string {
 	if !m.ready {
-		return T("loading")
+		return t("loading")
 	}
 	return m.viewport.View()
 }
 
-func (m keysTabModel) renderContent() string {
+func (m *keysTabModel) renderContent() string {
 	var sb strings.Builder
 
-	sb.WriteString(titleStyle.Render(T("keys_title")))
+	sb.WriteString(titleStyle.Render(t("keys_title")))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(T("keys_help")))
+	sb.WriteString(helpStyle.Render(t("keys_help")))
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", m.width))
 	sb.WriteString("\n")
 
 	if m.err != nil {
-		sb.WriteString(errorStyle.Render(T("error_prefix") + m.err.Error()))
+		sb.WriteString(errorStyle.Render(t("error_prefix") + m.err.Error()))
 		sb.WriteString("\n")
 		return sb.String()
 	}
 
 	// ━━━ Access API Keys (interactive) ━━━
-	sb.WriteString(tableHeaderStyle.Render(fmt.Sprintf("  %s (%d)", T("access_keys"), len(m.keys))))
+	sb.WriteString(tableHeaderStyle.Render(fmt.Sprintf("  %s (%d)", t("access_keys"), len(m.keys))))
 	sb.WriteString("\n")
 
 	if len(m.keys) == 0 {
-		sb.WriteString(subtitleStyle.Render(T("no_keys")))
+		sb.WriteString(subtitleStyle.Render(t("no_keys")))
 		sb.WriteString("\n")
 	}
 
@@ -314,7 +314,7 @@ func (m keysTabModel) renderContent() string {
 
 		// Delete confirmation
 		if m.confirm == i {
-			sb.WriteString(warningStyle.Render(fmt.Sprintf("    "+T("confirm_delete_key"), maskKey(key))))
+			sb.WriteString(warningStyle.Render(fmt.Sprintf("    "+t("confirm_delete_key"), maskKey(key))))
 			sb.WriteString("\n")
 		}
 
@@ -322,7 +322,7 @@ func (m keysTabModel) renderContent() string {
 		if m.editing && m.editIdx == i {
 			sb.WriteString(m.editInput.View())
 			sb.WriteString("\n")
-			sb.WriteString(helpStyle.Render(T("enter_save_esc")))
+			sb.WriteString(helpStyle.Render(t("enter_save_esc")))
 			sb.WriteString("\n")
 		}
 	}
@@ -332,7 +332,7 @@ func (m keysTabModel) renderContent() string {
 		sb.WriteString("\n")
 		sb.WriteString(m.editInput.View())
 		sb.WriteString("\n")
-		sb.WriteString(helpStyle.Render(T("enter_add")))
+		sb.WriteString(helpStyle.Render(t("enter_add")))
 		sb.WriteString("\n")
 	}
 

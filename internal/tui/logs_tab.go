@@ -43,14 +43,14 @@ func newLogsTabModel(client *Client, hook *LogHook) logsTabModel {
 	}
 }
 
-func (m logsTabModel) Init() tea.Cmd {
+func (m *logsTabModel) Init() tea.Cmd {
 	if m.hook != nil {
 		return m.waitForLog
 	}
 	return m.fetchLogs
 }
 
-func (m logsTabModel) fetchLogs() tea.Msg {
+func (m *logsTabModel) fetchLogs() tea.Msg {
 	lines, latest, err := m.client.GetLogs(m.after, 200)
 	return logsPollMsg{
 		lines:  lines,
@@ -59,13 +59,15 @@ func (m logsTabModel) fetchLogs() tea.Msg {
 	}
 }
 
-func (m logsTabModel) waitForNextPoll() tea.Cmd {
-	return tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
-		return logsTickMsg{}
-	})
+func (m *logsTabModel) waitForNextPoll() tea.Cmd {
+	return tea.Tick(
+		2*time.Second, func(_ time.Time) tea.Msg {
+			return logsTickMsg{}
+		},
+	)
 }
 
-func (m logsTabModel) waitForLog() tea.Msg {
+func (m *logsTabModel) waitForLog() tea.Msg {
 	if m.hook == nil {
 		return nil
 	}
@@ -76,19 +78,19 @@ func (m logsTabModel) waitForLog() tea.Msg {
 	return logLineMsg(line)
 }
 
-func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
+func (m *logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderLogs())
-		return m, nil
+		return *m, nil
 	case logsTickMsg:
 		if m.hook != nil {
-			return m, nil
+			return *m, nil
 		}
-		return m, m.fetchLogs
+		return *m, m.fetchLogs
 	case logsPollMsg:
 		if m.hook != nil {
-			return m, nil
+			return *m, nil
 		}
 		if msg.err != nil {
 			m.lastErr = msg.err
@@ -106,7 +108,7 @@ func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 		if m.autoScroll {
 			m.viewport.GotoBottom()
 		}
-		return m, m.waitForNextPoll()
+		return *m, m.waitForNextPoll()
 	case logLineMsg:
 		m.lines = append(m.lines, string(msg))
 		if len(m.lines) > m.maxLines {
@@ -116,7 +118,7 @@ func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 		if m.autoScroll {
 			m.viewport.GotoBottom()
 		}
-		return m, m.waitForLog
+		return *m, m.waitForLog
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -125,28 +127,28 @@ func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 			if m.autoScroll {
 				m.viewport.GotoBottom()
 			}
-			return m, nil
+			return *m, nil
 		case "c":
 			m.lines = nil
 			m.lastErr = nil
 			m.viewport.SetContent(m.renderLogs())
-			return m, nil
+			return *m, nil
 		case "1":
 			m.filter = ""
 			m.viewport.SetContent(m.renderLogs())
-			return m, nil
+			return *m, nil
 		case "2":
 			m.filter = "info"
 			m.viewport.SetContent(m.renderLogs())
-			return m, nil
+			return *m, nil
 		case "3":
 			m.filter = "warn"
 			m.viewport.SetContent(m.renderLogs())
-			return m, nil
+			return *m, nil
 		case "4":
 			m.filter = "error"
 			m.viewport.SetContent(m.renderLogs())
-			return m, nil
+			return *m, nil
 		default:
 			wasAtBottom := m.viewport.AtBottom()
 			var cmd tea.Cmd
@@ -159,13 +161,13 @@ func (m logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 			if m.viewport.AtBottom() {
 				m.autoScroll = true
 			}
-			return m, cmd
+			return *m, cmd
 		}
 	}
 
 	var cmd tea.Cmd
 	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
+	return *m, cmd
 }
 
 func (m *logsTabModel) SetSize(w, h int) {
@@ -181,30 +183,32 @@ func (m *logsTabModel) SetSize(w, h int) {
 	}
 }
 
-func (m logsTabModel) View() string {
+func (m *logsTabModel) View() string {
 	if !m.ready {
-		return T("loading")
+		return t("loading")
 	}
 	return m.viewport.View()
 }
 
-func (m logsTabModel) renderLogs() string {
+func (m *logsTabModel) renderLogs() string {
 	var sb strings.Builder
 
-	scrollStatus := successStyle.Render(T("logs_auto_scroll"))
+	scrollStatus := successStyle.Render(t("logs_auto_scroll"))
 	if !m.autoScroll {
-		scrollStatus = warningStyle.Render(T("logs_paused"))
+		scrollStatus = warningStyle.Render(t("logs_paused"))
 	}
 	filterLabel := "ALL"
 	if m.filter != "" {
 		filterLabel = strings.ToUpper(m.filter) + "+"
 	}
 
-	header := fmt.Sprintf(" %s  %s  %s: %s  %s: %d",
-		T("logs_title"), scrollStatus, T("logs_filter"), filterLabel, T("logs_lines"), len(m.lines))
+	header := fmt.Sprintf(
+		" %s  %s  %s: %s  %s: %d",
+		t("logs_title"), scrollStatus, t("logs_filter"), filterLabel, t("logs_lines"), len(m.lines),
+	)
 	sb.WriteString(titleStyle.Render(header))
 	sb.WriteString("\n")
-	sb.WriteString(helpStyle.Render(T("logs_help")))
+	sb.WriteString(helpStyle.Render(t("logs_help")))
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", m.width))
 	sb.WriteString("\n")
@@ -215,7 +219,7 @@ func (m logsTabModel) renderLogs() string {
 	}
 
 	if len(m.lines) == 0 {
-		sb.WriteString(subtitleStyle.Render(T("logs_waiting")))
+		sb.WriteString(subtitleStyle.Render(t("logs_waiting")))
 		return sb.String()
 	}
 
@@ -231,10 +235,12 @@ func (m logsTabModel) renderLogs() string {
 	return sb.String()
 }
 
-func (m logsTabModel) matchLevel(line string) bool {
+func (m *logsTabModel) matchLevel(line string) bool {
 	switch m.filter {
 	case "error":
-		return strings.Contains(line, "[error]") || strings.Contains(line, "[fatal]") || strings.Contains(line, "[panic]")
+		return strings.Contains(line, "[error]") || strings.Contains(line, "[fatal]") || strings.Contains(
+			line, "[panic]",
+		)
 	case "warn":
 		return strings.Contains(line, "[warn") || strings.Contains(line, "[error]") || strings.Contains(line, "[fatal]")
 	case "info":
@@ -244,7 +250,7 @@ func (m logsTabModel) matchLevel(line string) bool {
 	}
 }
 
-func (m logsTabModel) styleLine(line string) string {
+func (m *logsTabModel) styleLine(line string) string {
 	if strings.Contains(line, "[error]") || strings.Contains(line, "[fatal]") {
 		return logErrorStyle.Render(line)
 	}
