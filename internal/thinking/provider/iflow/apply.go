@@ -11,8 +11,8 @@ package iflow
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -29,13 +29,13 @@ type Applier struct{}
 
 var _ thinking.ProviderApplier = (*Applier)(nil)
 
-// NewApplier creates a new iFlow thinking applier.
-func NewApplier() *Applier {
+// newApplier creates a new iFlow thinking applier.
+func newApplier() *Applier {
 	return &Applier{}
 }
 
 func init() {
-	thinking.RegisterProvider("iflow", NewApplier())
+	thinking.RegisterProvider("iflow", newApplier())
 }
 
 // Apply applies thinking configuration to iFlow request body.
@@ -54,7 +54,7 @@ func init() {
 //	{
 //	  "reasoning_split": true
 //	}
-func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
 		return body, nil
 	}
@@ -73,7 +73,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	return body, nil
 }
 
-// configToBoolean converts ThinkingConfig to boolean for iFlow models.
+// configToBoolean converts Config to boolean for iFlow models.
 //
 // Conversion rules:
 //   - ModeNone: false
@@ -83,7 +83,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 //   - ModeLevel + Level="none": false
 //   - ModeLevel + any other level: true
 //   - Default (unknown mode): true
-func configToBoolean(config thinking.ThinkingConfig) bool {
+func configToBoolean(config thinking.Config) bool {
 	switch config.Mode {
 	case thinking.ModeNone:
 		return false
@@ -110,7 +110,7 @@ func configToBoolean(config thinking.ThinkingConfig) bool {
 //	{"chat_template_kwargs": {"enable_thinking": false}}
 //
 // Note: clear_thinking is only set for GLM models when thinking is enabled.
-func applyEnableThinking(body []byte, config thinking.ThinkingConfig, setClearThinking bool) []byte {
+func applyEnableThinking(body []byte, config thinking.Config, setClearThinking bool) []byte {
 	enableThinking := configToBoolean(config)
 
 	if len(body) == 0 || !gjson.ValidBytes(body) {
@@ -135,7 +135,7 @@ func applyEnableThinking(body []byte, config thinking.ThinkingConfig, setClearTh
 // Output format:
 //
 //	{"reasoning_split": true/false}
-func applyMiniMax(body []byte, config thinking.ThinkingConfig) []byte {
+func applyMiniMax(body []byte, config thinking.Config) []byte {
 	reasoningSplit := configToBoolean(config)
 
 	if len(body) == 0 || !gjson.ValidBytes(body) {

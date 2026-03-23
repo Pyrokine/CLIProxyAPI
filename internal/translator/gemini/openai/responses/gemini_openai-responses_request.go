@@ -3,7 +3,7 @@ package responses
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -119,20 +119,24 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				if strings.EqualFold(itemRole, "system") {
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						systemInstr := ""
-						if systemInstructionResult := gjson.Get(out, "system_instruction"); systemInstructionResult.Exists() {
+						if systemInstructionResult := gjson.Get(
+							out, "system_instruction",
+						); systemInstructionResult.Exists() {
 							systemInstr = systemInstructionResult.Raw
 						} else {
 							systemInstr = `{"parts":[]}`
 						}
 
 						if contentArray.IsArray() {
-							contentArray.ForEach(func(_, contentItem gjson.Result) bool {
-								part := `{"text":""}`
-								text := contentItem.Get("text").String()
-								part, _ = sjson.Set(part, "text", text)
-								systemInstr, _ = sjson.SetRaw(systemInstr, "parts.-1", part)
-								return true
-							})
+							contentArray.ForEach(
+								func(_, contentItem gjson.Result) bool {
+									part := `{"text":""}`
+									text := contentItem.Get("text").String()
+									part, _ = sjson.Set(part, "text", text)
+									systemInstr, _ = sjson.SetRaw(systemInstr, "parts.-1", part)
+									return true
+								},
+							)
 						} else if contentArray.Type == gjson.String {
 							part := `{"text":""}`
 							part, _ = sjson.Set(part, "text", contentArray.String())
@@ -168,82 +172,84 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						currentParts = nil
 					}
 
-					contentArray.ForEach(func(_, contentItem gjson.Result) bool {
-						contentType := contentItem.Get("type").String()
-						if contentType == "" {
-							contentType = "input_text"
-						}
+					contentArray.ForEach(
+						func(_, contentItem gjson.Result) bool {
+							contentType := contentItem.Get("type").String()
+							if contentType == "" {
+								contentType = "input_text"
+							}
 
-						effRole := "user"
-						if itemRole != "" {
-							switch strings.ToLower(itemRole) {
-							case "assistant", "model":
+							effRole := "user"
+							if itemRole != "" {
+								switch strings.ToLower(itemRole) {
+								case "assistant", "model":
+									effRole = "model"
+								default:
+									effRole = strings.ToLower(itemRole)
+								}
+							}
+							if contentType == "output_text" {
 								effRole = "model"
-							default:
-								effRole = strings.ToLower(itemRole)
 							}
-						}
-						if contentType == "output_text" {
-							effRole = "model"
-						}
-						if effRole == "assistant" {
-							effRole = "model"
-						}
+							if effRole == "assistant" {
+								effRole = "model"
+							}
 
-						if currentRole != "" && effRole != currentRole {
-							flush()
-							currentRole = ""
-						}
-						if currentRole == "" {
-							currentRole = effRole
-						}
+							if currentRole != "" && effRole != currentRole {
+								flush()
+								currentRole = ""
+							}
+							if currentRole == "" {
+								currentRole = effRole
+							}
 
-						var partJSON string
-						switch contentType {
-						case "input_text", "output_text":
-							if text := contentItem.Get("text"); text.Exists() {
-								partJSON = `{"text":""}`
-								partJSON, _ = sjson.Set(partJSON, "text", text.String())
-							}
-						case "input_image":
-							imageURL := contentItem.Get("image_url").String()
-							if imageURL == "" {
-								imageURL = contentItem.Get("url").String()
-							}
-							if imageURL != "" {
-								mimeType := "application/octet-stream"
-								data := ""
-								if strings.HasPrefix(imageURL, "data:") {
-									trimmed := strings.TrimPrefix(imageURL, "data:")
-									mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-									if len(mediaAndData) == 2 {
-										if mediaAndData[0] != "" {
-											mimeType = mediaAndData[0]
-										}
-										data = mediaAndData[1]
-									} else {
-										mediaAndData = strings.SplitN(trimmed, ",", 2)
+							var partJSON string
+							switch contentType {
+							case "input_text", "output_text":
+								if text := contentItem.Get("text"); text.Exists() {
+									partJSON = `{"text":""}`
+									partJSON, _ = sjson.Set(partJSON, "text", text.String())
+								}
+							case "input_image":
+								imageURL := contentItem.Get("image_url").String()
+								if imageURL == "" {
+									imageURL = contentItem.Get("url").String()
+								}
+								if imageURL != "" {
+									mimeType := "application/octet-stream"
+									data := ""
+									if after, ok := strings.CutPrefix(imageURL, "data:"); ok {
+										trimmed := after
+										mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
 										if len(mediaAndData) == 2 {
 											if mediaAndData[0] != "" {
 												mimeType = mediaAndData[0]
 											}
 											data = mediaAndData[1]
+										} else {
+											mediaAndData = strings.SplitN(trimmed, ",", 2)
+											if len(mediaAndData) == 2 {
+												if mediaAndData[0] != "" {
+													mimeType = mediaAndData[0]
+												}
+												data = mediaAndData[1]
+											}
 										}
 									}
-								}
-								if data != "" {
-									partJSON = `{"inline_data":{"mime_type":"","data":""}}`
-									partJSON, _ = sjson.Set(partJSON, "inline_data.mime_type", mimeType)
-									partJSON, _ = sjson.Set(partJSON, "inline_data.data", data)
+									if data != "" {
+										partJSON = `{"inline_data":{"mime_type":"","data":""}}`
+										partJSON, _ = sjson.Set(partJSON, "inline_data.mime_type", mimeType)
+										partJSON, _ = sjson.Set(partJSON, "inline_data.data", data)
+									}
 								}
 							}
-						}
 
-						if partJSON != "" {
-							currentParts = append(currentParts, partJSON)
-						}
-						return true
-					})
+							if partJSON != "" {
+								currentParts = append(currentParts, partJSON)
+							}
+							return true
+						},
+					)
 
 					flush()
 				} else if contentArray.Type == gjson.String {
@@ -298,13 +304,16 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				// Find the corresponding function call name by matching call_id
 				// We need to look back through the input array to find the matching call
 				if inputArray := root.Get("input"); inputArray.Exists() && inputArray.IsArray() {
-					inputArray.ForEach(func(_, prevItem gjson.Result) bool {
-						if prevItem.Get("type").String() == "function_call" && prevItem.Get("call_id").String() == callID {
-							functionName = prevItem.Get("name").String()
-							return false // Stop iteration
-						}
-						return true
-					})
+					inputArray.ForEach(
+						func(_, prevItem gjson.Result) bool {
+							if prevItem.Get("type").String() == "function_call" &&
+								prevItem.Get("call_id").String() == callID {
+								functionName = prevItem.Get("name").String()
+								return false // Stop iteration
+							}
+							return true
+						},
+					)
 				}
 
 				functionResponse, _ = sjson.Set(functionResponse, "functionResponse.name", functionName)
@@ -314,7 +323,9 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				if outputRaw != "" && outputRaw != "null" {
 					output := gjson.Parse(outputRaw)
 					if output.Type == gjson.JSON {
-						functionResponse, _ = sjson.SetRaw(functionResponse, "functionResponse.response.result", output.Raw)
+						functionResponse, _ = sjson.SetRaw(
+							functionResponse, "functionResponse.response.result", output.Raw,
+						)
 					} else {
 						functionResponse, _ = sjson.Set(functionResponse, "functionResponse.response.result", outputRaw)
 					}
@@ -343,42 +354,48 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		geminiTools := `[{"functionDeclarations":[]}]`
 
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
-				funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
+		tools.ForEach(
+			func(_, tool gjson.Result) bool {
+				if tool.Get("type").String() == "function" {
+					funcDecl := `{"name":"","description":"","parametersJsonSchema":{}}`
 
-				if name := tool.Get("name"); name.Exists() {
-					funcDecl, _ = sjson.Set(funcDecl, "name", name.String())
-				}
-				if desc := tool.Get("description"); desc.Exists() {
-					funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())
-				}
-				if params := tool.Get("parameters"); params.Exists() {
-					// Convert parameter types from OpenAI format to Gemini format
-					cleaned := params.Raw
-					// Convert type values to uppercase for Gemini
-					paramsResult := gjson.Parse(cleaned)
-					if properties := paramsResult.Get("properties"); properties.Exists() {
-						properties.ForEach(func(key, value gjson.Result) bool {
-							if propType := value.Get("type"); propType.Exists() {
-								upperType := strings.ToUpper(propType.String())
-								cleaned, _ = sjson.Set(cleaned, "properties."+key.String()+".type", upperType)
-							}
-							return true
-						})
+					if name := tool.Get("name"); name.Exists() {
+						funcDecl, _ = sjson.Set(funcDecl, "name", name.String())
 					}
-					// Set the overall type to OBJECT
-					cleaned, _ = sjson.Set(cleaned, "type", "OBJECT")
-					funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
-				}
+					if desc := tool.Get("description"); desc.Exists() {
+						funcDecl, _ = sjson.Set(funcDecl, "description", desc.String())
+					}
+					if params := tool.Get("parameters"); params.Exists() {
+						// Convert parameter types from OpenAI format to Gemini format
+						cleaned := params.Raw
+						// Convert type values to uppercase for Gemini
+						paramsResult := gjson.Parse(cleaned)
+						if properties := paramsResult.Get("properties"); properties.Exists() {
+							properties.ForEach(
+								func(key, value gjson.Result) bool {
+									if propType := value.Get("type"); propType.Exists() {
+										upperType := strings.ToUpper(propType.String())
+										cleaned, _ = sjson.Set(cleaned, "properties."+key.String()+".type", upperType)
+									}
+									return true
+								},
+							)
+						}
+						// Set the overall type to OBJECT
+						cleaned, _ = sjson.Set(cleaned, "type", "OBJECT")
+						funcDecl, _ = sjson.SetRaw(funcDecl, "parametersJsonSchema", cleaned)
+					}
 
-				geminiTools, _ = sjson.SetRaw(geminiTools, "0.functionDeclarations.-1", funcDecl)
-			}
-			return true
-		})
+					geminiTools, _ = sjson.SetRaw(geminiTools, "0.functionDeclarations.-1", funcDecl)
+				}
+				return true
+			},
+		)
 
 		// Only add tools if there are function declarations
-		if funcDecls := gjson.Get(geminiTools, "0.functionDeclarations"); funcDecls.Exists() && len(funcDecls.Array()) > 0 {
+		if funcDecls := gjson.Get(
+			geminiTools, "0.functionDeclarations",
+		); funcDecls.Exists() && len(funcDecls.Array()) > 0 {
 			out, _ = sjson.SetRaw(out, "tools", geminiTools)
 		}
 	}
@@ -412,10 +429,12 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			out, _ = sjson.SetRaw(out, "generationConfig", `{}`)
 		}
 		var sequences []string
-		stopSequences.ForEach(func(_, seq gjson.Result) bool {
-			sequences = append(sequences, seq.String())
-			return true
-		})
+		stopSequences.ForEach(
+			func(_, seq gjson.Result) bool {
+				sequences = append(sequences, seq.String())
+				return true
+			},
+		)
 		out, _ = sjson.Set(out, "generationConfig.stopSequences", sequences)
 	}
 

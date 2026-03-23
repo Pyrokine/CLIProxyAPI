@@ -6,12 +6,12 @@
 package geminiCLI
 
 import (
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/gemini"
+	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/claude/gemini"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// ConvertGeminiCLIRequestToClaude parses and transforms a Gemini CLI API request into Claude Code API format.
+// convertGeminiCLIRequestToClaude parses and transforms a Gemini CLI API request into Claude Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
 // The function performs the following transformations:
@@ -27,7 +27,7 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
-func ConvertGeminiCLIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertGeminiCLIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
 	modelResult := gjson.GetBytes(rawJSON, "model")
@@ -37,7 +37,9 @@ func ConvertGeminiCLIRequestToClaude(modelName string, inputRawJSON []byte, stre
 	rawJSON, _ = sjson.SetBytes(rawJSON, "model", modelResult.String())
 	// Convert systemInstruction field to system_instruction for Claude Code compatibility
 	if gjson.GetBytes(rawJSON, "systemInstruction").Exists() {
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "system_instruction", []byte(gjson.GetBytes(rawJSON, "systemInstruction").Raw))
+		rawJSON, _ = sjson.SetRawBytes(
+			rawJSON, "system_instruction", []byte(gjson.GetBytes(rawJSON, "systemInstruction").Raw),
+		)
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
 	// Delegate to the Gemini-to-Claude conversion function for further processing

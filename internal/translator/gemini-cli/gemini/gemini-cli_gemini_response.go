@@ -10,11 +10,12 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// ConvertGeminiCliResponseToGemini parses and transforms a Gemini CLI API request into Gemini API format.
+// convertGeminiCliResponseToGemini parses and transforms a Gemini CLI API request into Gemini API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini API.
 // The function performs the following transformations:
@@ -30,12 +31,17 @@ import (
 //
 // Returns:
 //   - []string: The transformed request data in Gemini API format
-func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []string {
+func convertGeminiCliResponseToGemini(
+	ctx context.Context,
+	_ string,
+	_, _, rawJSON []byte,
+	_ *any,
+) []string {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
-	if alt, ok := ctx.Value("alt").(string); ok {
+	if alt, ok := util.AltFromContext(ctx); ok {
 		var chunk []byte
 		if alt == "" {
 			responseResult := gjson.GetBytes(rawJSON, "response")
@@ -47,7 +53,7 @@ func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalReq
 			responseResult := gjson.ParseBytes(chunk)
 			if responseResult.IsArray() {
 				responseResultItems := responseResult.Array()
-				for i := 0; i < len(responseResultItems); i++ {
+				for i := range responseResultItems {
 					responseResultItem := responseResultItems[i]
 					if responseResultItem.Get("response").Exists() {
 						chunkTemplate, _ = sjson.SetRaw(chunkTemplate, "-1", responseResultItem.Get("response").Raw)
@@ -61,7 +67,7 @@ func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalReq
 	return []string{}
 }
 
-// ConvertGeminiCliResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
+// convertGeminiCliResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
 // This function processes the complete Gemini CLI request and transforms it into a single Gemini-compatible
 // JSON response. It extracts the response data from the request and returns it in the expected format.
 //
@@ -73,7 +79,12 @@ func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, originalReq
 //
 // Returns:
 //   - string: A Gemini-compatible JSON response containing the response data
-func ConvertGeminiCliResponseToGeminiNonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+func convertGeminiCliResponseToGeminiNonStream(
+	_ context.Context,
+	_ string,
+	_, _, rawJSON []byte,
+	_ *any,
+) string {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		return responseResult.Raw
@@ -81,6 +92,6 @@ func ConvertGeminiCliResponseToGeminiNonStream(_ context.Context, _ string, orig
 	return string(rawJSON)
 }
 
-func GeminiTokenCount(ctx context.Context, count int64) string {
+func tokenCount(_ context.Context, count int64) string {
 	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
 }

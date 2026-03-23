@@ -7,12 +7,15 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
+func convertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if inputResult.Type == gjson.String {
-		input, _ := sjson.Set(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text", inputResult.String())
+		input, _ := sjson.Set(
+			`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text",
+			inputResult.String(),
+		)
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
 	}
 
@@ -68,7 +71,7 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	result := rawJSON
 
 	// Directly modify role values for items with "system" role
-	for i := 0; i < len(inputArray); i++ {
+	for i := range inputArray {
 		rolePath := fmt.Sprintf("input.%d.role", i)
 		if gjson.GetBytes(result, rolePath).String() == "system" {
 			result, _ = sjson.SetBytes(result, rolePath, "developer")

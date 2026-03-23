@@ -10,19 +10,19 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// ConvertClaudeRequestToCodex parses and transforms a Claude Code API request into the internal client format.
+// convertClaudeRequestToCodex parses and transforms a Claude Code API request into the internal client format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the internal client.
 // The function performs the following transformations:
 // 1. Sets up a template with the model name and empty instructions field
 // 2. Processes system messages and converts them to developer input content
 // 3. Transforms message contents (text, image, tool_use, tool_result) to appropriate formats
-// 4. Converts tools declarations to the expected format
+// 4. Convert tools declarations to the expected format
 // 5. Adds additional configuration parameters for the Codex API
 // 6. Maps Claude thinking configuration to Codex reasoning settings
 //
@@ -33,7 +33,7 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in internal client format
-func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
+func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 
 	template := `{"model":"","instructions":"","input":[]}`
@@ -47,7 +47,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		systemResults := systemsResult.Array()
 		message := `{"type":"message","role":"developer","content":[]}`
 		contentIndex := 0
-		for i := 0; i < len(systemResults); i++ {
+		for i := range systemResults {
 			systemResult := systemResults[i]
 			systemTypeResult := systemResult.Get("type")
 			if systemTypeResult.String() == "text" {
@@ -70,7 +70,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
 
-		for i := 0; i < len(messageResults); i++ {
+		for i := range messageResults {
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
 
@@ -114,7 +114,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			messageContentsResult := messageResult.Get("content")
 			if messageContentsResult.IsArray() {
 				messageContentResults := messageContentsResult.Array()
-				for j := 0; j < len(messageContentResults); j++ {
+				for j := range messageContentResults {
 					messageContentResult := messageContentResults[j]
 					contentType := messageContentResult.Get("type").String()
 
@@ -143,7 +143,9 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					case "tool_use":
 						flushMessage()
 						functionCallMessage := `{"type":"function_call"}`
-						functionCallMessage, _ = sjson.Set(functionCallMessage, "call_id", messageContentResult.Get("id").String())
+						functionCallMessage, _ = sjson.Set(
+							functionCallMessage, "call_id", messageContentResult.Get("id").String(),
+						)
 						{
 							name := messageContentResult.Get("name").String()
 							toolMap := buildReverseMapFromClaudeOriginalToShort(rawJSON)
@@ -154,13 +156,19 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 							}
 							functionCallMessage, _ = sjson.Set(functionCallMessage, "name", name)
 						}
-						functionCallMessage, _ = sjson.Set(functionCallMessage, "arguments", messageContentResult.Get("input").Raw)
+						functionCallMessage, _ = sjson.Set(
+							functionCallMessage, "arguments", messageContentResult.Get("input").Raw,
+						)
 						template, _ = sjson.SetRaw(template, "input.-1", functionCallMessage)
 					case "tool_result":
 						flushMessage()
 						functionCallOutputMessage := `{"type":"function_call_output"}`
-						functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "call_id", messageContentResult.Get("tool_use_id").String())
-						functionCallOutputMessage, _ = sjson.Set(functionCallOutputMessage, "output", messageContentResult.Get("content").String())
+						functionCallOutputMessage, _ = sjson.Set(
+							functionCallOutputMessage, "call_id", messageContentResult.Get("tool_use_id").String(),
+						)
+						functionCallOutputMessage, _ = sjson.Set(
+							functionCallOutputMessage, "output", messageContentResult.Get("content").String(),
+						)
 						template, _ = sjson.SetRaw(template, "input.-1", functionCallOutputMessage)
 					}
 				}
@@ -181,14 +189,14 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		toolResults := toolsResult.Array()
 		// Build short name map from declared tools
 		var names []string
-		for i := 0; i < len(toolResults); i++ {
+		for i := range toolResults {
 			n := toolResults[i].Get("name").String()
 			if n != "" {
 				names = append(names, n)
 			}
 		}
 		shortMap := buildShortNameMap(names)
-		for i := 0; i < len(toolResults); i++ {
+		for i := range toolResults {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
 			if toolResult.Get("type").String() == "web_search_20250305" {
@@ -298,10 +306,7 @@ func buildShortNameMap(names []string) map[string]string {
 		base := cand
 		for i := 1; ; i++ {
 			suffix := "_" + strconv.Itoa(i)
-			allowed := limit - len(suffix)
-			if allowed < 0 {
-				allowed = 0
-			}
+			allowed := max(limit-len(suffix), 0)
 			tmp := base
 			if len(tmp) > allowed {
 				tmp = tmp[:allowed]
@@ -331,7 +336,7 @@ func buildReverseMapFromClaudeOriginalToShort(original []byte) map[string]string
 	}
 	var names []string
 	arr := tools.Array()
-	for i := 0; i < len(arr); i++ {
+	for i := range arr {
 		n := arr[i].Get("name").String()
 		if n != "" {
 			names = append(names, n)

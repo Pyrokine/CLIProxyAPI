@@ -3,7 +3,7 @@ package thinking
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
 // levelToBudgetMap defines the standard Level → Budget mapping.
@@ -43,14 +43,14 @@ func ConvertLevelToBudget(level string) (int, bool) {
 // BudgetThreshold constants define the upper bounds for each thinking level.
 // These are used by ConvertBudgetToLevel for range-based mapping.
 const (
-	// ThresholdMinimal is the upper bound for "minimal" level (1-512)
-	ThresholdMinimal = 512
-	// ThresholdLow is the upper bound for "low" level (513-1024)
-	ThresholdLow = 1024
-	// ThresholdMedium is the upper bound for "medium" level (1025-8192)
-	ThresholdMedium = 8192
-	// ThresholdHigh is the upper bound for "high" level (8193-24576)
-	ThresholdHigh = 24576
+	// thresholdMinimal is the upper bound for "minimal" level (1-512)
+	thresholdMinimal = 512
+	// thresholdLow is the upper bound for "low" level (513-1024)
+	thresholdLow = 1024
+	// thresholdMedium is the upper bound for "medium" level (1025-8192)
+	thresholdMedium = 8192
+	// thresholdHigh is the upper bound for "high" level (8193-24576)
+	thresholdHigh = 24576
 )
 
 // ConvertBudgetToLevel converts a budget value to the nearest thinking level.
@@ -79,51 +79,51 @@ func ConvertBudgetToLevel(budget int) (string, bool) {
 		return string(LevelAuto), true
 	case budget == 0:
 		return string(LevelNone), true
-	case budget <= ThresholdMinimal:
-		return string(LevelMinimal), true
-	case budget <= ThresholdLow:
-		return string(LevelLow), true
-	case budget <= ThresholdMedium:
-		return string(LevelMedium), true
-	case budget <= ThresholdHigh:
+	case budget <= thresholdMinimal:
+		return string(levelMinimal), true
+	case budget <= thresholdLow:
+		return string(levelLow), true
+	case budget <= thresholdMedium:
+		return string(levelMedium), true
+	case budget <= thresholdHigh:
 		return string(LevelHigh), true
 	default:
 		return string(LevelXHigh), true
 	}
 }
 
-// ModelCapability describes the thinking format support of a model.
-type ModelCapability int
+// modelCapability describes the thinking format support of a model.
+type modelCapability int
 
 const (
-	// CapabilityUnknown indicates modelInfo is nil (passthrough behavior, internal use).
-	CapabilityUnknown ModelCapability = iota - 1
-	// CapabilityNone indicates model doesn't support thinking (Thinking is nil).
-	CapabilityNone
-	// CapabilityBudgetOnly indicates the model supports numeric budgets only.
-	CapabilityBudgetOnly
-	// CapabilityLevelOnly indicates the model supports discrete levels only.
-	CapabilityLevelOnly
-	// CapabilityHybrid indicates the model supports both budgets and levels.
-	CapabilityHybrid
+	// capabilityUnknown indicates modelInfo is nil (passthrough behavior, internal use).
+	capabilityUnknown modelCapability = iota - 1
+	// capabilityNone indicates model doesn't support thinking (Thinking is nil).
+	capabilityNone
+	// capabilityBudgetOnly indicates the model supports numeric budgets only.
+	capabilityBudgetOnly
+	// capabilityLevelOnly indicates the model supports discrete levels only.
+	capabilityLevelOnly
+	// capabilityHybrid indicates the model supports both budgets and levels.
+	capabilityHybrid
 )
 
 // detectModelCapability determines the thinking format capability of a model.
 //
 // This is an internal function used by validation and conversion helpers.
 // It analyzes the model's ThinkingSupport configuration to classify the model:
-//   - CapabilityNone: modelInfo.Thinking is nil (model doesn't support thinking)
-//   - CapabilityBudgetOnly: Has Min/Max but no Levels (Claude, Gemini 2.5)
-//   - CapabilityLevelOnly: Has Levels but no Min/Max (OpenAI, iFlow)
-//   - CapabilityHybrid: Has both Min/Max and Levels (Gemini 3)
+//   - capabilityNone: modelInfo.Thinking is nil (model doesn't support thinking)
+//   - capabilityBudgetOnly: Has Min/Max but no Levels (Claude, Gemini 2.5)
+//   - capabilityLevelOnly: Has Levels but no Min/Max (OpenAI, iFlow)
+//   - capabilityHybrid: Has both Min/Max and Levels (Gemini 3)
 //
 // Note: Returns a special sentinel value when modelInfo itself is nil (unknown model).
-func detectModelCapability(modelInfo *registry.ModelInfo) ModelCapability {
+func detectModelCapability(modelInfo *registry.ModelInfo) modelCapability {
 	if modelInfo == nil {
-		return CapabilityUnknown // sentinel for "passthrough" behavior
+		return capabilityUnknown // sentinel for "passthrough" behavior
 	}
 	if modelInfo.Thinking == nil {
-		return CapabilityNone
+		return capabilityNone
 	}
 	support := modelInfo.Thinking
 	hasBudget := support.Min > 0 || support.Max > 0
@@ -131,12 +131,12 @@ func detectModelCapability(modelInfo *registry.ModelInfo) ModelCapability {
 
 	switch {
 	case hasBudget && hasLevels:
-		return CapabilityHybrid
+		return capabilityHybrid
 	case hasBudget:
-		return CapabilityBudgetOnly
+		return capabilityBudgetOnly
 	case hasLevels:
-		return CapabilityLevelOnly
+		return capabilityLevelOnly
 	default:
-		return CapabilityNone
+		return capabilityNone
 	}
 }

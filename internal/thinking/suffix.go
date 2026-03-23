@@ -18,7 +18,7 @@ import (
 //   - "gemini-2.5-pro" -> ModelName="gemini-2.5-pro", HasSuffix=false
 //
 // This function only extracts the suffix; it does not validate or interpret
-// the suffix content. Use ParseNumericSuffix, ParseLevelSuffix, etc. for
+// the suffix content. Use parseNumericSuffix, parseLevelSuffix, etc. for
 // content interpretation.
 func ParseSuffix(model string) SuffixResult {
 	// Find the last opening parenthesis
@@ -43,7 +43,7 @@ func ParseSuffix(model string) SuffixResult {
 	}
 }
 
-// ParseNumericSuffix attempts to parse a raw suffix as a numeric budget value.
+// parseNumericSuffix attempts to parse a raw suffix as a numeric budget value.
 //
 // This function parses the raw suffix content (from ParseSuffix.RawSuffix) as an integer.
 // Only non-negative integers are considered valid numeric suffixes.
@@ -62,8 +62,8 @@ func ParseSuffix(model string) SuffixResult {
 //   - "high" -> budget=0, ok=false (not a number)
 //   - "9223372036854775808" -> budget=0, ok=false (overflow on 64-bit systems)
 //
-// For special handling of -1 as auto mode, use ParseSpecialSuffix instead.
-func ParseNumericSuffix(rawSuffix string) (budget int, ok bool) {
+// For special handling of -1 as auto mode, use parseSpecialSuffix instead.
+func parseNumericSuffix(rawSuffix string) (budget int, ok bool) {
 	if rawSuffix == "" {
 		return 0, false
 	}
@@ -82,7 +82,7 @@ func ParseNumericSuffix(rawSuffix string) (budget int, ok bool) {
 	return value, true
 }
 
-// ParseSpecialSuffix attempts to parse a raw suffix as a special thinking mode value.
+// parseSpecialSuffix attempts to parse a raw suffix as a special thinking mode value.
 //
 // This function handles special strings that represent a change in thinking mode:
 //   - "none" -> ModeNone (disables thinking)
@@ -90,7 +90,7 @@ func ParseNumericSuffix(rawSuffix string) (budget int, ok bool) {
 //   - "-1"   -> ModeAuto (numeric representation of auto mode)
 //
 // String values are case-insensitive.
-func ParseSpecialSuffix(rawSuffix string) (mode ThinkingMode, ok bool) {
+func parseSpecialSuffix(rawSuffix string) (mode mode, ok bool) {
 	if rawSuffix == "" {
 		return ModeBudget, false
 	}
@@ -106,24 +106,24 @@ func ParseSpecialSuffix(rawSuffix string) (mode ThinkingMode, ok bool) {
 	}
 }
 
-// ParseLevelSuffix attempts to parse a raw suffix as a discrete thinking level.
+// parseLevelSuffix attempts to parse a raw suffix as a discrete thinking level.
 //
 // This function parses the raw suffix content (from ParseSuffix.RawSuffix) as a level.
 // Only discrete effort levels are valid: minimal, low, medium, high, xhigh.
 // Level matching is case-insensitive.
 //
-// Special values (none, auto) are NOT handled by this function; use ParseSpecialSuffix
+// Special values (none, auto) are NOT handled by this function; use parseSpecialSuffix
 // instead. This separation allows callers to prioritize special value handling.
 //
 // Examples:
 //   - "high" -> level=LevelHigh, ok=true
-//   - "HIGH" -> level=LevelHigh, ok=true (case insensitive)
-//   - "medium" -> level=LevelMedium, ok=true
-//   - "none" -> level="", ok=false (special value, use ParseSpecialSuffix)
-//   - "auto" -> level="", ok=false (special value, use ParseSpecialSuffix)
-//   - "8192" -> level="", ok=false (numeric, use ParseNumericSuffix)
+//   - "HIGH" -> level=LevelHigh, ok=true (case-insensitive)
+//   - "medium" -> level=levelMedium, ok=true
+//   - "none" -> level="", ok=false (special value, use parseSpecialSuffix)
+//   - "auto" -> level="", ok=false (special value, use parseSpecialSuffix)
+//   - "8192" -> level="", ok=false (numeric, use parseNumericSuffix)
 //   - "ultra" -> level="", ok=false (unknown level)
-func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
+func parseLevelSuffix(rawSuffix string) (level Level, ok bool) {
 	if rawSuffix == "" {
 		return "", false
 	}
@@ -131,11 +131,11 @@ func ParseLevelSuffix(rawSuffix string) (level ThinkingLevel, ok bool) {
 	// Case-insensitive matching
 	switch strings.ToLower(rawSuffix) {
 	case "minimal":
-		return LevelMinimal, true
+		return levelMinimal, true
 	case "low":
-		return LevelLow, true
+		return levelLow, true
 	case "medium":
-		return LevelMedium, true
+		return levelMedium, true
 	case "high":
 		return LevelHigh, true
 	case "xhigh":

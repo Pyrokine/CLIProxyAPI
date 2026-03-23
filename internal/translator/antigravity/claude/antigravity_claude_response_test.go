@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
 )
 
 // ============================================================================
@@ -35,9 +35,11 @@ func TestConvertAntigravityResponseToClaude_ParamsInitialized(t *testing.T) {
 
 	var param any
 	ctx := context.Background()
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, &param)
+	convertAntigravityResponseToClaude(
+		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, &param,
+	)
 
-	params := param.(*Params)
+	params := param.(*params)
 	if !params.HasFirstResponse {
 		t.Error("HasFirstResponse should be set after first chunk")
 	}
@@ -79,15 +81,15 @@ func TestConvertAntigravityResponseToClaude_ThinkingTextAccumulated(t *testing.T
 	ctx := context.Background()
 
 	// Process first chunk - starts new thinking block
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
-	params := param.(*Params)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
+	params := param.(*params)
 
 	if params.CurrentThinkingText.Len() == 0 {
 		t.Error("Thinking text should be accumulated after first chunk")
 	}
 
 	// Process second chunk - continues thinking block
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
 
 	text := params.CurrentThinkingText.String()
 	if !strings.Contains(text, "First part") || !strings.Contains(text, "Second part") {
@@ -130,8 +132,10 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	ctx := context.Background()
 
 	// Process thinking chunk
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, thinkingChunk, &param)
-	params := param.(*Params)
+	convertAntigravityResponseToClaude(
+		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, thinkingChunk, &param,
+	)
+	params := param.(*params)
 	thinkingText := params.CurrentThinkingText.String()
 
 	if thinkingText == "" {
@@ -139,7 +143,9 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	}
 
 	// Process signature chunk - should cache the signature
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, signatureChunk, &param)
+	convertAntigravityResponseToClaude(
+		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, signatureChunk, &param,
+	)
 
 	// Verify signature was cached
 	cachedSig := cache.GetCachedSignature("claude-sonnet-4-5-thinking", thinkingText)
@@ -219,11 +225,13 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	ctx := context.Background()
 
 	// Process first thinking block
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Thinking, &param)
-	params := param.(*Params)
+	convertAntigravityResponseToClaude(
+		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Thinking, &param,
+	)
+	params := param.(*params)
 	firstThinkingText := params.CurrentThinkingText.String()
 
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Sig, &param)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Sig, &param)
 
 	// Verify first signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", firstThinkingText) != validSig1 {
@@ -231,13 +239,15 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	}
 
 	// Process text (transitions out of thinking)
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, textBlock, &param)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, textBlock, &param)
 
 	// Process second thinking block
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Thinking, &param)
+	convertAntigravityResponseToClaude(
+		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Thinking, &param,
+	)
 	secondThinkingText := params.CurrentThinkingText.String()
 
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Sig, &param)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Sig, &param)
 
 	// Verify second signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", secondThinkingText) != validSig2 {

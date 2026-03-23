@@ -6,12 +6,12 @@
 package geminiCLI
 
 import (
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/gemini"
+	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/gemini"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// ConvertGeminiCLIRequestToCodex parses and transforms a Gemini CLI API request into Codex API format.
+// convertGeminiCLIRequestToCodex parses and transforms a Gemini CLI API request into Codex API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Codex API.
 // The function performs the following transformations:
@@ -27,13 +27,15 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Codex API format
-func ConvertGeminiCLIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertGeminiCLIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
 	rawJSON = []byte(gjson.GetBytes(rawJSON, "request").Raw)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "model", modelName)
 	if gjson.GetBytes(rawJSON, "systemInstruction").Exists() {
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "system_instruction", []byte(gjson.GetBytes(rawJSON, "systemInstruction").Raw))
+		rawJSON, _ = sjson.SetRawBytes(
+			rawJSON, "system_instruction", []byte(gjson.GetBytes(rawJSON, "systemInstruction").Raw),
+		)
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
 

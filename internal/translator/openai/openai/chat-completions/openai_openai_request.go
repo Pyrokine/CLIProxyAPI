@@ -1,4 +1,4 @@
-// Package openai provides request translation functionality for OpenAI to Gemini CLI API compatibility.
+// Package chat_completions provides request translation functionality for OpenAI to Gemini CLI API compatibility.
 // It converts OpenAI Chat Completions requests into Gemini CLI compatible JSON using gjson/sjson only.
 package chat_completions
 
@@ -6,7 +6,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertOpenAIRequestToOpenAI converts an OpenAI Chat Completions request (raw JSON)
+// convertOpenAIRequestToOpenAI converts an OpenAI Chat Completions request (raw JSON)
 // into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use gjson.
 //
 // Parameters:
@@ -16,7 +16,7 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Gemini CLI API format
-func ConvertOpenAIRequestToOpenAI(modelName string, inputRawJSON []byte, _ bool) []byte {
+func convertOpenAIRequestToOpenAI(modelName string, inputRawJSON []byte, _ bool) []byte {
 	// Update the "model" field in the JSON payload with the provided modelName
 	// The sjson.SetBytes function returns a new byte slice with the updated JSON.
 	updatedJSON, err := sjson.SetBytes(inputRawJSON, "model", modelName)

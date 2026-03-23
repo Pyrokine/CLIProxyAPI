@@ -1,4 +1,4 @@
-// Package openai provides response translation functionality for Codex to OpenAI API compatibility.
+// Package chat_completions provides response translation functionality for Codex to OpenAI API compatibility.
 // This package handles the conversion of Codex API responses into OpenAI Chat Completions-compatible
 // JSON format, transforming streaming events and non-streaming responses into the format
 // expected by OpenAI API clients. It supports both streaming and non-streaming modes,
@@ -18,8 +18,31 @@ var (
 	dataTag = []byte("data:")
 )
 
-// ConvertCliToOpenAIParams holds parameters for response conversion.
-type ConvertCliToOpenAIParams struct {
+// applyCodexUsage maps Codex/OpenAI Responses usage fields onto an OpenAI Chat Completions template.
+func applyCodexUsage(template string, usage gjson.Result) string {
+	if !usage.Exists() {
+		return template
+	}
+	if v := usage.Get("output_tokens"); v.Exists() {
+		template, _ = sjson.Set(template, "usage.completion_tokens", v.Int())
+	}
+	if v := usage.Get("total_tokens"); v.Exists() {
+		template, _ = sjson.Set(template, "usage.total_tokens", v.Int())
+	}
+	if v := usage.Get("input_tokens"); v.Exists() {
+		template, _ = sjson.Set(template, "usage.prompt_tokens", v.Int())
+	}
+	if v := usage.Get("input_tokens_details.cached_tokens"); v.Exists() {
+		template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", v.Int())
+	}
+	if v := usage.Get("output_tokens_details.reasoning_tokens"); v.Exists() {
+		template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", v.Int())
+	}
+	return template
+}
+
+// convertCliToOpenAIParams holds parameters for response conversion.
+type convertCliToOpenAIParams struct {
 	ResponseID                string
 	CreatedAt                 int64
 	Model                     string
@@ -28,7 +51,7 @@ type ConvertCliToOpenAIParams struct {
 	HasToolCallAnnounced      bool
 }
 
-// ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
+// convertCodexResponseToOpenAI translates a single chunk of a streaming response from the
 // Codex API format to the OpenAI Chat Completions streaming format.
 // It processes various Codex event types and transforms them into OpenAI-compatible JSON responses.
 // The function handles text content, tool calls, reasoning content, and usage metadata, outputting
@@ -42,9 +65,14 @@ type ConvertCliToOpenAIParams struct {
 //
 // Returns:
 //   - []string: A slice of strings, each containing an OpenAI-compatible JSON response
-func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+func convertCodexResponseToOpenAI(
+	_ context.Context,
+	modelName string,
+	originalRequestRawJSON, _, rawJSON []byte,
+	param *any,
+) []string {
 	if *param == nil {
-		*param = &ConvertCliToOpenAIParams{
+		*param = &convertCliToOpenAIParams{
 			Model:                     modelName,
 			CreatedAt:                 0,
 			ResponseID:                "",
@@ -67,9 +95,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	typeResult := rootResult.Get("type")
 	dataType := typeResult.String()
 	if dataType == "response.created" {
-		(*param).(*ConvertCliToOpenAIParams).ResponseID = rootResult.Get("response.id").String()
-		(*param).(*ConvertCliToOpenAIParams).CreatedAt = rootResult.Get("response.created_at").Int()
-		(*param).(*ConvertCliToOpenAIParams).Model = rootResult.Get("response.model").String()
+		(*param).(*convertCliToOpenAIParams).ResponseID = rootResult.Get("response.id").String()
+		(*param).(*convertCliToOpenAIParams).CreatedAt = rootResult.Get("response.created_at").Int()
+		(*param).(*convertCliToOpenAIParams).Model = rootResult.Get("response.model").String()
 		return []string{}
 	}
 
@@ -78,29 +106,13 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		template, _ = sjson.Set(template, "model", modelResult.String())
 	}
 
-	template, _ = sjson.Set(template, "created", (*param).(*ConvertCliToOpenAIParams).CreatedAt)
+	template, _ = sjson.Set(template, "created", (*param).(*convertCliToOpenAIParams).CreatedAt)
 
 	// Extract and set the response ID.
-	template, _ = sjson.Set(template, "id", (*param).(*ConvertCliToOpenAIParams).ResponseID)
+	template, _ = sjson.Set(template, "id", (*param).(*convertCliToOpenAIParams).ResponseID)
 
 	// Extract and set usage metadata (token counts).
-	if usageResult := gjson.GetBytes(rawJSON, "response.usage"); usageResult.Exists() {
-		if outputTokensResult := usageResult.Get("output_tokens"); outputTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokensResult.Int())
-		}
-		if totalTokensResult := usageResult.Get("total_tokens"); totalTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.total_tokens", totalTokensResult.Int())
-		}
-		if inputTokensResult := usageResult.Get("input_tokens"); inputTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokensResult.Int())
-		}
-		if cachedTokensResult := usageResult.Get("input_tokens_details.cached_tokens"); cachedTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int())
-		}
-		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
-		}
-	}
+	template = applyCodexUsage(template, gjson.GetBytes(rawJSON, "response.usage"))
 
 	if dataType == "response.reasoning_summary_text.delta" {
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
@@ -117,7 +129,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 	} else if dataType == "response.completed" {
 		finishReason := "stop"
-		if (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex != -1 {
+		if (*param).(*convertCliToOpenAIParams).FunctionCallIndex != -1 {
 			finishReason = "tool_calls"
 		}
 		template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
@@ -129,12 +141,14 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 
 		// Increment index for this new function call item.
-		(*param).(*ConvertCliToOpenAIParams).FunctionCallIndex++
-		(*param).(*ConvertCliToOpenAIParams).HasReceivedArgumentsDelta = false
-		(*param).(*ConvertCliToOpenAIParams).HasToolCallAnnounced = true
+		(*param).(*convertCliToOpenAIParams).FunctionCallIndex++
+		(*param).(*convertCliToOpenAIParams).HasReceivedArgumentsDelta = false
+		(*param).(*convertCliToOpenAIParams).HasToolCallAnnounced = true
 
 		functionCallItemTemplate := `{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`
-		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
+		functionCallItemTemplate, _ = sjson.Set(
+			functionCallItemTemplate, "index", (*param).(*convertCliToOpenAIParams).FunctionCallIndex,
+		)
 		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "id", itemResult.Get("call_id").String())
 
 		// Restore original tool name if it was shortened.
@@ -151,18 +165,20 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
 
 	} else if dataType == "response.function_call_arguments.delta" {
-		(*param).(*ConvertCliToOpenAIParams).HasReceivedArgumentsDelta = true
+		(*param).(*convertCliToOpenAIParams).HasReceivedArgumentsDelta = true
 
 		deltaValue := rootResult.Get("delta").String()
 		functionCallItemTemplate := `{"index":0,"function":{"arguments":""}}`
-		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
+		functionCallItemTemplate, _ = sjson.Set(
+			functionCallItemTemplate, "index", (*param).(*convertCliToOpenAIParams).FunctionCallIndex,
+		)
 		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.arguments", deltaValue)
 
 		template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
 		template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
 
 	} else if dataType == "response.function_call_arguments.done" {
-		if (*param).(*ConvertCliToOpenAIParams).HasReceivedArgumentsDelta {
+		if (*param).(*convertCliToOpenAIParams).HasReceivedArgumentsDelta {
 			// Arguments were already streamed via delta events; nothing to emit.
 			return []string{}
 		}
@@ -170,7 +186,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		// Fallback: no delta events were received, emit the full arguments as a single chunk.
 		fullArgs := rootResult.Get("arguments").String()
 		functionCallItemTemplate := `{"index":0,"function":{"arguments":""}}`
-		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
+		functionCallItemTemplate, _ = sjson.Set(
+			functionCallItemTemplate, "index", (*param).(*convertCliToOpenAIParams).FunctionCallIndex,
+		)
 		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.arguments", fullArgs)
 
 		template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
@@ -182,17 +200,19 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			return []string{}
 		}
 
-		if (*param).(*ConvertCliToOpenAIParams).HasToolCallAnnounced {
+		if (*param).(*convertCliToOpenAIParams).HasToolCallAnnounced {
 			// Tool call was already announced via output_item.added; skip emission.
-			(*param).(*ConvertCliToOpenAIParams).HasToolCallAnnounced = false
+			(*param).(*convertCliToOpenAIParams).HasToolCallAnnounced = false
 			return []string{}
 		}
 
 		// Fallback path: model skipped output_item.added, so emit complete tool call now.
-		(*param).(*ConvertCliToOpenAIParams).FunctionCallIndex++
+		(*param).(*convertCliToOpenAIParams).FunctionCallIndex++
 
 		functionCallItemTemplate := `{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`
-		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
+		functionCallItemTemplate, _ = sjson.Set(
+			functionCallItemTemplate, "index", (*param).(*convertCliToOpenAIParams).FunctionCallIndex,
+		)
 
 		template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls", `[]`)
 		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "id", itemResult.Get("call_id").String())
@@ -205,7 +225,9 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		}
 		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.name", name)
 
-		functionCallItemTemplate, _ = sjson.Set(functionCallItemTemplate, "function.arguments", itemResult.Get("arguments").String())
+		functionCallItemTemplate, _ = sjson.Set(
+			functionCallItemTemplate, "function.arguments", itemResult.Get("arguments").String(),
+		)
 		template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
 		template, _ = sjson.SetRaw(template, "choices.0.delta.tool_calls.-1", functionCallItemTemplate)
 
@@ -216,7 +238,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	return []string{template}
 }
 
-// ConvertCodexResponseToOpenAINonStream converts a non-streaming Codex response to a non-streaming OpenAI response.
+// convertCodexResponseToOpenAINonStream converts a non-streaming Codex response to a non-streaming OpenAI response.
 // This function processes the complete Codex response and transforms it into a single OpenAI-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the OpenAI API format.
@@ -229,7 +251,12 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 //
 // Returns:
 //   - string: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+func convertCodexResponseToOpenAINonStream(
+	_ context.Context,
+	_ string,
+	originalRequestRawJSON, _, rawJSON []byte,
+	_ *any,
+) string {
 	rootResult := gjson.ParseBytes(rawJSON)
 	// Verify this is a response.completed event
 	if rootResult.Get("type").String() != "response.completed" {
@@ -260,23 +287,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	}
 
 	// Extract and set usage metadata (token counts).
-	if usageResult := responseResult.Get("usage"); usageResult.Exists() {
-		if outputTokensResult := usageResult.Get("output_tokens"); outputTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokensResult.Int())
-		}
-		if totalTokensResult := usageResult.Get("total_tokens"); totalTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.total_tokens", totalTokensResult.Int())
-		}
-		if inputTokensResult := usageResult.Get("input_tokens"); inputTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokensResult.Int())
-		}
-		if cachedTokensResult := usageResult.Get("input_tokens_details.cached_tokens"); cachedTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int())
-		}
-		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
-			template, _ = sjson.Set(template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int())
-		}
-	}
+	template = applyCodexUsage(template, responseResult.Get("usage"))
 
 	// Process the output array for content and function calls
 	outputResult := responseResult.Get("output")
@@ -378,7 +389,7 @@ func buildReverseMapFromOriginalOpenAI(original []byte) map[string]string {
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		var names []string
 		arr := tools.Array()
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			t := arr[i]
 			if t.Get("type").String() != "function" {
 				continue

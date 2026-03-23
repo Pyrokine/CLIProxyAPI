@@ -7,8 +7,8 @@
 package claude
 
 import (
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -17,13 +17,13 @@ import (
 // This applier is stateless and holds no configuration.
 type Applier struct{}
 
-// NewApplier creates a new Claude thinking applier.
-func NewApplier() *Applier {
+// newApplier creates a new Claude thinking applier.
+func newApplier() *Applier {
 	return &Applier{}
 }
 
 func init() {
-	thinking.RegisterProvider("claude", NewApplier())
+	thinking.RegisterProvider("claude", newApplier())
 }
 
 // Apply applies thinking configuration to Claude request body.
@@ -52,7 +52,7 @@ func init() {
 //	    "type": "disabled"
 //	  }
 //	}
-func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
 		return applyCompatibleClaude(body, config)
 	}
@@ -140,7 +140,7 @@ func (a *Applier) effectiveMaxTokens(body []byte, modelInfo *registry.ModelInfo)
 	return 0, false
 }
 
-func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
+func applyCompatibleClaude(body []byte, config thinking.Config) ([]byte, error) {
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
 		return body, nil
 	}

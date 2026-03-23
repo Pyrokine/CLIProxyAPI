@@ -1,20 +1,21 @@
 package geminiCLI
 
 import (
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/translator"
+	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
+	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/claude/gemini"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/translator"
 )
 
 func init() {
 	translator.Register(
 		GeminiCLI,
 		Claude,
-		ConvertGeminiCLIRequestToClaude,
+		convertGeminiCLIRequestToClaude,
 		interfaces.TranslateResponse{
-			Stream:     ConvertClaudeResponseToGeminiCLI,
-			NonStream:  ConvertClaudeResponseToGeminiCLINonStream,
-			TokenCount: GeminiCLITokenCount,
+			Stream:     convertClaudeResponseToGeminiCLI,
+			NonStream:  convertClaudeResponseToGeminiCLINonStream,
+			TokenCount: TokenCount,
 		},
 	)
 }

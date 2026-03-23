@@ -12,8 +12,10 @@ func TestFinishReasonToolCallsNotOverwritten(t *testing.T) {
 	var param any
 
 	// Chunk 1: Contains functionCall - should set SawToolCall = true
-	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_files","args":{"path":"."}}}]}}]}}`)
-	result1 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
+	chunk1 := []byte(
+		`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_files","args":{"path":"."}}}]}}]}}`,
+	)
+	result1 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 
 	// Verify chunk1 has no finish_reason (null)
 	if len(result1) != 1 {
@@ -26,8 +28,10 @@ func TestFinishReasonToolCallsNotOverwritten(t *testing.T) {
 
 	// Chunk 2: Contains finishReason STOP + usage (final chunk, no functionCall)
 	// This simulates what the upstream sends AFTER the tool call chunk
-	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}}`)
-	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
+	chunk2 := []byte(
+		`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}}`,
+	)
+	result2 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
 	// Verify chunk2 has finish_reason: "tool_calls" (not "stop")
 	if len(result2) != 1 {
@@ -51,11 +55,13 @@ func TestFinishReasonStopForNormalText(t *testing.T) {
 
 	// Chunk 1: Text content only
 	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Hello world"}]}}]}}`)
-	ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
+	convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 
 	// Chunk 2: Final chunk with STOP
-	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
-	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
+	chunk2 := []byte(
+		`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`,
+	)
+	result2 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
 	// Verify finish_reason is "stop" (no tool calls were made)
 	fr := gjson.Get(result2[0], "choices.0.finish_reason").String()
@@ -70,11 +76,13 @@ func TestFinishReasonMaxTokens(t *testing.T) {
 
 	// Chunk 1: Text content
 	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}}`)
-	ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
+	convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 
 	// Chunk 2: Final chunk with MAX_TOKENS
-	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
-	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
+	chunk2 := []byte(
+		`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`,
+	)
+	result2 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
 	// Verify finish_reason is "max_tokens"
 	fr := gjson.Get(result2[0], "choices.0.finish_reason").String()
@@ -89,11 +97,13 @@ func TestToolCallTakesPriorityOverMaxTokens(t *testing.T) {
 
 	// Chunk 1: Contains functionCall
 	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"test","args":{}}}]}}]}}`)
-	ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
+	convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 
 	// Chunk 2: Final chunk with MAX_TOKENS (but we had a tool call, so tool_calls should win)
-	chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`)
-	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
+	chunk2 := []byte(
+		`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":100,"totalTokenCount":110}}}`,
+	)
+	result2 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
 	// Verify finish_reason is "tool_calls" (takes priority over max_tokens)
 	fr := gjson.Get(result2[0], "choices.0.finish_reason").String()
@@ -108,7 +118,7 @@ func TestNoFinishReasonOnIntermediateChunks(t *testing.T) {
 
 	// Chunk 1: Text content (no finish reason, no usage)
 	chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"Hello"}]}}]}}`)
-	result1 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
+	result1 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk1, &param)
 
 	// Verify no finish_reason on intermediate chunk
 	fr1 := gjson.Get(result1[0], "choices.0.finish_reason")
@@ -118,7 +128,7 @@ func TestNoFinishReasonOnIntermediateChunks(t *testing.T) {
 
 	// Chunk 2: More text (no finish reason, no usage)
 	chunk2 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":" world"}]}}]}}`)
-	result2 := ConvertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
+	result2 := convertAntigravityResponseToOpenAI(ctx, "model", nil, nil, chunk2, &param)
 
 	// Verify no finish_reason on intermediate chunk
 	fr2 := gjson.Get(result2[0], "choices.0.finish_reason")

@@ -18,8 +18,8 @@ var (
 	dataTag = []byte("data:")
 )
 
-// ConvertCodexResponseToGeminiParams holds parameters for response conversion.
-type ConvertCodexResponseToGeminiParams struct {
+// convertCodexResponseToGeminiParams holds parameters for response conversion.
+type convertCodexResponseToGeminiParams struct {
 	Model             string
 	CreatedAt         int64
 	ResponseID        string
@@ -39,9 +39,14 @@ type ConvertCodexResponseToGeminiParams struct {
 //
 // Returns:
 //   - []string: A slice of strings, each containing a Gemini-compatible JSON response
-func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
+func ConvertCodexResponseToGemini(
+	_ context.Context,
+	modelName string,
+	originalRequestRawJSON, _, rawJSON []byte,
+	param *any,
+) []string {
 	if *param == nil {
-		*param = &ConvertCodexResponseToGeminiParams{
+		*param = &convertCodexResponseToGeminiParams{
 			Model:             modelName,
 			CreatedAt:         0,
 			ResponseID:        "",
@@ -60,16 +65,20 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 
 	// Base Gemini response template
 	template := `{"candidates":[{"content":{"role":"model","parts":[]}}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"gemini-2.5-pro","createTime":"2025-08-15T02:52:03.884209Z","responseId":"06CeaPH7NaCU48APvNXDyA4"}`
-	if (*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput != "" && typeStr == "response.output_item.done" {
-		template = (*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput
+	if (*param).(*convertCodexResponseToGeminiParams).LastStorageOutput != "" &&
+		typeStr == "response.output_item.done" {
+		template = (*param).(*convertCodexResponseToGeminiParams).LastStorageOutput
 	} else {
-		template, _ = sjson.Set(template, "modelVersion", (*param).(*ConvertCodexResponseToGeminiParams).Model)
+		template, _ = sjson.Set(template, "modelVersion", (*param).(*convertCodexResponseToGeminiParams).Model)
 		createdAtResult := rootResult.Get("response.created_at")
 		if createdAtResult.Exists() {
-			(*param).(*ConvertCodexResponseToGeminiParams).CreatedAt = createdAtResult.Int()
-			template, _ = sjson.Set(template, "createTime", time.Unix((*param).(*ConvertCodexResponseToGeminiParams).CreatedAt, 0).Format(time.RFC3339Nano))
+			(*param).(*convertCodexResponseToGeminiParams).CreatedAt = createdAtResult.Int()
+			template, _ = sjson.Set(
+				template, "createTime",
+				time.Unix((*param).(*convertCodexResponseToGeminiParams).CreatedAt, 0).Format(time.RFC3339Nano),
+			)
 		}
-		template, _ = sjson.Set(template, "responseId", (*param).(*ConvertCodexResponseToGeminiParams).ResponseID)
+		template, _ = sjson.Set(template, "responseId", (*param).(*convertCodexResponseToGeminiParams).ResponseID)
 	}
 
 	// Handle function call completion
@@ -101,7 +110,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 			template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", functionCall)
 			template, _ = sjson.Set(template, "candidates.0.finishReason", "STOP")
 
-			(*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput = template
+			(*param).(*convertCodexResponseToGeminiParams).LastStorageOutput = template
 
 			// Use this return to storage message
 			return []string{}
@@ -111,7 +120,7 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 	if typeStr == "response.created" { // Handle response creation - set model and response ID
 		template, _ = sjson.Set(template, "modelVersion", rootResult.Get("response.model").String())
 		template, _ = sjson.Set(template, "responseId", rootResult.Get("response.id").String())
-		(*param).(*ConvertCodexResponseToGeminiParams).ResponseID = rootResult.Get("response.id").String()
+		(*param).(*convertCodexResponseToGeminiParams).ResponseID = rootResult.Get("response.id").String()
 	} else if typeStr == "response.reasoning_summary_text.delta" { // Handle reasoning/thinking content delta
 		part := `{"thought":true,"text":""}`
 		part, _ = sjson.Set(part, "text", rootResult.Get("delta").String())
@@ -121,19 +130,22 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 		part, _ = sjson.Set(part, "text", rootResult.Get("delta").String())
 		template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
 	} else if typeStr == "response.completed" { // Handle response completion with usage metadata
-		template, _ = sjson.Set(template, "usageMetadata.promptTokenCount", rootResult.Get("response.usage.input_tokens").Int())
-		template, _ = sjson.Set(template, "usageMetadata.candidatesTokenCount", rootResult.Get("response.usage.output_tokens").Int())
+		template, _ = sjson.Set(
+			template, "usageMetadata.promptTokenCount", rootResult.Get("response.usage.input_tokens").Int(),
+		)
+		template, _ = sjson.Set(
+			template, "usageMetadata.candidatesTokenCount", rootResult.Get("response.usage.output_tokens").Int(),
+		)
 		totalTokens := rootResult.Get("response.usage.input_tokens").Int() + rootResult.Get("response.usage.output_tokens").Int()
 		template, _ = sjson.Set(template, "usageMetadata.totalTokenCount", totalTokens)
 	} else {
 		return []string{}
 	}
 
-	if (*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput != "" {
-		return []string{(*param).(*ConvertCodexResponseToGeminiParams).LastStorageOutput, template}
-	} else {
-		return []string{template}
+	if (*param).(*convertCodexResponseToGeminiParams).LastStorageOutput != "" {
+		return []string{(*param).(*convertCodexResponseToGeminiParams).LastStorageOutput, template}
 	}
+	return []string{template}
 
 }
 
@@ -150,7 +162,12 @@ func ConvertCodexResponseToGemini(_ context.Context, modelName string, originalR
 //
 // Returns:
 //   - string: A Gemini-compatible JSON response containing all message content and metadata
-func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
+func ConvertCodexResponseToGeminiNonStream(
+	_ context.Context,
+	modelName string,
+	originalRequestRawJSON, _, rawJSON []byte,
+	_ *any,
+) string {
 	rootResult := gjson.ParseBytes(rawJSON)
 
 	// Verify this is a response.completed event
@@ -205,64 +222,68 @@ func ConvertCodexResponseToGeminiNonStream(_ context.Context, modelName string, 
 		}
 
 		if output := responseData.Get("output"); output.Exists() && output.IsArray() {
-			output.ForEach(func(key, value gjson.Result) bool {
-				itemType := value.Get("type").String()
+			output.ForEach(
+				func(key, value gjson.Result) bool {
+					itemType := value.Get("type").String()
 
-				switch itemType {
-				case "reasoning":
-					// Flush any pending function calls before adding non-function content
-					flushPendingFunctionCalls()
+					switch itemType {
+					case "reasoning":
+						// Flush any pending function calls before adding non-function content
+						flushPendingFunctionCalls()
 
-					// Add thinking content
-					if content := value.Get("content"); content.Exists() {
-						part := `{"text":"","thought":true}`
-						part, _ = sjson.Set(part, "text", content.String())
-						template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
-					}
+						// Add thinking content
+						if content := value.Get("content"); content.Exists() {
+							part := `{"text":"","thought":true}`
+							part, _ = sjson.Set(part, "text", content.String())
+							template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
+						}
 
-				case "message":
-					// Flush any pending function calls before adding non-function content
-					flushPendingFunctionCalls()
+					case "message":
+						// Flush any pending function calls before adding non-function content
+						flushPendingFunctionCalls()
 
-					// Add regular text content
-					if content := value.Get("content"); content.Exists() && content.IsArray() {
-						content.ForEach(func(_, contentItem gjson.Result) bool {
-							if contentItem.Get("type").String() == "output_text" {
-								if text := contentItem.Get("text"); text.Exists() {
-									part := `{"text":""}`
-									part, _ = sjson.Set(part, "text", text.String())
-									template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
-								}
+						// Add regular text content
+						if content := value.Get("content"); content.Exists() && content.IsArray() {
+							content.ForEach(
+								func(_, contentItem gjson.Result) bool {
+									if contentItem.Get("type").String() == "output_text" {
+										if text := contentItem.Get("text"); text.Exists() {
+											part := `{"text":""}`
+											part, _ = sjson.Set(part, "text", text.String())
+											template, _ = sjson.SetRaw(template, "candidates.0.content.parts.-1", part)
+										}
+									}
+									return true
+								},
+							)
+						}
+
+					case "function_call":
+						// Collect function call for potential merging with consecutive ones
+						hasToolCall = true
+						functionCall := `{"functionCall":{"args":{},"name":""}}`
+						{
+							n := value.Get("name").String()
+							rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
+							if orig, ok := rev[n]; ok {
+								n = orig
 							}
-							return true
-						})
-					}
-
-				case "function_call":
-					// Collect function call for potential merging with consecutive ones
-					hasToolCall = true
-					functionCall := `{"functionCall":{"args":{},"name":""}}`
-					{
-						n := value.Get("name").String()
-						rev := buildReverseMapFromGeminiOriginal(originalRequestRawJSON)
-						if orig, ok := rev[n]; ok {
-							n = orig
+							functionCall, _ = sjson.Set(functionCall, "functionCall.name", n)
 						}
-						functionCall, _ = sjson.Set(functionCall, "functionCall.name", n)
-					}
 
-					// Parse and set arguments
-					if argsStr := value.Get("arguments").String(); argsStr != "" {
-						argsResult := gjson.Parse(argsStr)
-						if argsResult.IsObject() {
-							functionCall, _ = sjson.SetRaw(functionCall, "functionCall.args", argsStr)
+						// Parse and set arguments
+						if argsStr := value.Get("arguments").String(); argsStr != "" {
+							argsResult := gjson.Parse(argsStr)
+							if argsResult.IsObject() {
+								functionCall, _ = sjson.SetRaw(functionCall, "functionCall.args", argsStr)
+							}
 						}
-					}
 
-					pendingFunctionCalls = append(pendingFunctionCalls, functionCall)
-				}
-				return true
-			})
+						pendingFunctionCalls = append(pendingFunctionCalls, functionCall)
+					}
+					return true
+				},
+			)
 
 			// Handle any remaining pending function calls at the end
 			flushPendingFunctionCalls()
@@ -287,7 +308,7 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 	}
 	var names []string
 	tarr := tools.Array()
-	for i := 0; i < len(tarr); i++ {
+	for i := range tarr {
 		fns := tarr[i].Get("functionDeclarations")
 		if !fns.IsArray() {
 			continue
@@ -307,6 +328,6 @@ func buildReverseMapFromGeminiOriginal(original []byte) map[string]string {
 	return rev
 }
 
-func GeminiTokenCount(ctx context.Context, count int64) string {
+func TokenCount(_ context.Context, count int64) string {
 	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
 }

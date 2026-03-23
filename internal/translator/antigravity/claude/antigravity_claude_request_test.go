@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
 	"github.com/tidwall/gjson"
 )
 
@@ -24,7 +24,7 @@ func TestConvertClaudeRequestToAntigravity_BasicStructure(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	// Check model
@@ -63,7 +63,7 @@ func TestConvertClaudeRequestToAntigravity_RoleMapping(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	// assistant should be mapped to model
@@ -98,9 +98,9 @@ func TestConvertClaudeRequestToAntigravity_ThinkingBlocks(t *testing.T) {
 		]
 	}`)
 
-	cache.CacheSignature("claude-sonnet-4-5-thinking", thinkingText, validSignature)
+	cache.StoreSignature("claude-sonnet-4-5-thinking", thinkingText, validSignature)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// Check thinking block conversion (now in contents.1 due to user message)
@@ -133,7 +133,7 @@ func TestConvertClaudeRequestToAntigravity_ThinkingBlockWithoutSignature(t *test
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// Without signature, thinking block should be removed (not converted to text)
@@ -170,7 +170,7 @@ func TestConvertClaudeRequestToAntigravity_ToolDeclarations(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("gemini-1.5-pro", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("gemini-1.5-pro", inputJSON, false)
 	outputStr := string(output)
 
 	// Check tools structure
@@ -211,7 +211,7 @@ func TestConvertClaudeRequestToAntigravity_ToolUse(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	// Now we expect only 1 part (tool_use), no dummy thinking block injected
@@ -267,9 +267,9 @@ func TestConvertClaudeRequestToAntigravity_ToolUse_WithSignature(t *testing.T) {
 		]
 	}`)
 
-	cache.CacheSignature("claude-sonnet-4-5-thinking", thinkingText, validSignature)
+	cache.StoreSignature("claude-sonnet-4-5-thinking", thinkingText, validSignature)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// Check function call has the signature from the preceding thinking block (now in contents.1)
@@ -278,7 +278,10 @@ func TestConvertClaudeRequestToAntigravity_ToolUse_WithSignature(t *testing.T) {
 		t.Errorf("Expected functionCall, got %s", part.Raw)
 	}
 	if part.Get("thoughtSignature").String() != validSignature {
-		t.Errorf("Expected thoughtSignature '%s' on tool_use, got '%s'", validSignature, part.Get("thoughtSignature").String())
+		t.Errorf(
+			"Expected thoughtSignature '%s' on tool_use, got '%s'", validSignature,
+			part.Get("thoughtSignature").String(),
+		)
 	}
 }
 
@@ -306,9 +309,9 @@ func TestConvertClaudeRequestToAntigravity_ReorderThinking(t *testing.T) {
 		]
 	}`)
 
-	cache.CacheSignature("claude-sonnet-4-5-thinking", thinkingText, validSignature)
+	cache.StoreSignature("claude-sonnet-4-5-thinking", thinkingText, validSignature)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// Verify order: Thinking block MUST be first (now in contents.1 due to user message)
@@ -342,7 +345,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResult(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	// Check function response conversion
@@ -368,7 +371,7 @@ func TestConvertClaudeRequestToAntigravity_ThinkingConfig(t *testing.T) {
 		}
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// Check thinking config conversion (only if model supports thinking in registry)
@@ -405,7 +408,7 @@ func TestConvertClaudeRequestToAntigravity_ImageContent(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	// Check inline data conversion
@@ -431,7 +434,7 @@ func TestConvertClaudeRequestToAntigravity_GenerationConfig(t *testing.T) {
 		"max_tokens": 2000
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	genConfig := gjson.Get(outputStr, "request.generationConfig")
@@ -472,7 +475,7 @@ func TestConvertClaudeRequestToAntigravity_TrailingUnsignedThinking_Removed(t *t
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// The last part of the last assistant message should NOT be a thinking block
@@ -516,9 +519,9 @@ func TestConvertClaudeRequestToAntigravity_TrailingSignedThinking_Kept(t *testin
 		]
 	}`)
 
-	cache.CacheSignature("claude-sonnet-4-5-thinking", thinkingText, validSignature)
+	cache.StoreSignature("claude-sonnet-4-5-thinking", thinkingText, validSignature)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// The signed thinking block should be preserved
@@ -548,7 +551,7 @@ func TestConvertClaudeRequestToAntigravity_MiddleUnsignedThinking_Removed(t *tes
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// Unsigned thinking should be removed entirely
@@ -586,7 +589,7 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_HintInjected(t *testi
 		"thinking": {"type": "enabled", "budget_tokens": 8000}
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// System instruction should contain the interleaved thinking hint
@@ -605,7 +608,10 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_HintInjected(t *testi
 		}
 	}
 	if !found {
-		t.Errorf("Interleaved thinking hint should be injected when tools and thinking are both active, got: %v", sysInstruction.Raw)
+		t.Errorf(
+			"Interleaved thinking hint should be injected when tools and thinking are both active, got: %v",
+			sysInstruction.Raw,
+		)
 	}
 }
 
@@ -624,7 +630,7 @@ func TestConvertClaudeRequestToAntigravity_ToolsOnly_NoHint(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	// System instruction should NOT contain the hint
@@ -647,7 +653,7 @@ func TestConvertClaudeRequestToAntigravity_ThinkingOnly_NoHint(t *testing.T) {
 		"thinking": {"type": "enabled", "budget_tokens": 8000}
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// System instruction should NOT contain the hint (no tools)
@@ -689,7 +695,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultNoContent(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, true)
+	output := convertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, true)
 	outputStr := string(output)
 
 	if !gjson.Valid(outputStr) {
@@ -732,7 +738,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultNullContent(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, true)
+	output := convertClaudeRequestToAntigravity("claude-opus-4-6-thinking", inputJSON, true)
 	outputStr := string(output)
 
 	if !gjson.Valid(outputStr) {
@@ -773,7 +779,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithImage(t *testing.T) {
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	if !gjson.Valid(outputStr) {
@@ -837,7 +843,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	if !gjson.Valid(outputStr) {
@@ -851,7 +857,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithSingleImage(t *testing.
 
 	// response.result should be empty (image only)
 	if funcResp.Get("response.result").String() != "" {
-		t.Errorf("Expected empty response.result for image-only content, got '%s'", funcResp.Get("response.result").String())
+		t.Errorf(
+			"Expected empty response.result for image-only content, got '%s'", funcResp.Get("response.result").String(),
+		)
 	}
 
 	// Image should be in functionResponse.parts[0].inlineData
@@ -900,7 +908,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	if !gjson.Valid(outputStr) {
@@ -934,7 +942,9 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithMultipleImagesAndTexts(
 		t.Errorf("Expected first image data 'AAAA', got '%s'", imgParts[0].Get("inlineData.data").String())
 	}
 	if imgParts[1].Get("inlineData.mimeType").String() != "image/jpeg" {
-		t.Errorf("Expected second image mimeType 'image/jpeg', got '%s'", imgParts[1].Get("inlineData.mimeType").String())
+		t.Errorf(
+			"Expected second image mimeType 'image/jpeg', got '%s'", imgParts[1].Get("inlineData.mimeType").String(),
+		)
 	}
 	if imgParts[1].Get("inlineData.data").String() != "BBBB" {
 		t.Errorf("Expected second image data 'BBBB', got '%s'", imgParts[1].Get("inlineData.data").String())
@@ -974,7 +984,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultWithOnlyMultipleImages(t *t
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	if !gjson.Valid(outputStr) {
@@ -1034,7 +1044,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultImageNotBase64(t *testing.T
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	if !gjson.Valid(outputStr) {
@@ -1087,7 +1097,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultImageMissingData(t *testing
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	if !gjson.Valid(outputStr) {
@@ -1137,7 +1147,7 @@ func TestConvertClaudeRequestToAntigravity_ToolResultImageMissingMediaType(t *te
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
 	outputStr := string(output)
 
 	if !gjson.Valid(outputStr) {
@@ -1178,7 +1188,7 @@ func TestConvertClaudeRequestToAntigravity_ToolAndThinking_NoExistingSystem(t *t
 		"thinking": {"type": "enabled", "budget_tokens": 8000}
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", inputJSON, false)
 	outputStr := string(output)
 
 	// System instruction should be created with hint

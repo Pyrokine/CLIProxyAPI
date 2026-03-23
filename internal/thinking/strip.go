@@ -6,7 +6,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// StripThinkingConfig removes thinking configuration fields from request body.
+// stripThinkingConfig removes thinking configuration fields from request body.
 //
 // This function is used when a model doesn't support thinking but the request
 // contains thinking configuration. The configuration is silently removed to
@@ -22,7 +22,7 @@ import (
 //   - body is empty or invalid JSON
 //   - provider is unknown
 //   - no thinking configuration found
-func StripThinkingConfig(body []byte, provider string) []byte {
+func stripThinkingConfig(body []byte, provider string) []byte {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}

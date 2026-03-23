@@ -1,9 +1,9 @@
 package gemini
 
 import (
-	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/translator"
+	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/translator"
 )
 
 func init() {
@@ -14,7 +14,7 @@ func init() {
 		interfaces.TranslateResponse{
 			Stream:     ConvertOpenAIResponseToGemini,
 			NonStream:  ConvertOpenAIResponseToGeminiNonStream,
-			TokenCount: GeminiTokenCount,
+			TokenCount: TokenCount,
 		},
 	)
 }

@@ -177,72 +177,78 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
-			resultJSON := gjson.ParseBytes(result)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				result := convertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+				resultJSON := gjson.ParseBytes(result)
 
-			// Find the relevant message
-			messages := resultJSON.Get("messages").Array()
-			if len(messages) < 1 {
-				if tt.wantHasReasoningContent || tt.wantHasContent {
-					t.Fatalf("Expected at least 1 message, got %d", len(messages))
-				}
-				return
-			}
-
-			// Check the last non-system message
-			var targetMsg gjson.Result
-			for i := len(messages) - 1; i >= 0; i-- {
-				if messages[i].Get("role").String() != "system" {
-					targetMsg = messages[i]
-					break
-				}
-			}
-
-			// Check reasoning_content
-			gotReasoningContent := targetMsg.Get("reasoning_content").String()
-			gotHasReasoningContent := targetMsg.Get("reasoning_content").Exists()
-
-			if gotHasReasoningContent != tt.wantHasReasoningContent {
-				t.Errorf("reasoning_content existence = %v, want %v", gotHasReasoningContent, tt.wantHasReasoningContent)
-			}
-
-			if gotReasoningContent != tt.wantReasoningContent {
-				t.Errorf("reasoning_content = %q, want %q", gotReasoningContent, tt.wantReasoningContent)
-			}
-
-			// Check content
-			content := targetMsg.Get("content")
-			// content has meaningful content if it's a non-empty array, or a non-empty string
-			var gotHasContent bool
-			switch {
-			case content.IsArray():
-				gotHasContent = len(content.Array()) > 0
-			case content.Type == gjson.String:
-				gotHasContent = content.String() != ""
-			default:
-				gotHasContent = false
-			}
-
-			if gotHasContent != tt.wantHasContent {
-				t.Errorf("content existence = %v, want %v", gotHasContent, tt.wantHasContent)
-			}
-
-			if tt.wantHasContent && tt.wantContentText != "" {
-				// Find text content
-				var foundText string
-				content.ForEach(func(_, v gjson.Result) bool {
-					if v.Get("type").String() == "text" {
-						foundText = v.Get("text").String()
-						return false
+				// Find the relevant message
+				messages := resultJSON.Get("messages").Array()
+				if len(messages) < 1 {
+					if tt.wantHasReasoningContent || tt.wantHasContent {
+						t.Fatalf("Expected at least 1 message, got %d", len(messages))
 					}
-					return true
-				})
-				if foundText != tt.wantContentText {
-					t.Errorf("content text = %q, want %q", foundText, tt.wantContentText)
+					return
 				}
-			}
-		})
+
+				// Check the last non-system message
+				var targetMsg gjson.Result
+				for i := len(messages) - 1; i >= 0; i-- {
+					if messages[i].Get("role").String() != "system" {
+						targetMsg = messages[i]
+						break
+					}
+				}
+
+				// Check reasoning_content
+				gotReasoningContent := targetMsg.Get("reasoning_content").String()
+				gotHasReasoningContent := targetMsg.Get("reasoning_content").Exists()
+
+				if gotHasReasoningContent != tt.wantHasReasoningContent {
+					t.Errorf(
+						"reasoning_content existence = %v, want %v", gotHasReasoningContent, tt.wantHasReasoningContent,
+					)
+				}
+
+				if gotReasoningContent != tt.wantReasoningContent {
+					t.Errorf("reasoning_content = %q, want %q", gotReasoningContent, tt.wantReasoningContent)
+				}
+
+				// Check content
+				content := targetMsg.Get("content")
+				// content has meaningful content if it's a non-empty array, or a non-empty string
+				var gotHasContent bool
+				switch {
+				case content.IsArray():
+					gotHasContent = len(content.Array()) > 0
+				case content.Type == gjson.String:
+					gotHasContent = content.String() != ""
+				default:
+					gotHasContent = false
+				}
+
+				if gotHasContent != tt.wantHasContent {
+					t.Errorf("content existence = %v, want %v", gotHasContent, tt.wantHasContent)
+				}
+
+				if tt.wantHasContent && tt.wantContentText != "" {
+					// Find text content
+					var foundText string
+					content.ForEach(
+						func(_, v gjson.Result) bool {
+							if v.Get("type").String() == "text" {
+								foundText = v.Get("text").String()
+								return false
+							}
+							return true
+						},
+					)
+					if foundText != tt.wantContentText {
+						t.Errorf("content text = %q, want %q", foundText, tt.wantContentText)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -267,7 +273,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingOnlyMessagePreserved(t *testing.T)
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 
 	messages := resultJSON.Get("messages").Array()
@@ -352,41 +358,43 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
-			resultJSON := gjson.ParseBytes(result)
-			messages := resultJSON.Get("messages").Array()
+		t.Run(
+			tt.name, func(t *testing.T) {
+				result := convertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+				resultJSON := gjson.ParseBytes(result)
+				messages := resultJSON.Get("messages").Array()
 
-			hasSys := false
-			var sysMsg gjson.Result
-			if len(messages) > 0 && messages[0].Get("role").String() == "system" {
-				hasSys = true
-				sysMsg = messages[0]
-			}
+				hasSys := false
+				var sysMsg gjson.Result
+				if len(messages) > 0 && messages[0].Get("role").String() == "system" {
+					hasSys = true
+					sysMsg = messages[0]
+				}
 
-			if hasSys != tt.wantHasSys {
-				t.Errorf("got hasSystem = %v, want %v", hasSys, tt.wantHasSys)
-			}
+				if hasSys != tt.wantHasSys {
+					t.Errorf("got hasSystem = %v, want %v", hasSys, tt.wantHasSys)
+				}
 
-			if tt.wantHasSys {
-				// Check content - it could be string or array in OpenAI
-				content := sysMsg.Get("content")
-				var gotText string
-				if content.IsArray() {
-					arr := content.Array()
-					if len(arr) > 0 {
-						// Get the last element's text for validation
-						gotText = arr[len(arr)-1].Get("text").String()
+				if tt.wantHasSys {
+					// Check content - it could be string or array in OpenAI
+					content := sysMsg.Get("content")
+					var gotText string
+					if content.IsArray() {
+						arr := content.Array()
+						if len(arr) > 0 {
+							// Get the last element's text for validation
+							gotText = arr[len(arr)-1].Get("text").String()
+						}
+					} else {
+						gotText = content.String()
 					}
-				} else {
-					gotText = content.String()
-				}
 
-				if tt.wantSysText != "" && gotText != tt.wantSysText {
-					t.Errorf("got system text = %q, want %q", gotText, tt.wantSysText)
+					if tt.wantSysText != "" && gotText != tt.wantSysText {
+						t.Errorf("got system text = %q, want %q", gotText, tt.wantSysText)
+					}
 				}
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -411,7 +419,7 @@ func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -422,7 +430,10 @@ func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 	}
 
 	if messages[0].Get("role").String() != "assistant" || !messages[0].Get("tool_calls").Exists() {
-		t.Fatalf("Expected messages[0] to be assistant tool_calls, got %s: %s", messages[0].Get("role").String(), messages[0].Raw)
+		t.Fatalf(
+			"Expected messages[0] to be assistant tool_calls, got %s: %s", messages[0].Get("role").String(),
+			messages[0].Raw,
+		)
 	}
 
 	// tool message MUST immediately follow assistant(tool_calls) per OpenAI spec
@@ -468,7 +479,7 @@ func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -503,7 +514,7 @@ func TestConvertClaudeRequestToOpenAI_AssistantTextToolUseTextOrder(t *testing.T
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -529,7 +540,7 @@ func TestConvertClaudeRequestToOpenAI_AssistantTextToolUseTextOrder(t *testing.T
 		t.Fatalf("Expected tool_call name %q, got %q", "do_work", got)
 	}
 
-	// Content should have both pre and post text
+	// Content should have both pre- and post-text
 	if got := assistantMsg.Get("content.0.text").String(); got != "pre" {
 		t.Fatalf("Expected content[0] text %q, got %q", "pre", got)
 	}
@@ -555,7 +566,7 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 

@@ -4,13 +4,15 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/tidwall/gjson"
 )
 
 func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) {
 	// Valid signature on functionCall should be preserved
 	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
-	inputJSON := []byte(fmt.Sprintf(`{
+	inputJSON := fmt.Appendf(nil,
+		`{
 		"model": "gemini-3-pro-preview",
 		"contents": [
 			{
@@ -20,7 +22,8 @@ func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) 
 				]
 			}
 		]
-	}`, validSignature))
+	}`, validSignature,
+	)
 
 	output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", inputJSON, false)
 	outputStr := string(output)
@@ -96,8 +99,8 @@ func TestConvertGeminiRequestToAntigravity_ParallelFunctionCalls(t *testing.T) {
 
 func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 	// When functionResponse contains a "parts" field with inlineData (from Claude
-	// translator's image embedding), fixCLIToolResponse should preserve it as-is.
-	// parseFunctionResponseRaw returns response.Raw for valid JSON objects,
+	// translator's image embedding), FixCLIToolResponse should preserve it as-is.
+	// ParseFunctionResponseRaw returns response.Raw for valid JSON objects,
 	// so extra fields like "parts" survive the pipeline.
 	input := `{
 		"model": "claude-opus-4-6-thinking",
@@ -130,7 +133,7 @@ func TestFixCLIToolResponse_PreservesFunctionResponseParts(t *testing.T) {
 		}
 	}`
 
-	result, err := fixCLIToolResponse(input)
+	result, err := common.FixCLIToolResponse(input)
 	if err != nil {
 		t.Fatalf("fixCLIToolResponse failed: %v", err)
 	}

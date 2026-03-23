@@ -1,4 +1,4 @@
-// Package openai provides utilities to translate OpenAI Chat Completions
+// Package chat_completions provides utilities to translate OpenAI Chat Completions
 // request JSON into OpenAI Responses API request JSON using gjson/sjson.
 // It supports tools, multimodal text/image inputs, and Structured Outputs.
 // The package handles the conversion of OpenAI API requests into the format
@@ -14,7 +14,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertOpenAIRequestToCodex converts an OpenAI Chat Completions request JSON
+// convertOpenAIRequestToCodex converts an OpenAI Chat Completions request JSON
 // into an OpenAI Responses API request JSON. The transformation follows the
 // examples defined in docs/2.md exactly, including tools, multi-turn dialog,
 // multimodal text/image handling, and Structured Outputs mapping.
@@ -26,7 +26,7 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in OpenAI Responses API format
-func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 	// Start with empty JSON object
 	out := `{"instructions":""}`
@@ -74,7 +74,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			// Collect original tool names
 			var names []string
 			arr := tools.Array()
-			for i := 0; i < len(arr); i++ {
+			for i := range arr {
 				t := arr[i]
 				if t.Get("type").String() == "function" {
 					fn := t.Get("function")
@@ -113,7 +113,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	out, _ = sjson.SetRaw(out, "input", `[]`)
 	if messages.IsArray() {
 		arr := messages.Array()
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			m := arr[i]
 			role := m.Get("role").String()
 
@@ -156,7 +156,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					msg, _ = sjson.SetRaw(msg, "content.-1", part)
 				} else if c.Exists() && c.IsArray() {
 					items := c.Array()
-					for j := 0; j < len(items); j++ {
+					for j := range items {
 						it := items[j]
 						t := it.Get("type").String()
 						switch t {
@@ -204,7 +204,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					toolCalls := m.Get("tool_calls")
 					if toolCalls.Exists() && toolCalls.IsArray() {
 						toolCallsArr := toolCalls.Array()
-						for j := 0; j < len(toolCallsArr); j++ {
+						for j := range toolCallsArr {
 							tc := toolCallsArr[j]
 							if tc.Get("type").String() == "function" {
 								// Create function_call as top-level object
@@ -280,7 +280,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	if tools.IsArray() && len(tools.Array()) > 0 {
 		out, _ = sjson.SetRaw(out, "tools", `[]`)
 		arr := tools.Array()
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			t := arr[i]
 			toolType := t.Get("type").String()
 			// Pass through built-in tools (e.g. {"type":"web_search"}) directly for the Responses API.
@@ -356,7 +356,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 // shortenNameIfNeeded applies the simple shortening rule for a single name.
 // If the name length exceeds 64, it will try to preserve the "mcp__" prefix and last segment.
-// Otherwise it truncates to 64 characters.
+// Otherwise, it truncates to 64 characters.
 func shortenNameIfNeeded(name string) string {
 	const limit = 64
 	if len(name) <= limit {
@@ -408,10 +408,7 @@ func buildShortNameMap(names []string) map[string]string {
 		base := cand
 		for i := 1; ; i++ {
 			suffix := "_" + strconv.Itoa(i)
-			allowed := limit - len(suffix)
-			if allowed < 0 {
-				allowed = 0
-			}
+			allowed := max(limit-len(suffix), 0)
 			tmp := base
 			if len(tmp) > allowed {
 				tmp = tmp[:allowed]

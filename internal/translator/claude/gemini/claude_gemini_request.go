@@ -14,8 +14,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -72,7 +72,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 		var b strings.Builder
 		// 24 chars random suffix for uniqueness
-		for i := 0; i < 24; i++ {
+		for range 24 {
 			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
 			b.WriteByte(letters[n.Int64()])
 		}
@@ -104,10 +104,12 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		// Stop sequences configuration for custom termination conditions
 		if stopSeqs := genConfig.Get("stopSequences"); stopSeqs.Exists() && stopSeqs.IsArray() {
 			var stopSequences []string
-			stopSeqs.ForEach(func(_, value gjson.Result) bool {
-				stopSequences = append(stopSequences, value.String())
-				return true
-			})
+			stopSeqs.ForEach(
+				func(_, value gjson.Result) bool {
+					stopSequences = append(stopSequences, value.String())
+					return true
+				},
+			)
 			if len(stopSequences) > 0 {
 				out, _ = sjson.Set(out, "stop_sequences", stopSequences)
 			}
@@ -166,15 +168,17 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	if sysInstr := root.Get("system_instruction"); sysInstr.Exists() {
 		if parts := sysInstr.Get("parts"); parts.Exists() && parts.IsArray() {
 			var systemText strings.Builder
-			parts.ForEach(func(_, part gjson.Result) bool {
-				if text := part.Get("text"); text.Exists() {
-					if systemText.Len() > 0 {
-						systemText.WriteString("\n")
+			parts.ForEach(
+				func(_, part gjson.Result) bool {
+					if text := part.Get("text"); text.Exists() {
+						if systemText.Len() > 0 {
+							systemText.WriteString("\n")
+						}
+						systemText.WriteString(text.String())
 					}
-					systemText.WriteString(text.String())
-				}
-				return true
-			})
+					return true
+				},
+			)
 			if systemText.Len() > 0 {
 				// Create system message in Claude Code format
 				systemMessage := `{"role":"user","content":[{"type":"text","text":""}]}`
@@ -186,156 +190,164 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Contents conversion to messages with proper role mapping
 	if contents := root.Get("contents"); contents.Exists() && contents.IsArray() {
-		contents.ForEach(func(_, content gjson.Result) bool {
-			role := content.Get("role").String()
-			// Map Gemini roles to Claude Code roles
-			if role == "model" {
-				role = "assistant"
-			}
+		contents.ForEach(
+			func(_, content gjson.Result) bool {
+				role := content.Get("role").String()
+				// Map Gemini roles to Claude Code roles
+				if role == "model" {
+					role = "assistant"
+				}
 
-			if role == "function" {
-				role = "user"
-			}
+				if role == "function" {
+					role = "user"
+				}
 
-			if role == "tool" {
-				role = "user"
-			}
+				if role == "tool" {
+					role = "user"
+				}
 
-			// Create message structure in Claude Code format
-			msg := `{"role":"","content":[]}`
-			msg, _ = sjson.Set(msg, "role", role)
+				// Create message structure in Claude Code format
+				msg := `{"role":"","content":[]}`
+				msg, _ = sjson.Set(msg, "role", role)
 
-			if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
-				parts.ForEach(func(_, part gjson.Result) bool {
-					// Text content conversion
-					if text := part.Get("text"); text.Exists() {
-						textContent := `{"type":"text","text":""}`
-						textContent, _ = sjson.Set(textContent, "text", text.String())
-						msg, _ = sjson.SetRaw(msg, "content.-1", textContent)
-						return true
-					}
+				if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
+					parts.ForEach(
+						func(_, part gjson.Result) bool {
+							// Text content conversion
+							if text := part.Get("text"); text.Exists() {
+								textContent := `{"type":"text","text":""}`
+								textContent, _ = sjson.Set(textContent, "text", text.String())
+								msg, _ = sjson.SetRaw(msg, "content.-1", textContent)
+								return true
+							}
 
-					// Function call (from model/assistant) conversion to tool use
-					if fc := part.Get("functionCall"); fc.Exists() && role == "assistant" {
-						toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
+							// Function call (from model/assistant) conversion to tool use
+							if fc := part.Get("functionCall"); fc.Exists() && role == "assistant" {
+								toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
 
-						// Generate a unique tool ID and enqueue it for later matching
-						// with the corresponding functionResponse
-						toolID := genToolCallID()
-						pendingToolIDs = append(pendingToolIDs, toolID)
-						toolUse, _ = sjson.Set(toolUse, "id", toolID)
+								// Generate a unique tool ID and enqueue it for later matching
+								// with the corresponding functionResponse
+								toolID := genToolCallID()
+								pendingToolIDs = append(pendingToolIDs, toolID)
+								toolUse, _ = sjson.Set(toolUse, "id", toolID)
 
-						if name := fc.Get("name"); name.Exists() {
-							toolUse, _ = sjson.Set(toolUse, "name", name.String())
-						}
-						if args := fc.Get("args"); args.Exists() && args.IsObject() {
-							toolUse, _ = sjson.SetRaw(toolUse, "input", args.Raw)
-						}
-						msg, _ = sjson.SetRaw(msg, "content.-1", toolUse)
-						return true
-					}
+								if name := fc.Get("name"); name.Exists() {
+									toolUse, _ = sjson.Set(toolUse, "name", name.String())
+								}
+								if args := fc.Get("args"); args.Exists() && args.IsObject() {
+									toolUse, _ = sjson.SetRaw(toolUse, "input", args.Raw)
+								}
+								msg, _ = sjson.SetRaw(msg, "content.-1", toolUse)
+								return true
+							}
 
-					// Function response (from user) conversion to tool result
-					if fr := part.Get("functionResponse"); fr.Exists() {
-						toolResult := `{"type":"tool_result","tool_use_id":"","content":""}`
+							// Function response (from user) conversion to tool result
+							if fr := part.Get("functionResponse"); fr.Exists() {
+								toolResult := `{"type":"tool_result","tool_use_id":"","content":""}`
 
-						// Attach the oldest queued tool_id to pair the response
-						// with its call. If the queue is empty, generate a new id.
-						var toolID string
-						if len(pendingToolIDs) > 0 {
-							toolID = pendingToolIDs[0]
-							// Pop the first element from the queue
-							pendingToolIDs = pendingToolIDs[1:]
-						} else {
-							// Fallback: generate new ID if no pending tool_use found
-							toolID = genToolCallID()
-						}
-						toolResult, _ = sjson.Set(toolResult, "tool_use_id", toolID)
+								// Attach the oldest queued tool_id to pair the response
+								// with its call. If the queue is empty, generate a new id.
+								var toolID string
+								if len(pendingToolIDs) > 0 {
+									toolID = pendingToolIDs[0]
+									// Pop the first element from the queue
+									pendingToolIDs = pendingToolIDs[1:]
+								} else {
+									// Fallback: generate new ID if no pending tool_use found
+									toolID = genToolCallID()
+								}
+								toolResult, _ = sjson.Set(toolResult, "tool_use_id", toolID)
 
-						// Extract result content from the function response
-						if result := fr.Get("response.result"); result.Exists() {
-							toolResult, _ = sjson.Set(toolResult, "content", result.String())
-						} else if response := fr.Get("response"); response.Exists() {
-							toolResult, _ = sjson.Set(toolResult, "content", response.Raw)
-						}
-						msg, _ = sjson.SetRaw(msg, "content.-1", toolResult)
-						return true
-					}
+								// Extract result content from the function response
+								if result := fr.Get("response.result"); result.Exists() {
+									toolResult, _ = sjson.Set(toolResult, "content", result.String())
+								} else if response := fr.Get("response"); response.Exists() {
+									toolResult, _ = sjson.Set(toolResult, "content", response.Raw)
+								}
+								msg, _ = sjson.SetRaw(msg, "content.-1", toolResult)
+								return true
+							}
 
-					// Image content (inline_data) conversion to Claude Code format
-					if inlineData := part.Get("inline_data"); inlineData.Exists() {
-						imageContent := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
-						if mimeType := inlineData.Get("mime_type"); mimeType.Exists() {
-							imageContent, _ = sjson.Set(imageContent, "source.media_type", mimeType.String())
-						}
-						if data := inlineData.Get("data"); data.Exists() {
-							imageContent, _ = sjson.Set(imageContent, "source.data", data.String())
-						}
-						msg, _ = sjson.SetRaw(msg, "content.-1", imageContent)
-						return true
-					}
+							// Image content (inline_data) conversion to Claude Code format
+							if inlineData := part.Get("inline_data"); inlineData.Exists() {
+								imageContent := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
+								if mimeType := inlineData.Get("mime_type"); mimeType.Exists() {
+									imageContent, _ = sjson.Set(imageContent, "source.media_type", mimeType.String())
+								}
+								if data := inlineData.Get("data"); data.Exists() {
+									imageContent, _ = sjson.Set(imageContent, "source.data", data.String())
+								}
+								msg, _ = sjson.SetRaw(msg, "content.-1", imageContent)
+								return true
+							}
 
-					// File data conversion to text content with file info
-					if fileData := part.Get("file_data"); fileData.Exists() {
-						// For file data, we'll convert to text content with file info
-						textContent := `{"type":"text","text":""}`
-						fileInfo := "File: " + fileData.Get("file_uri").String()
-						if mimeType := fileData.Get("mime_type"); mimeType.Exists() {
-							fileInfo += " (Type: " + mimeType.String() + ")"
-						}
-						textContent, _ = sjson.Set(textContent, "text", fileInfo)
-						msg, _ = sjson.SetRaw(msg, "content.-1", textContent)
-						return true
-					}
+							// File data conversion to text content with file info
+							if fileData := part.Get("file_data"); fileData.Exists() {
+								// For file data, we'll convert to text content with file info
+								textContent := `{"type":"text","text":""}`
+								fileInfo := "File: " + fileData.Get("file_uri").String()
+								if mimeType := fileData.Get("mime_type"); mimeType.Exists() {
+									fileInfo += " (Type: " + mimeType.String() + ")"
+								}
+								textContent, _ = sjson.Set(textContent, "text", fileInfo)
+								msg, _ = sjson.SetRaw(msg, "content.-1", textContent)
+								return true
+							}
 
-					return true
-				})
-			}
+							return true
+						},
+					)
+				}
 
-			// Only add message if it has content
-			if contentArray := gjson.Get(msg, "content"); contentArray.Exists() && len(contentArray.Array()) > 0 {
-				out, _ = sjson.SetRaw(out, "messages.-1", msg)
-			}
+				// Only add message if it has content
+				if contentArray := gjson.Get(msg, "content"); contentArray.Exists() && len(contentArray.Array()) > 0 {
+					out, _ = sjson.SetRaw(out, "messages.-1", msg)
+				}
 
-			return true
-		})
+				return true
+			},
+		)
 	}
 
 	// Tools mapping: Gemini functionDeclarations -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var anthropicTools []interface{}
+		var anthropicTools []any
 
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			if funcDecls := tool.Get("functionDeclarations"); funcDecls.Exists() && funcDecls.IsArray() {
-				funcDecls.ForEach(func(_, funcDecl gjson.Result) bool {
-					anthropicTool := `{"name":"","description":"","input_schema":{}}`
+		tools.ForEach(
+			func(_, tool gjson.Result) bool {
+				if funcDecls := tool.Get("functionDeclarations"); funcDecls.Exists() && funcDecls.IsArray() {
+					funcDecls.ForEach(
+						func(_, funcDecl gjson.Result) bool {
+							anthropicTool := `{"name":"","description":"","input_schema":{}}`
 
-					if name := funcDecl.Get("name"); name.Exists() {
-						anthropicTool, _ = sjson.Set(anthropicTool, "name", name.String())
-					}
-					if desc := funcDecl.Get("description"); desc.Exists() {
-						anthropicTool, _ = sjson.Set(anthropicTool, "description", desc.String())
-					}
-					if params := funcDecl.Get("parameters"); params.Exists() {
-						// Clean up the parameters schema for Claude Code compatibility
-						cleaned := params.Raw
-						cleaned, _ = sjson.Set(cleaned, "additionalProperties", false)
-						cleaned, _ = sjson.Set(cleaned, "$schema", "http://json-schema.org/draft-07/schema#")
-						anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", cleaned)
-					} else if params = funcDecl.Get("parametersJsonSchema"); params.Exists() {
-						// Clean up the parameters schema for Claude Code compatibility
-						cleaned := params.Raw
-						cleaned, _ = sjson.Set(cleaned, "additionalProperties", false)
-						cleaned, _ = sjson.Set(cleaned, "$schema", "http://json-schema.org/draft-07/schema#")
-						anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", cleaned)
-					}
+							if name := funcDecl.Get("name"); name.Exists() {
+								anthropicTool, _ = sjson.Set(anthropicTool, "name", name.String())
+							}
+							if desc := funcDecl.Get("description"); desc.Exists() {
+								anthropicTool, _ = sjson.Set(anthropicTool, "description", desc.String())
+							}
+							if params := funcDecl.Get("parameters"); params.Exists() {
+								// Clean up the parameters schema for Claude Code compatibility
+								cleaned := params.Raw
+								cleaned, _ = sjson.Set(cleaned, "additionalProperties", false)
+								cleaned, _ = sjson.Set(cleaned, "$schema", "http://json-schema.org/draft-07/schema#")
+								anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", cleaned)
+							} else if params = funcDecl.Get("parametersJsonSchema"); params.Exists() {
+								// Clean up the parameters schema for Claude Code compatibility
+								cleaned := params.Raw
+								cleaned, _ = sjson.Set(cleaned, "additionalProperties", false)
+								cleaned, _ = sjson.Set(cleaned, "$schema", "http://json-schema.org/draft-07/schema#")
+								anthropicTool, _ = sjson.SetRaw(anthropicTool, "input_schema", cleaned)
+							}
 
-					anthropicTools = append(anthropicTools, gjson.Parse(anthropicTool).Value())
-					return true
-				})
-			}
-			return true
-		})
+							anthropicTools = append(anthropicTools, gjson.Parse(anthropicTool).Value())
+							return true
+						},
+					)
+				}
+				return true
+			},
+		)
 
 		if len(anthropicTools) > 0 {
 			out, _ = sjson.Set(out, "tools", anthropicTools)

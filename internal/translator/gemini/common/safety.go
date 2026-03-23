@@ -5,8 +5,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// DefaultSafetySettings returns the default Gemini safety configuration we attach to requests.
-func DefaultSafetySettings() []map[string]string {
+// defaultSafetySettings returns the default Gemini safety configuration we attach to requests.
+func defaultSafetySettings() []map[string]string {
 	return []map[string]string{
 		{
 			"category":  "HARM_CATEGORY_HARASSMENT",
@@ -38,7 +38,7 @@ func AttachDefaultSafetySettings(rawJSON []byte, path string) []byte {
 		return rawJSON
 	}
 
-	out, err := sjson.SetBytes(rawJSON, path, DefaultSafetySettings())
+	out, err := sjson.SetBytes(rawJSON, path, defaultSafetySettings())
 	if err != nil {
 		return rawJSON
 	}

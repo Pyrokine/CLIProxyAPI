@@ -4,14 +4,14 @@
 // thinking configurations across various AI providers (Claude, Gemini, OpenAI, iFlow).
 package thinking
 
-import "github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+import "github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 
-// ThinkingMode represents the type of thinking configuration mode.
-type ThinkingMode int
+// mode represents the type of thinking configuration mode.
+type mode int
 
 const (
 	// ModeBudget indicates using a numeric budget (corresponds to suffix "(1000)" etc.)
-	ModeBudget ThinkingMode = iota
+	ModeBudget mode = iota
 	// ModeLevel indicates using a discrete level (corresponds to suffix "(high)" etc.)
 	ModeLevel
 	// ModeNone indicates thinking is disabled (corresponds to suffix "(none)" or budget=0)
@@ -20,8 +20,8 @@ const (
 	ModeAuto
 )
 
-// String returns the string representation of ThinkingMode.
-func (m ThinkingMode) String() string {
+// String returns the string representation of Mode.
+func (m mode) String() string {
 	switch m {
 	case ModeBudget:
 		return "budget"
@@ -36,27 +36,27 @@ func (m ThinkingMode) String() string {
 	}
 }
 
-// ThinkingLevel represents a discrete thinking level.
-type ThinkingLevel string
+// Level represents a discrete thinking level.
+type Level string
 
 const (
 	// LevelNone disables thinking
-	LevelNone ThinkingLevel = "none"
+	LevelNone Level = "none"
 	// LevelAuto enables automatic/dynamic thinking
-	LevelAuto ThinkingLevel = "auto"
-	// LevelMinimal sets minimal thinking effort
-	LevelMinimal ThinkingLevel = "minimal"
-	// LevelLow sets low thinking effort
-	LevelLow ThinkingLevel = "low"
-	// LevelMedium sets medium thinking effort
-	LevelMedium ThinkingLevel = "medium"
+	LevelAuto Level = "auto"
+	// levelMinimal sets minimal thinking effort
+	levelMinimal Level = "minimal"
+	// levelLow sets low thinking effort
+	levelLow Level = "low"
+	// levelMedium sets medium thinking effort
+	levelMedium Level = "medium"
 	// LevelHigh sets high thinking effort
-	LevelHigh ThinkingLevel = "high"
+	LevelHigh Level = "high"
 	// LevelXHigh sets extra-high thinking effort
-	LevelXHigh ThinkingLevel = "xhigh"
+	LevelXHigh Level = "xhigh"
 )
 
-// ThinkingConfig represents a unified thinking configuration.
+// Config represents a unified thinking configuration.
 //
 // This struct is used to pass thinking configuration information between components.
 // Depending on Mode, either Budget or Level field is effective:
@@ -64,14 +64,14 @@ const (
 //   - ModeAuto: Budget=-1, Level is ignored
 //   - ModeBudget: Budget is a positive integer, Level is ignored
 //   - ModeLevel: Budget is ignored, Level is a valid level
-type ThinkingConfig struct {
+type Config struct {
 	// Mode specifies the configuration mode
-	Mode ThinkingMode
+	Mode mode
 	// Budget is the thinking budget (token count), only effective when Mode is ModeBudget.
 	// Special values: 0 means disabled, -1 means automatic
 	Budget int
 	// Level is the thinking level, only effective when Mode is ModeLevel
-	Level ThinkingLevel
+	Level Level
 }
 
 // SuffixResult represents the result of parsing a model name for thinking suffix.
@@ -93,14 +93,14 @@ type SuffixResult struct {
 
 // ProviderApplier defines the interface for provider-specific thinking configuration application.
 //
-// Types implementing this interface are responsible for converting a unified ThinkingConfig
+// Types implementing this interface are responsible for converting a unified Config
 // into provider-specific format and applying it to the request body.
 //
 // Implementation requirements:
 //   - Apply method must be idempotent
 //   - Must not modify the input config or modelInfo
 //   - Returns a modified copy of the request body
-//   - Returns appropriate ThinkingError for unsupported configurations
+//   - Returns appropriate Error for unsupported configurations
 type ProviderApplier interface {
 	// Apply applies the thinking configuration to the request body.
 	//
@@ -111,6 +111,6 @@ type ProviderApplier interface {
 	//
 	// Returns:
 	//   - Modified request body JSON
-	//   - ThinkingError if the configuration is invalid or unsupported
-	Apply(body []byte, config ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error)
+	//   - Error if the configuration is invalid or unsupported
+	Apply(body []byte, config Config, modelInfo *registry.ModelInfo) ([]byte, error)
 }

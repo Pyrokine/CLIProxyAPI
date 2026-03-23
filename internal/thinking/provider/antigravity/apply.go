@@ -9,8 +9,8 @@ package antigravity
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -20,13 +20,13 @@ type Applier struct{}
 
 var _ thinking.ProviderApplier = (*Applier)(nil)
 
-// NewApplier creates a new Antigravity thinking applier.
-func NewApplier() *Applier {
+// newApplier creates a new Antigravity thinking applier.
+func newApplier() *Applier {
 	return &Applier{}
 }
 
 func init() {
-	thinking.RegisterProvider("antigravity", NewApplier())
+	thinking.RegisterProvider("antigravity", newApplier())
 }
 
 // Apply applies thinking configuration to Antigravity request body.
@@ -34,7 +34,7 @@ func init() {
 // For Claude models, additional constraints are applied:
 //   - Ensure thinking budget < max_tokens
 //   - Remove thinkingConfig if budget < minimum allowed
-func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
 		return a.applyCompatible(body, config, modelInfo)
 	}
@@ -42,39 +42,33 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
+	var ok bool
+	if body, ok = thinking.ValidateGeminiPreconditions(body, config); !ok {
 		return body, nil
-	}
-
-	if len(body) == 0 || !gjson.ValidBytes(body) {
-		body = []byte(`{}`)
 	}
 
 	isClaude := strings.Contains(strings.ToLower(modelInfo.ID), "claude")
 
-	// ModeAuto: Always use Budget format with thinkingBudget=-1
-	if config.Mode == thinking.ModeAuto {
-		return a.applyBudgetFormat(body, config, modelInfo, isClaude)
-	}
-	if config.Mode == thinking.ModeBudget {
+	// ModeAuto/ModeBudget: Always use Budget format
+	if config.Mode == thinking.ModeAuto || config.Mode == thinking.ModeBudget {
 		return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 	}
 
 	// For non-auto modes, choose format based on model capabilities
 	support := modelInfo.Thinking
 	if len(support.Levels) > 0 {
-		return a.applyLevelFormat(body, config)
+		return thinking.ApplyGeminiLevelFormat(body, config, thinking.GeminiCLIPrefix)
 	}
 	return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 }
 
-func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
+func (a *Applier) applyCompatible(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) (
+	[]byte,
+	error,
+) {
+	var ok bool
+	if body, ok = thinking.ValidateGeminiPreconditions(body, config); !ok {
 		return body, nil
-	}
-
-	if len(body) == 0 || !gjson.ValidBytes(body) {
-		body = []byte(`{}`)
 	}
 
 	isClaude := false
@@ -87,101 +81,31 @@ func (a *Applier) applyCompatible(body []byte, config thinking.ThinkingConfig, m
 	}
 
 	if config.Mode == thinking.ModeLevel || (config.Mode == thinking.ModeNone && config.Level != "") {
-		return a.applyLevelFormat(body, config)
+		return thinking.ApplyGeminiLevelFormat(body, config, thinking.GeminiCLIPrefix)
 	}
 
 	return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 }
 
-func (a *Applier) applyLevelFormat(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
-	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingBudget")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_budget")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
-	// Normalize includeThoughts field name to avoid oneof conflicts in upstream JSON parsing.
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
-
-	if config.Mode == thinking.ModeNone {
-		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
-		if config.Level != "" {
-			result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", string(config.Level))
-		}
-		return result, nil
-	}
-
-	// Only handle ModeLevel - budget conversion should be done by upper layer
-	if config.Mode != thinking.ModeLevel {
-		return body, nil
-	}
-
-	level := string(config.Level)
-	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingLevel", level)
-
-	// Respect user's explicit includeThoughts setting from original body; default to true if not set
-	// Support both camelCase and snake_case variants
-	includeThoughts := true
-	if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-	} else if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-	}
-	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
-	return result, nil
-}
-
-func (a *Applier) applyBudgetFormat(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo, isClaude bool) ([]byte, error) {
-	// Remove conflicting fields to avoid both thinkingLevel and thinkingBudget in output
-	result, _ := sjson.DeleteBytes(body, "request.generationConfig.thinkingConfig.thinkingLevel")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_level")
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.thinking_budget")
-	// Normalize includeThoughts field name to avoid oneof conflicts in upstream JSON parsing.
-	result, _ = sjson.DeleteBytes(result, "request.generationConfig.thinkingConfig.include_thoughts")
-
+// applyBudgetFormat applies Claude-specific budget normalization then delegates to shared logic.
+func (a *Applier) applyBudgetFormat(
+	body []byte,
+	config thinking.Config,
+	modelInfo *registry.ModelInfo,
+	isClaude bool,
+) ([]byte, error) {
 	budget := config.Budget
 
-	// Apply Claude-specific constraints first to get the final budget value
+	// Apply Claude-specific constraints before shared budget logic
 	if isClaude && modelInfo != nil {
-		budget, result = a.normalizeClaudeBudget(budget, result, modelInfo)
-		// Check if budget was removed entirely
+		budget, body = a.normalizeClaudeBudget(budget, body, modelInfo)
+		// Sentinel: thinkingConfig was removed entirely
 		if budget == -2 {
-			return result, nil
+			return body, nil
 		}
 	}
 
-	// For ModeNone, always set includeThoughts to false regardless of user setting.
-	// This ensures that when user requests budget=0 (disable thinking output),
-	// the includeThoughts is correctly set to false even if budget is clamped to min.
-	if config.Mode == thinking.ModeNone {
-		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-		result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", false)
-		return result, nil
-	}
-
-	// Determine includeThoughts: respect user's explicit setting from original body if provided
-	// Support both camelCase and snake_case variants
-	var includeThoughts bool
-	var userSetIncludeThoughts bool
-	if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.includeThoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-		userSetIncludeThoughts = true
-	} else if inc := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.include_thoughts"); inc.Exists() {
-		includeThoughts = inc.Bool()
-		userSetIncludeThoughts = true
-	}
-
-	if !userSetIncludeThoughts {
-		// No explicit setting, use default logic based on mode
-		switch config.Mode {
-		case thinking.ModeAuto:
-			includeThoughts = true
-		default:
-			includeThoughts = budget > 0
-		}
-	}
-
-	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-	result, _ = sjson.SetBytes(result, "request.generationConfig.thinkingConfig.includeThoughts", includeThoughts)
-	return result, nil
+	return thinking.ApplyGeminiBudgetFormat(body, config, budget, thinking.GeminiCLIPrefix)
 }
 
 // normalizeClaudeBudget applies Claude-specific constraints to thinking budget.
@@ -226,7 +150,9 @@ func (a *Applier) normalizeClaudeBudget(budget int, payload []byte, modelInfo *r
 // prefer request-provided maxOutputTokens; otherwise fall back to model default.
 // The boolean indicates whether the value came from the model default (and thus should be written back).
 func (a *Applier) effectiveMaxTokens(payload []byte, modelInfo *registry.ModelInfo) (max int, fromModel bool) {
-	if maxTok := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxTok.Exists() && maxTok.Int() > 0 {
+	if maxTok := gjson.GetBytes(
+		payload, "request.generationConfig.maxOutputTokens",
+	); maxTok.Exists() && maxTok.Int() > 0 {
 		return int(maxTok.Int()), false
 	}
 	if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {

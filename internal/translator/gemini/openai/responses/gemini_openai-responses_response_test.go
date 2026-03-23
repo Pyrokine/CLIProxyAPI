@@ -41,7 +41,11 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 	var param any
 	var out []string
 	for _, line := range in {
-		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", originalReq, nil, []byte(line), &param)...)
+		out = append(
+			out, ConvertGeminiResponseToOpenAIResponses(
+				context.Background(), "test-model", originalReq, nil, []byte(line), &param,
+			)...,
+		)
 	}
 
 	var (
@@ -107,10 +111,16 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 		t.Fatalf("missing response.output_text.done event")
 	}
 	if posTextDone == -1 || posPartDone == -1 || posMessageDone == -1 || posFuncAdded == -1 {
-		t.Fatalf("missing ordering events: textDone=%d partDone=%d messageDone=%d funcAdded=%d", posTextDone, posPartDone, posMessageDone, posFuncAdded)
+		t.Fatalf(
+			"missing ordering events: textDone=%d partDone=%d messageDone=%d funcAdded=%d", posTextDone, posPartDone,
+			posMessageDone, posFuncAdded,
+		)
 	}
 	if !(posTextDone < posPartDone && posPartDone < posMessageDone && posMessageDone < posFuncAdded) {
-		t.Fatalf("unexpected message/function ordering: textDone=%d partDone=%d messageDone=%d funcAdded=%d", posTextDone, posPartDone, posMessageDone, posFuncAdded)
+		t.Fatalf(
+			"unexpected message/function ordering: textDone=%d partDone=%d messageDone=%d funcAdded=%d", posTextDone,
+			posPartDone, posMessageDone, posFuncAdded,
+		)
 	}
 	if !gotMessageDone {
 		t.Fatalf("missing message response.output_item.done event")
@@ -165,7 +175,11 @@ func TestConvertGeminiResponseToOpenAIResponses_ReasoningEncryptedContent(t *tes
 	var param any
 	var out []string
 	for _, line := range in {
-		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, []byte(line), &param)...)
+		out = append(
+			out, ConvertGeminiResponseToOpenAIResponses(
+				context.Background(), "test-model", nil, nil, []byte(line), &param,
+			)...,
+		)
 	}
 
 	var (
@@ -205,7 +219,11 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 	var param any
 	var out []string
 	for _, line := range in {
-		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, []byte(line), &param)...)
+		out = append(
+			out, ConvertGeminiResponseToOpenAIResponses(
+				context.Background(), "test-model", nil, nil, []byte(line), &param,
+			)...,
+		)
 	}
 
 	posAdded := []int{-1, -1, -1}
@@ -255,10 +273,12 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 			if len(output.Array()) != 3 {
 				t.Fatalf("unexpected response.output length: got %d", len(output.Array()))
 			}
-			if data.Get("response.output.0.name").String() != "tool0" || data.Get("response.output.0.arguments").String() != "{}" {
+			if data.Get("response.output.0.name").String() != "tool0" ||
+				data.Get("response.output.0.arguments").String() != "{}" {
 				t.Fatalf("unexpected output[0]: %s", data.Get("response.output.0").Raw)
 			}
-			if data.Get("response.output.1.name").String() != "tool1" || data.Get("response.output.1.arguments").String() != "{}" {
+			if data.Get("response.output.1.name").String() != "tool1" ||
+				data.Get("response.output.1.arguments").String() != "{}" {
 				t.Fatalf("unexpected output[1]: %s", data.Get("response.output.1").Raw)
 			}
 			if data.Get("response.output.2.name").String() != "tool2" {
@@ -273,15 +293,24 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 	if posCompleted == -1 {
 		t.Fatalf("missing response.completed event")
 	}
-	for idx := 0; idx < 3; idx++ {
+	for idx := range 3 {
 		if posAdded[idx] == -1 || posArgsDelta[idx] == -1 || posArgsDone[idx] == -1 || posItemDone[idx] == -1 {
-			t.Fatalf("missing function call events for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx, posAdded[idx], posArgsDelta[idx], posArgsDone[idx], posItemDone[idx])
+			t.Fatalf(
+				"missing function call events for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx,
+				posAdded[idx], posArgsDelta[idx], posArgsDone[idx], posItemDone[idx],
+			)
 		}
 		if !(posAdded[idx] < posArgsDelta[idx] && posArgsDelta[idx] < posArgsDone[idx] && posArgsDone[idx] < posItemDone[idx]) {
-			t.Fatalf("unexpected ordering for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx, posAdded[idx], posArgsDelta[idx], posArgsDone[idx], posItemDone[idx])
+			t.Fatalf(
+				"unexpected ordering for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx,
+				posAdded[idx], posArgsDelta[idx], posArgsDone[idx], posItemDone[idx],
+			)
 		}
 		if idx > 0 && !(posItemDone[idx-1] < posAdded[idx]) {
-			t.Fatalf("function call events overlap between %d and %d: prevDone=%d nextAdded=%d", idx-1, idx, posItemDone[idx-1], posAdded[idx])
+			t.Fatalf(
+				"function call events overlap between %d and %d: prevDone=%d nextAdded=%d", idx-1, idx,
+				posItemDone[idx-1], posAdded[idx],
+			)
 		}
 	}
 
@@ -295,7 +324,10 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 		t.Fatalf("unexpected delta for output_index 2: got %q", deltaByIndex[2])
 	}
 	if !(posItemDone[2] < posCompleted) {
-		t.Fatalf("response.completed should be after last output_item.done: last=%d completed=%d", posItemDone[2], posCompleted)
+		t.Fatalf(
+			"response.completed should be after last output_item.done: last=%d completed=%d", posItemDone[2],
+			posCompleted,
+		)
 	}
 }
 
@@ -309,7 +341,11 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 	var param any
 	var out []string
 	for _, line := range in {
-		out = append(out, ConvertGeminiResponseToOpenAIResponses(context.Background(), "test-model", nil, nil, []byte(line), &param)...)
+		out = append(
+			out, ConvertGeminiResponseToOpenAIResponses(
+				context.Background(), "test-model", nil, nil, []byte(line), &param,
+			)...,
+		)
 	}
 
 	posFuncDone := -1
@@ -342,10 +378,15 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 	}
 
 	if posFuncDone == -1 || posMsgAdded == -1 || posCompleted == -1 {
-		t.Fatalf("missing required events: funcDone=%d msgAdded=%d completed=%d", posFuncDone, posMsgAdded, posCompleted)
+		t.Fatalf(
+			"missing required events: funcDone=%d msgAdded=%d completed=%d", posFuncDone, posMsgAdded, posCompleted,
+		)
 	}
 	if !(posFuncDone < posMsgAdded) {
-		t.Fatalf("expected function_call to complete before message is added: funcDone=%d msgAdded=%d", posFuncDone, posMsgAdded)
+		t.Fatalf(
+			"expected function_call to complete before message is added: funcDone=%d msgAdded=%d", posFuncDone,
+			posMsgAdded,
+		)
 	}
 	if !(posMsgAdded < posCompleted) {
 		t.Fatalf("expected response.completed after message added: msgAdded=%d completed=%d", posMsgAdded, posCompleted)

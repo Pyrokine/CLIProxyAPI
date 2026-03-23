@@ -3,20 +3,20 @@ package kimi
 import (
 	"testing"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/tidwall/gjson"
 )
 
 func TestApply_ModeNone_UsesDisabledThinking(t *testing.T) {
-	applier := NewApplier()
+	applier := newApplier()
 	modelInfo := &registry.ModelInfo{
 		ID:       "kimi-k2.5",
 		Thinking: &registry.ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 	}
 	body := []byte(`{"model":"kimi-k2.5","reasoning_effort":"none","thinking":{"type":"enabled","budget_tokens":2048}}`)
 
-	out, errApply := applier.Apply(body, thinking.ThinkingConfig{Mode: thinking.ModeNone}, modelInfo)
+	out, errApply := applier.Apply(body, thinking.Config{Mode: thinking.ModeNone}, modelInfo)
 	if errApply != nil {
 		t.Fatalf("Apply() error = %v", errApply)
 	}
@@ -32,14 +32,16 @@ func TestApply_ModeNone_UsesDisabledThinking(t *testing.T) {
 }
 
 func TestApply_ModeLevel_UsesReasoningEffort(t *testing.T) {
-	applier := NewApplier()
+	applier := newApplier()
 	modelInfo := &registry.ModelInfo{
 		ID:       "kimi-k2.5",
 		Thinking: &registry.ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 	}
 	body := []byte(`{"model":"kimi-k2.5","thinking":{"type":"disabled"}}`)
 
-	out, errApply := applier.Apply(body, thinking.ThinkingConfig{Mode: thinking.ModeLevel, Level: thinking.LevelHigh}, modelInfo)
+	out, errApply := applier.Apply(
+		body, thinking.Config{Mode: thinking.ModeLevel, Level: thinking.LevelHigh}, modelInfo,
+	)
 	if errApply != nil {
 		t.Fatalf("Apply() error = %v", errApply)
 	}
@@ -52,14 +54,14 @@ func TestApply_ModeLevel_UsesReasoningEffort(t *testing.T) {
 }
 
 func TestApply_UserDefinedModeNone_UsesDisabledThinking(t *testing.T) {
-	applier := NewApplier()
+	applier := newApplier()
 	modelInfo := &registry.ModelInfo{
 		ID:          "custom-kimi-model",
 		UserDefined: true,
 	}
 	body := []byte(`{"model":"custom-kimi-model","reasoning_effort":"none"}`)
 
-	out, errApply := applier.Apply(body, thinking.ThinkingConfig{Mode: thinking.ModeNone}, modelInfo)
+	out, errApply := applier.Apply(body, thinking.Config{Mode: thinking.ModeNone}, modelInfo)
 	if errApply != nil {
 		t.Fatalf("Apply() error = %v", errApply)
 	}
