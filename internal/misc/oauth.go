@@ -39,6 +39,7 @@ func ParseOAuthCallback(input string) (*OAuthCallback, error) {
 	}
 
 	candidate := trimmed
+	// noinspection HttpUrlsUsage
 	if !strings.Contains(candidate, "://") {
 		if strings.HasPrefix(candidate, "?") {
 			candidate = "http://localhost" + candidate

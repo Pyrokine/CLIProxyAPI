@@ -20,6 +20,13 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// AllowQueryAuth allows API key authentication via URL query parameters (?key= / ?auth_token=).
+	// Disabled by default because query parameters leak credentials to logs, Referer headers, and browser history.
+	AllowQueryAuth bool `yaml:"allow-query-auth" json:"allow-query-auth"`
+
+	// APIKeyAliases maps API keys to human-readable aliases for display purposes.
+	APIKeyAliases map[string]string `yaml:"api-key-aliases,omitempty" json:"api-key-aliases,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`

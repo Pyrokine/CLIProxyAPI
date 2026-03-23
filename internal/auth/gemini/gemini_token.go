@@ -4,20 +4,16 @@
 package gemini
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	log "github.com/sirupsen/logrus"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 )
 
-// GeminiTokenStorage stores OAuth2 token information for Google Gemini API authentication.
+// TokenStorage stores OAuth2 token information for Google Gemini API authentication.
 // It maintains compatibility with the existing auth system while adding Gemini-specific fields
 // for managing access tokens, refresh tokens, and user account information.
-type GeminiTokenStorage struct {
+type TokenStorage struct {
 	// Token holds the raw OAuth2 token data, including access and refresh tokens.
 	Token any `json:"token"`
 
@@ -41,11 +37,6 @@ type GeminiTokenStorage struct {
 	Metadata map[string]any `json:"-"`
 }
 
-// SetMetadata allows external callers to inject metadata into the storage before saving.
-func (ts *GeminiTokenStorage) SetMetadata(meta map[string]any) {
-	ts.Metadata = meta
-}
-
 // SaveTokenToFile serializes the Gemini token storage to a JSON file.
 // This method creates the necessary directory structure and writes the token
 // data in JSON format to the specified file path for persistent storage.
@@ -56,34 +47,9 @@ func (ts *GeminiTokenStorage) SetMetadata(meta map[string]any) {
 //
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
-func (ts *GeminiTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
+func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	ts.Type = "gemini"
-	// Merge metadata using helper
-	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
-	if errMerge != nil {
-		return fmt.Errorf("failed to merge metadata: %w", errMerge)
-	}
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
-	}
-
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
-	}
-	defer func() {
-		if errClose := f.Close(); errClose != nil {
-			log.Errorf("failed to close file: %v", errClose)
-		}
-	}()
-
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(data); err != nil {
-		return fmt.Errorf("failed to write token to file: %w", err)
-	}
-	return nil
+	return auth.SaveTokenJSON(authFilePath, ts, ts.Metadata)
 }
 
 // CredentialFileName returns the filename used to persist Gemini CLI credentials.

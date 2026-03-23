@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
+	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 )
 
 // newAuthManager creates a new authentication manager instance with all supported
@@ -12,7 +12,8 @@ import (
 //   - *sdkAuth.Manager: A configured authentication manager instance
 func newAuthManager() *sdkAuth.Manager {
 	store := sdkAuth.GetTokenStore()
-	manager := sdkAuth.NewManager(store,
+	manager := sdkAuth.NewManager(
+		store,
 		sdkAuth.NewGeminiAuthenticator(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),

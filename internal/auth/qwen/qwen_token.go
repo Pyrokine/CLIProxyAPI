@@ -4,18 +4,13 @@
 package qwen
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 )
 
-// QwenTokenStorage stores OAuth2 token information for Alibaba Qwen API authentication.
+// TokenStorage stores OAuth2 token information for Alibaba Qwen API authentication.
 // It maintains compatibility with the existing auth system while adding Qwen-specific fields
 // for managing access tokens, refresh tokens, and user account information.
-type QwenTokenStorage struct {
+type TokenStorage struct {
 	// AccessToken is the OAuth2 access token used for authenticating API requests.
 	AccessToken string `json:"access_token"`
 	// RefreshToken is used to obtain new access tokens when the current one expires.
@@ -37,7 +32,7 @@ type QwenTokenStorage struct {
 }
 
 // SetMetadata allows external callers to inject metadata into the storage before saving.
-func (ts *QwenTokenStorage) SetMetadata(meta map[string]any) {
+func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }
 
@@ -51,29 +46,7 @@ func (ts *QwenTokenStorage) SetMetadata(meta map[string]any) {
 //
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
-func (ts *QwenTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
+func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	ts.Type = "qwen"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
-	}
-
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-
-	// Merge metadata using helper
-	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
-	if errMerge != nil {
-		return fmt.Errorf("failed to merge metadata: %w", errMerge)
-	}
-
-	if err = json.NewEncoder(f).Encode(data); err != nil {
-		return fmt.Errorf("failed to write token to file: %w", err)
-	}
-	return nil
+	return auth.SaveTokenJSON(authFilePath, ts, ts.Metadata)
 }

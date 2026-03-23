@@ -9,11 +9,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/vertex"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/vertex"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -62,9 +62,9 @@ func DoVertexImport(cfg *config.Config, keyPath string) {
 	// Default location if not provided by user. Can be edited in the saved file later.
 	location := "us-central1"
 
-	fileName := fmt.Sprintf("vertex-%s.json", sanitizeFilePart(projectID))
+	fileName := fmt.Sprintf("vertex-%s.json", vertex.SanitizeFilePart(projectID))
 	// Build auth record
-	storage := &vertex.VertexCredentialStorage{
+	storage := &vertex.CredentialStorage{
 		ServiceAccount: sa,
 		ProjectID:      projectID,
 		Email:          email,
@@ -76,7 +76,7 @@ func DoVertexImport(cfg *config.Config, keyPath string) {
 		"email":           email,
 		"location":        location,
 		"type":            "vertex",
-		"label":           labelForVertex(projectID, email),
+		"label":           vertex.Label(projectID, email),
 	}
 	record := &coreauth.Auth{
 		ID:       fileName,
@@ -96,28 +96,4 @@ func DoVertexImport(cfg *config.Config, keyPath string) {
 		return
 	}
 	fmt.Printf("Vertex credentials imported: %s\n", path)
-}
-
-func sanitizeFilePart(s string) string {
-	out := strings.TrimSpace(s)
-	replacers := []string{"/", "_", "\\", "_", ":", "_", " ", "-"}
-	for i := 0; i < len(replacers); i += 2 {
-		out = strings.ReplaceAll(out, replacers[i], replacers[i+1])
-	}
-	return out
-}
-
-func labelForVertex(projectID, email string) string {
-	p := strings.TrimSpace(projectID)
-	e := strings.TrimSpace(email)
-	if p != "" && e != "" {
-		return fmt.Sprintf("%s (%s)", p, e)
-	}
-	if p != "" {
-		return p
-	}
-	if e != "" {
-		return e
-	}
-	return "vertex"
 }

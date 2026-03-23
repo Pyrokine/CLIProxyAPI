@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -37,10 +37,14 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	if localPassword != "" {
 		var keepAliveCancel context.CancelFunc
 		runCtx, keepAliveCancel = context.WithCancel(ctxSignal)
-		builder = builder.WithServerOptions(api.WithKeepAliveEndpoint(10*time.Second, func() {
-			log.Warn("keep-alive endpoint idle for 10s, shutting down")
-			keepAliveCancel()
-		}))
+		builder = builder.WithServerOptions(
+			api.WithKeepAliveEndpoint(
+				10*time.Second, func() {
+					log.Warn("keep-alive endpoint idle for 10s, shutting down")
+					keepAliveCancel()
+				},
+			),
+		)
 	}
 
 	service, err := builder.Build()
@@ -57,7 +61,10 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 
 // StartServiceBackground starts the proxy service in a background goroutine
 // and returns a cancel function for shutdown and a done channel.
-func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (cancel func(), done <-chan struct{}) {
+func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (
+	cancel func(),
+	done <-chan struct{},
+) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -87,7 +94,9 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 // when no configuration file is available.
 func WaitForCloudDeploy() {
 	// Clarify that we are intentionally idle for configuration and not running the API server.
-	log.Info("Cloud deploy mode: No config found; standing by for configuration. API server is not started. Press Ctrl+C to exit.")
+	log.Info(
+		"Cloud deploy mode: No config found; standing by for configuration. API server is not started. Press Ctrl+C to exit.",
+	)
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

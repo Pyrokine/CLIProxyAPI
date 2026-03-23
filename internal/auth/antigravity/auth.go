@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -24,55 +24,75 @@ type TokenResponse struct {
 	TokenType    string `json:"token_type"`
 }
 
+// BuildMetadata constructs the standard metadata map for an antigravity token response.
+func BuildMetadata(tokenResp *TokenResponse, email, projectID string) map[string]any {
+	now := time.Now()
+	metadata := map[string]any{
+		"type":          "antigravity",
+		"access_token":  tokenResp.AccessToken,
+		"refresh_token": tokenResp.RefreshToken,
+		"expires_in":    tokenResp.ExpiresIn,
+		"timestamp":     now.UnixMilli(),
+		"expired":       now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+	}
+	if email != "" {
+		metadata["email"] = email
+	}
+	if projectID != "" {
+		metadata["project_id"] = projectID
+	}
+	return metadata
+}
+
 // userInfo represents Google user profile
 type userInfo struct {
 	Email string `json:"email"`
 }
 
-// AntigravityAuth handles Antigravity OAuth authentication
-type AntigravityAuth struct {
+// Auth handles Antigravity OAuth authentication
+type Auth struct {
 	httpClient *http.Client
 }
 
-// NewAntigravityAuth creates a new Antigravity auth service.
-func NewAntigravityAuth(cfg *config.Config, httpClient *http.Client) *AntigravityAuth {
+// NewAuth creates a new Antigravity auth service.
+func NewAuth(cfg *config.Config, httpClient *http.Client) *Auth {
 	if httpClient != nil {
-		return &AntigravityAuth{httpClient: httpClient}
+		return &Auth{httpClient: httpClient}
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
-	return &AntigravityAuth{
+	return &Auth{
 		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
 	}
 }
 
 // BuildAuthURL generates the OAuth authorization URL.
-func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) string {
+func (o *Auth) BuildAuthURL(state, redirectURI string) string {
 	if strings.TrimSpace(redirectURI) == "" {
 		redirectURI = fmt.Sprintf("http://localhost:%d/oauth-callback", CallbackPort)
 	}
 	params := url.Values{}
 	params.Set("access_type", "offline")
-	params.Set("client_id", ClientID)
+	params.Set("client_id", clientID)
 	params.Set("prompt", "consent")
 	params.Set("redirect_uri", redirectURI)
 	params.Set("response_type", "code")
-	params.Set("scope", strings.Join(Scopes, " "))
+	params.Set("scope", strings.Join(scopes, " "))
 	params.Set("state", state)
-	return AuthEndpoint + "?" + params.Encode()
+	return authEndpoint + "?" + params.Encode()
 }
 
 // ExchangeCodeForTokens exchanges authorization code for access and refresh tokens
-func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*TokenResponse, error) {
+func (o *Auth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*TokenResponse, error) {
 	data := url.Values{}
 	data.Set("code", code)
-	data.Set("client_id", ClientID)
-	data.Set("client_secret", ClientSecret)
+	data.Set("client_id", clientID)
+	data.Set("client_secret", clientSecret)
 	data.Set("redirect_uri", redirectURI)
 	data.Set("grant_type", "authorization_code")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, TokenEndpoint, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("antigravity token exchange: create request: %w", err)
 	}
@@ -108,12 +128,12 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 }
 
 // FetchUserInfo retrieves user email from Google
-func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string) (string, error) {
+func (o *Auth) FetchUserInfo(ctx context.Context, accessToken string) (string, error) {
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" {
 		return "", fmt.Errorf("antigravity userinfo: missing access token")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, UserInfoEndpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, userInfoEndpoint, nil)
 	if err != nil {
 		return "", fmt.Errorf("antigravity userinfo: create request: %w", err)
 	}
@@ -152,7 +172,8 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 }
 
 // FetchProjectID retrieves the project ID for the authenticated user via loadCodeAssist
-func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string) (string, error) {
+//
+func (o *Auth) FetchProjectID(ctx context.Context, accessToken string) (string, error) {
 	loadReqBody := map[string]any{
 		"metadata": map[string]string{
 			"ideType":    "ANTIGRAVITY",
@@ -166,16 +187,16 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 		return "", fmt.Errorf("marshal request body: %w", errMarshal)
 	}
 
-	endpointURL := fmt.Sprintf("%s/%s:loadCodeAssist", APIEndpoint, APIVersion)
+	endpointURL := fmt.Sprintf("%s/%s:loadCodeAssist", aPIEndpoint, aPIVersion)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", APIUserAgent)
-	req.Header.Set("X-Goog-Api-Client", APIClient)
-	req.Header.Set("Client-Metadata", ClientMetadata)
+	req.Header.Set("User-Agent", aPIUserAgent)
+	req.Header.Set("X-Goog-Api-Client", aPIClient)
+	req.Header.Set("Client-Metadata", clientMetadata)
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -193,7 +214,9 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf("request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
+		return "", fmt.Errorf(
+			"request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)),
+		)
 	}
 
 	var loadResp map[string]any
@@ -231,7 +254,7 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 			}
 		}
 
-		projectID, err = o.OnboardUser(ctx, accessToken, tierID)
+		projectID, err = o.onboardUser(ctx, accessToken, tierID)
 		if err != nil {
 			return "", err
 		}
@@ -241,8 +264,8 @@ func (o *AntigravityAuth) FetchProjectID(ctx context.Context, accessToken string
 	return projectID, nil
 }
 
-// OnboardUser attempts to fetch the project ID via onboardUser by polling for completion
-func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
+// onboardUser attempts to fetch the project ID via onboardUser by polling for completion
+func (o *Auth) onboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
 	requestBody := map[string]any{
 		"tierId": tierID,
@@ -269,17 +292,19 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 		}
 		reqCtx, cancel = context.WithTimeout(reqCtx, 30*time.Second)
 
-		endpointURL := fmt.Sprintf("%s/%s:onboardUser", APIEndpoint, APIVersion)
-		req, errRequest := http.NewRequestWithContext(reqCtx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)))
+		endpointURL := fmt.Sprintf("%s/%s:onboardUser", aPIEndpoint, aPIVersion)
+		req, errRequest := http.NewRequestWithContext(
+			reqCtx, http.MethodPost, endpointURL, strings.NewReader(string(rawBody)),
+		)
 		if errRequest != nil {
 			cancel()
 			return "", fmt.Errorf("create request: %w", errRequest)
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", APIUserAgent)
-		req.Header.Set("X-Goog-Api-Client", APIClient)
-		req.Header.Set("Client-Metadata", ClientMetadata)
+		req.Header.Set("User-Agent", aPIUserAgent)
+		req.Header.Set("X-Goog-Api-Client", aPIClient)
+		req.Header.Set("Client-Metadata", clientMetadata)
 
 		resp, errDo := o.httpClient.Do(req)
 		if errDo != nil {

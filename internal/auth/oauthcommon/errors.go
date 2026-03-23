@@ -1,7 +1,6 @@
-// Package claude provides authentication and token management functionality
-// for Anthropic's Claude AI services. It handles OAuth2 token storage, serialization,
-// and retrieval for maintaining authenticated sessions with the Claude API.
-package claude
+// Package oauthcommon provides shared OAuth server, error types, and HTML templates
+// used by the Claude (Anthropic) and Codex (OpenAI) authentication flows.
+package oauthcommon
 
 import (
 	"errors"
@@ -60,12 +59,6 @@ func (e *AuthenticationError) Error() string {
 
 // Common authentication error types.
 var (
-	// ErrTokenExpired = &AuthenticationError{
-	// 	Type:    "token_expired",
-	// 	Message: "Access token has expired",
-	// 	Code:    http.StatusUnauthorized,
-	// }
-
 	// ErrInvalidState represents an error for invalid OAuth state parameter.
 	ErrInvalidState = &AuthenticationError{
 		Type:    "invalid_state",
@@ -100,6 +93,13 @@ var (
 		Message: "Timeout waiting for OAuth callback",
 		Code:    http.StatusRequestTimeout,
 	}
+
+	// ErrBrowserOpenFailed represents an error when opening the browser for authentication fails.
+	ErrBrowserOpenFailed = &AuthenticationError{
+		Type:    "browser_open_failed",
+		Message: "Failed to open browser for authentication",
+		Code:    http.StatusInternalServerError,
+	}
 )
 
 // NewAuthenticationError creates a new authentication error with a cause based on a base error.
@@ -112,24 +112,22 @@ func NewAuthenticationError(baseErr *AuthenticationError, cause error) *Authenti
 	}
 }
 
-// IsAuthenticationError checks if an error is an authentication error.
-func IsAuthenticationError(err error) bool {
+// isAuthenticationError checks if an error is an authentication error.
+func isAuthenticationError(err error) bool {
 	var authenticationError *AuthenticationError
-	ok := errors.As(err, &authenticationError)
-	return ok
+	return errors.As(err, &authenticationError)
 }
 
-// IsOAuthError checks if an error is an OAuth error.
-func IsOAuthError(err error) bool {
+// isOAuthError checks if an error is an OAuth error.
+func isOAuthError(err error) bool {
 	var oAuthError *OAuthError
-	ok := errors.As(err, &oAuthError)
-	return ok
+	return errors.As(err, &oAuthError)
 }
 
 // GetUserFriendlyMessage returns a user-friendly error message based on the error type.
 func GetUserFriendlyMessage(err error) string {
 	switch {
-	case IsAuthenticationError(err):
+	case isAuthenticationError(err):
 		var authErr *AuthenticationError
 		errors.As(err, &authErr)
 		switch authErr.Type {
@@ -148,7 +146,7 @@ func GetUserFriendlyMessage(err error) string {
 		default:
 			return "Authentication failed. Please try again."
 		}
-	case IsOAuthError(err):
+	case isOAuthError(err):
 		var oauthErr *OAuthError
 		errors.As(err, &oauthErr)
 		switch oauthErr.Code {

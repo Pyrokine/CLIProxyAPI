@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/oauthcommon"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -26,47 +27,59 @@ type LoginOptions struct {
 	Prompt func(prompt string) (string, error)
 }
 
-// DoCodexLogin triggers the Codex OAuth flow through the shared authentication manager.
-// It initiates the OAuth authentication process for OpenAI Codex services and saves
-// the authentication tokens to the configured auth directory.
-//
-// Parameters:
-//   - cfg: The application configuration
-//   - options: Login options including browser behavior and prompts
-func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
+// doLogin performs the common setup for all OAuth login flows and calls manager.Login.
+func doLogin(
+	cfg *config.Config,
+	options *LoginOptions,
+	provider string,
+	metadata map[string]string,
+) (*cliproxyauth.Auth, string, error) {
 	if options == nil {
 		options = &LoginOptions{}
 	}
-
 	promptFn := options.Prompt
 	if promptFn == nil {
 		promptFn = defaultProjectPrompt()
 	}
-
 	manager := newAuthManager()
-
+	if metadata == nil {
+		metadata = map[string]string{}
+	}
 	authOpts := &sdkAuth.LoginOptions{
 		NoBrowser:    options.NoBrowser,
 		CallbackPort: options.CallbackPort,
-		Metadata:     map[string]string{},
+		Metadata:     metadata,
 		Prompt:       promptFn,
 	}
+	return manager.Login(context.Background(), provider, cfg, authOpts)
+}
 
-	_, savedPath, err := manager.Login(context.Background(), "codex", cfg, authOpts)
-	if err != nil {
-		if authErr, ok := errors.AsType[*codex.AuthenticationError](err); ok {
-			log.Error(codex.GetUserFriendlyMessage(authErr))
-			if authErr.Type == codex.ErrPortInUse.Type {
-				os.Exit(codex.ErrPortInUse.Code)
-			}
-			return
+// handleOAuthError handles authentication errors with oauthcommon unwrapping.
+func handleOAuthError(err error, providerLabel string) {
+	if authErr, ok := errors.AsType[*oauthcommon.AuthenticationError](err); ok {
+		log.Error(oauthcommon.GetUserFriendlyMessage(authErr))
+		if authErr.Type == oauthcommon.ErrPortInUse.Type {
+			os.Exit(oauthcommon.ErrPortInUse.Code)
 		}
-		fmt.Printf("Codex authentication failed: %v\n", err)
 		return
 	}
+	fmt.Printf("%s authentication failed: %v\n", providerLabel, err)
+}
 
+// printLoginSuccess prints the standard success messages after a login completes.
+func printLoginSuccess(savedPath, providerLabel string) {
 	if savedPath != "" {
 		fmt.Printf("Authentication saved to %s\n", savedPath)
 	}
-	fmt.Println("Codex authentication successful!")
+	fmt.Printf("%s authentication successful!\n", providerLabel)
+}
+
+// DoCodexLogin triggers the Codex OAuth flow through the shared authentication manager.
+func DoCodexLogin(cfg *config.Config, options *LoginOptions) {
+	_, savedPath, err := doLogin(cfg, options, "codex", nil)
+	if err != nil {
+		handleOAuthError(err, "Codex")
+		return
+	}
+	printLoginSuccess(savedPath, "Codex")
 }

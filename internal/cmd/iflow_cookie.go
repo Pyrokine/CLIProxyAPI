@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/iflow"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
 // DoIFlowCookieAuth performs the iFlow cookie-based authentication.
@@ -50,7 +50,7 @@ func DoIFlowCookieAuth(cfg *config.Config, options *LoginOptions) {
 	}
 
 	// Authenticate with cookie
-	auth := iflow.NewIFlowAuth(cfg)
+	auth := iflow.NewAuth(cfg)
 	ctx := context.Background()
 
 	tokenData, err := auth.AuthenticateWithCookie(ctx, cookie)

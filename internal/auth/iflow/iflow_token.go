@@ -1,16 +1,11 @@
 package iflow
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 )
 
-// IFlowTokenStorage persists iFlow OAuth credentials alongside the derived API key.
-type IFlowTokenStorage struct {
+// TokenStorage persists iFlow OAuth credentials alongside the derived API key.
+type TokenStorage struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	LastRefresh  string `json:"last_refresh"`
@@ -27,33 +22,8 @@ type IFlowTokenStorage struct {
 	Metadata map[string]any `json:"-"`
 }
 
-// SetMetadata allows external callers to inject metadata into the storage before saving.
-func (ts *IFlowTokenStorage) SetMetadata(meta map[string]any) {
-	ts.Metadata = meta
-}
-
 // SaveTokenToFile serialises the token storage to disk.
-func (ts *IFlowTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
+func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	ts.Type = "iflow"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0o700); err != nil {
-		return fmt.Errorf("iflow token: create directory failed: %w", err)
-	}
-
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("iflow token: create file failed: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	// Merge metadata using helper
-	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
-	if errMerge != nil {
-		return fmt.Errorf("failed to merge metadata: %w", errMerge)
-	}
-
-	if err = json.NewEncoder(f).Encode(data); err != nil {
-		return fmt.Errorf("iflow token: encode token failed: %w", err)
-	}
-	return nil
+	return auth.SaveTokenJSON(authFilePath, ts, ts.Metadata)
 }

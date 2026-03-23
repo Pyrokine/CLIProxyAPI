@@ -14,30 +14,32 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
 // OAuth configuration constants for OpenAI Codex
 const (
-	AuthURL     = "https://auth.openai.com/oauth/authorize"
-	TokenURL    = "https://auth.openai.com/oauth/token"
+	authURL     = "https://auth.openai.com/oauth/authorize"
+	tokenURL    = "https://auth.openai.com/oauth/token"
 	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
-	RedirectURI = "http://localhost:1455/auth/callback"
+	redirectURI = "http://localhost:1455/auth/callback"
 )
 
-// CodexAuth handles the OpenAI OAuth2 authentication flow.
+// Auth handles the OpenAI OAuth2 authentication flow.
 // It manages the HTTP client and provides methods for generating authorization URLs,
 // exchanging authorization codes for tokens, and refreshing access tokens.
-type CodexAuth struct {
+type Auth struct {
 	httpClient *http.Client
 }
 
-// NewCodexAuth creates a new CodexAuth service instance.
+// NewAuth creates a new Auth service instance.
 // It initializes an HTTP client with proxy settings from the provided configuration.
-func NewCodexAuth(cfg *config.Config) *CodexAuth {
-	return &CodexAuth{
+func NewAuth(cfg *config.Config) *Auth {
+	return &Auth{
 		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
 	}
 }
@@ -45,7 +47,7 @@ func NewCodexAuth(cfg *config.Config) *CodexAuth {
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).
 // It constructs the URL with the necessary parameters, including the client ID,
 // response type, redirect URI, scopes, and PKCE challenge.
-func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, error) {
+func (o *Auth) GenerateAuthURL(state string, pkceCodes *misc.PKCECodes) (string, error) {
 	if pkceCodes == nil {
 		return "", fmt.Errorf("PKCE codes are required")
 	}
@@ -53,7 +55,7 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 	params := url.Values{
 		"client_id":                  {ClientID},
 		"response_type":              {"code"},
-		"redirect_uri":               {RedirectURI},
+		"redirect_uri":               {redirectURI},
 		"scope":                      {"openid email profile offline_access"},
 		"state":                      {state},
 		"code_challenge":             {pkceCodes.CodeChallenge},
@@ -63,21 +65,28 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 		"codex_cli_simplified_flow":  {"true"},
 	}
 
-	authURL := fmt.Sprintf("%s?%s", AuthURL, params.Encode())
+	authURL := fmt.Sprintf("%s?%s", authURL, params.Encode())
 	return authURL, nil
 }
 
 // ExchangeCodeForTokens exchanges an authorization code for access and refresh tokens.
 // It performs an HTTP POST request to the OpenAI token endpoint with the provided
 // authorization code and PKCE verifier.
-func (o *CodexAuth) ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *PKCECodes) (*CodexAuthBundle, error) {
-	return o.ExchangeCodeForTokensWithRedirect(ctx, code, RedirectURI, pkceCodes)
+func (o *Auth) ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *misc.PKCECodes) (
+	*AuthBundle,
+	error,
+) {
+	return o.ExchangeCodeForTokensWithRedirect(ctx, code, redirectURI, pkceCodes)
 }
 
 // ExchangeCodeForTokensWithRedirect exchanges an authorization code for tokens using
 // a caller-provided redirect URI. This supports alternate auth flows such as device
 // login while preserving the existing token parsing and storage behavior.
-func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code, redirectURI string, pkceCodes *PKCECodes) (*CodexAuthBundle, error) {
+func (o *Auth) ExchangeCodeForTokensWithRedirect(
+	ctx context.Context,
+	code, redirectURI string,
+	pkceCodes *misc.PKCECodes,
+) (*AuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
 	}
@@ -94,7 +103,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		"code_verifier": {pkceCodes.CodeVerifier},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
@@ -143,11 +152,11 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 	email := ""
 	if claims != nil {
 		accountID = claims.GetAccountID()
-		email = claims.GetUserEmail()
+		email = claims.getUserEmail()
 	}
 
 	// Create token data
-	tokenData := CodexTokenData{
+	TokenData := TokenData{
 		IDToken:      tokenResp.IDToken,
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
@@ -157,8 +166,8 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 	}
 
 	// Create auth bundle
-	bundle := &CodexAuthBundle{
-		TokenData:   tokenData,
+	bundle := &AuthBundle{
+		TokenData:   TokenData,
 		LastRefresh: time.Now().Format(time.RFC3339),
 	}
 
@@ -168,7 +177,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 // RefreshTokens refreshes an access token using a refresh token.
 // This method is called when an access token has expired. It makes a request to the
 // token endpoint to obtain a new set of tokens.
-func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*CodexTokenData, error) {
+func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenData, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
@@ -180,7 +189,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		"scope":         {"openid profile email"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}
@@ -230,7 +239,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		email = claims.Email
 	}
 
-	return &CodexTokenData{
+	return &TokenData{
 		IDToken:      tokenResp.IDToken,
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
@@ -240,10 +249,10 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	}, nil
 }
 
-// CreateTokenStorage creates a new CodexTokenStorage from a CodexAuthBundle.
+// CreateTokenStorage creates a new TokenStorage from an AuthBundle.
 // It populates the storage struct with token data, user information, and timestamps.
-func (o *CodexAuth) CreateTokenStorage(bundle *CodexAuthBundle) *CodexTokenStorage {
-	storage := &CodexTokenStorage{
+func (o *Auth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
+	storage := &TokenStorage{
 		IDToken:      bundle.TokenData.IDToken,
 		AccessToken:  bundle.TokenData.AccessToken,
 		RefreshToken: bundle.TokenData.RefreshToken,
@@ -259,33 +268,11 @@ func (o *CodexAuth) CreateTokenStorage(bundle *CodexAuthBundle) *CodexTokenStora
 // RefreshTokensWithRetry refreshes tokens with a built-in retry mechanism.
 // It attempts to refresh the tokens up to a specified maximum number of retries,
 // with an exponential backoff strategy to handle transient network errors.
-func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*CodexTokenData, error) {
-	var lastErr error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			// Wait before retry
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
-			}
-		}
-
-		tokenData, err := o.RefreshTokens(ctx, refreshToken)
-		if err == nil {
-			return tokenData, nil
-		}
-		if isNonRetryableRefreshErr(err) {
-			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
-			return nil, err
-		}
-
-		lastErr = err
-		log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
-	}
-
-	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
+func (o *Auth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (
+	*TokenData,
+	error,
+) {
+	return auth.RefreshWithRetry(ctx, refreshToken, maxRetries, o.RefreshTokens, isNonRetryableRefreshErr)
 }
 
 func isNonRetryableRefreshErr(err error) bool {
@@ -296,14 +283,14 @@ func isNonRetryableRefreshErr(err error) bool {
 	return strings.Contains(raw, "refresh_token_reused")
 }
 
-// UpdateTokenStorage updates an existing CodexTokenStorage with new token data.
+// UpdateTokenStorage updates an existing TokenStorage with new token data.
 // This is typically called after a successful token refresh to persist the new credentials.
-func (o *CodexAuth) UpdateTokenStorage(storage *CodexTokenStorage, tokenData *CodexTokenData) {
-	storage.IDToken = tokenData.IDToken
-	storage.AccessToken = tokenData.AccessToken
-	storage.RefreshToken = tokenData.RefreshToken
-	storage.AccountID = tokenData.AccountID
+func (o *Auth) UpdateTokenStorage(storage *TokenStorage, TokenData *TokenData) {
+	storage.IDToken = TokenData.IDToken
+	storage.AccessToken = TokenData.AccessToken
+	storage.RefreshToken = TokenData.RefreshToken
+	storage.AccountID = TokenData.AccountID
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
-	storage.Email = tokenData.Email
-	storage.Expire = tokenData.Expire
+	storage.Email = TokenData.Email
+	storage.Expire = TokenData.Expire
 }

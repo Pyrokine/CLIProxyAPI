@@ -19,7 +19,7 @@ type JWTClaims struct {
 	Email         string        `json:"email"`
 	EmailVerified bool          `json:"email_verified"`
 	Exp           int           `json:"exp"`
-	CodexAuthInfo CodexAuthInfo `json:"https://api.openai.com/auth"`
+	AuthInfo authInfo `json:"https://api.openai.com/auth"`
 	Iat           int           `json:"iat"`
 	Iss           string        `json:"iss"`
 	Jti           string        `json:"jti"`
@@ -28,18 +28,18 @@ type JWTClaims struct {
 	Sub           string        `json:"sub"`
 }
 
-// Organizations defines the structure for organization details within the JWT claims.
+// organizations defines the structure for organization details within the JWT claims.
 // It holds information about the user's organization, such as ID, role, and title.
-type Organizations struct {
+type organizations struct {
 	ID        string `json:"id"`
 	IsDefault bool   `json:"is_default"`
 	Role      string `json:"role"`
 	Title     string `json:"title"`
 }
 
-// CodexAuthInfo contains authentication-related details specific to Codex.
+// authInfo contains authentication-related details specific to Codex.
 // This includes ChatGPT account information, subscription status, and user/organization IDs.
-type CodexAuthInfo struct {
+type authInfo struct {
 	ChatgptAccountID               string          `json:"chatgpt_account_id"`
 	ChatgptPlanType                string          `json:"chatgpt_plan_type"`
 	ChatgptSubscriptionActiveStart any             `json:"chatgpt_subscription_active_start"`
@@ -47,7 +47,7 @@ type CodexAuthInfo struct {
 	ChatgptSubscriptionLastChecked time.Time       `json:"chatgpt_subscription_last_checked"`
 	ChatgptUserID                  string          `json:"chatgpt_user_id"`
 	Groups                         []any           `json:"groups"`
-	Organizations                  []Organizations `json:"organizations"`
+	Organizations                  []organizations `json:"organizations"`
 	UserID                         string          `json:"user_id"`
 }
 
@@ -90,13 +90,13 @@ func base64URLDecode(data string) ([]byte, error) {
 	return base64.URLEncoding.DecodeString(data)
 }
 
-// GetUserEmail extracts the user's email address from the JWT claims.
-func (c *JWTClaims) GetUserEmail() string {
+// getUserEmail extracts the user's email address from the JWT claims.
+func (c *JWTClaims) getUserEmail() string {
 	return c.Email
 }
 
 // GetAccountID extracts the user's account ID (subject) from the JWT claims.
 // It retrieves the unique identifier for the user's ChatGPT account.
 func (c *JWTClaims) GetAccountID() string {
-	return c.CodexAuthInfo.ChatgptAccountID
+	return c.AuthInfo.ChatgptAccountID
 }

@@ -1,14 +1,18 @@
-package codex
+package oauthcommon
 
-// LoginSuccessHTML is the HTML template for the page shown after a successful
-// OAuth2 authentication with Codex. It informs the user that the authentication
-// was successful and provides a countdown timer to automatically close the window.
-const LoginSuccessHtml = `<!DOCTYPE html>
+import (
+	"html"
+	"strings"
+)
+
+// loginSuccessHTML is the HTML template displayed to users after successful OAuth authentication.
+// The placeholder {{PROVIDER_NAME}} is replaced with the actual provider name (e.g. "Claude", "Codex").
+const loginSuccessHTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authentication Successful - Codex</title>
+    <title>Authentication Successful - {{PROVIDER_NAME}}</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%2310b981'%3E%3Cpath d='M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z'/%3E%3C/svg%3E">
     <style>
         * {
@@ -154,10 +158,10 @@ const LoginSuccessHtml = `<!DOCTYPE html>
     <div class="container">
         <div class="success-icon">✓</div>
         <h1>Authentication Successful!</h1>
-        <p class="subtitle">You have successfully authenticated with Codex. You can now close this window and return to your terminal to continue.</p>
-        
+        <p class="subtitle">You have successfully authenticated with {{PROVIDER_NAME}}. You can now close this window and return to your terminal to continue.</p>
+
         {{SETUP_NOTICE}}
-        
+
         <div class="actions">
             <button class="button button-primary" onclick="window.close()">
                 <span>Close Window</span>
@@ -167,48 +171,65 @@ const LoginSuccessHtml = `<!DOCTYPE html>
                 <span>↗</span>
             </a>
         </div>
-        
+
         <div class="countdown">
             This window will close automatically in <span id="countdown">10</span> seconds
         </div>
-        
+
         <div class="footer">
             <p>Powered by <a href="https://chatgpt.com" target="_blank">ChatGPT</a></p>
         </div>
     </div>
-    
+
     <script>
         let countdown = 10;
         const countdownElement = document.getElementById('countdown');
-        
+
         const timer = setInterval(() => {
             countdown--;
             countdownElement.textContent = countdown;
-            
+
             if (countdown <= 0) {
                 clearInterval(timer);
                 window.close();
             }
         }, 1000);
-        
+
         // Close window when user presses Escape
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 window.close();
             }
         });
-        
+
         // Focus the close button for keyboard accessibility
         document.querySelector('.button-primary').focus();
     </script>
 </body>
 </html>`
 
-// SetupNoticeHTML is the HTML template for the section that provides instructions
-// for additional setup. This is displayed on the success page when further actions
-// are required from the user.
-const SetupNoticeHtml = `
+// setupNoticeHTML is the HTML template for the setup notice section.
+const setupNoticeHTML = `
         <div class="setup-notice">
             <h3>Additional Setup Required</h3>
-            <p>To complete your setup, please visit the <a href="{{PLATFORM_URL}}" target="_blank">Codex</a> to configure your account.</p>
+            <p>To complete your setup, please visit the <a href="{{PLATFORM_URL}}" target="_blank">{{PROVIDER_NAME}}</a> to configure your account.</p>
         </div>`
+
+// generateSuccessHTML creates the HTML content for the success page.
+func generateSuccessHTML(providerName string, setupRequired bool, platformURL string) string {
+	safeProviderName := html.EscapeString(providerName)
+	safePlatformURL := html.EscapeString(platformURL)
+
+	result := strings.ReplaceAll(loginSuccessHTML, "{{PROVIDER_NAME}}", safeProviderName)
+	result = strings.ReplaceAll(result, "{{PLATFORM_URL}}", safePlatformURL)
+
+	if setupRequired {
+		setupNotice := strings.ReplaceAll(setupNoticeHTML, "{{PROVIDER_NAME}}", safeProviderName)
+		setupNotice = strings.ReplaceAll(setupNotice, "{{PLATFORM_URL}}", safePlatformURL)
+		result = strings.Replace(result, "{{SETUP_NOTICE}}", setupNotice, 1)
+	} else {
+		result = strings.Replace(result, "{{SETUP_NOTICE}}", "", 1)
+	}
+
+	return result
+}

@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	tls "github.com/refraction-networking/utls"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
@@ -113,14 +113,14 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
 	if err := tlsConn.Handshake(); err != nil {
-		conn.Close()
+		_ = tlsConn.Close()
 		return nil, err
 	}
 
 	tr := &http2.Transport{}
 	h2Conn, err := tr.NewClientConn(tlsConn)
 	if err != nil {
-		tlsConn.Close()
+		_ = tlsConn.Close()
 		return nil, err
 	}
 
@@ -157,10 +157,10 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
-// NewAnthropicHttpClient creates an HTTP client that bypasses TLS fingerprinting
+// newAnthropicHttpClient creates an HTTP client that bypasses TLS fingerprinting
 // for Anthropic domains by using utls with Chrome fingerprint.
 // It accepts optional SDK configuration for proxy settings.
-func NewAnthropicHttpClient(cfg *config.SDKConfig) *http.Client {
+func newAnthropicHttpClient(cfg *config.SDKConfig) *http.Client {
 	return &http.Client{
 		Transport: newUtlsRoundTripper(cfg),
 	}

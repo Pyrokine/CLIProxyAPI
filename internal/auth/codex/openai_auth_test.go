@@ -17,17 +17,21 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	var calls int32
-	auth := &CodexAuth{
+	auth := &Auth{
 		httpClient: &http.Client{
-			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				atomic.AddInt32(&calls, 1)
-				return &http.Response{
-					StatusCode: http.StatusBadRequest,
-					Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_grant","code":"refresh_token_reused"}`)),
-					Header:     make(http.Header),
-					Request:    req,
-				}, nil
-			}),
+			Transport: roundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					atomic.AddInt32(&calls, 1)
+					return &http.Response{
+						StatusCode: http.StatusBadRequest,
+						Body: io.NopCloser(
+							strings.NewReader(`{"error":"invalid_grant","code":"refresh_token_reused"}`),
+						),
+						Header:  make(http.Header),
+						Request: req,
+					}, nil
+				},
+			),
 		},
 	}
 

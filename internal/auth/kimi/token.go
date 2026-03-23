@@ -4,17 +4,14 @@
 package kimi
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 )
 
-// KimiTokenStorage stores OAuth2 token information for Kimi API authentication.
-type KimiTokenStorage struct {
+// TokenStorage stores OAuth2 token information for Kimi API authentication.
+type TokenStorage struct {
 	// AccessToken is the OAuth2 access token used for authenticating API requests.
 	AccessToken string `json:"access_token"`
 	// RefreshToken is the OAuth2 refresh token used to obtain new access tokens.
@@ -35,13 +32,27 @@ type KimiTokenStorage struct {
 	Metadata map[string]any `json:"-"`
 }
 
-// SetMetadata allows external callers to inject metadata into the storage before saving.
-func (ts *KimiTokenStorage) SetMetadata(meta map[string]any) {
-	ts.Metadata = meta
+// BuildMetadata constructs the standard metadata map for a Kimi auth bundle.
+func BuildMetadata(bundle *AuthBundle) map[string]any {
+	metadata := map[string]any{
+		"type":          "kimi",
+		"access_token":  bundle.TokenData.AccessToken,
+		"refresh_token": bundle.TokenData.RefreshToken,
+		"token_type":    bundle.TokenData.TokenType,
+		"scope":         bundle.TokenData.Scope,
+		"timestamp":     time.Now().UnixMilli(),
+	}
+	if bundle.TokenData.ExpiresAt > 0 {
+		metadata["expired"] = time.Unix(bundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
+	}
+	if deviceID := strings.TrimSpace(bundle.DeviceID); deviceID != "" {
+		metadata["device_id"] = deviceID
+	}
+	return metadata
 }
 
-// KimiTokenData holds the raw OAuth token response from Kimi.
-type KimiTokenData struct {
+// TokenData holds the raw OAuth token response from Kimi.
+type TokenData struct {
 	// AccessToken is the OAuth2 access token.
 	AccessToken string `json:"access_token"`
 	// RefreshToken is the OAuth2 refresh token.
@@ -54,10 +65,10 @@ type KimiTokenData struct {
 	Scope string `json:"scope"`
 }
 
-// KimiAuthBundle bundles authentication data for storage.
-type KimiAuthBundle struct {
+// AuthBundle bundles authentication data for storage.
+type AuthBundle struct {
 	// TokenData contains the OAuth token information.
-	TokenData *KimiTokenData
+	TokenData *TokenData
 	// DeviceID is the device identifier used during OAuth device flow.
 	DeviceID string
 }
@@ -78,54 +89,9 @@ type DeviceCodeResponse struct {
 	Interval int `json:"interval"`
 }
 
-// SaveTokenToFile serializes the Kimi token storage to a JSON file.
-func (ts *KimiTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
+// SaveTokenToFile serializes the token storage to a JSON file.
+func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	ts.Type = "kimi"
-
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
-	}
-
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-
-	// Merge metadata using helper
-	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
-	if errMerge != nil {
-		return fmt.Errorf("failed to merge metadata: %w", errMerge)
-	}
-
-	encoder := json.NewEncoder(f)
-	encoder.SetIndent("", "  ")
-	if err = encoder.Encode(data); err != nil {
-		return fmt.Errorf("failed to write token to file: %w", err)
-	}
-	return nil
+	return auth.SaveTokenJSON(authFilePath, ts, ts.Metadata)
 }
 
-// IsExpired checks if the token has expired.
-func (ts *KimiTokenStorage) IsExpired() bool {
-	if ts.Expired == "" {
-		return false // No expiry set, assume valid
-	}
-	t, err := time.Parse(time.RFC3339, ts.Expired)
-	if err != nil {
-		return true // Has expiry string but can't parse
-	}
-	// Consider expired if within refresh threshold
-	return time.Now().Add(time.Duration(refreshThresholdSeconds) * time.Second).After(t)
-}
-
-// NeedsRefresh checks if the token should be refreshed.
-func (ts *KimiTokenStorage) NeedsRefresh() bool {
-	if ts.RefreshToken == "" {
-		return false // Can't refresh without refresh token
-	}
-	return ts.IsExpired()
-}

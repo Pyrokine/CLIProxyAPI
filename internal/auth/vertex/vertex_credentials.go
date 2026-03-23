@@ -1,5 +1,5 @@
 // Package vertex provides token storage for Google Vertex AI Gemini via service account credentials.
-// It serialises service account JSON into an auth file that is consumed by the runtime executor.
+// It serializes service account JSON into an auth file that is consumed by the runtime executor.
 package vertex
 
 import (
@@ -7,15 +7,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
-// VertexCredentialStorage stores the service account JSON for Vertex AI access.
+// CredentialStorage stores the service account JSON for Vertex AI access.
 // The content is persisted verbatim under the "service_account" key, together with
 // helper fields for project, location and email to improve logging and discovery.
-type VertexCredentialStorage struct {
+type CredentialStorage struct {
 	// ServiceAccount holds the parsed service account JSON content.
 	ServiceAccount map[string]any `json:"service_account"`
 
@@ -34,7 +35,7 @@ type VertexCredentialStorage struct {
 
 // SaveTokenToFile writes the credential payload to the given file path in JSON format.
 // It ensures the parent directory exists and logs the operation for transparency.
-func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
+func (s *CredentialStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
 	if s == nil {
 		return fmt.Errorf("vertex credential: storage is nil")
@@ -63,4 +64,33 @@ func (s *VertexCredentialStorage) SaveTokenToFile(authFilePath string) error {
 		return fmt.Errorf("vertex credential: encode failed: %w", err)
 	}
 	return nil
+}
+
+// Label builds a human-readable label for a Vertex AI credential.
+func Label(projectID, email string) string {
+	p := strings.TrimSpace(projectID)
+	e := strings.TrimSpace(email)
+	if p != "" && e != "" {
+		return fmt.Sprintf("%s (%s)", p, e)
+	}
+	if p != "" {
+		return p
+	}
+	if e != "" {
+		return e
+	}
+	return "vertex"
+}
+
+// SanitizeFilePart replaces path separators and whitespace in s for safe use in file names.
+func SanitizeFilePart(s string) string {
+	out := strings.TrimSpace(s)
+	replacers := []string{"/", "_", "\\", "_", ":", "_", " ", "-"}
+	for i := 0; i < len(replacers); i += 2 {
+		out = strings.ReplaceAll(out, replacers[i], replacers[i+1])
+	}
+	if out == "" {
+		return "vertex"
+	}
+	return out
 }

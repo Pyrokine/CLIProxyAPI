@@ -4,18 +4,13 @@
 package codex
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 )
 
-// CodexTokenStorage stores OAuth2 token information for OpenAI Codex API authentication.
+// TokenStorage stores OAuth2 token information for OpenAI Codex API authentication.
 // It maintains compatibility with the existing auth system while adding Codex-specific fields
 // for managing access tokens, refresh tokens, and user account information.
-type CodexTokenStorage struct {
+type TokenStorage struct {
 	// IDToken is the JWT ID token containing user claims and identity information.
 	IDToken string `json:"id_token"`
 	// AccessToken is the OAuth2 access token used for authenticating API requests.
@@ -39,7 +34,7 @@ type CodexTokenStorage struct {
 }
 
 // SetMetadata allows external callers to inject metadata into the storage before saving.
-func (ts *CodexTokenStorage) SetMetadata(meta map[string]any) {
+func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }
 
@@ -53,30 +48,7 @@ func (ts *CodexTokenStorage) SetMetadata(meta map[string]any) {
 //
 // Returns:
 //   - error: An error if the operation fails, nil otherwise
-func (ts *CodexTokenStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
+func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	ts.Type = "codex"
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
-		return fmt.Errorf("failed to create directory: %v", err)
-	}
-
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("failed to create token file: %w", err)
-	}
-	defer func() {
-		_ = f.Close()
-	}()
-
-	// Merge metadata using helper
-	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
-	if errMerge != nil {
-		return fmt.Errorf("failed to merge metadata: %w", errMerge)
-	}
-
-	if err = json.NewEncoder(f).Encode(data); err != nil {
-		return fmt.Errorf("failed to write token to file: %w", err)
-	}
-	return nil
-
+	return auth.SaveTokenJSON(authFilePath, ts, ts.Metadata)
 }

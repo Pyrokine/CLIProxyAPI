@@ -33,7 +33,9 @@ func SanitizeIFlowFileName(raw string) string {
 	cleanEmail := strings.ReplaceAll(raw, "*", "x")
 	var result strings.Builder
 	for _, r := range cleanEmail {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '@' || r == '.' || r == '-' {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '@' ||
+			r == '.' ||
+			r == '-' {
 			result.WriteRune(r)
 		}
 	}
@@ -42,11 +44,11 @@ func SanitizeIFlowFileName(raw string) string {
 
 // ExtractBXAuth extracts the BXAuth value from a cookie string.
 func ExtractBXAuth(cookie string) string {
-	parts := strings.Split(cookie, ";")
-	for _, part := range parts {
+	parts := strings.SplitSeq(cookie, ";")
+	for part := range parts {
 		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "BXAuth=") {
-			return strings.TrimPrefix(part, "BXAuth=")
+		if after, ok := strings.CutPrefix(part, "BXAuth="); ok {
+			return after
 		}
 	}
 	return ""
@@ -82,14 +84,14 @@ func CheckDuplicateBXAuth(authDir, bxAuth string) (string, error) {
 			continue
 		}
 
-		var tokenData struct {
+		var TokenData struct {
 			Cookie string `json:"cookie"`
 		}
-		if err := json.Unmarshal(data, &tokenData); err != nil {
+		if err := json.Unmarshal(data, &TokenData); err != nil {
 			continue
 		}
 
-		existingBXAuth := ExtractBXAuth(tokenData.Cookie)
+		existingBXAuth := ExtractBXAuth(TokenData.Cookie)
 		if existingBXAuth != "" && existingBXAuth == bxAuth {
 			return filePath, nil
 		}

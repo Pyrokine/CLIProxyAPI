@@ -4,33 +4,11 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"maps"
 	"strings"
 )
-
-// NormalizeServiceAccountJSON normalizes the given JSON-encoded service account payload.
-// It returns the normalized JSON (with sanitized private_key) or, if normalization fails,
-// the original bytes and the encountered error.
-func NormalizeServiceAccountJSON(raw []byte) ([]byte, error) {
-	if len(raw) == 0 {
-		return raw, nil
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return raw, err
-	}
-	normalized, err := NormalizeServiceAccountMap(payload)
-	if err != nil {
-		return raw, err
-	}
-	out, err := json.Marshal(normalized)
-	if err != nil {
-		return raw, err
-	}
-	return out, nil
-}
 
 // NormalizeServiceAccountMap returns a copy of the given service account map with
 // a sanitized private_key field that is guaranteed to contain a valid RSA PRIVATE KEY PEM block.
@@ -47,9 +25,7 @@ func NormalizeServiceAccountMap(sa map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	clone := make(map[string]any, len(sa))
-	for k, v := range sa {
-		clone[k] = v
-	}
+	maps.Copy(clone, sa)
 	clone["private_key"] = normalized
 	return clone, nil
 }

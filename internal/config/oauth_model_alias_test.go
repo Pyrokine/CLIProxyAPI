@@ -19,10 +19,16 @@ func TestSanitizeOAuthModelAlias_PreservesForkFlag(t *testing.T) {
 		t.Fatalf("expected 2 sanitized aliases, got %d", len(aliases))
 	}
 	if aliases[0].Name != "gpt-5" || aliases[0].Alias != "g5" || !aliases[0].Fork {
-		t.Fatalf("expected first alias to be gpt-5->g5 fork=true, got name=%q alias=%q fork=%v", aliases[0].Name, aliases[0].Alias, aliases[0].Fork)
+		t.Fatalf(
+			"expected first alias to be gpt-5->g5 fork=true, got name=%q alias=%q fork=%v", aliases[0].Name,
+			aliases[0].Alias, aliases[0].Fork,
+		)
 	}
 	if aliases[1].Name != "gpt-6" || aliases[1].Alias != "g6" || aliases[1].Fork {
-		t.Fatalf("expected second alias to be gpt-6->g6 fork=false, got name=%q alias=%q fork=%v", aliases[1].Name, aliases[1].Alias, aliases[1].Fork)
+		t.Fatalf(
+			"expected second alias to be gpt-6->g6 fork=false, got name=%q alias=%q fork=%v", aliases[1].Name,
+			aliases[1].Alias, aliases[1].Fork,
+		)
 	}
 }
 
@@ -50,7 +56,10 @@ func TestSanitizeOAuthModelAlias_AllowsMultipleAliasesForSameName(t *testing.T) 
 	}
 	for i, exp := range expected {
 		if aliases[i].Name != exp.Name || aliases[i].Alias != exp.Alias || aliases[i].Fork != exp.Fork {
-			t.Fatalf("expected alias %d to be name=%q alias=%q fork=%v, got name=%q alias=%q fork=%v", i, exp.Name, exp.Alias, exp.Fork, aliases[i].Name, aliases[i].Alias, aliases[i].Fork)
+			t.Fatalf(
+				"expected alias %d to be name=%q alias=%q fork=%v, got name=%q alias=%q fork=%v", i, exp.Name,
+				exp.Alias, exp.Fork, aliases[i].Name, aliases[i].Alias, aliases[i].Fork,
+			)
 		}
 	}
 }

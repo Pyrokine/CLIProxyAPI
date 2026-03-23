@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -35,25 +35,25 @@ const (
 // DefaultAPIBaseURL is the canonical chat completions endpoint.
 const DefaultAPIBaseURL = "https://apis.iflow.cn/v1"
 
-// SuccessRedirectURL is exposed for consumers needing the official success page.
-const SuccessRedirectURL = iFlowSuccessRedirectURL
+// successRedirectURL is exposed for consumers needing the official success page.
+const successRedirectURL = iFlowSuccessRedirectURL
 
 // CallbackPort defines the local port used for OAuth callbacks.
 const CallbackPort = 11451
 
-// IFlowAuth encapsulates the HTTP client helpers for the OAuth flow.
-type IFlowAuth struct {
+// Auth encapsulates the HTTP client helpers for the OAuth flow.
+type Auth struct {
 	httpClient *http.Client
 }
 
-// NewIFlowAuth constructs a new IFlowAuth with proxy-aware transport.
-func NewIFlowAuth(cfg *config.Config) *IFlowAuth {
+// NewAuth constructs a new Auth with proxy-aware transport.
+func NewAuth(cfg *config.Config) *Auth {
 	client := &http.Client{Timeout: 30 * time.Second}
-	return &IFlowAuth{httpClient: util.SetProxy(&cfg.SDKConfig, client)}
+	return &Auth{httpClient: util.SetProxy(&cfg.SDKConfig, client)}
 }
 
 // AuthorizationURL builds the authorization URL and matching redirect URI.
-func (ia *IFlowAuth) AuthorizationURL(state string, port int) (authURL, redirectURI string) {
+func (ia *Auth) AuthorizationURL(state string, port int) (authURL, redirectURI string) {
 	redirectURI = fmt.Sprintf("http://localhost:%d/oauth2callback", port)
 	values := url.Values{}
 	values.Set("loginMethod", "phone")
@@ -66,7 +66,7 @@ func (ia *IFlowAuth) AuthorizationURL(state string, port int) (authURL, redirect
 }
 
 // ExchangeCodeForTokens exchanges an authorization code for access and refresh tokens.
-func (ia *IFlowAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*IFlowTokenData, error) {
+func (ia *Auth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*TokenData, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
@@ -83,7 +83,7 @@ func (ia *IFlowAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectUR
 }
 
 // RefreshTokens exchanges a refresh token for a new access token.
-func (ia *IFlowAuth) RefreshTokens(ctx context.Context, refreshToken string) (*IFlowTokenData, error) {
+func (ia *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenData, error) {
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
@@ -98,8 +98,10 @@ func (ia *IFlowAuth) RefreshTokens(ctx context.Context, refreshToken string) (*I
 	return ia.doTokenRequest(ctx, req)
 }
 
-func (ia *IFlowAuth) newTokenRequest(ctx context.Context, form url.Values) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, iFlowOAuthTokenEndpoint, strings.NewReader(form.Encode()))
+func (ia *Auth) newTokenRequest(ctx context.Context, form url.Values) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, iFlowOAuthTokenEndpoint, strings.NewReader(form.Encode()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("iflow token: create request failed: %w", err)
 	}
@@ -111,7 +113,7 @@ func (ia *IFlowAuth) newTokenRequest(ctx context.Context, form url.Values) (*htt
 	return req, nil
 }
 
-func (ia *IFlowAuth) doTokenRequest(ctx context.Context, req *http.Request) (*IFlowTokenData, error) {
+func (ia *Auth) doTokenRequest(ctx context.Context, req *http.Request) (*TokenData, error) {
 	resp, err := ia.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("iflow token: request failed: %w", err)
@@ -128,12 +130,12 @@ func (ia *IFlowAuth) doTokenRequest(ctx context.Context, req *http.Request) (*IF
 		return nil, fmt.Errorf("iflow token: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	var tokenResp IFlowTokenResponse
+	var tokenResp tokenResponse
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, fmt.Errorf("iflow token: decode response failed: %w", err)
 	}
 
-	data := &IFlowTokenData{
+	data := &TokenData{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		TokenType:    tokenResp.TokenType,
@@ -146,7 +148,7 @@ func (ia *IFlowAuth) doTokenRequest(ctx context.Context, req *http.Request) (*IF
 		return nil, fmt.Errorf("iflow token: missing access token in response")
 	}
 
-	info, errAPI := ia.FetchUserInfo(ctx, tokenResp.AccessToken)
+	info, errAPI := ia.fetchUserInfo(ctx, tokenResp.AccessToken)
 	if errAPI != nil {
 		return nil, fmt.Errorf("iflow token: fetch user info failed: %w", errAPI)
 	}
@@ -166,8 +168,8 @@ func (ia *IFlowAuth) doTokenRequest(ctx context.Context, req *http.Request) (*IF
 	return data, nil
 }
 
-// FetchUserInfo retrieves account metadata (including API key) for the provided access token.
-func (ia *IFlowAuth) FetchUserInfo(ctx context.Context, accessToken string) (*userInfoData, error) {
+// fetchUserInfo retrieves account metadata (including API key) for the provided access token.
+func (ia *Auth) fetchUserInfo(ctx context.Context, accessToken string) (*userInfoData, error) {
 	if strings.TrimSpace(accessToken) == "" {
 		return nil, fmt.Errorf("iflow api key: access token is empty")
 	}
@@ -212,11 +214,11 @@ func (ia *IFlowAuth) FetchUserInfo(ctx context.Context, accessToken string) (*us
 }
 
 // CreateTokenStorage converts token data into persistence storage.
-func (ia *IFlowAuth) CreateTokenStorage(data *IFlowTokenData) *IFlowTokenStorage {
+func (ia *Auth) CreateTokenStorage(data *TokenData) *TokenStorage {
 	if data == nil {
 		return nil
 	}
-	return &IFlowTokenStorage{
+	return &TokenStorage{
 		AccessToken:  data.AccessToken,
 		RefreshToken: data.RefreshToken,
 		LastRefresh:  time.Now().Format(time.RFC3339),
@@ -228,27 +230,8 @@ func (ia *IFlowAuth) CreateTokenStorage(data *IFlowTokenData) *IFlowTokenStorage
 	}
 }
 
-// UpdateTokenStorage updates the persisted token storage with latest token data.
-func (ia *IFlowAuth) UpdateTokenStorage(storage *IFlowTokenStorage, data *IFlowTokenData) {
-	if storage == nil || data == nil {
-		return
-	}
-	storage.AccessToken = data.AccessToken
-	storage.RefreshToken = data.RefreshToken
-	storage.LastRefresh = time.Now().Format(time.RFC3339)
-	storage.Expire = data.Expire
-	if data.APIKey != "" {
-		storage.APIKey = data.APIKey
-	}
-	if data.Email != "" {
-		storage.Email = data.Email
-	}
-	storage.TokenType = data.TokenType
-	storage.Scope = data.Scope
-}
-
-// IFlowTokenResponse models the OAuth token endpoint response.
-type IFlowTokenResponse struct {
+// tokenResponse models the OAuth token endpoint response.
+type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int    `json:"expires_in"`
@@ -256,8 +239,8 @@ type IFlowTokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
-// IFlowTokenData captures processed token details.
-type IFlowTokenData struct {
+// TokenData captures processed token details.
+type TokenData struct {
 	AccessToken  string
 	RefreshToken string
 	TokenType    string
@@ -282,15 +265,15 @@ type userInfoData struct {
 
 // iFlowAPIKeyResponse represents the response from the API key endpoint
 type iFlowAPIKeyResponse struct {
-	Success bool         `json:"success"`
-	Code    string       `json:"code"`
-	Message string       `json:"message"`
-	Data    iFlowKeyData `json:"data"`
-	Extra   interface{}  `json:"extra"`
+	Success bool    `json:"success"`
+	Code    string  `json:"code"`
+	Message string  `json:"message"`
+	Data    KeyData `json:"data"`
+	Extra   any     `json:"extra"`
 }
 
-// iFlowKeyData contains the API key information
-type iFlowKeyData struct {
+// KeyData contains the API key information
+type KeyData struct {
 	HasExpired bool   `json:"hasExpired"`
 	ExpireTime string `json:"expireTime"`
 	Name       string `json:"name"`
@@ -304,7 +287,7 @@ type iFlowRefreshRequest struct {
 }
 
 // AuthenticateWithCookie performs authentication using browser cookies
-func (ia *IFlowAuth) AuthenticateWithCookie(ctx context.Context, cookie string) (*IFlowTokenData, error) {
+func (ia *Auth) AuthenticateWithCookie(ctx context.Context, cookie string) (*TokenData, error) {
 	if strings.TrimSpace(cookie) == "" {
 		return nil, fmt.Errorf("iflow cookie authentication: cookie is empty")
 	}
@@ -322,7 +305,7 @@ func (ia *IFlowAuth) AuthenticateWithCookie(ctx context.Context, cookie string) 
 	}
 
 	// Convert to token data format using refreshed key
-	data := &IFlowTokenData{
+	data := &TokenData{
 		APIKey: refreshedKeyInfo.APIKey,
 		Expire: refreshedKeyInfo.ExpireTime,
 		Email:  refreshedKeyInfo.Name,
@@ -333,7 +316,7 @@ func (ia *IFlowAuth) AuthenticateWithCookie(ctx context.Context, cookie string) 
 }
 
 // fetchAPIKeyInfo retrieves API key information using GET request with cookie
-func (ia *IFlowAuth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*iFlowKeyData, error) {
+func (ia *Auth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*KeyData, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, iFlowAPIKeyEndpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("iflow cookie: create GET request failed: %w", err)
@@ -342,7 +325,10 @@ func (ia *IFlowAuth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*iFlow
 	// Set cookie and other headers to mimic browser
 	req.Header.Set("Cookie", cookie)
 	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set(
+		"User-Agent",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+	)
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	req.Header.Set("Connection", "keep-alive")
@@ -374,7 +360,9 @@ func (ia *IFlowAuth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*iFlow
 
 	if resp.StatusCode != http.StatusOK {
 		log.Debugf("iflow cookie GET request failed: status=%d body=%s", resp.StatusCode, string(body))
-		return nil, fmt.Errorf("iflow cookie: GET request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf(
+			"iflow cookie: GET request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)),
+		)
 	}
 
 	var keyResp iFlowAPIKeyResponse
@@ -395,7 +383,7 @@ func (ia *IFlowAuth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*iFlow
 }
 
 // RefreshAPIKey refreshes the API key using POST request
-func (ia *IFlowAuth) RefreshAPIKey(ctx context.Context, cookie, name string) (*iFlowKeyData, error) {
+func (ia *Auth) RefreshAPIKey(ctx context.Context, cookie, name string) (*KeyData, error) {
 	if strings.TrimSpace(cookie) == "" {
 		return nil, fmt.Errorf("iflow cookie refresh: cookie is empty")
 	}
@@ -413,7 +401,9 @@ func (ia *IFlowAuth) RefreshAPIKey(ctx context.Context, cookie, name string) (*i
 		return nil, fmt.Errorf("iflow cookie refresh: marshal request failed: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, iFlowAPIKeyEndpoint, strings.NewReader(string(bodyBytes)))
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, iFlowAPIKeyEndpoint, strings.NewReader(string(bodyBytes)),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("iflow cookie refresh: create POST request failed: %w", err)
 	}
@@ -422,7 +412,10 @@ func (ia *IFlowAuth) RefreshAPIKey(ctx context.Context, cookie, name string) (*i
 	req.Header.Set("Cookie", cookie)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set(
+		"User-Agent",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+	)
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	req.Header.Set("Connection", "keep-alive")
@@ -453,7 +446,10 @@ func (ia *IFlowAuth) RefreshAPIKey(ctx context.Context, cookie, name string) (*i
 
 	if resp.StatusCode != http.StatusOK {
 		log.Debugf("iflow cookie POST request failed: status=%d body=%s", resp.StatusCode, string(body))
-		return nil, fmt.Errorf("iflow cookie refresh: POST request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf(
+			"iflow cookie refresh: POST request failed with status %d: %s", resp.StatusCode,
+			strings.TrimSpace(string(body)),
+		)
 	}
 
 	var keyResp iFlowAPIKeyResponse
@@ -489,7 +485,7 @@ func ShouldRefreshAPIKey(expireTime string) (bool, time.Duration, error) {
 }
 
 // CreateCookieTokenStorage converts cookie-based token data into persistence storage
-func (ia *IFlowAuth) CreateCookieTokenStorage(data *IFlowTokenData) *IFlowTokenStorage {
+func (ia *Auth) CreateCookieTokenStorage(data *TokenData) *TokenStorage {
 	if data == nil {
 		return nil
 	}
@@ -501,7 +497,7 @@ func (ia *IFlowAuth) CreateCookieTokenStorage(data *IFlowTokenData) *IFlowTokenS
 		cookieToSave = "BXAuth=" + bxAuth + ";"
 	}
 
-	return &IFlowTokenStorage{
+	return &TokenStorage{
 		APIKey:      data.APIKey,
 		Email:       data.Email,
 		Expire:      data.Expire,
@@ -511,13 +507,3 @@ func (ia *IFlowAuth) CreateCookieTokenStorage(data *IFlowTokenData) *IFlowTokenS
 	}
 }
 
-// UpdateCookieTokenStorage updates the persisted token storage with refreshed API key data
-func (ia *IFlowAuth) UpdateCookieTokenStorage(storage *IFlowTokenStorage, keyData *iFlowKeyData) {
-	if storage == nil || keyData == nil {
-		return
-	}
-
-	storage.APIKey = keyData.APIKey
-	storage.Expire = keyData.ExpireTime
-	storage.LastRefresh = time.Now().Format(time.RFC3339)
-}

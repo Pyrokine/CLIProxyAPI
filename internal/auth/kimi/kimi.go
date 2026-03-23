@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -29,55 +29,53 @@ const (
 	kimiDeviceCodeURL = kimiOAuthHost + "/api/oauth/device_authorization"
 	// kimiTokenURL is the endpoint for exchanging device codes for tokens.
 	kimiTokenURL = kimiOAuthHost + "/api/oauth/token"
-	// KimiAPIBaseURL is the base URL for Kimi API requests.
-	KimiAPIBaseURL = "https://api.kimi.com/coding"
+	// APIBaseURL is the base URL for Kimi API requests.
+	APIBaseURL = "https://api.kimi.com/coding"
 	// defaultPollInterval is the default interval for polling token endpoint.
 	defaultPollInterval = 5 * time.Second
 	// maxPollDuration is the maximum time to wait for user authorization.
 	maxPollDuration = 15 * time.Minute
-	// refreshThresholdSeconds is when to refresh token before expiry (5 minutes).
-	refreshThresholdSeconds = 300
 )
 
-// KimiAuth handles Kimi authentication flow.
-type KimiAuth struct {
+// Auth handles Kimi authentication flow.
+type Auth struct {
 	deviceClient *DeviceFlowClient
 	cfg          *config.Config
 }
 
-// NewKimiAuth creates a new KimiAuth service instance.
-func NewKimiAuth(cfg *config.Config) *KimiAuth {
-	return &KimiAuth{
-		deviceClient: NewDeviceFlowClient(cfg),
+// NewAuth creates a new Auth service instance.
+func NewAuth(cfg *config.Config) *Auth {
+	return &Auth{
+		deviceClient: newDeviceFlowClient(cfg),
 		cfg:          cfg,
 	}
 }
 
 // StartDeviceFlow initiates the device flow authentication.
-func (k *KimiAuth) StartDeviceFlow(ctx context.Context) (*DeviceCodeResponse, error) {
-	return k.deviceClient.RequestDeviceCode(ctx)
+func (k *Auth) StartDeviceFlow(ctx context.Context) (*DeviceCodeResponse, error) {
+	return k.deviceClient.requestDeviceCode(ctx)
 }
 
 // WaitForAuthorization polls for user authorization and returns the auth bundle.
-func (k *KimiAuth) WaitForAuthorization(ctx context.Context, deviceCode *DeviceCodeResponse) (*KimiAuthBundle, error) {
-	tokenData, err := k.deviceClient.PollForToken(ctx, deviceCode)
+func (k *Auth) WaitForAuthorization(ctx context.Context, deviceCode *DeviceCodeResponse) (*AuthBundle, error) {
+	TokenData, err := k.deviceClient.pollForToken(ctx, deviceCode)
 	if err != nil {
 		return nil, err
 	}
 
-	return &KimiAuthBundle{
-		TokenData: tokenData,
+	return &AuthBundle{
+		TokenData: TokenData,
 		DeviceID:  k.deviceClient.deviceID,
 	}, nil
 }
 
-// CreateTokenStorage creates a new KimiTokenStorage from auth bundle.
-func (k *KimiAuth) CreateTokenStorage(bundle *KimiAuthBundle) *KimiTokenStorage {
+// CreateTokenStorage creates a new TokenStorage from auth bundle.
+func (k *Auth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 	expired := ""
 	if bundle.TokenData.ExpiresAt > 0 {
 		expired = time.Unix(bundle.TokenData.ExpiresAt, 0).UTC().Format(time.RFC3339)
 	}
-	return &KimiTokenStorage{
+	return &TokenStorage{
 		AccessToken:  bundle.TokenData.AccessToken,
 		RefreshToken: bundle.TokenData.RefreshToken,
 		TokenType:    bundle.TokenData.TokenType,
@@ -95,8 +93,8 @@ type DeviceFlowClient struct {
 	deviceID   string
 }
 
-// NewDeviceFlowClient creates a new device flow client.
-func NewDeviceFlowClient(cfg *config.Config) *DeviceFlowClient {
+// newDeviceFlowClient creates a new device flow client.
+func newDeviceFlowClient(cfg *config.Config) *DeviceFlowClient {
 	return NewDeviceFlowClientWithDeviceID(cfg, "")
 }
 
@@ -159,8 +157,8 @@ func (c *DeviceFlowClient) commonHeaders() map[string]string {
 	}
 }
 
-// RequestDeviceCode initiates the device flow by requesting a device code from Kimi.
-func (c *DeviceFlowClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeResponse, error) {
+// requestDeviceCode initiates the device flow by requesting a device code from Kimi.
+func (c *DeviceFlowClient) requestDeviceCode(ctx context.Context) (*DeviceCodeResponse, error) {
 	data := url.Values{}
 	data.Set("client_id", kimiClientID)
 
@@ -190,7 +188,9 @@ func (c *DeviceFlowClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeRe
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("kimi: device code request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
+		return nil, fmt.Errorf(
+			"kimi: device code request failed with status %d: %s", resp.StatusCode, string(bodyBytes),
+		)
 	}
 
 	var deviceCode DeviceCodeResponse
@@ -201,16 +201,13 @@ func (c *DeviceFlowClient) RequestDeviceCode(ctx context.Context) (*DeviceCodeRe
 	return &deviceCode, nil
 }
 
-// PollForToken polls the token endpoint until the user authorizes or the device code expires.
-func (c *DeviceFlowClient) PollForToken(ctx context.Context, deviceCode *DeviceCodeResponse) (*KimiTokenData, error) {
+// pollForToken polls the token endpoint until the user authorizes or the device code expires.
+func (c *DeviceFlowClient) pollForToken(ctx context.Context, deviceCode *DeviceCodeResponse) (*TokenData, error) {
 	if deviceCode == nil {
 		return nil, fmt.Errorf("kimi: device code is nil")
 	}
 
-	interval := time.Duration(deviceCode.Interval) * time.Second
-	if interval < defaultPollInterval {
-		interval = defaultPollInterval
-	}
+	interval := max(time.Duration(deviceCode.Interval)*time.Second, defaultPollInterval)
 
 	deadline := time.Now().Add(maxPollDuration)
 	if deviceCode.ExpiresIn > 0 {
@@ -246,7 +243,7 @@ func (c *DeviceFlowClient) PollForToken(ctx context.Context, deviceCode *DeviceC
 
 // exchangeDeviceCode attempts to exchange the device code for an access token.
 // Returns (token, error, shouldContinue).
-func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode string) (*KimiTokenData, error, bool) {
+func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode string) (*TokenData, error, bool) {
 	data := url.Values{}
 	data.Set("client_id", kimiClientID)
 	data.Set("device_code", deviceCode)
@@ -316,7 +313,7 @@ func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode st
 		expiresAt = time.Now().Unix() + int64(oauthResp.ExpiresIn)
 	}
 
-	return &KimiTokenData{
+	return &TokenData{
 		AccessToken:  oauthResp.AccessToken,
 		RefreshToken: oauthResp.RefreshToken,
 		TokenType:    oauthResp.TokenType,
@@ -326,7 +323,7 @@ func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode st
 }
 
 // RefreshToken exchanges a refresh token for a new access token.
-func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string) (*KimiTokenData, error) {
+func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string) (*TokenData, error) {
 	data := url.Values{}
 	data.Set("client_id", kimiClientID)
 	data.Set("grant_type", "refresh_token")
@@ -386,7 +383,7 @@ func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string
 		expiresAt = time.Now().Unix() + int64(tokenResp.ExpiresIn)
 	}
 
-	return &KimiTokenData{
+	return &TokenData{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		TokenType:    tokenResp.TokenType,

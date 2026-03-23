@@ -2,6 +2,7 @@ package iflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -64,7 +65,7 @@ func (s *OAuthServer) Start() error {
 	s.running = true
 
 	go func() {
-		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.errChan <- err
 		}
 	}()
@@ -121,7 +122,7 @@ func (s *OAuthServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	state := query.Get("state")
 	s.sendResult(&OAuthResult{Code: code, State: state})
-	http.Redirect(w, r, SuccessRedirectURL, http.StatusFound)
+	http.Redirect(w, r, successRedirectURL, http.StatusFound)
 }
 
 func (s *OAuthServer) sendResult(res *OAuthResult) {

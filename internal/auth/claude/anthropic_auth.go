@@ -13,16 +13,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
 // OAuth configuration constants for Claude/Anthropic
 const (
-	AuthURL     = "https://claude.ai/oauth/authorize"
-	TokenURL    = "https://api.anthropic.com/v1/oauth/token"
-	ClientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	RedirectURI = "http://localhost:54545/callback"
+	authURL     = "https://claude.ai/oauth/authorize"
+	tokenURL    = "https://api.anthropic.com/v1/oauth/token"
+	clientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	redirectURI = "http://localhost:54545/callback"
 )
 
 // tokenResponse represents the response structure from Anthropic's OAuth token endpoint.
@@ -42,14 +43,14 @@ type tokenResponse struct {
 	} `json:"account"`
 }
 
-// ClaudeAuth handles Anthropic OAuth2 authentication flow.
+// Auth handles Anthropic OAuth2 authentication flow.
 // It provides methods for generating authorization URLs, exchanging codes for tokens,
 // and refreshing expired tokens using PKCE for enhanced security.
-type ClaudeAuth struct {
+type Auth struct {
 	httpClient *http.Client
 }
 
-// NewClaudeAuth creates a new Anthropic authentication service.
+// NewAuth creates a new Anthropic authentication service.
 // It initializes the HTTP client with a custom TLS transport that uses Firefox
 // fingerprint to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
 //
@@ -57,12 +58,12 @@ type ClaudeAuth struct {
 //   - cfg: The application configuration containing proxy settings
 //
 // Returns:
-//   - *ClaudeAuth: A new Claude authentication service instance
-func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
+//   - *Auth: A new Claude authentication service instance
+func NewAuth(cfg *config.Config) *Auth {
 	// Use custom HTTP client with Firefox TLS fingerprint to bypass
 	// Cloudflare's bot detection on Anthropic domains
-	return &ClaudeAuth{
-		httpClient: NewAnthropicHttpClient(&cfg.SDKConfig),
+	return &Auth{
+		httpClient: newAnthropicHttpClient(&cfg.SDKConfig),
 	}
 }
 
@@ -78,23 +79,23 @@ func NewClaudeAuth(cfg *config.Config) *ClaudeAuth {
 //   - string: The complete authorization URL
 //   - string: The state parameter for verification
 //   - error: An error if PKCE codes are missing or URL generation fails
-func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, string, error) {
+func (o *Auth) GenerateAuthURL(state string, pkceCodes *misc.PKCECodes) (string, string, error) {
 	if pkceCodes == nil {
 		return "", "", fmt.Errorf("PKCE codes are required")
 	}
 
 	params := url.Values{
 		"code":                  {"true"},
-		"client_id":             {ClientID},
+		"client_id":             {clientID},
 		"response_type":         {"code"},
-		"redirect_uri":          {RedirectURI},
+		"redirect_uri":          {redirectURI},
 		"scope":                 {"org:create_api_key user:profile user:inference"},
 		"code_challenge":        {pkceCodes.CodeChallenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
 	}
 
-	authURL := fmt.Sprintf("%s?%s", AuthURL, params.Encode())
+	authURL := fmt.Sprintf("%s?%s", authURL, params.Encode())
 	return authURL, state, nil
 }
 
@@ -107,7 +108,7 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 // Returns:
 //   - parsedCode: The extracted authorization code
 //   - parsedState: The extracted state parameter if present
-func (c *ClaudeAuth) parseCodeAndState(code string) (parsedCode, parsedState string) {
+func (o *Auth) parseCodeAndState(code string) (parsedCode, parsedState string) {
 	splits := strings.Split(code, "#")
 	parsedCode = splits[0]
 	if len(splits) > 1 {
@@ -127,21 +128,25 @@ func (c *ClaudeAuth) parseCodeAndState(code string) (parsedCode, parsedState str
 //   - pkceCodes: The PKCE codes for secure verification
 //
 // Returns:
-//   - *ClaudeAuthBundle: The complete authentication bundle with tokens
+//   - *AuthBundle: The complete authentication bundle with tokens
 //   - error: An error if token exchange fails
-func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state string, pkceCodes *PKCECodes) (*ClaudeAuthBundle, error) {
+func (o *Auth) ExchangeCodeForTokens(
+	ctx context.Context,
+	code, state string,
+	pkceCodes *misc.PKCECodes,
+) (*AuthBundle, error) {
 	if pkceCodes == nil {
 		return nil, fmt.Errorf("PKCE codes are required for token exchange")
 	}
 	newCode, newState := o.parseCodeAndState(code)
 
 	// Prepare token exchange request
-	reqBody := map[string]interface{}{
+	reqBody := map[string]any{
 		"code":          newCode,
 		"state":         state,
 		"grant_type":    "authorization_code",
-		"client_id":     ClientID,
-		"redirect_uri":  RedirectURI,
+		"client_id":     clientID,
+		"redirect_uri":  redirectURI,
 		"code_verifier": pkceCodes.CodeVerifier,
 	}
 
@@ -157,7 +162,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 
 	// log.Debugf("Token exchange request: %s", string(jsonBody))
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(string(jsonBody)))
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
@@ -191,7 +196,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 	}
 
 	// Create token data
-	tokenData := ClaudeTokenData{
+	TokenData := TokenData{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		Email:        tokenResp.Account.EmailAddress,
@@ -199,8 +204,8 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 	}
 
 	// Create auth bundle
-	bundle := &ClaudeAuthBundle{
-		TokenData:   tokenData,
+	bundle := &AuthBundle{
+		TokenData:   TokenData,
 		LastRefresh: time.Now().Format(time.RFC3339),
 	}
 
@@ -216,15 +221,16 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 //   - refreshToken: The refresh token to use for getting new access token
 //
 // Returns:
-//   - *ClaudeTokenData: The new token data with updated access token
+//   - *TokenData: The new token data with updated access token
 //   - error: An error if token refresh fails
-func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*ClaudeTokenData, error) {
+//
+func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenData, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
 
-	reqBody := map[string]interface{}{
-		"client_id":     ClientID,
+	reqBody := map[string]any{
+		"client_id":     clientID,
 		"grant_type":    "refresh_token",
 		"refresh_token": refreshToken,
 	}
@@ -234,7 +240,7 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(string(jsonBody)))
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}
@@ -267,7 +273,7 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 	}
 
 	// Create token data
-	return &ClaudeTokenData{
+	return &TokenData{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
 		Email:        tokenResp.Account.EmailAddress,
@@ -275,7 +281,7 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 	}, nil
 }
 
-// CreateTokenStorage creates a new ClaudeTokenStorage from auth bundle and user info.
+// CreateTokenStorage creates a new TokenStorage from auth bundle and user info.
 // This method converts the authentication bundle into a token storage structure
 // suitable for persistence and later use.
 //
@@ -283,9 +289,9 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 //   - bundle: The authentication bundle containing token data
 //
 // Returns:
-//   - *ClaudeTokenStorage: A new token storage instance
-func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenStorage {
-	storage := &ClaudeTokenStorage{
+//   - *TokenStorage: A new token storage instance
+func (o *Auth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
+	storage := &TokenStorage{
 		AccessToken:  bundle.TokenData.AccessToken,
 		RefreshToken: bundle.TokenData.RefreshToken,
 		LastRefresh:  bundle.LastRefresh,
@@ -296,54 +302,3 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 	return storage
 }
 
-// RefreshTokensWithRetry refreshes tokens with automatic retry logic.
-// This method implements exponential backoff retry logic for token refresh operations,
-// providing resilience against temporary network or service issues.
-//
-// Parameters:
-//   - ctx: The context for the request
-//   - refreshToken: The refresh token to use
-//   - maxRetries: The maximum number of retry attempts
-//
-// Returns:
-//   - *ClaudeTokenData: The refreshed token data
-//   - error: An error if all retry attempts fail
-func (o *ClaudeAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*ClaudeTokenData, error) {
-	var lastErr error
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			// Wait before retry
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt) * time.Second):
-			}
-		}
-
-		tokenData, err := o.RefreshTokens(ctx, refreshToken)
-		if err == nil {
-			return tokenData, nil
-		}
-
-		lastErr = err
-		log.Warnf("Token refresh attempt %d failed: %v", attempt+1, err)
-	}
-
-	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
-}
-
-// UpdateTokenStorage updates an existing token storage with new token data.
-// This method refreshes the token storage with newly obtained access and refresh tokens,
-// updating timestamps and expiration information.
-//
-// Parameters:
-//   - storage: The existing token storage to update
-//   - tokenData: The new token data to apply
-func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *ClaudeTokenData) {
-	storage.AccessToken = tokenData.AccessToken
-	storage.RefreshToken = tokenData.RefreshToken
-	storage.LastRefresh = time.Now().Format(time.RFC3339)
-	storage.Email = tokenData.Email
-	storage.Expire = tokenData.Expire
-}

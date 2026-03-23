@@ -32,9 +32,11 @@ func normalizePlanTypeForFilename(planType string) string {
 		return ""
 	}
 
-	parts := strings.FieldsFunc(planType, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	})
+	parts := strings.FieldsFunc(
+		planType, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		},
+	)
 	if len(parts) == 0 {
 		return ""
 	}
