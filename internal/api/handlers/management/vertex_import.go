@@ -9,8 +9,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/vertex"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/vertex"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // ImportVertexCredential handles uploading a Vertex service account JSON and saving it as an auth record.
@@ -35,7 +35,7 @@ func (h *Handler) ImportVertexCredential(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -71,9 +71,9 @@ func (h *Handler) ImportVertexCredential(c *gin.Context) {
 		location = "us-central1"
 	}
 
-	fileName := fmt.Sprintf("vertex-%s.json", sanitizeVertexFilePart(projectID))
-	label := labelForVertex(projectID, email)
-	storage := &vertex.VertexCredentialStorage{
+	fileName := fmt.Sprintf("vertex-%s.json", vertex.SanitizeFilePart(projectID))
+	label := vertex.Label(projectID, email)
+	storage := &vertex.CredentialStorage{
 		ServiceAccount: serviceAccount,
 		ProjectID:      projectID,
 		Email:          email,
@@ -107,13 +107,15 @@ func (h *Handler) ImportVertexCredential(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"status":     "ok",
-		"auth-file":  savedPath,
-		"project_id": projectID,
-		"email":      email,
-		"location":   location,
-	})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"status":     "ok",
+			"auth-file":  savedPath,
+			"project_id": projectID,
+			"email":      email,
+			"location":   location,
+		},
+	)
 }
 
 func valueAsString(v any) string {
@@ -126,31 +128,4 @@ func valueAsString(v any) string {
 	default:
 		return fmt.Sprint(t)
 	}
-}
-
-func sanitizeVertexFilePart(s string) string {
-	out := strings.TrimSpace(s)
-	replacers := []string{"/", "_", "\\", "_", ":", "_", " ", "-"}
-	for i := 0; i < len(replacers); i += 2 {
-		out = strings.ReplaceAll(out, replacers[i], replacers[i+1])
-	}
-	if out == "" {
-		return "vertex"
-	}
-	return out
-}
-
-func labelForVertex(projectID, email string) string {
-	p := strings.TrimSpace(projectID)
-	e := strings.TrimSpace(email)
-	if p != "" && e != "" {
-		return fmt.Sprintf("%s (%s)", p, e)
-	}
-	if p != "" {
-		return p
-	}
-	if e != "" {
-		return e
-	}
-	return "vertex"
 }

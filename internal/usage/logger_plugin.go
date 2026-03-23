@@ -6,44 +6,97 @@ package usage
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 var statisticsEnabled atomic.Bool
 
-func init() {
-	statisticsEnabled.Store(true)
-	coreusage.RegisterPlugin(NewLoggerPlugin())
+// globalPersister is set when the Persister starts. When set, LoggerPlugin
+// routes records through it instead of the legacy RequestStatistics.
+var (
+	globalPersisterMu sync.RWMutex
+	globalPersister   *Persister
+)
+
+// SetGlobalPersister registers the active Persister for the LoggerPlugin to use.
+func SetGlobalPersister(p *Persister) {
+	globalPersisterMu.Lock()
+	defer globalPersisterMu.Unlock()
+	globalPersister = p
 }
 
-// LoggerPlugin collects in-memory request statistics for usage analysis.
+// getGlobalPersister returns the active Persister, if any.
+func getGlobalPersister() *Persister {
+	globalPersisterMu.RLock()
+	defer globalPersisterMu.RUnlock()
+	return globalPersister
+}
+
+func init() {
+	statisticsEnabled.Store(true)
+	coreusage.RegisterPlugin(newLoggerPlugin())
+}
+
+// loggerPlugin collects in-memory request statistics for usage analysis.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
-type LoggerPlugin struct {
+type loggerPlugin struct {
 	stats *RequestStatistics
 }
 
-// NewLoggerPlugin constructs a new logger plugin instance.
+// newLoggerPlugin constructs a new logger plugin instance.
 //
 // Returns:
 //   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
-func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultRequestStatistics} }
+func newLoggerPlugin() *loggerPlugin { return &loggerPlugin{stats: defaultRequestStatistics} }
 
 // HandleUsage implements coreusage.Plugin.
-// It updates the in-memory statistics store whenever a usage record is received.
-//
-// Parameters:
-//   - ctx: The context for the usage record
-//   - record: The usage record to aggregate
-func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
+// When a global Persister is registered, records are routed through it (v2 path).
+// Otherwise, the legacy RequestStatistics is used as fallback.
+func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if !statisticsEnabled.Load() {
 		return
 	}
+
+	timestamp := record.RequestedAt
+	if timestamp.IsZero() {
+		timestamp = time.Now()
+	}
+	tokens := normaliseDetail(record.Detail)
+	modelName := record.Model
+	if modelName == "" {
+		modelName = "unknown"
+	}
+	failed := record.Failed
+	if !failed {
+		failed = !resolveSuccess(ctx)
+	}
+
+	source := record.Source
+	authIndex := record.AuthIndex
+
+	// Try v2 path (global Persister)
+	if persister := getGlobalPersister(); persister != nil {
+		detail := FlatDetail{
+			Timestamp: timestamp,
+			Model:     modelName,
+			Source:    source,
+			AuthIndex: authIndex,
+			Tokens:    tokens,
+			Failed:    failed,
+		}
+		persister.Record(detail)
+		return
+	}
+
+	// Fallback: legacy RequestStatistics (used when no Persister is configured)
 	if p == nil || p.stats == nil {
 		return
 	}
@@ -53,10 +106,8 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
 func SetStatisticsEnabled(enabled bool) { statisticsEnabled.Store(enabled) }
 
-// StatisticsEnabled reports the current recording state.
-func StatisticsEnabled() bool { return statisticsEnabled.Load() }
-
 // RequestStatistics maintains aggregated request metrics in memory.
+// This is the legacy storage used when no Persister is configured.
 type RequestStatistics struct {
 	mu sync.RWMutex
 
@@ -84,20 +135,20 @@ type apiStats struct {
 type modelStats struct {
 	TotalRequests int64
 	TotalTokens   int64
-	Details       []RequestDetail
+	Details       []requestDetail
 }
 
-// RequestDetail stores the timestamp and token usage for a single request.
-type RequestDetail struct {
+// requestDetail stores the timestamp and token usage for a single request.
+type requestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
 	Source    string     `json:"source"`
 	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
+	Tokens    tokenStats `json:"tokens"`
 	Failed    bool       `json:"failed"`
 }
 
-// TokenStats captures the token usage breakdown for a request.
-type TokenStats struct {
+// tokenStats captures the token usage breakdown for a request.
+type tokenStats struct {
 	InputTokens     int64 `json:"input_tokens"`
 	OutputTokens    int64 `json:"output_tokens"`
 	ReasoningTokens int64 `json:"reasoning_tokens"`
@@ -112,7 +163,7 @@ type StatisticsSnapshot struct {
 	FailureCount  int64 `json:"failure_count"`
 	TotalTokens   int64 `json:"total_tokens"`
 
-	APIs map[string]APISnapshot `json:"apis"`
+	APIs map[string]aPISnapshot `json:"apis"`
 
 	RequestsByDay  map[string]int64 `json:"requests_by_day"`
 	RequestsByHour map[string]int64 `json:"requests_by_hour"`
@@ -120,27 +171,27 @@ type StatisticsSnapshot struct {
 	TokensByHour   map[string]int64 `json:"tokens_by_hour"`
 }
 
-// APISnapshot summarises metrics for a single API key.
-type APISnapshot struct {
+// aPISnapshot summarises metrics for a single API key.
+type aPISnapshot struct {
 	TotalRequests int64                    `json:"total_requests"`
 	TotalTokens   int64                    `json:"total_tokens"`
-	Models        map[string]ModelSnapshot `json:"models"`
+	Models        map[string]modelSnapshot `json:"models"`
 }
 
-// ModelSnapshot summarises metrics for a specific model.
-type ModelSnapshot struct {
+// modelSnapshot summarises metrics for a specific model.
+type modelSnapshot struct {
 	TotalRequests int64           `json:"total_requests"`
 	TotalTokens   int64           `json:"total_tokens"`
-	Details       []RequestDetail `json:"details"`
+	Details       []requestDetail `json:"details"`
 }
 
-var defaultRequestStatistics = NewRequestStatistics()
+var defaultRequestStatistics = newRequestStatistics()
 
 // GetRequestStatistics returns the shared statistics store.
 func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics }
 
-// NewRequestStatistics constructs an empty statistics store.
-func NewRequestStatistics() *RequestStatistics {
+// newRequestStatistics constructs an empty statistics store.
+func newRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
 		apis:           make(map[string]*apiStats),
 		requestsByDay:  make(map[string]int64),
@@ -150,7 +201,7 @@ func NewRequestStatistics() *RequestStatistics {
 	}
 }
 
-// Record ingests a new usage record and updates the aggregates.
+// Record ingests a new usage record and updates the aggregates (legacy path).
 func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record) {
 	if s == nil {
 		return
@@ -196,13 +247,15 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		stats = &apiStats{Models: make(map[string]*modelStats)}
 		s.apis[statsKey] = stats
 	}
-	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
-	})
+	s.updateAPIStats(
+		stats, modelName, requestDetail{
+			Timestamp: timestamp,
+			Source:    record.Source,
+			AuthIndex: record.AuthIndex,
+			Tokens:    detail,
+			Failed:    failed,
+		},
+	)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
@@ -210,7 +263,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	s.tokensByHour[hourKey] += totalTokens
 }
 
-func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {
+func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail requestDetail) {
 	stats.TotalRequests++
 	stats.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue, ok := stats.Models[model]
@@ -238,17 +291,17 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	result.FailureCount = s.failureCount
 	result.TotalTokens = s.totalTokens
 
-	result.APIs = make(map[string]APISnapshot, len(s.apis))
+	result.APIs = make(map[string]aPISnapshot, len(s.apis))
 	for apiName, stats := range s.apis {
-		apiSnapshot := APISnapshot{
+		apiSnapshot := aPISnapshot{
 			TotalRequests: stats.TotalRequests,
 			TotalTokens:   stats.TotalTokens,
-			Models:        make(map[string]ModelSnapshot, len(stats.Models)),
+			Models:        make(map[string]modelSnapshot, len(stats.Models)),
 		}
 		for modelName, modelStatsValue := range stats.Models {
-			requestDetails := make([]RequestDetail, len(modelStatsValue.Details))
+			requestDetails := make([]requestDetail, len(modelStatsValue.Details))
 			copy(requestDetails, modelStatsValue.Details)
-			apiSnapshot.Models[modelName] = ModelSnapshot{
+			apiSnapshot.Models[modelName] = modelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
 				Details:       requestDetails,
@@ -258,9 +311,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	}
 
 	result.RequestsByDay = make(map[string]int64, len(s.requestsByDay))
-	for k, v := range s.requestsByDay {
-		result.RequestsByDay[k] = v
-	}
+	maps.Copy(result.RequestsByDay, s.requestsByDay)
 
 	result.RequestsByHour = make(map[string]int64, len(s.requestsByHour))
 	for hour, v := range s.requestsByHour {
@@ -269,9 +320,7 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 	}
 
 	result.TokensByDay = make(map[string]int64, len(s.tokensByDay))
-	for k, v := range s.tokensByDay {
-		result.TokensByDay[k] = v
-	}
+	maps.Copy(result.TokensByDay, s.tokensByDay)
 
 	result.TokensByHour = make(map[string]int64, len(s.tokensByHour))
 	for hour, v := range s.tokensByHour {
@@ -350,11 +399,8 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	return result
 }
 
-func (s *RequestStatistics) recordImported(apiName, modelName string, stats *apiStats, detail RequestDetail) {
-	totalTokens := detail.Tokens.TotalTokens
-	if totalTokens < 0 {
-		totalTokens = 0
-	}
+func (s *RequestStatistics) recordImported(_, modelName string, stats *apiStats, detail requestDetail) {
+	totalTokens := max(detail.Tokens.TotalTokens, 0)
 
 	s.totalRequests++
 	if detail.Failed {
@@ -375,7 +421,7 @@ func (s *RequestStatistics) recordImported(apiName, modelName string, stats *api
 	s.tokensByHour[hourKey] += totalTokens
 }
 
-func dedupKey(apiName, modelName string, detail RequestDetail) string {
+func dedupKey(apiName, modelName string, detail requestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
@@ -396,7 +442,7 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 
 func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
 	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil {
 			path := ginCtx.FullPath()
 			if path == "" && ginCtx.Request != nil {
 				path = ginCtx.Request.URL.Path
@@ -423,7 +469,7 @@ func resolveSuccess(ctx context.Context) bool {
 	if ctx == nil {
 		return true
 	}
-	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	ginCtx, ok := util.GinContextValue(ctx).(*gin.Context)
 	if !ok || ginCtx == nil {
 		return true
 	}
@@ -436,8 +482,8 @@ func resolveSuccess(ctx context.Context) bool {
 
 const httpStatusBadRequest = 400
 
-func normaliseDetail(detail coreusage.Detail) TokenStats {
-	tokens := TokenStats{
+func normaliseDetail(detail coreusage.Detail) tokenStats {
+	tokens := tokenStats{
 		InputTokens:     detail.InputTokens,
 		OutputTokens:    detail.OutputTokens,
 		ReasoningTokens: detail.ReasoningTokens,
@@ -453,7 +499,7 @@ func normaliseDetail(detail coreusage.Detail) TokenStats {
 	return tokens
 }
 
-func normaliseTokenStats(tokens TokenStats) TokenStats {
+func normaliseTokenStats(tokens tokenStats) tokenStats {
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
 	}
@@ -470,3 +516,4 @@ func formatHour(hour int) string {
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
 }
+

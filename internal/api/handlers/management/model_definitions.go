@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
 // GetStaticModelDefinitions returns static model metadata for a given channel.
@@ -26,8 +26,10 @@ func (h *Handler) GetStaticModelDefinitions(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"channel": strings.ToLower(strings.TrimSpace(channel)),
-		"models":  models,
-	})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"channel": strings.ToLower(strings.TrimSpace(channel)),
+			"models":  models,
+		},
+	)
 }

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 )
 
 const (
@@ -22,18 +22,46 @@ const (
 	logScannerMaxBuffer     = 8 * 1024 * 1024
 )
 
-// GetLogs returns log lines with optional incremental loading.
-func (h *Handler) GetLogs(c *gin.Context) {
+// checkLoggingEnabled validates that the handler is initialized and file logging is on.
+// Returns true if the check passed; otherwise it writes an error response and returns false.
+func (h *Handler) checkLoggingEnabled(c *gin.Context) bool {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
-		return
+		return false
 	}
 	if h.cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
-		return
+		return false
 	}
 	if !h.cfg.LoggingToFile {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "logging to file disabled"})
+		return false
+	}
+	return true
+}
+
+// checkLogDirectory validates the handler and returns the resolved log directory.
+// Returns the directory path and true on success; otherwise writes an error response and returns ("", false).
+func (h *Handler) checkLogDirectory(c *gin.Context) (string, bool) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return "", false
+	}
+	if h.cfg == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return "", false
+	}
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return "", false
+	}
+	return dir, true
+}
+
+// GetLogs returns log lines with optional incremental loading.
+func (h *Handler) GetLogs(c *gin.Context) {
+	if !h.checkLoggingEnabled(c) {
 		return
 	}
 
@@ -47,11 +75,13 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			cutoff := parseCutoff(c.Query("after"))
-			c.JSON(http.StatusOK, gin.H{
-				"lines":            []string{},
-				"line-count":       0,
-				"latest-timestamp": cutoff,
-			})
+			c.JSON(
+				http.StatusOK, gin.H{
+					"lines":            []string{},
+					"line-count":       0,
+					"latest-timestamp": cutoff,
+				},
+			)
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list log files: %v", err)})
@@ -68,7 +98,10 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	acc := newLogAccumulator(cutoff, limit)
 	for i := range files {
 		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)})
+			c.JSON(
+				http.StatusInternalServerError,
+				gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)},
+			)
 			return
 		}
 	}
@@ -77,25 +110,18 @@ func (h *Handler) GetLogs(c *gin.Context) {
 	if latest == 0 || latest < cutoff {
 		latest = cutoff
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"lines":            lines,
-		"line-count":       total,
-		"latest-timestamp": latest,
-	})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"lines":            lines,
+			"line-count":       total,
+			"latest-timestamp": latest,
+		},
+	)
 }
 
 // DeleteLogs removes all rotated log files and truncates the active log.
 func (h *Handler) DeleteLogs(c *gin.Context) {
-	if h == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
-		return
-	}
-	if h.cfg == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
-		return
-	}
-	if !h.cfg.LoggingToFile {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "logging to file disabled"})
+	if !h.checkLoggingEnabled(c) {
 		return
 	}
 
@@ -124,25 +150,33 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 		fullPath := filepath.Join(dir, name)
 		if name == defaultLogFileName {
 			if errTrunc := os.Truncate(fullPath, 0); errTrunc != nil && !os.IsNotExist(errTrunc) {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to truncate log file: %v", errTrunc)})
+				c.JSON(
+					http.StatusInternalServerError,
+					gin.H{"error": fmt.Sprintf("failed to truncate log file: %v", errTrunc)},
+				)
 				return
 			}
 			continue
 		}
 		if isRotatedLogFile(name) {
 			if errRemove := os.Remove(fullPath); errRemove != nil && !os.IsNotExist(errRemove) {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to remove %s: %v", name, errRemove)})
+				c.JSON(
+					http.StatusInternalServerError,
+					gin.H{"error": fmt.Sprintf("failed to remove %s: %v", name, errRemove)},
+				)
 				return
 			}
 			removed++
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Logs cleared successfully",
-		"removed": removed,
-	})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"success": true,
+			"message": "Logs cleared successfully",
+			"removed": removed,
+		},
+	)
 }
 
 // GetRequestErrorLogs lists error request log files when RequestLog is disabled.
@@ -173,7 +207,9 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"files": []any{}})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list request error logs: %v", err)})
+		c.JSON(
+			http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list request error logs: %v", err)},
+		)
 		return
 	}
 
@@ -194,14 +230,19 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		}
 		info, errInfo := entry.Info()
 		if errInfo != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log info for %s: %v", name, errInfo)})
+			c.JSON(
+				http.StatusInternalServerError,
+				gin.H{"error": fmt.Sprintf("failed to read log info for %s: %v", name, errInfo)},
+			)
 			return
 		}
-		files = append(files, errorLog{
-			Name:     name,
-			Size:     info.Size(),
-			Modified: info.ModTime().Unix(),
-		})
+		files = append(
+			files, errorLog{
+				Name:     name,
+				Size:     info.Size(),
+				Modified: info.ModTime().Unix(),
+			},
+		)
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].Modified > files[j].Modified })
@@ -212,18 +253,8 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 // GetRequestLogByID finds and downloads a request log file by its request ID.
 // The ID is matched against the suffix of log file names (format: *-{requestID}.log).
 func (h *Handler) GetRequestLogByID(c *gin.Context) {
-	if h == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
-		return
-	}
-	if h.cfg == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
-		return
-	}
-
-	dir := h.logDirectory()
-	if strings.TrimSpace(dir) == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+	dir, ok := h.checkLogDirectory(c)
+	if !ok {
 		return
 	}
 
@@ -270,47 +301,18 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 
 	dirAbs, errAbs := filepath.Abs(dir)
 	if errAbs != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
+		c.JSON(
+			http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)},
+		)
 		return
 	}
-	fullPath := filepath.Clean(filepath.Join(dirAbs, matchedFile))
-	prefix := dirAbs + string(os.PathSeparator)
-	if !strings.HasPrefix(fullPath, prefix) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
-		return
-	}
-
-	info, errStat := os.Stat(fullPath)
-	if errStat != nil {
-		if os.IsNotExist(errStat) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
-		return
-	}
-	if info.IsDir() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
-		return
-	}
-
-	c.FileAttachment(fullPath, matchedFile)
+	h.serveLogFile(c, dirAbs, matchedFile)
 }
 
 // DownloadRequestErrorLog downloads a specific error request log file by name.
 func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
-	if h == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
-		return
-	}
-	if h.cfg == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
-		return
-	}
-
-	dir := h.logDirectory()
-	if strings.TrimSpace(dir) == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+	dir, ok := h.checkLogDirectory(c)
+	if !ok {
 		return
 	}
 
@@ -326,10 +328,17 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 
 	dirAbs, errAbs := filepath.Abs(dir)
 	if errAbs != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)})
+		c.JSON(
+			http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)},
+		)
 		return
 	}
-	fullPath := filepath.Clean(filepath.Join(dirAbs, name))
+	h.serveLogFile(c, dirAbs, name)
+}
+
+// serveLogFile validates the file path, checks for path traversal, and serves the file.
+func (h *Handler) serveLogFile(c *gin.Context, dirAbs, fileName string) {
+	fullPath := filepath.Clean(filepath.Join(dirAbs, fileName))
 	prefix := dirAbs + string(os.PathSeparator)
 	if !strings.HasPrefix(fullPath, prefix) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
@@ -350,7 +359,7 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 		return
 	}
 
-	c.FileAttachment(fullPath, name)
+	c.FileAttachment(fullPath, fileName)
 }
 
 func (h *Handler) logDirectory() string {
@@ -503,9 +512,7 @@ func parseLimit(raw string) (int, error) {
 }
 
 func parseTimestamp(line string) int64 {
-	if strings.HasPrefix(line, "[") {
-		line = line[1:]
-	}
+	line = strings.TrimPrefix(line, "[")
 	if len(line) < 19 {
 		return 0
 	}
@@ -560,9 +567,7 @@ func timestampRotationOrder(name string) (int64, bool) {
 		return 0, false
 	}
 	clean := strings.TrimPrefix(name, prefix)
-	if strings.HasSuffix(clean, ".gz") {
-		clean = strings.TrimSuffix(clean, ".gz")
-	}
+	clean = strings.TrimSuffix(clean, ".gz")
 	if ext != "" {
 		if !strings.HasSuffix(clean, ext) {
 			return 0, false

@@ -29,7 +29,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	canonicalProvider, err := NormalizeOAuthProvider(req.Provider)
+	canonicalProvider, err := normalizeOAuthProvider(req.Provider)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "unsupported provider"})
 		return
@@ -64,7 +64,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "state is required"})
 		return
 	}
-	if err := ValidateOAuthState(state); err != nil {
+	if err := validateOAuthState(state); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
 		return
 	}
@@ -73,7 +73,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	sessionProvider, sessionStatus, ok := GetOAuthSession(state)
+	sessionProvider, sessionStatus, ok := getOAuthSession(state)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "unknown or expired state"})
 		return
@@ -87,7 +87,9 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	if _, errWrite := WriteOAuthCallbackFileForPendingSession(h.cfg.AuthDir, canonicalProvider, state, code, errMsg); errWrite != nil {
+	if _, errWrite := WriteOAuthCallbackFileForPendingSession(
+		h.cfg.AuthDir, canonicalProvider, state, code, errMsg,
+	); errWrite != nil {
 		if errors.Is(errWrite, errOAuthSessionNotPending) {
 			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 			return

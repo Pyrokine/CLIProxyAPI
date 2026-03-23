@@ -3,6 +3,7 @@ package management
 import "github.com/gin-gonic/gin"
 
 // Quota exceeded toggles
+
 func (h *Handler) GetSwitchProject(c *gin.Context) {
 	c.JSON(200, gin.H{"switch-project": h.cfg.QuotaExceeded.SwitchProject})
 }
