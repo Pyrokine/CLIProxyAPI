@@ -119,7 +119,7 @@ func (o *Auth) ExchangeCodeForTokensWithRedirect(
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token response: %w", err)
 	}
@@ -205,7 +205,7 @@ func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read refresh response: %w", err)
 	}

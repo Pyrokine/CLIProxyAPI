@@ -190,7 +190,7 @@ func (g *Auth) createTokenStorage(
 		}
 	}()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("get user info request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
@@ -315,7 +315,8 @@ func (g *Auth) getTokenFromWeb(ctx context.Context, config *oauth2.Config, opts 
 	}()
 
 	// Open the authorization URL in the user's browser.
-	authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline,
+	authURL := config.AuthCodeURL(
+		state, oauth2.AccessTypeOffline,
 		oauth2.SetAuthURLParam("prompt", "consent"),
 		oauth2.S256ChallengeOption(verifier),
 	)

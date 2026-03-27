@@ -71,7 +71,7 @@ func callCLI(ctx context.Context, httpClient *http.Client, endpoint string, body
 	}()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf(
 			"api request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)),
 		)
@@ -109,7 +109,7 @@ func FetchGCPProjects(ctx context.Context, httpClient *http.Client) ([]interface
 	}()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, fmt.Errorf(
 			"project list request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)),
 		)
@@ -144,7 +144,7 @@ func CheckCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 		}
 
 		if resp.StatusCode == http.StatusOK {
-			bodyBytes, _ := io.ReadAll(resp.Body)
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			if gjson.GetBytes(bodyBytes, "state").String() == "ENABLED" {
 				_ = resp.Body.Close()
 				continue
@@ -164,7 +164,7 @@ func CheckCloudAPIIsEnabled(ctx context.Context, httpClient *http.Client, projec
 			return false, fmt.Errorf("failed to execute request: %w", errDo)
 		}
 
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		errMessage := string(bodyBytes)
 		errMessageResult := gjson.GetBytes(bodyBytes, "error.message")
 		if errMessageResult.Exists() {
@@ -338,7 +338,8 @@ func PerformCLISetup(
 								responseProjectID,
 							)
 							log.Infof(
-								"Using backend project ID: %s (recommended for preview model access)", responseProjectID,
+								"Using backend project ID: %s (recommended for preview model access)",
+								responseProjectID,
 							)
 							finalProjectID = responseProjectID
 						}

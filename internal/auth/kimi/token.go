@@ -32,6 +32,11 @@ type TokenStorage struct {
 	Metadata map[string]any `json:"-"`
 }
 
+// SetMetadata allows external callers to inject metadata into the storage before saving.
+func (ts *TokenStorage) SetMetadata(meta map[string]any) {
+	ts.Metadata = meta
+}
+
 // BuildMetadata constructs the standard metadata map for a Kimi auth bundle.
 func BuildMetadata(bundle *AuthBundle) map[string]any {
 	metadata := map[string]any{
@@ -95,3 +100,23 @@ func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	return auth.SaveTokenJSON(authFilePath, ts, ts.Metadata)
 }
 
+// IsExpired checks if the token has expired.
+func (ts *TokenStorage) IsExpired() bool {
+	if ts.Expired == "" {
+		return false // No expiry set, assume valid
+	}
+	t, err := time.Parse(time.RFC3339, ts.Expired)
+	if err != nil {
+		return true // Has expiry string but can't parse
+	}
+	// Consider expired if within refresh threshold
+	return time.Now().Add(time.Duration(refreshThresholdSeconds) * time.Second).After(t)
+}
+
+// NeedsRefresh checks if the token should be refreshed.
+func (ts *TokenStorage) NeedsRefresh() bool {
+	if ts.RefreshToken == "" {
+		return false // Can't refresh without refresh token
+	}
+	return ts.IsExpired()
+}

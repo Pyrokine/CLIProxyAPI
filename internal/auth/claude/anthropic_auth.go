@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	log "github.com/sirupsen/logrus"
@@ -179,7 +180,7 @@ func (o *Auth) ExchangeCodeForTokens(
 		}
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read token response: %w", err)
 	}
@@ -223,7 +224,6 @@ func (o *Auth) ExchangeCodeForTokens(
 // Returns:
 //   - *TokenData: The new token data with updated access token
 //   - error: An error if token refresh fails
-//
 func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenData, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
@@ -256,7 +256,7 @@ func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read refresh response: %w", err)
 	}
@@ -302,3 +302,25 @@ func (o *Auth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 	return storage
 }
 
+// RefreshTokensWithRetry refreshes tokens with automatic retry logic.
+func (o *Auth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (
+	*TokenData,
+	error,
+) {
+	return auth.RefreshWithRetry(ctx, refreshToken, maxRetries, o.RefreshTokens, nil)
+}
+
+// UpdateTokenStorage updates an existing token storage with new token data.
+// This method refreshes the token storage with newly obtained access and refresh tokens,
+// updating timestamps and expiration information.
+//
+// Parameters:
+//   - storage: The existing token storage to update
+//   - TokenData: The new token data to apply
+func (o *Auth) UpdateTokenStorage(storage *TokenStorage, TokenData *TokenData) {
+	storage.AccessToken = TokenData.AccessToken
+	storage.RefreshToken = TokenData.RefreshToken
+	storage.LastRefresh = time.Now().Format(time.RFC3339)
+	storage.Email = TokenData.Email
+	storage.Expire = TokenData.Expire
+}

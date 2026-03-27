@@ -74,7 +74,7 @@ func (o *Auth) BuildAuthURL(state, redirectURI string) string {
 	}
 	params := url.Values{}
 	params.Set("access_type", "offline")
-	params.Set("client_id", clientID)
+	params.Set("client_id", ClientID)
 	params.Set("prompt", "consent")
 	params.Set("redirect_uri", redirectURI)
 	params.Set("response_type", "code")
@@ -87,12 +87,12 @@ func (o *Auth) BuildAuthURL(state, redirectURI string) string {
 func (o *Auth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*TokenResponse, error) {
 	data := url.Values{}
 	data.Set("code", code)
-	data.Set("client_id", clientID)
-	data.Set("client_secret", clientSecret)
+	data.Set("client_id", ClientID)
+	data.Set("client_secret", ClientSecret)
 	data.Set("redirect_uri", redirectURI)
 	data.Set("grant_type", "authorization_code")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, TokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("antigravity token exchange: create request: %w", err)
 	}
@@ -172,7 +172,6 @@ func (o *Auth) FetchUserInfo(ctx context.Context, accessToken string) (string, e
 }
 
 // FetchProjectID retrieves the project ID for the authenticated user via loadCodeAssist
-//
 func (o *Auth) FetchProjectID(ctx context.Context, accessToken string) (string, error) {
 	loadReqBody := map[string]any{
 		"metadata": map[string]string{
@@ -208,7 +207,7 @@ func (o *Auth) FetchProjectID(ctx context.Context, accessToken string) (string, 
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(resp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if errRead != nil {
 		return "", fmt.Errorf("read response: %w", errRead)
 	}
@@ -312,7 +311,7 @@ func (o *Auth) onboardUser(ctx context.Context, accessToken, tierID string) (str
 			return "", fmt.Errorf("execute request: %w", errDo)
 		}
 
-		bodyBytes, errRead := io.ReadAll(resp.Body)
+		bodyBytes, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.Errorf("close body error: %v", errClose)
 		}

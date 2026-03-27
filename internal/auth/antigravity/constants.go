@@ -3,8 +3,8 @@ package antigravity
 
 // OAuth client credentials and configuration
 const (
-	clientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	clientSecret = "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"
+	ClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	ClientSecret = "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"
 	CallbackPort = 51121
 )
 
@@ -19,7 +19,7 @@ var scopes = []string{
 
 // OAuth2 endpoints for Google authentication
 const (
-	tokenEndpoint    = "https://oauth2.googleapis.com/token"
+	TokenEndpoint    = "https://oauth2.googleapis.com/token"
 	authEndpoint     = "https://accounts.google.com/o/oauth2/v2/auth"
 	userInfoEndpoint = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
 )

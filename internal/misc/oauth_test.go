@@ -7,6 +7,9 @@ func TestParseOAuthCallback_ValidURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if cb == nil {
+		t.Fatal("expected non-nil callback")
+	}
 	if cb.Code != "abc" {
 		t.Fatalf("Code = %q, want %q", cb.Code, "abc")
 	}
@@ -36,6 +39,9 @@ func TestParseOAuthCallback_ErrorResponse(t *testing.T) {
 	cb, err := ParseOAuthCallback("http://localhost/callback?error=access_denied&error_description=user+denied")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if cb == nil {
+		t.Fatal("expected non-nil callback")
 	}
 	if cb.Error != "access_denied" {
 		t.Fatalf("Error = %q, want %q", cb.Error, "access_denied")

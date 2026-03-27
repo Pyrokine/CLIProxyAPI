@@ -12,20 +12,20 @@ import (
 // It includes standard claims like issuer, subject, and expiration time, as well as
 // custom claims specific to OpenAI's authentication.
 type JWTClaims struct {
-	AtHash        string        `json:"at_hash"`
-	Aud           []string      `json:"aud"`
-	AuthProvider  string        `json:"auth_provider"`
-	AuthTime      int           `json:"auth_time"`
-	Email         string        `json:"email"`
-	EmailVerified bool          `json:"email_verified"`
-	Exp           int           `json:"exp"`
-	AuthInfo authInfo `json:"https://api.openai.com/auth"`
-	Iat           int           `json:"iat"`
-	Iss           string        `json:"iss"`
-	Jti           string        `json:"jti"`
-	Rat           int           `json:"rat"`
-	Sid           string        `json:"sid"`
-	Sub           string        `json:"sub"`
+	AtHash        string   `json:"at_hash"`
+	Aud           []string `json:"aud"`
+	AuthProvider  string   `json:"auth_provider"`
+	AuthTime      int      `json:"auth_time"`
+	Email         string   `json:"email"`
+	EmailVerified bool     `json:"email_verified"`
+	Exp           int      `json:"exp"`
+	AuthInfo      authInfo `json:"https://api.openai.com/auth"`
+	Iat           int      `json:"iat"`
+	Iss           string   `json:"iss"`
+	Jti           string   `json:"jti"`
+	Rat           int      `json:"rat"`
+	Sid           string   `json:"sid"`
+	Sub           string   `json:"sub"`
 }
 
 // organizations defines the structure for organization details within the JWT claims.

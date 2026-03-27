@@ -22,6 +22,11 @@ type TokenStorage struct {
 	Metadata map[string]any `json:"-"`
 }
 
+// SetMetadata allows external callers to inject metadata into the storage before saving.
+func (ts *TokenStorage) SetMetadata(meta map[string]any) {
+	ts.Metadata = meta
+}
+
 // SaveTokenToFile serialises the token storage to disk.
 func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	ts.Type = "iflow"

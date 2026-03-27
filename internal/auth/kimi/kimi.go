@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -35,6 +35,8 @@ const (
 	defaultPollInterval = 5 * time.Second
 	// maxPollDuration is the maximum time to wait for user authorization.
 	maxPollDuration = 15 * time.Minute
+	// refreshThresholdSeconds is when to refresh token before expiry (5 minutes).
+	refreshThresholdSeconds = 300
 )
 
 // Auth handles Kimi authentication flow.
@@ -182,7 +184,7 @@ func (c *DeviceFlowClient) requestDeviceCode(ctx context.Context) (*DeviceCodeRe
 		}
 	}()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("kimi: failed to read device code response: %w", err)
 	}
@@ -269,7 +271,7 @@ func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode st
 		}
 	}()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("kimi: failed to read token response: %w", err), false
 	}
@@ -349,7 +351,7 @@ func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string
 		}
 	}()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("kimi: failed to read refresh response: %w", err)
 	}

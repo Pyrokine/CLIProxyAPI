@@ -154,9 +154,11 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 		seenProjects := make(map[string]bool)
 		for _, candidateID := range projectSelections {
 			log.Infof("Activating project %s", candidateID)
-			if errSetup := gemini.PerformCLISetup(ctx, httpClient, storage, candidateID, &gemini.CLISetupOptions{
-				OnFreeUserProjectConflict: freeUserProjectPrompt,
-			}); errSetup != nil {
+			if errSetup := gemini.PerformCLISetup(
+				ctx, httpClient, storage, candidateID, &gemini.CLISetupOptions{
+					OnFreeUserProjectConflict: freeUserProjectPrompt,
+				},
+			); errSetup != nil {
 				if _, ok := errors.AsType[*gemini.ProjectSelectionRequiredError](errSetup); ok {
 					log.Error("Failed to start user onboarding: A project ID is required.")
 					showProjectSelectionHelp(storage.Email, projects)

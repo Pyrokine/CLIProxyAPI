@@ -98,7 +98,7 @@ func (a *Auth) generateCodeVerifier() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
-// generateCodeChallenge creates a SHA-256 hash of the code verifier, used as the PKCE code challenge.
+// generateCodeChallenge creates an SHA-256 hash of the code verifier, used as the PKCE code challenge.
 func (a *Auth) generateCodeChallenge(codeVerifier string) string {
 	hash := sha256.Sum256([]byte(codeVerifier))
 	return base64.RawURLEncoding.EncodeToString(hash[:])
@@ -139,7 +139,7 @@ func (a *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -198,7 +198,7 @@ func (a *Auth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error) {
 		_ = resp.Body.Close()
 	}()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
@@ -251,7 +251,7 @@ func (a *Auth) PollForToken(deviceCode, codeVerifier string) (*TokenData, error)
 			continue
 		}
 
-		body, err := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
 		if err != nil {
 			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)

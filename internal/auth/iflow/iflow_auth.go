@@ -120,7 +120,7 @@ func (ia *Auth) doTokenRequest(ctx context.Context, req *http.Request) (*TokenDa
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("iflow token: read response failed: %w", err)
 	}
@@ -187,7 +187,7 @@ func (ia *Auth) fetchUserInfo(ctx context.Context, accessToken string) (*userInf
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("iflow api key: read response failed: %w", err)
 	}
@@ -228,6 +228,25 @@ func (ia *Auth) CreateTokenStorage(data *TokenData) *TokenStorage {
 		TokenType:    data.TokenType,
 		Scope:        data.Scope,
 	}
+}
+
+// UpdateTokenStorage updates the persisted token storage with latest token data.
+func (ia *Auth) UpdateTokenStorage(storage *TokenStorage, data *TokenData) {
+	if storage == nil || data == nil {
+		return
+	}
+	storage.AccessToken = data.AccessToken
+	storage.RefreshToken = data.RefreshToken
+	storage.LastRefresh = time.Now().Format(time.RFC3339)
+	storage.Expire = data.Expire
+	if data.APIKey != "" {
+		storage.APIKey = data.APIKey
+	}
+	if data.Email != "" {
+		storage.Email = data.Email
+	}
+	storage.TokenType = data.TokenType
+	storage.Scope = data.Scope
 }
 
 // tokenResponse models the OAuth token endpoint response.
@@ -353,7 +372,7 @@ func (ia *Auth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*KeyData, e
 		reader = gzipReader
 	}
 
-	body, err := io.ReadAll(reader)
+	body, err := io.ReadAll(io.LimitReader(reader, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("iflow cookie: read GET response failed: %w", err)
 	}
@@ -439,7 +458,7 @@ func (ia *Auth) RefreshAPIKey(ctx context.Context, cookie, name string) (*KeyDat
 		reader = gzipReader
 	}
 
-	body, err := io.ReadAll(reader)
+	body, err := io.ReadAll(io.LimitReader(reader, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("iflow cookie refresh: read POST response failed: %w", err)
 	}
@@ -507,3 +526,13 @@ func (ia *Auth) CreateCookieTokenStorage(data *TokenData) *TokenStorage {
 	}
 }
 
+// UpdateCookieTokenStorage updates the persisted token storage with refreshed API key data.
+func (ia *Auth) UpdateCookieTokenStorage(storage *TokenStorage, KeyData *KeyData) {
+	if storage == nil || KeyData == nil {
+		return
+	}
+
+	storage.APIKey = KeyData.APIKey
+	storage.Expire = KeyData.ExpireTime
+	storage.LastRefresh = time.Now().Format(time.RFC3339)
+}

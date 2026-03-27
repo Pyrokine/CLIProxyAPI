@@ -37,6 +37,11 @@ type TokenStorage struct {
 	Metadata map[string]any `json:"-"`
 }
 
+// SetMetadata allows external callers to inject metadata into the storage before saving.
+func (ts *TokenStorage) SetMetadata(meta map[string]any) {
+	ts.Metadata = meta
+}
+
 // SaveTokenToFile serializes the Claude token storage to a JSON file.
 // This method creates the necessary directory structure and writes the token
 // data in JSON format to the specified file path for persistent storage.
