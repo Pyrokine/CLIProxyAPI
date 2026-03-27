@@ -3,37 +3,28 @@ package gemini
 import (
 	"bytes"
 	"context"
-	"fmt"
+
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 )
 
-// passthroughGeminiResponseStream forwards Gemini responses unchanged.
-func passthroughGeminiResponseStream(
-	_ context.Context,
-	_ string,
-	_, _, rawJSON []byte,
-	_ *any,
-) []string {
+// PassthroughGeminiResponseStream forwards Gemini responses unchanged.
+func PassthroughGeminiResponseStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return []string{}
+		return [][]byte{}
 	}
 
-	return []string{string(rawJSON)}
+	return [][]byte{rawJSON}
 }
 
-// passthroughGeminiResponseNonStream forwards Gemini responses unchanged.
-func passthroughGeminiResponseNonStream(
-	_ context.Context,
-	_ string,
-	_, _, rawJSON []byte,
-	_ *any,
-) string {
-	return string(rawJSON)
+// PassthroughGeminiResponseNonStream forwards Gemini responses unchanged.
+func PassthroughGeminiResponseNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+	return rawJSON
 }
 
-func TokenCount(_ context.Context, count int64) string {
-	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
+func tokenCount(_ context.Context, count int64) []byte {
+	return translatorcommon.GeminiTokenCountJSON(count)
 }

@@ -72,7 +72,7 @@ func (r *Registry) TranslateStream(
 	model string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) []string {
+) [][]byte {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -81,7 +81,7 @@ func (r *Registry) TranslateStream(
 			return fn.Stream(ctx, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 		}
 	}
-	return []string{string(rawJSON)}
+	return [][]byte{rawJSON}
 }
 
 // TranslateNonStream applies the registered non-stream response translator.
@@ -91,7 +91,7 @@ func (r *Registry) TranslateNonStream(
 	model string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) string {
+) []byte {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -100,11 +100,11 @@ func (r *Registry) TranslateNonStream(
 			return fn.NonStream(ctx, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 		}
 	}
-	return string(rawJSON)
+	return rawJSON
 }
 
-// TranslateTokenCount applies the registered non-stream response translator.
-func (r *Registry) TranslateTokenCount(ctx context.Context, from, to Format, count int64, rawJSON []byte) string {
+// TranslateTokenCount applies the registered token count response translator.
+func (r *Registry) TranslateTokenCount(ctx context.Context, from, to Format, count int64, rawJSON []byte) []byte {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -113,7 +113,7 @@ func (r *Registry) TranslateTokenCount(ctx context.Context, from, to Format, cou
 			return fn.TokenCount(ctx, count)
 		}
 	}
-	return string(rawJSON)
+	return rawJSON
 }
 
 var defaultRegistry = NewRegistry()
@@ -145,7 +145,7 @@ func TranslateStream(
 	model string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) []string {
+) [][]byte {
 	return defaultRegistry.TranslateStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 
@@ -156,13 +156,13 @@ func TranslateNonStream(
 	model string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) string {
+) []byte {
 	return defaultRegistry.TranslateNonStream(
 		ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param,
 	)
 }
 
 // TranslateTokenCount is a helper on the default registry.
-func TranslateTokenCount(ctx context.Context, from, to Format, count int64, rawJSON []byte) string {
+func TranslateTokenCount(ctx context.Context, from, to Format, count int64, rawJSON []byte) []byte {
 	return defaultRegistry.TranslateTokenCount(ctx, from, to, count, rawJSON)
 }

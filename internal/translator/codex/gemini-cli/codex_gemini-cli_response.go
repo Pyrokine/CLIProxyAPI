@@ -8,10 +8,10 @@ import (
 	"context"
 
 	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/gemini"
-	"github.com/tidwall/sjson"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 )
 
-// convertCodexResponseToGeminiCLI converts Codex streaming response format to Gemini CLI format.
+// ConvertCodexResponseToGeminiCLI converts Codex streaming response format to Gemini CLI format.
 // This function processes various Codex event types and transforms them into Gemini-compatible JSON responses.
 // It handles text content, tool calls, and usage metadata, outputting responses that match the Gemini CLI API format.
 // The function wraps each converted response in a "response" object to match the Gemini CLI API structure.
@@ -23,24 +23,22 @@ import (
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
-//   - []string: A slice of strings, each containing a Gemini-compatible JSON response wrapped in a response object
-func convertCodexResponseToGeminiCLI(
+//   - [][]byte: A slice of Gemini-compatible JSON responses wrapped in a response object
+func ConvertCodexResponseToGeminiCLI(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) []string {
+) [][]byte {
 	outputs := ConvertCodexResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
-	newOutputs := make([]string, 0)
-	for i := range outputs {
-		json := `{"response": {}}`
-		output, _ := sjson.SetRaw(json, "response", outputs[i])
-		newOutputs = append(newOutputs, output)
+	newOutputs := make([][]byte, 0, len(outputs))
+	for i := 0; i < len(outputs); i++ {
+		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
 	}
 	return newOutputs
 }
 
-// convertCodexResponseToGeminiCLINonStream converts a non-streaming Codex response to a non-streaming Gemini CLI response.
+// ConvertCodexResponseToGeminiCLINonStream converts a non-streaming Codex response to a non-streaming Gemini CLI response.
 // This function processes the complete Codex response and transforms it into a single Gemini-compatible
 // JSON response. It wraps the converted response in a "response" object to match the Gemini CLI API structure.
 //
@@ -51,18 +49,17 @@ func convertCodexResponseToGeminiCLI(
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:
-//   - string: A Gemini-compatible JSON response wrapped in a response object
-func convertCodexResponseToGeminiCLINonStream(
+//   - []byte: A Gemini-compatible JSON response wrapped in a response object
+func ConvertCodexResponseToGeminiCLINonStream(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) string {
-	// log.Debug(string(rawJSON))
-	strJSON := ConvertCodexResponseToGeminiNonStream(
-		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
-	)
-	json := `{"response": {}}`
-	strJSON, _ = sjson.SetRaw(json, "response", strJSON)
-	return strJSON
+) []byte {
+	out := ConvertCodexResponseToGeminiNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	return translatorcommon.WrapGeminiCLIResponse(out)
+}
+
+func tokenCount(_ context.Context, count int64) []byte {
+	return translatorcommon.GeminiTokenCountJSON(count)
 }

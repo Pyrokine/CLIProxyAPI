@@ -20,7 +20,7 @@ func TranslateStreamByFormatName(
 	model string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) []string {
+) [][]byte {
 	return TranslateStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 
@@ -31,12 +31,12 @@ func TranslateNonStreamByFormatName(
 	model string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) string {
+) []byte {
 	return TranslateNonStream(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 }
 
 // TranslateTokenCountByFormatName converts token counts between schemas by their string identifiers.
 // noinspection GoUnusedExportedFunction
-func TranslateTokenCountByFormatName(ctx context.Context, from, to Format, count int64, rawJSON []byte) string {
+func TranslateTokenCountByFormatName(ctx context.Context, from, to Format, count int64, rawJSON []byte) []byte {
 	return TranslateTokenCount(ctx, from, to, count, rawJSON)
 }

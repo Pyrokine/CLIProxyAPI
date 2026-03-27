@@ -10,10 +10,10 @@ func init() {
 	translator.Register(
 		OpenaiResponse,
 		Antigravity,
-		convertOpenAIResponsesRequestToAntigravity,
+		ConvertOpenAIResponsesRequestToAntigravity,
 		interfaces.TranslateResponse{
-			Stream:    convertAntigravityResponseToOpenAIResponses,
-			NonStream: convertAntigravityResponseToOpenAIResponsesNonStream,
+			Stream:    ConvertAntigravityResponseToOpenAIResponses,
+			NonStream: ConvertAntigravityResponseToOpenAIResponsesNonStream,
 		},
 	)
 }

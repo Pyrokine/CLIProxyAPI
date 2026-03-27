@@ -16,7 +16,7 @@ type ResponseEnvelope struct {
 	Model  string
 	Stream bool
 	Body   []byte
-	Chunks []string
+	Chunks [][]byte
 }
 
 // RequestMiddleware decorates request translation.
@@ -98,9 +98,9 @@ func (p *Pipeline) TranslateResponse(
 				ctx, from, to, input.Model, originalReq, translatedReq, input.Body, param,
 			)
 		} else {
-			input.Body = []byte(p.registry.TranslateNonStream(
+			input.Body = p.registry.TranslateNonStream(
 				ctx, from, to, input.Model, originalReq, translatedReq, input.Body, param,
-			))
+			)
 		}
 		input.Format = to
 		return input, nil

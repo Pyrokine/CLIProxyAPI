@@ -8,12 +8,13 @@ import (
 	"bytes"
 	"context"
 
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/sjson"
 )
 
 var dataTag = []byte("data:")
 
-// convertGeminiResponseToGeminiCLI converts Gemini streaming response format to Gemini CLI single-line JSON format.
+// ConvertGeminiResponseToGeminiCLI converts Gemini streaming response format to Gemini CLI single-line JSON format.
 // This function processes various Gemini event types and transforms them into Gemini CLI-compatible JSON responses.
 // It handles thinking content, regular text content, and function calls, outputting single-line JSON
 // that matches the Gemini CLI API response format.
@@ -25,27 +26,21 @@ var dataTag = []byte("data:")
 //   - param: A pointer to a parameter object for the conversion (unused).
 //
 // Returns:
-//   - []string: A slice of strings, each containing a Gemini CLI-compatible JSON response.
-func convertGeminiResponseToGeminiCLI(
-	_ context.Context,
-	_ string,
-	_, _, rawJSON []byte,
-	_ *any,
-) []string {
+//   - [][]byte: A slice of Gemini CLI-compatible JSON responses.
+func ConvertGeminiResponseToGeminiCLI(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
 	if !bytes.HasPrefix(rawJSON, dataTag) {
-		return []string{}
+		return [][]byte{}
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return []string{}
+		return [][]byte{}
 	}
-	json := `{"response": {}}`
-	rawJSON, _ = sjson.SetRawBytes([]byte(json), "response", rawJSON)
-	return []string{string(rawJSON)}
+	rawJSON, _ = sjson.SetRawBytes([]byte(`{"response":{}}`), "response", rawJSON)
+	return [][]byte{rawJSON}
 }
 
-// convertGeminiResponseToGeminiCLINonStream converts a non-streaming Gemini response to a non-streaming Gemini CLI response.
+// ConvertGeminiResponseToGeminiCLINonStream converts a non-streaming Gemini response to a non-streaming Gemini CLI response.
 //
 // Parameters:
 //   - ctx: The context for the request.
@@ -54,14 +49,12 @@ func convertGeminiResponseToGeminiCLI(
 //   - param: A pointer to a parameter object for the conversion (unused).
 //
 // Returns:
-//   - string: A Gemini CLI-compatible JSON response.
-func convertGeminiResponseToGeminiCLINonStream(
-	_ context.Context,
-	_ string,
-	_, _, rawJSON []byte,
-	_ *any,
-) string {
-	json := `{"response": {}}`
-	rawJSON, _ = sjson.SetRawBytes([]byte(json), "response", rawJSON)
-	return string(rawJSON)
+//   - []byte: A Gemini CLI-compatible JSON response.
+func ConvertGeminiResponseToGeminiCLINonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+	rawJSON, _ = sjson.SetRawBytes([]byte(`{"response":{}}`), "response", rawJSON)
+	return rawJSON
+}
+
+func tokenCount(_ context.Context, count int64) []byte {
+	return translatorcommon.GeminiTokenCountJSON(count)
 }

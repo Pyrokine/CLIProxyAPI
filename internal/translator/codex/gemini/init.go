@@ -14,7 +14,7 @@ func init() {
 		interfaces.TranslateResponse{
 			Stream:     ConvertCodexResponseToGemini,
 			NonStream:  ConvertCodexResponseToGeminiNonStream,
-			TokenCount: TokenCount,
+			TokenCount: tokenCount,
 		},
 	)
 }

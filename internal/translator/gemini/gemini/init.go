@@ -12,11 +12,11 @@ func init() {
 	translator.Register(
 		Gemini,
 		Gemini,
-		convertGeminiRequestToGemini,
+		ConvertGeminiRequestToGemini,
 		interfaces.TranslateResponse{
-			Stream:     passthroughGeminiResponseStream,
-			NonStream:  passthroughGeminiResponseNonStream,
-			TokenCount: TokenCount,
+			Stream:     PassthroughGeminiResponseStream,
+			NonStream:  PassthroughGeminiResponseNonStream,
+			TokenCount: tokenCount,
 		},
 	)
 }

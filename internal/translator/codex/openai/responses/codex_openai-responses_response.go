@@ -3,56 +3,32 @@ package responses
 import (
 	"bytes"
 	"context"
-	"fmt"
 
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
-// convertCodexResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
+// ConvertCodexResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
 // to OpenAI Responses SSE events (response.*).
 
-func convertCodexResponseToOpenAIResponses(
-	_ context.Context,
-	_ string,
-	originalRequestRawJSON, _, rawJSON []byte,
-	_ *any,
-) []string {
+func ConvertCodexResponseToOpenAIResponses(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
-		if typeResult := gjson.GetBytes(rawJSON, "type"); typeResult.Exists() {
-			typeStr := typeResult.String()
-			if typeStr == "response.created" || typeStr == "response.in_progress" || typeStr == "response.completed" {
-				if gjson.GetBytes(rawJSON, "response.instructions").Exists() {
-					instructions := gjson.GetBytes(originalRequestRawJSON, "instructions").String()
-					rawJSON, _ = sjson.SetBytes(rawJSON, "response.instructions", instructions)
-				}
-			}
-		}
-		out := fmt.Sprintf("data: %s", string(rawJSON))
-		return []string{out}
+		out := make([]byte, 0, len(rawJSON)+len("data: "))
+		out = append(out, []byte("data: ")...)
+		out = append(out, rawJSON...)
+		return [][]byte{out}
 	}
-	return []string{string(rawJSON)}
+	return [][]byte{rawJSON}
 }
 
-// convertCodexResponseToOpenAIResponsesNonStream builds a single Responses JSON
+// ConvertCodexResponseToOpenAIResponsesNonStream builds a single Responses JSON
 // from a non-streaming OpenAI Chat Completions response.
-func convertCodexResponseToOpenAIResponsesNonStream(
-	_ context.Context,
-	_ string,
-	originalRequestRawJSON, _, rawJSON []byte,
-	_ *any,
-) string {
+func ConvertCodexResponseToOpenAIResponsesNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
 	rootResult := gjson.ParseBytes(rawJSON)
 	// Verify this is a response.completed event
 	if rootResult.Get("type").String() != "response.completed" {
-		return ""
+		return []byte{}
 	}
 	responseResult := rootResult.Get("response")
-	template := responseResult.Raw
-	if responseResult.Get("instructions").Exists() {
-		instructions := gjson.GetBytes(originalRequestRawJSON, "instructions").String()
-		template, _ = sjson.Set(template, "instructions", instructions)
-	}
-	return template
+	return []byte(responseResult.Raw)
 }

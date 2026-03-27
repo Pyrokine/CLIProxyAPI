@@ -14,7 +14,7 @@ func init() {
 		interfaces.TranslateResponse{
 			Stream:     ConvertOpenAIResponseToGemini,
 			NonStream:  ConvertOpenAIResponseToGeminiNonStream,
-			TokenCount: TokenCount,
+			TokenCount: tokenCount,
 		},
 	)
 }

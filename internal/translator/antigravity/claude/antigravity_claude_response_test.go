@@ -35,11 +35,11 @@ func TestConvertAntigravityResponseToClaude_ParamsInitialized(t *testing.T) {
 
 	var param any
 	ctx := context.Background()
-	convertAntigravityResponseToClaude(
+	ConvertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, &param,
 	)
 
-	params := param.(*params)
+	params := param.(*Params)
 	if !params.HasFirstResponse {
 		t.Error("HasFirstResponse should be set after first chunk")
 	}
@@ -81,15 +81,15 @@ func TestConvertAntigravityResponseToClaude_ThinkingTextAccumulated(t *testing.T
 	ctx := context.Background()
 
 	// Process first chunk - starts new thinking block
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
-	params := param.(*params)
+	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
+	params := param.(*Params)
 
 	if params.CurrentThinkingText.Len() == 0 {
 		t.Error("Thinking text should be accumulated after first chunk")
 	}
 
 	// Process second chunk - continues thinking block
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
+	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
 
 	text := params.CurrentThinkingText.String()
 	if !strings.Contains(text, "First part") || !strings.Contains(text, "Second part") {
@@ -132,10 +132,10 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	ctx := context.Background()
 
 	// Process thinking chunk
-	convertAntigravityResponseToClaude(
+	ConvertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, thinkingChunk, &param,
 	)
-	params := param.(*params)
+	params := param.(*Params)
 	thinkingText := params.CurrentThinkingText.String()
 
 	if thinkingText == "" {
@@ -143,7 +143,7 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	}
 
 	// Process signature chunk - should cache the signature
-	convertAntigravityResponseToClaude(
+	ConvertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, signatureChunk, &param,
 	)
 
@@ -225,13 +225,13 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	ctx := context.Background()
 
 	// Process first thinking block
-	convertAntigravityResponseToClaude(
+	ConvertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Thinking, &param,
 	)
-	params := param.(*params)
+	params := param.(*Params)
 	firstThinkingText := params.CurrentThinkingText.String()
 
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Sig, &param)
+	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Sig, &param)
 
 	// Verify first signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", firstThinkingText) != validSig1 {
@@ -239,15 +239,15 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	}
 
 	// Process text (transitions out of thinking)
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, textBlock, &param)
+	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, textBlock, &param)
 
 	// Process second thinking block
-	convertAntigravityResponseToClaude(
+	ConvertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Thinking, &param,
 	)
 	secondThinkingText := params.CurrentThinkingText.String()
 
-	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Sig, &param)
+	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Sig, &param)
 
 	// Verify second signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", secondThinkingText) != validSig2 {

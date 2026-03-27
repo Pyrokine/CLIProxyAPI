@@ -8,10 +8,10 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func parseSSEEvent(t *testing.T, chunk string) (string, gjson.Result) {
+func parseSSEEvent(t *testing.T, chunk []byte) (string, gjson.Result) {
 	t.Helper()
 
-	lines := strings.Split(chunk, "\n")
+	lines := strings.Split(string(chunk), "\n")
 	if len(lines) < 2 {
 		t.Fatalf("unexpected SSE chunk: %q", chunk)
 	}
@@ -39,7 +39,7 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 	originalReq := []byte(`{"instructions":"test instructions","model":"gpt-5","max_output_tokens":123}`)
 
 	var param any
-	var out []string
+	var out [][]byte
 	for _, line := range in {
 		out = append(
 			out, ConvertGeminiResponseToOpenAIResponses(
@@ -173,7 +173,7 @@ func TestConvertGeminiResponseToOpenAIResponses_ReasoningEncryptedContent(t *tes
 	}
 
 	var param any
-	var out []string
+	var out [][]byte
 	for _, line := range in {
 		out = append(
 			out, ConvertGeminiResponseToOpenAIResponses(
@@ -217,7 +217,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 	}
 
 	var param any
-	var out []string
+	var out [][]byte
 	for _, line := range in {
 		out = append(
 			out, ConvertGeminiResponseToOpenAIResponses(
@@ -273,12 +273,10 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 			if len(output.Array()) != 3 {
 				t.Fatalf("unexpected response.output length: got %d", len(output.Array()))
 			}
-			if data.Get("response.output.0.name").String() != "tool0" ||
-				data.Get("response.output.0.arguments").String() != "{}" {
+			if data.Get("response.output.0.name").String() != "tool0" || data.Get("response.output.0.arguments").String() != "{}" {
 				t.Fatalf("unexpected output[0]: %s", data.Get("response.output.0").Raw)
 			}
-			if data.Get("response.output.1.name").String() != "tool1" ||
-				data.Get("response.output.1.arguments").String() != "{}" {
+			if data.Get("response.output.1.name").String() != "tool1" || data.Get("response.output.1.arguments").String() != "{}" {
 				t.Fatalf("unexpected output[1]: %s", data.Get("response.output.1").Raw)
 			}
 			if data.Get("response.output.2.name").String() != "tool2" {
@@ -293,7 +291,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 	if posCompleted == -1 {
 		t.Fatalf("missing response.completed event")
 	}
-	for idx := range 3 {
+	for idx := 0; idx < 3; idx++ {
 		if posAdded[idx] == -1 || posArgsDelta[idx] == -1 || posArgsDone[idx] == -1 || posItemDone[idx] == -1 {
 			t.Fatalf(
 				"missing function call events for output_index %d: added=%d argsDelta=%d argsDone=%d itemDone=%d", idx,
@@ -339,7 +337,7 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 	}
 
 	var param any
-	var out []string
+	var out [][]byte
 	for _, line := range in {
 		out = append(
 			out, ConvertGeminiResponseToOpenAIResponses(

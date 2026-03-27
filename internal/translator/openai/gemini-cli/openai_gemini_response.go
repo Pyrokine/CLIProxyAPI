@@ -8,11 +8,11 @@ package geminiCLI
 import (
 	"context"
 
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/gemini"
-	"github.com/tidwall/sjson"
 )
 
-// convertOpenAIResponseToGeminiCLI converts OpenAI Chat Completions streaming response format to Gemini API format.
+// ConvertOpenAIResponseToGeminiCLI converts OpenAI Chat Completions streaming response format to Gemini API format.
 // This function processes OpenAI streaming chunks and transforms them into Gemini-compatible JSON responses.
 // It handles text content, tool calls, and usage metadata, outputting responses that match the Gemini API format.
 //
@@ -23,24 +23,22 @@ import (
 //   - param: A pointer to a parameter object for the conversion.
 //
 // Returns:
-//   - []string: A slice of strings, each containing a Gemini-compatible JSON response.
-func convertOpenAIResponseToGeminiCLI(
+//   - [][]byte: A slice of Gemini-compatible JSON responses.
+func ConvertOpenAIResponseToGeminiCLI(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) []string {
+) [][]byte {
 	outputs := ConvertOpenAIResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
-	newOutputs := make([]string, 0)
-	for i := range outputs {
-		json := `{"response": {}}`
-		output, _ := sjson.SetRaw(json, "response", outputs[i])
-		newOutputs = append(newOutputs, output)
+	newOutputs := make([][]byte, 0, len(outputs))
+	for i := 0; i < len(outputs); i++ {
+		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
 	}
 	return newOutputs
 }
 
-// convertOpenAIResponseToGeminiCLINonStream converts a non-streaming OpenAI response to a non-streaming Gemini CLI response.
+// ConvertOpenAIResponseToGeminiCLINonStream converts a non-streaming OpenAI response to a non-streaming Gemini CLI response.
 //
 // Parameters:
 //   - ctx: The context for the request.
@@ -49,17 +47,19 @@ func convertOpenAIResponseToGeminiCLI(
 //   - param: A pointer to a parameter object for the conversion.
 //
 // Returns:
-//   - string: A Gemini-compatible JSON response.
-func convertOpenAIResponseToGeminiCLINonStream(
+//   - []byte: A Gemini-compatible JSON response.
+func ConvertOpenAIResponseToGeminiCLINonStream(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) string {
-	strJSON := ConvertOpenAIResponseToGeminiNonStream(
+) []byte {
+	out := ConvertOpenAIResponseToGeminiNonStream(
 		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
 	)
-	json := `{"response": {}}`
-	strJSON, _ = sjson.SetRaw(json, "response", strJSON)
-	return strJSON
+	return translatorcommon.WrapGeminiCLIResponse(out)
+}
+
+func tokenCount(_ context.Context, count int64) []byte {
+	return translatorcommon.GeminiTokenCountJSON(count)
 }

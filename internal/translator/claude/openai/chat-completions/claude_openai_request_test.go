@@ -6,61 +6,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// The current convertOpenAIRequestToClaude handles tool results with string content.
-// When the OpenAI tool message has array content (multi-part with images), the current
-// implementation calls content.String() which returns the JSON array as a string literal,
-// not a structured content array. These tests verify the current behavior.
-
-func TestConvertRequest_ToolResultStringContent(t *testing.T) {
-	inputJSON := `{
-		"model": "gpt-4.1",
-		"messages": [
-			{
-				"role": "assistant",
-				"content": "",
-				"tool_calls": [
-					{
-						"id": "call_1",
-						"type": "function",
-						"function": {
-							"name": "do_work",
-							"arguments": "{\"a\":1}"
-						}
-					}
-				]
-			},
-			{
-				"role": "tool",
-				"tool_call_id": "call_1",
-				"content": "tool ok"
-			}
-		]
-	}`
-
-	result := convertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
-	resultJSON := gjson.ParseBytes(result)
-	messages := resultJSON.Get("messages").Array()
-
-	if len(messages) != 2 {
-		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
-	}
-
-	toolResult := messages[1].Get("content.0")
-	if got := toolResult.Get("type").String(); got != "tool_result" {
-		t.Fatalf("Expected content[0].type %q, got %q", "tool_result", got)
-	}
-	if got := toolResult.Get("tool_use_id").String(); got != "call_1" {
-		t.Fatalf("Expected tool_use_id %q, got %q", "call_1", got)
-	}
-	if got := toolResult.Get("content").String(); got != "tool ok" {
-		t.Fatalf("Expected content %q, got %q", "tool ok", got)
-	}
-}
-
-func TestConvertRequest_ToolResultArrayContentPassedAsString(t *testing.T) {
-	// When tool message content is a JSON array, the current implementation passes it
-	// as a string value via message.Get("content").String(), not as a structured array.
-	// This is the current behavior after refactoring.
+func TestConvertOpenAIRequestToClaude_ToolResultTextAndBase64Image(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
 		"messages": [
@@ -94,7 +40,7 @@ func TestConvertRequest_ToolResultArrayContentPassedAsString(t *testing.T) {
 		]
 	}`
 
-	result := convertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -110,15 +56,31 @@ func TestConvertRequest_ToolResultArrayContentPassedAsString(t *testing.T) {
 		t.Fatalf("Expected tool_use_id %q, got %q", "call_1", got)
 	}
 
-	// The content field is a string representation of the JSON array,
-	// not a structured content array (current behavior).
 	toolContent := toolResult.Get("content")
-	if toolContent.Type == gjson.Null {
-		t.Fatal("Expected tool_result content to exist")
+	if !toolContent.IsArray() {
+		t.Fatalf("Expected tool_result content array, got %s", toolContent.Raw)
+	}
+	if got := toolContent.Get("0.type").String(); got != "text" {
+		t.Fatalf("Expected first tool_result part type %q, got %q", "text", got)
+	}
+	if got := toolContent.Get("0.text").String(); got != "tool ok" {
+		t.Fatalf("Expected first tool_result part text %q, got %q", "tool ok", got)
+	}
+	if got := toolContent.Get("1.type").String(); got != "image" {
+		t.Fatalf("Expected second tool_result part type %q, got %q", "image", got)
+	}
+	if got := toolContent.Get("1.source.type").String(); got != "base64" {
+		t.Fatalf("Expected image source type %q, got %q", "base64", got)
+	}
+	if got := toolContent.Get("1.source.media_type").String(); got != "image/png" {
+		t.Fatalf("Expected image media type %q, got %q", "image/png", got)
+	}
+	if got := toolContent.Get("1.source.data").String(); got != "iVBORw0KGgoAAAANSUhEUg==" {
+		t.Fatalf("Unexpected base64 image data: %q", got)
 	}
 }
 
-func TestConvertRequest_ToolResultEmptyContent(t *testing.T) {
+func TestConvertOpenAIRequestToClaude_ToolResultURLImageOnly(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",
 		"messages": [
@@ -131,7 +93,7 @@ func TestConvertRequest_ToolResultEmptyContent(t *testing.T) {
 						"type": "function",
 						"function": {
 							"name": "do_work",
-							"arguments": "{}"
+							"arguments": "{\"a\":1}"
 						}
 					}
 				]
@@ -139,21 +101,37 @@ func TestConvertRequest_ToolResultEmptyContent(t *testing.T) {
 			{
 				"role": "tool",
 				"tool_call_id": "call_1",
-				"content": ""
+				"content": [
+					{
+						"type": "image_url",
+						"image_url": {
+							"url": "https://example.com/tool.png"
+						}
+					}
+				]
 			}
 		]
 	}`
 
-	result := convertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
 	if len(messages) != 2 {
-		t.Fatalf("Expected 2 messages, got %d", len(messages))
+		t.Fatalf("Expected 2 messages, got %d. Messages: %s", len(messages), resultJSON.Get("messages").Raw)
 	}
 
-	toolResult := messages[1].Get("content.0")
-	if got := toolResult.Get("type").String(); got != "tool_result" {
-		t.Fatalf("Expected content[0].type %q, got %q", "tool_result", got)
+	toolContent := messages[1].Get("content.0.content")
+	if !toolContent.IsArray() {
+		t.Fatalf("Expected tool_result content array, got %s", toolContent.Raw)
+	}
+	if got := toolContent.Get("0.type").String(); got != "image" {
+		t.Fatalf("Expected tool_result part type %q, got %q", "image", got)
+	}
+	if got := toolContent.Get("0.source.type").String(); got != "url" {
+		t.Fatalf("Expected image source type %q, got %q", "url", got)
+	}
+	if got := toolContent.Get("0.source.url").String(); got != "https://example.com/tool.png" {
+		t.Fatalf("Unexpected image URL: %q", got)
 	}
 }

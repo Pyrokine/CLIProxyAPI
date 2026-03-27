@@ -10,10 +10,10 @@ func init() {
 	translator.Register(
 		OpenAI,
 		OpenAI,
-		convertOpenAIRequestToOpenAI,
+		ConvertOpenAIRequestToOpenAI,
 		interfaces.TranslateResponse{
-			Stream:    convertOpenAIResponseToOpenAI,
-			NonStream: convertOpenAIResponseToOpenAINonStream,
+			Stream:    ConvertOpenAIResponseToOpenAI,
+			NonStream: ConvertOpenAIResponseToOpenAINonStream,
 		},
 	)
 }

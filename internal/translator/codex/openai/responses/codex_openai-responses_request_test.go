@@ -24,7 +24,7 @@ func TestConvertSystemRoleToDeveloper_BasicConversion(t *testing.T) {
 		]
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	// Check that system role was converted to developer
@@ -69,7 +69,7 @@ func TestConvertSystemRoleToDeveloper_MultipleSystemMessages(t *testing.T) {
 		]
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	// Check that both system roles were converted
@@ -108,7 +108,7 @@ func TestConvertSystemRoleToDeveloper_NoSystemMessages(t *testing.T) {
 		]
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	// Check that user and assistant roles are unchanged
@@ -130,7 +130,7 @@ func TestConvertSystemRoleToDeveloper_EmptyInput(t *testing.T) {
 		"input": []
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	// Check that input is still an empty array
@@ -150,7 +150,7 @@ func TestConvertSystemRoleToDeveloper_NoInputField(t *testing.T) {
 		"stream": false
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	// Check that other fields are still set correctly
@@ -185,7 +185,7 @@ func TestConvertOpenAIResponsesRequestToCodex_OriginalIssue(t *testing.T) {
 		"stream": false
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	// Verify system role was converted to developer
@@ -242,7 +242,7 @@ func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 		]
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	// Check system -> developer
@@ -271,7 +271,7 @@ func TestUserFieldDeletion(t *testing.T) {
 		"input": [{"role": "user", "content": "Hello"}]  
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	// Verify user field is deleted
@@ -293,7 +293,7 @@ func TestContextManagementCompactionCompatibility(t *testing.T) {
 		"input": [{"role":"user","content":"hello"}]
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	if gjson.Get(outputStr, "context_management").Exists() {
@@ -311,7 +311,7 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 		"input": [{"role":"user","content":"hello"}]
 	}`)
 
-	output := convertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
 	outputStr := string(output)
 
 	if gjson.Get(outputStr, "truncation").Exists() {

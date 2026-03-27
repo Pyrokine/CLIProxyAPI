@@ -12,8 +12,8 @@ func init() {
 		GeminiCLI,
 		ConvertGeminiRequestToGeminiCLI,
 		interfaces.TranslateResponse{
-			Stream:     convertGeminiCliResponseToGemini,
-			NonStream:  convertGeminiCliResponseToGeminiNonStream,
+			Stream:     ConvertGeminiCliResponseToGemini,
+			NonStream:  ConvertGeminiCliResponseToGeminiNonStream,
 			TokenCount: tokenCount,
 		},
 	)

@@ -10,10 +10,10 @@ func init() {
 	translator.Register(
 		Claude,
 		GeminiCLI,
-		convertClaudeRequestToCLI,
+		ConvertClaudeRequestToCLI,
 		interfaces.TranslateResponse{
-			Stream:     convertGeminiCLIResponseToClaude,
-			NonStream:  convertGeminiCLIResponseToClaudeNonStream,
+			Stream:     ConvertGeminiCLIResponseToClaude,
+			NonStream:  ConvertGeminiCLIResponseToClaudeNonStream,
 			TokenCount: tokenCount,
 		},
 	)

@@ -8,10 +8,10 @@ import (
 	"context"
 
 	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/claude/gemini"
-	"github.com/tidwall/sjson"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 )
 
-// convertClaudeResponseToGeminiCLI converts Claude Code streaming response format to Gemini CLI format.
+// ConvertClaudeResponseToGeminiCLI converts Claude Code streaming response format to Gemini CLI format.
 // This function processes various Claude Code event types and transforms them into Gemini-compatible JSON responses.
 // It handles text content, tool calls, and usage metadata, outputting responses that match the Gemini CLI API format.
 // The function wraps each converted response in a "response" object to match the Gemini CLI API structure.
@@ -23,25 +23,23 @@ import (
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
-//   - []string: A slice of strings, each containing a Gemini-compatible JSON response wrapped in a response object
-func convertClaudeResponseToGeminiCLI(
+//   - [][]byte: A slice of Gemini-compatible JSON responses wrapped in a response object
+func ConvertClaudeResponseToGeminiCLI(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) []string {
+) [][]byte {
 	outputs := ConvertClaudeResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
 	// Wrap each converted response in a "response" object to match Gemini CLI API structure
-	newOutputs := make([]string, 0)
-	for i := range outputs {
-		json := `{"response": {}}`
-		output, _ := sjson.SetRaw(json, "response", outputs[i])
-		newOutputs = append(newOutputs, output)
+	newOutputs := make([][]byte, 0, len(outputs))
+	for i := 0; i < len(outputs); i++ {
+		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
 	}
 	return newOutputs
 }
 
-// convertClaudeResponseToGeminiCLINonStream converts a non-streaming Claude Code response to a non-streaming Gemini CLI response.
+// ConvertClaudeResponseToGeminiCLINonStream converts a non-streaming Claude Code response to a non-streaming Gemini CLI response.
 // This function processes the complete Claude Code response and transforms it into a single Gemini-compatible
 // JSON response. It wraps the converted response in a "response" object to match the Gemini CLI API structure.
 //
@@ -52,18 +50,20 @@ func convertClaudeResponseToGeminiCLI(
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:
-//   - string: A Gemini-compatible JSON response wrapped in a response object
-func convertClaudeResponseToGeminiCLINonStream(
+//   - []byte: A Gemini-compatible JSON response wrapped in a response object
+func ConvertClaudeResponseToGeminiCLINonStream(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) string {
-	strJSON := ConvertClaudeResponseToGeminiNonStream(
+) []byte {
+	out := ConvertClaudeResponseToGeminiNonStream(
 		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
 	)
 	// Wrap the converted response in a "response" object to match Gemini CLI API structure
-	json := `{"response": {}}`
-	strJSON, _ = sjson.SetRaw(json, "response", strJSON)
-	return strJSON
+	return translatorcommon.WrapGeminiCLIResponse(out)
+}
+
+func tokenCount(_ context.Context, count int64) []byte {
+	return translatorcommon.GeminiTokenCountJSON(count)
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// convertGeminiCLIRequestToClaude parses and transforms a Gemini CLI API request into Claude Code API format.
+// ConvertGeminiCLIRequestToClaude parses and transforms a Gemini CLI API request into Claude Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
 // The function performs the following transformations:
@@ -27,7 +27,7 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
-func convertGeminiCLIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertGeminiCLIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
 	modelResult := gjson.GetBytes(rawJSON, "model")

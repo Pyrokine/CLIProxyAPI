@@ -8,22 +8,27 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
-
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// geminiCLIResponseParams holds state tracked across streaming chunks.
-type geminiCLIResponseParams struct {
+// convertCliResponseToOpenAIChatParams holds parameters for response conversion.
+type convertCliResponseToOpenAIChatParams struct {
 	UnixTimestamp int64
 	FunctionIndex int
 }
 
-// convertCliResponseToOpenAI translates a single chunk of a streaming response from the
+// functionCallIDCounter provides a process-wide unique counter for function call identifiers.
+var functionCallIDCounter uint64
+
+// ConvertCliResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini CLI API format to the OpenAI Chat Completions streaming format.
 // It processes various Gemini CLI event types and transforms them into OpenAI-compatible JSON responses.
 // The function handles text content, tool calls, reasoning content, and usage metadata, outputting
@@ -36,54 +41,192 @@ type geminiCLIResponseParams struct {
 //   - param: A pointer to a parameter object for maintaining state between calls
 //
 // Returns:
-//   - []string: A slice of strings, each containing an OpenAI-compatible JSON response
-func convertCliResponseToOpenAI(
-	_ context.Context,
-	_ string,
-	_, _, rawJSON []byte,
-	param *any,
-) []string {
+//   - [][]byte: A slice of OpenAI-compatible JSON responses
+func ConvertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
-		*param = &geminiCLIResponseParams{}
+		*param = &convertCliResponseToOpenAIChatParams{
+			UnixTimestamp: 0,
+			FunctionIndex: 0,
+		}
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		return []string{}
+		return [][]byte{}
 	}
 
-	p := (*param).(*geminiCLIResponseParams)
+	// Initialize the OpenAI SSE template.
+	template := []byte(`{"id":"","object":"chat.completion.chunk","created":12345,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"reasoning_content":null,"tool_calls":null},"finish_reason":null,"native_finish_reason":null}]}`)
 
-	// Process the common chunk (model, time, id, usage, content parts).
-	result := common.ProcessCLIResponseChunk(rawJSON, &p.UnixTimestamp, &p.FunctionIndex)
+	// Extract and set the model version.
+	if modelVersionResult := gjson.GetBytes(rawJSON, "response.modelVersion"); modelVersionResult.Exists() {
+		template, _ = sjson.SetBytes(template, "model", modelVersionResult.String())
+	}
 
-	// Extract finish reason from either stop_reason or candidates.0.finishReason.
+	// Extract and set the creation timestamp.
+	if createTimeResult := gjson.GetBytes(rawJSON, "response.createTime"); createTimeResult.Exists() {
+		t, err := time.Parse(time.RFC3339Nano, createTimeResult.String())
+		if err == nil {
+			(*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp = t.Unix()
+		}
+		template, _ = sjson.SetBytes(
+			template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp,
+		)
+	} else {
+		template, _ = sjson.SetBytes(
+			template, "created", (*param).(*convertCliResponseToOpenAIChatParams).UnixTimestamp,
+		)
+	}
+
+	// Extract and set the response ID.
+	if responseIDResult := gjson.GetBytes(rawJSON, "response.responseId"); responseIDResult.Exists() {
+		template, _ = sjson.SetBytes(template, "id", responseIDResult.String())
+	}
+
 	finishReason := ""
-	if v := gjson.GetBytes(rawJSON, "response.stop_reason"); v.Exists() {
-		finishReason = v.String()
+	if stopReasonResult := gjson.GetBytes(rawJSON, "response.stop_reason"); stopReasonResult.Exists() {
+		finishReason = stopReasonResult.String()
 	}
 	if finishReason == "" {
-		if v := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); v.Exists() {
-			finishReason = v.String()
+		if finishReasonResult := gjson.GetBytes(
+			rawJSON, "response.candidates.0.finishReason",
+		); finishReasonResult.Exists() {
+			finishReason = finishReasonResult.String()
 		}
 	}
 	finishReason = strings.ToLower(finishReason)
 
-	template := result.Template
-	if result.HasToolCall {
-		template, _ = sjson.Set(template, "choices.0.finish_reason", "tool_calls")
-		template, _ = sjson.Set(template, "choices.0.native_finish_reason", "tool_calls")
-	} else if finishReason != "" && p.FunctionIndex == 0 {
-		// Only pass through specific finish reasons
-		if finishReason == "max_tokens" || finishReason == "stop" {
-			template, _ = sjson.Set(template, "choices.0.finish_reason", finishReason)
-			template, _ = sjson.Set(template, "choices.0.native_finish_reason", finishReason)
+	// Extract and set usage metadata (token counts).
+	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
+		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
+		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
+			template, _ = sjson.SetBytes(template, "usage.completion_tokens", candidatesTokenCountResult.Int())
+		}
+		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
+			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
+		}
+		promptTokenCount := usageResult.Get("promptTokenCount").Int()
+		thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
+		template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokenCount)
+		if thoughtsTokenCount > 0 {
+			template, _ = sjson.SetBytes(
+				template, "usage.completion_tokens_details.reasoning_tokens", thoughtsTokenCount,
+			)
+		}
+		// Include cached token count if present (indicates prompt caching is working)
+		if cachedTokenCount > 0 {
+			var err error
+			template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
+			if err != nil {
+				log.Warnf("gemini-cli openai response: failed to set cached_tokens: %v", err)
+			}
 		}
 	}
 
-	return []string{template}
+	// Process the main content part of the response.
+	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
+	hasFunctionCall := false
+	if partsResult.IsArray() {
+		partResults := partsResult.Array()
+		for i := 0; i < len(partResults); i++ {
+			partResult := partResults[i]
+			partTextResult := partResult.Get("text")
+			functionCallResult := partResult.Get("functionCall")
+			thoughtSignatureResult := partResult.Get("thoughtSignature")
+			if !thoughtSignatureResult.Exists() {
+				thoughtSignatureResult = partResult.Get("thought_signature")
+			}
+			inlineDataResult := partResult.Get("inlineData")
+			if !inlineDataResult.Exists() {
+				inlineDataResult = partResult.Get("inline_data")
+			}
+
+			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
+			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
+
+			// Ignore encrypted thoughtSignature but keep any actual content in the same part.
+			if hasThoughtSignature && !hasContentPayload {
+				continue
+			}
+
+			if partTextResult.Exists() {
+				textContent := partTextResult.String()
+
+				// Handle text content, distinguishing between regular content and reasoning/thoughts.
+				if partResult.Get("thought").Bool() {
+					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", textContent)
+				} else {
+					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)
+				}
+				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+			} else if functionCallResult.Exists() {
+				// Handle function call content.
+				hasFunctionCall = true
+				toolCallsResult := gjson.GetBytes(template, "choices.0.delta.tool_calls")
+				functionCallIndex := (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex
+				(*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex++
+				if toolCallsResult.Exists() && toolCallsResult.IsArray() {
+					functionCallIndex = len(toolCallsResult.Array())
+				} else {
+					template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls", []byte(`[]`))
+				}
+
+				functionCallTemplate := []byte(`{"id":"","index":0,"type":"function","function":{"name":"","arguments":""}}`)
+				fcName := functionCallResult.Get("name").String()
+				functionCallTemplate, _ = sjson.SetBytes(
+					functionCallTemplate, "id",
+					fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)),
+				)
+				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "index", functionCallIndex)
+				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", fcName)
+				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
+					functionCallTemplate, _ = sjson.SetBytes(
+						functionCallTemplate, "function.arguments", fcArgsResult.Raw,
+					)
+				}
+				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+				template, _ = sjson.SetRawBytes(template, "choices.0.delta.tool_calls.-1", functionCallTemplate)
+			} else if inlineDataResult.Exists() {
+				data := inlineDataResult.Get("data").String()
+				if data == "" {
+					continue
+				}
+				mimeType := inlineDataResult.Get("mimeType").String()
+				if mimeType == "" {
+					mimeType = inlineDataResult.Get("mime_type").String()
+				}
+				if mimeType == "" {
+					mimeType = "image/png"
+				}
+				imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
+				imagesResult := gjson.GetBytes(template, "choices.0.delta.images")
+				if !imagesResult.Exists() || !imagesResult.IsArray() {
+					template, _ = sjson.SetRawBytes(template, "choices.0.delta.images", []byte(`[]`))
+				}
+				imageIndex := len(gjson.GetBytes(template, "choices.0.delta.images").Array())
+				imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+				imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
+				imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
+				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+				template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
+			}
+		}
+	}
+
+	if hasFunctionCall {
+		template, _ = sjson.SetBytes(template, "choices.0.finish_reason", "tool_calls")
+		template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", "tool_calls")
+	} else if finishReason != "" && (*param).(*convertCliResponseToOpenAIChatParams).FunctionIndex == 0 {
+		// Only pass through specific finish reasons
+		if finishReason == "max_tokens" || finishReason == "stop" {
+			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
+		}
+	}
+
+	return [][]byte{template}
 }
 
-// convertCliResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
+// ConvertCliResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
 // This function processes the complete Gemini CLI response and transforms it into a single OpenAI-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the OpenAI API format.
@@ -95,18 +238,18 @@ func convertCliResponseToOpenAI(
 //   - param: A pointer to a parameter object for the conversion
 //
 // Returns:
-//   - string: An OpenAI-compatible JSON response containing all message content and metadata
-func convertCliResponseToOpenAINonStream(
+//   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
+func ConvertCliResponseToOpenAINonStream(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
-) string {
+) []byte {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		return ConvertGeminiResponseToOpenAINonStream(
 			ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param,
 		)
 	}
-	return ""
+	return []byte{}
 }

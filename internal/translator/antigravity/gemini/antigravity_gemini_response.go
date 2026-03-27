@@ -8,14 +8,13 @@ package gemini
 import (
 	"bytes"
 	"context"
-	"fmt"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// convertAntigravityResponseToGemini parses and transforms a Gemini CLI API request into Gemini API format.
+// ConvertAntigravityResponseToGemini parses and transforms a Gemini CLI API request into Gemini API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini API.
 // The function performs the following transformations:
@@ -30,18 +29,13 @@ import (
 //   - param: A pointer to a parameter object for the conversion (unused in current implementation)
 //
 // Returns:
-//   - []string: The transformed request data in Gemini API format
-func convertAntigravityResponseToGemini(
-	ctx context.Context,
-	_ string,
-	_, _, rawJSON []byte,
-	_ *any,
-) []string {
+//   - [][]byte: The transformed response data in Gemini API format.
+func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
-	if alt, ok := util.AltFromContext(ctx); ok {
+	if alt, ok := ctx.Value("alt").(string); ok {
 		var chunk []byte
 		if alt == "" {
 			responseResult := gjson.GetBytes(rawJSON, "response")
@@ -50,25 +44,27 @@ func convertAntigravityResponseToGemini(
 				chunk = restoreUsageMetadata(chunk)
 			}
 		} else {
-			chunkTemplate := "[]"
+			chunkTemplate := []byte("[]")
 			responseResult := gjson.ParseBytes(chunk)
 			if responseResult.IsArray() {
 				responseResultItems := responseResult.Array()
-				for i := range responseResultItems {
+				for i := 0; i < len(responseResultItems); i++ {
 					responseResultItem := responseResultItems[i]
 					if responseResultItem.Get("response").Exists() {
-						chunkTemplate, _ = sjson.SetRaw(chunkTemplate, "-1", responseResultItem.Get("response").Raw)
+						chunkTemplate, _ = sjson.SetRawBytes(
+							chunkTemplate, "-1", []byte(responseResultItem.Get("response").Raw),
+						)
 					}
 				}
 			}
-			chunk = []byte(chunkTemplate)
+			chunk = chunkTemplate
 		}
-		return []string{string(chunk)}
+		return [][]byte{chunk}
 	}
-	return []string{}
+	return [][]byte{}
 }
 
-// convertAntigravityResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
+// ConvertAntigravityResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
 // This function processes the complete Gemini CLI request and transforms it into a single Gemini-compatible
 // JSON response. It extracts the response data from the request and returns it in the expected format.
 //
@@ -79,23 +75,18 @@ func convertAntigravityResponseToGemini(
 //   - param: A pointer to a parameter object for the conversion (unused in current implementation)
 //
 // Returns:
-//   - string: A Gemini-compatible JSON response containing the response data
-func convertAntigravityResponseToGeminiNonStream(
-	_ context.Context,
-	_ string,
-	_, _, rawJSON []byte,
-	_ *any,
-) string {
+//   - []byte: A Gemini-compatible JSON response containing the response data.
+func ConvertAntigravityResponseToGeminiNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		chunk := restoreUsageMetadata([]byte(responseResult.Raw))
-		return string(chunk)
+		return chunk
 	}
-	return string(rawJSON)
+	return rawJSON
 }
 
-func tokenCount(_ context.Context, count int64) string {
-	return fmt.Sprintf(`{"totalTokens":%d,"promptTokensDetails":[{"modality":"TEXT","tokenCount":%d}]}`, count, count)
+func tokenCount(_ context.Context, count int64) []byte {
+	return translatorcommon.GeminiTokenCountJSON(count)
 }
 
 // restoreUsageMetadata renames cpaUsageMetadata back to usageMetadata.

@@ -3,8 +3,6 @@ package gemini
 import (
 	"context"
 	"testing"
-
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
 func TestRestoreUsageMetadata(t *testing.T) {
@@ -14,10 +12,8 @@ func TestRestoreUsageMetadata(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "cpaUsageMetadata renamed to usageMetadata",
-			input: []byte(
-				`{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100,"candidatesTokenCount":200}}`,
-			),
+			name:     "cpaUsageMetadata renamed to usageMetadata",
+			input:    []byte(`{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100,"candidatesTokenCount":200}}`),
 			expected: `{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":200}}`,
 		},
 		{
@@ -51,10 +47,8 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "cpaUsageMetadata restored in response",
-			input: []byte(
-				`{"response":{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100}}}`,
-			),
+			name:     "cpaUsageMetadata restored in response",
+			input:    []byte(`{"response":{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100}}}`),
 			expected: `{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":100}}`,
 		},
 		{
@@ -67,9 +61,9 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				result := convertAntigravityResponseToGeminiNonStream(context.Background(), "", nil, nil, tt.input, nil)
-				if result != tt.expected {
-					t.Errorf("convertAntigravityResponseToGeminiNonStream() = %s, want %s", result, tt.expected)
+				result := ConvertAntigravityResponseToGeminiNonStream(context.Background(), "", nil, nil, tt.input, nil)
+				if string(result) != tt.expected {
+					t.Errorf("ConvertAntigravityResponseToGeminiNonStream() = %s, want %s", string(result), tt.expected)
 				}
 			},
 		)
@@ -77,7 +71,7 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 }
 
 func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
-	ctx := util.WithAlt(context.Background(), "")
+	ctx := context.WithValue(context.Background(), "alt", "")
 
 	tests := []struct {
 		name     string
@@ -85,10 +79,8 @@ func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
 		expected string
 	}{
 		{
-			name: "cpaUsageMetadata restored in streaming response",
-			input: []byte(
-				`data: {"response":{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100}}}`,
-			),
+			name:     "cpaUsageMetadata restored in streaming response",
+			input:    []byte(`data: {"response":{"modelVersion":"gemini-3-pro","cpaUsageMetadata":{"promptTokenCount":100}}}`),
 			expected: `{"modelVersion":"gemini-3-pro","usageMetadata":{"promptTokenCount":100}}`,
 		},
 	}
@@ -96,12 +88,12 @@ func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				results := convertAntigravityResponseToGemini(ctx, "", nil, nil, tt.input, nil)
+				results := ConvertAntigravityResponseToGemini(ctx, "", nil, nil, tt.input, nil)
 				if len(results) != 1 {
 					t.Fatalf("expected 1 result, got %d", len(results))
 				}
-				if results[0] != tt.expected {
-					t.Errorf("convertAntigravityResponseToGemini() = %s, want %s", results[0], tt.expected)
+				if string(results[0]) != tt.expected {
+					t.Errorf("ConvertAntigravityResponseToGemini() = %s, want %s", string(results[0]), tt.expected)
 				}
 			},
 		)

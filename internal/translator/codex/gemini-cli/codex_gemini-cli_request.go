@@ -11,7 +11,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// convertGeminiCLIRequestToCodex parses and transforms a Gemini CLI API request into Codex API format.
+// ConvertGeminiCLIRequestToCodex parses and transforms a Gemini CLI API request into Codex API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Codex API.
 // The function performs the following transformations:
@@ -27,7 +27,7 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Codex API format
-func convertGeminiCLIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+func ConvertGeminiCLIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
 	rawJSON = []byte(gjson.GetBytes(rawJSON, "request").Raw)

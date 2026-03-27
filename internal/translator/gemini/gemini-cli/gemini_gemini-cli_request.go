@@ -1,20 +1,23 @@
-// Package geminiCLI provides request translation functionality for Gemini CLI to Gemini API.
-// It handles parsing and transforming Gemini CLI API requests into Gemini API format,
+// Package geminiCLI provides request translation from Gemini CLI to Gemini format.
+// It handles parsing and transforming Claude API requests into the internal client format,
 // extracting model information, system instructions, message contents, and tool declarations.
 // The package also performs JSON data cleaning and transformation to ensure compatibility
-// between Gemini CLI API format and Gemini API's expected format.
+// between Claude API format and the internal client's expected format.
 package geminiCLI
 
 import (
+	"fmt"
+
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// convertGeminiCLIRequestToGemini parses and transforms a Gemini CLI API request into Gemini API format.
+// ConvertGeminiCLIRequestToGemini transforms a Gemini CLI request into Gemini API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
-// from the raw JSON request and returns them in the format expected by the internal client.
-func convertGeminiCLIRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte {
+// from the raw JSON request and returns them in the format expected by the Gemini API.
+func ConvertGeminiCLIRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 	modelResult := gjson.GetBytes(rawJSON, "model")
 	rawJSON = []byte(gjson.GetBytes(rawJSON, "request").Raw)
@@ -26,8 +29,52 @@ func convertGeminiCLIRequestToGemini(_ string, inputRawJSON []byte, _ bool) []by
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
 
-	rawJSON = common.RenameToolParameters(rawJSON)
-	rawJSON = common.InjectThoughtSignatures(rawJSON, "contents")
+	toolsResult := gjson.GetBytes(rawJSON, "tools")
+	if toolsResult.Exists() && toolsResult.IsArray() {
+		toolResults := toolsResult.Array()
+		for i := 0; i < len(toolResults); i++ {
+			functionDeclarationsResult := gjson.GetBytes(rawJSON, fmt.Sprintf("tools.%d.function_declarations", i))
+			if functionDeclarationsResult.Exists() && functionDeclarationsResult.IsArray() {
+				functionDeclarationsResults := functionDeclarationsResult.Array()
+				for j := 0; j < len(functionDeclarationsResults); j++ {
+					parametersResult := gjson.GetBytes(
+						rawJSON, fmt.Sprintf("tools.%d.function_declarations.%d.parameters", i, j),
+					)
+					if parametersResult.Exists() {
+						strJson, _ := util.RenameKey(
+							string(rawJSON), fmt.Sprintf("tools.%d.function_declarations.%d.parameters", i, j),
+							fmt.Sprintf("tools.%d.function_declarations.%d.parametersJsonSchema", i, j),
+						)
+						rawJSON = []byte(strJson)
+					}
+				}
+			}
+		}
+	}
+
+	gjson.GetBytes(rawJSON, "contents").ForEach(
+		func(key, content gjson.Result) bool {
+			if content.Get("role").String() == "model" {
+				content.Get("parts").ForEach(
+					func(partKey, part gjson.Result) bool {
+						if part.Get("functionCall").Exists() {
+							rawJSON, _ = sjson.SetBytes(
+								rawJSON, fmt.Sprintf("contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()),
+								"skip_thought_signature_validator",
+							)
+						} else if part.Get("thoughtSignature").Exists() {
+							rawJSON, _ = sjson.SetBytes(
+								rawJSON, fmt.Sprintf("contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()),
+								"skip_thought_signature_validator",
+							)
+						}
+						return true
+					},
+				)
+			}
+			return true
+		},
+	)
 
 	return common.AttachDefaultSafetySettings(rawJSON, "safetySettings")
 }

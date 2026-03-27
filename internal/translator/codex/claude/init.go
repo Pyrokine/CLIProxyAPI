@@ -10,10 +10,10 @@ func init() {
 	translator.Register(
 		Claude,
 		Codex,
-		convertClaudeRequestToCodex,
+		ConvertClaudeRequestToCodex,
 		interfaces.TranslateResponse{
-			Stream:     convertCodexResponseToClaude,
-			NonStream:  convertCodexResponseToClaudeNonStream,
+			Stream:     ConvertCodexResponseToClaude,
+			NonStream:  ConvertCodexResponseToClaudeNonStream,
 			TokenCount: tokenCount,
 		},
 	)

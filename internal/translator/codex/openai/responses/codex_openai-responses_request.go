@@ -7,16 +7,16 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func convertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool) []byte {
+func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 
 	inputResult := gjson.GetBytes(rawJSON, "input")
 	if inputResult.Type == gjson.String {
-		input, _ := sjson.Set(
-			`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`, "0.content.0.text",
-			inputResult.String(),
+		input, _ := sjson.SetBytes(
+			[]byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`),
+			"0.content.0.text", inputResult.String(),
 		)
-		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", []byte(input))
+		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", input)
 	}
 
 	rawJSON, _ = sjson.SetBytes(rawJSON, "stream", true)
@@ -28,7 +28,12 @@ func convertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool)
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
+	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
+		if v.String() != "priority" {
+			rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")
+		}
+	}
+
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
@@ -71,7 +76,7 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	result := rawJSON
 
 	// Directly modify role values for items with "system" role
-	for i := range inputArray {
+	for i := 0; i < len(inputArray); i++ {
 		rolePath := fmt.Sprintf("input.%d.role", i)
 		if gjson.GetBytes(result, rolePath).String() == "system" {
 			result, _ = sjson.SetBytes(result, rolePath, "developer")
