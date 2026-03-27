@@ -162,6 +162,19 @@ func (p *Persister) Summary() *SummaryData {
 	return p.summary
 }
 
+// TodayDetails returns a copy of today's details.
+func (p *Persister) TodayDetails() []FlatDetail {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.today == nil {
+		return nil
+	}
+	return p.today.Details()
+}
+
 // TodayStore returns the today store for direct queries.
 func (p *Persister) TodayStore() *TodayStore {
 	if p == nil {
@@ -536,18 +549,18 @@ func atomicWrite(path string, data []byte) error {
 	}
 	tmpPath := tmpFile.Name()
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("failed to write %s: %w", tmpPath, err)
 	}
 	if err := tmpFile.Chmod(0o600); err != nil {
-		tmpFile.Close()
-		os.Remove(tmpPath)
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("failed to chmod %s: %w", tmpPath, err)
 	}
-	tmpFile.Close()
+	_ = tmpFile.Close()
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("failed to rename %s -> %s: %w", tmpPath, path, err)
 	}
 	return nil

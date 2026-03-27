@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -28,7 +28,8 @@ type eventsResponse struct {
 
 // GetUsageEvents returns paginated usage event details.
 //
-//	GET /v0/management/usage/events?from=...&to=...&page=1&page_size=50&model=...&source=...&search=...&sort=timestamp&order=desc
+//	GET /v0/management/usage/events?from=...&to=...&page=1&page_size=50
+//	    &model=...&source=...&search=...&sort=timestamp&order=desc
 func (h *Handler) GetUsageEvents(c *gin.Context) {
 	if h.usagePersister == nil {
 		c.JSON(

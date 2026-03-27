@@ -255,18 +255,6 @@ func paginate(total, page, pageSize int) (start, end int) {
 	return
 }
 
-// FilterAndSort applies time range filtering, event filters, and sorting to a slice of FlatDetail.
-func FilterAndSort(
-	details []FlatDetail,
-	from, to time.Time,
-	filters EventFilters,
-	sortField, sortOrder string,
-) []FlatDetail {
-	filtered := filterDetails(details, from, to, filters)
-	sortDetails(filtered, sortField, sortOrder == "desc")
-	return filtered
-}
-
 // MergeSorted merges two pre-sorted FlatDetail slices into a single sorted slice.
 // Both inputs must already be sorted by the same field and direction.
 func MergeSorted(a, b []FlatDetail, sortField string, desc bool) []FlatDetail {

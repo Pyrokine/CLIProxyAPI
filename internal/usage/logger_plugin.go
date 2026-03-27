@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/gin-gonic/gin"
 )
 
 var statisticsEnabled atomic.Bool
@@ -517,3 +517,48 @@ func formatHour(hour int) string {
 	return fmt.Sprintf("%02d", hour)
 }
 
+// ArchivedDetail pairs a trimmed requestDetail with its API and model names for archival.
+type ArchivedDetail struct {
+	APIName   string
+	ModelName string
+	Detail    requestDetail
+}
+
+// TrimDetails removes all details older than the cutoff time from memory.
+// Aggregate counters are preserved. Trimmed records are returned for archival.
+func (s *RequestStatistics) TrimDetails(cutoff time.Time) []ArchivedDetail {
+	if s == nil {
+		return nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var archived []ArchivedDetail
+	for apiName, stats := range s.apis {
+		if stats == nil {
+			continue
+		}
+		for modelName, ms := range stats.Models {
+			if ms == nil || len(ms.Details) == 0 {
+				continue
+			}
+			var kept []requestDetail
+			for _, d := range ms.Details {
+				if d.Timestamp.Before(cutoff) {
+					archived = append(
+						archived, ArchivedDetail{
+							APIName:   apiName,
+							ModelName: modelName,
+							Detail:    d,
+						},
+					)
+				} else {
+					kept = append(kept, d)
+				}
+			}
+			ms.Details = kept
+		}
+	}
+	return archived
+}

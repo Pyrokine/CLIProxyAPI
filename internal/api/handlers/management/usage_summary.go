@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
+	"github.com/gin-gonic/gin"
 )
 
 // summaryTokens holds a token breakdown.

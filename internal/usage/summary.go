@@ -241,12 +241,10 @@ func (s *SummaryData) Query(from, to time.Time) QueryResult {
 	if fullRange {
 		result.Totals = s.Totals
 		for model, ms := range s.ByModel {
-			copy := *ms
-			result.ByModel[model] = &copy
+			result.ByModel[model] = new(*ms)
 		}
 		for cred, cs := range s.ByCredential {
-			copy := *cs
-			result.ByCredential[cred] = &copy
+			result.ByCredential[cred] = new(*cs)
 		}
 	}
 
@@ -386,12 +384,10 @@ func (s *SummaryData) QueryHourly(from, to time.Time) QueryResult {
 	if fullRange {
 		result.Totals = s.Totals
 		for m, ms := range s.ByModel {
-			copy := *ms
-			result.ByModel[m] = &copy
+			result.ByModel[m] = new(*ms)
 		}
 		for c, cs := range s.ByCredential {
-			copy := *cs
-			result.ByCredential[c] = &copy
+			result.ByCredential[c] = new(*cs)
 		}
 	}
 

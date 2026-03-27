@@ -164,16 +164,18 @@ func (d *DetailStore) cleanPreview(cutoff time.Time) []cleanPreviewFile {
 	cutoffDay := cutoff.UTC().Format("2006-01-02")
 	var result []cleanPreviewFile
 
-	d.forEachDayFile(func(monthDir, dayDate string) {
-		if dayDate < cutoffDay {
-			filePath := filepath.Join(monthDir, dayDate+".json")
-			info, err := os.Stat(filePath)
-			if err != nil {
-				return
+	d.forEachDayFile(
+		func(monthDir, dayDate string) {
+			if dayDate < cutoffDay {
+				filePath := filepath.Join(monthDir, dayDate+".json")
+				info, err := os.Stat(filePath)
+				if err != nil {
+					return
+				}
+				result = append(result, cleanPreviewFile{Date: dayDate, SizeBytes: info.Size()})
 			}
-			result = append(result, cleanPreviewFile{Date: dayDate, SizeBytes: info.Size()})
-		}
-	})
+		},
+	)
 
 	sort.Slice(result, func(i, j int) bool { return result[i].Date < result[j].Date })
 	return result
@@ -197,12 +199,14 @@ func (d *DetailStore) cleanBefore(cutoff time.Time) error {
 	cutoffDay := cutoff.UTC().Format("2006-01-02")
 	monthsToCheck := make(map[string]struct{})
 
-	d.forEachDayFile(func(monthDir, dayDate string) {
-		if dayDate < cutoffDay {
-			_ = os.Remove(filepath.Join(monthDir, dayDate+".json"))
-			monthsToCheck[monthDir] = struct{}{}
-		}
-	})
+	d.forEachDayFile(
+		func(monthDir, dayDate string) {
+			if dayDate < cutoffDay {
+				_ = os.Remove(filepath.Join(monthDir, dayDate+".json"))
+				monthsToCheck[monthDir] = struct{}{}
+			}
+		},
+	)
 
 	// Remove empty month directories
 	for monthDir := range monthsToCheck {
@@ -217,9 +221,11 @@ func (d *DetailStore) cleanBefore(cutoff time.Time) error {
 // listDays returns all archived date keys sorted ascending.
 func (d *DetailStore) listDays() []string {
 	var days []string
-	d.forEachDayFile(func(_, dayDate string) {
-		days = append(days, dayDate)
-	})
+	d.forEachDayFile(
+		func(_, dayDate string) {
+			days = append(days, dayDate)
+		},
+	)
 	sort.Strings(days)
 	return days
 }
