@@ -14,7 +14,7 @@ const (
 type Config struct {
 	SDKConfig `yaml:",inline"`
 	// Host is the network host/interface on which the API server will bind.
-	// Default is empty ("") to bind all interfaces (IPv4 + IPv6). Use "127.0.0.1" or "localhost" for local-only access.
+	// Default is "127.0.0.1" (loopback only). Set to "0.0.0.0" to expose on all interfaces.
 	Host string `yaml:"host" json:"-"`
 	// Port is the network port on which the API server will listen.
 	Port int `yaml:"port" json:"-"`
@@ -183,8 +183,6 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
-	// PanelAutoUpdate controls whether the management panel is auto-updated. Default true.
-	PanelAutoUpdate *bool `yaml:"panel-auto-update,omitempty"`
 	// CPAGitHubRepository overrides the GitHub repository used for CPA backend self-update and releases listing.
 	CPAGitHubRepository string `yaml:"cpa-github-repository"`
 }

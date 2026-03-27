@@ -186,6 +186,20 @@ func (l *FileRequestLogger) IsEnabled() bool {
 	return l.enabled
 }
 
+// SetEnabled updates the request logging enabled state.
+// This method allows dynamic enabling/disabling of request logging.
+//
+// Parameters:
+//   - enabled: Whether request logging should be enabled
+func (l *FileRequestLogger) SetEnabled(enabled bool) {
+	l.enabled = enabled
+}
+
+// SetErrorLogsMaxFiles updates the maximum number of error log files to retain.
+func (l *FileRequestLogger) SetErrorLogsMaxFiles(maxFiles int) {
+	l.errorLogsMaxFiles = maxFiles
+}
+
 // LogRequest logs a complete non-streaming request/response cycle to a file.
 //
 // Parameters:
@@ -844,7 +858,7 @@ func (l *FileRequestLogger) decompressGzip(data []byte) ([]byte, error) {
 		}
 	}()
 
-	decompressed, err := io.ReadAll(reader)
+	decompressed, err := io.ReadAll(io.LimitReader(reader, 50<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress gzip data: %w", err)
 	}
@@ -868,7 +882,7 @@ func (l *FileRequestLogger) decompressDeflate(data []byte) ([]byte, error) {
 		}
 	}()
 
-	decompressed, err := io.ReadAll(reader)
+	decompressed, err := io.ReadAll(io.LimitReader(reader, 50<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress deflate data: %w", err)
 	}
@@ -887,7 +901,7 @@ func (l *FileRequestLogger) decompressDeflate(data []byte) ([]byte, error) {
 func (l *FileRequestLogger) decompressBrotli(data []byte) ([]byte, error) {
 	reader := brotli.NewReader(bytes.NewReader(data))
 
-	decompressed, err := io.ReadAll(reader)
+	decompressed, err := io.ReadAll(io.LimitReader(reader, 50<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress brotli data: %w", err)
 	}
@@ -910,7 +924,7 @@ func (l *FileRequestLogger) decompressZstd(data []byte) ([]byte, error) {
 	}
 	defer decoder.Close()
 
-	decompressed, err := io.ReadAll(decoder)
+	decompressed, err := io.ReadAll(io.LimitReader(decoder, 50<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress zstd data: %w", err)
 	}

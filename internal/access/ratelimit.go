@@ -6,11 +6,11 @@ import (
 )
 
 const (
-	maxFailures       = 10
-	failureWindow     = time.Minute
-	lockoutDuration   = 60 * time.Second
-	staleEntryMaxAge  = 5 * time.Minute
-	cleanupInterval   = time.Minute
+	maxFailures      = 10
+	failureWindow    = time.Minute
+	lockoutDuration  = 60 * time.Second
+	staleEntryMaxAge = 5 * time.Minute
+	cleanupInterval  = time.Minute
 )
 
 type rateLimitEntry struct {
@@ -105,14 +105,16 @@ func (rl *AuthRateLimiter) cleanupLoop() {
 
 func (rl *AuthRateLimiter) cleanup() {
 	now := time.Now()
-	rl.entries.Range(func(key, value any) bool {
-		entry := value.(*rateLimitEntry)
-		entry.mu.Lock()
-		stale := now.Sub(entry.firstFailure) > staleEntryMaxAge && now.After(entry.lockedUntil)
-		entry.mu.Unlock()
-		if stale {
-			rl.entries.Delete(key)
-		}
-		return true
-	})
+	rl.entries.Range(
+		func(key, value any) bool {
+			entry := value.(*rateLimitEntry)
+			entry.mu.Lock()
+			stale := now.Sub(entry.firstFailure) > staleEntryMaxAge && now.After(entry.lockedUntil)
+			entry.mu.Unlock()
+			if stale {
+				rl.entries.Delete(key)
+			}
+			return true
+		},
+	)
 }
