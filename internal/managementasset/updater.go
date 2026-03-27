@@ -25,12 +25,11 @@ import (
 )
 
 const (
-	defaultManagementReleaseURL  = "https://api.github.com/repos/Pyrokine/Cli-Proxy-API-Management-Center/releases/latest"
-	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
-	managementAssetName          = "management.html"
-	httpUserAgent                = "CLIProxyAPI-management-updater"
-	managementSyncMinInterval    = 30 * time.Second
-	updateCheckInterval          = 3 * time.Hour
+	defaultManagementReleaseURL = "https://api.github.com/repos/Pyrokine/Cli-Proxy-API-Management-Center/releases/latest"
+	managementAssetName         = "management.html"
+	httpUserAgent               = "CLIProxyAPI-management-updater"
+	managementSyncMinInterval   = 30 * time.Second
+	updateCheckInterval         = 3 * time.Hour
 )
 
 // managementFileName exposes the control panel asset filename.
@@ -234,13 +233,10 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			if err != nil {
 				if localFileMissing {
 					log.WithError(err).
-						Warn("failed to fetch latest management release information, trying fallback page")
-					if ensureFallbackManagementHTML(ctx, client, localPath) {
-						return nil, nil
-					}
-					return nil, nil
+						Warn("failed to fetch latest management release information; fallback download is disabled for security (no digest verification)")
+				} else {
+					log.WithError(err).Warn("failed to fetch latest management release information")
 				}
-				log.WithError(err).Warn("failed to fetch latest management release information")
 				return nil, nil
 			}
 
@@ -252,17 +248,19 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 			data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
 			if err != nil {
 				if localFileMissing {
-					log.WithError(err).Warn("failed to download management asset, trying fallback page")
-					if ensureFallbackManagementHTML(ctx, client, localPath) {
-						return nil, nil
-					}
-					return nil, nil
+					log.WithError(err).Warn("failed to download management asset; fallback download is disabled for security (no digest verification)")
+				} else {
+					log.WithError(err).Warn("failed to download management asset")
 				}
-				log.WithError(err).Warn("failed to download management asset")
 				return nil, nil
 			}
 
-			if remoteHash != "" && !strings.EqualFold(remoteHash, downloadedHash) {
+			// Fail-closed: reject update if remote digest is missing or mismatched
+			if remoteHash == "" {
+				log.Warn("management asset release has no digest; rejecting update (fail-closed)")
+				return nil, nil
+			}
+			if !strings.EqualFold(remoteHash, downloadedHash) {
 				log.Errorf(
 					"remote digest mismatch for management asset: expected %s got %s (rejecting update)", remoteHash,
 					downloadedHash,
@@ -282,24 +280,6 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 
 	_, err := os.Stat(localPath)
 	return err == nil
-}
-
-// ensureFallbackManagementHTML downloads a fallback management page when the GitHub release is unavailable.
-// NOTE: The fallback HTML has no digest verification — integrity cannot be guaranteed.
-func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, localPath string) bool {
-	data, downloadedHash, err := downloadAsset(ctx, client, defaultManagementFallbackURL)
-	if err != nil {
-		log.WithError(err).Warn("failed to download fallback management control panel page")
-		return false
-	}
-
-	if err = atomicWriteFile(localPath, data); err != nil {
-		log.WithError(err).Warn("failed to persist fallback management control panel page")
-		return false
-	}
-
-	log.Infof("management asset updated from fallback page successfully (hash=%s)", downloadedHash)
-	return true
 }
 
 func resolveReleaseURL(repo string) string {

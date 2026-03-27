@@ -22,6 +22,8 @@ type Manager struct {
 	sessions  map[string]*session
 	sessMutex sync.RWMutex
 
+	maxSessions int // hard cap on concurrent sessions
+
 	providerFactory func(*http.Request) (string, error)
 	onConnected     func(string)
 	onDisconnected  func(string, error)
@@ -34,6 +36,7 @@ type Manager struct {
 // Options configures a Manager instance.
 type Options struct {
 	Path            string
+	MaxSessions     int // hard cap on concurrent sessions; 0 = 256 default
 	ProviderFactory func(*http.Request) (string, error)
 	OnConnected     func(string)
 	OnDisconnected  func(string, error)
@@ -52,8 +55,9 @@ func NewManager(opts Options) *Manager {
 		path = "/" + path
 	}
 	mgr := &Manager{
-		path:     path,
-		sessions: make(map[string]*session),
+		path:        path,
+		maxSessions: opts.MaxSessions,
+		sessions:    make(map[string]*session),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -85,6 +89,9 @@ func NewManager(opts Options) *Manager {
 	}
 	if mgr.logWarnf == nil {
 		mgr.logWarnf = func(s string, args ...any) { fmt.Printf(s+"\n", args...) }
+	}
+	if mgr.maxSessions <= 0 {
+		mgr.maxSessions = 256
 	}
 	return mgr
 }
@@ -132,6 +139,14 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Enforce session limit before upgrading
+	m.sessMutex.RLock()
+	currentCount := len(m.sessions)
+	m.sessMutex.RUnlock()
+	if currentCount >= m.maxSessions {
+		http.Error(w, "too many websocket sessions", http.StatusServiceUnavailable)
+		return
+	}
 	conn, err := m.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		m.logWarnf("wsrelay: upgrade failed: %v", err)
@@ -152,6 +167,13 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		s.provider = strings.ToLower(s.id)
 	}
 	m.sessMutex.Lock()
+	if _, exists := m.sessions[s.provider]; !exists && len(m.sessions) >= m.maxSessions {
+		m.sessMutex.Unlock()
+		// Session was never registered into the manager; avoid firing onDisconnected side effects.
+		s.manager = nil
+		s.cleanup(errors.New("wsrelay: too many websocket sessions"))
+		return
+	}
 	var replaced *session
 	if existing, ok := m.sessions[s.provider]; ok {
 		replaced = existing

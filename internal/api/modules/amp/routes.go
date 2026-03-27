@@ -8,12 +8,12 @@ import (
 	"net/http/httputil"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers/gemini"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers/openai"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -309,7 +309,7 @@ func (m *Module) registerProviderAliases(
 
 	// Root-level routes (for providers that omit /v1, like groq/cerebras)
 	// Wrap handlers with fallback logic to forward to ampcode.com when provider not found
-	provider.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback (no body to check)
+	provider.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback (nobody to check)
 	provider.POST("/chat/completions", fallbackHandler.wrapHandler(openaiHandlers.ChatCompletions))
 	provider.POST("/completions", fallbackHandler.wrapHandler(openaiHandlers.Completions))
 	provider.POST("/responses", fallbackHandler.wrapHandler(openaiResponsesHandlers.Responses))

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/antigravity"
 )
 
 type memoryAuthStore struct {
@@ -77,10 +79,10 @@ func TestResolveTokenForAuth_Antigravity_RefreshesExpiredToken(t *testing.T) {
 				if values.Get("refresh_token") != "rt" {
 					t.Fatalf("unexpected refresh_token: %s", values.Get("refresh_token"))
 				}
-				if values.Get("client_id") != antigravityOAuthClientID {
+				if values.Get("client_id") != antigravity.ClientID {
 					t.Fatalf("unexpected client_id: %s", values.Get("client_id"))
 				}
-				if values.Get("client_secret") != antigravityOAuthClientSecret {
+				if values.Get("client_secret") != antigravity.ClientSecret {
 					t.Fatalf("unexpected client_secret")
 				}
 
@@ -193,6 +195,8 @@ func TestIsPrivateHost(t *testing.T) {
 		{"192.168.1.1", true},
 		{"8.8.8.8", false},
 		{"::1", true},
+		{"100:0:0:1::1", true},
+		{"2002::1", true},
 		{"", true},
 		{"0.0.0.0", true},
 	}
@@ -201,6 +205,27 @@ func TestIsPrivateHost(t *testing.T) {
 		got := isPrivateHost(tt.hostname)
 		if got != tt.want {
 			t.Errorf("isPrivateHost(%q) = %v, want %v", tt.hostname, got, tt.want)
+		}
+	}
+}
+
+func TestIsAllowedTokenTarget(t *testing.T) {
+	tests := []struct {
+		hostname string
+		want     bool
+	}{
+		{"api.openai.com", true},
+		{"API.OPENAI.COM", true},
+		{"sub.api.openai.com", true},
+		{"api.openai.com.evil.com", false},
+		{"iflow.cn", true},
+		{"foo.iflow.cn", true},
+		{"evil.com", false},
+	}
+	for _, tt := range tests {
+		got := isAllowedTokenTarget(tt.hostname)
+		if got != tt.want {
+			t.Errorf("isAllowedTokenTarget(%q) = %v, want %v", tt.hostname, got, tt.want)
 		}
 	}
 }

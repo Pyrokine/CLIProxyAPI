@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -18,11 +19,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -159,6 +160,21 @@ func (h *Handler) performUpdate(repo, version, proxyURL string) {
 		return
 	}
 
+	// Validate download URLs point to GitHub — prevent RCE via malicious repository config
+	for label, u := range map[string]string{"binary": downloadURL, "checksum": checksumURL} {
+		parsed, errParse := url.Parse(u)
+		if errParse != nil || parsed.Scheme != "https" {
+			setStatus("error", fmt.Sprintf("%s URL is not HTTPS", label), 0)
+			return
+		}
+		host := strings.ToLower(parsed.Hostname())
+		if host != "github.com" && !strings.HasSuffix(host, ".github.com") &&
+			!strings.HasSuffix(host, ".githubusercontent.com") {
+			setStatus("error", fmt.Sprintf("%s URL host %q is not a GitHub domain", label, host), 0)
+			return
+		}
+	}
+
 	setStatus("downloading", "Downloading binary...", 20)
 
 	// 3. Download binary
@@ -243,7 +259,20 @@ func expectedAssetName() string {
 }
 
 func newUpdateHTTPClient(proxyURL string) *http.Client {
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			host := strings.ToLower(req.URL.Hostname())
+			if host != "github.com" && !strings.HasSuffix(host, ".github.com") &&
+				!strings.HasSuffix(host, ".githubusercontent.com") {
+				return fmt.Errorf("redirect to non-GitHub domain %q blocked", host)
+			}
+			return nil
+		},
+	}
 	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL != "" {
 		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}

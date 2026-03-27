@@ -12,10 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/antigravity"
 	geminiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/gemini"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/proxy"
 	"golang.org/x/oauth2"
@@ -23,12 +24,7 @@ import (
 
 const defaultAPICallTimeout = 60 * time.Second
 
-const (
-	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityOAuthClientSecret = "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"
-)
-
-var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
+var antigravityOAuthTokenURL = antigravity.TokenEndpoint
 
 type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
@@ -90,12 +86,19 @@ type apiCallResponse struct {
 //	curl -sS -X POST "http://127.0.0.1:8317/v0/management/api-call" \
 //	  -H "Authorization: Bearer <MANAGEMENT_KEY>" \
 //	  -H "Content-Type: application/json" \
-//	  -d '{"auth_index":"<AUTH_INDEX>","method":"GET","url":"https://api.example.com/v1/ping","header":{"Authorization":"Bearer $TOKEN$"}}'
+//	  -d '{"auth_index":"<AUTH_INDEX>","method":"GET",
+//	       "url":"https://api.example.com/v1/ping",
+//	       "header":{"Authorization":"Bearer $TOKEN$"}}'
 //
 //	curl -sS -X POST "http://127.0.0.1:8317/v0/management/api-call" \
 //	  -H "Authorization: Bearer 831227" \
 //	  -H "Content-Type: application/json" \
-//	  -d '{"auth_index":"<AUTH_INDEX>","method":"POST","url":"https://api.example.com/v1/fetchAvailableModels","header":{"Authorization":"Bearer $TOKEN$","Content-Type":"application/json","User-Agent":"cliproxyapi"},"data":"{}"}'
+//	  -d '{"auth_index":"<AUTH_INDEX>","method":"POST",
+//	       "url":"https://api.example.com/v1/fetchAvailableModels",
+//	       "header":{"Authorization":"Bearer $TOKEN$",
+//	                  "Content-Type":"application/json",
+//	                  "User-Agent":"cliproxyapi"},
+//	       "data":"{}"}'
 func (h *Handler) APICall(c *gin.Context) {
 	var body apiCallRequest
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
@@ -135,6 +138,20 @@ func (h *Handler) APICall(c *gin.Context) {
 	reqHeaders := body.Header
 	if reqHeaders == nil {
 		reqHeaders = map[string]string{}
+	}
+
+	// Check if any header uses $TOKEN$ — if so, restrict target URL to known provider domains
+	// to prevent token exfiltration to arbitrary URLs (e.g., httpbin.org reflection).
+	hasTokenPlaceholder := false
+	for _, value := range reqHeaders {
+		if strings.Contains(value, "$TOKEN$") {
+			hasTokenPlaceholder = true
+			break
+		}
+	}
+	if hasTokenPlaceholder && !isAllowedTokenTarget(parsedURL.Hostname()) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "$TOKEN$ can only be used with known provider domains"})
+		return
 	}
 
 	var hostOverride string
@@ -188,12 +205,24 @@ func (h *Handler) APICall(c *gin.Context) {
 	httpClient := &http.Client{
 		Timeout: defaultAPICallTimeout,
 	}
-	httpClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+	httpClient.CheckRedirect = func(redirectReq *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return fmt.Errorf("too many redirects")
 		}
-		if isPrivateHost(req.URL.Hostname()) {
+		if isPrivateHost(redirectReq.URL.Hostname()) {
 			return fmt.Errorf("redirect to private address blocked")
+		}
+		// When $TOKEN$ was used, block redirect to non-whitelisted domains
+		// and strip token-bearing headers to prevent credential exfiltration.
+		if hasTokenPlaceholder {
+			if !isAllowedTokenTarget(redirectReq.URL.Hostname()) {
+				return fmt.Errorf("redirect to non-whitelisted domain blocked (token protection)")
+			}
+			for key := range redirectReq.Header {
+				if strings.Contains(redirectReq.Header.Get(key), token) && token != "" {
+					redirectReq.Header.Del(key)
+				}
+			}
 		}
 		return nil
 	}
@@ -340,8 +369,8 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	form := url.Values{}
-	form.Set("client_id", antigravityOAuthClientID)
-	form.Set("client_secret", antigravityOAuthClientSecret)
+	form.Set("client_id", antigravity.ClientID)
+	form.Set("client_secret", antigravity.ClientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -652,6 +681,11 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 		return nil
 	}
 
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok || base == nil {
+		base = &http.Transport{}
+	}
+
 	if proxyURL.Scheme == "socks5" {
 		var proxyAuth *proxy.Auth
 		if proxyURL.User != nil {
@@ -664,16 +698,18 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 			log.WithError(errSOCKS5).Debug("create SOCKS5 dialer failed")
 			return nil
 		}
-		return &http.Transport{
-			Proxy: nil,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialer.Dial(network, addr)
-			},
+		clone := base.Clone()
+		clone.Proxy = nil
+		clone.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialer.Dial(network, addr)
 		}
+		return clone
 	}
 
 	if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-		return &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+		clone := base.Clone()
+		clone.Proxy = http.ProxyURL(proxyURL)
+		return clone
 	}
 
 	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
@@ -748,24 +784,79 @@ func pinnedTransport(base http.RoundTripper, hostname, pinnedAddr string) http.R
 }
 
 func isPrivateIP(ip net.IP) bool {
+	// Reject anything that is not a global unicast address.
+	// This covers: loopback, link-local, multicast, unspecified, private (RFC1918),
+	// CGNAT (RFC6598), documentation (RFC5737), benchmarking (RFC2544), ULA (IPv6), etc.
+	if !ip.IsGlobalUnicast() {
+		return true
+	}
+	// IsGlobalUnicast returns true for RFC1918/ULA/many special-purpose ranges.
+	// Explicitly block all IANA "Globally Reachable=False" segments (and select N/A ones) that pass IsGlobalUnicast.
 	privateRanges := []struct {
 		network *net.IPNet
 	}{
-		{mustParseCIDR("10.0.0.0/8")},
-		{mustParseCIDR("172.16.0.0/12")},
-		{mustParseCIDR("192.168.0.0/16")},
-		{mustParseCIDR("127.0.0.0/8")},
-		{mustParseCIDR("169.254.0.0/16")},
-		{mustParseCIDR("::1/128")},
-		{mustParseCIDR("fc00::/7")},
-		{mustParseCIDR("fe80::/10")},
+		// IPv4
+		{mustParseCIDR("0.0.0.0/8")},          // RFC 791 "This network"
+		{mustParseCIDR("10.0.0.0/8")},          // RFC 1918 private
+		{mustParseCIDR("100.64.0.0/10")},       // RFC 6598 CGNAT
+		{mustParseCIDR("172.16.0.0/12")},       // RFC 1918 private
+		{mustParseCIDR("192.0.0.0/24")},        // RFC 6890 IETF protocol assignments
+		{mustParseCIDR("192.0.2.0/24")},        // RFC 5737 documentation (TEST-NET-1)
+		{mustParseCIDR("192.88.99.0/24")},      // RFC 7526 deprecated 6to4 relay anycast
+		{mustParseCIDR("192.168.0.0/16")},      // RFC 1918 private
+		{mustParseCIDR("198.18.0.0/15")},       // RFC 2544 benchmarking
+		{mustParseCIDR("198.51.100.0/24")},     // RFC 5737 documentation (TEST-NET-2)
+		{mustParseCIDR("203.0.113.0/24")},      // RFC 5737 documentation (TEST-NET-3)
+		{mustParseCIDR("240.0.0.0/4")},         // RFC 1112 reserved (class E)
+		// IPv6
+		{mustParseCIDR("::ffff:0:0/96")},       // IPv4-mapped addresses
+		{mustParseCIDR("64:ff9b:1::/48")},      // RFC 8215 IPv4-IPv6 translation
+		{mustParseCIDR("100::/64")},             // RFC 6666 discard-only
+		{mustParseCIDR("100:0:0:1::/64")},       // Dummy IPv6 Prefix
+		{mustParseCIDR("2001::/23")},            // RFC 2928 IETF protocol assignments
+		{mustParseCIDR("2001:2::/48")},          // RFC 5180 benchmarking
+		{mustParseCIDR("2001:db8::/32")},        // RFC 3849 documentation
+		{mustParseCIDR("2001:10::/28")},         // deprecated ORCHID
+		{mustParseCIDR("2002::/16")},            // 6to4 (deprecated)
+		{mustParseCIDR("3fff::/20")},            // RFC 9637 documentation
+		{mustParseCIDR("5f00::/16")},            // SRv6 SIDs
+		{mustParseCIDR("fc00::/7")},             // RFC 4193 ULA
 	}
 	for _, r := range privateRanges {
 		if r.network.Contains(ip) {
 			return true
 		}
 	}
-	return ip.IsUnspecified()
+	return false
+}
+
+// isAllowedTokenTarget returns true if the hostname belongs to a known AI provider,
+// preventing $TOKEN$ credential exfiltration to arbitrary domains.
+func isAllowedTokenTarget(hostname string) bool {
+	hostname = strings.ToLower(hostname)
+	allowed := []string{
+		"api.anthropic.com",
+		"claude.ai",
+		"generativelanguage.googleapis.com",
+		"aiplatform.googleapis.com",
+		"api.openai.com",
+		"api.githubcopilot.com",
+		"api.individual.githubcopilot.com",
+		"api.business.githubcopilot.com",
+		"api.enterprise.githubcopilot.com",
+		"antigravity.l7.tech",
+		"iflow.cn",
+		"platform.iflow.cn",
+		"apis.iflow.cn",
+		"kimi.moonshot.cn",
+		"dashscope.aliyuncs.com",
+	}
+	for _, domain := range allowed {
+		if hostname == domain || strings.HasSuffix(hostname, "."+domain) {
+			return true
+		}
+	}
+	return false
 }
 
 func mustParseCIDR(cidr string) *net.IPNet {
