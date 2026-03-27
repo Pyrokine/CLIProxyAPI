@@ -60,7 +60,7 @@ func validateConfig(
 		return &config, nil
 	}
 
-	allowClampUnsupported := isBudgetBasedProvider(fromFormat) && isLevelBasedProvider(toFormat)
+	allowClampUnsupported := isBudgetCapableProvider(fromFormat) && isLevelBasedProvider(toFormat)
 	strictBudget := !fromSuffix && fromFormat != "" && isSameProviderFamily(fromFormat, toFormat)
 	budgetDerivedFromLevel := false
 
@@ -358,7 +358,7 @@ func normalizeLevels(levels []string) []string {
 	return out
 }
 
-func isBudgetBasedProvider(provider string) bool {
+func isBudgetCapableProvider(provider string) bool {
 	switch provider {
 	case "gemini", "gemini-cli", "antigravity", "claude":
 		return true

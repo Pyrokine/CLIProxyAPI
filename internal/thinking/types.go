@@ -54,6 +54,8 @@ const (
 	LevelHigh Level = "high"
 	// LevelXHigh sets extra-high thinking effort
 	LevelXHigh Level = "xhigh"
+	// LevelMax sets maximum thinking effort
+	LevelMax Level = "max"
 )
 
 // Config represents a unified thinking configuration.
