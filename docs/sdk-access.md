@@ -1,6 +1,6 @@
 # @sdk/access SDK Reference
 
-The `github.com/router-for-me/CLIProxyAPI/v6/sdk/access` package centralizes inbound request authentication for the
+The `github.com/Pyrokine/CLIProxyAPI/v6/sdk/access` package centralizes inbound request authentication for the
 proxy. It offers a lightweight manager that chains credential providers, so servers can reuse the same access control
 logic inside or outside the CLI runtime.
 
@@ -8,11 +8,11 @@ logic inside or outside the CLI runtime.
 
 ```go
 import (
-    sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+    sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 )
 ```
 
-Add the module with `go get github.com/router-for-me/CLIProxyAPI/v6/sdk/access`.
+Add the module with `go get github.com/Pyrokine/CLIProxyAPI/v6/sdk/access`.
 
 ## Provider Registry
 
@@ -82,7 +82,7 @@ To consume a provider shipped in another Go module, import it for its registrati
 ```go
 import (
     _ "github.com/acme/xplatform/sdk/access/providers/partner" // registers partner-token
-    sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+    sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 )
 ```
 
@@ -159,10 +159,10 @@ registry snapshot.
 When configuration changes, refresh any config-backed providers and then reset the manager's provider chain:
 
 ```go
-// configaccess is github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access
+// configaccess is github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access
 configaccess.Register(&newCfg.SDKConfig)
 accessManager.SetProviders(sdkaccess.RegisteredProviders())
 ```
 
-This mirrors the behaviour in `internal/access.ApplyAccessProviders`, enabling runtime updates without restarting the
+This mirrors the behavior in `internal/access.ApplyAccessProviders`, enabling runtime updates without restarting the
 process.

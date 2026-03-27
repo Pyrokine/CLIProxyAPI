@@ -21,6 +21,9 @@ objectstore/*
 # Static assets
 static/*
 
+# Runtime data
+usage-data/*
+
 # Authentication data
 auths/*
 !auths/.gitkeep
@@ -38,7 +41,6 @@ GEMINI.md
 .gemini/*
 .serena/*
 .agent/*
-.agents/*
 .agents/*
 .opencode/*
 .idea/*

@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy"
@@ -32,6 +31,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/logging"
 	sdktr "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -58,16 +58,16 @@ func init() {
 				model string,
 				originalReq, translatedReq, raw []byte,
 				param *any,
-			) []string {
-				return []string{string(raw)}
+			) [][]byte {
+				return [][]byte{raw}
 			},
 			NonStream: func(
 				ctx context.Context,
 				model string,
 				originalReq, translatedReq, raw []byte,
 				param *any,
-			) string {
-				return string(raw)
+			) []byte {
+				return raw
 			},
 		},
 	)

@@ -6,7 +6,7 @@ authentication, hot‑reload, and translation layers without depending on the CL
 ## Install & Import
 
 ```bash
-go get github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy
+go get github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy
 ```
 
 ```go
@@ -15,8 +15,8 @@ import (
     "errors"
     "time"
 
-    "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-    "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
+    "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+    "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy"
 )
 ```
 
