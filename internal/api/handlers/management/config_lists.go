@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/gin-gonic/gin"
 )
 
 // Patch field helpers — apply optional pointer fields to entry fields.
@@ -667,9 +667,11 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
-	entry.Models = normalizeModels(entry.Models, func(m *config.ClaudeModel) (*string, *string) {
-		return &m.Name, &m.Alias
-	}, keepEither)
+	entry.Models = normalizeModels(
+		entry.Models, func(m *config.ClaudeModel) (*string, *string) {
+			return &m.Name, &m.Alias
+		}, keepEither,
+	)
 }
 
 func normalizeCodexKey(entry *config.CodexKey) {
@@ -682,9 +684,11 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
-	entry.Models = normalizeModels(entry.Models, func(m *config.CodexModel) (*string, *string) {
-		return &m.Name, &m.Alias
-	}, keepEither)
+	entry.Models = normalizeModels(
+		entry.Models, func(m *config.CodexModel) (*string, *string) {
+			return &m.Name, &m.Alias
+		}, keepEither,
+	)
 }
 
 func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
@@ -696,9 +700,11 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
-	entry.Models = normalizeModels(entry.Models, func(m *config.VertexCompatModel) (*string, *string) {
-		return &m.Name, &m.Alias
-	}, keepBoth)
+	entry.Models = normalizeModels(
+		entry.Models, func(m *config.VertexCompatModel) (*string, *string) {
+			return &m.Name, &m.Alias
+		}, keepBoth,
+	)
 }
 
 func sanitizedOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[string][]config.OAuthModelAlias {

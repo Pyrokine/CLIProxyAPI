@@ -59,7 +59,7 @@ func (h *LogHook) Fire(entry *log.Entry) error {
 	select {
 	case h.ch <- line:
 	default:
-		// Drop oldest if full
+		// Drop the oldest if full
 		select {
 		case <-h.ch:
 		default:

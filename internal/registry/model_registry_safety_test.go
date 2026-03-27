@@ -9,11 +9,15 @@ import (
 
 func TestGetModelInfoReturnsCorrectData(t *testing.T) {
 	r := newTestModelRegistry()
-	r.RegisterClient("client-1", "gemini", []*ModelInfo{{
-		ID:          "m1",
-		DisplayName: "Model One",
-		Thinking:    &ThinkingSupport{Min: 1, Max: 2, Levels: []string{"low", "high"}},
-	}})
+	r.RegisterClient(
+		"client-1", "gemini", []*ModelInfo{
+			{
+				ID:          "m1",
+				DisplayName: "Model One",
+				Thinking:    &ThinkingSupport{Min: 1, Max: 2, Levels: []string{"low", "high"}},
+			},
+		},
+	)
 
 	info := r.getModelInfo("m1", "gemini")
 	if info == nil {
@@ -32,11 +36,15 @@ func TestGetModelInfoReturnsCorrectData(t *testing.T) {
 
 func TestGetModelsForClientReturnsCorrectData(t *testing.T) {
 	r := newTestModelRegistry()
-	r.RegisterClient("client-1", "gemini", []*ModelInfo{{
-		ID:          "m1",
-		DisplayName: "Model One",
-		Thinking:    &ThinkingSupport{Levels: []string{"low", "high"}},
-	}})
+	r.RegisterClient(
+		"client-1", "gemini", []*ModelInfo{
+			{
+				ID:          "m1",
+				DisplayName: "Model One",
+				Thinking:    &ThinkingSupport{Levels: []string{"low", "high"}},
+			},
+		},
+	)
 
 	models := r.GetModelsForClient("client-1")
 	if len(models) != 1 || models[0] == nil {
@@ -52,11 +60,15 @@ func TestGetModelsForClientReturnsCorrectData(t *testing.T) {
 
 func TestGetAvailableModelsByProviderReturnsCorrectData(t *testing.T) {
 	r := newTestModelRegistry()
-	r.RegisterClient("client-1", "gemini", []*ModelInfo{{
-		ID:          "m1",
-		DisplayName: "Model One",
-		Thinking:    &ThinkingSupport{Levels: []string{"low", "high"}},
-	}})
+	r.RegisterClient(
+		"client-1", "gemini", []*ModelInfo{
+			{
+				ID:          "m1",
+				DisplayName: "Model One",
+				Thinking:    &ThinkingSupport{Levels: []string{"low", "high"}},
+			},
+		},
+	)
 
 	models := r.GetAvailableModelsByProvider("gemini")
 	if len(models) != 1 || models[0] == nil {
@@ -72,11 +84,15 @@ func TestGetAvailableModelsByProviderReturnsCorrectData(t *testing.T) {
 
 func TestGetAvailableModelsReturnsSupportedParameters(t *testing.T) {
 	r := newTestModelRegistry()
-	r.RegisterClient("client-1", "openai", []*ModelInfo{{
-		ID:                  "m1",
-		DisplayName:         "Model One",
-		SupportedParameters: []string{"temperature", "top_p"},
-	}})
+	r.RegisterClient(
+		"client-1", "openai", []*ModelInfo{
+			{
+				ID:                  "m1",
+				DisplayName:         "Model One",
+				SupportedParameters: []string{"temperature", "top_p"},
+			},
+		},
+	)
 
 	models := r.GetAvailableModels("openai")
 	if len(models) != 1 {

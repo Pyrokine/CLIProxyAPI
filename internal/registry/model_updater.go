@@ -20,7 +20,7 @@ const (
 )
 
 var modelsURLs = []string{
-	"https://raw.githubusercontent.com/Pyrokine/models/refs/heads/main/models.json",
+	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",
 	"https://models.router-for.me/models.json",
 }
 
@@ -66,6 +66,7 @@ var (
 // SetModelRefreshCallback registers a callback that is invoked when startup or
 // periodic model refresh detects changes. Only one callback is supported;
 // subsequent calls replace the previous callback.
+// noinspection GoUnusedExportedFunction — public API for external integrations.
 func SetModelRefreshCallback(cb ModelRefreshCallback) {
 	refreshCallbackMu.Lock()
 	refreshCallback = cb
@@ -92,9 +93,11 @@ func init() {
 // immediately on startup and then refreshes the model catalog every 3 hours.
 // Safe to call multiple times; only one updater will run.
 func StartModelsUpdater(ctx context.Context) {
-	updaterOnce.Do(func() {
-		go runModelsUpdater(ctx)
-	})
+	updaterOnce.Do(
+		func() {
+			go runModelsUpdater(ctx)
+		},
+	)
 }
 
 func runModelsUpdater(ctx context.Context) {
@@ -176,14 +179,14 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 		}
 
 		if resp.StatusCode != 200 {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			cancel()
 			log.Debugf("models fetch returned %d from %s", resp.StatusCode, url)
 			continue
 		}
 
-		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+		_ = resp.Body.Close()
 		cancel()
 
 		if err != nil {

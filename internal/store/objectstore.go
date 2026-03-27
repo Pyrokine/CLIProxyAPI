@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -118,6 +118,10 @@ func NewObjectTokenStore(cfg ObjectStoreConfig) (*ObjectTokenStore, error) {
 		authDir:    authDir,
 	}, nil
 }
+
+// SetBaseDir implements the optional interface used by authenticators; it is a no-op because
+// the object store controls its own workspace.
+func (s *ObjectTokenStore) SetBaseDir(_ string) {}
 
 // ConfigPath returns the managed configuration file path inside the spool directory.
 func (s *ObjectTokenStore) ConfigPath() string {
@@ -348,7 +352,7 @@ func (s *ObjectTokenStore) syncConfigFromBucket(ctx context.Context, example str
 			return fmt.Errorf("object store: fetch config: %w", errGet)
 		}
 		defer func() { _ = object.Close() }()
-		data, errRead := io.ReadAll(object)
+		data, errRead := io.ReadAll(io.LimitReader(object, 50<<20))
 		if errRead != nil {
 			return fmt.Errorf("object store: read config: %w", errRead)
 		}
@@ -427,7 +431,7 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 		if errGet != nil {
 			return fmt.Errorf("object store: download auth %s: %w", object.Key, errGet)
 		}
-		data, errRead := io.ReadAll(reader)
+		data, errRead := io.ReadAll(io.LimitReader(reader, 50<<20))
 		_ = reader.Close()
 		if errRead != nil {
 			return fmt.Errorf("object store: read auth %s: %w", object.Key, errRead)

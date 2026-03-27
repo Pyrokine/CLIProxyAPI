@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/antigravity"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/codex"
@@ -32,6 +31,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"golang.org/x/oauth2"
@@ -1187,7 +1187,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			}
 		}()
 
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			log.Errorf("Get user info request failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 			setOAuthSessionError(state, fmt.Sprintf("Get user info request failed with status %d", resp.StatusCode))
@@ -1984,7 +1984,6 @@ func ensureGeminiProjectsEnabled(ctx context.Context, httpClient *http.Client, p
 	}
 	return nil
 }
-
 
 func (h *Handler) GetAuthStatus(c *gin.Context) {
 	state := strings.TrimSpace(c.Query("state"))

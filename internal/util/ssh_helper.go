@@ -63,7 +63,7 @@ func tryIPService(service string) (string, error) {
 		return "", fmt.Errorf("bad status code: %d", resp.StatusCode)
 	}
 
-	ip, err := io.ReadAll(resp.Body)
+	ip, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		log.Debugf("Failed to read response body from %s: %v", service, err)
 		return "", err

@@ -7,7 +7,7 @@ import (
 
 const testModelName = "claude-sonnet-4-5"
 
-func TestStoreSignature_BasicStorageAndRetrieval(t *testing.T) {
+func TestCacheSignature_BasicStorageAndRetrieval(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "This is some thinking text content"
@@ -23,7 +23,7 @@ func TestStoreSignature_BasicStorageAndRetrieval(t *testing.T) {
 	}
 }
 
-func TestStoreSignature_DifferentModelGroups(t *testing.T) {
+func TestCacheSignature_DifferentModelGroups(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "Same text across models"
@@ -42,7 +42,7 @@ func TestStoreSignature_DifferentModelGroups(t *testing.T) {
 	}
 }
 
-func TestStoreSignature_NotFound(t *testing.T) {
+func TestCacheSignature_NotFound(t *testing.T) {
 	ClearSignatureCache("")
 
 	// Non-existent session
@@ -57,7 +57,7 @@ func TestStoreSignature_NotFound(t *testing.T) {
 	}
 }
 
-func TestStoreSignature_EmptyInputs(t *testing.T) {
+func TestCacheSignature_EmptyInputs(t *testing.T) {
 	ClearSignatureCache("")
 
 	// All empty/invalid inputs should be no-ops
@@ -70,7 +70,7 @@ func TestStoreSignature_EmptyInputs(t *testing.T) {
 	}
 }
 
-func TestStoreSignature_ShortSignatureRejected(t *testing.T) {
+func TestCacheSignature_ShortSignatureRejected(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "Some text"
@@ -141,7 +141,7 @@ func TestHasValidSignature(t *testing.T) {
 	}
 }
 
-func TestStoreSignature_TextHashCollisionResistance(t *testing.T) {
+func TestCacheSignature_TextHashCollisionResistance(t *testing.T) {
 	ClearSignatureCache("")
 
 	// Different texts should produce different hashes
@@ -161,7 +161,7 @@ func TestStoreSignature_TextHashCollisionResistance(t *testing.T) {
 	}
 }
 
-func TestStoreSignature_UnicodeText(t *testing.T) {
+func TestCacheSignature_UnicodeText(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "한글 텍스트와 이모지 🎉 그리고 特殊文字"
@@ -174,7 +174,7 @@ func TestStoreSignature_UnicodeText(t *testing.T) {
 	}
 }
 
-func TestStoreSignature_Overwrite(t *testing.T) {
+func TestCacheSignature_Overwrite(t *testing.T) {
 	ClearSignatureCache("")
 
 	text := "Same text"
@@ -191,7 +191,7 @@ func TestStoreSignature_Overwrite(t *testing.T) {
 
 // Note: TTL expiration test is tricky to test without mocking time
 // We test the logic path exists but actual expiration would require time manipulation
-func TestStoreSignature_ExpirationLogic(t *testing.T) {
+func TestCacheSignature_ExpirationLogic(t *testing.T) {
 	ClearSignatureCache("")
 
 	// This test verifies the expiration check exists

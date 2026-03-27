@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
 
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
@@ -52,6 +52,10 @@ type Watcher struct {
 	storePersister    storePersister
 	mirroredAuthDir   string
 	oldConfigYaml     []byte
+	serverUpdateMu    sync.Mutex
+	serverUpdateTimer *time.Timer
+	serverUpdateLast  time.Time
+	serverUpdatePend  bool
 }
 
 // authUpdateAction represents the type of change detected in auth sources.
@@ -76,6 +80,7 @@ const (
 	replaceCheckDelay        = 50 * time.Millisecond
 	configReloadDebounce     = 150 * time.Millisecond
 	authRemoveDebounceWindow = 1 * time.Second
+	serverUpdateDebounce     = 500 * time.Millisecond
 )
 
 // NewWatcher creates a new file watcher instance
@@ -116,6 +121,7 @@ func (w *Watcher) Start(ctx context.Context) error {
 func (w *Watcher) Stop() error {
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
+	w.stopServerUpdateTimer()
 	return w.watcher.Close()
 }
 

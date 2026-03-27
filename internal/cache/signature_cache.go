@@ -8,27 +8,27 @@ import (
 	"time"
 )
 
-// signatureEntry holds a cached thinking signature with timestamp
-type signatureEntry struct {
+// SignatureEntry holds a cached thinking signature with timestamp
+type SignatureEntry struct {
 	Signature string
 	Timestamp time.Time
 }
 
 const (
-	// signatureCacheTTL is how long signatures are valid
-	signatureCacheTTL = 3 * time.Hour
+	// SignatureCacheTTL is how long signatures are valid
+	SignatureCacheTTL = 3 * time.Hour
 
-	// signatureTextHashLen is the length of the hash key (16 hex chars = 64-bit key space)
-	signatureTextHashLen = 16
+	// SignatureTextHashLen is the length of the hash key (16 hex chars = 64-bit key space)
+	SignatureTextHashLen = 16
 
-	// minValidSignatureLen is the minimum length for a signature to be considered valid
-	minValidSignatureLen = 50
+	// MinValidSignatureLen is the minimum length for a signature to be considered valid
+	MinValidSignatureLen = 50
 
-	// cleanupInterval controls how often stale entries are purged
-	cleanupInterval = 10 * time.Minute
+	// CleanupInterval controls how often stale entries are purged
+	CleanupInterval = 10 * time.Minute
 )
 
-// signatureCache stores signatures by model group -> textHash -> signatureEntry
+// signatureCache stores signatures by model group -> textHash -> SignatureEntry
 var signatureCache sync.Map
 
 // cacheCleanupOnce ensures the background cleanup goroutine starts only once
@@ -37,13 +37,13 @@ var cacheCleanupOnce sync.Once
 // groupCache is the inner map type
 type groupCache struct {
 	mu      sync.RWMutex
-	entries map[string]signatureEntry
+	entries map[string]SignatureEntry
 }
 
 // hashText creates a stable, Unicode-safe key from text content
 func hashText(text string) string {
 	h := sha256.Sum256([]byte(text))
-	return hex.EncodeToString(h[:])[:signatureTextHashLen]
+	return hex.EncodeToString(h[:])[:SignatureTextHashLen]
 }
 
 // getOrCreateGroupCache gets or creates a cache bucket for a model group
@@ -54,7 +54,7 @@ func getOrCreateGroupCache(groupKey string) *groupCache {
 	if val, ok := signatureCache.Load(groupKey); ok {
 		return val.(*groupCache)
 	}
-	sc := &groupCache{entries: make(map[string]signatureEntry)}
+	sc := &groupCache{entries: make(map[string]SignatureEntry)}
 	actual, _ := signatureCache.LoadOrStore(groupKey, sc)
 	return actual.(*groupCache)
 }
@@ -63,7 +63,7 @@ func getOrCreateGroupCache(groupKey string) *groupCache {
 // removes caches where all entries have expired.
 func startCacheCleanup() {
 	go func() {
-		ticker := time.NewTicker(cleanupInterval)
+		ticker := time.NewTicker(CleanupInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			purgeExpiredCaches()
@@ -80,7 +80,7 @@ func purgeExpiredCaches() {
 			sc.mu.Lock()
 			// Remove expired entries
 			for k, entry := range sc.entries {
-				if now.Sub(entry.Timestamp) > signatureCacheTTL {
+				if now.Sub(entry.Timestamp) > SignatureCacheTTL {
 					delete(sc.entries, k)
 				}
 			}
@@ -101,7 +101,7 @@ func StoreSignature(modelName, text, signature string) {
 	if text == "" || signature == "" {
 		return
 	}
-	if len(signature) < minValidSignatureLen {
+	if len(signature) < MinValidSignatureLen {
 		return
 	}
 
@@ -111,7 +111,7 @@ func StoreSignature(modelName, text, signature string) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
-	sc.entries[textHash] = signatureEntry{
+	sc.entries[textHash] = SignatureEntry{
 		Signature: signature,
 		Timestamp: time.Now(),
 	}
@@ -150,7 +150,7 @@ func GetCachedSignature(modelName, text string) string {
 		}
 		return ""
 	}
-	if now.Sub(entry.Timestamp) > signatureCacheTTL {
+	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
 		delete(sc.entries, textHash)
 		sc.mu.Unlock()
 		if groupKey == "gemini" {
@@ -184,8 +184,7 @@ func ClearSignatureCache(modelName string) {
 
 // HasValidSignature checks if a signature is valid (non-empty and long enough)
 func HasValidSignature(modelName, signature string) bool {
-	return (signature != "" && len(signature) >= minValidSignatureLen) ||
-		(signature == "skip_thought_signature_validator" && GetModelGroup(modelName) == "gemini")
+	return (signature != "" && len(signature) >= MinValidSignatureLen) || (signature == "skip_thought_signature_validator" && GetModelGroup(modelName) == "gemini")
 }
 
 func GetModelGroup(modelName string) string {

@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/gin-gonic/gin"
 )
 
 func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
@@ -24,7 +24,9 @@ func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
 	authDir := t.TempDir()
 	fileName := "codex-user@example.com-plus.json"
 	filePath := filepath.Join(authDir, fileName)
-	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"test@example.com"}`), 0o600); errWrite != nil {
+	if errWrite := os.WriteFile(
+		filePath, []byte(`{"type":"codex","email":"test@example.com"}`), 0o600,
+	); errWrite != nil {
 		t.Fatalf("failed to write auth file: %v", errWrite)
 	}
 
@@ -34,12 +36,16 @@ func TestDeleteAuthFile_UsesAuthPathFromManager(t *testing.T) {
 
 	deleteRec := httptest.NewRecorder()
 	deleteCtx, _ := gin.CreateTestContext(deleteRec)
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
+	deleteReq := httptest.NewRequest(
+		http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil,
+	)
 	deleteCtx.Request = deleteReq
 	h.DeleteAuthFile(deleteCtx)
 
 	if deleteRec.Code != http.StatusOK {
-		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+		t.Fatalf(
+			"expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String(),
+		)
 	}
 	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
 		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
@@ -63,12 +69,16 @@ func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 
 	deleteRec := httptest.NewRecorder()
 	deleteCtx, _ := gin.CreateTestContext(deleteRec)
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil)
+	deleteReq := httptest.NewRequest(
+		http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape(fileName), nil,
+	)
 	deleteCtx.Request = deleteReq
 	h.DeleteAuthFile(deleteCtx)
 
 	if deleteRec.Code != http.StatusOK {
-		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String())
+		t.Fatalf(
+			"expected delete status %d, got %d with body %s", http.StatusOK, deleteRec.Code, deleteRec.Body.String(),
+		)
 	}
 	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
 		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
@@ -86,11 +96,16 @@ func TestDeleteAuthFile_NonExistentReturns404(t *testing.T) {
 
 	deleteRec := httptest.NewRecorder()
 	deleteCtx, _ := gin.CreateTestContext(deleteRec)
-	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape("nonexistent.json"), nil)
+	deleteReq := httptest.NewRequest(
+		http.MethodDelete, "/v0/management/auth-files?name="+url.QueryEscape("nonexistent.json"), nil,
+	)
 	deleteCtx.Request = deleteReq
 	h.DeleteAuthFile(deleteCtx)
 
 	if deleteRec.Code != http.StatusNotFound {
-		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusNotFound, deleteRec.Code, deleteRec.Body.String())
+		t.Fatalf(
+			"expected delete status %d, got %d with body %s", http.StatusNotFound, deleteRec.Code,
+			deleteRec.Body.String(),
+		)
 	}
 }

@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -189,6 +189,10 @@ func (s *PostgresStore) WorkDir() string {
 	}
 	return s.spoolRoot
 }
+
+// SetBaseDir implements the optional interface used by authenticators; it is a no-op because
+// the Postgres-backed store controls its own workspace.
+func (s *PostgresStore) SetBaseDir(_ string) {}
 
 // Save persists authentication metadata to disk and PostgreSQL.
 func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {

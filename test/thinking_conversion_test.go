@@ -2601,7 +2601,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 	defer reg.UnregisterClient(uid)
 
 	cases := []thinkingTestCase{
-		// A1: Claude adaptive to OpenAI level model -> highest supported level
+		// A1: Claude adaptive to OpenAI level model -> the highest supported level
 		{
 			name:        "A1",
 			from:        "claude",
@@ -2612,7 +2612,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			expectValue: "high",
 			expectErr:   false,
 		},
-		// A2: Claude adaptive to Gemini level subset model -> highest supported level
+		// A2: Claude adaptive to Gemini level subset model -> the highest supported level
 		{
 			name:            "A2",
 			from:            "claude",
@@ -2636,15 +2636,15 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// A4: Claude adaptive to Gemini mixed model -> highest supported level
+		// A4: Claude adaptive to Gemini mixed model -> max budget
 		{
 			name:            "A4",
 			from:            "claude",
 			to:              "gemini",
 			model:           "gemini-mixed-model",
 			inputJSON:       `{"model":"gemini-mixed-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"}}`,
-			expectField:     "generationConfig.thinkingConfig.thinkingLevel",
-			expectValue:     "high",
+			expectField:     "generationConfig.thinkingConfig.thinkingBudget",
+			expectValue:     "32768",
 			includeThoughts: "true",
 			expectErr:       false,
 		},
@@ -2693,7 +2693,7 @@ func TestThinkingE2EClaudeAdaptive_Body(t *testing.T) {
 			expectValue: "true",
 			expectErr:   false,
 		},
-		// A9: Claude adaptive to Codex level model -> highest supported level
+		// A9: Claude adaptive to Codex level model -> the highest supported level
 		{
 			name:        "A9",
 			from:        "claude",

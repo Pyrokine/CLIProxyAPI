@@ -51,7 +51,7 @@ func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, er
 		return nil, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if err != nil {
 		return nil, resp.StatusCode, err
 	}
@@ -393,3 +393,8 @@ func (c *Client) putStringField(path string, value string) error {
 	return err
 }
 
+// DeleteField sends a DELETE request for a config field.
+func (c *Client) DeleteField(path string) error {
+	_, _, err := c.doRequest("DELETE", "/v0/management/"+path, nil)
+	return err
+}

@@ -3,3 +3,15 @@
 // - ConfigSynthesizer: generates Auth entries from config API keys
 // - FileSynthesizer: generates Auth entries from OAuth JSON files
 package synthesizer
+
+import (
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+)
+
+// AuthSynthesizer defines the interface for generating Auth entries from various sources.
+// noinspection GoUnusedType — interface satisfied implicitly by ConfigSynthesizer and FileSynthesizer.
+type AuthSynthesizer interface {
+	// Synthesize generates Auth entries from the given context.
+	// Returns a slice of Auth pointers and any error encountered.
+	Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, error)
+}

@@ -47,7 +47,7 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 			transport = &http.Transport{Proxy: http.ProxyURL(proxyURL)}
 		}
 	}
-	// If a new transport was created, apply it to the HTTP client.
+	// If new transport was created, apply it to the HTTP client.
 	if transport != nil {
 		httpClient.Transport = transport
 	}

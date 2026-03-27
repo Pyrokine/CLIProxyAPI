@@ -279,25 +279,34 @@ func geminiProImagePreview() *ModelInfo {
 // GetGeminiModels returns the standard Gemini model definitions
 func GetGeminiModels() []*ModelInfo {
 	models := geminiStableModels()
-	models = append(models, geminiPreviewModels(geminiPreviewParams{
-		proDescription:   "Gemini 3 Pro Preview",
-		proLevels:        []string{"low", "high"},
-		flashDescription: "Gemini 3 Flash Preview",
-		flashLevels:      []string{"minimal", "low", "medium", "high"},
-	})...)
+	models = append(
+		models, geminiPreviewModels(
+			geminiPreviewParams{
+				proDescription:   "Gemini 3 Pro Preview",
+				proLevels:        []string{"low", "high"},
+				flashDescription: "Gemini 3 Flash Preview",
+				flashLevels:      []string{"minimal", "low", "medium", "high"},
+			},
+		)...,
+	)
 	models = append(models, geminiProImagePreview())
 	return models
 }
 
 func GetGeminiVertexModels() []*ModelInfo {
 	models := geminiStableModels()
-	models = append(models, geminiPreviewModels(geminiPreviewParams{
-		proDescription:   "Gemini 3 Pro Preview",
-		proLevels:        []string{"low", "high"},
-		flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
-		flashLevels:      []string{"minimal", "low", "medium", "high"},
-	})...)
-	models = append(models,
+	models = append(
+		models, geminiPreviewModels(
+			geminiPreviewParams{
+				proDescription:   "Gemini 3 Pro Preview",
+				proLevels:        []string{"low", "high"},
+				flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+				flashLevels:      []string{"minimal", "low", "medium", "high"},
+			},
+		)...,
+	)
+	models = append(
+		models,
 		geminiProImagePreview(),
 		// Imagen image generation models - use :predict action
 		&ModelInfo{
@@ -343,23 +352,32 @@ func GetGeminiVertexModels() []*ModelInfo {
 // GetGeminiCLIModels returns the standard Gemini model definitions
 func GetGeminiCLIModels() []*ModelInfo {
 	models := geminiStableModels()
-	models = append(models, geminiPreviewModels(geminiPreviewParams{
-		proDescription:   "Our most intelligent model with SOTA reasoning and multimodal understanding, and powerful agentic and vibe coding capabilities",
-		proLevels:        []string{"low", "high"},
-		flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
-		flashLevels:      []string{"minimal", "low", "medium", "high"},
-	})...)
+	models = append(
+		models, geminiPreviewModels(
+			geminiPreviewParams{
+				proDescription:   "Our most intelligent model with SOTA reasoning and multimodal understanding, and powerful agentic and vibe coding capabilities",
+				proLevels:        []string{"low", "high"},
+				flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+				flashLevels:      []string{"minimal", "low", "medium", "high"},
+			},
+		)...,
+	)
 	return models
 }
 
 // GetAIStudioModels returns the Gemini model definitions for AI Studio integrations
 func GetAIStudioModels() []*ModelInfo {
 	models := geminiStableModels()
-	models = append(models, geminiPreviewModels(geminiPreviewParams{
-		proDescription:   "Gemini 3 Pro Preview",
-		flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
-	})...)
-	models = append(models,
+	models = append(
+		models, geminiPreviewModels(
+			geminiPreviewParams{
+				proDescription:   "Gemini 3 Pro Preview",
+				flashDescription: "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
+			},
+		)...,
+	)
+	models = append(
+		models,
 		&ModelInfo{
 			ID:               "gemini-pro-latest",
 			Object:           "model",
@@ -755,7 +773,7 @@ type antigravityModelConfig struct {
 }
 
 // GetAntigravityModelConfig returns static configuration for antigravity models.
-// Keys use upstream model names returned by the Antigravity models endpoint.
+// Keys use upstream model names returned by the Antigravity models' endpoint.
 func GetAntigravityModelConfig() map[string]*antigravityModelConfig {
 	return map[string]*antigravityModelConfig{
 		"gemini-2.5-flash": {

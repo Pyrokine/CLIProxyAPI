@@ -4,8 +4,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/gin-gonic/gin"
 )
 
 // GetStaticModelDefinitions returns static model metadata for a given channel.

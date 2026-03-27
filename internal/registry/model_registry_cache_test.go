@@ -34,7 +34,9 @@ func TestGetAvailableModelsInvalidatesCacheOnRegistryChanges(t *testing.T) {
 		t.Fatalf("expected initial display_name Model One, got %v", got)
 	}
 
-	r.RegisterClient("client-1", "OpenAI", []*ModelInfo{{ID: "m1", OwnedBy: "team-a", DisplayName: "Model One Updated"}})
+	r.RegisterClient(
+		"client-1", "OpenAI", []*ModelInfo{{ID: "m1", OwnedBy: "team-a", DisplayName: "Model One Updated"}},
+	)
 	models = r.GetAvailableModels("openai")
 	if got := models[0]["display_name"]; got != "Model One Updated" {
 		t.Fatalf("expected updated display_name after cache invalidation, got %v", got)

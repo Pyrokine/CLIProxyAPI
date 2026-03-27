@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -391,16 +391,18 @@ func TestPutUsageRetention_Validation(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(rec)
-			c.Request = httptest.NewRequest(http.MethodPut, "/usage/retention", strings.NewReader(tt.body))
-			c.Request.Header.Set("Content-Type", "application/json")
-			h.PutUsageRetention(c)
-			if rec.Code != tt.wantCode {
-				t.Errorf("expected %d, got %d: %s", tt.wantCode, rec.Code, rec.Body.String())
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodPut, "/usage/retention", strings.NewReader(tt.body))
+				c.Request.Header.Set("Content-Type", "application/json")
+				h.PutUsageRetention(c)
+				if rec.Code != tt.wantCode {
+					t.Errorf("expected %d, got %d: %s", tt.wantCode, rec.Code, rec.Body.String())
+				}
+			},
+		)
 	}
 }
 
@@ -525,7 +527,9 @@ func TestUploadAuthFile_BodyMethod(t *testing.T) {
 	authContent := `{"type":"anthropic","key":"sk-ant-test"}`
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPost, "/auth-files?name=anthropic-body.json", strings.NewReader(authContent))
+	c.Request = httptest.NewRequest(
+		http.MethodPost, "/auth-files?name=anthropic-body.json", strings.NewReader(authContent),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.UploadAuthFile(c)
 
@@ -563,15 +567,17 @@ func TestUploadAuthFile_InvalidName(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(rec)
-			c.Request = httptest.NewRequest(http.MethodPost, "/auth-files?name="+tt.qn, strings.NewReader(`{}`))
-			h.UploadAuthFile(c)
-			if rec.Code == http.StatusOK {
-				t.Fatalf("expected error for name %q, got 200", tt.qn)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodPost, "/auth-files?name="+tt.qn, strings.NewReader(`{}`))
+				h.UploadAuthFile(c)
+				if rec.Code == http.StatusOK {
+					t.Fatalf("expected error for name %q, got 200", tt.qn)
+				}
+			},
+		)
 	}
 }
 
@@ -660,15 +666,17 @@ func TestNormalizeRoutingStrategy(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(fmt.Sprintf("input=%q", tt.input), func(t *testing.T) {
-			got, ok := normalizeRoutingStrategy(tt.input)
-			if ok != tt.ok {
-				t.Fatalf("expected ok=%v, got %v", tt.ok, ok)
-			}
-			if got != tt.expected {
-				t.Fatalf("expected %q, got %q", tt.expected, got)
-			}
-		})
+		t.Run(
+			fmt.Sprintf("input=%q", tt.input), func(t *testing.T) {
+				got, ok := normalizeRoutingStrategy(tt.input)
+				if ok != tt.ok {
+					t.Fatalf("expected ok=%v, got %v", tt.ok, ok)
+				}
+				if got != tt.expected {
+					t.Fatalf("expected %q, got %q", tt.expected, got)
+				}
+			},
+		)
 	}
 }
 

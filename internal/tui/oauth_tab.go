@@ -257,7 +257,7 @@ func (m *oauthTabModel) startOAuth(provider oauthProvider) tea.Cmd {
 			return oauthStartMsg{err: fmt.Errorf("no auth URL returned for %s", provider.name)}
 		}
 
-		// Try to open browser (best effort)
+		// Try to open browser (the best effort)
 		_ = openBrowser(authURL)
 
 		return oauthStartMsg{url: authURL, state: state, providerName: provider.name}

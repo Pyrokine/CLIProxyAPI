@@ -153,7 +153,7 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	}
 
 	if info := GetGlobalRegistry().getModelInfo(modelID, p); info != nil {
-		return info
+		return cloneModelInfo(info)
 	}
 	return LookupStaticModelInfo(modelID)
 }
@@ -507,6 +507,13 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	}
 	if len(model.SupportedOutputModalities) > 0 {
 		copyModel.SupportedOutputModalities = append([]string(nil), model.SupportedOutputModalities...)
+	}
+	if model.Thinking != nil {
+		copyThinking := *model.Thinking
+		if len(model.Thinking.Levels) > 0 {
+			copyThinking.Levels = append([]string(nil), model.Thinking.Levels...)
+		}
+		copyModel.Thinking = &copyThinking
 	}
 	return &copyModel
 }
@@ -1098,6 +1105,24 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			result["created"] = model.Created
 		}
 		return result
+	}
+}
+
+// CleanupExpiredQuotas removes expired quota tracking entries.
+func (r *ModelRegistry) CleanupExpiredQuotas() {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+
+	now := time.Now()
+	quotaExpiredDuration := 5 * time.Minute
+
+	for modelID, registration := range r.models {
+		for clientID, quotaTime := range registration.QuotaExceededClients {
+			if quotaTime != nil && now.Sub(*quotaTime) >= quotaExpiredDuration {
+				delete(registration.QuotaExceededClients, clientID)
+				log.Debugf("Cleaned up expired quota tracking for model %s, client %s", modelID, clientID)
+			}
+		}
 	}
 }
 

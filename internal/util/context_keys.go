@@ -10,12 +10,6 @@ func WithAlt(ctx context.Context, alt string) context.Context {
 	return context.WithValue(ctx, altContextKey{}, alt)
 }
 
-// AltFromContext retrieves the alt parameter value from the context.
-func AltFromContext(ctx context.Context) (string, bool) {
-	alt, ok := ctx.Value(altContextKey{}).(string)
-	return alt, ok
-}
-
 // ginContextKey is the unexported key for storing the *gin.Context in a standard context.
 type ginContextKey struct{}
 

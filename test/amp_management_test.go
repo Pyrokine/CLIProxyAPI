@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/gin-gonic/gin"
 )
 
 func init() {
