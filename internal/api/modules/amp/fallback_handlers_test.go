@@ -8,9 +8,9 @@ import (
 	"net/http/httputil"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/gin-gonic/gin"
 )
 
 func TestFallbackHandler_ModelMapping_PreservesThinkingSuffixAndRewritesResponse(t *testing.T) {

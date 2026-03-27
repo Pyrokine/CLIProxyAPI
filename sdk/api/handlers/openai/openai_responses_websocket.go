@@ -11,13 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -169,7 +169,17 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		} else {
 			cliCtx = handlers.WithSelectedAuthIDCallback(
 				cliCtx, func(authID string) {
-					pinnedAuthID = strings.TrimSpace(authID)
+					authID = strings.TrimSpace(authID)
+					if authID == "" || h == nil || h.AuthManager == nil {
+						return
+					}
+					selectedAuth, ok := h.AuthManager.GetByID(authID)
+					if !ok || selectedAuth == nil {
+						return
+					}
+					if websocketUpstreamSupportsIncrementalInput(selectedAuth.Attributes, selectedAuth.Metadata) {
+						pinnedAuthID = authID
+					}
 				},
 			)
 		}
@@ -200,14 +210,6 @@ func websocketUpgradeHeaders(req *http.Request) http.Header {
 		headers.Set(wsTurnStateHeader, turnState)
 	}
 	return headers
-}
-
-func normalizeResponsesWebsocketRequest(rawJSON []byte, lastRequest []byte, lastResponseOutput []byte) (
-	[]byte,
-	[]byte,
-	*interfaces.ErrorMessage,
-) {
-	return normalizeResponsesWebsocketRequestWithMode(rawJSON, lastRequest, lastResponseOutput, true)
 }
 
 func normalizeResponsesWebsocketRequestWithMode(

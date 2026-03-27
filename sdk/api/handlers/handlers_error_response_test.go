@@ -7,9 +7,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/gin-gonic/gin"
 )
 
 func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {

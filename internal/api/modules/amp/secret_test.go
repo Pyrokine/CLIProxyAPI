@@ -194,19 +194,21 @@ func TestMultiSourceSecret_Concurrency(t *testing.T) {
 	errors := make(chan error, goroutines)
 
 	for range goroutines {
-		wg.Go(func() {
-			for range iterations {
-				val, err := s.Get(ctx)
-				if err != nil {
-					errors <- err
-					return
+		wg.Go(
+			func() {
+				for range iterations {
+					val, err := s.Get(ctx)
+					if err != nil {
+						errors <- err
+						return
+					}
+					if val != "concurrent" {
+						errors <- err
+						return
+					}
 				}
-				if val != "concurrent" {
-					errors <- err
-					return
-				}
-			}
-		})
+			},
+		)
 	}
 
 	wg.Wait()

@@ -15,11 +15,11 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/gin-gonic/gin"
 	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -192,7 +192,7 @@ func (h *CodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []by
 					log.Warnf("failed to close Claude gzip reader: %v", errClose)
 				}
 			}()
-			decompressed, errRead := io.ReadAll(gzReader)
+			decompressed, errRead := io.ReadAll(io.LimitReader(gzReader, 50<<20))
 			if errRead != nil {
 				log.Warnf("failed to read decompressed Claude response: %v", errRead)
 			} else {
@@ -242,7 +242,6 @@ func (h *CodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte)
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
 	// Peek at the first chunk to determine success or failure before setting headers

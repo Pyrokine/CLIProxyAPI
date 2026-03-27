@@ -15,8 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
@@ -24,6 +22,8 @@ import (
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-04"
+	codexResponsesWebsocketBetaHeaderValue = "responses_websockets=2026-02-06"
 	codexResponsesWebsocketIdleTimeout     = 5 * time.Minute
 	codexResponsesWebsocketHandshakeTO     = 30 * time.Second
 )
@@ -56,11 +56,6 @@ type codexWebsocketSession struct {
 	conn   *websocket.Conn
 	wsURL  string
 	authID string
-
-	// connCreateSent tracks whether a `response.create` message has been successfully sent
-	// on the current websocket connection. The upstream expects the first message on each
-	// connection to be `response.create`.
-	connCreateSent bool
 
 	writeMu sync.Mutex
 
@@ -196,13 +191,7 @@ func (e *codexWebsocketsExecutor) Execute(
 		defer sess.reqMu.Unlock()
 	}
 
-	allowAppend := true
-	if sess != nil {
-		sess.connMu.Lock()
-		allowAppend = sess.connCreateSent
-		sess.connMu.Unlock()
-	}
-	wsReqBody := buildCodexWebsocketRequestBody(body, allowAppend)
+	wsReqBody := buildCodexWebsocketRequestBody(body)
 	recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBody, e.Identifier(), auth)
 
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
@@ -254,10 +243,7 @@ func (e *codexWebsocketsExecutor) Execute(
 			// execution session.
 			connRetry, _, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
-				sess.connMu.Lock()
-				allowAppend = sess.connCreateSent
-				sess.connMu.Unlock()
-				wsReqBodyRetry := buildCodexWebsocketRequestBody(body, allowAppend)
+				wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
 				recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBodyRetry, e.Identifier(), auth)
 				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry == nil {
 					conn = connRetry
@@ -276,7 +262,6 @@ func (e *codexWebsocketsExecutor) Execute(
 			return resp, errSend
 		}
 	}
-	markCodexWebsocketCreateSent(sess, conn, wsReqBody)
 
 	for {
 		if ctx != nil && ctx.Err() != nil {
@@ -321,7 +306,7 @@ func (e *codexWebsocketsExecutor) Execute(
 			}
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
-			resp = cliproxyexecutor.Response{Payload: []byte(out)}
+			resp = cliproxyexecutor.Response{Payload: out}
 			return resp, nil
 		}
 	}
@@ -379,13 +364,7 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 		}
 	}
 
-	allowAppend := true
-	if sess != nil {
-		sess.connMu.Lock()
-		allowAppend = sess.connCreateSent
-		sess.connMu.Unlock()
-	}
-	wsReqBody := buildCodexWebsocketRequestBody(body, allowAppend)
+	wsReqBody := buildCodexWebsocketRequestBody(body)
 	recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBody, e.Identifier(), auth)
 
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
@@ -436,10 +415,7 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 				sess.reqMu.Unlock()
 				return nil, errDialRetry
 			}
-			sess.connMu.Lock()
-			allowAppend = sess.connCreateSent
-			sess.connMu.Unlock()
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(body, allowAppend)
+			wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
 			recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBodyRetry, e.Identifier(), auth)
 			if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry != nil {
 				recordAPIResponseError(ctx, e.cfg, errSendRetry)
@@ -458,7 +434,6 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 			return nil, errSend
 		}
 	}
-	markCodexWebsocketCreateSent(sess, conn, wsReqBody)
 
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
@@ -559,7 +534,7 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 			line := encodeCodexWebsocketAsSSE(payload)
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, body, body, line, &param)
 			for i := range chunks {
-				if !send(cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}) {
+				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
 					return
@@ -605,29 +580,9 @@ func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Con
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
-func buildCodexWebsocketRequestBody(body []byte, allowAppend bool) []byte {
+func buildCodexWebsocketRequestBody(body []byte) []byte {
 	if len(body) == 0 {
 		return nil
-	}
-
-	// Codex CLI websocket v2 uses `response.create` with `previous_response_id` for incremental turns.
-	// The upstream ChatGPT Codex websocket currently rejects that with close 1008 (policy violation).
-	// Fall back to v1 `response.append` semantics on the same websocket connection to keep the session alive.
-	//
-	// NOTE: The upstream expects the first websocket event on each connection to be `response.create`,
-	// so we only use `response.append` after we have initialized the current connection.
-	if allowAppend {
-		if prev := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String()); prev != "" {
-			inputNode := gjson.GetBytes(body, "input")
-			wsReqBody := []byte(`{}`)
-			wsReqBody, _ = sjson.SetBytes(wsReqBody, "type", "response.append")
-			if inputNode.Exists() && inputNode.IsArray() && strings.TrimSpace(inputNode.Raw) != "" {
-				wsReqBody, _ = sjson.SetRawBytes(wsReqBody, "input", []byte(inputNode.Raw))
-				return wsReqBody
-			}
-			wsReqBody, _ = sjson.SetRawBytes(wsReqBody, "input", []byte("[]"))
-			return wsReqBody
-		}
 	}
 
 	wsReqBody, errSet := sjson.SetBytes(bytes.Clone(body), "type", "response.create")
@@ -676,21 +631,6 @@ func readCodexWebsocketMessage(
 			return ev.msgType, ev.payload, nil
 		}
 	}
-}
-
-func markCodexWebsocketCreateSent(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) {
-	if sess == nil || conn == nil || len(payload) == 0 {
-		return
-	}
-	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) != "response.create" {
-		return
-	}
-
-	sess.connMu.Lock()
-	if sess.conn == conn {
-		sess.connCreateSent = true
-	}
-	sess.connMu.Unlock()
 }
 
 func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *websocket.Dialer {
@@ -963,7 +903,7 @@ func websocketHandshakeBody(resp *http.Response) []byte {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 	closeHTTPResponseBody(resp, "codex websockets executor: close handshake response body error")
 	if len(body) == 0 {
 		return nil
@@ -1060,7 +1000,6 @@ func (e *codexWebsocketsExecutor) ensureUpstreamConn(
 	sess.conn = conn
 	sess.wsURL = wsURL
 	sess.authID = authID
-	sess.connCreateSent = false
 	sess.readerConn = conn
 	sess.connMu.Unlock()
 
@@ -1151,7 +1090,6 @@ func (e *codexWebsocketsExecutor) invalidateUpstreamConn(
 		return
 	}
 	sess.conn = nil
-	sess.connCreateSent = false
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
@@ -1218,7 +1156,6 @@ func (e *codexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 	authID := sess.authID
 	wsURL := sess.wsURL
 	sess.conn = nil
-	sess.connCreateSent = false
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}

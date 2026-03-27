@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/antigravity"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
@@ -31,6 +31,7 @@ import (
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -43,8 +44,6 @@ const (
 	antigravityStreamPath          = "/v1internal:streamGenerateContent"
 	antigravityGeneratePath        = "/v1internal:generateContent"
 	antigravityModelsPath          = "/v1internal:fetchAvailableModels"
-	antigravityClientID            = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
-	antigravityClientSecret        = "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"
 	defaultAntigravityAgent        = "antigravity/1.19.6 darwin/arm64"
 	antigravityAuthType            = "antigravity"
 	refreshSkew                    = 3000 * time.Second
@@ -274,7 +273,7 @@ const (
 
 // sendWithRetry executes an HTTP request across multiple base URLs with retry support
 // for rate limiting and no-capacity errors. On a 2xx response it returns the open
-// *http.Response (body unread) for the caller to consume. On error it handles all
+// *http.Response (body unread) for the caller to consume. On error, it handles all
 // retry/fallback logic and returns a terminal error.
 func (e *AntigravityExecutor) sendWithRetry(
 	ctx context.Context,
@@ -354,7 +353,7 @@ func (e *AntigravityExecutor) sendAcrossBaseURLs(
 		}
 
 		// Error status: read body and apply retry logic
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity executor: close response body error: %v", errClose)
 		}
@@ -390,7 +389,9 @@ func (e *AntigravityExecutor) sendAcrossBaseURLs(
 		lastBody = append([]byte(nil), bodyBytes...)
 		lastErr = nil
 
-		outcome := e.classifyErrorForRetry(ctx, httpResp.StatusCode, bodyBytes, hasNextURL, attempts, attempt, baseModel, baseURL, baseURLs, idx)
+		outcome := e.classifyErrorForRetry(
+			ctx, httpResp.StatusCode, bodyBytes, hasNextURL, attempts, attempt, baseModel, baseURL, baseURLs, idx,
+		)
 		switch outcome {
 		case antigravityRetryNextURL:
 			continue
@@ -527,14 +528,16 @@ func (e *AntigravityExecutor) Execute(
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
-	httpResp, err := e.sendWithRetry(ctx, httpClient, baseURLs, attempts, baseModel, func(baseURL string) (*http.Request, error) {
-		return e.buildRequest(ctx, auth, token, baseModel, translated, false, opts.Alt, baseURL)
-	})
+	httpResp, err := e.sendWithRetry(
+		ctx, httpClient, baseURLs, attempts, baseModel, func(baseURL string) (*http.Request, error) {
+			return e.buildRequest(ctx, auth, token, baseModel, translated, false, opts.Alt, baseURL)
+		},
+	)
 	if err != nil {
 		return resp, err
 	}
 
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if errClose := httpResp.Body.Close(); errClose != nil {
 		log.Errorf("antigravity executor: close response body error: %v", errClose)
 	}
@@ -549,7 +552,7 @@ func (e *AntigravityExecutor) Execute(
 	converted := sdktranslator.TranslateNonStream(
 		ctx, to, from, req.Model, opts.OriginalRequest, translated, bodyBytes, &param,
 	)
-	resp = cliproxyexecutor.Response{Payload: []byte(converted), Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
 	reporter.ensurePublished(ctx)
 	return resp, nil
 }
@@ -599,9 +602,11 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
-	httpResp, err := e.sendWithRetry(ctx, httpClient, baseURLs, attempts, baseModel, func(baseURL string) (*http.Request, error) {
-		return e.buildRequest(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL)
-	})
+	httpResp, err := e.sendWithRetry(
+		ctx, httpClient, baseURLs, attempts, baseModel, func(baseURL string) (*http.Request, error) {
+			return e.buildRequest(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL)
+		},
+	)
 	if err != nil {
 		return resp, err
 	}
@@ -661,7 +666,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 	converted := sdktranslator.TranslateNonStream(
 		ctx, to, from, req.Model, opts.OriginalRequest, translated, resp.Payload, &param,
 	)
-	resp = cliproxyexecutor.Response{Payload: []byte(converted), Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
 	reporter.ensurePublished(ctx)
 
 	return resp, nil
@@ -901,9 +906,11 @@ func (e *AntigravityExecutor) ExecuteStream(
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
-	httpResp, err := e.sendWithRetry(ctx, httpClient, baseURLs, attempts, baseModel, func(baseURL string) (*http.Request, error) {
-		return e.buildRequest(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL)
-	})
+	httpResp, err := e.sendWithRetry(
+		ctx, httpClient, baseURLs, attempts, baseModel, func(baseURL string) (*http.Request, error) {
+			return e.buildRequest(ctx, auth, token, baseModel, translated, true, opts.Alt, baseURL)
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -940,14 +947,14 @@ func (e *AntigravityExecutor) ExecuteStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
 		tail := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param,
 		)
 		for i := range tail {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(tail[i])}
+			out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
@@ -1065,7 +1072,7 @@ func (e *AntigravityExecutor) CountTokens(
 		}
 
 		recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity executor: close response body error: %v", errClose)
 		}
@@ -1078,7 +1085,7 @@ func (e *AntigravityExecutor) CountTokens(
 		if httpResp.StatusCode >= http.StatusOK && httpResp.StatusCode < http.StatusMultipleChoices {
 			count := gjson.GetBytes(bodyBytes, "totalTokens").Int()
 			translated := sdktranslator.TranslateTokenCount(respCtx, to, from, count, bodyBytes)
-			return cliproxyexecutor.Response{Payload: []byte(translated), Headers: httpResp.Header.Clone()}, nil
+			return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
 		}
 
 		lastStatus = httpResp.StatusCode
@@ -1172,7 +1179,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			return fallbackAntigravityPrimaryModels()
 		}
 
-		bodyBytes, errRead := io.ReadAll(httpResp.Body)
+		bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("antigravity executor: close response body error: %v", errClose)
 		}
@@ -1342,8 +1349,8 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 
 	form := url.Values{}
-	form.Set("client_id", antigravityClientID)
-	form.Set("client_secret", antigravityClientSecret)
+	form.Set("client_id", antigravity.ClientID)
+	form.Set("client_secret", antigravity.ClientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -1369,7 +1376,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		}
 	}()
 
-	bodyBytes, errRead := io.ReadAll(httpResp.Body)
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if errRead != nil {
 		return auth, errRead
 	}

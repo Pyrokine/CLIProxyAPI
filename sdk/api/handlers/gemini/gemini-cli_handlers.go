@@ -14,11 +14,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -112,7 +112,7 @@ func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 					log.Printf("warn: failed to close response body: %v", err)
 				}
 			}()
-			bodyBytes, _ := io.ReadAll(resp.Body)
+			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 
 			c.JSON(
 				http.StatusBadRequest, handlers.ErrorResponse{
@@ -132,7 +132,7 @@ func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 		for key, value := range resp.Header {
 			c.Header(key, value[0])
 		}
-		output, err := io.ReadAll(resp.Body)
+		output, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 		if err != nil {
 			log.Errorf("Failed to read response body: %v", err)
 			return
@@ -153,7 +153,6 @@ func (h *CLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context, rawJ
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
 	// Get the http.Flusher interface to manually flush the response.
@@ -208,20 +207,22 @@ func (h *CLIAPIHandler) forwardCLIStream(
 	data <-chan []byte,
 	errs <-chan *interfaces.ErrorMessage,
 ) {
-	forwardStream(h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) {
-		if alt == "" {
-			if bytes.Equal(chunk, []byte("data: [DONE]")) || bytes.Equal(chunk, []byte("[DONE]")) {
-				return
-			}
+	forwardStream(
+		h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) {
+			if alt == "" {
+				if bytes.Equal(chunk, []byte("data: [DONE]")) || bytes.Equal(chunk, []byte("[DONE]")) {
+					return
+				}
 
-			if !bytes.HasPrefix(chunk, []byte("data:")) {
-				_, _ = c.Writer.Write([]byte("data: "))
-			}
+				if !bytes.HasPrefix(chunk, []byte("data:")) {
+					_, _ = c.Writer.Write([]byte("data: "))
+				}
 
-			_, _ = c.Writer.Write(chunk)
-			_, _ = c.Writer.Write([]byte("\n\n"))
-		} else {
-			_, _ = c.Writer.Write(chunk)
-		}
-	})
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n\n"))
+			} else {
+				_, _ = c.Writer.Write(chunk)
+			}
+		},
+	)
 }

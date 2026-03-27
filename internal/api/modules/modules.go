@@ -5,9 +5,9 @@ package modules
 import (
 	"fmt"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/gin-gonic/gin"
 )
 
 // Context encapsulates the dependencies exposed to routing modules during

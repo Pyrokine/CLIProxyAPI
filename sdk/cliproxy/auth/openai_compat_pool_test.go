@@ -26,7 +26,12 @@ type openAICompatPoolExecutor struct {
 
 func (e *openAICompatPoolExecutor) Identifier() string { return e.id }
 
-func (e *openAICompatPoolExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *openAICompatPoolExecutor) Execute(
+	ctx context.Context,
+	auth *Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	_ = ctx
 	_ = auth
 	_ = opts
@@ -40,7 +45,12 @@ func (e *openAICompatPoolExecutor) Execute(ctx context.Context, auth *Auth, req 
 	return cliproxyexecutor.Response{Payload: []byte(req.Model)}, nil
 }
 
-func (e *openAICompatPoolExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *openAICompatPoolExecutor) ExecuteStream(
+	ctx context.Context,
+	auth *Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (*cliproxyexecutor.StreamResult, error) {
 	_ = ctx
 	_ = auth
 	_ = opts
@@ -71,7 +81,12 @@ func (e *openAICompatPoolExecutor) Refresh(_ context.Context, auth *Auth) (*Auth
 	return auth, nil
 }
 
-func (e *openAICompatPoolExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *openAICompatPoolExecutor) CountTokens(
+	ctx context.Context,
+	auth *Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	_ = ctx
 	_ = auth
 	_ = opts
@@ -85,7 +100,10 @@ func (e *openAICompatPoolExecutor) CountTokens(ctx context.Context, auth *Auth, 
 	return cliproxyexecutor.Response{Payload: []byte(req.Model)}, nil
 }
 
-func (e *openAICompatPoolExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+func (e *openAICompatPoolExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (
+	*http.Response,
+	error,
+) {
 	_ = ctx
 	_ = auth
 	_ = req
@@ -116,13 +134,20 @@ func (e *openAICompatPoolExecutor) StreamModels() []string {
 	return out
 }
 
-func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []internalconfig.OpenAICompatibilityModel, executor *openAICompatPoolExecutor) *Manager {
+func newOpenAICompatPoolTestManager(
+	t *testing.T,
+	alias string,
+	models []internalconfig.OpenAICompatibilityModel,
+	executor *openAICompatPoolExecutor,
+) *Manager {
 	t.Helper()
 	cfg := &internalconfig.Config{
-		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
-			Name:   "pool",
-			Models: models,
-		}},
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name:   "pool",
+				Models: models,
+			},
+		},
 	}
 	m := NewManager(nil, nil, nil)
 	m.SetConfig(cfg)
@@ -147,9 +172,11 @@ func newOpenAICompatPoolTestManager(t *testing.T, alias string, models []interna
 
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
-	t.Cleanup(func() {
-		reg.UnregisterClient(auth.ID)
-	})
+	t.Cleanup(
+		func() {
+			reg.UnregisterClient(auth.ID)
+		},
+	)
 	return m
 }
 
@@ -160,12 +187,16 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testi
 		id:          "pool",
 		countErrors: map[string]error{"qwen3.5-plus": invalidErr},
 	}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "qwen3.5-plus", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
+	m := newOpenAICompatPoolTestManager(
+		t, alias, []internalconfig.OpenAICompatibilityModel{
+			{Name: "qwen3.5-plus", Alias: alias},
+			{Name: "glm-5", Alias: alias},
+		}, executor,
+	)
 
-	_, err := m.ExecuteCount(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	_, err := m.ExecuteCount(
+		context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
+	)
 	if err == nil || err.Error() != invalidErr.Error() {
 		t.Fatalf("execute count error = %v, want %v", err, invalidErr)
 	}
@@ -181,13 +212,17 @@ func TestManagerExecuteCount_OpenAICompatAliasPoolStopsOnInvalidRequest(t *testi
 func TestManagerExecute_OpenAICompatAliasResolvesToFirstModel(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "qwen3.5-plus", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
+	m := newOpenAICompatPoolTestManager(
+		t, alias, []internalconfig.OpenAICompatibilityModel{
+			{Name: "qwen3.5-plus", Alias: alias},
+			{Name: "glm-5", Alias: alias},
+		}, executor,
+	)
 
 	for i := 0; i < 3; i++ {
-		resp, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		resp, err := m.Execute(
+			context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
+		)
 		if err != nil {
 			t.Fatalf("execute %d: %v", i, err)
 		}
@@ -216,12 +251,16 @@ func TestManagerExecute_OpenAICompatAliasPoolStopsOnBadRequest(t *testing.T) {
 		id:            "pool",
 		executeErrors: map[string]error{"qwen3.5-plus": invalidErr},
 	}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "qwen3.5-plus", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
+	m := newOpenAICompatPoolTestManager(
+		t, alias, []internalconfig.OpenAICompatibilityModel{
+			{Name: "qwen3.5-plus", Alias: alias},
+			{Name: "glm-5", Alias: alias},
+		}, executor,
+	)
 
-	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	_, err := m.Execute(
+		context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
+	)
 	if err == nil || err.Error() != invalidErr.Error() {
 		t.Fatalf("execute error = %v, want %v", err, invalidErr)
 	}
@@ -236,15 +275,23 @@ func TestManagerExecute_OpenAICompatAliasPoolStopsOnBadRequest(t *testing.T) {
 func TestManagerExecute_OpenAICompatAliasRetryableErrorStopsWithSingleAuth(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{
-		id:            "pool",
-		executeErrors: map[string]error{"qwen3.5-plus": &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}},
+		id: "pool",
+		executeErrors: map[string]error{
+			"qwen3.5-plus": &Error{
+				HTTPStatus: http.StatusTooManyRequests, Message: "quota",
+			},
+		},
 	}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "qwen3.5-plus", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
+	m := newOpenAICompatPoolTestManager(
+		t, alias, []internalconfig.OpenAICompatibilityModel{
+			{Name: "qwen3.5-plus", Alias: alias},
+			{Name: "glm-5", Alias: alias},
+		}, executor,
+	)
 
-	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	_, err := m.Execute(
+		context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
+	)
 	if err == nil {
 		t.Fatal("expected error for quota-exceeded model")
 	}
@@ -260,12 +307,16 @@ func TestManagerExecute_OpenAICompatAliasRetryableErrorStopsWithSingleAuth(t *te
 func TestManagerExecuteStream_OpenAICompatAliasResolvesToFirstModel(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "qwen3.5-plus", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
+	m := newOpenAICompatPoolTestManager(
+		t, alias, []internalconfig.OpenAICompatibilityModel{
+			{Name: "qwen3.5-plus", Alias: alias},
+			{Name: "glm-5", Alias: alias},
+		}, executor,
+	)
 
-	streamResult, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	streamResult, err := m.ExecuteStream(
+		context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
+	)
 	if err != nil {
 		t.Fatalf("execute stream: %v", err)
 	}
@@ -290,12 +341,16 @@ func TestManagerExecuteStream_OpenAICompatAliasStopsOnInvalidRequest(t *testing.
 		id:                "pool",
 		streamFirstErrors: map[string]error{"qwen3.5-plus": invalidErr},
 	}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "qwen3.5-plus", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
+	m := newOpenAICompatPoolTestManager(
+		t, alias, []internalconfig.OpenAICompatibilityModel{
+			{Name: "qwen3.5-plus", Alias: alias},
+			{Name: "glm-5", Alias: alias},
+		}, executor,
+	)
 
-	streamResult, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	streamResult, err := m.ExecuteStream(
+		context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
+	)
 	// The executor returns (*StreamResult, nil) with error in the chunk
 	if err != nil {
 		// If the manager propagates the error directly, that's also valid
@@ -329,13 +384,17 @@ func TestManagerExecuteStream_OpenAICompatAliasStopsOnInvalidRequest(t *testing.
 func TestManagerExecuteCount_OpenAICompatAliasResolvesToFirstModel(t *testing.T) {
 	alias := "claude-opus-4.66"
 	executor := &openAICompatPoolExecutor{id: "pool"}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "qwen3.5-plus", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
+	m := newOpenAICompatPoolTestManager(
+		t, alias, []internalconfig.OpenAICompatibilityModel{
+			{Name: "qwen3.5-plus", Alias: alias},
+			{Name: "glm-5", Alias: alias},
+		}, executor,
+	)
 
 	for i := 0; i < 2; i++ {
-		resp, err := m.ExecuteCount(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+		resp, err := m.ExecuteCount(
+			context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
+		)
 		if err != nil {
 			t.Fatalf("execute count %d: %v", i, err)
 		}
@@ -360,12 +419,16 @@ func TestManagerExecuteStream_OpenAICompatAliasStopsOnInvalidBootstrap(t *testin
 		id:                "pool",
 		streamFirstErrors: map[string]error{"qwen3.5-plus": invalidErr},
 	}
-	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
-		{Name: "qwen3.5-plus", Alias: alias},
-		{Name: "glm-5", Alias: alias},
-	}, executor)
+	m := newOpenAICompatPoolTestManager(
+		t, alias, []internalconfig.OpenAICompatibilityModel{
+			{Name: "qwen3.5-plus", Alias: alias},
+			{Name: "glm-5", Alias: alias},
+		}, executor,
+	)
 
-	streamResult, err := m.ExecuteStream(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	streamResult, err := m.ExecuteStream(
+		context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
+	)
 	// The executor returns (*StreamResult, nil) with error in the chunk.
 	// The manager may or may not propagate this as a direct error.
 	if err != nil {

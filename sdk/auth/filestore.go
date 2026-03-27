@@ -369,7 +369,7 @@ func refreshGeminiAccessToken(tokenMap map[string]any, httpClient *http.Client) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("refresh failed: status %d", resp.StatusCode)
 	}
@@ -387,4 +387,3 @@ func refreshGeminiAccessToken(tokenMap map[string]any, httpClient *http.Client) 
 	tokenMap["access_token"] = newAccessToken
 	return newAccessToken, nil
 }
-

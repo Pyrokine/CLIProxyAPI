@@ -123,7 +123,7 @@ func (e *codexExecutor) Execute(
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -132,7 +132,7 @@ func (e *codexExecutor) Execute(
 		err = newCodexStatusErr(httpResp.StatusCode, b)
 		return resp, err
 	}
-	data, err := io.ReadAll(httpResp.Body)
+	data, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -156,7 +156,7 @@ func (e *codexExecutor) Execute(
 
 		var param any
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, line, &param)
-		resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 		return resp, nil
 	}
 	err = statusErr{
@@ -217,7 +217,7 @@ func (e *codexExecutor) executeCompact(
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -226,7 +226,7 @@ func (e *codexExecutor) executeCompact(
 		err = newCodexStatusErr(httpResp.StatusCode, b)
 		return resp, err
 	}
-	data, err := io.ReadAll(httpResp.Body)
+	data, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -236,7 +236,7 @@ func (e *codexExecutor) executeCompact(
 	reporter.ensurePublished(ctx)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -279,7 +279,7 @@ func (e *codexExecutor) ExecuteStream(
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data, readErr := io.ReadAll(httpResp.Body)
+		data, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("codex executor: close response body error: %v", errClose)
 		}
@@ -323,7 +323,7 @@ func (e *codexExecutor) ExecuteStream(
 				ctx, to, from, req.Model, originalPayload, body, bytes.Clone(line), &param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -375,7 +375,7 @@ func (e *codexExecutor) CountTokens(
 		`{"response":{"usage":{"input_tokens":%d,"output_tokens":0,"total_tokens":%d}}}`, count, count,
 	)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, []byte(usageJSON))
-	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
+	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
 func tokenizerForCodexModel(model string) (tokenizer.Codec, error) {

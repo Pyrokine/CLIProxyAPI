@@ -19,7 +19,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
 	managementHandlers "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/middleware"
@@ -37,6 +36,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers/openai"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
@@ -1092,9 +1092,11 @@ func authMiddleware(manager *sdkaccess.Manager, rateLimiter *access.AuthRateLimi
 				remoteHost = c.Request.RemoteAddr
 			}
 			if ip := net.ParseIP(remoteHost); ip == nil || !ip.IsLoopback() {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-					"error": "Unauthorized",
-				})
+				c.AbortWithStatusJSON(
+					http.StatusUnauthorized, gin.H{
+						"error": "Unauthorized",
+					},
+				)
 				return
 			}
 			c.Next()
@@ -1108,23 +1110,35 @@ func authMiddleware(manager *sdkaccess.Manager, rateLimiter *access.AuthRateLimi
 		}
 		clientIP := remoteHost
 		if rateLimiter != nil && rateLimiter.IsLimited(clientIP) {
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error": "too many authentication failures, please try again later",
-			})
+			c.AbortWithStatusJSON(
+				http.StatusTooManyRequests, gin.H{
+					"error": "too many authentication failures, please try again later",
+				},
+			)
 			return
 		}
 
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {
-			if rateLimiter != nil {
-				rateLimiter.RecordSuccess(clientIP)
-			}
-			if result != nil {
+			if result == nil {
+				// No providers matched (api-keys empty) — restrict to loopback
+				if ip := net.ParseIP(clientIP); ip == nil || !ip.IsLoopback() {
+					c.AbortWithStatusJSON(
+						http.StatusUnauthorized, gin.H{
+							"error": "Unauthorized",
+						},
+					)
+					return
+				}
+			} else {
 				c.Set("apiKey", result.Principal)
 				c.Set("accessProvider", result.Provider)
 				if len(result.Metadata) > 0 {
 					c.Set("accessMetadata", result.Metadata)
 				}
+			}
+			if rateLimiter != nil {
+				rateLimiter.RecordSuccess(clientIP)
 			}
 			c.Next()
 			return

@@ -442,7 +442,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -451,7 +451,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
-	data, errRead := io.ReadAll(httpResp.Body)
+	data, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if errRead != nil {
 		recordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
@@ -468,7 +468,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 	// Standard Gemini translation (works for both Gemini and converted Imagen responses)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -502,7 +502,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 
 	// For API key auth, use simpler URL format without project/location
 	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com"
+		baseURL = "https://aiplatform.googleapis.com"
 	}
 	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
 	if opts.Alt != "" && action != "countTokens" {
@@ -535,7 +535,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -544,7 +544,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
-	data, errRead := io.ReadAll(httpResp.Body)
+	data, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if errRead != nil {
 		recordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
@@ -553,7 +553,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 	reporter.publish(ctx, parseGeminiUsage(data))
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -610,7 +610,9 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(
 
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
-	return e.handleVertexStreamResponse(ctx, newProxyAwareHTTPClient(ctx, e.cfg, auth, 0), httpReq, to, from, req, opts, body, reporter)
+	return e.handleVertexStreamResponse(
+		ctx, newProxyAwareHTTPClient(ctx, e.cfg, auth, 0), httpReq, to, from, req, opts, body, reporter,
+	)
 }
 func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 	ctx context.Context,
@@ -635,7 +637,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 	action := getVertexAction(baseModel, true)
 	// For API key auth, use simpler URL format without project/location
 	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com"
+		baseURL = "https://aiplatform.googleapis.com"
 	}
 	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, action)
 	// Imagen models don't support streaming, skip SSE params
@@ -660,7 +662,9 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
-	return e.handleVertexStreamResponse(ctx, newProxyAwareHTTPClient(ctx, e.cfg, auth, 0), httpReq, to, from, req, opts, body, reporter)
+	return e.handleVertexStreamResponse(
+		ctx, newProxyAwareHTTPClient(ctx, e.cfg, auth, 0), httpReq, to, from, req, opts, body, reporter,
+	)
 }
 
 // handleVertexStreamResponse sends the HTTP request and processes the streaming response.
@@ -681,7 +685,7 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -714,14 +718,14 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
 			for i := range lines {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 			}
 		}
 		lines := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
 		for i := range lines {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+			out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
@@ -794,7 +798,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -802,7 +806,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 		)
 		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
-	data, errRead := io.ReadAll(httpResp.Body)
+	data, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if errRead != nil {
 		recordAPIResponseError(ctx, e.cfg, errRead)
 		return cliproxyexecutor.Response{}, errRead
@@ -810,7 +814,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 }
 
 // countTokensWithAPIKey handles token counting using API key credentials.
@@ -842,7 +846,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 
 	// For API key auth, use simpler URL format without project/location
 	if baseURL == "" {
-		baseURL = "https://generativelanguage.googleapis.com"
+		baseURL = "https://aiplatform.googleapis.com"
 	}
 	url := fmt.Sprintf("%s/%s/publishers/google/models/%s:%s", baseURL, vertexAPIVersion, baseModel, "countTokens")
 
@@ -871,7 +875,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -879,7 +883,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 		)
 		return cliproxyexecutor.Response{}, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
-	data, errRead := io.ReadAll(httpResp.Body)
+	data, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if errRead != nil {
 		recordAPIResponseError(ctx, e.cfg, errRead)
 		return cliproxyexecutor.Response{}, errRead
@@ -887,7 +891,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 }
 
 // vertexCreds extracts project, location and raw service account JSON from auth metadata.

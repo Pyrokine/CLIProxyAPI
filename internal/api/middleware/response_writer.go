@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/gin-gonic/gin"
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"

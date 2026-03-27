@@ -5,10 +5,10 @@
 package api
 
 import (
-	"github.com/gin-gonic/gin"
 	internalmanagement "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/handlers/management"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/gin-gonic/gin"
 )
 
 // ManagementTokenRequester exposes a limited subset of management endpoints for requesting tokens.

@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -68,17 +68,19 @@ func recordUpstreamRequest(
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, cfg, upstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   headers,
-		Body:      body,
-		Provider:  provider,
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
+	recordAPIRequest(
+		ctx, cfg, upstreamRequestLog{
+			URL:       url,
+			Method:    http.MethodPost,
+			Headers:   headers,
+			Body:      body,
+			Provider:  provider,
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		},
+	)
 }
 
 // recordAPIRequest stores the upstream request metadata in Gin context for request logging.

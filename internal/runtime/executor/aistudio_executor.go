@@ -75,7 +75,7 @@ func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 
 	var body []byte
 	if httpReq.Body != nil {
-		b, errRead := io.ReadAll(httpReq.Body)
+		b, errRead := io.ReadAll(io.LimitReader(httpReq.Body, 50<<20))
 		if errRead != nil {
 			return nil, errRead
 		}
@@ -194,7 +194,7 @@ func (e *AIStudioExecutor) Execute(
 	out := sdktranslator.TranslateNonStream(
 		ctx, p.body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, p.translatedReq, wsResp.Body, &param,
 	)
-	resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON([]byte(out)), Headers: wsResp.Headers.Clone()}
+	resp = cliproxyexecutor.Response{Payload: ensureColonSpacedJSON(out), Headers: wsResp.Headers.Clone()}
 	return resp, nil
 }
 
@@ -284,11 +284,12 @@ func (e *AIStudioExecutor) ExecuteStream(
 						p.reporter.publish(ctx, detail)
 					}
 					lines := sdktranslator.TranslateStream(
-						ctx, p.body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, p.translatedReq, filtered,
+						ctx, p.body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, p.translatedReq,
+						filtered,
 						&param,
 					)
 					for i := range lines {
-						out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}
+						out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}
 					}
 					break
 				}
@@ -307,7 +308,7 @@ func (e *AIStudioExecutor) ExecuteStream(
 					event.Payload, &param,
 				)
 				for i := range lines {
-					out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON([]byte(lines[i]))}
+					out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}
 				}
 				p.reporter.publish(ctx, parseGeminiUsage(event.Payload))
 				return false
@@ -377,7 +378,7 @@ func (e *AIStudioExecutor) CountTokens(
 		return cliproxyexecutor.Response{}, fmt.Errorf("wsrelay: totalTokens missing in response")
 	}
 	translated := sdktranslator.TranslateTokenCount(ctx, body.toFormat, opts.SourceFormat, totalTokens, resp.Body)
-	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
+	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
 // Refresh refreshes the authentication credentials (no-op for AI Studio).

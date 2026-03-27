@@ -97,11 +97,13 @@ func TestMaskAPIKey(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := maskAPIKey(tt.key)
-			if got != tt.want {
-				t.Fatalf("maskAPIKey(%q) = %q, want %q", tt.key, got, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				got := maskAPIKey(tt.key)
+				if got != tt.want {
+					t.Fatalf("maskAPIKey(%q) = %q, want %q", tt.key, got, tt.want)
+				}
+			},
+		)
 	}
 }

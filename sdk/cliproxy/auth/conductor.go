@@ -15,13 +15,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -198,6 +198,19 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	return manager
+}
+
+// RefreshSchedulerEntry re-upserts a single auth into the scheduler so that its
+// supportedModelSet is rebuilt from the current global model registry state.
+// This must be called after models have been registered for a newly added auth,
+// because the initial scheduler.upsertAuth during Register/Update runs before
+// registerModelsForAuth and therefore snapshots an empty model set.
+func (m *Manager) RefreshSchedulerEntry(authID string) {
+	if m == nil || authID == "" {
+		return
+	}
+	// TODO: implement scheduler integration — currently a no-op since the
+	// scheduler is not yet wired into the Manager execution path.
 }
 
 func (m *Manager) SetSelector(selector Selector) {
@@ -527,16 +540,30 @@ func (m *Manager) Execute(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
-	return retryWithCooldown(m, ctx, providers, req, opts, func(
-		innerCtx context.Context, innerProviders []string, innerReq cliproxyexecutor.Request, innerOpts cliproxyexecutor.Options, maxCreds int,
-	) (cliproxyexecutor.Response, error) {
-		return mixedOnce(m, innerCtx, innerProviders, innerReq, innerOpts, maxCreds,
-			func(execCtx context.Context, auth *Auth, executor ProviderExecutor, _ string, execReq cliproxyexecutor.Request, execOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-				return executor.Execute(execCtx, auth, execReq, execOpts)
-			},
-			m.MarkResult,
-		)
-	})
+	return retryWithCooldown(
+		m, ctx, providers, req, opts, func(
+			innerCtx context.Context,
+			innerProviders []string,
+			innerReq cliproxyexecutor.Request,
+			innerOpts cliproxyexecutor.Options,
+			maxCreds int,
+		) (cliproxyexecutor.Response, error) {
+			return mixedOnce(
+				m, innerCtx, innerProviders, innerReq, innerOpts, maxCreds,
+				func(
+					execCtx context.Context,
+					auth *Auth,
+					executor ProviderExecutor,
+					_ string,
+					execReq cliproxyexecutor.Request,
+					execOpts cliproxyexecutor.Options,
+				) (cliproxyexecutor.Response, error) {
+					return executor.Execute(execCtx, auth, execReq, execOpts)
+				},
+				m.MarkResult,
+			)
+		},
+	)
 }
 
 // ExecuteCount performs a token-counting execution using the configured selector and executor.
@@ -547,16 +574,30 @@ func (m *Manager) ExecuteCount(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
-	return retryWithCooldown(m, ctx, providers, req, opts, func(
-		innerCtx context.Context, innerProviders []string, innerReq cliproxyexecutor.Request, innerOpts cliproxyexecutor.Options, maxCreds int,
-	) (cliproxyexecutor.Response, error) {
-		return mixedOnce(m, innerCtx, innerProviders, innerReq, innerOpts, maxCreds,
-			func(execCtx context.Context, auth *Auth, executor ProviderExecutor, _ string, execReq cliproxyexecutor.Request, execOpts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-				return executor.CountTokens(execCtx, auth, execReq, execOpts)
-			},
-			func(resultCtx context.Context, result Result) { m.hook.OnResult(resultCtx, result) },
-		)
-	})
+	return retryWithCooldown(
+		m, ctx, providers, req, opts, func(
+			innerCtx context.Context,
+			innerProviders []string,
+			innerReq cliproxyexecutor.Request,
+			innerOpts cliproxyexecutor.Options,
+			maxCreds int,
+		) (cliproxyexecutor.Response, error) {
+			return mixedOnce(
+				m, innerCtx, innerProviders, innerReq, innerOpts, maxCreds,
+				func(
+					execCtx context.Context,
+					auth *Auth,
+					executor ProviderExecutor,
+					_ string,
+					execReq cliproxyexecutor.Request,
+					execOpts cliproxyexecutor.Options,
+				) (cliproxyexecutor.Response, error) {
+					return executor.CountTokens(execCtx, auth, execReq, execOpts)
+				},
+				func(resultCtx context.Context, result Result) { m.hook.OnResult(resultCtx, result) },
+			)
+		},
+	)
 }
 
 // ExecuteStream performs a streaming execution using the configured selector and executor.
@@ -568,26 +609,40 @@ func (m *Manager) ExecuteStream(
 	opts cliproxyexecutor.Options,
 ) (*cliproxyexecutor.StreamResult, error) {
 	routeModel := req.Model
-	return retryWithCooldown(m, ctx, providers, req, opts, func(
-		innerCtx context.Context, innerProviders []string, innerReq cliproxyexecutor.Request, innerOpts cliproxyexecutor.Options, maxCreds int,
-	) (*cliproxyexecutor.StreamResult, error) {
-		return mixedOnce(m, innerCtx, innerProviders, innerReq, innerOpts, maxCreds,
-			func(execCtx context.Context, auth *Auth, executor ProviderExecutor, provider string, execReq cliproxyexecutor.Request, execOpts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-				streamResult, errStream := executor.ExecuteStream(execCtx, auth, execReq, execOpts)
-				if errStream != nil {
-					return nil, errStream
-				}
-				return m.wrapStreamChunks(execCtx, auth.Clone(), provider, routeModel, streamResult), nil
-			},
-			// Stream success recording is deferred to wrapStreamChunks goroutine;
-			// only record failures here to avoid double-recording.
-			func(resultCtx context.Context, result Result) {
-				if !result.Success {
-					m.MarkResult(resultCtx, result)
-				}
-			},
-		)
-	})
+	return retryWithCooldown(
+		m, ctx, providers, req, opts, func(
+			innerCtx context.Context,
+			innerProviders []string,
+			innerReq cliproxyexecutor.Request,
+			innerOpts cliproxyexecutor.Options,
+			maxCreds int,
+		) (*cliproxyexecutor.StreamResult, error) {
+			return mixedOnce(
+				m, innerCtx, innerProviders, innerReq, innerOpts, maxCreds,
+				func(
+					execCtx context.Context,
+					auth *Auth,
+					executor ProviderExecutor,
+					provider string,
+					execReq cliproxyexecutor.Request,
+					execOpts cliproxyexecutor.Options,
+				) (*cliproxyexecutor.StreamResult, error) {
+					streamResult, errStream := executor.ExecuteStream(execCtx, auth, execReq, execOpts)
+					if errStream != nil {
+						return nil, errStream
+					}
+					return m.wrapStreamChunks(execCtx, auth.Clone(), provider, routeModel, streamResult), nil
+				},
+				// Stream success recording is deferred to wrapStreamChunks goroutine;
+				// only record failures here to avoid double-recording.
+				func(resultCtx context.Context, result Result) {
+					if !result.Success {
+						m.MarkResult(resultCtx, result)
+					}
+				},
+			)
+		},
+	)
 }
 
 // retryWithCooldown runs attemptFn in a retry loop, waiting for cooldown between attempts.
@@ -599,7 +654,13 @@ func retryWithCooldown[T any](
 	providers []string,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
-	attemptFn func(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxCreds int) (T, error),
+	attemptFn func(
+		ctx context.Context,
+		providers []string,
+		req cliproxyexecutor.Request,
+		opts cliproxyexecutor.Options,
+		maxCreds int,
+	) (T, error),
 ) (T, error) {
 	var zero T
 	normalized := m.normalizeProviders(providers)
@@ -636,7 +697,14 @@ func mixedOnce[T any](
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 	maxRetryCredentials int,
-	executeFn func(ctx context.Context, auth *Auth, executor ProviderExecutor, provider string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (T, error),
+	executeFn func(
+		ctx context.Context,
+		auth *Auth,
+		executor ProviderExecutor,
+		provider string,
+		req cliproxyexecutor.Request,
+		opts cliproxyexecutor.Options,
+	) (T, error),
 	recordResult func(ctx context.Context, result Result),
 ) (T, error) {
 	var zero T
@@ -1471,8 +1539,7 @@ func retryAfterFromError(err error) *time.Duration {
 	if retryAfter == nil {
 		return nil
 	}
-	copy := *retryAfter
-	return &copy
+	return new(*retryAfter)
 }
 
 func statusCodeFromResult(err *Error) int {
@@ -1637,6 +1704,72 @@ func (m *Manager) CloseExecutionSession(sessionID string) {
 			closer.CloseExecutionSession(sessionID)
 		}
 	}
+}
+
+// PickNext selects the next auth entry for a single-provider request.
+func (m *Manager) PickNext(
+	ctx context.Context,
+	provider, model string,
+	opts cliproxyexecutor.Options,
+	tried map[string]struct{},
+) (*Auth, ProviderExecutor, error) {
+	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+
+	m.mu.RLock()
+	executor, okExecutor := m.executors[provider]
+	if !okExecutor {
+		m.mu.RUnlock()
+		return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
+	}
+	candidates := make([]*Auth, 0, len(m.auths))
+	modelKey := strings.TrimSpace(model)
+	// Always use base model name (without thinking suffix) for auth matching.
+	if modelKey != "" {
+		parsed := thinking.ParseSuffix(modelKey)
+		if parsed.ModelName != "" {
+			modelKey = strings.TrimSpace(parsed.ModelName)
+		}
+	}
+	registryRef := registry.GetGlobalRegistry()
+	for _, candidate := range m.auths {
+		if candidate.Provider != provider || candidate.Disabled {
+			continue
+		}
+		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
+		if _, used := tried[candidate.ID]; used {
+			continue
+		}
+		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	if len(candidates) == 0 {
+		m.mu.RUnlock()
+		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
+	if errPick != nil {
+		m.mu.RUnlock()
+		return nil, nil, errPick
+	}
+	if selected == nil {
+		m.mu.RUnlock()
+		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
+	}
+	authCopy := selected.Clone()
+	m.mu.RUnlock()
+	if !selected.indexAssigned {
+		m.mu.Lock()
+		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
+			current.EnsureIndex()
+			authCopy = current.Clone()
+		}
+		m.mu.Unlock()
+	}
+	return authCopy, executor, nil
 }
 
 func (m *Manager) pickNextMixed(
@@ -1890,10 +2023,14 @@ func authPreferredInterval(a *Auth) time.Duration {
 	if a == nil {
 		return 0
 	}
-	if d := durationFromMetadata(a.Metadata, "refresh_interval_seconds", "refreshIntervalSeconds", "refresh_interval", "refreshInterval"); d > 0 {
+	if d := durationFromMetadata(
+		a.Metadata, "refresh_interval_seconds", "refreshIntervalSeconds", "refresh_interval", "refreshInterval",
+	); d > 0 {
 		return d
 	}
-	if d := durationFromAttributes(a.Attributes, "refresh_interval_seconds", "refreshIntervalSeconds", "refresh_interval", "refreshInterval"); d > 0 {
+	if d := durationFromAttributes(
+		a.Attributes, "refresh_interval_seconds", "refreshIntervalSeconds", "refresh_interval", "refreshInterval",
+	); d > 0 {
 		return d
 	}
 	return 0
@@ -2009,7 +2146,9 @@ func authLastRefreshTimestamp(a *Auth) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	if a.Metadata != nil {
-		if ts, ok := lookupMetadataTime(a.Metadata, "last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"); ok {
+		if ts, ok := lookupMetadataTime(
+			a.Metadata, "last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt",
+		); ok {
 			return ts, true
 		}
 	}

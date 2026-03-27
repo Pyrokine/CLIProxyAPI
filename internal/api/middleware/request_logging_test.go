@@ -146,15 +146,17 @@ func TestCaptureRequestInfo_BodyLimited(t *testing.T) {
 	engine := gin.New()
 
 	var capturedBodyLen int
-	engine.POST("/test", func(c *gin.Context) {
-		info, err := captureRequestInfo(c, true)
-		if err != nil {
-			t.Errorf("captureRequestInfo error: %v", err)
-			return
-		}
-		capturedBodyLen = len(info.Body)
-		c.Status(http.StatusOK)
-	})
+	engine.POST(
+		"/test", func(c *gin.Context) {
+			info, err := captureRequestInfo(c, true)
+			if err != nil {
+				t.Errorf("captureRequestInfo error: %v", err)
+				return
+			}
+			capturedBodyLen = len(info.Body)
+			c.Status(http.StatusOK)
+		},
+	)
 
 	// Create a body larger than 10MB.
 	bigBody := make([]byte, 11<<20) // 11MB

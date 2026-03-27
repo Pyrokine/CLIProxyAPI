@@ -171,7 +171,12 @@ func (s *authScheduler) removeAuth(authID string) {
 }
 
 // pickSingle returns the next auth for a single provider/model request using scheduler state.
-func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, error) {
+func (s *authScheduler) pickSingle(
+	ctx context.Context,
+	provider, model string,
+	opts cliproxyexecutor.Options,
+	tried map[string]struct{},
+) (*Auth, error) {
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -211,7 +216,13 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 }
 
 // pickMixed returns the next auth and provider for a mixed-provider request.
-func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, string, error) {
+func (s *authScheduler) pickMixed(
+	_ context.Context,
+	providers []string,
+	model string,
+	opts cliproxyexecutor.Options,
+	tried map[string]struct{},
+) (*Auth, string, error) {
 	if s == nil {
 		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
@@ -644,7 +655,11 @@ func (m *modelScheduler) promoteExpiredLocked(now time.Time) {
 }
 
 // pickReadyLocked selects the next ready auth from the highest available priority bucket.
-func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyLocked(
+	preferWebsocket bool,
+	strategy schedulerStrategy,
+	predicate func(*scheduledAuth) bool,
+) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -658,7 +673,10 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predicate func(*scheduledAuth) bool) (int, bool) {
+func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predicate func(*scheduledAuth) bool) (
+	int,
+	bool,
+) {
 	if m == nil {
 		return 0, false
 	}
@@ -680,7 +698,12 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 
 // pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
 // The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(preferWebsocket bool, priority int, strategy schedulerStrategy, predicate func(*scheduledAuth) bool) *Auth {
+func (m *modelScheduler) pickReadyAtPriorityLocked(
+	preferWebsocket bool,
+	priority int,
+	strategy schedulerStrategy,
+	predicate func(*scheduledAuth) bool,
+) *Auth {
 	if m == nil {
 		return nil
 	}
@@ -762,6 +785,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		if entry == nil || entry.auth == nil {
 			continue
 		}
+		// noinspection GoSwitchMissingCasesForIotaConsts — scheduledStateDisabled entries are skipped (nil guard above).
 		switch entry.state {
 		case scheduledStateReady:
 			priority := entry.meta.priority
@@ -771,32 +795,38 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 	}
 	for priority, entries := range priorityBuckets {
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].auth.ID < entries[j].auth.ID
-		})
+		sort.Slice(
+			entries, func(i, j int) bool {
+				return entries[i].auth.ID < entries[j].auth.ID
+			},
+		)
 		m.readyByPriority[priority] = buildReadyBucket(entries)
 		m.priorityOrder = append(m.priorityOrder, priority)
 	}
-	sort.Slice(m.priorityOrder, func(i, j int) bool {
-		return m.priorityOrder[i] > m.priorityOrder[j]
-	})
-	sort.Slice(m.blocked, func(i, j int) bool {
-		left := m.blocked[i]
-		right := m.blocked[j]
-		if left == nil || right == nil {
-			return left != nil
-		}
-		if left.nextRetryAt.Equal(right.nextRetryAt) {
-			return left.auth.ID < right.auth.ID
-		}
-		if left.nextRetryAt.IsZero() {
-			return false
-		}
-		if right.nextRetryAt.IsZero() {
-			return true
-		}
-		return left.nextRetryAt.Before(right.nextRetryAt)
-	})
+	sort.Slice(
+		m.priorityOrder, func(i, j int) bool {
+			return m.priorityOrder[i] > m.priorityOrder[j]
+		},
+	)
+	sort.Slice(
+		m.blocked, func(i, j int) bool {
+			left := m.blocked[i]
+			right := m.blocked[j]
+			if left == nil || right == nil {
+				return left != nil
+			}
+			if left.nextRetryAt.Equal(right.nextRetryAt) {
+				return left.auth.ID < right.auth.ID
+			}
+			if left.nextRetryAt.IsZero() {
+				return false
+			}
+			if right.nextRetryAt.IsZero() {
+				return true
+			}
+			return left.nextRetryAt.Before(right.nextRetryAt)
+		},
+	)
 }
 
 // buildReadyBucket prepares the general and websocket-only ready views for one priority bucket.

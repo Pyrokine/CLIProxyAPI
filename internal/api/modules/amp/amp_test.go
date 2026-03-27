@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/modules"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/gin-gonic/gin"
 )
 
 func TestModule_Name(t *testing.T) {

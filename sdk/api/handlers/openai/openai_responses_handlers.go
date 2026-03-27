@@ -12,11 +12,11 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/gin-gonic/gin"
 	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -205,7 +205,6 @@ func (h *ResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
 	// Peek at the first chunk

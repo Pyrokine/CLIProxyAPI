@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/gin-gonic/gin"
 )
 
 func TestForwardResponsesStreamTerminalErrorUsesResponsesErrorChunk(t *testing.T) {

@@ -149,7 +149,7 @@ func (e *OpenAICompatExecutor) Execute(
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -158,7 +158,7 @@ func (e *OpenAICompatExecutor) Execute(
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
-	body, err := io.ReadAll(httpResp.Body)
+	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -170,7 +170,7 @@ func (e *OpenAICompatExecutor) Execute(
 	// Translate response back to source format when needed
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -210,6 +210,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		return nil, err
 	}
 
+	// Request usage data in the final streaming chunk so that token statistics
+	// are captured even when the upstream is an OpenAI-compatible provider.
+	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
@@ -237,7 +241,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -280,7 +284,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -325,7 +329,7 @@ func (e *OpenAICompatExecutor) CountTokens(
 
 	usageJSON := buildOpenAIUsageJSON(count)
 	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
-	return cliproxyexecutor.Response{Payload: []byte(translatedUsage)}, nil
+	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
 }
 
 // Refresh is a no-op for API-key based compatibility providers.

@@ -173,7 +173,7 @@ func (e *KimiExecutor) Execute(
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -182,7 +182,7 @@ func (e *KimiExecutor) Execute(
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
-	data, err := io.ReadAll(httpResp.Body)
+	data, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -192,8 +192,10 @@ func (e *KimiExecutor) Execute(
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
-	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	out := sdktranslator.TranslateNonStream(
+		ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.body, data, &param,
+	)
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -224,7 +226,7 @@ func (e *KimiExecutor) ExecuteStream(
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -261,14 +263,14 @@ func (e *KimiExecutor) ExecuteStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
 		doneChunks := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
 		for i := range doneChunks {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(doneChunks[i])}
+			out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)

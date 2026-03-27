@@ -8,10 +8,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/modules"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -110,7 +110,7 @@ func (m *Module) Register(ctx modules.Context) error {
 
 			// Store initial config for partial reload comparison
 			settingsCopy := settings
-		m.lastConfig = new(settingsCopy)
+			m.lastConfig = new(settingsCopy)
 
 			// Initialize localhost restriction setting (hot-reloadable)
 			m.setRestrictToLocalhost(settings.RestrictManagementToLocalhost)
@@ -375,6 +375,12 @@ func (m *Module) hasUpstreamAPIKeysChanged(old *config.AmpCode, new *config.AmpC
 	}
 
 	return false
+}
+
+// GetModelMapper returns the model mapper instance (for testing/debugging).
+// noinspection GoExportedFuncWithUnexportedType — internal package, unexported return type is intentional.
+func (m *Module) GetModelMapper() *defaultModelMapper {
+	return m.modelMapper
 }
 
 // getProxy returns the current proxy instance (thread-safe for hot-reload).

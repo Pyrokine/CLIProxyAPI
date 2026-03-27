@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/gin-gonic/gin"
 )
 
 type compactCaptureExecutor struct {

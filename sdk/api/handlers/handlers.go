@@ -13,8 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
@@ -23,6 +21,8 @@ import (
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -138,7 +138,8 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 		},
 	)
 	if err != nil {
-		return fmt.Appendf(nil,
+		return fmt.Appendf(
+			nil,
 			`{"error":{"message":%q,"type":"server_error","code":"internal_server_error"}}`, errText,
 		)
 	}
@@ -421,21 +422,23 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 	stopChan := make(chan struct{})
 	var stopOnce sync.Once
 	var wg sync.WaitGroup
-	wg.Go(func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopChan:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				_, _ = c.Writer.Write([]byte("\n"))
-				flusher.Flush()
+	wg.Go(
+		func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopChan:
+					return
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					_, _ = c.Writer.Write([]byte("\n"))
+					flusher.Flush()
+				}
 			}
-		}
-	})
+		},
+	)
 
 	return func() {
 		stopOnce.Do(

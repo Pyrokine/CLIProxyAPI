@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

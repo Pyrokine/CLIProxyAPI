@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	iflowauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
@@ -21,6 +20,7 @@ import (
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -178,7 +178,7 @@ func (e *IFlowExecutor) Execute(
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d error message: %s", httpResp.StatusCode,
@@ -188,7 +188,7 @@ func (e *IFlowExecutor) Execute(
 		return resp, err
 	}
 
-	data, err := io.ReadAll(httpResp.Body)
+	data, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -201,8 +201,10 @@ func (e *IFlowExecutor) Execute(
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
-	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	out := sdktranslator.TranslateNonStream(
+		ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.body, data, &param,
+	)
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -232,7 +234,7 @@ func (e *IFlowExecutor) ExecuteStream(
 
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		data, _ := io.ReadAll(httpResp.Body)
+		data, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("iflow executor: close response body error: %v", errClose)
 		}
@@ -271,7 +273,7 @@ func (e *IFlowExecutor) ExecuteStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -310,7 +312,7 @@ func (e *IFlowExecutor) CountTokens(
 
 	usageJSON := buildOpenAIUsageJSON(count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
-	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
+	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 
 // Refresh refreshes OAuth tokens or cookie-based API keys and updates the stored API key.

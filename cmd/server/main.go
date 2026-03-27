@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/joho/godotenv"
 	configaccess "github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cmd"
@@ -25,6 +24,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -58,6 +58,7 @@ func main() {
 		password   string
 		tuiMode    bool
 		standalone bool
+		localModel bool
 		testConfig bool
 	)
 
@@ -81,6 +82,7 @@ func main() {
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
+	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
 	flag.BoolVar(&testConfig, "t", false, "Test configuration and exit")
 
 	flag.CommandLine.Usage = func() {
@@ -206,15 +208,23 @@ func main() {
 		return
 	}
 
+	if localModel {
+		log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
+	}
+
 	if tuiMode {
 		if standalone {
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 		}
-		registry.StartModelsUpdater(context.Background())
+		if !localModel {
+			registry.StartModelsUpdater(context.Background())
+		}
 		runTUIMode(cfg, configFilePath, password, standalone)
 	} else {
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
-		registry.StartModelsUpdater(context.Background())
+		if !localModel {
+			registry.StartModelsUpdater(context.Background())
+		}
 		cmd.StartService(cfg, configFilePath, password)
 	}
 }

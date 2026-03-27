@@ -66,11 +66,13 @@ func (a *CodexAuthenticator) Login(ctx context.Context, cfg *config.Config, opts
 		return nil, fmt.Errorf("codex state generation failed: %w", err)
 	}
 
-	oauthServer := oauthcommon.NewOAuthServer(callbackPort, oauthcommon.ServerConfig{
-		CallbackPath:       "/auth/callback",
-		DefaultPlatformURL: "https://platform.openai.com",
-		ProviderName:       "Codex",
-	})
+	oauthServer := oauthcommon.NewOAuthServer(
+		callbackPort, oauthcommon.ServerConfig{
+			CallbackPath:       "/auth/callback",
+			DefaultPlatformURL: "https://platform.openai.com",
+			ProviderName:       "Codex",
+		},
+	)
 	if err = oauthServer.Start(); err != nil {
 		if strings.Contains(err.Error(), "already in use") {
 			return nil, oauthcommon.NewAuthenticationError(oauthcommon.ErrPortInUse, err)

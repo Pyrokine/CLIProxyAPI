@@ -148,10 +148,12 @@ func newCredentialRetryLimitTestManager(t *testing.T, maxRetryCredentials int) (
 	testModel := []*registry.ModelInfo{{ID: "test-model"}}
 	globalReg.RegisterClient("auth-1", "claude", testModel)
 	globalReg.RegisterClient("auth-2", "claude", testModel)
-	t.Cleanup(func() {
-		globalReg.UnregisterClient("auth-1")
-		globalReg.UnregisterClient("auth-2")
-	})
+	t.Cleanup(
+		func() {
+			globalReg.UnregisterClient("auth-1")
+			globalReg.UnregisterClient("auth-2")
+		},
+	)
 
 	if _, errRegister := m.Register(context.Background(), auth1); errRegister != nil {
 		t.Fatalf("register auth1: %v", errRegister)

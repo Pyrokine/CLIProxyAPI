@@ -134,13 +134,16 @@ func TestEnsureCacheControl(t *testing.T) {
 				if i > 0 {
 					toolsJSON.WriteString(",")
 				}
-				toolsJSON.WriteString(fmt.Sprintf(
-					`{"name": "tool%d", "description": "Tool %d", "input_schema": {"type": "object"}}`, i, i,
-				))
+				toolsJSON.WriteString(
+					fmt.Sprintf(
+						`{"name": "tool%d", "description": "Tool %d", "input_schema": {"type": "object"}}`, i, i,
+					),
+				)
 			}
 			toolsJSON.WriteString(`]`)
 
-			input := fmt.Appendf(nil,
+			input := fmt.Appendf(
+				nil,
 				`{
 			"model": "claude-3-5-sonnet",
 			"tools": %s,

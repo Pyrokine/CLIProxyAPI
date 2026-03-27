@@ -14,25 +14,29 @@ func TestManager_Update_PreservesModelStates(t *testing.T) {
 	model := "test-model"
 	backoffLevel := 7
 
-	if _, errRegister := m.Register(context.Background(), &Auth{
-		ID:       "auth-1",
-		Provider: "claude",
-		Metadata: map[string]any{"k": "v"},
-		ModelStates: map[string]*ModelState{
-			model: {
-				Quota: QuotaState{BackoffLevel: backoffLevel},
+	if _, errRegister := m.Register(
+		context.Background(), &Auth{
+			ID:       "auth-1",
+			Provider: "claude",
+			Metadata: map[string]any{"k": "v"},
+			ModelStates: map[string]*ModelState{
+				model: {
+					Quota: QuotaState{BackoffLevel: backoffLevel},
+				},
 			},
 		},
-	}); errRegister != nil {
+	); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
 
 	// Update without ModelStates replaces the entry entirely
-	if _, errUpdate := m.Update(context.Background(), &Auth{
-		ID:       "auth-1",
-		Provider: "claude",
-		Metadata: map[string]any{"k": "v2"},
-	}); errUpdate != nil {
+	if _, errUpdate := m.Update(
+		context.Background(), &Auth{
+			ID:       "auth-1",
+			Provider: "claude",
+			Metadata: map[string]any{"k": "v2"},
+		},
+	); errUpdate != nil {
 		t.Fatalf("update auth: %v", errUpdate)
 	}
 
@@ -58,29 +62,33 @@ func TestManager_Update_WithModelStatesPreservesModelStates(t *testing.T) {
 	model := "test-model"
 	backoffLevel := 7
 
-	if _, errRegister := m.Register(context.Background(), &Auth{
-		ID:       "auth-1",
-		Provider: "claude",
-		ModelStates: map[string]*ModelState{
-			model: {
-				Quota: QuotaState{BackoffLevel: backoffLevel},
+	if _, errRegister := m.Register(
+		context.Background(), &Auth{
+			ID:       "auth-1",
+			Provider: "claude",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Quota: QuotaState{BackoffLevel: backoffLevel},
+				},
 			},
 		},
-	}); errRegister != nil {
+	); errRegister != nil {
 		t.Fatalf("register auth: %v", errRegister)
 	}
 
 	// Update with ModelStates included preserves them
-	if _, errUpdate := m.Update(context.Background(), &Auth{
-		ID:       "auth-1",
-		Provider: "claude",
-		Metadata: map[string]any{"k": "v2"},
-		ModelStates: map[string]*ModelState{
-			model: {
-				Quota: QuotaState{BackoffLevel: backoffLevel},
+	if _, errUpdate := m.Update(
+		context.Background(), &Auth{
+			ID:       "auth-1",
+			Provider: "claude",
+			Metadata: map[string]any{"k": "v2"},
+			ModelStates: map[string]*ModelState{
+				model: {
+					Quota: QuotaState{BackoffLevel: backoffLevel},
+				},
 			},
 		},
-	}); errUpdate != nil {
+	); errUpdate != nil {
 		t.Fatalf("update auth: %v", errUpdate)
 	}
 

@@ -82,6 +82,16 @@ func (s *SharedCredential) MergeMetadata(values map[string]any) map[string]any {
 	return cloneMap(s.metadata)
 }
 
+// SetProjectIDs updates the stored project identifiers.
+func (s *SharedCredential) SetProjectIDs(ids []string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.projectIDs = cloneStrings(ids)
+	s.mu.Unlock()
+}
+
 // VirtualCredential tracks a per-project virtual auth entry that reuses a primary credential.
 type VirtualCredential struct {
 	ProjectID string

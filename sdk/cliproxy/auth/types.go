@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -36,7 +35,7 @@ func WithRequestInfo(ctx context.Context, info *RequestInfo) context.Context {
 }
 
 // GetRequestInfo retrieves the RequestInfo from the context, if present.
-// noinspection GoUnusedExportedFunction
+// noinspection GoUnusedExportedFunction — public SDK API.
 func GetRequestInfo(ctx context.Context) *RequestInfo {
 	if val, ok := ctx.Value(requestInfoKey{}).(*RequestInfo); ok {
 		return val
@@ -135,11 +134,15 @@ func (a *Auth) Clone() *Auth {
 	copyAuth := *a
 	if len(a.Attributes) > 0 {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
-		maps.Copy(copyAuth.Attributes, a.Attributes)
+		for key, value := range a.Attributes {
+			copyAuth.Attributes[key] = value
+		}
 	}
 	if len(a.Metadata) > 0 {
 		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
-		maps.Copy(copyAuth.Metadata, a.Metadata)
+		for key, value := range a.Metadata {
+			copyAuth.Metadata[key] = value
+		}
 	}
 	if len(a.ModelStates) > 0 {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
@@ -160,7 +163,60 @@ func stableAuthIndex(seed string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// EnsureIndex returns a stable index derived from the auth file name or API key.
+func (a *Auth) indexSeed() string {
+	if a == nil {
+		return ""
+	}
+
+	if fileName := strings.TrimSpace(a.FileName); fileName != "" {
+		return "file:" + fileName
+	}
+
+	providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
+	compatName := ""
+	baseURL := ""
+	apiKey := ""
+	source := ""
+	if a.Attributes != nil {
+		if value := strings.TrimSpace(a.Attributes["provider_key"]); value != "" {
+			providerKey = strings.ToLower(value)
+		}
+		compatName = strings.ToLower(strings.TrimSpace(a.Attributes["compat_name"]))
+		baseURL = strings.TrimSpace(a.Attributes["base_url"])
+		apiKey = strings.TrimSpace(a.Attributes["api_key"])
+		source = strings.TrimSpace(a.Attributes["source"])
+	}
+
+	proxyURL := strings.TrimSpace(a.ProxyURL)
+	hasCredentialIdentity := compatName != "" || baseURL != "" || proxyURL != "" || apiKey != "" || source != ""
+	if providerKey != "" && hasCredentialIdentity {
+		parts := []string{"provider=" + providerKey}
+		if compatName != "" {
+			parts = append(parts, "compat="+compatName)
+		}
+		if baseURL != "" {
+			parts = append(parts, "base="+baseURL)
+		}
+		if proxyURL != "" {
+			parts = append(parts, "proxy="+proxyURL)
+		}
+		if apiKey != "" {
+			parts = append(parts, "api_key="+apiKey)
+		}
+		if source != "" {
+			parts = append(parts, "source="+source)
+		}
+		return "config:" + strings.Join(parts, "\x00")
+	}
+
+	if id := strings.TrimSpace(a.ID); id != "" {
+		return "id:" + id
+	}
+
+	return ""
+}
+
+// EnsureIndex returns a stable index derived from the auth file name or credential identity.
 func (a *Auth) EnsureIndex() string {
 	if a == nil {
 		return ""
@@ -169,20 +225,9 @@ func (a *Auth) EnsureIndex() string {
 		return a.Index
 	}
 
-	seed := strings.TrimSpace(a.FileName)
-	if seed != "" {
-		seed = "file:" + seed
-	} else if a.Attributes != nil {
-		if apiKey := strings.TrimSpace(a.Attributes["api_key"]); apiKey != "" {
-			seed = "api_key:" + apiKey
-		}
-	}
+	seed := a.indexSeed()
 	if seed == "" {
-		if id := strings.TrimSpace(a.ID); id != "" {
-			seed = "id:" + id
-		} else {
-			return ""
-		}
+		return ""
 	}
 
 	idx := stableAuthIndex(seed)

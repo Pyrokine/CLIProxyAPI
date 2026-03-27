@@ -16,23 +16,41 @@ type schedulerBenchmarkExecutor struct {
 
 func (e schedulerBenchmarkExecutor) Identifier() string { return e.id }
 
-func (e schedulerBenchmarkExecutor) Execute(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e schedulerBenchmarkExecutor) Execute(
+	_ context.Context,
+	_ *Auth,
+	_ cliproxyexecutor.Request,
+	_ cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e schedulerBenchmarkExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e schedulerBenchmarkExecutor) ExecuteStream(
+	_ context.Context,
+	_ *Auth,
+	_ cliproxyexecutor.Request,
+	_ cliproxyexecutor.Options,
+) (*cliproxyexecutor.StreamResult, error) {
 	return nil, nil
 }
 
-func (e schedulerBenchmarkExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+func (e schedulerBenchmarkExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
 	return auth, nil
 }
 
-func (e schedulerBenchmarkExecutor) CountTokens(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e schedulerBenchmarkExecutor) CountTokens(
+	_ context.Context,
+	_ *Auth,
+	_ cliproxyexecutor.Request,
+	_ cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e schedulerBenchmarkExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
+func (e schedulerBenchmarkExecutor) HttpRequest(_ context.Context, _ *Auth, _ *http.Request) (
+	*http.Response,
+	error,
+) {
 	return nil, nil
 }
 
@@ -67,15 +85,17 @@ func benchmarkManagerSetup(b *testing.B, total int, mixed bool, withPriority boo
 		}
 		reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: model}})
 	}
-	b.Cleanup(func() {
-		for index := 0; index < total; index++ {
-			provider := providers[0]
-			if mixed && index%2 == 1 {
-				provider = providers[1]
+	b.Cleanup(
+		func() {
+			for index := 0; index < total; index++ {
+				provider := providers[0]
+				if mixed && index%2 == 1 {
+					provider = providers[1]
+				}
+				reg.UnregisterClient(fmt.Sprintf("bench-%s-%04d", provider, index))
 			}
-			reg.UnregisterClient(fmt.Sprintf("bench-%s-%04d", provider, index))
-		}
-	})
+		},
+	)
 
 	return manager, providers, model
 }

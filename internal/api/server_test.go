@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
 	proxyconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/gin-gonic/gin"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -137,7 +137,7 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		}
 	}()
 
-	// Force ResolveLogDirectory to fallback to auth-dir/logs by making ./logs not a writable directory.
+	// Force ResolveLogDirectory to fall back to auth-dir/logs by making ./logs not a writable directory.
 	if errWriteFile := os.WriteFile(
 		filepath.Join(tmpDir, "logs"), []byte("not-a-directory"), 0o644,
 	); errWriteFile != nil {
@@ -223,10 +223,12 @@ func setupAuthMiddlewareEngine(manager *sdkaccess.Manager) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	engine.Use(authMiddleware(manager, nil))
-	engine.GET("/test", func(c *gin.Context) {
-		apiKey, _ := c.Get("apiKey")
-		c.JSON(http.StatusOK, gin.H{"apiKey": apiKey})
-	})
+	engine.GET(
+		"/test", func(c *gin.Context) {
+			apiKey, _ := c.Get("apiKey")
+			c.JSON(http.StatusOK, gin.H{"apiKey": apiKey})
+		},
+	)
 	return engine
 }
 
@@ -293,16 +295,20 @@ func (s *stubProvider) Authenticate(_ context.Context, r *http.Request) (*sdkacc
 
 func TestAuthMiddleware_ValidAPIKey(t *testing.T) {
 	manager := sdkaccess.NewManager()
-	manager.SetProviders([]sdkaccess.Provider{
-		&stubProvider{keys: map[string]struct{}{"valid-key": {}}},
-	})
+	manager.SetProviders(
+		[]sdkaccess.Provider{
+			&stubProvider{keys: map[string]struct{}{"valid-key": {}}},
+		},
+	)
 	engine := gin.New()
 	gin.SetMode(gin.TestMode)
 	engine.Use(authMiddleware(manager, nil))
-	engine.GET("/test", func(c *gin.Context) {
-		apiKey, _ := c.Get("apiKey")
-		c.JSON(http.StatusOK, gin.H{"apiKey": apiKey})
-	})
+	engine.GET(
+		"/test", func(c *gin.Context) {
+			apiKey, _ := c.Get("apiKey")
+			c.JSON(http.StatusOK, gin.H{"apiKey": apiKey})
+		},
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("Authorization", "Bearer valid-key")
@@ -320,15 +326,19 @@ func TestAuthMiddleware_ValidAPIKey(t *testing.T) {
 
 func TestAuthMiddleware_InvalidAPIKey(t *testing.T) {
 	manager := sdkaccess.NewManager()
-	manager.SetProviders([]sdkaccess.Provider{
-		&stubProvider{keys: map[string]struct{}{"valid-key": {}}},
-	})
+	manager.SetProviders(
+		[]sdkaccess.Provider{
+			&stubProvider{keys: map[string]struct{}{"valid-key": {}}},
+		},
+	)
 	engine := gin.New()
 	gin.SetMode(gin.TestMode)
 	engine.Use(authMiddleware(manager, nil))
-	engine.GET("/test", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{})
-	})
+	engine.GET(
+		"/test", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{})
+		},
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("Authorization", "Bearer bad-key")
@@ -343,9 +353,11 @@ func TestAuthMiddleware_InvalidAPIKey(t *testing.T) {
 
 func TestAuthMiddleware_RateLimited(t *testing.T) {
 	manager := sdkaccess.NewManager()
-	manager.SetProviders([]sdkaccess.Provider{
-		&stubProvider{keys: map[string]struct{}{"valid-key": {}}},
-	})
+	manager.SetProviders(
+		[]sdkaccess.Provider{
+			&stubProvider{keys: map[string]struct{}{"valid-key": {}}},
+		},
+	)
 
 	rl := access.NewAuthRateLimiter()
 	defer rl.Stop()
@@ -358,9 +370,11 @@ func TestAuthMiddleware_RateLimited(t *testing.T) {
 	engine := gin.New()
 	gin.SetMode(gin.TestMode)
 	engine.Use(authMiddleware(manager, rl))
-	engine.GET("/test", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{})
-	})
+	engine.GET(
+		"/test", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{})
+		},
+	)
 
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("Authorization", "Bearer valid-key")

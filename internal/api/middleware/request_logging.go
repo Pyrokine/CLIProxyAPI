@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	"github.com/gin-gonic/gin"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB

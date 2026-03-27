@@ -1,7 +1,7 @@
 package main
 
 import (
-	crypto_rand "crypto/rand"
+	cryptorand "crypto/rand"
 	"fmt"
 	"io"
 	"os"
@@ -53,7 +53,7 @@ func runTUIStandalone(cfg *config.Config, configFilePath, password string) {
 	}
 
 	b := make([]byte, 16)
-	_, _ = crypto_rand.Read(b)
+	_, _ = cryptorand.Read(b)
 	localMgmtPassword := fmt.Sprintf("tui-%x", b)
 	if password == "" {
 		password = localMgmtPassword

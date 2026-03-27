@@ -3,10 +3,8 @@ package executor
 import (
 	"context"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
@@ -16,7 +14,7 @@ import (
 func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T) {
 	body := []byte(`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-1"}]}`)
 
-	wsReqBody := buildCodexWebsocketRequestBody(body, false)
+	wsReqBody := buildCodexWebsocketRequestBody(body)
 
 	if got := gjson.GetBytes(wsReqBody, "type").String(); got != "response.create" {
 		t.Fatalf("type = %s, want response.create", got)
@@ -41,18 +39,6 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 	if got := headers.Get("User-Agent"); got != codexUserAgent {
 		t.Fatalf("User-Agent = %s, want %s", got, codexUserAgent)
 	}
-}
-
-func contextWithGinHeaders(headers map[string]string) context.Context {
-	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	ginCtx, _ := gin.CreateTestContext(recorder)
-	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/", nil)
-	ginCtx.Request.Header = make(http.Header, len(headers))
-	for key, value := range headers {
-		ginCtx.Request.Header.Set(key, value)
-	}
-	return context.WithValue(context.Background(), "gin", ginCtx)
 }
 
 func TestNewProxyAwareWebsocketDialerUnrecognizedSchemeKeepsDefault(t *testing.T) {

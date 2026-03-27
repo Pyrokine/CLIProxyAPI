@@ -13,12 +13,12 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/gin-gonic/gin"
 	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	responsesconverter "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -337,7 +337,7 @@ func convertChatCompletionsResponseToCompletions(rawJSON []byte) []byte {
 //   - chunkData: The raw JSON bytes of a single chat completions stream chunk
 //
 // Returns:
-//   - []byte: The converted completions stream chunk, or nil if should be filtered out
+//   - []byte: The converted completions stream chunk, or nil if you should be filtered out
 func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 	root := gjson.ParseBytes(chunkData)
 
@@ -479,7 +479,6 @@ func (h *APIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
 	// Peek at the first chunk to determine success or failure before setting headers
@@ -593,7 +592,6 @@ func (h *APIHandler) handleCompletionsStreamingResponse(c *gin.Context, rawJSON 
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
 	// Peek at the first chunk

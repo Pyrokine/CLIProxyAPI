@@ -62,11 +62,13 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		return nil, fmt.Errorf("claude state generation failed: %w", err)
 	}
 
-	oauthServer := oauthcommon.NewOAuthServer(callbackPort, oauthcommon.ServerConfig{
-		CallbackPath:       "/callback",
-		DefaultPlatformURL: "https://console.anthropic.com/",
-		ProviderName:       "Claude",
-	})
+	oauthServer := oauthcommon.NewOAuthServer(
+		callbackPort, oauthcommon.ServerConfig{
+			CallbackPath:       "/callback",
+			DefaultPlatformURL: "https://console.anthropic.com/",
+			ProviderName:       "Claude",
+		},
+	)
 	if err = oauthServer.Start(); err != nil {
 		if strings.Contains(err.Error(), "already in use") {
 			return nil, oauthcommon.NewAuthenticationError(oauthcommon.ErrPortInUse, err)

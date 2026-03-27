@@ -131,7 +131,7 @@ func createReverseProxy(upstreamURL string, secretSource secretSource) (*httputi
 		// If n < 2, we didn't get enough bytes, so it's not gzip
 		if n >= 2 && header[0] == 0x1f && header[1] == 0x8b {
 			// It's gzip - read the rest of the body
-			rest, err := io.ReadAll(originalBody)
+			rest, err := io.ReadAll(io.LimitReader(originalBody, 50<<20))
 			if err != nil {
 				// Restore what we read and return original body (preserve Close behavior)
 				resp.Body = &readCloser{
@@ -154,7 +154,7 @@ func createReverseProxy(upstreamURL string, secretSource secretSource) (*httputi
 				return nil
 			}
 
-			decompressed, err := io.ReadAll(gzipReader)
+			decompressed, err := io.ReadAll(io.LimitReader(gzipReader, 50<<20))
 			_ = gzipReader.Close()
 			if err != nil {
 				log.Warnf("amp proxy: gzip decompress error: %v", err)

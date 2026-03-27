@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -102,14 +102,19 @@ func newFallbackHandlerWithMapper(
 	}
 }
 
+// SetModelMapper sets the model mapper for this handler (allows late binding)
+func (fh *fallbackHandler) SetModelMapper(mapper modelMapper) {
+	fh.modelMapper = mapper
+}
+
 // wrapHandler wraps a gin.HandlerFunc with fallback logic
 // If the model's provider is not configured in CLIProxyAPI, it forwards to ampcode.com
 func (fh *fallbackHandler) wrapHandler(handler gin.HandlerFunc) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
 
-		// Read the request body to extract the model name
-		bodyBytes, err := io.ReadAll(c.Request.Body)
+		// Read the request body to extract the model name (capped at 10MB)
+		bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, 10<<20))
 		if err != nil {
 			log.Errorf("amp fallback: failed to read request body: %v", err)
 			handler(c)

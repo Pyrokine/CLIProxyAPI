@@ -210,7 +210,7 @@ func (e *GeminiExecutor) Execute(
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -219,7 +219,7 @@ func (e *GeminiExecutor) Execute(
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
-	data, err := io.ReadAll(httpResp.Body)
+	data, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -227,8 +227,10 @@ func (e *GeminiExecutor) Execute(
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	prepared.reporter.publish(ctx, parseGeminiUsage(data))
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.body, data, &param)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	out := sdktranslator.TranslateNonStream(
+		ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.body, data, &param,
+	)
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -257,7 +259,7 @@ func (e *GeminiExecutor) ExecuteStream(
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		b, _ := io.ReadAll(httpResp.Body)
+		b, _ := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf(
 			"request error, error status: %d, error message: %s", httpResp.StatusCode,
@@ -299,14 +301,14 @@ func (e *GeminiExecutor) ExecuteStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(payload), &param,
 			)
 			for i := range lines {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 			}
 		}
 		lines := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
 		for i := range lines {
-			out <- cliproxyexecutor.StreamChunk{Payload: []byte(lines[i])}
+			out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
@@ -371,7 +373,7 @@ func (e *GeminiExecutor) CountTokens(
 	defer func() { _ = resp.Body.Close() }()
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
@@ -387,7 +389,7 @@ func (e *GeminiExecutor) CountTokens(
 
 	count := gjson.GetBytes(data, "totalTokens").Int()
 	translated := sdktranslator.TranslateTokenCount(respCtx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: []byte(translated), Headers: resp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: translated, Headers: resp.Header.Clone()}, nil
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini API key).

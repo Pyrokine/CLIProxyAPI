@@ -150,7 +150,7 @@ func requestCodexDeviceUserCode(ctx context.Context, client *http.Client) (*code
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read codex device code response: %w", err)
 	}
@@ -209,7 +209,7 @@ func pollCodexDeviceToken(
 			return nil, fmt.Errorf("failed to poll codex device token: %w", err)
 		}
 
-		respBody, readErr := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
 		if readErr != nil {
 			return nil, fmt.Errorf("failed to read codex device poll response: %w", readErr)

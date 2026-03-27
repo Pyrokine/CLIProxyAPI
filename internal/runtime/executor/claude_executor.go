@@ -18,8 +18,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andybalholm/brotli"
-	"github.com/klauspost/compress/zstd"
 	claudeauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
@@ -28,6 +26,8 @@ import (
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/andybalholm/brotli"
+	"github.com/klauspost/compress/zstd"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -225,18 +225,17 @@ func (e *ClaudeExecutor) Execute(
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		errBody := httpResp.Body
-		if ce := httpResp.Header.Get("Content-Encoding"); ce != "" {
-			var decErr error
-			errBody, decErr = decodeResponseBody(httpResp.Body, ce)
-			if decErr != nil {
-				recordAPIResponseError(ctx, e.cfg, decErr)
-				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
-				logWithRequestID(ctx).Warn(msg)
-				return resp, statusErr{code: httpResp.StatusCode, msg: msg}
-			}
+		// Decompress error responses — pass the Content-Encoding value (maybe empty)
+		// and let decodeResponseBody handle both header-declared and magic-byte-detected
+		// compression.
+		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return resp, statusErr{code: httpResp.StatusCode, msg: msg}
 		}
-		b, readErr := io.ReadAll(errBody)
+		b, readErr := io.ReadAll(io.LimitReader(errBody, 50<<20))
 		if readErr != nil {
 			recordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
@@ -267,7 +266,7 @@ func (e *ClaudeExecutor) Execute(
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
-	data, err := io.ReadAll(decodedBody)
+	data, err := io.ReadAll(io.LimitReader(decodedBody, 50<<20))
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
@@ -297,7 +296,7 @@ func (e *ClaudeExecutor) Execute(
 		data,
 		&param,
 	)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -325,18 +324,17 @@ func (e *ClaudeExecutor) ExecuteStream(
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		errBody := httpResp.Body
-		if ce := httpResp.Header.Get("Content-Encoding"); ce != "" {
-			var decErr error
-			errBody, decErr = decodeResponseBody(httpResp.Body, ce)
-			if decErr != nil {
-				recordAPIResponseError(ctx, e.cfg, decErr)
-				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
-				logWithRequestID(ctx).Warn(msg)
-				return nil, statusErr{code: httpResp.StatusCode, msg: msg}
-			}
+		// Decompress error responses — pass the Content-Encoding value (maybe empty)
+		// and let decodeResponseBody handle both header-declared and magic-byte-detected
+		// compression.
+		errBody, decErr := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return nil, statusErr{code: httpResp.StatusCode, msg: msg}
 		}
-		b, readErr := io.ReadAll(errBody)
+		b, readErr := io.ReadAll(io.LimitReader(errBody, 50<<20))
 		if readErr != nil {
 			recordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
@@ -422,7 +420,7 @@ func (e *ClaudeExecutor) ExecuteStream(
 				&param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -485,19 +483,17 @@ func (e *ClaudeExecutor) CountTokens(
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, resp.StatusCode, resp.Header.Clone())
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Decompress error responses (e.g. gzip-compressed 400 errors from Anthropic API).
-		errBody := resp.Body
-		if ce := resp.Header.Get("Content-Encoding"); ce != "" {
-			var decErr error
-			errBody, decErr = decodeResponseBody(resp.Body, ce)
-			if decErr != nil {
-				recordAPIResponseError(ctx, e.cfg, decErr)
-				msg := fmt.Sprintf("failed to decode error response body (encoding=%s): %v", ce, decErr)
-				logWithRequestID(ctx).Warn(msg)
-				return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
-			}
+		// Decompress error responses — pass the Content-Encoding value (maybe empty)
+		// and let decodeResponseBody handle both header-declared and magic-byte-detected
+		// compression.
+		errBody, decErr := decodeResponseBody(resp.Body, resp.Header.Get("Content-Encoding"))
+		if decErr != nil {
+			recordAPIResponseError(ctx, e.cfg, decErr)
+			msg := fmt.Sprintf("failed to decode error response body: %v", decErr)
+			logWithRequestID(ctx).Warn(msg)
+			return cliproxyexecutor.Response{}, statusErr{code: resp.StatusCode, msg: msg}
 		}
-		b, readErr := io.ReadAll(errBody)
+		b, readErr := io.ReadAll(io.LimitReader(errBody, 50<<20))
 		if readErr != nil {
 			recordAPIResponseError(ctx, e.cfg, readErr)
 			msg := fmt.Sprintf("failed to read error response body: %v", readErr)
@@ -523,7 +519,7 @@ func (e *ClaudeExecutor) CountTokens(
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
-	data, err := io.ReadAll(decodedBody)
+	data, err := io.ReadAll(io.LimitReader(decodedBody, 50<<20))
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
 		return cliproxyexecutor.Response{}, err
@@ -531,7 +527,7 @@ func (e *ClaudeExecutor) CountTokens(
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	count := gjson.GetBytes(data, "input_tokens").Int()
 	out := sdktranslator.TranslateTokenCount(ctx, to, from, count, data)
-	return cliproxyexecutor.Response{Payload: []byte(out), Headers: resp.Header.Clone()}, nil
+	return cliproxyexecutor.Response{Payload: out, Headers: resp.Header.Clone()}, nil
 }
 
 func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
@@ -620,12 +616,57 @@ func (c *compositeReadCloser) Close() error {
 	return firstErr
 }
 
+// peekableBody wraps a bufio.Reader around the original ReadCloser so that
+// magic bytes can be inspected without consuming them from the stream.
+type peekableBody struct {
+	*bufio.Reader
+	closer io.Closer
+}
+
+func (p *peekableBody) Close() error {
+	return p.closer.Close()
+}
+
 func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {
 	if body == nil {
 		return nil, fmt.Errorf("response body is nil")
 	}
 	if contentEncoding == "" {
-		return body, nil
+		// No Content-Encoding header. Attempt best-effort magic-byte detection to
+		// handle misbehaving upstreams that compress without setting the header.
+		pb := &peekableBody{Reader: bufio.NewReader(body), closer: body}
+		magic, peekErr := pb.Peek(4)
+		if peekErr == nil || (peekErr == io.EOF && len(magic) >= 2) {
+			switch {
+			case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
+				gzipReader, gzErr := gzip.NewReader(pb)
+				if gzErr != nil {
+					_ = pb.Close()
+					return nil, fmt.Errorf("magic-byte gzip: failed to create reader: %w", gzErr)
+				}
+				return &compositeReadCloser{
+					Reader: gzipReader,
+					closers: []func() error{
+						gzipReader.Close,
+						pb.Close,
+					},
+				}, nil
+			case len(magic) >= 4 && magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd:
+				decoder, zdErr := zstd.NewReader(pb)
+				if zdErr != nil {
+					_ = pb.Close()
+					return nil, fmt.Errorf("magic-byte zstd: failed to create reader: %w", zdErr)
+				}
+				return &compositeReadCloser{
+					Reader: decoder,
+					closers: []func() error{
+						func() error { decoder.Close(); return nil },
+						pb.Close,
+					},
+				}, nil
+			}
+		}
+		return pb, nil
 	}
 	encodings := strings.SplitSeq(contentEncoding, ",")
 	for raw := range encodings {
@@ -811,11 +852,14 @@ func applyClaudeHeaders(
 		r.Header.Set("User-Agent", hdrDefault(hd.UserAgent, "claude-cli/2.1.63 (external, cli)"))
 	}
 	r.Header.Set("Connection", "keep-alive")
-	r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
+		// SSE streams must not be compressed: the downstream scanner reads
+		// line-delimited text and cannot parse compressed bytes.
+		r.Header.Set("Accept-Encoding", "identity")
 	} else {
 		r.Header.Set("Accept", "application/json")
+		r.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 	}
 	// Keep OS/Arch mapping dynamic (not configurable).
 	// They intentionally continue to derive from runtime.GOOS/runtime.GOARCH.
@@ -824,6 +868,12 @@ func applyClaudeHeaders(
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	// Re-enforce Accept-Encoding: identity after ApplyCustomHeadersFromAttrs, which
+	// may override it with a user-configured value. Compressed SSE breaks the line
+	// scanner regardless of user preference, so this is non-negotiable for streams.
+	if stream {
+		r.Header.Set("Accept-Encoding", "identity")
+	}
 }
 
 func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
@@ -1203,6 +1253,10 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 				return true
 			},
 		)
+	} else if system.Type == gjson.String && system.String() != "" {
+		partJSON := `{"type":"text","cache_control":{"type":"ephemeral"}}`
+		partJSON, _ = sjson.Set(partJSON, "text", system.String())
+		result += "," + partJSON
 	}
 	result += "]"
 

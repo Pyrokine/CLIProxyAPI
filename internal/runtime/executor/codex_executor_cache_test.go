@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gin-gonic/gin"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
 
@@ -123,7 +123,9 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_NoCacheKey(t *testing.T)
 
 	// OpenAI chat-completions format does not generate prompt_cache_key
 	if gjson.GetBytes(body, "prompt_cache_key").Exists() {
-		t.Fatalf("expected no prompt_cache_key for openai format, got %q", gjson.GetBytes(body, "prompt_cache_key").String())
+		t.Fatalf(
+			"expected no prompt_cache_key for openai format, got %q", gjson.GetBytes(body, "prompt_cache_key").String(),
+		)
 	}
 	if httpReq.Header.Get("Conversation_id") != "" {
 		t.Fatal("expected no Conversation_id header for openai format")

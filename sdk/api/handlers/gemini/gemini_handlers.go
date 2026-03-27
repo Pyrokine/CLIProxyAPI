@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	"github.com/gin-gonic/gin"
 )
 
 // APIHandler contains the handlers for Gemini API endpoints.
@@ -207,7 +207,6 @@ func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName strin
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
-		c.Header("Access-Control-Allow-Origin", "*")
 	}
 
 	// Peek at the first chunk
@@ -322,15 +321,17 @@ func (h *APIHandler) forwardGeminiStream(
 	data <-chan []byte,
 	errs <-chan *interfaces.ErrorMessage,
 ) {
-	forwardStream(h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) {
-		if alt == "" {
-			_, _ = c.Writer.Write([]byte("data: "))
-			_, _ = c.Writer.Write(chunk)
-			_, _ = c.Writer.Write([]byte("\n\n"))
-		} else {
-			_, _ = c.Writer.Write(chunk)
-		}
-	})
+	forwardStream(
+		h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) {
+			if alt == "" {
+				_, _ = c.Writer.Write([]byte("data: "))
+				_, _ = c.Writer.Write(chunk)
+				_, _ = c.Writer.Write([]byte("\n\n"))
+			} else {
+				_, _ = c.Writer.Write(chunk)
+			}
+		},
+	)
 }
 
 // forwardStream is the shared streaming implementation for Gemini-family handlers.

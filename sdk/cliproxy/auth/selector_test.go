@@ -137,33 +137,35 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 	goroutines := 32
 	iterations := 100
 	for range goroutines {
-		wg.Go(func() {
-			<-start
-			for range iterations {
-				got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
-				if err != nil {
-					select {
-					case errCh <- err:
-					default:
+		wg.Go(
+			func() {
+				<-start
+				for range iterations {
+					got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+					if err != nil {
+						select {
+						case errCh <- err:
+						default:
+						}
+						return
 					}
-					return
-				}
-				if got == nil {
-					select {
-					case errCh <- errors.New("pick() returned nil auth"):
-					default:
+					if got == nil {
+						select {
+						case errCh <- errors.New("pick() returned nil auth"):
+						default:
+						}
+						return
 					}
-					return
-				}
-				if got.ID == "" {
-					select {
-					case errCh <- errors.New("pick() returned auth with empty ID"):
-					default:
+					if got.ID == "" {
+						select {
+						case errCh <- errors.New("pick() returned auth with empty ID"):
+						default:
+						}
+						return
 					}
-					return
 				}
-			}
-		})
+			},
+		)
 	}
 
 	close(start)

@@ -12,11 +12,9 @@ import (
 )
 
 func TestNormalizeResponsesWebsocketRequestCreate(t *testing.T) {
-	raw := []byte(
-		`{"type":"response.create","model":"test-model","stream":false,"input":[{"type":"message","id":"msg-1"}]}`,
-	)
+	raw := []byte(`{"type":"response.create","model":"test-model","stream":false,"input":[{"type":"message","id":"msg-1"}]}`)
 
-	normalized, last, errMsg := normalizeResponsesWebsocketRequest(raw, nil, nil)
+	normalized, last, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, nil, nil, true)
 	if errMsg != nil {
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
@@ -40,11 +38,9 @@ func TestNormalizeResponsesWebsocketRequestCreateWithHistory(t *testing.T) {
 		{"type":"function_call","id":"fc-1","call_id":"call-1"},
 		{"type":"message","id":"assistant-1"}
 	]`)
-	raw := []byte(
-		`{"type":"response.create","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1"}]}`,
-	)
+	raw := []byte(`{"type":"response.create","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1"}]}`)
 
-	normalized, next, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, true)
 	if errMsg != nil {
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
@@ -71,16 +67,12 @@ func TestNormalizeResponsesWebsocketRequestCreateWithHistory(t *testing.T) {
 }
 
 func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDIncremental(t *testing.T) {
-	lastRequest := []byte(
-		`{"model":"test-model","stream":true,"instructions":"be helpful","input":[{"type":"message","id":"msg-1"}]}`,
-	)
+	lastRequest := []byte(`{"model":"test-model","stream":true,"instructions":"be helpful","input":[{"type":"message","id":"msg-1"}]}`)
 	lastResponseOutput := []byte(`[
 		{"type":"function_call","id":"fc-1","call_id":"call-1"},
 		{"type":"message","id":"assistant-1"}
 	]`)
-	raw := []byte(
-		`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1"}]}`,
-	)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1"}]}`)
 
 	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, true)
 	if errMsg != nil {
@@ -116,9 +108,7 @@ func TestNormalizeResponsesWebsocketRequestWithPreviousResponseIDMergedWhenIncre
 		{"type":"function_call","id":"fc-1","call_id":"call-1"},
 		{"type":"message","id":"assistant-1"}
 	]`)
-	raw := []byte(
-		`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1"}]}`,
-	)
+	raw := []byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"function_call_output","call_id":"call-1","id":"tool-out-1"}]}`)
 
 	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, false)
 	if errMsg != nil {
@@ -148,11 +138,9 @@ func TestNormalizeResponsesWebsocketRequestAppend(t *testing.T) {
 		{"type":"message","id":"assistant-1"},
 		{"type":"function_call_output","id":"tool-out-1"}
 	]`)
-	raw := []byte(
-		`{"type":"response.append","input":[{"type":"message","id":"msg-2"},{"type":"message","id":"msg-3"}]}`,
-	)
+	raw := []byte(`{"type":"response.append","input":[{"type":"message","id":"msg-2"},{"type":"message","id":"msg-3"}]}`)
 
-	normalized, next, errMsg := normalizeResponsesWebsocketRequest(raw, lastRequest, lastResponseOutput)
+	normalized, next, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, lastRequest, lastResponseOutput, true)
 	if errMsg != nil {
 		t.Fatalf("unexpected error: %v", errMsg.Error)
 	}
@@ -175,7 +163,7 @@ func TestNormalizeResponsesWebsocketRequestAppend(t *testing.T) {
 func TestNormalizeResponsesWebsocketRequestAppendWithoutCreate(t *testing.T) {
 	raw := []byte(`{"type":"response.append","input":[]}`)
 
-	_, _, errMsg := normalizeResponsesWebsocketRequest(raw, nil, nil)
+	_, _, errMsg := normalizeResponsesWebsocketRequestWithMode(raw, nil, nil, true)
 	if errMsg == nil {
 		t.Fatalf("expected error for append without previous request")
 	}
@@ -185,9 +173,7 @@ func TestNormalizeResponsesWebsocketRequestAppendWithoutCreate(t *testing.T) {
 }
 
 func TestWebsocketJSONPayloadsFromChunk(t *testing.T) {
-	chunk := []byte(
-		"event: response.created\n\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\ndata: [DONE]\n",
-	)
+	chunk := []byte("event: response.created\n\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\"}}\n\ndata: [DONE]\n")
 
 	payloads := websocketJSONPayloadsFromChunk(chunk)
 	if len(payloads) != 1 {
@@ -211,9 +197,7 @@ func TestWebsocketJSONPayloadsFromPlainJSONChunk(t *testing.T) {
 }
 
 func TestResponseCompletedOutputFromPayload(t *testing.T) {
-	payload := []byte(
-		`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"out-1"}]}}`,
-	)
+	payload := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","id":"out-1"}]}}`)
 
 	output := responseCompletedOutputFromPayload(payload)
 	items := gjson.ParseBytes(output).Array()
