@@ -43,6 +43,14 @@ func TestOpenAICompatibility(t *testing.T) {
 	expectContains(t, changes, "provider updated: provider-a (api-keys 1 -> 2, models 1 -> 2, headers updated)")
 }
 
+func TestOpenAICompatibility_DisabledChanged(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{Name: "provider-a"}}
+	newList := []config.OpenAICompatibility{{Name: "provider-a", Disabled: true}}
+
+	changes := openAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (disabled false -> true)")
+}
+
 func TestOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 	oldList := []config.OpenAICompatibility{
 		{

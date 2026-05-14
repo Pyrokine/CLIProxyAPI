@@ -1,3 +1,6 @@
+// Last compiled: 2026-05-09
+// Author: pyro
+
 package management
 
 import (
@@ -7,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
@@ -20,17 +25,92 @@ import (
 
 const latestReleaseUserAgent = "CLIProxyAPI"
 
+// minPanelVersion is the minimum management-panel (frontend) version this server
+// is compatible with. When the panel reports a lower version via __APP_VERSION__,
+// the frontend renders a compatibility banner. Bump when introducing breaking
+// changes to management API response shapes.
+const minPanelVersion = "1.7.16-aug.1"
+
+type remoteManagementConfigResponse struct {
+	AllowRemote           bool   `json:"allow-remote"`
+	DisableControlPanel   bool   `json:"disable-control-panel"`
+	AutoUpdatePanel       bool   `json:"auto-update-panel"`
+	PanelGitHubRepository string `json:"panel-github-repository"`
+	CPAGitHubRepository   string `json:"cpa-github-repository"`
+	AutoCheckUpdate       bool   `json:"auto-check-update"`
+	AutoUpdateCPA         bool   `json:"auto-update-cpa"`
+	CheckInterval         int    `json:"check-interval"`
+}
+
+type configValidationError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+var (
+	configFieldPatterns = []struct {
+		pattern *regexp.Regexp
+		field   string
+	}{
+		{pattern: regexp.MustCompile(`\bapi-keys\[(\d+)\]`), field: "api-keys"},
+		{pattern: regexp.MustCompile(`\bport\b`), field: "port"},
+		{pattern: regexp.MustCompile(`\blogs-max-total-size-mb\b`), field: "logs-max-total-size-mb"},
+		{pattern: regexp.MustCompile(`\brequest-retry\b`), field: "request-retry"},
+		{pattern: regexp.MustCompile(`\bmax-retry-interval\b`), field: "max-retry-interval"},
+		{pattern: regexp.MustCompile(`\busage-retention\.days\b`), field: "usage-retention.days"},
+		{pattern: regexp.MustCompile(`\busage-retention\.max-db-size-mb\b`), field: "usage-retention.max-db-size-mb"},
+		{
+			pattern: regexp.MustCompile(`\busage-retention\.warning-threshold-pct\b`),
+			field:   "usage-retention.warning-threshold-pct",
+		},
+		{
+			pattern: regexp.MustCompile(`\bpanel-github-repository\b`),
+			field:   "remote-management.panel-github-repository",
+		},
+		{pattern: regexp.MustCompile(`\bcpa-github-repository\b`), field: "remote-management.cpa-github-repository"},
+		{pattern: regexp.MustCompile(`\btls cert\b`), field: "tls.cert"},
+		{pattern: regexp.MustCompile(`\btls key\b`), field: "tls.key"},
+	}
+	yamlLinePattern = regexp.MustCompile(`line\s+(\d+)`)
+)
+
+type configResponse struct {
+	*config.Config
+	RemoteManagement remoteManagementConfigResponse `json:"remote-management"`
+}
+
 func (h *Handler) GetConfig(c *gin.Context) {
 	if h == nil || h.cfg == nil {
 		c.JSON(200, gin.H{})
 		return
 	}
-	c.JSON(200, h.cfg)
+
+	checkInterval := h.cfg.RemoteManagement.CheckInterval
+	if checkInterval < minBackendUpdateCheckMinutes {
+		checkInterval = int(defaultBackendUpdateCheckInterval / time.Minute)
+	}
+
+	c.JSON(
+		200, configResponse{
+			Config: h.cfg,
+			RemoteManagement: remoteManagementConfigResponse{
+				AllowRemote:           h.cfg.RemoteManagement.AllowRemote,
+				DisableControlPanel:   h.cfg.RemoteManagement.DisableControlPanel,
+				AutoUpdatePanel:       h.cfg.RemoteManagement.IsAutoUpdatePanel(),
+				PanelGitHubRepository: h.cfg.RemoteManagement.PanelGitHubRepository,
+				CPAGitHubRepository:   h.cfg.RemoteManagement.CPAGitHubRepository,
+				AutoCheckUpdate:       h.cfg.RemoteManagement.AutoCheckUpdate,
+				AutoUpdateCPA:         h.cfg.RemoteManagement.AutoUpdateCPA,
+				CheckInterval:         checkInterval,
+			},
+		},
+	)
 }
 
 type releaseInfo struct {
-	TagName string `json:"tag_name"`
-	Name    string `json:"name"`
+	TagName     string `json:"tag_name"`
+	Name        string `json:"name"`
+	PublishedAt string `json:"published_at"`
 }
 
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.
@@ -91,7 +171,26 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"latest-version": version})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"latest-version": version,
+			"published-at":   strings.TrimSpace(info.PublishedAt),
+		},
+	)
+}
+
+// GetVersion returns the build metadata of the currently running server binary
+// plus the minimum panel version required for compatibility. The management
+// panel calls this on mount to decide whether to render a version mismatch banner.
+func (h *Handler) GetVersion(c *gin.Context) {
+	c.JSON(
+		http.StatusOK, gin.H{
+			"version":           buildinfo.Version,
+			"build_time":        buildinfo.BuildDate,
+			"commit":            buildinfo.Commit,
+			"min_panel_version": minPanelVersion,
+		},
+	)
 }
 
 func writeConfig(path string, data []byte) error {
@@ -124,23 +223,50 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	// Save current config as last-good before overwriting
+	if err := config.SaveLastGood(h.configFilePath); err != nil {
+		log.Errorf("failed to save last-good config: %v", err)
+		c.JSON(
+			http.StatusInternalServerError, gin.H{"error": "backup_failed", "message": "failed to save config backup"},
+		)
+		return
+	}
+
 	if writeConfig(h.configFilePath, body) != nil {
+		h.rollbackLastGood()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "write_failed", "message": "failed to write config"})
 		return
 	}
 	// Reload into handler to keep memory in sync
 	newCfg, err := config.LoadConfig(h.configFilePath)
 	if err != nil {
+		h.rollbackLastGood()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload_failed", "message": err.Error()})
 		return
 	}
 	h.cfg = newCfg
-	// Update last-good backup after successful write + reload
-	_ = config.SaveLastGood(h.configFilePath)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
 }
 
 // ValidateConfigYAML validates a YAML config body without saving.
+func inferConfigValidationField(message string) string {
+	for _, candidate := range configFieldPatterns {
+		if candidate.pattern.MatchString(message) {
+			return candidate.field
+		}
+	}
+	if matches := yamlLinePattern.FindStringSubmatch(message); len(matches) == 2 {
+		return "line " + matches[1]
+	}
+	if strings.Contains(message, "failed to parse config file") || strings.Contains(
+		message, "YAML parse error",
+	) || strings.Contains(message, "yaml:") {
+		return "$yaml"
+	}
+	return ""
+}
+
 func (h *Handler) ValidateConfigYAML(c *gin.Context) {
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, 10<<20))
 	if err != nil {
@@ -149,10 +275,16 @@ func (h *Handler) ValidateConfigYAML(c *gin.Context) {
 	}
 	_, warnings, errValidate := h.validateConfigBody(body)
 	if errValidate != nil {
+		message := errValidate.Error()
 		c.JSON(
 			http.StatusOK, gin.H{
-				"valid":    false,
-				"errors":   []gin.H{{"field": "", "message": errValidate.Error()}},
+				"valid": false,
+				"errors": []configValidationError{
+					{
+						Field:   inferConfigValidationField(message),
+						Message: message,
+					},
+				},
 				"warnings": warnings,
 			},
 		)
@@ -161,7 +293,7 @@ func (h *Handler) ValidateConfigYAML(c *gin.Context) {
 	c.JSON(
 		http.StatusOK, gin.H{
 			"valid":    true,
-			"errors":   []gin.H{},
+			"errors":   []configValidationError{},
 			"warnings": warnings,
 		},
 	)

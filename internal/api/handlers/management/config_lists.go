@@ -223,6 +223,20 @@ func validateAPIKey(key string) error {
 	return nil
 }
 
+// validateAlias checks that an alias is at most 20 characters and contains
+// only alphanumeric characters, dashes, and underscores.
+func validateAlias(alias string) error {
+	if len(alias) > 20 {
+		return fmt.Errorf("alias must be at most 20 characters")
+	}
+	for _, r := range alias {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			return fmt.Errorf("alias must contain only alphanumeric characters, dashes, and underscores")
+		}
+	}
+	return nil
+}
+
 // api-keys
 
 func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
@@ -279,6 +293,10 @@ func (h *Handler) PatchAPIKeyAlias(c *gin.Context) {
 	if body.Alias == "" {
 		delete(h.cfg.APIKeyAliases, body.Key)
 	} else {
+		if err := validateAlias(body.Alias); err != nil {
+			c.JSON(400, gin.H{"error": err.Error()})
+			return
+		}
 		h.cfg.APIKeyAliases[body.Key] = body.Alias
 	}
 	if len(h.cfg.APIKeyAliases) == 0 {
@@ -304,7 +322,9 @@ func (h *Handler) DeleteAPIKeyAlias(c *gin.Context) {
 
 // gemini-api-key: []GeminiKey
 
-func (h *Handler) GetGeminiKeys(c *gin.Context)   { getStructList(h, c, geminiKeyResource) }
+func (h *Handler) GetGeminiKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"gemini-api-key": h.geminiKeysWithAuthIndex()})
+}
 func (h *Handler) PutGeminiKeys(c *gin.Context)   { putStructList(h, c, geminiKeyResource) }
 func (h *Handler) DeleteGeminiKey(c *gin.Context) { deleteStructEntry(h, c, geminiKeyResource) }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
@@ -336,7 +356,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 
 // claude-api-key: []ClaudeKey
 
-func (h *Handler) GetClaudeKeys(c *gin.Context)   { getStructList(h, c, claudeKeyResource) }
+func (h *Handler) GetClaudeKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"claude-api-key": h.claudeKeysWithAuthIndex()})
+}
 func (h *Handler) PutClaudeKeys(c *gin.Context)   { putStructList(h, c, claudeKeyResource) }
 func (h *Handler) DeleteClaudeKey(c *gin.Context) { deleteStructEntry(h, c, claudeKeyResource) }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
@@ -370,7 +392,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 
 // openai-compatibility: []OpenAICompatibility
 
-func (h *Handler) GetOpenAICompat(c *gin.Context)    { getStructList(h, c, openAICompatResource) }
+func (h *Handler) GetOpenAICompat(c *gin.Context) {
+	c.JSON(200, gin.H{"openai-compatibility": h.openAICompatibilityWithAuthIndex()})
+}
 func (h *Handler) PutOpenAICompat(c *gin.Context)    { putStructList(h, c, openAICompatResource) }
 func (h *Handler) DeleteOpenAICompat(c *gin.Context) { deleteStructEntry(h, c, openAICompatResource) }
 func (h *Handler) PatchOpenAICompat(c *gin.Context) {
@@ -380,6 +404,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 				Name          *string                             `json:"name"`
 				Prefix        *string                             `json:"prefix"`
 				BaseURL       *string                             `json:"base-url"`
+				Disabled      *bool                               `json:"disabled"`
 				APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 				Models        *[]config.OpenAICompatibilityModel  `json:"models"`
 				Headers       *map[string]string                  `json:"headers"`
@@ -391,6 +416,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 			setTrimmed(p.Prefix, &entry.Prefix)
 			if err := setRequiredTrimmed(p.BaseURL, &entry.BaseURL); err != nil {
 				return err
+			}
+			if p.Disabled != nil {
+				entry.Disabled = *p.Disabled
 			}
 			if p.APIKeyEntries != nil {
 				entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), *p.APIKeyEntries...)
@@ -406,7 +434,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 
 // vertex-api-key: []VertexCompatKey
 
-func (h *Handler) GetVertexCompatKeys(c *gin.Context) { getStructList(h, c, vertexCompatKeyResource) }
+func (h *Handler) GetVertexCompatKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"vertex-api-key": h.vertexCompatKeysWithAuthIndex()})
+}
 func (h *Handler) PutVertexCompatKeys(c *gin.Context) { putStructList(h, c, vertexCompatKeyResource) }
 func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 	deleteStructEntry(h, c, vertexCompatKeyResource)
@@ -568,7 +598,9 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 
 // codex-api-key: []CodexKey
 
-func (h *Handler) GetCodexKeys(c *gin.Context)   { getStructList(h, c, codexKeyResource) }
+func (h *Handler) GetCodexKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"codex-api-key": h.codexKeysWithAuthIndex()})
+}
 func (h *Handler) PutCodexKeys(c *gin.Context)   { putStructList(h, c, codexKeyResource) }
 func (h *Handler) DeleteCodexKey(c *gin.Context) { deleteStructEntry(h, c, codexKeyResource) }
 func (h *Handler) PatchCodexKey(c *gin.Context) {

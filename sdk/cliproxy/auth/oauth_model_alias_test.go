@@ -89,6 +89,24 @@ func TestResolveOAuthUpstreamModel_SuffixPreservation(t *testing.T) {
 			want:    "gemini-2.5-pro-exp-03-25(high)",
 		},
 		{
+			name: "1m tag preserved",
+			aliases: map[string][]internalconfig.OAuthModelAlias{
+				"claude": {{Name: "claude-sonnet-4-5-20250514", Alias: "claude-sonnet-4-5"}},
+			},
+			channel: "claude",
+			input:   "claude-sonnet-4-5[1m]",
+			want:    "claude-sonnet-4-5-20250514[1m]",
+		},
+		{
+			name: "1m tag with suffix preserved",
+			aliases: map[string][]internalconfig.OAuthModelAlias{
+				"claude": {{Name: "claude-sonnet-4-5-20250514", Alias: "claude-sonnet-4-5"}},
+			},
+			channel: "claude",
+			input:   "claude-sonnet-4-5[1m](high)",
+			want:    "claude-sonnet-4-5-20250514[1m](high)",
+		},
+		{
 			name: "no alias returns empty",
 			aliases: map[string][]internalconfig.OAuthModelAlias{
 				"gemini-cli": {{Name: "gemini-2.5-pro-exp-03-25", Alias: "gemini-2.5-pro"}},

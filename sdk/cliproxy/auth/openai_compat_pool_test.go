@@ -172,6 +172,7 @@ func newOpenAICompatPoolTestManager(
 
 	reg := registry.GetGlobalRegistry()
 	reg.RegisterClient(auth.ID, "pool", []*registry.ModelInfo{{ID: alias}})
+	m.RefreshSchedulerEntry(auth.ID)
 	t.Cleanup(
 		func() {
 			reg.UnregisterClient(auth.ID)

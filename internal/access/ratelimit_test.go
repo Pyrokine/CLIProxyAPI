@@ -42,7 +42,7 @@ func TestLockoutExpires(t *testing.T) {
 	}
 
 	// Manually expire the lockout by reaching into the entry.
-	val, ok := rl.entries.Load(ip)
+	val, ok := rl.ipEntries.Load(ip)
 	if !ok {
 		t.Fatal("expected entry to exist")
 	}
@@ -89,7 +89,7 @@ func TestWindowReset_FailuresOutsideWindowDontCount(t *testing.T) {
 	}
 
 	// Simulate window expiry by backdating firstFailure.
-	val, ok := rl.entries.Load(ip)
+	val, ok := rl.ipEntries.Load(ip)
 	if !ok {
 		t.Fatal("expected entry to exist")
 	}

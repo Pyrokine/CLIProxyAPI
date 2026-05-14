@@ -167,6 +167,11 @@ func initStoreAndConfig(
 		cfg = &config.Config{}
 	}
 
+	// 启动时补齐源文件中的默认值
+	if !isCloudDeploy && configFilePath != "" {
+		config.EnsureDefaultsInFile(configFilePath, cfg)
+	}
+
 	return &storeResult{
 		cfg:            cfg,
 		configFilePath: configFilePath,

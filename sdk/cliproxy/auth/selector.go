@@ -29,6 +29,98 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// StoppableSelector releases resources held by a selector.
+type StoppableSelector interface {
+	Stop()
+}
+
+// SessionAffinityConfig configures session-sticky routing.
+type SessionAffinityConfig struct {
+	Fallback Selector
+	TTL      time.Duration
+}
+
+// SessionAffinitySelector keeps requests from the same session on the same auth when possible.
+type SessionAffinitySelector struct {
+	fallback Selector
+	cache    *SessionCache
+}
+
+func (s *SessionAffinitySelector) FallbackSelector() Selector {
+	if s == nil {
+		return nil
+	}
+	return s.fallback
+}
+
+func (s *SessionAffinitySelector) sessionKey(opts cliproxyexecutor.Options, provider string) string {
+	if s == nil {
+		return ""
+	}
+	sessionID := headerValueIgnoreCase(opts.Headers, "X-Session-ID")
+	if sessionID == "" && len(opts.Metadata) > 0 {
+		if raw, ok := opts.Metadata[cliproxyexecutor.ExecutionSessionMetadataKey]; ok {
+			switch value := raw.(type) {
+			case string:
+				sessionID = strings.TrimSpace(value)
+			case []byte:
+				sessionID = strings.TrimSpace(string(value))
+			}
+		}
+	}
+	if sessionID == "" {
+		return ""
+	}
+	return provider + "::" + sessionID
+}
+
+func (s *SessionAffinitySelector) PickSticky(provider string, opts cliproxyexecutor.Options, auths []*Auth) *Auth {
+	cacheKey := s.sessionKey(opts, provider)
+	if cacheKey == "" || s.cache == nil {
+		return nil
+	}
+	if authID, ok := s.cache.GetAndRefresh(cacheKey); ok {
+		for i := range auths {
+			if auths[i] != nil && auths[i].ID == authID {
+				return auths[i]
+			}
+		}
+	}
+	return nil
+}
+
+func (s *SessionAffinitySelector) Remember(provider string, opts cliproxyexecutor.Options, auth *Auth) {
+	if s == nil || s.cache == nil || auth == nil {
+		return
+	}
+	cacheKey := s.sessionKey(opts, provider)
+	if cacheKey == "" {
+		return
+	}
+	s.cache.Set(cacheKey, auth.ID)
+}
+
+func NewSessionAffinitySelector(fallback Selector) *SessionAffinitySelector {
+	return NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: fallback, TTL: time.Hour})
+}
+
+func NewSessionAffinitySelectorWithConfig(cfg SessionAffinityConfig) *SessionAffinitySelector {
+	if cfg.Fallback == nil {
+		cfg.Fallback = &RoundRobinSelector{}
+	}
+	if cfg.TTL <= 0 {
+		cfg.TTL = time.Hour
+	}
+	return &SessionAffinitySelector{fallback: cfg.Fallback, cache: NewSessionCache(cfg.TTL)}
+}
+
+func (s *SessionAffinitySelector) Stop() {
+	if s == nil || s.cache == nil {
+		return
+	}
+	s.cache.Stop()
+}
+
 type blockReason int
 
 const (
@@ -365,6 +457,66 @@ func (s *FillFirstSelector) Pick(
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
+}
+
+func headerValueIgnoreCase(headers http.Header, name string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	target := strings.ToLower(strings.TrimSpace(name))
+	for key, values := range headers {
+		if strings.ToLower(strings.TrimSpace(key)) != target || len(values) == 0 {
+			continue
+		}
+		return strings.TrimSpace(values[0])
+	}
+	return ""
+}
+
+func (s *SessionAffinitySelector) Pick(
+	ctx context.Context,
+	provider, model string,
+	opts cliproxyexecutor.Options,
+	auths []*Auth,
+) (*Auth, error) {
+	if s == nil {
+		return (&RoundRobinSelector{}).Pick(ctx, provider, model, opts, auths)
+	}
+	sessionID := headerValueIgnoreCase(opts.Headers, "X-Session-ID")
+	if sessionID == "" && len(opts.Metadata) > 0 {
+		if raw, ok := opts.Metadata[cliproxyexecutor.ExecutionSessionMetadataKey]; ok {
+			switch value := raw.(type) {
+			case string:
+				sessionID = strings.TrimSpace(value)
+			case []byte:
+				sessionID = strings.TrimSpace(string(value))
+			}
+		}
+	}
+	if sessionID == "" {
+		return s.fallback.Pick(ctx, provider, model, opts, auths)
+	}
+
+	now := time.Now()
+	available, err := getAvailableAuths(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	cacheKey := provider + "::" + sessionID
+	if authID, ok := s.cache.GetAndRefresh(cacheKey); ok {
+		for i := range available {
+			if available[i].ID == authID {
+				return available[i], nil
+			}
+		}
+	}
+	auth, err := s.fallback.Pick(ctx, provider, model, opts, auths)
+	if err != nil {
+		return nil, err
+	}
+	s.cache.Set(cacheKey, auth.ID)
+	return auth, nil
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {

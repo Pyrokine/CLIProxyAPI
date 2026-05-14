@@ -1,6 +1,8 @@
 package auth
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestToolPrefixDisabled(t *testing.T) {
 	var a *Auth
@@ -31,6 +33,34 @@ func TestToolPrefixDisabled(t *testing.T) {
 	a = &Auth{Metadata: map[string]any{"tool_prefix_disabled": false}}
 	if a.ToolPrefixDisabled() {
 		t.Error("should return false when set to false")
+	}
+}
+
+func TestApplyCustomHeadersFromMetadata(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Metadata: map[string]any{
+			"headers": map[string]any{
+				"X-Test":          "value",
+				" Authorization ": "Bearer token",
+				"empty":           "   ",
+			},
+		},
+	}
+
+	ApplyCustomHeadersFromMetadata(auth)
+
+	if auth.Attributes["header:X-Test"] != "value" {
+		t.Fatalf("expected X-Test header to be applied, got %q", auth.Attributes["header:X-Test"])
+	}
+	if auth.Attributes["header:Authorization"] != "Bearer token" {
+		t.Fatalf(
+			"expected Authorization header to be trimmed and applied, got %q", auth.Attributes["header:Authorization"],
+		)
+	}
+	if _, exists := auth.Attributes["header:empty"]; exists {
+		t.Fatal("expected empty custom header value to be ignored")
 	}
 }
 

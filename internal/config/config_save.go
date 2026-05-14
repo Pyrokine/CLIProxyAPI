@@ -10,6 +10,34 @@ import (
 
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
+func setConfigAPIKeyProviderEntries(root *yaml.Node, keys []string) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return
+	}
+	if len(keys) == 0 {
+		return
+	}
+	authNode := getOrCreateMapValue(root, "auth")
+	providersNode := getOrCreateMapValue(authNode, "providers")
+	configAPIKeyNode := getOrCreateMapValue(providersNode, "config-api-key")
+	entriesNode := getOrCreateMapValue(configAPIKeyNode, "api-key-entries")
+	entriesNode.Kind = yaml.SequenceNode
+	entriesNode.Tag = "!!seq"
+	entriesNode.Style = 0
+	entriesNode.Content = entriesNode.Content[:0]
+	for _, key := range normalizeStringSlice(keys) {
+		entry := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+		entry.Content = []*yaml.Node{
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "api-key"},
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		}
+		entriesNode.Content = append(entriesNode.Content, entry)
+	}
+	if idx := findMapKeyIndex(configAPIKeyNode, "api-keys"); idx >= 0 {
+		removeMapKey(configAPIKeyNode, "api-keys")
+	}
+}
+
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	persistCfg := cfg
 	// Load original YAML as a node tree to preserve comments and ordering.
@@ -53,6 +81,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	setConfigAPIKeyProviderEntries(original.Content[0], persistCfg.APIKeys)
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
@@ -117,4 +146,17 @@ func writeYAMLNode(filePath string, node *yaml.Node) error {
 	data := NormalizeCommentIndentation(buf.Bytes())
 	_, err = f.Write(data)
 	return err
+}
+
+// EnsureDefaultsInFile re-saves the config to the YAML file, ensuring all known fields
+// (including those with default/zero values) are written out. This is called once at startup
+// so the source file always contains every configurable field.
+func EnsureDefaultsInFile(configFile string, cfg *Config) {
+	if configFile == "" || cfg == nil {
+		return
+	}
+	if err := SaveConfigPreserveComments(configFile, cfg); err != nil {
+		// Non-fatal: log the error but don't prevent startup
+		fmt.Fprintf(os.Stderr, "config: failed to ensure defaults in %s: %v\n", configFile, err)
+	}
 }

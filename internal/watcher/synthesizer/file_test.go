@@ -75,6 +75,9 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 		"prefix":          "test-prefix",
 		"disable_cooling": true,
 		"request_retry":   2,
+		"headers": map[string]any{
+			"X-Test": "value",
+		},
 	}
 	data, _ := json.Marshal(authData)
 	err := os.WriteFile(filepath.Join(tempDir, "claude-auth.json"), data, 0644)
@@ -118,6 +121,9 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 	if auths[0].Status != coreauth.StatusActive {
 		t.Errorf("expected status active, got %s", auths[0].Status)
+	}
+	if auths[0].Attributes["header:X-Test"] != "value" {
+		t.Errorf("expected custom header to be applied, got %q", auths[0].Attributes["header:X-Test"])
 	}
 }
 
@@ -249,6 +255,12 @@ func TestFileSynthesizer_Synthesize_RelativeID(t *testing.T) {
 	// ID should be relative path
 	if auths[0].ID != "my-auth.json" {
 		t.Errorf("expected ID my-auth.json, got %s", auths[0].ID)
+	}
+	if auths[0].FileName != "my-auth.json" {
+		t.Errorf("expected FileName my-auth.json, got %s", auths[0].FileName)
+	}
+	if auths[0].EnsureIndex() == "" {
+		t.Fatal("expected synthesized auth to produce a stable auth index")
 	}
 }
 

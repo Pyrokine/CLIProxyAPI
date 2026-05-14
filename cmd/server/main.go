@@ -145,7 +145,7 @@ func main() {
 	result, err := initStoreAndConfig(wd, configPath, isCloudDeploy, lookupEnv)
 	if err != nil {
 		log.Errorf("%v", err)
-		return
+		os.Exit(1)
 	}
 	cfg := result.cfg
 	configFilePath := result.configFilePath
@@ -217,13 +217,13 @@ func main() {
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 		}
 		if !localModel {
-			registry.StartModelsUpdater(context.Background())
+			registry.StartModelsUpdater(context.Background(), cfg.ModelRefreshInterval)
 		}
 		runTUIMode(cfg, configFilePath, password, standalone)
 	} else {
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
 		if !localModel {
-			registry.StartModelsUpdater(context.Background())
+			registry.StartModelsUpdater(context.Background(), cfg.ModelRefreshInterval)
 		}
 		cmd.StartService(cfg, configFilePath, password)
 	}

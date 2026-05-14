@@ -25,6 +25,57 @@ func LoadConfig(configFile string) (*Config, error) {
 	return LoadConfigOptional(configFile, false)
 }
 
+func mergeConfigAPIKeys(rawYAML []byte, current []string) []string {
+	keys := append([]string(nil), current...)
+	var parsed struct {
+		Auth struct {
+			Providers map[string]struct {
+				APIKeys []string `yaml:"api-keys"`
+				Entries []struct {
+					APIKey string `yaml:"api-key"`
+				} `yaml:"api-key-entries"`
+			} `yaml:"providers"`
+		} `yaml:"auth"`
+	}
+	if err := yaml.Unmarshal(rawYAML, &parsed); err != nil {
+		return normalizeStringSlice(keys)
+	}
+	provider, ok := parsed.Auth.Providers["config-api-key"]
+	if !ok {
+		return normalizeStringSlice(keys)
+	}
+	for _, key := range provider.APIKeys {
+		keys = append(keys, key)
+	}
+	for _, entry := range provider.Entries {
+		keys = append(keys, entry.APIKey)
+	}
+	return normalizeStringSlice(keys)
+}
+
+func normalizeStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 // LoadConfigOptional reads YAML from configFile.
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
@@ -59,7 +110,19 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.RemoteManagement.CPAGitHubRepository = defaultCPAGitHubRepository
 	cfg.WebsocketAuth = true // Default to true: require authentication for WebSocket connections
+	// Quota refresh defaults (must match quota.DefaultConfig).
+	// Enabled defaults to false (R-095): auto-polling provider endpoints risks triggering anti-abuse detection.
+	// Frontend shows a confirmation dialog when user opts in (GlobalSettings.tsx:67).
+	cfg.QuotaRefresh.Enabled = false
+	cfg.QuotaRefresh.Interval = 600     // 10 minutes
+	cfg.QuotaRefresh.MaxInterval = 1800 // 30 minutes
+	// NOTE: UsageRetention zero-values are handled by persister.NewPersister (0 → default, -1 → disabled).
+	// AutoRefreshInterval (default 3) and ModelRefreshInterval (default 3) use 0 as "disabled",
+	// so their defaults must be set here rather than relying on zero-value semantics.
+	cfg.AutoRefreshInterval = 3  // 3 seconds
+	cfg.ModelRefreshInterval = 3 // 3 hours
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -67,6 +130,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+	cfg.APIKeys = mergeConfigAPIKeys(data, cfg.APIKeys)
 
 	// NOTE: Startup legacy key migration is intentionally disabled.
 	// Reason: avoid mutating config.yaml during server startup.

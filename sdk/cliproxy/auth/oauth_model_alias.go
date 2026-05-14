@@ -97,17 +97,7 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 	}
 
 	preserveSuffix := func(resolved string) string {
-		resolved = strings.TrimSpace(resolved)
-		if resolved == "" {
-			return ""
-		}
-		if thinking.ParseSuffix(resolved).HasSuffix {
-			return resolved
-		}
-		if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-			return resolved + "(" + requestResult.RawSuffix + ")"
-		}
-		return resolved
+		return thinking.PreserveRequestModelDecorations(resolved, requestedModel)
 	}
 
 	for i := range models {
@@ -183,15 +173,7 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 			return ""
 		}
 
-		// If config already has suffix, it takes priority.
-		if thinking.ParseSuffix(original).HasSuffix {
-			return original
-		}
-		// Preserve user's thinking suffix on the resolved model.
-		if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-			return original + "(" + requestResult.RawSuffix + ")"
-		}
-		return original
+		return thinking.PreserveRequestModelDecorations(original, requestedModel)
 	}
 
 	return ""

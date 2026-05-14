@@ -17,6 +17,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/client"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
@@ -114,7 +115,7 @@ func (s *GitTokenStore) EnsureRepository() error {
 	authDir := filepath.Join(repoDir, "auths")
 	configDir := filepath.Join(repoDir, "config")
 	gitDir := filepath.Join(repoDir, ".git")
-	authMethod := s.gitAuth()
+	clientOptions := s.gitClientOptions()
 	var initPaths []string
 	_, statErr := os.Stat(gitDir)
 	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
@@ -126,7 +127,9 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: create repo dir: %w", errMk)
 		}
-		if _, errClone := git.PlainClone(repoDir, &git.CloneOptions{Auth: authMethod, URL: s.remote}); errClone != nil {
+		if _, errClone := git.PlainClone(
+			repoDir, &git.CloneOptions{ClientOptions: clientOptions, URL: s.remote},
+		); errClone != nil {
 			if errors.Is(errClone, transport.ErrEmptyRemoteRepository) {
 				_ = os.RemoveAll(gitDir)
 				repo, errInit := git.PlainInit(repoDir, false)
@@ -181,7 +184,11 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: worktree: %w", errWorktree)
 		}
-		if errPull := worktree.Pull(&git.PullOptions{Auth: authMethod, RemoteName: "origin"}); errPull != nil {
+		if errPull := worktree.Pull(
+			&git.PullOptions{
+				ClientOptions: clientOptions, RemoteName: "origin",
+			},
+		); errPull != nil {
 			switch {
 			case errors.Is(errPull, git.NoErrAlreadyUpToDate),
 				errors.Is(errPull, git.ErrUnstagedChanges),
@@ -452,6 +459,7 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: time.Time{},
 	}
+	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
@@ -512,7 +520,7 @@ func (s *GitTokenStore) repoDirSnapshot() string {
 	return s.repoDir
 }
 
-func (s *GitTokenStore) gitAuth() transport.AuthMethod {
+func (s *GitTokenStore) gitClientOptions() []client.Option {
 	if s.username == "" && s.password == "" {
 		return nil
 	}
@@ -520,7 +528,7 @@ func (s *GitTokenStore) gitAuth() transport.AuthMethod {
 	if user == "" {
 		user = "git"
 	}
-	return &http.BasicAuth{Username: user, Password: s.password}
+	return []client.Option{client.WithHTTPAuth(&http.BasicAuth{Username: user, Password: s.password})}
 }
 
 func (s *GitTokenStore) relativeToRepo(path string) (string, error) {
@@ -615,7 +623,7 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 		return errRewrite
 	}
 	s.maybeRunGC(repo)
-	if err = repo.Push(&git.PushOptions{Auth: s.gitAuth(), Force: true}); err != nil {
+	if err = repo.Push(&git.PushOptions{ClientOptions: s.gitClientOptions(), Force: true}); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			return nil
 		}

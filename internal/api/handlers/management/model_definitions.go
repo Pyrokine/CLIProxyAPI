@@ -33,3 +33,19 @@ func (h *Handler) GetStaticModelDefinitions(c *gin.Context) {
 		},
 	)
 }
+
+// GetModelsCatalogMeta returns the current state of the remote model catalog
+// so the UI can show the source URL and refresh timing.
+func (h *Handler) GetModelsCatalogMeta(c *gin.Context) {
+	c.JSON(http.StatusOK, registry.GetCatalogMeta())
+}
+
+// PostModelsCatalogRefresh triggers an immediate model catalog refresh.
+func (h *Handler) PostModelsCatalogRefresh(c *gin.Context) {
+	meta, err := registry.TriggerCatalogRefresh(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "meta": meta})
+		return
+	}
+	c.JSON(http.StatusOK, meta)
+}

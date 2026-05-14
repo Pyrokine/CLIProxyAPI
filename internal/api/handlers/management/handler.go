@@ -3,7 +3,9 @@
 package management
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,15 +17,17 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 )
 
 type attemptInfo struct {
-	count        int
+	failures     []time.Time // sliding window of failure timestamps
 	blockedUntil time.Time
 	lastActivity time.Time // track last activity for cleanup
 }
@@ -50,6 +54,8 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	quotaScheduler      *quota.Scheduler
+	internalToken       string // random token for internal localhost requests (quota scheduler)
 }
 
 // Option configures a Handler.
@@ -75,6 +81,11 @@ func WithUsagePersister(p *usage.Persister) Option {
 	return func(h *Handler) { h.usagePersister = p }
 }
 
+// WithQuotaScheduler sets the quota refresh scheduler.
+func WithQuotaScheduler(s *quota.Scheduler) Option {
+	return func(h *Handler) { h.quotaScheduler = s }
+}
+
 // WithLogDir sets the log directory.
 func WithLogDir(dir string) Option {
 	return func(h *Handler) { h.logDir = dir }
@@ -94,6 +105,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+		internalToken:       generateInternalToken(),
 	}
 
 	for _, opt := range opts {
@@ -102,6 +114,26 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 
 	h.startAttemptCleanup()
 	return h
+}
+
+// generateInternalToken creates a random 32-byte hex token for internal requests.
+func generateInternalToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("crypto/rand.Read failed, system entropy source is broken: %v", err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// InternalToken returns the token for authenticating internal localhost requests.
+func (h *Handler) InternalToken() string {
+	return h.internalToken
+}
+
+// SetQuotaScheduler sets the quota refresh scheduler after handler creation.
+// Must be called before Server.Start() — not safe for concurrent use.
+func (h *Handler) SetQuotaScheduler(s *quota.Scheduler) {
+	h.quotaScheduler = s
 }
 
 // startAttemptCleanup launches a background goroutine that periodically
@@ -176,8 +208,11 @@ func (h *Handler) SetUsagePersister(p *usage.Persister) { h.usagePersister = p }
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
 func (h *Handler) Middleware() gin.HandlerFunc {
-	const maxFailures = 5
-	const banDuration = 30 * time.Minute
+	const (
+		failureWindow = 5 * time.Minute  // sliding window for counting failures
+		maxFailures   = 10               // failures within the window to trigger ban
+		banDuration   = 30 * time.Minute // ban duration after exceeding maxFailures
+	)
 
 	return func(c *gin.Context) {
 		c.Header("X-CPA-VERSION", buildinfo.Version)
@@ -215,6 +250,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				if time.Now().Before(ai.blockedUntil) {
 					remaining := time.Until(ai.blockedUntil).Round(time.Second)
 					h.attemptsMu.Unlock()
+					c.Header("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
 					c.AbortWithStatusJSON(
 						http.StatusForbidden, gin.H{
 							"error": fmt.Sprintf(
@@ -226,7 +262,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				}
 				// Ban expired, reset state
 				ai.blockedUntil = time.Time{}
-				ai.count = 0
+				ai.failures = ai.failures[:0]
 			}
 		}
 		h.attemptsMu.Unlock()
@@ -236,18 +272,35 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			return
 		}
 
+		// fail records a failed authentication attempt using a sliding time window.
+		// Only failures within the last failureWindow are counted toward the ban threshold.
 		fail := func() {
+			now := time.Now()
 			h.attemptsMu.Lock()
 			aip := h.failedAttempts[clientIP]
 			if aip == nil {
 				aip = &attemptInfo{}
 				h.failedAttempts[clientIP] = aip
 			}
-			aip.count++
-			aip.lastActivity = time.Now()
-			if aip.count >= maxFailures {
-				aip.blockedUntil = time.Now().Add(banDuration)
-				aip.count = 0
+			aip.lastActivity = now
+
+			// Evict failures outside the sliding window
+			cutoff := now.Add(-failureWindow)
+			kept := 0
+			for _, t := range aip.failures {
+				if t.After(cutoff) {
+					aip.failures[kept] = t
+					kept++
+				}
+			}
+			aip.failures = aip.failures[:kept]
+
+			// Append the new failure
+			aip.failures = append(aip.failures, now)
+
+			if len(aip.failures) >= maxFailures {
+				aip.blockedUntil = now.Add(banDuration)
+				aip.failures = aip.failures[:0]
 			}
 			h.attemptsMu.Unlock()
 		}
@@ -287,12 +340,19 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 					return
 				}
 			}
+			// Internal token for quota scheduler and other internal services
+			if it := h.internalToken; it != "" {
+				if subtle.ConstantTimeCompare([]byte(provided), []byte(it)) == 1 {
+					c.Next()
+					return
+				}
+			}
 		}
 
 		if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
 			h.attemptsMu.Lock()
 			if ai := h.failedAttempts[clientIP]; ai != nil {
-				ai.count = 0
+				ai.failures = ai.failures[:0]
 				ai.blockedUntil = time.Time{}
 			}
 			h.attemptsMu.Unlock()
@@ -308,7 +368,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 		h.attemptsMu.Lock()
 		if ai := h.failedAttempts[clientIP]; ai != nil {
-			ai.count = 0
+			ai.failures = ai.failures[:0]
 			ai.blockedUntil = time.Time{}
 		}
 		h.attemptsMu.Unlock()
@@ -317,17 +377,44 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 	}
 }
 
-// persist saves the current in-memory config to disk.
+// persist saves the current in-memory config to disk with last-good protection.
+// On write failure, it rolls back to the last-good backup.
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// Preserve comments when writing
+
+	// Save current file as last-good before overwriting
+	if err := config.SaveLastGood(h.configFilePath); err != nil {
+		log.Errorf("failed to save last-good config: %v", err)
+	}
+
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+		h.rollbackLastGood()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true
+}
+
+// rollbackLastGood restores config.yaml from the last-good backup and reloads it into memory.
+// Caller must hold h.mu.
+func (h *Handler) rollbackLastGood() {
+	lastGood := config.LastGoodPath(h.configFilePath)
+	data, err := os.ReadFile(lastGood)
+	if err != nil {
+		log.WithError(err).Error("rollback: failed to read last-good backup")
+		return
+	}
+	if errWrite := os.WriteFile(h.configFilePath, data, 0o600); errWrite != nil {
+		log.WithError(errWrite).Error("rollback: failed to restore config from last-good")
+		return
+	}
+	if restored, errLoad := config.LoadConfig(h.configFilePath); errLoad == nil {
+		h.cfg = restored
+	} else {
+		log.WithError(errLoad).Error("rollback: failed to reload config after restore")
+	}
 }
 
 // Helper methods for simple types

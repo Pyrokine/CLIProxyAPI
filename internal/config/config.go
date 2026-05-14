@@ -76,6 +76,9 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
+	// QuotaRefresh configures the backend quota polling scheduler.
+	QuotaRefresh QuotaRefresh `yaml:"quota-refresh" json:"quota-refresh"`
+
 	// Routing controls credential selection behavior.
 	Routing routingConfig `yaml:"routing" json:"routing"`
 
@@ -122,8 +125,12 @@ type Config struct {
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
 	// AutoRefreshInterval is the interval (in seconds) for the management panel to auto-refresh data
-	// when the browser window regains focus. Set to 0 to disable auto-refresh. Default: 60.
+	// when the browser window regains focus. Set to 0 to disable auto-refresh. Default: 3.
 	AutoRefreshInterval int `yaml:"auto-refresh-interval" json:"auto-refresh-interval"`
+
+	// ModelRefreshInterval is the interval (in hours) for fetching the upstream model catalog.
+	// Set to 0 to disable auto-refresh. Default: 3.
+	ModelRefreshInterval int `yaml:"model-refresh-interval" json:"model-refresh-interval"`
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
@@ -146,22 +153,37 @@ type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`
 	// Key is the path to the TLS private key file.
 	Key string `yaml:"key" json:"key"`
+	// HTTPRedirectPort starts an HTTP listener on this port that redirects to HTTPS.
+	// Only effective when Enable is true. Set to 0 to disable redirect. Default: 80.
+	HTTPRedirectPort int `yaml:"http-redirect-port" json:"http-redirect-port"`
+	// RequireForAuth, when true, rejects plaintext HTTP requests to authenticated
+	// endpoints (/v0/management, /v1, /v1beta, amp routes) with 421 Misdirected Request.
+	// Loopback addresses (127.0.0.0/8, ::1) are always allowed so the panel still
+	// works on localhost when tls.enable=false. Default: false (backward compatible).
+	RequireForAuth bool `yaml:"require-for-auth" json:"require-for-auth"`
+	// TrustForwardedProto controls whether the X-Forwarded-Proto header is honoured
+	// when deciding if a request is over HTTPS. Only enable this when CPA sits
+	// behind a trusted reverse proxy that sets the header — otherwise a direct
+	// attacker can forge "X-Forwarded-Proto: https" and bypass require-for-auth.
+	// Default: false (only trust real TLS connections).
+	TrustForwardedProto bool `yaml:"trust-forwarded-proto" json:"trust-forwarded-proto"`
 }
 
-// UsageRetention configures automatic cleanup and archival of detailed usage records.
-// Zero values apply defaults; negative values disable the feature.
+// UsageRetention configures automatic cleanup of usage records stored in the
+// SQLite database. Zero applies the default (-1, disabled).
 type UsageRetention struct {
-	// Days is the number of days to keep detailed request records.
-	// Records older than this are archived and removed from memory. Default: 30. Set to -1 to disable.
+	// Days is the number of days to keep usage records. Records older than
+	// this are deleted from the events / hour_bucket / day_bucket tables.
+	// Default: -1 (disabled, keep forever). Use -1 explicitly to disable.
 	Days int `yaml:"days" json:"days"`
-	// MaxFileSizeMB is the maximum size (in MB) for the active usage statistics file.
-	// When exceeded, the oldest details are trimmed. Default: 50. Set to -1 to disable.
-	// NOTE: not yet implemented — retained for future use; currently has no runtime effect.
-	MaxFileSizeMB int `yaml:"max-file-size-mb" json:"max-file-size-mb"`
-	// ArchiveMonths is the number of months to keep archived usage files.
-	// Archives older than this are deleted. Default: 3. Set to -1 to disable archiving.
-	// NOTE: not yet implemented — retained for future use; currently has no runtime effect.
-	ArchiveMonths int `yaml:"archive-months" json:"archive-months"`
+	// MaxDBSizeMB is a hard ceiling for events.db + WAL + SHM combined.
+	// When the store reaches this size, new live writes are rejected and
+	// imports are refused. Set to 0 to disable the cap.
+	MaxDBSizeMB int `yaml:"max-db-size-mb" json:"max-db-size-mb"`
+	// WarningThresholdPct defines when the panel should start warning about
+	// approaching MaxDBSizeMB. Effective only when MaxDBSizeMB > 0.
+	// Default: 80.
+	WarningThresholdPct int `yaml:"warning-threshold-pct" json:"warning-threshold-pct"`
 }
 
 // pprofConfig holds pprof HTTP server settings.
@@ -180,11 +202,31 @@ type RemoteManagement struct {
 	SecretKey string `yaml:"secret-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
+	// AutoUpdatePanel controls whether the management panel asset is automatically updated from GitHub Releases.
+	// Defaults to true. Set to false to keep a manually deployed panel without it being overwritten.
+	AutoUpdatePanel *bool `yaml:"auto-update-panel,omitempty"`
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
 	// CPAGitHubRepository overrides the GitHub repository used for CPA backend self-update and releases listing.
 	CPAGitHubRepository string `yaml:"cpa-github-repository"`
+	// AutoCheckUpdate enables automatic periodic checking for new versions.
+	// When false, version checks only happen on manual request. Defaults to false.
+	AutoCheckUpdate bool `yaml:"auto-check-update"`
+	// AutoUpdateCPA controls whether the backend binary is automatically installed
+	// after a periodic version check finds a newer release. Defaults to false.
+	AutoUpdateCPA bool `yaml:"auto-update-cpa,omitempty"`
+	// CheckInterval is the interval (in minutes) between automatic version checks.
+	// Only effective when AutoCheckUpdate is true. Default: 180 (3 hours). Minimum: 30.
+	CheckInterval int `yaml:"check-interval,omitempty"`
+}
+
+// IsAutoUpdatePanel returns whether automatic panel updates are enabled (default: true).
+func (rm RemoteManagement) IsAutoUpdatePanel() bool {
+	if rm.AutoUpdatePanel == nil {
+		return true
+	}
+	return *rm.AutoUpdatePanel
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -197,11 +239,32 @@ type QuotaExceeded struct {
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
 }
 
+// QuotaRefresh configures the backend quota polling scheduler for the management panel.
+type QuotaRefresh struct {
+	// Enabled controls whether the backend periodically queries provider quota APIs. Default: false.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// Interval is the base polling interval in seconds. Default: 600 (10 minutes).
+	Interval int `yaml:"interval" json:"interval"`
+
+	// MaxInterval is the maximum polling interval after exponential backoff in seconds. Default: 1800 (30 minutes).
+	MaxInterval int `yaml:"max-interval" json:"max-interval"`
+}
+
 // routingConfig configures how credentials are selected for requests.
 type routingConfig struct {
 	// Strategy selects the credential selection strategy.
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// ClaudeCodeSessionAffinity is kept for compatibility with older configs.
+	ClaudeCodeSessionAffinity bool `yaml:"claude-code-session-affinity,omitempty" json:"claude-code-session-affinity,omitempty"`
+
+	// SessionAffinity enables session-sticky routing.
+	SessionAffinity bool `yaml:"session-affinity,omitempty" json:"session-affinity,omitempty"`
+
+	// SessionAffinityTTL controls how long session bindings are retained.
+	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -482,6 +545,9 @@ type OpenAICompatibility struct {
 	// Priority controls selection preference when multiple providers or credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+
+	// Disabled prevents this provider from being used for routing.
+	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 
 	// Prefix optionally namespaces model aliases for this provider (e.g., "teamA/kimi-k2").
 	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`

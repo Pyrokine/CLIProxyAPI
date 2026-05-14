@@ -1,6 +1,9 @@
 package management
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +17,7 @@ import (
 const (
 	oauthSessionTTL     = 10 * time.Minute
 	maxOAuthStateLength = 128
+	maxOAuthNonceLength = 128
 )
 
 var (
@@ -25,6 +29,7 @@ var (
 type oauthSession struct {
 	Provider  string
 	Status    string
+	NonceHash string
 	CreatedAt time.Time
 	ExpiresAt time.Time
 }
@@ -53,7 +58,7 @@ func (s *oauthSessionStore) purgeExpiredLocked(now time.Time) {
 	}
 }
 
-func (s *oauthSessionStore) register(state, provider string) {
+func (s *oauthSessionStore) register(state, provider, nonce string) {
 	state = strings.TrimSpace(state)
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if state == "" || provider == "" {
@@ -68,6 +73,7 @@ func (s *oauthSessionStore) register(state, provider string) {
 	s.sessions[state] = oauthSession{
 		Provider:  provider,
 		Status:    "",
+		NonceHash: hashOAuthNonce(nonce),
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.ttl),
 	}
@@ -168,7 +174,9 @@ func (s *oauthSessionStore) isPending(state, provider string) bool {
 
 var oauthSessions = newOAuthSessionStore(oauthSessionTTL)
 
-func registerOAuthSession(state, provider string) { oauthSessions.register(state, provider) }
+func registerOAuthSession(state, provider, nonce string) {
+	oauthSessions.register(state, provider, nonce)
+}
 
 func setOAuthSessionError(state, message string) { oauthSessions.setError(state, message) }
 
@@ -186,8 +194,39 @@ func getOAuthSession(state string) (provider string, status string, ok bool) {
 	return session.Provider, session.Status, true
 }
 
+// verifyOAuthNonce checks the supplied nonce against the session's stored hash.
+// Returns true when the session has no nonce registered (legacy session), or when the
+// supplied nonce hashes to the same value as the one stored at registration.
+// Returns false only when a nonce was registered and the caller either omitted it
+// or supplied an incorrect value.
+func verifyOAuthNonce(state, nonce string) bool {
+	session, ok := oauthSessions.get(state)
+	if !ok {
+		return false
+	}
+	if session.NonceHash == "" {
+		return true
+	}
+	supplied := hashOAuthNonce(nonce)
+	return supplied != "" && subtle.ConstantTimeCompare([]byte(session.NonceHash), []byte(supplied)) == 1
+}
+
 func isOAuthSessionPending(state, provider string) bool {
 	return oauthSessions.isPending(state, provider)
+}
+
+// hashOAuthNonce returns a hex sha256 of the trimmed nonce, or empty for empty input.
+// The length is capped so a malicious caller cannot fill memory by sending huge values.
+func hashOAuthNonce(nonce string) string {
+	trimmed := strings.TrimSpace(nonce)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) > maxOAuthNonceLength {
+		trimmed = trimmed[:maxOAuthNonceLength]
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:])
 }
 
 func validateOAuthState(state string) error {

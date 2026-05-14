@@ -99,6 +99,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		a := &coreauth.Auth{
 			ID:       id,
 			Provider: provider,
+			FileName: id,
 			Label:    label,
 			Prefix:   prefix,
 			Status:   status,
@@ -112,6 +113,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
+		coreauth.ApplyCustomHeadersFromMetadata(a)
 		// Read priority from auth file
 		if rawPriority, ok := metadata["priority"]; ok {
 			switch v := rawPriority.(type) {

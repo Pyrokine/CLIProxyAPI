@@ -1,71 +1,66 @@
 # Server host/interface to bind to. Default is "127.0.0.1" for local-only access.
 # Use "" to bind all interfaces (IPv4 + IPv6) if remote access is needed.
 host: "127.0.0.1"
-
 # Server port
 port: 8317
-
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
-  enable: false
-  cert: ""
-  key: ""
-
+    enable: false
+    cert: ""
+    key: ""
+    # Only enable when CPA sits behind a trusted reverse proxy that terminates TLS.
+    # If enabled while CPA is exposed directly, an attacker can forge X-Forwarded-Proto:
+    # https and bypass require-for-auth. Default: false (only trust real TLS connections).
+    trust-forwarded-proto: false
 # Management API settings
 remote-management:
-  # Whether to allow remote (non-localhost) management access.
-  # When false, only localhost can access management endpoints (a key is still required).
-  allow-remote: false
-
-  # Management key. If a plaintext value is provided here, it will be hashed on startup.
-  # All management requests (even from localhost) require this key.
-  # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
-  secret-key: ""
-
-  # Disable the bundled management control panel asset download and HTTP route when true.
-  disable-control-panel: false
-
-  # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: "https://github.com/Pyrokine/Cli-Proxy-API-Management-Center"
-
-  # Override management panel static directory with MANAGEMENT_STATIC_PATH environment variable.
-  # If set, the server will look for management.html in the specified path instead of the default location.
-  # Example: MANAGEMENT_STATIC_PATH=/opt/cpa/static
-
+    # Whether to allow remote (non-localhost) management access.
+    # When false, only localhost can access management endpoints (a key is still required).
+    allow-remote: false
+    # Management key. If a plaintext value is provided here, it will be hashed on startup.
+    # All management requests (even from localhost) require this key.
+    # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
+    secret-key: ""
+    # Disable the bundled management control panel asset download and HTTP route when true.
+    disable-control-panel: false
+    # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
+    panel-github-repository: "https://github.com/Pyrokine/Cli-Proxy-API-Management-Center"
+    # GitHub repository for CPA backend releases.
+    cpa-github-repository: "https://github.com/Pyrokine/CLIProxyAPI"
+    # Periodically check GitHub for newer panel/backend releases.
+    auto-check-update: false
+    # Automatically install the CPA backend when auto-check-update finds a newer release.
+    auto-update-cpa: false
+    # Automatic update check interval in minutes.
+    check-interval: 180
+# Override management panel static directory with MANAGEMENT_STATIC_PATH environment variable.
+# If set, the server will look for management.html in the specified path instead of the default location.
+# Example: MANAGEMENT_STATIC_PATH=/opt/cpa/static
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
-
 # API keys for authentication
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
-
+    - "your-api-key-1"
+    - "your-api-key-2"
+    - "your-api-key-3"
 # Enable debug logging
 debug: false
-
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
-  enable: false
-  addr: "127.0.0.1:8316"
-
+    enable: false
+    addr: "127.0.0.1:8316"
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
-
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
-
 # Maximum total size (MB) of log files under the logs directory. When exceeded, the oldest log
 # files are deleted until within the limit. Set to 0 to disable.
 logs-max-total-size-mb: 0
-
 # Maximum number of error log files retained when request logging is disabled.
 # When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 error-logs-max-files: 10
-
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
-
 # File path for persisting usage statistics across restarts.
 # Defaults to "usage-statistics.json" next to config.yaml. Set to "disabled" to turn off.
 # usage-statistics-file: ""
@@ -73,39 +68,31 @@ usage-statistics-enabled: false
 # Retention policy for detailed usage records (logrotate-style).
 # Only per-request Details are trimmed; aggregate counters are preserved forever.
 # usage-retention:
-#   days: 30              # Keep details for this many days. Older entries are archived and removed.
-#   max-file-size-mb: 50  # Maximum active file size (MB). Exceeding triggers progressive trimming.
-#   archive-months: 3     # Keep monthly archive files for this many months. 0 = discard immediately.
+#   days: 30                    # Keep details for this many days. Older entries are removed. Set to -1 to disable cleanup.
+#   max-db-size-mb: 1024        # Hard cap for events.db + WAL + SHM combined. Set to 0 to disable.
+#   warning-threshold-pct: 80   # Show warnings when the DB reaches this percentage of max-db-size-mb.
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 proxy-url: ""
-
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
-
 # When true, forward filtered upstream response headers to downstream clients.
 # Default is false (disabled).
 passthrough-headers: false
-
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
-
 # Maximum number of different credentials to try for one failed request.
 # Set to 0 to keep legacy behavior (try all available credentials).
 max-retry-credentials: 0
-
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
-
 # Quota exceeded behavior
 quota-exceeded:
-  switch-project: true # Whether to automatically switch to another project when a quota is exceeded
-  switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
-
+    switch-project: true # Whether to automatically switch to another project when a quota is exceeded
+    switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), fill-first
-
+    strategy: "round-robin" # round-robin (default), fill-first
 # CORS allowed origins. Empty = allow all (*) for CLI tool compatibility.
 # Set to restrict browser access: ["http://localhost:5173", "http://127.0.0.1:5173"]
 # cors-allowed-origins: []
@@ -113,17 +100,21 @@ routing:
 # When true (default), enable authentication for the WebSocket API (/v1/ws).
 # Set to false to disable (NOT RECOMMENDED — unauthenticated WebSocket access allows anonymous AI proxy usage).
 ws-auth: true
-
 # Allow API key authentication via URL query parameters (?key= / ?auth_token=).
 # Disabled by default — query parameters leak credentials to server logs, Referer headers, and browser history.
 # allow-query-auth: false
 
 # Auto-refresh interval (seconds) for the management panel when the browser window regains focus.
-# Set to 0 to disable auto-refresh. Default: 60.
-auto-refresh-interval: 60
-
+# Set to 0 to disable auto-refresh. Default: 3.
+auto-refresh-interval: 3
+# Interval (hours) for fetching the upstream model catalog.
+# Set to 0 to disable periodic model refresh. Default: 3.
+model-refresh-interval: 3
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
+quota-refresh:
+    interval: 600
+    max-interval: 1800
 
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:

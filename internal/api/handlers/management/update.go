@@ -4,14 +4,21 @@
 package management
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -20,7 +27,9 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
@@ -41,18 +50,51 @@ type updateRequest struct {
 	Version string `json:"version"` // e.g. "v1.3.2"
 }
 
-type githubReleaseForUpdate struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
-		Name               string `json:"name"`
-		Size               int64  `json:"size"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-	} `json:"assets"`
+type updateCompatibilityResponse struct {
+	CurrentVersion  string                   `json:"current_version"`
+	TargetVersion   string                   `json:"target_version"`
+	MinPanelVersion string                   `json:"min_panel_version"`
+	RequiresRestart bool                     `json:"requires_restart"`
+	Compatible      bool                     `json:"compatible"`
+	Warnings        []string                 `json:"warnings,omitempty"`
+	Usage           updateUsageCompatibility `json:"usage"`
 }
+
+type updateUsageCompatibility struct {
+	ConfiguredDataDir string     `json:"configured_data_dir,omitempty"`
+	ResolvedDataDir   string     `json:"resolved_data_dir,omitempty"`
+	DBPath            string     `json:"db_path,omitempty"`
+	DBExists          bool       `json:"db_exists"`
+	PersisterReady    bool       `json:"persister_ready"`
+	DBSizeBytes       int64      `json:"db_size_bytes"`
+	SchemaVersion     string     `json:"schema_version,omitempty"`
+	MigratedFrom      string     `json:"migrated_from,omitempty"`
+	MigratedAt        *time.Time `json:"migrated_at,omitempty"`
+}
+
+type githubReleaseAsset struct {
+	Name               string `json:"name"`
+	Size               int64  `json:"size"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+type githubReleaseForUpdate struct {
+	TagName string               `json:"tag_name"`
+	Assets  []githubReleaseAsset `json:"assets"`
+}
+
+const (
+	defaultBackendUpdateCheckInterval = 3 * time.Hour
+	minBackendUpdateCheckMinutes      = 30
+)
 
 /* ---------- singleton state ---------- */
 
-var selfUpdate updateState
+var (
+	selfUpdate         updateState
+	cpaAutoUpdaterMu   sync.Mutex
+	cpaAutoUpdaterDone context.CancelFunc
+)
 
 func init() {
 	selfUpdate.status = "idle"
@@ -76,6 +118,16 @@ func (h *Handler) GetUpdateStatus(c *gin.Context) {
 	)
 }
 
+// GetUpdateCompatibility returns real backend upgrade compatibility signals.
+func (h *Handler) GetUpdateCompatibility(c *gin.Context) {
+	targetVersion := strings.TrimSpace(c.Query("version"))
+	if targetVersion == "" {
+		targetVersion = strings.TrimSpace(c.Query("target_version"))
+	}
+	compat := h.buildUpdateCompatibility(c.Request.Context(), targetVersion)
+	c.JSON(http.StatusOK, compat)
+}
+
 // PostUpdate triggers a self-update to the specified version.
 func (h *Handler) PostUpdate(c *gin.Context) {
 	var req updateRequest
@@ -84,10 +136,24 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 		return
 	}
 
-	if strings.EqualFold(strings.TrimSpace(req.Version), buildinfo.Version) {
+	targetVersion := strings.TrimSpace(req.Version)
+	if strings.EqualFold(targetVersion, buildinfo.Version) {
 		c.JSON(
 			http.StatusBadRequest,
 			gin.H{"error": "same_version", "message": "Target version is the same as current version"},
+		)
+		return
+	}
+
+	compat := h.buildUpdateCompatibility(c.Request.Context(), targetVersion)
+	if !compat.Compatible {
+		c.JSON(
+			http.StatusConflict,
+			gin.H{
+				"error":         "update_incompatible",
+				"message":       "Target version requires manual migration review before update",
+				"compatibility": compat,
+			},
 		)
 		return
 	}
@@ -100,7 +166,7 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 	}
 	selfUpdate.status = "downloading"
 	selfUpdate.message = ""
-	selfUpdate.version = req.Version
+	selfUpdate.version = targetVersion
 	selfUpdate.percent = 0
 	selfUpdate.mu.Unlock()
 
@@ -110,9 +176,11 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
 	}
 
-	go h.performUpdate(repo, req.Version, proxyURL)
+	go h.performUpdate(repo, targetVersion, proxyURL)
 
-	c.JSON(http.StatusAccepted, gin.H{"status": "downloading", "target_version": req.Version})
+	c.JSON(
+		http.StatusAccepted, gin.H{"status": "downloading", "target_version": targetVersion, "compatibility": compat},
+	)
 }
 
 /* ---------- update logic ---------- */
@@ -126,87 +194,66 @@ func (h *Handler) performUpdate(repo, version, proxyURL string) {
 		selfUpdate.mu.Unlock()
 	}
 
-	// 1. Fetch the target release
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
 	release, err := h.fetchRelease(repo, version, proxyURL)
 	if err != nil {
 		setStatus("error", fmt.Sprintf("fetch release: %v", err), 0)
 		return
 	}
 
-	// 2. Find the matching binary asset
-	assetName := expectedAssetName()
-	var downloadURL string
-	var checksumURL string
-	for _, asset := range release.Assets {
-		if strings.EqualFold(asset.Name, assetName) {
-			downloadURL = asset.BrowserDownloadURL
-		}
-		if strings.EqualFold(asset.Name, "checksums.txt") || strings.EqualFold(asset.Name, assetName+".sha256") {
-			checksumURL = asset.BrowserDownloadURL
-		}
-	}
-
-	if downloadURL == "" {
+	assetName := expectedArchiveAssetName()
+	asset, checksumAsset := findReleaseAssets(release.Assets, assetName)
+	if asset == nil {
 		setStatus("error", fmt.Sprintf("asset %s not found in release %s", assetName, version), 0)
 		return
 	}
-
-	if checksumURL == "" {
-		setStatus(
-			"error",
-			fmt.Sprintf("checksum file not found in release %s, refusing to update without verification", version),
-			0,
-		)
+	if checksumAsset == nil {
+		setStatus("error", fmt.Sprintf("checksums.txt not found in release %s", version), 0)
 		return
 	}
 
-	// Validate download URLs point to GitHub — prevent RCE via malicious repository config
-	for label, u := range map[string]string{"binary": downloadURL, "checksum": checksumURL} {
-		parsed, errParse := url.Parse(u)
-		if errParse != nil || parsed.Scheme != "https" {
-			setStatus("error", fmt.Sprintf("%s URL is not HTTPS", label), 0)
-			return
-		}
-		host := strings.ToLower(parsed.Hostname())
-		if host != "github.com" && !strings.HasSuffix(host, ".github.com") &&
-			!strings.HasSuffix(host, ".githubusercontent.com") {
-			setStatus("error", fmt.Sprintf("%s URL host %q is not a GitHub domain", label, host), 0)
+	for label, u := range map[string]string{
+		"archive": asset.BrowserDownloadURL, "checksum": checksumAsset.BrowserDownloadURL,
+	} {
+		if err := validateGitHubDownloadURL(label, u); err != nil {
+			setStatus("error", err.Error(), 0)
 			return
 		}
 	}
 
-	setStatus("downloading", "Downloading binary...", 20)
-
-	// 3. Download binary
+	setStatus("downloading", "Downloading release archive...", 20)
 	client := newUpdateHTTPClient(proxyURL)
-	binaryData, err := githubGet(context.Background(), client, downloadURL)
+	archiveData, err := githubGet(ctx, client, asset.BrowserDownloadURL)
 	if err != nil {
-		setStatus("error", fmt.Sprintf("download: %v", err), 20)
+		setStatus("error", fmt.Sprintf("download archive: %v", err), 20)
 		return
 	}
 
-	setStatus("verifying", "Verifying checksum...", 60)
-
-	// 4. SHA256 verification (mandatory — early return above guarantees checksumURL is non-empty)
-	downloadedHash := sha256Hex(binaryData)
-
-	expectedHash, errChecksum := fetchExpectedHash(client, checksumURL, assetName)
-	if errChecksum != nil {
-		setStatus("error", fmt.Sprintf("checksum verification failed: %v", errChecksum), 60)
+	setStatus("verifying", "Verifying checksum...", 55)
+	downloadedHash := sha256Hex(archiveData)
+	expectedHash, err := fetchExpectedHash(ctx, client, checksumAsset.BrowserDownloadURL, asset.Name)
+	if err != nil {
+		setStatus("error", fmt.Sprintf("checksum verification failed: %v", err), 55)
 		return
 	}
 	if expectedHash == "" {
-		setStatus("error", fmt.Sprintf("checksum file does not contain hash for %s", assetName), 60)
+		setStatus("error", fmt.Sprintf("checksum file does not contain hash for %s", asset.Name), 55)
 		return
 	}
 	if !strings.EqualFold(expectedHash, downloadedHash) {
-		setStatus("error", fmt.Sprintf("SHA256 mismatch: expected %s, got %s", expectedHash, downloadedHash), 60)
+		setStatus("error", fmt.Sprintf("SHA256 mismatch: expected %s, got %s", expectedHash, downloadedHash), 55)
 		return
 	}
 
-	setStatus("replacing", "Replacing binary...", 80)
+	setStatus("replacing", "Extracting archive...", 75)
+	binaryData, err := extractBinaryFromArchive(asset.Name, archiveData)
+	if err != nil {
+		setStatus("error", fmt.Sprintf("extract binary: %v", err), 75)
+		return
+	}
 
-	// 5. Replace current binary
 	execPath, err := os.Executable()
 	if err != nil {
 		setStatus("error", fmt.Sprintf("resolve executable path: %v", err), 80)
@@ -218,13 +265,17 @@ func (h *Handler) performUpdate(repo, version, proxyURL string) {
 		return
 	}
 
+	setStatus("replacing", "Replacing binary...", 90)
 	if err = replaceBinary(execPath, binaryData); err != nil {
-		setStatus("error", fmt.Sprintf("replace binary: %v", err), 80)
+		setStatus("error", fmt.Sprintf("replace binary: %v", err), 90)
 		return
 	}
 
 	setStatus("done", fmt.Sprintf("Updated to %s. Restart the process to apply.", version), 100)
-	log.Infof("self-update: binary replaced successfully (version=%s, sha256=%s)", version, downloadedHash)
+	log.Infof(
+		"self-update: binary replaced successfully (version=%s, archive=%s, sha256=%s)", version, asset.Name,
+		downloadedHash,
+	)
 }
 
 var validVersion = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -246,16 +297,329 @@ func (h *Handler) fetchRelease(repo, version, proxyURL string) (*githubReleaseFo
 	return &release, nil
 }
 
+func (h *Handler) StartCPAAutoUpdater(ctx context.Context) {
+	if h == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	cpaAutoUpdaterMu.Lock()
+	if cpaAutoUpdaterDone != nil {
+		cpaAutoUpdaterDone()
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	cpaAutoUpdaterDone = cancel
+	cpaAutoUpdaterMu.Unlock()
+
+	go h.runCPAAutoUpdater(runCtx)
+}
+
+func (h *Handler) StopCPAAutoUpdater() {
+	cpaAutoUpdaterMu.Lock()
+	cancel := cpaAutoUpdaterDone
+	cpaAutoUpdaterDone = nil
+	cpaAutoUpdaterMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (h *Handler) runCPAAutoUpdater(ctx context.Context) {
+	if h == nil {
+		return
+	}
+	interval := defaultBackendUpdateCheckInterval
+	var ticker *time.Ticker
+	var tick <-chan time.Time
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+
+	for {
+		cfg := h.cfg
+		if cfg != nil && cfg.RemoteManagement.CheckInterval >= minBackendUpdateCheckMinutes {
+			interval = time.Duration(cfg.RemoteManagement.CheckInterval) * time.Minute
+		}
+		if ticker == nil {
+			ticker = time.NewTicker(interval)
+			tick = ticker.C
+		}
+
+		h.tryAutoUpdateCPA(ctx)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick:
+			if cfg := h.cfg; cfg != nil {
+				next := defaultBackendUpdateCheckInterval
+				if cfg.RemoteManagement.CheckInterval >= minBackendUpdateCheckMinutes {
+					next = time.Duration(cfg.RemoteManagement.CheckInterval) * time.Minute
+				}
+				if next != interval {
+					interval = next
+					ticker.Stop()
+					ticker = time.NewTicker(interval)
+					tick = ticker.C
+				}
+			}
+		}
+	}
+}
+
+func (h *Handler) tryAutoUpdateCPA(ctx context.Context) {
+	if h == nil || h.cfg == nil {
+		return
+	}
+	if !h.cfg.RemoteManagement.AutoCheckUpdate || !h.cfg.RemoteManagement.AutoUpdateCPA {
+		return
+	}
+	if selfUpdate.status == "downloading" || selfUpdate.status == "verifying" || selfUpdate.status == "replacing" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	latest, err := h.fetchLatestReleaseVersion(ctx)
+	if err != nil {
+		log.Warnf("cpa auto-update: fetch latest release failed: %v", err)
+		return
+	}
+	if latest == "" || strings.EqualFold(strings.TrimSpace(latest), buildinfo.Version) {
+		return
+	}
+	compat := h.buildUpdateCompatibility(ctx, latest)
+	if !compat.Compatible {
+		log.Warnf("cpa auto-update: blocked by compatibility checks for %s: %v", latest, compat.Warnings)
+		return
+	}
+
+	selfUpdate.mu.Lock()
+	busy := selfUpdate.status == "downloading" || selfUpdate.status == "verifying" || selfUpdate.status == "replacing"
+	if !busy {
+		selfUpdate.status = "downloading"
+		selfUpdate.message = ""
+		selfUpdate.version = latest
+		selfUpdate.percent = 0
+	}
+	selfUpdate.mu.Unlock()
+	if busy {
+		return
+	}
+
+	go h.performUpdate(h.cpaRepository(), latest, strings.TrimSpace(h.cfg.ProxyURL))
+}
+
+func (h *Handler) fetchLatestReleaseVersion(ctx context.Context) (string, error) {
+	client := newUpdateHTTPClient(strings.TrimSpace(h.cfg.ProxyURL))
+	body, err := githubGet(
+		ctx, client, fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", h.cpaRepository()),
+	)
+	if err != nil {
+		return "", err
+	}
+	var info releaseInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return "", fmt.Errorf("decode latest release: %w", err)
+	}
+	version := strings.TrimSpace(info.TagName)
+	if version == "" {
+		version = strings.TrimSpace(info.Name)
+	}
+	if version == "" {
+		return "", fmt.Errorf("missing latest release version")
+	}
+	return version, nil
+}
+
+func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion string) updateCompatibilityResponse {
+	compat := updateCompatibilityResponse{
+		CurrentVersion:  buildinfo.Version,
+		TargetVersion:   strings.TrimSpace(targetVersion),
+		MinPanelVersion: minPanelVersion,
+		RequiresRestart: true,
+		Compatible:      true,
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cfg := h.cfg
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	compat.Usage.ConfiguredDataDir = strings.TrimSpace(cfg.UsageDataDir)
+	compat.Usage.ResolvedDataDir = usage.ResolveDataDir(cfg.UsageDataDir, h.configFilePath)
+	if compat.Usage.ResolvedDataDir != "" {
+		compat.Usage.DBPath = filepath.Join(compat.Usage.ResolvedDataDir, "events.db")
+		if info, err := os.Stat(compat.Usage.DBPath); err == nil && !info.IsDir() {
+			compat.Usage.DBExists = true
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			compat.Warnings = append(compat.Warnings, fmt.Sprintf("failed to stat usage db: %v", err))
+		}
+	}
+	if h == nil || h.usagePersister == nil {
+		if compat.Usage.DBExists {
+			compat.Compatible = false
+			compat.Warnings = append(compat.Warnings, "usage db exists but persister is unavailable in this process")
+		}
+		return compat
+	}
+
+	compat.Usage.PersisterReady = h.usagePersister.IsReady()
+	compat.Usage.DBSizeBytes = h.usagePersister.DBSize()
+	if !compat.Usage.PersisterReady {
+		if compat.Usage.DBExists {
+			compat.Compatible = false
+			compat.Warnings = append(
+				compat.Warnings, "usage persister is not ready; update would hide schema compatibility failures",
+			)
+		}
+		return compat
+	}
+
+	schemaVersion, err := h.usagePersister.SchemaVersion(ctx)
+	if err != nil {
+		compat.Compatible = false
+		compat.Warnings = append(compat.Warnings, fmt.Sprintf("failed to read usage schema version: %v", err))
+	} else {
+		compat.Usage.SchemaVersion = schemaVersion
+		if schemaVersion != "" && schemaVersion != "2" {
+			compat.Compatible = false
+			compat.Warnings = append(compat.Warnings, fmt.Sprintf("usage schema_version=%s, expected 2", schemaVersion))
+		}
+	}
+
+	migrationStatus, err := h.usagePersister.MigrationStatus(ctx)
+	if err != nil {
+		compat.Warnings = append(compat.Warnings, fmt.Sprintf("failed to read usage migration marker: %v", err))
+	} else {
+		compat.Usage.MigratedFrom = migrationStatus.From
+		if !migrationStatus.At.IsZero() {
+			migratedAt := migrationStatus.At
+			compat.Usage.MigratedAt = &migratedAt
+		}
+	}
+
+	return compat
+}
+
 /* ---------- helpers ---------- */
 
-func expectedAssetName() string {
+func expectedArchiveAssetName() string {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
-	ext := ""
+	format := "tar.gz"
 	if goos == "windows" {
-		ext = ".exe"
+		format = "zip"
 	}
-	return fmt.Sprintf("CLIProxyAPI_%s_%s%s", goos, goarch, ext)
+	return fmt.Sprintf("CLIProxyAPI_%s_%s.%s", goos, goarch, format)
+}
+
+func findReleaseAssets(assets []githubReleaseAsset, archiveName string) (*githubReleaseAsset, *githubReleaseAsset) {
+	var archiveAsset *githubReleaseAsset
+	var checksumAsset *githubReleaseAsset
+	for i := range assets {
+		asset := &assets[i]
+		if strings.EqualFold(asset.Name, archiveName) {
+			archiveAsset = asset
+		}
+		if strings.EqualFold(asset.Name, "checksums.txt") {
+			checksumAsset = asset
+		}
+	}
+	return archiveAsset, checksumAsset
+}
+
+func validateGitHubDownloadURL(label, rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" {
+		return fmt.Errorf("%s URL is not HTTPS", label)
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "github.com" && !strings.HasSuffix(host, ".github.com") && !strings.HasSuffix(
+		host, ".githubusercontent.com",
+	) {
+		return fmt.Errorf("%s URL host %q is not a GitHub domain", label, host)
+	}
+	return nil
+}
+
+func extractBinaryFromArchive(assetName string, archiveData []byte) ([]byte, error) {
+	switch {
+	case strings.HasSuffix(strings.ToLower(assetName), ".tar.gz"):
+		return extractBinaryFromTarGz(archiveData)
+	case strings.HasSuffix(strings.ToLower(assetName), ".zip"):
+		return extractBinaryFromZip(archiveData)
+	default:
+		return nil, fmt.Errorf("unsupported archive format: %s", assetName)
+	}
+}
+
+func extractBinaryFromTarGz(archiveData []byte) ([]byte, error) {
+	gzReader, err := gzip.NewReader(bytes.NewReader(archiveData))
+	if err != nil {
+		return nil, fmt.Errorf("open tar.gz: %w", err)
+	}
+	defer func() { _ = gzReader.Close() }()
+
+	tarReader := tar.NewReader(gzReader)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read tar entry: %w", err)
+		}
+		if header == nil || header.Typeflag != tar.TypeReg {
+			continue
+		}
+		if !isArchiveBinaryPath(header.Name) {
+			continue
+		}
+		data, err := io.ReadAll(tarReader)
+		if err != nil {
+			return nil, fmt.Errorf("read binary entry: %w", err)
+		}
+		return data, nil
+	}
+	return nil, fmt.Errorf("binary entry not found in tar.gz archive")
+}
+
+func extractBinaryFromZip(archiveData []byte) ([]byte, error) {
+	zipReader, err := zip.NewReader(bytes.NewReader(archiveData), int64(len(archiveData)))
+	if err != nil {
+		return nil, fmt.Errorf("open zip: %w", err)
+	}
+	for _, file := range zipReader.File {
+		if file == nil || file.FileInfo().IsDir() || !isArchiveBinaryPath(file.Name) {
+			continue
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open zip entry: %w", err)
+		}
+		data, readErr := io.ReadAll(rc)
+		closeErr := rc.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read zip entry: %w", readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close zip entry: %w", closeErr)
+		}
+		return data, nil
+	}
+	return nil, fmt.Errorf("binary entry not found in zip archive")
+}
+
+func isArchiveBinaryPath(name string) bool {
+	base := strings.ToLower(path.Base(strings.TrimSpace(name)))
+	return base == "cli-proxy-api" || base == "cli-proxy-api.exe"
 }
 
 func newUpdateHTTPClient(proxyURL string) *http.Client {
@@ -281,8 +645,8 @@ func newUpdateHTTPClient(proxyURL string) *http.Client {
 	return client
 }
 
-func fetchExpectedHash(client *http.Client, checksumURL, assetName string) (string, error) {
-	body, err := githubGet(context.Background(), client, checksumURL)
+func fetchExpectedHash(ctx context.Context, client *http.Client, checksumURL, assetName string) (string, error) {
+	body, err := githubGet(ctx, client, checksumURL)
 	if err != nil {
 		return "", err
 	}
@@ -355,8 +719,18 @@ func replaceBinary(execPath string, newBinary []byte) error {
 	return nil
 }
 
-// PostPanelUpdate triggers an immediate refresh of the management panel HTML asset.
+// PostPanelUpdate triggers a panel HTML asset refresh. An optional `version`
+// field in the request body pins the update to a specific release tag; when
+// empty the latest release is used.
 func (h *Handler) PostPanelUpdate(c *gin.Context) {
+	if h.cfg != nil && h.cfg.RemoteManagement.DisableControlPanel {
+		c.JSON(
+			http.StatusBadRequest,
+			gin.H{"error": "control_panel_disabled", "message": "Control panel is disabled in configuration"},
+		)
+		return
+	}
+
 	staticDir := managementasset.StaticDir(h.configFilePath)
 	if staticDir == "" {
 		c.JSON(
@@ -373,7 +747,13 @@ func (h *Handler) PostPanelUpdate(c *gin.Context) {
 		panelRepo = strings.TrimSpace(h.cfg.RemoteManagement.PanelGitHubRepository)
 	}
 
-	ok := managementasset.EnsureLatestManagementHTML(c.Request.Context(), staticDir, proxyURL, panelRepo)
+	var req struct {
+		Version string `json:"version"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	version := strings.TrimSpace(req.Version)
+
+	ok := managementasset.EnsureManagementHTML(c.Request.Context(), staticDir, proxyURL, panelRepo, version)
 	if !ok {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "update_failed", "message": "Failed to update management panel"})
 		return

@@ -16,18 +16,21 @@ var errEntryDeleted = errors.New("entry deleted")
 
 // structListResource describes a []T configuration list for generic CRUD operations.
 type structListResource[T any] struct {
-	configKey       string // JSON response key (e.g., "gemini-api-key")
-	getList         func(cfg *config.Config) []T
-	setList         func(cfg *config.Config, list []T)
-	sanitize        func(cfg *config.Config)
-	normalize       func(entry *T)        // per-entry normalization (nil = skip)
-	matchKey        func(entry *T) string // extract match field value
-	matchQueryParam string                // Delete query param name (e.g., "api-key")
-	matchBodyField  string                // Patch body field for match lookup ("match" or "name")
-	trimMatch       bool                  // whether to TrimSpace match values in Delete
-	filter          func(entry *T) bool   // optional PUT filter (nil = keep all)
-	prepareGet      func(list []T) []T    // optional GET transform (nil = return as-is)
-	strictDelete    bool                  // true = return 404 when item not found in Delete
+	configKey                string // JSON response key (e.g., "gemini-api-key")
+	getList                  func(cfg *config.Config) []T
+	setList                  func(cfg *config.Config, list []T)
+	sanitize                 func(cfg *config.Config)
+	normalize                func(entry *T)        // per-entry normalization (nil = skip)
+	matchKey                 func(entry *T) string // extract match field value
+	matchQueryParam          string                // Delete query param name (e.g., "api-key")
+	secondaryMatchKey        func(entry *T) string // optional secondary delete match (e.g., base-url)
+	secondaryMatchQueryParam string                // optional secondary delete query param
+	matchBodyField           string                // Patch body field for match lookup ("match" or "name")
+	trimMatch                bool                  // whether to TrimSpace match values in Delete
+	trimSecondaryMatch       bool                  // whether to TrimSpace secondary match values in Delete
+	filter                   func(entry *T) bool   // optional PUT filter (nil = keep all)
+	prepareGet               func(list []T) []T    // optional GET transform (nil = return as-is)
+	strictDelete             bool                  // true = return 404 when item not found in Delete
 }
 
 func getStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
@@ -82,9 +85,20 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 		if r.trimMatch {
 			val = strings.TrimSpace(val)
 		}
+		secondaryVal, hasSecondary := "", false
+		if r.secondaryMatchQueryParam != "" {
+			secondaryVal, hasSecondary = c.GetQuery(r.secondaryMatchQueryParam)
+			if hasSecondary && r.trimSecondaryMatch {
+				secondaryVal = strings.TrimSpace(secondaryVal)
+			}
+		}
 		out := make([]T, 0, len(list))
 		for i := range list {
-			if r.matchKey(&list[i]) != val {
+			matched := r.matchKey(&list[i]) == val
+			if matched && hasSecondary && r.secondaryMatchKey != nil {
+				matched = r.secondaryMatchKey(&list[i]) == secondaryVal
+			}
+			if !matched {
 				out = append(out, list[i])
 			}
 		}
@@ -193,24 +207,30 @@ func patchStructEntry[T any](
 // --- Resource descriptors ---
 
 var geminiKeyResource = structListResource[config.GeminiKey]{
-	configKey:       "gemini-api-key",
-	getList:         func(cfg *config.Config) []config.GeminiKey { return cfg.GeminiKey },
-	setList:         func(cfg *config.Config, list []config.GeminiKey) { cfg.GeminiKey = list },
-	sanitize:        func(cfg *config.Config) { cfg.SanitizeGeminiKeys() },
-	matchKey:        func(e *config.GeminiKey) string { return e.APIKey },
-	matchQueryParam: "api-key",
-	trimMatch:       true,
-	strictDelete:    true,
+	configKey:                "gemini-api-key",
+	getList:                  func(cfg *config.Config) []config.GeminiKey { return cfg.GeminiKey },
+	setList:                  func(cfg *config.Config, list []config.GeminiKey) { cfg.GeminiKey = list },
+	sanitize:                 func(cfg *config.Config) { cfg.SanitizeGeminiKeys() },
+	matchKey:                 func(e *config.GeminiKey) string { return e.APIKey },
+	secondaryMatchKey:        func(e *config.GeminiKey) string { return e.BaseURL },
+	matchQueryParam:          "api-key",
+	secondaryMatchQueryParam: "base-url",
+	trimMatch:                true,
+	trimSecondaryMatch:       true,
+	strictDelete:             true,
 }
 
 var claudeKeyResource = structListResource[config.ClaudeKey]{
-	configKey:       "claude-api-key",
-	getList:         func(cfg *config.Config) []config.ClaudeKey { return cfg.ClaudeKey },
-	setList:         func(cfg *config.Config, list []config.ClaudeKey) { cfg.ClaudeKey = list },
-	sanitize:        func(cfg *config.Config) { cfg.SanitizeClaudeKeys() },
-	normalize:       normalizeClaudeKey,
-	matchKey:        func(e *config.ClaudeKey) string { return e.APIKey },
-	matchQueryParam: "api-key",
+	configKey:                "claude-api-key",
+	getList:                  func(cfg *config.Config) []config.ClaudeKey { return cfg.ClaudeKey },
+	setList:                  func(cfg *config.Config, list []config.ClaudeKey) { cfg.ClaudeKey = list },
+	sanitize:                 func(cfg *config.Config) { cfg.SanitizeClaudeKeys() },
+	normalize:                normalizeClaudeKey,
+	matchKey:                 func(e *config.ClaudeKey) string { return e.APIKey },
+	secondaryMatchKey:        func(e *config.ClaudeKey) string { return e.BaseURL },
+	matchQueryParam:          "api-key",
+	secondaryMatchQueryParam: "base-url",
+	trimSecondaryMatch:       true,
 }
 
 var openAICompatResource = structListResource[config.OpenAICompatibility]{
@@ -227,23 +247,29 @@ var openAICompatResource = structListResource[config.OpenAICompatibility]{
 }
 
 var vertexCompatKeyResource = structListResource[config.VertexCompatKey]{
-	configKey:       "vertex-api-key",
-	getList:         func(cfg *config.Config) []config.VertexCompatKey { return cfg.VertexCompatAPIKey },
-	setList:         func(cfg *config.Config, list []config.VertexCompatKey) { cfg.VertexCompatAPIKey = list },
-	sanitize:        func(cfg *config.Config) { cfg.SanitizeVertexCompatKeys() },
-	normalize:       normalizeVertexCompatKey,
-	matchKey:        func(e *config.VertexCompatKey) string { return e.APIKey },
-	matchQueryParam: "api-key",
-	trimMatch:       true,
+	configKey:                "vertex-api-key",
+	getList:                  func(cfg *config.Config) []config.VertexCompatKey { return cfg.VertexCompatAPIKey },
+	setList:                  func(cfg *config.Config, list []config.VertexCompatKey) { cfg.VertexCompatAPIKey = list },
+	sanitize:                 func(cfg *config.Config) { cfg.SanitizeVertexCompatKeys() },
+	normalize:                normalizeVertexCompatKey,
+	matchKey:                 func(e *config.VertexCompatKey) string { return e.APIKey },
+	secondaryMatchKey:        func(e *config.VertexCompatKey) string { return e.BaseURL },
+	matchQueryParam:          "api-key",
+	secondaryMatchQueryParam: "base-url",
+	trimMatch:                true,
+	trimSecondaryMatch:       true,
 }
 
 var codexKeyResource = structListResource[config.CodexKey]{
-	configKey:       "codex-api-key",
-	getList:         func(cfg *config.Config) []config.CodexKey { return cfg.CodexKey },
-	setList:         func(cfg *config.Config, list []config.CodexKey) { cfg.CodexKey = list },
-	sanitize:        func(cfg *config.Config) { cfg.SanitizeCodexKeys() },
-	normalize:       normalizeCodexKey,
-	matchKey:        func(e *config.CodexKey) string { return e.APIKey },
-	matchQueryParam: "api-key",
-	filter:          func(e *config.CodexKey) bool { return e.BaseURL != "" },
+	configKey:                "codex-api-key",
+	getList:                  func(cfg *config.Config) []config.CodexKey { return cfg.CodexKey },
+	setList:                  func(cfg *config.Config, list []config.CodexKey) { cfg.CodexKey = list },
+	sanitize:                 func(cfg *config.Config) { cfg.SanitizeCodexKeys() },
+	normalize:                normalizeCodexKey,
+	matchKey:                 func(e *config.CodexKey) string { return e.APIKey },
+	secondaryMatchKey:        func(e *config.CodexKey) string { return e.BaseURL },
+	matchQueryParam:          "api-key",
+	secondaryMatchQueryParam: "base-url",
+	trimSecondaryMatch:       true,
+	filter:                   func(e *config.CodexKey) bool { return e.BaseURL != "" },
 }

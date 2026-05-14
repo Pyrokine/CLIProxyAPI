@@ -59,6 +59,45 @@ func (h *Handler) checkLogDirectory(c *gin.Context) (string, bool) {
 	return dir, true
 }
 
+// GetLogSize returns the total disk usage of all log files in the log directory.
+func (h *Handler) GetLogSize(c *gin.Context) {
+	if !h.checkLoggingEnabled(c) {
+		return
+	}
+
+	dir := h.logDirectory()
+	if strings.TrimSpace(dir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
+		return
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusOK, gin.H{"total_bytes": 0, "file_count": 0})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log directory: %v", err)})
+		return
+	}
+
+	var totalBytes int64
+	var fileCount int
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, errInfo := entry.Info()
+		if errInfo != nil {
+			continue
+		}
+		totalBytes += info.Size()
+		fileCount++
+	}
+
+	c.JSON(http.StatusOK, gin.H{"total_bytes": totalBytes, "file_count": fileCount})
+}
+
 // GetLogs returns log lines with optional incremental loading.
 func (h *Handler) GetLogs(c *gin.Context) {
 	if !h.checkLoggingEnabled(c) {
@@ -96,13 +135,30 @@ func (h *Handler) GetLogs(c *gin.Context) {
 
 	cutoff := parseCutoff(c.Query("after"))
 	acc := newLogAccumulator(cutoff, limit)
-	for i := range files {
-		if errProcess := acc.consumeFile(files[i]); errProcess != nil {
-			c.JSON(
-				http.StatusInternalServerError,
-				gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)},
-			)
-			return
+
+	// When only the tail is needed, still walk files from oldest to newest so
+	// the accumulator keeps chronological order across rotations. consumeFile()
+	// already seeks near EOF for each file in this mode, so we stay efficient
+	// without letting older rotated lines overwrite newer main.log lines.
+	if cutoff == 0 && limit > 0 {
+		for i := range files {
+			if errProcess := acc.consumeFile(files[i]); errProcess != nil {
+				c.JSON(
+					http.StatusInternalServerError,
+					gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)},
+				)
+				return
+			}
+		}
+	} else {
+		for i := range files {
+			if errProcess := acc.consumeFile(files[i]); errProcess != nil {
+				c.JSON(
+					http.StatusInternalServerError,
+					gin.H{"error": fmt.Sprintf("failed to read log file %s: %v", files[i], errProcess)},
+				)
+				return
+			}
 		}
 	}
 
@@ -310,6 +366,7 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 }
 
 // DownloadRequestErrorLog downloads a specific error request log file by name.
+// When the "lines" query parameter is set, returns a JSON preview instead.
 func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 	dir, ok := h.checkLogDirectory(c)
 	if !ok {
@@ -333,7 +390,81 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 		)
 		return
 	}
+
+	// Preview mode: return last N lines as JSON
+	if linesParam := c.Query("lines"); linesParam != "" {
+		maxLines, err := strconv.Atoi(linesParam)
+		if err != nil || maxLines < 1 {
+			maxLines = 100
+		}
+		if maxLines > 10000 {
+			maxLines = 10000
+		}
+		h.previewLogFile(c, dirAbs, name, maxLines)
+		return
+	}
+
 	h.serveLogFile(c, dirAbs, name)
+}
+
+// previewLogFile reads the last maxLines lines from a log file and returns them as JSON.
+func (h *Handler) previewLogFile(c *gin.Context, dirAbs, fileName string, maxLines int) {
+	fullPath := filepath.Clean(filepath.Join(dirAbs, fileName))
+	prefix := dirAbs + string(os.PathSeparator)
+	if !strings.HasPrefix(fullPath, prefix) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
+		return
+	}
+
+	file, err := os.Open(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to open log file: %v", err)})
+		return
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, logScannerInitialBuffer)
+	scanner.Buffer(buf, logScannerMaxBuffer)
+
+	// Ring buffer to hold tail lines without retaining the full file in memory
+	ring := make([]string, maxLines)
+	ringIdx := 0
+	totalLines := 0
+	for scanner.Scan() {
+		ring[ringIdx%maxLines] = scanner.Text()
+		ringIdx++
+		totalLines++
+	}
+	if errScan := scanner.Err(); errScan != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errScan)})
+		return
+	}
+
+	// Extract ring buffer in order
+	count := totalLines
+	if count > maxLines {
+		count = maxLines
+	}
+	lines := make([]string, count)
+	start := ringIdx - count
+	for i := 0; i < count; i++ {
+		lines[i] = ring[(start+i)%maxLines]
+	}
+
+	c.JSON(
+		http.StatusOK, gin.H{
+			"content":     strings.Join(lines, "\n"),
+			"truncated":   totalLines > maxLines,
+			"total_lines": totalLines,
+		},
+	)
 }
 
 // serveLogFile validates the file path, checks for path traversal, and serves the file.
@@ -438,6 +569,29 @@ func (acc *logAccumulator) consumeFile(path string) error {
 	defer func() {
 		_ = file.Close()
 	}()
+
+	// When only the tail is needed (no cutoff filter, with limit), seek near EOF
+	// to avoid reading the entire file. Estimate ~512 bytes per line as a buffer.
+	if acc.limit > 0 && acc.cutoff == 0 {
+		if info, errStat := file.Stat(); errStat == nil {
+			need := int64(acc.limit) * 512
+			// Need extra margin because we'll discard the first partial line
+			need += 4096
+			if size := info.Size(); size > need {
+				if _, errSeek := file.Seek(size-need, 0); errSeek == nil {
+					// Read and discard the first (likely partial) line
+					scanner := bufio.NewScanner(file)
+					buf := make([]byte, 0, logScannerInitialBuffer)
+					scanner.Buffer(buf, logScannerMaxBuffer)
+					scanner.Scan() // discard partial first line
+					for scanner.Scan() {
+						acc.addLine(scanner.Text())
+					}
+					return scanner.Err()
+				}
+			}
+		}
+	}
 
 	scanner := bufio.NewScanner(file)
 	buf := make([]byte, 0, logScannerInitialBuffer)

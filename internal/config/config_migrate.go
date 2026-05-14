@@ -44,5 +44,34 @@ func removeLegacyAuthBlock(root *yaml.Node) {
 	if root == nil || root.Kind != yaml.MappingNode {
 		return
 	}
-	removeMapKey(root, "auth")
+	idx := findMapKeyIndex(root, "auth")
+	if idx < 0 || idx+1 >= len(root.Content) {
+		return
+	}
+	authNode := root.Content[idx+1]
+	if authNode == nil || authNode.Kind != yaml.MappingNode {
+		return
+	}
+	providersIdx := findMapKeyIndex(authNode, "providers")
+	if providersIdx < 0 || providersIdx+1 >= len(authNode.Content) {
+		removeMapKey(root, "auth")
+		return
+	}
+	providersNode := authNode.Content[providersIdx+1]
+	if providersNode == nil || providersNode.Kind != yaml.MappingNode {
+		removeMapKey(root, "auth")
+		return
+	}
+	configAPIKeyIdx := findMapKeyIndex(providersNode, "config-api-key")
+	if configAPIKeyIdx < 0 {
+		removeMapKey(root, "auth")
+		return
+	}
+	for i := 0; i+1 < len(providersNode.Content); i += 2 {
+		if i == configAPIKeyIdx {
+			continue
+		}
+		removeMapKey(providersNode, providersNode.Content[i].Value)
+		i -= 2
+	}
 }

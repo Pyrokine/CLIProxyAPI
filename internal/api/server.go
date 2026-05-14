@@ -24,9 +24,11 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/modules"
 	ampmodule "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/modules/amp"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
@@ -180,6 +182,9 @@ type Server struct {
 	keepAliveOnTimeout func()
 	keepAliveHeartbeat chan struct{}
 	keepAliveStop      chan struct{}
+
+	// redirectSrv is the HTTP→HTTPS redirect listener for graceful shutdown.
+	redirectSrv *http.Server
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -275,8 +280,66 @@ func NewServer(
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
-	// Initialize management handler
+	// Initialize management handler first (to get internalToken for quota scheduler)
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+
+	// Create quota scheduler
+	quotaCfg := quota.Config{
+		Enabled:     cfg.QuotaRefresh.Enabled,
+		Interval:    cfg.QuotaRefresh.Interval,
+		MaxInterval: cfg.QuotaRefresh.MaxInterval,
+	}
+	if quotaCfg.Interval <= 0 {
+		quotaCfg.Interval = 600
+	}
+	if quotaCfg.MaxInterval <= 0 {
+		quotaCfg.MaxInterval = 1800
+	}
+	localAPICall := quota.NewLocalAPICallFunc(cfg.Port, s.mgmt.InternalToken())
+
+	quotaScheduler := quota.NewScheduler(
+		quotaCfg, func(entry *quota.Entry) ([]byte, error) {
+			if entry.AuthIndex == "" {
+				return nil, fmt.Errorf("no auth_index for %s", entry.FileName)
+			}
+
+			switch entry.Type {
+			case quota.TypeClaude:
+				return fetchClaudeQuota(localAPICall, entry.AuthIndex)
+			case quota.TypeCodex:
+				return fetchCodexQuota(localAPICall, entry.AuthIndex)
+			case quota.TypeGeminiCli:
+				return fetchGeminiQuota(localAPICall, entry.AuthIndex)
+			case quota.TypeAntigravity:
+				return fetchAntigravityQuota(localAPICall, entry.AuthIndex)
+			case quota.TypeKimi:
+				return fetchKimiQuota(localAPICall, entry.AuthIndex)
+			default:
+				return nil, fmt.Errorf("quota fetch not implemented for type %s", entry.Type)
+			}
+		},
+	)
+	s.mgmt.SetQuotaScheduler(quotaScheduler)
+
+	// Register existing auth files with quota scheduler
+	if cfg.AuthDir != "" {
+		registerAuthFilesForQuota(quotaScheduler, cfg.AuthDir)
+	}
+
+	// Sync initial disabled state from auth manager so auto-refresh skips
+	// pre-existing disabled/banned credentials on startup.
+	if authManager != nil {
+		for _, a := range authManager.List() {
+			if a != nil && a.Disabled && a.FileName != "" {
+				quotaScheduler.SetDisabled(a.FileName, true)
+			}
+		}
+	}
+
+	if quotaCfg.Enabled {
+		quotaScheduler.Start()
+	}
+
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
 	}
@@ -293,13 +356,13 @@ func NewServer(
 	// Register Amp module using V2 interface with Context
 	s.ampModule = ampmodule.New(
 		ampmodule.WithAccessManager(accessManager),
-		ampmodule.WithAuthMiddleware(authMiddleware(accessManager, authRateLimiter)),
+		ampmodule.WithAuthMiddleware(authMiddleware(accessManager, authRateLimiter, cfg.AllowQueryAuth)),
 	)
 	ctx := modules.Context{
 		Engine:         engine,
 		BaseHandler:    s.handlers,
 		Config:         cfg,
-		AuthMiddleware: authMiddleware(accessManager, authRateLimiter),
+		AuthMiddleware: authMiddleware(accessManager, authRateLimiter, cfg.AllowQueryAuth),
 	}
 	if err := modules.RegisterModule(ctx, s.ampModule); err != nil {
 		log.Errorf("Failed to register Amp module: %v", err)
@@ -345,7 +408,8 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(authMiddleware(s.accessManager, s.authRateLimiter))
+	v1.Use(requireTLSForAuth(s.cfg), noStoreMiddleware())
+	v1.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.cfg.AllowQueryAuth))
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -359,7 +423,8 @@ func (s *Server) setupRoutes() {
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(authMiddleware(s.accessManager, s.authRateLimiter))
+	v1beta.Use(requireTLSForAuth(s.cfg), noStoreMiddleware())
+	v1beta.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.cfg.AllowQueryAuth))
 	{
 		v1beta.GET("/models", geminiHandlers.GeminiModels)
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -381,7 +446,12 @@ func (s *Server) setupRoutes() {
 			)
 		},
 	)
-	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
+	s.engine.POST(
+		"/v1internal:method",
+		requireTLSForAuth(s.cfg),
+		authMiddleware(s.accessManager, s.authRateLimiter, s.cfg.AllowQueryAuth),
+		geminiCLIHandlers.CLIHandler,
+	)
 
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
@@ -395,7 +465,7 @@ func (s *Server) setupRoutes() {
 	} {
 		provider := cb.provider
 		s.engine.GET(
-			cb.path, func(c *gin.Context) {
+			cb.path, noStoreMiddleware(), func(c *gin.Context) {
 				code := c.Query("code")
 				state := c.Query("state")
 				errStr := c.Query("error")
@@ -437,7 +507,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	s.wsRoutes[trimmed] = struct{}{}
 	s.wsRouteMu.Unlock()
 
-	authMiddleware := authMiddleware(s.accessManager, s.authRateLimiter)
+	authMiddleware := authMiddleware(s.accessManager, s.authRateLimiter, s.cfg.AllowQueryAuth)
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
 			c.Next()
@@ -464,13 +534,17 @@ func (s *Server) registerManagementRoutes() {
 	log.Info("management routes registered after secret key configuration")
 
 	mgmt := s.engine.Group("/v0/management")
-	mgmt.Use(s.managementAvailabilityMiddleware(), managementBodyLimitMiddleware(), s.mgmt.Middleware())
+	mgmt.Use(
+		requireTLSForAuth(s.cfg), noStoreMiddleware(), s.managementAvailabilityMiddleware(),
+		managementBodyLimitMiddleware(), s.mgmt.Middleware(),
+	)
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/summary", s.mgmt.GetUsageSummary)
 		mgmt.GET("/usage/events", s.mgmt.GetUsageEvents)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.POST("/usage/recalculate-costs", s.mgmt.RecalculateCosts)
 		mgmt.GET("/model-prices", s.mgmt.GetModelPrices)
 		mgmt.PUT("/model-prices", s.mgmt.PutModelPrices)
 		mgmt.GET("/usage-retention", s.mgmt.GetUsageRetention)
@@ -478,12 +552,15 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/usage-retention", s.mgmt.PutUsageRetention)
 		mgmt.POST("/usage-retention/trim", s.mgmt.TrimUsageStatistics)
 		mgmt.GET("/usage-retention/trim-preview", s.mgmt.TrimPreviewUsageStatistics)
+		mgmt.GET("/usage/db-size", s.mgmt.GetUsageDBSize)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
 		mgmt.POST("/config.yaml/validate", s.mgmt.ValidateConfigYAML)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
+		mgmt.GET("/version", s.mgmt.GetVersion)
 		mgmt.GET("/releases", s.mgmt.GetReleases)
+		mgmt.GET("/update-compatibility", s.mgmt.GetUpdateCompatibility)
 		mgmt.POST("/update", s.mgmt.PostUpdate)
 		mgmt.GET("/update-status", s.mgmt.GetUpdateStatus)
 		mgmt.POST("/panel-update", s.mgmt.PostPanelUpdate)
@@ -523,6 +600,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 
+		mgmt.GET("/quota/status", s.mgmt.GetQuotaStatus)
+		mgmt.POST("/quota/refresh", s.mgmt.PostQuotaRefresh)
+		mgmt.GET("/quota/config", s.mgmt.GetQuotaConfig)
+		mgmt.PUT("/quota/config", s.mgmt.PutQuotaConfig)
+
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
@@ -532,12 +614,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-key-aliases", s.mgmt.PutAPIKeyAliases)
 		mgmt.PATCH("/api-key-aliases", s.mgmt.PatchAPIKeyAlias)
 		mgmt.DELETE("/api-key-aliases", s.mgmt.DeleteAPIKeyAlias)
+		mgmt.GET("/api-key-usage", s.mgmt.GetAPIKeyUsage)
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
 		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)
 		mgmt.DELETE("/gemini-api-key", s.mgmt.DeleteGeminiKey)
 
+		mgmt.GET("/log-size", s.mgmt.GetLogSize)
 		mgmt.GET("/logs", s.mgmt.GetLogs)
 		mgmt.DELETE("/logs", s.mgmt.DeleteLogs)
 		mgmt.GET("/request-error-logs", s.mgmt.GetRequestErrorLogs)
@@ -626,10 +710,14 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
+		mgmt.GET("/models-catalog-meta", s.mgmt.GetModelsCatalogMeta)
+		mgmt.POST("/models-catalog-refresh", s.mgmt.PostModelsCatalogRefresh)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
+		mgmt.PATCH("/auth-files/bulk-enable", s.mgmt.PatchAuthFilesBulkEnable)
+		mgmt.PATCH("/auth-files/bulk-disable", s.mgmt.PatchAuthFilesBulkDisable)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
@@ -665,6 +753,58 @@ func managementBodyLimitMiddleware() gin.HandlerFunc {
 	}
 }
 
+func noStoreMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
+		c.Next()
+	}
+}
+
+// requireTLSForAuth enforces cfg.TLS.RequireForAuth: if enabled, reject non-TLS
+// requests to authenticated routes with 421. Loopback traffic is always allowed
+// so the panel continues to work on localhost when tls.enable=false.
+func requireTLSForAuth(cfg *config.Config) gin.HandlerFunc {
+	if cfg == nil || !cfg.TLS.RequireForAuth {
+		return func(c *gin.Context) { c.Next() }
+	}
+	return func(c *gin.Context) {
+		if c.Request.TLS != nil {
+			c.Next()
+			return
+		}
+		if isLoopbackRequest(c.Request) {
+			c.Next()
+			return
+		}
+		if cfg.TLS.TrustForwardedProto {
+			forwardedProto := strings.ToLower(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")))
+			if forwardedProto == "https" {
+				c.Next()
+				return
+			}
+		}
+		c.AbortWithStatusJSON(
+			http.StatusMisdirectedRequest, gin.H{
+				"error":   "TLS required",
+				"message": "this endpoint requires HTTPS (tls.require-for-auth=true). Retry using https:// or connect via loopback.",
+			},
+		)
+	}
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	host := r.Host
+	if idx := strings.LastIndex(host, ":"); idx >= 0 {
+		host = host[:idx]
+	}
+	host = strings.Trim(host, "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	cfg := s.cfg
 	if cfg == nil || cfg.RemoteManagement.DisableControlPanel {
@@ -679,11 +819,16 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
+			// Only attempt sync download if auto-update is enabled
+			if !cfg.RemoteManagement.IsAutoUpdatePanel() {
+				c.AbortWithStatus(http.StatusNotFound)
+				return
+			}
 			// Synchronously ensure management.html is available with a detached context.
 			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(
+			if !managementasset.EnsureManagementHTML(
 				context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL,
-				cfg.RemoteManagement.PanelGitHubRepository,
+				cfg.RemoteManagement.PanelGitHubRepository, "",
 			) {
 				c.AbortWithStatus(http.StatusNotFound)
 				return
@@ -695,6 +840,11 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
+	// CSP for the management panel SPA
+	c.Header(
+		"Content-Security-Policy",
+		"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self'",
+	)
 	c.File(filePath)
 }
 
@@ -809,12 +959,51 @@ func (s *Server) Start() error {
 	}
 
 	useTLS := s.cfg != nil && s.cfg.TLS.Enable
+	if !useTLS {
+		log.Warnf(
+			"security: TLS is disabled — API traffic (including Authorization headers) is transmitted in plaintext. " +
+				"Enable tls.enable with certificate/key before exposing this server to the public network.",
+		)
+	}
+	if s.cfg != nil && s.cfg.AllowQueryAuth {
+		log.Warnf(
+			"security: allow-query-auth is enabled — API keys may leak to access logs, Referer headers, and browser history. " +
+				"Prefer Authorization header or x-api-key. This option remains for backward compatibility with scripted clients.",
+		)
+	}
 	if useTLS {
 		cert := strings.TrimSpace(s.cfg.TLS.Cert)
 		key := strings.TrimSpace(s.cfg.TLS.Key)
 		if cert == "" || key == "" {
 			return fmt.Errorf("failed to start HTTPS server: tls.cert or tls.key is empty")
 		}
+
+		// Start HTTP→HTTPS redirect listener if configured
+		redirectPort := s.cfg.TLS.HTTPRedirectPort
+		if redirectPort > 0 {
+			httpsAddr := s.server.Addr
+			redirectAddr := fmt.Sprintf(":%d", redirectPort)
+			redirectSrv := &http.Server{
+				Addr:         redirectAddr,
+				ReadTimeout:  5 * time.Second,
+				WriteTimeout: 10 * time.Second,
+				IdleTimeout:  30 * time.Second,
+				Handler: http.HandlerFunc(
+					func(w http.ResponseWriter, r *http.Request) {
+						target := "https://" + httpsAddr + r.URL.RequestURI()
+						http.Redirect(w, r, target, http.StatusMovedPermanently)
+					},
+				),
+			}
+			s.redirectSrv = redirectSrv
+			go func() {
+				log.Debugf("Starting HTTP→HTTPS redirect on %s → %s", redirectAddr, httpsAddr)
+				if err := redirectSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+					log.Warnf("HTTP redirect listener stopped: %v", err)
+				}
+			}()
+		}
+
 		log.Debugf("Starting API server on %s with TLS", s.server.Addr)
 		if errServeTLS := s.server.ListenAndServeTLS(cert, key); errServeTLS != nil && !errors.Is(
 			errServeTLS, http.ErrServerClosed,
@@ -850,9 +1039,27 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
-	// Shutdown the HTTP server.
-	if err := s.server.Shutdown(ctx); err != nil {
-		return fmt.Errorf("failed to shutdown HTTP server: %v", err)
+	shutdownServer := func(server *http.Server, name string) error {
+		if server == nil {
+			return nil
+		}
+		if err := server.Shutdown(ctx); err != nil {
+			if ctx != nil && ctx.Err() != nil {
+				if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+					return fmt.Errorf("failed to shutdown %s: %v (close fallback: %v)", name, err, closeErr)
+				}
+				return fmt.Errorf("failed to shutdown %s: %v", name, err)
+			}
+			return fmt.Errorf("failed to shutdown %s: %v", name, err)
+		}
+		return nil
+	}
+
+	if err := shutdownServer(s.server, "HTTP server"); err != nil {
+		return err
+	}
+	if err := shutdownServer(s.redirectSrv, "redirect server"); err != nil {
+		return err
 	}
 
 	if s.authRateLimiter != nil {
@@ -894,6 +1101,15 @@ func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
 		c.Header(
 			"Access-Control-Expose-Headers", "X-Cpa-Version, X-Cpa-Build-Date, X-Cpa-Commit",
 		)
+		c.Header("X-Cpa-Version", buildinfo.Version)
+		c.Header("X-Cpa-Build-Date", buildinfo.BuildDate)
+		c.Header("X-Cpa-Commit", buildinfo.Commit)
+
+		// Security headers
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "SAMEORIGIN")
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		c.Header("Cache-Control", "no-cache")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -1046,6 +1262,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {
 		entry := cfg.OpenAICompatibility[i]
+		if entry.Disabled {
+			continue
+		}
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
@@ -1077,13 +1296,59 @@ func (s *Server) SetUsagePersister(p *usage.Persister) {
 	s.mgmt.SetUsagePersister(p)
 }
 
+// ManagementHandler exposes the management handler for lifecycle wiring.
+func (s *Server) ManagementHandler() *managementHandlers.Handler {
+	if s == nil {
+		return nil
+	}
+	return s.mgmt
+}
+
 // (management handlers moved to internal/api/handlers/management)
 
-// authMiddleware returns a Gin middleware handler that authenticates requests
-// using the configured authentication providers. When no providers are available,
+// extractAuthCandidate returns the first non-empty credential found on the request.
+// It mirrors the detection order of the config-access provider so the rate limiter
+// can attribute failures to the credential the client actually offered.
+// readQuery must match the current allow-query-auth config: otherwise an attacker could
+// poison the per-account accountHash by forging ?key=<victim> and lock out victim's header-authed requests.
+func extractAuthCandidate(r *http.Request, readQuery bool) string {
+	if v := strings.TrimSpace(r.Header.Get("Authorization")); v != "" {
+		if lower := strings.ToLower(v); strings.HasPrefix(lower, "bearer ") {
+			return strings.TrimSpace(v[len("Bearer "):])
+		}
+		return v
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-Goog-Api-Key")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-Api-Key")); v != "" {
+		return v
+	}
+	if !readQuery {
+		return ""
+	}
+	q := r.URL.Query()
+	if v := strings.TrimSpace(q.Get("key")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(q.Get("auth_token")); v != "" {
+		return v
+	}
+	return ""
+}
+
+// authMiddleware creates an HTTP middleware that authenticates requests using
+// the access manager. When no auth providers are registered (api-keys empty),
 // only loopback clients are allowed (prevents open-proxy when api-keys is empty).
-// It enforces per-IP rate limiting on authentication failures to mitigate brute-force attacks.
-func authMiddleware(manager *sdkaccess.Manager, rateLimiter *access.AuthRateLimiter) gin.HandlerFunc {
+// It enforces rate limiting on authentication failures along two axes:
+//   - per client IP: mitigates a single host brute-forcing
+//   - per account identifier (derived from the offered credential): mitigates
+//     distributed attacks that rotate IPs against one account
+func authMiddleware(
+	manager *sdkaccess.Manager,
+	rateLimiter *access.AuthRateLimiter,
+	allowQueryAuth bool,
+) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if manager == nil {
 			// No auth configured — restrict to loopback to prevent open-proxy exposure
@@ -1118,6 +1383,18 @@ func authMiddleware(manager *sdkaccess.Manager, rateLimiter *access.AuthRateLimi
 			return
 		}
 
+		// Derive an account identifier from the raw credential candidate so repeated failures
+		// against a single account can be locked out even when the attacker rotates source IPs.
+		accountHash := access.HashAccountKey(extractAuthCandidate(c.Request, allowQueryAuth))
+		if rateLimiter != nil && rateLimiter.IsAccountLimited(accountHash) {
+			c.AbortWithStatusJSON(
+				http.StatusTooManyRequests, gin.H{
+					"error": "too many authentication failures for this credential, please try again later",
+				},
+			)
+			return
+		}
+
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {
 			if result == nil {
@@ -1139,6 +1416,7 @@ func authMiddleware(manager *sdkaccess.Manager, rateLimiter *access.AuthRateLimi
 			}
 			if rateLimiter != nil {
 				rateLimiter.RecordSuccess(clientIP)
+				rateLimiter.RecordAccountSuccess(accountHash)
 			}
 			c.Next()
 			return
@@ -1146,6 +1424,7 @@ func authMiddleware(manager *sdkaccess.Manager, rateLimiter *access.AuthRateLimi
 
 		if rateLimiter != nil {
 			rateLimiter.RecordFailure(clientIP)
+			rateLimiter.RecordAccountFailure(accountHash)
 		}
 
 		statusCode := err.HTTPStatusCode()

@@ -259,8 +259,8 @@ func TestSchedulerPick_MixedProvidersUsesProviderRotationOverReadyCandidates(t *
 		&Auth{ID: "claude-a", Provider: "claude"},
 	)
 
-	wantProviders := []string{"gemini", "claude", "gemini", "claude"}
-	wantIDs := []string{"gemini-a", "claude-a", "gemini-b", "claude-a"}
+	wantProviders := []string{"gemini", "gemini", "claude", "gemini"}
+	wantIDs := []string{"gemini-a", "gemini-b", "claude-a", "gemini-a"}
 	for index := range wantProviders {
 		got, provider, errPick := scheduler.pickMixed(
 			context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil,

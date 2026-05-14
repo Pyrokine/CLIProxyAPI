@@ -6,6 +6,7 @@ package cliproxy
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	configaccess "github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
@@ -208,8 +209,16 @@ func (b *Builder) Build() (*Service, error) {
 		}
 
 		strategy := ""
+		sessionAffinity := false
+		sessionAffinityTTL := time.Hour
 		if b.cfg != nil {
 			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
+			sessionAffinity = b.cfg.Routing.ClaudeCodeSessionAffinity || b.cfg.Routing.SessionAffinity
+			if ttl := strings.TrimSpace(b.cfg.Routing.SessionAffinityTTL); ttl != "" {
+				if parsed, err := time.ParseDuration(ttl); err == nil && parsed > 0 {
+					sessionAffinityTTL = parsed
+				}
+			}
 		}
 		var selector coreauth.Selector
 		switch strategy {
@@ -217,6 +226,14 @@ func (b *Builder) Build() (*Service, error) {
 			selector = &coreauth.FillFirstSelector{}
 		default:
 			selector = &coreauth.RoundRobinSelector{}
+		}
+		if sessionAffinity {
+			selector = coreauth.NewSessionAffinitySelectorWithConfig(
+				coreauth.SessionAffinityConfig{
+					Fallback: selector,
+					TTL:      sessionAffinityTTL,
+				},
+			)
 		}
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)

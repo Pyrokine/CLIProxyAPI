@@ -311,6 +311,31 @@ func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {
 	expectContains(t, details, "remote-management.secret-key: deleted")
 }
 
+func TestBuildConfigChangeDetails_RemoteManagementUpdateFields(t *testing.T) {
+	oldCfg := &config.Config{
+		RemoteManagement: config.RemoteManagement{
+			CPAGitHubRepository: "old/cpa",
+			AutoCheckUpdate:     false,
+			AutoUpdateCPA:       false,
+			CheckInterval:       180,
+		},
+	}
+	newCfg := &config.Config{
+		RemoteManagement: config.RemoteManagement{
+			CPAGitHubRepository: "new/cpa",
+			AutoCheckUpdate:     true,
+			AutoUpdateCPA:       true,
+			CheckInterval:       60,
+		},
+	}
+
+	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "remote-management.cpa-github-repository: old/cpa -> new/cpa")
+	expectContains(t, details, "remote-management.auto-check-update: false -> true")
+	expectContains(t, details, "remote-management.auto-update-cpa: false -> true")
+	expectContains(t, details, "remote-management.check-interval: 180 -> 60")
+}
+
 func TestBuildConfigChangeDetails_AllBranches(t *testing.T) {
 	oldCfg := &config.Config{
 		Port:                   1,

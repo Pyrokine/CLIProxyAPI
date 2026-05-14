@@ -1,4 +1,4 @@
-// Last compiled: 2026-03-23
+// Last compiled: 2026-04-27
 // Author: pyro
 
 package management
@@ -10,6 +10,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 // summaryTokens holds a token breakdown.
@@ -40,28 +41,49 @@ type summaryModelStats struct {
 }
 
 // summaryCredentialStats holds per-credential aggregation.
+// Provider/Source are surfaced so the frontend can render the
+// "[Claude] alias" tags in dropdowns and stat cards without re-parsing
+// the map key — v2 by_credential keys are "provider:source" tuples for
+// rows that carry a provider, but legacy rows (provider blank) keep the
+// bare source as their key, so the components must travel separately.
 type summaryCredentialStats struct {
-	Success int64 `json:"success"`
-	Failure int64 `json:"failure"`
+	Success  int64  `json:"success"`
+	Failure  int64  `json:"failure"`
+	Provider string `json:"provider,omitempty"`
+	Source   string `json:"source,omitempty"`
 }
 
 // summaryTimePoint represents a single time bucket.
 type summaryTimePoint struct {
-	Time     string  `json:"time"`
-	Requests int64   `json:"requests"`
-	Tokens   int64   `json:"tokens"`
-	Cost     float64 `json:"cost"`
-	HasCost  bool    `json:"has_cost"`
+	Time     string        `json:"time"`
+	Requests int64         `json:"requests"`
+	Success  int64         `json:"success"`
+	Failure  int64         `json:"failure"`
+	Tokens   summaryTokens `json:"tokens"`
+	Cost     float64       `json:"cost"`
+	HasCost  bool          `json:"has_cost"`
+}
+
+// summaryAPIKeyStats holds per-API-key aggregation.
+type summaryAPIKeyStats struct {
+	Requests int64         `json:"requests"`
+	Success  int64         `json:"success"`
+	Failure  int64         `json:"failure"`
+	Tokens   summaryTokens `json:"tokens"`
+	Cost     float64       `json:"cost"`
 }
 
 // summaryResponse is the full response for GET /usage/summary.
 type summaryResponse struct {
-	Period            summaryPeriod                      `json:"period"`
-	Totals            summaryTotals                      `json:"totals"`
-	ByModel           map[string]*summaryModelStats      `json:"by_model"`
-	ByCredential      map[string]*summaryCredentialStats `json:"by_credential"`
-	TimeSeries        []summaryTimePoint                 `json:"time_series"`
-	TimeSeriesByModel map[string][]summaryTimePoint      `json:"time_series_by_model"`
+	Period                 summaryPeriod                      `json:"period"`
+	Totals                 summaryTotals                      `json:"totals"`
+	ByModel                map[string]*summaryModelStats      `json:"by_model"`
+	ByCredential           map[string]*summaryCredentialStats `json:"by_credential"`
+	ByAPIKey               map[string]*summaryAPIKeyStats     `json:"by_api_key"`
+	TimeSeries             []summaryTimePoint                 `json:"time_series"`
+	TimeSeriesByModel      map[string][]summaryTimePoint      `json:"time_series_by_model"`
+	TimeSeriesByCredential map[string][]summaryTimePoint      `json:"time_series_by_credential"`
+	TimeSeriesByAPIKey     map[string][]summaryTimePoint      `json:"time_series_by_api_key"`
 }
 
 type summaryPeriod struct {
@@ -73,6 +95,7 @@ type summaryPeriod struct {
 //
 //	GET /v0/management/usage/summary?from=...&to=...&granularity=hourly|daily
 func (h *Handler) GetUsageSummary(c *gin.Context) {
+	start := time.Now()
 	now := time.Now().UTC()
 
 	from, errFrom := parseTimeParam(c.Query("from"), now.AddDate(0, 0, -30))
@@ -90,25 +113,36 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 		granularity = "hourly"
 	}
 
+	modelFilter := c.Query("model")
+	apiKeyFilter := c.Query("api_key")
+	credentialFilter := c.Query("credential")
+	includeGroups := c.DefaultQuery("groups", "all") != "none"
+
 	if h.usagePersister == nil {
 		c.JSON(http.StatusOK, emptySummaryResponse(from, to))
 		return
 	}
 
-	summary := h.usagePersister.Summary()
-	if summary == nil {
-		c.JSON(http.StatusOK, emptySummaryResponse(from, to))
+	qr, err := h.usagePersister.Query(
+		from, to, usage.EventFilters{
+			Model:  modelFilter,
+			Source: credentialFilter,
+			APIKey: apiKeyFilter,
+		}, granularity, includeGroups,
+	)
+	if err != nil {
+		log.Errorf("usage: GetUsageSummary query failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query summary"})
 		return
 	}
 
-	var qr usage.QueryResult
-	if granularity == "hourly" {
-		qr = summary.QueryHourly(from, to)
-	} else {
-		qr = summary.Query(from, to)
-	}
+	resp := buildSummaryResponse(from, to, qr, h.usagePersister.HasPricing())
 
-	c.JSON(http.StatusOK, buildSummaryResponse(from, to, qr, h.usagePersister.HasPricing()))
+	log.Debugf(
+		"usage: GetUsageSummary took %v (from=%s, to=%s)",
+		time.Since(start), from.Format(time.RFC3339), to.Format(time.RFC3339),
+	)
+	c.JSON(http.StatusOK, resp)
 }
 
 func emptySummaryResponse(from, to time.Time) summaryResponse {
@@ -117,9 +151,12 @@ func emptySummaryResponse(from, to time.Time) summaryResponse {
 			From: from.Format(time.RFC3339),
 			To:   to.Format(time.RFC3339),
 		},
-		ByModel:           make(map[string]*summaryModelStats),
-		ByCredential:      make(map[string]*summaryCredentialStats),
-		TimeSeriesByModel: make(map[string][]summaryTimePoint),
+		ByModel:                make(map[string]*summaryModelStats),
+		ByCredential:           make(map[string]*summaryCredentialStats),
+		ByAPIKey:               make(map[string]*summaryAPIKeyStats),
+		TimeSeriesByModel:      make(map[string][]summaryTimePoint),
+		TimeSeriesByCredential: make(map[string][]summaryTimePoint),
+		TimeSeriesByAPIKey:     make(map[string][]summaryTimePoint),
 	}
 }
 
@@ -142,9 +179,12 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 			},
 			Cost: roundCost(qr.Totals.Cost),
 		},
-		ByModel:           make(map[string]*summaryModelStats, len(qr.ByModel)),
-		ByCredential:      make(map[string]*summaryCredentialStats, len(qr.ByCredential)),
-		TimeSeriesByModel: make(map[string][]summaryTimePoint, len(qr.TimeSeriesByModel)),
+		ByModel:                make(map[string]*summaryModelStats, len(qr.ByModel)),
+		ByCredential:           make(map[string]*summaryCredentialStats, len(qr.ByCredential)),
+		ByAPIKey:               make(map[string]*summaryAPIKeyStats, len(qr.ByAPIKey)),
+		TimeSeriesByModel:      make(map[string][]summaryTimePoint, len(qr.TimeSeriesByModel)),
+		TimeSeriesByCredential: make(map[string][]summaryTimePoint, len(qr.TimeSeriesByCredential)),
+		TimeSeriesByAPIKey:     make(map[string][]summaryTimePoint, len(qr.TimeSeriesByAPIKey)),
 	}
 
 	for model, ms := range qr.ByModel {
@@ -165,8 +205,26 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 
 	for cred, cs := range qr.ByCredential {
 		resp.ByCredential[cred] = &summaryCredentialStats{
-			Success: cs.Success,
-			Failure: cs.Failure,
+			Success:  cs.Success,
+			Failure:  cs.Failure,
+			Provider: cs.Provider,
+			Source:   cs.Source,
+		}
+	}
+
+	for key, aks := range qr.ByAPIKey {
+		resp.ByAPIKey[key] = &summaryAPIKeyStats{
+			Requests: aks.Requests,
+			Success:  aks.Success,
+			Failure:  aks.Failure,
+			Tokens: summaryTokens{
+				Input:     aks.Tokens.InputTokens,
+				Output:    aks.Tokens.OutputTokens,
+				Cached:    aks.Tokens.CachedTokens,
+				Reasoning: aks.Tokens.ReasoningTokens,
+				Total:     aks.Tokens.TotalTokens,
+			},
+			Cost: roundCost(aks.Cost),
 		}
 	}
 
@@ -175,9 +233,17 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 		resp.TimeSeries[i] = summaryTimePoint{
 			Time:     tp.Time,
 			Requests: tp.Requests,
-			Tokens:   tp.Tokens,
-			Cost:     roundCost(tp.Cost),
-			HasCost:  tp.Cost > 0 || (hasPricing && tp.Requests > 0),
+			Success:  tp.Success,
+			Failure:  tp.Failure,
+			Tokens: summaryTokens{
+				Input:     tp.Tokens.InputTokens,
+				Output:    tp.Tokens.OutputTokens,
+				Cached:    tp.Tokens.CachedTokens,
+				Reasoning: tp.Tokens.ReasoningTokens,
+				Total:     tp.Tokens.TotalTokens,
+			},
+			Cost:    roundCost(tp.Cost),
+			HasCost: tp.Cost > 0 || (hasPricing && tp.Requests > 0),
 		}
 	}
 
@@ -187,10 +253,64 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 			converted[i] = summaryTimePoint{
 				Time:     tp.Time,
 				Requests: tp.Requests,
-				Tokens:   tp.Tokens,
+				Success:  tp.Success,
+				Failure:  tp.Failure,
+				Tokens: summaryTokens{
+					Input:     tp.Tokens.InputTokens,
+					Output:    tp.Tokens.OutputTokens,
+					Cached:    tp.Tokens.CachedTokens,
+					Reasoning: tp.Tokens.ReasoningTokens,
+					Total:     tp.Tokens.TotalTokens,
+				},
+				Cost:    roundCost(tp.Cost),
+				HasCost: tp.Cost > 0 || (hasPricing && tp.Requests > 0),
 			}
 		}
 		resp.TimeSeriesByModel[model] = converted
+	}
+
+	for cred, points := range qr.TimeSeriesByCredential {
+		converted := make([]summaryTimePoint, len(points))
+		for i, tp := range points {
+			converted[i] = summaryTimePoint{
+				Time:     tp.Time,
+				Requests: tp.Requests,
+				Success:  tp.Success,
+				Failure:  tp.Failure,
+				Tokens: summaryTokens{
+					Input:     tp.Tokens.InputTokens,
+					Output:    tp.Tokens.OutputTokens,
+					Cached:    tp.Tokens.CachedTokens,
+					Reasoning: tp.Tokens.ReasoningTokens,
+					Total:     tp.Tokens.TotalTokens,
+				},
+				Cost:    roundCost(tp.Cost),
+				HasCost: tp.Cost > 0 || (hasPricing && tp.Requests > 0),
+			}
+		}
+		resp.TimeSeriesByCredential[cred] = converted
+	}
+
+	for key, points := range qr.TimeSeriesByAPIKey {
+		converted := make([]summaryTimePoint, len(points))
+		for i, tp := range points {
+			converted[i] = summaryTimePoint{
+				Time:     tp.Time,
+				Requests: tp.Requests,
+				Success:  tp.Success,
+				Failure:  tp.Failure,
+				Tokens: summaryTokens{
+					Input:     tp.Tokens.InputTokens,
+					Output:    tp.Tokens.OutputTokens,
+					Cached:    tp.Tokens.CachedTokens,
+					Reasoning: tp.Tokens.ReasoningTokens,
+					Total:     tp.Tokens.TotalTokens,
+				},
+				Cost:    roundCost(tp.Cost),
+				HasCost: tp.Cost > 0 || (hasPricing && tp.Requests > 0),
+			}
+		}
+		resp.TimeSeriesByAPIKey[key] = converted
 	}
 
 	return resp

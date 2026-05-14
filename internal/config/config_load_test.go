@@ -62,3 +62,27 @@ func TestLoadConfig_WebsocketAuth_ExplicitTrue(t *testing.T) {
 		t.Fatal("expected WebsocketAuth to be true when explicitly set")
 	}
 }
+
+func TestLoadConfig_RemoteManagementDefaults(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if cfg.RemoteManagement.PanelGitHubRepository != DefaultPanelGitHubRepository {
+		t.Fatalf("panel repo = %q, want %q", cfg.RemoteManagement.PanelGitHubRepository, DefaultPanelGitHubRepository)
+	}
+	if cfg.RemoteManagement.CPAGitHubRepository != defaultCPAGitHubRepository {
+		t.Fatalf("cpa repo = %q, want %q", cfg.RemoteManagement.CPAGitHubRepository, defaultCPAGitHubRepository)
+	}
+	if cfg.RemoteManagement.AutoUpdateCPA {
+		t.Fatal("expected auto-update-cpa to default to false")
+	}
+}

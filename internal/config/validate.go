@@ -132,19 +132,19 @@ func ValidateConfig(cfg *Config) []string {
 			),
 		)
 	}
-	if cfg.UsageRetention.MaxFileSizeMB != 0 && cfg.UsageRetention.MaxFileSizeMB < -1 {
+	if cfg.UsageRetention.MaxDBSizeMB < 0 {
 		warnings = append(
 			warnings, fmt.Sprintf(
-				"usage-retention.max-file-size-mb %d is invalid (use -1 to disable or a positive integer)",
-				cfg.UsageRetention.MaxFileSizeMB,
+				"usage-retention.max-db-size-mb %d is invalid (use 0 to disable or a positive integer)",
+				cfg.UsageRetention.MaxDBSizeMB,
 			),
 		)
 	}
-	if cfg.UsageRetention.ArchiveMonths < -1 {
+	if cfg.UsageRetention.WarningThresholdPct < 0 || cfg.UsageRetention.WarningThresholdPct > 100 {
 		warnings = append(
 			warnings, fmt.Sprintf(
-				"usage-retention.archive-months %d is invalid (use -1 to disable or a positive integer)",
-				cfg.UsageRetention.ArchiveMonths,
+				"usage-retention.warning-threshold-pct %d is invalid (use 0 for default or 1-100)",
+				cfg.UsageRetention.WarningThresholdPct,
 			),
 		)
 	}

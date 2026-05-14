@@ -285,6 +285,72 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 	)
 }
 
+func TestSessionAffinitySelector_PicksStickyAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Hour,
+		},
+	)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-ID": {"sess-1"}}}
+
+	first, err := selector.Pick(context.Background(), "gemini", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "gemini", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("second Pick() error = %v", err)
+	}
+	if first == nil || second == nil {
+		t.Fatal("expected non-nil auths")
+	}
+	if first.ID != second.ID {
+		t.Fatalf("sticky session mismatch: %q vs %q", first.ID, second.ID)
+	}
+}
+
+func TestHeaderValueIgnoreCase(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{"X-Session-ID": {"sess-1"}}
+	if got := headerValueIgnoreCase(headers, "X-Session-ID"); got != "sess-1" {
+		t.Fatalf("headerValueIgnoreCase() = %q, want %q", got, "sess-1")
+	}
+}
+
+func TestSessionAffinitySelector_UsesExecutionSessionMetadata(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Hour,
+		},
+	)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "exec-1"}}
+
+	first, err := selector.Pick(context.Background(), "gemini", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "gemini", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("second Pick() error = %v", err)
+	}
+	if first == nil || second == nil || first.ID != second.ID {
+		t.Fatalf("expected metadata session stickiness, got %v and %v", first, second)
+	}
+}
+
 func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testing.T) {
 	t.Parallel()
 

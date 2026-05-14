@@ -108,8 +108,22 @@ func newAuthScheduler(selector Selector) *authScheduler {
 }
 
 // selectorStrategy maps a selector implementation to the scheduler semantics it should emulate.
+func unwrapSchedulerSelector(selector Selector) Selector {
+	for {
+		sessionAffinitySelector, ok := selector.(*SessionAffinitySelector)
+		if !ok || sessionAffinitySelector == nil {
+			return selector
+		}
+		fallback := sessionAffinitySelector.FallbackSelector()
+		if fallback == nil || fallback == selector {
+			return selector
+		}
+		selector = fallback
+	}
+}
+
 func selectorStrategy(selector Selector) schedulerStrategy {
-	switch selector.(type) {
+	switch unwrapSchedulerSelector(selector).(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
 	case nil, *RoundRobinSelector:
@@ -119,7 +133,6 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	}
 }
 
-// setSelector updates the active built-in strategy and resets mixed-provider cursors.
 func (s *authScheduler) setSelector(selector Selector) {
 	if s == nil {
 		return
@@ -128,6 +141,28 @@ func (s *authScheduler) setSelector(selector Selector) {
 	defer s.mu.Unlock()
 	s.strategy = selectorStrategy(selector)
 	clear(s.mixedCursors)
+}
+
+func (s *authScheduler) upsertAuth(auth *Auth) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.upsertAuthLocked(auth, time.Now())
+}
+
+func (s *authScheduler) removeAuth(authID string) {
+	if s == nil {
+		return
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removeAuthLocked(authID)
 }
 
 // rebuild recreates the complete scheduler state from an auth snapshot.
@@ -144,30 +179,6 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	for _, auth := range auths {
 		s.upsertAuthLocked(auth, now)
 	}
-}
-
-// upsertAuth incrementally synchronizes one auth into the scheduler.
-func (s *authScheduler) upsertAuth(auth *Auth) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.upsertAuthLocked(auth, time.Now())
-}
-
-// removeAuth deletes one auth from every scheduler shard that references it.
-func (s *authScheduler) removeAuth(authID string) {
-	if s == nil {
-		return
-	}
-	authID = strings.TrimSpace(authID)
-	if authID == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.removeAuthLocked(authID)
 }
 
 // pickSingle returns the next auth for a single provider/model request using scheduler state.
@@ -304,12 +315,46 @@ func (s *authScheduler) pickMixed(
 	}
 
 	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
-	start := 0
-	if len(normalized) > 0 {
-		start = s.mixedCursors[cursorKey] % len(normalized)
+	weights := make([]int, len(normalized))
+	segmentStarts := make([]int, len(normalized))
+	segmentEnds := make([]int, len(normalized))
+	totalWeight := 0
+	for providerIndex, shard := range candidateShards {
+		segmentStarts[providerIndex] = totalWeight
+		if shard != nil {
+			weights[providerIndex] = shard.readyCountAtPriorityLocked(false, bestPriority)
+		}
+		totalWeight += weights[providerIndex]
+		segmentEnds[providerIndex] = totalWeight
 	}
+	if totalWeight == 0 {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+	}
+
+	startSlot := s.mixedCursors[cursorKey] % totalWeight
+	startProviderIndex := -1
+	for providerIndex := range normalized {
+		if weights[providerIndex] == 0 {
+			continue
+		}
+		if startSlot < segmentEnds[providerIndex] {
+			startProviderIndex = providerIndex
+			break
+		}
+	}
+	if startProviderIndex < 0 {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
+	}
+
+	slot := startSlot
 	for offset := 0; offset < len(normalized); offset++ {
-		providerIndex := (start + offset) % len(normalized)
+		providerIndex := (startProviderIndex + offset) % len(normalized)
+		if weights[providerIndex] == 0 {
+			continue
+		}
+		if providerIndex != startProviderIndex {
+			slot = segmentStarts[providerIndex]
+		}
 		providerKey := normalized[providerIndex]
 		shard := candidateShards[providerIndex]
 		if shard == nil {
@@ -319,7 +364,7 @@ func (s *authScheduler) pickMixed(
 		if picked == nil {
 			continue
 		}
-		s.mixedCursors[cursorKey] = providerIndex + 1
+		s.mixedCursors[cursorKey] = slot + 1
 		return picked, providerKey, nil
 	}
 	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
@@ -557,9 +602,20 @@ func (m *scheduledAuthMeta) supportsModel(modelKey string) bool {
 		return true
 	}
 	if len(m.supportedModelSet) == 0 {
+		m.supportedModelSet = supportedModelSetForAuth(m.auth.ID)
+	}
+	if len(m.supportedModelSet) == 0 {
 		return false
 	}
-	_, ok := m.supportedModelSet[modelKey]
+	if _, ok := m.supportedModelSet[modelKey]; ok {
+		return true
+	}
+	refreshed := supportedModelSetForAuth(m.auth.ID)
+	if len(refreshed) == 0 {
+		return false
+	}
+	m.supportedModelSet = refreshed
+	_, ok := refreshed[modelKey]
 	return ok
 }
 
@@ -728,6 +784,20 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(
 }
 
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
+func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priority int) int {
+	if m == nil {
+		return 0
+	}
+	bucket := m.readyByPriority[priority]
+	if bucket == nil {
+		return 0
+	}
+	if preferWebsocket && len(bucket.ws.flat) > 0 {
+		return len(bucket.ws.flat)
+	}
+	return len(bucket.all.flat)
+}
+
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
 	total, cooldownCount, earliest := m.availabilitySummaryLocked(predicate)

@@ -44,17 +44,21 @@ type gitHubRelease struct {
 	} `json:"assets"`
 }
 
-type releasesCache struct {
-	mu        sync.RWMutex
+type releasesCacheEntry struct {
 	data      []gitHubRelease
 	fetchedAt time.Time
-	repo      string
 }
 
-var cachedReleases releasesCache
+type releasesCache struct {
+	mu      sync.RWMutex
+	entries map[string]releasesCacheEntry
+}
 
-// GetReleases proxies the GitHub Releases API with a 15-minute cache.
-// Query params: page (default 1), per_page (default 30, max 100).
+var cachedReleases = releasesCache{entries: make(map[string]releasesCacheEntry)}
+
+// GetReleases proxies the GitHub Releases API with a 15-minute per-repo cache.
+// Query params: page (default 1), per_page (default 30, max 100), target
+// ("cpa" | "panel", default "cpa").
 func (h *Handler) GetReleases(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", strconv.Itoa(releasesDefaultPage)))
 	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", strconv.Itoa(releasesDefaultLimit)))
@@ -68,7 +72,14 @@ func (h *Handler) GetReleases(c *gin.Context) {
 		perPage = releasesMaxLimit
 	}
 
-	repo := h.cpaRepository()
+	target := strings.ToLower(strings.TrimSpace(c.DefaultQuery("target", "cpa")))
+	var repo string
+	switch target {
+	case "panel":
+		repo = h.panelRepository()
+	default:
+		repo = h.cpaRepository()
+	}
 	releases, err := h.fetchAllReleases(c, repo)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "fetch_failed", "message": err.Error()})
@@ -85,8 +96,31 @@ func (h *Handler) GetReleases(c *gin.Context) {
 			"total":    total,
 			"page":     page,
 			"per_page": perPage,
+			"target":   target,
 		},
 	)
+}
+
+func (h *Handler) panelRepository() string {
+	repo := "Pyrokine/Cli-Proxy-API-Management-Center"
+	if h != nil && h.cfg != nil {
+		custom := strings.TrimSpace(h.cfg.RemoteManagement.PanelGitHubRepository)
+		if custom != "" {
+			custom = strings.TrimPrefix(custom, "https://github.com/")
+			// noinspection HttpUrlsUsage
+			custom = strings.TrimPrefix(custom, "http://github.com/")
+			custom = strings.TrimPrefix(custom, "https://api.github.com/repos/")
+			custom = strings.TrimSuffix(custom, "/")
+			// Drop "/releases/..." suffix if present in the configured URL.
+			if idx := strings.Index(custom, "/releases"); idx > 0 {
+				custom = custom[:idx]
+			}
+			if strings.Count(custom, "/") == 1 {
+				repo = custom
+			}
+		}
+	}
+	return repo
 }
 
 func (h *Handler) cpaRepository() string {
@@ -108,9 +142,9 @@ func (h *Handler) cpaRepository() string {
 
 func (h *Handler) fetchAllReleases(c *gin.Context, repo string) ([]gitHubRelease, error) {
 	cachedReleases.mu.RLock()
-	if cachedReleases.repo == repo && time.Since(cachedReleases.fetchedAt) < releasesCacheTTL &&
-		cachedReleases.data != nil {
-		data := cachedReleases.data
+	if entry, ok := cachedReleases.entries[repo]; ok &&
+		time.Since(entry.fetchedAt) < releasesCacheTTL && entry.data != nil {
+		data := entry.data
 		cachedReleases.mu.RUnlock()
 		return data, nil
 	}
@@ -139,9 +173,7 @@ func (h *Handler) fetchAllReleases(c *gin.Context, repo string) ([]gitHubRelease
 	}
 
 	cachedReleases.mu.Lock()
-	cachedReleases.data = releases
-	cachedReleases.fetchedAt = time.Now()
-	cachedReleases.repo = repo
+	cachedReleases.entries[repo] = releasesCacheEntry{data: releases, fetchedAt: time.Now()}
 	cachedReleases.mu.Unlock()
 
 	return releases, nil

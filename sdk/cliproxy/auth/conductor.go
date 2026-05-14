@@ -150,6 +150,7 @@ type Manager struct {
 	hook      Hook
 	mu        sync.RWMutex
 	auths     map[string]*Auth
+	scheduler *authScheduler
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -197,6 +198,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.scheduler = newAuthScheduler(selector)
 	return manager
 }
 
@@ -205,12 +207,42 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 // This must be called after models have been registered for a newly added auth,
 // because the initial scheduler.upsertAuth during Register/Update runs before
 // registerModelsForAuth and therefore snapshots an empty model set.
-func (m *Manager) RefreshSchedulerEntry(authID string) {
-	if m == nil || authID == "" {
+func isBuiltInSelector(selector Selector) bool {
+	switch unwrapSchedulerSelector(selector).(type) {
+	case *RoundRobinSelector, *FillFirstSelector:
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *Manager) syncSchedulerFromSnapshot(auths []*Auth) {
+	if m == nil || m.scheduler == nil {
 		return
 	}
-	// TODO: implement scheduler integration — currently a no-op since the
-	// scheduler is not yet wired into the Manager execution path.
+	m.scheduler.rebuild(auths)
+}
+
+func (m *Manager) syncScheduler() {
+	if m == nil || m.scheduler == nil {
+		return
+	}
+	m.syncSchedulerFromSnapshot(m.snapshotAuths())
+}
+
+func (m *Manager) RefreshSchedulerEntry(authID string) {
+	if m == nil || m.scheduler == nil || authID == "" {
+		return
+	}
+	m.mu.RLock()
+	auth, ok := m.auths[authID]
+	if !ok || auth == nil {
+		m.mu.RUnlock()
+		return
+	}
+	snapshot := auth.Clone()
+	m.mu.RUnlock()
+	m.scheduler.upsertAuth(snapshot)
 }
 
 func (m *Manager) SetSelector(selector Selector) {
@@ -221,8 +253,16 @@ func (m *Manager) SetSelector(selector Selector) {
 		selector = &RoundRobinSelector{}
 	}
 	m.mu.Lock()
+	previous := m.selector
 	m.selector = selector
 	m.mu.Unlock()
+	if m.scheduler != nil {
+		m.scheduler.setSelector(selector)
+		m.syncScheduler()
+	}
+	if stoppable, ok := previous.(StoppableSelector); ok && stoppable != nil && previous != selector {
+		stoppable.Stop()
+	}
 }
 
 // SetStore swaps the underlying persistence store.
@@ -280,15 +320,7 @@ func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) strin
 	if resolved == "" {
 		return ""
 	}
-	// Preserve thinking suffix from the client's requested model unless config already has one.
-	requestResult := thinking.ParseSuffix(requestedModel)
-	if thinking.ParseSuffix(resolved).HasSuffix {
-		return resolved
-	}
-	if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-		return resolved + "(" + requestResult.RawSuffix + ")"
-	}
-	return resolved
+	return thinking.PreserveRequestModelDecorations(resolved, requestedModel)
 
 }
 
@@ -477,9 +509,13 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 		auth.ID = uuid.NewString()
 	}
 	auth.EnsureIndex()
+	snapshot := auth.Clone()
 	m.mu.Lock()
-	m.auths[auth.ID] = auth.Clone()
+	m.auths[auth.ID] = snapshot
 	m.mu.Unlock()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(snapshot.Clone())
+	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthRegistered(ctx, auth.Clone())
@@ -492,13 +528,22 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 		return nil, nil
 	}
 	m.mu.Lock()
-	if existing, ok := m.auths[auth.ID]; ok && existing != nil && !auth.indexAssigned && auth.Index == "" {
-		auth.Index = existing.Index
-		auth.indexAssigned = existing.indexAssigned
+	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
+		if !auth.indexAssigned && auth.Index == "" {
+			auth.Index = existing.Index
+			auth.indexAssigned = existing.indexAssigned
+		}
+		auth.Success = existing.Success
+		auth.Failed = existing.Failed
+		auth.recentRequests = existing.recentRequests
 	}
 	auth.EnsureIndex()
-	m.auths[auth.ID] = auth.Clone()
+	snapshot := auth.Clone()
+	m.auths[auth.ID] = snapshot
 	m.mu.Unlock()
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(snapshot.Clone())
+	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
@@ -517,12 +562,18 @@ func (m *Manager) Load(ctx context.Context) error {
 		return err
 	}
 	m.auths = make(map[string]*Auth, len(items))
+	loaded := make([]*Auth, 0, len(items))
 	for _, auth := range items {
 		if auth == nil || auth.ID == "" {
 			continue
 		}
 		auth.EnsureIndex()
-		m.auths[auth.ID] = auth.Clone()
+		snapshot := auth.Clone()
+		m.auths[auth.ID] = snapshot
+		loaded = append(loaded, snapshot.Clone())
+	}
+	if m.scheduler != nil {
+		m.scheduler.rebuild(loaded)
 	}
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	if cfg == nil {
@@ -1106,6 +1157,9 @@ func resolveOpenAICompatConfig(
 	}
 	for i := range cfg.OpenAICompatibility {
 		compat := &cfg.OpenAICompatibility[i]
+		if compat.Disabled {
+			continue
+		}
 		for _, candidate := range candidates {
 			if candidate != "" && strings.EqualFold(strings.TrimSpace(candidate), compat.Name) {
 				return compat
@@ -1265,6 +1319,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
 		now := time.Now()
+		auth.recordRecentRequest(now, result.Success)
+		if result.Success {
+			auth.Success++
+		} else {
+			auth.Failed++
+		}
 
 		if result.Success {
 			if result.Model != "" {
@@ -1284,70 +1344,72 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		} else {
 			if result.Model != "" {
-				state := ensureModelState(auth, result.Model)
-				state.Unavailable = true
-				state.Status = StatusError
-				state.UpdatedAt = now
-				if result.Error != nil {
-					state.LastError = cloneError(result.Error)
-					state.StatusMessage = result.Error.Message
-					auth.LastError = cloneError(result.Error)
-					auth.StatusMessage = result.Error.Message
-				}
+				if !isRequestScopedNotFoundResultError(result.Error) {
+					state := ensureModelState(auth, result.Model)
+					state.Unavailable = true
+					state.Status = StatusError
+					state.UpdatedAt = now
+					if result.Error != nil {
+						state.LastError = cloneError(result.Error)
+						state.StatusMessage = result.Error.Message
+						auth.LastError = cloneError(result.Error)
+						auth.StatusMessage = result.Error.Message
+					}
 
-				statusCode := statusCodeFromResult(result.Error)
-				switch statusCode {
-				case 401:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
-					suspendReason = "unauthorized"
-					shouldSuspendModel = true
-				case 402, 403:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
-					suspendReason = "payment_required"
-					shouldSuspendModel = true
-				case 404:
-					next := now.Add(12 * time.Hour)
-					state.NextRetryAfter = next
-					suspendReason = "not_found"
-					shouldSuspendModel = true
-				case 429:
-					var next time.Time
-					backoffLevel := state.Quota.BackoffLevel
-					if result.RetryAfter != nil {
-						next = now.Add(*result.RetryAfter)
-					} else {
-						cooldown, nextLevel := nextQuotaCooldown(backoffLevel, quotaCooldownDisabledForAuth(auth))
-						if cooldown > 0 {
-							next = now.Add(cooldown)
-						}
-						backoffLevel = nextLevel
-					}
-					state.NextRetryAfter = next
-					state.Quota = QuotaState{
-						Exceeded:      true,
-						Reason:        "quota",
-						NextRecoverAt: next,
-						BackoffLevel:  backoffLevel,
-					}
-					suspendReason = "quota"
-					shouldSuspendModel = true
-					setModelQuota = true
-				case 408, 500, 502, 503, 504:
-					if quotaCooldownDisabledForAuth(auth) {
-						state.NextRetryAfter = time.Time{}
-					} else {
-						next := now.Add(1 * time.Minute)
+					statusCode := statusCodeFromResult(result.Error)
+					switch statusCode {
+					case 401:
+						next := now.Add(30 * time.Minute)
 						state.NextRetryAfter = next
+						suspendReason = "unauthorized"
+						shouldSuspendModel = true
+					case 402, 403:
+						next := now.Add(30 * time.Minute)
+						state.NextRetryAfter = next
+						suspendReason = "payment_required"
+						shouldSuspendModel = true
+					case 404:
+						next := now.Add(12 * time.Hour)
+						state.NextRetryAfter = next
+						suspendReason = "not_found"
+						shouldSuspendModel = true
+					case 429:
+						var next time.Time
+						backoffLevel := state.Quota.BackoffLevel
+						if result.RetryAfter != nil {
+							next = now.Add(*result.RetryAfter)
+						} else {
+							cooldown, nextLevel := nextQuotaCooldown(backoffLevel, quotaCooldownDisabledForAuth(auth))
+							if cooldown > 0 {
+								next = now.Add(cooldown)
+							}
+							backoffLevel = nextLevel
+						}
+						state.NextRetryAfter = next
+						state.Quota = QuotaState{
+							Exceeded:      true,
+							Reason:        "quota",
+							NextRecoverAt: next,
+							BackoffLevel:  backoffLevel,
+						}
+						suspendReason = "quota"
+						shouldSuspendModel = true
+						setModelQuota = true
+					case 408, 500, 502, 503, 504:
+						if quotaCooldownDisabledForAuth(auth) {
+							state.NextRetryAfter = time.Time{}
+						} else {
+							next := now.Add(1 * time.Minute)
+							state.NextRetryAfter = next
+						}
+					default:
+						state.NextRetryAfter = time.Time{}
 					}
-				default:
-					state.NextRetryAfter = time.Time{}
-				}
 
-				auth.Status = StatusError
-				auth.UpdatedAt = now
-				updateAggregatedAvailability(auth, now)
+					auth.Status = StatusError
+					auth.UpdatedAt = now
+					updateAggregatedAvailability(auth, now)
+				}
 			} else {
 				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
 			}
@@ -1553,19 +1615,43 @@ func statusCodeFromResult(err *Error) int {
 // error that should not be retried. Specifically, it checks for 400 Bad Request
 // with "invalid_request_error" in the message, indicating the request itself is
 // malformed and switching to a different auth will not help.
+func isRequestScopedNotFoundMessage(message string) bool {
+	if message == "" {
+		return false
+	}
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "item with id") &&
+		strings.Contains(lower, "not found") &&
+		strings.Contains(lower, "items are not persisted when `store` is set to false")
+}
+
+func isRequestScopedNotFoundResultError(err *Error) bool {
+	if err == nil || statusCodeFromResult(err) != http.StatusNotFound {
+		return false
+	}
+	return isRequestScopedNotFoundMessage(err.Message)
+}
+
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
 	}
 	status := statusCodeFromError(err)
-	if status != http.StatusBadRequest {
+	switch status {
+	case http.StatusBadRequest:
+		return strings.Contains(err.Error(), "invalid_request_error")
+	case http.StatusNotFound:
+		return isRequestScopedNotFoundMessage(err.Error())
+	default:
 		return false
 	}
-	return strings.Contains(err.Error(), "invalid_request_error")
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
 	if auth == nil {
+		return
+	}
+	if isRequestScopedNotFoundResultError(resultErr) {
 		return
 	}
 	auth.Unavailable = true
@@ -1750,6 +1836,35 @@ func (m *Manager) PickNext(
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	if m.scheduler != nil && isBuiltInSelector(m.selector) {
+		var stickySelector *SessionAffinitySelector
+		if selector, ok := m.selector.(*SessionAffinitySelector); ok {
+			stickySelector = selector
+		}
+		if stickySelector != nil {
+			if sticky := stickySelector.PickSticky(provider, opts, candidates); sticky != nil {
+				m.mu.RUnlock()
+				executor, ok := m.Executor(provider)
+				if !ok || executor == nil {
+					return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
+				}
+				return sticky.Clone(), executor, nil
+			}
+		}
+		m.mu.RUnlock()
+		selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+		if errPick != nil {
+			return nil, nil, errPick
+		}
+		if stickySelector != nil {
+			stickySelector.Remember(provider, opts, selected)
+		}
+		executor, ok := m.Executor(provider)
+		if !ok || executor == nil {
+			return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
+		}
+		return selected, executor, nil
+	}
 	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
 	if errPick != nil {
 		m.mu.RUnlock()
@@ -1833,6 +1948,42 @@ func (m *Manager) pickNextMixed(
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
+	if m.scheduler != nil && isBuiltInSelector(m.selector) {
+		var stickySelector *SessionAffinitySelector
+		if selector, ok := m.selector.(*SessionAffinitySelector); ok {
+			stickySelector = selector
+		}
+		if stickySelector != nil {
+			if sticky := stickySelector.PickSticky("mixed", opts, candidates); sticky != nil {
+				providerKey := strings.TrimSpace(strings.ToLower(sticky.Provider))
+				m.mu.RUnlock()
+				executor, ok := m.Executor(providerKey)
+				if !ok || executor == nil {
+					return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+				}
+				return sticky.Clone(), executor, providerKey, nil
+			}
+		}
+		m.mu.RUnlock()
+		filteredProviders := make([]string, 0, len(providers))
+		for _, provider := range providers {
+			if executor, ok := m.Executor(strings.TrimSpace(strings.ToLower(provider))); ok && executor != nil {
+				filteredProviders = append(filteredProviders, provider)
+			}
+		}
+		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, filteredProviders, model, opts, tried)
+		if errPick != nil {
+			return nil, nil, "", errPick
+		}
+		if stickySelector != nil {
+			stickySelector.Remember("mixed", opts, selected)
+		}
+		executor, ok := m.Executor(providerKey)
+		if !ok || executor == nil {
+			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+		}
+		return selected, executor, providerKey, nil
+	}
 	selected, errPick := m.selector.Pick(ctx, "mixed", model, opts, candidates)
 	if errPick != nil {
 		m.mu.RUnlock()
@@ -1914,6 +2065,12 @@ func (m *Manager) StopAutoRefresh() {
 	if m.refreshCancel != nil {
 		m.refreshCancel()
 		m.refreshCancel = nil
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	if stoppable, ok := selector.(StoppableSelector); ok && stoppable != nil {
+		stoppable.Stop()
 	}
 }
 

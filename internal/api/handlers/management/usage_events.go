@@ -1,4 +1,4 @@
-// Last compiled: 2026-03-23
+// Last compiled: 2026-04-27
 // Author: pyro
 
 package management
@@ -10,6 +10,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -71,47 +72,35 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	filters := usage.EventFilters{
 		Model:  c.Query("model"),
 		Source: c.Query("source"),
+		APIKey: c.Query("api_key"),
+		Status: c.Query("status"),
 		Search: c.Query("search"),
 	}
 
-	// Collect today's events (in memory, already filtered and sorted).
-	var todayFiltered []usage.FlatDetail
-	if todayStore := h.usagePersister.TodayStore(); todayStore != nil {
-		todayFiltered, _ = todayStore.Query(from, to, 0, 0, filters, sortField, sortOrder == "desc")
-	}
-
-	// Collect historical events from DetailStore (on disk, already filtered and sorted).
-	var historicalFiltered []usage.FlatDetail
-	if detailStore := h.usagePersister.DetailStore(); detailStore != nil {
-		historicalFiltered, _, _ = detailStore.QueryRange(from, to, 0, 0, filters, sortField, sortOrder == "desc")
-	}
-
-	// Merge the two pre-sorted slices and paginate.
-	merged := usage.MergeSorted(todayFiltered, historicalFiltered, sortField, sortOrder == "desc")
-	total := len(merged)
-
-	start := (page - 1) * pageSize
-	if start >= total {
-		c.JSON(
-			http.StatusOK, eventsResponse{
-				Events:     []usage.FlatDetail{},
-				Total:      total,
-				Page:       page,
-				PageSize:   pageSize,
-				TotalPages: (total + pageSize - 1) / pageSize,
-			},
-		)
+	events, total, err := h.usagePersister.QueryEvents(
+		from, to, filters, page, pageSize, sortField, sortOrder == "desc",
+	)
+	if err != nil {
+		log.Errorf("usage: QueryEvents failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query events"})
 		return
 	}
-	end := min(start+pageSize, total)
+	if events == nil {
+		events = []usage.FlatDetail{}
+	}
+
+	totalPages := 0
+	if pageSize > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
 
 	c.JSON(
 		http.StatusOK, eventsResponse{
-			Events:     merged[start:end],
+			Events:     events,
 			Total:      total,
 			Page:       page,
 			PageSize:   pageSize,
-			TotalPages: (total + pageSize - 1) / pageSize,
+			TotalPages: totalPages,
 		},
 	)
 }

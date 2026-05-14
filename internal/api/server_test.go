@@ -118,6 +118,25 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 	}
 }
 
+func TestNoStoreMiddleware_SetsCacheControl(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(noStoreMiddleware())
+	engine.GET(
+		"/test", func(c *gin.Context) {
+			c.String(http.StatusOK, "ok")
+		},
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("expected Cache-Control no-store, got %q", got)
+	}
+}
+
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")
@@ -180,6 +199,8 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
+		nil,
 		true,
 		"issue-1711",
 		time.Now(),
@@ -222,7 +243,7 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 func setupAuthMiddlewareEngine(manager *sdkaccess.Manager) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	engine.Use(authMiddleware(manager, nil))
+	engine.Use(authMiddleware(manager, nil, false))
 	engine.GET(
 		"/test", func(c *gin.Context) {
 			apiKey, _ := c.Get("apiKey")
@@ -302,7 +323,7 @@ func TestAuthMiddleware_ValidAPIKey(t *testing.T) {
 	)
 	engine := gin.New()
 	gin.SetMode(gin.TestMode)
-	engine.Use(authMiddleware(manager, nil))
+	engine.Use(authMiddleware(manager, nil, false))
 	engine.GET(
 		"/test", func(c *gin.Context) {
 			apiKey, _ := c.Get("apiKey")
@@ -333,7 +354,7 @@ func TestAuthMiddleware_InvalidAPIKey(t *testing.T) {
 	)
 	engine := gin.New()
 	gin.SetMode(gin.TestMode)
-	engine.Use(authMiddleware(manager, nil))
+	engine.Use(authMiddleware(manager, nil, false))
 	engine.GET(
 		"/test", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{})
@@ -369,7 +390,7 @@ func TestAuthMiddleware_RateLimited(t *testing.T) {
 
 	engine := gin.New()
 	gin.SetMode(gin.TestMode)
-	engine.Use(authMiddleware(manager, rl))
+	engine.Use(authMiddleware(manager, rl, false))
 	engine.GET(
 		"/test", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{})

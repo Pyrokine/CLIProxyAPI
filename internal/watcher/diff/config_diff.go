@@ -406,11 +406,50 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			),
 		)
 	}
+	if oldCfg.RemoteManagement.IsAutoUpdatePanel() != newCfg.RemoteManagement.IsAutoUpdatePanel() {
+		changes = append(
+			changes, fmt.Sprintf(
+				"remote-management.auto-update-panel: %t -> %t", oldCfg.RemoteManagement.IsAutoUpdatePanel(),
+				newCfg.RemoteManagement.IsAutoUpdatePanel(),
+			),
+		)
+	}
 	oldPanelRepo := strings.TrimSpace(oldCfg.RemoteManagement.PanelGitHubRepository)
 	newPanelRepo := strings.TrimSpace(newCfg.RemoteManagement.PanelGitHubRepository)
 	if oldPanelRepo != newPanelRepo {
 		changes = append(
 			changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", oldPanelRepo, newPanelRepo),
+		)
+	}
+	oldCPARepo := strings.TrimSpace(oldCfg.RemoteManagement.CPAGitHubRepository)
+	newCPARepo := strings.TrimSpace(newCfg.RemoteManagement.CPAGitHubRepository)
+	if oldCPARepo != newCPARepo {
+		changes = append(
+			changes, fmt.Sprintf("remote-management.cpa-github-repository: %s -> %s", oldCPARepo, newCPARepo),
+		)
+	}
+	if oldCfg.RemoteManagement.AutoCheckUpdate != newCfg.RemoteManagement.AutoCheckUpdate {
+		changes = append(
+			changes, fmt.Sprintf(
+				"remote-management.auto-check-update: %t -> %t", oldCfg.RemoteManagement.AutoCheckUpdate,
+				newCfg.RemoteManagement.AutoCheckUpdate,
+			),
+		)
+	}
+	if oldCfg.RemoteManagement.AutoUpdateCPA != newCfg.RemoteManagement.AutoUpdateCPA {
+		changes = append(
+			changes, fmt.Sprintf(
+				"remote-management.auto-update-cpa: %t -> %t", oldCfg.RemoteManagement.AutoUpdateCPA,
+				newCfg.RemoteManagement.AutoUpdateCPA,
+			),
+		)
+	}
+	if oldCfg.RemoteManagement.CheckInterval != newCfg.RemoteManagement.CheckInterval {
+		changes = append(
+			changes, fmt.Sprintf(
+				"remote-management.check-interval: %d -> %d", oldCfg.RemoteManagement.CheckInterval,
+				newCfg.RemoteManagement.CheckInterval,
+			),
 		)
 	}
 	if oldCfg.RemoteManagement.SecretKey != newCfg.RemoteManagement.SecretKey {

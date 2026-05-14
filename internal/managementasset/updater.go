@@ -29,7 +29,8 @@ const (
 	managementAssetName         = "management.html"
 	httpUserAgent               = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval   = 30 * time.Second
-	updateCheckInterval         = 3 * time.Hour
+	defaultUpdateCheckInterval  = 3 * time.Hour
+	minCheckIntervalMinutes     = 30
 )
 
 // managementFileName exposes the control panel asset filename.
@@ -76,8 +77,14 @@ func runAutoUpdater(ctx context.Context) {
 		ctx = context.Background()
 	}
 
-	ticker := time.NewTicker(updateCheckInterval)
-	defer ticker.Stop()
+	currentInterval := time.Duration(0)
+	var ticker *time.Ticker
+	var tick <-chan time.Time
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
 
 	runOnce := func() {
 		cfg := currentConfigPtr.Load()
@@ -89,20 +96,41 @@ func runAutoUpdater(ctx context.Context) {
 			log.Debug("management asset auto-updater skipped: control panel disabled")
 			return
 		}
+		if !cfg.RemoteManagement.AutoCheckUpdate {
+			log.Debug("management asset auto-updater skipped: auto-check-update is false")
+			return
+		}
+		if !cfg.RemoteManagement.IsAutoUpdatePanel() {
+			log.Debug("management asset auto-updater skipped: auto-update-panel is false")
+			return
+		}
 
 		configPath, _ := schedulerConfigPath.Load().(string)
 		staticDir := StaticDir(configPath)
-		EnsureLatestManagementHTML(ctx, staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
+		EnsureManagementHTML(ctx, staticDir, cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository, "")
 	}
 
-	runOnce()
-
 	for {
+		cfg := currentConfigPtr.Load()
+		interval := defaultUpdateCheckInterval
+		if cfg != nil && cfg.RemoteManagement.CheckInterval >= minCheckIntervalMinutes {
+			interval = time.Duration(cfg.RemoteManagement.CheckInterval) * time.Minute
+		}
+		if interval != currentInterval {
+			if ticker != nil {
+				ticker.Stop()
+			}
+			ticker = time.NewTicker(interval)
+			tick = ticker.C
+			currentInterval = interval
+		}
+
+		runOnce()
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			runOnce()
+		case <-tick:
 		}
 	}
 }
@@ -173,9 +201,18 @@ func FilePath(configFilePath string) string {
 	return filepath.Join(dir, managementFileName)
 }
 
-// EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
-// It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
-func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
+// EnsureManagementHTML fetches a specific version (empty version means latest)
+// of the management.html asset and updates the local copy when needed. It coalesces
+// concurrent sync attempts and returns whether the asset exists after the sync
+// attempt. Explicit version requests bypass the hash-equality short-circuit so
+// downgrades work, but they still respect the digest verification.
+func EnsureManagementHTML(
+	ctx context.Context,
+	staticDir string,
+	proxyURL string,
+	panelRepository string,
+	version string,
+) bool {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -186,13 +223,14 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 		return false
 	}
 	localPath := filepath.Join(staticDir, managementAssetName)
+	version = strings.TrimSpace(version)
 
 	_, _, _ = sfGroup.Do(
 		localPath, func() (any, error) {
 			lastUpdateCheckMu.Lock()
 			now := time.Now()
 			timeSinceLastAttempt := now.Sub(lastUpdateCheckTime)
-			if !lastUpdateCheckTime.IsZero() && timeSinceLastAttempt < managementSyncMinInterval {
+			if version == "" && !lastUpdateCheckTime.IsZero() && timeSinceLastAttempt < managementSyncMinInterval {
 				lastUpdateCheckMu.Unlock()
 				log.Debugf(
 					"management asset sync skipped by throttle: last attempt %v ago (interval %v)",
@@ -218,7 +256,7 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 				return nil, nil
 			}
 
-			releaseURL := resolveReleaseURL(panelRepository)
+			releaseURL := resolveReleaseURL(panelRepository, version)
 			client := newHTTPClient(proxyURL)
 
 			localHash, err := fileSHA256(localPath)
@@ -229,18 +267,20 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 				localHash = ""
 			}
 
-			asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
+			asset, remoteHash, err := fetchReleaseAsset(ctx, client, releaseURL)
 			if err != nil {
 				if localFileMissing {
 					log.WithError(err).
-						Warn("failed to fetch latest management release information; fallback download is disabled for security (no digest verification)")
+						Warn("failed to fetch management release information; fallback download is disabled for security (no digest verification)")
 				} else {
-					log.WithError(err).Warn("failed to fetch latest management release information")
+					log.WithError(err).Warn("failed to fetch management release information")
 				}
 				return nil, nil
 			}
 
-			if remoteHash != "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
+			// Only short-circuit when caller wants "latest" and hashes match. Explicit
+			// version requests (downgrade/sidegrade) must always replace the file.
+			if version == "" && remoteHash != "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
 				log.Debug("management asset is already up to date")
 				return nil, nil
 			}
@@ -282,24 +322,39 @@ func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL 
 	return err == nil
 }
 
-func resolveReleaseURL(repo string) string {
+// resolveReleaseURL turns a repository reference into the GitHub releases API URL.
+// An empty version returns the "/releases/latest" endpoint; a non-empty version
+// returns "/releases/tags/{version}".
+func resolveReleaseURL(repo, version string) string {
 	repo = strings.TrimSpace(repo)
+	version = strings.TrimSpace(version)
+
+	suffix := "/releases/latest"
+	if version != "" {
+		suffix = "/releases/tags/" + url.PathEscape(version)
+	}
+
 	if repo == "" {
-		return defaultManagementReleaseURL
+		if version == "" {
+			return defaultManagementReleaseURL
+		}
+		// Derive host-specific form from the default latest URL.
+		return strings.TrimSuffix(defaultManagementReleaseURL, "/releases/latest") + suffix
 	}
 
 	parsed, err := url.Parse(repo)
 	if err != nil || parsed.Host == "" {
-		return defaultManagementReleaseURL
+		return strings.TrimSuffix(defaultManagementReleaseURL, "/releases/latest") + suffix
 	}
 
 	host := strings.ToLower(parsed.Host)
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 
 	if host == "api.github.com" {
-		if !strings.HasSuffix(strings.ToLower(parsed.Path), "/releases/latest") {
-			parsed.Path = parsed.Path + "/releases/latest"
-		}
+		// Strip any trailing /releases/... so we always land on the right endpoint.
+		parsed.Path = strings.TrimSuffix(parsed.Path, "/releases/latest")
+		parsed.Path = strings.TrimPrefix(parsed.Path, "/")
+		parsed.Path = "/" + parsed.Path + suffix
 		return parsed.String()
 	}
 
@@ -307,14 +362,14 @@ func resolveReleaseURL(repo string) string {
 		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
 		if len(parts) >= 2 && parts[0] != "" && parts[1] != "" {
 			repoName := strings.TrimSuffix(parts[1], ".git")
-			return fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", parts[0], repoName)
+			return fmt.Sprintf("https://api.github.com/repos/%s/%s%s", parts[0], repoName, suffix)
 		}
 	}
 
-	return defaultManagementReleaseURL
+	return strings.TrimSuffix(defaultManagementReleaseURL, "/releases/latest") + suffix
 }
 
-func fetchLatestAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
+func fetchReleaseAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
 	if strings.TrimSpace(releaseURL) == "" {
 		releaseURL = defaultManagementReleaseURL
 	}

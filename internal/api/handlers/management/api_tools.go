@@ -796,31 +796,30 @@ func isPrivateIP(ip net.IP) bool {
 		network *net.IPNet
 	}{
 		// IPv4
-		{mustParseCIDR("0.0.0.0/8")},          // RFC 791 "This network"
-		{mustParseCIDR("10.0.0.0/8")},          // RFC 1918 private
-		{mustParseCIDR("100.64.0.0/10")},       // RFC 6598 CGNAT
-		{mustParseCIDR("172.16.0.0/12")},       // RFC 1918 private
-		{mustParseCIDR("192.0.0.0/24")},        // RFC 6890 IETF protocol assignments
-		{mustParseCIDR("192.0.2.0/24")},        // RFC 5737 documentation (TEST-NET-1)
-		{mustParseCIDR("192.88.99.0/24")},      // RFC 7526 deprecated 6to4 relay anycast
-		{mustParseCIDR("192.168.0.0/16")},      // RFC 1918 private
-		{mustParseCIDR("198.18.0.0/15")},       // RFC 2544 benchmarking
-		{mustParseCIDR("198.51.100.0/24")},     // RFC 5737 documentation (TEST-NET-2)
-		{mustParseCIDR("203.0.113.0/24")},      // RFC 5737 documentation (TEST-NET-3)
-		{mustParseCIDR("240.0.0.0/4")},         // RFC 1112 reserved (class E)
+		{mustParseCIDR("0.0.0.0/8")},       // RFC 791 "This network"
+		{mustParseCIDR("10.0.0.0/8")},      // RFC 1918 private
+		{mustParseCIDR("100.64.0.0/10")},   // RFC 6598 CGNAT
+		{mustParseCIDR("172.16.0.0/12")},   // RFC 1918 private
+		{mustParseCIDR("192.0.0.0/24")},    // RFC 6890 IETF protocol assignments
+		{mustParseCIDR("192.0.2.0/24")},    // RFC 5737 documentation (TEST-NET-1)
+		{mustParseCIDR("192.88.99.0/24")},  // RFC 7526 deprecated 6to4 relay anycast
+		{mustParseCIDR("192.168.0.0/16")},  // RFC 1918 private
+		{mustParseCIDR("198.18.0.0/15")},   // RFC 2544 benchmarking
+		{mustParseCIDR("198.51.100.0/24")}, // RFC 5737 documentation (TEST-NET-2)
+		{mustParseCIDR("203.0.113.0/24")},  // RFC 5737 documentation (TEST-NET-3)
+		{mustParseCIDR("240.0.0.0/4")},     // RFC 1112 reserved (class E)
 		// IPv6
-		{mustParseCIDR("::ffff:0:0/96")},       // IPv4-mapped addresses
-		{mustParseCIDR("64:ff9b:1::/48")},      // RFC 8215 IPv4-IPv6 translation
-		{mustParseCIDR("100::/64")},             // RFC 6666 discard-only
-		{mustParseCIDR("100:0:0:1::/64")},       // Dummy IPv6 Prefix
-		{mustParseCIDR("2001::/23")},            // RFC 2928 IETF protocol assignments
-		{mustParseCIDR("2001:2::/48")},          // RFC 5180 benchmarking
-		{mustParseCIDR("2001:db8::/32")},        // RFC 3849 documentation
-		{mustParseCIDR("2001:10::/28")},         // deprecated ORCHID
-		{mustParseCIDR("2002::/16")},            // 6to4 (deprecated)
-		{mustParseCIDR("3fff::/20")},            // RFC 9637 documentation
-		{mustParseCIDR("5f00::/16")},            // SRv6 SIDs
-		{mustParseCIDR("fc00::/7")},             // RFC 4193 ULA
+		{mustParseCIDR("64:ff9b:1::/48")}, // RFC 8215 IPv4-IPv6 translation
+		{mustParseCIDR("100::/64")},       // RFC 6666 discard-only
+		{mustParseCIDR("100:0:0:1::/64")}, // Dummy IPv6 Prefix
+		{mustParseCIDR("2001::/23")},      // RFC 2928 IETF protocol assignments
+		{mustParseCIDR("2001:2::/48")},    // RFC 5180 benchmarking
+		{mustParseCIDR("2001:db8::/32")},  // RFC 3849 documentation
+		{mustParseCIDR("2001:10::/28")},   // deprecated ORCHID
+		{mustParseCIDR("2002::/16")},      // 6to4 (deprecated)
+		{mustParseCIDR("3fff::/20")},      // RFC 9637 documentation
+		{mustParseCIDR("5f00::/16")},      // SRv6 SIDs
+		{mustParseCIDR("fc00::/7")},       // RFC 4193 ULA
 	}
 	for _, r := range privateRanges {
 		if r.network.Contains(ip) {
@@ -839,7 +838,9 @@ func isAllowedTokenTarget(hostname string) bool {
 		"claude.ai",
 		"generativelanguage.googleapis.com",
 		"aiplatform.googleapis.com",
+		"cloudcode-pa.googleapis.com",
 		"api.openai.com",
+		"chatgpt.com",
 		"api.githubcopilot.com",
 		"api.individual.githubcopilot.com",
 		"api.business.githubcopilot.com",

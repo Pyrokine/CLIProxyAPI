@@ -8,6 +8,7 @@ import (
 
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 // Register ensures the config-access provider is available to the access manager.
@@ -21,6 +22,13 @@ func Register(cfg *sdkconfig.SDKConfig) {
 	if len(keys) == 0 {
 		sdkaccess.UnregisterProvider(sdkaccess.ProviderTypeConfigAPIKey)
 		return
+	}
+
+	if cfg.AllowQueryAuth {
+		log.Warnf(
+			"security: allow-query-auth is enabled — API keys in URL query (?key=..., ?auth_token=...) will be accepted. " +
+				"Keys may leak via access logs, referrers, and browser history. Disable allow-query-auth unless a legacy client requires it.",
+		)
 	}
 
 	sdkaccess.RegisterProvider(

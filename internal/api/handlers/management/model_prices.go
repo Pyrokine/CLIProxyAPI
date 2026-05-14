@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	internalUsage "github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
@@ -105,5 +106,34 @@ func (h *Handler) PutModelPrices(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "count": len(body.Prices)})
+	response := gin.H{"status": "ok", "count": len(body.Prices), "recalculation": false}
+	if h.usagePersister == nil {
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	priceFn := internalUsage.BuildModelPriceFunc(h.configFilePath)
+	h.usagePersister.SetPriceFunc(priceFn)
+	if !h.usagePersister.HasPricing() {
+		response["recalculation_error"] = "no model prices configured"
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
+	result, err := h.usagePersister.RecalculateCosts()
+	response["recalculation"] = true
+	if err != nil {
+		log.Errorf("model-prices: recalculate failed: %v", err)
+		response["recalculation_error"] = err.Error()
+		c.JSON(http.StatusOK, response)
+		return
+	}
+	response["recalculated_days"] = result.RecalculatedDays
+	response["total_cost"] = result.TotalCost
+	if result.AlreadyRunning {
+		response["status"] = "busy"
+		response["recalculation_error"] = "cost recalculation already running"
+	}
+
+	c.JSON(http.StatusOK, response)
 }

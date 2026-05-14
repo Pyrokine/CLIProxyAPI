@@ -93,7 +93,34 @@ type Auth struct {
 	// Runtime carries non-serializable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
-	indexAssigned bool
+	Success int64 `json:"-"`
+	Failed  int64 `json:"-"`
+
+	recentRequests recentRequestRing `json:"-"`
+	indexAssigned  bool              `json:"-"`
+}
+
+const (
+	recentRequestBucketSeconds int64 = 10 * 60
+	recentRequestBucketCount         = 20
+)
+
+type recentRequestBucket struct {
+	bucketID int64
+	success  int64
+	failed   int64
+}
+
+type recentRequestRing struct {
+	buckets        [recentRequestBucketCount]recentRequestBucket
+	cachedBucketID int64
+	cachedSnapshot []RecentRequestBucket
+}
+
+type RecentRequestBucket struct {
+	Time    string `json:"time"`
+	Success int64  `json:"success"`
+	Failed  int64  `json:"failed"`
 }
 
 // QuotaState contains limiter tracking data for a credential.
@@ -124,6 +151,76 @@ type ModelState struct {
 	Quota QuotaState `json:"quota"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func recentRequestBucketID(now time.Time) int64 {
+	if now.IsZero() {
+		return 0
+	}
+	return now.Unix() / recentRequestBucketSeconds
+}
+
+func recentRequestBucketIndex(bucketID int64) int {
+	mod := bucketID % int64(recentRequestBucketCount)
+	if mod < 0 {
+		mod += int64(recentRequestBucketCount)
+	}
+	return int(mod)
+}
+
+func formatRecentRequestBucketLabel(bucketID int64) string {
+	start := time.Unix(bucketID*recentRequestBucketSeconds, 0).In(time.Local)
+	end := start.Add(10 * time.Minute)
+	return start.Format("15:04") + "-" + end.Format("15:04")
+}
+
+func (a *Auth) recordRecentRequest(now time.Time, success bool) {
+	if a == nil {
+		return
+	}
+	bucketID := recentRequestBucketID(now)
+	idx := recentRequestBucketIndex(bucketID)
+	bucket := &a.recentRequests.buckets[idx]
+	if bucket.bucketID != bucketID {
+		bucket.bucketID = bucketID
+		bucket.success = 0
+		bucket.failed = 0
+	}
+	a.recentRequests.cachedBucketID = 0
+	a.recentRequests.cachedSnapshot = nil
+	if success {
+		bucket.success++
+		return
+	}
+	bucket.failed++
+}
+
+func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
+	out := make([]RecentRequestBucket, 0, recentRequestBucketCount)
+	if a == nil {
+		return out
+	}
+
+	currentBucketID := recentRequestBucketID(now)
+	if a.recentRequests.cachedBucketID == currentBucketID && len(a.recentRequests.cachedSnapshot) == recentRequestBucketCount {
+		return append(out, a.recentRequests.cachedSnapshot...)
+	}
+	for i := recentRequestBucketCount - 1; i >= 0; i-- {
+		bucketID := currentBucketID - int64(i)
+		idx := recentRequestBucketIndex(bucketID)
+		bucket := a.recentRequests.buckets[idx]
+		entry := RecentRequestBucket{
+			Time: formatRecentRequestBucketLabel(bucketID),
+		}
+		if bucket.bucketID == bucketID {
+			entry.Success = bucket.success
+			entry.Failed = bucket.failed
+		}
+		out = append(out, entry)
+	}
+	a.recentRequests.cachedBucketID = currentBucketID
+	a.recentRequests.cachedSnapshot = append(a.recentRequests.cachedSnapshot[:0], out...)
+	return out
 }
 
 // Clone shallow copies the Auth structure, duplicating maps to avoid accidental mutation.
@@ -383,6 +480,71 @@ func parseIntAny(val any) (int, bool) {
 		return parsed, true
 	default:
 		return 0, false
+	}
+}
+
+func ExtractCustomHeadersFromMetadata(metadata map[string]any) map[string]string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	raw, ok := metadata["headers"]
+	if !ok || raw == nil {
+		return nil
+	}
+
+	out := make(map[string]string)
+	switch headers := raw.(type) {
+	case map[string]string:
+		for key, value := range headers {
+			name := strings.TrimSpace(key)
+			if name == "" {
+				continue
+			}
+			val := strings.TrimSpace(value)
+			if val == "" {
+				continue
+			}
+			out[name] = val
+		}
+	case map[string]any:
+		for key, value := range headers {
+			name := strings.TrimSpace(key)
+			if name == "" {
+				continue
+			}
+			rawVal, ok := value.(string)
+			if !ok {
+				continue
+			}
+			val := strings.TrimSpace(rawVal)
+			if val == "" {
+				continue
+			}
+			out[name] = val
+		}
+	default:
+		return nil
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func ApplyCustomHeadersFromMetadata(auth *Auth) {
+	if auth == nil || len(auth.Metadata) == 0 {
+		return
+	}
+	headers := ExtractCustomHeadersFromMetadata(auth.Metadata)
+	if len(headers) == 0 {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	for name, value := range headers {
+		auth.Attributes["header:"+name] = value
 	}
 }
 

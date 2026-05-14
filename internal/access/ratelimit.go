@@ -1,6 +1,9 @@
 package access
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,12 +23,17 @@ type rateLimitEntry struct {
 	lockedUntil  time.Time
 }
 
-// AuthRateLimiter tracks per-IP authentication failures and enforces
-// rate limits: after maxFailures failures within failureWindow, the IP
-// is locked out for lockoutDuration.
+// AuthRateLimiter tracks authentication failures and enforces rate limits on two
+// independent axes:
+//   - per client IP (mitigates a single host brute-forcing)
+//   - per candidate account identifier (mitigates attackers rotating IPs against one account)
+//
+// After maxFailures within failureWindow on either axis, subsequent requests are
+// rejected with 429 until lockoutDuration elapses.
 type AuthRateLimiter struct {
-	entries sync.Map // ip string → *rateLimitEntry
-	stopCh  chan struct{}
+	ipEntries      sync.Map // ip string → *rateLimitEntry
+	accountEntries sync.Map // accountHash string → *rateLimitEntry
+	stopCh         chan struct{}
 }
 
 // NewAuthRateLimiter creates a rate limiter and starts background cleanup.
@@ -49,7 +57,58 @@ func (rl *AuthRateLimiter) Stop() {
 
 // IsLimited returns true if the given IP is currently locked out.
 func (rl *AuthRateLimiter) IsLimited(ip string) bool {
-	val, ok := rl.entries.Load(ip)
+	return isLimited(&rl.ipEntries, ip)
+}
+
+// RecordFailure records an authentication failure for the given IP.
+// If the failure count reaches the threshold within the window, the IP is locked out.
+func (rl *AuthRateLimiter) RecordFailure(ip string) {
+	recordFailure(&rl.ipEntries, ip)
+}
+
+// RecordSuccess clears all failure state for the given IP.
+func (rl *AuthRateLimiter) RecordSuccess(ip string) {
+	rl.ipEntries.Delete(ip)
+}
+
+// IsAccountLimited returns true if the given account identifier is currently locked out.
+// Use HashAccountKey to derive accountHash from a raw credential — never pass raw secrets.
+func (rl *AuthRateLimiter) IsAccountLimited(accountHash string) bool {
+	if accountHash == "" {
+		return false
+	}
+	return isLimited(&rl.accountEntries, accountHash)
+}
+
+// RecordAccountFailure records an authentication failure for the given account hash.
+func (rl *AuthRateLimiter) RecordAccountFailure(accountHash string) {
+	if accountHash == "" {
+		return
+	}
+	recordFailure(&rl.accountEntries, accountHash)
+}
+
+// RecordAccountSuccess clears all failure state for the given account hash.
+func (rl *AuthRateLimiter) RecordAccountSuccess(accountHash string) {
+	if accountHash == "" {
+		return
+	}
+	rl.accountEntries.Delete(accountHash)
+}
+
+// HashAccountKey derives a non-reversible identifier for a credential candidate.
+// Returns empty string for empty input so callers can short-circuit safely.
+func HashAccountKey(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:8])
+}
+
+func isLimited(entries *sync.Map, key string) bool {
+	val, ok := entries.Load(key)
 	if !ok {
 		return false
 	}
@@ -59,11 +118,9 @@ func (rl *AuthRateLimiter) IsLimited(ip string) bool {
 	return time.Now().Before(entry.lockedUntil)
 }
 
-// RecordFailure records an authentication failure for the given IP.
-// If the failure count reaches the threshold within the window, the IP is locked out.
-func (rl *AuthRateLimiter) RecordFailure(ip string) {
+func recordFailure(entries *sync.Map, key string) {
 	now := time.Now()
-	val, _ := rl.entries.LoadOrStore(ip, &rateLimitEntry{})
+	val, _ := entries.LoadOrStore(key, &rateLimitEntry{})
 	entry := val.(*rateLimitEntry)
 
 	entry.mu.Lock()
@@ -85,11 +142,6 @@ func (rl *AuthRateLimiter) RecordFailure(ip string) {
 	}
 }
 
-// RecordSuccess clears all failure state for the given IP.
-func (rl *AuthRateLimiter) RecordSuccess(ip string) {
-	rl.entries.Delete(ip)
-}
-
 func (rl *AuthRateLimiter) cleanupLoop() {
 	ticker := time.NewTicker(cleanupInterval)
 	defer ticker.Stop()
@@ -105,16 +157,20 @@ func (rl *AuthRateLimiter) cleanupLoop() {
 
 func (rl *AuthRateLimiter) cleanup() {
 	now := time.Now()
-	rl.entries.Range(
-		func(key, value any) bool {
-			entry := value.(*rateLimitEntry)
-			entry.mu.Lock()
-			stale := now.Sub(entry.firstFailure) > staleEntryMaxAge && now.After(entry.lockedUntil)
-			entry.mu.Unlock()
-			if stale {
-				rl.entries.Delete(key)
-			}
-			return true
-		},
-	)
+	cleanupMap := func(m *sync.Map) {
+		m.Range(
+			func(key, value any) bool {
+				entry := value.(*rateLimitEntry)
+				entry.mu.Lock()
+				stale := now.Sub(entry.firstFailure) > staleEntryMaxAge && now.After(entry.lockedUntil)
+				entry.mu.Unlock()
+				if stale {
+					m.Delete(key)
+				}
+				return true
+			},
+		)
+	}
+	cleanupMap(&rl.ipEntries)
+	cleanupMap(&rl.accountEntries)
 }

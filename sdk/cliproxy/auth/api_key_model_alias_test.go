@@ -53,6 +53,8 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 		// Direct name lookup
 		{"upstream name direct", "a1", "gemini-2.5-pro-exp-03-25", "gemini-2.5-pro-exp-03-25"},
 		{"upstream name with suffix", "a1", "gemini-2.5-pro-exp-03-25(8192)", "gemini-2.5-pro-exp-03-25(8192)"},
+		{"alias with 1m tag", "a1", "g25p[1m]", "gemini-2.5-pro-exp-03-25[1m]"},
+		{"alias with 1m tag and thinking suffix", "a1", "g25p[1m](4096)", "gemini-2.5-pro-exp-03-25[1m](4096)"},
 
 		// Cache miss scenarios
 		{"non-existent auth", "non-existent", "g25p", ""},
@@ -165,6 +167,29 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 		if resolved := mgr.lookupAPIKeyUpstreamModel(tt.authID, tt.input); resolved != tt.want {
 			t.Errorf("lookupAPIKeyUpstreamModel(%q, %q) = %q, want %q", tt.authID, tt.input, resolved, tt.want)
 		}
+	}
+}
+
+func TestResolveOpenAICompatConfig_SkipsDisabled(t *testing.T) {
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "pool", Disabled: true,
+				Models: []internalconfig.OpenAICompatibilityModel{{Name: "disabled-model", Alias: "alias"}},
+			},
+			{Name: "pool", Models: []internalconfig.OpenAICompatibilityModel{{Name: "active-model", Alias: "alias"}}},
+		},
+	}
+
+	entry := resolveOpenAICompatConfig(cfg, "pool", "pool", "pool")
+	if entry == nil {
+		t.Fatal("expected active entry, got nil")
+	}
+	if entry.Disabled {
+		t.Fatal("expected disabled entry to be skipped")
+	}
+	if len(entry.Models) != 1 || entry.Models[0].Name != "active-model" {
+		t.Fatalf("unexpected entry selected: %+v", entry.Models)
 	}
 }
 

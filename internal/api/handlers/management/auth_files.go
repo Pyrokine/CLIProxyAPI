@@ -27,6 +27,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/oauthcommon"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
@@ -358,19 +359,22 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		name = auth.ID
 	}
 	entry := gin.H{
-		"id":             auth.ID,
-		"auth_index":     auth.Index,
-		"name":           name,
-		"type":           strings.TrimSpace(auth.Provider),
-		"provider":       strings.TrimSpace(auth.Provider),
-		"label":          auth.Label,
-		"status":         auth.Status,
-		"status_message": auth.StatusMessage,
-		"disabled":       auth.Disabled,
-		"unavailable":    auth.Unavailable,
-		"runtime_only":   runtimeOnly,
-		"source":         "memory",
-		"size":           int64(0),
+		"id":              auth.ID,
+		"auth_index":      auth.Index,
+		"name":            name,
+		"type":            strings.TrimSpace(auth.Provider),
+		"provider":        strings.TrimSpace(auth.Provider),
+		"label":           auth.Label,
+		"status":          auth.Status,
+		"status_message":  auth.StatusMessage,
+		"disabled":        auth.Disabled,
+		"unavailable":     auth.Unavailable,
+		"runtime_only":    runtimeOnly,
+		"source":          "memory",
+		"size":            int64(0),
+		"success":         auth.Success,
+		"failed":          auth.Failed,
+		"recent_requests": auth.RecentRequestsSnapshot(time.Now()),
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
@@ -539,37 +543,51 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 	c.Data(200, "application/json", data)
 }
 
-// UploadAuthFile uploads an auth file via multipart or raw JSON with ?name= parameter.
+// UploadAuthFile uploads auth files via multipart or raw JSON with ?name= parameter.
 func (h *Handler) UploadAuthFile(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
 	ctx := c.Request.Context()
-	if file, err := c.FormFile("file"); err == nil && file != nil {
-		dst, errV := h.validateAuthFileName(filepath.Base(file.Filename))
-		if errV != nil {
-			c.JSON(400, gin.H{"error": errV.Error()})
-			return
+	form, err := c.MultipartForm()
+	if err == nil && form != nil && len(form.File["file"]) > 0 {
+		uploadedFiles := make([]string, 0, len(form.File["file"]))
+		failed := make([]gin.H, 0)
+		for _, file := range form.File["file"] {
+			dst, errV := h.validateAuthFileName(filepath.Base(file.Filename))
+			if errV != nil {
+				failed = append(failed, gin.H{"name": file.Filename, "error": errV.Error()})
+				continue
+			}
+			if errSave := c.SaveUploadedFile(file, dst); errSave != nil {
+				failed = append(
+					failed, gin.H{"name": file.Filename, "error": fmt.Sprintf("failed to save file: %v", errSave)},
+				)
+				continue
+			}
+			if errChmod := os.Chmod(dst, 0o600); errChmod != nil {
+				log.Warnf("failed to chmod auth file %s: %v", dst, errChmod)
+			}
+			data, errRead := os.ReadFile(dst)
+			if errRead != nil {
+				failed = append(
+					failed, gin.H{"name": file.Filename, "error": fmt.Sprintf("failed to read saved file: %v", errRead)},
+				)
+				continue
+			}
+			if errReg := h.registerAuthFromFile(ctx, dst, data); errReg != nil {
+				_ = os.Remove(dst)
+				failed = append(failed, gin.H{"name": file.Filename, "error": errReg.Error()})
+				continue
+			}
+			uploadedFiles = append(uploadedFiles, filepath.Base(dst))
 		}
-		if errSave := c.SaveUploadedFile(file, dst); errSave != nil {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to save file: %v", errSave)})
-			return
+		status := "ok"
+		if len(failed) > 0 {
+			status = "partial"
 		}
-		// Restrict permissions to owner-only (Gin's SaveUploadedFile uses os.Create which inherits umask)
-		if errChmod := os.Chmod(dst, 0o600); errChmod != nil {
-			log.Warnf("failed to chmod auth file %s: %v", dst, errChmod)
-		}
-		data, errRead := os.ReadFile(dst)
-		if errRead != nil {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read saved file: %v", errRead)})
-			return
-		}
-		if errReg := h.registerAuthFromFile(ctx, dst, data); errReg != nil {
-			c.JSON(500, gin.H{"error": errReg.Error()})
-			return
-		}
-		c.JSON(200, gin.H{"status": "ok"})
+		c.JSON(200, gin.H{"status": status, "uploaded": len(uploadedFiles), "files": uploadedFiles, "failed": failed})
 		return
 	}
 	dst, errV := h.validateAuthFileName(c.Query("name"))
@@ -587,13 +605,14 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	if err = h.registerAuthFromFile(ctx, dst, data); err != nil {
+		_ = os.Remove(dst)
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, gin.H{"status": "ok"})
+	c.JSON(200, gin.H{"status": "ok", "uploaded": 1, "files": []string{filepath.Base(dst)}, "failed": []string{}})
 }
 
-// DeleteAuthFile deletes auth files: single by name or all.
+// DeleteAuthFile deletes auth files: single by name, batch by body, or all.
 func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -628,11 +647,49 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 				}
 				deleted++
 				h.disableAuth(ctx, full)
+				h.syncQuotaSchedulerRemoval(full)
 			}
 		}
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return
 	}
+	var body struct {
+		Names []string `json:"names"`
+	}
+	if err := c.ShouldBindJSON(&body); err == nil && len(body.Names) > 0 {
+		deletedFiles := make([]string, 0, len(body.Names))
+		failed := make([]gin.H, 0)
+		for _, rawName := range body.Names {
+			name := strings.TrimSpace(rawName)
+			full, errV := h.validateAuthFileName(name)
+			if errV != nil {
+				failed = append(failed, gin.H{"name": name, "error": errV.Error()})
+				continue
+			}
+			if err := os.Remove(full); err != nil {
+				if os.IsNotExist(err) {
+					failed = append(failed, gin.H{"name": name, "error": "file not found"})
+				} else {
+					failed = append(failed, gin.H{"name": name, "error": fmt.Sprintf("failed to remove file: %v", err)})
+				}
+				continue
+			}
+			if err := h.deleteTokenRecord(ctx, full); err != nil {
+				failed = append(failed, gin.H{"name": name, "error": err.Error()})
+				continue
+			}
+			h.disableAuth(ctx, full)
+			h.syncQuotaSchedulerRemoval(full)
+			deletedFiles = append(deletedFiles, filepath.Base(full))
+		}
+		status := "ok"
+		if len(failed) > 0 {
+			status = "partial"
+		}
+		c.JSON(200, gin.H{"status": status, "deleted": len(deletedFiles), "files": deletedFiles, "failed": failed})
+		return
+	}
+
 	full, errV := h.validateAuthFileName(c.Query("name"))
 	if errV != nil {
 		c.JSON(400, gin.H{"error": errV.Error()})
@@ -651,7 +708,8 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		return
 	}
 	h.disableAuth(ctx, full)
-	c.JSON(200, gin.H{"status": "ok"})
+	h.syncQuotaSchedulerRemoval(full)
+	c.JSON(200, gin.H{"status": "ok", "deleted": 1, "files": []string{filepath.Base(full)}})
 }
 
 func (h *Handler) authIDForPath(path string) string {
@@ -672,10 +730,115 @@ func (h *Handler) authIDForPath(path string) string {
 	return path
 }
 
+func normalizeAuthProvider(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "gemini" {
+		return string(quota.TypeGeminiCli)
+	}
+	if provider == "anthropic" {
+		return string(quota.TypeClaude)
+	}
+	return provider
+}
+
+func quotaCredentialTypeForProvider(provider string) (quota.CredentialType, bool) {
+	switch normalizeAuthProvider(provider) {
+	case string(quota.TypeClaude):
+		return quota.TypeClaude, true
+	case string(quota.TypeCodex):
+		return quota.TypeCodex, true
+	case string(quota.TypeGeminiCli):
+		return quota.TypeGeminiCli, true
+	case string(quota.TypeAntigravity):
+		return quota.TypeAntigravity, true
+	case string(quota.TypeKimi):
+		return quota.TypeKimi, true
+	default:
+		return "", false
+	}
+}
+
+func authMatchesPath(auth *coreauth.Auth, path string) bool {
+	if auth == nil {
+		return false
+	}
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(authAttribute(auth, "path")), trimmedPath) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(authAttribute(auth, "source")), trimmedPath)
+}
+
+func findAuthsByPath(auths []*coreauth.Auth, path string) []*coreauth.Auth {
+	matched := make([]*coreauth.Auth, 0, 2)
+	for _, auth := range auths {
+		if authMatchesPath(auth, path) {
+			matched = append(matched, auth)
+		}
+	}
+	return matched
+}
+
+func mergeAuthRuntimeState(target *coreauth.Auth, existing *coreauth.Auth, hasLastRefresh bool) {
+	if target == nil || existing == nil {
+		return
+	}
+	target.CreatedAt = existing.CreatedAt
+	if !hasLastRefresh {
+		target.LastRefreshedAt = existing.LastRefreshedAt
+	}
+	target.NextRefreshAfter = existing.NextRefreshAfter
+	target.NextRetryAfter = existing.NextRetryAfter
+	target.Runtime = existing.Runtime
+	target.Quota = existing.Quota
+	target.LastError = existing.LastError
+	target.Unavailable = existing.Unavailable
+	target.ModelStates = existing.ModelStates
+	if target.StatusMessage == "" {
+		target.StatusMessage = existing.StatusMessage
+	}
+	if target.Status == coreauth.StatusActive && existing.Status != "" && existing.Status != coreauth.StatusActive {
+		target.Status = existing.Status
+	}
+}
+
+func (h *Handler) syncQuotaSchedulerForAuth(auth *coreauth.Auth) {
+	if h == nil || h.quotaScheduler == nil || auth == nil {
+		return
+	}
+	fileName := strings.TrimSpace(auth.FileName)
+	if fileName == "" {
+		return
+	}
+	credType, ok := quotaCredentialTypeForProvider(auth.Provider)
+	if !ok {
+		return
+	}
+	auth.EnsureIndex()
+	h.quotaScheduler.Register(fileName, credType, auth.Index)
+	h.quotaScheduler.UpdateAuthIndex(fileName, auth.Index)
+	h.quotaScheduler.SetDisabled(fileName, auth.Disabled)
+}
+
+func (h *Handler) syncQuotaSchedulerRemoval(path string) {
+	if h == nil || h.quotaScheduler == nil {
+		return
+	}
+	fileName := strings.TrimSpace(filepath.Base(path))
+	if fileName == "" {
+		return
+	}
+	h.quotaScheduler.Unregister(fileName)
+}
+
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
 	if h.authManager == nil {
 		return nil
 	}
+	path = strings.TrimSpace(path)
 	if path == "" {
 		return fmt.Errorf("auth path is empty")
 	}
@@ -691,6 +854,7 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 		return fmt.Errorf("invalid auth file: %w", err)
 	}
 	provider, _ := metadata["type"].(string)
+	provider = normalizeAuthProvider(provider)
 	if provider == "" {
 		provider = "unknown"
 	}
@@ -699,41 +863,108 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 		label = email
 	}
 	lastRefresh, hasLastRefresh := extractLastRefreshTimestamp(metadata)
-
 	authID := h.authIDForPath(path)
 	if authID == "" {
 		authID = path
 	}
+	fileName := filepath.Base(path)
 	attr := map[string]string{
 		"path":   path,
 		"source": path,
 	}
-	auth := &coreauth.Auth{
-		ID:         authID,
-		Provider:   provider,
-		FileName:   filepath.Base(path),
-		Label:      label,
-		Status:     coreauth.StatusActive,
-		Attributes: attr,
-		Metadata:   metadata,
-		CreatedAt:  time.Now(),
-		UpdatedAt:  time.Now(),
+	if rawPrefix, ok := metadata["prefix"].(string); ok {
+		trimmed := strings.Trim(strings.TrimSpace(rawPrefix), "/")
+		if trimmed != "" && !strings.Contains(trimmed, "/") {
+			attr["prefix"] = trimmed
+		}
 	}
+	if rawPriority, ok := metadata["priority"]; ok {
+		switch v := rawPriority.(type) {
+		case float64:
+			attr["priority"] = strconv.Itoa(int(v))
+		case string:
+			priority := strings.TrimSpace(v)
+			if _, err := strconv.Atoi(priority); err == nil {
+				attr["priority"] = priority
+			}
+		}
+	}
+	proxyURL := ""
+	if rawProxyURL, ok := metadata["proxy_url"].(string); ok {
+		proxyURL = strings.TrimSpace(rawProxyURL)
+	}
+	disabled, _ := metadata["disabled"].(bool)
+	status := coreauth.StatusActive
+	if disabled {
+		status = coreauth.StatusDisabled
+	}
+	if rawStatus, ok := metadata["status"].(string); ok {
+		switch candidate := coreauth.Status(strings.TrimSpace(rawStatus)); candidate {
+		case coreauth.StatusUnknown, coreauth.StatusActive, coreauth.StatusPending, coreauth.StatusRefreshing, coreauth.StatusError, coreauth.StatusDisabled:
+			status = candidate
+		}
+	}
+	statusMessage, _ := metadata["status_message"].(string)
+	auth := &coreauth.Auth{
+		ID:            authID,
+		Provider:      provider,
+		FileName:      fileName,
+		Label:         label,
+		Prefix:        attr["prefix"],
+		Status:        status,
+		StatusMessage: strings.TrimSpace(statusMessage),
+		Disabled:      disabled,
+		Attributes:    attr,
+		ProxyURL:      proxyURL,
+		Metadata:      metadata,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+	coreauth.ApplyCustomHeadersFromMetadata(auth)
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
 	}
-	if existing, ok := h.authManager.GetByID(authID); ok {
-		auth.CreatedAt = existing.CreatedAt
-		if !hasLastRefresh {
-			auth.LastRefreshedAt = existing.LastRefreshedAt
+	allAuths := h.authManager.List()
+	existingByID, hasExistingByID := h.authManager.GetByID(authID)
+	var existingByPath *coreauth.Auth
+	for _, candidate := range findAuthsByPath(allAuths, path) {
+		if candidate != nil && !strings.EqualFold(candidate.ID, authID) {
+			existingByPath = candidate
+			break
 		}
-		auth.NextRefreshAfter = existing.NextRefreshAfter
-		auth.Runtime = existing.Runtime
-		_, err := h.authManager.Update(ctx, auth)
-		return err
 	}
-	_, err := h.authManager.Register(ctx, auth)
-	return err
+	if hasExistingByID {
+		mergeAuthRuntimeState(auth, existingByID, hasLastRefresh)
+	}
+	if existingByPath != nil {
+		mergeAuthRuntimeState(auth, existingByPath, hasLastRefresh)
+	}
+	if hasExistingByID {
+		if _, err := h.authManager.Update(ctx, auth); err != nil {
+			return err
+		}
+	} else {
+		if _, err := h.authManager.Register(ctx, auth); err != nil {
+			return err
+		}
+	}
+	for _, candidate := range allAuths {
+		if candidate == nil || candidate.ID == auth.ID {
+			continue
+		}
+		if !authMatchesPath(candidate, path) {
+			continue
+		}
+		candidate.Disabled = true
+		candidate.Status = coreauth.StatusDisabled
+		candidate.StatusMessage = "superseded by file-backed auth sync"
+		candidate.UpdatedAt = auth.UpdatedAt
+		if _, err := h.authManager.Update(ctx, candidate); err != nil {
+			return err
+		}
+	}
+	h.syncQuotaSchedulerForAuth(auth)
+	return nil
 }
 
 // PatchAuthFileStatus toggles the disabled state of an auth file
@@ -798,6 +1029,8 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
 		return
 	}
+
+	h.syncQuotaSchedulerForAuth(targetAuth)
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
@@ -944,7 +1177,17 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 			return "", fmt.Errorf("post-auth hook failed: %w", err)
 		}
 	}
-	return store.Save(ctx, record)
+	savedPath, err := store.Save(ctx, record)
+	if err != nil {
+		return "", err
+	}
+	if h.authManager != nil {
+		syncCtx := coreauth.WithSkipPersist(ctx)
+		if errReg := h.registerAuthFromFile(syncCtx, savedPath, nil); errReg != nil {
+			return "", errReg
+		}
+	}
+	return savedPath, nil
 }
 
 // generatePKCEAndState generates PKCE codes and a random state parameter for OAuth flows.
@@ -987,7 +1230,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		return
 	}
 
-	registerOAuthSession(state, "anthropic")
+	registerOAuthSession(state, "anthropic", strings.TrimSpace(c.Query("nonce")))
 
 	forwarder, ok := h.setupOAuthForwarder(c, "anthropic", anthropicCallbackPort, "/anthropic/callback")
 	if !ok {
@@ -1094,7 +1337,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	state := "gem-" + randomState
 	authURL := conf.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 
-	registerOAuthSession(state, "gemini")
+	registerOAuthSession(state, "gemini", strings.TrimSpace(c.Query("nonce")))
 
 	isWebUI := isWebUIRequest(c)
 	var forwarder *callbackForwarder
@@ -1355,7 +1598,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		return
 	}
 
-	registerOAuthSession(state, "codex")
+	registerOAuthSession(state, "codex", strings.TrimSpace(c.Query("nonce")))
 
 	forwarder, ok := h.setupOAuthForwarder(c, "codex", codexCallbackPort, "/codex/callback")
 	if !ok {
@@ -1464,7 +1707,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
-	registerOAuthSession(state, "antigravity")
+	registerOAuthSession(state, "antigravity", strings.TrimSpace(c.Query("nonce")))
 
 	forwarder, ok := h.setupOAuthForwarder(c, "antigravity", antigravity.CallbackPort, "/antigravity/callback")
 	if !ok {
@@ -1592,7 +1835,7 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 	}
 	authURL := deviceFlow.VerificationURIComplete
 
-	registerOAuthSession(state, "qwen")
+	registerOAuthSession(state, "qwen", strings.TrimSpace(c.Query("nonce")))
 
 	go func() {
 		log.Info("Waiting for authentication...")
@@ -1651,7 +1894,7 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		authURL = deviceFlow.VerificationURI
 	}
 
-	registerOAuthSession(state, "kimi")
+	registerOAuthSession(state, "kimi", strings.TrimSpace(c.Query("nonce")))
 
 	go func() {
 		log.Info("Waiting for authentication...")
@@ -1707,7 +1950,7 @@ func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	authSvc := iflowauth.NewAuth(h.cfg)
 	authURL, redirectURI := authSvc.AuthorizationURL(state, iflowauth.CallbackPort)
 
-	registerOAuthSession(state, "iflow")
+	registerOAuthSession(state, "iflow", strings.TrimSpace(c.Query("nonce")))
 
 	forwarder, ok := h.setupOAuthForwarder(c, "iflow", iflowauth.CallbackPort, "/iflow/callback")
 	if !ok {
@@ -1993,6 +2236,11 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 	}
 	if err := validateOAuthState(state); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid state"})
+		return
+	}
+
+	if !verifyOAuthNonce(state, c.Query("nonce")) {
+		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "error": "nonce mismatch"})
 		return
 	}
 
