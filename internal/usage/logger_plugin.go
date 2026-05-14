@@ -1,3 +1,6 @@
+// Last compiled: 2026-03-30
+// Author: pyro
+
 // Package usage provides usage tracking and logging functionality for the CLI Proxy API server.
 // It includes plugins for monitoring API usage, token consumption, and other metrics
 // to help with observability and billing purposes.
@@ -5,6 +8,7 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"strings"
@@ -89,6 +93,8 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 			Model:     modelName,
 			Source:    source,
 			AuthIndex: authIndex,
+			APIKey:    record.APIKey,
+			Provider:  record.Provider,
 			Tokens:    tokens,
 			Failed:    failed,
 		}
@@ -336,9 +342,16 @@ type MergeResult struct {
 	Skipped int64 `json:"skipped"`
 }
 
+// maxImportFieldLen limits apiName/modelName length in imports to prevent memory abuse.
+const maxImportFieldLen = 256
+
+// ImportHook is called for each successfully imported detail with the resolved fields.
+type ImportHook func(detail FlatDetail)
+
 // MergeSnapshot merges an exported statistics snapshot into the current store.
 // Existing data is preserved and duplicate request details are skipped.
-func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResult {
+// An optional hook is called for each newly added detail (after dedup, before return).
+func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...ImportHook) MergeResult {
 	result := MergeResult{}
 	if s == nil {
 		return result
@@ -367,6 +380,9 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 		if apiName == "" {
 			continue
 		}
+		if len(apiName) > maxImportFieldLen {
+			apiName = apiName[:maxImportFieldLen]
+		}
 		stats, ok := s.apis[apiName]
 		if !ok || stats == nil {
 			stats = &apiStats{Models: make(map[string]*modelStats)}
@@ -378,6 +394,9 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 			modelName = strings.TrimSpace(modelName)
 			if modelName == "" {
 				modelName = "unknown"
+			}
+			if len(modelName) > maxImportFieldLen {
+				modelName = modelName[:maxImportFieldLen]
 			}
 			for _, detail := range modelSnapshot.Details {
 				detail.Tokens = normaliseTokenStats(detail.Tokens)
@@ -392,6 +411,19 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				seen[key] = struct{}{}
 				s.recordImported(apiName, modelName, stats, detail)
 				result.Added++
+				if len(hooks) > 0 && hooks[0] != nil {
+					hooks[0](
+						FlatDetail{
+							Timestamp: detail.Timestamp,
+							Model:     modelName,
+							Source:    detail.Source,
+							AuthIndex: detail.AuthIndex,
+							APIKey:    apiName,
+							Tokens:    detail.Tokens,
+							Failed:    detail.Failed,
+						},
+					)
+				}
 			}
 		}
 	}
@@ -497,6 +529,33 @@ func normaliseDetail(detail coreusage.Detail) tokenStats {
 		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
 	}
 	return tokens
+}
+
+// add accumulates another tokenStats into this one, field by field.
+func (t *tokenStats) add(other tokenStats) {
+	t.InputTokens += other.InputTokens
+	t.OutputTokens += other.OutputTokens
+	t.ReasoningTokens += other.ReasoningTokens
+	t.CachedTokens += other.CachedTokens
+	t.TotalTokens += other.TotalTokens
+}
+
+// UnmarshalJSON supports both legacy int64 (→ TotalTokens) and full object formats.
+func (t *tokenStats) UnmarshalJSON(data []byte) error {
+	// Try int64 first (legacy format)
+	var n int64
+	if json.Unmarshal(data, &n) == nil {
+		*t = tokenStats{TotalTokens: n}
+		return nil
+	}
+	// Full object
+	type alias tokenStats
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*t = tokenStats(a)
+	return nil
 }
 
 func normaliseTokenStats(tokens tokenStats) tokenStats {
