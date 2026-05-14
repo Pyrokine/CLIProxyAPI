@@ -1,4 +1,4 @@
-// Last compiled: 2026-05-14
+// Last compiled: 2026-05-15
 // Author: pyro
 
 package management
@@ -285,7 +285,7 @@ func (h *Handler) performUpdate(repo, version, proxyURL string) {
 
 func restartCurrentProcess() error {
 	if os.Getenv("INVOCATION_ID") != "" {
-		cmd := exec.Command("systemctl", "restart", "cli-proxy-api.service")
+		cmd := exec.Command("systemctl", "restart", "--no-block", "cli-proxy-api.service")
 		return cmd.Run()
 	}
 	return fmt.Errorf("service restart is not supported outside systemd")
