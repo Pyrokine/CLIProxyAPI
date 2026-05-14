@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,27 @@ import (
 
 func init() {
 	gin.SetMode(gin.TestMode)
+}
+
+func TestGitHubGet_AllowsLargeResponseBody(t *testing.T) {
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				payload := bytes.Repeat([]byte("a"), 11<<20)
+				_, _ = io.Copy(w, bytes.NewReader(payload))
+			},
+		),
+	)
+	defer server.Close()
+
+	body, err := githubGet(context.Background(), server.Client(), server.URL)
+	if err != nil {
+		t.Fatalf("githubGet: %v", err)
+	}
+	if got, want := len(body), 11<<20; got != want {
+		t.Fatalf("len(body) = %d, want %d", got, want)
+	}
 }
 
 // --- Option pattern tests ---

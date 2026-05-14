@@ -1,4 +1,4 @@
-// Last compiled: 2026-03-17
+// Last compiled: 2026-05-15
 // Author: pyro
 
 package management
@@ -199,7 +199,7 @@ func githubGet(ctx context.Context, client *http.Client, url string) ([]byte, er
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	return io.ReadAll(io.LimitReader(resp.Body, 256<<20))
 }
 
 func lookupGitHubToken() string {
