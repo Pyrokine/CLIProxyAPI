@@ -62,6 +62,7 @@ var cachedReleases = releasesCache{entries: make(map[string]releasesCacheEntry)}
 func (h *Handler) GetReleases(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", strconv.Itoa(releasesDefaultPage)))
 	perPage, _ := strconv.Atoi(c.DefaultQuery("per_page", strconv.Itoa(releasesDefaultLimit)))
+	force := c.Query("force") == "1"
 	if page < 1 {
 		page = 1
 	}
@@ -80,7 +81,7 @@ func (h *Handler) GetReleases(c *gin.Context) {
 	default:
 		repo = h.cpaRepository()
 	}
-	releases, err := h.fetchAllReleases(c, repo)
+	releases, err := h.fetchAllReleases(c, repo, force)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "fetch_failed", "message": err.Error()})
 		return
@@ -140,13 +141,15 @@ func (h *Handler) cpaRepository() string {
 	return repo
 }
 
-func (h *Handler) fetchAllReleases(c *gin.Context, repo string) ([]gitHubRelease, error) {
+func (h *Handler) fetchAllReleases(c *gin.Context, repo string, force bool) ([]gitHubRelease, error) {
 	cachedReleases.mu.RLock()
-	if entry, ok := cachedReleases.entries[repo]; ok &&
-		time.Since(entry.fetchedAt) < releasesCacheTTL && entry.data != nil {
-		data := entry.data
-		cachedReleases.mu.RUnlock()
-		return data, nil
+	if !force {
+		if entry, ok := cachedReleases.entries[repo]; ok &&
+			time.Since(entry.fetchedAt) < releasesCacheTTL && entry.data != nil {
+			data := entry.data
+			cachedReleases.mu.RUnlock()
+			return data, nil
+		}
 	}
 	cachedReleases.mu.RUnlock()
 

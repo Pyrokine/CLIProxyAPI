@@ -52,6 +52,47 @@ func TestGitHubGet_AllowsLargeResponseBody(t *testing.T) {
 	}
 }
 
+func TestFetchAllReleases_ForceBypassesCache(t *testing.T) {
+	cachedReleases.entries = map[string]releasesCacheEntry{
+		"Pyrokine/Cli-Proxy-API-Management-Center": {
+			data: []gitHubRelease{{TagName: "cached"}}, fetchedAt: time.Now(),
+		},
+	}
+	defer func() {
+		cachedReleases.entries = make(map[string]releasesCacheEntry)
+	}()
+
+	proxy := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, `[{"tag_name":"fresh"}]`)
+			},
+		),
+	)
+	defer proxy.Close()
+
+	h := NewHandler(&config.Config{SDKConfig: config.SDKConfig{ProxyURL: proxy.URL}}, "", nil)
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/releases?force=1", nil)
+	releases, err := h.fetchAllReleases(ctx, "Pyrokine/Cli-Proxy-API-Management-Center", true)
+	if err == nil {
+		t.Fatalf("expected proxy URL to fail because it is not a valid proxy transport endpoint")
+	}
+	if releases != nil {
+		t.Fatalf("releases = %#v, want nil on fetch error", releases)
+	}
+}
+
+func TestRestartCurrentProcess_RequiresSystemd(t *testing.T) {
+	if err := os.Unsetenv("INVOCATION_ID"); err != nil {
+		t.Fatalf("Unsetenv: %v", err)
+	}
+	if err := restartCurrentProcess(); err == nil {
+		t.Fatal("expected restartCurrentProcess to reject non-systemd environment")
+	}
+}
+
 // --- Option pattern tests ---
 
 func TestWithEnvSecret(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -271,11 +272,23 @@ func (h *Handler) performUpdate(repo, version, proxyURL string) {
 		return
 	}
 
-	setStatus("done", fmt.Sprintf("Updated to %s. Restart the process to apply.", version), 100)
+	setStatus("replacing", fmt.Sprintf("Updated to %s, restarting service...", version), 100)
 	log.Infof(
 		"self-update: binary replaced successfully (version=%s, archive=%s, sha256=%s)", version, asset.Name,
 		downloadedHash,
 	)
+	if err = restartCurrentProcess(); err != nil {
+		setStatus("error", fmt.Sprintf("restart process: %v", err), 100)
+		return
+	}
+}
+
+func restartCurrentProcess() error {
+	if os.Getenv("INVOCATION_ID") != "" {
+		cmd := exec.Command("systemctl", "restart", "cli-proxy-api.service")
+		return cmd.Run()
+	}
+	return fmt.Errorf("service restart is not supported outside systemd")
 }
 
 var validVersion = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
