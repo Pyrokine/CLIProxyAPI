@@ -10,6 +10,7 @@ import (
 	"context"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -35,32 +36,30 @@ func ConvertGeminiCliResponseToGemini(ctx context.Context, _ string, _, _, rawJS
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
-	if alt, ok := ctx.Value("alt").(string); ok {
-		var chunk []byte
-		if alt == "" {
-			responseResult := gjson.GetBytes(rawJSON, "response")
-			if responseResult.Exists() {
-				chunk = []byte(responseResult.Raw)
-			}
-		} else {
-			chunkTemplate := []byte(`[]`)
-			responseResult := gjson.ParseBytes(chunk)
-			if responseResult.IsArray() {
-				responseResultItems := responseResult.Array()
-				for i := 0; i < len(responseResultItems); i++ {
-					responseResultItem := responseResultItems[i]
-					if responseResultItem.Get("response").Exists() {
-						chunkTemplate, _ = sjson.SetRawBytes(
-							chunkTemplate, "-1", []byte(responseResultItem.Get("response").Raw),
-						)
-					}
+	alt := util.AltValue(ctx)
+	var chunk []byte
+	if alt == "" {
+		responseResult := gjson.GetBytes(rawJSON, "response")
+		if responseResult.Exists() {
+			chunk = []byte(responseResult.Raw)
+		}
+	} else {
+		chunkTemplate := []byte(`[]`)
+		responseResult := gjson.ParseBytes(chunk)
+		if responseResult.IsArray() {
+			responseResultItems := responseResult.Array()
+			for i := 0; i < len(responseResultItems); i++ {
+				responseResultItem := responseResultItems[i]
+				if responseResultItem.Get("response").Exists() {
+					chunkTemplate, _ = sjson.SetRawBytes(
+						chunkTemplate, "-1", []byte(responseResultItem.Get("response").Raw),
+					)
 				}
 			}
-			chunk = chunkTemplate
 		}
-		return [][]byte{chunk}
+		chunk = chunkTemplate
 	}
-	return [][]byte{}
+	return [][]byte{chunk}
 }
 
 // ConvertGeminiCliResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.

@@ -9,7 +9,7 @@ import (
 	"context"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/gemini"
+	oagemini "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/gemini"
 )
 
 // ConvertOpenAIResponseToGeminiCLI converts OpenAI Chat Completions streaming response format to Gemini API format.
@@ -30,7 +30,9 @@ func ConvertOpenAIResponseToGeminiCLI(
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	outputs := ConvertOpenAIResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	outputs := oagemini.ConvertOpenAIResponseToGemini(
+		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
+	)
 	newOutputs := make([][]byte, 0, len(outputs))
 	for i := 0; i < len(outputs); i++ {
 		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
@@ -54,7 +56,7 @@ func ConvertOpenAIResponseToGeminiCLINonStream(
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
 ) []byte {
-	out := ConvertOpenAIResponseToGeminiNonStream(
+	out := oagemini.ConvertOpenAIResponseToGeminiNonStream(
 		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
 	)
 	return translatorcommon.WrapGeminiCLIResponse(out)

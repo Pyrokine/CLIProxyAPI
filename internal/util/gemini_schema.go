@@ -743,7 +743,7 @@ func orDefault(val, def string) string {
 }
 
 func escapeGJSONPathKey(key string) string {
-	if strings.IndexAny(key, ".*?") == -1 {
+	if !strings.ContainsAny(key, ".*?") {
 		return key
 	}
 	return gjsonPathKeyReplacer.Replace(key)

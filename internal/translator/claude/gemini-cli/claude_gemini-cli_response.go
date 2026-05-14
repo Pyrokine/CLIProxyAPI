@@ -7,7 +7,7 @@ package geminiCLI
 import (
 	"context"
 
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/claude/gemini"
+	claudegemini "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/claude/gemini"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 )
 
@@ -30,7 +30,9 @@ func ConvertClaudeResponseToGeminiCLI(
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	outputs := ConvertClaudeResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	outputs := claudegemini.ConvertClaudeResponseToGemini(
+		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
+	)
 	// Wrap each converted response in a "response" object to match Gemini CLI API structure
 	newOutputs := make([][]byte, 0, len(outputs))
 	for i := 0; i < len(outputs); i++ {
@@ -57,7 +59,7 @@ func ConvertClaudeResponseToGeminiCLINonStream(
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
 ) []byte {
-	out := ConvertClaudeResponseToGeminiNonStream(
+	out := claudegemini.ConvertClaudeResponseToGeminiNonStream(
 		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
 	)
 	// Wrap the converted response in a "response" object to match Gemini CLI API structure

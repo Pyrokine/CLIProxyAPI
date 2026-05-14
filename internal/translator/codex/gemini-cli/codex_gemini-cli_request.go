@@ -6,7 +6,7 @@
 package geminiCLI
 
 import (
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/gemini"
+	codexgemini "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/gemini"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -39,5 +39,5 @@ func ConvertGeminiCLIRequestToCodex(modelName string, inputRawJSON []byte, strea
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
 
-	return ConvertGeminiRequestToCodex(modelName, rawJSON, stream)
+	return codexgemini.ConvertGeminiRequestToCodex(modelName, rawJSON, stream)
 }

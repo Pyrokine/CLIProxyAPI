@@ -3,6 +3,8 @@ package gemini
 import (
 	"context"
 	"testing"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
 func TestRestoreUsageMetadata(t *testing.T) {
@@ -71,7 +73,7 @@ func TestConvertAntigravityResponseToGeminiNonStream(t *testing.T) {
 }
 
 func TestConvertAntigravityResponseToGeminiStream(t *testing.T) {
-	ctx := context.WithValue(context.Background(), "alt", "")
+	ctx := util.WithAlt(context.Background(), "")
 
 	tests := []struct {
 		name     string

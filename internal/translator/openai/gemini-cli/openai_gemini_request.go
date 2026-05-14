@@ -6,7 +6,7 @@
 package geminiCLI
 
 import (
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/gemini"
+	oagemini "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/gemini"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -25,5 +25,5 @@ func ConvertGeminiCLIRequestToOpenAI(modelName string, inputRawJSON []byte, stre
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
 
-	return ConvertGeminiRequestToOpenAI(modelName, rawJSON, stream)
+	return oagemini.ConvertGeminiRequestToOpenAI(modelName, rawJSON, stream)
 }

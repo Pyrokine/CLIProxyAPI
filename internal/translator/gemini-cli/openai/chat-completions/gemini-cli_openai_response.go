@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
+	geminichat "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -247,7 +247,7 @@ func ConvertCliResponseToOpenAINonStream(
 ) []byte {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
-		return ConvertGeminiResponseToOpenAINonStream(
+		return geminichat.ConvertGeminiResponseToOpenAINonStream(
 			ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param,
 		)
 	}

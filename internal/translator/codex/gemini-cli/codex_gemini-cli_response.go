@@ -7,7 +7,7 @@ package geminiCLI
 import (
 	"context"
 
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/gemini"
+	codexgemini "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/gemini"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 )
 
@@ -30,7 +30,9 @@ func ConvertCodexResponseToGeminiCLI(
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
 ) [][]byte {
-	outputs := ConvertCodexResponseToGemini(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	outputs := codexgemini.ConvertCodexResponseToGemini(
+		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
+	)
 	newOutputs := make([][]byte, 0, len(outputs))
 	for i := 0; i < len(outputs); i++ {
 		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
@@ -56,7 +58,9 @@ func ConvertCodexResponseToGeminiCLINonStream(
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
 ) []byte {
-	out := ConvertCodexResponseToGeminiNonStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+	out := codexgemini.ConvertCodexResponseToGeminiNonStream(
+		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
+	)
 	return translatorcommon.WrapGeminiCLIResponse(out)
 }
 

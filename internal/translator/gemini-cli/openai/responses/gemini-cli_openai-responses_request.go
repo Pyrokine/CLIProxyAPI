@@ -1,12 +1,12 @@
 package responses
 
 import (
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini-cli/gemini"
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai/responses"
+	geminiclgemini "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini-cli/gemini"
+	geminiresp "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai/responses"
 )
 
 func ConvertOpenAIResponsesRequestToGeminiCLI(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
-	rawJSON = ConvertOpenAIResponsesRequestToGemini(modelName, rawJSON, stream)
-	return ConvertGeminiRequestToGeminiCLI(modelName, rawJSON, stream)
+	rawJSON = geminiresp.ConvertOpenAIResponsesRequestToGemini(modelName, rawJSON, stream)
+	return geminiclgemini.ConvertGeminiRequestToGeminiCLI(modelName, rawJSON, stream)
 }

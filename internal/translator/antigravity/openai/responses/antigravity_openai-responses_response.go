@@ -3,7 +3,7 @@ package responses
 import (
 	"context"
 
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai/responses"
+	geminiresp "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai/responses"
 	"github.com/tidwall/gjson"
 )
 
@@ -17,7 +17,7 @@ func ConvertAntigravityResponseToOpenAIResponses(
 	if responseResult.Exists() {
 		rawJSON = []byte(responseResult.Raw)
 	}
-	return ConvertGeminiResponseToOpenAIResponses(
+	return geminiresp.ConvertGeminiResponseToOpenAIResponses(
 		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
 	)
 }
@@ -43,7 +43,7 @@ func ConvertAntigravityResponseToOpenAIResponsesNonStream(
 		requestRawJSON = []byte(requestResult.Raw)
 	}
 
-	return ConvertGeminiResponseToOpenAIResponsesNonStream(
+	return geminiresp.ConvertGeminiResponseToOpenAIResponsesNonStream(
 		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
 	)
 }
