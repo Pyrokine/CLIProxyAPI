@@ -1,4 +1,4 @@
-// Last compiled: 2026-05-07
+// Last compiled: 2026-05-14
 // Author: pyro
 
 package management
@@ -18,16 +18,31 @@ import (
 
 func TestFindReleaseAssets(t *testing.T) {
 	assets := []githubReleaseAsset{
-		{Name: "CLIProxyAPI_linux_amd64.tar.gz", BrowserDownloadURL: "https://github.com/example/archive"},
+		{Name: "CLIProxyAPI_6.10.9-augmented_linux_amd64.tar.gz", BrowserDownloadURL: "https://github.com/example/archive"},
 		{Name: "checksums.txt", BrowserDownloadURL: "https://github.com/example/checksums"},
 	}
 
-	archiveAsset, checksumAsset := findReleaseAssets(assets, "CLIProxyAPI_linux_amd64.tar.gz")
-	if archiveAsset == nil || archiveAsset.Name != "CLIProxyAPI_linux_amd64.tar.gz" {
+	archiveAsset, checksumAsset := findReleaseAssets(
+		assets, []string{"CLIProxyAPI_6.10.9-augmented_linux_amd64.tar.gz", "CLIProxyAPI_linux_amd64.tar.gz"},
+	)
+	if archiveAsset == nil || archiveAsset.Name != "CLIProxyAPI_6.10.9-augmented_linux_amd64.tar.gz" {
 		t.Fatalf("archive asset = %#v", archiveAsset)
 	}
 	if checksumAsset == nil || checksumAsset.Name != "checksums.txt" {
 		t.Fatalf("checksum asset = %#v", checksumAsset)
+	}
+}
+
+func TestExpectedArchiveAssetNames(t *testing.T) {
+	names := expectedArchiveAssetNames("v6.10.9-augmented")
+	if len(names) != 2 {
+		t.Fatalf("len(names) = %d, want 2", len(names))
+	}
+	if names[0] != "CLIProxyAPI_6.10.9-augmented_linux_amd64.tar.gz" {
+		t.Fatalf("names[0] = %q", names[0])
+	}
+	if names[1] != "CLIProxyAPI_linux_amd64.tar.gz" {
+		t.Fatalf("names[1] = %q", names[1])
 	}
 }
 

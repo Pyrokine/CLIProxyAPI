@@ -1,4 +1,4 @@
-// Last compiled: 2026-03-17
+// Last compiled: 2026-05-14
 // Author: pyro
 
 package management
@@ -203,10 +203,10 @@ func (h *Handler) performUpdate(repo, version, proxyURL string) {
 		return
 	}
 
-	assetName := expectedArchiveAssetName()
-	asset, checksumAsset := findReleaseAssets(release.Assets, assetName)
+	assetNames := expectedArchiveAssetNames(version)
+	asset, checksumAsset := findReleaseAssets(release.Assets, assetNames)
 	if asset == nil {
-		setStatus("error", fmt.Sprintf("asset %s not found in release %s", assetName, version), 0)
+		setStatus("error", fmt.Sprintf("asset %s not found in release %s", strings.Join(assetNames, " or "), version), 0)
 		return
 	}
 	if checksumAsset == nil {
@@ -510,23 +510,31 @@ func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion st
 
 /* ---------- helpers ---------- */
 
-func expectedArchiveAssetName() string {
+func expectedArchiveAssetNames(version string) []string {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 	format := "tar.gz"
 	if goos == "windows" {
 		format = "zip"
 	}
-	return fmt.Sprintf("CLIProxyAPI_%s_%s.%s", goos, goarch, format)
+	baseName := fmt.Sprintf("CLIProxyAPI_%s_%s.%s", goos, goarch, format)
+	normalizedVersion := strings.TrimPrefix(strings.TrimSpace(version), "v")
+	if normalizedVersion == "" {
+		return []string{baseName}
+	}
+	return []string{fmt.Sprintf("CLIProxyAPI_%s_%s_%s.%s", normalizedVersion, goos, goarch, format), baseName}
 }
 
-func findReleaseAssets(assets []githubReleaseAsset, archiveName string) (*githubReleaseAsset, *githubReleaseAsset) {
+func findReleaseAssets(assets []githubReleaseAsset, archiveNames []string) (*githubReleaseAsset, *githubReleaseAsset) {
 	var archiveAsset *githubReleaseAsset
 	var checksumAsset *githubReleaseAsset
 	for i := range assets {
 		asset := &assets[i]
-		if strings.EqualFold(asset.Name, archiveName) {
-			archiveAsset = asset
+		for _, archiveName := range archiveNames {
+			if strings.EqualFold(asset.Name, archiveName) {
+				archiveAsset = asset
+				break
+			}
 		}
 		if strings.EqualFold(asset.Name, "checksums.txt") {
 			checksumAsset = asset
