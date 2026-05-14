@@ -41,6 +41,8 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 - 新增 Claude Code 支持（OAuth 登录）
 - 新增 Qwen Code 支持（OAuth 登录）
 - 新增 iFlow 支持（OAuth 登录）
+- OpenAI `/v1/models` 返回动态模型元数据，包括上下文长度等能力字段
+- 为兼容上游提供 OpenAI Responses `/responses/compact` 端点
 - 支持流式与非流式响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
@@ -64,6 +66,13 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
 
+当前管理层不再只是基础配置编辑，还包括：
+
+- 认证文件状态、最近请求分桶、OAuth 排除模型和模型别名管理
+- 已支持提供商的 quota scheduler 状态 / 配置 / 手动刷新接口
+- 基于 SQLite 使用量存储与本地模型价格数据的使用统计接口
+- 供管理面板展示版本历史与更新动作使用的 release 元数据接口
+
 ## Amp CLI 支持
 
 CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支持，可让你使用自己的 Google/ChatGPT/Claude OAuth
@@ -83,6 +92,13 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 - 认证: [docs/sdk-access_CN.md](docs/sdk-access_CN.md)
 - 凭据加载/更新: [docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
 - 自定义 Provider 示例：`examples/custom-provider`
+
+## 开发检查
+
+```bash
+go vet ./...
+go build ./cmd/server
+```
 
 ## 贡献
 

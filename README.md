@@ -44,6 +44,8 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Qwen Code support via OAuth login
 - iFlow support via OAuth login
 - Amp CLI and IDE extensions support with provider routing
+- OpenAI `/v1/models` returns dynamic model metadata, including context length and other capability fields
+- OpenAI Responses `/responses/compact` endpoint for compatible upstreams
 - Streaming and non-streaming responses
 - Function calling/tools support
 - Multimodal input support (text and images)
@@ -67,6 +69,13 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+The management layer now covers more than basic config editing:
+
+- auth file status, recent request buckets, OAuth excluded models and model alias management
+- quota scheduler status/config/refresh endpoints for supported providers
+- usage statistics backed by the SQLite usage store and local model price data
+- release metadata used by the bundled management panel for version history and updates
+
 ## Amp CLI Support
 
 CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use
@@ -87,6 +96,13 @@ your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
 - Access: [docs/sdk-access.md](docs/sdk-access.md)
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
 - Custom Provider Example: `examples/custom-provider`
+
+## Development checks
+
+```bash
+go vet ./...
+go build ./cmd/server
+```
 
 ## Contributing
 

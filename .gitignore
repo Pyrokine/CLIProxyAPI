@@ -4,6 +4,7 @@ cli-proxy-api
 
 # Configuration
 config.yaml
+config.yaml.last-good
 .env
 
 # Generated content
@@ -28,28 +29,16 @@ usage-data/*
 auths/*
 !auths/.gitkeep
 
-# Documentation
+# Documentation (auto-generated)
 docs/*
+
+# AI tooling
 AGENTS.md
 CLAUDE.md
 GEMINI.md
-
-# Tooling metadata
-.vscode/*
-.codex/*
-.claude/*
-.gemini/*
-.serena/*
-.agent/*
-.agents/*
-.opencode/*
-.idea/*
-.bmad/*
-_bmad/*
-_bmad-output/*
+.claude/
+.idea/
 
 # macOS
 .DS_Store
 ._*
-
-.idea/
