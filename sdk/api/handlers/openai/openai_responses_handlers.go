@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"net/http"
 
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
@@ -43,7 +43,7 @@ func NewResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *ResponsesAPIH
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *ResponsesAPIHandler) HandlerType() string {
-	return OpenaiResponse
+	return constant.OpenaiResponse
 }
 
 // Models returns the OpenAIResponses-compatible model metadata supported by this handler.
@@ -147,7 +147,7 @@ func (h *ResponsesAPIHandler) Compact(c *gin.Context) {
 }
 
 // handleNonStreamingResponse handles non-streaming chat completion responses
-// for Gemini models. It selects a client from the pool, sends the request, and
+// for constant.Gemini models. It selects a client from the pool, sends the request, and
 // aggregates the response before sending it back to the client in OpenAIResponses format.
 //
 // Parameters:
@@ -172,7 +172,7 @@ func (h *ResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON
 	cliCancel()
 }
 
-// handleStreamingResponse handles streaming responses for Gemini models.
+// handleStreamingResponse handles streaming responses for constant.Gemini models.
 // It establishes a streaming connection with the backend service and forwards
 // the response chunks to the client in real-time using Server-Sent Events.
 //

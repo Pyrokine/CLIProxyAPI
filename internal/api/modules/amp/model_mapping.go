@@ -93,20 +93,8 @@ func (m *defaultModelMapper) MapModel(requestedModel string) string {
 		return ""
 	}
 
-	// Suffix handling: config suffix takes priority, otherwise preserve user suffix
-	if targetResult.HasSuffix {
-		// Config's "to" already contains a suffix - use it as-is (config priority)
-		return targetModel
-	}
-
-	// Preserve user's thinking suffix on the mapped model
-	// (skip empty suffixes to avoid returning "model()")
-	if requestResult.HasSuffix && requestResult.RawSuffix != "" {
-		return targetModel + "(" + requestResult.RawSuffix + ")"
-	}
-
 	// Note: Detailed routing log is handled by logAmpRouting in fallback_handlers.go
-	return targetModel
+	return thinking.PreserveRequestModelDecorations(targetModel, requestedModel)
 }
 
 // updateMappings refreshes the mapping configuration from config.

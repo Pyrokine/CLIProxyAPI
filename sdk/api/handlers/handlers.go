@@ -15,6 +15,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -22,7 +23,6 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 // ErrorResponse represents a standard error response format for the API.
@@ -194,7 +194,7 @@ func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
 
 func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
-	// It is forwarded as execution metadata; when absent we generate a UUID.
+	// Only forward it when the client explicitly provides it.
 	key := ""
 	if ctx != nil {
 		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -202,7 +202,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		}
 	}
 	if key == "" {
-		key = uuid.NewString()
+		meta := make(map[string]any)
+		if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
+			meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
+		}
+		if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
+			meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+		}
+		if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
+			meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+		}
+		return meta
 	}
 
 	meta := map[string]any{idempotencyKeyMetadataKey: key}
@@ -771,6 +781,32 @@ func statusFromError(err error) int {
 	return 0
 }
 
+func supportsContext1M(modelName string, providers []string) bool {
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
+	if baseModel == "" {
+		return false
+	}
+	for _, provider := range providers {
+		info := registry.LookupModelInfo(baseModel, strings.TrimSpace(provider))
+		if info != nil {
+			return info.ContextLength >= 1_000_000
+		}
+	}
+	if info := registry.LookupStaticModelInfo(baseModel); info != nil {
+		return info.ContextLength >= 1_000_000
+	}
+	return false
+}
+
+func requiresContext1MCapabilityValidation(providers []string) bool {
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), "claude") {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (
 	providers []string,
 	normalizedModel string,
@@ -805,6 +841,13 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName),
+		}
+	}
+	if thinking.HasContext1MTag(resolvedModelName) && requiresContext1MCapabilityValidation(providers) &&
+		!supportsContext1M(resolvedModelName, providers) {
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("model %s does not support [1m] context", modelName),
 		}
 	}
 

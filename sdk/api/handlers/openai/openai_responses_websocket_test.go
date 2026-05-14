@@ -224,26 +224,26 @@ func TestAppendWebsocketEvent(t *testing.T) {
 	}
 }
 
-func TestSetWebsocketRequestBody(t *testing.T) {
+func TestSetWebsocketTimelineBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
-	setWebsocketRequestBody(c, " \n ")
-	if _, exists := c.Get(wsRequestBodyKey); exists {
-		t.Fatalf("request body key should not be set for empty body")
+	setWebsocketTimelineBody(c, " \n ")
+	if _, exists := c.Get(wsTimelineBodyKey); exists {
+		t.Fatalf("timeline key should not be set for empty body")
 	}
 
-	setWebsocketRequestBody(c, "event body")
-	value, exists := c.Get(wsRequestBodyKey)
+	setWebsocketTimelineBody(c, "event body")
+	value, exists := c.Get(wsTimelineBodyKey)
 	if !exists {
-		t.Fatalf("request body key not set")
+		t.Fatalf("timeline key not set")
 	}
 	bodyBytes, ok := value.([]byte)
 	if !ok {
-		t.Fatalf("request body key type mismatch")
+		t.Fatalf("timeline key type mismatch")
 	}
 	if string(bodyBytes) != "event body" {
-		t.Fatalf("request body = %q, want %q", string(bodyBytes), "event body")
+		t.Fatalf("timeline body = %q, want %q", string(bodyBytes), "event body")
 	}
 }

@@ -1,5 +1,5 @@
-// Package gemini provides HTTP handlers for Gemini CLI API functionality.
-// This package implements handlers that process CLI-specific requests for Gemini API operations,
+// Package gemini provides HTTP handlers for constant.Gemini CLI API functionality.
+// This package implements handlers that process CLI-specific requests for constant.Gemini API operations,
 // including content generation and streaming content generation endpoints.
 // The handlers restrict access to localhost only and manage communication with the backend service.
 package gemini
@@ -14,7 +14,7 @@ import (
 	"net/http"
 	"time"
 
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
@@ -23,13 +23,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// CLIAPIHandler contains the handlers for Gemini CLI API endpoints.
+// CLIAPIHandler contains the handlers for constant.Gemini CLI API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type CLIAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
-// NewCLIAPIHandler creates a new Gemini CLI API handlers instance.
+// NewCLIAPIHandler creates a new constant.Gemini CLI API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns a CLIAPIHandler.
 func NewCLIAPIHandler(apiHandlers *handlers.BaseAPIHandler) *CLIAPIHandler {
 	return &CLIAPIHandler{
@@ -39,7 +39,7 @@ func NewCLIAPIHandler(apiHandlers *handlers.BaseAPIHandler) *CLIAPIHandler {
 
 // HandlerType returns the type of this handler.
 func (h *CLIAPIHandler) HandlerType() string {
-	return GeminiCLI
+	return constant.GeminiCLI
 }
 
 // Models returns a list of models supported by this handler.
@@ -47,7 +47,7 @@ func (h *CLIAPIHandler) Models() []map[string]any {
 	return make([]map[string]any, 0)
 }
 
-// CLIHandler handles CLI-specific requests for Gemini API operations.
+// CLIHandler handles CLI-specific requests for constant.Gemini API operations.
 // It restricts access to localhost only and routes requests to appropriate internal handlers.
 func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 	remoteHost, _, _ := net.SplitHostPort(c.Request.RemoteAddr)

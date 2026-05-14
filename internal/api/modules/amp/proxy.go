@@ -70,6 +70,7 @@ func createReverseProxy(upstreamURL string, secretSource secretSource) (*httputi
 			// Remove client's Authorization header - it was only used for CLI Proxy API authentication
 			// We will set our own Authorization using the configured upstream-api-key
 			pr.Out.Header.Del("Authorization")
+			pr.Out.Header.Del("Cookie")
 			pr.Out.Header.Del("X-Api-Key")
 			pr.Out.Header.Del("X-Goog-Api-Key")
 

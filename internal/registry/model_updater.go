@@ -15,9 +15,11 @@ import (
 )
 
 const (
-	modelsFetchTimeout    = 30 * time.Second
-	modelsRefreshInterval = 3 * time.Hour
+	modelsFetchTimeout           = 30 * time.Second
+	defaultModelsRefreshInterval = 3 * time.Hour
 )
+
+var configuredRefreshInterval = defaultModelsRefreshInterval
 
 var modelsURLs = []string{
 	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",
@@ -50,6 +52,26 @@ type modelStore struct {
 }
 
 var modelsCatalogStore = &modelStore{}
+
+// CatalogMeta describes the current state of the model catalog so the management UI
+// can show where the data came from and when the next refresh is due.
+type CatalogMeta struct {
+	LastRefreshAt time.Time `json:"last_refresh_at"`
+	NextRefreshAt time.Time `json:"next_refresh_at"`
+	IntervalHours int       `json:"interval_hours"`
+	Source        string    `json:"source"`
+	LastError     string    `json:"last_error,omitempty"`
+	Sources       []string  `json:"sources"`
+}
+
+type catalogMetaStore struct {
+	mu   sync.RWMutex
+	meta CatalogMeta
+}
+
+var modelsCatalogMetaStore = &catalogMetaStore{
+	meta: CatalogMeta{Source: "embed"},
+}
 
 var updaterOnce sync.Once
 
@@ -87,14 +109,22 @@ func init() {
 	if err := loadModelsFromBytes(embeddedModelsJSON, "embed"); err != nil {
 		panic(fmt.Sprintf("registry: failed to parse embedded models.json: %v", err))
 	}
+	modelsCatalogMetaStore.mu.Lock()
+	modelsCatalogMetaStore.meta.Sources = append([]string(nil), modelsURLs...)
+	modelsCatalogMetaStore.meta.IntervalHours = int(defaultModelsRefreshInterval / time.Hour)
+	modelsCatalogMetaStore.mu.Unlock()
 }
 
 // StartModelsUpdater starts a background updater that fetches models
-// immediately on startup and then refreshes the model catalog every 3 hours.
+// immediately on startup and then refreshes the model catalog periodically.
+// refreshHours sets the interval in hours; 0 or negative disables periodic refresh.
 // Safe to call multiple times; only one updater will run.
-func StartModelsUpdater(ctx context.Context) {
+func StartModelsUpdater(ctx context.Context, refreshHours int) {
 	updaterOnce.Do(
 		func() {
+			if refreshHours > 0 {
+				configuredRefreshInterval = time.Duration(refreshHours) * time.Hour
+			}
 			go runModelsUpdater(ctx)
 		},
 	)
@@ -106,9 +136,9 @@ func runModelsUpdater(ctx context.Context) {
 }
 
 func periodicRefresh(ctx context.Context) {
-	ticker := time.NewTicker(modelsRefreshInterval)
+	ticker := time.NewTicker(configuredRefreshInterval)
 	defer ticker.Stop()
-	log.Infof("periodic model refresh started (interval=%s)", modelsRefreshInterval)
+	log.Infof("periodic model refresh started (interval=%s)", configuredRefreshInterval)
 	for {
 		select {
 		case <-ctx.Done():
@@ -138,6 +168,7 @@ func tryRefreshModels(ctx context.Context, label string) {
 	parsed, url := fetchModelsFromRemote(ctx)
 	if parsed == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
+		updateCatalogMetaAfterRefresh("", "fetch failed from all URLs")
 		return
 	}
 
@@ -149,6 +180,8 @@ func tryRefreshModels(ctx context.Context, label string) {
 	modelsCatalogStore.data = parsed
 	modelsCatalogStore.mu.Unlock()
 
+	updateCatalogMetaAfterRefresh(url, "")
+
 	if len(changed) == 0 {
 		log.Infof("%s completed from %s, no changes detected", label, url)
 		return
@@ -156,6 +189,47 @@ func tryRefreshModels(ctx context.Context, label string) {
 
 	log.Infof("%s completed from %s, changes detected for providers: %v", label, url, changed)
 	notifyModelRefresh(changed)
+}
+
+func updateCatalogMetaAfterRefresh(source, errMsg string) {
+	now := time.Now()
+	interval := configuredRefreshInterval
+	modelsCatalogMetaStore.mu.Lock()
+	modelsCatalogMetaStore.meta.LastRefreshAt = now
+	if interval > 0 {
+		modelsCatalogMetaStore.meta.NextRefreshAt = now.Add(interval)
+		modelsCatalogMetaStore.meta.IntervalHours = int(interval / time.Hour)
+	} else {
+		modelsCatalogMetaStore.meta.NextRefreshAt = time.Time{}
+		modelsCatalogMetaStore.meta.IntervalHours = 0
+	}
+	if source != "" {
+		modelsCatalogMetaStore.meta.Source = source
+	}
+	modelsCatalogMetaStore.meta.LastError = errMsg
+	modelsCatalogMetaStore.meta.Sources = append(modelsCatalogMetaStore.meta.Sources[:0], modelsURLs...)
+	modelsCatalogMetaStore.mu.Unlock()
+}
+
+// GetCatalogMeta returns a snapshot of the current model catalog refresh state.
+func GetCatalogMeta() CatalogMeta {
+	modelsCatalogMetaStore.mu.RLock()
+	defer modelsCatalogMetaStore.mu.RUnlock()
+	snapshot := modelsCatalogMetaStore.meta
+	snapshot.Sources = append([]string(nil), modelsCatalogMetaStore.meta.Sources...)
+	return snapshot
+}
+
+// TriggerCatalogRefresh asks the updater to re-fetch the catalog immediately.
+// It runs synchronously and returns the new meta snapshot along with any
+// error recorded by the refresh attempt.
+func TriggerCatalogRefresh(ctx context.Context) (CatalogMeta, error) {
+	tryRefreshModels(ctx, "manual model refresh")
+	meta := GetCatalogMeta()
+	if meta.LastError != "" {
+		return meta, fmt.Errorf("%s", meta.LastError)
+	}
+	return meta, nil
 }
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
@@ -342,7 +416,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		return fmt.Errorf("catalog is nil")
 	}
 
-	requiredSections := []struct {
+	sections := []struct {
 		name   string
 		models []*ModelInfo
 	}{
@@ -361,19 +435,30 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "antigravity", models: data.Antigravity},
 	}
 
-	for _, section := range requiredSections {
+	// Upstream occasionally ships a catalog with some providers removed (e.g. qwen
+	// was dropped, then restored). Rejecting the whole catalog for a missing
+	// section forces the server onto the embedded fallback and surfaces
+	// "fetch failed from all URLs" every interval — even though the rest of the
+	// catalog is valid. Accept the catalog as long as it is not fully empty and
+	// every populated section passes structural validation.
+	nonEmpty := 0
+	for _, section := range sections {
+		if len(section.models) == 0 {
+			log.Debugf("models catalog: %s section is empty (accepted)", section.name)
+			continue
+		}
 		if err := validateModelSection(section.name, section.models); err != nil {
 			return err
 		}
+		nonEmpty++
+	}
+	if nonEmpty == 0 {
+		return fmt.Errorf("catalog has no populated provider sections")
 	}
 	return nil
 }
 
 func validateModelSection(section string, models []*ModelInfo) error {
-	if len(models) == 0 {
-		return fmt.Errorf("%s section is empty", section)
-	}
-
 	seen := make(map[string]struct{}, len(models))
 	for i, model := range models {
 		if model == nil {

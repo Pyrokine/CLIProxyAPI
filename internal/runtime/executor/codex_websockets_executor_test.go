@@ -68,3 +68,16 @@ func TestNewProxyAwareWebsocketDialerHTTPProxySetsProxy(t *testing.T) {
 		t.Fatal("expected proxy function to be set for HTTP proxy URL")
 	}
 }
+
+func TestNormalizeCodexCompletionEventMapsResponseDone(t *testing.T) {
+	payload := []byte(`{"type":"response.done","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+
+	normalized := normalizeCodexCompletionEvent(payload)
+
+	if got := gjson.GetBytes(normalized, "type").String(); got != "response.completed" {
+		t.Fatalf("type = %q, want %q", got, "response.completed")
+	}
+	if got := gjson.GetBytes(normalized, "response.status").String(); got != "completed" {
+		t.Fatalf("response.status = %q, want %q", got, "completed")
+	}
+}

@@ -2,6 +2,18 @@
 // This file stores the static model metadata catalog.
 package registry
 
+// getCodexPlusModels returns codex-plus models from the dynamic catalog if available.
+func getCodexPlusModels() []*ModelInfo {
+	data := getModels()
+	if data == nil || len(data.CodexPlus) == 0 {
+		return nil
+	}
+	// Return a copy to avoid external mutation.
+	out := make([]*ModelInfo, len(data.CodexPlus))
+	copy(out, data.CodexPlus)
+	return out
+}
+
 // GetClaudeModels returns the standard Claude model definitions
 func GetClaudeModels() []*ModelInfo {
 	return []*ModelInfo{
@@ -37,6 +49,18 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4.6 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:                  "claude-opus-4-7",
+			Object:              "model",
+			Created:             1776297600, // 2026-04-16
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.7 Opus",
+			Description:         "Premium model combining maximum intelligence with practical performance",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 128000,
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
 		},
 		{
@@ -467,8 +491,12 @@ func GetAIStudioModels() []*ModelInfo {
 	return models
 }
 
-// GetOpenAIModels returns the standard OpenAI model definitions
+// GetOpenAIModels returns the OpenAI model definitions.
+// Prefers dynamic catalog (codex-plus) when available, falls back to static data.
 func GetOpenAIModels() []*ModelInfo {
+	if dynamic := getCodexPlusModels(); len(dynamic) > 0 {
+		return dynamic
+	}
 	return []*ModelInfo{
 		{
 			ID:                  "gpt-5",

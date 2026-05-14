@@ -9,6 +9,59 @@ import (
 	"strings"
 )
 
+const context1MTag = "[1m]"
+
+func stripTrailingContext1MTag(model string) (string, bool) {
+	trimmed := strings.TrimSpace(model)
+	if len(trimmed) <= len(context1MTag) {
+		return model, false
+	}
+	if !strings.EqualFold(trimmed[len(trimmed)-len(context1MTag):], context1MTag) {
+		return model, false
+	}
+	base := strings.TrimSpace(trimmed[:len(trimmed)-len(context1MTag)])
+	if base == "" {
+		return model, false
+	}
+	return base, true
+}
+
+func HasContext1MTag(model string) bool {
+	if _, ok := stripTrailingContext1MTag(model); ok {
+		return true
+	}
+	trimmed := strings.TrimSpace(model)
+	lastOpen := strings.LastIndex(trimmed, "(")
+	if lastOpen == -1 || !strings.HasSuffix(trimmed, ")") {
+		return false
+	}
+	_, ok := stripTrailingContext1MTag(trimmed[:lastOpen])
+	return ok
+}
+
+func PreserveRequestModelDecorations(resolved, requested string) string {
+	resolved = strings.TrimSpace(resolved)
+	if resolved == "" {
+		return ""
+	}
+	requestResult := ParseSuffix(requested)
+	resolvedResult := ParseSuffix(resolved)
+	baseModel := strings.TrimSpace(resolvedResult.ModelName)
+	if baseModel == "" {
+		baseModel = resolved
+	}
+	if HasContext1MTag(requested) || HasContext1MTag(resolved) {
+		baseModel += context1MTag
+	}
+	if resolvedResult.HasSuffix {
+		return baseModel + "(" + resolvedResult.RawSuffix + ")"
+	}
+	if requestResult.HasSuffix && requestResult.RawSuffix != "" {
+		return baseModel + "(" + requestResult.RawSuffix + ")"
+	}
+	return baseModel
+}
+
 // ParseSuffix extracts thinking suffix from a model name.
 //
 // The suffix format is: model-name(value)
@@ -24,16 +77,19 @@ func ParseSuffix(model string) SuffixResult {
 	// Find the last opening parenthesis
 	lastOpen := strings.LastIndex(model, "(")
 	if lastOpen == -1 {
-		return SuffixResult{ModelName: model, HasSuffix: false}
+		modelName, _ := stripTrailingContext1MTag(model)
+		return SuffixResult{ModelName: modelName, HasSuffix: false}
 	}
 
 	// Check if the string ends with a closing parenthesis
 	if !strings.HasSuffix(model, ")") {
-		return SuffixResult{ModelName: model, HasSuffix: false}
+		modelName, _ := stripTrailingContext1MTag(model)
+		return SuffixResult{ModelName: modelName, HasSuffix: false}
 	}
 
 	// Extract components
 	modelName := model[:lastOpen]
+	modelName, _ = stripTrailingContext1MTag(modelName)
 	rawSuffix := model[lastOpen+1 : len(model)-1]
 
 	return SuffixResult{

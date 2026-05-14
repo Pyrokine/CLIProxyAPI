@@ -760,6 +760,14 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 		}
 	}
 
+	sort.Slice(
+		models, func(i, j int) bool {
+			idI, _ := models[i]["id"].(string)
+			idJ, _ := models[j]["id"].(string)
+			return idI < idJ
+		},
+	)
+
 	return models
 }
 
@@ -1036,6 +1044,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = model.SupportedParameters
+		}
+		if model.Thinking != nil {
+			result["thinking"] = model.Thinking
 		}
 		return result
 

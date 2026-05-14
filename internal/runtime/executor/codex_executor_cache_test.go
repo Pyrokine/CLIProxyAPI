@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/gin-gonic/gin"
@@ -17,7 +18,7 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPromptCacheKey(t *tes
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ginCtx.Set("apiKey", "test-api-key")
 
-	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	ctx := util.WithGinContext(context.Background(), ginCtx)
 	executor := &codexExecutor{}
 
 	expectedKey := "my-test-cache-key-12345"
@@ -53,13 +54,13 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPromptCacheKey(t *tes
 func TestCodexExecutorCacheHelper_Claude_GeneratesCacheKeyFromUserID(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
-	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	ctx := util.WithGinContext(context.Background(), ginCtx)
 	executor := &codexExecutor{}
 
-	rawJSON := []byte(`{"model":"gpt-5.3-codex","stream":true}`)
+	rawJSON := []byte(`{"model":"gpt-4.1","stream":true}`)
 	req := cliproxyexecutor.Request{
-		Model:   "gpt-5.3-codex",
-		Payload: []byte(`{"model":"gpt-5.3-codex","metadata":{"user_id":"test-user-123"}}`),
+		Model:   "gpt-4.1",
+		Payload: []byte(`{"model":"gpt-4.1","metadata":{"user_id":"test-user-123"}}`),
 	}
 	url := "https://example.com/messages"
 
@@ -97,12 +98,44 @@ func TestCodexExecutorCacheHelper_Claude_GeneratesCacheKeyFromUserID(t *testing.
 	}
 }
 
+func TestCodexExecutorCacheHelper_Claude_GPT55DoesNotReuseUserCacheSession(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ctx := util.WithGinContext(context.Background(), ginCtx)
+	executor := &codexExecutor{}
+
+	rawJSON := []byte(`{"model":"gpt-5.5","stream":true}`)
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"model":"gpt-5.5","metadata":{"user_id":"test-user-123"}}`),
+	}
+	url := "https://example.com/messages"
+
+	httpReq, err := executor.cacheHelper(ctx, sdktranslator.FromString("claude"), url, req, rawJSON)
+	if err != nil {
+		t.Fatalf("cacheHelper error: %v", err)
+	}
+	body, errRead := io.ReadAll(httpReq.Body)
+	if errRead != nil {
+		t.Fatalf("read request body: %v", errRead)
+	}
+	if gjson.GetBytes(body, "prompt_cache_key").Exists() {
+		t.Fatalf("expected no prompt_cache_key for gpt-5.5 Claude path")
+	}
+	if got := httpReq.Header.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
+	}
+	if got := httpReq.Header.Get("Session_id"); got != "" {
+		t.Fatalf("Session_id = %q, want empty", got)
+	}
+}
+
 func TestCodexExecutorCacheHelper_OpenAIChatCompletions_NoCacheKey(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ginCtx.Set("apiKey", "test-api-key")
 
-	ctx := context.WithValue(context.Background(), "gin", ginCtx)
+	ctx := util.WithGinContext(context.Background(), ginCtx)
 	executor := &codexExecutor{}
 	rawJSON := []byte(`{"model":"gpt-5.3-codex","stream":true}`)
 	req := cliproxyexecutor.Request{

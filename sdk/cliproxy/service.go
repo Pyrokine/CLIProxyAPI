@@ -5,11 +5,9 @@ package cliproxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +29,8 @@ import (
 // Service wraps the proxy server lifecycle so external programs can embed the CLI proxy.
 // It manages the complete lifecycle including authentication, file watching, HTTP server,
 // and integration with various AI service providers.
+var serviceShutdownTimeout = 30 * time.Second
+
 type Service struct {
 	// cfg holds the current application configuration.
 	cfg *config.Config
@@ -483,23 +483,37 @@ func (s *Service) Run(ctx context.Context) error {
 	if s.cfg.UsageStatisticsEnabled && !strings.EqualFold(s.cfg.UsageStatisticsFile, "disabled") {
 		baseDir := internalUsage.ResolveDataDir(s.cfg.UsageDataDir, s.configPath)
 		if baseDir != "" {
-			// Check for legacy data that needs migration
-			if oldPath, needed := internalUsage.NeedsMigration(s.configPath, s.cfg.UsageStatisticsFile); needed {
-				if err := internalUsage.MigrateV1ToV2(oldPath, baseDir, nil); err != nil {
-					log.Warnf("usage: migration failed: %v", err)
-				}
+			// If baseDir differs from the legacy config-dir location, migrate the existing
+			// directory so restarts across layout changes (e.g. WRITABLE_PATH newly set) do
+			// not appear to wipe historical data.
+			if err := internalUsage.MigrateDataDirIfNeeded(s.configPath, baseDir); err != nil {
+				log.Warnf("usage: data dir migration failed: %v", err)
 			}
 
 			s.usagePersister = internalUsage.NewPersister(baseDir, s.cfg.UsageRetention)
-			s.usagePersister.SetPriceFunc(buildPriceFunc(s.configPath))
+			s.usagePersister.SetPriceFunc(internalUsage.BuildModelPriceFunc(s.configPath))
 			internalUsage.SetGlobalPersister(s.usagePersister)
+			// Persister.Start opens SQLite, runs the legacy-JSON migration in
+			// place, then launches the writer + rollup goroutines.
 			s.usagePersister.Start(ctx)
+			// SQLite open / migration may have failed (disk full, permission
+			// denied, corrupted db, etc). When that happens the persister is
+			// non-functional — calling Record on it would silently drop every
+			// event behind the nil-writer guard. Unregister the global pointer
+			// so loggerPlugin.HandleUsage falls back to the in-memory
+			// RequestStatistics path. Operators get a loud Errorf at boot
+			// (see Persister.Start), data is preserved in memory, and once the
+			// underlying issue is fixed a restart re-opens SQLite normally.
+			if !s.usagePersister.IsReady() {
+				log.Warnf("usage: SQLite persister not ready, falling back to in-memory request statistics; legacy summary.json / detail JSON files remain untouched for manual recovery")
+				internalUsage.SetGlobalPersister(nil)
+			}
 		}
 	}
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer shutdownCancel()
 	defer func() {
+		shutdownCtx, shutdownCancel := s.newShutdownContext()
+		defer shutdownCancel()
 		if err := s.Shutdown(shutdownCtx); err != nil {
 			log.Errorf("service shutdown returned error: %v", err)
 		}
@@ -540,6 +554,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	if s.usagePersister != nil {
 		s.server.SetUsagePersister(s.usagePersister)
+	}
+	if s.server != nil && s.server.ManagementHandler() != nil {
+		s.server.ManagementHandler().StartCPAAutoUpdater(ctx)
 	}
 
 	if s.authManager == nil {
@@ -594,12 +611,31 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnAfterStart(s)
 	}
 
+	// Register model refresh callback to re-register client models when the
+	// remote catalog is updated (e.g., new models like gpt-5.4 added upstream).
+	registry.SetModelRefreshCallback(
+		func(_ []string) {
+			if s.server != nil {
+				s.cfgMu.RLock()
+				cfg := s.cfg
+				s.cfgMu.RUnlock()
+				if cfg != nil {
+					s.server.UpdateClients(cfg)
+				}
+			}
+		},
+	)
+
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
 		previousStrategy := ""
+		previousSessionAffinity := false
+		previousSessionAffinityTTL := ""
 		s.cfgMu.RLock()
 		if s.cfg != nil {
 			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
+			previousSessionAffinityTTL = strings.TrimSpace(s.cfg.Routing.SessionAffinityTTL)
 		}
 		s.cfgMu.RUnlock()
 
@@ -623,13 +659,32 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 		previousStrategy = normalizeStrategy(previousStrategy)
 		nextStrategy = normalizeStrategy(nextStrategy)
-		if s.coreManager != nil && previousStrategy != nextStrategy {
+		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
+		nextSessionAffinityTTL := strings.TrimSpace(newCfg.Routing.SessionAffinityTTL)
+		selectorChanged := previousStrategy != nextStrategy ||
+			previousSessionAffinity != nextSessionAffinity ||
+			previousSessionAffinityTTL != nextSessionAffinityTTL
+		if s.coreManager != nil && selectorChanged {
 			var selector coreauth.Selector
 			switch nextStrategy {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
 			default:
 				selector = &coreauth.RoundRobinSelector{}
+			}
+			if nextSessionAffinity {
+				ttl := time.Hour
+				if nextSessionAffinityTTL != "" {
+					if parsed, err := time.ParseDuration(nextSessionAffinityTTL); err == nil && parsed > 0 {
+						ttl = parsed
+					}
+				}
+				selector = coreauth.NewSessionAffinitySelectorWithConfig(
+					coreauth.SessionAffinityConfig{
+						Fallback: selector,
+						TTL:      ttl,
+					},
+				)
 			}
 			s.coreManager.SetSelector(selector)
 		}
@@ -681,6 +736,10 @@ func (s *Service) Run(ctx context.Context) error {
 	case err = <-s.serverErr:
 		return err
 	}
+}
+
+func (s *Service) newShutdownContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), serviceShutdownTimeout)
 }
 
 // Shutdown gracefully stops background workers and the HTTP server.
@@ -740,6 +799,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			// no legacy clients to persist
 
 			if s.server != nil {
+				if mgmt := s.server.ManagementHandler(); mgmt != nil {
+					mgmt.StopCPAAutoUpdater()
+				}
 				shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
 				if err := s.server.Stop(shutdownCtx); err != nil {
@@ -927,6 +989,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 			for i := range s.cfg.OpenAICompatibility {
 				compat := &s.cfg.OpenAICompatibility[i]
+				if compat.Disabled {
+					continue
+				}
 				if strings.EqualFold(compat.Name, compatName) {
 					isCompatAuth = true
 					// Convert compatibility models to registry models
@@ -1330,7 +1395,10 @@ func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*M
 			UserDefined: true,
 		}
 		if name != "" {
-			if upstream := registry.LookupStaticModelInfo(name); upstream != nil && upstream.Thinking != nil {
+			if upstream := registry.LookupStaticModelInfo(name); upstream != nil {
+				info.ContextLength = upstream.ContextLength
+				info.MaxCompletionTokens = upstream.MaxCompletionTokens
+				info.SupportedParameters = append([]string(nil), upstream.SupportedParameters...)
 				info.Thinking = upstream.Thinking
 			}
 		}
@@ -1495,60 +1563,4 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 		}
 	}
 	return out
-}
-
-// buildPriceFunc creates a cached PriceFunc that reads model prices from model-prices.json.
-func buildPriceFunc(configPath string) internalUsage.PriceFunc {
-	if configPath == "" {
-		return nil
-	}
-
-	filePath := filepath.Join(filepath.Dir(configPath), "model-prices.json")
-
-	type priceInfo struct {
-		Prompt     float64 `json:"prompt"`
-		Completion float64 `json:"completion"`
-		Cache      float64 `json:"cache"`
-	}
-
-	var mu sync.RWMutex
-	var cached map[string]priceInfo
-	var loadedAt time.Time
-
-	load := func() {
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			return
-		}
-		var m map[string]priceInfo
-		if err := json.Unmarshal(data, &m); err != nil {
-			return
-		}
-		mu.Lock()
-		cached = m
-		loadedAt = time.Now()
-		mu.Unlock()
-	}
-
-	// Initial load
-	load()
-
-	return func(model string) (prompt, completion, cache float64, found bool) {
-		mu.RLock()
-		age := time.Since(loadedAt)
-		p, ok := cached[model]
-		mu.RUnlock()
-
-		if age > 5*time.Minute {
-			load()
-			mu.RLock()
-			p, ok = cached[model]
-			mu.RUnlock()
-		}
-
-		if !ok {
-			return 0, 0, 0, false
-		}
-		return p.Prompt, p.Completion, p.Cache, true
-	}
 }

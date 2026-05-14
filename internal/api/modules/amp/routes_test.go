@@ -1,8 +1,10 @@
 package amp
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
@@ -53,6 +55,7 @@ func TestRegisterManagementRoutes(t *testing.T) {
 		{"/api/meta", http.MethodGet},
 		{"/api/telemetry", http.MethodGet},
 		{"/api/threads", http.MethodGet},
+		{"/api/thread-actors", http.MethodGet},
 		{"/threads/", http.MethodGet},
 		{"/threads.rss", http.MethodGet}, // Root-level route (no /api prefix)
 		{"/api/otel", http.MethodGet},
@@ -257,6 +260,73 @@ func TestRegisterProviderAliases_NoAuthMiddleware(t *testing.T) {
 	// Should still work (with fallback no-op auth)
 	if w.Code == http.StatusNotFound {
 		t.Fatal("routes should register even without auth middleware")
+	}
+}
+
+func TestRegisterProviderAliases_FallbackProxyStripsClientCredentials(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+
+	captured := make(chan http.Header, 1)
+	upstream := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, req *http.Request) {
+				captured <- req.Header.Clone()
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`ok`))
+			},
+		),
+	)
+	defer upstream.Close()
+
+	base := &handlers.BaseAPIHandler{}
+	m := &Module{authMiddleware_: func(c *gin.Context) { c.Next() }, modelMapper: newModelMapper(nil)}
+	proxy, err := createReverseProxy(upstream.URL, newStaticSecretSource("upstream"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.setProxy(proxy)
+	m.registerProviderAliases(r, base, func(c *gin.Context) { c.Next() })
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	req, err := http.NewRequest(
+		http.MethodPost,
+		srv.URL+"/api/provider/openai/v1/chat/completions?key=client-key&auth_token=client-key&foo=bar",
+		strings.NewReader(`{"model":"nonexistent-model","messages":[]}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer client-key")
+	req.Header.Set("Cookie", "session=secret")
+	req.Header.Set("X-Api-Key", "client-key")
+	req.Header.Set("X-Goog-Api-Key", "client-key")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(res.Body)
+	_ = res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from fallback proxy, got %d", res.StatusCode)
+	}
+
+	hdr := <-captured
+	if got := hdr.Get("Authorization"); got != "Bearer upstream" {
+		t.Fatalf("expected upstream Authorization, got %q", got)
+	}
+	if got := hdr.Get("X-Api-Key"); got != "upstream" {
+		t.Fatalf("expected upstream X-Api-Key, got %q", got)
+	}
+	if got := hdr.Get("Cookie"); got != "" {
+		t.Fatalf("expected Cookie to be stripped, got %q", got)
+	}
+	if got := hdr.Get("X-Goog-Api-Key"); got != "" {
+		t.Fatalf("expected X-Goog-Api-Key to be stripped, got %q", got)
 	}
 }
 

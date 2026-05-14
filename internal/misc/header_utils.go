@@ -69,6 +69,10 @@ func ScrubProxyAndFingerprintHeaders(req *http.Request) {
 	req.Header.Del("Via")
 
 	// --- Client identity headers ---
+	req.Header.Del("Authorization")
+	req.Header.Del("Cookie")
+	req.Header.Del("X-Api-Key")
+	req.Header.Del("X-Goog-Api-Key")
 	req.Header.Del("X-Title")
 	req.Header.Del("X-Stainless-Lang")
 	req.Header.Del("X-Stainless-Package-Version")

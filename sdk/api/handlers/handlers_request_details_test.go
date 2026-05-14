@@ -23,15 +23,16 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	modelRegistry.RegisterClient(
 		"test-request-details-openai", "openai", []*registry.ModelInfo{
 			{ID: "gpt-5.2", Created: now + 20},
+			{ID: "gpt-5.4", Created: now + 19, ContextLength: 1_050_000},
+			{ID: "gpt-5.5", Created: now + 18, ContextLength: 400_000},
 		},
 	)
 	modelRegistry.RegisterClient(
 		"test-request-details-claude", "claude", []*registry.ModelInfo{
-			{ID: "claude-sonnet-4-5", Created: now + 5},
+			{ID: "claude-sonnet-4-5", Created: now + 5, ContextLength: 1_000_000},
 		},
 	)
 
-	// Ensure cleanup of all test registrations.
 	clientIDs := []string{
 		"test-request-details-gemini",
 		"test-request-details-openai",
@@ -102,6 +103,27 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			inputModel:    "claude-sonnet-4-5(auto)",
 			wantProviders: []string{"claude"},
 			wantModel:     "claude-sonnet-4-5(auto)",
+			wantErr:       false,
+		},
+		{
+			name:          "context 1m tag resolved to base model",
+			inputModel:    "gpt-5.4[1m]",
+			wantProviders: []string{"openai"},
+			wantModel:     "gpt-5.4[1m]",
+			wantErr:       false,
+		},
+		{
+			name:          "openai context 1m tag allowed for compact path",
+			inputModel:    "gpt-5.5[1m]",
+			wantProviders: []string{"openai"},
+			wantModel:     "gpt-5.5[1m]",
+			wantErr:       false,
+		},
+		{
+			name:          "context 1m tag with thinking suffix preserved",
+			inputModel:    "claude-sonnet-4-5[1m](high)",
+			wantProviders: []string{"claude"},
+			wantModel:     "claude-sonnet-4-5[1m](high)",
 			wantErr:       false,
 		},
 	}

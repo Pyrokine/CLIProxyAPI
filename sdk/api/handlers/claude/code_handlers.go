@@ -1,8 +1,8 @@
-// Package claude provides HTTP handlers for Claude API code-related functionality.
-// This package implements Claude-compatible streaming chat completions with sophisticated
+// Package claude provides HTTP handlers for constant.Claude API code-related functionality.
+// This package implements constant.Claude-compatible streaming chat completions with sophisticated
 // client rotation and quota management systems to ensure high availability and optimal
 // resource utilization across multiple backend clients. It handles request translation
-// between Claude API format and the underlying Gemini backend, providing seamless
+// between constant.Claude API format and the underlying constant.Gemini backend, providing seamless
 // API compatibility while maintaining robust error handling and connection management.
 package claude
 
@@ -15,7 +15,7 @@ import (
 	"io"
 	"net/http"
 
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
@@ -24,20 +24,20 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// CodeAPIHandler contains the handlers for Claude API endpoints.
+// CodeAPIHandler contains the handlers for constant.Claude API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type CodeAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
-// NewCodeAPIHandler creates a new Claude API handlers instance.
+// NewCodeAPIHandler creates a new constant.Claude API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns a CodeAPIHandler.
 //
 // Parameters:
 //   - apiHandlers: The base API handler instance.
 //
 // Returns:
-//   - *CodeAPIHandler: A new Claude code API handler instance.
+//   - *CodeAPIHandler: A new constant.Claude code API handler instance.
 func NewCodeAPIHandler(apiHandlers *handlers.BaseAPIHandler) *CodeAPIHandler {
 	return &CodeAPIHandler{
 		BaseAPIHandler: apiHandlers,
@@ -46,7 +46,7 @@ func NewCodeAPIHandler(apiHandlers *handlers.BaseAPIHandler) *CodeAPIHandler {
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *CodeAPIHandler) HandlerType() string {
-	return Claude
+	return constant.Claude
 }
 
 // Models returns a list of models supported by this handler.
@@ -56,7 +56,7 @@ func (h *CodeAPIHandler) Models() []map[string]any {
 	return modelRegistry.GetAvailableModels("claude")
 }
 
-// ClaudeMessages handles Claude-compatible streaming chat completions.
+// ClaudeMessages handles constant.Claude-compatible streaming chat completions.
 // This function implements a sophisticated client rotation and quota management system
 // to ensure high availability and optimal resource utilization across multiple backend clients.
 //
@@ -87,7 +87,7 @@ func (h *CodeAPIHandler) ClaudeMessages(c *gin.Context) {
 	}
 }
 
-// ClaudeCountTokens handles Claude-compatible streaming chat completions.
+// ClaudeCountTokens handles constant.Claude-compatible streaming chat completions.
 // This function implements a sophisticated client rotation and quota management system
 // to ensure high availability and optimal resource utilization across multiple backend clients.
 //
@@ -127,8 +127,8 @@ func (h *CodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	cliCancel()
 }
 
-// ClaudeModels handles the Claude models listing endpoint.
-// It returns a JSON response containing available Claude models and their specifications.
+// ClaudeModels handles the constant.Claude models listing endpoint.
+// It returns a JSON response containing available constant.Claude models and their specifications.
 //
 // Parameters:
 //   - c: The Gin context for the request.
@@ -155,14 +155,14 @@ func (h *CodeAPIHandler) ClaudeModels(c *gin.Context) {
 	)
 }
 
-// handleNonStreamingResponse handles non-streaming content generation requests for Claude models.
+// handleNonStreamingResponse handles non-streaming content generation requests for constant.Claude models.
 // This function processes the request synchronously and returns the complete generated
 // response in a single API call. It supports various generation parameters and
 // response formats.
 //
 // Parameters:
 //   - c: The Gin context for the request
-//   - modelName: The name of the Gemini model to use for content generation
+//   - modelName: The name of the constant.Gemini model to use for content generation
 //   - rawJSON: The raw JSON request body containing generation parameters and content
 func (h *CodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
@@ -180,21 +180,21 @@ func (h *CodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []by
 		return
 	}
 
-	// Decompress gzipped responses - Claude API sometimes returns gzip without Content-Encoding header
+	// Decompress gzipped responses - constant.Claude API sometimes returns gzip without Content-Encoding header
 	// This fixes title generation and other non-streaming responses that arrive compressed
 	if len(resp) >= 2 && resp[0] == 0x1f && resp[1] == 0x8b {
 		gzReader, errGzip := gzip.NewReader(bytes.NewReader(resp))
 		if errGzip != nil {
-			log.Warnf("failed to decompress gzipped Claude response: %v", errGzip)
+			log.Warnf("failed to decompress gzipped constant.Claude response: %v", errGzip)
 		} else {
 			defer func() {
 				if errClose := gzReader.Close(); errClose != nil {
-					log.Warnf("failed to close Claude gzip reader: %v", errClose)
+					log.Warnf("failed to close constant.Claude gzip reader: %v", errClose)
 				}
 			}()
 			decompressed, errRead := io.ReadAll(io.LimitReader(gzReader, 50<<20))
 			if errRead != nil {
-				log.Warnf("failed to read decompressed Claude response: %v", errRead)
+				log.Warnf("failed to read decompressed constant.Claude response: %v", errRead)
 			} else {
 				resp = decompressed
 			}
@@ -206,9 +206,9 @@ func (h *CodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []by
 	cliCancel()
 }
 
-// handleStreamingResponse streams Claude-compatible responses backed by Gemini.
+// handleStreamingResponse streams constant.Claude-compatible responses backed by constant.Gemini.
 // It sets up SSE, selects a backend client with rotation/quota logic,
-// forwards chunks, and translates them to Claude CLI format.
+// forwards chunks, and translates them to constant.Claude CLI format.
 //
 // Parameters:
 //   - c: The Gin context for the request.

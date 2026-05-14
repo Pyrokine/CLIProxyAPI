@@ -225,6 +225,27 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 	}
 }
 
+func TestPrepareClaudeRequest_AddsContext1MBetaFromModelTag(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	ctx := context.Background()
+	req := cliproxyexecutor.Request{
+		Model:   "claude-opus-4-7[1m]",
+		Payload: []byte(`{"model":"claude-opus-4-7[1m]","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`),
+	}
+	cr, err := executor.prepareClaudeRequest(
+		ctx,
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}},
+		req, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}, false,
+	)
+	if err != nil {
+		t.Fatalf("prepareClaudeRequest error: %v", err)
+	}
+	got := cr.httpReq.Header.Get("Anthropic-Beta")
+	if !strings.Contains(got, "context-1m-2025-08-07") {
+		t.Fatalf("Anthropic-Beta = %q, want context-1m-2025-08-07", got)
+	}
+}
+
 func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	resetUserIDCache()
 

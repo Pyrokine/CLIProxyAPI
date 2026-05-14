@@ -247,7 +247,6 @@ func (e *codexWebsocketsExecutor) Execute(
 				recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBodyRetry, e.Identifier(), auth)
 				if errSendRetry := writeCodexWebsocketMessage(sess, connRetry, wsReqBodyRetry); errSendRetry == nil {
 					conn = connRetry
-					wsReqBody = wsReqBodyRetry
 				} else {
 					e.invalidateUpstreamConn(sess, connRetry, "send_error", errSendRetry)
 					recordAPIResponseError(ctx, e.cfg, errSendRetry)
@@ -298,7 +297,7 @@ func (e *codexWebsocketsExecutor) Execute(
 			return resp, wsErr
 		}
 
-		payload = normalizeCodexWebsocketCompletion(payload)
+		payload = normalizeCodexCompletionEvent(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
 		if eventType == "response.completed" {
 			if detail, ok := parseCodexUsage(payload); ok {
@@ -425,7 +424,6 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 				return nil, errSendRetry
 			}
 			conn = connRetry
-			wsReqBody = wsReqBodyRetry
 		} else {
 			logCodexWebsocketDisconnected(executionSessionID, authID, wsURL, "send_error", errSend)
 			if errClose := conn.Close(); errClose != nil {
@@ -523,7 +521,7 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 				return
 			}
 
-			payload = normalizeCodexWebsocketCompletion(payload)
+			payload = normalizeCodexCompletionEvent(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
 			if eventType == "response.completed" || eventType == "response.done" {
 				if detail, ok := parseCodexUsage(payload); ok {
@@ -711,7 +709,7 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 	}
 
 	var cache codexCache
-	if from == "claude" {
+	if shouldUseImplicitCodexConversationCache(from, req.Model) {
 		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
 		if userIDResult.Exists() {
 			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
@@ -879,7 +877,7 @@ func parseCodexWebsocketErrorHeaders(payload []byte) http.Header {
 	return mapped
 }
 
-func normalizeCodexWebsocketCompletion(payload []byte) []byte {
+func normalizeCodexCompletionEvent(payload []byte) []byte {
 	if strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == "response.done" {
 		updated, err := sjson.SetBytes(payload, "type", "response.completed")
 		if err == nil && len(updated) > 0 {
@@ -889,7 +887,7 @@ func normalizeCodexWebsocketCompletion(payload []byte) []byte {
 	return payload
 }
 
-func encodeCodexWebsocketAsSSE(payload []byte) []byte {
+func encodeCodexHTTPEvent(payload []byte) []byte {
 	if len(payload) == 0 {
 		return nil
 	}
@@ -897,6 +895,10 @@ func encodeCodexWebsocketAsSSE(payload []byte) []byte {
 	line = append(line, []byte("data: ")...)
 	line = append(line, payload...)
 	return line
+}
+
+func encodeCodexWebsocketAsSSE(payload []byte) []byte {
+	return encodeCodexHTTPEvent(payload)
 }
 
 func websocketHandshakeBody(resp *http.Response) []byte {

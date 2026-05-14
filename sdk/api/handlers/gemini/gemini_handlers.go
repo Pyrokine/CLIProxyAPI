@@ -1,7 +1,7 @@
-// Package gemini provides HTTP handlers for Gemini API endpoints.
-// This package implements handlers for managing Gemini model operations including
+// Package gemini provides HTTP handlers for constant.Gemini API endpoints.
+// This package implements handlers for managing constant.Gemini model operations including
 // model listing, content generation, streaming content generation, and token counting.
-// It serves as a proxy layer between clients and the Gemini backend service,
+// It serves as a proxy layer between clients and the constant.Gemini backend service,
 // handling request translation, client management, and response processing.
 package gemini
 
@@ -13,20 +13,20 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
 )
 
-// APIHandler contains the handlers for Gemini API endpoints.
+// APIHandler contains the handlers for constant.Gemini API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type APIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
-// NewAPIHandler creates a new Gemini API handlers instance.
+// NewAPIHandler creates a new constant.Gemini API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns a APIHandler.
 func NewAPIHandler(apiHandlers *handlers.BaseAPIHandler) *APIHandler {
 	return &APIHandler{
@@ -36,18 +36,18 @@ func NewAPIHandler(apiHandlers *handlers.BaseAPIHandler) *APIHandler {
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *APIHandler) HandlerType() string {
-	return Gemini
+	return constant.Gemini
 }
 
-// Models returns the Gemini-compatible model metadata supported by this handler.
+// Models returns the constant.Gemini-compatible model metadata supported by this handler.
 func (h *APIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
 	return modelRegistry.GetAvailableModels("gemini")
 }
 
-// GeminiModels handles the Gemini models listing endpoint.
-// It returns a JSON response containing available Gemini models and their specifications.
+// GeminiModels handles the constant.Gemini models listing endpoint.
+// It returns a JSON response containing available constant.Gemini models and their specifications.
 func (h *APIHandler) GeminiModels(c *gin.Context) {
 	rawModels := h.Models()
 	normalizedModels := make([]map[string]any, 0, len(rawModels))
@@ -78,8 +78,8 @@ func (h *APIHandler) GeminiModels(c *gin.Context) {
 	)
 }
 
-// GeminiGetHandler handles GET requests for specific Gemini model information.
-// It returns detailed information about a specific Gemini model based on the action parameter.
+// GeminiGetHandler handles GET requests for specific constant.Gemini model information.
+// It returns detailed information about a specific constant.Gemini model based on the action parameter.
 func (h *APIHandler) GeminiGetHandler(c *gin.Context) {
 	var request struct {
 		Action string `uri:"action" binding:"required"`
@@ -111,7 +111,7 @@ func (h *APIHandler) GeminiGetHandler(c *gin.Context) {
 	}
 
 	if targetModel != nil {
-		// Ensure the name has 'models/' prefix in the output if it's a Gemini model
+		// Ensure the name has 'models/' prefix in the output if it's a constant.Gemini model
 		if name, ok := targetModel["name"].(string); ok && name != "" && !strings.HasPrefix(name, "models/") {
 			targetModel["name"] = "models/" + name
 		}
@@ -129,7 +129,7 @@ func (h *APIHandler) GeminiGetHandler(c *gin.Context) {
 	)
 }
 
-// GeminiHandler handles POST requests for Gemini API operations.
+// GeminiHandler handles POST requests for constant.Gemini API operations.
 // It routes requests to appropriate handlers based on the action parameter (model:method format).
 func (h *APIHandler) GeminiHandler(c *gin.Context) {
 	var request struct {
@@ -172,14 +172,14 @@ func (h *APIHandler) GeminiHandler(c *gin.Context) {
 	}
 }
 
-// handleStreamGenerateContent handles streaming content generation requests for Gemini models.
+// handleStreamGenerateContent handles streaming content generation requests for constant.Gemini models.
 // This function establishes a Server-Sent Events connection and streams the generated content
 // back to the client in real-time. It supports both SSE format and direct streaming based
 // on the 'alt' query parameter.
 //
 // Parameters:
 //   - c: The Gin context for the request
-//   - modelName: The name of the Gemini model to use for content generation
+//   - modelName: The name of the constant.Gemini model to use for content generation
 //   - rawJSON: The raw JSON request body containing generation parameters
 func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName string, rawJSON []byte) {
 	alt := h.GetAlt(c)
@@ -264,13 +264,13 @@ func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName strin
 	}
 }
 
-// handleCountTokens handles token counting requests for Gemini models.
+// handleCountTokens handles token counting requests for constant.Gemini models.
 // This function counts the number of tokens in the provided content without
 // generating a response. It's useful for quota management and content validation.
 //
 // Parameters:
 //   - c: The Gin context for the request
-//   - modelName: The name of the Gemini model to use for token counting
+//   - modelName: The name of the constant.Gemini model to use for token counting
 //   - rawJSON: The raw JSON request body containing the content to count
 func (h *APIHandler) handleCountTokens(c *gin.Context, modelName string, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
@@ -287,14 +287,14 @@ func (h *APIHandler) handleCountTokens(c *gin.Context, modelName string, rawJSON
 	cliCancel()
 }
 
-// handleGenerateContent handles non-streaming content generation requests for Gemini models.
+// handleGenerateContent handles non-streaming content generation requests for constant.Gemini models.
 // This function processes the request synchronously and returns the complete generated
 // response in a single API call. It supports various generation parameters and
 // response formats.
 //
 // Parameters:
 //   - c: The Gin context for the request
-//   - modelName: The name of the Gemini model to use for content generation
+//   - modelName: The name of the constant.Gemini model to use for content generation
 //   - rawJSON: The raw JSON request body containing generation parameters and content
 func (h *APIHandler) handleGenerateContent(c *gin.Context, modelName string, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
@@ -334,7 +334,7 @@ func (h *APIHandler) forwardGeminiStream(
 	)
 }
 
-// forwardStream is the shared streaming implementation for Gemini-family handlers.
+// forwardStream is the shared streaming implementation for constant.Gemini-family handlers.
 // The caller provides a writeChunk callback to handle protocol-specific chunk formatting.
 func forwardStream(
 	h *handlers.BaseAPIHandler,

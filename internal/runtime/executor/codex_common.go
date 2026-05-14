@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"strings"
+
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -22,6 +24,17 @@ func codexResolveBase(auth *cliproxyauth.Auth, model string) (baseModel, apiKey,
 		baseURL = codexDefaultBaseURL
 	}
 	return
+}
+
+func shouldUseImplicitCodexConversationCache(from sdktranslator.Format, model string) bool {
+	if from != "claude" {
+		return false
+	}
+	baseModel := strings.TrimSpace(strings.ToLower(thinking.ParseSuffix(model).ModelName))
+	if baseModel == "" {
+		return true
+	}
+	return !strings.HasPrefix(baseModel, "gpt-5")
 }
 
 // codexResponsesBodyResult holds the outputs of codexResponsesBody.

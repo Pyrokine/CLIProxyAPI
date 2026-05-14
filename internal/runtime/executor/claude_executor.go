@@ -176,6 +176,9 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+	if thinking.HasContext1MTag(req.Model) && !containsTrimmedString(extraBetas, "context-1m-2025-08-07") {
+		extraBetas = append(extraBetas, "context-1m-2025-08-07")
+	}
 	bodyForTranslation := body
 	bodyForUpstream := body
 	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
@@ -566,6 +569,19 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 
 // extractAndRemoveBetas extracts the "betas" array from the body and removes it.
 // Returns the extracted betas as a string slice and the modified body.
+func containsTrimmedString(values []string, target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), target) {
+			return true
+		}
+	}
+	return false
+}
+
 func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	betasResult := gjson.GetBytes(body, "betas")
 	if !betasResult.Exists() {
@@ -786,7 +802,7 @@ func applyClaudeHeaders(
 	r.Header.Set("Content-Type", "application/json")
 
 	var ginHeaders http.Header
-	if ginCtx, ok := r.Context().Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+	if ginCtx, ok := util.GinContextValue(r.Context()).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 		ginHeaders = ginCtx.Request.Header
 	}
 
@@ -1313,6 +1329,9 @@ func applyCloaking(
 	} else if needCacheUserIDFallback {
 		_, _, _, attrCache := getCloakConfigFromAuth(auth)
 		cacheUserID = attrCache
+	}
+	if strings.HasPrefix(model, "gpt-") {
+		cacheUserID = false
 	}
 
 	// Determine if cloaking should be applied

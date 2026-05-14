@@ -374,6 +374,18 @@ func TestModelMapper_SuffixPreservation(t *testing.T) {
 			want:     "gemini-2.5-pro(high)",
 		},
 		{
+			name:     "1m tag preserved",
+			mappings: []config.AmpModelMapping{{From: "g25p", To: "gemini-2.5-pro"}},
+			input:    "g25p[1m]",
+			want:     "gemini-2.5-pro[1m]",
+		},
+		{
+			name:     "1m tag with suffix preserved",
+			mappings: []config.AmpModelMapping{{From: "g25p", To: "gemini-2.5-pro"}},
+			input:    "g25p[1m](high)",
+			want:     "gemini-2.5-pro[1m](high)",
+		},
+		{
 			name:     "empty suffix filtered out",
 			mappings: []config.AmpModelMapping{{From: "g25p", To: "gemini-2.5-pro"}},
 			input:    "g25p()",

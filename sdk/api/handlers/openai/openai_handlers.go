@@ -1,9 +1,9 @@
-// Package openai provides HTTP handlers for OpenAI API endpoints.
-// This package implements the OpenAI-compatible API interface, including model listing
+// Package openai provides HTTP handlers for constant.OpenAI API endpoints.
+// This package implements the constant.OpenAI-compatible API interface, including model listing
 // and chat completion functionality. It supports both streaming and non-streaming responses,
 // and manages a pool of clients to interact with backend services.
-// The handlers translate OpenAI API requests to the appropriate backend format and
-// convert responses back to OpenAI-compatible format.
+// The handlers translate constant.OpenAI API requests to the appropriate backend format and
+// convert responses back to constant.OpenAI-compatible format.
 package openai
 
 import (
@@ -13,7 +13,7 @@ import (
 	"net/http"
 	"sync"
 
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	responsesconverter "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
@@ -23,20 +23,20 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// APIHandler contains the handlers for OpenAI API endpoints.
+// APIHandler contains the handlers for constant.OpenAI API endpoints.
 // It holds a pool of clients to interact with the backend service.
 type APIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
-// NewAPIHandler creates a new OpenAI API handlers instance.
+// NewAPIHandler creates a new constant.OpenAI API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns an APIHandler.
 //
 // Parameters:
 //   - apiHandlers: The base API handlers instance
 //
 // Returns:
-//   - *APIHandler: A new OpenAI API handlers instance
+//   - *APIHandler: A new constant.OpenAI API handlers instance
 func NewAPIHandler(apiHandlers *handlers.BaseAPIHandler) *APIHandler {
 	return &APIHandler{
 		BaseAPIHandler: apiHandlers,
@@ -45,10 +45,10 @@ func NewAPIHandler(apiHandlers *handlers.BaseAPIHandler) *APIHandler {
 
 // HandlerType returns the identifier for this handler implementation.
 func (h *APIHandler) HandlerType() string {
-	return OpenAI
+	return constant.OpenAI
 }
 
-// Models returns the OpenAI-compatible model metadata supported by this handler.
+// Models returns the constant.OpenAI-compatible model metadata supported by this handler.
 func (h *APIHandler) Models() []map[string]any {
 	// Get dynamic models from the global registry
 	modelRegistry := registry.GetGlobalRegistry()
@@ -57,36 +57,12 @@ func (h *APIHandler) Models() []map[string]any {
 
 // OpenAIModels handles the /v1/models endpoint.
 // It returns a list of available AI models with their capabilities
-// and specifications in OpenAI-compatible format.
+// and specifications in constant.OpenAI-compatible format.
 func (h *APIHandler) OpenAIModels(c *gin.Context) {
-	// Get all available models
-	allModels := h.Models()
-
-	// Filter to only include the 4 required fields: id, object, created, owned_by
-	filteredModels := make([]map[string]any, len(allModels))
-	for i, model := range allModels {
-		filteredModel := map[string]any{
-			"id":     model["id"],
-			"object": model["object"],
-		}
-
-		// Add created field if it exists
-		if created, exists := model["created"]; exists {
-			filteredModel["created"] = created
-		}
-
-		// Add owned_by field if it exists
-		if ownedBy, exists := model["owned_by"]; exists {
-			filteredModel["owned_by"] = ownedBy
-		}
-
-		filteredModels[i] = filteredModel
-	}
-
 	c.JSON(
 		http.StatusOK, gin.H{
 			"object": "list",
-			"data":   filteredModels,
+			"data":   h.Models(),
 		},
 	)
 }
@@ -116,7 +92,7 @@ func (h *APIHandler) ChatCompletions(c *gin.Context) {
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	stream := streamResult.Type == gjson.True
 
-	// Some clients send OpenAI Responses-format payloads to /v1/chat/completions.
+	// Some clients send constant.OpenAI Responses-format payloads to /v1/chat/completions.
 	// Convert them to Chat Completions so downstream translators preserve tool metadata.
 	if shouldTreatAsResponsesFormat(rawJSON) {
 		modelName := gjson.GetBytes(rawJSON, "model").String()
@@ -132,7 +108,7 @@ func (h *APIHandler) ChatCompletions(c *gin.Context) {
 
 }
 
-// shouldTreatAsResponsesFormat detects OpenAI Responses-style payloads that are
+// shouldTreatAsResponsesFormat detects constant.OpenAI Responses-style payloads that are
 // accidentally sent to the Chat Completions endpoint.
 func shouldTreatAsResponsesFormat(rawJSON []byte) bool {
 	if gjson.GetBytes(rawJSON, "messages").Exists() {
@@ -150,7 +126,7 @@ func shouldTreatAsResponsesFormat(rawJSON []byte) bool {
 // Completions handles the /v1/completions endpoint.
 // It determines whether the request is for a streaming or non-streaming response
 // and calls the appropriate handler based on the model provider.
-// This endpoint follows the OpenAI completions API specification.
+// This endpoint follows the constant.OpenAI completions API specification.
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
@@ -179,7 +155,7 @@ func (h *APIHandler) Completions(c *gin.Context) {
 
 }
 
-// convertCompletionsRequestToChatCompletions converts OpenAI completions API request to chat completions format.
+// convertCompletionsRequestToChatCompletions converts constant.OpenAI completions API request to chat completions format.
 // This allows the completions endpoint to use the existing chat completions infrastructure.
 //
 // Parameters:
@@ -425,12 +401,12 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 }
 
 // handleNonStreamingResponse handles non-streaming chat completion responses
-// for Gemini models. It selects a client from the pool, sends the request, and
-// aggregates the response before sending it back to the client in OpenAI format.
+// for constant.Gemini models. It selects a client from the pool, sends the request, and
+// aggregates the response before sending it back to the client in constant.OpenAI format.
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
-//   - rawJSON: The raw JSON bytes of the OpenAI-compatible request
+//   - rawJSON: The raw JSON bytes of the constant.OpenAI-compatible request
 func (h *APIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
@@ -447,13 +423,13 @@ func (h *APIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) 
 	cliCancel()
 }
 
-// handleStreamingResponse handles streaming responses for Gemini models.
+// handleStreamingResponse handles streaming responses for constant.Gemini models.
 // It establishes a streaming connection with the backend service and forwards
 // the response chunks to the client in real-time using Server-Sent Events.
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
-//   - rawJSON: The raw JSON bytes of the OpenAI-compatible request
+//   - rawJSON: The raw JSON bytes of the constant.OpenAI-compatible request
 func (h *APIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
@@ -532,7 +508,7 @@ func (h *APIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
-//   - rawJSON: The raw JSON bytes of the OpenAI-compatible completions request
+//   - rawJSON: The raw JSON bytes of the constant.OpenAI-compatible completions request
 func (h *APIHandler) handleCompletionsNonStreamingResponse(c *gin.Context, rawJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
@@ -563,7 +539,7 @@ func (h *APIHandler) handleCompletionsNonStreamingResponse(c *gin.Context, rawJS
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
-//   - rawJSON: The raw JSON bytes of the OpenAI-compatible completions request
+//   - rawJSON: The raw JSON bytes of the constant.OpenAI-compatible completions request
 func (h *APIHandler) handleCompletionsStreamingResponse(c *gin.Context, rawJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
