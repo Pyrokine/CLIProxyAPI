@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-07
-// Author: pyro
-
 package usage
 
 import (
@@ -265,15 +262,46 @@ func (p *Persister) Start(ctx context.Context) {
 	p.mu.Lock()
 	p.store = store
 	p.writer = writer
+	p.mu.Unlock()
+
+	trimStop := p.startRetentionTrim(ctx)
+
+	p.mu.Lock()
 	p.stopFn = func() {
-		writerCancel()
 		writer.Stop()
+		writerCancel()
+		trimStop()
 		rollupStop()
 		_ = store.Close()
 	}
 	p.mu.Unlock()
 
 	log.Infof("usage: SQLite store opened at %s", dbPath)
+}
+
+func (p *Persister) startRetentionTrim(ctx context.Context) func() {
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		p.Trim()
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				p.Trim()
+			}
+		}
+	}()
+	return func() {
+		close(stopCh)
+		<-doneCh
+	}
 }
 
 // Stop drains the writer, halts the rollup loop, and closes the store. Idempotent.
@@ -466,7 +494,7 @@ func (p *Persister) TrimPreview() TrimPreviewResult {
 		log.Warnf("usage: trim preview: %v", err)
 		return TrimPreviewResult{}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var details []cleanPreviewFile
 	var total int64
@@ -612,7 +640,9 @@ func (p *Persister) SnapshotFiltered(from, to time.Time, filters EventFilters) S
 				snap.TokensByDay[day] = tokens
 			}
 		}
-		dayRows.Close()
+		if errClose := dayRows.Close(); errClose != nil {
+			log.Warnf("usage: snapshot day rows close: %v", errClose)
+		}
 	}
 
 	// Per-hour-of-day requests/tokens
@@ -629,7 +659,9 @@ func (p *Persister) SnapshotFiltered(from, to time.Time, filters EventFilters) S
 				snap.TokensByHour[hr] = tokens
 			}
 		}
-		hourRows.Close()
+		if errClose := hourRows.Close(); errClose != nil {
+			log.Warnf("usage: snapshot hour rows close: %v", errClose)
+		}
 	}
 
 	// APIs[apiName].Models[modelName].Details[] — must hit events table.
@@ -640,18 +672,19 @@ func (p *Persister) SnapshotFiltered(from, to time.Time, filters EventFilters) S
 		       (SELECT name FROM dim_auth_index WHERE id = events.auth_index_id),
 		       (SELECT name FROM dim_api_key    WHERE id = events.api_key_id),
 		       events.input_tokens, events.output_tokens, events.reasoning_tokens, events.cached_tokens, events.total_tokens,
-		       events.failed
+		       events.failed, events.metadata
 		  FROM events` + eventsWhere + ` ORDER BY events.ts_ns`
 	rows, err := s.db.QueryContext(ctx, eventsSQL, eventsArgs...)
 	if err != nil {
 		log.Warnf("usage: snapshot events: %v", err)
 		return snap
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var tsNs int64
 		var model, source, authIdx, apiKey sql.NullString
+		var metadata sql.NullString
 		var t tokenStats
 		var failedInt int64
 		if err := rows.Scan(
@@ -659,6 +692,7 @@ func (p *Persister) SnapshotFiltered(from, to time.Time, filters EventFilters) S
 			&model, &source, &authIdx, &apiKey,
 			&t.InputTokens, &t.OutputTokens, &t.ReasoningTokens, &t.CachedTokens, &t.TotalTokens,
 			&failedInt,
+			&metadata,
 		); err != nil {
 			log.Warnf("usage: snapshot scan: %v", err)
 			continue
@@ -678,15 +712,23 @@ func (p *Persister) SnapshotFiltered(from, to time.Time, filters EventFilters) S
 			api = aPISnapshot{Models: make(map[string]modelSnapshot)}
 		}
 		ms := api.Models[modelName]
-		ms.Details = append(
-			ms.Details, requestDetail{
-				Timestamp: time.Unix(0, tsNs).UTC(),
-				Source:    source.String,
-				AuthIndex: authIdx.String,
-				Tokens:    t,
-				Failed:    failedInt != 0,
-			},
-		)
+		detail := requestDetail{
+			Timestamp: time.Unix(0, tsNs).UTC(),
+			Source:    source.String,
+			AuthIndex: authIdx.String,
+			Tokens:    t,
+			Failed:    failedInt != 0,
+		}
+		flat := FlatDetail{}
+		if err := decodeEventMetadata(&flat, metadata); err != nil {
+			log.Warnf("usage: snapshot metadata decode: %v", err)
+		} else {
+			detail.LatencyMs = flat.LatencyMs
+			detail.ReasoningEffort = flat.ReasoningEffort
+			detail.Thinking = cloneThinking(flat.Thinking)
+			detail.ResponseHeaders = flat.ResponseHeaders
+		}
+		ms.Details = append(ms.Details, detail)
 		ms.TotalRequests++
 		ms.TotalTokens += t.TotalTokens
 		api.Models[modelName] = ms
@@ -779,7 +821,7 @@ func (p *Persister) RecalculateCosts() (RecalculateCostsResult, error) {
 		    bucket_ts_ns, model_id, credential_id, api_key_id, provider_id,
 		    requests, success, failure,
 		    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-		    cost_micro
+		    cost_micro, latency_ms_total, latency_samples
 		)
 		SELECT
 		    (ts_ns / %d) * %d AS bucket_ts_ns,
@@ -788,13 +830,16 @@ func (p *Persister) RecalculateCosts() (RecalculateCostsResult, error) {
 		    SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END) AS success,
 		    SUM(CASE WHEN failed = 1 THEN 1 ELSE 0 END) AS failure,
 		    SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cached_tokens), SUM(total_tokens),
-		    SUM(cost_micro)
+		    SUM(cost_micro), 0, 0
 		  FROM events
 		 GROUP BY bucket_ts_ns, model_id, credential_id, api_key_id, provider_id
 	`, nsPerHour, nsPerHour,
 		),
 	); err != nil {
 		return RecalculateCostsResult{}, fmt.Errorf("rebuild hour_bucket: %w", err)
+	}
+	if err := backfillLatencyBuckets(ctx, tx, false); err != nil {
+		return RecalculateCostsResult{}, err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM day_bucket"); err != nil {
 		return RecalculateCostsResult{}, fmt.Errorf("clear day_bucket: %w", err)
@@ -851,7 +896,7 @@ func (s *Store) fetchAllModels(ctx context.Context) ([]modelRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []modelRow
 	for rows.Next() {
 		var m modelRow
@@ -1009,8 +1054,7 @@ func isCrossDeviceError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var linkErr *os.LinkError
-	if errors.As(err, &linkErr) {
+	if linkErr, ok := errors.AsType[*os.LinkError](err); ok {
 		return errors.Is(linkErr.Err, syscall.EXDEV)
 	}
 	return errors.Is(err, syscall.EXDEV)

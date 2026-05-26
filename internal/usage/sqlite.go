@@ -1,6 +1,3 @@
-// Last compiled: 2026-04-28
-// Author: pyro
-
 package usage
 
 import (
@@ -8,6 +5,7 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,7 +23,7 @@ const (
 	// schemaVersion mirrors the 'schema_version' row inserted by schema.sql.
 	// OpenStore refuses to run when the persisted value disagrees, forcing an
 	// explicit migration step rather than silent corruption.
-	schemaVersion = "2"
+	schemaVersion = "3"
 
 	// dbFileName is the SQLite database file inside the usage data dir.
 	dbFileName = "events.db"
@@ -109,10 +107,9 @@ func OpenStore(dbPath string) (*Store, error) {
 
 	// Read whatever schema_version is currently persisted. Empty string means
 	// "fresh database, no version yet" — treat the same as if a version row
-	// were absent and let the schema apply step seed it. v1 means "needs
-	// upgrade"; v2 means "current". migrations must run BEFORE schema.sql
-	// applies, otherwise schema.sql's v2 indexes would reference columns the
-	// pre-migration tables don't have yet.
+	// were absent and let the schema apply step seed it. migrations must run
+	// BEFORE schema.sql applies, otherwise current queries would reference columns
+	// the pre-migration tables don't have yet.
 	var version string
 	err = db.QueryRowContext(ctx, "SELECT value FROM meta WHERE key='schema_version'").Scan(&version)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -129,6 +126,13 @@ func OpenStore(dbPath string) (*Store, error) {
 			return nil, fmt.Errorf("usage: migrate v1→v2: %w", err)
 		}
 		version = "2"
+	}
+	if version == "2" {
+		if err := migrateV2ToV3(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("usage: migrate v2→v3: %w", err)
+		}
+		version = "3"
 	}
 
 	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
@@ -166,6 +170,31 @@ func OpenStore(dbPath string) (*Store, error) {
 //
 // modernc.org/sqlite supports ALTER TABLE ADD COLUMN, DROP INDEX, and
 // CREATE UNIQUE INDEX inside a transaction.
+func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, fmt.Errorf("pragma table_info(%s): %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			colType string
+			notnull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("scan table_info(%s): %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 func migrateV1ToV2(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -178,39 +207,11 @@ func migrateV1ToV2(ctx context.Context, db *sql.DB) error {
 		}
 	}()
 
-	// columnExists is cheaper than a try-catch on ALTER TABLE — modernc.org
-	// returns a generic "duplicate column" error which we'd then have to
-	// string-match against. PRAGMA table_info is the canonical SQLite check.
-	columnExists := func(table, column string) (bool, error) {
-		rows, err := tx.QueryContext(ctx, "PRAGMA table_info("+table+")")
-		if err != nil {
-			return false, fmt.Errorf("pragma table_info(%s): %w", table, err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var (
-				cid     int
-				name    string
-				colType string
-				notnull int
-				dflt    sql.NullString
-				pk      int
-			)
-			if err := rows.Scan(&cid, &name, &colType, &notnull, &dflt, &pk); err != nil {
-				return false, fmt.Errorf("scan table_info(%s): %w", table, err)
-			}
-			if name == column {
-				return true, nil
-			}
-		}
-		return false, rows.Err()
-	}
-
 	// Add provider_id column to each fact table when missing. ALTER TABLE on
 	// a table that already has the column would fail; the columnExists guard
 	// keeps the migration idempotent for partial-completion replays.
 	for _, table := range []string{"events", "hour_bucket", "day_bucket"} {
-		exists, err := columnExists(table, "provider_id")
+		exists, err := columnExists(ctx, tx, table, "provider_id")
 		if err != nil {
 			return err
 		}
@@ -283,6 +284,156 @@ func migrateV1ToV2(ctx context.Context, db *sql.DB) error {
 	}
 	committed = true
 	log.Infof("usage: migrated events.db schema v1 → v2 (provider dimension)")
+	return nil
+}
+
+func migrateV2ToV3(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	for _, table := range []string{"hour_bucket", "day_bucket"} {
+		for _, column := range []string{"latency_ms_total", "latency_samples"} {
+			exists, err := columnExists(ctx, tx, table, column)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+			stmt := fmt.Sprintf(
+				"ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL DEFAULT 0 CHECK(%s >= 0)", table, column, column,
+			)
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("alter %s add %s: %w", table, column, err)
+			}
+		}
+	}
+
+	if err := backfillLatencyBuckets(ctx, tx, true); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		"UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+	); err != nil {
+		return fmt.Errorf("update schema_version: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration tx: %w", err)
+	}
+	committed = true
+	log.Infof("usage: migrated events.db schema v2 → v3 (latency aggregates)")
+	return nil
+}
+
+type latencyBackfillRow struct {
+	tsNs       int64
+	modelID    int64
+	credID     sql.NullInt64
+	apiKeyID   sql.NullInt64
+	providerID sql.NullInt64
+	latencyMs  int64
+}
+
+func backfillLatencyBuckets(ctx context.Context, tx *sql.Tx, includeDay bool) error {
+	rows, err := tx.QueryContext(
+		ctx, `
+SELECT ts_ns, model_id, credential_id, api_key_id, provider_id, metadata
+  FROM events
+ WHERE metadata IS NOT NULL AND metadata <> ''
+`,
+	)
+	if err != nil {
+		return fmt.Errorf("query latency metadata: %w", err)
+	}
+
+	var updates []latencyBackfillRow
+	for rows.Next() {
+		var item latencyBackfillRow
+		var metadata sql.NullString
+		if err := rows.Scan(
+			&item.tsNs,
+			&item.modelID,
+			&item.credID,
+			&item.apiKeyID,
+			&item.providerID,
+			&metadata,
+		); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan latency metadata: %w", err)
+		}
+		if !metadata.Valid || metadata.String == "" {
+			continue
+		}
+		var meta eventMetadata
+		if err := json.Unmarshal([]byte(metadata.String), &meta); err != nil {
+			log.Warnf("usage: skip latency backfill metadata: %v", err)
+			continue
+		}
+		if meta.LatencyMs <= 0 {
+			continue
+		}
+		item.latencyMs = meta.LatencyMs
+		updates = append(updates, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate latency metadata: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close latency metadata rows: %w", err)
+	}
+
+	for _, item := range updates {
+		hourNs := (item.tsNs / nsPerHour) * nsPerHour
+		if err := updateLatencyBucket(ctx, tx, "hour_bucket", item, hourNs); err != nil {
+			return err
+		}
+		if includeDay {
+			dayNs := (item.tsNs / nsPerDay) * nsPerDay
+			if err := updateLatencyBucket(ctx, tx, "day_bucket", item, dayNs); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func updateLatencyBucket(ctx context.Context, tx *sql.Tx, table string, item latencyBackfillRow, bucketNs int64) error {
+	q := fmt.Sprintf(
+		`
+UPDATE %s
+   SET latency_ms_total = latency_ms_total + ?,
+       latency_samples = latency_samples + 1
+ WHERE bucket_ts_ns = ?
+   AND model_id = ?
+   AND ifnull(credential_id, 0) = ifnull(?, 0)
+   AND ifnull(api_key_id, 0) = ifnull(?, 0)
+   AND ifnull(provider_id, 0) = ifnull(?, 0)
+`, table,
+	)
+	if _, err := tx.ExecContext(
+		ctx,
+		q,
+		item.latencyMs,
+		bucketNs,
+		item.modelID,
+		nullableID(item.credID),
+		nullableID(item.apiKeyID),
+		nullableID(item.providerID),
+	); err != nil {
+		return fmt.Errorf("backfill %s latency: %w", table, err)
+	}
 	return nil
 }
 

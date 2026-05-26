@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-07
-// Author: pyro
-
 package usage
 
 import (
@@ -506,7 +503,8 @@ func (s *Store) queryTotals(
 	q := "SELECT " +
 		"COALESCE(SUM(requests),0), COALESCE(SUM(success),0), COALESCE(SUM(failure),0), " +
 		"COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(reasoning_tokens),0), " +
-		"COALESCE(SUM(cached_tokens),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(cost_micro),0) " +
+		"COALESCE(SUM(cached_tokens),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(cost_micro),0), " +
+		"COALESCE(SUM(latency_ms_total),0), COALESCE(SUM(latency_samples),0) " +
 		"FROM " + table + " WHERE bucket_ts_ns >= ? AND bucket_ts_ns <= ?" + filterSQL
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
@@ -519,6 +517,7 @@ func (s *Store) queryTotals(
 		&totals.Tokens.InputTokens, &totals.Tokens.OutputTokens, &totals.Tokens.ReasoningTokens,
 		&totals.Tokens.CachedTokens, &totals.Tokens.TotalTokens,
 		&costMicro,
+		&totals.Latency.TotalMs, &totals.Latency.SampleCount,
 	); err != nil {
 		return fmt.Errorf("queryTotals: %w", err)
 	}
@@ -539,7 +538,7 @@ func (s *Store) queryByModel(
 	q := "SELECT m.name, " +
 		"SUM(b.requests), SUM(b.success), SUM(b.failure), " +
 		"SUM(b.input_tokens), SUM(b.output_tokens), SUM(b.reasoning_tokens), SUM(b.cached_tokens), SUM(b.total_tokens), " +
-		"SUM(b.cost_micro) " +
+		"SUM(b.cost_micro), SUM(b.latency_ms_total), SUM(b.latency_samples) " +
 		"FROM " + table + " b JOIN dim_model m ON m.id = b.model_id " +
 		"WHERE b.bucket_ts_ns >= ? AND b.bucket_ts_ns <= ?" + filterSQL +
 		" GROUP BY m.id, m.name"
@@ -549,7 +548,7 @@ func (s *Store) queryByModel(
 	if err != nil {
 		return fmt.Errorf("queryByModel: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var name string
@@ -561,6 +560,7 @@ func (s *Store) queryByModel(
 			&ms.Tokens.InputTokens, &ms.Tokens.OutputTokens, &ms.Tokens.ReasoningTokens,
 			&ms.Tokens.CachedTokens, &ms.Tokens.TotalTokens,
 			&costMicro,
+			&ms.Latency.TotalMs, &ms.Latency.SampleCount,
 		); err != nil {
 			return fmt.Errorf("queryByModel scan: %w", err)
 		}
@@ -595,7 +595,7 @@ func (s *Store) queryByCredential(
 	if err != nil {
 		return fmt.Errorf("queryByCredential: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var credName, providerName string
@@ -640,7 +640,7 @@ func (s *Store) queryByAPIKey(
 	q := "SELECT COALESCE(k.name, '(none)') AS api_key_name, " +
 		"SUM(b.requests), SUM(b.success), SUM(b.failure), " +
 		"SUM(b.input_tokens), SUM(b.output_tokens), SUM(b.reasoning_tokens), SUM(b.cached_tokens), SUM(b.total_tokens), " +
-		"SUM(b.cost_micro) " +
+		"SUM(b.cost_micro), SUM(b.latency_ms_total), SUM(b.latency_samples) " +
 		"FROM " + table + " b LEFT JOIN dim_api_key k ON k.id = b.api_key_id " +
 		"WHERE b.bucket_ts_ns >= ? AND b.bucket_ts_ns <= ?" + filterSQL +
 		" GROUP BY api_key_name"
@@ -650,7 +650,7 @@ func (s *Store) queryByAPIKey(
 	if err != nil {
 		return fmt.Errorf("queryByAPIKey: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var name string
@@ -662,6 +662,7 @@ func (s *Store) queryByAPIKey(
 			&aks.Tokens.InputTokens, &aks.Tokens.OutputTokens, &aks.Tokens.ReasoningTokens,
 			&aks.Tokens.CachedTokens, &aks.Tokens.TotalTokens,
 			&costMicro,
+			&aks.Latency.TotalMs, &aks.Latency.SampleCount,
 		); err != nil {
 			return fmt.Errorf("queryByAPIKey scan: %w", err)
 		}
@@ -700,7 +701,7 @@ func (s *Store) queryTimeSeries(
 	if err != nil {
 		return fmt.Errorf("queryTimeSeries: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var ts int64
@@ -746,7 +747,7 @@ func (s *Store) queryTimeSeriesByModel(
 	if err != nil {
 		return fmt.Errorf("queryTimeSeriesByModel: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var name string
@@ -802,7 +803,7 @@ func (s *Store) queryTimeSeriesByCredential(
 	if err != nil {
 		return fmt.Errorf("queryTimeSeriesByCredential: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var credName, providerName string
@@ -852,7 +853,7 @@ func (s *Store) queryTimeSeriesByAPIKey(
 	if err != nil {
 		return fmt.Errorf("queryTimeSeriesByAPIKey: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var name string
@@ -981,8 +982,9 @@ func (s *Store) QueryEvents(
 		"(SELECT name FROM dim_source     WHERE id = events.source_id), " +
 		"(SELECT name FROM dim_auth_index WHERE id = events.auth_index_id), " +
 		"(SELECT name FROM dim_api_key    WHERE id = events.api_key_id), " +
+		"(SELECT name FROM dim_provider   WHERE id = events.provider_id), " +
 		"events.input_tokens, events.output_tokens, events.reasoning_tokens, events.cached_tokens, events.total_tokens, " +
-		"events.failed " +
+		"events.failed, events.metadata " +
 		"FROM events " + whereSQL +
 		" ORDER BY " + orderCol + " " + orderDir +
 		" LIMIT ? OFFSET ?"
@@ -994,20 +996,22 @@ func (s *Store) QueryEvents(
 	if err != nil {
 		return nil, 0, fmt.Errorf("query events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	out := make([]FlatDetail, 0, pageSize)
 	for rows.Next() {
 		var d FlatDetail
 		var tsNs int64
-		var modelName, srcName, authIdxName, apiKeyName sql.NullString
+		var modelName, srcName, authIdxName, apiKeyName, providerName sql.NullString
+		var metadata sql.NullString
 		var failedInt int64
 		if err := rows.Scan(
 			&tsNs,
-			&modelName, &srcName, &authIdxName, &apiKeyName,
+			&modelName, &srcName, &authIdxName, &apiKeyName, &providerName,
 			&d.Tokens.InputTokens, &d.Tokens.OutputTokens, &d.Tokens.ReasoningTokens, &d.Tokens.CachedTokens,
 			&d.Tokens.TotalTokens,
 			&failedInt,
+			&metadata,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan event row: %w", err)
 		}
@@ -1016,7 +1020,11 @@ func (s *Store) QueryEvents(
 		d.Source = srcName.String
 		d.AuthIndex = authIdxName.String
 		d.APIKey = apiKeyName.String
+		d.Provider = providerName.String
 		d.Failed = failedInt != 0
+		if err := decodeEventMetadata(&d, metadata); err != nil {
+			return nil, 0, err
+		}
 		out = append(out, d)
 	}
 	if err := rows.Err(); err != nil {
@@ -1037,6 +1045,9 @@ func (s *Store) StartRollup(ctx context.Context) func() {
 	// blank summary until the goroutine catches up.
 	if err := s.rollupPendingDays(ctx); err != nil {
 		log.Errorf("usage: initial day rollup failed: %v", err)
+	}
+	if err := s.rollupRecentDays(ctx); err != nil {
+		log.Errorf("usage: initial recent day rollup failed: %v", err)
 	}
 
 	stopCh := make(chan struct{})
@@ -1088,6 +1099,13 @@ func (s *Store) rollupPendingDays(ctx context.Context) error {
 		return err
 	}
 	if !hasData {
+		return nil
+	}
+	latestClosedDayNs := time.Now().UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour).UnixNano()
+	if newestDayNs > latestClosedDayNs {
+		newestDayNs = latestClosedDayNs
+	}
+	if newestDayNs <= 0 {
 		return nil
 	}
 	watermarkNs, err := s.getDayRollupWatermark(ctx)
@@ -1231,7 +1249,7 @@ func (s *Store) RollupDay(ctx context.Context, dayStartNs int64) error {
 SELECT model_id, credential_id, api_key_id, provider_id,
        SUM(requests), SUM(success), SUM(failure),
        SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cached_tokens), SUM(total_tokens),
-       SUM(cost_micro)
+       SUM(cost_micro), SUM(latency_ms_total), SUM(latency_samples)
   FROM hour_bucket
  WHERE bucket_ts_ns >= ? AND bucket_ts_ns < ?
  GROUP BY model_id, credential_id, api_key_id, provider_id
@@ -1242,10 +1260,10 @@ SELECT model_id, credential_id, api_key_id, provider_id,
 	}
 
 	type aggRow struct {
-		modelID                                            int64
-		credID, apiKeyID, providerID                       sql.NullInt64
-		requests, success, failure                         int64
-		input, output, reasoning, cached, total, costMicro int64
+		modelID                                                              int64
+		credID, apiKeyID, providerID                                         sql.NullInt64
+		requests, success, failure                                           int64
+		input, output, reasoning, cached, total, costMicro, latency, samples int64
 	}
 	var aggs []aggRow
 	for rows.Next() {
@@ -1254,7 +1272,7 @@ SELECT model_id, credential_id, api_key_id, provider_id,
 			&a.modelID, &a.credID, &a.apiKeyID, &a.providerID,
 			&a.requests, &a.success, &a.failure,
 			&a.input, &a.output, &a.reasoning, &a.cached, &a.total,
-			&a.costMicro,
+			&a.costMicro, &a.latency, &a.samples,
 		); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan aggregate: %w", err)
@@ -1278,8 +1296,8 @@ INSERT INTO day_bucket (
     bucket_ts_ns, model_id, credential_id, api_key_id, provider_id,
     requests, success, failure,
     input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-    cost_micro
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    cost_micro, latency_ms_total, latency_samples
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(bucket_ts_ns, model_id, ifnull(credential_id, 0), ifnull(api_key_id, 0), ifnull(provider_id, 0))
 DO UPDATE SET
     requests         = excluded.requests,
@@ -1287,10 +1305,12 @@ DO UPDATE SET
     failure          = excluded.failure,
     input_tokens     = excluded.input_tokens,
     output_tokens    = excluded.output_tokens,
-    reasoning_tokens = excluded.reasoning_tokens,
-    cached_tokens    = excluded.cached_tokens,
-    total_tokens     = excluded.total_tokens,
-    cost_micro       = excluded.cost_micro
+    reasoning_tokens  = excluded.reasoning_tokens,
+    cached_tokens     = excluded.cached_tokens,
+    total_tokens      = excluded.total_tokens,
+    cost_micro        = excluded.cost_micro,
+    latency_ms_total  = excluded.latency_ms_total,
+    latency_samples   = excluded.latency_samples
 `
 	for _, a := range aggs {
 		var credAny, apiKeyAny, providerAny any
@@ -1308,7 +1328,7 @@ DO UPDATE SET
 			dayStartNs, a.modelID, credAny, apiKeyAny, providerAny,
 			a.requests, a.success, a.failure,
 			a.input, a.output, a.reasoning, a.cached, a.total,
-			a.costMicro,
+			a.costMicro, a.latency, a.samples,
 		); err != nil {
 			return fmt.Errorf("upsert day_bucket: %w", err)
 		}

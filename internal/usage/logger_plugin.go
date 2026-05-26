@@ -1,6 +1,3 @@
-// Last compiled: 2026-03-30
-// Author: pyro
-
 // Package usage provides usage tracking and logging functionality for the CLI Proxy API server.
 // It includes plugins for monitoring API usage, token consumption, and other metrics
 // to help with observability and billing purposes.
@@ -11,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +59,32 @@ type loggerPlugin struct {
 //   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
 func newLoggerPlugin() *loggerPlugin { return &loggerPlugin{stats: defaultRequestStatistics} }
 
+func latencyMilliseconds(latency time.Duration) int64 {
+	if latency <= 0 {
+		return 0
+	}
+	return latency.Milliseconds()
+}
+
+func thinkingFromCore(src *coreusage.Thinking) *Thinking {
+	if src == nil {
+		return nil
+	}
+	var budget *int
+	if src.Budget != nil {
+		budget = new(int)
+		*budget = *src.Budget
+	}
+	return cloneThinking(
+		&Thinking{
+			Intensity: strings.TrimSpace(src.Intensity),
+			Mode:      strings.TrimSpace(src.Mode),
+			Level:     strings.TrimSpace(src.Level),
+			Budget:    budget,
+		},
+	)
+}
+
 // HandleUsage implements coreusage.Plugin.
 // When a global Persister is registered, records are routed through it (v2 path).
 // Otherwise, the legacy RequestStatistics is used as fallback.
@@ -85,18 +109,26 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 
 	source := record.Source
 	authIndex := record.AuthIndex
+	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
+	if reasoningEffort == "" {
+		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
+	}
 
 	// Try v2 path (global Persister)
 	if persister := getGlobalPersister(); persister != nil {
 		detail := FlatDetail{
-			Timestamp: timestamp,
-			Model:     modelName,
-			Source:    source,
-			AuthIndex: authIndex,
-			APIKey:    record.APIKey,
-			Provider:  record.Provider,
-			Tokens:    tokens,
-			Failed:    failed,
+			Timestamp:       timestamp,
+			Model:           modelName,
+			Source:          source,
+			AuthIndex:       authIndex,
+			APIKey:          record.APIKey,
+			Provider:        record.Provider,
+			LatencyMs:       latencyMilliseconds(record.Latency),
+			ReasoningEffort: reasoningEffort,
+			Thinking:        thinkingFromCore(record.Thinking),
+			ResponseHeaders: sanitizeResponseHeaders(record.ResponseHeaders),
+			Tokens:          tokens,
+			Failed:          failed,
 		}
 		persister.Record(detail)
 		return
@@ -146,11 +178,15 @@ type modelStats struct {
 
 // requestDetail stores the timestamp and token usage for a single request.
 type requestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    tokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp       time.Time   `json:"timestamp"`
+	Source          string      `json:"source"`
+	AuthIndex       string      `json:"auth_index"`
+	LatencyMs       int64       `json:"latency_ms,omitempty"`
+	ReasoningEffort string      `json:"reasoning_effort,omitempty"`
+	Thinking        *Thinking   `json:"thinking,omitempty"`
+	ResponseHeaders http.Header `json:"response_headers,omitempty"`
+	Tokens          tokenStats  `json:"tokens"`
+	Failed          bool        `json:"failed"`
 }
 
 // tokenStats captures the token usage breakdown for a request.
@@ -234,6 +270,10 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if modelName == "" {
 		modelName = "unknown"
 	}
+	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
+	if reasoningEffort == "" {
+		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
+	}
 	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
 
@@ -255,11 +295,15 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	s.updateAPIStats(
 		stats, modelName, requestDetail{
-			Timestamp: timestamp,
-			Source:    record.Source,
-			AuthIndex: record.AuthIndex,
-			Tokens:    detail,
-			Failed:    failed,
+			Timestamp:       timestamp,
+			Source:          record.Source,
+			AuthIndex:       record.AuthIndex,
+			LatencyMs:       latencyMilliseconds(record.Latency),
+			ReasoningEffort: reasoningEffort,
+			Thinking:        thinkingFromCore(record.Thinking),
+			ResponseHeaders: sanitizeResponseHeaders(record.ResponseHeaders),
+			Tokens:          detail,
+			Failed:          failed,
 		},
 	)
 
@@ -306,7 +350,11 @@ func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
 		}
 		for modelName, modelStatsValue := range stats.Models {
 			requestDetails := make([]requestDetail, len(modelStatsValue.Details))
-			copy(requestDetails, modelStatsValue.Details)
+			for i, detail := range modelStatsValue.Details {
+				requestDetails[i] = detail
+				requestDetails[i].Thinking = cloneThinking(detail.Thinking)
+				requestDetails[i].ResponseHeaders = cloneHTTPHeader(detail.ResponseHeaders)
+			}
 			apiSnapshot.Models[modelName] = modelSnapshot{
 				TotalRequests: modelStatsValue.TotalRequests,
 				TotalTokens:   modelStatsValue.TotalTokens,
@@ -414,13 +462,17 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 				if len(hooks) > 0 && hooks[0] != nil {
 					hooks[0](
 						FlatDetail{
-							Timestamp: detail.Timestamp,
-							Model:     modelName,
-							Source:    detail.Source,
-							AuthIndex: detail.AuthIndex,
-							APIKey:    apiName,
-							Tokens:    detail.Tokens,
-							Failed:    detail.Failed,
+							Timestamp:       detail.Timestamp,
+							Model:           modelName,
+							Source:          detail.Source,
+							AuthIndex:       detail.AuthIndex,
+							APIKey:          apiName,
+							LatencyMs:       detail.LatencyMs,
+							ReasoningEffort: strings.TrimSpace(detail.ReasoningEffort),
+							Thinking:        cloneThinking(detail.Thinking),
+							ResponseHeaders: cloneHTTPHeader(detail.ResponseHeaders),
+							Tokens:          detail.Tokens,
+							Failed:          detail.Failed,
 						},
 					)
 				}
@@ -604,6 +656,7 @@ func (s *RequestStatistics) TrimDetails(cutoff time.Time) []ArchivedDetail {
 			}
 			var kept []requestDetail
 			for _, d := range ms.Details {
+				d.ResponseHeaders = cloneHTTPHeader(d.ResponseHeaders)
 				if d.Timestamp.Before(cutoff) {
 					archived = append(
 						archived, ArchivedDetail{

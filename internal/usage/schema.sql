@@ -1,4 +1,4 @@
--- Usage DB schema v2
+-- Usage DB schema v3
 -- All *_ns timestamps are UTC Unix nanoseconds.
 -- cost_micro = USD * 1e6 (micro-dollars).
 -- IF NOT EXISTS lets the same script run idempotently on every startup.
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS meta
 ) WITHOUT ROWID;
 
 INSERT
-OR IGNORE INTO meta(key, value) VALUES ('schema_version', '2');
+OR IGNORE INTO meta(key, value) VALUES ('schema_version', '3');
 
 CREATE TABLE IF NOT EXISTS dim_model
 (
@@ -384,6 +384,18 @@ CREATE TABLE IF NOT EXISTS hour_bucket
     >=
     0
 ),
+    latency_ms_total INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    latency_ms_total
+    >=
+    0
+),
+    latency_samples INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    latency_samples
+    >=
+    0
+),
     CHECK
 (
     success
@@ -497,6 +509,18 @@ CREATE TABLE IF NOT EXISTS day_bucket
     cost_micro INTEGER NOT NULL DEFAULT 0 CHECK
 (
     cost_micro
+    >=
+    0
+),
+    latency_ms_total INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    latency_ms_total
+    >=
+    0
+),
+    latency_samples INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    latency_samples
     >=
     0
 ),

@@ -1,6 +1,3 @@
-// Last compiled: 2026-04-27
-// Author: pyro
-
 package usage
 
 import (

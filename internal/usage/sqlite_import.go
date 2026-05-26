@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-07
-// Author: pyro
-
 package usage
 
 import (
@@ -158,6 +155,19 @@ func (csvParser) Parse(data []byte) ([]FlatDetail, error) {
 		n, _ := strconv.ParseInt(s, 10, 64)
 		return n
 	}
+	parseThinking := func(row []string) *Thinking {
+		intensity := get(row, "thinking_intensity")
+		mode := get(row, "thinking_mode")
+		level := get(row, "thinking_level")
+		budgetText := get(row, "thinking_budget")
+		var budget *int
+		if budgetText != "" {
+			if n, err := strconv.Atoi(budgetText); err == nil {
+				budget = &n
+			}
+		}
+		return cloneThinking(&Thinking{Intensity: intensity, Mode: mode, Level: level, Budget: budget})
+	}
 
 	var details []FlatDetail
 	for lineNo := 2; ; lineNo++ {
@@ -189,7 +199,10 @@ func (csvParser) Parse(data []byte) ([]FlatDetail, error) {
 				Model:     get(row, "model"),
 				Source:    get(row, "source"),
 				AuthIndex: get(row, "auth_index"),
+				Provider:  get(row, "provider"),
 				APIKey:    apiKey,
+				LatencyMs: parseInt(get(row, "latency_ms")),
+				Thinking:  parseThinking(row),
 				Failed:    strings.EqualFold(get(row, "result"), "failed"),
 				Tokens: tokenStats{
 					InputTokens:     parseInt(get(row, "input_tokens")),
@@ -253,13 +266,17 @@ func flattenSnapshot(snap StatisticsSnapshot) []FlatDetail {
 			for _, d := range model.Details {
 				out = append(
 					out, FlatDetail{
-						Timestamp: d.Timestamp,
-						Model:     cleanModel,
-						Source:    normaliseDimName(d.Source, ""),
-						AuthIndex: normaliseDimName(d.AuthIndex, ""),
-						APIKey:    cleanAPI,
-						Tokens:    normaliseTokenStats(d.Tokens),
-						Failed:    d.Failed,
+						Timestamp:       d.Timestamp,
+						Model:           cleanModel,
+						Source:          normaliseDimName(d.Source, ""),
+						AuthIndex:       normaliseDimName(d.AuthIndex, ""),
+						APIKey:          cleanAPI,
+						LatencyMs:       d.LatencyMs,
+						ReasoningEffort: strings.TrimSpace(d.ReasoningEffort),
+						Thinking:        cloneThinking(d.Thinking),
+						ResponseHeaders: cloneHTTPHeader(d.ResponseHeaders),
+						Tokens:          normaliseTokenStats(d.Tokens),
+						Failed:          d.Failed,
 					},
 				)
 			}

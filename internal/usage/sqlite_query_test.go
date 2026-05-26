@@ -1,10 +1,8 @@
-// Last compiled: 2026-05-07
-// Author: pyro
-
 package usage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -363,55 +361,66 @@ func BenchmarkStoreQuerySummaryAndEvents(b *testing.B) {
 			if err != nil {
 				b.Fatalf("begin large preload: %v", err)
 			}
+			modelIDs := make([]int64, 16)
+			for modelIdx := 0; modelIdx < len(modelIDs); modelIdx++ {
+				modelIDs[modelIdx], err = largeStore.ResolveModelID(largeCtx, tx, fmt.Sprintf("model-%02d", modelIdx))
+				if err != nil {
+					b.Fatalf("ResolveModelID: %v", err)
+				}
+			}
+			apiKeyIDs := make([]sql.NullInt64, 16)
+			for apiIdx := 0; apiIdx < len(apiKeyIDs); apiIdx++ {
+				apiKeyIDs[apiIdx], err = largeStore.ResolveAPIKeyID(largeCtx, tx, fmt.Sprintf("key-%02d", apiIdx))
+				if err != nil {
+					b.Fatalf("ResolveAPIKeyID: %v", err)
+				}
+			}
+			credentialIDs := make([]sql.NullInt64, 2048)
+			for credIdx := 0; credIdx < len(credentialIDs); credIdx++ {
+				credentialIDs[credIdx], err = largeStore.ResolveCredentialID(
+					largeCtx, tx, fmt.Sprintf("cred-%04d", credIdx), "",
+				)
+				if err != nil {
+					b.Fatalf("ResolveCredentialID: %v", err)
+				}
+			}
+			providerIDs := make([]sql.NullInt64, 4)
+			for providerIdx, provider := range []string{"claude", "codex", "openai", "gemini"} {
+				providerIDs[providerIdx], err = largeStore.ResolveProviderID(largeCtx, tx, provider)
+				if err != nil {
+					b.Fatalf("ResolveProviderID: %v", err)
+				}
+			}
 			for i := 0; i < 365; i++ {
 				bucketDay := largeBase.AddDate(0, 0, i)
-				for modelIdx := 0; modelIdx < 16; modelIdx++ {
-					modelID, err := largeStore.ResolveModelID(largeCtx, tx, fmt.Sprintf("model-%02d", modelIdx))
-					if err != nil {
-						b.Fatalf("ResolveModelID: %v", err)
-					}
-					for apiIdx := 0; apiIdx < 16; apiIdx++ {
-						apiKeyID, err := largeStore.ResolveAPIKeyID(largeCtx, tx, fmt.Sprintf("key-%02d", apiIdx))
-						if err != nil {
-							b.Fatalf("ResolveAPIKeyID: %v", err)
-						}
-						for credIdx := 0; credIdx < 32; credIdx++ {
-							credID, err := largeStore.ResolveCredentialID(
-								largeCtx, tx, fmt.Sprintf("cred-%03d", credIdx), "",
-							)
-							if err != nil {
-								b.Fatalf("ResolveCredentialID: %v", err)
-							}
-							providerID, err := largeStore.ResolveProviderID(
-								largeCtx, tx, []string{"claude", "codex", "openai", "gemini"}[credIdx%4],
-							)
-							if err != nil {
-								b.Fatalf("ResolveProviderID: %v", err)
-							}
-							if _, err := tx.ExecContext(
-								largeCtx, `INSERT INTO day_bucket (
-						    bucket_ts_ns, model_id, credential_id, api_key_id, provider_id,
-						    requests, success, failure,
-						    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_micro
-						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-								bucketDay.UnixNano(),
-								modelID,
-								nullableID(credID),
-								nullableID(apiKeyID),
-								nullableID(providerID),
-								200,
-								196,
-								4,
-								200000,
-								120000,
-								10000,
-								30000,
-								360000,
-								540000,
-							); err != nil {
-								b.Fatalf("insert day_bucket: %v", err)
-							}
-						}
+				for bucketIdx := 0; bucketIdx < 8192; bucketIdx++ {
+					credIdx := bucketIdx % len(credentialIDs)
+					modelID := modelIDs[bucketIdx%len(modelIDs)]
+					apiKeyID := apiKeyIDs[(bucketIdx/len(credentialIDs))%len(apiKeyIDs)]
+					credentialID := credentialIDs[credIdx]
+					providerID := providerIDs[credIdx%len(providerIDs)]
+					if _, err := tx.ExecContext(
+						largeCtx, `INSERT INTO day_bucket (
+				    bucket_ts_ns, model_id, credential_id, api_key_id, provider_id,
+				    requests, success, failure,
+				    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_micro
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						bucketDay.UnixNano(),
+						modelID,
+						nullableID(credentialID),
+						nullableID(apiKeyID),
+						nullableID(providerID),
+						200,
+						196,
+						4,
+						200000,
+						120000,
+						10000,
+						30000,
+						360000,
+						540000,
+					); err != nil {
+						b.Fatalf("insert day_bucket: %v", err)
 					}
 				}
 			}
@@ -424,8 +433,8 @@ func BenchmarkStoreQuerySummaryAndEvents(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				if _, err := largeStore.Query(
-					largeCtx, largeFrom, largeTo, EventFilters{Model: "model-03", Source: "cred-007", APIKey: "key-05"},
-					"daily", true,
+					largeCtx, largeFrom, largeTo,
+					EventFilters{Model: "model-03", Source: "cred-0007", APIKey: "key-05"}, "daily", true,
 				); err != nil {
 					b.Fatalf("large Query: %v", err)
 				}

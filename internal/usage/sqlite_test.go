@@ -1,6 +1,3 @@
-// Last compiled: 2026-04-28
-// Author: pyro
-
 package usage
 
 import (
@@ -8,7 +5,9 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"fmt"
+	"net/http"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,7 +66,7 @@ func TestResolveDimIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	// Required dim: empty string is rejected by callers, so we only test the
 	// happy path here.
@@ -161,6 +160,64 @@ func TestPersistEvent_Idempotent(t *testing.T) {
 // TestQueryFiltered_ZeroMatchNoFallback verifies the critical post-incident
 // invariant: an active filter that matches zero dim ids returns an empty
 // result, NEVER falls back to all rows.
+func TestQueryLatencyStatsFromBuckets(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for i, latencyMs := range []int64{100, 300, 0} {
+		d := FlatDetail{
+			Timestamp: base.Add(time.Duration(i) * time.Minute),
+			Model:     "m",
+			APIKey:    "k",
+			LatencyMs: latencyMs,
+			Tokens:    tokenStats{TotalTokens: int64(i + 1)},
+		}
+		if _, err := persistEvent(ctx, tx, store, &d, nil); err != nil {
+			t.Fatalf("persist[%d]: %v", i, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	qr, err := store.Query(ctx, base.Add(-time.Hour), base.Add(time.Hour), EventFilters{}, "hourly", true)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if qr.Totals.Latency.TotalMs != 400 || qr.Totals.Latency.SampleCount != 2 {
+		t.Fatalf("totals latency = %+v, want total 400 sample 2", qr.Totals.Latency)
+	}
+	model := qr.ByModel["m"]
+	if model == nil || model.Latency.TotalMs != 400 || model.Latency.SampleCount != 2 {
+		t.Fatalf("model latency = %+v, want total 400 sample 2", model)
+	}
+	apiKey := qr.ByAPIKey["k"]
+	if apiKey == nil || apiKey.Latency.TotalMs != 400 || apiKey.Latency.SampleCount != 2 {
+		t.Fatalf("api key latency = %+v, want total 400 sample 2", apiKey)
+	}
+
+	dayStart := time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC).UnixNano()
+	if err := store.RollupDay(ctx, dayStart); err != nil {
+		t.Fatalf("RollupDay: %v", err)
+	}
+	var dayLatency, daySamples int64
+	if err := store.db.QueryRowContext(
+		ctx,
+		"SELECT latency_ms_total, latency_samples FROM day_bucket WHERE bucket_ts_ns = ?",
+		dayStart,
+	).Scan(&dayLatency, &daySamples); err != nil {
+		t.Fatalf("query day latency: %v", err)
+	}
+	if dayLatency != 400 || daySamples != 2 {
+		t.Fatalf("day latency = (%d, %d), want (400, 2)", dayLatency, daySamples)
+	}
+}
+
 func TestQueryFiltered_ZeroMatchNoFallback(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
@@ -261,6 +318,106 @@ func TestQueryEvents_Pagination(t *testing.T) {
 // produce the exact SHA-1 the v1 11-field algorithm did. Otherwise a
 // re-import of pre-v2 JSON would explode events.fingerprint UNIQUE collisions
 // against rows already present from previous imports.
+func TestPersistEvent_ResponseHeadersRoundTrip(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	budget := new(int)
+	*budget = 8192
+	d := FlatDetail{
+		Timestamp:       time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC),
+		Model:           "m",
+		LatencyMs:       1234,
+		ReasoningEffort: "medium",
+		Thinking:        &Thinking{Mode: "budget", Budget: budget},
+		ResponseHeaders: http.Header{
+			"X-Request-Id":         []string{"req-1"},
+			"Openai-Processing-Ms": []string{"42"},
+		},
+		Tokens: tokenStats{TotalTokens: 1},
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := persistEvent(ctx, tx, store, &d, nil); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	events, total, err := store.QueryEvents(
+		ctx, d.Timestamp.Add(-time.Minute), d.Timestamp.Add(time.Minute), EventFilters{}, 1, 10, "timestamp", false,
+	)
+	if err != nil {
+		t.Fatalf("QueryEvents: %v", err)
+	}
+	if total != 1 || len(events) != 1 {
+		t.Fatalf("events len=%d total=%d, want 1/1", len(events), total)
+	}
+	if got := events[0].ResponseHeaders.Get("X-Request-Id"); got != "req-1" {
+		t.Fatalf("X-Request-Id = %q, want req-1", got)
+	}
+	if got := events[0].ResponseHeaders.Get("Openai-Processing-Ms"); got != "42" {
+		t.Fatalf("Openai-Processing-Ms = %q, want 42", got)
+	}
+	if got := events[0].LatencyMs; got != 1234 {
+		t.Fatalf("LatencyMs = %d, want 1234", got)
+	}
+	if got := events[0].ReasoningEffort; got != "medium" {
+		t.Fatalf("ReasoningEffort = %q, want medium", got)
+	}
+	if events[0].Thinking == nil || events[0].Thinking.Budget == nil || *events[0].Thinking.Budget != 8192 {
+		t.Fatalf("Thinking = %#v, want budget 8192", events[0].Thinking)
+	}
+}
+
+func TestWriterSubmitBlocksInsteadOfDropping(t *testing.T) {
+	writer := NewWriter(nil, nil)
+	writer.stopped.Store(false)
+	for i := 0; i < writerChanCap; i++ {
+		writer.ch <- FlatDetail{Timestamp: time.Now(), Model: "model"}
+	}
+
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		writer.Submit(FlatDetail{Timestamp: time.Now(), Model: "model"})
+		close(done)
+	}()
+	<-started
+
+	select {
+	case <-done:
+		t.Fatal("Submit returned while writer queue was full")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	<-writer.ch
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Submit did not resume after queue capacity became available")
+	}
+}
+
+func TestWriterSubmitDuringStopDoesNotPanic(t *testing.T) {
+	writer := NewWriter(nil, nil)
+	writer.Start(context.Background())
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			writer.Submit(FlatDetail{Timestamp: time.Now(), Model: "model"})
+		}()
+	}
+	writer.Stop()
+	wg.Wait()
+}
+
 func TestComputeFingerprint_NULLProviderEquivalent(t *testing.T) {
 	d := FlatDetail{
 		Timestamp: time.Date(2026, 4, 27, 10, 30, 0, 123_456_789, time.UTC),
@@ -385,8 +542,9 @@ func mapKeys[V any](m map[string]V) []string {
 // the pre-v2 schema literally), pre-populates it with one event, then opens
 // it through OpenStore so the migration runs and verifies:
 //
-//   - schema_version is bumped to 2
+//   - schema_version is bumped to 3
 //   - provider_id column appears on events / hour_bucket / day_bucket
+//   - latency aggregate columns appear on hour_bucket / day_bucket
 //   - the legacy event row survives with provider_id NULL
 //   - re-opening the migrated db is a no-op (idempotency)
 //
@@ -499,14 +657,21 @@ INSERT INTO hour_bucket(id, bucket_ts_ns, model_id, requests, success, failure, 
 	if err := store.db.QueryRow("SELECT value FROM meta WHERE key='schema_version'").Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "2" {
-		t.Fatalf("schema_version = %q, want \"2\"", ver)
+	if ver != "3" {
+		t.Fatalf("schema_version = %q, want \"3\"", ver)
 	}
 
 	// provider_id column must exist on every fact table.
 	for _, table := range []string{"events", "hour_bucket", "day_bucket"} {
 		if !columnPresent(t, store.db, table, "provider_id") {
 			t.Fatalf("provider_id missing on %s after migration", table)
+		}
+	}
+	for _, table := range []string{"hour_bucket", "day_bucket"} {
+		for _, column := range []string{"latency_ms_total", "latency_samples"} {
+			if !columnPresent(t, store.db, table, column) {
+				t.Fatalf("%s missing on %s after migration", column, table)
+			}
 		}
 	}
 
@@ -537,19 +702,30 @@ INSERT INTO hour_bucket(id, bucket_ts_ns, model_id, requests, success, failure, 
 	if err := store2.db.QueryRow("SELECT value FROM meta WHERE key='schema_version'").Scan(&ver); err != nil {
 		t.Fatalf("re-read schema_version: %v", err)
 	}
-	if ver != "2" {
-		t.Fatalf("schema_version after re-open = %q, want \"2\"", ver)
+	if ver != "3" {
+		t.Fatalf("schema_version after re-open = %q, want \"3\"", ver)
 	}
 }
 
 // columnPresent answers "does table have column?" via PRAGMA table_info.
 func columnPresent(t *testing.T, db *sql.DB, table, column string) bool {
 	t.Helper()
-	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	var query string
+	switch table {
+	case "events":
+		query = "PRAGMA table_info(events)"
+	case "hour_bucket":
+		query = "PRAGMA table_info(hour_bucket)"
+	case "day_bucket":
+		query = "PRAGMA table_info(day_bucket)"
+	default:
+		t.Fatalf("unexpected table for column check: %s", table)
+	}
+	rows, err := db.Query(query)
 	if err != nil {
 		t.Fatalf("table_info(%s): %v", table, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var (
 			cid     int

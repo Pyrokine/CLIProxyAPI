@@ -1,6 +1,3 @@
-// Last compiled: 2026-04-28
-// Author: pyro
-
 package usage
 
 import (
@@ -33,10 +30,10 @@ type Writer struct {
 	done     chan struct{}
 	started  atomic.Bool
 	stopOnce sync.Once
+	submitMu sync.RWMutex
+	stopped  atomic.Bool
 
 	priceMu sync.RWMutex // guards priceFn during runtime swaps
-
-	dropped atomic.Int64
 }
 
 // NewWriter wires a writer to a store. priceFn may be nil — events still land
@@ -67,7 +64,10 @@ func (w *Writer) Stop() {
 	}
 	w.stopOnce.Do(
 		func() {
+			w.submitMu.Lock()
+			w.stopped.Store(true)
 			close(w.ch)
+			w.submitMu.Unlock()
 			<-w.done
 		},
 	)
@@ -90,10 +90,8 @@ func (w *Writer) priceFunc() PriceFunc {
 	return w.priceFn
 }
 
-// Submit enqueues a record for persistence. Non-blocking: when the channel is
-// saturated the record is counted (and warning-logged with throttling) rather
-// than back-pressuring the request path. Usage tracking is observability — a
-// few dropped records is preferable to slowing production traffic.
+// Submit enqueues a record for persistence. It blocks when the channel is full
+// so accepted live usage records are not discarded under burst load.
 func (w *Writer) Submit(detail FlatDetail) {
 	if w == nil {
 		return
@@ -107,22 +105,14 @@ func (w *Writer) Submit(detail FlatDetail) {
 	detail.APIKey = normaliseDimName(detail.APIKey, "")
 	detail.AuthIndex = normaliseDimName(detail.AuthIndex, "")
 	detail.Provider = normaliseDimName(detail.Provider, "")
-	select {
-	case w.ch <- detail:
-	default:
-		n := w.dropped.Add(1)
-		if n == 1 || n%1000 == 0 {
-			log.Warnf("usage: writer queue full, dropped %d records cumulatively", n)
-		}
-	}
-}
 
-// Dropped exposes the lifetime drop count for diagnostics.
-func (w *Writer) Dropped() int64 {
-	if w == nil {
-		return 0
+	w.submitMu.RLock()
+	defer w.submitMu.RUnlock()
+	if w.stopped.Load() {
+		log.Warn("usage: writer stopped, live usage record was not accepted")
+		return
 	}
-	return w.dropped.Load()
+	w.ch <- detail
 }
 
 func (w *Writer) loop(ctx context.Context) {
@@ -191,16 +181,17 @@ const (
 	insertEventSQL = `
 INSERT OR IGNORE INTO events (
     fingerprint, ts_ns, model_id, api_key_id, source_id, auth_index_id, credential_id, provider_id,
-    failed, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_micro
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    failed, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_micro, metadata
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 	upsertHourBucketSQL = `
 INSERT INTO hour_bucket (
     bucket_ts_ns, model_id, credential_id, api_key_id, provider_id,
     requests, success, failure,
-    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_micro
-) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost_micro,
+    latency_ms_total, latency_samples
+) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(bucket_ts_ns, model_id, ifnull(credential_id, 0), ifnull(api_key_id, 0), ifnull(provider_id, 0))
 DO UPDATE SET
     requests         = hour_bucket.requests         + excluded.requests,
@@ -209,9 +200,11 @@ DO UPDATE SET
     input_tokens     = hour_bucket.input_tokens     + excluded.input_tokens,
     output_tokens    = hour_bucket.output_tokens    + excluded.output_tokens,
     reasoning_tokens = hour_bucket.reasoning_tokens + excluded.reasoning_tokens,
-    cached_tokens    = hour_bucket.cached_tokens    + excluded.cached_tokens,
-    total_tokens     = hour_bucket.total_tokens     + excluded.total_tokens,
-    cost_micro       = hour_bucket.cost_micro       + excluded.cost_micro
+    cached_tokens     = hour_bucket.cached_tokens     + excluded.cached_tokens,
+    total_tokens      = hour_bucket.total_tokens      + excluded.total_tokens,
+    cost_micro        = hour_bucket.cost_micro        + excluded.cost_micro,
+    latency_ms_total  = hour_bucket.latency_ms_total  + excluded.latency_ms_total,
+    latency_samples   = hour_bucket.latency_samples   + excluded.latency_samples
 `
 )
 
@@ -304,6 +297,11 @@ func persistEvent(ctx context.Context, tx *sql.Tx, store *Store, d *FlatDetail, 
 	}
 	successInt := int64(1) - failedInt
 	costMicro := computeCostMicro(tokens, priceFn, d.Model)
+	metadata, err := encodeEventMetadata(d)
+	if err != nil {
+		return false, err
+	}
+	latencyMs, latencySamples := latencyBucketValues(d.LatencyMs)
 
 	fp := ComputeFingerprint(*d)
 	res, err := tx.ExecContext(
@@ -323,6 +321,7 @@ func persistEvent(ctx context.Context, tx *sql.Tx, store *Store, d *FlatDetail, 
 		tokens.CachedTokens,
 		tokens.TotalTokens,
 		costMicro,
+		metadata,
 	)
 	if err != nil {
 		return false, fmt.Errorf("insert event: %w", err)
@@ -346,6 +345,7 @@ func persistEvent(ctx context.Context, tx *sql.Tx, store *Store, d *FlatDetail, 
 		successInt, failedInt,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens, tokens.CachedTokens, tokens.TotalTokens,
 		costMicro,
+		latencyMs, latencySamples,
 	); err != nil {
 		return true, fmt.Errorf("upsert hour_bucket: %w", err)
 	}
@@ -359,6 +359,13 @@ func nullableID(n sql.NullInt64) any {
 		return nil
 	}
 	return n.Int64
+}
+
+func latencyBucketValues(latencyMs int64) (int64, int64) {
+	if latencyMs <= 0 {
+		return 0, 0
+	}
+	return latencyMs, 1
 }
 
 // computeCostMicro turns token counts and per-1M-token prices into cost_micro

@@ -1,11 +1,7 @@
-// Last compiled: 2026-04-28
-// Author: pyro
-
 package usage
 
 import (
-	"math"
-	"sort"
+	"net/http"
 	"time"
 )
 
@@ -22,14 +18,26 @@ import (
 // as identical to the historical NULL so legacy rows imported from the JSON
 // era keep their original deduplication identity.
 type FlatDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	Model     string     `json:"model"`
-	Source    string     `json:"source"`     // credential file name
-	AuthIndex string     `json:"auth_index"` // alternate credential identifier
-	APIKey    string     `json:"api_key"`    // CPA access key used by the client
-	Provider  string     `json:"provider"`   // upstream vendor (claude/codex/gemini/...)
-	Tokens    tokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp       time.Time   `json:"timestamp"`
+	Model           string      `json:"model"`
+	Source          string      `json:"source"`     // credential file name
+	AuthIndex       string      `json:"auth_index"` // alternate credential identifier
+	APIKey          string      `json:"api_key"`    // CPA access key used by the client
+	Provider        string      `json:"provider"`   // upstream vendor (claude/codex/gemini/...)
+	LatencyMs       int64       `json:"latency_ms,omitempty"`
+	ReasoningEffort string      `json:"reasoning_effort,omitempty"`
+	Thinking        *Thinking   `json:"thinking,omitempty"`
+	ResponseHeaders http.Header `json:"response_headers,omitempty"`
+	Tokens          tokenStats  `json:"tokens"`
+	Failed          bool        `json:"failed"`
+}
+
+// Thinking describes the requested thinking intensity for a usage event.
+type Thinking struct {
+	Intensity string `json:"intensity,omitempty"`
+	Mode      string `json:"mode,omitempty"`
+	Level     string `json:"level,omitempty"`
+	Budget    *int   `json:"budget,omitempty"`
 }
 
 // EventFilters specifies optional dimensions the dashboard layers on top of a
@@ -67,22 +75,29 @@ type timePoint struct {
 	Cost     float64    `json:"cost"`
 }
 
+type latencyStats struct {
+	TotalMs     int64
+	SampleCount int64
+}
+
 // summaryTotals is the global aggregation block.
 type summaryTotals struct {
-	Requests int64      `json:"requests"`
-	Success  int64      `json:"success"`
-	Failure  int64      `json:"failure"`
-	Tokens   tokenStats `json:"tokens"`
-	Cost     float64    `json:"cost"`
+	Requests int64        `json:"requests"`
+	Success  int64        `json:"success"`
+	Failure  int64        `json:"failure"`
+	Tokens   tokenStats   `json:"tokens"`
+	Cost     float64      `json:"cost"`
+	Latency  latencyStats `json:"latency"`
 }
 
 // summaryModelStats is the per-model aggregation block.
 type summaryModelStats struct {
-	Requests int64      `json:"requests"`
-	Success  int64      `json:"success"`
-	Failure  int64      `json:"failure"`
-	Tokens   tokenStats `json:"tokens"`
-	Cost     float64    `json:"cost"`
+	Requests int64        `json:"requests"`
+	Success  int64        `json:"success"`
+	Failure  int64        `json:"failure"`
+	Tokens   tokenStats   `json:"tokens"`
+	Cost     float64      `json:"cost"`
+	Latency  latencyStats `json:"latency"`
 }
 
 // summaryCredentialStats keeps only success/failure: credentials are scoped
@@ -100,22 +115,10 @@ type summaryCredentialStats struct {
 
 // summaryAPIKeyStats is the per-API-key aggregation block.
 type summaryAPIKeyStats struct {
-	Requests int64      `json:"requests"`
-	Success  int64      `json:"success"`
-	Failure  int64      `json:"failure"`
-	Tokens   tokenStats `json:"tokens"`
-	Cost     float64    `json:"cost"`
-}
-
-// roundCost rounds USD costs to two decimal places before returning them in a
-// JSON response — protects the UI from trailing-cent noise on aggregations.
-func roundCost(v float64) float64 {
-	return math.Round(v*100) / 100
-}
-
-// sortTimePoints orders a series ascending by Time. Used by the SQL query
-// path to enforce a stable order on imported data even though SQLite's ORDER
-// BY already does so for live writes.
-func sortTimePoints(points []timePoint) {
-	sort.Slice(points, func(i, j int) bool { return points[i].Time < points[j].Time })
+	Requests int64        `json:"requests"`
+	Success  int64        `json:"success"`
+	Failure  int64        `json:"failure"`
+	Tokens   tokenStats   `json:"tokens"`
+	Cost     float64      `json:"cost"`
+	Latency  latencyStats `json:"latency"`
 }
