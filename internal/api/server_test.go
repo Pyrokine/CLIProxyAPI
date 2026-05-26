@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -115,6 +116,33 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestManagementBodyLimitMiddlewareUsesImportLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(managementBodyLimitMiddleware())
+	engine.POST(
+		"/v0/management/usage/import", func(c *gin.Context) {
+			_, errRead := io.ReadAll(c.Request.Body)
+			if errRead != nil {
+				c.String(http.StatusRequestEntityTooLarge, errRead.Error())
+				return
+			}
+			c.Status(http.StatusNoContent)
+		},
+	)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v0/management/usage/import",
+		strings.NewReader(strings.Repeat("a", (10<<20)+1)),
+	)
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusNoContent, rr.Body.String())
 	}
 }
 
@@ -289,6 +317,42 @@ func TestAuthMiddleware_NilManager_IPv6LoopbackAllowed(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 for IPv6 loopback with nil manager, got %d", rr.Code)
+	}
+}
+
+func setupRequireTLSEngine(cfg *proxyconfig.Config) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(requireTLSForAuth(cfg))
+	engine.GET("/test", func(c *gin.Context) { c.Status(http.StatusOK) })
+	return engine
+}
+
+func TestRequireTLSForAuthRejectsSpoofedLoopbackHost(t *testing.T) {
+	engine := setupRequireTLSEngine(&proxyconfig.Config{TLS: proxyconfig.TLSConfig{RequireForAuth: true}})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Host = "127.0.0.1"
+	req.RemoteAddr = "203.0.113.10:12345"
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusMisdirectedRequest)
+	}
+}
+
+func TestRequireTLSForAuthAllowsLoopbackRemoteAddr(t *testing.T) {
+	engine := setupRequireTLSEngine(&proxyconfig.Config{TLS: proxyconfig.TLSConfig{RequireForAuth: true}})
+
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Host = "example.com"
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
 }
 

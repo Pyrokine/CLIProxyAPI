@@ -7,6 +7,8 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -14,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,9 +29,11 @@ import (
 	ampmodule "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
@@ -40,6 +45,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -63,7 +69,9 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
-	return logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
+	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
+	return logger
 }
 
 // WithMiddleware appends additional Gin middleware during server construction.
@@ -128,6 +136,12 @@ type Server struct {
 
 	// server is the underlying HTTP server.
 	server *http.Server
+
+	// muxBaseListener is the shared TCP listener used to serve both HTTP and Redis protocol traffic.
+	muxBaseListener net.Listener
+
+	// muxHTTPListener receives HTTP connections selected by the multiplexer.
+	muxHTTPListener *muxListener
 
 	// handlers contains the API handlers for processing requests.
 	handlers *handlers.BaseAPIHandler
@@ -350,6 +364,8 @@ func NewServer(
 	}
 	s.localPassword = optionState.localPassword
 
+	engine.Use(s.homeHeartbeatMiddleware())
+
 	// Setup routes
 	s.setupRoutes()
 
@@ -377,6 +393,7 @@ func NewServer(
 	// or when a local management password is provided (e.g. TUI mode).
 	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != ""
 	s.managementRoutesEnabled.Store(hasManagementSecret)
+	redisqueue.SetEnabled(hasManagementSecret || (cfg != nil && cfg.Home.Enabled))
 	if hasManagementSecret {
 		s.registerManagementRoutes()
 	}
@@ -394,6 +411,28 @@ func NewServer(
 	}
 
 	return s
+}
+
+func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s == nil || s.cfg == nil || !s.cfg.Home.Enabled {
+			c.Next()
+			return
+		}
+		if c != nil && c.Request != nil {
+			path := c.Request.URL.Path
+			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || path == "/management.html" {
+				c.Next()
+				return
+			}
+		}
+		client := home.Current()
+		if client == nil || !client.HeartbeatOK() {
+			c.AbortWithStatus(http.StatusServiceUnavailable)
+			return
+		}
+		c.Next()
+	}
 }
 
 // setupRoutes configures the API routes for the server.
@@ -419,6 +458,35 @@ func (s *Server) setupRoutes() {
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
+		v1.POST("/images/edits", openaiHandlers.ImagesEdits)
+		v1.POST("/videos", openaiHandlers.VideosCreate)
+		v1.POST("/videos/generations", openaiHandlers.XAIVideosGenerations)
+		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
+		v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
+		v1.GET("/videos/:video_id", openaiHandlers.VideosRetrieve)
+	}
+
+	// Root-level Responses API routes (no /v1 prefix).
+	// Codex Desktop configures base_url without /v1 and appends /responses directly.
+	rootResponses := s.engine.Group("")
+	rootResponses.Use(requireTLSForAuth(s.cfg), noStoreMiddleware())
+	rootResponses.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.cfg.AllowQueryAuth))
+	{
+		rootResponses.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
+		rootResponses.POST("/responses", openaiResponsesHandlers.Responses)
+		rootResponses.POST("/responses/compact", openaiResponsesHandlers.Compact)
+	}
+
+	// Codex Direct routes: /backend-api/codex/responses
+	// Used when Codex Desktop sets chatgpt_base_url to point at this server.
+	codexDirect := s.engine.Group("/backend-api/codex")
+	codexDirect.Use(requireTLSForAuth(s.cfg), noStoreMiddleware())
+	codexDirect.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.cfg.AllowQueryAuth))
+	{
+		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
+		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
+		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
 	}
 
 	// Gemini compatible API routes
@@ -426,9 +494,9 @@ func (s *Server) setupRoutes() {
 	v1beta.Use(requireTLSForAuth(s.cfg), noStoreMiddleware())
 	v1beta.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.cfg.AllowQueryAuth))
 	{
-		v1beta.GET("/models", geminiHandlers.GeminiModels)
+		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
-		v1beta.GET("/models/*action", geminiHandlers.GeminiGetHandler)
+		v1beta.GET("/models/*action", s.geminiGetHandler(geminiHandlers))
 	}
 
 	// Root endpoint
@@ -446,6 +514,10 @@ func (s *Server) setupRoutes() {
 			)
 		},
 	)
+	// Health check endpoints (no auth required)
+	healthHandler := func(c *gin.Context) { c.Status(http.StatusOK) }
+	s.engine.GET("/healthz", healthHandler)
+	s.engine.HEAD("/healthz", healthHandler)
 	s.engine.POST(
 		"/v1internal:method",
 		requireTLSForAuth(s.cfg),
@@ -462,6 +534,7 @@ func (s *Server) setupRoutes() {
 		{"/google/callback", "gemini"},
 		{"/iflow/callback", "iflow"},
 		{"/antigravity/callback", "antigravity"},
+		{"/xai/callback", "xai"},
 	} {
 		provider := cb.provider
 		s.engine.GET(
@@ -540,6 +613,7 @@ func (s *Server) registerManagementRoutes() {
 	)
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.GET("/usage-queue", s.mgmt.GetUsageQueue)
 		mgmt.GET("/usage/summary", s.mgmt.GetUsageSummary)
 		mgmt.GET("/usage/events", s.mgmt.GetUsageEvents)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
@@ -721,12 +795,16 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 
+		mgmt.GET("/rate-limit/status", s.mgmt.GetRateLimitStatus)
+		mgmt.DELETE("/rate-limit/ban", s.mgmt.DeleteRateLimitBan)
+
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
 		mgmt.GET("/gemini-cli-auth-url", s.mgmt.RequestGeminiCLIToken)
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
@@ -744,10 +822,15 @@ func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 	}
 }
 
-// managementBodyLimitMiddleware caps the request body to 10 MiB for all management endpoints.
+// managementBodyLimitMiddleware caps request bodies for management endpoints.
 func managementBodyLimitMiddleware() gin.HandlerFunc {
-	const maxBodySize = 10 << 20 // 10 MiB
+	const defaultMaxBodySize = 10 << 20 // 10 MiB
+	const importMaxBodySize = 100 << 20 // 100 MiB
 	return func(c *gin.Context) {
+		maxBodySize := int64(defaultMaxBodySize)
+		if c.FullPath() == "/v0/management/usage/import" {
+			maxBodySize = importMaxBodySize
+		}
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodySize)
 		c.Next()
 	}
@@ -761,8 +844,8 @@ func noStoreMiddleware() gin.HandlerFunc {
 }
 
 // requireTLSForAuth enforces cfg.TLS.RequireForAuth: if enabled, reject non-TLS
-// requests to authenticated routes with 421. Loopback traffic is always allowed
-// so the panel continues to work on localhost when tls.enable=false.
+// requests to authenticated routes with 421. Loopback traffic is allowed based
+// on the actual peer address so Host headers cannot bypass the TLS gate.
 func requireTLSForAuth(cfg *config.Config) gin.HandlerFunc {
 	if cfg == nil || !cfg.TLS.RequireForAuth {
 		return func(c *gin.Context) { c.Next() }
@@ -793,21 +876,21 @@ func requireTLSForAuth(cfg *config.Config) gin.HandlerFunc {
 }
 
 func isLoopbackRequest(r *http.Request) bool {
-	host := r.Host
-	if idx := strings.LastIndex(host, ":"); idx >= 0 {
-		host = host[:idx]
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
 	}
 	host = strings.Trim(host, "[]")
-	if host == "localhost" {
-		return true
-	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	cfg := s.cfg
-	if cfg == nil || cfg.RemoteManagement.DisableControlPanel {
+	if cfg == nil || cfg.Home.Enabled || cfg.RemoteManagement.DisableControlPanel {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
@@ -935,6 +1018,20 @@ func (s *Server) unifiedModelsHandler(
 	claudeHandler *claude.CodeAPIHandler,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if _, ok := c.Request.URL.Query()["client_version"]; ok {
+			if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+				s.handleHomeCodexClientModels(c)
+				return
+			}
+			openaiHandler.OpenAIModels(c)
+			return
+		}
+
+		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+			s.handleHomeModels(c)
+			return
+		}
+
 		userAgent := c.GetHeader("User-Agent")
 
 		// Route to Claude handler if User-Agent starts with "claude-cli"
@@ -948,6 +1045,323 @@ func (s *Server) unifiedModelsHandler(
 	}
 }
 
+func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
+		return
+	}
+
+	models := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		model := map[string]any{
+			"id":     entry.id,
+			"object": "model",
+		}
+		if entry.created > 0 {
+			model["created"] = entry.created
+		}
+		if entry.ownedBy != "" {
+			model["owned_by"] = entry.ownedBy
+		}
+		if entry.displayName != "" {
+			model["display_name"] = entry.displayName
+			model["description"] = entry.displayName
+		}
+		models = append(models, model)
+	}
+
+	c.JSON(http.StatusOK, openai.CodexClientModelsResponse(models))
+}
+
+func (s *Server) geminiModelsHandler(geminiHandler *gemini.APIHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+			s.handleHomeGeminiModels(c)
+			return
+		}
+
+		geminiHandler.GeminiModels(c)
+	}
+}
+
+func (s *Server) geminiGetHandler(geminiHandler *gemini.APIHandler) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s != nil && s.cfg != nil && s.cfg.Home.Enabled {
+			s.handleHomeGeminiModel(c)
+			return
+		}
+
+		geminiHandler.GeminiGetHandler(c)
+	}
+}
+
+type homeModelEntry struct {
+	id          string
+	created     int64
+	ownedBy     string
+	displayName string
+}
+
+func (s *Server) handleHomeModels(c *gin.Context) {
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
+		return
+	}
+
+	userAgent := c.GetHeader("User-Agent")
+	isClaude := strings.HasPrefix(userAgent, "claude-cli")
+
+	if isClaude {
+		out := make([]map[string]any, 0, len(entries))
+		for _, entry := range entries {
+			model := map[string]any{
+				"id":       entry.id,
+				"object":   "model",
+				"owned_by": entry.ownedBy,
+			}
+			if entry.created > 0 {
+				model["created_at"] = entry.created
+			}
+			if entry.displayName != "" {
+				model["display_name"] = entry.displayName
+			}
+			out = append(out, model)
+		}
+		firstID := ""
+		lastID := ""
+		if len(out) > 0 {
+			if id, okID := out[0]["id"].(string); okID {
+				firstID = id
+			}
+			if id, okID := out[len(out)-1]["id"].(string); okID {
+				lastID = id
+			}
+		}
+		c.JSON(
+			http.StatusOK, gin.H{
+				"data":     out,
+				"has_more": false,
+				"first_id": firstID,
+				"last_id":  lastID,
+			},
+		)
+		return
+	}
+
+	filtered := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		model := map[string]any{
+			"id":     entry.id,
+			"object": "model",
+		}
+		if entry.created > 0 {
+			model["created"] = entry.created
+		}
+		if entry.ownedBy != "" {
+			model["owned_by"] = entry.ownedBy
+		}
+		filtered = append(filtered, model)
+	}
+	c.JSON(
+		http.StatusOK, gin.H{
+			"object": "list",
+			"data":   filtered,
+		},
+	)
+}
+
+func (s *Server) handleHomeGeminiModels(c *gin.Context) {
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
+		return
+	}
+
+	c.JSON(
+		http.StatusOK, gin.H{
+			"models": formatHomeGeminiModels(entries),
+		},
+	)
+}
+
+func (s *Server) handleHomeGeminiModel(c *gin.Context) {
+	entries, ok := s.loadHomeModelEntries(c)
+	if !ok {
+		return
+	}
+
+	action := strings.TrimPrefix(c.Param("action"), "/")
+	action = strings.TrimSpace(action)
+	for _, entry := range entries {
+		if homeGeminiModelMatches(entry, action) {
+			c.JSON(http.StatusOK, formatHomeGeminiModel(entry))
+			return
+		}
+	}
+
+	c.JSON(
+		http.StatusNotFound, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: "Not Found",
+				Type:    "not_found",
+			},
+		},
+	)
+}
+
+func (s *Server) loadHomeModelEntries(c *gin.Context) ([]homeModelEntry, bool) {
+	if s == nil || c == nil || c.Request == nil {
+		return nil, false
+	}
+	client := home.Current()
+	if client == nil {
+		c.JSON(
+			http.StatusServiceUnavailable, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "home control center unavailable",
+					Type:    "server_error",
+				},
+			},
+		)
+		return nil, false
+	}
+
+	raw, errGet := client.GetModels(c.Request.Context())
+	if errGet != nil {
+		c.JSON(
+			http.StatusBadGateway, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: errGet.Error(),
+					Type:    "server_error",
+				},
+			},
+		)
+		return nil, false
+	}
+
+	entries, errDecode := decodeHomeModels(raw)
+	if errDecode != nil {
+		c.JSON(
+			http.StatusBadGateway, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: errDecode.Error(),
+					Type:    "server_error",
+				},
+			},
+		)
+		return nil, false
+	}
+
+	return entries, true
+}
+
+func formatHomeGeminiModels(entries []homeModelEntry) []map[string]any {
+	out := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		out = append(out, formatHomeGeminiModel(entry))
+	}
+	return out
+}
+
+func formatHomeGeminiModel(entry homeModelEntry) map[string]any {
+	name := entry.id
+	if !strings.HasPrefix(name, "models/") {
+		name = "models/" + name
+	}
+	displayName := entry.displayName
+	if displayName == "" {
+		displayName = entry.id
+	}
+	return map[string]any{
+		"name":                       name,
+		"displayName":                displayName,
+		"description":                displayName,
+		"supportedGenerationMethods": []string{"generateContent"},
+	}
+}
+
+func homeGeminiModelMatches(entry homeModelEntry, action string) bool {
+	id := strings.TrimSpace(entry.id)
+	if id == "" || action == "" {
+		return false
+	}
+	normalizedAction := strings.TrimPrefix(action, "models/")
+	normalizedID := strings.TrimPrefix(id, "models/")
+	return action == id || action == "models/"+id || normalizedAction == normalizedID
+}
+
+func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("home models payload is empty")
+	}
+
+	var bySection map[string][]map[string]any
+	if err := json.Unmarshal(raw, &bySection); err != nil {
+		return nil, fmt.Errorf("parse home models payload: %w", err)
+	}
+	if len(bySection) == 0 {
+		return nil, fmt.Errorf("home models payload has no sections")
+	}
+
+	seen := make(map[string]struct{})
+	out := make([]homeModelEntry, 0, 256)
+	for _, models := range bySection {
+		for _, model := range models {
+			id, _ := model["id"].(string)
+			id = strings.TrimSpace(id)
+			if id == "" {
+				name, _ := model["name"].(string)
+				name = strings.TrimSpace(name)
+				id = strings.TrimPrefix(name, "models/")
+			}
+			if id == "" {
+				continue
+			}
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+
+			created := int64(0)
+			switch v := model["created"].(type) {
+			case float64:
+				created = int64(v)
+			case int64:
+				created = v
+			case int:
+				created = int64(v)
+			case json.Number:
+				if n, err := v.Int64(); err == nil {
+					created = n
+				}
+			}
+
+			ownedBy, _ := model["owned_by"].(string)
+			ownedBy = strings.TrimSpace(ownedBy)
+			displayName, _ := model["display_name"].(string)
+			displayName = strings.TrimSpace(displayName)
+			if displayName == "" {
+				displayName, _ = model["displayName"].(string)
+				displayName = strings.TrimSpace(displayName)
+			}
+
+			out = append(
+				out, homeModelEntry{
+					id:          id,
+					created:     created,
+					ownedBy:     ownedBy,
+					displayName: displayName,
+				},
+			)
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
+	if len(out) == 0 {
+		return nil, fmt.Errorf("home models payload contains no models")
+	}
+	return out, nil
+}
+
 // Start begins listening for and serving HTTP or HTTPS requests.
 // It's a blocking call and will only return on an unrecoverable error.
 //
@@ -956,6 +1370,11 @@ func (s *Server) unifiedModelsHandler(
 func (s *Server) Start() error {
 	if s == nil || s.server == nil {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
+	}
+
+	listener, errListen := net.Listen("tcp", s.server.Addr)
+	if errListen != nil {
+		return fmt.Errorf("failed to start HTTP server: %v", errListen)
 	}
 
 	useTLS := s.cfg != nil && s.cfg.TLS.Enable
@@ -975,7 +1394,17 @@ func (s *Server) Start() error {
 		cert := strings.TrimSpace(s.cfg.TLS.Cert)
 		key := strings.TrimSpace(s.cfg.TLS.Key)
 		if cert == "" || key == "" {
+			if errClose := listener.Close(); errClose != nil {
+				log.Errorf("failed to close listener after TLS validation failure: %v", errClose)
+			}
 			return fmt.Errorf("failed to start HTTPS server: tls.cert or tls.key is empty")
+		}
+		certPair, errLoad := tls.LoadX509KeyPair(cert, key)
+		if errLoad != nil {
+			if errClose := listener.Close(); errClose != nil {
+				log.Errorf("failed to close listener after TLS key pair load failure: %v", errClose)
+			}
+			return fmt.Errorf("failed to start HTTPS server: %v", errLoad)
 		}
 
 		// Start HTTP→HTTPS redirect listener if configured
@@ -1004,21 +1433,74 @@ func (s *Server) Start() error {
 			}()
 		}
 
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{certPair},
+			NextProtos:   []string{"h2", "http/1.1"},
+		}
+		s.server.TLSConfig = tlsConfig
+		if errHTTP2 := http2.ConfigureServer(s.server, &http2.Server{}); errHTTP2 != nil {
+			log.Warnf("failed to configure HTTP/2: %v", errHTTP2)
+		}
+		listener = tls.NewListener(listener, tlsConfig)
 		log.Debugf("Starting API server on %s with TLS", s.server.Addr)
-		if errServeTLS := s.server.ListenAndServeTLS(cert, key); errServeTLS != nil && !errors.Is(
-			errServeTLS, http.ErrServerClosed,
-		) {
-			return fmt.Errorf("failed to start HTTPS server: %v", errServeTLS)
+	} else {
+		log.Debugf("Starting API server on %s", s.server.Addr)
+	}
+
+	httpListener := newMuxListener(listener.Addr(), 1024)
+	s.muxBaseListener = listener
+	s.muxHTTPListener = httpListener
+
+	httpErrCh := make(chan error, 1)
+	acceptErrCh := make(chan error, 1)
+
+	go func() {
+		httpErrCh <- s.server.Serve(httpListener)
+	}()
+	go func() {
+		acceptErrCh <- s.acceptMuxConnections(listener, httpListener)
+	}()
+
+	select {
+	case errServe := <-httpErrCh:
+		if s.muxBaseListener != nil {
+			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+				log.Debugf("failed to close shared listener after HTTP serve exit: %v", errClose)
+			}
+		}
+		if s.muxHTTPListener != nil {
+			_ = s.muxHTTPListener.Close()
+		}
+		errAccept := <-acceptErrCh
+		errServe = normalizeHTTPServeError(errServe)
+		errAccept = normalizeListenerError(errAccept)
+		if errServe != nil {
+			return fmt.Errorf("failed to start HTTP server: %v", errServe)
+		}
+		if errAccept != nil {
+			return fmt.Errorf("failed to start HTTP server: %v", errAccept)
+		}
+		return nil
+	case errAccept := <-acceptErrCh:
+		if s.muxHTTPListener != nil {
+			_ = s.muxHTTPListener.Close()
+		}
+		if s.muxBaseListener != nil {
+			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+				log.Debugf("failed to close shared listener after accept loop exit: %v", errClose)
+			}
+		}
+		errServe := <-httpErrCh
+		errServe = normalizeHTTPServeError(errServe)
+		errAccept = normalizeListenerError(errAccept)
+		if errAccept != nil {
+			return fmt.Errorf("failed to start HTTP server: %v", errAccept)
+		}
+		if errServe != nil {
+			return fmt.Errorf("failed to start HTTP server: %v", errServe)
 		}
 		return nil
 	}
-
-	log.Debugf("Starting API server on %s", s.server.Addr)
-	if errServe := s.server.ListenAndServe(); errServe != nil && !errors.Is(errServe, http.ErrServerClosed) {
-		return fmt.Errorf("failed to start HTTP server: %v", errServe)
-	}
-
-	return nil
 }
 
 // Stop gracefully shuts down the API server without interrupting any
@@ -1036,6 +1518,15 @@ func (s *Server) Stop(ctx context.Context) error {
 		select {
 		case s.keepAliveStop <- struct{}{}:
 		default:
+		}
+	}
+
+	if s.muxHTTPListener != nil {
+		_ = s.muxHTTPListener.Close()
+	}
+	if s.muxBaseListener != nil {
+		if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			log.Debugf("failed to close shared listener: %v", errClose)
 		}
 	}
 
@@ -1155,6 +1646,12 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
+	if s.requestLogger != nil && (oldCfg == nil || oldCfg.Home.Enabled != cfg.Home.Enabled) {
+		if setter, ok := s.requestLogger.(interface{ SetHomeEnabled(bool) }); ok {
+			setter.SetHomeEnabled(cfg.Home.Enabled)
+		}
+	}
+
 	if oldCfg == nil || oldCfg.LoggingToFile != cfg.LoggingToFile ||
 		oldCfg.LogsMaxTotalSizeMB != cfg.LogsMaxTotalSizeMB {
 		if err := logging.ConfigureLogOutput(cfg); err != nil {
@@ -1164,6 +1661,11 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg == nil || oldCfg.UsageStatisticsEnabled != cfg.UsageStatisticsEnabled {
 		usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+		redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	}
+
+	if oldCfg == nil || oldCfg.RedisUsageQueueRetentionSeconds != cfg.RedisUsageQueueRetentionSeconds {
+		redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	}
 
 	if s.requestLogger != nil && (oldCfg == nil || oldCfg.ErrorLogsMaxFiles != cfg.ErrorLogsMaxFiles) {
@@ -1218,6 +1720,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 			s.managementRoutesEnabled.Store(!newSecretEmpty)
 		}
 	}
+	redisqueue.SetEnabled(s.managementRoutesEnabled.Load() || (cfg != nil && cfg.Home.Enabled))
 
 	s.applyAccessConfig(oldCfg, cfg)
 	s.cfg = cfg
