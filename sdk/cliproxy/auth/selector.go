@@ -57,7 +57,18 @@ func (s *SessionAffinitySelector) sessionKey(opts cliproxyexecutor.Options, prov
 	if s == nil {
 		return ""
 	}
+	sessionID := sessionAffinityIDFromOptions(opts)
+	if sessionID == "" {
+		return ""
+	}
+	return provider + "::" + sessionID
+}
+
+func sessionAffinityIDFromOptions(opts cliproxyexecutor.Options) string {
 	sessionID := headerValueIgnoreCase(opts.Headers, "X-Session-ID")
+	if sessionID == "" {
+		sessionID = headerValueIgnoreCase(opts.Headers, "X-Amp-Thread-Id")
+	}
 	if sessionID == "" && len(opts.Metadata) > 0 {
 		if raw, ok := opts.Metadata[cliproxyexecutor.ExecutionSessionMetadataKey]; ok {
 			switch value := raw.(type) {
@@ -68,10 +79,7 @@ func (s *SessionAffinitySelector) sessionKey(opts cliproxyexecutor.Options, prov
 			}
 		}
 	}
-	if sessionID == "" {
-		return ""
-	}
-	return provider + "::" + sessionID
+	return sessionID
 }
 
 func (s *SessionAffinitySelector) PickSticky(provider string, opts cliproxyexecutor.Options, auths []*Auth) *Auth {
@@ -482,17 +490,7 @@ func (s *SessionAffinitySelector) Pick(
 	if s == nil {
 		return (&RoundRobinSelector{}).Pick(ctx, provider, model, opts, auths)
 	}
-	sessionID := headerValueIgnoreCase(opts.Headers, "X-Session-ID")
-	if sessionID == "" && len(opts.Metadata) > 0 {
-		if raw, ok := opts.Metadata[cliproxyexecutor.ExecutionSessionMetadataKey]; ok {
-			switch value := raw.(type) {
-			case string:
-				sessionID = strings.TrimSpace(value)
-			case []byte:
-				sessionID = strings.TrimSpace(string(value))
-			}
-		}
-	}
+	sessionID := sessionAffinityIDFromOptions(opts)
 	if sessionID == "" {
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
 	}

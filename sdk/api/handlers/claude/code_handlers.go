@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
@@ -64,7 +65,7 @@ func (h *CodeAPIHandler) Models() []map[string]any {
 //   - c: The Gin context for the request.
 func (h *CodeAPIHandler) ClaudeMessages(c *gin.Context) {
 	// Extract raw JSON data from the incoming request
-	rawJSON, err := c.GetRawData()
+	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(
@@ -95,7 +96,7 @@ func (h *CodeAPIHandler) ClaudeMessages(c *gin.Context) {
 //   - c: The Gin context for the request.
 func (h *CodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 	// Extract raw JSON data from the incoming request
-	rawJSON, err := c.GetRawData()
+	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(
@@ -214,8 +215,6 @@ func (h *CodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []by
 //   - c: The Gin context for the request.
 //   - rawJSON: The raw JSON request body.
 func (h *CodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
-	// Get the http.Flusher interface to manually flush the response.
-	// This is crucial for streaming as it allows immediate sending of data chunks
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(
@@ -230,65 +229,105 @@ func (h *CodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte)
 	}
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
-
-	// Create a cancellable context for the backend client request
-	// This allows proper cleanup and cancellation of ongoing requests
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(
-		cliCtx, h.HandlerType(), modelName, rawJSON, "",
-	)
-	setSSEHeaders := func() {
+	headersSent := false
+	sendSSEHeaders := func(upstreamHeaders http.Header) {
+		if headersSent {
+			return
+		}
 		c.Header("Content-Type", "text/event-stream")
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		headersSent = true
 	}
 
-	// Peek at the first chunk to determine success or failure before setting headers
+	type streamStart struct {
+		data    <-chan []byte
+		headers http.Header
+		errs    <-chan *interfaces.ErrorMessage
+	}
+	startChan := make(chan streamStart, 1)
+	go func() {
+		dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(
+			cliCtx, h.HandlerType(), modelName, rawJSON, "",
+		)
+		select {
+		case <-cliCtx.Done():
+		case startChan <- streamStart{data: dataChan, headers: upstreamHeaders, errs: errChan}:
+		}
+	}()
+
+	keepAlive := time.NewTicker(15 * time.Second)
+	defer keepAlive.Stop()
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cliCancel(c.Request.Context().Err())
 			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				// Err channel closed cleanly; wait for data channel.
-				errChan = nil
-				continue
+		case <-keepAlive.C:
+			sendSSEHeaders(nil)
+			writeClaudeStreamKeepAlive(c, flusher)
+		case started := <-startChan:
+			dataChan := started.data
+			errChan := started.errs
+			for {
+				select {
+				case <-c.Request.Context().Done():
+					cliCancel(c.Request.Context().Err())
+					return
+				case <-keepAlive.C:
+					sendSSEHeaders(started.headers)
+					writeClaudeStreamKeepAlive(c, flusher)
+				case errMsg, ok := <-errChan:
+					if !ok {
+						errChan = nil
+						continue
+					}
+					if errMsg != nil {
+						if headersSent {
+							h.writeClaudeStreamError(c, flusher, errMsg)
+						} else {
+							h.WriteErrorResponse(c, errMsg)
+						}
+						cliCancel(errMsg.Error)
+					} else {
+						cliCancel(nil)
+					}
+					return
+				case chunk, ok := <-dataChan:
+					if !ok {
+						sendSSEHeaders(started.headers)
+						flusher.Flush()
+						cliCancel(nil)
+						return
+					}
+					sendSSEHeaders(started.headers)
+					if len(chunk) > 0 {
+						_, _ = c.Writer.Write(chunk)
+						flusher.Flush()
+					}
+					h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+					return
+				}
 			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				// Stream closed without data? Send DONE or just headers.
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				flusher.Flush()
-				cliCancel(nil)
-				return
-			}
-
-			// Success! Set headers now.
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-
-			// Write the first chunk
-			if len(chunk) > 0 {
-				_, _ = c.Writer.Write(chunk)
-				flusher.Flush()
-			}
-
-			// Continue streaming the rest
-			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
-			return
 		}
 	}
+}
+
+func writeClaudeStreamKeepAlive(c *gin.Context, flusher http.Flusher) {
+	_, _ = c.Writer.Write([]byte(": keep-alive\n\n"))
+	flusher.Flush()
+}
+
+func (h *CodeAPIHandler) writeClaudeStreamError(c *gin.Context, flusher http.Flusher, errMsg *interfaces.ErrorMessage) {
+	if errMsg == nil {
+		return
+	}
+	errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
+	_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
+	flusher.Flush()
 }
 
 func (h *CodeAPIHandler) forwardClaudeStream(
@@ -298,8 +337,11 @@ func (h *CodeAPIHandler) forwardClaudeStream(
 	data <-chan []byte,
 	errs <-chan *interfaces.ErrorMessage,
 ) {
+	keepAliveInterval := new(time.Duration)
+	*keepAliveInterval = 15 * time.Second
 	h.ForwardStream(
 		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+			KeepAliveInterval: keepAliveInterval,
 			WriteChunk: func(chunk []byte) {
 				if len(chunk) == 0 {
 					return

@@ -5,10 +5,14 @@ package handlers
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +27,96 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 )
+
+// ReadRequestBody returns the request body after applying supported Content-Encoding decoders.
+func ReadRequestBody(c *gin.Context) ([]byte, error) {
+	return ReadRequestBodyWithLimit(c, maxDecodedRequestBodyBytes)
+}
+
+func ReadRequestBodyWithLimit(c *gin.Context, maxDecodedBytes int64) ([]byte, error) {
+	if c == nil || c.Request == nil {
+		return nil, nil
+	}
+	raw, err := c.GetRawData()
+	if err != nil {
+		return nil, err
+	}
+	decoded, errDecode := DecodeRequestBodyWithLimit(raw, c.GetHeader("Content-Encoding"), maxDecodedBytes)
+	if errDecode != nil {
+		return nil, errDecode
+	}
+	c.Request.Header.Del("Content-Encoding")
+	c.Request.ContentLength = int64(len(decoded))
+	return decoded, nil
+}
+
+func DecodeRequestBody(raw []byte, contentEncoding string) ([]byte, error) {
+	return DecodeRequestBodyWithLimit(raw, contentEncoding, maxDecodedRequestBodyBytes)
+}
+
+func DecodeRequestBodyWithLimit(raw []byte, contentEncoding string, maxDecodedBytes int64) ([]byte, error) {
+	encoding := strings.ToLower(strings.TrimSpace(contentEncoding))
+	if encoding == "" || encoding == "identity" {
+		if maxDecodedBytes > 0 && int64(len(raw)) > maxDecodedBytes {
+			return nil, fmt.Errorf("decoded request body exceeds %d bytes", maxDecodedBytes)
+		}
+		return raw, nil
+	}
+	if strings.Contains(encoding, ",") {
+		parts := strings.Split(encoding, ",")
+		for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+			parts[i], parts[j] = parts[j], parts[i]
+		}
+		decoded := raw
+		var err error
+		for _, part := range parts {
+			decoded, err = DecodeRequestBodyWithLimit(decoded, part, maxDecodedBytes)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return decoded, nil
+	}
+
+	var reader io.ReadCloser
+	switch encoding {
+	case "gzip":
+		gz, errGzip := gzip.NewReader(bytes.NewReader(raw))
+		if errGzip != nil {
+			return nil, errGzip
+		}
+		reader = gz
+	case "deflate":
+		zr, errZlib := zlib.NewReader(bytes.NewReader(raw))
+		if errZlib != nil {
+			return nil, errZlib
+		}
+		reader = zr
+	case "zstd":
+		zr, errZstd := zstd.NewReader(bytes.NewReader(raw))
+		if errZstd != nil {
+			return nil, errZstd
+		}
+		reader = zr.IOReadCloser()
+	default:
+		return nil, fmt.Errorf("unsupported content-encoding: %s", contentEncoding)
+	}
+	defer func() { _ = reader.Close() }()
+	limit := maxDecodedBytes
+	if limit <= 0 {
+		limit = maxDecodedRequestBodyBytes
+	}
+	decoded, errRead := io.ReadAll(io.LimitReader(reader, limit+1))
+	if errRead != nil {
+		return nil, errRead
+	}
+	if int64(len(decoded)) > limit {
+		return nil, fmt.Errorf("decoded request body exceeds %d bytes", limit)
+	}
+	return decoded, nil
+}
 
 // ErrorResponse represents a standard error response format for the API.
 // It contains a single ErrorDetail field.
@@ -50,11 +143,13 @@ const idempotencyKeyMetadataKey = "idempotency_key"
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
+	maxDecodedRequestBodyBytes       = 50 << 20
 )
 
 type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
 type executionSessionContextKey struct{}
+type disallowFreeAuthContextKey struct{}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
@@ -89,6 +184,22 @@ func WithExecutionSessionID(ctx context.Context, sessionID string) context.Conte
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
+}
+
+// WithDisallowFreeAuth returns a child context that requests skipping known free-tier credentials.
+func WithDisallowFreeAuth(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, disallowFreeAuthContextKey{}, true)
+}
+
+func disallowFreeAuthFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(disallowFreeAuthContextKey{}).(bool)
+	return v
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
@@ -192,30 +303,47 @@ func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
 	return cfg != nil && cfg.PassthroughHeaders
 }
 
+func requestHeadersAndQuery(ctx context.Context) (http.Header, url.Values) {
+	if ctx == nil {
+		return nil, nil
+	}
+	ginCtx, ok := util.GinContextValue(ctx).(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return nil, nil
+	}
+	var headers http.Header
+	if ginCtx.Request.Header != nil {
+		headers = ginCtx.Request.Header.Clone()
+	}
+	var query url.Values
+	if ginCtx.Request.URL != nil {
+		query = ginCtx.Request.URL.Query()
+	}
+	return headers, query
+}
+
 func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// Only forward it when the client explicitly provides it.
 	key := ""
+	requestPath := ""
 	if ctx != nil {
 		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
+			requestPath = strings.TrimSpace(ginCtx.FullPath())
+			if requestPath == "" && ginCtx.Request.URL != nil {
+				requestPath = strings.TrimSpace(ginCtx.Request.URL.Path)
+			}
 		}
-	}
-	if key == "" {
-		meta := make(map[string]any)
-		if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
-			meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
-		}
-		if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
-			meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
-		}
-		if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
-			meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
-		}
-		return meta
 	}
 
-	meta := map[string]any{idempotencyKeyMetadataKey: key}
+	meta := make(map[string]any)
+	if key != "" {
+		meta[idempotencyKeyMetadataKey] = key
+	}
+	if requestPath != "" {
+		meta[coreexecutor.RequestPathMetadataKey] = requestPath
+	}
 	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
 		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
 	}
@@ -225,7 +353,21 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
+	if disallowFreeAuthFromContext(ctx) {
+		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
+	}
 	return meta
+}
+
+func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	effort := thinking.ExtractReasoningEffort(rawJSON, handlerType, model)
+	if effort == "" {
+		return
+	}
+	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
 }
 
 func pinnedAuthIDFromContext(ctx context.Context) string {
@@ -338,7 +480,7 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 //   - context.Context: The new context with cancellation and embedded values.
 //   - APIHandlerCancelFunc: A function to cancel the context and log the response.
 func (h *BaseAPIHandler) GetContextWithCancel(
-	_ interfaces.APIHandler,
+	handler interfaces.APIHandler,
 	c *gin.Context,
 	ctx context.Context,
 ) (context.Context, APIHandlerCancelFunc) {
@@ -360,6 +502,28 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 		}
 	}
 	newCtx, cancel := context.WithCancel(parentCtx)
+
+	endpoint := ""
+	if c != nil && c.Request != nil {
+		path := strings.TrimSpace(c.FullPath())
+		if path == "" && c.Request.URL != nil {
+			path = strings.TrimSpace(c.Request.URL.Path)
+		}
+		if path != "" {
+			method := strings.TrimSpace(c.Request.Method)
+			if method != "" {
+				endpoint = method + " " + path
+			} else {
+				endpoint = path
+			}
+		}
+	}
+	if endpoint != "" {
+		newCtx = logging.WithEndpoint(newCtx, endpoint)
+	}
+	newCtx = logging.WithResponseStatusHolder(newCtx)
+	newCtx = logging.WithResponseHeadersHolder(newCtx)
+	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
 		go func() {
 			select {
@@ -370,7 +534,11 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 		}()
 	}
 	newCtx = util.WithGinContext(newCtx, c)
+	newCtx = context.WithValue(newCtx, "handler", handler)
 	return newCtx, func(params ...any) {
+		if c != nil {
+			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
+		}
 		if h.Cfg.RequestLog && len(params) == 1 {
 			if existing, exists := c.Get("API_RESPONSE"); exists {
 				if existingBytes, ok := existing.([]byte); ok && len(bytes.TrimSpace(existingBytes)) > 0 {
@@ -469,6 +637,11 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 	// Capture timestamp on first API response
 	if _, exists := c.Get("API_RESPONSE_TIMESTAMP"); !exists {
 		c.Set("API_RESPONSE_TIMESTAMP", time.Now())
+		if timelineValue, ok := c.Get(logging.RequestTimelineGinKey); ok {
+			if timeline, okTimeline := timelineValue.(*logging.RequestTimeline); okTimeline && timeline != nil {
+				timeline.AddOnce("upstream.response.done", "")
+			}
+		}
 	}
 
 	if existing, exists := c.Get("API_RESPONSE"); exists {
@@ -522,6 +695,7 @@ func (h *BaseAPIHandler) executeNonStream(
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -530,9 +704,12 @@ func (h *BaseAPIHandler) executeNonStream(
 		Model:   normalizedModel,
 		Payload: payload,
 	}
+	headers, query := requestHeadersAndQuery(ctx)
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
+		Headers:         headers,
+		Query:           query,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
@@ -577,6 +754,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
+	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -585,9 +763,12 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(
 		Model:   normalizedModel,
 		Payload: payload,
 	}
+	headers, query := requestHeadersAndQuery(ctx)
 	opts := coreexecutor.Options{
 		Stream:          true,
 		Alt:             alt,
+		Headers:         headers,
+		Query:           query,
 		OriginalRequest: rawJSON,
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
@@ -799,12 +980,7 @@ func supportsContext1M(modelName string, providers []string) bool {
 }
 
 func requiresContext1MCapabilityValidation(providers []string) bool {
-	for _, provider := range providers {
-		if strings.EqualFold(strings.TrimSpace(provider), "claude") {
-			return true
-		}
-	}
-	return false
+	return len(providers) > 0
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (

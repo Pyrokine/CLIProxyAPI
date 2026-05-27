@@ -23,8 +23,8 @@ func TestBuildCodexConfigModels_PreservesStaticMetadata(t *testing.T) {
 	if models[0].ID != "g55" {
 		t.Fatalf("expected alias g55, got %q", models[0].ID)
 	}
-	if models[0].ContextLength != 400000 {
-		t.Fatalf("expected context_length 400000, got %d", models[0].ContextLength)
+	if upstream := registry.LookupStaticModelInfo("gpt-5.5"); upstream == nil || models[0].ContextLength != upstream.ContextLength {
+		t.Fatalf("expected static context_length, got %d", models[0].ContextLength)
 	}
 	if models[0].MaxCompletionTokens == 0 {
 		t.Fatal("expected max_completion_tokens to be preserved")

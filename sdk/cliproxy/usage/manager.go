@@ -2,6 +2,8 @@ package usage
 
 import (
 	"context"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,24 +12,104 @@ import (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider    string
-	Model       string
-	APIKey      string
-	AuthID      string
-	AuthIndex   string
-	Source      string
-	RequestedAt time.Time
-	Failed      bool
-	Detail      Detail
+	Provider        string
+	Model           string
+	Alias           string
+	APIKey          string
+	AuthID          string
+	AuthIndex       string
+	AuthType        string
+	Source          string
+	ReasoningEffort string
+	RequestedAt     time.Time
+	Latency         time.Duration
+	Thinking        *Thinking
+	Failed          bool
+	Fail            Failure
+	Detail          Detail
+	ResponseHeaders http.Header
+}
+
+type requestedModelAliasContextKey struct{}
+type reasoningEffortContextKey struct{}
+
+// WithRequestedModelAlias stores the client-requested model name for usage sinks.
+func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, requestedModelAliasContextKey{}, alias)
+}
+
+// RequestedModelAliasFromContext returns the client-requested model name stored in ctx.
+func RequestedModelAliasFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	switch value := ctx.Value(requestedModelAliasContextKey{}).(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+// WithReasoningEffort stores the client-requested reasoning effort for usage sinks.
+func WithReasoningEffort(ctx context.Context, effort string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	effort = strings.TrimSpace(effort)
+	if effort == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, reasoningEffortContextKey{}, effort)
+}
+
+// ReasoningEffortFromContext returns the client-requested reasoning effort stored in ctx.
+func ReasoningEffortFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	switch value := ctx.Value(reasoningEffortContextKey{}).(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+// Failure holds HTTP failure metadata for an upstream request attempt.
+type Failure struct {
+	StatusCode int
+	Body       string
 }
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
-	CachedTokens    int64
-	TotalTokens     int64
+	InputTokens         int64
+	OutputTokens        int64
+	ReasoningTokens     int64
+	CachedTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
+	TotalTokens         int64
+}
+
+// Thinking describes the requested thinking intensity for a usage record.
+type Thinking struct {
+	Intensity string `json:"intensity,omitempty"`
+	Mode      string `json:"mode,omitempty"`
+	Level     string `json:"level,omitempty"`
+	Budget    *int   `json:"budget,omitempty"`
 }
 
 // Plugin consumes usage records emitted by the proxy runtime.
@@ -45,6 +127,7 @@ type Manager struct {
 	once     sync.Once
 	stopOnce sync.Once
 	cancel   context.CancelFunc
+	done     chan struct{}
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -74,7 +157,11 @@ func (m *Manager) Start(ctx context.Context) {
 			}
 			var workerCtx context.Context
 			workerCtx, m.cancel = context.WithCancel(ctx)
-			go m.run(workerCtx)
+			m.done = make(chan struct{})
+			go func() {
+				defer close(m.done)
+				m.run(workerCtx)
+			}()
 		},
 	)
 }
@@ -84,6 +171,7 @@ func (m *Manager) Stop() {
 	if m == nil {
 		return
 	}
+	var done <-chan struct{}
 	m.stopOnce.Do(
 		func() {
 			if m.cancel != nil {
@@ -91,10 +179,19 @@ func (m *Manager) Stop() {
 			}
 			m.mu.Lock()
 			m.closed = true
+			done = m.done
 			m.mu.Unlock()
 			m.cond.Broadcast()
 		},
 	)
+	if done == nil {
+		m.mu.Lock()
+		done = m.done
+		m.mu.Unlock()
+	}
+	if done != nil {
+		<-done
+	}
 }
 
 // Register appends a plugin to the delivery list.

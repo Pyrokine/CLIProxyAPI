@@ -16,6 +16,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
@@ -66,7 +67,7 @@ func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 		return
 	}
 
-	rawJSON, _ := c.GetRawData()
+	rawJSON, _ := handlers.ReadRequestBody(c)
 	requestRawURI := c.Request.URL.Path
 
 	if requestRawURI == "/v1internal:generateContent" {
@@ -138,6 +139,11 @@ func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 			return
 		}
 		c.Set("API_RESPONSE_TIMESTAMP", time.Now())
+		if timelineValue, ok := c.Get(logging.RequestTimelineGinKey); ok {
+			if timeline, okTimeline := timelineValue.(*logging.RequestTimeline); okTimeline && timeline != nil {
+				timeline.AddOnce("upstream.response.done", "")
+			}
+		}
 		_, _ = c.Writer.Write(output)
 		c.Set("API_RESPONSE", output)
 	}

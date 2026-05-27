@@ -61,6 +61,8 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		return
 	}
 	conn.SetReadLimit(10 << 20) // 10MB per message
+	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
+	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	passthroughSessionID := uuid.NewString()
 	clientRemoteAddr := ""
 	if c != nil && c.Request != nil {
@@ -70,6 +72,7 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var wsTerminateErr error
 	var wsTimelineLog strings.Builder
 	defer func() {
+		releaseResponsesWebsocketToolCaches(downstreamSessionKey)
 		if wsTerminateErr != nil {
 			appendWebsocketEvent(&wsTimelineLog, "disconnect", []byte(wsTerminateErr.Error()))
 			// log.Infof("responses websocket: session closing id=%s reason=%v", passthroughSessionID, wsTerminateErr)
@@ -159,6 +162,8 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			}
 			continue
 		}
+		requestJSON = repairResponsesWebsocketToolCalls(downstreamSessionKey, requestJSON)
+		updatedLastRequest = bytes.Clone(requestJSON)
 		lastRequest = updatedLastRequest
 
 		modelName := gjson.GetBytes(requestJSON, "model").String()
@@ -187,7 +192,7 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		dataChan, _, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, requestJSON, "")
 
 		completedOutput, errForward := h.forwardResponsesWebsocket(
-			c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID,
+			c, conn, cliCancel, dataChan, errChan, &wsTimelineLog, passthroughSessionID, downstreamSessionKey,
 		)
 		if errForward != nil {
 			wsTerminateErr = errForward
@@ -453,6 +458,7 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
 	errs <-chan *interfaces.ErrorMessage,
 	wsTimelineLog *strings.Builder,
 	sessionID string,
+	downstreamSessionKey string,
 ) ([]byte, error) {
 	completed := false
 	completedOutput := []byte("[]")
@@ -506,6 +512,7 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
 
 			payloads := websocketJSONPayloadsFromChunk(chunk)
 			for i := range payloads {
+				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
 				eventType := gjson.GetBytes(payloads[i], "type").String()
 				if eventType == wsEventTypeCompleted {
 					// log.Infof("replace %s with %s", wsEventTypeCompleted, wsEventTypeDone)

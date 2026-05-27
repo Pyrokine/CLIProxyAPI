@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	internalUsage "github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
@@ -36,7 +38,8 @@ type Service struct {
 	cfg *config.Config
 
 	// cfgMu protects concurrent access to the configuration.
-	cfgMu sync.RWMutex
+	cfgMu          sync.RWMutex
+	configUpdateMu sync.Mutex
 
 	// configPath is the path to the configuration file.
 	configPath string
@@ -94,6 +97,9 @@ type Service struct {
 
 	// usagePersister handles periodic persistence of usage statistics.
 	usagePersister *internalUsage.Persister
+
+	homeClient *home.Client
+	homeCancel context.CancelFunc
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -113,6 +119,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewQwenAuthenticator(),
+		sdkAuth.NewXAIAuthenticator(),
 	)
 }
 
@@ -433,6 +440,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	case "xai":
+		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -460,6 +469,236 @@ func (s *Service) rebindExecutors() {
 	}
 }
 
+func (s *Service) registerHomeExecutors() {
+	if s == nil || s.coreManager == nil || s.cfg == nil {
+		return
+	}
+	s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
+	if s.wsGateway != nil {
+		s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, "", s.wsGateway))
+	}
+	s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("openai-compatibility", s.cfg))
+}
+
+func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
+	if s == nil || remoteCfg == nil {
+		return
+	}
+	s.cfgMu.RLock()
+	baseCfg := s.cfg
+	s.cfgMu.RUnlock()
+	if baseCfg == nil {
+		return
+	}
+	merged := *remoteCfg
+	merged.Host = baseCfg.Host
+	merged.Port = baseCfg.Port
+	merged.TLS = baseCfg.TLS
+	merged.Home = baseCfg.Home
+	config.ApplyHomeRuntimeConfig(&merged)
+	s.applyConfigUpdate(&merged)
+}
+
+func (s *Service) applyConfigUpdate(newCfg *config.Config) {
+	if s == nil {
+		return
+	}
+	s.configUpdateMu.Lock()
+	defer s.configUpdateMu.Unlock()
+
+	previousStrategy := ""
+	previousSessionAffinity := false
+	previousSessionAffinityTTL := ""
+	homeEnabled := false
+	s.cfgMu.RLock()
+	if s.cfg != nil {
+		previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+		previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
+		previousSessionAffinityTTL = strings.TrimSpace(s.cfg.Routing.SessionAffinityTTL)
+		homeEnabled = s.cfg.Home.Enabled
+	}
+	s.cfgMu.RUnlock()
+
+	if newCfg == nil {
+		s.cfgMu.RLock()
+		newCfg = s.cfg
+		s.cfgMu.RUnlock()
+	}
+	if newCfg == nil {
+		return
+	}
+	if homeEnabled {
+		config.ApplyHomeRuntimeConfig(newCfg)
+	}
+
+	nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
+	normalizeStrategy := func(strategy string) string {
+		switch strategy {
+		case "fill-first", "fillfirst", "ff":
+			return "fill-first"
+		default:
+			return "round-robin"
+		}
+	}
+	previousStrategy = normalizeStrategy(previousStrategy)
+	nextStrategy = normalizeStrategy(nextStrategy)
+	nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
+	nextSessionAffinityTTL := strings.TrimSpace(newCfg.Routing.SessionAffinityTTL)
+	selectorChanged := previousStrategy != nextStrategy ||
+		previousSessionAffinity != nextSessionAffinity ||
+		previousSessionAffinityTTL != nextSessionAffinityTTL
+	if s.coreManager != nil && selectorChanged {
+		var selector coreauth.Selector
+		switch nextStrategy {
+		case "fill-first":
+			selector = &coreauth.FillFirstSelector{}
+		default:
+			selector = &coreauth.RoundRobinSelector{}
+		}
+		if nextSessionAffinity {
+			ttl := time.Hour
+			if nextSessionAffinityTTL != "" {
+				if parsed, err := time.ParseDuration(nextSessionAffinityTTL); err == nil && parsed > 0 {
+					ttl = parsed
+				}
+			}
+			if ttl == time.Hour {
+				selector = coreauth.NewSessionAffinitySelector(selector)
+			} else {
+				selector = coreauth.NewSessionAffinitySelectorWithConfig(
+					coreauth.SessionAffinityConfig{
+						Fallback: selector,
+						TTL:      ttl,
+					},
+				)
+			}
+		}
+		s.coreManager.SetSelector(selector)
+	}
+
+	s.applyRetryConfig(newCfg)
+	s.applyPprofConfig(newCfg)
+	if s.server != nil {
+		s.server.UpdateClients(newCfg)
+	}
+	s.cfgMu.Lock()
+	s.cfg = newCfg
+	s.cfgMu.Unlock()
+	if s.coreManager != nil {
+		s.coreManager.SetConfig(newCfg)
+		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+	}
+	if homeEnabled {
+		s.registerHomeExecutors()
+	}
+	s.rebindExecutors()
+}
+
+func (s *Service) startHomeUsageForwarder(ctx context.Context, client *home.Client) {
+	if s == nil || client == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sleep := func(d time.Duration) bool {
+		if d <= 0 {
+			return true
+		}
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return true
+		}
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			if !client.HeartbeatOK() {
+				if !sleep(time.Second) {
+					return
+				}
+				continue
+			}
+			items := redisqueue.PopOldest(64)
+			if len(items) == 0 {
+				if !sleep(500 * time.Millisecond) {
+					return
+				}
+				continue
+			}
+			for i := range items {
+				if errPush := client.LPushUsage(ctx, items[i]); errPush != nil {
+					for j := i; j < len(items); j++ {
+						redisqueue.Enqueue(items[j])
+					}
+					if !sleep(time.Second) {
+						return
+					}
+					break
+				}
+			}
+		}
+	}()
+}
+
+func (s *Service) startHomeSubscriber(ctx context.Context) {
+	if s == nil {
+		return
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg == nil || !cfg.Home.Enabled {
+		return
+	}
+	if s.homeCancel != nil {
+		s.homeCancel()
+		s.homeCancel = nil
+	}
+	if s.homeClient != nil {
+		s.homeClient.Close()
+		s.homeClient = nil
+	}
+	homeCtx := ctx
+	if homeCtx == nil {
+		homeCtx = context.Background()
+	}
+	homeCtx, cancel := context.WithCancel(homeCtx)
+	s.homeCancel = cancel
+	client := home.New(cfg.Home)
+	s.homeClient = client
+	home.SetCurrent(client)
+	go client.StartConfigSubscriber(
+		homeCtx, func(raw []byte) error {
+			parsed, err := config.ParseConfigBytes(raw)
+			if err != nil {
+				log.Warnf("failed to parse home config payload: %v", err)
+				return err
+			}
+			s.applyHomeOverlay(parsed)
+			return nil
+		},
+	)
+	s.startHomeUsageForwarder(homeCtx, client)
+}
+
 // Run starts the service and blocks until the context is canceled or the server stops.
 // It initializes all components including authentication, file watching, HTTP server,
 // and starts processing requests. The method blocks until the context is canceled.
@@ -478,6 +717,18 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	usage.StartDefault(ctx)
+
+	homeEnabled := s.cfg != nil && s.cfg.Home.Enabled
+	if homeEnabled {
+		config.ApplyHomeRuntimeConfig(s.cfg)
+		redisqueue.SetEnabled(true)
+		redisqueue.SetUsageStatisticsEnabled(true)
+		redisqueue.SetRetentionSeconds(s.cfg.RedisUsageQueueRetentionSeconds)
+		if s.coreManager != nil {
+			s.coreManager.SetConfig(s.cfg)
+			s.coreManager.SetOAuthModelAlias(s.cfg.OAuthModelAlias)
+		}
+	}
 
 	// Start usage statistics persistence if enabled
 	if s.cfg.UsageStatisticsEnabled && !strings.EqualFold(s.cfg.UsageStatisticsFile, "disabled") {
@@ -507,6 +758,7 @@ func (s *Service) Run(ctx context.Context) error {
 			if !s.usagePersister.IsReady() {
 				log.Warnf("usage: SQLite persister not ready, falling back to in-memory request statistics; legacy summary.json / detail JSON files remain untouched for manual recovery")
 				internalUsage.SetGlobalPersister(nil)
+				s.usagePersister = nil
 			}
 		}
 	}
@@ -519,32 +771,37 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 	}()
 
-	if err := s.ensureAuthDir(); err != nil {
-		return err
+	var err error
+	if !homeEnabled {
+		if err := s.ensureAuthDir(); err != nil {
+			return err
+		}
 	}
 
 	s.applyRetryConfig(s.cfg)
 
-	if s.coreManager != nil {
-		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
-			log.Warnf("failed to load auth store: %v", errLoad)
+	if !homeEnabled {
+		if s.coreManager != nil {
+			if errLoad := s.coreManager.Load(ctx); errLoad != nil {
+				log.Warnf("failed to load auth store: %v", errLoad)
+			}
 		}
-	}
 
-	tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
-	if tokenResult == nil {
-		tokenResult = &TokenClientResult{}
-	}
+		tokenResult, err := s.tokenProvider.Load(ctx, s.cfg)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+		if tokenResult == nil {
+			tokenResult = &TokenClientResult{}
+		}
 
-	apiKeyResult, err := s.apiKeyProvider.Load(ctx, s.cfg)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		return err
-	}
-	if apiKeyResult == nil {
-		apiKeyResult = &APIKeyClientResult{}
+		apiKeyResult, err := s.apiKeyProvider.Load(ctx, s.cfg)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+		if apiKeyResult == nil {
+			apiKeyResult = &APIKeyClientResult{}
+		}
 	}
 
 	// legacy clients removed; no caches to refresh
@@ -588,6 +845,10 @@ func (s *Service) Run(ctx context.Context) error {
 			},
 		)
 	}
+	if homeEnabled {
+		s.registerHomeExecutors()
+		s.startHomeSubscriber(ctx)
+	}
 
 	if s.hooks.OnBeforeStart != nil {
 		s.hooks.OnBeforeStart(s.cfg)
@@ -626,103 +887,33 @@ func (s *Service) Run(ctx context.Context) error {
 		},
 	)
 
-	var watcherWrapper *WatcherWrapper
-	reloadCallback := func(newCfg *config.Config) {
-		previousStrategy := ""
-		previousSessionAffinity := false
-		previousSessionAffinityTTL := ""
-		s.cfgMu.RLock()
-		if s.cfg != nil {
-			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
-			previousSessionAffinity = s.cfg.Routing.ClaudeCodeSessionAffinity || s.cfg.Routing.SessionAffinity
-			previousSessionAffinityTTL = strings.TrimSpace(s.cfg.Routing.SessionAffinityTTL)
-		}
-		s.cfgMu.RUnlock()
-
-		if newCfg == nil {
-			s.cfgMu.RLock()
-			newCfg = s.cfg
-			s.cfgMu.RUnlock()
-		}
-		if newCfg == nil {
-			return
+	if !homeEnabled {
+		var watcherWrapper *WatcherWrapper
+		reloadCallback := func(newCfg *config.Config) {
+			s.applyConfigUpdate(newCfg)
 		}
 
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-		normalizeStrategy := func(strategy string) string {
-			switch strategy {
-			case "fill-first", "fillfirst", "ff":
-				return "fill-first"
-			default:
-				return "round-robin"
-			}
+		watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
+		if err != nil {
+			return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
 		}
-		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
-		nextSessionAffinity := newCfg.Routing.ClaudeCodeSessionAffinity || newCfg.Routing.SessionAffinity
-		nextSessionAffinityTTL := strings.TrimSpace(newCfg.Routing.SessionAffinityTTL)
-		selectorChanged := previousStrategy != nextStrategy ||
-			previousSessionAffinity != nextSessionAffinity ||
-			previousSessionAffinityTTL != nextSessionAffinityTTL
-		if s.coreManager != nil && selectorChanged {
-			var selector coreauth.Selector
-			switch nextStrategy {
-			case "fill-first":
-				selector = &coreauth.FillFirstSelector{}
-			default:
-				selector = &coreauth.RoundRobinSelector{}
-			}
-			if nextSessionAffinity {
-				ttl := time.Hour
-				if nextSessionAffinityTTL != "" {
-					if parsed, err := time.ParseDuration(nextSessionAffinityTTL); err == nil && parsed > 0 {
-						ttl = parsed
-					}
-				}
-				selector = coreauth.NewSessionAffinitySelectorWithConfig(
-					coreauth.SessionAffinityConfig{
-						Fallback: selector,
-						TTL:      ttl,
-					},
-				)
-			}
-			s.coreManager.SetSelector(selector)
+		s.watcher = watcherWrapper
+		s.ensureAuthUpdateQueue(ctx)
+		if s.authUpdates != nil {
+			watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 		}
+		watcherWrapper.SetConfig(s.cfg)
 
-		s.applyRetryConfig(newCfg)
-		s.applyPprofConfig(newCfg)
-		if s.server != nil {
-			s.server.UpdateClients(newCfg)
+		watcherCtx, watcherCancel := context.WithCancel(context.Background())
+		s.watcherCancel = watcherCancel
+		if err = watcherWrapper.Start(watcherCtx); err != nil {
+			return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
 		}
-		s.cfgMu.Lock()
-		s.cfg = newCfg
-		s.cfgMu.Unlock()
-		if s.coreManager != nil {
-			s.coreManager.SetConfig(newCfg)
-			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
-		}
-		s.rebindExecutors()
+		log.Info("file watcher started for config and auth directory changes")
+	} else {
+		s.ensureAuthUpdateQueue(ctx)
 	}
 
-	watcherWrapper, err = s.watcherFactory(s.configPath, s.cfg.AuthDir, reloadCallback)
-	if err != nil {
-		return fmt.Errorf("cliproxy: failed to create watcher: %w", err)
-	}
-	s.watcher = watcherWrapper
-	s.ensureAuthUpdateQueue(ctx)
-	if s.authUpdates != nil {
-		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
-	}
-	watcherWrapper.SetConfig(s.cfg)
-
-	watcherCtx, watcherCancel := context.WithCancel(context.Background())
-	s.watcherCancel = watcherCancel
-	if err = watcherWrapper.Start(watcherCtx); err != nil {
-		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
-	}
-	log.Info("file watcher started for config and auth directory changes")
-
-	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
 		interval := 15 * time.Minute
 		s.coreManager.StartAutoRefresh(context.Background(), interval)
@@ -763,6 +954,16 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 
 			// legacy refresh loop removed; only stopping core auth manager below
+
+			if s.homeCancel != nil {
+				s.homeCancel()
+				s.homeCancel = nil
+			}
+			if s.homeClient != nil {
+				s.homeClient.Close()
+				s.homeClient = nil
+			}
+			home.ClearCurrent()
 
 			if s.watcherCancel != nil {
 				s.watcherCancel()
@@ -812,13 +1013,13 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				}
 			}
 
+			usage.StopDefault()
+
 			// Save usage statistics before stopping
 			if s.usagePersister != nil {
 				s.usagePersister.Stop()
 				internalUsage.SetGlobalPersister(nil)
 			}
-
-			usage.StopDefault()
 		},
 	)
 	return shutdownErr
@@ -994,28 +1195,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				}
 				if strings.EqualFold(compat.Name, compatName) {
 					isCompatAuth = true
-					// Convert compatibility models to registry models
-					ms := make([]*ModelInfo, 0, len(compat.Models))
-					for j := range compat.Models {
-						m := compat.Models[j]
-						// Use alias as model ID, fallback to name if alias is empty
-						modelID := m.Alias
-						if modelID == "" {
-							modelID = m.Name
-						}
-						ms = append(
-							ms, &ModelInfo{
-								ID:          modelID,
-								Object:      "model",
-								Created:     time.Now().Unix(),
-								OwnedBy:     compat.Name,
-								Type:        "openai-compatibility",
-								DisplayName: modelID,
-								UserDefined: true,
-							},
-						)
-					}
-					// Register and return
+					ms := buildOpenAICompatibilityConfigModels(compat)
 					if len(ms) > 0 {
 						if providerKey == "" {
 							providerKey = "openai-compatibility"
@@ -1357,6 +1537,58 @@ func matchWildcard(pattern, value string) bool {
 type modelEntry interface {
 	GetName() string
 	GetAlias() string
+}
+
+func buildOpenAICompatibilityConfigModels(compat *config.OpenAICompatibility) []*ModelInfo {
+	if compat == nil || len(compat.Models) == 0 {
+		return nil
+	}
+	now := time.Now().Unix()
+	out := make([]*ModelInfo, 0, len(compat.Models))
+	seen := make(map[string]struct{}, len(compat.Models))
+	for i := range compat.Models {
+		model := compat.Models[i]
+		name := strings.TrimSpace(model.Name)
+		alias := strings.TrimSpace(model.Alias)
+		if alias == "" {
+			alias = name
+		}
+		if alias == "" {
+			continue
+		}
+		key := strings.ToLower(alias)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		display := name
+		if display == "" {
+			display = alias
+		}
+		modelType := "openai-compatibility"
+		if model.Image {
+			modelType = registry.OpenAIImageModelType
+		}
+		info := &ModelInfo{
+			ID:          alias,
+			Object:      "model",
+			Created:     now,
+			OwnedBy:     compat.Name,
+			Type:        modelType,
+			DisplayName: display,
+			UserDefined: true,
+		}
+		if name != "" && !model.Image {
+			if upstream := registry.LookupStaticModelInfo(name); upstream != nil {
+				info.ContextLength = upstream.ContextLength
+				info.MaxCompletionTokens = upstream.MaxCompletionTokens
+				info.SupportedParameters = append([]string(nil), upstream.SupportedParameters...)
+				info.Thinking = upstream.Thinking
+			}
+		}
+		out = append(out, info)
+	}
+	return out
 }
 
 func buildConfigModels[T modelEntry](models []T, ownedBy, modelType string) []*ModelInfo {

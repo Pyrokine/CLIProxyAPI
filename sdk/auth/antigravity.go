@@ -11,6 +11,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/antigravity"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -158,11 +159,13 @@ waitForCallback:
 	if accessToken != "" {
 		fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
 		if errProject != nil {
-			log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
-		} else {
-			projectID = fetchedProjectID
-			log.Infof("antigravity: obtained project ID %s", projectID)
+			return nil, fmt.Errorf("antigravity: failed to fetch project ID: %w", errProject)
 		}
+		projectID = fetchedProjectID
+		log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
+	}
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("antigravity: project ID discovery returned empty project")
 	}
 
 	metadata := antigravity.BuildMetadata(tokenResp, email, projectID)
@@ -175,7 +178,7 @@ waitForCallback:
 
 	fmt.Println("Antigravity authentication successful")
 	if projectID != "" {
-		fmt.Printf("Using GCP project: %s\n", projectID)
+		fmt.Printf("Using GCP project: %s\n", util.HideAPIKey(projectID))
 	}
 	return &coreauth.Auth{
 		ID:       fileName,

@@ -228,12 +228,16 @@ func (b *Builder) Build() (*Service, error) {
 			selector = &coreauth.RoundRobinSelector{}
 		}
 		if sessionAffinity {
-			selector = coreauth.NewSessionAffinitySelectorWithConfig(
-				coreauth.SessionAffinityConfig{
-					Fallback: selector,
-					TTL:      sessionAffinityTTL,
-				},
-			)
+			if sessionAffinityTTL == time.Hour {
+				selector = coreauth.NewSessionAffinitySelector(selector)
+			} else {
+				selector = coreauth.NewSessionAffinitySelectorWithConfig(
+					coreauth.SessionAffinityConfig{
+						Fallback: selector,
+						TTL:      sessionAffinityTTL,
+					},
+				)
+			}
 		}
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)

@@ -324,6 +324,33 @@ func TestHeaderValueIgnoreCase(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_UsesAmpThreadID(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Hour,
+		},
+	)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Amp-Thread-Id": {"thread-1"}}}
+
+	first, err := selector.Pick(context.Background(), "codex", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "codex", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("second Pick() error = %v", err)
+	}
+	if first == nil || second == nil || first.ID != second.ID {
+		t.Fatalf("expected X-Amp-Thread-Id stickiness, got %v and %v", first, second)
+	}
+}
+
 func TestSessionAffinitySelector_UsesExecutionSessionMetadata(t *testing.T) {
 	t.Parallel()
 

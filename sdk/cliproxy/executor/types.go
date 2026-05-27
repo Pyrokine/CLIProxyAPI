@@ -10,6 +10,9 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
+const ReasoningEffortMetadataKey = "reasoning_effort"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
@@ -19,6 +22,10 @@ const (
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
+	// RequestPathMetadataKey stores the inbound HTTP request path (e.g. "/v1/images/generations") in Options.Metadata.
+	RequestPathMetadataKey = "request_path"
+	// DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
+	DisallowFreeAuthMetadataKey = "disallow_free_auth"
 )
 
 // Request encapsulates the translated payload that will be sent to a provider executor.

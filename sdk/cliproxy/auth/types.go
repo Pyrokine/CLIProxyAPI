@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,13 +97,13 @@ type Auth struct {
 	Success int64 `json:"-"`
 	Failed  int64 `json:"-"`
 
-	recentRequests recentRequestRing `json:"-"`
-	indexAssigned  bool              `json:"-"`
+	recentRequests recentRequestRing
+	indexAssigned  bool
 }
 
 const (
 	recentRequestBucketSeconds int64 = 10 * 60
-	recentRequestBucketCount         = 20
+	recentRequestBucketCount         = 24
 )
 
 type recentRequestBucket struct {
@@ -118,9 +119,11 @@ type recentRequestRing struct {
 }
 
 type RecentRequestBucket struct {
-	Time    string `json:"time"`
-	Success int64  `json:"success"`
-	Failed  int64  `json:"failed"`
+	Time        string `json:"time"`
+	StartTimeMS int64  `json:"start_time_ms"`
+	EndTimeMS   int64  `json:"end_time_ms"`
+	Success     int64  `json:"success"`
+	Failed      int64  `json:"failed"`
 }
 
 // QuotaState contains limiter tracking data for a credential.
@@ -168,10 +171,14 @@ func recentRequestBucketIndex(bucketID int64) int {
 	return int(mod)
 }
 
+func recentRequestBucketRange(bucketID int64) (time.Time, time.Time) {
+	start := time.Unix(bucketID*recentRequestBucketSeconds, 0)
+	return start, start.Add(time.Duration(recentRequestBucketSeconds) * time.Second)
+}
+
 func formatRecentRequestBucketLabel(bucketID int64) string {
-	start := time.Unix(bucketID*recentRequestBucketSeconds, 0).In(time.Local)
-	end := start.Add(10 * time.Minute)
-	return start.Format("15:04") + "-" + end.Format("15:04")
+	start, end := recentRequestBucketRange(bucketID)
+	return start.In(time.Local).Format("15:04") + "-" + end.In(time.Local).Format("15:04")
 }
 
 func (a *Auth) recordRecentRequest(now time.Time, success bool) {
@@ -209,8 +216,11 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 		bucketID := currentBucketID - int64(i)
 		idx := recentRequestBucketIndex(bucketID)
 		bucket := a.recentRequests.buckets[idx]
+		start, end := recentRequestBucketRange(bucketID)
 		entry := RecentRequestBucket{
-			Time: formatRecentRequestBucketLabel(bucketID),
+			Time:        formatRecentRequestBucketLabel(bucketID),
+			StartTimeMS: start.UnixMilli(),
+			EndTimeMS:   end.UnixMilli(),
 		}
 		if bucket.bucketID == bucketID {
 			entry.Success = bucket.success
@@ -265,45 +275,71 @@ func (a *Auth) indexSeed() string {
 		return ""
 	}
 
-	if fileName := strings.TrimSpace(a.FileName); fileName != "" {
-		return "file:" + fileName
-	}
-
-	providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
+	provider := strings.ToLower(strings.TrimSpace(a.Provider))
 	compatName := ""
 	baseURL := ""
 	apiKey := ""
+	filePath := ""
 	source := ""
 	if a.Attributes != nil {
-		if value := strings.TrimSpace(a.Attributes["provider_key"]); value != "" {
-			providerKey = strings.ToLower(value)
-		}
-		compatName = strings.ToLower(strings.TrimSpace(a.Attributes["compat_name"]))
+		compatName = strings.TrimSpace(a.Attributes["compat_name"])
 		baseURL = strings.TrimSpace(a.Attributes["base_url"])
 		apiKey = strings.TrimSpace(a.Attributes["api_key"])
+		filePath = strings.TrimSpace(a.Attributes["path"])
 		source = strings.TrimSpace(a.Attributes["source"])
+		if filePath == "" {
+			filePath = source
+		}
 	}
 
-	proxyURL := strings.TrimSpace(a.ProxyURL)
-	hasCredentialIdentity := compatName != "" || baseURL != "" || proxyURL != "" || apiKey != "" || source != ""
-	if providerKey != "" && hasCredentialIdentity {
-		parts := []string{"provider=" + providerKey}
-		if compatName != "" {
-			parts = append(parts, "compat="+compatName)
+	if filePath == "" {
+		filePath = strings.TrimSpace(a.FileName)
+	}
+	if filePath == "" {
+		filePath = strings.TrimSpace(a.ID)
+	}
+
+	if filePath != "" && strings.HasSuffix(strings.ToLower(filePath), ".json") {
+		abs, errAbs := filepath.Abs(filePath)
+		if errAbs == nil && strings.TrimSpace(abs) != "" {
+			filePath = abs
 		}
-		if baseURL != "" {
-			parts = append(parts, "base="+baseURL)
+		filePath = filepath.Clean(filePath)
+
+		authType := ""
+		if a.Metadata != nil {
+			if rawType, ok := a.Metadata["type"].(string); ok {
+				authType = strings.TrimSpace(rawType)
+			}
 		}
-		if proxyURL != "" {
-			parts = append(parts, "proxy="+proxyURL)
+		if authType == "" {
+			authType = strings.TrimSpace(provider)
 		}
-		if apiKey != "" {
-			parts = append(parts, "api_key="+apiKey)
+		authType = strings.ToLower(strings.TrimSpace(authType))
+		if authType != "" {
+			return authType + ":" + filePath
 		}
+	}
+
+	apiPrefix := ""
+	if apiKey != "" {
+		switch {
+		case compatName != "" || strings.EqualFold(provider, "openai-compatibility"):
+			apiPrefix = "openai-compatibility"
+		case strings.EqualFold(provider, "gemini"):
+			apiPrefix = "gemini-api-key"
+		case strings.EqualFold(provider, "codex"):
+			apiPrefix = "codex-api-key"
+		case strings.EqualFold(provider, "claude"):
+			apiPrefix = "claude-api-key"
+		}
+	}
+	if apiPrefix != "" {
+		parts := []string{apiPrefix, strings.TrimSpace(baseURL), strings.TrimSpace(apiKey)}
 		if source != "" {
-			parts = append(parts, "source="+source)
+			parts = append(parts, source)
 		}
-		return "config:" + strings.Join(parts, "\x00")
+		return strings.Join(parts, "\x00")
 	}
 
 	if id := strings.TrimSpace(a.ID); id != "" {
@@ -366,17 +402,26 @@ func (a *Auth) ProxyInfo() string {
 
 // DisableCoolingOverride returns the auth-file scoped disable_cooling override when present.
 // The value is read from metadata key "disable_cooling" (or legacy "disable-cooling").
+//
+// NOTE: This override is intentionally "true-only". When the metadata value is false, it is treated
+// as "not set" so the global disable-cooling flag can still take effect.
 func (a *Auth) DisableCoolingOverride() (bool, bool) {
 	if a == nil || a.Metadata == nil {
 		return false, false
 	}
 	if val, ok := a.Metadata["disable_cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
+			if !parsed {
+				return false, false
+			}
 			return parsed, true
 		}
 	}
 	if val, ok := a.Metadata["disable-cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
+			if !parsed {
+				return false, false
+			}
 			return parsed, true
 		}
 	}

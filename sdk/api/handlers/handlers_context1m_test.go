@@ -6,12 +6,15 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
-func TestRequiresContext1MCapabilityValidation_ClaudeOnly(t *testing.T) {
+func TestRequiresContext1MCapabilityValidation_RequiresKnownProvider(t *testing.T) {
 	if !requiresContext1MCapabilityValidation([]string{"claude"}) {
 		t.Fatal("expected claude provider to require [1m] capability validation")
 	}
-	if requiresContext1MCapabilityValidation([]string{"openai"}) {
-		t.Fatal("expected openai provider to skip [1m] capability validation")
+	if !requiresContext1MCapabilityValidation([]string{"openai"}) {
+		t.Fatal("expected openai provider to require [1m] capability validation")
+	}
+	if requiresContext1MCapabilityValidation(nil) {
+		t.Fatal("expected empty providers to skip [1m] capability validation")
 	}
 }
 

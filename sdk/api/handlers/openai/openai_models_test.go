@@ -78,3 +78,57 @@ func TestOpenAIModels_PreservesExtendedMetadata(t *testing.T) {
 		t.Fatalf("expected thinking object, got %#v", model["thinking"])
 	}
 }
+
+func TestCodexClientModelsResponseSanitizesReasoningLevels(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-codex-client-reasoning-levels"
+	reg.RegisterClient(
+		clientID, "openai", []*registry.ModelInfo{
+			{
+				ID:            "custom-codex-model",
+				DisplayName:   "Custom Codex Model",
+				Description:   "Custom model from registry",
+				ContextLength: 123456,
+				Thinking: &registry.ThinkingSupport{
+					Levels: []string{
+						"none", "minimal", "low", "medium", "unsupported", "high", "xhigh",
+					},
+				},
+			},
+		},
+	)
+	defer reg.UnregisterClient(clientID)
+
+	resp := CodexClientModelsResponse([]map[string]any{{"id": "custom-codex-model"}})
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 1 {
+		t.Fatalf("models = %#v, want one model", resp["models"])
+	}
+
+	model := models[0]
+	if got := model["default_reasoning_level"]; got != "medium" {
+		t.Fatalf("default_reasoning_level = %v, want medium", got)
+	}
+	assertCodexSupportedReasoningLevels(t, model, []string{"none", "low", "medium", "high", "xhigh"})
+}
+
+func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, want []string) {
+	t.Helper()
+
+	rawLevels, ok := model["supported_reasoning_levels"].([]any)
+	if !ok {
+		t.Fatalf("supported_reasoning_levels = %#v, want array", model["supported_reasoning_levels"])
+	}
+	if len(rawLevels) != len(want) {
+		t.Fatalf("supported_reasoning_levels length = %d, want %d: %#v", len(rawLevels), len(want), rawLevels)
+	}
+	for index, rawLevel := range rawLevels {
+		levelEntry, ok := rawLevel.(map[string]any)
+		if !ok {
+			t.Fatalf("supported_reasoning_levels[%d] = %#v, want object", index, rawLevel)
+		}
+		if got, _ := levelEntry["effort"].(string); got != want[index] {
+			t.Fatalf("supported_reasoning_levels[%d].effort = %q, want %q", index, got, want[index])
+		}
+	}
+}

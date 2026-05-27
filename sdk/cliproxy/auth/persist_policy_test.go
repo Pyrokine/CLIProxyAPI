@@ -2,19 +2,21 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 )
 
 type countingStore struct {
 	saveCount atomic.Int32
+	saveErr   error
 }
 
 func (s *countingStore) List(context.Context) ([]*Auth, error) { return nil, nil }
 
 func (s *countingStore) Save(context.Context, *Auth) (string, error) {
 	s.saveCount.Add(1)
-	return "", nil
+	return "", s.saveErr
 }
 
 func (s *countingStore) Delete(context.Context, string) error { return nil }
@@ -58,5 +60,41 @@ func TestWithSkipPersist_DisablesRegisterPersistence(t *testing.T) {
 	}
 	if got := store.saveCount.Load(); got != 0 {
 		t.Fatalf("expected 0 Save calls, got %d", got)
+	}
+}
+
+func TestRegisterReturnsPersistError(t *testing.T) {
+	persistErr := errors.New("persist failed")
+	store := &countingStore{saveErr: persistErr}
+	mgr := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "antigravity",
+		Metadata: map[string]any{"type": "antigravity"},
+	}
+
+	if _, err := mgr.Register(context.Background(), auth); !errors.Is(err, persistErr) {
+		t.Fatalf("Register error = %v, want %v", err, persistErr)
+	}
+	if _, ok := mgr.GetByID(auth.ID); ok {
+		t.Fatalf("auth was registered after persist failure")
+	}
+}
+
+func TestUpdateReturnsPersistError(t *testing.T) {
+	persistErr := errors.New("persist failed")
+	store := &countingStore{saveErr: persistErr}
+	mgr := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "auth-1",
+		Provider: "antigravity",
+		Metadata: map[string]any{"type": "antigravity"},
+	}
+
+	if _, err := mgr.Update(context.Background(), auth); !errors.Is(err, persistErr) {
+		t.Fatalf("Update error = %v, want %v", err, persistErr)
+	}
+	if _, ok := mgr.GetByID(auth.ID); ok {
+		t.Fatalf("auth was updated after persist failure")
 	}
 }

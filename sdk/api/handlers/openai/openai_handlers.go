@@ -59,6 +59,10 @@ func (h *APIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in constant.OpenAI-compatible format.
 func (h *APIHandler) OpenAIModels(c *gin.Context) {
+	if _, ok := c.Request.URL.Query()["client_version"]; ok {
+		c.JSON(http.StatusOK, h.codexClientModelsResponse())
+		return
+	}
 	c.JSON(
 		http.StatusOK, gin.H{
 			"object": "list",
@@ -74,7 +78,7 @@ func (h *APIHandler) OpenAIModels(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 func (h *APIHandler) ChatCompletions(c *gin.Context) {
-	rawJSON, err := c.GetRawData()
+	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(
@@ -131,7 +135,7 @@ func shouldTreatAsResponsesFormat(rawJSON []byte) bool {
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 func (h *APIHandler) Completions(c *gin.Context) {
-	rawJSON, err := c.GetRawData()
+	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
 	if err != nil {
 		c.JSON(

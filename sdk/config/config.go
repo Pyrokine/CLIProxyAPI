@@ -13,6 +13,8 @@ type Config = internalconfig.Config
 type StreamingConfig = internalconfig.StreamingConfig
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
+type HomeConfig = internalconfig.HomeConfig
+type HomeTLSConfig = internalconfig.HomeTLSConfig
 type AmpCode = internalconfig.AmpCode
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type PayloadConfig = internalconfig.PayloadConfig
@@ -45,6 +47,12 @@ func LoadConfig(configFile string) (*Config, error) { return internalconfig.Load
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	return internalconfig.LoadConfigOptional(configFile, optional)
 }
+
+// ParseConfigBytes parses a YAML configuration payload.
+func ParseConfigBytes(data []byte) (*Config, error) { return internalconfig.ParseConfigBytes(data) }
+
+// ApplyHomeRuntimeConfig disables local entry points that Home replaces at runtime.
+func ApplyHomeRuntimeConfig(cfg *Config) { internalconfig.ApplyHomeRuntimeConfig(cfg) }
 
 // SaveConfigPreserveComments saves the configuration while preserving YAML comments.
 // noinspection GoUnusedExportedFunction

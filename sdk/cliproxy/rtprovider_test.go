@@ -7,15 +7,17 @@ import (
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-func TestRoundTripperForDirectReturnsNil(t *testing.T) {
+func TestRoundTripperForDirectReturnsTransport(t *testing.T) {
 	t.Parallel()
 
-	// "direct" has no URL scheme, so url.Parse sees it as a path-only URL.
-	// The provider returns nil because the scheme is unrecognized.
 	provider := newDefaultRoundTripperProvider()
 	rt := provider.RoundTripperFor(&coreauth.Auth{ProxyURL: "direct"})
-	if rt != nil {
-		t.Fatalf("expected nil RoundTripper for unrecognized proxy URL %q, got %T", "direct", rt)
+	transport, ok := rt.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", rt)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("expected direct transport to disable proxy function")
 	}
 }
 
