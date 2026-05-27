@@ -36,17 +36,32 @@ type GitTokenStore struct {
 	remote    string
 	username  string
 	password  string
+	branch    string
 	lastGC    time.Time
 }
 
 // NewGitTokenStore creates a token store that saves credentials to disk through the
 // TokenStorage implementation embedded in the token record.
-func NewGitTokenStore(remote, username, password string) *GitTokenStore {
+func NewGitTokenStore(remote, username, password, branch string) *GitTokenStore {
 	return &GitTokenStore{
 		remote:   remote,
 		username: username,
 		password: password,
+		branch:   normalizeGitStoreBranch(branch),
 	}
+}
+
+func normalizeGitStoreBranch(branch string) string {
+	branch = strings.TrimSpace(branch)
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	return strings.Trim(branch, "/")
+}
+
+func (s *GitTokenStore) branchRef() plumbing.ReferenceName {
+	if s == nil || s.branch == "" {
+		return ""
+	}
+	return plumbing.NewBranchReferenceName(s.branch)
 }
 
 // SetBaseDir updates the default directory used for auth JSON persistence when no explicit path is provided.
@@ -127,15 +142,34 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: create repo dir: %w", errMk)
 		}
-		if _, errClone := git.PlainClone(
-			repoDir, &git.CloneOptions{ClientOptions: clientOptions, URL: s.remote},
-		); errClone != nil {
+		branchRef := s.branchRef()
+		cloneOpts := &git.CloneOptions{ClientOptions: clientOptions, URL: s.remote}
+		if branchRef != "" {
+			cloneOpts.ReferenceName = branchRef
+			cloneOpts.SingleBranch = true
+		}
+		if _, errClone := git.PlainClone(repoDir, cloneOpts); errClone != nil {
 			if errors.Is(errClone, transport.ErrEmptyRemoteRepository) {
 				_ = os.RemoveAll(gitDir)
 				repo, errInit := git.PlainInit(repoDir, false)
 				if errInit != nil {
 					s.dirLock.Unlock()
 					return fmt.Errorf("git token store: init empty repo: %w", errInit)
+				}
+				if branchRef != "" {
+					worktree, errWorktree := repo.Worktree()
+					if errWorktree != nil {
+						s.dirLock.Unlock()
+						return fmt.Errorf("git token store: worktree: %w", errWorktree)
+					}
+					if errCheckout := worktree.Checkout(
+						&git.CheckoutOptions{
+							Branch: branchRef, Create: true,
+						},
+					); errCheckout != nil {
+						s.dirLock.Unlock()
+						return fmt.Errorf("git token store: checkout branch: %w", errCheckout)
+					}
 				}
 				if _, errRemote := repo.Remote("origin"); errRemote != nil {
 					if _, errCreate := repo.CreateRemote(
@@ -184,11 +218,25 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: worktree: %w", errWorktree)
 		}
-		if errPull := worktree.Pull(
-			&git.PullOptions{
-				ClientOptions: clientOptions, RemoteName: "origin",
-			},
-		); errPull != nil {
+		branchRef := s.branchRef()
+		if branchRef != "" {
+			if errCheckout := worktree.Checkout(&git.CheckoutOptions{Branch: branchRef}); errCheckout != nil {
+				if errCreate := worktree.Checkout(
+					&git.CheckoutOptions{
+						Branch: branchRef, Create: true,
+					},
+				); errCreate != nil {
+					s.dirLock.Unlock()
+					return fmt.Errorf("git token store: checkout branch: %w", errCreate)
+				}
+			}
+		}
+		pullOpts := &git.PullOptions{ClientOptions: clientOptions, RemoteName: "origin"}
+		if branchRef != "" {
+			pullOpts.ReferenceName = branchRef
+			pullOpts.SingleBranch = true
+		}
+		if errPull := worktree.Pull(pullOpts); errPull != nil {
 			switch {
 			case errors.Is(errPull, git.NoErrAlreadyUpToDate),
 				errors.Is(errPull, git.ErrUnstagedChanges),
@@ -622,13 +670,19 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 	); errRewrite != nil {
 		return errRewrite
 	}
-	s.maybeRunGC(repo)
-	if err = repo.Push(&git.PushOptions{ClientOptions: s.gitClientOptions(), Force: true}); err != nil {
+	pushOpts := &git.PushOptions{ClientOptions: s.gitClientOptions(), Force: true}
+	if branchRef := s.branchRef(); branchRef != "" {
+		pushOpts.RefSpecs = []config.RefSpec{
+			config.RefSpec(fmt.Sprintf("+%s:%s", branchRef.String(), branchRef.String())),
+		}
+	}
+	if err = repo.Push(pushOpts); err != nil {
 		if errors.Is(err, git.NoErrAlreadyUpToDate) {
 			return nil
 		}
 		return fmt.Errorf("git token store: push: %w", err)
 	}
+	s.maybeRunGC(repo)
 	return nil
 }
 

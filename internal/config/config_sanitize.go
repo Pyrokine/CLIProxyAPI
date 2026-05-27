@@ -130,8 +130,16 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 	cfg.OpenAICompatibility = out
 }
 
-// SanitizeCodexKeys removes Codex API key entries missing a BaseURL.
+// SanitizeCodexHeaderDefaults removes Codex API key entries missing a BaseURL.
 // It trims whitespace and preserves order for remaining entries.
+func (cfg *Config) SanitizeCodexHeaderDefaults() {
+	if cfg == nil {
+		return
+	}
+	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
+	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
 func (cfg *Config) SanitizeCodexKeys() {
 	if cfg == nil || len(cfg.CodexKey) == 0 {
 		return

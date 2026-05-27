@@ -1,8 +1,32 @@
 package util
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestMaskSensitiveHeaderValue(t *testing.T) {
+	cases := []struct {
+		key string
+		raw string
+	}{
+		{key: "Authorization", raw: "Bearer secret-token"},
+		{key: "X-Api-Key", raw: "sk-secret-value"},
+		{key: "Cookie", raw: "session=secret-cookie"},
+		{key: "Set-Cookie", raw: "session=response-secret"},
+	}
+
+	for _, tc := range cases {
+		t.Run(
+			tc.key, func(t *testing.T) {
+				got := MaskSensitiveHeaderValue(tc.key, tc.raw)
+				if got == tc.raw || strings.Contains(got, "secret") {
+					t.Fatalf("MaskSensitiveHeaderValue(%q, %q) = %q, want masked value", tc.key, tc.raw, got)
+				}
+			},
+		)
+	}
+}
 
 func TestSanitizeFunctionName(t *testing.T) {
 	tests := []struct {

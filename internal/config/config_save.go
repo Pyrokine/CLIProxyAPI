@@ -157,6 +157,6 @@ func EnsureDefaultsInFile(configFile string, cfg *Config) {
 	}
 	if err := SaveConfigPreserveComments(configFile, cfg); err != nil {
 		// Non-fatal: log the error but don't prevent startup
-		fmt.Fprintf(os.Stderr, "config: failed to ensure defaults in %s: %v\n", configFile, err)
+		_, _ = fmt.Fprintf(os.Stderr, "config: failed to ensure defaults in %s: %v\n", configFile, err)
 	}
 }

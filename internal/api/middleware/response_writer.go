@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 const requestBodyOverrideContextKey = "REQUEST_BODY_OVERRIDE"
@@ -43,6 +45,8 @@ type responseWriterWrapper struct {
 	headers             map[string][]string        // headers stores the response headers.
 	logOnErrorOnly      bool                       // logOnErrorOnly enables logging only when an error response is detected.
 	firstChunkTimestamp time.Time                  // firstChunkTimestamp captures TTFB for streaming responses.
+	firstWriteTimestamp time.Time
+	timeline            *logging.RequestTimeline
 }
 
 // newResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
@@ -59,6 +63,7 @@ func newResponseWriterWrapper(
 	w gin.ResponseWriter,
 	logger logging.RequestLogger,
 	requestInfo *requestInfo,
+	timeline *logging.RequestTimeline,
 ) *responseWriterWrapper {
 	return &responseWriterWrapper{
 		ResponseWriter: w,
@@ -66,6 +71,7 @@ func newResponseWriterWrapper(
 		logger:         logger,
 		requestInfo:    requestInfo,
 		headers:        make(map[string][]string),
+		timeline:       timeline,
 	}
 }
 
@@ -81,17 +87,24 @@ func (w *responseWriterWrapper) Write(data []byte) (int, error) {
 
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.Write(data)
+	if err == nil && n > 0 {
+		w.markFirstWrite()
+	}
 
 	// THEN: Handle logging based on response type
 	if w.isStreaming && w.chunkChannel != nil {
 		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
+			w.firstChunkTimestamp = w.firstWriteTimestamp
+			if w.firstChunkTimestamp.IsZero() {
+				w.firstChunkTimestamp = time.Now()
+			}
 		}
 		// For streaming responses: Send to async logging channel (non-blocking)
 		select {
 		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
-		default: // Channel full, skip logging to avoid blocking
+		default:
+			log.Warn("request log streaming buffer full, dropped response chunk")
 		}
 		return n, err
 	}
@@ -121,6 +134,28 @@ func (w *responseWriterWrapper) shouldBufferResponseBody() bool {
 	return status >= http.StatusBadRequest
 }
 
+func (w *responseWriterWrapper) addTimelineEvent(name string, detail string) {
+	if w.timeline == nil {
+		return
+	}
+	w.timeline.Add(name, detail)
+}
+
+func (w *responseWriterWrapper) addTimelineEventOnce(name string, detail string) {
+	if w.timeline == nil {
+		return
+	}
+	w.timeline.AddOnce(name, detail)
+}
+
+func (w *responseWriterWrapper) markFirstWrite() {
+	if !w.firstWriteTimestamp.IsZero() {
+		return
+	}
+	w.firstWriteTimestamp = time.Now()
+	w.addTimelineEventOnce("client.response.first_write", "")
+}
+
 // WriteString wraps the underlying ResponseWriter's WriteString method to capture response data.
 // Some handlers (and fmt/io helpers) write via io.StringWriter; without this override, those writes
 // bypass Write() and would be missing from request logs.
@@ -129,16 +164,23 @@ func (w *responseWriterWrapper) WriteString(data string) (int, error) {
 
 	// CRITICAL: Write to client first (zero latency)
 	n, err := w.ResponseWriter.WriteString(data)
+	if err == nil && n > 0 {
+		w.markFirstWrite()
+	}
 
 	// THEN: Capture for logging
 	if w.isStreaming && w.chunkChannel != nil {
 		// Capture TTFB on first chunk (synchronous, before async channel send)
 		if w.firstChunkTimestamp.IsZero() {
-			w.firstChunkTimestamp = time.Now()
+			w.firstChunkTimestamp = w.firstWriteTimestamp
+			if w.firstChunkTimestamp.IsZero() {
+				w.firstChunkTimestamp = time.Now()
+			}
 		}
 		select {
 		case w.chunkChannel <- []byte(data):
 		default:
+			log.Warn("request log streaming buffer full, dropped response chunk")
 		}
 		return n, err
 	}
@@ -187,6 +229,7 @@ func (w *responseWriterWrapper) WriteHeader(statusCode int) {
 
 	// Call original WriteHeader
 	w.ResponseWriter.WriteHeader(statusCode)
+	w.addTimelineEventOnce("client.response.headers", fmt.Sprintf("status=%d", statusCode))
 }
 
 // ensureHeadersCaptured is a helper function to make sure response headers are captured.
@@ -288,6 +331,9 @@ func (w *responseWriterWrapper) finalize(c *gin.Context) error {
 		return nil
 	}
 
+	w.addTimelineEvent("request.handler.done", fmt.Sprintf("status=%d", finalStatusCode))
+	w.addTimelineEvent("request.log.start", "")
+
 	if w.isStreaming && w.streamWriter != nil {
 		if w.chunkChannel != nil {
 			close(w.chunkChannel)
@@ -314,6 +360,10 @@ func (w *responseWriterWrapper) finalize(c *gin.Context) error {
 		if len(apiWebsocketTimeline) > 0 {
 			_ = w.streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline)
 		}
+		requestTimeline := requestTimelineBytes(c)
+		if len(requestTimeline) > 0 {
+			_ = w.streamWriter.WriteRequestTimeline(requestTimeline)
+		}
 		if err := w.streamWriter.Close(); err != nil {
 			w.streamWriter = nil
 			return err
@@ -325,7 +375,8 @@ func (w *responseWriterWrapper) finalize(c *gin.Context) error {
 	return w.logRequest(
 		w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c),
 		w.extractWebsocketTimeline(c), w.extractAPIRequest(c), w.extractAPIResponse(c),
-		w.extractAPIWebsocketTimeline(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog,
+		w.extractAPIWebsocketTimeline(c), requestTimelineBytes(c), w.extractAPIResponseTimestamp(c),
+		slicesAPIResponseError, forceLog,
 	)
 }
 
@@ -440,7 +491,7 @@ func (w *responseWriterWrapper) logRequest(
 	headers map[string][]string,
 	body []byte,
 	websocketTimeline []byte,
-	apiRequestBody, apiResponseBody, apiWebsocketTimeline []byte,
+	apiRequestBody, apiResponseBody, apiWebsocketTimeline, requestTimeline []byte,
 	apiResponseTimestamp time.Time,
 	apiResponseErrors []*interfaces.ErrorMessage,
 	forceLog bool,
@@ -449,14 +500,15 @@ func (w *responseWriterWrapper) logRequest(
 		return nil
 	}
 
-	if loggerWithOptions, ok := w.logger.(interface {
-		LogRequestWithOptions(
+	if loggerWithTimeline, ok := w.logger.(interface {
+		LogRequestWithOptionsAndTimeline(
 			string,
 			string,
 			map[string][]string,
 			[]byte,
 			int,
 			map[string][]string,
+			[]byte,
 			[]byte,
 			[]byte,
 			[]byte,
@@ -469,7 +521,7 @@ func (w *responseWriterWrapper) logRequest(
 			time.Time,
 		) error
 	}); ok {
-		return loggerWithOptions.LogRequestWithOptions(
+		return loggerWithTimeline.LogRequestWithOptionsAndTimeline(
 			w.requestInfo.URL,
 			w.requestInfo.Method,
 			w.requestInfo.Headers,
@@ -481,6 +533,7 @@ func (w *responseWriterWrapper) logRequest(
 			apiRequestBody,
 			apiResponseBody,
 			apiWebsocketTimeline,
+			requestTimeline,
 			apiResponseErrors,
 			forceLog,
 			w.requestInfo.RequestID,

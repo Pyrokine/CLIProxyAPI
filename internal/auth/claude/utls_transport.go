@@ -4,11 +4,11 @@ package claude
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	tls "github.com/refraction-networking/utls"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
@@ -32,16 +32,11 @@ type utlsRoundTripper struct {
 func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if cfg != nil && cfg.ProxyURL != "" {
-		proxyURL, err := url.Parse(cfg.ProxyURL)
-		if err != nil {
-			log.Errorf("failed to parse proxy URL %q: %v", cfg.ProxyURL, err)
-		} else {
-			pDialer, err := proxy.FromURL(proxyURL, proxy.Direct)
-			if err != nil {
-				log.Errorf("failed to create proxy dialer for %q: %v", cfg.ProxyURL, err)
-			} else {
-				dialer = pDialer
-			}
+		pDialer, _, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
+		if errBuild != nil {
+			log.Errorf("failed to create proxy dialer for %q: %v", cfg.ProxyURL, errBuild)
+		} else if pDialer != nil {
+			dialer = pDialer
 		}
 	}
 

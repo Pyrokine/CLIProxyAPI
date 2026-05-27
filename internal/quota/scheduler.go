@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-07
-// Author: pyro
-
 package quota
 
 import (
@@ -311,8 +308,8 @@ func (s *Scheduler) executeRefresh(entry *Entry) {
 		if backoff > maxInterval {
 			backoff = maxInterval
 		}
-		next := now.Add(backoff)
-		entry.NextRefresh = &next
+		entry.NextRefresh = new(time.Time)
+		*entry.NextRefresh = now.Add(backoff)
 		log.Warnf(
 			"quota: refresh failed for %s [%s]: %v (next retry in %v)",
 			entry.FileName, status, err, backoff,
@@ -322,14 +319,14 @@ func (s *Scheduler) executeRefresh(entry *Entry) {
 		entry.Error = ""
 		entry.FailureCount = 0
 		entry.Data = data
-		next := now.Add(time.Duration(s.cfg.Interval) * time.Second)
-		entry.NextRefresh = &next
+		entry.NextRefresh = new(time.Time)
+		*entry.NextRefresh = now.Add(time.Duration(s.cfg.Interval) * time.Second)
 	}
 }
 
 // classifyError determines the error status and backoff multiplier from the error message.
 // Returns (status, backoffMultiplier) where multiplier scales the base exponential backoff.
-func classifyError(errMsg string) (QuotaStatus, int) {
+func classifyError(errMsg string) (Status, int) {
 	if strings.Contains(errMsg, "status 429") || strings.Contains(errMsg, "status 403") {
 		return StatusBanned, 4
 	}
@@ -360,17 +357,18 @@ func (s *Scheduler) buildHeap() entryHeap {
 // entryHeap implements heap.Interface for Entry pointers, ordered by NextRefresh.
 type entryHeap []*Entry
 
-func (h entryHeap) Len() int { return len(h) }
-func (h entryHeap) Less(i, j int) bool {
-	if h[i].NextRefresh == nil {
+func (h *entryHeap) Len() int { return len(*h) }
+func (h *entryHeap) Less(i, j int) bool {
+	entries := *h
+	if entries[i].NextRefresh == nil {
 		return false
 	}
-	if h[j].NextRefresh == nil {
+	if entries[j].NextRefresh == nil {
 		return true
 	}
-	return h[i].NextRefresh.Before(*h[j].NextRefresh)
+	return entries[i].NextRefresh.Before(*entries[j].NextRefresh)
 }
-func (h entryHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *entryHeap) Swap(i, j int) { (*h)[i], (*h)[j] = (*h)[j], (*h)[i] }
 
 func (h *entryHeap) Push(x interface{}) {
 	*h = append(*h, x.(*Entry))

@@ -14,6 +14,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
@@ -51,8 +52,10 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
+		initRequestTimeline(c, requestInfo.Timestamp)
+
 		// Create response writer wrapper
-		wrapper := newResponseWriterWrapper(c.Writer, logger, requestInfo)
+		wrapper := newResponseWriterWrapper(c.Writer, logger, requestInfo, requestTimeline(c))
 		if !loggerEnabled {
 			wrapper.logOnErrorOnly = true
 		}
@@ -63,8 +66,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 
 		// Finalize logging after request processing
 		if err = wrapper.finalize(c); err != nil {
-			// Log error but don't interrupt the response
-			// In a real implementation, you might want to use a proper logger here
+			log.WithError(err).Warn("failed to write request log")
 		}
 	}
 }

@@ -17,17 +17,17 @@ const (
 	TypeKimi        CredentialType = "kimi"
 )
 
-// QuotaStatus represents the current state of a credential's quota.
-type QuotaStatus string
+// Status represents the current state of a credential's quota.
+type Status string
 
 // Entry status values.
 const (
-	StatusIdle          QuotaStatus = "idle"
-	StatusLoading       QuotaStatus = "loading"
-	StatusSuccess       QuotaStatus = "success"
-	StatusError         QuotaStatus = "error"
-	StatusBanned        QuotaStatus = "banned"
-	StatusQuotaExceeded QuotaStatus = "quota_exceeded"
+	StatusIdle          Status = "idle"
+	StatusLoading       Status = "loading"
+	StatusSuccess       Status = "success"
+	StatusError         Status = "error"
+	StatusBanned        Status = "banned"
+	StatusQuotaExceeded Status = "quota_exceeded"
 )
 
 // Entry holds the cached quota state for a single credential.
@@ -36,7 +36,7 @@ type Entry struct {
 	FileName     string          `json:"file_name"`
 	Type         CredentialType  `json:"type"`
 	AuthIndex    string          `json:"auth_index,omitempty"` // credential identifier for api-call proxy
-	Status       QuotaStatus     `json:"status"`
+	Status       Status          `json:"status"`
 	LastRefresh  *time.Time      `json:"last_refresh"`
 	NextRefresh  *time.Time      `json:"next_refresh"`
 	Error        string          `json:"error,omitempty"`

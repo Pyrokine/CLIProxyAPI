@@ -22,6 +22,9 @@ type Config struct {
 	// TLS config controls HTTPS server settings.
 	TLS TLSConfig `yaml:"tls" json:"tls"`
 
+	// Home config is runtime-only and is populated from -home-jwt.
+	Home HomeConfig `yaml:"-" json:"-"`
+
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
 
@@ -51,6 +54,10 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// RedisUsageQueueRetentionSeconds controls how long usage queue items are retained in memory.
+	// Default: 60. Max: 3600.
+	RedisUsageQueueRetentionSeconds int `yaml:"redis-usage-queue-retention-seconds" json:"redis-usage-queue-retention-seconds"`
+
 	// UsageStatisticsFile is the legacy file path for usage statistics (superseded by UsageDataDir).
 	// Retained so that YAML deserialization can detect old configs and trigger migration.
 	UsageStatisticsFile string `yaml:"usage-statistics-file" json:"usage-statistics-file"`
@@ -64,6 +71,10 @@ type Config struct {
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
+
+	// AuthAutoRefreshWorkers overrides the core auth auto-refresh concurrency.
+	// When <= 0, the default worker count is used.
+	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
 
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
@@ -95,6 +106,9 @@ type Config struct {
 
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
+
+	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
+	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
@@ -142,7 +156,14 @@ type ClaudeHeaderDefaults struct {
 	UserAgent      string `yaml:"user-agent" json:"user-agent"`
 	PackageVersion string `yaml:"package-version" json:"package-version"`
 	RuntimeVersion string `yaml:"runtime-version" json:"runtime-version"`
+	OS             string `yaml:"os" json:"os"`
+	Arch           string `yaml:"arch" json:"arch"`
 	Timeout        string `yaml:"timeout" json:"timeout"`
+}
+
+type CodexHeaderDefaults struct {
+	UserAgent    string `yaml:"user-agent" json:"user-agent"`
+	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -156,10 +177,10 @@ type TLSConfig struct {
 	// HTTPRedirectPort starts an HTTP listener on this port that redirects to HTTPS.
 	// Only effective when Enable is true. Set to 0 to disable redirect. Default: 80.
 	HTTPRedirectPort int `yaml:"http-redirect-port" json:"http-redirect-port"`
-	// RequireForAuth, when true, rejects plaintext HTTP requests to authenticated
-	// endpoints (/v0/management, /v1, /v1beta, amp routes) with 421 Misdirected Request.
-	// Loopback addresses (127.0.0.0/8, ::1) are always allowed so the panel still
-	// works on localhost when tls.enable=false. Default: false (backward compatible).
+	// RequireForAuth, when true, rejects plaintext requests to authenticated HTTP
+	// endpoints and the Redis usage-output protocol. Loopback addresses
+	// (127.0.0.0/8, ::1) are always allowed so local clients still work when
+	// tls.enable=false. Default: false (backward compatible).
 	RequireForAuth bool `yaml:"require-for-auth" json:"require-for-auth"`
 	// TrustForwardedProto controls whether the X-Forwarded-Proto header is honoured
 	// when deciding if a request is over HTTPS. Only enable this when CPA sits
@@ -202,6 +223,8 @@ type RemoteManagement struct {
 	SecretKey string `yaml:"secret-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
+	// DisableAutoUpdatePanel disables automatic management panel asset updates when true.
+	DisableAutoUpdatePanel *bool `yaml:"disable-auto-update-panel,omitempty"`
 	// AutoUpdatePanel controls whether the management panel asset is automatically updated from GitHub Releases.
 	// Defaults to true. Set to false to keep a manually deployed panel without it being overwritten.
 	AutoUpdatePanel *bool `yaml:"auto-update-panel,omitempty"`
@@ -223,6 +246,9 @@ type RemoteManagement struct {
 
 // IsAutoUpdatePanel returns whether automatic panel updates are enabled (default: true).
 func (rm RemoteManagement) IsAutoUpdatePanel() bool {
+	if rm.DisableAutoUpdatePanel != nil {
+		return !*rm.DisableAutoUpdatePanel
+	}
 	if rm.AutoUpdatePanel == nil {
 		return true
 	}
@@ -237,6 +263,9 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+
+	// AntigravityCredits enables credits-based last-resort fallback for Claude models.
+	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
 }
 
 // QuotaRefresh configures the backend quota polling scheduler for the management panel.
@@ -371,6 +400,18 @@ type PayloadModelRule struct {
 	Name string `yaml:"name" json:"name"`
 	// Protocol restricts the rule to a specific translator format (e.g., "gemini", "responses").
 	Protocol string `yaml:"protocol" json:"protocol"`
+	// Headers restricts the rule to requests whose headers match all configured wildcard patterns.
+	Headers map[string]string `yaml:"headers" json:"headers"`
+	// FromProtocol restricts the rule to a specific source protocol (e.g., "gemini", "responses").
+	FromProtocol string `yaml:"from-protocol" json:"from-protocol"`
+	// Match requires payload JSON paths to equal the configured values.
+	Match []map[string]any `yaml:"match" json:"match"`
+	// NotMatch requires payload JSON paths to not equal the configured values.
+	NotMatch []map[string]any `yaml:"not-match" json:"not-match"`
+	// Exist requires payload JSON paths to exist and not be null.
+	Exist []string `yaml:"exist" json:"exist"`
+	// NotExist requires payload JSON paths to be missing or null.
+	NotExist []string `yaml:"not-exist" json:"not-exist"`
 }
 
 // CloakConfig configures request cloaking for non-Claude-Code clients.
@@ -427,6 +468,9 @@ type ClaudeKey struct {
 
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
+
+	// ExperimentalCCHSigning enables final-body cch signing for cloaked /v1/messages requests.
+	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
 }
 
 func (k ClaudeKey) GetAPIKey() string  { return k.APIKey }
@@ -582,6 +626,9 @@ type OpenAICompatibilityModel struct {
 
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// Image marks this model as callable through /v1/images/generations and /v1/images/edits.
+	Image bool `yaml:"image,omitempty" json:"image,omitempty"`
 }
 
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }

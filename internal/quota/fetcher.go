@@ -54,7 +54,7 @@ func NewLocalAPICallFunc(port int, managementKey string) InternalAPICallFunc {
 		if err != nil {
 			return nil, fmt.Errorf("api-call request failed: %w", err)
 		}
-		defer httpResp.Body.Close()
+		defer func() { _ = httpResp.Body.Close() }()
 
 		respBody, err := io.ReadAll(io.LimitReader(httpResp.Body, 10<<20))
 		if err != nil {

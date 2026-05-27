@@ -47,6 +47,9 @@ func applyCustomHeaders(r *http.Request, headers map[string]string) {
 		if k == "" || v == "" {
 			continue
 		}
+		if strings.EqualFold(k, "Host") {
+			continue
+		}
 		r.Header.Set(k, v)
 	}
 }

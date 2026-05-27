@@ -21,14 +21,11 @@ var scopes = []string{
 const (
 	TokenEndpoint    = "https://oauth2.googleapis.com/token"
 	authEndpoint     = "https://accounts.google.com/o/oauth2/v2/auth"
-	userInfoEndpoint = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
+	userInfoEndpoint = "https://www.googleapis.com/oauth2/v2/userinfo?alt=json"
 )
 
 // Antigravity API configuration
 const (
-	aPIEndpoint    = "https://cloudcode-pa.googleapis.com"
-	aPIVersion     = "v1internal"
-	aPIUserAgent   = "google-api-nodejs-client/9.15.1"
-	aPIClient      = "google-cloud-sdk vscode_cloudshelleditor/0.1"
-	clientMetadata = `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`
+	aPIEndpoint = "https://cloudcode-pa.googleapis.com"
+	aPIVersion  = "v1internal"
 )

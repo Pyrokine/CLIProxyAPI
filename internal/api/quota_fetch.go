@@ -73,10 +73,10 @@ func fetchClaudeQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]by
 	)
 
 	result := map[string]interface{}{
-		"usage": json.RawMessage(usageResp.Body),
+		"usage": usageResp.Body,
 	}
 	if profileErr == nil && profileResp.StatusCode >= 200 && profileResp.StatusCode < 300 {
-		result["profile"] = json.RawMessage(profileResp.Body)
+		result["profile"] = profileResp.Body
 	}
 
 	return json.Marshal(result)
@@ -131,10 +131,10 @@ func fetchGeminiQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]by
 	)
 
 	result := map[string]interface{}{
-		"quota": json.RawMessage(quotaResp.Body),
+		"quota": quotaResp.Body,
 	}
 	if caErr == nil && codeAssistResp.StatusCode >= 200 && codeAssistResp.StatusCode < 300 {
-		result["codeAssist"] = json.RawMessage(codeAssistResp.Body)
+		result["codeAssist"] = codeAssistResp.Body
 	}
 	return json.Marshal(result)
 }

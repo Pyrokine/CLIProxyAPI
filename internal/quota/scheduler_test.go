@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-07
-// Author: pyro
-
 package quota
 
 import (
