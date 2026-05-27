@@ -120,6 +120,14 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			),
 		)
 	}
+	if oldCfg.QuotaExceeded.AntigravityCredits != newCfg.QuotaExceeded.AntigravityCredits {
+		changes = append(
+			changes, fmt.Sprintf(
+				"quota-exceeded.antigravity-credits: %t -> %t", oldCfg.QuotaExceeded.AntigravityCredits,
+				newCfg.QuotaExceeded.AntigravityCredits,
+			),
+		)
+	}
 
 	if oldCfg.Routing.Strategy != newCfg.Routing.Strategy {
 		changes = append(

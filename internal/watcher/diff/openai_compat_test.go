@@ -171,6 +171,33 @@ func TestOpenAICompatSignature_StableAndNormalized(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatSignature_IncludesImageFlag(t *testing.T) {
+	textSig := openAICompatSignature(
+		config.OpenAICompatibility{
+			Models: []config.OpenAICompatibilityModel{
+				{
+					Name: "gpt-image", Alias: "image",
+				},
+			},
+		},
+	)
+	imageSig := openAICompatSignature(
+		config.OpenAICompatibility{
+			Models: []config.OpenAICompatibilityModel{
+				{
+					Name: "gpt-image", Alias: "image", Image: true,
+				},
+			},
+		},
+	)
+	if textSig == "" || imageSig == "" {
+		t.Fatal("expected non-empty signatures")
+	}
+	if textSig == imageSig {
+		t.Fatalf("signature should change when image flag changes, got %s", textSig)
+	}
+}
+
 func TestCountOpenAIModelsSkipsBlanks(t *testing.T) {
 	models := []config.OpenAICompatibilityModel{
 		{Name: "m1"},

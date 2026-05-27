@@ -46,6 +46,23 @@ func TestComputeOpenAICompatModelsHash_NormalizesAndDedups(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
+	textHash := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "gpt-image", Alias: "image"}})
+	imageHash := ComputeOpenAICompatModelsHash(
+		[]config.OpenAICompatibilityModel{
+			{
+				Name: "gpt-image", Alias: "image", Image: true,
+			},
+		},
+	)
+	if textHash == "" || imageHash == "" {
+		t.Fatal("expected non-empty hashes")
+	}
+	if textHash == imageHash {
+		t.Fatalf("hash should change when image flag changes, got %s", textHash)
+	}
+}
+
 func TestComputeVertexCompatModelsHash_DifferentInputs(t *testing.T) {
 	models := []config.VertexCompatModel{{Name: "gemini-pro", Alias: "pro"}}
 	hash1 := ComputeVertexCompatModelsHash(models)

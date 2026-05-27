@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -13,10 +14,19 @@ import (
 // ComputeOpenAICompatModelsHash returns a stable hash for OpenAI-compat models.
 // Used to detect model list changes during hot reload.
 func ComputeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) string {
-	return summarizeModelPairs(
-		models,
-		func(m config.OpenAICompatibilityModel) (string, string) { return m.Name, m.Alias },
-	).hash
+	keys := normalizeModelPairs(
+		func(out func(key string)) {
+			for _, model := range models {
+				name := strings.TrimSpace(model.Name)
+				alias := strings.TrimSpace(model.Alias)
+				if name == "" && alias == "" {
+					continue
+				}
+				out(strings.ToLower(name) + "|" + strings.ToLower(alias) + "|image=" + strconv.FormatBool(model.Image))
+			}
+		},
+	)
+	return hashJoined(keys)
 }
 
 // ComputeVertexCompatModelsHash returns a stable hash for Vertex-compatible models.
