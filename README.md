@@ -76,6 +76,44 @@ The management layer now covers more than basic config editing:
 - usage statistics backed by the SQLite usage store and local model price data
 - release metadata used by the bundled management panel for version history and updates
 
+## Usage SQLite capacity
+
+CPA stores usage data in `usage-data/events.db` plus `events.db-wal` and `events.db-shm`. `/usage/db-size` reports the
+combined size.
+
+JSON import planning maps to SQLite rows as:
+
+```text
+SQLite rows = N events + H hour_bucket + D day_bucket + dimension rows
+H <= min(N, hours * models * credentials * api_keys * providers)
+D <= min(N, days  * models * credentials * api_keys * providers)
+```
+
+Use parsed request details as the upper bound for `N`, because duplicate fingerprints are ignored during import. Set
+`usage-retention.max-db-size-mb` with WAL and index headroom:
+
+```text
+max-db-size-mb >= ceil(estimated_sqlite_bytes * 1.2 / 1048576)
+```
+
+Both HTTP `/usage/import` and local legacy import reject files above 100 MiB. When `events.db + WAL + SHM` reaches
+`usage-retention.max-db-size-mb`, live usage writes and imports are refused, and `/usage/db-size` exposes warning/capped
+state. CPA does not split usage data across multiple SQLite files; the supported oversized-database behavior is warning
+plus rejection, so operators should raise the cap, trim retention, or archive externally.
+
+## Release deployment
+
+Tags named `vX.Y.Z` publish backend artifacts through `.github/workflows/release.yaml`; Docker images are published
+through `.github/workflows/docker-image.yml`.
+
+Deploy from a fast-forwarded git working copy instead of ad-hoc local files:
+
+```bash
+git pull --ff-only --tags
+git describe --tags --always
+go build -o cli-proxy-api ./cmd/server
+```
+
 ## Amp CLI Support
 
 CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use
@@ -189,7 +227,7 @@ log streaming, structured configuration editing, API key management, OAuth provi
 usage analytics, container management, and config sync with OpenCode via companion plugin - no manual YAML editing
 needed.
 
-> [!NOTE]  
+> [!NOTE]
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
 
 ## More choices
@@ -209,7 +247,7 @@ Never stop coding. Smart routing to FREE & low-cost AI models with automatic fal
 OmniRoute is an AI gateway for multi-provider LLMs: an OpenAI-compatible endpoint with smart routing, load balancing,
 retries, and fallbacks. Add policies, rate limits, caching, and observability for reliable, cost-aware inference.
 
-> [!NOTE]  
+> [!NOTE]
 > If you have developed a port of CLIProxyAPI or a project inspired by it, please open a PR to add it to this list.
 
 ## License

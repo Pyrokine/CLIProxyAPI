@@ -1,5 +1,5 @@
 # Server host/interface to bind to. Default is "127.0.0.1" for local-only access.
-# Use "" to bind all interfaces (IPv4 + IPv6) if remote access is needed.
+# Use "0.0.0.0" to bind all IPv4 interfaces if remote access is needed.
 host: "127.0.0.1"
 # Server port
 port: 8317
@@ -8,6 +8,9 @@ tls:
     enable: false
     cert: ""
     key: ""
+    # Reject plaintext requests to authenticated HTTP endpoints and Redis usage output.
+    # Loopback clients remain allowed.
+    require-for-auth: false
     # Only enable when CPA sits behind a trusted reverse proxy that terminates TLS.
     # If enabled while CPA is exposed directly, an attacker can forge X-Forwarded-Proto:
     # https and bypass require-for-auth. Default: false (only trust real TLS connections).
@@ -23,6 +26,8 @@ remote-management:
     secret-key: ""
     # Disable the bundled management control panel asset download and HTTP route when true.
     disable-control-panel: false
+    # Disable automatic management panel asset updates while keeping the panel route enabled.
+    disable-auto-update-panel: false
     # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
     panel-github-repository: "https://github.com/Pyrokine/Cli-Proxy-API-Management-Center"
     # GitHub repository for CPA backend releases.
@@ -86,10 +91,13 @@ request-retry: 3
 max-retry-credentials: 0
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
+# Number of concurrent OAuth auth refresh workers. When <= 0, the default is 16.
+# auth-auto-refresh-workers: 16
 # Quota exceeded behavior
 quota-exceeded:
     switch-project: true # Whether to automatically switch to another project when a quota is exceeded
     switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
+    antigravity-credits: false # Whether to retry Claude Antigravity requests with Google One AI credits when quota is exceeded
 # Routing strategy for selecting credentials when multiple match.
 routing:
     strategy: "round-robin" # round-robin (default), fill-first
@@ -185,14 +193,22 @@ quota-refresh:
 #       cache-user-id: true          # optional: default is false; set true to reuse cached
 #                                    # user_id per API key instead of generating a random
 #                                    # one each request
+#     experimental-cch-signing: false # optional: sign the final /v1/messages body with Claude Code cch algorithm
 
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # These are used as fallbacks when the client does not send its own headers.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.44 (external, sdk-cli)"
+#   user-agent: "claude-cli/2.1.63 (external, cli)"
 #   package-version: "0.74.0"
 #   runtime-version: "v24.3.0"
+#   os: "MacOS"
+#   arch: "arm64"
 #   timeout: "600"
+
+# Default headers for Codex OAuth requests. Update when Codex CLI releases new versions.
+# codex-header-defaults:
+#   user-agent: "codex_cli_rs/0.130.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+#   beta-features: ""
 
 # OpenAI compatibility providers
 # openai-compatibility:
@@ -208,6 +224,9 @@ quota-refresh:
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
+#       - name: "gpt-image-1"
+#         alias: "provider-image"
+#         image: true # Route this alias through /v1/images/generations and /v1/images/edits.
 
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:

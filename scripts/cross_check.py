@@ -1,38 +1,32 @@
 #!/usr/bin/env python3
 # CPA usage 数据离线交叉验证(R-552)
-#
-# 用途:在 SQLite 重构后,验证 events.db 与导出/导入的 snapshot 之间在以下维度
-# 严格一致(失败时打印差异并 exit 1):
-#   1) fingerprint(11/12 字段 SHA-1)round-trip 一致
-#   2) Totals 与 ByModel/ByCredential/ByAPIKey 守恒
-#   3) cost_micro 用当前 model-prices.json 重算后落差为 0
-#   4) hour_bucket 守恒 (events 累加 == hour_bucket sum)
-#   5) OAuth(api_key 为 NULL)行的守恒
-#
-# 用法:
-#   python3 cross_check.py --db /opt/cli-proxy-api/usage-data/events.db \
-#       --prices /opt/cli-proxy-api/model-prices.json
-#   python3 cross_check.py --db events.db --snapshot ./summary.json
-#
-# 依赖:Python 3.9+,无第三方库。
-#
-# 字段顺序与 internal/usage/sqlite.go:ComputeFingerprint 严格对齐。改动 schema
-# 请同步本脚本。
+from __future__ import annotations
+
 import argparse
+import datetime as dt
 import hashlib
 import json
 import sqlite3
 import sys
 from pathlib import Path
+from typing import Optional
 
-NS_PER_HOUR = 3600 * 1_000_000_000
-COST_MICRO_PER_USD = 1_000_000.0
+SUMMARY_FIELDS = (
+    "requests",
+    "success",
+    "failure",
+    "input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "cached_tokens",
+    "total_tokens",
+    "cost_micro",
+)
 
 
 def fingerprint(
         d: dict
 ) -> str:
-    """与 internal/usage/sqlite.go ComputeFingerprint 完全一致的 11/12 字段 SHA-1。"""
     ts = d["timestamp"]
     if not ts.endswith("Z") and "+" not in ts:
         ts = ts + "Z"
@@ -55,8 +49,7 @@ def fingerprint(
         str(int(d.get("cached_tokens", 0) or 0)),
         str(int(d.get("total_tokens", 0) or 0)),
     ]
-    payload = "|".join(fields)
-    return hashlib.sha1(payload.encode()).hexdigest()
+    return hashlib.sha1("|".join(fields).encode()).hexdigest()
 
 
 def fail(
@@ -78,10 +71,89 @@ def ok(
     print(f"OK:   {msg}")
 
 
+def ns_to_rfc3339_nano(
+        ts_ns: int
+) -> str:
+    sec, ns = divmod(int(ts_ns), 1_000_000_000)
+    base = dt.datetime.fromtimestamp(sec, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    if ns == 0:
+        return base + "Z"
+    frac = f"{ns:09d}".rstrip("0")
+    return f"{base}.{frac}Z"
+
+
+def int_value(
+        value: object
+) -> int:
+    if value is None:
+        return 0
+    return int(value)
+
+
+def totals_query(
+        table: str
+) -> str:
+    return (
+        "SELECT COALESCE(SUM(requests),0), COALESCE(SUM(success),0), COALESCE(SUM(failure),0), "
+        "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
+        "COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cached_tokens),0), "
+        f"COALESCE(SUM(total_tokens),0), COALESCE(SUM(cost_micro),0) FROM {table}"
+    )
+
+
+def fetch_totals(
+        conn: sqlite3.Connection,
+        table: str
+) -> tuple[int, ...]:
+    row = conn.execute(totals_query(table)).fetchone()
+    return tuple(int_value(value) for value in row)
+
+
+def fetch_grouped_totals(
+        conn: sqlite3.Connection,
+        table: str,
+        dimension: str
+) -> tuple[int, ...]:
+    totals = [0] * len(SUMMARY_FIELDS)
+    for row in conn.execute(totals_query(table) + f" GROUP BY {dimension}"):
+        for index, value in enumerate(row):
+            totals[index] += int_value(value)
+    return tuple(totals)
+
+
+def fetch_event_totals(
+        conn: sqlite3.Connection
+) -> tuple[int, ...]:
+    row = conn.execute(
+        """
+        SELECT COUNT(*),
+               COALESCE(SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END), 0),
+               COALESCE(SUM(CASE WHEN failed != 0 THEN 1 ELSE 0 END), 0),
+               COALESCE(SUM(input_tokens), 0),
+               COALESCE(SUM(output_tokens), 0),
+               COALESCE(SUM(reasoning_tokens), 0),
+               COALESCE(SUM(cached_tokens), 0),
+               COALESCE(SUM(total_tokens), 0),
+               COALESCE(SUM(cost_micro), 0)
+        FROM events
+        """
+    ).fetchone()
+    return tuple(int_value(value) for value in row)
+
+
+def compare_totals(
+        label: str,
+        left: tuple[int, ...],
+        right: tuple[int, ...]
+) -> None:
+    if left != right:
+        detail = ", ".join(f"{field}: {l} != {r}" for field, l, r in zip(SUMMARY_FIELDS, left, right) if l != r)
+        fail(f"{label} mismatch: {detail}")
+
+
 def check_fingerprint_roundtrip(
         conn: sqlite3.Connection
 ) -> None:
-    """每行的 fingerprint 列 = 重算 SHA-1。"""
     rows = conn.execute(
         """
         SELECT events.fingerprint,
@@ -102,12 +174,11 @@ def check_fingerprint_roundtrip(
     ).fetchall()
     mismatches = 0
     sample = []
-    import datetime as dt
 
     for row in rows:
         (fp_db, api_key, model, ts_ns, source, auth_index, provider, failed,
          it, ot, rt, ct, tt) = row
-        ts_iso = dt.datetime.fromtimestamp(ts_ns / 1e9, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        ts_iso = ns_to_rfc3339_nano(ts_ns)
         d = {
             "api_key": api_key or "",
             "model": model or "",
@@ -116,14 +187,13 @@ def check_fingerprint_roundtrip(
             "auth_index": auth_index or "",
             "provider": provider or "",
             "failed": bool(failed),
-            "input_tokens": it, "output_tokens": ot, "reasoning_tokens": rt,
-            "cached_tokens": ct, "total_tokens": tt,
+            "input_tokens": it,
+            "output_tokens": ot,
+            "reasoning_tokens": rt,
+            "cached_tokens": ct,
+            "total_tokens": tt,
         }
-        # SQLite stores fingerprint as 20-byte BLOB; hex() it via DB query if str
-        if isinstance(fp_db, bytes):
-            fp_db_hex = fp_db.hex()
-        else:
-            fp_db_hex = str(fp_db)
+        fp_db_hex = fp_db.hex() if isinstance(fp_db, bytes) else str(fp_db)
         recomputed = fingerprint(d)
         if recomputed != fp_db_hex:
             mismatches += 1
@@ -139,37 +209,29 @@ def check_fingerprint_roundtrip(
 def check_totals_conservation(
         conn: sqlite3.Connection
 ) -> None:
-    """ByModel / ByCredential / ByAPIKey 的合计应等于 Totals。"""
-    total = conn.execute("SELECT SUM(requests), SUM(total_tokens) FROM hour_bucket").fetchone()
-    if total[0] is None:
+    total = fetch_totals(conn, "hour_bucket")
+    if total[0] == 0:
         warn("hour_bucket empty, skipping conservation check")
         return
-    by_model = conn.execute("SELECT SUM(requests), SUM(total_tokens) FROM hour_bucket").fetchone()
-    if by_model != total:
-        fail(f"by_model total mismatch: {by_model} vs {total}")
-    ok(f"totals conservation: requests={total[0]} tokens={total[1]}")
+    for dimension in ("model_id", "credential_id", "api_key_id"):
+        grouped = fetch_grouped_totals(conn, "hour_bucket", dimension)
+        compare_totals(f"{dimension} conservation", grouped, total)
+    ok(f"totals conservation: requests={total[0]} tokens={total[7]} cost_micro={total[8]}")
 
 
 def check_hour_bucket_vs_events(
         conn: sqlite3.Connection
 ) -> None:
-    """hour_bucket 累加应等于 events 累加。"""
-    ev = conn.execute(
-        "SELECT COUNT(*), SUM(input_tokens+output_tokens+reasoning_tokens+cached_tokens), SUM(cost_micro) FROM events"
-    ).fetchone()
-    hb = conn.execute(
-        "SELECT SUM(requests), SUM(total_tokens), SUM(cost_micro) FROM hour_bucket"
-    ).fetchone()
-    if ev[0] != hb[0]:
-        fail(f"event count {ev[0]} != hour_bucket requests {hb[0]}")
-    ok(f"hour_bucket vs events: count={ev[0]} cost_micro events={ev[2]} bucket={hb[2]}")
+    ev = fetch_event_totals(conn)
+    hb = fetch_totals(conn, "hour_bucket")
+    compare_totals("hour_bucket vs events", hb, ev)
+    ok(f"hour_bucket vs events: count={ev[0]} tokens={ev[7]} cost_micro={ev[8]}")
 
 
 def check_cost_recompute(
         conn: sqlite3.Connection,
         prices_path: Path
 ) -> None:
-    """对每个 model 用当前 prices 重算 cost_micro,落差应为 0。"""
     if not prices_path.exists():
         warn(f"prices file missing: {prices_path}, skipping cost recompute")
         return
@@ -202,28 +264,221 @@ def check_cost_recompute(
 def check_oauth_null_conservation(
         conn: sqlite3.Connection
 ) -> None:
-    """OAuth 行(api_key_id IS NULL)在 events 与 hour_bucket 中数量应一致。"""
     ev_null = conn.execute("SELECT COUNT(*) FROM events WHERE api_key_id IS NULL").fetchone()[0]
-    hb_null = conn.execute("SELECT SUM(requests) FROM hour_bucket WHERE api_key_id IS NULL").fetchone()[0] or 0
+    hb_null = conn.execute("SELECT COALESCE(SUM(requests),0) FROM hour_bucket WHERE api_key_id IS NULL").fetchone()[0]
     if ev_null != hb_null:
         fail(f"OAuth NULL conservation: events={ev_null} hour_bucket={hb_null}")
     ok(f"OAuth NULL conservation: {ev_null}={hb_null}")
+
+
+def normalize_snapshot_payload(
+        raw: object
+) -> dict:
+    if not isinstance(raw, dict):
+        fail("snapshot root must be an object")
+    usage = raw.get("usage")
+    if isinstance(usage, dict):
+        return usage
+    return raw
+
+
+def build_snapshot_from_db(
+        conn: sqlite3.Connection
+) -> dict:
+    total = fetch_totals(conn, "hour_bucket")
+    snapshot = {
+        "total_requests": total[0],
+        "success_count": total[1],
+        "failure_count": total[2],
+        "total_tokens": total[7],
+        "apis": {},
+        "requests_by_day": {},
+        "requests_by_hour": {},
+        "tokens_by_day": {},
+        "tokens_by_hour": {},
+    }
+
+    for day, req, tokens in conn.execute(
+            """
+            SELECT strftime('%Y-%m-%d', bucket_ts_ns / 1000000000, 'unixepoch'),
+                   SUM(requests),
+                   SUM(total_tokens)
+            FROM hour_bucket
+            GROUP BY 1
+            ORDER BY 1
+            """
+    ):
+        snapshot["requests_by_day"][day] = int_value(req)
+        snapshot["tokens_by_day"][day] = int_value(tokens)
+
+    for hour, req, tokens in conn.execute(
+            """
+            SELECT strftime('%H', bucket_ts_ns / 1000000000, 'unixepoch'),
+                   SUM(requests),
+                   SUM(total_tokens)
+            FROM hour_bucket
+            GROUP BY 1
+            ORDER BY 1
+            """
+    ):
+        snapshot["requests_by_hour"][hour] = int_value(req)
+        snapshot["tokens_by_hour"][hour] = int_value(tokens)
+
+    rows = conn.execute(
+        """
+        SELECT events.ts_ns,
+               (SELECT name FROM dim_model WHERE id = events.model_id),
+               (SELECT name FROM dim_source WHERE id = events.source_id),
+               (SELECT name FROM dim_auth_index WHERE id = events.auth_index_id),
+               (SELECT name FROM dim_api_key WHERE id = events.api_key_id),
+               events.input_tokens,
+               events.output_tokens,
+               events.reasoning_tokens,
+               events.cached_tokens,
+               events.total_tokens,
+               events.failed
+        FROM events
+        ORDER BY events.ts_ns
+        """
+    ).fetchall()
+    for row in rows:
+        ts_ns, model, source, auth_index, api_key, it, ot, rt, ct, tt, failed = row
+        api_name = api_key or "unknown"
+        model_name = model or "unknown"
+        apis = snapshot["apis"]
+        api = apis.setdefault(api_name, {"total_requests": 0, "total_tokens": 0, "models": {}})
+        models = api["models"]
+        model_entry = models.setdefault(model_name, {"total_requests": 0, "total_tokens": 0, "details": []})
+        detail = {
+            "timestamp": ns_to_rfc3339_nano(ts_ns),
+            "source": source or "",
+            "auth_index": auth_index or "",
+            "tokens": {
+                "input_tokens": int_value(it),
+                "output_tokens": int_value(ot),
+                "reasoning_tokens": int_value(rt),
+                "cached_tokens": int_value(ct),
+                "total_tokens": int_value(tt),
+            },
+            "failed": bool(failed),
+        }
+        model_entry["details"].append(detail)
+        model_entry["total_requests"] += 1
+        model_entry["total_tokens"] += int_value(tt)
+        api["total_requests"] += 1
+        api["total_tokens"] += int_value(tt)
+    return snapshot
+
+
+def object_items(
+        value: object
+):
+    return value.items() if isinstance(value, dict) else ()
+
+
+def int_map(
+        value: object
+) -> dict:
+    return {str(k): int_value(v) for k, v in object_items(value)}
+
+
+def comparable_detail(
+        detail: object
+) -> dict:
+    if not isinstance(detail, dict):
+        return {}
+    tokens = detail.get("tokens") if isinstance(detail.get("tokens"), dict) else {}
+    return {
+        "timestamp": str(detail.get("timestamp", "")),
+        "source": str(detail.get("source") or ""),
+        "auth_index": str(detail.get("auth_index") or ""),
+        "tokens": {key: int_value(tokens.get(key)) for key in (
+            "input_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "cached_tokens",
+            "total_tokens",
+        )},
+        "failed": bool(detail.get("failed", False)),
+    }
+
+
+def normalize_snapshot_for_compare(
+        snapshot: dict
+) -> dict:
+    normalized = {
+        "total_requests": int_value(snapshot.get("total_requests", snapshot.get("TotalRequests"))),
+        "success_count": int_value(snapshot.get("success_count", snapshot.get("SuccessCount"))),
+        "failure_count": int_value(snapshot.get("failure_count", snapshot.get("FailureCount"))),
+        "total_tokens": int_value(snapshot.get("total_tokens", snapshot.get("TotalTokens"))),
+        "requests_by_day": int_map(snapshot.get("requests_by_day")),
+        "requests_by_hour": int_map(snapshot.get("requests_by_hour")),
+        "tokens_by_day": int_map(snapshot.get("tokens_by_day")),
+        "tokens_by_hour": int_map(snapshot.get("tokens_by_hour")),
+        "apis": {},
+    }
+    for api_name, api_value in object_items(snapshot.get("apis")):
+        if not isinstance(api_value, dict):
+            continue
+        api = {
+            "total_requests": int_value(api_value.get("total_requests")),
+            "total_tokens": int_value(api_value.get("total_tokens")),
+            "models": {},
+        }
+        for model_name, model_value in object_items(api_value.get("models")):
+            if not isinstance(model_value, dict):
+                continue
+            api["models"][str(model_name)] = {
+                "total_requests": int_value(model_value.get("total_requests")),
+                "total_tokens": int_value(model_value.get("total_tokens")),
+                "details": [comparable_detail(detail) for detail in model_value.get("details", [])],
+            }
+        normalized["apis"][str(api_name)] = api
+    return normalized
+
+
+def first_snapshot_diff(
+        left: object,
+        right: object,
+        path: str = "snapshot"
+) -> Optional[str]:
+    if type(left) is not type(right):
+        return f"{path}: type {type(left).__name__} != {type(right).__name__}"
+    if isinstance(left, dict):
+        if set(left) != set(right):
+            return f"{path}: keys {sorted(set(left) ^ set(right))} differ"
+        for key in sorted(left):
+            diff = first_snapshot_diff(left[key], right[key], f"{path}.{key}")
+            if diff:
+                return diff
+        return None
+    if isinstance(left, list):
+        if len(left) != len(right):
+            return f"{path}: len {len(left)} != {len(right)}"
+        for idx, (l_item, r_item) in enumerate(zip(left, right)):
+            diff = first_snapshot_diff(l_item, r_item, f"{path}[{idx}]")
+            if diff:
+                return diff
+        return None
+    if left != right:
+        return f"{path}: {left!r} != {right!r}"
+    return None
 
 
 def check_snapshot_alignment(
         conn: sqlite3.Connection,
         snapshot_path: Path
 ) -> None:
-    """对照导出 snapshot 的 totals 与 SQLite 的 hour_bucket 累加。"""
     if not snapshot_path.exists():
         warn(f"snapshot file missing: {snapshot_path}, skipping snapshot alignment")
         return
-    snap = json.loads(snapshot_path.read_text())
-    snap_total = snap.get("total_requests", snap.get("TotalRequests"))
-    db_total = conn.execute("SELECT SUM(requests) FROM hour_bucket").fetchone()[0] or 0
-    if snap_total is not None and snap_total != db_total:
-        fail(f"snapshot totals mismatch: snapshot={snap_total} db={db_total}")
-    ok(f"snapshot vs db totals: {snap_total}={db_total}")
+    raw = json.loads(snapshot_path.read_text())
+    snap = normalize_snapshot_for_compare(normalize_snapshot_payload(raw))
+    db_snap = normalize_snapshot_for_compare(build_snapshot_from_db(conn))
+    diff = first_snapshot_diff(snap, db_snap)
+    if diff:
+        fail(f"snapshot mismatch: {diff}")
+    ok(f"snapshot vs db: requests={snap['total_requests']} tokens={snap['total_tokens']}")
 
 
 def main() -> int:

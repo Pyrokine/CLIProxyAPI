@@ -1,5 +1,7 @@
 # Binaries
 cli-proxy-api
+/server
+/cli-proxy-api.deploy
 *.exe
 
 # Configuration
@@ -13,6 +15,8 @@ logs/*
 conv/*
 temp/*
 refs/*
+__pycache__/
+*.pyc
 
 # Storage backends
 pgstore/*
@@ -42,3 +46,4 @@ GEMINI.md
 # macOS
 .DS_Store
 ._*
+.ccg/

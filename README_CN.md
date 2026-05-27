@@ -73,6 +73,43 @@ CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-fo
 - 基于 SQLite 使用量存储与本地模型价格数据的使用统计接口
 - 供管理面板展示版本历史与更新动作使用的 release 元数据接口
 
+## SQLite 使用量容量规划
+
+CPA 使用 `usage-data/events.db`、`events.db-wal`、`events.db-shm` 保存使用量数据，`/usage/db-size` 返回三者合计大小。
+
+JSON 导入后的 SQLite 行数按下面估算：
+
+```text
+SQLite rows = N events + H hour_bucket + D day_bucket + dimension rows
+H <= min(N, hours * models * credentials * api_keys * providers)
+D <= min(N, days  * models * credentials * api_keys * providers)
+```
+
+`N` 用导入文件解析出的 request detail 数量作为上限，因为重复 fingerprint 会被忽略。配置 `usage-retention.max-db-size-mb`
+时给 WAL 和索引留 20% 余量：
+
+```text
+max-db-size-mb >= ceil(estimated_sqlite_bytes * 1.2 / 1048576)
+```
+
+HTTP `/usage/import` 和本地旧数据导入都会拒绝超过 100 MiB 的文件。当 `events.db + WAL + SHM` 达到
+`usage-retention.max-db-size-mb` 后，新的使用量写入和导入都会被拒绝，`/usage/db-size` 会返回 warning/capped 状态。CPA
+不把使用量自动拆成多个 SQLite 文件，单库过大的处理策略是告警并拒绝继续写入，运维侧需要调高上限、启用保留天数清理，或在 CPA
+外部归档。
+
+## Release 部署
+
+`vX.Y.Z` 标签会通过 `.github/workflows/release.yaml` 发布后端产物；Docker 镜像通过 `.github/workflows/docker-image.yml`
+发布。
+
+部署时从 git 工作区快进到 release，不使用临时本地产物：
+
+```bash
+git pull --ff-only --tags
+git describe --tags --always
+go build -o cli-proxy-api ./cmd/server
+```
+
 ## Amp CLI 支持
 
 CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支持，可让你使用自己的 Google/ChatGPT/Claude OAuth
@@ -173,7 +210,7 @@ Codex、Qwen Code等AI编程工具，本地代理实现多账户配额跟踪和�
 一个面向 CLIProxyAPI 的现代化 Web 管理仪表盘，基于 Next.js、React 和 PostgreSQL 构建。支持实时日志流、结构化配置编辑、API Key
 管理、Claude/Gemini/Codex 的 OAuth 提供方集成、使用量分析、容器管理，并可通过配套插件与 OpenCode 同步配置，无需手动编辑 YAML。
 
-> [!NOTE]  
+> [!NOTE]
 > 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
 
 ## 更多选择
@@ -192,7 +229,7 @@ Web 控制台，并支持 Cursor、Claude Code、Cline、RooCode 等 CLI 工具�
 OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼容 OpenAI
 的端点，具备智能路由、负载均衡、重试及回退机制。通过添加策略、速率限制、缓存和可观测性，确保推理过程既可靠又具备成本意识。
 
-> [!NOTE]  
+> [!NOTE]
 > 如果你开发了 CLIProxyAPI 的移植或衍生项目，请提交 PR 将其添加到此列表中。
 
 ## 许可证
