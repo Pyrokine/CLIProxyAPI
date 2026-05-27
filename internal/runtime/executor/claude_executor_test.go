@@ -17,6 +17,73 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+func TestSignAnthropicMessagesBodyReplacesCCHPlaceholder(t *testing.T) {
+	body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.63.abc; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := signAnthropicMessagesBody(body)
+
+	if bytes.Contains(out, []byte("cch=00000;")) {
+		t.Fatalf("expected cch placeholder to be signed, got %s", out)
+	}
+	if !gjson.GetBytes(out, "system.0.text").Exists() {
+		t.Fatalf("expected signed body to remain valid JSON, got %s", out)
+	}
+}
+
+func TestExperimentalCCHSigningEnabled(t *testing.T) {
+	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "sk-ant-api03-test", ExperimentalCCHSigning: true}}}
+	auth := &cliproxyauth.Auth{Provider: "claude", Attributes: map[string]string{"api_key": "sk-ant-api03-test"}}
+
+	if !experimentalCCHSigningEnabled(cfg, auth) {
+		t.Fatal("expected experimental cch signing to be enabled for matching Claude key")
+	}
+}
+
+func TestNewClaudeUtlsHTTPClientUsesFallbackRoundTripper(t *testing.T) {
+	client := newClaudeUtlsHTTPClient(context.Background(), &config.Config{}, nil, 0)
+
+	if _, ok := client.Transport.(*claudeFallbackRoundTripper); !ok {
+		t.Fatalf("transport = %T, want *claudeFallbackRoundTripper", client.Transport)
+	}
+}
+
+func TestCheckSystemInstructionsInjectsClaudeCodePromptAndMovesUserSystem(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"custom system"}],"messages":[{"role":"user","content":"hello"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, false, false)
+
+	if got := gjson.GetBytes(out, "system.0.text").String(); !strings.HasPrefix(got, "x-anthropic-billing-header:") {
+		t.Fatalf("system.0.text = %q, want billing header", got)
+	}
+	if got := gjson.GetBytes(
+		out, "system.1.text",
+	).String(); got != "You are Claude Code, Anthropic's official CLI for Claude." {
+		t.Fatalf("system.1.text = %q", got)
+	}
+	staticPrompt := gjson.GetBytes(out, "system.2.text").String()
+	if !strings.Contains(staticPrompt, "# System") || !strings.Contains(staticPrompt, "# Doing tasks") {
+		t.Fatalf("expected Claude Code static prompt, got %q", staticPrompt)
+	}
+	userContent := gjson.GetBytes(out, "messages.0.content").String()
+	if !strings.Contains(userContent, "custom system") || !strings.Contains(userContent, "hello") {
+		t.Fatalf("expected user system text to be prepended to first user message, got %q", userContent)
+	}
+}
+
+func TestCheckSystemInstructionsSanitizesForwardedOAuthSystemPrompt(t *testing.T) {
+	payload := []byte(`{"system":"third-party unique system prompt","messages":[{"role":"user","content":"hello"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, false, true)
+
+	userContent := gjson.GetBytes(out, "messages.0.content").String()
+	if strings.Contains(userContent, "third-party unique system prompt") {
+		t.Fatalf("expected OAuth forwarded prompt to be sanitized, got %q", userContent)
+	}
+	if !strings.Contains(userContent, "Use the available tools when needed") {
+		t.Fatalf("expected sanitized tool reminder, got %q", userContent)
+	}
+}
+
 func TestApplyClaudeToolPrefix(t *testing.T) {
 	input := []byte(
 		`{"tools":[{"name":"alpha"},{"name":"proxy_bravo"}],"tool_choice":{"type":"tool","name":"charlie"},"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"delta","id":"t1","input":{}}]}]}`,
@@ -435,6 +502,28 @@ func TestNormalizeCacheControlTTL_DowngradesLaterOneHourBlocks(t *testing.T) {
 	}
 }
 
+func TestNormalizeCacheControlTTL_PreservesKeyOrderWhenModified(t *testing.T) {
+	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral","ttl":"1h"}}]}],"tools":[{"name":"t1","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
+
+	out := normalizeCacheControlTTL(payload)
+
+	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
+		t.Fatalf("messages.0.content.0.cache_control.ttl should be removed after a default-5m block")
+	}
+
+	outStr := string(out)
+	idxModel := strings.Index(outStr, `"model"`)
+	idxMessages := strings.Index(outStr, `"messages"`)
+	idxTools := strings.Index(outStr, `"tools"`)
+	idxSystem := strings.Index(outStr, `"system"`)
+	if idxModel == -1 || idxMessages == -1 || idxTools == -1 || idxSystem == -1 {
+		t.Fatalf("failed to locate top-level keys in output: %s", outStr)
+	}
+	if !(idxModel < idxMessages && idxMessages < idxTools && idxTools < idxSystem) {
+		t.Fatalf("top-level key order changed:\noriginal: %s\ngot:      %s", payload, out)
+	}
+}
+
 func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) {
 	payload := []byte(`{
 		"tools": [
@@ -463,6 +552,31 @@ func TestEnforceCacheControlLimit_StripsNonLastToolBeforeMessages(t *testing.T) 
 		out, "messages.1.content.0.cache_control",
 	).Exists() {
 		t.Fatalf("message cache_control blocks should be preserved when non-last tool removal is enough")
+	}
+}
+
+func TestEnforceCacheControlLimit_PreservesKeyOrderWhenModified(t *testing.T) {
+	payload := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"u1","cache_control":{"type":"ephemeral"}},{"type":"text","text":"u2","cache_control":{"type":"ephemeral"}}]}],"tools":[{"name":"t1","cache_control":{"type":"ephemeral"}},{"name":"t2","cache_control":{"type":"ephemeral"}}],"system":[{"type":"text","text":"s1","cache_control":{"type":"ephemeral"}}]}`)
+
+	out := enforceCacheControlLimit(payload, 4)
+
+	if got := countCacheControls(out); got != 4 {
+		t.Fatalf("cache_control count = %d, want 4", got)
+	}
+	if gjson.GetBytes(out, "tools.0.cache_control").Exists() {
+		t.Fatalf("tools.0.cache_control should be removed first (non-last tool)")
+	}
+
+	outStr := string(out)
+	idxModel := strings.Index(outStr, `"model"`)
+	idxMessages := strings.Index(outStr, `"messages"`)
+	idxTools := strings.Index(outStr, `"tools"`)
+	idxSystem := strings.Index(outStr, `"system"`)
+	if idxModel == -1 || idxMessages == -1 || idxTools == -1 || idxSystem == -1 {
+		t.Fatalf("failed to locate top-level keys in output: %s", outStr)
+	}
+	if !(idxModel < idxMessages && idxMessages < idxTools && idxTools < idxSystem) {
+		t.Fatalf("top-level key order changed:\noriginal: %s\ngot:      %s", payload, out)
 	}
 }
 

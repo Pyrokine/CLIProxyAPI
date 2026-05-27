@@ -7,10 +7,12 @@ package claude
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -47,6 +49,9 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				if systemPromptResult.Get("type").String() == "text" {
 					textResult := systemPromptResult.Get("text")
 					if textResult.Type == gjson.String {
+						if util.IsClaudeCodeAttributionSystemText(textResult.String()) {
+							return true
+						}
 						part := []byte(`{"text":""}`)
 						part, _ = sjson.SetBytes(part, "text", textResult.String())
 						systemInstruction, _ = sjson.SetRawBytes(systemInstruction, "parts.-1", part)
@@ -59,7 +64,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 		if hasSystemParts {
 			out, _ = sjson.SetRawBytes(out, "system_instruction", systemInstruction)
 		}
-	} else if systemResult.Type == gjson.String {
+	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
 		out, _ = sjson.SetBytes(out, "system_instruction.parts.-1.text", systemResult.String())
 	}
 
@@ -85,8 +90,12 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 						func(_, contentResult gjson.Result) bool {
 							switch contentResult.Get("type").String() {
 							case "text":
+								text := contentResult.Get("text").String()
+								if text == "" {
+									return true
+								}
 								part := []byte(`{"text":""}`)
-								part, _ = sjson.SetBytes(part, "text", contentResult.Get("text").String())
+								part, _ = sjson.SetBytes(part, "text", text)
 								contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
 							case "tool_use":
@@ -149,6 +158,29 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				return true
 			},
 		)
+	}
+
+	contents := gjson.GetBytes(out, "contents")
+	if contents.Exists() && contents.IsArray() {
+		arr := contents.Array()
+		if len(arr) > 0 {
+			last := arr[len(arr)-1]
+			if last.Get("role").String() == "model" {
+				hasFunctionCall := false
+				last.Get("parts").ForEach(
+					func(_, part gjson.Result) bool {
+						if part.Get("functionCall").Exists() {
+							hasFunctionCall = true
+							return false
+						}
+						return true
+					},
+				)
+				if hasFunctionCall {
+					out, _ = sjson.DeleteBytes(out, fmt.Sprintf("contents.%d", len(arr)-1))
+				}
+			}
+		}
 	}
 
 	// tools

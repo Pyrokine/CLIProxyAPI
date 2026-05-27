@@ -13,9 +13,6 @@ import (
 func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
 
-	// "direct" is not a valid proxy URL scheme (no "://"), so buildProxyTransport
-	// returns nil and the client falls through to context RoundTripper (also nil).
-	// The result is a client with no transport, effectively bypassing any proxy.
 	client := newProxyAwareHTTPClient(
 		context.Background(),
 		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
@@ -23,8 +20,12 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 		0,
 	)
 
-	if client.Transport != nil {
-		t.Fatalf("expected nil transport for unrecognized proxy URL %q, got %T", "direct", client.Transport)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("direct transport must disable proxy function")
 	}
 }
 

@@ -16,6 +16,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"claude":      nil,
 	"openai":      nil,
 	"codex":       nil,
+	"xai":         nil,
 	"iflow":       nil,
 	"antigravity": nil,
 	"kimi":        nil,
@@ -354,7 +355,7 @@ func extractConfig(body []byte, provider string) Config {
 		return extractGeminiConfig(body, provider)
 	case "openai":
 		return extractOpenAIConfig(body)
-	case "codex":
+	case "codex", "xai":
 		return extractCodexConfig(body)
 	case "iflow":
 		config := extractIFlowConfig(body)
@@ -372,6 +373,52 @@ func extractConfig(body []byte, provider string) Config {
 
 func hasConfig(config Config) bool {
 	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != ""
+}
+
+// ExtractReasoningEffort returns the request's thinking setting as a canonical reasoning_effort label.
+func ExtractReasoningEffort(body []byte, provider, model string) string {
+	if effort := reasoningEffortFromSuffix(ParseSuffix(model)); effort != "" {
+		return effort
+	}
+
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	config := extractConfig(body, provider)
+	if !hasConfig(config) {
+		switch provider {
+		case "openai", "openai-response":
+			config = extractCodexConfig(body)
+		}
+	}
+	return reasoningEffortFromConfig(config)
+}
+
+func reasoningEffortFromSuffix(suffix SuffixResult) string {
+	if !suffix.HasSuffix {
+		return ""
+	}
+	return reasoningEffortFromConfig(parseSuffixToConfig(suffix.RawSuffix, "", suffix.ModelName))
+}
+
+func reasoningEffortFromConfig(config Config) string {
+	if !hasConfig(config) {
+		return ""
+	}
+	switch config.Mode {
+	case ModeNone:
+		return string(LevelNone)
+	case ModeAuto:
+		return string(LevelAuto)
+	case ModeLevel:
+		return strings.ToLower(strings.TrimSpace(string(config.Level)))
+	case ModeBudget:
+		level, ok := ConvertBudgetToLevel(config.Budget)
+		if !ok {
+			return ""
+		}
+		return level
+	default:
+		return ""
+	}
 }
 
 // extractClaudeConfig extracts thinking configuration from Claude format request body.

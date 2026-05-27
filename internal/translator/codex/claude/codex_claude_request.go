@@ -6,11 +6,15 @@
 package claude
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -48,7 +52,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		contentIndex := 0
 
 		appendSystemText := func(text string) {
-			if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header: ") {
+			if text == "" || util.IsClaudeCodeAttributionSystemText(text) {
 				return
 			}
 
@@ -120,6 +124,22 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				hasContent = true
 			}
 
+			appendReasoningContent := func(part gjson.Result) {
+				if messageRole != "assistant" {
+					return
+				}
+
+				signature := part.Get("signature").String()
+				if !isFernetLikeReasoningSignature(signature) {
+					return
+				}
+
+				flushMessage()
+				reasoningItem := []byte(`{"type":"reasoning","summary":[],"content":null}`)
+				reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", signature)
+				template, _ = sjson.SetRawBytes(template, "input.-1", reasoningItem)
+			}
+
 			messageContentsResult := messageResult.Get("content")
 			if messageContentsResult.IsArray() {
 				messageContentResults := messageContentsResult.Array()
@@ -130,6 +150,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					switch contentType {
 					case "text":
 						appendTextContent(messageContentResult.Get("text").String())
+					case "thinking":
+						appendReasoningContent(messageContentResult)
 					case "image":
 						sourceResult := messageContentResult.Get("source")
 						if sourceResult.Exists() {
@@ -153,7 +175,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						flushMessage()
 						functionCallMessage := []byte(`{"type":"function_call"}`)
 						functionCallMessage, _ = sjson.SetBytes(
-							functionCallMessage, "call_id", messageContentResult.Get("id").String(),
+							functionCallMessage, "call_id",
+							shortenCodexCallIDIfNeeded(messageContentResult.Get("id").String()),
 						)
 						{
 							name := messageContentResult.Get("name").String()
@@ -173,7 +196,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 						flushMessage()
 						functionCallOutputMessage := []byte(`{"type":"function_call_output"}`)
 						functionCallOutputMessage, _ = sjson.SetBytes(
-							functionCallOutputMessage, "call_id", messageContentResult.Get("tool_use_id").String(),
+							functionCallOutputMessage, "call_id",
+							shortenCodexCallIDIfNeeded(messageContentResult.Get("tool_use_id").String()),
 						)
 
 						contentResult := messageContentResult.Get("content")
@@ -341,6 +365,52 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	template, _ = sjson.SetBytes(template, "include", []string{"reasoning.encrypted_content"})
 
 	return template
+}
+
+func isFernetLikeReasoningSignature(signature string) bool {
+	const (
+		fernetVersionLen = 1
+		fernetTimestamp  = 8
+		fernetIV         = 16
+		fernetHMAC       = 32
+		aesBlockSize     = 16
+	)
+
+	signature = strings.TrimSpace(signature)
+	if !strings.HasPrefix(signature, "gAAAA") {
+		return false
+	}
+
+	decoded, err := base64.URLEncoding.DecodeString(signature)
+	if err != nil {
+		decoded, err = base64.RawURLEncoding.DecodeString(signature)
+		if err != nil {
+			return false
+		}
+	}
+
+	minLen := fernetVersionLen + fernetTimestamp + fernetIV + aesBlockSize + fernetHMAC
+	if len(decoded) < minLen || decoded[0] != 0x80 {
+		return false
+	}
+
+	ciphertextLen := len(decoded) - fernetVersionLen - fernetTimestamp - fernetIV - fernetHMAC
+	return ciphertextLen > 0 && ciphertextLen%aesBlockSize == 0
+}
+
+func shortenCodexCallIDIfNeeded(id string) string {
+	const limit = 64
+	if len(id) <= limit {
+		return id
+	}
+
+	sum := sha256.Sum256([]byte(id))
+	suffix := "_" + hex.EncodeToString(sum[:8])
+	prefixLen := limit - len(suffix)
+	if prefixLen <= 0 {
+		return suffix[len(suffix)-limit:]
+	}
+	return id[:prefixLen] + suffix
 }
 
 // shortenNameIfNeeded applies a simple shortening rule for a single name.

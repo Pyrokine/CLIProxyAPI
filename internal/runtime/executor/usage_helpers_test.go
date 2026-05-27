@@ -1,8 +1,62 @@
 package executor
 
 import (
+	"context"
+	"net/http"
 	"testing"
+	"time"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
+
+type captureUsagePlugin struct {
+	records chan usage.Record
+}
+
+func (p *captureUsagePlugin) HandleUsage(_ context.Context, record usage.Record) {
+	select {
+	case p.records <- record:
+	default:
+	}
+}
+
+func TestUsageReporterAttachesResponseHeaders(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+	usage.RegisterPlugin(plugin)
+
+	reporter := &usageReporter{provider: "openai", model: "gpt-test"}
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	logging.SetResponseHeaders(ctx, http.Header{"X-Request-Id": []string{"req-1"}})
+	reporter.publishRecord(ctx, usage.Record{Detail: usage.Detail{TotalTokens: 1}})
+
+	select {
+	case got := <-plugin.records:
+		if header := got.ResponseHeaders.Get("X-Request-Id"); header != "req-1" {
+			t.Fatalf("published X-Request-Id = %q, want req-1", header)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+}
+
+func TestUsageReporterIncludesReasoningEffort(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+	usage.RegisterPlugin(plugin)
+
+	ctx := usage.WithReasoningEffort(context.Background(), "medium")
+	reporter := newUsageReporter(ctx, "openai", "gpt-5.4", nil)
+	reporter.publish(ctx, usage.Detail{TotalTokens: 1})
+
+	select {
+	case got := <-plugin.records:
+		if got.ReasoningEffort != "medium" {
+			t.Fatalf("reasoning effort = %q, want %q", got.ReasoningEffort, "medium")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+}
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
 	data := []byte(

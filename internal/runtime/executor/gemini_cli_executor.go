@@ -403,7 +403,9 @@ func (e *GeminiCLIExecutor) ExecuteStream(
 							respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, bytes.Clone(line), &param,
 						)
 						for i := range segments {
-							out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}
+							if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: segments[i]}) {
+								return
+							}
 						}
 					}
 				}
@@ -412,12 +414,14 @@ func (e *GeminiCLIExecutor) ExecuteStream(
 					respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, []byte("[DONE]"), &param,
 				)
 				for i := range segments {
-					out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}
+					if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: segments[i]}) {
+						return
+					}
 				}
 				if errScan := scanner.Err(); errScan != nil {
 					recordAPIResponseError(ctx, e.cfg, errScan)
 					reporter.publishFailure(ctx)
-					out <- cliproxyexecutor.StreamChunk{Err: errScan}
+					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 				}
 				return
 			}
@@ -426,7 +430,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(
 			if errRead != nil {
 				recordAPIResponseError(ctx, e.cfg, errRead)
 				reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: errRead}
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errRead})
 				return
 			}
 			appendAPIResponseChunk(ctx, e.cfg, data)
@@ -436,14 +440,18 @@ func (e *GeminiCLIExecutor) ExecuteStream(
 				respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, data, &param,
 			)
 			for i := range segments {
-				out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: segments[i]}) {
+					return
+				}
 			}
 
 			segments = sdktranslator.TranslateStream(
 				respCtx, to, from, attemptModel, opts.OriginalRequest, reqBody, []byte("[DONE]"), &param,
 			)
 			for i := range segments {
-				out <- cliproxyexecutor.StreamChunk{Payload: segments[i]}
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: segments[i]}) {
+					return
+				}
 			}
 		}(httpResp, append([]byte(nil), payload...), attemptModel)
 
@@ -558,7 +566,10 @@ func (e *GeminiCLIExecutor) CountTokens(
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini CLI).
-func (e *GeminiCLIExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+func (e *GeminiCLIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if refreshed, handled, err := refreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	return auth, nil
 }
 
@@ -577,6 +588,33 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 	ctxToken := ctx
 	if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
 		ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
+	}
+
+	if cfg != nil && cfg.Home.Enabled {
+		now := time.Now()
+		if token.AccessToken == "" || (!token.Expiry.IsZero() && token.Expiry.Before(now.Add(30*time.Second))) {
+			refreshed, handled, errRefresh := refreshAuthViaHome(ctx, cfg, auth)
+			if handled {
+				if errRefresh != nil {
+					return nil, nil, errRefresh
+				}
+				auth = refreshed
+				metadata = geminiOAuthMetadata(auth)
+				if metadata == nil {
+					return nil, nil, fmt.Errorf("gemini-cli auth metadata missing")
+				}
+				base, token, conf = geminiauth.TokenAndConfigFromMetadata(metadata)
+				ctxToken = ctx
+				if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
+					ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
+				}
+			}
+		}
+		if token.AccessToken == "" {
+			return nil, nil, fmt.Errorf("gemini-cli access token missing")
+		}
+		updateGeminiCLITokenMetadata(auth, base, token)
+		return oauth2.StaticTokenSource(token), base, nil
 	}
 
 	src := conf.TokenSource(ctxToken, token)

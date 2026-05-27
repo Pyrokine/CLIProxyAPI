@@ -267,7 +267,9 @@ func (e *AIStudioExecutor) ExecuteStream(
 			if event.Err != nil {
 				recordAPIResponseError(ctx, e.cfg, event.Err)
 				p.reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}) {
+					return false
+				}
 				return false
 			}
 			switch event.Type {
@@ -289,7 +291,11 @@ func (e *AIStudioExecutor) ExecuteStream(
 						&param,
 					)
 					for i := range lines {
-						out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}
+						if !sendStreamChunk(
+							ctx, out, cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])},
+						) {
+							return false
+						}
 					}
 					break
 				}
@@ -308,14 +314,20 @@ func (e *AIStudioExecutor) ExecuteStream(
 					event.Payload, &param,
 				)
 				for i := range lines {
-					out <- cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])}
+					if !sendStreamChunk(
+						ctx, out, cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])},
+					) {
+						return false
+					}
 				}
 				p.reporter.publish(ctx, parseGeminiUsage(event.Payload))
 				return false
 			case wsrelay.MessageTypeError:
 				recordAPIResponseError(ctx, e.cfg, event.Err)
 				p.reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}) {
+					return false
+				}
 				return false
 			}
 			return true
@@ -382,7 +394,10 @@ func (e *AIStudioExecutor) CountTokens(
 }
 
 // Refresh refreshes the authentication credentials (no-op for AI Studio).
-func (e *AIStudioExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+func (e *AIStudioExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if refreshed, handled, err := refreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	return auth, nil
 }
 

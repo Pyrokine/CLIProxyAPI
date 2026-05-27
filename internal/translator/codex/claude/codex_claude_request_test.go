@@ -96,6 +96,57 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToCodex_AssistantThinkingSignatureBecomesReasoningInput(t *testing.T) {
+	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw"
+	inputJSON := `{
+		"model": "gpt-5.5",
+		"messages": [{
+			"role": "assistant",
+			"content": [
+				{"type": "thinking", "thinking": "previous reasoning", "signature": "` + signature + `"},
+				{"type": "text", "text": "answer"}
+			]
+		}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.5", []byte(inputJSON), false)
+	items := gjson.GetBytes(result, "input").Array()
+	if len(items) != 2 {
+		t.Fatalf("got %d input items, want 2: %s", len(items), result)
+	}
+	if got := items[0].Get("type").String(); got != "reasoning" {
+		t.Fatalf("input[0].type = %q, want reasoning: %s", got, result)
+	}
+	if got := items[0].Get("encrypted_content").String(); got != signature {
+		t.Fatalf("encrypted_content = %q, want %q: %s", got, signature, result)
+	}
+	if got := items[1].Get("content.0.type").String(); got != "output_text" {
+		t.Fatalf("assistant text type = %q, want output_text: %s", got, result)
+	}
+}
+
+func TestConvertClaudeRequestToCodex_DropsInvalidThinkingSignature(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-5.5",
+		"messages": [{
+			"role": "assistant",
+			"content": [
+				{"type": "thinking", "thinking": "bad reasoning", "signature": ""},
+				{"type": "text", "text": "answer"}
+			]
+		}]
+	}`
+
+	result := ConvertClaudeRequestToCodex("gpt-5.5", []byte(inputJSON), false)
+	items := gjson.GetBytes(result, "input").Array()
+	if len(items) != 1 {
+		t.Fatalf("got %d input items, want 1: %s", len(items), result)
+	}
+	if got := items[0].Get("type").String(); got == "reasoning" {
+		t.Fatalf("invalid thinking signature produced reasoning input: %s", result)
+	}
+}
+
 func TestConvertClaudeRequestToCodex_ParallelToolCalls(t *testing.T) {
 	tests := []struct {
 		name                  string

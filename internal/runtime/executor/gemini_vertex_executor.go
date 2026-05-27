@@ -228,6 +228,7 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = stripVertexOpenAIResponsesToolCallIDs(body, from.String())
 
 	return &vertexGeminiBody{from: from, to: to, body: body}, nil
 }
@@ -355,7 +356,10 @@ func (e *GeminiVertexExecutor) CountTokens(
 }
 
 // Refresh refreshes the authentication credentials (no-op for Vertex).
-func (e *GeminiVertexExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+func (e *GeminiVertexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if refreshed, handled, err := refreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	return auth, nil
 }
 
@@ -718,19 +722,23 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
 			for i := range lines {
-				out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
+					return
+				}
 			}
 		}
 		lines := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
 		for i := range lines {
-			out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
+			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
+				return
+			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -759,6 +767,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
+	translatedReq = stripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
 	respCtx := util.WithAlt(ctx, opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
@@ -839,6 +848,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
+	translatedReq = stripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
 	respCtx := util.WithAlt(ctx, opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")

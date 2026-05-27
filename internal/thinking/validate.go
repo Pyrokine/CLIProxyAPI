@@ -369,7 +369,7 @@ func isBudgetCapableProvider(provider string) bool {
 
 func isLevelBasedProvider(provider string) bool {
 	switch provider {
-	case "openai", "openai-response", "codex":
+	case "openai", "openai-response", "codex", "xai":
 		return true
 	default:
 		return false

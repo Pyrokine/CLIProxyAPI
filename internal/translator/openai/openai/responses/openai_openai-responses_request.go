@@ -57,102 +57,129 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Convert input array to messages
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
-		input.ForEach(
-			func(_, item gjson.Result) bool {
-				itemType := item.Get("type").String()
-				if itemType == "" && item.Get("role").String() != "" {
-					itemType = "message"
-				}
+		var pendingToolCalls [][]byte
+		pendingToolCallIDs := map[string]struct{}{}
+		pendingToolOutputIDs := map[string]struct{}{}
+		var deferredMessages [][]byte
 
-				switch itemType {
-				case "message", "":
-					// Handle regular message conversion
-					role := item.Get("role").String()
-					if role == "developer" {
-						role = "user"
-					}
-					message := []byte(`{"role":"","content":[]}`)
-					message, _ = sjson.SetBytes(message, "role", role)
+		emitPendingToolCalls := func() {
+			if len(pendingToolCalls) == 0 {
+				return
+			}
+			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
+			for i := range pendingToolCalls {
+				assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.-1", pendingToolCalls[i])
+			}
+			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
+			pendingToolCalls = nil
+		}
 
-					if content := item.Get("content"); content.Exists() && content.IsArray() {
-						var messageContent string
-						var toolCalls []interface{}
+		emitDeferredMessages := func() {
+			for i := range deferredMessages {
+				out, _ = sjson.SetRawBytes(out, "messages.-1", deferredMessages[i])
+			}
+			deferredMessages = nil
+			pendingToolCallIDs = map[string]struct{}{}
+			pendingToolOutputIDs = map[string]struct{}{}
+		}
 
-						content.ForEach(
-							func(_, contentItem gjson.Result) bool {
-								contentType := contentItem.Get("type").String()
-								if contentType == "" {
-									contentType = "input_text"
-								}
-
-								switch contentType {
-								case "input_text", "output_text":
-									text := contentItem.Get("text").String()
-									contentPart := []byte(`{"type":"text","text":""}`)
-									contentPart, _ = sjson.SetBytes(contentPart, "text", text)
-									message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
-								case "input_image":
-									imageURL := contentItem.Get("image_url").String()
-									contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
-									contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
-									message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
-								}
-								return true
-							},
-						)
-
-						if messageContent != "" {
-							message, _ = sjson.SetBytes(message, "content", messageContent)
-						}
-
-						if len(toolCalls) > 0 {
-							message, _ = sjson.SetBytes(message, "tool_calls", toolCalls)
-						}
-					} else if content.Type == gjson.String {
-						message, _ = sjson.SetBytes(message, "content", content.String())
-					}
-
-					out, _ = sjson.SetRawBytes(out, "messages.-1", message)
-
-				case "function_call":
-					// Handle function call conversion to assistant message with tool_calls
-					assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
-
-					toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-
-					if callId := item.Get("call_id"); callId.Exists() {
-						toolCall, _ = sjson.SetBytes(toolCall, "id", callId.String())
-					}
-
-					if name := item.Get("name"); name.Exists() {
-						toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
-					}
-
-					if arguments := item.Get("arguments"); arguments.Exists() {
-						toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
-					}
-
-					assistantMessage, _ = sjson.SetRawBytes(assistantMessage, "tool_calls.0", toolCall)
-					out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
-
-				case "function_call_output":
-					// Handle function call output conversion to tool message
-					toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-
-					if callId := item.Get("call_id"); callId.Exists() {
-						toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callId.String())
-					}
-
-					if output := item.Get("output"); output.Exists() {
-						toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
-					}
-
-					out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
-				}
-
+		allPendingToolOutputsReceived := func() bool {
+			if len(pendingToolCallIDs) == 0 {
 				return true
-			},
-		)
+			}
+			for callID := range pendingToolCallIDs {
+				if _, ok := pendingToolOutputIDs[callID]; !ok {
+					return false
+				}
+			}
+			return true
+		}
+
+		inputArray := input.Array()
+		for _, item := range inputArray {
+			itemType := item.Get("type").String()
+			if itemType == "" && item.Get("role").String() != "" {
+				itemType = "message"
+			}
+
+			switch itemType {
+			case "message", "":
+				role := item.Get("role").String()
+				if role == "developer" {
+					role = "user"
+				}
+				message := []byte(`{"role":"","content":[]}`)
+				message, _ = sjson.SetBytes(message, "role", role)
+
+				if content := item.Get("content"); content.Exists() && content.IsArray() {
+					content.ForEach(
+						func(_, contentItem gjson.Result) bool {
+							contentType := contentItem.Get("type").String()
+							if contentType == "" {
+								contentType = "input_text"
+							}
+
+							switch contentType {
+							case "input_text", "output_text":
+								text := contentItem.Get("text").String()
+								contentPart := []byte(`{"type":"text","text":""}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "text", text)
+								message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
+							case "input_image":
+								imageURL := contentItem.Get("image_url").String()
+								contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
+								contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+								message, _ = sjson.SetRawBytes(message, "content.-1", contentPart)
+							}
+							return true
+						},
+					)
+				} else if content.Type == gjson.String {
+					message, _ = sjson.SetBytes(message, "content", content.String())
+				}
+
+				if len(pendingToolCalls) > 0 || !allPendingToolOutputsReceived() {
+					deferredMessages = append(deferredMessages, message)
+				} else {
+					out, _ = sjson.SetRawBytes(out, "messages.-1", message)
+				}
+
+			case "function_call":
+				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+				if callID := item.Get("call_id"); callID.Exists() {
+					toolCall, _ = sjson.SetBytes(toolCall, "id", callID.String())
+					if callID.String() != "" {
+						pendingToolCallIDs[callID.String()] = struct{}{}
+					}
+				}
+				if name := item.Get("name"); name.Exists() {
+					toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
+				}
+				if arguments := item.Get("arguments"); arguments.Exists() {
+					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
+				}
+				pendingToolCalls = append(pendingToolCalls, toolCall)
+
+			case "function_call_output":
+				emitPendingToolCalls()
+				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+				if callID := item.Get("call_id"); callID.Exists() {
+					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID.String())
+					if callID.String() != "" {
+						pendingToolOutputIDs[callID.String()] = struct{}{}
+					}
+				}
+				if output := item.Get("output"); output.Exists() {
+					toolMessage, _ = sjson.SetBytes(toolMessage, "content", output.String())
+				}
+				out, _ = sjson.SetRawBytes(out, "messages.-1", toolMessage)
+				if allPendingToolOutputsReceived() {
+					emitDeferredMessages()
+				}
+			}
+		}
+		emitPendingToolCalls()
+		emitDeferredMessages()
 	} else if input.Type == gjson.String {
 		msg := []byte(`{}`)
 		msg, _ = sjson.SetBytes(msg, "role", "user")

@@ -9,4 +9,5 @@ import (
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking/provider/iflow"
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking/provider/kimi"
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking/provider/openai"
+	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking/provider/xai"
 )

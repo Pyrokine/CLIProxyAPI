@@ -42,7 +42,7 @@ func stripThinkingConfig(body []byte, provider string) []byte {
 			"reasoning_effort",
 			"thinking",
 		}
-	case "codex":
+	case "codex", "xai":
 		paths = []string{"reasoning.effort"}
 	case "iflow":
 		paths = []string{

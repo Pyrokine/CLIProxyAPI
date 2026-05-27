@@ -30,6 +30,7 @@ import (
 const (
 	codexClientVersion = "0.130.0"
 	codexUserAgent     = "codex_cli_rs/0.130.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	codexOriginator    = "codex_cli_rs"
 )
 
 var dataTag = []byte("data:")
@@ -111,7 +112,7 @@ func (e *codexExecutor) Execute(
 		if errReq != nil {
 			return resp, errReq
 		}
-		applyCodexHeaders(httpReq, auth, apiKey, true, req.Model)
+		applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 		recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
@@ -242,7 +243,7 @@ func (e *codexExecutor) executeCompact(
 	if err != nil {
 		return resp, err
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, false, req.Model)
+	applyCodexHeaders(httpReq, auth, apiKey, false, e.cfg)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
@@ -308,7 +309,7 @@ func (e *codexExecutor) ExecuteStream(
 	if err != nil {
 		return nil, err
 	}
-	applyCodexHeaders(httpReq, auth, apiKey, true, req.Model)
+	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -375,19 +376,21 @@ func (e *codexExecutor) ExecuteStream(
 				ctx, to, from, req.Model, originalPayload, body, bytes.Clone(line), &param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+					return
+				}
 			}
 		}
 		if streamErr != nil {
 			recordAPIResponseError(ctx, e.cfg, streamErr)
 			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: streamErr}
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: streamErr})
 			return
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 			return
 		}
 		if !sawCompleted {
@@ -396,7 +399,9 @@ func (e *codexExecutor) ExecuteStream(
 					ctx, to, from, req.Model, originalPayload, body, encodeCodexHTTPEvent(recoveredPayload), &param,
 				)
 				for i := range translated {
-					out <- cliproxyexecutor.StreamChunk{Payload: translated[i]}
+					if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: translated[i]}) {
+						return
+					}
 				}
 				reporter.ensurePublished(ctx)
 				return
@@ -407,7 +412,7 @@ func (e *codexExecutor) ExecuteStream(
 			}
 			recordAPIResponseError(ctx, e.cfg, streamEOFErr)
 			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: streamEOFErr}
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: streamEOFErr})
 			return
 		}
 		reporter.ensurePublished(ctx)
@@ -582,6 +587,9 @@ func countCodexInputTokens(enc tokenizer.Codec, body []byte) (int64, error) {
 
 func (e *codexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("codex executor: refresh called")
+	if refreshed, handled, err := refreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	if auth == nil {
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
@@ -661,18 +669,25 @@ func (e *codexExecutor) cacheHelper(
 	return httpReq, nil
 }
 
-func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, model string) {
+func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
+	misc.ScrubProxyAndFingerprintHeaders(r)
+	if userAgent := strings.TrimSpace(r.Header.Get("User-Agent")); userAgent != "" && !isCodexUserAgent(userAgent) {
+		r.Header.Del("User-Agent")
+	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
 
 	var ginHeaders http.Header
 	if ginCtx, ok := util.GinContextValue(r.Context()).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = ginCtx.Request.Header
+		ginHeaders = trustedCodexClientHeaders(ginCtx.Request.Header)
 	}
 
+	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", codexClientVersion)
-	misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", codexUserAgent)
+	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
+		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
+	}
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
@@ -687,8 +702,12 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 			isAPIKey = true
 		}
 	}
+	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
+		r.Header.Set("Originator", originator)
+	} else if !isAPIKey {
+		r.Header.Set("Originator", codexOriginator)
+	}
 	if !isAPIKey {
-		r.Header.Set("Originator", "codex_cli_rs")
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				r.Header.Set("Chatgpt-Account-Id", accountID)
@@ -700,6 +719,89 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, string) {
+	if cfg == nil || auth == nil {
+		return "", ""
+	}
+	if auth.Attributes != nil {
+		if strings.TrimSpace(auth.Attributes["api_key"]) != "" {
+			return "", ""
+		}
+	}
+	return strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent), strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
+func ensureHeaderWithPriority(target http.Header, source http.Header, key, configValue, fallbackValue string) {
+	if target == nil {
+		return
+	}
+	if source != nil {
+		if val := strings.TrimSpace(source.Get(key)); val != "" {
+			target.Set(key, val)
+			return
+		}
+	}
+	if strings.TrimSpace(target.Get(key)) != "" {
+		return
+	}
+	if val := strings.TrimSpace(configValue); val != "" {
+		target.Set(key, val)
+		return
+	}
+	if val := strings.TrimSpace(fallbackValue); val != "" {
+		target.Set(key, val)
+	}
+}
+
+func ensureHeaderWithConfigPrecedence(target http.Header, source http.Header, key, configValue, fallbackValue string) {
+	if target == nil {
+		return
+	}
+	if source != nil {
+		if val := strings.TrimSpace(source.Get(key)); val != "" {
+			target.Set(key, val)
+			return
+		}
+	}
+	if val := strings.TrimSpace(configValue); val != "" {
+		target.Set(key, val)
+		return
+	}
+	if strings.TrimSpace(target.Get(key)) != "" {
+		return
+	}
+	if val := strings.TrimSpace(fallbackValue); val != "" {
+		target.Set(key, val)
+	}
+}
+
+func trustedCodexClientHeaders(headers http.Header) http.Header {
+	if headers == nil {
+		return nil
+	}
+	userAgent := strings.TrimSpace(headers.Get("User-Agent"))
+	if userAgent != "" {
+		if isCodexUserAgent(userAgent) {
+			return headers
+		}
+		return nil
+	}
+	if isCodexOriginator(headers.Get("Originator")) {
+		return headers
+	}
+	return nil
+}
+
+func isCodexUserAgent(userAgent string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(userAgent))
+	return strings.HasPrefix(normalized, "codex_cli_rs/") || strings.HasPrefix(normalized, "codex-tui/")
+}
+
+func isCodexOriginator(originator string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(originator))
+	return normalized == codexOriginator || normalized == "codex-tui"
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
@@ -952,4 +1054,12 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func normalizeCodexInstructions(body []byte) []byte {
+	instructions := gjson.GetBytes(body, "instructions")
+	if !instructions.Exists() || instructions.Type == gjson.Null {
+		body, _ = sjson.SetBytes(body, "instructions", "")
+	}
+	return body
 }

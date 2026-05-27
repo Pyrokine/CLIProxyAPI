@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -63,6 +64,26 @@ func NewGeminiExecutor(cfg *config.Config) *GeminiExecutor {
 
 // Identifier returns the executor identifier.
 func (e *GeminiExecutor) Identifier() string { return "gemini" }
+
+func capGeminiMaxOutputTokens(body []byte, modelName string) []byte {
+	maxOut := gjson.GetBytes(body, "generationConfig.maxOutputTokens")
+	if !maxOut.Exists() || maxOut.Type != gjson.Number {
+		return body
+	}
+	modelInfo := registry.LookupModelInfo(modelName, "gemini")
+	if modelInfo == nil {
+		return body
+	}
+	limit := modelInfo.OutputTokenLimit
+	if limit <= 0 {
+		limit = modelInfo.MaxCompletionTokens
+	}
+	if limit <= 0 || maxOut.Int() <= int64(limit) {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "generationConfig.maxOutputTokens", limit)
+	return body
+}
 
 // PrepareRequest injects Gemini credentials into the outgoing HTTP request.
 func (e *GeminiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -134,6 +155,7 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	body = capGeminiMaxOutputTokens(body, baseModel)
 
 	action := "generateContent"
 	if isStream {
@@ -301,19 +323,23 @@ func (e *GeminiExecutor) ExecuteStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(payload), &param,
 			)
 			for i := range lines {
-				out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
+					return
+				}
 			}
 		}
 		lines := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
 		for i := range lines {
-			out <- cliproxyexecutor.StreamChunk{Payload: lines[i]}
+			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
+				return
+			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -393,7 +419,10 @@ func (e *GeminiExecutor) CountTokens(
 }
 
 // Refresh refreshes the authentication credentials (no-op for Gemini API key).
-func (e *GeminiExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+func (e *GeminiExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if refreshed, handled, err := refreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	return auth, nil
 }
 

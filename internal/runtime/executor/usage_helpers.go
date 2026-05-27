@@ -3,11 +3,15 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
@@ -17,24 +21,36 @@ import (
 )
 
 type usageReporter struct {
-	provider    string
-	model       string
-	authID      string
-	authIndex   string
-	apiKey      string
-	source      string
-	requestedAt time.Time
-	once        sync.Once
+	provider        string
+	model           string
+	alias           string
+	authID          string
+	authIndex       string
+	authType        string
+	apiKey          string
+	source          string
+	reasoningEffort string
+	thinking        *usage.Thinking
+	requestedAt     time.Time
+	once            sync.Once
 }
 
 func newUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *usageReporter {
 	apiKey := apiKeyFromContext(ctx)
+	alias := usage.RequestedModelAliasFromContext(ctx)
+	if alias == "" {
+		alias = model
+	}
 	reporter := &usageReporter{
-		provider:    provider,
-		model:       model,
-		requestedAt: time.Now(),
-		apiKey:      apiKey,
-		source:      resolveUsageSource(auth, apiKey),
+		provider:        provider,
+		model:           model,
+		alias:           strings.TrimSpace(alias),
+		requestedAt:     time.Now(),
+		apiKey:          apiKey,
+		source:          resolveUsageSource(auth, apiKey),
+		authType:        resolveUsageAuthType(auth),
+		reasoningEffort: usage.ReasoningEffortFromContext(ctx),
+		thinking:        thinkingFromAlias(alias),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -43,12 +59,59 @@ func newUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	return reporter
 }
 
-func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
-	r.publishWithOutcome(ctx, detail, false)
+func cloneUsageThinking(src *usage.Thinking) *usage.Thinking {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	if src.Budget != nil {
+		dst.Budget = new(int)
+		*dst.Budget = *src.Budget
+	}
+	if dst.Intensity == "" && dst.Mode == "" && dst.Level == "" && dst.Budget == nil {
+		return nil
+	}
+	return &dst
 }
 
-func (r *usageReporter) publishFailure(ctx context.Context) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true)
+func thinkingFromAlias(alias string) *usage.Thinking {
+	parsed := thinking.ParseSuffix(alias)
+	if !parsed.HasSuffix {
+		return nil
+	}
+	raw := strings.TrimSpace(parsed.RawSuffix)
+	if raw == "" {
+		return nil
+	}
+	lower := strings.ToLower(raw)
+	if lower == "none" {
+		return &usage.Thinking{Intensity: "none", Mode: "none", Level: "none", Budget: new(int)}
+	}
+	if lower == "auto" || raw == "-1" {
+		budget := new(int)
+		*budget = -1
+		return &usage.Thinking{Intensity: "auto", Mode: "auto", Budget: budget}
+	}
+	if budget, err := strconv.Atoi(raw); err == nil && budget >= 0 {
+		if budget == 0 {
+			return &usage.Thinking{Intensity: "none", Mode: "none", Level: "none", Budget: &budget}
+		}
+		return &usage.Thinking{Mode: "budget", Budget: &budget}
+	}
+	switch lower {
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+		return &usage.Thinking{Intensity: lower, Mode: "level", Level: lower}
+	default:
+		return nil
+	}
+}
+
+func (r *usageReporter) publish(ctx context.Context, detail usage.Detail) {
+	r.publishWithOutcome(ctx, detail, false, usage.Failure{})
+}
+
+func (r *usageReporter) publishFailure(ctx context.Context, errs ...error) {
+	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
 }
 
 func (r *usageReporter) trackFailure(ctx context.Context, errPtr *error) {
@@ -56,11 +119,11 @@ func (r *usageReporter) trackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
-		r.publishFailure(ctx)
+		r.publishFailure(ctx, *errPtr)
 	}
 }
 
-func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
+func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, fail usage.Failure) {
 	if r == nil {
 		return
 	}
@@ -71,23 +134,30 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		}
 	}
 	if detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.ReasoningTokens == 0 && detail.CachedTokens == 0 &&
+		detail.CacheReadTokens == 0 && detail.CacheCreationTokens == 0 &&
 		detail.TotalTokens == 0 &&
 		!failed {
 		return
 	}
 	r.once.Do(
 		func() {
-			usage.PublishRecord(
+			r.publishRecord(
 				ctx, usage.Record{
-					Provider:    r.provider,
-					Model:       r.model,
-					Source:      r.source,
-					APIKey:      r.apiKey,
-					AuthID:      r.authID,
-					AuthIndex:   r.authIndex,
-					RequestedAt: r.requestedAt,
-					Failed:      failed,
-					Detail:      detail,
+					Provider:        r.provider,
+					Model:           r.model,
+					Alias:           r.alias,
+					Source:          r.source,
+					APIKey:          r.apiKey,
+					AuthID:          r.authID,
+					AuthIndex:       r.authIndex,
+					AuthType:        r.authType,
+					ReasoningEffort: r.reasoningEffort,
+					RequestedAt:     r.requestedAt,
+					Latency:         r.latency(),
+					Thinking:        cloneUsageThinking(r.thinking),
+					Failed:          failed,
+					Fail:            fail,
+					Detail:          detail,
 				},
 			)
 		},
@@ -104,21 +174,59 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 	}
 	r.once.Do(
 		func() {
-			usage.PublishRecord(
+			r.publishRecord(
 				ctx, usage.Record{
-					Provider:    r.provider,
-					Model:       r.model,
-					Source:      r.source,
-					APIKey:      r.apiKey,
-					AuthID:      r.authID,
-					AuthIndex:   r.authIndex,
-					RequestedAt: r.requestedAt,
-					Failed:      false,
-					Detail:      usage.Detail{},
+					Provider:        r.provider,
+					Model:           r.model,
+					Alias:           r.alias,
+					Source:          r.source,
+					APIKey:          r.apiKey,
+					AuthID:          r.authID,
+					AuthIndex:       r.authIndex,
+					AuthType:        r.authType,
+					ReasoningEffort: r.reasoningEffort,
+					RequestedAt:     r.requestedAt,
+					Latency:         r.latency(),
+					Thinking:        cloneUsageThinking(r.thinking),
+					Failed:          false,
+					Detail:          usage.Detail{},
 				},
 			)
 		},
 	)
+}
+
+func (r *usageReporter) publishRecord(ctx context.Context, record usage.Record) {
+	record.ResponseHeaders = logging.GetResponseHeaders(ctx)
+	usage.PublishRecord(ctx, record)
+}
+
+func (r *usageReporter) latency() time.Duration {
+	if r == nil || r.requestedAt.IsZero() {
+		return 0
+	}
+	latency := time.Since(r.requestedAt)
+	if latency < 0 {
+		return 0
+	}
+	return latency
+}
+
+func failFromErrors(errs ...error) usage.Failure {
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		fail := usage.Failure{
+			Body: strings.TrimSpace(err.Error()),
+		}
+		var se interface{ StatusCode() int }
+		if errors.As(err, &se) && se != nil {
+			fail.StatusCode = se.StatusCode()
+		}
+		return fail
+	}
+	return usage.Failure{}
 }
 
 func apiKeyFromContext(ctx context.Context) string {
@@ -140,6 +248,18 @@ func apiKeyFromContext(ctx context.Context) string {
 		}
 	}
 	return ""
+}
+
+func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	kind, _ := auth.AccountInfo()
+	kind = strings.TrimSpace(kind)
+	if kind == "api_key" {
+		return "apikey"
+	}
+	return kind
 }
 
 func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {

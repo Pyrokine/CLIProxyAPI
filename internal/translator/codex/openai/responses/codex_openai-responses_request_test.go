@@ -318,3 +318,31 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 		t.Fatalf("truncation should be removed for Codex compatibility")
 	}
 }
+
+func TestNormalizeCodexBuiltinTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"tools": [
+			{"type":"web_search_preview"},
+			{"type":"web_search_preview_2025_03_11"},
+			{"type":"function","name":"do_work"}
+		],
+		"tool_choice": {
+			"type": "web_search_preview",
+			"tools": [{"type":"web_search_preview_2025_03_11"}]
+		},
+		"input": [{"role":"user","content":"hello"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	for _, path := range []string{"tools.0.type", "tools.1.type", "tool_choice.type", "tool_choice.tools.0.type"} {
+		if got := gjson.Get(outputStr, path).String(); got != "web_search" {
+			t.Fatalf("%s = %q, want web_search; output: %s", path, got, outputStr)
+		}
+	}
+	if got := gjson.Get(outputStr, "tools.2.type").String(); got != "function" {
+		t.Fatalf("function tool type changed to %q", got)
+	}
+}

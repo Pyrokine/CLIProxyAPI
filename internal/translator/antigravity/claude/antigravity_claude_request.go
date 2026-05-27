@@ -17,6 +17,30 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+func resolveThinkingSignature(modelName, thinkingText, rawSignature string) string {
+	if thinkingText != "" {
+		if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
+			return cachedSig
+		}
+	}
+	return resolveBypassModeSignature(rawSignature)
+}
+
+func resolveBypassModeSignature(rawSignature string) string {
+	if rawSignature == "" {
+		return ""
+	}
+	normalized, err := normalizeClaudeBypassSignature(rawSignature)
+	if err != nil {
+		return ""
+	}
+	return normalized
+}
+
+func hasResolvedThinkingSignature(signature string) bool {
+	return signature != ""
+}
+
 // ConvertClaudeRequestToAntigravity parses and transforms a Claude Code API request into Gemini CLI API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini CLI API.
@@ -51,6 +75,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			systemTypePromptResult := systemPromptResult.Get("type")
 			if systemTypePromptResult.Type == gjson.String && systemTypePromptResult.String() == "text" {
 				systemPrompt := systemPromptResult.Get("text").String()
+				if util.IsClaudeCodeAttributionSystemText(systemPrompt) {
+					continue
+				}
 				partJSON := []byte(`{}`)
 				if systemPrompt != "" {
 					partJSON, _ = sjson.SetBytes(partJSON, "text", systemPrompt)
@@ -59,7 +86,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				hasSystemInstruction = true
 			}
 		}
-	} else if systemResult.Type == gjson.String {
+	} else if systemResult.Type == gjson.String && !util.IsClaudeCodeAttributionSystemText(systemResult.String()) {
 		systemInstructionJSON = []byte(`{"role":"user","parts":[{"text":""}]}`)
 		systemInstructionJSON, _ = sjson.SetBytes(systemInstructionJSON, "parts.0.text", systemResult.String())
 		hasSystemInstruction = true
@@ -99,63 +126,29 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					contentResult := contentResults[j]
 					contentTypeResult := contentResult.Get("type")
 					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "thinking" {
-						// Use GetThinkingText to handle wrapped thinking objects
 						thinkingText := thinking.GetThinkingText(contentResult)
 
-						// Always try cached signature first (more reliable than client-provided)
-						// Client may send stale or invalid signatures from different sessions
-						signature := ""
-						if thinkingText != "" {
-							if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
-								signature = cachedSig
-								// log.Debugf("Using cached signature for thinking block")
-							}
-						}
+						signature := resolveThinkingSignature(
+							modelName, thinkingText, contentResult.Get("signature").String(),
+						)
 
-						// Fallback to client signature only if cache miss and client signature is valid
-						if signature == "" {
-							signatureResult := contentResult.Get("signature")
-							clientSignature := ""
-							if signatureResult.Exists() && signatureResult.String() != "" {
-								arrayClientSignatures := strings.SplitN(signatureResult.String(), "#", 2)
-								if len(arrayClientSignatures) == 2 {
-									if cache.GetModelGroup(modelName) == arrayClientSignatures[0] {
-										clientSignature = arrayClientSignatures[1]
-									}
-								}
-							}
-							if cache.HasValidSignature(modelName, clientSignature) {
-								signature = clientSignature
-							}
-							// log.Debugf("Using client-provided signature for thinking block")
-						}
-
-						// Store for subsequent tool_use in the same message
-						if cache.HasValidSignature(modelName, signature) {
+						if hasResolvedThinkingSignature(signature) {
 							currentMessageThinkingSignature = signature
 						}
 
-						// Skip trailing unsigned thinking blocks on last assistant message
-						isUnsigned := !cache.HasValidSignature(modelName, signature)
-
-						// If unsigned, skip entirely (don't convert to text)
-						// Claude requires assistant messages to start with thinking blocks when thinking is enabled
-						// Converting to text would break this requirement
-						if isUnsigned {
-							// log.Debugf("Dropping unsigned thinking block (no valid signature)")
+						if !hasResolvedThinkingSignature(signature) {
 							enableThoughtTranslate = false
 							continue
 						}
 
-						// Valid signature, send as thought block
+						if thinkingText == "" {
+							continue
+						}
+
 						partJSON := []byte(`{}`)
 						partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
-						if thinkingText != "" {
-							partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)
-						}
-						if signature != "" {
-							partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
-						}
+						partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)
+						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
 						clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
@@ -198,7 +191,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							// This is the approach used in opencode-google-antigravity-auth for Gemini
 							// and also works for Claude through Antigravity API
 							const skipSentinel = "skip_thought_signature_validator"
-							if cache.HasValidSignature(modelName, currentMessageThinkingSignature) {
+							if hasResolvedThinkingSignature(currentMessageThinkingSignature) {
 								partJSON, _ = sjson.SetBytes(
 									partJSON, "thoughtSignature", currentMessageThinkingSignature,
 								)

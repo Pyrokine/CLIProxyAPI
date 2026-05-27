@@ -23,10 +23,12 @@ import (
 )
 
 const (
-	qwenUserAgent       = "QwenCode/0.10.3 (darwin; arm64)"
+	qwenUserAgent       = "QwenCode/0.14.2 (darwin; arm64)"
 	qwenRateLimitPerMin = 60          // 60 requests per minute per credential
 	qwenRateLimitWindow = time.Minute // sliding window duration
 )
+
+var qwenDefaultSystemMessage = []byte(`{"role":"system","content":[{"type":"text","text":"","cache_control":{"type":"ephemeral"}}]}`)
 
 // qwenBeijingLoc caches the Beijing timezone to avoid repeated LoadLocation syscalls.
 var qwenBeijingLoc = func() *time.Location {
@@ -171,6 +173,96 @@ func timeUntilNextDay() time.Duration {
 	return tomorrow.Sub(now)
 }
 
+func ensureQwenSystemMessage(payload []byte) ([]byte, error) {
+	isInjectedSystemPart := func(part gjson.Result) bool {
+		if !part.Exists() || !part.IsObject() {
+			return false
+		}
+		if !strings.EqualFold(part.Get("type").String(), "text") {
+			return false
+		}
+		if !strings.EqualFold(part.Get("cache_control.type").String(), "ephemeral") {
+			return false
+		}
+		text := part.Get("text").String()
+		return text == "" || text == "You are Qwen Code."
+	}
+
+	defaultParts := gjson.ParseBytes(qwenDefaultSystemMessage).Get("content")
+	systemParts := make([]any, 0)
+	if defaultParts.Exists() && defaultParts.IsArray() {
+		for _, part := range defaultParts.Array() {
+			systemParts = append(systemParts, part.Value())
+		}
+	}
+	if len(systemParts) == 0 {
+		systemParts = append(
+			systemParts, map[string]any{
+				"type":          "text",
+				"text":          "You are Qwen Code.",
+				"cache_control": map[string]any{"type": "ephemeral"},
+			},
+		)
+	}
+
+	appendSystemContent := func(content gjson.Result) {
+		makeTextPart := func(text string) map[string]any {
+			return map[string]any{"type": "text", "text": text}
+		}
+
+		if !content.Exists() || content.Type == gjson.Null {
+			return
+		}
+		if content.IsArray() {
+			for _, part := range content.Array() {
+				if part.Type == gjson.String {
+					systemParts = append(systemParts, makeTextPart(part.String()))
+					continue
+				}
+				if isInjectedSystemPart(part) {
+					continue
+				}
+				systemParts = append(systemParts, part.Value())
+			}
+			return
+		}
+		if content.Type == gjson.String {
+			systemParts = append(systemParts, makeTextPart(content.String()))
+			return
+		}
+		if content.IsObject() {
+			if isInjectedSystemPart(content) {
+				return
+			}
+			systemParts = append(systemParts, content.Value())
+			return
+		}
+		systemParts = append(systemParts, makeTextPart(content.String()))
+	}
+
+	messages := gjson.GetBytes(payload, "messages")
+	nonSystemMessages := make([]any, 0)
+	if messages.Exists() && messages.IsArray() {
+		for _, msg := range messages.Array() {
+			if strings.EqualFold(msg.Get("role").String(), "system") {
+				appendSystemContent(msg.Get("content"))
+				continue
+			}
+			nonSystemMessages = append(nonSystemMessages, msg.Value())
+		}
+	}
+
+	newMessages := make([]any, 0, 1+len(nonSystemMessages))
+	newMessages = append(newMessages, map[string]any{"role": "system", "content": systemParts})
+	newMessages = append(newMessages, nonSystemMessages...)
+
+	updated, err := sjson.SetBytes(payload, "messages", newMessages)
+	if err != nil {
+		return nil, fmt.Errorf("qwen executor: set system message failed: %w", err)
+	}
+	return updated, nil
+}
+
 // QwenExecutor is a stateless executor for Qwen Code using OpenAI-compatible chat completions.
 // If access token is unavailable, it falls back to legacy via ClientAdapter.
 type QwenExecutor struct {
@@ -271,6 +363,10 @@ func (e *QwenExecutor) prepareQwenRequest(
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body, err = ensureQwenSystemMessage(body)
+	if err != nil {
+		return nil, err
+	}
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -428,20 +524,22 @@ func (e *QwenExecutor) ExecuteStream(
 			chunks := sdktranslator.TranslateStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
-			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+			if !sendStreamPayloads(ctx, out, chunks) {
+				return
 			}
 		}
 		doneChunks := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
 		for i := range doneChunks {
-			out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}
+			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}) {
+				return
+			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -481,6 +579,9 @@ func (e *QwenExecutor) CountTokens(
 
 func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("qwen executor: refresh called")
+	if refreshed, handled, err := refreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	if auth == nil {
 		return nil, fmt.Errorf("qwen executor: auth is nil")
 	}
@@ -520,20 +621,23 @@ func (e *QwenExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 }
 
 func applyQwenHeaders(r *http.Request, token string, stream bool) {
-	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Authorization", "Bearer "+token)
-	r.Header.Set("User-Agent", qwenUserAgent)
-	r.Header.Set("X-Dashscope-Useragent", qwenUserAgent)
 	r.Header.Set("X-Stainless-Runtime-Version", "v22.17.0")
-	r.Header.Set("Sec-Fetch-Mode", "cors")
+	r.Header.Set("User-Agent", qwenUserAgent)
 	r.Header.Set("X-Stainless-Lang", "js")
-	r.Header.Set("X-Stainless-Arch", "arm64")
-	r.Header.Set("X-Stainless-Package-Version", "5.11.0")
+	r.Header.Set("Accept-Language", "*")
 	r.Header.Set("X-Dashscope-Cachecontrol", "enable")
-	r.Header.Set("X-Stainless-Retry-Count", "0")
 	r.Header.Set("X-Stainless-Os", "MacOS")
 	r.Header.Set("X-Dashscope-Authtype", "qwen-oauth")
+	r.Header.Set("X-Stainless-Arch", "arm64")
 	r.Header.Set("X-Stainless-Runtime", "node")
+	r.Header.Set("X-Stainless-Retry-Count", "0")
+	r.Header.Set("Accept-Encoding", "gzip, deflate")
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("X-Stainless-Package-Version", "5.11.0")
+	r.Header.Set("Sec-Fetch-Mode", "cors")
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Connection", "keep-alive")
+	r.Header.Set("X-Dashscope-Useragent", qwenUserAgent)
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")

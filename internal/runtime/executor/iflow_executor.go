@@ -273,13 +273,15 @@ func (e *IFlowExecutor) ExecuteStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+					return
+				}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 		}
 		// Guarantee a usage record exists even if the stream never emitted usage data.
 		reporter.ensurePublished(ctx)
@@ -318,6 +320,9 @@ func (e *IFlowExecutor) CountTokens(
 // Refresh refreshes OAuth tokens or cookie-based API keys and updates the stored API key.
 func (e *IFlowExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	log.Debugf("iflow executor: refresh called")
+	if refreshed, handled, err := refreshAuthViaHome(ctx, e.cfg, auth); handled {
+		return refreshed, err
+	}
 	if auth == nil {
 		return nil, fmt.Errorf("iflow executor: auth is nil")
 	}
