@@ -70,7 +70,7 @@ func TestMultiSourceSecret_CacheBehavior(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := newMultiSourceSecretWithPath("", p, 50*time.Millisecond)
+	s := newMultiSourceSecretWithPath("", p, time.Hour)
 
 	// First read - should return v1
 	got1, err := s.Get(ctx)
@@ -90,8 +90,10 @@ func TestMultiSourceSecret_CacheBehavior(t *testing.T) {
 		t.Fatalf("cache hit expected v1, got %s", got2)
 	}
 
-	// After TTL expires, should see v2
-	time.Sleep(60 * time.Millisecond)
+	// Force cache expiry, should see v2
+	s.mu.Lock()
+	s.cache.expiresAt = time.Now().Add(-time.Millisecond)
+	s.mu.Unlock()
 	got3, _ := s.Get(ctx)
 	if got3 != "v2" {
 		t.Fatalf("cache miss expected v2, got %s", got3)

@@ -127,7 +127,7 @@ func TestPutAmpUpstreamURL(t *testing.T) {
 	h, _ := newAmpTestHandler(t)
 	r := setupAmpRouter(h)
 
-	body := `{"value": "https://new-upstream.com"}`
+	body := `{"value": "https://93.184.216.34"}`
 	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/upstream-url", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -650,7 +650,7 @@ func TestPutAmpUpstreamURL_VerifyState(t *testing.T) {
 	h, _ := newAmpTestHandler(t)
 	r := setupAmpRouter(h)
 
-	body := `{"value": "https://new-api.example.com"}`
+	body := `{"value": "https://93.184.216.34"}`
 	req := httptest.NewRequest(http.MethodPut, "/v0/management/ampcode/upstream-url", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -669,8 +669,8 @@ func TestPutAmpUpstreamURL_VerifyState(t *testing.T) {
 		t.Fatalf("failed to unmarshal: %v", err)
 	}
 
-	if resp["upstream-url"] != "https://new-api.example.com" {
-		t.Errorf("expected %q, got %q", "https://new-api.example.com", resp["upstream-url"])
+	if resp["upstream-url"] != "https://93.184.216.34" {
+		t.Errorf("expected %q, got %q", "https://93.184.216.34", resp["upstream-url"])
 	}
 }
 
