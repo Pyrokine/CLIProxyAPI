@@ -495,7 +495,7 @@ func GetAIStudioModels() []*ModelInfo {
 // Prefers dynamic catalog (codex-plus) when available, falls back to static data.
 func GetOpenAIModels() []*ModelInfo {
 	if dynamic := getCodexPlusModels(); len(dynamic) > 0 {
-		return dynamic
+		return WithCodexBuiltins(dynamic)
 	}
 	return []*ModelInfo{
 		{
@@ -903,4 +903,9 @@ func GetKimiModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 	}
+}
+
+// GetXAIModels returns xAI Grok model definitions including builtin image/video models.
+func GetXAIModels() []*ModelInfo {
+	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
 }
