@@ -7,19 +7,20 @@ import (
 
 // loginFlags groups all login-related command-line flags.
 type loginFlags struct {
-	vertexImport      string
-	projectID         string
-	login             bool
-	codexLogin        bool
-	codexDeviceLogin  bool
-	claudeLogin       bool
-	qwenLogin         bool
-	iflowLogin        bool
-	iflowCookie       bool
-	antigravityLogin  bool
-	kimiLogin         bool
-	noBrowser         bool
-	oauthCallbackPort int
+	vertexImport       string
+	vertexImportPrefix string
+	projectID          string
+	login              bool
+	codexLogin         bool
+	codexDeviceLogin   bool
+	claudeLogin        bool
+	qwenLogin          bool
+	iflowLogin         bool
+	iflowCookie        bool
+	antigravityLogin   bool
+	kimiLogin          bool
+	noBrowser          bool
+	oauthCallbackPort  int
 }
 
 // isLoginMode returns true when any login-related flag is set.
@@ -43,7 +44,7 @@ func runLoginMode(cfg *config.Config, flags *loginFlags) bool {
 
 	switch {
 	case flags.vertexImport != "":
-		cmd.DoVertexImport(cfg, flags.vertexImport)
+		cmd.DoVertexImport(cfg, flags.vertexImport, flags.vertexImportPrefix)
 	case flags.login:
 		cmd.DoLogin(cfg, flags.projectID, options)
 	case flags.antigravityLogin:

@@ -18,6 +18,8 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
@@ -53,13 +55,15 @@ func main() {
 
 	// Command-line flags
 	var (
-		lf         loginFlags
-		configPath string
-		password   string
-		tuiMode    bool
-		standalone bool
-		localModel bool
-		testConfig bool
+		lf                          loginFlags
+		configPath                  string
+		password                    string
+		tuiMode                     bool
+		standalone                  bool
+		localModel                  bool
+		testConfig                  bool
+		homeJWT                     string
+		homeDisableClusterDiscovery bool
 	)
 
 	flag.BoolVar(&lf.login, "login", false, "Login Google Account")
@@ -79,11 +83,17 @@ func main() {
 	flag.StringVar(&lf.projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", defaultConfigPath, "Configure File Path")
 	flag.StringVar(&lf.vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
+	flag.StringVar(&lf.vertexImportPrefix, "vertex-import-prefix", "", "Prefix for imported Vertex model names")
 	flag.StringVar(&password, "password", "", "")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
 	flag.BoolVar(&testConfig, "t", false, "Test configuration and exit")
+	flag.StringVar(&homeJWT, "home-jwt", "", "Home control plane JWT for mTLS certificate bootstrap and connection")
+	flag.BoolVar(
+		&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false,
+		"Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address",
+	)
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -140,9 +150,15 @@ func main() {
 		return "", false
 	}
 
+	if strings.TrimSpace(homeJWT) == "" {
+		if v, ok := lookupEnv("HOME_JWT", "home_jwt"); ok {
+			homeJWT = v
+		}
+	}
+
 	isCloudDeploy := os.Getenv("DEPLOY") == "cloud"
 
-	result, err := initStoreAndConfig(wd, configPath, isCloudDeploy, lookupEnv)
+	result, err := initStoreAndConfig(wd, configPath, isCloudDeploy, lookupEnv, homeJWT, homeDisableClusterDiscovery)
 	if err != nil {
 		log.Errorf("%v", err)
 		os.Exit(1)
@@ -168,9 +184,11 @@ func main() {
 	// Cloud deploy mode: check configuration availability
 	var configFileExists bool
 	if isCloudDeploy {
-		configFileExists = checkCloudConfig(configFilePath, cfg)
+		configFileExists = cloudConfigAvailable(configFilePath, cfg)
 	}
 	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
@@ -215,14 +233,16 @@ func main() {
 	if tuiMode {
 		if standalone {
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
+			misc.StartAntigravityVersionUpdater(context.Background())
 		}
-		if !localModel {
+		if !localModel && !cfg.Home.Enabled {
 			registry.StartModelsUpdater(context.Background(), cfg.ModelRefreshInterval)
 		}
 		runTUIMode(cfg, configFilePath, password, standalone)
 	} else {
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
-		if !localModel {
+		misc.StartAntigravityVersionUpdater(context.Background())
+		if !localModel && !cfg.Home.Enabled {
 			registry.StartModelsUpdater(context.Background(), cfg.ModelRefreshInterval)
 		}
 		cmd.StartService(cfg, configFilePath, password)
@@ -231,6 +251,13 @@ func main() {
 
 // checkCloudConfig validates the configuration file for cloud deploy mode
 // and returns true if a usable configuration exists.
+func cloudConfigAvailable(configFilePath string, cfg *config.Config) bool {
+	if cfg != nil && cfg.Home.Enabled && cfg.Port != 0 {
+		return true
+	}
+	return checkCloudConfig(configFilePath, cfg)
+}
+
 func checkCloudConfig(configFilePath string, cfg *config.Config) bool {
 	info, errStat := os.Stat(configFilePath)
 	if errStat != nil {
@@ -241,7 +268,7 @@ func checkCloudConfig(configFilePath string, cfg *config.Config) bool {
 		log.Info("Cloud deploy mode: Config path is a directory; standing by for configuration")
 		return false
 	}
-	if cfg.Port == 0 {
+	if cfg == nil || cfg.Port == 0 {
 		log.Info("Cloud deploy mode: Configuration file is empty or invalid; standing by for valid configuration")
 		return false
 	}

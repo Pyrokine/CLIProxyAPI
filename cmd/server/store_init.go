@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/store"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -34,6 +35,8 @@ func initStoreAndConfig(
 	wd, configPath string,
 	isCloudDeploy bool,
 	lookupEnv func(...string) (string, bool),
+	homeJWT string,
+	homeDisableClusterDiscovery bool,
 ) (*storeResult, error) {
 	writableBase := util.WritablePath()
 
@@ -45,6 +48,7 @@ func initStoreAndConfig(
 		gitStoreRemoteURL string
 		gitStoreUser      string
 		gitStorePassword  string
+		gitStoreBranch    string
 		gitStoreLocalPath string
 
 		objectStoreEndpoint  string
@@ -91,6 +95,9 @@ func initStoreAndConfig(
 	if value, ok := lookupEnv("GITSTORE_GIT_TOKEN", "gitstore_git_token"); ok {
 		gitStorePassword = value
 	}
+	if value, ok := lookupEnv("GITSTORE_GIT_BRANCH", "gitstore_git_branch"); ok {
+		gitStoreBranch = value
+	}
 	if value, ok := lookupEnv("GITSTORE_LOCAL_PATH", "gitstore_local_path"); ok {
 		gitStoreLocalPath = value
 	}
@@ -120,7 +127,9 @@ func initStoreAndConfig(
 		err            error
 	)
 
-	if usePostgresStore {
+	if strings.TrimSpace(homeJWT) != "" {
+		cfg, configFilePath, tokenStore, err = initHomeConfig(wd, configPath, homeJWT, homeDisableClusterDiscovery)
+	} else if usePostgresStore {
 		cfg, configFilePath, tokenStore, err = initPostgresStore(
 			wd, pgStoreDSN, pgStoreSchema, pgStoreLocalPath, isCloudDeploy,
 		)
@@ -131,7 +140,8 @@ func initStoreAndConfig(
 		)
 	} else if useGitStore {
 		cfg, configFilePath, tokenStore, err = initGitStore(
-			wd, writableBase, gitStoreRemoteURL, gitStoreUser, gitStorePassword, gitStoreLocalPath, isCloudDeploy,
+			wd, writableBase, gitStoreRemoteURL, gitStoreUser, gitStorePassword, gitStoreBranch, gitStoreLocalPath,
+			isCloudDeploy,
 		)
 	} else if configPath != "" {
 		configFilePath = configPath
@@ -168,7 +178,7 @@ func initStoreAndConfig(
 	}
 
 	// 启动时补齐源文件中的默认值
-	if !isCloudDeploy && configFilePath != "" {
+	if !cfg.Home.Enabled && !isCloudDeploy && configFilePath != "" {
 		config.EnsureDefaultsInFile(configFilePath, cfg)
 	}
 
@@ -177,6 +187,51 @@ func initStoreAndConfig(
 		configFilePath: configFilePath,
 		tokenStore:     tokenStore,
 	}, nil
+}
+
+func initHomeConfig(wd, configPath, homeJWT string, disableClusterDiscovery bool) (
+	*config.Config,
+	string,
+	coreauth.Store,
+	error,
+) {
+	ctxHome, cancelHome := context.WithTimeout(context.Background(), 30*time.Second)
+	homeCfg, errHomeCfg := home.ConfigFromJWT(ctxHome, homeJWT)
+	cancelHome()
+	if errHomeCfg != nil {
+		return nil, "", nil, fmt.Errorf("invalid -home-jwt: %w", errHomeCfg)
+	}
+	if disableClusterDiscovery {
+		homeCfg.DisableClusterDiscovery = true
+	}
+
+	homeClient := home.New(homeCfg)
+	defer homeClient.Close()
+
+	ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
+	raw, errGetConfig := homeClient.GetConfig(ctxHomeConfig)
+	cancelHomeConfig()
+	if errGetConfig != nil {
+		return nil, "", nil, fmt.Errorf("failed to fetch config from home: %w", errGetConfig)
+	}
+
+	parsed, errParseConfig := config.ParseConfigBytes(raw)
+	if errParseConfig != nil {
+		return nil, "", nil, fmt.Errorf("failed to parse config payload from home: %w", errParseConfig)
+	}
+	if parsed == nil {
+		parsed = &config.Config{}
+	}
+	parsed.Home = homeCfg
+	parsed.Port = 8317
+	config.ApplyHomeRuntimeConfig(parsed)
+
+	configFilePath := strings.TrimSpace(configPath)
+	if configFilePath == "" {
+		configFilePath = filepath.Join(wd, "config.yaml")
+	}
+
+	return parsed, configFilePath, sdkAuth.NewFileTokenStore(), nil
 }
 
 func initPostgresStore(wd, dsn, schema, localPath string, isCloudDeploy bool) (
@@ -279,7 +334,7 @@ func initObjectStore(
 	return cfg, configFilePath, objectStoreInst, nil
 }
 
-func initGitStore(wd, writableBase, remoteURL, user, password, localPath string, isCloudDeploy bool) (
+func initGitStore(wd, writableBase, remoteURL, user, password, branch, localPath string, isCloudDeploy bool) (
 	*config.Config,
 	string,
 	coreauth.Store,
@@ -295,7 +350,7 @@ func initGitStore(wd, writableBase, remoteURL, user, password, localPath string,
 	gitStoreRoot := filepath.Join(localPath, "gitstore")
 	authDir := filepath.Join(gitStoreRoot, "auths")
 
-	gitStoreInst := store.NewGitTokenStore(remoteURL, user, password)
+	gitStoreInst := store.NewGitTokenStore(remoteURL, user, password, branch)
 	gitStoreInst.SetBaseDir(authDir)
 	if errRepo := gitStoreInst.EnsureRepository(); errRepo != nil {
 		return nil, "", nil, fmt.Errorf("failed to prepare git token store: %w", errRepo)
