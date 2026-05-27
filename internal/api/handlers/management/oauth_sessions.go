@@ -270,9 +270,26 @@ func normalizeOAuthProvider(provider string) (string, error) {
 		return "antigravity", nil
 	case "qwen":
 		return "qwen", nil
+	case "xai", "x-ai", "x.ai", "grok":
+		return "xai", nil
 	default:
 		return "", errUnsupportedOAuthFlow
 	}
+}
+
+func oauthSessionErrorWithCause(message string, cause error) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "Authentication failed"
+	}
+	if cause == nil {
+		return message
+	}
+	detail := strings.TrimSpace(cause.Error())
+	if detail == "" {
+		return message
+	}
+	return message + ": " + detail
 }
 
 type oauthCallbackFilePayload struct {

@@ -16,9 +16,9 @@ import (
 	geminiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/gemini"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/proxy"
 	"golang.org/x/oauth2"
 )
 
@@ -662,58 +662,24 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 }
 
 func buildProxyTransport(proxyStr string) *http.Transport {
-	proxyStr = strings.TrimSpace(proxyStr)
-	if proxyStr == "" {
-		return nil
-	}
-
-	proxyURL, errParse := url.Parse(proxyStr)
+	setting, errParse := proxyutil.Parse(proxyStr)
 	if errParse != nil {
 		log.WithError(errParse).Debug("parse proxy URL failed")
 		return nil
 	}
-	if proxyURL.Scheme == "" || proxyURL.Host == "" {
-		log.Debug("proxy URL missing scheme/host")
+	if setting.Mode != proxyutil.ModeProxy || setting.URL == nil {
 		return nil
 	}
-	if isPrivateHost(proxyURL.Hostname()) {
+	if isPrivateHost(setting.URL.Hostname()) {
 		log.Debug("proxy URL points to private address, blocked")
 		return nil
 	}
-
-	base, ok := http.DefaultTransport.(*http.Transport)
-	if !ok || base == nil {
-		base = &http.Transport{}
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
+	if errBuild != nil {
+		log.WithError(errBuild).Debug("build proxy transport failed")
+		return nil
 	}
-
-	if proxyURL.Scheme == "socks5" {
-		var proxyAuth *proxy.Auth
-		if proxyURL.User != nil {
-			username := proxyURL.User.Username()
-			password, _ := proxyURL.User.Password()
-			proxyAuth = &proxy.Auth{User: username, Password: password}
-		}
-		dialer, errSOCKS5 := proxy.SOCKS5("tcp", proxyURL.Host, proxyAuth, proxy.Direct)
-		if errSOCKS5 != nil {
-			log.WithError(errSOCKS5).Debug("create SOCKS5 dialer failed")
-			return nil
-		}
-		clone := base.Clone()
-		clone.Proxy = nil
-		clone.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.Dial(network, addr)
-		}
-		return clone
-	}
-
-	if proxyURL.Scheme == "http" || proxyURL.Scheme == "https" {
-		clone := base.Clone()
-		clone.Proxy = http.ProxyURL(proxyURL)
-		return clone
-	}
-
-	log.Debugf("unsupported proxy scheme: %s", proxyURL.Scheme)
-	return nil
+	return transport
 }
 
 // isPrivateHost returns true if the given hostname resolves to a private,
@@ -809,7 +775,8 @@ func isPrivateIP(ip net.IP) bool {
 		{mustParseCIDR("203.0.113.0/24")},  // RFC 5737 documentation (TEST-NET-3)
 		{mustParseCIDR("240.0.0.0/4")},     // RFC 1112 reserved (class E)
 		// IPv6
-		{mustParseCIDR("64:ff9b:1::/48")}, // RFC 8215 IPv4-IPv6 translation
+		{mustParseCIDR("64:ff9b::/96")},   // RFC 6052 Well-Known NAT64 prefix
+		{mustParseCIDR("64:ff9b:1::/48")}, // RFC 8215 local-use NAT64 prefix
 		{mustParseCIDR("100::/64")},       // RFC 6666 discard-only
 		{mustParseCIDR("100:0:0:1::/64")}, // Dummy IPv6 Prefix
 		{mustParseCIDR("2001::/23")},      // RFC 2928 IETF protocol assignments

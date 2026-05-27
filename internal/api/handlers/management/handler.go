@@ -30,7 +30,14 @@ type attemptInfo struct {
 	failures     []time.Time // sliding window of failure timestamps
 	blockedUntil time.Time
 	lastActivity time.Time // track last activity for cleanup
+	banCount     int
 }
+
+const (
+	managementFailureWindow = 5 * time.Minute
+	managementMaxFailures   = 10
+	managementBanDuration   = 30 * time.Minute
+)
 
 // attemptCleanupInterval controls how often stale IP entries are purged
 const attemptCleanupInterval = 1 * time.Hour
@@ -40,22 +47,23 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	usagePersister      *usage.Persister
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
-	quotaScheduler      *quota.Scheduler
-	internalToken       string // random token for internal localhost requests (quota scheduler)
+	cfg                   *config.Config
+	configFilePath        string
+	mu                    sync.Mutex
+	attemptsMu            sync.Mutex
+	failedAttempts        map[string]*attemptInfo // keyed by client IP
+	rateLimitUnbanHistory []rateLimitUnbanHistoryEntry
+	authManager           *coreauth.Manager
+	usageStats            *usage.RequestStatistics
+	usagePersister        *usage.Persister
+	tokenStore            coreauth.Store
+	localPassword         string
+	allowRemoteOverride   bool
+	envSecret             string
+	logDir                string
+	postAuthHook          coreauth.PostAuthHook
+	quotaScheduler        *quota.Scheduler
+	internalToken         string // random token for internal localhost requests (quota scheduler)
 }
 
 // Option configures a Handler.
@@ -166,6 +174,62 @@ func (h *Handler) purgeStaleAttempts() {
 	}
 }
 
+func (h *Handler) currentRateLimitBan(clientIP string, now time.Time) (time.Duration, bool) {
+	h.attemptsMu.Lock()
+	defer h.attemptsMu.Unlock()
+
+	ai := h.failedAttempts[clientIP]
+	if ai == nil || ai.blockedUntil.IsZero() {
+		return 0, false
+	}
+	if now.Before(ai.blockedUntil) {
+		return ai.blockedUntil.Sub(now).Round(time.Second), true
+	}
+	ai.blockedUntil = time.Time{}
+	ai.failures = ai.failures[:0]
+	return 0, false
+}
+
+func (h *Handler) recordFailedManagementAttempt(clientIP string, now time.Time) {
+	h.attemptsMu.Lock()
+	defer h.attemptsMu.Unlock()
+
+	ai := h.failedAttempts[clientIP]
+	if ai == nil {
+		ai = &attemptInfo{}
+		h.failedAttempts[clientIP] = ai
+	}
+	ai.lastActivity = now
+
+	cutoff := now.Add(-managementFailureWindow)
+	kept := 0
+	for _, t := range ai.failures {
+		if t.After(cutoff) {
+			ai.failures[kept] = t
+			kept++
+		}
+	}
+	ai.failures = ai.failures[:kept]
+	ai.failures = append(ai.failures, now)
+
+	if len(ai.failures) >= managementMaxFailures {
+		ai.banCount++
+		ai.blockedUntil = now.Add(managementBanDuration)
+		ai.failures = ai.failures[:0]
+	}
+}
+
+func (h *Handler) resetManagementAttempts(clientIP string, now time.Time) {
+	h.attemptsMu.Lock()
+	defer h.attemptsMu.Unlock()
+
+	if ai := h.failedAttempts[clientIP]; ai != nil {
+		ai.failures = ai.failures[:0]
+		ai.blockedUntil = time.Time{}
+		ai.lastActivity = now
+	}
+}
+
 // NewHandlerWithoutConfigFilePath creates a management handler without a config file path.
 func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manager, opts ...Option) *Handler {
 	return NewHandler(cfg, "", manager, opts...)
@@ -204,22 +268,95 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 // SetUsagePersister sets the usage statistics persister reference.
 func (h *Handler) SetUsagePersister(p *usage.Persister) { h.usagePersister = p }
 
+// AuthenticateManagementKey verifies a management key outside Gin middleware.
+func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, provided string) (bool, int, string) {
+	cfg := h.cfg
+	var (
+		allowRemote bool
+		secretHash  string
+	)
+	if cfg != nil {
+		allowRemote = cfg.RemoteManagement.AllowRemote
+		secretHash = cfg.RemoteManagement.SecretKey
+	}
+	if h.allowRemoteOverride {
+		allowRemote = true
+	}
+	envSecret := h.envSecret
+
+	now := time.Now()
+	if remaining, banned := h.currentRateLimitBan(clientIP, now); banned {
+		return false, http.StatusForbidden, fmt.Sprintf(
+			"IP banned due to too many failed attempts. Try again in %s", remaining,
+		)
+	}
+
+	if !localClient && !allowRemote {
+		return false, http.StatusForbidden, "remote management disabled"
+	}
+
+	fail := func() {
+		h.recordFailedManagementAttempt(clientIP, time.Now())
+	}
+
+	reset := func() {
+		h.resetManagementAttempts(clientIP, time.Now())
+	}
+
+	if secretHash == "" && envSecret == "" {
+		if !(localClient && h.localPassword != "") {
+			return false, http.StatusForbidden, "remote management key not set"
+		}
+	}
+
+	if provided == "" {
+		fail()
+		return false, http.StatusUnauthorized, "missing management key"
+	}
+
+	if localClient {
+		if lp := h.localPassword; lp != "" {
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+				reset()
+				return true, 0, ""
+			}
+		}
+		if it := h.internalToken; it != "" {
+			if subtle.ConstantTimeCompare([]byte(provided), []byte(it)) == 1 {
+				reset()
+				return true, 0, ""
+			}
+		}
+	}
+
+	if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
+		reset()
+		return true, 0, ""
+	}
+
+	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
+		fail()
+		return false, http.StatusUnauthorized, "invalid management key"
+	}
+
+	reset()
+	return true, 0, ""
+}
+
 // Middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
 func (h *Handler) Middleware() gin.HandlerFunc {
-	const (
-		failureWindow = 5 * time.Minute  // sliding window for counting failures
-		maxFailures   = 10               // failures within the window to trigger ban
-		banDuration   = 30 * time.Minute // ban duration after exceeding maxFailures
-	)
-
 	return func(c *gin.Context) {
 		c.Header("X-CPA-VERSION", buildinfo.Version)
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 
-		// Use RemoteAddr to prevent X-Forwarded-For spoofing (consistent with amp module)
+		// Determine client IP for rate limiting.
+		// When RemoteAddr is loopback (nginx reverse proxy), read X-Real-IP set by nginx
+		// to $remote_addr. Safe when CPA binds to 127.0.0.1: external clients cannot spoof it.
+		// Direct local connections (quota scheduler, CLI tools) have no X-Real-IP and are
+		// treated as local.
 		remoteHost, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
 		if remoteHost == "" {
 			remoteHost = c.Request.RemoteAddr
@@ -227,7 +364,20 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		clientIP := remoteHost
 		localClient := false
 		if ip := net.ParseIP(remoteHost); ip != nil {
-			localClient = ip.IsLoopback()
+			if ip.IsLoopback() {
+				if xRealIP := c.GetHeader("X-Real-IP"); xRealIP != "" {
+					if realIP := net.ParseIP(xRealIP); realIP != nil {
+						clientIP = realIP.String()
+						localClient = realIP.IsLoopback()
+					} else {
+						clientIP = "127.0.0.1"
+						localClient = true
+					}
+				} else {
+					clientIP = "127.0.0.1"
+					localClient = true
+				}
+			}
 		}
 		cfg := h.cfg
 		var (
@@ -243,66 +393,29 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 		envSecret := h.envSecret
 
-		h.attemptsMu.Lock()
-		ai := h.failedAttempts[clientIP]
-		if ai != nil {
-			if !ai.blockedUntil.IsZero() {
-				if time.Now().Before(ai.blockedUntil) {
-					remaining := time.Until(ai.blockedUntil).Round(time.Second)
-					h.attemptsMu.Unlock()
-					c.Header("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
-					c.AbortWithStatusJSON(
-						http.StatusForbidden, gin.H{
-							"error": fmt.Sprintf(
-								"IP banned due to too many failed attempts. Try again in %s", remaining,
-							),
-						},
-					)
-					return
-				}
-				// Ban expired, reset state
-				ai.blockedUntil = time.Time{}
-				ai.failures = ai.failures[:0]
-			}
+		now := time.Now()
+		if remaining, banned := h.currentRateLimitBan(clientIP, now); banned {
+			c.Header("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
+			c.AbortWithStatusJSON(
+				http.StatusForbidden, gin.H{
+					"error": fmt.Sprintf(
+						"IP banned due to too many failed attempts. Try again in %s", remaining,
+					),
+				},
+			)
+			return
 		}
-		h.attemptsMu.Unlock()
 
 		if !localClient && !allowRemote {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management disabled"})
 			return
 		}
 
-		// fail records a failed authentication attempt using a sliding time window.
-		// Only failures within the last failureWindow are counted toward the ban threshold.
 		fail := func() {
-			now := time.Now()
-			h.attemptsMu.Lock()
-			aip := h.failedAttempts[clientIP]
-			if aip == nil {
-				aip = &attemptInfo{}
-				h.failedAttempts[clientIP] = aip
-			}
-			aip.lastActivity = now
-
-			// Evict failures outside the sliding window
-			cutoff := now.Add(-failureWindow)
-			kept := 0
-			for _, t := range aip.failures {
-				if t.After(cutoff) {
-					aip.failures[kept] = t
-					kept++
-				}
-			}
-			aip.failures = aip.failures[:kept]
-
-			// Append the new failure
-			aip.failures = append(aip.failures, now)
-
-			if len(aip.failures) >= maxFailures {
-				aip.blockedUntil = now.Add(banDuration)
-				aip.failures = aip.failures[:0]
-			}
-			h.attemptsMu.Unlock()
+			h.recordFailedManagementAttempt(clientIP, time.Now())
+		}
+		reset := func() {
+			h.resetManagementAttempts(clientIP, time.Now())
 		}
 		if secretHash == "" && envSecret == "" {
 			if localClient && h.localPassword != "" {
@@ -336,6 +449,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		if localClient {
 			if lp := h.localPassword; lp != "" {
 				if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+					reset()
 					c.Next()
 					return
 				}
@@ -343,6 +457,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			// Internal token for quota scheduler and other internal services
 			if it := h.internalToken; it != "" {
 				if subtle.ConstantTimeCompare([]byte(provided), []byte(it)) == 1 {
+					reset()
 					c.Next()
 					return
 				}
@@ -350,12 +465,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 
 		if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
-			h.attemptsMu.Lock()
-			if ai := h.failedAttempts[clientIP]; ai != nil {
-				ai.failures = ai.failures[:0]
-				ai.blockedUntil = time.Time{}
-			}
-			h.attemptsMu.Unlock()
+			reset()
 			c.Next()
 			return
 		}
@@ -366,13 +476,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			return
 		}
 
-		h.attemptsMu.Lock()
-		if ai := h.failedAttempts[clientIP]; ai != nil {
-			ai.failures = ai.failures[:0]
-			ai.blockedUntil = time.Time{}
-		}
-		h.attemptsMu.Unlock()
-
+		reset()
 		c.Next()
 	}
 }
@@ -448,6 +552,22 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	set(*body.Value)
+	h.persist(c)
+}
+
+func (h *Handler) updateStringFieldValidated(c *gin.Context, validate func(string) error, set func(string)) {
+	var body struct {
+		Value *string `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if err := validate(*body.Value); err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
 	set(*body.Value)

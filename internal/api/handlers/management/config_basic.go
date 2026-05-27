@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-09
-// Author: pyro
-
 package management
 
 import (
@@ -8,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,14 +30,15 @@ const latestReleaseUserAgent = "CLIProxyAPI"
 const minPanelVersion = "1.7.16-aug.1"
 
 type remoteManagementConfigResponse struct {
-	AllowRemote           bool   `json:"allow-remote"`
-	DisableControlPanel   bool   `json:"disable-control-panel"`
-	AutoUpdatePanel       bool   `json:"auto-update-panel"`
-	PanelGitHubRepository string `json:"panel-github-repository"`
-	CPAGitHubRepository   string `json:"cpa-github-repository"`
-	AutoCheckUpdate       bool   `json:"auto-check-update"`
-	AutoUpdateCPA         bool   `json:"auto-update-cpa"`
-	CheckInterval         int    `json:"check-interval"`
+	AllowRemote            bool   `json:"allow-remote"`
+	DisableControlPanel    bool   `json:"disable-control-panel"`
+	AutoUpdatePanel        bool   `json:"auto-update-panel"`
+	DisableAutoUpdatePanel bool   `json:"disable-auto-update-panel"`
+	PanelGitHubRepository  string `json:"panel-github-repository"`
+	CPAGitHubRepository    string `json:"cpa-github-repository"`
+	AutoCheckUpdate        bool   `json:"auto-check-update"`
+	AutoUpdateCPA          bool   `json:"auto-update-cpa"`
+	CheckInterval          int    `json:"check-interval"`
 }
 
 type configValidationError struct {
@@ -52,7 +51,7 @@ var (
 		pattern *regexp.Regexp
 		field   string
 	}{
-		{pattern: regexp.MustCompile(`\bapi-keys\[(\d+)\]`), field: "api-keys"},
+		{pattern: regexp.MustCompile(`\bapi-keys\[(\d+)]`), field: "api-keys"},
 		{pattern: regexp.MustCompile(`\bport\b`), field: "port"},
 		{pattern: regexp.MustCompile(`\blogs-max-total-size-mb\b`), field: "logs-max-total-size-mb"},
 		{pattern: regexp.MustCompile(`\brequest-retry\b`), field: "request-retry"},
@@ -94,14 +93,15 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		200, configResponse{
 			Config: h.cfg,
 			RemoteManagement: remoteManagementConfigResponse{
-				AllowRemote:           h.cfg.RemoteManagement.AllowRemote,
-				DisableControlPanel:   h.cfg.RemoteManagement.DisableControlPanel,
-				AutoUpdatePanel:       h.cfg.RemoteManagement.IsAutoUpdatePanel(),
-				PanelGitHubRepository: h.cfg.RemoteManagement.PanelGitHubRepository,
-				CPAGitHubRepository:   h.cfg.RemoteManagement.CPAGitHubRepository,
-				AutoCheckUpdate:       h.cfg.RemoteManagement.AutoCheckUpdate,
-				AutoUpdateCPA:         h.cfg.RemoteManagement.AutoUpdateCPA,
-				CheckInterval:         checkInterval,
+				AllowRemote:            h.cfg.RemoteManagement.AllowRemote,
+				DisableControlPanel:    h.cfg.RemoteManagement.DisableControlPanel,
+				AutoUpdatePanel:        h.cfg.RemoteManagement.IsAutoUpdatePanel(),
+				DisableAutoUpdatePanel: !h.cfg.RemoteManagement.IsAutoUpdatePanel(),
+				PanelGitHubRepository:  h.cfg.RemoteManagement.PanelGitHubRepository,
+				CPAGitHubRepository:    h.cfg.RemoteManagement.CPAGitHubRepository,
+				AutoCheckUpdate:        h.cfg.RemoteManagement.AutoCheckUpdate,
+				AutoUpdateCPA:          h.cfg.RemoteManagement.AutoUpdateCPA,
+				CheckInterval:          checkInterval,
 			},
 		},
 	)
@@ -505,7 +505,21 @@ func (h *Handler) PutAutoRefreshInterval(c *gin.Context) {
 // GetProxyURL returns the proxy URL.
 func (h *Handler) GetProxyURL(c *gin.Context) { c.JSON(200, gin.H{"proxy-url": h.cfg.ProxyURL}) }
 func (h *Handler) PutProxyURL(c *gin.Context) {
-	h.updateStringField(c, func(v string) { h.cfg.ProxyURL = v })
+	h.updateStringFieldValidated(
+		c, func(v string) error {
+			if v == "" {
+				return nil
+			}
+			parsed, err := url.Parse(v)
+			if err != nil || parsed.Hostname() == "" {
+				return fmt.Errorf("invalid URL")
+			}
+			if isPrivateHost(parsed.Hostname()) {
+				return fmt.Errorf("requests to private/internal addresses are not allowed")
+			}
+			return nil
+		}, func(v string) { h.cfg.ProxyURL = v },
+	)
 }
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
 	h.cfg.ProxyURL = ""

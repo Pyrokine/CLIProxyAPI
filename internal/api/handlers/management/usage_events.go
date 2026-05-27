@@ -1,6 +1,3 @@
-// Last compiled: 2026-04-27
-// Author: pyro
-
 package management
 
 import (
@@ -89,10 +86,7 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 		events = []usage.FlatDetail{}
 	}
 
-	totalPages := 0
-	if pageSize > 0 {
-		totalPages = (total + pageSize - 1) / pageSize
-	}
+	totalPages := (total + pageSize - 1) / pageSize
 
 	c.JSON(
 		http.StatusOK, eventsResponse{

@@ -73,8 +73,8 @@ func TestListAuthFiles_IncludesRecentRequestsBuckets(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected recent_requests array, got %#v", fileEntry["recent_requests"])
 	}
-	if len(recentRaw) != 20 {
-		t.Fatalf("expected 20 recent_requests buckets, got %d", len(recentRaw))
+	if len(recentRaw) != 24 {
+		t.Fatalf("expected 24 recent_requests buckets, got %d", len(recentRaw))
 	}
 	for idx, item := range recentRaw {
 		bucket, ok := item.(map[string]any)

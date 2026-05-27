@@ -1,16 +1,18 @@
-// Last compiled: 2026-05-07
-// Author: pyro
-
 package management
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,6 +20,49 @@ type usageExportPayload struct {
 	Version    int                      `json:"version"`
 	ExportedAt time.Time                `json:"exported_at"`
 	Usage      usage.StatisticsSnapshot `json:"usage"`
+}
+
+type usageQueueRecord []byte
+
+func (r usageQueueRecord) MarshalJSON() ([]byte, error) {
+	if json.Valid(r) {
+		return append([]byte(nil), r...), nil
+	}
+	return json.Marshal(string(r))
+}
+
+// GetUsageQueue pops queued usage records from the usage queue.
+func (h *Handler) GetUsageQueue(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+
+	count, errCount := parseUsageQueueCount(c.Query("count"))
+	if errCount != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errCount.Error()})
+		return
+	}
+
+	items := redisqueue.PopOldest(count)
+	records := make([]usageQueueRecord, 0, len(items))
+	for _, item := range items {
+		records = append(records, usageQueueRecord(append([]byte(nil), item...)))
+	}
+
+	c.JSON(http.StatusOK, records)
+}
+
+func parseUsageQueueCount(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 1, nil
+	}
+	count, errCount := strconv.Atoi(value)
+	if errCount != nil || count <= 0 {
+		return 0, errors.New("count must be a positive integer")
+	}
+	return count, nil
 }
 
 // GetUsageStatistics returns the in-memory request statistics snapshot.
@@ -84,7 +129,7 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	}
 
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 100<<20)
-	data, err := c.GetRawData()
+	data, err := handlers.ReadRequestBodyWithLimit(c, 100<<20)
 	if err != nil {
 		message := "failed to read request body"
 		if strings.Contains(err.Error(), "request body too large") || strings.Contains(
@@ -203,24 +248,23 @@ func (h *Handler) PutUsageRetention(c *gin.Context) {
 	if r.WarningThresholdPct == 0 {
 		r.WarningThresholdPct = 80
 	}
-	h.usagePersister.SetRetention(r)
-
 	if h.cfg != nil {
-		h.cfg.UsageRetention = r
-	}
-
-	// Persist config to disk so retention survives restarts
-	if h.configFilePath != "" {
 		h.mu.Lock()
-		_ = config.SaveLastGood(h.configFilePath)
-		if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-			h.rollbackLastGood()
-			h.mu.Unlock()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
-			return
+		previousConfigRetention := h.cfg.UsageRetention
+		h.cfg.UsageRetention = r
+		if h.configFilePath != "" {
+			_ = config.SaveLastGood(h.configFilePath)
+			if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
+				h.rollbackLastGood()
+				h.cfg.UsageRetention = previousConfigRetention
+				h.mu.Unlock()
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
+				return
+			}
 		}
 		h.mu.Unlock()
 	}
+	h.usagePersister.SetRetention(r)
 
 	warningThreshold := r.WarningThresholdPct
 	if warningThreshold == 0 {

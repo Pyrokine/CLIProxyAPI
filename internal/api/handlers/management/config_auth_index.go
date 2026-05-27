@@ -55,13 +55,13 @@ type openAICompatibilityWithAuthIndex struct {
 }
 
 func (h *Handler) buildConfigAuthIndexViews() configAuthIndexViews {
-	cfg := h.cfg
-	if cfg == nil {
+	if h == nil || h.cfg == nil {
 		return configAuthIndexViews{}
 	}
+	cfg := h.cfg
 
 	liveIndexByID := map[string]string{}
-	if h != nil && h.authManager != nil {
+	if h.authManager != nil {
 		for _, auth := range h.authManager.List() {
 			if auth == nil || strings.TrimSpace(auth.ID) == "" {
 				continue

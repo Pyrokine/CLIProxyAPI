@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-14
-// Author: pyro
-
 package management
 
 import (
@@ -8,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,7 +16,10 @@ import (
 
 func TestFindReleaseAssets(t *testing.T) {
 	assets := []githubReleaseAsset{
-		{Name: "CLIProxyAPI_6.10.9-augmented_linux_amd64.tar.gz", BrowserDownloadURL: "https://github.com/example/archive"},
+		{
+			Name:               "CLIProxyAPI_6.10.9-augmented_linux_amd64.tar.gz",
+			BrowserDownloadURL: "https://github.com/example/archive",
+		},
 		{Name: "checksums.txt", BrowserDownloadURL: "https://github.com/example/checksums"},
 	}
 
@@ -93,8 +94,8 @@ func TestBuildUpdateCompatibility_WithReadySQLitePersister(t *testing.T) {
 	if !compat.Usage.PersisterReady {
 		t.Fatal("expected persister_ready=true")
 	}
-	if compat.Usage.SchemaVersion != "2" {
-		t.Fatalf("schema_version = %q, want 2", compat.Usage.SchemaVersion)
+	if compat.Usage.SchemaVersion != "3" {
+		t.Fatalf("schema_version = %q, want 3", compat.Usage.SchemaVersion)
 	}
 	if compat.Usage.DBPath == "" {
 		t.Fatal("expected db_path to be populated")
@@ -127,6 +128,20 @@ func TestValidateGitHubDownloadURL(t *testing.T) {
 	}
 	if err := validateGitHubDownloadURL("archive", "https://example.com/a.tar.gz"); err == nil {
 		t.Fatal("expected non-GitHub host to fail validation")
+	}
+}
+
+func TestUpdateHTTPClientRejectsNonHTTPSRedirect(t *testing.T) {
+	client := newUpdateHTTPClient("")
+	if client.CheckRedirect == nil {
+		t.Fatal("CheckRedirect is nil")
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://github.com/Pyrokine/CLIProxyAPI/releases", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if err := client.CheckRedirect(req, nil); err == nil {
+		t.Fatal("expected non-HTTPS redirect to be rejected")
 	}
 }
 

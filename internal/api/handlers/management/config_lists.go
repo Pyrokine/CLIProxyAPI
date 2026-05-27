@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
 )
 
@@ -69,7 +71,7 @@ func deleteMapKey[V any](c *gin.Context, m *map[string]V, key, label string) boo
 func parseBody[T any](c *gin.Context) (T, bool) {
 	var zero T
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
-	data, err := c.GetRawData()
+	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return zero, false
@@ -92,7 +94,7 @@ func parseBody[T any](c *gin.Context) (T, bool) {
 
 func (h *Handler) putStringList(c *gin.Context, set func([]string), after func(), validate func(string) error) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
-	data, err := c.GetRawData()
+	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
@@ -781,7 +783,21 @@ func (h *Handler) GetAmpUpstreamURL(c *gin.Context) {
 
 // PutAmpUpstreamURL updates the ampcode upstream URL.
 func (h *Handler) PutAmpUpstreamURL(c *gin.Context) {
-	h.updateStringField(c, func(v string) { h.cfg.AmpCode.UpstreamURL = strings.TrimSpace(v) })
+	h.updateStringFieldValidated(
+		c, func(v string) error {
+			if v == "" {
+				return nil
+			}
+			parsed, err := url.Parse(v)
+			if err != nil || parsed.Hostname() == "" {
+				return fmt.Errorf("invalid URL")
+			}
+			if isPrivateHost(parsed.Hostname()) {
+				return fmt.Errorf("requests to private/internal addresses are not allowed")
+			}
+			return nil
+		}, func(v string) { h.cfg.AmpCode.UpstreamURL = strings.TrimSpace(v) },
+	)
 }
 
 // DeleteAmpUpstreamURL clears the ampcode upstream URL.

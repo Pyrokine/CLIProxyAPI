@@ -1,6 +1,3 @@
-// Last compiled: 2026-04-27
-// Author: pyro
-
 package management
 
 import (
@@ -24,20 +21,26 @@ type summaryTokens struct {
 
 // summaryTotals holds the global aggregation.
 type summaryTotals struct {
-	Requests int64         `json:"requests"`
-	Success  int64         `json:"success"`
-	Failure  int64         `json:"failure"`
-	Tokens   summaryTokens `json:"tokens"`
-	Cost     float64       `json:"cost"`
+	Requests           int64         `json:"requests"`
+	Success            int64         `json:"success"`
+	Failure            int64         `json:"failure"`
+	Tokens             summaryTokens `json:"tokens"`
+	Cost               float64       `json:"cost"`
+	AverageLatencyMs   *float64      `json:"average_latency_ms,omitempty"`
+	TotalLatencyMs     *int64        `json:"total_latency_ms,omitempty"`
+	LatencySampleCount int64         `json:"latency_sample_count,omitempty"`
 }
 
 // summaryModelStats holds per-model aggregation.
 type summaryModelStats struct {
-	Requests int64         `json:"requests"`
-	Success  int64         `json:"success"`
-	Failure  int64         `json:"failure"`
-	Tokens   summaryTokens `json:"tokens"`
-	Cost     float64       `json:"cost"`
+	Requests           int64         `json:"requests"`
+	Success            int64         `json:"success"`
+	Failure            int64         `json:"failure"`
+	Tokens             summaryTokens `json:"tokens"`
+	Cost               float64       `json:"cost"`
+	AverageLatencyMs   *float64      `json:"average_latency_ms,omitempty"`
+	TotalLatencyMs     *int64        `json:"total_latency_ms,omitempty"`
+	LatencySampleCount int64         `json:"latency_sample_count,omitempty"`
 }
 
 // summaryCredentialStats holds per-credential aggregation.
@@ -66,11 +69,14 @@ type summaryTimePoint struct {
 
 // summaryAPIKeyStats holds per-API-key aggregation.
 type summaryAPIKeyStats struct {
-	Requests int64         `json:"requests"`
-	Success  int64         `json:"success"`
-	Failure  int64         `json:"failure"`
-	Tokens   summaryTokens `json:"tokens"`
-	Cost     float64       `json:"cost"`
+	Requests           int64         `json:"requests"`
+	Success            int64         `json:"success"`
+	Failure            int64         `json:"failure"`
+	Tokens             summaryTokens `json:"tokens"`
+	Cost               float64       `json:"cost"`
+	AverageLatencyMs   *float64      `json:"average_latency_ms,omitempty"`
+	TotalLatencyMs     *int64        `json:"total_latency_ms,omitempty"`
+	LatencySampleCount int64         `json:"latency_sample_count,omitempty"`
 }
 
 // summaryResponse is the full response for GET /usage/summary.
@@ -161,6 +167,10 @@ func emptySummaryResponse(from, to time.Time) summaryResponse {
 }
 
 func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing bool) summaryResponse {
+	totalAverageLatency, totalLatency, totalLatencySamples := latencyResponseFields(
+		qr.Totals.Latency.TotalMs,
+		qr.Totals.Latency.SampleCount,
+	)
 	resp := summaryResponse{
 		Period: summaryPeriod{
 			From: from.Format(time.RFC3339),
@@ -177,7 +187,10 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 				Reasoning: qr.Totals.Tokens.ReasoningTokens,
 				Total:     qr.Totals.Tokens.TotalTokens,
 			},
-			Cost: roundCost(qr.Totals.Cost),
+			Cost:               roundCost(qr.Totals.Cost),
+			AverageLatencyMs:   totalAverageLatency,
+			TotalLatencyMs:     totalLatency,
+			LatencySampleCount: totalLatencySamples,
 		},
 		ByModel:                make(map[string]*summaryModelStats, len(qr.ByModel)),
 		ByCredential:           make(map[string]*summaryCredentialStats, len(qr.ByCredential)),
@@ -188,6 +201,10 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 	}
 
 	for model, ms := range qr.ByModel {
+		averageLatency, totalLatency, latencySamples := latencyResponseFields(
+			ms.Latency.TotalMs,
+			ms.Latency.SampleCount,
+		)
 		resp.ByModel[model] = &summaryModelStats{
 			Requests: ms.Requests,
 			Success:  ms.Success,
@@ -199,7 +216,10 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 				Reasoning: ms.Tokens.ReasoningTokens,
 				Total:     ms.Tokens.TotalTokens,
 			},
-			Cost: roundCost(ms.Cost),
+			Cost:               roundCost(ms.Cost),
+			AverageLatencyMs:   averageLatency,
+			TotalLatencyMs:     totalLatency,
+			LatencySampleCount: latencySamples,
 		}
 	}
 
@@ -213,6 +233,10 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 	}
 
 	for key, aks := range qr.ByAPIKey {
+		averageLatency, totalLatency, latencySamples := latencyResponseFields(
+			aks.Latency.TotalMs,
+			aks.Latency.SampleCount,
+		)
 		resp.ByAPIKey[key] = &summaryAPIKeyStats{
 			Requests: aks.Requests,
 			Success:  aks.Success,
@@ -224,7 +248,10 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 				Reasoning: aks.Tokens.ReasoningTokens,
 				Total:     aks.Tokens.TotalTokens,
 			},
-			Cost: roundCost(aks.Cost),
+			Cost:               roundCost(aks.Cost),
+			AverageLatencyMs:   averageLatency,
+			TotalLatencyMs:     totalLatency,
+			LatencySampleCount: latencySamples,
 		}
 	}
 
@@ -314,6 +341,17 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 	}
 
 	return resp
+}
+
+func latencyResponseFields(totalMs, sampleCount int64) (*float64, *int64, int64) {
+	if sampleCount <= 0 {
+		return nil, nil, 0
+	}
+	average := new(float64)
+	*average = float64(totalMs) / float64(sampleCount)
+	total := new(int64)
+	*total = totalMs
+	return average, total, sampleCount
 }
 
 func parseTimeParam(value string, fallback time.Time) (time.Time, error) {

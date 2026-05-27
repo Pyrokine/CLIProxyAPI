@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-09
-// Author: pyro
-
 package management
 
 import (
@@ -336,14 +333,12 @@ func TestMiddleware_IPBanning(t *testing.T) {
 	engine.Use(h.Middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
-	// Send 10 failed attempts to trigger ban (sliding window: 10 in 5 min)
 	for i := 0; i < 10; i++ {
 		rec := httptest.NewRecorder()
 		req := newRemoteRequest("GET", "/test", "Bearer wrong")
 		engine.ServeHTTP(rec, req)
 	}
 
-	// Next attempt should be banned even with correct key
 	rec := httptest.NewRecorder()
 	req := newRemoteRequest("GET", "/test", "Bearer "+secret)
 	engine.ServeHTTP(rec, req)
@@ -353,6 +348,107 @@ func TestMiddleware_IPBanning(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "banned") {
 		t.Fatalf("expected ban message, got: %s", body)
+	}
+}
+
+func TestRateLimitStatusIncludesBanCountAndUnbanHistory(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	secret := "correct"
+	hash, _ := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.MinCost)
+	cfg := &config.Config{}
+	cfg.RemoteManagement.SecretKey = string(hash)
+	cfg.RemoteManagement.AllowRemote = true
+	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+
+	engine := gin.New()
+	engine.Use(h.Middleware())
+	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+
+	triggerBan := func() {
+		for i := 0; i < 10; i++ {
+			rec := httptest.NewRecorder()
+			req := newRemoteRequest("GET", "/test", "Bearer wrong")
+			engine.ServeHTTP(rec, req)
+		}
+	}
+	readStatus := func() struct {
+		BannedIPs []struct {
+			IP       string `json:"ip"`
+			BanCount int    `json:"ban_count"`
+		} `json:"banned_ips"`
+		UnbanHistory []struct {
+			IP          string    `json:"ip"`
+			UnbannedAt  time.Time `json:"unbanned_at"`
+			BannedUntil time.Time `json:"banned_until"`
+			BanCount    int       `json:"ban_count"`
+		} `json:"unban_history"`
+	} {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		c.Request = httptest.NewRequest(http.MethodGet, "/management/rate-limit/status", nil)
+		h.GetRateLimitStatus(c)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GetRateLimitStatus status = %d", rec.Code)
+		}
+		var body struct {
+			BannedIPs []struct {
+				IP       string `json:"ip"`
+				BanCount int    `json:"ban_count"`
+			} `json:"banned_ips"`
+			UnbanHistory []struct {
+				IP          string    `json:"ip"`
+				UnbannedAt  time.Time `json:"unbanned_at"`
+				BannedUntil time.Time `json:"banned_until"`
+				BanCount    int       `json:"ban_count"`
+			} `json:"unban_history"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("unmarshal rate limit status: %v", err)
+		}
+		return body
+	}
+
+	triggerBan()
+	status := readStatus()
+	if len(status.BannedIPs) != 1 {
+		t.Fatalf("banned IPs = %d, want 1", len(status.BannedIPs))
+	}
+	if status.BannedIPs[0].IP != "203.0.113.1" || status.BannedIPs[0].BanCount != 1 {
+		t.Fatalf("banned entry = %#v, want IP 203.0.113.1 and ban_count 1", status.BannedIPs[0])
+	}
+	if len(status.UnbanHistory) != 0 {
+		t.Fatalf("unban history = %d, want 0 before manual unban", len(status.UnbanHistory))
+	}
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(
+		http.MethodDelete,
+		"/management/rate-limit/ban",
+		strings.NewReader(`{"ip":"203.0.113.1"}`),
+	)
+	c.Request.Header.Set("Content-Type", "application/json")
+	h.DeleteRateLimitBan(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("DeleteRateLimitBan status = %d", rec.Code)
+	}
+
+	status = readStatus()
+	if len(status.BannedIPs) != 0 {
+		t.Fatalf("banned IPs = %d, want 0 after manual unban", len(status.BannedIPs))
+	}
+	if len(status.UnbanHistory) != 1 {
+		t.Fatalf("unban history = %d, want 1", len(status.UnbanHistory))
+	}
+	history := status.UnbanHistory[0]
+	if history.IP != "203.0.113.1" || history.BanCount != 1 || history.UnbannedAt.IsZero() || history.BannedUntil.IsZero() {
+		t.Fatalf("unban history entry = %#v", history)
+	}
+
+	triggerBan()
+	status = readStatus()
+	if len(status.BannedIPs) != 1 || status.BannedIPs[0].BanCount != 2 {
+		t.Fatalf("banned IPs after second ban = %#v, want ban_count 2", status.BannedIPs)
 	}
 }
 
@@ -602,6 +698,9 @@ func TestGetConfig_IncludesRemoteManagement(t *testing.T) {
 	if remoteManagement["auto-update-panel"] != true {
 		t.Fatalf("auto-update-panel = %#v, want true", remoteManagement["auto-update-panel"])
 	}
+	if remoteManagement["disable-auto-update-panel"] != false {
+		t.Fatalf("disable-auto-update-panel = %#v, want false", remoteManagement["disable-auto-update-panel"])
+	}
 	if remoteManagement["auto-check-update"] != true {
 		t.Fatalf("auto-check-update = %#v, want true", remoteManagement["auto-check-update"])
 	}
@@ -713,6 +812,42 @@ func TestPutUsageRetention_PersistsToConfig(t *testing.T) {
 	}
 	if resp["warning_threshold_pct"] != float64(85) {
 		t.Fatalf("expected warning_threshold_pct=85, got %v", resp["warning_threshold_pct"])
+	}
+}
+
+func TestPutUsageRetention_SaveFailureKeepsRuntimeConfig(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("usage-retention: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	previousRetention := config.UsageRetention{Days: 30, MaxDBSizeMB: 256, WarningThresholdPct: 75}
+	cfg := &config.Config{Port: 8317, UsageRetention: previousRetention}
+	persister := usage.NewPersister(filepath.Join(tmpDir, "usage"), previousRetention)
+	defer persister.Stop()
+	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""), WithUsagePersister(persister))
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/usage/retention",
+		strings.NewReader(`{"days":60,"max_db_size_mb":512,"warning_threshold_pct":85}`),
+	)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PutUsageRetention(c)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if cfg.UsageRetention != previousRetention {
+		t.Fatalf("cfg.UsageRetention = %+v, want %+v", cfg.UsageRetention, previousRetention)
+	}
+	if got := persister.Retention(); got != previousRetention {
+		t.Fatalf("persister.Retention() = %+v, want %+v", got, previousRetention)
 	}
 }
 

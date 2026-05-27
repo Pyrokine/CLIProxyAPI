@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-15
-// Author: pyro
-
 package management
 
 import (
@@ -207,7 +204,9 @@ func (h *Handler) performUpdate(repo, version, proxyURL string) {
 	assetNames := expectedArchiveAssetNames(version)
 	asset, checksumAsset := findReleaseAssets(release.Assets, assetNames)
 	if asset == nil {
-		setStatus("error", fmt.Sprintf("asset %s not found in release %s", strings.Join(assetNames, " or "), version), 0)
+		setStatus(
+			"error", fmt.Sprintf("asset %s not found in release %s", strings.Join(assetNames, " or "), version), 0,
+		)
 		return
 	}
 	if checksumAsset == nil {
@@ -297,9 +296,9 @@ func (h *Handler) fetchRelease(repo, version, proxyURL string) (*githubReleaseFo
 	if !validVersion.MatchString(version) {
 		return nil, fmt.Errorf("invalid version format: %q", version)
 	}
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, version)
+	releaseURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, version)
 	client := newUpdateHTTPClient(proxyURL)
-	body, err := githubGet(context.Background(), client, url)
+	body, err := githubGet(context.Background(), client, releaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -458,6 +457,9 @@ func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion st
 		Compatible:      true,
 	}
 
+	if h == nil {
+		return compat
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -475,7 +477,7 @@ func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion st
 			compat.Warnings = append(compat.Warnings, fmt.Sprintf("failed to stat usage db: %v", err))
 		}
 	}
-	if h == nil || h.usagePersister == nil {
+	if h.usagePersister == nil {
 		if compat.Usage.DBExists {
 			compat.Compatible = false
 			compat.Warnings = append(compat.Warnings, "usage db exists but persister is unavailable in this process")
@@ -501,9 +503,9 @@ func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion st
 		compat.Warnings = append(compat.Warnings, fmt.Sprintf("failed to read usage schema version: %v", err))
 	} else {
 		compat.Usage.SchemaVersion = schemaVersion
-		if schemaVersion != "" && schemaVersion != "2" {
+		if schemaVersion != "" && schemaVersion != "3" {
 			compat.Compatible = false
-			compat.Warnings = append(compat.Warnings, fmt.Sprintf("usage schema_version=%s, expected 2", schemaVersion))
+			compat.Warnings = append(compat.Warnings, fmt.Sprintf("usage schema_version=%s, expected 3", schemaVersion))
 		}
 	}
 
@@ -513,8 +515,8 @@ func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion st
 	} else {
 		compat.Usage.MigratedFrom = migrationStatus.From
 		if !migrationStatus.At.IsZero() {
-			migratedAt := migrationStatus.At
-			compat.Usage.MigratedAt = &migratedAt
+			compat.Usage.MigratedAt = new(time.Time)
+			*compat.Usage.MigratedAt = migrationStatus.At
 		}
 	}
 
@@ -649,6 +651,9 @@ func newUpdateHTTPClient(proxyURL string) *http.Client {
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return fmt.Errorf("too many redirects")
+			}
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("redirect to non-HTTPS URL blocked")
 			}
 			host := strings.ToLower(req.URL.Hostname())
 			if host != "github.com" && !strings.HasSuffix(host, ".github.com") &&

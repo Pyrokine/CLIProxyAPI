@@ -1,6 +1,3 @@
-// Last compiled: 2026-05-15
-// Author: pyro
-
 package management
 
 import (

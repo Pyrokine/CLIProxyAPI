@@ -26,6 +26,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/oauthcommon"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/qwen"
+	xaiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/xai"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
@@ -572,7 +573,8 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			data, errRead := os.ReadFile(dst)
 			if errRead != nil {
 				failed = append(
-					failed, gin.H{"name": file.Filename, "error": fmt.Sprintf("failed to read saved file: %v", errRead)},
+					failed,
+					gin.H{"name": file.Filename, "error": fmt.Sprintf("failed to read saved file: %v", errRead)},
 				)
 				continue
 			}
@@ -1043,10 +1045,12 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string  `json:"name"`
-		Prefix   *string `json:"prefix"`
-		ProxyURL *string `json:"proxy_url"`
-		Priority *int    `json:"priority"`
+		Name     string            `json:"name"`
+		Prefix   *string           `json:"prefix"`
+		ProxyURL *string           `json:"proxy_url"`
+		Priority *int              `json:"priority"`
+		Headers  map[string]string `json:"headers"`
+		Note     *string           `json:"note"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1082,11 +1086,29 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	changed := false
 	if req.Prefix != nil {
-		targetAuth.Prefix = *req.Prefix
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		prefix := strings.Trim(strings.TrimSpace(*req.Prefix), "/")
+		targetAuth.Prefix = prefix
+		if prefix == "" {
+			delete(targetAuth.Metadata, "prefix")
+		} else {
+			targetAuth.Metadata["prefix"] = prefix
+		}
 		changed = true
 	}
 	if req.ProxyURL != nil {
-		targetAuth.ProxyURL = *req.ProxyURL
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		proxyURL := strings.TrimSpace(*req.ProxyURL)
+		targetAuth.ProxyURL = proxyURL
+		if proxyURL == "" {
+			delete(targetAuth.Metadata, "proxy_url")
+		} else {
+			targetAuth.Metadata["proxy_url"] = proxyURL
+		}
 		changed = true
 	}
 	if req.Priority != nil {
@@ -1097,6 +1119,53 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			delete(targetAuth.Metadata, "priority")
 		} else {
 			targetAuth.Metadata["priority"] = *req.Priority
+		}
+		changed = true
+	}
+	if req.Headers != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		merged := coreauth.ExtractCustomHeadersFromMetadata(targetAuth.Metadata)
+		if merged == nil {
+			merged = make(map[string]string)
+		}
+		for name, value := range req.Headers {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			value = strings.TrimSpace(value)
+			if value == "" {
+				delete(merged, name)
+				continue
+			}
+			merged[name] = value
+		}
+		if len(merged) == 0 {
+			delete(targetAuth.Metadata, "headers")
+		} else {
+			targetAuth.Metadata["headers"] = merged
+		}
+		if targetAuth.Attributes != nil {
+			for key := range targetAuth.Attributes {
+				if strings.HasPrefix(key, "header:") {
+					delete(targetAuth.Attributes, key)
+				}
+			}
+		}
+		coreauth.ApplyCustomHeadersFromMetadata(targetAuth)
+		changed = true
+	}
+	if req.Note != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		note := strings.TrimSpace(*req.Note)
+		if note == "" {
+			delete(targetAuth.Metadata, "note")
+		} else {
+			targetAuth.Metadata["note"] = note
 		}
 		changed = true
 	}
@@ -1775,11 +1844,17 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		if accessToken != "" {
 			fetchedProjectID, errProject := authSvc.FetchProjectID(ctx, accessToken)
 			if errProject != nil {
-				log.Warnf("antigravity: failed to fetch project ID: %v", errProject)
-			} else {
-				projectID = fetchedProjectID
-				log.Infof("antigravity: obtained project ID %s", projectID)
+				log.Errorf("antigravity: failed to fetch project ID: %v", errProject)
+				setOAuthSessionError(state, "Failed to fetch project ID")
+				return
 			}
+			projectID = fetchedProjectID
+			log.Infof("antigravity: obtained project ID %s", util.HideAPIKey(projectID))
+		}
+		if strings.TrimSpace(projectID) == "" {
+			log.Error("antigravity: project ID discovery returned empty project")
+			setOAuthSessionError(state, "Failed to fetch project ID")
+			return
 		}
 
 		metadata := antigravity.BuildMetadata(tokenResp, email, projectID)
@@ -1808,7 +1883,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		completeOAuthSessionsByProvider("antigravity")
 		log.Infof("Authentication successful! Token saved to %s", savedPath)
 		if projectID != "" {
-			log.Infof("Using GCP project: %s", projectID)
+			log.Infof("Using GCP project: %s", util.HideAPIKey(projectID))
 		}
 		log.Info("You can now use Antigravity services through this CLI")
 	}()
@@ -2254,6 +2329,191 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+}
+
+func (h *Handler) RequestXAIToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = populateAuthContext(ctx, c)
+
+	log.Info("Initializing xAI authentication...")
+
+	pkceCodes, errPKCE := xaiauth.GeneratePKCECodes()
+	if errPKCE != nil {
+		log.Errorf("Failed to generate xAI PKCE codes: %v", errPKCE)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		return
+	}
+
+	state, errState := misc.GenerateRandomState()
+	if errState != nil {
+		log.Errorf("Failed to generate state parameter: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	nonce, errNonce := misc.GenerateRandomState()
+	if errNonce != nil {
+		log.Errorf("Failed to generate nonce parameter: %v", errNonce)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate nonce parameter"})
+		return
+	}
+
+	authSvc := xaiauth.NewXAIAuth(h.cfg)
+	discovery, errDiscover := authSvc.Discover(ctx)
+	if errDiscover != nil {
+		log.Errorf("Failed to discover xAI OAuth endpoints: %v", errDiscover)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to discover oauth endpoints"})
+		return
+	}
+
+	redirectURI := fmt.Sprintf("http://%s:%d%s", xaiauth.RedirectHost, xaiauth.CallbackPort, xaiauth.RedirectPath)
+	authURL, errAuthURL := xaiauth.BuildAuthorizeURL(
+		xaiauth.AuthorizeURLParams{
+			AuthorizationEndpoint: discovery.AuthorizationEndpoint,
+			RedirectURI:           redirectURI,
+			CodeChallenge:         pkceCodes.CodeChallenge,
+			State:                 state,
+			Nonce:                 nonce,
+		},
+	)
+	if errAuthURL != nil {
+		log.Errorf("Failed to generate xAI authorization URL: %v", errAuthURL)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		return
+	}
+
+	registerOAuthSession(state, "xai", strings.TrimSpace(c.Query("nonce")))
+
+	isWebUI := isWebUIRequest(c)
+	var forwarder *callbackForwarder
+	if isWebUI {
+		targetURL, errTarget := h.managementCallbackURL("/xai/callback")
+		if errTarget != nil {
+			log.WithError(errTarget).Error("failed to compute xai callback target")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})
+			return
+		}
+		var errStart error
+		if forwarder, errStart = startCallbackForwarder(xaiauth.CallbackPort, "xai", targetURL); errStart != nil {
+			log.WithError(errStart).Error("failed to start xai callback forwarder")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
+			return
+		}
+	}
+
+	go func() {
+		if isWebUI {
+			defer stopCallbackForwarderInstance(xaiauth.CallbackPort, forwarder)
+		}
+
+		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-xai-%s.oauth", state))
+		deadline := time.Now().Add(5 * time.Minute)
+		var authCode string
+		for {
+			if !isOAuthSessionPending(state, "xai") {
+				return
+			}
+			if time.Now().After(deadline) {
+				log.Error("xai oauth flow timed out")
+				setOAuthSessionError(state, "OAuth flow timed out")
+				return
+			}
+			if data, errReadFile := os.ReadFile(waitFile); errReadFile == nil {
+				var payload map[string]string
+				_ = json.Unmarshal(data, &payload)
+				_ = os.Remove(waitFile)
+				if errStr := strings.TrimSpace(payload["error"]); errStr != "" {
+					log.Errorf("xAI authentication failed: %s", errStr)
+					setOAuthSessionError(state, "Authentication failed: "+errStr)
+					return
+				}
+				if payloadState := strings.TrimSpace(payload["state"]); payloadState != "" && payloadState != state {
+					log.Errorf("xAI authentication failed: state mismatch")
+					setOAuthSessionError(state, "Authentication failed: state mismatch")
+					return
+				}
+				authCode = strings.TrimSpace(payload["code"])
+				if authCode == "" {
+					log.Error("xAI authentication failed: code not found")
+					setOAuthSessionError(state, "Authentication failed: code not found")
+					return
+				}
+				break
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		bundle, errExchange := authSvc.ExchangeCodeForTokens(
+			ctx, authCode, redirectURI, pkceCodes, discovery.TokenEndpoint,
+		)
+		if errExchange != nil {
+			log.Errorf("Failed to exchange xAI token: %v", errExchange)
+			setOAuthSessionError(
+				state, oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange),
+			)
+			return
+		}
+
+		tokenStorage := authSvc.CreateTokenStorage(bundle)
+		if tokenStorage == nil || strings.TrimSpace(tokenStorage.AccessToken) == "" {
+			log.Error("xAI token exchange returned empty access token")
+			setOAuthSessionError(state, "Failed to exchange token")
+			return
+		}
+
+		fileName := xaiauth.CredentialFileName(tokenStorage.Email, tokenStorage.Subject)
+		label := strings.TrimSpace(tokenStorage.Email)
+		if label == "" {
+			label = "xAI"
+		}
+
+		metadata := map[string]any{
+			"type":           "xai",
+			"access_token":   tokenStorage.AccessToken,
+			"refresh_token":  tokenStorage.RefreshToken,
+			"id_token":       tokenStorage.IDToken,
+			"token_type":     tokenStorage.TokenType,
+			"expires_in":     tokenStorage.ExpiresIn,
+			"expired":        tokenStorage.Expire,
+			"last_refresh":   tokenStorage.LastRefresh,
+			"base_url":       tokenStorage.BaseURL,
+			"redirect_uri":   tokenStorage.RedirectURI,
+			"token_endpoint": tokenStorage.TokenEndpoint,
+			"auth_kind":      "oauth",
+		}
+		if tokenStorage.Email != "" {
+			metadata["email"] = tokenStorage.Email
+		}
+		if tokenStorage.Subject != "" {
+			metadata["sub"] = tokenStorage.Subject
+		}
+
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: "xai",
+			FileName: fileName,
+			Label:    label,
+			Storage:  tokenStorage,
+			Metadata: metadata,
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+				"base_url":  tokenStorage.BaseURL,
+			},
+		}
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save xAI token to file: %v", errSave)
+			setOAuthSessionError(state, "Failed to save token to file")
+			return
+		}
+
+		completeOAuthSession(state)
+		completeOAuthSessionsByProvider("xai")
+		log.Infof("Authentication successful! Token saved to %s", savedPath)
+		log.Info("You can now use xAI services through this CLI")
+	}()
+
+	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
 }
 
 // populateAuthContext extracts request info and adds it to the context

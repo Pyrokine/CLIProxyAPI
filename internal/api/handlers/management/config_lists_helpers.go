@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 )
 
 var errEntryDeleted = errors.New("entry deleted")
@@ -33,17 +34,9 @@ type structListResource[T any] struct {
 	strictDelete             bool                  // true = return 404 when item not found in Delete
 }
 
-func getStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
-	list := r.getList(h.cfg)
-	if r.prepareGet != nil {
-		list = r.prepareGet(list)
-	}
-	c.JSON(200, gin.H{r.configKey: list})
-}
-
 func putStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
-	data, err := c.GetRawData()
+	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
@@ -130,7 +123,7 @@ func patchStructEntry[T any](
 ) {
 
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
-	data, err := c.GetRawData()
+	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
