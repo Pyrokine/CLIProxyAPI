@@ -11,6 +11,8 @@ config.yaml.last-good
 
 # Generated content
 bin/*
+dist/*
+release-notes.md
 logs/*
 conv/*
 temp/*
