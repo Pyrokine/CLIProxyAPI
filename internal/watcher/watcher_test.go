@@ -80,6 +80,24 @@ func TestBuildAPIKeyClientsCounts(t *testing.T) {
 	}
 }
 
+func TestComputePerPathUpdatesDoesNotRecreateRuntimeOnlyAuth(t *testing.T) {
+	w := &Watcher{currentAuths: map[string]*coreauth.Auth{}}
+	runtimeOnly := &coreauth.Auth{
+		ID:         "runtime-auth",
+		Provider:   "codex",
+		Attributes: map[string]string{"runtime_only": "true"},
+	}
+
+	updates := w.computePerPathUpdatesLocked(nil, map[string]*coreauth.Auth{"runtime-auth": runtimeOnly})
+
+	if len(updates) != 1 {
+		t.Fatalf("updates length = %d, want 1", len(updates))
+	}
+	if updates[0].AllowAuthRecreate {
+		t.Fatal("runtime-only auth must not allow tombstone recreation")
+	}
+}
+
 func TestNormalizeAuthStripsTemporalFields(t *testing.T) {
 	now := time.Now()
 	auth := &coreauth.Auth{
@@ -248,7 +266,7 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	w := &Watcher{
 		configPath:     configPath,
 		authDir:        authDir,
-		reloadCallback: func(*config.Config) { reloads++ },
+		reloadCallback: func(*config.Config) bool { reloads++; return true },
 	}
 
 	w.reloadConfigIfChanged()
@@ -287,8 +305,9 @@ func TestStartAndStopSuccess(t *testing.T) {
 
 	var reloads int32
 	w, err := NewWatcher(
-		configPath, authDir, func(*config.Config) {
+		configPath, authDir, func(*config.Config) bool {
 			atomic.AddInt32(&reloads, 1)
+			return true
 		},
 	)
 	if err != nil {
@@ -384,8 +403,9 @@ func TestAddOrUpdateClientSkipsUnchanged(t *testing.T) {
 	w := &Watcher{
 		authDir:        tmpDir,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) {
+		reloadCallback: func(*config.Config) bool {
 			atomic.AddInt32(&reloads, 1)
+			return true
 		},
 	}
 	w.SetConfig(&config.Config{AuthDir: tmpDir})
@@ -409,8 +429,9 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 	w := &Watcher{
 		authDir:        tmpDir,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) {
+		reloadCallback: func(*config.Config) bool {
 			atomic.AddInt32(&reloads, 1)
+			return true
 		},
 	}
 	w.SetConfig(&config.Config{AuthDir: tmpDir})
@@ -435,8 +456,9 @@ func TestRemoveClientRemovesHash(t *testing.T) {
 	w := &Watcher{
 		authDir:        tmpDir,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) {
+		reloadCallback: func(*config.Config) bool {
 			atomic.AddInt32(&reloads, 1)
+			return true
 		},
 	}
 	w.SetConfig(&config.Config{AuthDir: tmpDir})
@@ -657,8 +679,9 @@ func TestHandleEventRemovesAuthFile(t *testing.T) {
 		authDir:        tmpDir,
 		config:         &config.Config{AuthDir: tmpDir},
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) {
+		reloadCallback: func(*config.Config) bool {
 			atomic.AddInt32(&reloads, 1)
+			return true
 		},
 	}
 	// Use normalizeAuthPath to set up the hash with the correct key format
@@ -801,7 +824,7 @@ func TestHandleEventIgnoresUnrelatedFiles(t *testing.T) {
 		authDir:        authDir,
 		configPath:     configPath,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
@@ -827,7 +850,7 @@ func TestHandleEventConfigChangeSchedulesReload(t *testing.T) {
 		authDir:        authDir,
 		configPath:     configPath,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
@@ -859,7 +882,7 @@ func TestHandleEventAuthWriteTriggersUpdate(t *testing.T) {
 		authDir:        authDir,
 		configPath:     configPath,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
@@ -889,7 +912,7 @@ func TestHandleEventRemoveDebounceSkips(t *testing.T) {
 		lastRemoveTimes: map[string]time.Time{
 			filepath.Clean(authFile): time.Now(),
 		},
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
@@ -921,7 +944,7 @@ func TestHandleEventAtomicReplaceUnchangedSkips(t *testing.T) {
 		authDir:        authDir,
 		configPath:     configPath,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = hexString(sum[:])
@@ -955,7 +978,7 @@ func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
 		authDir:        authDir,
 		configPath:     configPath,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = hexString(oldSum[:])
@@ -983,7 +1006,7 @@ func TestHandleEventRemoveUnknownFileIgnored(t *testing.T) {
 		authDir:        authDir,
 		configPath:     configPath,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
@@ -1010,7 +1033,7 @@ func TestHandleEventRemoveKnownFileDeletes(t *testing.T) {
 		authDir:        authDir,
 		configPath:     configPath,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = "hash"
@@ -1096,7 +1119,7 @@ func TestAddOrUpdateClientEdgeCases(t *testing.T) {
 	w := &Watcher{
 		authDir:        authDir,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 
 	w.addOrUpdateClient(filepath.Join(tmpDir, "missing.json"))
@@ -1286,11 +1309,12 @@ func TestReloadConfigTriggersCallbackForMaxRetryCredentialsChange(t *testing.T) 
 		configPath:     configPath,
 		authDir:        authDir,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(cfg *config.Config) {
+		reloadCallback: func(cfg *config.Config) bool {
 			callbackCalls++
 			if cfg != nil {
 				callbackMaxRetryCredentials = cfg.MaxRetryCredentials
 			}
+			return true
 		},
 	}
 	w.SetConfig(oldCfg)
@@ -1310,6 +1334,107 @@ func TestReloadConfigTriggersCallbackForMaxRetryCredentialsChange(t *testing.T) 
 	defer w.clientsMutex.RUnlock()
 	if w.config == nil || w.config.MaxRetryCredentials != 2 {
 		t.Fatalf("expected watcher config MaxRetryCredentials=2, got %+v", w.config)
+	}
+}
+
+func TestReloadConfigRollsBackWhenReloadCallbackRejects(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	oldCfg := &config.Config{AuthDir: authDir, MaxRetryCredentials: 1}
+	newCfg := &config.Config{AuthDir: authDir, MaxRetryCredentials: 2}
+	data, errMarshal := yaml.Marshal(newCfg)
+	if errMarshal != nil {
+		t.Fatalf("failed to marshal config: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(configPath, data, 0o644); errWrite != nil {
+		t.Fatalf("failed to write config file: %v", errWrite)
+	}
+
+	callbackCalls := 0
+	callbackSawPublishedConfig := false
+	var w *Watcher
+	w = &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(*config.Config) bool {
+			callbackCalls++
+			w.clientsMutex.RLock()
+			callbackSawPublishedConfig = w.config != nil && w.config.MaxRetryCredentials == 2
+			w.clientsMutex.RUnlock()
+			return false
+		},
+	}
+	w.SetConfig(oldCfg)
+
+	if ok := w.reloadConfig(); ok {
+		t.Fatal("expected reloadConfig to reject callback failure")
+	}
+	if callbackCalls != 1 {
+		t.Fatalf("expected reload callback once, got %d", callbackCalls)
+	}
+	if callbackSawPublishedConfig {
+		t.Fatal("expected rejected config not to be published before reload callback accepts it")
+	}
+
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.MaxRetryCredentials != 1 {
+		t.Fatalf("expected watcher config to remain old config, got %+v", w.config)
+	}
+	var saved config.Config
+	if err := yaml.Unmarshal(w.oldConfigYaml, &saved); err != nil {
+		t.Fatalf("failed to unmarshal saved config: %v", err)
+	}
+	if saved.MaxRetryCredentials != 1 {
+		t.Fatalf("expected saved config yaml to remain old config, got %+v", saved)
+	}
+}
+
+func TestReloadConfigRejectsInvalidModelCatalog(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	oldCfg := &config.Config{AuthDir: authDir, MaxRetryCredentials: 1}
+	newCfg := &config.Config{AuthDir: authDir, MaxRetryCredentials: 2}
+	data, errMarshal := yaml.Marshal(newCfg)
+	if errMarshal != nil {
+		t.Fatalf("failed to marshal config: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(configPath, data, 0o644); errWrite != nil {
+		t.Fatalf("failed to write config file: %v", errWrite)
+	}
+	if errWrite := os.WriteFile(filepath.Join(tmpDir, "models.json"), []byte(`{invalid`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write invalid models.json: %v", errWrite)
+	}
+
+	callbackCalls := 0
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(*config.Config) bool { callbackCalls++; return true },
+	}
+	w.SetConfig(oldCfg)
+
+	if ok := w.reloadConfig(); ok {
+		t.Fatal("expected reloadConfig to reject invalid models.json")
+	}
+	if callbackCalls != 0 {
+		t.Fatalf("expected reload callback not to run, got %d calls", callbackCalls)
+	}
+
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.MaxRetryCredentials != 1 {
+		t.Fatalf("expected watcher config to remain old config, got %+v", w.config)
 	}
 }
 
@@ -1438,7 +1563,7 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	w := &Watcher{
 		configPath:     cfgPath,
 		authDir:        authDir,
-		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 

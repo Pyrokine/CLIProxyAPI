@@ -3,9 +3,11 @@ package misc
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,17 +16,34 @@ import (
 )
 
 const (
-	antigravityReleasesURL     = "https://antigravity-auto-updater-974169037036.us-central1.run.app/releases"
-	antigravityFallbackVersion = "1.21.9"
+	antigravityFallbackVersion = "2.1.0"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
 	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
 	AntigravityGoogAPIClientUA = "gl-node/22.21.1"
 )
 
+var (
+	antigravityHubGCSListURL = "https://storage.googleapis.com/antigravity-public/?prefix=antigravity-hub/&delimiter=/"
+	antigravityReleasesURL   = "https://antigravity-auto-updater-974169037036.us-central1.run.app/releases"
+)
+
 type antigravityRelease struct {
 	Version     string `json:"version"`
 	ExecutionID string `json:"execution_id"`
+}
+
+type antigravityHubGCSList struct {
+	CommonPrefixes []antigravityHubGCSPrefix `xml:"CommonPrefixes"`
+}
+
+type antigravityHubGCSPrefix struct {
+	Prefix string `xml:"Prefix"`
+}
+
+type antigravitySemVersion struct {
+	raw   string
+	parts [3]int
 }
 
 var (
@@ -34,7 +53,6 @@ var (
 	antigravityUpdaterOnce   sync.Once
 )
 
-// StartAntigravityVersionUpdater refreshes the cached Antigravity version in the background.
 func StartAntigravityVersionUpdater(ctx context.Context) {
 	antigravityUpdaterOnce.Do(
 		func() {
@@ -88,7 +106,6 @@ func refreshAntigravityVersion(ctx context.Context) {
 	log.WithError(errFetch).Debug("failed to refresh antigravity version, keeping cached value")
 }
 
-// AntigravityLatestVersion returns the latest cached Antigravity version.
 func AntigravityLatestVersion() string {
 	antigravityVersionMu.RLock()
 	if cachedAntigravityVersion != "" && time.Now().Before(antigravityVersionExpiry) {
@@ -101,7 +118,6 @@ func AntigravityLatestVersion() string {
 	return antigravityFallbackVersion
 }
 
-// AntigravityUserAgent returns the short Antigravity runtime User-Agent.
 func AntigravityUserAgent() string {
 	return fmt.Sprintf("antigravity/%s darwin/arm64", AntigravityLatestVersion())
 }
@@ -123,12 +139,10 @@ func antigravityBaseUserAgent(userAgent string) string {
 	return userAgent
 }
 
-// AntigravityRequestUserAgent returns the UA for generate, stream and model-list requests.
 func AntigravityRequestUserAgent(userAgent string) string {
 	return antigravityBaseUserAgent(userAgent)
 }
 
-// AntigravityLoadCodeAssistUserAgent returns the UA for loadCodeAssist requests.
 func AntigravityLoadCodeAssistUserAgent(userAgent string) string {
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
@@ -144,7 +158,6 @@ func AntigravityLoadCodeAssistUserAgent(userAgent string) string {
 	return antigravityBaseUserAgent(userAgent) + " " + AntigravityNodeAPIClientUA
 }
 
-// AntigravityVersionFromUserAgent extracts the Antigravity version from short or long UA forms.
 func AntigravityVersionFromUserAgent(userAgent string) string {
 	base := antigravityBaseUserAgent(userAgent)
 	lower := strings.ToLower(base)
@@ -168,6 +181,53 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 	}
 
 	client := &http.Client{Timeout: antigravityFetchTimeout}
+	version, errHub := fetchAntigravityHubGCSLatestVersion(ctx, client)
+	if errHub == nil {
+		return version, nil
+	}
+
+	log.WithError(errHub).Debug("failed to fetch antigravity hub GCS version, trying legacy releases API")
+	version, errLegacy := fetchAntigravityLegacyLatestVersion(ctx, client)
+	if errLegacy == nil {
+		return version, nil
+	}
+
+	return "", fmt.Errorf("fetch antigravity hub GCS version: %v; fetch legacy releases: %w", errHub, errLegacy)
+}
+
+func fetchAntigravityHubGCSLatestVersion(ctx context.Context, client *http.Client) (string, error) {
+	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityHubGCSListURL, nil)
+	if errReq != nil {
+		return "", fmt.Errorf("build antigravity hub GCS request: %w", errReq)
+	}
+
+	resp, errDo := client.Do(httpReq)
+	if errDo != nil {
+		return "", fmt.Errorf("fetch antigravity hub GCS list: %w", errDo)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Warn("antigravity hub GCS response body close error")
+		}
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("antigravity hub GCS list returned status %d", resp.StatusCode)
+	}
+
+	var list antigravityHubGCSList
+	if errDecode := xml.NewDecoder(resp.Body).Decode(&list); errDecode != nil {
+		return "", fmt.Errorf("decode antigravity hub GCS list: %w", errDecode)
+	}
+
+	prefixes := make([]string, 0, len(list.CommonPrefixes))
+	for _, commonPrefix := range list.CommonPrefixes {
+		prefixes = append(prefixes, commonPrefix.Prefix)
+	}
+	return latestAntigravityHubVersionFromPrefixes(prefixes)
+}
+
+func fetchAntigravityLegacyLatestVersion(ctx context.Context, client *http.Client) (string, error) {
 	httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodGet, antigravityReleasesURL, nil)
 	if errReq != nil {
 		return "", fmt.Errorf("build antigravity releases request: %w", errReq)
@@ -200,4 +260,94 @@ func fetchAntigravityLatestVersion(ctx context.Context) (string, error) {
 		return "", errors.New("antigravity releases API returned empty version")
 	}
 	return version, nil
+}
+
+func latestAntigravityHubVersionFromPrefixes(prefixes []string) (string, error) {
+	var best antigravitySemVersion
+	found := false
+
+	for _, prefix := range prefixes {
+		version, ok := antigravityHubVersionFromPrefix(prefix)
+		if !ok {
+			continue
+		}
+		semVersion, ok := parseAntigravitySemVersion(version)
+		if !ok {
+			continue
+		}
+		if !found || compareAntigravitySemVersion(semVersion, best) > 0 {
+			best = semVersion
+			found = true
+		}
+	}
+
+	if !found {
+		return "", errors.New("antigravity hub GCS list contained no version prefixes")
+	}
+	return best.raw, nil
+}
+
+func antigravityHubVersionFromPrefix(prefix string) (string, bool) {
+	const hubPrefix = "antigravity-hub/"
+
+	prefix = strings.TrimSpace(prefix)
+	prefix = strings.TrimSuffix(prefix, "/")
+	if !strings.HasPrefix(prefix, hubPrefix) {
+		return "", false
+	}
+
+	name := strings.TrimPrefix(prefix, hubPrefix)
+	separator := strings.LastIndex(name, "-")
+	if separator <= 0 || separator == len(name)-1 {
+		return "", false
+	}
+
+	version := strings.TrimSpace(name[:separator])
+	executionID := name[separator+1:]
+	if version == "" || executionID == "" {
+		return "", false
+	}
+	for _, ch := range executionID {
+		if ch < '0' || ch > '9' {
+			return "", false
+		}
+	}
+	return version, true
+}
+
+func parseAntigravitySemVersion(version string) (antigravitySemVersion, bool) {
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return antigravitySemVersion{}, false
+	}
+
+	semVersion := antigravitySemVersion{raw: version}
+	for i, part := range parts {
+		if part == "" {
+			return antigravitySemVersion{}, false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return antigravitySemVersion{}, false
+			}
+		}
+		value, errParse := strconv.Atoi(part)
+		if errParse != nil {
+			return antigravitySemVersion{}, false
+		}
+		semVersion.parts[i] = value
+	}
+	return semVersion, true
+}
+
+func compareAntigravitySemVersion(left antigravitySemVersion, right antigravitySemVersion) int {
+	for i := range left.parts {
+		if left.parts[i] > right.parts[i] {
+			return 1
+		}
+		if left.parts[i] < right.parts[i] {
+			return -1
+		}
+	}
+	return 0
 }

@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
@@ -47,23 +49,28 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                   *config.Config
-	configFilePath        string
-	mu                    sync.Mutex
-	attemptsMu            sync.Mutex
-	failedAttempts        map[string]*attemptInfo // keyed by client IP
-	rateLimitUnbanHistory []rateLimitUnbanHistoryEntry
-	authManager           *coreauth.Manager
-	usageStats            *usage.RequestStatistics
-	usagePersister        *usage.Persister
-	tokenStore            coreauth.Store
-	localPassword         string
-	allowRemoteOverride   bool
-	envSecret             string
-	logDir                string
-	postAuthHook          coreauth.PostAuthHook
-	quotaScheduler        *quota.Scheduler
-	internalToken         string // random token for internal localhost requests (quota scheduler)
+	cfg                     *config.Config
+	configFilePath          string
+	mu                      sync.Mutex
+	attemptsMu              sync.Mutex
+	failedAttempts          map[string]*attemptInfo // keyed by client IP
+	rateLimitUnbanHistory   []rateLimitUnbanHistoryEntry
+	authManager             *coreauth.Manager
+	usageStats              *usage.RequestStatistics
+	usagePersister          *usage.Persister
+	tokenStore              coreauth.Store
+	localPassword           string
+	allowRemoteOverride     bool
+	envSecret               string
+	logDir                  string
+	postAuthHook            coreauth.PostAuthHook
+	quotaScheduler          *quota.Scheduler
+	pluginHost              *pluginhost.Host
+	pluginRuntimeSync       func(context.Context, *config.Config)
+	modelCatalogRuntimeSync func(*config.Config)
+	accountInspection       *accountInspectionService
+	stateStore              *managementStateStore
+	internalToken           string // random token for internal localhost requests (quota scheduler)
 }
 
 // Option configures a Handler.
@@ -94,6 +101,20 @@ func WithQuotaScheduler(s *quota.Scheduler) Option {
 	return func(h *Handler) { h.quotaScheduler = s }
 }
 
+// WithPluginHost sets the dynamic plugin host used by management plugin endpoints.
+func WithPluginHost(host *pluginhost.Host) Option {
+	return func(h *Handler) { h.pluginHost = host }
+}
+
+// WithPluginRuntimeSync refreshes plugin runtime state after plugin config mutations.
+func WithPluginRuntimeSync(sync func(context.Context, *config.Config)) Option {
+	return func(h *Handler) { h.pluginRuntimeSync = sync }
+}
+
+func WithModelCatalogRuntimeSync(sync func(*config.Config)) Option {
+	return func(h *Handler) { h.modelCatalogRuntimeSync = sync }
+}
+
 // WithLogDir sets the log directory.
 func WithLogDir(dir string) Option {
 	return func(h *Handler) { h.logDir = dir }
@@ -119,6 +140,14 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	for _, opt := range opts {
 		opt(h)
 	}
+	stateStore, err := openManagementStateStore(configFilePath)
+	if err != nil {
+		log.WithError(err).Warn("management state persistence disabled")
+	} else {
+		h.stateStore = stateStore
+	}
+	h.accountInspection = newAccountInspectionService(h)
+	h.configureQuotaScheduler(h.quotaScheduler)
 
 	h.startAttemptCleanup()
 	return h
@@ -142,6 +171,57 @@ func (h *Handler) InternalToken() string {
 // Must be called before Server.Start() — not safe for concurrent use.
 func (h *Handler) SetQuotaScheduler(s *quota.Scheduler) {
 	h.quotaScheduler = s
+	h.configureQuotaScheduler(s)
+}
+
+func (h *Handler) Close() error {
+	if h == nil {
+		return nil
+	}
+	if h.accountInspection != nil {
+		h.accountInspection.close()
+	}
+	if h.stateStore != nil {
+		return h.stateStore.Close()
+	}
+	return nil
+}
+
+func (h *Handler) configureQuotaScheduler(s *quota.Scheduler) {
+	if h == nil || s == nil || h.stateStore == nil {
+		return
+	}
+	s.SetPersistence(h.saveQuotaEntry, h.deleteQuotaEntry)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	entries, err := h.stateStore.loadQuotaEntries(ctx)
+	if err != nil {
+		log.WithError(err).Warn("failed to load quota state")
+		return
+	}
+	s.Restore(entries)
+}
+
+func (h *Handler) saveQuotaEntry(entry quota.EntryState) {
+	if h == nil || h.stateStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.stateStore.saveQuotaEntry(ctx, entry); err != nil {
+		log.WithError(err).Warn("failed to save quota state")
+	}
+}
+
+func (h *Handler) deleteQuotaEntry(fileName string) {
+	if h == nil || h.stateStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.stateStore.deleteQuotaEntry(ctx, fileName); err != nil {
+		log.WithError(err).Warn("failed to delete quota state")
+	}
 }
 
 // startAttemptCleanup launches a background goroutine that periodically
@@ -486,18 +566,22 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !h.saveConfigLocked(c) {
+		return false
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	return true
+}
 
-	// Save current file as last-good before overwriting
+func (h *Handler) saveConfigLocked(c *gin.Context) bool {
 	if err := config.SaveLastGood(h.configFilePath); err != nil {
 		log.Errorf("failed to save last-good config: %v", err)
 	}
-
 	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
 		h.rollbackLastGood()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
 		return false
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true
 }
 

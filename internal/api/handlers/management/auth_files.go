@@ -334,6 +334,9 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
+				if websockets, ok := authFileBoolValueFromGJSON(gjson.GetBytes(data, "websockets")); ok {
+					fileData["websockets"] = websockets
+				}
 			}
 
 			files = append(files, fileData)
@@ -422,7 +425,56 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	if priority, ok := authPriorityValue(auth); ok {
+		entry["priority"] = priority
+	}
+	if note := authNoteValue(auth); note != "" {
+		entry["note"] = note
+	}
+	if websockets, ok := authWebsocketsValue(auth); ok {
+		entry["websockets"] = websockets
+	}
 	return entry
+}
+
+func authPriorityValue(auth *coreauth.Auth) (int, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if raw, ok := auth.Metadata["priority"]; ok {
+		switch v := raw.(type) {
+		case int:
+			return v, true
+		case int64:
+			return int(v), true
+		case float64:
+			return int(v), true
+		case string:
+			priority := strings.TrimSpace(v)
+			if parsed, err := strconv.Atoi(priority); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	if auth.Attributes != nil {
+		if parsed, err := strconv.Atoi(strings.TrimSpace(auth.Attributes["priority"])); err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func authNoteValue(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if raw, ok := auth.Metadata["note"].(string); ok {
+		return strings.TrimSpace(raw)
+	}
+	if auth.Attributes != nil {
+		return strings.TrimSpace(auth.Attributes["note"])
+	}
+	return ""
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -463,6 +515,69 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 		return nil
 	}
 	return result
+}
+
+func authWebsocketsValue(auth *coreauth.Auth) (bool, bool) {
+	if auth == nil {
+		return false, false
+	}
+	if auth.Attributes != nil {
+		if raw := strings.TrimSpace(auth.Attributes["websockets"]); raw != "" {
+			if parsed, errParse := strconv.ParseBool(raw); errParse == nil {
+				return parsed, true
+			}
+		}
+	}
+	if auth.Metadata == nil {
+		return false, false
+	}
+	return authFileBoolValue(auth.Metadata["websockets"])
+}
+
+func authFileBoolValue(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		parsed, errParse := strconv.ParseBool(strings.TrimSpace(typed))
+		if errParse == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func authFileBoolValueFromGJSON(value gjson.Result) (bool, bool) {
+	if !value.Exists() {
+		return false, false
+	}
+	switch value.Type {
+	case gjson.True:
+		return true, true
+	case gjson.False:
+		return false, true
+	case gjson.String:
+		parsed, errParse := strconv.ParseBool(strings.TrimSpace(value.String()))
+		if errParse == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func syncAuthFileWebsocketsAttribute(auth *coreauth.Auth) {
+	if auth == nil {
+		return
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	websockets, ok := authFileBoolValue(auth.Metadata["websockets"])
+	if !ok {
+		delete(auth.Attributes, "websockets")
+		return
+	}
+	auth.Attributes["websockets"] = strconv.FormatBool(websockets)
 }
 
 func authEmail(auth *coreauth.Auth) string {
@@ -648,7 +763,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					return
 				}
 				deleted++
-				h.disableAuth(ctx, full)
+				h.removeAuth(ctx, full)
 				h.syncQuotaSchedulerRemoval(full)
 			}
 		}
@@ -680,7 +795,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 				failed = append(failed, gin.H{"name": name, "error": err.Error()})
 				continue
 			}
-			h.disableAuth(ctx, full)
+			h.removeAuth(ctx, full)
 			h.syncQuotaSchedulerRemoval(full)
 			deletedFiles = append(deletedFiles, filepath.Base(full))
 		}
@@ -709,7 +824,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	h.disableAuth(ctx, full)
+	h.removeAuth(ctx, full)
 	h.syncQuotaSchedulerRemoval(full)
 	c.JSON(200, gin.H{"status": "ok", "deleted": 1, "files": []string{filepath.Base(full)}})
 }
@@ -755,6 +870,8 @@ func quotaCredentialTypeForProvider(provider string) (quota.CredentialType, bool
 		return quota.TypeAntigravity, true
 	case string(quota.TypeKimi):
 		return quota.TypeKimi, true
+	case string(quota.TypeXAI), "x-ai", "grok":
+		return quota.TypeXAI, true
 	default:
 		return "", false
 	}
@@ -891,6 +1008,9 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 			}
 		}
 	}
+	if websockets, ok := authFileBoolValue(metadata["websockets"]); ok {
+		attr["websockets"] = strconv.FormatBool(websockets)
+	}
 	proxyURL := ""
 	if rawProxyURL, ok := metadata["proxy_url"].(string); ok {
 		proxyURL = strings.TrimSpace(rawProxyURL)
@@ -926,6 +1046,7 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
 	}
+	ctx = coreauth.WithAllowAuthRecreate(ctx)
 	allAuths := h.authManager.List()
 	existingByID, hasExistingByID := h.authManager.GetByID(authID)
 	var existingByPath *coreauth.Auth
@@ -1045,12 +1166,13 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string            `json:"name"`
-		Prefix   *string           `json:"prefix"`
-		ProxyURL *string           `json:"proxy_url"`
-		Priority *int              `json:"priority"`
-		Headers  map[string]string `json:"headers"`
-		Note     *string           `json:"note"`
+		Name       string            `json:"name"`
+		Prefix     *string           `json:"prefix"`
+		ProxyURL   *string           `json:"proxy_url"`
+		Priority   *int              `json:"priority"`
+		Headers    map[string]string `json:"headers"`
+		Note       *string           `json:"note"`
+		Websockets *bool             `json:"websockets"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1115,10 +1237,15 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
+		if targetAuth.Attributes == nil {
+			targetAuth.Attributes = make(map[string]string)
+		}
 		if *req.Priority == 0 {
 			delete(targetAuth.Metadata, "priority")
+			delete(targetAuth.Attributes, "priority")
 		} else {
 			targetAuth.Metadata["priority"] = *req.Priority
+			targetAuth.Attributes["priority"] = strconv.Itoa(*req.Priority)
 		}
 		changed = true
 	}
@@ -1169,6 +1296,14 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 		changed = true
 	}
+	if req.Websockets != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		targetAuth.Metadata["websockets"] = *req.Websockets
+		syncAuthFileWebsocketsAttribute(targetAuth)
+		changed = true
+	}
 
 	if !changed {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
@@ -1185,23 +1320,30 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-func (h *Handler) disableAuth(ctx context.Context, id string) {
+func (h *Handler) removeAuth(ctx context.Context, id string) {
 	if h == nil || h.authManager == nil {
 		return
 	}
-	authID := h.authIDForPath(id)
-	if authID == "" {
-		authID = strings.TrimSpace(id)
-	}
-	if authID == "" {
+	trimmedID := strings.TrimSpace(id)
+	if trimmedID == "" {
 		return
 	}
-	if auth, ok := h.authManager.GetByID(authID); ok {
-		auth.Disabled = true
-		auth.Status = coreauth.StatusDisabled
-		auth.StatusMessage = "removed via management API"
-		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+	removed := make(map[string]struct{})
+	for _, auth := range h.authManager.List() {
+		if auth == nil || strings.TrimSpace(auth.ID) == "" {
+			continue
+		}
+		if authMatchesPath(auth, trimmedID) || strings.EqualFold(auth.ID, trimmedID) {
+			h.authManager.Remove(ctx, auth.ID)
+			removed[auth.ID] = struct{}{}
+		}
+	}
+	authID := h.authIDForPath(trimmedID)
+	if authID == "" {
+		authID = trimmedID
+	}
+	if _, ok := removed[authID]; !ok {
+		h.authManager.Remove(ctx, authID)
 	}
 }
 
@@ -1554,12 +1696,16 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			projects, errAll := onboardAllGeminiProjects(ctx, gemClient, &ts)
 			if errAll != nil {
 				log.Errorf("Failed to complete Gemini CLI onboarding: %v", errAll)
-				setOAuthSessionError(state, "Failed to complete Gemini CLI onboarding")
+				setOAuthSessionError(
+					state, oauthSessionErrorWithCause("Failed to complete Gemini CLI onboarding", errAll),
+				)
 				return
 			}
 			if errVerify := ensureGeminiProjectsEnabled(ctx, gemClient, projects); errVerify != nil {
 				log.Errorf("Failed to verify Cloud AI API status: %v", errVerify)
-				setOAuthSessionError(state, "Failed to verify Cloud AI API status")
+				setOAuthSessionError(
+					state, oauthSessionErrorWithCause("Failed to verify Cloud AI API status", errVerify),
+				)
 				return
 			}
 			ts.ProjectID = strings.Join(projects, ",")
@@ -1568,7 +1714,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			ts.Auto = false
 			if errSetup := geminiAuth.PerformCLISetup(ctx, gemClient, &ts, "", nil); errSetup != nil {
 				log.Errorf("Google One auto-discovery failed: %v", errSetup)
-				setOAuthSessionError(state, "Google One auto-discovery failed")
+				setOAuthSessionError(state, oauthSessionErrorWithCause("Google One auto-discovery failed", errSetup))
 				return
 			}
 			if strings.TrimSpace(ts.ProjectID) == "" {
@@ -1579,7 +1725,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			isChecked, errCheck := geminiAuth.CheckCloudAPIIsEnabled(ctx, gemClient, ts.ProjectID)
 			if errCheck != nil {
 				log.Errorf("Failed to verify Cloud AI API status: %v", errCheck)
-				setOAuthSessionError(state, "Failed to verify Cloud AI API status")
+				setOAuthSessionError(
+					state, oauthSessionErrorWithCause("Failed to verify Cloud AI API status", errCheck),
+				)
 				return
 			}
 			ts.Checked = isChecked
@@ -1591,7 +1739,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 		} else {
 			if errEnsure := ensureGeminiProjectAndOnboard(ctx, gemClient, &ts, requestedProjectID); errEnsure != nil {
 				log.Errorf("Failed to complete Gemini CLI onboarding: %v", errEnsure)
-				setOAuthSessionError(state, "Failed to complete Gemini CLI onboarding")
+				setOAuthSessionError(
+					state, oauthSessionErrorWithCause("Failed to complete Gemini CLI onboarding", errEnsure),
+				)
 				return
 			}
 
@@ -1604,7 +1754,9 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			isChecked, errCheck := geminiAuth.CheckCloudAPIIsEnabled(ctx, gemClient, ts.ProjectID)
 			if errCheck != nil {
 				log.Errorf("Failed to verify Cloud AI API status: %v", errCheck)
-				setOAuthSessionError(state, "Failed to verify Cloud AI API status")
+				setOAuthSessionError(
+					state, oauthSessionErrorWithCause("Failed to verify Cloud AI API status", errCheck),
+				)
 				return
 			}
 			ts.Checked = isChecked

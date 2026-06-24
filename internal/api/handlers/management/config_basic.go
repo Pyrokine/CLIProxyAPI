@@ -25,9 +25,9 @@ const latestReleaseUserAgent = "CLIProxyAPI"
 
 // minPanelVersion is the minimum management-panel (frontend) version this server
 // is compatible with. When the panel reports a lower version via __APP_VERSION__,
-// the frontend renders a compatibility banner. Bump when introducing breaking
-// changes to management API response shapes.
-const minPanelVersion = "1.7.16-aug.1"
+// the frontend renders a compatibility banner. Bump when management API changes
+// require matching panel behavior.
+const minPanelVersion = "1.15.3-aug.1"
 
 type remoteManagementConfigResponse struct {
 	AllowRemote            bool   `json:"allow-remote"`

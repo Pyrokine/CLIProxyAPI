@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -164,4 +165,55 @@ func TestLoadConfig_RemoteManagementDefaults(t *testing.T) {
 	if cfg.RemoteManagement.AutoUpdateCPA {
 		t.Fatal("expected auto-update-cpa to default to false")
 	}
+}
+
+func TestValidateConfigCoversPanelManagedFields(t *testing.T) {
+	cfg := &Config{
+		SDKConfig:            SDKConfig{APIKeys: []string{"valid-api-key"}},
+		Port:                 8317,
+		AutoRefreshInterval:  -1,
+		ModelRefreshInterval: -1,
+		CORSAllowedOrigins:   []string{"not-url", ""},
+		QuotaRefresh: QuotaRefresh{
+			Enabled:     true,
+			Interval:    10,
+			MaxInterval: 5,
+		},
+		Routing: routingConfig{
+			Strategy:           "bad",
+			SessionAffinityTTL: "wat",
+		},
+		Plugins: PluginsConfig{
+			Configs: map[string]PluginInstanceConfig{
+				"bad id": {},
+			},
+		},
+	}
+
+	warnings := ValidateConfig(cfg)
+	for _, want := range []string{
+		"auto-refresh-interval -1 is negative",
+		"model-refresh-interval -1 is negative",
+		"cors-allowed-origins[0]",
+		"cors-allowed-origins[1] is empty",
+		"quota-refresh.interval 10 is below minimum 60 seconds",
+		"quota-refresh.max-interval 5 is below minimum 300 seconds",
+		"quota-refresh.max-interval is smaller than quota-refresh.interval",
+		"routing.strategy \"bad\" is invalid",
+		"routing.session-affinity-ttl \"wat\" is not a positive duration",
+		"plugins.configs contains invalid plugin id \"bad id\"",
+	} {
+		if !hasWarningContaining(warnings, want) {
+			t.Fatalf("warnings missing %q: %#v", want, warnings)
+		}
+	}
+}
+
+func hasWarningContaining(warnings []string, want string) bool {
+	for _, warning := range warnings {
+		if strings.Contains(warning, want) {
+			return true
+		}
+	}
+	return false
 }

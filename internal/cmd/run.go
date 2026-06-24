@@ -12,6 +12,8 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/safemode"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,10 +27,33 @@ import (
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
+	StartServiceWithPluginHost(cfg, configPath, localPassword, nil)
+}
+
+func StartExampleAPIKeyWarningServer(cfg *config.Config, configPath string, keys []string) {
+	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	log.Errorf(
+		"unsafe example API key configured; normal API server disabled; open %s to view setup guidance",
+		safemode.WarningServerURL(cfg),
+	)
+	if err := safemode.StartExampleAPIKeyWarningServer(ctxSignal, cfg, configPath, keys); err != nil && !errors.Is(
+		err, context.Canceled,
+	) {
+		log.Errorf("example API key warning server exited with error: %v", err)
+	}
+}
+
+// StartServiceWithPluginHost builds and runs the proxy service with a shared plugin host.
+func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
+	if host != nil {
+		builder = builder.WithPluginHost(host)
+	}
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -65,10 +90,26 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	cancel func(),
 	done <-chan struct{},
 ) {
+	return StartServiceBackgroundWithPluginHost(cfg, configPath, localPassword, nil)
+}
+
+// StartServiceBackgroundWithPluginHost starts the proxy service with a shared plugin host.
+func StartServiceBackgroundWithPluginHost(
+	cfg *config.Config,
+	configPath string,
+	localPassword string,
+	host *pluginhost.Host,
+) (
+	cancel func(),
+	done <-chan struct{},
+) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
 		WithLocalManagementPassword(localPassword)
+	if host != nil {
+		builder = builder.WithPluginHost(host)
+	}
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 	doneCh := make(chan struct{})

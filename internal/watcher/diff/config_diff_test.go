@@ -7,6 +7,20 @@ import (
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
+func TestBuildConfigChangeDetailsIncludesPayloadChanges(t *testing.T) {
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{
+		Payload: config.PayloadConfig{
+			Default: []config.PayloadRule{{Params: map[string]any{"temperature": 0.1}}},
+			Filter:  []config.PayloadFilterRule{{Params: []string{"tools"}}},
+		},
+	}
+
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "payload.default: updated (0 -> 1 rules)")
+	expectContains(t, changes, "payload.filter: updated (0 -> 1 rules)")
+}
+
 func TestBuildConfigChangeDetails(t *testing.T) {
 	oldCfg := &config.Config{
 		Port:    8080,

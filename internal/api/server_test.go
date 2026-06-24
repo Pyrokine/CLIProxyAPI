@@ -14,6 +14,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
 	proxyconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
@@ -47,6 +48,164 @@ func newTestServer(t *testing.T) *Server {
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func TestRegisteredManagementRouteKeysIncludeFixedPluginRoutes(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-management-password")
+	server := newTestServer(t)
+	keys := server.registeredManagementRouteKeys()
+	for _, key := range []string{
+		"GET /v0/management/plugins",
+		"PATCH /v0/management/plugins/:id/enabled",
+		"PUT /v0/management/plugins/:id/config",
+		"PATCH /v0/management/plugins/:id/config",
+	} {
+		if _, ok := keys[key]; !ok {
+			t.Fatalf("registeredManagementRouteKeys() missing %s", key)
+		}
+	}
+}
+
+func TestPluginResourcePrefixRequiresManagementAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := newTestServer(t)
+	server.pluginHost = pluginhost.New()
+	server.mgmt.SetLocalPassword("test-management-password")
+	server.managementRoutesEnabled.Store(true)
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401; body=%s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Management-Key", "test-management-password")
+	rr = httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("authenticated missing route status = %d, want 404; body=%s", rr.Code, rr.Body.String())
+	}
+	if cookies := rr.Result().Cookies(); len(cookies) != 0 {
+		t.Fatalf("authenticated missing route set cookies: %#v", cookies)
+	}
+}
+
+func TestPluginResourceSessionCookieSkipsManagementKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := newTestServer(t)
+	server.pluginHost = pluginhost.New()
+	server.mgmt.SetLocalPassword("test-management-password")
+	server.managementRoutesEnabled.Store(true)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
+	if !server.issuePluginResourceSession(c) {
+		t.Fatal("issuePluginResourceSession() = false")
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != pluginResourceSessionCookie {
+		t.Fatalf("cookies = %#v, want one plugin resource session cookie", cookies)
+	}
+	if cookies[0].Path != "/v0/resource/plugins/" || !cookies[0].HttpOnly {
+		t.Fatalf("cookie attributes = %#v, want resource path and HttpOnly", cookies[0])
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.AddCookie(cookies[0])
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("cookie-authenticated missing route status = %d, want 404; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPluginResourceExpiredSessionCookieRequiresManagementKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := newTestServer(t)
+	server.pluginHost = pluginhost.New()
+	server.mgmt.SetLocalPassword("test-management-password")
+	server.managementRoutesEnabled.Store(true)
+
+	server.pluginResourceSessionMu.Lock()
+	server.pluginResourceSessionTokens["expired"] = pluginResourceSession{
+		IdleExpiresAt:     time.Now().Add(-time.Minute),
+		AbsoluteExpiresAt: time.Now().Add(pluginResourceSessionAbsoluteTTL),
+	}
+	server.pluginResourceSessionMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.AddCookie(&http.Cookie{Name: pluginResourceSessionCookie, Value: "expired"})
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expired cookie status = %d, want 401; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPluginResourceAbsoluteExpiredSessionCookieRequiresManagementKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := newTestServer(t)
+	server.pluginHost = pluginhost.New()
+	server.mgmt.SetLocalPassword("test-management-password")
+	server.managementRoutesEnabled.Store(true)
+
+	server.pluginResourceSessionMu.Lock()
+	server.pluginResourceSessionTokens["absolute-expired"] = pluginResourceSession{
+		IdleExpiresAt:     time.Now().Add(pluginResourceSessionTTL),
+		AbsoluteExpiresAt: time.Now().Add(-time.Minute),
+	}
+	server.pluginResourceSessionMu.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.AddCookie(&http.Cookie{Name: pluginResourceSessionCookie, Value: "absolute-expired"})
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("absolute expired cookie status = %d, want 401; body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPluginResourceSessionRenewalIsCappedByAbsoluteExpiry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	server := newTestServer(t)
+	now := time.Now()
+	absoluteExpiresAt := now.Add(time.Minute)
+	server.pluginResourceSessionMu.Lock()
+	server.pluginResourceSessionTokens["near-absolute"] = pluginResourceSession{
+		IdleExpiresAt:     now.Add(pluginResourceSessionTTL),
+		AbsoluteExpiresAt: absoluteExpiresAt,
+	}
+	server.pluginResourceSessionMu.Unlock()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/v0/resource/plugins/resource/status", nil)
+	c.Request.AddCookie(&http.Cookie{Name: pluginResourceSessionCookie, Value: "near-absolute"})
+
+	if !server.pluginResourceSessionAuthenticated(c) {
+		t.Fatal("pluginResourceSessionAuthenticated() = false, want true")
+	}
+	server.pluginResourceSessionMu.Lock()
+	session := server.pluginResourceSessionTokens["near-absolute"]
+	server.pluginResourceSessionMu.Unlock()
+	if session.IdleExpiresAt.After(absoluteExpiresAt) {
+		t.Fatalf("idle expiry = %s, want not after absolute expiry %s", session.IdleExpiresAt, absoluteExpiresAt)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != pluginResourceSessionCookie {
+		t.Fatalf("renewal cookies = %#v, want session cookie", cookies)
+	}
+	if cookies[0].MaxAge > int(time.Minute.Seconds()) {
+		t.Fatalf("renewed cookie MaxAge = %d, want capped by absolute expiry", cookies[0].MaxAge)
+	}
 }
 
 func TestAmpProviderModelRoutes(t *testing.T) {
@@ -116,6 +275,43 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestPluginResourceCORSAllowsCredentialsForOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(corsMiddleware(nil))
+	engine.GET("/v0/resource/plugins/demo/status", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	engine.GET("/v0/management/config", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	req := httptest.NewRequest(http.MethodOptions, "/v0/resource/plugins/demo/status", nil)
+	req.Header.Set("Origin", "https://panel.example.com")
+	req.Header.Set("Access-Control-Request-Headers", "authorization")
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want 204", rr.Code)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://panel.example.com" {
+		t.Fatalf("plugin resource ACAO = %q, want request origin", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("plugin resource ACAC = %q, want true", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); got != "authorization" {
+		t.Fatalf("plugin resource ACAH = %q, want requested header", got)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.Header.Set("Origin", "https://panel.example.com")
+	rr = httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("management ACAO = %q, want *", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("management ACAC = %q, want empty", got)
 	}
 }
 

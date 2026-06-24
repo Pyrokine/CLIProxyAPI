@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,8 +82,9 @@ func (w *Watcher) refreshAuthState(force bool) {
 	w.clientsMutex.RLock()
 	cfg := w.config
 	authDir := w.authDir
+	parser := w.pluginAuthParser
 	w.clientsMutex.RUnlock()
-	auths := snapshotCoreAuthsFunc(cfg, authDir)
+	auths := snapshotCoreAuthsFunc(cfg, authDir, parser)
 	w.clientsMutex.Lock()
 	if len(w.runtimeAuths) > 0 {
 		for _, a := range w.runtimeAuths {
@@ -111,7 +113,15 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 		}
 		updates := make([]AuthUpdate, 0, len(newState))
 		for id, auth := range newState {
-			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: auth.Clone()})
+			updates = append(
+				updates,
+				AuthUpdate{
+					Action:            AuthUpdateActionAdd,
+					ID:                id,
+					Auth:              auth.Clone(),
+					AllowAuthRecreate: allowAuthRecreateForUpdate(auth),
+				},
+			)
 		}
 		return updates
 	}
@@ -122,9 +132,25 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 	updates := make([]AuthUpdate, 0, len(newState)+len(w.currentAuths))
 	for id, auth := range newState {
 		if existing, ok := w.currentAuths[id]; !ok {
-			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: auth.Clone()})
+			updates = append(
+				updates,
+				AuthUpdate{
+					Action:            AuthUpdateActionAdd,
+					ID:                id,
+					Auth:              auth.Clone(),
+					AllowAuthRecreate: allowAuthRecreateForUpdate(auth),
+				},
+			)
 		} else if force || !authEqual(existing, auth) {
-			updates = append(updates, AuthUpdate{Action: AuthUpdateActionModify, ID: id, Auth: auth.Clone()})
+			updates = append(
+				updates,
+				AuthUpdate{
+					Action:            AuthUpdateActionModify,
+					ID:                id,
+					Auth:              auth.Clone(),
+					AllowAuthRecreate: allowAuthRecreateForUpdate(auth),
+				},
+			)
 		}
 	}
 	for id := range w.currentAuths {
@@ -241,6 +267,13 @@ func authEqual(a, b *coreauth.Auth) bool {
 	return reflect.DeepEqual(normalizeAuth(a), normalizeAuth(b))
 }
 
+func allowAuthRecreateForUpdate(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
+}
+
 func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	if a == nil {
 		return nil
@@ -255,12 +288,13 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	return clone
 }
 
-func snapshotCoreAuths(cfg *config.Config, authDir string) []*coreauth.Auth {
+func snapshotCoreAuths(cfg *config.Config, authDir string, parser synthesizer.PluginAuthParser) []*coreauth.Auth {
 	ctx := &synthesizer.SynthesisContext{
-		Config:      cfg,
-		AuthDir:     authDir,
-		Now:         time.Now(),
-		IDGenerator: synthesizer.NewStableIDGenerator(),
+		Config:           cfg,
+		AuthDir:          authDir,
+		Now:              time.Now(),
+		IDGenerator:      synthesizer.NewStableIDGenerator(),
+		PluginAuthParser: parser,
 	}
 
 	var out []*coreauth.Auth

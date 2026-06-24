@@ -665,6 +665,7 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 		"email":      "multi@example.com",
 		"project_id": "project-a, project-b, project-c",
 		"priority":   " 10 ",
+		"note":       " shared account ",
 	}
 	data, _ := json.Marshal(authData)
 	err := os.WriteFile(filepath.Join(tempDir, "gemini-multi.json"), data, 0644)
@@ -714,6 +715,9 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 		}
 		if gotPriority := v.Attributes["priority"]; gotPriority != "10" {
 			t.Errorf("expected virtual %d priority 10, got %q", i, gotPriority)
+		}
+		if gotNote := v.Metadata["note"]; gotNote != "shared account" {
+			t.Errorf("expected virtual %d note shared account, got %#v", i, gotNote)
 		}
 	}
 }

@@ -6,8 +6,10 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +34,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
@@ -51,16 +54,29 @@ import (
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
 
+const (
+	pluginResourceSessionCookie      = "cpa_plugin_resource_session"
+	pluginResourceSessionTTL         = 5 * time.Minute
+	pluginResourceSessionAbsoluteTTL = 30 * time.Minute
+)
+
+type pluginResourceSession struct {
+	IdleExpiresAt     time.Time
+	AbsoluteExpiresAt time.Time
+}
+
 type serverOptionConfig struct {
-	extraMiddleware      []gin.HandlerFunc
-	engineConfigurator   func(*gin.Engine)
-	routerConfigurator   func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
-	requestLoggerFactory func(*config.Config, string) logging.RequestLogger
-	localPassword        string
-	keepAliveEnabled     bool
-	keepAliveTimeout     time.Duration
-	keepAliveOnTimeout   func()
-	postAuthHook         auth.PostAuthHook
+	extraMiddleware         []gin.HandlerFunc
+	engineConfigurator      func(*gin.Engine)
+	routerConfigurator      func(*gin.Engine, *handlers.BaseAPIHandler, *config.Config)
+	requestLoggerFactory    func(*config.Config, string) logging.RequestLogger
+	localPassword           string
+	keepAliveEnabled        bool
+	keepAliveTimeout        time.Duration
+	keepAliveOnTimeout      func()
+	postAuthHook            auth.PostAuthHook
+	pluginHost              *pluginhost.Host
+	modelCatalogRuntimeSync func(*config.Config)
 }
 
 // ServerOption customises HTTP server construction.
@@ -69,9 +85,28 @@ type ServerOption func(*serverOptionConfig)
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
-	logger := logging.NewFileRequestLogger(cfg.RequestLog, logsDir, configDir, cfg.ErrorLogsMaxFiles)
-	logger.SetHomeEnabled(cfg != nil && cfg.Home.Enabled)
+	enabled := false
+	errorLogsMaxFiles := 0
+	homeEnabled := false
+	if cfg != nil {
+		enabled = cfg.RequestLog && !cfg.CommercialMode
+		errorLogsMaxFiles = cfg.ErrorLogsMaxFiles
+		homeEnabled = cfg.Home.Enabled
+	}
+	logger := logging.NewFileRequestLogger(enabled, logsDir, configDir, errorLogsMaxFiles)
+	logger.SetHomeEnabled(homeEnabled)
 	return logger
+}
+
+func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
+	if cfg == nil {
+		return nil
+	}
+	sdkCfg := cfg.SDKConfig
+	if cfg.CommercialMode {
+		sdkCfg.RequestLog = false
+	}
+	return &sdkCfg
 }
 
 // WithMiddleware appends additional Gin middleware during server construction.
@@ -128,6 +163,19 @@ func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 	}
 }
 
+// WithPluginHost wires dynamic plugin management endpoints to the plugin host.
+func WithPluginHost(host *pluginhost.Host) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.pluginHost = host
+	}
+}
+
+func WithModelCatalogRuntimeSync(sync func(*config.Config)) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.modelCatalogRuntimeSync = sync
+	}
+}
+
 // Server represents the main API server.
 // It encapsulates the Gin engine, HTTP server, handlers, and configuration.
 type Server struct {
@@ -160,8 +208,9 @@ type Server struct {
 	authRateLimiter *access.AuthRateLimiter
 
 	// requestLogger is the request logger instance for dynamic configuration updates.
-	requestLogger logging.RequestLogger
-	loggerToggle  func(bool)
+	requestLogger                logging.RequestLogger
+	loggerToggle                 func(bool)
+	requestLoggingRuntimeEnabled *atomic.Bool
 
 	// configFilePath is the absolute path to the YAML config file for persistence.
 	configFilePath string
@@ -178,8 +227,16 @@ type Server struct {
 	// management handler
 	mgmt *managementHandlers.Handler
 
+	quotaScheduler *quota.Scheduler
+
 	// ampModule is the Amp routing module for model mapping hot-reload
 	ampModule *ampmodule.Module
+
+	// pluginHost owns dynamic plugin Management API route dispatch.
+	pluginHost *pluginhost.Host
+
+	pluginResourceSessionMu     sync.Mutex
+	pluginResourceSessionTokens map[string]pluginResourceSession
 
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
@@ -246,15 +303,20 @@ func NewServer(
 	// Resolve logs directory relative to the configuration file directory.
 	var requestLogger logging.RequestLogger
 	var toggle func(bool)
-	if !cfg.CommercialMode {
-		if optionState.requestLoggerFactory != nil {
-			requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
-		}
-		if requestLogger != nil {
-			engine.Use(middleware.RequestLoggingMiddleware(requestLogger))
-			if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
-				toggle = setter.SetEnabled
-			}
+	requestLoggingRuntimeEnabled := &atomic.Bool{}
+	requestLoggingRuntimeEnabled.Store(!cfg.CommercialMode)
+	if optionState.requestLoggerFactory != nil {
+		requestLogger = optionState.requestLoggerFactory(cfg, configFilePath)
+	}
+	if requestLogger != nil {
+		engine.Use(
+			middleware.RequestLoggingMiddleware(
+				requestLogger,
+				middleware.RequestLoggingOptions{RuntimeEnabled: requestLoggingRuntimeEnabled.Load},
+			),
+		)
+		if setter, ok := requestLogger.(interface{ SetEnabled(bool) }); ok {
+			toggle = setter.SetEnabled
 		}
 	}
 
@@ -270,18 +332,26 @@ func NewServer(
 
 	// Create server instance
 	authRateLimiter := access.NewAuthRateLimiter()
+	baseHandlers := handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager)
+	if optionState.pluginHost != nil {
+		baseHandlers.SetPluginHost(optionState.pluginHost)
+		optionState.pluginHost.SetModelExecutor(baseHandlers)
+	}
 	s := &Server{
-		engine:              engine,
-		handlers:            handlers.NewBaseAPIHandlers(&cfg.SDKConfig, authManager),
-		cfg:                 cfg,
-		accessManager:       accessManager,
-		authRateLimiter:     authRateLimiter,
-		requestLogger:       requestLogger,
-		loggerToggle:        toggle,
-		configFilePath:      configFilePath,
-		currentPath:         wd,
-		envManagementSecret: envManagementSecret,
-		wsRoutes:            make(map[string]struct{}),
+		engine:                       engine,
+		handlers:                     baseHandlers,
+		cfg:                          cfg,
+		accessManager:                accessManager,
+		authRateLimiter:              authRateLimiter,
+		requestLogger:                requestLogger,
+		loggerToggle:                 toggle,
+		requestLoggingRuntimeEnabled: requestLoggingRuntimeEnabled,
+		configFilePath:               configFilePath,
+		currentPath:                  wd,
+		envManagementSecret:          envManagementSecret,
+		wsRoutes:                     make(map[string]struct{}),
+		pluginHost:                   optionState.pluginHost,
+		pluginResourceSessionTokens:  make(map[string]pluginResourceSession),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -295,7 +365,32 @@ func NewServer(
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	// Initialize management handler first (to get internalToken for quota scheduler)
-	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
+	s.mgmt = managementHandlers.NewHandler(
+		cfg,
+		configFilePath,
+		authManager,
+		managementHandlers.WithPluginHost(optionState.pluginHost),
+		managementHandlers.WithPluginRuntimeSync(
+			func(ctx context.Context, nextCfg *config.Config) {
+				if optionState.pluginHost == nil {
+					return
+				}
+				optionState.pluginHost.ApplyConfig(ctx, nextCfg)
+				s.refreshPluginManagementRoutes()
+			},
+		),
+		managementHandlers.WithModelCatalogRuntimeSync(
+			func(nextCfg *config.Config) {
+				if nextCfg != nil {
+					s.cfg = nextCfg
+				}
+				if optionState.modelCatalogRuntimeSync != nil {
+					optionState.modelCatalogRuntimeSync(nextCfg)
+				}
+				s.handlers.UpdateClients(effectiveSDKConfig(s.cfg))
+			},
+		),
+	)
 
 	// Create quota scheduler
 	quotaCfg := quota.Config{
@@ -328,27 +423,20 @@ func NewServer(
 				return fetchAntigravityQuota(localAPICall, entry.AuthIndex)
 			case quota.TypeKimi:
 				return fetchKimiQuota(localAPICall, entry.AuthIndex)
+			case quota.TypeXAI:
+				return fetchXAIQuota(localAPICall, entry.AuthIndex)
 			default:
 				return nil, fmt.Errorf("quota fetch not implemented for type %s", entry.Type)
 			}
 		},
 	)
-	s.mgmt.SetQuotaScheduler(quotaScheduler)
-
-	// Register existing auth files with quota scheduler
-	if cfg.AuthDir != "" {
+	if authManager != nil {
+		registerAuthManagerForQuota(quotaScheduler, authManager)
+	} else if cfg.AuthDir != "" {
 		registerAuthFilesForQuota(quotaScheduler, cfg.AuthDir)
 	}
-
-	// Sync initial disabled state from auth manager so auto-refresh skips
-	// pre-existing disabled/banned credentials on startup.
-	if authManager != nil {
-		for _, a := range authManager.List() {
-			if a != nil && a.Disabled && a.FileName != "" {
-				quotaScheduler.SetDisabled(a.FileName, true)
-			}
-		}
-	}
+	s.mgmt.SetQuotaScheduler(quotaScheduler)
+	s.quotaScheduler = quotaScheduler
 
 	if quotaCfg.Enabled {
 		quotaScheduler.Start()
@@ -397,6 +485,8 @@ func NewServer(
 	if hasManagementSecret {
 		s.registerManagementRoutes()
 	}
+	s.refreshPluginManagementRoutes()
+	engine.NoRoute(s.pluginManagementNoRoute)
 
 	if optionState.keepAliveEnabled {
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
@@ -421,7 +511,9 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 		}
 		if c != nil && c.Request != nil {
 			path := c.Request.URL.Path
-			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || path == "/management.html" {
+			if strings.HasPrefix(path, "/v0/management/") || path == "/v0/management" || strings.HasPrefix(
+				path, "/v0/resource/plugins/",
+			) || path == "/management.html" {
 				c.Next()
 				return
 			}
@@ -679,6 +771,17 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/quota/config", s.mgmt.GetQuotaConfig)
 		mgmt.PUT("/quota/config", s.mgmt.PutQuotaConfig)
 
+		mgmt.GET("/account-inspection/status", s.mgmt.GetAccountInspectionStatus)
+		mgmt.GET("/account-inspection/schedule", s.mgmt.GetAccountInspectionSchedule)
+		mgmt.PUT("/account-inspection/schedule", s.mgmt.PutAccountInspectionSchedule)
+		mgmt.PATCH("/account-inspection/schedule", s.mgmt.PutAccountInspectionSchedule)
+		mgmt.GET("/account-inspection/results", s.mgmt.GetAccountInspectionResults)
+		mgmt.GET("/account-inspection/logs", s.mgmt.GetAccountInspectionLogs)
+		mgmt.POST("/account-inspection/run", s.mgmt.PostAccountInspectionRun)
+		mgmt.POST("/account-inspection/inspect-one", s.mgmt.PostAccountInspectionInspectOne)
+		mgmt.POST("/account-inspection/stop", s.mgmt.PostAccountInspectionStop)
+		mgmt.POST("/account-inspection/refresh-token", s.mgmt.PostAccountInspectionRefreshToken)
+
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
@@ -781,8 +884,20 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
+		mgmt.GET("/plugins", s.mgmt.ListPlugins)
+		mgmt.PATCH("/plugins/:id/enabled", s.mgmt.PatchPluginEnabled)
+		mgmt.PUT("/plugins/:id/config", s.mgmt.PutPluginConfig)
+		mgmt.PATCH("/plugins/:id/config", s.mgmt.PatchPluginConfig)
+
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
+		mgmt.GET("/runtime-models", s.mgmt.GetRuntimeModels)
+		mgmt.GET("/model-catalog", s.mgmt.GetModelCatalog)
+		mgmt.PUT("/model-catalog", s.mgmt.PutModelCatalog)
+		mgmt.PATCH("/model-catalog", s.mgmt.PatchModelCatalogModel)
+		mgmt.DELETE("/model-catalog", s.mgmt.DeleteModelCatalogModel)
+		mgmt.GET("/model-catalog/default-update", s.mgmt.GetModelCatalogDefaultUpdate)
+		mgmt.POST("/model-catalog/default-update/apply", s.mgmt.ApplyModelCatalogDefaultUpdate)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/models-catalog-meta", s.mgmt.GetModelsCatalogMeta)
 		mgmt.POST("/models-catalog-refresh", s.mgmt.PostModelsCatalogRefresh)
@@ -810,6 +925,227 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/oauth-callback", s.mgmt.PostOAuthCallback)
 		mgmt.GET("/get-auth-status", s.mgmt.GetAuthStatus)
 	}
+}
+
+func (s *Server) refreshPluginManagementRoutes() {
+	if s == nil || s.pluginHost == nil || s.engine == nil {
+		return
+	}
+	s.pluginHost.RegisterManagementRoutes(context.Background(), s.registeredManagementRouteKeys())
+}
+
+// RefreshPluginManagementRoutes rebuilds plugin-owned Management API routes.
+func (s *Server) RefreshPluginManagementRoutes() {
+	s.refreshPluginManagementRoutes()
+}
+
+func (s *Server) registeredManagementRouteKeys() map[string]struct{} {
+	out := make(map[string]struct{})
+	if s == nil || s.engine == nil {
+		return out
+	}
+	for _, route := range s.engine.Routes() {
+		if strings.HasPrefix(route.Path, "/v0/management/") || route.Path == "/v0/management" {
+			out[strings.ToUpper(strings.TrimSpace(route.Method))+" "+route.Path] = struct{}{}
+		}
+	}
+	return out
+}
+
+func (s *Server) pluginManagementNoRoute(c *gin.Context) {
+	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+		if c != nil {
+			c.AbortWithStatus(http.StatusNotFound)
+		}
+		return
+	}
+	path := c.Request.URL.Path
+	if strings.HasPrefix(path, "/v0/resource/plugins/") {
+		s.pluginResourceNoRoute(c)
+		return
+	}
+	if path != "/v0/management" && !strings.HasPrefix(path, "/v0/management/") {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	if s.pluginHost == nil || s.mgmt == nil || !s.pluginHost.HasManagementRoute(c.Request.Method, path) {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	requireTLSForAuth(s.cfg)(c)
+	if c.IsAborted() {
+		return
+	}
+	noStoreMiddleware()(c)
+	if c.IsAborted() {
+		return
+	}
+	s.managementAvailabilityMiddleware()(c)
+	if c.IsAborted() {
+		return
+	}
+	managementBodyLimitMiddleware()(c)
+	if c.IsAborted() {
+		return
+	}
+	s.mgmt.Middleware()(c)
+	if c.IsAborted() {
+		return
+	}
+	if s.pluginHost.ServeManagementHTTP(c.Writer, c.Request) {
+		c.Abort()
+		return
+	}
+	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) pluginResourceNoRoute(c *gin.Context) {
+	if s == nil || c == nil || c.Request == nil || c.Request.URL == nil {
+		if c != nil {
+			c.AbortWithStatus(http.StatusNotFound)
+		}
+		return
+	}
+	path := c.Request.URL.Path
+	if s.cfg == nil || s.cfg.Home.Enabled || s.pluginHost == nil || s.mgmt == nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	requireTLSForAuth(s.cfg)(c)
+	if c.IsAborted() {
+		return
+	}
+	noStoreMiddleware()(c)
+	if c.IsAborted() {
+		return
+	}
+	s.managementAvailabilityMiddleware()(c)
+	if c.IsAborted() {
+		return
+	}
+	managementBodyLimitMiddleware()(c)
+	if c.IsAborted() {
+		return
+	}
+	sessionAuthenticated := s.pluginResourceSessionAuthenticated(c)
+	if !sessionAuthenticated {
+		s.mgmt.Middleware()(c)
+		if c.IsAborted() {
+			return
+		}
+	}
+	if !s.pluginHost.HasResourceRoute(c.Request.Method, path) {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	if !sessionAuthenticated && !s.issuePluginResourceSession(c) {
+		return
+	}
+	if s.pluginHost.ServeResourceHTTP(c.Writer, c.Request) {
+		c.Abort()
+		return
+	}
+	c.AbortWithStatus(http.StatusNotFound)
+}
+
+func (s *Server) pluginResourceSessionAuthenticated(c *gin.Context) bool {
+	if s == nil || c == nil || c.Request == nil {
+		return false
+	}
+	cookie, errCookie := c.Request.Cookie(pluginResourceSessionCookie)
+	if errCookie != nil || cookie == nil || cookie.Value == "" {
+		return false
+	}
+	now := time.Now()
+	token := cookie.Value
+	s.pluginResourceSessionMu.Lock()
+	session, ok := s.pluginResourceSessionTokens[token]
+	if !ok {
+		s.pluginResourceSessionMu.Unlock()
+		return false
+	}
+	if !session.IdleExpiresAt.After(now) || !session.AbsoluteExpiresAt.After(now) {
+		delete(s.pluginResourceSessionTokens, token)
+		s.pluginResourceSessionMu.Unlock()
+		return false
+	}
+	idleExpiresAt := now.Add(pluginResourceSessionTTL)
+	if idleExpiresAt.After(session.AbsoluteExpiresAt) {
+		idleExpiresAt = session.AbsoluteExpiresAt
+	}
+	session.IdleExpiresAt = idleExpiresAt
+	s.pluginResourceSessionTokens[token] = session
+	s.pluginResourceSessionMu.Unlock()
+	maxAge := int(idleExpiresAt.Sub(now) / time.Second)
+	if maxAge <= 0 {
+		maxAge = 1
+	}
+	s.setPluginResourceSessionCookie(c, token, maxAge)
+	return true
+}
+
+func (s *Server) pluginResourceSessionCookieSecure(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if c.Request.TLS != nil {
+		return true
+	}
+	if s != nil && s.cfg != nil && s.cfg.TLS.TrustForwardedProto {
+		return strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")), "https")
+	}
+	return false
+}
+
+func (s *Server) pluginResourceSessionSameSite(c *gin.Context) http.SameSite {
+	if c != nil && strings.TrimSpace(c.GetHeader("Origin")) != "" && s.pluginResourceSessionCookieSecure(c) {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
+}
+
+func (s *Server) issuePluginResourceSession(c *gin.Context) bool {
+	if s == nil || c == nil || c.Request == nil {
+		return false
+	}
+	tokenBytes := make([]byte, 32)
+	if _, errRead := rand.Read(tokenBytes); errRead != nil {
+		log.WithError(errRead).Error("failed to generate plugin resource session token")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return false
+	}
+	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	now := time.Now()
+	s.pluginResourceSessionMu.Lock()
+	if s.pluginResourceSessionTokens == nil {
+		s.pluginResourceSessionTokens = make(map[string]pluginResourceSession)
+	}
+	for existing, session := range s.pluginResourceSessionTokens {
+		if !session.IdleExpiresAt.After(now) || !session.AbsoluteExpiresAt.After(now) {
+			delete(s.pluginResourceSessionTokens, existing)
+		}
+	}
+	s.pluginResourceSessionTokens[token] = pluginResourceSession{
+		IdleExpiresAt:     now.Add(pluginResourceSessionTTL),
+		AbsoluteExpiresAt: now.Add(pluginResourceSessionAbsoluteTTL),
+	}
+	s.pluginResourceSessionMu.Unlock()
+	s.setPluginResourceSessionCookie(c, token, int(pluginResourceSessionTTL.Seconds()))
+	return true
+}
+
+func (s *Server) setPluginResourceSessionCookie(c *gin.Context, token string, maxAge int) {
+	http.SetCookie(
+		c.Writer, &http.Cookie{
+			Name:     pluginResourceSessionCookie,
+			Value:    token,
+			Path:     "/v0/resource/plugins/",
+			MaxAge:   maxAge,
+			HttpOnly: true,
+			Secure:   s.pluginResourceSessionCookieSecure(c),
+			SameSite: s.pluginResourceSessionSameSite(c),
+		},
+	)
 }
 
 func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
@@ -1070,6 +1406,7 @@ func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
 		models = append(models, model)
 	}
 
+	models = s.handlers.FilterModelsForCurrentAPIKey(c, models)
 	c.JSON(http.StatusOK, openai.CodexClientModelsResponse(models))
 }
 
@@ -1127,6 +1464,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 			}
 			out = append(out, model)
 		}
+		out = s.handlers.FilterModelsForCurrentAPIKey(c, out)
 		firstID := ""
 		lastID := ""
 		if len(out) > 0 {
@@ -1162,6 +1500,7 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 		}
 		filtered = append(filtered, model)
 	}
+	filtered = s.handlers.FilterModelsForCurrentAPIKey(c, filtered)
 	c.JSON(
 		http.StatusOK, gin.H{
 			"object": "list",
@@ -1176,9 +1515,10 @@ func (s *Server) handleHomeGeminiModels(c *gin.Context) {
 		return
 	}
 
+	models := s.handlers.FilterModelsForCurrentAPIKey(c, formatHomeGeminiModels(entries))
 	c.JSON(
 		http.StatusOK, gin.H{
-			"models": formatHomeGeminiModels(entries),
+			"models": models,
 		},
 	)
 }
@@ -1193,7 +1533,11 @@ func (s *Server) handleHomeGeminiModel(c *gin.Context) {
 	action = strings.TrimSpace(action)
 	for _, entry := range entries {
 		if homeGeminiModelMatches(entry, action) {
-			c.JSON(http.StatusOK, formatHomeGeminiModel(entry))
+			model := formatHomeGeminiModel(entry)
+			if len(s.handlers.FilterModelsForCurrentAPIKey(c, []map[string]any{model})) == 0 {
+				break
+			}
+			c.JSON(http.StatusOK, model)
 			return
 		}
 	}
@@ -1553,6 +1897,15 @@ func (s *Server) Stop(ctx context.Context) error {
 		return err
 	}
 
+	if s.quotaScheduler != nil {
+		s.quotaScheduler.Stop()
+	}
+	if s.mgmt != nil {
+		if err := s.mgmt.Close(); err != nil {
+			return err
+		}
+	}
+
 	if s.authRateLimiter != nil {
 		s.authRateLimiter.Stop()
 	}
@@ -1577,18 +1930,34 @@ func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
 	}
 
 	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		pluginResourceRequest := c.Request != nil && c.Request.URL != nil && strings.HasPrefix(
+			c.Request.URL.Path, "/v0/resource/plugins/",
+		)
 		if len(originSet) == 0 {
-			c.Header("Access-Control-Allow-Origin", "*")
+			if origin != "" && pluginResourceRequest {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Access-Control-Allow-Credentials", "true")
+				c.Header("Vary", "Origin")
+			} else {
+				c.Header("Access-Control-Allow-Origin", "*")
+			}
 		} else {
-			origin := c.GetHeader("Origin")
 			if _, ok := originSet[origin]; ok {
 				c.Header("Access-Control-Allow-Origin", origin)
+				if pluginResourceRequest {
+					c.Header("Access-Control-Allow-Credentials", "true")
+				}
 			}
 			// Always set Vary when the response depends on the request Origin.
 			c.Header("Vary", "Origin")
 		}
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "*")
+		if requestedHeaders := c.GetHeader("Access-Control-Request-Headers"); requestedHeaders != "" {
+			c.Header("Access-Control-Allow-Headers", requestedHeaders)
+		} else {
+			c.Header("Access-Control-Allow-Headers", "*")
+		}
 		c.Header(
 			"Access-Control-Expose-Headers", "X-Cpa-Version, X-Cpa-Build-Date, X-Cpa-Commit",
 		)
@@ -1636,13 +2005,17 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	// Update request logger enabled state if it has changed
 	previousRequestLog := false
 	if oldCfg != nil {
-		previousRequestLog = oldCfg.RequestLog
+		previousRequestLog = oldCfg.RequestLog && !oldCfg.CommercialMode
 	}
-	if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != cfg.RequestLog) {
+	currentRequestLog := cfg.RequestLog && !cfg.CommercialMode
+	if s.requestLoggingRuntimeEnabled != nil {
+		s.requestLoggingRuntimeEnabled.Store(!cfg.CommercialMode)
+	}
+	if s.requestLogger != nil && (oldCfg == nil || previousRequestLog != currentRequestLog) {
 		if s.loggerToggle != nil {
-			s.loggerToggle(cfg.RequestLog)
+			s.loggerToggle(currentRequestLog)
 		} else if toggler, ok := s.requestLogger.(interface{ SetEnabled(bool) }); ok {
-			toggler.SetEnabled(cfg.RequestLog)
+			toggler.SetEnabled(currentRequestLog)
 		}
 	}
 
@@ -1732,12 +2105,13 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	// Save YAML snapshot for next comparison
 	s.oldConfigYaml, _ = yaml.Marshal(cfg)
 
-	s.handlers.UpdateClients(&cfg.SDKConfig)
+	s.handlers.UpdateClients(effectiveSDKConfig(cfg))
 
 	if s.mgmt != nil {
 		s.mgmt.SetConfig(cfg)
 		s.mgmt.SetAuthManager(s.handlers.AuthManager)
 	}
+	s.refreshPluginManagementRoutes()
 
 	// Notify Amp module only when Amp config has changed.
 	ampConfigChanged := oldCfg == nil || !reflect.DeepEqual(oldCfg.AmpCode, cfg.AmpCode)

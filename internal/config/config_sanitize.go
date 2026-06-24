@@ -72,8 +72,15 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 	if cfg == nil || len(cfg.OAuthModelAlias) == 0 {
 		return
 	}
-	out := make(map[string][]OAuthModelAlias, len(cfg.OAuthModelAlias))
-	for rawChannel, aliases := range cfg.OAuthModelAlias {
+	cfg.OAuthModelAlias = SanitizeOAuthModelAliasMap(cfg.OAuthModelAlias)
+}
+
+func SanitizeOAuthModelAliasMap(entries map[string][]OAuthModelAlias) map[string][]OAuthModelAlias {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string][]OAuthModelAlias, len(entries))
+	for rawChannel, aliases := range entries {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
 		if channel == "" || len(aliases) == 0 {
 			continue
@@ -100,7 +107,10 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			out[channel] = clean
 		}
 	}
-	cfg.OAuthModelAlias = out
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are

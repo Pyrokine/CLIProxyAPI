@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -21,7 +22,8 @@ const (
 	geminiQuotaURL      = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 	geminiCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:getCodeAssistSubscription"
 
-	kimiUsageURL = "https://api.kimi.com/coding/v1/usages"
+	kimiUsageURL  = "https://api.kimi.com/coding/v1/usages"
+	xaiBillingURL = "https://cli-chat-proxy.grok.com/v1/billing"
 )
 
 var claudeHeaders = map[string]string{
@@ -44,6 +46,10 @@ var geminiHeaders = map[string]string{
 var kimiHeaders = map[string]string{
 	"Authorization": "Bearer $TOKEN$",
 	"Content-Type":  "application/json",
+}
+
+var xaiHeaders = map[string]string{
+	"Authorization": "Bearer $TOKEN$",
 }
 
 // fetchClaudeQuota queries Claude's quota API via the local api-call proxy.
@@ -164,9 +170,52 @@ func fetchKimiQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]byte
 	return resp.Body, nil
 }
 
-// registerAuthFilesForQuota registers auth files found in authDir with the quota
-// scheduler. auth_index is derived from the filename hash matching the backend's
-// auth indexing scheme.
+func fetchXAIQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]byte, error) {
+	resp, err := apiCall(
+		quota.APICallRequest{
+			URL:       xaiBillingURL,
+			Method:    "GET",
+			Header:    xaiHeaders,
+			AuthIndex: authIndex,
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("xai billing request failed: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("xai billing returned status %d", resp.StatusCode)
+	}
+	return resp.Body, nil
+}
+
+func registerAuthManagerForQuota(scheduler *quota.Scheduler, authManager *coreauth.Manager) int {
+	if scheduler == nil || authManager == nil {
+		return 0
+	}
+	registered := 0
+	for _, auth := range authManager.List() {
+		if auth == nil {
+			continue
+		}
+		fileName := strings.TrimSpace(auth.FileName)
+		if fileName == "" {
+			continue
+		}
+		credType, ok := quotaCredentialTypeForProvider(auth.Provider)
+		if !ok {
+			continue
+		}
+		auth.EnsureIndex()
+		if auth.Index == "" {
+			continue
+		}
+		scheduler.Register(fileName, credType, auth.Index)
+		scheduler.SetDisabled(fileName, auth.Disabled)
+		registered++
+	}
+	return registered
+}
+
 func registerAuthFilesForQuota(scheduler *quota.Scheduler, authDir string) {
 	entries, err := os.ReadDir(authDir)
 	if err != nil {
@@ -183,19 +232,8 @@ func registerAuthFilesForQuota(scheduler *quota.Scheduler, authDir string) {
 		name := entry.Name()
 		nameLower := strings.ToLower(name)
 
-		var credType quota.CredentialType
-		switch {
-		case strings.HasPrefix(nameLower, "claude"):
-			credType = quota.TypeClaude
-		case strings.HasPrefix(nameLower, "codex"):
-			credType = quota.TypeCodex
-		case strings.HasPrefix(nameLower, "antigravity"):
-			credType = quota.TypeAntigravity
-		case strings.HasPrefix(nameLower, "gemini"):
-			credType = quota.TypeGeminiCli
-		case strings.HasPrefix(nameLower, "kimi"):
-			credType = quota.TypeKimi
-		default:
+		credType, ok := quotaCredentialTypeForFileName(nameLower)
+		if !ok {
 			continue
 		}
 
@@ -211,10 +249,46 @@ func registerAuthFilesForQuota(scheduler *quota.Scheduler, authDir string) {
 	}
 }
 
-// computeAuthIndex replicates the auth index computation from sdk/cliproxy/auth.
-// It computes sha256("file:" + fileName) and takes the first 8 bytes as hex.
-// computeAuthIndex replicates the auth index computation from sdk/cliproxy/auth.stableAuthIndex.
-// Both use sha256(seed)[:8] as hex. If the SDK algorithm changes, this must be updated in sync.
+func quotaCredentialTypeForProvider(provider string) (quota.CredentialType, bool) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		return quota.TypeClaude, true
+	case "codex":
+		return quota.TypeCodex, true
+	case "gemini", "gemini-cli":
+		return quota.TypeGeminiCli, true
+	case "antigravity":
+		return quota.TypeAntigravity, true
+	case "kimi":
+		return quota.TypeKimi, true
+	case "xai", "x-ai", "grok":
+		return quota.TypeXAI, true
+	default:
+		return "", false
+	}
+}
+
+func quotaCredentialTypeForFileName(nameLower string) (quota.CredentialType, bool) {
+	switch {
+	case strings.HasPrefix(nameLower, "claude"):
+		return quota.TypeClaude, true
+	case strings.HasPrefix(nameLower, "codex"):
+		return quota.TypeCodex, true
+	case strings.HasPrefix(nameLower, "antigravity"):
+		return quota.TypeAntigravity, true
+	case strings.HasPrefix(nameLower, "gemini"):
+		return quota.TypeGeminiCli, true
+	case strings.HasPrefix(nameLower, "kimi"):
+		return quota.TypeKimi, true
+	case strings.HasPrefix(nameLower, "xai"), strings.HasPrefix(nameLower, "x-ai"), strings.HasPrefix(
+		nameLower, "grok",
+	):
+		return quota.TypeXAI, true
+	default:
+		return "", false
+	}
+}
+
 func computeAuthIndex(fileName string) string {
 	seed := "file:" + strings.TrimSpace(fileName)
 	sum := sha256.Sum256([]byte(seed))

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
 	"gopkg.in/yaml.v3"
@@ -98,24 +99,24 @@ func (w *Watcher) reloadConfig() bool {
 			newConfig.AuthDir = resolvedAuthDir
 		}
 	}
+	if _, err := modelcatalog.LoadOrInit(w.configPath, newConfig); err != nil {
+		log.Errorf("failed to reload model catalog: %v", err)
+		return false
+	}
 
-	w.clientsMutex.Lock()
+	w.clientsMutex.RLock()
+	previousConfig := w.config
+	previousConfigYaml := append([]byte(nil), w.oldConfigYaml...)
+	w.clientsMutex.RUnlock()
+
 	var oldConfig *config.Config
-	_ = yaml.Unmarshal(w.oldConfigYaml, &oldConfig)
-	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
-	w.config = newConfig
-	w.clientsMutex.Unlock()
+	_ = yaml.Unmarshal(previousConfigYaml, &oldConfig)
 
 	var affectedOAuthProviders []string
 	if oldConfig != nil {
 		_, affectedOAuthProviders = diff.OAuthExcludedModelChanges(
 			oldConfig.OAuthExcludedModels, newConfig.OAuthExcludedModels,
 		)
-	}
-
-	util.SetLogLevel(newConfig)
-	if oldConfig != nil && oldConfig.Debug != newConfig.Debug {
-		log.Debugf("log level updated - debug mode changed from %t to %t", oldConfig.Debug, newConfig.Debug)
 	}
 
 	if oldConfig != nil {
@@ -138,7 +139,31 @@ func (w *Watcher) reloadConfig() bool {
 			oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias,
 		) || retryConfigChanged)
 
+	if w.reloadCallback != nil {
+		log.Debugf("triggering server update callback before publishing config reload")
+		if !w.reloadCallback(newConfig) {
+			log.Errorf("server update callback rejected config reload; keeping previous config")
+			return false
+		}
+	}
+
+	w.clientsMutex.Lock()
+	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
+	w.config = newConfig
+	w.clientsMutex.Unlock()
+
 	log.Infof("config successfully reloaded, triggering client reload")
-	w.reloadClients(authDirChanged, affectedOAuthProviders, forceAuthRefresh)
+	if !w.reloadClientsWithConfig(newConfig, authDirChanged, affectedOAuthProviders, forceAuthRefresh) {
+		w.clientsMutex.Lock()
+		w.oldConfigYaml = previousConfigYaml
+		w.config = previousConfig
+		w.clientsMutex.Unlock()
+		return false
+	}
+
+	util.SetLogLevel(newConfig)
+	if oldConfig != nil && oldConfig.Debug != newConfig.Debug {
+		log.Debugf("log level updated - debug mode changed from %t to %t", oldConfig.Debug, newConfig.Debug)
+	}
 	return true
 }

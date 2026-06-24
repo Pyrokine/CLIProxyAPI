@@ -31,6 +31,7 @@ const (
 	managementSyncMinInterval   = 30 * time.Second
 	defaultUpdateCheckInterval  = 3 * time.Hour
 	minCheckIntervalMinutes     = 30
+	maxManagementAssetBytes     = 10 << 20
 )
 
 // managementFileName exposes the control panel asset filename.
@@ -88,20 +89,8 @@ func runAutoUpdater(ctx context.Context) {
 
 	runOnce := func() {
 		cfg := currentConfigPtr.Load()
-		if cfg == nil {
-			log.Debug("management asset auto-updater skipped: config not yet available")
-			return
-		}
-		if cfg.RemoteManagement.DisableControlPanel {
-			log.Debug("management asset auto-updater skipped: control panel disabled")
-			return
-		}
-		if !cfg.RemoteManagement.AutoCheckUpdate {
-			log.Debug("management asset auto-updater skipped: auto-check-update is false")
-			return
-		}
-		if !cfg.RemoteManagement.IsAutoUpdatePanel() {
-			log.Debug("management asset auto-updater skipped: auto-update-panel is false")
+		if reason, skip := autoUpdateSkipReason(cfg); skip {
+			log.Debugf("management asset auto-updater skipped: %s", reason)
 			return
 		}
 
@@ -133,6 +122,25 @@ func runAutoUpdater(ctx context.Context) {
 		case <-tick:
 		}
 	}
+}
+
+func autoUpdateSkipReason(cfg *config.Config) (string, bool) {
+	if cfg == nil {
+		return "config not yet available", true
+	}
+	if cfg.Home.Enabled {
+		return "cluster mode enabled", true
+	}
+	if cfg.RemoteManagement.DisableControlPanel {
+		return "control panel disabled", true
+	}
+	if !cfg.RemoteManagement.AutoCheckUpdate {
+		return "auto-check-update is false", true
+	}
+	if !cfg.RemoteManagement.IsAutoUpdatePanel() {
+		return "auto-update-panel is false", true
+	}
+	return "", false
 }
 
 func newHTTPClient(proxyURL string) *http.Client {
@@ -440,9 +448,12 @@ func downloadAsset(ctx context.Context, client *http.Client, downloadURL string)
 		)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10MB limit
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxManagementAssetBytes+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("read download body: %w", err)
+	}
+	if len(data) > maxManagementAssetBytes {
+		return nil, "", fmt.Errorf("management asset download exceeds %d bytes", maxManagementAssetBytes)
 	}
 
 	sum := sha256.Sum256(data)

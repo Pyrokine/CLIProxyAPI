@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/antigravity"
@@ -145,6 +146,79 @@ func TestResolveTokenForAuth_Antigravity_RefreshesExpiredToken(t *testing.T) {
 	}
 }
 
+func TestResolveTokenForAuth_XAI_RefreshesExpiredToken(t *testing.T) {
+	var callCount int
+	srv := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				callCount++
+				if r.Method != http.MethodPost {
+					t.Fatalf("expected POST, got %s", r.Method)
+				}
+				bodyBytes, _ := io.ReadAll(r.Body)
+				_ = r.Body.Close()
+				values, err := url.ParseQuery(string(bodyBytes))
+				if err != nil {
+					t.Fatalf("parse form: %v", err)
+				}
+				if values.Get("grant_type") != "refresh_token" {
+					t.Fatalf("unexpected grant_type: %s", values.Get("grant_type"))
+				}
+				if values.Get("refresh_token") != "rt" {
+					t.Fatalf("unexpected refresh_token: %s", values.Get("refresh_token"))
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(
+					map[string]any{
+						"access_token":  "new-xai-token",
+						"refresh_token": "rt2",
+						"expires_in":    3600,
+						"token_type":    "Bearer",
+					},
+				)
+			},
+		),
+	)
+	t.Cleanup(srv.Close)
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "xai-test.json",
+		FileName: "xai-test.json",
+		Provider: "xai",
+		Metadata: map[string]any{
+			"type":           "xai",
+			"access_token":   "old-token",
+			"refresh_token":  "rt",
+			"token_endpoint": srv.URL,
+			"expired":        time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := &Handler{authManager: manager}
+	token, err := h.resolveTokenForAuth(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("resolveTokenForAuth: %v", err)
+	}
+	if token != "new-xai-token" {
+		t.Fatalf("expected refreshed token, got %q", token)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected 1 refresh call, got %d", callCount)
+	}
+	updated, ok := manager.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth in manager after update")
+	}
+	if got := tokenValueFromMetadata(updated.Metadata); got != "new-xai-token" {
+		t.Fatalf("expected manager metadata updated, got %q", got)
+	}
+}
+
 func TestResolveTokenForAuth_Antigravity_SkipsRefreshWhenTokenValid(t *testing.T) {
 	var callCount int
 	srv := httptest.NewServer(
@@ -220,6 +294,9 @@ func TestIsAllowedTokenTarget(t *testing.T) {
 		{"api.openai.com.evil.com", false},
 		{"iflow.cn", true},
 		{"foo.iflow.cn", true},
+		{"x.ai", true},
+		{"auth.x.ai", true},
+		{"cli-chat-proxy.grok.com", true},
 		{"evil.com", false},
 	}
 	for _, tt := range tests {
@@ -288,4 +365,48 @@ func TestPinnedTransport_NonTransport(t *testing.T) {
 	if got != custom {
 		t.Fatal("expected custom RoundTripper returned unchanged")
 	}
+}
+
+func TestAPICallTransport_RequestProxyOverridesCredentialAndGlobal(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ProxyURL = "http://1.1.1.1:8080"
+	h := &Handler{cfg: cfg}
+	auth := &coreauth.Auth{ProxyURL: "http://8.8.4.4:8080"}
+
+	got := proxyURLForTransport(t, h.apiCallTransport(auth, "http://8.8.8.8:8080"))
+	if got != "http://8.8.8.8:8080" {
+		t.Fatalf("expected request proxy, got %q", got)
+	}
+}
+
+func TestAPICallTransport_CredentialProxyOverridesGlobal(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ProxyURL = "http://1.1.1.1:8080"
+	h := &Handler{cfg: cfg}
+	auth := &coreauth.Auth{ProxyURL: "http://8.8.4.4:8080"}
+
+	got := proxyURLForTransport(t, h.apiCallTransport(auth, ""))
+	if got != "http://8.8.4.4:8080" {
+		t.Fatalf("expected credential proxy, got %q", got)
+	}
+}
+
+func proxyURLForTransport(t *testing.T, rt http.RoundTripper) string {
+	t.Helper()
+	transport, ok := rt.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", rt)
+	}
+	if transport.Proxy == nil {
+		t.Fatal("expected proxy function")
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://example.com", nil)
+	proxyURL, err := transport.Proxy(req)
+	if err != nil {
+		t.Fatalf("proxy lookup failed: %v", err)
+	}
+	if proxyURL == nil {
+		t.Fatal("expected proxy URL")
+	}
+	return proxyURL.String()
 }

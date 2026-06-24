@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v3"
 
@@ -33,9 +34,10 @@ type Watcher struct {
 	authDir           string
 	config            *config.Config
 	clientsMutex      sync.RWMutex
+	authRescanMu      sync.Mutex
 	configReloadMu    sync.Mutex
 	configReloadTimer *time.Timer
-	reloadCallback    func(*config.Config)
+	reloadCallback    func(*config.Config) bool
 	watcher           *fsnotify.Watcher
 	lastAuthHashes    map[string]string
 	lastAuthContents  map[string]*coreauth.Auth
@@ -43,6 +45,7 @@ type Watcher struct {
 	lastRemoveTimes   map[string]time.Time
 	lastConfigHash    string
 	authQueue         chan<- AuthUpdate
+	pluginAuthParser  synthesizer.PluginAuthParser
 	currentAuths      map[string]*coreauth.Auth
 	runtimeAuths      map[string]*coreauth.Auth
 	dispatchMu        sync.Mutex
@@ -70,9 +73,10 @@ const (
 
 // AuthUpdate describes an incremental change to auth configuration.
 type AuthUpdate struct {
-	Action authUpdateAction
-	ID     string
-	Auth   *coreauth.Auth
+	Action            authUpdateAction
+	ID                string
+	Auth              *coreauth.Auth
+	AllowAuthRecreate bool
 }
 
 const (
@@ -85,7 +89,7 @@ const (
 )
 
 // NewWatcher creates a new file watcher instance
-func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config)) (*Watcher, error) {
+func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config) bool) (*Watcher, error) {
 	watcher, errNewWatcher := fsnotify.NewWatcher()
 	if errNewWatcher != nil {
 		return nil, errNewWatcher
@@ -140,6 +144,13 @@ func (w *Watcher) SetAuthUpdateQueue(queue chan<- AuthUpdate) {
 	w.setAuthUpdateQueue(queue)
 }
 
+// SetPluginAuthParser updates the parser used for plugin-owned auth files.
+func (w *Watcher) SetPluginAuthParser(parser synthesizer.PluginAuthParser) {
+	w.clientsMutex.Lock()
+	defer w.clientsMutex.Unlock()
+	w.pluginAuthParser = parser
+}
+
 // DispatchRuntimeAuthUpdate allows external runtime providers (e.g., websocket-driven auths)
 // to push auth updates through the same queue used by file/config watchers.
 // Returns true if the update was enqueued; false if no queue is configured.
@@ -151,6 +162,7 @@ func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 func (w *Watcher) SnapshotCoreAuths() []*coreauth.Auth {
 	w.clientsMutex.RLock()
 	cfg := w.config
+	parser := w.pluginAuthParser
 	w.clientsMutex.RUnlock()
-	return snapshotCoreAuths(cfg, w.authDir)
+	return snapshotCoreAuths(cfg, w.authDir, parser)
 }

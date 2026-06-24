@@ -1,10 +1,17 @@
 package synthesizer
 
 import (
+	"context"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
+
+type PluginAuthParser interface {
+	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
+}
 
 // SynthesisContext provides the context needed for auth synthesis.
 type SynthesisContext struct {
@@ -16,4 +23,6 @@ type SynthesisContext struct {
 	Now time.Time
 	// IDGenerator generates stable IDs for auth entries
 	IDGenerator *StableIDGenerator
+	// PluginAuthParser parses plugin-owned auth files
+	PluginAuthParser PluginAuthParser
 }

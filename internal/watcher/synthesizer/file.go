@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
 
 // FileSynthesizer generates Auth entries from OAuth JSON files.
@@ -72,10 +74,33 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		return nil
 	}
 	t, _ := metadata["type"].(string)
-	if t == "" {
+	provider := strings.ToLower(strings.TrimSpace(t))
+	if ctx.PluginAuthParser != nil {
+		auth, handled, errParse := ctx.PluginAuthParser.ParseAuth(
+			context.Background(), pluginapi.AuthParseRequest{
+				Provider: provider,
+				Path:     fullPath,
+				FileName: filepath.Base(fullPath),
+				RawJSON:  data,
+			},
+		)
+		if errParse == nil && handled && auth != nil {
+			auth.CreatedAt = now
+			auth.UpdatedAt = now
+			if auth.Attributes == nil {
+				auth.Attributes = make(map[string]string)
+			}
+			auth.Attributes["path"] = fullPath
+			auth.Attributes["source"] = fullPath
+			perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
+			ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
+			coreauth.ApplyCustomHeadersFromMetadata(auth)
+			return []*coreauth.Auth{auth}
+		}
+	}
+	if provider == "" {
 		return nil
 	}
-	provider := strings.ToLower(t)
 	if provider == "gemini" {
 		provider = "gemini-cli"
 	}
@@ -222,6 +247,11 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			metadataCopy["request_retry"] = v
 		} else if v, ok := metadata["request-retry"]; ok {
 			metadataCopy["request_retry"] = v
+		}
+		if note, ok := metadata["note"].(string); ok {
+			if note = strings.TrimSpace(note); note != "" {
+				metadataCopy["note"] = note
+			}
 		}
 		proxy := strings.TrimSpace(primary.ProxyURL)
 		if proxy != "" {

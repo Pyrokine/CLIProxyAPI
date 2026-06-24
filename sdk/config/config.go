@@ -11,6 +11,8 @@ type SDKConfig = internalconfig.SDKConfig
 type Config = internalconfig.Config
 
 type StreamingConfig = internalconfig.StreamingConfig
+type ModelCatalogConfig = internalconfig.ModelCatalogConfig
+type ModelCatalogModel = internalconfig.ModelCatalogModel
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
 type HomeConfig = internalconfig.HomeConfig
@@ -53,6 +55,10 @@ func ParseConfigBytes(data []byte) (*Config, error) { return internalconfig.Pars
 
 // ApplyHomeRuntimeConfig disables local entry points that Home replaces at runtime.
 func ApplyHomeRuntimeConfig(cfg *Config) { internalconfig.ApplyHomeRuntimeConfig(cfg) }
+
+func SetRuntimeModelCatalog(models []ModelCatalogModel) {
+	internalconfig.SetRuntimeModelCatalog(models)
+}
 
 // SaveConfigPreserveComments saves the configuration while preserving YAML comments.
 // noinspection GoUnusedExportedFunction

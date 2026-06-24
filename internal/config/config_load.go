@@ -44,9 +44,7 @@ func mergeConfigAPIKeys(rawYAML []byte, current []string) []string {
 	if !ok {
 		return normalizeStringSlice(keys)
 	}
-	for _, key := range provider.APIKeys {
-		keys = append(keys, key)
-	}
+	keys = append(keys, provider.APIKeys...)
 	for _, entry := range provider.Entries {
 		keys = append(keys, entry.APIKey)
 	}
@@ -219,6 +217,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+
+	cfg.SanitizeModelCatalog()
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.sanitizePayloadRules()

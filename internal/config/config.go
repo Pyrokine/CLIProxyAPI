@@ -4,8 +4,15 @@
 // debug settings, proxy configuration, and API keys.
 package config
 
+import (
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
 const (
 	DefaultPanelGitHubRepository = "https://github.com/Pyrokine/Cli-Proxy-API-Management-Center"
+	DefaultAuthDir               = "~/.cli-proxy-api"
 	defaultCPAGitHubRepository   = "https://github.com/Pyrokine/CLIProxyAPI"
 	DefaultPprofAddr             = "127.0.0.1:8316"
 )
@@ -27,6 +34,9 @@ type Config struct {
 
 	// RemoteManagement nests management-related options under 'remote-management'.
 	RemoteManagement RemoteManagement `yaml:"remote-management" json:"-"`
+
+	// Plugins configures dynamic plugin discovery and per-plugin settings.
+	Plugins PluginsConfig `yaml:"plugins" json:"plugins"`
 
 	// AuthDir is the directory where authentication token files are stored.
 	AuthDir string `yaml:"auth-dir" json:"-"`
@@ -107,6 +117,8 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	Codex CodexConfig `yaml:"codex" json:"codex"`
+
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
 
@@ -148,6 +160,72 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+}
+
+// PluginsConfig holds dynamic plugin system settings.
+type PluginsConfig struct {
+	// Enabled toggles dynamic plugin loading.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Dir is the plugin discovery directory.
+	Dir string `yaml:"dir" json:"dir"`
+	// Configs stores per-plugin instance configuration by plugin ID.
+	Configs map[string]PluginInstanceConfig `yaml:"configs" json:"configs"`
+}
+
+// PluginInstanceConfig stores host-owned plugin settings and the original plugin YAML subtree.
+type PluginInstanceConfig struct {
+	// Enabled toggles this plugin instance. Nil is normalized to true during YAML parsing.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Priority controls plugin startup and routing order.
+	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
+	// Raw preserves the full original plugin configuration YAML subtree.
+	Raw yaml.Node `yaml:"-" json:"-"`
+}
+
+// UnmarshalYAML extracts host-owned fields while preserving the full original YAML node.
+func (c *PluginInstanceConfig) UnmarshalYAML(value *yaml.Node) error {
+	if c == nil {
+		return nil
+	}
+
+	c.Priority = 0
+	defaultEnabled := true
+	c.Enabled = &defaultEnabled
+
+	if value == nil || value.Kind == 0 {
+		c.Raw = *defaultPluginInstanceConfigNode()
+		return nil
+	}
+	c.Raw = *value
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := strings.TrimSpace(value.Content[i].Value)
+		node := value.Content[i+1]
+		switch key {
+		case "enabled":
+			var enabled bool
+			if err := node.Decode(&enabled); err != nil {
+				return err
+			}
+			c.Enabled = &enabled
+		case "priority":
+			var priority int
+			if err := node.Decode(&priority); err != nil {
+				return err
+			}
+			c.Priority = priority
+		}
+	}
+	return nil
+}
+
+func defaultPluginInstanceConfigNode() *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Value: "enabled", Tag: "!!str"},
+			{Kind: yaml.ScalarNode, Value: "true", Tag: "!!bool"},
+		},
+	}
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests
@@ -253,6 +331,10 @@ func (rm RemoteManagement) IsAutoUpdatePanel() bool {
 		return true
 	}
 	return *rm.AutoUpdatePanel
+}
+
+type CodexConfig struct {
+	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -633,3 +715,17 @@ type OpenAICompatibilityModel struct {
 
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
+
+// NormalizePluginsConfig applies default plugin configuration values.
+func (cfg *Config) NormalizePluginsConfig() {
+	if cfg == nil {
+		return
+	}
+	cfg.Plugins.Dir = strings.TrimSpace(cfg.Plugins.Dir)
+	if cfg.Plugins.Dir == "" {
+		cfg.Plugins.Dir = "plugins"
+	}
+	if cfg.Plugins.Configs == nil {
+		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
+	}
+}

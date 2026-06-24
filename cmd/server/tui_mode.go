@@ -10,6 +10,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cmd"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/tui"
 	log "github.com/sirupsen/logrus"
 )
@@ -17,9 +18,9 @@ import (
 // runTUIMode starts the terminal management UI.
 // In standalone mode an embedded local server is launched first; otherwise the proxy
 // server is expected to be already running.
-func runTUIMode(cfg *config.Config, configFilePath, password string, standalone bool) {
+func runTUIMode(cfg *config.Config, configFilePath, password string, standalone bool, host *pluginhost.Host) {
 	if standalone {
-		runTUIStandalone(cfg, configFilePath, password)
+		runTUIStandalone(cfg, configFilePath, password, host)
 	} else {
 		if errRun := tui.Run(cfg.Port, password, nil, os.Stdout); errRun != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
@@ -27,7 +28,7 @@ func runTUIMode(cfg *config.Config, configFilePath, password string, standalone 
 	}
 }
 
-func runTUIStandalone(cfg *config.Config, configFilePath, password string) {
+func runTUIStandalone(cfg *config.Config, configFilePath, password string, host *pluginhost.Host) {
 	hook := tui.NewLogHook(2000)
 	hook.SetFormatter(&logging.LogFormatter{})
 	log.AddHook(hook)
@@ -59,7 +60,7 @@ func runTUIStandalone(cfg *config.Config, configFilePath, password string) {
 		password = localMgmtPassword
 	}
 
-	cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+	cancel, done := cmd.StartServiceBackgroundWithPluginHost(cfg, configFilePath, password, host)
 
 	client := tui.NewClient(cfg.Port, password)
 	ready := false

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -39,7 +40,14 @@ func setConfigAPIKeyProviderEntries(root *yaml.Node, keys []string) {
 }
 
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
+	modelsExternal := modelsJSONExists(configFile)
 	persistCfg := cfg
+	if modelsExternal && cfg != nil {
+		copyCfg := *cfg
+		copyCfg.ModelCatalog = ModelCatalogConfig{}
+		copyCfg.OAuthModelAlias = nil
+		persistCfg = &copyCfg
+	}
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -81,10 +89,20 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	if modelsExternal {
+		removeMapKey(original.Content[0], "model-catalog")
+	} else {
+		pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "model-catalog")
+	}
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "api-key-rules")
 	setConfigAPIKeyProviderEntries(original.Content[0], persistCfg.APIKeys)
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
+	if modelsExternal {
+		removeMapKey(original.Content[0], "oauth-model-alias")
+		removeMapKey(original.Content[0], "model-catalog")
+	}
 	normalizeCollectionNodeStyles(original.Content[0])
 
 	// Write back.
@@ -159,4 +177,12 @@ func EnsureDefaultsInFile(configFile string, cfg *Config) {
 		// Non-fatal: log the error but don't prevent startup
 		_, _ = fmt.Fprintf(os.Stderr, "config: failed to ensure defaults in %s: %v\n", configFile, err)
 	}
+}
+
+func modelsJSONExists(configFile string) bool {
+	if configFile == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(filepath.Dir(configFile), "models.json"))
+	return err == nil
 }

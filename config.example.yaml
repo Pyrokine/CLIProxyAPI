@@ -48,12 +48,37 @@ api-keys:
     - "your-api-key-1"
     - "your-api-key-2"
     - "your-api-key-3"
+# Per-client API key model denylist. Omit a key to allow all models.
+api-key-rules:
+    "your-api-key-2":
+        blocked-models:
+            - "claude-opus-*"
+            - "gpt-5.5"
 # Enable debug logging
 debug: false
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
     enable: false
     addr: "127.0.0.1:8316"
+# Standard dynamic library plugins are trusted in-process code. They are disabled by default.
+# Build Go examples with go build -buildmode=c-shared for the target GOOS/GOARCH.
+# Other languages can implement the same C ABI and JSON method protocol.
+# Plugin executors require a matching auth record with the same provider key.
+# If the same provider is configured as OpenAI-compatible, the native executor wins.
+# Plugin command-line flags and Management API routes are optional capabilities.
+# The plugin list Management API reads plugin Metadata Logo and ConfigFields for panel display.
+# Per-plugin enabled only controls plugins.configs.<pluginID>.enabled; it does not change global plugins.enabled.
+plugins:
+    enabled: false
+    dir: "plugins"
+    configs:
+        example:
+            enabled: true
+            priority: 1
+            config1: true
+            config2: "string"
+            config3: 3
+            mode: "safe" # enum example: safe, fast
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
 # When true, write application logs to rotating files instead of stdout
@@ -81,6 +106,9 @@ usage-statistics-enabled: false
 proxy-url: ""
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
+# When true, enable Gemini CLI internal endpoints (/v1internal:*).
+# Default is false for safety.
+enable-gemini-cli-endpoint: false
 # When true, forward filtered upstream response headers to downstream clients.
 # Default is false (disabled).
 passthrough-headers: false
@@ -120,9 +148,24 @@ auto-refresh-interval: 3
 model-refresh-interval: 3
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
+# Base model used when proxying gpt-image-2 via hosted image_generation tool. Defaults to gpt-5.4-mini.
+# gpt-image-2-base-model: "gpt-5.4-mini"
 quota-refresh:
     interval: 600
     max-interval: 1800
+# Codex provider behavior.
+codex:
+    # Remap Codex prompt_cache_key and client identity per selected auth when fill-first/session affinity is enabled.
+    identity-confuse: false
+auth:
+    providers:
+        config-api-key:
+            api-key-entries:
+                -   api-key: your-api-key-1
+                -   api-key: your-api-key-2
+                -   api-key: your-api-key-3
+disable-image-generation: "off"
+redis-usage-queue-retention-seconds: 60
 
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
@@ -313,6 +356,9 @@ quota-refresh:
 #   kimi:
 #     - name: "kimi-k2.5"
 #       alias: "k2.5"
+#   qoder:                            # plugin provider keys are supported for OAuth plugins
+#     - name: "qmodel_latest"
+#       alias: "qlatest"
 
 # OAuth provider excluded models
 # oauth-excluded-models:

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 // ValidateConfig checks the configuration for common issues and returns a list of warnings.
@@ -110,6 +111,79 @@ func ValidateConfig(cfg *Config) []string {
 		warnings = append(warnings, fmt.Sprintf("logs-max-total-size-mb %d is negative", cfg.LogsMaxTotalSizeMB))
 	}
 
+	if cfg.AutoRefreshInterval < 0 {
+		warnings = append(warnings, fmt.Sprintf("auto-refresh-interval %d is negative", cfg.AutoRefreshInterval))
+	}
+	if cfg.ModelRefreshInterval < 0 {
+		warnings = append(warnings, fmt.Sprintf("model-refresh-interval %d is negative", cfg.ModelRefreshInterval))
+	}
+
+	for i, origin := range cfg.CORSAllowedOrigins {
+		trimmed := strings.TrimSpace(origin)
+		if trimmed == "" {
+			warnings = append(warnings, fmt.Sprintf("cors-allowed-origins[%d] is empty", i))
+			continue
+		}
+		if trimmed == "*" {
+			continue
+		}
+		parsed, errParseOrigin := url.Parse(trimmed)
+		if errParseOrigin != nil || parsed.Scheme == "" || parsed.Host == "" {
+			warnings = append(warnings, fmt.Sprintf("cors-allowed-origins[%d] %q is not a valid origin", i, origin))
+		}
+	}
+
+	if cfg.QuotaRefresh.Interval < 0 {
+		warnings = append(warnings, fmt.Sprintf("quota-refresh.interval %d is negative", cfg.QuotaRefresh.Interval))
+	}
+	if cfg.QuotaRefresh.MaxInterval < 0 {
+		warnings = append(
+			warnings, fmt.Sprintf("quota-refresh.max-interval %d is negative", cfg.QuotaRefresh.MaxInterval),
+		)
+	}
+	if cfg.QuotaRefresh.Enabled {
+		if cfg.QuotaRefresh.Interval < 60 {
+			warnings = append(
+				warnings,
+				fmt.Sprintf("quota-refresh.interval %d is below minimum 60 seconds", cfg.QuotaRefresh.Interval),
+			)
+		}
+		if cfg.QuotaRefresh.MaxInterval < 300 {
+			warnings = append(
+				warnings,
+				fmt.Sprintf("quota-refresh.max-interval %d is below minimum 300 seconds", cfg.QuotaRefresh.MaxInterval),
+			)
+		}
+		if cfg.QuotaRefresh.Interval > 0 && cfg.QuotaRefresh.MaxInterval > 0 && cfg.QuotaRefresh.MaxInterval < cfg.QuotaRefresh.Interval {
+			warnings = append(warnings, "quota-refresh.max-interval is smaller than quota-refresh.interval")
+		}
+	}
+
+	switch strings.TrimSpace(cfg.Routing.Strategy) {
+	case "", "round-robin", "fill-first":
+	default:
+		warnings = append(
+			warnings,
+			fmt.Sprintf("routing.strategy %q is invalid (use round-robin or fill-first)", cfg.Routing.Strategy),
+		)
+	}
+	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
+		parsedTTL, errParseTTL := time.ParseDuration(ttl)
+		if errParseTTL != nil || parsedTTL <= 0 {
+			warnings = append(
+				warnings, fmt.Sprintf(
+					"routing.session-affinity-ttl %q is not a positive duration", cfg.Routing.SessionAffinityTTL,
+				),
+			)
+		}
+	}
+
+	for id := range cfg.Plugins.Configs {
+		if !validPluginConfigID(id) {
+			warnings = append(warnings, fmt.Sprintf("plugins.configs contains invalid plugin id %q", id))
+		}
+	}
+
 	// TLS
 	if cfg.TLS.Enable {
 		if strings.TrimSpace(cfg.TLS.Cert) == "" {
@@ -202,4 +276,20 @@ func isValidGitHubRepoURL(s string) bool {
 	trimmed := strings.Trim(u.Path, "/")
 	parts := strings.Split(trimmed, "/")
 	return len(parts) >= 2 && parts[0] != "" && parts[1] != ""
+}
+
+func validPluginConfigID(id string) bool {
+	if len(id) == 0 || len(id) > 128 || !isASCIILetterDigit(id[0]) {
+		return false
+	}
+	for i := 1; i < len(id); i++ {
+		if !isASCIILetterDigit(id[i]) && id[i] != '.' && id[i] != '_' && id[i] != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIILetterDigit(ch byte) bool {
+	return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
 }

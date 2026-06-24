@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
 )
@@ -289,6 +290,10 @@ func (h *Handler) PatchAPIKeyAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
+	if err := validateAPIKey(body.Key); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
 	if h.cfg.APIKeyAliases == nil {
 		h.cfg.APIKeyAliases = map[string]string{}
 	}
@@ -486,6 +491,7 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 		return
 	}
 	h.cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
+	h.cfg.PruneGloballyExcludedAPIKeyRules()
 	h.persist(c)
 }
 
@@ -515,6 +521,7 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 		h.cfg.OAuthExcludedModels = make(map[string][]string)
 	}
 	h.cfg.OAuthExcludedModels[provider] = normalized
+	h.cfg.PruneGloballyExcludedAPIKeyRules()
 	h.persist(c)
 }
 
@@ -533,7 +540,11 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 // oauth-model-alias: map[string][]OAuthModelAlias
 
 func (h *Handler) GetOAuthModelAlias(c *gin.Context) {
-	c.JSON(200, gin.H{"oauth-model-alias": sanitizedOAuthModelAlias(h.cfg.OAuthModelAlias)})
+	doc, ok := h.loadOAuthModelAliasCatalog(c)
+	if !ok {
+		return
+	}
+	c.JSON(200, gin.H{"oauth-model-alias": doc.ToOAuthModelAlias()})
 }
 
 func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
@@ -541,8 +552,12 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 	if !ok {
 		return
 	}
-	h.cfg.OAuthModelAlias = sanitizedOAuthModelAlias(entries)
-	h.persist(c)
+	doc, ok := h.loadOAuthModelAliasCatalog(c)
+	if !ok {
+		return
+	}
+	modelcatalog.ReplaceOAuthModelAlias(&doc, sanitizedOAuthModelAlias(entries))
+	h.persistOAuthModelAlias(c, doc)
 }
 
 func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
@@ -566,21 +581,20 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid channel"})
 		return
 	}
-
-	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
-	normalized := normalizedMap[channel]
-	if len(normalized) == 0 {
-		if !deleteMapKey(c, &h.cfg.OAuthModelAlias, channel, "channel") {
-			return
-		}
-		h.persist(c)
+	doc, ok := h.loadOAuthModelAliasCatalog(c)
+	if !ok {
 		return
 	}
-	if h.cfg.OAuthModelAlias == nil {
-		h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
+	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
+	if len(normalizedMap[channel]) == 0 {
+		if !modelcatalog.DeleteOAuthModelAliasChannel(&doc, channel) {
+			c.JSON(404, gin.H{"error": "channel not found"})
+			return
+		}
+	} else {
+		modelcatalog.ReplaceOAuthModelAliasChannel(&doc, channel, normalizedMap[channel])
 	}
-	h.cfg.OAuthModelAlias[channel] = normalized
-	h.persist(c)
+	h.persistOAuthModelAlias(c, doc)
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
@@ -592,10 +606,47 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
-	if !deleteMapKey(c, &h.cfg.OAuthModelAlias, channel, "channel") {
+	doc, ok := h.loadOAuthModelAliasCatalog(c)
+	if !ok {
 		return
 	}
-	h.persist(c)
+	if !modelcatalog.DeleteOAuthModelAliasChannel(&doc, channel) {
+		c.JSON(404, gin.H{"error": "channel not found"})
+		return
+	}
+	h.persistOAuthModelAlias(c, doc)
+}
+
+func (h *Handler) loadOAuthModelAliasCatalog(c *gin.Context) (modelcatalog.File, bool) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return modelcatalog.File{}, false
+	}
+	doc, err := modelcatalog.LoadOrInit(h.configFilePath, h.cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load model catalog: %v", err)})
+		return modelcatalog.File{}, false
+	}
+	return doc, true
+}
+
+func (h *Handler) persistOAuthModelAlias(c *gin.Context, doc modelcatalog.File) {
+	if h == nil || h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return
+	}
+	if err := modelcatalog.Save(h.configFilePath, doc); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save model catalog: %v", err)})
+		return
+	}
+	h.applyModelCatalogRuntime(doc)
+	h.mu.Lock()
+	ok := h.saveConfigLocked(c)
+	h.mu.Unlock()
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // codex-api-key: []CodexKey

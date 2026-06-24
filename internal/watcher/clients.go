@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/synthesizer"
@@ -22,16 +23,32 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) {
-	log.Debugf("starting full client load process")
-
+func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string, forceAuthRefresh bool) bool {
 	w.clientsMutex.RLock()
 	cfg := w.config
 	w.clientsMutex.RUnlock()
 
+	if cfg != nil && w.reloadCallback != nil {
+		log.Debugf("triggering server update callback before auth refresh")
+		if !w.reloadCallback(cfg) {
+			log.Errorf("server update callback rejected config reload; skipping auth refresh")
+			return false
+		}
+	}
+	return w.reloadClientsWithConfig(cfg, rescanAuth, affectedOAuthProviders, forceAuthRefresh)
+}
+
+func (w *Watcher) reloadClientsWithConfig(
+	cfg *config.Config,
+	rescanAuth bool,
+	affectedOAuthProviders []string,
+	forceAuthRefresh bool,
+) bool {
+	log.Debugf("starting full client load process")
+
 	if cfg == nil {
 		log.Error("config is nil, cannot reload clients")
-		return
+		return false
 	}
 
 	if len(affectedOAuthProviders) > 0 {
@@ -74,7 +91,9 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 	}
 
 	if rescanAuth {
+		w.authRescanMu.Lock()
 		w.clientsMutex.Lock()
+		parser := w.pluginAuthParser
 
 		w.lastAuthHashes = make(map[string]string)
 		cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
@@ -104,10 +123,11 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 								}
 							}
 							ctx := &synthesizer.SynthesisContext{
-								Config:      cfg,
-								AuthDir:     resolvedAuthDir,
-								Now:         time.Now(),
-								IDGenerator: synthesizer.NewStableIDGenerator(),
+								Config:           cfg,
+								AuthDir:          resolvedAuthDir,
+								Now:              time.Now(),
+								IDGenerator:      synthesizer.NewStableIDGenerator(),
+								PluginAuthParser: parser,
 							}
 							if generated := synthesizer.SynthesizeAuthFile(ctx, path, data); len(generated) > 0 {
 								if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
@@ -121,16 +141,13 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 			)
 		}
 		w.clientsMutex.Unlock()
+		w.authRescanMu.Unlock()
 	}
 
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 
-	if w.reloadCallback != nil {
-		log.Debugf("triggering server update callback before auth refresh")
-		w.reloadCallback(cfg)
-	}
-
 	w.refreshAuthState(forceAuthRefresh)
+	redisqueue.NotifyUsageRefresh()
 
 	log.Infof(
 		"full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
@@ -142,6 +159,7 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 		codexAPIKeyCount,
 		openAICompatCount,
 	)
+	return true
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {
@@ -166,6 +184,9 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		return
 	}
 
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+
 	w.clientsMutex.Lock()
 	if w.config == nil {
 		log.Error("config is nil, cannot add or update client")
@@ -173,6 +194,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		return
 	}
 	cfg := w.config
+	parser := w.pluginAuthParser
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
 	}
@@ -210,10 +232,11 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	sctx := &synthesizer.SynthesisContext{
-		Config:      w.config,
-		AuthDir:     w.authDir,
-		Now:         time.Now(),
-		IDGenerator: synthesizer.NewStableIDGenerator(),
+		Config:           w.config,
+		AuthDir:          w.authDir,
+		Now:              time.Now(),
+		IDGenerator:      synthesizer.NewStableIDGenerator(),
+		PluginAuthParser: parser,
 	}
 	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
 	newByID := authSliceToMap(generated)
@@ -232,9 +255,13 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
 	w.dispatchAuthUpdates(updates)
+	redisqueue.NotifyUsageRefresh()
 }
 
 func (w *Watcher) removeClient(path string) {
+	w.authRescanMu.Lock()
+	defer w.authRescanMu.Unlock()
+
 	normalized := w.normalizeAuthPath(path)
 	w.clientsMutex.Lock()
 	cfg := w.config
@@ -256,6 +283,7 @@ func (w *Watcher) removeClient(path string) {
 	}
 	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
 	w.dispatchAuthUpdates(updates)
+	redisqueue.NotifyUsageRefresh()
 }
 
 func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*coreauth.Auth) []AuthUpdate {
@@ -267,12 +295,28 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 		existing, ok := w.currentAuths[id]
 		if !ok {
 			w.currentAuths[id] = newAuth.Clone()
-			updates = append(updates, AuthUpdate{Action: AuthUpdateActionAdd, ID: id, Auth: newAuth.Clone()})
+			updates = append(
+				updates,
+				AuthUpdate{
+					Action:            AuthUpdateActionAdd,
+					ID:                id,
+					Auth:              newAuth.Clone(),
+					AllowAuthRecreate: allowAuthRecreateForUpdate(newAuth),
+				},
+			)
 			continue
 		}
 		if !authEqual(existing, newAuth) {
 			w.currentAuths[id] = newAuth.Clone()
-			updates = append(updates, AuthUpdate{Action: AuthUpdateActionModify, ID: id, Auth: newAuth.Clone()})
+			updates = append(
+				updates,
+				AuthUpdate{
+					Action:            AuthUpdateActionModify,
+					ID:                id,
+					Auth:              newAuth.Clone(),
+					AllowAuthRecreate: allowAuthRecreateForUpdate(newAuth),
+				},
+			)
 		}
 	}
 	for id := range oldByID {

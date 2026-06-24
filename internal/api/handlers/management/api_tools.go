@@ -13,7 +13,10 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/antigravity"
+	claudeauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/claude"
+	codexauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/codex"
 	geminiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/gemini"
+	xaiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/xai"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
@@ -30,6 +33,9 @@ type apiCallRequest struct {
 	AuthIndexSnake  *string           `json:"auth_index"`
 	AuthIndexCamel  *string           `json:"authIndex"`
 	AuthIndexPascal *string           `json:"AuthIndex"`
+	ProxyURLSnake   *string           `json:"proxy_url"`
+	ProxyURLCamel   *string           `json:"proxyUrl"`
+	ProxyURLPascal  *string           `json:"ProxyUrl"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
 	Header          map[string]string `json:"header"`
@@ -72,9 +78,10 @@ type apiCallResponse struct {
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
 //
 // Proxy selection (highest priority first):
-//  1. Selected credential proxy_url
-//  2. Global config proxy-url
-//  3. Direct connect (environment proxies are not used)
+//  1. Request proxy_url / proxyUrl / ProxyUrl
+//  2. Selected credential proxy_url
+//  3. Global config proxy-url
+//  4. Direct connect (environment proxies are not used)
 //
 // Response JSON (returned with HTTP 200 when the APICall itself succeeds):
 //   - status_code: Upstream HTTP status code.
@@ -133,6 +140,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
+	proxyURL := firstNonEmptyString(body.ProxyURLSnake, body.ProxyURLCamel, body.ProxyURLPascal)
 	auth := h.authByIndex(authIndex)
 
 	reqHeaders := body.Header
@@ -226,7 +234,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		}
 		return nil
 	}
-	httpClient.Transport = pinnedTransport(h.apiCallTransport(auth), parsedURL.Hostname(), pinnedAddr)
+	httpClient.Transport = pinnedTransport(h.apiCallTransport(auth, proxyURL), parsedURL.Hostname(), pinnedAddr)
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -293,16 +301,112 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 	}
 
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-	if provider == "gemini-cli" {
+	switch provider {
+	case "claude", "anthropic":
+		token, errToken := h.refreshClaudeOAuthAccessToken(ctx, auth)
+		return token, errToken
+	case "codex":
+		token, errToken := h.refreshCodexOAuthAccessToken(ctx, auth)
+		return token, errToken
+	case "gemini", "gemini-cli":
 		token, errToken := h.refreshGeminiOAuthAccessToken(ctx, auth)
 		return token, errToken
-	}
-	if provider == "antigravity" {
+	case "antigravity":
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
 		return token, errToken
+	case "xai", "x-ai", "grok":
+		token, errToken := h.refreshXAIOAuthAccessToken(ctx, auth)
+		return token, errToken
+	default:
+		return tokenValueForAuth(auth), nil
 	}
+}
 
-	return tokenValueForAuth(auth), nil
+func tokenExpired(metadata map[string]any) bool {
+	if len(metadata) == 0 {
+		return false
+	}
+	for _, key := range []string{"expired", "expiry", "expires_at", "expiresAt"} {
+		raw := stringValue(metadata, key)
+		if raw == "" {
+			continue
+		}
+		if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+			return !time.Now().Add(time.Minute).Before(ts)
+		}
+	}
+	return false
+}
+
+func (h *Handler) persistRefreshedAuth(ctx context.Context, auth *coreauth.Auth) {
+	if h == nil || h.authManager == nil || auth == nil {
+		return
+	}
+	if _, err := h.authManager.Update(ctx, auth); err != nil {
+		log.WithError(err).Warnf("failed to persist refreshed auth %s", auth.ID)
+	}
+}
+
+func (h *Handler) refreshClaudeOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	current := tokenValueForAuth(auth)
+	if current != "" && !tokenExpired(auth.Metadata) {
+		return current, nil
+	}
+	refreshToken := stringValue(auth.Metadata, "refresh_token")
+	if refreshToken == "" {
+		return current, nil
+	}
+	svc := claudeauth.NewAuth(h.cfg)
+	td, err := svc.RefreshTokens(ctx, refreshToken)
+	if err != nil {
+		return "", err
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = td.AccessToken
+	if td.RefreshToken != "" {
+		auth.Metadata["refresh_token"] = td.RefreshToken
+	}
+	auth.Metadata["email"] = td.Email
+	auth.Metadata["expired"] = td.Expire
+	auth.Metadata["type"] = "claude"
+	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+	h.persistRefreshedAuth(ctx, auth)
+	return strings.TrimSpace(td.AccessToken), nil
+}
+
+func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	current := tokenValueForAuth(auth)
+	if current != "" && !tokenExpired(auth.Metadata) {
+		return current, nil
+	}
+	refreshToken := stringValue(auth.Metadata, "refresh_token")
+	if refreshToken == "" {
+		return current, nil
+	}
+	svc := codexauth.NewAuth(h.cfg)
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	if err != nil {
+		return "", err
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["id_token"] = td.IDToken
+	auth.Metadata["access_token"] = td.AccessToken
+	if td.RefreshToken != "" {
+		auth.Metadata["refresh_token"] = td.RefreshToken
+	}
+	if td.AccountID != "" {
+		auth.Metadata["account_id"] = td.AccountID
+	}
+	auth.Metadata["email"] = td.Email
+	auth.Metadata["expired"] = td.Expire
+	auth.Metadata["type"] = "codex"
+	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+	h.persistRefreshedAuth(ctx, auth)
+	return strings.TrimSpace(td.AccessToken), nil
 }
 
 func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
@@ -323,7 +427,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	ctxToken := ctx
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, ""),
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
@@ -382,7 +486,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, ""),
 	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -441,6 +545,78 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	}
 
 	return strings.TrimSpace(tokenResp.AccessToken), nil
+}
+
+func (h *Handler) refreshXAIOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+	current := tokenValueForAuth(auth)
+	if current != "" && !xaiTokenNeedsRefresh(auth.Metadata) {
+		return current, nil
+	}
+	refreshToken := stringValue(auth.Metadata, "refresh_token")
+	if refreshToken == "" {
+		return current, nil
+	}
+	tokenEndpoint := stringValue(auth.Metadata, "token_endpoint")
+	svc := xaiauth.NewXAIAuthWithProxyURL(h.cfg, auth.ProxyURL)
+	td, err := svc.RefreshTokens(ctx, refreshToken, tokenEndpoint)
+	if err != nil {
+		return "", err
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	now := time.Now().UTC()
+	auth.Metadata["access_token"] = strings.TrimSpace(td.AccessToken)
+	if strings.TrimSpace(td.RefreshToken) != "" {
+		auth.Metadata["refresh_token"] = strings.TrimSpace(td.RefreshToken)
+	}
+	if strings.TrimSpace(td.IDToken) != "" {
+		auth.Metadata["id_token"] = strings.TrimSpace(td.IDToken)
+	}
+	if strings.TrimSpace(td.TokenType) != "" {
+		auth.Metadata["token_type"] = strings.TrimSpace(td.TokenType)
+	}
+	if td.ExpiresIn > 0 {
+		auth.Metadata["expires_in"] = td.ExpiresIn
+		auth.Metadata["timestamp"] = now.UnixMilli()
+	}
+	if strings.TrimSpace(td.Expire) != "" {
+		auth.Metadata["expired"] = strings.TrimSpace(td.Expire)
+	}
+	if strings.TrimSpace(td.Email) != "" {
+		auth.Metadata["email"] = strings.TrimSpace(td.Email)
+	}
+	if strings.TrimSpace(td.Subject) != "" {
+		auth.Metadata["sub"] = strings.TrimSpace(td.Subject)
+	}
+	auth.Metadata["type"] = "xai"
+	auth.Metadata["last_refresh"] = now.Format(time.RFC3339)
+	h.persistRefreshedAuth(ctx, auth)
+	return strings.TrimSpace(td.AccessToken), nil
+}
+
+func xaiTokenNeedsRefresh(metadata map[string]any) bool {
+	if metadata == nil {
+		return true
+	}
+	if expStr := stringValue(metadata, "expired"); expStr != "" {
+		if ts, errParse := time.Parse(time.RFC3339, expStr); errParse == nil {
+			return !ts.After(time.Now().Add(xaiauth.RefreshLead()))
+		}
+	}
+	expiresIn := int64Value(metadata["expires_in"])
+	timestampMs := int64Value(metadata["timestamp"])
+	if expiresIn > 0 && timestampMs > 0 {
+		exp := time.UnixMilli(timestampMs).Add(time.Duration(expiresIn) * time.Second)
+		return !exp.After(time.Now().Add(xaiauth.RefreshLead()))
+	}
+	return true
 }
 
 func antigravityTokenNeedsRefresh(metadata map[string]any) bool {
@@ -633,8 +809,11 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	return nil
 }
 
-func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
+func (h *Handler) apiCallTransport(auth *coreauth.Auth, proxyURL string) http.RoundTripper {
 	var proxyCandidates []string
+	if proxyStr := strings.TrimSpace(proxyURL); proxyStr != "" {
+		proxyCandidates = append(proxyCandidates, proxyStr)
+	}
 	if auth != nil {
 		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
 			proxyCandidates = append(proxyCandidates, proxyStr)
@@ -818,6 +997,8 @@ func isAllowedTokenTarget(hostname string) bool {
 		"apis.iflow.cn",
 		"kimi.moonshot.cn",
 		"dashscope.aliyuncs.com",
+		"x.ai",
+		"cli-chat-proxy.grok.com",
 	}
 	for _, domain := range allowed {
 		if hostname == domain || strings.HasSuffix(hostname, "."+domain) {
