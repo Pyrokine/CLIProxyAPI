@@ -246,7 +246,7 @@ func (fh *fallbackHandler) wrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			// Log: Model was mapped to another model
 			log.Debugf("amp model mapping: request %s -> %s", normalizedModel, resolvedModel)
 			logAmpRouting(routeTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
-			rewriter := newResponseRewriter(c.Writer, modelName)
+			rewriter := newResponseRewriterForRequest(c.Writer, modelName, bodyBytes)
 			c.Writer = rewriter
 			// Filter Anthropic-Beta header only for local handling paths
 			filterAntropicBetaHeader(c)
@@ -257,10 +257,13 @@ func (fh *fallbackHandler) wrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		} else if len(providers) > 0 {
 			// Log: Using local provider (free)
 			logAmpRouting(routeTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
+			rewriter := newResponseRewriterForRequest(c.Writer, modelName, bodyBytes)
+			c.Writer = rewriter
 			// Filter Anthropic-Beta header only for local handling paths
 			filterAntropicBetaHeader(c)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			handler(c)
+			rewriter.Flush()
 		} else {
 			// No provider, no mapping, no proxy: fall back to the wrapped handler so it can return an error response
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))

@@ -59,14 +59,15 @@ func (h *APIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in constant.OpenAI-compatible format.
 func (h *APIHandler) OpenAIModels(c *gin.Context) {
+	models := h.FilterModelsForCurrentAPIKey(c, h.Models())
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
-		c.JSON(http.StatusOK, h.codexClientModelsResponse())
+		c.JSON(http.StatusOK, CodexClientModelsResponse(models))
 		return
 	}
 	c.JSON(
 		http.StatusOK, gin.H{
 			"object": "list",
-			"data":   h.Models(),
+			"data":   models,
 		},
 	)
 }

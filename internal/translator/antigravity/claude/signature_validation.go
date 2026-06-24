@@ -185,17 +185,6 @@ func validateSingleLayerSignatureContent(sig string, encodingLayers int) error {
 	return err
 }
 
-func inspectSingleLayerSignatureWithLayers(sig string, encodingLayers int) (*claudeSignatureTree, error) {
-	decoded, err := base64.StdEncoding.DecodeString(sig)
-	if err != nil {
-		return nil, fmt.Errorf("invalid single-layer signature: base64 decode failed: %w", err)
-	}
-	if len(decoded) == 0 {
-		return nil, fmt.Errorf("invalid single-layer signature: empty after decode")
-	}
-	return inspectClaudeSignaturePayload(decoded, encodingLayers)
-}
-
 func inspectClaudeSignaturePayload(payload []byte, encodingLayers int) (*claudeSignatureTree, error) {
 	if len(payload) == 0 {
 		return nil, fmt.Errorf("invalid Claude signature: empty payload")

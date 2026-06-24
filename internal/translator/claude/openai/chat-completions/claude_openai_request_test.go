@@ -80,6 +80,71 @@ func TestConvertOpenAIRequestToClaude_ToolResultTextAndBase64Image(t *testing.T)
 	}
 }
 
+func TestConvertOpenAIRequestToClaudeMapsSystemToTopLevel(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{"role": "system", "content": "be concise"},
+			{"role": "system", "content": [{"type":"text","text":"use json"}]},
+			{"role": "user", "content": "hello"}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("system.0.text").String(); got != "be concise" {
+		t.Fatalf("system.0.text = %q, want be concise. Output: %s", got, string(result))
+	}
+	if got := resultJSON.Get("system.1.text").String(); got != "use json" {
+		t.Fatalf("system.1.text = %q, want use json. Output: %s", got, string(result))
+	}
+	messages := resultJSON.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("messages length = %d, want 1. Output: %s", len(messages), string(result))
+	}
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("message role = %q, want user. Output: %s", got, string(result))
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeSanitizesToolIDs(t *testing.T) {
+	inputJSON := `{
+		"model": "gpt-4.1",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": "",
+				"tool_calls": [
+					{
+						"id": "call.bad/id",
+						"type": "function",
+						"function": {
+							"name": "do_work",
+							"arguments": "{\"a\":1}"
+						}
+					}
+				]
+			},
+			{
+				"role": "tool",
+				"tool_call_id": "call.bad/id",
+				"content": "tool ok"
+			}
+		]
+	}`
+
+	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+
+	if got := resultJSON.Get("messages.0.content.0.id").String(); got != "call_bad_id" {
+		t.Fatalf("tool_use id = %q, want call_bad_id. Output: %s", got, string(result))
+	}
+	if got := resultJSON.Get("messages.1.content.0.tool_use_id").String(); got != "call_bad_id" {
+		t.Fatalf("tool_result tool_use_id = %q, want call_bad_id. Output: %s", got, string(result))
+	}
+}
+
 func TestConvertOpenAIRequestToClaude_ToolResultURLImageOnly(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",

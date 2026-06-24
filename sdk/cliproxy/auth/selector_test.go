@@ -324,6 +324,168 @@ func TestHeaderValueIgnoreCase(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{"Session_id": {"codex-session-1"}}
+	if got := ExtractSessionID(headers, nil, nil); got != "codex-session-1" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-session-1")
+	}
+}
+
+func TestExtractSessionID_CodexSessionIDPriorityOverClientRequestID(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{"Session_id": {"codex-session-1"}, "X-Client-Request-Id": {"client-session-1"}}
+	if got := ExtractSessionID(headers, nil, nil); got != "codex-session-1" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-session-1")
+	}
+}
+
+func TestExtractSessionID_CodexHyphenSessionIDHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{"Session-Id": {"codex-session-2"}}
+	if got := ExtractSessionID(headers, nil, nil); got != "codex-session-2" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-session-2")
+	}
+}
+
+func TestExtractSessionID_CodexConversationIDHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{"Conversation_id": {"codex-conversation-1"}}
+	if got := ExtractSessionID(headers, nil, nil); got != "codex-conversation-1" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-conversation-1")
+	}
+}
+
+func TestExtractSessionID_CodexPromptCacheKeyBody(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{"X-Client-Request-Id": {"client-session-1"}}
+	body := []byte(`{"prompt_cache_key":"codex-cache-1"}`)
+	if got := ExtractSessionID(headers, body, nil); got != "codex-cache-1" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-cache-1")
+	}
+}
+
+func TestExtractSessionID_CodexTurnMetadataPromptCacheKeyBody(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"client_metadata":{"x-codex-turn-metadata":"{\"prompt_cache_key\":\"turn-cache-1\",\"window_id\":\"window-1\"}"}}`)
+	if got := ExtractSessionID(nil, body, nil); got != "turn-cache-1" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "turn-cache-1")
+	}
+}
+
+func TestSessionAffinitySelector_UsesCodexSessionID(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Hour,
+		},
+	)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	opts := cliproxyexecutor.Options{Headers: http.Header{"Session_id": {"codex-session-1"}}}
+
+	first, err := selector.Pick(context.Background(), "codex", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "codex", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("second Pick() error = %v", err)
+	}
+	if first == nil || second == nil || first.ID != second.ID {
+		t.Fatalf("expected Session_id stickiness, got %v and %v", first, second)
+	}
+}
+
+func TestSessionAffinitySelector_UsesCodexPromptCacheKeyBody(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Hour,
+		},
+	)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	opts := cliproxyexecutor.Options{OriginalRequest: []byte(`{"prompt_cache_key":"codex-cache-1"}`)}
+
+	first, err := selector.Pick(context.Background(), "codex", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("first Pick() error = %v", err)
+	}
+	second, err := selector.Pick(context.Background(), "codex", "m1", opts, auths)
+	if err != nil {
+		t.Fatalf("second Pick() error = %v", err)
+	}
+	if first == nil || second == nil || first.ID != second.ID {
+		t.Fatalf("expected prompt_cache_key stickiness, got %v and %v", first, second)
+	}
+}
+
+func TestSessionAffinitySelector_CodexPromptCacheKeyPriorityOverClientSessionID(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Hour,
+		},
+	)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	selector.Remember(
+		"codex", cliproxyexecutor.Options{OriginalRequest: []byte(`{"prompt_cache_key":"codex-cache-1"}`)}, auths[0],
+	)
+
+	opts := cliproxyexecutor.Options{
+		Headers:         http.Header{"Session_id": {"codex-client-session"}},
+		OriginalRequest: []byte(`{"prompt_cache_key":"codex-cache-1"}`),
+	}
+	sticky := selector.PickSticky("codex", opts, auths)
+	if sticky == nil || sticky.ID != "a" {
+		t.Fatalf("PickSticky() = %v, want auth a", sticky)
+	}
+}
+
+func TestSessionAffinitySelector_CodexSessionIDPriorityOverAmpThreadID(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &RoundRobinSelector{},
+			TTL:      time.Hour,
+		},
+	)
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+	selector.Remember(
+		"codex", cliproxyexecutor.Options{Headers: http.Header{"Session_id": {"codex-session-1"}}}, auths[0],
+	)
+
+	opts := cliproxyexecutor.Options{
+		Headers: http.Header{
+			"Session_id": {"codex-session-1"}, "X-Amp-Thread-Id": {"amp-session-1"},
+		},
+	}
+	sticky := selector.PickSticky("codex", opts, auths)
+	if sticky == nil || sticky.ID != "a" {
+		t.Fatalf("PickSticky() = %v, want auth a", sticky)
+	}
+}
+
 func TestSessionAffinitySelector_UsesAmpThreadID(t *testing.T) {
 	t.Parallel()
 

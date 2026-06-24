@@ -58,7 +58,7 @@ const (
 	LevelMax Level = "max"
 )
 
-// Config represents a unified thinking configuration.
+// ThinkingConfig represents a unified thinking configuration.
 //
 // This struct is used to pass thinking configuration information between components.
 // Depending on Mode, either Budget or Level field is effective:
@@ -66,7 +66,7 @@ const (
 //   - ModeAuto: Budget=-1, Level is ignored
 //   - ModeBudget: Budget is a positive integer, Level is ignored
 //   - ModeLevel: Budget is ignored, Level is a valid level
-type Config struct {
+type ThinkingConfig struct {
 	// Mode specifies the configuration mode
 	Mode mode
 	// Budget is the thinking budget (token count), only effective when Mode is ModeBudget.
@@ -75,6 +75,9 @@ type Config struct {
 	// Level is the thinking level, only effective when Mode is ModeLevel
 	Level Level
 }
+
+// Config is kept as the compatibility name for existing provider code.
+type Config = ThinkingConfig
 
 // SuffixResult represents the result of parsing a model name for thinking suffix.
 //
@@ -95,7 +98,7 @@ type SuffixResult struct {
 
 // ProviderApplier defines the interface for provider-specific thinking configuration application.
 //
-// Types implementing this interface are responsible for converting a unified Config
+// Types implementing this interface are responsible for converting a unified ThinkingConfig
 // into provider-specific format and applying it to the request body.
 //
 // Implementation requirements:
@@ -114,5 +117,5 @@ type ProviderApplier interface {
 	// Returns:
 	//   - Modified request body JSON
 	//   - Error if the configuration is invalid or unsupported
-	Apply(body []byte, config Config, modelInfo *registry.ModelInfo) ([]byte, error)
+	Apply(body []byte, config ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error)
 }

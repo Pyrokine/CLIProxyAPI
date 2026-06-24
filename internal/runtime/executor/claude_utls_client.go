@@ -115,18 +115,25 @@ func (t *claudeUtlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 }
 
 type claudeFallbackRoundTripper struct {
-	utls     *claudeUtlsRoundTripper
+	utls     http.RoundTripper
 	fallback http.RoundTripper
+}
+
+var utlsProtectedHosts = map[string]struct{}{
+	"api.anthropic.com": {},
+	"chatgpt.com":       {},
 }
 
 func (f *claudeFallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.URL != nil && req.URL.Scheme == "https" {
-		return f.utls.RoundTrip(req)
+		if _, ok := utlsProtectedHosts[strings.ToLower(req.URL.Hostname())]; ok {
+			return f.utls.RoundTrip(req)
+		}
 	}
 	return f.fallback.RoundTrip(req)
 }
 
-func newClaudeUtlsHTTPClient(
+func newProtectedUtlsHTTPClient(
 	ctx context.Context,
 	cfg *config.Config,
 	auth *cliproxyauth.Auth,
@@ -140,6 +147,7 @@ func newClaudeUtlsHTTPClient(
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
+	var utlsTransport http.RoundTripper = newClaudeUtlsRoundTripper(proxyURL)
 	var fallback http.RoundTripper = &http.Transport{
 		DialContext: (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 	}
@@ -148,12 +156,13 @@ func newClaudeUtlsHTTPClient(
 			fallback = transport
 		}
 	} else if roundTripper, ok := util.RoundTripperValue(ctx).(http.RoundTripper); ok && roundTripper != nil {
+		utlsTransport = roundTripper
 		fallback = roundTripper
 	}
 
 	client := &http.Client{
 		Transport: &claudeFallbackRoundTripper{
-			utls:     newClaudeUtlsRoundTripper(proxyURL),
+			utls:     utlsTransport,
 			fallback: fallback,
 		},
 	}
@@ -161,4 +170,13 @@ func newClaudeUtlsHTTPClient(
 		client.Timeout = timeout
 	}
 	return client
+}
+
+func newClaudeUtlsHTTPClient(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *cliproxyauth.Auth,
+	timeout time.Duration,
+) *http.Client {
+	return newProtectedUtlsHTTPClient(ctx, cfg, auth, timeout)
 }

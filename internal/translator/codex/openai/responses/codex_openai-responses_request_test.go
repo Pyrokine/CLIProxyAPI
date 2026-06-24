@@ -319,6 +319,21 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 	}
 }
 
+func TestStreamOptionsRemovedForCodexCompatibility(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"stream_options": {"include_usage": true},
+		"input": [{"role":"user","content":"hello"}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	if gjson.Get(outputStr, "stream_options").Exists() {
+		t.Fatalf("stream_options should be removed for Codex compatibility")
+	}
+}
+
 func TestNormalizeCodexBuiltinTools(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.2",

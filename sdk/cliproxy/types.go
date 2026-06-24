@@ -7,6 +7,7 @@ import (
 	"context"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
@@ -78,7 +79,7 @@ type APIKeyClientResult struct {
 // Returns:
 //   - *WatcherWrapper: A watcher wrapper instance
 //   - error: An error if watcher creation fails
-type WatcherFactory func(configPath, authDir string, reload func(*config.Config)) (*WatcherWrapper, error)
+type WatcherFactory func(configPath, authDir string, reload func(*config.Config) bool) (*WatcherWrapper, error)
 
 // WatcherWrapper exposes the subset of watcher methods required by the SDK.
 type WatcherWrapper struct {
@@ -86,6 +87,7 @@ type WatcherWrapper struct {
 	stop  func() error
 
 	setConfig             func(cfg *config.Config)
+	setPluginAuthParser   func(parser synthesizer.PluginAuthParser)
 	snapshotAuths         func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
@@ -123,6 +125,14 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 		return false
 	}
 	return w.dispatchRuntimeUpdate(update)
+}
+
+// SetPluginAuthParser updates the parser used for plugin-owned auth files.
+func (w *WatcherWrapper) SetPluginAuthParser(parser synthesizer.PluginAuthParser) {
+	if w == nil || w.setPluginAuthParser == nil {
+		return
+	}
+	w.setPluginAuthParser(parser)
 }
 
 // SetClients updates the watcher file-backed clients registry.

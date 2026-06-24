@@ -213,9 +213,46 @@ func ConvertCodexResponseToClaude(
 				output = translatorcommon.AppendSSEEventBytes(output, "content_block_delta", template, 2)
 			}
 		}
+	} else if typeStr == "error" || typeStr == "response.error" {
+		output = translatorcommon.AppendSSEEventBytes(output, "error", codexClaudeErrorEvent(rootResult), 2)
 	}
 
 	return [][]byte{output}
+}
+
+func codexClaudeErrorEvent(root gjson.Result) []byte {
+	errorResult := root.Get("error")
+	errType := strings.TrimSpace(errorResult.Get("type").String())
+	if errType == "" {
+		errType = strings.TrimSpace(root.Get("error_type").String())
+	}
+	if errType == "" {
+		errType = "api_error"
+	}
+
+	code := strings.TrimSpace(errorResult.Get("code").String())
+	message := strings.TrimSpace(errorResult.Get("message").String())
+	if message == "" {
+		message = strings.TrimSpace(root.Get("message").String())
+	}
+	if message == "" {
+		message = code
+	}
+	if message == "" {
+		message = errType
+	}
+
+	if code == "cyber_policy" || errType == "invalid_request" {
+		errType = "invalid_request_error"
+	}
+
+	payload := []byte(`{"type":"error","error":{"type":"api_error","message":""}}`)
+	payload, _ = sjson.SetBytes(payload, "error.type", errType)
+	payload, _ = sjson.SetBytes(payload, "error.message", message)
+	if code != "" {
+		payload, _ = sjson.SetBytes(payload, "error.code", code)
+	}
+	return payload
 }
 
 func resetPendingCodexThinkingBlock(params *ConvertCodexResponseToClaudeParams) {

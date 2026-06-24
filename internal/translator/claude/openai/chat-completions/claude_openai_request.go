@@ -15,6 +15,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -166,8 +167,6 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Process messages and transform them to Claude Code format
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
-		messageIndex := 0
-		systemMessageIndex := -1
 		messages.ForEach(
 			func(_, message gjson.Result) bool {
 				role := message.Get("role").String()
@@ -175,27 +174,17 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				switch role {
 				case "system":
-					if systemMessageIndex == -1 {
-						systemMsg := []byte(`{"role":"user","content":[]}`)
-						out, _ = sjson.SetRawBytes(out, "messages.-1", systemMsg)
-						systemMessageIndex = messageIndex
-						messageIndex++
-					}
 					if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
 						textPart := []byte(`{"type":"text","text":""}`)
 						textPart, _ = sjson.SetBytes(textPart, "text", contentResult.String())
-						out, _ = sjson.SetRawBytes(
-							out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart,
-						)
+						out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 					} else if contentResult.Exists() && contentResult.IsArray() {
 						contentResult.ForEach(
 							func(_, part gjson.Result) bool {
 								if part.Get("type").String() == "text" {
 									textPart := []byte(`{"type":"text","text":""}`)
 									textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-									out, _ = sjson.SetRawBytes(
-										out, fmt.Sprintf("messages.%d.content.-1", systemMessageIndex), textPart,
-									)
+									out, _ = sjson.SetRawBytes(out, "system.-1", textPart)
 								}
 								return true
 							},
@@ -230,6 +219,8 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 									toolCallID := toolCall.Get("id").String()
 									if toolCallID == "" {
 										toolCallID = genToolCallID()
+									} else {
+										toolCallID = util.SanitizeClaudeToolID(toolCallID)
 									}
 
 									function := toolCall.Get("function")
@@ -262,11 +253,10 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					}
 
 					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-					messageIndex++
 
 				case "tool":
 					// Handle tool result messages conversion
-					toolCallID := message.Get("tool_call_id").String()
+					toolCallID := util.SanitizeClaudeToolID(message.Get("tool_call_id").String())
 					toolContentResult := message.Get("content")
 
 					msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
@@ -278,7 +268,6 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 					}
 					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
-					messageIndex++
 				}
 				return true
 			},

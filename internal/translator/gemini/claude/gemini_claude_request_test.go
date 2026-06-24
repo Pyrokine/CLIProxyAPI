@@ -6,6 +6,41 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertClaudeRequestToGeminiCleansToolSchema(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{
+				"name": "search",
+				"description": "Search",
+				"eager_input_streaming": true,
+				"input_schema": {
+					"type": "object",
+					"title": "SearchInput",
+					"properties": {
+						"query": {"type": "string", "nullable": true, "title": "Query"}
+					}
+				}
+			}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToGemini("gemini-3-flash-preview", inputJSON, false)
+
+	if gjson.GetBytes(output, "tools.0.functionDeclarations.0.eager_input_streaming").Exists() {
+		t.Fatalf("eager_input_streaming should be removed: %s", output)
+	}
+	if gjson.GetBytes(output, "tools.0.functionDeclarations.0.parametersJsonSchema.title").Exists() {
+		t.Fatalf("schema title should be removed: %s", output)
+	}
+	if gjson.GetBytes(
+		output, "tools.0.functionDeclarations.0.parametersJsonSchema.properties.query.nullable",
+	).Exists() {
+		t.Fatalf("schema nullable should be removed: %s", output)
+	}
+}
+
 func TestConvertClaudeRequestToGemini_ToolChoice_SpecificTool(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gemini-3-flash-preview",

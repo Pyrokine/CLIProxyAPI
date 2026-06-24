@@ -48,14 +48,46 @@ func (h *CLIAPIHandler) Models() []map[string]any {
 	return make([]map[string]any, 0)
 }
 
+func isGeminiCLILocalRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	remoteHost, _, errSplitRemote := net.SplitHostPort(req.RemoteAddr)
+	if errSplitRemote != nil {
+		remoteHost = req.RemoteAddr
+	}
+	remoteIP := net.ParseIP(remoteHost)
+	if remoteIP == nil || !remoteIP.IsLoopback() {
+		return false
+	}
+
+	host := req.Host
+	if parsedHost, _, errSplitHost := net.SplitHostPort(host); errSplitHost == nil {
+		host = parsedHost
+	}
+	if host == "localhost" {
+		return true
+	}
+	hostIP := net.ParseIP(host)
+	return hostIP != nil && hostIP.IsLoopback()
+}
+
 // CLIHandler handles CLI-specific requests for constant.Gemini API operations.
 // It restricts access to localhost only and routes requests to appropriate internal handlers.
 func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
-	remoteHost, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
-	if remoteHost == "" {
-		remoteHost = c.Request.RemoteAddr
+	if h == nil || h.BaseAPIHandler == nil || h.Cfg == nil || !h.Cfg.EnableGeminiCLIEndpoint {
+		c.JSON(
+			http.StatusForbidden, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "Gemini CLI endpoint is disabled",
+					Type:    "forbidden",
+				},
+			},
+		)
+		return
 	}
-	if ip := net.ParseIP(remoteHost); ip == nil || !ip.IsLoopback() {
+
+	if !isGeminiCLILocalRequest(c.Request) {
 		c.JSON(
 			http.StatusForbidden, handlers.ErrorResponse{
 				Error: handlers.ErrorDetail{
@@ -92,7 +124,7 @@ func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 		}
 		maps.Copy(req.Header, c.Request.Header)
 
-		httpClient := util.SetProxy(h.Cfg, &http.Client{})
+		httpClient := util.SetProxy(h.BaseAPIHandler.Cfg, &http.Client{})
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
@@ -138,14 +170,16 @@ func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 			log.Errorf("Failed to read response body: %v", err)
 			return
 		}
-		c.Set("API_RESPONSE_TIMESTAMP", time.Now())
-		if timelineValue, ok := c.Get(logging.RequestTimelineGinKey); ok {
-			if timeline, okTimeline := timelineValue.(*logging.RequestTimeline); okTimeline && timeline != nil {
-				timeline.AddOnce("upstream.response.done", "")
+		if h.BaseAPIHandler != nil && h.BaseAPIHandler.Cfg != nil && h.BaseAPIHandler.Cfg.RequestLog {
+			c.Set("API_RESPONSE_TIMESTAMP", time.Now())
+			if timelineValue, ok := c.Get(logging.RequestTimelineGinKey); ok {
+				if timeline, okTimeline := timelineValue.(*logging.RequestTimeline); okTimeline && timeline != nil {
+					timeline.AddOnce("upstream.response.done", "")
+				}
 			}
+			c.Set("API_RESPONSE", output)
 		}
 		_, _ = c.Writer.Write(output)
-		c.Set("API_RESPONSE", output)
 	}
 }
 

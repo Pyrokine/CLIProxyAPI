@@ -369,6 +369,20 @@ func (a *Auth) EnsureIndex() string {
 	return idx
 }
 
+// AssignIndex stores an externally assigned stable auth index.
+func (a *Auth) AssignIndex(index string) string {
+	if a == nil {
+		return ""
+	}
+	index = strings.TrimSpace(index)
+	if index == "" {
+		return a.EnsureIndex()
+	}
+	a.Index = index
+	a.indexAssigned = true
+	return index
+}
+
 // Clone duplicates a model state including nested error details.
 func (m *ModelState) Clone() *ModelState {
 	if m == nil {

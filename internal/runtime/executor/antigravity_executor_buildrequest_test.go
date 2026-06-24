@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestAntigravityBuildRequest_SanitizesGeminiToolSchema(t *testing.T) {
@@ -33,6 +35,22 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 		t.Fatalf("parameters missing or invalid type")
 	}
 	assertSchemaSanitizedAndPropertyPreserved(t, params)
+}
+
+func TestValidateAntigravityRequestSignatures_DropsInvalidClaudeThinkingSignature(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"bad","signature":"skip_thought_signature_validator"},{"type":"text","text":"visible"}]}]}`)
+
+	out, err := validateAntigravityRequestSignatures(sdktranslator.FromString("claude"), payload)
+	if err != nil {
+		t.Fatalf("validateAntigravityRequestSignatures error: %v", err)
+	}
+	content := gjson.GetBytes(out, "messages.0.content")
+	if got := len(content.Array()); got != 1 {
+		t.Fatalf("content length = %d, want 1. Payload: %s", got, out)
+	}
+	if got := content.Array()[0].Get("text").String(); got != "visible" {
+		t.Fatalf("text = %q, want visible. Payload: %s", got, out)
+	}
 }
 
 func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any {

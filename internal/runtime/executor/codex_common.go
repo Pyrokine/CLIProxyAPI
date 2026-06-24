@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -8,7 +9,6 @@ import (
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
-	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -49,6 +49,7 @@ type codexResponsesBodyResult struct {
 // applies thinking parameters, payload configuration rules, sets the model field, and
 // cleans up fields that the Codex /responses endpoint does not accept.
 func codexResponsesBody(
+	ctx context.Context,
 	cfg *config.Config,
 	baseModel string,
 	model string,
@@ -77,12 +78,11 @@ func codexResponsesBody(
 	body = applyPayloadConfigWithRoot(cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
+	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex", body)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	if !gjson.GetBytes(body, "instructions").Exists() {
-		body, _ = sjson.SetBytes(body, "instructions", "")
-	}
+	body = normalizeCodexInstructions(body)
 
 	return codexResponsesBodyResult{
 		Body:            body,

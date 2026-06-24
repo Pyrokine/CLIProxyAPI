@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 
@@ -12,6 +13,9 @@ const RequestedModelMetadataKey = "requested_model"
 
 // ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
 const ReasoningEffortMetadataKey = "reasoning_effort"
+
+// ServiceTierMetadataKey stores the client-requested service tier for usage logs.
+const ServiceTierMetadataKey = "service_tier"
 
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
@@ -40,6 +44,34 @@ type Request struct {
 	Metadata map[string]any
 }
 
+// RequestAfterAuthInterceptor rewrites a request after credential selection and before executor translation.
+type RequestAfterAuthInterceptor func(
+	context.Context,
+	RequestAfterAuthInterceptRequest,
+) RequestAfterAuthInterceptResponse
+
+// RequestAfterAuthInterceptRequest describes a selected-auth request before executor translation.
+type RequestAfterAuthInterceptRequest struct {
+	SourceFormat    sdktranslator.Format
+	ToFormat        sdktranslator.Format
+	Model           string
+	RequestedModel  string
+	Stream          bool
+	AuthID          string
+	AuthLabel       string
+	AuthProvider    string
+	OriginalRequest []byte
+	Request         Request
+	Options         Options
+}
+
+// RequestAfterAuthInterceptResponse describes a post-auth interceptor result.
+type RequestAfterAuthInterceptResponse struct {
+	Request Request
+	Options Options
+	Handled bool
+}
+
 // Options controls execution behavior for both streaming and non-streaming calls.
 type Options struct {
 	// Stream toggles streaming mode.
@@ -54,8 +86,20 @@ type Options struct {
 	OriginalRequest []byte
 	// SourceFormat identifies the inbound schema.
 	SourceFormat sdktranslator.Format
+	// ResponseFormat identifies the downstream response schema.
+	ResponseFormat sdktranslator.Format
 	// Metadata carries extra execution hints shared across selection and executors.
 	Metadata map[string]any
+	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
+	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
+}
+
+// ResponseFormatOrSource returns the response target format for an execution.
+func ResponseFormatOrSource(opts Options) sdktranslator.Format {
+	if opts.ResponseFormat != "" {
+		return opts.ResponseFormat
+	}
+	return opts.SourceFormat
 }
 
 // Response wraps either a full provider response or metadata for streaming flows.

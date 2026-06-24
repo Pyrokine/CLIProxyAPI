@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/wsrelay"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -133,12 +134,13 @@ func (e *AIStudioExecutor) prepareRequest(
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 
 	translatedReq, body, err := e.translateRequest(req, opts, stream)
 	if err != nil {
 		return nil, err
 	}
+	reporter.SetTranslatedReasoningEffort(body.payload, body.toFormat.String())
 
 	endpoint := e.buildEndpoint(baseModel, body.action, opts.Alt)
 	wsReq := &wsrelay.HTTPRequest{
@@ -433,6 +435,7 @@ func (e *AIStudioExecutor) translateRequest(
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.maxOutputTokens")
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseMimeType")
 	payload, _ = sjson.DeleteBytes(payload, "generationConfig.responseJsonSchema")
+	payload = signature.SanitizeGeminiRequestThoughtSignatures(payload, "contents")
 	metadataAction := "generateContent"
 	if req.Metadata != nil {
 		if action, _ := req.Metadata["action"].(string); action == "countTokens" {

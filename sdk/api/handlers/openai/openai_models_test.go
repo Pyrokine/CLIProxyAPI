@@ -79,6 +79,56 @@ func TestOpenAIModels_PreservesExtendedMetadata(t *testing.T) {
 	}
 }
 
+func TestOpenAIModels_FiltersDisabledCatalogModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-openai-models-disabled-catalog"
+	reg.RegisterClient(
+		clientID, "openai", []*registry.ModelInfo{
+			{ID: "catalog-disabled-model", OwnedBy: "openai", Type: "openai"},
+			{ID: "catalog-enabled-model", OwnedBy: "openai", Type: "openai"},
+		},
+	)
+	defer reg.UnregisterClient(clientID)
+
+	disabled := false
+	handler := NewAPIHandler(
+		handlers.NewBaseAPIHandlers(
+			&sdkconfig.SDKConfig{
+				ModelCatalog: sdkconfig.ModelCatalogConfig{
+					Models: []sdkconfig.ModelCatalogModel{
+						{Name: "catalog-disabled-model", Enabled: &disabled},
+					},
+				},
+			},
+			nil,
+		),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rr)
+	ctx.Request = req
+
+	handler.OpenAIModels(ctx)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var resp struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	for _, model := range resp.Data {
+		if model["id"] == "catalog-disabled-model" {
+			t.Fatalf("disabled model returned in response: %+v", resp.Data)
+		}
+	}
+}
+
 func TestCodexClientModelsResponseSanitizesReasoningLevels(t *testing.T) {
 	reg := registry.GetGlobalRegistry()
 	clientID := "test-codex-client-reasoning-levels"

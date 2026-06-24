@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -117,7 +118,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 			switch itemType {
 			case "message":
-				if strings.EqualFold(itemRole, "system") {
+				if strings.EqualFold(itemRole, "system") || strings.EqualFold(itemRole, "developer") {
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						systemInstr := []byte(`{"parts":[]}`)
 						if systemInstructionResult := gjson.GetBytes(
@@ -365,7 +366,14 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				thoughtContent := []byte(`{"role":"model","parts":[]}`)
 				thought := []byte(`{"text":"","thoughtSignature":"","thought":true}`)
 				thought, _ = sjson.SetBytes(thought, "text", item.Get("summary.0.text").String())
-				thought, _ = sjson.SetBytes(thought, "thoughtSignature", item.Get("encrypted_content").String())
+				thought, _ = sjson.SetBytes(
+					thought,
+					"thoughtSignature",
+					signature.GeminiReplaySignatureOrBypass(
+						item.Get("encrypted_content").String(),
+						signature.BlockKindGeminiModelPart,
+					),
+				)
 
 				thoughtContent, _ = sjson.SetRawBytes(thoughtContent, "parts.-1", thought)
 				out, _ = sjson.SetRawBytes(out, "contents.-1", thoughtContent)
@@ -410,6 +418,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 			out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
 		}
 	}
+
+	out = common.CleanToolSchemas(out)
 
 	// Handle generation config from OpenAI format
 	if maxOutputTokens := root.Get("max_output_tokens"); maxOutputTokens.Exists() {

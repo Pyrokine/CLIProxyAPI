@@ -74,7 +74,8 @@ func (a *sseFrameAccumulator) AddChunk(chunk []byte) [][]byte {
 		if frameLen == 0 {
 			break
 		}
-		frames = append(frames, a.pending[:frameLen])
+		frame := append([]byte(nil), a.pending[:frameLen]...)
+		frames = append(frames, frame)
 		copy(a.pending, a.pending[frameLen:])
 		a.pending = a.pending[:len(a.pending)-frameLen]
 	}
@@ -102,7 +103,8 @@ func (a *sseFrameAccumulator) Flush() [][]byte {
 		if frameLen == 0 {
 			break
 		}
-		frames = append(frames, a.pending[:frameLen])
+		frame := append([]byte(nil), a.pending[:frameLen]...)
+		frames = append(frames, frame)
 		copy(a.pending, a.pending[frameLen:])
 		a.pending = a.pending[:len(a.pending)-frameLen]
 	}
@@ -1425,6 +1427,8 @@ func collectImagesFromResponsesStream(
 	responseFormat string,
 ) ([]byte, *interfaces.ErrorMessage) {
 	acc := &sseFrameAccumulator{}
+	var fallbackResults []imageCallResult
+	var fallbackMeta imageCallResult
 
 	processFrame := func(frame []byte) ([]byte, bool, *interfaces.ErrorMessage) {
 		for _, line := range bytes.Split(frame, []byte("\n")) {
@@ -1445,13 +1449,33 @@ func collectImagesFromResponsesStream(
 				}
 			}
 
-			if gjson.GetBytes(payload, "type").String() != "response.completed" {
+			eventType := gjson.GetBytes(payload, "type").String()
+			if eventType == "response.image_generation_call.partial_image" {
+				res := strings.TrimSpace(gjson.GetBytes(payload, "partial_image_b64").String())
+				if res != "" {
+					entry := imageCallResult{
+						Result:       res,
+						OutputFormat: strings.TrimSpace(gjson.GetBytes(payload, "output_format").String()),
+						Size:         strings.TrimSpace(gjson.GetBytes(payload, "size").String()),
+						Background:   strings.TrimSpace(gjson.GetBytes(payload, "background").String()),
+						Quality:      strings.TrimSpace(gjson.GetBytes(payload, "quality").String()),
+					}
+					fallbackResults = []imageCallResult{entry}
+					fallbackMeta = entry
+				}
+				continue
+			}
+			if eventType != "response.completed" {
 				continue
 			}
 
 			results, createdAt, usageRaw, firstMeta, err := extractImagesFromResponsesCompleted(payload)
 			if err != nil {
 				return nil, false, &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+			}
+			if len(results) == 0 && len(fallbackResults) > 0 {
+				results = fallbackResults
+				firstMeta = fallbackMeta
 			}
 			if len(results) == 0 {
 				return nil, false, &interfaces.ErrorMessage{
@@ -1673,7 +1697,8 @@ func (h *APIHandler) streamImagesFromResponses(
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 			h.forwardImagesStream(
-				c, func(err error) { cliCancel(err) }, dataChan, errChan, chunk, responseFormat, streamPrefix, writeEvent,
+				c, func(err error) { cliCancel(err) }, dataChan, errChan, chunk, responseFormat, streamPrefix,
+				writeEvent,
 			)
 			return
 		}
@@ -1696,6 +1721,7 @@ func (h *APIHandler) forwardImagesStream(
 	if responseFormat == "" {
 		responseFormat = "b64_json"
 	}
+	emittedPartial := false
 
 	emitError := func(errMsg *interfaces.ErrorMessage) {
 		if errMsg == nil {
@@ -1743,6 +1769,7 @@ func (h *APIHandler) forwardImagesStream(
 					evtData, _ = sjson.SetBytes(evtData, "b64_json", b64)
 				}
 				writeEvent(eventName, evtData)
+				emittedPartial = true
 			case "response.completed":
 				results, _, usageRaw, _, err := extractImagesFromResponsesCompleted(payload)
 				if err != nil {
@@ -1750,6 +1777,9 @@ func (h *APIHandler) forwardImagesStream(
 					return true
 				}
 				if len(results) == 0 {
+					if emittedPartial {
+						return true
+					}
 					emitError(
 						&interfaces.ErrorMessage{
 							StatusCode: http.StatusBadGateway,

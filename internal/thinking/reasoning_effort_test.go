@@ -31,3 +31,17 @@ func TestExtractReasoningEffortMissingConfigIsEmpty(t *testing.T) {
 		t.Fatalf("ExtractReasoningEffort() = %q, want empty", got)
 	}
 }
+
+func TestExtractTranslatedReasoningEffortSupportsOpenAIResponses(t *testing.T) {
+	got := ExtractTranslatedReasoningEffort([]byte(`{"reasoning":{"effort":"high"}}`), "openai-response")
+	if got != "high" {
+		t.Fatalf("ExtractTranslatedReasoningEffort() = %q, want %q", got, "high")
+	}
+}
+
+func TestExtractTranslatedReasoningEffortSupportsKimiDisabledThinking(t *testing.T) {
+	got := ExtractTranslatedReasoningEffort([]byte(`{"thinking":{"type":"disabled"}}`), "kimi")
+	if got != "none" {
+		t.Fatalf("ExtractTranslatedReasoningEffort() = %q, want %q", got, "none")
+	}
+}

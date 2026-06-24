@@ -86,7 +86,7 @@ func (e *KimiExecutor) prepareKimiRequest(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	token := kimiCreds(auth)
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -123,6 +123,7 @@ func (e *KimiExecutor) prepareKimiRequest(
 	if err != nil {
 		return nil, err
 	}
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := kimiauth.APIBaseURL + "/v1/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))

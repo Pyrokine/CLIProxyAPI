@@ -14,6 +14,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -133,7 +134,7 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 
 	apiKey, bearer := geminiCreds(auth)
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
@@ -156,6 +157,7 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = capGeminiMaxOutputTokens(body, baseModel)
+	body = signature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 
 	action := "generateContent"
 	if isStream {
@@ -179,6 +181,7 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 	}
 
 	body, _ = sjson.DeleteBytes(body, "session_id")
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -366,6 +369,7 @@ func (e *GeminiExecutor) CountTokens(
 	}
 
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
+	translatedReq = signature.SanitizeGeminiRequestThoughtSignatures(translatedReq, "contents")
 	respCtx := util.WithAlt(ctx, opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")

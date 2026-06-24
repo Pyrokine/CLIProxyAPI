@@ -329,7 +329,9 @@ func ConvertCodexResponseToOpenAINonStream(
 					summaryArray := summaryResult.Array()
 					for _, summaryItem := range summaryArray {
 						if summaryItem.Get("type").String() == "summary_text" {
-							reasoningText = summaryItem.Get("text").String()
+							if text := summaryItem.Get("text").String(); text != "" {
+								reasoningText += text
+							}
 							break
 						}
 					}
@@ -340,7 +342,9 @@ func ConvertCodexResponseToOpenAINonStream(
 					contentArray := contentResult.Array()
 					for _, contentItem := range contentArray {
 						if contentItem.Get("type").String() == "output_text" {
-							contentText = contentItem.Get("text").String()
+							if text := contentItem.Get("text").String(); text != "" {
+								contentText += text
+							}
 							break
 						}
 					}

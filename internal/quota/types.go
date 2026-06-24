@@ -15,6 +15,7 @@ const (
 	TypeGeminiCli   CredentialType = "gemini-cli"
 	TypeAntigravity CredentialType = "antigravity"
 	TypeKimi        CredentialType = "kimi"
+	TypeXAI         CredentialType = "xai"
 )
 
 // Status represents the current state of a credential's quota.
@@ -32,10 +33,24 @@ const (
 
 // Entry holds the cached quota state for a single credential.
 type Entry struct {
-	mu           sync.RWMutex
+	mu                 sync.RWMutex
+	disabledConfigured bool
+	FileName           string          `json:"file_name"`
+	Type               CredentialType  `json:"type"`
+	AuthIndex          string          `json:"auth_index,omitempty"` // credential identifier for api-call proxy
+	Status             Status          `json:"status"`
+	LastRefresh        *time.Time      `json:"last_refresh"`
+	NextRefresh        *time.Time      `json:"next_refresh"`
+	Error              string          `json:"error,omitempty"`
+	FailureCount       int             `json:"failure_count"`
+	Data               json.RawMessage `json:"data,omitempty"`
+	Disabled           bool            `json:"disabled,omitempty"`
+}
+
+type EntryState struct {
 	FileName     string          `json:"file_name"`
 	Type         CredentialType  `json:"type"`
-	AuthIndex    string          `json:"auth_index,omitempty"` // credential identifier for api-call proxy
+	AuthIndex    string          `json:"auth_index,omitempty"`
 	Status       Status          `json:"status"`
 	LastRefresh  *time.Time      `json:"last_refresh"`
 	NextRefresh  *time.Time      `json:"next_refresh"`
@@ -43,6 +58,36 @@ type Entry struct {
 	FailureCount int             `json:"failure_count"`
 	Data         json.RawMessage `json:"data,omitempty"`
 	Disabled     bool            `json:"disabled,omitempty"`
+}
+
+func (e *Entry) Snapshot() EntryState {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.snapshotLocked()
+}
+
+func (e *Entry) snapshotLocked() EntryState {
+	state := EntryState{
+		FileName:     e.FileName,
+		Type:         e.Type,
+		AuthIndex:    e.AuthIndex,
+		Status:       e.Status,
+		Error:        e.Error,
+		FailureCount: e.FailureCount,
+		Disabled:     e.Disabled,
+	}
+	if e.LastRefresh != nil {
+		last := *e.LastRefresh
+		state.LastRefresh = &last
+	}
+	if e.NextRefresh != nil {
+		next := *e.NextRefresh
+		state.NextRefresh = &next
+	}
+	if e.Data != nil {
+		state.Data = append(json.RawMessage(nil), e.Data...)
+	}
+	return state
 }
 
 // shouldSkipAutoRefresh reports whether auto-refresh (scheduler loop or bulk RefreshNow)

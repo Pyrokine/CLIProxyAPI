@@ -9,7 +9,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// providerAppliers maps provider names to their ProviderApplier implementations.
+type pluginProviderApplier struct {
+	owner    string
+	priority int
+	applier  ProviderApplier
+}
+
+// providerAppliers maps native provider names to their ProviderApplier implementations.
 var providerAppliers = map[string]ProviderApplier{
 	"gemini":      nil,
 	"gemini-cli":  nil,
@@ -22,15 +28,53 @@ var providerAppliers = map[string]ProviderApplier{
 	"kimi":        nil,
 }
 
+var pluginProviderAppliers = map[string]pluginProviderApplier{}
+
 // getProviderApplier returns the ProviderApplier for the given provider name.
 // Returns nil if the provider is not registered.
 func getProviderApplier(provider string) ProviderApplier {
-	return providerAppliers[provider]
+	if applier := providerAppliers[provider]; applier != nil {
+		return applier
+	}
+	return pluginProviderAppliers[provider].applier
 }
 
 // RegisterProvider registers a provider applier by name.
 func RegisterProvider(name string, applier ProviderApplier) {
 	providerAppliers[name] = applier
+}
+
+// RegisterPluginProvider registers a plugin-owned provider applier.
+func RegisterPluginProvider(owner string, name string, priority int, applier ProviderApplier) bool {
+	owner = strings.TrimSpace(owner)
+	name = strings.ToLower(strings.TrimSpace(name))
+	if owner == "" || name == "" || applier == nil {
+		return false
+	}
+	if _, native := providerAppliers[name]; native {
+		return false
+	}
+	current, exists := pluginProviderAppliers[name]
+	if exists && current.priority > priority {
+		return false
+	}
+	pluginProviderAppliers[name] = pluginProviderApplier{owner: owner, priority: priority, applier: applier}
+	return true
+}
+
+// UnregisterPluginProviders removes all thinking providers owned by a plugin.
+func UnregisterPluginProviders(owner string) {
+	owner = strings.TrimSpace(owner)
+	for provider, record := range pluginProviderAppliers {
+		if record.owner == owner {
+			delete(pluginProviderAppliers, provider)
+		}
+	}
+}
+
+// ClearPluginProviders removes all plugin-owned thinking providers.
+func ClearPluginProviders() {
+	pluginProviderAppliers = map[string]pluginProviderApplier{}
 }
 
 // IsUserDefinedModel reports whether the model is a user-defined model that should
@@ -364,8 +408,14 @@ func extractConfig(body []byte, provider string) Config {
 		}
 		return extractOpenAIConfig(body)
 	case "kimi":
-		// Kimi uses OpenAI-compatible reasoning_effort format
-		return extractOpenAIConfig(body)
+		config := extractOpenAIConfig(body)
+		if hasConfig(config) {
+			return config
+		}
+		if gjson.GetBytes(body, "thinking.type").String() == "disabled" {
+			return Config{Mode: ModeNone, Budget: 0}
+		}
+		return Config{}
 	default:
 		return Config{}
 	}
@@ -381,12 +431,20 @@ func ExtractReasoningEffort(body []byte, provider, model string) string {
 		return effort
 	}
 
+	return ExtractTranslatedReasoningEffort(body, provider)
+}
+
+// ExtractTranslatedReasoningEffort returns the final provider payload's thinking setting.
+func ExtractTranslatedReasoningEffort(body []byte, provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	config := extractConfig(body, provider)
 	if !hasConfig(config) {
 		switch provider {
 		case "openai", "openai-response":
 			config = extractCodexConfig(body)
+			if !hasConfig(config) {
+				config = extractOpenAIConfig(body)
+			}
 		}
 	}
 	return reasoningEffortFromConfig(config)

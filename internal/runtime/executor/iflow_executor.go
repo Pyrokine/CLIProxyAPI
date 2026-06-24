@@ -99,7 +99,7 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 		baseURL = iflowauth.DefaultAPIBaseURL
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -128,6 +128,7 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 

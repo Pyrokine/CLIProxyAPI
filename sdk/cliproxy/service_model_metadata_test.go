@@ -50,3 +50,37 @@ func TestBuildConfigModels_PreservesSupportedParameters(t *testing.T) {
 		)
 	}
 }
+
+func TestCatalogEnabledModelsRejectsConfigAliasWhenUpstreamDisabled(t *testing.T) {
+	enabled := false
+	cfg := &internalconfig.Config{}
+	cfg.ModelCatalog.Models = []internalconfig.ModelCatalogModel{{Name: "gpt-5.5", Enabled: &enabled}}
+	internalconfig.SetRuntimeModelCatalog(cfg.ModelCatalog.Models)
+	svc := &Service{cfg: cfg}
+
+	codexModels := buildConfigModels([]internalconfig.CodexModel{{Name: "gpt-5.5", Alias: "g55"}}, "openai", "openai")
+	if len(codexModels) != 1 || codexModels[0].CatalogName != "gpt-5.5" {
+		t.Fatalf("expected codex config model to retain catalog name, got %+v", codexModels)
+	}
+	if filtered := svc.catalogEnabledModels(codexModels); len(filtered) != 0 {
+		t.Fatalf("expected disabled upstream to filter codex alias, got %+v", filtered)
+	}
+
+	compatModels := buildOpenAICompatibilityConfigModels(
+		&internalconfig.OpenAICompatibility{
+			Name:   "compat",
+			Models: []internalconfig.OpenAICompatibilityModel{{Name: "gpt-5.5", Alias: "g55"}},
+		},
+	)
+	if len(compatModels) != 1 || compatModels[0].CatalogName != "gpt-5.5" {
+		t.Fatalf("expected compat config model to retain catalog name, got %+v", compatModels)
+	}
+	if filtered := svc.catalogEnabledModels(compatModels); len(filtered) != 0 {
+		t.Fatalf("expected disabled upstream to filter compat alias, got %+v", filtered)
+	}
+
+	pluginModels := []*ModelInfo{{ID: "plugin-alias", Name: "gpt-5.5"}}
+	if filtered := svc.catalogEnabledModels(pluginModels); len(filtered) != 0 {
+		t.Fatalf("expected disabled upstream to filter plugin alias, got %+v", filtered)
+	}
+}

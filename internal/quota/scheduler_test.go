@@ -6,6 +6,62 @@ import (
 	"time"
 )
 
+func TestScheduler_RestorePreservesRegisteredDisabledState(t *testing.T) {
+	tests := []struct {
+		name               string
+		registeredDisabled bool
+		persistedDisabled  bool
+	}{
+		{
+			name:               "registered disabled stays disabled",
+			registeredDisabled: true,
+			persistedDisabled:  false,
+		},
+		{
+			name:               "registered enabled stays enabled",
+			registeredDisabled: false,
+			persistedDisabled:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				scheduler := NewScheduler(DefaultConfig(), nil)
+				scheduler.Register("claude-user.json", TypeClaude, "claude")
+				scheduler.SetDisabled("claude-user.json", tt.registeredDisabled)
+
+				lastRefresh := time.Now().Add(-time.Hour)
+				nextRefresh := time.Now().Add(time.Hour)
+				scheduler.Restore(
+					map[string]EntryState{
+						"claude-user.json": {
+							FileName:    "claude-user.json",
+							Type:        TypeClaude,
+							AuthIndex:   "claude",
+							Status:      StatusSuccess,
+							LastRefresh: &lastRefresh,
+							NextRefresh: &nextRefresh,
+							Disabled:    tt.persistedDisabled,
+						},
+					},
+				)
+
+				entry := scheduler.GetStatus().Credentials["claude-user.json"]
+				if entry == nil {
+					t.Fatal("missing restored entry")
+				}
+				if entry.Disabled != tt.registeredDisabled {
+					t.Fatalf("Disabled = %v, want registered state %v", entry.Disabled, tt.registeredDisabled)
+				}
+				if entry.Status != StatusSuccess {
+					t.Fatalf("Status = %s, want %s", entry.Status, StatusSuccess)
+				}
+			},
+		)
+	}
+}
+
 func TestScheduler_RefreshNowQueuesConcurrentManualRequests(t *testing.T) {
 	scheduler := NewScheduler(DefaultConfig(), nil)
 

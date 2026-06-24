@@ -1,10 +1,73 @@
 package gemini
 
 import (
+	"encoding/base64"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
+
+func validGeminiThoughtSignatureForTest() string {
+	payload := protowire.AppendTag(nil, 1, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, []byte{0x01, 0x02, 0x03, 0x04})
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func TestConvertGeminiRequestToGeminiCleansToolSchema(t *testing.T) {
+	input := []byte(`{
+		"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+		"tools": [
+			{
+				"functionDeclarations": [
+					{
+						"name": "search",
+						"eager_input_streaming": true,
+						"parameters": {
+							"type": "object",
+							"title": "SearchInput",
+							"properties": {
+								"query": {"type": "string", "nullable": true, "title": "Query"}
+							}
+						}
+					}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToGemini("", input, false)
+
+	if gjson.GetBytes(out, "tools.0.function_declarations.0.eager_input_streaming").Exists() {
+		t.Fatalf("eager_input_streaming should be removed: %s", out)
+	}
+	if gjson.GetBytes(out, "tools.0.function_declarations.0.parametersJsonSchema.title").Exists() {
+		t.Fatalf("schema title should be removed: %s", out)
+	}
+	if gjson.GetBytes(out, "tools.0.function_declarations.0.parametersJsonSchema.properties.query.nullable").Exists() {
+		t.Fatalf("schema nullable should be removed: %s", out)
+	}
+}
+
+func TestConvertGeminiRequestToGeminiPreservesValidThoughtSignature(t *testing.T) {
+	signature := validGeminiThoughtSignatureForTest()
+	input := []byte(`{
+		"contents": [
+			{
+				"role": "model",
+				"parts": [
+					{"functionCall": {"name": "Bash", "args": {}}, "thoughtSignature": "` + signature + `"}
+				]
+			}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToGemini("gemini-3-pro", input, false)
+
+	if got := gjson.GetBytes(out, "contents.0.parts.0.thoughtSignature").String(); got != signature {
+		t.Fatalf("thoughtSignature = %q, want %q. Output: %s", got, signature, string(out))
+	}
+}
 
 func TestBackfillEmptyFunctionResponseNames_Single(t *testing.T) {
 	input := []byte(`{

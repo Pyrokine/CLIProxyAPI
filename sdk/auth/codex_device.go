@@ -291,6 +291,10 @@ func (a *CodexAuthenticator) buildAuthRecord(
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}
+	attributes := make(map[string]string)
+	if planType != "" {
+		attributes["plan_type"] = planType
+	}
 
 	fmt.Println("Codex authentication successful")
 	if authBundle.APIKey != "" {
@@ -298,10 +302,11 @@ func (a *CodexAuthenticator) buildAuthRecord(
 	}
 
 	return &coreauth.Auth{
-		ID:       fileName,
-		Provider: a.Provider(),
-		FileName: fileName,
-		Storage:  tokenStorage,
-		Metadata: metadata,
+		ID:         fileName,
+		Provider:   a.Provider(),
+		FileName:   fileName,
+		Storage:    tokenStorage,
+		Attributes: attributes,
+		Metadata:   metadata,
 	}, nil
 }

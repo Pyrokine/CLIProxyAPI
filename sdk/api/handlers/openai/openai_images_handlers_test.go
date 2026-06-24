@@ -131,6 +131,74 @@ func TestImagesGenerationsRoutesConfiguredOpenAICompatImageModel(t *testing.T) {
 	}
 }
 
+func TestCollectImagesFromResponsesStreamFallsBackToPartialImage(t *testing.T) {
+	dataCh := make(chan []byte, 1)
+	dataCh <- []byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"partial_image_b64\":\"abc\",\"output_format\":\"png\",\"size\":\"1024x1024\",\"quality\":\"low\",\"background\":\"opaque\"}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[]}}\n\n")
+	close(dataCh)
+
+	out, errMsg := collectImagesFromResponsesStream(context.Background(), dataCh, nil, "b64_json")
+	if errMsg != nil {
+		t.Fatalf("collectImagesFromResponsesStream error: %v", errMsg.Error)
+	}
+	if got := gjson.GetBytes(out, "data.0.b64_json").String(); got != "abc" {
+		t.Fatalf("b64_json = %q, want abc; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "output_format").String(); got != "png" {
+		t.Fatalf("output_format = %q, want png; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "size").String(); got != "1024x1024" {
+		t.Fatalf("size = %q, want 1024x1024; body=%s", got, out)
+	}
+}
+
+func TestForwardImagesStreamIgnoresEmptyCompletedAfterPartialImage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+
+	firstChunk := []byte("data: {\"type\":\"response.image_generation_call.partial_image\",\"partial_image_b64\":\"abc\",\"output_format\":\"png\",\"partial_image_index\":0}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"created_at\":123,\"output\":[]}}\n\n")
+	dataCh := make(chan []byte)
+	close(dataCh)
+
+	var events []string
+	var cancelled bool
+	h := &APIHandler{}
+	h.forwardImagesStream(
+		c,
+		func(err error) {
+			cancelled = true
+			if err != nil {
+				t.Fatalf("cancel error: %v", err)
+			}
+		},
+		dataCh,
+		nil,
+		firstChunk,
+		"b64_json",
+		"image_generation",
+		func(eventName string, dataJSON []byte) {
+			events = append(events, eventName+":"+string(dataJSON))
+		},
+	)
+
+	if !cancelled {
+		t.Fatalf("cancel was not called")
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %v, want one partial image event", events)
+	}
+	if !strings.HasPrefix(events[0], "image_generation.partial_image:") {
+		t.Fatalf("event = %q, want partial image event", events[0])
+	}
+	_, eventPayload, _ := strings.Cut(events[0], ":")
+	if got := gjson.Get(eventPayload, "b64_json").String(); got != "abc" {
+		t.Fatalf("b64_json = %q, want abc; event=%s", got, events[0])
+	}
+}
+
 func TestImagesEditsRejectsOversizedMultipartBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	executor := &imageCaptureExecutor{}

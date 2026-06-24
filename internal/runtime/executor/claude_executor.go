@@ -18,6 +18,7 @@ import (
 	claudeauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -148,6 +149,69 @@ type claudeRequest struct {
 	reporter           *usageReporter
 }
 
+type claudeStreamingValidator struct {
+	hasData         bool
+	hasMessageStart bool
+	hasMessageDelta bool
+}
+
+func (v *claudeStreamingValidator) observe(line []byte) error {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
+		return nil
+	}
+	payload := bytes.TrimSpace(line[len("data:"):])
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+		return nil
+	}
+	v.hasData = true
+	if !gjson.ValidBytes(payload) {
+		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned malformed stream data"}
+	}
+	root := gjson.ParseBytes(payload)
+	switch root.Get("type").String() {
+	case "error":
+		message := strings.TrimSpace(root.Get("error.message").String())
+		if message == "" {
+			message = strings.TrimSpace(root.Get("error.type").String())
+		}
+		if message == "" {
+			message = "unknown upstream error"
+		}
+		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned error event: " + message}
+	case "message_start":
+		message := root.Get("message")
+		if strings.TrimSpace(message.Get("id").String()) == "" || strings.TrimSpace(message.Get("model").String()) == "" {
+			return statusErr{
+				code: http.StatusBadGateway,
+				msg:  "claude executor: upstream stream message_start is missing id or model",
+			}
+		}
+		v.hasMessageStart = true
+	case "message_delta":
+		v.hasMessageDelta = true
+	}
+	return nil
+}
+
+func (v *claudeStreamingValidator) finish() error {
+	if !v.hasData {
+		return statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned empty stream response"}
+	}
+	if !v.hasMessageStart {
+		return statusErr{
+			code: http.StatusBadGateway, msg: "claude executor: upstream stream response is missing message_start",
+		}
+	}
+	if !v.hasMessageDelta {
+		return statusErr{
+			code: http.StatusBadGateway,
+			msg:  "claude executor: upstream stream response ended before message completion",
+		}
+	}
+	return nil
+}
+
 // prepareClaudeRequest builds the translated, cloaked, and header-enriched HTTP request
 // shared by Execute and ExecuteStream.
 // When isStream is true, translation always uses streaming mode and the Accept header
@@ -167,7 +231,7 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 		baseURL = "https://api.anthropic.com"
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
@@ -197,6 +261,7 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+	body = normalizeClaudeTemperatureForThinking(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -214,6 +279,7 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 
 	// Clamp max_tokens to the model's documented limit (works around Claude Code SDK off-by-one).
 	body = capMaxTokens(body, baseModel)
+	body, _ = signature.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -223,12 +289,14 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 	}
 	bodyForTranslation := body
 	bodyForUpstream := body
-	if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
+	oauthToken := isClaudeOAuthToken(apiKey)
+	if oauthToken && !auth.ToolPrefixDisabled() {
 		bodyForUpstream = applyClaudeToolPrefix(body, claudeToolPrefix)
 	}
-	if experimentalCCHSigningEnabled(e.cfg, auth) {
+	if oauthToken || experimentalCCHSigningEnabled(e.cfg, auth) {
 		bodyForUpstream = signAnthropicMessagesBody(bodyForUpstream)
 	}
+	reporter.SetTranslatedReasoningEffort(bodyForUpstream, to.String())
 
 	url := fmt.Sprintf("%s/v1/messages?beta=true", baseURL)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(bodyForUpstream))
@@ -417,6 +485,8 @@ func (e *ClaudeExecutor) ExecuteStream(
 			}
 		}()
 
+		validator := &claudeStreamingValidator{}
+
 		// If from == to (Claude -> Claude), directly forward the SSE stream without translation
 		if cr.from == cr.to {
 			scanner := bufio.NewScanner(decodedBody)
@@ -424,6 +494,12 @@ func (e *ClaudeExecutor) ExecuteStream(
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				appendAPIResponseChunk(ctx, e.cfg, line)
+				if errValidate := validator.observe(line); errValidate != nil {
+					recordAPIResponseError(ctx, e.cfg, errValidate)
+					cr.reporter.publishFailure(ctx)
+					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errValidate})
+					return
+				}
 				if detail, ok := parseClaudeStreamUsage(line); ok {
 					cr.reporter.publish(ctx, detail)
 				}
@@ -442,6 +518,12 @@ func (e *ClaudeExecutor) ExecuteStream(
 				recordAPIResponseError(ctx, e.cfg, errScan)
 				cr.reporter.publishFailure(ctx)
 				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+				return
+			}
+			if errValidate := validator.finish(); errValidate != nil {
+				recordAPIResponseError(ctx, e.cfg, errValidate)
+				cr.reporter.publishFailure(ctx)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errValidate})
 			}
 			return
 		}
@@ -453,6 +535,12 @@ func (e *ClaudeExecutor) ExecuteStream(
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
+			if errValidate := validator.observe(line); errValidate != nil {
+				recordAPIResponseError(ctx, e.cfg, errValidate)
+				cr.reporter.publishFailure(ctx)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errValidate})
+				return
+			}
 			if detail, ok := parseClaudeStreamUsage(line); ok {
 				cr.reporter.publish(ctx, detail)
 			}
@@ -479,6 +567,12 @@ func (e *ClaudeExecutor) ExecuteStream(
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			cr.reporter.publishFailure(ctx)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+			return
+		}
+		if errValidate := validator.finish(); errValidate != nil {
+			recordAPIResponseError(ctx, e.cfg, errValidate)
+			cr.reporter.publishFailure(ctx)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errValidate})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -511,6 +605,7 @@ func (e *ClaudeExecutor) CountTokens(
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
 	body = normalizeCacheControlTTL(body)
+	body, _ = signature.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
 
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
@@ -600,7 +695,7 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		return auth, nil
 	}
 	svc := claudeauth.NewAuth(e.cfg)
-	td, err := svc.RefreshTokens(ctx, refreshToken)
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
 		return nil, err
 	}
@@ -662,6 +757,23 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	if toolChoiceType == "any" || toolChoiceType == "tool" {
 		// Remove thinking configuration entirely to avoid API error
 		body, _ = sjson.DeleteBytes(body, "thinking")
+	}
+	return body
+}
+
+func normalizeClaudeTemperatureForThinking(body []byte) []byte {
+	if !gjson.GetBytes(body, "temperature").Exists() {
+		return body
+	}
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	switch thinkingType {
+	case "enabled", "adaptive", "auto":
+		if temp := gjson.GetBytes(
+			body, "temperature",
+		); temp.Exists() && temp.Type == gjson.Number && temp.Float() == 1 {
+			return body
+		}
+		body, _ = sjson.SetBytes(body, "temperature", 1)
 	}
 	return body
 }
@@ -1436,7 +1548,8 @@ func applyCloaking(
 	apiKey string,
 ) []byte {
 	clientUserAgent := getClientUserAgent(ctx)
-	useExperimentalCCHSigning := experimentalCCHSigningEnabled(cfg, auth)
+	oauthToken := isClaudeOAuthToken(apiKey)
+	useCCHSigning := oauthToken || experimentalCCHSigningEnabled(cfg, auth)
 
 	// Get cloak config from ClaudeKey configuration
 	cloakCfg := resolveClaudeKeyCloakConfig(cfg, auth)
@@ -1487,9 +1600,7 @@ func applyCloaking(
 
 	// Skip system instructions for claude-3-5-haiku models
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
-		payload = checkSystemInstructionsWithSigningMode(
-			payload, strictMode, useExperimentalCCHSigning, isClaudeOAuthToken(apiKey),
-		)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken)
 	}
 
 	// Inject fake user ID

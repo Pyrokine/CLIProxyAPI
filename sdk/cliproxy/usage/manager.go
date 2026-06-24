@@ -12,26 +12,35 @@ import (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider        string
-	Model           string
-	Alias           string
-	APIKey          string
-	AuthID          string
-	AuthIndex       string
-	AuthType        string
-	Source          string
-	ReasoningEffort string
-	RequestedAt     time.Time
-	Latency         time.Duration
-	Thinking        *Thinking
-	Failed          bool
-	Fail            Failure
-	Detail          Detail
-	ResponseHeaders http.Header
+	Provider          string
+	ExecutorType      string
+	Model             string
+	Alias             string
+	APIKey            string
+	AuthID            string
+	AuthIndex         string
+	AuthType          string
+	Source            string
+	ReasoningEffort   string
+	ServiceTier       string
+	RequestedAt       time.Time
+	Latency           time.Duration
+	RequestID         string
+	TimeToFirstByteMs int64
+	TotalDurationMs   int64
+	Completed         bool
+	Thinking          *Thinking
+	Failed            bool
+	Fail              Failure
+	Detail            Detail
+	ResponseHeaders   http.Header
 }
+
+const DefaultServiceTier = "default"
 
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
+type serviceTierContextKey struct{}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -87,6 +96,41 @@ func ReasoningEffortFromContext(ctx context.Context) string {
 	}
 }
 
+// WithServiceTier stores the client-requested service tier for usage sinks.
+func WithServiceTier(ctx context.Context, tier string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	tier = strings.TrimSpace(tier)
+	if tier == "" {
+		tier = DefaultServiceTier
+	}
+	return context.WithValue(ctx, serviceTierContextKey{}, tier)
+}
+
+// ServiceTierFromContext returns the client-requested service tier stored in ctx.
+func ServiceTierFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return DefaultServiceTier
+	}
+	switch value := ctx.Value(serviceTierContextKey{}).(type) {
+	case string:
+		tier := strings.TrimSpace(value)
+		if tier == "" {
+			return DefaultServiceTier
+		}
+		return tier
+	case []byte:
+		tier := strings.TrimSpace(string(value))
+		if tier == "" {
+			return DefaultServiceTier
+		}
+		return tier
+	default:
+		return DefaultServiceTier
+	}
+}
+
 // Failure holds HTTP failure metadata for an upstream request attempt.
 type Failure struct {
 	StatusCode int
@@ -134,8 +178,9 @@ type Manager struct {
 	queue  []queueItem
 	closed bool
 
-	pluginsMu sync.RWMutex
-	plugins   []Plugin
+	pluginsMu    sync.RWMutex
+	plugins      []Plugin
+	namedPlugins map[string]Plugin
 }
 
 // NewManager constructs a manager with a buffered queue.
@@ -204,6 +249,19 @@ func (m *Manager) Register(plugin Plugin) {
 	m.pluginsMu.Unlock()
 }
 
+// RegisterNamed adds or replaces a plugin identified by name.
+func (m *Manager) RegisterNamed(name string, plugin Plugin) {
+	if m == nil || name == "" || plugin == nil {
+		return
+	}
+	m.pluginsMu.Lock()
+	if m.namedPlugins == nil {
+		m.namedPlugins = make(map[string]Plugin)
+	}
+	m.namedPlugins[name] = plugin
+	m.pluginsMu.Unlock()
+}
+
 // Publish enqueues a usage record for processing. If no plugin is registered
 // the record will be discarded downstream.
 func (m *Manager) Publish(ctx context.Context, record Record) {
@@ -241,8 +299,11 @@ func (m *Manager) run(_ context.Context) {
 
 func (m *Manager) dispatch(item queueItem) {
 	m.pluginsMu.RLock()
-	plugins := make([]Plugin, len(m.plugins))
+	plugins := make([]Plugin, len(m.plugins), len(m.plugins)+len(m.namedPlugins))
 	copy(plugins, m.plugins)
+	for _, plugin := range m.namedPlugins {
+		plugins = append(plugins, plugin)
+	}
 	m.pluginsMu.RUnlock()
 	if len(plugins) == 0 {
 		return
@@ -271,6 +332,9 @@ func DefaultManager() *Manager { return defaultManager }
 
 // RegisterPlugin registers a plugin on the default manager.
 func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
+
+// RegisterNamedPlugin registers or replaces a named plugin on the default manager.
+func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
 
 // PublishRecord publishes a record using the default manager.
 func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }

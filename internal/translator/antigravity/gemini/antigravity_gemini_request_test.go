@@ -1,15 +1,23 @@
 package gemini
 
 import (
+	"encoding/base64"
 	"fmt"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func validGeminiThoughtSignature() string {
+	payload := protowire.AppendTag(nil, 1, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, []byte{0x01, 0x02, 0x03, 0x04})
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
 func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) {
-	// Valid signature on functionCall should be preserved
-	validSignature := "abc123validSignature1234567890123456789012345678901234567890"
+	validSignature := validGeminiThoughtSignature()
 	inputJSON := []byte(fmt.Sprintf(
 		`{
 		"model": "gemini-3-pro-preview",
@@ -36,6 +44,64 @@ func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) 
 	sig := parts[0].Get("thoughtSignature").String()
 	if sig != validSignature {
 		t.Errorf("Expected thoughtSignature '%s', got '%s'", validSignature, sig)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_RemovesGeminiSignatureForClaudeTarget(t *testing.T) {
+	validSignature := validGeminiThoughtSignature()
+	inputJSON := []byte(fmt.Sprintf(
+		`{
+			"contents": [{
+				"role": "model",
+				"parts": [
+					{"thought": true, "text": "hidden", "thoughtSignature": "%s"},
+					{"functionCall": {"name": "test_tool", "args": {}}, "thoughtSignature": "%s"}
+				]
+			}]
+		}`, validSignature, validSignature,
+	))
+
+	output := ConvertGeminiRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("parts len = %d, want 1; output: %s", len(parts), output)
+	}
+	if !parts[0].Get("functionCall").Exists() {
+		t.Fatalf("expected functionCall to remain; output: %s", output)
+	}
+	if parts[0].Get("thoughtSignature").Exists() {
+		t.Fatalf("thoughtSignature should be removed for Claude target; output: %s", output)
+	}
+	if signature.DetectProvider(validSignature) != signature.ProviderGemini {
+		t.Fatalf("test signature should be detected as Gemini")
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_DropsSignatureOnlyPartForClaudeTarget(t *testing.T) {
+	validSignature := validGeminiThoughtSignature()
+	inputJSON := []byte(fmt.Sprintf(
+		`{
+			"contents": [{
+				"role": "model",
+				"parts": [
+					{"thoughtSignature": "%s"},
+					{"extra_content": {"google": {"thought_signature": "%s"}}},
+					{"functionCall": {"name": "test_tool", "args": {}}, "thoughtSignature": "%s"}
+				]
+			}]
+		}`, validSignature, validSignature, validSignature,
+	))
+
+	output := ConvertGeminiRequestToAntigravity("claude-sonnet-4-5", inputJSON, false)
+	parts := gjson.GetBytes(output, "request.contents.0.parts").Array()
+	if len(parts) != 1 {
+		t.Fatalf("parts len = %d, want 1; output: %s", len(parts), output)
+	}
+	if !parts[0].Get("functionCall").Exists() {
+		t.Fatalf("expected functionCall to remain; output: %s", output)
+	}
+	if parts[0].Get("thoughtSignature").Exists() {
+		t.Fatalf("thoughtSignature should be removed for Claude target; output: %s", output)
 	}
 }
 

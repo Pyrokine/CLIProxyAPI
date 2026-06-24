@@ -17,7 +17,6 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -157,17 +156,18 @@ func (e *codexWebsocketsExecutor) Execute(
 
 	baseModel, apiKey, baseURL := codexResolveBase(auth, req.Model)
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
-	prepared, err := codexResponsesBody(e.cfg, baseModel, req.Model, e.Identifier(), from, opts, req, false)
+	prepared, err := codexResponsesBody(ctx, e.cfg, baseModel, req.Model, e.Identifier(), from, opts, req, false)
 	if err != nil {
 		return resp, err
 	}
 	body := prepared.Body
 	originalPayload := prepared.OriginalPayload
+	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -176,7 +176,11 @@ func (e *codexWebsocketsExecutor) Execute(
 	}
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
+	reporter.SetTranslatedReasoningEffort(body, to.String())
+	clientBody := body
+	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayload, body)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
 	var authID string
 	if auth != nil {
@@ -191,7 +195,7 @@ func (e *codexWebsocketsExecutor) Execute(
 		defer sess.reqMu.Unlock()
 	}
 
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := codexWebsocketRequestLog(wsURL, wsHeaders, wsReqBody, e.Identifier(), auth)
 	recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBody, e.Identifier(), auth)
 	recordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
@@ -250,7 +254,7 @@ func (e *codexWebsocketsExecutor) Execute(
 			// execution session.
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
-				wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
+				wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 				wsReqLogRetry := codexWebsocketRequestLog(wsURL, wsHeaders, wsReqBodyRetry, e.Identifier(), auth)
 				recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBodyRetry, e.Identifier(), auth)
 				recordAPIWebsocketRequest(ctx, e.cfg, wsReqLogRetry)
@@ -307,6 +311,7 @@ func (e *codexWebsocketsExecutor) Execute(
 		appendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 		if wsErr, ok := parseCodexWebsocketError(payload); ok {
+			clearCodexReasoningReplayOnInvalidSignature(replayScope, statusErrCode(wsErr), []byte(wsErr.Error()))
 			if sess != nil {
 				e.invalidateUpstreamConn(sess, conn, "upstream_error", wsErr)
 			}
@@ -318,11 +323,15 @@ func (e *codexWebsocketsExecutor) Execute(
 		payload = normalizeCodexCompletionEvent(payload)
 		eventType := gjson.GetBytes(payload, "type").String()
 		if eventType == "response.completed" {
+			cacheCodexReasoningReplayFromCompleted(replayScope, payload)
 			if detail, ok := parseCodexUsage(payload); ok {
 				reporter.publish(ctx, detail)
 			}
 			var param any
-			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
+			out := sdktranslator.TranslateNonStream(
+				ctx, to, from, req.Model, originalPayload, clientBody,
+				applyCodexIdentityExposeResponsePayload(payload, identityState), &param,
+			)
 			resp = cliproxyexecutor.Response{Payload: out}
 			return resp, nil
 		}
@@ -345,20 +354,18 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 
 	baseModel, apiKey, baseURL := codexResolveBase(auth, req.Model)
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("codex")
-	body := req.Payload
-
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	prepared, err := codexResponsesBody(ctx, e.cfg, baseModel, req.Model, e.Identifier(), from, opts, req, true)
 	if err != nil {
 		return nil, err
 	}
-
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, body, requestedModel)
+	body := prepared.Body
+	originalPayload := prepared.OriginalPayload
+	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -367,7 +374,11 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 	}
 
 	body, wsHeaders := applyCodexPromptCacheHeaders(from, req, body)
+	reporter.SetTranslatedReasoningEffort(body, to.String())
+	clientBody := body
+	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayload, body)
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
 	authID := auth.ID
 
@@ -381,7 +392,7 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 		}
 	}
 
-	wsReqBody := buildCodexWebsocketRequestBody(body)
+	wsReqBody := buildCodexWebsocketRequestBody(upstreamBody)
 	wsReqLog := codexWebsocketRequestLog(wsURL, wsHeaders, wsReqBody, e.Identifier(), auth)
 	recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBody, e.Identifier(), auth)
 	recordAPIWebsocketRequest(ctx, e.cfg, wsReqLog)
@@ -453,7 +464,7 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 				sess.reqMu.Unlock()
 				return nil, errDialRetry
 			}
-			wsReqBodyRetry := buildCodexWebsocketRequestBody(body)
+			wsReqBodyRetry := buildCodexWebsocketRequestBody(upstreamBody)
 			wsReqLogRetry := codexWebsocketRequestLog(wsURL, wsHeaders, wsReqBodyRetry, e.Identifier(), auth)
 			recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBodyRetry, e.Identifier(), auth)
 			recordAPIWebsocketRequest(ctx, e.cfg, wsReqLogRetry)
@@ -508,6 +519,8 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 		}
 
 		var param any
+		outputItemsByIndex := make(map[int64][]byte)
+		var outputItemsFallback [][]byte
 		for {
 			if ctx != nil && ctx.Err() != nil {
 				terminateReason = "context_done"
@@ -552,10 +565,12 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 			if len(payload) == 0 {
 				continue
 			}
+			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
 			appendAPIResponseChunk(ctx, e.cfg, payload)
 			appendAPIWebsocketResponse(ctx, e.cfg, payload)
 
 			if wsErr, ok := parseCodexWebsocketError(payload); ok {
+				clearCodexReasoningReplayOnInvalidSignature(replayScope, statusErrCode(wsErr), []byte(wsErr.Error()))
 				terminateReason = "upstream_error"
 				terminateErr = wsErr
 				recordAPIResponseError(ctx, e.cfg, wsErr)
@@ -570,14 +585,22 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 
 			payload = normalizeCodexCompletionEvent(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
-			if eventType == "response.completed" || eventType == "response.done" {
+			switch eventType {
+			case "response.output_item.done":
+				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
+			case "response.completed", "response.done":
+				payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+				cacheCodexReasoningReplayFromCompleted(replayScope, payload)
 				if detail, ok := parseCodexUsage(payload); ok {
 					reporter.publish(ctx, detail)
 				}
 			}
 
 			line := encodeCodexWebsocketAsSSE(payload)
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, body, body, line, &param)
+			chunks := sdktranslator.TranslateStream(
+				ctx, to, from, req.Model, originalPayload, clientBody,
+				applyCodexIdentityExposeResponsePayload(line, identityState), &param,
+			)
 			for i := range chunks {
 				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"
@@ -815,7 +838,7 @@ func applyCodexWebsocketHeaders(
 	headers.Set("OpenAI-Beta", betaHeader)
 	ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
 	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
+		ensureHeaderWithTargetPrecedence(headers, ginHeaders, "Session_id", uuid.NewString())
 	}
 
 	isAPIKey := false
@@ -829,7 +852,7 @@ func applyCodexWebsocketHeaders(
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					headers.Set("Chatgpt-Account-Id", trimmed)
+					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
 				}
 			}
 		}

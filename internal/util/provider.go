@@ -4,12 +4,20 @@
 package util
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	log "github.com/sirupsen/logrus"
+)
+
+var (
+	camelBoundaryPattern   = regexp.MustCompile(`([a-z0-9])([A-Z])`)
+	jsonStringFieldPattern = regexp.MustCompile(`"([^"]+)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"`)
 )
 
 // GetProviderName determines all AI service providers capable of serving a registered model.
@@ -183,7 +191,7 @@ func MaskSensitiveQuery(raw string) string {
 		if err != nil {
 			decodedKey = keyPart
 		}
-		if !shouldMaskQueryParam(decodedKey) {
+		if !IsSensitiveFieldName(decodedKey) {
 			continue
 		}
 		decodedValue, err := url.QueryUnescape(valuePart)
@@ -200,19 +208,161 @@ func MaskSensitiveQuery(raw string) string {
 	return strings.Join(parts, "&")
 }
 
-func shouldMaskQueryParam(key string) bool {
-	key = strings.ToLower(strings.TrimSpace(key))
+func IsSensitiveFieldName(key string) bool {
+	key = strings.TrimSpace(key)
 	if key == "" {
 		return false
 	}
 	key = strings.TrimSuffix(key, "[]")
-	if key == "key" || strings.Contains(key, "api-key") || strings.Contains(key, "apikey") || strings.Contains(
-		key, "api_key",
-	) {
+	key = camelBoundaryPattern.ReplaceAllString(key, `${1}_${2}`)
+	key = strings.ToLower(key)
+	compact := strings.NewReplacer("-", "_", " ", "_").Replace(key)
+	if compact == "key" || compact == "api_key" || compact == "apikey" || compact == "password" || compact == "passwd" || compact == "authorization" || compact == "management_key" || compact == "auth_key" || compact == "access_key" {
 		return true
 	}
-	if strings.Contains(key, "token") || strings.Contains(key, "secret") {
-		return true
+	parts := strings.FieldsFunc(compact, func(r rune) bool { return r == '_' || r == '.' || r == ':' })
+	for _, part := range parts {
+		if part == "token" || part == "secret" || part == "cookie" || part == "credential" {
+			return true
+		}
 	}
-	return false
+	return strings.Contains(compact, "api_key") || strings.Contains(compact, "apikey")
+}
+
+func MaskSensitivePayload(payload []byte) []byte {
+	trimmed := bytes.TrimSpace(payload)
+	if len(trimmed) == 0 {
+		return payload
+	}
+	var decoded any
+	if json.Unmarshal(trimmed, &decoded) == nil {
+		masked := maskSensitiveJSONValue(decoded, "")
+		encoded, err := json.MarshalIndent(masked, "", "  ")
+		if err == nil {
+			return encoded
+		}
+	}
+	return []byte(maskSensitiveText(string(payload)))
+}
+
+func maskSensitiveJSONValue(value any, key string) any {
+	if IsSensitiveFieldName(key) {
+		if text, ok := value.(string); ok {
+			return HideAPIKey(text)
+		}
+		return "***"
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for childKey, childValue := range typed {
+			out[childKey] = maskSensitiveJSONValue(childValue, childKey)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, childValue := range typed {
+			out[i] = maskSensitiveJSONValue(childValue, "")
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func maskSensitiveText(payload string) string {
+	maskedPayload := maskSensitiveQueryText(maskSensitiveEmbeddedJSONStrings(payload))
+	changed := maskedPayload != payload
+	lines := strings.Split(maskedPayload, "\n")
+	for i, line := range lines {
+		key, value, sep, ok := splitTextField(line)
+		if !ok || !IsSensitiveFieldName(key) {
+			continue
+		}
+		lines[i] = key + sep + " " + HideAPIKey(strings.TrimSpace(value))
+		changed = true
+	}
+	if !changed {
+		return payload
+	}
+	return strings.Join(lines, "\n")
+}
+
+func maskSensitiveQueryText(payload string) string {
+	lines := strings.Split(payload, "\n")
+	changed := false
+	for i, line := range lines {
+		question := strings.Index(line, "?")
+		if question < 0 || question == len(line)-1 {
+			continue
+		}
+		queryEnd := len(line)
+		for j, r := range line[question+1:] {
+			if r == ' ' || r == '\t' {
+				queryEnd = question + 1 + j
+				break
+			}
+		}
+		maskedQuery := MaskSensitiveQuery(line[question+1 : queryEnd])
+		if maskedQuery == line[question+1:queryEnd] {
+			continue
+		}
+		lines[i] = line[:question+1] + maskedQuery + line[queryEnd:]
+		changed = true
+	}
+	if !changed {
+		return payload
+	}
+	return strings.Join(lines, "\n")
+}
+
+func maskSensitiveEmbeddedJSONStrings(payload string) string {
+	matches := jsonStringFieldPattern.FindAllStringSubmatchIndex(payload, -1)
+	if len(matches) == 0 {
+		return payload
+	}
+	var builder strings.Builder
+	cursor := 0
+	changed := false
+	for _, match := range matches {
+		if len(match) < 6 || match[2] < 0 || match[3] < 0 || match[4] < 0 || match[5] < 0 {
+			continue
+		}
+		key := payload[match[2]:match[3]]
+		if !IsSensitiveFieldName(key) {
+			continue
+		}
+		builder.WriteString(payload[cursor:match[4]])
+		builder.WriteString(HideAPIKey(payload[match[4]:match[5]]))
+		cursor = match[5]
+		changed = true
+	}
+	if !changed {
+		return payload
+	}
+	builder.WriteString(payload[cursor:])
+	return builder.String()
+}
+
+func splitTextField(line string) (string, string, string, bool) {
+	colon := strings.Index(line, ":")
+	equal := strings.Index(line, "=")
+	idx := -1
+	sep := ""
+	if colon >= 0 && (equal < 0 || colon < equal) {
+		idx = colon
+		sep = ":"
+	} else if equal >= 0 {
+		idx = equal
+		sep = "="
+	}
+	if idx <= 0 {
+		return "", "", "", false
+	}
+	key := strings.TrimSpace(line[:idx])
+	value := strings.TrimSpace(line[idx+1:])
+	if key == "" || value == "" {
+		return "", "", "", false
+	}
+	return key, value, sep, true
 }

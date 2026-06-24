@@ -6,17 +6,20 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // OAuth configuration constants for Claude/Anthropic
@@ -25,7 +28,90 @@ const (
 	tokenURL    = "https://api.anthropic.com/v1/oauth/token"
 	clientID    = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	redirectURI = "http://localhost:54545/callback"
+
+	claudeRefreshMinBackoff = 5 * time.Second
+	claudeRefreshMaxBackoff = 5 * time.Minute
 )
+
+var (
+	claudeRefreshGroup singleflight.Group
+	claudeRefreshMu    sync.Mutex
+	claudeRefreshBlock = make(map[string]time.Time)
+)
+
+type refreshHTTPError struct {
+	status    int
+	message   string
+	retryable bool
+}
+
+func (e *refreshHTTPError) Error() string {
+	return fmt.Sprintf("token refresh failed with status %d: %s", e.status, e.message)
+}
+
+func (e *refreshHTTPError) Retryable() bool {
+	return e != nil && e.retryable
+}
+
+func resetClaudeRefreshState() {
+	claudeRefreshMu.Lock()
+	defer claudeRefreshMu.Unlock()
+	claudeRefreshBlock = make(map[string]time.Time)
+	claudeRefreshGroup = singleflight.Group{}
+}
+
+func claudeRefreshBlockedUntil(refreshToken string) time.Time {
+	claudeRefreshMu.Lock()
+	defer claudeRefreshMu.Unlock()
+	return claudeRefreshBlock[refreshToken]
+}
+
+func setClaudeRefreshBlockedUntil(refreshToken string, until time.Time) {
+	claudeRefreshMu.Lock()
+	defer claudeRefreshMu.Unlock()
+	claudeRefreshBlock[refreshToken] = until
+}
+
+func clearClaudeRefreshBlockedUntil(refreshToken string) {
+	claudeRefreshMu.Lock()
+	defer claudeRefreshMu.Unlock()
+	delete(claudeRefreshBlock, refreshToken)
+}
+
+func clampClaudeRefreshBackoff(d time.Duration) time.Duration {
+	if d < claudeRefreshMinBackoff {
+		return claudeRefreshMinBackoff
+	}
+	if d > claudeRefreshMaxBackoff {
+		return claudeRefreshMaxBackoff
+	}
+	return d
+}
+
+func parseClaudeRetryAfter(resp *http.Response) time.Duration {
+	if resp == nil {
+		return claudeRefreshMinBackoff
+	}
+	if raw := strings.TrimSpace(resp.Header.Get("Retry-After")); raw != "" {
+		if seconds, err := time.ParseDuration(raw + "s"); err == nil {
+			return clampClaudeRefreshBackoff(seconds)
+		}
+		if when, err := http.ParseTime(raw); err == nil {
+			return clampClaudeRefreshBackoff(time.Until(when))
+		}
+	}
+	if raw := strings.TrimSpace(resp.Header.Get("Retry-After-Ms")); raw != "" {
+		if ms, err := time.ParseDuration(raw + "ms"); err == nil {
+			return clampClaudeRefreshBackoff(ms)
+		}
+	}
+	return claudeRefreshMinBackoff
+}
+
+func isClaudeRefreshNonRetryable(err error) bool {
+	var httpErr *refreshHTTPError
+	return errors.As(err, &httpErr) && !httpErr.Retryable()
+}
 
 // tokenResponse represents the response structure from Anthropic's OAuth token endpoint.
 // It contains access token, refresh token, and associated user/organization information.
@@ -228,6 +314,40 @@ func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if blockedUntil := claudeRefreshBlockedUntil(refreshToken); blockedUntil.After(time.Now()) {
+		return nil, &refreshHTTPError{
+			status:    http.StatusTooManyRequests,
+			message:   fmt.Sprintf("refresh temporarily blocked until %s", blockedUntil.Format(time.RFC3339)),
+			retryable: false,
+		}
+	}
+
+	result, err, _ := claudeRefreshGroup.Do(
+		refreshToken, func() (interface{}, error) {
+			return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	tokenData, ok := result.(*TokenData)
+	if !ok || tokenData == nil {
+		return nil, fmt.Errorf("token refresh failed: invalid single-flight result")
+	}
+	return tokenData, nil
+}
+
+func (o *Auth) refreshTokensSingleFlight(ctx context.Context, refreshToken string) (*TokenData, error) {
+	if blockedUntil := claudeRefreshBlockedUntil(refreshToken); blockedUntil.After(time.Now()) {
+		return nil, &refreshHTTPError{
+			status:    http.StatusTooManyRequests,
+			message:   fmt.Sprintf("refresh temporarily blocked until %s", blockedUntil.Format(time.RFC3339)),
+			retryable: false,
+		}
+	}
 
 	reqBody := map[string]any{
 		"client_id":     clientID,
@@ -262,7 +382,17 @@ func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+		message := string(body)
+		if resp.StatusCode == http.StatusTooManyRequests {
+			retryAfter := parseClaudeRetryAfter(resp)
+			setClaudeRefreshBlockedUntil(refreshToken, time.Now().Add(retryAfter))
+			return nil, &refreshHTTPError{status: resp.StatusCode, message: message, retryable: false}
+		}
+		return nil, &refreshHTTPError{
+			status:    resp.StatusCode,
+			message:   message,
+			retryable: resp.StatusCode >= http.StatusInternalServerError,
+		}
 	}
 
 	// log.Debugf("Token response: %s", string(body))
@@ -273,6 +403,7 @@ func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 	}
 
 	// Create token data
+	clearClaudeRefreshBlockedUntil(refreshToken)
 	return &TokenData{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
@@ -307,7 +438,7 @@ func (o *Auth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, 
 	*TokenData,
 	error,
 ) {
-	return auth.RefreshWithRetry(ctx, refreshToken, maxRetries, o.RefreshTokens, nil)
+	return auth.RefreshWithRetry(ctx, refreshToken, maxRetries, o.RefreshTokens, isClaudeRefreshNonRetryable)
 }
 
 // UpdateTokenStorage updates an existing token storage with new token data.

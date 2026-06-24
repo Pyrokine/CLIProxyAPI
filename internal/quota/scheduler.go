@@ -14,6 +14,10 @@ import (
 // It receives the entry with all credential info, returns raw JSON data or an error.
 type FetchFunc func(entry *Entry) ([]byte, error)
 
+type PersistFunc func(entry EntryState)
+
+type DeleteFunc func(fileName string)
+
 // Scheduler manages periodic quota refresh for all registered credentials.
 // It uses a min-heap priority queue sorted by next refresh time, with a single
 // dispatcher goroutine that serializes all fetch operations.
@@ -27,6 +31,8 @@ type Scheduler struct {
 	wake            chan struct{} // signal dispatcher to re-check heap
 	updatedAt       time.Time
 	manualRefreshMu sync.Mutex // serializes manual RefreshNow calls so later requests wait instead of being dropped
+	persistFn       PersistFunc
+	deleteFn        DeleteFunc
 }
 
 // NewScheduler creates a new quota scheduler.
@@ -36,6 +42,51 @@ func NewScheduler(cfg Config, fetchFn FetchFunc) *Scheduler {
 		cfg:     cfg,
 		fetchFn: fetchFn,
 		wake:    make(chan struct{}, 1),
+	}
+}
+
+func (s *Scheduler) SetPersistence(persist PersistFunc, deleteFn DeleteFunc) {
+	s.mu.Lock()
+	s.persistFn = persist
+	s.deleteFn = deleteFn
+	s.mu.Unlock()
+}
+
+func (s *Scheduler) Restore(entries map[string]EntryState) {
+	if len(entries) == 0 {
+		return
+	}
+	changed := make([]EntryState, 0, len(entries))
+	s.mu.Lock()
+	for name, state := range entries {
+		entry, ok := s.entries[name]
+		if !ok {
+			continue
+		}
+		entry.mu.Lock()
+		if state.Status == StatusLoading {
+			entry.Status = StatusIdle
+			entry.Error = "quota refresh interrupted by server restart"
+		} else if state.Status != "" {
+			entry.Status = state.Status
+			entry.Error = state.Error
+		}
+		entry.LastRefresh = cloneTime(state.LastRefresh)
+		entry.NextRefresh = cloneTime(state.NextRefresh)
+		entry.FailureCount = state.FailureCount
+		entry.Data = append(entry.Data[:0], state.Data...)
+		if !entry.disabledConfigured {
+			entry.Disabled = state.Disabled
+		}
+		changed = append(changed, entry.snapshotLocked())
+		entry.mu.Unlock()
+	}
+	if len(changed) > 0 {
+		s.updatedAt = time.Now()
+	}
+	s.mu.Unlock()
+	for _, state := range changed {
+		s.persist(state)
 	}
 }
 
@@ -72,15 +123,17 @@ func (s *Scheduler) Stop() {
 
 // Register adds or updates a credential in the scheduler.
 func (s *Scheduler) Register(fileName string, credType CredentialType, authIndex string) {
+	var state EntryState
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if existing, exists := s.entries[fileName]; exists {
 		existing.mu.Lock()
 		existing.Type = credType
 		existing.AuthIndex = authIndex
+		state = existing.snapshotLocked()
 		existing.mu.Unlock()
 		s.poke()
+		s.mu.Unlock()
+		s.persist(state)
 		return
 	}
 
@@ -94,25 +147,36 @@ func (s *Scheduler) Register(fileName string, credType CredentialType, authIndex
 	next := now.Add(time.Duration(len(s.entries)) * time.Second * 2) // stagger
 	entry.NextRefresh = &next
 	s.entries[fileName] = entry
-
+	state = entry.Snapshot()
 	s.poke()
+	s.mu.Unlock()
+	s.persist(state)
 }
 
 // Unregister removes a credential from the scheduler.
 func (s *Scheduler) Unregister(fileName string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	deleteFn := s.deleteFn
 	delete(s.entries, fileName)
+	s.mu.Unlock()
+	if deleteFn != nil {
+		deleteFn(fileName)
+	}
 }
 
 // UpdateAuthIndex sets the auth_index for a registered entry.
 func (s *Scheduler) UpdateAuthIndex(fileName, authIndex string) {
+	var state EntryState
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if e, ok := s.entries[fileName]; ok {
 		e.mu.Lock()
 		e.AuthIndex = authIndex
+		state = e.snapshotLocked()
 		e.mu.Unlock()
+	}
+	s.mu.Unlock()
+	if state.FileName != "" {
+		s.persist(state)
 	}
 }
 
@@ -121,13 +185,19 @@ func (s *Scheduler) UpdateAuthIndex(fileName, authIndex string) {
 // refresh loop; manual RefreshNow(fileNames) still executes them so users can
 // verify whether a banned/disabled account has recovered.
 func (s *Scheduler) SetDisabled(fileName string, disabled bool) {
+	var state EntryState
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if e, ok := s.entries[fileName]; ok {
 		e.mu.Lock()
 		e.Disabled = disabled
+		e.disabledConfigured = true
+		state = e.snapshotLocked()
 		e.mu.Unlock()
 		s.poke()
+	}
+	s.mu.Unlock()
+	if state.FileName != "" {
+		s.persist(state)
 	}
 }
 
@@ -229,6 +299,23 @@ func (s *Scheduler) UpdateConfig(cfg Config) {
 	}
 }
 
+func (s *Scheduler) persist(state EntryState) {
+	s.mu.RLock()
+	persistFn := s.persistFn
+	s.mu.RUnlock()
+	if persistFn != nil {
+		persistFn(state)
+	}
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 // poke signals the dispatcher to re-check the heap. Must be called with s.mu held.
 func (s *Scheduler) poke() {
 	select {
@@ -280,17 +367,15 @@ func (s *Scheduler) dispatchLoop(ctx context.Context) {
 func (s *Scheduler) executeRefresh(entry *Entry) {
 	entry.mu.Lock()
 	entry.Status = StatusLoading
+	loadingState := entry.snapshotLocked()
 	entry.mu.Unlock()
+	s.persist(loadingState)
 
 	data, err := s.fetchFn(entry)
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	now := time.Now()
 	entry.mu.Lock()
-	defer entry.mu.Unlock()
-
 	entry.LastRefresh = &now
 	s.updatedAt = now
 
@@ -322,6 +407,10 @@ func (s *Scheduler) executeRefresh(entry *Entry) {
 		entry.NextRefresh = new(time.Time)
 		*entry.NextRefresh = now.Add(time.Duration(s.cfg.Interval) * time.Second)
 	}
+	state := entry.snapshotLocked()
+	entry.mu.Unlock()
+	s.mu.Unlock()
+	s.persist(state)
 }
 
 // classifyError determines the error status and backoff multiplier from the error message.

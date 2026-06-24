@@ -10,7 +10,9 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -112,6 +114,65 @@ func TestApplyCodexWebsocketHeadersPreservesCodexClientIdentity(t *testing.T) {
 	}
 	if got := headers.Get("Session_id"); got != "codex-session" {
 		t.Fatalf("Session_id = %q, want Codex client value", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersUsesCanonicalAccountHeader(t *testing.T) {
+	auth := &cliproxyauth.Auth{Provider: "codex", Metadata: map[string]any{"account_id": "acct-1"}}
+
+	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "", nil)
+
+	accountHeader := "ChatGPT-Account-ID"
+	if got := headerValueCaseInsensitive(headers, accountHeader); got != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID = %q, want acct-1", got)
+	}
+	values, ok := headers[accountHeader]
+	if !ok {
+		t.Fatalf("expected exact ChatGPT-Account-ID key, got %#v", headers)
+	}
+	if len(values) != 1 || values[0] != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID values = %#v, want [acct-1]", values)
+	}
+}
+
+func TestApplyCodexPromptCacheHeadersSetsSessionAndConversation(t *testing.T) {
+	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"prompt_cache_key":"cache-1"}`)}
+
+	_, headers := applyCodexPromptCacheHeaders(
+		sdktranslator.FormatOpenAIResponse, req, []byte(`{"model":"gpt-5-codex"}`),
+	)
+
+	if got := headers.Get("Session_id"); got != "cache-1" {
+		t.Fatalf("Session_id = %q, want cache-1", got)
+	}
+	if got := headers.Get("Conversation_id"); got != "cache-1" {
+		t.Fatalf("Conversation_id = %q, want cache-1", got)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersKeepsPromptCacheSessionOverCodexClientSession(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	ginCtx.Request.Header.Set("User-Agent", "codex_cli_rs/0.131.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9")
+	ginCtx.Request.Header.Set("Version", "0.131.0")
+	ginCtx.Request.Header.Set("Session_id", "codex-client-session")
+
+	req := cliproxyexecutor.Request{Model: "gpt-5-codex", Payload: []byte(`{"prompt_cache_key":"cache-1"}`)}
+	_, headers := applyCodexPromptCacheHeaders(
+		sdktranslator.FormatOpenAIResponse, req, []byte(`{"model":"gpt-5-codex"}`),
+	)
+
+	headers = applyCodexWebsocketHeaders(util.WithGinContext(context.Background(), ginCtx), headers, nil, "", nil)
+
+	if got := headers.Get("Session_id"); got != "cache-1" {
+		t.Fatalf("Session_id = %q, want prompt cache key", got)
+	}
+	if got := headers.Get("Conversation_id"); got != "cache-1" {
+		t.Fatalf("Conversation_id = %q, want prompt cache key", got)
+	}
+	if got := headers.Get("User-Agent"); got != ginCtx.Request.Header.Get("User-Agent") {
+		t.Fatalf("User-Agent = %q, want Codex client value", got)
 	}
 }
 

@@ -4,12 +4,14 @@
 package cliproxy
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	configaccess "github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -46,6 +48,9 @@ type Builder struct {
 
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
+
+	// pluginHost manages dynamic plugin lifecycle and callbacks.
+	pluginHost *pluginhost.Host
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
@@ -139,6 +144,12 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 	return b
 }
 
+// WithPluginHost overrides the dynamic plugin host used by the service.
+func (b *Builder) WithPluginHost(host *pluginhost.Host) *Builder {
+	b.pluginHost = host
+	return b
+}
+
 // WithServerOptions appends server configuration options used during construction.
 func (b *Builder) WithServerOptions(opts ...api.ServerOption) *Builder {
 	b.serverOptions = append(b.serverOptions, opts...)
@@ -213,7 +224,7 @@ func (b *Builder) Build() (*Service, error) {
 		sessionAffinityTTL := time.Hour
 		if b.cfg != nil {
 			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
-			sessionAffinity = b.cfg.Routing.ClaudeCodeSessionAffinity || b.cfg.Routing.SessionAffinity
+			sessionAffinity = b.cfg.Routing.SessionAffinity
 			if ttl := strings.TrimSpace(b.cfg.Routing.SessionAffinityTTL); ttl != "" {
 				if parsed, err := time.ParseDuration(ttl); err == nil && parsed > 0 {
 					sessionAffinityTTL = parsed
@@ -247,6 +258,18 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 
+	pluginHost := b.pluginHost
+	if pluginHost == nil {
+		pluginHost = pluginhost.New()
+	}
+	if pluginHost != nil {
+		pluginHost.ApplyConfig(context.Background(), b.cfg)
+		sdkAuth.RegisterPluginAuthParser(pluginHost)
+		pluginHost.RegisterFrontendAuthProviders()
+		accessManager.SetProviders(sdkaccess.RegisteredProviders())
+		coreManager.SetPluginScheduler(pluginHost)
+	}
+
 	service := &Service{
 		cfg:            b.cfg,
 		configPath:     b.configPath,
@@ -257,6 +280,7 @@ func (b *Builder) Build() (*Service, error) {
 		authManager:    authManager,
 		accessManager:  accessManager,
 		coreManager:    coreManager,
+		pluginHost:     pluginHost,
 		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
 	}
 	return service, nil

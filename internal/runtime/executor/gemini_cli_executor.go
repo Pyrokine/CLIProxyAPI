@@ -21,6 +21,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -123,7 +124,7 @@ func (e *GeminiCLIExecutor) prepareGeminiCLIRequest(
 		return nil, err
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini-cli")
@@ -146,6 +147,9 @@ func (e *GeminiCLIExecutor) prepareGeminiCLIRequest(
 	basePayload = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, "gemini", "request", basePayload, originalTranslated, requestedModel,
 	)
+	basePayload = cleanGeminiCLIRequestSchemas(basePayload)
+	basePayload = signature.SanitizeGeminiRequestThoughtSignatures(basePayload, "request.contents")
+	reporter.SetTranslatedReasoningEffort(basePayload, to.String())
 
 	projectID := resolveGeminiProjectID(auth)
 
@@ -510,6 +514,8 @@ func (e *GeminiCLIExecutor) CountTokens(
 		payload = deleteJSONField(payload, "model")
 		payload = deleteJSONField(payload, "request.safetySettings")
 		payload = fixGeminiCLIImageAspectRatio(baseModel, payload)
+		payload = cleanGeminiCLIRequestSchemas(payload)
+		payload = signature.SanitizeGeminiRequestThoughtSignatures(payload, "request.contents")
 
 		tok, errTok := tokenSource.Token()
 		if errTok != nil {
@@ -603,11 +609,7 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 				if metadata == nil {
 					return nil, nil, fmt.Errorf("gemini-cli auth metadata missing")
 				}
-				base, token, conf = geminiauth.TokenAndConfigFromMetadata(metadata)
-				ctxToken = ctx
-				if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
-					ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
-				}
+				base, token, _ = geminiauth.TokenAndConfigFromMetadata(metadata)
 			}
 		}
 		if token.AccessToken == "" {
@@ -789,6 +791,65 @@ func deleteJSONField(body []byte, key string) []byte {
 		return body
 	}
 	return updated
+}
+
+func cleanGeminiCLIRequestSchemas(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	hasTools := gjson.GetBytes(body, "request.tools.0").Exists()
+	hasResponseSchema := gjson.GetBytes(body, "request.generationConfig.responseSchema").Exists()
+	hasResponseJSONSchema := gjson.GetBytes(body, "request.generationConfig.responseJsonSchema").Exists()
+	if !hasTools && !hasResponseSchema && !hasResponseJSONSchema {
+		return body
+	}
+
+	tools := gjson.GetBytes(body, "request.tools")
+	if tools.IsArray() {
+		for i, tool := range tools.Array() {
+			for _, declarationsKey := range []string{"function_declarations", "functionDeclarations"} {
+				funcDecls := tool.Get(declarationsKey)
+				if !funcDecls.IsArray() {
+					continue
+				}
+				for j, decl := range funcDecls.Array() {
+					for _, schemaKey := range []string{"parameters", "parametersJsonSchema"} {
+						params := decl.Get(schemaKey)
+						if !params.Exists() || !params.IsObject() {
+							continue
+						}
+						cleaned := util.CleanJSONSchemaForGemini(params.Raw)
+						path := fmt.Sprintf("request.tools.%d.%s.%d.%s", i, declarationsKey, j, schemaKey)
+						updated, errSet := sjson.SetRawBytes(body, path, []byte(cleaned))
+						if errSet != nil {
+							log.Errorf("gemini cli executor: failed to set cleaned schema at %s: %v", path, errSet)
+							continue
+						}
+						body = updated
+					}
+				}
+			}
+		}
+	}
+
+	for _, schemaPath := range []string{
+		"request.generationConfig.responseSchema",
+		"request.generationConfig.responseJsonSchema",
+	} {
+		responseSchema := gjson.GetBytes(body, schemaPath)
+		if !responseSchema.IsObject() {
+			continue
+		}
+		cleaned := util.CleanJSONSchemaForGemini(responseSchema.Raw)
+		updated, errSet := sjson.SetRawBytes(body, schemaPath, []byte(cleaned))
+		if errSet != nil {
+			log.Errorf("gemini cli executor: failed to set cleaned response schema at %s: %v", schemaPath, errSet)
+			continue
+		}
+		body = updated
+	}
+
+	return body
 }
 
 func fixGeminiCLIImageAspectRatio(modelName string, rawJSON []byte) []byte {

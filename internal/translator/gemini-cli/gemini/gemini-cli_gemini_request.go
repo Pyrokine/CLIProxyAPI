@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -111,17 +112,24 @@ func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []by
 			if content.Get("role").String() == "model" {
 				content.Get("parts").ForEach(
 					func(partKey, part gjson.Result) bool {
+						partPath := fmt.Sprintf("request.contents.%d.parts.%d", key.Int(), partKey.Int())
 						if part.Get("functionCall").Exists() {
 							rawJSON, _ = sjson.SetBytes(
 								rawJSON,
-								fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()),
-								"skip_thought_signature_validator",
+								partPath+".thoughtSignature",
+								signature.GeminiReplaySignatureOrBypass(
+									part.Get("thoughtSignature").String(),
+									signature.BlockKindGeminiFunctionCall,
+								),
 							)
 						} else if part.Get("thoughtSignature").Exists() {
 							rawJSON, _ = sjson.SetBytes(
 								rawJSON,
-								fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", key.Int(), partKey.Int()),
-								"skip_thought_signature_validator",
+								partPath+".thoughtSignature",
+								signature.GeminiReplaySignatureOrBypass(
+									part.Get("thoughtSignature").String(),
+									signature.BlockKindGeminiModelPart,
+								),
 							)
 						}
 						return true

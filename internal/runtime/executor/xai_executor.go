@@ -121,8 +121,9 @@ func (e *XAIExecutor) Execute(
 		return resp, err
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
+	reporter := newUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	upstreamURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(prepared.body))
@@ -336,8 +337,9 @@ func (e *XAIExecutor) ExecuteStream(
 		return nil, err
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), prepared.baseModel, auth)
+	reporter := newUsageReporter(ctx, e, prepared.baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
+	reporter.SetTranslatedReasoningEffort(prepared.body, e.Identifier())
 
 	upstreamURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(prepared.body))
@@ -558,6 +560,7 @@ func (e *XAIExecutor) prepareResponsesRequest(
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
 	body = normalizeXAITools(body)
+	body = normalizeXAIToolChoiceForTools(body)
 	body = normalizeXAIInputReasoningItems(body)
 	body = normalizeCodexInstructions(body)
 	body = sanitizeXAIResponsesBody(body, baseModel)
@@ -754,6 +757,24 @@ func normalizeXAITools(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+func normalizeXAIToolChoiceForTools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	hasTools := tools.Exists() && tools.IsArray() && len(tools.Array()) > 0
+	if hasTools {
+		return body
+	}
+	if tools.Exists() {
+		body, _ = sjson.DeleteBytes(body, "tools")
+	}
+	if gjson.GetBytes(body, "tool_choice").Exists() {
+		body, _ = sjson.DeleteBytes(body, "tool_choice")
+	}
+	if gjson.GetBytes(body, "parallel_tool_calls").Exists() {
+		body, _ = sjson.DeleteBytes(body, "parallel_tool_calls")
+	}
+	return body
 }
 
 func normalizeXAITool(tool gjson.Result) ([]byte, bool, bool) {

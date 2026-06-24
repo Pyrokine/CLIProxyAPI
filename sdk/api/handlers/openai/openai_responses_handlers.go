@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
@@ -25,6 +26,27 @@ import (
 // It holds a pool of clients to interact with the backend service.
 type ResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
+}
+
+func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
+	if w == nil || len(chunk) == 0 {
+		return
+	}
+	_, _ = w.Write(chunk)
+	if bytes.HasSuffix(chunk, []byte("\n\n")) || bytes.HasSuffix(chunk, []byte("\r\n\r\n")) {
+		return
+	}
+	suffix := []byte("\n\n")
+	if bytes.HasSuffix(chunk, []byte("\n")) || bytes.HasSuffix(chunk, []byte("\r\n")) {
+		suffix = []byte("\n")
+	}
+	_, _ = w.Write(suffix)
+}
+
+func writeResponsesSSEFrames(w io.Writer, frames [][]byte) {
+	for _, frame := range frames {
+		writeResponsesSSEChunk(w, frame)
+	}
 }
 
 // NewResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
@@ -60,7 +82,7 @@ func (h *ResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 	c.JSON(
 		http.StatusOK, gin.H{
 			"object": "list",
-			"data":   h.Models(),
+			"data":   h.FilterModelsForCurrentAPIKey(c, h.Models()),
 		},
 	)
 }
@@ -207,6 +229,8 @@ func (h *ResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []
 		c.Header("Connection", "keep-alive")
 	}
 
+	acc := &sseFrameAccumulator{}
+
 	// Peek at the first chunk
 	for {
 		select {
@@ -242,16 +266,11 @@ func (h *ResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
-			// Write first chunk logic (matching forwardResponsesStream)
-			if bytes.HasPrefix(chunk, []byte("event:")) {
-				_, _ = c.Writer.Write([]byte("\n"))
-			}
-			_, _ = c.Writer.Write(chunk)
-			_, _ = c.Writer.Write([]byte("\n"))
+			writeResponsesSSEFrames(c.Writer, acc.AddChunk(chunk))
 			flusher.Flush()
 
 			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, acc, dataChan, errChan)
 			return
 		}
 	}
@@ -261,22 +280,23 @@ func (h *ResponsesAPIHandler) forwardResponsesStream(
 	c *gin.Context,
 	flusher http.Flusher,
 	cancel func(error),
+	acc *sseFrameAccumulator,
 	data <-chan []byte,
 	errs <-chan *interfaces.ErrorMessage,
 ) {
+	if acc == nil {
+		acc = &sseFrameAccumulator{}
+	}
 	h.ForwardStream(
 		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 			WriteChunk: func(chunk []byte) {
-				if bytes.HasPrefix(chunk, []byte("event:")) {
-					_, _ = c.Writer.Write([]byte("\n"))
-				}
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n"))
+				writeResponsesSSEFrames(c.Writer, acc.AddChunk(chunk))
 			},
 			WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 				if errMsg == nil {
 					return
 				}
+				writeResponsesSSEFrames(c.Writer, acc.Flush())
 				status := http.StatusInternalServerError
 				if errMsg.StatusCode > 0 {
 					status = errMsg.StatusCode
@@ -289,6 +309,7 @@ func (h *ResponsesAPIHandler) forwardResponsesStream(
 				_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
 			},
 			WriteDone: func() {
+				writeResponsesSSEFrames(c.Writer, acc.Flush())
 				_, _ = c.Writer.Write([]byte("\n"))
 			},
 		},

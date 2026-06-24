@@ -8,6 +8,7 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -24,8 +25,12 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // ProviderExecutor defines the contract required by Manager to execute provider calls.
@@ -130,6 +135,10 @@ type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
 }
 
+type PluginScheduler interface {
+	PickAuth(context.Context, pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, bool, error)
+}
+
 // Hook captures lifecycle callbacks for observing auth changes.
 type Hook interface {
 	// OnAuthRegistered fires when a new auth is registered.
@@ -159,9 +168,13 @@ type Manager struct {
 	selector         Selector
 	hook             Hook
 	mu               sync.RWMutex
+	persistMu        sync.Mutex
 	auths            map[string]*Auth
 	scheduler        *authScheduler
+	pluginScheduler  PluginScheduler
 	homeRuntimeAuths map[string]map[string]*Auth
+	removedAuths     map[string]uint64
+	removedAuthSeq   uint64
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -206,6 +219,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		hook:             hook,
 		auths:            make(map[string]*Auth),
 		homeRuntimeAuths: make(map[string]map[string]*Auth),
+		removedAuths:     make(map[string]uint64),
 		providerOffsets:  make(map[string]int),
 		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
 	}
@@ -257,6 +271,30 @@ func (m *Manager) RefreshSchedulerEntry(authID string) {
 	snapshot := auth.Clone()
 	m.mu.RUnlock()
 	m.scheduler.upsertAuth(snapshot)
+}
+
+func (m *Manager) RefreshSchedulerAll() {
+	if m == nil {
+		return
+	}
+	m.mu.RLock()
+	ids := make([]string, 0, len(m.auths))
+	for id := range m.auths {
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		m.RefreshSchedulerEntry(id)
+	}
+}
+
+func (m *Manager) SetPluginScheduler(scheduler PluginScheduler) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.pluginScheduler = scheduler
+	m.mu.Unlock()
 }
 
 func (m *Manager) SetSelector(selector Selector) {
@@ -553,13 +591,28 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth.ID == "" {
 		auth.ID = uuid.NewString()
 	}
+	m.mu.RLock()
+	removedSeq, removed := m.removedAuths[auth.ID]
+	m.mu.RUnlock()
+	allowRecreate := shouldAllowAuthRecreate(ctx)
+	removedAtStart := removed
+	if removed && !allowRecreate {
+		return nil, nil
+	}
 	auth.EnsureIndex()
-	if err := m.persist(ctx, auth); err != nil {
+	if err := m.persist(ctx, auth, allowRecreate, removedAtStart, removedSeq); err != nil {
 		return nil, err
 	}
 	snapshot := auth.Clone()
 	m.mu.Lock()
+	if currentSeq, removed := m.removedAuths[auth.ID]; removed && (!allowRecreate || !removedAtStart || currentSeq != removedSeq) {
+		m.mu.Unlock()
+		return nil, nil
+	}
 	m.auths[auth.ID] = snapshot
+	if allowRecreate && removedAtStart {
+		delete(m.removedAuths, auth.ID)
+	}
 	m.mu.Unlock()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot.Clone())
@@ -574,8 +627,21 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	if auth == nil || auth.ID == "" {
 		return nil, nil
 	}
+	allowRecreate := shouldAllowAuthRecreate(ctx)
+	removedAtStart := false
+	var removedSeq uint64
 	m.mu.Lock()
-	if existing, ok := m.auths[auth.ID]; ok && existing != nil {
+	existing, ok := m.auths[auth.ID]
+	if !ok || existing == nil {
+		if seq, removed := m.removedAuths[auth.ID]; removed {
+			removedAtStart = true
+			removedSeq = seq
+			if !allowRecreate {
+				m.mu.Unlock()
+				return nil, nil
+			}
+		}
+	} else {
 		if !auth.indexAssigned && auth.Index == "" {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
@@ -586,12 +652,19 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	}
 	auth.EnsureIndex()
 	m.mu.Unlock()
-	if err := m.persist(ctx, auth); err != nil {
+	if err := m.persist(ctx, auth, allowRecreate, removedAtStart, removedSeq); err != nil {
 		return nil, err
 	}
 	snapshot := auth.Clone()
 	m.mu.Lock()
+	if currentSeq, removed := m.removedAuths[auth.ID]; removed && (!allowRecreate || !removedAtStart || currentSeq != removedSeq) {
+		m.mu.Unlock()
+		return nil, nil
+	}
 	m.auths[auth.ID] = snapshot
+	if allowRecreate && removedAtStart {
+		delete(m.removedAuths, auth.ID)
+	}
 	m.mu.Unlock()
 	if m.scheduler != nil {
 		m.scheduler.upsertAuth(snapshot.Clone())
@@ -599,6 +672,74 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
+}
+
+func (m *Manager) Remove(ctx context.Context, id string) {
+	if m == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	deletePersisted := m.store != nil && !shouldSkipPersist(ctx)
+
+	m.mu.Lock()
+	existing := m.auths[id]
+	provider := ""
+	if existing != nil {
+		provider = strings.TrimSpace(existing.Provider)
+		delete(m.auths, id)
+	}
+	if m.removedAuths == nil {
+		m.removedAuths = make(map[string]uint64)
+	}
+	m.removedAuthSeq++
+	m.removedAuths[id] = m.removedAuthSeq
+	for sessionID, sessionAuths := range m.homeRuntimeAuths {
+		if sessionAuths == nil {
+			continue
+		}
+		if runtimeAuth := sessionAuths[id]; provider == "" && runtimeAuth != nil {
+			provider = strings.TrimSpace(runtimeAuth.Provider)
+		}
+		delete(sessionAuths, id)
+		if len(sessionAuths) == 0 {
+			delete(m.homeRuntimeAuths, sessionID)
+		}
+	}
+	m.mu.Unlock()
+
+	if deletePersisted {
+		m.persistMu.Lock()
+		defer m.persistMu.Unlock()
+		if err := m.store.Delete(ctx, id); err != nil {
+			log.WithError(err).Warnf("failed to delete auth %s from store", id)
+		}
+	}
+
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	if m.scheduler != nil {
+		m.scheduler.removeAuth(id)
+	}
+	m.invalidateSessionAffinity(id)
+
+	if provider != "" {
+		if exec, ok := m.Executor(provider); ok && exec != nil {
+			if closer, okCloser := exec.(ExecutionSessionCloser); okCloser {
+				closer.CloseExecutionSession(CloseAllExecutionSessionsID)
+			}
+		}
+	}
+}
+
+func (m *Manager) invalidateSessionAffinity(authID string) {
+	if m == nil || authID == "" {
+		return
+	}
+	if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) }); ok && invalidator != nil {
+		invalidator.InvalidateAuth(authID)
+	}
 }
 
 // Load resets manager state from the backing store.
@@ -621,6 +762,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		auth.EnsureIndex()
 		snapshot := auth.Clone()
 		m.auths[auth.ID] = snapshot
+		if len(m.removedAuths) > 0 {
+			delete(m.removedAuths, auth.ID)
+		}
 		loaded = append(loaded, snapshot.Clone())
 	}
 	if m.scheduler != nil {
@@ -910,6 +1054,9 @@ func (m *Manager) tryAntigravityCreditsExecute(
 		creditsCtx, execReq, creditsOpts := m.prepareAntigravityCreditsExecution(ctx, candidate.auth, req.Model, opts)
 		execReq.Payload = req.Payload
 		execReq.Model = m.antigravityCreditsModel(req.Model, candidate.auth)
+		execReq, creditsOpts = applyRequestAfterAuthInterceptor(
+			creditsCtx, candidate.executor, candidate.provider, candidate.auth, execReq, creditsOpts, req.Model,
+		)
 		resp, errExec := candidate.executor.Execute(creditsCtx, candidate.auth, execReq, creditsOpts)
 		result := Result{
 			AuthID: candidate.auth.ID, Provider: candidate.provider, Model: req.Model, Success: errExec == nil,
@@ -936,6 +1083,9 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(
 		creditsCtx, execReq, creditsOpts := m.prepareAntigravityCreditsExecution(ctx, candidate.auth, req.Model, opts)
 		execReq.Payload = req.Payload
 		execReq.Model = m.antigravityCreditsModel(req.Model, candidate.auth)
+		execReq, creditsOpts = applyRequestAfterAuthInterceptor(
+			creditsCtx, candidate.executor, candidate.provider, candidate.auth, execReq, creditsOpts, req.Model,
+		)
 		result, errStream := m.executeStreamWithBootstrap(
 			creditsCtx, candidate.auth, candidate.executor, candidate.provider, execReq, creditsOpts, req.Model,
 		)
@@ -1037,7 +1187,12 @@ func mixedOnce[T any](
 			execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
 			execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
 		}
-		resp, errExec := executeFn(execCtx, auth, executor, provider, execReq, opts)
+		execOpts := opts
+		execReq, execOpts = applyRequestAfterAuthInterceptor(
+			execCtx, executor, provider, auth, execReq, execOpts, routeModel,
+		)
+		execReq = sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, execReq)
+		resp, errExec := executeFn(execCtx, auth, executor, provider, execReq, execOpts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
@@ -1103,6 +1258,233 @@ func cloneHTTPHeader(headers http.Header) http.Header {
 		return nil
 	}
 	return headers.Clone()
+}
+
+func cloneSchedulerAnyMap(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneURLValues(in url.Values) url.Values {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(url.Values, len(in))
+	for key, values := range in {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
+}
+
+func cloneExecutorRequest(req cliproxyexecutor.Request) cliproxyexecutor.Request {
+	req.Payload = bytes.Clone(req.Payload)
+	req.Metadata = cloneSchedulerAnyMap(req.Metadata)
+	return req
+}
+
+func cloneExecutorOptions(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	opts.Headers = cloneHTTPHeader(opts.Headers)
+	opts.Query = cloneURLValues(opts.Query)
+	opts.OriginalRequest = bytes.Clone(opts.OriginalRequest)
+	opts.Metadata = cloneSchedulerAnyMap(opts.Metadata)
+	return opts
+}
+
+type requestFormatResolver interface {
+	RequestToFormat(cliproxyexecutor.Request, cliproxyexecutor.Options) sdktranslator.Format
+}
+
+func requestToFormat(
+	executor ProviderExecutor,
+	provider string,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) sdktranslator.Format {
+	if resolver, ok := executor.(requestFormatResolver); ok && resolver != nil {
+		if format := resolver.RequestToFormat(req, opts); format != "" {
+			return format
+		}
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "claude":
+		return sdktranslator.FormatClaude
+	case "codex", "xai":
+		return sdktranslator.FormatCodex
+	case "gemini", "vertex", "aistudio":
+		return sdktranslator.FormatGemini
+	case "gemini-cli":
+		return sdktranslator.FormatGeminiCLI
+	case "antigravity":
+		return sdktranslator.FormatAntigravity
+	default:
+		return sdktranslator.FormatOpenAI
+	}
+}
+
+func applyRequestAfterAuthInterceptor(
+	ctx context.Context,
+	executor ProviderExecutor,
+	provider string,
+	auth *Auth,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	requestedModel string,
+) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	if opts.RequestAfterAuthInterceptor == nil {
+		return req, opts
+	}
+	authID := ""
+	authLabel := ""
+	authProvider := provider
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		if strings.TrimSpace(auth.Provider) != "" {
+			authProvider = auth.Provider
+		}
+	}
+	resp := opts.RequestAfterAuthInterceptor(
+		ctx, cliproxyexecutor.RequestAfterAuthInterceptRequest{
+			SourceFormat:    opts.SourceFormat,
+			ToFormat:        requestToFormat(executor, provider, req, opts),
+			Model:           req.Model,
+			RequestedModel:  requestedModelAliasFromOptions(opts, requestedModel),
+			Stream:          opts.Stream,
+			AuthID:          authID,
+			AuthLabel:       authLabel,
+			AuthProvider:    authProvider,
+			OriginalRequest: bytes.Clone(opts.OriginalRequest),
+			Request:         cloneExecutorRequest(req),
+			Options:         cloneExecutorOptions(opts),
+		},
+	)
+	if !resp.Handled {
+		return req, opts
+	}
+	return cloneExecutorRequest(resp.Request), cloneExecutorOptions(resp.Options)
+}
+
+func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
+	if len(auths) == 0 {
+		return nil
+	}
+	out := make([]pluginapi.SchedulerAuthCandidate, 0, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		out = append(
+			out, pluginapi.SchedulerAuthCandidate{
+				ID:         auth.ID,
+				Provider:   strings.ToLower(strings.TrimSpace(auth.Provider)),
+				Priority:   authPriority(auth),
+				Status:     string(auth.Status),
+				Attributes: maps.Clone(auth.Attributes),
+				Metadata:   cloneSchedulerAnyMap(auth.Metadata),
+			},
+		)
+	}
+	return out
+}
+
+func schedulerProviders(provider string, providers []string) []string {
+	out := make([]string, 0, len(providers)+1)
+	seen := make(map[string]struct{}, len(providers)+1)
+	addProvider := func(value string) {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || value == "mixed" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	addProvider(provider)
+	for _, value := range providers {
+		addProvider(value)
+	}
+	return out
+}
+
+func schedulerOptions(opts cliproxyexecutor.Options) pluginapi.SchedulerOptions {
+	return pluginapi.SchedulerOptions{
+		Headers:  cloneHTTPHeader(opts.Headers),
+		Metadata: cloneSchedulerAnyMap(opts.Metadata),
+	}
+}
+
+func pickSchedulerAuthByID(candidates []*Auth, authID string) *Auth {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil
+	}
+	for _, candidate := range candidates {
+		if candidate != nil && candidate.ID == authID {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func builtinSchedulerStrategy(delegate string) (schedulerStrategy, bool) {
+	switch strings.TrimSpace(delegate) {
+	case pluginapi.SchedulerBuiltinRoundRobin:
+		return schedulerStrategyRoundRobin, true
+	case pluginapi.SchedulerBuiltinFillFirst:
+		return schedulerStrategyFillFirst, true
+	default:
+		return schedulerStrategyCustom, false
+	}
+}
+
+func (m *Manager) pickViaPluginScheduler(
+	ctx context.Context,
+	scheduler PluginScheduler,
+	provider string,
+	providers []string,
+	model string,
+	opts cliproxyexecutor.Options,
+	candidates []*Auth,
+) (*Auth, bool, error) {
+	if scheduler == nil || len(candidates) == 0 {
+		return nil, false, nil
+	}
+	providerKey := strings.ToLower(strings.TrimSpace(provider))
+	requestProvider := providerKey
+	if providerKey == "mixed" {
+		requestProvider = ""
+	}
+	req := pluginapi.SchedulerPickRequest{
+		Provider:   requestProvider,
+		Providers:  schedulerProviders(providerKey, providers),
+		Model:      model,
+		Stream:     opts.Stream,
+		Options:    schedulerOptions(opts),
+		Candidates: schedulerAuthCandidates(candidates),
+	}
+	resp, handled, errPick := scheduler.PickAuth(ctx, req)
+	if errPick != nil {
+		return nil, true, errPick
+	}
+	if !handled || !resp.Handled {
+		return nil, false, nil
+	}
+	if selected := pickSchedulerAuthByID(candidates, resp.AuthID); selected != nil {
+		return selected, true, nil
+	}
+	if _, ok := builtinSchedulerStrategy(resp.DelegateBuiltin); ok {
+		return nil, false, nil
+	}
+	return nil, false, nil
 }
 
 func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamResult {
@@ -1262,6 +1644,22 @@ func (m *Manager) wrapStreamResult(
 	}
 }
 
+func sanitizeDownstreamWebsocketFallbackRequest(
+	ctx context.Context,
+	auth *Auth,
+	req cliproxyexecutor.Request,
+) cliproxyexecutor.Request {
+	if !cliproxyexecutor.DownstreamWebsocket(ctx) || authWebsocketsEnabled(auth) || len(req.Payload) == 0 {
+		return req
+	}
+	updated, errDelete := sjson.DeleteBytes(req.Payload, "generate")
+	if errDelete != nil {
+		return req
+	}
+	req.Payload = updated
+	return req
+}
+
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
 	requestedModel = strings.TrimSpace(requestedModel)
 	if requestedModel == "" {
@@ -1290,6 +1688,9 @@ func contextWithRequestedModelAlias(
 	ctx = coreusage.WithRequestedModelAlias(ctx, alias)
 	if effort := reasoningEffortFromOptions(opts); effort != "" {
 		ctx = coreusage.WithReasoningEffort(ctx, effort)
+	}
+	if serviceTier := serviceTierFromOptions(opts); serviceTier != "" {
+		ctx = coreusage.WithServiceTier(ctx, serviceTier)
 	}
 	return ctx
 }
@@ -1324,6 +1725,24 @@ func reasoningEffortFromOptions(opts cliproxyexecutor.Options) string {
 		return ""
 	}
 	raw, ok := opts.Metadata[cliproxyexecutor.ReasoningEffortMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+func serviceTierFromOptions(opts cliproxyexecutor.Options) string {
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey]
 	if !ok || raw == nil {
 		return ""
 	}
@@ -1440,7 +1859,7 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 	if saved != nil {
 		return saved, nil
 	}
-	return updated, nil
+	return target, &Error{Code: "auth_removed", Message: "auth was removed during request preparation"}
 }
 
 func pinnedAuthIDFromMetadata(meta map[string]any) string {
@@ -1461,11 +1880,61 @@ func pinnedAuthIDFromMetadata(meta map[string]any) string {
 	}
 }
 
-func ExtractSessionID(headers http.Header, _ []byte, metadata map[string]any) string {
+func disallowFreeAuthFromMetadata(meta map[string]any) bool {
+	if len(meta) == 0 {
+		return false
+	}
+	raw, ok := meta[cliproxyexecutor.DisallowFreeAuthMetadataKey]
+	if !ok || raw == nil {
+		return false
+	}
+	switch val := raw.(type) {
+	case bool:
+		return val
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(val))
+		return err == nil && parsed
+	case []byte:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(string(val)))
+		return err == nil && parsed
+	default:
+		return false
+	}
+}
+
+func isFreeCodexAuth(auth *Auth) bool {
+	if auth == nil || auth.Attributes == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(auth.Attributes["plan_type"]), "free")
+}
+
+func selectionPredicate(disallowFreeAuth bool) func(*Auth) bool {
+	if !disallowFreeAuth {
+		return nil
+	}
+	return func(auth *Auth) bool {
+		return !isFreeCodexAuth(auth)
+	}
+}
+
+func ExtractSessionID(headers http.Header, body []byte, metadata map[string]any) string {
 	if id := headerValueIgnoreCase(headers, "X-Session-ID"); id != "" {
 		return id
 	}
+	if id := codexSessionIDFromPayload(body); id != "" {
+		return id
+	}
+	if id := headerValueIgnoreCase(headers, "Session-Id"); id != "" {
+		return id
+	}
 	if id := headerValueIgnoreCase(headers, "Session_id"); id != "" {
+		return id
+	}
+	if id := headerValueIgnoreCase(headers, "Conversation_id"); id != "" {
 		return id
 	}
 	if id := headerValueIgnoreCase(headers, "X-Amp-Thread-Id"); id != "" {
@@ -1475,6 +1944,31 @@ func ExtractSessionID(headers http.Header, _ []byte, metadata map[string]any) st
 		return id
 	}
 	return homeExecutionSessionIDFromMetadata(metadata)
+}
+
+func codexSessionIDFromPayload(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if id := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); id != "" {
+		return id
+	}
+	if rawTurnMetadata := strings.TrimSpace(
+		gjson.GetBytes(
+			body, "client_metadata.x-codex-turn-metadata",
+		).String(),
+	); rawTurnMetadata != "" {
+		if id := strings.TrimSpace(gjson.Get(rawTurnMetadata, "prompt_cache_key").String()); id != "" {
+			return id
+		}
+		if id := strings.TrimSpace(gjson.Get(rawTurnMetadata, "window_id").String()); id != "" {
+			return id
+		}
+	}
+	if id := strings.TrimSpace(gjson.GetBytes(body, "client_metadata.x-codex-window-id").String()); id != "" {
+		return id
+	}
+	return ""
 }
 
 func publishSelectedAuthMetadata(meta map[string]any, authID string) {
@@ -1900,6 +2394,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	var persistAuth *Auth
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1949,10 +2444,29 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						suspendReason = "unauthorized"
 						shouldSuspendModel = true
 					case 402, 403:
-						next := now.Add(30 * time.Minute)
-						state.NextRetryAfter = next
-						suspendReason = "payment_required"
-						shouldSuspendModel = true
+						if isCloudflareChallengeResultError(result.Error) {
+							next, backoffLevel := nextCloudflareCooldown(
+								state.Quota.BackoffLevel,
+								quotaCooldownDisabledForAuth(auth),
+								now,
+							)
+							state.NextRetryAfter = next
+							state.StatusMessage = "cloudflare challenge"
+							if auth.LastError != nil {
+								auth.StatusMessage = "cloudflare challenge"
+							}
+							state.Quota = QuotaState{
+								Exceeded:      true,
+								Reason:        "cloudflare challenge",
+								NextRecoverAt: next,
+								BackoffLevel:  backoffLevel,
+							}
+						} else {
+							next := now.Add(30 * time.Minute)
+							state.NextRetryAfter = next
+							suspendReason = "payment_required"
+							shouldSuspendModel = true
+						}
 					case 404:
 						next := now.Add(12 * time.Hour)
 						state.NextRetryAfter = next
@@ -2000,9 +2514,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
-		_ = m.persist(ctx, auth)
+		persistAuth = auth.Clone()
 	}
 	m.mu.Unlock()
+	if persistAuth != nil {
+		_ = m.persist(ctx, persistAuth, false, false, 0)
+	}
 
 	if clearModelQuota && result.Model != "" {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
@@ -2264,8 +2781,48 @@ func isRequestScopedNotFoundResultError(err *Error) bool {
 	return isRequestScopedNotFoundMessage(err.Message)
 }
 
+func isCloudflareChallengeErrorMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "challenge-platform") ||
+		strings.Contains(lower, "cf-mitigated") ||
+		strings.Contains(lower, "cloudflare challenge") ||
+		(strings.Contains(lower, "cloudflare") && strings.Contains(lower, "<html"))
+}
+
+func isCloudflareChallengeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isCloudflareChallengeErrorMessage(err.Error())
+}
+
+func isCloudflareChallengeResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	return isCloudflareChallengeErrorMessage(err.Message)
+}
+
+func nextCloudflareCooldown(backoffLevel int, disableCooling bool, now time.Time) (time.Time, int) {
+	var next time.Time
+	if !disableCooling {
+		cooldown, nextLevel := nextQuotaCooldown(backoffLevel, disableCooling)
+		if cooldown < 10*time.Second {
+			cooldown = 10 * time.Second
+		}
+		if cooldown > 0 {
+			next = now.Add(cooldown)
+		}
+		backoffLevel = nextLevel
+	}
+	return next, backoffLevel
+}
+
 func isRequestInvalidError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if isCloudflareChallengeError(err) {
 		return false
 	}
 	status := statusCodeFromError(err)
@@ -2296,6 +2853,18 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 	}
 	statusCode := statusCodeFromResult(resultErr)
+	if isCloudflareChallengeResultError(resultErr) {
+		auth.StatusMessage = "cloudflare challenge"
+		next, backoffLevel := nextCloudflareCooldown(auth.Quota.BackoffLevel, quotaCooldownDisabledForAuth(auth), now)
+		auth.Quota = QuotaState{
+			Exceeded:      true,
+			Reason:        "cloudflare challenge",
+			NextRecoverAt: next,
+			BackoffLevel:  backoffLevel,
+		}
+		auth.NextRetryAfter = next
+		return
+	}
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
@@ -2458,8 +3027,11 @@ func (m *Manager) PickNext(
 		return auth, exec, err
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	requestPredicate := selectionPredicate(disallowFreeAuthFromMetadata(opts.Metadata))
 
 	m.mu.RLock()
+	selector := m.selector
+	pluginScheduler := m.pluginScheduler
 	executor, okExecutor := m.executors[provider]
 	if !okExecutor {
 		m.mu.RUnlock()
@@ -2467,7 +3039,6 @@ func (m *Manager) PickNext(
 	}
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
-	// Always use base model name (without thinking suffix) for auth matching.
 	if modelKey != "" {
 		parsed := thinking.ParseSuffix(modelKey)
 		if parsed.ModelName != "" {
@@ -2482,26 +3053,36 @@ func (m *Manager) PickNext(
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
 			continue
 		}
+		if requestPredicate != nil && !requestPredicate(candidate) {
+			continue
+		}
 		if _, used := tried[candidate.ID]; used {
 			continue
 		}
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
 			continue
 		}
-		candidates = append(candidates, candidate)
+		candidates = append(candidates, candidate.Clone())
 	}
+	m.mu.RUnlock()
 	if len(candidates) == 0 {
-		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if m.scheduler != nil && isBuiltInSelector(m.selector) {
+	if selected, handled, errPick := m.pickViaPluginScheduler(
+		ctx, pluginScheduler, provider, []string{provider}, model, opts, candidates,
+	); errPick != nil {
+		return nil, nil, errPick
+	} else if handled {
+		authCopy := selected.Clone()
+		return authCopy, executor, nil
+	}
+	if m.scheduler != nil && isBuiltInSelector(selector) {
 		var stickySelector *SessionAffinitySelector
-		if selector, ok := m.selector.(*SessionAffinitySelector); ok {
+		if selector, ok := selector.(*SessionAffinitySelector); ok {
 			stickySelector = selector
 		}
 		if stickySelector != nil {
 			if sticky := stickySelector.PickSticky(provider, opts, candidates); sticky != nil {
-				m.mu.RUnlock()
 				executor, ok := m.Executor(provider)
 				if !ok || executor == nil {
 					return nil, nil, &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -2509,8 +3090,7 @@ func (m *Manager) PickNext(
 				return sticky.Clone(), executor, nil
 			}
 		}
-		m.mu.RUnlock()
-		selected, errPick := m.scheduler.pickSingle(ctx, provider, model, opts, tried)
+		selected, errPick := m.scheduler.pickSingleWithPredicate(ctx, provider, model, opts, tried, requestPredicate)
 		if errPick != nil {
 			return nil, nil, errPick
 		}
@@ -2523,17 +3103,14 @@ func (m *Manager) PickNext(
 		}
 		return selected, executor, nil
 	}
-	selected, errPick := m.selector.Pick(ctx, provider, model, opts, candidates)
+	selected, errPick := selector.Pick(ctx, provider, model, opts, candidates)
 	if errPick != nil {
-		m.mu.RUnlock()
 		return nil, nil, errPick
 	}
 	if selected == nil {
-		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	authCopy := selected.Clone()
-	m.mu.RUnlock()
 	if !selected.indexAssigned {
 		m.mu.Lock()
 		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -2544,7 +3121,6 @@ func (m *Manager) PickNext(
 	}
 	return authCopy, executor, nil
 }
-
 func (m *Manager) pickNextMixed(
 	ctx context.Context,
 	providers []string,
@@ -2556,6 +3132,7 @@ func (m *Manager) pickNextMixed(
 		return m.pickNextViaHome(ctx, model, opts, tried)
 	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
+	requestPredicate := selectionPredicate(disallowFreeAuthFromMetadata(opts.Metadata))
 
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
@@ -2570,9 +3147,10 @@ func (m *Manager) pickNextMixed(
 	}
 
 	m.mu.RLock()
+	selector := m.selector
+	pluginScheduler := m.pluginScheduler
 	candidates := make([]*Auth, 0, len(m.auths))
 	modelKey := strings.TrimSpace(model)
-	// Always use base model name (without thinking suffix) for auth matching.
 	if modelKey != "" {
 		parsed := thinking.ParseSuffix(modelKey)
 		if parsed.ModelName != "" {
@@ -2585,6 +3163,9 @@ func (m *Manager) pickNextMixed(
 			continue
 		}
 		if pinnedAuthID != "" && candidate.ID != pinnedAuthID {
+			continue
+		}
+		if requestPredicate != nil && !requestPredicate(candidate) {
 			continue
 		}
 		providerKey := strings.TrimSpace(strings.ToLower(candidate.Provider))
@@ -2603,21 +3184,32 @@ func (m *Manager) pickNextMixed(
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
 			continue
 		}
-		candidates = append(candidates, candidate)
+		candidates = append(candidates, candidate.Clone())
 	}
+	m.mu.RUnlock()
 	if len(candidates) == 0 {
-		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
-	if m.scheduler != nil && isBuiltInSelector(m.selector) {
+	if selected, handled, errPick := m.pickViaPluginScheduler(
+		ctx, pluginScheduler, "mixed", providers, model, opts, candidates,
+	); errPick != nil {
+		return nil, nil, "", errPick
+	} else if handled {
+		providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
+		executor, okExecutor := m.Executor(providerKey)
+		if !okExecutor {
+			return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
+		}
+		return selected.Clone(), executor, providerKey, nil
+	}
+	if m.scheduler != nil && isBuiltInSelector(selector) {
 		var stickySelector *SessionAffinitySelector
-		if selector, ok := m.selector.(*SessionAffinitySelector); ok {
+		if selector, ok := selector.(*SessionAffinitySelector); ok {
 			stickySelector = selector
 		}
 		if stickySelector != nil {
 			if sticky := stickySelector.PickSticky("mixed", opts, candidates); sticky != nil {
 				providerKey := strings.TrimSpace(strings.ToLower(sticky.Provider))
-				m.mu.RUnlock()
 				executor, ok := m.Executor(providerKey)
 				if !ok || executor == nil {
 					return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
@@ -2625,14 +3217,15 @@ func (m *Manager) pickNextMixed(
 				return sticky.Clone(), executor, providerKey, nil
 			}
 		}
-		m.mu.RUnlock()
 		filteredProviders := make([]string, 0, len(providers))
 		for _, provider := range providers {
 			if executor, ok := m.Executor(strings.TrimSpace(strings.ToLower(provider))); ok && executor != nil {
 				filteredProviders = append(filteredProviders, provider)
 			}
 		}
-		selected, providerKey, errPick := m.scheduler.pickMixed(ctx, filteredProviders, model, opts, tried)
+		selected, providerKey, errPick := m.scheduler.pickMixedWithPredicate(
+			ctx, filteredProviders, model, opts, tried, requestPredicate,
+		)
 		if errPick != nil {
 			return nil, nil, "", errPick
 		}
@@ -2645,23 +3238,19 @@ func (m *Manager) pickNextMixed(
 		}
 		return selected, executor, providerKey, nil
 	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", model, opts, candidates)
+	selected, errPick := selector.Pick(ctx, "mixed", model, opts, candidates)
 	if errPick != nil {
-		m.mu.RUnlock()
 		return nil, nil, "", errPick
 	}
 	if selected == nil {
-		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
 	providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
-	executor, okExecutor := m.executors[providerKey]
+	executor, okExecutor := m.Executor(providerKey)
 	if !okExecutor {
-		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	authCopy := selected.Clone()
-	m.mu.RUnlock()
 	if !selected.indexAssigned {
 		m.mu.Lock()
 		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
@@ -2706,12 +3295,41 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	return isHomeRequestRetryExceededError(errPick)
 }
 
+func homeAuthAlreadyTried(tried map[string]struct{}, authID string) bool {
+	authID = strings.TrimSpace(authID)
+	if authID == "" || len(tried) == 0 {
+		return false
+	}
+	_, ok := tried[authID]
+	return ok
+}
+
+func repeatedHomeAuthError() *Error {
+	return &Error{
+		Code:       homeRequestRetryExceededErrorCode,
+		Message:    "home returned a previously tried auth",
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
+}
+
 type homeAuthDispatchResponse struct {
 	Model      string `json:"model"`
 	Provider   string `json:"provider"`
 	AuthIndex  string `json:"auth_index"`
 	UserAPIKey string `json:"user_api_key"`
 	Auth       Auth   `json:"auth"`
+}
+
+type homeAuthDispatcher interface {
+	HeartbeatOK() bool
+	RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) (
+		[]byte,
+		error,
+	)
+}
+
+var currentHomeDispatcher = func() homeAuthDispatcher {
+	return home.Current()
 }
 
 func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
@@ -2829,6 +3447,10 @@ func (m *Manager) rememberHomeRuntimeAuth(sessionID string, auth *Auth) {
 		return
 	}
 	m.mu.Lock()
+	if _, removed := m.removedAuths[authID]; removed {
+		m.mu.Unlock()
+		return
+	}
 	if m.homeRuntimeAuths == nil {
 		m.homeRuntimeAuths = make(map[string]map[string]*Auth)
 	}
@@ -2896,7 +3518,7 @@ func (m *Manager) pickNextViaHome(
 		}
 	}
 
-	client := home.Current()
+	client := currentHomeDispatcher()
 	if client == nil || !client.HeartbeatOK() {
 		return nil, nil, "", &Error{
 			Code: "home_unavailable", Message: "home control center unavailable",
@@ -2960,6 +3582,9 @@ func (m *Manager) pickNextViaHome(
 			Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway,
 		}
 	}
+	if homeAuthAlreadyTried(tried, auth.ID) {
+		return nil, nil, "", repeatedHomeAuthError()
+	}
 	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if providerKey == "" {
 		return nil, nil, "", &Error{
@@ -2991,7 +3616,13 @@ func (m *Manager) pickNextViaHome(
 	return authCopy, executor, providerKey, nil
 }
 
-func (m *Manager) persist(ctx context.Context, auth *Auth) error {
+func (m *Manager) persist(
+	ctx context.Context,
+	auth *Auth,
+	allowRecreate bool,
+	removedAtStart bool,
+	removedSeq uint64,
+) error {
 	if m.store == nil || auth == nil {
 		return nil
 	}
@@ -3005,6 +3636,14 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	// Skip persistence when metadata is absent (e.g., runtime-only auths).
 	if auth.Metadata == nil {
+		return nil
+	}
+	m.persistMu.Lock()
+	defer m.persistMu.Unlock()
+	m.mu.RLock()
+	currentSeq, removed := m.removedAuths[auth.ID]
+	m.mu.RUnlock()
+	if removed && (!allowRecreate || !removedAtStart || currentSeq != removedSeq) {
 		return nil
 	}
 	_, err := m.store.Save(ctx, auth)

@@ -8,6 +8,7 @@ package claude
 import (
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -154,6 +155,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							case "thinking":
 								// Only map thinking to reasoning_content for assistant messages (security: prevent injection)
 								if role == "assistant" {
+									if !shouldMapClaudeThinkingToGPTReasoning(part) {
+										return true
+									}
 									thinkingText := thinking.GetThinkingText(part)
 									// Skip empty or whitespace-only thinking
 									if strings.TrimSpace(thinkingText) != "" {
@@ -346,6 +350,17 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	}
 
 	return out
+}
+
+func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result) bool {
+	rawSignature := strings.TrimSpace(part.Get("signature").String())
+	if rawSignature == "" {
+		return true
+	}
+	_, ok := signature.CompatibleSignatureForProvider(
+		signature.ProviderGPT, rawSignature, signature.BlockKindGPTReasoning,
+	)
+	return ok
 }
 
 func convertClaudeContentPart(part gjson.Result) (string, bool) {

@@ -18,6 +18,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -38,6 +39,8 @@ const (
 	// refreshThresholdSeconds is when to refresh token before expiry (5 minutes).
 	refreshThresholdSeconds = 300
 )
+
+var kimiRefreshGroup singleflight.Group
 
 // Auth handles Kimi authentication flow.
 type Auth struct {
@@ -326,6 +329,30 @@ func (c *DeviceFlowClient) exchangeDeviceCode(ctx context.Context, deviceCode st
 
 // RefreshToken exchanges a refresh token for a new access token.
 func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string) (*TokenData, error) {
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil, fmt.Errorf("kimi: refresh token is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	result, err, _ := kimiRefreshGroup.Do(
+		refreshToken, func() (interface{}, error) {
+			return c.refreshTokenSingleFlight(context.WithoutCancel(ctx), refreshToken)
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	tokenData, ok := result.(*TokenData)
+	if !ok || tokenData == nil {
+		return nil, fmt.Errorf("kimi: refresh token failed: invalid single-flight result")
+	}
+	return tokenData, nil
+}
+
+func (c *DeviceFlowClient) refreshTokenSingleFlight(ctx context.Context, refreshToken string) (*TokenData, error) {
 	data := url.Values{}
 	data.Set("client_id", kimiClientID)
 	data.Set("grant_type", "refresh_token")

@@ -28,6 +28,36 @@ func TestMaskSensitiveHeaderValue(t *testing.T) {
 	}
 }
 
+func TestMaskSensitivePayload(t *testing.T) {
+	jsonPayload := []byte(`{"model":"gpt-5.5","max_tokens":256,"maxTokens":128,"api_key":"sk-secret-value","apiKey":"camel-api-secret","managementKey":"management-secret","nested":{"access_token":"access-secret-value","accessToken":"camel-access-secret"}}`)
+	maskedJSON := string(MaskSensitivePayload(jsonPayload))
+	for _, secret := range []string{
+		"sk-secret-value", "camel-api-secret", "management-secret", "access-secret-value", "camel-access-secret",
+	} {
+		if strings.Contains(maskedJSON, secret) {
+			t.Fatalf("MaskSensitivePayload JSON kept secret %q: %s", secret, maskedJSON)
+		}
+	}
+	if !strings.Contains(maskedJSON, "max_tokens") || !strings.Contains(
+		maskedJSON, "256",
+	) || !strings.Contains(maskedJSON, "maxTokens") || !strings.Contains(maskedJSON, "128") {
+		t.Fatalf("MaskSensitivePayload JSON masked non-secret token limit fields: %s", maskedJSON)
+	}
+
+	textPayload := []byte("Authorization: Bearer auth-secret-value\nUpstream URL: https://example.test/v1?key=query-secret-value&model=gpt-5.5&accessToken=access-query-secret\nBody:\n{\"refreshToken\":\"refresh-secret-value\",\"maxTokens\":128}\n")
+	maskedText := string(MaskSensitivePayload(textPayload))
+	if strings.Contains(maskedText, "auth-secret-value") || strings.Contains(
+		maskedText, "refresh-secret-value",
+	) || strings.Contains(maskedText, "query-secret-value") || strings.Contains(maskedText, "access-query-secret") {
+		t.Fatalf("MaskSensitivePayload text kept secret: %s", maskedText)
+	}
+	if !strings.Contains(maskedText, "maxTokens") || !strings.Contains(
+		maskedText, "128",
+	) || !strings.Contains(maskedText, "model=gpt-5.5") {
+		t.Fatalf("MaskSensitivePayload text masked non-secret fields: %s", maskedText)
+	}
+}
+
 func TestSanitizeFunctionName(t *testing.T) {
 	tests := []struct {
 		name     string

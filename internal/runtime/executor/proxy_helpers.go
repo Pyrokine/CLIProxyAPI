@@ -32,6 +32,15 @@ func newProxyAwareHTTPClient(
 	auth *cliproxyauth.Auth,
 	timeout time.Duration,
 ) *http.Client {
+	return NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
+}
+
+func NewProxyAwareHTTPClient(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *cliproxyauth.Auth,
+	timeout time.Duration,
+) *http.Client {
 	httpClient := &http.Client{}
 	if timeout > 0 {
 		httpClient.Timeout = timeout

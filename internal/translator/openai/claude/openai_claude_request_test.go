@@ -1,10 +1,22 @@
 package claude
 
 import (
+	"encoding/base64"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
+
+func validClaudeThinkingSignatureForOpenAITest() string {
+	channel := protowire.AppendTag(nil, 1, protowire.VarintType)
+	channel = protowire.AppendVarint(channel, 12)
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channel)
+	payload := protowire.AppendTag(nil, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	return base64.StdEncoding.EncodeToString(payload)
+}
 
 // TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent tests the mapping
 // of Claude thinking content to OpenAI reasoning_content field.
@@ -249,6 +261,28 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_DropsClaudeSignedThinkingForGPTReasoning(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-3-opus",
+		"messages": [{
+			"role": "assistant",
+			"content": [
+				{"type": "thinking", "thinking": "cross provider", "signature": "` + validClaudeThinkingSignatureForOpenAITest() + `"},
+				{"type": "text", "text": "visible"}
+			]
+		}]
+	}`
+
+	output := ConvertClaudeRequestToOpenAI("gpt-5.1", []byte(inputJSON), false)
+	assistantMsg := gjson.GetBytes(output, "messages.0")
+	if assistantMsg.Get("reasoning_content").Exists() {
+		t.Fatalf("reasoning_content should be dropped for Claude signature replay. Output: %s", string(output))
+	}
+	if got := assistantMsg.Get("content.0.text").String(); got != "visible" {
+		t.Fatalf("visible content = %q, want visible. Output: %s", got, string(output))
 	}
 }
 

@@ -79,6 +79,8 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				role := roleResult.String()
 				if role == "assistant" {
 					role = "model"
+				} else if role == "system" {
+					role = "user"
 				}
 
 				contentJSON := []byte(`{"role":"","parts":[]}`)
@@ -297,6 +299,7 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 	}
 
 	result := out
+	result = common.CleanToolSchemas(result)
 	result = common.AttachDefaultSafetySettings(result, "safetySettings")
 
 	return result

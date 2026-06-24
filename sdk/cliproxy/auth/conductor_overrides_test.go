@@ -264,3 +264,195 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
 	}
 }
+
+func TestManager_MarkResult_CloudflareChallenge_On403(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+
+	auth := &Auth{
+		ID:       "auth-cf-403",
+		Provider: "claude",
+	}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	model := "test-model-cf-403"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+
+	m.MarkResult(
+		context.Background(), Result{
+			AuthID:   auth.ID,
+			Provider: "claude",
+			Model:    model,
+			Success:  false,
+			Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "cf-mitigated: challenge"},
+		},
+	)
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	state := updated.ModelStates[model]
+	if state == nil {
+		t.Fatalf("expected model state to be present")
+	}
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be non-zero for cloudflare challenge")
+	}
+	diff := time.Until(state.NextRetryAfter)
+	if diff < 5*time.Second || diff > 25*time.Second {
+		t.Fatalf("expected NextRetryAfter to be ~10 seconds, got %v", diff)
+	}
+	if state.StatusMessage != "cloudflare challenge" {
+		t.Fatalf("expected StatusMessage to be 'cloudflare challenge', got %s", state.StatusMessage)
+	}
+	if !state.Quota.Exceeded || state.Quota.Reason != "cloudflare challenge" {
+		t.Fatalf("expected cloudflare challenge quota state, got %+v", state.Quota)
+	}
+	available := false
+	for _, info := range reg.GetAvailableModelsByProvider("claude") {
+		if info != nil && info.ID == model {
+			available = true
+			break
+		}
+	}
+	if !available {
+		t.Fatalf("expected model to remain available for cloudflare challenge transient cooldown")
+	}
+}
+
+func TestManager_MarkResult_CloudflareChallenge_AuthLevelFailure(t *testing.T) {
+	prev := quotaCooldownDisabled.Load()
+	quotaCooldownDisabled.Store(false)
+	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
+
+	m := NewManager(nil, nil, nil)
+	auth := &Auth{ID: "auth-cf-auth", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(
+		context.Background(), Result{
+			AuthID:   auth.ID,
+			Provider: "claude",
+			Success:  false,
+			Error:    &Error{HTTPStatus: http.StatusForbidden, Message: "cloudflare challenge"},
+		},
+	)
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to be present")
+	}
+	if updated.StatusMessage != "cloudflare challenge" {
+		t.Fatalf("expected auth StatusMessage to be cloudflare challenge, got %q", updated.StatusMessage)
+	}
+	if updated.NextRetryAfter.IsZero() {
+		t.Fatalf("expected auth NextRetryAfter to be non-zero")
+	}
+	if !updated.Quota.Exceeded || updated.Quota.Reason != "cloudflare challenge" {
+		t.Fatalf("expected auth cloudflare quota state, got %+v", updated.Quota)
+	}
+}
+
+func TestIsCloudflareChallengeErrorMessage_NarrowChallengeMatch(t *testing.T) {
+	t.Parallel()
+
+	if isCloudflareChallengeErrorMessage("generic challenge failed") {
+		t.Fatal("generic challenge message should not be treated as cloudflare challenge")
+	}
+	if !isCloudflareChallengeErrorMessage("cf-mitigated: challenge") {
+		t.Fatal("cf-mitigated message should be treated as cloudflare challenge")
+	}
+}
+
+func TestManager_PickNext_DisallowsFreeCodexAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(&credentialRetryLimitExecutor{id: "codex"})
+	freeAuth := &Auth{ID: "a-free", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}}
+	paidAuth := &Auth{ID: "b-paid", Provider: "codex", Attributes: map[string]string{"plan_type": "plus"}}
+	if _, errRegister := m.Register(context.Background(), freeAuth); errRegister != nil {
+		t.Fatalf("register free auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), paidAuth); errRegister != nil {
+		t.Fatalf("register paid auth: %v", errRegister)
+	}
+
+	selected, _, errPick := m.PickNext(
+		context.Background(), "codex", "", cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.DisallowFreeAuthMetadataKey: true},
+		}, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("PickNext() error = %v", errPick)
+	}
+	if selected == nil || selected.ID != paidAuth.ID {
+		t.Fatalf("PickNext() auth = %#v, want %s", selected, paidAuth.ID)
+	}
+}
+
+func TestManager_PickNext_DisallowsFreeCodexAuthForCustomSelector(t *testing.T) {
+	selector := &trackingSelector{}
+	m := NewManager(nil, selector, nil)
+	m.RegisterExecutor(&credentialRetryLimitExecutor{id: "codex"})
+	freeAuth := &Auth{ID: "a-free", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}}
+	paidAuth := &Auth{ID: "b-paid", Provider: "codex", Attributes: map[string]string{"plan_type": "team"}}
+	if _, errRegister := m.Register(context.Background(), freeAuth); errRegister != nil {
+		t.Fatalf("register free auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), paidAuth); errRegister != nil {
+		t.Fatalf("register paid auth: %v", errRegister)
+	}
+
+	selected, _, errPick := m.PickNext(
+		context.Background(), "codex", "", cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.DisallowFreeAuthMetadataKey: true},
+		}, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("PickNext() error = %v", errPick)
+	}
+	if selected == nil || selected.ID != paidAuth.ID {
+		t.Fatalf("PickNext() auth = %#v, want %s", selected, paidAuth.ID)
+	}
+	if len(selector.lastAuthID) != 1 || selector.lastAuthID[0] != paidAuth.ID {
+		t.Fatalf("selector candidates = %#v, want only %s", selector.lastAuthID, paidAuth.ID)
+	}
+}
+
+func TestManager_PickNextMixed_DisallowsFreeCodexAuth(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.RegisterExecutor(&credentialRetryLimitExecutor{id: "codex"})
+	m.RegisterExecutor(&credentialRetryLimitExecutor{id: "claude"})
+	freeAuth := &Auth{ID: "a-free", Provider: "codex", Attributes: map[string]string{"plan_type": "free"}}
+	paidAuth := &Auth{ID: "b-paid", Provider: "claude"}
+	if _, errRegister := m.Register(context.Background(), freeAuth); errRegister != nil {
+		t.Fatalf("register free auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), paidAuth); errRegister != nil {
+		t.Fatalf("register paid auth: %v", errRegister)
+	}
+
+	selected, _, provider, errPick := m.pickNextMixed(
+		context.Background(), []string{"codex", "claude"}, "", cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.DisallowFreeAuthMetadataKey: true},
+		}, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickNextMixed() error = %v", errPick)
+	}
+	if provider != "claude" {
+		t.Fatalf("pickNextMixed() provider = %q, want claude", provider)
+	}
+	if selected == nil || selected.ID != paidAuth.ID {
+		t.Fatalf("pickNextMixed() auth = %#v, want %s", selected, paidAuth.ID)
+	}
+}

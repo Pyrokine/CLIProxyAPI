@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -109,55 +110,105 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		}
 	}
 
-	// Gemini-specific handling for non-Claude models:
-	// - Add skip_thought_signature_validator to functionCall parts so upstream can bypass signature validation.
-	// - Also mark thinking parts with the same sentinel when present (we keep the parts; we only annotate them).
-	if !strings.Contains(modelName, "claude") {
-		const skipSentinel = "skip_thought_signature_validator"
-
-		gjson.GetBytes(rawJSON, "request.contents").ForEach(
-			func(contentIdx, content gjson.Result) bool {
-				if content.Get("role").String() == "model" {
-					// First pass: collect indices of thinking parts to mark with skip sentinel
-					var thinkingIndicesToSkipSignature []int64
-					content.Get("parts").ForEach(
-						func(partIdx, part gjson.Result) bool {
-							// Collect indices of thinking blocks to mark with skip sentinel
-							if part.Get("thought").Bool() {
-								thinkingIndicesToSkipSignature = append(thinkingIndicesToSkipSignature, partIdx.Int())
-							}
-							// Add skip sentinel to functionCall parts
-							if part.Get("functionCall").Exists() {
-								existingSig := part.Get("thoughtSignature").String()
-								if existingSig == "" || len(existingSig) < 50 {
-									rawJSON, _ = sjson.SetBytes(
-										rawJSON, fmt.Sprintf(
-											"request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(),
-											partIdx.Int(),
-										), skipSentinel,
-									)
-								}
-							}
-							return true
-						},
-					)
-
-					// Add skip_thought_signature_validator sentinel to thinking blocks in reverse order to preserve indices
-					for i := len(thinkingIndicesToSkipSignature) - 1; i >= 0; i-- {
-						idx := thinkingIndicesToSkipSignature[i]
-						rawJSON, _ = sjson.SetBytes(
-							rawJSON,
-							fmt.Sprintf("request.contents.%d.parts.%d.thoughtSignature", contentIdx.Int(), idx),
-							skipSentinel,
-						)
-					}
-				}
-				return true
-			},
-		)
-	}
+	rawJSON = sanitizeAntigravityGeminiSignaturesForModel(rawJSON, modelName)
 
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
+}
+
+func sanitizeAntigravityGeminiSignaturesForModel(rawJSON []byte, modelName string) []byte {
+	switch signature.ProviderFromModelName(modelName) {
+	case signature.ProviderClaude:
+		return sanitizeAntigravityGeminiSignaturesForClaude(rawJSON)
+	default:
+		return signature.SanitizeGeminiRequestThoughtSignatures(rawJSON, "request.contents")
+	}
+}
+
+func sanitizeAntigravityGeminiSignaturesForClaude(rawJSON []byte) []byte {
+	contents := gjson.GetBytes(rawJSON, "request.contents")
+	if !contents.IsArray() {
+		return rawJSON
+	}
+	contents.ForEach(
+		func(contentIdx, content gjson.Result) bool {
+			parts := content.Get("parts")
+			if !parts.IsArray() {
+				return true
+			}
+			isModelTurn := content.Get("role").String() == "model"
+			changed := false
+			nextParts := []byte(`[]`)
+			parts.ForEach(
+				func(_, part gjson.Result) bool {
+					updatedPart := []byte(part.Raw)
+					if part.Get("functionResponse").Exists() {
+						updatedPart = deleteAntigravityGeminiSignatureFields(updatedPart)
+						changed = true
+					}
+					if isModelTurn {
+						if part.Get("thought").Bool() {
+							changed = true
+							return true
+						}
+						if part.Get("functionCall").Exists() || hasAntigravityGeminiSignatureField(part) {
+							updatedPart = deleteAntigravityGeminiSignatureFields(updatedPart)
+							changed = true
+						}
+					}
+					if !hasAntigravityGeminiContentPart(gjson.ParseBytes(updatedPart)) {
+						changed = true
+						return true
+					}
+					nextParts, _ = sjson.SetRawBytes(nextParts, "-1", updatedPart)
+					return true
+				},
+			)
+			if changed {
+				rawJSON, _ = sjson.SetRawBytes(
+					rawJSON, fmt.Sprintf("request.contents.%d.parts", contentIdx.Int()), nextParts,
+				)
+			}
+			return true
+		},
+	)
+	return rawJSON
+}
+
+func hasAntigravityGeminiSignatureField(part gjson.Result) bool {
+	for _, path := range []string{
+		"thoughtSignature", "thought_signature", "functionCall.thoughtSignature", "functionCall.thought_signature",
+		"functionResponse.thoughtSignature", "functionResponse.thought_signature",
+		"extra_content.google.thought_signature",
+	} {
+		if part.Get(path).Exists() {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAntigravityGeminiContentPart(part gjson.Result) bool {
+	for _, path := range []string{
+		"text", "inlineData", "inline_data", "fileData", "file_data", "functionCall", "function_call",
+		"functionResponse", "function_response", "executableCode", "executable_code", "codeExecutionResult",
+		"code_execution_result",
+	} {
+		if part.Get(path).Exists() {
+			return true
+		}
+	}
+	return false
+}
+
+func deleteAntigravityGeminiSignatureFields(part []byte) []byte {
+	for _, path := range []string{
+		"thoughtSignature", "thought_signature", "functionCall.thoughtSignature", "functionCall.thought_signature",
+		"functionResponse.thoughtSignature", "functionResponse.thought_signature",
+		"extra_content.google.thought_signature",
+	} {
+		part, _ = sjson.DeleteBytes(part, path)
+	}
+	return part
 }
 
 // FunctionCallGroup represents a group of function calls and their responses

@@ -8,10 +8,12 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
 )
@@ -176,6 +178,61 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	}
 }
 
+func TestFilterModelsForCurrentAPIKeyUsesCatalogNameForAlias(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-filter-api-key-catalog-alias"
+	modelRegistry.RegisterClient(
+		clientID, "openai", []*registry.ModelInfo{
+			{ID: "py-gpt", CatalogName: "gpt-5.2", OwnedBy: "openai", Type: "openai"},
+		},
+	)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	handler := NewBaseAPIHandlers(
+		&sdkconfig.SDKConfig{
+			APIKeyRules: map[string]internalconfig.APIKeyRule{
+				"sk-test": {BlockedModels: []string{"gpt-5.2"}},
+			},
+		},
+		nil,
+	)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "sk-test")
+
+	models := handler.FilterModelsForCurrentAPIKey(ginCtx, []map[string]any{{"id": "py-gpt"}})
+	if len(models) != 0 {
+		t.Fatalf("expected canonical API key block to hide alias model, got %+v", models)
+	}
+}
+
+func TestFilterModelsForCurrentAPIKeyUsesCatalogNameForDisabledAlias(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-filter-disabled-catalog-alias"
+	modelRegistry.RegisterClient(
+		clientID, "openai", []*registry.ModelInfo{
+			{ID: "py-gpt-disabled", CatalogName: "gpt-5.3", OwnedBy: "openai", Type: "openai"},
+		},
+	)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+	disabled := false
+	handler := NewBaseAPIHandlers(
+		&sdkconfig.SDKConfig{
+			ModelCatalog: sdkconfig.ModelCatalogConfig{
+				Models: []sdkconfig.ModelCatalogModel{
+					{Name: "gpt-5.3", Enabled: &disabled},
+				},
+			},
+		},
+		nil,
+	)
+
+	models := handler.FilterModelsForCurrentAPIKey(nil, []map[string]any{{"id": "py-gpt-disabled"}})
+	if len(models) != 0 {
+		t.Fatalf("expected disabled canonical model to hide alias model, got %+v", models)
+	}
+}
+
 func TestSetReasoningEffortMetadataUsesSuffixOverBody(t *testing.T) {
 	meta := make(map[string]any)
 
@@ -193,5 +250,25 @@ func TestSetReasoningEffortMetadataSupportsOpenAIResponses(t *testing.T) {
 
 	if got := meta[coreexecutor.ReasoningEffortMetadataKey]; got != "medium" {
 		t.Fatalf("ReasoningEffortMetadataKey = %v, want %q", got, "medium")
+	}
+}
+
+func TestSetServiceTierMetadataUsesBodyValue(t *testing.T) {
+	meta := make(map[string]any)
+
+	setServiceTierMetadata(meta, []byte(`{"service_tier":"flex"}`))
+
+	if got := meta[coreexecutor.ServiceTierMetadataKey]; got != "flex" {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", got, "flex")
+	}
+}
+
+func TestSetServiceTierMetadataDefaultsWhenMissing(t *testing.T) {
+	meta := make(map[string]any)
+
+	setServiceTierMetadata(meta, []byte(`{"model":"gpt-5.4"}`))
+
+	if got := meta[coreexecutor.ServiceTierMetadataKey]; got != coreusage.DefaultServiceTier {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", got, coreusage.DefaultServiceTier)
 	}
 }

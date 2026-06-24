@@ -37,6 +37,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -66,6 +67,7 @@ var (
 		models []*registry.ModelInfo
 	}
 	antigravityCreditsHintRefreshByID sync.Map
+	antigravityRefreshGroup           singleflight.Group
 )
 
 type antigravityCreditsHintRefreshState struct {
@@ -219,11 +221,7 @@ func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []b
 		return rawJSON, nil
 	}
 
-	rawJSON = antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON)
-	if err := antigravityclaude.ValidateClaudeBypassSignatures(rawJSON); err != nil {
-		return rawJSON, statusErr{code: http.StatusBadRequest, msg: err.Error()}
-	}
-	return rawJSON, nil
+	return antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON), nil
 }
 
 // Identifier returns the executor identifier.
@@ -584,7 +582,7 @@ func (e *AntigravityExecutor) Execute(
 		auth = updatedAuth
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -612,6 +610,7 @@ func (e *AntigravityExecutor) Execute(
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel,
 	)
+	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -670,7 +669,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 		auth = updatedAuth
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -698,6 +697,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel,
 	)
+	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -719,7 +719,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 		return resp, err
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 1)
 	go func(resp *http.Response) {
 		defer close(out)
 		defer func() {
@@ -753,7 +753,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
-			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		} else {
 			reporter.ensurePublished(ctx)
 		}
@@ -980,7 +980,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 
 	ctx = util.WithAlt(ctx, "")
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	from := opts.SourceFormat
@@ -1016,6 +1016,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel,
 	)
+	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -1037,7 +1038,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 		return nil, err
 	}
 
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 1)
 	go func(resp *http.Response) {
 		defer close(out)
 		defer func() {
@@ -1074,6 +1075,12 @@ func (e *AntigravityExecutor) ExecuteStream(
 				}
 			}
 		}
+		if errScan := scanner.Err(); errScan != nil {
+			recordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.publishFailure(ctx)
+			out <- cliproxyexecutor.StreamChunk{Err: errScan}
+			return
+		}
 		tail := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param,
 		)
@@ -1082,13 +1089,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 				return
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
-			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
-		} else {
-			reporter.ensurePublished(ctx)
-		}
+		reporter.ensurePublished(ctx)
 	}(httpResp)
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -1529,6 +1530,13 @@ func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *clipr
 	return metaStringValue(updated.Metadata, "access_token"), updated, nil
 }
 
+type antigravityTokenRefreshData struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int64  `json:"expires_in"`
+	TokenType    string `json:"token_type"`
+}
+
 func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if auth == nil {
 		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing auth"}
@@ -1537,58 +1545,21 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	if refreshToken == "" {
 		return auth, statusErr{code: http.StatusUnauthorized, msg: "missing refresh token"}
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	form := url.Values{}
-	form.Set("client_id", antigravity.ClientID)
-	form.Set("client_secret", antigravity.ClientSecret)
-	form.Set("grant_type", "refresh_token")
-	form.Set("refresh_token", refreshToken)
-
-	httpReq, errReq := http.NewRequestWithContext(
-		ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()),
+	result, errRefresh, _ := antigravityRefreshGroup.Do(
+		refreshToken, func() (interface{}, error) {
+			return e.refreshTokenSingleFlight(context.WithoutCancel(ctx), auth, refreshToken)
+		},
 	)
-	if errReq != nil {
-		return auth, errReq
+	if errRefresh != nil {
+		return auth, errRefresh
 	}
-	httpReq.Header.Set("Host", "oauth2.googleapis.com")
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
-	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
-
-	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-	httpResp, errDo := httpClient.Do(httpReq)
-	if errDo != nil {
-		return auth, errDo
-	}
-	defer func() {
-		if errClose := httpResp.Body.Close(); errClose != nil {
-			log.Errorf("antigravity executor: close response body error: %v", errClose)
-		}
-	}()
-
-	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
-	if errRead != nil {
-		return auth, errRead
-	}
-
-	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
-		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
-			}
-		}
-		return auth, sErr
-	}
-
-	var tokenResp struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-		TokenType    string `json:"token_type"`
-	}
-	if errUnmarshal := json.Unmarshal(bodyBytes, &tokenResp); errUnmarshal != nil {
-		return auth, errUnmarshal
+	tokenResp, ok := result.(*antigravityTokenRefreshData)
+	if !ok || tokenResp == nil {
+		return auth, fmt.Errorf("antigravity token refresh failed: invalid single-flight result")
 	}
 
 	if auth.Metadata == nil {
@@ -1608,6 +1579,61 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 	e.updateAntigravityCreditsBalance(ctx, auth, tokenResp.AccessToken)
 	return auth, nil
+}
+
+func (e *AntigravityExecutor) refreshTokenSingleFlight(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	refreshToken string,
+) (*antigravityTokenRefreshData, error) {
+	form := url.Values{}
+	form.Set("client_id", antigravity.ClientID)
+	form.Set("client_secret", antigravity.ClientSecret)
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+
+	httpReq, errReq := http.NewRequestWithContext(
+		ctx, http.MethodPost, "https://oauth2.googleapis.com/token", strings.NewReader(form.Encode()),
+	)
+	if errReq != nil {
+		return nil, errReq
+	}
+	httpReq.Header.Set("Host", "oauth2.googleapis.com")
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Real Antigravity uses Go's default User-Agent for OAuth token refresh
+	httpReq.Header.Set("User-Agent", "Go-http-client/2.0")
+
+	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
+	httpResp, errDo := httpClient.Do(httpReq)
+	if errDo != nil {
+		return nil, errDo
+	}
+	defer func() {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("antigravity executor: close response body error: %v", errClose)
+		}
+	}()
+
+	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
+	if errRead != nil {
+		return nil, errRead
+	}
+
+	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
+		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
+		if httpResp.StatusCode == http.StatusTooManyRequests {
+			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
+				sErr.retryAfter = retryAfter
+			}
+		}
+		return nil, sErr
+	}
+
+	var tokenResp antigravityTokenRefreshData
+	if errUnmarshal := json.Unmarshal(bodyBytes, &tokenResp); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	return &tokenResp, nil
 }
 
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(
@@ -1950,7 +1976,7 @@ func (e *AntigravityExecutor) buildRequest(
 	}
 
 	var payloadLog []byte
-	if e.cfg != nil && e.cfg.RequestLog {
+	if requestLogCaptureEnabled(e.cfg) {
 		payloadLog = []byte(payloadStr)
 	}
 	recordUpstreamRequest(ctx, e.cfg, requestURL.String(), httpReq.Header.Clone(), payloadLog, e.Identifier(), auth)

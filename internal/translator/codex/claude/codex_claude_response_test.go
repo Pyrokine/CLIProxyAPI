@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -11,7 +12,9 @@ func collectCodexClaudeEvents(chunks ...string) string {
 	var param any
 	var builder strings.Builder
 	for _, chunk := range chunks {
-		for _, out := range ConvertCodexResponseToClaude(nil, "gpt-5.5", nil, nil, []byte("data: "+chunk), &param) {
+		for _, out := range ConvertCodexResponseToClaude(
+			context.TODO(), "gpt-5.5", nil, nil, []byte("data: "+chunk), &param,
+		) {
 			builder.Write(out)
 		}
 	}
@@ -77,7 +80,7 @@ func TestConvertCodexResponseToClaude_EmitsReasoningWhenSignatureArrivesAfterSum
 
 func TestConvertCodexResponseToClaudeNonStream_DropsUnsignedReasoning(t *testing.T) {
 	out := ConvertCodexResponseToClaudeNonStream(
-		nil, "gpt-5.5", nil, nil, []byte(`{
+		context.TODO(), "gpt-5.5", nil, nil, []byte(`{
 		"type":"response.completed",
 		"response":{
 			"id":"resp_1",
@@ -111,7 +114,7 @@ func TestConvertCodexResponseToClaude_EmitsDoneOnlyMessageText(t *testing.T) {
 func TestConvertCodexResponseToClaudeNonStream_IncludesReasoningSignature(t *testing.T) {
 	const signature = "gAAAAAAAAAAAERERERERERERERERERERESIiIiIiIiIiIiIiIiIiIiIzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMw"
 	out := ConvertCodexResponseToClaudeNonStream(
-		nil, "gpt-5.5", nil, nil, []byte(`{
+		context.TODO(), "gpt-5.5", nil, nil, []byte(`{
 		"type":"response.completed",
 		"response":{
 			"id":"resp_1",
@@ -128,5 +131,34 @@ func TestConvertCodexResponseToClaudeNonStream_IncludesReasoningSignature(t *tes
 	}
 	if content.Get("signature").String() != signature {
 		t.Fatalf("signature = %q, want %q; output: %s", content.Get("signature").String(), signature, out)
+	}
+}
+
+func TestConvertCodexResponseToClaude_TranslatesCyberPolicyStreamError(t *testing.T) {
+	out := collectCodexClaudeEvents(
+		`{"type":"response.error","error":{"type":"invalid_request","code":"cyber_policy","message":"blocked by policy"}}`,
+	)
+
+	if !strings.Contains(out, "event: error") {
+		t.Fatalf("error event missing: %s", out)
+	}
+	if !strings.Contains(out, `"type":"invalid_request_error"`) {
+		t.Fatalf("Claude error type missing: %s", out)
+	}
+	if !strings.Contains(out, `"code":"cyber_policy"`) || !strings.Contains(out, "blocked by policy") {
+		t.Fatalf("Claude error payload incomplete: %s", out)
+	}
+}
+
+func TestConvertCodexResponseToClaude_TranslatesStreamErrorWithoutMessage(t *testing.T) {
+	out := collectCodexClaudeEvents(
+		`{"type":"error","error_type":"rate_limit_error"}`,
+	)
+
+	if !strings.Contains(out, "event: error") {
+		t.Fatalf("error event missing: %s", out)
+	}
+	if !strings.Contains(out, `"type":"rate_limit_error"`) || !strings.Contains(out, `"message":"rate_limit_error"`) {
+		t.Fatalf("fallback error payload missing: %s", out)
 	}
 }

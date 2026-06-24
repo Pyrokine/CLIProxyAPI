@@ -16,6 +16,7 @@ import (
 
 	vertexauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/vertex"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -229,6 +230,7 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body = stripVertexOpenAIResponsesToolCallIDs(body, from.String())
+	body = signature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
 
 	return &vertexGeminiBody{from: from, to: to, body: body}, nil
 }
@@ -375,7 +377,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 ) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	var body []byte
@@ -417,6 +419,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
@@ -486,7 +489,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 ) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	prepared, errPrep := e.prepareVertexGeminiBody(req, opts, baseModel, false)
@@ -513,6 +516,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
@@ -572,7 +576,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(
 ) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	prepared, errPrep := e.prepareVertexGeminiBody(req, opts, baseModel, true)
@@ -598,6 +602,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(
 		}
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
@@ -627,7 +632,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 ) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	prepared, errPrep := e.prepareVertexGeminiBody(req, opts, baseModel, true)
@@ -653,6 +658,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 		}
 	}
 	body, _ = sjson.DeleteBytes(body, "session_id")
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if errNewReq != nil {
@@ -768,6 +774,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
 	translatedReq = stripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
+	translatedReq = signature.SanitizeGeminiRequestThoughtSignatures(translatedReq, "contents")
 	respCtx := util.WithAlt(ctx, opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
@@ -849,6 +856,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
 	translatedReq, _ = sjson.SetBytes(translatedReq, "model", baseModel)
 	translatedReq = stripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
+	translatedReq = signature.SanitizeGeminiRequestThoughtSignatures(translatedReq, "contents")
 	respCtx := util.WithAlt(ctx, opts.Alt)
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")

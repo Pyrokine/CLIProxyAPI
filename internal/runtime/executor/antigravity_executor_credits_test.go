@@ -1,7 +1,9 @@
 package executor
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
@@ -18,6 +21,33 @@ import (
 
 func resetAntigravityCreditsRetryState() {
 	antigravityCreditsHintRefreshByID = sync.Map{}
+}
+
+type cancelAfterFirstLineBody struct {
+	reader *bytes.Reader
+	err    error
+}
+
+func (b *cancelAfterFirstLineBody) Read(p []byte) (int, error) {
+	if b.reader.Len() > 0 {
+		return b.reader.Read(p)
+	}
+	return 0, b.err
+}
+
+func (b *cancelAfterFirstLineBody) Close() error { return nil }
+
+type antigravityStreamRoundTripper struct {
+	body io.ReadCloser
+}
+
+func (rt antigravityStreamRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       rt.body,
+		Request:    req,
+	}, nil
 }
 
 func TestInjectEnabledCreditTypes(t *testing.T) {
@@ -142,6 +172,64 @@ func TestAntigravityExecute_CreditsNotInjectedWithoutConductorFlag(t *testing.T)
 	}
 	if strings.Contains(requestBodies[0], `"enabledCreditTypes"`) {
 		t.Fatalf("request should not contain enabledCreditTypes without conductor flag: %s", requestBodies[0])
+	}
+}
+
+func TestAntigravityExecuteStreamPreservesContextCancellationError(t *testing.T) {
+	errCanceled := context.Canceled
+	body := &cancelAfterFirstLineBody{
+		reader: bytes.NewReader([]byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]}}]}}` + "\n")),
+		err:    errCanceled,
+	}
+
+	exec := NewAntigravityExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID: "auth-stream-cancel",
+		Attributes: map[string]string{
+			"base_url": "https://antigravity.test",
+		},
+		Metadata: map[string]any{
+			"access_token": "token",
+			"project_id":   "project-1",
+			"expired":      time.Now().Add(time.Hour).Format(time.RFC3339),
+		},
+	}
+	ctx := util.WithRoundTripper(context.Background(), antigravityStreamRoundTripper{body: body})
+	stream, err := exec.ExecuteStream(
+		ctx, auth, cliproxyexecutor.Request{
+			Model:   "claude-sonnet-4-6",
+			Payload: []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}}`),
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatAntigravity},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream error = %v", err)
+	}
+
+	select {
+	case chunk, ok := <-stream.Chunks:
+		if !ok {
+			t.Fatal("stream closed before first payload")
+		}
+		if chunk.Err != nil {
+			t.Fatalf("first chunk error = %v", chunk.Err)
+		}
+		if len(chunk.Payload) == 0 {
+			t.Fatal("first chunk payload is empty")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first payload")
+	}
+
+	select {
+	case chunk, ok := <-stream.Chunks:
+		if !ok {
+			t.Fatal("stream closed without cancellation error")
+		}
+		if !errors.Is(chunk.Err, errCanceled) {
+			t.Fatalf("terminal error = %v, want context canceled", chunk.Err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for cancellation error")
 	}
 }
 

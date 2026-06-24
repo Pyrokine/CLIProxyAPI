@@ -86,6 +86,9 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// System instruction -> as a user message with input_text parts
 	sysParts := root.Get("system_instruction.parts")
+	if !sysParts.IsArray() {
+		sysParts = root.Get("systemInstruction.parts")
+	}
 	if sysParts.IsArray() {
 		msg := []byte(`{"type":"message","role":"developer","content":[]}`)
 		arr := sysParts.Array()
@@ -123,6 +126,9 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				p := parr[j]
 				// text part
 				if t := p.Get("text"); t.Exists() {
+					if p.Get("thought").Bool() || p.Get("thoughtSignature").Exists() {
+						continue
+					}
 					msg := []byte(`{"type":"message","role":"","content":[]}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
 					partType := "input_text"
@@ -284,7 +290,11 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	util.Walk(toolsResult, "", "type", &pathsToLower)
 	for _, p := range pathsToLower {
 		fullPath := fmt.Sprintf("tools.%s", p)
-		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(gjson.GetBytes(out, fullPath).String()))
+		typeValue := gjson.GetBytes(out, fullPath)
+		if typeValue.Type != gjson.String {
+			continue
+		}
+		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(typeValue.String()))
 	}
 
 	return out

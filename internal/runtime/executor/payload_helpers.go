@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
@@ -929,27 +930,37 @@ func matchModelPattern(pattern, model string) bool {
 	return pi == len(pattern)
 }
 
-// maxTokensByModel returns the output token cap for a given model name.
-// Falls back to 128000 (Anthropic's general maximum as of 2025) for unknown models.
+const defaultClaudeMaxTokens = 1024
+
 func maxTokensByModel(model string) int64 {
-	lower := strings.ToLower(model)
-	switch {
-	case strings.Contains(lower, "haiku"):
-		return 64000
-	default:
-		return 128000
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return defaultClaudeMaxTokens
 	}
+	if info := registry.LookupModelInfo(model, "claude"); info != nil && info.MaxCompletionTokens > 0 {
+		return int64(info.MaxCompletionTokens)
+	}
+	return defaultClaudeMaxTokens
 }
 
-// capMaxTokens clamps max_tokens in the request body to the model's documented limit.
-// This works around Claude Code SDK sending max_tokens=128001 (off-by-one above the API cap).
 func capMaxTokens(body []byte, model string) []byte {
-	mt := gjson.GetBytes(body, "max_tokens")
-	if !mt.Exists() {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	providers := registry.GetGlobalRegistry().GetModelProviders(strings.TrimSpace(model))
+	isRegisteredClaude := false
+	for _, provider := range providers {
+		if strings.EqualFold(provider, "claude") {
+			isRegisteredClaude = true
+			break
+		}
+	}
+	if !isRegisteredClaude {
 		return body
 	}
 	limit := maxTokensByModel(model)
-	if mt.Int() <= limit {
+	mt := gjson.GetBytes(body, "max_tokens")
+	if mt.Exists() && mt.Int() <= limit {
 		return body
 	}
 	out, err := sjson.SetBytes(body, "max_tokens", limit)

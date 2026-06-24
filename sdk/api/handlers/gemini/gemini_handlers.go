@@ -49,7 +49,7 @@ func (h *APIHandler) Models() []map[string]any {
 // GeminiModels handles the constant.Gemini models listing endpoint.
 // It returns a JSON response containing available constant.Gemini models and their specifications.
 func (h *APIHandler) GeminiModels(c *gin.Context) {
-	rawModels := h.Models()
+	rawModels := h.FilterModelsForCurrentAPIKey(c, h.Models())
 	normalizedModels := make([]map[string]any, 0, len(rawModels))
 	defaultMethods := []string{"generateContent"}
 	for _, model := range rawModels {
@@ -98,7 +98,7 @@ func (h *APIHandler) GeminiGetHandler(c *gin.Context) {
 	action := strings.TrimPrefix(request.Action, "/")
 
 	// Get dynamic models from the global registry and find the matching one
-	availableModels := h.Models()
+	availableModels := h.FilterModelsForCurrentAPIKey(c, h.Models())
 	var targetModel map[string]any
 
 	for _, model := range availableModels {

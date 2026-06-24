@@ -19,6 +19,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // OAuth configuration constants for OpenAI Codex
@@ -28,6 +29,8 @@ const (
 	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
 	redirectURI = "http://localhost:1455/auth/callback"
 )
+
+var codexRefreshGroup singleflight.Group
 
 // Auth handles the OpenAI OAuth2 authentication flow.
 // It manages the HTTP client and provides methods for generating authorization URLs,
@@ -181,7 +184,26 @@ func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
+	result, err, _ := codexRefreshGroup.Do(
+		refreshToken, func() (interface{}, error) {
+			return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	tokenData, ok := result.(*TokenData)
+	if !ok || tokenData == nil {
+		return nil, fmt.Errorf("token refresh failed: invalid single-flight result")
+	}
+	return tokenData, nil
+}
+
+func (o *Auth) refreshTokensSingleFlight(ctx context.Context, refreshToken string) (*TokenData, error) {
 	data := url.Values{
 		"client_id":     {ClientID},
 		"grant_type":    {"refresh_token"},

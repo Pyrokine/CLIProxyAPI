@@ -117,6 +117,36 @@ func TestSchedulerPick_RoundRobinHighestPriority(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_PreservesCursorAcrossIndexRebuild(t *testing.T) {
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "a", Provider: "gemini", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{"priority": "10"}},
+	)
+
+	first, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("first pickSingle() error = %v", errPick)
+	}
+	if first == nil || first.ID != "a" {
+		t.Fatalf("first auth = %#v, want a", first)
+	}
+
+	scheduler.upsertAuth(
+		&Auth{
+			ID: "b", Provider: "gemini", Attributes: map[string]string{"priority": "10", "note": "updated"},
+		},
+	)
+
+	second, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
+	if errPick != nil {
+		t.Fatalf("second pickSingle() error = %v", errPick)
+	}
+	if second == nil || second.ID != "b" {
+		t.Fatalf("second auth = %#v, want b", second)
+	}
+}
+
 func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	t.Parallel()
 
@@ -246,6 +276,56 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 		if got.ID != wantID {
 			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
 		}
+	}
+}
+
+func TestSchedulerPick_CodexWebsocketPrefersWebsocketAcrossPriorityTiers(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-ws", Provider: "codex", Attributes: map[string]string{"priority": "1", "websockets": "true"}},
+	)
+
+	got, errPick := scheduler.pickSingle(
+		cliproxyexecutor.WithDownstreamWebsocket(context.Background()), "codex", "", cliproxyexecutor.Options{}, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickSingle() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickSingle() auth = nil")
+	}
+	if got.ID != "codex-ws" {
+		t.Fatalf("pickSingle() auth.ID = %q, want codex-ws", got.ID)
+	}
+}
+
+func TestSchedulerPick_MixedCodexWebsocketPrefersWebsocketAcrossPriorityTiers(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "codex-http", Provider: "codex", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "codex-ws", Provider: "codex", Attributes: map[string]string{"priority": "1", "websockets": "true"}},
+	)
+
+	got, provider, errPick := scheduler.pickMixed(
+		cliproxyexecutor.WithDownstreamWebsocket(context.Background()), []string{"codex"}, "",
+		cliproxyexecutor.Options{}, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickMixed() auth = nil")
+	}
+	if provider != "codex" {
+		t.Fatalf("pickMixed() provider = %q, want codex", provider)
+	}
+	if got.ID != "codex-ws" {
+		t.Fatalf("pickMixed() auth.ID = %q, want codex-ws", got.ID)
 	}
 }
 

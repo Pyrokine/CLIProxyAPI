@@ -254,3 +254,55 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 		t.Error("Second thinking block signature should be cached")
 	}
 }
+
+func TestConvertAntigravityResponseToClaude_EmitsSignatureOnlyChunk(t *testing.T) {
+	cache.ClearSignatureCache("")
+	requestJSON := []byte(`{"model":"claude-sonnet-4-5-thinking"}`)
+	thinkingChunk := []byte(`{
+		"response":{"candidates":[{"content":{"parts":[{"text":"private reasoning","thought":true}]}}]}
+	}`)
+	signatureChunk := []byte(`{
+		"response":{"candidates":[{"content":{"parts":[{"thoughtSignature":"sig-only"}]}}]}
+	}`)
+
+	var param any
+	ctx := context.Background()
+	ConvertAntigravityResponseToClaude(
+		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, thinkingChunk, &param,
+	)
+	out := string(
+		ConvertAntigravityResponseToClaude(
+			ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, signatureChunk, &param,
+		)[0],
+	)
+
+	if !strings.Contains(out, `"type":"signature_delta"`) || !strings.Contains(out, "sig-only") {
+		t.Fatalf("signature_delta missing: %s", out)
+	}
+	if strings.Contains(out, "text_delta") {
+		t.Fatalf("signature-only chunk emitted text_delta: %s", out)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStream_TreatsSignatureAsThinking(t *testing.T) {
+	requestJSON := []byte(`{"model":"claude-sonnet-4-5-thinking"}`)
+	responseJSON := []byte(`{
+		"response":{
+			"responseId":"r1",
+			"modelVersion":"claude-sonnet-4-5-thinking",
+			"candidates":[{"content":{"parts":[{"text":"signed thought","thoughtSignature":"sig-nonstream"}]}}],
+			"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}
+		}
+	}`)
+
+	out := ConvertAntigravityResponseToClaudeNonStream(
+		context.Background(), "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, nil,
+	)
+	body := string(out)
+	if !strings.Contains(body, `"type":"thinking"`) || !strings.Contains(body, "signed thought") {
+		t.Fatalf("thinking block missing: %s", body)
+	}
+	if !strings.Contains(body, "sig-nonstream") {
+		t.Fatalf("thinking signature missing: %s", body)
+	}
+}

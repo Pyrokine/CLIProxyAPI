@@ -1,6 +1,7 @@
 package amp
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -105,6 +106,86 @@ func TestRewriteStreamChunk_MessageModel(t *testing.T) {
 	expected := "data: {\"message\":{\"model\":\"claude-opus-4.5\",\"role\":\"assistant\"}}\n\n"
 	if string(result) != expected {
 		t.Errorf("expected %s, got %s", expected, string(result))
+	}
+}
+
+func TestRewriteStreamChunkPreservesThinkingWithSignatureInjection(t *testing.T) {
+	rw := &responseRewriter{}
+	chunk := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"abc\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"name\":\"bash\",\"input\":{}}}\n\n")
+	result := rw.rewriteStreamChunk(chunk)
+
+	if !contains(result, []byte(`"content_block":{"type":"thinking"`)) {
+		t.Fatalf("expected thinking content_block_start to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"delta":{"type":"thinking_delta"`)) {
+		t.Fatalf("expected thinking_delta to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"type":"content_block_stop","index":0`)) {
+		t.Fatalf("expected content_block_stop for thinking block to be preserved, got %s", string(result))
+	}
+	if !contains(result, []byte(`"content_block":{"type":"tool_use"`)) {
+		t.Fatalf("expected tool_use content_block frame to remain, got %s", string(result))
+	}
+	if count := strings.Count(string(result), `"signature":""`); count != 2 {
+		t.Fatalf("expected 2 signature injections, got %d in %s", count, string(result))
+	}
+}
+
+func TestRewriteModelInResponseInjectsSignatureAndSuppressesThinking(t *testing.T) {
+	rw := &responseRewriter{}
+	input := []byte(`{"content":[{"type":"thinking","thinking":"hide"},{"type":"tool_use","name":"bash","input":{}}]}`)
+	result := rw.rewriteModelInResponse(input)
+
+	if contains(result, []byte(`"thinking":"hide"`)) {
+		t.Fatalf("expected non-streaming thinking block to be suppressed, got %s", string(result))
+	}
+	if !contains(result, []byte(`"type":"tool_use"`)) {
+		t.Fatalf("expected tool_use block to remain, got %s", string(result))
+	}
+	if !contains(result, []byte(`"signature":""`)) {
+		t.Fatalf("expected tool_use signature injection, got %s", string(result))
+	}
+}
+
+func TestRewriteModelInResponseRestoresRequestToolCasing(t *testing.T) {
+	rw := newResponseRewriterForRequest(nil, "", []byte(`{"tools":[{"name":"CustomTool"},{"name":"Bash"}]}`))
+	input := []byte(`{"content":[{"type":"tool_use","name":"customtool"},{"type":"tool_use","name":"bash"}]}`)
+	result := rw.rewriteModelInResponse(input)
+
+	if !contains(result, []byte(`"name":"CustomTool"`)) {
+		t.Fatalf("expected CustomTool casing restored, got %s", result)
+	}
+	if !contains(result, []byte(`"name":"Bash"`)) {
+		t.Fatalf("expected Bash casing restored, got %s", result)
+	}
+}
+
+func TestRewriteStreamChunkRestoresRequestToolCasing(t *testing.T) {
+	rw := newResponseRewriterForRequest(nil, "", []byte(`{"tools":[{"name":"CustomTool"}]}`))
+	chunk := []byte("data: {\"content_block\":{\"type\":\"tool_use\",\"name\":\"customtool\"}}\n\n")
+	result := rw.rewriteStreamChunk(chunk)
+
+	if !contains(result, []byte(`"name":"CustomTool"`)) {
+		t.Fatalf("expected CustomTool casing restored, got %s", result)
+	}
+	if !contains(result, []byte(`"signature":""`)) {
+		t.Fatalf("expected signature injection, got %s", result)
+	}
+}
+
+func TestRewriteModelInResponseKeepsConflictingRequestToolCasing(t *testing.T) {
+	rw := newResponseRewriterForRequest(nil, "", []byte(`{"tools":[{"name":"CustomTool"},{"name":"customtool"}]}`))
+	input := []byte(`{"content":[{"type":"tool_use","name":"customtool"}]}`)
+	result := rw.rewriteModelInResponse(input)
+
+	if !contains(result, []byte(`"name":"customtool"`)) {
+		t.Fatalf("expected conflicting tool casing to stay unchanged, got %s", result)
+	}
+	if contains(result, []byte(`"name":"CustomTool"`)) {
+		t.Fatalf("expected conflicting tool casing not to be rewritten, got %s", result)
+	}
+	if !contains(result, []byte(`"signature":""`)) {
+		t.Fatalf("expected signature injection, got %s", result)
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
@@ -47,6 +49,74 @@ func TestNewClaudeUtlsHTTPClientUsesFallbackRoundTripper(t *testing.T) {
 	}
 }
 
+type protectedUtlsRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f protectedUtlsRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestNewProtectedUtlsHTTPClientUsesContextRoundTripperForProtectedHost(t *testing.T) {
+	called := false
+	roundTripper := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			called = true
+			if req.URL.Hostname() != "chatgpt.com" {
+				t.Fatalf("hostname = %q, want chatgpt.com", req.URL.Hostname())
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("{}")),
+				Request:    req,
+			}, nil
+		},
+	)
+	ctx := util.WithRoundTripper(context.Background(), roundTripper)
+	client := newProtectedUtlsHTTPClient(ctx, nil, nil, 0)
+
+	resp, err := client.Get("https://chatgpt.com/backend-api/codex/responses")
+	if err != nil {
+		t.Fatalf("client.Get returned error: %v", err)
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatalf("response body close returned error: %v", errClose)
+	}
+	if !called {
+		t.Fatal("expected context RoundTripper to handle protected host request")
+	}
+}
+
+func TestNewProtectedUtlsHTTPClientUsesContextRoundTripperForNonProtectedHost(t *testing.T) {
+	called := false
+	roundTripper := protectedUtlsRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			called = true
+			if req.URL.Hostname() != "example.com" {
+				t.Fatalf("hostname = %q, want example.com", req.URL.Hostname())
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("{}")),
+				Request:    req,
+			}, nil
+		},
+	)
+	ctx := util.WithRoundTripper(context.Background(), roundTripper)
+	client := newProtectedUtlsHTTPClient(ctx, nil, nil, 0)
+
+	resp, err := client.Get("https://example.com/test")
+	if err != nil {
+		t.Fatalf("client.Get returned error: %v", err)
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatalf("response body close returned error: %v", errClose)
+	}
+	if !called {
+		t.Fatal("expected context RoundTripper to handle fallback request")
+	}
+}
+
 func TestCheckSystemInstructionsInjectsClaudeCodePromptAndMovesUserSystem(t *testing.T) {
 	payload := []byte(`{"system":[{"type":"text","text":"custom system"}],"messages":[{"role":"user","content":"hello"}]}`)
 
@@ -81,6 +151,50 @@ func TestCheckSystemInstructionsSanitizesForwardedOAuthSystemPrompt(t *testing.T
 	}
 	if !strings.Contains(userContent, "Use the available tools when needed") {
 		t.Fatalf("expected sanitized tool reminder, got %q", userContent)
+	}
+}
+
+func TestCheckSystemInstructionsUsesCCHPlaceholderForOAuth(t *testing.T) {
+	payload := []byte(`{"system":"custom system","messages":[{"role":"user","content":"hello"}]}`)
+
+	out := checkSystemInstructionsWithSigningMode(payload, false, true, true)
+
+	if got := gjson.GetBytes(out, "system.0.text").String(); !strings.Contains(got, "cch=00000;") {
+		t.Fatalf("system.0.text = %q, want unsigned cch placeholder", got)
+	}
+}
+
+func TestPrepareClaudeRequestSignsOAuthCCHByDefault(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	payload := []byte(`{"model":"claude-opus-4-7","system":"custom system","messages":[{"role":"user","content":"hello"}],"max_tokens":16}`)
+	auth := &cliproxyauth.Auth{
+		Provider: "claude",
+		Metadata: map[string]any{"access_token": "sk-ant-oat-test"},
+		Attributes: map[string]string{
+			"base_url":                 "https://example.com",
+			"disable_tool_name_prefix": "true",
+		},
+	}
+
+	cr, err := executor.prepareClaudeRequest(
+		context.Background(), auth,
+		cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: payload},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")}, false,
+	)
+	if err != nil {
+		t.Fatalf("prepareClaudeRequest error: %v", err)
+	}
+	body, err := io.ReadAll(cr.httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+
+	billing := gjson.GetBytes(body, "system.0.text").String()
+	if !strings.Contains(billing, "cch=") {
+		t.Fatalf("billing header = %q, want cch", billing)
+	}
+	if strings.Contains(billing, "cch=00000;") {
+		t.Fatalf("billing header was not signed: %q", billing)
 	}
 }
 
@@ -292,6 +406,109 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 	}
 }
 
+func TestNormalizeClaudeTemperatureForThinkingAdaptiveCoercesToOne(t *testing.T) {
+	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
+	out := normalizeClaudeTemperatureForThinking(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
+		t.Fatalf("temperature = %v, want 1", got)
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinkingEnabledCoercesToOne(t *testing.T) {
+	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
+	out := normalizeClaudeTemperatureForThinking(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
+		t.Fatalf("temperature = %v, want 1", got)
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinkingNoThinkingLeavesTemperatureAlone(t *testing.T) {
+	payload := []byte(`{"temperature":0,"messages":[{"role":"user","content":"hi"}]}`)
+	out := normalizeClaudeTemperatureForThinking(payload)
+
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 0 {
+		t.Fatalf("temperature = %v, want 0", got)
+	}
+}
+
+func TestNormalizeClaudeTemperatureForThinkingAfterForcedToolChoiceKeepsOriginalTemperature(t *testing.T) {
+	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"any"}}`)
+	out := disableThinkingIfToolChoiceForced(payload)
+	out = normalizeClaudeTemperatureForThinking(out)
+
+	if gjson.GetBytes(out, "thinking").Exists() {
+		t.Fatalf("thinking should be removed when tool_choice forces tool use")
+	}
+	if got := gjson.GetBytes(out, "temperature").Float(); got != 0 {
+		t.Fatalf("temperature = %v, want 0", got)
+	}
+}
+
+func TestCapMaxTokensAddsDefaultForRegisteredClaudeModel(t *testing.T) {
+	clientID := "test-claude-default-max-tokens-client"
+	modelID := "test-claude-default-max-tokens-model"
+	registry.GetGlobalRegistry().RegisterClient(
+		clientID, "claude", []*registry.ModelInfo{{ID: modelID, Type: "claude"}},
+	)
+	defer registry.GetGlobalRegistry().UnregisterClient(clientID)
+
+	out := capMaxTokens([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), modelID)
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != defaultClaudeMaxTokens {
+		t.Fatalf("max_tokens = %d, want %d. Body: %s", got, defaultClaudeMaxTokens, string(out))
+	}
+}
+
+func TestCapMaxTokensUsesRegisteredMaxCompletionTokens(t *testing.T) {
+	clientID := "test-claude-registered-max-tokens-client"
+	modelID := "test-claude-registered-max-tokens-model"
+	registry.GetGlobalRegistry().RegisterClient(
+		clientID, "claude", []*registry.ModelInfo{
+			{
+				ID:                  modelID,
+				Type:                "claude",
+				MaxCompletionTokens: 4096,
+			},
+		},
+	)
+	defer registry.GetGlobalRegistry().UnregisterClient(clientID)
+
+	out := capMaxTokens([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), modelID)
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 4096 {
+		t.Fatalf("max_tokens = %d, want %d. Body: %s", got, 4096, string(out))
+	}
+}
+
+func TestCapMaxTokensPreservesExplicitValue(t *testing.T) {
+	clientID := "test-claude-preserve-max-tokens-client"
+	modelID := "test-claude-preserve-max-tokens-model"
+	registry.GetGlobalRegistry().RegisterClient(
+		clientID, "claude", []*registry.ModelInfo{
+			{
+				ID:                  modelID,
+				Type:                "claude",
+				MaxCompletionTokens: 4096,
+			},
+		},
+	)
+	defer registry.GetGlobalRegistry().UnregisterClient(clientID)
+
+	out := capMaxTokens([]byte(`{"messages":[{"role":"user","content":"hi"}],"max_tokens":2048}`), modelID)
+	if got := gjson.GetBytes(out, "max_tokens").Int(); got != 2048 {
+		t.Fatalf("max_tokens = %d, want %d. Body: %s", got, 2048, string(out))
+	}
+}
+
+func TestCapMaxTokensSkipsUnregisteredModel(t *testing.T) {
+	out := capMaxTokens(
+		[]byte(`{"messages":[{"role":"user","content":"hi"}]}`), "test-claude-unregistered-max-tokens-model",
+	)
+	if gjson.GetBytes(out, "max_tokens").Exists() {
+		t.Fatalf("max_tokens should remain unset. Body: %s", string(out))
+	}
+}
+
 func TestPrepareClaudeRequest_AddsContext1MBetaFromModelTag(t *testing.T) {
 	executor := NewClaudeExecutor(&config.Config{})
 	ctx := context.Background()
@@ -310,6 +527,54 @@ func TestPrepareClaudeRequest_AddsContext1MBetaFromModelTag(t *testing.T) {
 	got := cr.httpReq.Header.Get("Anthropic-Beta")
 	if !strings.Contains(got, "context-1m-2025-08-07") {
 		t.Fatalf("Anthropic-Beta = %q, want context-1m-2025-08-07", got)
+	}
+}
+
+func TestPrepareClaudeRequestSanitizesIncompatibleSignatures(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	payload := []byte(`{
+		"model":"claude-opus-4-7",
+		"messages":[{
+			"role":"assistant",
+			"content":[
+				{"type":"thinking","thinking":"bad","signature":"skip_thought_signature_validator"},
+				{"type":"tool_use","id":"toolu_1","name":"Read","input":{},"signature":"skip_thought_signature_validator","extra_content":{"google":{"thought_signature":"skip_thought_signature_validator"}},"model":"gemini-3-pro"},
+				{"type":"text","text":"visible"}
+			]
+		},{"role":"user","content":"continue"}],
+		"max_tokens":16
+	}`)
+
+	cr, err := executor.prepareClaudeRequest(
+		context.Background(),
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}},
+		cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: payload},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("prepareClaudeRequest error: %v", err)
+	}
+	body, err := io.ReadAll(cr.httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+
+	if got := gjson.GetBytes(body, "messages.0.content.0.type").String(); got != "tool_use" {
+		t.Fatalf("first retained content type = %q, want tool_use. Body: %s", got, string(body))
+	}
+	for _, path := range []string{
+		"messages.0.content.0.signature",
+		"messages.0.content.0.extra_content.google.thought_signature",
+		"messages.0.content.0.extra_content",
+		"messages.0.content.0.model",
+	} {
+		if gjson.GetBytes(body, path).Exists() {
+			t.Fatalf("%s should be removed. Body: %s", path, string(body))
+		}
+	}
+	if got := gjson.GetBytes(body, "messages.0.content.1.text").String(); got != "visible" {
+		t.Fatalf("text content = %q, want visible. Body: %s", got, string(body))
 	}
 }
 
@@ -761,6 +1026,68 @@ func TestClaudeExecutor_CountTokens_InvalidGzipErrorBodyReturnsDecodeMessage(t *
 			return err
 		},
 	)
+}
+
+func TestClaudeStreamingValidator(t *testing.T) {
+	tests := []struct {
+		name    string
+		lines   []string
+		wantErr string
+	}{
+		{
+			name:    "empty stream",
+			wantErr: "empty stream response",
+		},
+		{
+			name:    "error event",
+			lines:   []string{`data: {"type":"error","error":{"message":"rate limited"}}`},
+			wantErr: "upstream returned error event: rate limited",
+		},
+		{
+			name:    "missing message start",
+			lines:   []string{`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`},
+			wantErr: "missing message_start",
+		},
+		{
+			name:    "incomplete stream",
+			lines:   []string{`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`},
+			wantErr: "ended before message completion",
+		},
+		{
+			name: "valid stream",
+			lines: []string{
+				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`,
+				`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				validator := &claudeStreamingValidator{}
+				for _, line := range tt.lines {
+					if err := validator.observe([]byte(line)); err != nil {
+						if tt.wantErr == "" || !strings.Contains(err.Error(), tt.wantErr) {
+							t.Fatalf("observe() error = %v, want substring %q", err, tt.wantErr)
+						}
+						return
+					}
+				}
+				err := validator.finish()
+				if tt.wantErr == "" {
+					if err != nil {
+						t.Fatalf("finish() error = %v", err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("finish() error = %v, want substring %q", err, tt.wantErr)
+				}
+			},
+		)
+	}
 }
 
 func testClaudeExecutorInvalidCompressedErrorBody(

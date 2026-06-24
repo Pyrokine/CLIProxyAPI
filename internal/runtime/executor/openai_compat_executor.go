@@ -97,7 +97,7 @@ func (e *OpenAICompatExecutor) Execute(
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -128,12 +128,14 @@ func (e *OpenAICompatExecutor) Execute(
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
 		}
+		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai-compatible compact", translated)
 	}
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
+	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -199,7 +201,7 @@ func (e *OpenAICompatExecutor) executeImages(
 ) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -218,6 +220,7 @@ func (e *OpenAICompatExecutor) executeImages(
 	if contentType == "" {
 		contentType = "application/json"
 	}
+	reporter.SetTranslatedReasoningEffort(payload, "openai")
 
 	url := strings.TrimSuffix(baseURL, "/") + endpointPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
@@ -284,7 +287,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -315,6 +318,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
+	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -372,18 +376,29 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
 				reporter.publish(ctx, detail)
 			}
-			if len(line) == 0 {
+			trimmedLine := bytes.TrimSpace(line)
+			if len(trimmedLine) == 0 {
 				continue
 			}
 
-			if !bytes.HasPrefix(line, []byte("data:")) {
+			if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
+				if bytes.HasPrefix(trimmedLine, []byte(":")) || bytes.HasPrefix(trimmedLine, []byte("event:")) ||
+					bytes.HasPrefix(trimmedLine, []byte("id:")) || bytes.HasPrefix(trimmedLine, []byte("retry:")) {
+					continue
+				}
+				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
+					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+					recordAPIResponseError(ctx, e.cfg, streamErr)
+					reporter.publishFailure(ctx)
+					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: streamErr})
+					return
+				}
 				continue
 			}
 
-			// OpenAI-compatible streams are SSE: lines typically prefixed with "data: ".
-			// Pass through translator; it yields one or more chunks for the target schema.
+			// OpenAI-compatible streams must use SSE data lines.
 			chunks := sdktranslator.TranslateStream(
-				ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(line), &param,
+				ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param,
 			)
 			for i := range chunks {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
@@ -411,7 +426,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 ) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -430,6 +445,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 	if contentType == "" {
 		contentType = "application/json"
 	}
+	reporter.SetTranslatedReasoningEffort(payload, "openai")
 
 	url := strings.TrimSuffix(baseURL, "/") + endpointPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))

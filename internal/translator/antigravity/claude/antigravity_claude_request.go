@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -20,10 +21,20 @@ import (
 func resolveThinkingSignature(modelName, thinkingText, rawSignature string) string {
 	if thinkingText != "" {
 		if cachedSig := cache.GetCachedSignature(modelName, thinkingText); cachedSig != "" {
-			return cachedSig
+			rawSignature = cachedSig
 		}
 	}
-	return resolveBypassModeSignature(rawSignature)
+	if strings.TrimSpace(rawSignature) == "" {
+		return ""
+	}
+	switch signature.ProviderFromModelName(modelName) {
+	case signature.ProviderGemini:
+		return signature.GeminiReplaySignatureOrBypass(rawSignature, signature.BlockKindGeminiModelPart)
+	case signature.ProviderClaude:
+		return resolveBypassModeSignature(rawSignature)
+	default:
+		return resolveBypassModeSignature(rawSignature)
+	}
 }
 
 func resolveBypassModeSignature(rawSignature string) string {
@@ -114,6 +125,8 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			role := originalRole
 			if role == "assistant" {
 				role = "model"
+			} else if role == "system" {
+				role = "user"
 			}
 			clientContentJSON := []byte(`{"role":"","parts":[]}`)
 			clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "role", role)
@@ -187,17 +200,14 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						if argsRaw != "" {
 							partJSON := []byte(`{}`)
 
-							// Use skip_thought_signature_validator for tool calls without valid thinking signature
-							// This is the approach used in opencode-google-antigravity-auth for Gemini
-							// and also works for Claude through Antigravity API
-							const skipSentinel = "skip_thought_signature_validator"
 							if hasResolvedThinkingSignature(currentMessageThinkingSignature) {
 								partJSON, _ = sjson.SetBytes(
 									partJSON, "thoughtSignature", currentMessageThinkingSignature,
 								)
-							} else {
-								// No valid signature - use skip sentinel to bypass validation
-								partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", skipSentinel)
+							} else if signature.ProviderFromModelName(modelName) == signature.ProviderGemini {
+								partJSON, _ = sjson.SetBytes(
+									partJSON, "thoughtSignature", signature.GeminiSkipThoughtSignatureValidator,
+								)
 							}
 
 							if functionID != "" {
@@ -348,32 +358,34 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					}
 				}
 
-				// Reorder parts for 'model' role to ensure thinking block is first
 				if role == "model" {
 					partsResult := gjson.GetBytes(clientContentJSON, "parts")
 					if partsResult.IsArray() {
 						parts := partsResult.Array()
-						var thinkingParts []gjson.Result
-						var otherParts []gjson.Result
-						for _, part := range parts {
-							if part.Get("thought").Bool() {
-								thinkingParts = append(thinkingParts, part)
-							} else {
-								otherParts = append(otherParts, part)
-							}
-						}
-						if len(thinkingParts) > 0 {
-							firstPartIsThinking := parts[0].Get("thought").Bool()
-							if !firstPartIsThinking || len(thinkingParts) > 1 {
-								var newParts []interface{}
-								for _, p := range thinkingParts {
-									newParts = append(newParts, p.Value())
+						if len(parts) > 1 {
+							var thinkingParts []gjson.Result
+							var regularParts []gjson.Result
+							var functionCallParts []gjson.Result
+							for _, part := range parts {
+								if part.Get("thought").Bool() {
+									thinkingParts = append(thinkingParts, part)
+								} else if part.Get("functionCall").Exists() {
+									functionCallParts = append(functionCallParts, part)
+								} else {
+									regularParts = append(regularParts, part)
 								}
-								for _, p := range otherParts {
-									newParts = append(newParts, p.Value())
-								}
-								clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "parts", newParts)
 							}
+							var newParts []interface{}
+							for _, p := range thinkingParts {
+								newParts = append(newParts, p.Value())
+							}
+							for _, p := range regularParts {
+								newParts = append(newParts, p.Value())
+							}
+							for _, p := range functionCallParts {
+								newParts = append(newParts, p.Value())
+							}
+							clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "parts", newParts)
 						}
 					}
 				}

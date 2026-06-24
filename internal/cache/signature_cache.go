@@ -93,6 +93,7 @@ func purgeExpiredCaches() {
 			return true
 		},
 	)
+	purgeExpiredCodexReasoningReplayCache(now)
 }
 
 // StoreSignature stores a thinking signature for a given model group and text.

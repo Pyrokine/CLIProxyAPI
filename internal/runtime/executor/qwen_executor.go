@@ -327,7 +327,7 @@ func (e *QwenExecutor) prepareQwenRequest(
 		baseURL = "https://portal.qwen.ai/v1"
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := newUsageReporter(ctx, e, baseModel, auth)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -367,6 +367,7 @@ func (e *QwenExecutor) prepareQwenRequest(
 	if err != nil {
 		return nil, err
 	}
+	reporter.SetTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
