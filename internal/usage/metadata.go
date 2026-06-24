@@ -11,10 +11,16 @@ import (
 )
 
 type eventMetadata struct {
-	LatencyMs       int64       `json:"latency_ms,omitempty"`
-	ReasoningEffort string      `json:"reasoning_effort,omitempty"`
-	Thinking        *Thinking   `json:"thinking,omitempty"`
-	ResponseHeaders http.Header `json:"response_headers,omitempty"`
+	LatencyMs         int64       `json:"latency_ms,omitempty"`
+	RequestID         string      `json:"request_id,omitempty"`
+	TimeToFirstByteMs int64       `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs   int64       `json:"total_duration_ms,omitempty"`
+	Completed         bool        `json:"completed"`
+	ReasoningEffort   string      `json:"reasoning_effort,omitempty"`
+	ServiceTier       string      `json:"service_tier,omitempty"`
+	ExecutorType      string      `json:"executor_type,omitempty"`
+	Thinking          *Thinking   `json:"thinking,omitempty"`
+	ResponseHeaders   http.Header `json:"response_headers,omitempty"`
 }
 
 func encodeEventMetadata(d *FlatDetail) (any, error) {
@@ -22,12 +28,18 @@ func encodeEventMetadata(d *FlatDetail) (any, error) {
 		return nil, nil
 	}
 	meta := eventMetadata{
-		LatencyMs:       d.LatencyMs,
-		ReasoningEffort: strings.TrimSpace(d.ReasoningEffort),
-		Thinking:        cloneThinking(d.Thinking),
-		ResponseHeaders: sanitizeResponseHeaders(d.ResponseHeaders),
+		LatencyMs:         d.LatencyMs,
+		RequestID:         strings.TrimSpace(d.RequestID),
+		TimeToFirstByteMs: d.TimeToFirstByteMs,
+		TotalDurationMs:   d.TotalDurationMs,
+		Completed:         d.Completed,
+		ReasoningEffort:   strings.TrimSpace(d.ReasoningEffort),
+		ServiceTier:       strings.TrimSpace(d.ServiceTier),
+		ExecutorType:      strings.TrimSpace(d.ExecutorType),
+		Thinking:          cloneThinking(d.Thinking),
+		ResponseHeaders:   sanitizeResponseHeaders(d.ResponseHeaders),
 	}
-	if meta.LatencyMs <= 0 && meta.ReasoningEffort == "" && meta.Thinking == nil && len(meta.ResponseHeaders) == 0 {
+	if meta.LatencyMs <= 0 && meta.RequestID == "" && meta.TimeToFirstByteMs <= 0 && meta.TotalDurationMs <= 0 && !meta.Completed && meta.ReasoningEffort == "" && meta.ServiceTier == "" && meta.ExecutorType == "" && meta.Thinking == nil && len(meta.ResponseHeaders) == 0 {
 		return nil, nil
 	}
 	raw, err := json.Marshal(meta)
@@ -41,12 +53,19 @@ func decodeEventMetadata(d *FlatDetail, raw sql.NullString) error {
 	if d == nil || !raw.Valid || raw.String == "" {
 		return nil
 	}
+	d.MetadataRecorded = true
 	var meta eventMetadata
 	if err := json.Unmarshal([]byte(raw.String), &meta); err != nil {
 		return fmt.Errorf("decode event metadata: %w", err)
 	}
 	d.LatencyMs = meta.LatencyMs
+	d.RequestID = strings.TrimSpace(meta.RequestID)
+	d.TimeToFirstByteMs = meta.TimeToFirstByteMs
+	d.TotalDurationMs = meta.TotalDurationMs
+	d.Completed = meta.Completed
 	d.ReasoningEffort = strings.TrimSpace(meta.ReasoningEffort)
+	d.ServiceTier = strings.TrimSpace(meta.ServiceTier)
+	d.ExecutorType = strings.TrimSpace(meta.ExecutorType)
 	d.Thinking = cloneThinking(meta.Thinking)
 	d.ResponseHeaders = cloneHTTPHeader(meta.ResponseHeaders)
 	return nil

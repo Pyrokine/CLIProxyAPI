@@ -31,7 +31,8 @@ type LogFormatter struct{}
 
 // logFieldOrder defines the display order for common log fields.
 var logFieldOrder = []string{
-	"provider", "model", "mode", "budget", "level", "original_mode", "original_value", "min", "max", "clamped_to",
+	"provider", "model", "version", "mode", "budget", "level", "original_mode", "original_value", "min", "max",
+	"clamped_to",
 	"error",
 }
 

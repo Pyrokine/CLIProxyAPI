@@ -22,14 +22,6 @@ func initRequestTimeline(c *gin.Context, timestamp time.Time) {
 	timeline.Add("request.received", "captured_at="+timestamp.Format(time.RFC3339Nano))
 }
 
-func addRequestTimelineEvent(c *gin.Context, name string, detail string) {
-	requestTimeline(c).Add(name, detail)
-}
-
-func addRequestTimelineEventOnce(c *gin.Context, name string, detail string) {
-	requestTimeline(c).AddOnce(name, detail)
-}
-
 func requestTimeline(c *gin.Context) *logging.RequestTimeline {
 	if c == nil {
 		return nil

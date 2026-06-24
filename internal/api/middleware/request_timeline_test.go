@@ -95,23 +95,51 @@ func (w *timelineCaptureStreamingWriter) Close() error {
 	return nil
 }
 
+func TestRequestLoggingMiddlewareRuntimeDisabledSkipsErrorOnlyLog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	logger := &timelineCaptureLogger{enabled: false}
+	engine := gin.New()
+	engine.Use(RequestLoggingMiddleware(logger, RequestLoggingOptions{RuntimeEnabled: func() bool { return false }}))
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			if _, exists := c.Get(logging.RequestTimelineGinKey); exists {
+				t.Fatal("request timeline should not be created when runtime gate is disabled")
+			}
+			c.String(http.StatusInternalServerError, "fail")
+		},
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude"}`))
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+	}
+	if len(logger.requestTimeline) > 0 {
+		t.Fatalf("request timeline logged while runtime gate was disabled: %q", string(logger.requestTimeline))
+	}
+}
+
 func TestRequestLoggingMiddlewareWritesRequestTimeline(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	logger := &timelineCaptureLogger{enabled: true}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(logger))
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		value, exists := c.Get(logging.RequestTimelineGinKey)
-		if !exists {
-			t.Fatal("request timeline missing from gin context")
-		}
-		timeline, ok := value.(*logging.RequestTimeline)
-		if !ok || timeline == nil {
-			t.Fatal("request timeline has unexpected type")
-		}
-		timeline.Add("handler.work", "step=test")
-		c.String(http.StatusOK, "ok")
-	})
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			value, exists := c.Get(logging.RequestTimelineGinKey)
+			if !exists {
+				t.Fatal("request timeline missing from gin context")
+			}
+			timeline, ok := value.(*logging.RequestTimeline)
+			if !ok || timeline == nil {
+				t.Fatal("request timeline has unexpected type")
+			}
+			timeline.Add("handler.work", "step=test")
+			c.String(http.StatusOK, "ok")
+		},
+	)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude"}`))
 	rr := httptest.NewRecorder()
@@ -120,7 +148,10 @@ func TestRequestLoggingMiddlewareWritesRequestTimeline(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
-	assertTimelineContains(t, logger.requestTimeline, "request.received", "handler.work", "client.response.first_write", "request.handler.done", "request.log.start")
+	assertTimelineContains(
+		t, logger.requestTimeline, "request.received", "handler.work", "client.response.first_write",
+		"request.handler.done", "request.log.start",
+	)
 }
 
 func TestRequestLoggingMiddlewareWritesStreamingRequestTimeline(t *testing.T) {
@@ -128,11 +159,13 @@ func TestRequestLoggingMiddlewareWritesStreamingRequestTimeline(t *testing.T) {
 	logger := &timelineCaptureLogger{enabled: true}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(logger))
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		c.Header("Content-Type", "text/event-stream")
-		c.Writer.WriteHeader(http.StatusOK)
-		_, _ = c.Writer.Write([]byte("data: ok\n\n"))
-	})
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			c.Header("Content-Type", "text/event-stream")
+			c.Writer.WriteHeader(http.StatusOK)
+			_, _ = c.Writer.Write([]byte("data: ok\n\n"))
+		},
+	)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"stream":true}`))
 	rr := httptest.NewRecorder()
@@ -144,7 +177,10 @@ func TestRequestLoggingMiddlewareWritesStreamingRequestTimeline(t *testing.T) {
 	if logger.streamingWriter == nil {
 		t.Fatal("streaming writer was not created")
 	}
-	assertTimelineContains(t, logger.streamingWriter.requestTimeline, "request.received", "client.response.headers", "client.response.first_write", "request.handler.done", "request.log.start")
+	assertTimelineContains(
+		t, logger.streamingWriter.requestTimeline, "request.received", "client.response.headers",
+		"client.response.first_write", "request.handler.done", "request.log.start",
+	)
 }
 
 func TestRequestLoggingMiddlewareSkipsTimelineForSuccessfulRequestsWhenDisabled(t *testing.T) {
@@ -152,9 +188,11 @@ func TestRequestLoggingMiddlewareSkipsTimelineForSuccessfulRequestsWhenDisabled(
 	logger := &timelineCaptureLogger{enabled: false}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(logger))
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		c.String(http.StatusOK, "ok")
-	})
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			c.String(http.StatusOK, "ok")
+		},
+	)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude"}`))
 	rr := httptest.NewRecorder()
@@ -173,9 +211,11 @@ func TestRequestLoggingMiddlewareWritesTimelineForForcedErrorLog(t *testing.T) {
 	logger := &timelineCaptureLogger{enabled: false}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(logger))
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		c.String(http.StatusInternalServerError, "failed")
-	})
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			c.String(http.StatusInternalServerError, "failed")
+		},
+	)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude"}`))
 	rr := httptest.NewRecorder()
@@ -184,7 +224,10 @@ func TestRequestLoggingMiddlewareWritesTimelineForForcedErrorLog(t *testing.T) {
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
 	}
-	assertTimelineContains(t, logger.requestTimeline, "request.received", "client.response.first_write", "request.handler.done", "request.log.start")
+	assertTimelineContains(
+		t, logger.requestTimeline, "request.received", "client.response.first_write", "request.handler.done",
+		"request.log.start",
+	)
 }
 
 func TestRequestLoggingMiddlewareSkipsManagementTimeline(t *testing.T) {
@@ -192,12 +235,14 @@ func TestRequestLoggingMiddlewareSkipsManagementTimeline(t *testing.T) {
 	logger := &timelineCaptureLogger{enabled: true}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(logger))
-	engine.POST("/v0/management/config", func(c *gin.Context) {
-		if _, exists := c.Get(logging.RequestTimelineGinKey); exists {
-			t.Fatal("request timeline should not be attached to management routes")
-		}
-		c.String(http.StatusOK, "ok")
-	})
+	engine.POST(
+		"/v0/management/config", func(c *gin.Context) {
+			if _, exists := c.Get(logging.RequestTimelineGinKey); exists {
+				t.Fatal("request timeline should not be attached to management routes")
+			}
+			c.String(http.StatusOK, "ok")
+		},
+	)
 
 	req := httptest.NewRequest(http.MethodPost, "/v0/management/config", bytes.NewBufferString(`{"enabled":true}`))
 	rr := httptest.NewRecorder()

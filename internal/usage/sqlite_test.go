@@ -328,6 +328,8 @@ func TestPersistEvent_ResponseHeadersRoundTrip(t *testing.T) {
 		Model:           "m",
 		LatencyMs:       1234,
 		ReasoningEffort: "medium",
+		ServiceTier:     "flex",
+		ExecutorType:    "OpenAICompatExecutor",
 		Thinking:        &Thinking{Mode: "budget", Budget: budget},
 		ResponseHeaders: http.Header{
 			"X-Request-Id":         []string{"req-1"},
@@ -367,6 +369,12 @@ func TestPersistEvent_ResponseHeadersRoundTrip(t *testing.T) {
 	}
 	if got := events[0].ReasoningEffort; got != "medium" {
 		t.Fatalf("ReasoningEffort = %q, want medium", got)
+	}
+	if got := events[0].ServiceTier; got != "flex" {
+		t.Fatalf("ServiceTier = %q, want flex", got)
+	}
+	if got := events[0].ExecutorType; got != "OpenAICompatExecutor" {
+		t.Fatalf("ExecutorType = %q, want OpenAICompatExecutor", got)
 	}
 	if events[0].Thinking == nil || events[0].Thinking.Budget == nil || *events[0].Thinking.Budget != 8192 {
 		t.Fatalf("Thinking = %#v, want budget 8192", events[0].Thinking)

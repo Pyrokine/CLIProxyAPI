@@ -113,22 +113,33 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
+	serviceTier := strings.TrimSpace(record.ServiceTier)
+	if serviceTier == "" {
+		serviceTier = coreusage.ServiceTierFromContext(ctx)
+	}
+	executorType := strings.TrimSpace(record.ExecutorType)
 
 	// Try v2 path (global Persister)
 	if persister := getGlobalPersister(); persister != nil {
 		detail := FlatDetail{
-			Timestamp:       timestamp,
-			Model:           modelName,
-			Source:          source,
-			AuthIndex:       authIndex,
-			APIKey:          record.APIKey,
-			Provider:        record.Provider,
-			LatencyMs:       latencyMilliseconds(record.Latency),
-			ReasoningEffort: reasoningEffort,
-			Thinking:        thinkingFromCore(record.Thinking),
-			ResponseHeaders: sanitizeResponseHeaders(record.ResponseHeaders),
-			Tokens:          tokens,
-			Failed:          failed,
+			Timestamp:         timestamp,
+			Model:             modelName,
+			Source:            source,
+			AuthIndex:         authIndex,
+			APIKey:            record.APIKey,
+			Provider:          record.Provider,
+			LatencyMs:         latencyMilliseconds(record.Latency),
+			RequestID:         strings.TrimSpace(record.RequestID),
+			TimeToFirstByteMs: record.TimeToFirstByteMs,
+			TotalDurationMs:   record.TotalDurationMs,
+			Completed:         record.Completed,
+			ReasoningEffort:   reasoningEffort,
+			ServiceTier:       serviceTier,
+			ExecutorType:      executorType,
+			Thinking:          thinkingFromCore(record.Thinking),
+			ResponseHeaders:   sanitizeResponseHeaders(record.ResponseHeaders),
+			Tokens:            tokens,
+			Failed:            failed,
 		}
 		persister.Record(detail)
 		return
@@ -178,15 +189,21 @@ type modelStats struct {
 
 // requestDetail stores the timestamp and token usage for a single request.
 type requestDetail struct {
-	Timestamp       time.Time   `json:"timestamp"`
-	Source          string      `json:"source"`
-	AuthIndex       string      `json:"auth_index"`
-	LatencyMs       int64       `json:"latency_ms,omitempty"`
-	ReasoningEffort string      `json:"reasoning_effort,omitempty"`
-	Thinking        *Thinking   `json:"thinking,omitempty"`
-	ResponseHeaders http.Header `json:"response_headers,omitempty"`
-	Tokens          tokenStats  `json:"tokens"`
-	Failed          bool        `json:"failed"`
+	Timestamp         time.Time   `json:"timestamp"`
+	Source            string      `json:"source"`
+	AuthIndex         string      `json:"auth_index"`
+	LatencyMs         int64       `json:"latency_ms,omitempty"`
+	RequestID         string      `json:"request_id,omitempty"`
+	TimeToFirstByteMs int64       `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs   int64       `json:"total_duration_ms,omitempty"`
+	Completed         bool        `json:"completed"`
+	ReasoningEffort   string      `json:"reasoning_effort,omitempty"`
+	ServiceTier       string      `json:"service_tier,omitempty"`
+	ExecutorType      string      `json:"executor_type,omitempty"`
+	Thinking          *Thinking   `json:"thinking,omitempty"`
+	ResponseHeaders   http.Header `json:"response_headers,omitempty"`
+	Tokens            tokenStats  `json:"tokens"`
+	Failed            bool        `json:"failed"`
 }
 
 // tokenStats captures the token usage breakdown for a request.
@@ -274,6 +291,11 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
+	serviceTier := strings.TrimSpace(record.ServiceTier)
+	if serviceTier == "" {
+		serviceTier = coreusage.ServiceTierFromContext(ctx)
+	}
+	executorType := strings.TrimSpace(record.ExecutorType)
 	dayKey := timestamp.Format("2006-01-02")
 	hourKey := timestamp.Hour()
 
@@ -295,15 +317,21 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	s.updateAPIStats(
 		stats, modelName, requestDetail{
-			Timestamp:       timestamp,
-			Source:          record.Source,
-			AuthIndex:       record.AuthIndex,
-			LatencyMs:       latencyMilliseconds(record.Latency),
-			ReasoningEffort: reasoningEffort,
-			Thinking:        thinkingFromCore(record.Thinking),
-			ResponseHeaders: sanitizeResponseHeaders(record.ResponseHeaders),
-			Tokens:          detail,
-			Failed:          failed,
+			Timestamp:         timestamp,
+			Source:            record.Source,
+			AuthIndex:         record.AuthIndex,
+			LatencyMs:         latencyMilliseconds(record.Latency),
+			RequestID:         strings.TrimSpace(record.RequestID),
+			TimeToFirstByteMs: record.TimeToFirstByteMs,
+			TotalDurationMs:   record.TotalDurationMs,
+			Completed:         record.Completed,
+			ReasoningEffort:   reasoningEffort,
+			ServiceTier:       serviceTier,
+			ExecutorType:      executorType,
+			Thinking:          thinkingFromCore(record.Thinking),
+			ResponseHeaders:   sanitizeResponseHeaders(record.ResponseHeaders),
+			Tokens:            detail,
+			Failed:            failed,
 		},
 	)
 
@@ -462,17 +490,23 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 				if len(hooks) > 0 && hooks[0] != nil {
 					hooks[0](
 						FlatDetail{
-							Timestamp:       detail.Timestamp,
-							Model:           modelName,
-							Source:          detail.Source,
-							AuthIndex:       detail.AuthIndex,
-							APIKey:          apiName,
-							LatencyMs:       detail.LatencyMs,
-							ReasoningEffort: strings.TrimSpace(detail.ReasoningEffort),
-							Thinking:        cloneThinking(detail.Thinking),
-							ResponseHeaders: cloneHTTPHeader(detail.ResponseHeaders),
-							Tokens:          detail.Tokens,
-							Failed:          detail.Failed,
+							Timestamp:         detail.Timestamp,
+							Model:             modelName,
+							Source:            detail.Source,
+							AuthIndex:         detail.AuthIndex,
+							APIKey:            apiName,
+							LatencyMs:         detail.LatencyMs,
+							RequestID:         strings.TrimSpace(detail.RequestID),
+							TimeToFirstByteMs: detail.TimeToFirstByteMs,
+							TotalDurationMs:   detail.TotalDurationMs,
+							Completed:         detail.Completed,
+							ReasoningEffort:   strings.TrimSpace(detail.ReasoningEffort),
+							ServiceTier:       strings.TrimSpace(detail.ServiceTier),
+							ExecutorType:      strings.TrimSpace(detail.ExecutorType),
+							Thinking:          cloneThinking(detail.Thinking),
+							ResponseHeaders:   cloneHTTPHeader(detail.ResponseHeaders),
+							Tokens:            detail.Tokens,
+							Failed:            detail.Failed,
 						},
 					)
 				}
@@ -575,21 +609,9 @@ func normaliseDetail(detail coreusage.Detail) tokenStats {
 		TotalTokens:     detail.TotalTokens,
 	}
 	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
-	}
-	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
 	}
 	return tokens
-}
-
-// add accumulates another tokenStats into this one, field by field.
-func (t *tokenStats) add(other tokenStats) {
-	t.InputTokens += other.InputTokens
-	t.OutputTokens += other.OutputTokens
-	t.ReasoningTokens += other.ReasoningTokens
-	t.CachedTokens += other.CachedTokens
-	t.TotalTokens += other.TotalTokens
 }
 
 // UnmarshalJSON supports both legacy int64 (→ TotalTokens) and full object formats.
@@ -611,9 +633,6 @@ func (t *tokenStats) UnmarshalJSON(data []byte) error {
 }
 
 func normaliseTokenStats(tokens tokenStats) tokenStats {
-	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
-	}
 	if tokens.TotalTokens == 0 {
 		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
 	}

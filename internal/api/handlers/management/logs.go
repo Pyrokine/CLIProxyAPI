@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"math"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -322,7 +323,7 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing request ID"})
 		return
 	}
-	if strings.ContainsAny(requestID, "/\\") {
+	if strings.ContainsAny(requestID, "/\\") || strings.Contains(requestID, "..") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request ID"})
 		return
 	}
@@ -360,6 +361,17 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		c.JSON(
 			http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)},
 		)
+		return
+	}
+	if linesParam := c.Query("lines"); linesParam != "" {
+		maxLines, err := strconv.Atoi(linesParam)
+		if err != nil || maxLines < 1 {
+			maxLines = 100
+		}
+		if maxLines > 10000 {
+			maxLines = 10000
+		}
+		h.previewLogFile(c, dirAbs, matchedFile, maxLines)
 		return
 	}
 	h.serveLogFile(c, dirAbs, matchedFile)
@@ -409,20 +421,8 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 
 // previewLogFile reads the last maxLines lines from a log file and returns them as JSON.
 func (h *Handler) previewLogFile(c *gin.Context, dirAbs, fileName string, maxLines int) {
-	fullPath := filepath.Clean(filepath.Join(dirAbs, fileName))
-	prefix := dirAbs + string(os.PathSeparator)
-	if !strings.HasPrefix(fullPath, prefix) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
-		return
-	}
-
-	file, err := os.Open(fullPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to open log file: %v", err)})
+	file, _, ok := openLogFile(c, dirAbs, fileName)
+	if !ok {
 		return
 	}
 	defer func() {
@@ -469,28 +469,49 @@ func (h *Handler) previewLogFile(c *gin.Context, dirAbs, fileName string, maxLin
 
 // serveLogFile validates the file path, checks for path traversal, and serves the file.
 func (h *Handler) serveLogFile(c *gin.Context, dirAbs, fileName string) {
+	file, info, ok := openLogFile(c, dirAbs, fileName)
+	if !ok {
+		return
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+	c.Header("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fileName}))
+	http.ServeContent(c.Writer, c.Request, fileName, info.ModTime(), file)
+}
+
+func openLogFile(c *gin.Context, dirAbs, fileName string) (*os.File, os.FileInfo, bool) {
 	fullPath := filepath.Clean(filepath.Join(dirAbs, fileName))
 	prefix := dirAbs + string(os.PathSeparator)
 	if !strings.HasPrefix(fullPath, prefix) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file path"})
-		return
+		return nil, nil, false
 	}
-
-	info, errStat := os.Stat(fullPath)
-	if errStat != nil {
-		if os.IsNotExist(errStat) {
+	file, err := openLogFileNoFollow(fullPath)
+	if err != nil {
+		if os.IsNotExist(err) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "log file not found"})
-			return
+			return nil, nil, false
 		}
+		if isLogSymlinkError(err) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
+			return nil, nil, false
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to open log file: %v", err)})
+		return nil, nil, false
+	}
+	info, errStat := file.Stat()
+	if errStat != nil {
+		_ = file.Close()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read log file: %v", errStat)})
-		return
+		return nil, nil, false
 	}
 	if info.IsDir() {
+		_ = file.Close()
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid log file"})
-		return
+		return nil, nil, false
 	}
-
-	c.FileAttachment(fullPath, fileName)
+	return file, info, true
 }
 
 func (h *Handler) logDirectory() string {

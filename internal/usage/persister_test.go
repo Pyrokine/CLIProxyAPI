@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
 )
 
 func TestAtomicWrite_FilePermissions(t *testing.T) {
@@ -97,9 +98,10 @@ func TestBuildModelPriceFunc_ReturnsNilWithoutPriceFile(t *testing.T) {
 func TestBuildModelPriceFunc_LoadsValidPriceFile(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
-	pricesPath := filepath.Join(dir, "model-prices.json")
-	if err := os.WriteFile(
-		pricesPath, []byte(`{"claude-opus-4-6":{"prompt":5,"completion":25,"cache":0.5}}`), 0o600,
+	if _, err := modelcatalog.ReplacePrices(
+		configPath, map[string]modelcatalog.Price{
+			"claude-opus-4-6": {Prompt: 5, Completion: 25, Cache: 0.5},
+		},
 	); err != nil {
 		t.Fatalf("write prices: %v", err)
 	}

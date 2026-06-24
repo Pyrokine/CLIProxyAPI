@@ -95,6 +95,45 @@ func TestStore_QueryStaysWithinMemoryBudget(t *testing.T) {
 // The test asserts day_bucket transitions from 0 → ≥1 rows during the
 // StartRollup call. Async rollup would leave the count at 0 in nearly all
 // scheduling timelines and fail the test deterministically.
+func TestSnapshotFilteredPreservesRuntimeMetadata(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	d := FlatDetail{
+		Timestamp:       ts,
+		Model:           "m",
+		APIKey:          "k",
+		ReasoningEffort: "medium",
+		ServiceTier:     "flex",
+		ExecutorType:    "OpenAICompatExecutor",
+		Tokens:          tokenStats{TotalTokens: 1},
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := persistEvent(ctx, tx, store, &d, nil); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	p := &Persister{store: store}
+	snap := p.SnapshotFiltered(ts.Add(-time.Minute), ts.Add(time.Minute), EventFilters{})
+	detail := snap.APIs["k"].Models["m"].Details[0]
+	if got := detail.ReasoningEffort; got != "medium" {
+		t.Fatalf("ReasoningEffort = %q, want medium", got)
+	}
+	if got := detail.ServiceTier; got != "flex" {
+		t.Fatalf("ServiceTier = %q, want flex", got)
+	}
+	if got := detail.ExecutorType; got != "OpenAICompatExecutor" {
+		t.Fatalf("ExecutorType = %q, want OpenAICompatExecutor", got)
+	}
+}
+
 func TestStartRollup_DayBucketReadyOnReturn(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

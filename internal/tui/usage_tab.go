@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -292,22 +293,30 @@ func (m *usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 	}
 
 	var inputTotal, outputTotal, cachedTotal, reasoningTotal int64
+	var latencyTotal, latencyCount, ttfbTotal, ttfbCount, durationTotal, durationCount int64
+	var latestTimestamp time.Time
 	for _, d := range detailList {
 		dm, ok := d.(map[string]any)
 		if !ok {
 			continue
 		}
-		tokens, ok := dm["tokens"].(map[string]any)
-		if !ok {
-			continue
+		if tokens, ok := dm["tokens"].(map[string]any); ok {
+			inputTotal += int64(getFloat(tokens, "input_tokens"))
+			outputTotal += int64(getFloat(tokens, "output_tokens"))
+			cachedTotal += int64(getFloat(tokens, "cached_tokens"))
+			reasoningTotal += int64(getFloat(tokens, "reasoning_tokens"))
 		}
-		inputTotal += int64(getFloat(tokens, "input_tokens"))
-		outputTotal += int64(getFloat(tokens, "output_tokens"))
-		cachedTotal += int64(getFloat(tokens, "cached_tokens"))
-		reasoningTotal += int64(getFloat(tokens, "reasoning_tokens"))
+		if timestamp := usageDetailTimestamp(dm); !timestamp.IsZero() && timestamp.After(latestTimestamp) {
+			latestTimestamp = timestamp
+		}
+		latencyTotal, latencyCount = addDurationSample(latencyTotal, latencyCount, getFloat(dm, "latency_ms"))
+		ttfbTotal, ttfbCount = addDurationSample(ttfbTotal, ttfbCount, getFloat(dm, "time_to_first_byte_ms"))
+		durationTotal, durationCount = addDurationSample(
+			durationTotal, durationCount, getFloat(dm, "total_duration_ms"),
+		)
 	}
 
-	if inputTotal == 0 && outputTotal == 0 && cachedTotal == 0 && reasoningTotal == 0 {
+	if inputTotal == 0 && outputTotal == 0 && cachedTotal == 0 && reasoningTotal == 0 && latestTimestamp.IsZero() && latencyCount == 0 && ttfbCount == 0 && durationCount == 0 {
 		return ""
 	}
 
@@ -324,11 +333,53 @@ func (m *usageTabModel) renderTokenBreakdown(modelStats map[string]any) string {
 	if reasoningTotal > 0 {
 		parts = append(parts, fmt.Sprintf("%s:%s", t("usage_reasoning"), formatLargeNumber(reasoningTotal)))
 	}
+	if !latestTimestamp.IsZero() {
+		parts = append(
+			parts, fmt.Sprintf("%s:%s", t("usage_time"), latestTimestamp.Local().Format("2006-01-02 15:04:05")),
+		)
+	}
+	parts = appendAverageDuration(parts, t("usage_latency"), latencyTotal, latencyCount)
+	parts = appendAverageDuration(parts, t("usage_ttfb"), ttfbTotal, ttfbCount)
+	parts = appendAverageDuration(parts, t("usage_duration"), durationTotal, durationCount)
 
 	return fmt.Sprintf(
 		"    │  %s\n",
 		lipgloss.NewStyle().Foreground(colorMuted).Render(strings.Join(parts, "  ")),
 	)
+}
+
+func usageDetailTimestamp(detail map[string]any) time.Time {
+	value := getString(detail, "timestamp")
+	if value == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
+		if ts, err := time.Parse(layout, value); err == nil {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+func addDurationSample(total int64, count int64, value float64) (int64, int64) {
+	if value <= 0 {
+		return total, count
+	}
+	return total + int64(value+0.5), count + 1
+}
+
+func appendAverageDuration(parts []string, label string, total int64, count int64) []string {
+	if count == 0 {
+		return parts
+	}
+	return append(parts, fmt.Sprintf("%s:%s", label, formatDurationMS(total/count)))
+}
+
+func formatDurationMS(ms int64) string {
+	if ms >= 1000 {
+		return fmt.Sprintf("%.2fs", float64(ms)/1000.0)
+	}
+	return fmt.Sprintf("%dms", ms)
 }
 
 // renderBarChart renders a simple ASCII horizontal bar chart.

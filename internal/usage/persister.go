@@ -128,18 +128,6 @@ func (p *Persister) DBSize() int64 {
 	return total
 }
 
-func (p *Persister) maxDBSizeBytes() int64 {
-	if p == nil {
-		return 0
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.retention.MaxDBSizeMB <= 0 {
-		return 0
-	}
-	return int64(p.retention.MaxDBSizeMB) << 20
-}
-
 func (p *Persister) dbSizeStatus() (
 	sizeBytes int64,
 	maxBytes int64,
@@ -724,7 +712,13 @@ func (p *Persister) SnapshotFiltered(from, to time.Time, filters EventFilters) S
 			log.Warnf("usage: snapshot metadata decode: %v", err)
 		} else {
 			detail.LatencyMs = flat.LatencyMs
+			detail.RequestID = flat.RequestID
+			detail.TimeToFirstByteMs = flat.TimeToFirstByteMs
+			detail.TotalDurationMs = flat.TotalDurationMs
+			detail.Completed = flat.Completed
 			detail.ReasoningEffort = flat.ReasoningEffort
+			detail.ServiceTier = flat.ServiceTier
+			detail.ExecutorType = flat.ExecutorType
 			detail.Thinking = cloneThinking(flat.Thinking)
 			detail.ResponseHeaders = flat.ResponseHeaders
 		}

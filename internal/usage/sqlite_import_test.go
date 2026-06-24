@@ -169,6 +169,69 @@ func TestFingerprint_StableAcrossFormats(t *testing.T) {
 // TestImport_CrossFormatDedup imports the same logical event via v2 detail and
 // then via v1 nested snapshot and verifies the second import skips the row
 // (fingerprint UNIQUE).
+func TestCSVParserPreservesRuntimeMetadata(t *testing.T) {
+	payload := []byte(strings.Join(
+		[]string{
+			"timestamp,model,source,api_key,result,input_tokens,output_tokens,total_tokens,reasoning_effort,service_tier,executor_type",
+			`2026-04-27T10:00:00Z,m,src,k,success,10,20,30,medium,flex,OpenAICompatExecutor`,
+		}, "\n",
+	))
+
+	details, _, err := ParseAny(payload)
+	if err != nil {
+		t.Fatalf("ParseAny: %v", err)
+	}
+	if len(details) != 1 {
+		t.Fatalf("details len=%d, want 1", len(details))
+	}
+	if got := details[0].ReasoningEffort; got != "medium" {
+		t.Fatalf("ReasoningEffort = %q, want medium", got)
+	}
+	if got := details[0].ServiceTier; got != "flex" {
+		t.Fatalf("ServiceTier = %q, want flex", got)
+	}
+	if got := details[0].ExecutorType; got != "OpenAICompatExecutor" {
+		t.Fatalf("ExecutorType = %q, want OpenAICompatExecutor", got)
+	}
+}
+
+func TestFlattenSnapshotPreservesRuntimeMetadata(t *testing.T) {
+	ts, _ := time.Parse(time.RFC3339, "2026-04-27T10:00:00Z")
+	snap := StatisticsSnapshot{
+		APIs: map[string]aPISnapshot{
+			"k": {
+				Models: map[string]modelSnapshot{
+					"m": {
+						Details: []requestDetail{
+							{
+								Timestamp:       ts,
+								ReasoningEffort: "medium",
+								ServiceTier:     "flex",
+								ExecutorType:    "OpenAICompatExecutor",
+								Tokens:          tokenStats{TotalTokens: 30},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	flat := flattenSnapshot(snap)
+	if len(flat) != 1 {
+		t.Fatalf("flattenSnapshot len=%d, want 1", len(flat))
+	}
+	if got := flat[0].ReasoningEffort; got != "medium" {
+		t.Fatalf("ReasoningEffort = %q, want medium", got)
+	}
+	if got := flat[0].ServiceTier; got != "flex" {
+		t.Fatalf("ServiceTier = %q, want flex", got)
+	}
+	if got := flat[0].ExecutorType; got != "OpenAICompatExecutor" {
+		t.Fatalf("ExecutorType = %q, want OpenAICompatExecutor", got)
+	}
+}
+
 func TestImport_CrossFormatDedup(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

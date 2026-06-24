@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -14,18 +15,35 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	log "github.com/sirupsen/logrus"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
 
+type fileBodySourceFactory interface {
+	NewFileBodySource(prefix string) (*logging.FileBodySource, error)
+}
+
+type RequestLoggingOptions struct {
+	RuntimeEnabled func() bool
+}
+
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
 // It captures detailed information about the request and response, including headers and body,
 // and uses the provided RequestLogger to record this data. When full request logging is disabled,
 // body capture is limited to small known-size payloads to avoid large per-request memory spikes.
-func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
+func RequestLoggingMiddleware(logger logging.RequestLogger, opts ...RequestLoggingOptions) gin.HandlerFunc {
+	var runtimeEnabled func() bool
+	if len(opts) > 0 {
+		runtimeEnabled = opts[0].RuntimeEnabled
+	}
 	return func(c *gin.Context) {
 		if logger == nil {
+			c.Next()
+			return
+		}
+		if runtimeEnabled != nil && !runtimeEnabled() {
 			c.Next()
 			return
 		}
@@ -53,6 +71,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		initRequestTimeline(c, requestInfo.Timestamp)
+		attachRequestLogSources(c, logger, loggerEnabled)
 
 		// Create response writer wrapper
 		wrapper := newResponseWriterWrapper(c.Writer, logger, requestInfo, requestTimeline(c))
@@ -68,6 +87,39 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		if err = wrapper.finalize(c); err != nil {
 			log.WithError(err).Warn("failed to write request log")
 		}
+	}
+}
+
+func attachRequestLogSources(c *gin.Context, logger logging.RequestLogger, loggerEnabled bool) {
+	if c == nil || !loggerEnabled {
+		return
+	}
+	factory, ok := logger.(fileBodySourceFactory)
+	if !ok || factory == nil {
+		return
+	}
+	if source, errSource := factory.NewFileBodySource("api-request"); errSource == nil {
+		c.Set(logging.APIRequestSourceContextKey, source)
+	} else {
+		log.WithError(errSource).Warn("failed to create api request log source")
+	}
+	if source, errSource := factory.NewFileBodySource("api-response"); errSource == nil {
+		c.Set(logging.APIResponseSourceContextKey, source)
+	} else {
+		log.WithError(errSource).Warn("failed to create api response log source")
+	}
+	if !isResponsesWebsocketUpgrade(c.Request) {
+		return
+	}
+	if source, errSource := factory.NewFileBodySource("websocket-timeline"); errSource == nil {
+		c.Set(logging.WebsocketTimelineSourceContextKey, source)
+	} else {
+		log.WithError(errSource).Warn("failed to create websocket timeline log source")
+	}
+	if source, errSource := factory.NewFileBodySource("api-websocket-timeline"); errSource == nil {
+		c.Set(logging.APIWebsocketTimelineSourceContextKey, source)
+	} else {
+		log.WithError(errSource).Warn("failed to create api websocket timeline log source")
 	}
 }
 
@@ -137,7 +189,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*requestInfo, error) 
 
 		// Restore the body for the actual request processing
 		c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-		body = bodyBytes
+		body = decodeCapturedRequestBodyForLog(bodyBytes, c.Request.Header.Get("Content-Encoding"))
 	}
 
 	return &requestInfo{
@@ -153,6 +205,57 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*requestInfo, error) 
 // shouldLogRequest determines whether the request should be logged.
 // It skips management endpoints to avoid leaking secrets but allows
 // all other routes, including module-provided ones, to honor request-log.
+func decodeCapturedRequestBodyForLog(raw []byte, encoding string) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	decoded, errDecode := decodeCapturedRequestBody(raw, encoding)
+	if errDecode != nil {
+		return raw
+	}
+	return decoded
+}
+
+func decodeCapturedRequestBody(raw []byte, encoding string) ([]byte, error) {
+	encoding = strings.TrimSpace(encoding)
+	if encoding == "" || strings.EqualFold(encoding, "identity") {
+		return raw, nil
+	}
+
+	parts := strings.Split(encoding, ",")
+	body := raw
+	for i := len(parts) - 1; i >= 0; i-- {
+		enc := strings.ToLower(strings.TrimSpace(parts[i]))
+		switch enc {
+		case "", "identity":
+			continue
+		case "zstd":
+			decoded, errDecode := decodeCapturedZstdRequestBody(body)
+			if errDecode != nil {
+				return nil, errDecode
+			}
+			body = decoded
+		default:
+			return nil, fmt.Errorf("unsupported request content encoding: %s", enc)
+		}
+	}
+	return body, nil
+}
+
+func decodeCapturedZstdRequestBody(raw []byte) ([]byte, error) {
+	decoder, errNewReader := zstd.NewReader(bytes.NewReader(raw))
+	if errNewReader != nil {
+		return nil, fmt.Errorf("failed to create zstd request decoder: %w", errNewReader)
+	}
+	defer decoder.Close()
+
+	decoded, errRead := io.ReadAll(decoder)
+	if errRead != nil {
+		return nil, fmt.Errorf("failed to decode zstd request body: %w", errRead)
+	}
+	return decoded, nil
+}
+
 func shouldLogRequest(path string) bool {
 	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
 		return false

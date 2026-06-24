@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
@@ -85,6 +86,7 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	if events == nil {
 		events = []usage.FlatDetail{}
 	}
+	events = maskUsageEventAPIKeys(events)
 
 	totalPages := (total + pageSize - 1) / pageSize
 
@@ -97,6 +99,17 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 			TotalPages: totalPages,
 		},
 	)
+}
+
+func maskUsageEventAPIKeys(events []usage.FlatDetail) []usage.FlatDetail {
+	out := make([]usage.FlatDetail, len(events))
+	copy(out, events)
+	for i := range out {
+		if out[i].APIKey != "" {
+			out[i].APIKey = util.HideAPIKey(out[i].APIKey)
+		}
+	}
+	return out
 }
 
 func intParam(c *gin.Context, name string, fallback int) int {

@@ -53,7 +53,9 @@ func (t *RequestTimeline) AddOnce(name string, detail string) {
 		return
 	}
 	t.seen[name] = struct{}{}
-	t.events = append(t.events, RequestTimelineEvent{Name: name, Detail: strings.TrimSpace(detail), Timestamp: time.Now()})
+	t.events = append(
+		t.events, RequestTimelineEvent{Name: name, Detail: strings.TrimSpace(detail), Timestamp: time.Now()},
+	)
 	t.mu.Unlock()
 }
 

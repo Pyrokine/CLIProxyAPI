@@ -5,11 +5,13 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type endpointKey struct{}
 type responseStatusKey struct{}
 type responseHeadersKey struct{}
+type responseTimingKey struct{}
 
 type responseStatusHolder struct {
 	status atomic.Int32
@@ -18,6 +20,11 @@ type responseStatusHolder struct {
 type responseHeadersHolder struct {
 	mu      sync.RWMutex
 	headers http.Header
+}
+
+type responseTimingHolder struct {
+	mu                sync.RWMutex
+	firstResponseByte time.Time
 }
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
@@ -55,6 +62,16 @@ func WithResponseHeadersHolder(ctx context.Context) context.Context {
 	return context.WithValue(ctx, responseHeadersKey{}, &responseHeadersHolder{})
 }
 
+func WithResponseTimingHolder(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if holder, ok := ctx.Value(responseTimingKey{}).(*responseTimingHolder); ok && holder != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, responseTimingKey{}, &responseTimingHolder{})
+}
+
 func SetResponseStatus(ctx context.Context, status int) {
 	if ctx == nil || status <= 0 {
 		return
@@ -77,6 +94,34 @@ func SetResponseHeaders(ctx context.Context, headers http.Header) {
 	holder.mu.Lock()
 	defer holder.mu.Unlock()
 	holder.headers = cloneResponseHeaders(headers)
+}
+
+func MarkFirstResponseByte(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	holder, ok := ctx.Value(responseTimingKey{}).(*responseTimingHolder)
+	if !ok || holder == nil {
+		return
+	}
+	holder.mu.Lock()
+	defer holder.mu.Unlock()
+	if holder.firstResponseByte.IsZero() {
+		holder.firstResponseByte = time.Now()
+	}
+}
+
+func GetFirstResponseByteAt(ctx context.Context) time.Time {
+	if ctx == nil {
+		return time.Time{}
+	}
+	holder, ok := ctx.Value(responseTimingKey{}).(*responseTimingHolder)
+	if !ok || holder == nil {
+		return time.Time{}
+	}
+	holder.mu.RLock()
+	defer holder.mu.RUnlock()
+	return holder.firstResponseByte
 }
 
 func GetResponseStatus(ctx context.Context) int {
