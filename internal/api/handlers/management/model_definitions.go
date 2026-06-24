@@ -34,6 +34,12 @@ func (h *Handler) GetStaticModelDefinitions(c *gin.Context) {
 	)
 }
 
+// GetRuntimeModels returns the current registry models without API-key filtering.
+func (h *Handler) GetRuntimeModels(c *gin.Context) {
+	models := registry.GetGlobalRegistry().GetAvailableModels("openai")
+	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
 // GetModelsCatalogMeta returns the current state of the remote model catalog
 // so the UI can show the source URL and refresh timing.
 func (h *Handler) GetModelsCatalogMeta(c *gin.Context) {

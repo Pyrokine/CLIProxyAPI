@@ -31,6 +31,8 @@ type ModelInfo struct {
 	Type string `json:"type"`
 	// DisplayName is the human-readable name for the model
 	DisplayName string `json:"display_name,omitempty"`
+	// CatalogName is the backend model catalog entry controlling this model when ID is an exposed alias.
+	CatalogName string `json:"-"`
 	// Name is used for Gemini-style model names
 	Name string `json:"name,omitempty"`
 	// Version is the model version
@@ -771,6 +773,28 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 	)
 
 	return models
+}
+
+// GetRegisteredProviders returns provider identifiers currently present in the registry.
+func (r *ModelRegistry) GetRegisteredProviders() []string {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	seen := make(map[string]struct{}, len(r.clientProviders))
+	providers := make([]string, 0, len(r.clientProviders))
+	for _, provider := range r.clientProviders {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider == "" {
+			continue
+		}
+		if _, exists := seen[provider]; exists {
+			continue
+		}
+		seen[provider] = struct{}{}
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	return providers
 }
 
 // GetAvailableModelsByProvider returns models available for the given provider identifier.

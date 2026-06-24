@@ -105,6 +105,14 @@ func SetModelRefreshCallback(cb ModelRefreshCallback) {
 	}
 }
 
+func embeddedModelsCatalog() *staticModelsJSON {
+	var parsed staticModelsJSON
+	if err := json.Unmarshal(embeddedModelsJSON, &parsed); err != nil {
+		return nil
+	}
+	return &parsed
+}
+
 func init() {
 	// Load embedded data as fallback on startup.
 	if err := loadModelsFromBytes(embeddedModelsJSON, "embed"); err != nil {

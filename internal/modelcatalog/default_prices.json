@@ -1,0 +1,447 @@
+{
+    "claude-opus-4-7": {
+        "prompt": 5.0,
+        "completion": 25.0,
+        "cache": 0.5
+    },
+    "claude-opus-4-7-thinking": {
+        "prompt": 5.0,
+        "completion": 25.0,
+        "cache": 0.5
+    },
+    "claude-opus-4-6": {
+        "prompt": 5.0,
+        "completion": 25.0,
+        "cache": 0.5
+    },
+    "claude-opus-4-6-thinking": {
+        "prompt": 5.0,
+        "completion": 25.0,
+        "cache": 0.5
+    },
+    "claude-opus-4-5-20251101": {
+        "prompt": 5.0,
+        "completion": 25.0,
+        "cache": 0.5
+    },
+    "claude-opus-4-20250514": {
+        "prompt": 15.0,
+        "completion": 75.0,
+        "cache": 1.5
+    },
+    "claude-opus-4-1-20250805": {
+        "prompt": 15.0,
+        "completion": 75.0,
+        "cache": 1.5
+    },
+    "claude-sonnet-4-6": {
+        "prompt": 3.0,
+        "completion": 15.0,
+        "cache": 0.3
+    },
+    "claude-sonnet-4-5-20250929": {
+        "prompt": 3.0,
+        "completion": 15.0,
+        "cache": 0.3
+    },
+    "claude-sonnet-4-20250514": {
+        "prompt": 3.0,
+        "completion": 15.0,
+        "cache": 0.3
+    },
+    "claude-haiku-4-5-20251001": {
+        "prompt": 1.0,
+        "completion": 5.0,
+        "cache": 0.1
+    },
+    "claude-3-7-sonnet-20250219": {
+        "prompt": 3.0,
+        "completion": 15.0,
+        "cache": 0.3
+    },
+    "claude-3-5-haiku-20241022": {
+        "prompt": 0.8,
+        "completion": 4.0,
+        "cache": 0.08
+    },
+    "gpt-5.5": {
+        "prompt": 5.0,
+        "completion": 30.0,
+        "cache": 0.5
+    },
+    "gpt-5.4": {
+        "prompt": 2.5,
+        "completion": 15.0,
+        "cache": 0.25
+    },
+    "gpt-5.4-mini": {
+        "prompt": 0.75,
+        "completion": 4.5,
+        "cache": 0.075
+    },
+    "gpt-5.3-codex": {
+        "prompt": 1.75,
+        "completion": 14.0,
+        "cache": 0.175
+    },
+    "gpt-5.3-codex-spark": {
+        "prompt": 1.75,
+        "completion": 14.0,
+        "cache": 0.175
+    },
+    "gpt-5.2": {
+        "prompt": 1.75,
+        "completion": 14.0,
+        "cache": 0.175
+    },
+    "gpt-5.2-codex": {
+        "prompt": 1.75,
+        "completion": 14.0,
+        "cache": 0.175
+    },
+    "gpt-5.1": {
+        "prompt": 1.25,
+        "completion": 10.0,
+        "cache": 0.125
+    },
+    "gpt-5.1-codex": {
+        "prompt": 1.25,
+        "completion": 10.0,
+        "cache": 0.125
+    },
+    "gpt-5.1-codex-mini": {
+        "prompt": 0.25,
+        "completion": 2.0,
+        "cache": 0.025
+    },
+    "gpt-5.1-codex-max": {
+        "prompt": 1.25,
+        "completion": 10.0,
+        "cache": 0.125
+    },
+    "gpt-5": {
+        "prompt": 1.25,
+        "completion": 10.0,
+        "cache": 0.125
+    },
+    "gpt-5-codex": {
+        "prompt": 1.25,
+        "completion": 10.0,
+        "cache": 0.125
+    },
+    "gpt-5-codex-mini": {
+        "prompt": 0.4,
+        "completion": 1.6,
+        "cache": 0.1
+    },
+    "gpt-oss-120b-medium": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "gemini-3.1-pro-preview": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
+    "gemini-3.1-pro-high": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
+    "gemini-3.1-pro-low": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
+    "gemini-3-pro-preview": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
+    "gemini-3-pro-high": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
+    "gemini-3-pro-low": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
+    "gemini-3-pro-image-preview": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
+    "gemini-3-flash-preview": {
+        "prompt": 0.5,
+        "completion": 3.0,
+        "cache": 0.05
+    },
+    "gemini-3-flash": {
+        "prompt": 0.5,
+        "completion": 3.0,
+        "cache": 0.05
+    },
+    "gemini-3.1-flash-image": {
+        "prompt": 0.5,
+        "completion": 3.0,
+        "cache": 0.05
+    },
+    "gemini-3.1-flash-image-preview": {
+        "prompt": 0.5,
+        "completion": 3.0,
+        "cache": 0.05
+    },
+    "gemini-3.1-flash-lite-preview": {
+        "prompt": 0.25,
+        "completion": 1.5,
+        "cache": 0.025
+    },
+    "gemini-2.5-pro": {
+        "prompt": 1.25,
+        "completion": 10.0,
+        "cache": 0.125
+    },
+    "gemini-2.5-flash": {
+        "prompt": 0.3,
+        "completion": 2.5,
+        "cache": 0.03
+    },
+    "gemini-2.5-flash-lite": {
+        "prompt": 0.1,
+        "completion": 0.4,
+        "cache": 0.01
+    },
+    "gemini-2.5-flash-image": {
+        "prompt": 0.3,
+        "completion": 2.5,
+        "cache": 0.03
+    },
+    "gemini-pro-latest": {
+        "prompt": 1.25,
+        "completion": 10.0,
+        "cache": 0.125
+    },
+    "gemini-flash-latest": {
+        "prompt": 0.3,
+        "completion": 2.5,
+        "cache": 0.03
+    },
+    "gemini-flash-lite-latest": {
+        "prompt": 0.1,
+        "completion": 0.4,
+        "cache": 0.01
+    },
+    "imagen-4.0-generate-001": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "imagen-4.0-ultra-generate-001": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "imagen-4.0-fast-generate-001": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "imagen-3.0-generate-002": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "imagen-3.0-fast-generate-001": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "deepseek-r1": {
+        "prompt": 0.55,
+        "completion": 2.19,
+        "cache": 0.14
+    },
+    "deepseek-v3": {
+        "prompt": 0.27,
+        "completion": 1.1,
+        "cache": 0.07
+    },
+    "deepseek-v3.1": {
+        "prompt": 0.56,
+        "completion": 1.68,
+        "cache": 0.07
+    },
+    "deepseek-v3.2": {
+        "prompt": 0.28,
+        "completion": 0.42,
+        "cache": 0.028
+    },
+    "kimi-k2": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "kimi-k2-thinking": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "kimi-k2.5": {
+        "prompt": 0.6,
+        "completion": 3.0,
+        "cache": 0.1
+    },
+    "qwen3-coder-plus": {
+        "prompt": 1.0,
+        "completion": 5.0,
+        "cache": 0.1
+    },
+    "qwen3-coder-flash": {
+        "prompt": 0.3,
+        "completion": 1.5,
+        "cache": 0.03
+    },
+    "qwen3-max": {
+        "prompt": 1.2,
+        "completion": 6.0,
+        "cache": 0.12
+    },
+    "qwen3-max-preview": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "qwen3-vl-plus": {
+        "prompt": 0.2,
+        "completion": 1.6,
+        "cache": 0.02
+    },
+    "qwen3-32b": {
+        "prompt": 0.16,
+        "completion": 0.64,
+        "cache": 0.016
+    },
+    "qwen3-235b": {
+        "prompt": 0.7,
+        "completion": 2.8,
+        "cache": 0.07
+    },
+    "qwen3-235b-a22b-instruct": {
+        "prompt": 0.23,
+        "completion": 0.92,
+        "cache": 0.023
+    },
+    "qwen3-235b-a22b-thinking-2507": {
+        "prompt": 0.23,
+        "completion": 2.3,
+        "cache": 0.023
+    },
+    "glm-4.6": {
+        "prompt": 0.6,
+        "completion": 2.2,
+        "cache": 0.11
+    },
+    "iflow-rome-30ba3b": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "coder-model": {
+        "prompt": 0.4,
+        "completion": 2.4,
+        "cache": 0.04
+    },
+    "vision-model": {
+        "prompt": 0.0,
+        "completion": 0.0,
+        "cache": 0.0
+    },
+    "codex-auto-review": {
+        "prompt": 1.75,
+        "completion": 14.0,
+        "cache": 0.175
+    },
+    "gemini-3-flash-agent": {
+        "prompt": 1.5,
+        "completion": 9.0,
+        "cache": 0.15
+    },
+    "gemini-3.1-flash-lite": {
+        "prompt": 0.25,
+        "completion": 1.5,
+        "cache": 0.025
+    },
+    "gemini-3.5-flash": {
+        "prompt": 1.5,
+        "completion": 9.0,
+        "cache": 0.15
+    },
+    "gemini-3.5-flash-low": {
+        "prompt": 1.5,
+        "completion": 9.0,
+        "cache": 0.15
+    },
+    "gemini-pro-agent": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
+    "grok-3-mini": {
+        "prompt": 1.25,
+        "completion": 2.5,
+        "cache": 0.2
+    },
+    "grok-3-mini-fast": {
+        "prompt": 1.25,
+        "completion": 2.5,
+        "cache": 0.2
+    },
+    "grok-4.20-0309-non-reasoning": {
+        "prompt": 1.25,
+        "completion": 2.5,
+        "cache": 0.2
+    },
+    "grok-4.20-0309-reasoning": {
+        "prompt": 1.25,
+        "completion": 2.5,
+        "cache": 0.2
+    },
+    "grok-4.20-multi-agent-0309": {
+        "prompt": 1.25,
+        "completion": 2.5,
+        "cache": 0.2
+    },
+    "grok-4.3": {
+        "prompt": 1.25,
+        "completion": 2.5,
+        "cache": 0.2
+    },
+    "kimi-k2.6": {
+        "prompt": 0.95,
+        "completion": 4.0,
+        "cache": 0.16
+    },
+    "claude-opus-4-8": {
+        "prompt": 5.0,
+        "completion": 25.0,
+        "cache": 0.5
+    },
+    "claude-fable-5": {
+        "prompt": 5.0,
+        "completion": 25.0,
+        "cache": 0.5
+    },
+    "grok-build-0.1": {
+        "prompt": 1.25,
+        "completion": 2.5,
+        "cache": 0.2
+    },
+    "grok-composer-2.5-fast": {
+        "prompt": 1.25,
+        "completion": 2.5,
+        "cache": 0.2
+    }
+}

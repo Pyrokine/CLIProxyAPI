@@ -64,6 +64,30 @@ func GetClaudeModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
 		},
 		{
+			ID:                  "claude-opus-4-8",
+			Object:              "model",
+			Created:             1779984000, // 2026-05-29
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude Opus 4.8",
+			Description:         "Premium model combining maximum intelligence with practical performance",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 128000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:                  "claude-fable-5",
+			Object:              "model",
+			Created:             1781049600, // 2026-06-10
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude Fable 5",
+			Description:         "Anthropic's most capable widely released model, for the most demanding reasoning and long-horizon agentic work",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 128000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
 			ID:                  "claude-opus-4-6",
 			Object:              "model",
 			Created:             1770318000, // 2026-02-05
@@ -497,6 +521,10 @@ func GetOpenAIModels() []*ModelInfo {
 	if dynamic := getCodexPlusModels(); len(dynamic) > 0 {
 		return WithCodexBuiltins(dynamic)
 	}
+	return GetEmbeddedOpenAIModels()
+}
+
+func GetEmbeddedOpenAIModels() []*ModelInfo {
 	return []*ModelInfo{
 		{
 			ID:                  "gpt-5",
@@ -597,20 +625,6 @@ func GetOpenAIModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
 		},
 		{
-			ID:                  "gpt-5.2",
-			Object:              "model",
-			Created:             1765440000,
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-5.2",
-			DisplayName:         "GPT 5.2",
-			Description:         "Stable version of GPT 5.2",
-			ContextLength:       400000,
-			MaxCompletionTokens: 128000,
-			SupportedParameters: []string{"tools"},
-			Thinking:            &ThinkingSupport{Levels: []string{"none", "low", "medium", "high", "xhigh"}},
-		},
-		{
 			ID:                  "gpt-5.2-codex",
 			Object:              "model",
 			Created:             1765440000,
@@ -619,20 +633,6 @@ func GetOpenAIModels() []*ModelInfo {
 			Version:             "gpt-5.2",
 			DisplayName:         "GPT 5.2 Codex",
 			Description:         "Stable version of GPT 5.2 Codex, The best model for coding and agentic tasks across domains.",
-			ContextLength:       400000,
-			MaxCompletionTokens: 128000,
-			SupportedParameters: []string{"tools"},
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
-		},
-		{
-			ID:                  "gpt-5.3-codex",
-			Object:              "model",
-			Created:             1770307200,
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-5.3",
-			DisplayName:         "GPT 5.3 Codex",
-			Description:         "Stable version of GPT 5.3 Codex, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
@@ -908,4 +908,12 @@ func GetKimiModels() []*ModelInfo {
 // GetXAIModels returns xAI Grok model definitions including builtin image/video models.
 func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
+}
+
+func GetEmbeddedXAIModels() []*ModelInfo {
+	data := embeddedModelsCatalog()
+	if data == nil {
+		return WithXAIBuiltins(nil)
+	}
+	return WithXAIBuiltins(cloneModelInfos(data.XAI))
 }

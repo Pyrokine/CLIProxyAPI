@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	codexBuiltinImageModelID      = "gpt-image-2"
-	xaiBuiltinImageModelID        = "grok-imagine-image"
-	xaiBuiltinImageQualityModelID = "grok-imagine-image-quality"
-	xaiBuiltinVideoModelID        = "grok-imagine-video"
+	codexBuiltinImageModelID        = "gpt-image-2"
+	xaiBuiltinImageModelID          = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
+	xaiBuiltinVideoModelID          = "grok-imagine-video"
+	xaiBuiltinVideo15PreviewModelID = "grok-imagine-video-1.5-preview"
 )
 
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
@@ -36,7 +37,11 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(
-		models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(),
+		models,
+		xaiBuiltinImageModelInfo(),
+		xaiBuiltinImageQualityModelInfo(),
+		xaiBuiltinVideoModelInfo(),
+		xaiBuiltinVideo15PreviewModelInfo(),
 	)
 }
 
@@ -88,6 +93,19 @@ func xaiBuiltinVideoModelInfo() *ModelInfo {
 		DisplayName: "Grok Imagine Video",
 		Name:        xaiBuiltinVideoModelID,
 		Description: "xAI Grok video generation model.",
+	}
+}
+
+func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          xaiBuiltinVideo15PreviewModelID,
+		Object:      "model",
+		Created:     1735689600,
+		OwnedBy:     "xai",
+		Type:        "xai",
+		DisplayName: "Grok Imagine Video 1.5 Preview",
+		Name:        xaiBuiltinVideo15PreviewModelID,
+		Description: "xAI Grok preview video generation model.",
 	}
 }
 
