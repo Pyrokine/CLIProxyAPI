@@ -91,6 +91,14 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
+	serviceTier := strings.TrimSpace(record.ServiceTier)
+	if serviceTier == "" {
+		serviceTier = coreusage.ServiceTierFromContext(ctx)
+	}
+	executorType := strings.TrimSpace(record.ExecutorType)
+	if executorType == "" {
+		executorType = "unknown"
+	}
 
 	tokens := tokenStats{
 		InputTokens:         record.Detail.InputTokens,
@@ -102,10 +110,11 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		TotalTokens:         record.Detail.TotalTokens,
 	}
 	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens
-	}
-	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
+		cachedTokens := tokens.CachedTokens
+		if cachedTokens == 0 {
+			cachedTokens = tokens.CacheReadTokens + tokens.CacheCreationTokens
+		}
+		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + cachedTokens
 	}
 
 	failed := record.Failed
@@ -117,6 +126,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	detail := requestDetail{
 		Timestamp:       timestamp,
 		LatencyMs:       record.Latency.Milliseconds(),
+		TTFTMs:          record.TimeToFirstByteMs,
 		Thinking:        cloneThinking(record.Thinking),
 		Source:          record.Source,
 		AuthIndex:       record.AuthIndex,
@@ -130,6 +140,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		queuedUsageDetail{
 			requestDetail:   detail,
 			Provider:        provider,
+			ExecutorType:    executorType,
 			Model:           modelName,
 			Alias:           aliasName,
 			Endpoint:        resolveEndpoint(ctx),
@@ -137,6 +148,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 			APIKey:          apiKey,
 			RequestID:       requestID,
 			ReasoningEffort: reasoningEffort,
+			ServiceTier:     serviceTier,
 		},
 	)
 	if err != nil {
@@ -148,6 +160,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 type queuedUsageDetail struct {
 	requestDetail
 	Provider        string `json:"provider"`
+	ExecutorType    string `json:"executor_type"`
 	Model           string `json:"model"`
 	Alias           string `json:"alias"`
 	Endpoint        string `json:"endpoint"`
@@ -155,11 +168,13 @@ type queuedUsageDetail struct {
 	APIKey          string `json:"api_key"`
 	RequestID       string `json:"request_id"`
 	ReasoningEffort string `json:"reasoning_effort"`
+	ServiceTier     string `json:"service_tier"`
 }
 
 type requestDetail struct {
 	Timestamp       time.Time           `json:"timestamp"`
 	LatencyMs       int64               `json:"latency_ms"`
+	TTFTMs          int64               `json:"ttft_ms"`
 	Thinking        *coreusage.Thinking `json:"thinking,omitempty"`
 	Source          string              `json:"source"`
 	AuthIndex       string              `json:"auth_index"`

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
 )
@@ -29,20 +30,23 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			plugin := &usageQueuePlugin{}
 			plugin.HandleUsage(
 				ctx, coreusage.Record{
-					Provider:        "openai",
-					Model:           "gpt-5.4",
-					Alias:           "client-gpt",
-					APIKey:          "test-key",
-					AuthIndex:       "0",
-					AuthType:        "apikey",
-					Source:          "user@example.com",
-					ReasoningEffort: "medium",
-					RequestedAt:     time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-					Latency:         1500 * time.Millisecond,
+					Provider:          "openai",
+					ExecutorType:      "OpenAICompatExecutor",
+					Model:             "gpt-5.4",
+					Alias:             "client-gpt",
+					APIKey:            "test-key",
+					AuthIndex:         "0",
+					AuthType:          "apikey",
+					Source:            "user@example.com",
+					ReasoningEffort:   "medium",
+					ServiceTier:       "flex",
+					RequestedAt:       time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+					Latency:           1500 * time.Millisecond,
+					TimeToFirstByteMs: 250,
 					Detail: coreusage.Detail{
 						InputTokens:  10,
 						OutputTokens: 20,
-						TotalTokens:  30,
+						CachedTokens: 5,
 					},
 					ResponseHeaders: responseHeaders.Clone(),
 				},
@@ -51,6 +55,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 			payload := popSinglePayload(t)
 			requireStringField(t, payload, "provider", "openai")
+			requireStringField(t, payload, "executor_type", "OpenAICompatExecutor")
 			requireStringField(t, payload, "model", "gpt-5.4")
 			requireStringField(t, payload, "alias", "client-gpt")
 			requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
@@ -59,6 +64,10 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireMissingField(t, payload, "user_api_key")
 			requireStringField(t, payload, "request_id", "ctx-request-id")
 			requireStringField(t, payload, "reasoning_effort", "medium")
+			requireStringField(t, payload, "service_tier", "flex")
+			requireIntField(t, payload, "ttft_ms", 250)
+			requireTokenField(t, payload, "total_tokens", 35)
+			requireTokenField(t, payload, "cached_tokens", 5)
 			requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 			requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 			requireHeaderNotPresent(t, payload, "response_headers", "Set-Cookie")
@@ -172,7 +181,7 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 	withEnabledQueue(
 		t, func() {
 			ginCtx := newTestGinContext(t, http.MethodPost, "/v1/chat/completions", http.StatusOK)
-			ctx := context.WithValue(context.Background(), "gin", ginCtx)
+			ctx := util.WithGinContext(context.Background(), ginCtx)
 			ctx = internallogging.WithRequestID(ctx, "ctx-request-id")
 			ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
 			ctx = internallogging.WithResponseStatusHolder(ctx)
@@ -339,6 +348,38 @@ func requireBoolField(t *testing.T, payload map[string]json.RawMessage, key stri
 	}
 	if got != want {
 		t.Fatalf("%s = %t, want %t", key, got, want)
+	}
+}
+
+func requireIntField(t *testing.T, payload map[string]json.RawMessage, key string, want int64) {
+	t.Helper()
+
+	raw, ok := payload[key]
+	if !ok {
+		t.Fatalf("payload missing %q", key)
+	}
+	var got int64
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal %q: %v", key, err)
+	}
+	if got != want {
+		t.Fatalf("%s = %d, want %d", key, got, want)
+	}
+}
+
+func requireTokenField(t *testing.T, payload map[string]json.RawMessage, key string, want int64) {
+	t.Helper()
+
+	raw, ok := payload["tokens"]
+	if !ok {
+		t.Fatalf("payload missing %q", "tokens")
+	}
+	var tokens map[string]int64
+	if err := json.Unmarshal(raw, &tokens); err != nil {
+		t.Fatalf("unmarshal tokens: %v", err)
+	}
+	if got := tokens[key]; got != want {
+		t.Fatalf("tokens[%q] = %d, want %d", key, got, want)
 	}
 }
 

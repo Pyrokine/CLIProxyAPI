@@ -10,6 +10,9 @@ const (
 	defaultRetentionSeconds int64 = 60
 	maxRetentionSeconds     int64 = 3600
 	usageSubscriberBuffer         = 256
+
+	usageSupportRefreshPayload = `{"support_refresh":true}`
+	usageRefreshPayload        = `{"refresh":true}`
 )
 
 type queueItem struct {
@@ -80,7 +83,11 @@ func PopOldest(count int) [][]byte {
 }
 
 func SubscribeUsage() (<-chan []byte, func()) {
-	return global.subscribeUsage()
+	return global.subscribeUsage([]byte(usageSupportRefreshPayload))
+}
+
+func NotifyUsageRefresh() {
+	global.publishToSubscribers([]byte(usageRefreshPayload))
 }
 
 func (q *queue) clear() {
@@ -137,7 +144,7 @@ func (q *queue) publishToSubscribers(payload []byte) bool {
 	return true
 }
 
-func (q *queue) subscribeUsage() (<-chan []byte, func()) {
+func (q *queue) subscribeUsage(initialPayload []byte) (<-chan []byte, func()) {
 	subscriber := make(chan []byte, usageSubscriberBuffer)
 
 	q.mu.Lock()
@@ -147,6 +154,9 @@ func (q *queue) subscribeUsage() (<-chan []byte, func()) {
 	q.nextSubscriberID++
 	id := q.nextSubscriberID
 	q.subscribers[id] = subscriber
+	if len(initialPayload) > 0 {
+		subscriber <- append([]byte(nil), initialPayload...)
+	}
 	q.mu.Unlock()
 
 	var once sync.Once

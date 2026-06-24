@@ -12,6 +12,8 @@ func TestEnqueueBroadcastsToUsageSubscribersAndSkipsQueue(t *testing.T) {
 			defer unsubscribeFirst()
 			second, unsubscribeSecond := SubscribeUsage()
 			defer unsubscribeSecond()
+			requireUsageSubscriberPayload(t, first, usageSupportRefreshPayload)
+			requireUsageSubscriberPayload(t, second, usageSupportRefreshPayload)
 
 			Enqueue([]byte("usage-record"))
 
@@ -39,6 +41,7 @@ func TestSetEnabledFalseClosesUsageSubscribers(t *testing.T) {
 		t, func() {
 			subscriber, unsubscribe := SubscribeUsage()
 			defer unsubscribe()
+			requireUsageSubscriberPayload(t, subscriber, usageSupportRefreshPayload)
 
 			SetEnabled(false)
 
@@ -50,6 +53,20 @@ func TestSetEnabledFalseClosesUsageSubscribers(t *testing.T) {
 			case <-time.After(time.Second):
 				t.Fatalf("timeout waiting for subscriber close")
 			}
+		},
+	)
+}
+
+func TestNotifyUsageRefreshBroadcastsToUsageSubscribers(t *testing.T) {
+	withEnabledQueue(
+		t, func() {
+			subscriber, unsubscribe := SubscribeUsage()
+			defer unsubscribe()
+			requireUsageSubscriberPayload(t, subscriber, usageSupportRefreshPayload)
+
+			NotifyUsageRefresh()
+
+			requireUsageSubscriberPayload(t, subscriber, usageRefreshPayload)
 		},
 	)
 }
