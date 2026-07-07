@@ -129,7 +129,10 @@ func (w *Watcher) reloadClientsWithConfig(
 								IDGenerator:      synthesizer.NewStableIDGenerator(),
 								PluginAuthParser: parser,
 							}
-							if generated := synthesizer.SynthesizeAuthFile(ctx, path, data); len(generated) > 0 {
+							generated, errSynthesize := synthesizer.SynthesizeAuthFile(ctx, path, data)
+							if errSynthesize != nil {
+								log.Errorf("failed to synthesize auth file %s: %v", filepath.Base(path), errSynthesize)
+							} else if len(generated) > 0 {
 								if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
 									w.fileAuthsByPath[normalizedPath] = authIDSet(pathAuths)
 								}
@@ -238,7 +241,11 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		IDGenerator:      synthesizer.NewStableIDGenerator(),
 		PluginAuthParser: parser,
 	}
-	generated := synthesizer.SynthesizeAuthFile(sctx, path, data)
+	generated, errSynthesize := synthesizer.SynthesizeAuthFile(sctx, path, data)
+	if errSynthesize != nil {
+		log.Errorf("failed to synthesize auth file %s: %v", filepath.Base(path), errSynthesize)
+		generated = nil
+	}
 	newByID := authSliceToMap(generated)
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = authIDSet(newByID)

@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// DisableImageGenerationMode is a tri-state config value controlling image generation endpoints.
+// DisableImageGenerationMode controls image generation endpoint and tool filtering behavior.
 type DisableImageGenerationMode int
 
 const (
@@ -16,6 +16,8 @@ const (
 	DisableImageGenerationAll
 	// DisableImageGenerationChat disables image generation when the request originates from chat.
 	DisableImageGenerationChat
+	// DisableImageGenerationPassthrough keeps client-supplied image generation tools untouched.
+	DisableImageGenerationPassthrough
 )
 
 func parseDisableImageGenerationMode(s string) (DisableImageGenerationMode, error) {
@@ -26,9 +28,11 @@ func parseDisableImageGenerationMode(s string) (DisableImageGenerationMode, erro
 		return DisableImageGenerationAll, nil
 	case "chat":
 		return DisableImageGenerationChat, nil
+	case "passthrough":
+		return DisableImageGenerationPassthrough, nil
 	default:
 		return DisableImageGenerationOff, fmt.Errorf(
-			"unknown disable-image-generation value %q (expected off/all/chat)", s,
+			"unknown disable-image-generation value %q (expected off/all/chat/passthrough)", s,
 		)
 	}
 }
@@ -39,6 +43,8 @@ func (m DisableImageGenerationMode) String() string {
 		return "all"
 	case DisableImageGenerationChat:
 		return "chat"
+	case DisableImageGenerationPassthrough:
+		return "passthrough"
 	default:
 		return "off"
 	}
@@ -49,7 +55,7 @@ func (m DisableImageGenerationMode) MarshalYAML() (any, error) {
 	return m.String(), nil
 }
 
-// UnmarshalYAML accepts both string ("off"/"all"/"chat") and bool/int YAML values.
+// UnmarshalYAML accepts string ("off"/"all"/"chat"/"passthrough") and bool/int YAML values.
 func (m *DisableImageGenerationMode) UnmarshalYAML(unmarshal func(any) error) error {
 	var s string
 	if err := unmarshal(&s); err != nil {

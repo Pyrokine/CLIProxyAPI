@@ -25,7 +25,6 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
-	cfg.AmpCode.RestrictManagementToLocalhost = false
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.RemoteManagement.CPAGitHubRepository = defaultCPAGitHubRepository
 	cfg.WebsocketAuth = true

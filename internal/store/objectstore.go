@@ -603,7 +603,9 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: time.Time{},
 	}
-	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+	if err := cliproxyauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
+		return nil, err
+	}
 	return auth, nil
 }
 

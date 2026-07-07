@@ -46,7 +46,8 @@
                 "levels": [
                     "low",
                     "medium",
-                    "high"
+                    "high",
+                    "max"
                 ]
             }
         },
@@ -191,6 +192,28 @@
                 "min": 1024,
                 "max": 128000,
                 "zero_allowed": true,
+                "levels": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            }
+        },
+        {
+            "id": "claude-sonnet-5",
+            "object": "model",
+            "created": 1782777600,
+            "owned_by": "anthropic",
+            "type": "claude",
+            "display_name": "Claude Sonnet 5",
+            "description": "Anthropic's agentic Sonnet model for coding, tool use, and enterprise workflows",
+            "context_length": 1000000,
+            "max_completion_tokens": 128000,
+            "thinking": {
+                "zero_allowed": true,
+                "dynamic_allowed": true,
                 "levels": [
                     "low",
                     "medium",
@@ -2079,6 +2102,23 @@
                 "zero_allowed": true,
                 "dynamic_allowed": true
             }
+        },
+        {
+            "id": "kimi-k2.7-code",
+            "object": "model",
+            "created": 1780396800,
+            "owned_by": "moonshot",
+            "type": "kimi",
+            "display_name": "Kimi K2.7 Code",
+            "description": "Kimi K2.7 Code - Moonshot AI's latest coding-focused model",
+            "context_length": 262144,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "min": 1024,
+                "max": 32000,
+                "zero_allowed": false,
+                "dynamic_allowed": true
+            }
         }
     ],
     "antigravity": [
@@ -2156,46 +2196,6 @@
                     "minimal",
                     "low",
                     "medium",
-                    "high"
-                ]
-            }
-        },
-        {
-            "id": "gemini-3-pro-high",
-            "object": "model",
-            "owned_by": "antigravity",
-            "type": "antigravity",
-            "display_name": "Gemini 3 Pro (High)",
-            "name": "gemini-3-pro-high",
-            "description": "Gemini 3 Pro (High)",
-            "context_length": 1048576,
-            "max_completion_tokens": 65535,
-            "thinking": {
-                "min": 128,
-                "max": 32768,
-                "dynamic_allowed": true,
-                "levels": [
-                    "low",
-                    "high"
-                ]
-            }
-        },
-        {
-            "id": "gemini-3-pro-low",
-            "object": "model",
-            "owned_by": "antigravity",
-            "type": "antigravity",
-            "display_name": "Gemini 3 Pro (Low)",
-            "name": "gemini-3-pro-low",
-            "description": "Gemini 3 Pro (Low)",
-            "context_length": 1048576,
-            "max_completion_tokens": 65535,
-            "thinking": {
-                "min": 128,
-                "max": 32768,
-                "dynamic_allowed": true,
-                "levels": [
-                    "low",
                     "high"
                 ]
             }
@@ -2429,16 +2429,7 @@
             "name": "grok-build-0.1",
             "description": "Grok Build 0.1 is xAI’s fast coding model trained specifically for agentic software engineering workflows.",
             "context_length": 256000,
-            "max_completion_tokens": 256000,
-            "thinking": {
-                "zero_allowed": true,
-                "levels": [
-                    "none",
-                    "low",
-                    "medium",
-                    "high"
-                ]
-            }
+            "max_completion_tokens": 256000
         },
         {
             "id": "grok-composer-2.5-fast",
@@ -2449,15 +2440,8 @@
             "display_name": "Composer 2.5 Fast",
             "name": "grok-composer-2.5-fast",
             "description": "xAI Composer 2.5 Fast model for the Responses API.",
-            "context_length": 131072,
-            "max_completion_tokens": 32768,
-            "thinking": {
-                "levels": [
-                    "low",
-                    "medium",
-                    "high"
-                ]
-            }
+            "context_length": 200000,
+            "max_completion_tokens": 32768
         }
     ]
 }

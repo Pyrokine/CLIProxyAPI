@@ -1,12 +1,8 @@
 package diff
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"sort"
 	"strings"
-
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
 // summarizeExcludedModels normalizes and hashes an excluded-model list.
@@ -55,29 +51,4 @@ func OAuthExcludedModelChanges(oldMap, newMap map[string][]string) ([]string, []
 		summarizeOAuthExcludedModels(newMap),
 		"oauth-excluded-models",
 	)
-}
-
-// summarizeAmpModelMappings hashes Amp model mappings for change detection.
-func summarizeAmpModelMappings(mappings []config.AmpModelMapping) modelsSummary {
-	if len(mappings) == 0 {
-		return modelsSummary{}
-	}
-	entries := make([]string, 0, len(mappings))
-	for _, mapping := range mappings {
-		from := strings.TrimSpace(mapping.From)
-		to := strings.TrimSpace(mapping.To)
-		if from == "" && to == "" {
-			continue
-		}
-		entries = append(entries, from+"->"+to)
-	}
-	if len(entries) == 0 {
-		return modelsSummary{}
-	}
-	sort.Strings(entries)
-	sum := sha256.Sum256([]byte(strings.Join(entries, "|")))
-	return modelsSummary{
-		hash:  hex.EncodeToString(sum[:]),
-		count: len(entries),
-	}
 }

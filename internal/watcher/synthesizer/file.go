@@ -50,7 +50,11 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		if errRead != nil || len(data) == 0 {
 			continue
 		}
-		if auths := synthesizeFileAuths(ctx, full, data); len(auths) > 0 {
+		auths, errSynthesize := synthesizeFileAuths(ctx, full, data)
+		if errSynthesize != nil {
+			return nil, errSynthesize
+		}
+		if len(auths) > 0 {
 			out = append(out, auths...)
 		}
 	}
@@ -58,20 +62,20 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 }
 
 // SynthesizeAuthFile generates Auth entries for one auth JSON file payload.
-func SynthesizeAuthFile(ctx *SynthesisContext, fullPath string, data []byte) []*coreauth.Auth {
+func SynthesizeAuthFile(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, error) {
 	return synthesizeFileAuths(ctx, fullPath, data)
 }
 
-func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []*coreauth.Auth {
+func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, error) {
 	if ctx == nil || len(data) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	now := ctx.Now
 	cfg := ctx.Config
 	var metadata map[string]any
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
-		return nil
+		return nil, nil
 	}
 	t, _ := metadata["type"].(string)
 	provider := strings.ToLower(strings.TrimSpace(t))
@@ -94,12 +98,14 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			auth.Attributes["source"] = fullPath
 			perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
 			ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
-			coreauth.ApplyCustomHeadersFromMetadata(auth)
-			return []*coreauth.Auth{auth}
+			if err := coreauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
+				return nil, err
+			}
+			return []*coreauth.Auth{auth}, nil
 		}
 	}
 	if provider == "" {
-		return nil
+		return nil, nil
 	}
 	if provider == "gemini" {
 		provider = "gemini-cli"
@@ -156,7 +162,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	coreauth.ApplyCustomHeadersFromMetadata(a)
+	if err := coreauth.ApplyCustomHeadersFromMetadata(a); err != nil {
+		return nil, err
+	}
 	// Read priority from auth file
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {
@@ -178,10 +186,10 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 			out := make([]*coreauth.Auth, 0, 1+len(virtuals))
 			out = append(out, a)
 			out = append(out, virtuals...)
-			return out
+			return out, nil
 		}
 	}
-	return []*coreauth.Auth{a}
+	return []*coreauth.Auth{a}, nil
 }
 
 // synthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.

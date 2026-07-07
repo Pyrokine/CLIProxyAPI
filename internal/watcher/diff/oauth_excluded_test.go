@@ -40,34 +40,6 @@ func TestOAuthExcludedModelChanges(t *testing.T) {
 	}
 }
 
-func TestSummarizeAmpModelMappings(t *testing.T) {
-	summary := summarizeAmpModelMappings(
-		[]config.AmpModelMapping{
-			{From: "a", To: "A"},
-			{From: "b", To: "B"},
-			{From: " ", To: " "}, // ignored
-		},
-	)
-	if summary.count != 2 {
-		t.Fatalf("expected 2 entries, got %d", summary.count)
-	}
-	if summary.hash == "" {
-		t.Fatal("expected non-empty hash")
-	}
-	if empty := summarizeAmpModelMappings(nil); empty.count != 0 || empty.hash != "" {
-		t.Fatalf("expected empty summary for nil input, got %+v", empty)
-	}
-	if blank := summarizeAmpModelMappings(
-		[]config.AmpModelMapping{
-			{
-				From: " ", To: " ",
-			},
-		},
-	); blank.count != 0 || blank.hash != "" {
-		t.Fatalf("expected blank mappings ignored, got %+v", blank)
-	}
-}
-
 func TestSummarizeOAuthExcludedModels_NormalizesKeys(t *testing.T) {
 	out := summarizeOAuthExcludedModels(
 		map[string][]string{

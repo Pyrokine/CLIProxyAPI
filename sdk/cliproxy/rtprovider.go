@@ -36,6 +36,10 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	if rt != nil {
 		return rt
 	}
+	if errValidate := proxyutil.ValidateProxyURL(proxyStr); errValidate != nil {
+		log.Errorf("proxy URL rejected: %v", errValidate)
+		return nil
+	}
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
 	if errBuild != nil {
 		log.Errorf("build proxy transport failed: %v", errBuild)

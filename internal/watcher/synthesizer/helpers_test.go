@@ -235,17 +235,18 @@ func TestAddConfigHeadersToAttrs(t *testing.T) {
 		headers map[string]string
 		attrs   map[string]string
 		want    map[string]string
+		wantErr bool
 	}{
 		{
 			name: "basic headers",
 			headers: map[string]string{
-				"Authorization": "Bearer token",
+				"X-API-Version": "2024-01-01",
 				"X-Custom":      "value",
 			},
 			attrs: map[string]string{"existing": "key"},
 			want: map[string]string{
 				"existing":             "key",
-				"header:Authorization": "Bearer token",
+				"header:X-API-Version": "2024-01-01",
 				"header:X-Custom":      "value",
 			},
 		},
@@ -280,12 +281,25 @@ func TestAddConfigHeadersToAttrs(t *testing.T) {
 				"header:valid": "valid-value",
 			},
 		},
+		{
+			name:    "reject restricted header",
+			headers: map[string]string{"Authorization": "Bearer token"},
+			attrs:   map[string]string{"existing": "key"},
+			want:    map[string]string{"existing": "key"},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				addConfigHeadersToAttrs(tt.headers, tt.attrs)
+				err := addConfigHeadersToAttrs(tt.headers, tt.attrs)
+				if tt.wantErr && err == nil {
+					t.Fatal("expected error")
+				}
+				if !tt.wantErr && err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
 				if !reflect.DeepEqual(tt.attrs, tt.want) {
 					t.Errorf("expected %v, got %v", tt.want, tt.attrs)
 				}

@@ -25,22 +25,37 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 		return out, nil
 	}
 
-	// Gemini API Keys
-	out = append(out, s.synthesizeGeminiKeys(ctx)...)
-	// Claude API Keys
-	out = append(out, s.synthesizeClaudeKeys(ctx)...)
-	// Codex API Keys
-	out = append(out, s.synthesizeCodexKeys(ctx)...)
-	// OpenAI-compat
-	out = append(out, s.synthesizeOpenAICompat(ctx)...)
-	// Vertex-compat
-	out = append(out, s.synthesizeVertexCompat(ctx)...)
+	geminiKeys, err := s.synthesizeGeminiKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, geminiKeys...)
+	claudeKeys, err := s.synthesizeClaudeKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, claudeKeys...)
+	codexKeys, err := s.synthesizeCodexKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, codexKeys...)
+	openAICompat, err := s.synthesizeOpenAICompat(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, openAICompat...)
+	vertexCompat, err := s.synthesizeVertexCompat(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, vertexCompat...)
 
 	return out, nil
 }
 
 // synthesizeGeminiKeys creates Auth entries for Gemini API keys.
-func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*coreauth.Auth {
+func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	cfg := ctx.Config
 	now := ctx.Now
 	idGen := ctx.IDGenerator
@@ -69,7 +84,9 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		if hash := diff.ComputeGeminiModelsHash(entry.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
-		addConfigHeadersToAttrs(entry.Headers, attrs)
+		if err := addConfigHeadersToAttrs(entry.Headers, attrs); err != nil {
+			return nil, err
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "gemini",
@@ -84,11 +101,11 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 		out = append(out, a)
 	}
-	return out
+	return out, nil
 }
 
 // synthesizeClaudeKeys creates Auth entries for Claude API keys.
-func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*coreauth.Auth {
+func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	cfg := ctx.Config
 	now := ctx.Now
 	idGen := ctx.IDGenerator
@@ -113,10 +130,15 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if base != "" {
 			attrs["base_url"] = base
 		}
+		if ck.RebuildMidSystemMessage {
+			attrs["rebuild_mid_system_message"] = "true"
+		}
 		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
-		addConfigHeadersToAttrs(ck.Headers, attrs)
+		if err := addConfigHeadersToAttrs(ck.Headers, attrs); err != nil {
+			return nil, err
+		}
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
@@ -132,11 +154,11 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
 		out = append(out, a)
 	}
-	return out
+	return out, nil
 }
 
 // synthesizeCodexKeys creates Auth entries for Codex API keys.
-func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreauth.Auth {
+func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	cfg := ctx.Config
 	now := ctx.Now
 	idGen := ctx.IDGenerator
@@ -166,7 +188,9 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
-		addConfigHeadersToAttrs(ck.Headers, attrs)
+		if err := addConfigHeadersToAttrs(ck.Headers, attrs); err != nil {
+			return nil, err
+		}
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
@@ -182,11 +206,11 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
 		out = append(out, a)
 	}
-	return out
+	return out, nil
 }
 
 // synthesizeOpenAICompat creates Auth entries for OpenAI-compatible providers.
-func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*coreauth.Auth {
+func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	cfg := ctx.Config
 	now := ctx.Now
 	idGen := ctx.IDGenerator
@@ -227,7 +251,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
 			}
-			addConfigHeadersToAttrs(compat.Headers, attrs)
+			if err := addConfigHeadersToAttrs(compat.Headers, attrs); err != nil {
+				return nil, err
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
@@ -258,7 +284,9 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
 			}
-			addConfigHeadersToAttrs(compat.Headers, attrs)
+			if err := addConfigHeadersToAttrs(compat.Headers, attrs); err != nil {
+				return nil, err
+			}
 			a := &coreauth.Auth{
 				ID:         id,
 				Provider:   providerName,
@@ -272,11 +300,11 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			out = append(out, a)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // synthesizeVertexCompat creates Auth entries for Vertex-compatible providers.
-func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*coreauth.Auth {
+func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
 	cfg := ctx.Config
 	now := ctx.Now
 	idGen := ctx.IDGenerator
@@ -306,7 +334,9 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		if hash := diff.ComputeVertexCompatModelsHash(compat.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
-		addConfigHeadersToAttrs(compat.Headers, attrs)
+		if err := addConfigHeadersToAttrs(compat.Headers, attrs); err != nil {
+			return nil, err
+		}
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   providerName,
@@ -321,5 +351,5 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		ApplyAuthExcludedModelsMeta(a, cfg, nil, "apikey")
 		out = append(out, a)
 	}
-	return out
+	return out, nil
 }

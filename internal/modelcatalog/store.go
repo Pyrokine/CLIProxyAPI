@@ -105,6 +105,9 @@ func ReplacePrices(configPath string, prices map[string]Price) (File, error) {
 			continue
 		}
 		model := doc.EnsureModel(name, true)
+		if model == nil {
+			continue
+		}
 		price := normalizedPrices[name]
 		model.Price = &price
 	}
@@ -195,6 +198,9 @@ func applyLegacyPrices(filePath string, doc *File) error {
 	sort.Strings(names)
 	for _, name := range names {
 		model := doc.EnsureModel(name, true)
+		if model == nil {
+			continue
+		}
 		price := normalizedPrices[name]
 		model.Price = &price
 	}
@@ -207,6 +213,7 @@ func ReplaceOAuthModelAlias(doc *File, aliases map[string][]config.OAuthModelAli
 	}
 	for i := range doc.Models {
 		doc.Models[i].Aliases = nil
+		doc.Models[i].ForceMappedAliases = nil
 	}
 	ApplyOAuthModelAlias(doc, aliases)
 	doc.Sanitize()
@@ -243,6 +250,7 @@ func deleteOAuthModelAliasChannel(doc *File, channel string) bool {
 			continue
 		}
 		doc.Models[i].Aliases = nil
+		doc.Models[i].ForceMappedAliases = nil
 		changed = true
 	}
 	return changed
@@ -309,10 +317,22 @@ func applyOAuthModelAliasEntry(doc *File, channel string, alias config.OAuthMode
 	}
 	for _, existing := range model.Aliases {
 		if strings.EqualFold(existing, aliasName) {
+			if alias.ForceMapping {
+				for _, forceMappedAlias := range model.ForceMappedAliases {
+					if strings.EqualFold(forceMappedAlias, aliasName) {
+						return false
+					}
+				}
+				model.ForceMappedAliases = append(model.ForceMappedAliases, aliasName)
+				return true
+			}
 			return false
 		}
 	}
 	model.Aliases = append(model.Aliases, aliasName)
+	if alias.ForceMapping {
+		model.ForceMappedAliases = append(model.ForceMappedAliases, aliasName)
+	}
 	return true
 }
 
@@ -327,6 +347,9 @@ func applyLegacyConfig(cfg *config.Config, doc *File) {
 			continue
 		}
 		model := doc.EnsureModel(name, true)
+		if model == nil {
+			continue
+		}
 		if provider := strings.TrimSpace(entry.Provider); provider != "" {
 			model.Provider = provider
 		}

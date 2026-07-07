@@ -20,15 +20,16 @@ type Price struct {
 }
 
 type Model struct {
-	Name        string   `json:"name"`
-	Provider    string   `json:"provider"`
-	Channel     string   `json:"channel"`
-	Group       string   `json:"group"`
-	DisplayName string   `json:"display_name,omitempty"`
-	UserCreated bool     `json:"user_created"`
-	Enabled     bool     `json:"enabled"`
-	Aliases     []string `json:"aliases,omitempty"`
-	Price       *Price   `json:"price,omitempty"`
+	Name               string   `json:"name"`
+	Provider           string   `json:"provider"`
+	Channel            string   `json:"channel"`
+	Group              string   `json:"group"`
+	DisplayName        string   `json:"display_name,omitempty"`
+	UserCreated        bool     `json:"user_created"`
+	Enabled            bool     `json:"enabled"`
+	Aliases            []string `json:"aliases,omitempty"`
+	ForceMappedAliases []string `json:"force_mapped_aliases,omitempty"`
+	Price              *Price   `json:"price,omitempty"`
 }
 
 type File struct {
@@ -94,6 +95,7 @@ func (m *Model) sanitize() {
 	}
 	m.DisplayName = strings.TrimSpace(m.DisplayName)
 	m.Aliases = uniqueStrings(m.Aliases)
+	m.ForceMappedAliases = filterStringsBySet(uniqueStrings(m.ForceMappedAliases), m.Aliases)
 }
 
 func (f *File) Find(name string) (*Model, bool) {
@@ -198,14 +200,21 @@ func (f *File) ToOAuthModelAlias() map[string][]config.OAuthModelAlias {
 		if channel == "" || name == "" || len(model.Aliases) == 0 {
 			continue
 		}
+		forceMappedAliases := stringSet(model.ForceMappedAliases)
 		for _, alias := range model.Aliases {
 			alias = strings.TrimSpace(alias)
 			if alias == "" || strings.EqualFold(alias, name) {
 				continue
 			}
+			forceMapping := false
+			if _, ok := forceMappedAliases[strings.ToLower(alias)]; ok {
+				forceMapping = true
+			}
 			for _, aliasChannel := range oauthAliasChannelsForModel(model.Provider, channel) {
 				out[aliasChannel] = append(
-					out[aliasChannel], config.OAuthModelAlias{Name: name, Alias: alias, Fork: true},
+					out[aliasChannel], config.OAuthModelAlias{
+						Name: name, Alias: alias, Fork: true, ForceMapping: forceMapping,
+					},
 				)
 			}
 		}
@@ -260,5 +269,33 @@ func uniqueStrings(values []string) []string {
 		out = append(out, value)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func filterStringsBySet(values, allowed []string) []string {
+	if len(values) == 0 || len(allowed) == 0 {
+		return nil
+	}
+	allowedSet := stringSet(allowed)
+	out := values[:0]
+	for _, value := range values {
+		if _, ok := allowedSet[strings.ToLower(strings.TrimSpace(value))]; ok {
+			out = append(out, value)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func stringSet(values []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		key := strings.ToLower(strings.TrimSpace(value))
+		if key != "" {
+			out[key] = struct{}{}
+		}
+	}
 	return out
 }

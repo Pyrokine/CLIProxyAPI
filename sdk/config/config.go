@@ -17,7 +17,6 @@ type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
 type HomeConfig = internalconfig.HomeConfig
 type HomeTLSConfig = internalconfig.HomeTLSConfig
-type AmpCode = internalconfig.AmpCode
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule

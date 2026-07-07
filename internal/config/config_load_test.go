@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestApplyHomeRuntimeConfig(t *testing.T) {
@@ -48,6 +50,65 @@ func TestParseConfigBytes_HostDefaultsToLoopback(t *testing.T) {
 	}
 	if cfg.Host != "127.0.0.1" {
 		t.Fatalf("Host = %q, want 127.0.0.1", cfg.Host)
+	}
+}
+
+func TestParseConfigBytes_PluginStoreSources(t *testing.T) {
+	cfg, err := ParseConfigBytes(
+		[]byte(`
+plugins:
+  store-sources:
+    - " https://example.com/plugins.json "
+    - ""
+    - "https://mirror.example.com/store.json"
+`),
+	)
+	if err != nil {
+		t.Fatalf("ParseConfigBytes: %v", err)
+	}
+
+	want := []string{"https://example.com/plugins.json", "https://mirror.example.com/store.json"}
+	if len(cfg.Plugins.StoreSources) != len(want) {
+		t.Fatalf("StoreSources = %#v, want %#v", cfg.Plugins.StoreSources, want)
+	}
+	for i, item := range want {
+		if cfg.Plugins.StoreSources[i] != item {
+			t.Fatalf("StoreSources[%d] = %q, want %q", i, cfg.Plugins.StoreSources[i], item)
+		}
+	}
+}
+
+func TestPluginInstanceConfigMarshalYAMLPreservesStoreMetadata(t *testing.T) {
+	var cfg struct {
+		Plugin PluginInstanceConfig `yaml:"plugin"`
+	}
+	if err := yaml.Unmarshal(
+		[]byte(`
+plugin:
+  enabled: true
+  priority: 7
+  store:
+    id: sample
+    version: v1.2.3
+    source_url: https://example.com/plugins.json
+  custom:
+    nested: value
+`), &cfg,
+	); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	text := string(out)
+	for _, want := range []string{
+		"store:", "version: v1.2.3", "source_url: https://example.com/plugins.json", "custom:", "nested: value",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("marshaled config missing %q:\n%s", want, text)
+		}
 	}
 }
 

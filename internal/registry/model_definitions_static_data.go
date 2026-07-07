@@ -49,7 +49,10 @@ func GetClaudeModels() []*ModelInfo {
 			DisplayName:         "Claude 4.6 Sonnet",
 			ContextLength:       200000,
 			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+			Thinking: &ThinkingSupport{
+				Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false,
+				Levels: []string{"low", "medium", "high", "max"},
+			},
 		},
 		{
 			ID:                  "claude-opus-4-7",
@@ -74,6 +77,21 @@ func GetClaudeModels() []*ModelInfo {
 			ContextLength:       1000000,
 			MaxCompletionTokens: 128000,
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: false},
+		},
+		{
+			ID:                  "claude-sonnet-5",
+			Object:              "model",
+			Created:             1782777600, // 2026-06-30
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude Sonnet 5",
+			Description:         "Anthropic's agentic Sonnet model for coding, tool use, and enterprise workflows",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 128000,
+			Thinking: &ThinkingSupport{
+				ZeroAllowed: true, DynamicAllowed: true,
+				Levels: []string{"low", "medium", "high", "xhigh", "max"},
+			},
 		},
 		{
 			ID:                  "claude-fable-5",
@@ -814,18 +832,6 @@ func GetAntigravityModelConfig() map[string]*antigravityModelConfig {
 				Min: 0, Max: 24576, ZeroAllowed: true, DynamicAllowed: true,
 			},
 		},
-		"gemini-3-pro-high": {
-			Thinking: &ThinkingSupport{
-				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
-				Levels: []string{"low", "high"},
-			},
-		},
-		"gemini-3-pro-low": {
-			Thinking: &ThinkingSupport{
-				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
-				Levels: []string{"low", "high"},
-			},
-		},
 		"gemini-3.1-pro-high": {
 			Thinking: &ThinkingSupport{
 				Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true,
@@ -901,6 +907,30 @@ func GetKimiModels() []*ModelInfo {
 			ContextLength:       131072,
 			MaxCompletionTokens: 32768,
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:                  "kimi-k2.6",
+			Object:              "model",
+			Created:             1776729600, // 2026-04-21
+			OwnedBy:             "moonshot",
+			Type:                "kimi",
+			DisplayName:         "Kimi K2.6",
+			Description:         "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
+			ContextLength:       262144,
+			MaxCompletionTokens: 65536,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
+			ID:                  "kimi-k2.7-code",
+			Object:              "model",
+			Created:             1780396800, // 2026-06-02
+			OwnedBy:             "moonshot",
+			Type:                "kimi",
+			DisplayName:         "Kimi K2.7 Code",
+			Description:         "Kimi K2.7 Code - Moonshot AI's latest coding-focused model",
+			ContextLength:       262144,
+			MaxCompletionTokens: 65536,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 	}
 }

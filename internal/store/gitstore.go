@@ -21,6 +21,7 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
+	log "github.com/sirupsen/logrus"
 )
 
 // gcInterval defines minimum time between garbage collection runs.
@@ -148,7 +149,9 @@ func (s *GitTokenStore) EnsureRepository() error {
 			cloneOpts.ReferenceName = branchRef
 			cloneOpts.SingleBranch = true
 		}
-		if _, errClone := git.PlainClone(repoDir, cloneOpts); errClone != nil {
+		repo, errClone := git.PlainClone(repoDir, cloneOpts)
+		if errClone != nil {
+			closeGitRepository(repo, "git token store: close failed clone repo")
 			if errors.Is(errClone, transport.ErrEmptyRemoteRepository) {
 				_ = os.RemoveAll(gitDir)
 				repo, errInit := git.PlainInit(repoDir, false)
@@ -156,6 +159,7 @@ func (s *GitTokenStore) EnsureRepository() error {
 					s.dirLock.Unlock()
 					return fmt.Errorf("git token store: init empty repo: %w", errInit)
 				}
+				defer closeGitRepository(repo, "git token store: close initialized repo")
 				if branchRef != "" {
 					worktree, errWorktree := repo.Worktree()
 					if errWorktree != nil {
@@ -206,6 +210,8 @@ func (s *GitTokenStore) EnsureRepository() error {
 				s.dirLock.Unlock()
 				return fmt.Errorf("git token store: clone remote: %w", errClone)
 			}
+		} else {
+			defer closeGitRepository(repo, "git token store: close cloned repo")
 		}
 	} else {
 		repo, errOpen := git.PlainOpen(repoDir)
@@ -213,6 +219,7 @@ func (s *GitTokenStore) EnsureRepository() error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: open repo: %w", errOpen)
 		}
+		defer closeGitRepository(repo, "git token store: close opened repo")
 		worktree, errWorktree := repo.Worktree()
 		if errWorktree != nil {
 			s.dirLock.Unlock()
@@ -380,6 +387,7 @@ func (s *GitTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 			}
 			auth, err := s.readAuthFile(path, dir)
 			if err != nil {
+				log.WithError(err).Warnf("git store: skip auth %s", path)
 				return nil
 			}
 			if auth != nil {
@@ -507,7 +515,9 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: time.Time{},
 	}
-	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+	if err := cliproxyauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
+		return nil, err
+	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
@@ -602,6 +612,15 @@ func (s *GitTokenStore) relativeToRepo(path string) (string, error) {
 	return rel, nil
 }
 
+func closeGitRepository(repo *git.Repository, operation string) {
+	if repo == nil {
+		return
+	}
+	if err := repo.Close(); err != nil {
+		log.Warnf("%s: %v", operation, err)
+	}
+}
+
 func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) error {
 	repoDir := s.repoDirSnapshot()
 	if repoDir == "" {
@@ -611,6 +630,7 @@ func (s *GitTokenStore) commitAndPushLocked(message string, relPaths ...string) 
 	if err != nil {
 		return fmt.Errorf("git token store: open repo: %w", err)
 	}
+	defer closeGitRepository(repo, "git token store: close commit repo")
 	worktree, err := repo.Worktree()
 	if err != nil {
 		return fmt.Errorf("git token store: worktree: %w", err)

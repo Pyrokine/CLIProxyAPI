@@ -101,7 +101,10 @@ func SanitizeOAuthModelAliasMap(entries map[string][]OAuthModelAlias) map[string
 				continue
 			}
 			seenAlias[aliasKey] = struct{}{}
-			clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
+			clean = append(
+				clean,
+				OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork, ForceMapping: entry.ForceMapping},
+			)
 		}
 		if len(clean) > 0 {
 			out[channel] = clean

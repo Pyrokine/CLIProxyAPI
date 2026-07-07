@@ -162,9 +162,10 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 		Config: &config.Config{
 			ClaudeKey: []config.ClaudeKey{
 				{
-					APIKey:  "sk-ant-api-xxx",
-					Prefix:  "main",
-					BaseURL: "https://api.anthropic.com",
+					APIKey:                  "sk-ant-api-xxx",
+					Prefix:                  "main",
+					BaseURL:                 "https://api.anthropic.com",
+					RebuildMidSystemMessage: true,
 					Models: []config.ClaudeModel{
 						{Name: "claude-3-opus"},
 						{Name: "claude-3-sonnet"},
@@ -198,6 +199,9 @@ func TestConfigSynthesizer_ClaudeKeys(t *testing.T) {
 	}
 	if _, ok := auths[0].Attributes["models_hash"]; !ok {
 		t.Error("expected models_hash in attributes")
+	}
+	if got := auths[0].Attributes["rebuild_mid_system_message"]; got != "true" {
+		t.Errorf("expected rebuild_mid_system_message=true, got %s", got)
 	}
 }
 
@@ -274,7 +278,7 @@ func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 			CodexKey: []config.CodexKey{
 				{APIKey: ""},   // empty, should be skipped
 				{APIKey: "  "}, // whitespace, should be skipped
-				{APIKey: "valid-key", Headers: map[string]string{"Authorization": "Bearer xyz"}},
+				{APIKey: "valid-key", Headers: map[string]string{"X-Custom": "value"}},
 			},
 		},
 		Now:         time.Now(),
@@ -288,8 +292,25 @@ func TestConfigSynthesizer_CodexKeys_SkipsEmptyAndHeaders(t *testing.T) {
 	if len(auths) != 1 {
 		t.Fatalf("expected 1 auth (empty keys skipped), got %d", len(auths))
 	}
-	if auths[0].Attributes["header:Authorization"] != "Bearer xyz" {
-		t.Errorf("expected header:Authorization=Bearer xyz, got %s", auths[0].Attributes["header:Authorization"])
+	if auths[0].Attributes["header:X-Custom"] != "value" {
+		t.Errorf("expected header:X-Custom=value, got %s", auths[0].Attributes["header:X-Custom"])
+	}
+}
+
+func TestConfigSynthesizer_CodexKeys_RejectsRestrictedHeaders(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			CodexKey: []config.CodexKey{
+				{APIKey: "valid-key", Headers: map[string]string{"Authorization": "Bearer xyz"}},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	if _, err := synth.Synthesize(ctx); err == nil {
+		t.Fatal("expected restricted header error")
 	}
 }
 

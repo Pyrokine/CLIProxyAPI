@@ -25,7 +25,7 @@ func TestRoundTripperForHTTPProxyReturnsTransport(t *testing.T) {
 	t.Parallel()
 
 	provider := newDefaultRoundTripperProvider()
-	rt := provider.RoundTripperFor(&coreauth.Auth{ProxyURL: "http://proxy.example.com:3128"})
+	rt := provider.RoundTripperFor(&coreauth.Auth{ProxyURL: "http://8.8.8.8:3128"})
 	transport, ok := rt.(*http.Transport)
 	if !ok {
 		t.Fatalf("transport type = %T, want *http.Transport", rt)

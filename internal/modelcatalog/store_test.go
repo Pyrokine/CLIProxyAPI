@@ -167,3 +167,55 @@ func TestRemoveDefaultModelRecordsTombstoneAndPreviewCanRestore(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyOAuthModelAliasPersistsForceMappedAliases(t *testing.T) {
+	t.Parallel()
+
+	doc := File{}
+	changed := ApplyOAuthModelAlias(
+		&doc,
+		map[string][]config.OAuthModelAlias{
+			"codex": {{Name: "gpt-5.4", Alias: "gpt-5.4-fast", Fork: true, ForceMapping: true}},
+		},
+	)
+	if !changed {
+		t.Fatal("ApplyOAuthModelAlias changed = false, want true")
+	}
+	model, ok := doc.Find("gpt-5.4")
+	if !ok {
+		t.Fatal("gpt-5.4 missing")
+	}
+	if len(model.Aliases) != 1 || model.Aliases[0] != "gpt-5.4-fast" {
+		t.Fatalf("aliases = %#v", model.Aliases)
+	}
+	if len(model.ForceMappedAliases) != 1 || model.ForceMappedAliases[0] != "gpt-5.4-fast" {
+		t.Fatalf("force mapped aliases = %#v", model.ForceMappedAliases)
+	}
+
+	aliases := doc.ToOAuthModelAlias()["codex"]
+	if len(aliases) != 1 || !aliases[0].ForceMapping {
+		t.Fatalf("oauth aliases = %#v", aliases)
+	}
+}
+
+func TestDeleteOAuthModelAliasChannelClearsForceMappedAliases(t *testing.T) {
+	t.Parallel()
+
+	doc := File{}
+	ApplyOAuthModelAlias(
+		&doc,
+		map[string][]config.OAuthModelAlias{
+			"codex": {{Name: "gpt-5.4", Alias: "gpt-5.4-fast", Fork: true, ForceMapping: true}},
+		},
+	)
+	if !DeleteOAuthModelAliasChannel(&doc, "codex") {
+		t.Fatal("DeleteOAuthModelAliasChannel changed = false, want true")
+	}
+	model, ok := doc.Find("gpt-5.4")
+	if !ok {
+		t.Fatal("gpt-5.4 missing")
+	}
+	if len(model.Aliases) != 0 || len(model.ForceMappedAliases) != 0 {
+		t.Fatalf("aliases = %#v, force mapped aliases = %#v", model.Aliases, model.ForceMappedAliases)
+	}
+}

@@ -201,11 +201,18 @@ type SDKConfig struct {
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
 
-	// DisableImageGeneration controls whether image generation endpoints are available.
-	// "off" (default) enables them; "all" returns 404 for all image requests; "chat" disables only chat-originated requests.
+	// DisableImageGeneration controls whether image generation endpoints and tools are available.
+	// "off" enables them; "all" returns 404 for image endpoints and strips chat tools; "chat" strips chat tools only; "passthrough" keeps client-supplied tools untouched.
 	DisableImageGeneration DisableImageGenerationMode `yaml:"disable-image-generation" json:"disable-image-generation"`
 
+	// GPTImage2BaseModel sets the base model used by the legacy hosted image_generation tool path
+	// when a Codex image request is not proxied directly through the Image API.
 	GPTImage2BaseModel string `yaml:"gpt-image-2-base-model,omitempty" json:"gpt-image-2-base-model,omitempty"`
+
+	// VideoResultAuthCacheTTL controls how long video IDs stay pinned to the credential
+	// that created them. Accepts duration strings like "30m" or "3h".
+	// Empty or invalid values use the default 3h.
+	VideoResultAuthCacheTTL string `yaml:"video-result-auth-cache-ttl,omitempty" json:"video-result-auth-cache-ttl,omitempty"`
 
 	// Streaming configures server-side streaming behavior (keep-alives and safe bootstrap retries).
 	Streaming StreamingConfig `yaml:"streaming" json:"streaming"`

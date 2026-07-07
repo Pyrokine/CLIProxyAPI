@@ -71,6 +71,15 @@ pprof:
 plugins:
     enabled: false
     dir: "plugins"
+    # Additional plugin store registry URLs are appended after the built-in official source.
+    # store-sources:
+    #     - "https://example.com/cpa-plugin-registry.json"
+    # Optional auth rules for private registry, metadata, and artifact URLs. Values are read from environment variables.
+    # store-auth:
+    #     - match: "https://api.github.com/repos/example/private-plugin/"
+    #       apply-to: ["metadata"]
+    #       type: "github-token"
+    #       token-env: "CPA_PLUGIN_STORE_GITHUB_TOKEN"
     configs:
         example:
             enabled: true
@@ -81,6 +90,8 @@ plugins:
             mode: "safe" # enum example: safe, fast
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
+# When true, disable Claude Code cloak mode globally for all Claude credentials.
+disable-claude-cloak-mode: false
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 # Maximum total size (MB) of log files under the logs directory. When exceeded, the oldest log
@@ -148,8 +159,10 @@ auto-refresh-interval: 3
 model-refresh-interval: 3
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
-# Base model used when proxying gpt-image-2 via hosted image_generation tool. Defaults to gpt-5.4-mini.
+# Base model used by the legacy hosted image_generation tool path when Codex image requests are not proxied directly through the Image API. Defaults to gpt-5.4-mini.
 # gpt-image-2-base-model: "gpt-5.4-mini"
+# How long video IDs stay pinned to the credential that created them. Accepts duration strings like "30m" or "3h". Defaults to 3h.
+# video-result-auth-cache-ttl: "3h"
 quota-refresh:
     interval: 600
     max-interval: 1800
@@ -164,6 +177,7 @@ auth:
                 -   api-key: your-api-key-1
                 -   api-key: your-api-key-2
                 -   api-key: your-api-key-3
+# off/all/chat/passthrough
 disable-image-generation: "off"
 redis-usage-queue-retention-seconds: 60
 
@@ -224,6 +238,7 @@ redis-usage-queue-retention-seconds: 60
 #       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
 #       - "*-thinking"               # wildcard matching suffix (e.g. claude-opus-4-5-thinking)
 #       - "*haiku*"                  # wildcard matching substring (e.g. claude-3-5-haiku-20241022)
+#     rebuild-mid-system-message: false # optional: move messages with role "system" into top-level Claude system
 #     cloak:                         # optional: request cloaking for non-Claude-Code clients
 #       mode: "auto"                 # "auto" (default): cloak only when client is not Claude Code
 #                                    # "always": always apply cloaking
@@ -286,52 +301,20 @@ redis-usage-queue-retention-seconds: 60
 #       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
 
-# Amp Integration
-# ampcode:
-#   # Configure upstream URL for Amp CLI OAuth and management features
-#   upstream-url: "https://ampcode.com"
-#   # Optional: Override API key for Amp upstream (otherwise uses env or file)
-#   upstream-api-key: ""
-#   # Per-client upstream API key mapping
-#   # Maps client API keys (from top-level api-keys) to different Amp upstream API keys.
-#   # Useful when different clients need to use different Amp accounts/quotas.
-#   # If a client key isn't mapped, falls back to upstream-api-key (default behavior).
-#   upstream-api-keys:
-#     - upstream-api-key: "amp_key_for_team_a"    # Upstream key to use for these clients
-#       api-keys:                                 # Client keys that use this upstream key
-#         - "your-api-key-1"
-#         - "your-api-key-2"
-#     - upstream-api-key: "amp_key_for_team_b"
-#       api-keys:
-#         - "your-api-key-3"
-#   # Restrict Amp management routes (/api/auth, /api/user, etc.) to localhost only (default: false)
-#   restrict-management-to-localhost: false
-#   # Force model mappings to run before checking local API keys (default: false)
-#   force-model-mappings: false
-#   # Amp Model Mappings
-#   # Route unavailable Amp models to alternative models available in your local proxy.
-#   # Useful when Amp CLI requests models you don't have access to (e.g., Claude Opus 4.5)
-#   # but you have a similar model available (e.g., Claude Sonnet 4).
-#   model-mappings:
-#     - from: "claude-opus-4-5-20251101"          # Model requested by Amp CLI
-#       to: "gemini-claude-opus-4-5-thinking"     # Route to this available model instead
-#     - from: "claude-sonnet-4-5-20250929"
-#       to: "gemini-claude-sonnet-4-5-thinking"
-#     - from: "claude-haiku-4-5-20251001"
-#       to: "gemini-2.5-flash"
-
 # Global OAuth model name aliases (per channel)
 # These aliases rename model IDs for both model listing and request routing.
 # Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
 # NOTE: Aliases do not apply to gemini-api-key, codex-api-key, claude-api-key,
-# openai-compatibility, vertex-api-key, or ampcode.
+# openai-compatibility and vertex-api-key.
 # You can repeat the same name with different aliases to expose multiple client model names.
+# Set force-mapping when the upstream response returns the original model name but clients should see the alias.
 # oauth-model-alias:
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
-#       fork: true                   # when true, keep original and also add the alias
-#                                    # as an extra model (default: false)
+#       fork: true                      # when true, keep original and also add the alias
+#                                       # as an extra model (default: false)
+#       force-mapping: true             # rewrite response model fields back to the alias
 #   vertex:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"

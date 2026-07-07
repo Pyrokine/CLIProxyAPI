@@ -105,9 +105,12 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 
 // addConfigHeadersToAttrs adds header configuration to auth attributes.
 // Headers are prefixed with "header:" in the attributes map.
-func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) {
+func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string) error {
 	if len(headers) == 0 || attrs == nil {
-		return
+		return nil
+	}
+	if err := coreauth.ValidateCustomHeaders(headers); err != nil {
+		return err
 	}
 	for hk, hv := range headers {
 		key := strings.TrimSpace(hk)
@@ -117,4 +120,5 @@ func addConfigHeadersToAttrs(headers map[string]string, attrs map[string]string)
 		}
 		attrs["header:"+key] = val
 	}
+	return nil
 }
