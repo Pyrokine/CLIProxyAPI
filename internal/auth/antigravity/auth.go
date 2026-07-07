@@ -117,8 +117,12 @@ func defaultAntigravityTierID(loadResp map[string]any) string {
 }
 
 // BuildAuthURL generates the OAuth authorization URL.
-func (o *Auth) loadCodeAssistUserAgent() string {
-	return misc.AntigravityLoadCodeAssistUserAgent("")
+func (o *Auth) shortUserAgent() string {
+	return misc.AntigravityRequestUserAgent("")
+}
+
+func (o *Auth) nodeUserAgent() string {
+	return misc.AntigravityOnboardUserUserAgent("")
 }
 
 func (o *Auth) BuildAuthURL(state, redirectURI string) string {
@@ -191,7 +195,7 @@ func (o *Auth) FetchUserInfo(ctx context.Context, accessToken string) (string, e
 		return "", fmt.Errorf("antigravity userinfo: create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", o.loadCodeAssistUserAgent())
+	req.Header.Set("User-Agent", o.shortUserAgent())
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -227,7 +231,7 @@ func (o *Auth) FetchUserInfo(ctx context.Context, accessToken string) (string, e
 
 // FetchProjectID retrieves the project ID for the authenticated user via loadCodeAssist
 func (o *Auth) FetchProjectID(ctx context.Context, accessToken string) (string, error) {
-	userAgent := o.loadCodeAssistUserAgent()
+	userAgent := o.shortUserAgent()
 	loadReqBody := map[string]any{
 		"metadata": map[string]string{
 			"ide_type":    "ANTIGRAVITY",
@@ -295,7 +299,7 @@ func (o *Auth) FetchProjectID(ctx context.Context, accessToken string) (string, 
 // onboardUser attempts to fetch the project ID via onboardUser by polling for completion
 func (o *Auth) onboardUser(ctx context.Context, accessToken, tierID string) (string, error) {
 	log.Infof("Antigravity: onboarding user with tier: %s", tierID)
-	userAgent := o.loadCodeAssistUserAgent()
+	userAgent := o.nodeUserAgent()
 	requestBody := map[string]any{
 		"tierId": tierID,
 		"metadata": map[string]string{

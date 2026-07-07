@@ -87,6 +87,10 @@ func (g *Auth) GetAuthenticatedClient(
 
 	// Configure proxy settings for the HTTP client if a proxy URL is provided.
 	if cfg != nil && cfg.ProxyURL != "" {
+		if errValidate := proxyutil.ValidateProxyURL(cfg.ProxyURL); errValidate != nil {
+			log.Errorf("proxy URL rejected: %v", errValidate)
+			return nil, fmt.Errorf("proxy URL rejected: %w", errValidate)
+		}
 		transport, _, errBuild := proxyutil.BuildHTTPTransport(cfg.ProxyURL)
 		if errBuild != nil {
 			log.Errorf("build proxy transport failed: %v", errBuild)

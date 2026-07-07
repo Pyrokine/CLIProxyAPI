@@ -3,6 +3,7 @@
 package claude
 
 import (
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -28,13 +29,24 @@ type utlsRoundTripper struct {
 	dialer proxy.Dialer
 }
 
+type proxyErrorDialer struct {
+	err error
+}
+
+func (d proxyErrorDialer) Dial(string, string) (net.Conn, error) {
+	return nil, d.err
+}
+
 // newUtlsRoundTripper creates a new utls-based round tripper with optional proxy support
 func newUtlsRoundTripper(cfg *config.SDKConfig) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if cfg != nil && cfg.ProxyURL != "" {
-		pDialer, _, errBuild := proxyutil.BuildDialer(cfg.ProxyURL)
-		if errBuild != nil {
+		if errValidate := proxyutil.ValidateProxyURL(cfg.ProxyURL); errValidate != nil {
+			log.Errorf("proxy URL rejected: %v", errValidate)
+			dialer = proxyErrorDialer{err: errValidate}
+		} else if pDialer, _, errBuild := proxyutil.BuildDialer(cfg.ProxyURL); errBuild != nil {
 			log.Errorf("failed to create proxy dialer for %q: %v", cfg.ProxyURL, errBuild)
+			dialer = proxyErrorDialer{err: errBuild}
 		} else if pDialer != nil {
 			dialer = pDialer
 		}

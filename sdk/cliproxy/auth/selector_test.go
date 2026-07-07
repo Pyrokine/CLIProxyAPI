@@ -324,6 +324,25 @@ func TestHeaderValueIgnoreCase(t *testing.T) {
 	}
 }
 
+func TestExtractSessionID_ClaudeCodeSessionIDPriorityOverHeader(t *testing.T) {
+	t.Parallel()
+
+	headers := http.Header{"X-Session-ID": {"header-session"}}
+	body := []byte(`{"metadata":{"user_id":"{\"session_id\":\"claude-session-1\"}"}}`)
+	if got := ExtractSessionID(headers, body, nil); got != "claude:claude-session-1" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "claude:claude-session-1")
+	}
+}
+
+func TestExtractSessionID_ClaudeCodeSuffixSessionID(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"metadata":{"user_id":"user_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_account_x_session_9fbc3f7a-390a-4acf-aecf-11b2ed8d511e"}}`)
+	if got := ExtractSessionID(nil, body, nil); got != "claude:9fbc3f7a-390a-4acf-aecf-11b2ed8d511e" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "claude:9fbc3f7a-390a-4acf-aecf-11b2ed8d511e")
+	}
+}
+
 func TestExtractSessionID_CodexSessionIDHeader(t *testing.T) {
 	t.Parallel()
 

@@ -29,13 +29,13 @@ func TestScheduler_RestorePreservesRegisteredDisabledState(t *testing.T) {
 			tt.name, func(t *testing.T) {
 				scheduler := NewScheduler(DefaultConfig(), nil)
 				scheduler.Register("claude-user.json", TypeClaude, "claude")
-				scheduler.SetDisabled("claude-user.json", tt.registeredDisabled)
+				scheduler.SetDisabled("claude-user.json", TypeClaude, tt.registeredDisabled)
 
 				lastRefresh := time.Now().Add(-time.Hour)
 				nextRefresh := time.Now().Add(time.Hour)
 				scheduler.Restore(
 					map[string]EntryState{
-						"claude-user.json": {
+						EntryKey(TypeClaude, "claude-user.json"): {
 							FileName:    "claude-user.json",
 							Type:        TypeClaude,
 							AuthIndex:   "claude",
@@ -47,7 +47,7 @@ func TestScheduler_RestorePreservesRegisteredDisabledState(t *testing.T) {
 					},
 				)
 
-				entry := scheduler.GetStatus().Credentials["claude-user.json"]
+				entry := scheduler.GetStatus().Credentials[EntryKey(TypeClaude, "claude-user.json")]
 				if entry == nil {
 					t.Fatal("missing restored entry")
 				}
@@ -59,6 +59,64 @@ func TestScheduler_RestorePreservesRegisteredDisabledState(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestSchedulerRegisterUsesProviderAwareStatusKeys(t *testing.T) {
+	scheduler := NewScheduler(DefaultConfig(), nil)
+	scheduler.Register("shared.json", TypeClaude, "claude-auth")
+	scheduler.Register("shared.json", TypeCodex, "codex-auth")
+
+	status := scheduler.GetStatus()
+	claude := status.Credentials[EntryKey(TypeClaude, "shared.json")]
+	codex := status.Credentials[EntryKey(TypeCodex, "shared.json")]
+	if claude == nil || codex == nil {
+		t.Fatalf("credentials = %+v, want claude and codex entries", status.Credentials)
+	}
+	if claude.Type != TypeClaude || claude.AuthIndex != "claude-auth" {
+		t.Fatalf("claude entry = %+v", claude)
+	}
+	if codex.Type != TypeCodex || codex.AuthIndex != "codex-auth" {
+		t.Fatalf("codex entry = %+v", codex)
+	}
+}
+
+func TestSchedulerRegisterReplacesSameAuthWhenCredentialTypeChanges(t *testing.T) {
+	scheduler := NewScheduler(DefaultConfig(), nil)
+	scheduler.Register("shared.json", TypeClaude, "auth-1")
+	scheduler.Register("shared.json", TypeCodex, "auth-1")
+
+	status := scheduler.GetStatus()
+	if status.Credentials[EntryKey(TypeClaude, "shared.json")] != nil {
+		t.Fatalf("stale claude entry was not removed: %+v", status.Credentials)
+	}
+	got := status.Credentials[EntryKey(TypeCodex, "shared.json")]
+	if got == nil {
+		t.Fatal("missing codex entry")
+	}
+	if got.Type != TypeCodex || got.AuthIndex != "auth-1" {
+		t.Fatalf("entry identity = (%s, %s), want (%s, auth-1)", got.Type, got.AuthIndex, TypeCodex)
+	}
+	if got.Status != StatusIdle || got.LastRefresh != nil || got.Data != nil || got.FailureCount != 0 {
+		t.Fatalf("new entry started with stale quota state: %+v", got)
+	}
+}
+
+func TestSchedulerRefreshNowFileNameRefreshesMatchingProviderEntries(t *testing.T) {
+	scheduler := NewScheduler(DefaultConfig(), nil)
+	refreshed := make(map[CredentialType]int)
+	scheduler.fetchFn = func(entry *Entry) ([]byte, error) {
+		refreshed[entry.Type]++
+		return []byte(`{}`), nil
+	}
+
+	scheduler.Register("shared.json", TypeClaude, "claude-auth")
+	scheduler.Register("shared.json", TypeCodex, "codex-auth")
+
+	scheduler.RefreshNow([]string{"shared.json"})
+
+	if refreshed[TypeClaude] != 1 || refreshed[TypeCodex] != 1 {
+		t.Fatalf("refreshed = %+v, want both provider entries", refreshed)
 	}
 }
 
@@ -141,8 +199,12 @@ func TestScheduler_RefreshNowQueuesConcurrentManualRequests(t *testing.T) {
 	}
 
 	status := scheduler.GetStatus()
+	typeByName := map[string]CredentialType{
+		"codex-user.json":  TypeCodex,
+		"gemini-user.json": TypeGeminiCli,
+	}
 	for _, name := range []string{"codex-user.json", "gemini-user.json"} {
-		entry := status.Credentials[name]
+		entry := status.Credentials[EntryKey(typeByName[name], name)]
 		if entry == nil {
 			t.Fatalf("missing status entry for %s", name)
 		}
@@ -152,5 +214,57 @@ func TestScheduler_RefreshNowQueuesConcurrentManualRequests(t *testing.T) {
 		if entry.Status != StatusSuccess {
 			t.Fatalf("status for %s = %s, want %s", name, entry.Status, StatusSuccess)
 		}
+	}
+}
+
+func TestSummarizeEntriesByProvider(t *testing.T) {
+	claudeLast := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	claudeNext := time.Date(2026, 7, 7, 11, 0, 0, 0, time.UTC)
+	codexLast := time.Date(2026, 7, 7, 9, 0, 0, 0, time.UTC)
+	codexNext := time.Date(2026, 7, 7, 10, 30, 0, 0, time.UTC)
+	entries := map[string]*Entry{
+		EntryKey(TypeClaude, "claude-a.json"): {
+			FileName:     "claude-a.json",
+			Type:         TypeClaude,
+			Status:       StatusSuccess,
+			LastRefresh:  &claudeLast,
+			NextRefresh:  &claudeNext,
+			FailureCount: 1,
+		},
+		EntryKey(TypeClaude, "claude-b.json"): {
+			FileName:     "claude-b.json",
+			Type:         TypeClaude,
+			Status:       StatusBanned,
+			Disabled:     true,
+			FailureCount: 2,
+		},
+		EntryKey(TypeCodex, "codex.json"): {
+			FileName:     "codex.json",
+			Type:         TypeCodex,
+			Status:       StatusError,
+			LastRefresh:  &codexLast,
+			NextRefresh:  &codexNext,
+			FailureCount: 3,
+		},
+	}
+
+	byProvider := summarizeEntriesByProvider(entries)
+	claude := byProvider[string(TypeClaude)]
+	if claude.Provider != string(TypeClaude) || claude.CredentialCount != 2 {
+		t.Fatalf("claude summary identity = %+v", claude)
+	}
+	if claude.Success != 1 || claude.Banned != 1 || claude.Disabled != 1 || claude.FailureCount != 3 {
+		t.Fatalf("claude summary counters = %+v", claude)
+	}
+	if claude.LatestRefreshAt == nil || !claude.LatestRefreshAt.Equal(claudeLast) {
+		t.Fatalf("claude latest refresh = %v, want %v", claude.LatestRefreshAt, claudeLast)
+	}
+	if claude.NextRefreshAt == nil || !claude.NextRefreshAt.Equal(claudeNext) {
+		t.Fatalf("claude next refresh = %v, want %v", claude.NextRefreshAt, claudeNext)
+	}
+
+	codex := byProvider[string(TypeCodex)]
+	if codex.Error != 1 || codex.FailureCount != 3 {
+		t.Fatalf("codex summary counters = %+v", codex)
 	}
 }

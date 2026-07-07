@@ -12,9 +12,22 @@ type modelAliasEntry interface {
 	GetAlias() string
 }
 
+type oauthModelAliasEntry struct {
+	upstreamModel string
+	configAlias   string
+	forceMapping  bool
+}
+
 type oauthModelAliasTable struct {
-	// reverse maps channel -> alias (lower) -> original upstream model name.
-	reverse map[string]map[string]string
+	// reverse maps channel -> alias (lower) -> upstream model entry.
+	reverse map[string]map[string]oauthModelAliasEntry
+}
+
+// OAuthModelAliasResult carries the upstream model and optional response rewrite target.
+type OAuthModelAliasResult struct {
+	UpstreamModel string
+	ForceMapping  bool
+	OriginalAlias string
 }
 
 func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
@@ -22,14 +35,14 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 		return &oauthModelAliasTable{}
 	}
 	out := &oauthModelAliasTable{
-		reverse: make(map[string]map[string]string, len(aliases)),
+		reverse: make(map[string]map[string]oauthModelAliasEntry, len(aliases)),
 	}
 	for rawChannel, entries := range aliases {
 		channel := strings.ToLower(strings.TrimSpace(rawChannel))
 		if channel == "" || len(entries) == 0 {
 			continue
 		}
-		rev := make(map[string]string, len(entries))
+		rev := make(map[string]oauthModelAliasEntry, len(entries))
 		for _, entry := range entries {
 			name := strings.TrimSpace(entry.Name)
 			alias := strings.TrimSpace(entry.Alias)
@@ -43,7 +56,11 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 			if _, exists := rev[aliasKey]; exists {
 				continue
 			}
-			rev[aliasKey] = name
+			rev[aliasKey] = oauthModelAliasEntry{
+				upstreamModel: name,
+				configAlias:   alias,
+				forceMapping:  entry.ForceMapping,
+			}
 		}
 		if len(rev) > 0 {
 			out.reverse[channel] = rev
@@ -73,11 +90,25 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 // applyOAuthModelAlias resolves the upstream model from OAuth model alias.
 // If an alias exists, the returned model is the upstream model.
 func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string {
-	upstreamModel := m.resolveOAuthUpstreamModel(auth, requestedModel)
-	if upstreamModel == "" {
-		return requestedModel
+	result := m.applyOAuthModelAliasWithResult(auth, requestedModel)
+	return result.UpstreamModel
+}
+
+func modelAliasLookupCandidates(requestedModel string) (string, []string) {
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return "", nil
 	}
-	return upstreamModel
+	requestResult := thinking.ParseSuffix(requestedModel)
+	base := strings.TrimSpace(requestResult.ModelName)
+	if base == "" {
+		base = requestedModel
+	}
+	candidates := []string{base}
+	if base != requestedModel {
+		candidates = append(candidates, requestedModel)
+	}
+	return base, candidates
 }
 
 func resolveModelAliasFromConfigModels(requestedModel string, models []modelAliasEntry) string {
@@ -89,11 +120,9 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 		return ""
 	}
 
-	requestResult := thinking.ParseSuffix(requestedModel)
-	base := requestResult.ModelName
-	candidates := []string{base}
-	if base != requestedModel {
-		candidates = append(candidates, requestedModel)
+	_, candidates := modelAliasLookupCandidates(requestedModel)
+	if len(candidates) == 0 {
+		return ""
 	}
 
 	preserveSuffix := func(resolved string) string {
@@ -125,39 +154,50 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 // If an alias exists, returns the original (upstream) model name that corresponds
 // to the requested alias.
 //
-// If the requested model contains a thinking suffix (e.g., "gemini-2.5-pro(8192)"),
+// If the requested model contains a thinking suffix (e.g. "gemini-2.5-pro(8192)"),
 // the suffix is preserved in the returned model name. However, if the alias's
 // original name already contains a suffix, the config suffix takes priority.
 func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) string {
+	return m.resolveOAuthModelAliasWithResult(auth, requestedModel).UpstreamModel
+}
+
+func (m *Manager) resolveOAuthModelAliasWithResult(auth *Auth, requestedModel string) OAuthModelAliasResult {
 	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
 }
 
-func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, channel string) string {
+func (m *Manager) applyOAuthModelAliasWithResult(auth *Auth, requestedModel string) OAuthModelAliasResult {
+	result := m.resolveOAuthModelAliasWithResult(auth, requestedModel)
+	if result.UpstreamModel == "" {
+		result.UpstreamModel = requestedModel
+	}
+	return result
+}
+
+func oauthModelAliasForceMappingResponseModel(configAlias string) string {
+	return strings.TrimSpace(configAlias)
+}
+
+func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, channel string) OAuthModelAliasResult {
 	if m == nil || auth == nil {
-		return ""
+		return OAuthModelAliasResult{}
 	}
 	if channel == "" {
-		return ""
+		return OAuthModelAliasResult{}
 	}
 
-	// Extract thinking suffix from requested model using ParseSuffix
-	requestResult := thinking.ParseSuffix(requestedModel)
-	baseModel := requestResult.ModelName
-
-	// Candidate keys to match: base model and raw input (handles suffix-parsing edge cases).
-	candidates := []string{baseModel}
-	if baseModel != requestedModel {
-		candidates = append(candidates, requestedModel)
+	baseModel, candidates := modelAliasLookupCandidates(requestedModel)
+	if len(candidates) == 0 {
+		return OAuthModelAliasResult{}
 	}
 
 	raw := m.oauthModelAlias.Load()
 	table, _ := raw.(*oauthModelAliasTable)
 	if table == nil || table.reverse == nil {
-		return ""
+		return OAuthModelAliasResult{}
 	}
 	rev := table.reverse[channel]
 	if rev == nil {
-		return ""
+		return OAuthModelAliasResult{}
 	}
 
 	for _, candidate := range candidates {
@@ -165,18 +205,31 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 		if key == "" {
 			continue
 		}
-		original := strings.TrimSpace(rev[key])
+		entry, exists := rev[key]
+		if !exists {
+			continue
+		}
+
+		original := strings.TrimSpace(entry.upstreamModel)
 		if original == "" {
 			continue
 		}
-		if strings.EqualFold(original, baseModel) {
-			return ""
+		if strings.EqualFold(original, baseModel) && !entry.forceMapping {
+			return OAuthModelAliasResult{}
 		}
 
-		return thinking.PreserveRequestModelDecorations(original, requestedModel)
+		originalAlias := requestedModel
+		if entry.forceMapping {
+			originalAlias = oauthModelAliasForceMappingResponseModel(entry.configAlias)
+		}
+		return OAuthModelAliasResult{
+			UpstreamModel: thinking.PreserveRequestModelDecorations(original, requestedModel),
+			ForceMapping:  entry.forceMapping,
+			OriginalAlias: originalAlias,
+		}
 	}
 
-	return ""
+	return OAuthModelAliasResult{}
 }
 
 // modelAliasChannel extracts the OAuth model alias channel from an Auth object.
@@ -203,33 +256,38 @@ func modelAliasChannel(auth *Auth) string {
 // and auth kind. Returns empty string if the provider/authKind combination doesn't support
 // OAuth model alias (e.g., API key authentication).
 //
-// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
+// Built-in channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
+// Plugin OAuth providers use their normalized provider key as the channel.
 func OAuthModelAliasChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	authKind = strings.ToLower(strings.TrimSpace(authKind))
+	authKind = normalizeOAuthModelAliasAuthKind(authKind)
+	if authKind == "apikey" {
+		return ""
+	}
 	switch provider {
 	case "gemini":
 		// gemini provider uses gemini-api-key config, not oauth-model-alias.
 		// OAuth-based gemini auth is converted to "gemini-cli" by the synthesizer.
 		return ""
 	case "vertex":
-		if authKind == "apikey" {
-			return ""
-		}
 		return "vertex"
 	case "claude":
-		if authKind == "apikey" {
-			return ""
-		}
 		return "claude"
 	case "codex":
-		if authKind == "apikey" {
-			return ""
-		}
 		return "codex"
 	case "gemini-cli", "aistudio", "antigravity", "qwen", "iflow", "kimi":
 		return provider
 	default:
-		return ""
+		return provider
+	}
+}
+
+func normalizeOAuthModelAliasAuthKind(authKind string) string {
+	authKind = strings.ToLower(strings.TrimSpace(authKind))
+	switch authKind {
+	case "api_key", "api-key":
+		return "apikey"
+	default:
+		return authKind
 	}
 }

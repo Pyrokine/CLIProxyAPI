@@ -16,7 +16,7 @@ type FetchFunc func(entry *Entry) ([]byte, error)
 
 type PersistFunc func(entry EntryState)
 
-type DeleteFunc func(fileName string)
+type DeleteFunc func(entryKey string)
 
 // Scheduler manages periodic quota refresh for all registered credentials.
 // It uses a min-heap priority queue sorted by next refresh time, with a single
@@ -59,7 +59,12 @@ func (s *Scheduler) Restore(entries map[string]EntryState) {
 	changed := make([]EntryState, 0, len(entries))
 	s.mu.Lock()
 	for name, state := range entries {
-		entry, ok := s.entries[name]
+		key := strings.TrimSpace(name)
+		entry, ok := s.entries[key]
+		if !ok {
+			key = EntryKey(state.Type, state.FileName)
+			entry, ok = s.entries[key]
+		}
 		if !ok {
 			continue
 		}
@@ -123,16 +128,38 @@ func (s *Scheduler) Stop() {
 
 // Register adds or updates a credential in the scheduler.
 func (s *Scheduler) Register(fileName string, credType CredentialType, authIndex string) {
+	fileName = strings.TrimSpace(fileName)
+	key := EntryKey(credType, fileName)
+	if key == "" {
+		return
+	}
+
 	var state EntryState
+	removedKeys := make([]string, 0)
 	s.mu.Lock()
-	if existing, exists := s.entries[fileName]; exists {
+	for existingKey, existing := range s.entries {
+		if existingKey == key {
+			continue
+		}
+		existing.mu.RLock()
+		replaceSameAuth := existing.FileName == fileName && existing.AuthIndex == authIndex && authIndex != ""
+		existing.mu.RUnlock()
+		if replaceSameAuth {
+			delete(s.entries, existingKey)
+			removedKeys = append(removedKeys, existingKey)
+		}
+	}
+
+	if existing, exists := s.entries[key]; exists {
 		existing.mu.Lock()
-		existing.Type = credType
 		existing.AuthIndex = authIndex
 		state = existing.snapshotLocked()
 		existing.mu.Unlock()
 		s.poke()
 		s.mu.Unlock()
+		for _, removedKey := range removedKeys {
+			s.deletePersisted(removedKey)
+		}
 		s.persist(state)
 		return
 	}
@@ -146,29 +173,51 @@ func (s *Scheduler) Register(fileName string, credType CredentialType, authIndex
 	}
 	next := now.Add(time.Duration(len(s.entries)) * time.Second * 2) // stagger
 	entry.NextRefresh = &next
-	s.entries[fileName] = entry
+	s.entries[key] = entry
 	state = entry.Snapshot()
 	s.poke()
 	s.mu.Unlock()
+	for _, removedKey := range removedKeys {
+		s.deletePersisted(removedKey)
+	}
 	s.persist(state)
 }
 
-// Unregister removes a credential from the scheduler.
+// Unregister removes credentials for a file from the scheduler.
 func (s *Scheduler) Unregister(fileName string) {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return
+	}
+	removedKeys := make([]string, 0)
 	s.mu.Lock()
-	deleteFn := s.deleteFn
-	delete(s.entries, fileName)
+	for key, entry := range s.entries {
+		entry.mu.RLock()
+		matches := entry.FileName == fileName
+		entry.mu.RUnlock()
+		if matches {
+			delete(s.entries, key)
+			removedKeys = append(removedKeys, key)
+		}
+	}
+	if len(removedKeys) > 0 {
+		s.poke()
+	}
 	s.mu.Unlock()
-	if deleteFn != nil {
-		deleteFn(fileName)
+	for _, key := range removedKeys {
+		s.deletePersisted(key)
 	}
 }
 
 // UpdateAuthIndex sets the auth_index for a registered entry.
-func (s *Scheduler) UpdateAuthIndex(fileName, authIndex string) {
+func (s *Scheduler) UpdateAuthIndex(fileName string, credType CredentialType, authIndex string) {
+	key := EntryKey(credType, fileName)
+	if key == "" {
+		return
+	}
 	var state EntryState
 	s.mu.Lock()
-	if e, ok := s.entries[fileName]; ok {
+	if e, ok := s.entries[key]; ok {
 		e.mu.Lock()
 		e.AuthIndex = authIndex
 		state = e.snapshotLocked()
@@ -184,10 +233,14 @@ func (s *Scheduler) UpdateAuthIndex(fileName, authIndex string) {
 // dispatcher to re-evaluate the heap. Disabled entries are skipped by the auto
 // refresh loop; manual RefreshNow(fileNames) still executes them so users can
 // verify whether a banned/disabled account has recovered.
-func (s *Scheduler) SetDisabled(fileName string, disabled bool) {
+func (s *Scheduler) SetDisabled(fileName string, credType CredentialType, disabled bool) {
+	key := EntryKey(credType, fileName)
+	if key == "" {
+		return
+	}
 	var state EntryState
 	s.mu.Lock()
-	if e, ok := s.entries[fileName]; ok {
+	if e, ok := s.entries[key]; ok {
 		e.mu.Lock()
 		e.Disabled = disabled
 		e.disabledConfigured = true
@@ -208,9 +261,10 @@ func (s *Scheduler) SetDisabled(fileName string, disabled bool) {
 //
 // When fileNames is non-empty the call is treated as a user-initiated manual refresh
 // and executes every named entry regardless of disabled/banned/quota-exceeded state
-// so the operator can verify whether an account has recovered. When fileNames is
-// empty the call is a bulk auto-refresh and skips entries that shouldSkipAutoRefresh
-// reports as ineligible.
+// so the operator can verify whether an account has recovered. Identifiers may be
+// provider-aware entry keys or legacy file names; file names refresh all matching
+// provider entries. When fileNames is empty the call is a bulk auto-refresh and skips
+// entries that shouldSkipAutoRefresh reports as ineligible.
 func (s *Scheduler) RefreshNow(fileNames []string) {
 	s.manualRefreshMu.Lock()
 	defer s.manualRefreshMu.Unlock()
@@ -218,23 +272,43 @@ func (s *Scheduler) RefreshNow(fileNames []string) {
 	isManual := len(fileNames) > 0
 
 	s.mu.RLock()
-	targets := fileNames
+	toRefresh := make([]*Entry, 0, len(s.entries))
+	seen := make(map[string]struct{}, len(s.entries))
 	if !isManual {
-		targets = make([]string, 0, len(s.entries))
-		for name := range s.entries {
-			targets = append(targets, name)
+		for key, entry := range s.entries {
+			if entry.shouldSkipAutoRefresh() {
+				continue
+			}
+			seen[key] = struct{}{}
+			toRefresh = append(toRefresh, entry)
 		}
-	}
-	toRefresh := make([]*Entry, 0, len(targets))
-	for _, name := range targets {
-		e, ok := s.entries[name]
-		if !ok {
-			continue
+	} else {
+		for _, name := range fileNames {
+			identifier := strings.TrimSpace(name)
+			if identifier == "" {
+				continue
+			}
+			if entry, ok := s.entries[identifier]; ok {
+				if _, exists := seen[identifier]; !exists {
+					seen[identifier] = struct{}{}
+					toRefresh = append(toRefresh, entry)
+				}
+				continue
+			}
+			for key, entry := range s.entries {
+				entry.mu.RLock()
+				matches := entry.FileName == identifier
+				entry.mu.RUnlock()
+				if !matches {
+					continue
+				}
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+				toRefresh = append(toRefresh, entry)
+			}
 		}
-		if !isManual && e.shouldSkipAutoRefresh() {
-			continue
-		}
-		toRefresh = append(toRefresh, e)
 	}
 	s.mu.RUnlock()
 
@@ -271,8 +345,53 @@ func (s *Scheduler) GetStatus() StatusResponse {
 		Enabled:         s.cfg.Enabled,
 		IntervalSeconds: s.cfg.Interval,
 		Credentials:     creds,
+		ByProvider:      summarizeEntriesByProvider(creds),
 		UpdatedAt:       s.updatedAt,
 	}
+}
+
+func summarizeEntriesByProvider(entries map[string]*Entry) map[string]ProviderStatusSummary {
+	out := make(map[string]ProviderStatusSummary)
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		provider := strings.ToLower(strings.TrimSpace(string(entry.Type)))
+		if provider == "" {
+			provider = "unknown"
+		}
+		summary := out[provider]
+		summary.Provider = provider
+		summary.CredentialCount++
+		summary.FailureCount += entry.FailureCount
+		if entry.Disabled {
+			summary.Disabled++
+		}
+		switch entry.Status {
+		case StatusIdle:
+			summary.Idle++
+		case StatusLoading:
+			summary.Loading++
+		case StatusSuccess:
+			summary.Success++
+		case StatusError:
+			summary.Error++
+		case StatusBanned:
+			summary.Banned++
+		case StatusQuotaExceeded:
+			summary.QuotaExceeded++
+		}
+		if entry.LastRefresh != nil && (summary.LatestRefreshAt == nil || entry.LastRefresh.After(*summary.LatestRefreshAt)) {
+			latest := *entry.LastRefresh
+			summary.LatestRefreshAt = &latest
+		}
+		if entry.NextRefresh != nil && (summary.NextRefreshAt == nil || entry.NextRefresh.Before(*summary.NextRefreshAt)) {
+			next := *entry.NextRefresh
+			summary.NextRefreshAt = &next
+		}
+		out[provider] = summary
+	}
+	return out
 }
 
 // GetConfig returns the current configuration.
@@ -305,6 +424,15 @@ func (s *Scheduler) persist(state EntryState) {
 	s.mu.RUnlock()
 	if persistFn != nil {
 		persistFn(state)
+	}
+}
+
+func (s *Scheduler) deletePersisted(entryKey string) {
+	s.mu.RLock()
+	deleteFn := s.deleteFn
+	s.mu.RUnlock()
+	if deleteFn != nil {
+		deleteFn(entryKey)
 	}
 }
 

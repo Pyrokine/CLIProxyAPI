@@ -279,6 +279,32 @@ func TestSchedulerPick_CodexWebsocketPrefersWebsocketEnabledSubset(t *testing.T)
 	}
 }
 
+func TestSchedulerPick_XAIWebsocketPrefersWebsocketEnabledSubset(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "xai-http", Provider: "xai"},
+		&Auth{ID: "xai-ws-a", Provider: "xai", Attributes: map[string]string{"websockets": "true"}},
+		&Auth{ID: "xai-ws-b", Provider: "xai", Attributes: map[string]string{"websockets": "true"}},
+	)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(context.Background())
+	want := []string{"xai-ws-a", "xai-ws-b", "xai-ws-a"}
+	for index, wantID := range want {
+		got, errPick := scheduler.pickSingle(ctx, "xai", "", cliproxyexecutor.Options{}, nil)
+		if errPick != nil {
+			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickSingle() #%d auth = nil", index)
+		}
+		if got.ID != wantID {
+			t.Fatalf("pickSingle() #%d auth.ID = %q, want %q", index, got.ID, wantID)
+		}
+	}
+}
+
 func TestSchedulerPick_CodexWebsocketPrefersWebsocketAcrossPriorityTiers(t *testing.T) {
 	t.Parallel()
 
@@ -326,6 +352,33 @@ func TestSchedulerPick_MixedCodexWebsocketPrefersWebsocketAcrossPriorityTiers(t 
 	}
 	if got.ID != "codex-ws" {
 		t.Fatalf("pickMixed() auth.ID = %q, want codex-ws", got.ID)
+	}
+}
+
+func TestSchedulerPick_MixedXAIWebsocketPrefersWebsocketAcrossPriorityTiers(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{ID: "xai-http", Provider: "xai", Attributes: map[string]string{"priority": "10"}},
+		&Auth{ID: "xai-ws", Provider: "xai", Attributes: map[string]string{"priority": "1", "websockets": "true"}},
+	)
+
+	got, provider, errPick := scheduler.pickMixed(
+		cliproxyexecutor.WithDownstreamWebsocket(context.Background()), []string{"xai"}, "",
+		cliproxyexecutor.Options{}, nil,
+	)
+	if errPick != nil {
+		t.Fatalf("pickMixed() error = %v", errPick)
+	}
+	if got == nil {
+		t.Fatal("pickMixed() auth = nil")
+	}
+	if provider != "xai" {
+		t.Fatalf("pickMixed() provider = %q, want xai", provider)
+	}
+	if got.ID != "xai-ws" {
+		t.Fatalf("pickMixed() auth.ID = %q, want xai-ws", got.ID)
 	}
 }
 

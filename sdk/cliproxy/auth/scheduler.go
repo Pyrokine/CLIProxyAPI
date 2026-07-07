@@ -257,6 +257,15 @@ func (s *authScheduler) pickSingle(
 	return s.pickSingleWithPredicate(ctx, provider, model, opts, tried, nil)
 }
 
+func providerPrefersWebsocketTransport(providerKey string) bool {
+	switch strings.ToLower(strings.TrimSpace(providerKey)) {
+	case "codex", "xai":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *authScheduler) pickSingleWithPredicate(
 	ctx context.Context,
 	provider, model string,
@@ -270,7 +279,7 @@ func (s *authScheduler) pickSingleWithPredicate(
 	providerKey := strings.ToLower(strings.TrimSpace(provider))
 	modelKey := canonicalModelKey(model)
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
-	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
+	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerPrefersWebsocketTransport(providerKey) && pinnedAuthID == ""
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -378,7 +387,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 		}
 		shard := providerState.ensureModelLocked(modelKey, now)
 		candidateShards[providerIndex] = shard
-		preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerKey == "codex" && pinnedAuthID == ""
+		preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerPrefersWebsocketTransport(providerKey)
 		preferWebsocketByProvider[providerIndex] = preferWebsocket
 		if shard == nil {
 			continue

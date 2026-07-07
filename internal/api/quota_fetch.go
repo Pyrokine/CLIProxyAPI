@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -17,10 +18,13 @@ const (
 	claudeUsageURL   = "https://api.anthropic.com/api/oauth/usage"
 	claudeProfileURL = "https://api.anthropic.com/api/oauth/profile"
 
-	codexUsageURL = "https://chatgpt.com/backend-api/wham/usage"
+	codexUsageURL                 = "https://chatgpt.com/backend-api/wham/usage"
+	codexRateLimitResetCreditsURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 
 	geminiQuotaURL      = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 	geminiCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:getCodeAssistSubscription"
+
+	antigravityLoadCodeAssistURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 
 	kimiUsageURL  = "https://api.kimi.com/coding/v1/usages"
 	xaiBillingURL = "https://cli-chat-proxy.grok.com/v1/billing"
@@ -38,9 +42,25 @@ var codexHeaders = map[string]string{
 	"User-Agent":    "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
 }
 
+var codexResetCreditsHeaders = map[string]string{
+	"Authorization": "Bearer $TOKEN$",
+	"Accept":        "application/json",
+	"OpenAI-Beta":   "codex-1",
+	"Originator":    "Codex Desktop",
+	"User-Agent":    "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+}
+
 var geminiHeaders = map[string]string{
 	"Authorization": "Bearer $TOKEN$",
 	"Content-Type":  "application/json",
+}
+
+func antigravityHeaders() map[string]string {
+	return map[string]string{
+		"Authorization": "Bearer $TOKEN$",
+		"Content-Type":  "application/json",
+		"User-Agent":    misc.AntigravityUserAgent(),
+	}
 }
 
 var kimiHeaders = map[string]string{
@@ -104,7 +124,34 @@ func fetchCodexQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]byt
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("codex usage returned status %d", resp.StatusCode)
 	}
-	return resp.Body, nil
+
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		return resp.Body, nil
+	}
+
+	resetCreditsResp, resetCreditsErr := apiCall(
+		quota.APICallRequest{
+			URL:       codexRateLimitResetCreditsURL,
+			Method:    "GET",
+			Header:    codexResetCreditsHeaders,
+			AuthIndex: authIndex,
+		},
+	)
+	if resetCreditsErr != nil {
+		encoded, _ := json.Marshal(resetCreditsErr.Error())
+		result["rate_limit_reset_credits_error"] = encoded
+	} else if resetCreditsResp == nil {
+		encoded, _ := json.Marshal("codex reset credits returned empty response")
+		result["rate_limit_reset_credits_error"] = encoded
+	} else if resetCreditsResp.StatusCode < 200 || resetCreditsResp.StatusCode >= 300 {
+		encoded, _ := json.Marshal(fmt.Sprintf("codex reset credits returned status %d", resetCreditsResp.StatusCode))
+		result["rate_limit_reset_credits_error"] = encoded
+	} else {
+		result["rate_limit_reset_credits_details"] = resetCreditsResp.Body
+	}
+
+	return json.Marshal(result)
 }
 
 // fetchGeminiQuota queries Gemini CLI quota via api-call proxy.
@@ -145,10 +192,41 @@ func fetchGeminiQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]by
 	return json.Marshal(result)
 }
 
-// fetchAntigravityQuota queries Antigravity quota via api-call proxy.
-// Antigravity shares the Gemini CLI cloudcode-pa endpoints, so this delegates to fetchGeminiQuota.
+// fetchAntigravityQuota queries Antigravity quota and subscription tier via api-call proxy.
 func fetchAntigravityQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]byte, error) {
-	return fetchGeminiQuota(apiCall, authIndex)
+	quotaResp, err := apiCall(
+		quota.APICallRequest{
+			URL:       geminiQuotaURL,
+			Method:    "POST",
+			Header:    antigravityHeaders(),
+			AuthIndex: authIndex,
+			Data:      "{}",
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("antigravity quota request failed: %w", err)
+	}
+	if quotaResp.StatusCode < 200 || quotaResp.StatusCode >= 300 {
+		return nil, fmt.Errorf("antigravity quota returned status %d", quotaResp.StatusCode)
+	}
+
+	codeAssistResp, codeAssistErr := apiCall(
+		quota.APICallRequest{
+			URL:       antigravityLoadCodeAssistURL,
+			Method:    "POST",
+			Header:    antigravityHeaders(),
+			AuthIndex: authIndex,
+			Data:      `{"metadata":{"ideType":"ANTIGRAVITY"}}`,
+		},
+	)
+
+	result := map[string]interface{}{
+		"quota": quotaResp.Body,
+	}
+	if codeAssistErr == nil && codeAssistResp != nil && codeAssistResp.StatusCode >= 200 && codeAssistResp.StatusCode < 300 {
+		result["codeAssist"] = codeAssistResp.Body
+	}
+	return json.Marshal(result)
 }
 
 // fetchKimiQuota queries Kimi quota via api-call proxy.
@@ -210,7 +288,7 @@ func registerAuthManagerForQuota(scheduler *quota.Scheduler, authManager *coreau
 			continue
 		}
 		scheduler.Register(fileName, credType, auth.Index)
-		scheduler.SetDisabled(fileName, auth.Disabled)
+		scheduler.SetDisabled(fileName, credType, auth.Disabled)
 		registered++
 	}
 	return registered

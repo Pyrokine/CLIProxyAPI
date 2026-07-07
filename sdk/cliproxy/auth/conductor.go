@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -674,6 +675,101 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return auth.Clone(), nil
 }
 
+// ResetQuota clears quota/cooldown state for an auth and resumes registry routing.
+func (m *Manager) ResetQuota(ctx context.Context, authID string) (*Auth, []string, error) {
+	if m == nil {
+		return nil, nil, nil
+	}
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return nil, nil, fmt.Errorf("auth id is required")
+	}
+
+	now := time.Now()
+	models := make([]string, 0)
+
+	m.mu.RLock()
+	auth, ok := m.auths[authID]
+	if !ok || auth == nil {
+		m.mu.RUnlock()
+		return nil, nil, nil
+	}
+	updated := auth.Clone()
+	m.mu.RUnlock()
+
+	for modelKey, state := range updated.ModelStates {
+		modelKey = strings.TrimSpace(modelKey)
+		if modelKey == "" {
+			continue
+		}
+		models = append(models, modelKey)
+		resetModelState(state, now)
+	}
+	updateAggregatedAvailability(updated, now)
+	if !updated.Disabled && updated.Status != StatusDisabled && !hasModelError(updated, now) {
+		clearAuthStateOnSuccess(updated, now)
+	}
+	if len(models) == 0 {
+		models = append(models, modelsForRegisteredAuth(authID)...)
+	}
+	models = dedupeStrings(models)
+
+	if err := m.persist(ctx, updated, false, false, 0); err != nil {
+		return nil, nil, err
+	}
+
+	snapshot := updated.Clone()
+	m.mu.Lock()
+	if _, removed := m.removedAuths[authID]; removed {
+		m.mu.Unlock()
+		return nil, nil, nil
+	}
+	m.auths[authID] = snapshot.Clone()
+	m.mu.Unlock()
+
+	for _, modelKey := range models {
+		registry.GetGlobalRegistry().ClearModelQuotaExceeded(authID, modelKey)
+		registry.GetGlobalRegistry().ResumeClientModel(authID, modelKey)
+	}
+	if m.scheduler != nil {
+		m.scheduler.upsertAuth(snapshot.Clone())
+	}
+	m.hook.OnAuthUpdated(ctx, snapshot.Clone())
+	return snapshot, models, nil
+}
+
+func modelsForRegisteredAuth(authID string) []string {
+	supportedModels := registry.GetGlobalRegistry().GetModelsForClient(authID)
+	models := make([]string, 0, len(supportedModels))
+	for _, supportedModel := range supportedModels {
+		if supportedModel == nil || strings.TrimSpace(supportedModel.ID) == "" {
+			continue
+		}
+		models = append(models, supportedModel.ID)
+	}
+	return models
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := values[:0]
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func (m *Manager) Remove(ctx context.Context, id string) {
 	if m == nil {
 		return
@@ -803,8 +899,13 @@ func (m *Manager) Execute(
 					_ string,
 					execReq cliproxyexecutor.Request,
 					execOpts cliproxyexecutor.Options,
+					aliasResult OAuthModelAliasResult,
 				) (cliproxyexecutor.Response, error) {
-					return executor.Execute(execCtx, auth, execReq, execOpts)
+					resp, errExec := executor.Execute(execCtx, auth, execReq, execOpts)
+					if errExec == nil {
+						rewriteForceMappedResponse(&resp, aliasResult)
+					}
+					return resp, errExec
 				},
 				m.MarkResult,
 			)
@@ -843,6 +944,7 @@ func (m *Manager) ExecuteCount(
 					_ string,
 					execReq cliproxyexecutor.Request,
 					execOpts cliproxyexecutor.Options,
+					_ OAuthModelAliasResult,
 				) (cliproxyexecutor.Response, error) {
 					return executor.CountTokens(execCtx, auth, execReq, execOpts)
 				},
@@ -878,9 +980,10 @@ func (m *Manager) ExecuteStream(
 					provider string,
 					execReq cliproxyexecutor.Request,
 					execOpts cliproxyexecutor.Options,
+					aliasResult OAuthModelAliasResult,
 				) (*cliproxyexecutor.StreamResult, error) {
 					return m.executeStreamWithBootstrap(
-						execCtx, auth, executor, provider, execReq, execOpts, routeModel,
+						execCtx, auth, executor, provider, execReq, execOpts, routeModel, aliasResult,
 					)
 				},
 				// Stream success recording is deferred to wrapStreamResult goroutine;
@@ -1037,11 +1140,11 @@ func (m *Manager) prepareAntigravityCreditsExecution(
 	return creditsCtx, cliproxyexecutor.Request{Model: routeModel}, creditsOpts
 }
 
-func (m *Manager) antigravityCreditsModel(routeModel string, auth *Auth) string {
+func (m *Manager) antigravityCreditsModelAliasResult(routeModel string, auth *Auth) OAuthModelAliasResult {
 	model := rewriteModelForAuth(routeModel, auth)
-	model = m.applyOAuthModelAlias(auth, model)
-	model = m.applyAPIKeyModelAlias(auth, model)
-	return model
+	aliasResult := m.applyOAuthModelAliasWithResult(auth, model)
+	aliasResult.UpstreamModel = m.applyAPIKeyModelAlias(auth, aliasResult.UpstreamModel)
+	return aliasResult
 }
 
 func (m *Manager) tryAntigravityCreditsExecute(
@@ -1053,7 +1156,8 @@ func (m *Manager) tryAntigravityCreditsExecute(
 		}
 		creditsCtx, execReq, creditsOpts := m.prepareAntigravityCreditsExecution(ctx, candidate.auth, req.Model, opts)
 		execReq.Payload = req.Payload
-		execReq.Model = m.antigravityCreditsModel(req.Model, candidate.auth)
+		aliasResult := m.antigravityCreditsModelAliasResult(req.Model, candidate.auth)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq, creditsOpts = applyRequestAfterAuthInterceptor(
 			creditsCtx, candidate.executor, candidate.provider, candidate.auth, execReq, creditsOpts, req.Model,
 		)
@@ -1068,6 +1172,7 @@ func (m *Manager) tryAntigravityCreditsExecute(
 			continue
 		}
 		m.MarkResult(creditsCtx, result)
+		rewriteForceMappedResponse(&resp, aliasResult)
 		return resp, true
 	}
 	return cliproxyexecutor.Response{}, false
@@ -1082,12 +1187,14 @@ func (m *Manager) tryAntigravityCreditsExecuteStream(
 		}
 		creditsCtx, execReq, creditsOpts := m.prepareAntigravityCreditsExecution(ctx, candidate.auth, req.Model, opts)
 		execReq.Payload = req.Payload
-		execReq.Model = m.antigravityCreditsModel(req.Model, candidate.auth)
+		aliasResult := m.antigravityCreditsModelAliasResult(req.Model, candidate.auth)
+		execReq.Model = aliasResult.UpstreamModel
 		execReq, creditsOpts = applyRequestAfterAuthInterceptor(
 			creditsCtx, candidate.executor, candidate.provider, candidate.auth, execReq, creditsOpts, req.Model,
 		)
 		result, errStream := m.executeStreamWithBootstrap(
 			creditsCtx, candidate.auth, candidate.executor, candidate.provider, execReq, creditsOpts, req.Model,
+			aliasResult,
 		)
 		if errStream != nil {
 			m.MarkResult(
@@ -1121,6 +1228,7 @@ func mixedOnce[T any](
 		provider string,
 		req cliproxyexecutor.Request,
 		opts cliproxyexecutor.Options,
+		aliasResult OAuthModelAliasResult,
 	) (T, error),
 	recordResult func(ctx context.Context, result Result),
 ) (T, error) {
@@ -1180,19 +1288,21 @@ func mixedOnce[T any](
 			continue
 		}
 		execReq := req
+		aliasResult := OAuthModelAliasResult{}
 		if auth.Attributes != nil && strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey]) != "" {
 			execReq.Model = strings.TrimSpace(auth.Attributes[homeUpstreamModelAttributeKey])
 		} else {
 			execReq.Model = rewriteModelForAuth(routeModel, auth)
-			execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
-			execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+			aliasResult = m.applyOAuthModelAliasWithResult(auth, execReq.Model)
+			execReq.Model = m.applyAPIKeyModelAlias(auth, aliasResult.UpstreamModel)
+			aliasResult.UpstreamModel = execReq.Model
 		}
 		execOpts := opts
 		execReq, execOpts = applyRequestAfterAuthInterceptor(
 			execCtx, executor, provider, auth, execReq, execOpts, routeModel,
 		)
 		execReq = sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, execReq)
-		resp, errExec := executeFn(execCtx, auth, executor, provider, execReq, execOpts)
+		resp, errExec := executeFn(execCtx, auth, executor, provider, execReq, execOpts, aliasResult)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
@@ -1386,12 +1496,60 @@ func schedulerAuthCandidates(auths []*Auth) []pluginapi.SchedulerAuthCandidate {
 				Provider:   strings.ToLower(strings.TrimSpace(auth.Provider)),
 				Priority:   authPriority(auth),
 				Status:     string(auth.Status),
-				Attributes: maps.Clone(auth.Attributes),
-				Metadata:   cloneSchedulerAnyMap(auth.Metadata),
+				Attributes: schedulerSafeAttributes(auth.Attributes),
 			},
 		)
 	}
 	return out
+}
+
+func schedulerSafeAttributes(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		if schedulerAttributeSensitive(key) {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func schedulerAttributeSensitive(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if key == "" {
+		return true
+	}
+	switch key {
+	case "provider_key", "provider-key", "compat_name", "compat-name", "auth_index", "auth-index", "label", "source", "scope":
+		return false
+	}
+	sensitiveTokens := []string{
+		"api_key",
+		"api-key",
+		"apikey",
+		"authorization",
+		"bearer",
+		"cookie",
+		"credential",
+		"password",
+		"proxy",
+		"refresh",
+		"secret",
+		"storage",
+		"token",
+	}
+	for _, token := range sensitiveTokens {
+		if strings.Contains(key, token) {
+			return true
+		}
+	}
+	return false
 }
 
 func schedulerProviders(provider string, providers []string) []string {
@@ -1494,6 +1652,37 @@ func streamErrorResult(headers http.Header, err error) *cliproxyexecutor.StreamR
 	return &cliproxyexecutor.StreamResult{Headers: cloneHTTPHeader(headers), Chunks: ch}
 }
 
+func rewriteForceMappedResponse(resp *cliproxyexecutor.Response, aliasResult OAuthModelAliasResult) {
+	if resp == nil || !aliasResult.ForceMapping || strings.TrimSpace(aliasResult.OriginalAlias) == "" {
+		return
+	}
+	resp.Payload = rewriteModelInResponse(resp.Payload, aliasResult.OriginalAlias)
+}
+
+func rewriteForceMappedStreamChunk(rewriter *StreamRewriter, payload []byte) []byte {
+	if rewriter == nil || len(payload) == 0 {
+		return payload
+	}
+	rewritten := rewriter.RewriteChunk(payload)
+	if len(rewritten) > 0 {
+		return rewritten
+	}
+	if len(rewriter.pendingBuf) > 0 {
+		return nil
+	}
+	if lineWise := rewriteSSEPayloadLines(payload, rewriter.options.RewriteModel); len(lineWise) > 0 {
+		return lineWise
+	}
+	return nil
+}
+
+func finishForceMappedStreamChunks(rewriter *StreamRewriter) []byte {
+	if rewriter == nil {
+		return nil
+	}
+	return rewriter.Finish()
+}
+
 func readStreamBootstrap(ctx context.Context, ch <-chan cliproxyexecutor.StreamChunk) (
 	[]cliproxyexecutor.StreamChunk,
 	bool,
@@ -1548,6 +1737,7 @@ func (m *Manager) executeStreamWithBootstrap(
 	execReq cliproxyexecutor.Request,
 	execOpts cliproxyexecutor.Options,
 	routeModel string,
+	aliasResult OAuthModelAliasResult,
 ) (*cliproxyexecutor.StreamResult, error) {
 	streamResult, errStream := executor.ExecuteStream(execCtx, streamAuth, execReq, execOpts)
 	if errStream != nil {
@@ -1571,7 +1761,7 @@ func (m *Manager) executeStreamWithBootstrap(
 		remaining = closedCh
 	}
 	return m.wrapStreamResult(
-		execCtx, streamAuth.Clone(), streamProvider, routeModel, streamResult.Headers, buffered, remaining,
+		execCtx, streamAuth.Clone(), streamProvider, routeModel, streamResult.Headers, buffered, remaining, aliasResult,
 	), nil
 }
 
@@ -1583,12 +1773,17 @@ func (m *Manager) wrapStreamResult(
 	headers http.Header,
 	buffered []cliproxyexecutor.StreamChunk,
 	remaining <-chan cliproxyexecutor.StreamChunk,
+	aliasResult OAuthModelAliasResult,
 ) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func(streamCtx context.Context, streamChunks <-chan cliproxyexecutor.StreamChunk) {
 		defer close(out)
 		var failed bool
 		forward := true
+		var rewriter *StreamRewriter
+		if aliasResult.ForceMapping && strings.TrimSpace(aliasResult.OriginalAlias) != "" {
+			rewriter = NewStreamRewriter(StreamRewriteOptions{RewriteModel: aliasResult.OriginalAlias})
+		}
 		emit := func(chunk cliproxyexecutor.StreamChunk) bool {
 			if chunk.Err != nil && !failed {
 				failed = true
@@ -1603,6 +1798,13 @@ func (m *Manager) wrapStreamResult(
 						Error:    rerr,
 					},
 				)
+			}
+			if len(chunk.Payload) > 0 {
+				payload := rewriteForceMappedStreamChunk(rewriter, chunk.Payload)
+				if len(payload) == 0 {
+					return true
+				}
+				chunk.Payload = payload
 			}
 			if !forward {
 				return false
@@ -1628,6 +1830,11 @@ func (m *Manager) wrapStreamResult(
 		for chunk := range streamChunks {
 			if ok := emit(chunk); !ok {
 				discardStreamChunks(streamChunks)
+				return
+			}
+		}
+		if tail := finishForceMappedStreamChunks(rewriter); len(tail) > 0 {
+			if ok := emit(cliproxyexecutor.StreamChunk{Payload: tail}); !ok {
 				return
 			}
 		}
@@ -1922,6 +2129,9 @@ func selectionPredicate(disallowFreeAuth bool) func(*Auth) bool {
 }
 
 func ExtractSessionID(headers http.Header, body []byte, metadata map[string]any) string {
+	if id := claudeCodeSessionIDFromPayload(body); id != "" {
+		return id
+	}
 	if id := headerValueIgnoreCase(headers, "X-Session-ID"); id != "" {
 		return id
 	}
@@ -1944,6 +2154,28 @@ func ExtractSessionID(headers http.Header, body []byte, metadata map[string]any)
 		return id
 	}
 	return homeExecutionSessionIDFromMetadata(metadata)
+}
+
+func claudeCodeSessionIDFromPayload(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	userID := strings.TrimSpace(gjson.GetBytes(body, "metadata.user_id").String())
+	if userID == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(userID, "_session_"); idx >= 0 {
+		sessionID := strings.TrimSpace(userID[idx+len("_session_"):])
+		if sessionID != "" {
+			return "claude:" + sessionID
+		}
+	}
+	if strings.HasPrefix(userID, "{") {
+		if sessionID := strings.TrimSpace(gjson.Get(userID, "session_id").String()); sessionID != "" {
+			return "claude:" + sessionID
+		}
+	}
+	return ""
 }
 
 func codexSessionIDFromPayload(body []byte) string {

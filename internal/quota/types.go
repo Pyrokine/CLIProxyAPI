@@ -2,6 +2,7 @@ package quota
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,6 +18,16 @@ const (
 	TypeKimi        CredentialType = "kimi"
 	TypeXAI         CredentialType = "xai"
 )
+
+// EntryKey returns the provider-aware credential key used by quota status and persistence.
+func EntryKey(credType CredentialType, fileName string) string {
+	trimmedType := strings.TrimSpace(string(credType))
+	trimmedFileName := strings.TrimSpace(fileName)
+	if trimmedType == "" || trimmedFileName == "" {
+		return ""
+	}
+	return trimmedType + "::" + trimmedFileName
+}
 
 // Status represents the current state of a credential's quota.
 type Status string
@@ -117,10 +128,27 @@ func DefaultConfig() Config {
 	}
 }
 
+// ProviderStatusSummary holds provider-level quota polling status.
+type ProviderStatusSummary struct {
+	Provider        string     `json:"provider"`
+	CredentialCount int        `json:"credential_count"`
+	Idle            int        `json:"idle"`
+	Loading         int        `json:"loading"`
+	Success         int        `json:"success"`
+	Error           int        `json:"error"`
+	Banned          int        `json:"banned"`
+	QuotaExceeded   int        `json:"quota_exceeded"`
+	Disabled        int        `json:"disabled"`
+	FailureCount    int        `json:"failure_count"`
+	LatestRefreshAt *time.Time `json:"latest_refresh_at,omitempty"`
+	NextRefreshAt   *time.Time `json:"next_refresh_at,omitempty"`
+}
+
 // StatusResponse is the response for GET /quota/status.
 type StatusResponse struct {
-	Enabled         bool              `json:"enabled"`
-	IntervalSeconds int               `json:"interval_seconds"`
-	Credentials     map[string]*Entry `json:"credentials"`
-	UpdatedAt       time.Time         `json:"updated_at"`
+	Enabled         bool                             `json:"enabled"`
+	IntervalSeconds int                              `json:"interval_seconds"`
+	Credentials     map[string]*Entry                `json:"credentials"`
+	ByProvider      map[string]ProviderStatusSummary `json:"by_provider"`
+	UpdatedAt       time.Time                        `json:"updated_at"`
 }

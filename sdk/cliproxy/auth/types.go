@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	baseauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -591,13 +593,29 @@ func ExtractCustomHeadersFromMetadata(metadata map[string]any) map[string]string
 	return out
 }
 
-func ApplyCustomHeadersFromMetadata(auth *Auth) {
+func ValidateCustomHeaders(headers map[string]string) error {
+	for name, value := range headers {
+		trimmedName := strings.TrimSpace(name)
+		if trimmedName == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		if proxyutil.IsRestrictedCustomHeader(trimmedName) {
+			return fmt.Errorf("custom header %q is restricted", trimmedName)
+		}
+	}
+	return nil
+}
+
+func ApplyCustomHeadersFromMetadata(auth *Auth) error {
 	if auth == nil || len(auth.Metadata) == 0 {
-		return
+		return nil
 	}
 	headers := ExtractCustomHeadersFromMetadata(auth.Metadata)
 	if len(headers) == 0 {
-		return
+		return nil
+	}
+	if err := ValidateCustomHeaders(headers); err != nil {
+		return err
 	}
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
@@ -605,6 +623,7 @@ func ApplyCustomHeadersFromMetadata(auth *Auth) {
 	for name, value := range headers {
 		auth.Attributes["header:"+name] = value
 	}
+	return nil
 }
 
 func (a *Auth) AccountInfo() (string, string) {

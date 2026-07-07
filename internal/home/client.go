@@ -23,12 +23,14 @@ import (
 )
 
 const (
-	redisKeyConfig     = "config"
-	redisChannelConfig = "config"
-	redisKeyModels     = "models"
-	redisKeyUsage      = "usage"
-	redisKeyRequestLog = "request-log"
-	redisKeyAppLog     = "app-log"
+	redisKeyConfig       = "config"
+	redisChannelConfig   = "config"
+	redisKeyModels       = "models"
+	redisKeyUsage        = "usage"
+	redisKeyRequestLog   = "request-log"
+	redisKeyAppLog       = "app-log"
+	redisKeyPluginStatus = "plugin-status"
+	redisKeyPluginTasks  = "plugin-tasks"
 
 	homeReconnectInterval          = time.Second
 	homeReconnectFailoverThreshold = 3
@@ -57,6 +59,16 @@ type clusterNode struct {
 type clusterNodesEnvelope struct {
 	OK    bool          `json:"ok"`
 	Nodes []clusterNode `json:"nodes"`
+}
+
+type PluginTask struct {
+	ID             uint      `json:"id"`
+	Operation      string    `json:"operation"`
+	PluginID       string    `json:"plugin_id"`
+	TargetNodeType string    `json:"target_node_type,omitempty"`
+	TargetNodeID   string    `json:"target_node_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type Client struct {
@@ -682,6 +694,39 @@ func (c *Client) RPushAppLog(ctx context.Context, payload []byte) error {
 		return nil
 	}
 	return cmd.RPush(ctx, redisKeyAppLog, payload).Err()
+}
+
+func (c *Client) RPushPluginStatus(ctx context.Context, payload []byte) error {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return errClient
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	return cmd.RPush(ctx, redisKeyPluginStatus, payload).Err()
+}
+
+func (c *Client) GetPluginTasks(ctx context.Context) ([]PluginTask, error) {
+	cmd, errClient := c.commandClient()
+	if errClient != nil {
+		return nil, errClient
+	}
+	raw, errGet := cmd.Get(ctx, redisKeyPluginTasks).Bytes()
+	if errors.Is(errGet, redis.Nil) {
+		return nil, nil
+	}
+	if errGet != nil {
+		return nil, errGet
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var tasks []PluginTask
+	if errUnmarshal := json.Unmarshal(raw, &tasks); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	return tasks, nil
 }
 
 func (c *Client) handleSubscriptionPayload(channel string, payload string, onConfig func([]byte) error) error {

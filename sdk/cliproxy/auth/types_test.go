@@ -43,24 +43,43 @@ func TestApplyCustomHeadersFromMetadata(t *testing.T) {
 		Metadata: map[string]any{
 			"headers": map[string]any{
 				"X-Test":          "value",
-				" Authorization ": "Bearer token",
+				" X-API-Version ": "2024-01-01",
 				"empty":           "   ",
 			},
 		},
 	}
 
-	ApplyCustomHeadersFromMetadata(auth)
+	if err := ApplyCustomHeadersFromMetadata(auth); err != nil {
+		t.Fatalf("ApplyCustomHeadersFromMetadata returned error: %v", err)
+	}
 
 	if auth.Attributes["header:X-Test"] != "value" {
 		t.Fatalf("expected X-Test header to be applied, got %q", auth.Attributes["header:X-Test"])
 	}
-	if auth.Attributes["header:Authorization"] != "Bearer token" {
-		t.Fatalf(
-			"expected Authorization header to be trimmed and applied, got %q", auth.Attributes["header:Authorization"],
-		)
+	if auth.Attributes["header:X-API-Version"] != "2024-01-01" {
+		t.Fatalf("expected X-API-Version header to be applied, got %q", auth.Attributes["header:X-API-Version"])
 	}
 	if _, exists := auth.Attributes["header:empty"]; exists {
 		t.Fatal("expected empty custom header value to be ignored")
+	}
+}
+
+func TestApplyCustomHeadersFromMetadataRejectsRestrictedHeader(t *testing.T) {
+	t.Parallel()
+
+	auth := &Auth{
+		Metadata: map[string]any{
+			"headers": map[string]any{
+				"Authorization": "Bearer token",
+			},
+		},
+	}
+
+	if err := ApplyCustomHeadersFromMetadata(auth); err == nil {
+		t.Fatal("expected restricted header error")
+	}
+	if _, exists := auth.Attributes["header:Authorization"]; exists {
+		t.Fatal("restricted header should not be applied")
 	}
 }
 
