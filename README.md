@@ -43,7 +43,6 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 - Claude Code support via OAuth login
 - Qwen Code support via OAuth login
 - iFlow support via OAuth login
-- Amp CLI and IDE extensions support with provider routing
 - OpenAI `/v1/models` returns dynamic model metadata, including context length and other capability fields
 - OpenAI Responses `/responses/compact` endpoint for compatible upstreams
 - Streaming and non-streaming responses
@@ -113,19 +112,6 @@ git pull --ff-only --tags
 git describe --tags --always
 go build -o cli-proxy-api ./cmd/server
 ```
-
-## Amp CLI Support
-
-CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use
-your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
-
-- Provider route aliases for Amp's API patterns (`/api/provider/{provider}/v1...`)
-- Management proxy for OAuth authentication and account features
-- Smart model fallback with automatic routing
-- **Model mapping** to route unavailable models to alternatives (e.g., `claude-opus-4.5` → `claude-sonnet-4`)
-- Security-first design with localhost-only management endpoints
-
-**→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
 
 ## SDK Docs
 
