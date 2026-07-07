@@ -425,7 +425,7 @@ func TestCodexExecutorCacheHelper_Claude_GeneratesCacheKeyFromUserID(t *testing.
 	}
 }
 
-func TestCodexExecutorCacheHelper_Claude_GPT55DoesNotReuseUserCacheSession(t *testing.T) {
+func TestCodexExecutorCacheHelper_Claude_GPT5UsesStablePromptCache(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ctx := util.WithGinContext(context.Background(), ginCtx)
@@ -434,7 +434,7 @@ func TestCodexExecutorCacheHelper_Claude_GPT55DoesNotReuseUserCacheSession(t *te
 	rawJSON := []byte(`{"model":"gpt-5.5","stream":true}`)
 	req := cliproxyexecutor.Request{
 		Model:   "gpt-5.5",
-		Payload: []byte(`{"model":"gpt-5.5","metadata":{"user_id":"test-user-123"}}`),
+		Payload: []byte(`{"model":"gpt-5.5","metadata":{"user_id":"{\"session_id\":\"claude-session-1\"}"}}`),
 	}
 	url := "https://example.com/messages"
 
@@ -448,18 +448,34 @@ func TestCodexExecutorCacheHelper_Claude_GPT55DoesNotReuseUserCacheSession(t *te
 	if errRead != nil {
 		t.Fatalf("read request body: %v", errRead)
 	}
-	if gjson.GetBytes(body, "prompt_cache_key").Exists() {
-		t.Fatalf("expected no prompt_cache_key for gpt-5.5 Claude path")
+	gotKey := gjson.GetBytes(body, "prompt_cache_key").String()
+	if gotKey == "" {
+		t.Fatalf("expected prompt_cache_key for gpt-5.5 Claude path")
 	}
-	if got := httpReq.Header.Get("Conversation_id"); got != "" {
-		t.Fatalf("Conversation_id = %q, want empty", got)
+	if got := httpReq.Header.Get("Conversation_id"); got != gotKey {
+		t.Fatalf("Conversation_id = %q, want %q", got, gotKey)
 	}
-	if got := httpReq.Header.Get("Session_id"); got != "" {
-		t.Fatalf("Session_id = %q, want empty", got)
+	if got := httpReq.Header.Get("Session_id"); got != gotKey {
+		t.Fatalf("Session_id = %q, want %q", got, gotKey)
+	}
+
+	rawJSON2 := []byte(`{"model":"gpt-5.5","stream":true}`)
+	httpReq2, _, _, err := executor.cacheHelper(
+		ctx, sdktranslator.FromString("claude"), url, nil, req, req.Payload, rawJSON2,
+	)
+	if err != nil {
+		t.Fatalf("cacheHelper error (second call): %v", err)
+	}
+	body2, errRead2 := io.ReadAll(httpReq2.Body)
+	if errRead2 != nil {
+		t.Fatalf("read request body (second call): %v", errRead2)
+	}
+	if gotKey2 := gjson.GetBytes(body2, "prompt_cache_key").String(); gotKey2 != gotKey {
+		t.Fatalf("prompt_cache_key (second call) = %q, want %q", gotKey2, gotKey)
 	}
 }
 
-func TestCodexExecutorCacheHelper_OpenAIChatCompletions_NoCacheKey(t *testing.T) {
+func TestCodexExecutorCacheHelper_OpenAIChatCompletions_UsesAPIKeyPromptCache(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ginCtx.Set("apiKey", "test-api-key")
@@ -485,13 +501,15 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_NoCacheKey(t *testing.T)
 		t.Fatalf("read request body: %v", errRead)
 	}
 
-	if gjson.GetBytes(body, "prompt_cache_key").Exists() {
-		t.Fatalf(
-			"expected no prompt_cache_key for openai format, got %q", gjson.GetBytes(body, "prompt_cache_key").String(),
-		)
+	gotKey := gjson.GetBytes(body, "prompt_cache_key").String()
+	if gotKey == "" {
+		t.Fatalf("expected prompt_cache_key for openai format")
 	}
-	if httpReq.Header.Get("Conversation_id") != "" {
-		t.Fatal("expected no Conversation_id header for openai format")
+	if got := httpReq.Header.Get("Conversation_id"); got != gotKey {
+		t.Fatalf("Conversation_id = %q, want %q", got, gotKey)
+	}
+	if got := httpReq.Header.Get("Session_id"); got != gotKey {
+		t.Fatalf("Session_id = %q, want %q", got, gotKey)
 	}
 }
 

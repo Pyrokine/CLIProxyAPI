@@ -774,20 +774,10 @@ func applyCodexPromptCacheHeaders(from sdktranslator.Format, req cliproxyexecuto
 
 	var cache codexCache
 	if shouldUseImplicitCodexConversationCache(from, req.Model) {
-		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
-		if userIDResult.Exists() {
-			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			if cached, ok := getCodexCache(key); ok {
-				cache = cached
-			} else {
-				cache = codexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(1 * time.Hour),
-				}
-				setCodexCache(key, cache)
-			}
+		if cached, ok := codexPromptCacheFromClaudeRequest(req.Model, req.Payload); ok {
+			cache = cached
 		}
-	} else if from == "openai-response" {
+	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
 		if promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key"); promptCacheKey.Exists() {
 			cache.ID = promptCacheKey.String()
 		}

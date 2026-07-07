@@ -32,6 +32,40 @@ func TestSignAnthropicMessagesBodyReplacesCCHPlaceholder(t *testing.T) {
 	}
 }
 
+func TestRebuildMidSystemMessagesToTopLevel(t *testing.T) {
+	payload := []byte(`{
+		"system": "Top rule",
+		"messages": [
+			{"role":"user","content":[{"type":"text","text":"hi"}]},
+			{"role":"system","content":"Mid string rule"},
+			{"role":"assistant","content":[{"type":"text","text":"ok"}]},
+			{"role":"system","content":[{"type":"text","text":"Mid array rule","cache_control":{"type":"ephemeral"}}]},
+			{"role":"user","content":[{"type":"text","text":"continue"}]}
+		]
+	}`)
+
+	out := rebuildMidSystemMessagesToTopLevel(payload)
+	system := gjson.GetBytes(out, "system").Array()
+	if len(system) != 3 {
+		t.Fatalf("system has %d items, want 3: %s", len(system), gjson.GetBytes(out, "system").Raw)
+	}
+	wantTexts := []string{"Top rule", "Mid string rule", "Mid array rule"}
+	for i, want := range wantTexts {
+		if got := system[i].Get("text").String(); got != want {
+			t.Fatalf("system[%d].text = %q, want %q", i, got, want)
+		}
+	}
+	if got := gjson.GetBytes(out, "system.2.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system.2.cache_control.type = %q, want ephemeral", got)
+	}
+	if gjson.GetBytes(out, `messages.#(role=="system")`).Exists() {
+		t.Fatalf("messages should not contain system role after rebuild: %s", gjson.GetBytes(out, "messages").Raw)
+	}
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3", got)
+	}
+}
+
 func TestExperimentalCCHSigningEnabled(t *testing.T) {
 	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "sk-ant-api03-test", ExperimentalCCHSigning: true}}}
 	auth := &cliproxyauth.Auth{Provider: "claude", Attributes: map[string]string{"api_key": "sk-ant-api03-test"}}
@@ -86,13 +120,13 @@ func TestNewProtectedUtlsHTTPClientUsesContextRoundTripperForProtectedHost(t *te
 	}
 }
 
-func TestNewProtectedUtlsHTTPClientUsesContextRoundTripperForNonProtectedHost(t *testing.T) {
+func TestNewProtectedUtlsHTTPClientUsesContextRoundTripperForLocalNonProtectedHost(t *testing.T) {
 	called := false
 	roundTripper := protectedUtlsRoundTripFunc(
 		func(req *http.Request) (*http.Response, error) {
 			called = true
-			if req.URL.Hostname() != "example.com" {
-				t.Fatalf("hostname = %q, want example.com", req.URL.Hostname())
+			if req.URL.Hostname() != "localhost" {
+				t.Fatalf("hostname = %q, want localhost", req.URL.Hostname())
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
@@ -105,7 +139,7 @@ func TestNewProtectedUtlsHTTPClientUsesContextRoundTripperForNonProtectedHost(t 
 	ctx := util.WithRoundTripper(context.Background(), roundTripper)
 	client := newProtectedUtlsHTTPClient(ctx, nil, nil, 0)
 
-	resp, err := client.Get("https://example.com/test")
+	resp, err := client.Get("http://localhost:11434/v1/messages")
 	if err != nil {
 		t.Fatalf("client.Get returned error: %v", err)
 	}
@@ -114,6 +148,30 @@ func TestNewProtectedUtlsHTTPClientUsesContextRoundTripperForNonProtectedHost(t 
 	}
 	if !called {
 		t.Fatal("expected context RoundTripper to handle fallback request")
+	}
+}
+
+func TestNewProtectedUtlsHTTPClientAllowsLocalFallbackURL(t *testing.T) {
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("{}"))
+			},
+		),
+	)
+	defer server.Close()
+	client := newProtectedUtlsHTTPClient(context.Background(), nil, nil, 0)
+
+	resp, err := client.Get(server.URL + "/v1/messages")
+	if err != nil {
+		t.Fatalf("client.Get returned error: %v", err)
+	}
+	if errClose := resp.Body.Close(); errClose != nil {
+		t.Fatalf("response body close returned error: %v", errClose)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }
 
@@ -195,6 +253,17 @@ func TestPrepareClaudeRequestSignsOAuthCCHByDefault(t *testing.T) {
 	}
 	if strings.Contains(billing, "cch=00000;") {
 		t.Fatalf("billing header was not signed: %q", billing)
+	}
+}
+
+func TestApplyCloakingGlobalDisableLeavesPayloadUnchanged(t *testing.T) {
+	payload := []byte(`{"system":"custom system","messages":[{"role":"user","content":"hello"}]}`)
+	out := applyCloaking(
+		context.Background(), &config.Config{DisableClaudeCloakMode: true}, nil, payload, "claude-opus-4-7",
+		"sk-ant-oat-test",
+	)
+	if string(out) != string(payload) {
+		t.Fatalf("payload changed while cloak mode disabled: %s", string(out))
 	}
 }
 
@@ -406,43 +475,64 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 	}
 }
 
-func TestNormalizeClaudeTemperatureForThinkingAdaptiveCoercesToOne(t *testing.T) {
+func TestNormalizeClaudeSamplingForUpstreamRemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
-	out := normalizeClaudeTemperatureForThinking(payload)
+	out := normalizeClaudeSamplingForUpstream(payload)
 
-	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
-		t.Fatalf("temperature = %v, want 1", got)
+	if gjson.GetBytes(out, "temperature").Exists() {
+		t.Fatalf("temperature should be removed")
 	}
 }
 
-func TestNormalizeClaudeTemperatureForThinkingEnabledCoercesToOne(t *testing.T) {
+func TestNormalizeClaudeSamplingForUpstreamRemovesTemperatureWithThinkingEnabled(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
-	out := normalizeClaudeTemperatureForThinking(payload)
+	out := normalizeClaudeSamplingForUpstream(payload)
 
-	if got := gjson.GetBytes(out, "temperature").Float(); got != 1 {
-		t.Fatalf("temperature = %v, want 1", got)
+	if gjson.GetBytes(out, "temperature").Exists() {
+		t.Fatalf("temperature should be removed")
 	}
 }
 
-func TestNormalizeClaudeTemperatureForThinkingNoThinkingLeavesTemperatureAlone(t *testing.T) {
-	payload := []byte(`{"temperature":0,"messages":[{"role":"user","content":"hi"}]}`)
-	out := normalizeClaudeTemperatureForThinking(payload)
+func TestNormalizeClaudeSamplingForUpstreamRemovesTopPAndTopKForThinking(t *testing.T) {
+	payload := []byte(`{"temperature":0.2,"top_p":0.9,"top_k":40,"thinking":{"type":"adaptive"}}`)
+	out := normalizeClaudeSamplingForUpstream(payload)
 
-	if got := gjson.GetBytes(out, "temperature").Float(); got != 0 {
-		t.Fatalf("temperature = %v, want 0", got)
+	if gjson.GetBytes(out, "temperature").Exists() {
+		t.Fatalf("temperature should be removed")
+	}
+	if gjson.GetBytes(out, "top_p").Exists() {
+		t.Fatalf("top_p should be removed when thinking is active")
+	}
+	if gjson.GetBytes(out, "top_k").Exists() {
+		t.Fatalf("top_k should be removed when thinking is active")
 	}
 }
 
-func TestNormalizeClaudeTemperatureForThinkingAfterForcedToolChoiceKeepsOriginalTemperature(t *testing.T) {
+func TestNormalizeClaudeSamplingForUpstreamNoThinkingRemovesOnlyTemperature(t *testing.T) {
+	payload := []byte(`{"temperature":0,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
+	out := normalizeClaudeSamplingForUpstream(payload)
+
+	if gjson.GetBytes(out, "temperature").Exists() {
+		t.Fatalf("temperature should be removed")
+	}
+	if got := gjson.GetBytes(out, "top_p").Float(); got != 0.9 {
+		t.Fatalf("top_p = %v, want 0.9", got)
+	}
+	if got := gjson.GetBytes(out, "top_k").Int(); got != 40 {
+		t.Fatalf("top_k = %v, want 40", got)
+	}
+}
+
+func TestNormalizeClaudeSamplingForUpstreamAfterForcedToolChoiceRemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"any"}}`)
 	out := disableThinkingIfToolChoiceForced(payload)
-	out = normalizeClaudeTemperatureForThinking(out)
+	out = normalizeClaudeSamplingForUpstream(out)
 
 	if gjson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("thinking should be removed when tool_choice forces tool use")
 	}
-	if got := gjson.GetBytes(out, "temperature").Float(); got != 0 {
-		t.Fatalf("temperature = %v, want 0", got)
+	if gjson.GetBytes(out, "temperature").Exists() {
+		t.Fatalf("temperature should be removed")
 	}
 }
 
@@ -575,6 +665,51 @@ func TestPrepareClaudeRequestSanitizesIncompatibleSignatures(t *testing.T) {
 	}
 	if got := gjson.GetBytes(body, "messages.0.content.1.text").String(); got != "visible" {
 		t.Fatalf("text content = %q, want visible. Body: %s", got, string(body))
+	}
+}
+
+func TestPrepareClaudeRequestBypassesSignatureSanitizerForNonClaudeModel(t *testing.T) {
+	executor := NewClaudeExecutor(&config.Config{})
+	payload := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[{
+			"role":"assistant",
+			"content":[
+				{"type":"thinking","thinking":"keep","signature":"skip_thought_signature_validator"},
+				{"type":"tool_use","id":"toolu_1","name":"Read","input":{},"signature":"skip_thought_signature_validator","extra_content":{"google":{"thought_signature":"skip_thought_signature_validator"}},"model":"gemini-3-pro"},
+				{"type":"text","text":"visible"}
+			]
+		}],
+		"max_tokens":16
+	}`)
+
+	cr, err := executor.prepareClaudeRequest(
+		context.Background(),
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": "https://example.com"}},
+		cliproxyexecutor.Request{Model: "gpt-5.4", Payload: payload},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("prepareClaudeRequest error: %v", err)
+	}
+	body, err := io.ReadAll(cr.httpReq.Body)
+	if err != nil {
+		t.Fatalf("read request body: %v", err)
+	}
+
+	if got := gjson.GetBytes(body, "messages.0.content.0.type").String(); got != "thinking" {
+		t.Fatalf("first content type = %q, want thinking. Body: %s", got, string(body))
+	}
+	for _, path := range []string{
+		"messages.0.content.0.signature",
+		"messages.0.content.1.signature",
+		"messages.0.content.1.extra_content.google.thought_signature",
+		"messages.0.content.1.model",
+	} {
+		if !gjson.GetBytes(body, path).Exists() {
+			t.Fatalf("%s should be preserved for non-Claude target. Body: %s", path, string(body))
+		}
 	}
 }
 

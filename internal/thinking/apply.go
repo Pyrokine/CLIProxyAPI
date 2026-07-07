@@ -3,6 +3,7 @@ package thinking
 
 import (
 	"strings"
+	"sync"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	log "github.com/sirupsen/logrus"
@@ -28,11 +29,16 @@ var providerAppliers = map[string]ProviderApplier{
 	"kimi":        nil,
 }
 
-var pluginProviderAppliers = map[string]pluginProviderApplier{}
+var (
+	providerAppliersMu     sync.RWMutex
+	pluginProviderAppliers = map[string]pluginProviderApplier{}
+)
 
 // getProviderApplier returns the ProviderApplier for the given provider name.
 // Returns nil if the provider is not registered.
 func getProviderApplier(provider string) ProviderApplier {
+	providerAppliersMu.RLock()
+	defer providerAppliersMu.RUnlock()
 	if applier := providerAppliers[provider]; applier != nil {
 		return applier
 	}
@@ -41,6 +47,8 @@ func getProviderApplier(provider string) ProviderApplier {
 
 // RegisterProvider registers a provider applier by name.
 func RegisterProvider(name string, applier ProviderApplier) {
+	providerAppliersMu.Lock()
+	defer providerAppliersMu.Unlock()
 	providerAppliers[name] = applier
 }
 
@@ -51,6 +59,8 @@ func RegisterPluginProvider(owner string, name string, priority int, applier Pro
 	if owner == "" || name == "" || applier == nil {
 		return false
 	}
+	providerAppliersMu.Lock()
+	defer providerAppliersMu.Unlock()
 	if _, native := providerAppliers[name]; native {
 		return false
 	}
@@ -65,6 +75,8 @@ func RegisterPluginProvider(owner string, name string, priority int, applier Pro
 // UnregisterPluginProviders removes all thinking providers owned by a plugin.
 func UnregisterPluginProviders(owner string) {
 	owner = strings.TrimSpace(owner)
+	providerAppliersMu.Lock()
+	defer providerAppliersMu.Unlock()
 	for provider, record := range pluginProviderAppliers {
 		if record.owner == owner {
 			delete(pluginProviderAppliers, provider)
@@ -74,6 +86,8 @@ func UnregisterPluginProviders(owner string) {
 
 // ClearPluginProviders removes all plugin-owned thinking providers.
 func ClearPluginProviders() {
+	providerAppliersMu.Lock()
+	defer providerAppliersMu.Unlock()
 	pluginProviderAppliers = map[string]pluginProviderApplier{}
 }
 

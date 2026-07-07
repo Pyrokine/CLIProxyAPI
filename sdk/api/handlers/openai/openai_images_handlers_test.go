@@ -300,3 +300,105 @@ func TestImagesEditsRoutesConfiguredOpenAICompatImageModel(t *testing.T) {
 		t.Fatalf("payload model = %q, want alias-image-edit; body=%s", got, executor.payload)
 	}
 }
+
+func TestImagesGenerationsRoutesGPTImage15ToOpenAIImageExecutor(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &imageCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID: "auth-gpt-image-15", Provider: executor.Identifier(), Status: coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(
+		auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gpt-image-1.5", Type: registry.OpenAIImageModelType}},
+	)
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		},
+	)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/images/generations", h.ImagesGenerations)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/images/generations",
+		strings.NewReader(`{"model":"gpt-image-1.5","prompt":"draw"}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.sourceFormat != "openai-image" {
+		t.Fatalf("source format = %q, want openai-image", executor.sourceFormat)
+	}
+	if executor.requestPath != "/v1/images/generations" {
+		t.Fatalf("request path = %q, want /v1/images/generations", executor.requestPath)
+	}
+	if executor.model != "gpt-image-1.5" {
+		t.Fatalf("model = %q, want gpt-image-1.5", executor.model)
+	}
+	if got := gjson.GetBytes(executor.payload, "model").String(); got != "gpt-image-1.5" {
+		t.Fatalf("payload model = %q, want gpt-image-1.5; body=%s", got, executor.payload)
+	}
+}
+
+func TestImagesEditsRoutesCodexImageModelToOpenAIImageExecutor(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &imageCaptureExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{
+		ID: "auth-codex-image-edit", Provider: executor.Identifier(), Status: coreauth.StatusActive,
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(
+		auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gpt-image-2", Type: registry.OpenAIImageModelType}},
+	)
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		},
+	)
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/images/edits", h.ImagesEdits)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/images/edits",
+		strings.NewReader(`{"model":"gpt-image-2","prompt":"edit","images":[{"file_id":"file-abc"}]}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", resp.Code, http.StatusOK, resp.Body.String())
+	}
+	if executor.sourceFormat != "openai-image" {
+		t.Fatalf("source format = %q, want openai-image", executor.sourceFormat)
+	}
+	if executor.requestPath != "/v1/images/edits" {
+		t.Fatalf("request path = %q, want /v1/images/edits", executor.requestPath)
+	}
+	if got := gjson.GetBytes(executor.payload, "model").String(); got != "gpt-image-2" {
+		t.Fatalf("payload model = %q, want gpt-image-2; body=%s", got, executor.payload)
+	}
+	if got := gjson.GetBytes(executor.payload, "images.0.file_id").String(); got != "file-abc" {
+		t.Fatalf("images.0.file_id = %q, want file-abc; body=%s", got, executor.payload)
+	}
+}

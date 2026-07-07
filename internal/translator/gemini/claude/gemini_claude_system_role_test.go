@@ -18,7 +18,8 @@ func TestConvertClaudeRequestToGemini_NormalizesMessageLevelSystemRole(t *testin
 	if got := gjson.GetBytes(output, "contents.0.role").String(); got != "user" {
 		t.Fatalf("contents.0.role = %q, want user; output=%s", got, output)
 	}
-	if got := gjson.GetBytes(output, "contents.0.parts.0.text").String(); got != "system in messages" {
-		t.Fatalf("contents.0.parts.0.text = %q, want system in messages; output=%s", got, output)
+	wantReminder := "<system-reminder>\nsystem in messages\n</system-reminder>"
+	if got := gjson.GetBytes(output, "contents.0.parts.0.text").String(); got != wantReminder {
+		t.Fatalf("contents.0.parts.0.text = %q, want system reminder; output=%s", got, output)
 	}
 }

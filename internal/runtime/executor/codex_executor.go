@@ -1469,22 +1469,17 @@ func (e *codexExecutor) cacheHelper(
 ) (*http.Request, []byte, codexIdentityConfuseState, error) {
 	var cache codexCache
 	if shouldUseImplicitCodexConversationCache(from, req.Model) {
-		userIDResult := gjson.GetBytes(req.Payload, "metadata.user_id")
-		if userIDResult.Exists() {
-			key := fmt.Sprintf("%s-%s", req.Model, userIDResult.String())
-			var ok bool
-			if cache, ok = getCodexCache(key); !ok {
-				cache = codexCache{
-					ID:     uuid.New().String(),
-					Expire: time.Now().Add(1 * time.Hour),
-				}
-				setCodexCache(key, cache)
-			}
+		if cached, ok := codexPromptCacheFromClaudeRequest(req.Model, req.Payload); ok {
+			cache = cached
 		}
 	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
 		promptCacheKey := gjson.GetBytes(req.Payload, "prompt_cache_key")
 		if promptCacheKey.Exists() {
 			cache.ID = promptCacheKey.String()
+		}
+	} else if sourceFormatEqual(from, sdktranslator.FormatOpenAI) {
+		if cached, ok := codexPromptCacheFromOpenAIAPIKey(ctx); ok {
+			cache = cached
 		}
 	}
 
@@ -1508,17 +1503,47 @@ func (e *codexExecutor) cacheHelper(
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config) {
+	var ginHeaders http.Header
+	if ginCtx, ok := util.GinContextValue(r.Context()).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		ginHeaders = trustedCodexClientHeaders(ginCtx.Request.Header)
+	}
+	applyCodexHeadersFromSources(r, auth, token, stream, cfg, ginHeaders)
+}
+
+// applyCodexDirectImageHeaders sets Codex upstream headers for direct /images/* calls.
+// Downstream client User-Agent values are not forwarded to reduce Cloudflare 1010 blocks.
+func applyCodexDirectImageHeaders(
+	r *http.Request,
+	auth *cliproxyauth.Auth,
+	token string,
+	stream bool,
+	cfg *config.Config,
+) {
+	var ginHeaders http.Header
+	if ginCtx, ok := util.GinContextValue(r.Context()).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		ginHeaders = trustedCodexClientHeaders(ginCtx.Request.Header)
+		if ginHeaders != nil {
+			ginHeaders = ginHeaders.Clone()
+			ginHeaders.Del("User-Agent")
+		}
+	}
+	applyCodexHeadersFromSources(r, auth, token, stream, cfg, ginHeaders)
+}
+
+func applyCodexHeadersFromSources(
+	r *http.Request,
+	auth *cliproxyauth.Auth,
+	token string,
+	stream bool,
+	cfg *config.Config,
+	ginHeaders http.Header,
+) {
 	misc.ScrubProxyAndFingerprintHeaders(r)
 	if userAgent := strings.TrimSpace(r.Header.Get("User-Agent")); userAgent != "" && !isCodexUserAgent(userAgent) {
 		r.Header.Del("User-Agent")
 	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+token)
-
-	var ginHeaders http.Header
-	if ginCtx, ok := util.GinContextValue(r.Context()).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = trustedCodexClientHeaders(ginCtx.Request.Header)
-	}
 
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
 	misc.EnsureHeader(r.Header, ginHeaders, "Version", codexClientVersion)

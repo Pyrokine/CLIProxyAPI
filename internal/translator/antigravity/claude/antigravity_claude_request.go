@@ -11,6 +11,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -73,6 +74,9 @@ func hasResolvedThinkingSignature(signature string) bool {
 func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
 	enableThoughtTranslate := true
 	rawJSON := inputRawJSON
+	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON) {
+		return buildAntigravityWebSearchRequest(modelName, rawJSON)
+	}
 
 	// system instruction
 	var systemInstructionJSON []byte
@@ -131,6 +135,16 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			clientContentJSON := []byte(`{"role":"","parts":[]}`)
 			clientContentJSON, _ = sjson.SetBytes(clientContentJSON, "role", role)
 			contentsResult := messageResult.Get("content")
+			if originalRole == "system" {
+				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
+					partJSON := []byte(`{}`)
+					partJSON, _ = sjson.SetBytes(partJSON, "text", reminderText)
+					clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
+					contentsJSON, _ = sjson.SetRawBytes(contentsJSON, "-1", clientContentJSON)
+					hasContents = true
+				}
+				continue
+			}
 			if contentsResult.IsArray() {
 				contentResults := contentsResult.Array()
 				numContents := len(contentResults)
@@ -141,15 +155,15 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "thinking" {
 						thinkingText := thinking.GetThinkingText(contentResult)
 
-						signature := resolveThinkingSignature(
+						resolvedSignature := resolveThinkingSignature(
 							modelName, thinkingText, contentResult.Get("signature").String(),
 						)
 
-						if hasResolvedThinkingSignature(signature) {
-							currentMessageThinkingSignature = signature
+						if hasResolvedThinkingSignature(resolvedSignature) {
+							currentMessageThinkingSignature = resolvedSignature
 						}
 
-						if !hasResolvedThinkingSignature(signature) {
+						if !hasResolvedThinkingSignature(resolvedSignature) {
 							enableThoughtTranslate = false
 							continue
 						}
@@ -161,7 +175,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						partJSON := []byte(`{}`)
 						partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
 						partJSON, _ = sjson.SetBytes(partJSON, "text", thinkingText)
-						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", signature)
+						partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", resolvedSignature)
 						clientContentJSON, _ = sjson.SetRawBytes(clientContentJSON, "parts.-1", partJSON)
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "text" {
 						prompt := contentResult.Get("text").String()
@@ -420,10 +434,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	}
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.IsArray() {
-		toolsJSON = []byte(`[{"functionDeclarations":[]}]`)
+		functionToolNode := []byte(`{"functionDeclarations":[]}`)
 		toolsResults := toolsResult.Array()
 		for i := 0; i < len(toolsResults); i++ {
 			toolResult := toolsResults[i]
+			if isClaudeTypedWebSearchToolType(toolResult.Get("type").String()) {
+				continue
+			}
 			inputSchemaResult := toolResult.Get("input_schema")
 			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
 				// Sanitize the input schema for Antigravity API compatibility
@@ -436,9 +453,13 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					}
 					tool, _ = sjson.DeleteBytes(tool, toolKey)
 				}
-				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "0.functionDeclarations.-1", tool)
+				functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations.-1", tool)
 				toolDeclCount++
 			}
+		}
+		if toolDeclCount > 0 {
+			toolsJSON = []byte(`[]`)
+			toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", functionToolNode)
 		}
 	}
 

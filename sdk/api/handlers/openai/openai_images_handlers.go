@@ -26,6 +26,7 @@ import (
 
 const (
 	defaultImagesMainModel            = "gpt-5.4-mini"
+	gptImage15Model                   = "gpt-image-1.5"
 	defaultImagesToolModel            = "gpt-image-2"
 	defaultXAIImagesModel             = "grok-imagine-image"
 	xaiImagesQualityModel             = "grok-imagine-image-quality"
@@ -144,8 +145,9 @@ func isXAIImagesModel(model string) bool {
 	return prefix == "" || prefix == "xai" || prefix == "x-ai" || prefix == "grok"
 }
 
-func isDefaultImagesToolModel(model string) bool {
-	return imagesModelBase(model) == defaultImagesToolModel
+func isCodexImagesToolModel(model string) bool {
+	baseModel := imagesModelBase(model)
+	return baseModel == gptImage15Model || baseModel == defaultImagesToolModel
 }
 
 func isOpenAICompatImagesModel(model string) bool {
@@ -158,7 +160,7 @@ func isOpenAICompatImagesModel(model string) bool {
 }
 
 func isSupportedImagesModel(model string) bool {
-	if isDefaultImagesToolModel(model) {
+	if isCodexImagesToolModel(model) {
 		return true
 	}
 	return isXAIImagesModel(model) || isOpenAICompatImagesModel(model)
@@ -173,9 +175,9 @@ func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
 		http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf(
-					"Model %s is not supported on %s or %s. Use %s, %s, %s, or a configured openai-compatibility image model.",
-					model, imagesGenerationsPath, imagesEditsPath, defaultImagesToolModel, defaultXAIImagesModel,
-					xaiImagesQualityModel,
+					"Model %s is not supported on %s or %s. Use %s, %s, %s, %s, or a configured openai-compatibility image model.",
+					model, imagesGenerationsPath, imagesEditsPath, gptImage15Model, defaultImagesToolModel,
+					defaultXAIImagesModel, xaiImagesQualityModel,
 				),
 				Type: "invalid_request_error",
 			},
@@ -225,15 +227,20 @@ func cloneMIMEHeader(src textproto.MIMEHeader) textproto.MIMEHeader {
 }
 
 func buildOpenAICompatImagesMultipartRequest(form *multipart.Form, imageModel string, stream bool) (
-	[]byte,
-	string,
-	error,
+	out []byte,
+	contentType string,
+	err error,
 ) {
 	if form == nil {
 		return nil, "", fmt.Errorf("multipart form is nil")
 	}
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	defer func() {
+		if err != nil {
+			_ = writer.Close()
+		}
+	}()
 	if errWrite := writer.WriteField("model", imageModel); errWrite != nil {
 		return nil, "", fmt.Errorf("write model field failed: %w", errWrite)
 	}
@@ -949,6 +956,11 @@ func (h *APIHandler) ImagesGenerations(c *gin.Context) {
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
+	if isCodexImagesToolModel(imageModel) {
+		compatReq := buildOpenAICompatImagesJSONRequest(rawJSON, imageModel, stream)
+		h.handleOpenAICompatImages(c, compatReq, imageModel, stream)
+		return
+	}
 	if isXAIImagesModel(imageModel) {
 		xaiReq := buildXAIImagesGenerationsRequest(rawJSON, imageModel, responseFormat)
 		h.handleXAIImages(c, xaiReq, responseFormat, "image_generation", stream)
@@ -1106,7 +1118,7 @@ func (h *APIHandler) imagesEditsFromMultipart(c *gin.Context) {
 	}
 	stream := parseBoolField(c.PostForm("stream"), false)
 
-	if isOpenAICompatImagesModel(imageModel) {
+	if isCodexImagesToolModel(imageModel) || isOpenAICompatImagesModel(imageModel) {
 		compatReq, contentType, errBuild := buildOpenAICompatImagesMultipartRequest(form, imageModel, stream)
 		if errBuild != nil {
 			c.JSON(
@@ -1261,7 +1273,7 @@ func (h *APIHandler) imagesEditsFromJSON(c *gin.Context) {
 	}
 	stream := gjson.GetBytes(rawJSON, "stream").Bool()
 
-	if isOpenAICompatImagesModel(imageModel) {
+	if isCodexImagesToolModel(imageModel) || isOpenAICompatImagesModel(imageModel) {
 		compatReq := buildOpenAICompatImagesJSONRequest(rawJSON, imageModel, stream)
 		h.handleOpenAICompatImages(c, compatReq, imageModel, stream)
 		return

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -87,6 +88,15 @@ func ConvertClaudeRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 				contentJSON, _ = sjson.SetBytes(contentJSON, "role", role)
 
 				contentsResult := messageResult.Get("content")
+				if roleResult.String() == "system" {
+					if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
+						part := []byte(`{"text":""}`)
+						part, _ = sjson.SetBytes(part, "text", reminderText)
+						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
+						out, _ = sjson.SetRawBytes(out, "contents.-1", contentJSON)
+					}
+					return true
+				}
 				if contentsResult.IsArray() {
 					contentsResult.ForEach(
 						func(_, contentResult gjson.Result) bool {

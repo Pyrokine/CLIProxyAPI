@@ -624,17 +624,15 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 51: Effort none → ZeroAllowed=true → 0 → includeThoughts=false
+		// Case 51: Effort none → ZeroAllowed=true → remove empty thinkingConfig
 		{
-			name:            "51",
-			from:            "gemini",
-			to:              "antigravity",
-			model:           "antigravity-budget-model(none)",
-			inputJSON:       `{"model":"antigravity-budget-model(none)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
-			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
-			expectValue:     "0",
-			includeThoughts: "false",
-			expectErr:       false,
+			name:        "51",
+			from:        "gemini",
+			to:          "antigravity",
+			model:       "antigravity-budget-model(none)",
+			inputJSON:   `{"model":"antigravity-budget-model(none)","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			expectField: "",
+			expectErr:   false,
 		},
 		// Case 52: Effort auto → DynamicAllowed=true → -1
 		{
@@ -682,17 +680,15 @@ func TestThinkingE2EMatrix_Suffix(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 56: Budget 0 → ZeroAllowed=true → 0 → includeThoughts=false
+		// Case 56: Budget 0 → ZeroAllowed=true → remove empty thinkingConfig
 		{
-			name:            "56",
-			from:            "claude",
-			to:              "antigravity",
-			model:           "antigravity-budget-model(0)",
-			inputJSON:       `{"model":"antigravity-budget-model(0)","messages":[{"role":"user","content":"hi"}]}`,
-			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
-			expectValue:     "0",
-			includeThoughts: "false",
-			expectErr:       false,
+			name:        "56",
+			from:        "claude",
+			to:          "antigravity",
+			model:       "antigravity-budget-model(0)",
+			inputJSON:   `{"model":"antigravity-budget-model(0)","messages":[{"role":"user","content":"hi"}]}`,
+			expectField: "",
+			expectErr:   false,
 		},
 		// Case 57: Budget -1 → DynamicAllowed=true → -1
 		{
@@ -1906,17 +1902,15 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 51: thinkingLevel=none → 0 (ZeroAllowed=true)
+		// Case 51: thinkingLevel=none → remove empty thinkingConfig
 		{
-			name:            "51",
-			from:            "gemini",
-			to:              "antigravity",
-			model:           "antigravity-budget-model",
-			inputJSON:       `{"model":"antigravity-budget-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"none"}}}`,
-			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
-			expectValue:     "0",
-			includeThoughts: "false",
-			expectErr:       false,
+			name:        "51",
+			from:        "gemini",
+			to:          "antigravity",
+			model:       "antigravity-budget-model",
+			inputJSON:   `{"model":"antigravity-budget-model","contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"none"}}}`,
+			expectField: "",
+			expectErr:   false,
 		},
 		// Case 52: thinkingBudget=-1 → -1 (DynamicAllowed=true)
 		{
@@ -1964,17 +1958,15 @@ func TestThinkingE2EMatrix_Body(t *testing.T) {
 			includeThoughts: "true",
 			expectErr:       false,
 		},
-		// Case 56: thinking.budget_tokens=0 → 0 (ZeroAllowed=true)
+		// Case 56: thinking.budget_tokens=0 → remove empty thinkingConfig
 		{
-			name:            "56",
-			from:            "claude",
-			to:              "antigravity",
-			model:           "antigravity-budget-model",
-			inputJSON:       `{"model":"antigravity-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
-			expectField:     "request.generationConfig.thinkingConfig.thinkingBudget",
-			expectValue:     "0",
-			includeThoughts: "false",
-			expectErr:       false,
+			name:        "56",
+			from:        "claude",
+			to:          "antigravity",
+			model:       "antigravity-budget-model",
+			inputJSON:   `{"model":"antigravity-budget-model","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":0}}`,
+			expectField: "",
+			expectErr:   false,
 		},
 		// Case 57: thinking.budget_tokens=-1 → -1 (DynamicAllowed=true)
 		{

@@ -537,13 +537,40 @@ func convertResponsesWebSearchToolToClaude(tool gjson.Result) ([]byte, bool) {
 	if maxUses := tool.Get("max_uses"); maxUses.Exists() {
 		tJSON, _ = sjson.SetBytes(tJSON, "max_uses", maxUses.Int())
 	}
-	if allowedDomains := tool.Get("filters.allowed_domains"); allowedDomains.Exists() && allowedDomains.IsArray() {
-		tJSON, _ = sjson.SetRawBytes(tJSON, "allowed_domains", []byte(allowedDomains.Raw))
+	if domains := nonEmptyStringArrayRaw(tool.Get("filters.allowed_domains")); len(domains) > 0 {
+		tJSON, _ = sjson.SetRawBytes(tJSON, "allowed_domains", domains)
+	}
+	if domains := nonEmptyStringArrayRaw(tool.Get("filters.blocked_domains")); len(domains) > 0 {
+		tJSON, _ = sjson.SetRawBytes(tJSON, "blocked_domains", domains)
 	}
 	if userLocation := tool.Get("user_location"); userLocation.Exists() && userLocation.IsObject() {
 		tJSON, _ = sjson.SetRawBytes(tJSON, "user_location", []byte(userLocation.Raw))
 	}
 	return tJSON, true
+}
+
+func nonEmptyStringArrayRaw(value gjson.Result) []byte {
+	if !value.Exists() || !value.IsArray() {
+		return nil
+	}
+	out := []byte(`[]`)
+	count := 0
+	for _, item := range value.Array() {
+		text := strings.TrimSpace(item.String())
+		if text == "" {
+			continue
+		}
+		updated, errSet := sjson.SetBytes(out, "-1", text)
+		if errSet != nil {
+			return nil
+		}
+		out = updated
+		count++
+	}
+	if count == 0 {
+		return nil
+	}
+	return out
 }
 
 func responsesToolName(tool gjson.Result) string {

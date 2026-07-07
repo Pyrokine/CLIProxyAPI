@@ -10,6 +10,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -139,6 +140,14 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			func(_, message gjson.Result) bool {
 				role := message.Get("role").String()
 				contentResult := message.Get("content")
+				if role == "system" {
+					if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentResult); ok {
+						msgJSON := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+						msgJSON, _ = sjson.SetBytes(msgJSON, "content.0.text", reminderText)
+						messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+					}
+					return true
+				}
 
 				// Handle content
 				if contentResult.Exists() && contentResult.IsArray() {

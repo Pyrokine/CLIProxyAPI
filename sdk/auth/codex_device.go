@@ -275,10 +275,19 @@ func (a *CodexAuthenticator) buildAuthRecord(
 	}
 
 	planType := ""
+	subscriptionActiveUntil := ""
 	hashAccountID := ""
 	if tokenStorage.IDToken != "" {
 		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
 			planType = strings.TrimSpace(claims.AuthInfo.ChatgptPlanType)
+			switch value := claims.AuthInfo.ChatgptSubscriptionActiveUntil.(type) {
+			case string:
+				subscriptionActiveUntil = strings.TrimSpace(value)
+			case float64:
+				if value > 0 {
+					subscriptionActiveUntil = strconv.FormatInt(int64(value), 10)
+				}
+			}
 			accountID := strings.TrimSpace(claims.AuthInfo.ChatgptAccountID)
 			if accountID != "" {
 				digest := sha256.Sum256([]byte(accountID))
@@ -294,6 +303,10 @@ func (a *CodexAuthenticator) buildAuthRecord(
 	attributes := make(map[string]string)
 	if planType != "" {
 		attributes["plan_type"] = planType
+	}
+	if subscriptionActiveUntil != "" && subscriptionActiveUntil != "0" {
+		attributes["chatgpt_subscription_active_until"] = subscriptionActiveUntil
+		metadata["chatgpt_subscription_active_until"] = subscriptionActiveUntil
 	}
 
 	fmt.Println("Codex authentication successful")

@@ -18,6 +18,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 type PluginAuthParser interface {
@@ -174,6 +175,7 @@ func (s *FileTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 			}
 			auth, err := s.readAuthFile(path, dir)
 			if err != nil {
+				log.WithError(err).Warnf("auth filestore: skip auth %s", path)
 				return nil
 			}
 			if auth != nil {
@@ -250,7 +252,9 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 			}
 			auth.Attributes["path"] = path
 			auth.Attributes["source"] = path
-			cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+			if err := cliproxyauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
+				return nil, err
+			}
 			return auth, nil
 		}
 	}
@@ -311,7 +315,9 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: time.Time{},
 	}
-	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
+	if err := cliproxyauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
+		return nil, err
+	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}

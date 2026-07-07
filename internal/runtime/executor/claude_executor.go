@@ -45,6 +45,10 @@ const claudeToolPrefix = ""
 
 const claudeFingerprintSalt = "59cf53e54c78"
 
+func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
+	return signature.ProviderFromModelName(baseModel) == signature.ProviderClaude
+}
+
 const claudeCodeIntro = `You are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
 
 IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.`
@@ -251,6 +255,9 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 	if err != nil {
 		return nil, err
 	}
+	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+		body = rebuildMidSystemMessagesToTopLevel(body)
+	}
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
@@ -261,7 +268,7 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
-	body = normalizeClaudeTemperatureForThinking(body)
+	body = normalizeClaudeSamplingForUpstream(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -279,7 +286,9 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 
 	// Clamp max_tokens to the model's documented limit (works around Claude Code SDK off-by-one).
 	body = capMaxTokens(body, baseModel)
-	body, _ = signature.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
+	if shouldSanitizeClaudeMessagesForUpstream(baseModel) {
+		body, _ = signature.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
+	}
 
 	// Extract betas from body and convert to header
 	var extraBetas []string
@@ -597,6 +606,9 @@ func (e *ClaudeExecutor) CountTokens(
 	stream := from != to
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
+	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
+		body = rebuildMidSystemMessagesToTopLevel(body)
+	}
 
 	if !strings.HasPrefix(baseModel, "claude-3-5-haiku") {
 		body = checkSystemInstructions(body)
@@ -605,7 +617,9 @@ func (e *ClaudeExecutor) CountTokens(
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
 	body = normalizeCacheControlTTL(body)
-	body, _ = signature.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
+	if shouldSanitizeClaudeMessagesForUpstream(baseModel) {
+		body, _ = signature.SanitizeClaudeMessagesForClaudeUpstream(body, baseModel)
+	}
 
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
@@ -761,19 +775,14 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 	return body
 }
 
-func normalizeClaudeTemperatureForThinking(body []byte) []byte {
-	if !gjson.GetBytes(body, "temperature").Exists() {
-		return body
-	}
+func normalizeClaudeSamplingForUpstream(body []byte) []byte {
+	body, _ = sjson.DeleteBytes(body, "temperature")
+
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
 	switch thinkingType {
 	case "enabled", "adaptive", "auto":
-		if temp := gjson.GetBytes(
-			body, "temperature",
-		); temp.Exists() && temp.Type == gjson.Number && temp.Float() == 1 {
-			return body
-		}
-		body, _ = sjson.SetBytes(body, "temperature", 1)
+		body, _ = sjson.DeleteBytes(body, "top_p")
+		body, _ = sjson.DeleteBytes(body, "top_k")
 	}
 	return body
 }
@@ -1027,6 +1036,98 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 
 func checkSystemInstructions(payload []byte) []byte {
 	return checkSystemInstructionsWithSigningMode(payload, false, false, false)
+}
+
+func rebuildMidSystemMessagesToTopLevel(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+
+	var movedSystemParts []string
+	keptMessages := make([]string, 0, int(messages.Get("#").Int()))
+	messages.ForEach(
+		func(_, message gjson.Result) bool {
+			if strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "system") {
+				movedSystemParts = append(movedSystemParts, claudeSystemTextParts(message.Get("content"))...)
+				return true
+			}
+			keptMessages = append(keptMessages, message.Raw)
+			return true
+		},
+	)
+	if len(movedSystemParts) == 0 {
+		return payload
+	}
+
+	systemParts := claudeSystemTextParts(gjson.GetBytes(payload, "system"))
+	systemParts = append(systemParts, movedSystemParts...)
+	if len(systemParts) > 0 {
+		if updated, errSetSystem := sjson.SetRawBytes(
+			payload, "system", rawJSONArray(systemParts),
+		); errSetSystem == nil {
+			payload = updated
+		}
+	}
+	updated, errSetMessages := sjson.SetRawBytes(payload, "messages", rawJSONArray(keptMessages))
+	if errSetMessages == nil {
+		payload = updated
+	}
+	return payload
+}
+
+func claudeSystemTextParts(content gjson.Result) []string {
+	if !content.Exists() {
+		return nil
+	}
+	if content.Type == gjson.String {
+		text := content.String()
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		block := []byte(`{"type":"text","text":""}`)
+		block, _ = sjson.SetBytes(block, "text", text)
+		return []string{string(block)}
+	}
+	if !content.IsArray() {
+		return nil
+	}
+
+	var parts []string
+	content.ForEach(
+		func(_, item gjson.Result) bool {
+			if item.Type == gjson.String {
+				text := item.String()
+				if strings.TrimSpace(text) != "" {
+					block := []byte(`{"type":"text","text":""}`)
+					block, _ = sjson.SetBytes(block, "text", text)
+					parts = append(parts, string(block))
+				}
+				return true
+			}
+			if item.IsObject() && item.Get("type").String() == "text" && strings.TrimSpace(item.Get("text").String()) != "" {
+				parts = append(parts, item.Raw)
+			}
+			return true
+		},
+	)
+	return parts
+}
+
+func rawJSONArray(items []string) []byte {
+	if len(items) == 0 {
+		return []byte("[]")
+	}
+	var builder strings.Builder
+	builder.WriteByte('[')
+	for i, item := range items {
+		if i > 0 {
+			builder.WriteByte(',')
+		}
+		builder.WriteString(item)
+	}
+	builder.WriteByte(']')
+	return []byte(builder.String())
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1547,6 +1648,9 @@ func applyCloaking(
 	model string,
 	apiKey string,
 ) []byte {
+	if cfg != nil && cfg.DisableClaudeCloakMode {
+		return payload
+	}
 	clientUserAgent := getClientUserAgent(ctx)
 	oauthToken := isClaudeOAuthToken(apiKey)
 	useCCHSigning := oauthToken || experimentalCCHSigningEnabled(cfg, auth)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/homeplugins"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
@@ -107,9 +108,11 @@ type Service struct {
 	// usagePersister handles periodic persistence of usage statistics.
 	usagePersister *internalUsage.Persister
 
-	homeClient       *home.Client
-	homeCancel       context.CancelFunc
-	homeLogForwarder *logging.HomeAppLogForwarder
+	homeClient        *home.Client
+	homeCancel        context.CancelFunc
+	homeLogForwarder  *logging.HomeAppLogForwarder
+	homePluginSyncMu  sync.Mutex
+	homePluginSyncKey string
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -439,10 +442,12 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 			return
 		}
 		auth = current
-	} else if updated == nil {
-		GlobalModelRegistry().UnregisterClient(auth.ID)
-		return
-	} else {
+	}
+	if err == nil {
+		if updated == nil {
+			GlobalModelRegistry().UnregisterClient(auth.ID)
+			return
+		}
 		auth = updated
 	}
 
@@ -519,6 +524,19 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
 		return
 	}
+	if strings.EqualFold(strings.TrimSpace(a.Provider), "xai") {
+		if !forceReplace {
+			existingExecutor, hasExecutor := s.coreManager.Executor("xai")
+			if hasExecutor {
+				_, isXAIAutoExecutor := existingExecutor.(*executor.XAIAutoExecutor)
+				if isXAIAutoExecutor {
+					return
+				}
+			}
+		}
+		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
+		return
+	}
 	// Skip disabled auth entries when (re)binding executors.
 	// Disabled auths can linger during config reloads (e.g., removed OpenAI-compat entries)
 	// and must not override active provider executors (such as iFlow OAuth accounts).
@@ -558,11 +576,19 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
-		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
 			providerKey = "openai-compatibility"
+		}
+		if s.pluginHost != nil && s.pluginHost.HasExecutorCandidateProvider(providerKey) {
+			if existing, ok := s.coreManager.Executor(providerKey); ok {
+				if _, isCompat := existing.(*executor.OpenAICompatExecutor); isCompat {
+					s.coreManager.UnregisterExecutor(providerKey)
+				}
+			}
+			return
 		}
 		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, s.cfg))
 	}
@@ -575,12 +601,19 @@ func (s *Service) rebindExecutors() {
 	}
 	auths := s.coreManager.List()
 	reboundCodex := false
+	reboundXAI := false
 	for _, auth := range auths {
 		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 			if reboundCodex {
 				continue
 			}
 			reboundCodex = true
+		}
+		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+			if reboundXAI {
+				continue
+			}
+			reboundXAI = true
 		}
 		s.ensureExecutorsForAuthWithMode(auth, true)
 	}
@@ -602,19 +635,28 @@ func (s *Service) registerHomeExecutors() {
 	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewQwenExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("openai-compatibility", s.cfg))
 }
 
 func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
+	if errApply := s.applyHomeOverlayContext(context.Background(), remoteCfg); errApply != nil {
+		log.Warnf("failed to apply home config payload: %v", errApply)
+	}
+}
+
+func (s *Service) applyHomeOverlayContext(ctx context.Context, remoteCfg *config.Config) error {
 	if s == nil || remoteCfg == nil {
-		return
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	s.cfgMu.RLock()
 	baseCfg := s.cfg
 	s.cfgMu.RUnlock()
 	if baseCfg == nil {
-		return
+		return nil
 	}
 	merged := *remoteCfg
 	merged.Host = baseCfg.Host
@@ -623,7 +665,23 @@ func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
 	merged.Home = baseCfg.Home
 	config.ApplyHomeRuntimeConfig(&merged)
 	logHomeConfigChanges(baseCfg, &merged)
+	report, syncKey, didSync, errSync := s.syncHomePlugins(ctx, &merged)
+	if didSync && errSync != nil {
+		log.Warnf("failed to sync home plugins: %v", errSync)
+	}
 	s.applyConfigUpdate(&merged)
+	if didSync {
+		errLoad := homeplugins.MarkLoadResults(&report, s.pluginHost)
+		if errLoad != nil {
+			log.Warnf("failed to load home plugins after config update: %v", errLoad)
+		}
+		s.reportHomePluginStatus(ctx, &merged, report)
+		if errSync == nil && errLoad == nil {
+			s.markHomePluginsSynced(syncKey)
+		}
+	}
+	s.processHomePluginTasks(ctx, &merged)
+	return nil
 }
 
 func (s *Service) applyModelCatalogConfig(cfg *config.Config) (map[string][]config.OAuthModelAlias, error) {
@@ -886,8 +944,7 @@ func (s *Service) startHomeSubscriber(ctx context.Context) {
 				log.Warnf("failed to parse home config payload: %v", err)
 				return err
 			}
-			s.applyHomeOverlay(parsed)
-			return nil
+			return s.applyHomeOverlayContext(homeCtx, parsed)
 		},
 	)
 	s.startHomeUsageForwarder(homeCtx, client)

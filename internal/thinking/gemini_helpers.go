@@ -22,6 +22,10 @@ func ApplyGeminiLevelFormat(body []byte, config Config, prefix string) ([]byte, 
 	result, _ = sjson.DeleteBytes(result, prefix+".include_thoughts")
 
 	if config.Mode == ModeNone {
+		if config.Budget == 0 && config.Level == "" {
+			result, _ = sjson.DeleteBytes(result, prefix)
+			return result, nil
+		}
 		result, _ = sjson.SetBytes(result, prefix+".includeThoughts", false)
 		if config.Level != "" {
 			result, _ = sjson.SetBytes(result, prefix+".thinkingLevel", string(config.Level))
@@ -64,6 +68,10 @@ func ApplyGeminiBudgetFormat(body []byte, config Config, budget int, prefix stri
 	// This ensures that when user requests budget=0 (disable thinking output),
 	// the includeThoughts is correctly set to false even if budget is clamped to min.
 	if config.Mode == ModeNone {
+		if config.Budget == 0 && config.Level == "" {
+			result, _ = sjson.DeleteBytes(result, prefix)
+			return result, nil
+		}
 		result, _ = sjson.SetBytes(result, prefix+".thinkingBudget", budget)
 		result, _ = sjson.SetBytes(result, prefix+".includeThoughts", false)
 		return result, nil

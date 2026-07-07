@@ -11,6 +11,14 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+type proxyErrorTransport struct {
+	err error
+}
+
+func (t proxyErrorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, t.err
+}
+
 // SetProxy configures the provided HTTP client with proxy settings from the configuration.
 // It supports SOCKS5, HTTP, and HTTPS proxies. The function modifies the client's transport
 // to route requests through the configured proxy server.
@@ -21,9 +29,15 @@ func SetProxy(cfg *config.SDKConfig, httpClient *http.Client) *http.Client {
 	if cfg == nil {
 		return httpClient
 	}
+	if errValidate := proxyutil.ValidateProxyURL(cfg.ProxyURL); errValidate != nil {
+		log.Errorf("proxy URL rejected: %v", errValidate)
+		httpClient.Transport = proxyErrorTransport{err: errValidate}
+		return httpClient
+	}
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(cfg.ProxyURL)
 	if errBuild != nil {
 		log.Errorf("build proxy transport failed: %v", errBuild)
+		httpClient.Transport = proxyErrorTransport{err: errBuild}
 		return httpClient
 	}
 	if transport != nil {

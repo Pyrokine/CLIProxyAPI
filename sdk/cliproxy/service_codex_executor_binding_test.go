@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
@@ -65,6 +66,68 @@ func TestEnsureExecutorsForAuthWithMode_CodexForceReplace(t *testing.T) {
 	}
 }
 
+func TestEnsureExecutorsForAuth_XAIDoesNotReplaceInNormalMode(t *testing.T) {
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	auth := &coreauth.Auth{
+		ID:       "xai-auth-1",
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+	}
+
+	service.ensureExecutorsForAuth(auth)
+	firstExecutor, okFirst := service.coreManager.Executor("xai")
+	if !okFirst || firstExecutor == nil {
+		t.Fatal("expected xai executor after first bind")
+	}
+	if _, ok := firstExecutor.(*executor.XAIAutoExecutor); !ok {
+		t.Fatalf("xai executor = %T, want *executor.XAIAutoExecutor", firstExecutor)
+	}
+
+	service.ensureExecutorsForAuth(auth)
+	secondExecutor, okSecond := service.coreManager.Executor("xai")
+	if !okSecond || secondExecutor == nil {
+		t.Fatal("expected xai executor after second bind")
+	}
+
+	if firstExecutor != secondExecutor {
+		t.Fatal("expected xai executor to stay unchanged in normal mode")
+	}
+}
+
+func TestEnsureExecutorsForAuthWithMode_XAIForceReplace(t *testing.T) {
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+	auth := &coreauth.Auth{
+		ID:       "xai-auth-2",
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+	}
+
+	service.ensureExecutorsForAuth(auth)
+	firstExecutor, okFirst := service.coreManager.Executor("xai")
+	if !okFirst || firstExecutor == nil {
+		t.Fatal("expected xai executor after first bind")
+	}
+
+	service.ensureExecutorsForAuthWithMode(auth, true)
+	secondExecutor, okSecond := service.coreManager.Executor("xai")
+	if !okSecond || secondExecutor == nil {
+		t.Fatal("expected xai executor after forced rebind")
+	}
+
+	if firstExecutor == secondExecutor {
+		t.Fatal("expected xai executor replacement in force mode")
+	}
+	if _, ok := secondExecutor.(*executor.XAIAutoExecutor); !ok {
+		t.Fatalf("xai executor = %T, want *executor.XAIAutoExecutor", secondExecutor)
+	}
+}
+
 func TestRegisterHomeExecutorsRegistersBaselineExecutors(t *testing.T) {
 	service := &Service{
 		cfg:         &config.Config{},
@@ -96,6 +159,13 @@ func TestRegisterHomeExecutorsRegistersBaselineExecutors(t *testing.T) {
 		if !ok || resolved == nil {
 			t.Fatalf("expected executor for provider %s after Home registration", provider)
 		}
+	}
+	resolved, ok := service.coreManager.Executor("xai")
+	if !ok || resolved == nil {
+		t.Fatal("expected xai executor after Home registration")
+	}
+	if _, ok := resolved.(*executor.XAIAutoExecutor); !ok {
+		t.Fatalf("xai executor = %T, want *executor.XAIAutoExecutor", resolved)
 	}
 }
 

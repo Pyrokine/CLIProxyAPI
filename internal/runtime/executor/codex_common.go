@@ -3,12 +3,15 @@ package executor
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -27,14 +30,56 @@ func codexResolveBase(auth *cliproxyauth.Auth, model string) (baseModel, apiKey,
 }
 
 func shouldUseImplicitCodexConversationCache(from sdktranslator.Format, model string) bool {
-	if from != "claude" {
-		return false
+	return sourceFormatEqual(from, sdktranslator.FormatClaude) && codexPromptCacheModelName(model) != ""
+}
+
+func codexPromptCacheFromClaudeRequest(model string, payload []byte) (codexCache, bool) {
+	if len(payload) == 0 {
+		return codexCache{}, false
 	}
-	baseModel := strings.TrimSpace(strings.ToLower(thinking.ParseSuffix(model).ModelName))
-	if baseModel == "" {
-		return true
+	scope := codexPromptCacheClaudeScope(payload)
+	if scope == "" {
+		return codexCache{}, false
 	}
-	return !strings.HasPrefix(baseModel, "gpt-5")
+	key := "codex-prompt-cache:" + codexPromptCacheModelName(model) + ":" + scope
+	if cache, ok := getCodexCache(key); ok {
+		return cache, true
+	}
+	cache := codexCache{
+		ID:     uuid.New().String(),
+		Expire: time.Now().Add(time.Hour),
+	}
+	setCodexCache(key, cache)
+	return cache, true
+}
+
+func codexPromptCacheFromOpenAIAPIKey(ctx context.Context) (codexCache, bool) {
+	apiKey := strings.TrimSpace(apiKeyFromContext(ctx))
+	if apiKey == "" {
+		return codexCache{}, false
+	}
+	return codexCache{
+		ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:prompt-cache:"+apiKey)).String(),
+	}, true
+}
+
+func codexPromptCacheClaudeScope(payload []byte) string {
+	if sessionID := extractClaudeCodeSessionIDForCodexReplay(payload); sessionID != "" {
+		return "claude-session:" + sessionID
+	}
+	userID := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String())
+	if userID == "" {
+		return ""
+	}
+	return "claude-user:" + userID
+}
+
+func codexPromptCacheModelName(model string) string {
+	modelName := strings.TrimSpace(strings.ToLower(thinking.ParseSuffix(model).ModelName))
+	if modelName != "" {
+		return modelName
+	}
+	return strings.TrimSpace(strings.ToLower(model))
 }
 
 // codexResponsesBodyResult holds the outputs of codexResponsesBody.

@@ -13,7 +13,7 @@ func TestCodexBuildAuthRecordStoresPlanTypeAttribute(t *testing.T) {
 	authSvc := &codexauth.Auth{}
 	authBundle := &codexauth.AuthBundle{
 		TokenData: codexauth.TokenData{
-			IDToken:      codexDeviceTestJWT(t, "free", "account-123"),
+			IDToken:      codexDeviceTestJWT(t, "free", "account-123", "1798761600"),
 			AccessToken:  "access-token",
 			RefreshToken: "refresh-token",
 			AccountID:    "account-123",
@@ -33,9 +33,12 @@ func TestCodexBuildAuthRecordStoresPlanTypeAttribute(t *testing.T) {
 	if got := record.Attributes["plan_type"]; got != "free" {
 		t.Fatalf("plan_type attribute = %q, want free", got)
 	}
+	if got := record.Attributes["chatgpt_subscription_active_until"]; got != "1798761600" {
+		t.Fatalf("chatgpt_subscription_active_until attribute = %q, want 1798761600", got)
+	}
 }
 
-func codexDeviceTestJWT(t *testing.T, planType string, accountID string) string {
+func codexDeviceTestJWT(t *testing.T, planType string, accountID string, subscriptionActiveUntil string) string {
 	t.Helper()
 	encode := func(value any) string {
 		data, err := json.Marshal(value)
@@ -48,8 +51,9 @@ func codexDeviceTestJWT(t *testing.T, planType string, accountID string) string 
 	payload := map[string]any{
 		"email": "codex@example.com",
 		"https://api.openai.com/auth": map[string]any{
-			"chatgpt_account_id": accountID,
-			"chatgpt_plan_type":  planType,
+			"chatgpt_account_id":                accountID,
+			"chatgpt_plan_type":                 planType,
+			"chatgpt_subscription_active_until": subscriptionActiveUntil,
 		},
 	}
 	return encode(header) + "." + encode(payload) + "."

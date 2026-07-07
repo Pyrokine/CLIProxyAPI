@@ -224,6 +224,54 @@ func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []b
 	return antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON), nil
 }
 
+func hasAntigravityClaudeTypedWebSearchTool(payload []byte) bool {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		switch tool.Get("type").String() {
+		case "web_search_20250305", "web_search_20260209":
+			return true
+		}
+	}
+	return false
+}
+
+func hasAntigravityGoogleSearchTool(payload []byte) bool {
+	tools := gjson.GetBytes(payload, "request.tools")
+	if !tools.IsArray() {
+		return false
+	}
+	for _, tool := range tools.Array() {
+		if tool.Get("googleSearch").Exists() {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldResolveAntigravityWebSearchGroundingURLs(
+	from sdktranslator.Format,
+	originalRequestRawJSON, requestRawJSON []byte,
+) bool {
+	return from.String() == "claude" &&
+		hasAntigravityClaudeTypedWebSearchTool(originalRequestRawJSON) &&
+		hasAntigravityGoogleSearchTool(requestRawJSON)
+}
+
+func (e *AntigravityExecutor) resolveWebSearchGroundingURLs(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	from sdktranslator.Format,
+	originalRequestRawJSON, requestRawJSON, responseRawJSON []byte,
+) []byte {
+	if !shouldResolveAntigravityWebSearchGroundingURLs(from, originalRequestRawJSON, requestRawJSON) {
+		return responseRawJSON
+	}
+	return resolveAntigravityGroundingURLs(ctx, e.cfg, auth, responseRawJSON)
+}
+
 // Identifier returns the executor identifier.
 func (e *AntigravityExecutor) Identifier() string { return antigravityAuthType }
 
@@ -617,18 +665,22 @@ func (e *AntigravityExecutor) Execute(
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
+	requestPayload := translated
+	if useCredits {
+		if creditPayload := injectEnabledCreditTypes(translated); len(creditPayload) > 0 {
+			requestPayload = creditPayload
+		}
+	}
+	requestPayload, replayScope := prepareAntigravityGeminiReasoningReplayPayload(
+		ctx, baseModel, req, opts, requestPayload,
+	)
 	httpResp, err := e.sendWithRetry(
 		ctx, httpClient, baseURLs, attempts, baseModel, auth, func(baseURL string) (*http.Request, error) {
-			requestPayload := translated
-			if useCredits {
-				if creditPayload := injectEnabledCreditTypes(translated); len(creditPayload) > 0 {
-					requestPayload = creditPayload
-				}
-			}
 			return e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL)
 		},
 	)
 	if err != nil {
+		clearAntigravityReasoningReplayOnError(ctx, replayScope, err)
 		return resp, err
 	}
 
@@ -641,11 +693,13 @@ func (e *AntigravityExecutor) Execute(
 		return resp, errRead
 	}
 	appendAPIResponseChunk(ctx, e.cfg, bodyBytes)
+	cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, bodyBytes)
+	bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, requestPayload, bodyBytes)
 
 	reporter.publish(ctx, parseAntigravityUsage(bodyBytes))
 	var param any
 	converted := sdktranslator.TranslateNonStream(
-		ctx, to, from, req.Model, opts.OriginalRequest, translated, bodyBytes, &param,
+		ctx, to, from, req.Model, opts.OriginalRequest, requestPayload, bodyBytes, &param,
 	)
 	resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
 	reporter.ensurePublished(ctx)
@@ -703,19 +757,23 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
+	requestPayload := translated
+	if useCredits {
+		if creditPayload := injectEnabledCreditTypes(translated); len(creditPayload) > 0 {
+			requestPayload = creditPayload
+		}
+	}
+	requestPayload, replayScope := prepareAntigravityGeminiReasoningReplayPayload(
+		ctx, baseModel, req, opts, requestPayload,
+	)
 
 	httpResp, err := e.sendWithRetry(
 		ctx, httpClient, baseURLs, attempts, baseModel, auth, func(baseURL string) (*http.Request, error) {
-			requestPayload := translated
-			if useCredits {
-				if creditPayload := injectEnabledCreditTypes(translated); len(creditPayload) > 0 {
-					requestPayload = creditPayload
-				}
-			}
 			return e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
 		},
 	)
 	if err != nil {
+		clearAntigravityReasoningReplayOnError(ctx, replayScope, err)
 		return resp, err
 	}
 
@@ -770,11 +828,13 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 		}
 	}
 	resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
+	cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, resp.Payload)
+	resp.Payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, requestPayload, resp.Payload)
 
 	reporter.publish(ctx, parseAntigravityUsage(resp.Payload))
 	var param any
 	converted := sdktranslator.TranslateNonStream(
-		ctx, to, from, req.Model, opts.OriginalRequest, translated, resp.Payload, &param,
+		ctx, to, from, req.Model, opts.OriginalRequest, requestPayload, resp.Payload, &param,
 	)
 	resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
 	reporter.ensurePublished(ctx)
@@ -1022,19 +1082,23 @@ func (e *AntigravityExecutor) ExecuteStream(
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	attempts := antigravityRetryAttempts(auth, e.cfg)
 	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
+	requestPayload := translated
+	if useCredits {
+		if creditPayload := injectEnabledCreditTypes(translated); len(creditPayload) > 0 {
+			requestPayload = creditPayload
+		}
+	}
+	requestPayload, replayScope := prepareAntigravityGeminiReasoningReplayPayload(
+		ctx, baseModel, req, opts, requestPayload,
+	)
 
 	httpResp, err := e.sendWithRetry(
 		ctx, httpClient, baseURLs, attempts, baseModel, auth, func(baseURL string) (*http.Request, error) {
-			requestPayload := translated
-			if useCredits {
-				if creditPayload := injectEnabledCreditTypes(translated); len(creditPayload) > 0 {
-					requestPayload = creditPayload
-				}
-			}
 			return e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
 		},
 	)
 	if err != nil {
+		clearAntigravityReasoningReplayOnError(ctx, replayScope, err)
 		return nil, err
 	}
 
@@ -1046,6 +1110,8 @@ func (e *AntigravityExecutor) ExecuteStream(
 				log.Errorf("antigravity executor: close response body error: %v", errClose)
 			}
 		}()
+		replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
+		defer replayAccumulator.Flush(ctx)
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		var param any
@@ -1056,6 +1122,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 			// Filter usage metadata for all models
 			// Only retain usage statistics in the terminal chunk
 			line = filterSSEUsageMetadata(line)
+			replayAccumulator.ObserveSSELine(line)
 
 			payload := jsonPayload(line)
 			if payload == nil {
@@ -1065,9 +1132,10 @@ func (e *AntigravityExecutor) ExecuteStream(
 			if detail, ok := parseAntigravityStreamUsage(payload); ok {
 				reporter.publish(ctx, detail)
 			}
+			payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, requestPayload, payload)
 
 			chunks := sdktranslator.TranslateStream(
-				ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param,
+				ctx, to, from, req.Model, opts.OriginalRequest, requestPayload, bytes.Clone(payload), &param,
 			)
 			for i := range chunks {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
@@ -1082,7 +1150,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 			return
 		}
 		tail := sdktranslator.TranslateStream(
-			ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param,
+			ctx, to, from, req.Model, opts.OriginalRequest, requestPayload, []byte("[DONE]"), &param,
 		)
 		for i := range tail {
 			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: tail[i]}) {
@@ -1303,6 +1371,25 @@ func (e *AntigravityExecutor) CountTokens(
 	}
 }
 
+func antigravityWebSearchModelIDs(payload []byte) map[string]struct{} {
+	models := gjson.GetBytes(payload, "webSearchModelIds")
+	if !models.IsArray() {
+		return nil
+	}
+	out := make(map[string]struct{}, len(models.Array()))
+	for _, model := range models.Array() {
+		modelID := normalizeAntigravityCapabilityModelID(model.String())
+		if modelID != "" {
+			out[modelID] = struct{}{}
+		}
+	}
+	return out
+}
+
+func normalizeAntigravityCapabilityModelID(modelID string) string {
+	return strings.ToLower(strings.TrimSpace(modelID))
+}
+
 // FetchAntigravityModels retrieves available models using the supplied auth.
 func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
 	exec := &AntigravityExecutor{cfg: cfg}
@@ -1403,6 +1490,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			}
 			return fallbackAntigravityPrimaryModels()
 		}
+		webSearchModelIDs := antigravityWebSearchModelIDs(bodyBytes)
 
 		now := time.Now().Unix()
 		modelConfig := registry.GetAntigravityModelConfig()
@@ -1451,6 +1539,7 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			}
 			modelInfo.SupportedInputModalities = inputModalities
 			modelInfo.SupportedOutputModalities = []string{"TEXT"}
+			_, modelInfo.SupportsWebSearch = webSearchModelIDs[normalizeAntigravityCapabilityModelID(modelID)]
 
 			// Token limits from upstream.
 			if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
@@ -2174,20 +2263,21 @@ func geminiToAntigravity(modelName string, payload []byte, projectID string) []b
 	template, _ = sjson.Set(template, "userAgent", "antigravity")
 
 	isImageModel := strings.Contains(modelName, "image")
-
-	var reqType string
-	if isImageModel {
-		reqType = "image_gen"
-	} else {
-		reqType = "agent"
+	reqType := strings.TrimSpace(gjson.Get(template, "requestType").String())
+	if reqType == "" {
+		if isImageModel {
+			reqType = "image_gen"
+		} else {
+			reqType = "agent"
+		}
+		template, _ = sjson.Set(template, "requestType", reqType)
 	}
-	template, _ = sjson.Set(template, "requestType", reqType)
 
 	template, _ = sjson.Set(template, "project", projectID)
 
 	if isImageModel {
 		template, _ = sjson.Set(template, "requestId", generateImageGenRequestID())
-	} else {
+	} else if reqType != "web_search" {
 		template, _ = sjson.Set(template, "requestId", generateRequestID())
 		template, _ = sjson.Set(template, "request.sessionId", generateStableSessionID(payload))
 	}

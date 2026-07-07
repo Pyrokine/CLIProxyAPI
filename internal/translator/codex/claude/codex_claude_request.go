@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -87,7 +88,12 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
 			if messageRole == "system" {
-				messageRole = "developer"
+				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(messageResult.Get("content")); ok {
+					message := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
+					message, _ = sjson.SetBytes(message, "content.0.text", reminderText)
+					template, _ = sjson.SetRawBytes(template, "input.-1", message)
+				}
+				continue
 			}
 
 			newMessage := func() []byte {

@@ -150,6 +150,35 @@ func TestApplyCodexPromptCacheHeadersSetsSessionAndConversation(t *testing.T) {
 	}
 }
 
+func TestApplyCodexPromptCacheHeadersClaudeGPT5UsesStableCache(t *testing.T) {
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-5.5",
+		Payload: []byte(`{"metadata":{"user_id":"{\"session_id\":\"claude-ws-session-1\"}"}}`),
+	}
+
+	body, headers := applyCodexPromptCacheHeaders(
+		sdktranslator.FormatClaude, req, []byte(`{"model":"gpt-5.5"}`),
+	)
+
+	gotKey := gjson.GetBytes(body, "prompt_cache_key").String()
+	if gotKey == "" {
+		t.Fatalf("expected prompt_cache_key for gpt-5.5 Claude websocket path")
+	}
+	if got := headers.Get("Session_id"); got != gotKey {
+		t.Fatalf("Session_id = %q, want %q", got, gotKey)
+	}
+	if got := headers.Get("Conversation_id"); got != gotKey {
+		t.Fatalf("Conversation_id = %q, want %q", got, gotKey)
+	}
+
+	body2, _ := applyCodexPromptCacheHeaders(
+		sdktranslator.FormatClaude, req, []byte(`{"model":"gpt-5.5"}`),
+	)
+	if gotKey2 := gjson.GetBytes(body2, "prompt_cache_key").String(); gotKey2 != gotKey {
+		t.Fatalf("prompt_cache_key (second call) = %q, want %q", gotKey2, gotKey)
+	}
+}
+
 func TestApplyCodexWebsocketHeadersKeepsPromptCacheSessionOverCodexClientSession(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)

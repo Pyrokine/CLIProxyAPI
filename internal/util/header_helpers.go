@@ -3,10 +3,11 @@ package util
 import (
 	"net/http"
 	"strings"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 )
 
 // ApplyCustomHeadersFromAttrs applies user-defined headers stored in the provided attributes map.
-// Custom headers override built-in defaults when conflicts occur.
 func ApplyCustomHeadersFromAttrs(r *http.Request, attrs map[string]string) {
 	if r == nil {
 		return
@@ -47,7 +48,7 @@ func applyCustomHeaders(r *http.Request, headers map[string]string) {
 		if k == "" || v == "" {
 			continue
 		}
-		if strings.EqualFold(k, "Host") {
+		if proxyutil.IsRestrictedCustomHeader(k) {
 			continue
 		}
 		r.Header.Set(k, v)

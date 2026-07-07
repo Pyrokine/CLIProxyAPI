@@ -19,7 +19,8 @@ func TestConvertClaudeRequestToAntigravity_NormalizesMessageLevelSystemRole(t *t
 	if got := gjson.Get(outputStr, "request.contents.0.role").String(); got != "user" {
 		t.Fatalf("request.contents.0.role = %q, want user; output=%s", got, outputStr)
 	}
-	if got := gjson.Get(outputStr, "request.contents.0.parts.0.text").String(); got != "system in messages" {
-		t.Fatalf("request.contents.0.parts.0.text = %q, want system in messages; output=%s", got, outputStr)
+	wantReminder := "<system-reminder>\nsystem in messages\n</system-reminder>"
+	if got := gjson.Get(outputStr, "request.contents.0.parts.0.text").String(); got != wantReminder {
+		t.Fatalf("request.contents.0.parts.0.text = %q, want system reminder; output=%s", got, outputStr)
 	}
 }

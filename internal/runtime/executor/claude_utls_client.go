@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -25,12 +26,23 @@ type claudeUtlsRoundTripper struct {
 	dialer      proxy.Dialer
 }
 
+type proxyErrorDialer struct {
+	err error
+}
+
+func (d proxyErrorDialer) Dial(string, string) (net.Conn, error) {
+	return nil, d.err
+}
+
 func newClaudeUtlsRoundTripper(proxyURL string) *claudeUtlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
-		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
-		if errBuild != nil {
+		if errValidate := proxyutil.ValidateProxyURL(proxyURL); errValidate != nil {
+			log.Errorf("utls: proxy URL rejected: %v", errValidate)
+			dialer = proxyErrorDialer{err: errValidate}
+		} else if proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL); errBuild != nil {
 			log.Errorf("utls: failed to configure proxy dialer for %q: %v", proxyURL, errBuild)
+			dialer = proxyErrorDialer{err: errBuild}
 		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
 			dialer = proxyDialer
 		}
@@ -93,11 +105,19 @@ func (t *claudeUtlsRoundTripper) createConnection(host string, addr string) (*ht
 }
 
 func (t *claudeUtlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	addr := req.URL.Host
-	if !strings.Contains(addr, ":") {
-		addr += ":443"
+	if req == nil || req.URL == nil {
+		return nil, fmt.Errorf("request URL is nil")
 	}
 	hostname := req.URL.Hostname()
+	pinnedAddr, private := proxyutil.ResolvePublicHost(hostname)
+	if private {
+		return nil, fmt.Errorf("requests to private/internal addresses are not allowed")
+	}
+	port := req.URL.Port()
+	if port == "" {
+		port = "443"
+	}
+	addr := net.JoinHostPort(pinnedAddr, port)
 	h2Conn, err := t.getOrCreateConnection(hostname, addr)
 	if err != nil {
 		return nil, err

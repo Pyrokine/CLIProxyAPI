@@ -35,6 +35,14 @@ func newProxyAwareHTTPClient(
 	return NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 }
 
+type proxyErrorTransport struct {
+	err error
+}
+
+func (t proxyErrorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, t.err
+}
+
 func NewProxyAwareHTTPClient(
 	ctx context.Context,
 	cfg *config.Config,
@@ -71,6 +79,7 @@ func NewProxyAwareHTTPClient(
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := util.RoundTripperValue(ctx).(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
+		return httpClient
 	}
 
 	return httpClient
@@ -83,12 +92,16 @@ func NewProxyAwareHTTPClient(
 //   - proxyURL: The proxy URL string (e.g., "socks5://user:pass@host:port", "http://host:port")
 //
 // Returns:
-//   - *http.Transport: A configured transport, or nil if the proxy URL is invalid
-func buildProxyTransport(proxyURL string) *http.Transport {
+//   - http.RoundTripper: A configured transport, or a rejecting transport if the proxy URL is invalid
+func buildProxyTransport(proxyURL string) http.RoundTripper {
+	if errValidate := proxyutil.ValidateProxyURL(proxyURL); errValidate != nil {
+		log.Errorf("proxy URL rejected: %v", errValidate)
+		return proxyErrorTransport{err: errValidate}
+	}
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
 	if errBuild != nil {
 		log.Errorf("build proxy transport failed: %v", errBuild)
-		return nil
+		return proxyErrorTransport{err: errBuild}
 	}
 	return transport
 }

@@ -273,8 +273,10 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistHint(t *testing.T) {
 	if hint.CreditAmount != 25000 || hint.MinCreditAmount != 50 || hint.PaidTierID != "tier-1" {
 		t.Fatalf("credits hint = %+v, want parsed balance", hint)
 	}
-	if !strings.Contains(gotUserAgent, antigravityLoadCodeAssistNodeClient) {
-		t.Fatalf("User-Agent = %q, want loadCodeAssist client", gotUserAgent)
+	if !strings.Contains(gotUserAgent, "antigravity/cli/") || strings.Contains(
+		gotUserAgent, antigravityLoadCodeAssistNodeClient,
+	) {
+		t.Fatalf("User-Agent = %q, want short loadCodeAssist client", gotUserAgent)
 	}
 	if gotAPIClient != antigravityLoadCodeAssistAPIClient {
 		t.Fatalf("X-Goog-Api-Client = %q, want %q", gotAPIClient, antigravityLoadCodeAssistAPIClient)

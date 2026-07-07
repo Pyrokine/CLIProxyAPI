@@ -432,6 +432,45 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_MessageLevelSystemBecomesReminder(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-sonnet-4-5",
+		"system": [{"type": "text", "text": "Top-level rules"}],
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Hello"}]},
+			{"role": "system", "content": "String mid-conversation rule"},
+			{"role": "assistant", "content": [{"type": "text", "text": "Hi there"}]},
+			{"role": "system", "content": [{"type": "text", "text": "Array mid-conversation rule"}]},
+			{"role": "user", "content": [{"type": "text", "text": "Follow up"}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+	resultJSON := gjson.ParseBytes(result)
+	messages := resultJSON.Get("messages").Array()
+
+	if len(messages) != 6 {
+		t.Fatalf("expected 6 messages, got %d: %s", len(messages), resultJSON.Get("messages").Raw)
+	}
+	wantRoles := []string{"system", "user", "user", "assistant", "user", "user"}
+	for i, wantRole := range wantRoles {
+		if got := messages[i].Get("role").String(); got != wantRole {
+			t.Fatalf("messages[%d].role = %q, want %q", i, got, wantRole)
+		}
+	}
+	if got := messages[0].Get("content.0.text").String(); got != "Top-level rules" {
+		t.Fatalf("top-level system text = %q, want Top-level rules", got)
+	}
+	wantStringReminder := "<system-reminder>\nString mid-conversation rule\n</system-reminder>"
+	if got := messages[2].Get("content.0.text").String(); got != wantStringReminder {
+		t.Fatalf("string reminder = %q", got)
+	}
+	wantArrayReminder := "<system-reminder>\nArray mid-conversation rule\n</system-reminder>"
+	if got := messages[4].Get("content.0.text").String(); got != wantArrayReminder {
+		t.Fatalf("array reminder = %q", got)
+	}
+}
+
 func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 	inputJSON := `{
 		"model": "claude-3-opus",

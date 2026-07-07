@@ -792,8 +792,10 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
 				recordResponsesWebsocketToolCallsFromPayload(downstreamSessionKey, payloads[i])
 				recordPendingToolCallIDsFromPayload(pendingToolCallIDs, payloads[i])
 				eventType := gjson.GetBytes(payloads[i], "type").String()
-				if eventType == wsEventTypeCompleted {
-					payloads[i], _ = sjson.SetBytes(payloads[i], "type", wsEventTypeDone)
+				if isResponsesWebsocketCompletionEvent(eventType) {
+					if eventType == wsEventTypeCompleted {
+						payloads[i], _ = sjson.SetBytes(payloads[i], "type", wsEventTypeDone)
+					}
 
 					completed = true
 					completedOutput = responseCompletedOutputFromPayload(payloads[i])
@@ -814,6 +816,10 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
 			}
 		}
 	}
+}
+
+func isResponsesWebsocketCompletionEvent(eventType string) bool {
+	return eventType == wsEventTypeCompleted || eventType == wsEventTypeDone
 }
 
 func pendingResponsesWebsocketError(errs <-chan *interfaces.ErrorMessage) (*interfaces.ErrorMessage, bool) {

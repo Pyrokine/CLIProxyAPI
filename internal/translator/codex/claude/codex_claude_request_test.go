@@ -49,8 +49,8 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 					{"role": "user", "content": "hello"}
 				]
 			}`,
-			wantHasDeveloper: true,
-			wantTexts:        []string{"Follow the project instructions"},
+			wantHasDeveloper: false,
+			wantTexts:        []string{"<system-reminder>\nFollow the project instructions\n</system-reminder>"},
 		},
 		{
 			name: "Array system field with filtered billing header",
@@ -83,7 +83,7 @@ func TestConvertClaudeRequestToCodex_SystemMessageScenarios(t *testing.T) {
 					)
 				}
 
-				if !tt.wantHasDeveloper {
+				if !tt.wantHasDeveloper && len(tt.wantTexts) == 0 {
 					return
 				}
 

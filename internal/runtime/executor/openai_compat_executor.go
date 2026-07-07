@@ -619,9 +619,9 @@ func cloneOpenAICompatMIMEHeader(src textproto.MIMEHeader) textproto.MIMEHeader 
 }
 
 func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, boundary string, stream bool) (
-	[]byte,
-	string,
-	error,
+	out []byte,
+	contentType string,
+	err error,
 ) {
 	reader := multipart.NewReader(bytes.NewReader(payload), boundary)
 	form, errRead := reader.ReadForm(openAICompatMultipartMemory)
@@ -636,6 +636,11 @@ func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, bou
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	defer func() {
+		if err != nil {
+			_ = writer.Close()
+		}
+	}()
 	if model != "" {
 		if errWrite := writer.WriteField("model", model); errWrite != nil {
 			return nil, "", fmt.Errorf("write model field failed: %w", errWrite)

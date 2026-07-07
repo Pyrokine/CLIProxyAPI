@@ -224,6 +224,27 @@ func TestConvertOpenAIResponsesRequestToClaudeWebSearchTool(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaudeDropsEmptyWebSearchDomains(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":"hello",
+		"tools":[{
+			"type":"web_search",
+			"filters":{"allowed_domains":[],"blocked_domains":["blocked.example"]}
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	root := gjson.ParseBytes(out)
+
+	if root.Get("tools.0.allowed_domains").Exists() {
+		t.Fatalf("empty allowed_domains should be omitted. Output: %s", string(out))
+	}
+	if got := root.Get("tools.0.blocked_domains.0").String(); got != "blocked.example" {
+		t.Fatalf("blocked domain = %q, want blocked.example. Output: %s", got, string(out))
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaudeDropsInvalidToolChoice(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-test",

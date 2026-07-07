@@ -49,6 +49,105 @@ func TestParse(t *testing.T) {
 	}
 }
 
+func TestValidateProxyURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{name: "direct", input: "direct"},
+		{name: "public", input: "http://8.8.8.8:8080"},
+		{name: "loopback", input: "http://127.0.0.1:8080"},
+		{name: "private", input: "socks5://10.0.0.1:1080"},
+		{name: "documentation", input: "http://203.0.113.1:8080"},
+		{name: "unsupported", input: "file:///tmp/socket", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(
+			tt.name, func(t *testing.T) {
+				t.Parallel()
+				errValidate := ValidateProxyURL(tt.input)
+				if tt.wantErr && errValidate == nil {
+					t.Fatal("expected validation error, got nil")
+				}
+				if !tt.wantErr && errValidate != nil {
+					t.Fatalf("unexpected validation error: %v", errValidate)
+				}
+			},
+		)
+	}
+}
+
+func TestValidateHTTPURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{name: "public http", input: "http://8.8.8.8/v1"},
+		{name: "public https", input: "https://example.com/v1"},
+		{name: "loopback", input: "http://127.0.0.1:8080"},
+		{name: "link local", input: "http://169.254.169.254/latest/meta-data/"},
+		{name: "missing host", input: "https://", wantErr: true},
+		{name: "unsupported scheme", input: "file:///tmp/socket", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(
+			tt.name, func(t *testing.T) {
+				t.Parallel()
+				errValidate := ValidateHTTPURL(tt.input)
+				if tt.wantErr && errValidate == nil {
+					t.Fatal("expected validation error, got nil")
+				}
+				if !tt.wantErr && errValidate != nil {
+					t.Fatalf("unexpected validation error: %v", errValidate)
+				}
+			},
+		)
+	}
+}
+
+func TestValidatePublicHTTPURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{name: "public http", input: "http://8.8.8.8/v1"},
+		{name: "public https", input: "https://example.com/v1"},
+		{name: "missing host", input: "https://", wantErr: true},
+		{name: "unsupported scheme", input: "file:///tmp/socket", wantErr: true},
+		{name: "loopback", input: "http://127.0.0.1:8080", wantErr: true},
+		{name: "link local", input: "http://169.254.169.254/latest/meta-data/", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(
+			tt.name, func(t *testing.T) {
+				t.Parallel()
+				errValidate := ValidatePublicHTTPURL(tt.input)
+				if tt.wantErr && errValidate == nil {
+					t.Fatal("expected validation error, got nil")
+				}
+				if !tt.wantErr && errValidate != nil {
+					t.Fatalf("unexpected validation error: %v", errValidate)
+				}
+			},
+		)
+	}
+}
+
 func TestBuildHTTPTransportDirectBypassesProxy(t *testing.T) {
 	t.Parallel()
 
