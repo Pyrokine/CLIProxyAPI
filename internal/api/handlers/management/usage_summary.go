@@ -3,6 +3,7 @@ package management
 import (
 	"math"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
@@ -56,6 +57,14 @@ type summaryCredentialStats struct {
 	Source   string `json:"source,omitempty"`
 }
 
+type summaryProviderStats struct {
+	Provider  string  `json:"provider"`
+	Requests  int64   `json:"requests"`
+	Success   int64   `json:"success"`
+	Failure   int64   `json:"failure"`
+	ErrorRate float64 `json:"error_rate"`
+}
+
 // summaryTimePoint represents a single time bucket.
 type summaryTimePoint struct {
 	Time     string        `json:"time"`
@@ -85,6 +94,7 @@ type summaryResponse struct {
 	Totals                 summaryTotals                      `json:"totals"`
 	ByModel                map[string]*summaryModelStats      `json:"by_model"`
 	ByCredential           map[string]*summaryCredentialStats `json:"by_credential"`
+	ByProvider             map[string]*summaryProviderStats   `json:"by_provider"`
 	ByAPIKey               map[string]*summaryAPIKeyStats     `json:"by_api_key"`
 	TimeSeries             []summaryTimePoint                 `json:"time_series"`
 	TimeSeriesByModel      map[string][]summaryTimePoint      `json:"time_series_by_model"`
@@ -159,6 +169,7 @@ func emptySummaryResponse(from, to time.Time) summaryResponse {
 		},
 		ByModel:                make(map[string]*summaryModelStats),
 		ByCredential:           make(map[string]*summaryCredentialStats),
+		ByProvider:             make(map[string]*summaryProviderStats),
 		ByAPIKey:               make(map[string]*summaryAPIKeyStats),
 		TimeSeriesByModel:      make(map[string][]summaryTimePoint),
 		TimeSeriesByCredential: make(map[string][]summaryTimePoint),
@@ -194,6 +205,7 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 		},
 		ByModel:                make(map[string]*summaryModelStats, len(qr.ByModel)),
 		ByCredential:           make(map[string]*summaryCredentialStats, len(qr.ByCredential)),
+		ByProvider:             make(map[string]*summaryProviderStats),
 		ByAPIKey:               make(map[string]*summaryAPIKeyStats, len(qr.ByAPIKey)),
 		TimeSeriesByModel:      make(map[string][]summaryTimePoint, len(qr.TimeSeriesByModel)),
 		TimeSeriesByCredential: make(map[string][]summaryTimePoint, len(qr.TimeSeriesByCredential)),
@@ -229,6 +241,21 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 			Failure:  cs.Failure,
 			Provider: cs.Provider,
 			Source:   cs.Source,
+		}
+		provider := strings.ToLower(strings.TrimSpace(cs.Provider))
+		if provider == "" {
+			provider = "unknown"
+		}
+		providerStats := resp.ByProvider[provider]
+		if providerStats == nil {
+			providerStats = &summaryProviderStats{Provider: provider}
+			resp.ByProvider[provider] = providerStats
+		}
+		providerStats.Success += cs.Success
+		providerStats.Failure += cs.Failure
+		providerStats.Requests += cs.Success + cs.Failure
+		if providerStats.Requests > 0 {
+			providerStats.ErrorRate = float64(providerStats.Failure) / float64(providerStats.Requests)
 		}
 	}
 

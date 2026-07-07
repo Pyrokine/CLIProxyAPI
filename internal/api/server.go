@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -27,8 +26,6 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
 	managementHandlers "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/middleware"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/modules"
-	ampmodule "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/modules/amp"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
@@ -58,7 +55,70 @@ const (
 	pluginResourceSessionCookie      = "cpa_plugin_resource_session"
 	pluginResourceSessionTTL         = 5 * time.Minute
 	pluginResourceSessionAbsoluteTTL = 30 * time.Minute
+	oauthCallbackRateLimitWindow     = time.Minute
+	oauthCallbackRateLimitMax        = 30
+	oauthCallbackCleanupInterval     = 5 * time.Minute
 )
+
+type callbackRateLimiter struct {
+	mu          sync.Mutex
+	hits        map[string][]time.Time
+	lastCleanup time.Time
+}
+
+func newCallbackRateLimiter() *callbackRateLimiter {
+	return &callbackRateLimiter{hits: make(map[string][]time.Time)}
+}
+
+func (l *callbackRateLimiter) allow(key string, now time.Time) bool {
+	if l == nil {
+		return true
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		key = "unknown"
+	}
+	cutoff := now.Add(-oauthCallbackRateLimitWindow)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.lastCleanup.IsZero() || now.Sub(l.lastCleanup) >= oauthCallbackCleanupInterval {
+		l.cleanupExpired(cutoff)
+		l.lastCleanup = now
+	}
+	hits := l.hits[key]
+	kept := 0
+	for _, hit := range hits {
+		if hit.After(cutoff) {
+			hits[kept] = hit
+			kept++
+		}
+	}
+	hits = hits[:kept]
+	if len(hits) >= oauthCallbackRateLimitMax {
+		l.hits[key] = hits
+		return false
+	}
+	hits = append(hits, now)
+	l.hits[key] = hits
+	return true
+}
+
+func (l *callbackRateLimiter) cleanupExpired(cutoff time.Time) {
+	for key, hits := range l.hits {
+		kept := 0
+		for _, hit := range hits {
+			if hit.After(cutoff) {
+				hits[kept] = hit
+				kept++
+			}
+		}
+		if kept == 0 {
+			delete(l.hits, key)
+			continue
+		}
+		l.hits[key] = hits[:kept]
+	}
+}
 
 type pluginResourceSession struct {
 	IdleExpiresAt     time.Time
@@ -229,14 +289,12 @@ type Server struct {
 
 	quotaScheduler *quota.Scheduler
 
-	// ampModule is the Amp routing module for model mapping hot-reload
-	ampModule *ampmodule.Module
-
 	// pluginHost owns dynamic plugin Management API route dispatch.
 	pluginHost *pluginhost.Host
 
 	pluginResourceSessionMu     sync.Mutex
 	pluginResourceSessionTokens map[string]pluginResourceSession
+	oauthCallbackLimiter        *callbackRateLimiter
 
 	// managementRoutesRegistered tracks whether the management routes have been attached to the engine.
 	managementRoutesRegistered atomic.Bool
@@ -352,6 +410,7 @@ func NewServer(
 		wsRoutes:                     make(map[string]struct{}),
 		pluginHost:                   optionState.pluginHost,
 		pluginResourceSessionTokens:  make(map[string]pluginResourceSession),
+		oauthCallbackLimiter:         newCallbackRateLimiter(),
 	}
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	// Save initial YAML snapshot
@@ -457,21 +516,6 @@ func NewServer(
 	// Setup routes
 	s.setupRoutes()
 
-	// Register Amp module using V2 interface with Context
-	s.ampModule = ampmodule.New(
-		ampmodule.WithAccessManager(accessManager),
-		ampmodule.WithAuthMiddleware(authMiddleware(accessManager, authRateLimiter, cfg.AllowQueryAuth)),
-	)
-	ctx := modules.Context{
-		Engine:         engine,
-		BaseHandler:    s.handlers,
-		Config:         cfg,
-		AuthMiddleware: authMiddleware(accessManager, authRateLimiter, cfg.AllowQueryAuth),
-	}
-	if err := modules.RegisterModule(ctx, s.ampModule); err != nil {
-		log.Errorf("Failed to register Amp module: %v", err)
-	}
-
 	// Apply additional router configurators from options
 	if optionState.routerConfigurator != nil {
 		optionState.routerConfigurator(engine, s.handlers, cfg)
@@ -527,6 +571,45 @@ func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
 	}
 }
 
+func (s *Server) oauthCallbackRateLimitMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if s == nil || s.oauthCallbackLimiter == nil {
+			c.Next()
+			return
+		}
+		trustForwardedHeaders := s.cfg != nil && s.cfg.TLS.TrustForwardedProto
+		if !s.oauthCallbackLimiter.allow(callbackClientIP(c.Request, trustForwardedHeaders), time.Now()) {
+			c.Header("Retry-After", "60")
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "too many oauth callback requests"})
+			return
+		}
+		c.Next()
+	}
+}
+
+func callbackClientIP(r *http.Request, trustForwardedHeaders bool) string {
+	if r == nil {
+		return ""
+	}
+	remoteHost, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if remoteHost == "" {
+		remoteHost = r.RemoteAddr
+	}
+	if !trustForwardedHeaders {
+		return remoteHost
+	}
+	if realIP := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); realIP != nil {
+		return realIP.String()
+	}
+	if forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwardedFor != "" {
+		first, _, _ := strings.Cut(forwardedFor, ",")
+		if forwardedIP := net.ParseIP(strings.TrimSpace(first)); forwardedIP != nil {
+			return forwardedIP.String()
+		}
+	}
+	return remoteHost
+}
+
 // setupRoutes configures the API routes for the server.
 // It defines the endpoints and associates them with their respective handlers.
 func (s *Server) setupRoutes() {
@@ -556,7 +639,17 @@ func (s *Server) setupRoutes() {
 		v1.POST("/videos/generations", openaiHandlers.XAIVideosGenerations)
 		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
 		v1.POST("/videos/extensions", openaiHandlers.XAIVideosExtensions)
+		v1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
 		v1.GET("/videos/:video_id", openaiHandlers.VideosRetrieve)
+	}
+
+	openaiV1 := s.engine.Group("/openai/v1")
+	openaiV1.Use(requireTLSForAuth(s.cfg), noStoreMiddleware())
+	openaiV1.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.cfg.AllowQueryAuth))
+	{
+		openaiV1.POST("/videos", openaiHandlers.VideosCreate)
+		openaiV1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
+		openaiV1.GET("/videos/:video_id", openaiHandlers.VideosRetrieve)
 	}
 
 	// Root-level Responses API routes (no /v1 prefix).
@@ -630,7 +723,7 @@ func (s *Server) setupRoutes() {
 	} {
 		provider := cb.provider
 		s.engine.GET(
-			cb.path, noStoreMiddleware(), func(c *gin.Context) {
+			cb.path, noStoreMiddleware(), s.oauthCallbackRateLimitMiddleware(), func(c *gin.Context) {
 				code := c.Query("code")
 				state := c.Query("state")
 				errStr := c.Query("error")
@@ -766,6 +859,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 
+		mgmt.POST("/reset-quota", s.mgmt.ResetQuota)
 		mgmt.GET("/quota/status", s.mgmt.GetQuotaStatus)
 		mgmt.POST("/quota/refresh", s.mgmt.PostQuotaRefresh)
 		mgmt.GET("/quota/config", s.mgmt.GetQuotaConfig)
@@ -810,30 +904,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/ws-auth", s.mgmt.GetWebsocketAuth)
 		mgmt.PUT("/ws-auth", s.mgmt.PutWebsocketAuth)
 		mgmt.PATCH("/ws-auth", s.mgmt.PutWebsocketAuth)
-
-		mgmt.GET("/ampcode", s.mgmt.GetAmpCode)
-		mgmt.GET("/ampcode/upstream-url", s.mgmt.GetAmpUpstreamURL)
-		mgmt.PUT("/ampcode/upstream-url", s.mgmt.PutAmpUpstreamURL)
-		mgmt.PATCH("/ampcode/upstream-url", s.mgmt.PutAmpUpstreamURL)
-		mgmt.DELETE("/ampcode/upstream-url", s.mgmt.DeleteAmpUpstreamURL)
-		mgmt.GET("/ampcode/upstream-api-key", s.mgmt.GetAmpUpstreamAPIKey)
-		mgmt.PUT("/ampcode/upstream-api-key", s.mgmt.PutAmpUpstreamAPIKey)
-		mgmt.PATCH("/ampcode/upstream-api-key", s.mgmt.PutAmpUpstreamAPIKey)
-		mgmt.DELETE("/ampcode/upstream-api-key", s.mgmt.DeleteAmpUpstreamAPIKey)
-		mgmt.GET("/ampcode/restrict-management-to-localhost", s.mgmt.GetAmpRestrictManagementToLocalhost)
-		mgmt.PUT("/ampcode/restrict-management-to-localhost", s.mgmt.PutAmpRestrictManagementToLocalhost)
-		mgmt.PATCH("/ampcode/restrict-management-to-localhost", s.mgmt.PutAmpRestrictManagementToLocalhost)
-		mgmt.GET("/ampcode/model-mappings", s.mgmt.GetAmpModelMappings)
-		mgmt.PUT("/ampcode/model-mappings", s.mgmt.PutAmpModelMappings)
-		mgmt.PATCH("/ampcode/model-mappings", s.mgmt.PatchAmpModelMappings)
-		mgmt.DELETE("/ampcode/model-mappings", s.mgmt.DeleteAmpModelMappings)
-		mgmt.GET("/ampcode/force-model-mappings", s.mgmt.GetAmpForceModelMappings)
-		mgmt.PUT("/ampcode/force-model-mappings", s.mgmt.PutAmpForceModelMappings)
-		mgmt.PATCH("/ampcode/force-model-mappings", s.mgmt.PutAmpForceModelMappings)
-		mgmt.GET("/ampcode/upstream-api-keys", s.mgmt.GetAmpUpstreamAPIKeys)
-		mgmt.PUT("/ampcode/upstream-api-keys", s.mgmt.PutAmpUpstreamAPIKeys)
-		mgmt.PATCH("/ampcode/upstream-api-keys", s.mgmt.PatchAmpUpstreamAPIKeys)
-		mgmt.DELETE("/ampcode/upstream-api-keys", s.mgmt.DeleteAmpUpstreamAPIKeys)
 
 		mgmt.GET("/request-retry", s.mgmt.GetRequestRetry)
 		mgmt.PUT("/request-retry", s.mgmt.PutRequestRetry)
@@ -884,7 +954,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/oauth-model-alias", s.mgmt.PatchOAuthModelAlias)
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
+		mgmt.GET("/plugin-store", s.mgmt.ListPluginStore)
+		mgmt.POST("/plugin-store/:id/install", s.mgmt.InstallPluginFromStore)
 		mgmt.GET("/plugins", s.mgmt.ListPlugins)
+		mgmt.DELETE("/plugins/:id", s.mgmt.DeletePlugin)
 		mgmt.PATCH("/plugins/:id/enabled", s.mgmt.PatchPluginEnabled)
 		mgmt.PUT("/plugins/:id/config", s.mgmt.PutPluginConfig)
 		mgmt.PATCH("/plugins/:id/config", s.mgmt.PatchPluginConfig)
@@ -1918,7 +1991,7 @@ func (s *Server) Stop(ctx context.Context) error {
 // to every response, allowing cross-origin requests.
 // When allowedOrigins is non-empty, only matching origins receive the
 // Access-Control-Allow-Origin header (with Vary: Origin).
-// When empty, all origins are allowed (*) for CLI tool compatibility.
+// When empty, all non-credentialed origins are allowed (*) for CLI tool compatibility.
 //
 // Returns:
 //   - gin.HandlerFunc: The CORS middleware handler
@@ -1935,13 +2008,7 @@ func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
 			c.Request.URL.Path, "/v0/resource/plugins/",
 		)
 		if len(originSet) == 0 {
-			if origin != "" && pluginResourceRequest {
-				c.Header("Access-Control-Allow-Origin", origin)
-				c.Header("Access-Control-Allow-Credentials", "true")
-				c.Header("Vary", "Origin")
-			} else {
-				c.Header("Access-Control-Allow-Origin", "*")
-			}
+			c.Header("Access-Control-Allow-Origin", "*")
 		} else {
 			if _, ok := originSet[origin]; ok {
 				c.Header("Access-Control-Allow-Origin", origin)
@@ -1959,7 +2026,8 @@ func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Headers", "*")
 		}
 		c.Header(
-			"Access-Control-Expose-Headers", "X-Cpa-Version, X-Cpa-Build-Date, X-Cpa-Commit",
+			"Access-Control-Expose-Headers",
+			"X-Cpa-Version, X-Cpa-Build-Date, X-Cpa-Commit, X-CPA-SUPPORT-PLUGIN",
 		)
 		c.Header("X-Cpa-Version", buildinfo.Version)
 		c.Header("X-Cpa-Build-Date", buildinfo.BuildDate)
@@ -2113,19 +2181,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	}
 	s.refreshPluginManagementRoutes()
 
-	// Notify Amp module only when Amp config has changed.
-	ampConfigChanged := oldCfg == nil || !reflect.DeepEqual(oldCfg.AmpCode, cfg.AmpCode)
-	if ampConfigChanged {
-		if s.ampModule != nil {
-			log.Debugf("triggering amp module config update")
-			if err := s.ampModule.OnConfigUpdated(cfg); err != nil {
-				log.Errorf("failed to update Amp module config: %v", err)
-			}
-		} else {
-			log.Warnf("amp module is nil, skipping config update")
-		}
-	}
-
 	// Count client sources from configuration and auth store.
 	tokenStore := sdkAuth.GetTokenStore()
 	if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok {
@@ -2227,6 +2282,7 @@ func authMiddleware(
 	allowQueryAuth bool,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
 		if manager == nil {
 			// No auth configured — restrict to loopback to prevent open-proxy exposure
 			remoteHost, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
@@ -2305,9 +2361,11 @@ func authMiddleware(
 		}
 
 		statusCode := err.HTTPStatusCode()
+		message := "Unauthorized"
 		if statusCode >= http.StatusInternalServerError {
 			log.Errorf("authentication middleware error: %v", err)
+			message = "Authentication service error"
 		}
-		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
+		c.AbortWithStatusJSON(statusCode, gin.H{"error": message})
 	}
 }

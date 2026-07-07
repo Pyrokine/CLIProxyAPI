@@ -16,10 +16,13 @@ import (
 )
 
 const (
-	redisUsageChannel      = "usage"
-	redisMaxArrayLength    = 16
-	redisMaxBulkStringSize = 1 << 20
-	redisMaxLineSize       = 4096
+	redisUsageChannel              = "usage"
+	redisMaxArrayLength            = 16
+	redisMaxBulkStringSize         = 1 << 20
+	redisMaxLineSize               = 4096
+	redisNoAuthMessage             = "NOAUTH Authentication required."
+	redisUnauthorizedMessage       = "ERR Unauthorized"
+	redisAuthRateLimitErrorMessage = "ERR too many authentication failures, please try again later"
 )
 
 type redisSubscriptionCommand struct {
@@ -98,16 +101,14 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 
 		if cmd != "AUTH" && !authed {
 			if s.mgmt != nil {
-				_, statusCode, errMsg := s.mgmt.AuthenticateManagementKey(clientIP, localClient, "")
-				if statusCode == http.StatusForbidden && strings.HasPrefix(
-					errMsg, "IP banned due to too many failed attempts",
-				) {
-					_ = writeRedisError(writer, "ERR "+errMsg)
+				_, statusCode, _ := s.mgmt.AuthenticateManagementKey(clientIP, localClient, "")
+				if statusCode == http.StatusTooManyRequests {
+					_ = writeRedisError(writer, redisAuthRateLimitErrorMessage)
 				} else {
-					_ = writeRedisError(writer, "NOAUTH Authentication required.")
+					_ = writeRedisError(writer, redisNoAuthMessage)
 				}
 			} else {
-				_ = writeRedisError(writer, "NOAUTH Authentication required.")
+				_ = writeRedisError(writer, redisNoAuthMessage)
 			}
 			if !flush() {
 				return
@@ -120,11 +121,9 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 			password, ok := parseAuthPassword(args)
 			if !ok {
 				if s.mgmt != nil {
-					_, statusCode, errMsg := s.mgmt.AuthenticateManagementKey(clientIP, localClient, "")
-					if statusCode == http.StatusForbidden && strings.HasPrefix(
-						errMsg, "IP banned due to too many failed attempts",
-					) {
-						_ = writeRedisError(writer, "ERR "+errMsg)
+					_, statusCode, _ := s.mgmt.AuthenticateManagementKey(clientIP, localClient, "")
+					if statusCode == http.StatusTooManyRequests {
+						_ = writeRedisError(writer, redisAuthRateLimitErrorMessage)
 						if !flush() {
 							return
 						}
@@ -138,15 +137,19 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				continue
 			}
 			if s.mgmt == nil {
-				_ = writeRedisError(writer, "ERR remote management disabled")
+				_ = writeRedisError(writer, redisUnauthorizedMessage)
 				if !flush() {
 					return
 				}
 				continue
 			}
-			allowed, _, errMsg := s.mgmt.AuthenticateManagementKey(clientIP, localClient, password)
+			allowed, statusCode, _ := s.mgmt.AuthenticateManagementKey(clientIP, localClient, password)
 			if !allowed {
-				_ = writeRedisError(writer, "ERR "+errMsg)
+				if statusCode == http.StatusTooManyRequests {
+					_ = writeRedisError(writer, redisAuthRateLimitErrorMessage)
+				} else {
+					_ = writeRedisError(writer, redisUnauthorizedMessage)
+				}
 				if !flush() {
 					return
 				}

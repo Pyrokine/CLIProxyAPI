@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -74,7 +73,7 @@ type apiCallResponse struct {
 //     2) attributes.api_key
 //     3) metadata.token / metadata.id_token / metadata.cookie
 //     Example: {"Authorization":"Bearer $TOKEN$"}.
-//     Note: if you need to override the HTTP Host header, set header["Host"].
+//     Literal restricted headers are rejected.
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
 //
 // Proxy selection (highest priority first):
@@ -133,7 +132,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only http and https schemes are allowed"})
 		return
 	}
-	pinnedAddr, private := resolveAndCheckHost(parsedURL.Hostname())
+	_, private := resolveAndCheckHost(parsedURL.Hostname())
 	if private {
 		c.JSON(http.StatusForbidden, gin.H{"error": "requests to private/internal addresses are not allowed"})
 		return
@@ -146,6 +145,10 @@ func (h *Handler) APICall(c *gin.Context) {
 	reqHeaders := body.Header
 	if reqHeaders == nil {
 		reqHeaders = map[string]string{}
+	}
+	if err := validateAPICallHeaders(reqHeaders); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
 	// Check if any header uses $TOKEN$ — if so, restrict target URL to known provider domains
@@ -162,7 +165,6 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
-	var hostOverride string
 	var token string
 	var tokenResolved bool
 	var tokenErr error
@@ -200,14 +202,7 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	for key, value := range reqHeaders {
-		if strings.EqualFold(key, "host") {
-			hostOverride = strings.TrimSpace(value)
-			continue
-		}
 		req.Header.Set(key, value)
-	}
-	if hostOverride != "" {
-		req.Host = hostOverride
 	}
 
 	httpClient := &http.Client{
@@ -234,7 +229,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		}
 		return nil
 	}
-	httpClient.Transport = pinnedTransport(h.apiCallTransport(auth, proxyURL), parsedURL.Hostname(), pinnedAddr)
+	httpClient.Transport = publicHostTransport(h.apiCallTransport(auth, proxyURL))
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -293,6 +288,22 @@ func tokenValueForAuth(auth *coreauth.Auth) string {
 		}
 	}
 	return ""
+}
+
+func validateAPICallHeaders(headers map[string]string) error {
+	for name, value := range headers {
+		trimmedName := strings.TrimSpace(name)
+		if trimmedName == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		if strings.EqualFold(trimmedName, "Host") {
+			return fmt.Errorf("host header override is not allowed")
+		}
+		if proxyutil.IsRestrictedCustomHeader(trimmedName) && !strings.Contains(value, "$TOKEN$") {
+			return fmt.Errorf("literal %s header is not allowed; use $TOKEN$ with a supported provider", trimmedName)
+		}
+	}
+	return nil
 }
 
 func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) (string, error) {
@@ -849,10 +860,6 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 	if setting.Mode != proxyutil.ModeProxy || setting.URL == nil {
 		return nil
 	}
-	if isPrivateHost(setting.URL.Hostname()) {
-		log.Debug("proxy URL points to private address, blocked")
-		return nil
-	}
 	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
 	if errBuild != nil {
 		log.WithError(errBuild).Debug("build proxy transport failed")
@@ -861,118 +868,20 @@ func buildProxyTransport(proxyStr string) *http.Transport {
 	return transport
 }
 
-// isPrivateHost returns true if the given hostname resolves to a private,
-// loopback, or link-local address that should not be reachable via the
-// APICall proxy endpoint.
 func isPrivateHost(hostname string) bool {
-	_, priv := resolveAndCheckHost(hostname)
-	return priv
+	return proxyutil.IsPrivateHost(hostname)
 }
 
-// resolveAndCheckHost resolves the hostname and returns the first non-private IP address.
-// If the hostname is private or resolution fails, returns ("", true).
-// The returned IP can be used for DNS pinning to prevent TOCTOU rebinding attacks.
 func resolveAndCheckHost(hostname string) (pinnedAddr string, private bool) {
-	if hostname == "" {
-		return "", true
-	}
-	ip := net.ParseIP(hostname)
-	if ip != nil {
-		if isPrivateIP(ip) {
-			return "", true
-		}
-		return hostname, false
-	}
-	addrs, err := net.LookupHost(hostname)
-	if err != nil {
-		return "", true
-	}
-	for _, addr := range addrs {
-		if parsed := net.ParseIP(addr); parsed != nil && isPrivateIP(parsed) {
-			return "", true
-		}
-	}
-	if len(addrs) > 0 {
-		return addrs[0], false
-	}
-	return "", true
+	return proxyutil.ResolvePublicHost(hostname)
 }
 
-// pinnedTransport wraps a base RoundTripper with a custom DialContext that
-// forces the initial hostname to connect to the pre-resolved pinnedAddr,
-// preventing DNS rebinding TOCTOU attacks.
-func pinnedTransport(base http.RoundTripper, hostname, pinnedAddr string) http.RoundTripper {
-	if pinnedAddr == "" || hostname == "" {
-		return base
-	}
-	t, ok := base.(*http.Transport)
-	if !ok {
-		return base
-	}
-	clone := t.Clone()
-	originalDial := clone.DialContext
-	if originalDial == nil {
-		dialer := &net.Dialer{Timeout: 10 * time.Second}
-		originalDial = dialer.DialContext
-	}
-	clone.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return originalDial(ctx, network, addr)
-		}
-		if host == hostname {
-			addr = net.JoinHostPort(pinnedAddr, port)
-		}
-		return originalDial(ctx, network, addr)
-	}
-	return clone
+func publicHostTransport(base http.RoundTripper) http.RoundTripper {
+	return proxyutil.PublicHostTransport(base)
 }
 
-func isPrivateIP(ip net.IP) bool {
-	// Reject anything that is not a global unicast address.
-	// This covers: loopback, link-local, multicast, unspecified, private (RFC1918),
-	// CGNAT (RFC6598), documentation (RFC5737), benchmarking (RFC2544), ULA (IPv6), etc.
-	if !ip.IsGlobalUnicast() {
-		return true
-	}
-	// IsGlobalUnicast returns true for RFC1918/ULA/many special-purpose ranges.
-	// Explicitly block all IANA "Globally Reachable=False" segments (and select N/A ones) that pass IsGlobalUnicast.
-	privateRanges := []struct {
-		network *net.IPNet
-	}{
-		// IPv4
-		{mustParseCIDR("0.0.0.0/8")},       // RFC 791 "This network"
-		{mustParseCIDR("10.0.0.0/8")},      // RFC 1918 private
-		{mustParseCIDR("100.64.0.0/10")},   // RFC 6598 CGNAT
-		{mustParseCIDR("172.16.0.0/12")},   // RFC 1918 private
-		{mustParseCIDR("192.0.0.0/24")},    // RFC 6890 IETF protocol assignments
-		{mustParseCIDR("192.0.2.0/24")},    // RFC 5737 documentation (TEST-NET-1)
-		{mustParseCIDR("192.88.99.0/24")},  // RFC 7526 deprecated 6to4 relay anycast
-		{mustParseCIDR("192.168.0.0/16")},  // RFC 1918 private
-		{mustParseCIDR("198.18.0.0/15")},   // RFC 2544 benchmarking
-		{mustParseCIDR("198.51.100.0/24")}, // RFC 5737 documentation (TEST-NET-2)
-		{mustParseCIDR("203.0.113.0/24")},  // RFC 5737 documentation (TEST-NET-3)
-		{mustParseCIDR("240.0.0.0/4")},     // RFC 1112 reserved (class E)
-		// IPv6
-		{mustParseCIDR("64:ff9b::/96")},   // RFC 6052 Well-Known NAT64 prefix
-		{mustParseCIDR("64:ff9b:1::/48")}, // RFC 8215 local-use NAT64 prefix
-		{mustParseCIDR("100::/64")},       // RFC 6666 discard-only
-		{mustParseCIDR("100:0:0:1::/64")}, // Dummy IPv6 Prefix
-		{mustParseCIDR("2001::/23")},      // RFC 2928 IETF protocol assignments
-		{mustParseCIDR("2001:2::/48")},    // RFC 5180 benchmarking
-		{mustParseCIDR("2001:db8::/32")},  // RFC 3849 documentation
-		{mustParseCIDR("2001:10::/28")},   // deprecated ORCHID
-		{mustParseCIDR("2002::/16")},      // 6to4 (deprecated)
-		{mustParseCIDR("3fff::/20")},      // RFC 9637 documentation
-		{mustParseCIDR("5f00::/16")},      // SRv6 SIDs
-		{mustParseCIDR("fc00::/7")},       // RFC 4193 ULA
-	}
-	for _, r := range privateRanges {
-		if r.network.Contains(ip) {
-			return true
-		}
-	}
-	return false
+func pinnedTransport(base http.RoundTripper, hostname string, pinnedAddr string) http.RoundTripper {
+	return proxyutil.PinnedTransport(base, hostname, pinnedAddr)
 }
 
 // isAllowedTokenTarget returns true if the hostname belongs to a known AI provider,
@@ -1006,12 +915,4 @@ func isAllowedTokenTarget(hostname string) bool {
 		}
 	}
 	return false
-}
-
-func mustParseCIDR(cidr string) *net.IPNet {
-	_, network, err := net.ParseCIDR(cidr)
-	if err != nil {
-		panic("invalid CIDR: " + cidr)
-	}
-	return network
 }

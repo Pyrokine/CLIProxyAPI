@@ -38,6 +38,28 @@ func TestRegisterAuthFromFileParsesWebsockets(t *testing.T) {
 	}
 }
 
+func TestRegisterAuthFromFileAllowsPrivateProxyURL(t *testing.T) {
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := &Handler{cfg: &config.Config{AuthDir: authDir}, authManager: manager}
+	path := filepath.Join(authDir, "codex.json")
+	data := []byte(`{"type":"codex","email":"user@example.com","proxy_url":"http://127.0.0.1:8080"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	if err := h.registerAuthFromFile(context.Background(), path, data); err != nil {
+		t.Fatalf("register auth file: %v", err)
+	}
+	registered, ok := manager.GetByID("codex.json")
+	if !ok {
+		t.Fatal("registered auth not found")
+	}
+	if registered.ProxyURL != "http://127.0.0.1:8080" {
+		t.Fatalf("proxy URL = %q", registered.ProxyURL)
+	}
+}
+
 func TestListAuthFilesIncludesWebsockets(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "codex.json")
@@ -237,6 +259,80 @@ func TestPatchAuthFileFieldsUpdatesHeadersAndNote(t *testing.T) {
 	}
 	if updated.Metadata["note"] != "updated note" {
 		t.Fatalf("note = %#v", updated.Metadata["note"])
+	}
+}
+
+func TestPatchAuthFileFieldsRejectsRestrictedHeader(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:        "auth-1",
+		Provider:  "claude",
+		FileName:  "claude.json",
+		Status:    coreauth.StatusActive,
+		Metadata:  map[string]any{},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := &Handler{authManager: manager}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(
+		http.MethodPatch,
+		"/auth-files/fields",
+		bytes.NewBufferString(`{"name":"auth-1","headers":{"Authorization":"Bearer token"}}`),
+	)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchAuthFileFields(c)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	updated, ok := manager.GetByID("auth-1")
+	if !ok {
+		t.Fatal("updated auth not found")
+	}
+	if headers := coreauth.ExtractCustomHeadersFromMetadata(updated.Metadata); len(headers) != 0 {
+		t.Fatalf("restricted header persisted: %#v", headers)
+	}
+}
+
+func TestPatchAuthFileFieldsAllowsPrivateProxyURL(t *testing.T) {
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "auth-1",
+		Provider: "claude",
+		FileName: "claude.json",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := &Handler{authManager: manager}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(
+		http.MethodPatch,
+		"/auth-files/fields",
+		bytes.NewBufferString(`{"name":"auth-1","proxy_url":"http://127.0.0.1:8080"}`),
+	)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PatchAuthFileFields(c)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", recorder.Code, recorder.Body.String())
+	}
+	updated, ok := manager.GetByID("auth-1")
+	if !ok {
+		t.Fatal("updated auth not found")
+	}
+	if updated.ProxyURL != "http://127.0.0.1:8080" {
+		t.Fatalf("proxy URL = %q", updated.ProxyURL)
 	}
 }
 

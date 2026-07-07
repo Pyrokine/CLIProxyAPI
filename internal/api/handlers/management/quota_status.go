@@ -16,6 +16,7 @@ func (h *Handler) GetQuotaStatus(c *gin.Context) {
 		c.JSON(
 			http.StatusOK, quota.StatusResponse{
 				Credentials: make(map[string]*quota.Entry),
+				ByProvider:  make(map[string]quota.ProviderStatusSummary),
 			},
 		)
 		return

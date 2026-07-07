@@ -219,8 +219,10 @@ func TestNormalizeKeys(t *testing.T) {
 	}{
 		{"nil", nil, 0},
 		{"empty strings", []string{"", "  "}, 0},
-		{"dedup", []string{"a", "b", "a"}, 2},
-		{"trim", []string{"  x  ", "x"}, 1},
+		{"dedup", []string{"valid-key-a", "valid-key-b", "valid-key-a"}, 2},
+		{"trim", []string{"  valid-key  ", "valid-key"}, 1},
+		{"reject short", []string{"short", "valid-key"}, 1},
+		{"reject non printable", []string{"valid-key", "bad\nkey"}, 1},
 	}
 	for _, tt := range tests {
 		got := normalizeKeys(tt.input)

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +51,95 @@ func newTestServer(t *testing.T) *Server {
 	return NewServer(cfg, authManager, accessManager, configPath)
 }
 
+func TestOAuthCallbackRateLimiterCleansStaleKeys(t *testing.T) {
+	limiter := newCallbackRateLimiter()
+	start := time.Now()
+
+	if !limiter.allow("203.0.113.10", start) {
+		t.Fatal("first request should be allowed")
+	}
+	if len(limiter.hits) != 1 {
+		t.Fatalf("hits length = %d, want 1", len(limiter.hits))
+	}
+	if !limiter.allow("203.0.113.11", start.Add(oauthCallbackCleanupInterval+oauthCallbackRateLimitWindow)) {
+		t.Fatal("new request should be allowed")
+	}
+	if _, exists := limiter.hits["203.0.113.10"]; exists {
+		t.Fatal("stale callback rate-limit entry was not cleaned")
+	}
+}
+
+func TestOAuthCallbackRateLimit(t *testing.T) {
+	server := newTestServer(t)
+
+	for i := 0; i < oauthCallbackRateLimitMax; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/anthropic/callback?state=missing&code=x", nil)
+		req.RemoteAddr = "203.0.113.10:12345"
+		rec := httptest.NewRecorder()
+		server.engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("callback request %d status = %d, want 200", i+1, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/anthropic/callback?state=missing&code=x", nil)
+	req.RemoteAddr = "203.0.113.10:12345"
+	rec := httptest.NewRecorder()
+	server.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("callback over limit status = %d, want 429", rec.Code)
+	}
+}
+
+func TestOAuthCallbackRateLimitIgnoresXRealIP(t *testing.T) {
+	server := newTestServer(t)
+
+	for i := 0; i < oauthCallbackRateLimitMax; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/anthropic/callback?state=missing&code=x", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("X-Real-IP", fmt.Sprintf("20.0.0.%d", i+1))
+		rec := httptest.NewRecorder()
+		server.engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("callback request %d status = %d, want 200", i+1, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/anthropic/callback?state=missing&code=x", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Real-IP", "20.0.0.99")
+	rec := httptest.NewRecorder()
+	server.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("callback over limit with spoofed X-Real-IP status = %d, want 429", rec.Code)
+	}
+}
+
+func TestOAuthCallbackRateLimitUsesTrustedXRealIP(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.TLS.TrustForwardedProto = true
+
+	for i := 0; i < oauthCallbackRateLimitMax; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/anthropic/callback?state=missing&code=x", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("X-Real-IP", fmt.Sprintf("20.0.0.%d", i+1))
+		rec := httptest.NewRecorder()
+		server.engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("callback request %d status = %d, want 200", i+1, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/anthropic/callback?state=missing&code=x", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Real-IP", "20.0.0.99")
+	rec := httptest.NewRecorder()
+	server.engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("callback with new trusted X-Real-IP status = %d, want 200", rec.Code)
+	}
+}
+
 func TestRegisteredManagementRouteKeysIncludeFixedPluginRoutes(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-password")
 	server := newTestServer(t)
@@ -59,6 +149,8 @@ func TestRegisteredManagementRouteKeysIncludeFixedPluginRoutes(t *testing.T) {
 		"PATCH /v0/management/plugins/:id/enabled",
 		"PUT /v0/management/plugins/:id/config",
 		"PATCH /v0/management/plugins/:id/config",
+		"GET /v0/management/plugin-store",
+		"POST /v0/management/plugin-store/:id/install",
 	} {
 		if _, ok := keys[key]; !ok {
 			t.Fatalf("registeredManagementRouteKeys() missing %s", key)
@@ -208,80 +300,38 @@ func TestPluginResourceSessionRenewalIsCappedByAbsoluteExpiry(t *testing.T) {
 	}
 }
 
-func TestAmpProviderModelRoutes(t *testing.T) {
-	testCases := []struct {
-		name         string
-		path         string
-		wantStatus   int
-		wantContains string
-	}{
-		{
-			name:         "openai root models",
-			path:         "/api/provider/openai/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"object":"list"`,
-		},
-		{
-			name:         "groq root models",
-			path:         "/api/provider/groq/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"object":"list"`,
-		},
-		{
-			name:         "openai models",
-			path:         "/api/provider/openai/v1/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"object":"list"`,
-		},
-		{
-			name:         "anthropic models",
-			path:         "/api/provider/anthropic/v1/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"data"`,
-		},
-		{
-			name:         "google models v1",
-			path:         "/api/provider/google/v1/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"models"`,
-		},
-		{
-			name:         "google models v1beta",
-			path:         "/api/provider/google/v1beta/models",
-			wantStatus:   http.StatusOK,
-			wantContains: `"models"`,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(
-			tc.name, func(t *testing.T) {
-				server := newTestServer(t)
-
-				req := httptest.NewRequest(http.MethodGet, tc.path, nil)
-				req.Header.Set("Authorization", "Bearer test-key")
-
-				rr := httptest.NewRecorder()
-				server.engine.ServeHTTP(rr, req)
-
-				if rr.Code != tc.wantStatus {
-					t.Fatalf(
-						"unexpected status code for %s: got %d want %d; body=%s", tc.path, rr.Code, tc.wantStatus,
-						rr.Body.String(),
-					)
-				}
-				if body := rr.Body.String(); !strings.Contains(body, tc.wantContains) {
-					t.Fatalf("response body for %s missing %q: %s", tc.path, tc.wantContains, body)
-				}
-			},
-		)
-	}
-}
-
-func TestPluginResourceCORSAllowsCredentialsForOrigin(t *testing.T) {
+func TestPluginResourceCORSRequiresAllowlistForCredentials(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
 	engine.Use(corsMiddleware(nil))
+	engine.GET("/v0/resource/plugins/demo/status", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	req := httptest.NewRequest(http.MethodOptions, "/v0/resource/plugins/demo/status", nil)
+	req.Header.Set("Origin", "https://panel.example.com")
+	req.Header.Set("Access-Control-Request-Headers", "authorization")
+	rr := httptest.NewRecorder()
+	engine.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want 204", rr.Code)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("plugin resource ACAO = %q, want *", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("plugin resource ACAC = %q, want empty", got)
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Headers"); got != "authorization" {
+		t.Fatalf("plugin resource ACAH = %q, want requested header", got)
+	}
+	if got := rr.Header().Get("Access-Control-Expose-Headers"); !strings.Contains(got, pluginhost.SupportPluginHeader) {
+		t.Fatalf("Access-Control-Expose-Headers = %q, want %s", got, pluginhost.SupportPluginHeader)
+	}
+}
+
+func TestPluginResourceCORSAllowsCredentialsForAllowlistedOrigin(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(corsMiddleware([]string{"https://panel.example.com"}))
 	engine.GET("/v0/resource/plugins/demo/status", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 	engine.GET("/v0/management/config", func(c *gin.Context) { c.Status(http.StatusNoContent) })
 
@@ -299,16 +349,16 @@ func TestPluginResourceCORSAllowsCredentialsForOrigin(t *testing.T) {
 	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
 		t.Fatalf("plugin resource ACAC = %q, want true", got)
 	}
-	if got := rr.Header().Get("Access-Control-Allow-Headers"); got != "authorization" {
-		t.Fatalf("plugin resource ACAH = %q, want requested header", got)
+	if got := rr.Header().Get("Vary"); got != "Origin" {
+		t.Fatalf("Vary = %q, want Origin", got)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
 	req.Header.Set("Origin", "https://panel.example.com")
 	rr = httptest.NewRecorder()
 	engine.ServeHTTP(rr, req)
-	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("management ACAO = %q, want *", got)
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://panel.example.com" {
+		t.Fatalf("management ACAO = %q, want allowlisted origin", got)
 	}
 	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "" {
 		t.Fatalf("management ACAC = %q, want empty", got)
@@ -629,6 +679,12 @@ func TestAuthMiddleware_InvalidAPIKey(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("expected Cache-Control no-store, got %q", got)
+	}
+	if !strings.Contains(rr.Body.String(), "Unauthorized") {
+		t.Fatalf("expected generic Unauthorized error, got %s", rr.Body.String())
 	}
 }
 

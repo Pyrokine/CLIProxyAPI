@@ -307,6 +307,27 @@ func TestIsAllowedTokenTarget(t *testing.T) {
 	}
 }
 
+func TestValidateAPICallHeadersRejectsLiteralRestrictedHeader(t *testing.T) {
+	err := validateAPICallHeaders(map[string]string{"Authorization": "Bearer literal"})
+	if err == nil {
+		t.Fatal("expected literal restricted header to be rejected")
+	}
+}
+
+func TestValidateAPICallHeadersAllowsTokenRestrictedHeader(t *testing.T) {
+	err := validateAPICallHeaders(map[string]string{"Authorization": "Bearer $TOKEN$"})
+	if err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
+func TestValidateAPICallHeadersRejectsHostOverride(t *testing.T) {
+	err := validateAPICallHeaders(map[string]string{"Host": "api.example.test"})
+	if err == nil {
+		t.Fatal("expected Host override to be rejected")
+	}
+}
+
 func TestResolveAndCheckHost_IPLiteral(t *testing.T) {
 	// Public IP should return the IP itself and private=false.
 	pinnedAddr, private := resolveAndCheckHost("8.8.8.8")
@@ -332,6 +353,34 @@ func TestResolveAndCheckHost_EmptyHost(t *testing.T) {
 	_, private := resolveAndCheckHost("")
 	if !private {
 		t.Fatal("expected empty hostname to be treated as private")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestPublicHostTransportBlocksPrivateHost(t *testing.T) {
+	called := false
+	base := roundTripFunc(
+		func(*http.Request) (*http.Response, error) {
+			called = true
+			return nil, nil
+		},
+	)
+	transport := publicHostTransport(base)
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	_, err = transport.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected private host to be rejected")
+	}
+	if called {
+		t.Fatal("base transport should not be called for private host")
 	}
 }
 
@@ -388,6 +437,15 @@ func TestAPICallTransport_CredentialProxyOverridesGlobal(t *testing.T) {
 	got := proxyURLForTransport(t, h.apiCallTransport(auth, ""))
 	if got != "http://8.8.4.4:8080" {
 		t.Fatalf("expected credential proxy, got %q", got)
+	}
+}
+
+func TestAPICallTransportAllowsPrivateProxy(t *testing.T) {
+	h := &Handler{cfg: &config.Config{}}
+
+	got := proxyURLForTransport(t, h.apiCallTransport(nil, "http://127.0.0.1:8080"))
+	if got != "http://127.0.0.1:8080" {
+		t.Fatalf("expected private proxy, got %q", got)
 	}
 }
 

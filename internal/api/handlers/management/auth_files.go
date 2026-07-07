@@ -33,6 +33,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -561,6 +562,8 @@ func authFileBoolValueFromGJSON(value gjson.Result) (bool, bool) {
 		if errParse == nil {
 			return parsed, true
 		}
+	case gjson.Null, gjson.Number, gjson.JSON:
+		return false, false
 	}
 	return false, false
 }
@@ -737,6 +740,10 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	}
 	ctx := c.Request.Context()
 	if all := c.Query("all"); all == "true" || all == "1" || all == "*" {
+		if c.GetHeader("X-Confirm-Action") != "delete-all-auth-files" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "delete-all confirmation required"})
+			return
+		}
 		entries, err := os.ReadDir(h.cfg.AuthDir)
 		if err != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
@@ -938,8 +945,8 @@ func (h *Handler) syncQuotaSchedulerForAuth(auth *coreauth.Auth) {
 	}
 	auth.EnsureIndex()
 	h.quotaScheduler.Register(fileName, credType, auth.Index)
-	h.quotaScheduler.UpdateAuthIndex(fileName, auth.Index)
-	h.quotaScheduler.SetDisabled(fileName, auth.Disabled)
+	h.quotaScheduler.UpdateAuthIndex(fileName, credType, auth.Index)
+	h.quotaScheduler.SetDisabled(fileName, credType, auth.Disabled)
 }
 
 func (h *Handler) syncQuotaSchedulerRemoval(path string) {
@@ -1014,6 +1021,11 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 	proxyURL := ""
 	if rawProxyURL, ok := metadata["proxy_url"].(string); ok {
 		proxyURL = strings.TrimSpace(rawProxyURL)
+		if proxyURL != "" {
+			if errValidate := proxyutil.ValidateProxyURL(proxyURL); errValidate != nil {
+				return fmt.Errorf("proxy URL rejected: %w", errValidate)
+			}
+		}
 	}
 	disabled, _ := metadata["disabled"].(bool)
 	status := coreauth.StatusActive
@@ -1042,7 +1054,9 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
-	coreauth.ApplyCustomHeadersFromMetadata(auth)
+	if err := coreauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
+		return err
+	}
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
 	}
@@ -1225,6 +1239,10 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			targetAuth.Metadata = make(map[string]any)
 		}
 		proxyURL := strings.TrimSpace(*req.ProxyURL)
+		if errValidate := proxyutil.ValidateProxyURL(proxyURL); errValidate != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errValidate.Error()})
+			return
+		}
 		targetAuth.ProxyURL = proxyURL
 		if proxyURL == "" {
 			delete(targetAuth.Metadata, "proxy_url")
@@ -1269,6 +1287,10 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			}
 			merged[name] = value
 		}
+		if err := coreauth.ValidateCustomHeaders(merged); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		if len(merged) == 0 {
 			delete(targetAuth.Metadata, "headers")
 		} else {
@@ -1281,7 +1303,10 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 				}
 			}
 		}
-		coreauth.ApplyCustomHeadersFromMetadata(targetAuth)
+		if err := coreauth.ApplyCustomHeadersFromMetadata(targetAuth); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		changed = true
 	}
 	if req.Note != nil {

@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	maxFailures      = 10
-	failureWindow    = time.Minute
-	lockoutDuration  = 60 * time.Second
-	staleEntryMaxAge = 5 * time.Minute
-	cleanupInterval  = time.Minute
+	maxFailures        = 10
+	failureWindow      = time.Minute
+	lockoutDuration    = 60 * time.Second
+	maxLockoutDuration = 30 * time.Minute
+	staleEntryMaxAge   = 5 * time.Minute
+	cleanupInterval    = time.Minute
 )
 
 type rateLimitEntry struct {
@@ -21,6 +22,7 @@ type rateLimitEntry struct {
 	failures     int
 	firstFailure time.Time
 	lockedUntil  time.Time
+	lockoutLevel int
 }
 
 // AuthRateLimiter tracks authentication failures and enforces rate limits on two
@@ -126,7 +128,9 @@ func recordFailure(entries *sync.Map, key string) {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	// Reset window if expired
+	if now.Before(entry.lockedUntil) {
+		return
+	}
 	if now.Sub(entry.firstFailure) > failureWindow {
 		entry.failures = 0
 		entry.firstFailure = now
@@ -138,8 +142,25 @@ func recordFailure(entries *sync.Map, key string) {
 	entry.failures++
 
 	if entry.failures >= maxFailures {
-		entry.lockedUntil = now.Add(lockoutDuration)
+		entry.lockoutLevel++
+		entry.lockedUntil = now.Add(lockoutDurationForLevel(entry.lockoutLevel))
+		entry.failures = 0
+		entry.firstFailure = now
 	}
+}
+
+func lockoutDurationForLevel(level int) time.Duration {
+	if level <= 1 {
+		return lockoutDuration
+	}
+	duration := lockoutDuration
+	for i := 1; i < level; i++ {
+		duration *= 2
+		if duration >= maxLockoutDuration {
+			return maxLockoutDuration
+		}
+	}
+	return duration
 }
 
 func (rl *AuthRateLimiter) cleanupLoop() {

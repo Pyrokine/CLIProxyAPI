@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,7 +16,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const managementStateSchemaVersion = "1"
+const managementStateSchemaVersion = "2"
 
 type managementStateStore struct {
 	db *sql.DB
@@ -84,8 +85,9 @@ func (s *managementStateStore) applySchema(ctx context.Context) error {
 	stmts := []string{
 		"CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID",
 		"CREATE TABLE IF NOT EXISTS state_items (key TEXT PRIMARY KEY, value BLOB NOT NULL, updated_at TEXT NOT NULL) WITHOUT ROWID",
-		`CREATE TABLE IF NOT EXISTS quota_entries (
-			file_name TEXT PRIMARY KEY,
+		`CREATE TABLE IF NOT EXISTS quota_entries_v2 (
+			entry_key TEXT PRIMARY KEY,
+			file_name TEXT NOT NULL,
 			type TEXT NOT NULL,
 			auth_index TEXT NOT NULL,
 			status TEXT NOT NULL,
@@ -97,7 +99,7 @@ func (s *managementStateStore) applySchema(ctx context.Context) error {
 			disabled INTEGER NOT NULL DEFAULT 0,
 			updated_at TEXT NOT NULL
 		) WITHOUT ROWID`,
-		"INSERT INTO meta(key, value) VALUES('schema_version', '1') ON CONFLICT(key) DO NOTHING",
+		"INSERT INTO meta(key, value) VALUES('schema_version', '2') ON CONFLICT(key) DO NOTHING",
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -110,8 +112,44 @@ func (s *managementStateStore) applySchema(ctx context.Context) error {
 	).Scan(&version); err != nil {
 		return fmt.Errorf("management state: read schema version: %w", err)
 	}
+	if version == "1" {
+		if err := s.migrateQuotaEntriesV2(ctx); err != nil {
+			return err
+		}
+		version = managementStateSchemaVersion
+	}
 	if version != managementStateSchemaVersion {
 		return fmt.Errorf("management state: unexpected schema_version=%s", version)
+	}
+	return nil
+}
+
+func (s *managementStateStore) migrateQuotaEntriesV2(ctx context.Context) error {
+	var tableName string
+	err := s.db.QueryRowContext(
+		ctx,
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='quota_entries'",
+	).Scan(&tableName)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("management state: inspect quota_entries: %w", err)
+	}
+	if tableName == "quota_entries" {
+		_, err = s.db.ExecContext(
+			ctx,
+			`INSERT INTO quota_entries_v2(
+				entry_key, file_name, type, auth_index, status, last_refresh, next_refresh, error, failure_count, data, disabled, updated_at
+			 )
+			 SELECT type || '::' || file_name, file_name, type, auth_index, status, last_refresh, next_refresh, error, failure_count, data, disabled, updated_at
+			 FROM quota_entries
+			 WHERE type <> '' AND file_name <> ''
+			 ON CONFLICT(entry_key) DO NOTHING`,
+		)
+		if err != nil {
+			return fmt.Errorf("management state: migrate quota entries: %w", err)
+		}
+	}
+	if _, err = s.db.ExecContext(ctx, "UPDATE meta SET value='2' WHERE key='schema_version'"); err != nil {
+		return fmt.Errorf("management state: update schema version: %w", err)
 	}
 	return nil
 }
@@ -130,7 +168,7 @@ func (s *managementStateStore) loadAccountInspection(ctx context.Context) (*acco
 	var raw []byte
 	err := s.db.QueryRowContext(ctx, "SELECT value FROM state_items WHERE key='account_inspection'").Scan(&raw)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("management state: load account inspection: %w", err)
@@ -169,8 +207,8 @@ func (s *managementStateStore) loadQuotaEntries(ctx context.Context) (map[string
 	}
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT file_name, type, auth_index, status, last_refresh, next_refresh, error, failure_count, data, disabled
-		 FROM quota_entries`,
+		`SELECT entry_key, file_name, type, auth_index, status, last_refresh, next_refresh, error, failure_count, data, disabled
+		 FROM quota_entries_v2`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("management state: load quota entries: %w", err)
@@ -181,6 +219,7 @@ func (s *managementStateStore) loadQuotaEntries(ctx context.Context) (map[string
 	for rows.Next() {
 		var (
 			entry        quota.EntryState
+			entryKey     string
 			lastRefresh  sql.NullString
 			nextRefresh  sql.NullString
 			data         []byte
@@ -188,6 +227,7 @@ func (s *managementStateStore) loadQuotaEntries(ctx context.Context) (map[string
 			failureCount int
 		)
 		if err := rows.Scan(
+			&entryKey,
 			&entry.FileName,
 			&entry.Type,
 			&entry.AuthIndex,
@@ -218,7 +258,12 @@ func (s *managementStateStore) loadQuotaEntries(ctx context.Context) (map[string
 			}
 			entry.NextRefresh = &parsed
 		}
-		entries[entry.FileName] = entry
+		if entryKey == "" {
+			entryKey = quota.EntryKey(entry.Type, entry.FileName)
+		}
+		if entryKey != "" {
+			entries[entryKey] = entry
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("management state: iterate quota entries: %w", err)
@@ -227,17 +272,19 @@ func (s *managementStateStore) loadQuotaEntries(ctx context.Context) (map[string
 }
 
 func (s *managementStateStore) saveQuotaEntry(ctx context.Context, entry quota.EntryState) error {
-	if s == nil || s.db == nil || strings.TrimSpace(entry.FileName) == "" {
+	entryKey := quota.EntryKey(entry.Type, entry.FileName)
+	if s == nil || s.db == nil || entryKey == "" {
 		return nil
 	}
 	lastRefresh := formatOptionalTime(entry.LastRefresh)
 	nextRefresh := formatOptionalTime(entry.NextRefresh)
 	_, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO quota_entries(
-			file_name, type, auth_index, status, last_refresh, next_refresh, error, failure_count, data, disabled, updated_at
-		 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(file_name) DO UPDATE SET
+		`INSERT INTO quota_entries_v2(
+			entry_key, file_name, type, auth_index, status, last_refresh, next_refresh, error, failure_count, data, disabled, updated_at
+		 ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(entry_key) DO UPDATE SET
+			file_name=excluded.file_name,
 			type=excluded.type,
 			auth_index=excluded.auth_index,
 			status=excluded.status,
@@ -248,6 +295,7 @@ func (s *managementStateStore) saveQuotaEntry(ctx context.Context, entry quota.E
 			data=excluded.data,
 			disabled=excluded.disabled,
 			updated_at=excluded.updated_at`,
+		entryKey,
 		entry.FileName,
 		string(entry.Type),
 		entry.AuthIndex,
@@ -266,11 +314,12 @@ func (s *managementStateStore) saveQuotaEntry(ctx context.Context, entry quota.E
 	return nil
 }
 
-func (s *managementStateStore) deleteQuotaEntry(ctx context.Context, fileName string) error {
-	if s == nil || s.db == nil || strings.TrimSpace(fileName) == "" {
+func (s *managementStateStore) deleteQuotaEntry(ctx context.Context, entryKey string) error {
+	entryKey = strings.TrimSpace(entryKey)
+	if s == nil || s.db == nil || entryKey == "" {
 		return nil
 	}
-	if _, err := s.db.ExecContext(ctx, "DELETE FROM quota_entries WHERE file_name=?", fileName); err != nil {
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM quota_entries_v2 WHERE entry_key=?", entryKey); err != nil {
 		return fmt.Errorf("management state: delete quota entry: %w", err)
 	}
 	return nil

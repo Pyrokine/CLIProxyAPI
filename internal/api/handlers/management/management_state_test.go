@@ -122,6 +122,46 @@ func TestAccountInspectionSkipsDisabledAuthsByDefault(t *testing.T) {
 	}
 }
 
+func TestQuotaStatePersistsProviderAwareEntriesAcrossHandlers(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	h := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	scheduler := quota.NewScheduler(
+		quota.DefaultConfig(), func(entry *quota.Entry) ([]byte, error) {
+			return []byte(`{"provider":"` + string(entry.Type) + `"}`), nil
+		},
+	)
+	scheduler.Register("shared.json", quota.TypeClaude, "claude-auth")
+	scheduler.Register("shared.json", quota.TypeCodex, "codex-auth")
+	h.SetQuotaScheduler(scheduler)
+	scheduler.RefreshNow([]string{"shared.json"})
+	if err := h.Close(); err != nil {
+		t.Fatalf("close handler: %v", err)
+	}
+
+	h2 := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	defer func() { _ = h2.Close() }()
+	scheduler2 := quota.NewScheduler(quota.DefaultConfig(), nil)
+	scheduler2.Register("shared.json", quota.TypeClaude, "claude-auth")
+	scheduler2.Register("shared.json", quota.TypeCodex, "codex-auth")
+	h2.SetQuotaScheduler(scheduler2)
+
+	status := scheduler2.GetStatus()
+	for _, credType := range []quota.CredentialType{quota.TypeClaude, quota.TypeCodex} {
+		entry := status.Credentials[quota.EntryKey(credType, "shared.json")]
+		if entry == nil {
+			t.Fatalf("missing %s quota entry", credType)
+		}
+		if entry.Status != quota.StatusSuccess {
+			t.Fatalf("%s status = %s, want %s", credType, entry.Status, quota.StatusSuccess)
+		}
+		if !bytes.Contains(entry.Data, []byte(string(credType))) {
+			t.Fatalf("%s data = %s", credType, string(entry.Data))
+		}
+	}
+}
+
 func TestQuotaStatePersistsAcrossHandlers(t *testing.T) {
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")
@@ -135,7 +175,7 @@ func TestQuotaStatePersistsAcrossHandlers(t *testing.T) {
 	scheduler.Register("claude-user.json", quota.TypeClaude, "auth-1")
 	h.SetQuotaScheduler(scheduler)
 	scheduler.RefreshNow([]string{"claude-user.json"})
-	scheduler.SetDisabled("claude-user.json", true)
+	scheduler.SetDisabled("claude-user.json", quota.TypeClaude, true)
 	if err := h.Close(); err != nil {
 		t.Fatalf("close handler: %v", err)
 	}
@@ -145,7 +185,7 @@ func TestQuotaStatePersistsAcrossHandlers(t *testing.T) {
 	scheduler2 := quota.NewScheduler(quota.DefaultConfig(), nil)
 	scheduler2.Register("claude-user.json", quota.TypeClaude, "auth-1")
 	h2.SetQuotaScheduler(scheduler2)
-	entry := scheduler2.GetStatus().Credentials["claude-user.json"]
+	entry := scheduler2.GetStatus().Credentials[quota.EntryKey(quota.TypeClaude, "claude-user.json")]
 	if entry == nil {
 		t.Fatal("missing quota entry")
 	}

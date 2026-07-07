@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
@@ -26,6 +27,31 @@ import (
 
 func init() {
 	gin.SetMode(gin.TestMode)
+}
+
+func TestMiddlewareSetsSupportPluginHeader(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret("test-secret"))
+	engine := gin.New()
+	engine.GET(
+		"/v0/management/config", h.Middleware(), func(c *gin.Context) {
+			c.Status(http.StatusOK)
+		},
+	)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/config", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Management-Key", "test-secret")
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if got := rec.Header().Get(pluginhost.SupportPluginHeader); got != pluginhost.SupportPluginHeaderValue() {
+		t.Fatalf("%s = %q, want %q", pluginhost.SupportPluginHeader, got, pluginhost.SupportPluginHeaderValue())
+	}
 }
 
 func TestGitHubGet_AllowsLargeResponseBody(t *testing.T) {
@@ -94,17 +120,14 @@ func TestRestartCurrentProcess_RequiresSystemd(t *testing.T) {
 
 func TestWithEnvSecret(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret("my-secret"))
+	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(" my-secret "))
 	if h.envSecret != "my-secret" {
 		t.Fatalf("expected envSecret=%q, got %q", "my-secret", h.envSecret)
 	}
-	if !h.allowRemoteOverride {
-		t.Fatal("expected allowRemoteOverride=true when envSecret is set")
-	}
 
 	h2 := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""))
-	if h2.allowRemoteOverride {
-		t.Fatal("expected allowRemoteOverride=false when envSecret is empty")
+	if h2.envSecret != "" {
+		t.Fatalf("expected empty envSecret, got %q", h2.envSecret)
 	}
 }
 
@@ -207,6 +230,7 @@ func TestMiddleware_BcryptSecret(t *testing.T) {
 func TestMiddleware_EnvSecret(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
+	cfg.RemoteManagement.AllowRemote = true
 	h := NewHandler(cfg, "", nil, WithEnvSecret("env-pass"))
 
 	engine := gin.New()
@@ -227,6 +251,88 @@ func TestMiddleware_EnvSecret(t *testing.T) {
 	engine.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 with wrong env secret, got %d", rec.Code)
+	}
+}
+
+func TestMiddleware_EnvSecretDoesNotEnableRemote(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	h := NewHandler(cfg, "", nil, WithEnvSecret("env-pass"))
+
+	engine := gin.New()
+	engine.Use(h.Middleware())
+	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+
+	rec := httptest.NewRecorder()
+	req := newRemoteRequest("GET", "/test", "Bearer env-pass")
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when remote management is disabled, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMiddleware_UntrustedXRealIPIsIgnored(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h.localPassword = "local-pass"
+
+	engine := gin.New()
+	engine.Use(h.Middleware())
+	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+
+	rec := httptest.NewRecorder()
+	req := newLoopbackRequest("GET", "/test", "Bearer local-pass")
+	req.Header.Set("X-Real-IP", "not-an-ip")
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 when untrusted X-Real-IP is ignored, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMiddleware_InvalidTrustedXRealIPIsRemote(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	cfg.TLS.TrustForwardedProto = true
+	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h.localPassword = "local-pass"
+
+	engine := gin.New()
+	engine.Use(h.Middleware())
+	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+
+	rec := httptest.NewRecorder()
+	req := newLoopbackRequest("GET", "/test", "Bearer local-pass")
+	req.Header.Set("X-Real-IP", "not-an-ip")
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for malformed trusted X-Real-IP, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMiddleware_UntrustedXRealIPDoesNotBypassRateLimit(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	cfg.RemoteManagement.AllowRemote = true
+	h := NewHandler(cfg, "", nil, WithEnvSecret("env-pass"))
+
+	engine := gin.New()
+	engine.Use(h.Middleware())
+	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+
+	for i := 0; i < 10; i++ {
+		rec := httptest.NewRecorder()
+		req := newLoopbackRequest("GET", "/test", "Bearer wrong")
+		req.Header.Set("X-Real-IP", fmt.Sprintf("20.0.0.%d", i+1))
+		engine.ServeHTTP(rec, req)
+	}
+
+	rec := httptest.NewRecorder()
+	req := newLoopbackRequest("GET", "/test", "Bearer env-pass")
+	req.Header.Set("X-Real-IP", "20.0.0.99")
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after spoofed X-Real-IP attempts, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -260,8 +366,8 @@ func TestMiddleware_LocalPassword(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = newRemoteRequest("GET", "/test", "Bearer local-pass")
 	engine.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for remote with local-only password, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for remote with local-only password, got %d", rec.Code)
 	}
 }
 
@@ -286,6 +392,7 @@ func TestMiddleware_MissingKey(t *testing.T) {
 func TestMiddleware_XManagementKeyHeader(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
+	cfg.RemoteManagement.AllowRemote = true
 	h := NewHandler(cfg, "", nil, WithEnvSecret("env-key"))
 
 	engine := gin.New()
@@ -315,8 +422,33 @@ func TestMiddleware_RemoteDisabled(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := newRemoteRequest("GET", "/test", "Bearer something")
 	engine.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 when remote management disabled, got %d", rec.Code)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 when remote management disabled, got %d", rec.Code)
+	}
+}
+
+func TestMiddleware_RemoteDisabledConsumesRateLimit(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	cfg.RemoteManagement.AllowRemote = false
+	cfg.RemoteManagement.SecretKey = "some-hash"
+	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+
+	engine := gin.New()
+	engine.Use(h.Middleware())
+	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+
+	for i := 0; i < 10; i++ {
+		rec := httptest.NewRecorder()
+		req := newRemoteRequest("GET", "/test", "Bearer something")
+		engine.ServeHTTP(rec, req)
+	}
+
+	rec := httptest.NewRecorder()
+	req := newRemoteRequest("GET", "/test", "Bearer something")
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after repeated remote-disabled probes, got %d", rec.Code)
 	}
 }
 
@@ -342,12 +474,12 @@ func TestMiddleware_IPBanning(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := newRemoteRequest("GET", "/test", "Bearer "+secret)
 	engine.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 after IP ban, got %d", rec.Code)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after IP ban, got %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "banned") {
-		t.Fatalf("expected ban message, got: %s", body)
+	if !strings.Contains(body, managementRateLimitMessage) {
+		t.Fatalf("expected rate-limit message, got: %s", body)
 	}
 }
 
@@ -449,6 +581,77 @@ func TestRateLimitStatusIncludesBanCountAndUnbanHistory(t *testing.T) {
 	status = readStatus()
 	if len(status.BannedIPs) != 1 || status.BannedIPs[0].BanCount != 2 {
 		t.Fatalf("banned IPs after second ban = %#v, want ban_count 2", status.BannedIPs)
+	}
+}
+
+func TestRateLimitStatusIncludesAndConsumesFailedLoginNotices(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	secret := "correct"
+	hash, _ := bcrypt.GenerateFromPassword([]byte(secret), bcrypt.MinCost)
+	cfg := &config.Config{}
+	cfg.RemoteManagement.SecretKey = string(hash)
+	cfg.RemoteManagement.AllowRemote = true
+	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+
+	engine := gin.New()
+	engine.Use(h.Middleware())
+	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
+
+	for i := 0; i < 3; i++ {
+		rec := httptest.NewRecorder()
+		req := newRemoteRequest("GET", "/test", "Bearer wrong")
+		engine.ServeHTTP(rec, req)
+	}
+	rec := httptest.NewRecorder()
+	req := newRemoteRequest("GET", "/test", "Bearer "+secret)
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected successful auth, got %d", rec.Code)
+	}
+
+	readNotices := func(consume bool) []struct {
+		IP                   string    `json:"ip"`
+		Count                int       `json:"count"`
+		LastFailureAt        time.Time `json:"last_failure_at"`
+		LastSuccessfulAuthAt time.Time `json:"last_successful_auth_at"`
+	} {
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		path := "/management/rate-limit/status"
+		if consume {
+			path += "?consume_failed_login_notices=true"
+		}
+		c.Request = httptest.NewRequest(http.MethodGet, path, nil)
+		h.GetRateLimitStatus(c)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GetRateLimitStatus status = %d", rec.Code)
+		}
+		var body struct {
+			FailedLoginNotices []struct {
+				IP                   string    `json:"ip"`
+				Count                int       `json:"count"`
+				LastFailureAt        time.Time `json:"last_failure_at"`
+				LastSuccessfulAuthAt time.Time `json:"last_successful_auth_at"`
+			} `json:"failed_login_notices"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("unmarshal rate limit status: %v", err)
+		}
+		return body.FailedLoginNotices
+	}
+
+	notices := readNotices(true)
+	if len(notices) != 1 {
+		t.Fatalf("failed login notices = %d, want 1", len(notices))
+	}
+	if notices[0].IP != "203.0.113.1" || notices[0].Count != 3 {
+		t.Fatalf("failed login notice = %#v, want IP 203.0.113.1 count 3", notices[0])
+	}
+	if notices[0].LastFailureAt.IsZero() || notices[0].LastSuccessfulAuthAt.IsZero() {
+		t.Fatalf("failed login notice timestamps missing: %#v", notices[0])
+	}
+	if got := readNotices(false); len(got) != 0 {
+		t.Fatalf("failed login notices after consume = %#v, want empty", got)
 	}
 }
 
@@ -1076,7 +1279,7 @@ func TestUploadAuthFile_RegistersQuotaEntry(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	status := h.quotaScheduler.GetStatus()
-	entry, exists := status.Credentials["gemini-user.json"]
+	entry, exists := status.Credentials[quota.EntryKey(quota.TypeGeminiCli, "gemini-user.json")]
 	if !exists {
 		t.Fatal("expected quota entry for uploaded auth file")
 	}
@@ -1151,7 +1354,7 @@ func TestSaveTokenRecord_RegistersAuthManagerAndQuotaEntry(t *testing.T) {
 	}
 
 	status := h.quotaScheduler.GetStatus()
-	entry, exists := status.Credentials["codex-user.json"]
+	entry, exists := status.Credentials[quota.EntryKey(quota.TypeCodex, "codex-user.json")]
 	if !exists {
 		t.Fatal("expected quota entry for saved token record")
 	}
@@ -1216,7 +1419,7 @@ func TestPatchAuthFileStatus_SyncsQuotaDisabledState(t *testing.T) {
 	}
 
 	status := h.quotaScheduler.GetStatus()
-	entry, exists := status.Credentials["claude-user.json"]
+	entry, exists := status.Credentials[quota.EntryKey(quota.TypeClaude, "claude-user.json")]
 	if !exists {
 		t.Fatal("expected quota entry for patched auth file")
 	}

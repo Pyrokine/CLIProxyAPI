@@ -24,6 +24,13 @@ type rateLimitUnbanHistoryEntry struct {
 	BanCount    int       `json:"ban_count"`
 }
 
+type failedLoginNoticeEntry struct {
+	IP                   string    `json:"ip"`
+	Count                int       `json:"count"`
+	LastFailureAt        time.Time `json:"last_failure_at"`
+	LastSuccessfulAuthAt time.Time `json:"last_successful_auth_at"`
+}
+
 // GetRateLimitStatus returns the list of IPs currently banned by the management endpoint rate limiter.
 func (h *Handler) GetRateLimitStatus(c *gin.Context) {
 	now := time.Now()
@@ -31,6 +38,8 @@ func (h *Handler) GetRateLimitStatus(c *gin.Context) {
 	defer h.attemptsMu.Unlock()
 
 	banned := make([]bannedIPEntry, 0)
+	notices := make([]failedLoginNoticeEntry, 0)
+	consumeNotices := c.Query("consume_failed_login_notices") == "true"
 	for ip, ai := range h.failedAttempts {
 		if !ai.blockedUntil.IsZero() && now.Before(ai.blockedUntil) {
 			banned = append(
@@ -42,12 +51,27 @@ func (h *Handler) GetRateLimitStatus(c *gin.Context) {
 				},
 			)
 		}
+		if ai.pendingNoticeFailures > 0 {
+			notices = append(
+				notices,
+				failedLoginNoticeEntry{
+					IP:                   ip,
+					Count:                ai.pendingNoticeFailures,
+					LastFailureAt:        ai.lastFailureAt,
+					LastSuccessfulAuthAt: ai.lastSuccessfulAuthAt,
+				},
+			)
+			if consumeNotices {
+				ai.pendingNoticeFailures = 0
+			}
+		}
 	}
 	sort.Slice(banned, func(i, j int) bool { return banned[i].IP < banned[j].IP })
+	sort.Slice(notices, func(i, j int) bool { return notices[i].LastFailureAt.After(notices[j].LastFailureAt) })
 
 	history := append([]rateLimitUnbanHistoryEntry(nil), h.rateLimitUnbanHistory...)
 	sort.Slice(history, func(i, j int) bool { return history[i].UnbannedAt.After(history[j].UnbannedAt) })
-	c.JSON(http.StatusOK, gin.H{"banned_ips": banned, "unban_history": history})
+	c.JSON(http.StatusOK, gin.H{"banned_ips": banned, "failed_login_notices": notices, "unban_history": history})
 }
 
 // DeleteRateLimitBan removes the ban on a specific IP from the management endpoint rate limiter.

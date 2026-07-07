@@ -16,6 +16,8 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cmd"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/homeplugins"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
@@ -183,13 +185,18 @@ func main() {
 
 	isCloudDeploy := os.Getenv("DEPLOY") == "cloud"
 
-	result, err := initStoreAndConfig(wd, configPath, isCloudDeploy, lookupEnv, homeJWT, homeDisableClusterDiscovery)
+	result, err := initStoreAndConfig(
+		wd, configPath, isCloudDeploy, lookupEnv, homeJWT, homeDisableClusterDiscovery, pluginHost,
+	)
 	if err != nil {
 		log.Errorf("%v", err)
 		os.Exit(1)
 	}
 	cfg := result.cfg
 	configFilePath := result.configFilePath
+	if result.homeClient != nil {
+		defer result.homeClient.Close()
+	}
 
 	// -t: test configuration and exit
 	if testConfig {
@@ -240,6 +247,20 @@ func main() {
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
 	pluginHost.ApplyConfig(context.Background(), cfg)
+	if result.configLoadedFromHome {
+		errHomePluginLoad := homeplugins.MarkLoadResults(&result.homePluginSyncReport, pluginHost)
+		if result.homeClient == nil {
+			log.Warn("failed to report home plugin load status: home client is unavailable")
+		} else if errReportPlugins := home.ReportPluginStatus(
+			context.Background(), result.homeClient, cfg.Home.NodeID, result.homePluginSyncReport,
+		); errReportPlugins != nil {
+			log.Warnf("failed to report home plugin load status: %v", errReportPlugins)
+		}
+		if errHomePluginLoad != nil {
+			log.Errorf("failed to load home plugins: %v", errHomePluginLoad)
+			return
+		}
+	}
 	if pluginHost.HasTriggeredCommandLineFlags() {
 		if exitCode, handled := pluginHost.ExecuteCommandLine(
 			context.Background(), os.Args[0], os.Args[1:], configFilePath, flag.CommandLine,
@@ -267,9 +288,8 @@ func main() {
 	}
 
 	commandMode := lf.vertexImport != "" || lf.login || lf.codexLogin || lf.codexDeviceLogin || lf.claudeLogin || lf.qwenLogin || lf.iflowLogin || lf.iflowCookie || lf.antigravityLogin || lf.kimiLogin
-	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := cfg.Home.Enabled
-	if shouldStartExampleAPIKeyWarningServer(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode) {
+	if shouldStartExampleAPIKeyWarningServer(cfg, commandMode, tuiMode, standalone, false, homeMode) {
 		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
 		log.WithField(
 			"api_keys", strings.Join(matches, ","),

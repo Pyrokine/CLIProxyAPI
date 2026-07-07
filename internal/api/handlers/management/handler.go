@@ -19,6 +19,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
@@ -29,16 +30,21 @@ import (
 )
 
 type attemptInfo struct {
-	failures     []time.Time // sliding window of failure timestamps
-	blockedUntil time.Time
-	lastActivity time.Time // track last activity for cleanup
-	banCount     int
+	failures              []time.Time // sliding window of failure timestamps
+	blockedUntil          time.Time
+	lastActivity          time.Time // track last activity for cleanup
+	banCount              int
+	pendingNoticeFailures int
+	lastFailureAt         time.Time
+	lastSuccessfulAuthAt  time.Time
 }
 
 const (
-	managementFailureWindow = 5 * time.Minute
-	managementMaxFailures   = 10
-	managementBanDuration   = 30 * time.Minute
+	managementFailureWindow      = 5 * time.Minute
+	managementMaxFailures        = 10
+	managementBanDuration        = 30 * time.Minute
+	managementAuthFailureMessage = "Unauthorized"
+	managementRateLimitMessage   = "too many authentication failures, please try again later"
 )
 
 // attemptCleanupInterval controls how often stale IP entries are purged
@@ -46,6 +52,12 @@ const attemptCleanupInterval = 1 * time.Hour
 
 // attemptMaxIdleTime controls how long an IP can be idle before cleanup
 const attemptMaxIdleTime = 2 * time.Hour
+
+type pluginRuntimeHost interface {
+	RegisteredPlugins() []pluginhost.RegisteredPluginInfo
+	PluginBusy(string) bool
+	UnloadPlugin(string) bool
+}
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
@@ -60,13 +72,16 @@ type Handler struct {
 	usagePersister          *usage.Persister
 	tokenStore              coreauth.Store
 	localPassword           string
-	allowRemoteOverride     bool
 	envSecret               string
 	logDir                  string
 	postAuthHook            coreauth.PostAuthHook
 	quotaScheduler          *quota.Scheduler
-	pluginHost              *pluginhost.Host
+	pluginHost              pluginRuntimeHost
 	pluginRuntimeSync       func(context.Context, *config.Config)
+	pluginStoreRegistryURL  string
+	pluginStoreHTTPClient   pluginstore.HTTPDoer
+	pluginReleaseCacheMu    sync.Mutex
+	pluginReleaseCache      map[string]pluginReleaseCacheEntry
 	modelCatalogRuntimeSync func(*config.Config)
 	accountInspection       *accountInspectionService
 	stateStore              *managementStateStore
@@ -78,7 +93,7 @@ type Option func(*Handler)
 
 // WithEnvSecret overrides the management password (default: from MANAGEMENT_PASSWORD env).
 func WithEnvSecret(secret string) Option {
-	return func(h *Handler) { h.envSecret = secret; h.allowRemoteOverride = secret != "" }
+	return func(h *Handler) { h.envSecret = strings.TrimSpace(secret) }
 }
 
 // WithUsageStats overrides the usage statistics source.
@@ -126,15 +141,15 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	envSecret = strings.TrimSpace(envSecret)
 
 	h := &Handler{
-		cfg:                 cfg,
-		configFilePath:      configFilePath,
-		failedAttempts:      make(map[string]*attemptInfo),
-		authManager:         manager,
-		usageStats:          usage.GetRequestStatistics(),
-		tokenStore:          sdkAuth.GetTokenStore(),
-		allowRemoteOverride: envSecret != "",
-		envSecret:           envSecret,
-		internalToken:       generateInternalToken(),
+		cfg:                cfg,
+		configFilePath:     configFilePath,
+		failedAttempts:     make(map[string]*attemptInfo),
+		authManager:        manager,
+		usageStats:         usage.GetRequestStatistics(),
+		tokenStore:         sdkAuth.GetTokenStore(),
+		envSecret:          envSecret,
+		internalToken:      generateInternalToken(),
+		pluginReleaseCache: make(map[string]pluginReleaseCacheEntry),
 	}
 
 	for _, opt := range opts {
@@ -213,13 +228,13 @@ func (h *Handler) saveQuotaEntry(entry quota.EntryState) {
 	}
 }
 
-func (h *Handler) deleteQuotaEntry(fileName string) {
+func (h *Handler) deleteQuotaEntry(entryKey string) {
 	if h == nil || h.stateStore == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := h.stateStore.deleteQuotaEntry(ctx, fileName); err != nil {
+	if err := h.stateStore.deleteQuotaEntry(ctx, entryKey); err != nil {
 		log.WithError(err).Warn("failed to delete quota state")
 	}
 }
@@ -280,6 +295,8 @@ func (h *Handler) recordFailedManagementAttempt(clientIP string, now time.Time) 
 		h.failedAttempts[clientIP] = ai
 	}
 	ai.lastActivity = now
+	ai.pendingNoticeFailures++
+	ai.lastFailureAt = now
 
 	cutoff := now.Add(-managementFailureWindow)
 	kept := 0
@@ -307,6 +324,7 @@ func (h *Handler) resetManagementAttempts(clientIP string, now time.Time) {
 		ai.failures = ai.failures[:0]
 		ai.blockedUntil = time.Time{}
 		ai.lastActivity = now
+		ai.lastSuccessfulAuthAt = now
 	}
 }
 
@@ -359,24 +377,20 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		allowRemote = cfg.RemoteManagement.AllowRemote
 		secretHash = cfg.RemoteManagement.SecretKey
 	}
-	if h.allowRemoteOverride {
-		allowRemote = true
-	}
 	envSecret := h.envSecret
 
 	now := time.Now()
-	if remaining, banned := h.currentRateLimitBan(clientIP, now); banned {
-		return false, http.StatusForbidden, fmt.Sprintf(
-			"IP banned due to too many failed attempts. Try again in %s", remaining,
-		)
-	}
-
-	if !localClient && !allowRemote {
-		return false, http.StatusForbidden, "remote management disabled"
+	if _, banned := h.currentRateLimitBan(clientIP, now); banned {
+		return false, http.StatusTooManyRequests, managementRateLimitMessage
 	}
 
 	fail := func() {
 		h.recordFailedManagementAttempt(clientIP, time.Now())
+	}
+
+	if !localClient && !allowRemote {
+		fail()
+		return false, http.StatusUnauthorized, managementAuthFailureMessage
 	}
 
 	reset := func() {
@@ -385,13 +399,14 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 
 	if secretHash == "" && envSecret == "" {
 		if !(localClient && h.localPassword != "") {
-			return false, http.StatusForbidden, "remote management key not set"
+			fail()
+			return false, http.StatusUnauthorized, managementAuthFailureMessage
 		}
 	}
 
 	if provided == "" {
 		fail()
-		return false, http.StatusUnauthorized, "missing management key"
+		return false, http.StatusUnauthorized, managementAuthFailureMessage
 	}
 
 	if localClient {
@@ -416,7 +431,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 
 	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
 		fail()
-		return false, http.StatusUnauthorized, "invalid management key"
+		return false, http.StatusUnauthorized, managementAuthFailureMessage
 	}
 
 	reset()
@@ -428,15 +443,14 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 // Additionally, remote access requires allow-remote-management=true.
 func (h *Handler) Middleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
 		c.Header("X-CPA-VERSION", buildinfo.Version)
 		c.Header("X-CPA-COMMIT", buildinfo.Commit)
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
+		c.Header(pluginhost.SupportPluginHeader, pluginhost.SupportPluginHeaderValue())
 
-		// Determine client IP for rate limiting.
-		// When RemoteAddr is loopback (nginx reverse proxy), read X-Real-IP set by nginx
-		// to $remote_addr. Safe when CPA binds to 127.0.0.1: external clients cannot spoof it.
-		// Direct local connections (quota scheduler, CLI tools) have no X-Real-IP and are
-		// treated as local.
+		cfg := h.cfg
+		// X-Real-IP is trusted only when the deployment explicitly trusts forwarded proxy headers.
 		remoteHost, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
 		if remoteHost == "" {
 			remoteHost = c.Request.RemoteAddr
@@ -445,21 +459,19 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		localClient := false
 		if ip := net.ParseIP(remoteHost); ip != nil {
 			if ip.IsLoopback() {
-				if xRealIP := c.GetHeader("X-Real-IP"); xRealIP != "" {
+				clientIP = ip.String()
+				localClient = true
+				if xRealIP := strings.TrimSpace(c.GetHeader("X-Real-IP")); xRealIP != "" &&
+					cfg != nil && cfg.TLS.TrustForwardedProto {
 					if realIP := net.ParseIP(xRealIP); realIP != nil {
 						clientIP = realIP.String()
 						localClient = realIP.IsLoopback()
 					} else {
-						clientIP = "127.0.0.1"
-						localClient = true
+						localClient = false
 					}
-				} else {
-					clientIP = "127.0.0.1"
-					localClient = true
 				}
 			}
 		}
-		cfg := h.cfg
 		var (
 			allowRemote bool
 			secretHash  string
@@ -468,32 +480,24 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			allowRemote = cfg.RemoteManagement.AllowRemote
 			secretHash = cfg.RemoteManagement.SecretKey
 		}
-		if h.allowRemoteOverride {
-			allowRemote = true
-		}
 		envSecret := h.envSecret
 
 		now := time.Now()
 		if remaining, banned := h.currentRateLimitBan(clientIP, now); banned {
 			c.Header("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
-			c.AbortWithStatusJSON(
-				http.StatusForbidden, gin.H{
-					"error": fmt.Sprintf(
-						"IP banned due to too many failed attempts. Try again in %s", remaining,
-					),
-				},
-			)
-			return
-		}
-
-		if !localClient && !allowRemote {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management disabled"})
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": managementRateLimitMessage})
 			return
 		}
 
 		fail := func() {
 			h.recordFailedManagementAttempt(clientIP, time.Now())
 		}
+		if !localClient && !allowRemote {
+			fail()
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
+			return
+		}
+
 		reset := func() {
 			h.resetManagementAttempts(clientIP, time.Now())
 		}
@@ -501,7 +505,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			if localClient && h.localPassword != "" {
 				// Allow local requests to proceed — localPassword will be validated below
 			} else {
-				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management key not set"})
+				fail()
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
 				return
 			}
 		}
@@ -522,7 +527,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 		if provided == "" {
 			fail()
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing management key"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
 			return
 		}
 
@@ -552,7 +557,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 		if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
 			fail()
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid management key"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
 			return
 		}
 

@@ -157,6 +157,33 @@ func TestDeleteAuthFile_BatchBody(t *testing.T) {
 	}
 }
 
+func TestDeleteAuthFile_AllRequiresConfirmation(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	filePath := filepath.Join(authDir, "a.json")
+	if err := os.WriteFile(filePath, []byte(`{"type":"claude"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = &memoryAuthStore{}
+
+	deleteRec := httptest.NewRecorder()
+	deleteCtx, _ := gin.CreateTestContext(deleteRec)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?all=true", nil)
+	deleteCtx.Request = deleteReq
+	h.DeleteAuthFile(deleteCtx)
+
+	if deleteRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 without confirmation, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, errStat := os.Stat(filePath); errStat != nil {
+		t.Fatalf("expected auth file to remain, stat err: %v", errStat)
+	}
+}
+
 func TestDeleteAuthFile_UnregistersQuotaEntry(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -207,7 +234,7 @@ func TestDeleteAuthFile_UnregistersQuotaEntry(t *testing.T) {
 		)
 	}
 	status := scheduler.GetStatus()
-	if _, exists := status.Credentials[fileName]; exists {
+	if _, exists := status.Credentials[quota.EntryKey(quota.TypeClaude, fileName)]; exists {
 		t.Fatalf("expected quota entry %s to be removed", fileName)
 	}
 }

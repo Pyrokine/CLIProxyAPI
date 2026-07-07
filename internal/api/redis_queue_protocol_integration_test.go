@@ -64,9 +64,13 @@ func writeTestRESPCommand(conn net.Conn, args ...string) error {
 	}
 
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "*%d\r\n", len(args))
+	if _, err := fmt.Fprintf(&buf, "*%d\r\n", len(args)); err != nil {
+		return err
+	}
 	for _, arg := range args {
-		fmt.Fprintf(&buf, "$%d\r\n%s\r\n", len(arg), arg)
+		if _, err := fmt.Fprintf(&buf, "$%d\r\n%s\r\n", len(arg), arg); err != nil {
+			return err
+		}
 	}
 	_, err := conn.Write(buf.Bytes())
 	return err

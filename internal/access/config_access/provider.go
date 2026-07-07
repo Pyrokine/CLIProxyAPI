@@ -26,8 +26,9 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	if cfg.AllowQueryAuth {
 		log.Warnf(
-			"security: allow-query-auth is enabled — API keys in URL query (?key=..., ?auth_token=...) will be accepted. " +
-				"Keys may leak via access logs, referrers, and browser history. Disable allow-query-auth unless a legacy client requires it.",
+			"security: allow-query-auth is enabled — API keys in URL query (?key=..., ?auth_token=...) " +
+				"will be accepted. Keys may leak via access logs, referrers, and browser history. " +
+				"Disable allow-query-auth unless a legacy client requires it.",
 		)
 	}
 
@@ -148,6 +149,10 @@ func normalizeKeys(keys []string) []string {
 		if trimmedKey == "" {
 			continue
 		}
+		if !validConfigAPIKey(trimmedKey) {
+			log.Warn("config API key rejected: keys must be at least 8 printable ASCII characters")
+			continue
+		}
 		if _, exists := seen[trimmedKey]; exists {
 			continue
 		}
@@ -158,4 +163,16 @@ func normalizeKeys(keys []string) []string {
 		return nil
 	}
 	return normalized
+}
+
+func validConfigAPIKey(key string) bool {
+	if len(key) < 8 {
+		return false
+	}
+	for _, b := range []byte(key) {
+		if b < 0x21 || b > 0x7E {
+			return false
+		}
+	}
+	return true
 }

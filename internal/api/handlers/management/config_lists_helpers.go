@@ -22,6 +22,7 @@ type structListResource[T any] struct {
 	setList                  func(cfg *config.Config, list []T)
 	sanitize                 func(cfg *config.Config)
 	normalize                func(entry *T)        // per-entry normalization (nil = skip)
+	validate                 func(entry *T) error  // per-entry validation (nil = skip)
 	matchKey                 func(entry *T) string // extract match field value
 	matchQueryParam          string                // Delete query param name (e.g., "api-key")
 	secondaryMatchKey        func(entry *T) string // optional secondary delete match (e.g., base-url)
@@ -57,6 +58,14 @@ func putStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 			r.normalize(&arr[i])
 		}
 	}
+	if r.validate != nil {
+		for i := range arr {
+			if errValidate := r.validate(&arr[i]); errValidate != nil {
+				c.JSON(400, gin.H{"error": errValidate.Error()})
+				return
+			}
+		}
+	}
 	if r.filter != nil {
 		filtered := make([]T, 0, len(arr))
 		for i := range arr {
@@ -73,23 +82,50 @@ func putStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 
 func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 	list := r.getList(h.cfg)
+	matchValue, hasMatch := deleteStructEntryMatch(c, r)
+	secondaryValue, hasSecondary := deleteStructEntrySecondaryMatch(c, r)
+	indexValue, hasIndex := deleteStructEntryIndex(c)
 
-	if val := c.Query(r.matchQueryParam); val != "" {
-		if r.trimMatch {
-			val = strings.TrimSpace(val)
+	if !hasMatch && !hasIndex && c.Request.Body != nil && c.Request.ContentLength != 0 {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
+		data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "failed to read body"})
+			return
 		}
-		secondaryVal, hasSecondary := "", false
-		if r.secondaryMatchQueryParam != "" {
-			secondaryVal, hasSecondary = c.GetQuery(r.secondaryMatchQueryParam)
-			if hasSecondary && r.trimSecondaryMatch {
-				secondaryVal = strings.TrimSpace(secondaryVal)
+		if len(strings.TrimSpace(string(data))) > 0 {
+			var body map[string]json.RawMessage
+			if err = json.Unmarshal(data, &body); err != nil {
+				c.JSON(400, gin.H{"error": "invalid body"})
+				return
 			}
+			if value, ok := stringFieldFromRaw(body, r.matchQueryParam); ok {
+				matchValue = value
+				hasMatch = true
+			}
+			if value, ok := stringFieldFromRaw(body, r.secondaryMatchQueryParam); ok {
+				secondaryValue = value
+				hasSecondary = true
+			}
+			if value, ok := intFieldFromRaw(body, "index"); ok {
+				indexValue = value
+				hasIndex = true
+			}
+		}
+	}
+
+	if hasMatch {
+		if r.trimMatch {
+			matchValue = strings.TrimSpace(matchValue)
+		}
+		if r.trimSecondaryMatch {
+			secondaryValue = strings.TrimSpace(secondaryValue)
 		}
 		out := make([]T, 0, len(list))
 		for i := range list {
-			matched := r.matchKey(&list[i]) == val
+			matched := r.matchKey(&list[i]) == matchValue
 			if matched && hasSecondary && r.secondaryMatchKey != nil {
-				matched = r.secondaryMatchKey(&list[i]) == secondaryVal
+				matched = r.secondaryMatchKey(&list[i]) == secondaryValue
 			}
 			if !matched {
 				out = append(out, list[i])
@@ -104,17 +140,68 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 		h.persist(c)
 		return
 	}
-	if idxStr := c.Query("index"); idxStr != "" {
-		var idx int
-		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(list) {
-			list = append(list[:idx], list[idx+1:]...)
-			r.setList(h.cfg, list)
-			r.sanitize(h.cfg)
-			h.persist(c)
-			return
-		}
+	if hasIndex && indexValue >= 0 && indexValue < len(list) {
+		list = append(list[:indexValue], list[indexValue+1:]...)
+		r.setList(h.cfg, list)
+		r.sanitize(h.cfg)
+		h.persist(c)
+		return
 	}
 	c.JSON(400, gin.H{"error": fmt.Sprintf("missing %s or index", r.matchQueryParam)})
+}
+
+func deleteStructEntryMatch[T any](c *gin.Context, r structListResource[T]) (string, bool) {
+	value := c.Query(r.matchQueryParam)
+	if value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+func deleteStructEntrySecondaryMatch[T any](c *gin.Context, r structListResource[T]) (string, bool) {
+	if r.secondaryMatchQueryParam == "" {
+		return "", false
+	}
+	return c.GetQuery(r.secondaryMatchQueryParam)
+}
+
+func deleteStructEntryIndex(c *gin.Context) (int, bool) {
+	idxStr := c.Query("index")
+	if idxStr == "" {
+		return 0, false
+	}
+	var idx int
+	if _, err := fmt.Sscanf(idxStr, "%d", &idx); err != nil {
+		return 0, false
+	}
+	return idx, true
+}
+
+func stringFieldFromRaw(fields map[string]json.RawMessage, name string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	raw, ok := fields[name]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func intFieldFromRaw(fields map[string]json.RawMessage, name string) (int, bool) {
+	raw, ok := fields[name]
+	if !ok {
+		return 0, false
+	}
+	var value int
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 func patchStructEntry[T any](
@@ -191,6 +278,12 @@ func patchStructEntry[T any](
 	if r.normalize != nil {
 		r.normalize(&entry)
 	}
+	if r.validate != nil {
+		if errValidate := r.validate(&entry); errValidate != nil {
+			c.JSON(400, gin.H{"error": errValidate.Error()})
+			return
+		}
+	}
 	list[targetIndex] = entry
 	r.setList(h.cfg, list)
 	r.sanitize(h.cfg)
@@ -204,6 +297,7 @@ var geminiKeyResource = structListResource[config.GeminiKey]{
 	getList:                  func(cfg *config.Config) []config.GeminiKey { return cfg.GeminiKey },
 	setList:                  func(cfg *config.Config, list []config.GeminiKey) { cfg.GeminiKey = list },
 	sanitize:                 func(cfg *config.Config) { cfg.SanitizeGeminiKeys() },
+	validate:                 validateGeminiKey,
 	matchKey:                 func(e *config.GeminiKey) string { return e.APIKey },
 	secondaryMatchKey:        func(e *config.GeminiKey) string { return e.BaseURL },
 	matchQueryParam:          "api-key",
@@ -219,6 +313,7 @@ var claudeKeyResource = structListResource[config.ClaudeKey]{
 	setList:                  func(cfg *config.Config, list []config.ClaudeKey) { cfg.ClaudeKey = list },
 	sanitize:                 func(cfg *config.Config) { cfg.SanitizeClaudeKeys() },
 	normalize:                normalizeClaudeKey,
+	validate:                 validateClaudeKey,
 	matchKey:                 func(e *config.ClaudeKey) string { return e.APIKey },
 	secondaryMatchKey:        func(e *config.ClaudeKey) string { return e.BaseURL },
 	matchQueryParam:          "api-key",
@@ -232,6 +327,7 @@ var openAICompatResource = structListResource[config.OpenAICompatibility]{
 	setList:         func(cfg *config.Config, list []config.OpenAICompatibility) { cfg.OpenAICompatibility = list },
 	sanitize:        func(cfg *config.Config) { cfg.SanitizeOpenAICompatibility() },
 	normalize:       normalizeOpenAICompatibilityEntry,
+	validate:        validateOpenAICompatibilityEntry,
 	matchKey:        func(e *config.OpenAICompatibility) string { return e.Name },
 	matchQueryParam: "name",
 	matchBodyField:  "name",
@@ -245,6 +341,7 @@ var vertexCompatKeyResource = structListResource[config.VertexCompatKey]{
 	setList:                  func(cfg *config.Config, list []config.VertexCompatKey) { cfg.VertexCompatAPIKey = list },
 	sanitize:                 func(cfg *config.Config) { cfg.SanitizeVertexCompatKeys() },
 	normalize:                normalizeVertexCompatKey,
+	validate:                 validateVertexCompatKey,
 	matchKey:                 func(e *config.VertexCompatKey) string { return e.APIKey },
 	secondaryMatchKey:        func(e *config.VertexCompatKey) string { return e.BaseURL },
 	matchQueryParam:          "api-key",
@@ -259,6 +356,7 @@ var codexKeyResource = structListResource[config.CodexKey]{
 	setList:                  func(cfg *config.Config, list []config.CodexKey) { cfg.CodexKey = list },
 	sanitize:                 func(cfg *config.Config) { cfg.SanitizeCodexKeys() },
 	normalize:                normalizeCodexKey,
+	validate:                 validateCodexKey,
 	matchKey:                 func(e *config.CodexKey) string { return e.APIKey },
 	secondaryMatchKey:        func(e *config.CodexKey) string { return e.BaseURL },
 	matchQueryParam:          "api-key",

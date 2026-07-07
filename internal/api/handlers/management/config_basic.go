@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +15,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
@@ -189,6 +189,9 @@ func (h *Handler) GetVersion(c *gin.Context) {
 			"build_time":        buildinfo.BuildDate,
 			"commit":            buildinfo.Commit,
 			"min_panel_version": minPanelVersion,
+			"features": gin.H{
+				"plugins": true,
+			},
 		},
 	)
 }
@@ -510,12 +513,8 @@ func (h *Handler) PutProxyURL(c *gin.Context) {
 			if v == "" {
 				return nil
 			}
-			parsed, err := url.Parse(v)
-			if err != nil || parsed.Hostname() == "" {
-				return fmt.Errorf("invalid URL")
-			}
-			if isPrivateHost(parsed.Hostname()) {
-				return fmt.Errorf("requests to private/internal addresses are not allowed")
+			if errValidate := proxyutil.ValidateProxyURL(v); errValidate != nil {
+				return fmt.Errorf("invalid proxy-url: %w", errValidate)
 			}
 			return nil
 		}, func(v string) { h.cfg.ProxyURL = v },

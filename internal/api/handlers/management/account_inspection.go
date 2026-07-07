@@ -48,6 +48,25 @@ type accountInspectionSummary struct {
 	Disabled      int `json:"disabled"`
 }
 
+type accountInspectionReasonCount struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
+}
+
+type accountInspectionProviderSummary struct {
+	Provider      string                         `json:"provider"`
+	Total         int                            `json:"total"`
+	Normal        int                            `json:"normal"`
+	Abnormal      int                            `json:"abnormal"`
+	TokenInvalid  int                            `json:"token_invalid"`
+	RefreshFailed int                            `json:"refresh_failed"`
+	Disabled      int                            `json:"disabled"`
+	Unavailable   int                            `json:"unavailable"`
+	Unknown       int                            `json:"unknown"`
+	LastCheckedAt *time.Time                     `json:"last_checked_at,omitempty"`
+	TopReasons    []accountInspectionReasonCount `json:"top_reasons,omitempty"`
+}
+
 type accountInspectionRun struct {
 	ID        string                   `json:"id"`
 	StartedAt time.Time                `json:"started_at"`
@@ -86,13 +105,14 @@ type accountInspectionRefreshSummary struct {
 }
 
 type accountInspectionStatusResponse struct {
-	Status       string                          `json:"status"`
-	Schedule     accountInspectionSchedule       `json:"schedule"`
-	Summary      accountInspectionSummary        `json:"summary"`
-	RefreshQueue accountInspectionRefreshSummary `json:"refresh_queue"`
-	CurrentRun   *accountInspectionRun           `json:"current_run,omitempty"`
-	LastRun      *accountInspectionRun           `json:"last_run,omitempty"`
-	UpdatedAt    time.Time                       `json:"updated_at"`
+	Status            string                                      `json:"status"`
+	Schedule          accountInspectionSchedule                   `json:"schedule"`
+	Summary           accountInspectionSummary                    `json:"summary"`
+	SummaryByProvider map[string]accountInspectionProviderSummary `json:"summary_by_provider"`
+	RefreshQueue      accountInspectionRefreshSummary             `json:"refresh_queue"`
+	CurrentRun        *accountInspectionRun                       `json:"current_run,omitempty"`
+	LastRun           *accountInspectionRun                       `json:"last_run,omitempty"`
+	UpdatedAt         time.Time                                   `json:"updated_at"`
 }
 
 type accountInspectionService struct {
@@ -392,13 +412,14 @@ func (s *accountInspectionService) statusSnapshot() accountInspectionStatusRespo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return accountInspectionStatusResponse{
-		Status:       s.status,
-		Schedule:     cloneInspectionSchedule(s.schedule),
-		Summary:      summarizeInspectionResults(s.results),
-		RefreshQueue: s.refreshSummaryLocked(),
-		CurrentRun:   cloneInspectionRun(s.currentRun),
-		LastRun:      cloneInspectionRun(s.lastRun),
-		UpdatedAt:    s.updatedAt,
+		Status:            s.status,
+		Schedule:          cloneInspectionSchedule(s.schedule),
+		Summary:           summarizeInspectionResults(s.results),
+		SummaryByProvider: summarizeInspectionResultsByProvider(s.results),
+		RefreshQueue:      s.refreshSummaryLocked(),
+		CurrentRun:        cloneInspectionRun(s.currentRun),
+		LastRun:           cloneInspectionRun(s.lastRun),
+		UpdatedAt:         s.updatedAt,
 	}
 }
 
@@ -519,12 +540,12 @@ func (s *accountInspectionService) timeout() time.Duration {
 
 func (s *accountInspectionService) maxConcurrency() int {
 	s.mu.Lock()
-	max := s.schedule.MaxConcurrency
+	limit := s.schedule.MaxConcurrency
 	s.mu.Unlock()
-	if max < 1 {
+	if limit < 1 {
 		return 1
 	}
-	return max
+	return limit
 }
 
 func (s *accountInspectionService) execute(ctx context.Context, run *accountInspectionRun, target string) {
@@ -601,7 +622,11 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 		if target == "" && inspectionAuthDisabled(auth) {
 			continue
 		}
-		candidates = append(candidates, candidate{auth: auth, entry: quotaStatus.Credentials[auth.FileName]})
+		entry := quotaStatus.Credentials[quota.EntryKey(quota.CredentialType(provider), auth.FileName)]
+		if entry == nil {
+			entry = quotaStatus.Credentials[auth.FileName]
+		}
+		candidates = append(candidates, candidate{auth: auth, entry: entry})
 	}
 	if len(candidates) == 0 {
 		return []accountInspectionResult{}
@@ -872,6 +897,76 @@ func summarizeInspectionResults(results []accountInspectionResult) accountInspec
 		}
 	}
 	return summary
+}
+
+func summarizeInspectionResultsByProvider(
+	results []accountInspectionResult,
+) map[string]accountInspectionProviderSummary {
+	out := make(map[string]accountInspectionProviderSummary)
+	reasonsByProvider := make(map[string]map[string]int)
+	for _, result := range results {
+		provider := strings.ToLower(strings.TrimSpace(result.Provider))
+		if provider == "" {
+			provider = "unknown"
+		}
+		summary := out[provider]
+		summary.Provider = provider
+		summary.Total++
+		switch result.Status {
+		case accountHealthNormal:
+			summary.Normal++
+		case accountHealthDisabled:
+			summary.Disabled++
+		default:
+			summary.Abnormal++
+		}
+		switch result.Status {
+		case accountHealthUnavailable:
+			summary.Unavailable++
+		case accountHealthUnknown:
+			summary.Unknown++
+		}
+		switch result.Reason {
+		case "token_expired":
+			summary.TokenInvalid++
+		case "refresh_failed", "provider_error":
+			summary.RefreshFailed++
+		}
+		if summary.LastCheckedAt == nil || result.CheckedAt.After(*summary.LastCheckedAt) {
+			checkedAt := result.CheckedAt
+			summary.LastCheckedAt = &checkedAt
+		}
+		out[provider] = summary
+		reason := strings.TrimSpace(result.Reason)
+		if reason == "" {
+			continue
+		}
+		if reasonsByProvider[provider] == nil {
+			reasonsByProvider[provider] = make(map[string]int)
+		}
+		reasonsByProvider[provider][reason]++
+	}
+	for provider, counts := range reasonsByProvider {
+		reasons := make([]accountInspectionReasonCount, 0, len(counts))
+		for reason, count := range counts {
+			reasons = append(reasons, accountInspectionReasonCount{Reason: reason, Count: count})
+		}
+		sort.Slice(
+			reasons, func(i, j int) bool {
+				if reasons[i].Count == reasons[j].Count {
+					return reasons[i].Reason < reasons[j].Reason
+				}
+				return reasons[i].Count > reasons[j].Count
+			},
+		)
+		if len(reasons) > 3 {
+			reasons = reasons[:3]
+		}
+		summary := out[provider]
+		summary.TopReasons = reasons
+		out[provider] = summary
+	}
+	return out
 }
 
 func (h *Handler) findInspectionAuth(target string) *coreauth.Auth {

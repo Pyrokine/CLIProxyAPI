@@ -212,7 +212,7 @@ func applyModelCatalogPatch(model *modelcatalog.Model, body modelCatalogPatchReq
 		model.Enabled = *body.Enabled
 	}
 	if body.Aliases != nil {
-		model.Aliases = append([]string(nil), (*body.Aliases)...)
+		model.Aliases = append([]string(nil), *body.Aliases...)
 	}
 	if body.Price != nil {
 		price := modelcatalog.Price{

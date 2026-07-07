@@ -56,6 +56,43 @@ func TestLockoutExpires(t *testing.T) {
 	}
 }
 
+func TestLockoutEscalatesAfterRepeatFailures(t *testing.T) {
+	rl := NewAuthRateLimiter()
+	defer rl.Stop()
+
+	ip := "10.0.0.2"
+	for i := 0; i < maxFailures; i++ {
+		rl.RecordFailure(ip)
+	}
+
+	val, ok := rl.ipEntries.Load(ip)
+	if !ok {
+		t.Fatal("expected entry to exist")
+	}
+	entry := val.(*rateLimitEntry)
+	entry.mu.Lock()
+	firstUntil := entry.lockedUntil
+	entry.lockedUntil = time.Now().Add(-time.Second)
+	entry.firstFailure = time.Now().Add(-failureWindow - time.Second)
+	entry.mu.Unlock()
+
+	for i := 0; i < maxFailures; i++ {
+		rl.RecordFailure(ip)
+	}
+
+	entry.mu.Lock()
+	secondUntil := entry.lockedUntil
+	level := entry.lockoutLevel
+	entry.mu.Unlock()
+
+	if level != 2 {
+		t.Fatalf("lockoutLevel = %d, want 2", level)
+	}
+	if !secondUntil.After(firstUntil) {
+		t.Fatalf("expected second lockout to last longer, firstUntil=%s secondUntil=%s", firstUntil, secondUntil)
+	}
+}
+
 func TestRecordSuccess_ClearsFailures(t *testing.T) {
 	rl := NewAuthRateLimiter()
 	defer rl.Stop()
