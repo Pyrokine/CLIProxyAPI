@@ -26,7 +26,11 @@ func TestStore_QueryStaysWithinMemoryBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		if errClose := store.Close(); errClose != nil {
+			t.Fatalf("Close: %v", errClose)
+		}
+	}()
 
 	ctx := context.Background()
 

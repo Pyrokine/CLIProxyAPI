@@ -389,7 +389,11 @@ func TestImportFile_RejectsLargeInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		if errClose := store.Close(); errClose != nil {
+			t.Fatalf("Close: %v", errClose)
+		}
+	}()
 
 	largeFile := filepath.Join(baseDir, "too-large.json")
 	f, err := os.Create(largeFile)
@@ -419,7 +423,11 @@ func TestMigrateLegacy_EmptyDirIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		if errClose := store.Close(); errClose != nil {
+			t.Fatalf("Close: %v", errClose)
+		}
+	}()
 
 	ctx := context.Background()
 	if err := MigrateLegacyToSQLite(ctx, store, nil, baseDir); err != nil {

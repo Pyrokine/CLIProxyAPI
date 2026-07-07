@@ -1274,12 +1274,22 @@ SELECT model_id, credential_id, api_key_id, provider_id,
 			&a.input, &a.output, &a.reasoning, &a.cached, &a.total,
 			&a.costMicro, &a.latency, &a.samples,
 		); err != nil {
-			rows.Close()
+			if errClose := rows.Close(); errClose != nil {
+				log.Warnf("usage: close aggregate rows after scan error: %v", errClose)
+			}
 			return fmt.Errorf("scan aggregate: %w", err)
 		}
 		aggs = append(aggs, a)
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		if errClose := rows.Close(); errClose != nil {
+			log.Warnf("usage: close aggregate rows after iteration error: %v", errClose)
+		}
+		return fmt.Errorf("iterate aggregate rows: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close aggregate rows: %w", err)
+	}
 
 	// Wipe day_bucket rows for this day before re-inserting so deletions in
 	// hour_bucket (e.g. from Trim) propagate.

@@ -387,7 +387,9 @@ SELECT ts_ns, model_id, credential_id, api_key_id, provider_id, metadata
 		updates = append(updates, item)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		if errClose := rows.Close(); errClose != nil {
+			log.Warnf("usage: close latency metadata rows after iteration error: %v", errClose)
+		}
 		return fmt.Errorf("iterate latency metadata: %w", err)
 	}
 	if err := rows.Close(); err != nil {

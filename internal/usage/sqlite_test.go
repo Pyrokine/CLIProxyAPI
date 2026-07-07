@@ -44,7 +44,11 @@ func TestOpenStore_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second OpenStore: %v", err)
 	}
-	defer store2.Close()
+	defer func() {
+		if errClose := store2.Close(); errClose != nil {
+			t.Fatalf("Close: %v", errClose)
+		}
+	}()
 
 	var v string
 	if err := store2.db.QueryRow("SELECT value FROM meta WHERE key = 'schema_version'").Scan(&v); err != nil {
@@ -706,7 +710,11 @@ INSERT INTO hour_bucket(id, bucket_ts_ns, model_id, requests, success, failure, 
 	if err != nil {
 		t.Fatalf("re-OpenStore: %v", err)
 	}
-	defer store2.Close()
+	defer func() {
+		if errClose := store2.Close(); errClose != nil {
+			t.Fatalf("Close: %v", errClose)
+		}
+	}()
 	if err := store2.db.QueryRow("SELECT value FROM meta WHERE key='schema_version'").Scan(&ver); err != nil {
 		t.Fatalf("re-read schema_version: %v", err)
 	}

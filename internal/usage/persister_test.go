@@ -124,7 +124,11 @@ func TestPersisterImport_RejectsWhenDBSizeCapReached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		if errClose := store.Close(); errClose != nil {
+			t.Fatalf("Close: %v", errClose)
+		}
+	}()
 	walPath := filepath.Join(dir, "events.db-wal")
 	if err := os.WriteFile(walPath, make([]byte, 2<<20), 0o600); err != nil {
 		t.Fatalf("write wal: %v", err)
@@ -153,7 +157,11 @@ func TestPersisterDBSizeStatus_ReportsWarningAndCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	defer store.Close()
+	defer func() {
+		if errClose := store.Close(); errClose != nil {
+			t.Fatalf("Close: %v", errClose)
+		}
+	}()
 	walPath := filepath.Join(dir, "events.db-wal")
 	if err := os.WriteFile(walPath, make([]byte, 900<<10), 0o600); err != nil {
 		t.Fatalf("write wal: %v", err)
