@@ -158,7 +158,8 @@ func (r *Registry) TranslateStream(
 	out := make([][]byte, 0, len(frames))
 	for _, frame := range frames {
 		out = append(
-			out, hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, frame, true),
+			out,
+			hooks.NormalizeResponseAfter(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, frame, true),
 		)
 	}
 	return out

@@ -3,6 +3,7 @@ package safemode
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"html"
 	"net"
@@ -138,7 +139,7 @@ func StartExampleAPIKeyWarningServer(ctx context.Context, cfg *config.Config, co
 
 	select {
 	case errServe := <-errCh:
-		if errServe == nil || errServe == http.ErrServerClosed {
+		if errServe == nil || errors.Is(errServe, http.ErrServerClosed) {
 			return nil
 		}
 		return errServe
@@ -150,7 +151,7 @@ func StartExampleAPIKeyWarningServer(ctx context.Context, cfg *config.Config, co
 		if errShutdown != nil {
 			return errShutdown
 		}
-		if errServe != nil && errServe != http.ErrServerClosed {
+		if errServe != nil && !errors.Is(errServe, http.ErrServerClosed) {
 			return errServe
 		}
 		return ctx.Err()
