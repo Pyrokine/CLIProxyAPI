@@ -256,10 +256,10 @@ func TestRegisterModelsUsesModelProviderStaticModels(t *testing.T) {
 		},
 		AuthDir: "/tmp/plugin-auth",
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
-			"plugin-provider": []config.OAuthModelAlias{{Name: "upstream-model", Alias: "alias-model"}},
+			"plugin-provider": {{Name: "upstream-model", Alias: "alias-model"}},
 		},
 		OAuthExcludedModels: map[string][]string{
-			"plugin-provider": []string{"hidden-model"},
+			"plugin-provider": {"hidden-model"},
 		},
 	}
 
@@ -1296,7 +1296,8 @@ func TestAdaptersKeepPayloadOrTryNextOnErrorAndEmptyBody(t *testing.T) {
 	)
 
 	normalized := host.NormalizeRequest(
-		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"), false,
+		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"),
+		false,
 	)
 	if string(normalized) != "kept-then-success" {
 		t.Fatalf("NormalizeRequest() = %q, want %q", normalized, "kept-then-success")
@@ -1354,7 +1355,8 @@ func TestAdaptersKeepPayloadOrTryNextOnErrorAndEmptyBody(t *testing.T) {
 	)
 
 	translated, ok := translatorHost.TranslateRequest(
-		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"), false,
+		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"),
+		false,
 	)
 	if !ok {
 		t.Fatal("TranslateRequest() ok = false, want true")
@@ -1401,7 +1403,8 @@ func TestTranslatorPanicFusesPlugin(t *testing.T) {
 	)
 
 	got := host.NormalizeRequest(
-		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"), false,
+		context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, "model", []byte("original"),
+		false,
 	)
 	if string(got) != "original|next" {
 		t.Fatalf("NormalizeRequest() = %q, want %q", got, "original|next")
@@ -2329,7 +2332,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 				"bytes":     []byte("original"),
 				"labels":    map[string]string{"name": "original"},
 				"values":    url.Values{"name": []string{"original"}},
-				"mapSlice":  map[string][]string{"name": []string{"original"}},
+				"mapSlice":  map[string][]string{"name": {"original"}},
 				"sliceMap":  []map[string]string{{"name": "original"}},
 				"aliasMap":  stringSliceAlias{"original"},
 				"aliasList": mapSliceAlias{{"name": "original"}},
@@ -2419,7 +2422,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 				"bytes":     []byte("original"),
 				"labels":    map[string]string{"name": "original"},
 				"values":    url.Values{"name": []string{"original"}},
-				"mapSlice":  map[string][]string{"name": []string{"original"}},
+				"mapSlice":  map[string][]string{"name": {"original"}},
 				"sliceMap":  []map[string]string{{"name": "original"}},
 				"aliasMap":  stringSliceAlias{"original"},
 				"aliasList": mapSliceAlias{{"name": "original"}},
@@ -2524,7 +2527,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 				"bytes":     []byte("original"),
 				"labels":    map[string]string{"name": "original"},
 				"values":    url.Values{"name": []string{"original"}},
-				"mapSlice":  map[string][]string{"name": []string{"original"}},
+				"mapSlice":  map[string][]string{"name": {"original"}},
 				"sliceMap":  []map[string]string{{"name": "original"}},
 				"aliasMap":  stringSliceAlias{"original"},
 				"aliasList": mapSliceAlias{{"name": "original"}},
@@ -2627,7 +2630,7 @@ func TestInterceptorsDoNotMutateInputs(t *testing.T) {
 			}
 
 			structValue := &pointerMetadata{Value: "original", Items: []string{"original"}}
-			mapValue := &map[string][]string{"names": []string{"original"}}
+			mapValue := &map[string][]string{"names": {"original"}}
 			sliceValue := &[]string{"original"}
 			aliasMapValue := &mapSliceAlias{{"name": "original"}}
 			var ifaceValue any = &pointerMetadata{Value: "original", Items: []string{"original"}}
@@ -3527,7 +3530,7 @@ func TestExecutorAdapterMethods(t *testing.T) {
 		t.Fatalf("first stream chunk = %#v, want payload chunk", first)
 	}
 	second := <-stream.Chunks
-	if second.Err != streamErr {
+	if !errors.Is(second.Err, streamErr) {
 		t.Fatalf("second stream chunk err = %v, want %v", second.Err, streamErr)
 	}
 	if _, ok := <-stream.Chunks; ok {

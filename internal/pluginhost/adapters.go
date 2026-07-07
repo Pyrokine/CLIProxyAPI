@@ -230,9 +230,9 @@ func cloneRegistryModels(in []*registry.ModelInfo) []*registry.ModelInfo {
 		copyModel.SupportedInputModalities = cloneStringSlice(model.SupportedInputModalities)
 		copyModel.SupportedOutputModalities = cloneStringSlice(model.SupportedOutputModalities)
 		if model.Thinking != nil {
-			thinking := *model.Thinking
-			thinking.Levels = cloneStringSlice(model.Thinking.Levels)
-			copyModel.Thinking = &thinking
+			thinkingInfo := *model.Thinking
+			thinkingInfo.Levels = cloneStringSlice(model.Thinking.Levels)
+			copyModel.Thinking = &thinkingInfo
 		}
 		out = append(out, &copyModel)
 	}
@@ -245,11 +245,12 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 	}
 
 	snap := h.Snapshot()
+	records := h.activeRecordsFromSnapshot(snap)
 	registrations := make([]modelClientRegistration, 0)
 	nextClients := make(map[string]struct{})
 	nextProviders := make(map[string]string)
 	nextModelRegistrations := make(map[string]pluginModelRegistration)
-	for _, record := range snap.records {
+	for _, record := range records {
 		modelProvider := record.plugin.Capabilities.ModelProvider
 		registrar := record.plugin.Capabilities.ModelRegistrar
 		if modelProvider == nil && registrar == nil {
@@ -262,10 +263,13 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 		var errRegisterModels error
 		if modelProvider != nil {
 			modelResp, errStaticModels := h.callModelProviderStaticModels(ctx, record, modelProvider)
-			errRegisterModels = errStaticModels
-			resp = pluginapi.ModelRegistrationResponse{
-				Provider: modelResp.Provider,
-				Models:   modelResp.Models,
+			if errStaticModels != nil {
+				errRegisterModels = errStaticModels
+			} else {
+				resp = pluginapi.ModelRegistrationResponse{
+					Provider: modelResp.Provider,
+					Models:   modelResp.Models,
+				}
 			}
 		} else {
 			resp, errRegisterModels = h.callModelRegistrar(ctx, record, registrar)
@@ -324,7 +328,7 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 	if providerKey == "" {
 		return AuthModelResult{}
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		modelProvider := record.plugin.Capabilities.ModelProvider
 		if modelProvider == nil || h.isPluginFused(record.id) {
 			continue
@@ -666,7 +670,7 @@ func (h *Host) interceptRequest(
 		Body:    bytes.Clone(req.Body),
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		interceptor := record.plugin.Capabilities.RequestInterceptor
 		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
 			continue
@@ -709,7 +713,7 @@ func (h *Host) InterceptResponseExcept(
 		Body:    bytes.Clone(req.Body),
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		interceptor := record.plugin.Capabilities.ResponseInterceptor
 		if h.isPluginFused(record.id) || interceptor == nil || record.id == skipPluginID {
 			continue
@@ -748,7 +752,7 @@ func (h *Host) InterceptStreamChunkExcept(
 		Body:    bytes.Clone(req.Body),
 	}
 	skipPluginID = strings.TrimSpace(skipPluginID)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		interceptor := record.plugin.Capabilities.StreamChunkInterceptor
 		if h.isPluginFused(record.id) || interceptor == nil || current.DropChunk || record.id == skipPluginID {
 			continue
@@ -778,7 +782,7 @@ func (h *Host) HasStreamInterceptors() bool {
 	if h == nil {
 		return false
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) {
 			continue
 		}
@@ -793,7 +797,7 @@ func (h *Host) HasRequestInterceptors() bool {
 	if h == nil {
 		return false
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) {
 			continue
 		}
@@ -857,6 +861,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 	}
 
 	snap := h.Snapshot()
+	records := h.activeRecordsFromSnapshot(snap)
 	registrations := h.snapshotModelRegistrations()
 	selectedModels := make(map[string][]*registry.ModelInfo)
 	providerModels := make(map[string][]*registry.ModelInfo)
@@ -867,7 +872,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 			appendModelsForProvider(providerModels, registration.provider, registration.models)
 		}
 	}
-	for _, record := range snap.records {
+	for _, record := range records {
 		executor := record.plugin.Capabilities.Executor
 		if executor == nil || h.isPluginFused(record.id) {
 			continue
@@ -909,7 +914,7 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 	nextModelClients := make(map[string]struct{})
 	executorRegistrations := make([]executorRegistration, 0)
 	modelClientRegistrations := make([]modelClientRegistration, 0)
-	for _, record := range snap.records {
+	for _, record := range records {
 		executor := record.plugin.Capabilities.Executor
 		if executor == nil || h.isPluginFused(record.id) {
 			continue
@@ -1178,7 +1183,7 @@ func (h *Host) HasExecutorCandidateProvider(provider string) bool {
 	if provider == "" {
 		return false
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		executor := record.plugin.Capabilities.Executor
 		if executor == nil || h.isPluginFused(record.id) {
 			continue
@@ -1218,7 +1223,7 @@ func (h *Host) RegisterFrontendAuthProviders() {
 
 	nextKeys := make(map[string]struct{})
 	var bestExclusive exclusiveFrontendAuthCandidate
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		provider := record.plugin.Capabilities.FrontendAuthProvider
 		if provider == nil || h.isPluginFused(record.id) {
 			continue
@@ -1281,7 +1286,7 @@ func (h *Host) RegisterUsagePlugins() {
 		return
 	}
 
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.UsagePlugin
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
@@ -1343,7 +1348,7 @@ func (h *Host) currentUsagePlugin(pluginID string) pluginapi.UsagePlugin {
 	if h == nil || strings.TrimSpace(pluginID) == "" {
 		return nil
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if record.id != pluginID {
 			continue
 		}
@@ -1588,7 +1593,7 @@ func (a *executorAdapter) executorResponseTranslationAvailable(from, to sdktrans
 }
 
 func (h *Host) hasResponseTranslator() bool {
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) || record.plugin.Capabilities.ResponseTranslator == nil {
 			continue
 		}
@@ -2096,7 +2101,7 @@ func (h *Host) NormalizeRequest(
 	stream bool,
 ) []byte {
 	current := bytes.Clone(body)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) || record.plugin.Capabilities.RequestNormalizer == nil {
 			continue
 		}
@@ -2114,7 +2119,7 @@ func (h *Host) TranslateRequest(
 	body []byte,
 	stream bool,
 ) ([]byte, bool) {
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) || record.plugin.Capabilities.RequestTranslator == nil {
 			continue
 		}
@@ -2133,7 +2138,7 @@ func (h *Host) NormalizeResponseBefore(
 	stream bool,
 ) []byte {
 	current := bytes.Clone(body)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		normalizer := record.plugin.Capabilities.ResponseBeforeTranslator
 		if h.isPluginFused(record.id) || normalizer == nil {
 			continue
@@ -2155,7 +2160,7 @@ func (h *Host) TranslateResponse(
 	originalRequestRawJSON, requestRawJSON, body []byte,
 	stream bool,
 ) ([]byte, bool) {
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		translator := record.plugin.Capabilities.ResponseTranslator
 		if h.isPluginFused(record.id) || translator == nil {
 			continue
@@ -2177,7 +2182,7 @@ func (h *Host) NormalizeResponseAfter(
 	stream bool,
 ) []byte {
 	current := bytes.Clone(body)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		normalizer := record.plugin.Capabilities.ResponseAfterTranslator
 		if h.isPluginFused(record.id) || normalizer == nil {
 			continue

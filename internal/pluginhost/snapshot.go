@@ -9,6 +9,8 @@ import (
 
 type capabilityRecord struct {
 	id       string
+	path     string
+	version  string
 	priority int
 	meta     pluginapi.Metadata
 	plugin   pluginapi.Plugin
@@ -39,26 +41,56 @@ func emptySnapshot() *Snapshot {
 	return &Snapshot{}
 }
 
-// RegisteredPlugins returns a stable copy of plugin metadata in the current runtime snapshot.
-func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
-	snap := h.Snapshot()
+func (h *Host) activeRecords() []capabilityRecord {
+	return h.activeRecordsFromSnapshot(h.Snapshot())
+}
+
+func (h *Host) activeRecordsFromSnapshot(snap *Snapshot) []capabilityRecord {
 	if snap == nil || len(snap.records) == 0 {
 		return nil
 	}
-	menusByPlugin := h.registeredPluginMenus()
-	out := make([]RegisteredPluginInfo, 0, len(snap.records))
+	out := make([]capabilityRecord, 0, len(snap.records))
 	for _, record := range snap.records {
+		if h.recordCurrent(record) {
+			out = append(out, record)
+		}
+	}
+	return out
+}
+
+// RegisteredPlugins returns a stable copy of plugin metadata in the current runtime snapshot.
+func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
+	records := h.activeRecords()
+	if len(records) == 0 {
+		return nil
+	}
+	menusByPlugin := h.registeredPluginMenus()
+	out := make([]RegisteredPluginInfo, 0, len(records))
+	for _, record := range records {
 		out = append(
 			out, RegisteredPluginInfo{
 				ID:            record.id,
 				Priority:      record.priority,
-				Metadata:      record.meta,
+				Metadata:      clonePluginMetadata(record.meta),
 				SupportsOAuth: record.plugin.Capabilities.AuthProvider != nil,
 				Menus:         menusByPlugin[record.id],
 			},
 		)
 	}
 	return out
+}
+
+func (h *Host) PluginRegistered(id string) bool {
+	id = strings.TrimSpace(id)
+	if h == nil || id == "" {
+		return false
+	}
+	for _, info := range h.RegisteredPlugins() {
+		if info.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Host) registeredPluginMenus() map[string][]RegisteredPluginMenu {
@@ -100,4 +132,24 @@ func sortRecords(records []capabilityRecord) {
 			return records[i].priority > records[j].priority
 		},
 	)
+}
+
+func clonePluginMetadata(meta pluginapi.Metadata) pluginapi.Metadata {
+	if len(meta.ConfigFields) == 0 {
+		return meta
+	}
+	meta.ConfigFields = cloneConfigFields(meta.ConfigFields)
+	return meta
+}
+
+func cloneConfigFields(fields []pluginapi.ConfigField) []pluginapi.ConfigField {
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]pluginapi.ConfigField, len(fields))
+	copy(out, fields)
+	for index := range out {
+		out[index].EnumValues = append([]string(nil), fields[index].EnumValues...)
+	}
+	return out
 }

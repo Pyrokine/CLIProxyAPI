@@ -37,7 +37,7 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 
 	nextRoutes := make(map[string]managementRouteRecord)
 	nextResources := make(map[string]resourceRouteRecord)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.ManagementAPI
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue

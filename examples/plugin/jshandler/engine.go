@@ -49,7 +49,9 @@ func (engine *jsEngine) initConsole() {
 		}
 		message := strings.Join(args, " ")
 		if errLog := engine.consoleLogger(message); errLog != nil {
-			defaultJSConsoleLogger(message)
+			if errFallback := defaultJSConsoleLogger(message); errFallback != nil {
+				log.Warnf("JS console fallback log failed: %v", errFallback)
+			}
 		}
 		return goja.Undefined()
 	}
@@ -104,12 +106,12 @@ func (engine *jsEngine) frozenStringArray(values []string) (goja.Value, error) {
 	array := engine.vm.NewArray(items...)
 	objectValue := engine.vm.Get("Object")
 	if objectValue == nil || goja.IsUndefined(objectValue) {
-		return nil, errors.New("Object constructor is unavailable")
+		return nil, errors.New("object constructor is unavailable")
 	}
 	freezeValue := objectValue.ToObject(engine.vm).Get("freeze")
 	freezeFunc, ok := goja.AssertFunction(freezeValue)
 	if !ok {
-		return nil, errors.New("Object.freeze is unavailable")
+		return nil, errors.New("object.freeze is unavailable")
 	}
 	if _, errFreeze := freezeFunc(goja.Undefined(), array); errFreeze != nil {
 		return nil, errFreeze

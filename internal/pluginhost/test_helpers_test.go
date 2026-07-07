@@ -34,6 +34,7 @@ func (l *testSymbolLoader) Open(file pluginFile, host *Host) (pluginClient, erro
 type testSymbolLookup struct {
 	plugin              *testPlugin
 	active              pluginapi.Plugin
+	shutdownCalls       int
 	registerOverride    func([]byte) pluginapi.Plugin
 	reconfigureOverride func([]byte) pluginapi.Plugin
 }
@@ -148,7 +149,9 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 	}
 }
 
-func (l *testSymbolLookup) Shutdown() {}
+func (l *testSymbolLookup) Shutdown() {
+	l.shutdownCalls++
+}
 
 func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, error) {
 	var req rpcLifecycleRequest
@@ -329,4 +332,17 @@ func makePluginDir(t *testing.T, ids ...string) string {
 		}
 	}
 	return root
+}
+
+func makePluginFile(t *testing.T, root string, id string) string {
+	t.Helper()
+	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
+	}
+	path := filepath.Join(archDir, id+pluginExtension(runtime.GOOS))
+	if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
+	}
+	return path
 }

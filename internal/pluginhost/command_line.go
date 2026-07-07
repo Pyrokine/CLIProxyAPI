@@ -28,7 +28,7 @@ func (h *Host) RegisterCommandLineFlags(ctx context.Context, flagSet *flag.FlagS
 		return
 	}
 
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.CommandLinePlugin
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
@@ -82,7 +82,8 @@ func (h *Host) registerCommandLineFlag(flagSet *flag.FlagSet, pluginID string, i
 	}
 	if flagSet.Lookup(name) != nil {
 		log.Warnf(
-			"pluginhost: plugin %s command-line flag %s conflicts with an existing flag and was skipped", pluginID, name,
+			"pluginhost: plugin %s command-line flag %s conflicts with an existing flag and was skipped", pluginID,
+			name,
 		)
 		return
 	}
@@ -266,7 +267,7 @@ func (h *Host) ExecuteCommandLine(
 
 	exitCode := 0
 	handled := false
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		plugin := record.plugin.Capabilities.CommandLinePlugin
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue

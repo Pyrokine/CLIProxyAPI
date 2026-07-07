@@ -13,6 +13,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/homeplugins"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/store"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -23,9 +24,12 @@ import (
 
 // storeResult holds the configuration and token store produced by initStoreAndConfig.
 type storeResult struct {
-	cfg            *config.Config
-	configFilePath string
-	tokenStore     coreauth.Store
+	cfg                  *config.Config
+	configFilePath       string
+	tokenStore           coreauth.Store
+	configLoadedFromHome bool
+	homeClient           *home.Client
+	homePluginSyncReport homeplugins.SyncReport
 }
 
 // initStoreAndConfig initializes the configuration file and token store backend based on
@@ -37,6 +41,7 @@ func initStoreAndConfig(
 	lookupEnv func(...string) (string, bool),
 	homeJWT string,
 	homeDisableClusterDiscovery bool,
+	pluginRuntime homeplugins.PluginRuntime,
 ) (*storeResult, error) {
 	writableBase := util.WritablePath()
 
@@ -121,14 +126,20 @@ func initStoreAndConfig(
 	}
 
 	var (
-		cfg            *config.Config
-		configFilePath string
-		tokenStore     coreauth.Store
-		err            error
+		cfg                  *config.Config
+		configFilePath       string
+		tokenStore           coreauth.Store
+		homeClient           *home.Client
+		homePluginSyncReport homeplugins.SyncReport
+		configLoadedFromHome bool
+		err                  error
 	)
 
 	if strings.TrimSpace(homeJWT) != "" {
-		cfg, configFilePath, tokenStore, err = initHomeConfig(wd, configPath, homeJWT, homeDisableClusterDiscovery)
+		configLoadedFromHome = true
+		cfg, configFilePath, tokenStore, homeClient, homePluginSyncReport, err = initHomeConfig(
+			wd, configPath, homeJWT, homeDisableClusterDiscovery, pluginRuntime,
+		)
 	} else if usePostgresStore {
 		cfg, configFilePath, tokenStore, err = initPostgresStore(
 			wd, pgStoreDSN, pgStoreSchema, pgStoreLocalPath, isCloudDeploy,
@@ -183,41 +194,55 @@ func initStoreAndConfig(
 	}
 
 	return &storeResult{
-		cfg:            cfg,
-		configFilePath: configFilePath,
-		tokenStore:     tokenStore,
+		cfg:                  cfg,
+		configFilePath:       configFilePath,
+		tokenStore:           tokenStore,
+		configLoadedFromHome: configLoadedFromHome,
+		homeClient:           homeClient,
+		homePluginSyncReport: homePluginSyncReport,
 	}, nil
 }
 
-func initHomeConfig(wd, configPath, homeJWT string, disableClusterDiscovery bool) (
+func initHomeConfig(
+	wd string,
+	configPath string,
+	homeJWT string,
+	disableClusterDiscovery bool,
+	pluginRuntime homeplugins.PluginRuntime,
+) (
 	*config.Config,
 	string,
 	coreauth.Store,
+	*home.Client,
+	homeplugins.SyncReport,
 	error,
 ) {
+	var emptyReport homeplugins.SyncReport
 	ctxHome, cancelHome := context.WithTimeout(context.Background(), 30*time.Second)
 	homeCfg, errHomeCfg := home.ConfigFromJWT(ctxHome, homeJWT)
 	cancelHome()
 	if errHomeCfg != nil {
-		return nil, "", nil, fmt.Errorf("invalid -home-jwt: %w", errHomeCfg)
+		return nil, "", nil, nil, emptyReport, fmt.Errorf("invalid -home-jwt: %w", errHomeCfg)
 	}
 	if disableClusterDiscovery {
 		homeCfg.DisableClusterDiscovery = true
 	}
 
 	homeClient := home.New(homeCfg)
-	defer homeClient.Close()
-
 	ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
 	raw, errGetConfig := homeClient.GetConfig(ctxHomeConfig)
 	cancelHomeConfig()
 	if errGetConfig != nil {
-		return nil, "", nil, fmt.Errorf("failed to fetch config from home: %w", errGetConfig)
+		homeClient.Close()
+		return nil, "", nil, nil, emptyReport, fmt.Errorf("failed to fetch config from home: %w", errGetConfig)
 	}
 
 	parsed, errParseConfig := config.ParseConfigBytes(raw)
 	if errParseConfig != nil {
-		return nil, "", nil, fmt.Errorf("failed to parse config payload from home: %w", errParseConfig)
+		homeClient.Close()
+		return nil, "", nil, nil, emptyReport, fmt.Errorf(
+			"failed to parse config payload from home: %w", errParseConfig,
+		)
 	}
 	if parsed == nil {
 		parsed = &config.Config{}
@@ -226,12 +251,26 @@ func initHomeConfig(wd, configPath, homeJWT string, disableClusterDiscovery bool
 	parsed.Port = 8317
 	config.ApplyHomeRuntimeConfig(parsed)
 
+	ctxHomePlugins, cancelHomePlugins := context.WithTimeout(context.Background(), 30*time.Second)
+	homePluginSyncReport, errHomePlugins := homeplugins.SyncWithReport(ctxHomePlugins, parsed, pluginRuntime)
+	cancelHomePlugins()
+	errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
+	if errReportPlugins != nil {
+		log.Warnf("failed to report home plugin sync status: %v", errReportPlugins)
+	}
+	if errHomePlugins != nil {
+		homeClient.Close()
+		return nil, "", nil, nil, homePluginSyncReport, fmt.Errorf(
+			"failed to fetch plugins from home: %w", errHomePlugins,
+		)
+	}
+
 	configFilePath := strings.TrimSpace(configPath)
 	if configFilePath == "" {
 		configFilePath = filepath.Join(wd, "config.yaml")
 	}
 
-	return parsed, configFilePath, sdkAuth.NewFileTokenStore(), nil
+	return parsed, configFilePath, sdkAuth.NewFileTokenStore(), homeClient, homePluginSyncReport, nil
 }
 
 func initPostgresStore(wd, dsn, schema, localPath string, isCloudDeploy bool) (

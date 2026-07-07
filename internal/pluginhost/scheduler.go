@@ -42,7 +42,7 @@ func (h *Host) schedulerRecord() *capabilityRecord {
 	if h == nil {
 		return nil
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if h.isPluginFused(record.id) || record.plugin.Capabilities.Scheduler == nil {
 			continue
 		}

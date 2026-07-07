@@ -110,7 +110,7 @@ func (h *Host) AuthProviderIdentifiers() []string {
 		return nil
 	}
 	out := make([]string, 0)
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		provider := record.plugin.Capabilities.AuthProvider
 		if provider == nil || h.isPluginFused(record.id) {
 			continue
@@ -132,7 +132,7 @@ func (h *Host) authProviderRecord(provider string) *capabilityRecord {
 	if h == nil || provider == "" {
 		return nil
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		authProvider := record.plugin.Capabilities.AuthProvider
 		if authProvider == nil || h.isPluginFused(record.id) {
 			continue
@@ -174,7 +174,7 @@ func (h *Host) ParseAuth(ctx context.Context, req pluginapi.AuthParseRequest) (*
 		}
 		return h.callParseAuth(ctx, *record, req)
 	}
-	for _, record := range h.Snapshot().records {
+	for _, record := range h.activeRecords() {
 		if record.plugin.Capabilities.AuthProvider == nil || h.isPluginFused(record.id) {
 			continue
 		}
@@ -466,9 +466,7 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	if metadata == nil {
 		metadata = make(map[string]any)
 	}
-	if provider != "" {
-		metadata["type"] = provider
-	}
+	metadata["type"] = provider
 	attributes := cloneStringMap(data.Attributes)
 	if attributes == nil {
 		attributes = make(map[string]string)

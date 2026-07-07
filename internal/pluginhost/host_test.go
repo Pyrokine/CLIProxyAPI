@@ -644,6 +644,80 @@ func TestHostApplyConfig_PanicFusesPluginForProcessLifetime(t *testing.T) {
 	}
 }
 
+func TestHostUnloadPluginRemovesRuntimeStateAndShutsDownClient(t *testing.T) {
+	loader := newTestSymbolLoader()
+	plugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	lookup := newTestSymbolLookup(plugin)
+	loader.lookups["alpha"] = lookup
+	h := NewForTest(loader)
+	dir := makePluginDir(t, "alpha")
+
+	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: dir}})
+	if !h.PluginLoaded("alpha") {
+		t.Fatal("PluginLoaded(alpha) = false, want true")
+	}
+	if len(h.activeRecords()) != 1 {
+		t.Fatalf("activeRecords() len = %d, want 1", len(h.activeRecords()))
+	}
+
+	if !h.UnloadPlugin("alpha") {
+		t.Fatal("UnloadPlugin(alpha) = false, want true")
+	}
+	if h.PluginLoaded("alpha") || h.PluginBusy("alpha") {
+		t.Fatal("plugin remained loaded or busy after unload")
+	}
+	if len(h.activeRecords()) != 0 {
+		t.Fatalf("activeRecords() len = %d, want 0", len(h.activeRecords()))
+	}
+	if lookup.shutdownCalls != 1 {
+		t.Fatalf("Shutdown calls = %d, want 1", lookup.shutdownCalls)
+	}
+}
+
+func TestHostApplyConfigHotReloadsChangedVersionAndShutsDownOldClient(t *testing.T) {
+	loader := newTestSymbolLoader()
+	oldPlugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	newPlugin := &testPlugin{
+		registerResult:    validTestPlugin("alpha"),
+		reconfigureResult: validTestPlugin("alpha"),
+	}
+	oldLookup := newTestSymbolLookup(oldPlugin)
+	newLookup := newTestSymbolLookup(newPlugin)
+	loader.lookups["alpha"] = oldLookup
+	h := NewForTest(loader)
+	dir := makePluginDir(t, "alpha-v1.0.0")
+
+	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: dir}})
+	loader.lookups["alpha"] = newLookup
+	makePluginFile(t, dir, "alpha-v1.1.0")
+	h.ApplyConfig(context.Background(), &config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: dir}})
+
+	if oldPlugin.registerCalls != 1 || newPlugin.registerCalls != 1 {
+		t.Fatalf("register calls old=%d new=%d, want 1/1", oldPlugin.registerCalls, newPlugin.registerCalls)
+	}
+	if oldPlugin.reconfigureCalls != 0 {
+		t.Fatalf("old reconfigure calls = %d, want 0", oldPlugin.reconfigureCalls)
+	}
+	if !h.PluginBusy("alpha") {
+		t.Fatal("PluginBusy(alpha) = false, want true while active client exists")
+	}
+	if oldLookup.shutdownCalls != 1 {
+		t.Fatalf("old Shutdown calls = %d after hot reload, want 1", oldLookup.shutdownCalls)
+	}
+	if !h.UnloadPlugin("alpha") {
+		t.Fatal("UnloadPlugin(alpha) = false, want true")
+	}
+	if oldLookup.shutdownCalls != 1 || newLookup.shutdownCalls != 1 {
+		t.Fatalf("shutdown calls old=%d new=%d, want 1/1", oldLookup.shutdownCalls, newLookup.shutdownCalls)
+	}
+}
+
 func TestSortRecordsPriorityDescendingAndIDTieBreak(t *testing.T) {
 	records := []capabilityRecord{
 		{id: "charlie", priority: 1},

@@ -61,10 +61,11 @@ func TestPluginExtensionForPlatform(t *testing.T) {
 
 func TestPluginIDFromDynamicLibraryPath(t *testing.T) {
 	cases := map[string]string{
-		"plugins/example.so":     "example",
-		"plugins/example.dylib":  "example",
-		"plugins/example.dll":    "example",
-		"plugins/example.custom": "example.custom",
+		"plugins/example.so":        "example",
+		"plugins/example.dylib":     "example",
+		"plugins/example.dll":       "example",
+		"plugins/example-v1.2.3.so": "example",
+		"plugins/example.custom":    "example.custom",
 	}
 
 	for path, want := range cases {
@@ -143,6 +144,63 @@ func TestSelectPluginFilesPrefersPlatformDirOverRootFallback(t *testing.T) {
 	}
 	if files[0] != (pluginFile{ID: "alpha", Path: platformPath}) {
 		t.Fatalf("selectPluginFiles()[0] = %v, want platform plugin %s", files[0], platformPath)
+	}
+}
+
+func TestSelectPluginFilesUsesVersionedPluginIDAndPrefersNewestVersion(t *testing.T) {
+	root := t.TempDir()
+	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
+	}
+
+	extension := pluginExtension(runtime.GOOS)
+	paths := []string{
+		filepath.Join(archDir, "sample-v1.2.0"+extension),
+		filepath.Join(archDir, "sample-v1.10.0"+extension),
+		filepath.Join(archDir, "sample-v1.9.9"+extension),
+	}
+	for _, path := range paths {
+		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
+		}
+	}
+
+	files, errSelect := selectPluginFiles(root)
+	if errSelect != nil {
+		t.Fatalf("selectPluginFiles() error = %v", errSelect)
+	}
+	wantPath := filepath.Join(archDir, "sample-v1.10.0"+extension)
+	if len(files) != 1 {
+		t.Fatalf("selectPluginFiles() = %v, want exactly one sample plugin", files)
+	}
+	if files[0] != (pluginFile{ID: "sample", Path: wantPath, Version: "1.10.0"}) {
+		t.Fatalf("selectPluginFiles()[0] = %v, want newest version %s", files[0], wantPath)
+	}
+}
+
+func TestSelectPluginFilesPrefersDesiredVersion(t *testing.T) {
+	root := t.TempDir()
+	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
+	}
+
+	extension := pluginExtension(runtime.GOOS)
+	for _, name := range []string{"sample-v1.2.0", "sample-v1.10.0"} {
+		path := filepath.Join(archDir, name+extension)
+		if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
+			t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
+		}
+	}
+
+	files, errSelect := selectPluginFiles(root, map[string]string{"sample": "1.2.0"})
+	if errSelect != nil {
+		t.Fatalf("selectPluginFiles() error = %v", errSelect)
+	}
+	wantPath := filepath.Join(archDir, "sample-v1.2.0"+extension)
+	if len(files) != 1 || files[0] != (pluginFile{ID: "sample", Path: wantPath, Version: "1.2.0"}) {
+		t.Fatalf("selectPluginFiles() = %v, want desired version %s", files, wantPath)
 	}
 }
 
