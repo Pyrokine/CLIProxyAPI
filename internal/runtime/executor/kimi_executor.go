@@ -95,8 +95,8 @@ func (e *KimiExecutor) prepareKimiRequest(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := bytes.Clone(originalPayloadSource)
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, isStream)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), isStream)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, isStream)
+	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, bytes.Clone(req.Payload), isStream)
 
 	// Strip kimi- prefix for upstream API
 	upstreamModel := stripKimiPrefix(baseModel)
@@ -246,7 +246,10 @@ func (e *KimiExecutor) ExecuteStream(
 	to := prepared.to
 	go func() {
 		defer close(out)
+		var streamUsage streamUsageBuffer
 		defer func() {
+			streamUsage.publish(ctx, reporter)
+			reporter.ensurePublished(ctx)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("kimi executor: close response body error: %v", errClose)
 			}
@@ -257,30 +260,37 @@ func (e *KimiExecutor) ExecuteStream(
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
-			}
+			streamUsage.observeOpenAIStream(line)
 			chunks := sdktranslator.TranslateStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
 			for i := range chunks {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+						recordAPIResponseError(ctx, e.cfg, errStream)
+						reporter.publishFailure(ctx, errStream)
+					}
 					return
 				}
 			}
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			recordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.publishFailure(ctx, errScan)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+			return
 		}
 		doneChunks := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
 		for i := range doneChunks {
 			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}) {
+				if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+					recordAPIResponseError(ctx, e.cfg, errStream)
+					reporter.publishFailure(ctx, errStream)
+				}
 				return
 			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
-			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil

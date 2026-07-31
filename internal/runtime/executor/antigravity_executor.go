@@ -646,8 +646,8 @@ func (e *AntigravityExecutor) Execute(
 		return resp, errValidate
 	}
 	req.Payload = originalPayload
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, false)
+	translated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -739,8 +739,8 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 		return resp, errValidate
 	}
 	req.Payload = originalPayload
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, true)
+	translated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1056,8 +1056,8 @@ func (e *AntigravityExecutor) ExecuteStream(
 		return nil, errValidate
 	}
 	req.Payload = originalPayload
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, true)
+	translated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, true)
 
 	token, updatedAuth, errToken := e.ensureAccessToken(ctx, auth)
 	if errToken != nil {
@@ -1250,7 +1250,7 @@ func (e *AntigravityExecutor) CountTokens(
 	req.Payload = originalPayload
 
 	// Prepare payload once (doesn't depend on baseURL)
-	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	payload := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
 
 	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {

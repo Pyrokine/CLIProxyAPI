@@ -136,7 +136,7 @@ func (e *AIStudioExecutor) prepareRequest(
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
 
-	translatedReq, body, err := e.translateRequest(req, opts, stream)
+	translatedReq, body, err := e.translateRequest(ctx, req, opts, stream)
 	if err != nil {
 		return nil, err
 	}
@@ -354,7 +354,7 @@ func (e *AIStudioExecutor) CountTokens(
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
-	_, body, err := e.translateRequest(req, opts, false)
+	_, body, err := e.translateRequest(ctx, req, opts, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
@@ -410,6 +410,7 @@ type translatedPayload struct {
 }
 
 func (e *AIStudioExecutor) translateRequest(
+	ctx context.Context,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 	stream bool,
@@ -423,8 +424,8 @@ func (e *AIStudioExecutor) translateRequest(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, stream)
-	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, stream)
+	payload := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, stream)
 	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, translatedPayload{}, err

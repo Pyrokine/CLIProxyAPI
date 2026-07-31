@@ -336,8 +336,8 @@ func (e *QwenExecutor) prepareQwenRequest(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, isStream)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, isStream)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, isStream)
+	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, isStream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	var err error
@@ -508,7 +508,10 @@ func (e *QwenExecutor) ExecuteStream(
 	to := prepared.to
 	go func() {
 		defer close(out)
+		var streamUsage streamUsageBuffer
 		defer func() {
+			streamUsage.publish(ctx, reporter)
+			reporter.ensurePublished(ctx)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("qwen executor: close response body error: %v", errClose)
 			}
@@ -519,28 +522,35 @@ func (e *QwenExecutor) ExecuteStream(
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
-			}
+			streamUsage.observeOpenAIStream(line)
 			chunks := sdktranslator.TranslateStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
 			if !sendStreamPayloads(ctx, out, chunks) {
+				if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+					recordAPIResponseError(ctx, e.cfg, errStream)
+					reporter.publishFailure(ctx, errStream)
+				}
 				return
 			}
+		}
+		if errScan := scanner.Err(); errScan != nil {
+			recordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.publishFailure(ctx, errScan)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+			return
 		}
 		doneChunks := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
 		for i := range doneChunks {
 			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}) {
+				if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+					recordAPIResponseError(ctx, e.cfg, errStream)
+					reporter.publishFailure(ctx, errStream)
+				}
 				return
 			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
-			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -556,7 +566,7 @@ func (e *QwenExecutor) CountTokens(
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
 
 	modelName := gjson.GetBytes(body, "model").String()
 	if strings.TrimSpace(modelName) == "" {

@@ -203,6 +203,7 @@ func (e *GeminiVertexExecutor) Identifier() string { return "vertex" }
 // prepareVertexGeminiBody translates and configures the request payload for Vertex AI Gemini endpoints.
 // This is the shared translation logic used by all execute* and executeStream* methods.
 func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
+	ctx context.Context,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 	baseModel string,
@@ -216,8 +217,8 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, isStream)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, isStream)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, isStream)
+	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, isStream)
 
 	var err error
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -395,7 +396,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 		to = sdktranslator.FromString("gemini")
 	} else {
 		// Standard Gemini translation flow
-		prepared, errPrep := e.prepareVertexGeminiBody(req, opts, baseModel, false)
+		prepared, errPrep := e.prepareVertexGeminiBody(ctx, req, opts, baseModel, false)
 		if errPrep != nil {
 			return resp, errPrep
 		}
@@ -492,7 +493,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	prepared, errPrep := e.prepareVertexGeminiBody(req, opts, baseModel, false)
+	prepared, errPrep := e.prepareVertexGeminiBody(ctx, req, opts, baseModel, false)
 	if errPrep != nil {
 		return resp, errPrep
 	}
@@ -579,7 +580,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	prepared, errPrep := e.prepareVertexGeminiBody(req, opts, baseModel, true)
+	prepared, errPrep := e.prepareVertexGeminiBody(ctx, req, opts, baseModel, true)
 	if errPrep != nil {
 		return nil, errPrep
 	}
@@ -635,7 +636,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 	reporter := newUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.trackFailure(ctx, &err)
 
-	prepared, errPrep := e.prepareVertexGeminiBody(req, opts, baseModel, true)
+	prepared, errPrep := e.prepareVertexGeminiBody(ctx, req, opts, baseModel, true)
 	if errPrep != nil {
 		return nil, errPrep
 	}
@@ -764,7 +765,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 
-	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translatedReq := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
 
 	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -846,7 +847,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 
-	translatedReq := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translatedReq := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
 
 	translatedReq, err := thinking.ApplyThinking(translatedReq, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {

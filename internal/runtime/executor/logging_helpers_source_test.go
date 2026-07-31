@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"os"
@@ -61,8 +62,8 @@ func TestRecordAPIRequestSourceFailureKeepsPreviousRequests(t *testing.T) {
 	if !exists {
 		t.Fatal("api request fallback was not aggregated")
 	}
-	got, _ := value.([]byte)
-	gotText := string(got)
+	got, _ := value.(*logging.BoundedLogBuffer)
+	gotText := got.String()
 	firstIndex := strings.Index(gotText, "https://upstream.example/first")
 	secondIndex := strings.Index(gotText, "https://upstream.example/second")
 	if firstIndex < 0 || secondIndex < 0 {
@@ -87,10 +88,9 @@ func TestWriteAttemptResponseFallbackDisablesBrokenSource(t *testing.T) {
 		t.Fatalf("cleanup source: %v", errCleanup)
 	}
 	ginCtx.Set(logging.APIResponseSourceContextKey, source)
-	attempt := &upstreamAttempt{index: 1, responseSource: source, response: &strings.Builder{}}
+	attempt := &upstreamAttempt{index: 1, responseSource: source}
 
 	writeAttemptResponse(ginCtx, attempt, []byte("Body:\nhello"))
-	updateAggregatedResponseIfMemoryBacked(ginCtx, []*upstreamAttempt{attempt})
 
 	if attempt.responseSource != nil {
 		t.Fatal("response source should be disabled after write failure")
@@ -102,9 +102,164 @@ func TestWriteAttemptResponseFallbackDisablesBrokenSource(t *testing.T) {
 	if !exists {
 		t.Fatal("api response fallback was not aggregated")
 	}
-	got, _ := value.([]byte)
-	if !strings.Contains(string(got), "Body:\nhello") {
-		t.Fatalf("api response fallback = %q, want body payload", string(got))
+	got, _ := value.(*logging.BoundedLogBuffer)
+	if !strings.Contains(got.String(), "Body:\nhello") {
+		t.Fatalf("api response fallback = %q, want body payload", got.String())
+	}
+}
+
+func TestMoveFileBodySourceToFallbackRetainsUnreadablePrefix(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx := &gin.Context{}
+	source, errSource := logging.NewFileBodySourceInDir(t.TempDir(), "unreadable-prefix")
+	if errSource != nil {
+		t.Fatalf("NewFileBodySourceInDir: %v", errSource)
+	}
+	if errAppend := source.AppendBytes([]byte("confirmed-prefix")); errAppend != nil {
+		t.Fatalf("AppendBytes: %v", errAppend)
+	}
+	paths := source.Paths()
+	if len(paths) != 1 {
+		t.Fatalf("source paths = %v, want one path", paths)
+	}
+	partPath := paths[0]
+	if errRemove := os.Remove(partPath); errRemove != nil {
+		t.Fatalf("remove source part: %v", errRemove)
+	}
+	if errMkdir := os.Mkdir(partPath, 0o700); errMkdir != nil {
+		t.Fatalf("create source part directory: %v", errMkdir)
+	}
+	nestedPath := filepath.Join(partPath, "nested")
+	if errWrite := os.WriteFile(nestedPath, []byte("force read failure"), 0o600); errWrite != nil {
+		t.Fatalf("write nested file: %v", errWrite)
+	}
+	ginCtx.Set(logging.APIResponseSourceContextKey, source)
+	fallback := logging.NewBoundedLogBuffer()
+
+	moved := moveFileBodySourceToFallback(
+		ginCtx,
+		logging.APIResponseSourceContextKey,
+		apiResponseSourceFailedKey,
+		source,
+		fallback,
+	)
+	if moved {
+		t.Fatal("unreadable source was detached")
+	}
+	if !fileBodySourceFailed(ginCtx, apiResponseSourceFailedKey) {
+		t.Fatal("source failure state was not retained")
+	}
+	if sourceAfter := apiResponseSourceOrNil(ginCtx); sourceAfter != source {
+		t.Fatal("source ownership was not retained")
+	}
+	if fallback.Len() != 0 {
+		t.Fatalf("fallback contains unconfirmed prefix: %q", fallback.String())
+	}
+
+	if errRemove := os.Remove(nestedPath); errRemove != nil {
+		t.Fatalf("remove nested file: %v", errRemove)
+	}
+	if errRemove := os.Remove(partPath); errRemove != nil {
+		t.Fatalf("remove source part directory: %v", errRemove)
+	}
+	if errWrite := os.WriteFile(partPath, []byte("confirmed-prefix"), 0o600); errWrite != nil {
+		t.Fatalf("restore source part: %v", errWrite)
+	}
+	got, errBytes := source.Bytes()
+	if errBytes != nil {
+		t.Fatalf("Bytes after restore: %v", errBytes)
+	}
+	if string(got) != "confirmed-prefix" {
+		t.Fatalf("restored source = %q, want confirmed prefix", got)
+	}
+	if errCleanup := source.Cleanup(); errCleanup != nil {
+		t.Fatalf("Cleanup: %v", errCleanup)
+	}
+}
+
+func TestWriteAttemptResponseUsesBoundedFallbackBuffer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx := &gin.Context{}
+	attempt := &upstreamAttempt{index: 1}
+	writeAttemptResponse(ginCtx, attempt, []byte("first"))
+	value, exists := ginCtx.Get(apiResponseKey)
+	if !exists {
+		t.Fatal("missing response fallback buffer")
+	}
+	buffer, ok := value.(*logging.BoundedLogBuffer)
+	if !ok || buffer == nil {
+		t.Fatalf("response fallback type = %T", value)
+	}
+	writeAttemptResponse(ginCtx, attempt, bytes.Repeat([]byte("x"), 9<<20))
+	valueAfter, _ := ginCtx.Get(apiResponseKey)
+	if valueAfter != buffer {
+		t.Fatal("response fallback buffer was rebuilt")
+	}
+	if !buffer.Truncated() {
+		t.Fatal("oversized response fallback was not truncated")
+	}
+}
+
+func TestAppendAPIWebsocketTimelineUsesBoundedFallbackBuffer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx := &gin.Context{}
+	appendAPIWebsocketTimeline(ginCtx, bytes.Repeat([]byte("x"), 9<<20))
+
+	value, exists := ginCtx.Get(apiWebsocketTimelineKey)
+	if !exists {
+		t.Fatal("missing API websocket fallback buffer")
+	}
+	buffer, ok := value.(*logging.BoundedLogBuffer)
+	if !ok || buffer == nil || !buffer.Truncated() {
+		t.Fatalf("API websocket fallback = %T, truncated = %t", value, ok && buffer.Truncated())
+	}
+}
+
+func TestDisableFileBodySourceRetainsFailedCleanupOwner(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx := &gin.Context{}
+	source, errSource := logging.NewFileBodySourceInDir(t.TempDir(), "cleanup-owner")
+	if errSource != nil {
+		t.Fatalf("NewFileBodySourceInDir: %v", errSource)
+	}
+	if errAppend := source.AppendBytes([]byte("source payload")); errAppend != nil {
+		t.Fatalf("AppendBytes: %v", errAppend)
+	}
+	paths := source.Paths()
+	if len(paths) != 1 {
+		t.Fatalf("source paths = %v, want one path", paths)
+	}
+	partPath := paths[0]
+	sourceDir := filepath.Dir(partPath)
+	if errRemove := os.Remove(partPath); errRemove != nil {
+		t.Fatalf("remove source part: %v", errRemove)
+	}
+	if errMkdir := os.Mkdir(partPath, 0o700); errMkdir != nil {
+		t.Fatalf("create non-empty part directory: %v", errMkdir)
+	}
+	nestedPath := filepath.Join(partPath, "nested")
+	if errWrite := os.WriteFile(nestedPath, []byte("keep directory non-empty"), 0o600); errWrite != nil {
+		t.Fatalf("write nested file: %v", errWrite)
+	}
+	ginCtx.Set(logging.APIRequestSourceContextKey, source)
+	queue := &logging.FileBodySourceCleanupQueue{}
+	ginCtx.Set(logging.FileBodySourceCleanupQueueContextKey, queue)
+
+	disableFileBodySource(ginCtx, logging.APIRequestSourceContextKey, source)
+	if sourceAfter, ok := apiRequestSource(ginCtx); ok || sourceAfter != nil {
+		t.Fatal("source should be disabled after cleanup failure")
+	}
+	if errRemove := os.Remove(nestedPath); errRemove != nil {
+		t.Fatalf("remove nested file: %v", errRemove)
+	}
+	if errRemove := os.Remove(partPath); errRemove != nil {
+		t.Fatalf("remove part directory: %v", errRemove)
+	}
+	if errCleanup := queue.Cleanup(); errCleanup != nil {
+		t.Fatalf("retry cleanup queue: %v", errCleanup)
+	}
+	if _, errStat := os.Stat(sourceDir); !os.IsNotExist(errStat) {
+		t.Fatalf("source directory %q still exists, stat error = %v", sourceDir, errStat)
 	}
 }
 
@@ -140,8 +295,8 @@ func TestAppendAPIWebsocketTimelineSourceFailureKeepsOrder(t *testing.T) {
 	if !exists {
 		t.Fatal("api websocket timeline fallback was not aggregated")
 	}
-	got, _ := value.([]byte)
-	gotText := string(got)
+	got, _ := value.(*logging.BoundedLogBuffer)
+	gotText := got.String()
 	firstIndex := strings.Index(gotText, "event-one")
 	secondIndex := strings.Index(gotText, "event-two")
 	if firstIndex < 0 || secondIndex < 0 {

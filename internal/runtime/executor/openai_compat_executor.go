@@ -118,8 +118,8 @@ func (e *OpenAICompatExecutor) Execute(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, opts.Stream)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, opts.Stream)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, opts.Stream)
+	translated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, opts.Stream)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel,
@@ -303,8 +303,8 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, true)
+	translated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, true)
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel,
@@ -362,7 +362,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		var streamUsage streamUsageBuffer
 		defer func() {
+			streamUsage.publish(ctx, reporter)
+			reporter.ensurePublished(ctx)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
@@ -373,9 +376,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
-			}
+			streamUsage.observeOpenAIStream(line)
 			trimmedLine := bytes.TrimSpace(line)
 			if len(trimmedLine) == 0 {
 				continue
@@ -389,7 +390,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
 					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
 					recordAPIResponseError(ctx, e.cfg, streamErr)
-					reporter.publishFailure(ctx)
+					reporter.publishFailure(ctx, streamErr)
 					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: streamErr})
 					return
 				}
@@ -402,17 +403,19 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 			)
 			for i := range chunks {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+						recordAPIResponseError(ctx, e.cfg, errStream)
+						reporter.publishFailure(ctx, errStream)
+					}
 					return
 				}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
+			reporter.publishFailure(ctx, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 		}
-		// Ensure we record the request if no usage chunk was ever seen
-		reporter.ensurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -494,26 +497,32 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		var streamUsage streamUsageBuffer
 		defer func() {
+			streamUsage.flushOpenAIStream()
+			streamUsage.publish(ctx, reporter)
+			reporter.ensurePublished(ctx)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
-			reporter.ensurePublished(ctx)
 		}()
 		buffer := make([]byte, 32*1024)
 		for {
 			n, errRead := httpResp.Body.Read(buffer)
+			if errRead != nil && errRead != io.EOF {
+				recordAPIResponseError(ctx, e.cfg, errRead)
+				reporter.publishFailure(ctx, errRead)
+			}
 			if n > 0 {
 				chunk := bytes.Clone(buffer[:n])
 				appendAPIResponseChunk(ctx, e.cfg, chunk)
+				streamUsage.observeOpenAIStreamChunk(chunk)
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunk}) {
 					return
 				}
 			}
 			if errRead != nil {
 				if errRead != io.EOF {
-					recordAPIResponseError(ctx, e.cfg, errRead)
-					reporter.publishFailure(ctx, errRead)
 					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errRead})
 				}
 				return
@@ -533,7 +542,7 @@ func (e *OpenAICompatExecutor) CountTokens(
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+	translated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
 
 	modelForCounting := baseModel
 

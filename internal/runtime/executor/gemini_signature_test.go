@@ -94,6 +94,7 @@ func TestAIStudioTranslateRequestSanitizesThoughtSignatures(t *testing.T) {
 	executor := NewAIStudioExecutor(&config.Config{}, "aistudio", nil)
 
 	translated, _, err := executor.translateRequest(
+		context.Background(),
 		cliproxyexecutor.Request{Model: "gemini-3-pro", Payload: payload},
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("gemini")},
 		false,
@@ -120,6 +121,7 @@ func TestPrepareVertexGeminiBodySanitizesThoughtSignatures(t *testing.T) {
 	executor := NewGeminiVertexExecutor(&config.Config{})
 
 	prepared, err := executor.prepareVertexGeminiBody(
+		context.Background(),
 		cliproxyexecutor.Request{Model: "gemini-3-pro", Payload: payload},
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("gemini")},
 		"gemini-3-pro",

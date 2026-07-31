@@ -12,6 +12,7 @@ type SharedCredential struct {
 	email      string
 	metadata   map[string]any
 	projectIDs []string
+	revision   uint64
 	mu         sync.RWMutex
 }
 
@@ -59,6 +60,61 @@ func (s *SharedCredential) MetadataSnapshot() map[string]any {
 	return cloneMap(s.metadata)
 }
 
+type MetadataRefreshCommit struct {
+	owner            *SharedCredential
+	expectedRevision uint64
+	metadata         map[string]any
+}
+
+func (s *SharedCredential) StageMetadata(values map[string]any) (map[string]any, *MetadataRefreshCommit) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.RLock()
+	revision := s.revision
+	staged := cloneMap(s.metadata)
+	s.mu.RUnlock()
+	if staged == nil {
+		staged = make(map[string]any, len(values))
+	}
+	for key, value := range values {
+		if value == nil {
+			delete(staged, key)
+			continue
+		}
+		staged[key] = value
+	}
+	return cloneMap(staged), &MetadataRefreshCommit{
+		owner:            s,
+		expectedRevision: revision,
+		metadata:         staged,
+	}
+}
+
+func (c *MetadataRefreshCommit) Current() bool {
+	if c == nil || c.owner == nil {
+		return false
+	}
+	c.owner.mu.RLock()
+	current := c.owner.revision == c.expectedRevision
+	c.owner.mu.RUnlock()
+	return current
+}
+
+func (c *MetadataRefreshCommit) CommitRefresh(commit func() bool) bool {
+	if c == nil || c.owner == nil || commit == nil {
+		return false
+	}
+	c.owner.mu.Lock()
+	defer c.owner.mu.Unlock()
+	if c.owner.revision != c.expectedRevision || !commit() {
+		return false
+	}
+	c.owner.metadata = cloneMap(c.metadata)
+	c.owner.revision++
+	return true
+}
+
 // MergeMetadata merges the provided fields into the shared metadata and returns an updated copy.
 func (s *SharedCredential) MergeMetadata(values map[string]any) map[string]any {
 	if s == nil {
@@ -67,19 +123,11 @@ func (s *SharedCredential) MergeMetadata(values map[string]any) map[string]any {
 	if len(values) == 0 {
 		return s.MetadataSnapshot()
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.metadata == nil {
-		s.metadata = make(map[string]any, len(values))
+	staged, commit := s.StageMetadata(values)
+	if commit == nil || !commit.CommitRefresh(func() bool { return true }) {
+		return s.MetadataSnapshot()
 	}
-	for k, v := range values {
-		if v == nil {
-			delete(s.metadata, k)
-			continue
-		}
-		s.metadata[k] = v
-	}
-	return cloneMap(s.metadata)
+	return staged
 }
 
 // SetProjectIDs updates the stored project identifiers.
@@ -89,6 +137,7 @@ func (s *SharedCredential) SetProjectIDs(ids []string) {
 	}
 	s.mu.Lock()
 	s.projectIDs = cloneStrings(ids)
+	s.revision++
 	s.mu.Unlock()
 }
 

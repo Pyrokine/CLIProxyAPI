@@ -126,6 +126,52 @@ func TestCodexExecutorCompactNormalizesInstructions(t *testing.T) {
 	}
 }
 
+func TestCodexExecutorCompactDoesNotInjectImageToolOrReorderInput(t *testing.T) {
+	var captured []byte
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			captured = append([]byte(nil), body...)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp_1","output":[]}`))
+		}),
+	)
+	defer server.Close()
+
+	executor := &codexExecutor{cfg: &config.Config{}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL}}
+	req := cliproxyexecutor.Request{
+		Model: "gpt-5.4",
+		Payload: []byte(`{
+			"model":"gpt-5.4",
+			"input":[
+				{"type":"message","role":"user","content":"history"},
+				{"type":"compaction_trigger"}
+			]
+		}`),
+	}
+	opts := cliproxyexecutor.Options{
+		Alt: "responses/compact", SourceFormat: sdktranslator.FromString("openai-response"),
+	}
+
+	if _, err := executor.Execute(context.Background(), auth, req, opts); err != nil {
+		t.Fatalf("Execute compact error: %v", err)
+	}
+	if gjson.GetBytes(captured, "tools").Exists() {
+		t.Fatalf("compact request injected tools: %s", captured)
+	}
+	input := gjson.GetBytes(captured, "input").Array()
+	if len(input) != 2 {
+		t.Fatalf("compact input len = %d, want 2: %s", len(input), captured)
+	}
+	if input[0].Get("type").String() != "message" || input[1].Get("type").String() != "compaction_trigger" {
+		t.Fatalf("compact input order changed: %s", captured)
+	}
+}
+
 func TestCodexResponsesBodyDropsInvalidReasoningEncryptedContent(t *testing.T) {
 	payload := []byte(`{
 		"model":"gpt-5.3-codex",
@@ -137,7 +183,7 @@ func TestCodexResponsesBodyDropsInvalidReasoningEncryptedContent(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5.3-codex", Payload: payload}
 
 	prepared, err := codexResponsesBody(
-		context.Background(), &config.Config{}, "gpt-5.3-codex", req.Model, "codex",
+		context.Background(), &config.Config{}, nil, "gpt-5.3-codex", req.Model, "codex",
 		sdktranslator.FromString("openai-response"), cliproxyexecutor.Options{}, req, true,
 	)
 	if err != nil {
@@ -161,7 +207,7 @@ func TestCodexResponsesBodyNormalizesNullInstructions(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "gpt-5.3-codex", Payload: payload}
 
 	prepared, err := codexResponsesBody(
-		context.Background(), &config.Config{}, "gpt-5.3-codex", req.Model, "codex",
+		context.Background(), &config.Config{}, nil, "gpt-5.3-codex", req.Model, "codex",
 		sdktranslator.FromString("openai-response"), cliproxyexecutor.Options{}, req, true,
 	)
 	if err != nil {
@@ -171,6 +217,25 @@ func TestCodexResponsesBodyNormalizesNullInstructions(t *testing.T) {
 	instructions := gjson.GetBytes(prepared.Body, "instructions")
 	if !instructions.Exists() || instructions.Type != gjson.String || instructions.String() != "" {
 		t.Fatalf("instructions = %s, want empty string in %s", instructions.Raw, string(prepared.Body))
+	}
+}
+
+func TestCodexResponsesBodyResponsesLiteHeaderDoesNotInjectImageGenerationTool(t *testing.T) {
+	payload := []byte(`{"model":"gpt-5.6-sol","input":"hello"}`)
+	req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: payload}
+	headers := http.Header{}
+	headers.Set(codexResponsesLiteHeader, "true")
+
+	prepared, err := codexResponsesBody(
+		context.Background(), &config.Config{}, nil, "gpt-5.6-sol", req.Model, "codex",
+		sdktranslator.FromString("codex"), cliproxyexecutor.Options{Headers: headers}, req, true,
+	)
+	if err != nil {
+		t.Fatalf("codexResponsesBody error: %v", err)
+	}
+
+	if gjson.GetBytes(prepared.Body, "tools").Exists() {
+		t.Fatalf("expected responses-lite body without injected tools, got %s", string(prepared.Body))
 	}
 }
 
@@ -186,7 +251,7 @@ func TestCodexResponsesBodyPreservesValidReasoningEncryptedContent(t *testing.T)
 	req := cliproxyexecutor.Request{Model: "gpt-5.3-codex", Payload: payload}
 
 	prepared, err := codexResponsesBody(
-		context.Background(), &config.Config{}, "gpt-5.3-codex", req.Model, "codex",
+		context.Background(), &config.Config{}, nil, "gpt-5.3-codex", req.Model, "codex",
 		sdktranslator.FromString("openai-response"), cliproxyexecutor.Options{}, req, true,
 	)
 	if err != nil {
@@ -235,6 +300,27 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPromptCacheKey(t *tes
 	}
 	if gotSession := httpReq.Header.Get("Session_id"); gotSession != expectedKey {
 		t.Fatalf("Session_id = %q, want %q", gotSession, expectedKey)
+	}
+}
+
+func TestApplyModelHeaderOverridesUsesEmbeddedModelConfig(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("User-Agent", codexUserAgent)
+	headers.Set("Originator", codexOriginator)
+
+	applyModelHeaderOverrides(headers, "gpt-5.6-luna")
+
+	if got := headers.Get("User-Agent"); got != "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)" {
+		t.Fatalf("User-Agent = %q", got)
+	}
+	if got := headers.Get("Originator"); got != "codex-tui" {
+		t.Fatalf("Originator = %q, want codex-tui", got)
+	}
+	if got := headers.Get("Version"); got != "0.144.0" {
+		t.Fatalf("Version = %q, want 0.144.0", got)
+	}
+	if got := headers.Get("Session_id"); got == "" {
+		t.Fatal("Session_id is empty after Mac OS User-Agent override")
 	}
 }
 
@@ -620,5 +706,33 @@ func TestApplyCodexHeadersPreservesCodexClientIdentity(t *testing.T) {
 	}
 	if got := req.Header.Get("Session_id"); got != "codex-session" {
 		t.Fatalf("Session_id = %q, want Codex client value", got)
+	}
+}
+
+func TestApplyCodexHeadersPreservesLegacyOriginatorOnlyClientIdentity(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginCtx.Request.Header.Set("Version", "0.131.0")
+	ginCtx.Request.Header.Set("Session_id", "codex-session")
+	ginCtx.Request.Header.Set("Originator", "codex_cli_rs")
+
+	req, err := http.NewRequestWithContext(
+		util.WithGinContext(context.Background(), ginCtx), http.MethodPost, "https://example.com/responses", nil,
+	)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	applyCodexHeaders(req, &cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}}, "token", true, nil)
+
+	if got := req.Header.Get("Version"); got != "0.131.0" {
+		t.Fatalf("Version = %q, want legacy Codex client value", got)
+	}
+	if got := req.Header.Get("Session_id"); got != "codex-session" {
+		t.Fatalf("Session_id = %q, want legacy Codex client value", got)
+	}
+	if got := req.Header.Get("Originator"); got != "codex_cli_rs" {
+		t.Fatalf("Originator = %q, want legacy Codex client value", got)
 	}
 }

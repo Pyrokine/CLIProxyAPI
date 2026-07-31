@@ -3,18 +3,39 @@ package executor
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator/builtin"
 )
+
+func TestReadCodexResponseBodyRequiresEOFWithinLimit(t *testing.T) {
+	const limit = 64
+	withinLimit := strings.Repeat("a", limit)
+	data, err := readCodexResponseBody(strings.NewReader(withinLimit), limit)
+	if err != nil {
+		t.Fatalf("readCodexResponseBody exact limit error = %v", err)
+	}
+	if string(data) != withinLimit {
+		t.Fatalf("readCodexResponseBody data length = %d, want %d", len(data), limit)
+	}
+
+	completedThenFailure := strings.Repeat("b", limit) + "x"
+	_, err = readCodexResponseBody(strings.NewReader(completedThenFailure), limit)
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum allowed size") {
+		t.Fatalf("readCodexResponseBody oversized error = %v", err)
+	}
+}
 
 func TestParseCodexRetryAfter(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
@@ -121,6 +142,57 @@ func TestCodexExecuteRetriesHTTP408Once(t *testing.T) {
 	}
 }
 
+func TestCodexExecuteRequiresCompleteSSEFrames(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{
+			name: "multiline data",
+			body: "data: {\"type\":\ndata: \"response.completed\",\"response\":{\"id\":\"resp_multiline\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3},\"output\":[]}}\n\n",
+		},
+		{
+			name:    "delimiterless completion",
+			body:    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_truncated\",\"model\":\"gpt-5.5\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3},\"output\":[]}}",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+
+			exec := newCodexExecutor(&config.Config{})
+			resp, err := exec.Execute(
+				context.Background(),
+				&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+				cliproxyexecutor.Request{
+					Model:   "gpt-5.5",
+					Payload: []byte(`{"model":"gpt-5.5","input":"hi"}`),
+				},
+				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+			)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "incomplete SSE frame") {
+					t.Fatalf("Execute error = %v, want incomplete SSE frame", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Execute error: %v", err)
+			}
+			if !bytes.Contains(resp.Payload, []byte(`"resp_multiline"`)) {
+				t.Fatalf("response payload = %s, want multiline completion", resp.Payload)
+			}
+		})
+	}
+}
+
 func TestCodexExecuteRecoversWhenCompletedEventIsMissing(t *testing.T) {
 	server := httptest.NewServer(
 		http.HandlerFunc(
@@ -210,6 +282,182 @@ func TestCodexExecuteStreamPropagatesUpstreamEventError(t *testing.T) {
 	}
 	if bytes.Contains(joined, []byte("event: message_stop")) {
 		t.Fatalf("stream payload should not include message_stop on upstream error: %s", string(joined))
+	}
+}
+
+func TestCodexExecuteStreamAcceptsMultilineSSEData(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\ndata: \"response.completed\",\"response\":{\"id\":\"resp_multiline\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n")
+	}))
+	defer server.Close()
+
+	exec := newCodexExecutor(&config.Config{})
+	stream, err := exec.ExecuteStream(
+		context.Background(),
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+		cliproxyexecutor.Request{
+			Model:   "gpt-5.5",
+			Payload: []byte(`{"model":"gpt-5.5","stream":true,"input":"hi"}`),
+		},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var payload []byte
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if !bytes.Contains(payload, []byte(`"response.completed"`)) {
+		t.Fatalf("stream payload missing completed event: %q", payload)
+	}
+}
+
+func TestCodexExecuteStreamRejectsDelimiterlessCompletedEvent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_truncated\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}")
+	}))
+	defer server.Close()
+
+	exec := newCodexExecutor(&config.Config{})
+	stream, err := exec.ExecuteStream(
+		context.Background(),
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+		cliproxyexecutor.Request{
+			Model:   "gpt-5.5",
+			Payload: []byte(`{"model":"gpt-5.5","stream":true,"input":"hi"}`),
+		},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var streamErr error
+	var payload []byte
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			continue
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if streamErr == nil {
+		t.Fatal("stream error = nil, want delimiterless SSE error")
+	}
+	if bytes.Contains(payload, []byte(`"response.completed"`)) {
+		t.Fatalf("delimiterless completion was forwarded: %q", payload)
+	}
+}
+
+func TestCodexExecuteStreamRejectsMalformedDataFrame(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+	registerTestUsagePlugin(t, plugin)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_bad\",\"model\":\"gpt-5.5\"}}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":}\n\n")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bad\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n")
+	}))
+	defer server.Close()
+
+	exec := newCodexExecutor(&config.Config{})
+	stream, err := exec.ExecuteStream(
+		context.Background(),
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+		cliproxyexecutor.Request{
+			Model:   "gpt-5.5",
+			Payload: []byte(`{"model":"gpt-5.5","stream":true,"messages":[{"role":"user","content":"hi"}]}`),
+		},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var streamErr error
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if streamErr == nil || statusErrCode(streamErr) != http.StatusBadGateway {
+		t.Fatalf("stream error = %v, want 502", streamErr)
+	}
+	if !strings.Contains(streamErr.Error(), "malformed stream data") {
+		t.Fatalf("stream error = %v, want malformed stream data", streamErr)
+	}
+
+	select {
+	case record := <-plugin.records:
+		if !record.Failed {
+			t.Fatalf("usage record Failed = false, want true: %+v", record)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for failed usage record")
+	}
+}
+
+func TestCodexExecuteStreamScannerErrorAfterCompletedReportsFailure(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+	registerTestUsagePlugin(t, plugin)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("response writer does not support hijacking")
+		}
+		conn, rw, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			t.Fatalf("Hijack error: %v", errHijack)
+		}
+		defer conn.Close()
+
+		payload := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_partial\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
+		_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+		_, _ = rw.WriteString(strconv.FormatInt(int64(len(payload)), 16) + "\r\n" + payload + "\r\n")
+		_ = rw.Flush()
+	}))
+	defer server.Close()
+
+	exec := newCodexExecutor(&config.Config{})
+	stream, err := exec.ExecuteStream(
+		context.Background(),
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+		cliproxyexecutor.Request{
+			Model:   "gpt-5.5",
+			Payload: []byte(`{"model":"gpt-5.5","stream":true,"input":"hi"}`),
+		},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var streamErr error
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+		}
+	}
+	if streamErr == nil {
+		t.Fatal("stream error = nil, want truncated chunked response error")
+	}
+
+	select {
+	case record := <-plugin.records:
+		if !record.Failed {
+			t.Fatalf("usage record Failed = false, want true: %+v", record)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for failed usage record")
 	}
 }
 

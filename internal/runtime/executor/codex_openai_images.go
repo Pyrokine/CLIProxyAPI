@@ -36,6 +36,7 @@ const (
 	codexOpenAIImagesMainModel       = "gpt-5.4-mini"
 	codexDefaultImageToolModel       = "gpt-image-2"
 	maxCodexOpenAIImageResponseBytes = 50 << 20
+	maxCodexOpenAIImageOutputItems   = 1024
 )
 
 type codexOpenAIImagePreparedRequest struct {
@@ -53,6 +54,55 @@ type codexImageCallResult struct {
 	Quality       string
 }
 
+type codexImageOutputCollector struct {
+	byIndex    map[int64][]byte
+	fallback   [][]byte
+	itemCount  int
+	totalBytes int
+}
+
+func newCodexImageOutputCollector() *codexImageOutputCollector {
+	return &codexImageOutputCollector{byIndex: make(map[int64][]byte)}
+}
+
+func (c *codexImageOutputCollector) add(eventData []byte) error {
+	if c == nil {
+		return fmt.Errorf("codex image output collector is nil")
+	}
+	item := gjson.GetBytes(eventData, "item")
+	if !item.Exists() || item.Type != gjson.JSON {
+		return nil
+	}
+	raw := []byte(item.Raw)
+	if len(raw) > maxCodexOpenAIImageResponseBytes {
+		return fmt.Errorf("codex image output item exceeds maximum allowed size of %d bytes", maxCodexOpenAIImageResponseBytes)
+	}
+	index := gjson.GetBytes(eventData, "output_index")
+	if index.Exists() {
+		key := index.Int()
+		previous, exists := c.byIndex[key]
+		itemCount := c.itemCount
+		if !exists {
+			itemCount++
+		}
+		totalBytes := c.totalBytes - len(previous) + len(raw)
+		if itemCount > maxCodexOpenAIImageOutputItems || totalBytes > maxCodexOpenAIImageResponseBytes {
+			return fmt.Errorf("codex image output items exceed configured memory limits")
+		}
+		c.byIndex[key] = bytes.Clone(raw)
+		c.itemCount = itemCount
+		c.totalBytes = totalBytes
+		return nil
+	}
+	if c.itemCount+1 > maxCodexOpenAIImageOutputItems || c.totalBytes+len(raw) > maxCodexOpenAIImageResponseBytes {
+		return fmt.Errorf("codex image output items exceed configured memory limits")
+	}
+	c.fallback = append(c.fallback, bytes.Clone(raw))
+	c.itemCount++
+	c.totalBytes += len(raw)
+	return nil
+}
+
 func readCodexOpenAIImageResponseBody(body io.Reader) ([]byte, error) {
 	data, errRead := io.ReadAll(io.LimitReader(body, maxCodexOpenAIImageResponseBytes+1))
 	if errRead != nil {
@@ -64,6 +114,20 @@ func readCodexOpenAIImageResponseBody(body io.Reader) ([]byte, error) {
 		)
 	}
 	return data, nil
+}
+
+func parseCodexOpenAIImageEvent(frame []byte) ([]byte, bool, error) {
+	eventData, hasData, valid := sseDataPayload(frame)
+	if !hasData || len(eventData) == 0 || bytes.Equal(eventData, []byte("[DONE]")) {
+		return nil, false, nil
+	}
+	if !valid {
+		return nil, false, statusErr{
+			code: http.StatusBadGateway,
+			msg:  "upstream returned invalid image SSE JSON",
+		}
+	}
+	return normalizeCodexCompletionEvent(eventData), true, nil
 }
 
 func isCodexOpenAIImageRequest(opts cliproxyexecutor.Options) bool {
@@ -93,6 +157,28 @@ func (e *codexExecutor) resolveGPTImage2BaseModel() string {
 		return model
 	}
 	return codexOpenAIImagesMainModel
+}
+
+func codexOpenAIImageServiceTier(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	if value := gjson.GetBytes(req.Payload, "service_tier"); value.Type == gjson.String {
+		if tier := strings.TrimSpace(value.String()); tier != "" {
+			return tier
+		}
+	}
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	var tier string
+	switch value := opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey].(type) {
+	case string:
+		tier = strings.TrimSpace(value)
+	case []byte:
+		tier = strings.TrimSpace(string(value))
+	}
+	if tier == usage.DefaultServiceTier {
+		return ""
+	}
+	return tier
 }
 
 func (e *codexExecutor) executeOpenAIImage(
@@ -133,6 +219,7 @@ func (e *codexExecutor) executeOpenAIImage(
 		return resp, errCache
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	applyModelHeaderOverrides(httpReq.Header, mainModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), upstreamBody, e.Identifier(), auth)
 
@@ -165,42 +252,73 @@ func (e *codexExecutor) executeOpenAIImage(
 		return resp, err
 	}
 
-	outputItemsByIndex := make(map[int64][]byte)
-	var outputItemsFallback [][]byte
-	for _, line := range bytes.Split(data, []byte("\n")) {
-		if !bytes.HasPrefix(line, dataTag) {
+	outputItems := newCodexImageOutputCollector()
+	var completedData []byte
+	remaining := data
+	for len(remaining) > 0 {
+		frameLen := sseFrameLen(remaining)
+		if frameLen == 0 {
+			if len(bytes.TrimSpace(remaining)) > 0 {
+				errIncomplete := statusErr{
+					code: http.StatusBadGateway,
+					msg:  "upstream image stream ended with incomplete SSE frame",
+				}
+				recordAPIResponseError(ctx, e.cfg, errIncomplete)
+				return resp, errIncomplete
+			}
+			break
+		}
+		frame := remaining[:frameLen]
+		remaining = remaining[frameLen:]
+		eventData, ok, errEventData := parseCodexOpenAIImageEvent(frame)
+		if errEventData != nil {
+			recordAPIResponseError(ctx, e.cfg, errEventData)
+			return resp, errEventData
+		}
+		if !ok {
 			continue
 		}
-		eventData := bytes.TrimSpace(line[len(dataTag):])
+		if errEvent, isError := parseCodexEventError(eventData); isError {
+			recordAPIResponseError(ctx, e.cfg, errEvent)
+			return resp, errEvent
+		}
 		switch gjson.GetBytes(eventData, "type").String() {
 		case "response.output_item.done":
-			collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+			if errCollect := outputItems.add(eventData); errCollect != nil {
+				return resp, errCollect
+			}
 		case "response.completed":
-			if detail, ok := parseCodexUsage(eventData); ok {
-				reporter.publish(ctx, detail)
+			if len(completedData) == 0 {
+				completedData = bytes.Clone(eventData)
 			}
-			publishCodexImageToolUsage(ctx, reporter, body, eventData)
-			results, createdAt, usageRaw, firstMeta, errExtract := codexExtractImageResults(
-				eventData, outputItemsByIndex, outputItemsFallback,
-			)
-			if errExtract != nil {
-				return resp, errExtract
-			}
-			if len(results) == 0 {
-				return resp, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
-			}
-			out, errOutput := codexBuildImagesAPIResponse(
-				results, createdAt, usageRaw, firstMeta, prepared.ResponseFormat,
-			)
-			if errOutput != nil {
-				return resp, errOutput
-			}
-			return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 		}
 	}
+	if len(completedData) == 0 {
+		err = statusErr{code: http.StatusGatewayTimeout, msg: "stream error: stream disconnected before completion"}
+		return resp, err
+	}
 
-	err = statusErr{code: http.StatusGatewayTimeout, msg: "stream error: stream disconnected before completion"}
-	return resp, err
+	results, createdAt, usageRaw, firstMeta, errExtract := codexExtractImageResults(
+		completedData, outputItems.byIndex, outputItems.fallback,
+	)
+	if errExtract != nil {
+		return resp, errExtract
+	}
+	if len(results) == 0 {
+		return resp, statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
+	}
+	out, errOutput := codexBuildImagesAPIResponse(
+		results, createdAt, usageRaw, firstMeta, prepared.ResponseFormat,
+	)
+	if errOutput != nil {
+		return resp, errOutput
+	}
+	if detail, ok := parseCodexUsage(completedData); ok {
+		reporter.publish(ctx, detail)
+	}
+	publishCodexImageToolUsage(ctx, reporter, body, completedData)
+	reporter.ensurePublished(ctx)
+	return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 }
 
 func (e *codexExecutor) executeOpenAIImageStream(
@@ -241,6 +359,7 @@ func (e *codexExecutor) executeOpenAIImageStream(
 		return nil, errCache
 	}
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg)
+	applyModelHeaderOverrides(httpReq.Header, mainModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), upstreamBody, e.Identifier(), auth)
 
@@ -280,62 +399,113 @@ func (e *codexExecutor) executeOpenAIImageStream(
 		}()
 
 		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800)
-		outputItemsByIndex := make(map[int64][]byte)
-		var outputItemsFallback [][]byte
+		scanner.Buffer(nil, maxCodexOpenAIImageResponseBytes)
+		scanner.Split(scanSSEFrame)
+		outputItems := newCodexImageOutputCollector()
+		var completedData []byte
 		for scanner.Scan() {
-			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
-			appendAPIResponseChunk(ctx, e.cfg, line)
-			if !bytes.HasPrefix(line, dataTag) {
+			frame := applyCodexIdentityConfuseResponsePayload(bytes.Clone(scanner.Bytes()), identityState)
+			if len(bytes.TrimSpace(frame)) == 0 {
 				continue
 			}
-			eventData := bytes.TrimSpace(line[len(dataTag):])
+			appendAPIResponseChunk(ctx, e.cfg, frame)
+			if !isCompleteSSEFrame(frame) {
+				errIncomplete := statusErr{
+					code: http.StatusBadGateway,
+					msg:  "upstream image stream ended with incomplete SSE frame",
+				}
+				recordAPIResponseError(ctx, e.cfg, errIncomplete)
+				reporter.publishFailure(ctx, errIncomplete)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errIncomplete})
+				return
+			}
+			eventData, ok, errEventData := parseCodexOpenAIImageEvent(frame)
+			if errEventData != nil {
+				recordAPIResponseError(ctx, e.cfg, errEventData)
+				reporter.publishFailure(ctx, errEventData)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errEventData})
+				return
+			}
+			if !ok {
+				continue
+			}
+			if errEvent, isError := parseCodexEventError(eventData); isError {
+				recordAPIResponseError(ctx, e.cfg, errEvent)
+				reporter.publishFailure(ctx, errEvent)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errEvent})
+				return
+			}
 			switch gjson.GetBytes(eventData, "type").String() {
 			case "response.output_item.done":
-				collectCodexOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+				if errCollect := outputItems.add(eventData); errCollect != nil {
+					recordAPIResponseError(ctx, e.cfg, errCollect)
+					reporter.publishFailure(ctx, errCollect)
+					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errCollect})
+					return
+				}
 			case "response.image_generation_call.partial_image":
 				frame := codexBuildImagePartialFrame(eventData, prepared.ResponseFormat, prepared.StreamPrefix)
 				if len(frame) > 0 && !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: frame}) {
+					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+						recordAPIResponseError(ctx, e.cfg, errStream)
+						reporter.publishFailure(ctx, errStream)
+					}
 					return
 				}
 			case "response.completed":
-				if detail, ok := parseCodexUsage(eventData); ok {
-					reporter.publish(ctx, detail)
+				if len(completedData) == 0 {
+					completedData = bytes.Clone(eventData)
 				}
-				publishCodexImageToolUsage(ctx, reporter, body, eventData)
-				results, _, usageRaw, _, errExtract := codexExtractImageResults(
-					eventData, outputItemsByIndex, outputItemsFallback,
-				)
-				if errExtract != nil {
-					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errExtract})
-					return
-				}
-				if len(results) == 0 {
-					_ = sendStreamChunk(
-						ctx, out, cliproxyexecutor.StreamChunk{
-							Err: statusErr{
-								code: http.StatusBadGateway, msg: "upstream did not return image output",
-							},
-						},
-					)
-					return
-				}
-				for _, img := range results {
-					frame := codexBuildImageCompletedFrame(
-						img, usageRaw, prepared.ResponseFormat, prepared.StreamPrefix,
-					)
-					if len(frame) > 0 && !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: frame}) {
-						return
-					}
-				}
-				return
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+			return
 		}
+		if len(completedData) == 0 {
+			errIncomplete := statusErr{
+				code: http.StatusGatewayTimeout, msg: "stream error: stream disconnected before completion",
+			}
+			recordAPIResponseError(ctx, e.cfg, errIncomplete)
+			reporter.publishFailure(ctx, errIncomplete)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errIncomplete})
+			return
+		}
+		results, _, usageRaw, _, errExtract := codexExtractImageResults(
+			completedData, outputItems.byIndex, outputItems.fallback,
+		)
+		if errExtract != nil {
+			recordAPIResponseError(ctx, e.cfg, errExtract)
+			reporter.publishFailure(ctx, errExtract)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errExtract})
+			return
+		}
+		if len(results) == 0 {
+			errOutput := statusErr{code: http.StatusBadGateway, msg: "upstream did not return image output"}
+			recordAPIResponseError(ctx, e.cfg, errOutput)
+			reporter.publishFailure(ctx, errOutput)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errOutput})
+			return
+		}
+		for _, img := range results {
+			frame := codexBuildImageCompletedFrame(
+				img, usageRaw, prepared.ResponseFormat, prepared.StreamPrefix,
+			)
+			if len(frame) > 0 && !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: frame}) {
+				if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+					recordAPIResponseError(ctx, e.cfg, errStream)
+					reporter.publishFailure(ctx, errStream)
+				}
+				return
+			}
+		}
+		if detail, ok := parseCodexUsage(completedData); ok {
+			reporter.publish(ctx, detail)
+		}
+		publishCodexImageToolUsage(ctx, reporter, body, completedData)
+		reporter.ensurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -372,6 +542,7 @@ func (e *codexExecutor) executeDirectOpenAIImage(
 	if contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
 	}
+	applyModelHeaderOverrides(httpReq.Header, model)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), upstreamBody, e.Identifier(), auth)
 
@@ -441,6 +612,7 @@ func (e *codexExecutor) executeDirectOpenAIImageStream(
 	if contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
 	}
+	applyModelHeaderOverrides(httpReq.Header, model)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), upstreamBody, e.Identifier(), auth)
 
@@ -473,39 +645,49 @@ func (e *codexExecutor) executeDirectOpenAIImageStream(
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		var streamUsage streamUsageBuffer
+		var streamErr error
+		sawPayload := false
 		defer func() {
+			if streamErr != nil {
+				reporter.publishFailure(ctx, streamErr)
+			} else {
+				streamUsage.flushOpenAIStream()
+				streamUsage.publish(ctx, reporter)
+				reporter.ensurePublished(ctx)
+			}
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("codex executor: close response body error: %v", errClose)
 			}
-			reporter.ensurePublished(ctx)
 		}()
 
 		buffer := make([]byte, 32*1024)
 		for {
 			n, errRead := httpResp.Body.Read(buffer)
+			if errRead != nil && errRead != io.EOF {
+				streamErr = errRead
+				recordAPIResponseError(ctx, e.cfg, errRead)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errRead})
+				return
+			}
 			if n > 0 {
 				chunk := bytes.Clone(buffer[:n])
 				chunk = applyCodexIdentityConfuseResponsePayload(chunk, identityState)
 				appendAPIResponseChunk(ctx, e.cfg, chunk)
-				for _, line := range bytes.Split(chunk, []byte("\n")) {
-					if detail, ok := parseOpenAIStreamUsage(bytes.TrimSpace(line)); ok {
-						reporter.publish(ctx, detail)
-					}
-				}
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
-				case <-ctx.Done():
+				streamUsage.observeOpenAIStreamChunk(chunk)
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunk}) {
+					streamErr = ctx.Err()
 					return
 				}
+				sawPayload = true
 			}
-			if errRead != nil {
-				if errRead != io.EOF {
-					recordAPIResponseError(ctx, e.cfg, errRead)
-					reporter.publishFailure(ctx, errRead)
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: errRead}:
-					case <-ctx.Done():
+			if errRead == io.EOF {
+				if !sawPayload {
+					streamErr = statusErr{
+						code: http.StatusBadGateway, msg: "upstream returned an empty image stream",
 					}
+					recordAPIResponseError(ctx, e.cfg, streamErr)
+					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: streamErr})
 				}
 				return
 			}
@@ -730,6 +912,9 @@ func (e *codexExecutor) prepareCodexOpenAIImageBody(
 	)
 	out, _ = sjson.SetBytes(out, "model", mainModel)
 	out, _ = sjson.SetBytes(out, "stream", true)
+	if serviceTier := codexOpenAIImageServiceTier(req, opts); serviceTier != "" {
+		out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+	}
 	out, _ = sjson.DeleteBytes(out, "previous_response_id")
 	out, _ = sjson.DeleteBytes(out, "prompt_cache_retention")
 	out, _ = sjson.DeleteBytes(out, "safety_identifier")
@@ -1184,47 +1369,68 @@ func parseCodexImageToolUsage(data []byte) (usage.Detail, bool) {
 	if !openAIStyleUsageTokenFieldsExist(usageNode) {
 		return usage.Detail{}, false
 	}
-	return parseOpenAIStyleUsageNode(usageNode), true
+	detail := parseOpenAIStyleUsageNode(usageNode)
+	detail.ResponseServiceTier = extractResponseServiceTier(data)
+	return detail, true
 }
 
 func openAIStyleUsageTokenFieldsExist(usageNode gjson.Result) bool {
 	if !usageNode.Exists() || !usageNode.IsObject() {
 		return false
 	}
-	return usageNode.Get("prompt_tokens").Exists() ||
-		usageNode.Get("input_tokens").Exists() ||
-		usageNode.Get("completion_tokens").Exists() ||
-		usageNode.Get("output_tokens").Exists() ||
-		usageNode.Get("total_tokens").Exists() ||
-		usageNode.Get("prompt_tokens_details.cached_tokens").Exists() ||
-		usageNode.Get("input_tokens_details.cached_tokens").Exists() ||
-		usageNode.Get("completion_tokens_details.reasoning_tokens").Exists() ||
-		usageNode.Get("output_tokens_details.reasoning_tokens").Exists()
+	for _, path := range []string{
+		"prompt_tokens",
+		"input_tokens",
+		"completion_tokens",
+		"output_tokens",
+		"total_tokens",
+		"prompt_tokens_details.cached_tokens",
+		"input_tokens_details.cached_tokens",
+		"prompt_tokens_details.cache_write_tokens",
+		"prompt_tokens_details.cache_creation_tokens",
+		"input_tokens_details.cache_write_tokens",
+		"input_tokens_details.cache_creation_tokens",
+		"completion_tokens_details.reasoning_tokens",
+		"output_tokens_details.reasoning_tokens",
+	} {
+		if validUsageTokenNode(usageNode.Get(path)) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
-	inputNode := usageNode.Get("prompt_tokens")
-	if !inputNode.Exists() {
-		inputNode = usageNode.Get("input_tokens")
-	}
-	outputNode := usageNode.Get("completion_tokens")
-	if !outputNode.Exists() {
-		outputNode = usageNode.Get("output_tokens")
-	}
+	inputNode := firstExistingUsageNode(usageNode, "prompt_tokens", "input_tokens")
+	outputNode := firstExistingUsageNode(usageNode, "completion_tokens", "output_tokens")
+	totalNode := firstExistingUsageNode(usageNode, "total_tokens")
 	detail := usage.Detail{
-		InputTokens: inputNode.Int(), OutputTokens: outputNode.Int(), TotalTokens: usageNode.Get("total_tokens").Int(),
+		InputTokens: inputNode.Int(), OutputTokens: outputNode.Int(), TotalTokens: totalNode.Int(),
 	}
-	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
-	if !cached.Exists() {
-		cached = usageNode.Get("input_tokens_details.cached_tokens")
-	}
+	cached := firstExistingUsageNode(
+		usageNode,
+		"prompt_tokens_details.cached_tokens",
+		"input_tokens_details.cached_tokens",
+	)
 	if cached.Exists() {
 		detail.CachedTokens = cached.Int()
+		detail.CacheReadTokens = cached.Int()
 	}
-	reasoning := usageNode.Get("completion_tokens_details.reasoning_tokens")
-	if !reasoning.Exists() {
-		reasoning = usageNode.Get("output_tokens_details.reasoning_tokens")
+	cacheCreation := firstExistingUsageNode(
+		usageNode,
+		"input_tokens_details.cache_creation_tokens",
+		"input_tokens_details.cache_write_tokens",
+		"prompt_tokens_details.cache_creation_tokens",
+		"prompt_tokens_details.cache_write_tokens",
+	)
+	if cacheCreation.Exists() {
+		detail.CacheCreationTokens = cacheCreation.Int()
 	}
+	reasoning := firstExistingUsageNode(
+		usageNode,
+		"completion_tokens_details.reasoning_tokens",
+		"output_tokens_details.reasoning_tokens",
+	)
 	if reasoning.Exists() {
 		detail.ReasoningTokens = reasoning.Int()
 	}

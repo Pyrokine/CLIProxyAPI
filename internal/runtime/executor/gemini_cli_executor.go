@@ -38,6 +38,8 @@ const (
 	codeAssistVersion  = "v1internal"
 )
 
+var geminiTokenAndConfigFromMetadata = geminiauth.TokenAndConfigFromMetadata
+
 // GeminiCLIExecutor talks to the Cloud Code Assist endpoint using OAuth credentials from auth metadata.
 type GeminiCLIExecutor struct {
 	cfg *config.Config
@@ -67,6 +69,21 @@ func NewGeminiCLIExecutor(cfg *config.Config) *GeminiCLIExecutor {
 
 // Identifier returns the executor identifier.
 func (e *GeminiCLIExecutor) Identifier() string { return "gemini-cli" }
+
+func (e *GeminiCLIExecutor) ShouldRefresh(now time.Time, auth *cliproxyauth.Auth) bool {
+	if auth == nil || (e.cfg != nil && e.cfg.Home.Enabled) {
+		return false
+	}
+	metadata := geminiOAuthMetadata(auth)
+	if metadata == nil {
+		return false
+	}
+	_, token, _ := geminiTokenAndConfigFromMetadata(metadata)
+	if token == nil || strings.TrimSpace(token.AccessToken) == "" {
+		return true
+	}
+	return !token.Expiry.IsZero() && token.Expiry.Before(now.Add(30*time.Second))
+}
 
 // PrepareRequest injects Gemini CLI credentials into the outgoing HTTP request.
 func (e *GeminiCLIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -134,8 +151,8 @@ func (e *GeminiCLIExecutor) prepareGeminiCLIRequest(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, isStream)
-	basePayload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, isStream)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, isStream)
+	basePayload := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, isStream)
 
 	basePayload, err = thinking.ApplyThinking(basePayload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -503,7 +520,7 @@ func (e *GeminiCLIExecutor) CountTokens(
 	// The loop variable attemptModel is only used as the concrete model id sent to the upstream
 	// Gemini CLI endpoint when iterating fallback variants.
 	for range models {
-		payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
+		payload := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
 
 		payload, err = thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
 		if err != nil {
@@ -571,12 +588,86 @@ func (e *GeminiCLIExecutor) CountTokens(
 	return cliproxyexecutor.Response{}, newGeminiStatusErr(lastStatus, lastBody)
 }
 
-// Refresh refreshes the authentication credentials (no-op for Gemini CLI).
+// Refresh refreshes Gemini CLI OAuth credentials and returns a primary-file persistence update for virtual entries.
 func (e *GeminiCLIExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if refreshed, handled, err := refreshAuthViaHome(ctx, e.cfg, auth); handled {
-		return refreshed, err
+		if err != nil || refreshed == nil {
+			return refreshed, err
+		}
+		return finalizeGeminiCLIRefresh(auth, refreshed), nil
 	}
-	return auth, nil
+	metadata := geminiOAuthMetadata(auth)
+	if auth == nil || metadata == nil {
+		return nil, fmt.Errorf("gemini-cli auth metadata missing")
+	}
+	base, token, conf := geminiTokenAndConfigFromMetadata(metadata)
+	if strings.TrimSpace(token.RefreshToken) == "" {
+		return nil, fmt.Errorf("gemini-cli refresh token missing")
+	}
+	ctxToken := ctx
+	if httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0); httpClient != nil {
+		ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
+	}
+	forceRefresh := *token
+	forceRefresh.AccessToken = ""
+	forceRefresh.Expiry = time.Unix(0, 0)
+	refreshedToken, errToken := conf.TokenSource(ctxToken, &forceRefresh).Token()
+	if errToken != nil {
+		return nil, errToken
+	}
+	updated := auth.Clone()
+	updateGeminiCLITokenMetadata(updated, base, refreshedToken)
+	return finalizeGeminiCLIRefresh(auth, updated), nil
+}
+
+func finalizeGeminiCLIRefresh(current, updated *cliproxyauth.Auth) *cliproxyauth.Auth {
+	if current == nil || updated == nil {
+		return updated
+	}
+	shared := geminicli.ResolveSharedCredential(current.Runtime)
+	if shared == nil {
+		return updated
+	}
+	virtualMetadata, _ := updated.Metadata["virtual"].(bool)
+	snapshot := shared.MetadataSnapshot()
+	if len(updated.Metadata) > 0 && (!geminicli.IsVirtual(current.Runtime) || !virtualMetadata) {
+		var commit *geminicli.MetadataRefreshCommit
+		snapshot, commit = shared.StageMetadata(updated.Metadata)
+		updated.RefreshCommit = commit
+	}
+	updated.ID = current.ID
+	updated.Runtime = current.Runtime
+	updated.Metadata = snapshot
+	if !geminicli.IsVirtual(current.Runtime) {
+		return updated
+	}
+
+	attrs := make(map[string]string)
+	if current.Attributes != nil {
+		for _, key := range []string{"path", "source", "priority"} {
+			if value := strings.TrimSpace(current.Attributes[key]); value != "" {
+				attrs[key] = value
+			}
+		}
+	}
+	attrs["gemini_virtual_primary"] = "true"
+	if projects := shared.ProjectIDs(); len(projects) > 0 {
+		attrs["virtual_children"] = strings.Join(projects, ",")
+	}
+	updated.RefreshPersistence = &cliproxyauth.Auth{
+		ID:         shared.PrimaryID(),
+		Provider:   current.Provider,
+		Prefix:     current.Prefix,
+		FileName:   shared.PrimaryID(),
+		Label:      current.Label,
+		Status:     cliproxyauth.StatusDisabled,
+		Disabled:   true,
+		ProxyURL:   current.ProxyURL,
+		Attributes: attrs,
+		Metadata:   snapshot,
+		Runtime:    shared,
+	}
+	return updated
 }
 
 func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) (
@@ -589,12 +680,7 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 		return nil, nil, fmt.Errorf("gemini-cli auth metadata missing")
 	}
 
-	base, token, conf := geminiauth.TokenAndConfigFromMetadata(metadata)
-
-	ctxToken := ctx
-	if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
-		ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
-	}
+	base, token, _ := geminiTokenAndConfigFromMetadata(metadata)
 
 	if cfg != nil && cfg.Home.Enabled {
 		now := time.Now()
@@ -609,7 +695,7 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 				if metadata == nil {
 					return nil, nil, fmt.Errorf("gemini-cli auth metadata missing")
 				}
-				base, token, _ = geminiauth.TokenAndConfigFromMetadata(metadata)
+				base, token, _ = geminiTokenAndConfigFromMetadata(metadata)
 			}
 		}
 		if token.AccessToken == "" {
@@ -619,13 +705,13 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 		return oauth2.StaticTokenSource(token), base, nil
 	}
 
-	src := conf.TokenSource(ctxToken, token)
-	currentToken, err := src.Token()
-	if err != nil {
-		return nil, nil, err
+	if token == nil || strings.TrimSpace(token.AccessToken) == "" {
+		return nil, nil, fmt.Errorf("gemini-cli access token missing; managed refresh required")
 	}
-	updateGeminiCLITokenMetadata(auth, base, currentToken)
-	return oauth2.ReuseTokenSource(currentToken, src), base, nil
+	if !token.Expiry.IsZero() && token.Expiry.Before(time.Now().Add(30*time.Second)) {
+		return nil, nil, fmt.Errorf("gemini-cli access token is expiring; managed refresh required")
+	}
+	return oauth2.StaticTokenSource(token), base, nil
 }
 
 func updateGeminiCLITokenMetadata(auth *cliproxyauth.Auth, base map[string]any, tok *oauth2.Token) {
@@ -636,10 +722,8 @@ func updateGeminiCLITokenMetadata(auth *cliproxyauth.Auth, base map[string]any, 
 	fields := buildGeminiTokenFields(tok, merged)
 	shared := geminicli.ResolveSharedCredential(auth.Runtime)
 	if shared != nil {
-		snapshot := shared.MergeMetadata(fields)
-		if !geminicli.IsVirtual(auth.Runtime) {
-			auth.Metadata = snapshot
-		}
+		snapshot, _ := shared.StageMetadata(fields)
+		auth.Metadata = snapshot
 		return
 	}
 	if auth.Metadata == nil {

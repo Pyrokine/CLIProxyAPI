@@ -45,6 +45,8 @@ const claudeToolPrefix = ""
 
 const claudeFingerprintSalt = "59cf53e54c78"
 
+const maxClaudeResponseBytes = 50 << 20
+
 func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 	return signature.ProviderFromModelName(baseModel) == signature.ProviderClaude
 }
@@ -157,6 +159,7 @@ type claudeStreamingValidator struct {
 	hasData         bool
 	hasMessageStart bool
 	hasMessageDelta bool
+	hasMessageStop  bool
 }
 
 func (v *claudeStreamingValidator) observe(line []byte) error {
@@ -194,6 +197,8 @@ func (v *claudeStreamingValidator) observe(line []byte) error {
 		v.hasMessageStart = true
 	case "message_delta":
 		v.hasMessageDelta = true
+	case "message_stop":
+		v.hasMessageStop = true
 	}
 	return nil
 }
@@ -211,6 +216,12 @@ func (v *claudeStreamingValidator) finish() error {
 		return statusErr{
 			code: http.StatusBadGateway,
 			msg:  "claude executor: upstream stream response ended before message completion",
+		}
+	}
+	if !v.hasMessageStop {
+		return statusErr{
+			code: http.StatusBadGateway,
+			msg:  "claude executor: upstream stream response is missing message_stop",
 		}
 	}
 	return nil
@@ -247,8 +258,8 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, translationStream)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, translationStream)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, translationStream)
+	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, translationStream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	body, err := thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
@@ -391,18 +402,41 @@ func (e *ClaudeExecutor) Execute(
 			log.Errorf("response body close error: %v", errClose)
 		}
 	}()
-	data, err := io.ReadAll(io.LimitReader(decodedBody, 50<<20))
+	data, err := io.ReadAll(io.LimitReader(decodedBody, maxClaudeResponseBytes+1))
 	if err != nil {
+		recordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
+	if len(data) > maxClaudeResponseBytes {
+		err = statusErr{
+			code: http.StatusBadGateway,
+			msg:  "claude executor: upstream response exceeds 50 MiB limit",
+		}
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 	if cr.translationStream {
+		var streamUsage claudeStreamUsageBuffer
+		validator := &claudeStreamingValidator{}
 		lines := bytes.SplitSeq(data, []byte("\n"))
 		for line := range lines {
-			if detail, ok := parseClaudeStreamUsage(line); ok {
-				cr.reporter.publish(ctx, detail)
+			if errValidate := validator.observe(line); errValidate != nil {
+				recordAPIResponseError(ctx, e.cfg, errValidate)
+				streamUsage.publishFailure(ctx, cr.reporter, errValidate)
+				err = errValidate
+				return resp, err
 			}
+			streamUsage.observe(line)
+		}
+		if errValidate := validator.finish(); errValidate != nil {
+			recordAPIResponseError(ctx, e.cfg, errValidate)
+			streamUsage.publishFailure(ctx, cr.reporter, errValidate)
+			err = errValidate
+			return resp, err
+		}
+		if !streamUsage.publish(ctx, cr.reporter) {
+			cr.reporter.ensurePublished(ctx)
 		}
 	} else {
 		cr.reporter.publish(ctx, parseClaudeUsage(data))
@@ -493,6 +527,12 @@ func (e *ClaudeExecutor) ExecuteStream(
 				log.Errorf("response body close error: %v", errClose)
 			}
 		}()
+		var streamUsage claudeStreamUsageBuffer
+		defer func() {
+			if !streamUsage.publish(ctx, cr.reporter) {
+				cr.reporter.ensurePublished(ctx)
+			}
+		}()
 
 		validator := &claudeStreamingValidator{}
 
@@ -505,13 +545,11 @@ func (e *ClaudeExecutor) ExecuteStream(
 				appendAPIResponseChunk(ctx, e.cfg, line)
 				if errValidate := validator.observe(line); errValidate != nil {
 					recordAPIResponseError(ctx, e.cfg, errValidate)
-					cr.reporter.publishFailure(ctx)
+					streamUsage.publishFailure(ctx, cr.reporter, errValidate)
 					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errValidate})
 					return
 				}
-				if detail, ok := parseClaudeStreamUsage(line); ok {
-					cr.reporter.publish(ctx, detail)
-				}
+				streamUsage.observe(line)
 				if isClaudeOAuthToken(cr.apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 				}
@@ -520,18 +558,22 @@ func (e *ClaudeExecutor) ExecuteStream(
 				copy(cloned, line)
 				cloned[len(line)] = '\n'
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: cloned}) {
+					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+						recordAPIResponseError(ctx, e.cfg, errStream)
+						streamUsage.publishFailure(ctx, cr.reporter, errStream)
+					}
 					return
 				}
 			}
 			if errScan := scanner.Err(); errScan != nil {
 				recordAPIResponseError(ctx, e.cfg, errScan)
-				cr.reporter.publishFailure(ctx)
+				streamUsage.publishFailure(ctx, cr.reporter, errScan)
 				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 				return
 			}
 			if errValidate := validator.finish(); errValidate != nil {
 				recordAPIResponseError(ctx, e.cfg, errValidate)
-				cr.reporter.publishFailure(ctx)
+				streamUsage.publishFailure(ctx, cr.reporter, errValidate)
 				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errValidate})
 			}
 			return
@@ -546,13 +588,11 @@ func (e *ClaudeExecutor) ExecuteStream(
 			appendAPIResponseChunk(ctx, e.cfg, line)
 			if errValidate := validator.observe(line); errValidate != nil {
 				recordAPIResponseError(ctx, e.cfg, errValidate)
-				cr.reporter.publishFailure(ctx)
+				streamUsage.publishFailure(ctx, cr.reporter, errValidate)
 				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errValidate})
 				return
 			}
-			if detail, ok := parseClaudeStreamUsage(line); ok {
-				cr.reporter.publish(ctx, detail)
-			}
+			streamUsage.observe(line)
 			if isClaudeOAuthToken(cr.apiKey) && !auth.ToolPrefixDisabled() {
 				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 			}
@@ -568,19 +608,23 @@ func (e *ClaudeExecutor) ExecuteStream(
 			)
 			for i := range chunks {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
+					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+						recordAPIResponseError(ctx, e.cfg, errStream)
+						streamUsage.publishFailure(ctx, cr.reporter, errStream)
+					}
 					return
 				}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
-			cr.reporter.publishFailure(ctx)
+			streamUsage.publishFailure(ctx, cr.reporter, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 			return
 		}
 		if errValidate := validator.finish(); errValidate != nil {
 			recordAPIResponseError(ctx, e.cfg, errValidate)
-			cr.reporter.publishFailure(ctx)
+			streamUsage.publishFailure(ctx, cr.reporter, errValidate)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errValidate})
 		}
 	}()
@@ -604,7 +648,7 @@ func (e *ClaudeExecutor) CountTokens(
 	to := sdktranslator.FromString("claude")
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
+	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
@@ -816,6 +860,15 @@ func (p *peekableBody) Close() error {
 	return p.closer.Close()
 }
 
+func newClaudeZstdReader(reader io.Reader) (*zstd.Decoder, error) {
+	return zstd.NewReader(
+		reader,
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderMaxWindow(maxClaudeResponseBytes),
+		zstd.WithDecoderMaxMemory(maxClaudeResponseBytes+(8<<20)),
+	)
+}
+
 func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadCloser, error) {
 	if body == nil {
 		return nil, fmt.Errorf("response body is nil")
@@ -841,7 +894,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 					},
 				}, nil
 			case len(magic) >= 4 && magic[0] == 0x28 && magic[1] == 0xb5 && magic[2] == 0x2f && magic[3] == 0xfd:
-				decoder, zdErr := zstd.NewReader(pb)
+				decoder, zdErr := newClaudeZstdReader(pb)
 				if zdErr != nil {
 					_ = pb.Close()
 					return nil, fmt.Errorf("magic-byte zstd: failed to create reader: %w", zdErr)
@@ -893,7 +946,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 				},
 			}, nil
 		case "zstd":
-			decoder, err := zstd.NewReader(body)
+			decoder, err := newClaudeZstdReader(body)
 			if err != nil {
 				_ = body.Close()
 				return nil, fmt.Errorf("failed to create zstd reader: %w", err)

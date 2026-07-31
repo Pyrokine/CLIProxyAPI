@@ -35,6 +35,13 @@ var currentHomeRefreshClient = func() homeRefreshClient {
 	return home.Current()
 }
 
+func homeRefreshClientForContext(ctx context.Context) homeRefreshClient {
+	if client, ok := cliproxyauth.HomeRefreshClientFromContext(ctx); ok {
+		return client
+	}
+	return currentHomeRefreshClient()
+}
+
 func refreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) (
 	*cliproxyauth.Auth,
 	bool,
@@ -50,7 +57,7 @@ func refreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		return nil, true, statusErr{code: http.StatusInternalServerError, msg: "home refresh: auth is nil"}
 	}
 
-	client := currentHomeRefreshClient()
+	client := homeRefreshClientForContext(ctx)
 	if client == nil || !client.HeartbeatOK() {
 		return nil, true, statusErr{code: http.StatusServiceUnavailable, msg: "home control center unavailable"}
 	}

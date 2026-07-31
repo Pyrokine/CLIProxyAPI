@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -96,6 +97,7 @@ type codexResponsesBodyResult struct {
 func codexResponsesBody(
 	ctx context.Context,
 	cfg *config.Config,
+	auth *cliproxyauth.Auth,
 	baseModel string,
 	model string,
 	executorID string,
@@ -111,8 +113,8 @@ func codexResponsesBody(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, streaming)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, streaming)
+	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, streaming)
+	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, streaming)
 
 	body, err := thinking.ApplyThinking(body, model, from.String(), to.String(), executorID)
 	if err != nil {
@@ -124,13 +126,38 @@ func codexResponsesBody(
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex", body)
-	body, _ = sjson.DeleteBytes(body, "previous_response_id")
+	body, err = preserveCodexPreviousResponseID(body, req.Payload)
+	if err != nil {
+		return codexResponsesBodyResult{}, err
+	}
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body = normalizeCodexInstructions(body)
+	if cfg == nil || cfg.DisableImageGeneration == config.DisableImageGenerationOff {
+		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
+	}
 
 	return codexResponsesBodyResult{
 		Body:            body,
 		OriginalPayload: originalPayload,
 	}, nil
+}
+
+func preserveCodexPreviousResponseID(body []byte, requestPayload []byte) ([]byte, error) {
+	previousID := strings.TrimSpace(gjson.GetBytes(requestPayload, "previous_response_id").String())
+	if previousID == "" {
+		updated, errDelete := sjson.DeleteBytes(body, "previous_response_id")
+		if errDelete != nil {
+			return nil, fmt.Errorf("codex executor: remove previous_response_id: %w", errDelete)
+		}
+		return updated, nil
+	}
+	updated, errSet := sjson.SetBytes(body, "previous_response_id", previousID)
+	if errSet != nil {
+		return nil, fmt.Errorf("codex executor: preserve previous_response_id: %w", errSet)
+	}
+	if got := strings.TrimSpace(gjson.GetBytes(updated, "previous_response_id").String()); got != previousID {
+		return nil, fmt.Errorf("codex executor: previous_response_id was not preserved")
+	}
+	return updated, nil
 }

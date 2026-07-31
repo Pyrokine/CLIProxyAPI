@@ -1163,6 +1163,107 @@ func TestClaudeExecutor_CountTokens_InvalidGzipErrorBodyReturnsDecodeMessage(t *
 	)
 }
 
+func TestClaudeExecutorExecuteValidatesTranslatedStream(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name:    "upstream error event",
+			body:    "data: {\"type\":\"error\",\"error\":{\"message\":\"rate limited\"}}\n\n",
+			wantErr: "upstream returned error event: rate limited",
+		},
+		{
+			name: "malformed event",
+			body: "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\"}}\n\n" +
+				"data: {malformed\n\n",
+			wantErr: "upstream returned malformed stream data",
+		},
+		{
+			name: "missing message stop",
+			body: "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-test\"}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+			wantErr: "missing message_stop",
+		},
+		{
+			name: "valid stream",
+			body: "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" +
+				"data: {\"type\":\"message_stop\"}\n\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer server.Close()
+
+			executor := NewClaudeExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{
+				"api_key":  "key-123",
+				"base_url": server.URL,
+			}}
+			_, err := executor.Execute(
+				context.Background(),
+				auth,
+				cliproxyexecutor.Request{
+					Model:   "claude-3-5-sonnet-20241022",
+					Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+				},
+				cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")},
+			)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Execute error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Execute error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+type repeatedByteReader byte
+
+func (r repeatedByteReader) Read(p []byte) (int, error) {
+	for index := range p {
+		p[index] = byte(r)
+	}
+	return len(p), nil
+}
+
+func TestClaudeExecutorExecuteRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.CopyN(w, repeatedByteReader('x'), maxClaudeResponseBytes+1)
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	_, err := executor.Execute(
+		context.Background(),
+		auth,
+		cliproxyexecutor.Request{
+			Model:   "claude-3-5-sonnet-20241022",
+			Payload: []byte(`{"messages":[{"role":"user","content":"hi"}]}`),
+		},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+	)
+	if err == nil || !strings.Contains(err.Error(), "upstream response exceeds 50 MiB limit") {
+		t.Fatalf("Execute error = %v, want response size error", err)
+	}
+}
+
 func TestClaudeStreamingValidator(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1189,11 +1290,20 @@ func TestClaudeStreamingValidator(t *testing.T) {
 			wantErr: "ended before message completion",
 		},
 		{
+			name: "missing message stop",
+			lines: []string{
+				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+			},
+			wantErr: "missing message_stop",
+		},
+		{
 			name: "valid stream",
 			lines: []string{
 				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`,
 				`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`data: {"type":"message_stop"}`,
 			},
 		},
 	}

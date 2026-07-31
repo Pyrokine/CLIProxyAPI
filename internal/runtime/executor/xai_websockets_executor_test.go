@@ -20,6 +20,51 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestXAIWebsocketsExecuteStreamFreeUsageUpgradeSetsRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"code":"subscription:free-usage-exhausted","error":"included free usage exhausted"}`))
+	}))
+	defer server.Close()
+
+	exec := NewXAIWebsocketsExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		ID:       "xai-auth",
+		Provider: "xai",
+		Attributes: map[string]string{
+			"base_url":   server.URL,
+			"websockets": "true",
+		},
+		Metadata: map[string]any{"access_token": "xai-token"},
+	}
+	_, err := exec.ExecuteStream(
+		cliproxyexecutor.WithDownstreamWebsocket(context.Background()),
+		auth,
+		cliproxyexecutor.Request{Model: "grok-4.3", Payload: []byte(`{"model":"grok-4.3","stream":true,"input":"hello"}`)},
+		cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatOpenAIResponse,
+			ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		},
+	)
+	if err == nil {
+		t.Fatal("ExecuteStream() error = nil")
+	}
+	status, ok := err.(interface {
+		StatusCode() int
+		RetryAfter() *time.Duration
+	})
+	if !ok {
+		t.Fatalf("ExecuteStream() error type = %T, want status error", err)
+	}
+	if status.StatusCode() != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", status.StatusCode())
+	}
+	if retryAfter := status.RetryAfter(); retryAfter == nil || *retryAfter != xaiFreeUsageExhaustedCooldown {
+		t.Fatalf("retryAfter = %v, want %v", retryAfter, xaiFreeUsageExhaustedCooldown)
+	}
+}
+
 func TestXAIWebsocketsExecuteStreamSendsResponseCreateWithPreviousResponseID(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	capturedPayload := make(chan []byte, 1)

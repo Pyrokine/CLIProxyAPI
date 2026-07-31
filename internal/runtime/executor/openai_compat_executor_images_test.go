@@ -9,10 +9,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -166,13 +168,17 @@ func TestOpenAICompatExecutorImagesMultipartPassthrough(t *testing.T) {
 }
 
 func TestOpenAICompatExecutorImagesStreamPassthrough(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+	registerTestUsagePlugin(t, plugin)
 	var gotBody []byte
 	server := httptest.NewServer(
 		http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
 				gotBody, _ = io.ReadAll(r.Body)
 				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = w.Write([]byte("data: {\"ok\":true}\n\n"))
+				_, _ = w.Write(
+					[]byte("data: {\"ok\":true}\n\ndata: {\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}\n\n"),
+				)
 			},
 		),
 	)
@@ -202,8 +208,24 @@ func TestOpenAICompatExecutorImagesStreamPassthrough(t *testing.T) {
 		}
 		chunks = append(chunks, string(chunk.Payload))
 	}
-	if got := strings.Join(chunks, ""); got != "data: {\"ok\":true}\n\n" {
+	wantStream := "data: {\"ok\":true}\n\ndata: {\"service_tier\":\"priority\",\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}\n\n"
+	if got := strings.Join(chunks, ""); got != wantStream {
 		t.Fatalf("stream payload = %q", got)
+	}
+	select {
+	case record := <-plugin.records:
+		if record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 || record.Detail.TotalTokens != 5 {
+			t.Fatalf("usage detail = %+v", record.Detail)
+		}
+		if record.ResponseServiceTier != "priority" || record.Detail.ResponseServiceTier != "priority" {
+			t.Fatalf(
+				"response tiers = (%q, %q), want priority",
+				record.ResponseServiceTier,
+				record.Detail.ResponseServiceTier,
+			)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for image stream usage record")
 	}
 	if got := gjson.GetBytes(gotBody, "model").String(); got != "upstream-image" {
 		t.Fatalf("model = %q, want upstream-image; body=%s", got, gotBody)

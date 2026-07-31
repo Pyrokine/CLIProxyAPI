@@ -21,10 +21,13 @@ import (
 )
 
 const (
-	apiAttemptsKey          = "API_UPSTREAM_ATTEMPTS"
-	apiRequestKey           = "API_REQUEST"
-	apiResponseKey          = "API_RESPONSE"
-	apiWebsocketTimelineKey = "API_WEBSOCKET_TIMELINE"
+	apiAttemptsKey                      = "API_UPSTREAM_ATTEMPTS"
+	apiRequestKey                       = "API_REQUEST"
+	apiResponseKey                      = "API_RESPONSE"
+	apiWebsocketTimelineKey             = "API_WEBSOCKET_TIMELINE"
+	apiRequestSourceFailedKey           = "API_REQUEST_SOURCE_FAILED"
+	apiResponseSourceFailedKey          = "API_RESPONSE_SOURCE_FAILED"
+	apiWebsocketTimelineSourceFailedKey = "API_WEBSOCKET_TIMELINE_SOURCE_FAILED"
 )
 
 // upstreamRequestLog captures the outbound upstream request details for logging.
@@ -42,8 +45,6 @@ type upstreamRequestLog struct {
 
 type upstreamAttempt struct {
 	index                int
-	request              string
-	response             *strings.Builder
 	responseSource       *logging.FileBodySource
 	responseIntroWritten bool
 	statusWritten        bool
@@ -157,28 +158,32 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	}
 	builder.WriteString("\n\n")
 
-	requestText := builder.String()
-	if source, ok := apiRequestSource(ginCtx); ok {
-		if errWrite := source.AppendBytes([]byte(requestText)); errWrite == nil {
-			requestText = ""
+	requestData := []byte(builder.String())
+	if source, ok := apiRequestSource(ginCtx); ok &&
+		!fileBodySourceFailed(ginCtx, apiRequestSourceFailedKey) {
+		if errWrite := source.AppendBytes(requestData); errWrite == nil {
+			requestData = nil
 		} else {
 			log.WithError(errWrite).Warn("failed to append api request log part")
-			requestText = drainFileBodySourceToString(source) + requestText
-			disableFileBodySource(ginCtx, logging.APIRequestSourceContextKey, source)
+			moveFileBodySourceToFallback(
+				ginCtx,
+				logging.APIRequestSourceContextKey,
+				apiRequestSourceFailedKey,
+				source,
+				requestLogFallbackBuffer(ginCtx, apiRequestKey),
+			)
 		}
+	}
+	if len(requestData) > 0 {
+		requestLogFallbackBuffer(ginCtx, apiRequestKey).Append(requestData)
 	}
 
 	attempt := &upstreamAttempt{
 		index:          index,
-		request:        requestText,
-		response:       &strings.Builder{},
 		responseSource: apiResponseSourceOrNil(ginCtx),
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
-	if requestText != "" {
-		updateAggregatedRequest(ginCtx, attempts)
-	}
 }
 
 // recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
@@ -191,7 +196,7 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
+	_, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(ginCtx, attempt)
 	addRequestTimelineEvent(
 		ginCtx, "upstream.response.headers", fmt.Sprintf("attempt=%d status=%d", attempt.index, status),
@@ -209,8 +214,6 @@ func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 		attempt.headersWritten = true
 		writeAttemptResponse(ginCtx, attempt, []byte("\n"))
 	}
-
-	updateAggregatedResponseIfMemoryBacked(ginCtx, attempts)
 }
 
 // recordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
@@ -222,7 +225,7 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
+	_, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(ginCtx, attempt)
 	addRequestTimelineEvent(ginCtx, "upstream.response.error", fmt.Sprintf("attempt=%d", attempt.index))
 
@@ -235,8 +238,6 @@ func recordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 	}
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Error: %s\n", err.Error())))
 	attempt.errorWritten = true
-
-	updateAggregatedResponseIfMemoryBacked(ginCtx, attempts)
 }
 
 // appendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
@@ -253,7 +254,7 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if ginCtx == nil {
 		return
 	}
-	attempts, attempt := ensureAttempt(ginCtx)
+	_, attempt := ensureAttempt(ginCtx)
 	ensureResponseIntro(ginCtx, attempt)
 	addRequestTimelineEventOnce(ginCtx, "upstream.response.first_body", fmt.Sprintf("attempt=%d", attempt.index))
 
@@ -274,8 +275,6 @@ func appendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	}
 	writeAttemptResponse(ginCtx, attempt, data)
 	attempt.bodyHasContent = true
-
-	updateAggregatedResponseIfMemoryBacked(ginCtx, attempts)
 }
 
 func recordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
@@ -498,22 +497,29 @@ func ensureAttempt(ginCtx *gin.Context) ([]*upstreamAttempt, *upstreamAttempt) {
 	if len(attempts) == 0 {
 		attempt := &upstreamAttempt{
 			index:          1,
-			response:       &strings.Builder{},
 			responseSource: apiResponseSourceOrNil(ginCtx),
 		}
-		if source, ok := apiRequestSource(ginCtx); ok {
-			if errWrite := source.AppendBytes([]byte("=== API REQUEST 1 ===\n<missing>\n\n")); errWrite != nil {
+		missingRequest := []byte("=== API REQUEST 1 ===\n<missing>\n\n")
+		if source, ok := apiRequestSource(ginCtx); ok &&
+			!fileBodySourceFailed(ginCtx, apiRequestSourceFailedKey) {
+			if errWrite := source.AppendBytes(missingRequest); errWrite == nil {
+				missingRequest = nil
+			} else {
 				log.WithError(errWrite).Warn("failed to append missing api request log part")
-				attempt.request = "=== API REQUEST 1 ===\n<missing>\n\n"
+				moveFileBodySourceToFallback(
+					ginCtx,
+					logging.APIRequestSourceContextKey,
+					apiRequestSourceFailedKey,
+					source,
+					requestLogFallbackBuffer(ginCtx, apiRequestKey),
+				)
 			}
-		} else {
-			attempt.request = "=== API REQUEST 1 ===\n<missing>\n\n"
+		}
+		if len(missingRequest) > 0 {
+			requestLogFallbackBuffer(ginCtx, apiRequestKey).Append(missingRequest)
 		}
 		attempts = []*upstreamAttempt{attempt}
 		ginCtx.Set(apiAttemptsKey, attempts)
-		if attempt.request != "" {
-			updateAggregatedRequest(ginCtx, attempts)
-		}
 	}
 	return attempts, attempts[len(attempts)-1]
 }
@@ -535,7 +541,7 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 	if attempt.responseSource == nil {
 		attempt.responseSource = apiResponseSourceOrNil(ginCtx)
 	}
-	if attempt.responseSource != nil {
+	if attempt.responseSource != nil && !fileBodySourceFailed(ginCtx, apiResponseSourceFailedKey) {
 		if errWrite := attempt.responseSource.AppendBytes(payload); errWrite == nil {
 			if ginCtx != nil {
 				ginCtx.Set(logging.APIResponseCapturedContextKey, true)
@@ -543,67 +549,18 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 			return
 		} else {
 			log.WithError(errWrite).Warn("failed to append api response log part")
-			if attempt.response == nil {
-				attempt.response = &strings.Builder{}
+			if moveFileBodySourceToFallback(
+				ginCtx,
+				logging.APIResponseSourceContextKey,
+				apiResponseSourceFailedKey,
+				attempt.responseSource,
+				requestLogFallbackBuffer(ginCtx, apiResponseKey),
+			) {
+				attempt.responseSource = nil
 			}
-			if existing, errRead := attempt.responseSource.Bytes(); errRead == nil && len(existing) > 0 {
-				attempt.response.Write(existing)
-				if !bytes.HasSuffix(existing, []byte("\n")) {
-					attempt.response.WriteByte('\n')
-				}
-			} else if errRead != nil {
-				log.WithError(errRead).Warn("failed to read api response source for fallback")
-			}
-			disableFileBodySource(ginCtx, logging.APIResponseSourceContextKey, attempt.responseSource)
-			attempt.responseSource = nil
 		}
 	}
-	if attempt.response == nil {
-		attempt.response = &strings.Builder{}
-	}
-	attempt.response.Write(payload)
-}
-
-func updateAggregatedRequest(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if ginCtx == nil {
-		return
-	}
-	var builder strings.Builder
-	for _, attempt := range attempts {
-		builder.WriteString(attempt.request)
-	}
-	ginCtx.Set(apiRequestKey, []byte(builder.String()))
-}
-
-func updateAggregatedResponseIfMemoryBacked(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if apiResponseSourceOrNil(ginCtx) != nil {
-		return
-	}
-	updateAggregatedResponse(ginCtx, attempts)
-}
-
-func updateAggregatedResponse(ginCtx *gin.Context, attempts []*upstreamAttempt) {
-	if ginCtx == nil {
-		return
-	}
-	var builder strings.Builder
-	for idx, attempt := range attempts {
-		if attempt == nil || attempt.response == nil {
-			continue
-		}
-		responseText := attempt.response.String()
-		if responseText == "" {
-			continue
-		}
-		builder.WriteString(responseText)
-		if !strings.HasSuffix(responseText, "\n") {
-			builder.WriteString("\n")
-		}
-		if idx < len(attempts)-1 {
-			builder.WriteString("\n")
-		}
-	}
-	ginCtx.Set(apiResponseKey, []byte(builder.String()))
+	requestLogFallbackBuffer(ginCtx, apiResponseKey).Append(payload)
 }
 
 func apiRequestSource(ginCtx *gin.Context) (*logging.FileBodySource, bool) {
@@ -626,16 +583,19 @@ func appendAPIWebsocketTimeline(ginCtx *gin.Context, chunk []byte) {
 	if len(data) == 0 {
 		return
 	}
-	if source, ok := apiWebsocketTimelineSource(ginCtx); ok {
+	if source, ok := apiWebsocketTimelineSource(ginCtx); ok &&
+		!fileBodySourceFailed(ginCtx, apiWebsocketTimelineSourceFailedKey) {
 		if errAppend := source.AppendPart(data); errAppend == nil {
 			return
 		} else {
 			log.WithError(errAppend).Warn("failed to append api websocket timeline log part")
-			existing := drainFileBodySourceToBytes(source)
-			disableFileBodySource(ginCtx, logging.APIWebsocketTimelineSourceContextKey, source)
-			if len(existing) > 0 {
-				appendAPIWebsocketTimelineBytes(ginCtx, existing)
-			}
+			moveFileBodySourceToFallback(
+				ginCtx,
+				logging.APIWebsocketTimelineSourceContextKey,
+				apiWebsocketTimelineSourceFailedKey,
+				source,
+				requestLogFallbackBuffer(ginCtx, apiWebsocketTimelineKey),
+			)
 		}
 	}
 	appendAPIWebsocketTimelineBytes(ginCtx, data)
@@ -645,20 +605,16 @@ func appendAPIWebsocketTimelineBytes(ginCtx *gin.Context, data []byte) {
 	if ginCtx == nil || len(data) == 0 {
 		return
 	}
-	if existing, exists := ginCtx.Get(apiWebsocketTimelineKey); exists {
-		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
-			combined := make([]byte, 0, len(existingBytes)+len(data)+2)
-			combined = append(combined, existingBytes...)
-			if !bytes.HasSuffix(existingBytes, []byte("\n")) {
-				combined = append(combined, '\n')
-			}
-			combined = append(combined, '\n')
-			combined = append(combined, data...)
-			ginCtx.Set(apiWebsocketTimelineKey, combined)
-			return
+	buffer := requestLogFallbackBuffer(ginCtx, apiWebsocketTimelineKey)
+	if buffer.Len() > 0 {
+		if !buffer.HasSuffix([]byte("\n")) {
+			buffer.Append([]byte("\n"))
 		}
+		buffer.Append([]byte("\n"))
+	} else if source, ok := apiWebsocketTimelineSource(ginCtx); ok && source.HasPayload() {
+		buffer.Append([]byte("\n"))
 	}
-	ginCtx.Set(apiWebsocketTimelineKey, bytes.Clone(data))
+	buffer.Append(data)
 }
 
 func apiWebsocketTimelineSource(ginCtx *gin.Context) (*logging.FileBodySource, bool) {
@@ -680,20 +636,52 @@ func fileBodySourceFromGin(ginCtx *gin.Context, key string) (*logging.FileBodySo
 	return source, true
 }
 
-func drainFileBodySourceToString(source *logging.FileBodySource) string {
-	return string(drainFileBodySourceToBytes(source))
+func requestLogFallbackBuffer(ginCtx *gin.Context, key string) *logging.BoundedLogBuffer {
+	if ginCtx == nil {
+		return logging.NewBoundedLogBuffer()
+	}
+	if value, exists := ginCtx.Get(key); exists {
+		if buffer, ok := value.(*logging.BoundedLogBuffer); ok && buffer != nil {
+			return buffer
+		}
+	}
+	buffer := logging.NewBoundedLogBuffer()
+	ginCtx.Set(key, buffer)
+	return buffer
 }
 
-func drainFileBodySourceToBytes(source *logging.FileBodySource) []byte {
+func fileBodySourceFailed(ginCtx *gin.Context, key string) bool {
+	if ginCtx == nil {
+		return false
+	}
+	value, exists := ginCtx.Get(key)
+	failed, _ := value.(bool)
+	return exists && failed
+}
+
+func moveFileBodySourceToFallback(
+	ginCtx *gin.Context,
+	sourceKey string,
+	failedKey string,
+	source *logging.FileBodySource,
+	fallback *logging.BoundedLogBuffer,
+) bool {
 	if source == nil {
-		return nil
+		return true
 	}
-	existing, errRead := source.Bytes()
-	if errRead != nil {
-		log.WithError(errRead).Warn("failed to read log source for fallback")
-		return nil
+	if source.HasPayload() {
+		existing, errRead := source.Bytes()
+		if errRead != nil {
+			if ginCtx != nil {
+				ginCtx.Set(failedKey, true)
+			}
+			log.WithError(errRead).Warn("failed to read log source for fallback; retaining source prefix")
+			return false
+		}
+		fallback.Append(existing)
 	}
-	return existing
+	disableFileBodySource(ginCtx, sourceKey, source)
+	return true
 }
 
 func disableFileBodySource(ginCtx *gin.Context, key string, source *logging.FileBodySource) {
@@ -704,8 +692,23 @@ func disableFileBodySource(ginCtx *gin.Context, key string, source *logging.File
 		return
 	}
 	if errCleanup := source.Cleanup(); errCleanup != nil {
+		fileBodySourceCleanupQueue(ginCtx).Add(source)
 		log.WithError(errCleanup).Warn("failed to clean up disabled log part files")
 	}
+}
+
+func fileBodySourceCleanupQueue(ginCtx *gin.Context) *logging.FileBodySourceCleanupQueue {
+	if ginCtx == nil {
+		return nil
+	}
+	if value, exists := ginCtx.Get(logging.FileBodySourceCleanupQueueContextKey); exists {
+		if queue, ok := value.(*logging.FileBodySourceCleanupQueue); ok && queue != nil {
+			return queue
+		}
+	}
+	queue := &logging.FileBodySourceCleanupQueue{}
+	ginCtx.Set(logging.FileBodySourceCleanupQueueContextKey, queue)
+	return queue
 }
 
 func markAPIResponseTimestamp(ginCtx *gin.Context) {

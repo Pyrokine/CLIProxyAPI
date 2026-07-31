@@ -137,12 +137,11 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(
 		if sess != nil {
 			sess.reqMu.Lock()
 			readCh = make(chan codexWebsocketRead, 4096)
-			sess.setActive(readCh)
 		}
 	}
-	releaseSessionRequest := func() {
+	releaseSessionRequest := func(conn *websocket.Conn) {
 		if sess != nil {
-			sess.clearActive(readCh)
+			sess.clearActive(conn, readCh)
 			sess.reqMu.Unlock()
 		}
 	}
@@ -154,36 +153,36 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(
 
 	conn, respHS, errDial := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 	if errDial != nil {
-		releaseSessionRequest()
-		bodyErr := websocketHandshakeBody(respHS)
+		releaseSessionRequest(conn)
+		bodyErr, normalizedDialErr := xaiWebsocketDialError(respHS, errDial)
 		if respHS != nil {
 			recordAPIWebsocketUpgradeRejection(
 				ctx, e.cfg, websocketUpgradeRequestLog(wsReqLog), respHS.StatusCode, respHS.Header.Clone(), bodyErr,
 			)
 		}
-		if respHS != nil && respHS.StatusCode > 0 {
-			return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
-		}
-		recordAPIResponseError(ctx, e.cfg, errDial)
-		recordAPIWebsocketError(ctx, e.cfg, "dial", errDial)
-		return nil, errDial
+		recordAPIResponseError(ctx, e.cfg, normalizedDialErr)
+		recordAPIWebsocketError(ctx, e.cfg, "dial", normalizedDialErr)
+		return nil, normalizedDialErr
 	}
 	recordXAIWebsocketHandshake(ctx, e.cfg, respHS)
 	if sess == nil {
 		logXAIWebsocketConnected(executionSessionID, authID, wsURL)
+	} else {
+		sess.setActive(conn, readCh)
 	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		clearActiveOnReturn := true
 		defer func() {
 			if clearActiveOnReturn {
-				releaseSessionRequest()
+				releaseSessionRequest(conn)
 			}
 		}()
 		if sess != nil {
 			e.invalidateUpstreamConn(sess, conn, "send_error", errSend)
 			connRetry, respHSRetry, errDialRetry := e.ensureUpstreamConn(ctx, auth, sess, authID, wsURL, wsHeaders)
 			if errDialRetry == nil && connRetry != nil {
+				sess.setActive(connRetry, readCh)
 				wsReqLogRetry := xaiWebsocketRequestLog(wsURL, wsHeaders, wsReqBody, e.Identifier(), auth)
 				recordUpstreamRequest(ctx, e.cfg, wsURL, wsHeaders.Clone(), wsReqBody, e.Identifier(), auth)
 				recordAPIWebsocketRequest(ctx, e.cfg, wsReqLogRetry)
@@ -198,10 +197,20 @@ func (e *XAIWebsocketsExecutor) ExecuteStream(
 					return nil, errSendRetry
 				}
 			} else {
-				closeHTTPResponseBody(respHSRetry, "xai websockets executor: close handshake response body error")
-				recordAPIResponseError(ctx, e.cfg, errDialRetry)
-				recordAPIWebsocketError(ctx, e.cfg, "dial_retry", errDialRetry)
-				return nil, errDialRetry
+				bodyErr, normalizedDialErr := xaiWebsocketDialError(respHSRetry, errDialRetry)
+				if respHSRetry != nil {
+					recordAPIWebsocketUpgradeRejection(
+						ctx,
+						e.cfg,
+						websocketUpgradeRequestLog(wsReqLog),
+						respHSRetry.StatusCode,
+						respHSRetry.Header.Clone(),
+						bodyErr,
+					)
+				}
+				recordAPIResponseError(ctx, e.cfg, normalizedDialErr)
+				recordAPIWebsocketError(ctx, e.cfg, "dial_retry", normalizedDialErr)
+				return nil, normalizedDialErr
 			}
 		} else {
 			recordAPIResponseError(ctx, e.cfg, errSend)
@@ -252,7 +261,7 @@ func (e *XAIWebsocketsExecutor) streamXAIWebsocketResponses(
 	}
 	if sess != nil {
 		defer func() {
-			sess.clearActive(readCh)
+			sess.clearActive(conn, readCh)
 			sess.reqMu.Unlock()
 		}()
 	}
@@ -1149,6 +1158,14 @@ func xaiGenerateFalseCompletedPayload(createdPayload []byte) []byte {
 		completed, _ = sjson.SetRawBytes(completed, "response.output", []byte("[]"))
 	}
 	return completed
+}
+
+func xaiWebsocketDialError(resp *http.Response, dialErr error) ([]byte, error) {
+	body := websocketHandshakeBody(resp)
+	if resp != nil && resp.StatusCode > 0 {
+		return body, xaiStatusErr(resp.StatusCode, body)
+	}
+	return body, dialErr
 }
 
 func parseXAIWebsocketError(payload []byte) (error, bool) {

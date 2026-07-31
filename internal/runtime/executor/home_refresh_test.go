@@ -60,6 +60,44 @@ func TestRefreshAuthViaHomeAcceptsAuthEnvelope(t *testing.T) {
 	}
 }
 
+func TestRefreshAuthViaHomeUsesContextClient(t *testing.T) {
+	payload := []byte(`{"auth":{"provider":"codex","metadata":{"token":"local"}},"auth_index":"local-index"}`)
+	localClient := &testHomeRefreshClient{heartbeat: true, payload: payload}
+	globalClient := &testHomeRefreshClient{heartbeat: true, payload: []byte(`{"auth_index":"global-index"}`)}
+	previous := currentHomeRefreshClient
+	currentHomeRefreshClient = func() homeRefreshClient { return globalClient }
+	t.Cleanup(func() { currentHomeRefreshClient = previous })
+
+	ctx := cliproxyauth.WithHomeRefreshClient(context.Background(), localClient)
+	updated, attempted, errRefresh := refreshAuthViaHome(
+		ctx,
+		&config.Config{Home: config.HomeConfig{Enabled: true}},
+		&cliproxyauth.Auth{ID: "auth-old", Provider: "codex", Index: "requested-index"},
+	)
+	if errRefresh != nil || !attempted {
+		t.Fatalf("refreshAuthViaHome() = (%#v, %t, %v)", updated, attempted, errRefresh)
+	}
+	if localClient.index != "requested-index" || globalClient.index != "" {
+		t.Fatalf("refresh clients indexes = local %q, global %q", localClient.index, globalClient.index)
+	}
+	if updated == nil || updated.Index != "local-index" {
+		t.Fatalf("updated auth = %#v", updated)
+	}
+
+	nilCtx := cliproxyauth.WithHomeRefreshClient(context.Background(), nil)
+	_, attempted, errRefresh = refreshAuthViaHome(
+		nilCtx,
+		&config.Config{Home: config.HomeConfig{Enabled: true}},
+		&cliproxyauth.Auth{ID: "auth-old", Provider: "codex", Index: "requested-index"},
+	)
+	if !attempted || errRefresh == nil {
+		t.Fatalf("explicit nil Home client = attempted %t, error %v", attempted, errRefresh)
+	}
+	if globalClient.index != "" {
+		t.Fatalf("explicit nil Home client used compatibility client: %q", globalClient.index)
+	}
+}
+
 func TestRefreshAuthViaHomeMapsHomeErrorEnvelope(t *testing.T) {
 	payload := []byte(`{"error":{"type":"authentication_error","message":"refresh denied"}}`)
 	client := &testHomeRefreshClient{heartbeat: true, payload: payload}

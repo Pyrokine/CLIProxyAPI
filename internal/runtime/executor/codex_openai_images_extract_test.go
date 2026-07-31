@@ -3,6 +3,8 @@ package executor
 import (
 	"testing"
 
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
 )
 
@@ -94,12 +96,76 @@ func TestCodexExtractImageResults_WrongEventType(t *testing.T) {
 	}
 }
 
+func TestParseCodexOpenAIImageEventAcceptsMultilineData(t *testing.T) {
+	frame := []byte("event: response.completed\ndata: {\"type\":\ndata: \"response.completed\",\"response\":{}}\n\n")
+	eventData, ok, err := parseCodexOpenAIImageEvent(frame)
+	if err != nil {
+		t.Fatalf("parseCodexOpenAIImageEvent error: %v", err)
+	}
+	if !ok {
+		t.Fatal("parseCodexOpenAIImageEvent returned no data")
+	}
+	if got := gjson.GetBytes(eventData, "type").String(); got != "response.completed" {
+		t.Fatalf("event type = %q, want response.completed", got)
+	}
+}
+
+func TestParseCodexOpenAIImageEventNormalizesResponseDone(t *testing.T) {
+	frame := []byte("event: response.done\ndata: {\"type\":\"response.done\",\"response\":{}}\n\n")
+	eventData, ok, err := parseCodexOpenAIImageEvent(frame)
+	if err != nil {
+		t.Fatalf("parseCodexOpenAIImageEvent error: %v", err)
+	}
+	if !ok {
+		t.Fatal("parseCodexOpenAIImageEvent returned no data")
+	}
+	if got := gjson.GetBytes(eventData, "type").String(); got != "response.completed" {
+		t.Fatalf("event type = %q, want response.completed", got)
+	}
+}
+
 func TestParseCodexImageToolUsage(t *testing.T) {
-	detail, ok := parseCodexImageToolUsage([]byte(`{"response":{"tool_usage":{"image_gen":{"input_tokens":7,"output_tokens":9,"total_tokens":16,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}}}`))
+	detail, ok := parseCodexImageToolUsage([]byte(`{"response":{"service_tier":"priority","tool_usage":{"image_gen":{"input_tokens":7,"output_tokens":9,"total_tokens":16,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}}}`))
 	if !ok {
 		t.Fatal("expected image usage to parse")
 	}
 	if detail.InputTokens != 7 || detail.OutputTokens != 9 || detail.TotalTokens != 16 || detail.CachedTokens != 3 || detail.ReasoningTokens != 2 {
 		t.Fatalf("detail = %#v, want parsed OpenAI-style usage", detail)
+	}
+	if detail.ResponseServiceTier != "priority" {
+		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
+	}
+}
+
+func TestParseCodexImageToolUsagePreservesZeroTokens(t *testing.T) {
+	detail, ok := parseCodexImageToolUsage(
+		[]byte(`{"response":{"service_tier":"priority","tool_usage":{"image_gen":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}}`),
+	)
+	if !ok {
+		t.Fatal("expected zero image usage to parse")
+	}
+	if detail != (usage.Detail{ResponseServiceTier: "priority"}) {
+		t.Fatalf("detail = %#v", detail)
+	}
+}
+
+func TestCodexOpenAIImageServiceTierDoesNotInjectDefaultMetadata(t *testing.T) {
+	req := cliproxyexecutor.Request{Payload: []byte(`{"model":"gpt-image-2"}`)}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.ServiceTierMetadataKey: usage.DefaultServiceTier,
+	}}
+
+	if got := codexOpenAIImageServiceTier(req, opts); got != "" {
+		t.Fatalf("service tier = %q, want empty", got)
+	}
+
+	opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey] = "flex"
+	if got := codexOpenAIImageServiceTier(req, opts); got != "flex" {
+		t.Fatalf("service tier = %q, want flex", got)
+	}
+
+	req.Payload = []byte(`{"model":"gpt-image-2","service_tier":"priority"}`)
+	if got := codexOpenAIImageServiceTier(req, opts); got != "priority" {
+		t.Fatalf("service tier = %q, want priority", got)
 	}
 }
