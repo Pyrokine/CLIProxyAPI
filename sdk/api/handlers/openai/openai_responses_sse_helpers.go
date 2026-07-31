@@ -26,12 +26,19 @@ func responsesSSEFrameLen(chunk []byte) int {
 	}
 }
 
-func responsesSSENeedsMoreData(chunk []byte) bool {
-	trimmed := bytes.TrimSpace(chunk)
-	if len(trimmed) == 0 {
-		return false
+func responsesSSEPrefixLenForPending(pending, chunk []byte) int {
+	if len(chunk) == 0 {
+		return 0
 	}
-	return responsesSSEHasField(trimmed, []byte("event:")) && !responsesSSEHasField(trimmed, []byte("data:"))
+	tailLen := min(len(pending), 3)
+	headLen := min(len(chunk), 3)
+	bridge := make([]byte, 0, tailLen+headLen)
+	bridge = append(bridge, pending[len(pending)-tailLen:]...)
+	bridge = append(bridge, chunk[:headLen]...)
+	if frameLen := responsesSSEFrameLen(bridge); frameLen > tailLen {
+		return frameLen - tailLen
+	}
+	return responsesSSEFrameLen(chunk)
 }
 
 func responsesSSEHasField(chunk []byte, prefix []byte) bool {
@@ -52,15 +59,8 @@ func responsesSSEHasField(chunk []byte, prefix []byte) bool {
 	return false
 }
 
-func responsesSSECanEmitWithoutDelimiter(chunk []byte) bool {
-	trimmed := bytes.TrimSpace(chunk)
-	if len(trimmed) == 0 || responsesSSENeedsMoreData(trimmed) || !responsesSSEHasField(trimmed, []byte("data:")) {
-		return false
-	}
-	return responsesSSEDataLinesValid(trimmed)
-}
-
-func responsesSSEDataLinesValid(chunk []byte) bool {
+func responsesSSEDataPayload(chunk []byte) ([]byte, bool, bool) {
+	var dataLines [][]byte
 	s := chunk
 	for len(s) > 0 {
 		line := s
@@ -70,39 +70,21 @@ func responsesSSEDataLinesValid(chunk []byte) bool {
 		} else {
 			s = nil
 		}
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
+		line = bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue
 		}
-		data := bytes.TrimSpace(line[len("data:"):])
-		if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
-			continue
-		}
-		if !json.Valid(data) {
-			return false
-		}
+		dataLines = append(dataLines, bytes.TrimSpace(line[len("data:"):]))
 	}
-	return true
-}
-
-func responsesSSENeedsLineBreak(pending, chunk []byte) bool {
-	if len(pending) == 0 || len(chunk) == 0 {
-		return false
+	if len(dataLines) == 0 {
+		return nil, false, true
 	}
-	if bytes.HasSuffix(pending, []byte("\n")) || bytes.HasSuffix(pending, []byte("\r")) {
-		return false
+	payload := bytes.Join(dataLines, []byte("\n"))
+	if len(payload) == 0 {
+		return payload, true, false
 	}
-	if chunk[0] == '\n' || chunk[0] == '\r' {
-		return false
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return payload, true, true
 	}
-	trimmed := bytes.TrimLeft(chunk, " \t")
-	if len(trimmed) == 0 {
-		return false
-	}
-	for _, prefix := range [][]byte{[]byte("data:"), []byte("event:"), []byte("id:"), []byte("retry:"), []byte(":")} {
-		if bytes.HasPrefix(trimmed, prefix) {
-			return true
-		}
-	}
-	return false
+	return payload, true, json.Valid(payload)
 }

@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
@@ -86,6 +85,10 @@ func DecodeRequestBodyWithLimit(raw []byte, contentEncoding string, maxDecodedBy
 		return decoded, nil
 	}
 
+	limit := maxDecodedBytes
+	if limit <= 0 {
+		limit = maxDecodedRequestBodyBytes
+	}
 	var reader io.ReadCloser
 	switch encoding {
 	case "gzip":
@@ -101,7 +104,12 @@ func DecodeRequestBodyWithLimit(raw []byte, contentEncoding string, maxDecodedBy
 		}
 		reader = zr
 	case "zstd":
-		zr, errZstd := zstd.NewReader(bytes.NewReader(raw))
+		zr, errZstd := zstd.NewReader(
+			bytes.NewReader(raw),
+			zstd.WithDecoderConcurrency(1),
+			zstd.WithDecoderMaxWindow(uint64(limit)),
+			zstd.WithDecoderMaxMemory(uint64(limit)),
+		)
 		if errZstd != nil {
 			return nil, errZstd
 		}
@@ -110,10 +118,6 @@ func DecodeRequestBodyWithLimit(raw []byte, contentEncoding string, maxDecodedBy
 		return nil, fmt.Errorf("unsupported content-encoding: %s", contentEncoding)
 	}
 	defer func() { _ = reader.Close() }()
-	limit := maxDecodedBytes
-	if limit <= 0 {
-		limit = maxDecodedRequestBodyBytes
-	}
 	decoded, errRead := io.ReadAll(io.LimitReader(reader, limit+1))
 	if errRead != nil {
 		return nil, errRead
@@ -155,9 +159,12 @@ const (
 )
 
 type pinnedAuthContextKey struct{}
+type pinSelectedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
+type selectedAuthInfoCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 type disallowFreeAuthContextKey struct{}
+type requireResponsesContinuationContextKey struct{}
 
 // PluginInterceptorHost applies plugin interceptors around handler execution.
 type PluginInterceptorHost interface {
@@ -190,6 +197,23 @@ type pluginInterceptorSkipHost interface {
 	) pluginapi.StreamChunkInterceptResponse
 }
 
+type ImageArtifactRecord struct {
+	ID       string
+	SHA256   string
+	MIMEType string
+	Size     int64
+}
+
+type ImageArtifactStore interface {
+	PutBytes(context.Context, []byte, string) (ImageArtifactRecord, error)
+	PutDataURL(context.Context, string) (ImageArtifactRecord, error)
+	PutRemoteImage(context.Context, string) (ImageArtifactRecord, []byte, error)
+}
+
+type ImageArtifactURLBuilder interface {
+	ImageArtifactContentURL(*gin.Context, ImageArtifactRecord) (string, error)
+}
+
 type streamInterceptorDetector interface {
 	HasStreamInterceptors() bool
 }
@@ -219,6 +243,33 @@ func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) cont
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
+}
+
+// WithSelectedAuthInfoCallback returns a child context that receives non-secret selected auth details.
+func WithSelectedAuthInfoCallback(ctx context.Context, callback func(coreexecutor.SelectedAuthInfo)) context.Context {
+	if callback == nil {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, selectedAuthInfoCallbackContextKey{}, callback)
+}
+
+// WithPinSelectedAuth locks retries to the first auth selected for this request.
+func WithPinSelectedAuth(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, pinSelectedAuthContextKey{}, true)
+}
+
+// WithRequireResponsesContinuation restricts auth selection to native continuation owners.
+func WithRequireResponsesContinuation(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, requireResponsesContinuationContextKey{}, true)
 }
 
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
@@ -385,6 +436,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 
 	meta := make(map[string]any)
+	meta[coreexecutor.ServiceTierMetadataKey] = coreusage.ServiceTierFromContext(ctx)
 	if key != "" {
 		meta[idempotencyKeyMetadataKey] = key
 	}
@@ -397,11 +449,20 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
 	}
+	if selectedInfoCallback := selectedAuthInfoCallbackFromContext(ctx); selectedInfoCallback != nil {
+		meta[coreexecutor.SelectedAuthInfoCallbackMetadataKey] = selectedInfoCallback
+	}
+	if pinSelectedAuthFromContext(ctx) {
+		meta[coreexecutor.PinSelectedAuthMetadataKey] = true
+	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
+	}
+	if requireResponsesContinuationFromContext(ctx) {
+		meta[coreexecutor.RequireResponsesContinuationMetadataKey] = true
 	}
 	return meta
 }
@@ -422,7 +483,17 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 		return
 	}
 	serviceTier := coreusage.DefaultServiceTier
-	if node := gjson.GetBytes(rawJSON, "service_tier"); node.Exists() {
+	switch value := meta[coreexecutor.ServiceTierMetadataKey].(type) {
+	case string:
+		if value = strings.TrimSpace(value); value != "" {
+			serviceTier = value
+		}
+	case []byte:
+		if value := strings.TrimSpace(string(value)); value != "" {
+			serviceTier = value
+		}
+	}
+	if node := gjson.GetBytes(rawJSON, "service_tier"); node.Type == gjson.String {
 		if value := strings.TrimSpace(node.String()); value != "" {
 			serviceTier = value
 		}
@@ -456,6 +527,33 @@ func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
 	return nil
 }
 
+func selectedAuthInfoCallbackFromContext(ctx context.Context) func(coreexecutor.SelectedAuthInfo) {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx.Value(selectedAuthInfoCallbackContextKey{})
+	if callback, ok := raw.(func(coreexecutor.SelectedAuthInfo)); ok && callback != nil {
+		return callback
+	}
+	return nil
+}
+
+func requireResponsesContinuationFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	value, _ := ctx.Value(requireResponsesContinuationContextKey{}).(bool)
+	return value
+}
+
+func pinSelectedAuthFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	value, _ := ctx.Value(pinSelectedAuthContextKey{}).(bool)
+	return value
+}
+
 func executionSessionIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -479,10 +577,16 @@ type BaseAPIHandler struct {
 	AuthManager *coreauth.Manager
 
 	// Cfg holds the current application configuration.
-	Cfg *config.SDKConfig
+	cfgMu sync.RWMutex
+	Cfg   *config.SDKConfig
 
 	// PluginHost optionally applies plugin interceptors around upstream execution.
 	PluginHost PluginInterceptorHost
+
+	ImageArtifactStore      ImageArtifactStore
+	ImageArtifactURLBuilder ImageArtifactURLBuilder
+	TranslatorPluginHooks   sdktranslator.PluginHooks
+	UsageManager            *coreusage.Manager
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -507,10 +611,27 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 // Parameters:
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
-func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) { h.Cfg = cfg }
+func (h *BaseAPIHandler) UpdateClients(cfg *config.SDKConfig) {
+	if h == nil {
+		return
+	}
+	h.cfgMu.Lock()
+	h.Cfg = cfg
+	h.cfgMu.Unlock()
+}
+
+func (h *BaseAPIHandler) ConfigSnapshot() *config.SDKConfig {
+	if h == nil {
+		return nil
+	}
+	h.cfgMu.RLock()
+	defer h.cfgMu.RUnlock()
+	return h.Cfg
+}
 
 func (h *BaseAPIHandler) requestLoggingEnabled() bool {
-	return h != nil && h.Cfg != nil && h.Cfg.RequestLog
+	cfg := h.ConfigSnapshot()
+	return cfg != nil && cfg.RequestLog
 }
 
 // SetPluginHost configures the optional plugin interceptor host.
@@ -523,6 +644,36 @@ func (h *BaseAPIHandler) SetPluginHost(host PluginInterceptorHost) {
 		return
 	}
 	h.PluginHost = host
+}
+
+func (h *BaseAPIHandler) SetImageArtifactStore(store ImageArtifactStore) {
+	if h == nil {
+		return
+	}
+	h.ImageArtifactStore = store
+}
+
+func (h *BaseAPIHandler) SetImageArtifactURLBuilder(builder ImageArtifactURLBuilder) {
+	if h == nil {
+		return
+	}
+	h.ImageArtifactURLBuilder = builder
+}
+
+// SetUsageManager assigns the service-owned usage dispatcher.
+func (h *BaseAPIHandler) SetUsageManager(manager *coreusage.Manager) {
+	if h == nil {
+		return
+	}
+	h.UsageManager = manager
+}
+
+// SetTranslatorPluginHooks assigns translator hooks owned by this server.
+func (h *BaseAPIHandler) SetTranslatorPluginHooks(hooks sdktranslator.PluginHooks) {
+	if h == nil {
+		return
+	}
+	h.TranslatorPluginHooks = hooks
 }
 
 func isNilPluginInterceptorHost(host PluginInterceptorHost) bool {
@@ -539,7 +690,7 @@ func isNilPluginInterceptorHost(host PluginInterceptorHost) bool {
 }
 
 func (h *BaseAPIHandler) FilterModelsForCurrentAPIKey(c *gin.Context, models []map[string]any) []map[string]any {
-	if h == nil || h.Cfg == nil || len(models) == 0 {
+	if h == nil || h.ConfigSnapshot() == nil || len(models) == 0 {
 		return models
 	}
 	apiKey := apiKeyFromGinContext(c)
@@ -562,11 +713,12 @@ func (h *BaseAPIHandler) FilterModelsForCurrentAPIKey(c *gin.Context, models []m
 }
 
 func (h *BaseAPIHandler) modelCatalogModelDisabled(model string) bool {
-	if h == nil || h.Cfg == nil {
+	cfg := h.ConfigSnapshot()
+	if cfg == nil {
 		return false
 	}
 	for _, candidate := range h.modelAccessCandidates(model) {
-		if !h.Cfg.ModelCatalogModelEnabled(candidate) {
+		if !cfg.ModelCatalogModelEnabled(candidate) {
 			return true
 		}
 	}
@@ -574,11 +726,12 @@ func (h *BaseAPIHandler) modelCatalogModelDisabled(model string) bool {
 }
 
 func (h *BaseAPIHandler) apiKeyBlocksModel(apiKey, model string) bool {
-	if h == nil || h.Cfg == nil {
+	cfg := h.ConfigSnapshot()
+	if cfg == nil {
 		return false
 	}
 	for _, candidate := range h.modelAccessCandidates(model) {
-		if h.Cfg.APIKeyBlocksModel(apiKey, candidate) {
+		if cfg.APIKeyBlocksModel(apiKey, candidate) {
 			return true
 		}
 	}
@@ -694,7 +847,7 @@ func (h *BaseAPIHandler) GetAlt(c *gin.Context) string {
 //   - context.Context: The new context with cancellation and embedded values.
 //   - APIHandlerCancelFunc: A function to cancel the context and log the response.
 func (h *BaseAPIHandler) GetContextWithCancel(
-	handler interfaces.APIHandler,
+	handler APIHandler,
 	c *gin.Context,
 	ctx context.Context,
 ) (context.Context, APIHandlerCancelFunc) {
@@ -740,15 +893,18 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 	newCtx = logging.WithResponseTimingHolder(newCtx)
 	cancelCtx := newCtx
 	if requestCtx != nil && requestCtx != parentCtx {
+		watchCtx := newCtx
 		go func() {
 			select {
 			case <-requestCtx.Done():
 				cancel()
-			case <-newCtx.Done():
+			case <-watchCtx.Done():
 			}
 		}()
 	}
 	newCtx = util.WithGinContext(newCtx, c)
+	newCtx = coreusage.WithManager(newCtx, h.UsageManager)
+	newCtx = sdktranslator.WithPluginHooks(newCtx, h.TranslatorPluginHooks)
 	newCtx = context.WithValue(newCtx, handlerContextKey{}, handler)
 	return newCtx, func(params ...any) {
 		if c != nil {
@@ -761,13 +917,11 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 					return
 				}
 			}
-			if existing, exists := c.Get("API_RESPONSE"); exists {
-				if existingBytes, ok := existing.([]byte); ok && len(bytes.TrimSpace(existingBytes)) > 0 {
-					switch params[0].(type) {
-					case error, string:
-						cancel()
-						return
-					}
+			if existingBytes := requestLogContextBytes(c, "API_RESPONSE"); len(bytes.TrimSpace(existingBytes)) > 0 {
+				switch params[0].(type) {
+				case error, string:
+					cancel()
+					return
 				}
 			}
 
@@ -783,14 +937,11 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 				payload = []byte(data)
 			}
 			if len(payload) > 0 {
-				if existing, exists := c.Get("API_RESPONSE"); exists {
-					if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
-						trimmedPayload := bytes.TrimSpace(payload)
-						if len(trimmedPayload) > 0 && bytes.Contains(existingBytes, trimmedPayload) {
-							cancel()
-							return
-						}
-					}
+				existingBytes := requestLogContextBytes(c, "API_RESPONSE")
+				trimmedPayload := bytes.TrimSpace(payload)
+				if len(trimmedPayload) > 0 && bytes.Contains(existingBytes, trimmedPayload) {
+					cancel()
+					return
 				}
 				appendAPIResponse(c, payload)
 			}
@@ -806,7 +957,7 @@ func (h *BaseAPIHandler) StartNonStreamingKeepAlive(c *gin.Context, ctx context.
 	if h == nil || c == nil {
 		return func() {}
 	}
-	interval := NonStreamingKeepAliveInterval(h.Cfg)
+	interval := NonStreamingKeepAliveInterval(h.ConfigSnapshot())
 	if interval <= 0 {
 		return func() {}
 	}
@@ -865,20 +1016,46 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 		}
 	}
 
-	if existing, exists := c.Get("API_RESPONSE"); exists {
-		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
-			combined := make([]byte, 0, len(existingBytes)+len(data)+1)
-			combined = append(combined, existingBytes...)
-			if existingBytes[len(existingBytes)-1] != '\n' {
-				combined = append(combined, '\n')
-			}
-			combined = append(combined, data...)
-			c.Set("API_RESPONSE", combined)
-			return
+	buffer := requestLogContextBuffer(c, "API_RESPONSE")
+	if buffer.Len() > 0 && !buffer.HasSuffix([]byte("\n")) {
+		buffer.Append([]byte("\n"))
+	}
+	buffer.Append(data)
+}
+
+func requestLogContextBuffer(c *gin.Context, key string) *logging.BoundedLogBuffer {
+	if value, exists := c.Get(key); exists {
+		if buffer, ok := value.(*logging.BoundedLogBuffer); ok && buffer != nil {
+			return buffer
+		}
+		if data, ok := value.([]byte); ok {
+			buffer := logging.NewBoundedLogBuffer()
+			buffer.Append(data)
+			c.Set(key, buffer)
+			return buffer
 		}
 	}
+	buffer := logging.NewBoundedLogBuffer()
+	c.Set(key, buffer)
+	return buffer
+}
 
-	c.Set("API_RESPONSE", bytes.Clone(data))
+func requestLogContextBytes(c *gin.Context, key string) []byte {
+	if c == nil {
+		return nil
+	}
+	value, exists := c.Get(key)
+	if !exists {
+		return nil
+	}
+	switch data := value.(type) {
+	case []byte:
+		return bytes.Clone(data)
+	case *logging.BoundedLogBuffer:
+		return data.Bytes()
+	default:
+		return nil
+	}
 }
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
@@ -888,9 +1065,21 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(
 	handlerType, modelName string,
 	rawJSON []byte,
 	alt string,
-) ([]byte, http.Header, *interfaces.ErrorMessage) {
+) ([]byte, http.Header, *ErrorMessage) {
 	return h.executeNonStream(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, nil, nil, "", h.AuthManager.Execute,
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, nil, nil, "", h.AuthManager.Execute,
+	)
+}
+
+// ExecuteImageWithAuthManager executes a non-streaming image request via the core auth manager.
+func (h *BaseAPIHandler) ExecuteImageWithAuthManager(
+	ctx context.Context,
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+) ([]byte, http.Header, *ErrorMessage) {
+	return h.executeNonStream(
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, true, nil, nil, "", h.AuthManager.Execute,
 	)
 }
 
@@ -901,9 +1090,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(
 	handlerType, modelName string,
 	rawJSON []byte,
 	alt string,
-) ([]byte, http.Header, *interfaces.ErrorMessage) {
+) ([]byte, http.Header, *ErrorMessage) {
 	return h.executeNonStream(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, nil, nil, "", h.AuthManager.ExecuteCount,
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, nil, nil, "", h.AuthManager.ExecuteCount,
 	)
 }
 
@@ -912,25 +1101,27 @@ func (h *BaseAPIHandler) executeNonStream(
 	handlerType, responseType, modelName string,
 	rawJSON []byte,
 	alt string,
+	allowImageModel bool,
 	requestHeaders http.Header,
 	requestQuery url.Values,
 	skipPluginID string,
 	execFn func(context.Context, []string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error),
-) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+) ([]byte, http.Header, *ErrorMessage) {
+	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	if h.modelCatalogModelDisabled(normalizedModel) {
-		return nil, nil, &interfaces.ErrorMessage{
+	if h.modelCatalogModelDisabled(modelName) || h.modelCatalogModelDisabled(normalizedModel) {
+		return nil, nil, &ErrorMessage{
 			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model %s is disabled", normalizedModel),
+			Error:      fmt.Errorf("model %s is disabled", modelName),
 		}
 	}
-	if h.apiKeyBlocksModel(apiKeyFromContext(ctx), normalizedModel) {
-		return nil, nil, &interfaces.ErrorMessage{
+	apiKey := apiKeyFromContext(ctx)
+	if h.apiKeyBlocksModel(apiKey, modelName) || h.apiKeyBlocksModel(apiKey, normalizedModel) {
+		return nil, nil, &ErrorMessage{
 			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model %s is blocked for this API key", normalizedModel),
+			Error:      fmt.Errorf("model %s is blocked for this API key", modelName),
 		}
 	}
 	reqMeta := requestExecutionMetadata(ctx)
@@ -979,11 +1170,11 @@ func (h *BaseAPIHandler) executeNonStream(
 				addon = hdr.Clone()
 			}
 		}
-		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		return nil, nil, &ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	rawResponseHeaders := cloneHeader(resp.Headers)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
+	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.ConfigSnapshot()))
 	body, responseHeaders := h.applyResponseInterceptors(
 		ctx, responseType, normalizedModel, modelName, executedOpts, rawResponseHeaders, responseHeaders,
 		executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, skipPluginID,
@@ -999,8 +1190,30 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(
 	handlerType, modelName string,
 	rawJSON []byte,
 	alt string,
-) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, nil, nil, "")
+) (<-chan []byte, http.Header, <-chan *ErrorMessage) {
+	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, false, nil, nil, "")
+}
+
+// ExecuteStreamChunksWithAuthManager preserves per-chunk delivery acknowledgements.
+func (h *BaseAPIHandler) ExecuteStreamChunksWithAuthManager(
+	ctx context.Context,
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *ErrorMessage) {
+	return h.executeStreamChunksWithAuthManager(
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, nil, nil, "",
+	)
+}
+
+// ExecuteImageStreamWithAuthManager executes a streaming image request via the core auth manager.
+func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(
+	ctx context.Context,
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+) (<-chan []byte, http.Header, <-chan *ErrorMessage) {
+	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, true, nil, nil, "")
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManager(
@@ -1008,31 +1221,81 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(
 	handlerType, responseType, modelName string,
 	rawJSON []byte,
 	alt string,
+	allowImageModel bool,
 	requestHeaders http.Header,
 	requestQuery url.Values,
 	skipPluginID string,
-) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+) (<-chan []byte, http.Header, <-chan *ErrorMessage) {
+	chunks, headers, errs := h.executeStreamChunksWithAuthManager(
+		ctx, handlerType, responseType, modelName, rawJSON, alt, allowImageModel,
+		requestHeaders, requestQuery, skipPluginID,
+	)
+	return flattenStreamChunks(ctx, chunks), headers, errs
+}
+
+func flattenStreamChunks(ctx context.Context, chunks <-chan coreexecutor.StreamChunk) <-chan []byte {
+	if chunks == nil {
+		return nil
+	}
+	data := make(chan []byte)
+	go func() {
+		defer close(data)
+		for chunk := range chunks {
+			if ctx == nil {
+				data <- chunk.Payload
+				if chunk.Acknowledge != nil {
+					chunk.Acknowledge(nil)
+				}
+				continue
+			}
+			select {
+			case data <- chunk.Payload:
+				if chunk.Acknowledge != nil {
+					chunk.Acknowledge(nil)
+				}
+			case <-ctx.Done():
+				if chunk.Acknowledge != nil {
+					chunk.Acknowledge(ctx.Err())
+				}
+				return
+			}
+		}
+	}()
+	return data
+}
+
+func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
+	ctx context.Context,
+	handlerType, responseType, modelName string,
+	rawJSON []byte,
+	alt string,
+	allowImageModel bool,
+	requestHeaders http.Header,
+	requestQuery url.Values,
+	skipPluginID string,
+) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *ErrorMessage) {
+	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan := make(chan *ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
 	}
-	if h.modelCatalogModelDisabled(normalizedModel) {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- &interfaces.ErrorMessage{
+	if h.modelCatalogModelDisabled(modelName) || h.modelCatalogModelDisabled(normalizedModel) {
+		errChan := make(chan *ErrorMessage, 1)
+		errChan <- &ErrorMessage{
 			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model %s is disabled", normalizedModel),
+			Error:      fmt.Errorf("model %s is disabled", modelName),
 		}
 		close(errChan)
 		return nil, nil, errChan
 	}
-	if h.apiKeyBlocksModel(apiKeyFromContext(ctx), normalizedModel) {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- &interfaces.ErrorMessage{
+	apiKey := apiKeyFromContext(ctx)
+	if h.apiKeyBlocksModel(apiKey, modelName) || h.apiKeyBlocksModel(apiKey, normalizedModel) {
+		errChan := make(chan *ErrorMessage, 1)
+		errChan <- &ErrorMessage{
 			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model %s is blocked for this API key", normalizedModel),
+			Error:      fmt.Errorf("model %s is blocked for this API key", modelName),
 		}
 		close(errChan)
 		return nil, nil, errChan
@@ -1071,7 +1334,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(
 	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, modelName, req, opts, skipPluginID)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan := make(chan *ErrorMessage, 1)
 		status := http.StatusInternalServerError
 		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
 			if code := se.StatusCode(); code > 0 {
@@ -1084,14 +1347,14 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(
 				addon = hdr.Clone()
 			}
 		}
-		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		errChan <- &ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 		close(errChan)
 		return nil, nil, errChan
 	}
 	executedRequest := func() (coreexecutor.Request, coreexecutor.Options) {
 		return afterAuthCapture.apply(req, opts)
 	}
-	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
+	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.ConfigSnapshot())
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
@@ -1101,8 +1364,8 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(
 		upstreamHeaders = make(http.Header)
 	}
 	chunks := streamResult.Chunks
-	dataChan := make(chan []byte)
-	errChan := make(chan *interfaces.ErrorMessage, 1)
+	dataChan := make(chan coreexecutor.StreamChunk)
+	errChan := make(chan *ErrorMessage, 1)
 	streamHeaderInitialized := false
 	streamHeadersCommitted := false
 
@@ -1183,9 +1446,9 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(
 		bootstrapRetries := 0
 		chunkIndex := 0
 		var historyChunks [][]byte
-		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+		maxBootstrapRetries := StreamingBootstrapRetries(h.ConfigSnapshot())
 
-		sendErr := func(msg *interfaces.ErrorMessage) bool {
+		sendErr := func(msg *ErrorMessage) bool {
 			if ctx == nil {
 				errChan <- msg
 				return true
@@ -1198,13 +1461,16 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(
 			}
 		}
 
-		sendData := func(chunk []byte) bool {
+		sendData := func(chunk coreexecutor.StreamChunk) bool {
 			if ctx == nil {
 				dataChan <- chunk
 				return true
 			}
 			select {
 			case <-ctx.Done():
+				if chunk.Acknowledge != nil {
+					chunk.Acknowledge(ctx.Err())
+				}
 				return false
 			case dataChan <- chunk:
 				return true
@@ -1274,7 +1540,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(
 							addon = hdr.Clone()
 						}
 					}
-					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
+					_ = sendErr(&ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
 					return
 				}
 				if len(chunk.Payload) > 0 {
@@ -1303,20 +1569,20 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(
 						}
 						chunkIndex++
 						if intercepted.DropChunk {
+							if chunk.Acknowledge != nil {
+								chunk.Acknowledge(fmt.Errorf("stream chunk dropped by interceptor"))
+							}
 							continue
 						}
 					} else {
 						chunkIndex++
 					}
-					if responseType == "openai-response" {
-						if errValidate := validateSSEDataJSON(payload); errValidate != nil {
-							_ = sendErr(&interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate})
-							return
-						}
-					}
 					sentPayload = true
 					streamHeadersCommitted = true
-					if okSendData := sendData(payload); !okSendData {
+					if okSendData := sendData(coreexecutor.StreamChunk{
+						Payload:     payload,
+						Acknowledge: chunk.Acknowledge,
+					}); !okSendData {
 						return
 					}
 					if streamInterceptorsActive {
@@ -1699,41 +1965,12 @@ func (h *BaseAPIHandler) applyResponseInterceptors(
 	responseHeaders = downstreamHeadersAfterInterceptors(
 		rawResponseHeaders,
 		mergeRequestInterceptorHeaders(rawResponseHeaders, resp.Headers, resp.ClearHeaders),
-		PassthroughHeadersEnabled(h.Cfg),
+		PassthroughHeadersEnabled(h.ConfigSnapshot()),
 	)
 	if len(resp.Body) > 0 {
 		body = cloneBytes(resp.Body)
 	}
 	return body, responseHeaders
-}
-
-func validateSSEDataJSON(chunk []byte) error {
-	for line := range bytes.SplitSeq(chunk, []byte("\n")) {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-		if !bytes.HasPrefix(line, []byte("data:")) {
-			continue
-		}
-		data := bytes.TrimSpace(line[5:])
-		if len(data) == 0 {
-			continue
-		}
-		if bytes.Equal(data, []byte("[DONE]")) {
-			continue
-		}
-		if json.Valid(data) {
-			continue
-		}
-		const previewLimit = 512
-		preview := data
-		if len(preview) > previewLimit {
-			preview = preview[:previewLimit]
-		}
-		return fmt.Errorf("invalid SSE data JSON (len=%d): %q", len(data), preview)
-	}
-	return nil
 }
 
 func statusFromError(err error) int {
@@ -1772,7 +2009,15 @@ func requiresContext1MCapabilityValidation(providers []string) bool {
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (
 	providers []string,
 	normalizedModel string,
-	err *interfaces.ErrorMessage,
+	err *ErrorMessage,
+) {
+	return h.getRequestDetailsWithOptions(modelName, false)
+}
+
+func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowImageModel bool) (
+	providers []string,
+	normalizedModel string,
+	err *ErrorMessage,
 ) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
@@ -1790,7 +2035,31 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
+	if errMsg := h.validateImageOnlyModel(baseModel, allowImageModel); errMsg != nil {
+		return nil, "", errMsg
+	}
+
 	providers = util.GetProviderName(baseModel)
+	if len(providers) == 0 && allowImageModel {
+		if registeredModel := registry.GetGlobalRegistry().ResolveModelIDCaseInsensitive(baseModel); registeredModel != "" {
+			providers = util.GetProviderName(registeredModel)
+			if len(providers) > 0 {
+				resolvedModelName = registeredModel
+			}
+		}
+	}
+	if len(providers) == 0 && allowImageModel && allowsBuiltinImageModelBareFallback(baseModel) {
+		if canonicalModel := canonicalImageOnlyModel(baseModel); canonicalModel != "" {
+			registeredModel := registry.GetGlobalRegistry().ResolveModelIDCaseInsensitive(canonicalModel)
+			if registeredModel == "" {
+				registeredModel = canonicalModel
+			}
+			providers = util.GetProviderName(registeredModel)
+			if len(providers) > 0 {
+				resolvedModelName = registeredModel
+			}
+		}
+	}
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
 	// try using the full model name. This handles edge cases where custom models
 	// may be registered with their full suffixed name (e.g., "my-model(8192)").
@@ -1801,13 +2070,13 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (
 	}
 
 	if len(providers) == 0 {
-		return nil, "", &interfaces.ErrorMessage{
+		return nil, "", &ErrorMessage{
 			StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName),
 		}
 	}
 	if thinking.HasContext1MTag(resolvedModelName) && requiresContext1MCapabilityValidation(providers) &&
 		!supportsContext1M(resolvedModelName, providers) {
-		return nil, "", &interfaces.ErrorMessage{
+		return nil, "", &ErrorMessage{
 			StatusCode: http.StatusBadRequest,
 			Error:      fmt.Errorf("model %s does not support [1m] context", modelName),
 		}
@@ -1816,6 +2085,71 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func (h *BaseAPIHandler) validateImageOnlyModel(modelName string, allowImageModel bool) *ErrorMessage {
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
+	if baseModel == "" {
+		baseModel = strings.TrimSpace(modelName)
+	}
+	if isOpenAIImageOnlyModel(baseModel) && !allowImageModel {
+		return &ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error: fmt.Errorf(
+				"model %s is only supported on /v1/images/generations and /v1/images/edits",
+				routeModelBaseName(baseModel),
+			),
+		}
+	}
+	return nil
+}
+
+func isOpenAIImageOnlyModel(model string) bool {
+	return canonicalImageOnlyModel(model) != ""
+}
+
+func allowsBuiltinImageModelBareFallback(model string) bool {
+	model = strings.TrimSpace(thinking.ParseSuffix(model).ModelName)
+	idx := strings.LastIndex(model, "/")
+	if idx < 0 {
+		return true
+	}
+	if idx >= len(model)-1 {
+		return false
+	}
+
+	prefix := strings.ToLower(strings.TrimSpace(model[:idx]))
+	switch canonicalImageOnlyModel(model) {
+	case "gpt-image-1.5", "gpt-image-2":
+		return prefix == "codex" || prefix == "openai"
+	case "grok-imagine-image", "grok-imagine-image-quality":
+		return prefix == "xai" || prefix == "x-ai" || prefix == "grok"
+	default:
+		return false
+	}
+}
+
+func canonicalImageOnlyModel(model string) string {
+	switch strings.ToLower(strings.TrimSpace(routeModelBaseName(model))) {
+	case "gpt-image-1.5":
+		return "gpt-image-1.5"
+	case "gpt-image-2":
+		return "gpt-image-2"
+	case "grok-imagine-image":
+		return "grok-imagine-image"
+	case "grok-imagine-image-quality":
+		return "grok-imagine-image-quality"
+	default:
+		return ""
+	}
+}
+
+func routeModelBaseName(model string) string {
+	model = strings.TrimSpace(model)
+	if idx := strings.LastIndex(model, "/"); idx >= 0 && idx < len(model)-1 {
+		return strings.TrimSpace(model[idx+1:])
+	}
+	return model
 }
 
 func cloneBytes(src []byte) []byte {
@@ -1848,12 +2182,12 @@ func replaceHeader(dst http.Header, src http.Header) {
 }
 
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
-func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *ErrorMessage) {
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
-	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
+	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.ConfigSnapshot()) {
 		for key, values := range msg.Addon {
 			if len(values) == 0 {
 				continue
@@ -1876,20 +2210,14 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	if h.requestLoggingEnabled() {
 		captured, existsCaptured := c.Get(logging.APIResponseCapturedContextKey)
 		if !existsCaptured || captured != true {
-			var previous []byte
-			if existing, exists := c.Get("API_RESPONSE"); exists {
-				if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
-					previous = existingBytes
-				}
-			}
-			appendAPIResponse(c, body)
+			previous := requestLogContextBytes(c, "API_RESPONSE")
 			trimmedErrText := strings.TrimSpace(errText)
 			trimmedBody := bytes.TrimSpace(body)
-			if len(previous) > 0 {
-				if (trimmedErrText != "" && bytes.Contains(previous, []byte(trimmedErrText))) ||
-					(len(trimmedBody) > 0 && bytes.Contains(previous, trimmedBody)) {
-					c.Set("API_RESPONSE", previous)
-				}
+			alreadyCaptured := len(previous) > 0 &&
+				((trimmedErrText != "" && bytes.Contains(previous, []byte(trimmedErrText))) ||
+					(len(trimmedBody) > 0 && bytes.Contains(previous, trimmedBody)))
+			if !alreadyCaptured {
+				appendAPIResponse(c, body)
 			}
 		}
 	}
@@ -1901,17 +2229,17 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	_, _ = c.Writer.Write(body)
 }
 
-func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *ErrorMessage) {
 	if h.requestLoggingEnabled() {
 		if ginContext, ok := util.GinContextValue(ctx).(*gin.Context); ok {
 			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
-				if slicesAPIResponseError, isOk := apiResponseErrors.([]*interfaces.ErrorMessage); isOk {
+				if slicesAPIResponseError, isOk := apiResponseErrors.([]*ErrorMessage); isOk {
 					slicesAPIResponseError = append(slicesAPIResponseError, err)
 					ginContext.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
 				}
 			} else {
 				// Create new response data entry
-				ginContext.Set("API_RESPONSE_ERROR", []*interfaces.ErrorMessage{err})
+				ginContext.Set("API_RESPONSE_ERROR", []*ErrorMessage{err})
 			}
 		}
 	}

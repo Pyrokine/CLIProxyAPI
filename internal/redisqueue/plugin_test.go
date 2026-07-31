@@ -3,6 +3,7 @@ package redisqueue
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,23 +27,25 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			responseHeaders.Add("Retry-After", "30")
 			responseHeaders.Add("Set-Cookie", "session=response-secret")
 			responseHeaders.Add("X-Api-Key", "sk-secret-value")
+			responseHeaders.Add("X-Management-Key", "management-secret-value")
 
 			plugin := &usageQueuePlugin{}
 			plugin.HandleUsage(
 				ctx, coreusage.Record{
-					Provider:          "openai",
-					ExecutorType:      "OpenAICompatExecutor",
-					Model:             "gpt-5.4",
-					Alias:             "client-gpt",
-					APIKey:            "test-key",
-					AuthIndex:         "0",
-					AuthType:          "apikey",
-					Source:            "user@example.com",
-					ReasoningEffort:   "medium",
-					ServiceTier:       "flex",
-					RequestedAt:       time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
-					Latency:           1500 * time.Millisecond,
-					TimeToFirstByteMs: 250,
+					Provider:            "openai",
+					ExecutorType:        "OpenAICompatExecutor",
+					Model:               "gpt-5.4",
+					Alias:               "client-gpt",
+					APIKey:              "test-key",
+					AuthIndex:           "0",
+					AuthType:            "apikey",
+					Source:              "user@example.com",
+					ReasoningEffort:     "medium",
+					ServiceTier:         "flex",
+					ResponseServiceTier: "default",
+					RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
+					Latency:             1500 * time.Millisecond,
+					TimeToFirstByteMs:   250,
 					Detail: coreusage.Detail{
 						InputTokens:  10,
 						OutputTokens: 20,
@@ -60,11 +63,13 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireStringField(t, payload, "alias", "client-gpt")
 			requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 			requireStringField(t, payload, "auth_type", "apikey")
-			requireStringField(t, payload, "api_key", "te...ey")
+			requireStringField(t, payload, "api_key", util.HideAPIKey("test-key"))
 			requireMissingField(t, payload, "user_api_key")
 			requireStringField(t, payload, "request_id", "ctx-request-id")
 			requireStringField(t, payload, "reasoning_effort", "medium")
 			requireStringField(t, payload, "service_tier", "flex")
+			requireStringField(t, payload, "request_service_tier", "flex")
+			requireStringField(t, payload, "response_service_tier", "default")
 			requireIntField(t, payload, "ttft_ms", 250)
 			requireTokenField(t, payload, "total_tokens", 35)
 			requireTokenField(t, payload, "cached_tokens", 5)
@@ -72,6 +77,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
 			requireHeaderNotPresent(t, payload, "response_headers", "Set-Cookie")
 			requireHeaderFieldMasked(t, payload, "response_headers", "X-Api-Key", "sk-secret-value")
+			requireHeaderFieldMasked(t, payload, "response_headers", "X-Management-Key", "management-secret-value")
 			requireBoolField(t, payload, "failed", false)
 			requireFailField(t, payload, http.StatusOK, "")
 		},
@@ -168,7 +174,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t 
 			requireStringField(t, payload, "alias", "client-mini")
 			requireStringField(t, payload, "endpoint", "GET /v1/responses")
 			requireStringField(t, payload, "auth_type", "apikey")
-			requireStringField(t, payload, "api_key", "te...ey")
+			requireStringField(t, payload, "api_key", util.HideAPIKey("test-key"))
 			requireMissingField(t, payload, "user_api_key")
 			requireStringField(t, payload, "request_id", "gin-request-id")
 			requireBoolField(t, payload, "failed", true)
@@ -226,13 +232,53 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 			payload := waitForSinglePayload(t, 2*time.Second)
 			requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 			requireStringField(t, payload, "alias", "client-gpt")
-			requireStringField(t, payload, "api_key", "te...ey")
+			requireStringField(t, payload, "api_key", util.HideAPIKey("test-key"))
 			requireMissingField(t, payload, "user_api_key")
 			requireStringField(t, payload, "request_id", "ctx-request-id")
 			requireBoolField(t, payload, "failed", true)
 			requireFailField(t, payload, http.StatusBadGateway, "bad gateway")
 		},
 	)
+}
+
+func TestUsageQueuePluginRejectsInvalidTokenTotals(t *testing.T) {
+	tests := []struct {
+		name   string
+		detail coreusage.Detail
+	}{
+		{
+			name: "negative token",
+			detail: coreusage.Detail{
+				InputTokens: -1,
+			},
+		},
+		{
+			name: "cached token overflow",
+			detail: coreusage.Detail{
+				CacheReadTokens:     math.MaxInt64,
+				CacheCreationTokens: 1,
+			},
+		},
+		{
+			name: "total token overflow",
+			detail: coreusage.Detail{
+				InputTokens:  math.MaxInt64,
+				OutputTokens: 1,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			withEnabledQueue(t, func() {
+				plugin := &usageQueuePlugin{}
+				plugin.HandleUsage(
+					context.Background(),
+					coreusage.Record{Model: "m", Detail: test.detail},
+				)
+				requireNoQueuedPayload(t)
+			})
+		})
+	}
 }
 
 func withEnabledQueue(t *testing.T, fn func()) {
@@ -265,6 +311,13 @@ func newTestGinContext(t *testing.T, method, path string, status int) *gin.Conte
 		ginCtx.Status(status)
 	}
 	return ginCtx
+}
+
+func requireNoQueuedPayload(t *testing.T) {
+	t.Helper()
+	if items := PopOldest(10); len(items) != 0 {
+		t.Fatalf("PopOldest() items = %d, want 0", len(items))
+	}
 }
 
 func popSinglePayload(t *testing.T) map[string]json.RawMessage {

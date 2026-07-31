@@ -139,11 +139,25 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Enforce session limit before upgrading
+	provider := randomProviderName()
+	if m.providerFactory != nil {
+		name, err := m.providerFactory(r)
+		if err != nil {
+			http.Error(w, "invalid websocket provider", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(name) != "" {
+			provider = strings.ToLower(strings.TrimSpace(name))
+		}
+	}
+	if provider == "" {
+		provider = strings.ToLower(randomProviderName())
+	}
 	m.sessMutex.RLock()
+	_, providerExists := m.sessions[provider]
 	currentCount := len(m.sessions)
 	m.sessMutex.RUnlock()
-	if currentCount >= m.maxSessions {
+	if !providerExists && currentCount >= m.maxSessions {
 		http.Error(w, "too many websocket sessions", http.StatusServiceUnavailable)
 		return
 	}
@@ -152,20 +166,8 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		m.logWarnf("wsrelay: upgrade failed: %v", err)
 		return
 	}
-	s := newSession(conn, m, randomProviderName())
-	if m.providerFactory != nil {
-		name, err := m.providerFactory(r)
-		if err != nil {
-			s.cleanup(err)
-			return
-		}
-		if strings.TrimSpace(name) != "" {
-			s.provider = strings.ToLower(name)
-		}
-	}
-	if s.provider == "" {
-		s.provider = strings.ToLower(s.id)
-	}
+	s := newSession(conn, m, provider)
+	s.provider = provider
 	m.sessMutex.Lock()
 	if _, exists := m.sessions[s.provider]; !exists && len(m.sessions) >= m.maxSessions {
 		m.sessMutex.Unlock()

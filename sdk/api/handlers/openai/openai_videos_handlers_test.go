@@ -299,14 +299,14 @@ func TestBuildVideosRetrieveAPIResponseFromXAINormalizesErrors(t *testing.T) {
 }
 
 func TestXAIVideoContentURLFromPayload(t *testing.T) {
-	payload := []byte(`{"status":"done","video":{"url":"https://vidgen.x.ai/video.mp4","duration":6}}`)
+	payload := []byte(`{"status":"done","video":{"url":"https://example.com/video.mp4","duration":6}}`)
 
 	got, err := xaiVideoContentURLFromPayload(payload)
 	if err != nil {
 		t.Fatalf("xaiVideoContentURLFromPayload() error = %v", err)
 	}
-	if got != "https://vidgen.x.ai/video.mp4" {
-		t.Fatalf("url = %q, want https://vidgen.x.ai/video.mp4", got)
+	if got != "https://example.com/video.mp4" {
+		t.Fatalf("url = %q, want https://example.com/video.mp4", got)
 	}
 }
 

@@ -1,13 +1,13 @@
 package handlers
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
@@ -21,7 +21,7 @@ func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 
 	handler := NewBaseAPIHandlers(nil, nil)
 	handler.WriteErrorResponse(
-		c, &interfaces.ErrorMessage{
+		c, &ErrorMessage{
 			StatusCode: http.StatusTooManyRequests,
 			Error:      errors.New("rate limit"),
 			Addon: http.Header{
@@ -42,6 +42,29 @@ func TestWriteErrorResponse_AddonHeadersDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestAppendAPIResponseUsesBoundedBuffer(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	appendAPIResponse(c, []byte("first"))
+	value, exists := c.Get("API_RESPONSE")
+	if !exists {
+		t.Fatal("API_RESPONSE was not captured")
+	}
+	buffer, ok := value.(*logging.BoundedLogBuffer)
+	if !ok || buffer == nil {
+		t.Fatalf("API_RESPONSE type = %T", value)
+	}
+	appendAPIResponse(c, bytes.Repeat([]byte("x"), 9<<20))
+	valueAfter, _ := c.Get("API_RESPONSE")
+	if valueAfter != buffer {
+		t.Fatal("API_RESPONSE buffer was rebuilt")
+	}
+	if !buffer.Truncated() {
+		t.Fatal("oversized API response was not truncated")
+	}
+}
+
 func TestWriteErrorResponse_DoesNotAppendAPIResponseWhenRequestLogDisabled(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -50,7 +73,7 @@ func TestWriteErrorResponse_DoesNotAppendAPIResponseWhenRequestLogDisabled(t *te
 
 	handler := NewBaseAPIHandlers(nil, nil)
 	handler.WriteErrorResponse(
-		c, &interfaces.ErrorMessage{
+		c, &ErrorMessage{
 			StatusCode: http.StatusBadGateway,
 			Error:      errors.New("upstream failure"),
 		},
@@ -71,7 +94,7 @@ func TestWriteErrorResponse_DoesNotAppendAPIResponseWhenCaptured(t *testing.T) {
 
 	handler := NewBaseAPIHandlers(nil, nil)
 	handler.WriteErrorResponse(
-		c, &interfaces.ErrorMessage{
+		c, &ErrorMessage{
 			StatusCode: http.StatusBadGateway,
 			Error:      errors.New("upstream failure"),
 		},
@@ -91,7 +114,7 @@ func TestWriteErrorResponse_AddonHeadersEnabled(t *testing.T) {
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil)
 	handler.WriteErrorResponse(
-		c, &interfaces.ErrorMessage{
+		c, &ErrorMessage{
 			StatusCode: http.StatusTooManyRequests,
 			Error:      errors.New("rate limit"),
 			Addon: http.Header{

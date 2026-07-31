@@ -603,16 +603,17 @@ func TestExecuteStreamWithAuthManager_PinnedAuthKeepsSameUpstream(t *testing.T) 
 	}
 }
 
-func TestExecuteStreamWithAuthManager_SelectedAuthCallbackReceivesAuthID(t *testing.T) {
+func TestExecuteStreamWithAuthManager_SelectedAuthCallbacksReceiveIDAndInfo(t *testing.T) {
 	executor := &authAwareStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
 
 	auth2 := &coreauth.Auth{
-		ID:       "auth2",
-		Provider: "codex",
-		Status:   coreauth.StatusActive,
-		Metadata: map[string]any{"email": "test2@example.com"},
+		ID:         "auth2",
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"websockets": "true"},
+		Metadata:   map[string]any{"email": "test2@example.com"},
 	}
 	if _, err := manager.Register(context.Background(), auth2); err != nil {
 		t.Fatalf("manager.Register(auth2): %v", err)
@@ -634,9 +635,15 @@ func TestExecuteStreamWithAuthManager_SelectedAuthCallbackReceivesAuthID(t *test
 	)
 
 	selectedAuthID := ""
+	var selectedAuth coreexecutor.SelectedAuthInfo
 	ctx := WithSelectedAuthIDCallback(
 		context.Background(), func(authID string) {
 			selectedAuthID = authID
+		},
+	)
+	ctx = WithSelectedAuthInfoCallback(
+		ctx, func(auth coreexecutor.SelectedAuthInfo) {
+			selectedAuth = auth
 		},
 	)
 	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
@@ -662,9 +669,18 @@ func TestExecuteStreamWithAuthManager_SelectedAuthCallbackReceivesAuthID(t *test
 	if selectedAuthID != "auth2" {
 		t.Fatalf("selectedAuthID = %q, want %q", selectedAuthID, "auth2")
 	}
+	if selectedAuth.ID != "auth2" {
+		t.Fatalf("selected auth info = %#v, want auth2", selectedAuth)
+	}
+	if !selectedAuth.SupportsIncrementalResponsesWebsocket {
+		t.Fatalf("selected auth websocket capability = false, want true")
+	}
+	if !selectedAuth.SupportsResponsesContinuation {
+		t.Fatalf("selected auth continuation capability = false, want true")
+	}
 }
 
-func TestExecuteStreamWithAuthManager_ValidatesOpenAIResponsesStreamDataJSON(t *testing.T) {
+func TestExecuteStreamWithAuthManagerPreservesFragmentedOpenAIResponsesData(t *testing.T) {
 	executor := &invalidJSONStreamExecutor{}
 	manager := coreauth.NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
@@ -698,24 +714,13 @@ func TestExecuteStreamWithAuthManager_ValidatesOpenAIResponsesStreamDataJSON(t *
 	for chunk := range dataChan {
 		got = append(got, chunk...)
 	}
-	if len(got) != 0 {
-		t.Fatalf("expected empty payload, got %q", string(got))
+	want := "event: response.completed\ndata: {\"type\""
+	if string(got) != want {
+		t.Fatalf("payload = %q, want %q", string(got), want)
 	}
-
-	gotErr := false
 	for msg := range errChan {
-		if msg == nil {
-			continue
+		if msg != nil {
+			t.Fatalf("unexpected terminal error: %+v", msg)
 		}
-		if msg.StatusCode != http.StatusBadGateway {
-			t.Fatalf("expected status %d, got %d", http.StatusBadGateway, msg.StatusCode)
-		}
-		if msg.Error == nil {
-			t.Fatalf("expected error")
-		}
-		gotErr = true
-	}
-	if !gotErr {
-		t.Fatalf("expected terminal error")
 	}
 }

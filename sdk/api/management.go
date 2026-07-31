@@ -25,6 +25,12 @@ type ManagementTokenRequester interface {
 	PostOAuthCallback(c *gin.Context)
 }
 
+// ManagementAuthSessionRequester adds cancellation for in-flight authentication sessions.
+type ManagementAuthSessionRequester interface {
+	ManagementTokenRequester
+	CancelAuthSession(c *gin.Context)
+}
+
 type managementTokenRequester struct {
 	handler *internalmanagement.Handler
 }
@@ -32,6 +38,15 @@ type managementTokenRequester struct {
 // NewManagementTokenRequester creates a limited management handler exposing only token request endpoints.
 // noinspection GoUnusedExportedFunction
 func NewManagementTokenRequester(cfg *config.Config, manager *coreauth.Manager) ManagementTokenRequester {
+	return NewManagementAuthSessionRequester(cfg, manager)
+}
+
+// NewManagementAuthSessionRequester creates a management handler with authentication session cancellation.
+// noinspection GoUnusedExportedFunction
+func NewManagementAuthSessionRequester(
+	cfg *config.Config,
+	manager *coreauth.Manager,
+) ManagementAuthSessionRequester {
 	return &managementTokenRequester{
 		handler: internalmanagement.NewHandlerWithoutConfigFilePath(cfg, manager),
 	}
@@ -71,6 +86,10 @@ func (m *managementTokenRequester) RequestIFlowCookieToken(c *gin.Context) {
 
 func (m *managementTokenRequester) GetAuthStatus(c *gin.Context) {
 	m.handler.GetAuthStatus(c)
+}
+
+func (m *managementTokenRequester) CancelAuthSession(c *gin.Context) {
+	m.handler.CancelAuthSession(c)
 }
 
 func (m *managementTokenRequester) PostOAuthCallback(c *gin.Context) {

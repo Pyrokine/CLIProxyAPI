@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -40,7 +39,7 @@ func isRedisRESPPrefix(prefix byte) bool {
 }
 
 func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
-	if s == nil || conn == nil {
+	if s == nil || conn == nil || s.stopping.Load() {
 		return
 	}
 	if reader == nil {
@@ -70,14 +69,14 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 		return true
 	}
 
-	if s.cfg != nil && s.cfg.Home.Enabled {
+	if cfg := s.configSnapshot(); cfg != nil && cfg.Home.Enabled {
 		_ = writeRedisError(writer, "ERR redis usage output disabled in home mode")
 		_ = writer.Flush()
 		return
 	}
 
 	for {
-		if !s.managementRoutesEnabled.Load() {
+		if s.stopping.Load() || !s.managementRoutesEnabled.Load() {
 			return
 		}
 
@@ -161,6 +160,9 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				return
 			}
 		case "SUBSCRIBE":
+			if s.stopping.Load() {
+				return
+			}
 			channel, ok := parseSubscribeChannel(args)
 			if !ok {
 				_ = writeRedisError(writer, "ERR wrong number of arguments for 'subscribe' command")
@@ -176,7 +178,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				}
 				continue
 			}
-			messages, unsubscribe := redisqueue.SubscribeUsage()
+			messages, unsubscribe := s.usageQueue.SubscribeUsage()
 			if errWrite := writeRedisPubSubSubscribe(writer, redisUsageChannel, 1); errWrite != nil {
 				unsubscribe()
 				log.Errorf("redis protocol subscribe response error: %v", errWrite)
@@ -186,7 +188,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				unsubscribe()
 				return
 			}
-			s.streamRedisUsageSubscription(reader, writer, messages, unsubscribe)
+			s.streamRedisUsageSubscription(conn, reader, writer, messages, unsubscribe)
 			return
 		case "LPOP", "RPOP":
 			count, hasCount, ok := parsePopCount(args)
@@ -204,7 +206,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				}
 				continue
 			}
-			items := redisqueue.PopOldest(count)
+			items := s.usageQueue.PopOldest(count)
 			if hasCount {
 				_ = writeRedisArrayOfBulkStrings(writer, items)
 				if !flush() {
@@ -233,6 +235,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 }
 
 func (s *Server) streamRedisUsageSubscription(
+	conn net.Conn,
 	reader *bufio.Reader,
 	writer *bufio.Writer,
 	messages <-chan []byte,
@@ -244,10 +247,20 @@ func (s *Server) streamRedisUsageSubscription(
 	defer unsubscribe()
 
 	done := make(chan struct{})
-	defer close(done)
+	readerDone := make(chan struct{})
+	defer func() {
+		close(done)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		<-readerDone
+	}()
 
 	commands := make(chan redisSubscriptionCommand, 1)
-	go readRedisSubscriptionCommands(reader, commands, done)
+	go func() {
+		defer close(readerDone)
+		readRedisSubscriptionCommands(reader, commands, done)
+	}()
 
 	for {
 		select {
@@ -337,7 +350,11 @@ func handleRedisSubscriptionCommand(writer *bufio.Writer, command redisSubscript
 }
 
 func redisConnectionRequiresTLS(s *Server, conn net.Conn) bool {
-	if s == nil || s.cfg == nil || !s.cfg.TLS.RequireForAuth || conn == nil {
+	if s == nil || conn == nil {
+		return false
+	}
+	cfg := s.configSnapshot()
+	if cfg == nil || !cfg.TLS.RequireForAuth {
 		return false
 	}
 	if _, ok := conn.(*tls.Conn); ok {

@@ -187,6 +187,7 @@ func TestCaptureRequestInfo_BodyLimited(t *testing.T) {
 	engine := gin.New()
 
 	var capturedBodyLen int
+	var restoredBodyLen int
 	engine.POST(
 		"/test", func(c *gin.Context) {
 			info, err := captureRequestInfo(c, true)
@@ -195,24 +196,63 @@ func TestCaptureRequestInfo_BodyLimited(t *testing.T) {
 				return
 			}
 			capturedBodyLen = len(info.Body)
+			restored, errRead := io.ReadAll(c.Request.Body)
+			if errRead != nil {
+				t.Errorf("read restored request body: %v", errRead)
+				return
+			}
+			restoredBodyLen = len(restored)
 			c.Status(http.StatusOK)
 		},
 	)
 
-	// Create a body larger than 10MB.
-	bigBody := make([]byte, 11<<20) // 11MB
-	for i := range bigBody {
-		bigBody[i] = 'A'
-	}
-
+	bigBody := bytes.Repeat([]byte{'A'}, 11<<20)
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/test", bytes.NewReader(bigBody))
 	req.Header.Set("Content-Type", "application/json")
 	engine.ServeHTTP(w, req)
 
-	// The body should be truncated to 10MB.
-	maxExpected := 10 << 20
-	if capturedBodyLen > maxExpected {
-		t.Fatalf("expected body capped at %d bytes, got %d", maxExpected, capturedBodyLen)
+	if capturedBodyLen != int(maxCapturedRequestBodyBytes) {
+		t.Fatalf("captured body length = %d, want %d", capturedBodyLen, maxCapturedRequestBodyBytes)
+	}
+	if restoredBodyLen != len(bigBody) {
+		t.Fatalf("restored body length = %d, want %d", restoredBodyLen, len(bigBody))
+	}
+}
+
+func TestCaptureRequestInfoOmitsOversizedDecodedZstdBody(t *testing.T) {
+	payload := bytes.Repeat([]byte{'A'}, int(maxDecodedRequestLogBodyBytes)+1)
+	var compressed bytes.Buffer
+	encoder, errNewWriter := zstd.NewWriter(&compressed)
+	if errNewWriter != nil {
+		t.Fatalf("zstd.NewWriter error = %v", errNewWriter)
+	}
+	if _, errWrite := encoder.Write(payload); errWrite != nil {
+		t.Fatalf("zstd write error = %v", errWrite)
+	}
+	if errClose := encoder.Close(); errClose != nil {
+		t.Fatalf("zstd close error = %v", errClose)
+	}
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	compressedBytes := compressed.Bytes()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(compressedBytes))
+	req.Header.Set("Content-Encoding", "zstd")
+	c.Request = req
+
+	info, errCapture := captureRequestInfo(c, true)
+	if errCapture != nil {
+		t.Fatalf("captureRequestInfo error = %v", errCapture)
+	}
+	if !strings.Contains(string(info.Body), errDecodedRequestLogBodyTooLarge.Error()) {
+		t.Fatalf("logged request body = %q, want omission marker", info.Body)
+	}
+	restored, errRead := io.ReadAll(c.Request.Body)
+	if errRead != nil {
+		t.Fatalf("read restored request body: %v", errRead)
+	}
+	if !bytes.Equal(restored, compressedBytes) {
+		t.Fatal("compressed request body was not restored")
 	}
 }

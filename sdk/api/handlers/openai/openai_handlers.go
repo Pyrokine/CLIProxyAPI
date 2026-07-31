@@ -14,7 +14,6 @@ import (
 	"sync"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	responsesconverter "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
@@ -658,14 +657,14 @@ func (h *APIHandler) handleStreamResult(
 	flusher http.Flusher,
 	cancel func(error),
 	data <-chan []byte,
-	errs <-chan *interfaces.ErrorMessage,
+	errs <-chan *handlers.ErrorMessage,
 ) {
 	h.ForwardStream(
 		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 			WriteChunk: func(chunk []byte) {
 				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(chunk))
 			},
-			WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			WriteTerminalError: func(errMsg *handlers.ErrorMessage) {
 				if errMsg == nil {
 					return
 				}

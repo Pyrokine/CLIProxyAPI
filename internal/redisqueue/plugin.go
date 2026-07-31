@@ -10,13 +10,27 @@ import (
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 func init() {
-	coreusage.RegisterPlugin(&usageQueuePlugin{})
+	coreusage.RegisterPlugin(NewUsagePlugin())
 }
 
-type usageQueuePlugin struct{}
+// NewUsagePlugin creates the Redis usage queue adapter for the compatibility queue.
+func NewUsagePlugin() coreusage.Plugin { return NewUsagePluginForQueue(defaultQueue) }
+
+// NewUsagePluginForQueue creates an adapter bound to one service's queue.
+func NewUsagePluginForQueue(queue *Queue) coreusage.Plugin {
+	if queue == nil {
+		queue = defaultQueue
+	}
+	return &usageQueuePlugin{queue: queue}
+}
+
+type usageQueuePlugin struct {
+	queue *Queue
+}
 
 func cloneThinking(src *coreusage.Thinking) *coreusage.Thinking {
 	if src == nil {
@@ -60,7 +74,11 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if p == nil {
 		return
 	}
-	if !Enabled() || !UsageStatisticsEnabled() {
+	queue := p.queue
+	if queue == nil {
+		queue = defaultQueue
+	}
+	if !queue.Enabled() || !queue.UsageStatisticsEnabled() {
 		return
 	}
 
@@ -91,9 +109,16 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
-	serviceTier := strings.TrimSpace(record.ServiceTier)
-	if serviceTier == "" {
-		serviceTier = coreusage.ServiceTierFromContext(ctx)
+	requestServiceTier := strings.TrimSpace(record.RequestServiceTier)
+	if requestServiceTier == "" {
+		requestServiceTier = strings.TrimSpace(record.ServiceTier)
+	}
+	if requestServiceTier == "" {
+		requestServiceTier = coreusage.ServiceTierFromContext(ctx)
+	}
+	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
+	if responseServiceTier == "" {
+		responseServiceTier = strings.TrimSpace(record.Detail.ResponseServiceTier)
 	}
 	executorType := strings.TrimSpace(record.ExecutorType)
 	if executorType == "" {
@@ -109,12 +134,44 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		CacheCreationTokens: record.Detail.CacheCreationTokens,
 		TotalTokens:         record.Detail.TotalTokens,
 	}
+	for _, value := range []int64{
+		tokens.InputTokens,
+		tokens.OutputTokens,
+		tokens.ReasoningTokens,
+		tokens.CachedTokens,
+		tokens.CacheReadTokens,
+		tokens.CacheCreationTokens,
+		tokens.TotalTokens,
+	} {
+		if value < 0 {
+			log.Warn("redis usage queue: rejected negative token detail")
+			return
+		}
+	}
 	if tokens.TotalTokens == 0 {
 		cachedTokens := tokens.CachedTokens
 		if cachedTokens == 0 {
-			cachedTokens = tokens.CacheReadTokens + tokens.CacheCreationTokens
+			var ok bool
+			cachedTokens, ok = coreusage.AddNonNegativeInt64(
+				tokens.CacheReadTokens,
+				tokens.CacheCreationTokens,
+			)
+			if !ok {
+				log.Warn("redis usage queue: rejected overflowing cached token detail")
+				return
+			}
 		}
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + cachedTokens
+		totalTokens, ok := coreusage.AddNonNegativeInt64(
+			tokens.InputTokens,
+			tokens.OutputTokens,
+			tokens.ReasoningTokens,
+			cachedTokens,
+		)
+		if !ok {
+			log.Warn("redis usage queue: rejected overflowing token detail")
+			return
+		}
+		tokens.TotalTokens = totalTokens
 	}
 
 	failed := record.Failed
@@ -138,37 +195,41 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 	payload, err := json.Marshal(
 		queuedUsageDetail{
-			requestDetail:   detail,
-			Provider:        provider,
-			ExecutorType:    executorType,
-			Model:           modelName,
-			Alias:           aliasName,
-			Endpoint:        resolveEndpoint(ctx),
-			AuthType:        authType,
-			APIKey:          apiKey,
-			RequestID:       requestID,
-			ReasoningEffort: reasoningEffort,
-			ServiceTier:     serviceTier,
+			requestDetail:       detail,
+			Provider:            provider,
+			ExecutorType:        executorType,
+			Model:               modelName,
+			Alias:               aliasName,
+			Endpoint:            resolveEndpoint(ctx),
+			AuthType:            authType,
+			APIKey:              apiKey,
+			RequestID:           requestID,
+			ReasoningEffort:     reasoningEffort,
+			ServiceTier:         requestServiceTier,
+			RequestServiceTier:  requestServiceTier,
+			ResponseServiceTier: responseServiceTier,
 		},
 	)
 	if err != nil {
 		return
 	}
-	Enqueue(payload)
+	queue.Enqueue(payload)
 }
 
 type queuedUsageDetail struct {
 	requestDetail
-	Provider        string `json:"provider"`
-	ExecutorType    string `json:"executor_type"`
-	Model           string `json:"model"`
-	Alias           string `json:"alias"`
-	Endpoint        string `json:"endpoint"`
-	AuthType        string `json:"auth_type"`
-	APIKey          string `json:"api_key"`
-	RequestID       string `json:"request_id"`
-	ReasoningEffort string `json:"reasoning_effort"`
-	ServiceTier     string `json:"service_tier"`
+	Provider            string `json:"provider"`
+	ExecutorType        string `json:"executor_type"`
+	Model               string `json:"model"`
+	Alias               string `json:"alias"`
+	Endpoint            string `json:"endpoint"`
+	AuthType            string `json:"auth_type"`
+	APIKey              string `json:"api_key"`
+	RequestID           string `json:"request_id"`
+	ReasoningEffort     string `json:"reasoning_effort"`
+	ServiceTier         string `json:"service_tier"`
+	RequestServiceTier  string `json:"request_service_tier"`
+	ResponseServiceTier string `json:"response_service_tier,omitempty"`
 }
 
 type requestDetail struct {

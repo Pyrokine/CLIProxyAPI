@@ -35,6 +35,55 @@ func normalizeListenerError(err error) error {
 	return err
 }
 
+func (s *Server) trackRedisConnection(conn net.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.redisConnectionsMu.Lock()
+	defer s.redisConnectionsMu.Unlock()
+	if s.stopping.Load() {
+		return false
+	}
+	if s.redisConnections == nil {
+		s.redisConnections = make(map[net.Conn]struct{})
+	}
+	s.redisConnections[conn] = struct{}{}
+	s.redisConnectionsWG.Add(1)
+	return true
+}
+
+func (s *Server) untrackRedisConnection(conn net.Conn) {
+	if s == nil || conn == nil {
+		return
+	}
+	s.redisConnectionsMu.Lock()
+	_, tracked := s.redisConnections[conn]
+	if tracked {
+		delete(s.redisConnections, conn)
+	}
+	s.redisConnectionsMu.Unlock()
+	if tracked {
+		s.redisConnectionsWG.Done()
+	}
+}
+
+func (s *Server) closeRedisConnections() {
+	if s == nil {
+		return
+	}
+	s.redisConnectionsMu.Lock()
+	connections := make([]net.Conn, 0, len(s.redisConnections))
+	for conn := range s.redisConnections {
+		connections = append(connections, conn)
+	}
+	s.redisConnectionsMu.Unlock()
+	for _, conn := range connections {
+		if errClose := conn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			log.Debugf("failed to close Redis connection during shutdown: %v", errClose)
+		}
+	}
+}
+
 func (s *Server) acceptMuxConnections(listener net.Listener, httpListener *muxListener) error {
 	if s == nil || listener == nil {
 		return net.ErrClosed
@@ -103,6 +152,11 @@ func (s *Server) routeMuxConnection(conn net.Conn, httpListener *muxListener) {
 	}
 
 	if isRedisRESPPrefix(prefix[0]) {
+		if !s.trackRedisConnection(conn) {
+			_ = conn.Close()
+			return
+		}
+		defer s.untrackRedisConnection(conn)
 		_ = conn.SetReadDeadline(time.Time{})
 		s.handleRedisConnection(conn, reader)
 		return

@@ -5,8 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 )
 
 // ModelExecutionRequest describes an internal model execution request.
@@ -66,14 +64,14 @@ func (e *ModelExecutionStreamError) Error() string {
 // nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionRequest) (
 	ModelExecutionResponse,
-	*interfaces.ErrorMessage,
+	*ErrorMessage,
 ) {
 	if req.Stream {
 		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteModel requires Stream=false")
 	}
 	responseProtocol := modelExecutionResponseProtocol(req.EntryProtocol, req.ExitProtocol)
 	body, headers, errMsg := h.executeNonStream(
-		ctx, req.EntryProtocol, responseProtocol, req.Model, cloneBytes(req.Body), req.Alt,
+		ctx, req.EntryProtocol, responseProtocol, req.Model, cloneBytes(req.Body), req.Alt, false,
 		modelExecutionHeaders(ctx, req.Headers), cloneURLValues(req.Query), req.SkipInterceptorPluginID,
 		h.AuthManager.Execute,
 	)
@@ -93,14 +91,14 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 // nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecutionRequest) (
 	ModelExecutionStream,
-	*interfaces.ErrorMessage,
+	*ErrorMessage,
 ) {
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteModelStream requires Stream=true")
 	}
 	responseProtocol := modelExecutionResponseProtocol(req.EntryProtocol, req.ExitProtocol)
 	dataChan, headers, errChan := h.executeStreamWithAuthManager(
-		ctx, req.EntryProtocol, responseProtocol, req.Model, cloneBytes(req.Body), req.Alt,
+		ctx, req.EntryProtocol, responseProtocol, req.Model, cloneBytes(req.Body), req.Alt, false,
 		modelExecutionHeaders(ctx, req.Headers), cloneURLValues(req.Query), req.SkipInterceptorPluginID,
 	)
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
@@ -114,8 +112,8 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 	}, nil
 }
 
-func modelExecutionModeError(message string) *interfaces.ErrorMessage {
-	return &interfaces.ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(message)}
+func modelExecutionModeError(message string) *ErrorMessage {
+	return &ErrorMessage{StatusCode: http.StatusBadRequest, Error: errors.New(message)}
 }
 
 func modelExecutionResponseProtocol(entryProtocol, exitProtocol string) string {
@@ -147,8 +145,8 @@ func cloneURLValues(src url.Values) url.Values {
 func prepareModelExecutionStream(
 	ctx context.Context,
 	dataChan <-chan []byte,
-	errChan <-chan *interfaces.ErrorMessage,
-) (<-chan ModelExecutionChunk, *interfaces.ErrorMessage) {
+	errChan <-chan *ErrorMessage,
+) (<-chan ModelExecutionChunk, *ErrorMessage) {
 	pending, nextDataChan, nextErrChan, errMsg := receiveInitialModelExecutionChunk(ctx, dataChan, errChan)
 	if errMsg != nil {
 		return nil, errMsg
@@ -159,8 +157,8 @@ func prepareModelExecutionStream(
 func receiveInitialModelExecutionChunk(
 	ctx context.Context,
 	dataChan <-chan []byte,
-	errChan <-chan *interfaces.ErrorMessage,
-) ([]ModelExecutionChunk, <-chan []byte, <-chan *interfaces.ErrorMessage, *interfaces.ErrorMessage) {
+	errChan <-chan *ErrorMessage,
+) ([]ModelExecutionChunk, <-chan []byte, <-chan *ErrorMessage, *ErrorMessage) {
 	var done <-chan struct{}
 	if ctx != nil {
 		done = ctx.Done()
@@ -191,7 +189,7 @@ func receiveInitialModelExecutionChunk(
 func wrapModelExecutionChunks(
 	ctx context.Context,
 	dataChan <-chan []byte,
-	errChan <-chan *interfaces.ErrorMessage,
+	errChan <-chan *ErrorMessage,
 	pending []ModelExecutionChunk,
 ) <-chan ModelExecutionChunk {
 	chunks := make(chan ModelExecutionChunk)
@@ -235,7 +233,7 @@ func wrapModelExecutionChunks(
 	return chunks
 }
 
-func modelExecutionStreamErrorFromMessage(errMsg *interfaces.ErrorMessage) *ModelExecutionStreamError {
+func modelExecutionStreamErrorFromMessage(errMsg *ErrorMessage) *ModelExecutionStreamError {
 	if errMsg == nil {
 		return nil
 	}

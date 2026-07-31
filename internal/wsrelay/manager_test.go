@@ -1,9 +1,14 @@
 package wsrelay
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestDefaultMaxSessions(t *testing.T) {
@@ -24,6 +29,75 @@ func TestSessionLimit(t *testing.T) {
 	mgr.handleWebsocket(rr, req)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected status %d, got %d", http.StatusServiceUnavailable, rr.Code)
+	}
+}
+
+func TestSessionLimitAllowsSameProviderReplacement(t *testing.T) {
+	replaced := make(chan error, 1)
+	mgr := NewManager(
+		Options{
+			MaxSessions: 1,
+			ProviderFactory: func(*http.Request) (string, error) {
+				return "a", nil
+			},
+			OnDisconnected: func(_ string, cause error) {
+				replaced <- cause
+			},
+		},
+	)
+	server := httptest.NewServer(mgr.Handler())
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + mgr.Path()
+	first, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+	if err != nil {
+		t.Fatalf("dial first websocket: %v", err)
+	}
+	defer func() { _ = first.Close() }()
+
+	second, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
+	if err != nil {
+		t.Fatalf("dial replacement websocket: %v", err)
+	}
+	defer func() { _ = second.Close() }()
+
+	select {
+	case cause := <-replaced:
+		if cause == nil || cause.Error() != "replaced by new connection" {
+			t.Fatalf("replacement cause = %v, want replaced by new connection", cause)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("expected existing provider session to be replaced")
+	}
+	mgr.sessMutex.RLock()
+	current := mgr.sessions["a"]
+	count := len(mgr.sessions)
+	mgr.sessMutex.RUnlock()
+	if count != 1 || current == nil {
+		t.Fatalf("provider replacement left invalid session state: count=%d current=%v", count, current)
+	}
+}
+
+func TestProviderFactoryErrorBeforeUpgrade(t *testing.T) {
+	mgr := NewManager(
+		Options{
+			ProviderFactory: func(*http.Request) (string, error) {
+				return "", errors.New("bad provider")
+			},
+		},
+	)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://example.com"+mgr.Path(), nil)
+	mgr.handleWebsocket(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rr.Code)
 	}
 }
 

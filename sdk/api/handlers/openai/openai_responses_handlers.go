@@ -9,14 +9,16 @@ package openai
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -49,6 +51,86 @@ func writeResponsesSSEFrames(w io.Writer, frames [][]byte) {
 	}
 }
 
+type responsesStreamFrameWriter struct {
+	writer        io.Writer
+	deferred      [][]byte
+	deferredBytes int
+	holding       bool
+	err           error
+}
+
+func (w *responsesStreamFrameWriter) writeFrames(frames [][]byte) {
+	if w == nil || w.err != nil {
+		return
+	}
+	for _, frame := range frames {
+		if !w.holding && !isResponsesTerminalSSEFrame(frame) {
+			writeResponsesSSEChunk(w.writer, frame)
+			continue
+		}
+		w.holding = true
+		if len(frame) > maxResponsesSSEFrameBytes-w.deferredBytes {
+			w.deferred = nil
+			w.deferredBytes = 0
+			w.err = fmt.Errorf("Responses SSE terminal sequence exceeds maximum allowed size of %d bytes", maxResponsesSSEFrameBytes)
+			return
+		}
+		w.deferred = append(w.deferred, frame)
+		w.deferredBytes += len(frame)
+	}
+}
+
+func (w *responsesStreamFrameWriter) writeDeferred() {
+	if w == nil || w.err != nil {
+		return
+	}
+	writeResponsesSSEFrames(w.writer, w.deferred)
+	w.discardDeferred()
+}
+
+func (w *responsesStreamFrameWriter) discardDeferred() {
+	if w == nil {
+		return
+	}
+	w.deferred = nil
+	w.deferredBytes = 0
+	w.holding = false
+}
+
+func isResponsesTerminalSSEFrame(frame []byte) bool {
+	payload, hasData, valid := responsesSSEDataPayload(frame)
+	if !hasData || !valid || bytes.Equal(payload, []byte("[DONE]")) {
+		return false
+	}
+	switch strings.TrimSpace(gjson.GetBytes(payload, "type").String()) {
+	case "response.completed", "response.done":
+		return true
+	default:
+		return false
+	}
+}
+
+func writeResponsesStreamError(w io.Writer, errMsg *handlers.ErrorMessage) {
+	if w == nil || errMsg == nil {
+		return
+	}
+	status := http.StatusInternalServerError
+	if errMsg.StatusCode > 0 {
+		status = errMsg.StatusCode
+	}
+	errText := http.StatusText(status)
+	if errMsg.Error != nil && errMsg.Error.Error() != "" {
+		errText = errMsg.Error.Error()
+	}
+	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
+	_, _ = fmt.Fprintf(w, "\nevent: error\ndata: %s\n\n", string(chunk))
+}
+
+func isResponsesEmptyStreamError(err error) bool {
+	var authErr *coreauth.Error
+	return errors.As(err, &authErr) && authErr.Code == "empty_stream"
+}
+
 // NewResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns an ResponsesAPIHandler.
 //
@@ -61,6 +143,13 @@ func NewResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *ResponsesAPIH
 	return &ResponsesAPIHandler{
 		BaseAPIHandler: apiHandlers,
 	}
+}
+
+func withResponsesContinuationAuthPin(ctx context.Context, rawJSON []byte) context.Context {
+	if strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()) == "" {
+		return ctx
+	}
+	return handlers.WithPinSelectedAuth(ctx)
 }
 
 // HandlerType returns the identifier for this handler implementation.
@@ -153,6 +242,7 @@ func (h *ResponsesAPIHandler) Compact(c *gin.Context) {
 	c.Header("Content-Type", "application/json")
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = withResponsesContinuationAuthPin(cliCtx, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(
 		cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact",
@@ -180,6 +270,7 @@ func (h *ResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = withResponsesContinuationAuthPin(cliCtx, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
@@ -192,6 +283,34 @@ func (h *ResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
+}
+
+func receiveInitialResponsesStream(
+	ctx context.Context,
+	data <-chan []byte,
+	errs <-chan *handlers.ErrorMessage,
+) ([]byte, *handlers.ErrorMessage, error) {
+	for data != nil || errs != nil {
+		select {
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		case errMsg, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			if errMsg != nil {
+				return nil, errMsg, nil
+			}
+		case chunk, ok := <-data:
+			if !ok {
+				data = nil
+				continue
+			}
+			return chunk, nil, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("Responses stream ended before response.completed")
 }
 
 // handleStreamingResponse handles streaming responses for constant.Gemini models.
@@ -219,6 +338,7 @@ func (h *ResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []
 	// New core execution path
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = withResponsesContinuationAuthPin(cliCtx, rawJSON)
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(
 		cliCtx, h.HandlerType(), modelName, rawJSON, "",
 	)
@@ -229,51 +349,42 @@ func (h *ResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []
 		c.Header("Connection", "keep-alive")
 	}
 
-	acc := &sseFrameAccumulator{}
-
-	// Peek at the first chunk
-	for {
-		select {
-		case <-c.Request.Context().Done():
-			cliCancel(c.Request.Context().Err())
-			return
-		case errMsg, ok := <-errChan:
-			if !ok {
-				// Err channel closed cleanly; wait for data channel.
-				errChan = nil
-				continue
-			}
-			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
-				cliCancel(errMsg.Error)
-			} else {
-				cliCancel(nil)
-			}
-			return
-		case chunk, ok := <-dataChan:
-			if !ok {
-				// Stream closed without data? Send headers and done.
-				setSSEHeaders()
-				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				_, _ = c.Writer.Write([]byte("\n"))
-				flusher.Flush()
-				cliCancel(nil)
-				return
-			}
-
-			// Success! Set headers.
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-
-			writeResponsesSSEFrames(c.Writer, acc.AddChunk(chunk))
-			flusher.Flush()
-
-			// Continue
-			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, acc, dataChan, errChan)
+	acc := newResponsesSSEFrameAccumulator()
+	chunk, errMsg, streamErr := receiveInitialResponsesStream(c.Request.Context(), dataChan, errChan)
+	if streamErr != nil {
+		if c.Request.Context().Err() != nil {
+			cliCancel(streamErr)
 			return
 		}
+		setSSEHeaders()
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		writeResponsesStreamError(c.Writer, &handlers.ErrorMessage{
+			StatusCode: http.StatusBadGateway,
+			Error:      streamErr,
+		})
+		flusher.Flush()
+		cliCancel(streamErr)
+		return
 	}
+	if errMsg != nil {
+		if isResponsesEmptyStreamError(errMsg.Error) {
+			setSSEHeaders()
+			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+			writeResponsesStreamError(c.Writer, errMsg)
+			flusher.Flush()
+			cliCancel(errMsg.Error)
+			return
+		}
+		h.WriteErrorResponse(c, errMsg)
+		cliCancel(errMsg.Error)
+		return
+	}
+
+	setSSEHeaders()
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+	h.forwardResponsesStream(
+		c, flusher, func(err error) { cliCancel(err) }, acc, dataChan, errChan, chunk,
+	)
 }
 
 func (h *ResponsesAPIHandler) forwardResponsesStream(
@@ -282,36 +393,53 @@ func (h *ResponsesAPIHandler) forwardResponsesStream(
 	cancel func(error),
 	acc *sseFrameAccumulator,
 	data <-chan []byte,
-	errs <-chan *interfaces.ErrorMessage,
+	errs <-chan *handlers.ErrorMessage,
+	initialChunks ...[]byte,
 ) {
 	if acc == nil {
-		acc = &sseFrameAccumulator{}
+		acc = newResponsesSSEFrameAccumulator()
+	}
+	frameWriter := &responsesStreamFrameWriter{writer: c.Writer}
+	for _, chunk := range initialChunks {
+		frameWriter.writeFrames(acc.AddChunk(chunk))
+	}
+	if len(initialChunks) > 0 {
+		flusher.Flush()
+	}
+
+	doneError := func() error {
+		if err := acc.Err(); err != nil {
+			return err
+		}
+		return frameWriter.err
 	}
 	h.ForwardStream(
 		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 			WriteChunk: func(chunk []byte) {
-				writeResponsesSSEFrames(c.Writer, acc.AddChunk(chunk))
+				frameWriter.writeFrames(acc.AddChunk(chunk))
 			},
-			WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			WriteTerminalError: func(errMsg *handlers.ErrorMessage) {
 				if errMsg == nil {
 					return
 				}
-				writeResponsesSSEFrames(c.Writer, acc.Flush())
-				status := http.StatusInternalServerError
-				if errMsg.StatusCode > 0 {
-					status = errMsg.StatusCode
-				}
-				errText := http.StatusText(status)
-				if errMsg.Error != nil && errMsg.Error.Error() != "" {
-					errText = errMsg.Error.Error()
-				}
-				chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-				_, _ = fmt.Fprintf(c.Writer, "\nevent: error\ndata: %s\n\n", string(chunk))
+				frameWriter.writeFrames(acc.Flush())
+				frameWriter.discardDeferred()
+				writeResponsesStreamError(c.Writer, errMsg)
 			},
 			WriteDone: func() {
-				writeResponsesSSEFrames(c.Writer, acc.Flush())
+				frameWriter.writeFrames(acc.Finalize())
+				if err := doneError(); err != nil {
+					frameWriter.discardDeferred()
+					writeResponsesStreamError(c.Writer, &handlers.ErrorMessage{
+						StatusCode: http.StatusBadGateway,
+						Error:      err,
+					})
+					return
+				}
+				frameWriter.writeDeferred()
 				_, _ = c.Writer.Write([]byte("\n"))
 			},
+			DoneError: doneError,
 		},
 	)
 }

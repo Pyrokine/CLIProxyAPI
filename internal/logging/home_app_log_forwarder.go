@@ -31,8 +31,26 @@ var currentHomeAppLogClient = func() homeAppLogClient {
 	return home.Current()
 }
 
+var activeHomeAppLogForwarders = struct {
+	sync.RWMutex
+	items map[*HomeAppLogForwarder]struct{}
+}{items: make(map[*HomeAppLogForwarder]struct{})}
+
+var activeHomeAppLogScopes atomic.Int64
+
+func BeginHomeAppLogScope() func() {
+	activeHomeAppLogScopes.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			activeHomeAppLogScopes.Add(-1)
+		})
+	}
+}
+
 type HomeAppLogForwarder struct {
 	formatter log.Formatter
+	client    homeAppLogClient
 	queue     chan homeAppLogPayload
 	stop      chan struct{}
 	stopOnce  sync.Once
@@ -41,19 +59,60 @@ type HomeAppLogForwarder struct {
 }
 
 func StartHomeAppLogForwarder(queueSize int) *HomeAppLogForwarder {
+	return startHomeAppLogForwarder(queueSize, nil)
+}
+
+func StartHomeAppLogForwarderForClient(queueSize int, client *home.Client) *HomeAppLogForwarder {
+	return startHomeAppLogForwarder(queueSize, client)
+}
+
+func startHomeAppLogForwarder(queueSize int, client homeAppLogClient) *HomeAppLogForwarder {
 	if queueSize <= 0 {
 		queueSize = defaultHomeAppLogQueueSize
 	}
 	forwarder := &HomeAppLogForwarder{
 		formatter: &LogFormatter{},
+		client:    client,
 		queue:     make(chan homeAppLogPayload, queueSize),
 		stop:      make(chan struct{}),
 	}
 	forwarder.enabled.Store(true)
 	forwarder.wg.Add(1)
 	go forwarder.run()
+	registerHomeAppLogForwarder(forwarder)
 	log.AddHook(forwarder)
 	return forwarder
+}
+
+func registerHomeAppLogForwarder(forwarder *HomeAppLogForwarder) {
+	if forwarder == nil {
+		return
+	}
+	activeHomeAppLogForwarders.Lock()
+	activeHomeAppLogForwarders.items[forwarder] = struct{}{}
+	count := len(activeHomeAppLogForwarders.items)
+	activeHomeAppLogForwarders.Unlock()
+	if count > 1 {
+		log.Warn("home app-log forwarding paused while multiple Home services are active")
+	}
+}
+
+func unregisterHomeAppLogForwarder(forwarder *HomeAppLogForwarder) {
+	activeHomeAppLogForwarders.Lock()
+	delete(activeHomeAppLogForwarders.items, forwarder)
+	activeHomeAppLogForwarders.Unlock()
+}
+
+func homeAppLogForwardingAllowed(forwarder *HomeAppLogForwarder) bool {
+	if activeHomeAppLogScopes.Load() > 1 {
+		return false
+	}
+	activeHomeAppLogForwarders.RLock()
+	defer activeHomeAppLogForwarders.RUnlock()
+	if _, registered := activeHomeAppLogForwarders.items[forwarder]; !registered {
+		return true
+	}
+	return len(activeHomeAppLogForwarders.items) == 1
 }
 
 func (f *HomeAppLogForwarder) Stop() {
@@ -63,6 +122,7 @@ func (f *HomeAppLogForwarder) Stop() {
 	f.stopOnce.Do(
 		func() {
 			f.enabled.Store(false)
+			unregisterHomeAppLogForwarder(f)
 			close(f.stop)
 			f.wg.Wait()
 		},
@@ -73,11 +133,18 @@ func (f *HomeAppLogForwarder) Levels() []log.Level {
 	return log.AllLevels
 }
 
+func (f *HomeAppLogForwarder) homeClient() homeAppLogClient {
+	if f != nil && f.client != nil {
+		return f.client
+	}
+	return currentHomeAppLogClient()
+}
+
 func (f *HomeAppLogForwarder) Fire(entry *log.Entry) error {
-	if f == nil || entry == nil || !f.enabled.Load() {
+	if f == nil || entry == nil || !f.enabled.Load() || !homeAppLogForwardingAllowed(f) {
 		return nil
 	}
-	client := currentHomeAppLogClient()
+	client := f.homeClient()
 	if client == nil || !client.HeartbeatOK() {
 		return nil
 	}
@@ -139,7 +206,7 @@ func (f *HomeAppLogForwarder) forward(payload homeAppLogPayload) {
 	if !f.enabled.Load() {
 		return
 	}
-	client := currentHomeAppLogClient()
+	client := f.homeClient()
 	if client == nil || !client.HeartbeatOK() {
 		return
 	}

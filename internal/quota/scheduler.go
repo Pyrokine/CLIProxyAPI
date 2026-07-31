@@ -3,6 +3,8 @@ package quota
 import (
 	"container/heap"
 	"context"
+	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +15,19 @@ import (
 // FetchFunc is called to refresh quota data for a credential.
 // It receives the entry with all credential info, returns raw JSON data or an error.
 type FetchFunc func(entry *Entry) ([]byte, error)
+
+// RefreshAttempt describes one successful provider fetch before its state is published.
+type RefreshAttempt struct {
+	EntryKey       string
+	FileName       string
+	Type           CredentialType
+	AuthIndex      string
+	PreviousStatus Status
+	Data           []byte
+}
+
+// RefreshFinalizer applies provider-specific recovery before refresh success is published.
+type RefreshFinalizer func(attempt RefreshAttempt) error
 
 type PersistFunc func(entry EntryState)
 
@@ -266,6 +281,15 @@ func (s *Scheduler) SetDisabled(fileName string, credType CredentialType, disabl
 // provider entries. When fileNames is empty the call is a bulk auto-refresh and skips
 // entries that shouldSkipAutoRefresh reports as ineligible.
 func (s *Scheduler) RefreshNow(fileNames []string) {
+	s.refreshNow(fileNames, nil)
+}
+
+// RefreshNowWithFinalizer refreshes named credentials and finalizes successful fetches before publication.
+func (s *Scheduler) RefreshNowWithFinalizer(fileNames []string, finalizer RefreshFinalizer) {
+	s.refreshNow(fileNames, finalizer)
+}
+
+func (s *Scheduler) refreshNow(fileNames []string, finalizer RefreshFinalizer) {
 	s.manualRefreshMu.Lock()
 	defer s.manualRefreshMu.Unlock()
 
@@ -314,7 +338,11 @@ func (s *Scheduler) RefreshNow(fileNames []string) {
 
 	// Execute refreshes directly (serialized)
 	for _, entry := range toRefresh {
-		s.executeRefresh(entry)
+		entryFinalizer := finalizer
+		if !isManual {
+			entryFinalizer = nil
+		}
+		s.executeRefresh(entry, entryFinalizer)
 	}
 }
 
@@ -331,11 +359,11 @@ func (s *Scheduler) GetStatus() StatusResponse {
 			Type:         e.Type,
 			AuthIndex:    e.AuthIndex,
 			Status:       e.Status,
-			LastRefresh:  e.LastRefresh,
-			NextRefresh:  e.NextRefresh,
+			LastRefresh:  cloneTime(e.LastRefresh),
+			NextRefresh:  cloneTime(e.NextRefresh),
 			Error:        e.Error,
 			FailureCount: e.FailureCount,
-			Data:         e.Data,
+			Data:         append(json.RawMessage(nil), e.Data...),
 			Disabled:     e.Disabled,
 		}
 		e.mu.RUnlock()
@@ -474,7 +502,7 @@ func (s *Scheduler) dispatchLoop(ctx context.Context) {
 		delay := time.Until(*next.NextRefresh)
 		if delay <= 0 {
 			// Execute immediately
-			s.executeRefresh(next)
+			s.executeRefresh(next, nil)
 			continue
 		}
 
@@ -487,25 +515,44 @@ func (s *Scheduler) dispatchLoop(ctx context.Context) {
 			timer.Stop()
 			continue
 		case <-timer.C:
-			s.executeRefresh(next)
+			s.executeRefresh(next, nil)
 		}
 	}
 }
 
-func (s *Scheduler) executeRefresh(entry *Entry) {
+const refreshFinalizerErrorMessage = "quota refreshed, but routing state could not be restored"
+
+func (s *Scheduler) executeRefresh(entry *Entry, finalizer RefreshFinalizer) {
 	entry.mu.Lock()
+	attempt := RefreshAttempt{
+		EntryKey:       EntryKey(entry.Type, entry.FileName),
+		FileName:       entry.FileName,
+		Type:           entry.Type,
+		AuthIndex:      entry.AuthIndex,
+		PreviousStatus: entry.Status,
+	}
 	entry.Status = StatusLoading
 	loadingState := entry.snapshotLocked()
 	entry.mu.Unlock()
 	s.persist(loadingState)
 
 	data, err := s.fetchFn(entry)
+	if err == nil && finalizer != nil {
+		attempt.Data = append([]byte(nil), data...)
+		if errFinalize := finalizer(attempt); errFinalize != nil {
+			log.WithError(errFinalize).Warnf("quota: finalize manual refresh for %s", entry.FileName)
+			err = errors.New(refreshFinalizerErrorMessage)
+		}
+	}
 
 	s.mu.Lock()
 	now := time.Now()
 	entry.mu.Lock()
 	entry.LastRefresh = &now
 	s.updatedAt = now
+	if len(data) > 0 {
+		entry.Data = append(entry.Data[:0], data...)
+	}
 
 	if err != nil {
 		errMsg := err.Error()
@@ -531,7 +578,6 @@ func (s *Scheduler) executeRefresh(entry *Entry) {
 		entry.Status = StatusSuccess
 		entry.Error = ""
 		entry.FailureCount = 0
-		entry.Data = data
 		entry.NextRefresh = new(time.Time)
 		*entry.NextRefresh = now.Add(time.Duration(s.cfg.Interval) * time.Second)
 	}

@@ -1,6 +1,7 @@
 package quota
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -78,6 +79,31 @@ func TestSchedulerRegisterUsesProviderAwareStatusKeys(t *testing.T) {
 	}
 	if codex.Type != TypeCodex || codex.AuthIndex != "codex-auth" {
 		t.Fatalf("codex entry = %+v", codex)
+	}
+}
+
+func TestSchedulerGetStatusReturnsIndependentSnapshot(t *testing.T) {
+	scheduler := NewScheduler(DefaultConfig(), nil)
+	scheduler.Register("claude-user.json", TypeClaude, "claude-auth")
+	key := EntryKey(TypeClaude, "claude-user.json")
+
+	entry := scheduler.entries[key]
+	entry.mu.Lock()
+	entry.Data = append(entry.Data[:0], []byte(`{"remaining":10}`)...)
+	entry.mu.Unlock()
+
+	status := scheduler.GetStatus()
+	snapshot := status.Credentials[key]
+	if snapshot == nil {
+		t.Fatal("missing quota status snapshot")
+	}
+
+	entry.mu.Lock()
+	entry.Data[13] = '0'
+	entry.mu.Unlock()
+
+	if got := string(snapshot.Data); got != `{"remaining":10}` {
+		t.Fatalf("snapshot data = %s, want independent copy", got)
 	}
 }
 
@@ -214,6 +240,84 @@ func TestScheduler_RefreshNowQueuesConcurrentManualRequests(t *testing.T) {
 		if entry.Status != StatusSuccess {
 			t.Fatalf("status for %s = %s, want %s", name, entry.Status, StatusSuccess)
 		}
+	}
+}
+
+func TestSchedulerManualRefreshFinalizerRunsBeforeSuccessPublication(t *testing.T) {
+	scheduler := NewScheduler(DefaultConfig(), func(*Entry) ([]byte, error) {
+		return []byte(`{"rate_limit":{"allowed":true}}`), nil
+	})
+	scheduler.Register("codex-user.json", TypeCodex, "codex-auth")
+
+	var attempt RefreshAttempt
+	scheduler.RefreshNowWithFinalizer(
+		[]string{"codex-user.json"}, func(current RefreshAttempt) error {
+			attempt = current
+			status := scheduler.GetStatus().Credentials[EntryKey(TypeCodex, "codex-user.json")]
+			if status == nil || status.Status != StatusLoading || status.LastRefresh != nil {
+				t.Fatalf("published state before finalizer completed: %#v", status)
+			}
+			return nil
+		},
+	)
+	if attempt.EntryKey != EntryKey(TypeCodex, "codex-user.json") ||
+		attempt.AuthIndex != "codex-auth" || attempt.Type != TypeCodex || attempt.PreviousStatus != StatusIdle {
+		t.Fatalf("refresh attempt = %#v", attempt)
+	}
+	entry := scheduler.GetStatus().Credentials[attempt.EntryKey]
+	if entry == nil || entry.Status != StatusSuccess || entry.LastRefresh == nil || entry.Error != "" {
+		t.Fatalf("final refresh state = %#v", entry)
+	}
+}
+
+func TestSchedulerManualRefreshFinalizerFailureIsVisible(t *testing.T) {
+	data := []byte(`{"rate_limit":{"allowed":true}}`)
+	scheduler := NewScheduler(DefaultConfig(), func(*Entry) ([]byte, error) { return data, nil })
+	scheduler.Register("codex-user.json", TypeCodex, "codex-auth")
+
+	scheduler.RefreshNowWithFinalizer(
+		[]string{"codex-user.json"}, func(RefreshAttempt) error {
+			return errors.New("internal recovery failure")
+		},
+	)
+	entry := scheduler.GetStatus().Credentials[EntryKey(TypeCodex, "codex-user.json")]
+	if entry == nil || entry.Status != StatusError || entry.Error != refreshFinalizerErrorMessage {
+		t.Fatalf("finalizer failure state = %#v", entry)
+	}
+	if string(entry.Data) != string(data) {
+		t.Fatalf("finalizer failure data = %s, want %s", entry.Data, data)
+	}
+}
+
+func TestSchedulerFetchFailureDoesNotRunFinalizer(t *testing.T) {
+	scheduler := NewScheduler(DefaultConfig(), func(*Entry) ([]byte, error) {
+		return nil, errors.New("provider unavailable")
+	})
+	scheduler.Register("codex-user.json", TypeCodex, "codex-auth")
+	called := false
+	scheduler.RefreshNowWithFinalizer([]string{"codex-user.json"}, func(RefreshAttempt) error {
+		called = true
+		return nil
+	})
+	if called {
+		t.Fatal("fetch failure ran finalizer")
+	}
+	entry := scheduler.GetStatus().Credentials[EntryKey(TypeCodex, "codex-user.json")]
+	if entry == nil || entry.Status != StatusError || entry.Error != "provider unavailable" {
+		t.Fatalf("fetch failure state = %#v", entry)
+	}
+}
+
+func TestSchedulerBulkRefreshDoesNotRunFinalizer(t *testing.T) {
+	scheduler := NewScheduler(DefaultConfig(), func(*Entry) ([]byte, error) { return []byte(`{}`), nil })
+	scheduler.Register("codex-user.json", TypeCodex, "codex-auth")
+	called := false
+	scheduler.RefreshNowWithFinalizer(nil, func(RefreshAttempt) error {
+		called = true
+		return nil
+	})
+	if called {
+		t.Fatal("bulk refresh ran manual finalizer")
 	}
 }
 

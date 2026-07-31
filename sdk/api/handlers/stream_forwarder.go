@@ -1,11 +1,9 @@
 package handlers
 
 import (
+	"github.com/gin-gonic/gin"
 	"net/http"
 	"time"
-
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/gin-gonic/gin"
 )
 
 type StreamForwardOptions struct {
@@ -18,11 +16,15 @@ type StreamForwardOptions struct {
 
 	// WriteTerminalError writes an error payload to the response body when streaming fails
 	// after headers have already been committed. It should not flush.
-	WriteTerminalError func(errMsg *interfaces.ErrorMessage)
+	WriteTerminalError func(errMsg *ErrorMessage)
 
 	// WriteDone optionally writes a terminal marker when the upstream data channel closes
 	// without an error (e.g. OpenAI's `[DONE]`). It should not flush.
 	WriteDone func()
+
+	// DoneError reports an error discovered while finalizing a cleanly closed data stream.
+	// WriteDone should write the matching terminal error payload before returning it here.
+	DoneError func() error
 
 	// WriteKeepAlive optionally writes a keep-alive heartbeat. It should not flush.
 	// When nil, a standard SSE comment heartbeat is used.
@@ -34,7 +36,7 @@ func (h *BaseAPIHandler) ForwardStream(
 	flusher http.Flusher,
 	cancel func(error),
 	data <-chan []byte,
-	errs <-chan *interfaces.ErrorMessage,
+	errs <-chan *ErrorMessage,
 	opts StreamForwardOptions,
 ) {
 	if c == nil {
@@ -56,7 +58,7 @@ func (h *BaseAPIHandler) ForwardStream(
 		}
 	}
 
-	keepAliveInterval := StreamingKeepAliveInterval(h.Cfg)
+	keepAliveInterval := StreamingKeepAliveInterval(h.ConfigSnapshot())
 	if opts.KeepAliveInterval != nil {
 		keepAliveInterval = *opts.KeepAliveInterval
 	}
@@ -68,7 +70,7 @@ func (h *BaseAPIHandler) ForwardStream(
 		keepAliveC = keepAlive.C
 	}
 
-	var terminalErr *interfaces.ErrorMessage
+	var terminalErr *ErrorMessage
 	for {
 		select {
 		case <-c.Request.Context().Done():
@@ -97,6 +99,13 @@ func (h *BaseAPIHandler) ForwardStream(
 				if opts.WriteDone != nil {
 					opts.WriteDone()
 				}
+				if opts.DoneError != nil {
+					if err := opts.DoneError(); err != nil {
+						flusher.Flush()
+						cancel(err)
+						return
+					}
+				}
 				flusher.Flush()
 				cancel(nil)
 				return
@@ -105,6 +114,7 @@ func (h *BaseAPIHandler) ForwardStream(
 			flusher.Flush()
 		case errMsg, ok := <-errs:
 			if !ok {
+				errs = nil
 				continue
 			}
 			if errMsg != nil {

@@ -109,6 +109,48 @@ func readTestRESPSimpleString(r *bufio.Reader) (string, error) {
 	return readTestRESPLine(r)
 }
 
+func readTestRESPSubscribe(r *bufio.Reader, channel string) error {
+	prefix, errRead := r.ReadByte()
+	if errRead != nil {
+		return errRead
+	}
+	if prefix != '*' {
+		return fmt.Errorf("expected array prefix '*', got %q", prefix)
+	}
+	if count, errLine := readTestRESPLine(r); errLine != nil {
+		return errLine
+	} else if count != "3" {
+		return fmt.Errorf("unexpected subscribe array length %q", count)
+	}
+	kind, errKind := readTestRESPBulkString(r)
+	if errKind != nil {
+		return errKind
+	}
+	if string(kind) != "subscribe" {
+		return fmt.Errorf("unexpected subscribe response kind %q", string(kind))
+	}
+	gotChannel, errChannel := readTestRESPBulkString(r)
+	if errChannel != nil {
+		return errChannel
+	}
+	if string(gotChannel) != channel {
+		return fmt.Errorf("unexpected subscribe response channel %q", string(gotChannel))
+	}
+	integerPrefix, errInteger := r.ReadByte()
+	if errInteger != nil {
+		return errInteger
+	}
+	if integerPrefix != ':' {
+		return fmt.Errorf("expected integer prefix ':', got %q", integerPrefix)
+	}
+	if count, errLine := readTestRESPLine(r); errLine != nil {
+		return errLine
+	} else if count != "1" {
+		return fmt.Errorf("unexpected subscription count %q", count)
+	}
+	return nil
+}
+
 func readTestRESPBulkString(r *bufio.Reader) ([]byte, error) {
 	prefix, errRead := r.ReadByte()
 	if errRead != nil {
@@ -438,5 +480,59 @@ func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 	}
 	if len(emptyItems) != 0 {
 		t.Fatalf("expected empty array for empty queue with count, got %#v", emptyItems)
+	}
+}
+
+func TestRedisProtocol_SUBSCRIBEConnectionClosesWhenQueueDisabled(t *testing.T) {
+	const managementPassword = "test-management-password"
+
+	t.Setenv("MANAGEMENT_PASSWORD", managementPassword)
+	queue := redisqueue.NewQueue()
+	server := newTestServerWithOptions(t, WithUsageQueue(queue))
+	queue.SetEnabled(true)
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { _ = clientConn.Close() })
+	done := make(chan struct{})
+	go func() {
+		server.handleRedisConnection(
+			&redisTestConn{
+				Conn:       serverConn,
+				remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+			},
+			nil,
+		)
+		close(done)
+	}()
+
+	reader := bufio.NewReader(clientConn)
+	_ = clientConn.SetDeadline(time.Now().Add(2 * time.Second))
+	if errWrite := writeTestRESPCommand(clientConn, "AUTH", managementPassword); errWrite != nil {
+		t.Fatalf("failed to write AUTH command: %v", errWrite)
+	}
+	if response, errRead := readTestRESPSimpleString(reader); errRead != nil {
+		t.Fatalf("failed to read AUTH response: %v", errRead)
+	} else if response != "OK" {
+		t.Fatalf("unexpected AUTH response: %q", response)
+	}
+	queue.SetEnabled(false)
+	if errWrite := writeTestRESPCommand(clientConn, "SUBSCRIBE", redisUsageChannel); errWrite != nil {
+		t.Fatalf("failed to write SUBSCRIBE command: %v", errWrite)
+	}
+	if errRead := readTestRESPSubscribe(reader, redisUsageChannel); errRead != nil {
+		t.Fatalf("failed to read SUBSCRIBE response: %v", errRead)
+	}
+
+	if _, errRead := io.Copy(io.Discard, reader); errRead != nil {
+		var netErr net.Error
+		if errors.As(errRead, &netErr) && netErr.Timeout() {
+			t.Fatalf("redis subscription remained open after queue shutdown: %v", errRead)
+		}
+		t.Fatalf("failed while waiting for redis subscription shutdown: %v", errRead)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("redis connection handler remained active after queue shutdown")
 	}
 }

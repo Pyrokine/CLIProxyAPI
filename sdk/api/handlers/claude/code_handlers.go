@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
@@ -245,7 +244,7 @@ func (h *CodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte)
 	type streamStart struct {
 		data    <-chan []byte
 		headers http.Header
-		errs    <-chan *interfaces.ErrorMessage
+		errs    <-chan *handlers.ErrorMessage
 	}
 	startChan := make(chan streamStart, 1)
 	go func() {
@@ -321,7 +320,7 @@ func writeClaudeStreamKeepAlive(c *gin.Context, flusher http.Flusher) {
 	flusher.Flush()
 }
 
-func (h *CodeAPIHandler) writeClaudeStreamError(c *gin.Context, flusher http.Flusher, errMsg *interfaces.ErrorMessage) {
+func (h *CodeAPIHandler) writeClaudeStreamError(c *gin.Context, flusher http.Flusher, errMsg *handlers.ErrorMessage) {
 	if errMsg == nil {
 		return
 	}
@@ -335,7 +334,7 @@ func (h *CodeAPIHandler) forwardClaudeStream(
 	flusher http.Flusher,
 	cancel func(error),
 	data <-chan []byte,
-	errs <-chan *interfaces.ErrorMessage,
+	errs <-chan *handlers.ErrorMessage,
 ) {
 	keepAliveInterval := new(time.Duration)
 	*keepAliveInterval = 15 * time.Second
@@ -348,7 +347,7 @@ func (h *CodeAPIHandler) forwardClaudeStream(
 				}
 				_, _ = c.Writer.Write(chunk)
 			},
-			WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			WriteTerminalError: func(errMsg *handlers.ErrorMessage) {
 				if errMsg == nil {
 					return
 				}
@@ -375,7 +374,7 @@ type claudeErrorResponse struct {
 	Error claudeErrorDetail `json:"error"`
 }
 
-func (h *CodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claudeErrorResponse {
+func (h *CodeAPIHandler) toClaudeError(msg *handlers.ErrorMessage) claudeErrorResponse {
 	return claudeErrorResponse{
 		Type: "error",
 		Error: claudeErrorDetail{

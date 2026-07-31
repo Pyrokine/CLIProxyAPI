@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,21 @@ import (
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
 )
+
+func TestGetContextWithCancelIncludesUsageManager(t *testing.T) {
+	manager := coreusage.NewManager(4)
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetUsageManager(manager)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+	defer cancel()
+	if got := coreusage.ManagerFromContext(ctx); got != manager {
+		t.Fatalf("usage manager = %p, want %p", got, manager)
+	}
+}
 
 func TestRequestHeadersAndQueryFromGinContext(t *testing.T) {
 	recorder := httptest.NewRecorder()
@@ -178,6 +194,177 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	}
 }
 
+func TestGetRequestDetailsImageOnlyModelsReturn503(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	models := []string{
+		"gpt-image-1.5",
+		"gpt-image-2",
+		"codex/gpt-image-2",
+		"grok-imagine-image",
+		"xai/grok-imagine-image",
+		"grok-imagine-image-quality",
+		"XAI/Grok-Imagine-Image-Quality(HIGH)",
+	}
+
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			_, _, errMsg := handler.getRequestDetails(model)
+			if errMsg == nil {
+				t.Fatalf("getRequestDetails(%q) error = nil, want image-only error", model)
+			}
+			if errMsg.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+			}
+			message := errMsg.Error.Error()
+			if !strings.Contains(message, "/v1/images/generations") || !strings.Contains(message, "/v1/images/edits") {
+				t.Fatalf("unexpected error message: %q", message)
+			}
+		})
+	}
+}
+
+func TestValidateImageOnlyModelAllowsImageEndpoints(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	models := []string{
+		"gpt-image-1.5",
+		"codex/gpt-image-2",
+		"grok-imagine-image",
+		"xai/grok-imagine-image-quality(high)",
+	}
+
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			if errMsg := handler.validateImageOnlyModel(model, true); errMsg != nil {
+				t.Fatalf("validateImageOnlyModel(%q, true) = %+v, want nil", model, errMsg)
+			}
+		})
+	}
+}
+
+func TestGetRequestDetailsWithOptionsCanonicalizesBuiltinImageModels(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(
+		"test-image-details-codex",
+		"codex",
+		[]*registry.ModelInfo{{ID: "gpt-image-2"}},
+	)
+	modelRegistry.RegisterClient(
+		"test-image-details-xai",
+		"xai",
+		[]*registry.ModelInfo{{ID: "grok-imagine-image-quality"}},
+	)
+	modelRegistry.RegisterClient(
+		"test-image-details-prefixed",
+		"codex",
+		[]*registry.ModelInfo{{ID: "TeamA/gpt-image-2"}},
+	)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("test-image-details-codex")
+		modelRegistry.UnregisterClient("test-image-details-xai")
+		modelRegistry.UnregisterClient("test-image-details-prefixed")
+	})
+
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+	tests := []struct {
+		model        string
+		wantProvider string
+		wantModel    string
+	}{
+		{model: "Codex/GPT-IMAGE-2(high)", wantProvider: "codex", wantModel: "gpt-image-2"},
+		{
+			model:        "XAI/Grok-Imagine-Image-Quality(HIGH)",
+			wantProvider: "xai",
+			wantModel:    "grok-imagine-image-quality",
+		},
+		{
+			model:        "teama/GPT-IMAGE-2(HIGH)",
+			wantProvider: "codex",
+			wantModel:    "TeamA/gpt-image-2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			providers, model, errMsg := handler.getRequestDetailsWithOptions(tt.model, true)
+			if errMsg != nil {
+				t.Fatalf("getRequestDetailsWithOptions(%q, true) error = %v", tt.model, errMsg.Error)
+			}
+			if len(providers) != 1 || providers[0] != tt.wantProvider {
+				t.Fatalf("providers = %v, want [%s]", providers, tt.wantProvider)
+			}
+			if model != tt.wantModel {
+				t.Fatalf("model = %q, want %q", model, tt.wantModel)
+			}
+		})
+	}
+
+	if _, _, errMsg := handler.getRequestDetailsWithOptions("TeamB/GPT-IMAGE-2(HIGH)", true); errMsg == nil {
+		t.Fatal("unknown image model prefix unexpectedly fell back to the bare model")
+	}
+}
+
+func TestExecuteImageWithAuthManagerChecksRequestedModelAccess(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(
+		"test-image-access-prefixed",
+		"codex",
+		[]*registry.ModelInfo{{ID: "TeamA/gpt-image-2"}},
+	)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient("test-image-access-prefixed")
+	})
+
+	handler := NewBaseAPIHandlers(
+		&sdkconfig.SDKConfig{
+			APIKeyRules: map[string]internalconfig.APIKeyRule{
+				"sk-test": {BlockedModels: []string{"TeamA/gpt-image-2"}},
+			},
+		},
+		coreauth.NewManager(nil, nil, nil),
+	)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Set("apiKey", "sk-test")
+	ctx := util.WithGinContext(context.Background(), ginCtx)
+
+	_, _, errMsg := handler.ExecuteImageWithAuthManager(
+		ctx,
+		"openai-image",
+		"teama/GPT-IMAGE-2(HIGH)",
+		[]byte(`{"model":"teama/GPT-IMAGE-2(HIGH)"}`),
+		"",
+	)
+	if errMsg == nil {
+		t.Fatal("prefixed model access rule was bypassed")
+	}
+	if errMsg.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestIsOpenAIImageOnlyModel(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{model: "gpt-image-1.5", want: true},
+		{model: "codex/gpt-image-2", want: true},
+		{model: "grok-imagine-image", want: true},
+		{model: "xai/grok-imagine-image", want: true},
+		{model: "XAI/Grok-Imagine-Image-Quality", want: true},
+		{model: "grok-3", want: false},
+		{model: "grok-imagine-video", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := isOpenAIImageOnlyModel(tt.model); got != tt.want {
+				t.Fatalf("isOpenAIImageOnlyModel(%q) = %v, want %v", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFilterModelsForCurrentAPIKeyUsesCatalogNameForAlias(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-filter-api-key-catalog-alias"
@@ -270,5 +457,27 @@ func TestSetServiceTierMetadataDefaultsWhenMissing(t *testing.T) {
 
 	if got := meta[coreexecutor.ServiceTierMetadataKey]; got != coreusage.DefaultServiceTier {
 		t.Fatalf("ServiceTierMetadataKey = %v, want %q", got, coreusage.DefaultServiceTier)
+	}
+}
+
+func TestSetServiceTierMetadataPreservesContextValue(t *testing.T) {
+	ctx := coreusage.WithServiceTier(context.Background(), "flex")
+	meta := requestExecutionMetadata(ctx)
+
+	setServiceTierMetadata(meta, []byte(`{"service_tier":123}`))
+
+	if got := meta[coreexecutor.ServiceTierMetadataKey]; got != "flex" {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", got, "flex")
+	}
+}
+
+func TestSetServiceTierMetadataBodyOverridesContextValue(t *testing.T) {
+	ctx := coreusage.WithServiceTier(context.Background(), "flex")
+	meta := requestExecutionMetadata(ctx)
+
+	setServiceTierMetadata(meta, []byte(`{"service_tier":"priority"}`))
+
+	if got := meta[coreexecutor.ServiceTierMetadataKey]; got != "priority" {
+		t.Fatalf("ServiceTierMetadataKey = %v, want %q", got, "priority")
 	}
 }

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
@@ -319,7 +318,7 @@ func (h *APIHandler) forwardGeminiStream(
 	alt string,
 	cancel func(error),
 	data <-chan []byte,
-	errs <-chan *interfaces.ErrorMessage,
+	errs <-chan *handlers.ErrorMessage,
 ) {
 	forwardStream(
 		h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) {
@@ -343,7 +342,7 @@ func forwardStream(
 	alt string,
 	cancel func(error),
 	data <-chan []byte,
-	errs <-chan *interfaces.ErrorMessage,
+	errs <-chan *handlers.ErrorMessage,
 	writeChunk func([]byte),
 ) {
 	var keepAliveInterval *time.Duration
@@ -355,7 +354,7 @@ func forwardStream(
 		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 			KeepAliveInterval: keepAliveInterval,
 			WriteChunk:        writeChunk,
-			WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
+			WriteTerminalError: func(errMsg *handlers.ErrorMessage) {
 				if errMsg == nil {
 					return
 				}

@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -312,8 +311,8 @@ func firstPostForm(c *gin.Context, keys ...string) string {
 }
 
 func (h *APIHandler) videoAuthBindingTTL() time.Duration {
-	if h != nil && h.BaseAPIHandler != nil && h.Cfg != nil {
-		raw := strings.TrimSpace(h.Cfg.VideoResultAuthCacheTTL)
+	if h != nil && h.BaseAPIHandler != nil && h.ConfigSnapshot() != nil {
+		raw := strings.TrimSpace(h.ConfigSnapshot().VideoResultAuthCacheTTL)
 		if raw != "" {
 			if ttl, err := time.ParseDuration(raw); err == nil && ttl > 0 {
 				return ttl
@@ -866,7 +865,7 @@ func (h *APIHandler) VideosRetrieve(c *gin.Context) {
 
 	out, err := buildVideosRetrieveAPIResponseFromXAI(videoID, resp, defaultXAIVideosModel)
 	if err != nil {
-		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(err)
 		return
@@ -938,7 +937,7 @@ func (h *APIHandler) VideosContent(c *gin.Context) {
 	h.bindVideoAuthID(videoID, selectedAuthID, executionModel)
 	contentURL, err := xaiVideoContentURLFromPayload(resp)
 	if err != nil {
-		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(err)
 		return
@@ -954,7 +953,7 @@ func (h *APIHandler) VideosContent(c *gin.Context) {
 func (h *APIHandler) writeVideoContentFromURL(c *gin.Context, contentURL string) error {
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, contentURL, nil)
 	if err != nil {
-		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		h.WriteErrorResponse(c, errMsg)
 		return err
 	}
@@ -962,7 +961,7 @@ func (h *APIHandler) writeVideoContentFromURL(c *gin.Context, contentURL string)
 	httpClient := h.videoContentHTTPClient(c)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		h.WriteErrorResponse(c, errMsg)
 		return err
 	}
@@ -972,7 +971,7 @@ func (h *APIHandler) writeVideoContentFromURL(c *gin.Context, contentURL string)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errDownloadStatus := videoContentDownloadStatusError(resp)
-		errMsg := &interfaces.ErrorMessage{StatusCode: resp.StatusCode, Error: errDownloadStatus}
+		errMsg := &handlers.ErrorMessage{StatusCode: resp.StatusCode, Error: errDownloadStatus}
 		h.WriteErrorResponse(c, errMsg)
 		return errDownloadStatus
 	}
@@ -1014,8 +1013,8 @@ func (h *APIHandler) videoContentHTTPClient(c *gin.Context) *http.Client {
 		ctx = c.Request.Context()
 	}
 	var cfg *sdkconfig.Config
-	if h != nil && h.BaseAPIHandler != nil && h.Cfg != nil {
-		cfg = &sdkconfig.Config{SDKConfig: *h.Cfg}
+	if h != nil && h.BaseAPIHandler != nil && h.ConfigSnapshot() != nil {
+		cfg = &sdkconfig.Config{SDKConfig: *h.ConfigSnapshot()}
 	}
 	client := runtimeexecutor.NewProxyAwareHTTPClient(
 		ctx, cfg, h.videoContentDownloadAuth(c), defaultVideoContentHTTPTimeout,
@@ -1124,7 +1123,7 @@ func (h *APIHandler) collectXAIVideosCreate(c *gin.Context, xaiReq []byte, meta 
 
 	out, err := buildVideosCreateAPIResponseFromXAI(resp, meta)
 	if err != nil {
-		errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(err)
 		return

@@ -47,6 +47,105 @@ func (c *stubHomeAppLogClient) pushedAt(index int) []byte {
 	return bytes.Clone(c.pushed[index])
 }
 
+func TestHomeAppLogForwarderPausesGlobalLogsWithMultipleHomeServices(t *testing.T) {
+	clientA := &stubHomeAppLogClient{heartbeatOK: true}
+	clientB := &stubHomeAppLogClient{heartbeatOK: true}
+	forwarderA := startHomeAppLogForwarder(4, clientA)
+	forwarderB := startHomeAppLogForwarder(4, clientB)
+	t.Cleanup(forwarderA.Stop)
+	t.Cleanup(forwarderB.Stop)
+
+	log.WithField("request_id", "multi-home").Info("must not cross Home services")
+	time.Sleep(50 * time.Millisecond)
+	if clientA.pushedCount() != 0 || clientB.pushedCount() != 0 {
+		t.Fatalf(
+			"multi-service pushes = service A %d, service B %d",
+			clientA.pushedCount(),
+			clientB.pushedCount(),
+		)
+	}
+
+	forwarderB.Stop()
+	log.WithField("request_id", "single-home").Info("single Home service log")
+	deadline := time.Now().Add(time.Second)
+	for clientA.pushedCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if clientA.pushedCount() != 1 || clientB.pushedCount() != 0 {
+		t.Fatalf(
+			"single-service pushes = service A %d, service B %d",
+			clientA.pushedCount(),
+			clientB.pushedCount(),
+		)
+	}
+}
+
+func TestHomeAppLogScopeCoversPeerStartupAndShutdownWindows(t *testing.T) {
+	clientA := &stubHomeAppLogClient{heartbeatOK: true}
+	clientB := &stubHomeAppLogClient{heartbeatOK: true}
+	releaseScopeA := BeginHomeAppLogScope()
+	t.Cleanup(releaseScopeA)
+	forwarderA := startHomeAppLogForwarder(8, clientA)
+	t.Cleanup(forwarderA.Stop)
+
+	releaseScopeB := BeginHomeAppLogScope()
+	log.Info("peer Home service is starting")
+	time.Sleep(30 * time.Millisecond)
+	if clientA.pushedCount() != 0 {
+		t.Fatalf("startup-window pushes to service A = %d, want 0", clientA.pushedCount())
+	}
+
+	forwarderB := startHomeAppLogForwarder(8, clientB)
+	forwarderB.Stop()
+	log.Info("peer Home service is shutting down")
+	time.Sleep(30 * time.Millisecond)
+	if clientA.pushedCount() != 0 || clientB.pushedCount() != 0 {
+		t.Fatalf(
+			"shutdown-window pushes = service A %d, service B %d",
+			clientA.pushedCount(),
+			clientB.pushedCount(),
+		)
+	}
+
+	releaseScopeB()
+	log.Info("single Home service resumed")
+	deadline := time.Now().Add(time.Second)
+	for clientA.pushedCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if clientA.pushedCount() != 1 {
+		t.Fatalf("single-service pushes after peer shutdown = %d, want 1", clientA.pushedCount())
+	}
+}
+
+func TestHomeAppLogForwarderClientsAreIsolated(t *testing.T) {
+	globalClient := &stubHomeAppLogClient{heartbeatOK: true}
+	previous := currentHomeAppLogClient
+	currentHomeAppLogClient = func() homeAppLogClient { return globalClient }
+	t.Cleanup(func() { currentHomeAppLogClient = previous })
+
+	clientA := &stubHomeAppLogClient{heartbeatOK: true}
+	clientB := &stubHomeAppLogClient{heartbeatOK: true}
+	forwarderA := &HomeAppLogForwarder{client: clientA}
+	forwarderB := &HomeAppLogForwarder{client: clientB}
+	forwarderNil := &HomeAppLogForwarder{}
+	forwarderNil.client = nil
+	forwarderA.enabled.Store(true)
+	forwarderB.enabled.Store(true)
+	forwarderNil.enabled.Store(false)
+
+	forwarderA.forward(homeAppLogPayload{Line: "service-a"})
+	forwarderB.forward(homeAppLogPayload{Line: "service-b"})
+	if clientA.pushedCount() != 1 || clientB.pushedCount() != 1 || globalClient.pushedCount() != 0 {
+		t.Fatalf(
+			"pushed counts = service A %d, service B %d, global %d",
+			clientA.pushedCount(),
+			clientB.pushedCount(),
+			globalClient.pushedCount(),
+		)
+	}
+}
+
 func TestHomeAppLogForwarderForwardsFormattedLogWhenHomeHealthy(t *testing.T) {
 	original := currentHomeAppLogClient
 	defer func() {

@@ -11,6 +11,10 @@ const (
 	maxRetentionSeconds     int64 = 3600
 	usageSubscriberBuffer         = 256
 
+	queueDisabled uint32 = 0
+	queueEnabled  uint32 = 1
+	queueClosed   uint32 = 2
+
 	usageSupportRefreshPayload = `{"support_refresh":true}`
 	usageRefreshPayload        = `{"refresh":true}`
 )
@@ -20,77 +24,140 @@ type queueItem struct {
 	payload    []byte
 }
 
-type queue struct {
-	mu               sync.Mutex
-	items            []queueItem
-	head             int
-	subscribers      map[uint64]chan []byte
-	nextSubscriberID uint64
+// Queue owns one service's usage output buffer, subscribers and runtime flags.
+type Queue struct {
+	state                  atomic.Uint32
+	usageStatisticsEnabled atomic.Bool
+	retentionSeconds       atomic.Int64
+	mu                     sync.Mutex
+	items                  []queueItem
+	head                   int
+	subscribers            map[uint64]chan []byte
+	nextSubscriberID       uint64
 }
 
-var (
-	enabled          atomic.Bool
-	retentionSeconds atomic.Int64
-	global           queue
-)
+var defaultQueue = NewQueue()
 
-func init() {
-	retentionSeconds.Store(defaultRetentionSeconds)
+// DefaultQueue returns the process-wide compatibility queue.
+func DefaultQueue() *Queue { return defaultQueue }
+
+func NewQueue() *Queue {
+	q := &Queue{}
+	q.retentionSeconds.Store(defaultRetentionSeconds)
+	q.usageStatisticsEnabled.Store(true)
+	return q
 }
 
-func SetEnabled(value bool) {
-	enabled.Store(value)
-	if !value {
-		global.clear()
+func (q *Queue) SetEnabled(value bool) {
+	if q == nil {
+		return
+	}
+	if value {
+		for {
+			state := q.state.Load()
+			if state == queueClosed {
+				return
+			}
+			if q.state.CompareAndSwap(state, queueEnabled) {
+				return
+			}
+		}
+	}
+	for {
+		state := q.state.Load()
+		if state == queueClosed || q.state.CompareAndSwap(state, queueDisabled) {
+			q.clear()
+			return
+		}
 	}
 }
 
-func Enabled() bool {
-	return enabled.Load()
+func (q *Queue) Close() {
+	if q == nil {
+		return
+	}
+	q.state.Store(queueClosed)
+	q.clear()
 }
 
-func SetRetentionSeconds(value int) {
+func (q *Queue) Enabled() bool {
+	return q != nil && q.state.Load() == queueEnabled
+}
+
+func (q *Queue) SetRetentionSeconds(value int) {
+	if q == nil {
+		return
+	}
 	normalized := int64(value)
 	if normalized <= 0 {
 		normalized = defaultRetentionSeconds
 	} else if normalized > maxRetentionSeconds {
 		normalized = maxRetentionSeconds
 	}
-	retentionSeconds.Store(normalized)
+	q.retentionSeconds.Store(normalized)
 }
 
-func Enqueue(payload []byte) {
-	if !Enabled() {
+func (q *Queue) SetUsageStatisticsEnabled(value bool) {
+	if q == nil {
 		return
 	}
-	if len(payload) == 0 {
-		return
-	}
-	if global.publishToSubscribers(payload) {
-		return
-	}
-	global.enqueue(payload)
+	q.usageStatisticsEnabled.Store(value)
 }
 
-func PopOldest(count int) [][]byte {
-	if !Enabled() {
+func (q *Queue) UsageStatisticsEnabled() bool {
+	return q != nil && q.usageStatisticsEnabled.Load()
+}
+
+func (q *Queue) Enqueue(payload []byte) {
+	if q == nil || !q.Enabled() || len(payload) == 0 {
+		return
+	}
+	if q.publishToSubscribers(payload) {
+		return
+	}
+	q.enqueue(payload)
+}
+
+func (q *Queue) PopOldest(count int) [][]byte {
+	if q == nil || !q.Enabled() || count <= 0 {
 		return nil
 	}
-	if count <= 0 {
-		return nil
+	return q.popOldest(count)
+}
+
+func (q *Queue) SubscribeUsage() (<-chan []byte, func()) {
+	if q == nil {
+		closed := make(chan []byte)
+		close(closed)
+		return closed, func() {}
 	}
-	return global.popOldest(count)
+	return q.subscribeUsage([]byte(usageSupportRefreshPayload))
 }
 
-func SubscribeUsage() (<-chan []byte, func()) {
-	return global.subscribeUsage([]byte(usageSupportRefreshPayload))
+func (q *Queue) NotifyUsageRefresh() {
+	if q == nil {
+		return
+	}
+	q.publishToSubscribers([]byte(usageRefreshPayload))
 }
 
-func NotifyUsageRefresh() {
-	global.publishToSubscribers([]byte(usageRefreshPayload))
-}
+func SetEnabled(value bool) { defaultQueue.SetEnabled(value) }
 
-func (q *queue) clear() {
+func Close() { defaultQueue.Close() }
+
+func Enabled() bool { return defaultQueue.Enabled() }
+
+func SetRetentionSeconds(value int) { defaultQueue.SetRetentionSeconds(value) }
+
+func Enqueue(payload []byte) { defaultQueue.Enqueue(payload) }
+
+func PopOldest(count int) [][]byte { return defaultQueue.PopOldest(count) }
+
+func SubscribeUsage() (<-chan []byte, func()) { return defaultQueue.SubscribeUsage() }
+
+func NotifyUsageRefresh() { defaultQueue.NotifyUsageRefresh() }
+
+func (q *Queue) clear() {
 	q.mu.Lock()
 
 	subscribers := make([]chan []byte, 0, len(q.subscribers))
@@ -107,7 +174,7 @@ func (q *queue) clear() {
 	}
 }
 
-func (q *queue) enqueue(payload []byte) {
+func (q *Queue) enqueue(payload []byte) {
 	now := time.Now()
 
 	q.mu.Lock()
@@ -123,7 +190,7 @@ func (q *queue) enqueue(payload []byte) {
 	q.maybeCompactLocked()
 }
 
-func (q *queue) publishToSubscribers(payload []byte) bool {
+func (q *Queue) publishToSubscribers(payload []byte) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -144,10 +211,15 @@ func (q *queue) publishToSubscribers(payload []byte) bool {
 	return true
 }
 
-func (q *queue) subscribeUsage(initialPayload []byte) (<-chan []byte, func()) {
+func (q *Queue) subscribeUsage(initialPayload []byte) (<-chan []byte, func()) {
 	subscriber := make(chan []byte, usageSubscriberBuffer)
 
 	q.mu.Lock()
+	if q.state.Load() != queueEnabled {
+		q.mu.Unlock()
+		close(subscriber)
+		return subscriber, func() {}
+	}
 	if q.subscribers == nil {
 		q.subscribers = make(map[uint64]chan []byte)
 	}
@@ -170,7 +242,7 @@ func (q *queue) subscribeUsage(initialPayload []byte) (<-chan []byte, func()) {
 	return subscriber, unsubscribe
 }
 
-func (q *queue) unsubscribeUsage(id uint64) {
+func (q *Queue) unsubscribeUsage(id uint64) {
 	q.mu.Lock()
 	subscriber, ok := q.subscribers[id]
 	if ok {
@@ -183,7 +255,7 @@ func (q *queue) unsubscribeUsage(id uint64) {
 	}
 }
 
-func (q *queue) popOldest(count int) [][]byte {
+func (q *Queue) popOldest(count int) [][]byte {
 	now := time.Now()
 
 	q.mu.Lock()
@@ -210,14 +282,14 @@ func (q *queue) popOldest(count int) [][]byte {
 	return out
 }
 
-func (q *queue) pruneLocked(now time.Time) {
+func (q *Queue) pruneLocked(now time.Time) {
 	if q.head >= len(q.items) {
 		q.items = nil
 		q.head = 0
 		return
 	}
 
-	windowSeconds := retentionSeconds.Load()
+	windowSeconds := q.retentionSeconds.Load()
 	if windowSeconds <= 0 {
 		windowSeconds = defaultRetentionSeconds
 	}
@@ -227,7 +299,7 @@ func (q *queue) pruneLocked(now time.Time) {
 	}
 }
 
-func (q *queue) maybeCompactLocked() {
+func (q *Queue) maybeCompactLocked() {
 	if q.head == 0 {
 		return
 	}

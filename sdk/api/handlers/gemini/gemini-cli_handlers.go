@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
@@ -75,7 +74,19 @@ func isGeminiCLILocalRequest(req *http.Request) bool {
 // CLIHandler handles CLI-specific requests for constant.Gemini API operations.
 // It restricts access to localhost only and routes requests to appropriate internal handlers.
 func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
-	if h == nil || h.BaseAPIHandler == nil || h.Cfg == nil || !h.Cfg.EnableGeminiCLIEndpoint {
+	if h == nil || h.BaseAPIHandler == nil {
+		c.JSON(
+			http.StatusForbidden, handlers.ErrorResponse{
+				Error: handlers.ErrorDetail{
+					Message: "Gemini CLI endpoint is disabled",
+					Type:    "forbidden",
+				},
+			},
+		)
+		return
+	}
+	cfg := h.BaseAPIHandler.ConfigSnapshot()
+	if cfg == nil || !cfg.EnableGeminiCLIEndpoint {
 		c.JSON(
 			http.StatusForbidden, handlers.ErrorResponse{
 				Error: handlers.ErrorDetail{
@@ -124,7 +135,7 @@ func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 		}
 		maps.Copy(req.Header, c.Request.Header)
 
-		httpClient := util.SetProxy(h.BaseAPIHandler.Cfg, &http.Client{})
+		httpClient := util.SetProxy(cfg, &http.Client{})
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
@@ -170,14 +181,16 @@ func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 			log.Errorf("Failed to read response body: %v", err)
 			return
 		}
-		if h.BaseAPIHandler != nil && h.BaseAPIHandler.Cfg != nil && h.BaseAPIHandler.Cfg.RequestLog {
+		if h.BaseAPIHandler != nil && cfg != nil && cfg.RequestLog {
 			c.Set("API_RESPONSE_TIMESTAMP", time.Now())
 			if timelineValue, ok := c.Get(logging.RequestTimelineGinKey); ok {
 				if timeline, okTimeline := timelineValue.(*logging.RequestTimeline); okTimeline && timeline != nil {
 					timeline.AddOnce("upstream.response.done", "")
 				}
 			}
-			c.Set("API_RESPONSE", output)
+			buffer := logging.NewBoundedLogBuffer()
+			buffer.Append(output)
+			c.Set("API_RESPONSE", buffer)
 		}
 		_, _ = c.Writer.Write(output)
 	}
@@ -245,7 +258,7 @@ func (h *CLIAPIHandler) forwardCLIStream(
 	alt string,
 	cancel func(error),
 	data <-chan []byte,
-	errs <-chan *interfaces.ErrorMessage,
+	errs <-chan *handlers.ErrorMessage,
 ) {
 	forwardStream(
 		h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) {
