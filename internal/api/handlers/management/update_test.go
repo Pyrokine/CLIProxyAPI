@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 )
@@ -44,6 +45,78 @@ func TestExpectedArchiveAssetNames(t *testing.T) {
 	}
 	if names[1] != "CLIProxyAPI_linux_amd64.tar.gz" {
 		t.Fatalf("names[1] = %q", names[1])
+	}
+}
+
+func TestCompareUpdateVersions(t *testing.T) {
+	tests := []struct {
+		name           string
+		left           string
+		right          string
+		wantOrder      int
+		wantComparable bool
+	}{
+		{name: "plain older", left: "v7.2.49", right: "v7.2.50", wantOrder: -1, wantComparable: true},
+		{name: "plain equal", left: "v7.2.50", right: "v7.2.50", wantComparable: true},
+		{name: "augmented after plain", left: "v7.2.50-aug.1", right: "v7.2.50", wantOrder: 1, wantComparable: true},
+		{name: "augmentation zero after plain", left: "v7.2.50-aug.0", right: "v7.2.50", wantOrder: 1, wantComparable: true},
+		{name: "augmentation revision", left: "v7.2.50-aug.1", right: "v7.2.50-aug.2", wantOrder: -1, wantComparable: true},
+		{name: "new base after augmentation", left: "v7.2.51", right: "v7.2.50-aug.9", wantOrder: 1, wantComparable: true},
+		{name: "unprefixed versions", left: "7.2.51", right: "7.2.50", wantOrder: 1, wantComparable: true},
+		{name: "development version", left: "v7.2.51", right: "dev"},
+		{name: "unsupported suffix", left: "v7.2.51-rc.1", right: "v7.2.50"},
+		{
+			name:  "overflowing component",
+			left:  "v18446744073709551616.0.0",
+			right: "v7.2.50",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotOrder, gotComparable := compareUpdateVersions(test.left, test.right)
+			if gotComparable != test.wantComparable {
+				t.Fatalf("comparable = %t, want %t", gotComparable, test.wantComparable)
+			}
+			if gotOrder != test.wantOrder {
+				t.Fatalf("order = %d, want %d", gotOrder, test.wantOrder)
+			}
+		})
+	}
+}
+
+func TestBuildUpdateCompatibility_RejectsComparableDowngrade(t *testing.T) {
+	oldVersion := buildinfo.Version
+	t.Cleanup(func() {
+		buildinfo.Version = oldVersion
+	})
+	buildinfo.Version = "v7.2.50-aug.1"
+
+	var h *Handler
+	compat := h.buildUpdateCompatibility(context.Background(), "v7.2.50")
+	if compat.Compatible {
+		t.Fatalf("downgrade compatibility unexpectedly true: %#v", compat)
+	}
+	if len(compat.Warnings) != 1 {
+		t.Fatalf("warnings = %#v, want one downgrade warning", compat.Warnings)
+	}
+}
+
+func TestBuildUpdateCompatibility_AllowsNewerAndUncomparableTargets(t *testing.T) {
+	oldVersion := buildinfo.Version
+	t.Cleanup(func() {
+		buildinfo.Version = oldVersion
+	})
+	buildinfo.Version = "v7.2.50-aug.1"
+
+	var h *Handler
+	for _, target := range []string{"v7.2.51", "dev"} {
+		compat := h.buildUpdateCompatibility(context.Background(), target)
+		if !compat.Compatible {
+			t.Fatalf("target %q compatibility unexpectedly false: %#v", target, compat)
+		}
+		if len(compat.Warnings) != 0 {
+			t.Fatalf("target %q warnings = %#v, want none", target, compat.Warnings)
+		}
 	}
 }
 
@@ -94,8 +167,12 @@ func TestBuildUpdateCompatibility_WithReadySQLitePersister(t *testing.T) {
 	if !compat.Usage.PersisterReady {
 		t.Fatal("expected persister_ready=true")
 	}
-	if compat.Usage.SchemaVersion != "3" {
-		t.Fatalf("schema_version = %q, want 3", compat.Usage.SchemaVersion)
+	if compat.Usage.SchemaVersion != usage.CurrentSchemaVersion {
+		t.Fatalf(
+			"schema_version = %q, want %s",
+			compat.Usage.SchemaVersion,
+			usage.CurrentSchemaVersion,
+		)
 	}
 	if compat.Usage.DBPath == "" {
 		t.Fatal("expected db_path to be populated")

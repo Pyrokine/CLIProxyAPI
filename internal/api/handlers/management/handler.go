@@ -5,10 +5,11 @@ package management
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,11 +17,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/artifact"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -56,20 +59,44 @@ const attemptMaxIdleTime = 2 * time.Hour
 type pluginRuntimeHost interface {
 	RegisteredPlugins() []pluginhost.RegisteredPluginInfo
 	PluginBusy(string) bool
-	UnloadPlugin(string) bool
+	PluginRuntimeIdentity(string) pluginhost.PluginRuntimeIdentity
+	UnloadPluginWithError(string) (bool, error)
+	UnloadPluginIfCurrentWithError(pluginhost.PluginRuntimeIdentity) (bool, error)
 }
+
+// ConfigCommit identifies a successfully persisted management config generation.
+type ConfigCommit struct {
+	Config                 *config.Config
+	Generation             uint64
+	ConfigFileHash         string
+	DeferPluginRuntimeSync bool
+}
+
+// ConfigCommittedFunc applies a persisted management config to the running server.
+type ConfigCommittedFunc func(context.Context, ConfigCommit) error
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
 	cfg                     *config.Config
 	configFilePath          string
-	mu                      sync.Mutex
+	commitMu                sync.Mutex
+	runtimeCommitMu         sync.Mutex
+	mu                      sync.RWMutex
+	configGeneration        uint64
+	configCommitted         ConfigCommittedFunc
+	configYAMLKeyMu         sync.Mutex
+	configYAMLKey           [32]byte
+	configYAMLKeyLoaded     bool
+	apiKeyAliasesMu         sync.RWMutex
+	apiKeyAliases           map[string]string
 	attemptsMu              sync.Mutex
 	failedAttempts          map[string]*attemptInfo // keyed by client IP
 	rateLimitUnbanHistory   []rateLimitUnbanHistoryEntry
 	authManager             *coreauth.Manager
 	usageStats              *usage.RequestStatistics
 	usagePersister          *usage.Persister
+	usageQueue              *redisqueue.Queue
+	imageArtifacts          *artifact.Store
 	tokenStore              coreauth.Store
 	localPassword           string
 	envSecret               string
@@ -77,7 +104,7 @@ type Handler struct {
 	postAuthHook            coreauth.PostAuthHook
 	quotaScheduler          *quota.Scheduler
 	pluginHost              pluginRuntimeHost
-	pluginRuntimeSync       func(context.Context, *config.Config)
+	pluginRuntimeSync       func(context.Context, *config.Config) error
 	pluginStoreRegistryURL  string
 	pluginStoreHTTPClient   pluginstore.HTTPDoer
 	pluginReleaseCacheMu    sync.Mutex
@@ -86,6 +113,10 @@ type Handler struct {
 	accountInspection       *accountInspectionService
 	stateStore              *managementStateStore
 	internalToken           string // random token for internal localhost requests (quota scheduler)
+	attemptCleanupCancel    context.CancelFunc
+	attemptCleanupWG        sync.WaitGroup
+	closeOnce               sync.Once
+	closeErr                error
 }
 
 // Option configures a Handler.
@@ -111,9 +142,24 @@ func WithUsagePersister(p *usage.Persister) Option {
 	return func(h *Handler) { h.usagePersister = p }
 }
 
+// WithUsageQueue sets the service-owned usage output queue.
+func WithUsageQueue(queue *redisqueue.Queue) Option {
+	return func(h *Handler) { h.usageQueue = queue }
+}
+
+// WithImageArtifacts sets the image artifact store.
+func WithImageArtifacts(store *artifact.Store) Option {
+	return func(h *Handler) { h.imageArtifacts = store }
+}
+
 // WithQuotaScheduler sets the quota refresh scheduler.
 func WithQuotaScheduler(s *quota.Scheduler) Option {
 	return func(h *Handler) { h.quotaScheduler = s }
+}
+
+// WithConfigCommitted synchronizes persisted management config commits with the running server.
+func WithConfigCommitted(callback ConfigCommittedFunc) Option {
+	return func(h *Handler) { h.configCommitted = callback }
 }
 
 // WithPluginHost sets the dynamic plugin host used by management plugin endpoints.
@@ -122,7 +168,7 @@ func WithPluginHost(host *pluginhost.Host) Option {
 }
 
 // WithPluginRuntimeSync refreshes plugin runtime state after plugin config mutations.
-func WithPluginRuntimeSync(sync func(context.Context, *config.Config)) Option {
+func WithPluginRuntimeSync(sync func(context.Context, *config.Config) error) Option {
 	return func(h *Handler) { h.pluginRuntimeSync = sync }
 }
 
@@ -143,6 +189,8 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	h := &Handler{
 		cfg:                cfg,
 		configFilePath:     configFilePath,
+		usageQueue:         redisqueue.DefaultQueue(),
+		apiKeyAliases:      copyAPIKeyAliases(configAPIKeyAliases(cfg)),
 		failedAttempts:     make(map[string]*attemptInfo),
 		authManager:        manager,
 		usageStats:         usage.GetRequestStatistics(),
@@ -193,13 +241,21 @@ func (h *Handler) Close() error {
 	if h == nil {
 		return nil
 	}
-	if h.accountInspection != nil {
-		h.accountInspection.close()
-	}
-	if h.stateStore != nil {
-		return h.stateStore.Close()
-	}
-	return nil
+	h.closeOnce.Do(
+		func() {
+			if h.attemptCleanupCancel != nil {
+				h.attemptCleanupCancel()
+			}
+			h.attemptCleanupWG.Wait()
+			if h.accountInspection != nil {
+				h.accountInspection.close()
+			}
+			if h.stateStore != nil {
+				h.closeErr = h.stateStore.Close()
+			}
+		},
+	)
+	return h.closeErr
 }
 
 func (h *Handler) configureQuotaScheduler(s *quota.Scheduler) {
@@ -242,11 +298,20 @@ func (h *Handler) deleteQuotaEntry(entryKey string) {
 // startAttemptCleanup launches a background goroutine that periodically
 // removes stale IP entries from failedAttempts to prevent memory leaks.
 func (h *Handler) startAttemptCleanup() {
+	ctx, cancel := context.WithCancel(context.Background())
+	h.attemptCleanupCancel = cancel
+	h.attemptCleanupWG.Add(1)
 	go func() {
+		defer h.attemptCleanupWG.Done()
 		ticker := time.NewTicker(attemptCleanupInterval)
 		defer ticker.Stop()
-		for range ticker.C {
-			h.purgeStaleAttempts()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				h.purgeStaleAttempts()
+			}
 		}
 	}()
 }
@@ -333,8 +398,113 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 	return NewHandler(cfg, "", manager, opts...)
 }
 
+// ApplyExternalConfigUpdate serializes Home and runtime-only updates with
+// management config mutations. The callback must not start another external update.
+func (h *Handler) ApplyExternalConfigUpdate(apply func() error) error {
+	if h == nil {
+		return fmt.Errorf("management handler is unavailable")
+	}
+	if apply == nil {
+		return fmt.Errorf("external config update callback is nil")
+	}
+	h.runtimeCommitMu.Lock()
+	defer h.runtimeCommitMu.Unlock()
+	h.commitMu.Lock()
+	defer h.commitMu.Unlock()
+	return apply()
+}
+
+// ApplyRuntimeUpdate serializes runtime-only retries with config commit callbacks
+// without holding the config persistence lock around plugin callbacks.
+func (h *Handler) ApplyRuntimeUpdate(apply func() error) error {
+	if h == nil {
+		return fmt.Errorf("management handler is unavailable")
+	}
+	if apply == nil {
+		return fmt.Errorf("runtime update callback is nil")
+	}
+	h.runtimeCommitMu.Lock()
+	defer h.runtimeCommitMu.Unlock()
+	return apply()
+}
+
+// ApplyExternalConfigCommit validates and publishes one watcher snapshot before
+// applying it to the runtime. Runtime work does not hold the management commit lock.
+func (h *Handler) ApplyExternalConfigCommit(
+	cfg *config.Config,
+	expectedHash string,
+	apply func(ConfigCommit) error,
+) error {
+	if h == nil {
+		return fmt.Errorf("management handler is unavailable")
+	}
+	if cfg == nil {
+		return fmt.Errorf("external config is nil")
+	}
+	expectedHash = strings.TrimSpace(expectedHash)
+	if expectedHash == "" {
+		return fmt.Errorf("external config hash is empty")
+	}
+	if apply == nil {
+		return fmt.Errorf("external config commit callback is nil")
+	}
+
+	h.runtimeCommitMu.Lock()
+	defer h.runtimeCommitMu.Unlock()
+	h.commitMu.Lock()
+	if h.configFileHash() != expectedHash {
+		h.commitMu.Unlock()
+		return fmt.Errorf("external config changed before commit")
+	}
+	h.mu.Lock()
+	commit, _ := h.publishConfigLocked(cfg, expectedHash)
+	h.mu.Unlock()
+	h.commitMu.Unlock()
+	return apply(commit)
+}
+
 // SetConfig updates the in-memory config reference when the server hot-reloads.
-func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
+func (h *Handler) SetConfig(cfg *config.Config) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg != cfg {
+		h.configGeneration++
+	}
+	h.setConfigLocked(cfg)
+}
+
+func (h *Handler) SetConfigCommit(commit ConfigCommit) {
+	if h == nil || commit.Config == nil || commit.Generation == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if commit.Generation < h.configGeneration {
+		return
+	}
+	h.configGeneration = commit.Generation
+	h.setConfigLocked(commit.Config)
+}
+
+func (h *Handler) ConfigState() ConfigCommit {
+	if h == nil {
+		return ConfigCommit{}
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return ConfigCommit{Config: h.cfg, Generation: h.configGeneration}
+}
+
+func (h *Handler) configSnapshot() *config.Config {
+	return h.ConfigState().Config
+}
+
+// setConfigLocked publishes config-derived handler snapshots together.
+// Caller must hold h.mu.
+func (h *Handler) setConfigLocked(cfg *config.Config) {
+	h.cfg = cfg
+	h.replaceAPIKeyAliasesSnapshot(configAPIKeyAliases(cfg))
+}
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
 func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
@@ -366,9 +536,12 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 // SetUsagePersister sets the usage statistics persister reference.
 func (h *Handler) SetUsagePersister(p *usage.Persister) { h.usagePersister = p }
 
+// SetImageArtifacts sets the image artifact store reference.
+func (h *Handler) SetImageArtifacts(store *artifact.Store) { h.imageArtifacts = store }
+
 // AuthenticateManagementKey verifies a management key outside Gin middleware.
 func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, provided string) (bool, int, string) {
-	cfg := h.cfg
+	cfg := h.configSnapshot()
 	var (
 		allowRemote bool
 		secretHash  string
@@ -449,29 +622,10 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 		c.Header(pluginhost.SupportPluginHeader, pluginhost.SupportPluginHeaderValue())
 
-		cfg := h.cfg
-		// X-Real-IP is trusted only when the deployment explicitly trusts forwarded proxy headers.
-		remoteHost, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
-		if remoteHost == "" {
-			remoteHost = c.Request.RemoteAddr
-		}
-		clientIP := remoteHost
-		localClient := false
-		if ip := net.ParseIP(remoteHost); ip != nil {
-			if ip.IsLoopback() {
-				clientIP = ip.String()
-				localClient = true
-				if xRealIP := strings.TrimSpace(c.GetHeader("X-Real-IP")); xRealIP != "" &&
-					cfg != nil && cfg.TLS.TrustForwardedProto {
-					if realIP := net.ParseIP(xRealIP); realIP != nil {
-						clientIP = realIP.String()
-						localClient = realIP.IsLoopback()
-					} else {
-						localClient = false
-					}
-				}
-			}
-		}
+		cfg := h.configSnapshot()
+		client := resolveManagementClientAddress(c.Request, cfg)
+		clientIP := client.ip
+		localClient := client.local
 		var (
 			allowRemote bool
 			secretHash  string
@@ -566,11 +720,267 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 	}
 }
 
+type configMutationError struct {
+	status  int
+	message string
+}
+
+func (e *configMutationError) Error() string {
+	return e.message
+}
+
+func newConfigMutationError(status int, message string) error {
+	return &configMutationError{status: status, message: message}
+}
+
+func (h *Handler) mutateConfig(
+	c *gin.Context,
+	mutate func(*config.Config) error,
+) (*config.Config, bool) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return nil, false
+	}
+
+	h.commitMu.Lock()
+	h.mu.Lock()
+	commit, callback, ok := h.mutateConfigLocked(c, mutate)
+	h.mu.Unlock()
+	h.commitMu.Unlock()
+	if !ok {
+		return nil, false
+	}
+	if !h.notifyConfigCommitted(c, callback, commit) {
+		return nil, false
+	}
+	return commit.Config, true
+}
+
+// mutateConfigLocked persists and publishes a candidate config.
+// Caller must hold h.mu and h.commitMu.
+func (h *Handler) mutateConfigLocked(
+	c *gin.Context,
+	mutate func(*config.Config) error,
+) (ConfigCommit, ConfigCommittedFunc, bool) {
+	if h.cfg == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return ConfigCommit{}, nil, false
+	}
+
+	next, err := config.Clone(h.cfg)
+	if err != nil {
+		log.WithError(err).Error("failed to clone config for management update")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prepare config update"})
+		return ConfigCommit{}, nil, false
+	}
+	if mutate != nil {
+		if err = mutate(next); err != nil {
+			status := http.StatusBadRequest
+			var mutationError *configMutationError
+			if errors.As(err, &mutationError) {
+				status = mutationError.status
+			}
+			c.JSON(status, gin.H{"error": err.Error()})
+			return ConfigCommit{}, nil, false
+		}
+	}
+	persistedHash, ok := h.saveConfigCandidateLocked(c, next)
+	if !ok {
+		return ConfigCommit{}, nil, false
+	}
+	commit, callback := h.publishConfigLocked(next, persistedHash)
+	return commit, callback, true
+}
+
+// publishConfigLocked publishes one immutable config generation.
+// Caller must hold h.mu.
+func (h *Handler) publishConfigLocked(
+	cfg *config.Config,
+	configFileHash string,
+) (ConfigCommit, ConfigCommittedFunc) {
+	h.setConfigLocked(cfg)
+	h.configGeneration++
+	return ConfigCommit{
+		Config:         cfg,
+		Generation:     h.configGeneration,
+		ConfigFileHash: strings.TrimSpace(configFileHash),
+	}, h.configCommitted
+}
+
+func (h *Handler) configFileHash() string {
+	if h == nil || strings.TrimSpace(h.configFilePath) == "" {
+		return ""
+	}
+	data, errRead := os.ReadFile(h.configFilePath)
+	if errRead != nil || len(data) == 0 {
+		return ""
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:])
+}
+
+func (h *Handler) notifyConfigCommitted(
+	c *gin.Context,
+	callback ConfigCommittedFunc,
+	commit ConfigCommit,
+) bool {
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = context.WithoutCancel(c.Request.Context())
+	}
+	return h.notifyConfigCommittedContext(c, ctx, callback, commit)
+}
+
+func (h *Handler) configCommitCurrent(commit ConfigCommit) bool {
+	if h == nil {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.configGeneration == commit.Generation
+}
+
+func (h *Handler) runPluginRuntimeSyncForCommit(
+	ctx context.Context,
+	commit ConfigCommit,
+	syncRuntime func(context.Context, *config.Config) error,
+) error {
+	if syncRuntime == nil {
+		return nil
+	}
+	h.runtimeCommitMu.Lock()
+	defer h.runtimeCommitMu.Unlock()
+	if !h.configCommitCurrent(commit) {
+		return nil
+	}
+	return runPluginRuntimeSync(ctx, syncRuntime, pluginRuntimeConfigSnapshot(commit.Config))
+}
+
+func (h *Handler) notifyConfigCommittedContext(
+	c *gin.Context,
+	ctx context.Context,
+	callback ConfigCommittedFunc,
+	commit ConfigCommit,
+) bool {
+	if callback == nil {
+		return true
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	h.runtimeCommitMu.Lock()
+	defer h.runtimeCommitMu.Unlock()
+	if !h.configCommitCurrent(commit) {
+		return true
+	}
+	if err := invokeConfigCommitted(ctx, callback, commit); err != nil {
+		log.WithError(err).WithField("generation", commit.Generation).
+			Error("management config committed but runtime sync failed")
+		if c != nil {
+			c.JSON(
+				http.StatusServiceUnavailable,
+				gin.H{"error": "runtime_sync_failed", "generation": commit.Generation},
+			)
+		}
+		return false
+	}
+	return true
+}
+
+func invokeConfigCommitted(
+	ctx context.Context,
+	callback ConfigCommittedFunc,
+	commit ConfigCommit,
+) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("config committed callback panicked: %v", recovered)
+		}
+	}()
+	return callback(ctx, commit)
+}
+
+type configPersistenceError struct {
+	logMessage  string
+	userMessage string
+	err         error
+}
+
+func (e *configPersistenceError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s: %v", e.userMessage, e.err)
+}
+
+func (e *configPersistenceError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (h *Handler) persistConfigCandidate(candidate *config.Config) (string, error) {
+	if strings.TrimSpace(h.configFilePath) == "" {
+		return "", nil
+	}
+	if _, err := os.Stat(h.configFilePath); err == nil {
+		if err = config.SaveLastGood(h.configFilePath); err != nil {
+			return "", &configPersistenceError{
+				logMessage:  "failed to save last-good config",
+				userMessage: "failed to save config backup",
+				err:         err,
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return "", &configPersistenceError{
+			logMessage:  "failed to inspect config before saving backup",
+			userMessage: "failed to inspect config",
+			err:         err,
+		}
+	}
+	persistedHash, err := config.SaveConfigPreserveCommentsWithDigest(h.configFilePath, candidate)
+	if err != nil {
+		return "", &configPersistenceError{
+			logMessage:  "failed to save config",
+			userMessage: "failed to save config",
+			err:         err,
+		}
+	}
+	return persistedHash, nil
+}
+
+func respondConfigPersistenceError(c *gin.Context, err error) {
+	var persistenceError *configPersistenceError
+	if errors.As(err, &persistenceError) {
+		log.WithError(persistenceError.err).Error(persistenceError.logMessage)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": persistenceError.userMessage})
+		return
+	}
+	log.WithError(err).Error("failed to save config")
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save config"})
+}
+
+func (h *Handler) saveConfigCandidateLocked(
+	c *gin.Context,
+	candidate *config.Config,
+) (string, bool) {
+	persistedHash, err := h.persistConfigCandidate(candidate)
+	if err != nil {
+		respondConfigPersistenceError(c, err)
+		return "", false
+	}
+	return persistedHash, true
+}
+
 // persist saves the current in-memory config to disk with last-good protection.
-// On write failure, it rolls back to the last-good backup.
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.persistLocked(c)
+}
+
+func (h *Handler) persistLocked(c *gin.Context) bool {
 	if !h.saveConfigLocked(c) {
 		return false
 	}
@@ -579,15 +989,8 @@ func (h *Handler) persist(c *gin.Context) bool {
 }
 
 func (h *Handler) saveConfigLocked(c *gin.Context) bool {
-	if err := config.SaveLastGood(h.configFilePath); err != nil {
-		log.Errorf("failed to save last-good config: %v", err)
-	}
-	if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-		h.rollbackLastGood()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
-		return false
-	}
-	return true
+	_, ok := h.saveConfigCandidateLocked(c, h.cfg)
+	return ok
 }
 
 // rollbackLastGood restores config.yaml from the last-good backup and reloads it into memory.
@@ -599,19 +1002,19 @@ func (h *Handler) rollbackLastGood() {
 		log.WithError(err).Error("rollback: failed to read last-good backup")
 		return
 	}
-	if errWrite := os.WriteFile(h.configFilePath, data, 0o600); errWrite != nil {
+	if errWrite := writeConfigFileAtomically(h.configFilePath, data); errWrite != nil {
 		log.WithError(errWrite).Error("rollback: failed to restore config from last-good")
 		return
 	}
 	if restored, errLoad := config.LoadConfig(h.configFilePath); errLoad == nil {
-		h.cfg = restored
+		h.setConfigLocked(restored)
 	} else {
 		log.WithError(errLoad).Error("rollback: failed to reload config after restore")
 	}
 }
 
 // Helper methods for simple types
-func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
+func (h *Handler) updateBoolField(c *gin.Context, set func(*config.Config, bool)) {
 	var body struct {
 		Value *bool `json:"value"`
 	}
@@ -619,11 +1022,15 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(bool)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		set(next, *body.Value)
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
 }
 
-func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
+func (h *Handler) updateIntField(c *gin.Context, set func(*config.Config, int)) {
 	var body struct {
 		Value *int `json:"value"`
 	}
@@ -631,11 +1038,15 @@ func (h *Handler) updateIntField(c *gin.Context, set func(int)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		set(next, *body.Value)
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
 }
 
-func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
+func (h *Handler) updateStringField(c *gin.Context, set func(*config.Config, string)) {
 	var body struct {
 		Value *string `json:"value"`
 	}
@@ -643,11 +1054,19 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		set(next, *body.Value)
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
 }
 
-func (h *Handler) updateStringFieldValidated(c *gin.Context, validate func(string) error, set func(string)) {
+func (h *Handler) updateStringFieldValidated(
+	c *gin.Context,
+	validate func(string) error,
+	set func(*config.Config, string),
+) {
 	var body struct {
 		Value *string `json:"value"`
 	}
@@ -659,6 +1078,10 @@ func (h *Handler) updateStringFieldValidated(c *gin.Context, validate func(strin
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
-	set(*body.Value)
-	h.persist(c)
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		set(next, *body.Value)
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
 }

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -122,7 +123,7 @@ func (h *Handler) GetUpdateCompatibility(c *gin.Context) {
 	if targetVersion == "" {
 		targetVersion = strings.TrimSpace(c.Query("target_version"))
 	}
-	compat := h.buildUpdateCompatibility(c.Request.Context(), targetVersion)
+	compat := h.buildUpdateCompatibilityFromConfig(c.Request.Context(), targetVersion, h.configSnapshot())
 	c.JSON(http.StatusOK, compat)
 }
 
@@ -135,6 +136,7 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 	}
 
 	targetVersion := strings.TrimSpace(req.Version)
+	cfg := h.configSnapshot()
 	if strings.EqualFold(targetVersion, buildinfo.Version) {
 		c.JSON(
 			http.StatusBadRequest,
@@ -143,7 +145,7 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 		return
 	}
 
-	compat := h.buildUpdateCompatibility(c.Request.Context(), targetVersion)
+	compat := h.buildUpdateCompatibilityFromConfig(c.Request.Context(), targetVersion, cfg)
 	if !compat.Compatible {
 		c.JSON(
 			http.StatusConflict,
@@ -168,10 +170,10 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 	selfUpdate.percent = 0
 	selfUpdate.mu.Unlock()
 
-	repo := h.cpaRepository()
+	repo := cpaRepositoryFromConfig(cfg)
 	proxyURL := ""
-	if h != nil && h.cfg != nil {
-		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
+	if cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
 	go h.performUpdate(repo, targetVersion, proxyURL)
@@ -291,6 +293,72 @@ func restartCurrentProcess() error {
 }
 
 var validVersion = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+var comparableUpdateVersion = regexp.MustCompile(`(?i)^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-aug\.([0-9]+))?$`)
+
+type parsedUpdateVersion struct {
+	major        uint64
+	minor        uint64
+	patch        uint64
+	augmented    bool
+	augmentation uint64
+}
+
+func compareUpdateVersions(left, right string) (int, bool) {
+	leftVersion, okLeft := parseUpdateVersion(left)
+	rightVersion, okRight := parseUpdateVersion(right)
+	if !okLeft || !okRight {
+		return 0, false
+	}
+	leftParts := [...]uint64{leftVersion.major, leftVersion.minor, leftVersion.patch}
+	rightParts := [...]uint64{rightVersion.major, rightVersion.minor, rightVersion.patch}
+	for i := range leftParts {
+		switch {
+		case leftParts[i] < rightParts[i]:
+			return -1, true
+		case leftParts[i] > rightParts[i]:
+			return 1, true
+		}
+	}
+	if leftVersion.augmented != rightVersion.augmented {
+		if leftVersion.augmented {
+			return 1, true
+		}
+		return -1, true
+	}
+	switch {
+	case leftVersion.augmentation < rightVersion.augmentation:
+		return -1, true
+	case leftVersion.augmentation > rightVersion.augmentation:
+		return 1, true
+	default:
+		return 0, true
+	}
+}
+
+func parseUpdateVersion(raw string) (parsedUpdateVersion, bool) {
+	matches := comparableUpdateVersion.FindStringSubmatch(strings.TrimSpace(raw))
+	if len(matches) != 5 {
+		return parsedUpdateVersion{}, false
+	}
+	var parts [4]uint64
+	for i := range parts {
+		if matches[i+1] == "" {
+			continue
+		}
+		part, err := strconv.ParseUint(matches[i+1], 10, 64)
+		if err != nil {
+			return parsedUpdateVersion{}, false
+		}
+		parts[i] = part
+	}
+	return parsedUpdateVersion{
+		major:        parts[0],
+		minor:        parts[1],
+		patch:        parts[2],
+		augmented:    matches[4] != "",
+		augmentation: parts[3],
+	}, true
+}
 
 func (h *Handler) fetchRelease(repo, version, proxyURL string) (*githubReleaseForUpdate, error) {
 	if !validVersion.MatchString(version) {
@@ -352,7 +420,7 @@ func (h *Handler) runCPAAutoUpdater(ctx context.Context) {
 	}()
 
 	for {
-		cfg := h.cfg
+		cfg := h.configSnapshot()
 		if cfg != nil && cfg.RemoteManagement.CheckInterval >= minBackendUpdateCheckMinutes {
 			interval = time.Duration(cfg.RemoteManagement.CheckInterval) * time.Minute
 		}
@@ -361,13 +429,14 @@ func (h *Handler) runCPAAutoUpdater(ctx context.Context) {
 			tick = ticker.C
 		}
 
-		h.tryAutoUpdateCPA(ctx)
+		h.tryAutoUpdateCPA(ctx, cfg)
 
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick:
-			if cfg := h.cfg; cfg != nil {
+			cfg = h.configSnapshot()
+			if cfg != nil {
 				next := defaultBackendUpdateCheckInterval
 				if cfg.RemoteManagement.CheckInterval >= minBackendUpdateCheckMinutes {
 					next = time.Duration(cfg.RemoteManagement.CheckInterval) * time.Minute
@@ -383,11 +452,11 @@ func (h *Handler) runCPAAutoUpdater(ctx context.Context) {
 	}
 }
 
-func (h *Handler) tryAutoUpdateCPA(ctx context.Context) {
-	if h == nil || h.cfg == nil {
+func (h *Handler) tryAutoUpdateCPA(ctx context.Context, cfg *config.Config) {
+	if h == nil || cfg == nil {
 		return
 	}
-	if !h.cfg.RemoteManagement.AutoCheckUpdate || !h.cfg.RemoteManagement.AutoUpdateCPA {
+	if !cfg.RemoteManagement.AutoCheckUpdate || !cfg.RemoteManagement.AutoUpdateCPA {
 		return
 	}
 	if selfUpdate.status == "downloading" || selfUpdate.status == "verifying" || selfUpdate.status == "replacing" {
@@ -396,7 +465,9 @@ func (h *Handler) tryAutoUpdateCPA(ctx context.Context) {
 
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	latest, err := h.fetchLatestReleaseVersion(ctx)
+	repo := cpaRepositoryFromConfig(cfg)
+	proxyURL := strings.TrimSpace(cfg.ProxyURL)
+	latest, err := h.fetchLatestReleaseVersion(ctx, repo, proxyURL)
 	if err != nil {
 		log.Warnf("cpa auto-update: fetch latest release failed: %v", err)
 		return
@@ -404,7 +475,7 @@ func (h *Handler) tryAutoUpdateCPA(ctx context.Context) {
 	if latest == "" || strings.EqualFold(strings.TrimSpace(latest), buildinfo.Version) {
 		return
 	}
-	compat := h.buildUpdateCompatibility(ctx, latest)
+	compat := h.buildUpdateCompatibilityFromConfig(ctx, latest, cfg)
 	if !compat.Compatible {
 		log.Warnf("cpa auto-update: blocked by compatibility checks for %s: %v", latest, compat.Warnings)
 		return
@@ -423,13 +494,13 @@ func (h *Handler) tryAutoUpdateCPA(ctx context.Context) {
 		return
 	}
 
-	go h.performUpdate(h.cpaRepository(), latest, strings.TrimSpace(h.cfg.ProxyURL))
+	go h.performUpdate(repo, latest, proxyURL)
 }
 
-func (h *Handler) fetchLatestReleaseVersion(ctx context.Context) (string, error) {
-	client := newUpdateHTTPClient(strings.TrimSpace(h.cfg.ProxyURL))
+func (h *Handler) fetchLatestReleaseVersion(ctx context.Context, repo string, proxyURL string) (string, error) {
+	client := newUpdateHTTPClient(proxyURL)
 	body, err := githubGet(
-		ctx, client, fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", h.cpaRepository()),
+		ctx, client, fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo),
 	)
 	if err != nil {
 		return "", err
@@ -449,12 +520,31 @@ func (h *Handler) fetchLatestReleaseVersion(ctx context.Context) (string, error)
 }
 
 func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion string) updateCompatibilityResponse {
+	return h.buildUpdateCompatibilityFromConfig(ctx, targetVersion, h.configSnapshot())
+}
+
+func (h *Handler) buildUpdateCompatibilityFromConfig(
+	ctx context.Context,
+	targetVersion string,
+	cfg *config.Config,
+) updateCompatibilityResponse {
 	compat := updateCompatibilityResponse{
 		CurrentVersion:  buildinfo.Version,
 		TargetVersion:   strings.TrimSpace(targetVersion),
 		MinPanelVersion: minPanelVersion,
 		RequiresRestart: true,
 		Compatible:      true,
+	}
+	if order, ok := compareUpdateVersions(compat.TargetVersion, compat.CurrentVersion); ok && order < 0 {
+		compat.Compatible = false
+		compat.Warnings = append(
+			compat.Warnings,
+			fmt.Sprintf(
+				"target version %s is older than current version %s; automatic downgrade is not supported",
+				compat.TargetVersion,
+				compat.CurrentVersion,
+			),
+		)
 	}
 
 	if h == nil {
@@ -463,7 +553,6 @@ func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion st
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	cfg := h.cfg
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
@@ -503,9 +592,16 @@ func (h *Handler) buildUpdateCompatibility(ctx context.Context, targetVersion st
 		compat.Warnings = append(compat.Warnings, fmt.Sprintf("failed to read usage schema version: %v", err))
 	} else {
 		compat.Usage.SchemaVersion = schemaVersion
-		if schemaVersion != "" && schemaVersion != "3" {
+		if schemaVersion != "" && schemaVersion != usage.CurrentSchemaVersion {
 			compat.Compatible = false
-			compat.Warnings = append(compat.Warnings, fmt.Sprintf("usage schema_version=%s, expected 3", schemaVersion))
+			compat.Warnings = append(
+				compat.Warnings,
+				fmt.Sprintf(
+					"usage schema_version=%s, expected %s",
+					schemaVersion,
+					usage.CurrentSchemaVersion,
+				),
+			)
 		}
 	}
 
@@ -749,7 +845,8 @@ func replaceBinary(execPath string, newBinary []byte) error {
 // field in the request body pins the update to a specific release tag; when
 // empty the latest release is used.
 func (h *Handler) PostPanelUpdate(c *gin.Context) {
-	if h.cfg != nil && h.cfg.RemoteManagement.DisableControlPanel {
+	cfg := h.configSnapshot()
+	if cfg != nil && cfg.RemoteManagement.DisableControlPanel {
 		c.JSON(
 			http.StatusBadRequest,
 			gin.H{"error": "control_panel_disabled", "message": "Control panel is disabled in configuration"},
@@ -768,9 +865,9 @@ func (h *Handler) PostPanelUpdate(c *gin.Context) {
 
 	proxyURL := ""
 	panelRepo := ""
-	if h.cfg != nil {
-		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
-		panelRepo = strings.TrimSpace(h.cfg.RemoteManagement.PanelGitHubRepository)
+	if cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+		panelRepo = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
 	}
 
 	var req struct {

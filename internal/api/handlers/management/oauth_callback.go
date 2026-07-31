@@ -18,7 +18,7 @@ type oauthCallbackRequest struct {
 }
 
 func (h *Handler) PostOAuthCallback(c *gin.Context) {
-	if h == nil || h.cfg == nil {
+	if h.configSnapshot() == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "handler not initialized"})
 		return
 	}
@@ -73,7 +73,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		return
 	}
 
-	sessionProvider, sessionStatus, ok := getOAuthSession(state)
+	sessionProvider, sessionStatus, _, ok := getOAuthSessionForCallback(state)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"status": "error", "error": "unknown or expired state"})
 		return
@@ -86,9 +86,8 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "provider does not match state"})
 		return
 	}
-
 	if _, errWrite := WriteOAuthCallbackFileForPendingSession(
-		h.cfg.AuthDir, canonicalProvider, state, code, errMsg,
+		canonicalProvider, state, code, errMsg,
 	); errWrite != nil {
 		if errors.Is(errWrite, errOAuthSessionNotPending) {
 			c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})

@@ -54,11 +54,10 @@ type openAICompatibilityWithAuthIndex struct {
 	AuthIndex     string                                   `json:"auth-index,omitempty"`
 }
 
-func (h *Handler) buildConfigAuthIndexViews() configAuthIndexViews {
-	if h == nil || h.cfg == nil {
+func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexViews {
+	if h == nil || cfg == nil {
 		return configAuthIndexViews{}
 	}
-	cfg := h.cfg
 
 	liveIndexByID := map[string]string{}
 	if h.authManager != nil {
@@ -94,71 +93,102 @@ func (h *Handler) buildConfigAuthIndexViews() configAuthIndexViews {
 		return views
 	}
 
-	cursor := 0
-	nextAuthIndex := func() string {
-		if cursor >= len(auths) {
-			return ""
-		}
-		auth := auths[cursor]
-		cursor++
+	type authIndexQueues struct {
+		gemini []string
+		claude []string
+		codex  []string
+		vertex []string
+		openAI []string
+	}
+	queues := authIndexQueues{}
+	for _, auth := range auths {
 		if auth == nil || strings.TrimSpace(auth.ID) == "" {
-			return ""
+			continue
 		}
-		return liveIndexByID[auth.ID]
+		index := liveIndexByID[auth.ID]
+		switch {
+		case strings.HasPrefix(auth.ID, "gemini:apikey:"):
+			queues.gemini = append(queues.gemini, index)
+		case strings.HasPrefix(auth.ID, "gemini-interactions:apikey:"):
+			continue
+		case strings.HasPrefix(auth.ID, "claude:apikey:"):
+			queues.claude = append(queues.claude, index)
+		case strings.HasPrefix(auth.ID, "codex:apikey:"):
+			queues.codex = append(queues.codex, index)
+		case strings.HasPrefix(auth.ID, "vertex:apikey:"):
+			queues.vertex = append(queues.vertex, index)
+		case strings.HasPrefix(auth.ID, "openai-compatibility:"):
+			queues.openAI = append(queues.openAI, index)
+		}
 	}
 
+	nextAuthIndex := func(indexes []string, cursor *int) string {
+		if *cursor >= len(indexes) {
+			return ""
+		}
+		index := indexes[*cursor]
+		(*cursor)++
+		return index
+	}
+
+	geminiCursor := 0
 	for i := range cfg.GeminiKey {
 		if strings.TrimSpace(cfg.GeminiKey[i].APIKey) == "" {
 			continue
 		}
-		views.gemini[i] = nextAuthIndex()
+		views.gemini[i] = nextAuthIndex(queues.gemini, &geminiCursor)
 	}
+	claudeCursor := 0
 	for i := range cfg.ClaudeKey {
 		if strings.TrimSpace(cfg.ClaudeKey[i].APIKey) == "" {
 			continue
 		}
-		views.claude[i] = nextAuthIndex()
+		views.claude[i] = nextAuthIndex(queues.claude, &claudeCursor)
 	}
+	codexCursor := 0
 	for i := range cfg.CodexKey {
 		if strings.TrimSpace(cfg.CodexKey[i].APIKey) == "" {
 			continue
 		}
-		views.codex[i] = nextAuthIndex()
+		views.codex[i] = nextAuthIndex(queues.codex, &codexCursor)
 	}
+	openAICursor := 0
 	for i := range cfg.OpenAICompatibility {
 		if cfg.OpenAICompatibility[i].Disabled {
 			continue
 		}
 		entries := cfg.OpenAICompatibility[i].APIKeyEntries
 		if len(entries) == 0 {
-			views.openAIFallback[i] = nextAuthIndex()
+			views.openAIFallback[i] = nextAuthIndex(queues.openAI, &openAICursor)
 			continue
 		}
 
 		views.openAIEntries[i] = make([]string, len(entries))
 		for j := range entries {
-			views.openAIEntries[i][j] = nextAuthIndex()
+			views.openAIEntries[i][j] = nextAuthIndex(queues.openAI, &openAICursor)
 		}
 	}
+	vertexCursor := 0
 	for i := range cfg.VertexCompatAPIKey {
 		if strings.TrimSpace(cfg.VertexCompatAPIKey[i].APIKey) == "" {
 			continue
 		}
-		views.vertex[i] = nextAuthIndex()
+		views.vertex[i] = nextAuthIndex(queues.vertex, &vertexCursor)
 	}
 
 	return views
 }
 
 func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
-	if h == nil || h.cfg == nil {
+	cfg := h.configSnapshot()
+	if cfg == nil {
 		return nil
 	}
-	views := h.buildConfigAuthIndexViews()
-	out := make([]geminiKeyWithAuthIndex, len(h.cfg.GeminiKey))
-	for i := range h.cfg.GeminiKey {
+	views := h.buildConfigAuthIndexViews(cfg)
+	out := make([]geminiKeyWithAuthIndex, len(cfg.GeminiKey))
+	for i := range cfg.GeminiKey {
 		out[i] = geminiKeyWithAuthIndex{
-			GeminiKey: h.cfg.GeminiKey[i],
+			GeminiKey: cfg.GeminiKey[i],
 			AuthIndex: views.gemini[i],
 		}
 	}
@@ -166,14 +196,15 @@ func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 }
 
 func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
-	if h == nil || h.cfg == nil {
+	cfg := h.configSnapshot()
+	if cfg == nil {
 		return nil
 	}
-	views := h.buildConfigAuthIndexViews()
-	out := make([]claudeKeyWithAuthIndex, len(h.cfg.ClaudeKey))
-	for i := range h.cfg.ClaudeKey {
+	views := h.buildConfigAuthIndexViews(cfg)
+	out := make([]claudeKeyWithAuthIndex, len(cfg.ClaudeKey))
+	for i := range cfg.ClaudeKey {
 		out[i] = claudeKeyWithAuthIndex{
-			ClaudeKey: h.cfg.ClaudeKey[i],
+			ClaudeKey: cfg.ClaudeKey[i],
 			AuthIndex: views.claude[i],
 		}
 	}
@@ -181,14 +212,15 @@ func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 }
 
 func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
-	if h == nil || h.cfg == nil {
+	cfg := h.configSnapshot()
+	if cfg == nil {
 		return nil
 	}
-	views := h.buildConfigAuthIndexViews()
-	out := make([]codexKeyWithAuthIndex, len(h.cfg.CodexKey))
-	for i := range h.cfg.CodexKey {
+	views := h.buildConfigAuthIndexViews(cfg)
+	out := make([]codexKeyWithAuthIndex, len(cfg.CodexKey))
+	for i := range cfg.CodexKey {
 		out[i] = codexKeyWithAuthIndex{
-			CodexKey:  h.cfg.CodexKey[i],
+			CodexKey:  cfg.CodexKey[i],
 			AuthIndex: views.codex[i],
 		}
 	}
@@ -196,14 +228,15 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 }
 
 func (h *Handler) vertexCompatKeysWithAuthIndex() []vertexCompatKeyWithAuthIndex {
-	if h == nil || h.cfg == nil {
+	cfg := h.configSnapshot()
+	if cfg == nil {
 		return nil
 	}
-	views := h.buildConfigAuthIndexViews()
-	out := make([]vertexCompatKeyWithAuthIndex, len(h.cfg.VertexCompatAPIKey))
-	for i := range h.cfg.VertexCompatAPIKey {
+	views := h.buildConfigAuthIndexViews(cfg)
+	out := make([]vertexCompatKeyWithAuthIndex, len(cfg.VertexCompatAPIKey))
+	for i := range cfg.VertexCompatAPIKey {
 		out[i] = vertexCompatKeyWithAuthIndex{
-			VertexCompatKey: h.cfg.VertexCompatAPIKey[i],
+			VertexCompatKey: cfg.VertexCompatAPIKey[i],
 			AuthIndex:       views.vertex[i],
 		}
 	}
@@ -211,12 +244,13 @@ func (h *Handler) vertexCompatKeysWithAuthIndex() []vertexCompatKeyWithAuthIndex
 }
 
 func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAuthIndex {
-	if h == nil || h.cfg == nil {
+	cfg := h.configSnapshot()
+	if cfg == nil {
 		return nil
 	}
 
-	views := h.buildConfigAuthIndexViews()
-	normalized := normalizedOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)
+	views := h.buildConfigAuthIndexViews(cfg)
+	normalized := normalizedOpenAICompatibilityEntries(cfg.OpenAICompatibility)
 	out := make([]openAICompatibilityWithAuthIndex, len(normalized))
 	for i := range normalized {
 		entry := normalized[i]

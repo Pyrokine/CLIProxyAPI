@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
@@ -20,8 +21,13 @@ var (
 
 // waitForOAuthCallback polls authDir for an OAuth callback file and returns the parsed result.
 // Returns (nil, error) on timeout or when the session is no longer pending.
-func (h *Handler) waitForOAuthCallback(provider, state string, timeout time.Duration) (map[string]string, error) {
-	waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-%s-%s.oauth", provider, state))
+func waitForOAuthCallback(
+	authDir string,
+	provider string,
+	state string,
+	timeout time.Duration,
+) (map[string]string, error) {
+	waitFile := filepath.Join(authDir, fmt.Sprintf(".oauth-%s-%s.oauth", provider, state))
 	deadline := time.Now().Add(timeout)
 	for {
 		if !isOAuthSessionPending(state, provider) {
@@ -47,6 +53,7 @@ func (h *Handler) waitForOAuthCallback(provider, state string, timeout time.Dura
 // If not a WebUI request, returns (nil, true) — caller should skip forwarder cleanup.
 func (h *Handler) setupOAuthForwarder(
 	c *gin.Context,
+	cfg *config.Config,
 	provider string,
 	port int,
 	callbackPath string,
@@ -54,7 +61,7 @@ func (h *Handler) setupOAuthForwarder(
 	if !isWebUIRequest(c) {
 		return nil, true
 	}
-	targetURL, err := h.managementCallbackURL(callbackPath)
+	targetURL, err := managementCallbackURL(cfg, callbackPath)
 	if err != nil {
 		log.WithError(err).Errorf("failed to compute %s callback target", provider)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "callback server unavailable"})

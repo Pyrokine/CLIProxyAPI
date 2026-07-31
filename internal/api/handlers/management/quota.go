@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -20,21 +21,24 @@ var codexRateLimitResetCreditsConsumeURL = codexRateLimitResetCreditsConsumeDefa
 // Quota exceeded toggles
 
 func (h *Handler) GetSwitchProject(c *gin.Context) {
-	c.JSON(200, gin.H{"switch-project": h.cfg.QuotaExceeded.SwitchProject})
+	cfg := h.configSnapshot()
+	c.JSON(200, gin.H{"switch-project": cfg != nil && cfg.QuotaExceeded.SwitchProject})
 }
 func (h *Handler) PutSwitchProject(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.QuotaExceeded.SwitchProject = v })
+	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.QuotaExceeded.SwitchProject = v })
 }
 
 func (h *Handler) GetSwitchPreviewModel(c *gin.Context) {
-	c.JSON(200, gin.H{"switch-preview-model": h.cfg.QuotaExceeded.SwitchPreviewModel})
+	cfg := h.configSnapshot()
+	c.JSON(200, gin.H{"switch-preview-model": cfg != nil && cfg.QuotaExceeded.SwitchPreviewModel})
 }
 func (h *Handler) PutSwitchPreviewModel(c *gin.Context) {
-	h.updateBoolField(c, func(v bool) { h.cfg.QuotaExceeded.SwitchPreviewModel = v })
+	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.QuotaExceeded.SwitchPreviewModel = v })
 }
 
 // ResetQuota clears quota and cooldown routing state for one auth index.
 func (h *Handler) ResetQuota(c *gin.Context) {
+	cfg := h.configSnapshot()
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
@@ -61,7 +65,7 @@ func (h *Handler) ResetQuota(c *gin.Context) {
 	}
 
 	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		if err := h.consumeCodexResetCredit(c.Request.Context(), auth); err != nil {
+		if err := h.consumeCodexResetCredit(c.Request.Context(), cfg, auth); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to consume Codex reset credit: %v", err)})
 			return
 		}
@@ -87,8 +91,12 @@ func (h *Handler) ResetQuota(c *gin.Context) {
 	)
 }
 
-func (h *Handler) consumeCodexResetCredit(ctx context.Context, auth *coreauth.Auth) error {
-	token, err := h.resolveTokenForAuth(ctx, auth)
+func (h *Handler) consumeCodexResetCredit(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+) error {
+	token, err := h.resolveTokenForAuth(ctx, cfg, auth)
 	if err != nil {
 		return err
 	}
@@ -116,7 +124,7 @@ func (h *Handler) consumeCodexResetCredit(ctx context.Context, auth *coreauth.Au
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "codex_cli_rs/0.76.0")
 
-	client := &http.Client{Timeout: defaultAPICallTimeout, Transport: h.apiCallTransport(auth, "")}
+	client := &http.Client{Timeout: defaultAPICallTimeout, Transport: h.apiCallTransport(cfg, auth, "")}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("request reset credit: %w", err)

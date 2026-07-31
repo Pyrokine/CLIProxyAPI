@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	codexauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/codex"
 	geminiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/gemini"
 	xaiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/xai"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
@@ -106,6 +108,7 @@ type apiCallResponse struct {
 //	                  "User-Agent":"cliproxyapi"},
 //	       "data":"{}"}'
 func (h *Handler) APICall(c *gin.Context) {
+	cfg := h.configSnapshot()
 	var body apiCallRequest
 	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
@@ -173,7 +176,7 @@ func (h *Handler) APICall(c *gin.Context) {
 			continue
 		}
 		if !tokenResolved {
-			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), auth)
+			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), cfg, auth)
 			tokenResolved = true
 		}
 		if auth != nil && token == "" {
@@ -229,7 +232,7 @@ func (h *Handler) APICall(c *gin.Context) {
 		}
 		return nil
 	}
-	httpClient.Transport = publicHostTransport(h.apiCallTransport(auth, proxyURL))
+	httpClient.Transport = publicHostTransport(h.apiCallTransport(cfg, auth, proxyURL))
 
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -306,7 +309,11 @@ func validateAPICallHeaders(headers map[string]string) error {
 	return nil
 }
 
-func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) (string, error) {
+func (h *Handler) resolveTokenForAuth(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+) (string, error) {
 	if auth == nil {
 		return "", nil
 	}
@@ -314,19 +321,19 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	switch provider {
 	case "claude", "anthropic":
-		token, errToken := h.refreshClaudeOAuthAccessToken(ctx, auth)
+		token, errToken := h.refreshClaudeOAuthAccessToken(ctx, cfg, auth)
 		return token, errToken
 	case "codex":
-		token, errToken := h.refreshCodexOAuthAccessToken(ctx, auth)
+		token, errToken := h.refreshCodexOAuthAccessToken(ctx, cfg, auth)
 		return token, errToken
 	case "gemini", "gemini-cli":
-		token, errToken := h.refreshGeminiOAuthAccessToken(ctx, auth)
+		token, errToken := h.refreshGeminiOAuthAccessToken(ctx, cfg, auth)
 		return token, errToken
 	case "antigravity":
-		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
+		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, cfg, auth)
 		return token, errToken
 	case "xai", "x-ai", "grok":
-		token, errToken := h.refreshXAIOAuthAccessToken(ctx, auth)
+		token, errToken := h.refreshXAIOAuthAccessToken(ctx, cfg, auth)
 		return token, errToken
 	default:
 		return tokenValueForAuth(auth), nil
@@ -349,16 +356,87 @@ func tokenExpired(metadata map[string]any) bool {
 	return false
 }
 
-func (h *Handler) persistRefreshedAuth(ctx context.Context, auth *coreauth.Auth) {
-	if h == nil || h.authManager == nil || auth == nil {
-		return
+func refreshTokenValue(metadata map[string]any) string {
+	if refreshToken := stringValue(metadata, "refresh_token"); refreshToken != "" {
+		return refreshToken
 	}
-	if _, err := h.authManager.Update(ctx, auth); err != nil {
-		log.WithError(err).Warnf("failed to persist refreshed auth %s", auth.ID)
+	if token, ok := metadata["token"].(map[string]any); ok {
+		return stringValue(token, "refresh_token")
 	}
+	return ""
 }
 
-func (h *Handler) refreshClaudeOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+func refreshOwnerMatches(current, before *coreauth.Auth) bool {
+	if current == nil || before == nil || current.ID != before.ID ||
+		!strings.EqualFold(strings.TrimSpace(current.Provider), strings.TrimSpace(before.Provider)) {
+		return false
+	}
+	refreshToken := refreshTokenValue(before.Metadata)
+	return refreshToken != "" && refreshTokenValue(current.Metadata) == refreshToken
+}
+
+func mergeRefreshedAuth(current, before, refreshed *coreauth.Auth) *coreauth.Auth {
+	next := current.Clone()
+	if next.Metadata == nil {
+		next.Metadata = make(map[string]any)
+	}
+	refreshedSnapshot := refreshed.Clone()
+	for key, value := range refreshedSnapshot.Metadata {
+		if previous, existed := before.Metadata[key]; !existed || !reflect.DeepEqual(previous, value) {
+			next.Metadata[key] = value
+		}
+	}
+	for key, previous := range before.Metadata {
+		if _, exists := refreshedSnapshot.Metadata[key]; !exists {
+			if currentValue, currentExists := next.Metadata[key]; currentExists && reflect.DeepEqual(currentValue, previous) {
+				delete(next.Metadata, key)
+			}
+		}
+	}
+	if !refreshed.LastRefreshedAt.Equal(before.LastRefreshedAt) {
+		next.LastRefreshedAt = refreshed.LastRefreshedAt
+	}
+	return next
+}
+
+func (h *Handler) persistRefreshedAuth(ctx context.Context, before, refreshed *coreauth.Auth) error {
+	if h == nil || h.authManager == nil || before == nil || refreshed == nil || before.ID != refreshed.ID {
+		return fmt.Errorf("refreshed auth persistence requires matching registered auth")
+	}
+	persistenceBase := context.Background()
+	if ctx != nil {
+		persistenceBase = context.WithoutCancel(ctx)
+	}
+	persistenceCtx, cancelPersistence := context.WithTimeout(persistenceBase, defaultAPICallTimeout)
+	defer cancelPersistence()
+	for range 8 {
+		current, ok := h.authManager.GetByID(refreshed.ID)
+		if !ok || current == nil {
+			return fmt.Errorf("refreshed auth %s is no longer registered", refreshed.ID)
+		}
+		if !refreshOwnerMatches(current, before) {
+			return fmt.Errorf("persist refreshed auth %s: credential owner changed", refreshed.ID)
+		}
+		next := mergeRefreshedAuth(current, before, refreshed)
+		updated, errUpdate := h.authManager.MergePersistentUpdate(persistenceCtx, current, next)
+		if errUpdate != nil {
+			return fmt.Errorf("persist refreshed auth %s: %w", refreshed.ID, errUpdate)
+		}
+		if updated != nil {
+			return nil
+		}
+		if errContext := persistenceCtx.Err(); errContext != nil {
+			return errContext
+		}
+	}
+	return fmt.Errorf("persist refreshed auth %s: credential changed concurrently", refreshed.ID)
+}
+
+func (h *Handler) refreshClaudeOAuthAccessToken(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+) (string, error) {
 	current := tokenValueForAuth(auth)
 	if current != "" && !tokenExpired(auth.Metadata) {
 		return current, nil
@@ -367,7 +445,8 @@ func (h *Handler) refreshClaudeOAuthAccessToken(ctx context.Context, auth *corea
 	if refreshToken == "" {
 		return current, nil
 	}
-	svc := claudeauth.NewAuth(h.cfg)
+	before := auth.Clone()
+	svc := claudeauth.NewAuth(cfg)
 	td, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		return "", err
@@ -383,11 +462,17 @@ func (h *Handler) refreshClaudeOAuthAccessToken(ctx context.Context, auth *corea
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "claude"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
-	h.persistRefreshedAuth(ctx, auth)
+	if errPersist := h.persistRefreshedAuth(ctx, before, auth); errPersist != nil {
+		return "", errPersist
+	}
 	return strings.TrimSpace(td.AccessToken), nil
 }
 
-func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+func (h *Handler) refreshCodexOAuthAccessToken(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+) (string, error) {
 	current := tokenValueForAuth(auth)
 	if current != "" && !tokenExpired(auth.Metadata) {
 		return current, nil
@@ -396,7 +481,8 @@ func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreau
 	if refreshToken == "" {
 		return current, nil
 	}
-	svc := codexauth.NewAuth(h.cfg)
+	before := auth.Clone()
+	svc := codexauth.NewAuth(cfg)
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
 		return "", err
@@ -416,11 +502,17 @@ func (h *Handler) refreshCodexOAuthAccessToken(ctx context.Context, auth *coreau
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "codex"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
-	h.persistRefreshedAuth(ctx, auth)
+	if errPersist := h.persistRefreshedAuth(ctx, before, auth); errPersist != nil {
+		return "", errPersist
+	}
 	return strings.TrimSpace(td.AccessToken), nil
 }
 
-func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+func (h *Handler) refreshGeminiOAuthAccessToken(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -428,6 +520,8 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 		return "", nil
 	}
 
+	before := auth.Clone()
+	sharedCredential := geminicli.ResolveSharedCredential(auth.Runtime) != nil
 	metadata, updater := geminiOAuthMetadata(auth)
 	if len(metadata) == 0 {
 		return "", fmt.Errorf("gemini oauth metadata missing")
@@ -438,7 +532,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	ctxToken := ctx
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth, ""),
+		Transport: h.apiCallTransport(cfg, auth, ""),
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
@@ -453,10 +547,19 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	if updater != nil {
 		updater(fields)
 	}
+	if !sharedCredential {
+		if errPersist := h.persistRefreshedAuth(ctx, before, auth); errPersist != nil {
+			return "", errPersist
+		}
+	}
 	return strings.TrimSpace(currentToken.AccessToken), nil
 }
 
-func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+func (h *Handler) refreshAntigravityOAuthAccessToken(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -478,6 +581,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	if refreshToken == "" {
 		return "", fmt.Errorf("antigravity refresh token missing")
 	}
+	before := auth.Clone()
 
 	tokenURL := strings.TrimSpace(antigravityOAuthTokenURL)
 	if tokenURL == "" {
@@ -497,7 +601,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(auth, ""),
+		Transport: h.apiCallTransport(cfg, auth, ""),
 	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -549,16 +653,20 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 	}
 	auth.Metadata["type"] = "antigravity"
 
-	if h != nil && h.authManager != nil {
-		auth.LastRefreshedAt = now
-		auth.UpdatedAt = now
-		_, _ = h.authManager.Update(ctx, auth)
+	auth.LastRefreshedAt = now
+	auth.UpdatedAt = now
+	if errPersist := h.persistRefreshedAuth(ctx, before, auth); errPersist != nil {
+		return "", errPersist
 	}
 
 	return strings.TrimSpace(tokenResp.AccessToken), nil
 }
 
-func (h *Handler) refreshXAIOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+func (h *Handler) refreshXAIOAuthAccessToken(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -573,8 +681,9 @@ func (h *Handler) refreshXAIOAuthAccessToken(ctx context.Context, auth *coreauth
 	if refreshToken == "" {
 		return current, nil
 	}
+	before := auth.Clone()
 	tokenEndpoint := stringValue(auth.Metadata, "token_endpoint")
-	svc := xaiauth.NewXAIAuthWithProxyURL(h.cfg, auth.ProxyURL)
+	svc := xaiauth.NewXAIAuthWithProxyURL(cfg, auth.ProxyURL)
 	td, err := svc.RefreshTokens(ctx, refreshToken, tokenEndpoint)
 	if err != nil {
 		return "", err
@@ -608,7 +717,9 @@ func (h *Handler) refreshXAIOAuthAccessToken(ctx context.Context, auth *coreauth
 	}
 	auth.Metadata["type"] = "xai"
 	auth.Metadata["last_refresh"] = now.Format(time.RFC3339)
-	h.persistRefreshedAuth(ctx, auth)
+	if errPersist := h.persistRefreshedAuth(ctx, before, auth); errPersist != nil {
+		return "", errPersist
+	}
 	return strings.TrimSpace(td.AccessToken), nil
 }
 
@@ -820,7 +931,11 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 	return nil
 }
 
-func (h *Handler) apiCallTransport(auth *coreauth.Auth, proxyURL string) http.RoundTripper {
+func (h *Handler) apiCallTransport(
+	cfg *config.Config,
+	auth *coreauth.Auth,
+	proxyURL string,
+) http.RoundTripper {
 	var proxyCandidates []string
 	if proxyStr := strings.TrimSpace(proxyURL); proxyStr != "" {
 		proxyCandidates = append(proxyCandidates, proxyStr)
@@ -830,8 +945,8 @@ func (h *Handler) apiCallTransport(auth *coreauth.Auth, proxyURL string) http.Ro
 			proxyCandidates = append(proxyCandidates, proxyStr)
 		}
 	}
-	if h != nil && h.cfg != nil {
-		if proxyStr := strings.TrimSpace(h.cfg.ProxyURL); proxyStr != "" {
+	if cfg != nil {
+		if proxyStr := strings.TrimSpace(cfg.ProxyURL); proxyStr != "" {
 			proxyCandidates = append(proxyCandidates, proxyStr)
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 // Patch field helpers — apply optional pointer fields to entry fields.
@@ -75,17 +76,31 @@ func validateBaseURL(raw string) error {
 	return nil
 }
 
-func validateConfigHeaders(headers map[string]string) error {
+func validateConfigHeaders(headers map[string]string, existing map[string]string) error {
 	for name, value := range headers {
 		trimmedName := strings.TrimSpace(name)
-		if trimmedName == "" || strings.TrimSpace(value) == "" {
+		trimmedValue := strings.TrimSpace(value)
+		if trimmedName == "" || trimmedValue == "" {
 			continue
 		}
-		if proxyutil.IsRestrictedCustomHeader(trimmedName) {
+		if !proxyutil.IsRestrictedCustomHeader(trimmedName) {
+			continue
+		}
+		existingValue, ok := matchingConfigHeader(existing, trimmedName)
+		if !ok || existingValue != trimmedValue {
 			return fmt.Errorf("custom header %q is restricted", trimmedName)
 		}
 	}
 	return nil
+}
+
+func matchingConfigHeader(headers map[string]string, name string) (string, bool) {
+	for candidateName, value := range headers {
+		if strings.EqualFold(strings.TrimSpace(candidateName), name) {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
 }
 
 // setHeaders applies NormalizeHeaders to *dst when src is non-nil.
@@ -100,6 +115,42 @@ func setExcludedModels(src *[]string, dst *[]string) {
 	if src != nil {
 		*dst = config.NormalizeExcludedModels(*src)
 	}
+}
+
+func patchClaudeCloak(raw json.RawMessage, dst **config.CloakConfig) error {
+	if len(raw) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(string(raw)) == "null" {
+		*dst = nil
+		return nil
+	}
+
+	var patch struct {
+		Mode           *string   `json:"mode"`
+		StrictMode     *bool     `json:"strict-mode"`
+		SensitiveWords *[]string `json:"sensitive-words"`
+	}
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		return err
+	}
+
+	next := config.CloakConfig{}
+	if *dst != nil {
+		next = **dst
+		next.SensitiveWords = append([]string(nil), (*dst).SensitiveWords...)
+	}
+	if patch.Mode != nil {
+		next.Mode = strings.ToLower(strings.TrimSpace(*patch.Mode))
+	}
+	if patch.StrictMode != nil {
+		next.StrictMode = *patch.StrictMode
+	}
+	if patch.SensitiveWords != nil {
+		next.SensitiveWords = append([]string(nil), *patch.SensitiveWords...)
+	}
+	*dst = &next
+	return nil
 }
 
 // deleteMapKey removes key from *m, nils out the map if empty, and returns true.
@@ -146,15 +197,22 @@ func parseBody[T any](c *gin.Context) (T, bool) {
 
 // Generic helpers for list[string]
 
-func (h *Handler) putStringList(c *gin.Context, set func([]string), after func(), validate func(string) error) {
+func (h *Handler) putStringList(
+	c *gin.Context,
+	get func(*config.Config) []string,
+	set func(*config.Config, []string),
+	after func(*config.Config),
+	validate func(string) error,
+	transform func([]string, []string) ([]string, error),
+) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
 	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
-	var arr []string
-	if err = json.Unmarshal(data, &arr); err != nil {
+	var submitted []string
+	if err = json.Unmarshal(data, &submitted); err != nil {
 		var obj struct {
 			Items []string `json:"items"`
 		}
@@ -162,24 +220,40 @@ func (h *Handler) putStringList(c *gin.Context, set func([]string), after func()
 			c.JSON(400, gin.H{"error": "invalid body"})
 			return
 		}
-		arr = obj.Items
+		submitted = obj.Items
 	}
-	if validate != nil {
-		for _, v := range arr {
-			if errV := validate(v); errV != nil {
-				c.JSON(400, gin.H{"error": errV.Error()})
-				return
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		arr := append([]string(nil), submitted...)
+		if transform != nil {
+			arr, err = transform(arr, get(next))
+			if err != nil {
+				return err
 			}
 		}
+		if validate != nil {
+			for _, value := range arr {
+				if errValidate := validate(value); errValidate != nil {
+					return errValidate
+				}
+			}
+		}
+		set(next, arr)
+		if after != nil {
+			after(next)
+		}
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	set(arr)
-	if after != nil {
-		after()
-	}
-	h.persist(c)
 }
 
-func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func(), validate func(string) error) {
+func (h *Handler) patchStringList(
+	c *gin.Context,
+	get func(*config.Config) []string,
+	set func(*config.Config, []string),
+	after func(*config.Config),
+	validate func(string) error,
+) {
 	var body struct {
 		Old   *string `json:"old"`
 		New   *string `json:"new"`
@@ -190,75 +264,112 @@ func (h *Handler) patchStringList(c *gin.Context, target *[]string, after func()
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(*target) {
-		if validate != nil {
-			if errV := validate(*body.Value); errV != nil {
-				c.JSON(400, gin.H{"error": errV.Error()})
-				return
-			}
-		}
-		(*target)[*body.Index] = *body.Value
-		if after != nil {
-			after()
-		}
-		h.persist(c)
+	if (body.Index == nil || body.Value == nil) && (body.Old == nil || body.New == nil) {
+		c.JSON(400, gin.H{"error": "missing fields"})
 		return
 	}
-	if body.Old != nil && body.New != nil {
-		if validate != nil {
-			if errV := validate(*body.New); errV != nil {
-				c.JSON(400, gin.H{"error": errV.Error()})
-				return
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		list := append([]string(nil), get(next)...)
+		if body.Index != nil && body.Value != nil && *body.Index >= 0 && *body.Index < len(list) {
+			resolvedValue, errResolve := resolveSubmittedAPIKey(*body.Value, list)
+			if errResolve != nil {
+				return errResolve
 			}
-		}
-		for i := range *target {
-			if (*target)[i] == *body.Old {
-				(*target)[i] = *body.New
-				if after != nil {
-					after()
+			if validate != nil {
+				if errValidate := validate(resolvedValue); errValidate != nil {
+					return errValidate
 				}
-				h.persist(c)
-				return
+			}
+			list[*body.Index] = resolvedValue
+			set(next, list)
+			if after != nil {
+				after(next)
+			}
+			return nil
+		}
+		if body.Old == nil || body.New == nil {
+			return newConfigMutationError(http.StatusBadRequest, "missing fields")
+		}
+		resolvedOld, errResolve := resolveSubmittedAPIKey(*body.Old, list)
+		if errResolve != nil {
+			return errResolve
+		}
+		resolvedNew, errResolve := resolveSubmittedAPIKey(*body.New, list)
+		if errResolve != nil {
+			return errResolve
+		}
+		if validate != nil {
+			if errValidate := validate(resolvedNew); errValidate != nil {
+				return errValidate
 			}
 		}
-		*target = append(*target, *body.New)
-		if after != nil {
-			after()
+		replaced := false
+		for i := range list {
+			if list[i] == resolvedOld {
+				list[i] = resolvedNew
+				replaced = true
+				break
+			}
 		}
-		h.persist(c)
-		return
+		if !replaced {
+			list = append(list, resolvedNew)
+		}
+		set(next, list)
+		if after != nil {
+			after(next)
+		}
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	c.JSON(400, gin.H{"error": "missing fields"})
 }
 
-func (h *Handler) deleteFromStringList(c *gin.Context, target *[]string, after func()) {
-	if idxStr := c.Query("index"); idxStr != "" {
-		var idx int
-		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(*target) {
-			*target = append((*target)[:idx], (*target)[idx+1:]...)
-			if after != nil {
-				after()
-			}
-			h.persist(c)
-			return
-		}
-	}
-	if val := strings.TrimSpace(c.Query("value")); val != "" {
-		out := make([]string, 0, len(*target))
-		for _, v := range *target {
-			if strings.TrimSpace(v) != val {
-				out = append(out, v)
-			}
-		}
-		*target = out
-		if after != nil {
-			after()
-		}
-		h.persist(c)
+func (h *Handler) deleteFromStringList(
+	c *gin.Context,
+	get func(*config.Config) []string,
+	set func(*config.Config, []string),
+	after func(*config.Config),
+) {
+	idxStr := c.Query("index")
+	value := strings.TrimSpace(c.Query("value"))
+	if idxStr == "" && value == "" {
+		c.JSON(400, gin.H{"error": "missing index or value"})
 		return
 	}
-	c.JSON(400, gin.H{"error": "missing index or value"})
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		list := append([]string(nil), get(next)...)
+		if idxStr != "" {
+			var index int
+			if _, errScan := fmt.Sscanf(idxStr, "%d", &index); errScan == nil && index >= 0 && index < len(list) {
+				list = append(list[:index], list[index+1:]...)
+				set(next, list)
+				if after != nil {
+					after(next)
+				}
+				return nil
+			}
+		}
+		if value == "" {
+			return newConfigMutationError(http.StatusBadRequest, "missing index or value")
+		}
+		resolvedValue, errResolve := resolveSubmittedAPIKey(value, list)
+		if errResolve != nil {
+			return errResolve
+		}
+		out := make([]string, 0, len(list))
+		for _, item := range list {
+			if strings.TrimSpace(item) != resolvedValue {
+				out = append(out, item)
+			}
+		}
+		set(next, out)
+		if after != nil {
+			after(next)
+		}
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
 }
 
 // validateAPIKey checks that an API key meets minimum requirements.
@@ -268,6 +379,9 @@ func validateAPIKey(key string) error {
 	if trimmed == "" {
 		return fmt.Errorf("api key must not be empty")
 	}
+	if err := validateResolvedAPIKeyPlaceholder(trimmed); err != nil {
+		return err
+	}
 	if len(trimmed) < 8 {
 		return fmt.Errorf("api key must be at least 8 characters")
 	}
@@ -275,6 +389,14 @@ func validateAPIKey(key string) error {
 		if b < 0x21 || b > 0x7E {
 			return fmt.Errorf("api key contains invalid character (only ASCII printable characters allowed)")
 		}
+	}
+	return nil
+}
+
+func validateResolvedAPIKeyPlaceholder(key string) error {
+	base, _, _ := splitMaskedAPIKeyOrdinal(strings.TrimSpace(key))
+	if base == "***" {
+		return fmt.Errorf("api key placeholder could not be resolved")
 	}
 	return nil
 }
@@ -295,29 +417,83 @@ func validateAlias(alias string) error {
 
 // api-keys
 
-func (h *Handler) GetAPIKeys(c *gin.Context) { c.JSON(200, gin.H{"api-keys": h.cfg.APIKeys}) }
+func (h *Handler) GetAPIKeys(c *gin.Context) {
+	cfg := h.configSnapshot()
+	if cfg == nil {
+		c.JSON(http.StatusOK, gin.H{"api-keys": []string{}})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"api-keys": maskAPIKeyList(cfg.APIKeys)})
+}
 func (h *Handler) PutAPIKeys(c *gin.Context) {
 	h.putStringList(
-		c, func(v []string) {
-			h.cfg.APIKeys = append([]string(nil), v...)
-		}, nil, validateAPIKey,
+		c,
+		func(cfg *config.Config) []string { return cfg.APIKeys },
+		func(cfg *config.Config, values []string) { cfg.APIKeys = values },
+		nil,
+		validateAPIKey,
+		func(values, existing []string) ([]string, error) {
+			return resolveStringListPlaceholders(values, existing)
+		},
 	)
 }
 func (h *Handler) PatchAPIKeys(c *gin.Context) {
-	h.patchStringList(c, &h.cfg.APIKeys, func() {}, validateAPIKey)
+	h.patchStringList(
+		c,
+		func(cfg *config.Config) []string { return cfg.APIKeys },
+		func(cfg *config.Config, values []string) { cfg.APIKeys = values },
+		nil,
+		validateAPIKey,
+	)
 }
 func (h *Handler) DeleteAPIKeys(c *gin.Context) {
-	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
+	h.deleteFromStringList(
+		c,
+		func(cfg *config.Config) []string { return cfg.APIKeys },
+		func(cfg *config.Config, values []string) { cfg.APIKeys = values },
+		nil,
+	)
 }
 
 // api-key-aliases
 
 func (h *Handler) GetAPIKeyAliases(c *gin.Context) {
-	aliases := h.cfg.APIKeyAliases
-	if aliases == nil {
-		aliases = map[string]string{}
+	writeRedactedJSON(c, 200, gin.H{"api-key-aliases": h.apiKeyAliasesSnapshot()})
+}
+
+func configAPIKeyAliases(cfg *config.Config) map[string]string {
+	if cfg == nil {
+		return nil
 	}
-	c.JSON(200, gin.H{"api-key-aliases": aliases})
+	return cfg.APIKeyAliases
+}
+
+func copyAPIKeyAliases(aliases map[string]string) map[string]string {
+	if len(aliases) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(aliases))
+	for key, alias := range aliases {
+		out[key] = alias
+	}
+	return out
+}
+
+func (h *Handler) replaceAPIKeyAliasesSnapshot(aliases map[string]string) {
+	snapshot := copyAPIKeyAliases(aliases)
+	h.apiKeyAliasesMu.Lock()
+	h.apiKeyAliases = snapshot
+	h.apiKeyAliasesMu.Unlock()
+}
+
+func (h *Handler) apiKeyAliasesSnapshot() map[string]string {
+	h.apiKeyAliasesMu.RLock()
+	defer h.apiKeyAliasesMu.RUnlock()
+	aliases := copyAPIKeyAliases(h.apiKeyAliases)
+	if aliases == nil {
+		return map[string]string{}
+	}
+	return aliases
 }
 
 func (h *Handler) PutAPIKeyAliases(c *gin.Context) {
@@ -326,12 +502,20 @@ func (h *Handler) PutAPIKeyAliases(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	if len(body) == 0 {
-		h.cfg.APIKeyAliases = nil
-	} else {
-		h.cfg.APIKeyAliases = body
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		if len(body) == 0 {
+			next.APIKeyAliases = nil
+			return nil
+		}
+		resolved, errResolve := resolveAliasMapPlaceholders(body, next.APIKeyAliases)
+		if errResolve != nil {
+			return errResolve
+		}
+		next.APIKeyAliases = resolved
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	h.persist(c)
 }
 
 func (h *Handler) PatchAPIKeyAlias(c *gin.Context) {
@@ -343,26 +527,32 @@ func (h *Handler) PatchAPIKeyAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	if err := validateAPIKey(body.Key); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
-		return
-	}
-	if h.cfg.APIKeyAliases == nil {
-		h.cfg.APIKeyAliases = map[string]string{}
-	}
-	if body.Alias == "" {
-		delete(h.cfg.APIKeyAliases, body.Key)
-	} else {
-		if err := validateAlias(body.Alias); err != nil {
-			c.JSON(400, gin.H{"error": err.Error()})
-			return
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		resolvedKey, errResolve := resolveSubmittedAPIKey(body.Key, aliasKeyCandidates(next.APIKeyAliases))
+		if errResolve != nil {
+			return errResolve
 		}
-		h.cfg.APIKeyAliases[body.Key] = body.Alias
+		if errValidate := validateAPIKey(resolvedKey); errValidate != nil {
+			return errValidate
+		}
+		if body.Alias == "" {
+			delete(next.APIKeyAliases, resolvedKey)
+		} else {
+			if errValidate := validateAlias(body.Alias); errValidate != nil {
+				return errValidate
+			}
+			if next.APIKeyAliases == nil {
+				next.APIKeyAliases = map[string]string{}
+			}
+			next.APIKeyAliases[resolvedKey] = body.Alias
+		}
+		if len(next.APIKeyAliases) == 0 {
+			next.APIKeyAliases = nil
+		}
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	if len(h.cfg.APIKeyAliases) == 0 {
-		h.cfg.APIKeyAliases = nil
-	}
-	h.persist(c)
 }
 
 func (h *Handler) DeleteAPIKeyAlias(c *gin.Context) {
@@ -381,19 +571,25 @@ func (h *Handler) DeleteAPIKeyAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing key parameter"})
 		return
 	}
-	if h.cfg.APIKeyAliases != nil {
-		delete(h.cfg.APIKeyAliases, key)
-		if len(h.cfg.APIKeyAliases) == 0 {
-			h.cfg.APIKeyAliases = nil
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		resolvedKey, errResolve := resolveSubmittedAPIKey(key, aliasKeyCandidates(next.APIKeyAliases))
+		if errResolve != nil {
+			return errResolve
 		}
+		delete(next.APIKeyAliases, resolvedKey)
+		if len(next.APIKeyAliases) == 0 {
+			next.APIKeyAliases = nil
+		}
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	h.persist(c)
 }
 
 // gemini-api-key: []GeminiKey
 
 func (h *Handler) GetGeminiKeys(c *gin.Context) {
-	c.JSON(200, gin.H{"gemini-api-key": h.geminiKeysWithAuthIndex()})
+	writeRedactedJSON(c, 200, gin.H{"gemini-api-key": h.geminiKeysWithAuthIndex()})
 }
 func (h *Handler) PutGeminiKeys(c *gin.Context)   { putStructList(h, c, geminiKeyResource) }
 func (h *Handler) DeleteGeminiKey(c *gin.Context) { deleteStructEntry(h, c, geminiKeyResource) }
@@ -429,7 +625,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 // claude-api-key: []ClaudeKey
 
 func (h *Handler) GetClaudeKeys(c *gin.Context) {
-	c.JSON(200, gin.H{"claude-api-key": h.claudeKeysWithAuthIndex()})
+	writeRedactedJSON(c, 200, gin.H{"claude-api-key": h.claudeKeysWithAuthIndex()})
 }
 func (h *Handler) PutClaudeKeys(c *gin.Context)   { putStructList(h, c, claudeKeyResource) }
 func (h *Handler) DeleteClaudeKey(c *gin.Context) { deleteStructEntry(h, c, claudeKeyResource) }
@@ -438,6 +634,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		h, c, claudeKeyResource, func(entry *config.ClaudeKey, raw json.RawMessage) error {
 			var p struct {
 				APIKey                  *string               `json:"api-key"`
+				Priority                *int                  `json:"priority"`
 				Prefix                  *string               `json:"prefix"`
 				BaseURL                 *string               `json:"base-url"`
 				ProxyURL                *string               `json:"proxy-url"`
@@ -445,11 +642,15 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 				Headers                 *map[string]string    `json:"headers"`
 				ExcludedModels          *[]string             `json:"excluded-models"`
 				RebuildMidSystemMessage *bool                 `json:"rebuild-mid-system-message"`
+				Cloak                   json.RawMessage       `json:"cloak"`
 			}
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return err
 			}
 			setTrimmed(p.APIKey, &entry.APIKey)
+			if p.Priority != nil {
+				entry.Priority = *p.Priority
+			}
 			setTrimmed(p.Prefix, &entry.Prefix)
 			if err := setBaseURL(p.BaseURL, &entry.BaseURL); err != nil {
 				return err
@@ -463,7 +664,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 			if p.RebuildMidSystemMessage != nil {
 				entry.RebuildMidSystemMessage = *p.RebuildMidSystemMessage
 			}
-			return nil
+			return patchClaudeCloak(p.Cloak, &entry.Cloak)
 		},
 	)
 }
@@ -471,7 +672,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 // openai-compatibility: []OpenAICompatibility
 
 func (h *Handler) GetOpenAICompat(c *gin.Context) {
-	c.JSON(200, gin.H{"openai-compatibility": h.openAICompatibilityWithAuthIndex()})
+	writeRedactedJSON(c, 200, gin.H{"openai-compatibility": h.openAICompatibilityWithAuthIndex()})
 }
 func (h *Handler) PutOpenAICompat(c *gin.Context)    { putStructList(h, c, openAICompatResource) }
 func (h *Handler) DeleteOpenAICompat(c *gin.Context) { deleteStructEntry(h, c, openAICompatResource) }
@@ -513,7 +714,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 // vertex-api-key: []VertexCompatKey
 
 func (h *Handler) GetVertexCompatKeys(c *gin.Context) {
-	c.JSON(200, gin.H{"vertex-api-key": h.vertexCompatKeysWithAuthIndex()})
+	writeRedactedJSON(c, 200, gin.H{"vertex-api-key": h.vertexCompatKeysWithAuthIndex()})
 }
 func (h *Handler) PutVertexCompatKeys(c *gin.Context) { putStructList(h, c, vertexCompatKeyResource) }
 func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
@@ -553,7 +754,12 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 // oauth-excluded-models: map[string][]string
 
 func (h *Handler) GetOAuthExcludedModels(c *gin.Context) {
-	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(h.cfg.OAuthExcludedModels)})
+	cfg := h.configSnapshot()
+	if cfg == nil {
+		c.JSON(200, gin.H{"oauth-excluded-models": map[string][]string{}})
+		return
+	}
+	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)})
 }
 
 func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
@@ -561,9 +767,13 @@ func (h *Handler) PutOAuthExcludedModels(c *gin.Context) {
 	if !ok {
 		return
 	}
-	h.cfg.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
-	h.cfg.PruneGloballyExcludedAPIKeyRules()
-	h.persist(c)
+	if _, ok = h.mutateConfig(c, func(next *config.Config) error {
+		next.OAuthExcludedModels = config.NormalizeOAuthExcludedModels(entries)
+		next.PruneGloballyExcludedAPIKeyRules()
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
 }
 
 func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
@@ -581,19 +791,29 @@ func (h *Handler) PatchOAuthExcludedModels(c *gin.Context) {
 		return
 	}
 	normalized := config.NormalizeExcludedModels(body.Models)
-	if len(normalized) == 0 {
-		if !deleteMapKey(c, &h.cfg.OAuthExcludedModels, provider, "provider") {
-			return
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		if len(normalized) == 0 {
+			if next.OAuthExcludedModels == nil {
+				return newConfigMutationError(http.StatusNotFound, "provider not found")
+			}
+			if _, exists := next.OAuthExcludedModels[provider]; !exists {
+				return newConfigMutationError(http.StatusNotFound, "provider not found")
+			}
+			delete(next.OAuthExcludedModels, provider)
+			if len(next.OAuthExcludedModels) == 0 {
+				next.OAuthExcludedModels = nil
+			}
+			return nil
 		}
-		h.persist(c)
-		return
+		if next.OAuthExcludedModels == nil {
+			next.OAuthExcludedModels = make(map[string][]string)
+		}
+		next.OAuthExcludedModels[provider] = normalized
+		next.PruneGloballyExcludedAPIKeyRules()
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	if h.cfg.OAuthExcludedModels == nil {
-		h.cfg.OAuthExcludedModels = make(map[string][]string)
-	}
-	h.cfg.OAuthExcludedModels[provider] = normalized
-	h.cfg.PruneGloballyExcludedAPIKeyRules()
-	h.persist(c)
 }
 
 func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
@@ -602,17 +822,30 @@ func (h *Handler) DeleteOAuthExcludedModels(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing provider"})
 		return
 	}
-	if !deleteMapKey(c, &h.cfg.OAuthExcludedModels, provider, "provider") {
-		return
+	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
+		if next.OAuthExcludedModels == nil {
+			return newConfigMutationError(http.StatusNotFound, "provider not found")
+		}
+		if _, exists := next.OAuthExcludedModels[provider]; !exists {
+			return newConfigMutationError(http.StatusNotFound, "provider not found")
+		}
+		delete(next.OAuthExcludedModels, provider)
+		if len(next.OAuthExcludedModels) == 0 {
+			next.OAuthExcludedModels = nil
+		}
+		return nil
+	}); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	h.persist(c)
 }
 
 // oauth-model-alias: map[string][]OAuthModelAlias
 
 func (h *Handler) GetOAuthModelAlias(c *gin.Context) {
-	doc, ok := h.loadOAuthModelAliasCatalog(c)
-	if !ok {
+	doc, err := modelcatalog.LoadOrInit(h.configFilePath, h.configSnapshot())
+	if err != nil {
+		log.WithError(err).Error("failed to load model catalog")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
 		return
 	}
 	c.JSON(200, gin.H{"oauth-model-alias": doc.ToOAuthModelAlias()})
@@ -623,12 +856,17 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 	if !ok {
 		return
 	}
-	doc, ok := h.loadOAuthModelAliasCatalog(c)
-	if !ok {
-		return
+	_, ok = h.mutateModelCatalog(
+		c,
+		modelCatalogMutationOptions{},
+		func(doc *modelcatalog.File) error {
+			modelcatalog.ReplaceOAuthModelAlias(doc, sanitizedOAuthModelAlias(entries))
+			return nil
+		},
+	)
+	if ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	modelcatalog.ReplaceOAuthModelAlias(&doc, sanitizedOAuthModelAlias(entries))
-	h.persistOAuthModelAlias(c, doc)
 }
 
 func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
@@ -652,20 +890,24 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid channel"})
 		return
 	}
-	doc, ok := h.loadOAuthModelAliasCatalog(c)
-	if !ok {
-		return
-	}
 	normalizedMap := sanitizedOAuthModelAlias(map[string][]config.OAuthModelAlias{channel: body.Aliases})
-	if len(normalizedMap[channel]) == 0 {
-		if !modelcatalog.DeleteOAuthModelAliasChannel(&doc, channel) {
-			c.JSON(404, gin.H{"error": "channel not found"})
-			return
-		}
-	} else {
-		modelcatalog.ReplaceOAuthModelAliasChannel(&doc, channel, normalizedMap[channel])
+	_, ok := h.mutateModelCatalog(
+		c,
+		modelCatalogMutationOptions{},
+		func(doc *modelcatalog.File) error {
+			if len(normalizedMap[channel]) == 0 {
+				if !modelcatalog.DeleteOAuthModelAliasChannel(doc, channel) {
+					return newConfigMutationError(http.StatusNotFound, "channel not found")
+				}
+				return nil
+			}
+			modelcatalog.ReplaceOAuthModelAliasChannel(doc, channel, normalizedMap[channel])
+			return nil
+		},
+	)
+	if ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	h.persistOAuthModelAlias(c, doc)
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
@@ -677,53 +919,25 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "missing channel"})
 		return
 	}
-	doc, ok := h.loadOAuthModelAliasCatalog(c)
-	if !ok {
-		return
+	_, ok := h.mutateModelCatalog(
+		c,
+		modelCatalogMutationOptions{},
+		func(doc *modelcatalog.File) error {
+			if !modelcatalog.DeleteOAuthModelAliasChannel(doc, channel) {
+				return newConfigMutationError(http.StatusNotFound, "channel not found")
+			}
+			return nil
+		},
+	)
+	if ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
-	if !modelcatalog.DeleteOAuthModelAliasChannel(&doc, channel) {
-		c.JSON(404, gin.H{"error": "channel not found"})
-		return
-	}
-	h.persistOAuthModelAlias(c, doc)
-}
-
-func (h *Handler) loadOAuthModelAliasCatalog(c *gin.Context) (modelcatalog.File, bool) {
-	if h == nil || h.cfg == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
-		return modelcatalog.File{}, false
-	}
-	doc, err := modelcatalog.LoadOrInit(h.configFilePath, h.cfg)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load model catalog: %v", err)})
-		return modelcatalog.File{}, false
-	}
-	return doc, true
-}
-
-func (h *Handler) persistOAuthModelAlias(c *gin.Context, doc modelcatalog.File) {
-	if h == nil || h.cfg == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
-		return
-	}
-	if err := modelcatalog.Save(h.configFilePath, doc); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save model catalog: %v", err)})
-		return
-	}
-	h.applyModelCatalogRuntime(doc)
-	h.mu.Lock()
-	ok := h.saveConfigLocked(c)
-	h.mu.Unlock()
-	if !ok {
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
 // codex-api-key: []CodexKey
 
 func (h *Handler) GetCodexKeys(c *gin.Context) {
-	c.JSON(200, gin.H{"codex-api-key": h.codexKeysWithAuthIndex()})
+	writeRedactedJSON(c, 200, gin.H{"codex-api-key": h.codexKeysWithAuthIndex()})
 }
 func (h *Handler) PutCodexKeys(c *gin.Context)   { putStructList(h, c, codexKeyResource) }
 func (h *Handler) DeleteCodexKey(c *gin.Context) { deleteStructEntry(h, c, codexKeyResource) }
@@ -758,54 +972,91 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	)
 }
 
-func validateGeminiKey(entry *config.GeminiKey) error {
+func validateGeminiKey(entry *config.GeminiKey, existing *config.GeminiKey) error {
 	if entry == nil {
 		return nil
+	}
+	if err := validateResolvedAPIKeyPlaceholder(entry.APIKey); err != nil {
+		return err
 	}
 	if err := validateBaseURL(entry.BaseURL); err != nil {
 		return err
 	}
-	return validateConfigHeaders(entry.Headers)
+	var existingHeaders map[string]string
+	if existing != nil {
+		existingHeaders = existing.Headers
+	}
+	return validateConfigHeaders(entry.Headers, existingHeaders)
 }
 
-func validateClaudeKey(entry *config.ClaudeKey) error {
+func validateClaudeKey(entry *config.ClaudeKey, existing *config.ClaudeKey) error {
 	if entry == nil {
 		return nil
+	}
+	if err := validateResolvedAPIKeyPlaceholder(entry.APIKey); err != nil {
+		return err
 	}
 	if err := validateBaseURL(entry.BaseURL); err != nil {
 		return err
 	}
-	return validateConfigHeaders(entry.Headers)
+	var existingHeaders map[string]string
+	if existing != nil {
+		existingHeaders = existing.Headers
+	}
+	return validateConfigHeaders(entry.Headers, existingHeaders)
 }
 
-func validateOpenAICompatibilityEntry(entry *config.OpenAICompatibility) error {
+func validateOpenAICompatibilityEntry(entry *config.OpenAICompatibility, existing *config.OpenAICompatibility) error {
 	if entry == nil {
 		return nil
 	}
 	if err := validateBaseURL(entry.BaseURL); err != nil {
 		return err
 	}
-	return validateConfigHeaders(entry.Headers)
+	for i := range entry.APIKeyEntries {
+		if err := validateResolvedAPIKeyPlaceholder(entry.APIKeyEntries[i].APIKey); err != nil {
+			return err
+		}
+	}
+	var existingHeaders map[string]string
+	if existing != nil {
+		existingHeaders = existing.Headers
+	}
+	return validateConfigHeaders(entry.Headers, existingHeaders)
 }
 
-func validateVertexCompatKey(entry *config.VertexCompatKey) error {
+func validateVertexCompatKey(entry *config.VertexCompatKey, existing *config.VertexCompatKey) error {
 	if entry == nil {
 		return nil
+	}
+	if err := validateResolvedAPIKeyPlaceholder(entry.APIKey); err != nil {
+		return err
 	}
 	if err := validateBaseURL(entry.BaseURL); err != nil {
 		return err
 	}
-	return validateConfigHeaders(entry.Headers)
+	var existingHeaders map[string]string
+	if existing != nil {
+		existingHeaders = existing.Headers
+	}
+	return validateConfigHeaders(entry.Headers, existingHeaders)
 }
 
-func validateCodexKey(entry *config.CodexKey) error {
+func validateCodexKey(entry *config.CodexKey, existing *config.CodexKey) error {
 	if entry == nil {
 		return nil
+	}
+	if err := validateResolvedAPIKeyPlaceholder(entry.APIKey); err != nil {
+		return err
 	}
 	if err := validateBaseURL(entry.BaseURL); err != nil {
 		return err
 	}
-	return validateConfigHeaders(entry.Headers)
+	var existingHeaders map[string]string
+	if existing != nil {
+		existingHeaders = existing.Headers
+	}
+	return validateConfigHeaders(entry.Headers, existingHeaders)
 }
 
 func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {

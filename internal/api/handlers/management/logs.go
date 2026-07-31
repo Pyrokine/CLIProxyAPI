@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/gin-gonic/gin"
 )
@@ -33,35 +34,37 @@ const (
 )
 
 // checkLoggingEnabled validates that the handler is initialized and file logging is on.
-// Returns true if the check passed; otherwise it writes an error response and returns false.
-func (h *Handler) checkLoggingEnabled(c *gin.Context) bool {
+// It returns the request-level config snapshot when the check passes.
+func (h *Handler) checkLoggingEnabled(c *gin.Context) (*config.Config, bool) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
-		return false
+		return nil, false
 	}
-	if h.cfg == nil {
+	cfg := h.configSnapshot()
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
-		return false
+		return nil, false
 	}
-	if !h.cfg.LoggingToFile {
+	if !cfg.LoggingToFile {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "logging to file disabled"})
-		return false
+		return nil, false
 	}
-	return true
+	return cfg, true
 }
 
 // checkLogDirectory validates the handler and returns the resolved log directory.
-// Returns the directory path and true on success; otherwise writes an error response and returns ("", false).
+// The directory is resolved from one request-level config snapshot.
 func (h *Handler) checkLogDirectory(c *gin.Context) (string, bool) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return "", false
 	}
-	if h.cfg == nil {
+	cfg := h.configSnapshot()
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return "", false
 	}
-	dir := h.logDirectory()
+	dir := h.logDirectoryFromConfig(cfg)
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return "", false
@@ -71,11 +74,12 @@ func (h *Handler) checkLogDirectory(c *gin.Context) (string, bool) {
 
 // GetLogSize returns the total disk usage of all log files in the log directory.
 func (h *Handler) GetLogSize(c *gin.Context) {
-	if !h.checkLoggingEnabled(c) {
+	cfg, ok := h.checkLoggingEnabled(c)
+	if !ok {
 		return
 	}
 
-	dir := h.logDirectory()
+	dir := h.logDirectoryFromConfig(cfg)
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -116,11 +120,12 @@ func (h *Handler) GetLogSize(c *gin.Context) {
 // points at the latest complete log boundary; combining after with limit is
 // therefore tail semantics and does not replay lines trimmed by limit.
 func (h *Handler) GetLogs(c *gin.Context) {
-	if !h.checkLoggingEnabled(c) {
+	cfg, ok := h.checkLoggingEnabled(c)
+	if !ok {
 		return
 	}
 
-	logDir := h.logDirectory()
+	logDir := h.logDirectoryFromConfig(cfg)
 	if strings.TrimSpace(logDir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -212,11 +217,12 @@ func (h *Handler) GetLogs(c *gin.Context) {
 
 // DeleteLogs removes all rotated log files and truncates the active log.
 func (h *Handler) DeleteLogs(c *gin.Context) {
-	if !h.checkLoggingEnabled(c) {
+	cfg, ok := h.checkLoggingEnabled(c)
+	if !ok {
 		return
 	}
 
-	dir := h.logDirectory()
+	dir := h.logDirectoryFromConfig(cfg)
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -277,16 +283,17 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return
 	}
-	if h.cfg == nil {
+	cfg := h.configSnapshot()
+	if cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
 		return
 	}
-	if h.cfg.RequestLog {
+	if cfg.RequestLog {
 		c.JSON(http.StatusOK, gin.H{"files": []any{}})
 		return
 	}
 
-	dir := h.logDirectory()
+	dir := h.logDirectoryFromConfig(cfg)
 	if strings.TrimSpace(dir) == "" {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "log directory not configured"})
 		return
@@ -548,14 +555,14 @@ func openLogFile(c *gin.Context, dirAbs, fileName string) (*os.File, os.FileInfo
 	return file, info, true
 }
 
-func (h *Handler) logDirectory() string {
+func (h *Handler) logDirectoryFromConfig(cfg *config.Config) string {
 	if h == nil {
 		return ""
 	}
 	if h.logDir != "" {
 		return h.logDir
 	}
-	return logging.ResolveLogDirectory(h.cfg)
+	return logging.ResolveLogDirectory(cfg)
 }
 
 func (h *Handler) collectLogFiles(dir string) ([]string, error) {

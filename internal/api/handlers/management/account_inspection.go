@@ -375,6 +375,7 @@ func (h *Handler) PostAccountInspectionStop(c *gin.Context) {
 }
 
 func (h *Handler) PostAccountInspectionRefreshToken(c *gin.Context) {
+	cfg := h.configSnapshot()
 	var req struct {
 		ID        string `json:"id"`
 		FileName  string `json:"file_name"`
@@ -396,7 +397,7 @@ func (h *Handler) PostAccountInspectionRefreshToken(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
-	_, err := h.resolveTokenForAuth(ctx, auth)
+	_, err := h.resolveTokenForAuth(ctx, cfg, auth)
 	if err != nil {
 		h.inspectionService().addLog(
 			"error", "manual token refresh failed for "+inspectionAccountName(auth)+": "+err.Error(),

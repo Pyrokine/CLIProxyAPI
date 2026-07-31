@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
@@ -71,14 +72,19 @@ func (h *Handler) GetReleases(c *gin.Context) {
 	}
 
 	target := strings.ToLower(strings.TrimSpace(c.DefaultQuery("target", "cpa")))
+	cfg := h.configSnapshot()
 	var repo string
 	switch target {
 	case "panel":
-		repo = h.panelRepository()
+		repo = panelRepositoryFromConfig(cfg)
 	default:
-		repo = h.cpaRepository()
+		repo = cpaRepositoryFromConfig(cfg)
 	}
-	releases, err := h.fetchAllReleases(c, repo, force)
+	proxyURL := ""
+	if cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+	releases, err := h.fetchAllReleases(c, repo, force, proxyURL)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "fetch_failed", "message": err.Error()})
 		return
@@ -100,9 +106,13 @@ func (h *Handler) GetReleases(c *gin.Context) {
 }
 
 func (h *Handler) panelRepository() string {
+	return panelRepositoryFromConfig(h.configSnapshot())
+}
+
+func panelRepositoryFromConfig(cfg *config.Config) string {
 	repo := "Pyrokine/Cli-Proxy-API-Management-Center"
-	if h != nil && h.cfg != nil {
-		custom := strings.TrimSpace(h.cfg.RemoteManagement.PanelGitHubRepository)
+	if cfg != nil {
+		custom := strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
 		if custom != "" {
 			custom = strings.TrimPrefix(custom, "https://github.com/")
 			// noinspection HttpUrlsUsage
@@ -122,9 +132,13 @@ func (h *Handler) panelRepository() string {
 }
 
 func (h *Handler) cpaRepository() string {
+	return cpaRepositoryFromConfig(h.configSnapshot())
+}
+
+func cpaRepositoryFromConfig(cfg *config.Config) string {
 	repo := "Pyrokine/CLIProxyAPI"
-	if h != nil && h.cfg != nil {
-		custom := strings.TrimSpace(h.cfg.RemoteManagement.CPAGitHubRepository)
+	if cfg != nil {
+		custom := strings.TrimSpace(cfg.RemoteManagement.CPAGitHubRepository)
 		if custom != "" {
 			custom = strings.TrimPrefix(custom, "https://github.com/")
 			// noinspection HttpUrlsUsage
@@ -138,7 +152,12 @@ func (h *Handler) cpaRepository() string {
 	return repo
 }
 
-func (h *Handler) fetchAllReleases(c *gin.Context, repo string, force bool) ([]gitHubRelease, error) {
+func (h *Handler) fetchAllReleases(
+	c *gin.Context,
+	repo string,
+	force bool,
+	proxyURL string,
+) ([]gitHubRelease, error) {
 	cachedReleases.mu.RLock()
 	if !force {
 		if entry, ok := cachedReleases.entries[repo]; ok &&
@@ -153,10 +172,7 @@ func (h *Handler) fetchAllReleases(c *gin.Context, repo string, force bool) ([]g
 	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=100", repo)
 	client := &http.Client{Timeout: 15 * time.Second}
 
-	proxyURL := ""
-	if h != nil && h.cfg != nil {
-		proxyURL = strings.TrimSpace(h.cfg.ProxyURL)
-	}
+	proxyURL = strings.TrimSpace(proxyURL)
 	if proxyURL != "" {
 		sdkCfg := &sdkconfig.SDKConfig{ProxyURL: proxyURL}
 		util.SetProxy(sdkCfg, client)

@@ -20,7 +20,15 @@ func newConfigListTestHandler(t *testing.T, cfg *config.Config) *Handler {
 	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	return NewHandler(cfg, path, nil, WithEnvSecret(""))
+	handler := NewHandler(cfg, path, nil, WithEnvSecret(""))
+	t.Cleanup(
+		func() {
+			if errClose := handler.Close(); errClose != nil {
+				t.Errorf("Close() error = %v", errClose)
+			}
+		},
+	)
+	return handler
 }
 
 func runConfigListRequest(
@@ -216,8 +224,9 @@ func TestDeleteProviderKeyAcceptsBodyMatch(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	if len(cfg.GeminiKey) != 1 || cfg.GeminiKey[0].APIKey != "keep-me" {
-		t.Fatalf("gemini keys = %#v, want only keep-me", cfg.GeminiKey)
+	snapshot := h.configSnapshot()
+	if len(snapshot.GeminiKey) != 1 || snapshot.GeminiKey[0].APIKey != "keep-me" {
+		t.Fatalf("gemini keys = %#v, want only keep-me", snapshot.GeminiKey)
 	}
 }
 
@@ -239,10 +248,11 @@ func TestDeleteAPIKeyAliasAcceptsBody(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
-	if _, ok := cfg.APIKeyAliases["delete-me"]; ok {
-		t.Fatalf("delete-me alias still exists: %#v", cfg.APIKeyAliases)
+	snapshot := h.configSnapshot()
+	if _, ok := snapshot.APIKeyAliases["delete-me"]; ok {
+		t.Fatalf("delete-me alias still exists: %#v", snapshot.APIKeyAliases)
 	}
-	if cfg.APIKeyAliases["keep-me"] != "new" {
-		t.Fatalf("keep-me alias = %q", cfg.APIKeyAliases["keep-me"])
+	if snapshot.APIKeyAliases["keep-me"] != "new" {
+		t.Fatalf("keep-me alias = %q", snapshot.APIKeyAliases["keep-me"])
 	}
 }

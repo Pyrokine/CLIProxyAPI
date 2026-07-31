@@ -1335,6 +1335,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
 		mgmt.GET("/plugin-store", s.mgmt.ListPluginStore)
+		mgmt.GET("/plugin-store/:id/releases", s.mgmt.ListPluginStoreReleases)
 		mgmt.POST("/plugin-store/:id/install", s.mgmt.InstallPluginFromStore)
 		mgmt.GET("/plugins", s.mgmt.ListPlugins)
 		mgmt.DELETE("/plugins/:id", s.mgmt.DeletePlugin)
