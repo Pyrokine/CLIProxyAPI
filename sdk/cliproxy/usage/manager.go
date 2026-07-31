@@ -2,6 +2,8 @@ package usage
 
 import (
 	"context"
+	"errors"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -12,28 +14,30 @@ import (
 
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
-	Provider          string
-	ExecutorType      string
-	Model             string
-	Alias             string
-	APIKey            string
-	AuthID            string
-	AuthIndex         string
-	AuthType          string
-	Source            string
-	ReasoningEffort   string
-	ServiceTier       string
-	RequestedAt       time.Time
-	Latency           time.Duration
-	RequestID         string
-	TimeToFirstByteMs int64
-	TotalDurationMs   int64
-	Completed         bool
-	Thinking          *Thinking
-	Failed            bool
-	Fail              Failure
-	Detail            Detail
-	ResponseHeaders   http.Header
+	Provider            string
+	ExecutorType        string
+	Model               string
+	Alias               string
+	APIKey              string
+	AuthID              string
+	AuthIndex           string
+	AuthType            string
+	Source              string
+	ReasoningEffort     string
+	ServiceTier         string
+	RequestServiceTier  string
+	ResponseServiceTier string
+	RequestedAt         time.Time
+	Latency             time.Duration
+	RequestID           string
+	TimeToFirstByteMs   int64
+	TotalDurationMs     int64
+	Completed           bool
+	Thinking            *Thinking
+	Failed              bool
+	Fail                Failure
+	Detail              Detail
+	ResponseHeaders     http.Header
 }
 
 const DefaultServiceTier = "default"
@@ -41,6 +45,39 @@ const DefaultServiceTier = "default"
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
+type deferredRecordContextKey struct{}
+type managerContextKey struct{}
+
+// WithManager routes usage records published with ctx through manager.
+func WithManager(ctx context.Context, manager *Manager) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if manager == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, managerContextKey{}, manager)
+}
+
+// ManagerFromContext returns the usage manager assigned to ctx.
+func ManagerFromContext(ctx context.Context) *Manager {
+	if ctx == nil {
+		return nil
+	}
+	manager, _ := ctx.Value(managerContextKey{}).(*Manager)
+	return manager
+}
+
+// DeferredRecord delays the main usage record until the response handler knows
+// whether downstream validation and response construction succeeded.
+type DeferredRecord struct {
+	mu        sync.Mutex
+	record    *Record
+	ctx       context.Context
+	decided   bool
+	failure   error
+	published bool
+}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {
@@ -131,6 +168,124 @@ func ServiceTierFromContext(ctx context.Context) string {
 	}
 }
 
+// WithDeferredRecord stores a deferred main usage record in ctx.
+func WithDeferredRecord(ctx context.Context, deferred *DeferredRecord) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if deferred == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, deferredRecordContextKey{}, deferred)
+}
+
+// WithoutDeferredRecord prevents nested executions from claiming a parent request's deferred record.
+func WithoutDeferredRecord(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, deferredRecordContextKey{}, (*DeferredRecord)(nil))
+}
+
+// NewDeferredRecord creates a usage record holder whose first completion result wins.
+func NewDeferredRecord() *DeferredRecord {
+	return &DeferredRecord{}
+}
+
+// DeferRecord stores the main usage record when ctx has a deferred holder.
+func DeferRecord(ctx context.Context, record Record) bool {
+	if ctx == nil {
+		return false
+	}
+	deferred, _ := ctx.Value(deferredRecordContextKey{}).(*DeferredRecord)
+	if deferred == nil {
+		return false
+	}
+	return deferred.store(ctx, record)
+}
+
+// Complete publishes the deferred record after applying the final handler outcome.
+func (d *DeferredRecord) Complete(ctx context.Context, err error) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	if d.decided {
+		d.mu.Unlock()
+		return
+	}
+	d.decided = true
+	d.failure = err
+	if d.record == nil || d.published {
+		d.mu.Unlock()
+		return
+	}
+	record := *d.record
+	publishCtx := d.ctx
+	if publishCtx == nil {
+		publishCtx = ctx
+	}
+	d.published = true
+	d.mu.Unlock()
+	PublishRecord(publishCtx, deferredRecordWithOutcome(record, err))
+}
+
+func (d *DeferredRecord) store(ctx context.Context, record Record) bool {
+	d.mu.Lock()
+	if d.record != nil || d.published {
+		d.mu.Unlock()
+		return false
+	}
+	stored := record
+	d.record = &stored
+	if ctx != nil {
+		d.ctx = context.WithoutCancel(ctx)
+	}
+	if !d.decided {
+		d.mu.Unlock()
+		return true
+	}
+	err := d.failure
+	publishCtx := d.ctx
+	if publishCtx == nil {
+		publishCtx = ctx
+	}
+	d.published = true
+	d.mu.Unlock()
+	PublishRecord(publishCtx, deferredRecordWithOutcome(record, err))
+	return true
+}
+
+func deferredRecordWithOutcome(record Record, err error) Record {
+	if err == nil {
+		return record
+	}
+	record.Failed = true
+	record.Completed = false
+	if strings.TrimSpace(record.Fail.Body) == "" {
+		record.Fail.Body = strings.TrimSpace(err.Error())
+	}
+	if record.Fail.StatusCode == 0 {
+		var statusErr interface{ StatusCode() int }
+		if errors.As(err, &statusErr) && statusErr != nil {
+			record.Fail.StatusCode = statusErr.StatusCode()
+		}
+	}
+	return record
+}
+
+// AddNonNegativeInt64 adds non-negative values without integer wraparound.
+func AddNonNegativeInt64(values ...int64) (int64, bool) {
+	var total int64
+	for _, value := range values {
+		if value < 0 || total > math.MaxInt64-value {
+			return 0, false
+		}
+		total += value
+	}
+	return total, true
+}
+
 // Failure holds HTTP failure metadata for an upstream request attempt.
 type Failure struct {
 	StatusCode int
@@ -146,6 +301,7 @@ type Detail struct {
 	CacheReadTokens     int64
 	CacheCreationTokens int64
 	TotalTokens         int64
+	ResponseServiceTier string
 }
 
 // Thinking describes the requested thinking intensity for a usage record.
@@ -161,81 +317,204 @@ type Plugin interface {
 	HandleUsage(ctx context.Context, record Record)
 }
 
-type queueItem struct {
-	ctx    context.Context
-	record Record
+type pluginGeneration struct {
+	plugin Plugin
+
+	mu      sync.Mutex
+	pending int
+	retired bool
+	done    chan struct{}
 }
 
-// Manager maintains a queue of usage records and delivers them to registered plugins.
-type Manager struct {
-	once     sync.Once
-	stopOnce sync.Once
-	cancel   context.CancelFunc
-	done     chan struct{}
+// Retirement represents a detached named plugin generation. Wait blocks until
+// every record that captured the generation at publication time has finished.
+type Retirement struct {
+	generation *pluginGeneration
+}
 
-	mu     sync.Mutex
-	cond   *sync.Cond
-	queue  []queueItem
-	closed bool
+// Wait waits for the retired generation to drain. It must not be called from
+// a callback that captured the same generation.
+func (r *Retirement) Wait() {
+	_ = r.WaitContext(context.Background())
+}
+
+// WaitContext waits for the retired generation to drain or for ctx to end.
+func (r *Retirement) WaitContext(ctx context.Context) error {
+	if r == nil || r.generation == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-r.generation.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Drained reports whether the retired generation has no captured callbacks left.
+func (r *Retirement) Drained() bool {
+	if r == nil || r.generation == nil {
+		return true
+	}
+	select {
+	case <-r.generation.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func newPluginGeneration(plugin Plugin) *pluginGeneration {
+	return &pluginGeneration{plugin: plugin, done: make(chan struct{})}
+}
+
+func (g *pluginGeneration) acquire() bool {
+	if g == nil || g.plugin == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.retired {
+		return false
+	}
+	g.pending++
+	return true
+}
+
+func (g *pluginGeneration) release() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	g.pending--
+	if g.retired && g.pending == 0 {
+		close(g.done)
+	}
+	g.mu.Unlock()
+}
+
+func (g *pluginGeneration) retire() *Retirement {
+	if g == nil {
+		return nil
+	}
+	g.mu.Lock()
+	if !g.retired {
+		g.retired = true
+		if g.pending == 0 {
+			close(g.done)
+		}
+	}
+	g.mu.Unlock()
+	return &Retirement{generation: g}
+}
+
+type pluginInvocation struct {
+	plugin  Plugin
+	release func()
+}
+
+type queueItem struct {
+	ctx     context.Context
+	record  Record
+	plugins []pluginInvocation
+}
+
+type managerState uint8
+
+const (
+	managerStateNew managerState = iota
+	managerStateRunning
+	managerStateStopping
+	managerStateStopped
+)
+
+const defaultQueueCapacity = 512
+
+var ErrManagerStopped = errors.New("usage: manager stopped")
+
+// Manager maintains a bounded queue of usage records and delivers them to registered plugins.
+type Manager struct {
+	capacity int
+
+	mu       sync.Mutex
+	cond     *sync.Cond
+	queue    []queueItem
+	state    managerState
+	done     chan struct{}
+	stopping chan struct{}
+	slots    chan struct{}
 
 	pluginsMu    sync.RWMutex
 	plugins      []Plugin
-	namedPlugins map[string]Plugin
+	namedPlugins map[string]*pluginGeneration
 }
 
-// NewManager constructs a manager with a buffered queue.
-func NewManager(_ int) *Manager {
-	m := &Manager{}
+// NewManager constructs a manager with a bounded queue.
+func NewManager(capacity int) *Manager {
+	if capacity <= 0 {
+		capacity = defaultQueueCapacity
+	}
+	m := &Manager{capacity: capacity}
 	m.cond = sync.NewCond(&m.mu)
 	return m
 }
 
-// Start launches the background dispatcher. Calling Start multiple times is safe.
-func (m *Manager) Start(ctx context.Context) {
+// Start launches or restarts the background dispatcher. Calling Start while it
+// is already running is safe.
+func (m *Manager) Start(_ context.Context) {
 	if m == nil {
 		return
 	}
-	m.once.Do(
-		func() {
-			if ctx == nil {
-				ctx = context.Background()
-			}
-			var workerCtx context.Context
-			workerCtx, m.cancel = context.WithCancel(ctx)
-			m.done = make(chan struct{})
-			go func() {
-				defer close(m.done)
-				m.run(workerCtx)
-			}()
-		},
-	)
+	m.mu.Lock()
+	if m.state == managerStateRunning || m.state == managerStateStopping {
+		m.mu.Unlock()
+		return
+	}
+	m.queue = nil
+	m.done = make(chan struct{})
+	m.stopping = make(chan struct{})
+	m.slots = make(chan struct{}, m.capacity)
+	m.state = managerStateRunning
+	done := m.done
+	m.mu.Unlock()
+	go m.run(done)
 }
 
 // Stop stops the dispatcher and drains the queue.
 func (m *Manager) Stop() {
+	_ = m.StopContext(context.Background())
+}
+
+// StopContext stops the dispatcher and waits up to ctx for active callbacks.
+func (m *Manager) StopContext(ctx context.Context) error {
 	if m == nil {
-		return
+		return nil
 	}
-	var done <-chan struct{}
-	m.stopOnce.Do(
-		func() {
-			if m.cancel != nil {
-				m.cancel()
-			}
-			m.mu.Lock()
-			m.closed = true
-			done = m.done
-			m.mu.Unlock()
-			m.cond.Broadcast()
-		},
-	)
-	if done == nil {
-		m.mu.Lock()
-		done = m.done
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.Lock()
+	switch m.state {
+	case managerStateNew, managerStateStopped:
+		m.state = managerStateStopped
 		m.mu.Unlock()
+		return nil
+	case managerStateRunning:
+		m.state = managerStateStopping
+		close(m.stopping)
+		m.cond.Broadcast()
 	}
-	if done != nil {
-		<-done
+	done := m.done
+	m.mu.Unlock()
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -251,68 +530,168 @@ func (m *Manager) Register(plugin Plugin) {
 
 // RegisterNamed adds or replaces a plugin identified by name.
 func (m *Manager) RegisterNamed(name string, plugin Plugin) {
+	_ = m.RegisterNamedWithRetirement(name, plugin)
+}
+
+// RegisterNamedWithRetirement adds or replaces a named plugin and returns the
+// retirement for the replaced generation. Wait outside a plugin callback stack
+// before releasing generation-owned resources.
+func (m *Manager) RegisterNamedWithRetirement(name string, plugin Plugin) *Retirement {
 	if m == nil || name == "" || plugin == nil {
-		return
+		return nil
 	}
 	m.pluginsMu.Lock()
 	if m.namedPlugins == nil {
-		m.namedPlugins = make(map[string]Plugin)
+		m.namedPlugins = make(map[string]*pluginGeneration)
 	}
-	m.namedPlugins[name] = plugin
+	previous := m.namedPlugins[name]
+	m.namedPlugins[name] = newPluginGeneration(plugin)
+	var retirement *Retirement
+	if previous != nil {
+		retirement = previous.retire()
+	}
 	m.pluginsMu.Unlock()
+	return retirement
 }
 
-// Publish enqueues a usage record for processing. If no plugin is registered
-// the record will be discarded downstream.
-func (m *Manager) Publish(ctx context.Context, record Record) {
+// UnregisterNamed detaches a named plugin without affecting records that
+// already captured its generation. Wait for the returned retirement outside
+// a plugin callback stack before releasing generation-owned resources.
+func (m *Manager) UnregisterNamed(name string) *Retirement {
+	if m == nil || name == "" {
+		return nil
+	}
+	m.pluginsMu.Lock()
+	generation := m.namedPlugins[name]
+	delete(m.namedPlugins, name)
+	var retirement *Retirement
+	if generation != nil {
+		retirement = generation.retire()
+	}
+	m.pluginsMu.Unlock()
+	return retirement
+}
+
+// Publish enqueues a usage record for processing. It applies backpressure when
+// the configured queue capacity is reached and returns when ctx is canceled.
+func (m *Manager) Publish(ctx context.Context, record Record) error {
 	if m == nil {
-		return
+		return ErrManagerStopped
 	}
-	// ensure worker is running even if Start was not called explicitly
-	m.Start(context.Background())
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	m.mu.Lock()
-	if m.closed {
+	if m.state == managerStateNew {
 		m.mu.Unlock()
-		return
+		m.Start(context.Background())
+		m.mu.Lock()
 	}
-	m.queue = append(m.queue, queueItem{ctx: ctx, record: record})
+	if m.state != managerStateRunning {
+		m.mu.Unlock()
+		return ErrManagerStopped
+	}
+	slots := m.slots
+	stopping := m.stopping
 	m.mu.Unlock()
+
+	item := queueItem{
+		ctx:     ctx,
+		record:  record,
+		plugins: m.registeredPlugins(),
+	}
+	select {
+	case slots <- struct{}{}:
+	case <-stopping:
+		releaseInvocations(item.plugins)
+		return ErrManagerStopped
+	case <-ctx.Done():
+		releaseInvocations(item.plugins)
+		return ctx.Err()
+	}
+
+	m.mu.Lock()
+	if m.state != managerStateRunning || m.slots != slots {
+		m.mu.Unlock()
+		<-slots
+		releaseInvocations(item.plugins)
+		return ErrManagerStopped
+	}
+	m.queue = append(m.queue, item)
 	m.cond.Signal()
+	m.mu.Unlock()
+	return nil
 }
 
-func (m *Manager) run(_ context.Context) {
+func (m *Manager) run(done chan struct{}) {
+	defer close(done)
 	for {
 		m.mu.Lock()
-		for !m.closed && len(m.queue) == 0 {
+		for m.state == managerStateRunning && len(m.queue) == 0 {
 			m.cond.Wait()
 		}
-		if len(m.queue) == 0 && m.closed {
+		if len(m.queue) == 0 && m.state == managerStateStopping {
+			m.state = managerStateStopped
 			m.mu.Unlock()
 			return
 		}
+		if len(m.queue) == 0 {
+			m.mu.Unlock()
+			continue
+		}
 		item := m.queue[0]
+		m.queue[0] = queueItem{}
 		m.queue = m.queue[1:]
+		slots := m.slots
 		m.mu.Unlock()
+		<-slots
 		m.dispatch(item)
 	}
 }
 
-func (m *Manager) dispatch(item queueItem) {
+func (m *Manager) registeredPlugins() []pluginInvocation {
 	m.pluginsMu.RLock()
-	plugins := make([]Plugin, len(m.plugins), len(m.plugins)+len(m.namedPlugins))
-	copy(plugins, m.plugins)
-	for _, plugin := range m.namedPlugins {
-		plugins = append(plugins, plugin)
+	plugins := make([]pluginInvocation, 0, len(m.plugins)+len(m.namedPlugins))
+	for _, plugin := range m.plugins {
+		if plugin != nil {
+			plugins = append(plugins, pluginInvocation{plugin: plugin})
+		}
 	}
-	m.pluginsMu.RUnlock()
-	if len(plugins) == 0 {
-		return
-	}
-	for _, plugin := range plugins {
-		if plugin == nil {
+	for _, generation := range m.namedPlugins {
+		if generation == nil || !generation.acquire() {
 			continue
 		}
-		safeInvoke(plugin, item.ctx, item.record)
+		captured := generation
+		plugins = append(
+			plugins,
+			pluginInvocation{plugin: captured.plugin, release: captured.release},
+		)
+	}
+	m.pluginsMu.RUnlock()
+	return plugins
+}
+
+func (m *Manager) dispatch(item queueItem) {
+	for _, invocation := range item.plugins {
+		invokePlugin(invocation, item.ctx, item.record)
+	}
+}
+
+func invokePlugin(invocation pluginInvocation, ctx context.Context, record Record) {
+	if invocation.release != nil {
+		defer invocation.release()
+	}
+	if invocation.plugin != nil {
+		safeInvoke(invocation.plugin, ctx, record)
+	}
+}
+
+func releaseInvocations(invocations []pluginInvocation) {
+	for _, invocation := range invocations {
+		if invocation.release != nil {
+			invocation.release()
+		}
 	}
 }
 
@@ -334,13 +713,40 @@ func DefaultManager() *Manager { return defaultManager }
 func RegisterPlugin(plugin Plugin) { DefaultManager().Register(plugin) }
 
 // RegisterNamedPlugin registers or replaces a named plugin on the default manager.
-func RegisterNamedPlugin(name string, plugin Plugin) { DefaultManager().RegisterNamed(name, plugin) }
+func RegisterNamedPlugin(name string, plugin Plugin) {
+	DefaultManager().RegisterNamed(name, plugin)
+}
 
-// PublishRecord publishes a record using the default manager.
-func PublishRecord(ctx context.Context, record Record) { DefaultManager().Publish(ctx, record) }
+// RegisterNamedPluginWithRetirement registers or replaces a named plugin and
+// returns the retirement for the replaced generation.
+func RegisterNamedPluginWithRetirement(name string, plugin Plugin) *Retirement {
+	return DefaultManager().RegisterNamedWithRetirement(name, plugin)
+}
+
+// UnregisterNamedPlugin removes a named plugin from the default manager.
+func UnregisterNamedPlugin(name string) *Retirement {
+	return DefaultManager().UnregisterNamed(name)
+}
+
+// PublishRecord publishes a record using the manager assigned to ctx, or the
+// default manager when no instance manager is present.
+func PublishRecord(ctx context.Context, record Record) error {
+	manager := ManagerFromContext(ctx)
+	if manager == nil {
+		manager = DefaultManager()
+	}
+	if err := manager.Publish(ctx, record); err != nil {
+		log.WithError(err).Warn("usage: record was not queued")
+		return err
+	}
+	return nil
+}
 
 // StartDefault starts the default manager's dispatcher.
 func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
 func StopDefault() { DefaultManager().Stop() }
+
+// StopDefaultContext stops the default manager and waits up to ctx.
+func StopDefaultContext(ctx context.Context) error { return DefaultManager().StopContext(ctx) }

@@ -16,13 +16,18 @@ const (
 	maxEventsPageSize     = 500
 )
 
+type usageEventResponse struct {
+	usage.FlatDetail
+	APIKeyAlias string `json:"api_key_alias"`
+}
+
 // eventsResponse is the paginated response for GET /usage/events.
 type eventsResponse struct {
-	Events     []usage.FlatDetail `json:"events"`
-	Total      int                `json:"total"`
-	Page       int                `json:"page"`
-	PageSize   int                `json:"page_size"`
-	TotalPages int                `json:"total_pages"`
+	Events     []usageEventResponse `json:"events"`
+	Total      int                  `json:"total"`
+	Page       int                  `json:"page"`
+	PageSize   int                  `json:"page_size"`
+	TotalPages int                  `json:"total_pages"`
 }
 
 // GetUsageEvents returns paginated usage event details.
@@ -33,7 +38,7 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	if h.usagePersister == nil {
 		c.JSON(
 			http.StatusOK, eventsResponse{
-				Events:   []usage.FlatDetail{},
+				Events:   []usageEventResponse{},
 				Page:     1,
 				PageSize: defaultEventsPageSize,
 			},
@@ -68,11 +73,12 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	}
 
 	filters := usage.EventFilters{
-		Model:  c.Query("model"),
-		Source: c.Query("source"),
-		APIKey: c.Query("api_key"),
-		Status: c.Query("status"),
-		Search: c.Query("search"),
+		Model:   c.Query("model"),
+		Source:  c.Query("source"),
+		APIKey:  c.Query("api_key"),
+		APIKeys: c.QueryArray("api_key"),
+		Status:  c.Query("status"),
+		Search:  c.Query("search"),
 	}
 
 	events, total, err := h.usagePersister.QueryEvents(
@@ -86,13 +92,13 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	if events == nil {
 		events = []usage.FlatDetail{}
 	}
-	events = maskUsageEventAPIKeys(events)
+	maskedEvents := maskUsageEventAPIKeys(events, h.apiKeyAliasesSnapshot())
 
 	totalPages := (total + pageSize - 1) / pageSize
 
 	c.JSON(
 		http.StatusOK, eventsResponse{
-			Events:     events,
+			Events:     maskedEvents,
 			Total:      total,
 			Page:       page,
 			PageSize:   pageSize,
@@ -101,13 +107,15 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	)
 }
 
-func maskUsageEventAPIKeys(events []usage.FlatDetail) []usage.FlatDetail {
-	out := make([]usage.FlatDetail, len(events))
-	copy(out, events)
-	for i := range out {
-		if out[i].APIKey != "" {
-			out[i].APIKey = util.HideAPIKey(out[i].APIKey)
+func maskUsageEventAPIKeys(events []usage.FlatDetail, aliases map[string]string) []usageEventResponse {
+	out := make([]usageEventResponse, len(events))
+	for i := range events {
+		out[i].FlatDetail = events[i]
+		if out[i].APIKey == "" {
+			continue
 		}
+		out[i].APIKeyAlias = aliases[out[i].APIKey]
+		out[i].APIKey = util.HideAPIKey(out[i].APIKey)
 	}
 	return out
 }

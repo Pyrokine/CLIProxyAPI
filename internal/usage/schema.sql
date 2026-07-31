@@ -1,4 +1,4 @@
--- Usage DB schema v3
+-- Usage DB schema v4
 -- All *_ns timestamps are UTC Unix nanoseconds.
 -- cost_micro = USD * 1e6 (micro-dollars).
 -- IF NOT EXISTS lets the same script run idempotently on every startup.
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS meta
 ) WITHOUT ROWID;
 
 INSERT
-OR IGNORE INTO meta(key, value) VALUES ('schema_version', '3');
+OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4');
 
 CREATE TABLE IF NOT EXISTS dim_model
 (
@@ -546,3 +546,11 @@ CREATE INDEX IF NOT EXISTS idx_day_bucket_model_ts_ns ON day_bucket(model_id, bu
 CREATE INDEX IF NOT EXISTS idx_day_bucket_cred_ts_ns ON day_bucket(credential_id, bucket_ts_ns);
 CREATE INDEX IF NOT EXISTS idx_day_bucket_apikey_ts_ns ON day_bucket(api_key_id, bucket_ts_ns);
 CREATE INDEX IF NOT EXISTS idx_day_bucket_prov_ts_ns ON day_bucket(provider_id, bucket_ts_ns);
+
+-- Marks UTC days whose hour buckets changed after their day bucket may already
+-- have been materialized. The marker is written and cleared transactionally so
+-- late events survive restarts and are eventually included in long-range reads.
+CREATE TABLE IF NOT EXISTS dirty_day
+(
+    day_ts_ns INTEGER PRIMARY KEY
+) WITHOUT ROWID;

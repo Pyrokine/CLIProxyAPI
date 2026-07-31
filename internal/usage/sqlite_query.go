@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -76,41 +78,152 @@ type credentialPair struct {
 // it resolves to "this dimension is NULL" without touching the dim table,
 // so by_api_key's (none) bucket can be selected/excluded as a real filter
 // value.
-func resolveNamesToIDs(ctx context.Context, db *sql.DB, table, raw string) (resolvedFilter, error) {
+func resolveNamesToIDs(ctx context.Context, db dbQueryer, table, raw string) (resolvedFilter, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return resolvedFilter{}, nil
 	}
 	rf := resolvedFilter{active: true}
-	seen := make(map[string]struct{})
-	for _, part := range strings.Split(raw, ",") {
-		name := strings.TrimSpace(part)
+	seenNames := make(map[string]struct{})
+	seenIDs := make(map[int64]struct{})
+	resolveName := func(name string, ids []int64, resolved bool) error {
+		name = strings.TrimSpace(name)
 		if name == "" {
-			continue
+			return nil
 		}
-		if _, dup := seen[name]; dup {
-			continue
+		if _, dup := seenNames[name]; dup {
+			return nil
 		}
-		seen[name] = struct{}{}
+		seenNames[name] = struct{}{}
 
 		if name == noneSentinel {
 			rf.includesNone = true
 			rf.matchedAny = true
-			continue
 		}
+		if !resolved {
+			var err error
+			ids, err = resolveDimensionNameIDs(ctx, db, table, name)
+			if err != nil {
+				return err
+			}
+		}
+		for _, id := range ids {
+			if _, dup := seenIDs[id]; dup {
+				continue
+			}
+			seenIDs[id] = struct{}{}
+			rf.ids = append(rf.ids, id)
+			rf.matchedAny = true
+		}
+		return nil
+	}
 
-		var id int64
-		err := db.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE name = ?", name).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
+	wholeIDs, err := resolveDimensionNameIDs(ctx, db, table, raw)
+	if err != nil {
+		return resolvedFilter{}, err
+	}
+	if raw == noneSentinel || len(wholeIDs) > 0 {
+		if err = resolveName(raw, wholeIDs, true); err != nil {
+			return resolvedFilter{}, err
 		}
-		if err != nil {
-			return resolvedFilter{}, fmt.Errorf("resolve %s.name=%q: %w", table, name, err)
+		return rf, nil
+	}
+
+	for _, part := range strings.Split(raw, ",") {
+		if err = resolveName(part, nil, false); err != nil {
+			return resolvedFilter{}, err
 		}
-		rf.ids = append(rf.ids, id)
-		rf.matchedAny = true
 	}
 	return rf, nil
+}
+
+func resolveFilterNamesToIDs(
+	ctx context.Context,
+	db dbQueryer,
+	table string,
+	raw string,
+	values []string,
+) (resolvedFilter, error) {
+	names := make([]string, 0, len(values))
+	for _, value := range values {
+		if name := strings.TrimSpace(value); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return resolveNamesToIDs(ctx, db, table, raw)
+	}
+	if len(names) == 1 {
+		if strings.TrimSpace(raw) == "" {
+			raw = names[0]
+		}
+		return resolveNamesToIDs(ctx, db, table, raw)
+	}
+
+	rf := resolvedFilter{active: true}
+	seenNames := make(map[string]struct{})
+	seenIDs := make(map[int64]struct{})
+	for _, name := range names {
+		if _, duplicate := seenNames[name]; duplicate {
+			continue
+		}
+		seenNames[name] = struct{}{}
+
+		if name == noneSentinel {
+			rf.includesNone = true
+			rf.matchedAny = true
+		}
+		ids, err := resolveDimensionNameIDs(ctx, db, table, name)
+		if err != nil {
+			return resolvedFilter{}, err
+		}
+		for _, id := range ids {
+			if _, duplicate := seenIDs[id]; duplicate {
+				continue
+			}
+			seenIDs[id] = struct{}{}
+			rf.ids = append(rf.ids, id)
+			rf.matchedAny = true
+		}
+	}
+	return rf, nil
+}
+
+func resolveDimensionNameIDs(ctx context.Context, db dbQueryer, table, name string) ([]int64, error) {
+	if table != "dim_api_key" {
+		var id int64
+		err := db.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE name = ?", name).Scan(&id)
+		if err == nil {
+			return []int64{id}, nil
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("resolve %s.name=%q: %w", table, name, err)
+	}
+
+	rows, err := db.QueryContext(ctx, "SELECT id, name FROM dim_api_key ORDER BY id")
+	if err != nil {
+		return nil, fmt.Errorf("resolve api key %q: %w", name, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	ids := []int64{}
+	for rows.Next() {
+		var candidateID int64
+		var candidateName string
+		if err = rows.Scan(&candidateID, &candidateName); err != nil {
+			return nil, fmt.Errorf("resolve api key scan: %w", err)
+		}
+		trimmedCandidate := strings.TrimSpace(candidateName)
+		if trimmedCandidate == name || util.HideAPIKey(trimmedCandidate) == name {
+			ids = append(ids, candidateID)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("resolve api key rows: %w", err)
+	}
+	return ids, nil
 }
 
 // resolveCredentialFilter parses the credential filter string into a list of
@@ -124,7 +237,7 @@ func resolveNamesToIDs(ctx context.Context, db *sql.DB, table, raw string) (reso
 // silently — same fail-closed contract as resolveNamesToIDs: when a filter
 // is active but no token matched, the caller must short-circuit to empty
 // rather than degrade to "all rows".
-func resolveCredentialFilter(ctx context.Context, db *sql.DB, raw string) (resolvedCredentialFilter, error) {
+func resolveCredentialFilter(ctx context.Context, db dbQueryer, raw string) (resolvedCredentialFilter, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return resolvedCredentialFilter{}, nil
@@ -247,14 +360,56 @@ func credentialClause(credCol, provCol string, rf resolvedCredentialFilter) (str
 	return " AND (" + strings.Join(ors, " OR ") + ")", args
 }
 
-// floorToHour rounds t down to the start of its hour in UTC. Zero time is
-// returned unchanged so callers can pass time.Time{} as a "no lower bound"
-// sentinel through buildFilterClause without it drifting to 1970.
-func floorToHour(t time.Time) time.Time {
-	if t.IsZero() {
-		return t
+func unixNanoUTC(t time.Time) (int64, error) {
+	utc := t.UTC()
+	ns := utc.UnixNano()
+	if !time.Unix(0, ns).UTC().Equal(utc) {
+		return 0, fmt.Errorf("timestamp %s is outside the UnixNano range", utc.Format(time.RFC3339Nano))
 	}
-	return time.Unix(0, (t.UTC().UnixNano()/nsPerHour)*nsPerHour).UTC()
+	return ns, nil
+}
+
+func floorUnixNano(ns, grain int64) (int64, error) {
+	if grain <= 0 {
+		return 0, errors.New("usage: timestamp bucket grain must be positive")
+	}
+	remainder := ns % grain
+	if remainder == 0 {
+		return ns, nil
+	}
+	if remainder > 0 {
+		return ns - remainder, nil
+	}
+	adjustment := grain + remainder
+	if ns < math.MinInt64+adjustment {
+		return 0, errors.New("usage: timestamp bucket start underflows int64")
+	}
+	return ns - adjustment, nil
+}
+
+func unixNanoBucketStarts(t time.Time) (int64, int64, int64, error) {
+	tsNs, err := unixNanoUTC(t)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	hourNs, err := floorUnixNano(tsNs, nsPerHour)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("hour bucket: %w", err)
+	}
+	dayNs, err := floorUnixNano(tsNs, nsPerDay)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("day bucket: %w", err)
+	}
+	return tsNs, hourNs, dayNs, nil
+}
+
+func sqliteFloorBucketExpr(column string, grain int64) string {
+	return fmt.Sprintf(
+		"CASE WHEN %[1]s >= 0 THEN (%[1]s / %[2]d) * %[2]d "+
+			"ELSE (-1 - ((-1 - %[1]s) / %[2]d)) * %[2]d END",
+		column,
+		grain,
+	)
 }
 
 // buildFilterClause assembles the full " WHERE ts ≥ ? AND ts ≤ ? AND col IN (...) ..."
@@ -314,21 +469,41 @@ func (s *Store) Query(
 		return emptyQueryResult(), nil
 	}
 
+	fromRawNs, err := unixNanoUTC(from)
+	if err != nil {
+		return QueryResult{}, fmt.Errorf("usage: invalid query start: %w", err)
+	}
+	toRawNs, err := unixNanoUTC(to)
+	if err != nil {
+		return QueryResult{}, fmt.Errorf("usage: invalid query end: %w", err)
+	}
+
 	useDayBucket := to.Sub(from) > dayBucketThreshold
 	table := "hour_bucket"
 	if useDayBucket {
 		table = "day_bucket"
 	}
 
-	modelF, err := resolveNamesToIDs(ctx, s.db, "dim_model", filters.Model)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return QueryResult{}, fmt.Errorf("usage: begin summary transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	modelF, err := resolveNamesToIDs(ctx, tx, "dim_model", filters.Model)
 	if err != nil {
 		return QueryResult{}, err
 	}
-	credF, err := resolveCredentialFilter(ctx, s.db, filters.Source)
+	credF, err := resolveCredentialFilter(ctx, tx, filters.Source)
 	if err != nil {
 		return QueryResult{}, err
 	}
-	apiKeyF, err := resolveNamesToIDs(ctx, s.db, "dim_api_key", filters.APIKey)
+	apiKeyF, err := resolveFilterNamesToIDs(ctx, tx, "dim_api_key", filters.APIKey, filters.APIKeys)
 	if err != nil {
 		return QueryResult{}, err
 	}
@@ -352,43 +527,49 @@ func (s *Store) Query(
 	if useDayBucket {
 		grainNs = nsPerDay
 	}
-	fromNs := (from.UTC().UnixNano() / grainNs) * grainNs
-	toNs := (to.UTC().UnixNano() / grainNs) * grainNs
+	fromNs, err := floorUnixNano(fromRawNs, grainNs)
+	if err != nil {
+		return QueryResult{}, fmt.Errorf("usage: bucket query start: %w", err)
+	}
+	toNs, err := floorUnixNano(toRawNs, grainNs)
+	if err != nil {
+		return QueryResult{}, fmt.Errorf("usage: bucket query end: %w", err)
+	}
 
 	timeExpr := "bucket_ts_ns"
 	if !useDayBucket && granularity == "daily" {
-		timeExpr = fmt.Sprintf("(bucket_ts_ns / %d) * %d", nsPerDay, nsPerDay)
+		timeExpr = sqliteFloorBucketExpr("bucket_ts_ns", nsPerDay)
 	}
 
 	result := emptyQueryResult()
-	if err := s.queryTotals(ctx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
+	if err := s.queryTotals(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
 		return QueryResult{}, err
 	}
-	if err := s.queryByModel(ctx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
+	if err := s.queryByModel(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
 		return QueryResult{}, err
 	}
-	if err := s.queryByCredential(ctx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
+	if err := s.queryByCredential(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
 		return QueryResult{}, err
 	}
-	if err := s.queryByAPIKey(ctx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
+	if err := s.queryByAPIKey(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, &result); err != nil {
 		return QueryResult{}, err
 	}
-	if err := s.queryTimeSeries(ctx, table, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result); err != nil {
+	if err := s.queryTimeSeries(ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result); err != nil {
 		return QueryResult{}, err
 	}
 	if includeGroups {
 		if err := s.queryTimeSeriesByModel(
-			ctx, table, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result,
+			ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result,
 		); err != nil {
 			return QueryResult{}, err
 		}
 		if err := s.queryTimeSeriesByCredential(
-			ctx, table, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result,
+			ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result,
 		); err != nil {
 			return QueryResult{}, err
 		}
 		if err := s.queryTimeSeriesByAPIKey(
-			ctx, table, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result,
+			ctx, tx, table, fromNs, toNs, modelF, credF, apiKeyF, timeExpr, &result,
 		); err != nil {
 			return QueryResult{}, err
 		}
@@ -402,38 +583,57 @@ func (s *Store) Query(
 	if useDayBucket || granularity == "daily" {
 		stepNs = nsPerDay
 	}
-	padTimeSeries(&result, fromNs, toNs, stepNs)
+	if err := padTimeSeries(&result, fromNs, toNs, stepNs); err != nil {
+		return QueryResult{}, err
+	}
 
+	if err := tx.Commit(); err != nil {
+		return QueryResult{}, fmt.Errorf("usage: commit summary transaction: %w", err)
+	}
+	committed = true
 	return result, nil
 }
 
 // padTimeSeries 把 from/to 内的所有桶补齐为零值;TimeSeries 与所有
 // TimeSeriesBy* map 都会被处理。零值桶用 timePoint{Time: bucket-start}
 // 填充,前端依据 Time 字段对齐 X 轴。
-func padTimeSeries(result *QueryResult, fromNs, toNs, stepNs int64) {
-	if result == nil || stepNs <= 0 || fromNs > toNs {
-		return
+func padTimeSeries(result *QueryResult, fromNs, toNs, stepNs int64) error {
+	if result == nil || fromNs > toNs {
+		return nil
 	}
-	fromNs = (fromNs / stepNs) * stepNs
-	toNs = (toNs / stepNs) * stepNs
+	if stepNs <= 0 {
+		return errors.New("usage: time-series step must be positive")
+	}
+	var err error
+	fromNs, err = floorUnixNano(fromNs, stepNs)
+	if err != nil {
+		return fmt.Errorf("usage: pad time-series start: %w", err)
+	}
+	toNs, err = floorUnixNano(toNs, stepNs)
+	if err != nil {
+		return fmt.Errorf("usage: pad time-series end: %w", err)
+	}
 
 	pad := func(series []timePoint) []timePoint {
 		existing := make(map[int64]timePoint, len(series))
 		for _, p := range series {
-			t, err := time.Parse(time.RFC3339, p.Time)
-			if err != nil {
+			t, parseErr := time.Parse(time.RFC3339, p.Time)
+			if parseErr != nil {
 				continue
 			}
 			existing[t.UTC().UnixNano()] = p
 		}
 		bucketCount := (toNs-fromNs)/stepNs + 1
 		out := make([]timePoint, 0, bucketCount)
-		for ts := fromNs; ts <= toNs; ts += stepNs {
+		for ts := fromNs; ; ts += stepNs {
 			if p, ok := existing[ts]; ok {
 				out = append(out, p)
-				continue
+			} else {
+				out = append(out, timePoint{Time: time.Unix(0, ts).UTC().Format(time.RFC3339)})
 			}
-			out = append(out, timePoint{Time: time.Unix(0, ts).UTC().Format(time.RFC3339)})
+			if ts >= toNs || ts > math.MaxInt64-stepNs {
+				break
+			}
 		}
 		return out
 	}
@@ -448,6 +648,7 @@ func padTimeSeries(result *QueryResult, fromNs, toNs, stepNs int64) {
 	for k, v := range result.TimeSeriesByAPIKey {
 		result.TimeSeriesByAPIKey[k] = pad(v)
 	}
+	return nil
 }
 
 // emptyQueryResult mimics summary.go's "make-all-maps" initialisation so the
@@ -493,6 +694,7 @@ func composeFilterSQL(
 
 func (s *Store) queryTotals(
 	ctx context.Context,
+	queryer dbQueryer,
 	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
@@ -508,7 +710,7 @@ func (s *Store) queryTotals(
 		"FROM " + table + " WHERE bucket_ts_ns >= ? AND bucket_ts_ns <= ?" + filterSQL
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
-	row := s.db.QueryRowContext(ctx, q, args...)
+	row := queryer.QueryRowContext(ctx, q, args...)
 
 	var totals summaryTotals
 	var costMicro int64
@@ -528,6 +730,7 @@ func (s *Store) queryTotals(
 
 func (s *Store) queryByModel(
 	ctx context.Context,
+	queryer dbQueryer,
 	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
@@ -544,7 +747,7 @@ func (s *Store) queryByModel(
 		" GROUP BY m.id, m.name"
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := queryer.QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("queryByModel: %w", err)
 	}
@@ -572,6 +775,7 @@ func (s *Store) queryByModel(
 
 func (s *Store) queryByCredential(
 	ctx context.Context,
+	queryer dbQueryer,
 	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
@@ -591,7 +795,7 @@ func (s *Store) queryByCredential(
 		" GROUP BY c.id, c.name, p.id, provider_name"
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := queryer.QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("queryByCredential: %w", err)
 	}
@@ -625,6 +829,7 @@ func credentialMapKey(provider, source string) string {
 
 func (s *Store) queryByAPIKey(
 	ctx context.Context,
+	queryer dbQueryer,
 	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
@@ -646,7 +851,7 @@ func (s *Store) queryByAPIKey(
 		" GROUP BY api_key_name"
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := queryer.QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("queryByAPIKey: %w", err)
 	}
@@ -681,6 +886,7 @@ func (s *Store) queryByAPIKey(
 
 func (s *Store) queryTimeSeries(
 	ctx context.Context,
+	queryer dbQueryer,
 	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
@@ -697,7 +903,7 @@ func (s *Store) queryTimeSeries(
 		" GROUP BY ts ORDER BY ts"
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := queryer.QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("queryTimeSeries: %w", err)
 	}
@@ -725,6 +931,7 @@ func (s *Store) queryTimeSeries(
 
 func (s *Store) queryTimeSeriesByModel(
 	ctx context.Context,
+	queryer dbQueryer,
 	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
@@ -743,7 +950,7 @@ func (s *Store) queryTimeSeriesByModel(
 		" GROUP BY m.id, m.name, ts ORDER BY m.name, ts"
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := queryer.QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("queryTimeSeriesByModel: %w", err)
 	}
@@ -772,6 +979,7 @@ func (s *Store) queryTimeSeriesByModel(
 
 func (s *Store) queryTimeSeriesByCredential(
 	ctx context.Context,
+	queryer dbQueryer,
 	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
@@ -799,7 +1007,7 @@ func (s *Store) queryTimeSeriesByCredential(
 		" GROUP BY c.id, c.name, p.id, provider_name, ts ORDER BY c.name, provider_name, ts"
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := queryer.QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("queryTimeSeriesByCredential: %w", err)
 	}
@@ -829,6 +1037,7 @@ func (s *Store) queryTimeSeriesByCredential(
 
 func (s *Store) queryTimeSeriesByAPIKey(
 	ctx context.Context,
+	queryer dbQueryer,
 	table string,
 	fromNs, toNs int64,
 	modelF resolvedFilter, credF resolvedCredentialFilter, apiKeyF resolvedFilter,
@@ -849,7 +1058,7 @@ func (s *Store) queryTimeSeriesByAPIKey(
 		" GROUP BY api_key_name, ts ORDER BY api_key_name, ts"
 
 	args := append([]any{fromNs, toNs}, filterArgs...)
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := queryer.QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("queryTimeSeriesByAPIKey: %w", err)
 	}
@@ -903,7 +1112,7 @@ func (s *Store) QueryEvents(
 	if err != nil {
 		return nil, 0, err
 	}
-	apiKeyF, err := resolveNamesToIDs(ctx, s.db, "dim_api_key", filters.APIKey)
+	apiKeyF, err := resolveFilterNamesToIDs(ctx, s.db, "dim_api_key", filters.APIKey, filters.APIKeys)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1033,6 +1242,158 @@ func (s *Store) QueryEvents(
 	return out, total, nil
 }
 
+// QueryBackupEvents returns one transactionally consistent, unpaginated event
+// set for an encrypted backup. Zero from/to values leave that bound open.
+func (s *Store) QueryBackupEvents(
+	ctx context.Context,
+	from, to time.Time,
+	filters EventFilters,
+) ([]FlatDetail, error) {
+	return s.queryBackupEvents(ctx, from, to, filters, MaxPortableBackupPlaintextBytes)
+}
+
+func (s *Store) queryBackupEvents(
+	ctx context.Context,
+	from, to time.Time,
+	filters EventFilters,
+	maxPlaintextBytes int64,
+) ([]FlatDetail, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("usage: query backup events on nil store")
+	}
+	if maxPlaintextBytes <= 0 || maxPlaintextBytes > MaxPortableBackupPlaintextBytes {
+		maxPlaintextBytes = MaxPortableBackupPlaintextBytes
+	}
+	if !from.IsZero() {
+		if _, err := unixNanoUTC(from); err != nil {
+			return nil, fmt.Errorf("usage: invalid backup start: %w", err)
+		}
+	}
+	if !to.IsZero() {
+		if _, err := unixNanoUTC(to); err != nil {
+			return nil, fmt.Errorf("usage: invalid backup end: %w", err)
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("usage: begin backup transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	modelF, err := resolveNamesToIDs(ctx, tx, "dim_model", filters.Model)
+	if err != nil {
+		return nil, fmt.Errorf("usage: resolve backup model filter: %w", err)
+	}
+	credF, err := resolveCredentialFilter(ctx, tx, filters.Source)
+	if err != nil {
+		return nil, fmt.Errorf("usage: resolve backup credential filter: %w", err)
+	}
+	apiKeyF, err := resolveFilterNamesToIDs(ctx, tx, "dim_api_key", filters.APIKey, filters.APIKeys)
+	if err != nil {
+		return nil, fmt.Errorf("usage: resolve backup API key filter: %w", err)
+	}
+	if (modelF.active && !modelF.matchedAny) ||
+		(credF.active && !credF.matchedAny) ||
+		(apiKeyF.active && !apiKeyF.matchedAny) {
+		if err = tx.Commit(); err != nil {
+			return nil, fmt.Errorf("usage: commit empty backup transaction: %w", err)
+		}
+		committed = true
+		return []FlatDetail{}, nil
+	}
+
+	whereSQL, args := buildFilterClause(from, to, "ts_ns", "", modelF, apiKeyF, credF)
+	query := "SELECT events.ts_ns, " +
+		"(SELECT name FROM dim_model      WHERE id = events.model_id), " +
+		"(SELECT name FROM dim_source     WHERE id = events.source_id), " +
+		"(SELECT name FROM dim_auth_index WHERE id = events.auth_index_id), " +
+		"(SELECT name FROM dim_api_key    WHERE id = events.api_key_id), " +
+		"(SELECT name FROM dim_provider   WHERE id = events.provider_id), " +
+		"events.input_tokens, events.output_tokens, events.reasoning_tokens, events.cached_tokens, events.total_tokens, " +
+		"events.cost_micro, events.failed, events.metadata " +
+		"FROM events" + whereSQL + " ORDER BY events.ts_ns, events.id"
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("usage: query backup events: %w", err)
+	}
+
+	out := make([]FlatDetail, 0)
+	estimatedPlaintextBytes := int64(512)
+	seenAPIKeys := make(map[string]struct{})
+	for rows.Next() {
+		var detail FlatDetail
+		var tsNs int64
+		var modelName, sourceName, authIndexName, apiKeyName, providerName sql.NullString
+		var metadata sql.NullString
+		var failed int64
+		if err = rows.Scan(
+			&tsNs,
+			&modelName,
+			&sourceName,
+			&authIndexName,
+			&apiKeyName,
+			&providerName,
+			&detail.Tokens.InputTokens,
+			&detail.Tokens.OutputTokens,
+			&detail.Tokens.ReasoningTokens,
+			&detail.Tokens.CachedTokens,
+			&detail.Tokens.TotalTokens,
+			&detail.costMicro,
+			&failed,
+			&metadata,
+		); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("usage: scan backup event: %w", err)
+		}
+		detail.Timestamp = time.Unix(0, tsNs).UTC()
+		detail.Model = modelName.String
+		detail.Source = sourceName.String
+		detail.AuthIndex = authIndexName.String
+		detail.APIKey = apiKeyName.String
+		detail.Provider = providerName.String
+		detail.costTrusted = true
+		detail.Failed = failed != 0
+		if err = decodeEventMetadata(&detail, metadata); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		_, seenAPIKey := seenAPIKeys[detail.APIKey]
+		includeAPIKey := detail.APIKey != "" && !seenAPIKey
+		estimatedDetailBytes, errEstimate := estimateUsageBackupDetailBytes(detail, includeAPIKey)
+		if errEstimate != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("usage: estimate backup event size: %w", errEstimate)
+		}
+		if estimatedPlaintextBytes > maxPlaintextBytes-estimatedDetailBytes {
+			_ = rows.Close()
+			return nil, ErrPortableBackupTooLarge
+		}
+		estimatedPlaintextBytes += estimatedDetailBytes
+		if includeAPIKey {
+			seenAPIKeys[detail.APIKey] = struct{}{}
+		}
+		out = append(out, detail)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("usage: iterate backup events: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return nil, fmt.Errorf("usage: close backup event rows: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, fmt.Errorf("usage: commit backup transaction: %w", err)
+	}
+	committed = true
+	return out, nil
+}
+
 // StartRollup launches the day-bucket rollup goroutine and returns a stop
 // function. The first catch-up pass still runs synchronously before this
 // function returns, but it now resumes from meta.day_bucket_rollup_watermark_ns
@@ -1048,6 +1409,9 @@ func (s *Store) StartRollup(ctx context.Context) func() {
 	}
 	if err := s.rollupRecentDays(ctx); err != nil {
 		log.Errorf("usage: initial recent day rollup failed: %v", err)
+	}
+	if err := s.rollupDirtyDays(ctx); err != nil {
+		log.Errorf("usage: initial dirty day rollup failed: %v", err)
 	}
 
 	stopCh := make(chan struct{})
@@ -1071,6 +1435,9 @@ func (s *Store) StartRollup(ctx context.Context) func() {
 				if err := s.rollupPendingDays(ctx); err != nil {
 					log.Errorf("usage: rollup pending days: %v", err)
 				}
+				if err := s.rollupDirtyDays(ctx); err != nil {
+					log.Errorf("usage: rollup dirty days: %v", err)
+				}
 			}
 		}
 	}()
@@ -1091,6 +1458,35 @@ func (s *Store) rollupRecentDays(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) rollupDirtyDays(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, "SELECT day_ts_ns FROM dirty_day ORDER BY day_ts_ns")
+	if err != nil {
+		return fmt.Errorf("query dirty days: %w", err)
+	}
+	var days []int64
+	for rows.Next() {
+		var dayNs int64
+		if err := rows.Scan(&dayNs); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan dirty day: %w", err)
+		}
+		days = append(days, dayNs)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate dirty days: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close dirty days: %w", err)
+	}
+	for _, dayNs := range days {
+		if err := s.RollupDay(ctx, dayNs); err != nil {
+			return fmt.Errorf("rollup dirty day %s: %w", time.Unix(0, dayNs).UTC().Format("2006-01-02"), err)
+		}
+	}
+	return nil
+}
+
 // rollupPendingDays catches day_bucket up to the newest hour_bucket day using a
 // persisted watermark in meta, so restarts only process unseen closed days.
 func (s *Store) rollupPendingDays(ctx context.Context) error {
@@ -1105,18 +1501,15 @@ func (s *Store) rollupPendingDays(ctx context.Context) error {
 	if newestDayNs > latestClosedDayNs {
 		newestDayNs = latestClosedDayNs
 	}
-	if newestDayNs <= 0 {
-		return nil
-	}
-	watermarkNs, err := s.getDayRollupWatermark(ctx)
+	watermarkNs, hasWatermark, err := s.getDayRollupWatermark(ctx)
 	if err != nil {
 		return err
 	}
-	startDayNs, err := s.nextPendingRollupDay(ctx, watermarkNs)
+	startDayNs, hasStartDay, err := s.nextPendingRollupDay(ctx, watermarkNs, hasWatermark)
 	if err != nil {
 		return err
 	}
-	if startDayNs == 0 || startDayNs > newestDayNs {
+	if !hasStartDay || startDayNs > newestDayNs {
 		return nil
 	}
 	if err := s.rollupDayRange(ctx, startDayNs, newestDayNs); err != nil {
@@ -1126,57 +1519,64 @@ func (s *Store) rollupPendingDays(ctx context.Context) error {
 }
 
 func (s *Store) rollupImportedDays(ctx context.Context, earliestDayNs, latestDayNs int64) error {
-	if earliestDayNs == 0 || latestDayNs == 0 || earliestDayNs > latestDayNs {
+	if earliestDayNs > latestDayNs {
 		return nil
 	}
 	return s.rollupDayRange(ctx, earliestDayNs, latestDayNs)
 }
 
-func (s *Store) nextPendingRollupDay(ctx context.Context, watermarkNs int64) (int64, error) {
-	if watermarkNs == 0 {
-		startDayNs, err := s.earliestHourBucketDay(ctx)
+func (s *Store) nextPendingRollupDay(
+	ctx context.Context,
+	watermarkNs int64,
+	hasWatermark bool,
+) (int64, bool, error) {
+	if !hasWatermark {
+		startDayNs, hasData, err := s.earliestHourBucketDay(ctx)
 		if err != nil {
-			return 0, err
+			return 0, false, err
 		}
-		if startDayNs == 0 {
-			return 0, nil
-		}
-		return startDayNs, nil
+		return startDayNs, hasData, nil
 	}
-	return watermarkNs + nsPerDay, nil
+	if watermarkNs > math.MaxInt64-nsPerDay {
+		return 0, false, errors.New("usage: day rollup watermark overflows int64")
+	}
+	return watermarkNs + nsPerDay, true, nil
 }
 
 func (s *Store) rollupDayRange(ctx context.Context, startDayNs, endDayNs int64) error {
-	for dayNs := startDayNs; dayNs <= endDayNs; dayNs += nsPerDay {
+	if startDayNs > endDayNs {
+		return nil
+	}
+	for dayNs := startDayNs; ; {
 		if err := s.RollupDay(ctx, dayNs); err != nil {
 			return fmt.Errorf("rollup day %s: %w", time.Unix(0, dayNs).UTC().Format("2006-01-02"), err)
 		}
+		if dayNs >= endDayNs {
+			return nil
+		}
+		if dayNs > math.MaxInt64-nsPerDay {
+			return errors.New("usage: day rollup range overflows int64")
+		}
+		dayNs += nsPerDay
 	}
-	return nil
 }
 
-func (s *Store) earliestHourBucketDay(ctx context.Context) (int64, error) {
+func (s *Store) earliestHourBucketDay(ctx context.Context) (int64, bool, error) {
 	var dayNs sql.NullInt64
-	if err := s.db.QueryRowContext(
-		ctx,
-		"SELECT MIN((bucket_ts_ns / ?) * ?) FROM hour_bucket",
-		nsPerDay, nsPerDay,
-	).Scan(&dayNs); err != nil {
-		return 0, fmt.Errorf("query earliest day: %w", err)
+	query := "SELECT MIN(" + sqliteFloorBucketExpr("bucket_ts_ns", nsPerDay) + ") FROM hour_bucket"
+	if err := s.db.QueryRowContext(ctx, query).Scan(&dayNs); err != nil {
+		return 0, false, fmt.Errorf("query earliest day: %w", err)
 	}
 	if !dayNs.Valid {
-		return 0, nil
+		return 0, false, nil
 	}
-	return dayNs.Int64, nil
+	return dayNs.Int64, true, nil
 }
 
 func (s *Store) latestHourBucketDay(ctx context.Context) (int64, bool, error) {
 	var dayNs sql.NullInt64
-	if err := s.db.QueryRowContext(
-		ctx,
-		"SELECT MAX((bucket_ts_ns / ?) * ?) FROM hour_bucket",
-		nsPerDay, nsPerDay,
-	).Scan(&dayNs); err != nil {
+	query := "SELECT MAX(" + sqliteFloorBucketExpr("bucket_ts_ns", nsPerDay) + ") FROM hour_bucket"
+	if err := s.db.QueryRowContext(ctx, query).Scan(&dayNs); err != nil {
 		return 0, false, fmt.Errorf("query latest day: %w", err)
 	}
 	if !dayNs.Valid {
@@ -1185,7 +1585,7 @@ func (s *Store) latestHourBucketDay(ctx context.Context) (int64, bool, error) {
 	return dayNs.Int64, true, nil
 }
 
-func (s *Store) getDayRollupWatermark(ctx context.Context) (int64, error) {
+func (s *Store) getDayRollupWatermark(ctx context.Context) (int64, bool, error) {
 	var raw string
 	err := s.db.QueryRowContext(
 		ctx,
@@ -1193,20 +1593,25 @@ func (s *Store) getDayRollupWatermark(ctx context.Context) (int64, error) {
 		dayRollupWatermarkKey,
 	).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return 0, false, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("read day rollup watermark: %w", err)
+		return 0, false, fmt.Errorf("read day rollup watermark: %w", err)
 	}
 	parsed, parseErr := time.Parse(time.RFC3339Nano, raw)
 	if parseErr == nil {
-		return parsed.UTC().UnixNano(), nil
+		parsed = parsed.UTC()
+		watermarkNs := parsed.UnixNano()
+		if !time.Unix(0, watermarkNs).UTC().Equal(parsed) {
+			return 0, false, fmt.Errorf("parse day rollup watermark %q: outside UnixNano range", raw)
+		}
+		return watermarkNs, true, nil
 	}
 	var watermarkNs int64
 	if _, scanErr := fmt.Sscan(raw, &watermarkNs); scanErr != nil {
-		return 0, fmt.Errorf("parse day rollup watermark %q: %w", raw, scanErr)
+		return 0, false, fmt.Errorf("parse day rollup watermark %q: %w", raw, scanErr)
 	}
-	return watermarkNs, nil
+	return watermarkNs, true, nil
 }
 
 func (s *Store) setDayRollupWatermark(ctx context.Context, dayNs int64) error {
@@ -1232,8 +1637,6 @@ func (s *Store) RollupDay(ctx context.Context, dayStartNs int64) error {
 	if s == nil || s.db == nil {
 		return errors.New("usage: rollupDay on nil store")
 	}
-	dayEndNs := dayStartNs + nsPerDay
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin rollup tx: %w", err)
@@ -1244,6 +1647,24 @@ func (s *Store) RollupDay(ctx context.Context, dayStartNs int64) error {
 			_ = tx.Rollback()
 		}
 	}()
+	if err := s.rollupDayTx(ctx, tx, dayStartNs); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rollup tx: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+func (s *Store) rollupDayTx(ctx context.Context, tx *sql.Tx, dayStartNs int64) error {
+	if s == nil || tx == nil {
+		return errors.New("usage: rollupDayTx on nil store or transaction")
+	}
+	if dayStartNs > math.MaxInt64-nsPerDay {
+		return errors.New("usage: day rollup end overflows int64")
+	}
+	dayEndNs := dayStartNs + nsPerDay
 
 	const aggSQL = `
 SELECT model_id, credential_id, api_key_id, provider_id,
@@ -1291,13 +1712,7 @@ SELECT model_id, credential_id, api_key_id, provider_id,
 		return fmt.Errorf("close aggregate rows: %w", err)
 	}
 
-	// Wipe day_bucket rows for this day before re-inserting so deletions in
-	// hour_bucket (e.g. from Trim) propagate.
-	if _, err := tx.ExecContext(
-		ctx,
-		"DELETE FROM day_bucket WHERE bucket_ts_ns = ?",
-		dayStartNs,
-	); err != nil {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM day_bucket WHERE bucket_ts_ns = ?", dayStartNs); err != nil {
 		return fmt.Errorf("clear day_bucket: %w", err)
 	}
 
@@ -1315,12 +1730,12 @@ DO UPDATE SET
     failure          = excluded.failure,
     input_tokens     = excluded.input_tokens,
     output_tokens    = excluded.output_tokens,
-    reasoning_tokens  = excluded.reasoning_tokens,
-    cached_tokens     = excluded.cached_tokens,
-    total_tokens      = excluded.total_tokens,
-    cost_micro        = excluded.cost_micro,
-    latency_ms_total  = excluded.latency_ms_total,
-    latency_samples   = excluded.latency_samples
+    reasoning_tokens = excluded.reasoning_tokens,
+    cached_tokens    = excluded.cached_tokens,
+    total_tokens     = excluded.total_tokens,
+    cost_micro       = excluded.cost_micro,
+    latency_ms_total = excluded.latency_ms_total,
+    latency_samples  = excluded.latency_samples
 `
 	for _, a := range aggs {
 		var credAny, apiKeyAny, providerAny any
@@ -1343,10 +1758,8 @@ DO UPDATE SET
 			return fmt.Errorf("upsert day_bucket: %w", err)
 		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit rollup tx: %w", err)
+	if _, err := tx.ExecContext(ctx, "DELETE FROM dirty_day WHERE day_ts_ns = ?", dayStartNs); err != nil {
+		return fmt.Errorf("clear dirty day: %w", err)
 	}
-	committed = true
 	return nil
 }

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,21 +15,28 @@ import (
 )
 
 const (
-	writerChanCap       = 4096
-	writerBatchSize     = 100
-	writerFlushInterval = 100 * time.Millisecond
-	writerFlushTimeout  = 10 * time.Second
+	writerChanCap              = 4096
+	writerBatchSize            = 100
+	writerFlushInterval        = 100 * time.Millisecond
+	writerFlushTimeout         = 10 * time.Second
+	writerShutdownFlushTimeout = 2 * time.Second
+	writerShutdownRetryLimit   = 3
 )
+
+var errWriterFlushTransient = errors.New("usage: transient writer flush failure")
 
 // Writer ingests FlatDetail records and persists them in batched transactions
 // against a Store. A single goroutine owns all SQL writes so we never collide
 // with SQLite's "one writer at a time" rule.
 type Writer struct {
-	store   *Store
-	priceFn PriceFunc
+	store         *Store
+	priceFn       PriceFunc
+	priceProvider PriceProvider
+	pricingMu     *sync.RWMutex
 
 	ch       chan FlatDetail
 	done     chan struct{}
+	stop     chan struct{}
 	started  atomic.Bool
 	stopOnce sync.Once
 	submitMu sync.RWMutex
@@ -36,14 +45,63 @@ type Writer struct {
 	priceMu sync.RWMutex // guards priceFn during runtime swaps
 }
 
+type writerPriceSnapshot struct {
+	priceFn PriceFunc
+	release func()
+}
+
+func (s *writerPriceSnapshot) close() {
+	if s == nil || s.release == nil {
+		return
+	}
+	s.release()
+	s.release = nil
+}
+
 // NewWriter wires a writer to a store. priceFn may be nil — events still land
 // on disk, just with cost_micro = 0 until pricing is configured.
 func NewWriter(store *Store, priceFn PriceFunc) *Writer {
+	return newWriterWithPricingGate(store, priceFn, nil)
+}
+
+func newWriterWithPricingGate(store *Store, priceFn PriceFunc, pricingMu *sync.RWMutex) *Writer {
+	return newWriterWithPriceProviderAndGate(store, nil, priceFn, pricingMu)
+}
+
+func newWriterWithPriceProviderAndGate(
+	store *Store,
+	provider PriceProvider,
+	priceFn PriceFunc,
+	pricingMu *sync.RWMutex,
+) *Writer {
 	return &Writer{
-		store:   store,
+		store:         store,
+		priceFn:       priceFn,
+		priceProvider: provider,
+		pricingMu:     pricingMu,
+		ch:            make(chan FlatDetail, writerChanCap),
+		done:          make(chan struct{}),
+		stop:          make(chan struct{}),
+	}
+}
+
+func (w *Writer) acquirePriceSnapshot() *writerPriceSnapshot {
+	if w.pricingMu != nil {
+		w.pricingMu.RLock()
+	}
+	w.priceMu.RLock()
+	priceFn := w.priceFn
+	if w.priceProvider != nil {
+		priceFn = w.priceProvider.Snapshot()
+	}
+	return &writerPriceSnapshot{
 		priceFn: priceFn,
-		ch:      make(chan FlatDetail, writerChanCap),
-		done:    make(chan struct{}),
+		release: func() {
+			w.priceMu.RUnlock()
+			if w.pricingMu != nil {
+				w.pricingMu.RUnlock()
+			}
+		},
 	}
 }
 
@@ -62,15 +120,20 @@ func (w *Writer) Stop() {
 	if w == nil {
 		return
 	}
-	w.stopOnce.Do(
-		func() {
-			w.submitMu.Lock()
-			w.stopped.Store(true)
-			close(w.ch)
-			w.submitMu.Unlock()
-			<-w.done
-		},
-	)
+	w.requestStop()
+	if w.started.Load() {
+		<-w.done
+	}
+}
+
+func (w *Writer) requestStop() {
+	w.stopOnce.Do(func() {
+		w.stopped.Store(true)
+		close(w.stop)
+		w.submitMu.Lock()
+		close(w.ch)
+		w.submitMu.Unlock()
+	})
 }
 
 // SetPriceFunc lets callers swap pricing at runtime (e.g. after a model
@@ -81,13 +144,18 @@ func (w *Writer) SetPriceFunc(fn PriceFunc) {
 	}
 	w.priceMu.Lock()
 	w.priceFn = fn
+	w.priceProvider = nil
 	w.priceMu.Unlock()
 }
 
-func (w *Writer) priceFunc() PriceFunc {
-	w.priceMu.RLock()
-	defer w.priceMu.RUnlock()
-	return w.priceFn
+func (w *Writer) SetPriceProvider(provider PriceProvider) {
+	if w == nil {
+		return
+	}
+	w.priceMu.Lock()
+	w.priceFn = nil
+	w.priceProvider = provider
+	w.priceMu.Unlock()
 }
 
 // Submit enqueues a record for persistence. It blocks when the channel is full
@@ -112,25 +180,20 @@ func (w *Writer) Submit(detail FlatDetail) {
 		log.Warn("usage: writer stopped, live usage record was not accepted")
 		return
 	}
-	w.ch <- detail
+	select {
+	case w.ch <- detail:
+	case <-w.stop:
+		log.Warn("usage: writer stopped, live usage record was not accepted")
+	}
 }
 
 func (w *Writer) loop(ctx context.Context) {
 	defer close(w.done)
 
 	batch := make([]FlatDetail, 0, writerBatchSize)
+	var priceSnapshot *writerPriceSnapshot
 	timer := time.NewTimer(writerFlushInterval)
 	defer timer.Stop()
-
-	flush := func() {
-		if len(batch) == 0 {
-			return
-		}
-		if err := w.flush(batch); err != nil {
-			log.Errorf("usage: writer flush failed (%d records): %v", len(batch), err)
-		}
-		batch = batch[:0]
-	}
 
 	resetTimer := func() {
 		if !timer.Stop() {
@@ -141,37 +204,104 @@ func (w *Writer) loop(ctx context.Context) {
 		}
 		timer.Reset(writerFlushInterval)
 	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			// Drain whatever is still buffered before exiting so a normal
-			// shutdown doesn't lose records sitting in the channel.
-			for {
-				select {
-				case d, ok := <-w.ch:
-					if !ok {
-						flush()
-						return
-					}
-					batch = append(batch, d)
-				default:
-					flush()
+	releasePriceSnapshot := func() {
+		priceSnapshot.close()
+		priceSnapshot = nil
+	}
+	flush := func(timeout time.Duration) bool {
+		if len(batch) == 0 {
+			return true
+		}
+		if priceSnapshot == nil && w.store != nil && w.store.DB() != nil {
+			priceSnapshot = w.acquirePriceSnapshot()
+		}
+		var priceFn PriceFunc
+		if priceSnapshot != nil {
+			priceFn = priceSnapshot.priceFn
+		}
+		err := w.flushWithPrice(batch, timeout, priceFn)
+		releasePriceSnapshot()
+		if err == nil {
+			batch = batch[:0]
+			return true
+		}
+		if errors.Is(err, errWriterFlushTransient) {
+			log.Warnf("usage: writer flush will retry (%d records): %v", len(batch), err)
+			return false
+		}
+		log.Errorf("usage: writer permanently rejected records (%d records): %v", len(batch), err)
+		batch = batch[:0]
+		return true
+	}
+	drainAvailable := func() {
+		for {
+			select {
+			case detail, ok := <-w.ch:
+				if !ok {
 					return
 				}
-			}
-		case d, ok := <-w.ch:
-			if !ok {
-				flush()
+				batch = append(batch, detail)
+			default:
 				return
 			}
-			batch = append(batch, d)
+		}
+	}
+	flushBeforeExit := func() {
+		drainAvailable()
+		for attempt := 1; attempt <= writerShutdownRetryLimit; attempt++ {
+			if flush(writerShutdownFlushTimeout) {
+				return
+			}
+			if attempt < writerShutdownRetryLimit {
+				time.Sleep(writerFlushInterval)
+			}
+		}
+		if len(batch) > 0 {
+			log.Errorf(
+				"usage: writer shutdown dropped %d accepted records after %d transient failures",
+				len(batch),
+				writerShutdownRetryLimit,
+			)
+			releasePriceSnapshot()
+			batch = batch[:0]
+		}
+	}
+
+	ctxDone := ctx.Done()
+	retryPending := false
+	for {
+		if retryPending {
+			if w.stopped.Load() {
+				flushBeforeExit()
+				return
+			}
+			select {
+			case <-ctxDone:
+				w.requestStop()
+				ctxDone = nil
+			case <-timer.C:
+				retryPending = !flush(writerFlushTimeout)
+				timer.Reset(writerFlushInterval)
+			}
+			continue
+		}
+
+		select {
+		case <-ctxDone:
+			w.requestStop()
+			ctxDone = nil
+		case detail, ok := <-w.ch:
+			if !ok {
+				flushBeforeExit()
+				return
+			}
+			batch = append(batch, detail)
 			if len(batch) >= writerBatchSize {
-				flush()
+				retryPending = !flush(writerFlushTimeout)
 				resetTimer()
 			}
 		case <-timer.C:
-			flush()
+			retryPending = !flush(writerFlushTimeout)
 			timer.Reset(writerFlushInterval)
 		}
 	}
@@ -205,22 +335,120 @@ DO UPDATE SET
     cost_micro        = hour_bucket.cost_micro        + excluded.cost_micro,
     latency_ms_total  = hour_bucket.latency_ms_total  + excluded.latency_ms_total,
     latency_samples   = hour_bucket.latency_samples   + excluded.latency_samples
+WHERE hour_bucket.requests         <= 9223372036854775807 - excluded.requests
+  AND hour_bucket.success          <= 9223372036854775807 - excluded.success
+  AND hour_bucket.failure          <= 9223372036854775807 - excluded.failure
+  AND hour_bucket.input_tokens     <= 9223372036854775807 - excluded.input_tokens
+  AND hour_bucket.output_tokens    <= 9223372036854775807 - excluded.output_tokens
+  AND hour_bucket.reasoning_tokens <= 9223372036854775807 - excluded.reasoning_tokens
+  AND hour_bucket.cached_tokens    <= 9223372036854775807 - excluded.cached_tokens
+  AND hour_bucket.total_tokens     <= 9223372036854775807 - excluded.total_tokens
+  AND hour_bucket.cost_micro       <= 9223372036854775807 - excluded.cost_micro
+  AND hour_bucket.latency_ms_total <= 9223372036854775807 - excluded.latency_ms_total
+  AND hour_bucket.latency_samples  <= 9223372036854775807 - excluded.latency_samples
 `
 )
 
 func (w *Writer) flush(batch []FlatDetail) error {
+	return w.flushWithTimeout(batch, writerFlushTimeout)
+}
+
+func (w *Writer) flushWithTimeout(batch []FlatDetail, timeout time.Duration) error {
 	if len(batch) == 0 || w.store == nil {
 		return nil
 	}
-	db := w.store.DB()
-	if db == nil {
+	if w.store.DB() == nil {
+		return errors.New("usage: writer store has nil DB")
+	}
+	priceSnapshot := w.acquirePriceSnapshot()
+	defer priceSnapshot.close()
+	return w.flushWithPrice(batch, timeout, priceSnapshot.priceFn)
+}
+
+func (w *Writer) flushWithPrice(batch []FlatDetail, timeout time.Duration, priceFn PriceFunc) error {
+	if len(batch) == 0 || w.store == nil {
+		return nil
+	}
+	if w.store.DB() == nil {
 		return errors.New("usage: writer store has nil DB")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), writerFlushTimeout)
-	defer cancel()
+	flushTransaction := func(items []FlatDetail) error {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		return w.flushTransaction(ctx, items, priceFn)
+	}
+	warmCaches := func(items []FlatDetail) {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := w.store.warmDimensionCaches(ctx, items); err != nil {
+			log.Warnf("usage: warm dimension caches after writer commit: %v", err)
+		}
+	}
 
-	tx, err := db.BeginTx(ctx, nil)
+	batchErr := flushTransaction(batch)
+	if batchErr == nil {
+		warmCaches(batch)
+		return nil
+	}
+	if isTransientWriterError(batchErr) {
+		return fmt.Errorf("%w: %v", errWriterFlushTransient, batchErr)
+	}
+	if len(batch) == 1 {
+		return batchErr
+	}
+
+	var recordErrs []error
+	for i := range batch {
+		err := flushTransaction(batch[i : i+1])
+		if err == nil {
+			warmCaches(batch[i : i+1])
+			continue
+		}
+		if isTransientWriterError(err) {
+			return fmt.Errorf("%w: event[%d]: %v", errWriterFlushTransient, i, err)
+		}
+		recordErrs = append(recordErrs, fmt.Errorf("event[%d]: %w", i, err))
+	}
+	if len(recordErrs) == 0 {
+		log.Warnf(
+			"usage: batch transaction failed but all %d records were recovered individually: %v",
+			len(batch),
+			batchErr,
+		)
+		return nil
+	}
+	return fmt.Errorf(
+		"usage: batch transaction failed; %d of %d records were rejected: %w",
+		len(recordErrs),
+		len(batch),
+		errors.Join(append([]error{batchErr}, recordErrs...)...),
+	)
+}
+
+func isTransientWriterError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var sqliteErr interface{ Code() int }
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case 5, 6:
+			return true
+		}
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") ||
+		strings.Contains(message, "database table is locked") ||
+		strings.Contains(message, "sqlite_busy") ||
+		strings.Contains(message, "sqlite_locked")
+}
+
+func (w *Writer) flushTransaction(ctx context.Context, batch []FlatDetail, priceFn PriceFunc) error {
+	tx, err := w.store.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("usage: begin tx: %w", err)
 	}
@@ -231,13 +459,11 @@ func (w *Writer) flush(batch []FlatDetail) error {
 		}
 	}()
 
-	priceFn := w.priceFunc()
 	for i := range batch {
 		if err := w.persistOne(ctx, tx, &batch[i], priceFn); err != nil {
 			return fmt.Errorf("usage: persist event[%d]: %w", i, err)
 		}
 	}
-
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("usage: commit tx: %w", err)
 	}
@@ -263,7 +489,14 @@ func persistEvent(ctx context.Context, tx *sql.Tx, store *Store, d *FlatDetail, 
 	if store == nil {
 		return false, errors.New("usage: persistEvent on nil store")
 	}
-	tokens := normaliseTokenStats(d.Tokens)
+	tokens, err := validatedTokenStats(d.Tokens)
+	if err != nil {
+		return false, err
+	}
+	tsNs, hourNs, dayNs, err := unixNanoBucketStarts(d.Timestamp)
+	if err != nil {
+		return false, fmt.Errorf("usage: invalid event timestamp: %w", err)
+	}
 	d.Tokens = tokens
 
 	modelID, err := store.ResolveModelID(ctx, tx, d.Model)
@@ -296,7 +529,17 @@ func persistEvent(ctx context.Context, tx *sql.Tx, store *Store, d *FlatDetail, 
 		failedInt = 1
 	}
 	successInt := int64(1) - failedInt
-	costMicro := computeCostMicro(tokens, priceFn, d.Model)
+	costMicro := d.costMicro
+	if d.costTrusted {
+		if costMicro < 0 {
+			return false, errors.New("usage: cost_micro must be non-negative")
+		}
+	} else {
+		costMicro, err = computeCostMicro(tokens, priceFn, d.Model)
+		if err != nil {
+			return false, err
+		}
+	}
 	metadata, err := encodeEventMetadata(d)
 	if err != nil {
 		return false, err
@@ -307,7 +550,7 @@ func persistEvent(ctx context.Context, tx *sql.Tx, store *Store, d *FlatDetail, 
 	res, err := tx.ExecContext(
 		ctx, insertEventSQL,
 		fp[:],
-		d.Timestamp.UTC().UnixNano(),
+		tsNs,
 		modelID,
 		nullableID(apiKeyID),
 		nullableID(sourceID),
@@ -334,10 +577,9 @@ func persistEvent(ctx context.Context, tx *sql.Tx, store *Store, d *FlatDetail, 
 		return false, nil
 	}
 
-	bucketTsNs := d.Timestamp.UTC().Truncate(time.Hour).UnixNano()
-	if _, err := tx.ExecContext(
+	bucketResult, err := tx.ExecContext(
 		ctx, upsertHourBucketSQL,
-		bucketTsNs,
+		hourNs,
 		modelID,
 		nullableID(credID),
 		nullableID(apiKeyID),
@@ -346,8 +588,24 @@ func persistEvent(ctx context.Context, tx *sql.Tx, store *Store, d *FlatDetail, 
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens, tokens.CachedTokens, tokens.TotalTokens,
 		costMicro,
 		latencyMs, latencySamples,
-	); err != nil {
+	)
+	if err != nil {
 		return true, fmt.Errorf("upsert hour_bucket: %w", err)
+	}
+	bucketAffected, err := bucketResult.RowsAffected()
+	if err != nil {
+		return true, fmt.Errorf("upsert hour_bucket rows affected: %w", err)
+	}
+	if bucketAffected != 1 {
+		return true, errors.New("upsert hour_bucket rejected integer overflow")
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		"INSERT OR IGNORE INTO dirty_day(day_ts_ns) VALUES (?)",
+		dayNs,
+	); err != nil {
+		return true, fmt.Errorf("mark dirty day: %w", err)
 	}
 	return true, nil
 }
@@ -372,19 +630,31 @@ func latencyBucketValues(latencyMs int64) (int64, int64) {
 // (USD × 1e6 INTEGER). The 1e6 factors cancel: cost_USD = tokens*price/1e6,
 // cost_micro = cost_USD * 1e6, leaving cost_micro = tokens * price directly.
 // Returns 0 when no price is registered.
-func computeCostMicro(tokens tokenStats, priceFn PriceFunc, model string) int64 {
+func computeCostMicro(tokens tokenStats, priceFn PriceFunc, model string) (int64, error) {
 	if priceFn == nil {
-		return 0
+		return 0, nil
 	}
 	prompt, completion, cache, ok := priceFn(model)
 	if !ok {
-		return 0
+		return 0, nil
+	}
+	for _, item := range []struct {
+		name  string
+		price float64
+	}{
+		{name: "prompt", price: prompt},
+		{name: "completion", price: completion},
+		{name: "cache", price: cache},
+	} {
+		if math.IsNaN(item.price) || math.IsInf(item.price, 0) || item.price < 0 {
+			return 0, fmt.Errorf("usage: invalid %s price for model %q", item.name, model)
+		}
 	}
 	raw := float64(tokens.InputTokens)*prompt +
 		float64(tokens.OutputTokens)*completion +
 		float64(tokens.CachedTokens)*cache
-	if raw < 0 {
-		return 0
+	if math.IsNaN(raw) || math.IsInf(raw, 0) || raw < 0 || raw >= math.Exp2(63) {
+		return 0, fmt.Errorf("usage: cost_micro out of int64 range for model %q", model)
 	}
-	return int64(raw)
+	return int64(raw), nil
 }

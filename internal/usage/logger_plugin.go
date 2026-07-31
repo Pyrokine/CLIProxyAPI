@@ -6,6 +6,7 @@ package usage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -17,18 +18,19 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
 
-// globalPersister is set when the Persister starts. When set, LoggerPlugin
-// routes records through it instead of the legacy RequestStatistics.
+// globalPersister is retained for callers using the process-wide default usage
+// manager. Service instances bind their own persister directly to loggerPlugin.
 var (
 	globalPersisterMu sync.RWMutex
 	globalPersister   *Persister
 )
 
-// SetGlobalPersister registers the active Persister for the LoggerPlugin to use.
+// SetGlobalPersister configures the compatibility logger on the default manager.
 func SetGlobalPersister(p *Persister) {
 	globalPersisterMu.Lock()
 	defer globalPersisterMu.Unlock()
@@ -50,14 +52,28 @@ func init() {
 // loggerPlugin collects in-memory request statistics for usage analysis.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
 type loggerPlugin struct {
-	stats *RequestStatistics
+	stats     *RequestStatistics
+	persister *Persister
+	enabled   func() bool
+	useGlobal bool
 }
 
-// newLoggerPlugin constructs a new logger plugin instance.
-//
-// Returns:
-//   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
-func newLoggerPlugin() *loggerPlugin { return &loggerPlugin{stats: defaultRequestStatistics} }
+// newLoggerPlugin constructs the compatibility plugin used by the default manager.
+func newLoggerPlugin() *loggerPlugin {
+	return &loggerPlugin{stats: defaultRequestStatistics, useGlobal: true}
+}
+
+// NewLoggerPlugin constructs a logger bound to one service's storage and enabled state.
+func NewLoggerPlugin(
+	persister *Persister,
+	stats *RequestStatistics,
+	enabled func() bool,
+) coreusage.Plugin {
+	if stats == nil {
+		stats = NewRequestStatistics()
+	}
+	return &loggerPlugin{stats: stats, persister: persister, enabled: enabled}
+}
 
 func latencyMilliseconds(latency time.Duration) int64 {
 	if latency <= 0 {
@@ -89,7 +105,14 @@ func thinkingFromCore(src *coreusage.Thinking) *Thinking {
 // When a global Persister is registered, records are routed through it (v2 path).
 // Otherwise, the legacy RequestStatistics is used as fallback.
 func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
-	if !statisticsEnabled.Load() {
+	if p == nil {
+		return
+	}
+	if p.enabled != nil {
+		if !p.enabled() {
+			return
+		}
+	} else if !statisticsEnabled.Load() {
 		return
 	}
 
@@ -113,33 +136,47 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
-	serviceTier := strings.TrimSpace(record.ServiceTier)
-	if serviceTier == "" {
-		serviceTier = coreusage.ServiceTierFromContext(ctx)
+	requestServiceTier := strings.TrimSpace(record.RequestServiceTier)
+	if requestServiceTier == "" {
+		requestServiceTier = strings.TrimSpace(record.ServiceTier)
+	}
+	if requestServiceTier == "" {
+		requestServiceTier = coreusage.ServiceTierFromContext(ctx)
+	}
+	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
+	if responseServiceTier == "" {
+		responseServiceTier = strings.TrimSpace(record.Detail.ResponseServiceTier)
 	}
 	executorType := strings.TrimSpace(record.ExecutorType)
 
-	// Try v2 path (global Persister)
-	if persister := getGlobalPersister(); persister != nil {
+	// Prefer the service-owned persister. The compatibility plugin resolves the
+	// process-global pointer for callers that still use the default manager.
+	persister := p.persister
+	if p.useGlobal {
+		persister = getGlobalPersister()
+	}
+	if persister != nil {
 		detail := FlatDetail{
-			Timestamp:         timestamp,
-			Model:             modelName,
-			Source:            source,
-			AuthIndex:         authIndex,
-			APIKey:            record.APIKey,
-			Provider:          record.Provider,
-			LatencyMs:         latencyMilliseconds(record.Latency),
-			RequestID:         strings.TrimSpace(record.RequestID),
-			TimeToFirstByteMs: record.TimeToFirstByteMs,
-			TotalDurationMs:   record.TotalDurationMs,
-			Completed:         record.Completed,
-			ReasoningEffort:   reasoningEffort,
-			ServiceTier:       serviceTier,
-			ExecutorType:      executorType,
-			Thinking:          thinkingFromCore(record.Thinking),
-			ResponseHeaders:   sanitizeResponseHeaders(record.ResponseHeaders),
-			Tokens:            tokens,
-			Failed:            failed,
+			Timestamp:           timestamp,
+			Model:               modelName,
+			Source:              source,
+			AuthIndex:           authIndex,
+			APIKey:              record.APIKey,
+			Provider:            record.Provider,
+			LatencyMs:           latencyMilliseconds(record.Latency),
+			RequestID:           strings.TrimSpace(record.RequestID),
+			TimeToFirstByteMs:   record.TimeToFirstByteMs,
+			TotalDurationMs:     record.TotalDurationMs,
+			Completed:           record.Completed,
+			ReasoningEffort:     reasoningEffort,
+			ServiceTier:         requestServiceTier,
+			RequestServiceTier:  requestServiceTier,
+			ResponseServiceTier: responseServiceTier,
+			ExecutorType:        executorType,
+			Thinking:            thinkingFromCore(record.Thinking),
+			ResponseHeaders:     sanitizeResponseHeaders(record.ResponseHeaders),
+			Tokens:              tokens,
+			Failed:              failed,
 		}
 		persister.Record(detail)
 		return
@@ -189,21 +226,23 @@ type modelStats struct {
 
 // requestDetail stores the timestamp and token usage for a single request.
 type requestDetail struct {
-	Timestamp         time.Time   `json:"timestamp"`
-	Source            string      `json:"source"`
-	AuthIndex         string      `json:"auth_index"`
-	LatencyMs         int64       `json:"latency_ms,omitempty"`
-	RequestID         string      `json:"request_id,omitempty"`
-	TimeToFirstByteMs int64       `json:"time_to_first_byte_ms,omitempty"`
-	TotalDurationMs   int64       `json:"total_duration_ms,omitempty"`
-	Completed         bool        `json:"completed"`
-	ReasoningEffort   string      `json:"reasoning_effort,omitempty"`
-	ServiceTier       string      `json:"service_tier,omitempty"`
-	ExecutorType      string      `json:"executor_type,omitempty"`
-	Thinking          *Thinking   `json:"thinking,omitempty"`
-	ResponseHeaders   http.Header `json:"response_headers,omitempty"`
-	Tokens            tokenStats  `json:"tokens"`
-	Failed            bool        `json:"failed"`
+	Timestamp           time.Time   `json:"timestamp"`
+	Source              string      `json:"source"`
+	AuthIndex           string      `json:"auth_index"`
+	LatencyMs           int64       `json:"latency_ms,omitempty"`
+	RequestID           string      `json:"request_id,omitempty"`
+	TimeToFirstByteMs   int64       `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs     int64       `json:"total_duration_ms,omitempty"`
+	Completed           bool        `json:"completed"`
+	ReasoningEffort     string      `json:"reasoning_effort,omitempty"`
+	ServiceTier         string      `json:"service_tier,omitempty"`
+	RequestServiceTier  string      `json:"request_service_tier,omitempty"`
+	ResponseServiceTier string      `json:"response_service_tier,omitempty"`
+	ExecutorType        string      `json:"executor_type,omitempty"`
+	Thinking            *Thinking   `json:"thinking,omitempty"`
+	ResponseHeaders     http.Header `json:"response_headers,omitempty"`
+	Tokens              tokenStats  `json:"tokens"`
+	Failed              bool        `json:"failed"`
 }
 
 // tokenStats captures the token usage breakdown for a request.
@@ -244,13 +283,13 @@ type modelSnapshot struct {
 	Details       []requestDetail `json:"details"`
 }
 
-var defaultRequestStatistics = newRequestStatistics()
+var defaultRequestStatistics = NewRequestStatistics()
 
 // GetRequestStatistics returns the shared statistics store.
 func GetRequestStatistics() *RequestStatistics { return defaultRequestStatistics }
 
-// newRequestStatistics constructs an empty statistics store.
-func newRequestStatistics() *RequestStatistics {
+// NewRequestStatistics constructs an empty statistics store.
+func NewRequestStatistics() *RequestStatistics {
 	return &RequestStatistics{
 		apis:           make(map[string]*apiStats),
 		requestsByDay:  make(map[string]int64),
@@ -259,6 +298,8 @@ func newRequestStatistics() *RequestStatistics {
 		tokensByHour:   make(map[int]int64),
 	}
 }
+
+func newRequestStatistics() *RequestStatistics { return NewRequestStatistics() }
 
 // Record ingests a new usage record and updates the aggregates (legacy path).
 func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record) {
@@ -291,9 +332,16 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
 	}
-	serviceTier := strings.TrimSpace(record.ServiceTier)
-	if serviceTier == "" {
-		serviceTier = coreusage.ServiceTierFromContext(ctx)
+	requestServiceTier := strings.TrimSpace(record.RequestServiceTier)
+	if requestServiceTier == "" {
+		requestServiceTier = strings.TrimSpace(record.ServiceTier)
+	}
+	if requestServiceTier == "" {
+		requestServiceTier = coreusage.ServiceTierFromContext(ctx)
+	}
+	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
+	if responseServiceTier == "" {
+		responseServiceTier = strings.TrimSpace(record.Detail.ResponseServiceTier)
 	}
 	executorType := strings.TrimSpace(record.ExecutorType)
 	dayKey := timestamp.Format("2006-01-02")
@@ -308,50 +356,72 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	} else {
 		s.failureCount++
 	}
-	s.totalTokens += totalTokens
 
 	stats, ok := s.apis[statsKey]
 	if !ok {
 		stats = &apiStats{Models: make(map[string]*modelStats)}
 		s.apis[statsKey] = stats
 	}
-	s.updateAPIStats(
+	modelStatsValue := s.updateAPIStats(
 		stats, modelName, requestDetail{
-			Timestamp:         timestamp,
-			Source:            record.Source,
-			AuthIndex:         record.AuthIndex,
-			LatencyMs:         latencyMilliseconds(record.Latency),
-			RequestID:         strings.TrimSpace(record.RequestID),
-			TimeToFirstByteMs: record.TimeToFirstByteMs,
-			TotalDurationMs:   record.TotalDurationMs,
-			Completed:         record.Completed,
-			ReasoningEffort:   reasoningEffort,
-			ServiceTier:       serviceTier,
-			ExecutorType:      executorType,
-			Thinking:          thinkingFromCore(record.Thinking),
-			ResponseHeaders:   sanitizeResponseHeaders(record.ResponseHeaders),
-			Tokens:            detail,
-			Failed:            failed,
+			Timestamp:           timestamp,
+			Source:              record.Source,
+			AuthIndex:           record.AuthIndex,
+			LatencyMs:           latencyMilliseconds(record.Latency),
+			RequestID:           strings.TrimSpace(record.RequestID),
+			TimeToFirstByteMs:   record.TimeToFirstByteMs,
+			TotalDurationMs:     record.TotalDurationMs,
+			Completed:           record.Completed,
+			ReasoningEffort:     reasoningEffort,
+			ServiceTier:         requestServiceTier,
+			RequestServiceTier:  requestServiceTier,
+			ResponseServiceTier: responseServiceTier,
+			ExecutorType:        executorType,
+			Thinking:            thinkingFromCore(record.Thinking),
+			ResponseHeaders:     sanitizeResponseHeaders(record.ResponseHeaders),
+			Tokens:              detail,
+			Failed:              failed,
 		},
 	)
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
-	s.tokensByDay[dayKey] += totalTokens
-	s.tokensByHour[hourKey] += totalTokens
+	s.updateTokenAggregates(stats, modelStatsValue, dayKey, hourKey, totalTokens)
 }
 
-func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail requestDetail) {
+func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail requestDetail) *modelStats {
 	stats.TotalRequests++
-	stats.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue, ok := stats.Models[model]
 	if !ok {
 		modelStatsValue = &modelStats{}
 		stats.Models[model] = modelStatsValue
 	}
 	modelStatsValue.TotalRequests++
-	modelStatsValue.TotalTokens += detail.Tokens.TotalTokens
 	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	return modelStatsValue
+}
+
+func (s *RequestStatistics) updateTokenAggregates(
+	stats *apiStats,
+	modelStatsValue *modelStats,
+	dayKey string,
+	hourKey int,
+	totalTokens int64,
+) {
+	globalTotal, globalOK := coreusage.AddNonNegativeInt64(s.totalTokens, totalTokens)
+	apiTotal, apiOK := coreusage.AddNonNegativeInt64(stats.TotalTokens, totalTokens)
+	modelTotal, modelOK := coreusage.AddNonNegativeInt64(modelStatsValue.TotalTokens, totalTokens)
+	dayTotal, dayOK := coreusage.AddNonNegativeInt64(s.tokensByDay[dayKey], totalTokens)
+	hourTotal, hourOK := coreusage.AddNonNegativeInt64(s.tokensByHour[hourKey], totalTokens)
+	if !globalOK || !apiOK || !modelOK || !dayOK || !hourOK {
+		log.Warn("usage: rejected overflowing token aggregate update")
+		return
+	}
+	s.totalTokens = globalTotal
+	stats.TotalTokens = apiTotal
+	modelStatsValue.TotalTokens = modelTotal
+	s.tokensByDay[dayKey] = dayTotal
+	s.tokensByHour[hourKey] = hourTotal
 }
 
 // Snapshot returns a copy of the aggregated metrics for external consumption.
@@ -488,25 +558,31 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 				s.recordImported(apiName, modelName, stats, detail)
 				result.Added++
 				if len(hooks) > 0 && hooks[0] != nil {
+					requestServiceTier := strings.TrimSpace(detail.RequestServiceTier)
+					if requestServiceTier == "" {
+						requestServiceTier = strings.TrimSpace(detail.ServiceTier)
+					}
 					hooks[0](
 						FlatDetail{
-							Timestamp:         detail.Timestamp,
-							Model:             modelName,
-							Source:            detail.Source,
-							AuthIndex:         detail.AuthIndex,
-							APIKey:            apiName,
-							LatencyMs:         detail.LatencyMs,
-							RequestID:         strings.TrimSpace(detail.RequestID),
-							TimeToFirstByteMs: detail.TimeToFirstByteMs,
-							TotalDurationMs:   detail.TotalDurationMs,
-							Completed:         detail.Completed,
-							ReasoningEffort:   strings.TrimSpace(detail.ReasoningEffort),
-							ServiceTier:       strings.TrimSpace(detail.ServiceTier),
-							ExecutorType:      strings.TrimSpace(detail.ExecutorType),
-							Thinking:          cloneThinking(detail.Thinking),
-							ResponseHeaders:   cloneHTTPHeader(detail.ResponseHeaders),
-							Tokens:            detail.Tokens,
-							Failed:            detail.Failed,
+							Timestamp:           detail.Timestamp,
+							Model:               modelName,
+							Source:              detail.Source,
+							AuthIndex:           detail.AuthIndex,
+							APIKey:              apiName,
+							LatencyMs:           detail.LatencyMs,
+							RequestID:           strings.TrimSpace(detail.RequestID),
+							TimeToFirstByteMs:   detail.TimeToFirstByteMs,
+							TotalDurationMs:     detail.TotalDurationMs,
+							Completed:           detail.Completed,
+							ReasoningEffort:     strings.TrimSpace(detail.ReasoningEffort),
+							ServiceTier:         requestServiceTier,
+							RequestServiceTier:  requestServiceTier,
+							ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+							ExecutorType:        strings.TrimSpace(detail.ExecutorType),
+							Thinking:            cloneThinking(detail.Thinking),
+							ResponseHeaders:     cloneHTTPHeader(detail.ResponseHeaders),
+							Tokens:              detail.Tokens,
+							Failed:              detail.Failed,
 						},
 					)
 				}
@@ -518,7 +594,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 }
 
 func (s *RequestStatistics) recordImported(_, modelName string, stats *apiStats, detail requestDetail) {
-	totalTokens := max(detail.Tokens.TotalTokens, 0)
+	totalTokens := detail.Tokens.TotalTokens
 
 	s.totalRequests++
 	if detail.Failed {
@@ -526,17 +602,15 @@ func (s *RequestStatistics) recordImported(_, modelName string, stats *apiStats,
 	} else {
 		s.successCount++
 	}
-	s.totalTokens += totalTokens
 
-	s.updateAPIStats(stats, modelName, detail)
+	modelStatsValue := s.updateAPIStats(stats, modelName, detail)
 
 	dayKey := detail.Timestamp.Format("2006-01-02")
 	hourKey := detail.Timestamp.Hour()
 
 	s.requestsByDay[dayKey]++
 	s.requestsByHour[hourKey]++
-	s.tokensByDay[dayKey] += totalTokens
-	s.tokensByHour[hourKey] += totalTokens
+	s.updateTokenAggregates(stats, modelStatsValue, dayKey, hourKey, totalTokens)
 }
 
 func dedupKey(apiName, modelName string, detail requestDetail) string {
@@ -601,17 +675,19 @@ func resolveSuccess(ctx context.Context) bool {
 const httpStatusBadRequest = 400
 
 func normaliseDetail(detail coreusage.Detail) tokenStats {
-	tokens := tokenStats{
-		InputTokens:     detail.InputTokens,
-		OutputTokens:    detail.OutputTokens,
-		ReasoningTokens: detail.ReasoningTokens,
-		CachedTokens:    detail.CachedTokens,
-		TotalTokens:     detail.TotalTokens,
+	if detail.CacheReadTokens < 0 || detail.CacheCreationTokens < 0 {
+		log.Warn("usage: rejected negative token detail")
+		return tokenStats{}
 	}
-	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens + detail.CachedTokens
-	}
-	return tokens
+	return normaliseTokenStats(
+		tokenStats{
+			InputTokens:     detail.InputTokens,
+			OutputTokens:    detail.OutputTokens,
+			ReasoningTokens: detail.ReasoningTokens,
+			CachedTokens:    detail.CachedTokens,
+			TotalTokens:     detail.TotalTokens,
+		},
+	)
 }
 
 // UnmarshalJSON supports both legacy int64 (→ TotalTokens) and full object formats.
@@ -632,11 +708,44 @@ func (t *tokenStats) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func normaliseTokenStats(tokens tokenStats) tokenStats {
-	if tokens.TotalTokens == 0 {
-		tokens.TotalTokens = tokens.InputTokens + tokens.OutputTokens + tokens.ReasoningTokens + tokens.CachedTokens
+func validatedTokenStats(tokens tokenStats) (tokenStats, error) {
+	for _, field := range []struct {
+		name  string
+		value int64
+	}{
+		{name: "input_tokens", value: tokens.InputTokens},
+		{name: "output_tokens", value: tokens.OutputTokens},
+		{name: "reasoning_tokens", value: tokens.ReasoningTokens},
+		{name: "cached_tokens", value: tokens.CachedTokens},
+		{name: "total_tokens", value: tokens.TotalTokens},
+	} {
+		if field.value < 0 {
+			return tokenStats{}, fmt.Errorf("usage: %s must be non-negative", field.name)
+		}
 	}
-	return tokens
+	if tokens.TotalTokens != 0 {
+		return tokens, nil
+	}
+	total, ok := coreusage.AddNonNegativeInt64(
+		tokens.InputTokens,
+		tokens.OutputTokens,
+		tokens.ReasoningTokens,
+		tokens.CachedTokens,
+	)
+	if !ok {
+		return tokenStats{}, errors.New("usage: token detail total overflows int64")
+	}
+	tokens.TotalTokens = total
+	return tokens, nil
+}
+
+func normaliseTokenStats(tokens tokenStats) tokenStats {
+	normalised, err := validatedTokenStats(tokens)
+	if err != nil {
+		log.Warn(err)
+		return tokenStats{}
+	}
+	return normalised
 }
 
 func formatHour(hour int) string {

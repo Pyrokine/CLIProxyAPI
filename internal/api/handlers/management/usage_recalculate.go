@@ -6,7 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// RecalculateCosts recalculates all historical costs using the current price table.
+// RecalculateCosts starts recalculating all historical costs using the current price table.
 //
 //	POST /v0/management/usage/recalculate-costs
 func (h *Handler) RecalculateCosts(c *gin.Context) {
@@ -20,23 +20,29 @@ func (h *Handler) RecalculateCosts(c *gin.Context) {
 		return
 	}
 
-	result, err := h.usagePersister.RecalculateCosts()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if !h.usagePersister.StartRecalculateCosts() {
+		c.JSON(http.StatusOK, gin.H{
+			"status":          "busy",
+			"running":         true,
+			"already_running": true,
+		})
 		return
 	}
 
-	status := "ok"
-	if result.AlreadyRunning {
-		status = "busy"
-	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"status":          "started",
+		"running":         true,
+		"already_running": false,
+	})
+}
 
-	c.JSON(
-		http.StatusOK, gin.H{
-			"status":            status,
-			"recalculated_days": result.RecalculatedDays,
-			"total_cost":        result.TotalCost,
-			"already_running":   result.AlreadyRunning,
-		},
-	)
+// GetRecalculateCostsStatus returns the latest historical cost recalculation state.
+//
+//	GET /v0/management/usage/recalculate-costs
+func (h *Handler) GetRecalculateCostsStatus(c *gin.Context) {
+	if h.usagePersister == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persister not configured"})
+		return
+	}
+	c.JSON(http.StatusOK, h.usagePersister.RecalculateCostsStatus())
 }

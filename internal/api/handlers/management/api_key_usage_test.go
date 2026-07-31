@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -20,6 +21,13 @@ func sumRecentRequestBuckets(buckets []coreauth.RecentRequestBucket) (int64, int
 		failed += bucket.Failed
 	}
 	return success, failed
+}
+
+func firstAPIKeyUsageEntry(entries map[string]apiKeyUsageEntry) (apiKeyUsageEntry, string) {
+	for key, entry := range entries {
+		return entry, key
+	}
+	return apiKeyUsageEntry{}, ""
 }
 
 func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
@@ -80,7 +88,10 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 		t.Fatalf("decode payload: %v", err)
 	}
 
-	codexEntry := payload["codex"]["https://codex.example.com|codex-key"]
+	codexEntry, codexKey := firstAPIKeyUsageEntry(payload["codex"])
+	if strings.Contains(codexKey, "codex-key") {
+		t.Fatalf("codex bucket key leaked raw API key: %q", codexKey)
+	}
 	if len(codexEntry.RecentRequests) != 24 {
 		t.Fatalf("codex buckets len = %d, want 24", len(codexEntry.RecentRequests))
 	}
@@ -92,7 +103,10 @@ func TestGetAPIKeyUsage_GroupsByProviderAndAPIKey(t *testing.T) {
 		t.Fatalf("codex recent totals = %d/%d, want 1/1", codexSuccess, codexFailed)
 	}
 
-	claudeEntry := payload["claude"]["https://claude.example.com|claude-key"]
+	claudeEntry, claudeKey := firstAPIKeyUsageEntry(payload["claude"])
+	if strings.Contains(claudeKey, "claude-key") {
+		t.Fatalf("claude bucket key leaked raw API key: %q", claudeKey)
+	}
 	if len(claudeEntry.RecentRequests) != 24 {
 		t.Fatalf("claude buckets len = %d, want 24", len(claudeEntry.RecentRequests))
 	}

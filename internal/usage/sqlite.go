@@ -1,13 +1,15 @@
 package usage
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
-	"encoding/json"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -20,14 +22,74 @@ import (
 var schemaSQL string
 
 const (
-	// schemaVersion mirrors the 'schema_version' row inserted by schema.sql.
+	// CurrentSchemaVersion mirrors the 'schema_version' row inserted by schema.sql.
 	// OpenStore refuses to run when the persisted value disagrees, forcing an
 	// explicit migration step rather than silent corruption.
-	schemaVersion = "3"
+	CurrentSchemaVersion = "4"
 
 	// dbFileName is the SQLite database file inside the usage data dir.
 	dbFileName = "events.db"
+
+	// Large databases can require several minutes for forward migrations. Keep
+	// one deadline across setup and migration so startup still fails predictably.
+	storeOpenTimeout = 5 * time.Minute
 )
+
+func inspectExistingSchemaVersion(dbPath string) (string, bool, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("stat database: %w", err)
+	}
+
+	probeDSN := dbPath +
+		"?mode=ro" +
+		"&_pragma=query_only(1)" +
+		"&_pragma=busy_timeout(5000)"
+
+	db, err := sql.Open("sqlite", probeDSN)
+	if err != nil {
+		return "", false, fmt.Errorf("open read-only schema probe: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var metaExists int
+	if err := db.QueryRowContext(
+		ctx,
+		"SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta')",
+	).Scan(&metaExists); err != nil {
+		return "", false, fmt.Errorf("inspect meta table: %w", err)
+	}
+	if metaExists == 0 {
+		return "", false, nil
+	}
+
+	var version string
+	if err := db.QueryRowContext(
+		ctx,
+		"SELECT value FROM meta WHERE key='schema_version'",
+	).Scan(&version); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read schema_version: %w", err)
+	}
+	return version, true, nil
+}
+
+func isSupportedSchemaVersion(version string) bool {
+	switch version {
+	case "1", "2", "3", CurrentSchemaVersion:
+		return true
+	default:
+		return false
+	}
+}
 
 // Store owns the *sql.DB plus dimension-name → id caches.
 //
@@ -58,6 +120,17 @@ func OpenStore(dbPath string) (*Store, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("usage: empty SQLite db path")
 	}
+	preflightVersion, hasVersion, err := inspectExistingSchemaVersion(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("usage: inspect SQLite schema %s: %w", dbPath, err)
+	}
+	if hasVersion && !isSupportedSchemaVersion(preflightVersion) {
+		return nil, fmt.Errorf(
+			"usage: unexpected schema_version=%s (want %s)",
+			preflightVersion,
+			CurrentSchemaVersion,
+		)
+	}
 
 	// Per-connection pragmas via DSN: modernc.org/sqlite re-applies these on
 	// every new pooled connection, which matters for foreign_keys (per-conn)
@@ -79,7 +152,7 @@ func OpenStore(dbPath string) (*Store, error) {
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(0)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), storeOpenTimeout)
 	defer cancel()
 
 	if err := db.PingContext(ctx); err != nil {
@@ -134,10 +207,27 @@ func OpenStore(dbPath string) (*Store, error) {
 		}
 		version = "3"
 	}
+	if version == "3" {
+		if err := migrateV3ToV4(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("usage: migrate v3→v4: %w", err)
+		}
+		version = "4"
+	}
 
-	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
+	schemaTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("usage: begin schema transaction: %w", err)
+	}
+	if _, err := schemaTx.ExecContext(ctx, schemaSQL); err != nil {
+		_ = schemaTx.Rollback()
 		_ = db.Close()
 		return nil, fmt.Errorf("usage: apply schema: %w", err)
+	}
+	if err := schemaTx.Commit(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("usage: commit schema transaction: %w", err)
 	}
 
 	// Re-read in case schema.sql seeded the version on a fresh database.
@@ -146,9 +236,13 @@ func OpenStore(dbPath string) (*Store, error) {
 		return nil, fmt.Errorf("usage: read schema_version (post-apply): %w", err)
 	}
 
-	if version != schemaVersion {
+	if version != CurrentSchemaVersion {
 		_ = db.Close()
-		return nil, fmt.Errorf("usage: unexpected schema_version=%s (want %s)", version, schemaVersion)
+		return nil, fmt.Errorf("usage: unexpected schema_version=%s (want %s)", version, CurrentSchemaVersion)
+	}
+	if err := ensureIntegerStorageTriggers(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("usage: enforce integer storage: %w", err)
 	}
 
 	return &Store{db: db}, nil
@@ -206,6 +300,16 @@ func migrateV1ToV2(ctx context.Context, db *sql.DB) error {
 			_ = tx.Rollback()
 		}
 	}()
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`CREATE TABLE IF NOT EXISTS dim_provider (
+			id INTEGER PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE CHECK(name = trim(name)) CHECK(length(name) > 0)
+		)`,
+	); err != nil {
+		return fmt.Errorf("create dim_provider: %w", err)
+	}
 
 	// Add provider_id column to each fact table when missing. ALTER TABLE on
 	// a table that already has the column would fail; the columnExists guard
@@ -336,104 +440,84 @@ func migrateV2ToV3(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-type latencyBackfillRow struct {
-	tsNs       int64
-	modelID    int64
-	credID     sql.NullInt64
-	apiKeyID   sql.NullInt64
-	providerID sql.NullInt64
-	latencyMs  int64
-}
-
 func backfillLatencyBuckets(ctx context.Context, tx *sql.Tx, includeDay bool) error {
-	rows, err := tx.QueryContext(
-		ctx, `
-SELECT ts_ns, model_id, credential_id, api_key_id, provider_id, metadata
-  FROM events
- WHERE metadata IS NOT NULL AND metadata <> ''
-`,
-	)
-	if err != nil {
-		return fmt.Errorf("query latency metadata: %w", err)
+	var invalidMetadata int64
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COUNT(*)
+		   FROM events
+		  WHERE metadata IS NOT NULL
+		    AND metadata <> ''
+		    AND CASE
+		        WHEN json_valid(metadata) = 0 THEN 1
+		        ELSE
+		            json_type(metadata, '$.latency_ms') IS NOT NULL AND
+		            json_type(metadata, '$.latency_ms') <> 'null' AND
+		            (
+		                json_type(metadata, '$.latency_ms') <> 'integer' OR
+		                typeof(json_extract(metadata, '$.latency_ms')) <> 'integer'
+		            )
+		    END`,
+	).Scan(&invalidMetadata); err != nil {
+		return fmt.Errorf("validate latency metadata: %w", err)
+	}
+	if invalidMetadata > 0 {
+		log.Warnf("usage: skip latency backfill for %d invalid metadata records", invalidMetadata)
 	}
 
-	var updates []latencyBackfillRow
-	for rows.Next() {
-		var item latencyBackfillRow
-		var metadata sql.NullString
-		if err := rows.Scan(
-			&item.tsNs,
-			&item.modelID,
-			&item.credID,
-			&item.apiKeyID,
-			&item.providerID,
-			&metadata,
-		); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan latency metadata: %w", err)
-		}
-		if !metadata.Valid || metadata.String == "" {
-			continue
-		}
-		var meta eventMetadata
-		if err := json.Unmarshal([]byte(metadata.String), &meta); err != nil {
-			log.Warnf("usage: skip latency backfill metadata: %v", err)
-			continue
-		}
-		if meta.LatencyMs <= 0 {
-			continue
-		}
-		item.latencyMs = meta.LatencyMs
-		updates = append(updates, item)
+	if err := backfillLatencyBucket(ctx, tx, "hour_bucket", nsPerHour); err != nil {
+		return err
 	}
-	if err := rows.Err(); err != nil {
-		if errClose := rows.Close(); errClose != nil {
-			log.Warnf("usage: close latency metadata rows after iteration error: %v", errClose)
-		}
-		return fmt.Errorf("iterate latency metadata: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close latency metadata rows: %w", err)
-	}
-
-	for _, item := range updates {
-		hourNs := (item.tsNs / nsPerHour) * nsPerHour
-		if err := updateLatencyBucket(ctx, tx, "hour_bucket", item, hourNs); err != nil {
+	if includeDay {
+		if err := backfillLatencyBucket(ctx, tx, "day_bucket", nsPerDay); err != nil {
 			return err
-		}
-		if includeDay {
-			dayNs := (item.tsNs / nsPerDay) * nsPerDay
-			if err := updateLatencyBucket(ctx, tx, "day_bucket", item, dayNs); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
 }
 
-func updateLatencyBucket(ctx context.Context, tx *sql.Tx, table string, item latencyBackfillRow, bucketNs int64) error {
-	q := fmt.Sprintf(
-		`
-UPDATE %s
-   SET latency_ms_total = latency_ms_total + ?,
-       latency_samples = latency_samples + 1
- WHERE bucket_ts_ns = ?
-   AND model_id = ?
-   AND ifnull(credential_id, 0) = ifnull(?, 0)
-   AND ifnull(api_key_id, 0) = ifnull(?, 0)
-   AND ifnull(provider_id, 0) = ifnull(?, 0)
-`, table,
-	)
-	if _, err := tx.ExecContext(
-		ctx,
-		q,
-		item.latencyMs,
-		bucketNs,
-		item.modelID,
-		nullableID(item.credID),
-		nullableID(item.apiKeyID),
-		nullableID(item.providerID),
-	); err != nil {
+func backfillLatencyBucket(
+	ctx context.Context,
+	tx *sql.Tx,
+	table string,
+	bucketSize int64,
+) error {
+	bucketExpr := sqliteFloorBucketExpr("ts_ns", bucketSize)
+	statement := fmt.Sprintf(`
+		WITH event_latency AS (
+		    SELECT
+		        ts_ns, model_id, credential_id, api_key_id, provider_id,
+		        CASE WHEN json_valid(metadata)
+		             THEN json_extract(metadata, '$.latency_ms')
+		        END AS latency_ms,
+		        CASE WHEN json_valid(metadata)
+		             THEN json_type(metadata, '$.latency_ms')
+		        END AS latency_type
+		      FROM events
+		     WHERE metadata IS NOT NULL AND metadata <> ''
+		), latency AS (
+		    SELECT
+		        %s AS bucket_ts_ns,
+		        model_id, credential_id, api_key_id, provider_id,
+		        SUM(latency_ms) AS latency_ms_total,
+		        COUNT(*) AS latency_samples
+		      FROM event_latency
+		     WHERE latency_type = 'integer'
+		       AND typeof(latency_ms) = 'integer'
+		       AND latency_ms > 0
+		     GROUP BY %s, model_id, credential_id, api_key_id, provider_id
+		)
+		UPDATE %s AS bucket
+		   SET latency_ms_total = latency.latency_ms_total,
+		       latency_samples = latency.latency_samples
+		  FROM latency
+		 WHERE bucket.bucket_ts_ns = latency.bucket_ts_ns
+		   AND bucket.model_id = latency.model_id
+		   AND bucket.credential_id IS latency.credential_id
+		   AND bucket.api_key_id IS latency.api_key_id
+		   AND bucket.provider_id IS latency.provider_id
+	`, bucketExpr, bucketExpr, table)
+	if _, err := tx.ExecContext(ctx, statement); err != nil {
 		return fmt.Errorf("backfill %s latency: %w", table, err)
 	}
 	return nil
@@ -487,13 +571,65 @@ func (s *Store) resolveDimID(
 	if err := exec.QueryRowContext(ctx, "SELECT id FROM "+table+" WHERE name = ?", name).Scan(&id); err != nil {
 		return 0, false, fmt.Errorf("usage: select from %s: %w", table, err)
 	}
-	cache.Store(name, id)
+	if _, inTransaction := exec.(*sql.Tx); !inTransaction {
+		cache.Store(name, id)
+	}
 	return id, true, nil
 }
 
 // ResolveModelID returns the dim_model id, falling back to "unknown" when the
 // caller passes an empty model name. Model is the only dim that is NOT NULL on
 // the events table, so we never return NullInt64 here.
+func (s *Store) warmDimensionCaches(ctx context.Context, details []FlatDetail) error {
+	if s == nil || s.db == nil || len(details) == 0 {
+		return nil
+	}
+	type candidate struct {
+		cache *sync.Map
+		table string
+		name  string
+	}
+	seen := make(map[string]struct{})
+	for i := range details {
+		detail := &details[i]
+		model := strings.TrimSpace(detail.Model)
+		if model == "" {
+			model = "unknown"
+		}
+		candidates := []candidate{
+			{cache: &s.modelCache, table: "dim_model", name: model},
+			{cache: &s.apiKeyCache, table: "dim_api_key", name: strings.TrimSpace(detail.APIKey)},
+			{cache: &s.sourceCache, table: "dim_source", name: strings.TrimSpace(detail.Source)},
+			{cache: &s.authIndexCache, table: "dim_auth_index", name: strings.TrimSpace(detail.AuthIndex)},
+			{cache: &s.credentialCache, table: "dim_credential", name: credentialName(detail.Source, detail.AuthIndex)},
+			{cache: &s.providerCache, table: "dim_provider", name: strings.TrimSpace(detail.Provider)},
+		}
+		for _, item := range candidates {
+			if item.name == "" {
+				continue
+			}
+			key := item.table + "\x00" + item.name
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			if _, ok := item.cache.Load(item.name); ok {
+				continue
+			}
+			var id int64
+			if err := s.db.QueryRowContext(
+				ctx,
+				"SELECT id FROM "+item.table+" WHERE name = ?",
+				item.name,
+			).Scan(&id); err != nil {
+				return fmt.Errorf("usage: warm %s cache for %q: %w", item.table, item.name, err)
+			}
+			item.cache.Store(item.name, id)
+		}
+	}
+	return nil
+}
+
 func (s *Store) ResolveModelID(ctx context.Context, exec dbExec, name string) (int64, error) {
 	if strings.TrimSpace(name) == "" {
 		name = "unknown"
@@ -562,56 +698,41 @@ func credentialName(source, authIndex string) string {
 	return strings.TrimSpace(authIndex)
 }
 
-// ComputeFingerprint produces a 20-byte SHA-1 over the canonical dedupKey
-// payload. Field order MUST stay aligned with dedupKey() in logger_plugin.go
-// so the same logical event arriving via v2 detail / v1 nested / frontend
-// CSV / frontend JSON / /usage/export collapses onto one row through the
-// events.fingerprint UNIQUE constraint.
-//
-// Provider compatibility: when Provider is empty (legacy JSON imports, where
-// the field never existed on disk) the payload format reverts to the v1 11-
-// field layout so historical rows reproduce the same SHA-1 the JSON era
-// produced. When Provider is set (live writes from the v2 LoggerPlugin) the
-// 12-field layout is used so the same email speaking to two providers no
-// longer dedupes to a single row.
-//
-// SHA-1 is used as a fast 160-bit hash, not for security; collision risk for a
-// well-formed dedup payload is negligible (birthday bound ≫ realistic event
-// counts) and any duplicate would harmlessly produce INSERT OR IGNORE no-ops.
+// ComputeFingerprint produces a 20-byte digest over an unambiguous, versioned payload
 func ComputeFingerprint(d FlatDetail) [20]byte {
 	tokens := normaliseTokenStats(d.Tokens)
-	var payload string
-	if d.Provider == "" {
-		payload = fmt.Sprintf(
-			"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
-			d.APIKey,
-			d.Model,
-			d.Timestamp.UTC().Format(time.RFC3339Nano),
-			d.Source,
-			d.AuthIndex,
-			d.Failed,
-			tokens.InputTokens,
-			tokens.OutputTokens,
-			tokens.ReasoningTokens,
-			tokens.CachedTokens,
-			tokens.TotalTokens,
-		)
+	var payload bytes.Buffer
+	payload.WriteString("usage-fingerprint-v2")
+	writeFingerprintString(&payload, d.RequestID)
+	writeFingerprintString(&payload, d.APIKey)
+	writeFingerprintString(&payload, d.Model)
+	writeFingerprintString(&payload, d.Timestamp.UTC().Format(time.RFC3339Nano))
+	writeFingerprintString(&payload, d.Source)
+	writeFingerprintString(&payload, d.AuthIndex)
+	writeFingerprintString(&payload, d.Provider)
+	if d.Failed {
+		payload.WriteByte(1)
 	} else {
-		payload = fmt.Sprintf(
-			"%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
-			d.APIKey,
-			d.Model,
-			d.Timestamp.UTC().Format(time.RFC3339Nano),
-			d.Source,
-			d.AuthIndex,
-			d.Provider,
-			d.Failed,
-			tokens.InputTokens,
-			tokens.OutputTokens,
-			tokens.ReasoningTokens,
-			tokens.CachedTokens,
-			tokens.TotalTokens,
-		)
+		payload.WriteByte(0)
 	}
-	return sha1.Sum([]byte(payload))
+	writeFingerprintInt64(&payload, tokens.InputTokens)
+	writeFingerprintInt64(&payload, tokens.OutputTokens)
+	writeFingerprintInt64(&payload, tokens.ReasoningTokens)
+	writeFingerprintInt64(&payload, tokens.CachedTokens)
+	writeFingerprintInt64(&payload, tokens.TotalTokens)
+	digest := sha256.Sum256(payload.Bytes())
+	var fingerprint [20]byte
+	copy(fingerprint[:], digest[:len(fingerprint)])
+	return fingerprint
+}
+
+func writeFingerprintString(payload *bytes.Buffer, value string) {
+	writeFingerprintInt64(payload, int64(len(value)))
+	payload.WriteString(value)
+}
+
+func writeFingerprintInt64(payload *bytes.Buffer, value int64) {
+	var encoded [8]byte
+	binary.LittleEndian.PutUint64(encoded[:], uint64(value))
+	payload.Write(encoded[:])
 }

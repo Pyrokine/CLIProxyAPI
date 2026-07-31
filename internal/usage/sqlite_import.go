@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Parser describes one importable on-disk format. ParseAny tries Detect on
@@ -98,11 +100,9 @@ func (flatArrayParser) Parse(data []byte) ([]FlatDetail, error) {
 }
 
 // csvParser handles the events CSV the frontend produces from the request
-// events tab. Frontend writes both `api_key` (masked, e.g. "sk-***-abc") and
-// `raw_api_key` (full secret) plus `auth_index` since R-547 — the parser
-// prefers raw_api_key when present so re-imports dedup correctly against the
-// originals; falls back to the masked value for legacy CSVs (in which case
-// fingerprint won't align with unmasked events).
+// events tab. raw_api_key is preferred when an authorized export includes it.
+// Masked api_key values are display labels rather than stable identities, so
+// masked-only CSVs leave APIKey empty instead of creating false dimensions.
 type csvParser struct{}
 
 // csvRequiredHeaders is the minimum header set the parser needs to recover a
@@ -139,7 +139,14 @@ func (csvParser) Parse(data []byte) ([]FlatDetail, error) {
 	}
 	idx := make(map[string]int, len(header))
 	for i, col := range header {
-		idx[strings.ToLower(strings.TrimSpace(col))] = i
+		name := strings.ToLower(strings.TrimSpace(col))
+		if name == "" {
+			return nil, fmt.Errorf("parse csv header: empty column at position %d", i+1)
+		}
+		if _, exists := idx[name]; exists {
+			return nil, fmt.Errorf("parse csv header: duplicate column %q", name)
+		}
+		idx[name] = i
 	}
 	get := func(row []string, name string) string {
 		i, ok := idx[name]
@@ -148,25 +155,40 @@ func (csvParser) Parse(data []byte) ([]FlatDetail, error) {
 		}
 		return strings.TrimSpace(row[i])
 	}
-	parseInt := func(s string) int64 {
-		if s == "" {
-			return 0
+	parseInt := func(lineNo int, row []string, name string, required bool) (int64, error) {
+		raw := get(row, name)
+		if raw == "" {
+			if required {
+				return 0, fmt.Errorf("parse csv line %d %s: empty integer", lineNo, name)
+			}
+			return 0, nil
 		}
-		n, _ := strconv.ParseInt(s, 10, 64)
-		return n
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("parse csv line %d %s %q: %w", lineNo, name, raw, err)
+		}
+		if n < 0 {
+			return 0, fmt.Errorf("parse csv line %d %s: negative value %d", lineNo, name, n)
+		}
+		return n, nil
 	}
-	parseThinking := func(row []string) *Thinking {
+	parseThinking := func(lineNo int, row []string) (*Thinking, error) {
 		intensity := get(row, "thinking_intensity")
 		mode := get(row, "thinking_mode")
 		level := get(row, "thinking_level")
 		budgetText := get(row, "thinking_budget")
 		var budget *int
 		if budgetText != "" {
-			if n, err := strconv.Atoi(budgetText); err == nil {
-				budget = &n
+			n, err := strconv.Atoi(budgetText)
+			if err != nil {
+				return nil, fmt.Errorf("parse csv line %d thinking_budget %q: %w", lineNo, budgetText, err)
 			}
+			if n < 0 {
+				return nil, fmt.Errorf("parse csv line %d thinking_budget: negative value %d", lineNo, n)
+			}
+			budget = &n
 		}
-		return cloneThinking(&Thinking{Intensity: intensity, Mode: mode, Level: level, Budget: budget})
+		return cloneThinking(&Thinking{Intensity: intensity, Mode: mode, Level: level, Budget: budget}), nil
 	}
 
 	var details []FlatDetail
@@ -187,32 +209,71 @@ func (csvParser) Parse(data []byte) ([]FlatDetail, error) {
 				return nil, fmt.Errorf("parse csv line %d timestamp %q: %w", lineNo, get(row, "timestamp"), err)
 			}
 		}
-		// R-547:优先 raw_api_key 列(R-547 后 frontend 导出的 CSV 含此列),
-		// 缺失时退回 api_key(可能是 masked,fingerprint 一致性会打折)。
 		apiKey := get(row, "raw_api_key")
 		if apiKey == "" {
-			apiKey = get(row, "api_key")
+			candidate := get(row, "api_key")
+			if !isMaskedAPIKey(candidate) {
+				apiKey = candidate
+			}
+		}
+		result := strings.ToLower(get(row, "result"))
+		if result != "success" && result != "failed" {
+			return nil, fmt.Errorf("parse csv line %d result %q: want success or failed", lineNo, result)
+		}
+		latencyMs, err := parseInt(lineNo, row, "latency_ms", false)
+		if err != nil {
+			return nil, err
+		}
+		inputTokens, err := parseInt(lineNo, row, "input_tokens", true)
+		if err != nil {
+			return nil, err
+		}
+		outputTokens, err := parseInt(lineNo, row, "output_tokens", true)
+		if err != nil {
+			return nil, err
+		}
+		reasoningTokens, err := parseInt(lineNo, row, "reasoning_tokens", false)
+		if err != nil {
+			return nil, err
+		}
+		cachedTokens, err := parseInt(lineNo, row, "cached_tokens", false)
+		if err != nil {
+			return nil, err
+		}
+		totalTokens, err := parseInt(lineNo, row, "total_tokens", true)
+		if err != nil {
+			return nil, err
+		}
+		thinking, err := parseThinking(lineNo, row)
+		if err != nil {
+			return nil, err
+		}
+		requestServiceTier := get(row, "request_service_tier")
+		if requestServiceTier == "" {
+			requestServiceTier = get(row, "service_tier")
 		}
 		details = append(
 			details, FlatDetail{
-				Timestamp:       ts,
-				Model:           get(row, "model"),
-				Source:          get(row, "source"),
-				AuthIndex:       get(row, "auth_index"),
-				Provider:        get(row, "provider"),
-				APIKey:          apiKey,
-				LatencyMs:       parseInt(get(row, "latency_ms")),
-				ReasoningEffort: get(row, "reasoning_effort"),
-				ServiceTier:     get(row, "service_tier"),
-				ExecutorType:    get(row, "executor_type"),
-				Thinking:        parseThinking(row),
-				Failed:          strings.EqualFold(get(row, "result"), "failed"),
+				Timestamp:           ts,
+				Model:               get(row, "model"),
+				Source:              get(row, "source"),
+				AuthIndex:           get(row, "auth_index"),
+				Provider:            get(row, "provider"),
+				APIKey:              apiKey,
+				LatencyMs:           latencyMs,
+				ReasoningEffort:     get(row, "reasoning_effort"),
+				ServiceTier:         requestServiceTier,
+				RequestServiceTier:  requestServiceTier,
+				ResponseServiceTier: get(row, "response_service_tier"),
+				ExecutorType:        get(row, "executor_type"),
+				Thinking:            thinking,
+				Failed:              result == "failed",
 				Tokens: tokenStats{
-					InputTokens:     parseInt(get(row, "input_tokens")),
-					OutputTokens:    parseInt(get(row, "output_tokens")),
-					ReasoningTokens: parseInt(get(row, "reasoning_tokens")),
-					CachedTokens:    parseInt(get(row, "cached_tokens")),
-					TotalTokens:     parseInt(get(row, "total_tokens")),
+					InputTokens:     inputTokens,
+					OutputTokens:    outputTokens,
+					ReasoningTokens: reasoningTokens,
+					CachedTokens:    cachedTokens,
+					TotalTokens:     totalTokens,
 				},
 			},
 		)
@@ -220,9 +281,36 @@ func (csvParser) Parse(data []byte) ([]FlatDetail, error) {
 	return details, nil
 }
 
+func normalizeFlatDetailServiceTiers(detail *FlatDetail) {
+	if detail == nil {
+		return
+	}
+	detail.RequestServiceTier = strings.TrimSpace(detail.RequestServiceTier)
+	if detail.RequestServiceTier == "" {
+		detail.RequestServiceTier = strings.TrimSpace(detail.ServiceTier)
+	}
+	detail.ServiceTier = detail.RequestServiceTier
+	detail.ResponseServiceTier = strings.TrimSpace(detail.ResponseServiceTier)
+}
+
+func isMaskedAPIKey(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	if value == "***" {
+		return true
+	}
+	parts := strings.Split(value, "...")
+	if len(parts) != 2 {
+		return false
+	}
+	return (len(parts[0]) == 4 && len(parts[1]) == 4) ||
+		(len(parts[0]) == 2 && len(parts[1]) == 2)
+}
+
 func csvReaderFor(data []byte) *csv.Reader {
 	r := csv.NewReader(bytes.NewReader(data))
-	r.FieldsPerRecord = -1 // tolerate mixed-width rows from hand-edited files
 	r.TrimLeadingSpace = true
 	return r
 }
@@ -239,13 +327,30 @@ var allParsers = []Parser{
 }
 
 // ParseAny detects the format and returns the flattened FlatDetail slice.
-// Returns the matched parser type for diagnostics in the caller's logs.
+// Encrypted backups require ParseAnyWithSecret; legacy formats remain importable
+// without an encryption key.
 func ParseAny(data []byte) ([]FlatDetail, string, error) {
+	return ParseAnyWithSecret(data, "")
+}
+
+// ParseAnyWithSecret detects encrypted v3 backups before the legacy parser
+// chain. The secret is ignored for formats that never contained encrypted keys.
+func ParseAnyWithSecret(data []byte, secret string) ([]FlatDetail, string, error) {
+	if IsUsageBackup(data) {
+		details, err := ParseUsageBackup(data, secret)
+		if err != nil {
+			return nil, "usageBackupV3", err
+		}
+		return details, "usageBackupV3", nil
+	}
 	for _, p := range allParsers {
 		if p.Detect(data) {
 			details, err := p.Parse(data)
 			if err != nil {
 				return nil, fmt.Sprintf("%T", p), err
+			}
+			for index := range details {
+				normalizeFlatDetailServiceTiers(&details[index])
 			}
 			return details, fmt.Sprintf("%T", p), nil
 		}
@@ -267,21 +372,27 @@ func flattenSnapshot(snap StatisticsSnapshot) []FlatDetail {
 			cleanModel := normaliseDimName(modelName, "unknown")
 			cleanAPI := normaliseDimName(apiName, "")
 			for _, d := range model.Details {
+				requestServiceTier := strings.TrimSpace(d.RequestServiceTier)
+				if requestServiceTier == "" {
+					requestServiceTier = strings.TrimSpace(d.ServiceTier)
+				}
 				out = append(
 					out, FlatDetail{
-						Timestamp:       d.Timestamp,
-						Model:           cleanModel,
-						Source:          normaliseDimName(d.Source, ""),
-						AuthIndex:       normaliseDimName(d.AuthIndex, ""),
-						APIKey:          cleanAPI,
-						LatencyMs:       d.LatencyMs,
-						ReasoningEffort: strings.TrimSpace(d.ReasoningEffort),
-						ServiceTier:     strings.TrimSpace(d.ServiceTier),
-						ExecutorType:    strings.TrimSpace(d.ExecutorType),
-						Thinking:        cloneThinking(d.Thinking),
-						ResponseHeaders: cloneHTTPHeader(d.ResponseHeaders),
-						Tokens:          normaliseTokenStats(d.Tokens),
-						Failed:          d.Failed,
+						Timestamp:           d.Timestamp,
+						Model:               cleanModel,
+						Source:              normaliseDimName(d.Source, ""),
+						AuthIndex:           normaliseDimName(d.AuthIndex, ""),
+						APIKey:              cleanAPI,
+						LatencyMs:           d.LatencyMs,
+						ReasoningEffort:     strings.TrimSpace(d.ReasoningEffort),
+						ServiceTier:         requestServiceTier,
+						RequestServiceTier:  requestServiceTier,
+						ResponseServiceTier: strings.TrimSpace(d.ResponseServiceTier),
+						ExecutorType:        strings.TrimSpace(d.ExecutorType),
+						Thinking:            cloneThinking(d.Thinking),
+						ResponseHeaders:     cloneHTTPHeader(d.ResponseHeaders),
+						Tokens:              d.Tokens,
+						Failed:              d.Failed,
 					},
 				)
 			}
@@ -312,6 +423,10 @@ func normaliseDimName(raw, fallback string) string {
 	return s
 }
 
+// ErrInvalidImport marks payload parsing and validation failures that callers
+// may report as client errors. Storage and maintenance errors remain distinct.
+var ErrInvalidImport = errors.New("usage: invalid import payload")
+
 // ImportResult mirrors RequestStatistics.MergeSnapshot's MergeResult so the
 // HTTP handler can keep the same response shape.
 type ImportResult struct {
@@ -323,36 +438,54 @@ type ImportResult struct {
 	HasDayRange   bool
 }
 
-func importDayRange(details []FlatDetail) (int64, int64, bool) {
+func importDayRange(details []FlatDetail) (int64, int64, bool, error) {
 	if len(details) == 0 {
-		return 0, 0, false
+		return 0, 0, false, nil
 	}
-	earliest := details[0].Timestamp.UTC().Truncate(24 * time.Hour).UnixNano()
-	latest := earliest
-	for i := 1; i < len(details); i++ {
-		dayNs := details[i].Timestamp.UTC().Truncate(24 * time.Hour).UnixNano()
-		if dayNs < earliest {
+	var earliest, latest int64
+	for i := range details {
+		if _, err := validatedTokenStats(details[i].Tokens); err != nil {
+			return 0, 0, false, fmt.Errorf("event[%d]: %w", i, err)
+		}
+		_, _, dayNs, err := unixNanoBucketStarts(details[i].Timestamp)
+		if err != nil {
+			return 0, 0, false, fmt.Errorf("event[%d] timestamp: %w", i, err)
+		}
+		if i == 0 || dayNs < earliest {
 			earliest = dayNs
 		}
-		if dayNs > latest {
+		if i == 0 || dayNs > latest {
 			latest = dayNs
 		}
 	}
-	return earliest, latest, true
+	return earliest, latest, true, nil
 }
 
-// ImportBytes is the synchronous entry point used by HTTP handlers. It parses
-// the payload, then imports every detail in a single transaction so the
-// caller sees consistent counts on success.
+// ImportBytes is the synchronous entry point for legacy, non-encrypted input.
 func ImportBytes(ctx context.Context, store *Store, priceFn PriceFunc, data []byte) (ImportResult, error) {
+	return ImportBytesWithSecret(ctx, store, priceFn, data, "")
+}
+
+// ImportBytesWithSecret parses encrypted backups and every legacy format, then
+// imports all details in one transaction so the caller sees consistent counts.
+func ImportBytesWithSecret(
+	ctx context.Context,
+	store *Store,
+	priceFn PriceFunc,
+	data []byte,
+	secret string,
+) (ImportResult, error) {
 	if store == nil {
 		return ImportResult{}, errors.New("usage: import on nil store")
 	}
-	details, format, err := ParseAny(data)
+	details, format, err := ParseAnyWithSecret(data, secret)
 	if err != nil {
-		return ImportResult{}, err
+		return ImportResult{}, fmt.Errorf("%w: %v", ErrInvalidImport, err)
 	}
-	earliestDayNs, latestDayNs, hasDayRange := importDayRange(details)
+	earliestDayNs, latestDayNs, hasDayRange, err := importDayRange(details)
+	if err != nil {
+		return ImportResult{Format: format}, fmt.Errorf("%w: %v", ErrInvalidImport, err)
+	}
 	added, skipped, err := importDetails(ctx, store, priceFn, details)
 	if err != nil {
 		return ImportResult{Format: format}, err
@@ -374,10 +507,9 @@ func ImportFile(ctx context.Context, store *Store, priceFn PriceFunc, path strin
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("stat %s: %w", path, err)
 	}
-	const maxImportBytes = 100 << 20
-	if info.Size() > maxImportBytes {
+	if info.Size() > MaxPortableBackupBytes {
 		return ImportResult{}, fmt.Errorf(
-			"read %s: file too large (%d bytes > %d bytes limit)", path, info.Size(), maxImportBytes,
+			"read %s: file too large (%d bytes > %d bytes limit)", path, info.Size(), MaxPortableBackupBytes,
 		)
 	}
 	data, err := os.ReadFile(path)
@@ -387,31 +519,10 @@ func ImportFile(ctx context.Context, store *Store, priceFn PriceFunc, path strin
 	return ImportBytes(ctx, store, priceFn, data)
 }
 
-// importDetails persists a slice of FlatDetail in chunked transactions. We
-// chunk because a single 60MB file can hold hundreds of thousands of records,
-// and one giant tx would block writers on the WAL for too long.
+// importDetails persists the entire payload in one transaction. Imports are
+// management operations, and atomicity is more important than allowing live
+// writers to interleave with a partially visible import.
 func importDetails(ctx context.Context, store *Store, priceFn PriceFunc, details []FlatDetail) (
-	added, skipped int,
-	err error,
-) {
-	const chunkSize = 1000
-
-	for start := 0; start < len(details); start += chunkSize {
-		end := start + chunkSize
-		if end > len(details) {
-			end = len(details)
-		}
-		a, s, err := importChunk(ctx, store, priceFn, details[start:end])
-		if err != nil {
-			return added, skipped, err
-		}
-		added += a
-		skipped += s
-	}
-	return added, skipped, nil
-}
-
-func importChunk(ctx context.Context, store *Store, priceFn PriceFunc, details []FlatDetail) (
 	added, skipped int,
 	err error,
 ) {
@@ -428,20 +539,38 @@ func importChunk(ctx context.Context, store *Store, priceFn PriceFunc, details [
 			_ = tx.Rollback()
 		}
 	}()
+	dirtyDays := make(map[int64]struct{})
 	for i := range details {
 		ok, err := persistEvent(ctx, tx, store, &details[i], priceFn)
 		if err != nil {
-			return added, skipped, fmt.Errorf("import event[%d]: %w", i, err)
+			return 0, 0, fmt.Errorf("import event[%d]: %w", i, err)
 		}
 		if ok {
-			added++
+			added += 1
+			_, _, dayNs, bucketErr := unixNanoBucketStarts(details[i].Timestamp)
+			if bucketErr != nil {
+				return 0, 0, fmt.Errorf("import event[%d] timestamp: %w", i, bucketErr)
+			}
+			dirtyDays[dayNs] = struct{}{}
 		} else {
-			skipped++
+			skipped += 1
+		}
+	}
+	for dayNs := range dirtyDays {
+		if err := store.rollupDayTx(ctx, tx, dayNs); err != nil {
+			return 0, 0, fmt.Errorf(
+				"rollup imported day %s: %w",
+				time.Unix(0, dayNs).UTC().Format("2006-01-02"),
+				err,
+			)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return added, skipped, fmt.Errorf("commit import tx: %w", err)
+		return 0, 0, fmt.Errorf("commit import tx: %w", err)
 	}
 	committed = true
+	if err := store.warmDimensionCaches(ctx, details); err != nil {
+		log.Warnf("usage: warm dimension caches after import: %v", err)
+	}
 	return added, skipped, nil
 }

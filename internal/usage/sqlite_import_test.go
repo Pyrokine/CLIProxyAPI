@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +68,154 @@ func TestParseAny_DetectsAllFormats(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestCSVParserStrictValidation(t *testing.T) {
+	const header = "timestamp,model,source,api_key,result,input_tokens,output_tokens,total_tokens"
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{
+			name:    "empty header",
+			payload: header + ",\n2026-04-27T10:00:00Z,m,src,k,success,1,2,3,value",
+			want:    "empty column",
+		},
+		{
+			name:    "duplicate header",
+			payload: header + ",api_key\n2026-04-27T10:00:00Z,m,src,k,success,1,2,3,k2",
+			want:    "duplicate column",
+		},
+		{
+			name:    "mixed width",
+			payload: header + "\n2026-04-27T10:00:00Z,m,src,k,success,1,2,3,extra",
+			want:    "wrong number of fields",
+		},
+		{
+			name:    "invalid integer",
+			payload: header + "\n2026-04-27T10:00:00Z,m,src,k,success,invalid,2,3",
+			want:    "input_tokens",
+		},
+		{
+			name:    "negative integer",
+			payload: header + "\n2026-04-27T10:00:00Z,m,src,k,success,1,-2,3",
+			want:    "negative value",
+		},
+		{
+			name:    "unknown result",
+			payload: header + "\n2026-04-27T10:00:00Z,m,src,k,pending,1,2,3",
+			want:    "want success or failed",
+		},
+		{
+			name:    "invalid thinking budget",
+			payload: header + ",thinking_budget\n2026-04-27T10:00:00Z,m,src,k,success,1,2,3,nope",
+			want:    "thinking_budget",
+		},
+		{
+			name:    "negative thinking budget",
+			payload: header + ",thinking_budget\n2026-04-27T10:00:00Z,m,src,k,success,1,2,3,-1",
+			want:    "negative value",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, err := ParseAny([]byte(test.payload))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ParseAny error = %v, want contain %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCSVParserDoesNotUseMaskedAPIKeyAsIdentity(t *testing.T) {
+	payload := []byte(strings.Join(
+		[]string{
+			"timestamp,model,source,api_key,result,input_tokens,output_tokens,total_tokens",
+			"2026-04-27T10:00:00Z,m,src,abcd...wxyz,success,1,2,3",
+		},
+		"\n",
+	))
+	details, _, err := ParseAny(payload)
+	if err != nil {
+		t.Fatalf("ParseAny: %v", err)
+	}
+	if len(details) != 1 || details[0].APIKey != "" {
+		t.Fatalf("masked API key parsed as identity: %+v", details)
+	}
+}
+
+func TestImportBytesRejectsInvalidJSONDetails(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{
+			name: "negative token in flat array",
+			payload: `[{"timestamp":"2026-04-27T10:00:00Z","model":"m",` +
+				`"tokens":{"input_tokens":-1}}]`,
+			want: "input_tokens must be non-negative",
+		},
+		{
+			name: "negative token in snapshot envelope",
+			payload: `{"version":1,"usage":{"apis":{"k":{"models":{"m":{"details":[` +
+				`{"timestamp":"2026-04-27T10:00:00Z","tokens":{"total_tokens":-1}}` +
+				`]}}}}}}`,
+			want: "total_tokens must be non-negative",
+		},
+		{
+			name: "timestamp outside UnixNano range",
+			payload: `[{"timestamp":"9999-01-01T00:00:00Z","model":"m",` +
+				`"tokens":{"total_tokens":1}}]`,
+			want: "outside the UnixNano range",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := openTestStore(t)
+			_, err := ImportBytes(context.Background(), store, nil, []byte(test.payload))
+			if !errors.Is(err, ErrInvalidImport) || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("ImportBytes error = %v, want ErrInvalidImport containing %q", err, test.want)
+			}
+			var events int64
+			if countErr := store.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); countErr != nil {
+				t.Fatalf("count events: %v", countErr)
+			}
+			if events != 0 {
+				t.Fatalf("events = %d after invalid import, want 0", events)
+			}
+		})
+	}
+}
+
+func TestImportBytesRollsBackWholePayloadOnPersistError(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	payload := []byte(`[
+		{"timestamp":"2026-04-27T10:00:00Z","model":"good-1","tokens":{"input_tokens":1,"total_tokens":1}},
+		{"timestamp":"2026-04-27T10:01:00Z","model":"bad","tokens":{"input_tokens":1,"total_tokens":1}},
+		{"timestamp":"2026-04-27T10:02:00Z","model":"good-2","tokens":{"input_tokens":1,"total_tokens":1}}
+	]`)
+	priceFn := func(model string) (float64, float64, float64, bool) {
+		if model == "bad" {
+			return math.NaN(), 0, 0, true
+		}
+		return 1, 0, 0, true
+	}
+
+	_, err := ImportBytes(ctx, store, priceFn, payload)
+	if err == nil || !strings.Contains(err.Error(), "import event[1]") {
+		t.Fatalf("ImportBytes error = %v, want event[1] rejection", err)
+	}
+	for _, table := range []string{"events", "hour_bucket", "dim_model"} {
+		var count int64
+		if err := store.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s rows=%d after failed import, want 0", table, count)
+		}
 	}
 }
 
@@ -170,28 +320,58 @@ func TestFingerprint_StableAcrossFormats(t *testing.T) {
 // then via v1 nested snapshot and verifies the second import skips the row
 // (fingerprint UNIQUE).
 func TestCSVParserPreservesRuntimeMetadata(t *testing.T) {
-	payload := []byte(strings.Join(
+	legacyPayload := []byte(strings.Join(
 		[]string{
 			"timestamp,model,source,api_key,result,input_tokens,output_tokens,total_tokens,reasoning_effort,service_tier,executor_type",
 			`2026-04-27T10:00:00Z,m,src,k,success,10,20,30,medium,flex,OpenAICompatExecutor`,
 		}, "\n",
 	))
 
+	legacyDetails, _, err := ParseAny(legacyPayload)
+	if err != nil {
+		t.Fatalf("ParseAny legacy CSV: %v", err)
+	}
+	if len(legacyDetails) != 1 {
+		t.Fatalf("legacy details len=%d, want 1", len(legacyDetails))
+	}
+	if got := legacyDetails[0].ReasoningEffort; got != "medium" {
+		t.Fatalf("legacy ReasoningEffort = %q, want medium", got)
+	}
+	if got := legacyDetails[0].ServiceTier; got != "flex" {
+		t.Fatalf("legacy ServiceTier = %q, want flex", got)
+	}
+	if got := legacyDetails[0].RequestServiceTier; got != "flex" {
+		t.Fatalf("legacy RequestServiceTier = %q, want flex", got)
+	}
+	if got := legacyDetails[0].ResponseServiceTier; got != "" {
+		t.Fatalf("legacy ResponseServiceTier = %q, want empty", got)
+	}
+	if got := legacyDetails[0].ExecutorType; got != "OpenAICompatExecutor" {
+		t.Fatalf("legacy ExecutorType = %q, want OpenAICompatExecutor", got)
+	}
+
+	payload := []byte(strings.Join(
+		[]string{
+			"timestamp,model,source,api_key,result,input_tokens,output_tokens,total_tokens,reasoning_effort,service_tier,request_service_tier,response_service_tier,executor_type",
+			`2026-04-27T10:00:00Z,m,src,k,success,10,20,30,medium,auto,flex,default,OpenAICompatExecutor`,
+		}, "\n",
+	))
+
 	details, _, err := ParseAny(payload)
 	if err != nil {
-		t.Fatalf("ParseAny: %v", err)
+		t.Fatalf("ParseAny CSV: %v", err)
 	}
 	if len(details) != 1 {
 		t.Fatalf("details len=%d, want 1", len(details))
 	}
-	if got := details[0].ReasoningEffort; got != "medium" {
-		t.Fatalf("ReasoningEffort = %q, want medium", got)
-	}
 	if got := details[0].ServiceTier; got != "flex" {
 		t.Fatalf("ServiceTier = %q, want flex", got)
 	}
-	if got := details[0].ExecutorType; got != "OpenAICompatExecutor" {
-		t.Fatalf("ExecutorType = %q, want OpenAICompatExecutor", got)
+	if got := details[0].RequestServiceTier; got != "flex" {
+		t.Fatalf("RequestServiceTier = %q, want flex", got)
+	}
+	if got := details[0].ResponseServiceTier; got != "default" {
+		t.Fatalf("ResponseServiceTier = %q, want default", got)
 	}
 }
 
@@ -204,11 +384,13 @@ func TestFlattenSnapshotPreservesRuntimeMetadata(t *testing.T) {
 					"m": {
 						Details: []requestDetail{
 							{
-								Timestamp:       ts,
-								ReasoningEffort: "medium",
-								ServiceTier:     "flex",
-								ExecutorType:    "OpenAICompatExecutor",
-								Tokens:          tokenStats{TotalTokens: 30},
+								Timestamp:           ts,
+								ReasoningEffort:     "medium",
+								ServiceTier:         "auto",
+								RequestServiceTier:  "flex",
+								ResponseServiceTier: "default",
+								ExecutorType:        "OpenAICompatExecutor",
+								Tokens:              tokenStats{TotalTokens: 30},
 							},
 						},
 					},
@@ -227,8 +409,53 @@ func TestFlattenSnapshotPreservesRuntimeMetadata(t *testing.T) {
 	if got := flat[0].ServiceTier; got != "flex" {
 		t.Fatalf("ServiceTier = %q, want flex", got)
 	}
+	if got := flat[0].RequestServiceTier; got != "flex" {
+		t.Fatalf("RequestServiceTier = %q, want flex", got)
+	}
+	if got := flat[0].ResponseServiceTier; got != "default" {
+		t.Fatalf("ResponseServiceTier = %q, want default", got)
+	}
 	if got := flat[0].ExecutorType; got != "OpenAICompatExecutor" {
 		t.Fatalf("ExecutorType = %q, want OpenAICompatExecutor", got)
+	}
+}
+
+func TestMergeSnapshotHookPreservesServiceTiers(t *testing.T) {
+	ts, _ := time.Parse(time.RFC3339, "2026-04-27T10:00:00Z")
+	snap := StatisticsSnapshot{
+		APIs: map[string]aPISnapshot{
+			"k": {
+				Models: map[string]modelSnapshot{
+					"m": {
+						Details: []requestDetail{
+							{
+								Timestamp:           ts,
+								ServiceTier:         "auto",
+								RequestServiceTier:  "flex",
+								ResponseServiceTier: "default",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	var imported FlatDetail
+	result := newRequestStatistics().MergeSnapshot(snap, func(detail FlatDetail) {
+		imported = detail
+	})
+	if result.Added != 1 {
+		t.Fatalf("MergeSnapshot added=%d, want 1", result.Added)
+	}
+	if got := imported.ServiceTier; got != "flex" {
+		t.Fatalf("ServiceTier = %q, want flex", got)
+	}
+	if got := imported.RequestServiceTier; got != "flex" {
+		t.Fatalf("RequestServiceTier = %q, want flex", got)
+	}
+	if got := imported.ResponseServiceTier; got != "default" {
+		t.Fatalf("ResponseServiceTier = %q, want default", got)
 	}
 }
 
@@ -278,6 +505,127 @@ func TestImportBytes_ReturnsDayRange(t *testing.T) {
 	wantLatest := time.Date(2026, 3, 20, 0, 0, 0, 0, time.UTC).UnixNano()
 	if result.EarliestDayNs != wantEarliest || result.LatestDayNs != wantLatest {
 		t.Fatalf("day range=(%d,%d), want (%d,%d)", result.EarliestDayNs, result.LatestDayNs, wantEarliest, wantLatest)
+	}
+}
+
+func TestImportBytesRollsBackEventsAndBucketsWhenDayRollupFails(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	dayStart := time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC)
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO dim_model(name) VALUES ('m')"); err != nil {
+		t.Fatalf("insert model: %v", err)
+	}
+	if _, err := store.db.ExecContext(
+		ctx,
+		`INSERT INTO hour_bucket (
+			bucket_ts_ns, model_id, requests, success, failure, total_tokens
+		) VALUES (?, (SELECT id FROM dim_model WHERE name = 'm'), 1, 1, 0, ?)`,
+		dayStart.UnixNano(),
+		int64(math.MaxInt64),
+	); err != nil {
+		t.Fatalf("insert existing hour bucket: %v", err)
+	}
+
+	payload := []byte(`{
+		"date":"2026-04-27",
+		"details":[
+			{"timestamp":"2026-04-27T01:00:00Z","model":"m","tokens":{"total_tokens":1}}
+		]
+	}`)
+	_, err := ImportBytes(ctx, store, nil, payload)
+	if err == nil || !strings.Contains(err.Error(), "rollup imported day") {
+		t.Fatalf("ImportBytes error = %v, want day rollup failure", err)
+	}
+
+	var events, hours, days int64
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events").Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM hour_bucket").Scan(&hours); err != nil {
+		t.Fatalf("count hour buckets: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM day_bucket").Scan(&days); err != nil {
+		t.Fatalf("count day buckets: %v", err)
+	}
+	if events != 0 || hours != 1 || days != 0 {
+		t.Fatalf(
+			"post-failure rows events=%d hours=%d days=%d, want 0/1/0",
+			events,
+			hours,
+			days,
+		)
+	}
+}
+
+func TestImportBytesReturnsUnixEpochDayRange(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	payload := []byte(`{
+		"date":"1970-01-01",
+		"details":[
+			{"timestamp":"1970-01-01T12:00:00Z","model":"m","api_key":"k","tokens":{"total_tokens":1}}
+		]
+	}`)
+
+	result, err := ImportBytes(ctx, store, nil, payload)
+	if err != nil {
+		t.Fatalf("ImportBytes: %v", err)
+	}
+	if !result.HasDayRange {
+		t.Fatal("HasDayRange = false, want true for Unix epoch day")
+	}
+	if result.EarliestDayNs != 0 || result.LatestDayNs != 0 {
+		t.Fatalf(
+			"day range=(%d,%d), want (0,0)",
+			result.EarliestDayNs,
+			result.LatestDayNs,
+		)
+	}
+	var requests int64
+	if err := store.db.QueryRowContext(
+		ctx,
+		"SELECT requests FROM day_bucket WHERE bucket_ts_ns = 0",
+	).Scan(&requests); err != nil {
+		t.Fatalf("query epoch day bucket: %v", err)
+	}
+	if requests != 1 {
+		t.Fatalf("epoch day requests = %d, want 1", requests)
+	}
+	var dirtyDays int64
+	if err := store.db.QueryRowContext(
+		ctx,
+		"SELECT COUNT(*) FROM dirty_day WHERE day_ts_ns = 0",
+	).Scan(&dirtyDays); err != nil {
+		t.Fatalf("query dirty epoch day: %v", err)
+	}
+	if dirtyDays != 0 {
+		t.Fatalf("dirty epoch days = %d, want 0 after atomic rollup", dirtyDays)
+	}
+}
+
+func TestImportBytesUsesFloorBucketsBeforeUnixEpoch(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	payload := []byte(`[{"timestamp":"1969-12-31T23:30:00Z","model":"m","tokens":{"total_tokens":1}}]`)
+
+	result, err := ImportBytes(ctx, store, nil, payload)
+	if err != nil {
+		t.Fatalf("ImportBytes: %v", err)
+	}
+	wantHour := time.Date(1969, 12, 31, 23, 0, 0, 0, time.UTC).UnixNano()
+	wantDay := time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC).UnixNano()
+	if !result.HasDayRange || result.EarliestDayNs != wantDay || result.LatestDayNs != wantDay {
+		t.Fatalf("day range = (%v, %d, %d), want (true, %d, %d)", result.HasDayRange, result.EarliestDayNs, result.LatestDayNs, wantDay, wantDay)
+	}
+	var hourNs, dayNs int64
+	if err := store.db.QueryRow("SELECT bucket_ts_ns FROM hour_bucket").Scan(&hourNs); err != nil {
+		t.Fatalf("query hour bucket: %v", err)
+	}
+	if err := store.db.QueryRow("SELECT bucket_ts_ns FROM day_bucket").Scan(&dayNs); err != nil {
+		t.Fatalf("query day bucket: %v", err)
+	}
+	if hourNs != wantHour || dayNs != wantDay {
+		t.Fatalf("bucket starts = (%d, %d), want (%d, %d)", hourNs, dayNs, wantHour, wantDay)
 	}
 }
 

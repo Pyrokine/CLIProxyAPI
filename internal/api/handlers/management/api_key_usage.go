@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/gin-gonic/gin"
 )
@@ -75,7 +76,7 @@ func (h *Handler) GetAPIKeyUsage(c *gin.Context) {
 				baseURL = strings.TrimSpace(auth.Attributes["base-url"])
 			}
 		}
-		compositeKey := baseURL + "|" + apiKey
+		compositeKey := baseURL + "|" + util.HideAPIKey(apiKey)
 		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 		if provider == "" {
 			provider = "unknown"

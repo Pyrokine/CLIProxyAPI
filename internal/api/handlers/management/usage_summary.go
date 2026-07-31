@@ -3,10 +3,12 @@ package management
 import (
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
@@ -88,6 +90,24 @@ type summaryAPIKeyStats struct {
 	LatencySampleCount int64         `json:"latency_sample_count,omitempty"`
 }
 
+type summaryAPIKeyAccumulator struct {
+	Requests       int64
+	Success        int64
+	Failure        int64
+	Tokens         summaryTokens
+	Cost           float64
+	TotalLatencyMs int64
+	LatencySamples int64
+}
+
+type summaryTimePointAccumulator struct {
+	Requests int64
+	Success  int64
+	Failure  int64
+	Tokens   summaryTokens
+	Cost     float64
+}
+
 // summaryResponse is the full response for GET /usage/summary.
 type summaryResponse struct {
 	Period                 summaryPeriod                      `json:"period"`
@@ -131,6 +151,7 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 
 	modelFilter := c.Query("model")
 	apiKeyFilter := c.Query("api_key")
+	apiKeyFilters := c.QueryArray("api_key")
 	credentialFilter := c.Query("credential")
 	includeGroups := c.DefaultQuery("groups", "all") != "none"
 
@@ -141,9 +162,10 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 
 	qr, err := h.usagePersister.Query(
 		from, to, usage.EventFilters{
-			Model:  modelFilter,
-			Source: credentialFilter,
-			APIKey: apiKeyFilter,
+			Model:   modelFilter,
+			Source:  credentialFilter,
+			APIKey:  apiKeyFilter,
+			APIKeys: apiKeyFilters,
 		}, granularity, includeGroups,
 	)
 	if err != nil {
@@ -259,23 +281,37 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 		}
 	}
 
+	apiKeyAccumulators := make(map[string]*summaryAPIKeyAccumulator, len(qr.ByAPIKey))
 	for key, aks := range qr.ByAPIKey {
+		maskedKey := maskSummaryAPIKey(key)
+		accumulator := apiKeyAccumulators[maskedKey]
+		if accumulator == nil {
+			accumulator = &summaryAPIKeyAccumulator{}
+			apiKeyAccumulators[maskedKey] = accumulator
+		}
+		accumulator.Requests += aks.Requests
+		accumulator.Success += aks.Success
+		accumulator.Failure += aks.Failure
+		accumulator.Tokens.Input += aks.Tokens.InputTokens
+		accumulator.Tokens.Output += aks.Tokens.OutputTokens
+		accumulator.Tokens.Cached += aks.Tokens.CachedTokens
+		accumulator.Tokens.Reasoning += aks.Tokens.ReasoningTokens
+		accumulator.Tokens.Total += aks.Tokens.TotalTokens
+		accumulator.Cost += aks.Cost
+		accumulator.TotalLatencyMs += aks.Latency.TotalMs
+		accumulator.LatencySamples += aks.Latency.SampleCount
+	}
+	for key, accumulator := range apiKeyAccumulators {
 		averageLatency, totalLatency, latencySamples := latencyResponseFields(
-			aks.Latency.TotalMs,
-			aks.Latency.SampleCount,
+			accumulator.TotalLatencyMs,
+			accumulator.LatencySamples,
 		)
 		resp.ByAPIKey[key] = &summaryAPIKeyStats{
-			Requests: aks.Requests,
-			Success:  aks.Success,
-			Failure:  aks.Failure,
-			Tokens: summaryTokens{
-				Input:     aks.Tokens.InputTokens,
-				Output:    aks.Tokens.OutputTokens,
-				Cached:    aks.Tokens.CachedTokens,
-				Reasoning: aks.Tokens.ReasoningTokens,
-				Total:     aks.Tokens.TotalTokens,
-			},
-			Cost:               roundCost(aks.Cost),
+			Requests:           accumulator.Requests,
+			Success:            accumulator.Success,
+			Failure:            accumulator.Failure,
+			Tokens:             accumulator.Tokens,
+			Cost:               roundCost(accumulator.Cost),
 			AverageLatencyMs:   averageLatency,
 			TotalLatencyMs:     totalLatency,
 			LatencySampleCount: latencySamples,
@@ -345,29 +381,66 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 		resp.TimeSeriesByCredential[cred] = converted
 	}
 
+	timeSeriesAccumulators := make(
+		map[string]map[string]*summaryTimePointAccumulator,
+		len(qr.TimeSeriesByAPIKey),
+	)
 	for key, points := range qr.TimeSeriesByAPIKey {
-		converted := make([]summaryTimePoint, len(points))
-		for i, tp := range points {
-			converted[i] = summaryTimePoint{
-				Time:     tp.Time,
-				Requests: tp.Requests,
-				Success:  tp.Success,
-				Failure:  tp.Failure,
-				Tokens: summaryTokens{
-					Input:     tp.Tokens.InputTokens,
-					Output:    tp.Tokens.OutputTokens,
-					Cached:    tp.Tokens.CachedTokens,
-					Reasoning: tp.Tokens.ReasoningTokens,
-					Total:     tp.Tokens.TotalTokens,
-				},
-				Cost:    roundCost(tp.Cost),
-				HasCost: tp.Cost > 0 || (hasPricing && tp.Requests > 0),
+		maskedKey := maskSummaryAPIKey(key)
+		byTime := timeSeriesAccumulators[maskedKey]
+		if byTime == nil {
+			byTime = make(map[string]*summaryTimePointAccumulator, len(points))
+			timeSeriesAccumulators[maskedKey] = byTime
+		}
+		for _, tp := range points {
+			accumulator := byTime[tp.Time]
+			if accumulator == nil {
+				accumulator = &summaryTimePointAccumulator{}
+				byTime[tp.Time] = accumulator
 			}
+			accumulator.Requests += tp.Requests
+			accumulator.Success += tp.Success
+			accumulator.Failure += tp.Failure
+			accumulator.Tokens.Input += tp.Tokens.InputTokens
+			accumulator.Tokens.Output += tp.Tokens.OutputTokens
+			accumulator.Tokens.Cached += tp.Tokens.CachedTokens
+			accumulator.Tokens.Reasoning += tp.Tokens.ReasoningTokens
+			accumulator.Tokens.Total += tp.Tokens.TotalTokens
+			accumulator.Cost += tp.Cost
+		}
+	}
+	for key, byTime := range timeSeriesAccumulators {
+		times := make([]string, 0, len(byTime))
+		for pointTime := range byTime {
+			times = append(times, pointTime)
+		}
+		sort.Strings(times)
+		converted := make([]summaryTimePoint, 0, len(times))
+		for _, pointTime := range times {
+			accumulator := byTime[pointTime]
+			converted = append(converted, summaryTimePoint{
+				Time:     pointTime,
+				Requests: accumulator.Requests,
+				Success:  accumulator.Success,
+				Failure:  accumulator.Failure,
+				Tokens:   accumulator.Tokens,
+				Cost:     roundCost(accumulator.Cost),
+				HasCost: accumulator.Cost > 0 ||
+					(hasPricing && accumulator.Requests > 0),
+			})
 		}
 		resp.TimeSeriesByAPIKey[key] = converted
 	}
 
 	return resp
+}
+
+func maskSummaryAPIKey(key string) string {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" || trimmed == "(none)" {
+		return key
+	}
+	return util.HideAPIKey(trimmed)
 }
 
 func latencyResponseFields(totalMs, sampleCount int64) (*float64, *int64, int64) {

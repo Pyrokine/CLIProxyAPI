@@ -18,25 +18,30 @@ import (
 // as identical to the historical NULL so legacy rows imported from the JSON
 // era keep their original deduplication identity.
 type FlatDetail struct {
-	Timestamp         time.Time   `json:"timestamp"`
-	Model             string      `json:"model"`
-	Source            string      `json:"source"`     // credential file name
-	AuthIndex         string      `json:"auth_index"` // alternate credential identifier
-	APIKey            string      `json:"api_key"`    // CPA access key used by the client
-	Provider          string      `json:"provider"`   // upstream vendor (claude/codex/gemini/...)
-	LatencyMs         int64       `json:"latency_ms,omitempty"`
-	RequestID         string      `json:"request_id,omitempty"`
-	TimeToFirstByteMs int64       `json:"time_to_first_byte_ms,omitempty"`
-	TotalDurationMs   int64       `json:"total_duration_ms,omitempty"`
-	Completed         bool        `json:"completed"`
-	MetadataRecorded  bool        `json:"metadata_recorded,omitempty"`
-	ReasoningEffort   string      `json:"reasoning_effort,omitempty"`
-	ServiceTier       string      `json:"service_tier,omitempty"`
-	ExecutorType      string      `json:"executor_type,omitempty"`
-	Thinking          *Thinking   `json:"thinking,omitempty"`
-	ResponseHeaders   http.Header `json:"response_headers,omitempty"`
-	Tokens            tokenStats  `json:"tokens"`
-	Failed            bool        `json:"failed"`
+	Timestamp           time.Time   `json:"timestamp"`
+	Model               string      `json:"model"`
+	Source              string      `json:"source"`     // credential file name
+	AuthIndex           string      `json:"auth_index"` // alternate credential identifier
+	APIKey              string      `json:"api_key"`    // CPA access key used by the client
+	Provider            string      `json:"provider"`   // upstream vendor (claude/codex/gemini/...)
+	LatencyMs           int64       `json:"latency_ms,omitempty"`
+	RequestID           string      `json:"request_id,omitempty"`
+	TimeToFirstByteMs   int64       `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs     int64       `json:"total_duration_ms,omitempty"`
+	Completed           bool        `json:"completed"`
+	MetadataRecorded    bool        `json:"metadata_recorded,omitempty"`
+	ReasoningEffort     string      `json:"reasoning_effort,omitempty"`
+	ServiceTier         string      `json:"service_tier,omitempty"`
+	RequestServiceTier  string      `json:"request_service_tier,omitempty"`
+	ResponseServiceTier string      `json:"response_service_tier,omitempty"`
+	ExecutorType        string      `json:"executor_type,omitempty"`
+	Thinking            *Thinking   `json:"thinking,omitempty"`
+	ResponseHeaders     http.Header `json:"response_headers,omitempty"`
+	Tokens              tokenStats  `json:"tokens"`
+	Failed              bool        `json:"failed"`
+	metadataTrusted     bool
+	costMicro           int64
+	costTrusted         bool
 }
 
 // Thinking describes the requested thinking intensity for a usage event.
@@ -48,14 +53,16 @@ type Thinking struct {
 }
 
 // EventFilters specifies optional dimensions the dashboard layers on top of a
-// time-range query. Multi-value filters are expressed as comma-separated
-// strings to match the on-the-wire form sent by the management UI.
+// time-range query. Model and Source retain the legacy comma-separated form.
+// APIKeys carries repeated api_key query parameters so values containing commas
+// remain unambiguous; APIKey retains compatibility with older callers.
 type EventFilters struct {
-	Model  string
-	Source string
-	APIKey string
-	Status string // "success", "failure", or "" (all)
-	Search string
+	Model   string
+	Source  string
+	APIKey  string
+	APIKeys []string
+	Status  string // "success", "failure", or "" (all)
+	Search  string
 }
 
 // QueryResult is the read-side payload Query produces and the management

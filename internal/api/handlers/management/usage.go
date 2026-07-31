@@ -3,7 +3,7 @@ package management
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,11 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-type usageExportPayload struct {
-	Version    int                      `json:"version"`
-	ExportedAt time.Time                `json:"exported_at"`
-	Usage      usage.StatisticsSnapshot `json:"usage"`
-}
+const usageBackupKeyHeader = "X-Usage-Backup-Key"
 
 type usageQueueRecord []byte
 
@@ -44,7 +40,11 @@ func (h *Handler) GetUsageQueue(c *gin.Context) {
 		return
 	}
 
-	items := redisqueue.PopOldest(count)
+	queue := h.usageQueue
+	if queue == nil {
+		queue = redisqueue.DefaultQueue()
+	}
+	items := queue.PopOldest(count)
 	records := make([]usageQueueRecord, 0, len(items))
 	for _, item := range items {
 		records = append(records, usageQueueRecord(append([]byte(nil), item...)))
@@ -70,66 +70,110 @@ func parseUsageQueueCount(value string) (int, error) {
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	var snapshot usage.StatisticsSnapshot
 	if h.usagePersister != nil {
-		snapshot = h.usagePersister.Snapshot()
+		var err error
+		snapshot, err = h.usagePersister.QuerySnapshot()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query usage statistics"})
+			return
+		}
 	} else if h.usageStats != nil {
 		snapshot = h.usageStats.Snapshot()
 	}
-	c.JSON(
-		http.StatusOK, gin.H{
+	writeRedactedJSON(
+		c, http.StatusOK, gin.H{
 			"usage":           snapshot,
 			"failed_requests": snapshot.FailureCount,
 		},
 	)
 }
 
-// ExportUsageStatistics returns a usage snapshot for backup/migration. The
-// response shape (version 1 + nested StatisticsSnapshot) is preserved so
-// previously exported files stay re-importable across the SQLite swap.
-//
-// Supports optional query parameters from / to / model / api_key / credential
-// to scope the export to the user's current dashboard view. Without any
-// parameters the full snapshot is returned (legacy behaviour).
+// ExportUsageStatistics returns a versioned, reversible backup of canonical
+// SQLite events. Raw API keys are encrypted with the authenticated management
+// credential, or with X-Usage-Backup-Key when the caller supplies a portable
+// backup key. Optional filters scope the exported event set.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
-	var snapshot usage.StatisticsSnapshot
-	if h.usagePersister != nil {
-		from, errFrom := parseTimeParam(c.Query("from"), time.Time{})
-		to, errTo := parseTimeParam(c.Query("to"), time.Time{})
-		if errFrom != nil || errTo != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from/to parameter"})
+	if h == nil || h.usagePersister == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persister unavailable"})
+		return
+	}
+	from, errFrom := parseTimeParam(c.Query("from"), time.Time{})
+	to, errTo := parseTimeParam(c.Query("to"), time.Time{})
+	if errFrom != nil || errTo != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid from/to parameter"})
+		return
+	}
+	if !from.IsZero() && !to.IsZero() && from.After(to) {
+		from, to = to, from
+	}
+	filters := usage.EventFilters{
+		Model:   c.Query("model"),
+		APIKey:  c.Query("api_key"),
+		APIKeys: c.QueryArray("api_key"),
+		Source:  c.Query("credential"),
+	}
+	events, err := h.usagePersister.QueryBackupEventsContext(c.Request.Context(), from, to, filters)
+	if err != nil {
+		if errors.Is(err, usage.ErrPortableBackupTooLarge) {
+			writeUsageBackupTooLarge(c)
 			return
 		}
-		if !from.IsZero() && !to.IsZero() && from.After(to) {
-			from, to = to, from
-		}
-		filters := usage.EventFilters{
-			Model:  c.Query("model"),
-			APIKey: c.Query("api_key"),
-			Source: c.Query("credential"),
-		}
-		snapshot = h.usagePersister.SnapshotFiltered(from, to, filters)
-	} else if h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query usage export"})
+		return
 	}
+	secret := usageBackupSecret(c)
+	if secret == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "usage backup encryption key unavailable"})
+		return
+	}
+	exportedAt := time.Now().UTC()
+	payload, err := usage.MarshalUsageBackup(events, secret, exportedAt)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encrypt usage export"})
+		return
+	}
+	if int64(len(payload)) > usage.MaxPortableBackupBytes {
+		writeUsageBackupTooLarge(c)
+		return
+	}
+	c.Header("Content-Disposition", "attachment; filename=usage-backup-"+exportedAt.Format("20060102T150405Z")+".json")
+	c.Data(http.StatusOK, "application/json; charset=utf-8", payload)
+}
+
+func writeUsageBackupTooLarge(c *gin.Context) {
 	c.JSON(
-		http.StatusOK, usageExportPayload{
-			Version:    1,
-			ExportedAt: time.Now().UTC(),
-			Usage:      snapshot,
-		},
+		http.StatusRequestEntityTooLarge,
+		gin.H{"error": "usage backup exceeds the 100 MiB portable limit; narrow the export with from, to, model, api_key, or credential filters"},
 	)
 }
 
-// ImportUsageStatistics merges a previously exported payload into the SQLite
-// store. Auto-detects the format (v1 nested, v2 detail, today.json, raw
-// FlatDetail array) so old export files remain importable.
+func usageBackupSecret(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	if secret := strings.TrimSpace(c.GetHeader(usageBackupKeyHeader)); secret != "" {
+		return secret
+	}
+	provided := strings.TrimSpace(c.GetHeader("Authorization"))
+	if provided != "" {
+		parts := strings.SplitN(provided, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+			return strings.TrimSpace(parts[1])
+		}
+		return provided
+	}
+	return strings.TrimSpace(c.GetHeader("X-Management-Key"))
+}
+
+// ImportUsageStatistics merges an encrypted v3 backup or any supported legacy
+// payload into SQLite. Encrypted backups require the key that created them.
 func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 	if h == nil || h.usagePersister == nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persister unavailable"})
 		return
 	}
 
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 100<<20)
-	data, err := handlers.ReadRequestBodyWithLimit(c, 100<<20)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, usage.MaxPortableBackupBytes)
+	data, err := handlers.ReadRequestBodyWithLimit(c, usage.MaxPortableBackupBytes)
 	if err != nil {
 		message := "failed to read request body"
 		if strings.Contains(err.Error(), "request body too large") || strings.Contains(
@@ -141,13 +185,36 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	result, err := h.usagePersister.Import(data)
+	secret := ""
+	if usage.IsUsageBackup(data) {
+		secret = usageBackupSecret(c)
+		if secret == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "usage backup decryption key unavailable"})
+			return
+		}
+	}
+	result, err := h.usagePersister.ImportContextWithSecret(c.Request.Context(), data, secret)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		status := http.StatusInternalServerError
+		if errors.Is(err, usage.ErrInvalidImport) {
+			status = http.StatusBadRequest
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 
-	snapshot := h.usagePersister.Snapshot()
+	snapshot, err := h.usagePersister.QuerySnapshot()
+	if err != nil {
+		c.JSON(
+			http.StatusOK, gin.H{
+				"added":   result.Added,
+				"skipped": result.Skipped,
+				"format":  result.Format,
+				"warning": "usage imported, but totals could not be queried",
+			},
+		)
+		return
+	}
 	c.JSON(
 		http.StatusOK, gin.H{
 			"added":           result.Added,
@@ -213,7 +280,13 @@ func (h *Handler) PutUsageRetention(c *gin.Context) {
 		MaxDBSizeMB         *int `json:"max_db_size_mb"`
 		WarningThresholdPct *int `json:"warning_threshold_pct"`
 	}
-	if err := c.ShouldBindJSON(&body); err != nil {
+	decoder := json.NewDecoder(c.Request.Body)
+	if err := decoder.Decode(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
@@ -235,46 +308,42 @@ func (h *Handler) PutUsageRetention(c *gin.Context) {
 		return
 	}
 
-	r := h.usagePersister.Retention()
-	if body.Days != nil {
-		r.Days = *body.Days
-	}
-	if body.MaxDBSizeMB != nil {
-		r.MaxDBSizeMB = *body.MaxDBSizeMB
-	}
-	if body.WarningThresholdPct != nil {
-		r.WarningThresholdPct = *body.WarningThresholdPct
-	}
-	if r.WarningThresholdPct == 0 {
-		r.WarningThresholdPct = 80
-	}
-	if h.cfg != nil {
-		h.mu.Lock()
-		previousConfigRetention := h.cfg.UsageRetention
-		h.cfg.UsageRetention = r
-		if h.configFilePath != "" {
-			_ = config.SaveLastGood(h.configFilePath)
-			if err := config.SaveConfigPreserveComments(h.configFilePath, h.cfg); err != nil {
-				h.rollbackLastGood()
-				h.cfg.UsageRetention = previousConfigRetention
-				h.mu.Unlock()
-				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save config: %v", err)})
-				return
-			}
+	runtimeRetention := h.usagePersister.Retention()
+	committed, ok := h.mutateConfig(c, func(next *config.Config) error {
+		retention := next.UsageRetention
+		if retention == (config.UsageRetention{}) {
+			retention = runtimeRetention
 		}
-		h.mu.Unlock()
+		if body.Days != nil {
+			retention.Days = *body.Days
+		}
+		if body.MaxDBSizeMB != nil {
+			retention.MaxDBSizeMB = *body.MaxDBSizeMB
+		}
+		if body.WarningThresholdPct != nil {
+			retention.WarningThresholdPct = *body.WarningThresholdPct
+		}
+		if retention.WarningThresholdPct == 0 {
+			retention.WarningThresholdPct = 80
+		}
+		next.UsageRetention = retention
+		return nil
+	})
+	if !ok {
+		return
 	}
-	h.usagePersister.SetRetention(r)
+	retention := committed.UsageRetention
+	h.usagePersister.SetRetention(retention)
 
-	warningThreshold := r.WarningThresholdPct
+	warningThreshold := retention.WarningThresholdPct
 	if warningThreshold == 0 {
 		warningThreshold = 80
 	}
 	c.JSON(
 		http.StatusOK, gin.H{
 			"status":                "ok",
-			"days":                  r.Days,
-			"max_db_size_mb":        r.MaxDBSizeMB,
+			"days":                  retention.Days,
+			"max_db_size_mb":        retention.MaxDBSizeMB,
 			"warning_threshold_pct": warningThreshold,
 		},
 	)

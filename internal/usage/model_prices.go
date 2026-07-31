@@ -7,40 +7,68 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
 )
 
-func BuildModelPriceFunc(configPath string) PriceFunc {
+const modelPriceRefreshInterval = 5 * time.Minute
+
+// PriceProvider returns an immutable pricing function for one operation.
+type PriceProvider interface {
+	Snapshot() PriceFunc
+}
+
+type modelPriceProvider struct {
+	mu         sync.Mutex
+	configPath string
+	cached     map[string]modelcatalog.Price
+	loadedAt   time.Time
+}
+
+// BuildModelPriceProvider creates a provider that refreshes prices between
+// operations while keeping each returned snapshot immutable.
+func BuildModelPriceProvider(configPath string) PriceProvider {
 	if configPath == "" {
 		return nil
 	}
-	var mu sync.RWMutex
-	var cached map[string]modelcatalog.Price
-	var loadedAt time.Time
-	load := func() bool {
-		prices, err := modelcatalog.Prices(configPath)
-		if err != nil || len(prices) == 0 {
-			return false
-		}
-		mu.Lock()
-		cached = prices
-		loadedAt = time.Now()
-		mu.Unlock()
-		return true
+	provider := &modelPriceProvider{configPath: configPath}
+	if provider.Snapshot() == nil {
+		return nil
 	}
-	if !load() {
+	return provider
+}
+
+// BuildModelPriceFunc returns the current immutable model-price snapshot.
+func BuildModelPriceFunc(configPath string) PriceFunc {
+	provider := BuildModelPriceProvider(configPath)
+	if provider == nil {
+		return nil
+	}
+	return provider.Snapshot()
+}
+
+func (p *modelPriceProvider) Snapshot() PriceFunc {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.cached) == 0 || time.Since(p.loadedAt) > modelPriceRefreshInterval {
+		prices, err := modelcatalog.Prices(p.configPath)
+		if err == nil && len(prices) > 0 {
+			p.cached = prices
+			p.loadedAt = time.Now()
+		}
+	}
+	return priceFuncFromMap(p.cached)
+}
+
+func priceFuncFromMap(prices map[string]modelcatalog.Price) PriceFunc {
+	if len(prices) == 0 {
 		return nil
 	}
 	return func(model string) (prompt, completion, cache float64, found bool) {
-		mu.RLock()
-		age := time.Since(loadedAt)
-		p, ok := cached[model]
-		mu.RUnlock()
-		if age > 5*time.Minute && load() {
-			mu.RLock()
-			p, ok = cached[model]
-			mu.RUnlock()
-		}
+		price, ok := prices[model]
 		if !ok {
 			return 0, 0, 0, false
 		}
-		return p.Prompt, p.Completion, p.Cache, true
+		return price.Prompt, price.Completion, price.Cache, true
 	}
 }

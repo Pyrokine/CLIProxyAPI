@@ -3,11 +3,16 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
 // TestStore_QueryStaysWithinMemoryBudget is the regression test for the
@@ -72,9 +77,11 @@ func TestStore_QueryStaysWithinMemoryBudget(t *testing.T) {
 	if _, _, err := store.QueryEvents(ctx, from, to, EventFilters{}, 1, 100, "timestamp", false); err != nil {
 		t.Fatalf("QueryEvents: %v", err)
 	}
-	// SnapshotFiltered rebuilds v1 nested — the path /usage/export uses.
+	// QuerySnapshotFiltered rebuilds v1 nested — the path /usage/export uses.
 	p := &Persister{store: store}
-	_ = p.SnapshotFiltered(from, to, EventFilters{})
+	if _, err := p.QuerySnapshotFiltered(from, to, EventFilters{}); err != nil {
+		t.Fatalf("QuerySnapshotFiltered: %v", err)
+	}
 
 	runtime.GC()
 	var after runtime.MemStats
@@ -125,7 +132,10 @@ func TestSnapshotFilteredPreservesRuntimeMetadata(t *testing.T) {
 	}
 
 	p := &Persister{store: store}
-	snap := p.SnapshotFiltered(ts.Add(-time.Minute), ts.Add(time.Minute), EventFilters{})
+	snap, err := p.QuerySnapshotFiltered(ts.Add(-time.Minute), ts.Add(time.Minute), EventFilters{})
+	if err != nil {
+		t.Fatalf("QuerySnapshotFiltered: %v", err)
+	}
 	detail := snap.APIs["k"].Models["m"].Details[0]
 	if got := detail.ReasoningEffort; got != "medium" {
 		t.Fatalf("ReasoningEffort = %q, want medium", got)
@@ -135,6 +145,205 @@ func TestSnapshotFilteredPreservesRuntimeMetadata(t *testing.T) {
 	}
 	if got := detail.ExecutorType; got != "OpenAICompatExecutor" {
 		t.Fatalf("ExecutorType = %q, want OpenAICompatExecutor", got)
+	}
+}
+
+func TestQuerySnapshotFilteredUsesExactEventRangeForAllAggregates(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for index, minute := range []int{10, 30, 50} {
+		detail := FlatDetail{
+			Timestamp: base.Add(time.Duration(minute) * time.Minute),
+			Model:     "m",
+			APIKey:    "k",
+			Failed:    index == 1,
+			Tokens:    tokenStats{TotalTokens: int64(index + 1)},
+		}
+		if _, err := persistEvent(ctx, tx, store, &detail, nil); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("persist[%d]: %v", index, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	p := &Persister{store: store}
+	snap, err := p.QuerySnapshotFiltered(
+		base.Add(20*time.Minute),
+		base.Add(40*time.Minute),
+		EventFilters{},
+	)
+	if err != nil {
+		t.Fatalf("QuerySnapshotFiltered: %v", err)
+	}
+	if snap.TotalRequests != 1 || snap.SuccessCount != 0 || snap.FailureCount != 1 || snap.TotalTokens != 2 {
+		t.Fatalf("totals = requests:%d success:%d failure:%d tokens:%d, want 1/0/1/2", snap.TotalRequests, snap.SuccessCount, snap.FailureCount, snap.TotalTokens)
+	}
+	if snap.RequestsByDay["2026-05-20"] != 1 || snap.RequestsByHour["10"] != 1 || snap.TokensByDay["2026-05-20"] != 2 || snap.TokensByHour["10"] != 2 {
+		t.Fatalf("time maps = %#v %#v %#v %#v", snap.RequestsByDay, snap.RequestsByHour, snap.TokensByDay, snap.TokensByHour)
+	}
+	api := snap.APIs["k"]
+	model := api.Models["m"]
+	if api.TotalRequests != 1 || api.TotalTokens != 2 || model.TotalRequests != 1 || model.TotalTokens != 2 || len(model.Details) != 1 {
+		t.Fatalf("API/model aggregate mismatch: api=%+v model=%+v", api, model)
+	}
+}
+
+func TestPadTimeSeriesFloorsNegativeUnixTimestamps(t *testing.T) {
+	from := time.Date(1969, 12, 31, 23, 30, 0, 0, time.UTC)
+	to := time.Date(1970, 1, 1, 1, 30, 0, 0, time.UTC)
+	result := QueryResult{
+		TimeSeries: []timePoint{{
+			Time:     "1969-12-31T23:00:00Z",
+			Requests: 1,
+		}},
+		TimeSeriesByModel:      map[string][]timePoint{},
+		TimeSeriesByCredential: map[string][]timePoint{},
+		TimeSeriesByAPIKey:     map[string][]timePoint{},
+	}
+	if err := padTimeSeries(&result, from.UnixNano(), to.UnixNano(), nsPerHour); err != nil {
+		t.Fatalf("padTimeSeries: %v", err)
+	}
+	wantTimes := []string{
+		"1969-12-31T23:00:00Z",
+		"1970-01-01T00:00:00Z",
+		"1970-01-01T01:00:00Z",
+	}
+	if len(result.TimeSeries) != len(wantTimes) {
+		t.Fatalf("time series length = %d, want %d", len(result.TimeSeries), len(wantTimes))
+	}
+	for index, want := range wantTimes {
+		if result.TimeSeries[index].Time != want {
+			t.Fatalf("time series[%d] = %q, want %q", index, result.TimeSeries[index].Time, want)
+		}
+	}
+	if result.TimeSeries[0].Requests != 1 {
+		t.Fatalf("existing pre-epoch bucket requests = %d, want 1", result.TimeSeries[0].Requests)
+	}
+}
+
+func TestHourBucketDayBoundsUseFloorBeforeUnixEpoch(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for index, timestamp := range []time.Time{
+		time.Date(1969, 12, 30, 23, 30, 0, 0, time.UTC),
+		time.Date(1969, 12, 31, 1, 30, 0, 0, time.UTC),
+	} {
+		detail := FlatDetail{
+			Timestamp: timestamp,
+			Model:     "m",
+			Tokens:    tokenStats{TotalTokens: 1},
+		}
+		if _, err := persistEvent(ctx, tx, store, &detail, nil); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("persist[%d]: %v", index, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	earliest, found, err := store.earliestHourBucketDay(ctx)
+	if err != nil {
+		t.Fatalf("earliestHourBucketDay: %v", err)
+	}
+	wantEarliest := time.Date(1969, 12, 30, 0, 0, 0, 0, time.UTC).UnixNano()
+	if !found || earliest != wantEarliest {
+		t.Fatalf("earliest day = (%d, %t), want (%d, true)", earliest, found, wantEarliest)
+	}
+	latest, found, err := store.latestHourBucketDay(ctx)
+	if err != nil {
+		t.Fatalf("latestHourBucketDay: %v", err)
+	}
+	wantLatest := time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC).UnixNano()
+	if !found || latest != wantLatest {
+		t.Fatalf("latest day = (%d, %t), want (%d, true)", latest, found, wantLatest)
+	}
+}
+
+func TestQuerySnapshotFilteredReturnsMalformedMetadataError(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	ts := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	detail := FlatDetail{
+		Timestamp: ts,
+		Model:     "m",
+		APIKey:    "k",
+		Tokens:    tokenStats{TotalTokens: 1},
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := persistEvent(ctx, tx, store, &detail, nil); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "UPDATE events SET metadata = '{' WHERE ts_ns = ?", ts.UnixNano()); err != nil {
+		t.Fatalf("corrupt metadata: %v", err)
+	}
+
+	p := &Persister{store: store}
+	_, err = p.QuerySnapshotFiltered(ts.Add(-time.Minute), ts.Add(time.Minute), EventFilters{})
+	if err == nil || !strings.Contains(err.Error(), "decode snapshot event metadata") {
+		t.Fatalf("QuerySnapshotFiltered error = %v, want malformed metadata error", err)
+	}
+}
+
+func TestQuerySnapshotFilteredReturnsDatabaseError(t *testing.T) {
+	store := openTestStore(t)
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	p := &Persister{store: store}
+	if _, err := p.QuerySnapshotFiltered(time.Time{}, time.Time{}, EventFilters{}); err == nil {
+		t.Fatal("QuerySnapshotFiltered error = nil, want closed database error")
+	}
+}
+
+func TestQuerySnapshotFilteredRejectsAggregateOverflow(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO dim_model(name) VALUES('m')"); err != nil {
+		t.Fatalf("insert model: %v", err)
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for index, totalTokens := range []int64{math.MaxInt64, 1} {
+		detail := FlatDetail{
+			Timestamp: time.Unix(0, int64(index)*nsPerHour).UTC(),
+			Model:     "m",
+			Tokens:    tokenStats{TotalTokens: totalTokens},
+		}
+		if _, err := persistEvent(ctx, tx, store, &detail, nil); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("persist event[%d]: %v", index, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	p := &Persister{store: store}
+	_, err = p.QuerySnapshotFiltered(time.Time{}, time.Time{}, EventFilters{})
+	if err == nil || !strings.Contains(err.Error(), "snapshot token aggregate overflows int64") {
+		t.Fatalf("QuerySnapshotFiltered overflow error = %v", err)
 	}
 }
 
@@ -182,6 +391,239 @@ func TestStartRollup_DayBucketReadyOnReturn(t *testing.T) {
 	}
 	if postCount == 0 {
 		t.Fatalf("day_bucket empty after StartRollup returned — initial rollup must be synchronous")
+	}
+}
+
+func TestGetDayRollupWatermarkRejectsRFC3339OutsideUnixNanoRange(t *testing.T) {
+	tests := []string{
+		"0001-01-01T00:00:00Z",
+		"9999-12-31T23:59:59.999999999Z",
+	}
+	for _, raw := range tests {
+		t.Run(raw, func(t *testing.T) {
+			store := openTestStore(t)
+			if _, err := store.db.ExecContext(
+				context.Background(),
+				"INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+				dayRollupWatermarkKey,
+				raw,
+			); err != nil {
+				t.Fatalf("write watermark: %v", err)
+			}
+
+			_, _, err := store.getDayRollupWatermark(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "outside UnixNano range") {
+				t.Fatalf("getDayRollupWatermark error = %v, want UnixNano range error", err)
+			}
+		})
+	}
+}
+
+func TestDayRollupWatermarkPreservesUnixEpoch(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	if err := store.setDayRollupWatermark(ctx, 0); err != nil {
+		t.Fatalf("setDayRollupWatermark: %v", err)
+	}
+	watermark, hasWatermark, err := store.getDayRollupWatermark(ctx)
+	if err != nil {
+		t.Fatalf("getDayRollupWatermark: %v", err)
+	}
+	if !hasWatermark || watermark != 0 {
+		t.Fatalf("watermark = (%d, %t), want (0, true)", watermark, hasWatermark)
+	}
+	next, hasNext, err := store.nextPendingRollupDay(ctx, watermark, hasWatermark)
+	if err != nil {
+		t.Fatalf("nextPendingRollupDay: %v", err)
+	}
+	if !hasNext || next != nsPerDay {
+		t.Fatalf("next day = (%d, %t), want (%d, true)", next, hasNext, int64(nsPerDay))
+	}
+}
+
+func TestNextPendingRollupDayChecksOverflowBoundary(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+
+	got, hasDay, err := store.nextPendingRollupDay(ctx, math.MaxInt64-nsPerDay, true)
+	if err != nil {
+		t.Fatalf("nextPendingRollupDay boundary: %v", err)
+	}
+	if !hasDay || got != math.MaxInt64 {
+		t.Fatalf("nextPendingRollupDay = (%d, %t), want (%d, true)", got, hasDay, int64(math.MaxInt64))
+	}
+
+	_, _, err = store.nextPendingRollupDay(ctx, math.MaxInt64-nsPerDay+1, true)
+	if err == nil || !strings.Contains(err.Error(), "watermark overflows int64") {
+		t.Fatalf("nextPendingRollupDay overflow error = %v", err)
+	}
+}
+
+func TestRollupDayRejectsEndTimestampOverflow(t *testing.T) {
+	store := openTestStore(t)
+	err := store.RollupDay(context.Background(), math.MaxInt64-nsPerDay+1)
+	if err == nil || !strings.Contains(err.Error(), "rollup end overflows int64") {
+		t.Fatalf("RollupDay overflow error = %v", err)
+	}
+}
+
+func TestRollupDayRangeStopsBeforeTimestampWraparound(t *testing.T) {
+	store := openTestStore(t)
+	err := store.rollupDayRange(
+		context.Background(),
+		math.MaxInt64-nsPerDay,
+		math.MaxInt64,
+	)
+	if err == nil || !strings.Contains(err.Error(), "rollup end overflows int64") {
+		t.Fatalf("rollupDayRange overflow error = %v", err)
+	}
+}
+
+func TestRollupDirtyDaysRebuildsLateEventDay(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	dayStart := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	persist := func(timestamp time.Time) {
+		t.Helper()
+		detail := FlatDetail{
+			Timestamp: timestamp,
+			Model:     "m",
+			APIKey:    "k",
+			Tokens:    tokenStats{TotalTokens: 1},
+		}
+		tx, err := store.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := persistEvent(ctx, tx, store, &detail, nil); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("persist: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+	readRequests := func() int64 {
+		t.Helper()
+		var requests int64
+		if err := store.db.QueryRowContext(
+			ctx,
+			"SELECT requests FROM day_bucket WHERE bucket_ts_ns = ?",
+			dayStart.UnixNano(),
+		).Scan(&requests); err != nil {
+			t.Fatalf("query day bucket: %v", err)
+		}
+		return requests
+	}
+	readDirtyCount := func() int64 {
+		t.Helper()
+		var count int64
+		if err := store.db.QueryRowContext(
+			ctx,
+			"SELECT COUNT(*) FROM dirty_day WHERE day_ts_ns = ?",
+			dayStart.UnixNano(),
+		).Scan(&count); err != nil {
+			t.Fatalf("query dirty day: %v", err)
+		}
+		return count
+	}
+
+	persist(dayStart.Add(10 * time.Hour))
+	if err := store.RollupDay(ctx, dayStart.UnixNano()); err != nil {
+		t.Fatalf("initial RollupDay: %v", err)
+	}
+	if requests := readRequests(); requests != 1 {
+		t.Fatalf("initial requests = %d, want 1", requests)
+	}
+	if dirty := readDirtyCount(); dirty != 0 {
+		t.Fatalf("dirty markers after rollup = %d, want 0", dirty)
+	}
+
+	persist(dayStart.Add(11 * time.Hour))
+	if requests := readRequests(); requests != 1 {
+		t.Fatalf("requests before dirty rollup = %d, want stale value 1", requests)
+	}
+	if dirty := readDirtyCount(); dirty != 1 {
+		t.Fatalf("dirty markers after late event = %d, want 1", dirty)
+	}
+	if err := store.rollupDirtyDays(ctx); err != nil {
+		t.Fatalf("rollupDirtyDays: %v", err)
+	}
+	if requests := readRequests(); requests != 2 {
+		t.Fatalf("requests after dirty rollup = %d, want 2", requests)
+	}
+	if dirty := readDirtyCount(); dirty != 0 {
+		t.Fatalf("dirty markers after rebuild = %d, want 0", dirty)
+	}
+}
+
+func TestDirtyDaySurvivesStoreRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "events.db")
+	store, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	ctx := context.Background()
+	dayStart := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	persist := func(timestamp time.Time) {
+		t.Helper()
+		detail := FlatDetail{
+			Timestamp: timestamp,
+			Model:     "m",
+			APIKey:    "k",
+			Tokens:    tokenStats{TotalTokens: 1},
+		}
+		tx, err := store.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := persistEvent(ctx, tx, store, &detail, nil); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("persist: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	persist(dayStart.Add(10 * time.Hour))
+	if err := store.RollupDay(ctx, dayStart.UnixNano()); err != nil {
+		t.Fatalf("initial RollupDay: %v", err)
+	}
+	persist(dayStart.Add(11 * time.Hour))
+	if err := store.Close(); err != nil {
+		t.Fatalf("close before restart: %v", err)
+	}
+
+	store, err = OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	var dirty int64
+	if err := store.db.QueryRowContext(
+		ctx,
+		"SELECT COUNT(*) FROM dirty_day WHERE day_ts_ns = ?",
+		dayStart.UnixNano(),
+	).Scan(&dirty); err != nil {
+		t.Fatalf("query dirty day after restart: %v", err)
+	}
+	if dirty != 1 {
+		t.Fatalf("dirty markers after restart = %d, want 1", dirty)
+	}
+	if err := store.rollupDirtyDays(ctx); err != nil {
+		t.Fatalf("rollupDirtyDays after restart: %v", err)
+	}
+	var requests int64
+	if err := store.db.QueryRowContext(
+		ctx,
+		"SELECT requests FROM day_bucket WHERE bucket_ts_ns = ?",
+		dayStart.UnixNano(),
+	).Scan(&requests); err != nil {
+		t.Fatalf("query day bucket after restart: %v", err)
+	}
+	if requests != 2 {
+		t.Fatalf("day requests after restart = %d, want 2", requests)
 	}
 }
 
@@ -243,13 +685,13 @@ func TestRollupImportedDays_RebuildsDaysBeforeWatermark(t *testing.T) {
 		t.Fatalf("rebuilt day_bucket requests=%d, want 1", requests)
 	}
 
-	watermarkNs, err := store.getDayRollupWatermark(ctx)
+	watermarkNs, hasWatermark, err := store.getDayRollupWatermark(ctx)
 	if err != nil {
 		t.Fatalf("get watermark: %v", err)
 	}
 	wantWatermark := time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC).UnixNano()
-	if watermarkNs != wantWatermark {
-		t.Fatalf("watermark moved backward to %d, want %d", watermarkNs, wantWatermark)
+	if !hasWatermark || watermarkNs != wantWatermark {
+		t.Fatalf("watermark = (%d, %t), want (%d, true)", watermarkNs, hasWatermark, wantWatermark)
 	}
 }
 
@@ -625,5 +1067,145 @@ func TestNoneSentinel_FilterMatchesNullAPIKey(t *testing.T) {
 	}
 	if got := qrBoth.Totals.Requests; got != 2 {
 		t.Fatalf("(none,sk-real) totals = %d, want 2", got)
+	}
+}
+
+func TestQueryBackupEventsRejectsOversizedExportBeforeLoadingAllRows(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 7, 30, 0, 0, 0, 0, time.UTC)
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		detail := FlatDetail{
+			Timestamp: base.Add(time.Duration(i) * time.Second),
+			Model:     "oversized-model-" + strings.Repeat("x", 256),
+			APIKey:    fmt.Sprintf("sk-%d", i),
+			Tokens:    tokenStats{TotalTokens: 1},
+		}
+		if _, err = persistEvent(ctx, tx, store, &detail, nil); err != nil {
+			t.Fatalf("persist[%d]: %v", i, err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	_, err = store.queryBackupEvents(ctx, time.Time{}, time.Time{}, EventFilters{}, 1024)
+	if !errors.Is(err, ErrPortableBackupTooLarge) {
+		t.Fatalf("queryBackupEvents() error = %v, want ErrPortableBackupTooLarge", err)
+	}
+}
+
+func TestAPIKeyFilterHandlesDisplayCollisionsAndLiteralSentinels(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+	keys := []string{
+		"abcd...wxyz",
+		"abcd-secret-wxyz",
+		"(none)",
+		"",
+		"ab,c-first-zzzz",
+		"ab,c-second-zzzz",
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for _, key := range keys {
+		detail := FlatDetail{
+			Timestamp: base,
+			Model:     "m",
+			APIKey:    key,
+			Tokens:    tokenStats{TotalTokens: 1},
+		}
+		if _, err = persistEvent(ctx, tx, store, &detail, nil); err != nil {
+			t.Fatalf("persist key=%q: %v", key, err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	from := base.Add(-time.Hour)
+	to := base.Add(time.Hour)
+	queries := []struct {
+		name       string
+		filter     string
+		wantTotals int64
+	}{
+		{name: "exact raw and masked display", filter: "abcd...wxyz", wantTotals: 2},
+		{name: "literal none and null sentinel", filter: "(none)", wantTotals: 2},
+		{name: "masked display containing comma", filter: util.HideAPIKey("ab,c-first-zzzz"), wantTotals: 2},
+	}
+	for _, tc := range queries {
+		t.Run(tc.name, func(t *testing.T) {
+			result, errQuery := store.Query(
+				ctx,
+				from,
+				to,
+				EventFilters{APIKey: tc.filter},
+				"hourly",
+				true,
+			)
+			if errQuery != nil {
+				t.Fatalf("Query(%q): %v", tc.filter, errQuery)
+			}
+			if result.Totals.Requests != tc.wantTotals {
+				t.Fatalf("Query(%q) totals = %d, want %d", tc.filter, result.Totals.Requests, tc.wantTotals)
+			}
+		})
+	}
+
+	repeated := []string{util.HideAPIKey("ab,c-first-zzzz"), "abcd...wxyz"}
+	result, err := store.Query(
+		ctx,
+		from,
+		to,
+		EventFilters{APIKeys: repeated},
+		"hourly",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("Query(repeated API keys): %v", err)
+	}
+	if result.Totals.Requests != 4 {
+		t.Fatalf("Query(repeated API keys) totals = %d, want 4", result.Totals.Requests)
+	}
+
+	singleRepeated := []string{util.HideAPIKey("ab,c-first-zzzz")}
+	result, err = store.Query(
+		ctx,
+		from,
+		to,
+		EventFilters{APIKeys: singleRepeated},
+		"hourly",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("Query(single repeated API key): %v", err)
+	}
+	if result.Totals.Requests != 2 {
+		t.Fatalf("Query(single repeated API key) totals = %d, want 2", result.Totals.Requests)
+	}
+
+	result, err = store.Query(
+		ctx,
+		from,
+		to,
+		EventFilters{APIKeys: []string{"", "  "}},
+		"hourly",
+		true,
+	)
+	if err != nil {
+		t.Fatalf("Query(empty repeated API keys): %v", err)
+	}
+	if result.Totals.Requests != int64(len(keys)) {
+		t.Fatalf("Query(empty repeated API keys) totals = %d, want %d", result.Totals.Requests, len(keys))
 	}
 }
