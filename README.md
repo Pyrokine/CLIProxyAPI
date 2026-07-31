@@ -64,6 +64,33 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+### Docker Compose
+
+Create a dedicated configuration directory before the first start:
+
+```bash
+mkdir -p config
+cp config.example.yaml config/config.yaml
+docker compose up -d
+```
+
+Compose mounts the directory at `/CLIProxyAPI/config` so management API updates can atomically replace `config.yaml` and
+maintain `config.yaml.last-good`. Edit `config/config.yaml` for the local deployment.
+
+For an existing root-level `config.yaml`, either move it into the directory or keep the old layout temporarily:
+
+```bash
+mkdir -p config
+mv -n config.yaml config/config.yaml
+# Temporary compatibility mode:
+CLI_PROXY_CONFIG_DIR=. docker compose up -d
+```
+
+The `docker-build.sh` and `docker-build.ps1` helpers detect the legacy file and print a compatibility notice. New
+installations use `config/config.yaml`. Source builds download the fixed management panel release required by this
+backend (`v1.17.14-aug.1`) before building the image. Set `PANEL_SOURCE=/path/to/management.html` to test a local panel
+candidate, or set `PANEL_TAG` only when deliberately testing another compatible release.
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
@@ -95,10 +122,21 @@ Use parsed request details as the upper bound for `N`, because duplicate fingerp
 max-db-size-mb >= ceil(estimated_sqlite_bytes * 1.2 / 1048576)
 ```
 
-Both HTTP `/usage/import` and local legacy import reject files above 100 MiB. When `events.db + WAL + SHM` reaches
-`usage-retention.max-db-size-mb`, live usage writes and imports are refused, and `/usage/db-size` exposes warning/capped
-state. CPA does not split usage data across multiple SQLite files; the supported oversized-database behavior is warning
-plus rejection, so operators should raise the cap, trim retention, or archive externally.
+Portable usage backups have a 100 MiB limit. HTTP `/usage/import` and local legacy import reject larger files;
+`/usage/export` checks the final encrypted JSON before sending it and returns HTTP 413 when it exceeds the same limit.
+Use the existing `from`, `to`, `model`, `api_key`, or `credential` filters to export smaller ranges. When
+`events.db + WAL + SHM` reaches `usage-retention.max-db-size-mb`, live usage writes and imports are refused, and
+`/usage/db-size` exposes warning/capped state. CPA does not split usage data across multiple SQLite files, so operators
+must raise the cap, trim retention, or archive externally.
+
+`/usage/export` writes a version 3 backup containing the canonical SQLite event fields. AES-GCM authenticates and
+encrypts the complete backup content under keys derived with salted scrypt; the visible envelope contains only format,
+KDF, nonce, and ciphertext fields. API keys use a separate derived HMAC identity key, so the JSON file exposes neither
+API keys nor linkable event metadata. Version 3 restores the original `cost_micro` values. Repricing historical events
+requires an explicit `POST /v0/management/usage/recalculate-costs` request. Import with the same management credential.
+To move data between servers that use different management credentials, send the same `X-Usage-Backup-Key` header on
+export and import. `/usage/import` still accepts v1 snapshots, v2 detail envelopes, bare `FlatDetail` arrays, and
+supported CSV exports.
 
 ## Release deployment
 

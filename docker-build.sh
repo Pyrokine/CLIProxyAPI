@@ -7,18 +7,52 @@
 
 # Hidden feature: Preserve usage statistics across rebuilds
 # Usage: ./docker-build.sh --with-usage
-# First run prompts for management API key, saved to temp/stats/.api_secret
+# First run prompts for management API key, saved outside the source tree
 
 set -euo pipefail
 
-STATS_DIR="temp/stats"
-STATS_FILE="${STATS_DIR}/.usage_backup.json"
-SECRET_FILE="${STATS_DIR}/.api_secret"
+STATE_HOME="${XDG_STATE_HOME:-}"
+if [[ -z "${STATE_HOME}" ]]; then
+  if [[ -n "${HOME:-}" ]]; then
+    STATE_HOME="${HOME}/.local/state"
+  else
+    STATE_HOME="${TMPDIR:-/tmp}/cli-proxy-api-state"
+  fi
+fi
+STATS_DIR="${CLI_PROXY_API_DOCKER_STATS_DIR:-${STATE_HOME}/cli-proxy-api/docker-build/stats}"
+STATS_FILE="${STATS_DIR}/usage_backup.json"
+SECRET_FILE="${STATS_DIR}/api_secret"
 WITH_USAGE=false
+CONFIG_DIR=""
+CONFIG_FILE=""
+
+configure_local_config() {
+  if [[ -n "${CLI_PROXY_CONFIG_DIR:-}" ]]; then
+    CONFIG_DIR="${CLI_PROXY_CONFIG_DIR}"
+  elif [[ -f "./config/config.yaml" ]]; then
+    CONFIG_DIR="./config"
+  elif [[ -f "./config.yaml" ]]; then
+    CONFIG_DIR="."
+    export CLI_PROXY_CONFIG_DIR="."
+    echo "Using legacy ./config.yaml. Move it to ./config/config.yaml for the new default layout."
+  else
+    echo "Error: config file not found."
+    echo "Create one with: mkdir -p config && cp config.example.yaml config/config.yaml"
+    exit 1
+  fi
+
+  CONFIG_FILE="${CONFIG_DIR%/}/config.yaml"
+  if [[ ! -f "${CONFIG_FILE}" ]]; then
+    echo "Error: config file not found: ${CONFIG_FILE}"
+    exit 1
+  fi
+}
 
 get_port() {
-  if [[ -f "config.yaml" ]]; then
-    grep -E "^port:" config.yaml | sed -E 's/^port: *["'"'"']?([0-9]+)["'"'"']?.*$/\1/'
+  local port
+  port=$(grep -E "^port:" "${CONFIG_FILE}" | sed -E 's/^port: *["'"'"']?([0-9]+)["'"'"']?.*$/\1/' || true)
+  if [[ -n "${port}" ]]; then
+    echo "${port}"
   else
     echo "8317"
   fi
@@ -109,6 +143,8 @@ wait_for_service() {
   sleep 2
 }
 
+configure_local_config
+
 if [[ "${1:-}" == "--with-usage" ]]; then
   WITH_USAGE=true
   export_stats_api_secret
@@ -151,6 +187,9 @@ case "$choice" in
 
     # Build and start the services with a local-only image tag
     export CLI_PROXY_IMAGE="cli-proxy-api:local"
+
+    echo "Preparing management panel asset..."
+    PANEL_TAG="${PANEL_TAG:-v1.17.14-aug.1}" ./scripts/prepare-management-panel.sh
 
     echo "Building the Docker image..."
     docker compose build \

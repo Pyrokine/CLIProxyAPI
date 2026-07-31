@@ -5,6 +5,7 @@ cli-proxy-api
 *.exe
 
 # Configuration
+/config/
 config.yaml
 config.yaml.last-good
 .env

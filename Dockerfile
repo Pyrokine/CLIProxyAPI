@@ -8,10 +8,8 @@ RUN go mod download
 
 COPY . .
 
-RUN mkdir -p static && \
-    if [ ! -f static/management.html ]; then \
-      printf '%s\n' '<!doctype html><html><head><meta charset="utf-8"><title>Management panel unavailable</title></head><body><h1>Management panel asset is not included in this Docker image.</h1></body></html>' > static/management.html; \
-    fi
+RUN test -s static/management.html && \
+    ! grep -q 'Management panel asset is not included in this Docker image' static/management.html
 
 ARG VERSION=dev
 ARG COMMIT=none
@@ -28,7 +26,7 @@ FROM alpine:3.22.0
 
 RUN apk add --no-cache tzdata
 
-RUN mkdir -p /CLIProxyAPI/static
+RUN mkdir -p /CLIProxyAPI/static /CLIProxyAPI/config
 
 COPY --from=builder ./app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
 COPY --from=builder ./app/static/management.html /CLIProxyAPI/static/management.html
@@ -40,7 +38,8 @@ WORKDIR /CLIProxyAPI
 EXPOSE 8317
 
 ENV TZ=Asia/Shanghai
+ENV MANAGEMENT_STATIC_PATH=/CLIProxyAPI/static
 
 RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
 
-CMD ["./CLIProxyAPI"]
+CMD ["./CLIProxyAPI", "--config", "/CLIProxyAPI/config/config.yaml"]

@@ -1,6 +1,6 @@
 # Git and GitHub folders
-.git/*
-.github/*
+.git
+.github
 
 # Docker and CI/CD related files
 docker-compose.yml
@@ -10,29 +10,36 @@ docker-compose.yml
 Dockerfile
 
 # Documentation and license
-docs/*
+docs
 README.md
 README_CN.md
 LICENSE
 
 # Runtime data folders (should be mounted as volumes)
-auths/*
-logs/*
-conv/*
-usage-data/*
+config
+auths
+logs
+conv
+usage-data
+temp
+refs
+pgstore
+gitstore
+objectstore
+home
 config.yaml
+config.yaml.last-good
+.env
+*.bak
+*.backup
+*.old
+*.orig
+*.secret
+*.key
 
-# Development/editor
-bin/*
-.vscode/*
-.claude/*
-.codex/*
-.gemini/*
-.serena/*
-.agent/*
-.agents/*
-.opencode/*
-.idea/*
-.bmad/*
-_bmad/*
-_bmad-output/*
+# Build output and development/editor data
+dist
+bin
+.*
+_bmad
+_bmad-output

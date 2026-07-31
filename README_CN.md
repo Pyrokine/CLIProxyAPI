@@ -62,6 +62,33 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
+### Docker Compose
+
+首次启动前创建专用配置目录：
+
+```bash
+mkdir -p config
+cp config.example.yaml config/config.yaml
+docker compose up -d
+```
+
+Compose 会把该目录挂载到 `/CLIProxyAPI/config`，管理 API 可以原子替换 `config.yaml`，并维护
+`config.yaml.last-good`，本地部署使用 `config/config.yaml`
+
+已有根目录 `config.yaml` 的部署可以迁移文件，也可以暂时保留旧目录结构：
+
+```bash
+mkdir -p config
+mv -n config.yaml config/config.yaml
+# 临时兼容旧目录结构：
+CLI_PROXY_CONFIG_DIR=. docker compose up -d
+```
+
+`docker-build.sh` 和 `docker-build.ps1` 会识别旧配置文件并输出兼容提示，新部署默认使用
+`config/config.yaml`，源码构建会先下载当前后端固定要求的管理面板版本 `v1.17.14-aug.1`，再构建镜像，
+测试本地面板候选产物时设置 `PANEL_SOURCE=/path/to/management.html`，只有明确测试其他兼容发布版本时才设置
+`PANEL_TAG`
+
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
@@ -92,10 +119,17 @@ D <= min(N, days  * models * credentials * api_keys * providers)
 max-db-size-mb >= ceil(estimated_sqlite_bytes * 1.2 / 1048576)
 ```
 
-HTTP `/usage/import` 和本地旧数据导入都会拒绝超过 100 MiB 的文件。当 `events.db + WAL + SHM` 达到
-`usage-retention.max-db-size-mb` 后，新的使用量写入和导入都会被拒绝，`/usage/db-size` 会返回 warning/capped 状态。CPA
-不把使用量自动拆成多个 SQLite 文件，单库过大的处理策略是告警并拒绝继续写入，运维侧需要调高上限、启用保留天数清理，或在 CPA
-外部归档。
+便携使用量备份统一限制为 100 MiB。HTTP `/usage/import` 和本地旧数据导入会拒绝更大的文件；`/usage/export` 会在发送前检查
+最终加密 JSON，超限返回 HTTP 413。可使用现有的 `from`、`to`、`model`、`api_key` 或 `credential` 过滤条件分段导出。当
+`events.db + WAL + SHM` 达到 `usage-retention.max-db-size-mb` 后，新的使用量写入和导入都会被拒绝，`/usage/db-size` 会返回
+warning/capped 状态。CPA 不把使用量自动拆成多个 SQLite 文件，运维侧需要调高上限、启用保留天数清理，或在 CPA 外部归档。
+
+`/usage/export` 输出版本 3 备份，完整保存 SQLite 事件字段。带随机 salt 的 scrypt 派生独立加密密钥和身份密钥，AES-GCM 对完整
+备份内容进行认证加密；可见 envelope 只包含格式、KDF、nonce 和 ciphertext。API Key 使用独立派生的 HMAC 身份，JSON 文件不会
+暴露 API Key、事件元数据或可跨备份关联的身份。版本 3 恢复原始 `cost_micro`；历史成本重估必须显式调用
+`POST /v0/management/usage/recalculate-costs`。导入时使用与导出时相同的管理凭证；两台服务器的管理凭证不同时，在导出和导入请求中
+传入相同的 `X-Usage-Backup-Key`。`/usage/import` 继续兼容 v1 snapshot、v2 detail envelope、`FlatDetail` 数组和已支持的 CSV
+格式。
 
 ## Release 部署
 

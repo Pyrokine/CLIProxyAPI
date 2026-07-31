@@ -1,5 +1,59 @@
 # Changelog
 
+## v7.2.67-aug.1 - 2026-07-31
+
+### Release Basis
+
+- Upstream semantic basis: v7.2.67
+- Previous local release: v7.2.50-aug.1
+- Local release: v7.2.67-aug.1
+- Required management panel: v1.17.14-aug.1 or newer
+
+### What's Changed
+
+- feat(config): Make configuration and auth-file updates transactional, keep last-good recovery data, and update dependent runtime state only after persistence succeeds
+- feat(plugin): Harden plugin host startup, authenticated private-repository release selection, artifact storage, resource cleanup, and scheduler lifecycle handling
+- feat(auth): Update provider credentials, quota refresh, exhausted-account routing, model aliases, authentication metadata, and concurrency-safe quota status snapshots
+- feat(runtime): Refresh provider executors, management handlers, interactions APIs, and protocol translators for the v7.2.67 semantic base
+- feat(usage): Migrate SQLite usage storage to schema v4, preserve latency and cost aggregates, add encrypted portable backups, and enforce database capacity limits
+- feat(model-catalog): Refresh catalog metadata and default prices, centralize server-side pricing, and apply catalog mutations transactionally
+- fix(usage): Run historical cost recalculation in the background, expose task status, and merge concurrent price updates into one follow-up pass using the latest prices
+- fix(release): Pin Docker images to management panel v1.17.14-aug.1 and reject missing, empty, mismatched, or fallback panel assets
+
+### Migration and Compatibility
+
+- The first startup after upgrading an older usage database runs the schema v4 migration before the usage store becomes ready; large databases can take several minutes
+- Model-price saves and model-catalog price updates return without waiting for historical repricing; use the recalculation status endpoint to observe completion
+- Version 3 usage backups preserve canonical SQLite event fields and costs; cross-server restores require the same management credential or `X-Usage-Backup-Key`
+- Docker release builds require the published CPAM v1.17.14-aug.1 `management.html` asset and do not fall back to another panel version
+
+---
+
+### 版本依据
+
+- 上游语义基线：v7.2.67
+- 上一个本地版本：v7.2.50-aug.1
+- 本地发布版本：v7.2.67-aug.1
+- 要求的管理面板版本：v1.17.14-aug.1 或更新
+
+### 更新内容
+
+- feat(config)：配置和 Auth file 更新改为事务处理，保留 last-good 恢复数据，只在持久化成功后更新依赖的运行时状态
+- feat(plugin)：加强 plugin host 启动、私有仓库 release 认证查询与选择、artifact 存储、资源清理和 scheduler 生命周期处理
+- feat(auth)：更新 provider 凭证、quota 刷新、额度耗尽账号路由、模型别名、认证元数据和并发安全的 quota 状态快照
+- feat(runtime)：按 v7.2.67 语义基线更新 provider executor、管理 handler、interactions API 和协议 translator
+- feat(usage)：SQLite 使用量存储迁移到 schema v4，保留 latency 和成本聚合，新增加密便携备份，并限制数据库容量
+- feat(model-catalog)：刷新模型目录元数据和默认价格，统一使用后端价格源，并以事务方式应用目录修改
+- fix(usage)：历史费用重算改为后台任务，提供任务状态，并把并发价格更新合并为一次使用最新价格的后续重算
+- fix(release)：Docker 镜像固定使用管理面板 v1.17.14-aug.1，拒绝缺失、空白、标签不匹配或 fallback 面板资产
+
+### 迁移与兼容性
+
+- 从旧版使用量数据库升级后的首次启动会在 usage store 就绪前执行 schema v4 迁移，大型数据库可能需要数分钟
+- 模型价格保存和模型目录价格修改不再等待历史费用重算，可通过重算状态接口查看完成结果
+- 版本 3 使用量备份保留 SQLite 标准事件字段和成本，跨服务器恢复需要相同管理凭证或 `X-Usage-Backup-Key`
+- Docker 发布构建要求 CPAM v1.17.14-aug.1 已发布 `management.html`，不会改用其他面板版本
+
 ## v7.2.50-aug.1 - 2026-07-07
 
 ### Release Basis

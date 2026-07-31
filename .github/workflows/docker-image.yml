@@ -27,6 +27,12 @@ jobs:
           echo VERSION=`git describe --tags --always --dirty` >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+      - name: Prepare management panel asset
+        env:
+          PANEL_REPO: Pyrokine/Cli-Proxy-API-Management-Center
+          PANEL_TAG: v1.17.14-aug.1
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prepare-management-panel.sh
       - name: Build and push (amd64)
         uses: docker/build-push-action@v6
         with:
@@ -58,6 +64,12 @@ jobs:
           echo VERSION=`git describe --tags --always --dirty` >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
+      - name: Prepare management panel asset
+        env:
+          PANEL_REPO: Pyrokine/Cli-Proxy-API-Management-Center
+          PANEL_TAG: v1.17.14-aug.1
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/prepare-management-panel.sh
       - name: Build and push (arm64)
         uses: docker/build-push-action@v6
         with:

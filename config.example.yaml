@@ -20,6 +20,10 @@ remote-management:
     # Whether to allow remote (non-localhost) management access.
     # When false, only localhost can access management endpoints (a key is still required).
     allow-remote: false
+    # Direct reverse-proxy IP addresses or CIDR ranges whose X-Forwarded-For/X-Real-IP
+    # headers may identify management clients. Leave empty when CPA is exposed directly.
+    # Example for a local Nginx proxy: ["127.0.0.1/32", "::1/128"]
+    trusted-proxies: []
     # Management key. If a plaintext value is provided here, it will be hashed on startup.
     # All management requests (even from localhost) require this key.
     # Leave empty to disable the Management API entirely (404 for all /v0/management routes).

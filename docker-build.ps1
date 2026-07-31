@@ -6,6 +6,26 @@
 # Stop script execution on any error
 $ErrorActionPreference = "Stop"
 
+$configDir = $env:CLI_PROXY_CONFIG_DIR
+if ([string]::IsNullOrWhiteSpace($configDir)) {
+    if (Test-Path -LiteralPath "./config/config.yaml" -PathType Leaf) {
+        $configDir = "./config"
+    }
+    elseif (Test-Path -LiteralPath "./config.yaml" -PathType Leaf) {
+        $configDir = "."
+        $env:CLI_PROXY_CONFIG_DIR = "."
+        Write-Warning "Using legacy ./config.yaml. Move it to ./config/config.yaml for the new default layout."
+    }
+    else {
+        throw "Config file not found. Run: New-Item -ItemType Directory -Force config; Copy-Item config.example.yaml config/config.yaml"
+    }
+}
+
+$configFile = Join-Path $configDir "config.yaml"
+if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) {
+    throw "Config file not found: $configFile"
+}
+
 # --- Step 1: Choose Environment ---
 Write-Host "Please select an option:"
 Write-Host "1) Run using Pre-built Image (Recommended)"
@@ -37,6 +57,9 @@ switch ($choice) {
         # Build and start the services with a local-only image tag
         $env:CLI_PROXY_IMAGE = "cli-proxy-api:local"
         
+        Write-Host "Preparing management panel asset..."
+        & "$PSScriptRoot/scripts/prepare-management-panel.ps1"
+
         Write-Host "Building the Docker image..."
         docker compose build --build-arg VERSION=$VERSION --build-arg COMMIT=$COMMIT --build-arg BUILD_DATE=$BUILD_DATE
 
