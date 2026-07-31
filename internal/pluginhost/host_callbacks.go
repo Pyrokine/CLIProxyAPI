@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
@@ -273,6 +273,7 @@ func (h *Host) callHostModelExecute(ctx context.Context, request []byte) ([]byte
 	}
 	skipPluginID := h.callbackCallerPluginID(ctx, req.HostCallbackID)
 	ctx = h.resolveCallbackContext(req.HostCallbackID, ctx)
+	ctx = coreusage.WithoutDeferredRecord(ctx)
 	resp, errMsg := executor.ExecuteModel(
 		ctx, modelExecutionRequestFromPlugin(req.HostModelExecutionRequest, skipPluginID),
 	)
@@ -302,9 +303,7 @@ func (h *Host) callHostModelExecuteStream(ctx context.Context, request []byte) (
 	}
 	skipPluginID := h.callbackCallerPluginID(ctx, req.HostCallbackID)
 	ctx = h.resolveCallbackContext(req.HostCallbackID, ctx)
-	if ctx == nil {
-		ctx = context.Background()
-	}
+	ctx = coreusage.WithoutDeferredRecord(ctx)
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer func() {
 		if cancel != nil {
@@ -392,7 +391,7 @@ func modelExecutionRequestFromPlugin(
 	}
 }
 
-func modelExecutionError(errMsg *interfaces.ErrorMessage) error {
+func modelExecutionError(errMsg *handlers.ErrorMessage) error {
 	if errMsg == nil {
 		return nil
 	}

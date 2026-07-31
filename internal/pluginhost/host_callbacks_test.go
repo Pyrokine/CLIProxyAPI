@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	"github.com/gin-gonic/gin"
@@ -25,25 +25,25 @@ import (
 type fakeHostModelExecutor struct {
 	executeModel func(context.Context, handlers.ModelExecutionRequest) (
 		handlers.ModelExecutionResponse,
-		*interfaces.ErrorMessage,
+		*handlers.ErrorMessage,
 	)
 	executeModelStream func(context.Context, handlers.ModelExecutionRequest) (
 		handlers.ModelExecutionStream,
-		*interfaces.ErrorMessage,
+		*handlers.ErrorMessage,
 	)
 }
 
 func (e *fakeHostModelExecutor) ExecuteModel(
 	ctx context.Context,
 	req handlers.ModelExecutionRequest,
-) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+) (handlers.ModelExecutionResponse, *handlers.ErrorMessage) {
 	return e.executeModel(ctx, req)
 }
 
 func (e *fakeHostModelExecutor) ExecuteModelStream(
 	ctx context.Context,
 	req handlers.ModelExecutionRequest,
-) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+) (handlers.ModelExecutionStream, *handlers.ErrorMessage) {
 	return e.executeModelStream(ctx, req)
 }
 
@@ -132,7 +132,7 @@ func TestHostHTTPDoCallbackRestoresRegisteredRequestContext(t *testing.T) {
 	if !okRequest {
 		t.Fatal("API_REQUEST was not captured on the original Gin context")
 	}
-	apiRequest, _ := rawAPIRequest.([]byte)
+	apiRequest := rawAPIRequest.(*logging.BoundedLogBuffer).Bytes()
 	if !bytes.Contains(apiRequest, []byte("=== API REQUEST 1 ===")) || !bytes.Contains(
 		apiRequest, []byte(`{"request":true}`),
 	) {
@@ -143,7 +143,7 @@ func TestHostHTTPDoCallbackRestoresRegisteredRequestContext(t *testing.T) {
 	if !okResponse {
 		t.Fatal("API_RESPONSE was not captured on the original Gin context")
 	}
-	apiResponse, _ := rawAPIResponse.([]byte)
+	apiResponse := rawAPIResponse.(*logging.BoundedLogBuffer).Bytes()
 	if !bytes.Contains(apiResponse, []byte("=== API RESPONSE 1 ===")) || !bytes.Contains(
 		apiResponse, []byte("upstream-body"),
 	) {
@@ -280,7 +280,7 @@ func TestHostModelExecuteCallback(t *testing.T) {
 			executeModel: func(
 				ctx context.Context,
 				req handlers.ModelExecutionRequest,
-			) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			) (handlers.ModelExecutionResponse, *handlers.ErrorMessage) {
 				got = req
 				return handlers.ModelExecutionResponse{
 					StatusCode: http.StatusAccepted,
@@ -347,7 +347,7 @@ func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 			executeModel: func(
 				ctx context.Context,
 				req handlers.ModelExecutionRequest,
-			) (handlers.ModelExecutionResponse, *interfaces.ErrorMessage) {
+			) (handlers.ModelExecutionResponse, *handlers.ErrorMessage) {
 				got = req
 				return handlers.ModelExecutionResponse{StatusCode: http.StatusOK, Body: []byte(`{"ok":true}`)}, nil
 			},
@@ -380,6 +380,103 @@ func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 	}
 }
 
+func TestHostModelExecuteCallbackDoesNotClaimParentDeferredUsage(t *testing.T) {
+	type metadataKey struct{}
+
+	deferred := coreusage.NewDeferredRecord()
+	parentCtx := coreusage.WithDeferredRecord(
+		context.WithValue(context.Background(), metadataKey{}, "preserved"),
+		deferred,
+	)
+	host := New()
+	host.SetModelExecutor(
+		&fakeHostModelExecutor{
+			executeModel: func(
+				ctx context.Context,
+				req handlers.ModelExecutionRequest,
+			) (handlers.ModelExecutionResponse, *handlers.ErrorMessage) {
+				if ctx.Value(metadataKey{}) != "preserved" {
+					t.Fatalf("callback metadata = %v, want preserved", ctx.Value(metadataKey{}))
+				}
+				if coreusage.DeferRecord(ctx, coreusage.Record{Model: "nested"}) {
+					t.Fatal("nested model execution claimed the parent deferred record")
+				}
+				return handlers.ModelExecutionResponse{StatusCode: http.StatusOK}, nil
+			},
+		},
+	)
+	callbackID, closeCallback := host.openCallbackContext(parentCtx)
+	defer closeCallback()
+
+	rawReq, errMarshal := json.Marshal(
+		rpcHostModelExecutionRequest{
+			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+				EntryProtocol: "openai",
+				ExitProtocol:  "openai",
+				Model:         "model-1",
+			},
+			HostCallbackID: callbackID,
+		},
+	)
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(
+		context.Background(), pluginabi.MethodHostModelExecute, rawReq,
+	); errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if !coreusage.DeferRecord(parentCtx, coreusage.Record{Model: "parent"}) {
+		t.Fatal("parent context no longer owns its deferred record")
+	}
+}
+
+func TestHostModelExecuteStreamCallbackDoesNotClaimParentDeferredUsage(t *testing.T) {
+	deferred := coreusage.NewDeferredRecord()
+	parentCtx := coreusage.WithDeferredRecord(context.Background(), deferred)
+	host := New()
+	host.SetModelExecutor(
+		&fakeHostModelExecutor{
+			executeModelStream: func(
+				ctx context.Context,
+				req handlers.ModelExecutionRequest,
+			) (handlers.ModelExecutionStream, *handlers.ErrorMessage) {
+				if coreusage.DeferRecord(ctx, coreusage.Record{Model: "nested-stream"}) {
+					t.Fatal("nested stream execution claimed the parent deferred record")
+				}
+				chunks := make(chan handlers.ModelExecutionChunk)
+				close(chunks)
+				return handlers.ModelExecutionStream{StatusCode: http.StatusOK, Chunks: chunks}, nil
+			},
+		},
+	)
+	callbackID, closeCallback := host.openCallbackContext(parentCtx)
+	defer closeCallback()
+
+	rawReq, errMarshal := json.Marshal(
+		rpcHostModelExecutionRequest{
+			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
+				EntryProtocol: "openai",
+				ExitProtocol:  "openai",
+				Model:         "model-1",
+				Stream:        true,
+			},
+			HostCallbackID: callbackID,
+		},
+	)
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(
+		context.Background(), pluginabi.MethodHostModelExecuteStream, rawReq,
+	); errCall != nil {
+		t.Fatalf("callFromPlugin() error = %v", errCall)
+	}
+	if !coreusage.DeferRecord(parentCtx, coreusage.Record{Model: "parent"}) {
+		t.Fatal("parent context no longer owns its deferred record")
+	}
+}
+
 func TestHostModelStreamClosesWithCallbackScope(t *testing.T) {
 	host := New()
 	ctxSeen := make(chan context.Context, 1)
@@ -388,7 +485,7 @@ func TestHostModelStreamClosesWithCallbackScope(t *testing.T) {
 			executeModelStream: func(
 				ctx context.Context,
 				req handlers.ModelExecutionRequest,
-			) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			) (handlers.ModelExecutionStream, *handlers.ErrorMessage) {
 				ctxSeen <- ctx
 				return handlers.ModelExecutionStream{
 					StatusCode: http.StatusOK,
@@ -442,7 +539,7 @@ func TestHostModelStreamClosesWithCallbackScope(t *testing.T) {
 	}
 }
 
-func TestHostModelStreamReadAfterCallbackCloseReturnsDone(t *testing.T) {
+func TestHostModelStreamReadAfterCallbackCloseReturnsError(t *testing.T) {
 	host := New()
 	chunks := make(chan handlers.ModelExecutionChunk)
 	host.SetModelExecutor(
@@ -450,7 +547,7 @@ func TestHostModelStreamReadAfterCallbackCloseReturnsDone(t *testing.T) {
 			executeModelStream: func(
 				ctx context.Context,
 				req handlers.ModelExecutionRequest,
-			) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			) (handlers.ModelExecutionStream, *handlers.ErrorMessage) {
 				return handlers.ModelExecutionStream{
 					StatusCode: http.StatusOK,
 					Chunks:     chunks,
@@ -492,30 +589,9 @@ func TestHostModelStreamReadAfterCallbackCloseReturnsDone(t *testing.T) {
 	if errMarshal != nil {
 		t.Fatalf("marshal read request: %v", errMarshal)
 	}
-	readDone := make(chan pluginapi.HostModelStreamReadResponse, 1)
-	readErr := make(chan error, 1)
-	go func() {
-		rawRead, errRead := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelStreamRead, readReq)
-		if errRead != nil {
-			readErr <- errRead
-			return
-		}
-		doneResp, errDecodeRead := decodeRPCEnvelope[pluginapi.HostModelStreamReadResponse](rawRead)
-		if errDecodeRead != nil {
-			readErr <- errDecodeRead
-			return
-		}
-		readDone <- doneResp
-	}()
-	select {
-	case errRead := <-readErr:
-		t.Fatalf("read after callback close error = %v", errRead)
-	case doneResp := <-readDone:
-		if !doneResp.Done || len(doneResp.Payload) != 0 || doneResp.Error != "" {
-			t.Fatalf("read after callback close = %#v, want done without payload/error", doneResp)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("read after callback close blocked")
+	_, errRead := host.callFromPlugin(context.Background(), pluginabi.MethodHostModelStreamRead, readReq)
+	if errRead == nil || !strings.Contains(errRead.Error(), "is not open") {
+		t.Fatalf("read after callback close error = %v, want closed stream error", errRead)
 	}
 }
 
@@ -527,9 +603,9 @@ func TestHostModelExecuteStreamStartupErrorCleansUp(t *testing.T) {
 			executeModelStream: func(
 				ctx context.Context,
 				req handlers.ModelExecutionRequest,
-			) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			) (handlers.ModelExecutionStream, *handlers.ErrorMessage) {
 				ctxSeen <- ctx
-				return handlers.ModelExecutionStream{}, &interfaces.ErrorMessage{
+				return handlers.ModelExecutionStream{}, &handlers.ErrorMessage{
 					StatusCode: http.StatusBadGateway,
 				}
 			},
@@ -688,7 +764,7 @@ func TestHostModelStreamReadReturnsPayloadAndTerminalError(t *testing.T) {
 			executeModelStream: func(
 				ctx context.Context,
 				req handlers.ModelExecutionRequest,
-			) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			) (handlers.ModelExecutionStream, *handlers.ErrorMessage) {
 				return handlers.ModelExecutionStream{
 					StatusCode: http.StatusOK,
 					Headers:    http.Header{"X-Stream": []string{"ok"}},
@@ -736,7 +812,7 @@ func TestHostModelStreamExplicitCloseCancelsStream(t *testing.T) {
 			executeModelStream: func(
 				ctx context.Context,
 				req handlers.ModelExecutionRequest,
-			) (handlers.ModelExecutionStream, *interfaces.ErrorMessage) {
+			) (handlers.ModelExecutionStream, *handlers.ErrorMessage) {
 				ctxSeen <- ctx
 				return handlers.ModelExecutionStream{
 					StatusCode: http.StatusOK,

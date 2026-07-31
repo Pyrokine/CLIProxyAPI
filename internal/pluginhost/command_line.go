@@ -11,6 +11,7 @@ import (
 	"time"
 
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
@@ -405,18 +406,25 @@ func (h *Host) persistCommandLineAuths(ctx context.Context, auths []pluginapi.Au
 		return nil, fmt.Errorf("pluginhost: token store unavailable")
 	}
 	summary := h.hostConfigSummary()
-	if summary.AuthDir != "" {
-		if setter, okSetter := store.(interface{ SetBaseDir(string) }); okSetter {
-			setter.SetBaseDir(summary.AuthDir)
-		}
-	}
 	savedPaths := make([]string, 0, len(auths))
 	for index, authData := range auths {
 		record := h.AuthDataToCoreAuth(authData, "", "")
 		if record == nil {
 			return savedPaths, fmt.Errorf("pluginhost: command-line auth %d is invalid", index+1)
 		}
-		savedPath, errSave := store.Save(ctx, record)
+		var savedPath string
+		var errSave error
+		if summary.AuthDir != "" {
+			if scopedStore, okScoped := store.(interface {
+				SaveWithBaseDir(context.Context, string, *coreauth.Auth) (string, error)
+			}); okScoped {
+				savedPath, errSave = scopedStore.SaveWithBaseDir(ctx, summary.AuthDir, record)
+			} else {
+				savedPath, errSave = store.Save(ctx, record)
+			}
+		} else {
+			savedPath, errSave = store.Save(ctx, record)
+		}
 		if errSave != nil {
 			return savedPaths, fmt.Errorf("pluginhost: save command-line auth %s: %w", record.ID, errSave)
 		}

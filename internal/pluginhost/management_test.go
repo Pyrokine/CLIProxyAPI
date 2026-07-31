@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
@@ -90,6 +91,66 @@ func TestRegisterManagementRoutesSkipsReservedAndUsesPriority(t *testing.T) {
 	rec = httptest.NewRecorder()
 	if host.ServeManagementHTTP(rec, req) {
 		t.Fatal("reserved route was served by plugin")
+	}
+}
+
+func TestRegisterManagementRoutesDropsResultsAfterRuntimeInvalidation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "stale-management",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					ManagementAPI: &managementPluginDouble{
+						register: func(
+							context.Context,
+							pluginapi.ManagementRegistrationRequest,
+						) (pluginapi.ManagementRegistrationResponse, error) {
+							close(started)
+							<-release
+							return pluginapi.ManagementRegistrationResponse{
+								Routes: []pluginapi.ManagementRoute{
+									{
+										Method: http.MethodGet,
+										Path:   "/plugins/stale/status",
+										Handler: managementHandlerFunc(
+											func(
+												context.Context,
+												pluginapi.ManagementRequest,
+											) (pluginapi.ManagementResponse, error) {
+												return pluginapi.ManagementResponse{}, nil
+											},
+										),
+									},
+								},
+							}, nil
+						},
+					},
+				},
+			},
+		},
+	)
+
+	done := make(chan struct{})
+	go func() {
+		host.RegisterManagementRoutes(context.Background(), nil)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("management registration did not start")
+	}
+	host.InvalidateRuntime()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("management registration did not finish")
+	}
+	if host.HasManagementRoute(http.MethodGet, "/v0/management/plugins/stale/status") {
+		t.Fatal("stale management route was published after runtime invalidation")
 	}
 }
 
@@ -304,12 +365,19 @@ func TestRegisteredPluginsIncludesResourceMenus(t *testing.T) {
 type managementPluginDouble struct {
 	routes    []pluginapi.ManagementRoute
 	resources []pluginapi.ResourceRoute
+	register  func(
+		context.Context,
+		pluginapi.ManagementRegistrationRequest,
+	) (pluginapi.ManagementRegistrationResponse, error)
 }
 
 func (p *managementPluginDouble) RegisterManagement(
-	context.Context,
-	pluginapi.ManagementRegistrationRequest,
+	ctx context.Context,
+	req pluginapi.ManagementRegistrationRequest,
 ) (pluginapi.ManagementRegistrationResponse, error) {
+	if p.register != nil {
+		return p.register(ctx, req)
+	}
 	return pluginapi.ManagementRegistrationResponse{Routes: p.routes, Resources: p.resources}, nil
 }
 

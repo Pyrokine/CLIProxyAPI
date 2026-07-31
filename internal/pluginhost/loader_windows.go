@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -51,7 +50,6 @@ const (
 	shadowPluginPrefix           = "cliproxy-plugin-"
 	shadowPluginTempPrefix       = ".cliproxy-plugin-"
 	shadowPluginProcessDirPrefix = "pid-"
-	shadowPluginDigestLength     = 32
 )
 
 type dynamicLibraryLoader struct{}
@@ -130,55 +128,44 @@ func shadowCopyPlugin(file pluginFile) (string, error) {
 
 func shadowCopyPluginToDir(file pluginFile, dir string) (string, error) {
 	source := filepath.Clean(file.Path)
-	tmp, errTemp := os.CreateTemp(dir, shadowPluginTempPrefix+file.ID+"-*"+filepath.Ext(source))
-	if errTemp != nil {
-		return "", errTemp
+	shadow, errShadow := os.CreateTemp(dir, shadowPluginPrefix+file.ID+"-*"+filepath.Ext(source))
+	if errShadow != nil {
+		return "", errShadow
 	}
-	tmpName := tmp.Name()
-	removeTemp := true
+	shadowPath := shadow.Name()
+	removeShadow := true
 	defer func() {
-		if removeTemp {
-			removeShadowPlugin(tmpName)
+		if removeShadow {
+			removeShadowPlugin(shadowPath)
 		}
 	}()
 
 	in, errOpen := os.Open(source)
 	if errOpen != nil {
-		_ = tmp.Close()
+		_ = shadow.Close()
 		return "", errOpen
 	}
 	defer func() {
 		_ = in.Close()
 	}()
 	hasher := sha256.New()
-	size, errCopy := io.Copy(io.MultiWriter(tmp, hasher), in)
-	if errCopy != nil {
-		_ = tmp.Close()
+	if _, errCopy := io.Copy(io.MultiWriter(shadow, hasher), in); errCopy != nil {
+		_ = shadow.Close()
 		return "", errCopy
 	}
-	if errClose := tmp.Close(); errClose != nil {
+	if errSync := shadow.Sync(); errSync != nil {
+		_ = shadow.Close()
+		return "", errSync
+	}
+	if errClose := shadow.Close(); errClose != nil {
 		return "", errClose
 	}
 	digest := hex.EncodeToString(hasher.Sum(nil))
-	target := shadowPluginPath(dir, file.ID, digest, filepath.Ext(source))
-	if shadowPluginMatches(target, size, digest) {
-		return target, nil
+	if expected := strings.TrimSpace(file.digest); expected != "" && digest != expected {
+		return "", fmt.Errorf("shadow plugin digest %s does not match snapshot %s", digest, expected)
 	}
-	if errRemove := os.Remove(target); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
-		if shadowPluginMatches(target, size, digest) {
-			return target, nil
-		}
-		removeShadowPlugin(target)
-		return "", fmt.Errorf("remove stale shadow plugin: %w", errRemove)
-	}
-	if errRename := os.Rename(tmpName, target); errRename != nil {
-		if shadowPluginMatches(target, size, digest) {
-			return target, nil
-		}
-		return "", fmt.Errorf("move shadow plugin: %w", errRename)
-	}
-	removeTemp = false
-	return target, nil
+	removeShadow = false
+	return shadowPath, nil
 }
 
 func shadowPluginDir() (string, error) {
@@ -221,35 +208,6 @@ func removeStaleShadowPlugins(dir string) {
 			removeShadowPlugin(filepath.Join(dir, name))
 		}
 	}
-}
-
-func shadowPluginPath(dir string, id string, digest string, extension string) string {
-	if len(digest) > shadowPluginDigestLength {
-		digest = digest[:shadowPluginDigestLength]
-	}
-	return filepath.Join(dir, shadowPluginPrefix+id+"-"+digest+extension)
-}
-
-func shadowPluginMatches(path string, size int64, digest string) bool {
-	info, errStat := os.Stat(path)
-	if errStat != nil {
-		return false
-	}
-	if !info.Mode().IsRegular() || info.Size() != size {
-		return false
-	}
-	file, errOpen := os.Open(path)
-	if errOpen != nil {
-		return false
-	}
-	defer func() {
-		_ = file.Close()
-	}()
-	hasher := sha256.New()
-	if _, errCopy := io.Copy(hasher, file); errCopy != nil {
-		return false
-	}
-	return hex.EncodeToString(hasher.Sum(nil)) == digest
 }
 
 func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {

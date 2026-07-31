@@ -35,9 +35,10 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 		return
 	}
 
+	token := h.capturePublicationToken()
 	nextRoutes := make(map[string]managementRouteRecord)
 	nextResources := make(map[string]resourceRouteRecord)
-	for _, record := range h.activeRecords() {
+	for _, record := range h.activeRecordsFromSnapshot(token.snapshot) {
 		plugin := record.plugin.Capabilities.ManagementAPI
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
@@ -92,10 +93,17 @@ func (h *Host) RegisterManagementRoutes(ctx context.Context, reserved map[string
 		}
 	}
 
+	h.publicationMu.Lock()
 	h.mu.Lock()
+	if !h.publicationTokenCurrentLocked(token) {
+		h.mu.Unlock()
+		h.publicationMu.Unlock()
+		return
+	}
 	h.managementRoutes = nextRoutes
 	h.resourceRoutes = nextResources
 	h.mu.Unlock()
+	h.publicationMu.Unlock()
 }
 
 func (h *Host) callManagementRegistrar(

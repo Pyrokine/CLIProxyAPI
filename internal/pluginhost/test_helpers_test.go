@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
@@ -35,6 +36,9 @@ type testSymbolLookup struct {
 	plugin              *testPlugin
 	active              pluginapi.Plugin
 	shutdownCalls       int
+	shutdownStarted     chan struct{}
+	shutdownRelease     chan struct{}
+	shutdownOnce        sync.Once
 	registerOverride    func([]byte) pluginapi.Plugin
 	reconfigureOverride func([]byte) pluginapi.Plugin
 }
@@ -121,6 +125,19 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, fmt.Errorf("missing auth provider")
 		}
 		return marshalRPCResult(rpcIdentifierResponse{Identifier: l.active.Capabilities.AuthProvider.Identifier()})
+	case pluginabi.MethodModelRegister:
+		if l.active.Capabilities.ModelRegistrar == nil {
+			return nil, fmt.Errorf("missing model registrar")
+		}
+		var req pluginapi.ModelRegistrationRequest
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		resp, errRegister := l.active.Capabilities.ModelRegistrar.RegisterModels(ctx, req)
+		if errRegister != nil {
+			return nil, errRegister
+		}
+		return marshalRPCResult(resp)
 	case pluginabi.MethodSchedulerPick:
 		if l.active.Capabilities.Scheduler == nil {
 			return nil, fmt.Errorf("missing scheduler")
@@ -151,6 +168,14 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 
 func (l *testSymbolLookup) Shutdown() {
 	l.shutdownCalls++
+	if l.shutdownStarted != nil {
+		l.shutdownOnce.Do(func() {
+			close(l.shutdownStarted)
+		})
+	}
+	if l.shutdownRelease != nil {
+		<-l.shutdownRelease
+	}
 }
 
 func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, error) {

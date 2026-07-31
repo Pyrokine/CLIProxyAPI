@@ -173,8 +173,11 @@ func TestExecuteCommandLinePersistsReturnedAuths(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("ExecuteCommandLine() exitCode = %d, want 0", exitCode)
 	}
-	if store.baseDir != authDir {
-		t.Fatalf("store baseDir = %q, want %q", store.baseDir, authDir)
+	if store.scopedDir != authDir {
+		t.Fatalf("store scopedDir = %q, want %q", store.scopedDir, authDir)
+	}
+	if store.setterCalls != 0 || store.unscopedSaves != 0 {
+		t.Fatalf("shared setter calls = %d, unscoped saves = %d", store.setterCalls, store.unscopedSaves)
 	}
 	if len(store.saved) != 1 {
 		t.Fatalf("saved auths = %d, want 1", len(store.saved))
@@ -213,9 +216,12 @@ func (p *commandLinePluginDouble) ExecuteCommandLine(
 }
 
 type commandLineAuthStore struct {
-	baseDir string
-	saved   []*coreauth.Auth
-	paths   []string
+	baseDir       string
+	scopedDir     string
+	setterCalls   int
+	unscopedSaves int
+	saved         []*coreauth.Auth
+	paths         []string
 }
 
 func (s *commandLineAuthStore) List(context.Context) ([]*coreauth.Auth, error) {
@@ -223,8 +229,21 @@ func (s *commandLineAuthStore) List(context.Context) ([]*coreauth.Auth, error) {
 }
 
 func (s *commandLineAuthStore) Save(_ context.Context, auth *coreauth.Auth) (string, error) {
+	s.unscopedSaves++
 	s.saved = append(s.saved, auth.Clone())
 	path := filepath.Join(s.baseDir, auth.FileName)
+	s.paths = append(s.paths, path)
+	return path, nil
+}
+
+func (s *commandLineAuthStore) SaveWithBaseDir(
+	_ context.Context,
+	dir string,
+	auth *coreauth.Auth,
+) (string, error) {
+	s.scopedDir = dir
+	s.saved = append(s.saved, auth.Clone())
+	path := filepath.Join(dir, auth.FileName)
 	s.paths = append(s.paths, path)
 	return path, nil
 }
@@ -234,5 +253,6 @@ func (s *commandLineAuthStore) Delete(context.Context, string) error {
 }
 
 func (s *commandLineAuthStore) SetBaseDir(dir string) {
+	s.setterCalls++
 	s.baseDir = dir
 }

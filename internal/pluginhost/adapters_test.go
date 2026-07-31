@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -22,6 +24,11 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
+
+func testRefreshCommitGuardCurrent(guard coreauth.RefreshCommitGuard) bool {
+	validator, ok := guard.(interface{ Current() bool })
+	return ok && validator.Current()
+}
 
 func TestPluginModelInfoToRegistryModelInfoClonesThinkingAndSlices(t *testing.T) {
 	model := pluginapi.ModelInfo{
@@ -400,7 +407,7 @@ func TestRegisterModelsPrunesStaleClientAfterSnapshotChange(t *testing.T) {
 	}
 }
 
-func TestRegisterModelsDropsResultsWhenSnapshotChangesDuringRegistration(t *testing.T) {
+func TestRegisterModelsDropsResultsAfterRuntimeInvalidation(t *testing.T) {
 	modelRegistry := newFakeModelRegistry()
 	host := New()
 	oldSnap := &Snapshot{
@@ -414,20 +421,7 @@ func TestRegisterModelsDropsResultsWhenSnapshotChangesDuringRegistration(t *test
 								ctx context.Context,
 								req pluginapi.ModelRegistrationRequest,
 							) (pluginapi.ModelRegistrationResponse, error) {
-								host.snapshot.Store(
-									&Snapshot{
-										enabled: true, records: []capabilityRecord{
-											{
-												id: "bravo",
-												plugin: pluginapi.Plugin{
-													Capabilities: pluginapi.Capabilities{
-														ModelRegistrar: staticModelRegistrar("provider-b", "model-b"),
-													},
-												},
-											},
-										},
-									},
-								)
+								host.InvalidateRuntime()
 								return pluginapi.ModelRegistrationResponse{
 									Provider: "provider-a",
 									Models: []pluginapi.ModelInfo{
@@ -495,6 +489,66 @@ func TestRegisterModelsPanicFusesPluginAndSkipsLaterCalls(t *testing.T) {
 	}
 }
 
+func TestUnloadPluginRevokesModelAndExecutorPublications(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	manager := newFakeExecutorManager()
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "model-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					ModelRegistrar: staticModelRegistrar("model-provider", "model-only"),
+				},
+			},
+		},
+		capabilityRecord{
+			id: "executor-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					ModelRegistrar: staticModelRegistrar("executor-provider", "executor-model"),
+					Executor:       &fakeExecutor{identifier: "executor-provider"},
+				},
+			},
+		},
+	)
+	host.mu.Lock()
+	host.loaded["model-plugin"] = &loadedPlugin{id: "model-plugin"}
+	host.loaded["executor-plugin"] = &loadedPlugin{id: "executor-plugin"}
+	host.mu.Unlock()
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	host.RegisterExecutors(manager, modelRegistry)
+	if modelRegistry.clients["plugin:model-plugin:model-provider"] == nil {
+		t.Fatal("model plugin client was not published")
+	}
+	if modelRegistry.clients["plugin:executor-plugin:executor-provider:executor"] == nil {
+		t.Fatal("executor model client was not published")
+	}
+	if _, okExecutor := manager.Executor("executor-provider"); !okExecutor {
+		t.Fatal("plugin executor was not published")
+	}
+
+	if !host.UnloadPlugin("model-plugin") {
+		t.Fatal("UnloadPlugin(model-plugin) = false, want true")
+	}
+	if modelRegistry.clients["plugin:model-plugin:model-provider"] != nil {
+		t.Fatal("model plugin client remains after unload")
+	}
+	if _, okExecutor := manager.Executor("executor-provider"); !okExecutor {
+		t.Fatal("unloading model plugin removed another plugin executor")
+	}
+
+	if !host.UnloadPlugin("executor-plugin") {
+		t.Fatal("UnloadPlugin(executor-plugin) = false, want true")
+	}
+	if modelRegistry.clients["plugin:executor-plugin:executor-provider:executor"] != nil {
+		t.Fatal("executor model client remains after unload")
+	}
+	if _, okExecutor := manager.Executor("executor-provider"); okExecutor {
+		t.Fatal("plugin executor remains after unload")
+	}
+}
+
 func TestRegisterExecutorsDoesNotOverwriteExistingExecutor(t *testing.T) {
 	manager := newFakeExecutorManager()
 	existing := &fakeProviderExecutor{provider: "provider"}
@@ -518,6 +572,33 @@ func TestRegisterExecutorsDoesNotOverwriteExistingExecutor(t *testing.T) {
 	got, _ := manager.Executor("provider")
 	if got != existing {
 		t.Fatalf("registered executor = %#v, want existing executor", got)
+	}
+}
+
+func TestRegisterExecutorsReusesEquivalentAdapter(t *testing.T) {
+	manager := newFakeExecutorManager()
+	executor := &fakeExecutor{identifier: "provider"}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "alpha",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{Executor: executor},
+			},
+		},
+	)
+	host.RegisterExecutors(manager, nil)
+	first, okFirst := manager.executors["provider"].(*executorAdapter)
+	if !okFirst || first == nil {
+		t.Fatalf("first executor = %#v, want executorAdapter", manager.executors["provider"])
+	}
+
+	host.RegisterExecutors(manager, nil)
+	second, okSecond := manager.executors["provider"].(*executorAdapter)
+	if !okSecond || second != first {
+		t.Fatalf("second executor = %#v, want reused adapter %#v", second, first)
+	}
+	if manager.registerCalls != 1 {
+		t.Fatalf("RegisterExecutor calls = %d, want 1", manager.registerCalls)
 	}
 }
 
@@ -983,7 +1064,7 @@ func TestRegisterExecutorsBothScopeKeepsStaticAndOAuthModels(t *testing.T) {
 	}
 }
 
-func TestRegisterExecutorsDropsResultsWhenSnapshotChangesBeforeCommit(t *testing.T) {
+func TestRegisterExecutorsDropsResultsAfterRuntimeInvalidation(t *testing.T) {
 	manager := newFakeExecutorManager()
 	host := New()
 	staleExecutor := &executorAdapter{
@@ -994,12 +1075,12 @@ func TestRegisterExecutorsDropsResultsWhenSnapshotChangesBeforeCommit(t *testing
 	manager.executors["stale-provider"] = staleExecutor
 	host.executorProviders["stale-provider"] = struct{}{}
 
-	changedSnapshot := false
+	invalidated := false
 	exec := &fakeExecutor{
 		identifierFunc: func() string {
-			if !changedSnapshot {
-				changedSnapshot = true
-				host.snapshot.Store(&Snapshot{enabled: true})
+			if !invalidated {
+				invalidated = true
+				host.InvalidateRuntime()
 			}
 			return "provider-a"
 		},
@@ -1030,8 +1111,8 @@ func TestRegisterExecutorsDropsResultsWhenSnapshotChangesBeforeCommit(t *testing
 	if manager.executors["stale-provider"] != staleExecutor {
 		t.Fatalf("stale-provider executor = %#v, want existing executor preserved", manager.executors["stale-provider"])
 	}
-	if _, okProvider := host.executorProviders["stale-provider"]; !okProvider {
-		t.Fatal("stale-provider ownership was pruned by a stale snapshot")
+	if _, okProvider := host.executorProviders["stale-provider"]; okProvider {
+		t.Fatal("runtime invalidation retained stale-provider ownership")
 	}
 }
 
@@ -2857,29 +2938,147 @@ func TestResponseHooksKeepPayloadOrTryNextOnErrorAndEmptyBody(t *testing.T) {
 	}
 }
 
-func TestUsageAdapterPanicFusesPlugin(t *testing.T) {
+func TestUsageAdapterPropagatesServiceTiers(t *testing.T) {
+	tests := []struct {
+		name         string
+		contextTier  string
+		record       coreusage.Record
+		wantRequest  string
+		wantResponse string
+	}{
+		{
+			name:        "context tier",
+			contextTier: "priority",
+			record: coreusage.Record{
+				Detail: coreusage.Detail{TotalTokens: 1},
+			},
+			wantRequest: "priority",
+		},
+		{
+			name: "legacy service tier",
+			record: coreusage.Record{
+				ServiceTier: "flex",
+				Detail:      coreusage.Detail{TotalTokens: 1},
+			},
+			wantRequest: "flex",
+		},
+		{
+			name: "request service tier",
+			record: coreusage.Record{
+				RequestServiceTier: "priority",
+				Detail:             coreusage.Detail{TotalTokens: 1},
+			},
+			wantRequest: "priority",
+		},
+		{
+			name: "top level response tier",
+			record: coreusage.Record{
+				RequestServiceTier:  "flex",
+				ResponseServiceTier: "priority",
+				Detail: coreusage.Detail{
+					TotalTokens:         1,
+					ResponseServiceTier: "default",
+				},
+			},
+			wantRequest:  "flex",
+			wantResponse: "priority",
+		},
+		{
+			name: "detail response tier",
+			record: coreusage.Record{
+				RequestServiceTier: "flex",
+				Detail: coreusage.Detail{
+					TotalTokens:         1,
+					ResponseServiceTier: "default",
+				},
+			},
+			wantRequest:  "flex",
+			wantResponse: "default",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var captured pluginapi.UsageRecord
+			plugin := usagePluginFunc(
+				func(_ context.Context, record pluginapi.UsageRecord) {
+					captured = record
+				},
+			)
+			host := newHostWithRecords(
+				capabilityRecord{
+					id: "usage-tier",
+					plugin: pluginapi.Plugin{
+						Capabilities: pluginapi.Capabilities{UsagePlugin: plugin},
+					},
+				},
+			)
+			adapter := &usageAdapter{host: host, pluginID: "usage-tier", plugin: plugin}
+			ctx := context.Background()
+			if tt.contextTier != "" {
+				ctx = coreusage.WithServiceTier(ctx, tt.contextTier)
+			}
+
+			adapter.HandleUsage(ctx, tt.record)
+
+			if captured.ServiceTier != tt.wantRequest || captured.RequestServiceTier != tt.wantRequest ||
+				captured.ResponseServiceTier != tt.wantResponse {
+				t.Fatalf(
+					"captured tiers = (%q, %q, %q), want (%q, %q, %q)",
+					captured.ServiceTier,
+					captured.RequestServiceTier,
+					captured.ResponseServiceTier,
+					tt.wantRequest,
+					tt.wantRequest,
+					tt.wantResponse,
+				)
+			}
+			if captured.Detail.ResponseServiceTier != tt.wantResponse {
+				t.Fatalf(
+					"captured detail response tier = %q, want %q",
+					captured.Detail.ResponseServiceTier,
+					tt.wantResponse,
+				)
+			}
+		})
+	}
+}
+
+func TestUsageAdapterPanicFusesAndUnregistersPlugin(t *testing.T) {
+	plugin := usagePluginFunc(
+		func(ctx context.Context, record pluginapi.UsageRecord) {
+			panic("usage panic")
+		},
+	)
 	host := newHostWithRecords(
 		capabilityRecord{
 			id: "usage-panic",
 			plugin: pluginapi.Plugin{
-				Capabilities: pluginapi.Capabilities{
-					UsagePlugin: usagePluginFunc(
-						func(ctx context.Context, record pluginapi.UsageRecord) {
-							panic("usage panic")
-						},
-					),
-				},
+				Capabilities: pluginapi.Capabilities{UsagePlugin: plugin},
 			},
 		},
 	)
+	t.Cleanup(func() {
+		host.refreshUsagePlugins(nil)
+		host.waitAllUsageRetirements()
+	})
+	host.RegisterUsagePlugins()
+	key := host.usagePluginKey("usage-panic")
+	if _, ok := host.usagePluginKeys[key]; !ok {
+		t.Fatalf("usage plugin key %q was not registered", key)
+	}
 	adapter := &usageAdapter{
 		host:     host,
 		pluginID: "usage-panic",
+		plugin:   plugin,
 	}
 
 	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "plugin-provider"})
 	if !host.isPluginFused("usage-panic") {
 		t.Fatal("usage-panic was not fused")
+	}
+	if _, ok := host.usagePluginKeys[key]; ok {
+		t.Fatalf("fused usage plugin key %q remains registered", key)
 	}
 }
 
@@ -2920,6 +3119,35 @@ func TestUsageManagerRegisterNamedReplacesWithoutDuplicateDispatch(t *testing.T)
 	}
 }
 
+func TestUsageRetirementTrackingSkipsDrainedGenerations(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "usage-active",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					UsagePlugin: usagePluginFunc(func(context.Context, pluginapi.UsageRecord) {}),
+				},
+			},
+		},
+	)
+	t.Cleanup(func() {
+		host.refreshUsagePlugins(nil)
+		host.waitAllUsageRetirements()
+	})
+
+	for range 4 {
+		host.RegisterUsagePlugins()
+	}
+
+	host.usageMu.Lock()
+	pending := len(host.usageRetirements["usage-active"])
+	trackedPlugins := len(host.usageRetirements)
+	host.usageMu.Unlock()
+	if pending != 0 || trackedPlugins != 0 {
+		t.Fatalf("drained retirements pending=%d plugins=%d, want 0/0", pending, trackedPlugins)
+	}
+}
+
 func TestRegisterFrontendAuthProvidersPrunesStaleKeys(t *testing.T) {
 	const key = "plugin:auth-active:custom-auth"
 	sdkaccess.UnregisterProvider(key)
@@ -2953,6 +3181,124 @@ func TestRegisterFrontendAuthProvidersPrunesStaleKeys(t *testing.T) {
 	host.RegisterFrontendAuthProviders()
 	if registeredProviderIdentifier(key) {
 		t.Fatalf("registered providers still included stale key %q", key)
+	}
+}
+
+func TestRegisterFrontendAuthProvidersDropsResultsAfterRuntimeInvalidation(t *testing.T) {
+	const key = "plugin:stale-auth:custom-auth"
+	sdkaccess.UnregisterProvider(key)
+	defer sdkaccess.UnregisterProvider(key)
+
+	host := New()
+	provider := frontendAuthProviderFunc{
+		identifierFunc: func() string {
+			host.InvalidateRuntime()
+			return "custom-auth"
+		},
+	}
+	host.snapshot.Store(
+		&Snapshot{
+			enabled: true,
+			records: []capabilityRecord{
+				{
+					id: "stale-auth",
+					plugin: pluginapi.Plugin{
+						Capabilities: pluginapi.Capabilities{FrontendAuthProvider: provider},
+					},
+				},
+			},
+		},
+	)
+
+	host.RegisterFrontendAuthProviders()
+
+	if registeredProviderIdentifier(key) {
+		t.Fatalf("stale frontend auth provider %q was published after runtime invalidation", key)
+	}
+}
+
+func TestUnloadPluginRefreshesLiveAccessManager(t *testing.T) {
+	const pluginID = "auth-live-unload"
+	const pluginKey = "plugin:" + pluginID + ":custom-auth"
+	const nativeKey = "native-live-auth"
+	sdkaccess.UnregisterProvider(pluginKey)
+	sdkaccess.UnregisterProvider(nativeKey)
+	sdkaccess.ClearExclusiveProvider()
+	sdkaccess.RegisterProvider(nativeKey, staticAccessProvider{identifier: nativeKey})
+	defer sdkaccess.UnregisterProvider(pluginKey)
+	defer sdkaccess.UnregisterProvider(nativeKey)
+	defer sdkaccess.ClearExclusiveProvider()
+
+	plugin := validTestPlugin(pluginID)
+	plugin.Capabilities.FrontendAuthProvider = frontendAuthProviderFunc{
+		identifier: "custom-auth",
+		authenticate: func(
+			context.Context,
+			pluginapi.FrontendAuthRequest,
+		) (pluginapi.FrontendAuthResponse, error) {
+			return pluginapi.FrontendAuthResponse{Authenticated: true}, nil
+		},
+	}
+	plugin.Capabilities.FrontendAuthProviderExclusive = true
+	host := newHostWithRecords(capabilityRecord{id: pluginID, plugin: plugin})
+	host.loaded[pluginID] = &loadedPlugin{
+		id:     pluginID,
+		client: newGuardedPluginClient(newTestSymbolLookup(&testPlugin{})),
+	}
+	manager := sdkaccess.NewManager()
+	host.SetAccessManager(manager)
+	host.RegisterFrontendAuthProviders()
+	providers := manager.Providers()
+	if len(providers) != 1 || providers[0].Identifier() != pluginKey {
+		t.Fatalf("exclusive live providers = %#v, want only %q", providers, pluginKey)
+	}
+
+	if !host.UnloadPlugin(pluginID) {
+		t.Fatal("UnloadPlugin() = false, want true")
+	}
+	providers = manager.Providers()
+	foundNative := false
+	for _, provider := range providers {
+		if provider == nil {
+			continue
+		}
+		if provider.Identifier() == pluginKey {
+			t.Fatalf("live access manager retained unloaded provider %q", pluginKey)
+		}
+		if provider.Identifier() == nativeKey {
+			foundNative = true
+		}
+	}
+	if !foundNative {
+		t.Fatalf("live access manager did not restore native provider: %#v", providers)
+	}
+}
+
+func TestUnloadPluginUnregistersFrontendAuthProvider(t *testing.T) {
+	const pluginID = "auth-unload"
+	const key = "plugin:" + pluginID + ":custom-auth"
+	sdkaccess.UnregisterProvider(key)
+	defer sdkaccess.UnregisterProvider(key)
+
+	plugin := validTestPlugin(pluginID)
+	plugin.Capabilities.FrontendAuthProvider = frontendAuthProviderFunc{identifier: "custom-auth"}
+	host := newHostWithRecords(
+		capabilityRecord{id: pluginID, plugin: plugin},
+	)
+	host.loaded[pluginID] = &loadedPlugin{
+		id:     pluginID,
+		client: newGuardedPluginClient(newTestSymbolLookup(&testPlugin{})),
+	}
+	host.RegisterFrontendAuthProviders()
+	if !registeredProviderIdentifier(key) {
+		t.Fatalf("registered providers did not include %q", key)
+	}
+
+	if !host.UnloadPlugin(pluginID) {
+		t.Fatal("UnloadPlugin() = false, want true")
+	}
+	if registeredProviderIdentifier(key) {
+		t.Fatalf("registered providers still included unloaded key %q", key)
 	}
 }
 
@@ -3170,7 +3516,7 @@ func TestRegisterFrontendAuthProvidersIgnoresExclusiveWithoutFrontendAuthProvide
 	}
 }
 
-func TestUsageAdapterUsesCurrentSnapshotCapability(t *testing.T) {
+func TestUsageAdapterUsesCapturedGenerationCapability(t *testing.T) {
 	oldCalls := 0
 	newCalls := 0
 	oldPlugin := usagePluginFunc(
@@ -3215,19 +3561,19 @@ func TestUsageAdapterUsesCurrentSnapshotCapability(t *testing.T) {
 
 	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "provider"})
 
-	if oldCalls != 0 {
-		t.Fatalf("old usage plugin calls = %d, want 0", oldCalls)
+	if oldCalls != 1 {
+		t.Fatalf("old usage plugin calls = %d, want 1", oldCalls)
 	}
-	if newCalls != 1 {
-		t.Fatalf("new usage plugin calls = %d, want 1", newCalls)
+	if newCalls != 0 {
+		t.Fatalf("new usage plugin calls = %d, want 0", newCalls)
 	}
 }
 
-func TestRegisterUsagePluginsStaleAdapterSkipsRemovedCapability(t *testing.T) {
-	calls := 0
+func TestRegisterUsagePluginsPrunesRemovedCapability(t *testing.T) {
+	calls := make(chan pluginapi.UsageRecord, 1)
 	plugin := usagePluginFunc(
 		func(ctx context.Context, record pluginapi.UsageRecord) {
-			calls++
+			calls <- record
 		},
 	)
 	host := newHostWithRecords(
@@ -3240,18 +3586,132 @@ func TestRegisterUsagePluginsStaleAdapterSkipsRemovedCapability(t *testing.T) {
 			},
 		},
 	)
+	t.Cleanup(func() {
+		host.refreshUsagePlugins(nil)
+		host.waitAllUsageRetirements()
+	})
 
 	host.RegisterUsagePlugins()
-	adapter := &usageAdapter{
-		host:     host,
-		pluginID: "usage-active",
-		plugin:   plugin,
+	key := host.usagePluginKey("usage-active")
+	if _, ok := host.usagePluginKeys[key]; !ok {
+		t.Fatalf("usage plugin key %q was not registered", key)
 	}
-	host.snapshot.Store(&Snapshot{enabled: true})
-	adapter.HandleUsage(context.Background(), coreusage.Record{Provider: "provider"})
 
-	if calls != 0 {
-		t.Fatalf("usage plugin calls = %d, want 0 after capability removal", calls)
+	host.snapshot.Store(&Snapshot{enabled: true})
+	host.RegisterUsagePlugins()
+	if _, ok := host.usagePluginKeys[key]; ok {
+		t.Fatalf("removed usage plugin key %q remains registered", key)
+	}
+	coreusage.PublishRecord(context.Background(), coreusage.Record{Provider: "provider"})
+	select {
+	case got := <-calls:
+		t.Fatalf("removed usage plugin received record: %#v", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestUsagePluginRegistrationKeysAreScopedToHost(t *testing.T) {
+	firstCalls := make(chan pluginapi.UsageRecord, 1)
+	secondCalls := make(chan pluginapi.UsageRecord, 1)
+	firstHost := newHostWithRecords(
+		capabilityRecord{
+			id: "shared-id",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					UsagePlugin: usagePluginFunc(
+						func(ctx context.Context, record pluginapi.UsageRecord) {
+							firstCalls <- record
+						},
+					),
+				},
+			},
+		},
+	)
+	secondHost := newHostWithRecords(
+		capabilityRecord{
+			id: "shared-id",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					UsagePlugin: usagePluginFunc(
+						func(ctx context.Context, record pluginapi.UsageRecord) {
+							secondCalls <- record
+						},
+					),
+				},
+			},
+		},
+	)
+	t.Cleanup(func() {
+		firstHost.refreshUsagePlugins(nil)
+		secondHost.refreshUsagePlugins(nil)
+		firstHost.waitAllUsageRetirements()
+		secondHost.waitAllUsageRetirements()
+	})
+
+	firstHost.RegisterUsagePlugins()
+	secondHost.RegisterUsagePlugins()
+	if firstHost.usagePluginKey("shared-id") == secondHost.usagePluginKey("shared-id") {
+		t.Fatal("different hosts generated the same usage plugin registration key")
+	}
+	coreusage.PublishRecord(context.Background(), coreusage.Record{Provider: "provider"})
+	for name, calls := range map[string]<-chan pluginapi.UsageRecord{
+		"first":  firstCalls,
+		"second": secondCalls,
+	} {
+		select {
+		case <-calls:
+		case <-time.After(time.Second):
+			t.Fatalf("%s host did not receive the usage record", name)
+		}
+	}
+}
+
+func TestShutdownAllUnregistersUsagePlugins(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "usage-shutdown",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					UsagePlugin: usagePluginFunc(func(context.Context, pluginapi.UsageRecord) {}),
+				},
+			},
+		},
+	)
+	host.RegisterUsagePlugins()
+	key := host.usagePluginKey("usage-shutdown")
+	if _, ok := host.usagePluginKeys[key]; !ok {
+		t.Fatalf("usage plugin key %q was not registered", key)
+	}
+
+	host.ShutdownAll()
+	if _, ok := host.usagePluginKeys[key]; ok {
+		t.Fatalf("usage plugin key %q remains after ShutdownAll", key)
+	}
+}
+
+func TestUnloadPluginUnregistersUsagePlugin(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "usage-unload",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					UsagePlugin: usagePluginFunc(func(context.Context, pluginapi.UsageRecord) {}),
+				},
+			},
+		},
+	)
+	host.loaded["usage-unload"] = &loadedPlugin{id: "usage-unload", client: &capturePluginClient{}}
+	host.RegisterUsagePlugins()
+	key := host.usagePluginKey("usage-unload")
+	if _, ok := host.usagePluginKeys[key]; !ok {
+		t.Fatalf("usage plugin key %q was not registered", key)
+	}
+
+	if !host.UnloadPlugin("usage-unload") {
+		t.Fatal("UnloadPlugin() = false, want true")
+	}
+	if _, ok := host.usagePluginKeys[key]; ok {
+		t.Fatalf("usage plugin key %q remains after UnloadPlugin", key)
 	}
 }
 
@@ -3389,6 +3849,380 @@ func TestAccessAdapterErrorReturnsNotHandledAndRestoresBody(t *testing.T) {
 	}
 	if string(restored) != "request-body" {
 		t.Fatalf("restored body = %q, want %q", restored, "request-body")
+	}
+}
+
+func TestExecutorAdapterRefreshRejectsInvalidatedPluginResult(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	authProvider := fakeAuthProvider{
+		identifier: "plugin-provider",
+		refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+			pluginapi.AuthRefreshResponse,
+			error,
+		) {
+			close(started)
+			<-release
+			return pluginapi.AuthRefreshResponse{
+				Auth: pluginapi.AuthData{Metadata: map[string]any{"token": "stale"}},
+			}, nil
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+			},
+		},
+	)
+	adapter := &executorAdapter{
+		host:     host,
+		pluginID: "auth-plugin",
+		provider: "plugin-provider",
+		executor: &fakeExecutor{identifier: "plugin-provider"},
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, errRefresh := adapter.Refresh(
+			context.Background(),
+			&coreauth.Auth{ID: "auth-1", Provider: "plugin-provider"},
+		)
+		result <- errRefresh
+	}()
+	<-started
+	host.InvalidateRuntime()
+	close(release)
+	if errRefresh := <-result; !errors.Is(errRefresh, context.Canceled) {
+		t.Fatalf("Refresh() error = %v, want canceled stale result", errRefresh)
+	}
+}
+
+func TestExecutorAdapterRefreshErrorCarriesOwnerGuard(t *testing.T) {
+	authProvider := fakeAuthProvider{
+		identifier: "plugin-provider",
+		refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+			pluginapi.AuthRefreshResponse,
+			error,
+		) {
+			return pluginapi.AuthRefreshResponse{}, errors.New("refresh failed")
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+			},
+		},
+	)
+	adapter := &executorAdapter{
+		host: host, pluginID: "auth-plugin", provider: "plugin-provider",
+		executor: &fakeExecutor{identifier: "plugin-provider"},
+	}
+	refreshed, errRefresh := adapter.Refresh(
+		context.Background(),
+		&coreauth.Auth{ID: "auth-1", Provider: "plugin-provider"},
+	)
+	if errRefresh == nil || refreshed == nil || refreshed.RefreshCommit == nil ||
+		!testRefreshCommitGuardCurrent(refreshed.RefreshCommit) {
+		t.Fatalf("Refresh() = (%#v, %v), want current guarded error", refreshed, errRefresh)
+	}
+	host.InvalidateRuntime()
+	if refreshed.RefreshCommit.CommitRefresh(func() bool { return true }) {
+		t.Fatal("invalidated plugin refresh error retained publication ownership")
+	}
+}
+
+func TestExecutorAdapterRefreshRejectsAuthIdentityChanges(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		auth pluginapi.AuthData
+	}{
+		{name: "id", auth: pluginapi.AuthData{ID: "auth-2", Metadata: map[string]any{"token": "new"}}},
+		{name: "provider", auth: pluginapi.AuthData{Provider: "other-provider", Metadata: map[string]any{"token": "new"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			authProvider := fakeAuthProvider{
+				identifier: "plugin-provider",
+				refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+					pluginapi.AuthRefreshResponse,
+					error,
+				) {
+					return pluginapi.AuthRefreshResponse{Auth: test.auth}, nil
+				},
+			}
+			host := newHostWithRecords(
+				capabilityRecord{
+					id: "auth-plugin",
+					plugin: pluginapi.Plugin{
+						Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+					},
+				},
+			)
+			adapter := &executorAdapter{
+				host: host, pluginID: "auth-plugin", provider: "plugin-provider",
+				executor: &fakeExecutor{identifier: "plugin-provider"},
+			}
+			if _, errRefresh := adapter.Refresh(
+				context.Background(),
+				&coreauth.Auth{ID: "auth-1", Provider: "plugin-provider"},
+			); errRefresh == nil {
+				t.Fatal("Refresh() accepted plugin-owned auth identity change")
+			}
+		})
+	}
+}
+
+func TestExecutorAdapterRefreshPreservesHostRuntimeState(t *testing.T) {
+	authProvider := fakeAuthProvider{
+		identifier: "plugin-provider",
+		refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+			pluginapi.AuthRefreshResponse,
+			error,
+		) {
+			return pluginapi.AuthRefreshResponse{
+				Auth: pluginapi.AuthData{
+					StorageJSON: []byte(`{"token":"new"}`),
+					Metadata:    map[string]any{"token": "new"},
+				},
+			}, nil
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+			},
+		},
+	)
+	adapter := &executorAdapter{
+		host: host, pluginID: "auth-plugin", provider: "plugin-provider",
+		executor: &fakeExecutor{identifier: "plugin-provider"},
+	}
+	retryAfter := time.Now().Add(time.Minute)
+	original := &coreauth.Auth{
+		ID:             "auth-1",
+		Index:          "home-index",
+		Provider:       "plugin-provider",
+		Status:         coreauth.StatusError,
+		StatusMessage:  "rate limited",
+		Unavailable:    true,
+		Quota:          coreauth.QuotaState{Exceeded: true, Reason: "rate limited", NextRecoverAt: retryAfter},
+		LastError:      &coreauth.Error{Code: "rate_limit", Message: "rate limited", HTTPStatus: http.StatusTooManyRequests},
+		NextRetryAfter: retryAfter,
+		ModelStates: map[string]*coreauth.ModelState{
+			"model-a": {
+				Status:         coreauth.StatusError,
+				StatusMessage:  "rate limited",
+				Unavailable:    true,
+				NextRetryAfter: retryAfter,
+				Quota:          coreauth.QuotaState{Exceeded: true, Reason: "rate limited", NextRecoverAt: retryAfter},
+			},
+		},
+		Metadata: map[string]any{"token": "old"},
+	}
+	refreshed, errRefresh := adapter.Refresh(context.Background(), original)
+	if errRefresh != nil {
+		t.Fatalf("Refresh() error = %v", errRefresh)
+	}
+	if refreshed == nil || refreshed.Index != original.Index || refreshed.Status != original.Status ||
+		refreshed.StatusMessage != original.StatusMessage || refreshed.Unavailable != original.Unavailable ||
+		refreshed.Quota != original.Quota || refreshed.NextRetryAfter != original.NextRetryAfter ||
+		refreshed.LastError == nil || refreshed.LastError.Code != original.LastError.Code {
+		t.Fatalf("Refresh() lost host runtime state: %#v", refreshed)
+	}
+	modelState := refreshed.ModelStates["model-a"]
+	if modelState == nil || !modelState.Unavailable || modelState.Quota.Reason != "rate limited" ||
+		modelState.NextRetryAfter != retryAfter {
+		t.Fatalf("Refresh() model state = %#v, want preserved cooldown", modelState)
+	}
+	if refreshed.Metadata["token"] != "new" || !bytes.Contains(storageJSONFromAuth(refreshed), []byte(`"token":"new"`)) {
+		t.Fatalf("Refresh() provider state = metadata %#v storage %s", refreshed.Metadata, storageJSONFromAuth(refreshed))
+	}
+}
+
+func TestExecutorAdapterRefreshPersistenceDoesNotBlockRuntimeInvalidation(t *testing.T) {
+	authProvider := fakeAuthProvider{
+		identifier: "plugin-provider",
+		refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+			pluginapi.AuthRefreshResponse,
+			error,
+		) {
+			return pluginapi.AuthRefreshResponse{
+				Auth: pluginapi.AuthData{Metadata: map[string]any{"token": "new"}},
+			}, nil
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+			},
+		},
+	)
+	adapter := &executorAdapter{
+		host: host, pluginID: "auth-plugin", provider: "plugin-provider",
+		executor: &fakeExecutor{identifier: "plugin-provider"},
+	}
+	refreshed, errRefresh := adapter.Refresh(
+		context.Background(),
+		&coreauth.Auth{ID: "auth-1", Provider: "plugin-provider"},
+	)
+	if errRefresh != nil || refreshed == nil || refreshed.RefreshCommit == nil {
+		t.Fatalf("Refresh() = (%#v, %v), want guarded result", refreshed, errRefresh)
+	}
+	if !testRefreshCommitGuardCurrent(refreshed.RefreshCommit) {
+		t.Fatal("refresh owner is not current before invalidation")
+	}
+	invalidateDone := make(chan struct{})
+	go func() {
+		host.InvalidateRuntime()
+		close(invalidateDone)
+	}()
+	select {
+	case <-invalidateDone:
+	case <-time.After(time.Second):
+		t.Fatal("runtime invalidation waited for external refresh persistence")
+	}
+	if refreshed.RefreshCommit.CommitRefresh(func() bool { return true }) {
+		t.Fatal("invalidated refresh owner committed stale credentials")
+	}
+}
+
+func TestExecutorAdapterRefreshCommitSurvivesFailedConfigApply(t *testing.T) {
+	authProvider := fakeAuthProvider{
+		identifier: "plugin-provider",
+		refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+			pluginapi.AuthRefreshResponse,
+			error,
+		) {
+			return pluginapi.AuthRefreshResponse{
+				Auth: pluginapi.AuthData{Metadata: map[string]any{"token": "new"}},
+			}, nil
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+			},
+		},
+	)
+	adapter := &executorAdapter{
+		host: host, pluginID: "auth-plugin", provider: "plugin-provider",
+		executor: &fakeExecutor{identifier: "plugin-provider"},
+	}
+	refreshed, errRefresh := adapter.Refresh(
+		context.Background(),
+		&coreauth.Auth{ID: "auth-1", Provider: "plugin-provider"},
+	)
+	if errRefresh != nil || refreshed == nil || refreshed.RefreshCommit == nil {
+		t.Fatalf("Refresh() = (%#v, %v), want guarded result", refreshed, errRefresh)
+	}
+	blockedRoot := filepath.Join(t.TempDir(), "plugins")
+	if errWrite := os.WriteFile(blockedRoot, []byte("not a directory"), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	if errApply := host.ApplyConfig(
+		context.Background(),
+		&config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: blockedRoot}},
+	); errApply == nil {
+		t.Fatal("ApplyConfig() error = nil")
+	}
+	if !refreshed.RefreshCommit.CommitRefresh(func() bool { return true }) {
+		t.Fatal("failed config apply invalidated the unchanged plugin refresh owner")
+	}
+}
+
+func TestExecutorAdapterRefreshCommitDoesNotAcquireHostMutex(t *testing.T) {
+	authProvider := fakeAuthProvider{
+		identifier: "plugin-provider",
+		refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+			pluginapi.AuthRefreshResponse,
+			error,
+		) {
+			return pluginapi.AuthRefreshResponse{
+				Auth: pluginapi.AuthData{Metadata: map[string]any{"token": "new"}},
+			}, nil
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+			},
+		},
+	)
+	adapter := &executorAdapter{
+		host: host, pluginID: "auth-plugin", provider: "plugin-provider",
+		executor: &fakeExecutor{identifier: "plugin-provider"},
+	}
+	refreshed, errRefresh := adapter.Refresh(
+		context.Background(),
+		&coreauth.Auth{ID: "auth-1", Provider: "plugin-provider"},
+	)
+	if errRefresh != nil || refreshed == nil || refreshed.RefreshCommit == nil {
+		t.Fatalf("Refresh() = (%#v, %v), want guarded result", refreshed, errRefresh)
+	}
+
+	host.mu.Lock()
+	commitDone := make(chan bool, 1)
+	go func() {
+		commitDone <- refreshed.RefreshCommit.CommitRefresh(func() bool { return true })
+	}()
+	select {
+	case committed := <-commitDone:
+		if !committed {
+			t.Fatal("current refresh owner was rejected")
+		}
+	case <-time.After(time.Second):
+		host.mu.Unlock()
+		t.Fatal("refresh commit waited for Host.mu")
+	}
+	host.mu.Unlock()
+}
+
+func TestExecutorAdapterRefreshCommitRejectsFusedPlugin(t *testing.T) {
+	authProvider := fakeAuthProvider{
+		identifier: "plugin-provider",
+		refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+			pluginapi.AuthRefreshResponse,
+			error,
+		) {
+			return pluginapi.AuthRefreshResponse{
+				Auth: pluginapi.AuthData{Metadata: map[string]any{"token": "new"}},
+			}, nil
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+			},
+		},
+	)
+	adapter := &executorAdapter{
+		host: host, pluginID: "auth-plugin", provider: "plugin-provider",
+		executor: &fakeExecutor{identifier: "plugin-provider"},
+	}
+	refreshed, errRefresh := adapter.Refresh(
+		context.Background(),
+		&coreauth.Auth{ID: "auth-1", Provider: "plugin-provider"},
+	)
+	if errRefresh != nil || refreshed == nil || refreshed.RefreshCommit == nil {
+		t.Fatalf("Refresh() = (%#v, %v), want guarded result", refreshed, errRefresh)
+	}
+	if refreshed.RefreshCommit.CommitRefresh(func() bool {
+		host.fusePlugin("auth-plugin", "test", "panic")
+		return true
+	}) {
+		t.Fatal("plugin fused during final publication committed stale credentials")
 	}
 }
 
@@ -3537,6 +4371,9 @@ func TestExecutorAdapterMethods(t *testing.T) {
 		t.Fatal("stream chunks channel still open, want closed")
 	}
 
+	if !adapter.ShouldRefreshAfterUnauthorized(auth) {
+		t.Fatal("ShouldRefreshAfterUnauthorized() = false, want plugin AuthProvider capability")
+	}
 	refreshed, errRefresh := adapter.Refresh(context.Background(), auth)
 	if errRefresh != nil {
 		t.Fatalf("Refresh() error = %v", errRefresh)
@@ -3780,6 +4617,42 @@ func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T
 	}
 }
 
+func TestExecutorAdapterTerminalStreamErrorDoesNotEmitSuccessTail(t *testing.T) {
+	adapter := &executorAdapter{}
+	request := []byte(`{"model":"model-1","stream":true}`)
+	prepared := preparedExecutorCall{
+		req: coreexecutor.Request{Model: "model-1", Payload: request},
+		opts: coreexecutor.Options{
+			OriginalRequest: request,
+		},
+		requestedFormat: sdktranslator.FormatOpenAIResponse,
+		outputFormat:    sdktranslator.FormatOpenAI,
+	}
+	input := make(chan pluginapi.ExecutorStreamChunk, 2)
+	input <- pluginapi.ExecutorStreamChunk{
+		Payload: []byte(`{"choices":[{"delta":{"content":"hello"},"index":0}],"model":"model-1"}`),
+	}
+	input <- pluginapi.ExecutorStreamChunk{Err: errors.New("terminal boom")}
+	close(input)
+
+	sawError := false
+	for chunk := range adapter.translateExecutorStreamChunks(context.Background(), prepared, input) {
+		if chunk.Err != nil {
+			sawError = true
+			continue
+		}
+		if sawError {
+			t.Fatalf("payload emitted after terminal error: %q", chunk.Payload)
+		}
+		if bytes.Contains(chunk.Payload, []byte("response.completed")) {
+			t.Fatalf("success tail emitted before terminal error: %q", chunk.Payload)
+		}
+	}
+	if !sawError {
+		t.Fatal("terminal stream error was not forwarded")
+	}
+}
+
 func TestExecutorAdapterKeepsRawStreamFallbackWithOnlyHostResponseTranslator(t *testing.T) {
 	customOutputFormat := sdktranslator.Format("plugin-custom-stream-output")
 	requestedFormat := sdktranslator.FormatOpenAI
@@ -3915,6 +4788,7 @@ func TestMapExecutorStreamChunksExitsWhenContextCanceledWithoutDownstreamConsume
 func newHostWithRecords(records ...capabilityRecord) *Host {
 	host := New()
 	sortRecords(records)
+	host.applyGeneration = 1
 	host.snapshot.Store(&Snapshot{enabled: true, records: records})
 	return host
 }
@@ -3971,12 +4845,31 @@ func (f coreUsagePluginFunc) HandleUsage(ctx context.Context, record coreusage.R
 	f(ctx, record)
 }
 
+type staticAccessProvider struct {
+	identifier string
+}
+
+func (p staticAccessProvider) Identifier() string {
+	return p.identifier
+}
+
+func (staticAccessProvider) Authenticate(
+	context.Context,
+	*http.Request,
+) (*sdkaccess.Result, *sdkaccess.AuthError) {
+	return nil, sdkaccess.NewNoCredentialsError()
+}
+
 type frontendAuthProviderFunc struct {
-	identifier   string
-	authenticate func(context.Context, pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error)
+	identifier     string
+	identifierFunc func() string
+	authenticate   func(context.Context, pluginapi.FrontendAuthRequest) (pluginapi.FrontendAuthResponse, error)
 }
 
 func (f frontendAuthProviderFunc) Identifier() string {
+	if f.identifierFunc != nil {
+		return f.identifierFunc()
+	}
 	return f.identifier
 }
 
@@ -4183,9 +5076,40 @@ func (m *fakeExecutorManager) RegisterExecutor(executor coreauth.ProviderExecuto
 	m.executors[executor.Identifier()] = executor
 }
 
+func (m *fakeExecutorManager) RegisterExecutorIfAbsent(executor coreauth.ProviderExecutor) bool {
+	if _, exists := m.executors[executor.Identifier()]; exists {
+		return false
+	}
+	m.RegisterExecutor(executor)
+	return true
+}
+
+func (m *fakeExecutorManager) ReplaceExecutorIfSame(
+	expected,
+	replacement coreauth.ProviderExecutor,
+) bool {
+	provider := replacement.Identifier()
+	if m.executors[provider] != expected {
+		return false
+	}
+	m.RegisterExecutor(replacement)
+	return true
+}
+
 func (m *fakeExecutorManager) UnregisterExecutor(provider string) {
 	delete(m.executors, provider)
 	m.unregisters = append(m.unregisters, provider)
+}
+
+func (m *fakeExecutorManager) UnregisterExecutorIfSame(
+	provider string,
+	expected coreauth.ProviderExecutor,
+) bool {
+	if m.executors[provider] != expected {
+		return false
+	}
+	m.UnregisterExecutor(provider)
+	return true
 }
 
 type fakeProviderExecutor struct {

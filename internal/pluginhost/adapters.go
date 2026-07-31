@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
@@ -123,11 +125,13 @@ func executorFormatContains(formats []sdktranslator.Format, target sdktranslator
 }
 
 type AuthModelResult struct {
-	Provider string
-	Models   []*registry.ModelInfo
-	Auth     *coreauth.Auth
-	Handled  bool
-	Err      error
+	Provider       string
+	Models         []*registry.ModelInfo
+	Auth           *coreauth.Auth
+	Snapshot       *Snapshot
+	operationToken pluginOperationToken
+	Handled        bool
+	Err            error
 }
 
 func pluginModelInfoToRegistryModelInfo(model pluginapi.ModelInfo) *registry.ModelInfo {
@@ -244,8 +248,8 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 		return
 	}
 
-	snap := h.Snapshot()
-	records := h.activeRecordsFromSnapshot(snap)
+	token := h.capturePublicationToken()
+	records := h.activeRecordsFromSnapshot(token.snapshot)
 	registrations := make([]modelClientRegistration, 0)
 	nextClients := make(map[string]struct{})
 	nextProviders := make(map[string]string)
@@ -309,6 +313,7 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 			clientID := "plugin:" + record.id + ":" + provider
 			registrations = append(
 				registrations, modelClientRegistration{
+					pluginID: record.id,
 					clientID: clientID,
 					provider: provider,
 					models:   models,
@@ -317,7 +322,21 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 			nextClients[clientID] = struct{}{}
 		}
 	}
-	h.commitModelClients(snap, modelRegistry, registrations, nextClients, nextProviders, nextModelRegistrations)
+	h.commitModelClients(token, modelRegistry, registrations, nextClients, nextProviders, nextModelRegistrations)
+}
+
+func (h *Host) HasOAuthModelProvider() bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.activeRecords() {
+		if record.plugin.Capabilities.ModelProvider != nil &&
+			!h.isPluginFused(record.id) &&
+			executorScopeAllowsOAuthModels(record.plugin.Capabilities) {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModelResult {
@@ -328,7 +347,8 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 	if providerKey == "" {
 		return AuthModelResult{}
 	}
-	for _, record := range h.activeRecords() {
+	snapshot := h.Snapshot()
+	for _, record := range h.activeRecordsFromSnapshot(snapshot) {
 		modelProvider := record.plugin.Capabilities.ModelProvider
 		if modelProvider == nil || h.isPluginFused(record.id) {
 			continue
@@ -357,10 +377,19 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 				continue
 			}
 		}
+		operationToken, okToken := h.capturePluginOperationToken(record, h.currentApplyGeneration())
+		if !okToken {
+			continue
+		}
 		resp, errModels := h.callModelsForAuth(ctx, record, modelProvider, auth)
 		if errModels != nil {
 			log.Warnf("pluginhost: models for auth %s failed: %v", auth.ID, errModels)
-			return AuthModelResult{Handled: true, Err: errModels}
+			return AuthModelResult{
+				Snapshot:       snapshot,
+				operationToken: operationToken,
+				Handled:        true,
+				Err:            errModels,
+			}
 		}
 		respProvider := normalizeProviderID(resp.Provider)
 		if respProvider != "" && respProvider != providerKey {
@@ -387,9 +416,26 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 		if authDataHasValue(resp.AuthUpdate) {
 			updated = h.AuthDataToCoreAuth(authDataWithDefaults(resp.AuthUpdate, auth), path, auth.FileName)
 		}
-		return AuthModelResult{Provider: respProvider, Models: models, Auth: updated, Handled: true}
+		return AuthModelResult{
+			Provider:       respProvider,
+			Models:         models,
+			Auth:           updated,
+			Snapshot:       snapshot,
+			operationToken: operationToken,
+			Handled:        true,
+		}
 	}
-	return AuthModelResult{}
+	return AuthModelResult{Snapshot: snapshot}
+}
+
+func (h *Host) AuthModelResultCurrent(result AuthModelResult) bool {
+	if h == nil || result.Snapshot == nil || h.Snapshot() != result.Snapshot {
+		return false
+	}
+	if !result.Handled {
+		return true
+	}
+	return result.operationToken.pluginID != "" && h.pluginOperationTokenCurrent(result.operationToken)
 }
 
 func authDataHasValue(data pluginapi.AuthData) bool {
@@ -460,6 +506,7 @@ func authDataWithDefaults(data pluginapi.AuthData, auth *coreauth.Auth) pluginap
 }
 
 type modelClientRegistration struct {
+	pluginID string
 	clientID string
 	provider string
 	models   []*registry.ModelInfo
@@ -809,7 +856,7 @@ func (h *Host) HasRequestInterceptors() bool {
 }
 
 func (h *Host) commitModelClients(
-	snap *Snapshot,
+	token pluginPublicationToken,
 	modelRegistry modelRegistry,
 	registrations []modelClientRegistration,
 	nextClients map[string]struct{},
@@ -820,9 +867,17 @@ func (h *Host) commitModelClients(
 		return
 	}
 
+	nextOwners := make(map[string]string, len(registrations))
+	for _, registration := range registrations {
+		if registration.clientID != "" && registration.pluginID != "" {
+			nextOwners[registration.clientID] = registration.pluginID
+		}
+	}
 	staleClients := make([]string, 0)
+	h.publicationMu.Lock()
+	defer h.publicationMu.Unlock()
 	h.mu.Lock()
-	if h.Snapshot() != snap {
+	if !h.publicationTokenCurrentLocked(token) {
 		h.mu.Unlock()
 		return
 	}
@@ -832,6 +887,8 @@ func (h *Host) commitModelClients(
 		}
 	}
 	h.modelClientIDs = nextClients
+	h.modelClientOwners = nextOwners
+	h.modelRegistry = modelRegistry
 	h.modelProviders = nextProviders
 	h.modelRegistrations = nextModelRegistrations
 	h.mu.Unlock()
@@ -847,7 +904,10 @@ func (h *Host) commitModelClients(
 type executorManager interface {
 	Executor(provider string) (coreauth.ProviderExecutor, bool)
 	RegisterExecutor(coreauth.ProviderExecutor)
+	RegisterExecutorIfAbsent(coreauth.ProviderExecutor) bool
+	ReplaceExecutorIfSame(coreauth.ProviderExecutor, coreauth.ProviderExecutor) bool
 	UnregisterExecutor(provider string)
+	UnregisterExecutorIfSame(provider string, expected coreauth.ProviderExecutor) bool
 }
 
 type executorRegistration struct {
@@ -860,8 +920,8 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 		return
 	}
 
-	snap := h.Snapshot()
-	records := h.activeRecordsFromSnapshot(snap)
+	token := h.capturePublicationToken()
+	records := h.activeRecordsFromSnapshot(token.snapshot)
 	registrations := h.snapshotModelRegistrations()
 	selectedModels := make(map[string][]*registry.ModelInfo)
 	providerModels := make(map[string][]*registry.ModelInfo)
@@ -910,8 +970,6 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 	}
 
 	seenProviders := make(map[string]struct{})
-	nextProviders := make(map[string]struct{})
-	nextModelClients := make(map[string]struct{})
 	executorRegistrations := make([]executorRegistration, 0)
 	modelClientRegistrations := make([]modelClientRegistration, 0)
 	for _, record := range records {
@@ -936,27 +994,28 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 			continue
 		}
 
-		nextProviders[provider] = struct{}{}
-		executorRegistrations = append(
-			executorRegistrations, newExecutorAdapterRegistration(h, record, provider, executor),
-		)
+		executorRegistration := newExecutorAdapterRegistration(h, record, provider, executor)
+		if existing, okExecutor := manager.Executor(provider); okExecutor {
+			if adapter, okAdapter := existing.(*executorAdapter); okAdapter &&
+				executorAdaptersEquivalent(adapter, executorRegistration.adapter) {
+				executorRegistration.adapter = adapter
+			}
+		}
+		executorRegistrations = append(executorRegistrations, executorRegistration)
 		appendModelsForProvider(providerModels, provider, selectedModels[record.id])
 		if len(selectedModels[record.id]) > 0 {
 			clientID := pluginExecutorModelClientID(record.id, provider)
 			modelClientRegistrations = append(
 				modelClientRegistrations, modelClientRegistration{
+					pluginID: record.id,
 					clientID: clientID,
 					provider: provider,
 					models:   selectedModels[record.id],
 				},
 			)
-			nextModelClients[clientID] = struct{}{}
 		}
 	}
-	h.commitExecutorState(
-		snap, manager, modelRegistry, providerModels, executorRegistrations, nextProviders, modelClientRegistrations,
-		nextModelClients,
-	)
+	h.commitExecutorState(token, manager, modelRegistry, providerModels, executorRegistrations, modelClientRegistrations)
 }
 
 func pluginExecutorModelClientID(pluginID, provider string) string {
@@ -964,21 +1023,21 @@ func pluginExecutorModelClientID(pluginID, provider string) string {
 }
 
 func (h *Host) commitExecutorState(
-	snap *Snapshot,
+	token pluginPublicationToken,
 	manager executorManager,
-	modelRegistry modelRegistry,
+	modelRegistry modelProviderRegistry,
 	providerModels map[string][]*registry.ModelInfo,
 	registrations []executorRegistration,
-	nextProviders map[string]struct{},
 	modelClientRegistrations []modelClientRegistration,
-	nextModelClients map[string]struct{},
 ) {
 	if h == nil || manager == nil {
 		return
 	}
 
+	h.publicationMu.Lock()
+	defer h.publicationMu.Unlock()
 	h.mu.Lock()
-	if h.Snapshot() != snap {
+	if !h.publicationTokenCurrentLocked(token) {
 		h.mu.Unlock()
 		return
 	}
@@ -988,15 +1047,52 @@ func (h *Host) commitExecutorState(
 		h.providerModels[provider] = cloneRegistryModels(models)
 	}
 
-	staleProviders := make([]string, 0)
-	for provider := range h.executorProviders {
-		if _, okProvider := nextProviders[provider]; !okProvider {
-			staleProviders = append(staleProviders, provider)
+	nextProviders := make(map[string]struct{}, len(registrations))
+	nextProviderOwners := make(map[string]string, len(registrations))
+	for _, registration := range registrations {
+		if registration.adapter == nil || registration.provider == "" {
+			continue
 		}
+		existing, okExecutor := manager.Executor(registration.provider)
+		registered := false
+		if !okExecutor || existing == nil {
+			registered = manager.RegisterExecutorIfAbsent(registration.adapter)
+		} else if existing == registration.adapter {
+			registered = true
+		} else if h.ownsExecutor(existing) {
+			registered = manager.ReplaceExecutorIfSame(existing, registration.adapter)
+		}
+		if !registered {
+			continue
+		}
+		nextProviders[registration.provider] = struct{}{}
+		nextProviderOwners[registration.provider] = registration.adapter.pluginID
+	}
+	for provider := range h.executorProviders {
+		if _, retained := nextProviders[provider]; retained {
+			continue
+		}
+		existing, okExecutor := manager.Executor(provider)
+		if !okExecutor || !h.ownsExecutor(existing) {
+			continue
+		}
+		manager.UnregisterExecutorIfSame(provider, existing)
 	}
 	h.executorProviders = nextProviders
-	if nextModelClients == nil {
-		nextModelClients = make(map[string]struct{})
+	h.executorProviderOwners = nextProviderOwners
+	h.executorManager = manager
+
+	nextModelClients := make(map[string]struct{}, len(modelClientRegistrations))
+	nextModelClientOwners := make(map[string]string, len(modelClientRegistrations))
+	publishedModelClients := make([]modelClientRegistration, 0, len(modelClientRegistrations))
+	for _, registration := range modelClientRegistrations {
+		owner := nextProviderOwners[registration.provider]
+		if owner == "" || owner != registration.pluginID || registration.clientID == "" {
+			continue
+		}
+		nextModelClients[registration.clientID] = struct{}{}
+		nextModelClientOwners[registration.clientID] = registration.pluginID
+		publishedModelClients = append(publishedModelClients, registration)
 	}
 	staleModelClients := make([]string, 0)
 	for clientID := range h.executorModelClientIDs {
@@ -1005,26 +1101,14 @@ func (h *Host) commitExecutorState(
 		}
 	}
 	h.executorModelClientIDs = nextModelClients
-
-	for _, registration := range registrations {
-		if registration.adapter == nil || registration.provider == "" {
-			continue
-		}
-		manager.RegisterExecutor(registration.adapter)
-	}
-	for _, provider := range staleProviders {
-		existing, okExecutor := manager.Executor(provider)
-		if !okExecutor || !h.ownsExecutor(existing) {
-			continue
-		}
-		manager.UnregisterExecutor(provider)
-	}
+	h.executorModelClientOwners = nextModelClientOwners
+	h.executorModelRegistry = modelRegistry
 	h.mu.Unlock()
 
 	if modelRegistry == nil {
 		return
 	}
-	for _, registration := range modelClientRegistrations {
+	for _, registration := range publishedModelClients {
 		modelRegistry.RegisterClient(registration.clientID, registration.provider, registration.models)
 	}
 	for _, clientID := range staleModelClients {
@@ -1048,6 +1132,35 @@ func newExecutorAdapterRegistration(
 			inputFormats:  normalizeExecutorFormats(record.plugin.Capabilities.ExecutorInputFormats),
 			outputFormats: normalizeExecutorFormats(record.plugin.Capabilities.ExecutorOutputFormats),
 		},
+	}
+}
+
+func executorAdaptersEquivalent(left, right *executorAdapter) bool {
+	if left == nil || right == nil || left.host != right.host || left.pluginID != right.pluginID ||
+		left.provider != right.provider || !pluginExecutorIdentityEqual(left.executor, right.executor) {
+		return false
+	}
+	return reflect.DeepEqual(left.inputFormats, right.inputFormats) &&
+		reflect.DeepEqual(left.outputFormats, right.outputFormats)
+}
+
+func pluginExecutorIdentityEqual(left, right pluginapi.ProviderExecutor) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	leftValue := reflect.ValueOf(left)
+	rightValue := reflect.ValueOf(right)
+	if leftValue.Type() != rightValue.Type() {
+		return false
+	}
+	if leftValue.Type().Comparable() {
+		return leftValue.Interface() == rightValue.Interface()
+	}
+	switch leftValue.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return leftValue.Pointer() == rightValue.Pointer()
+	default:
+		return false
 	}
 }
 
@@ -1210,20 +1323,48 @@ func (h *Host) modelProvider(pluginID string) string {
 	return h.modelProviders[pluginID]
 }
 
+func (h *Host) SetAccessManager(manager accessProviderManager) {
+	if h == nil {
+		return
+	}
+	h.publicationMu.Lock()
+	h.mu.Lock()
+	h.accessManager = manager
+	h.mu.Unlock()
+	if manager != nil {
+		manager.SetProviders(sdkaccess.RegisteredProviders())
+	}
+	h.publicationMu.Unlock()
+}
+
+func (h *Host) syncAccessManagerProviders() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	manager := h.accessManager
+	h.mu.Unlock()
+	if manager != nil {
+		manager.SetProviders(sdkaccess.RegisteredProviders())
+	}
+}
+
 func (h *Host) RegisterFrontendAuthProviders() {
 	if h == nil {
 		return
 	}
 
-	type exclusiveFrontendAuthCandidate struct {
-		key      string
-		pluginID string
-		priority int
+	type frontendAuthRegistration struct {
+		key       string
+		pluginID  string
+		priority  int
+		exclusive bool
+		adapter   *accessAdapter
 	}
 
-	nextKeys := make(map[string]struct{})
-	var bestExclusive exclusiveFrontendAuthCandidate
-	for _, record := range h.activeRecords() {
+	token := h.capturePublicationToken()
+	registrations := make([]frontendAuthRegistration, 0)
+	for _, record := range h.activeRecordsFromSnapshot(token.snapshot) {
 		provider := record.plugin.Capabilities.FrontendAuthProvider
 		if provider == nil || h.isPluginFused(record.id) {
 			continue
@@ -1237,75 +1378,270 @@ func (h *Host) RegisterFrontendAuthProviders() {
 		if key == "" {
 			continue
 		}
-		sdkaccess.RegisterProvider(key, adapter)
-		nextKeys[key] = struct{}{}
-		if record.plugin.Capabilities.FrontendAuthProviderExclusive {
-			candidate := exclusiveFrontendAuthCandidate{
-				key:      key,
-				pluginID: record.id,
-				priority: record.priority,
-			}
-			if bestExclusive.key == "" ||
-				candidate.priority > bestExclusive.priority ||
-				(candidate.priority == bestExclusive.priority && candidate.pluginID < bestExclusive.pluginID) {
-				bestExclusive = candidate
-			}
-		}
+		registrations = append(
+			registrations, frontendAuthRegistration{
+				key:       key,
+				pluginID:  record.id,
+				priority:  record.priority,
+				exclusive: record.plugin.Capabilities.FrontendAuthProviderExclusive,
+				adapter:   adapter,
+			},
+		)
 	}
 
-	if bestExclusive.key != "" {
-		sdkaccess.SetExclusiveProvider(bestExclusive.key)
-	} else {
-		sdkaccess.ClearExclusiveProvider()
-	}
-	h.pruneStaleAccessProviders(nextKeys)
-}
-
-func (h *Host) pruneStaleAccessProviders(nextKeys map[string]struct{}) {
-	if h == nil {
+	h.publicationMu.Lock()
+	defer h.publicationMu.Unlock()
+	h.mu.Lock()
+	if !h.publicationTokenCurrentLocked(token) {
+		h.mu.Unlock()
 		return
 	}
-
+	nextKeys := make(map[string]string, len(registrations))
+	exclusiveKey := ""
+	exclusiveOwner := ""
+	exclusivePriority := 0
+	for _, registration := range registrations {
+		nextKeys[registration.key] = registration.pluginID
+		if registration.exclusive &&
+			(exclusiveKey == "" || registration.priority > exclusivePriority ||
+				(registration.priority == exclusivePriority && registration.pluginID < exclusiveOwner)) {
+			exclusiveKey = registration.key
+			exclusiveOwner = registration.pluginID
+			exclusivePriority = registration.priority
+		}
+	}
 	staleKeys := make([]string, 0)
-	h.mu.Lock()
 	for key := range h.accessProviderKeys {
 		if _, okKey := nextKeys[key]; !okKey {
 			staleKeys = append(staleKeys, key)
 		}
 	}
 	h.accessProviderKeys = nextKeys
+	h.exclusiveAccessProviderKey = exclusiveKey
+	h.exclusiveAccessProviderOwner = exclusiveOwner
 	h.mu.Unlock()
 
+	for _, registration := range registrations {
+		sdkaccess.RegisterProvider(registration.key, registration.adapter)
+	}
 	for _, key := range staleKeys {
 		sdkaccess.UnregisterProvider(key)
 	}
+	if exclusiveKey != "" {
+		sdkaccess.SetExclusiveProvider(exclusiveKey)
+	} else {
+		sdkaccess.ClearExclusiveProvider()
+	}
+	h.syncAccessManagerProviders()
+}
+
+func (h *Host) clearAccessProvidersForPublication() {
+	if h == nil {
+		return
+	}
+	keys := make([]string, 0)
+	h.mu.Lock()
+	for key := range h.accessProviderKeys {
+		keys = append(keys, key)
+	}
+	h.accessProviderKeys = make(map[string]string)
+	h.exclusiveAccessProviderKey = ""
+	h.exclusiveAccessProviderOwner = ""
+	h.mu.Unlock()
+	for _, key := range keys {
+		sdkaccess.UnregisterProvider(key)
+	}
+	sdkaccess.ClearExclusiveProvider()
+	h.syncAccessManagerProviders()
+}
+
+func (h *Host) unregisterAccessProviders(pluginID string) {
+	if h == nil {
+		return
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return
+	}
+	removedKeys := make([]string, 0)
+	clearExclusive := false
+	h.mu.Lock()
+	for key, owner := range h.accessProviderKeys {
+		if owner != pluginID {
+			continue
+		}
+		removedKeys = append(removedKeys, key)
+		delete(h.accessProviderKeys, key)
+	}
+	if h.exclusiveAccessProviderOwner == pluginID {
+		h.exclusiveAccessProviderKey = ""
+		h.exclusiveAccessProviderOwner = ""
+		clearExclusive = true
+	}
+	h.mu.Unlock()
+	for _, key := range removedKeys {
+		sdkaccess.UnregisterProvider(key)
+	}
+	if clearExclusive {
+		sdkaccess.ClearExclusiveProvider()
+	}
+	h.syncAccessManagerProviders()
 }
 
 func (h *Host) RegisterUsagePlugins() {
 	if h == nil {
 		return
 	}
+	h.refreshUsagePlugins(h.activeRecords())
+}
 
-	for _, record := range h.activeRecords() {
+func (h *Host) refreshUsagePlugins(records []capabilityRecord) {
+	if h == nil {
+		return
+	}
+
+	h.usageMu.Lock()
+	defer h.usageMu.Unlock()
+
+	nextKeys := make(map[string]string)
+	for _, record := range records {
 		plugin := record.plugin.Capabilities.UsagePlugin
 		if plugin == nil || h.isPluginFused(record.id) {
 			continue
 		}
-		coreusage.RegisterNamedPlugin(
-			"plugin:"+record.id, &usageAdapter{
+		pluginID := strings.TrimSpace(record.id)
+		key := h.usagePluginKey(pluginID)
+		retirement := h.usageDispatcher().RegisterNamedWithRetirement(
+			key, &usageAdapter{
 				host:     h,
-				pluginID: record.id,
+				pluginID: pluginID,
 				plugin:   plugin,
 			},
 		)
+		h.addUsageRetirementLocked(pluginID, retirement)
+		nextKeys[key] = pluginID
 	}
+	for key, pluginID := range h.usagePluginKeys {
+		if _, ok := nextKeys[key]; !ok {
+			h.addUsageRetirementLocked(pluginID, h.usageDispatcher().UnregisterNamed(key))
+		}
+	}
+	h.usagePluginKeys = nextKeys
 }
 
-func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
-	thinking.ClearPluginProviders()
+func (h *Host) unregisterUsagePlugin(pluginID string) {
 	if h == nil {
 		return
 	}
+	pluginID = strings.TrimSpace(pluginID)
+	key := h.usagePluginKey(pluginID)
+	h.usageMu.Lock()
+	h.addUsageRetirementLocked(pluginID, h.usageDispatcher().UnregisterNamed(key))
+	delete(h.usagePluginKeys, key)
+	h.usageMu.Unlock()
+}
+
+func (h *Host) addUsageRetirementLocked(pluginID string, retirement *coreusage.Retirement) {
+	if h == nil {
+		return
+	}
+	pluginID = strings.TrimSpace(pluginID)
+	if pluginID == "" {
+		return
+	}
+	pending := h.usageRetirements[pluginID]
+	active := pending[:0]
+	for _, existing := range pending {
+		if existing != nil && !existing.Drained() {
+			active = append(active, existing)
+		}
+	}
+	if retirement != nil && !retirement.Drained() {
+		active = append(active, retirement)
+	}
+	if len(active) == 0 {
+		delete(h.usageRetirements, pluginID)
+		return
+	}
+	if h.usageRetirements == nil {
+		h.usageRetirements = make(map[string][]*coreusage.Retirement)
+	}
+	h.usageRetirements[pluginID] = active
+}
+
+func (h *Host) waitUsageRetirementsForTargets(
+	ctx context.Context,
+	targets []pluginUnloadTarget,
+) error {
+	if h == nil || len(targets) == 0 {
+		return nil
+	}
+	pluginIDs := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		pluginID := strings.TrimSpace(target.id)
+		if pluginID != "" {
+			pluginIDs[pluginID] = struct{}{}
+		}
+	}
+	return h.waitUsageRetirements(ctx, pluginIDs)
+}
+
+func (h *Host) waitAllUsageRetirements() {
+	_ = h.waitAllUsageRetirementsContext(context.Background())
+}
+
+func (h *Host) waitAllUsageRetirementsContext(ctx context.Context) error {
+	return h.waitUsageRetirements(ctx, nil)
+}
+
+func (h *Host) waitUsageRetirements(
+	ctx context.Context,
+	pluginIDs map[string]struct{},
+) error {
+	if h == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	retirements := make([]*coreusage.Retirement, 0)
+	h.usageMu.Lock()
+	if pluginIDs == nil {
+		for pluginID, pending := range h.usageRetirements {
+			retirements = append(retirements, pending...)
+			delete(h.usageRetirements, pluginID)
+		}
+	} else {
+		for pluginID := range pluginIDs {
+			retirements = append(retirements, h.usageRetirements[pluginID]...)
+			delete(h.usageRetirements, pluginID)
+		}
+	}
+	h.usageMu.Unlock()
+	var waitErrors []error
+	for _, retirement := range retirements {
+		if errWait := retirement.WaitContext(ctx); errWait != nil {
+			waitErrors = append(waitErrors, errWait)
+		}
+	}
+	return errors.Join(waitErrors...)
+}
+
+func (h *Host) usagePluginKey(pluginID string) string {
+	return fmt.Sprintf("plugin:%p:%s", h, strings.TrimSpace(pluginID))
+}
+
+func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
+	if h == nil {
+		thinking.ClearPluginProviders()
+		return
+	}
+	type registration struct {
+		record   capabilityRecord
+		provider string
+		applier  pluginapi.ThinkingApplier
+	}
+	registrations := make([]registration, 0, len(records))
 	for _, record := range records {
 		applier := record.plugin.Capabilities.ThinkingApplier
 		if applier == nil || h.isPluginFused(record.id) {
@@ -1315,15 +1651,36 @@ func (h *Host) refreshThinkingProviders(records []capabilityRecord) {
 		if !okProvider {
 			continue
 		}
+		registrations = append(
+			registrations,
+			registration{record: record, provider: provider, applier: applier},
+		)
+	}
+
+	h.publicationMu.Lock()
+	defer h.publicationMu.Unlock()
+	thinking.ClearPluginProviders()
+	for _, item := range registrations {
+		if !h.recordCurrent(item.record) {
+			continue
+		}
 		thinking.RegisterPluginProvider(
-			record.id, provider, record.priority, &thinkingAdapter{
+			item.record.id, item.provider, item.record.priority, &thinkingAdapter{
 				host:     h,
-				pluginID: record.id,
-				provider: provider,
-				applier:  applier,
+				pluginID: item.record.id,
+				provider: item.provider,
+				applier:  item.applier,
 			},
 		)
 	}
+}
+
+func (h *Host) clearThinkingProviders() {
+	thinking.ClearPluginProviders()
+}
+
+func (h *Host) unregisterThinkingProvider(pluginID string) {
+	thinking.UnregisterPluginProviders(strings.TrimSpace(pluginID))
 }
 
 func (h *Host) callThinkingIdentifier(record capabilityRecord, applier pluginapi.ThinkingApplier) (
@@ -1344,29 +1701,19 @@ func (h *Host) callThinkingIdentifier(record capabilityRecord, applier pluginapi
 	return provider, true
 }
 
-func (h *Host) currentUsagePlugin(pluginID string) pluginapi.UsagePlugin {
-	if h == nil || strings.TrimSpace(pluginID) == "" {
-		return nil
-	}
-	for _, record := range h.activeRecords() {
-		if record.id != pluginID {
-			continue
-		}
-		if h.isPluginFused(record.id) {
-			return nil
-		}
-		return record.plugin.Capabilities.UsagePlugin
-	}
-	return nil
-}
-
 func (h *Host) fusePlugin(id, method string, recovered any) {
 	if h == nil {
 		return
 	}
+	id = pluginstore.CanonicalPluginID(id)
+	if id == "" {
+		return
+	}
 	h.mu.Lock()
 	h.fused[id] = fmt.Sprintf("%s panic: %v", method, recovered)
+	h.advancePluginOperationLocked(id)
 	h.mu.Unlock()
+	h.unregisterUsagePlugin(id)
 	thinking.UnregisterPluginProviders(id)
 	log.WithField("plugin_id", id).WithField("method", method).Errorf(
 		"pluginhost: plugin panic recovered: %v\n%s", recovered, debug.Stack(),
@@ -1460,6 +1807,22 @@ type executorAdapter struct {
 	outputFormats []sdktranslator.Format
 }
 
+type pluginRefreshCommitGuard struct {
+	host  *Host
+	token pluginOperationToken
+}
+
+func (g *pluginRefreshCommitGuard) Current() bool {
+	return g != nil && g.host != nil && g.host.pluginOperationTokenCurrent(g.token)
+}
+
+func (g *pluginRefreshCommitGuard) CommitRefresh(commit func() bool) bool {
+	if !g.Current() || commit == nil {
+		return false
+	}
+	return commit() && g.Current()
+}
+
 func (a *executorAdapter) Identifier() string {
 	if a == nil {
 		return ""
@@ -1477,6 +1840,7 @@ type preparedExecutorCall struct {
 }
 
 func (a *executorAdapter) prepareExecutorCall(
+	ctx context.Context,
 	req coreexecutor.Request,
 	opts coreexecutor.Options,
 ) (preparedExecutorCall, error) {
@@ -1494,8 +1858,8 @@ func (a *executorAdapter) prepareExecutorCall(
 	nativeReq := req
 	nativeOpts := opts
 	if inputRequested != "" && inputRequested != inputFormat {
-		nativeReq.Payload = sdktranslator.TranslateRequest(
-			inputRequested, inputFormat, req.Model, req.Payload, opts.Stream,
+		nativeReq.Payload = sdktranslator.TranslateRequestWithContext(
+			ctx, inputRequested, inputFormat, req.Model, req.Payload, opts.Stream,
 		)
 	}
 	nativeReq.Format = outputFormat
@@ -1668,7 +2032,7 @@ func (a *executorAdapter) translateExecutorStreamChunks(
 				}
 				if chunk.Err != nil {
 					_ = sendExecutorPluginStreamChunk(ctx, out, chunk)
-					continue
+					return
 				}
 				frames := a.translateExecutorStreamPayload(ctx, prepared, chunk.Payload, &param)
 				for _, frame := range frames {
@@ -1789,7 +2153,7 @@ func (a *executorAdapter) Execute(
 		}
 	}()
 
-	prepared, errPrepare := a.prepareExecutorCall(req, opts)
+	prepared, errPrepare := a.prepareExecutorCall(ctx, req, opts)
 	if errPrepare != nil {
 		return coreexecutor.Response{}, errPrepare
 	}
@@ -1823,7 +2187,7 @@ func (a *executorAdapter) ExecuteStream(
 		}
 	}()
 
-	prepared, errPrepare := a.prepareExecutorCall(req, opts)
+	prepared, errPrepare := a.prepareExecutorCall(ctx, req, opts)
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
@@ -1839,19 +2203,38 @@ func (a *executorAdapter) ExecuteStream(
 	}, nil
 }
 
+func (a *executorAdapter) ShouldRefreshAfterUnauthorized(auth *coreauth.Auth) bool {
+	if a == nil || a.host == nil || a.host.isPluginFused(a.pluginID) {
+		return false
+	}
+	record := a.host.authProviderRecord(authProvider(auth))
+	return record != nil && record.plugin.Capabilities.AuthProvider != nil
+}
+
 func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, err error) {
+	if auth == nil {
+		return nil, fmt.Errorf("plugin executor refresh auth is nil")
+	}
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+	applyGeneration := a.host.currentApplyGeneration()
 	record := a.host.authProviderRecord(authProvider(auth))
 	if record == nil || record.plugin.Capabilities.AuthProvider == nil {
 		return auth.Clone(), nil
+	}
+	token, okToken := a.host.capturePluginOperationToken(*record, applyGeneration)
+	if !okToken {
+		return nil, fmt.Errorf("plugin executor %s refresh owner changed: %w", a.Identifier(), context.Canceled)
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
 			refreshed = nil
-			err = fmt.Errorf("plugin executor %s refresh panic: %v", a.Identifier(), recovered)
+			err = fmt.Errorf(
+				"plugin executor %s refresh invalidated: %v: %w",
+				a.Identifier(), recovered, context.Canceled,
+			)
 		}
 	}()
 
@@ -1866,33 +2249,37 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 			HTTPClient:   a.host.newHTTPClient(auth),
 		},
 	)
+	if !a.host.pluginOperationTokenCurrent(token) {
+		return nil, fmt.Errorf("plugin executor %s refresh result is stale: %w", a.Identifier(), context.Canceled)
+	}
 	if errRefresh != nil {
-		return nil, errRefresh
+		guarded := auth.Clone()
+		if guarded != nil {
+			guarded.RefreshCommit = &pluginRefreshCommitGuard{host: a.host, token: token}
+		}
+		return guarded, errRefresh
 	}
 	data := pluginResp.Auth
-	if strings.TrimSpace(data.Provider) == "" {
-		data.Provider = authProvider(auth)
+	expectedProvider := authProvider(auth)
+	expectedID := authID(auth)
+	if returnedProvider := strings.TrimSpace(data.Provider); returnedProvider != "" && returnedProvider != expectedProvider {
+		return nil, fmt.Errorf("plugin executor %s refresh changed auth provider", a.Identifier())
 	}
-	if strings.TrimSpace(data.ID) == "" {
-		data.ID = authID(auth)
+	if returnedID := strings.TrimSpace(data.ID); returnedID != "" && returnedID != expectedID {
+		return nil, fmt.Errorf("plugin executor %s refresh changed auth id", a.Identifier())
 	}
-	if strings.TrimSpace(data.FileName) == "" && auth != nil {
+	data.Provider = expectedProvider
+	data.ID = expectedID
+	if auth != nil {
 		data.FileName = auth.FileName
-	}
-	if strings.TrimSpace(data.Label) == "" && auth != nil {
 		data.Label = auth.Label
-	}
-	if strings.TrimSpace(data.Prefix) == "" && auth != nil {
 		data.Prefix = auth.Prefix
-	}
-	if strings.TrimSpace(data.ProxyURL) == "" && auth != nil {
 		data.ProxyURL = auth.ProxyURL
+		data.Disabled = auth.Disabled
+		data.Attributes = cloneStringMap(auth.Attributes)
 	}
 	if len(data.Metadata) == 0 && auth != nil {
 		data.Metadata = cloneAnyMap(auth.Metadata)
-	}
-	if len(data.Attributes) == 0 && auth != nil {
-		data.Attributes = cloneStringMap(auth.Attributes)
 	}
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
@@ -1903,14 +2290,15 @@ func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (ref
 	if !pluginResp.NextRefreshAfter.IsZero() {
 		data.NextRefreshAfter = pluginResp.NextRefreshAfter
 	}
-	next := a.host.AuthDataToCoreAuth(data, "", data.FileName)
-	if next == nil {
+	providerUpdate := a.host.AuthDataToCoreAuth(data, "", data.FileName)
+	if providerUpdate == nil || auth == nil {
 		return nil, fmt.Errorf("plugin executor %s refresh returned invalid auth data", a.Identifier())
 	}
-	if auth != nil {
-		next.CreatedAt = auth.CreatedAt
-		next.UpdatedAt = auth.UpdatedAt
-	}
+	next := auth.Clone()
+	next.Storage = providerUpdate.Storage
+	next.Metadata = providerUpdate.Metadata
+	next.NextRefreshAfter = providerUpdate.NextRefreshAfter
+	next.RefreshCommit = &pluginRefreshCommitGuard{host: a.host, token: token}
 	return next, nil
 }
 
@@ -1931,7 +2319,7 @@ func (a *executorAdapter) CountTokens(
 		}
 	}()
 
-	prepared, errPrepare := a.prepareExecutorCall(req, opts)
+	prepared, errPrepare := a.prepareExecutorCall(ctx, req, opts)
 	if errPrepare != nil {
 		return coreexecutor.Response{}, errPrepare
 	}
@@ -2014,35 +2402,45 @@ type thinkingAdapter struct {
 }
 
 func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record) {
-	if a == nil {
+	if a == nil || a.plugin == nil {
 		return
 	}
-	plugin := a.host.currentUsagePlugin(a.pluginID)
-	if plugin == nil {
-		return
-	}
+	plugin := a.plugin
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "UsagePlugin.HandleUsage", recovered)
 		}
 	}()
+	requestServiceTier := strings.TrimSpace(record.RequestServiceTier)
+	if requestServiceTier == "" {
+		requestServiceTier = strings.TrimSpace(record.ServiceTier)
+	}
+	if requestServiceTier == "" {
+		requestServiceTier = coreusage.ServiceTierFromContext(ctx)
+	}
+	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
+	if responseServiceTier == "" {
+		responseServiceTier = strings.TrimSpace(record.Detail.ResponseServiceTier)
+	}
 	plugin.HandleUsage(
 		ctx, pluginapi.UsageRecord{
-			Provider:        record.Provider,
-			ExecutorType:    record.ExecutorType,
-			Model:           record.Model,
-			Alias:           record.Alias,
-			APIKey:          record.APIKey,
-			AuthID:          record.AuthID,
-			AuthIndex:       record.AuthIndex,
-			AuthType:        record.AuthType,
-			Source:          record.Source,
-			ReasoningEffort: record.ReasoningEffort,
-			ServiceTier:     record.ServiceTier,
-			RequestedAt:     record.RequestedAt,
-			Latency:         record.Latency,
-			TTFT:            time.Duration(record.TimeToFirstByteMs) * time.Millisecond,
-			Failed:          record.Failed,
+			Provider:            record.Provider,
+			ExecutorType:        record.ExecutorType,
+			Model:               record.Model,
+			Alias:               record.Alias,
+			APIKey:              record.APIKey,
+			AuthID:              record.AuthID,
+			AuthIndex:           record.AuthIndex,
+			AuthType:            record.AuthType,
+			Source:              record.Source,
+			ReasoningEffort:     record.ReasoningEffort,
+			ServiceTier:         requestServiceTier,
+			RequestServiceTier:  requestServiceTier,
+			ResponseServiceTier: responseServiceTier,
+			RequestedAt:         record.RequestedAt,
+			Latency:             record.Latency,
+			TTFT:                time.Duration(record.TimeToFirstByteMs) * time.Millisecond,
+			Failed:              record.Failed,
 			Failure: pluginapi.UsageFailure{
 				StatusCode: record.Fail.StatusCode,
 				Body:       record.Fail.Body,
@@ -2055,6 +2453,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 				CacheReadTokens:     record.Detail.CacheReadTokens,
 				CacheCreationTokens: record.Detail.CacheCreationTokens,
 				TotalTokens:         record.Detail.TotalTokens,
+				ResponseServiceTier: responseServiceTier,
 			},
 			ResponseHeaders: cloneHeader(record.ResponseHeaders),
 		},

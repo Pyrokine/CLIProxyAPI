@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
 
@@ -81,7 +82,7 @@ func (h *Host) RegisteredPlugins() []RegisteredPluginInfo {
 }
 
 func (h *Host) PluginRegistered(id string) bool {
-	id = strings.TrimSpace(id)
+	id = pluginstore.CanonicalPluginID(id)
 	if h == nil || id == "" {
 		return false
 	}

@@ -59,7 +59,7 @@ func (b *modelStreamBridge) read(ctx context.Context, id string) (handlers.Model
 	entry, ok := b.streams[id]
 	b.mu.Unlock()
 	if !ok || entry.chunks == nil {
-		return handlers.ModelExecutionChunk{}, true, nil
+		return handlers.ModelExecutionChunk{}, true, fmt.Errorf("model stream %s is not open", id)
 	}
 	if ctx == nil {
 		ctx = context.Background()

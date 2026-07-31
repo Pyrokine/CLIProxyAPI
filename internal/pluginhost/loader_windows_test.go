@@ -3,13 +3,16 @@
 package pluginhost
 
 import (
+	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
 
 func TestShadowPluginDirIsProcessScoped(t *testing.T) {
@@ -23,7 +26,7 @@ func TestShadowPluginDirIsProcessScoped(t *testing.T) {
 	}
 }
 
-func TestShadowCopyPluginReusesContentAddressedShadow(t *testing.T) {
+func TestShadowCopyPluginUsesUniquePathForSameContent(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(t.TempDir(), "alpha.dll")
 	content := []byte("plugin-v1")
@@ -41,24 +44,23 @@ func TestShadowCopyPluginReusesContentAddressedShadow(t *testing.T) {
 		t.Fatalf("shadowCopyPluginToDir() second error = %v", errSecond)
 	}
 
-	if second != first {
-		t.Fatalf("second shadow path = %q, want reused path %q", second, first)
+	if second == first {
+		t.Fatalf("second shadow path reused active module path %q", first)
 	}
-	gotContent, errRead := os.ReadFile(first)
-	if errRead != nil {
-		t.Fatalf("ReadFile(%s) error = %v", first, errRead)
+	for _, path := range []string{first, second} {
+		gotContent, errRead := os.ReadFile(path)
+		if errRead != nil {
+			t.Fatalf("ReadFile(%s) error = %v", path, errRead)
+		}
+		if string(gotContent) != string(content) {
+			t.Fatalf("shadow content = %q, want %q", gotContent, content)
+		}
+		if name := filepath.Base(path); !strings.HasPrefix(name, shadowPluginPrefix+"alpha-") {
+			t.Fatalf("shadow file name = %q, want unique alpha prefix", name)
+		}
 	}
-	if string(gotContent) != string(content) {
-		t.Fatalf("shadow content = %q, want %q", gotContent, content)
-	}
-	digest := sha256.Sum256(content)
-	wantDigest := hex.EncodeToString(digest[:])[:shadowPluginDigestLength]
-	name := filepath.Base(first)
-	if !strings.HasPrefix(name, shadowPluginPrefix+"alpha-") || !strings.Contains(name, wantDigest) {
-		t.Fatalf("shadow file name = %q, want alpha content digest %s", name, wantDigest)
-	}
-	if count := countShadowPluginFiles(t, dir); count != 1 {
-		t.Fatalf("shadow file count = %d, want 1", count)
+	if count := countShadowPluginFiles(t, dir); count != 2 {
+		t.Fatalf("shadow file count = %d, want 2 isolated modules", count)
 	}
 }
 
@@ -90,36 +92,108 @@ func TestShadowCopyPluginCreatesNewPathForChangedContent(t *testing.T) {
 	}
 }
 
-func TestShadowCopyPluginReplacesCorruptSameSizeShadow(t *testing.T) {
+func TestShadowCopyPluginRejectsSnapshotDigestMismatch(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(t.TempDir(), "alpha.dll")
 	content := []byte("plugin-v1")
 	if errWrite := os.WriteFile(source, content, 0o644); errWrite != nil {
 		t.Fatalf("WriteFile() source error = %v", errWrite)
 	}
-	digest := sha256.Sum256(content)
-	target := shadowPluginPath(dir, "alpha", hex.EncodeToString(digest[:]), ".dll")
-	if errWrite := os.WriteFile(target, []byte("corrupt!!"), 0o644); errWrite != nil {
-		t.Fatalf("WriteFile() corrupt shadow error = %v", errWrite)
-	}
 
-	gotPath, errCopy := shadowCopyPluginToDir(pluginFile{ID: "alpha", Path: source}, dir)
-	if errCopy != nil {
-		t.Fatalf("shadowCopyPluginToDir() error = %v", errCopy)
+	gotPath, errCopy := shadowCopyPluginToDir(
+		pluginFile{ID: "alpha", Path: source, digest: strings.Repeat("0", sha256.Size*2)},
+		dir,
+	)
+	if errCopy == nil || gotPath != "" {
+		t.Fatalf("shadowCopyPluginToDir() = (%q, %v), want digest mismatch", gotPath, errCopy)
 	}
+	if count := countShadowPluginFiles(t, dir); count != 0 {
+		t.Fatalf("shadow file count = %d, want rejected copy removed", count)
+	}
+}
 
-	if gotPath != target {
-		t.Fatalf("shadow path = %q, want %q", gotPath, target)
+func TestHostWindowsRejectedCandidateRequiresRestartBeforeRetry(t *testing.T) {
+	loader := newTestSymbolLoader()
+	lookup := newTestSymbolLookup(&testPlugin{})
+	lookup.registerOverride = func([]byte) pluginapi.Plugin { return pluginapi.Plugin{} }
+	loader.lookups["alpha"] = lookup
+	host := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+	}}
+	if errApply := host.ApplyConfig(context.Background(), cfg); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
 	}
-	gotContent, errRead := os.ReadFile(target)
-	if errRead != nil {
-		t.Fatalf("ReadFile(%s) error = %v", target, errRead)
+	if errApply := host.ApplyConfig(context.Background(), cfg); errApply == nil ||
+		!strings.Contains(errApply.Error(), "requires process restart") {
+		t.Fatalf("retry ApplyConfig() error = %v, want restart requirement", errApply)
 	}
-	if string(gotContent) != string(content) {
-		t.Fatalf("shadow content = %q, want %q", gotContent, content)
+	if loader.openCalls != 1 {
+		t.Fatalf("Open calls = %d, want one DLL load attempt per process", loader.openCalls)
 	}
-	if count := countShadowPluginFiles(t, dir); count != 1 {
-		t.Fatalf("shadow file count = %d, want 1", count)
+}
+
+func TestHostWindowsActivePluginRequiresRestartForReplacement(t *testing.T) {
+	loader := newTestSymbolLoader()
+	loader.lookups["alpha"] = newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("alpha")})
+	host := NewForTest(loader)
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, "alpha"),
+	}}
+	if errApply := host.ApplyConfig(context.Background(), cfg); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+	t.Cleanup(host.ShutdownAll)
+	enabled := true
+	cfg.Plugins.Configs = map[string]config.PluginInstanceConfig{
+		"alpha": {Enabled: &enabled, Priority: 1},
+	}
+	if errApply := host.ApplyConfig(context.Background(), cfg); errApply == nil ||
+		!strings.Contains(errApply.Error(), "requires process restart") {
+		t.Fatalf("replacement ApplyConfig() error = %v, want restart requirement", errApply)
+	}
+	if loader.openCalls != 1 || !host.PluginLoaded("alpha") {
+		t.Fatalf("replacement load calls = %d, active = %v", loader.openCalls, host.PluginLoaded("alpha"))
+	}
+}
+
+func TestHostWindowsLoadAttemptIsSharedAcrossHosts(t *testing.T) {
+	const pluginID = "process-load-attempt"
+	processPluginLoadAttempts.attempts.Delete(pluginID)
+	t.Cleanup(func() { processPluginLoadAttempts.attempts.Delete(pluginID) })
+	firstLoader := newTestSymbolLoader()
+	firstLoader.lookups[pluginID] = newTestSymbolLookup(
+		&testPlugin{registerResult: validTestPlugin(pluginID)},
+	)
+	firstHost := New()
+	firstHost.loader = firstLoader
+	cfg := &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     makePluginDir(t, pluginID),
+	}}
+	if errApply := firstHost.ApplyConfig(context.Background(), cfg); errApply != nil {
+		t.Fatalf("first ApplyConfig() error = %v", errApply)
+	}
+	t.Cleanup(firstHost.ShutdownAll)
+
+	secondLoader := newTestSymbolLoader()
+	secondLoader.lookups[pluginID] = newTestSymbolLookup(
+		&testPlugin{registerResult: validTestPlugin(pluginID)},
+	)
+	secondHost := New()
+	secondHost.loader = secondLoader
+	if errApply := secondHost.ApplyConfig(context.Background(), cfg); errApply == nil ||
+		!strings.Contains(errApply.Error(), "requires process restart") {
+		t.Fatalf("second ApplyConfig() error = %v, want restart requirement", errApply)
+	}
+	if firstLoader.openCalls != 1 || secondLoader.openCalls != 0 {
+		t.Fatalf(
+			"Open calls first=%d second=%d, want 1/0",
+			firstLoader.openCalls,
+			secondLoader.openCalls,
+		)
 	}
 }
 

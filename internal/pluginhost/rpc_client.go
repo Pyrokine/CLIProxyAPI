@@ -9,6 +9,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 type rpcPluginAdapter struct {
@@ -437,9 +438,8 @@ func (a *rpcPluginAdapter) ExecuteStream(
 	if a == nil || a.host == nil || a.host.streams == nil {
 		return pluginapi.ExecutorStreamResponse{}, fmt.Errorf("plugin stream bridge is unavailable")
 	}
-	streamID, chunks, cleanup := a.host.streams.open(ctx)
 	callbackID, closeCallback := a.openHostCallbackContext(ctx)
-	defer closeCallback()
+	streamID, chunks, cleanup := a.host.streams.open(ctx, closeCallback)
 	rpcReq := rpcExecutorRequest{
 		ExecutorRequest: req,
 		StreamID:        streamID,
@@ -589,7 +589,12 @@ func (a rpcThinkingApplier) ApplyThinking(
 }
 
 func (a *rpcPluginAdapter) HandleUsage(ctx context.Context, record pluginapi.UsageRecord) {
-	_, _ = callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record)
+	if a == nil {
+		return
+	}
+	if _, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodUsageHandle, record); errCall != nil {
+		log.WithError(errCall).WithField("plugin_id", a.id).Error("pluginhost: usage delivery failed")
+	}
 }
 
 func (a *rpcPluginAdapter) RegisterCommandLine(

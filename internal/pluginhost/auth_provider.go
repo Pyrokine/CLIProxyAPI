@@ -8,10 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 	"time"
 
+	internalauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
@@ -88,21 +88,7 @@ func normalizeProviderID(provider string) string {
 }
 
 func authIDForPath(path, authDir string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	id := path
-	if authDir = strings.TrimSpace(authDir); authDir != "" {
-		if rel, errRel := filepath.Rel(authDir, path); errRel == nil && rel != "" && !strings.HasPrefix(rel, "..") {
-			id = rel
-		}
-	}
-	id = filepath.ToSlash(filepath.Clean(id))
-	if runtime.GOOS == "windows" {
-		id = strings.ToLower(id)
-	}
-	return id
+	return filepath.ToSlash(internalauth.FileAuthID(path, authDir))
 }
 
 func (h *Host) AuthProviderIdentifiers() []string {

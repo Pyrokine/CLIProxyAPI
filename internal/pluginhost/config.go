@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,8 +48,9 @@ func runtimeConfigFromConfig(cfg *config.Config) runtimeConfig {
 	}
 	sort.Strings(ids)
 
-	for _, id := range ids {
-		item := cfg.Plugins.Configs[id]
+	for _, configuredID := range ids {
+		item := cfg.Plugins.Configs[configuredID]
+		id := pluginstore.CanonicalPluginID(configuredID)
 		enabled := true
 		if item.Enabled != nil {
 			enabled = *item.Enabled
@@ -80,7 +82,7 @@ func desiredPluginVersions(items map[string]runtimeItemConfig) map[string]string
 	}
 	out := make(map[string]string, len(items))
 	for id, item := range items {
-		id = strings.TrimSpace(id)
+		id = pluginstore.CanonicalPluginID(id)
 		version := strings.TrimSpace(item.Version)
 		if id == "" || version == "" {
 			continue

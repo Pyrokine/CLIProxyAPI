@@ -2,6 +2,7 @@ package pluginhost
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/cpu"
 )
@@ -20,9 +22,12 @@ var (
 )
 
 type pluginFile struct {
-	ID      string
-	Path    string
-	Version string
+	ID         string
+	Path       string
+	Version    string
+	loadPath   string
+	digest     string
+	sourceInfo os.FileInfo
 }
 
 // PluginFileInfo describes a plugin binary selected by the host discovery rules.
@@ -42,7 +47,8 @@ func validPluginID(id string) bool {
 }
 
 func validPluginVersion(version string) bool {
-	return version != "" && !strings.HasPrefix(version, "v") && pluginVersionPattern.MatchString(version)
+	return version != "" && !strings.HasPrefix(version, "v") && !strings.Contains(version, "-v") &&
+		pluginVersionPattern.MatchString(version)
 }
 
 func pluginIDFromPath(path string) string {
@@ -54,10 +60,10 @@ func pluginIDFromPath(path string) string {
 	lowerBase := strings.ToLower(base)
 	for _, extension := range []string{".so", ".dylib", ".dll"} {
 		if strings.HasSuffix(lowerBase, extension) {
-			return base[:len(base)-len(extension)]
+			return pluginstore.CanonicalPluginID(base[:len(base)-len(extension)])
 		}
 	}
-	return base
+	return pluginstore.CanonicalPluginID(base)
 }
 
 func pluginFileFromPath(filePath string, requiredExtension string) (pluginFile, bool) {
@@ -93,7 +99,7 @@ func pluginFileFromPath(filePath string, requiredExtension string) (pluginFile, 
 	if !validPluginID(id) {
 		return pluginFile{}, false
 	}
-	return pluginFile{ID: id, Path: filePath, Version: version}, true
+	return pluginFile{ID: pluginstore.CanonicalPluginID(id), Path: filePath, Version: version}, true
 }
 
 func pluginExtension(goos string) string {
@@ -121,7 +127,23 @@ func selectPluginFilesWithCandidates(root string, desiredVersions ...map[string]
 	if root == "" {
 		root = "plugins"
 	}
+	resolvedRoot, errResolveRoot := filepath.EvalSymlinks(root)
+	if errResolveRoot != nil {
+		if errors.Is(errResolveRoot, os.ErrNotExist) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("resolve plugin root: %w", errResolveRoot)
+	}
+	root = resolvedRoot
 	desired := normalizeDesiredPluginVersions(desiredVersions...)
+	pendingDeletions, errPending := pluginstore.PendingDeletionPluginIDs(root)
+	if errPending != nil {
+		return nil, nil, fmt.Errorf("read pending plugin deletions: %w", errPending)
+	}
+	pendingInstalls, errPending := pluginstore.PendingInstallPluginIDs(root)
+	if errPending != nil {
+		return nil, nil, fmt.Errorf("read pending plugin installs: %w", errPending)
+	}
 
 	candidates := candidateDirs(root, runtime.GOOS, runtime.GOARCH, cpuVariant())
 	extension := pluginExtension(runtime.GOOS)
@@ -129,12 +151,12 @@ func selectPluginFilesWithCandidates(root string, desiredVersions ...map[string]
 	order := make([]string, 0)
 	all := make([]pluginFile, 0)
 	for _, dir := range candidates {
-		entries, errReadDir := os.ReadDir(dir)
+		entries, exists, errReadDir := securePluginCandidateEntries(root, dir)
 		if errReadDir != nil {
-			if os.IsNotExist(errReadDir) {
-				continue
-			}
 			return nil, nil, errReadDir
+		}
+		if !exists {
+			continue
 		}
 		files := make([]string, 0, len(entries))
 		for _, entry := range entries {
@@ -149,6 +171,12 @@ func selectPluginFilesWithCandidates(root string, desiredVersions ...map[string]
 		for _, path := range files {
 			file, okFile := pluginFileFromPath(path, extension)
 			if !okFile {
+				continue
+			}
+			if _, pendingDelete := pendingDeletions[file.ID]; pendingDelete {
+				continue
+			}
+			if _, pendingInstall := pendingInstalls[file.ID]; pendingInstall {
 				continue
 			}
 			all = append(all, file)
@@ -174,11 +202,49 @@ func selectPluginFilesWithCandidates(root string, desiredVersions ...map[string]
 	return selected, all, nil
 }
 
+func securePluginCandidateEntries(root, dir string) ([]os.DirEntry, bool, error) {
+	relative, errRelative := filepath.Rel(root, dir)
+	if errRelative != nil || filepath.IsAbs(relative) || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, false, fmt.Errorf("plugin candidate directory is outside the plugin root: %s", dir)
+	}
+	current := root
+	if relative != "." {
+		for _, component := range strings.Split(relative, string(filepath.Separator)) {
+			if component == "" || component == "." {
+				continue
+			}
+			current = filepath.Join(current, component)
+			info, errInfo := os.Lstat(current)
+			if errInfo != nil {
+				if errors.Is(errInfo, os.ErrNotExist) {
+					return nil, false, nil
+				}
+				return nil, false, fmt.Errorf("stat plugin candidate directory: %w", errInfo)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return nil, false, fmt.Errorf("plugin candidate directory is a symlink: %s", current)
+			}
+			if !info.IsDir() {
+				return nil, false, fmt.Errorf("plugin candidate path is not a directory: %s", current)
+			}
+		}
+	}
+	entries, errReadDir := os.ReadDir(dir)
+	if errReadDir != nil {
+		if errors.Is(errReadDir, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, errReadDir
+	}
+	return entries, true, nil
+}
+
 func normalizeDesiredPluginVersions(sources ...map[string]string) map[string]string {
 	out := make(map[string]string)
 	for _, source := range sources {
 		for id, version := range source {
-			id = strings.TrimSpace(id)
+			id = pluginstore.CanonicalPluginID(id)
 			version = normalizePluginDesiredVersion(version)
 			if id == "" || version == "" {
 				continue
@@ -249,13 +315,9 @@ func pluginVersionSegment(segments []string, index int) (int64, bool) {
 	return number, true
 }
 
-func cleanupUnselectedPluginFiles(root string, loaded []pluginFile) error {
-	if len(loaded) == 0 {
+func cleanupUnselectedPluginFiles(candidates []pluginFile, loaded []pluginFile) error {
+	if len(candidates) == 0 || len(loaded) == 0 {
 		return nil
-	}
-	_, candidates, errSelect := selectPluginFilesWithCandidates(root)
-	if errSelect != nil {
-		return errSelect
 	}
 	loadedByID := make(map[string]map[string]struct{}, len(loaded))
 	for _, file := range loaded {
@@ -276,6 +338,17 @@ func cleanupUnselectedPluginFiles(root string, loaded []pluginFile) error {
 			continue
 		}
 		if _, selected := paths[filepath.Clean(candidate.Path)]; selected {
+			continue
+		}
+		current, errCurrent := pluginFileSnapshotCurrent(candidate)
+		if errors.Is(errCurrent, os.ErrNotExist) {
+			continue
+		}
+		if errCurrent != nil {
+			errs = append(errs, errCurrent)
+			continue
+		}
+		if !current {
 			continue
 		}
 		if errRemove := os.Remove(candidate.Path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
@@ -300,7 +373,7 @@ func DiscoverPluginFiles(root string, desiredVersionsOpt ...map[string]string) (
 	}
 	out := make([]PluginFileInfo, 0, len(files))
 	for _, file := range files {
-		out = append(out, PluginFileInfo(file))
+		out = append(out, PluginFileInfo{ID: file.ID, Path: file.Path, Version: file.Version})
 	}
 	return out, nil
 }

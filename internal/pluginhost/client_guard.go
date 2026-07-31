@@ -4,20 +4,25 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
+const pluginShutdownTimeout = 15 * time.Second
+
 type guardedPluginClient struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	inner  pluginClient
-	calls  int
-	closed bool
+	mu              sync.Mutex
+	inner           pluginClient
+	calls           int
+	closed          bool
+	shutdownStarted bool
+	shutdownDone    chan struct{}
 }
 
 func newGuardedPluginClient(inner pluginClient) pluginClient {
-	client := &guardedPluginClient{inner: inner}
-	client.cond = sync.NewCond(&client.mu)
-	return client
+	return &guardedPluginClient{
+		inner:        inner,
+		shutdownDone: make(chan struct{}),
+	}
 }
 
 func (c *guardedPluginClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
@@ -43,37 +48,98 @@ func (c *guardedPluginClient) acquire() (pluginClient, error) {
 }
 
 func (c *guardedPluginClient) release() {
-	c.mu.Lock()
-	c.calls--
-	if c.calls == 0 {
-		c.cond.Broadcast()
-	}
-	c.mu.Unlock()
-}
-
-func (c *guardedPluginClient) Shutdown() {
 	if c == nil {
 		return
 	}
-
-	var inner pluginClient
 	c.mu.Lock()
-	if c.closed {
-		for c.calls > 0 {
-			c.cond.Wait()
-		}
-		c.mu.Unlock()
+	if c.calls > 0 {
+		c.calls--
+	}
+	inner := c.detachShutdownLocked()
+	c.mu.Unlock()
+	c.startShutdown(inner)
+}
+
+func (c *guardedPluginClient) Shutdown() {
+	_ = c.ShutdownContext(context.Background())
+}
+
+func (c *guardedPluginClient) ShutdownContext(ctx context.Context) error {
+	if c == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.mu.Lock()
+	c.closed = true
+	inner := c.detachShutdownLocked()
+	done := c.shutdownDone
+	c.mu.Unlock()
+	c.startShutdown(inner)
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("shutdown plugin client: %w", ctx.Err())
+	}
+}
+
+func (c *guardedPluginClient) detachShutdownLocked() pluginClient {
+	if c.shutdownStarted || !c.closed || c.calls > 0 {
+		return nil
+	}
+	c.shutdownStarted = true
+	inner := c.inner
+	c.inner = nil
+	if inner == nil {
+		close(c.shutdownDone)
+	}
+	return inner
+}
+
+func (c *guardedPluginClient) startShutdown(inner pluginClient) {
+	if inner == nil {
 		return
 	}
-	c.closed = true
-	for c.calls > 0 {
-		c.cond.Wait()
-	}
-	inner = c.inner
-	c.inner = nil
-	c.mu.Unlock()
-
-	if inner != nil {
+	go func() {
+		defer close(c.shutdownDone)
 		inner.Shutdown()
+	}()
+}
+
+func shutdownPluginClient(ctx context.Context, client pluginClient) error {
+	if client == nil {
+		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if contextual, ok := client.(interface {
+		ShutdownContext(context.Context) error
+	}); ok {
+		return contextual.ShutdownContext(ctx)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.Shutdown()
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("shutdown plugin client: %w", ctx.Err())
+	}
+}
+
+func boundedPluginShutdownContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if _, hasDeadline := parent.Deadline(); hasDeadline {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, pluginShutdownTimeout)
 }
