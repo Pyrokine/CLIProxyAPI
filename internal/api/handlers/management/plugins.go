@@ -11,8 +11,10 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -76,7 +78,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
 	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg.Plugins.Configs))
 	for id, item := range h.cfg.Plugins.Configs {
-		configs[id] = item
+		configs[pluginstore.CanonicalPluginID(id)] = item
 	}
 	host := h.pluginHost
 	h.mu.Unlock()
@@ -115,13 +117,14 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	}
 	if host != nil {
 		for _, info := range host.RegisteredPlugins() {
-			entry := entries[info.ID]
-			entry.ID = info.ID
+			id := pluginstore.CanonicalPluginID(info.ID)
+			entry := entries[id]
+			entry.ID = id
 			entry.Registered = true
 			entry.SupportsOAuth = info.SupportsOAuth
 			entry.Logo = info.Metadata.Logo
 			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
-			configuredItem, configured := configs[info.ID]
+			_, configuredItem, configured := pluginConfigByID(configs, id)
 			if configured {
 				entry.Config = pluginConfigObject(configuredItem, info.Metadata.ConfigFields)
 			}
@@ -130,7 +133,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			if !configured && !entry.Enabled {
 				entry.Enabled = true
 			}
-			entries[info.ID] = entry
+			entries[id] = entry
 		}
 	}
 
@@ -178,24 +181,25 @@ func (h *Handler) PatchPluginEnabled(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	ensurePluginConfigMap(h.cfg)
-	item := h.cfg.Plugins.Configs[id]
-	node := pluginConfigNode(item)
-	setYAMLMappingValue(node, "enabled", boolYAMLNode(*body.Enabled))
-	updated, errConfig := pluginInstanceConfigFromNode(node)
-	if errConfig != nil {
-		h.mu.Unlock()
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errConfig.Error()})
+	if !h.mutatePluginConfig(
+		c, func(next *config.Config) error {
+			ensurePluginConfigMap(next)
+			_, item, _ := pluginConfigByID(next.Plugins.Configs, id)
+			node := pluginConfigNode(item)
+			setYAMLMappingValue(node, "enabled", boolYAMLNode(*body.Enabled))
+			updated, errConfig := pluginInstanceConfigFromNode(node)
+			if errConfig != nil {
+				return newConfigMutationError(
+					http.StatusBadRequest,
+					fmt.Sprintf("invalid plugin config: %v", errConfig),
+				)
+			}
+			setPluginConfigByID(next.Plugins.Configs, id, updated)
+			return nil
+		},
+	) {
 		return
 	}
-	h.cfg.Plugins.Configs[id] = updated
-	syncFn, cfgSnapshot, okSave := h.preparePluginMutationSyncLocked(c)
-	h.mu.Unlock()
-	if !okSave {
-		return
-	}
-	runPluginRuntimeSync(syncFn, cfgSnapshot)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
@@ -209,6 +213,13 @@ func (h *Handler) PutPluginConfig(c *gin.Context) {
 	if !okBody {
 		return
 	}
+	if _, hasStore := body["store"]; hasStore {
+		c.JSON(
+			http.StatusBadRequest,
+			gin.H{"error": "reserved_plugin_config_field", "message": "store is managed by the plugin store"},
+		)
+		return
+	}
 	node, errNode := yamlNodeFromJSONObject(body)
 	if errNode != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body", "message": errNode.Error()})
@@ -220,15 +231,29 @@ func (h *Handler) PutPluginConfig(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
-	ensurePluginConfigMap(h.cfg)
-	h.cfg.Plugins.Configs[id] = updated
-	syncFn, cfgSnapshot, okSave := h.preparePluginMutationSyncLocked(c)
-	h.mu.Unlock()
-	if !okSave {
+	if !h.mutatePluginConfig(
+		c, func(next *config.Config) error {
+			ensurePluginConfigMap(next)
+			candidate := updated
+			_, current, _ := pluginConfigByID(next.Plugins.Configs, id)
+			if storeNode := pluginStoreConfigNode(current); storeNode != nil {
+				node := pluginConfigNode(candidate)
+				setYAMLMappingValue(node, "store", cloneYAMLNode(storeNode))
+				preserved, errPreserve := pluginInstanceConfigFromNode(node)
+				if errPreserve != nil {
+					return newConfigMutationError(
+						http.StatusInternalServerError,
+						fmt.Sprintf("preserve plugin store metadata: %v", errPreserve),
+					)
+				}
+				candidate = preserved
+			}
+			setPluginConfigByID(next.Plugins.Configs, id, candidate)
+			return nil
+		},
+	) {
 		return
 	}
-	runPluginRuntimeSync(syncFn, cfgSnapshot)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
@@ -242,60 +267,105 @@ func (h *Handler) PatchPluginConfig(c *gin.Context) {
 	if !okBody {
 		return
 	}
+	if _, hasStore := body["store"]; hasStore {
+		c.JSON(
+			http.StatusBadRequest,
+			gin.H{"error": "reserved_plugin_config_field", "message": "store is managed by the plugin store"},
+		)
+		return
+	}
 
-	h.mu.Lock()
-	ensurePluginConfigMap(h.cfg)
-	node := pluginConfigNode(h.cfg.Plugins.Configs[id])
-	keys := make([]string, 0, len(body))
-	for key := range body {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		value := body[key]
-		if value == nil {
-			deleteYAMLMappingKey(node, key)
-			continue
-		}
-		valueNode, errNode := yamlNodeFromJSONValue(value)
-		if errNode != nil {
-			h.mu.Unlock()
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_body", "message": errNode.Error()})
-			return
-		}
-		setYAMLMappingValue(node, key, valueNode)
-	}
-	updated, errConfig := pluginInstanceConfigFromNode(node)
-	if errConfig != nil {
-		h.mu.Unlock()
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_config", "message": errConfig.Error()})
+	if !h.mutatePluginConfig(
+		c, func(next *config.Config) error {
+			ensurePluginConfigMap(next)
+			_, current, _ := pluginConfigByID(next.Plugins.Configs, id)
+			node := pluginConfigNode(current)
+			keys := make([]string, 0, len(body))
+			for key := range body {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				value := body[key]
+				if value == nil {
+					deleteYAMLMappingKey(node, key)
+					continue
+				}
+				valueNode, errNode := yamlNodeFromJSONValue(value)
+				if errNode != nil {
+					return newConfigMutationError(
+						http.StatusBadRequest,
+						fmt.Sprintf("invalid plugin config field %q: %v", key, errNode),
+					)
+				}
+				setYAMLMappingValue(node, key, valueNode)
+			}
+			updated, errConfig := pluginInstanceConfigFromNode(node)
+			if errConfig != nil {
+				return newConfigMutationError(
+					http.StatusBadRequest,
+					fmt.Sprintf("invalid plugin config: %v", errConfig),
+				)
+			}
+			setPluginConfigByID(next.Plugins.Configs, id, updated)
+			return nil
+		},
+	) {
 		return
 	}
-	h.cfg.Plugins.Configs[id] = updated
-	syncFn, cfgSnapshot, okSave := h.preparePluginMutationSyncLocked(c)
-	h.mu.Unlock()
-	if !okSave {
-		return
-	}
-	runPluginRuntimeSync(syncFn, cfgSnapshot)
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-func (h *Handler) preparePluginMutationSyncLocked(c *gin.Context) (
-	func(context.Context, *config.Config),
-	*config.Config,
-	bool,
-) {
-	if !h.saveConfigLocked(c) {
-		return nil, nil, false
+func (h *Handler) mutatePluginConfig(
+	c *gin.Context,
+	mutate func(*config.Config) error,
+) bool {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return false
 	}
-	return h.pluginRuntimeSync, pluginRuntimeConfigSnapshot(h.cfg), true
+
+	h.commitMu.Lock()
+	h.mu.Lock()
+	commit, callback, ok := h.mutateConfigLocked(c, mutate)
+	h.mu.Unlock()
+	h.commitMu.Unlock()
+	if !ok {
+		return false
+	}
+	if !h.notifyConfigCommitted(c, callback, commit) {
+		return false
+	}
+	if callback != nil {
+		return true
+	}
+
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = context.WithoutCancel(c.Request.Context())
+	}
+	if err := h.runPluginRuntimeSyncForCommit(ctx, commit, h.pluginRuntimeSync); err != nil {
+		log.WithError(err).Error("plugin config committed but runtime sync failed")
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "plugin_runtime_sync_failed"})
+		return false
+	}
+	return true
 }
 
-func runPluginRuntimeSync(syncFn func(context.Context, *config.Config), cfg *config.Config) {
-	if syncFn != nil {
-		syncFn(context.Background(), cfg)
+func runPluginRuntimeSync(
+	ctx context.Context,
+	syncFn func(context.Context, *config.Config) error,
+	cfg *config.Config,
+) (err error) {
+	if syncFn == nil {
+		return nil
 	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("plugin runtime sync panicked: %v", recovered)
+		}
+	}()
+	return syncFn(ctx, cfg)
 }
 
 func pluginRuntimeConfigSnapshot(cfg *config.Config) *config.Config {
@@ -435,7 +505,7 @@ func pluginMetadata(meta pluginapi.Metadata) *pluginMetadataInfo {
 }
 
 func pluginIDFromRequest(c *gin.Context) (string, bool) {
-	id := strings.TrimSpace(c.Param("id"))
+	id := pluginstore.CanonicalPluginID(c.Param("id"))
 	if !pluginhost.ValidatePluginID(id) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_plugin_id", "message": "invalid plugin id"})
 		return "", false
@@ -456,6 +526,45 @@ func readPluginConfigObject(c *gin.Context) (map[string]any, bool) {
 		return nil, false
 	}
 	return body, true
+}
+
+func pluginConfigByID(
+	configs map[string]config.PluginInstanceConfig,
+	id string,
+) (string, config.PluginInstanceConfig, bool) {
+	canonicalID := pluginstore.CanonicalPluginID(id)
+	if item, exists := configs[canonicalID]; exists {
+		return canonicalID, item, true
+	}
+	for configuredID, item := range configs {
+		if pluginstore.CanonicalPluginID(configuredID) == canonicalID {
+			return configuredID, item, true
+		}
+	}
+	return canonicalID, config.PluginInstanceConfig{}, false
+}
+
+func setPluginConfigByID(
+	configs map[string]config.PluginInstanceConfig,
+	id string,
+	item config.PluginInstanceConfig,
+) {
+	canonicalID := pluginstore.CanonicalPluginID(id)
+	for configuredID := range configs {
+		if configuredID != canonicalID && pluginstore.CanonicalPluginID(configuredID) == canonicalID {
+			delete(configs, configuredID)
+		}
+	}
+	configs[canonicalID] = item
+}
+
+func deletePluginConfigByID(configs map[string]config.PluginInstanceConfig, id string) {
+	canonicalID := pluginstore.CanonicalPluginID(id)
+	for configuredID := range configs {
+		if pluginstore.CanonicalPluginID(configuredID) == canonicalID {
+			delete(configs, configuredID)
+		}
+	}
 }
 
 func ensurePluginConfigMap(cfg *config.Config) {

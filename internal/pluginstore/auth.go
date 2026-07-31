@@ -229,7 +229,7 @@ func pluginStorePathMatchesAuthRule(requestPath string, rulePath string) bool {
 		return true
 	}
 	if strings.HasSuffix(rulePath, "/") {
-		return strings.HasPrefix(requestPath, rulePath)
+		return requestPath == strings.TrimSuffix(rulePath, "/") || strings.HasPrefix(requestPath, rulePath)
 	}
 	return strings.HasPrefix(requestPath, rulePath+"/")
 }

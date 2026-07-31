@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -18,6 +18,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	sdkpluginstore "github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
@@ -33,6 +34,7 @@ const (
 	pluginReleaseFailureCacheTTL         = 30 * time.Second
 	pluginStoreHTTPTimeout               = 30 * time.Second
 	pluginStoreInstallRequestMaxBytes    = 16 * 1024
+	pluginStoreReleasePageSize           = 50
 	pluginLatestVersionLookupConcurrency = 8
 )
 
@@ -63,32 +65,34 @@ type pluginStoreSourceErr struct {
 }
 
 type pluginStoreListEntry struct {
-	StoreID          string                `json:"store_id"`
-	SourceID         string                `json:"source_id"`
-	SourceName       string                `json:"source_name"`
-	SourceURL        string                `json:"source_url"`
-	ID               string                `json:"id"`
-	Name             string                `json:"name"`
-	Description      string                `json:"description"`
-	Author           string                `json:"author"`
-	Version          string                `json:"version"`
-	Repository       string                `json:"repository"`
-	InstallType      string                `json:"install_type"`
-	AuthRequired     bool                  `json:"auth_required"`
-	AuthConfigured   bool                  `json:"auth_configured"`
-	Platforms        []pluginStorePlatform `json:"platforms,omitempty"`
-	Logo             string                `json:"logo,omitempty"`
-	Homepage         string                `json:"homepage,omitempty"`
-	License          string                `json:"license,omitempty"`
-	Tags             []string              `json:"tags,omitempty"`
-	Installed        bool                  `json:"installed"`
-	InstalledVersion string                `json:"installed_version"`
-	Path             string                `json:"path"`
-	Configured       bool                  `json:"configured"`
-	Registered       bool                  `json:"registered"`
-	Enabled          bool                  `json:"enabled"`
-	EffectiveEnabled bool                  `json:"effective_enabled"`
-	UpdateAvailable  bool                  `json:"update_available"`
+	StoreID             string                `json:"store_id"`
+	SourceID            string                `json:"source_id"`
+	SourceName          string                `json:"source_name"`
+	SourceURL           string                `json:"source_url"`
+	ID                  string                `json:"id"`
+	Name                string                `json:"name"`
+	Description         string                `json:"description"`
+	Author              string                `json:"author"`
+	Version             string                `json:"version"`
+	Repository          string                `json:"repository"`
+	InstallType         string                `json:"install_type"`
+	AuthRequired        bool                  `json:"auth_required"`
+	AuthConfigured      bool                  `json:"auth_configured"`
+	Platforms           []pluginStorePlatform `json:"platforms,omitempty"`
+	Logo                string                `json:"logo,omitempty"`
+	Homepage            string                `json:"homepage,omitempty"`
+	License             string                `json:"license,omitempty"`
+	Tags                []string              `json:"tags,omitempty"`
+	Installed           bool                  `json:"installed"`
+	InstalledVersion    string                `json:"installed_version"`
+	InstalledSourceID   string                `json:"installed_source_id,omitempty"`
+	InstallSourceStatus string                `json:"install_source_status,omitempty"`
+	Path                string                `json:"path"`
+	Configured          bool                  `json:"configured"`
+	Registered          bool                  `json:"registered"`
+	Enabled             bool                  `json:"enabled"`
+	EffectiveEnabled    bool                  `json:"effective_enabled"`
+	UpdateAvailable     bool                  `json:"update_available"`
 }
 
 type pluginStorePlatform struct {
@@ -109,18 +113,30 @@ type pluginInstallResponse struct {
 	RestartRequired bool   `json:"restart_required"`
 }
 
+type pluginStoreReleaseEntry struct {
+	TagName     string   `json:"tag_name"`
+	Name        string   `json:"name"`
+	PublishedAt string   `json:"published_at"`
+	Prerelease  bool     `json:"prerelease"`
+	HTMLURL     string   `json:"html_url"`
+	AssetNames  []string `json:"asset_names"`
+}
+
 type pluginInstallRequest struct {
 	Version string `json:"version"`
 }
 
 type pluginLocalStatus struct {
-	Installed        bool
-	InstalledVersion string
-	Path             string
-	Configured       bool
-	Registered       bool
-	Enabled          bool
-	EffectiveEnabled bool
+	Installed          bool
+	InstalledVersion   string
+	StoreManaged       bool
+	InstalledSourceID  string
+	InstalledSourceURL string
+	Path               string
+	Configured         bool
+	Registered         bool
+	Enabled            bool
+	EffectiveEnabled   bool
 }
 
 type sourcedPlugin struct {
@@ -129,7 +145,7 @@ type sourcedPlugin struct {
 }
 
 func (h *Handler) ListPluginStore(c *gin.Context) {
-	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host := h.pluginStoreSnapshot()
+	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host, _ := h.pluginStoreSnapshot()
 	sources, errSources := h.pluginStoreSources(sourceConfigs)
 	if errSources != nil {
 		c.JSON(
@@ -157,11 +173,21 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 	}
 	client := h.newPluginStoreClient(proxyURL, "", storeAuth)
 	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
+	pluginSourceCounts := make(map[string]int, len(plugins))
+	for _, item := range plugins {
+		pluginSourceCounts[item.plugin.ID]++
+	}
 
 	entries := make([]pluginStoreListEntry, 0, len(plugins))
 	for index, item := range plugins {
 		plugin := item.plugin
 		status := statuses[plugin.ID]
+		installedSourceID, installSourceStatus, sourceAllowsUpdate := pluginStoreInstallSourceStatus(
+			status,
+			sources,
+			item.source.ID,
+			pluginSourceCounts[plugin.ID],
+		)
 		installedVersion := status.InstalledVersion
 		// Fall back to the registry version when the latest release is unknown.
 		storeVersion := plugin.Version
@@ -170,32 +196,34 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		}
 		entries = append(
 			entries, pluginStoreListEntry{
-				StoreID:          pluginStoreText(item.source.ID + "/" + plugin.ID),
-				SourceID:         pluginStoreText(item.source.ID),
-				SourceName:       pluginStoreText(item.source.Name),
-				SourceURL:        pluginStoreText(item.source.URL),
-				ID:               pluginStoreText(plugin.ID),
-				Name:             pluginStoreText(plugin.Name),
-				Description:      pluginStoreText(plugin.Description),
-				Author:           pluginStoreText(plugin.Author),
-				Version:          pluginStoreText(storeVersion),
-				Repository:       pluginStoreText(plugin.Repository),
-				InstallType:      pluginStoreText(pluginstore.PluginInstallType(plugin)),
-				AuthRequired:     plugin.AuthRequired,
-				AuthConfigured:   pluginAuthConfigured(item.source, plugin, storeAuth),
-				Platforms:        sanitizePluginStorePlatforms(pluginstore.PluginPlatforms(plugin)),
-				Logo:             pluginStoreText(plugin.Logo),
-				Homepage:         pluginStoreText(plugin.Homepage),
-				License:          pluginStoreText(plugin.License),
-				Tags:             pluginStoreTextList(plugin.Tags),
-				Installed:        status.Installed,
-				InstalledVersion: pluginStoreText(installedVersion),
-				Path:             pluginStoreText(status.Path),
-				Configured:       status.Configured,
-				Registered:       status.Registered,
-				Enabled:          status.Enabled,
-				EffectiveEnabled: status.EffectiveEnabled,
-				UpdateAvailable:  pluginstore.UpdateAvailable(installedVersion, storeVersion),
+				StoreID:             pluginStoreText(item.source.ID + "/" + plugin.ID),
+				SourceID:            pluginStoreText(item.source.ID),
+				SourceName:          pluginStoreText(item.source.Name),
+				SourceURL:           pluginStoreText(item.source.URL),
+				ID:                  pluginStoreText(plugin.ID),
+				Name:                pluginStoreText(plugin.Name),
+				Description:         pluginStoreText(plugin.Description),
+				Author:              pluginStoreText(plugin.Author),
+				Version:             pluginStoreText(storeVersion),
+				Repository:          pluginStoreText(plugin.Repository),
+				InstallType:         pluginStoreText(pluginstore.PluginInstallType(plugin)),
+				AuthRequired:        plugin.AuthRequired,
+				AuthConfigured:      pluginAuthConfigured(item.source, plugin, storeAuth),
+				Platforms:           sanitizePluginStorePlatforms(pluginstore.PluginPlatforms(plugin)),
+				Logo:                pluginStoreText(plugin.Logo),
+				Homepage:            pluginStoreText(plugin.Homepage),
+				License:             pluginStoreText(plugin.License),
+				Tags:                pluginStoreTextList(plugin.Tags),
+				Installed:           status.Installed,
+				InstalledVersion:    pluginStoreText(installedVersion),
+				InstalledSourceID:   pluginStoreText(installedSourceID),
+				InstallSourceStatus: pluginStoreText(installSourceStatus),
+				Path:                pluginStoreText(status.Path),
+				Configured:          status.Configured,
+				Registered:          status.Registered,
+				Enabled:             status.Enabled,
+				EffectiveEnabled:    status.EffectiveEnabled,
+				UpdateAvailable:     sourceAllowsUpdate && pluginstore.UpdateAvailable(installedVersion, storeVersion),
 			},
 		)
 	}
@@ -209,6 +237,68 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 			Plugins:        entries,
 		},
 	)
+}
+
+func (h *Handler) ListPluginStoreReleases(c *gin.Context) {
+	id, okID := pluginIDFromRequest(c)
+	if !okID {
+		return
+	}
+	_, _, proxyURL, sourceConfigs, storeAuth, _, _, _ := h.pluginStoreSnapshot()
+	sources, errSources := h.pluginStoreSources(sourceConfigs)
+	if errSources != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": "plugin_store_source_invalid", "message": errSources.Error()},
+		)
+		return
+	}
+	_, plugin, client, okPlugin := h.findPluginStoreInstallTarget(
+		c.Request.Context(), proxyURL, storeAuth, sources, id, c.Query("source"), c,
+	)
+	if !okPlugin {
+		return
+	}
+	if pluginstore.PluginInstallType(plugin) != pluginstore.InstallTypeGitHubRelease {
+		c.JSON(
+			http.StatusBadRequest,
+			gin.H{"error": "plugin_release_versions_unsupported", "message": "plugin does not use GitHub releases"},
+		)
+		return
+	}
+
+	releases, errReleases := client.FetchReleases(c.Request.Context(), plugin, pluginStoreReleasePageSize)
+	if errReleases != nil {
+		c.JSON(
+			http.StatusBadGateway,
+			gin.H{"error": "plugin_release_versions_failed", "message": errReleases.Error()},
+		)
+		return
+	}
+	entries := make([]pluginStoreReleaseEntry, 0, len(releases))
+	for _, release := range releases {
+		if release.Draft {
+			continue
+		}
+		assetNames := make([]string, 0, len(release.Assets))
+		for _, asset := range release.Assets {
+			if name := strings.TrimSpace(asset.Name); name != "" {
+				assetNames = append(assetNames, pluginStoreText(name))
+			}
+		}
+		entries = append(
+			entries,
+			pluginStoreReleaseEntry{
+				TagName:     pluginStoreText(strings.TrimSpace(release.TagName)),
+				Name:        pluginStoreText(strings.TrimSpace(release.Name)),
+				PublishedAt: pluginStoreText(strings.TrimSpace(release.PublishedAt)),
+				Prerelease:  release.Prerelease,
+				HTMLURL:     pluginStoreText(strings.TrimSpace(release.HTMLURL)),
+				AssetNames:  assetNames,
+			},
+		)
+	}
+	c.JSON(http.StatusOK, entries)
 }
 
 func (h *Handler) InstallPluginFromStore(c *gin.Context) {
@@ -226,7 +316,8 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	installCtx := c.Request.Context()
-	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, _, host := h.pluginStoreSnapshot()
+	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, _, configGeneration :=
+		h.pluginStoreSnapshot()
 	sources, errSources := h.pluginStoreSources(sourceConfigs)
 	if errSources != nil {
 		c.JSON(
@@ -241,31 +332,25 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	if !okPlugin {
 		return
 	}
-	pluginIsBusy := func() bool { return pluginBusy(host, id) }
-	installOptions := pluginstore.InstallOptions{
-		PluginsDir:   pluginsDir,
-		GOOS:         goos,
-		GOARCH:       goarch,
-		PluginLoaded: pluginIsBusy,
-		BeforeWrite: func() error {
-			return preparePluginStoreOverwrite(id, host)
-		},
+	if !validatePluginStoreInstallSource(c, configs, sources, id, source.ID) {
+		return
 	}
+
+	prepareOptions := pluginstore.InstallOptions{GOOS: goos, GOARCH: goarch}
 	var manifest pluginstore.Manifest
-	var result pluginstore.InstallResult
-	var errInstall error
+	var prepared pluginstore.PreparedInstall
+	var errPrepare error
 	switch pluginstore.PluginInstallType(plugin) {
 	case pluginstore.InstallTypeDirect:
-		var errManifest error
-		manifest, errManifest = pluginStoreDirectManifest(source, plugin, requestedVersion)
-		if errManifest != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_manifest_invalid", "message": errManifest.Error()})
+		manifest, errPrepare = pluginStoreDirectManifest(source, plugin, requestedVersion)
+		if errPrepare != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_manifest_invalid", "message": errPrepare.Error()})
 			return
 		}
-		result, errInstall = client.InstallManifest(installCtx, manifest, installOptions)
+		prepared, errPrepare = client.PrepareManifest(installCtx, manifest, prepareOptions)
 	case pluginstore.InstallTypeGitHubRelease:
-		result, errInstall = installPluginStoreGitHubRelease(
-			installCtx, client, plugin, requestedVersion, installOptions,
+		prepared, errPrepare = preparePluginStoreGitHubRelease(
+			installCtx, client, plugin, requestedVersion, prepareOptions,
 		)
 	default:
 		c.JSON(
@@ -276,7 +361,136 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		)
 		return
 	}
+	if errPrepare != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_install_failed", "message": errPrepare.Error()})
+		return
+	}
+
+	h.commitMu.Lock()
+	commitMuHeld := true
+	releaseCommitMu := func() {
+		if commitMuHeld {
+			h.commitMu.Unlock()
+			commitMuHeld = false
+		}
+	}
+	defer releaseCommitMu()
+	rootLock, errRootLock := pluginstore.LockRoot(pluginsDir)
+	if errRootLock != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_install_failed", "message": errRootLock.Error()})
+		return
+	}
+	rootLockHeld := true
+	releaseRootLock := func() {
+		if rootLockHeld {
+			rootLock.Unlock()
+			rootLockHeld = false
+		}
+	}
+	defer releaseRootLock()
+	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "config_unavailable"})
+		return
+	}
+	currentSourceConfigs := append([]string(nil), h.cfg.Plugins.StoreSources...)
+	currentStoreAuth := pluginStoreAuthConfigs(h.cfg.Plugins.StoreAuth)
+	currentProxyURL := strings.TrimSpace(h.cfg.ProxyURL)
+	currentPluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
+	currentSources, errCurrentSources := h.pluginStoreSources(currentSourceConfigs)
+	if errCurrentSources != nil || h.configGeneration != configGeneration ||
+		currentProxyURL != proxyURL || currentPluginsDir != pluginsDir ||
+		!reflect.DeepEqual(currentSourceConfigs, sourceConfigs) ||
+		!reflect.DeepEqual(currentStoreAuth, storeAuth) {
+		h.mu.Unlock()
+		c.JSON(
+			http.StatusConflict,
+			gin.H{
+				"error":   "plugin_store_config_changed",
+				"message": "plugin store configuration changed while the artifact was prepared; retry install",
+			},
+		)
+		return
+	}
+	currentSource, sourceUnchanged := pluginStoreSourceByID(currentSources, source.ID)
+	if !sourceUnchanged || currentSource.URL != source.URL {
+		h.mu.Unlock()
+		c.JSON(
+			http.StatusConflict,
+			gin.H{
+				"error":   "plugin_store_config_changed",
+				"message": "plugin store source changed while the artifact was prepared; retry install",
+			},
+		)
+		return
+	}
+	if !validatePluginStoreInstallSource(c, h.cfg.Plugins.Configs, currentSources, id, source.ID) {
+		h.mu.Unlock()
+		return
+	}
+
+	pluginsEnabled = h.cfg.Plugins.Enabled
+	pluginsDir = currentPluginsDir
+	host := h.pluginHost
+	previousConfig := pluginRuntimeConfigSnapshot(h.cfg)
+	previousGeneration := h.configGeneration
+	var installTransaction *pluginstore.InstallTransaction
+	runtimePrepared := false
+	pluginIsBusy := func() bool { return pluginBusy(host, id) }
+	installOptions := pluginstore.InstallOptions{
+		PluginsDir:   pluginsDir,
+		GOOS:         goos,
+		GOARCH:       goarch,
+		PluginLoaded: pluginIsBusy,
+		BeforePublish: func(path, version string, overwritten bool, digest string) error {
+			transaction, errTransaction := pluginstore.PrepareInstallTransactionLocked(
+				pluginsDir, id, path, version, digest, overwritten, rootLock,
+			)
+			if errTransaction != nil {
+				return errTransaction
+			}
+			installTransaction = transaction
+			return nil
+		},
+		RootLock: rootLock,
+		BeforeWrite: func() error {
+			wasBusy := pluginBusy(host, id)
+			if errOverwrite := preparePluginStoreOverwrite(id, host); errOverwrite != nil {
+				return errOverwrite
+			}
+			runtimePrepared = wasBusy
+			return nil
+		},
+	}
+	rollbackInstall := func(result pluginstore.InstallResult) {
+		if installTransaction != nil {
+			if errRollback := installTransaction.Rollback(result); errRollback != nil {
+				log.WithError(errRollback).WithField("plugin_id", id).Error("pluginstore: failed to roll back artifact")
+			}
+		}
+	}
+	restoreRuntime := func() {
+		if runtimePrepared {
+			previousCommit := ConfigCommit{Config: previousConfig, Generation: previousGeneration}
+			if errSync := h.runPluginRuntimeSyncForCommit(
+				context.Background(), previousCommit, h.pluginRuntimeSync,
+			); errSync != nil {
+				log.WithError(errSync).WithField("plugin_id", id).Error("pluginstore: failed to restore runtime")
+			}
+		}
+	}
+	abortInstall := func(result pluginstore.InstallResult) {
+		rollbackInstall(result)
+		releaseRootLock()
+		releaseCommitMu()
+		restoreRuntime()
+	}
+
+	result, errInstall := prepared.Install(installOptions)
 	if errInstall != nil {
+		h.mu.Unlock()
+		abortInstall(result)
 		if errors.Is(errInstall, pluginstore.ErrLoadedPluginLocked) {
 			c.JSON(
 				http.StatusConflict, gin.H{
@@ -291,15 +505,16 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if manifest.ID == "" {
-		var errManifest error
-		manifest, errManifest = pluginStoreManifestForInstall(source, plugin, result)
-		if errManifest != nil {
+		manifest, errPrepare = pluginStoreManifestForInstall(source, plugin, result)
+		if errPrepare != nil {
+			h.mu.Unlock()
+			abortInstall(result)
 			c.JSON(
 				http.StatusInternalServerError, gin.H{
 					"error": "plugin_manifest_failed",
 					"message": fmt.Sprintf(
 						"plugin file installed at %s but creating store manifest failed: %s", result.Path,
-						errManifest.Error(),
+						errPrepare.Error(),
 					),
 					"path": result.Path,
 				},
@@ -307,39 +522,61 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 			return
 		}
 	}
-	h.mu.Lock()
-	if h.cfg == nil {
+	commit, callback, okCommit := h.mutateConfigLocked(
+		c, func(next *config.Config) error {
+			if errEnable := enablePluginConfig(next, id, manifest); errEnable != nil {
+				return newConfigMutationError(
+					http.StatusInternalServerError,
+					fmt.Sprintf("failed to enable installed plugin: %v", errEnable),
+				)
+			}
+			if installTransaction != nil {
+				_, installedConfig, _ := pluginConfigByID(next.Plugins.Configs, id)
+				fingerprint, errFingerprint := config.PluginInstanceConfigFingerprint(installedConfig)
+				if errFingerprint != nil {
+					return newConfigMutationError(
+						http.StatusInternalServerError,
+						fmt.Sprintf("failed to fingerprint installed plugin config: %v", errFingerprint),
+					)
+				}
+				if errExpected := installTransaction.SetExpectedConfigFingerprint(fingerprint); errExpected != nil {
+					return newConfigMutationError(
+						http.StatusInternalServerError,
+						fmt.Sprintf("failed to journal installed plugin config: %v", errExpected),
+					)
+				}
+			}
+			return nil
+		},
+	)
+	if !okCommit {
 		h.mu.Unlock()
-		c.JSON(
-			http.StatusInternalServerError, gin.H{
-				"error": "config_unavailable",
-				"message": fmt.Sprintf(
-					"plugin file installed at %s but config is unavailable to enable it", result.Path,
-				),
-				"path": result.Path,
-			},
-		)
+		abortInstall(result)
 		return
 	}
-	if errEnable := h.enablePluginConfigLocked(id, manifest); errEnable != nil {
-		h.mu.Unlock()
-		c.JSON(
-			http.StatusInternalServerError, gin.H{
-				"error": "config_update_failed",
-				"message": fmt.Sprintf(
-					"plugin file installed at %s but enabling it in config failed: %s", result.Path, errEnable.Error(),
-				),
-				"path": result.Path,
-			},
-		)
-		return
+	if installTransaction != nil {
+		if errCommitArtifact := installTransaction.Commit(); errCommitArtifact != nil {
+			log.WithError(errCommitArtifact).WithField("plugin_id", id).Warn(
+				"pluginstore: failed to remove install transaction",
+			)
+		}
 	}
-	syncFn, cfgSnapshot, okSave := h.preparePluginMutationSyncLocked(c)
 	h.mu.Unlock()
-	if !okSave {
+	releaseRootLock()
+	releaseCommitMu()
+	runtimeCtx := context.WithoutCancel(c.Request.Context())
+	if !h.notifyConfigCommittedContext(c, runtimeCtx, callback, commit) {
 		return
 	}
-	runPluginRuntimeSync(syncFn, cfgSnapshot)
+	if callback == nil {
+		if errSync := h.runPluginRuntimeSyncForCommit(
+			runtimeCtx, commit, h.pluginRuntimeSync,
+		); errSync != nil {
+			log.WithError(errSync).WithField("plugin_id", id).Error("pluginstore: installed plugin runtime sync failed")
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "plugin_runtime_sync_failed"})
+			return
+		}
+	}
 	log.WithFields(
 		log.Fields{
 			"plugin_id":    result.ID,
@@ -378,16 +615,56 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
-	h.mu.Lock()
+	h.commitMu.Lock()
+	commitMuHeld := true
+	releaseCommitMu := func() {
+		if commitMuHeld {
+			h.commitMu.Unlock()
+			commitMuHeld = false
+		}
+	}
+	defer releaseCommitMu()
+
+	h.mu.RLock()
 	if h.cfg == nil {
-		h.mu.Unlock()
+		h.mu.RUnlock()
 		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 		return
 	}
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
-	item, configured := h.cfg.Plugins.Configs[id]
+	_, item, configured := pluginConfigByID(h.cfg.Plugins.Configs, id)
 	host := h.pluginHost
-	h.mu.Unlock()
+	h.mu.RUnlock()
+	var runtimeIdentity pluginhost.PluginRuntimeIdentity
+	if host != nil {
+		runtimeIdentity = host.PluginRuntimeIdentity(id)
+	}
+
+	rootLock, errRootLock := pluginstore.LockRoot(pluginsDir)
+	if errRootLock != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_delete_failed", "message": errRootLock.Error()})
+		return
+	}
+	rootLockHeld := true
+	releaseRootLock := func() {
+		if rootLockHeld {
+			rootLock.Unlock()
+			rootLockHeld = false
+		}
+	}
+	acquireRootLock := func() error {
+		if rootLockHeld {
+			return nil
+		}
+		lock, errLock := pluginstore.LockRoot(pluginsDir)
+		if errLock != nil {
+			return errLock
+		}
+		rootLock = lock
+		rootLockHeld = true
+		return nil
+	}
+	defer releaseRootLock()
 
 	var desiredVersions map[string]string
 	if configured {
@@ -398,59 +675,191 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_discovery_failed", "message": errPath.Error()})
 		return
 	}
-	if path == "" && !configured {
+	artifactPaths, errArtifacts := pluginstore.FindPluginArtifacts(pluginsDir, id)
+	if errArtifacts != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": "plugin_discovery_failed", "message": errArtifacts.Error()},
+		)
+		return
+	}
+	if path == "" && len(artifactPaths) > 0 {
+		path = artifactPaths[0]
+	}
+	if len(artifactPaths) == 0 && !configured {
 		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 		return
 	}
 
+	deletionTransaction, errPrepare := pluginstore.PrepareDeletionTransactionLocked(
+		pluginsDir,
+		id,
+		artifactPaths,
+		rootLock,
+	)
+	if errPrepare != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": "plugin_delete_failed", "message": errPrepare.Error()},
+		)
+		return
+	}
+	defer deletionTransaction.Deactivate()
+
 	runtimeUnloaded := false
-	if pluginBusy(host, id) {
-		runtimeUnloaded = host.UnloadPlugin(id)
-		if !runtimeUnloaded && pluginBusy(host, id) {
+	rollbackDelete := func() error {
+		var rollbackErrors []error
+		if errLock := acquireRootLock(); errLock != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("lock root for rollback: %w", errLock))
+		} else if errRollback := deletionTransaction.Rollback(); errRollback != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore deleted artifacts: %w", errRollback))
+		}
+		releaseRootLock()
+		releaseCommitMu()
+		return errors.Join(rollbackErrors...)
+	}
+	respondRollbackFailure := func(status int, code string, cause error) {
+		if errRollback := rollbackDelete(); errRollback != nil {
 			c.JSON(
-				http.StatusConflict, gin.H{
-					"error":            "plugin_delete_requires_restart",
-					"message":          "loaded plugin cannot be deleted while the server is running",
+				http.StatusInternalServerError,
+				gin.H{
+					"error":            "plugin_delete_rollback_failed",
+					"message":          errors.Join(cause, errRollback).Error(),
 					"restart_required": true,
 				},
 			)
 			return
 		}
+		c.JSON(status, gin.H{"error": code, "message": cause.Error()})
 	}
-
-	fileDeleted := false
-	if path != "" {
-		if errRemove := os.Remove(path); errRemove != nil {
-			if !errors.Is(errRemove, os.ErrNotExist) {
-				c.JSON(
-					http.StatusInternalServerError,
-					gin.H{"error": "plugin_delete_failed", "message": errRemove.Error()},
-				)
-				return
-			}
-		} else {
-			fileDeleted = true
+	commitDelete := func() error {
+		if errLock := acquireRootLock(); errLock != nil {
+			return errLock
 		}
+		defer releaseRootLock()
+		return deletionTransaction.Commit()
 	}
-
-	var syncFn func(context.Context, *config.Config)
-	var cfgSnapshot *config.Config
+	if errHide := deletionTransaction.Hide(); errHide != nil {
+		respondRollbackFailure(http.StatusInternalServerError, "plugin_delete_failed", errHide)
+		return
+	}
+	remainingArtifacts, errRescan := pluginstore.FindPluginArtifacts(pluginsDir, id)
+	if errRescan != nil || len(remainingArtifacts) > 0 {
+		if errRescan == nil {
+			errRescan = fmt.Errorf("plugin artifact appeared during deletion: %s", remainingArtifacts[0])
+		}
+		respondRollbackFailure(http.StatusConflict, "plugin_delete_conflict", errRescan)
+		return
+	}
+	if errMark := deletionTransaction.MarkCommitted(); errMark != nil {
+		respondRollbackFailure(http.StatusInternalServerError, "plugin_delete_failed", errMark)
+		return
+	}
+	fileDeleted := deletionTransaction.Removed()
+	var runtimeSyncErr error
+	var runtimeUnloadErr error
 	if configured {
 		h.mu.Lock()
-		delete(h.cfg.Plugins.Configs, id)
-		var okSave bool
-		syncFn, cfgSnapshot, okSave = h.preparePluginMutationSyncLocked(c)
+		commit, callback, okCommit := h.mutateConfigLocked(
+			c, func(next *config.Config) error {
+				deletePluginConfigByID(next.Plugins.Configs, id)
+				return nil
+			},
+		)
 		h.mu.Unlock()
-		if !okSave {
+		if !okCommit {
+			if errRollback := rollbackDelete(); errRollback != nil {
+				log.WithError(errRollback).WithField("plugin_id", id).Error(
+					"pluginstore: failed to rollback deletion after config persistence failure",
+				)
+			}
 			return
 		}
+		releaseRootLock()
+		releaseCommitMu()
+		commit.DeferPluginRuntimeSync = true
+		if callback != nil && h.configCommitCurrent(commit) {
+			runtimeCtx := context.WithoutCancel(c.Request.Context())
+			runtimeSyncErr = invokeConfigCommitted(runtimeCtx, callback, commit)
+		}
 	} else {
-		h.mu.Lock()
-		syncFn = h.pluginRuntimeSync
-		cfgSnapshot = pluginRuntimeConfigSnapshot(h.cfg)
-		h.mu.Unlock()
+		releaseRootLock()
+		releaseCommitMu()
 	}
-	runPluginRuntimeSync(syncFn, cfgSnapshot)
+
+	h.commitMu.Lock()
+	commitMuHeld = true
+	h.mu.RLock()
+	currentPluginsDir := ""
+	configuredAgain := false
+	if h.cfg != nil {
+		currentPluginsDir = normalizedPluginsDir(h.cfg.Plugins.Dir)
+		_, _, configuredAgain = pluginConfigByID(h.cfg.Plugins.Configs, id)
+	}
+	h.mu.RUnlock()
+	if currentPluginsDir != pluginsDir || configuredAgain {
+		errRollback := rollbackDelete()
+		if errRollback != nil {
+			c.JSON(
+				http.StatusInternalServerError,
+				gin.H{
+					"error":            "plugin_delete_rollback_failed",
+					"message":          errRollback.Error(),
+					"restart_required": true,
+				},
+			)
+			return
+		}
+		c.JSON(
+			http.StatusConflict,
+			gin.H{"error": "plugin_delete_superseded", "message": "plugin configuration changed during deletion"},
+		)
+		return
+	}
+	errCommitArtifact := commitDelete()
+	if errCommitArtifact == nil && pluginBusy(host, id) {
+		runtimeUnloaded, runtimeUnloadErr = host.UnloadPluginIfCurrentWithError(runtimeIdentity)
+	}
+	releaseCommitMu()
+	if errCommitArtifact != nil {
+		log.WithError(errCommitArtifact).WithField("plugin_id", id).Error(
+			"pluginstore: failed to commit artifact deletion",
+		)
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{
+				"error":            "plugin_delete_failed",
+				"message":          errors.Join(errCommitArtifact, runtimeSyncErr, runtimeUnloadErr).Error(),
+				"restart_required": runtimeUnloadErr != nil || pluginBusy(host, id),
+			},
+		)
+		return
+	}
+	if runtimeUnloadErr != nil || pluginBusy(host, id) {
+		c.JSON(
+			http.StatusConflict,
+			gin.H{
+				"error": "plugin_delete_requires_restart",
+				"message": errors.Join(
+					fmt.Errorf("plugin deletion committed but the loaded runtime could not be fully released"),
+					runtimeUnloadErr,
+				).Error(),
+				"restart_required": true,
+			},
+		)
+		return
+	}
+	if runtimeSyncErr != nil {
+		c.JSON(
+			http.StatusServiceUnavailable,
+			gin.H{
+				"error":            "plugin_runtime_sync_failed",
+				"message":          runtimeSyncErr.Error(),
+				"restart_required": false,
+			},
+		)
+		return
+	}
 
 	c.JSON(
 		http.StatusOK, gin.H{
@@ -492,27 +901,27 @@ func pluginStoreDirectManifest(
 	return pluginstore.Manifest{}, fmt.Errorf("direct plugin version %q not found", version)
 }
 
-func installPluginStoreGitHubRelease(
+func preparePluginStoreGitHubRelease(
 	ctx context.Context,
 	client pluginstore.Client,
 	plugin pluginstore.Plugin,
 	requestedVersion string,
 	options pluginstore.InstallOptions,
-) (pluginstore.InstallResult, error) {
+) (pluginstore.PreparedInstall, error) {
 	version := normalizePluginStoreRequestedVersion(requestedVersion)
 	if version == "" {
-		return client.Install(ctx, plugin, options)
+		return client.Prepare(ctx, plugin, options)
 	}
 	tags := pluginStoreReleaseTagCandidates(requestedVersion)
 	errs := make([]error, 0, len(tags))
 	for _, tag := range tags {
-		result, errInstall := client.InstallVersion(ctx, plugin, tag, version, options)
-		if errInstall == nil {
-			return result, nil
+		prepared, errPrepare := client.PrepareVersion(ctx, plugin, tag, version, options)
+		if errPrepare == nil {
+			return prepared, nil
 		}
-		errs = append(errs, fmt.Errorf("%s: %w", tag, errInstall))
+		errs = append(errs, fmt.Errorf("%s: %w", tag, errPrepare))
 	}
-	return pluginstore.InstallResult{}, fmt.Errorf("install release by tag: %w", errors.Join(errs...))
+	return pluginstore.PreparedInstall{}, fmt.Errorf("prepare release by tag: %w", errors.Join(errs...))
 }
 
 func pluginStoreManifestForInstall(
@@ -590,11 +999,12 @@ func normalizePluginStoreRequestedVersion(version string) string {
 	return version
 }
 
-// enablePluginConfigLocked sets plugins.configs.<id>.enabled and store while
-// preserving the rest of the plugin's raw configuration. Callers must hold h.mu.
-func (h *Handler) enablePluginConfigLocked(id string, storeManifest pluginstore.Manifest) error {
-	ensurePluginConfigMap(h.cfg)
-	node := pluginConfigNode(h.cfg.Plugins.Configs[id])
+// enablePluginConfig sets plugins.configs.<id>.enabled and store while
+// preserving the rest of the plugin's raw configuration.
+func enablePluginConfig(cfg *config.Config, id string, storeManifest pluginstore.Manifest) error {
+	ensurePluginConfigMap(cfg)
+	_, current, _ := pluginConfigByID(cfg.Plugins.Configs, id)
+	node := pluginConfigNode(current)
 	storeNode, errStoreNode := pluginStoreManifestYAMLNode(storeManifest)
 	if errStoreNode != nil {
 		return errStoreNode
@@ -605,7 +1015,7 @@ func (h *Handler) enablePluginConfigLocked(id string, storeManifest pluginstore.
 	if errConfig != nil {
 		return fmt.Errorf("decode plugin config: %w", errConfig)
 	}
-	h.cfg.Plugins.Configs[id] = updated
+	setPluginConfigByID(cfg.Plugins.Configs, id, updated)
 	return nil
 }
 
@@ -625,25 +1035,47 @@ func (h *Handler) pluginStoreSnapshot() (
 	[]pluginstore.AuthConfig,
 	map[string]config.PluginInstanceConfig,
 	pluginRuntimeHost,
+	uint64,
 ) {
 	if h == nil {
-		return false, "plugins", "", nil, nil, map[string]config.PluginInstanceConfig{}, nil
+		return false, "plugins", "", nil, nil, map[string]config.PluginInstanceConfig{}, nil, 0
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.cfg == nil {
-		return false, "plugins", "", nil, nil, map[string]config.PluginInstanceConfig{}, nil
+		return false, "plugins", "", nil, nil, map[string]config.PluginInstanceConfig{}, nil, 0
 	}
 	pluginsEnabled := h.cfg.Plugins.Enabled
 	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
 	proxyURL := strings.TrimSpace(h.cfg.ProxyURL)
 	sourceConfigs := append([]string(nil), h.cfg.Plugins.StoreSources...)
-	storeAuth := append([]pluginstore.AuthConfig(nil), h.cfg.Plugins.StoreAuth...)
+	storeAuth := pluginStoreAuthConfigs(h.cfg.Plugins.StoreAuth)
 	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg.Plugins.Configs))
 	for id, item := range h.cfg.Plugins.Configs {
 		configs[id] = item
 	}
-	return pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, h.pluginHost
+	return pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, h.pluginHost, h.configGeneration
+}
+
+func pluginStoreAuthConfigs(auth []sdkpluginstore.AuthConfig) []pluginstore.AuthConfig {
+	if len(auth) == 0 {
+		return nil
+	}
+	out := make([]pluginstore.AuthConfig, len(auth))
+	for i := range auth {
+		out[i] = pluginstore.AuthConfig{
+			Match:          auth[i].Match,
+			ApplyTo:        append([]string(nil), auth[i].ApplyTo...),
+			Type:           auth[i].Type,
+			TokenEnv:       auth[i].TokenEnv,
+			UsernameEnv:    auth[i].UsernameEnv,
+			PasswordEnv:    auth[i].PasswordEnv,
+			HeaderName:     auth[i].HeaderName,
+			HeaderValueEnv: auth[i].HeaderValueEnv,
+			AllowInsecure:  auth[i].AllowInsecure,
+		}
+	}
+	return out
 }
 
 func (h *Handler) pluginStoreSources(sourceConfigs []string) ([]pluginstore.Source, error) {
@@ -790,6 +1222,15 @@ func sourcedPluginSources(plugins []sourcedPlugin) []pluginstore.Source {
 		sources = append(sources, item.source)
 	}
 	return sources
+}
+
+func pluginStoreSourceByID(sources []pluginstore.Source, id string) (pluginstore.Source, bool) {
+	for _, source := range sources {
+		if source.ID == id {
+			return source, true
+		}
+	}
+	return pluginstore.Source{}, false
 }
 
 func pluginStoreText(value string) string {
@@ -948,6 +1389,7 @@ func (h *Handler) latestPluginVersion(
 }
 
 func pluginFilePath(pluginsDir string, id string, desiredVersions ...map[string]string) (string, error) {
+	id = pluginstore.CanonicalPluginID(id)
 	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir, desiredVersions...)
 	if errDiscover != nil {
 		return "", errDiscover
@@ -982,21 +1424,24 @@ func pluginLocalStatuses(
 		statuses[file.ID] = status
 	}
 	for id, item := range configs {
+		id = pluginstore.CanonicalPluginID(id)
 		status := statuses[id]
 		status.Configured = true
 		status.Enabled = pluginInstanceEnabled(item)
+		status.InstalledSourceID, status.InstalledSourceURL, status.StoreManaged = pluginStoreConfiguredSource(item)
 		statuses[id] = status
 	}
 	if host != nil {
 		for _, info := range host.RegisteredPlugins() {
-			status := statuses[info.ID]
+			id := pluginstore.CanonicalPluginID(info.ID)
+			status := statuses[id]
 			status.Installed = true
 			status.Registered = true
 			status.InstalledVersion = strings.TrimSpace(info.Metadata.Version)
-			if _, configured := configs[info.ID]; !configured && !status.Enabled {
+			if _, _, configured := pluginConfigByID(configs, id); !configured && !status.Enabled {
 				status.Enabled = false
 			}
-			statuses[info.ID] = status
+			statuses[id] = status
 		}
 	}
 	for id, status := range statuses {
@@ -1006,13 +1451,127 @@ func pluginLocalStatuses(
 	return statuses, nil
 }
 
+func pluginStoreConfiguredSource(item config.PluginInstanceConfig) (sourceID string, sourceURL string, managed bool) {
+	storeNode := pluginStoreConfigNode(item)
+	if storeNode == nil {
+		return "", "", false
+	}
+	var manifest pluginstore.Manifest
+	if errDecode := storeNode.Decode(&manifest); errDecode != nil {
+		return "", "", true
+	}
+	return strings.TrimSpace(manifest.SourceID), strings.TrimSpace(manifest.SourceURL), true
+}
+
+func pluginStoreResolveInstalledSource(status pluginLocalStatus, sources []pluginstore.Source) (string, bool) {
+	sourceID := strings.TrimSpace(status.InstalledSourceID)
+	sourceURL := strings.TrimSpace(status.InstalledSourceURL)
+	if sourceID != "" {
+		for _, source := range sources {
+			if strings.TrimSpace(source.ID) != sourceID {
+				continue
+			}
+			if sourceURL != "" && strings.TrimSpace(source.URL) != sourceURL {
+				return "", false
+			}
+			return sourceID, true
+		}
+		return sourceID, true
+	}
+	if sourceURL == "" {
+		return "", false
+	}
+	for _, source := range sources {
+		if strings.TrimSpace(source.URL) == sourceURL {
+			return strings.TrimSpace(source.ID), true
+		}
+	}
+	return "", false
+}
+
+func pluginStoreInstallSourceStatus(
+	status pluginLocalStatus,
+	sources []pluginstore.Source,
+	entrySourceID string,
+	sourceCount int,
+) (installedSourceID string, sourceStatus string, allowUpdate bool) {
+	if !status.Installed && !status.Configured && !status.Registered {
+		return "", "", true
+	}
+	if sourceID, known := pluginStoreResolveInstalledSource(status, sources); known {
+		if sourceID == strings.TrimSpace(entrySourceID) {
+			return sourceID, "matched", true
+		}
+		return sourceID, "different", false
+	}
+	if status.StoreManaged || sourceCount > 1 {
+		return "", "unknown", false
+	}
+	return "", "assumed", true
+}
+
+func validatePluginStoreInstallSource(
+	c *gin.Context,
+	configs map[string]config.PluginInstanceConfig,
+	sources []pluginstore.Source,
+	id string,
+	requestedSourceID string,
+) bool {
+	canonicalID := pluginstore.CanonicalPluginID(id)
+	matchingConfigs := 0
+	for configuredID := range configs {
+		if pluginstore.CanonicalPluginID(configuredID) == canonicalID {
+			matchingConfigs++
+		}
+	}
+	if matchingConfigs > 1 {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "plugin_config_identity_conflict",
+			"message": "plugin configuration contains duplicate case-insensitive ids",
+		})
+		return false
+	}
+	_, item, configured := pluginConfigByID(configs, canonicalID)
+	if !configured {
+		return true
+	}
+	installedSourceID, installedSourceURL, managed := pluginStoreConfiguredSource(item)
+	if !managed {
+		return true
+	}
+	status := pluginLocalStatus{
+		StoreManaged:       true,
+		InstalledSourceID:  installedSourceID,
+		InstalledSourceURL: installedSourceURL,
+	}
+	resolvedSourceID, known := pluginStoreResolveInstalledSource(status, sources)
+	if !known {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":               "plugin_store_installed_source_unknown",
+			"message":             "installed plugin source cannot be verified; uninstall it before reinstalling from the store",
+			"requested_source_id": strings.TrimSpace(requestedSourceID),
+		})
+		return false
+	}
+	if resolvedSourceID != strings.TrimSpace(requestedSourceID) {
+		c.JSON(http.StatusConflict, gin.H{
+			"error":               "plugin_store_source_conflict",
+			"message":             "installed plugin belongs to a different store source; uninstall it before switching sources",
+			"installed_source_id": resolvedSourceID,
+			"requested_source_id": strings.TrimSpace(requestedSourceID),
+		})
+		return false
+	}
+	return true
+}
+
 func pluginStoreDesiredVersions(configs map[string]config.PluginInstanceConfig) map[string]string {
 	if len(configs) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(configs))
 	for id, item := range configs {
-		id = strings.TrimSpace(id)
+		id = pluginstore.CanonicalPluginID(id)
 		version := pluginStoreDesiredVersion(item)
 		if id == "" || version == "" {
 			continue
@@ -1071,7 +1630,11 @@ func preparePluginStoreOverwrite(id string, host pluginRuntimeHost) error {
 	if !pluginBusy(host, id) {
 		return nil
 	}
-	if host.UnloadPlugin(id) || !pluginBusy(host, id) {
+	unloaded, errUnload := host.UnloadPluginWithError(id)
+	if errUnload != nil {
+		return errors.Join(pluginstore.ErrLoadedPluginLocked, errUnload)
+	}
+	if unloaded || !pluginBusy(host, id) {
 		return nil
 	}
 	return pluginstore.ErrLoadedPluginLocked

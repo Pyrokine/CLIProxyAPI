@@ -48,7 +48,7 @@ func ManifestFromPlugin(source Source, plugin Plugin) (Manifest, error) {
 	case InstallTypeDirect:
 		return Manifest{
 			SchemaVersion: SchemaVersionV2,
-			ID:            strings.TrimSpace(plugin.ID),
+			ID:            CanonicalPluginID(plugin.ID),
 			Version:       strings.TrimSpace(plugin.Version),
 			SourceID:      strings.TrimSpace(source.ID),
 			SourceName:    strings.TrimSpace(source.Name),
@@ -63,7 +63,7 @@ func ManifestFromPlugin(source Source, plugin Plugin) (Manifest, error) {
 }
 
 func manifestFromPlugin(source Source, plugin Plugin, base Manifest) Manifest {
-	base.ID = strings.TrimSpace(plugin.ID)
+	base.ID = CanonicalPluginID(plugin.ID)
 	base.Name = strings.TrimSpace(plugin.Name)
 	base.Description = strings.TrimSpace(plugin.Description)
 	base.Author = strings.TrimSpace(plugin.Author)
@@ -79,7 +79,7 @@ func manifestFromPlugin(source Source, plugin Plugin, base Manifest) Manifest {
 
 func (m Manifest) Plugin() Plugin {
 	return Plugin{
-		ID:          strings.TrimSpace(m.ID),
+		ID:          CanonicalPluginID(m.ID),
 		Name:        strings.TrimSpace(m.Name),
 		Description: strings.TrimSpace(m.Description),
 		Author:      strings.TrimSpace(m.Author),

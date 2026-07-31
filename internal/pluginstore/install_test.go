@@ -14,7 +14,21 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestReadTargetLibraryRejectsOversizedUncompressedEntry(t *testing.T) {
+	archive := makeZip(t, map[string]string{"sample-provider.so": "library"})
+	reader, errReader := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if errReader != nil {
+		t.Fatal(errReader)
+	}
+	reader.File[0].UncompressedSize64 = uint64(maxPluginLibraryBytes) + 1
+	if _, _, errRead := readTargetLibrary(reader, "sample-provider", "1.0.0", "linux"); errRead == nil ||
+		!strings.Contains(errRead.Error(), "plugin library exceeds") {
+		t.Fatalf("readTargetLibrary() error = %v, want uncompressed size rejection", errRead)
+	}
+}
 
 func TestInstallBlocksLoadedWindowsPlugin(t *testing.T) {
 	t.Parallel()
@@ -134,6 +148,59 @@ func TestInstallArchivePreparesLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveStagesAfterLoadedWindowsPluginIsReleased(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	targetDir := filepath.Join(root, "windows", "amd64")
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	targetPath := filepath.Join(targetDir, "sample-provider-v0.1.0.dll")
+	if errWrite := os.WriteFile(targetPath, []byte("old"), 0o644); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	loaded := true
+	order := make([]string, 0, 3)
+
+	_, errInstall := InstallArchive(
+		makeZip(
+			t, map[string]string{
+				"sample-provider.dll": "new",
+			},
+		), testPlugin(), InstallOptions{
+			PluginsDir: root,
+			GOOS:       "windows",
+			GOARCH:     "amd64",
+			PluginLoaded: func() bool {
+				order = append(order, "loaded-check")
+				return loaded
+			},
+			BeforeWrite: func() error {
+				order = append(order, "runtime-release")
+				loaded = false
+				return nil
+			},
+			BeforeReplace: func(path string) error {
+				order = append(order, "artifact-stage")
+				if loaded {
+					t.Fatal("artifact was staged while the plugin remained loaded")
+				}
+				if path != targetPath {
+					t.Fatalf("BeforeReplace path = %q, want %q", path, targetPath)
+				}
+				return nil
+			},
+		},
+	)
+	if errInstall != nil {
+		t.Fatalf("InstallArchive() error = %v", errInstall)
+	}
+	if got := strings.Join(order, ","); got != "runtime-release,loaded-check,artifact-stage" {
+		t.Fatalf("callback order = %q", got)
+	}
+}
+
 func TestInstallArchiveSkipsIdenticalLoadedWindowsPlugin(t *testing.T) {
 	t.Parallel()
 
@@ -185,6 +252,84 @@ func TestInstallArchiveSkipsIdenticalLoadedWindowsPlugin(t *testing.T) {
 	}
 }
 
+func TestInstallArchiveWaitsForPluginRootLock(t *testing.T) {
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "linux", "amd64", "sample-v1.0.0.so")
+	if errMkdir := os.MkdirAll(filepath.Dir(targetPath), 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	if errWrite := os.WriteFile(targetPath, []byte("old"), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	rootLock, errLock := LockRoot(root)
+	if errLock != nil {
+		t.Fatalf("LockRoot() error = %v", errLock)
+	}
+	archive := makeZip(t, map[string]string{"sample.so": "plugin"})
+	entered := make(chan struct{}, 1)
+	finished := make(chan error, 1)
+	go func() {
+		_, errInstall := InstallArchive(
+			archive,
+			Plugin{ID: "sample", Version: "1.0.0"},
+			InstallOptions{
+				PluginsDir: root,
+				GOOS:       "linux",
+				GOARCH:     "amd64",
+				BeforeWrite: func() error {
+					entered <- struct{}{}
+					return nil
+				},
+			},
+		)
+		finished <- errInstall
+	}()
+	select {
+	case <-entered:
+		t.Fatal("InstallArchive entered the mutation while the root lock was held")
+	case <-time.After(20 * time.Millisecond):
+	}
+	rootLock.Unlock()
+	select {
+	case errInstall := <-finished:
+		if errInstall != nil {
+			t.Fatalf("InstallArchive() error = %v", errInstall)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("InstallArchive did not finish after releasing the root lock")
+	}
+}
+
+func TestInstallArchiveRejectsPendingDeletion(t *testing.T) {
+	root := t.TempDir()
+	paths := writeDeletionTestArtifacts(t, root, "sample", "1.0.0")
+	transaction, errPrepare := PrepareDeletionTransaction(root, "sample", paths)
+	if errPrepare != nil {
+		t.Fatalf("PrepareDeletionTransaction() error = %v", errPrepare)
+	}
+	if errHide := transaction.Hide(); errHide != nil {
+		t.Fatalf("Hide() error = %v", errHide)
+	}
+	transaction.Deactivate()
+	t.Cleanup(func() {
+		if errRollback := transaction.Rollback(); errRollback != nil {
+			t.Fatalf("Rollback() error = %v", errRollback)
+		}
+	})
+
+	_, errInstall := InstallArchive(
+		makeZip(t, map[string]string{"sample.so": "replacement"}),
+		Plugin{ID: "sample", Version: "1.0.0"},
+		InstallOptions{PluginsDir: root, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH},
+	)
+	if !errors.Is(errInstall, ErrPendingDeletion) {
+		t.Fatalf("InstallArchive() error = %v, want ErrPendingDeletion", errInstall)
+	}
+	if _, errStat := os.Stat(paths[0]); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("pending deletion target was republished: %v", errStat)
+	}
+}
+
 func TestInstallArchiveWritesPlatformPlugin(t *testing.T) {
 	t.Parallel()
 
@@ -210,6 +355,106 @@ func TestInstallArchiveWritesPlatformPlugin(t *testing.T) {
 	}
 	if string(data) != "library-data" {
 		t.Fatalf("installed data = %q", data)
+	}
+}
+
+func TestInstallArchiveRejectsLinkedTargetFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated Windows privileges")
+	}
+	root := t.TempDir()
+	targetDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
+	if errMkdir := os.MkdirAll(targetDir, 0o755); errMkdir != nil {
+		t.Fatalf("MkdirAll() error = %v", errMkdir)
+	}
+	outside := filepath.Join(t.TempDir(), "outside"+pluginExtension(runtime.GOOS))
+	if errWrite := os.WriteFile(outside, []byte("same"), 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	target := filepath.Join(targetDir, "sample-v1.0.0"+pluginExtension(runtime.GOOS))
+	if errSymlink := os.Symlink(outside, target); errSymlink != nil {
+		t.Fatalf("Symlink() error = %v", errSymlink)
+	}
+
+	_, errInstall := InstallArchive(
+		makeZip(t, map[string]string{"sample" + pluginExtension(runtime.GOOS): "same"}),
+		Plugin{ID: "sample", Version: "1.0.0"},
+		InstallOptions{PluginsDir: root, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH},
+	)
+	if errInstall == nil {
+		t.Fatal("InstallArchive() accepted a linked target file")
+	}
+	data, errRead := os.ReadFile(outside)
+	if errRead != nil || string(data) != "same" {
+		t.Fatalf("outside file = %q, error = %v", data, errRead)
+	}
+}
+
+func TestInstallArchiveRejectsLinkedPlatformDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reparse-point coverage runs in the Windows target suite")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	if errSymlink := os.Symlink(outside, filepath.Join(root, "darwin")); errSymlink != nil {
+		t.Fatalf("Symlink() error = %v", errSymlink)
+	}
+	_, errInstall := InstallArchive(
+		makeZip(t, map[string]string{"sample-provider.dylib": "library-data"}),
+		testPlugin(),
+		InstallOptions{PluginsDir: root, GOOS: "darwin", GOARCH: "arm64"},
+	)
+	if errInstall == nil {
+		t.Fatal("InstallArchive() accepted a linked platform directory")
+	}
+	outsideTarget := filepath.Join(outside, "arm64", "sample-provider-v0.1.0.dylib")
+	if _, errStat := os.Stat(outsideTarget); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("outside target was created: %v", errStat)
+	}
+}
+
+func TestInstallArchiveReturnsVisiblePathForRollbackAfterWriteFailure(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeFailure := errors.New("directory sync failed")
+	result, errInstall := InstallArchive(
+		makeZip(
+			t, map[string]string{
+				"sample-provider.dylib": "library-data",
+			},
+		),
+		testPlugin(),
+		InstallOptions{
+			PluginsDir: root,
+			GOOS:       "darwin",
+			GOARCH:     "arm64",
+			writeFile: func(targetPath string, data []byte, mode os.FileMode) error {
+				if errMkdir := os.MkdirAll(filepath.Dir(targetPath), 0o755); errMkdir != nil {
+					return errMkdir
+				}
+				if errWrite := os.WriteFile(targetPath, data, mode); errWrite != nil {
+					return errWrite
+				}
+				return writeFailure
+			},
+		},
+	)
+	if !errors.Is(errInstall, writeFailure) {
+		t.Fatalf("InstallArchive() error = %v, want %v", errInstall, writeFailure)
+	}
+	if result.Path == "" || result.Overwritten {
+		t.Fatalf("result = %#v, want new visible target path", result)
+	}
+	if _, errStat := os.Stat(result.Path); errStat != nil {
+		t.Fatalf("visible target missing before rollback: %v", errStat)
+	}
+	transaction := &ArtifactTransaction{}
+	if errRollback := transaction.Rollback(result); errRollback != nil {
+		t.Fatalf("Rollback() error = %v", errRollback)
+	}
+	if _, errStat := os.Stat(result.Path); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("target remains after rollback: %v", errStat)
 	}
 }
 
@@ -657,6 +902,46 @@ func TestInstallDirectDownloadsMatchingArtifactWithBearerAuth(t *testing.T) {
 	}
 	if string(data) != "library-data" {
 		t.Fatalf("installed data = %q", data)
+	}
+}
+
+func TestPrepareDirectDoesNotChangePluginDirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	archiveData := makeZip(t, map[string]string{"sample-provider.so": "library-data"})
+	checksum := sha256.Sum256(archiveData)
+	artifactURL := "https://downloads.example/sample-provider.zip"
+	client := Client{HTTPClient: mapHTTPDoer{artifactURL: archiveData}}
+	plugin := testPlugin()
+	plugin.Version = "0.4.0"
+	plugin.Install = InstallPlan{
+		Type: InstallTypeDirect,
+		Artifacts: []Artifact{
+			{
+				GOOS:   "linux",
+				GOARCH: "amd64",
+				URL:    artifactURL,
+				SHA256: hex.EncodeToString(checksum[:]),
+			},
+		},
+	}
+	options := InstallOptions{PluginsDir: root, GOOS: "linux", GOARCH: "amd64"}
+
+	prepared, errPrepare := client.Prepare(context.Background(), plugin, options)
+	if errPrepare != nil {
+		t.Fatalf("Prepare() error = %v", errPrepare)
+	}
+	targetPath := filepath.Join(root, "linux", "amd64", "sample-provider-v0.4.0.so")
+	if _, errStat := os.Stat(targetPath); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("Prepare() changed plugin directory: %v", errStat)
+	}
+	result, errInstall := prepared.Install(options)
+	if errInstall != nil {
+		t.Fatalf("PreparedInstall.Install() error = %v", errInstall)
+	}
+	if result.Path != targetPath || result.InstallType != InstallTypeDirect {
+		t.Fatalf("result = %#v, want direct install at %s", result, targetPath)
 	}
 }
 

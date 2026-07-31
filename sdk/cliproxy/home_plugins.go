@@ -19,26 +19,26 @@ import (
 
 const homePluginStatusReportTimeout = 10 * time.Second
 
-func (s *Service) syncHomePlugins(ctx context.Context, cfg *config.Config) (
-	homeplugins.SyncReport,
+func (s *Service) prepareHomePlugins(ctx context.Context, cfg *config.Config) (
+	homeplugins.PreparedSync,
 	string,
 	bool,
 	error,
 ) {
 	if s == nil || cfg == nil || !cfg.Home.Enabled {
-		return homeplugins.SyncReport{}, "", false, nil
+		return homeplugins.PreparedSync{}, "", false, nil
 	}
 	syncKey := homePluginSyncKey(cfg)
 	if syncKey != "" {
 		s.homePluginSyncMu.Lock()
 		if s.homePluginSyncKey == syncKey {
 			s.homePluginSyncMu.Unlock()
-			return homeplugins.SyncReport{}, syncKey, false, nil
+			return homeplugins.PreparedSync{}, syncKey, false, nil
 		}
 		s.homePluginSyncMu.Unlock()
 	}
-	report, errSync := homeplugins.SyncWithReport(ctx, cfg, s.pluginHost)
-	return report, syncKey, true, errSync
+	prepared, errPrepare := homeplugins.PrepareSyncWithReport(ctx, cfg)
+	return prepared, syncKey, true, errPrepare
 }
 
 func (s *Service) markHomePluginsSynced(syncKey string) {
@@ -96,7 +96,17 @@ func (s *Service) processHomePluginTasks(ctx context.Context, cfg *config.Config
 		if !strings.EqualFold(strings.TrimSpace(task.Operation), "delete") {
 			continue
 		}
-		report := s.processHomePluginDeleteTask(ctx, cfg, task)
+		var report homeplugins.SyncReport
+		errApply := s.applyExternalConfigUpdate(
+			func() error {
+				report = s.processHomePluginDeleteTask(ctx, cfg, task)
+				return nil
+			},
+		)
+		if errApply != nil {
+			log.Warnf("failed to sequence home plugin delete task %d for %s: %v", task.ID, task.PluginID, errApply)
+			continue
+		}
 		if !report.OK && strings.TrimSpace(report.Error) != "" {
 			log.Warnf("failed to process home plugin delete task %d for %s: %v", task.ID, task.PluginID, report.Error)
 		}

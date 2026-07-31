@@ -64,6 +64,25 @@ type PluginInstallStatus struct {
 	Error         string `json:"error,omitempty"`
 }
 
+type preparedPluginInstall struct {
+	status            PluginInstallStatus
+	artifact          sdkpluginstore.PreparedInstall
+	configFingerprint string
+	prepareError      error
+}
+
+// PreparedSync contains downloaded and verified Home plugin artifacts that have
+// not changed the plugin directory.
+type PreparedSync struct {
+	report        SyncReport
+	root          string
+	platform      Platform
+	installs      []preparedPluginInstall
+	prepareErrors []error
+	terminalError error
+	enabled       bool
+}
+
 const (
 	pluginTaskName         = "plugin-sync"
 	pluginDeleteTaskName   = "plugin-delete"
@@ -125,28 +144,86 @@ func SyncPlatformWithReport(
 	pluginRuntime PluginRuntime,
 	platform Platform,
 ) (SyncReport, error) {
+	if errRecover := recoverPluginTransactions(cfg); errRecover != nil {
+		report := newSyncReport(NormalizePlatform(platform))
+		finishReport(&report, errRecover)
+		return report, errRecover
+	}
+	prepared, _ := PrepareSyncPlatformWithReport(ctx, cfg, platform)
+	return prepared.Apply(pluginRuntime)
+}
+
+func recoverPluginTransactions(cfg *config.Config) error {
 	if cfg == nil || !cfg.Home.Enabled || !cfg.Plugins.Enabled {
-		return newSyncReport(platform), nil
+		return nil
 	}
-	platform = NormalizePlatform(platform)
-	report := newSyncReport(platform)
-	if platform.GOOS == "" {
-		errPlatform := fmt.Errorf("home plugins: goos is required")
-		finishReport(&report, errPlatform)
-		return report, errPlatform
-	}
-	if platform.GOARCH == "" {
-		errPlatform := fmt.Errorf("home plugins: goarch is required")
-		finishReport(&report, errPlatform)
-		return report, errPlatform
-	}
-	report.Platform = platform
 	root := strings.TrimSpace(cfg.Plugins.Dir)
 	if root == "" {
 		root = "plugins"
 	}
+	fingerprints := make(map[string]string, len(cfg.Plugins.Configs))
+	configured := make(map[string]struct{}, len(cfg.Plugins.Configs))
+	for id, item := range cfg.Plugins.Configs {
+		canonicalID := sdkpluginstore.CanonicalPluginID(id)
+		if canonicalID == "" {
+			return fmt.Errorf("home plugins: invalid plugin id %q", id)
+		}
+		if _, duplicate := configured[canonicalID]; duplicate {
+			return fmt.Errorf("home plugins: duplicate plugin id %q", id)
+		}
+		fingerprint, errFingerprint := config.PluginInstanceConfigFingerprint(item)
+		if errFingerprint != nil {
+			return fmt.Errorf("home plugins: fingerprint %s config: %w", canonicalID, errFingerprint)
+		}
+		configured[canonicalID] = struct{}{}
+		fingerprints[canonicalID] = fingerprint
+	}
+	rootLock, errLock := sdkpluginstore.LockRoot(root)
+	if errLock != nil {
+		return fmt.Errorf("home plugins: lock plugin root for recovery: %w", errLock)
+	}
+	defer rootLock.Unlock()
+	if errRecover := sdkpluginstore.RecoverInstallTransactionsLocked(root, fingerprints, rootLock); errRecover != nil {
+		return fmt.Errorf("home plugins: recover install transactions: %w", errRecover)
+	}
+	if errRecover := sdkpluginstore.RecoverDeletionTransactionsLocked(root, configured, rootLock); errRecover != nil {
+		return fmt.Errorf("home plugins: recover deletion transactions: %w", errRecover)
+	}
+	return nil
+}
+
+func PrepareSyncWithReport(ctx context.Context, cfg *config.Config) (PreparedSync, error) {
+	return PrepareSyncPlatformWithReport(ctx, cfg, CurrentPlatform())
+}
+
+func PrepareSyncPlatformWithReport(
+	ctx context.Context,
+	cfg *config.Config,
+	platform Platform,
+) (PreparedSync, error) {
+	prepared := PreparedSync{report: newSyncReport(platform)}
+	if cfg == nil || !cfg.Home.Enabled || !cfg.Plugins.Enabled {
+		return prepared, nil
+	}
+	platform = NormalizePlatform(platform)
+	prepared.platform = platform
+	prepared.report.Platform = platform
+	if platform.GOOS == "" {
+		prepared.terminalError = fmt.Errorf("home plugins: goos is required")
+		finishReport(&prepared.report, prepared.terminalError)
+		return prepared, prepared.terminalError
+	}
+	if platform.GOARCH == "" {
+		prepared.terminalError = fmt.Errorf("home plugins: goarch is required")
+		finishReport(&prepared.report, prepared.terminalError)
+		return prepared, prepared.terminalError
+	}
+	prepared.enabled = true
+	prepared.root = strings.TrimSpace(cfg.Plugins.Dir)
+	if prepared.root == "" {
+		prepared.root = "plugins"
+	}
 	client := newPluginStoreClient(cfg)
-	var syncErrors []error
 	ids := make([]string, 0, len(cfg.Plugins.Configs))
 	for id := range cfg.Plugins.Configs {
 		ids = append(ids, id)
@@ -159,25 +236,134 @@ func SyncPlatformWithReport(
 		}
 		manifest, okManifest, errManifest := storeManifestFromPluginConfig(id, item)
 		if errManifest != nil {
-			status := PluginInstallStatus{
-				ID:            strings.TrimSpace(id),
-				InstallStatus: pluginInstallStatusFailed,
-				Error:         errManifest.Error(),
-			}
-			report.Plugins = append(report.Plugins, status)
-			syncErrors = append(syncErrors, errManifest)
+			prepared.installs = append(
+				prepared.installs,
+				preparedPluginInstall{
+					status: PluginInstallStatus{
+						ID:            sdkpluginstore.CanonicalPluginID(id),
+						InstallStatus: pluginInstallStatusFailed,
+						Error:         errManifest.Error(),
+					},
+					prepareError: errManifest,
+				},
+			)
+			prepared.prepareErrors = append(prepared.prepareErrors, errManifest)
 			continue
 		}
 		if !okManifest {
 			continue
 		}
 		status := pluginStatusFromManifest(manifest)
-		result, errSync := installManifest(ctx, client, manifest, root, platform, pluginRuntime)
-		if errSync != nil {
+		fingerprint, errFingerprint := config.PluginInstanceConfigFingerprint(item)
+		if errFingerprint != nil {
+			errFingerprint = fmt.Errorf("home plugins: fingerprint %s config: %w", manifest.ID, errFingerprint)
 			status.InstallStatus = pluginInstallStatusFailed
-			status.Error = errSync.Error()
+			status.Error = errFingerprint.Error()
+			prepared.installs = append(
+				prepared.installs,
+				preparedPluginInstall{status: status, prepareError: errFingerprint},
+			)
+			prepared.prepareErrors = append(prepared.prepareErrors, errFingerprint)
+			continue
+		}
+		artifact, errPrepare := client.PrepareManifest(
+			ctx,
+			manifest,
+			sdkpluginstore.InstallOptions{
+				PluginsDir: prepared.root,
+				GOOS:       platform.GOOS,
+				GOARCH:     platform.GOARCH,
+			},
+		)
+		if errPrepare != nil {
+			errPrepare = fmt.Errorf("home plugins: prepare %s: %w", strings.TrimSpace(manifest.ID), errPrepare)
+			status.InstallStatus = pluginInstallStatusFailed
+			status.Error = errPrepare.Error()
+			prepared.installs = append(
+				prepared.installs,
+				preparedPluginInstall{status: status, prepareError: errPrepare},
+			)
+			prepared.prepareErrors = append(prepared.prepareErrors, errPrepare)
+			continue
+		}
+		if errSpool := artifact.SpoolToTemp(); errSpool != nil {
+			errSpool = fmt.Errorf("home plugins: spool %s: %w", strings.TrimSpace(manifest.ID), errSpool)
+			status.InstallStatus = pluginInstallStatusFailed
+			status.Error = errSpool.Error()
+			prepared.installs = append(
+				prepared.installs,
+				preparedPluginInstall{status: status, prepareError: errSpool},
+			)
+			prepared.prepareErrors = append(prepared.prepareErrors, errSpool)
+			continue
+		}
+		prepared.installs = append(
+			prepared.installs,
+			preparedPluginInstall{
+				status:            status,
+				artifact:          artifact,
+				configFingerprint: fingerprint,
+			},
+		)
+	}
+	return prepared, errors.Join(prepared.prepareErrors...)
+}
+
+func (p *PreparedSync) Close() error {
+	if p == nil {
+		return nil
+	}
+	var cleanupErrors []error
+	for index := range p.installs {
+		if errClose := p.installs[index].artifact.Close(); errClose != nil {
+			cleanupErrors = append(cleanupErrors, errClose)
+		}
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+func (p *PreparedSync) Apply(pluginRuntime PluginRuntime) (SyncReport, error) {
+	if p == nil {
+		return SyncReport{}, fmt.Errorf("home plugins: prepared sync is nil")
+	}
+	report := p.report
+	if p.terminalError != nil {
+		_ = p.Close()
+		return report, p.terminalError
+	}
+	if !p.enabled {
+		_ = p.Close()
+		return report, nil
+	}
+	rootLock, errRootLock := sdkpluginstore.LockRoot(p.root)
+	if errRootLock != nil {
+		_ = p.Close()
+		finishReport(&report, errRootLock)
+		return report, errRootLock
+	}
+	defer rootLock.Unlock()
+
+	syncErrors := append([]error(nil), p.prepareErrors...)
+	for _, install := range p.installs {
+		status := install.status
+		if install.prepareError != nil {
 			report.Plugins = append(report.Plugins, status)
-			syncErrors = append(syncErrors, errSync)
+			continue
+		}
+		result, errInstall := installPreparedArtifact(
+			install.artifact,
+			status.ID,
+			install.configFingerprint,
+			p.root,
+			p.platform,
+			pluginRuntime,
+			rootLock,
+		)
+		if errInstall != nil {
+			status.InstallStatus = pluginInstallStatusFailed
+			status.Error = errInstall.Error()
+			report.Plugins = append(report.Plugins, status)
+			syncErrors = append(syncErrors, errInstall)
 			continue
 		}
 		status.Path = strings.TrimSpace(result.Path)
@@ -190,39 +376,73 @@ func SyncPlatformWithReport(
 		}
 		report.Plugins = append(report.Plugins, status)
 	}
+	if errCleanup := p.Close(); errCleanup != nil {
+		syncErrors = append(syncErrors, fmt.Errorf("home plugins: clean prepared archives: %w", errCleanup))
+	}
 	errSync := errors.Join(syncErrors...)
 	finishReport(&report, errSync)
 	return report, errSync
 }
 
-func installManifest(
-	ctx context.Context,
-	client sdkpluginstore.Client,
-	manifest sdkpluginstore.Manifest,
+func installPreparedArtifact(
+	artifact sdkpluginstore.PreparedInstall,
+	id string,
+	configFingerprint string,
 	root string,
 	platform Platform,
 	pluginRuntime PluginRuntime,
+	rootLock *sdkpluginstore.RootLock,
 ) (sdkpluginstore.InstallResult, error) {
-	id := strings.TrimSpace(manifest.ID)
+	id = sdkpluginstore.CanonicalPluginID(id)
 	if id == "" {
 		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: manifest plugin id is empty")
 	}
 	pluginIsBusy := func() bool {
 		return pluginRuntime != nil && pluginRuntime.PluginBusy(id)
 	}
-	result, errInstall := client.InstallManifest(
-		ctx, manifest, sdkpluginstore.InstallOptions{
+	var installTransaction *sdkpluginstore.InstallTransaction
+	result, errInstall := artifact.Install(
+		sdkpluginstore.InstallOptions{
 			PluginsDir:   root,
 			GOOS:         platform.GOOS,
 			GOARCH:       platform.GOARCH,
 			PluginLoaded: pluginIsBusy,
+			RootLock:     rootLock,
 			BeforeWrite: func() error {
 				return preparePluginOverwrite(id, pluginRuntime)
+			},
+			BeforePublish: func(path, version string, overwritten bool, digest string) error {
+				transaction, errPrepare := sdkpluginstore.PrepareInstallTransactionLocked(
+					root,
+					id,
+					path,
+					version,
+					digest,
+					overwritten,
+					rootLock,
+				)
+				if errPrepare != nil {
+					return errPrepare
+				}
+				installTransaction = transaction
+				return nil
 			},
 		},
 	)
 	if errInstall != nil {
-		return sdkpluginstore.InstallResult{}, fmt.Errorf("home plugins: install %s: %w", id, errInstall)
+		if installTransaction != nil {
+			errInstall = errors.Join(errInstall, installTransaction.Rollback(result))
+		}
+		return result, fmt.Errorf("home plugins: install %s: %w", id, errInstall)
+	}
+	if installTransaction != nil {
+		if errExpected := installTransaction.SetExpectedConfigFingerprint(configFingerprint); errExpected != nil {
+			return result, fmt.Errorf(
+				"home plugins: journal %s config: %w",
+				id,
+				errors.Join(errExpected, installTransaction.Rollback(result)),
+			)
+		}
 	}
 	return result, nil
 }
@@ -250,7 +470,7 @@ func DeleteWithReport(
 	report.TaskID = taskID
 	report.Task = pluginDeleteTaskName
 	report.Phase = pluginTaskPhaseDelete
-	pluginID = strings.TrimSpace(pluginID)
+	pluginID = sdkpluginstore.CanonicalPluginID(pluginID)
 	status := PluginInstallStatus{ID: pluginID}
 	if cfg == nil {
 		status.InstallStatus = pluginInstallStatusFailed
@@ -348,7 +568,7 @@ func finishReport(report *SyncReport, errTask error) {
 
 func pluginStatusFromManifest(manifest sdkpluginstore.Manifest) PluginInstallStatus {
 	return PluginInstallStatus{
-		ID:            strings.TrimSpace(manifest.ID),
+		ID:            sdkpluginstore.CanonicalPluginID(manifest.ID),
 		Version:       strings.TrimSpace(manifest.Version),
 		ReleaseTag:    strings.TrimSpace(manifest.ReleaseTag),
 		Repository:    strings.TrimSpace(manifest.Repository),
@@ -371,8 +591,15 @@ func storeManifestFromPluginConfig(id string, item config.PluginInstanceConfig) 
 			"home plugins: decode store manifest for %s: %w", id, errDecode,
 		)
 	}
+	canonicalID := sdkpluginstore.CanonicalPluginID(id)
 	if strings.TrimSpace(manifest.ID) == "" {
-		manifest.ID = strings.TrimSpace(id)
+		manifest.ID = canonicalID
+	} else if sdkpluginstore.CanonicalPluginID(manifest.ID) != canonicalID {
+		return sdkpluginstore.Manifest{}, false, fmt.Errorf(
+			"home plugins: store manifest id %q does not match plugin config id %q", manifest.ID, id,
+		)
+	} else {
+		manifest.ID = canonicalID
 	}
 	if errValidate := manifest.Validate(); errValidate != nil {
 		return sdkpluginstore.Manifest{}, false, fmt.Errorf(

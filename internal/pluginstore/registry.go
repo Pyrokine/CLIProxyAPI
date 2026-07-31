@@ -25,6 +25,11 @@ const (
 var pluginVersionPattern = regexp.MustCompile(`^[0-9][0-9A-Za-z.+-]*$`)
 var pluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+// CanonicalPluginID returns the case-insensitive identity used for plugin ownership.
+func CanonicalPluginID(id string) string {
+	return strings.ToLower(strings.TrimSpace(id))
+}
+
 type Source struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -142,7 +147,7 @@ func normalizeRegistry(registry *Registry) {
 	}
 	for index := range registry.Plugins {
 		plugin := &registry.Plugins[index]
-		plugin.ID = strings.TrimSpace(plugin.ID)
+		plugin.ID = CanonicalPluginID(plugin.ID)
 		plugin.Name = strings.TrimSpace(plugin.Name)
 		plugin.Description = strings.TrimSpace(plugin.Description)
 		plugin.Author = strings.TrimSpace(plugin.Author)
@@ -175,7 +180,7 @@ func ValidateRegistry(registry Registry) error {
 		if errValidate := ValidatePlugin(plugin); errValidate != nil {
 			return fmt.Errorf("plugins[%d]: %w", index, errValidate)
 		}
-		id := strings.TrimSpace(plugin.ID)
+		id := CanonicalPluginID(plugin.ID)
 		if _, exists := seen[id]; exists {
 			return fmt.Errorf("plugins[%d]: duplicate plugin id %q", index, id)
 		}
@@ -408,7 +413,8 @@ func hasSensitiveQueryParameter(parsed *url.URL) bool {
 }
 
 func validPluginVersion(version string) bool {
-	return version != "" && !strings.HasPrefix(version, "v") && pluginVersionPattern.MatchString(version)
+	return version != "" && !strings.HasPrefix(version, "v") && !strings.Contains(version, "-v") &&
+		pluginVersionPattern.MatchString(version)
 }
 
 func validPluginID(id string) bool {
@@ -443,9 +449,9 @@ func GitHubRepositoryParts(repository string) (string, string, error) {
 }
 
 func (r Registry) PluginByID(id string) (Plugin, bool) {
-	id = strings.TrimSpace(id)
+	id = CanonicalPluginID(id)
 	for _, plugin := range r.Plugins {
-		if strings.TrimSpace(plugin.ID) == id {
+		if CanonicalPluginID(plugin.ID) == id {
 			return plugin, true
 		}
 	}

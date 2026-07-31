@@ -23,6 +23,7 @@ const (
 	maxPluginStoreMetadataBytes   int64 = 2 * 1024 * 1024
 	maxPluginStoreChecksumBytes   int64 = 256 * 1024
 	maxPluginStoreArtifactBytes   int64 = 128 * 1024 * 1024
+	maxPluginStoreReleasePageSize       = 100
 )
 
 // HTTPDoer abstracts the HTTP client used to execute requests.
@@ -36,8 +37,13 @@ type Client struct {
 }
 
 type Release struct {
-	TagName string         `json:"tag_name"`
-	Assets  []ReleaseAsset `json:"assets"`
+	TagName     string         `json:"tag_name"`
+	Name        string         `json:"name"`
+	PublishedAt string         `json:"published_at"`
+	Prerelease  bool           `json:"prerelease"`
+	Draft       bool           `json:"draft"`
+	HTMLURL     string         `json:"html_url"`
+	Assets      []ReleaseAsset `json:"assets"`
 }
 
 type ReleaseAsset struct {
@@ -86,6 +92,34 @@ func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release,
 		return Release{}, fmt.Errorf("decode release: %w", errDecode)
 	}
 	return release, nil
+}
+
+// FetchReleases returns published releases from the plugin's GitHub repository.
+func (c Client) FetchReleases(ctx context.Context, plugin Plugin, pageSize int) ([]Release, error) {
+	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	if errRepository != nil {
+		return nil, errRepository
+	}
+	if pageSize <= 0 || pageSize > maxPluginStoreReleasePageSize {
+		return nil, fmt.Errorf("release page size must be between 1 and %d", maxPluginStoreReleasePageSize)
+	}
+	releaseURL := fmt.Sprintf(
+		"https://api.github.com/repos/%s/%s/releases?per_page=%d",
+		url.PathEscape(owner),
+		url.PathEscape(repo),
+		pageSize,
+	)
+	data, errDownload := c.get(
+		ctx, releaseURL, "application/vnd.github+json", RequestKindMetadata, maxPluginStoreMetadataBytes,
+	)
+	if errDownload != nil {
+		return nil, errDownload
+	}
+	var releases []Release
+	if errDecode := json.Unmarshal(data, &releases); errDecode != nil {
+		return nil, fmt.Errorf("decode releases: %w", errDecode)
+	}
+	return releases, nil
 }
 
 // FetchReleaseByTag returns a published release by its exact GitHub tag.
@@ -328,7 +362,7 @@ func SelectReleaseAssets(release Release, id, version, goos, goarch string) (Rel
 func ArchiveName(id, version, goos, goarch string) string {
 	return fmt.Sprintf(
 		"%s_%s_%s_%s.zip",
-		strings.TrimSpace(id),
+		CanonicalPluginID(id),
 		strings.TrimSpace(version),
 		strings.TrimSpace(goos),
 		strings.TrimSpace(goarch),
