@@ -20,17 +20,30 @@ const ServiceTierMetadataKey = "service_tier"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// PinSelectedAuthMetadataKey locks retries to the first auth selected for the request.
+	PinSelectedAuthMetadataKey = "pin_selected_auth"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
+	// SelectedAuthInfoCallbackMetadataKey carries an optional callback invoked with non-secret selected auth details.
+	SelectedAuthInfoCallbackMetadataKey = "selected_auth_info_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
 	// RequestPathMetadataKey stores the inbound HTTP request path (e.g. "/v1/images/generations") in Options.Metadata.
 	RequestPathMetadataKey = "request_path"
 	// DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 	DisallowFreeAuthMetadataKey = "disallow_free_auth"
+	// RequireResponsesContinuationMetadataKey restricts selection to credentials with native Responses continuation.
+	RequireResponsesContinuationMetadataKey = "require_responses_continuation"
 )
+
+// SelectedAuthInfo contains the non-secret selected auth details needed by request handlers.
+type SelectedAuthInfo struct {
+	ID                                    string
+	SupportsIncrementalResponsesWebsocket bool
+	SupportsResponsesContinuation         bool
+}
 
 // Request encapsulates the translated payload that will be sent to a provider executor.
 type Request struct {
@@ -118,6 +131,9 @@ type StreamChunk struct {
 	Payload []byte
 	// Err reports any terminal error encountered while producing chunks.
 	Err error
+	// Acknowledge reports whether a downstream transport delivered this chunk.
+	// Executors that provide it must tolerate at most one call.
+	Acknowledge func(error)
 }
 
 // StreamResult wraps the streaming response, providing both the chunk channel

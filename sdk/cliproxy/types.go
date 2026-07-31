@@ -6,10 +6,10 @@ package cliproxy
 import (
 	"context"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/synthesizer"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
 
 // TokenClientProvider loads clients backed by stored authentication tokens.
@@ -68,6 +68,25 @@ type APIKeyClientResult struct {
 	OpenAICompatCount int
 }
 
+type AuthUpdateAction string
+
+const (
+	AuthUpdateActionAdd    AuthUpdateAction = "add"
+	AuthUpdateActionModify AuthUpdateAction = "modify"
+	AuthUpdateActionDelete AuthUpdateAction = "delete"
+)
+
+type AuthUpdate struct {
+	Action            AuthUpdateAction
+	ID                string
+	Auth              *coreauth.Auth
+	AllowAuthRecreate bool
+}
+
+type PluginAuthParser interface {
+	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
+}
+
 // WatcherFactory creates a watcher for configuration and token changes.
 // The reload callback receives the updated configuration when changes are detected.
 //
@@ -86,11 +105,14 @@ type WatcherWrapper struct {
 	start func(ctx context.Context) error
 	stop  func() error
 
-	setConfig             func(cfg *config.Config)
-	setPluginAuthParser   func(parser synthesizer.PluginAuthParser)
-	snapshotAuths         func() []*coreauth.Auth
-	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
-	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
+	setConfig               func(cfg *config.Config)
+	setConfigReloadCallback func(callback func(*config.Config, string) bool)
+	acknowledgeConfigFile   func(cfg *config.Config, expectedHash string) bool
+	setPluginAuthParser     func(parser PluginAuthParser)
+	setUsageQueue           func(queue *redisqueue.Queue)
+	snapshotAuths           func() []*coreauth.Auth
+	setUpdateQueue          func(queue chan<- AuthUpdate)
+	dispatchRuntimeUpdate   func(update AuthUpdate) bool
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -117,10 +139,24 @@ func (w *WatcherWrapper) SetConfig(cfg *config.Config) {
 	w.setConfig(cfg)
 }
 
+func (w *WatcherWrapper) AcknowledgeConfigFile(cfg *config.Config, expectedHash string) bool {
+	if w == nil || w.acknowledgeConfigFile == nil {
+		return false
+	}
+	return w.acknowledgeConfigFile(cfg, expectedHash)
+}
+
+func (w *WatcherWrapper) SetConfigReloadCallback(callback func(*config.Config, string) bool) {
+	if w == nil || w.setConfigReloadCallback == nil {
+		return
+	}
+	w.setConfigReloadCallback(callback)
+}
+
 // DispatchRuntimeAuthUpdate forwards runtime auth updates (e.g., websocket providers)
 // into the watcher-managed auth update queue when available.
 // Returns true if the update was enqueued successfully.
-func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bool {
+func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	if w == nil || w.dispatchRuntimeUpdate == nil {
 		return false
 	}
@@ -128,11 +164,19 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 }
 
 // SetPluginAuthParser updates the parser used for plugin-owned auth files.
-func (w *WatcherWrapper) SetPluginAuthParser(parser synthesizer.PluginAuthParser) {
+func (w *WatcherWrapper) SetPluginAuthParser(parser PluginAuthParser) {
 	if w == nil || w.setPluginAuthParser == nil {
 		return
 	}
 	w.setPluginAuthParser(parser)
+}
+
+// SetUsageQueue assigns the service-owned usage queue.
+func (w *WatcherWrapper) SetUsageQueue(queue *redisqueue.Queue) {
+	if w == nil || w.setUsageQueue == nil {
+		return
+	}
+	w.setUsageQueue(queue)
 }
 
 // SetClients updates the watcher file-backed clients registry.
@@ -150,7 +194,7 @@ func (w *WatcherWrapper) SnapshotAuths() []*coreauth.Auth {
 }
 
 // SetAuthUpdateQueue registers the channel used to propagate auth updates.
-func (w *WatcherWrapper) SetAuthUpdateQueue(queue chan<- watcher.AuthUpdate) {
+func (w *WatcherWrapper) SetAuthUpdateQueue(queue chan<- AuthUpdate) {
 	if w == nil || w.setUpdateQueue == nil {
 		return
 	}

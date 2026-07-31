@@ -1093,8 +1093,12 @@ type UsageRecord struct {
 	Source string
 	// ReasoningEffort records the requested reasoning effort.
 	ReasoningEffort string
-	// ServiceTier records the requested or reported service tier.
+	// ServiceTier records the client-requested service tier for compatibility.
 	ServiceTier string
+	// RequestServiceTier explicitly records the client-requested service tier.
+	RequestServiceTier string
+	// ResponseServiceTier records the final tier reported by the upstream response.
+	ResponseServiceTier string
 	// RequestedAt is the time the request was received.
 	RequestedAt time.Time
 	// Latency is the total request latency.
@@ -1135,4 +1139,6 @@ type UsageDetail struct {
 	CacheCreationTokens int64
 	// TotalTokens is the total token count.
 	TotalTokens int64
+	// ResponseServiceTier records the final tier reported by the upstream response.
+	ResponseServiceTier string
 }

@@ -120,7 +120,7 @@ func IsPrivateHost(hostname string) bool {
 
 func IsRestrictedCustomHeader(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "authorization", "cookie", "host", "proxy-authorization", "x-api-key", "x-goog-api-key", "x-management-key":
+	case "authorization", "api-key", "cookie", "host", "proxy-authorization", "x-api-key", "x-goog-api-key", "x-management-key":
 		return true
 	default:
 		return false

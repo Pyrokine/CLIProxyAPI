@@ -1,14 +1,53 @@
 package cliproxy
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	internalapi "github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
-func TestApplyModelCatalogConfigMigratesConfigAliasIntoCatalog(t *testing.T) {
+func TestApplyModelCatalogConfigMigratesConfigAliasIntoNewCatalog(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {{Name: "gpt-5", Alias: "g5"}},
+		},
+	}
+	svc := &Service{configPath: configPath}
+
+	aliases, err := svc.applyModelCatalogConfig(cfg)
+	if err != nil {
+		t.Fatalf("applyModelCatalogConfig: %v", err)
+	}
+	codexAliases := aliases["codex"]
+	if len(codexAliases) != 1 || codexAliases[0].Name != "gpt-5" || codexAliases[0].Alias != "g5" || codexAliases[0].Fork {
+		t.Fatalf("codex aliases = %#v", codexAliases)
+	}
+	found := false
+	for _, model := range cfg.ModelCatalog.Models {
+		if model.Name == "gpt-5" {
+			if len(model.Aliases) != 0 {
+				t.Fatalf("catalog model aliases = %#v, want channel aliases kept separate", model.Aliases)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("catalog models = %#v", cfg.ModelCatalog.Models)
+	}
+}
+
+func TestApplyModelCatalogConfigKeepsExistingCatalogAuthoritative(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
@@ -33,7 +72,7 @@ func TestApplyModelCatalogConfigMigratesConfigAliasIntoCatalog(t *testing.T) {
 	}
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
-			"codex": {{Name: "gpt-5", Alias: "g5"}},
+			"codex": {{Name: "gpt-5", Alias: "stale-alias"}},
 		},
 	}
 	svc := &Service{configPath: configPath}
@@ -42,12 +81,55 @@ func TestApplyModelCatalogConfigMigratesConfigAliasIntoCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("applyModelCatalogConfig: %v", err)
 	}
-	codexAliases := aliases["codex"]
-	if len(codexAliases) != 1 || codexAliases[0].Name != "gpt-5" || codexAliases[0].Alias != "g5" {
-		t.Fatalf("codex aliases = %#v", codexAliases)
+	if len(aliases) != 0 {
+		t.Fatalf("aliases = %#v, want existing catalog aliases", aliases)
 	}
-	if len(cfg.ModelCatalog.Models) != 1 || len(cfg.ModelCatalog.Models[0].Aliases) != 1 || cfg.ModelCatalog.Models[0].Aliases[0] != "g5" {
+	if len(cfg.ModelCatalog.Models) != 1 || len(cfg.ModelCatalog.Models[0].Aliases) != 0 {
 		t.Fatalf("catalog models = %#v", cfg.ModelCatalog.Models)
+	}
+}
+
+func TestApplyManagementConfigCommitDoesNotMutatePublishedConfig(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	doc := modelcatalog.File{}
+	modelcatalog.ApplyOAuthModelAlias(
+		&doc,
+		map[string][]config.OAuthModelAlias{
+			"codex": {{Name: "gpt-5", Alias: "stored-alias"}},
+		},
+	)
+	if err := modelcatalog.Save(configPath, doc); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	published := &config.Config{
+		Debug: true,
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {{Name: "gpt-5", Alias: "published-alias"}},
+		},
+	}
+	svc := &Service{configPath: configPath, cfg: &config.Config{}}
+	if err := svc.applyManagementConfigCommit(
+		context.Background(),
+		internalapi.ManagementConfigCommit{Config: published, Generation: 1},
+	); err != nil {
+		t.Fatalf("applyManagementConfigCommit: %v", err)
+	}
+	if len(published.ModelCatalog.Models) != 0 {
+		t.Fatalf("published model catalog was mutated: %#v", published.ModelCatalog.Models)
+	}
+	publishedAliases := published.OAuthModelAlias["codex"]
+	if len(publishedAliases) != 1 || publishedAliases[0].Alias != "published-alias" {
+		t.Fatalf("published aliases were mutated: %#v", publishedAliases)
+	}
+	svc.cfgMu.RLock()
+	runtimeAliases := svc.cfg.OAuthModelAlias["codex"]
+	svc.cfgMu.RUnlock()
+	if len(runtimeAliases) != 1 || runtimeAliases[0].Alias != "stored-alias" {
+		t.Fatalf("runtime aliases = %#v", runtimeAliases)
 	}
 }
 

@@ -10,11 +10,13 @@ import (
 	"time"
 
 	configaccess "github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
+	internalUsage "github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
+	sdkapi "github.com/Pyrokine/CLIProxyAPI/v6/sdk/api"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
@@ -50,10 +52,10 @@ type Builder struct {
 	coreManager *coreauth.Manager
 
 	// pluginHost manages dynamic plugin lifecycle and callbacks.
-	pluginHost *pluginhost.Host
+	pluginHost *PluginHost
 
 	// serverOptions contains additional server configuration options.
-	serverOptions []api.ServerOption
+	serverOptions []sdkapi.ServerOption
 }
 
 // Hooks allows callers to plug into service lifecycle stages.
@@ -145,13 +147,13 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 }
 
 // WithPluginHost overrides the dynamic plugin host used by the service.
-func (b *Builder) WithPluginHost(host *pluginhost.Host) *Builder {
+func (b *Builder) WithPluginHost(host *PluginHost) *Builder {
 	b.pluginHost = host
 	return b
 }
 
 // WithServerOptions appends server configuration options used during construction.
-func (b *Builder) WithServerOptions(opts ...api.ServerOption) *Builder {
+func (b *Builder) WithServerOptions(opts ...sdkapi.ServerOption) *Builder {
 	b.serverOptions = append(b.serverOptions, opts...)
 	return b
 }
@@ -161,7 +163,7 @@ func (b *Builder) WithLocalManagementPassword(password string) *Builder {
 	if password == "" {
 		return b
 	}
-	b.serverOptions = append(b.serverOptions, api.WithLocalManagementPassword(password))
+	b.serverOptions = append(b.serverOptions, sdkapi.WithLocalManagementPassword(password))
 	return b
 }
 
@@ -171,7 +173,7 @@ func (b *Builder) WithPostAuthHook(hook coreauth.PostAuthHook) *Builder {
 	if hook == nil {
 		return b
 	}
-	b.serverOptions = append(b.serverOptions, api.WithPostAuthHook(hook))
+	b.serverOptions = append(b.serverOptions, sdkapi.WithPostAuthHook(hook))
 	return b
 }
 
@@ -260,14 +262,22 @@ func (b *Builder) Build() (*Service, error) {
 
 	pluginHost := b.pluginHost
 	if pluginHost == nil {
-		pluginHost = pluginhost.New()
+		pluginHost = NewPluginHost()
 	}
-	if pluginHost != nil {
-		pluginHost.ApplyConfig(context.Background(), b.cfg)
-		sdkAuth.RegisterPluginAuthParser(pluginHost)
-		pluginHost.RegisterFrontendAuthProviders()
+	usageManager := coreusage.NewManager(512)
+	usageQueue := redisqueue.NewQueue()
+	usageQueue.SetUsageStatisticsEnabled(b.cfg.UsageStatisticsEnabled)
+	usageQueue.SetRetentionSeconds(b.cfg.RedisUsageQueueRetentionSeconds)
+	internalPluginHost := pluginHost.internal()
+	if internalPluginHost != nil {
+		internalPluginHost.SetUsageManager(usageManager)
+		internalPluginHost.SetAccessManager(accessManager)
+		if errApply := internalPluginHost.ApplyConfig(context.Background(), b.cfg); errApply != nil {
+			return nil, fmt.Errorf("cliproxy: apply plugin config during build: %w", errApply)
+		}
+		internalPluginHost.RegisterFrontendAuthProviders()
 		accessManager.SetProviders(sdkaccess.RegisteredProviders())
-		coreManager.SetPluginScheduler(pluginHost)
+		coreManager.SetPluginScheduler(internalPluginHost)
 	}
 
 	service := &Service{
@@ -280,8 +290,20 @@ func (b *Builder) Build() (*Service, error) {
 		authManager:    authManager,
 		accessManager:  accessManager,
 		coreManager:    coreManager,
-		pluginHost:     pluginHost,
-		serverOptions:  append([]api.ServerOption(nil), b.serverOptions...),
+		pluginHost:     internalPluginHost,
+		usageManager:   usageManager,
+		usageStats:     internalUsage.NewRequestStatistics(),
+		usageQueue:     usageQueue,
+		serverOptions:  append([]sdkapi.ServerOption(nil), b.serverOptions...),
 	}
+	service.usageStatisticsEnabled.Store(b.cfg.UsageStatisticsEnabled)
+	coreManager.SetHomeClientProvider(func() coreauth.HomeClient {
+		client := service.currentHomeClient()
+		if client == nil {
+			return nil
+		}
+		return client
+	})
+	coreManager.SetDeferredAuthRecreateHandler(service.applyCoreAuthAddOrUpdate)
 	return service, nil
 }
