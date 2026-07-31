@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 // Manager aggregates authenticators and coordinates persistence via a token store.
@@ -65,14 +65,30 @@ func (m *Manager) Login(ctx context.Context, provider string, cfg *config.Config
 	if m.store == nil {
 		return record, "", nil
 	}
-
-	if cfg != nil {
-		if dirSetter, ok := m.store.(interface{ SetBaseDir(string) }); ok {
-			dirSetter.SetBaseDir(cfg.AuthDir)
+	if ctx != nil {
+		if err = ctx.Err(); err != nil {
+			return record, "", err
 		}
 	}
 
-	savedPath, err := m.store.Save(ctx, record)
+	if ctx != nil {
+		if err = ctx.Err(); err != nil {
+			return record, "", err
+		}
+	}
+
+	var savedPath string
+	if cfg != nil {
+		if scopedStore, ok := m.store.(interface {
+			SaveWithBaseDir(context.Context, string, *coreauth.Auth) (string, error)
+		}); ok {
+			savedPath, err = scopedStore.SaveWithBaseDir(ctx, cfg.AuthDir, record)
+		} else {
+			savedPath, err = m.store.Save(ctx, record)
+		}
+	} else {
+		savedPath, err = m.store.Save(ctx, record)
+	}
 	if err != nil {
 		return record, "", err
 	}

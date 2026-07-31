@@ -75,6 +75,42 @@ func TestLookupAPIKeyUpstreamModel(t *testing.T) {
 	}
 }
 
+func TestLookupAPIKeyUpstreamModelInteractions(t *testing.T) {
+	cfg := &internalconfig.Config{
+		InteractionsKey: []internalconfig.GeminiKey{
+			{
+				APIKey: "k",
+				Models: []internalconfig.GeminiModel{
+					{Name: "gemini-2.5-pro-exp-03-25", Alias: "g25p"},
+				},
+			},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	_, _ = mgr.Register(
+		ctx, &Auth{
+			ID: "interactions-auth", Provider: "gemini-interactions",
+			Attributes: map[string]string{"api_key": "k"},
+		},
+	)
+
+	if resolved := mgr.lookupAPIKeyUpstreamModel("interactions-auth", "g25p(high)"); resolved != "gemini-2.5-pro-exp-03-25(high)" {
+		t.Fatalf("lookupAPIKeyUpstreamModel = %q, want gemini-2.5-pro-exp-03-25(high)", resolved)
+	}
+
+	resolvedModel := mgr.applyAPIKeyModelAlias(
+		&Auth{Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "k"}},
+		"g25p[1m]",
+	)
+	if resolvedModel != "gemini-2.5-pro-exp-03-25[1m]" {
+		t.Fatalf("applyAPIKeyModelAlias = %q, want gemini-2.5-pro-exp-03-25[1m]", resolvedModel)
+	}
+}
+
 func TestAPIKeyModelAlias_ConfigHotReload(t *testing.T) {
 	cfg := &internalconfig.Config{
 		GeminiKey: []internalconfig.GeminiKey{

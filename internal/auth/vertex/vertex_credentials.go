@@ -3,14 +3,10 @@
 package vertex
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
-	log "github.com/sirupsen/logrus"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 )
 
 // CredentialStorage stores the service account JSON for Vertex AI access.
@@ -39,7 +35,6 @@ type CredentialStorage struct {
 // SaveTokenToFile writes the credential payload to the given file path in JSON format.
 // It ensures the parent directory exists and logs the operation for transparency.
 func (s *CredentialStorage) SaveTokenToFile(authFilePath string) error {
-	misc.LogSavingCredentials(authFilePath)
 	if s == nil {
 		return fmt.Errorf("vertex credential: storage is nil")
 	}
@@ -48,23 +43,8 @@ func (s *CredentialStorage) SaveTokenToFile(authFilePath string) error {
 	}
 	// Ensure we tag the file with the provider type.
 	s.Type = "vertex"
-
-	if err := os.MkdirAll(filepath.Dir(authFilePath), 0o700); err != nil {
-		return fmt.Errorf("vertex credential: create directory failed: %w", err)
-	}
-	f, err := os.Create(authFilePath)
-	if err != nil {
-		return fmt.Errorf("vertex credential: create file failed: %w", err)
-	}
-	defer func() {
-		if errClose := f.Close(); errClose != nil {
-			log.Errorf("vertex credential: failed to close file: %v", errClose)
-		}
-	}()
-	enc := json.NewEncoder(f)
-	enc.SetIndent("", "  ")
-	if err = enc.Encode(s); err != nil {
-		return fmt.Errorf("vertex credential: encode failed: %w", err)
+	if errSave := auth.SaveTokenJSON(authFilePath, s, nil); errSave != nil {
+		return fmt.Errorf("vertex credential: save token file: %w", errSave)
 	}
 	return nil
 }

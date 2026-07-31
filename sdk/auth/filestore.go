@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	internalauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
@@ -29,7 +31,11 @@ type pluginAuthParserHolder struct {
 	parser PluginAuthParser
 }
 
+type pluginAuthParserContextKey struct{}
+
 var pluginAuthParserValue atomic.Value
+
+const authProjectDiscoveryTimeout = 15 * time.Second
 
 func RegisterPluginAuthParser(parser PluginAuthParser) {
 	pluginAuthParserValue.Store(pluginAuthParserHolder{parser: parser})
@@ -47,11 +53,72 @@ func currentPluginAuthParser() PluginAuthParser {
 	return holder.parser
 }
 
+func WithPluginAuthParser(ctx context.Context, parser PluginAuthParser) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, pluginAuthParserContextKey{}, pluginAuthParserHolder{parser: parser})
+}
+
+func pluginAuthParserForContext(ctx context.Context) PluginAuthParser {
+	if ctx != nil {
+		if holder, ok := ctx.Value(pluginAuthParserContextKey{}).(pluginAuthParserHolder); ok {
+			return holder.parser
+		}
+	}
+	return currentPluginAuthParser()
+}
+
+// ParsePluginAuthFile applies the registered plugin parser to file-backed auth material
+func ParsePluginAuthFile(
+	ctx context.Context,
+	provider,
+	path,
+	fileName string,
+	data []byte,
+) (*cliproxyauth.Auth, bool, error) {
+	parser := pluginAuthParserForContext(ctx)
+	if parser == nil {
+		return nil, false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	auth, handled, errParse := parser.ParseAuth(
+		ctx,
+		pluginapi.AuthParseRequest{
+			Provider: strings.TrimSpace(provider),
+			Path:     path,
+			FileName: fileName,
+			RawJSON:  data,
+		},
+	)
+	if errParse != nil || !handled {
+		return auth, handled, errParse
+	}
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return nil, true, fmt.Errorf("plugin auth parser returned an invalid auth")
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if path = strings.TrimSpace(path); path != "" {
+		auth.Attributes["path"] = path
+		auth.Attributes["source"] = path
+	}
+	if errHeaders := cliproxyauth.ApplyCustomHeadersFromMetadata(auth); errHeaders != nil {
+		return nil, true, errHeaders
+	}
+	return auth, true, nil
+}
+
 // FileTokenStore persists token records and auth metadata using the filesystem as backing storage.
 type FileTokenStore struct {
-	mu      sync.Mutex
-	dirLock sync.RWMutex
-	baseDir string
+	mu                      sync.Mutex
+	dirLock                 sync.RWMutex
+	baseDir                 string
+	httpClient              *http.Client
+	projectDiscoveryTimeout time.Duration
 }
 
 // NewFileTokenStore creates a token store that saves credentials to disk through the
@@ -68,12 +135,35 @@ func (s *FileTokenStore) SetBaseDir(dir string) {
 }
 
 // Save persists token storage and metadata to the resolved auth file path.
-func (s *FileTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string, error) {
+func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+	return s.saveWithBaseDir(ctx, s.baseDirSnapshot(), auth)
+}
+
+// SaveWithBaseDir persists an auth record using an operation-scoped base directory.
+func (s *FileTokenStore) SaveWithBaseDir(
+	ctx context.Context,
+	baseDir string,
+	auth *cliproxyauth.Auth,
+) (string, error) {
+	return s.saveWithBaseDir(ctx, strings.TrimSpace(baseDir), auth)
+}
+
+func (s *FileTokenStore) saveWithBaseDir(
+	ctx context.Context,
+	baseDir string,
+	auth *cliproxyauth.Auth,
+) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
 
-	path, err := s.resolveAuthPath(auth)
+	path, err := s.resolveAuthPath(auth, baseDir)
 	if err != nil {
 		return "", err
 	}
@@ -81,34 +171,30 @@ func (s *FileTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (strin
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
-		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
-			return "", nil
-		}
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", fmt.Errorf("auth filestore: create dir failed: %w", err)
+	if err = ctx.Err(); err != nil {
+		return "", err
+	}
+	root, errRoot := util.OpenOrCreateDirectoryRoot(filepath.Dir(path), 0o700)
+	if errRoot != nil {
+		return "", fmt.Errorf("auth filestore: secure dir failed: %w", errRoot)
+	}
+	if errCloseRoot := root.Close(); errCloseRoot != nil {
+		return "", fmt.Errorf("auth filestore: close dir root failed: %w", errCloseRoot)
+	}
+	if err = ctx.Err(); err != nil {
+		return "", err
 	}
 
-	// metadataSetter is a private interface for TokenStorage implementations that support metadata injection.
-	type metadataSetter interface {
-		SetMetadata(map[string]any)
-	}
-
+	cliproxyauth.PrepareAuthForPersistence(auth)
 	switch {
 	case auth.Storage != nil:
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
+		if err = ctx.Err(); err != nil {
+			return "", err
 		}
-		auth.Metadata["disabled"] = auth.Disabled
-		if setter, ok := auth.Storage.(metadataSetter); ok {
-			setter.SetMetadata(auth.Metadata)
-		}
-		if err = auth.Storage.SaveTokenToFile(path); err != nil {
+		if err = internalauth.PublishTokenFile(path, auth.Storage.SaveTokenToFile); err != nil {
 			return "", err
 		}
 	case auth.Metadata != nil:
@@ -117,26 +203,30 @@ func (s *FileTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (strin
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
 		}
+		if err = ctx.Err(); err != nil {
+			return "", err
+		}
 		if existing, errRead := os.ReadFile(path); errRead == nil {
+			if err = ctx.Err(); err != nil {
+				return "", err
+			}
 			if util.JSONEqual(existing, raw) {
+				if errSecure := internalauth.SecureTokenFile(path); errSecure != nil {
+					return "", fmt.Errorf("auth filestore: secure existing file failed: %w", errSecure)
+				}
 				return path, nil
 			}
-			file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
-			if errOpen != nil {
-				return "", fmt.Errorf("auth filestore: open existing failed: %w", errOpen)
-			}
-			if _, errWrite := file.Write(raw); errWrite != nil {
-				_ = file.Close()
+			if errWrite := internalauth.WriteTokenFileAtomic(path, raw); errWrite != nil {
 				return "", fmt.Errorf("auth filestore: write existing failed: %w", errWrite)
-			}
-			if errClose := file.Close(); errClose != nil {
-				return "", fmt.Errorf("auth filestore: close existing failed: %w", errClose)
 			}
 			return path, nil
 		} else if !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
-		if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+		if err = ctx.Err(); err != nil {
+			return "", err
+		}
+		if errWrite := internalauth.WriteTokenFileAtomic(path, raw); errWrite != nil {
 			return "", fmt.Errorf("auth filestore: write file failed: %w", errWrite)
 		}
 	default:
@@ -156,14 +246,20 @@ func (s *FileTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (strin
 }
 
 // List enumerates all auth JSON files under the configured directory.
-func (s *FileTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
+func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) {
 	dir := s.baseDirSnapshot()
 	if dir == "" {
 		return nil, fmt.Errorf("auth filestore: directory not configured")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	entries := make([]*cliproxyauth.Auth, 0)
 	err := filepath.WalkDir(
 		dir, func(path string, d fs.DirEntry, walkErr error) error {
+			if errCtx := ctx.Err(); errCtx != nil {
+				return errCtx
+			}
 			if walkErr != nil {
 				return walkErr
 			}
@@ -173,8 +269,11 @@ func (s *FileTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 			if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 				return nil
 			}
-			auth, err := s.readAuthFile(path, dir)
+			auth, err := s.readAuthFile(ctx, path, dir)
 			if err != nil {
+				if errCtx := ctx.Err(); errCtx != nil {
+					return errCtx
+				}
 				log.WithError(err).Warnf("auth filestore: skip auth %s", path)
 				return nil
 			}
@@ -188,6 +287,25 @@ func (s *FileTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
 		return nil, err
 	}
 	return entries, nil
+}
+
+// DeleteIfVersion removes the auth file only while its exact persisted content matches.
+func (s *FileTokenStore) DeleteIfVersion(
+	_ context.Context,
+	id string,
+	version cliproxyauth.PersistedVersion,
+) (bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, fmt.Errorf("auth filestore: id is empty")
+	}
+	path, err := s.resolveDeletePath(id)
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cliproxyauth.RemoveFileIfVersion(path, version)
 }
 
 // Delete removes the auth file.
@@ -217,7 +335,13 @@ func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
 	return filepath.Join(dir, id), nil
 }
 
-func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
+func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string) (*cliproxyauth.Auth, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errCtx := ctx.Err(); errCtx != nil {
+		return nil, errCtx
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
@@ -235,28 +359,20 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 	if errStat != nil {
 		return nil, fmt.Errorf("stat file: %w", errStat)
 	}
-	if parser := currentPluginAuthParser(); parser != nil {
-		auth, handled, errParse := parser.ParseAuth(
-			context.Background(), pluginapi.AuthParseRequest{
-				Provider: provider,
-				Path:     path,
-				FileName: s.idFor(path, baseDir),
-				RawJSON:  data,
-			},
-		)
-		if errParse == nil && handled && auth != nil {
-			auth.CreatedAt = info.ModTime()
-			auth.UpdatedAt = info.ModTime()
-			if auth.Attributes == nil {
-				auth.Attributes = make(map[string]string)
-			}
-			auth.Attributes["path"] = path
-			auth.Attributes["source"] = path
-			if err := cliproxyauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
-				return nil, err
-			}
-			return auth, nil
-		}
+	pluginAuth, handled, errParse := ParsePluginAuthFile(
+		ctx,
+		provider,
+		path,
+		s.idFor(path, baseDir),
+		data,
+	)
+	if errParse != nil {
+		return nil, errParse
+	}
+	if handled {
+		pluginAuth.CreatedAt = info.ModTime()
+		pluginAuth.UpdatedAt = info.ModTime()
+		return pluginAuth, nil
 	}
 	if provider == "" {
 		provider = "unknown"
@@ -267,13 +383,15 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 			projectID = strings.TrimSpace(pid)
 		}
 		if projectID == "" {
+			discoveryCtx, cancelDiscovery := context.WithTimeout(ctx, s.discoveryTimeout())
+			httpClient := s.discoveryHTTPClient()
 			accessToken := extractAccessToken(metadata)
 			// For gemini type, the stored access_token is likely expired (~1h lifetime).
 			// Refresh it using the long-lived refresh_token before querying.
 			if provider == "gemini" {
 				if tokenMap, ok := metadata["token"].(map[string]any); ok {
 					if refreshed, errRefresh := refreshGeminiAccessToken(
-						tokenMap, http.DefaultClient,
+						discoveryCtx, tokenMap, httpClient,
 					); errRefresh == nil {
 						accessToken = refreshed
 					}
@@ -281,17 +399,22 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 			}
 			if accessToken != "" {
 				fetchedProjectID, errFetch := FetchAntigravityProjectID(
-					context.Background(), accessToken, http.DefaultClient,
+					discoveryCtx, accessToken, httpClient,
 				)
 				if errFetch == nil && strings.TrimSpace(fetchedProjectID) != "" {
-					metadata["project_id"] = strings.TrimSpace(fetchedProjectID)
-					if raw, errMarshal := json.Marshal(metadata); errMarshal == nil {
-						if file, errOpen := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600); errOpen == nil {
-							_, _ = file.Write(raw)
-							_ = file.Close()
-						}
+					metadata, err = s.persistProjectIDIfUnchanged(path, data, metadata, fetchedProjectID)
+					if err != nil {
+						cancelDiscovery()
+						return nil, err
+					}
+					if latestInfo, errLatestInfo := os.Stat(path); errLatestInfo == nil {
+						info = latestInfo
 					}
 				}
+			}
+			cancelDiscovery()
+			if errCtx := ctx.Err(); errCtx != nil {
+				return nil, errCtx
 			}
 		}
 	}
@@ -325,17 +448,10 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {
-	if baseDir == "" {
-		return path
-	}
-	rel, err := filepath.Rel(baseDir, path)
-	if err != nil {
-		return path
-	}
-	return rel
+	return internalauth.FileAuthID(path, baseDir)
 }
 
-func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error) {
+func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth, baseDir string) (string, error) {
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
@@ -348,8 +464,8 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 		if filepath.IsAbs(fileName) {
 			return fileName, nil
 		}
-		if dir := s.baseDirSnapshot(); dir != "" {
-			return filepath.Join(dir, fileName), nil
+		if baseDir != "" {
+			return filepath.Join(baseDir, fileName), nil
 		}
 		return fileName, nil
 	}
@@ -359,11 +475,10 @@ func (s *FileTokenStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error
 	if filepath.IsAbs(auth.ID) {
 		return auth.ID, nil
 	}
-	dir := s.baseDirSnapshot()
-	if dir == "" {
+	if baseDir == "" {
 		return "", fmt.Errorf("auth filestore: directory not configured")
 	}
-	return filepath.Join(dir, auth.ID), nil
+	return filepath.Join(baseDir, auth.ID), nil
 }
 
 func (s *FileTokenStore) labelFor(metadata map[string]any) string {
@@ -388,6 +503,61 @@ func (s *FileTokenStore) baseDirSnapshot() string {
 	return s.baseDir
 }
 
+func (s *FileTokenStore) discoveryHTTPClient() *http.Client {
+	if s != nil && s.httpClient != nil {
+		return s.httpClient
+	}
+	return http.DefaultClient
+}
+
+func (s *FileTokenStore) discoveryTimeout() time.Duration {
+	if s != nil && s.projectDiscoveryTimeout > 0 {
+		return s.projectDiscoveryTimeout
+	}
+	return authProjectDiscoveryTimeout
+}
+
+func (s *FileTokenStore) persistProjectIDIfUnchanged(
+	path string,
+	original []byte,
+	candidate map[string]any,
+	projectID string,
+) (map[string]any, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, fmt.Errorf("persist antigravity project ID: project ID is empty")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return nil, fmt.Errorf("persist antigravity project ID: read current credential: %w", errRead)
+	}
+	metadata := make(map[string]any)
+	if errDecode := json.Unmarshal(current, &metadata); errDecode != nil {
+		return nil, fmt.Errorf("persist antigravity project ID: decode current credential: %w", errDecode)
+	}
+	if !bytes.Equal(current, original) {
+		return metadata, nil
+	}
+	if existing, _ := metadata["project_id"].(string); strings.TrimSpace(existing) != "" {
+		return metadata, nil
+	}
+	if candidate == nil {
+		candidate = metadata
+	}
+	candidate["project_id"] = projectID
+	raw, errMarshal := json.Marshal(candidate)
+	if errMarshal != nil {
+		return nil, fmt.Errorf("persist antigravity project ID: encode credential: %w", errMarshal)
+	}
+	if errWrite := internalauth.WriteTokenFileAtomic(path, raw); errWrite != nil {
+		return nil, fmt.Errorf("persist antigravity project ID: %w", errWrite)
+	}
+	return candidate, nil
+}
+
 func extractAccessToken(metadata map[string]any) string {
 	if at, ok := metadata["access_token"].(string); ok {
 		if v := strings.TrimSpace(at); v != "" {
@@ -404,7 +574,11 @@ func extractAccessToken(metadata map[string]any) string {
 	return ""
 }
 
-func refreshGeminiAccessToken(tokenMap map[string]any, httpClient *http.Client) (string, error) {
+func refreshGeminiAccessToken(
+	ctx context.Context,
+	tokenMap map[string]any,
+	httpClient *http.Client,
+) (string, error) {
 	refreshToken, _ := tokenMap["refresh_token"].(string)
 	clientID, _ := tokenMap["client_id"].(string)
 	clientSecret, _ := tokenMap["client_secret"].(string)
@@ -424,7 +598,23 @@ func refreshGeminiAccessToken(tokenMap map[string]any, httpClient *http.Client) 
 		"client_secret": {clientSecret},
 	}
 
-	resp, err := httpClient.PostForm(tokenURI, data)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	request, errRequest := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		tokenURI,
+		strings.NewReader(data.Encode()),
+	)
+	if errRequest != nil {
+		return "", fmt.Errorf("create refresh request: %w", errRequest)
+	}
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := httpClient.Do(request)
 	if err != nil {
 		return "", fmt.Errorf("refresh request: %w", err)
 	}

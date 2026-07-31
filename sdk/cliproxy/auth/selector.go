@@ -69,14 +69,27 @@ func sessionAffinityIDFromOptions(opts cliproxyexecutor.Options) string {
 }
 
 func (s *SessionAffinitySelector) PickSticky(provider string, opts cliproxyexecutor.Options, auths []*Auth) *Auth {
+	return s.pickStickyForModel(provider, "", opts, auths)
+}
+
+func (s *SessionAffinitySelector) pickStickyForModel(
+	provider,
+	model string,
+	opts cliproxyexecutor.Options,
+	auths []*Auth,
+) *Auth {
 	cacheKey := s.sessionKey(opts, provider)
 	if cacheKey == "" || s.cache == nil {
 		return nil
 	}
+	available, errAvailable := getAvailableAuths(auths, provider, model, time.Now())
+	if errAvailable != nil {
+		return nil
+	}
 	if authID, ok := s.cache.GetAndRefresh(cacheKey); ok {
-		for i := range auths {
-			if auths[i] != nil && auths[i].ID == authID {
-				return auths[i]
+		for i := range available {
+			if available[i] != nil && available[i].ID == authID {
+				return available[i]
 			}
 		}
 	}

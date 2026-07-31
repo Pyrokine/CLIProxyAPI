@@ -31,6 +31,7 @@ const (
 )
 
 var codexRefreshGroup singleflight.Group
+var codexRefreshTimeout = 60 * time.Second
 
 // Auth handles the OpenAI OAuth2 authentication flow.
 // It manages the HTTP client and provides methods for generating authorization URLs,
@@ -188,9 +189,11 @@ func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 		ctx = context.Background()
 	}
 
+	refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
+	defer cancelRefresh()
 	result, err, _ := codexRefreshGroup.Do(
 		refreshToken, func() (interface{}, error) {
-			return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+			return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
 		},
 	)
 	if err != nil {

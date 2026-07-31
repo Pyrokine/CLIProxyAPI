@@ -2,8 +2,14 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
@@ -28,9 +34,6 @@ func TestManager_SetConfigClearsHomeRuntimeAuthsWhenHomeDisabled(t *testing.T) {
 }
 
 func TestManager_Update_PreservesModelStates(t *testing.T) {
-	// The current Update method replaces the auth entry entirely (only preserving
-	// Index/indexAssigned). ModelStates are not automatically preserved. This test
-	// verifies the caller must include ModelStates in the update payload to retain them.
 	m := NewManager(nil, nil, nil)
 
 	model := "test-model"
@@ -51,7 +54,7 @@ func TestManager_Update_PreservesModelStates(t *testing.T) {
 		t.Fatalf("register auth: %v", errRegister)
 	}
 
-	// Update without ModelStates replaces the entry entirely
+	// Persistent updates must not clear request-time quota state.
 	if _, errUpdate := m.Update(
 		context.Background(), &Auth{
 			ID:       "auth-1",
@@ -67,9 +70,9 @@ func TestManager_Update_PreservesModelStates(t *testing.T) {
 		t.Fatalf("expected auth to be present")
 	}
 
-	// Current behavior: ModelStates are not preserved when omitted from update
-	if len(updated.ModelStates) != 0 {
-		t.Fatalf("expected ModelStates to be empty after update without them, got %+v", updated.ModelStates)
+	state := updated.ModelStates[model]
+	if state == nil || state.Quota.BackoffLevel != backoffLevel {
+		t.Fatalf("ModelStates were overwritten by persistent update: %+v", updated.ModelStates)
 	}
 
 	// Verify metadata was updated
@@ -127,6 +130,467 @@ func (unauthorizedRefreshExecutor) Identifier() string { return "unauthorized-re
 
 func (unauthorizedRefreshExecutor) Refresh(_ context.Context, _ *Auth) (*Auth, error) {
 	return nil, &Error{Code: "authentication_error", Message: "401 unauthorized", HTTPStatus: http.StatusUnauthorized}
+}
+
+type cancelAfterSuccessRefreshExecutor struct {
+	schedulerTestExecutor
+	cancel context.CancelFunc
+}
+
+func (e *cancelAfterSuccessRefreshExecutor) Identifier() string {
+	return "cancel-after-success-refresh"
+}
+
+func (e *cancelAfterSuccessRefreshExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	updated := auth.Clone()
+	updated.Metadata = map[string]any{
+		"access_token":  "new-token",
+		"refresh_token": "new-refresh",
+	}
+	e.cancel()
+	return updated, nil
+}
+
+type contextCheckingRefreshStore struct {
+	mu    sync.Mutex
+	saved *Auth
+}
+
+func (s *contextCheckingRefreshStore) List(context.Context) ([]*Auth, error) {
+	return nil, nil
+}
+
+func (s *contextCheckingRefreshStore) Save(ctx context.Context, auth *Auth) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	s.saved = auth.Clone()
+	s.mu.Unlock()
+	return auth.ID, nil
+}
+
+func (s *contextCheckingRefreshStore) Delete(context.Context, string) error {
+	return nil
+}
+
+type blockingRefreshExecutor struct {
+	schedulerTestExecutor
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+type rotatingRefreshExecutor struct {
+	schedulerTestExecutor
+	beforeReturn func() error
+}
+
+type virtualPersistenceRefreshExecutor struct {
+	schedulerTestExecutor
+	persistenceRuntime any
+}
+
+func (e *virtualPersistenceRefreshExecutor) Identifier() string { return "virtual-persistence-refresh" }
+
+func (e *virtualPersistenceRefreshExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	updated := auth.Clone()
+	updated.Metadata = map[string]any{
+		"access_token":  "new-access",
+		"refresh_token": "new-refresh",
+		"project_id":    "project-a,project-b",
+	}
+	updated.RefreshPersistence = &Auth{
+		ID:         "primary.json",
+		Provider:   e.Identifier(),
+		FileName:   "primary.json",
+		Disabled:   true,
+		Status:     StatusDisabled,
+		Attributes: map[string]string{"path": auth.Attributes["path"]},
+		Metadata:   updated.Metadata,
+		Runtime:    e.persistenceRuntime,
+	}
+	return updated, nil
+}
+
+func (e *rotatingRefreshExecutor) Identifier() string { return "rotating-refresh" }
+
+func (e *rotatingRefreshExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	updated := auth.Clone()
+	updated.Metadata = map[string]any{
+		"access_token":  "new-access",
+		"refresh_token": "new-refresh",
+	}
+	if e.beforeReturn != nil {
+		if err := e.beforeReturn(); err != nil {
+			return nil, err
+		}
+	}
+	return updated, nil
+}
+
+type retryingRefreshStore struct {
+	mu        sync.Mutex
+	path      string
+	saveCalls int
+	failCall  int
+	retried   chan struct{}
+	once      sync.Once
+}
+
+func (*retryingRefreshStore) List(context.Context) ([]*Auth, error) { return nil, nil }
+
+func (s *retryingRefreshStore) Save(_ context.Context, auth *Auth) (string, error) {
+	s.mu.Lock()
+	s.saveCalls++
+	call := s.saveCalls
+	s.mu.Unlock()
+	if call == s.failCall {
+		return "", errors.New("persist failed")
+	}
+	PrepareAuthForPersistence(auth)
+	raw, errMarshal := json.Marshal(auth.Metadata)
+	if errMarshal != nil {
+		return "", errMarshal
+	}
+	if errWrite := os.WriteFile(s.path, raw, 0o600); errWrite != nil {
+		return "", errWrite
+	}
+	if call > s.failCall && s.retried != nil {
+		s.once.Do(func() { close(s.retried) })
+	}
+	return s.path, nil
+}
+
+func (s *retryingRefreshStore) Delete(context.Context, string) error {
+	return os.Remove(s.path)
+}
+
+func (e *blockingRefreshExecutor) Identifier() string { return "blocking-refresh" }
+
+func (e *blockingRefreshExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
+	e.once.Do(func() { close(e.started) })
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-e.release:
+	}
+	updated := auth.Clone()
+	updated.Metadata = map[string]any{"access_token": "new"}
+	return updated, nil
+}
+
+func TestRefreshAuthForRequestPersistsAfterSuccessfulExchangeCancellation(t *testing.T) {
+	store := &contextCheckingRefreshStore{}
+	manager := NewManager(store, nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	executor := &cancelAfterSuccessRefreshExecutor{cancel: cancel}
+	manager.RegisterExecutor(executor)
+	if _, errRegister := manager.Register(
+		context.Background(),
+		&Auth{
+			ID:       "rotated-refresh.json",
+			Provider: executor.Identifier(),
+			Metadata: map[string]any{
+				"access_token":  "old-token",
+				"refresh_token": "old-refresh",
+			},
+		},
+	); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+
+	updated, errRefresh := manager.refreshAuthForRequest(ctx, "rotated-refresh.json", "old-token")
+	if errRefresh != nil {
+		t.Fatalf("refreshAuthForRequest() error = %v", errRefresh)
+	}
+	if updated == nil || authAccessToken(updated) != "new-token" ||
+		authRefreshOwnerToken(updated) != "new-refresh" {
+		t.Fatalf("refreshed auth = %#v", updated)
+	}
+	store.mu.Lock()
+	persisted := store.saved
+	if persisted != nil {
+		persisted = persisted.Clone()
+	}
+	store.mu.Unlock()
+	if persisted == nil || authAccessToken(persisted) != "new-token" ||
+		authRefreshOwnerToken(persisted) != "new-refresh" {
+		t.Fatalf("persisted auth = %#v", persisted)
+	}
+}
+
+func TestRefreshAuthForRequestKeepsRotatedCredentialAndRetriesPersistence(t *testing.T) {
+	previousInitialDelay := deferredAuthRecreateRetryInitialDelay
+	previousMaxDelay := deferredAuthRecreateRetryMaxDelay
+	deferredAuthRecreateRetryInitialDelay = time.Millisecond
+	deferredAuthRecreateRetryMaxDelay = 5 * time.Millisecond
+	t.Cleanup(func() {
+		deferredAuthRecreateRetryInitialDelay = previousInitialDelay
+		deferredAuthRecreateRetryMaxDelay = previousMaxDelay
+	})
+
+	path := filepath.Join(t.TempDir(), "rotating.json")
+	store := &retryingRefreshStore{
+		path:     path,
+		failCall: 2,
+		retried:  make(chan struct{}),
+	}
+	manager := NewManager(store, nil, nil)
+	executor := &rotatingRefreshExecutor{}
+	manager.RegisterExecutor(executor)
+	registered, errRegister := manager.Register(
+		context.Background(),
+		&Auth{
+			ID:         "rotating.json",
+			Provider:   executor.Identifier(),
+			Attributes: map[string]string{"path": path},
+			Metadata: map[string]any{
+				"access_token":  "old-access",
+				"refresh_token": "old-refresh",
+			},
+		},
+	)
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	refreshed, errRefresh := manager.refreshAuthForRequest(
+		context.Background(), registered.ID, "old-access", registered.Generation,
+	)
+	if !errors.Is(errRefresh, ErrAuthDurableStateUncertain) {
+		t.Fatalf("refreshAuthForRequest() error = %v, want durable state uncertainty", errRefresh)
+	}
+	if refreshed == nil || authAccessToken(refreshed) != "new-access" ||
+		authRefreshOwnerToken(refreshed) != "new-refresh" {
+		t.Fatalf("refreshed auth = %#v", refreshed)
+	}
+	current, ok := manager.GetByID(registered.ID)
+	if !ok || authAccessToken(current) != "new-access" || authRefreshOwnerToken(current) != "new-refresh" {
+		t.Fatalf("runtime auth after persistence failure = %#v", current)
+	}
+
+	select {
+	case <-store.retried:
+	case <-time.After(time.Second):
+		t.Fatal("refreshed credential persistence was not retried")
+	}
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	var persisted map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &persisted); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if persisted["access_token"] != "new-access" || persisted["refresh_token"] != "new-refresh" {
+		t.Fatalf("persisted credential = %#v", persisted)
+	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+	defer cancelStop()
+	if errStop := manager.StopDeferredAuthRecreates(stopCtx); errStop != nil {
+		t.Fatalf("StopDeferredAuthRecreates() error = %v", errStop)
+	}
+}
+
+func TestRefreshAuthForRequestDoesNotOverwriteExternallyChangedCredential(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "external-change.json")
+	store := &retryingRefreshStore{path: path}
+	manager := NewManager(store, nil, nil)
+	external := map[string]any{
+		"access_token":  "external-access",
+		"refresh_token": "external-refresh",
+		"disabled":      false,
+	}
+	executor := &rotatingRefreshExecutor{
+		beforeReturn: func() error {
+			raw, errMarshal := json.Marshal(external)
+			if errMarshal != nil {
+				return errMarshal
+			}
+			return os.WriteFile(path, raw, 0o600)
+		},
+	}
+	manager.RegisterExecutor(executor)
+	registered, errRegister := manager.Register(
+		context.Background(),
+		&Auth{
+			ID:         "external-change.json",
+			Provider:   executor.Identifier(),
+			Attributes: map[string]string{"path": path},
+			Metadata: map[string]any{
+				"access_token":  "old-access",
+				"refresh_token": "old-refresh",
+			},
+		},
+	)
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	refreshed, errRefresh := manager.refreshAuthForRequest(
+		context.Background(), registered.ID, "old-access", registered.Generation,
+	)
+	if !errors.Is(errRefresh, errRefreshPersistedVersionChanged) ||
+		!errors.Is(errRefresh, ErrAuthDurableStateUncertain) {
+		t.Fatalf("refreshAuthForRequest() error = %v, want persisted version conflict", errRefresh)
+	}
+	if refreshed == nil || authAccessToken(refreshed) != "new-access" ||
+		authRefreshOwnerToken(refreshed) != "new-refresh" {
+		t.Fatalf("runtime rotated credential = %#v", refreshed)
+	}
+	store.mu.Lock()
+	saveCalls := store.saveCalls
+	store.mu.Unlock()
+	if saveCalls != 1 {
+		t.Fatalf("Save() calls = %d, want registration only", saveCalls)
+	}
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	var persisted map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &persisted); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if persisted["access_token"] != "external-access" || persisted["refresh_token"] != "external-refresh" {
+		t.Fatalf("external credential was overwritten: %#v", persisted)
+	}
+}
+
+func TestRefreshAuthForRequestPersistsVirtualCredentialThroughPrimaryOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "primary.json")
+	store := &retryingRefreshStore{path: path}
+	manager := NewManager(store, nil, nil)
+	sharedOwner := &struct{ Name string }{Name: "shared-owner"}
+	replacementOwner := &struct{ Name string }{Name: "replacement-owner"}
+	executor := &virtualPersistenceRefreshExecutor{persistenceRuntime: replacementOwner}
+	manager.RegisterExecutor(executor)
+	primary, errRegister := manager.Register(
+		context.Background(),
+		&Auth{
+			ID:         "primary.json",
+			Provider:   executor.Identifier(),
+			FileName:   "primary.json",
+			Disabled:   true,
+			Status:     StatusDisabled,
+			Attributes: map[string]string{"path": path, "gemini_virtual_primary": "true"},
+			Metadata: map[string]any{
+				"access_token":  "old-access",
+				"refresh_token": "old-refresh",
+				"project_id":    "project-a,project-b",
+			},
+			Runtime: sharedOwner,
+		},
+	)
+	if errRegister != nil {
+		t.Fatalf("Register(primary) error = %v", errRegister)
+	}
+	virtualRuntime := &struct{ Parent any }{Parent: sharedOwner}
+	virtual, errVirtual := manager.Register(
+		context.Background(),
+		&Auth{
+			ID:       "primary.json::project-a",
+			Provider: executor.Identifier(),
+			Attributes: map[string]string{
+				"runtime_only":          "true",
+				"gemini_virtual_parent": primary.ID,
+				"path":                  path,
+			},
+			Metadata: map[string]any{"project_id": "project-a", "virtual": true},
+			Runtime:  virtualRuntime,
+		},
+	)
+	if errVirtual != nil {
+		t.Fatalf("Register(virtual) error = %v", errVirtual)
+	}
+
+	refreshed, errRefresh := manager.refreshAuthForRequest(
+		context.Background(), virtual.ID, "", virtual.Generation,
+	)
+	if errRefresh != nil {
+		t.Fatalf("refreshAuthForRequest() error = %v", errRefresh)
+	}
+	if refreshed == nil || refreshed.Runtime != virtualRuntime || refreshed.Metadata["project_id"] != "project-a" {
+		t.Fatalf("refreshed virtual auth = %#v", refreshed)
+	}
+	persistedPrimary, ok := manager.GetByID(primary.ID)
+	if !ok || persistedPrimary.Runtime != sharedOwner {
+		t.Fatalf("primary runtime owner changed: %#v", persistedPrimary)
+	}
+	if persistedPrimary.Metadata["access_token"] != "new-access" ||
+		persistedPrimary.Metadata["refresh_token"] != "new-refresh" {
+		t.Fatalf("primary metadata = %#v", persistedPrimary.Metadata)
+	}
+	store.mu.Lock()
+	saveCalls := store.saveCalls
+	store.mu.Unlock()
+	if saveCalls != 2 {
+		t.Fatalf("Save() calls = %d, want primary registration plus refresh", saveCalls)
+	}
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("ReadFile() error = %v", errRead)
+	}
+	var persisted map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &persisted); errUnmarshal != nil {
+		t.Fatalf("Unmarshal() error = %v", errUnmarshal)
+	}
+	if persisted["access_token"] != "new-access" || persisted["refresh_token"] != "new-refresh" {
+		t.Fatalf("persisted primary credential = %#v", persisted)
+	}
+}
+
+func TestRefreshAuthForRequestWaitIsCancelable(t *testing.T) {
+	executor := &blockingRefreshExecutor{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	if _, err := manager.Register(
+		context.Background(),
+		&Auth{
+			ID:       "auth-refresh-cancel",
+			Provider: executor.Identifier(),
+			Metadata: map[string]any{"access_token": "old"},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := manager.refreshAuthForRequest(context.Background(), "auth-refresh-cancel", "old")
+		firstDone <- err
+	}()
+	select {
+	case <-executor.started:
+	case <-time.After(time.Second):
+		t.Fatal("first refresh did not start")
+	}
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	_, err := manager.refreshAuthForRequest(waitCtx, "auth-refresh-cancel", "old")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiting refresh error = %v, want deadline exceeded", err)
+	}
+	close(executor.release)
+	select {
+	case err = <-firstDone:
+		if err != nil {
+			t.Fatalf("first refresh error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first refresh did not finish")
+	}
+	manager.refreshLocksMu.Lock()
+	remainingLocks := len(manager.refreshLocks)
+	manager.refreshLocksMu.Unlock()
+	if remainingLocks != 0 {
+		t.Fatalf("refresh lock entries = %d, want 0", remainingLocks)
+	}
 }
 
 func TestManager_Update_WithModelStatesPreservesModelStates(t *testing.T) {

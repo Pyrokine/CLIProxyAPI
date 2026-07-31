@@ -1,15 +1,25 @@
 package auth
 
-import (
-	"fmt"
+import "fmt"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
-)
+// GCPProject contains details about a Google Cloud project available to the user.
+type GCPProject struct {
+	ProjectNumber  string           `json:"projectNumber"`
+	ProjectID      string           `json:"projectId"`
+	LifecycleState string           `json:"lifecycleState"`
+	Name           string           `json:"name"`
+	Labels         GCPProjectLabels `json:"labels"`
+}
+
+// GCPProjectLabels contains metadata labels associated with a Google Cloud project.
+type GCPProjectLabels struct {
+	GenerativeLanguage string `json:"generative-language"`
+}
 
 // ProjectSelectionError indicates that the user must choose a specific project ID.
 type ProjectSelectionError struct {
 	Email    string
-	Projects []interfaces.GCPProjectProjects
+	Projects []GCPProject
 }
 
 func (e *ProjectSelectionError) Error() string {
@@ -20,7 +30,7 @@ func (e *ProjectSelectionError) Error() string {
 }
 
 // ProjectsDisplay returns the projects list for caller presentation.
-func (e *ProjectSelectionError) ProjectsDisplay() []interfaces.GCPProjectProjects {
+func (e *ProjectSelectionError) ProjectsDisplay() []GCPProject {
 	if e == nil {
 		return nil
 	}

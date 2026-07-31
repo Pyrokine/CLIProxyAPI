@@ -6,6 +6,27 @@ import (
 	"testing"
 )
 
+func TestSaveTokenJSONFailurePreservesExistingCredential(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "token.json")
+	original := []byte(`{"access_token":"old"}`)
+	if errWrite := os.WriteFile(filePath, original, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	storage := struct {
+		Unsupported chan int `json:"unsupported"`
+	}{Unsupported: make(chan int)}
+	if errSave := SaveTokenJSON(filePath, storage, nil); errSave == nil {
+		t.Fatal("SaveTokenJSON() succeeded with unsupported value")
+	}
+	current, errRead := os.ReadFile(filePath)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if string(current) != string(original) {
+		t.Fatalf("credential changed after failed save: %q", current)
+	}
+}
+
 func TestSaveTokenJSON_FilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "auth", "test-token.json")

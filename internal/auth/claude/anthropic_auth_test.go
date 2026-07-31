@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -15,6 +16,28 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestRefreshTokensDetachedRequestHasTimeout(t *testing.T) {
+	originalTimeout := claudeRefreshTimeout
+	claudeRefreshTimeout = 20 * time.Millisecond
+	defer func() { claudeRefreshTimeout = originalTimeout }()
+	resetClaudeRefreshState()
+	defer resetClaudeRefreshState()
+	auth := &Auth{httpClient: &http.Client{Transport: roundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		},
+	)}}
+	started := time.Now()
+	_, errRefresh := auth.RefreshTokens(context.Background(), "timeout-refresh-token")
+	if !errors.Is(errRefresh, context.DeadlineExceeded) {
+		t.Fatalf("RefreshTokens() error = %v", errRefresh)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("RefreshTokens() elapsed = %s", elapsed)
+	}
 }
 
 func TestRefreshTokensWithRetry429BlocksImmediateReplay(t *testing.T) {

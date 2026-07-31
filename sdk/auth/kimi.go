@@ -7,8 +7,8 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/browser"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 

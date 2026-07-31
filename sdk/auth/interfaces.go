@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 // noinspection GoUnusedGlobalVariable

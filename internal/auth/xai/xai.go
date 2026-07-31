@@ -17,11 +17,10 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-var xaiRefreshGroup singleflight.Group
-
 // Auth performs xAI OAuth discovery, token exchange, and refresh.
 type Auth struct {
-	httpClient *http.Client
+	httpClient   *http.Client
+	refreshGroup singleflight.Group
 }
 
 // NewXAIAuth creates an xAI OAuth helper using config proxy settings.
@@ -40,7 +39,17 @@ func NewXAIAuthWithProxyURL(cfg *config.Config, proxyURL string) *Auth {
 		}
 	}
 	sdkCfg.ProxyURL = effectiveProxyURL
-	return &Auth{httpClient: util.SetProxy(&sdkCfg, &http.Client{})}
+	client := util.SetProxy(&sdkCfg, &http.Client{Timeout: httpClientTimeout})
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("xai OAuth redirect limit exceeded")
+		}
+		if _, err := ValidateOAuthEndpoint(req.URL.String(), "redirect endpoint"); err != nil {
+			return err
+		}
+		return nil
+	}
+	return &Auth{httpClient: client}
 }
 
 // ValidateOAuthEndpoint validates an endpoint returned by xAI discovery.
@@ -53,47 +62,24 @@ func ValidateOAuthEndpoint(rawURL string, field string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("xai discovery %s is invalid: %w", field, err)
 	}
-	if parsed.Scheme != "https" {
+	if !strings.EqualFold(parsed.Scheme, "https") {
 		return "", fmt.Errorf("xai discovery %s must use https: %q", field, rawURL)
+	}
+	if parsed.User != nil {
+		return "", fmt.Errorf("xai discovery %s must not contain user information", field)
 	}
 	host := strings.ToLower(strings.TrimSpace(parsed.Hostname()))
 	if host != "x.ai" && !strings.HasSuffix(host, ".x.ai") {
 		return "", fmt.Errorf("xai discovery %s host %q is not on x.ai", field, host)
 	}
-	return rawURL, nil
-}
-
-// BuildAuthorizeURL builds the browser URL for xAI OAuth.
-func BuildAuthorizeURL(params AuthorizeURLParams) (string, error) {
-	endpoint, err := ValidateOAuthEndpoint(params.AuthorizationEndpoint, "authorization_endpoint")
-	if err != nil {
-		return "", err
+	port := parsed.Port()
+	parsed.Scheme = "https"
+	parsed.Host = host
+	if port != "" && port != "443" {
+		parsed.Host += ":" + port
 	}
-	if strings.TrimSpace(params.RedirectURI) == "" {
-		return "", fmt.Errorf("xai authorize URL: redirect URI is required")
-	}
-	if strings.TrimSpace(params.CodeChallenge) == "" {
-		return "", fmt.Errorf("xai authorize URL: code challenge is required")
-	}
-	if strings.TrimSpace(params.State) == "" {
-		return "", fmt.Errorf("xai authorize URL: state is required")
-	}
-	if strings.TrimSpace(params.Nonce) == "" {
-		return "", fmt.Errorf("xai authorize URL: nonce is required")
-	}
-	values := url.Values{
-		"response_type":         {"code"},
-		"client_id":             {ClientID},
-		"redirect_uri":          {strings.TrimSpace(params.RedirectURI)},
-		"scope":                 {Scope},
-		"code_challenge":        {strings.TrimSpace(params.CodeChallenge)},
-		"code_challenge_method": {"S256"},
-		"state":                 {strings.TrimSpace(params.State)},
-		"nonce":                 {strings.TrimSpace(params.Nonce)},
-		"plan":                  {"generic"},
-		"referrer":              {"cli-proxy-api"},
-	}
-	return endpoint + "?" + values.Encode(), nil
+	parsed.Fragment = ""
+	return parsed.String(), nil
 }
 
 // Discover resolves xAI OAuth endpoints through OIDC discovery.
@@ -125,13 +111,16 @@ func (a *Auth) Discover(ctx context.Context) (*Discovery, error) {
 		)
 	}
 	var payload struct {
-		AuthorizationEndpoint string `json:"authorization_endpoint"`
-		TokenEndpoint         string `json:"token_endpoint"`
+		DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
+		TokenEndpoint               string `json:"token_endpoint"`
 	}
 	if err = json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("xai discovery: parse response: %w", err)
 	}
-	authorizationEndpoint, err := ValidateOAuthEndpoint(payload.AuthorizationEndpoint, "authorization_endpoint")
+	deviceAuthorizationEndpoint, err := ValidateOAuthEndpoint(
+		payload.DeviceAuthorizationEndpoint,
+		"device_authorization_endpoint",
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -139,50 +128,295 @@ func (a *Auth) Discover(ctx context.Context) (*Discovery, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Discovery{AuthorizationEndpoint: authorizationEndpoint, TokenEndpoint: tokenEndpoint}, nil
+	return &Discovery{
+		DeviceAuthorizationEndpoint: deviceAuthorizationEndpoint,
+		TokenEndpoint:               tokenEndpoint,
+	}, nil
 }
 
-// ExchangeCodeForTokens exchanges an authorization code for xAI OAuth tokens.
-func (a *Auth) ExchangeCodeForTokens(
-	ctx context.Context,
-	code, redirectURI string,
-	pkceCodes *PKCECodes,
-	tokenEndpoint string,
-) (*AuthBundle, error) {
-	if pkceCodes == nil {
-		return nil, fmt.Errorf("xai token exchange: PKCE codes are required")
-	}
-	if strings.TrimSpace(code) == "" {
-		return nil, fmt.Errorf("xai token exchange: authorization code is required")
-	}
-	if strings.TrimSpace(redirectURI) == "" {
-		return nil, fmt.Errorf("xai token exchange: redirect URI is required")
-	}
-	if strings.TrimSpace(tokenEndpoint) == "" {
-		discovery, errDiscover := a.Discover(ctx)
-		if errDiscover != nil {
-			return nil, errDiscover
-		}
-		tokenEndpoint = discovery.TokenEndpoint
-	}
-	form := url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {strings.TrimSpace(code)},
-		"redirect_uri":  {strings.TrimSpace(redirectURI)},
-		"client_id":     {ClientID},
-		"code_verifier": {pkceCodes.CodeVerifier},
-	}
-	tokenData, err := a.postTokenForm(ctx, tokenEndpoint, form)
+// StartDeviceFlow requests a device code through xAI OIDC discovery.
+func (a *Auth) StartDeviceFlow(ctx context.Context) (*DeviceCodeResponse, error) {
+	discovery, err := a.Discover(ctx)
 	if err != nil {
 		return nil, err
+	}
+	return a.RequestDeviceCode(ctx, discovery.DeviceAuthorizationEndpoint, discovery.TokenEndpoint)
+}
+
+// RequestDeviceCode requests a device authorization code from xAI.
+func (a *Auth) RequestDeviceCode(
+	ctx context.Context,
+	deviceAuthorizationEndpoint string,
+	tokenEndpoint string,
+) (*DeviceCodeResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	deviceAuthorizationEndpoint, err := ValidateOAuthEndpoint(
+		deviceAuthorizationEndpoint, "device_authorization_endpoint",
+	)
+	if err != nil {
+		return nil, err
+	}
+	tokenEndpoint, err = ValidateOAuthEndpoint(tokenEndpoint, "token_endpoint")
+	if err != nil {
+		return nil, err
+	}
+
+	form := url.Values{
+		"client_id": {ClientID},
+		"scope":     {Scope},
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		deviceAuthorizationEndpoint,
+		strings.NewReader(form.Encode()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("xai device code: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("xai device code request failed: %w", err)
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("xai device code: close response body error: %v", errClose)
+		}
+	}()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("xai device code: read response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"xai device code request failed with status %d: %s",
+			resp.StatusCode,
+			strings.TrimSpace(string(body)),
+		)
+	}
+
+	var deviceCode DeviceCodeResponse
+	if err = json.Unmarshal(body, &deviceCode); err != nil {
+		return nil, fmt.Errorf("xai device code: parse response: %w", err)
+	}
+	if strings.TrimSpace(deviceCode.DeviceCode) == "" {
+		return nil, fmt.Errorf("xai device code: response missing device_code")
+	}
+	if strings.TrimSpace(deviceCode.UserCode) == "" {
+		return nil, fmt.Errorf("xai device code: response missing user_code")
+	}
+	if strings.TrimSpace(deviceCode.VerificationURI) == "" &&
+		strings.TrimSpace(deviceCode.VerificationURIComplete) == "" {
+		return nil, fmt.Errorf("xai device code: response missing verification URI")
+	}
+	deviceCode.DeviceCode = strings.TrimSpace(deviceCode.DeviceCode)
+	deviceCode.UserCode = strings.TrimSpace(deviceCode.UserCode)
+	deviceCode.VerificationURI = strings.TrimSpace(deviceCode.VerificationURI)
+	deviceCode.VerificationURIComplete = strings.TrimSpace(deviceCode.VerificationURIComplete)
+	deviceCode.TokenEndpoint = tokenEndpoint
+	return &deviceCode, nil
+}
+
+// WaitForAuthorization polls until the user authorizes the device code.
+func (a *Auth) WaitForAuthorization(ctx context.Context, deviceCode *DeviceCodeResponse) (*AuthBundle, error) {
+	tokenData, err := a.PollForToken(ctx, deviceCode)
+	if err != nil {
+		return nil, err
+	}
+	tokenEndpoint := ""
+	if deviceCode != nil {
+		tokenEndpoint = strings.TrimSpace(deviceCode.TokenEndpoint)
 	}
 	return &AuthBundle{
 		TokenData:     *tokenData,
 		LastRefresh:   time.Now().UTC().Format(time.RFC3339),
 		BaseURL:       DefaultAPIBaseURL,
-		RedirectURI:   strings.TrimSpace(redirectURI),
-		TokenEndpoint: strings.TrimSpace(tokenEndpoint),
+		TokenEndpoint: tokenEndpoint,
 	}, nil
+}
+
+// PollForToken polls xAI's token endpoint until authorization completes.
+func (a *Auth) PollForToken(ctx context.Context, deviceCode *DeviceCodeResponse) (*TokenData, error) {
+	if deviceCode == nil {
+		return nil, fmt.Errorf("xai device code: response is nil")
+	}
+	if strings.TrimSpace(deviceCode.DeviceCode) == "" {
+		return nil, fmt.Errorf("xai device code: device_code is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	tokenEndpoint := strings.TrimSpace(deviceCode.TokenEndpoint)
+	if tokenEndpoint == "" {
+		discovery, err := a.Discover(ctx)
+		if err != nil {
+			return nil, err
+		}
+		tokenEndpoint = discovery.TokenEndpoint
+	}
+	validatedTokenEndpoint, err := ValidateOAuthEndpoint(tokenEndpoint, "token_endpoint")
+	if err != nil {
+		return nil, err
+	}
+
+	interval := time.Duration(deviceCode.Interval) * time.Second
+	if interval < defaultPollInterval {
+		interval = defaultPollInterval
+	}
+	now := time.Now()
+	deadline := now.Add(MaxPollDuration)
+	if deviceCode.ExpiresIn > 0 {
+		deviceDeadline := now.Add(time.Duration(deviceCode.ExpiresIn) * time.Second)
+		if deviceDeadline.Before(deadline) {
+			deadline = deviceDeadline
+		}
+	}
+	pollCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-pollCtx.Done():
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("xai device code: context cancelled: %w", ctx.Err())
+			}
+			return nil, fmt.Errorf("xai device code expired")
+		case <-timer.C:
+			if !time.Now().Before(deadline) {
+				return nil, fmt.Errorf("xai device code expired")
+			}
+			token, pollErr, nextInterval, shouldContinue := a.exchangeDeviceCode(
+				pollCtx,
+				validatedTokenEndpoint,
+				deviceCode.DeviceCode,
+				interval,
+			)
+			if !time.Now().Before(deadline) {
+				return nil, fmt.Errorf("xai device code expired")
+			}
+			if pollCtx.Err() != nil {
+				if ctx.Err() != nil {
+					return nil, fmt.Errorf("xai device code: context cancelled: %w", ctx.Err())
+				}
+				return nil, fmt.Errorf("xai device code expired")
+			}
+			if token != nil {
+				return token, nil
+			}
+			if !shouldContinue {
+				return nil, pollErr
+			}
+			interval = nextInterval
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				return nil, fmt.Errorf("xai device code expired")
+			}
+			if interval > remaining {
+				interval = remaining
+			}
+			timer.Reset(interval)
+		}
+	}
+}
+
+func (a *Auth) exchangeDeviceCode(
+	ctx context.Context,
+	tokenEndpoint string,
+	deviceCode string,
+	interval time.Duration,
+) (*TokenData, error, time.Duration, bool) {
+	form := url.Values{
+		"grant_type":  {DeviceCodeGrantType},
+		"device_code": {strings.TrimSpace(deviceCode)},
+		"client_id":   {ClientID},
+	}
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		tokenEndpoint,
+		strings.NewReader(form.Encode()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("xai device token: create request: %w", err), interval, false
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("xai device token request failed: %w", err), interval, false
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("xai device token: close response body error: %v", errClose)
+		}
+	}()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("xai device token: read response: %w", err), interval, false
+	}
+
+	var payload struct {
+		Error            string `json:"error"`
+		ErrorDescription string `json:"error_description"`
+		AccessToken      string `json:"access_token"`
+		RefreshToken     string `json:"refresh_token"`
+		IDToken          string `json:"id_token"`
+		TokenType        string `json:"token_type"`
+		ExpiresIn        int    `json:"expires_in"`
+	}
+	if err = json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("xai device token: parse response: %w", err), interval, false
+	}
+	if payload.Error != "" {
+		switch payload.Error {
+		case "authorization_pending":
+			return nil, nil, interval, true
+		case "slow_down":
+			return nil, nil, interval + defaultPollInterval, true
+		case "expired_token":
+			return nil, fmt.Errorf("xai device code expired"), interval, false
+		case "access_denied":
+			return nil, fmt.Errorf("xai device authorization denied"), interval, false
+		default:
+			description := strings.TrimSpace(payload.ErrorDescription)
+			if description != "" {
+				return nil, fmt.Errorf(
+					"xai device token error: %s: %s",
+					payload.Error,
+					description,
+				), interval, false
+			}
+			return nil, fmt.Errorf("xai device token error: %s", payload.Error), interval, false
+		}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf(
+			"xai device token request failed with status %d: %s",
+			resp.StatusCode,
+			strings.TrimSpace(string(body)),
+		), interval, false
+	}
+	if strings.TrimSpace(payload.AccessToken) == "" {
+		return nil, fmt.Errorf("xai device token response missing access_token"), interval, false
+	}
+	email, subject := parseJWTIdentity(payload.IDToken)
+	return buildTokenData(
+		payload.AccessToken,
+		payload.RefreshToken,
+		payload.IDToken,
+		payload.TokenType,
+		payload.ExpiresIn,
+		email,
+		subject,
+	), nil, interval, false
 }
 
 // RefreshTokens refreshes an xAI access token.
@@ -203,14 +437,24 @@ func (a *Auth) RefreshTokens(ctx context.Context, refreshToken, tokenEndpoint st
 		}
 		tokenEndpoint = discovery.TokenEndpoint
 	}
+	validatedTokenEndpoint, errValidate := ValidateOAuthEndpoint(tokenEndpoint, "token_endpoint")
+	if errValidate != nil {
+		return nil, errValidate
+	}
 
-	result, err, _ := xaiRefreshGroup.Do(
-		refreshToken, func() (interface{}, error) {
-			return a.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken, tokenEndpoint)
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, fmt.Errorf("xai token refresh: context cancelled: %w", errContext)
+	}
+	singleflightKey := refreshToken + "\x00" + validatedTokenEndpoint
+	sharedCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), httpClientTimeout)
+	defer cancelRefresh()
+	result, errRefresh, _ := a.refreshGroup.Do(
+		singleflightKey, func() (interface{}, error) {
+			return a.refreshTokensSingleFlight(sharedCtx, refreshToken, validatedTokenEndpoint)
 		},
 	)
-	if err != nil {
-		return nil, err
+	if errRefresh != nil {
+		return nil, errRefresh
 	}
 	tokenData, ok := result.(*TokenData)
 	if !ok || tokenData == nil {
@@ -272,16 +516,15 @@ func (a *Auth) postTokenForm(ctx context.Context, tokenEndpoint string, form url
 		return nil, fmt.Errorf("xai token response missing access_token")
 	}
 	email, subject := parseJWTIdentity(payload.IDToken)
-	return &TokenData{
-		AccessToken:  strings.TrimSpace(payload.AccessToken),
-		RefreshToken: strings.TrimSpace(payload.RefreshToken),
-		IDToken:      strings.TrimSpace(payload.IDToken),
-		TokenType:    strings.TrimSpace(payload.TokenType),
-		ExpiresIn:    payload.ExpiresIn,
-		Expire:       time.Now().Add(time.Duration(payload.ExpiresIn) * time.Second).UTC().Format(time.RFC3339),
-		Email:        email,
-		Subject:      subject,
-	}, nil
+	return buildTokenData(
+		payload.AccessToken,
+		payload.RefreshToken,
+		payload.IDToken,
+		payload.TokenType,
+		payload.ExpiresIn,
+		email,
+		subject,
+	), nil
 }
 
 // CreateTokenStorage converts an auth bundle into persistable storage.
@@ -305,6 +548,30 @@ func (a *Auth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 		TokenEndpoint: bundle.TokenEndpoint,
 		AuthKind:      "oauth",
 	}
+}
+
+func buildTokenData(
+	accessToken string,
+	refreshToken string,
+	idToken string,
+	tokenType string,
+	expiresIn int,
+	email string,
+	subject string,
+) *TokenData {
+	tokenData := &TokenData{
+		AccessToken:  strings.TrimSpace(accessToken),
+		RefreshToken: strings.TrimSpace(refreshToken),
+		IDToken:      strings.TrimSpace(idToken),
+		TokenType:    strings.TrimSpace(tokenType),
+		ExpiresIn:    expiresIn,
+		Email:        strings.TrimSpace(email),
+		Subject:      strings.TrimSpace(subject),
+	}
+	if expiresIn > 0 {
+		tokenData.Expire = time.Now().Add(time.Duration(expiresIn) * time.Second).UTC().Format(time.RFC3339)
+	}
+	return tokenData
 }
 
 func parseJWTIdentity(token string) (email string, subject string) {

@@ -95,3 +95,159 @@ func TestManagerResetQuotaClearsRuntimeAndRegistryState(t *testing.T) {
 		t.Fatalf("registry available model after reset = %q, %v; want %q", available, err, model)
 	}
 }
+
+func TestManagerResetQuotaRejectsInFlightPreResetResult(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	const (
+		authID = "reset-quota-in-flight"
+		model  = "quota-model"
+	)
+	next := time.Now().Add(time.Hour)
+	registered, errRegister := manager.Register(
+		ctx, &Auth{
+			ID:             authID,
+			Provider:       "claude",
+			Status:         StatusError,
+			Unavailable:    true,
+			NextRetryAfter: next,
+			Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: next,
+					Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
+					QuotaEpoch:     2,
+				},
+			},
+		},
+	)
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	updated, _, errReset := manager.ResetQuota(ctx, authID)
+	if errReset != nil {
+		t.Fatalf("ResetQuota() error = %v", errReset)
+	}
+	if updated == nil || updated.Generation == registered.Generation {
+		t.Fatalf("ResetQuota() result = %#v, want new generation", updated)
+	}
+
+	retryAfter := time.Hour
+	manager.MarkResult(
+		ctx, Result{
+			AuthID:          authID,
+			AuthGeneration:  registered.Generation,
+			Model:           model,
+			ModelQuotaEpoch: 2,
+			Error:           &Error{HTTPStatus: 429, Message: "stale quota exhausted"},
+			RetryAfter:      &retryAfter,
+		},
+	)
+	current, ok := manager.GetByID(authID)
+	if !ok {
+		t.Fatal("auth missing after stale pre-reset result")
+	}
+	state := current.ModelStates[model]
+	if state == nil || state.Quota.Exceeded || state.Unavailable || state.QuotaEpoch != 3 {
+		t.Fatalf("stale pre-reset result changed recovered model: %#v", state)
+	}
+
+	manager.MarkResult(
+		ctx, Result{
+			AuthID:          authID,
+			AuthGeneration:  current.Generation,
+			Model:           model,
+			ModelQuotaEpoch: state.QuotaEpoch,
+			Error:           &Error{HTTPStatus: 429, Message: "new quota exhausted"},
+			RetryAfter:      &retryAfter,
+		},
+	)
+	current, ok = manager.GetByID(authID)
+	if !ok {
+		t.Fatal("auth missing after current result")
+	}
+	state = current.ModelStates[model]
+	if state == nil || !state.Quota.Exceeded || !state.Unavailable || state.QuotaEpoch != 4 {
+		t.Fatalf("current post-reset result was not applied: %#v", state)
+	}
+}
+
+func TestManagerResetQuotaPreservesNonQuotaModelError(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	ctx := context.Background()
+	const (
+		authID     = "reset-mixed-auth"
+		quotaModel = "quota-model"
+		errorModel = "missing-model"
+	)
+	next := time.Now().Add(time.Hour)
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(
+		authID,
+		"claude",
+		[]*registry.ModelInfo{{ID: quotaModel}, {ID: errorModel}},
+	)
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	registered, errRegister := manager.Register(
+		ctx, &Auth{
+			ID:             authID,
+			Provider:       "claude",
+			Status:         StatusError,
+			StatusMessage:  "quota exhausted",
+			Unavailable:    true,
+			NextRetryAfter: next,
+			Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
+			ModelStates: map[string]*ModelState{
+				quotaModel: {
+					Status:         StatusError,
+					StatusMessage:  "quota exhausted",
+					Unavailable:    true,
+					NextRetryAfter: next,
+					LastError:      &Error{HTTPStatus: 429, Message: "quota exhausted"},
+					Quota:          QuotaState{Exceeded: true, Reason: "quota", NextRecoverAt: next},
+					UpdatedAt:      next.Add(-time.Minute),
+					QuotaEpoch:     3,
+				},
+				errorModel: {
+					Status:         StatusError,
+					StatusMessage:  "model not found",
+					Unavailable:    true,
+					NextRetryAfter: next,
+					LastError:      &Error{HTTPStatus: 404, Message: "model not found"},
+					UpdatedAt:      next,
+				},
+			},
+		},
+	)
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	reg.SetModelQuotaExceeded(authID, quotaModel)
+	reg.SuspendClientModel(authID, quotaModel, "quota")
+	reg.SuspendClientModel(authID, errorModel, "not_found")
+
+	updated, models, err := manager.ResetQuota(ctx, authID)
+	if err != nil {
+		t.Fatalf("ResetQuota() error = %v", err)
+	}
+	if len(models) != 1 || models[0] != quotaModel {
+		t.Fatalf("ResetQuota() models = %v, want [%s]", models, quotaModel)
+	}
+	quotaState := updated.ModelStates[quotaModel]
+	if quotaState == nil || quotaState.Quota.Exceeded || quotaState.Unavailable || quotaState.QuotaEpoch != 4 {
+		t.Fatalf("quota model state = %#v, want recovered epoch 4", quotaState)
+	}
+	errorState := updated.ModelStates[errorModel]
+	if errorState == nil || errorState.Status != StatusError || !errorState.Unavailable || errorState.LastError == nil {
+		t.Fatalf("non-quota model state was cleared: %#v", errorState)
+	}
+	if updated.Status != StatusError || updated.StatusMessage != "model not found" || updated.LastError == nil {
+		t.Fatalf("aggregated auth error = %#v", updated)
+	}
+	if current, ok := manager.GetByID(authID); !ok || current.Generation == registered.Generation {
+		t.Fatalf("ResetQuota() did not advance auth generation: %#v", current)
+	}
+}

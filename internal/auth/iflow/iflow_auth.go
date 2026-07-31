@@ -113,6 +113,14 @@ func (ia *Auth) newTokenRequest(ctx context.Context, form url.Values) (*http.Req
 	return req, nil
 }
 
+func sanitizeIFlowText(text string) string {
+	return strings.TrimSpace(string(util.MaskSensitivePayload([]byte(text))))
+}
+
+func sanitizeIFlowResponseBody(body []byte) string {
+	return strings.TrimSpace(string(util.MaskSensitivePayload(body)))
+}
+
 func (ia *Auth) doTokenRequest(ctx context.Context, req *http.Request) (*TokenData, error) {
 	resp, err := ia.httpClient.Do(req)
 	if err != nil {
@@ -126,8 +134,9 @@ func (ia *Auth) doTokenRequest(ctx context.Context, req *http.Request) (*TokenDa
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Debugf("iflow token request failed: status=%d body=%s", resp.StatusCode, string(body))
-		return nil, fmt.Errorf("iflow token: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		bodyText := sanitizeIFlowResponseBody(body)
+		log.Debugf("iflow token request failed: status=%d body=%s", resp.StatusCode, bodyText)
+		return nil, fmt.Errorf("iflow token: %d %s", resp.StatusCode, bodyText)
 	}
 
 	var tokenResp tokenResponse
@@ -144,7 +153,7 @@ func (ia *Auth) doTokenRequest(ctx context.Context, req *http.Request) (*TokenDa
 	}
 
 	if tokenResp.AccessToken == "" {
-		log.Debug(string(body))
+		log.Debug(sanitizeIFlowResponseBody(body))
 		return nil, fmt.Errorf("iflow token: missing access token in response")
 	}
 
@@ -183,7 +192,7 @@ func (ia *Auth) fetchUserInfo(ctx context.Context, accessToken string) (*userInf
 
 	resp, err := ia.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("iflow api key: request failed: %w", err)
+		return nil, fmt.Errorf("iflow api key: request failed: %s", sanitizeIFlowText(err.Error()))
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -193,8 +202,9 @@ func (ia *Auth) fetchUserInfo(ctx context.Context, accessToken string) (*userInf
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Debugf("iflow api key failed: status=%d body=%s", resp.StatusCode, string(body))
-		return nil, fmt.Errorf("iflow api key: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		bodyText := sanitizeIFlowResponseBody(body)
+		log.Debugf("iflow api key failed: status=%d body=%s", resp.StatusCode, bodyText)
+		return nil, fmt.Errorf("iflow api key: %d %s", resp.StatusCode, bodyText)
 	}
 
 	var result userInfoResponse
@@ -378,9 +388,10 @@ func (ia *Auth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*KeyData, e
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Debugf("iflow cookie GET request failed: status=%d body=%s", resp.StatusCode, string(body))
+		bodyText := sanitizeIFlowResponseBody(body)
+		log.Debugf("iflow cookie GET request failed: status=%d body=%s", resp.StatusCode, bodyText)
 		return nil, fmt.Errorf(
-			"iflow cookie: GET request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)),
+			"iflow cookie: GET request failed with status %d: %s", resp.StatusCode, bodyText,
 		)
 	}
 
@@ -390,7 +401,7 @@ func (ia *Auth) fetchAPIKeyInfo(ctx context.Context, cookie string) (*KeyData, e
 	}
 
 	if !keyResp.Success {
-		return nil, fmt.Errorf("iflow cookie: GET request not successful: %s", keyResp.Message)
+		return nil, fmt.Errorf("iflow cookie: GET request not successful: %s", sanitizeIFlowText(keyResp.Message))
 	}
 
 	// Handle initial response where apiKey field might be apiKeyMask
@@ -464,10 +475,10 @@ func (ia *Auth) RefreshAPIKey(ctx context.Context, cookie, name string) (*KeyDat
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		log.Debugf("iflow cookie POST request failed: status=%d body=%s", resp.StatusCode, string(body))
+		bodyText := sanitizeIFlowResponseBody(body)
+		log.Debugf("iflow cookie POST request failed: status=%d body=%s", resp.StatusCode, bodyText)
 		return nil, fmt.Errorf(
-			"iflow cookie refresh: POST request failed with status %d: %s", resp.StatusCode,
-			strings.TrimSpace(string(body)),
+			"iflow cookie refresh: POST request failed with status %d: %s", resp.StatusCode, bodyText,
 		)
 	}
 
@@ -477,7 +488,7 @@ func (ia *Auth) RefreshAPIKey(ctx context.Context, cookie, name string) (*KeyDat
 	}
 
 	if !keyResp.Success {
-		return nil, fmt.Errorf("iflow cookie refresh: POST request not successful: %s", keyResp.Message)
+		return nil, fmt.Errorf("iflow cookie refresh: POST request not successful: %s", sanitizeIFlowText(keyResp.Message))
 	}
 
 	return &keyResp.Data, nil

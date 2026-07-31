@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -9,12 +10,36 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestRefreshTokensDetachedRequestHasTimeout(t *testing.T) {
+	originalTimeout := codexRefreshTimeout
+	codexRefreshTimeout = 20 * time.Millisecond
+	defer func() { codexRefreshTimeout = originalTimeout }()
+	codexRefreshGroup = singleflight.Group{}
+	defer func() { codexRefreshGroup = singleflight.Group{} }()
+	auth := &Auth{httpClient: &http.Client{Transport: roundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		},
+	)}}
+	started := time.Now()
+	_, errRefresh := auth.RefreshTokens(context.Background(), "timeout-refresh-token")
+	if !errors.Is(errRefresh, context.DeadlineExceeded) {
+		t.Fatalf("RefreshTokens() error = %v", errRefresh)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("RefreshTokens() elapsed = %s", elapsed)
+	}
 }
 
 func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {

@@ -93,6 +93,45 @@ func TestManagerRegisterExecutorClosesReplacedExecutionSessions(t *testing.T) {
 	}
 }
 
+func TestManagerExecutorCompareAndSwap(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	plugin := &replaceAwareExecutor{id: "codex"}
+	native := &replaceAwareExecutor{id: "codex"}
+	replacement := &replaceAwareExecutor{id: "codex"}
+
+	if !manager.RegisterExecutorIfAbsent(plugin) {
+		t.Fatal("RegisterExecutorIfAbsent() rejected an empty provider")
+	}
+	if manager.RegisterExecutorIfAbsent(native) {
+		t.Fatal("RegisterExecutorIfAbsent() replaced an existing executor")
+	}
+	if manager.ReplaceExecutorIfSame(native, replacement) {
+		t.Fatal("ReplaceExecutorIfSame() accepted a stale expected executor")
+	}
+	if manager.UnregisterExecutorIfSame("codex", native) {
+		t.Fatal("UnregisterExecutorIfSame() accepted a stale expected executor")
+	}
+	resolved, okResolved := manager.Executor("codex")
+	if !okResolved || resolved != plugin {
+		t.Fatalf("stale CAS changed executor: %#v", resolved)
+	}
+
+	if !manager.ReplaceExecutorIfSame(plugin, replacement) {
+		t.Fatal("ReplaceExecutorIfSame() rejected the current executor")
+	}
+	if closed := plugin.ClosedSessionIDs(); len(closed) != 1 || closed[0] != CloseAllExecutionSessionsID {
+		t.Fatalf("replaced executor close calls = %v", closed)
+	}
+	if !manager.UnregisterExecutorIfSame("codex", replacement) {
+		t.Fatal("UnregisterExecutorIfSame() rejected the current executor")
+	}
+	if _, okResolved = manager.Executor("codex"); okResolved {
+		t.Fatal("executor remains after successful conditional unregister")
+	}
+}
+
 func TestManagerExecutorReturnsRegisteredExecutor(t *testing.T) {
 	t.Parallel()
 

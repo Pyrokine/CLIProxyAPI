@@ -14,9 +14,18 @@ import (
 	"sync"
 	"time"
 
-	baseauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 )
+
+// TokenStorage persists provider-owned authentication data.
+type TokenStorage interface {
+	SaveTokenToFile(authFilePath string) error
+}
+
+// RefreshCommitGuard publishes a refreshed credential against its provider owner.
+type RefreshCommitGuard interface {
+	CommitRefresh(func() bool) bool
+}
 
 // PostAuthHook defines a function that is called after an Auth record is created
 // but before it is persisted to storage. This allows for modification of the
@@ -59,7 +68,7 @@ type Auth struct {
 	// FileName stores the relative or absolute path of the backing auth file.
 	FileName string `json:"-"`
 	// Storage holds the token persistence implementation used during login flows.
-	Storage baseauth.TokenStorage `json:"-"`
+	Storage TokenStorage `json:"-"`
 	// Label is an optional human-readable label for logging.
 	Label string `json:"label,omitempty"`
 	// Status is the lifecycle status managed by the AuthManager.
@@ -95,9 +104,16 @@ type Auth struct {
 
 	// Runtime carries non-serializable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+	// Generation identifies the manager-published credential version used by a request.
+	Generation uint64 `json:"-"`
+	// RefreshCommit guards provider-owned refresh publication against owner replacement.
+	RefreshCommit RefreshCommitGuard `json:"-"`
+	// RefreshPersistence carries a persistent owner update for runtime-only virtual credentials.
+	RefreshPersistence *Auth `json:"-"`
 
-	Success int64 `json:"-"`
-	Failed  int64 `json:"-"`
+	executorKey string
+	Success     int64 `json:"-"`
+	Failed      int64 `json:"-"`
 
 	recentRequests recentRequestRing
 	indexAssigned  bool
@@ -156,6 +172,8 @@ type ModelState struct {
 	Quota QuotaState `json:"quota"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
+	// QuotaEpoch invalidates in-flight results from before the latest quota barrier.
+	QuotaEpoch uint64 `json:"-"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {
@@ -260,6 +278,9 @@ func (a *Auth) Clone() *Auth {
 		}
 	}
 	copyAuth.Runtime = a.Runtime
+	if a.RefreshPersistence != nil {
+		copyAuth.RefreshPersistence = a.RefreshPersistence.Clone()
+	}
 	return &copyAuth
 }
 

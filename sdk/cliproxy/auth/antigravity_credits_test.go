@@ -13,29 +13,65 @@ import (
 )
 
 type antigravityCreditsFallbackExecutor struct {
-	streamCreditsRequested []bool
+	executeAuthIDs          []string
+	executeCreditsRequested []bool
+	streamAuthIDs           []string
+	streamCreditsRequested  []bool
+}
+
+type antigravityAuthIDSelector struct {
+	authID string
+}
+
+func (s *antigravityAuthIDSelector) Pick(
+	_ context.Context,
+	_, _ string,
+	_ cliproxyexecutor.Options,
+	auths []*Auth,
+) (*Auth, error) {
+	for _, auth := range auths {
+		if auth != nil && auth.ID == s.authID {
+			return auth, nil
+		}
+	}
+	return nil, fmt.Errorf("auth %q not found", s.authID)
 }
 
 func (e *antigravityCreditsFallbackExecutor) Identifier() string { return "antigravity" }
 
 func (e *antigravityCreditsFallbackExecutor) Execute(
-	context.Context,
-	*Auth,
-	cliproxyexecutor.Request,
-	cliproxyexecutor.Options,
+	ctx context.Context,
+	auth *Auth,
+	_ cliproxyexecutor.Request,
+	_ cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
-	return cliproxyexecutor.Response{}, &Error{
-		HTTPStatus: http.StatusNotImplemented, Message: "Execute not implemented",
+	creditsRequested := AntigravityCreditsRequested(ctx)
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
 	}
+	e.executeAuthIDs = append(e.executeAuthIDs, authID)
+	e.executeCreditsRequested = append(e.executeCreditsRequested, creditsRequested)
+	if !creditsRequested {
+		return cliproxyexecutor.Response{}, &Error{
+			HTTPStatus: http.StatusTooManyRequests, Message: "quota exhausted",
+		}
+	}
+	return cliproxyexecutor.Response{Payload: []byte("credits fallback")}, nil
 }
 
 func (e *antigravityCreditsFallbackExecutor) ExecuteStream(
 	ctx context.Context,
-	_ *Auth,
+	auth *Auth,
 	req cliproxyexecutor.Request,
 	_ cliproxyexecutor.Options,
 ) (*cliproxyexecutor.StreamResult, error) {
 	creditsRequested := AntigravityCreditsRequested(ctx)
+	authID := ""
+	if auth != nil {
+		authID = auth.ID
+	}
+	e.streamAuthIDs = append(e.streamAuthIDs, authID)
 	e.streamCreditsRequested = append(e.streamCreditsRequested, creditsRequested)
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	if !creditsRequested {
@@ -118,6 +154,95 @@ func TestManagerExecuteStream_AntigravityCreditsFallbackAfterBootstrap429(t *tes
 	}
 	if executor.streamCreditsRequested[0] || !executor.streamCreditsRequested[1] {
 		t.Fatalf("credits flags = %v, want [false true]", executor.streamCreditsRequested)
+	}
+}
+
+func TestManagerExecute_AntigravityCreditsFallbackHonorsDynamicAuthPin(t *testing.T) {
+	const model = "claude-sonnet-4-6-thinking"
+	const ownerAuthID = "ag-owner"
+	executor := &antigravityCreditsFallbackExecutor{}
+	manager := NewManager(nil, &antigravityAuthIDSelector{authID: ownerAuthID}, nil)
+	manager.SetConfig(
+		&internalconfig.Config{
+			QuotaExceeded: internalconfig.QuotaExceeded{AntigravityCredits: true},
+		},
+	)
+	manager.RegisterExecutor(executor)
+
+	for _, authID := range []string{ownerAuthID, "ag-other"} {
+		registry.GetGlobalRegistry().RegisterClient(
+			authID, "antigravity", []*registry.ModelInfo{{ID: model}},
+		)
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+		if _, errRegister := manager.Register(
+			context.Background(), &Auth{ID: authID, Provider: "antigravity", Status: StatusActive},
+		); errRegister != nil {
+			t.Fatalf("register auth %s: %v", authID, errRegister)
+		}
+	}
+
+	resp, errExecute := manager.Execute(
+		context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model},
+		cliproxyexecutor.Options{
+			Metadata: map[string]any{cliproxyexecutor.PinSelectedAuthMetadataKey: true},
+		},
+	)
+	if errExecute != nil {
+		t.Fatalf("execute: %v", errExecute)
+	}
+	if string(resp.Payload) != "credits fallback" {
+		t.Fatalf("payload = %q, want credits fallback", resp.Payload)
+	}
+	if got := executor.executeAuthIDs; len(got) != 2 || got[0] != ownerAuthID || got[1] != ownerAuthID {
+		t.Fatalf("execute auth IDs = %v, want [%s %s]", got, ownerAuthID, ownerAuthID)
+	}
+}
+
+func TestManagerExecuteStream_AntigravityCreditsFallbackHonorsDynamicAuthPin(t *testing.T) {
+	const model = "claude-sonnet-4-6-thinking"
+	const ownerAuthID = "ag-owner"
+	executor := &antigravityCreditsFallbackExecutor{}
+	manager := NewManager(nil, &antigravityAuthIDSelector{authID: ownerAuthID}, nil)
+	manager.SetConfig(
+		&internalconfig.Config{
+			QuotaExceeded: internalconfig.QuotaExceeded{AntigravityCredits: true},
+		},
+	)
+	manager.RegisterExecutor(executor)
+
+	for _, authID := range []string{ownerAuthID, "ag-other"} {
+		registry.GetGlobalRegistry().RegisterClient(
+			authID, "antigravity", []*registry.ModelInfo{{ID: model}},
+		)
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+		if _, errRegister := manager.Register(
+			context.Background(), &Auth{ID: authID, Provider: "antigravity", Status: StatusActive},
+		); errRegister != nil {
+			t.Fatalf("register auth %s: %v", authID, errRegister)
+		}
+	}
+
+	metadata := map[string]any{cliproxyexecutor.PinSelectedAuthMetadataKey: true}
+	streamResult, errExecute := manager.ExecuteStream(
+		context.Background(), []string{"antigravity"}, cliproxyexecutor.Request{Model: model},
+		cliproxyexecutor.Options{Metadata: metadata},
+	)
+	if errExecute != nil {
+		t.Fatalf("execute stream: %v", errExecute)
+	}
+
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != "credits fallback" {
+		t.Fatalf("payload = %q, want credits fallback", payload)
+	}
+	if got := executor.streamAuthIDs; len(got) != 2 || got[0] != ownerAuthID || got[1] != ownerAuthID {
+		t.Fatalf("stream auth IDs = %v, want [%s %s]", got, ownerAuthID, ownerAuthID)
 	}
 }
 

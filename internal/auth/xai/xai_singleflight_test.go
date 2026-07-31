@@ -2,6 +2,7 @@ package xai
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -74,6 +75,272 @@ func TestRefreshTokensSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("refresh calls = %d, want 1", got)
+	}
+}
+
+func TestRefreshTokensRejectsUntrustedExplicitEndpoint(t *testing.T) {
+	var calls atomic.Int32
+	auth := &Auth{
+		httpClient: &http.Client{
+			Transport: xaiRoundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					calls.Add(1)
+					return nil, fmt.Errorf("unexpected request to %s", req.URL)
+				},
+			),
+		},
+	}
+
+	_, err := auth.RefreshTokens(
+		context.Background(),
+		"refresh-token",
+		"http://127.0.0.1/oauth/token",
+	)
+	if err == nil || !strings.Contains(err.Error(), "must use https") {
+		t.Fatalf("RefreshTokens() error = %v, want trusted endpoint validation error", err)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("refresh requests = %d, want 0", got)
+	}
+}
+
+func TestRefreshTokensSingleflightSeparatesTokenEndpoints(t *testing.T) {
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	auth := &Auth{
+		httpClient: &http.Client{
+			Transport: xaiRoundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					entered <- req.URL.Host
+					<-release
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body: io.NopCloser(
+							strings.NewReader(`{"access_token":"` + req.URL.Host + `","expires_in":3600}`),
+						),
+						Header:  make(http.Header),
+						Request: req,
+					}, nil
+				},
+			),
+		},
+	}
+
+	endpoints := []string{
+		"https://x.ai/oauth/token",
+		"https://auth.x.ai/oauth/token",
+	}
+	results := make(chan string, len(endpoints))
+	errs := make(chan error, len(endpoints))
+	for _, endpoint := range endpoints {
+		go func() {
+			tokenData, err := auth.RefreshTokens(context.Background(), "shared-refresh-token", endpoint)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- tokenData.AccessToken
+		}()
+	}
+
+	seenHosts := make(map[string]struct{}, len(endpoints))
+	for range endpoints {
+		select {
+		case host := <-entered:
+			seenHosts[host] = struct{}{}
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("refreshes for distinct token endpoints were coalesced")
+		}
+	}
+	close(release)
+	if len(seenHosts) != len(endpoints) {
+		t.Fatalf("refresh hosts = %#v", seenHosts)
+	}
+	for range endpoints {
+		select {
+		case err := <-errs:
+			t.Fatalf("RefreshTokens() error = %v", err)
+		case accessToken := <-results:
+			if _, ok := seenHosts[accessToken]; !ok {
+				t.Fatalf("access token = %q, want one of %#v", accessToken, seenHosts)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("refresh result timed out")
+		}
+	}
+}
+
+func TestRefreshTokensSingleflightCanonicalizesEquivalentEndpoints(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	auth := &Auth{
+		httpClient: &http.Client{
+			Transport: xaiRoundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					if calls.Add(1) == 1 {
+						close(entered)
+					}
+					<-release
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body: io.NopCloser(
+							strings.NewReader(`{"access_token":"access","expires_in":3600}`),
+						),
+						Header:  make(http.Header),
+						Request: req,
+					}, nil
+				},
+			),
+		},
+	}
+
+	endpoints := []string{"https://x.ai/oauth/token", "HTTPS://X.AI:443/oauth/token#ignored"}
+	errs := make(chan error, len(endpoints))
+	for _, endpoint := range endpoints {
+		go func() {
+			_, err := auth.RefreshTokens(context.Background(), "shared-token", endpoint)
+			errs <- err
+		}()
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("refresh request did not start")
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	for range endpoints {
+		if err := <-errs; err != nil {
+			t.Fatalf("RefreshTokens() error = %v", err)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("refresh calls = %d, want 1", got)
+	}
+}
+
+func TestRefreshTokensSingleflightIsScopedToAuthClient(t *testing.T) {
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	newAuth := func(label string) *Auth {
+		return &Auth{
+			httpClient: &http.Client{
+				Transport: xaiRoundTripFunc(
+					func(req *http.Request) (*http.Response, error) {
+						entered <- label
+						<-release
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body: io.NopCloser(
+								strings.NewReader(`{"access_token":"` + label + `","expires_in":3600}`),
+							),
+							Header:  make(http.Header),
+							Request: req,
+						}, nil
+					},
+				),
+			},
+		}
+	}
+	errs := make(chan error, 2)
+	for _, auth := range []*Auth{newAuth("first"), newAuth("second")} {
+		go func() {
+			_, err := auth.RefreshTokens(context.Background(), "shared-token", "https://x.ai/oauth/token")
+			errs <- err
+		}()
+	}
+	seen := make(map[string]struct{}, 2)
+	for range 2 {
+		select {
+		case label := <-entered:
+			seen[label] = struct{}{}
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("refreshes on separate clients were coalesced")
+		}
+	}
+	close(release)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("RefreshTokens() error = %v", err)
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("refresh clients = %#v", seen)
+	}
+}
+
+func TestRefreshTokensCompletesRotationAfterRequestCancellation(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	auth := &Auth{
+		httpClient: &http.Client{
+			Transport: xaiRoundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					close(entered)
+					<-release
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body: io.NopCloser(
+							strings.NewReader(`{"access_token":"access","expires_in":3600}`),
+						),
+						Header:  make(http.Header),
+						Request: req,
+					}, nil
+				},
+			),
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := auth.RefreshTokens(ctx, "refresh-token", "https://x.ai/oauth/token")
+		done <- err
+	}()
+	<-entered
+	cancel()
+	select {
+	case err := <-done:
+		close(release)
+		t.Fatalf("RefreshTokens() returned before rotation completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RefreshTokens() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("detached refresh did not finish")
+	}
+}
+
+func TestRefreshTokensRejectsRedirectOutsideXAI(t *testing.T) {
+	var calls atomic.Int32
+	auth := NewXAIAuth(nil)
+	auth.httpClient.Transport = xaiRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			response := &http.Response{
+				StatusCode: http.StatusTemporaryRedirect,
+				Body:       io.NopCloser(strings.NewReader("")),
+				Header:     make(http.Header),
+				Request:    req,
+			}
+			response.Header.Set("Location", "https://example.com/oauth/token")
+			return response, nil
+		},
+	)
+	_, err := auth.RefreshTokens(context.Background(), "refresh-token", "https://x.ai/oauth/token")
+	if err == nil || !strings.Contains(err.Error(), "not on x.ai") {
+		t.Fatalf("RefreshTokens() error = %v, want redirect validation error", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("transport calls = %d, want 1", got)
 	}
 }
 

@@ -315,6 +315,46 @@ func TestSessionAffinitySelector_PicksStickyAuth(t *testing.T) {
 	}
 }
 
+func TestSessionAffinitySelector_SkipsStickyAuthCoolingDownForModel(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(
+		SessionAffinityConfig{
+			Fallback: &FillFirstSelector{},
+			TTL:      time.Hour,
+		},
+	)
+	defer selector.Stop()
+
+	const model = "model-a"
+	auths := []*Auth{
+		{
+			ID:       "a",
+			Provider: "gemini",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(time.Hour),
+					Quota: QuotaState{
+						Exceeded:      true,
+						NextRecoverAt: time.Now().Add(time.Hour),
+					},
+				},
+			},
+		},
+		{ID: "b", Provider: "gemini"},
+	}
+	opts := cliproxyexecutor.Options{Headers: http.Header{"X-Session-ID": {"sess-cooldown"}}}
+	selector.Remember("gemini", opts, auths[0])
+
+	selected, errPick := selector.Pick(context.Background(), "gemini", model, opts, auths)
+	if errPick != nil {
+		t.Fatalf("Pick() error = %v", errPick)
+	}
+	if selected == nil || selected.ID != "b" {
+		t.Fatalf("Pick() = %#v, want non-cooling auth b", selected)
+	}
+}
+
 func TestHeaderValueIgnoreCase(t *testing.T) {
 	t.Parallel()
 

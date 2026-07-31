@@ -226,57 +226,73 @@ func (a *Auth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error) {
 }
 
 // PollForToken polls the token endpoint with the device code to obtain an access token.
-func (a *Auth) PollForToken(deviceCode, codeVerifier string) (*TokenData, error) {
+func (a *Auth) PollForToken(ctx context.Context, deviceCode, codeVerifier string) (*TokenData, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	pollInterval := 5 * time.Second
 	maxAttempts := 60 // 5 minutes max
 
 	for attempt := range maxAttempts {
+		if errContext := ctx.Err(); errContext != nil {
+			return nil, fmt.Errorf("device token poll cancelled: %w", errContext)
+		}
 		data := url.Values{}
 		data.Set("grant_type", oAuthGrantType)
 		data.Set("client_id", oAuthClientID)
 		data.Set("device_code", deviceCode)
 		data.Set("code_verifier", codeVerifier)
 
-		req, errReq := http.NewRequest("POST", oAuthTokenEndpoint, strings.NewReader(data.Encode()))
+		req, errReq := http.NewRequestWithContext(
+			ctx, http.MethodPost, oAuthTokenEndpoint, strings.NewReader(data.Encode()),
+		)
 		if errReq != nil {
-			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, errReq)
-			time.Sleep(pollInterval)
-			continue
+			return nil, fmt.Errorf("create device token poll request: %w", errReq)
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		resp, err := a.httpClient.Do(req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("device token poll cancelled: %w", ctx.Err())
+			}
 			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
-			time.Sleep(pollInterval)
+			if errWait := waitForQwenPoll(ctx, pollInterval); errWait != nil {
+				return nil, errWait
+			}
 			continue
 		}
 
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("device token poll cancelled: %w", ctx.Err())
+		}
 		if err != nil {
 			fmt.Printf("Polling attempt %d/%d failed: %v\n", attempt+1, maxAttempts, err)
-			time.Sleep(pollInterval)
+			if errWait := waitForQwenPoll(ctx, pollInterval); errWait != nil {
+				return nil, errWait
+			}
 			continue
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			// Parse the response as JSON to check for OAuth RFC 8628 standard errors
 			var errorData map[string]any
 			if err = json.Unmarshal(body, &errorData); err == nil {
-				// According to OAuth RFC 8628, handle standard polling responses
 				if resp.StatusCode == http.StatusBadRequest {
 					errorType, _ := errorData["error"].(string)
 					switch errorType {
 					case "authorization_pending":
-						// User has not yet approved the authorization request. Continue polling.
 						fmt.Printf("Polling attempt %d/%d...\n\n", attempt+1, maxAttempts)
-						time.Sleep(pollInterval)
+						if errWait := waitForQwenPoll(ctx, pollInterval); errWait != nil {
+							return nil, errWait
+						}
 						continue
 					case "slow_down":
-						// Client is polling too frequently. Increase poll interval.
 						pollInterval = min(time.Duration(float64(pollInterval)*1.5), 10*time.Second)
 						fmt.Printf("Server requested to slow down, increasing poll interval to %v\n\n", pollInterval)
-						time.Sleep(pollInterval)
+						if errWait := waitForQwenPoll(ctx, pollInterval); errWait != nil {
+							return nil, errWait
+						}
 						continue
 					case "expired_token":
 						return nil, fmt.Errorf("device code expired. Please restart the authentication process")
@@ -287,37 +303,40 @@ func (a *Auth) PollForToken(deviceCode, codeVerifier string) (*TokenData, error)
 					}
 				}
 
-				// For other errors, return with proper error information
 				errorType, _ := errorData["error"].(string)
 				errorDesc, _ := errorData["error_description"].(string)
 				return nil, fmt.Errorf("device token poll failed: %s - %s", errorType, errorDesc)
 			}
-
-			// If JSON parsing fails, fall back to text response
 			return nil, fmt.Errorf(
 				"device token poll failed: %d %s. Response: %s", resp.StatusCode, resp.Status, string(body),
 			)
 		}
-		// log.Debugf("%s", string(body))
-		// Success - parse token data
 		var response tokenResponse
 		if err = json.Unmarshal(body, &response); err != nil {
 			return nil, fmt.Errorf("failed to parse token response: %w", err)
 		}
 
-		// Convert to TokenData format and save
-		tokenData := &TokenData{
+		return &TokenData{
 			AccessToken:  response.AccessToken,
 			RefreshToken: response.RefreshToken,
 			TokenType:    response.TokenType,
 			ResourceURL:  response.ResourceURL,
 			Expire:       time.Now().Add(time.Duration(response.ExpiresIn) * time.Second).Format(time.RFC3339),
-		}
-
-		return tokenData, nil
+		}, nil
 	}
 
 	return nil, fmt.Errorf("authentication timeout. Please restart the authentication process")
+}
+
+func waitForQwenPoll(ctx context.Context, interval time.Duration) error {
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("device token poll cancelled: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 // RefreshTokensWithRetry attempts to refresh tokens with a specified number of retries upon failure.

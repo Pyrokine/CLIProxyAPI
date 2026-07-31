@@ -3,8 +3,8 @@ package auth
 import (
 	"strings"
 
-	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 type modelAliasEntry interface {
@@ -30,7 +30,7 @@ type OAuthModelAliasResult struct {
 	OriginalAlias string
 }
 
-func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelAlias) *oauthModelAliasTable {
+func compileOAuthModelAliasTable(aliases map[string][]config.OAuthModelAlias) *oauthModelAliasTable {
 	if len(aliases) == 0 {
 		return &oauthModelAliasTable{}
 	}
@@ -75,7 +75,7 @@ func compileOAuthModelAliasTable(aliases map[string][]internalconfig.OAuthModelA
 // SetOAuthModelAlias updates the OAuth model name alias table used during execution.
 // The alias is applied per-auth channel to resolve the upstream model name while keeping the
 // client-visible model name unchanged for translation/response formatting.
-func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthModelAlias) {
+func (m *Manager) SetOAuthModelAlias(aliases map[string][]config.OAuthModelAlias) {
 	if m == nil {
 		return
 	}

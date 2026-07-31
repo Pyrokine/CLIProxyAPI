@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -106,6 +107,35 @@ func TestUpdateReturnsPersistError(t *testing.T) {
 	}
 	if _, ok := mgr.GetByID(auth.ID); ok {
 		t.Fatalf("auth was updated after persist failure")
+	}
+}
+
+func TestPersistAndSetStoreAreSynchronized(t *testing.T) {
+	store := &countingStore{}
+	mgr := NewManager(store, nil, nil)
+	auth := &Auth{
+		ID:       "xai-auth",
+		Provider: "xai",
+		Metadata: map[string]any{"type": "xai"},
+	}
+
+	for range 100 {
+		mgr.SetStore(store)
+		start := make(chan struct{})
+		var group sync.WaitGroup
+		group.Add(2)
+		go func() {
+			defer group.Done()
+			<-start
+			_, _ = mgr.persist(context.Background(), auth, true, false, 0)
+		}()
+		go func() {
+			defer group.Done()
+			<-start
+			mgr.SetStore(nil)
+		}()
+		close(start)
+		group.Wait()
 	}
 }
 

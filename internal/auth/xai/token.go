@@ -1,15 +1,18 @@
 package xai
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
-	log "github.com/sirupsen/logrus"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
 // TokenStorage stores xAI OAuth credentials on disk.
@@ -40,31 +43,161 @@ func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 // SaveTokenToFile writes xAI credentials to a JSON auth file.
 func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
+	if ts == nil {
+		return fmt.Errorf("xai token storage: storage is nil")
+	}
+	authFilePath = strings.TrimSpace(authFilePath)
+	if authFilePath == "" {
+		return fmt.Errorf("xai token storage: auth file path is empty")
+	}
+	if hasTrailingPathSeparator(authFilePath) {
+		return fmt.Errorf("xai token storage: auth file path identifies a directory")
+	}
+	absoluteAuthFilePath, err := filepath.Abs(authFilePath)
+	if err != nil {
+		return fmt.Errorf("xai token storage: resolve auth file path: %w", err)
+	}
+	authFilePath = filepath.Clean(absoluteAuthFilePath)
+	name := filepath.Base(authFilePath)
+	if name == "." || name == ".." || name == "" {
+		return fmt.Errorf("xai token storage: auth file name is invalid")
+	}
 	ts.Type = "xai"
 	ts.AuthKind = "oauth"
-	if errMkdirAll := os.MkdirAll(filepath.Dir(authFilePath), 0o700); errMkdirAll != nil {
-		return fmt.Errorf("xai token storage: create directory: %w", errMkdirAll)
-	}
-	file, err := os.Create(authFilePath)
+	data, err := misc.MergeMetadata(ts, ts.Metadata)
 	if err != nil {
-		return fmt.Errorf("xai token storage: create token file: %w", err)
+		return fmt.Errorf("xai token storage: merge metadata: %w", err)
 	}
-	defer func() {
-		if errClose := file.Close(); errClose != nil {
-			log.Errorf("xai token storage: close token file error: %v", errClose)
-		}
-	}()
+	payload, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return fmt.Errorf("xai token storage: marshal token file: %w", err)
+	}
+	payload = append(payload, '\n')
 
-	data, errMerge := misc.MergeMetadata(ts, ts.Metadata)
-	if errMerge != nil {
-		return fmt.Errorf("xai token storage: merge metadata: %w", errMerge)
+	dir := filepath.Dir(authFilePath)
+	root, err := util.OpenOrCreateDirectoryRoot(dir, 0o700)
+	if err != nil {
+		return fmt.Errorf("xai token storage: open directory root: %w", err)
 	}
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	if err = encoder.Encode(data); err != nil {
-		return fmt.Errorf("xai token storage: write token file: %w", err)
+	defer func() { _ = root.Close() }()
+	directory, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("xai token storage: open directory: %w", err)
 	}
-	return nil
+	if err = secureTokenFile(directory, true); err != nil {
+		_ = directory.Close()
+		return fmt.Errorf("xai token storage: secure directory: %w", err)
+	}
+	if err = directory.Close(); err != nil {
+		return fmt.Errorf("xai token storage: close directory: %w", err)
+	}
+	return saveTokenPayload(root, name, payload)
+}
+
+func hasTrailingPathSeparator(path string) bool {
+	if strings.HasSuffix(path, string(os.PathSeparator)) {
+		return true
+	}
+	return runtime.GOOS == "windows" && strings.HasSuffix(path, "/")
+}
+
+func saveTokenPayload(root *os.Root, name string, payload []byte) error {
+	return withTokenFileLock(
+		root,
+		name,
+		func() error {
+			if info, errInspect := root.Lstat(name); errInspect == nil {
+				if !info.Mode().IsRegular() {
+					return fmt.Errorf("xai token storage: token path is not a regular file")
+				}
+			} else if !os.IsNotExist(errInspect) {
+				return fmt.Errorf("xai token storage: inspect token path: %w", errInspect)
+			}
+			file, tempName, errCreate := createTokenCandidate(root)
+			if errCreate != nil {
+				return errCreate
+			}
+			fileOpen := true
+			defer func() {
+				if fileOpen {
+					_ = file.Close()
+				}
+				if tempName != "" {
+					_ = root.Remove(tempName)
+				}
+			}()
+			if err := secureTokenFile(file, false); err != nil {
+				return fmt.Errorf("xai token storage: secure token candidate: %w", err)
+			}
+			written, errWrite := file.Write(payload)
+			if errWrite != nil {
+				return fmt.Errorf("xai token storage: write token candidate: %w", errWrite)
+			}
+			if written != len(payload) {
+				return io.ErrShortWrite
+			}
+			if err := file.Sync(); err != nil {
+				return fmt.Errorf("xai token storage: sync token candidate: %w", err)
+			}
+			candidateInfo, err := file.Stat()
+			if err != nil {
+				return fmt.Errorf("xai token storage: inspect token candidate: %w", err)
+			}
+			if err = file.Close(); err != nil {
+				fileOpen = false
+				return fmt.Errorf("xai token storage: close token candidate: %w", err)
+			}
+			fileOpen = false
+			pathInfo, err := root.Lstat(tempName)
+			if err != nil {
+				return fmt.Errorf("xai token storage: verify token candidate: %w", err)
+			}
+			if !pathInfo.Mode().IsRegular() || !os.SameFile(candidateInfo, pathInfo) {
+				return fmt.Errorf("xai token storage: token candidate changed before publication")
+			}
+			if err = root.Rename(tempName, name); err != nil {
+				return fmt.Errorf("xai token storage: publish token file: %w", err)
+			}
+			tempName = ""
+			if err := syncTokenRoot(root); err != nil {
+				return fmt.Errorf("xai token storage: sync token directory: %w", err)
+			}
+			return nil
+		},
+	)
+}
+
+func createTokenCandidate(root *os.Root) (*os.File, string, error) {
+	for range 100 {
+		var suffix [8]byte
+		if _, err := rand.Read(suffix[:]); err != nil {
+			return nil, "", fmt.Errorf("xai token storage: generate candidate name: %w", err)
+		}
+		tempName := fmt.Sprintf(".xai-token-%x.tmp", suffix)
+		file, err := root.OpenFile(tempName, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if err == nil {
+			return file, tempName, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", fmt.Errorf("xai token storage: create token candidate: %w", err)
+		}
+	}
+	return nil, "", fmt.Errorf("xai token storage: candidate name collision limit exceeded")
+}
+
+func syncTokenRoot(root *os.Root) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	if err = directory.Sync(); err != nil {
+		_ = directory.Close()
+		return err
+	}
+	return directory.Close()
 }
 
 // CredentialFileName returns the filename used for xAI credentials.

@@ -34,9 +34,10 @@ const (
 )
 
 var (
-	claudeRefreshGroup singleflight.Group
-	claudeRefreshMu    sync.Mutex
-	claudeRefreshBlock = make(map[string]time.Time)
+	claudeRefreshGroup   singleflight.Group
+	claudeRefreshTimeout = 60 * time.Second
+	claudeRefreshMu      sync.Mutex
+	claudeRefreshBlock   = make(map[string]time.Time)
 )
 
 type refreshHTTPError struct {
@@ -325,9 +326,11 @@ func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 		}
 	}
 
+	refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), claudeRefreshTimeout)
+	defer cancelRefresh()
 	result, err, _ := claudeRefreshGroup.Do(
 		refreshToken, func() (interface{}, error) {
-			return o.refreshTokensSingleFlight(context.WithoutCancel(ctx), refreshToken)
+			return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
 		},
 	)
 	if err != nil {
