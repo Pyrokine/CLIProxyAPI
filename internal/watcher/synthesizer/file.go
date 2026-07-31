@@ -2,6 +2,7 @@ package synthesizer
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	authfile "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
@@ -52,7 +54,7 @@ func (s *FileSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth, e
 		}
 		auths, errSynthesize := synthesizeFileAuths(ctx, full, data)
 		if errSynthesize != nil {
-			return nil, errSynthesize
+			return out, fmt.Errorf("synthesize auth file %s: %w", name, errSynthesize)
 		}
 		if len(auths) > 0 {
 			out = append(out, auths...)
@@ -67,6 +69,29 @@ func SynthesizeAuthFile(ctx *SynthesisContext, fullPath string, data []byte) ([]
 }
 
 func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, error) {
+	auths, err := synthesizeFileAuthsRaw(ctx, fullPath, data)
+	if err != nil || len(auths) == 0 {
+		return auths, err
+	}
+	digest, errDigest := coreauth.DigestPersistedJSON(data)
+	if errDigest != nil {
+		return nil, errDigest
+	}
+	digestText := hex.EncodeToString(digest[:])
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if auth.Attributes == nil {
+			auth.Attributes = make(map[string]string)
+		}
+		auth.Attributes[coreauth.PersistedSHA256Attribute] = digestText
+		auth.Attributes[coreauth.PersistedReadAtAttribute] = ctx.Now.Format(time.RFC3339Nano)
+	}
+	return auths, nil
+}
+
+func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte) ([]*coreauth.Auth, error) {
 	if ctx == nil || len(data) == 0 {
 		return nil, nil
 	}
@@ -75,7 +100,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	cfg := ctx.Config
 	var metadata map[string]any
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
-		return nil, nil
+		return nil, fmt.Errorf("parse auth JSON: %w", errUnmarshal)
 	}
 	t, _ := metadata["type"].(string)
 	provider := strings.ToLower(strings.TrimSpace(t))
@@ -88,7 +113,13 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 				RawJSON:  data,
 			},
 		)
-		if errParse == nil && handled && auth != nil {
+		if errParse != nil {
+			return nil, fmt.Errorf("parse plugin auth: %w", errParse)
+		}
+		if handled {
+			if auth == nil || strings.TrimSpace(auth.ID) == "" {
+				return nil, fmt.Errorf("plugin auth parser returned an invalid auth")
+			}
 			auth.CreatedAt = now
 			auth.UpdatedAt = now
 			if auth.Attributes == nil {
@@ -114,13 +145,8 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	if email, _ := metadata["email"].(string); email != "" {
 		label = email
 	}
-	// Use relative path under authDir as ID to stay consistent with the file-based token store
-	id := fullPath
-	if strings.TrimSpace(ctx.AuthDir) != "" {
-		if rel, errRel := filepath.Rel(ctx.AuthDir, fullPath); errRel == nil && rel != "" {
-			id = rel
-		}
-	}
+	// 使用 authDir 下的相对路径，并在大小写不敏感的平台统一文件标识
+	id := authfile.FileAuthID(fullPath, ctx.AuthDir)
 
 	proxyURL := ""
 	if p, ok := metadata["proxy_url"].(string); ok {

@@ -1,10 +1,12 @@
 package synthesizer
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -12,6 +14,14 @@ import (
 // ConfigSynthesizer generates Auth entries from configuration API keys.
 // It handles Gemini, Claude, Codex, OpenAI-compat, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
+
+func stableConfigAuthRouteIdentity(parts ...any) (string, error) {
+	data, err := json.Marshal(parts)
+	if err != nil {
+		return "", fmt.Errorf("marshal config auth route identity: %w", err)
+	}
+	return string(data), nil
+}
 
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
 func NewConfigSynthesizer() *ConfigSynthesizer {
@@ -30,6 +40,11 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 		return nil, err
 	}
 	out = append(out, geminiKeys...)
+	interactionsKeys, err := s.synthesizeInteractionsKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, interactionsKeys...)
 	claudeKeys, err := s.synthesizeClaudeKeys(ctx)
 	if err != nil {
 		return nil, err
@@ -56,13 +71,29 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 
 // synthesizeGeminiKeys creates Auth entries for Gemini API keys.
 func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
+	return s.synthesizeGeminiKeyEntries(ctx, ctx.Config.GeminiKey, "gemini:apikey", "gemini", "gemini-apikey", "gemini")
+}
+
+// synthesizeInteractionsKeys creates Auth entries for native Interactions API keys.
+func (s *ConfigSynthesizer) synthesizeInteractionsKeys(ctx *SynthesisContext) ([]*coreauth.Auth, error) {
+	return s.synthesizeGeminiKeyEntries(ctx, ctx.Config.InteractionsKey, "gemini-interactions:apikey", "interactions", "interactions-apikey", "gemini-interactions")
+}
+
+func (s *ConfigSynthesizer) synthesizeGeminiKeyEntries(
+	ctx *SynthesisContext,
+	entries []config.GeminiKey,
+	idKind string,
+	sourceName string,
+	label string,
+	provider string,
+) ([]*coreauth.Auth, error) {
 	cfg := ctx.Config
 	now := ctx.Now
 	idGen := ctx.IDGenerator
 
-	out := make([]*coreauth.Auth, 0, len(cfg.GeminiKey))
-	for i := range cfg.GeminiKey {
-		entry := cfg.GeminiKey[i]
+	out := make([]*coreauth.Auth, 0, len(entries))
+	for i := range entries {
+		entry := entries[i]
 		key := strings.TrimSpace(entry.APIKey)
 		if key == "" {
 			continue
@@ -70,9 +101,9 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) ([]*core
 		prefix := strings.TrimSpace(entry.Prefix)
 		base := strings.TrimSpace(entry.BaseURL)
 		proxyURL := strings.TrimSpace(entry.ProxyURL)
-		id, token := idGen.next("gemini:apikey", key, base)
+		id, token := idGen.next(idKind, key, base)
 		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:gemini[%s]", token),
+			"source":  fmt.Sprintf("config:%s[%s]", sourceName, token),
 			"api_key": key,
 		}
 		if entry.Priority != 0 {
@@ -89,8 +120,8 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) ([]*core
 		}
 		a := &coreauth.Auth{
 			ID:         id,
-			Provider:   "gemini",
-			Label:      "gemini-apikey",
+			Provider:   provider,
+			Label:      label,
 			Prefix:     prefix,
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
@@ -119,7 +150,30 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) ([]*core
 		}
 		prefix := strings.TrimSpace(ck.Prefix)
 		base := strings.TrimSpace(ck.BaseURL)
-		id, token := idGen.next("claude:apikey", key, base)
+		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		headers := config.NormalizeHeaders(ck.Headers)
+		modelsHash := diff.ComputeClaudeModelsHash(ck.Models)
+		excludedModelsHash := diff.ComputeExcludedModelsHash(ck.ExcludedModels)
+		idParts := []string{key, base}
+		if ck.Priority != 0 || prefix != "" || proxyURL != "" || modelsHash != "" || len(headers) > 0 ||
+			excludedModelsHash != "" || ck.RebuildMidSystemMessage || ck.Cloak != nil || ck.ExperimentalCCHSigning {
+			routeIdentity, errIdentity := stableConfigAuthRouteIdentity(
+				ck.Priority,
+				prefix,
+				proxyURL,
+				modelsHash,
+				headers,
+				excludedModelsHash,
+				ck.RebuildMidSystemMessage,
+				ck.Cloak,
+				ck.ExperimentalCCHSigning,
+			)
+			if errIdentity != nil {
+				return nil, errIdentity
+			}
+			idParts = append(idParts, routeIdentity)
+		}
+		id, token := idGen.next("claude:apikey", idParts...)
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:claude[%s]", token),
 			"api_key": key,
@@ -133,13 +187,12 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) ([]*core
 		if ck.RebuildMidSystemMessage {
 			attrs["rebuild_mid_system_message"] = "true"
 		}
-		if hash := diff.ComputeClaudeModelsHash(ck.Models); hash != "" {
-			attrs["models_hash"] = hash
+		if modelsHash != "" {
+			attrs["models_hash"] = modelsHash
 		}
-		if err := addConfigHeadersToAttrs(ck.Headers, attrs); err != nil {
+		if err := addConfigHeadersToAttrs(headers, attrs); err != nil {
 			return nil, err
 		}
-		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "claude",
@@ -171,7 +224,29 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) ([]*corea
 			continue
 		}
 		prefix := strings.TrimSpace(ck.Prefix)
-		id, token := idGen.next("codex:apikey", key, ck.BaseURL)
+		base := strings.TrimSpace(ck.BaseURL)
+		proxyURL := strings.TrimSpace(ck.ProxyURL)
+		headers := config.NormalizeHeaders(ck.Headers)
+		modelsHash := diff.ComputeCodexModelsHash(ck.Models)
+		excludedModelsHash := diff.ComputeExcludedModelsHash(ck.ExcludedModels)
+		idParts := []string{key, base}
+		if ck.Priority != 0 || prefix != "" || proxyURL != "" || modelsHash != "" || len(headers) > 0 ||
+			excludedModelsHash != "" || ck.Websockets {
+			routeIdentity, errIdentity := stableConfigAuthRouteIdentity(
+				ck.Priority,
+				prefix,
+				proxyURL,
+				modelsHash,
+				headers,
+				excludedModelsHash,
+				ck.Websockets,
+			)
+			if errIdentity != nil {
+				return nil, errIdentity
+			}
+			idParts = append(idParts, routeIdentity)
+		}
+		id, token := idGen.next("codex:apikey", idParts...)
 		attrs := map[string]string{
 			"source":  fmt.Sprintf("config:codex[%s]", token),
 			"api_key": key,
@@ -179,19 +254,18 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) ([]*corea
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
-		if ck.BaseURL != "" {
-			attrs["base_url"] = ck.BaseURL
+		if base != "" {
+			attrs["base_url"] = base
 		}
 		if ck.Websockets {
 			attrs["websockets"] = "true"
 		}
-		if hash := diff.ComputeCodexModelsHash(ck.Models); hash != "" {
-			attrs["models_hash"] = hash
+		if modelsHash != "" {
+			attrs["models_hash"] = modelsHash
 		}
-		if err := addConfigHeadersToAttrs(ck.Headers, attrs); err != nil {
+		if err := addConfigHeadersToAttrs(headers, attrs); err != nil {
 			return nil, err
 		}
-		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		a := &coreauth.Auth{
 			ID:         id,
 			Provider:   "codex",

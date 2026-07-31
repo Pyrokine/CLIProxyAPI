@@ -5,6 +5,9 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 
 	sdkpluginstore "github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginstore"
@@ -83,6 +86,9 @@ type Config struct {
 	// UsageRetention configures automatic cleanup and archival of detailed usage records.
 	UsageRetention UsageRetention `yaml:"usage-retention" json:"usage-retention"`
 
+	// ImageArtifactCache configures local generated image artifact retention.
+	ImageArtifactCache ImageArtifactCache `yaml:"image-artifact-cache" json:"image-artifact-cache"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -117,6 +123,9 @@ type Config struct {
 
 	// GeminiKey defines Gemini API key configurations with optional routing overrides.
 	GeminiKey []GeminiKey `yaml:"gemini-api-key" json:"gemini-api-key"`
+
+	// InteractionsKey defines native Google Interactions API key configurations.
+	InteractionsKey []GeminiKey `yaml:"interactions-api-key" json:"interactions-api-key"`
 
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
@@ -185,6 +194,16 @@ type PluginInstanceConfig struct {
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 	// Raw preserves the full original plugin configuration YAML subtree.
 	Raw yaml.Node `yaml:"-" json:"-"`
+}
+
+// PluginInstanceConfigFingerprint returns a stable digest of the preserved plugin subtree.
+func PluginInstanceConfigFingerprint(item PluginInstanceConfig) (string, error) {
+	data, errMarshal := json.Marshal(item.Raw)
+	if errMarshal != nil {
+		return "", errMarshal
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
 }
 
 // UnmarshalYAML extracts host-owned fields while preserving the full original YAML node.
@@ -298,6 +317,16 @@ type UsageRetention struct {
 	WarningThresholdPct int `yaml:"warning-threshold-pct" json:"warning-threshold-pct"`
 }
 
+// ImageArtifactCache configures cleanup of generated image artifacts stored on disk.
+type ImageArtifactCache struct {
+	// RetentionDays is the number of days to keep image artifacts since last use.
+	// Set to 0 to disable time-based cleanup.
+	RetentionDays int `yaml:"retention-days" json:"retention-days"`
+	// MaxTotalSizeMB limits total image artifact disk usage. Oldest artifacts are
+	// deleted first when exceeded. Set to 0 to disable size-based cleanup.
+	MaxTotalSizeMB int `yaml:"max-total-size-mb" json:"max-total-size-mb"`
+}
+
 // pprofConfig holds pprof HTTP server settings.
 type pprofConfig struct {
 	// Enable toggles the pprof HTTP debug server.
@@ -310,6 +339,9 @@ type pprofConfig struct {
 type RemoteManagement struct {
 	// AllowRemote toggles remote (non-localhost) access to management API.
 	AllowRemote bool `yaml:"allow-remote"`
+	// TrustedProxies lists direct reverse-proxy IP addresses or CIDR ranges whose
+	// forwarded client address headers may be used by management authentication.
+	TrustedProxies []string `yaml:"trusted-proxies,omitempty"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
@@ -699,5 +731,19 @@ func (cfg *Config) NormalizePluginsConfig() {
 	cfg.Plugins.StoreAuth = sdkpluginstore.NormalizeAuthConfigs(cfg.Plugins.StoreAuth)
 	if cfg.Plugins.Configs == nil {
 		cfg.Plugins.Configs = map[string]PluginInstanceConfig{}
+		return
 	}
+	canonicalConfigs := make(map[string]PluginInstanceConfig, len(cfg.Plugins.Configs))
+	for id, item := range cfg.Plugins.Configs {
+		canonicalID := canonicalPluginConfigID(id)
+		if _, duplicate := canonicalConfigs[canonicalID]; duplicate {
+			return
+		}
+		canonicalConfigs[canonicalID] = item
+	}
+	cfg.Plugins.Configs = canonicalConfigs
+}
+
+func canonicalPluginConfigID(id string) string {
+	return strings.ToLower(strings.TrimSpace(id))
 }

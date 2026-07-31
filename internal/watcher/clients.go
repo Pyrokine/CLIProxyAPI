@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
+	authfile "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/diff"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/synthesizer"
@@ -96,6 +96,7 @@ func (w *Watcher) reloadClientsWithConfig(
 		parser := w.pluginAuthParser
 
 		w.lastAuthHashes = make(map[string]string)
+		w.lastAuthVersions = make(map[string]coreauth.PersistedVersion)
 		cacheAuthContents := log.IsLevelEnabled(log.DebugLevel)
 		if cacheAuthContents {
 			w.lastAuthContents = make(map[string]*coreauth.Auth)
@@ -112,10 +113,18 @@ func (w *Watcher) reloadClientsWithConfig(
 						return nil
 					}
 					if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+						readAt := time.Now()
 						if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
 							sum := sha256.Sum256(data)
 							normalizedPath := w.normalizeAuthPath(path)
 							w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
+							if digest, errDigest := coreauth.DigestPersistedJSON(data); errDigest == nil {
+								w.lastAuthVersions[normalizedPath] = coreauth.PersistedVersion{
+									Path: path, SHA256: digest,
+								}
+							} else {
+								log.WithError(errDigest).Warnf("failed to capture auth version for %s", filepath.Base(path))
+							}
 							if cacheAuthContents {
 								var auth coreauth.Auth
 								if errParse := json.Unmarshal(data, &auth); errParse == nil {
@@ -125,7 +134,7 @@ func (w *Watcher) reloadClientsWithConfig(
 							ctx := &synthesizer.SynthesisContext{
 								Config:           cfg,
 								AuthDir:          resolvedAuthDir,
-								Now:              time.Now(),
+								Now:              readAt,
 								IDGenerator:      synthesizer.NewStableIDGenerator(),
 								PluginAuthParser: parser,
 							}
@@ -150,7 +159,7 @@ func (w *Watcher) reloadClientsWithConfig(
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
 
 	w.refreshAuthState(forceAuthRefresh)
-	redisqueue.NotifyUsageRefresh()
+	w.notifyUsageRefresh()
 
 	log.Infof(
 		"full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
@@ -166,6 +175,9 @@ func (w *Watcher) reloadClientsWithConfig(
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {
+	unlockFile := authfile.LockFileMutation(path)
+	defer unlockFile()
+	readAt := time.Now()
 	data, errRead := os.ReadFile(path)
 	if errRead != nil {
 		log.Errorf("failed to read auth file %s: %v", filepath.Base(path), errRead)
@@ -186,18 +198,49 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		log.Errorf("failed to parse auth file %s: %v", filepath.Base(path), errParse)
 		return
 	}
+	persistedDigest, errDigest := coreauth.DigestPersistedJSON(data)
+	if errDigest != nil {
+		log.Errorf("failed to capture auth version for %s: %v", filepath.Base(path), errDigest)
+		return
+	}
+
+	w.clientsMutex.RLock()
+	cfg := w.config
+	authDir := w.authDir
+	parser := w.pluginAuthParser
+	w.clientsMutex.RUnlock()
+	if cfg == nil {
+		log.Error("config is nil, cannot add or update client")
+		return
+	}
+	sctx := &synthesizer.SynthesisContext{
+		Config:           cfg,
+		AuthDir:          authDir,
+		Now:              readAt,
+		IDGenerator:      synthesizer.NewStableIDGenerator(),
+		PluginAuthParser: parser,
+	}
+	generated, errSynthesize := synthesizer.SynthesizeAuthFile(sctx, path, data)
+	if errSynthesize != nil {
+		log.Errorf("failed to synthesize auth file %s: %v", filepath.Base(path), errSynthesize)
+		return
+	}
+	newByID := authSliceToMap(generated)
 
 	w.authRescanMu.Lock()
 	defer w.authRescanMu.Unlock()
-
-	w.clientsMutex.Lock()
-	if w.config == nil {
-		log.Error("config is nil, cannot add or update client")
-		w.clientsMutex.Unlock()
+	currentVersion, errCurrentVersion := coreauth.ReadPersistedVersion(path)
+	if errCurrentVersion != nil || currentVersion.SHA256 != persistedDigest {
+		log.Debugf("auth file changed again before publication, skipping stale update: %s", filepath.Base(path))
 		return
 	}
-	cfg := w.config
-	parser := w.pluginAuthParser
+
+	w.clientsMutex.Lock()
+	if w.config != cfg || w.authDir != authDir {
+		w.clientsMutex.Unlock()
+		log.Debugf("auth configuration changed before publication, skipping stale update: %s", filepath.Base(path))
+		return
+	}
 	if w.fileAuthsByPath == nil {
 		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
 	}
@@ -222,6 +265,10 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	w.lastAuthHashes[normalized] = curHash
+	if w.lastAuthVersions == nil {
+		w.lastAuthVersions = make(map[string]coreauth.PersistedVersion)
+	}
+	w.lastAuthVersions[normalized] = currentVersion
 	if cacheAuthContents {
 		if w.lastAuthContents == nil {
 			w.lastAuthContents = make(map[string]*coreauth.Auth)
@@ -233,20 +280,6 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	for id, a := range w.fileAuthsByPath[normalized] {
 		oldByID[id] = a
 	}
-
-	sctx := &synthesizer.SynthesisContext{
-		Config:           w.config,
-		AuthDir:          w.authDir,
-		Now:              time.Now(),
-		IDGenerator:      synthesizer.NewStableIDGenerator(),
-		PluginAuthParser: parser,
-	}
-	generated, errSynthesize := synthesizer.SynthesizeAuthFile(sctx, path, data)
-	if errSynthesize != nil {
-		log.Errorf("failed to synthesize auth file %s: %v", filepath.Base(path), errSynthesize)
-		generated = nil
-	}
-	newByID := authSliceToMap(generated)
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = authIDSet(newByID)
 	} else {
@@ -260,12 +293,18 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		log.Debugf("triggering server update callback after add/update")
 		w.triggerServerUpdate(cfg)
 	}
-	w.persistAuthAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path)
+	w.persistAuthVersionAsync(fmt.Sprintf("Sync auth %s", filepath.Base(path)), path, currentVersion)
 	w.dispatchAuthUpdates(updates)
-	redisqueue.NotifyUsageRefresh()
+	w.notifyUsageRefresh()
 }
 
 func (w *Watcher) removeClient(path string) {
+	unlockFile := authfile.LockFileMutation(path)
+	defer unlockFile()
+	if _, errStat := os.Stat(path); errStat == nil {
+		log.Debugf("auth file exists after remove event, skipping stale removal: %s", filepath.Base(path))
+		return
+	}
 	w.authRescanMu.Lock()
 	defer w.authRescanMu.Unlock()
 
@@ -276,7 +315,9 @@ func (w *Watcher) removeClient(path string) {
 	for id, a := range w.fileAuthsByPath[normalized] {
 		oldByID[id] = a
 	}
+	version, hasVersion := w.lastAuthVersions[normalized]
 	delete(w.lastAuthHashes, normalized)
+	delete(w.lastAuthVersions, normalized)
 	delete(w.lastAuthContents, normalized)
 	delete(w.fileAuthsByPath, normalized)
 
@@ -288,9 +329,9 @@ func (w *Watcher) removeClient(path string) {
 		log.Debugf("triggering server update callback after removal")
 		w.triggerServerUpdate(cfg)
 	}
-	w.persistAuthAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path)
+	w.persistAuthDeletionAsync(fmt.Sprintf("Remove auth %s", filepath.Base(path)), path, version, hasVersion)
 	w.dispatchAuthUpdates(updates)
-	redisqueue.NotifyUsageRefresh()
+	w.notifyUsageRefresh()
 }
 
 func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*coreauth.Auth) []AuthUpdate {
@@ -402,6 +443,9 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	if len(cfg.GeminiKey) > 0 {
 		geminiAPIKeyCount += len(cfg.GeminiKey)
 	}
+	if len(cfg.InteractionsKey) > 0 {
+		geminiAPIKeyCount += len(cfg.InteractionsKey)
+	}
 	if len(cfg.VertexCompatAPIKey) > 0 {
 		vertexCompatAPIKeyCount += len(cfg.VertexCompatAPIKey)
 	}
@@ -435,6 +479,30 @@ func (w *Watcher) persistConfigAsync() {
 	}()
 }
 
+func (w *Watcher) persistAuthVersionAsync(
+	message,
+	path string,
+	version coreauth.PersistedVersion,
+) {
+	if w == nil || w.storePersister == nil || strings.TrimSpace(path) == "" {
+		return
+	}
+	go func() {
+		unlockFile := authfile.LockFileMutation(path)
+		defer unlockFile()
+		currentVersion, errVersion := coreauth.ReadPersistedVersion(path)
+		if errVersion != nil || currentVersion.SHA256 != version.SHA256 {
+			log.Debugf("skipping stale auth persistence: %s", filepath.Base(path))
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if errPersist := w.storePersister.PersistAuthFiles(ctx, message, path); errPersist != nil {
+			log.Errorf("failed to persist auth changes: %v", errPersist)
+		}
+	}()
+}
+
 func (w *Watcher) persistAuthAsync(message string, paths ...string) {
 	if w == nil || w.storePersister == nil {
 		return
@@ -453,6 +521,39 @@ func (w *Watcher) persistAuthAsync(message string, paths ...string) {
 		defer cancel()
 		if err := w.storePersister.PersistAuthFiles(ctx, message, filtered...); err != nil {
 			log.Errorf("failed to persist auth changes: %v", err)
+		}
+	}()
+}
+
+func (w *Watcher) persistAuthDeletionAsync(
+	message string,
+	path string,
+	version coreauth.PersistedVersion,
+	hasVersion bool,
+) {
+	if w == nil || w.storePersister == nil || strings.TrimSpace(path) == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if versionedStore, ok := w.storePersister.(coreauth.VersionedStore); ok {
+			if !hasVersion {
+				log.Errorf("cannot persist auth deletion without captured version: %s", filepath.Base(path))
+				return
+			}
+			deleted, errDelete := versionedStore.DeleteIfVersion(ctx, path, version)
+			if errDelete != nil {
+				log.Errorf("failed to persist versioned auth deletion: %v", errDelete)
+				return
+			}
+			if !deleted {
+				log.Warnf("skipped stale auth deletion: %s", filepath.Base(path))
+			}
+			return
+		}
+		if errPersist := w.storePersister.PersistAuthFiles(ctx, message, path); errPersist != nil {
+			log.Errorf("failed to persist auth changes: %v", errPersist)
 		}
 	}()
 }

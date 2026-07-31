@@ -27,17 +27,25 @@ func matchProvider(provider string, targets []string) (string, bool) {
 }
 
 func (w *Watcher) start(ctx context.Context) error {
-	if errAddConfig := w.watcher.Add(w.configPath); errAddConfig != nil {
-		log.Errorf("failed to watch config file %s: %v", w.configPath, errAddConfig)
-		return errAddConfig
+	if _, errStatConfig := os.Stat(w.configPath); errStatConfig != nil {
+		log.Errorf("failed to watch config file %s: %v", w.configPath, errStatConfig)
+		return errStatConfig
 	}
-	log.Debugf("watching config file: %s", w.configPath)
 
-	if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
-		log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
-		return errAddAuthDir
+	configDir := filepath.Dir(w.configPath)
+	if errAddConfigDir := w.watcher.Add(configDir); errAddConfigDir != nil {
+		log.Errorf("failed to watch config directory %s: %v", configDir, errAddConfigDir)
+		return errAddConfigDir
 	}
-	log.Debugf("watching auth directory: %s", w.authDir)
+	log.Debugf("watching config directory: %s", configDir)
+
+	if w.normalizeAuthPath(configDir) != w.normalizeAuthPath(w.authDir) {
+		if errAddAuthDir := w.watcher.Add(w.authDir); errAddAuthDir != nil {
+			log.Errorf("failed to watch auth directory %s: %v", w.authDir, errAddAuthDir)
+			return errAddAuthDir
+		}
+		log.Debugf("watching auth directory: %s", w.authDir)
+	}
 
 	go w.processEvents(ctx)
 
@@ -69,12 +77,14 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	configOps := fsnotify.Write | fsnotify.Create | fsnotify.Rename
 	normalizedName := w.normalizeAuthPath(event.Name)
 	normalizedConfigPath := w.normalizeAuthPath(w.configPath)
-	normalizedAuthDir := w.normalizeAuthPath(w.authDir)
+	w.clientsMutex.RLock()
+	authDir := w.authDir
+	w.clientsMutex.RUnlock()
+	normalizedAuthDir := w.normalizeAuthPath(authDir)
 	isConfigEvent := normalizedName == normalizedConfigPath && event.Op&configOps != 0
 	authOps := fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
-	isAuthJSON := strings.HasPrefix(normalizedName, normalizedAuthDir) && strings.HasSuffix(
-		normalizedName, ".json",
-	) && event.Op&authOps != 0
+	isAuthJSON := pathWithinDirectory(normalizedName, normalizedAuthDir) &&
+		strings.EqualFold(filepath.Ext(normalizedName), ".json") && event.Op&authOps != 0
 	if !isConfigEvent && !isAuthJSON {
 		// Ignore unrelated files (e.g., cookie snapshots *.cookie) and other noise.
 		return
@@ -103,6 +113,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		// Wait briefly; if the path exists again, treat as an update instead of removal.
 		time.Sleep(replaceCheckDelay)
 		if _, statErr := os.Stat(event.Name); statErr == nil {
+			w.clearRemoveRecord(normalizedName)
 			if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
 				log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 				return
@@ -117,11 +128,13 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			log.Debugf("ignoring remove for unknown auth file: %s", filepath.Base(event.Name))
 			return
 		}
+		w.recordRemove(normalizedName, now)
 		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 		w.removeClient(event.Name)
 		return
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
+		w.clearRemoveRecord(normalizedName)
 		if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
 			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
 			return
@@ -129,6 +142,17 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
 		w.addOrUpdateClient(event.Name)
 	}
+}
+
+func pathWithinDirectory(path, directory string) bool {
+	if path == "" || directory == "" {
+		return false
+	}
+	relative, errRelative := filepath.Rel(directory, path)
+	if errRelative != nil || filepath.IsAbs(relative) || relative == "." || relative == ".." {
+		return false
+	}
+	return !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (w *Watcher) authFileUnchanged(path string) (bool, error) {
@@ -177,25 +201,37 @@ func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) boo
 	if normalizedPath == "" {
 		return false
 	}
+	w.clientsMutex.RLock()
+	last, ok := w.lastRemoveTimes[normalizedPath]
+	w.clientsMutex.RUnlock()
+	return ok && now.Sub(last) < authRemoveDebounceWindow
+}
+
+func (w *Watcher) clearRemoveRecord(normalizedPath string) {
+	if normalizedPath == "" {
+		return
+	}
+	w.clientsMutex.Lock()
+	delete(w.lastRemoveTimes, normalizedPath)
+	w.clientsMutex.Unlock()
+}
+
+func (w *Watcher) recordRemove(normalizedPath string, now time.Time) {
+	if normalizedPath == "" {
+		return
+	}
 	w.clientsMutex.Lock()
 	if w.lastRemoveTimes == nil {
 		w.lastRemoveTimes = make(map[string]time.Time)
 	}
-	if last, ok := w.lastRemoveTimes[normalizedPath]; ok {
-		if now.Sub(last) < authRemoveDebounceWindow {
-			w.clientsMutex.Unlock()
-			return true
-		}
-	}
 	w.lastRemoveTimes[normalizedPath] = now
 	if len(w.lastRemoveTimes) > 128 {
 		cutoff := now.Add(-2 * authRemoveDebounceWindow)
-		for p, t := range w.lastRemoveTimes {
-			if t.Before(cutoff) {
-				delete(w.lastRemoveTimes, p)
+		for path, recordedAt := range w.lastRemoveTimes {
+			if recordedAt.Before(cutoff) {
+				delete(w.lastRemoveTimes, path)
 			}
 		}
 	}
 	w.clientsMutex.Unlock()
-	return false
 }

@@ -213,6 +213,36 @@ func (cfg *Config) SanitizeGeminiKeys() {
 	cfg.GeminiKey = out
 }
 
+// SanitizeInteractionsKeys deduplicates and normalizes native Interactions credentials.
+// It uses API key + base URL as the uniqueness key.
+func (cfg *Config) SanitizeInteractionsKeys() {
+	if cfg == nil || len(cfg.InteractionsKey) == 0 {
+		return
+	}
+
+	seen := make(map[string]struct{}, len(cfg.InteractionsKey))
+	out := cfg.InteractionsKey[:0]
+	for i := range cfg.InteractionsKey {
+		entry := cfg.InteractionsKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		if entry.APIKey == "" {
+			continue
+		}
+		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		out = append(out, entry)
+	}
+	cfg.InteractionsKey = out
+}
+
 func normalizeModelPrefix(prefix string) string {
 	trimmed := strings.TrimSpace(prefix)
 	trimmed = strings.Trim(trimmed, "/")

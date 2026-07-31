@@ -53,6 +53,116 @@ func TestParseConfigBytes_HostDefaultsToLoopback(t *testing.T) {
 	}
 }
 
+func TestParseConfigBytesImageArtifactCacheDefaultsMatchLoadConfig(t *testing.T) {
+	parsed, err := ParseConfigBytes([]byte("port: 8317\n"))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes: %v", err)
+	}
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err = os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	loaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if parsed.ImageArtifactCache != loaded.ImageArtifactCache {
+		t.Fatalf("ParseConfigBytes image artifact cache = %#v, want LoadConfig value %#v", parsed.ImageArtifactCache, loaded.ImageArtifactCache)
+	}
+}
+
+func TestLoadConfigRejectsAliasedManagementSecret(t *testing.T) {
+	tests := map[string]string{
+		"remote management alias": `shared: &management
+  secret-key: plain-secret
+remote-management: *management
+`,
+		"secret alias": `shared-secret: &secret plain-secret
+remote-management:
+  secret-key: *secret
+`,
+		"merged secret": `shared: &management
+  secret-key: plain-secret
+remote-management:
+  <<: *management
+`,
+		"remote management key alias": `remote-name: &remote-name remote-management
+*remote-name:
+  secret-key: plain-secret
+`,
+		"secret key alias": `secret-name: &secret-name secret-key
+remote-management:
+  *secret-name: plain-secret
+`,
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			if _, err := LoadConfig(configPath); err == nil || !strings.Contains(
+				err.Error(),
+				errManagementSecretYAMLAlias.Error(),
+			) {
+				t.Fatalf("LoadConfig error = %v, want alias rejection", err)
+			}
+			persisted, errRead := os.ReadFile(configPath)
+			if errRead != nil {
+				t.Fatalf("read config: %v", errRead)
+			}
+			if string(persisted) != content {
+				t.Fatalf("rejected config changed:\n%s", persisted)
+			}
+		})
+	}
+}
+
+func TestParseConfigBytesRejectsAliasedManagementSecret(t *testing.T) {
+	for name, content := range map[string]string{
+		"mapping alias": `shared: &management
+  secret-key: plain-secret
+remote-management: *management
+`,
+		"mapping key alias": `secret-name: &secret-name secret-key
+remote-management:
+  *secret-name: plain-secret
+`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseConfigBytes([]byte(content)); err == nil || !strings.Contains(
+				err.Error(),
+				errManagementSecretYAMLAlias.Error(),
+			) {
+				t.Fatalf("ParseConfigBytes error = %v, want alias rejection", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigRejectsNegativeImageArtifactCache(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	content := "image-artifact-cache:\n  retention-days: -1\n  max-total-size-mb: 1\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := LoadConfig(configPath); err == nil || !strings.Contains(err.Error(), "image-artifact-cache.retention-days") {
+		t.Fatalf("LoadConfig err = %v, want retention-days error", err)
+	}
+}
+
+func TestParseConfigBytesRejectsNegativeImageArtifactCache(t *testing.T) {
+	content := "image-artifact-cache:\n  retention-days: 1\n  max-total-size-mb: -1\n"
+	if _, err := ParseConfigBytes([]byte(content)); err == nil || !strings.Contains(err.Error(), "image-artifact-cache.max-total-size-mb") {
+		t.Fatalf("ParseConfigBytes err = %v, want max-total-size-mb error", err)
+	}
+}
+
 func TestParseConfigBytes_PluginStoreSources(t *testing.T) {
 	cfg, err := ParseConfigBytes(
 		[]byte(`
@@ -75,6 +185,105 @@ plugins:
 		if cfg.Plugins.StoreSources[i] != item {
 			t.Fatalf("StoreSources[%d] = %q, want %q", i, cfg.Plugins.StoreSources[i], item)
 		}
+	}
+}
+
+func TestParseConfigBytesInteractionsAPIKeys(t *testing.T) {
+	cfg, err := ParseConfigBytes(
+		[]byte(`
+interactions-api-key:
+  - api-key: " interactions-key-1 "
+    base-url: " https://interactions.example.com "
+    proxy-url: " http://proxy.local:8080 "
+    prefix: " /team-a/ "
+    headers:
+      X-Custom: " value "
+      " ": "drop"
+    excluded-models:
+      - " Gemini-2.5-Pro "
+      - "gemini-2.5-pro"
+      - ""
+    models:
+      - name: gemini-2.5-pro
+        alias: g25p
+  - api-key: "interactions-key-1"
+    base-url: "https://interactions.example.com"
+    prefix: duplicate
+  - api-key: "interactions-key-1"
+    base-url: "https://other-interactions.example.com"
+  - api-key: "   "
+`),
+	)
+	if err != nil {
+		t.Fatalf("ParseConfigBytes: %v", err)
+	}
+
+	assertSanitizedInteractionsKeys(t, cfg)
+}
+
+func TestLoadConfigInteractionsAPIKeys(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	content := []byte(`
+interactions-api-key:
+  - api-key: " interactions-key-1 "
+    base-url: " https://interactions.example.com "
+    proxy-url: " http://proxy.local:8080 "
+    prefix: " /team-a/ "
+    headers:
+      X-Custom: " value "
+    excluded-models:
+      - " Gemini-2.5-Pro "
+      - "gemini-2.5-pro"
+    models:
+      - name: gemini-2.5-pro
+        alias: g25p
+  - api-key: "interactions-key-1"
+    base-url: "https://interactions.example.com"
+  - api-key: "interactions-key-1"
+    base-url: "https://other-interactions.example.com"
+`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	assertSanitizedInteractionsKeys(t, cfg)
+}
+
+func assertSanitizedInteractionsKeys(t *testing.T, cfg *Config) {
+	t.Helper()
+	if len(cfg.InteractionsKey) != 2 {
+		t.Fatalf("InteractionsKey length = %d, want 2", len(cfg.InteractionsKey))
+	}
+	first := cfg.InteractionsKey[0]
+	if first.APIKey != "interactions-key-1" {
+		t.Fatalf("api key = %q, want interactions-key-1", first.APIKey)
+	}
+	if first.BaseURL != "https://interactions.example.com" {
+		t.Fatalf("base url = %q, want https://interactions.example.com", first.BaseURL)
+	}
+	if first.ProxyURL != "http://proxy.local:8080" {
+		t.Fatalf("proxy url = %q, want http://proxy.local:8080", first.ProxyURL)
+	}
+	if first.Prefix != "team-a" {
+		t.Fatalf("prefix = %q, want team-a", first.Prefix)
+	}
+	if got := first.Headers["X-Custom"]; got != "value" {
+		t.Fatalf("header X-Custom = %q, want value", got)
+	}
+	if len(first.ExcludedModels) != 1 || first.ExcludedModels[0] != "gemini-2.5-pro" {
+		t.Fatalf("excluded models = %#v, want [gemini-2.5-pro]", first.ExcludedModels)
+	}
+	if len(first.Models) != 1 || first.Models[0].Name != "gemini-2.5-pro" || first.Models[0].Alias != "g25p" {
+		t.Fatalf("models = %#v, want gemini-2.5-pro alias g25p", first.Models)
+	}
+	if cfg.InteractionsKey[1].BaseURL != "https://other-interactions.example.com" {
+		t.Fatalf("second base url = %q, want https://other-interactions.example.com", cfg.InteractionsKey[1].BaseURL)
 	}
 }
 
@@ -277,4 +486,41 @@ func hasWarningContaining(warnings []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestSaveLastGoodReplacesBackupAtomically(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	lastGoodPath := LastGoodPath(configPath)
+	if err := os.WriteFile(configPath, []byte("port: 9090\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lastGoodPath, []byte("port: 8317\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(lastGoodPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err = SaveLastGood(configPath); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(lastGoodPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("last-good backup was updated in place")
+	}
+	if after.Mode().Perm() != 0o600 {
+		t.Fatalf("last-good mode = %o, want 600", after.Mode().Perm())
+	}
+	written, err := os.ReadFile(lastGoodPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(written) != "port: 9090\n" {
+		t.Fatalf("last-good content = %q, want current config", written)
+	}
 }

@@ -2,9 +2,15 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,6 +22,32 @@ func setConfigAPIKeyProviderEntries(root *yaml.Node, keys []string) {
 		return
 	}
 	if len(keys) == 0 {
+		authIndex := findMapKeyIndex(root, "auth")
+		if authIndex < 0 {
+			return
+		}
+		authNode := root.Content[authIndex+1]
+		providersIndex := findMapKeyIndex(authNode, "providers")
+		if providersIndex < 0 {
+			return
+		}
+		providersNode := authNode.Content[providersIndex+1]
+		providerIndex := findMapKeyIndex(providersNode, "config-api-key")
+		if providerIndex < 0 {
+			return
+		}
+		configAPIKeyNode := providersNode.Content[providerIndex+1]
+		removeMapKey(configAPIKeyNode, "api-key-entries")
+		removeMapKey(configAPIKeyNode, "api-keys")
+		if len(configAPIKeyNode.Content) == 0 {
+			removeMapKey(providersNode, "config-api-key")
+		}
+		if len(providersNode.Content) == 0 {
+			removeMapKey(authNode, "providers")
+		}
+		if len(authNode.Content) == 0 {
+			removeMapKey(root, "auth")
+		}
 		return
 	}
 	authNode := getOrCreateMapValue(root, "auth")
@@ -40,6 +72,13 @@ func setConfigAPIKeyProviderEntries(root *yaml.Node, keys []string) {
 }
 
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
+	_, err := SaveConfigPreserveCommentsWithDigest(configFile, cfg)
+	return err
+}
+
+// SaveConfigPreserveCommentsWithDigest writes the config and returns the SHA-256
+// of the exact bytes atomically published to configFile.
+func SaveConfigPreserveCommentsWithDigest(configFile string, cfg *Config) (string, error) {
 	modelsExternal := modelsJSONExists(configFile)
 	persistCfg := cfg
 	if modelsExternal && cfg != nil {
@@ -48,37 +87,47 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 		copyCfg.OAuthModelAlias = nil
 		persistCfg = &copyCfg
 	}
-	// Load original YAML as a node tree to preserve comments and ordering.
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		return err
-	}
-
-	var original yaml.Node
-	if err = yaml.Unmarshal(data, &original); err != nil {
-		return err
-	}
-	if original.Kind != yaml.DocumentNode || len(original.Content) == 0 {
-		return fmt.Errorf("invalid yaml document structure")
-	}
-	if original.Content[0] == nil || original.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("expected root mapping node")
-	}
 
 	// Marshal the current cfg to YAML, then unmarshal to a yaml.Node we can merge from.
 	rendered, err := yaml.Marshal(persistCfg)
 	if err != nil {
-		return err
+		return "", err
 	}
 	var generated yaml.Node
 	if err = yaml.Unmarshal(rendered, &generated); err != nil {
-		return err
+		return "", err
 	}
 	if generated.Kind != yaml.DocumentNode || len(generated.Content) == 0 || generated.Content[0] == nil {
-		return fmt.Errorf("invalid generated yaml structure")
+		return "", fmt.Errorf("invalid generated yaml structure")
 	}
 	if generated.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("expected generated root mapping node")
+		return "", fmt.Errorf("expected generated root mapping node")
+	}
+
+	// Load original YAML as a node tree to preserve comments and ordering.
+	data, err := os.ReadFile(configFile)
+	if os.IsNotExist(err) {
+		setConfigAPIKeyProviderEntries(generated.Content[0], persistCfg.APIKeys)
+		if modelsExternal {
+			removeMapKey(generated.Content[0], "oauth-model-alias")
+			removeMapKey(generated.Content[0], "model-catalog")
+		}
+		normalizeCollectionNodeStyles(generated.Content[0])
+		return writeYAMLNodeWithDigest(configFile, &generated)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	var original yaml.Node
+	if err = yaml.Unmarshal(data, &original); err != nil {
+		return "", err
+	}
+	if original.Kind != yaml.DocumentNode || len(original.Content) == 0 {
+		return "", fmt.Errorf("invalid yaml document structure")
+	}
+	if original.Content[0] == nil || original.Content[0].Kind != yaml.MappingNode {
+		return "", fmt.Errorf("expected root mapping node")
 	}
 
 	// Remove deprecated sections before merging back the sanitized config.
@@ -106,7 +155,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	normalizeCollectionNodeStyles(original.Content[0])
 
 	// Write back.
-	return writeYAMLNode(configFile, &original)
+	return writeYAMLNodeWithDigest(configFile, &original)
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
@@ -146,24 +195,107 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 
 // writeYAMLNode encodes a yaml.Node to the given file with normalized comment indentation.
 func writeYAMLNode(filePath string, node *yaml.Node) error {
-	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
+	_, err := writeYAMLNodeWithDigest(filePath, node)
+	return err
+}
+
+func writeYAMLNodeWithDigest(filePath string, node *yaml.Node) (string, error) {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
-	if err = enc.Encode(node); err != nil {
+	if err := enc.Encode(node); err != nil {
 		_ = enc.Close()
-		return err
+		return "", err
 	}
-	if err = enc.Close(); err != nil {
-		return err
+	if err := enc.Close(); err != nil {
+		return "", err
 	}
 	data := NormalizeCommentIndentation(buf.Bytes())
-	_, err = f.Write(data)
-	return err
+	digest := sha256.Sum256(data)
+	if err := writeFileAtomically(filePath, data); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func writeFileAtomically(filePath string, data []byte) error {
+	targetPath, err := resolveAtomicWriteTarget(filePath)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(targetPath)
+	file, err := os.CreateTemp(dir, "."+filepath.Base(targetPath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := file.Name()
+	fileOpen := true
+	defer func() {
+		if fileOpen {
+			_ = file.Close()
+		}
+		if tempPath != "" {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err = file.Chmod(0o600); err != nil {
+		return err
+	}
+	written, err := file.Write(data)
+	if err != nil {
+		return err
+	}
+	if written != len(data) {
+		return io.ErrShortWrite
+	}
+	if err = file.Sync(); err != nil {
+		return err
+	}
+	if err = file.Close(); err != nil {
+		fileOpen = false
+		return err
+	}
+	fileOpen = false
+	if err = os.Rename(tempPath, targetPath); err != nil {
+		if errors.Is(err, syscall.EBUSY) {
+			return fmt.Errorf(
+				"replace config file: %w; mount the config directory instead of a single config file",
+				err,
+			)
+		}
+		return err
+	}
+	tempPath = ""
+	return syncParentDirectory(dir)
+}
+
+func syncParentDirectory(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err = directory.Sync(); err != nil {
+		_ = directory.Close()
+		return err
+	}
+	return directory.Close()
+}
+
+func resolveAtomicWriteTarget(filePath string) (string, error) {
+	info, err := os.Lstat(filePath)
+	switch {
+	case err == nil && info.Mode()&os.ModeSymlink != 0:
+		return filepath.EvalSymlinks(filePath)
+	case err == nil:
+		return filePath, nil
+	case os.IsNotExist(err):
+		return filePath, nil
+	default:
+		return "", err
+	}
 }
 
 // EnsureDefaultsInFile re-saves the config to the YAML file, ensuring all known fields

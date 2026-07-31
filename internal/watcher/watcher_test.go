@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,7 +63,8 @@ func TestApplyAuthExcludedModelsMeta_OAuthProvider(t *testing.T) {
 
 func TestBuildAPIKeyClientsCounts(t *testing.T) {
 	cfg := &config.Config{
-		GeminiKey: []config.GeminiKey{{APIKey: "g1"}, {APIKey: "g2"}},
+		GeminiKey:       []config.GeminiKey{{APIKey: "g1"}, {APIKey: "g2"}},
+		InteractionsKey: []config.GeminiKey{{APIKey: "i1"}},
 		VertexCompatAPIKey: []config.VertexCompatKey{
 			{APIKey: "v1"},
 		},
@@ -75,7 +77,7 @@ func TestBuildAPIKeyClientsCounts(t *testing.T) {
 	}
 
 	gemini, vertex, claude, codex, compat := BuildAPIKeyClients(cfg)
-	if gemini != 2 || vertex != 1 || claude != 1 || codex != 2 || compat != 2 {
+	if gemini != 3 || vertex != 1 || claude != 1 || codex != 2 || compat != 2 {
 		t.Fatalf("unexpected counts: %d %d %d %d %d", gemini, vertex, claude, codex, compat)
 	}
 }
@@ -292,6 +294,151 @@ func TestReloadConfigIfChanged_TriggersOnChangeAndSkipsUnchanged(t *testing.T) {
 	}
 }
 
+func TestReloadConfigIfChangedRejectsStaleSnapshotBeforeCallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(port int) {
+		t.Helper()
+		data, err := yaml.Marshal(&config.Config{Port: port, AuthDir: authDir})
+		if err != nil {
+			t.Fatalf("marshal config: %v", err)
+		}
+		if err = os.WriteFile(configPath, data, 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	writeConfig(8317)
+
+	var reads int
+	var callbackPorts []int
+	w := &Watcher{
+		configPath: configPath,
+		authDir:    authDir,
+		reloadCallback: func(cfg *config.Config) bool {
+			callbackPorts = append(callbackPorts, cfg.Port)
+			return true
+		},
+	}
+	w.SetConfig(&config.Config{Port: 7000, AuthDir: authDir})
+	w.readConfigFile = func(path string) ([]byte, error) {
+		reads++
+		data, err := os.ReadFile(path)
+		if err == nil && reads == 1 {
+			writeConfig(9090)
+		}
+		return data, err
+	}
+
+	w.reloadConfigIfChanged()
+	w.stopConfigReloadTimer()
+	if len(callbackPorts) != 0 {
+		t.Fatalf("stale snapshot reached callback: %v", callbackPorts)
+	}
+	w.clientsMutex.RLock()
+	if w.config == nil || w.config.Port != 7000 || w.lastConfigHash != "" {
+		t.Fatalf("watcher published stale state: config=%+v hash=%q", w.config, w.lastConfigHash)
+	}
+	w.clientsMutex.RUnlock()
+
+	w.reloadConfigIfChanged()
+	w.stopConfigReloadTimer()
+	if len(callbackPorts) != 1 || callbackPorts[0] != 9090 {
+		t.Fatalf("callback ports = %v, want [9090]", callbackPorts)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read final config: %v", err)
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.Port != 9090 || w.lastConfigHash != configDataHash(data) {
+		t.Fatalf("final watcher state: config=%+v hash=%q", w.config, w.lastConfigHash)
+	}
+}
+
+func TestAcknowledgeConfigFileRequiresExpectedHash(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("port: 8317\n")
+	if errWrite := os.WriteFile(configPath, data, 0o600); errWrite != nil {
+		t.Fatalf("WriteFile() error = %v", errWrite)
+	}
+	w := &Watcher{configPath: configPath}
+	cfg := &config.Config{Port: 8317}
+	if w.AcknowledgeConfigFile(cfg, configDataHash([]byte("different"))) {
+		t.Fatal("AcknowledgeConfigFile accepted a stale file hash")
+	}
+	if w.config != nil || w.lastConfigHash != "" {
+		t.Fatalf("stale acknowledgement changed watcher state: config=%+v hash=%q", w.config, w.lastConfigHash)
+	}
+	if !w.AcknowledgeConfigFile(cfg, configDataHash(data)) {
+		t.Fatal("AcknowledgeConfigFile rejected the persisted management config")
+	}
+	if w.config != cfg || w.lastConfigHash != configDataHash(data) {
+		t.Fatalf("acknowledged watcher state: config=%+v hash=%q", w.config, w.lastConfigHash)
+	}
+}
+
+func TestReloadConfigIfChangedKeepsPublishedHashWhenFileChangesInCallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	marshalConfig := func(port int) []byte {
+		t.Helper()
+		data, err := yaml.Marshal(&config.Config{Port: port, AuthDir: authDir})
+		if err != nil {
+			t.Fatalf("marshal config: %v", err)
+		}
+		return data
+	}
+	configA := marshalConfig(8317)
+	configB := marshalConfig(9090)
+	if err := os.WriteFile(configPath, configA, 0o600); err != nil {
+		t.Fatalf("write config A: %v", err)
+	}
+
+	var callbackPorts []int
+	w := &Watcher{
+		configPath: configPath,
+		authDir:    authDir,
+		reloadCallback: func(cfg *config.Config) bool {
+			callbackPorts = append(callbackPorts, cfg.Port)
+			if cfg.Port == 8317 {
+				if err := os.WriteFile(configPath, configB, 0o600); err != nil {
+					t.Fatalf("write config B: %v", err)
+				}
+			}
+			return true
+		},
+	}
+	w.SetConfig(&config.Config{Port: 7000, AuthDir: authDir})
+
+	w.reloadConfigIfChanged()
+	w.stopConfigReloadTimer()
+	w.clientsMutex.RLock()
+	if w.config == nil || w.config.Port != 8317 || w.lastConfigHash != configDataHash(configA) {
+		t.Fatalf("first published state: config=%+v hash=%q", w.config, w.lastConfigHash)
+	}
+	w.clientsMutex.RUnlock()
+
+	w.reloadConfigIfChanged()
+	w.stopConfigReloadTimer()
+	if len(callbackPorts) != 2 || callbackPorts[0] != 8317 || callbackPorts[1] != 9090 {
+		t.Fatalf("callback ports = %v, want [8317 9090]", callbackPorts)
+	}
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.Port != 9090 || w.lastConfigHash != configDataHash(configB) {
+		t.Fatalf("final published state: config=%+v hash=%q", w.config, w.lastConfigHash)
+	}
+}
+
 func TestStartAndStopSuccess(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -327,6 +474,65 @@ func TestStartAndStopSuccess(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&reloads); got != 1 {
 		t.Fatalf("expected one reload callback, got %d", got)
+	}
+}
+
+func TestStartObservesAtomicConfigReplace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("replacing an existing file with os.Rename is not supported on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	writeConfig := func(path string, port int) {
+		t.Helper()
+		data := []byte(fmt.Sprintf("port: %d\nauth-dir: %s\n", port, authDir))
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+	writeConfig(configPath, 8317)
+
+	reloadedPorts := make(chan int, 4)
+	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) bool {
+		select {
+		case reloadedPorts <- cfg.Port:
+		default:
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatalf("create watcher: %v", err)
+	}
+	w.SetConfig(&config.Config{Port: 8317, AuthDir: authDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer func() { _ = w.Stop() }()
+	if err = w.Start(ctx); err != nil {
+		t.Fatalf("start watcher: %v", err)
+	}
+
+	tempPath := filepath.Join(tmpDir, ".config.yaml.tmp")
+	writeConfig(tempPath, 9090)
+	if err = os.Rename(tempPath, configPath); err != nil {
+		t.Fatalf("replace config atomically: %v", err)
+	}
+
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case port := <-reloadedPorts:
+			if port == 9090 {
+				return
+			}
+		case <-timer.C:
+			t.Fatal("watcher did not reload atomically replaced config")
+		}
 	}
 }
 
@@ -479,8 +685,9 @@ func TestShouldDebounceRemove(t *testing.T) {
 	path := filepath.Clean("test.json")
 
 	if w.shouldDebounceRemove(path, time.Now()) {
-		t.Fatal("first call should not debounce")
+		t.Fatal("unrecorded remove should not debounce")
 	}
+	w.recordRemove(path, time.Now())
 	if !w.shouldDebounceRemove(path, time.Now()) {
 		t.Fatal("second call within window should debounce")
 	}
@@ -989,6 +1196,126 @@ func TestHandleEventAtomicReplaceChangedTriggersUpdate(t *testing.T) {
 	}
 }
 
+func TestHandleEventAtomicReplaceDoesNotDebounceFollowingRealRemove(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if errMkdir := os.MkdirAll(authDir, 0o755); errMkdir != nil {
+		t.Fatal(errMkdir)
+	}
+	authFile := filepath.Join(authDir, "replace-then-remove.json")
+	oldContent := []byte(`{"type":"demo","v":1}`)
+	newContent := []byte(`{"type":"demo","v":2}`)
+	if errWrite := os.WriteFile(authFile, newContent, 0o644); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	oldSum := sha256.Sum256(oldContent)
+	var reloads int32
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     filepath.Join(tmpDir, "config.yaml"),
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(*config.Config) bool {
+			atomic.AddInt32(&reloads, 1)
+			return true
+		},
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = hexString(oldSum[:])
+
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Rename})
+	if atomic.LoadInt32(&reloads) != 1 {
+		t.Fatalf("atomic replace reloads = %d, want 1", reloads)
+	}
+	if errRemove := os.Remove(authFile); errRemove != nil {
+		t.Fatal(errRemove)
+	}
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
+	if w.isKnownAuthFile(authFile) {
+		t.Fatal("real remove after atomic replacement left the auth file registered")
+	}
+	w.clientsMutex.RLock()
+	_, recorded := w.lastRemoveTimes[w.normalizeAuthPath(authFile)]
+	w.clientsMutex.RUnlock()
+	if !recorded {
+		t.Fatal("real remove after atomic replacement was not recorded")
+	}
+}
+
+func TestHandleEventRecreatedFileResetsRemoveDebounce(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if errMkdir := os.MkdirAll(authDir, 0o755); errMkdir != nil {
+		t.Fatal(errMkdir)
+	}
+	authFile := filepath.Join(authDir, "recreated.json")
+	content := []byte(`{"type":"demo"}`)
+	if errWrite := os.WriteFile(authFile, content, 0o644); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	sum := sha256.Sum256(content)
+	w := &Watcher{
+		authDir:        authDir,
+		lastAuthHashes: map[string]string{},
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = hexString(sum[:])
+
+	if errRemove := os.Remove(authFile); errRemove != nil {
+		t.Fatal(errRemove)
+	}
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
+	if w.isKnownAuthFile(authFile) {
+		t.Fatal("first remove left the auth file registered")
+	}
+	if errWrite := os.WriteFile(authFile, content, 0o644); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Create})
+	if !w.isKnownAuthFile(authFile) {
+		t.Fatal("recreated auth file was not registered")
+	}
+	if errRemove := os.Remove(authFile); errRemove != nil {
+		t.Fatal(errRemove)
+	}
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
+	if w.isKnownAuthFile(authFile) {
+		t.Fatal("second real remove was incorrectly debounced")
+	}
+}
+
+func TestHandleEventIgnoresSiblingDirectoryWithAuthPrefix(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	siblingDir := filepath.Join(root, "auth-backup")
+	for _, dir := range []string{authDir, siblingDir} {
+		if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
+			t.Fatal(errMkdir)
+		}
+	}
+	siblingFile := filepath.Join(siblingDir, "outside.json")
+	if errWrite := os.WriteFile(siblingFile, []byte(`{"type":"demo"}`), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	var reloads int32
+	w := &Watcher{
+		authDir:        authDir,
+		config:         &config.Config{AuthDir: authDir},
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(*config.Config) bool {
+			atomic.AddInt32(&reloads, 1)
+			return true
+		},
+	}
+
+	w.handleEvent(fsnotify.Event{Name: siblingFile, Op: fsnotify.Write})
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatalf("sibling auth-prefix path triggered %d reloads", reloads)
+	}
+	if len(w.lastAuthHashes) != 0 {
+		t.Fatalf("sibling auth-prefix path entered auth cache: %#v", w.lastAuthHashes)
+	}
+}
+
 func TestHandleEventRemoveUnknownFileIgnored(t *testing.T) {
 	tmpDir := t.TempDir()
 	authDir := filepath.Join(tmpDir, "auth")
@@ -1064,7 +1391,7 @@ func TestNormalizeAuthPathAndDebounceCleanup(t *testing.T) {
 	}
 	w.clientsMutex.Unlock()
 
-	w.shouldDebounceRemove("new-path", time.Now())
+	w.recordRemove("new-path", time.Now())
 
 	w.clientsMutex.Lock()
 	gotLen := len(w.lastRemoveTimes)
@@ -1272,6 +1599,39 @@ func TestReloadConfigFiltersAffectedOAuthProviders(t *testing.T) {
 	}
 	if !foundB {
 		t.Fatal("expected unaffected provider auth to remain")
+	}
+}
+
+func TestReloadConfigPassesSnapshotHashToConfigCallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if errMkdir := os.MkdirAll(authDir, 0o755); errMkdir != nil {
+		t.Fatalf("create auth dir: %v", errMkdir)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	data := []byte("auth-dir: " + authDir + "\ndebug: true\n")
+	if errWrite := os.WriteFile(configPath, data, 0o600); errWrite != nil {
+		t.Fatalf("write config: %v", errWrite)
+	}
+	var gotHash string
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		lastAuthHashes: make(map[string]string),
+		configReloadCallback: func(cfg *config.Config, snapshotHash string) bool {
+			if cfg == nil || !cfg.Debug {
+				t.Fatalf("callback config = %#v", cfg)
+			}
+			gotHash = snapshotHash
+			return true
+		},
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	if !w.reloadConfig() {
+		t.Fatal("reloadConfig() = false")
+	}
+	if gotHash != configDataHash(data) {
+		t.Fatalf("snapshot hash = %q, want %q", gotHash, configDataHash(data))
 	}
 }
 
@@ -1489,6 +1849,7 @@ type stubStore struct {
 	authPersisted   int32
 	lastAuthMessage string
 	lastAuthPaths   []string
+	persisted       chan string
 }
 
 func (s *stubStore) List(context.Context) ([]*coreauth.Auth, error) { return nil, nil }
@@ -1498,15 +1859,88 @@ func (s *stubStore) Save(context.Context, *coreauth.Auth) (string, error) {
 func (s *stubStore) Delete(context.Context, string) error { return nil }
 func (s *stubStore) PersistConfig(context.Context) error {
 	atomic.AddInt32(&s.cfgPersisted, 1)
+	if s.persisted != nil {
+		s.persisted <- "config"
+	}
 	return nil
 }
 func (s *stubStore) PersistAuthFiles(_ context.Context, message string, paths ...string) error {
-	atomic.AddInt32(&s.authPersisted, 1)
 	s.lastAuthMessage = message
 	s.lastAuthPaths = paths
+	atomic.AddInt32(&s.authPersisted, 1)
+	if s.persisted != nil {
+		s.persisted <- "auth"
+	}
 	return nil
 }
 func (s *stubStore) AuthDir() string { return s.authDir }
+
+type versionedWatcherStore struct {
+	stubStore
+	deleteID      string
+	deleteVersion coreauth.PersistedVersion
+	deleted       chan struct{}
+}
+
+func (s *versionedWatcherStore) DeleteIfVersion(
+	_ context.Context,
+	id string,
+	version coreauth.PersistedVersion,
+) (bool, error) {
+	s.deleteID = id
+	s.deleteVersion = version
+	close(s.deleted)
+	return false, nil
+}
+
+func TestWatcherRemovalUsesCapturedVersionForPersistentDelete(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "removed.json")
+	raw := []byte(`{"type":"demo","access_token":"old"}`)
+	if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	digest, errDigest := coreauth.DigestPersistedJSON(raw)
+	if errDigest != nil {
+		t.Fatal(errDigest)
+	}
+	store := &versionedWatcherStore{deleted: make(chan struct{})}
+	w := &Watcher{
+		authDir:          authDir,
+		config:           &config.Config{AuthDir: authDir},
+		lastAuthHashes:   make(map[string]string),
+		lastAuthVersions: make(map[string]coreauth.PersistedVersion),
+		fileAuthsByPath:  make(map[string]map[string]*coreauth.Auth),
+		currentAuths:     make(map[string]*coreauth.Auth),
+		storePersister:   store,
+	}
+	normalized := w.normalizeAuthPath(path)
+	w.lastAuthHashes[normalized] = "raw-hash"
+	w.lastAuthVersions[normalized] = coreauth.PersistedVersion{Path: path, SHA256: digest}
+	w.fileAuthsByPath[normalized] = map[string]*coreauth.Auth{
+		"removed.json": {ID: "removed.json", Provider: "demo"},
+	}
+	w.currentAuths["removed.json"] = &coreauth.Auth{ID: "removed.json", Provider: "demo"}
+	if errRemove := os.Remove(path); errRemove != nil {
+		t.Fatal(errRemove)
+	}
+
+	w.removeClient(path)
+	select {
+	case <-store.deleted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for versioned deletion")
+	}
+	if store.deleteID != path {
+		t.Fatalf("DeleteIfVersion() id = %q, want %q", store.deleteID, path)
+	}
+	if store.deleteVersion.Path != path || store.deleteVersion.SHA256 != digest {
+		t.Fatalf("DeleteIfVersion() version = %#v", store.deleteVersion)
+	}
+	if atomic.LoadInt32(&store.authPersisted) != 0 {
+		t.Fatal("watcher fell back to unconditional PersistAuthFiles deletion")
+	}
+}
 
 func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 	tmp := t.TempDir()
@@ -1528,15 +1962,21 @@ func TestNewWatcherDetectsPersisterAndAuthDir(t *testing.T) {
 }
 
 func TestPersistConfigAndAuthAsyncInvokePersister(t *testing.T) {
-	w := &Watcher{
-		storePersister: &stubStore{},
-	}
+	store := &stubStore{persisted: make(chan string, 2)}
+	w := &Watcher{storePersister: store}
 
 	w.persistConfigAsync()
 	w.persistAuthAsync("msg", " a ", "", "b ")
 
-	time.Sleep(30 * time.Millisecond)
-	store := w.storePersister.(*stubStore)
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	for completed := 0; completed < 2; completed++ {
+		select {
+		case <-store.persisted:
+		case <-timer.C:
+			t.Fatal("timed out waiting for asynchronous persistence")
+		}
+	}
 	if atomic.LoadInt32(&store.cfgPersisted) != 1 {
 		t.Fatalf("expected PersistConfig to be called once, got %d", store.cfgPersisted)
 	}
@@ -1575,7 +2015,10 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	if atomic.LoadInt32(&reloads) != 1 {
 		t.Fatalf("expected single debounced reload, got %d", reloads)
 	}
-	if w.lastConfigHash == "" {
+	w.clientsMutex.RLock()
+	lastConfigHash := w.lastConfigHash
+	w.clientsMutex.RUnlock()
+	if lastConfigHash == "" {
 		t.Fatal("expected lastConfigHash to be set after reload")
 	}
 }

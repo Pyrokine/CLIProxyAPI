@@ -74,6 +74,22 @@ func normalizeStringSlice(values []string) []string {
 	return result
 }
 
+func validateImageArtifactCacheConfig(cfg ImageArtifactCache) error {
+	if cfg.RetentionDays < 0 {
+		return fmt.Errorf(
+			"image-artifact-cache.retention-days %d is invalid (use 0 to disable or a positive integer)",
+			cfg.RetentionDays,
+		)
+	}
+	if cfg.MaxTotalSizeMB < 0 {
+		return fmt.Errorf(
+			"image-artifact-cache.max-total-size-mb %d is invalid (use 0 to disable or a positive integer)",
+			cfg.MaxTotalSizeMB,
+		)
+	}
+	return nil
+}
+
 // LoadConfigOptional reads YAML from configFile.
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
@@ -95,6 +111,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return &Config{}, nil
 	}
 
+	if errValidate := validateManagementSecretYAML(data); errValidate != nil {
+		if optional {
+			return &Config{}, nil
+		}
+		return nil, fmt.Errorf("failed to validate config file: %w", errValidate)
+	}
+
 	// Unmarshal the YAML data into the Config struct.
 	var cfg Config
 	// Set defaults before unmarshal so that absent keys keep defaults.
@@ -104,6 +127,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
+	cfg.ImageArtifactCache.RetentionDays = 7
+	cfg.ImageArtifactCache.MaxTotalSizeMB = 10240
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -127,6 +152,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			return &Config{}, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	if err = validateImageArtifactCacheConfig(cfg.ImageArtifactCache); err != nil {
+		return nil, err
 	}
 	cfg.APIKeys = mergeConfigAPIKeys(data, cfg.APIKeys)
 
@@ -155,6 +183,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.RemoteManagement.CPAGitHubRepository == "" {
 		cfg.RemoteManagement.CPAGitHubRepository = defaultCPAGitHubRepository
 	}
+	cfg.RemoteManagement.TrustedProxies, err = NormalizeTrustedProxies(cfg.RemoteManagement.TrustedProxies)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {
@@ -181,6 +213,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
+	cfg.SanitizeInteractionsKeys()
 
 	// Sanitize Vertex-compatible API keys: drop entries without base-url
 	cfg.SanitizeVertexCompatKeys()
@@ -221,7 +254,7 @@ func SaveLastGood(configFilePath string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(LastGoodPath(configFilePath), data, 0o600)
+	return writeFileAtomically(LastGoodPath(configFilePath), data)
 }
 
 // LoadWithFallback tries to load configFilePath; on failure, falls back to config.yaml.last-good.

@@ -190,18 +190,12 @@ func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 	}
 }
 
-func TestFileSynthesizer_Synthesize_SkipsInvalidFiles(t *testing.T) {
+func TestFileSynthesizer_Synthesize_ReportsInvalidFiles(t *testing.T) {
 	tempDir := t.TempDir()
 
-	// Create various invalid files
-	_ = os.WriteFile(filepath.Join(tempDir, "not-json.txt"), []byte("text content"), 0644)
-	_ = os.WriteFile(filepath.Join(tempDir, "invalid.json"), []byte("not valid json"), 0644)
-	_ = os.WriteFile(filepath.Join(tempDir, "empty.json"), []byte(""), 0644)
-	_ = os.WriteFile(filepath.Join(tempDir, "no-type.json"), []byte(`{"email": "test@example.com"}`), 0644)
-
-	// Create one valid file
 	validData, _ := json.Marshal(map[string]any{"type": "claude", "email": "valid@example.com"})
-	_ = os.WriteFile(filepath.Join(tempDir, "valid.json"), validData, 0644)
+	_ = os.WriteFile(filepath.Join(tempDir, "a-valid.json"), validData, 0o644)
+	_ = os.WriteFile(filepath.Join(tempDir, "z-invalid.json"), []byte("not valid json"), 0o644)
 
 	synth := NewFileSynthesizer()
 	ctx := &SynthesisContext{
@@ -212,14 +206,11 @@ func TestFileSynthesizer_Synthesize_SkipsInvalidFiles(t *testing.T) {
 	}
 
 	auths, err := synth.Synthesize(ctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "z-invalid.json") {
+		t.Fatalf("Synthesize() error = %v", err)
 	}
-	if len(auths) != 1 {
-		t.Fatalf("only valid auth file should be processed, got %d", len(auths))
-	}
-	if auths[0].Label != "valid@example.com" {
-		t.Errorf("expected label valid@example.com, got %s", auths[0].Label)
+	if len(auths) != 1 || auths[0].Label != "valid@example.com" {
+		t.Fatalf("partial valid auths = %#v", auths)
 	}
 }
 

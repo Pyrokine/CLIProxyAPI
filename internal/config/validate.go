@@ -178,10 +178,20 @@ func ValidateConfig(cfg *Config) []string {
 		}
 	}
 
+	pluginConfigIDs := make(map[string]string, len(cfg.Plugins.Configs))
 	for id := range cfg.Plugins.Configs {
 		if !validPluginConfigID(id) {
 			warnings = append(warnings, fmt.Sprintf("plugins.configs contains invalid plugin id %q", id))
 		}
+		canonicalID := canonicalPluginConfigID(id)
+		if existingID, duplicate := pluginConfigIDs[canonicalID]; duplicate {
+			warnings = append(
+				warnings,
+				fmt.Sprintf("plugins.configs contains duplicate plugin ids %q and %q", existingID, id),
+			)
+			continue
+		}
+		pluginConfigIDs[canonicalID] = id
 	}
 
 	// TLS
@@ -219,6 +229,24 @@ func ValidateConfig(cfg *Config) []string {
 			warnings, fmt.Sprintf(
 				"usage-retention.warning-threshold-pct %d is invalid (use 0 for default or 1-100)",
 				cfg.UsageRetention.WarningThresholdPct,
+			),
+		)
+	}
+
+	// Image artifact cache
+	if cfg.ImageArtifactCache.RetentionDays < 0 {
+		warnings = append(
+			warnings, fmt.Sprintf(
+				"image-artifact-cache.retention-days %d is invalid (use 0 to disable or a positive integer)",
+				cfg.ImageArtifactCache.RetentionDays,
+			),
+		)
+	}
+	if cfg.ImageArtifactCache.MaxTotalSizeMB < 0 {
+		warnings = append(
+			warnings, fmt.Sprintf(
+				"image-artifact-cache.max-total-size-mb %d is invalid (use 0 to disable or a positive integer)",
+				cfg.ImageArtifactCache.MaxTotalSizeMB,
 			),
 		)
 	}

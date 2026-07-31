@@ -15,6 +15,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		return nil, fmt.Errorf("config payload is empty")
 	}
 
+	if errValidate := validateManagementSecretYAML(data); errValidate != nil {
+		return nil, fmt.Errorf("validate config payload: %w", errValidate)
+	}
+
 	var cfg Config
 	cfg.Host = "127.0.0.1"
 	cfg.LoggingToFile = false
@@ -22,6 +26,8 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
+	cfg.ImageArtifactCache.RetentionDays = 7
+	cfg.ImageArtifactCache.MaxTotalSizeMB = 10240
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
@@ -37,6 +43,10 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
 	}
+	if err := validateImageArtifactCacheConfig(cfg.ImageArtifactCache); err != nil {
+		return nil, err
+	}
+	cfg.APIKeys = mergeConfigAPIKeys(data, cfg.APIKeys)
 
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
 		hashed, errHash := bcrypt.GenerateFromPassword([]byte(cfg.RemoteManagement.SecretKey), bcrypt.DefaultCost)
@@ -54,6 +64,11 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if cfg.RemoteManagement.CPAGitHubRepository == "" {
 		cfg.RemoteManagement.CPAGitHubRepository = defaultCPAGitHubRepository
 	}
+	trustedProxies, errTrustedProxies := NormalizeTrustedProxies(cfg.RemoteManagement.TrustedProxies)
+	if errTrustedProxies != nil {
+		return nil, errTrustedProxies
+	}
+	cfg.RemoteManagement.TrustedProxies = trustedProxies
 
 	cfg.Pprof.Addr = strings.TrimSpace(cfg.Pprof.Addr)
 	if cfg.Pprof.Addr == "" {
@@ -77,6 +92,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.NormalizePluginsConfig()
 
 	cfg.SanitizeGeminiKeys()
+	cfg.SanitizeInteractionsKeys()
 	cfg.SanitizeVertexCompatKeys()
 	cfg.SanitizeCodexKeys()
 	cfg.SanitizeCodexHeaderDefaults()

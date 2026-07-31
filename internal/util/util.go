@@ -17,11 +17,11 @@ import (
 
 var functionNameSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.:-]`)
 
-// sanitizeFunctionName ensures a function name matches the requirements for Gemini/Vertex AI.
+// SanitizeFunctionName ensures a function name matches the requirements for Gemini/Vertex AI.
 // It replaces invalid characters with underscores, ensures it starts with a letter or underscore,
 // and truncates it to 64 characters if necessary.
 // Regex Rule: [^a-zA-Z0-9_.:-] replaced with _.
-func sanitizeFunctionName(name string) string {
+func SanitizeFunctionName(name string) string {
 	if name == "" {
 		return ""
 	}
@@ -52,6 +52,10 @@ func sanitizeFunctionName(name string) string {
 		sanitized = sanitized[:64]
 	}
 	return sanitized
+}
+
+func sanitizeFunctionName(name string) string {
+	return SanitizeFunctionName(name)
 }
 
 // SetLogLevel configures the logrus log level based on the configuration.

@@ -385,6 +385,16 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			),
 		)
 	}
+	if !reflect.DeepEqual(oldCfg.RemoteManagement.TrustedProxies, newCfg.RemoteManagement.TrustedProxies) {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"remote-management.trusted-proxies: [%s] -> [%s]",
+				strings.Join(oldCfg.RemoteManagement.TrustedProxies, ", "),
+				strings.Join(newCfg.RemoteManagement.TrustedProxies, ", "),
+			),
+		)
+	}
 	if oldCfg.RemoteManagement.DisableControlPanel != newCfg.RemoteManagement.DisableControlPanel {
 		changes = append(
 			changes, fmt.Sprintf(

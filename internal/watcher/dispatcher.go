@@ -4,6 +4,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -11,8 +12,10 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 var snapshotCoreAuthsFunc = snapshotCoreAuths
@@ -84,8 +87,13 @@ func (w *Watcher) refreshAuthState(force bool) {
 	authDir := w.authDir
 	parser := w.pluginAuthParser
 	w.clientsMutex.RUnlock()
-	auths := snapshotCoreAuthsFunc(cfg, authDir, parser)
+	auths, errSnapshot := snapshotCoreAuthsFunc(cfg, authDir, parser)
 	w.clientsMutex.Lock()
+	if errSnapshot != nil && w.currentAuths != nil {
+		w.clientsMutex.Unlock()
+		log.Errorf("failed to refresh auth snapshot; retaining current auth state: %v", errSnapshot)
+		return
+	}
 	if len(w.runtimeAuths) > 0 {
 		for _, a := range w.runtimeAuths {
 			if a != nil {
@@ -264,7 +272,30 @@ func (w *Watcher) stopDispatch() {
 }
 
 func authEqual(a, b *coreauth.Auth) bool {
-	return reflect.DeepEqual(normalizeAuth(a), normalizeAuth(b))
+	return reflect.DeepEqual(normalizeAuth(a), normalizeAuth(b)) && geminiRuntimeEqual(a, b)
+}
+
+func geminiRuntimeEqual(a, b *coreauth.Auth) bool {
+	sharedA := geminicli.ResolveSharedCredential(runtimeValue(a))
+	sharedB := geminicli.ResolveSharedCredential(runtimeValue(b))
+	if sharedA == nil || sharedB == nil {
+		return sharedA == sharedB
+	}
+	if sharedA.PrimaryID() != sharedB.PrimaryID() || sharedA.Email() != sharedB.Email() ||
+		!reflect.DeepEqual(sharedA.ProjectIDs(), sharedB.ProjectIDs()) ||
+		!reflect.DeepEqual(sharedA.MetadataSnapshot(), sharedB.MetadataSnapshot()) {
+		return false
+	}
+	virtualA, virtualAOK := runtimeValue(a).(*geminicli.VirtualCredential)
+	virtualB, virtualBOK := runtimeValue(b).(*geminicli.VirtualCredential)
+	return virtualAOK == virtualBOK && (!virtualAOK || virtualA.ProjectID == virtualB.ProjectID)
+}
+
+func runtimeValue(auth *coreauth.Auth) any {
+	if auth == nil {
+		return nil
+	}
+	return auth.Runtime
 }
 
 func allowAuthRecreateForUpdate(auth *coreauth.Auth) bool {
@@ -288,7 +319,11 @@ func normalizeAuth(a *coreauth.Auth) *coreauth.Auth {
 	return clone
 }
 
-func snapshotCoreAuths(cfg *config.Config, authDir string, parser synthesizer.PluginAuthParser) []*coreauth.Auth {
+func snapshotCoreAuths(
+	cfg *config.Config,
+	authDir string,
+	parser synthesizer.PluginAuthParser,
+) ([]*coreauth.Auth, error) {
 	ctx := &synthesizer.SynthesisContext{
 		Config:           cfg,
 		AuthDir:          authDir,
@@ -297,17 +332,24 @@ func snapshotCoreAuths(cfg *config.Config, authDir string, parser synthesizer.Pl
 		PluginAuthParser: parser,
 	}
 
-	var out []*coreauth.Auth
+	var (
+		out         []*coreauth.Auth
+		errSnapshot error
+	)
 
 	configSynth := synthesizer.NewConfigSynthesizer()
-	if auths, err := configSynth.Synthesize(ctx); err == nil {
-		out = append(out, auths...)
+	configAuths, errConfig := configSynth.Synthesize(ctx)
+	out = append(out, configAuths...)
+	if errConfig != nil {
+		errSnapshot = errors.Join(errSnapshot, fmt.Errorf("synthesize config auths: %w", errConfig))
 	}
 
 	fileSynth := synthesizer.NewFileSynthesizer()
-	if auths, err := fileSynth.Synthesize(ctx); err == nil {
-		out = append(out, auths...)
+	fileAuths, errFiles := fileSynth.Synthesize(ctx)
+	out = append(out, fileAuths...)
+	if errFiles != nil {
+		errSnapshot = errors.Join(errSnapshot, fmt.Errorf("synthesize file auths: %w", errFiles))
 	}
 
-	return out
+	return out, errSnapshot
 }
