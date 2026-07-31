@@ -59,7 +59,7 @@ type authConnectMsg struct {
 }
 
 // newApp creates the root TUI application model.
-func newApp(port int, secretKey string, hook *LogHook) app {
+func newApp(client *Client, secretKey string, hook *LogHook) app {
 	standalone := hook != nil
 	authRequired := !standalone
 	ti := textinput.New()
@@ -69,7 +69,6 @@ func newApp(port int, secretKey string, hook *LogHook) app {
 	ti.SetValue(strings.TrimSpace(secretKey))
 	ti.Focus()
 
-	client := NewClient(port, secretKey)
 	app := app{
 		activeTab:     tabDashboard,
 		standalone:    standalone,
@@ -239,6 +238,14 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !a.authenticated {
 		var cmd tea.Cmd
 		a.authInput, cmd = a.authInput.Update(msg)
+		return a, cmd
+	}
+
+	// OAuth commands may finish after the user has switched tabs.
+	switch msg.(type) {
+	case oauthStartMsg, oauthPollMsg, oauthCallbackSubmitMsg, oauthCancelMsg:
+		var cmd tea.Cmd
+		a.oauth, cmd = a.oauth.Update(msg)
 		return a, cmd
 	}
 
@@ -472,7 +479,7 @@ func (a *app) setAuthInputPrompt() {
 
 func (a *app) connectWithPassword(password string) tea.Cmd {
 	return func() tea.Msg {
-		a.client.setSecretKey(password)
+		a.client.SetSecretKey(password)
 		cfg, errGetConfig := a.client.GetConfig()
 		return authConnectMsg{cfg: cfg, err: errGetConfig}
 	}
@@ -480,11 +487,14 @@ func (a *app) connectWithPassword(password string) tea.Cmd {
 
 // Run starts the TUI application.
 // output specifies where bubbletea renders. If nil, defaults to os.Stdout.
-func Run(port int, secretKey string, hook *LogHook, output io.Writer) error {
+func Run(client *Client, secretKey string, hook *LogHook, output io.Writer) error {
+	if client == nil {
+		return fmt.Errorf("TUI client is nil")
+	}
 	if output == nil {
 		output = os.Stdout
 	}
-	app := new(newApp(port, secretKey, hook))
+	app := new(newApp(client, secretKey, hook))
 	p := tea.NewProgram(app, tea.WithAltScreen(), tea.WithOutput(output))
 	_, err := p.Run()
 	return err

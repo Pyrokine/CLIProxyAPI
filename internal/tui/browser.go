@@ -5,6 +5,8 @@ import (
 	"runtime"
 )
 
+var openOAuthBrowser = openBrowser
+
 // openBrowser opens the specified URL in the user's default browser.
 func openBrowser(url string) error {
 	switch runtime.GOOS {

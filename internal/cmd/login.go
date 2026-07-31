@@ -205,11 +205,19 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 	updateAuthRecord(record, storage)
 
 	store := sdkAuth.GetTokenStore()
-	if setter, okSetter := store.(interface{ SetBaseDir(string) }); okSetter && cfg != nil {
-		setter.SetBaseDir(cfg.AuthDir)
+	var savedPath string
+	var errSave error
+	if cfg != nil {
+		if scopedStore, okScoped := store.(interface {
+			SaveWithBaseDir(context.Context, string, *cliproxyauth.Auth) (string, error)
+		}); okScoped {
+			savedPath, errSave = scopedStore.SaveWithBaseDir(ctx, cfg.AuthDir, record)
+		} else {
+			savedPath, errSave = store.Save(ctx, record)
+		}
+	} else {
+		savedPath, errSave = store.Save(ctx, record)
 	}
-
-	savedPath, errSave := store.Save(ctx, record)
 	if errSave != nil {
 		log.Errorf("Failed to save token to file: %v", errSave)
 		return

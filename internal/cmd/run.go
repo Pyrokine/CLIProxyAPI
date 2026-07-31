@@ -6,14 +6,13 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/signal"
 	"syscall"
-	"time"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/safemode"
+	sdkapi "github.com/Pyrokine/CLIProxyAPI/v6/sdk/api"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -26,8 +25,8 @@ import (
 //   - cfg: The application configuration
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
-func StartService(cfg *config.Config, configPath string, localPassword string) {
-	StartServiceWithPluginHost(cfg, configPath, localPassword, nil)
+func StartService(cfg *config.Config, configPath string, localPassword string, opts ...sdkapi.ServerOption) error {
+	return StartServiceWithPluginHost(cfg, configPath, localPassword, nil, opts...)
 }
 
 func StartExampleAPIKeyWarningServer(cfg *config.Config, configPath string, keys []string) {
@@ -46,11 +45,18 @@ func StartExampleAPIKeyWarningServer(cfg *config.Config, configPath string, keys
 }
 
 // StartServiceWithPluginHost builds and runs the proxy service with a shared plugin host.
-func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPassword string, host *pluginhost.Host) {
+func StartServiceWithPluginHost(
+	cfg *config.Config,
+	configPath string,
+	localPassword string,
+	host *cliproxy.PluginHost,
+	opts ...sdkapi.ServerOption,
+) error {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword)
+		WithLocalManagementPassword(localPassword).
+		WithServerOptions(opts...)
 	if host != nil {
 		builder = builder.WithPluginHost(host)
 	}
@@ -58,39 +64,25 @@ func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPass
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	runCtx := ctxSignal
-	if localPassword != "" {
-		var keepAliveCancel context.CancelFunc
-		runCtx, keepAliveCancel = context.WithCancel(ctxSignal)
-		builder = builder.WithServerOptions(
-			api.WithKeepAliveEndpoint(
-				10*time.Second, func() {
-					log.Warn("keep-alive endpoint idle for 10s, shutting down")
-					keepAliveCancel()
-				},
-			),
-		)
-	}
-
 	service, err := builder.Build()
 	if err != nil {
-		log.Errorf("failed to build proxy service: %v", err)
-		return
+		return fmt.Errorf("failed to build proxy service: %w", err)
 	}
 
-	err = service.Run(runCtx)
+	err = service.Run(ctxSignal)
 	if err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("proxy service exited with error: %v", err)
+		return fmt.Errorf("proxy service exited with error: %w", err)
 	}
+	return nil
 }
 
 // StartServiceBackground starts the proxy service in a background goroutine
-// and returns a cancel function for shutdown and a done channel.
-func StartServiceBackground(cfg *config.Config, configPath string, localPassword string) (
+// and returns a cancel function for shutdown and a terminal error channel.
+func StartServiceBackground(cfg *config.Config, configPath string, localPassword string, opts ...sdkapi.ServerOption) (
 	cancel func(),
-	done <-chan struct{},
+	done <-chan error,
 ) {
-	return StartServiceBackgroundWithPluginHost(cfg, configPath, localPassword, nil)
+	return StartServiceBackgroundWithPluginHost(cfg, configPath, localPassword, nil, opts...)
 }
 
 // StartServiceBackgroundWithPluginHost starts the proxy service with a shared plugin host.
@@ -98,34 +90,38 @@ func StartServiceBackgroundWithPluginHost(
 	cfg *config.Config,
 	configPath string,
 	localPassword string,
-	host *pluginhost.Host,
+	host *cliproxy.PluginHost,
+	opts ...sdkapi.ServerOption,
 ) (
 	cancel func(),
-	done <-chan struct{},
+	done <-chan error,
 ) {
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
-		WithLocalManagementPassword(localPassword)
+		WithLocalManagementPassword(localPassword).
+		WithServerOptions(opts...)
 	if host != nil {
 		builder = builder.WithPluginHost(host)
 	}
 
 	ctx, cancelFn := context.WithCancel(context.Background())
-	doneCh := make(chan struct{})
+	doneCh := make(chan error, 1)
 
 	service, err := builder.Build()
 	if err != nil {
-		log.Errorf("failed to build proxy service: %v", err)
+		doneCh <- fmt.Errorf("failed to build proxy service: %w", err)
 		close(doneCh)
 		return cancelFn, doneCh
 	}
 
 	go func() {
 		defer close(doneCh)
-		if err := service.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Errorf("proxy service exited with error: %v", err)
+		errRun := service.Run(ctx)
+		if errors.Is(errRun, context.Canceled) {
+			errRun = nil
 		}
+		doneCh <- errRun
 	}()
 
 	return cancelFn, doneCh

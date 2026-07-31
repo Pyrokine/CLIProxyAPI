@@ -11,6 +11,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
 // DoIFlowCookieAuth performs the iFlow cookie-based authentication.
@@ -71,7 +72,7 @@ func DoIFlowCookieAuth(cfg *config.Config, options *LoginOptions) {
 		return
 	}
 
-	fmt.Printf("Authentication successful! API key: %s\n", tokenData.APIKey)
+	fmt.Printf("Authentication successful! API key: %s\n", util.HideAPIKey(tokenData.APIKey))
 	fmt.Printf("Expires at: %s\n", tokenData.Expire)
 	fmt.Printf("Authentication saved to: %s\n", authFilePath)
 }

@@ -1,14 +1,20 @@
 package tui
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
 // Client wraps HTTP calls to the management API.
@@ -19,18 +25,79 @@ type Client struct {
 }
 
 // NewClient creates a new management API client.
-func NewClient(port int, secretKey string) *Client {
+func NewClient(port int, secretKey string, tlsConfig config.TLSConfig) (*Client, error) {
+	scheme := "http"
+	transport := http.DefaultTransport
+	if tlsConfig.Enable {
+		pinnedTransport, errTransport := pinnedTLSClientTransport(tlsConfig.Cert)
+		if errTransport != nil {
+			return nil, errTransport
+		}
+		scheme = "https"
+		transport = pinnedTransport
+	}
 	return &Client{
-		baseURL:   fmt.Sprintf("http://127.0.0.1:%d", port),
+		baseURL:   fmt.Sprintf("%s://127.0.0.1:%d", scheme, port),
 		secretKey: strings.TrimSpace(secretKey),
 		http: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: transport,
 		},
-	}
+	}, nil
 }
 
-// setSecretKey updates management API bearer token used by this client.
-func (c *Client) setSecretKey(secretKey string) {
+func pinnedTLSClientTransport(certPath string) (*http.Transport, error) {
+	certPEM, errRead := os.ReadFile(strings.TrimSpace(certPath))
+	if errRead != nil {
+		return nil, fmt.Errorf("read TUI TLS certificate: %w", errRead)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(certPEM) {
+		return nil, fmt.Errorf("TUI TLS certificate file contains no certificates")
+	}
+	var leaf *x509.Certificate
+	for rest := certPEM; len(rest) > 0; {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		leaf, errRead = x509.ParseCertificate(block.Bytes)
+		if errRead != nil {
+			return nil, fmt.Errorf("parse TUI TLS certificate: %w", errRead)
+		}
+		break
+	}
+	if leaf == nil {
+		return nil, fmt.Errorf("TUI TLS certificate file contains no certificates")
+	}
+	serverName := ""
+	if len(leaf.DNSNames) > 0 {
+		serverName = leaf.DNSNames[0]
+	} else if len(leaf.IPAddresses) > 0 {
+		serverName = leaf.IPAddresses[0].String()
+	}
+	if serverName == "" {
+		return nil, fmt.Errorf("TUI TLS certificate has no DNS or IP subject alternative name")
+	}
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("default HTTP transport has unexpected type")
+	}
+	transport := base.Clone()
+	transport.TLSClientConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    roots,
+		ServerName: serverName,
+	}
+	return transport, nil
+}
+
+// SetSecretKey updates the management API bearer token used by this client.
+func (c *Client) SetSecretKey(secretKey string) {
 	c.secretKey = strings.TrimSpace(secretKey)
 }
 
@@ -368,6 +435,34 @@ func (c *Client) GetAuthStatus(state string) (string, string, error) {
 	status := getString(wrapper, "status")
 	errMsg := getString(wrapper, "error")
 	return status, errMsg, nil
+}
+
+// CancelAuthSession cancels a pending OAuth session on the management server.
+func (c *Client) CancelAuthSession(state string) (bool, error) {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return false, nil
+	}
+	query := url.Values{}
+	query.Set("state", state)
+	path := "/v0/management/oauth-session?" + query.Encode()
+	data, code, err := c.doRequest(http.MethodDelete, path, nil)
+	if err != nil {
+		return false, err
+	}
+	if code >= http.StatusBadRequest {
+		return false, fmt.Errorf("HTTP %d: %s", code, strings.TrimSpace(string(data)))
+	}
+	var response struct {
+		Cancelled *bool `json:"cancelled"`
+	}
+	if err = json.Unmarshal(data, &response); err != nil {
+		return false, fmt.Errorf("decode OAuth cancel response: %w", err)
+	}
+	if response.Cancelled == nil {
+		return false, fmt.Errorf("decode OAuth cancel response: missing cancelled field")
+	}
+	return *response.Cancelled, nil
 }
 
 // ----- Config field update methods -----

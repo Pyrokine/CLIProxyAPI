@@ -19,6 +19,7 @@ type loginFlags struct {
 	iflowCookie        bool
 	antigravityLogin   bool
 	kimiLogin          bool
+	xaiLogin           bool
 	noBrowser          bool
 	oauthCallbackPort  int
 }
@@ -27,7 +28,7 @@ type loginFlags struct {
 func (f *loginFlags) isLoginMode() bool {
 	return f.vertexImport != "" ||
 		f.login || f.codexLogin || f.codexDeviceLogin || f.claudeLogin ||
-		f.qwenLogin || f.iflowLogin || f.iflowCookie || f.antigravityLogin || f.kimiLogin
+		f.qwenLogin || f.iflowLogin || f.iflowCookie || f.antigravityLogin || f.kimiLogin || f.xaiLogin
 }
 
 // runLoginMode dispatches to the appropriate login command.
@@ -63,6 +64,8 @@ func runLoginMode(cfg *config.Config, flags *loginFlags) bool {
 		cmd.DoIFlowCookieAuth(cfg, options)
 	case flags.kimiLogin:
 		cmd.DoKimiLogin(cfg, options)
+	case flags.xaiLogin:
+		cmd.DoXAILogin(cfg, options)
 	}
 
 	return true

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -16,7 +19,63 @@ func TestCloudDeployHomeConfigIsAvailableWithoutLocalFile(t *testing.T) {
 	}
 }
 
-func TestShouldStartExampleAPIKeyWarningServer(t *testing.T) {
+func TestShouldCreateExampleAPIKeyLocalManagementPassword(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	if !shouldCreateExampleAPIKeyLocalManagementPassword(cfg, "") {
+		t.Fatal("expected local management password when no management credential is configured")
+	}
+	if shouldCreateExampleAPIKeyLocalManagementPassword(cfg, "existing") {
+		t.Fatal("expected existing local password to be preserved")
+	}
+	cfg.RemoteManagement.SecretKey = "hashed-secret"
+	if shouldCreateExampleAPIKeyLocalManagementPassword(cfg, "") {
+		t.Fatal("expected remote-management secret-key to disable local password generation")
+	}
+	cfg.RemoteManagement.SecretKey = ""
+	t.Setenv("MANAGEMENT_PASSWORD", "env-secret")
+	if shouldCreateExampleAPIKeyLocalManagementPassword(cfg, "") {
+		t.Fatal("expected MANAGEMENT_PASSWORD to disable local password generation")
+	}
+}
+
+func TestWriteExampleAPIKeyLocalManagementPasswordRejectsNonTerminal(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	password := "safe-mode-secret-value"
+	if writeExampleAPIKeyLocalManagementPassword(writer, password) {
+		t.Fatal("writeExampleAPIKeyLocalManagementPassword accepted a non-terminal output")
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatalf("close pipe writer: %v", err)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read pipe: %v", err)
+	}
+	if err = reader.Close(); err != nil {
+		t.Fatalf("close pipe reader: %v", err)
+	}
+	if strings.Contains(string(output), password) {
+		t.Fatalf("non-terminal output contained management password: %q", output)
+	}
+}
+
+func TestWriteExampleAPIKeyLocalManagementPasswordRejectsNullDevice(t *testing.T) {
+	nullDevice, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open null device: %v", err)
+	}
+	defer func() { _ = nullDevice.Close() }()
+
+	if writeExampleAPIKeyLocalManagementPassword(nullDevice, "safe-mode-secret-value") {
+		t.Fatal("writeExampleAPIKeyLocalManagementPassword accepted the null device")
+	}
+}
+
+func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"your-api-key-1"}}}
 	tests := []struct {
 		name               string
@@ -43,11 +102,11 @@ func TestShouldStartExampleAPIKeyWarningServer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				got := shouldStartExampleAPIKeyWarningServer(
+				got := shouldEnableExampleAPIKeySafeMode(
 					tt.cfg, tt.commandMode, tt.tuiMode, tt.standalone, tt.cloudConfigMissing, tt.homeMode,
 				)
 				if got != tt.want {
-					t.Fatalf("shouldStartExampleAPIKeyWarningServer() = %v, want %v", got, tt.want)
+					t.Fatalf("shouldEnableExampleAPIKeySafeMode() = %v, want %v", got, tt.want)
 				}
 			},
 		)

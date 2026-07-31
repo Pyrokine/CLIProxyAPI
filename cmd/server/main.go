@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -21,17 +22,19 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/safemode"
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	sdkapi "github.com/Pyrokine/CLIProxyAPI/v6/sdk/api"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/joho/godotenv"
 	log "github.com/sirupsen/logrus"
+	"golang.org/x/term"
 )
 
 var (
@@ -41,7 +44,7 @@ var (
 	defaultConfigPath = ""
 )
 
-func shouldStartExampleAPIKeyWarningServer(
+func shouldEnableExampleAPIKeySafeMode(
 	cfg *config.Config,
 	commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool,
 ) bool {
@@ -52,6 +55,36 @@ func shouldStartExampleAPIKeyWarningServer(
 		return false
 	}
 	return safemode.HasExampleAPIKeys(cfg.APIKeys)
+}
+
+func shouldCreateExampleAPIKeyLocalManagementPassword(cfg *config.Config, currentPassword string) bool {
+	if cfg == nil || strings.TrimSpace(currentPassword) != "" || strings.TrimSpace(os.Getenv("MANAGEMENT_PASSWORD")) != "" {
+		return false
+	}
+	return strings.TrimSpace(cfg.RemoteManagement.SecretKey) == ""
+}
+
+func newExampleAPIKeyLocalManagementPassword() string {
+	b := make([]byte, 16)
+	if _, err := cryptorand.Read(b); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("safe-mode-%x", b)
+}
+
+func writeExampleAPIKeyLocalManagementPassword(output *os.File, password string) bool {
+	if output == nil || strings.TrimSpace(password) == "" {
+		return false
+	}
+	if !term.IsTerminal(int(output.Fd())) {
+		return false
+	}
+	_, err := fmt.Fprintf(
+		output,
+		"Temporary local management password for example API key safe mode: %s\n",
+		password,
+	)
+	return err == nil
 }
 
 // init initializes the shared logger setup.
@@ -97,6 +130,7 @@ func main() {
 	)
 	flag.BoolVar(&lf.antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&lf.kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&lf.xaiLogin, "xai-login", false, "Login to xAI using OAuth device code flow")
 	flag.StringVar(&lf.projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", defaultConfigPath, "Configure File Path")
 	flag.StringVar(&lf.vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -141,13 +175,16 @@ func main() {
 		)
 	}
 
-	pluginHost := pluginhost.New()
+	pluginHost := cliproxy.NewPluginHost()
 	if bootstrapCfg := loadPluginBootstrapConfig(
 		pluginBootstrapConfigPath(
 			os.Args[1:], defaultConfigPath,
 		),
 	); bootstrapCfg != nil {
-		pluginHost.ApplyConfig(context.Background(), bootstrapCfg)
+		if errApply := pluginHost.ApplyConfig(context.Background(), bootstrapCfg); errApply != nil {
+			log.Errorf("failed to apply bootstrap plugin config: %v", errApply)
+			return
+		}
 		pluginHost.RegisterCommandLineFlags(context.Background(), flag.CommandLine)
 	}
 
@@ -246,7 +283,10 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
-	pluginHost.ApplyConfig(context.Background(), cfg)
+	if errApply := pluginHost.ApplyConfig(context.Background(), cfg); errApply != nil {
+		log.Errorf("failed to apply plugin config: %v", errApply)
+		return
+	}
 	if result.configLoadedFromHome {
 		errHomePluginLoad := homeplugins.MarkLoadResults(&result.homePluginSyncReport, pluginHost)
 		if result.homeClient == nil {
@@ -287,15 +327,29 @@ func main() {
 		log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
 	}
 
-	commandMode := lf.vertexImport != "" || lf.login || lf.codexLogin || lf.codexDeviceLogin || lf.claudeLogin || lf.qwenLogin || lf.iflowLogin || lf.iflowCookie || lf.antigravityLogin || lf.kimiLogin
+	commandMode := lf.vertexImport != "" || lf.login || lf.codexLogin || lf.codexDeviceLogin || lf.claudeLogin || lf.qwenLogin || lf.iflowLogin || lf.iflowCookie || lf.antigravityLogin || lf.kimiLogin || lf.xaiLogin
 	homeMode := cfg.Home.Enabled
-	if shouldStartExampleAPIKeyWarningServer(cfg, commandMode, tuiMode, standalone, false, homeMode) {
+	serverOptions := []sdkapi.ServerOption(nil)
+	if shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, false, homeMode) {
 		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
 		log.WithField(
 			"api_keys", strings.Join(matches, ","),
-		).Error("unsafe example API key configured; starting warning-only server")
-		cmd.StartExampleAPIKeyWarningServer(cfg, configFilePath, matches)
-		return
+		).Error("unsafe example API key configured; proxy API endpoints disabled until api-keys is updated")
+		if shouldCreateExampleAPIKeyLocalManagementPassword(cfg, password) {
+			password = newExampleAPIKeyLocalManagementPassword()
+			switch {
+			case password == "":
+				log.Error("failed to create local management password for example API key safe mode")
+			case !writeExampleAPIKeyLocalManagementPassword(os.Stderr, password):
+				password = ""
+				log.Error(
+					"example API key safe mode requires MANAGEMENT_PASSWORD or remote-management secret-key when no interactive terminal is available",
+				)
+			default:
+				log.Warn("temporary local management password written to the interactive terminal")
+			}
+		}
+		serverOptions = append(serverOptions, sdkapi.WithExampleAPIKeySafeMode())
 	}
 
 	if tuiMode {
@@ -306,14 +360,22 @@ func main() {
 		if !localModel && !cfg.Home.Enabled {
 			registry.StartModelsUpdater(context.Background(), cfg.ModelRefreshInterval)
 		}
-		runTUIMode(cfg, configFilePath, password, standalone, pluginHost)
+		if errRun := runTUIMode(cfg, configFilePath, password, standalone, pluginHost, serverOptions...); errRun != nil {
+			log.Errorf("TUI exited with error: %v", errRun)
+			os.Exit(1)
+		}
 	} else {
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
 		misc.StartAntigravityVersionUpdater(context.Background())
 		if !localModel && !cfg.Home.Enabled {
 			registry.StartModelsUpdater(context.Background(), cfg.ModelRefreshInterval)
 		}
-		cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost)
+		if errStart := cmd.StartServiceWithPluginHost(
+			cfg, configFilePath, password, pluginHost, serverOptions...,
+		); errStart != nil {
+			log.Errorf("%v", errStart)
+			os.Exit(1)
+		}
 	}
 }
 

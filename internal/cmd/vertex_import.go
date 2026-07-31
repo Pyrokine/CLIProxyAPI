@@ -99,10 +99,15 @@ func DoVertexImport(cfg *config.Config, keyPath, prefix string) {
 	}
 
 	store := sdkAuth.GetTokenStore()
-	if setter, ok := store.(interface{ SetBaseDir(string) }); ok {
-		setter.SetBaseDir(cfg.AuthDir)
+	var path string
+	var errSave error
+	if scopedStore, ok := store.(interface {
+		SaveWithBaseDir(context.Context, string, *coreauth.Auth) (string, error)
+	}); ok {
+		path, errSave = scopedStore.SaveWithBaseDir(context.Background(), cfg.AuthDir, record)
+	} else {
+		path, errSave = store.Save(context.Background(), record)
 	}
-	path, errSave := store.Save(context.Background(), record)
 	if errSave != nil {
 		log.Errorf("vertex-import: save credential failed: %v", errSave)
 		return
