@@ -15,8 +15,10 @@ import (
 	"sync"
 	"time"
 
+	internalauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	sdkauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -27,6 +29,12 @@ const (
 	objectStoreConfigKey  = "config/config.yaml"
 	objectStoreAuthPrefix = "auths"
 )
+
+type objectStoreAuthTombstone struct {
+	DeletedVersionID string `json:"deleted_version_id"`
+	DeletedSHA256    string `json:"deleted_sha256"`
+	Tombstone        bool   `json:"_cliproxy_auth_deleted"`
+}
 
 // ObjectStoreConfig captures configuration for the object storage-backed token store.
 type ObjectStoreConfig struct {
@@ -92,8 +100,8 @@ func NewObjectTokenStore(cfg ObjectStoreConfig) (*ObjectTokenStore, error) {
 	if err = os.MkdirAll(configDir, 0o700); err != nil {
 		return nil, fmt.Errorf("object store: create config directory: %w", err)
 	}
-	if err = os.MkdirAll(authDir, 0o700); err != nil {
-		return nil, fmt.Errorf("object store: create auth directory: %w", err)
+	if err = secureAuthDirectory(authDir); err != nil {
+		return nil, fmt.Errorf("object store: secure auth directory: %w", err)
 	}
 
 	options := &minio.Options{
@@ -150,14 +158,39 @@ func (s *ObjectTokenStore) Bootstrap(ctx context.Context, exampleConfigPath stri
 	if err := s.syncConfigFromBucket(ctx, exampleConfigPath); err != nil {
 		return err
 	}
+	if err := s.recoverAuthDeletions(ctx); err != nil {
+		return err
+	}
 	if err := s.syncAuthFromBucket(ctx); err != nil {
 		return err
 	}
 	return nil
 }
 
+func (s *ObjectTokenStore) recoverAuthDeletions(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deletions, errRecover := cliproxyauth.RecoverDurablePersistedFileDeletions(s.authDir)
+	if errRecover != nil {
+		return errRecover
+	}
+	for _, deletion := range deletions {
+		deleted, errDelete := s.deleteAuthObjectIfVersion(ctx, deletion.Path(), deletion.Version())
+		if errDelete != nil {
+			return fmt.Errorf("object store: resume auth deletion: %w", errDelete)
+		}
+		if !deleted {
+			log.Warnf("object store: interrupted auth deletion preserved a newer credential at %s", deletion.Path())
+		}
+		if errCommit := deletion.Commit(); errCommit != nil {
+			return errors.Join(cliproxyauth.ErrAuthDurableStateUncertain, errCommit)
+		}
+	}
+	return nil
+}
+
 // Save persists authentication metadata to disk and uploads it to the object storage backend.
-func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
+func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (savedPath string, err error) {
 	if auth == nil {
 		return "", fmt.Errorf("object store: auth is nil")
 	}
@@ -170,43 +203,62 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		return "", fmt.Errorf("object store: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
-		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
-			return "", nil
-		}
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return "", fmt.Errorf("object store: create auth directory: %w", err)
+	if err = secureAuthDirectory(filepath.Dir(path)); err != nil {
+		return "", fmt.Errorf("object store: secure auth directory: %w", err)
 	}
+	fileSnapshot, errSnapshot := captureFileMutationSnapshot(path)
+	if errSnapshot != nil {
+		return "", errSnapshot
+	}
+	fileMutated := false
+	remoteAttempted := false
+	mutationComplete := false
+	defer func() {
+		if mutationComplete {
+			return
+		}
+		if fileMutated {
+			err = errors.Join(err, restoreFileMutationSnapshot(path, fileSnapshot))
+		}
+		if remoteAttempted || err != nil && fileMutated {
+			err = errors.Join(cliproxyauth.ErrAuthDurableStateUncertain, err)
+		}
+		if err != nil {
+			savedPath = ""
+		}
+	}()
 
+	cliproxyauth.PrepareAuthForPersistence(auth)
 	switch {
 	case auth.Storage != nil:
+		fileMutated = true
 		if err = auth.Storage.SaveTokenToFile(path); err != nil {
 			return "", err
+		}
+		if err = secureAuthFilePath(path); err != nil {
+			return "", fmt.Errorf("object store: secure stored token: %w", err)
 		}
 	case auth.Metadata != nil:
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("object store: marshal metadata: %w", errMarshal)
 		}
-		// noinspection GoDfaConstantCondition — errRead is non-nil in else branch; checking error kind is intentional.
-		if existing, errRead := os.ReadFile(path); errRead == nil {
-			if util.JSONEqual(existing, raw) {
-				return path, nil
+		existing, errRead := os.ReadFile(path)
+		if errRead == nil && util.JSONEqual(existing, raw) {
+			if err = secureAuthFilePath(path); err != nil {
+				return "", fmt.Errorf("object store: secure existing metadata: %w", err)
 			}
-		} else if !errors.Is(errRead, fs.ErrNotExist) {
+			break
+		}
+		if errRead != nil && !errors.Is(errRead, fs.ErrNotExist) {
 			return "", fmt.Errorf("object store: read existing metadata: %w", errRead)
 		}
-		tmp := path + ".tmp"
-		if errWrite := os.WriteFile(tmp, raw, 0o600); errWrite != nil {
-			return "", fmt.Errorf("object store: write temp auth file: %w", errWrite)
-		}
-		if errRename := os.Rename(tmp, path); errRename != nil {
-			return "", fmt.Errorf("object store: rename auth file: %w", errRename)
+		fileMutated = true
+		if errWrite := writeAuthFile(path, raw); errWrite != nil {
+			return "", fmt.Errorf("object store: write auth file: %w", errWrite)
 		}
 	default:
 		return "", fmt.Errorf("object store: nothing to persist for %s", auth.ID)
@@ -216,19 +268,20 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		auth.Attributes = make(map[string]string)
 	}
 	auth.Attributes["path"] = path
-
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID
 	}
 
+	remoteAttempted = true
 	if err = s.uploadAuth(ctx, path); err != nil {
 		return "", err
 	}
+	mutationComplete = true
 	return path, nil
 }
 
 // List enumerates auth JSON files from the mirrored workspace.
-func (s *ObjectTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error) {
+func (s *ObjectTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) {
 	dir := strings.TrimSpace(s.AuthDir())
 	if dir == "" {
 		return nil, fmt.Errorf("object store: auth directory not configured")
@@ -245,7 +298,7 @@ func (s *ObjectTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error)
 			if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 				return nil
 			}
-			auth, err := s.readAuthFile(path, dir)
+			auth, err := s.readAuthFile(ctx, path, dir)
 			if err != nil {
 				log.WithError(err).Warnf("object store: skip auth %s", path)
 				return nil
@@ -262,6 +315,136 @@ func (s *ObjectTokenStore) List(_ context.Context) ([]*cliproxyauth.Auth, error)
 	return entries, nil
 }
 
+// DeleteIfVersion replaces the expected current object with a conditional tombstone,
+// then removes the hidden credential version without exposing older versions.
+func (s *ObjectTokenStore) DeleteIfVersion(
+	ctx context.Context,
+	id string,
+	version cliproxyauth.PersistedVersion,
+) (bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, fmt.Errorf("object store: id is empty")
+	}
+	path, err := s.resolveDeletePath(id)
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	deletion, matched, errPrepare := cliproxyauth.PrepareDurablePersistedFileDeletion(path, version)
+	if errPrepare != nil || !matched {
+		return false, errPrepare
+	}
+	deleted, errDelete := s.deleteAuthObjectIfVersion(ctx, path, version)
+	if errDelete != nil {
+		return false, errors.Join(errDelete, deletion.Rollback())
+	}
+	if !deleted {
+		return false, deletion.Rollback()
+	}
+	if errCommit := deletion.Commit(); errCommit != nil {
+		return false, errors.Join(cliproxyauth.ErrAuthDurableStateUncertain, errCommit)
+	}
+	return true, nil
+}
+
+func (s *ObjectTokenStore) deleteAuthObjectIfVersion(
+	ctx context.Context,
+	path string,
+	version cliproxyauth.PersistedVersion,
+) (bool, error) {
+	versioning, errVersioning := s.client.GetBucketVersioning(ctx, s.cfg.Bucket)
+	if errVersioning != nil {
+		return false, fmt.Errorf("object store: read bucket versioning: %w", errVersioning)
+	}
+	if !versioning.Enabled() {
+		return false, errors.Join(
+			cliproxyauth.ErrAuthDurableStateUncertain,
+			fmt.Errorf("object store: enabled bucket versioning is required for conditional auth deletion"),
+		)
+	}
+	rel, err := filepath.Rel(s.authDir, path)
+	if err != nil {
+		return false, fmt.Errorf("object store: resolve auth relative path: %w", err)
+	}
+	fullKey := s.prefixedKey(objectStoreAuthPrefix + "/" + filepath.ToSlash(rel))
+	info, errStat := s.client.StatObject(ctx, s.cfg.Bucket, fullKey, minio.StatObjectOptions{})
+	if errStat != nil {
+		if isObjectNotFound(errStat) {
+			return true, nil
+		}
+		return false, fmt.Errorf("object store: stat versioned auth %s: %w", fullKey, errStat)
+	}
+	versionID := strings.TrimSpace(info.VersionID)
+	if versionID == "" || strings.EqualFold(versionID, "null") || strings.TrimSpace(info.ETag) == "" {
+		return false, errors.Join(
+			cliproxyauth.ErrAuthDurableStateUncertain,
+			fmt.Errorf("object store: current auth object lacks a conditional version identity"),
+		)
+	}
+	object, errGet := s.client.GetObject(
+		ctx,
+		s.cfg.Bucket,
+		fullKey,
+		minio.GetObjectOptions{VersionID: versionID},
+	)
+	if errGet != nil {
+		return false, fmt.Errorf("object store: open versioned auth %s: %w", fullKey, errGet)
+	}
+	raw, errRead := io.ReadAll(io.LimitReader(object, 50<<20))
+	_ = object.Close()
+	if errRead != nil {
+		return false, fmt.Errorf("object store: read versioned auth %s: %w", fullKey, errRead)
+	}
+	if tombstone, ok := parseObjectStoreAuthTombstone(raw); ok {
+		if !strings.EqualFold(tombstone.DeletedSHA256, fmt.Sprintf("%x", version.SHA256)) {
+			return false, nil
+		}
+		if errRemove := s.removeObjectVersion(ctx, fullKey, tombstone.DeletedVersionID); errRemove != nil {
+			return false, errors.Join(cliproxyauth.ErrAuthDurableStateUncertain, errRemove)
+		}
+		return true, nil
+	}
+	digest, errDigest := cliproxyauth.DigestPersistedJSON(raw)
+	if errDigest != nil {
+		return false, fmt.Errorf("object store: digest versioned auth %s: %w", fullKey, errDigest)
+	}
+	if digest != version.SHA256 {
+		return false, nil
+	}
+	tombstoneRaw, errTombstone := json.Marshal(objectStoreAuthTombstone{
+		DeletedVersionID: versionID,
+		DeletedSHA256:    fmt.Sprintf("%x", version.SHA256),
+		Tombstone:        true,
+	})
+	if errTombstone != nil {
+		return false, fmt.Errorf("object store: encode auth tombstone: %w", errTombstone)
+	}
+	putOptions := minio.PutObjectOptions{ContentType: "application/json", DisableMultipart: true}
+	putOptions.SetMatchETag(info.ETag)
+	if _, errPut := s.client.PutObject(
+		ctx,
+		s.cfg.Bucket,
+		fullKey,
+		bytes.NewReader(tombstoneRaw),
+		int64(len(tombstoneRaw)),
+		putOptions,
+	); errPut != nil {
+		if isObjectPreconditionFailed(errPut) {
+			return false, nil
+		}
+		return false, errors.Join(
+			cliproxyauth.ErrAuthDurableStateUncertain,
+			fmt.Errorf("object store: publish conditional auth tombstone %s: %w", fullKey, errPut),
+		)
+	}
+	if errRemove := s.removeObjectVersion(ctx, fullKey, versionID); errRemove != nil {
+		return false, errors.Join(cliproxyauth.ErrAuthDurableStateUncertain, errRemove)
+	}
+	return true, nil
+}
+
 // Delete removes an auth file locally and remotely.
 func (s *ObjectTokenStore) Delete(ctx context.Context, id string) error {
 	id = strings.TrimSpace(id)
@@ -276,11 +459,16 @@ func (s *ObjectTokenStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	fileSnapshot, errSnapshot := captureFileMutationSnapshot(path)
+	if errSnapshot != nil {
+		return errSnapshot
+	}
 	if err = os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("object store: delete auth file: %w", err)
 	}
 	if err = s.deleteAuthObject(ctx, path); err != nil {
-		return err
+		errRestore := restoreFileMutationSnapshot(path, fileSnapshot)
+		return errors.Join(cliproxyauth.ErrAuthDurableStateUncertain, err, errRestore)
 	}
 	return nil
 }
@@ -394,8 +582,8 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 	// Wiping the directory triggers file watcher delete events, which then
 	// propagate deletions to the remote object store (race condition).
 	// Instead, we just ensure the directory exists and overwrite files incrementally.
-	if err := os.MkdirAll(s.authDir, 0o700); err != nil {
-		return fmt.Errorf("object store: create auth directory: %w", err)
+	if err := secureAuthDirectory(s.authDir); err != nil {
+		return fmt.Errorf("object store: secure auth directory: %w", err)
 	}
 
 	prefix := s.prefixedKey(objectStoreAuthPrefix + "/")
@@ -424,8 +612,8 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 			continue
 		}
 		local := filepath.Join(s.authDir, cleanRel)
-		if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
-			return fmt.Errorf("object store: prepare auth subdir: %w", err)
+		if err := secureAuthDirectory(filepath.Dir(local)); err != nil {
+			return fmt.Errorf("object store: secure auth subdir: %w", err)
 		}
 		reader, errGet := s.client.GetObject(ctx, s.cfg.Bucket, object.Key, minio.GetObjectOptions{})
 		if errGet != nil {
@@ -436,7 +624,13 @@ func (s *ObjectTokenStore) syncAuthFromBucket(ctx context.Context) error {
 		if errRead != nil {
 			return fmt.Errorf("object store: read auth %s: %w", object.Key, errRead)
 		}
-		if errWrite := os.WriteFile(local, data, 0o600); errWrite != nil {
+		if _, tombstone := parseObjectStoreAuthTombstone(data); tombstone {
+			if errRemove := os.Remove(local); errRemove != nil && !errors.Is(errRemove, fs.ErrNotExist) {
+				return fmt.Errorf("object store: remove tombstoned auth %s: %w", local, errRemove)
+			}
+			continue
+		}
+		if errWrite := writeAuthFile(local, data); errWrite != nil {
 			return fmt.Errorf("object store: write auth %s: %w", local, errWrite)
 		}
 	}
@@ -490,6 +684,30 @@ func (s *ObjectTokenStore) putObject(ctx context.Context, key string, data []byt
 	)
 	if err != nil {
 		return fmt.Errorf("object store: put object %s: %w", fullKey, err)
+	}
+	return nil
+}
+
+func parseObjectStoreAuthTombstone(raw []byte) (objectStoreAuthTombstone, bool) {
+	var tombstone objectStoreAuthTombstone
+	if json.Unmarshal(raw, &tombstone) != nil || !tombstone.Tombstone {
+		return objectStoreAuthTombstone{}, false
+	}
+	return tombstone, true
+}
+
+func (s *ObjectTokenStore) removeObjectVersion(ctx context.Context, fullKey, versionID string) error {
+	versionID = strings.TrimSpace(versionID)
+	if versionID == "" || strings.EqualFold(versionID, "null") {
+		return fmt.Errorf("object store: invalid auth version id")
+	}
+	if err := s.client.RemoveObject(
+		ctx,
+		s.cfg.Bucket,
+		fullKey,
+		minio.RemoveObjectOptions{VersionID: versionID},
+	); err != nil && !isObjectNotFound(err) {
+		return fmt.Errorf("object store: delete auth version %s: %w", fullKey, err)
 	}
 	return nil
 }
@@ -561,7 +779,7 @@ func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
 	return filepath.Join(s.authDir, clean), nil
 }
 
-func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
+func (s *ObjectTokenStore) readAuthFile(ctx context.Context, path, baseDir string) (*cliproxyauth.Auth, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
@@ -574,28 +792,41 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
 	provider := strings.TrimSpace(valueAsString(metadata["type"]))
-	if provider == "" {
-		provider = "unknown"
-	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat auth file: %w", err)
 	}
-	rel, errRel := filepath.Rel(baseDir, path)
-	if errRel != nil {
-		rel = filepath.Base(path)
+	id := internalauth.FileAuthID(path, baseDir)
+	pluginAuth, handled, errParse := sdkauth.ParsePluginAuthFile(
+		ctx, provider, path, id, data,
+	)
+	if errParse != nil {
+		return nil, errParse
 	}
-	rel = normalizeAuthID(rel)
+	if handled {
+		pluginAuth.CreatedAt = info.ModTime()
+		pluginAuth.UpdatedAt = info.ModTime()
+		return pluginAuth, nil
+	}
+	if provider == "" {
+		provider = "unknown"
+	}
 	attr := map[string]string{"path": path}
 	if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
 		attr["email"] = email
 	}
+	disabled, _ := metadata["disabled"].(bool)
+	status := cliproxyauth.StatusActive
+	if disabled {
+		status = cliproxyauth.StatusDisabled
+	}
 	auth := &cliproxyauth.Auth{
-		ID:               rel,
+		ID:               id,
 		Provider:         provider,
-		FileName:         rel,
+		FileName:         id,
 		Label:            labelFor(metadata),
-		Status:           cliproxyauth.StatusActive,
+		Status:           status,
+		Disabled:         disabled,
 		Attributes:       attr,
 		Metadata:         metadata,
 		CreatedAt:        info.ModTime(),
@@ -614,6 +845,14 @@ func normalizeLineEndingsBytes(data []byte) []byte {
 	return bytes.ReplaceAll(replaced, []byte{'\r'}, []byte{'\n'})
 }
 
+func isObjectPreconditionFailed(err error) bool {
+	if err == nil {
+		return false
+	}
+	resp := minio.ToErrorResponse(err)
+	return resp.StatusCode == http.StatusPreconditionFailed || resp.Code == "PreconditionFailed"
+}
+
 func isObjectNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -623,7 +862,7 @@ func isObjectNotFound(err error) bool {
 		return true
 	}
 	switch resp.Code {
-	case "NoSuchKey", "NotFound", "NoSuchBucket":
+	case "NoSuchKey", "NoSuchVersion", "NotFound", "NoSuchBucket":
 		return true
 	}
 	return false
