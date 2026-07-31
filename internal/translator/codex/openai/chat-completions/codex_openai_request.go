@@ -65,6 +65,11 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
+	if value := gjson.GetBytes(rawJSON, "service_tier"); value.Type == gjson.String {
+		if tier := strings.TrimSpace(value.String()); tier != "" {
+			out, _ = sjson.SetBytes(out, "service_tier", tier)
+		}
+	}
 
 	// Build tool name shortening map from original tools (if any)
 	originalToolNameMap := map[string]string{}

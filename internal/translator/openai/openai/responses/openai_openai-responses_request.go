@@ -38,6 +38,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 	// Set stream configuration
 	out, _ = sjson.SetBytes(out, "stream", stream)
+	if serviceTier := root.Get("service_tier"); serviceTier.Type == gjson.String {
+		if tier := strings.TrimSpace(serviceTier.String()); tier != "" {
+			out, _ = sjson.SetBytes(out, "service_tier", tier)
+		}
+	}
 
 	// Map generation parameters from responses format to chat completions format
 	if maxTokens := root.Get("max_output_tokens"); maxTokens.Exists() {

@@ -109,6 +109,11 @@ func ConvertCodexResponseToOpenAI(
 				template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int(),
 			)
 		}
+		if cacheWriteTokensResult := usageResult.Get("input_tokens_details.cache_write_tokens"); cacheWriteTokensResult.Exists() {
+			template, _ = sjson.SetBytes(
+				template, "usage.prompt_tokens_details.cached_creation_tokens", cacheWriteTokensResult.Int(),
+			)
+		}
 		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {
 			template, _ = sjson.SetBytes(
 				template, "usage.completion_tokens_details.reasoning_tokens", reasoningTokensResult.Int(),
@@ -302,6 +307,11 @@ func ConvertCodexResponseToOpenAINonStream(
 		if cachedTokensResult := usageResult.Get("input_tokens_details.cached_tokens"); cachedTokensResult.Exists() {
 			template, _ = sjson.SetBytes(
 				template, "usage.prompt_tokens_details.cached_tokens", cachedTokensResult.Int(),
+			)
+		}
+		if cacheWriteTokensResult := usageResult.Get("input_tokens_details.cache_write_tokens"); cacheWriteTokensResult.Exists() {
+			template, _ = sjson.SetBytes(
+				template, "usage.prompt_tokens_details.cached_creation_tokens", cacheWriteTokensResult.Int(),
 			)
 		}
 		if reasoningTokensResult := usageResult.Get("output_tokens_details.reasoning_tokens"); reasoningTokensResult.Exists() {

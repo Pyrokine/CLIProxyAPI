@@ -56,7 +56,7 @@ func (r *Registry) TranslateRequestWithContext(
 		ctx = context.Background()
 	}
 	body := rawJSON
-	if hooks := currentPluginHooks(); hooks != nil {
+	if hooks := pluginHooksForContext(ctx); hooks != nil {
 		body = hooks.NormalizeRequest(ctx, from, to, model, body, stream)
 		if translated, ok := hooks.TranslateRequest(ctx, from, to, model, body, stream); ok {
 			return translated
@@ -125,7 +125,7 @@ func (r *Registry) TranslateStream(
 		ctx = context.Background()
 	}
 	body := rawJSON
-	hooks := currentPluginHooks()
+	hooks := pluginHooksForContext(ctx)
 	if hooks != nil {
 		body = hooks.NormalizeResponseBefore(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, true)
 		if translated, ok := hooks.TranslateResponse(
@@ -177,7 +177,7 @@ func (r *Registry) TranslateNonStream(
 		ctx = context.Background()
 	}
 	body := rawJSON
-	hooks := currentPluginHooks()
+	hooks := pluginHooksForContext(ctx)
 	if hooks != nil {
 		body = hooks.NormalizeResponseBefore(ctx, from, to, model, originalRequestRawJSON, requestRawJSON, body, false)
 		if translated, ok := hooks.TranslateResponse(
@@ -230,6 +230,17 @@ func Register(from, to Format, request RequestTransform, response ResponseTransf
 // TranslateRequest is a helper on the default registry.
 func TranslateRequest(from, to Format, model string, rawJSON []byte, stream bool) []byte {
 	return defaultRegistry.TranslateRequest(from, to, model, rawJSON, stream)
+}
+
+// TranslateRequestWithContext is a context-aware helper on the default registry.
+func TranslateRequestWithContext(
+	ctx context.Context,
+	from, to Format,
+	model string,
+	rawJSON []byte,
+	stream bool,
+) []byte {
+	return defaultRegistry.TranslateRequestWithContext(ctx, from, to, model, rawJSON, stream)
 }
 
 // HasRequestTransformer inspects the default registry.

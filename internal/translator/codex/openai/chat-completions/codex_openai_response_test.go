@@ -89,3 +89,43 @@ func TestConvertCodexResponseToOpenAI_NonStreamMultiMessageEmptyTrailingKeepsCon
 		t.Fatalf("reasoning = %q, want concatenated non-empty text; output: %s", got, out)
 	}
 }
+
+func TestConvertCodexResponseToOpenAIForwardsCacheWriteTokens(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	_ = ConvertCodexResponseToOpenAI(
+		ctx,
+		"gpt-5.4",
+		nil,
+		nil,
+		[]byte(`data: {"type":"response.created","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4"}}`),
+		&param,
+	)
+	stream := ConvertCodexResponseToOpenAI(
+		ctx,
+		"gpt-5.4",
+		nil,
+		nil,
+		[]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens_details":{"cache_write_tokens":0}}}}`),
+		&param,
+	)
+	if len(stream) != 1 {
+		t.Fatalf("stream chunks = %d, want 1", len(stream))
+	}
+	streamValue := gjson.GetBytes(stream[0], "usage.prompt_tokens_details.cached_creation_tokens")
+	if !streamValue.Exists() || streamValue.Int() != 0 {
+		t.Fatalf("stream cached_creation_tokens = %s, want explicit zero", streamValue.Raw)
+	}
+
+	nonStream := ConvertCodexResponseToOpenAINonStream(
+		ctx,
+		"gpt-5.4",
+		nil,
+		nil,
+		[]byte(`{"type":"response.completed","response":{"usage":{"input_tokens_details":{"cache_write_tokens":40}},"output":[]}}`),
+		nil,
+	)
+	if got := gjson.GetBytes(nonStream, "usage.prompt_tokens_details.cached_creation_tokens").Int(); got != 40 {
+		t.Fatalf("non-stream cached_creation_tokens = %d, want 40; output: %s", got, nonStream)
+	}
+}

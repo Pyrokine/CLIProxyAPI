@@ -756,3 +756,27 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 		t.Errorf("tool 'search' not found in output tools: %s", gjson.Get(result, "tools").Raw)
 	}
 }
+
+func TestConvertOpenAIRequestToCodexPreservesStringServiceTier(t *testing.T) {
+	out := ConvertOpenAIRequestToCodex(
+		"gpt-5.4",
+		[]byte(`{"messages":[{"role":"user","content":"hello"}],"service_tier":" flex "}`),
+		true,
+	)
+
+	if got := gjson.GetBytes(out, "service_tier").String(); got != "flex" {
+		t.Fatalf("service_tier = %q, want flex; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIRequestToCodexIgnoresNonStringServiceTier(t *testing.T) {
+	out := ConvertOpenAIRequestToCodex(
+		"gpt-5.4",
+		[]byte(`{"messages":[{"role":"user","content":"hello"}],"service_tier":123}`),
+		true,
+	)
+
+	if gjson.GetBytes(out, "service_tier").Exists() {
+		t.Fatalf("service_tier should be omitted; output=%s", out)
+	}
+}

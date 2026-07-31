@@ -6,6 +6,26 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToGeminiMapsMaxTokens(t *testing.T) {
+	input := []byte(`{"model":"gemini-3-flash","max_tokens":321,"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := ConvertOpenAIRequestToGemini("gemini-3-flash", input, false)
+
+	if got := gjson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != 321 {
+		t.Fatalf("maxOutputTokens = %d, want 321; payload=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIRequestToGeminiMapsMaxCompletionTokens(t *testing.T) {
+	input := []byte(`{"model":"gemini-3-flash","max_completion_tokens":654,"messages":[{"role":"user","content":"hi"}]}`)
+
+	out := ConvertOpenAIRequestToGemini("gemini-3-flash", input, false)
+
+	if got := gjson.GetBytes(out, "generationConfig.maxOutputTokens").Int(); got != 654 {
+		t.Fatalf("maxOutputTokens = %d, want 654; payload=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIRequestToGeminiPreservesVideoURL(t *testing.T) {
 	input := []byte(`{
 		"model":"gemini-3-flash",

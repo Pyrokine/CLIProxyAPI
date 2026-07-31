@@ -38,3 +38,27 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsAggregatesContinuou
 		t.Fatalf("deferred user message not emitted after tool outputs; output: %s", output)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsPreservesStringServiceTier(t *testing.T) {
+	output := ConvertOpenAIResponsesRequestToOpenAIChatCompletions(
+		"gpt-4.1",
+		[]byte(`{"input":"hello","service_tier":" priority "}`),
+		false,
+	)
+
+	if got := gjson.GetBytes(output, "service_tier").String(); got != "priority" {
+		t.Fatalf("service_tier = %q, want priority; output=%s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsIgnoresNonStringServiceTier(t *testing.T) {
+	output := ConvertOpenAIResponsesRequestToOpenAIChatCompletions(
+		"gpt-4.1",
+		[]byte(`{"input":"hello","service_tier":true}`),
+		false,
+	)
+
+	if gjson.GetBytes(output, "service_tier").Exists() {
+		t.Fatalf("service_tier should be omitted; output=%s", output)
+	}
+}

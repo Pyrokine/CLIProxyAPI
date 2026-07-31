@@ -10,6 +10,12 @@ var pluginHooksRegistry struct {
 	hooks PluginHooks
 }
 
+type pluginHooksContextKey struct{}
+
+type pluginHooksContextValue struct {
+	hooks PluginHooks
+}
+
 // PluginHooks defines optional translator extension hooks provided by plugins.
 type PluginHooks interface {
 	NormalizeRequest(ctx context.Context, from, to Format, model string, body []byte, stream bool) []byte
@@ -48,4 +54,22 @@ func currentPluginHooks() PluginHooks {
 	pluginHooksRegistry.mu.RLock()
 	defer pluginHooksRegistry.mu.RUnlock()
 	return pluginHooksRegistry.hooks
+}
+
+// WithPluginHooks binds translator hooks to one request. A nil hook is retained
+// explicitly so the request cannot inherit another service's compatibility hook.
+func WithPluginHooks(ctx context.Context, hooks PluginHooks) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, pluginHooksContextKey{}, pluginHooksContextValue{hooks: hooks})
+}
+
+func pluginHooksForContext(ctx context.Context) PluginHooks {
+	if ctx != nil {
+		if value, ok := ctx.Value(pluginHooksContextKey{}).(pluginHooksContextValue); ok {
+			return value.hooks
+		}
+	}
+	return currentPluginHooks()
 }
