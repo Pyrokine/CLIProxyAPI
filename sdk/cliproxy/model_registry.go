@@ -1,12 +1,50 @@
 package cliproxy
 
-import "github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+import (
+	"context"
 
-// ModelInfo re-exports the registry model info structure.
-type ModelInfo = registry.ModelInfo
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+)
 
-// ModelRegistryHook re-exports the registry hook interface for external integrations.
-type ModelRegistryHook = registry.ModelRegistryHook
+// ModelInfo describes a model exposed through the embedded proxy registry.
+type ModelInfo struct {
+	ID                         string           `json:"id"`
+	Object                     string           `json:"object"`
+	Created                    int64            `json:"created"`
+	OwnedBy                    string           `json:"owned_by"`
+	Type                       string           `json:"type"`
+	DisplayName                string           `json:"display_name,omitempty"`
+	CatalogName                string           `json:"-"`
+	Name                       string           `json:"name,omitempty"`
+	Version                    string           `json:"version,omitempty"`
+	Description                string           `json:"description,omitempty"`
+	InputTokenLimit            int              `json:"inputTokenLimit,omitempty"`
+	OutputTokenLimit           int              `json:"outputTokenLimit,omitempty"`
+	SupportedGenerationMethods []string         `json:"supportedGenerationMethods,omitempty"`
+	ContextLength              int              `json:"context_length,omitempty"`
+	MaxCompletionTokens        int              `json:"max_completion_tokens,omitempty"`
+	SupportedParameters        []string         `json:"supported_parameters,omitempty"`
+	SupportedInputModalities   []string         `json:"supportedInputModalities,omitempty"`
+	SupportedOutputModalities  []string         `json:"supportedOutputModalities,omitempty"`
+	SupportsWebSearch          bool             `json:"supports_web_search,omitempty"`
+	Thinking                   *ThinkingSupport `json:"thinking,omitempty"`
+	UserDefined                bool             `json:"-"`
+}
+
+// ThinkingSupport describes supported reasoning budget settings for a model.
+type ThinkingSupport struct {
+	Min            int      `json:"min,omitempty"`
+	Max            int      `json:"max,omitempty"`
+	ZeroAllowed    bool     `json:"zero_allowed,omitempty"`
+	DynamicAllowed bool     `json:"dynamic_allowed,omitempty"`
+	Levels         []string `json:"levels,omitempty"`
+}
+
+// ModelRegistryHook receives asynchronous model registry updates.
+type ModelRegistryHook interface {
+	OnModelsRegistered(ctx context.Context, provider, clientID string, models []*ModelInfo)
+	OnModelsUnregistered(ctx context.Context, provider, clientID string)
+}
 
 // ModelRegistry describes registry operations consumed by external callers.
 type ModelRegistry interface {
@@ -19,13 +57,203 @@ type ModelRegistry interface {
 	GetAvailableModelsByProvider(provider string) []*ModelInfo
 }
 
+type modelRegistryAdapter struct {
+	inner *registry.ModelRegistry
+}
+
+func (r *modelRegistryAdapter) RegisterClient(clientID, clientProvider string, models []*ModelInfo) {
+	if r == nil || r.inner == nil {
+		return
+	}
+	r.inner.RegisterClient(clientID, clientProvider, toRegistryModelInfos(models))
+}
+
+func (r *modelRegistryAdapter) UnregisterClient(clientID string) {
+	if r == nil || r.inner == nil {
+		return
+	}
+	r.inner.UnregisterClient(clientID)
+}
+
+func (r *modelRegistryAdapter) SetModelQuotaExceeded(clientID, modelID string) {
+	if r == nil || r.inner == nil {
+		return
+	}
+	r.inner.SetModelQuotaExceeded(clientID, modelID)
+}
+
+func (r *modelRegistryAdapter) ClearModelQuotaExceeded(clientID, modelID string) {
+	if r == nil || r.inner == nil {
+		return
+	}
+	r.inner.ClearModelQuotaExceeded(clientID, modelID)
+}
+
+func (r *modelRegistryAdapter) ClientSupportsModel(clientID, modelID string) bool {
+	if r == nil || r.inner == nil {
+		return false
+	}
+	return r.inner.ClientSupportsModel(clientID, modelID)
+}
+
+func (r *modelRegistryAdapter) GetAvailableModels(handlerType string) []map[string]any {
+	if r == nil || r.inner == nil {
+		return nil
+	}
+	return r.inner.GetAvailableModels(handlerType)
+}
+
+func (r *modelRegistryAdapter) GetAvailableModelsByProvider(provider string) []*ModelInfo {
+	if r == nil || r.inner == nil {
+		return nil
+	}
+	return fromRegistryModelInfos(r.inner.GetAvailableModelsByProvider(provider))
+}
+
 // GlobalModelRegistry returns the shared registry instance.
 func GlobalModelRegistry() ModelRegistry {
-	return registry.GetGlobalRegistry()
+	return &modelRegistryAdapter{inner: registry.GetGlobalRegistry()}
 }
 
 // SetGlobalModelRegistryHook registers an optional hook on the shared global registry instance.
 // noinspection GoUnusedExportedFunction
 func SetGlobalModelRegistryHook(hook ModelRegistryHook) {
-	registry.GetGlobalRegistry().SetHook(hook)
+	if hook == nil {
+		registry.GetGlobalRegistry().SetHook(nil)
+		return
+	}
+	registry.GetGlobalRegistry().SetHook(modelRegistryHookAdapter{hook: hook})
+}
+
+type modelRegistryHookAdapter struct {
+	hook ModelRegistryHook
+}
+
+func (h modelRegistryHookAdapter) OnModelsRegistered(
+	ctx context.Context,
+	provider string,
+	clientID string,
+	models []*registry.ModelInfo,
+) {
+	if h.hook == nil {
+		return
+	}
+	h.hook.OnModelsRegistered(ctx, provider, clientID, fromRegistryModelInfos(models))
+}
+
+func (h modelRegistryHookAdapter) OnModelsUnregistered(ctx context.Context, provider string, clientID string) {
+	if h.hook == nil {
+		return
+	}
+	h.hook.OnModelsUnregistered(ctx, provider, clientID)
+}
+
+func toRegistryModelInfos(models []*ModelInfo) []*registry.ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]*registry.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if converted := toRegistryModelInfo(model); converted != nil {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+func toRegistryModelInfo(model *ModelInfo) *registry.ModelInfo {
+	if model == nil {
+		return nil
+	}
+	return &registry.ModelInfo{
+		ID:                         model.ID,
+		Object:                     model.Object,
+		Created:                    model.Created,
+		OwnedBy:                    model.OwnedBy,
+		Type:                       model.Type,
+		DisplayName:                model.DisplayName,
+		CatalogName:                model.CatalogName,
+		Name:                       model.Name,
+		Version:                    model.Version,
+		Description:                model.Description,
+		InputTokenLimit:            model.InputTokenLimit,
+		OutputTokenLimit:           model.OutputTokenLimit,
+		SupportedGenerationMethods: append([]string(nil), model.SupportedGenerationMethods...),
+		ContextLength:              model.ContextLength,
+		MaxCompletionTokens:        model.MaxCompletionTokens,
+		SupportedParameters:        append([]string(nil), model.SupportedParameters...),
+		SupportedInputModalities:   append([]string(nil), model.SupportedInputModalities...),
+		SupportedOutputModalities:  append([]string(nil), model.SupportedOutputModalities...),
+		SupportsWebSearch:          model.SupportsWebSearch,
+		Thinking:                   toRegistryThinkingSupport(model.Thinking),
+		UserDefined:                model.UserDefined,
+	}
+}
+
+func toRegistryThinkingSupport(thinking *ThinkingSupport) *registry.ThinkingSupport {
+	if thinking == nil {
+		return nil
+	}
+	return &registry.ThinkingSupport{
+		Min:            thinking.Min,
+		Max:            thinking.Max,
+		ZeroAllowed:    thinking.ZeroAllowed,
+		DynamicAllowed: thinking.DynamicAllowed,
+		Levels:         append([]string(nil), thinking.Levels...),
+	}
+}
+
+func fromRegistryModelInfos(models []*registry.ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if converted := fromRegistryModelInfo(model); converted != nil {
+			out = append(out, converted)
+		}
+	}
+	return out
+}
+
+func fromRegistryModelInfo(model *registry.ModelInfo) *ModelInfo {
+	if model == nil {
+		return nil
+	}
+	return &ModelInfo{
+		ID:                         model.ID,
+		Object:                     model.Object,
+		Created:                    model.Created,
+		OwnedBy:                    model.OwnedBy,
+		Type:                       model.Type,
+		DisplayName:                model.DisplayName,
+		CatalogName:                model.CatalogName,
+		Name:                       model.Name,
+		Version:                    model.Version,
+		Description:                model.Description,
+		InputTokenLimit:            model.InputTokenLimit,
+		OutputTokenLimit:           model.OutputTokenLimit,
+		SupportedGenerationMethods: append([]string(nil), model.SupportedGenerationMethods...),
+		ContextLength:              model.ContextLength,
+		MaxCompletionTokens:        model.MaxCompletionTokens,
+		SupportedParameters:        append([]string(nil), model.SupportedParameters...),
+		SupportedInputModalities:   append([]string(nil), model.SupportedInputModalities...),
+		SupportedOutputModalities:  append([]string(nil), model.SupportedOutputModalities...),
+		SupportsWebSearch:          model.SupportsWebSearch,
+		Thinking:                   fromRegistryThinkingSupport(model.Thinking),
+		UserDefined:                model.UserDefined,
+	}
+}
+
+func fromRegistryThinkingSupport(thinking *registry.ThinkingSupport) *ThinkingSupport {
+	if thinking == nil {
+		return nil
+	}
+	return &ThinkingSupport{
+		Min:            thinking.Min,
+		Max:            thinking.Max,
+		ZeroAllowed:    thinking.ZeroAllowed,
+		DynamicAllowed: thinking.DynamicAllowed,
+		Levels:         append([]string(nil), thinking.Levels...),
+	}
 }

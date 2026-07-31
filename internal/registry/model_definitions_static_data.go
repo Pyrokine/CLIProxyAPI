@@ -2,16 +2,49 @@
 // This file stores the static model metadata catalog.
 package registry
 
-// getCodexPlusModels returns codex-plus models from the dynamic catalog if available.
-func getCodexPlusModels() []*ModelInfo {
+// getCodexModels returns models from the selected dynamic Codex catalog section, if available.
+func getCodexModels(selectModels func(*staticModelsJSON) []*ModelInfo) []*ModelInfo {
 	data := getModels()
-	if data == nil || len(data.CodexPlus) == 0 {
+	if data == nil {
 		return nil
 	}
-	// Return a copy to avoid external mutation.
-	out := make([]*ModelInfo, len(data.CodexPlus))
-	copy(out, data.CodexPlus)
-	return out
+	models := selectModels(data)
+	if len(models) == 0 {
+		return nil
+	}
+	return cloneModelInfos(models)
+}
+
+// GetCodexFreeModels returns the Codex free-plan model definitions.
+func GetCodexFreeModels() []*ModelInfo {
+	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexFree }); len(dynamic) > 0 {
+		return WithCodexBuiltins(dynamic)
+	}
+	return GetEmbeddedOpenAIModels()
+}
+
+// GetCodexTeamModels returns the Codex team-plan model definitions.
+func GetCodexTeamModels() []*ModelInfo {
+	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexTeam }); len(dynamic) > 0 {
+		return WithCodexBuiltins(dynamic)
+	}
+	return GetEmbeddedOpenAIModels()
+}
+
+// GetCodexPlusModels returns the Codex plus-plan model definitions.
+func GetCodexPlusModels() []*ModelInfo {
+	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexPlus }); len(dynamic) > 0 {
+		return WithCodexBuiltins(dynamic)
+	}
+	return GetEmbeddedOpenAIModels()
+}
+
+// GetCodexProModels returns the Codex pro-plan model definitions.
+func GetCodexProModels() []*ModelInfo {
+	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexPro }); len(dynamic) > 0 {
+		return WithCodexBuiltins(dynamic)
+	}
+	return GetEmbeddedOpenAIModels()
 }
 
 // GetClaudeModels returns the standard Claude model definitions
@@ -533,13 +566,9 @@ func GetAIStudioModels() []*ModelInfo {
 	return models
 }
 
-// GetOpenAIModels returns the OpenAI model definitions.
-// Prefers dynamic catalog (codex-plus) when available, falls back to static data.
+// GetOpenAIModels returns the default Codex/OpenAI model definitions.
 func GetOpenAIModels() []*ModelInfo {
-	if dynamic := getCodexPlusModels(); len(dynamic) > 0 {
-		return WithCodexBuiltins(dynamic)
-	}
-	return GetEmbeddedOpenAIModels()
+	return GetCodexProModels()
 }
 
 func GetEmbeddedOpenAIModels() []*ModelInfo {

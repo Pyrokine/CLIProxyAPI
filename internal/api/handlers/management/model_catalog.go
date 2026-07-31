@@ -14,8 +14,9 @@ import (
 )
 
 type modelCatalogResponse struct {
-	Models []modelCatalogRow `json:"models"`
-	Meta   gin.H             `json:"meta"`
+	Models               []modelCatalogRow `json:"models"`
+	Meta                 gin.H             `json:"meta"`
+	RecalculationPending bool              `json:"recalculation_pending,omitempty"`
 }
 
 type modelCatalogRow struct {
@@ -52,14 +53,14 @@ type modelCatalogPatchRequest struct {
 }
 
 func (h *Handler) GetModelCatalog(c *gin.Context) {
-	doc, err := modelcatalog.LoadOrInit(h.configFilePath, h.cfg)
+	cfg := h.configSnapshot()
+	doc, err := modelcatalog.LoadOrInit(h.configFilePath, cfg)
 	if err != nil {
 		log.Warnf("model-catalog: failed to load models.json: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
 		return
 	}
-	h.applyModelCatalogRuntime(doc)
-	c.JSON(http.StatusOK, h.modelCatalogResponse(doc))
+	c.JSON(http.StatusOK, h.modelCatalogResponse(cfg, doc))
 }
 
 func (h *Handler) PutModelCatalog(c *gin.Context) {
@@ -70,31 +71,31 @@ func (h *Handler) PutModelCatalog(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
-	existing, err := modelcatalog.LoadOrInit(h.configFilePath, h.cfg)
-	if err != nil {
-		log.Warnf("model-catalog: failed to load models.json before save: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
+	result, ok := h.mutateModelCatalog(
+		c,
+		modelCatalogMutationOptions{},
+		func(doc *modelcatalog.File) error {
+			defaultsVersion := strings.TrimSpace(doc.DefaultsVersion)
+			if defaultsVersion == "" {
+				defaultsVersion = modelcatalog.DefaultsVersion
+			}
+			*doc = modelcatalog.File{
+				SchemaVersion:        modelcatalog.SchemaVersion,
+				DefaultsVersion:      defaultsVersion,
+				RemovedDefaultModels: append([]string(nil), doc.RemovedDefaultModels...),
+				OAuthModelAlias:      doc.ToOAuthModelAlias(),
+				Models:               body.Models,
+			}
+			return nil
+		},
+	)
+	if result.config != nil {
+		h.refreshModelPricing(false)
+	}
+	if !ok {
 		return
 	}
-	defaultsVersion := strings.TrimSpace(existing.DefaultsVersion)
-	if defaultsVersion == "" {
-		defaultsVersion = modelcatalog.DefaultsVersion
-	}
-	doc := modelcatalog.File{
-		SchemaVersion:        modelcatalog.SchemaVersion,
-		DefaultsVersion:      defaultsVersion,
-		RemovedDefaultModels: append([]string(nil), existing.RemovedDefaultModels...),
-		Models:               body.Models,
-	}
-	doc.Sanitize()
-	if err := modelcatalog.Save(h.configFilePath, doc); err != nil {
-		log.Warnf("model-catalog: failed to save models.json: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save model catalog"})
-		return
-	}
-	h.applyModelCatalogRuntime(doc)
-	h.refreshModelPricing(false)
-	c.JSON(http.StatusOK, h.modelCatalogResponse(doc))
+	c.JSON(http.StatusOK, h.modelCatalogResponse(result.config, result.doc))
 }
 
 func (h *Handler) PatchModelCatalogModel(c *gin.Context) {
@@ -108,23 +109,29 @@ func (h *Handler) PatchModelCatalogModel(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
 	}
-	doc, err := modelcatalog.LoadOrInit(h.configFilePath, h.cfg)
-	if err != nil {
-		log.Warnf("model-catalog: failed to load models.json: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
+	result, ok := h.mutateModelCatalog(
+		c,
+		modelCatalogMutationOptions{},
+		func(doc *modelcatalog.File) error {
+			model := doc.EnsureModel(body.Name, true)
+			applyModelCatalogPatch(model, body)
+			if body.Aliases != nil {
+				modelcatalog.ReplaceModelAliases(doc, body.Name, *body.Aliases)
+			}
+			return nil
+		},
+	)
+	recalculate := body.Price != nil || (body.ClearPrice != nil && *body.ClearPrice)
+	recalculationPending := false
+	if result.config != nil {
+		recalculationPending = h.refreshModelPricing(recalculate)
+	}
+	if !ok {
 		return
 	}
-	model := doc.EnsureModel(body.Name, true)
-	applyModelCatalogPatch(model, body)
-	doc.Sanitize()
-	if err := modelcatalog.Save(h.configFilePath, doc); err != nil {
-		log.Warnf("model-catalog: failed to save models.json: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save model catalog"})
-		return
-	}
-	h.applyModelCatalogRuntime(doc)
-	h.refreshModelPricing(body.Price != nil || (body.ClearPrice != nil && *body.ClearPrice))
-	c.JSON(http.StatusOK, h.modelCatalogResponse(doc))
+	response := h.modelCatalogResponse(result.config, result.doc)
+	response.RecalculationPending = recalculationPending
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *Handler) DeleteModelCatalogModel(c *gin.Context) {
@@ -133,25 +140,23 @@ func (h *Handler) DeleteModelCatalogModel(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
 		return
 	}
-	doc, err := modelcatalog.LoadOrInit(h.configFilePath, h.cfg)
-	if err != nil {
-		log.Warnf("model-catalog: failed to load models.json: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
+	result, ok := h.mutateModelCatalog(
+		c,
+		modelCatalogMutationOptions{},
+		func(doc *modelcatalog.File) error {
+			if !doc.RemoveModel(name, modelcatalog.DefaultFile()) {
+				return newConfigMutationError(http.StatusNotFound, "model catalog entry not found")
+			}
+			return nil
+		},
+	)
+	if result.config != nil {
+		h.refreshModelPricing(false)
+	}
+	if !ok {
 		return
 	}
-	if !doc.RemoveModel(name, modelcatalog.DefaultFile()) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "model catalog entry not found"})
-		return
-	}
-	doc.Sanitize()
-	if err := modelcatalog.Save(h.configFilePath, doc); err != nil {
-		log.Warnf("model-catalog: failed to save models.json: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save model catalog"})
-		return
-	}
-	h.applyModelCatalogRuntime(doc)
-	h.refreshModelPricing(false)
-	c.JSON(http.StatusOK, h.modelCatalogResponse(doc))
+	c.JSON(http.StatusOK, h.modelCatalogResponse(result.config, result.doc))
 }
 
 func (h *Handler) GetModelCatalogDefaultUpdate(c *gin.Context) {
@@ -172,21 +177,37 @@ func (h *Handler) ApplyModelCatalogDefaultUpdate(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
 		return
 	}
-	result, err := modelcatalog.ApplyDefaultUpdate(h.configFilePath, body.Decisions)
-	if err != nil {
-		log.Warnf("model-catalog: failed to apply default update: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to apply default update"})
+	applied := 0
+	result, ok := h.mutateModelCatalog(
+		c,
+		modelCatalogMutationOptions{backup: true},
+		func(doc *modelcatalog.File) error {
+			var err error
+			applied, err = modelcatalog.ApplyDefaultDecisions(doc, body.Decisions)
+			return err
+		},
+	)
+	recalculationPending := false
+	if result.config != nil {
+		recalculationPending = h.refreshModelPricing(true)
+	}
+	if !ok {
 		return
 	}
-	doc, err := modelcatalog.LoadOrInit(h.configFilePath, h.cfg)
-	if err != nil {
-		log.Warnf("model-catalog: failed to reload models.json: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reload model catalog"})
-		return
+	applyResult := modelcatalog.ApplyResult{
+		Status:     "ok",
+		BackupPath: result.backupPath,
+		Applied:    applied,
 	}
-	h.applyModelCatalogRuntime(doc)
-	h.refreshModelPricing(true)
-	c.JSON(http.StatusOK, gin.H{"result": result, "catalog": h.modelCatalogResponse(doc)})
+	catalog := h.modelCatalogResponse(result.config, result.doc)
+	catalog.RecalculationPending = recalculationPending
+	c.JSON(
+		http.StatusOK,
+		gin.H{
+			"result":  applyResult,
+			"catalog": catalog,
+		},
+	)
 }
 
 func applyModelCatalogPatch(model *modelcatalog.Model, body modelCatalogPatchRequest) {
@@ -211,9 +232,6 @@ func applyModelCatalogPatch(model *modelcatalog.Model, body modelCatalogPatchReq
 	if body.Enabled != nil {
 		model.Enabled = *body.Enabled
 	}
-	if body.Aliases != nil {
-		model.Aliases = append([]string(nil), *body.Aliases...)
-	}
 	if body.Price != nil {
 		price := modelcatalog.Price{
 			Prompt: body.Price.Prompt, Completion: body.Price.Completion, Cache: body.Price.Cache,
@@ -225,15 +243,49 @@ func applyModelCatalogPatch(model *modelcatalog.Model, body modelCatalogPatchReq
 	}
 }
 
-func (h *Handler) modelCatalogResponse(doc modelcatalog.File) modelCatalogResponse {
+func (h *Handler) modelCatalogResponse(
+	cfg *config.Config,
+	doc modelcatalog.File,
+) modelCatalogResponse {
+	aliasesByModel := make(map[string][]string, len(doc.Models))
+	seenAliases := make(map[string]map[string]struct{}, len(doc.Models))
+	appendAlias := func(name, alias string) {
+		name = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(name, "models/")))
+		alias = strings.TrimSpace(strings.TrimPrefix(alias, "models/"))
+		if name == "" || alias == "" || strings.EqualFold(name, alias) {
+			return
+		}
+		if seenAliases[name] == nil {
+			seenAliases[name] = make(map[string]struct{})
+		}
+		aliasKey := strings.ToLower(alias)
+		if _, exists := seenAliases[name][aliasKey]; exists {
+			return
+		}
+		seenAliases[name][aliasKey] = struct{}{}
+		aliasesByModel[name] = append(aliasesByModel[name], alias)
+	}
+	for _, model := range doc.Models {
+		for _, alias := range model.Aliases {
+			appendAlias(model.Name, alias)
+		}
+	}
+	for _, entries := range doc.OAuthModelAlias {
+		for _, entry := range entries {
+			appendAlias(entry.Name, entry.Alias)
+		}
+	}
+	for name := range aliasesByModel {
+		sort.Strings(aliasesByModel[name])
+	}
 	rows := make([]modelCatalogRow, 0, len(doc.Models))
 	for _, model := range doc.Models {
 		providers := registry.GetGlobalRegistry().GetModelProviders(model.Name)
 		runtimeAvailable := len(providers) > 0
-		apiKeyBlocked := apiKeyBlockedCount(h.cfg, model.Name)
-		credentialExcluded := credentialExcludedCount(h.cfg, model.Name)
-		credentialConfigured := credentialConfiguredCount(h.cfg, model.Name)
-		accessRestricted := (apiKeyRuleCount(h.cfg) > 0 && apiKeyBlocked >= apiKeyRuleCount(h.cfg)) ||
+		apiKeyBlocked := apiKeyBlockedCount(cfg, model.Name)
+		credentialExcluded := credentialExcludedCount(cfg, model.Name)
+		credentialConfigured := credentialConfiguredCount(cfg, model.Name)
+		accessRestricted := (apiKeyRuleCount(cfg) > 0 && apiKeyBlocked >= apiKeyRuleCount(cfg)) ||
 			(credentialConfigured > 0 && credentialExcluded >= credentialConfigured)
 		requestable := model.Enabled && runtimeAvailable && !accessRestricted
 		reason := ""
@@ -257,7 +309,7 @@ func (h *Handler) modelCatalogResponse(doc modelcatalog.File) modelCatalogRespon
 			RuntimeProviders:          providers,
 			Requestable:               requestable,
 			NotRequestableReason:      reason,
-			Aliases:                   append([]string(nil), model.Aliases...),
+			Aliases:                   aliasesByModel[strings.ToLower(model.Name)],
 			APIKeyBlockedCount:        apiKeyBlocked,
 			CredentialExcludedCount:   credentialExcluded,
 			CredentialConfiguredCount: credentialConfigured,
@@ -292,34 +344,19 @@ func (h *Handler) modelCatalogResponse(doc modelcatalog.File) modelCatalogRespon
 	}
 }
 
-func (h *Handler) applyModelCatalogRuntime(doc modelcatalog.File) {
-	catalog := doc.ToModelCatalogModels()
-	aliases := doc.ToOAuthModelAlias()
-	config.SetRuntimeModelCatalog(catalog)
-	if h != nil && h.cfg != nil {
-		h.cfg.ModelCatalog.Models = catalog
-		h.cfg.OAuthModelAlias = aliases
-	}
-	if h != nil && h.authManager != nil {
-		h.authManager.SetOAuthModelAlias(aliases)
-	}
-	if h != nil && h.modelCatalogRuntimeSync != nil {
-		h.modelCatalogRuntimeSync(h.cfg)
-	}
-}
-
-func (h *Handler) refreshModelPricing(recalculate bool) {
+func (h *Handler) refreshModelPricing(recalculate bool) bool {
 	if h == nil || h.usagePersister == nil {
-		return
+		return false
 	}
-	priceFn := internalUsage.BuildModelPriceFunc(h.configFilePath)
-	h.usagePersister.SetPriceFunc(priceFn)
+	priceProvider := internalUsage.BuildModelPriceProvider(h.configFilePath)
+	h.usagePersister.SetPriceProvider(priceProvider)
 	if !recalculate || !h.usagePersister.HasPricing() {
-		return
+		return false
 	}
-	if _, err := h.usagePersister.RecalculateCosts(); err != nil {
-		log.Warnf("model-catalog: cost recalculation failed: %v", err)
+	if !h.usagePersister.StartRecalculateCosts() {
+		log.Debug("model-catalog: historical cost recalculation already running")
 	}
+	return true
 }
 
 func modelRuntimeAvailable(name string) bool {

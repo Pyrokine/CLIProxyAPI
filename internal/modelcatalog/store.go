@@ -2,17 +2,27 @@ package modelcatalog
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
 
 var storeMu sync.RWMutex
+
+type UpdateOptions struct {
+	Backup bool
+	Commit func(File) error
+}
 
 func Path(configPath string) string {
 	if strings.TrimSpace(configPath) == "" {
@@ -28,7 +38,7 @@ func Load(configPath string) (File, error) {
 	}
 	storeMu.RLock()
 	defer storeMu.RUnlock()
-	return readFile(filePath)
+	return readFileUnlocked(filePath)
 }
 
 func LoadOrInit(configPath string, cfg *config.Config) (File, error) {
@@ -38,27 +48,26 @@ func LoadOrInit(configPath string, cfg *config.Config) (File, error) {
 	}
 	storeMu.Lock()
 	defer storeMu.Unlock()
-	if _, err := os.Stat(filePath); err == nil {
-		doc, err := readFileUnlocked(filePath)
-		if err != nil {
+
+	doc, previousData, exists, rewrite, err := loadOrInitializeUnlocked(filePath, cfg)
+	if err != nil {
+		return File{}, err
+	}
+	if !exists {
+		if err = writeFileUnlocked(filePath, doc); err != nil {
 			return File{}, err
 		}
-		if cfg != nil && ApplyOAuthModelAlias(&doc, cfg.OAuthModelAlias) {
-			if err := writeFileUnlocked(filePath, doc); err != nil {
-				return File{}, err
-			}
-		}
 		return doc, nil
-	} else if !os.IsNotExist(err) {
+	}
+	if !rewrite {
+		return doc, nil
+	}
+	backupPath, err := writeBackupUnlocked(filePath, previousData)
+	if err != nil {
 		return File{}, err
 	}
-	doc := DefaultFile()
-	if err := applyLegacyPrices(filepath.Join(filepath.Dir(filePath), "model-prices.json"), &doc); err != nil {
-		return File{}, err
-	}
-	applyLegacyConfig(cfg, &doc)
-	doc.Sanitize()
-	if err := writeFileUnlocked(filePath, doc); err != nil {
+	if err = writeFileUnlocked(filePath, doc); err != nil {
+		removeBackupUnlocked(backupPath)
 		return File{}, err
 	}
 	return doc, nil
@@ -75,17 +84,88 @@ func Save(configPath string, doc File) error {
 	return writeFileUnlocked(filePath, doc)
 }
 
+func Update(
+	configPath string,
+	cfg *config.Config,
+	options UpdateOptions,
+	mutate func(*File) error,
+) (File, string, error) {
+	filePath := Path(configPath)
+	if filePath == "" {
+		return File{}, "", fmt.Errorf("config file path not set")
+	}
+
+	storeMu.Lock()
+	defer storeMu.Unlock()
+
+	doc, previousData, existed, _, err := loadOrInitializeUnlocked(filePath, cfg)
+	if err != nil {
+		return File{}, "", err
+	}
+	if !existed {
+		previousData, err = marshalFile(doc)
+		if err != nil {
+			return File{}, "", err
+		}
+	}
+	if mutate != nil {
+		if err = mutate(&doc); err != nil {
+			return File{}, "", err
+		}
+	}
+	doc.Sanitize()
+
+	backupPath := ""
+	if options.Backup {
+		backupPath, err = writeBackupUnlocked(filePath, previousData)
+		if err != nil {
+			return File{}, "", err
+		}
+	}
+
+	if err = writeFileUnlocked(filePath, doc); err != nil {
+		removeBackupUnlocked(backupPath)
+		return File{}, "", err
+	}
+	if options.Commit == nil {
+		return doc, backupPath, nil
+	}
+	if err = options.Commit(doc); err == nil {
+		return doc, backupPath, nil
+	}
+
+	commitErr := err
+	rollbackErr := restoreFileUnlocked(filePath, previousData, existed)
+	removeBackupUnlocked(backupPath)
+	if rollbackErr != nil {
+		return File{}, "", errors.Join(commitErr, fmt.Errorf("restore model catalog: %w", rollbackErr))
+	}
+	return File{}, "", commitErr
+}
+
 func ReplacePrices(configPath string, prices map[string]Price) (File, error) {
+	doc, _, err := Update(
+		configPath,
+		nil,
+		UpdateOptions{},
+		func(doc *File) error {
+			SetPrices(doc, prices)
+			return nil
+		},
+	)
+	return doc, err
+}
+
+func SetPrices(doc *File, prices map[string]Price) {
+	if doc == nil {
+		return
+	}
 	normalizedPrices := make(map[string]Price, len(prices))
 	for name, price := range prices {
 		name = normalizeModelName(name)
 		if name != "" {
 			normalizedPrices[name] = price
 		}
-	}
-	doc, err := LoadOrInit(configPath, nil)
-	if err != nil {
-		return File{}, err
 	}
 	for i := range doc.Models {
 		price, ok := normalizedPrices[doc.Models[i].Name]
@@ -112,10 +192,6 @@ func ReplacePrices(configPath string, prices map[string]Price) (File, error) {
 		model.Price = &price
 	}
 	doc.Sanitize()
-	if err := Save(configPath, doc); err != nil {
-		return File{}, err
-	}
-	return doc, nil
 }
 
 func Prices(configPath string) (map[string]Price, error) {
@@ -136,8 +212,40 @@ func Prices(configPath string) (map[string]Price, error) {
 	return out, nil
 }
 
-func readFile(filePath string) (File, error) {
-	return readFileUnlocked(filePath)
+func Backup(configPath string) (string, error) {
+	filePath := Path(configPath)
+	if filePath == "" {
+		return "", fmt.Errorf("config file path not set")
+	}
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", err
+	}
+	return writeBackupUnlocked(filePath, data)
+}
+
+func loadOrInitializeUnlocked(
+	filePath string,
+	cfg *config.Config,
+) (File, []byte, bool, bool, error) {
+	data, err := os.ReadFile(filePath)
+	if err == nil {
+		doc, rewrite, errDecode := decodeFileForLoad(data)
+		return doc, data, true, rewrite, errDecode
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return File{}, nil, false, false, err
+	}
+
+	doc := DefaultFile()
+	if err = applyLegacyPrices(filepath.Join(filepath.Dir(filePath), "model-prices.json"), &doc); err != nil {
+		return File{}, nil, false, false, err
+	}
+	applyLegacyConfig(cfg, &doc)
+	doc.Sanitize()
+	return doc, nil, false, false, nil
 }
 
 func readFileUnlocked(filePath string) (File, error) {
@@ -145,28 +253,173 @@ func readFileUnlocked(filePath string) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
+	return decodeFile(data)
+}
+
+func decodeFile(data []byte) (File, error) {
+	doc, _, err := decodeFileForLoad(data)
+	return doc, err
+}
+
+func decodeFileForLoad(data []byte) (File, bool, error) {
 	var doc File
 	if err := json.Unmarshal(data, &doc); err != nil {
-		return File{}, err
+		return File{}, false, err
+	}
+	rewrite := doc.SchemaVersion < SchemaVersion || strings.TrimSpace(doc.DefaultsVersion) == ""
+	if !rewrite {
+		for i := range doc.Models {
+			if len(doc.Models[i].Aliases) > 0 || len(doc.Models[i].ForceMappedAliases) > 0 {
+				rewrite = true
+				break
+			}
+		}
 	}
 	doc.Sanitize()
-	return doc, nil
+	return doc, rewrite, nil
+}
+
+func marshalFile(doc File) ([]byte, error) {
+	doc.Sanitize()
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }
 
 func writeFileUnlocked(filePath string, doc File) error {
-	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(doc, "", "  ")
+	data, err := marshalFile(doc)
 	if err != nil {
 		return err
 	}
-	data = append(data, '\n')
-	tmpPath := filePath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
+	return writeBytesAtomic(filePath, data)
+}
+
+func writeBytesAtomic(filePath string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, filePath)
+	file, err := os.CreateTemp(filepath.Dir(filePath), "."+filepath.Base(filePath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := file.Name()
+	fileOpen := true
+	defer func() {
+		if fileOpen {
+			_ = file.Close()
+		}
+		if tempPath != "" {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	if err = file.Chmod(0o600); err != nil {
+		return err
+	}
+	written, err := file.Write(data)
+	if err != nil {
+		return err
+	}
+	if written != len(data) {
+		return io.ErrShortWrite
+	}
+	if err = file.Sync(); err != nil {
+		return err
+	}
+	if err = file.Close(); err != nil {
+		fileOpen = false
+		return err
+	}
+	fileOpen = false
+	if err = os.Rename(tempPath, filePath); err != nil {
+		if errors.Is(err, syscall.EBUSY) {
+			return fmt.Errorf(
+				"replace model catalog: %w; mount the config directory instead of a single file",
+				err,
+			)
+		}
+		return err
+	}
+	tempPath = ""
+	return syncDirectory(filepath.Dir(filePath))
+}
+
+func writeBackupUnlocked(filePath string, data []byte) (string, error) {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o700); err != nil {
+		return "", err
+	}
+	pattern := fmt.Sprintf(
+		"%s.%s-*.bak",
+		filepath.Base(filePath),
+		time.Now().Format("20060102-150405"),
+	)
+	file, err := os.CreateTemp(filepath.Dir(filePath), pattern)
+	if err != nil {
+		return "", err
+	}
+	backupPath := file.Name()
+	removeBackup := true
+	defer func() {
+		_ = file.Close()
+		if removeBackup {
+			_ = os.Remove(backupPath)
+		}
+	}()
+	if err = file.Chmod(0o600); err != nil {
+		return "", err
+	}
+	written, err := file.Write(data)
+	if err != nil {
+		return "", err
+	}
+	if written != len(data) {
+		return "", io.ErrShortWrite
+	}
+	if err = file.Sync(); err != nil {
+		return "", err
+	}
+	if err = file.Close(); err != nil {
+		return "", err
+	}
+	if err = syncDirectory(filepath.Dir(filePath)); err != nil {
+		return "", err
+	}
+	removeBackup = false
+	return backupPath, nil
+}
+
+func restoreFileUnlocked(filePath string, previousData []byte, existed bool) error {
+	if existed {
+		return writeBytesAtomic(filePath, previousData)
+	}
+	if err := os.Remove(filePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return syncDirectory(filepath.Dir(filePath))
+}
+
+func removeBackupUnlocked(backupPath string) {
+	if backupPath == "" {
+		return
+	}
+	_ = os.Remove(backupPath)
+	_ = syncDirectory(filepath.Dir(backupPath))
+}
+
+func syncDirectory(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err = directory.Sync(); err != nil {
+		_ = directory.Close()
+		return err
+	}
+	return directory.Close()
 }
 
 func applyLegacyPrices(filePath string, doc *File) error {
@@ -211,11 +464,39 @@ func ReplaceOAuthModelAlias(doc *File, aliases map[string][]config.OAuthModelAli
 	if doc == nil {
 		return
 	}
+	doc.OAuthModelAlias = nil
 	for i := range doc.Models {
 		doc.Models[i].Aliases = nil
 		doc.Models[i].ForceMappedAliases = nil
 	}
 	ApplyOAuthModelAlias(doc, aliases)
+	doc.Sanitize()
+}
+
+func ReplaceModelAliases(doc *File, name string, aliases []string) {
+	if doc == nil {
+		return
+	}
+	model, ok := doc.Find(name)
+	if !ok {
+		return
+	}
+	key := modelKey(model.Name)
+	for channel, entries := range doc.OAuthModelAlias {
+		kept := entries[:0]
+		for _, entry := range entries {
+			if modelKey(entry.Name) != key {
+				kept = append(kept, entry)
+			}
+		}
+		if len(kept) == 0 {
+			delete(doc.OAuthModelAlias, channel)
+			continue
+		}
+		doc.OAuthModelAlias[channel] = kept
+	}
+	model.Aliases = append([]string(nil), aliases...)
+	model.ForceMappedAliases = nil
 	doc.Sanitize()
 }
 
@@ -244,7 +525,15 @@ func deleteOAuthModelAliasChannel(doc *File, channel string) bool {
 	if doc == nil || channel == "" {
 		return false
 	}
+	doc.materializeModelAliases()
 	changed := false
+	if _, ok := doc.OAuthModelAlias[channel]; ok {
+		delete(doc.OAuthModelAlias, channel)
+		if len(doc.OAuthModelAlias) == 0 {
+			doc.OAuthModelAlias = nil
+		}
+		changed = true
+	}
 	for i := range doc.Models {
 		if !modelMatchesOAuthAliasChannel(doc.Models[i], channel) || len(doc.Models[i].Aliases) == 0 {
 			continue
@@ -274,20 +563,39 @@ func modelMatchesOAuthAliasChannel(model Model, channel string) bool {
 }
 
 func ApplyOAuthModelAlias(doc *File, aliases map[string][]config.OAuthModelAlias) bool {
-	if doc == nil || len(aliases) == 0 {
+	if doc == nil {
 		return false
 	}
+	normalized := config.SanitizeOAuthModelAliasMap(aliases)
+	if len(normalized) == 0 {
+		return false
+	}
+	if doc.OAuthModelAlias == nil {
+		doc.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
+	}
 	changed := false
-	channels := make([]string, 0, len(aliases))
-	for channel := range aliases {
+	channels := make([]string, 0, len(normalized))
+	for channel := range normalized {
 		channels = append(channels, channel)
 	}
 	sort.Strings(channels)
 	for _, channel := range channels {
-		for _, alias := range aliases[channel] {
-			if applyOAuthModelAliasEntry(doc, channel, alias) {
+		existingAliases := doc.OAuthModelAlias[channel]
+		existingByAlias := make(map[string]struct{}, len(existingAliases))
+		for _, existing := range existingAliases {
+			existingByAlias[strings.ToLower(existing.Alias)] = struct{}{}
+		}
+		for _, alias := range normalized[channel] {
+			if ensureOAuthAliasModel(doc, channel, alias.Name) {
 				changed = true
 			}
+			aliasKey := strings.ToLower(alias.Alias)
+			if _, exists := existingByAlias[aliasKey]; exists {
+				continue
+			}
+			doc.OAuthModelAlias[channel] = append(doc.OAuthModelAlias[channel], alias)
+			existingByAlias[aliasKey] = struct{}{}
+			changed = true
 		}
 	}
 	if changed {
@@ -296,44 +604,30 @@ func ApplyOAuthModelAlias(doc *File, aliases map[string][]config.OAuthModelAlias
 	return changed
 }
 
-func applyOAuthModelAliasEntry(doc *File, channel string, alias config.OAuthModelAlias) bool {
-	if doc == nil {
+func ensureOAuthAliasModel(doc *File, channel string, name string) bool {
+	name = normalizeModelName(name)
+	if doc == nil || name == "" {
 		return false
 	}
-	name := normalizeModelName(alias.Name)
-	aliasName := normalizeModelName(alias.Alias)
-	if name == "" || aliasName == "" || strings.EqualFold(name, aliasName) {
-		return false
-	}
+	_, existed := doc.Find(name)
 	model := doc.EnsureModel(name, true)
 	if model == nil {
 		return false
 	}
+	changed := !existed
 	if provider := inferProvider(channel, name); model.Provider == "" || model.Provider == "Other" {
-		model.Provider = provider
-	}
-	if inferredChannel := inferChannel(channel, name); model.Channel == "" || model.Channel == "other" {
-		model.Channel = inferredChannel
-	}
-	for _, existing := range model.Aliases {
-		if strings.EqualFold(existing, aliasName) {
-			if alias.ForceMapping {
-				for _, forceMappedAlias := range model.ForceMappedAliases {
-					if strings.EqualFold(forceMappedAlias, aliasName) {
-						return false
-					}
-				}
-				model.ForceMappedAliases = append(model.ForceMappedAliases, aliasName)
-				return true
-			}
-			return false
+		if model.Provider != provider {
+			model.Provider = provider
+			changed = true
 		}
 	}
-	model.Aliases = append(model.Aliases, aliasName)
-	if alias.ForceMapping {
-		model.ForceMappedAliases = append(model.ForceMappedAliases, aliasName)
+	if inferredChannel := inferChannel(channel, name); model.Channel == "" || model.Channel == "other" {
+		if model.Channel != inferredChannel {
+			model.Channel = inferredChannel
+			changed = true
+		}
 	}
-	return true
+	return changed
 }
 
 func applyLegacyConfig(cfg *config.Config, doc *File) {

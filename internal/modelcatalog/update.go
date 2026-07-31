@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"time"
 )
 
 type FieldChange struct {
@@ -56,13 +55,26 @@ func PreviewDefaultUpdate(configPath string) (DefaultUpdatePreview, error) {
 }
 
 func ApplyDefaultUpdate(configPath string, decisions []ApplyDecision) (ApplyResult, error) {
-	current, err := LoadOrInit(configPath, nil)
+	applied := 0
+	_, backupPath, err := Update(
+		configPath,
+		nil,
+		UpdateOptions{Backup: true},
+		func(doc *File) error {
+			var errApply error
+			applied, errApply = ApplyDefaultDecisions(doc, decisions)
+			return errApply
+		},
+	)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	backupPath, err := Backup(configPath)
-	if err != nil {
-		return ApplyResult{}, err
+	return ApplyResult{Status: "ok", BackupPath: backupPath, Applied: applied}, nil
+}
+
+func ApplyDefaultDecisions(current *File, decisions []ApplyDecision) (int, error) {
+	if current == nil {
+		return 0, fmt.Errorf("model catalog is nil")
 	}
 	defaults := DefaultFile()
 	applied := 0
@@ -97,31 +109,12 @@ func ApplyDefaultUpdate(configPath string, decisions []ApplyDecision) (ApplyResu
 		case "keep_current", "skip", "":
 			continue
 		default:
-			return ApplyResult{}, fmt.Errorf("unknown default update action %q", decision.Action)
+			return 0, fmt.Errorf("unknown default update action %q", decision.Action)
 		}
 	}
 	current.DefaultsVersion = defaults.DefaultsVersion
 	current.Sanitize()
-	if err := Save(configPath, current); err != nil {
-		return ApplyResult{}, err
-	}
-	return ApplyResult{Status: "ok", BackupPath: backupPath, Applied: applied}, nil
-}
-
-func Backup(configPath string) (string, error) {
-	filePath := Path(configPath)
-	if filePath == "" {
-		return "", fmt.Errorf("config file path not set")
-	}
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return "", err
-	}
-	backupPath := fmt.Sprintf("%s.%s.bak", filePath, time.Now().Format("20060102-150405"))
-	if err := os.WriteFile(backupPath, data, 0o600); err != nil {
-		return "", err
-	}
-	return backupPath, nil
+	return applied, nil
 }
 
 func diffDefaults(current, defaults File) []DefaultUpdateChange {

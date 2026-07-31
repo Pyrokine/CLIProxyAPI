@@ -67,6 +67,9 @@ type ModelInfo struct {
 	// This is optional and currently used for Gemini thinking budget normalization.
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
 
+	// Config holds model-specific runtime overrides loaded from models.json.
+	Config *ModelConfig `json:"config,omitempty"`
+
 	// UserDefined indicates this model was defined through config file's models[]
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
 	// UserDefined models have thinking configuration passed through without validation.
@@ -87,6 +90,13 @@ type ThinkingSupport struct {
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
 	Levels []string `json:"levels,omitempty"`
+}
+
+// ModelConfig holds optional runtime overrides for a model definition.
+type ModelConfig struct {
+	// OverrideHeader forces upstream request headers when non-empty.
+	// Keys are header names; values replace any existing header.
+	OverrideHeader map[string]string `json:"override_header,omitempty"`
 }
 
 // modelRegistration tracks a model's availability
@@ -167,6 +177,66 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 		return cloneModelInfo(info)
 	}
 	return LookupStaticModelInfo(modelID)
+}
+
+// ModelOverrideHeaders returns models.json config.override_header for the model, if any.
+func ModelOverrideHeaders(modelID string, _ ...string) map[string]string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil
+	}
+	if headers := modelOverrideHeadersFromInfo(LookupStaticModelInfo(modelID)); len(headers) > 0 {
+		return headers
+	}
+	return modelOverrideHeadersFromEmbeddedCatalog(modelID)
+}
+
+func modelOverrideHeadersFromEmbeddedCatalog(modelID string) map[string]string {
+	catalog := embeddedModelsCatalog()
+	if catalog == nil {
+		return nil
+	}
+	sections := [][]*ModelInfo{
+		catalog.Claude,
+		catalog.Gemini,
+		catalog.Vertex,
+		catalog.GeminiCLI,
+		catalog.AIStudio,
+		catalog.CodexFree,
+		catalog.CodexTeam,
+		catalog.CodexPlus,
+		catalog.CodexPro,
+		catalog.Qwen,
+		catalog.IFlow,
+		catalog.Kimi,
+		catalog.XAI,
+	}
+	for _, models := range sections {
+		for _, model := range models {
+			if model != nil && model.ID == modelID {
+				return modelOverrideHeadersFromInfo(model)
+			}
+		}
+	}
+	return nil
+}
+
+func modelOverrideHeadersFromInfo(info *ModelInfo) map[string]string {
+	if info == nil || info.Config == nil || len(info.Config.OverrideHeader) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(info.Config.OverrideHeader))
+	for key, value := range info.Config.OverrideHeader {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // SetHook sets an optional hook for observing model registration changes.
@@ -525,6 +595,16 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 			copyThinking.Levels = append([]string(nil), model.Thinking.Levels...)
 		}
 		copyModel.Thinking = &copyThinking
+	}
+	if model.Config != nil {
+		copyConfig := *model.Config
+		if model.Config.OverrideHeader != nil {
+			copyConfig.OverrideHeader = make(map[string]string, len(model.Config.OverrideHeader))
+			for key, value := range model.Config.OverrideHeader {
+				copyConfig.OverrideHeader[key] = value
+			}
+		}
+		copyModel.Config = &copyConfig
 	}
 	return &copyModel
 }
@@ -1018,6 +1098,33 @@ func (r *ModelRegistry) GetModelProviders(modelID string) []string {
 		result = append(result, item.name)
 	}
 	return result
+}
+
+// ResolveModelIDCaseInsensitive returns the registered model ID with its original casing.
+// An empty result means no model matched or multiple IDs differ only by case.
+func (r *ModelRegistry) ResolveModelIDCaseInsensitive(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return ""
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+	if _, exists := r.models[modelID]; exists {
+		return modelID
+	}
+
+	matched := ""
+	for registeredID := range r.models {
+		if !strings.EqualFold(registeredID, modelID) {
+			continue
+		}
+		if matched != "" {
+			return ""
+		}
+		matched = registeredID
+	}
+	return matched
 }
 
 // getModelInfo returns ModelInfo, prioritizing provider-specific definition if available.

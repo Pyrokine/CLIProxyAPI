@@ -82,6 +82,35 @@ func TestGetAvailableModelsByProviderReturnsCorrectData(t *testing.T) {
 	}
 }
 
+func TestResolveModelIDCaseInsensitive(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient(
+		"client-1", "codex", []*ModelInfo{
+			{ID: "TeamA/gpt-image-2"},
+		},
+	)
+
+	if got := r.ResolveModelIDCaseInsensitive("teama/GPT-IMAGE-2"); got != "TeamA/gpt-image-2" {
+		t.Fatalf("ResolveModelIDCaseInsensitive() = %q, want %q", got, "TeamA/gpt-image-2")
+	}
+	if got := r.ResolveModelIDCaseInsensitive("TeamA/gpt-image-2"); got != "TeamA/gpt-image-2" {
+		t.Fatalf("exact ResolveModelIDCaseInsensitive() = %q, want exact ID", got)
+	}
+	if got := r.ResolveModelIDCaseInsensitive("TeamB/gpt-image-2"); got != "" {
+		t.Fatalf("unknown ResolveModelIDCaseInsensitive() = %q, want empty", got)
+	}
+}
+
+func TestResolveModelIDCaseInsensitiveRejectsAmbiguousIDs(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "codex", []*ModelInfo{{ID: "TeamA/gpt-image-2"}})
+	r.RegisterClient("client-2", "codex", []*ModelInfo{{ID: "teama/GPT-IMAGE-2"}})
+
+	if got := r.ResolveModelIDCaseInsensitive("TEAMA/gpt-image-2"); got != "" {
+		t.Fatalf("ambiguous ResolveModelIDCaseInsensitive() = %q, want empty", got)
+	}
+}
+
 func TestGetAvailableModelsReturnsSupportedParameters(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient(

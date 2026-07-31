@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/gin-gonic/gin"
 )
 
@@ -16,7 +17,7 @@ func TestPutModelPricesReplacesEditedAndDeletedEntries(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	h := &Handler{configFilePath: filepath.Join(dir, "config.yaml")}
+	h := &Handler{cfg: &config.Config{}, configFilePath: filepath.Join(dir, "config.yaml")}
 
 	putModelPrices(
 		t, h, map[string]modelPriceEntry{
@@ -53,7 +54,7 @@ func TestGetModelPricesReturnsErrorWhenCatalogInvalid(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "models.json"), []byte(`{invalid`), 0o600); err != nil {
 		t.Fatalf("write invalid models.json: %v", err)
 	}
-	h := &Handler{configFilePath: configPath}
+	h := &Handler{cfg: &config.Config{}, configFilePath: configPath}
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/model-prices", nil)

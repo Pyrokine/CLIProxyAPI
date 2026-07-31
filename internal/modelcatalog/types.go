@@ -9,8 +9,8 @@ import (
 
 const (
 	FileName        = "models.json"
-	SchemaVersion   = 1
-	DefaultsVersion = "2026-06-23"
+	SchemaVersion   = 2
+	DefaultsVersion = "2026-07-31"
 )
 
 type Price struct {
@@ -33,17 +33,18 @@ type Model struct {
 }
 
 type File struct {
-	SchemaVersion        int      `json:"schema_version"`
-	DefaultsVersion      string   `json:"defaults_version"`
-	RemovedDefaultModels []string `json:"removed_default_models,omitempty"`
-	Models               []Model  `json:"models"`
+	SchemaVersion        int                                 `json:"schema_version"`
+	DefaultsVersion      string                              `json:"defaults_version"`
+	RemovedDefaultModels []string                            `json:"removed_default_models,omitempty"`
+	OAuthModelAlias      map[string][]config.OAuthModelAlias `json:"oauth_model_alias,omitempty"`
+	Models               []Model                             `json:"models"`
 }
 
 func (f *File) Sanitize() {
 	if f == nil {
 		return
 	}
-	if f.SchemaVersion == 0 {
+	if f.SchemaVersion < SchemaVersion {
 		f.SchemaVersion = SchemaVersion
 	}
 	if strings.TrimSpace(f.DefaultsVersion) == "" {
@@ -76,7 +77,9 @@ func (f *File) Sanitize() {
 		},
 	)
 	f.RemovedDefaultModels = removed
+	f.OAuthModelAlias = config.SanitizeOAuthModelAliasMap(f.OAuthModelAlias)
 	f.Models = models
+	f.materializeModelAliases()
 }
 
 func (m *Model) sanitize() {
@@ -156,6 +159,22 @@ func (f *File) RemoveModel(name string, defaults File) bool {
 		models = append(models, model)
 	}
 	f.Models = models
+	for channel, aliases := range f.OAuthModelAlias {
+		kept := aliases[:0]
+		for _, alias := range aliases {
+			if modelKey(alias.Name) != key {
+				kept = append(kept, alias)
+			}
+		}
+		if len(kept) == 0 {
+			delete(f.OAuthModelAlias, channel)
+			continue
+		}
+		f.OAuthModelAlias[channel] = kept
+	}
+	if len(f.OAuthModelAlias) == 0 {
+		f.OAuthModelAlias = nil
+	}
 	if _, ok := defaults.Find(name); ok {
 		f.RemovedDefaultModels = append(f.RemovedDefaultModels, normalizeModelName(name))
 	}
@@ -181,7 +200,7 @@ func (f *File) ToModelCatalogModels() []config.ModelCatalogModel {
 				Channel:     strings.ToLower(strings.TrimSpace(model.Channel)),
 				Group:       strings.TrimSpace(model.Group),
 				DisplayName: strings.TrimSpace(model.DisplayName),
-				Aliases:     append([]string(nil), model.Aliases...),
+				Aliases:     uniqueStrings(model.Aliases),
 				Enabled:     &enabled,
 			},
 		)
@@ -193,7 +212,10 @@ func (f *File) ToOAuthModelAlias() map[string][]config.OAuthModelAlias {
 	if f == nil {
 		return nil
 	}
-	out := make(map[string][]config.OAuthModelAlias)
+	out := make(map[string][]config.OAuthModelAlias, len(f.OAuthModelAlias))
+	for channel, aliases := range f.OAuthModelAlias {
+		out[channel] = append([]config.OAuthModelAlias(nil), aliases...)
+	}
 	for _, model := range f.Models {
 		channel := strings.ToLower(strings.TrimSpace(model.Channel))
 		name := normalizeModelName(model.Name)
@@ -227,13 +249,34 @@ func (f *File) ToOAuthModelAlias() map[string][]config.OAuthModelAlias {
 	return cfg.OAuthModelAlias
 }
 
+func (f *File) materializeModelAliases() {
+	if f == nil {
+		return
+	}
+	hasModelAliases := false
+	for i := range f.Models {
+		if len(f.Models[i].Aliases) > 0 {
+			hasModelAliases = true
+			break
+		}
+	}
+	if !hasModelAliases {
+		return
+	}
+	f.OAuthModelAlias = f.ToOAuthModelAlias()
+	for i := range f.Models {
+		f.Models[i].Aliases = nil
+		f.Models[i].ForceMappedAliases = nil
+	}
+}
+
 func oauthAliasChannelsForModel(provider, channel string) []string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	channel = strings.ToLower(strings.TrimSpace(channel))
-	switch channel {
-	case "gemini":
+	if channel == "gemini" || (provider == "gemini" && channel == "google") {
 		return []string{"gemini-cli", "vertex", "aistudio", "antigravity"}
-	case "gemini-cli", "vertex", "aistudio", "antigravity", "claude", "codex", "qwen", "iflow", "kimi":
+	}
+	if channel != "" && channel != "other" {
 		return []string{channel}
 	}
 	if provider == "gemini" {
