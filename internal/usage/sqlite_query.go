@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -243,44 +244,107 @@ func resolveCredentialFilter(ctx context.Context, db dbQueryer, raw string) (res
 		return resolvedCredentialFilter{}, nil
 	}
 	rf := resolvedCredentialFilter{active: true}
-	seen := make(map[string]struct{})
-	for _, part := range strings.Split(raw, ",") {
-		token := strings.TrimSpace(part)
+	seenTokens := make(map[string]struct{})
+	seenPairs := make(map[credentialPair]struct{})
+	resolveToken := func(token string) (bool, error) {
+		token = strings.TrimSpace(token)
 		if token == "" {
-			continue
+			return false, nil
 		}
-		if _, dup := seen[token]; dup {
-			continue
+		if _, duplicate := seenTokens[token]; duplicate {
+			return false, nil
 		}
-		seen[token] = struct{}{}
+		seenTokens[token] = struct{}{}
 
-		providerName, credName := splitCredentialToken(token)
-
-		var credID int64
-		err := db.QueryRowContext(ctx, "SELECT id FROM dim_credential WHERE name = ?", credName).Scan(&credID)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return resolvedCredentialFilter{}, fmt.Errorf("resolve credential %q: %w", credName, err)
-		}
-
-		pair := credentialPair{credentialID: credID}
+		providerName, credentialName := splitCredentialToken(token)
+		var providerID sql.NullInt64
 		if providerName != "" {
-			var providerID int64
-			err := db.QueryRowContext(ctx, "SELECT id FROM dim_provider WHERE name = ?", providerName).Scan(&providerID)
+			var id int64
+			err := db.QueryRowContext(ctx, "SELECT id FROM dim_provider WHERE name = ?", providerName).Scan(&id)
 			if errors.Is(err, sql.ErrNoRows) {
-				continue
+				return false, nil
 			}
 			if err != nil {
-				return resolvedCredentialFilter{}, fmt.Errorf("resolve provider %q: %w", providerName, err)
+				return false, fmt.Errorf("resolve provider %q: %w", providerName, err)
 			}
-			pair.providerID = sql.NullInt64{Int64: providerID, Valid: true}
+			providerID = sql.NullInt64{Int64: id, Valid: true}
 		}
-		rf.pairs = append(rf.pairs, pair)
-		rf.matchedAny = true
+
+		credentialIDs, err := resolveCredentialNameIDs(ctx, db, credentialName)
+		if err != nil {
+			return false, err
+		}
+		matched := false
+		for _, credentialID := range credentialIDs {
+			pair := credentialPair{credentialID: credentialID, providerID: providerID}
+			if _, duplicate := seenPairs[pair]; duplicate {
+				continue
+			}
+			seenPairs[pair] = struct{}{}
+			rf.pairs = append(rf.pairs, pair)
+			matched = true
+		}
+		if matched {
+			rf.matchedAny = true
+		}
+		return matched, nil
+	}
+
+	for _, part := range strings.Split(raw, ",") {
+		if _, err := resolveToken(part); err != nil {
+			return resolvedCredentialFilter{}, err
+		}
 	}
 	return rf, nil
+}
+
+func resolveCredentialNameIDs(ctx context.Context, db dbQueryer, name string) ([]int64, error) {
+	name, filterKind, filterTyped := DecodeCredentialFilter(name)
+	rows, err := db.QueryContext(ctx, "SELECT id, name FROM dim_credential ORDER BY id")
+	if err != nil {
+		return nil, fmt.Errorf("resolve credential %q: %w", name, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	exactIDs := []int64{}
+	taggedIDs := []int64{}
+	legacyDisplayIDs := []int64{}
+	maskedName := util.HideAPIKey(name)
+	for rows.Next() {
+		var candidateID int64
+		var candidateName string
+		if err = rows.Scan(&candidateID, &candidateName); err != nil {
+			return nil, fmt.Errorf("resolve credential scan: %w", err)
+		}
+		trimmedCandidate := strings.TrimSpace(candidateName)
+		if trimmedCandidate == name && (!filterTyped || filterKind == coreusage.CredentialSourceKindAPIKey) {
+			exactIDs = append(exactIDs, candidateID)
+			continue
+		}
+		display, kind, tagged := DecodeCredentialSource(trimmedCandidate)
+		if tagged {
+			if filterTyped && kind != filterKind {
+				continue
+			}
+			if display == name || (kind == coreusage.CredentialSourceKindAPIKey && display == maskedName) {
+				taggedIDs = append(taggedIDs, candidateID)
+			}
+			continue
+		}
+		if filterTyped && filterKind != coreusage.CredentialSourceKindAPIKey {
+			continue
+		}
+		if util.HideAPIKey(display) == name {
+			legacyDisplayIDs = append(legacyDisplayIDs, candidateID)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("resolve credential rows: %w", err)
+	}
+	if len(exactIDs) > 0 {
+		return append(exactIDs, taggedIDs...), nil
+	}
+	return append(taggedIDs, legacyDisplayIDs...), nil
 }
 
 // splitCredentialToken pulls the optional "provider:" prefix off a credential
@@ -292,6 +356,9 @@ func resolveCredentialFilter(ctx context.Context, db dbQueryer, raw string) (res
 // at one character so accidental "::source" or "provider:" inputs degrade
 // gracefully to "match nothing".
 func splitCredentialToken(token string) (provider, credential string) {
+	if strings.HasPrefix(token, credentialFilterPrefix) {
+		return "", token
+	}
 	idx := strings.Index(token, ":")
 	if idx <= 0 || idx >= len(token)-1 {
 		return "", token

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	_ "modernc.org/sqlite"
 )
 
@@ -1116,6 +1117,78 @@ func TestQueryByCredential_DistinctProviders(t *testing.T) {
 	}
 	if _, ok := qrClaude.ByCredential[wantCodex]; ok {
 		t.Fatalf("codex bucket leaked into claude-only filter")
+	}
+}
+
+func TestQueryByCredentialMatchesRawMaskedAndTaggedSources(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC)
+	rawA := "custom-provider-first-wxyz"
+	rawB := "custom-provider-other-wxyz"
+	masked := util.HideAPIKey(rawA)
+	if masked != util.HideAPIKey(rawB) {
+		t.Fatalf("credential fixtures do not collide: %q/%q", rawA, rawB)
+	}
+
+	sources := []string{
+		rawA,
+		rawB,
+		TagAPIKeyCredentialSource(masked, true),
+		"alpha",
+		"beta",
+		"alpha,beta",
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for _, source := range sources {
+		detail := FlatDetail{
+			Timestamp: base,
+			Model:     "credential-filter-model",
+			Source:    source,
+			Provider:  "claude",
+			Tokens:    tokenStats{TotalTokens: 1},
+		}
+		if _, err = persistEvent(ctx, tx, store, &detail, nil); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("persist %q: %v", source, err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	requestCount := func(filter string) int64 {
+		t.Helper()
+		result, errQuery := store.Query(
+			ctx,
+			base.Add(-time.Hour),
+			base.Add(time.Hour),
+			EventFilters{Source: filter},
+			"hourly",
+			true,
+		)
+		if errQuery != nil {
+			t.Fatalf("Query(%q): %v", filter, errQuery)
+		}
+		return result.Totals.Requests
+	}
+
+	for _, filter := range []string{masked, "claude:" + masked} {
+		if got := requestCount(filter); got != 3 {
+			t.Fatalf("Query(%q) requests = %d, want 3", filter, got)
+		}
+	}
+	if got := requestCount(rawA); got != 2 {
+		t.Fatalf("raw credential requests = %d, want historical and tagged rows", got)
+	}
+	if got := requestCount("alpha,beta"); got != 2 {
+		t.Fatalf("comma-separated credential requests = %d, want alpha and beta", got)
+	}
+	if got := requestCount("claude:not-present"); got != 0 {
+		t.Fatalf("unmatched credential requests = %d, want 0", got)
 	}
 }
 

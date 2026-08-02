@@ -12,6 +12,15 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// CredentialSourceKind identifies whether Record.Source is a secret-derived
+// value or a non-secret account identity.
+type CredentialSourceKind string
+
+const (
+	CredentialSourceKindAPIKey   CredentialSourceKind = "api_key"
+	CredentialSourceKindIdentity CredentialSourceKind = "identity"
+)
+
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	Provider            string
@@ -23,6 +32,8 @@ type Record struct {
 	AuthIndex           string
 	AuthType            string
 	Source              string
+	SourceKind          CredentialSourceKind
+	SourceRedacted      bool
 	ReasoningEffort     string
 	ServiceTier         string
 	RequestServiceTier  string

@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 // TestParseAny_DetectsAllFormats feeds a sample of every supported format
@@ -222,6 +225,47 @@ func TestImportBytesRollsBackWholePayloadOnPersistError(t *testing.T) {
 // TestImportBytes_Idempotent verifies that importing the same payload twice
 // adds rows on the first pass and skips them all on the second — the core
 // dedup guarantee that lets users freely re-import their backups.
+func TestImportBytesMasksUntaggedCredentialSources(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	raw := "custom-provider-secret-value"
+	lookalike := "\x1fcpa:usage-source:v1:identity:sk-imported-secret-value"
+	payload, err := json.Marshal([]FlatDetail{
+		{
+			Timestamp: time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC),
+			Model:     "import-model",
+			Source:    raw,
+			Tokens:    tokenStats{TotalTokens: 1},
+		},
+		{
+			Timestamp: time.Date(2026, 8, 2, 10, 1, 0, 0, time.UTC),
+			Model:     "import-model",
+			Source:    lookalike,
+			Tokens:    tokenStats{TotalTokens: 1},
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if _, err = ImportBytes(ctx, store, nil, payload); err != nil {
+		t.Fatalf("ImportBytes: %v", err)
+	}
+
+	events, err := store.QueryBackupEvents(ctx, time.Time{}, time.Time{}, EventFilters{})
+	if err != nil {
+		t.Fatalf("QueryBackupEvents: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %d, want 2", len(events))
+	}
+	for i, want := range []string{util.HideAPIKey(raw), util.HideAPIKey(lookalike)} {
+		display, kind, tagged := DecodeCredentialSource(events[i].Source)
+		if display != want || kind != coreusage.CredentialSourceKindAPIKey || !tagged {
+			t.Fatalf("event[%d] source = %q/%q/%v, want %q/api_key/true", i, display, kind, tagged, want)
+		}
+	}
+}
+
 func TestImportBytes_Idempotent(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()

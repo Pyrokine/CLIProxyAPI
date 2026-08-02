@@ -92,7 +92,11 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	if events == nil {
 		events = []usage.FlatDetail{}
 	}
-	maskedEvents := maskUsageEventAPIKeys(events, h.apiKeyAliasesSnapshot())
+	maskedEvents := maskUsageEvents(
+		events,
+		h.apiKeyAliasesSnapshot(),
+		newUsageCredentialMasker(h.configSnapshot()),
+	)
 
 	totalPages := (total + pageSize - 1) / pageSize
 
@@ -107,10 +111,15 @@ func (h *Handler) GetUsageEvents(c *gin.Context) {
 	)
 }
 
-func maskUsageEventAPIKeys(events []usage.FlatDetail, aliases map[string]string) []usageEventResponse {
+func maskUsageEvents(
+	events []usage.FlatDetail,
+	aliases map[string]string,
+	credentialMasker usageCredentialMasker,
+) []usageEventResponse {
 	out := make([]usageEventResponse, len(events))
 	for i := range events {
 		out[i].FlatDetail = events[i]
+		out[i].Source = credentialMasker.Mask(out[i].Source)
 		if out[i].APIKey == "" {
 			continue
 		}

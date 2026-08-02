@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -29,6 +31,109 @@ func TestNormaliseTokenStatsRejectsNegativeAndOverflowingValues(t *testing.T) {
 	explicit := tokenStats{InputTokens: math.MaxInt64, OutputTokens: 1, TotalTokens: 7}
 	if got := normaliseTokenStats(explicit); got != explicit {
 		t.Fatalf("explicit total changed: got %+v, want %+v", got, explicit)
+	}
+}
+
+func TestLoggerPluginRedactsAPIKeySourceForLegacyStatistics(t *testing.T) {
+	raw := "abcd...wxyz"
+	stats := newRequestStatistics()
+	plugin := &loggerPlugin{stats: stats, enabled: func() bool { return true }}
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:   "client-key",
+		Model:    "model",
+		Source:   raw,
+		AuthType: "api_key",
+	})
+
+	detail := stats.Snapshot().APIs["client-key"].Models["model"].Details[0]
+	display, kind, tagged := DecodeCredentialSource(detail.Source)
+	if got, want := display, util.HideAPIKey(raw); got != want || kind != coreusage.CredentialSourceKindAPIKey || !tagged {
+		t.Fatalf("legacy source = %q/%v/%v, want %q/true/true", got, kind, tagged, want)
+	}
+}
+
+func TestLoggerPluginPreservesRedactedAPIKeySource(t *testing.T) {
+	raw := "sk-provider-secret-wxyz"
+	masked := util.HideAPIKey(raw)
+	stats := newRequestStatistics()
+	plugin := &loggerPlugin{stats: stats, enabled: func() bool { return true }}
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:         "client-key",
+		Model:          "model",
+		Source:         masked,
+		SourceRedacted: true,
+		AuthType:       "apikey",
+	})
+
+	detail := stats.Snapshot().APIs["client-key"].Models["model"].Details[0]
+	display, kind, tagged := DecodeCredentialSource(detail.Source)
+	if display != masked || kind != coreusage.CredentialSourceKindAPIKey || !tagged {
+		t.Fatalf("redacted source = %q/%q/%v, want %q/api_key/true", display, kind, tagged, masked)
+	}
+}
+
+func TestLoggerPluginPreservesTypedIdentityWithAPIKeyAuth(t *testing.T) {
+	stats := newRequestStatistics()
+	plugin := &loggerPlugin{stats: stats, enabled: func() bool { return true }}
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:     "client-key",
+		Model:      "model",
+		Source:     "project-123",
+		SourceKind: coreusage.CredentialSourceKindIdentity,
+		AuthType:   "api_key",
+	})
+
+	detail := stats.Snapshot().APIs["client-key"].Models["model"].Details[0]
+	display, kind, tagged := DecodeCredentialSource(detail.Source)
+	if display != "project-123" || kind != coreusage.CredentialSourceKindIdentity || !tagged {
+		t.Fatalf("identity source = %q/%q/%v, want project-123/identity/true", display, kind, tagged)
+	}
+}
+
+func TestLoggerPluginRedactsAPIKeySourceForSQLite(t *testing.T) {
+	raw := "sk-provider-secret-wxyz"
+	persister := NewPersister(t.TempDir(), config.UsageRetention{Days: -1})
+	persister.Start(context.Background())
+	if !persister.IsReady() {
+		t.Fatal("usage persister did not start")
+	}
+	defer persister.Stop()
+
+	plugin := &loggerPlugin{persister: persister, enabled: func() bool { return true }}
+	requestedAt := time.Now().UTC().Add(-time.Minute)
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		APIKey:      "client-key",
+		Model:       "model",
+		Source:      raw,
+		AuthType:    "apikey",
+		RequestedAt: requestedAt,
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		events, _, err := persister.QueryEvents(
+			requestedAt.Add(-time.Minute),
+			requestedAt.Add(time.Minute),
+			EventFilters{},
+			1,
+			10,
+			"timestamp",
+			true,
+		)
+		if err != nil {
+			t.Fatalf("QueryEvents: %v", err)
+		}
+		if len(events) == 1 {
+			display, kind, tagged := DecodeCredentialSource(events[0].Source)
+			if got, want := display, util.HideAPIKey(raw); got != want || kind != coreusage.CredentialSourceKindAPIKey || !tagged {
+				t.Fatalf("SQLite source = %q/%v/%v, want %q/true/true", got, kind, tagged, want)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("usage record was not persisted before deadline")
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 

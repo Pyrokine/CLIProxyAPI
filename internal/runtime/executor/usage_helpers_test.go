@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -865,62 +867,28 @@ func TestParseInteractionsStreamUsageIgnoresNonUsage(t *testing.T) {
 	}
 }
 
-func TestMaskAPIKey(t *testing.T) {
-	tests := []struct {
-		name string
-		key  string
-		want string
-	}{
-		{
-			name: "normal key with dashes",
-			key:  "sk-pyro-abc123def456",
-			want: "sk-pyro-...f456",
-		},
-		{
-			name: "short key 3 chars",
-			key:  "abc",
-			want: "***",
-		},
-		{
-			name: "empty string",
-			key:  "",
-			want: "***",
-		},
-		{
-			name: "exactly 8 chars",
-			key:  "abcdefgh",
-			want: "***",
-		},
-		{
-			name: "exactly 9 chars no dash",
-			key:  "abcdefghi",
-			want: "abcd...fghi",
-		},
-		{
-			name: "key with no dash long",
-			key:  "abcdefghij1234",
-			want: "abcd...1234",
-		},
-		{
-			name: "dash near end",
-			key:  "sk-pyro-xy-ab",
-			want: "sk-p...y-ab",
-		},
-		{
-			name: "9 chars with dash at position 2",
-			key:  "sk-abcdef",
-			want: "sk-...cdef",
-		},
+func TestResolveUsageSourceRedactsAPIKeyAccountInfo(t *testing.T) {
+	raw := "sk-pyro-abc123def456"
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": raw}}
+
+	got, kind, redacted := resolveUsageSource(auth, "")
+	if want := util.HideAPIKey(raw); got != want || kind != usage.CredentialSourceKindAPIKey || !redacted {
+		t.Fatalf("resolveUsageSource API key = %q/%q/%v, want %q/api_key/true", got, kind, redacted, want)
+	}
+}
+
+func TestResolveUsageSourcePreservesNonSecretAccountInfo(t *testing.T) {
+	oauth := &cliproxyauth.Auth{Metadata: map[string]any{"email": "user@example.com"}}
+	if got, kind, redacted := resolveUsageSource(oauth, ""); got != "user@example.com" || kind != usage.CredentialSourceKindIdentity || redacted {
+		t.Fatalf("resolveUsageSource OAuth = %q/%q/%v, want user@example.com/identity/false", got, kind, redacted)
 	}
 
-	for _, tt := range tests {
-		t.Run(
-			tt.name, func(t *testing.T) {
-				got := maskAPIKey(tt.key)
-				if got != tt.want {
-					t.Fatalf("maskAPIKey(%q) = %q, want %q", tt.key, got, tt.want)
-				}
-			},
-		)
+	vertex := &cliproxyauth.Auth{
+		Provider:   "vertex",
+		Metadata:   map[string]any{"project_id": "project-123"},
+		Attributes: map[string]string{"api_key": "vertex-secret-value"},
+	}
+	if got, kind, redacted := resolveUsageSource(vertex, ""); got != "project-123" || kind != usage.CredentialSourceKindIdentity || redacted {
+		t.Fatalf("resolveUsageSource Vertex = %q/%q/%v, want project-123/identity/false", got, kind, redacted)
 	}
 }

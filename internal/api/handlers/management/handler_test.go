@@ -3458,8 +3458,12 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 	rawA := "abcd-first-wxyz"
 	rawB := "abcd-second-wxyz"
 	masked := util.HideAPIKey(rawA)
-	if rawA == rawB || masked != util.HideAPIKey(rawB) {
-		t.Fatalf("invalid collision fixture: %q, %q", rawA, rawB)
+	credentialRawA := "sk-credential-first-wxyz"
+	credentialRawB := "sk-credential-other-wxyz"
+	credentialMasked := util.HideAPIKey(credentialRawA)
+	if rawA == rawB || masked != util.HideAPIKey(rawB) ||
+		credentialRawA == credentialRawB || credentialMasked != util.HideAPIKey(credentialRawB) {
+		t.Fatalf("invalid collision fixtures: %q/%q, %q/%q", rawA, rawB, credentialRawA, credentialRawB)
 	}
 
 	persister := usage.NewPersister(t.TempDir(), config.UsageRetention{Days: -1})
@@ -3477,6 +3481,7 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		Timestamp: bucket.Add(5 * time.Minute),
 		Model:     "collision-model",
 		APIKey:    rawA,
+		Source:    credentialRawA,
 		Provider:  "test",
 		LatencyMs: 100,
 		Completed: true,
@@ -3488,6 +3493,7 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		Timestamp: bucket.Add(10 * time.Minute),
 		Model:     "collision-model",
 		APIKey:    rawB,
+		Source:    credentialRawB,
 		Provider:  "test",
 		LatencyMs: 300,
 		Completed: true,
@@ -3500,6 +3506,7 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		Timestamp: bucket.Add(time.Hour + 5*time.Minute),
 		Model:     "collision-model",
 		APIKey:    rawA,
+		Source:    usage.TagAPIKeyCredentialSource(credentialMasked, true),
 		Provider:  "test",
 		LatencyMs: 200,
 		Completed: true,
@@ -3579,6 +3586,24 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 			stats.LatencySampleCount != 3 {
 			t.Fatalf("%s API key latency = %+v, want total/average/samples 600/200/3", label, stats)
 		}
+
+		credentialKey := "test:" + credentialMasked + " [api_key]"
+		if len(got.ByCredential) != 1 {
+			t.Fatalf("%s by_credential has %d entries, want 1: %#v", label, len(got.ByCredential), got.ByCredential)
+		}
+		credentialStats := got.ByCredential[credentialKey]
+		if credentialStats == nil {
+			t.Fatalf("%s missing masked credential %q: %#v", label, credentialKey, got.ByCredential)
+		}
+		if credentialStats.Success != 2 || credentialStats.Failure != 1 ||
+			credentialStats.Provider != "test" || credentialStats.Source != credentialMasked {
+			t.Fatalf("%s credential stats = %+v, want success/failure/provider/source 2/1/test/%s", label, credentialStats, credentialMasked)
+		}
+		credentialSeries := got.TimeSeriesByCredential[credentialKey]
+		if len(credentialSeries) != 2 || credentialSeries[0].Requests != 2 || credentialSeries[1].Requests != 1 {
+			t.Fatalf("%s credential time series = %#v, want request counts 2/1", label, credentialSeries)
+		}
+
 		series := got.TimeSeriesByAPIKey[masked]
 		if len(series) != 2 {
 			t.Fatalf("%s masked time series has %d points, want 2: %#v", label, len(series), series)
@@ -3599,16 +3624,136 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		}
 	}
 
-	if strings.Contains(responseBody, rawA) || strings.Contains(responseBody, rawB) {
-		t.Fatalf("usage summary kept raw API key: %s", responseBody)
+	assertNoRawSecrets := func(label, body string) {
+		t.Helper()
+		for _, raw := range []string{rawA, rawB, credentialRawA, credentialRawB} {
+			if strings.Contains(body, raw) {
+				t.Fatalf("%s kept raw secret %q: %s", label, raw, body)
+			}
+		}
 	}
+	assertNoRawSecrets("usage summary", responseBody)
 	assertAggregated("unfiltered", response)
 
 	filtered, filteredBody := requestSummary(basePath + "&api_key=" + masked)
-	if strings.Contains(filteredBody, rawA) || strings.Contains(filteredBody, rawB) {
-		t.Fatalf("filtered usage summary kept raw API key: %s", filteredBody)
+	assertNoRawSecrets("API-key filtered usage summary", filteredBody)
+	assertAggregated("masked API-key filter", filtered)
+
+	credentialFiltered, credentialFilteredBody := requestSummary(
+		basePath + "&credential=test:" + credentialMasked,
+	)
+	assertNoRawSecrets("credential filtered usage summary", credentialFilteredBody)
+	assertAggregated("provider-qualified masked credential filter", credentialFiltered)
+
+	rawCredentialFiltered, rawCredentialFilteredBody := requestSummary(
+		basePath + "&credential=" + credentialRawA,
+	)
+	assertNoRawSecrets("raw credential filtered usage summary", rawCredentialFilteredBody)
+	if rawCredentialFiltered.Totals.Requests != 2 {
+		t.Fatalf("raw credential filter requests = %d, want historical and tagged rows", rawCredentialFiltered.Totals.Requests)
 	}
-	assertAggregated("masked filter", filtered)
+
+	eventsRecorder := httptest.NewRecorder()
+	eventsContext, _ := gin.CreateTestContext(eventsRecorder)
+	eventsContext.Request = httptest.NewRequest(
+		http.MethodGet,
+		strings.Replace(basePath, "/usage/summary?", "/usage/events?", 1),
+		nil,
+	)
+	h.GetUsageEvents(eventsContext)
+	if eventsRecorder.Code != http.StatusOK {
+		t.Fatalf("GetUsageEvents status = %d, want %d body=%s", eventsRecorder.Code, http.StatusOK, eventsRecorder.Body.String())
+	}
+	assertNoRawSecrets("usage events", eventsRecorder.Body.String())
+
+	usageRecorder := httptest.NewRecorder()
+	usageContext, _ := gin.CreateTestContext(usageRecorder)
+	usageContext.Request = httptest.NewRequest(http.MethodGet, "/usage", nil)
+	h.GetUsageStatistics(usageContext)
+	if usageRecorder.Code != http.StatusOK {
+		t.Fatalf("GetUsageStatistics status = %d, want %d body=%s", usageRecorder.Code, http.StatusOK, usageRecorder.Body.String())
+	}
+	assertNoRawSecrets("legacy usage snapshot", usageRecorder.Body.String())
+}
+
+func TestGetUsageSummarySeparatesCredentialSourceKinds(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	persister := usage.NewPersister(t.TempDir(), config.UsageRetention{Days: -1})
+	persister.Start(context.Background())
+	if !persister.IsReady() {
+		t.Fatal("usage persister did not start")
+	}
+	defer persister.Stop()
+
+	bucket := time.Now().UTC().Add(-time.Hour).Truncate(time.Hour)
+	display := "abcd...wxyz"
+	persister.Record(usage.FlatDetail{
+		Timestamp: bucket.Add(5 * time.Minute),
+		Model:     "kind-collision-model",
+		Source:    usage.TagIdentityCredentialSource(display),
+		Provider:  "test",
+		Completed: true,
+	})
+	persister.Record(usage.FlatDetail{
+		Timestamp: bucket.Add(10 * time.Minute),
+		Model:     "kind-collision-model",
+		Source:    usage.TagAPIKeyCredentialSource(display, true),
+		Provider:  "test",
+		Completed: true,
+	})
+
+	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""), WithUsagePersister(persister))
+	basePath := fmt.Sprintf(
+		"/usage/summary?from=%s&to=%s",
+		bucket.Format(time.RFC3339),
+		bucket.Add(59*time.Minute).Format(time.RFC3339),
+	)
+	requestSummary := func(path string) summaryResponse {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet, path, nil)
+		h.GetUsageSummary(c)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("GetUsageSummary status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+		var response summaryResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode usage summary: %v body=%s", err, recorder.Body.String())
+		}
+		return response
+	}
+
+	var response summaryResponse
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		response = requestSummary(basePath)
+		if response.Totals.Requests == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("usage records were not persisted before deadline: %#v", response)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	identityKey := "test:" + display + " [identity]"
+	apiKeyKey := "test:" + display + " [api_key]"
+	for _, key := range []string{identityKey, apiKeyKey} {
+		wantKind := "api_key"
+		if key == identityKey {
+			wantKind = "identity"
+		}
+		stats := response.ByCredential[key]
+		if stats == nil || stats.Success != 1 || stats.Failure != 0 || stats.Source != display ||
+			stats.SourceKind != wantKind || stats.FilterKey == "" {
+			t.Fatalf("credential %q = %#v, want one successful %s request with a typed filter key", key, stats, wantKind)
+		}
+		filtered := requestSummary(basePath + "&credential=" + url.QueryEscape(stats.FilterKey))
+		if filtered.Totals.Requests != 1 || len(filtered.ByCredential) != 1 || filtered.ByCredential[key] == nil {
+			t.Fatalf("credential filter %q = totals %d entries %#v, want stable key with one request", stats.FilterKey, filtered.Totals.Requests, filtered.ByCredential)
+		}
+	}
 }
 
 func TestGetUsageSummaryAPIKeyFilterBoundaries(t *testing.T) {

@@ -17,9 +17,10 @@ func TestMaskUsageEventAPIKeysPreservesAliasIdentityOnMaskCollision(t *testing.T
 		t.Fatalf("test API keys do not collide")
 	}
 
-	masked := maskUsageEventAPIKeys(
+	masked := maskUsageEvents(
 		[]usage.FlatDetail{{APIKey: rawA}, {APIKey: rawB}},
 		map[string]string{rawA: "first", rawB: "second"},
+		usageCredentialMasker{},
 	)
 	if masked[0].APIKey != util.HideAPIKey(rawA) || masked[1].APIKey != util.HideAPIKey(rawB) {
 		t.Fatalf("maskUsageEventAPIKeys API keys = %#v", masked)
@@ -29,8 +30,77 @@ func TestMaskUsageEventAPIKeysPreservesAliasIdentityOnMaskCollision(t *testing.T
 	}
 }
 
+func TestUsageCredentialMaskerRedactsUntaggedHistory(t *testing.T) {
+	masker := usageCredentialMasker{}
+	for _, raw := range []string{"custom-provider-secret-value", "abcd...wxyz", "user@example.com"} {
+		if got, want := masker.Mask(raw), util.HideAPIKey(raw); got != want {
+			t.Fatalf("historical source %q = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestUsageCredentialMaskerPreservesTaggedIdentityAndAPIKey(t *testing.T) {
+	masker := usageCredentialMasker{}
+	identity := "user@example.com"
+	maskedKey := util.HideAPIKey("custom-provider-secret-value")
+	if got := masker.Mask(usage.TagIdentityCredentialSource(identity)); got != identity {
+		t.Fatalf("tagged identity = %q, want %q", got, identity)
+	}
+	if got := masker.Mask(usage.TagAPIKeyCredentialSource(maskedKey, true)); got != maskedKey {
+		t.Fatalf("tagged API key = %q, want %q", got, maskedKey)
+	}
+}
+
+func TestUsageCredentialMaskerRedactsTagLookalikeHistory(t *testing.T) {
+	masker := usageCredentialMasker{}
+	for _, raw := range []string{
+		"__cpa_api_key__:custom-provider-secret-value",
+		"__cpa_identity__:user@example.com",
+		"cpa:usage-source:v1:identity:user@example.com",
+	} {
+		if got, want := masker.Mask(raw), util.HideAPIKey(raw); got != want {
+			t.Fatalf("tag lookalike %q = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestMaskUsageEventsRedactsCredentialSource(t *testing.T) {
+	raw := "sk-source-secret-wxyz"
+	masked := maskUsageEvents(
+		[]usage.FlatDetail{{Source: raw}},
+		nil,
+		usageCredentialMasker{},
+	)
+	if got, want := masked[0].Source, util.HideAPIKey(raw); got != want {
+		t.Fatalf("maskUsageEvents source = %q, want %q", got, want)
+	}
+}
+
+func TestMaskUsageSourceFieldsUsesSourceTags(t *testing.T) {
+	identity := "user@example.com"
+	raw := "sk-source-secret-wxyz"
+	payload := map[string]any{
+		"details": []any{
+			map[string]any{"source": usage.TagIdentityCredentialSource(identity)},
+			map[string]any{"source": raw},
+		},
+	}
+	maskUsageSourceFields(payload, usageCredentialMasker{})
+	details := payload["details"].([]any)
+	if got := details[0].(map[string]any)["source"]; got != identity {
+		t.Fatalf("tagged identity source = %q, want %q", got, identity)
+	}
+	if got, want := details[1].(map[string]any)["source"], util.HideAPIKey(raw); got != want {
+		t.Fatalf("historical API-key source = %q, want %q", got, want)
+	}
+}
+
 func TestMaskUsageEventAPIKeysSerializesExplicitEmptyAlias(t *testing.T) {
-	masked := maskUsageEventAPIKeys([]usage.FlatDetail{{APIKey: "abcd-other-wxyz"}}, nil)
+	masked := maskUsageEvents(
+		[]usage.FlatDetail{{APIKey: "abcd-other-wxyz"}},
+		nil,
+		usageCredentialMasker{},
+	)
 	encoded, err := json.Marshal(masked[0])
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)

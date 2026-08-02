@@ -75,6 +75,12 @@ func NewLoggerPlugin(
 	return &loggerPlugin{stats: stats, persister: persister, enabled: enabled}
 }
 
+func isAPIKeyUsageAuthType(authType string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(authType))
+	normalized = strings.NewReplacer("_", "", "-", "").Replace(normalized)
+	return normalized == "apikey"
+}
+
 func latencyMilliseconds(latency time.Duration) int64 {
 	if latency <= 0 {
 		return 0
@@ -130,7 +136,22 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 		failed = !resolveSuccess(ctx)
 	}
 
-	source := record.Source
+	source := strings.TrimSpace(record.Source)
+	if source != "" {
+		switch record.SourceKind {
+		case coreusage.CredentialSourceKindAPIKey:
+			source = TagAPIKeyCredentialSource(source, record.SourceRedacted)
+		case coreusage.CredentialSourceKindIdentity:
+			source = TagIdentityCredentialSource(source)
+		default:
+			if record.SourceRedacted || isAPIKeyUsageAuthType(record.AuthType) {
+				source = TagAPIKeyCredentialSource(source, record.SourceRedacted)
+			} else {
+				source = TagIdentityCredentialSource(source)
+			}
+		}
+	}
+	record.Source = source
 	authIndex := record.AuthIndex
 	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
 	if reasoningEffort == "" {

@@ -47,16 +47,16 @@ type summaryModelStats struct {
 }
 
 // summaryCredentialStats holds per-credential aggregation.
-// Provider/Source are surfaced so the frontend can render the
-// "[Claude] alias" tags in dropdowns and stat cards without re-parsing
-// the map key — v2 by_credential keys are "provider:source" tuples for
-// rows that carry a provider, but legacy rows (provider blank) keep the
-// bare source as their key, so the components must travel separately.
+// Provider/Source are surfaced so the frontend can render dropdowns and
+// stat cards without parsing the map key. FilterKey is a stable, type-aware
+// query value; map keys add a readable source-kind suffix for chart labels.
 type summaryCredentialStats struct {
-	Success  int64  `json:"success"`
-	Failure  int64  `json:"failure"`
-	Provider string `json:"provider,omitempty"`
-	Source   string `json:"source,omitempty"`
+	Success    int64  `json:"success"`
+	Failure    int64  `json:"failure"`
+	Provider   string `json:"provider,omitempty"`
+	Source     string `json:"source,omitempty"`
+	SourceKind string `json:"source_kind,omitempty"`
+	FilterKey  string `json:"filter_key,omitempty"`
 }
 
 type summaryProviderStats struct {
@@ -88,6 +88,15 @@ type summaryAPIKeyStats struct {
 	AverageLatencyMs   *float64      `json:"average_latency_ms,omitempty"`
 	TotalLatencyMs     *int64        `json:"total_latency_ms,omitempty"`
 	LatencySampleCount int64         `json:"latency_sample_count,omitempty"`
+}
+
+type summaryCredentialAccumulator struct {
+	Success    int64
+	Failure    int64
+	Provider   string
+	Source     string
+	SourceKind string
+	FilterKey  string
 }
 
 type summaryAPIKeyAccumulator struct {
@@ -174,7 +183,13 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 		return
 	}
 
-	resp := buildSummaryResponse(from, to, qr, h.usagePersister.HasPricing())
+	resp := buildSummaryResponse(
+		from,
+		to,
+		qr,
+		h.usagePersister.HasPricing(),
+		newUsageCredentialMasker(h.configSnapshot()),
+	)
 
 	log.Debugf(
 		"usage: GetUsageSummary took %v (from=%s, to=%s)",
@@ -199,7 +214,13 @@ func emptySummaryResponse(from, to time.Time) summaryResponse {
 	}
 }
 
-func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing bool) summaryResponse {
+func buildSummaryResponse(
+	from,
+	to time.Time,
+	qr usage.QueryResult,
+	hasPricing bool,
+	credentialMasker usageCredentialMasker,
+) summaryResponse {
 	totalAverageLatency, totalLatency, totalLatencySamples := latencyResponseFields(
 		qr.Totals.Latency.TotalMs,
 		qr.Totals.Latency.SampleCount,
@@ -257,13 +278,35 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 		}
 	}
 
+	credentialDisplayKeys := make(map[string]string, len(qr.ByCredential))
+	credentialAccumulators := make(
+		map[string]*summaryCredentialAccumulator,
+		len(qr.ByCredential),
+	)
 	for cred, cs := range qr.ByCredential {
-		resp.ByCredential[cred] = &summaryCredentialStats{
-			Success:  cs.Success,
-			Failure:  cs.Failure,
-			Provider: cs.Provider,
-			Source:   cs.Source,
+		displaySource, kind := credentialMasker.Describe(cs.Source)
+		displayKey := summaryCredentialMapKey(
+			cs.Provider,
+			usage.DisambiguateCredentialSource(displaySource, kind),
+		)
+		filterKey := summaryCredentialMapKey(
+			cs.Provider,
+			usage.EncodeCredentialFilter(displaySource, kind),
+		)
+		credentialDisplayKeys[cred] = displayKey
+		accumulator := credentialAccumulators[displayKey]
+		if accumulator == nil {
+			accumulator = &summaryCredentialAccumulator{
+				Provider:   cs.Provider,
+				Source:     displaySource,
+				SourceKind: string(kind),
+				FilterKey:  filterKey,
+			}
+			credentialAccumulators[displayKey] = accumulator
 		}
+		accumulator.Success += cs.Success
+		accumulator.Failure += cs.Failure
+
 		provider := strings.ToLower(strings.TrimSpace(cs.Provider))
 		if provider == "" {
 			provider = "unknown"
@@ -278,6 +321,16 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 		providerStats.Requests += cs.Success + cs.Failure
 		if providerStats.Requests > 0 {
 			providerStats.ErrorRate = float64(providerStats.Failure) / float64(providerStats.Requests)
+		}
+	}
+	for key, accumulator := range credentialAccumulators {
+		resp.ByCredential[key] = &summaryCredentialStats{
+			Success:    accumulator.Success,
+			Failure:    accumulator.Failure,
+			Provider:   accumulator.Provider,
+			Source:     accumulator.Source,
+			SourceKind: accumulator.SourceKind,
+			FilterKey:  accumulator.FilterKey,
 		}
 	}
 
@@ -359,26 +412,58 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 		resp.TimeSeriesByModel[model] = converted
 	}
 
+	credentialTimeSeriesAccumulators := make(
+		map[string]map[string]*summaryTimePointAccumulator,
+		len(qr.TimeSeriesByCredential),
+	)
 	for cred, points := range qr.TimeSeriesByCredential {
-		converted := make([]summaryTimePoint, len(points))
-		for i, tp := range points {
-			converted[i] = summaryTimePoint{
-				Time:     tp.Time,
-				Requests: tp.Requests,
-				Success:  tp.Success,
-				Failure:  tp.Failure,
-				Tokens: summaryTokens{
-					Input:     tp.Tokens.InputTokens,
-					Output:    tp.Tokens.OutputTokens,
-					Cached:    tp.Tokens.CachedTokens,
-					Reasoning: tp.Tokens.ReasoningTokens,
-					Total:     tp.Tokens.TotalTokens,
-				},
-				Cost:    roundCost(tp.Cost),
-				HasCost: tp.Cost > 0 || (hasPricing && tp.Requests > 0),
-			}
+		displayKey := credentialDisplayKeys[cred]
+		if displayKey == "" {
+			displayKey = maskSummaryCredentialMapKey(cred, credentialMasker)
 		}
-		resp.TimeSeriesByCredential[cred] = converted
+		byTime := credentialTimeSeriesAccumulators[displayKey]
+		if byTime == nil {
+			byTime = make(map[string]*summaryTimePointAccumulator, len(points))
+			credentialTimeSeriesAccumulators[displayKey] = byTime
+		}
+		for _, tp := range points {
+			accumulator := byTime[tp.Time]
+			if accumulator == nil {
+				accumulator = &summaryTimePointAccumulator{}
+				byTime[tp.Time] = accumulator
+			}
+			accumulator.Requests += tp.Requests
+			accumulator.Success += tp.Success
+			accumulator.Failure += tp.Failure
+			accumulator.Tokens.Input += tp.Tokens.InputTokens
+			accumulator.Tokens.Output += tp.Tokens.OutputTokens
+			accumulator.Tokens.Cached += tp.Tokens.CachedTokens
+			accumulator.Tokens.Reasoning += tp.Tokens.ReasoningTokens
+			accumulator.Tokens.Total += tp.Tokens.TotalTokens
+			accumulator.Cost += tp.Cost
+		}
+	}
+	for key, byTime := range credentialTimeSeriesAccumulators {
+		times := make([]string, 0, len(byTime))
+		for pointTime := range byTime {
+			times = append(times, pointTime)
+		}
+		sort.Strings(times)
+		converted := make([]summaryTimePoint, 0, len(times))
+		for _, pointTime := range times {
+			accumulator := byTime[pointTime]
+			converted = append(converted, summaryTimePoint{
+				Time:     pointTime,
+				Requests: accumulator.Requests,
+				Success:  accumulator.Success,
+				Failure:  accumulator.Failure,
+				Tokens:   accumulator.Tokens,
+				Cost:     roundCost(accumulator.Cost),
+				HasCost: accumulator.Cost > 0 ||
+					(hasPricing && accumulator.Requests > 0),
+			})
+		}
+		resp.TimeSeriesByCredential[key] = converted
 	}
 
 	timeSeriesAccumulators := make(
@@ -433,6 +518,26 @@ func buildSummaryResponse(from, to time.Time, qr usage.QueryResult, hasPricing b
 	}
 
 	return resp
+}
+
+func summaryCredentialMapKey(provider, source string) string {
+	if strings.TrimSpace(provider) == "" {
+		return source
+	}
+	return provider + ":" + source
+}
+
+func maskSummaryCredentialMapKey(key string, masker usageCredentialMasker) string {
+	provider, source := splitSummaryCredentialMapKey(key)
+	return summaryCredentialMapKey(provider, masker.Mask(source))
+}
+
+func splitSummaryCredentialMapKey(key string) (string, string) {
+	separator := strings.Index(key, ":")
+	if separator <= 0 || separator >= len(key)-1 {
+		return "", key
+	}
+	return key[:separator], key[separator+1:]
 }
 
 func maskSummaryAPIKey(key string) string {

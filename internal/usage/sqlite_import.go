@@ -482,6 +482,10 @@ func ImportBytesWithSecret(
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("%w: %v", ErrInvalidImport, err)
 	}
+	preserveEncryptedBackup := format == "usageBackupV3"
+	for i := range details {
+		details[i].Source = NormalizeImportedCredentialSource(details[i].Source, preserveEncryptedBackup)
+	}
 	earliestDayNs, latestDayNs, hasDayRange, err := importDayRange(details)
 	if err != nil {
 		return ImportResult{Format: format}, fmt.Errorf("%w: %v", ErrInvalidImport, err)

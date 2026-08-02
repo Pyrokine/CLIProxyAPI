@@ -32,6 +32,8 @@ type usageReporter struct {
 	authType        string
 	apiKey          string
 	source          string
+	sourceKind      usage.CredentialSourceKind
+	sourceRedacted  bool
 	reasoningEffort string
 	serviceTier     string
 	thinking        *usage.Thinking
@@ -51,6 +53,7 @@ func newUsageReporter(
 ) *usageReporter {
 	provider, executorType := usageReporterProvider(providerOrExecutor)
 	apiKey := apiKeyFromContext(ctx)
+	source, sourceKind, sourceRedacted := resolveUsageSource(auth, apiKey)
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
@@ -62,7 +65,9 @@ func newUsageReporter(
 		alias:           strings.TrimSpace(alias),
 		requestedAt:     time.Now(),
 		apiKey:          apiKey,
-		source:          resolveUsageSource(auth, apiKey),
+		source:          source,
+		sourceKind:      sourceKind,
+		sourceRedacted:  sourceRedacted,
 		authType:        resolveUsageAuthType(auth),
 		reasoningEffort: usage.ReasoningEffortFromContext(ctx),
 		serviceTier:     usage.ServiceTierFromContext(ctx),
@@ -206,6 +211,8 @@ func (r *usageReporter) publishAdditionalModel(ctx context.Context, model string
 			Model:               model,
 			Alias:               model,
 			Source:              r.source,
+			SourceKind:          r.sourceKind,
+			SourceRedacted:      r.sourceRedacted,
 			APIKey:              r.apiKey,
 			AuthID:              r.authID,
 			AuthIndex:           r.authIndex,
@@ -259,6 +266,8 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 					Model:               r.model,
 					Alias:               r.alias,
 					Source:              r.source,
+					SourceKind:          r.sourceKind,
+					SourceRedacted:      r.sourceRedacted,
 					APIKey:              r.apiKey,
 					AuthID:              r.authID,
 					AuthIndex:           r.authIndex,
@@ -323,6 +332,8 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 					Model:              r.model,
 					Alias:              r.alias,
 					Source:             r.source,
+					SourceKind:         r.sourceKind,
+					SourceRedacted:     r.sourceRedacted,
 					APIKey:             r.apiKey,
 					AuthID:             r.authID,
 					AuthIndex:          r.authIndex,
@@ -434,62 +445,55 @@ func resolveUsageAuthType(auth *cliproxyauth.Auth) string {
 	return kind
 }
 
-func resolveUsageSource(auth *cliproxyauth.Auth, ctxAPIKey string) string {
+func resolveUsageSource(
+	auth *cliproxyauth.Auth,
+	ctxAPIKey string,
+) (string, usage.CredentialSourceKind, bool) {
 	if auth != nil {
 		provider := strings.TrimSpace(auth.Provider)
 		if strings.EqualFold(provider, "gemini-cli") {
 			if id := strings.TrimSpace(auth.ID); id != "" {
-				return id
+				return id, usage.CredentialSourceKindIdentity, false
 			}
 		}
 		if strings.EqualFold(provider, "vertex") {
 			if auth.Metadata != nil {
 				if projectID, ok := auth.Metadata["project_id"].(string); ok {
 					if trimmed := strings.TrimSpace(projectID); trimmed != "" {
-						return trimmed
+						return trimmed, usage.CredentialSourceKindIdentity, false
 					}
 				}
 				if project, ok := auth.Metadata["project"].(string); ok {
 					if trimmed := strings.TrimSpace(project); trimmed != "" {
-						return trimmed
+						return trimmed, usage.CredentialSourceKindIdentity, false
 					}
 				}
 			}
 		}
-		if _, value := auth.AccountInfo(); value != "" {
-			return strings.TrimSpace(value)
+		if kind, value := auth.AccountInfo(); strings.TrimSpace(value) != "" {
+			trimmed := strings.TrimSpace(value)
+			if strings.EqualFold(strings.TrimSpace(kind), "api_key") {
+				return util.HideAPIKey(trimmed), usage.CredentialSourceKindAPIKey, true
+			}
+			return trimmed, usage.CredentialSourceKindIdentity, false
 		}
 		if auth.Metadata != nil {
 			if email, ok := auth.Metadata["email"].(string); ok {
 				if trimmed := strings.TrimSpace(email); trimmed != "" {
-					return trimmed
+					return trimmed, usage.CredentialSourceKindIdentity, false
 				}
 			}
 		}
 		if auth.Attributes != nil {
 			if key := strings.TrimSpace(auth.Attributes["api_key"]); key != "" {
-				return maskAPIKey(key)
+				return util.HideAPIKey(key), usage.CredentialSourceKindAPIKey, true
 			}
 		}
 	}
 	if trimmed := strings.TrimSpace(ctxAPIKey); trimmed != "" {
-		return maskAPIKey(trimmed)
+		return util.HideAPIKey(trimmed), usage.CredentialSourceKindAPIKey, true
 	}
-	return ""
-}
-
-// maskAPIKey redacts an API key to prefix + last 4 characters (e.g. "sk-pyro-...d878").
-func maskAPIKey(key string) string {
-	if len(key) <= 8 {
-		return "***"
-	}
-	dashIdx := strings.LastIndex(key, "-")
-	if dashIdx == -1 || dashIdx >= len(key)-4 {
-		return key[:4] + "..." + key[len(key)-4:]
-	}
-	prefix := key[:dashIdx+1]
-	suffix := key[len(key)-4:]
-	return prefix + "..." + suffix
+	return "", "", false
 }
 
 type streamUsageBuffer struct {

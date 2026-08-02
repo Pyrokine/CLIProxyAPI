@@ -35,7 +35,11 @@ func TestAPIKeyAliasSnapshotsAreSafeDuringManagementUpdates(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 100; i++ {
 			aliases := h.apiKeyAliasesSnapshot()
-			_ = maskUsageEventAPIKeys([]usage.FlatDetail{{APIKey: "initial-key"}}, aliases)
+			_ = maskUsageEvents(
+				[]usage.FlatDetail{{APIKey: "initial-key"}},
+				aliases,
+				usageCredentialMasker{},
+			)
 		}
 	}()
 	go func() {

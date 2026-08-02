@@ -79,11 +79,14 @@ func (h *Handler) GetUsageStatistics(c *gin.Context) {
 	} else if h.usageStats != nil {
 		snapshot = h.usageStats.Snapshot()
 	}
-	writeRedactedJSON(
-		c, http.StatusOK, gin.H{
+	writeRedactedUsageJSON(
+		c,
+		http.StatusOK,
+		gin.H{
 			"usage":           snapshot,
 			"failed_requests": snapshot.FailureCount,
 		},
+		newUsageCredentialMasker(h.configSnapshot()),
 	)
 }
 
