@@ -17,7 +17,7 @@ if ([string]::IsNullOrWhiteSpace($PanelRepo)) {
 }
 if ([string]::IsNullOrWhiteSpace($PanelTag)) {
     $PanelTag = if ([string]::IsNullOrWhiteSpace($env:PANEL_TAG)) {
-        "v1.17.14-aug.1"
+        "v1.17.14-aug.2"
     }
     else {
         $env:PANEL_TAG

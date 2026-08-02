@@ -1,5 +1,53 @@
 # Changelog
 
+## v7.2.67-aug.2 - 2026-08-02
+
+### Release Basis
+
+- Upstream semantic basis: v7.2.67
+- Previous local release: v7.2.67-aug.1
+- Local release: v7.2.67-aug.2
+- Required management panel: v1.17.14-aug.2 or newer
+
+### What's Changed
+
+- fix(usage): Preserve credential-source type information and store API-key sources only as masked values for live writes and non-encrypted legacy imports
+- fix(management): Conservatively mask untyped historical credential sources in summary, time-series, event, and legacy usage responses while preserving typed identity labels and provider grouping
+- fix(filters): Resolve raw and masked credential filters, merge API-key mask collisions, disambiguate identity/API-key display collisions, preserve provider-qualified filtering, and keep unmatched filters fail-closed
+- fix(release): Pin Docker images and source-build helpers to management panel v1.17.14-aug.2
+
+### Migration and Compatibility
+
+- SQLite remains on schema v4; existing events and aggregates are not rewritten
+- Existing untyped source values stay unchanged on disk and are conservatively masked at the authenticated management response boundary
+- Legacy imports store untyped source values only as masked API-key credentials; encrypted backups preserve source values exactly for recovery
+- Encrypted usage exports remain reversible and keep their existing format
+- Docker release builds require the published CPAM v1.17.14-aug.2 `management.html` asset
+
+---
+
+### 版本依据
+
+- 上游语义基线：v7.2.67
+- 上一个本地版本：v7.2.67-aug.1
+- 本地发布版本：v7.2.67-aug.2
+- 要求的管理面板版本：v1.17.14-aug.2 或更新
+
+### 更新内容
+
+- fix(usage)：保存 credential source 类型信息，实时写入和非加密 legacy 导入中的 API-key source 仅以脱敏值保存
+- fix(management)：未标记类型的历史 credential source 在 summary、时间序列、事件和旧版 usage 响应中保守脱敏，同时保留已标记的身份标签与 provider 分组
+- fix(filters)：credential filter 同时支持原值和脱敏值，合并 API-key 脱敏碰撞，区分 identity/API-key 展示碰撞，保留 provider 限定查询，无匹配时继续返回空结果
+- fix(release)：Docker 镜像和源码构建脚本固定使用管理面板 v1.17.14-aug.2
+
+### 迁移与兼容性
+
+- SQLite schema 保持 v4，不改写现有事件和聚合数据
+- 现有未标记类型的 source 在磁盘中保持不变，在已认证的管理响应边界进行保守脱敏
+- legacy 导入仅以脱敏 API-key credential 保存未标记类型的 source；加密备份为恢复用途精确保留 source
+- 加密 usage export 保持可恢复能力与现有格式
+- Docker 发布构建要求 CPAM v1.17.14-aug.2 已发布 `management.html`
+
 ## v7.2.67-aug.1 - 2026-07-31
 
 ### Release Basis

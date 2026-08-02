@@ -88,7 +88,7 @@ CLI_PROXY_CONFIG_DIR=. docker compose up -d
 
 The `docker-build.sh` and `docker-build.ps1` helpers detect the legacy file and print a compatibility notice. New
 installations use `config/config.yaml`. Source builds download the fixed management panel release required by this
-backend (`v1.17.14-aug.1`) before building the image. Set `PANEL_SOURCE=/path/to/management.html` to test a local panel
+backend (`v1.17.14-aug.2`) before building the image. Set `PANEL_SOURCE=/path/to/management.html` to test a local panel
 candidate, or set `PANEL_TAG` only when deliberately testing another compatible release.
 
 ## Management API

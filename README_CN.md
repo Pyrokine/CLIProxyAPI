@@ -85,7 +85,7 @@ CLI_PROXY_CONFIG_DIR=. docker compose up -d
 ```
 
 `docker-build.sh` 和 `docker-build.ps1` 会识别旧配置文件并输出兼容提示，新部署默认使用
-`config/config.yaml`，源码构建会先下载当前后端固定要求的管理面板版本 `v1.17.14-aug.1`，再构建镜像，
+`config/config.yaml`，源码构建会先下载当前后端固定要求的管理面板版本 `v1.17.14-aug.2`，再构建镜像，
 测试本地面板候选产物时设置 `PANEL_SOURCE=/path/to/management.html`，只有明确测试其他兼容发布版本时才设置
 `PANEL_TAG`
 
