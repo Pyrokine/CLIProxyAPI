@@ -65,27 +65,78 @@ func parseUsageQueueCount(value string) (int, error) {
 	return count, nil
 }
 
-// GetUsageStatistics returns the in-memory request statistics snapshot.
-// With SQLite storage, the snapshot is rebuilt from disk on every call.
+// GetUsageStatistics returns the legacy request statistics snapshot. Callers
+// that do not need per-request details can pass details=false for a bounded
+// aggregate response.
 func (h *Handler) GetUsageStatistics(c *gin.Context) {
+	h.getUsageStatistics(c, usage.MaxLegacySnapshotEvents)
+}
+
+func (h *Handler) getUsageStatistics(c *gin.Context, maxEvents int64) {
+	ctx := c.Request.Context()
+	if ctx.Err() != nil {
+		return
+	}
+	includeDetails := !strings.EqualFold(c.Query("details"), "false")
+	detailsTruncated := false
 	var snapshot usage.StatisticsSnapshot
 	if h.usagePersister != nil {
 		var err error
-		snapshot, err = h.usagePersister.QuerySnapshot()
+		if includeDetails {
+			snapshot, err = h.usagePersister.QuerySnapshotLimitedContext(ctx, maxEvents)
+			if errors.Is(err, usage.ErrLegacySnapshotTooLarge) {
+				snapshot, err = h.usagePersister.QueryAggregateSnapshotContext(ctx)
+				detailsTruncated = err == nil
+			}
+		} else {
+			snapshot, err = h.usagePersister.QueryAggregateSnapshotContext(ctx)
+		}
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query usage statistics"})
 			return
 		}
 	} else if h.usageStats != nil {
-		snapshot = h.usageStats.Snapshot()
+		var err error
+		if includeDetails {
+			snapshot, err = h.usageStats.SnapshotLimitedContext(
+				ctx,
+				maxEvents,
+				usage.MaxLegacySnapshotDetailBytes,
+			)
+			if errors.Is(err, usage.ErrLegacySnapshotTooLarge) {
+				snapshot, err = h.usageStats.AggregateSnapshotContext(ctx)
+				detailsTruncated = err == nil
+			}
+		} else {
+			snapshot, err = h.usageStats.AggregateSnapshotContext(ctx)
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query usage statistics"})
+			return
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	payload := gin.H{
+		"usage":           snapshot,
+		"failed_requests": snapshot.FailureCount,
+	}
+	if detailsTruncated {
+		payload["details_truncated"] = true
+		payload["warning"] = "legacy usage details exceed the compatibility memory budget; " +
+			"use /usage/summary and /usage/events for large datasets"
 	}
 	writeRedactedUsageJSON(
 		c,
 		http.StatusOK,
-		gin.H{
-			"usage":           snapshot,
-			"failed_requests": snapshot.FailureCount,
-		},
+		payload,
 		newUsageCredentialMasker(h.configSnapshot()),
 	)
 }
@@ -174,10 +225,16 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "usage persister unavailable"})
 		return
 	}
-
+	ctx := c.Request.Context()
+	if ctx.Err() != nil {
+		return
+	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, usage.MaxPortableBackupBytes)
 	data, err := handlers.ReadRequestBodyWithLimit(c, usage.MaxPortableBackupBytes)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		message := "failed to read request body"
 		if strings.Contains(err.Error(), "request body too large") || strings.Contains(
 			err.Error(), "http: request body too large",
@@ -185,6 +242,9 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 			message = "import file too large: request body exceeds 100MB limit"
 		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": message})
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 
@@ -196,8 +256,11 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 			return
 		}
 	}
-	result, err := h.usagePersister.ImportContextWithSecret(c.Request.Context(), data, secret)
+	result, err := h.usagePersister.ImportContextWithSecret(ctx, data, secret)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		status := http.StatusInternalServerError
 		if errors.Is(err, usage.ErrInvalidImport) {
 			status = http.StatusBadRequest
@@ -206,27 +269,42 @@ func (h *Handler) ImportUsageStatistics(c *gin.Context) {
 		return
 	}
 
-	snapshot, err := h.usagePersister.QuerySnapshot()
-	if err != nil {
-		c.JSON(
-			http.StatusOK, gin.H{
-				"added":   result.Added,
-				"skipped": result.Skipped,
-				"format":  result.Format,
-				"warning": "usage imported, but totals could not be queried",
-			},
-		)
+	totalRequests, failureCount, err := h.usagePersister.QueryRequestCountsContext(ctx)
+	if ctx.Err() != nil {
 		return
 	}
-	c.JSON(
-		http.StatusOK, gin.H{
-			"added":           result.Added,
-			"skipped":         result.Skipped,
-			"format":          result.Format,
-			"total_requests":  snapshot.TotalRequests,
-			"failed_requests": snapshot.FailureCount,
-		},
-	)
+	writeUsageImportResult(c, result, totalRequests, failureCount, err)
+}
+
+func writeUsageImportResult(
+	c *gin.Context,
+	result usage.ImportResult,
+	totalRequests int64,
+	failureCount int64,
+	queryErr error,
+) {
+	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+		return
+	}
+	payload := gin.H{
+		"added":   result.Added,
+		"skipped": result.Skipped,
+		"format":  result.Format,
+	}
+	warnings := make([]string, 0, 2)
+	if result.Warning != "" {
+		warnings = append(warnings, result.Warning)
+	}
+	if queryErr != nil {
+		warnings = append(warnings, "usage imported, but totals could not be queried")
+	} else {
+		payload["total_requests"] = totalRequests
+		payload["failed_requests"] = failureCount
+	}
+	if len(warnings) > 0 {
+		payload["warning"] = strings.Join(warnings, "; ")
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // GetUsageRetention returns the current retention configuration.

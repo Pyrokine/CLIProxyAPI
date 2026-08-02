@@ -5,6 +5,35 @@ import (
 	"testing"
 )
 
+func TestDashboardRenderShowsTruncationWarning(t *testing.T) {
+	model := dashboardModel{client: &Client{baseURL: "http://localhost"}}
+	output := model.renderDashboard(
+		map[string]any{},
+		map[string]any{
+			"warning": "usage details were truncated",
+			"usage":   map[string]any{},
+		},
+		nil,
+		nil,
+	)
+	if !strings.Contains(output, "usage details were truncated") {
+		t.Fatalf("rendered dashboard missing warning: %q", output)
+	}
+}
+
+func TestUsageTabRenderContentShowsTruncationWarning(t *testing.T) {
+	model := usageTabModel{
+		usage: map[string]any{
+			"warning": "usage details were truncated",
+			"usage":   map[string]any{},
+		},
+	}
+	output := model.renderContent()
+	if !strings.Contains(output, "usage details were truncated") {
+		t.Fatalf("rendered usage content missing warning: %q", output)
+	}
+}
+
 func TestUsageTabRenderTokenBreakdownIncludesTimeAndLatency(t *testing.T) {
 	previousLocale := currentLocale
 	currentLocale = "en"

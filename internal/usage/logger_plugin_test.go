@@ -2,7 +2,10 @@ package usage
 
 import (
 	"context"
+	"errors"
 	"math"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +34,108 @@ func TestNormaliseTokenStatsRejectsNegativeAndOverflowingValues(t *testing.T) {
 	explicit := tokenStats{InputTokens: math.MaxInt64, OutputTokens: 1, TotalTokens: 7}
 	if got := normaliseTokenStats(explicit); got != explicit {
 		t.Fatalf("explicit total changed: got %+v, want %+v", got, explicit)
+	}
+}
+
+func TestRequestStatisticsAggregateSnapshotOmitsDetails(t *testing.T) {
+	stats := newRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey: "client-key",
+		Model:  "model",
+		Detail: coreusage.Detail{
+			TotalTokens: 3,
+		},
+	})
+
+	if _, err := stats.SnapshotLimited(1, MaxLegacySnapshotDetailBytes); err != nil {
+		t.Fatalf("SnapshotLimited() exact limit error = %v", err)
+	}
+	stats.mu.Lock()
+	stats.apis["client-key"].Models["model"].Details[0].ResponseHeaders = http.Header{
+		"X-Test": {strings.Repeat("x", 8<<10)},
+	}
+	stats.mu.Unlock()
+	if _, err := stats.SnapshotLimited(1, 4<<10); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+		t.Fatalf("SnapshotLimited() detail size error = %v, want %v", err, ErrLegacySnapshotTooLarge)
+	}
+	emptyDimensions := newRequestStatistics()
+	emptyDimensions.apis[strings.Repeat("k", 4<<10)] = &apiStats{
+		Models: map[string]*modelStats{},
+	}
+	if _, err := emptyDimensions.SnapshotLimited(1, 2<<10); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+		t.Fatalf("SnapshotLimited() dimension size error = %v, want %v", err, ErrLegacySnapshotTooLarge)
+	}
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey: "client-key",
+		Model:  "model",
+		Detail: coreusage.Detail{
+			TotalTokens: 2,
+		},
+	})
+	if _, err := stats.SnapshotLimited(1, MaxLegacySnapshotDetailBytes); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+		t.Fatalf("SnapshotLimited() error = %v, want %v", err, ErrLegacySnapshotTooLarge)
+	}
+
+	aggregate := stats.AggregateSnapshot()
+	if aggregate.TotalRequests != 2 || aggregate.TotalTokens != 5 || len(aggregate.APIs) != 0 {
+		t.Fatalf("aggregate snapshot = %+v, want global totals without API dimensions", aggregate)
+	}
+	if len(stats.Snapshot().APIs["client-key"].Models["model"].Details) != 2 {
+		t.Fatal("full snapshot lost request details")
+	}
+	cancelledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := stats.SnapshotLimitedContext(
+		cancelledContext,
+		2,
+		MaxLegacySnapshotDetailBytes,
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("SnapshotLimitedContext() error = %v, want %v", err, context.Canceled)
+	}
+	if _, err := stats.AggregateSnapshotContext(cancelledContext); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AggregateSnapshotContext() error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestLegacyAggregateBackendsUseUTC(t *testing.T) {
+	location := time.FixedZone("UTC+8", 8*60*60)
+	timestamp := time.Date(2026, 8, 3, 0, 30, 0, 0, location)
+	wantDay := "2026-08-02"
+	wantHour := "16"
+
+	stats := newRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "client-key",
+		Model:       "model",
+		RequestedAt: timestamp,
+	})
+	memorySnapshot := stats.AggregateSnapshot()
+	memoryDetail := stats.Snapshot().APIs["client-key"].Models["model"].Details[0]
+	if memorySnapshot.RequestsByDay[wantDay] != 1 ||
+		memorySnapshot.RequestsByHour[wantHour] != 1 ||
+		memoryDetail.Timestamp.Location() != time.UTC {
+		t.Fatalf("in-memory UTC snapshot = %+v detail=%s", memorySnapshot, memoryDetail.Timestamp)
+	}
+
+	store := openTestStore(t)
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	detail := FlatDetail{Timestamp: timestamp, Model: "model"}
+	if _, err = persistEvent(context.Background(), tx, store, &detail, nil); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("persist: %v", err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	sqliteSnapshot, err := (&Persister{store: store}).QueryAggregateSnapshotContext(context.Background())
+	if err != nil {
+		t.Fatalf("QueryAggregateSnapshotContext: %v", err)
+	}
+	if sqliteSnapshot.RequestsByDay[wantDay] != 1 || sqliteSnapshot.RequestsByHour[wantHour] != 1 {
+		t.Fatalf("SQLite UTC snapshot = %+v", sqliteSnapshot)
 	}
 }
 

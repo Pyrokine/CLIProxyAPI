@@ -2,6 +2,7 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -37,16 +38,35 @@ func writeRedactedJSON(c *gin.Context, status int, payload any) {
 }
 
 func redactedManagementPayload(payload any) (any, error) {
+	return redactedManagementPayloadContext(context.Background(), payload)
+}
+
+func redactedManagementPayloadContext(ctx context.Context, payload any) (any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal management payload: %w", err)
 	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
 	data = util.MaskSensitivePayload(data)
+	if err = ctx.Err(); err != nil {
+		return nil, err
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	var decoded any
 	if err = decoder.Decode(&decoded); err != nil {
 		return nil, fmt.Errorf("decode redacted management payload: %w", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
 	}
 	var extra any
 	if err = decoder.Decode(&extra); err != io.EOF {
@@ -54,6 +74,9 @@ func redactedManagementPayload(payload any) (any, error) {
 			err = errors.New("unexpected trailing JSON value")
 		}
 		return nil, fmt.Errorf("decode redacted management payload: %w", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return nil, err
 	}
 	return decoded, nil
 }

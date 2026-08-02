@@ -110,6 +110,10 @@ func (m *usageTabModel) renderContent() string {
 		sb.WriteString("\n")
 		return sb.String()
 	}
+	if warning := getString(m.usage, "warning"); warning != "" {
+		sb.WriteString(errorStyle.Render("⚠ " + warning))
+		sb.WriteString("\n\n")
+	}
 
 	usageMap, _ := m.usage["usage"].(map[string]any)
 	if usageMap == nil {

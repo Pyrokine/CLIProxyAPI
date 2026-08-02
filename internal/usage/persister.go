@@ -30,12 +30,30 @@ const (
 	// -1 means unlimited retention (no automatic cleanup).
 	// Configure via config.yaml usage-retention.days to override.
 	defaultRetentionDays = -1
+
+	// MaxLegacySnapshotEvents and MaxLegacySnapshotDetailBytes bound the
+	// detail-heavy compatibility snapshot. Modern management clients use the
+	// aggregate and paginated read APIs.
+	MaxLegacySnapshotEvents      int64 = 10_000
+	MaxLegacySnapshotDetailBytes int64 = 32 << 20
+
+	// JSON strings may expand sixfold through HTML-safe escaping. Metadata uses
+	// a larger factor to cover decoded container nodes and repeated JSON buffers.
+	legacySnapshotEventOverhead       int64 = 1024
+	legacySnapshotMetadataExpansion   int64 = 16
+	legacySnapshotJSONStringExpansion int64 = 6
+	legacySnapshotHeaderNameOverhead  int64 = 128
+	legacySnapshotHeaderValueOverhead int64 = 64
 )
 
 // PriceFunc returns the pricing for a model: prices are in USD per 1M tokens.
 type PriceFunc func(model string) (prompt, completion, cache float64, found bool)
 
 var renameUsageDataDir = os.Rename
+
+// ErrLegacySnapshotTooLarge reports that the detail-heavy compatibility
+// response would exceed its event-count or estimated-size limit.
+var ErrLegacySnapshotTooLarge = errors.New("usage: legacy snapshot exceeds size limit")
 
 // Persister is the SQLite-backed coordinator for usage data. It owns the
 // Store + Writer + rollup goroutine, exposes a stable surface to the rest of
@@ -462,6 +480,35 @@ func (p *Persister) Query(
 	return s.Query(ctx, from, to, filters, granularity, includeGroups)
 }
 
+// QueryRequestCountsContext returns the current request and failure totals
+// without materialising per-request details.
+func (p *Persister) QueryRequestCountsContext(parent context.Context) (int64, int64, error) {
+	if p == nil {
+		return 0, 0, errors.New("usage: nil persister")
+	}
+	p.mu.RLock()
+	s := p.store
+	p.mu.RUnlock()
+	if s == nil || s.db == nil {
+		return 0, 0, errors.New("usage: store not initialized")
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+
+	var totalRequests int64
+	var failureCount int64
+	if err := s.db.QueryRowContext(
+		ctx,
+		"SELECT COUNT(*), COALESCE(SUM(failed), 0) FROM events",
+	).Scan(&totalRequests, &failureCount); err != nil {
+		return 0, 0, fmt.Errorf("usage: query request counts: %w", err)
+	}
+	return totalRequests, failureCount, nil
+}
+
 // QueryEvents serves /usage/events with SQL-native pagination.
 func (p *Persister) QueryEvents(
 	from, to time.Time,
@@ -519,13 +566,20 @@ func (p *Persister) Save() {
 }
 
 func (p *Persister) checkpoint(mode string) error {
+	return p.checkpointContext(context.Background(), mode)
+}
+
+func (p *Persister) checkpointContext(parent context.Context, mode string) error {
 	p.mu.RLock()
 	s := p.store
 	p.mu.RUnlock()
 	if s == nil || s.db == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint("+mode+")"); err != nil {
 		return fmt.Errorf("wal_checkpoint %s: %w", mode, err)
@@ -712,10 +766,8 @@ func emptyStatisticsSnapshot() StatisticsSnapshot {
 	}
 }
 
-// Snapshot reconstructs a v1-style StatisticsSnapshot from the SQLite tables
-// so /usage/export keeps returning the same response shape the UI knows how
-// to consume. Heavy on memory for big datasets — same as the JSON-era path
-// it replaces, but bounded by the data the user already has.
+// Snapshot reconstructs the bounded v1-style compatibility response. Modern
+// callers should use Query, QueryEvents, or QueryBackupEventsContext.
 func (p *Persister) Snapshot() StatisticsSnapshot {
 	snap, err := p.QuerySnapshot()
 	if err != nil {
@@ -725,10 +777,156 @@ func (p *Persister) Snapshot() StatisticsSnapshot {
 	return snap
 }
 
+// QueryAggregateSnapshotContext reconstructs the legacy aggregate fields from
+// hour buckets without loading per-request details.
+func (p *Persister) QueryAggregateSnapshotContext(parent context.Context) (StatisticsSnapshot, error) {
+	snap := emptyStatisticsSnapshot()
+	if p == nil {
+		return snap, errors.New("usage: nil persister")
+	}
+	p.mu.RLock()
+	s := p.store
+	p.mu.RUnlock()
+	if s == nil || s.db == nil {
+		return snap, errors.New("usage: store not initialized")
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return StatisticsSnapshot{}, fmt.Errorf("begin aggregate snapshot tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT bucket_ts_ns,
+		        SUM(requests),
+		        SUM(success),
+		        SUM(failure),
+		        SUM(total_tokens)
+		   FROM hour_bucket
+		  GROUP BY bucket_ts_ns
+		  ORDER BY bucket_ts_ns`,
+	)
+	if err != nil {
+		return StatisticsSnapshot{}, fmt.Errorf("query aggregate snapshot buckets: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	addAggregate := func(current, delta int64, name string) (int64, error) {
+		value, ok := coreusage.AddNonNegativeInt64(current, delta)
+		if !ok {
+			return 0, fmt.Errorf("usage: aggregate snapshot %s overflows int64", name)
+		}
+		return value, nil
+	}
+	for rows.Next() {
+		var bucketNs int64
+		var requests int64
+		var success int64
+		var failure int64
+		var totalTokens int64
+		if err = rows.Scan(
+			&bucketNs,
+			&requests,
+			&success,
+			&failure,
+			&totalTokens,
+		); err != nil {
+			return StatisticsSnapshot{}, fmt.Errorf("scan aggregate snapshot bucket: %w", err)
+		}
+
+		bucketTime := time.Unix(0, bucketNs).UTC()
+		dayKey := bucketTime.Format("2006-01-02")
+		hourKey := formatHour(bucketTime.Hour())
+
+		if snap.TotalRequests, err = addAggregate(snap.TotalRequests, requests, "request count"); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		if snap.SuccessCount, err = addAggregate(snap.SuccessCount, success, "success count"); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		if snap.FailureCount, err = addAggregate(snap.FailureCount, failure, "failure count"); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		if snap.TotalTokens, err = addAggregate(snap.TotalTokens, totalTokens, "token count"); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		if snap.RequestsByDay[dayKey], err = addAggregate(
+			snap.RequestsByDay[dayKey], requests, "daily request count",
+		); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		if snap.RequestsByHour[hourKey], err = addAggregate(
+			snap.RequestsByHour[hourKey], requests, "hourly request count",
+		); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		if snap.TokensByDay[dayKey], err = addAggregate(
+			snap.TokensByDay[dayKey], totalTokens, "daily token count",
+		); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		if snap.TokensByHour[hourKey], err = addAggregate(
+			snap.TokensByHour[hourKey], totalTokens, "hourly token count",
+		); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return StatisticsSnapshot{}, fmt.Errorf("iterate aggregate snapshot buckets: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return StatisticsSnapshot{}, fmt.Errorf("close aggregate snapshot buckets: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return StatisticsSnapshot{}, fmt.Errorf("commit aggregate snapshot tx: %w", err)
+	}
+	committed = true
+	return snap, nil
+}
+
 // QuerySnapshot reconstructs the full v1-style snapshot and reports storage
 // errors instead of returning an incomplete snapshot.
 func (p *Persister) QuerySnapshot() (StatisticsSnapshot, error) {
-	return p.QuerySnapshotFiltered(time.Time{}, time.Time{}, EventFilters{})
+	return p.querySnapshotFilteredContext(
+		context.Background(),
+		time.Time{},
+		time.Time{},
+		EventFilters{},
+		MaxLegacySnapshotEvents,
+		MaxLegacySnapshotDetailBytes,
+	)
+}
+
+// QuerySnapshotLimitedContext reconstructs the v1-style snapshot while
+// rejecting result sets that exceed the event or estimated-detail limits
+// before loading any details.
+func (p *Persister) QuerySnapshotLimitedContext(
+	parent context.Context,
+	maxEvents int64,
+) (StatisticsSnapshot, error) {
+	if maxEvents <= 0 {
+		maxEvents = MaxLegacySnapshotEvents
+	}
+	return p.querySnapshotFilteredContext(
+		parent,
+		time.Time{},
+		time.Time{},
+		EventFilters{},
+		maxEvents,
+		MaxLegacySnapshotDetailBytes,
+	)
 }
 
 // SnapshotFiltered reconstructs a v1-style StatisticsSnapshot scoped by the
@@ -751,6 +949,23 @@ func (p *Persister) QuerySnapshotFiltered(
 	from, to time.Time,
 	filters EventFilters,
 ) (StatisticsSnapshot, error) {
+	return p.querySnapshotFilteredContext(
+		context.Background(),
+		from,
+		to,
+		filters,
+		MaxLegacySnapshotEvents,
+		MaxLegacySnapshotDetailBytes,
+	)
+}
+
+func (p *Persister) querySnapshotFilteredContext(
+	parent context.Context,
+	from, to time.Time,
+	filters EventFilters,
+	maxEvents int64,
+	maxDetailBytes int64,
+) (StatisticsSnapshot, error) {
 	snap := emptyStatisticsSnapshot()
 	if p == nil {
 		return snap, errors.New("usage: nil persister")
@@ -771,8 +986,11 @@ func (p *Persister) QuerySnapshotFiltered(
 			return StatisticsSnapshot{}, fmt.Errorf("invalid snapshot end: %w", err)
 		}
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -814,6 +1032,56 @@ func (p *Persister) QuerySnapshotFiltered(
 	// from the same exact event set. Bucket tables cannot represent partial-hour
 	// bounds without including events outside the requested interval.
 	eventsWhere, eventsArgs := buildFilterClause(from, to, "ts_ns", "", modelF, apiKeyF, credF)
+	if maxEvents > 0 {
+		limitArgs := append([]any(nil), eventsArgs...)
+		limitArgs = append(limitArgs, maxEvents)
+		limitSQL := "SELECT EXISTS(SELECT 1 FROM events" + eventsWhere + " LIMIT 1 OFFSET ?)"
+		var exceedsLimit int
+		if err := tx.QueryRowContext(ctx, limitSQL, limitArgs...).Scan(&exceedsLimit); err != nil {
+			return StatisticsSnapshot{}, fmt.Errorf("check snapshot event limit: %w", err)
+		}
+		if exceedsLimit != 0 {
+			return StatisticsSnapshot{}, fmt.Errorf(
+				"%w: more than %d events",
+				ErrLegacySnapshotTooLarge,
+				maxEvents,
+			)
+		}
+	}
+	if maxDetailBytes > 0 {
+		detailSizeSQL := `SELECT COALESCE(SUM(
+			? +
+			? * COALESCE(LENGTH(CAST(events.metadata AS BLOB)), 0) +
+			? * (
+				COALESCE(LENGTH(CAST(m.name AS BLOB)), 0) +
+				COALESCE(LENGTH(CAST(s.name AS BLOB)), 0) +
+				COALESCE(LENGTH(CAST(a.name AS BLOB)), 0) +
+				COALESCE(LENGTH(CAST(k.name AS BLOB)), 0)
+			)
+		), 0)
+		FROM events
+		JOIN dim_model m ON m.id = events.model_id
+		LEFT JOIN dim_source s ON s.id = events.source_id
+		LEFT JOIN dim_auth_index a ON a.id = events.auth_index_id
+		LEFT JOIN dim_api_key k ON k.id = events.api_key_id` + eventsWhere
+		detailSizeArgs := []any{
+			legacySnapshotEventOverhead,
+			legacySnapshotMetadataExpansion,
+			legacySnapshotJSONStringExpansion,
+		}
+		detailSizeArgs = append(detailSizeArgs, eventsArgs...)
+		var estimatedDetailBytes int64
+		if err := tx.QueryRowContext(ctx, detailSizeSQL, detailSizeArgs...).Scan(&estimatedDetailBytes); err != nil {
+			return StatisticsSnapshot{}, fmt.Errorf("check snapshot detail size: %w", err)
+		}
+		if estimatedDetailBytes > maxDetailBytes {
+			return StatisticsSnapshot{}, fmt.Errorf(
+				"%w: estimated details use %d bytes",
+				ErrLegacySnapshotTooLarge,
+				estimatedDetailBytes,
+			)
+		}
+	}
 
 	// APIs[apiName].Models[modelName].Details[] must hit the events table.
 	eventsSQL := `
@@ -1402,6 +1670,9 @@ func (p *Persister) ImportContextWithSecret(
 	if p.overDBSizeCap() {
 		return ImportResult{}, errors.New("usage: SQLite DB size cap reached, import refused")
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
 
 	ctx, cancel := p.maintenanceContext(parent, 5*time.Minute)
 	defer cancel()
@@ -1425,13 +1696,40 @@ func (p *Persister) ImportContextWithSecret(
 	if err != nil {
 		return ImportResult{}, err
 	}
-	if err := s.rollupPendingDays(ctx); err != nil {
-		log.Warnf("usage: roll up pending days after import: %v", err)
+	if err := handlePostImportMaintenanceError(
+		parent,
+		&result,
+		"roll up pending days after import",
+		s.rollupPendingDays(ctx),
+	); err != nil {
+		return result, err
 	}
-	if err := p.checkpoint("TRUNCATE"); err != nil {
-		log.Warnf("usage: checkpoint after import: %v", err)
+	if err := handlePostImportMaintenanceError(
+		parent,
+		&result,
+		"checkpoint after import",
+		p.checkpointContext(ctx, "TRUNCATE"),
+	); err != nil {
+		return result, err
 	}
 	return result, nil
+}
+
+func handlePostImportMaintenanceError(
+	parent context.Context,
+	result *ImportResult,
+	operation string,
+	maintenanceErr error,
+) error {
+	if maintenanceErr == nil {
+		return nil
+	}
+	if err := parent.Err(); err != nil {
+		return err
+	}
+	result.Warning = "usage imported, but post-import maintenance did not finish"
+	log.Warnf("usage: %s: %v", operation, maintenanceErr)
+	return nil
 }
 
 func (p *Persister) priceFn() PriceFunc {

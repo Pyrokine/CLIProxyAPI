@@ -1,14 +1,40 @@
 package management
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
 )
+
+func TestUsageRedactionHonorsRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := redactedManagementPayloadContext(ctx, map[string]any{"source": "secret"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("redactedManagementPayloadContext() error = %v, want %v", err, context.Canceled)
+	}
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage", nil).WithContext(ctx)
+	writeRedactedUsageJSON(
+		c,
+		http.StatusOK,
+		map[string]any{"usage": map[string]any{"source": "secret"}},
+		usageCredentialMasker{},
+	)
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("canceled redaction wrote response body: %s", recorder.Body.String())
+	}
+}
 
 func TestMaskUsageEventAPIKeysPreservesAliasIdentityOnMaskCollision(t *testing.T) {
 	rawA := "abcd-first-wxyz"

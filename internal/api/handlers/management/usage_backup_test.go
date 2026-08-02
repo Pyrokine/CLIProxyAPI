@@ -2,6 +2,8 @@ package management
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -13,6 +15,86 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/gin-gonic/gin"
 )
+
+func TestWriteUsageImportResultIncludesWarningWhenTotalsFail(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	writeUsageImportResult(
+		c,
+		usage.ImportResult{Added: 2, Skipped: 1, Format: "usageBackupV3"},
+		0,
+		0,
+		errors.New("query failed"),
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, recorder.Body.String())
+	}
+	if response["warning"] != "usage imported, but totals could not be queried" {
+		t.Fatalf("warning response = %#v", response)
+	}
+	if _, ok := response["total_requests"]; ok {
+		t.Fatalf("warning response unexpectedly included totals: %#v", response)
+	}
+}
+
+func TestWriteUsageImportResultIncludesPostImportWarning(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	writeUsageImportResult(
+		c,
+		usage.ImportResult{
+			Added:   1,
+			Format:  "usageBackupV3",
+			Warning: "usage imported, but post-import maintenance did not finish",
+		},
+		3,
+		1,
+		nil,
+	)
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, recorder.Body.String())
+	}
+	if response["warning"] != "usage imported, but post-import maintenance did not finish" ||
+		response["total_requests"] != float64(3) || response["failed_requests"] != float64(1) {
+		t.Fatalf("post-import warning response = %#v", response)
+	}
+}
+
+func TestImportUsageStatisticsHonorsCanceledRequest(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/usage/import", strings.NewReader("[]")).WithContext(ctx)
+	h := &Handler{usagePersister: &usage.Persister{}}
+	h.ImportUsageStatistics(c)
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("canceled import wrote response body: %s", recorder.Body.String())
+	}
+}
+
+func TestWriteUsageImportResultHonorsRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/usage/import", nil).WithContext(ctx)
+	writeUsageImportResult(
+		c,
+		usage.ImportResult{Added: 1, Format: "usageBackupV3"},
+		0,
+		0,
+		context.Canceled,
+	)
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("canceled import result wrote response body: %s", recorder.Body.String())
+	}
+}
 
 func TestUsageExportImportEncryptedRoundTrip(t *testing.T) {
 	gin.SetMode(gin.TestMode)
@@ -95,6 +177,20 @@ func TestUsageExportImportEncryptedRoundTrip(t *testing.T) {
 	targetHandler.ImportUsageStatistics(importContext)
 	if importRecorder.Code != http.StatusOK {
 		t.Fatalf("ImportUsageStatistics status = %d body=%s", importRecorder.Code, importRecorder.Body.String())
+	}
+	var importResponse struct {
+		Added          int64  `json:"added"`
+		Skipped        int64  `json:"skipped"`
+		TotalRequests  int64  `json:"total_requests"`
+		FailedRequests int64  `json:"failed_requests"`
+		Warning        string `json:"warning"`
+	}
+	if err := json.Unmarshal(importRecorder.Body.Bytes(), &importResponse); err != nil {
+		t.Fatalf("decode ImportUsageStatistics response: %v body=%s", err, importRecorder.Body.String())
+	}
+	if importResponse.Added != 1 || importResponse.Skipped != 0 ||
+		importResponse.TotalRequests != 1 || importResponse.FailedRequests != 0 || importResponse.Warning != "" {
+		t.Fatalf("ImportUsageStatistics response = %+v, want added/total 1 and no failures/warning", importResponse)
 	}
 
 	sourceEvents, err := source.QueryBackupEventsContext(ctx, time.Time{}, time.Time{}, usage.EventFilters{})

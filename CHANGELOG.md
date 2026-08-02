@@ -1,5 +1,53 @@
 # Changelog
 
+## v7.2.67-aug.3 - 2026-08-03
+
+### Release Basis
+
+- Upstream semantic basis: v7.2.67
+- Previous local release: v7.2.67-aug.2
+- Local release: v7.2.67-aug.3
+- Required management panel: v1.17.14-aug.2 or newer
+
+### What's Changed
+
+- fix(usage): Limit legacy `/usage` details to 10,000 events and a conservative 32 MiB estimate that includes JSON escaping and decoded header structures, then return global and time aggregates with `apis: {}` and an explicit truncation warning
+- fix(usage): Propagate request cancellation through SQLite and in-memory snapshots, response redaction, response encoding, and usage import responses; report post-import maintenance timeouts as successful imports with an explicit warning; query totals with a constant-memory SQL aggregate
+- fix(usage): Keep degraded in-memory day and hour aggregates in UTC, matching SQLite-backed responses
+- fix(tui): Keep dashboard and usage views available when legacy details are truncated, and display the server warning in both views
+- test(usage): Cover event, structure, escaping and byte limits, high-cardinality aggregate responses, UTC parity, TUI warning display, cancellation, import totals, maintenance warnings, and allocations against a 20,000-event SQLite dataset
+
+### Migration and Compatibility
+
+- SQLite remains on schema v4; existing events, buckets, costs, and backups are unchanged
+- Legacy `/usage` keeps request details only while the dataset is at most 10,000 events and the conservative decoded/encoded size estimate is at most 32 MiB; otherwise it returns global and time aggregates with `apis: {}`, `details_truncated: true`, and a warning that identifies `/usage/summary` and `/usage/events`
+- Management panel v1.17.14-aug.2 already uses the aggregate and paginated APIs for the usage page
+- Docker release builds continue to use the published CPAM v1.17.14-aug.2 `management.html` asset
+
+---
+
+### 版本依据
+
+- 上游语义基线：v7.2.67
+- 上一个本地版本：v7.2.67-aug.2
+- 本地发布版本：v7.2.67-aug.3
+- 要求的管理面板版本：v1.17.14-aug.2 或更新
+
+### 更新内容
+
+- fix(usage)：旧版 `/usage` 明细限制为 10,000 个事件和包含 JSON 转义、响应头解码结构的保守 32 MiB 估算，超限后返回全局与时间聚合、`apis: {}` 和明确的截断警告
+- fix(usage)：SQLite 与内存快照、响应脱敏、响应编码和使用统计导入响应均继承请求取消信号；导入后维护超时改为返回成功并附明确警告；总数查询改用常量内存 SQL 聚合
+- fix(usage)：降级内存路径的日期和小时聚合统一使用 UTC，与 SQLite 响应一致
+- fix(tui)：旧版请求明细被截断时继续显示 dashboard 和使用统计，并在两个页面展示后端警告
+- test(usage)：覆盖事件、结构、转义和字节限制、高基数聚合、UTC 一致性、TUI 警告展示、请求取消、导入总数、维护警告，以及 20,000 个 SQLite 事件下的分配量限制
+
+### 迁移与兼容性
+
+- SQLite schema 保持 v4，现有事件、bucket、费用和备份格式不变
+- 旧版 `/usage` 仅在事件不超过 10,000 个且保守的解码/编码大小估算不超过 32 MiB 时保留请求明细；超限后返回全局与时间聚合、`apis: {}`、`details_truncated: true` 和指向 `/usage/summary`、`/usage/events` 的警告
+- 管理面板 v1.17.14-aug.2 的使用统计页面已经使用聚合和分页接口
+- Docker 发布构建继续使用已发布的 CPAM v1.17.14-aug.2 `management.html`
+
 ## v7.2.67-aug.2 - 2026-08-02
 
 ### Release Basis

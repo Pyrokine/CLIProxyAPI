@@ -77,7 +77,7 @@ func TestStore_QueryStaysWithinMemoryBudget(t *testing.T) {
 	if _, _, err := store.QueryEvents(ctx, from, to, EventFilters{}, 1, 100, "timestamp", false); err != nil {
 		t.Fatalf("QueryEvents: %v", err)
 	}
-	// QuerySnapshotFiltered rebuilds v1 nested — the path /usage/export uses.
+	// QuerySnapshotFiltered rebuilds the detail-heavy v1 shape used by legacy /usage.
 	p := &Persister{store: store}
 	if _, err := p.QuerySnapshotFiltered(from, to, EventFilters{}); err != nil {
 		t.Fatalf("QuerySnapshotFiltered: %v", err)
@@ -192,6 +192,306 @@ func TestQuerySnapshotFilteredUsesExactEventRangeForAllAggregates(t *testing.T) 
 	model := api.Models["m"]
 	if api.TotalRequests != 1 || api.TotalTokens != 2 || model.TotalRequests != 1 || model.TotalTokens != 2 || len(model.Details) != 1 {
 		t.Fatalf("API/model aggregate mismatch: api=%+v model=%+v", api, model)
+	}
+}
+
+func TestQuerySnapshotLimitedContextRejectsOversizedResult(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for index := range 3 {
+		detail := FlatDetail{
+			Timestamp: base.Add(time.Duration(index) * time.Minute),
+			Model:     "m",
+			Failed:    index == 2,
+			Tokens:    tokenStats{TotalTokens: 1},
+		}
+		if _, err = persistEvent(ctx, tx, store, &detail, nil); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("persist[%d]: %v", index, err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	p := &Persister{store: store}
+	if _, err = p.QuerySnapshotLimitedContext(ctx, 2); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+		t.Fatalf("QuerySnapshotLimitedContext error = %v, want %v", err, ErrLegacySnapshotTooLarge)
+	}
+	snapshot, err := p.QuerySnapshotLimitedContext(ctx, 3)
+	if err != nil {
+		t.Fatalf("QuerySnapshotLimitedContext exact limit: %v", err)
+	}
+	if snapshot.TotalRequests != 3 || snapshot.FailureCount != 1 {
+		t.Fatalf(
+			"snapshot totals = requests:%d failures:%d, want 3/1",
+			snapshot.TotalRequests,
+			snapshot.FailureCount,
+		)
+	}
+
+	aggregateSnapshot, err := p.QueryAggregateSnapshotContext(ctx)
+	if err != nil {
+		t.Fatalf("QueryAggregateSnapshotContext: %v", err)
+	}
+	if aggregateSnapshot.TotalRequests != 3 || aggregateSnapshot.SuccessCount != 2 ||
+		aggregateSnapshot.FailureCount != 1 || aggregateSnapshot.TotalTokens != 3 {
+		t.Fatalf(
+			"aggregate totals = requests:%d success:%d failures:%d tokens:%d, want 3/2/1/3",
+			aggregateSnapshot.TotalRequests,
+			aggregateSnapshot.SuccessCount,
+			aggregateSnapshot.FailureCount,
+			aggregateSnapshot.TotalTokens,
+		)
+	}
+	dayKey := base.Format("2006-01-02")
+	hourKey := formatHour(base.Hour())
+	if aggregateSnapshot.RequestsByDay[dayKey] != 3 || aggregateSnapshot.RequestsByHour[hourKey] != 3 ||
+		aggregateSnapshot.TokensByDay[dayKey] != 3 || aggregateSnapshot.TokensByHour[hourKey] != 3 {
+		t.Fatalf(
+			"aggregate time maps = %#v %#v %#v %#v, want 3 in %s/%s",
+			aggregateSnapshot.RequestsByDay,
+			aggregateSnapshot.RequestsByHour,
+			aggregateSnapshot.TokensByDay,
+			aggregateSnapshot.TokensByHour,
+			dayKey,
+			hourKey,
+		)
+	}
+	if len(aggregateSnapshot.APIs) != 0 {
+		t.Fatalf("aggregate APIs = %#v, want bounded empty map", aggregateSnapshot.APIs)
+	}
+
+	largeMetadata := `{"response_headers":{"X-Test":["` + strings.Repeat("x", 8<<10) + `"]}}`
+	if _, err = store.db.ExecContext(
+		ctx,
+		"UPDATE events SET metadata = ? WHERE ts_ns = ?",
+		largeMetadata,
+		base.UnixNano(),
+	); err != nil {
+		t.Fatalf("set large metadata: %v", err)
+	}
+	if _, err = p.querySnapshotFilteredContext(
+		ctx,
+		time.Time{},
+		time.Time{},
+		EventFilters{},
+		3,
+		4<<10,
+	); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+		t.Fatalf("byte-limited snapshot error = %v, want %v", err, ErrLegacySnapshotTooLarge)
+	}
+
+	cancelledContext, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err = p.QuerySnapshotLimitedContext(cancelledContext, 3); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled QuerySnapshotLimitedContext error = %v, want %v", err, context.Canceled)
+	}
+	if _, err = p.QueryAggregateSnapshotContext(cancelledContext); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled QueryAggregateSnapshotContext error = %v, want %v", err, context.Canceled)
+	}
+	if _, _, err = p.QueryRequestCountsContext(cancelledContext); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled QueryRequestCountsContext error = %v, want %v", err, context.Canceled)
+	}
+
+	totalRequests, failureCount, err := p.QueryRequestCountsContext(ctx)
+	if err != nil {
+		t.Fatalf("QueryRequestCountsContext: %v", err)
+	}
+	if totalRequests != 3 || failureCount != 1 {
+		t.Fatalf("request counts = total:%d failures:%d, want 3/1", totalRequests, failureCount)
+	}
+}
+
+func TestQuerySnapshotDetailBudgetAccountsForStructureAndEscaping(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	timestamp := time.Date(2026, 8, 3, 1, 0, 0, 0, time.UTC)
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	detail := FlatDetail{Timestamp: timestamp, Model: "m"}
+	if _, err = persistEvent(ctx, tx, store, &detail, nil); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("persist: %v", err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	p := &Persister{store: store}
+	headerValues := strings.Repeat(`"",`, 1_000) + `""`
+	nodeHeavyMetadata := `{"response_headers":{"X-Test":[` + headerValues + `]}}`
+	if _, err = store.db.ExecContext(
+		ctx,
+		"UPDATE events SET metadata = ? WHERE ts_ns = ?",
+		nodeHeavyMetadata,
+		timestamp.UnixNano(),
+	); err != nil {
+		t.Fatalf("set node-heavy metadata: %v", err)
+	}
+	if _, err = p.querySnapshotFilteredContext(
+		ctx,
+		time.Time{},
+		time.Time{},
+		EventFilters{},
+		1,
+		16<<10,
+	); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+		t.Fatalf("node-heavy snapshot error = %v, want %v", err, ErrLegacySnapshotTooLarge)
+	}
+
+	if _, err = store.db.ExecContext(ctx, "UPDATE events SET metadata = '{}' WHERE ts_ns = ?", timestamp.UnixNano()); err != nil {
+		t.Fatalf("reset metadata: %v", err)
+	}
+	if _, err = store.db.ExecContext(ctx, "UPDATE dim_model SET name = ?", strings.Repeat("<", 2<<10)); err != nil {
+		t.Fatalf("set escaped model name: %v", err)
+	}
+	if _, err = p.querySnapshotFilteredContext(
+		ctx,
+		time.Time{},
+		time.Time{},
+		EventFilters{},
+		1,
+		8<<10,
+	); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+		t.Fatalf("escaped-string snapshot error = %v, want %v", err, ErrLegacySnapshotTooLarge)
+	}
+}
+
+func TestPostImportMaintenanceDistinguishesRequestAndInternalTimeouts(t *testing.T) {
+	result := ImportResult{}
+	if err := handlePostImportMaintenanceError(
+		context.Background(),
+		&result,
+		"checkpoint after import",
+		context.DeadlineExceeded,
+	); err != nil {
+		t.Fatalf("internal maintenance timeout error = %v, want nil", err)
+	}
+	if result.Warning != "usage imported, but post-import maintenance did not finish" {
+		t.Fatalf("internal maintenance warning = %q", result.Warning)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result = ImportResult{}
+	if err := handlePostImportMaintenanceError(
+		ctx,
+		&result,
+		"checkpoint after import",
+		context.Canceled,
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("request cancellation error = %v, want %v", err, context.Canceled)
+	}
+	if result.Warning != "" {
+		t.Fatalf("request cancellation warning = %q, want empty", result.Warning)
+	}
+}
+
+func TestCheckpointContextHonorsCancellation(t *testing.T) {
+	store := openTestStore(t)
+	p := &Persister{store: store}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := p.checkpointContext(ctx, "TRUNCATE"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("checkpointContext() error = %v, want %v", err, context.Canceled)
+	}
+}
+
+func TestQueryAggregateSnapshotCollapsesHighCardinalityDimensions(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	const dimensions = 5_000
+	bucket := time.Date(2026, 8, 3, 1, 0, 0, 0, time.UTC)
+	if _, err := store.db.ExecContext(
+		ctx,
+		`WITH RECURSIVE seq(value) AS (
+			SELECT 1
+			UNION ALL
+			SELECT value + 1 FROM seq WHERE value < ?
+		)
+		INSERT INTO dim_model(name)
+		SELECT printf('model-%05d', value) FROM seq`,
+		dimensions,
+	); err != nil {
+		t.Fatalf("insert dimensions: %v", err)
+	}
+	if _, err := store.db.ExecContext(
+		ctx,
+		`INSERT INTO hour_bucket(
+			bucket_ts_ns,
+			model_id,
+			requests,
+			success,
+			failure,
+			total_tokens
+		)
+		SELECT ?, id, 1, 1, 0, 1 FROM dim_model`,
+		bucket.UnixNano(),
+	); err != nil {
+		t.Fatalf("insert high-cardinality buckets: %v", err)
+	}
+
+	p := &Persister{store: store}
+	snapshot, err := p.QueryAggregateSnapshotContext(ctx)
+	if err != nil {
+		t.Fatalf("QueryAggregateSnapshotContext: %v", err)
+	}
+	dayKey := bucket.Format("2006-01-02")
+	hourKey := formatHour(bucket.Hour())
+	if snapshot.TotalRequests != dimensions ||
+		snapshot.SuccessCount != dimensions ||
+		snapshot.TotalTokens != dimensions ||
+		snapshot.RequestsByDay[dayKey] != dimensions ||
+		snapshot.RequestsByHour[hourKey] != dimensions ||
+		len(snapshot.APIs) != 0 {
+		t.Fatalf("aggregate snapshot = %+v, want %d collapsed dimensions", snapshot, dimensions)
+	}
+}
+
+func TestQuerySnapshotLimitHasBoundedAllocations(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	if _, err := store.db.ExecContext(ctx, "INSERT INTO dim_model(name) VALUES('m')"); err != nil {
+		t.Fatalf("insert model: %v", err)
+	}
+	_, err := store.db.ExecContext(
+		ctx,
+		`WITH RECURSIVE seq(value) AS (
+			SELECT 1
+			UNION ALL
+			SELECT value + 1 FROM seq WHERE value < 20000
+		)
+		INSERT INTO events(fingerprint, ts_ns, model_id, failed)
+		SELECT CAST(printf('%020d', value) AS BLOB), value,
+		       (SELECT id FROM dim_model WHERE name = 'm'), 0
+		FROM seq`,
+	)
+	if err != nil {
+		t.Fatalf("insert events: %v", err)
+	}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	p := &Persister{store: store}
+	if _, err = p.QuerySnapshot(); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+		t.Fatalf("QuerySnapshot error = %v, want %v", err, ErrLegacySnapshotTooLarge)
+	}
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+
+	const allocationBudget = 8 << 20
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if allocated > allocationBudget {
+		t.Fatalf("limited snapshot allocated %d bytes, budget %d", allocated, allocationBudget)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -334,6 +333,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	if timestamp.IsZero() {
 		timestamp = time.Now()
 	}
+	timestamp = timestamp.UTC()
 	detail := normaliseDetail(record.Detail)
 	totalTokens := detail.TotalTokens
 	statsKey := record.APIKey
@@ -445,63 +445,258 @@ func (s *RequestStatistics) updateTokenAggregates(
 	s.tokensByHour[hourKey] = hourTotal
 }
 
-// Snapshot returns a copy of the aggregated metrics for external consumption.
+// Snapshot returns a copy of the aggregated metrics and request details.
 func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
-	result := StatisticsSnapshot{}
-	if s == nil {
-		return result
-	}
+	snapshot, _ := s.snapshotContext(context.Background(), true)
+	return snapshot
+}
 
+// SnapshotLimited returns the full snapshot only when its request count and
+// estimated detail size fit the compatibility limits.
+func (s *RequestStatistics) SnapshotLimited(
+	maxEvents int64,
+	maxDetailBytes int64,
+) (StatisticsSnapshot, error) {
+	return s.SnapshotLimitedContext(
+		context.Background(),
+		maxEvents,
+		maxDetailBytes,
+	)
+}
+
+// SnapshotLimitedContext applies the compatibility limits and stops estimating
+// or copying details when the caller cancels the request.
+func (s *RequestStatistics) SnapshotLimitedContext(
+	ctx context.Context,
+	maxEvents int64,
+	maxDetailBytes int64,
+) (StatisticsSnapshot, error) {
+	if s == nil {
+		return StatisticsSnapshot{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return StatisticsSnapshot{}, err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return StatisticsSnapshot{}, err
+	}
+	if maxEvents > 0 && s.totalRequests > maxEvents {
+		return StatisticsSnapshot{}, fmt.Errorf(
+			"%w: more than %d events",
+			ErrLegacySnapshotTooLarge,
+			maxEvents,
+		)
+	}
+	if err := s.validateLegacySnapshotSizeLocked(ctx, maxDetailBytes); err != nil {
+		return StatisticsSnapshot{}, err
+	}
+	return s.snapshotLockedContext(ctx, true)
+}
 
-	result.TotalRequests = s.totalRequests
-	result.SuccessCount = s.successCount
-	result.FailureCount = s.failureCount
-	result.TotalTokens = s.totalTokens
-
-	result.APIs = make(map[string]aPISnapshot, len(s.apis))
+func (s *RequestStatistics) validateLegacySnapshotSizeLocked(
+	ctx context.Context,
+	maxDetailBytes int64,
+) error {
+	if maxDetailBytes <= 0 {
+		return nil
+	}
+	var estimatedBytes int64
 	for apiName, stats := range s.apis {
-		apiSnapshot := aPISnapshot{
-			TotalRequests: stats.TotalRequests,
-			TotalTokens:   stats.TotalTokens,
-			Models:        make(map[string]modelSnapshot, len(stats.Models)),
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if stats == nil {
+			continue
+		}
+		estimatedBytes += int64(len(apiName))*legacySnapshotJSONStringExpansion + 256
+		if estimatedBytes > maxDetailBytes {
+			return legacySnapshotSizeError(maxDetailBytes)
 		}
 		for modelName, modelStatsValue := range stats.Models {
-			requestDetails := make([]requestDetail, len(modelStatsValue.Details))
-			for i, detail := range modelStatsValue.Details {
-				requestDetails[i] = detail
-				requestDetails[i].Thinking = cloneThinking(detail.Thinking)
-				requestDetails[i].ResponseHeaders = cloneHTTPHeader(detail.ResponseHeaders)
+			if err := ctx.Err(); err != nil {
+				return err
 			}
-			apiSnapshot.Models[modelName] = modelSnapshot{
-				TotalRequests: modelStatsValue.TotalRequests,
-				TotalTokens:   modelStatsValue.TotalTokens,
-				Details:       requestDetails,
+			if modelStatsValue == nil {
+				continue
+			}
+			estimatedBytes += int64(len(modelName))*legacySnapshotJSONStringExpansion + 256
+			if estimatedBytes > maxDetailBytes {
+				return legacySnapshotSizeError(maxDetailBytes)
+			}
+			for _, detail := range modelStatsValue.Details {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				estimatedBytes += estimateRequestDetailBytes(detail)
+				if estimatedBytes > maxDetailBytes {
+					return legacySnapshotSizeError(maxDetailBytes)
+				}
 			}
 		}
-		result.APIs[apiName] = apiSnapshot
+	}
+	return nil
+}
+
+func legacySnapshotSizeError(maxDetailBytes int64) error {
+	return fmt.Errorf(
+		"%w: estimated snapshot uses more than %d bytes",
+		ErrLegacySnapshotTooLarge,
+		maxDetailBytes,
+	)
+}
+
+func estimateRequestDetailBytes(detail requestDetail) int64 {
+	estimatedBytes := legacySnapshotEventOverhead +
+		int64(
+			len(detail.Source)+
+				len(detail.AuthIndex)+
+				len(detail.RequestID)+
+				len(detail.ReasoningEffort)+
+				len(detail.ServiceTier)+
+				len(detail.RequestServiceTier)+
+				len(detail.ResponseServiceTier)+
+				len(detail.ExecutorType),
+		)*legacySnapshotJSONStringExpansion
+	if detail.Thinking != nil {
+		estimatedBytes += int64(
+			len(detail.Thinking.Intensity)+
+				len(detail.Thinking.Mode)+
+				len(detail.Thinking.Level),
+		)*legacySnapshotJSONStringExpansion + 64
+	}
+	for name, values := range detail.ResponseHeaders {
+		estimatedBytes += int64(len(name))*legacySnapshotJSONStringExpansion +
+			legacySnapshotHeaderNameOverhead
+		for _, value := range values {
+			estimatedBytes += int64(len(value))*legacySnapshotJSONStringExpansion +
+				legacySnapshotHeaderValueOverhead
+		}
+	}
+	return estimatedBytes
+}
+
+// AggregateSnapshot returns the legacy aggregate shape without copying request
+// details. It is used by bounded management and TUI views.
+func (s *RequestStatistics) AggregateSnapshot() StatisticsSnapshot {
+	snapshot, _ := s.AggregateSnapshotContext(context.Background())
+	return snapshot
+}
+
+// AggregateSnapshotContext returns the bounded aggregate shape and stops map
+// copying when the caller cancels the request.
+func (s *RequestStatistics) AggregateSnapshotContext(
+	ctx context.Context,
+) (StatisticsSnapshot, error) {
+	return s.snapshotContext(ctx, false)
+}
+
+func (s *RequestStatistics) snapshotContext(
+	ctx context.Context,
+	includeDetails bool,
+) (StatisticsSnapshot, error) {
+	if s == nil {
+		return StatisticsSnapshot{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return StatisticsSnapshot{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.snapshotLockedContext(ctx, includeDetails)
+}
+
+func (s *RequestStatistics) snapshotLockedContext(
+	ctx context.Context,
+	includeDetails bool,
+) (StatisticsSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return StatisticsSnapshot{}, err
+	}
+	result := StatisticsSnapshot{
+		TotalRequests: s.totalRequests,
+		SuccessCount:  s.successCount,
+		FailureCount:  s.failureCount,
+		TotalTokens:   s.totalTokens,
+		APIs:          make(map[string]aPISnapshot),
+	}
+	if includeDetails {
+		result.APIs = make(map[string]aPISnapshot, len(s.apis))
+		for apiName, stats := range s.apis {
+			if err := ctx.Err(); err != nil {
+				return StatisticsSnapshot{}, err
+			}
+			if stats == nil {
+				continue
+			}
+			apiSnapshot := aPISnapshot{
+				TotalRequests: stats.TotalRequests,
+				TotalTokens:   stats.TotalTokens,
+				Models:        make(map[string]modelSnapshot, len(stats.Models)),
+			}
+			for modelName, modelStatsValue := range stats.Models {
+				if err := ctx.Err(); err != nil {
+					return StatisticsSnapshot{}, err
+				}
+				if modelStatsValue == nil {
+					continue
+				}
+				requestDetails := make([]requestDetail, len(modelStatsValue.Details))
+				for i, detail := range modelStatsValue.Details {
+					if err := ctx.Err(); err != nil {
+						return StatisticsSnapshot{}, err
+					}
+					requestDetails[i] = detail
+					requestDetails[i].Thinking = cloneThinking(detail.Thinking)
+					requestDetails[i].ResponseHeaders = cloneHTTPHeader(detail.ResponseHeaders)
+				}
+				apiSnapshot.Models[modelName] = modelSnapshot{
+					TotalRequests: modelStatsValue.TotalRequests,
+					TotalTokens:   modelStatsValue.TotalTokens,
+					Details:       requestDetails,
+				}
+			}
+			result.APIs[apiName] = apiSnapshot
+		}
 	}
 
 	result.RequestsByDay = make(map[string]int64, len(s.requestsByDay))
-	maps.Copy(result.RequestsByDay, s.requestsByDay)
-
+	for day, requests := range s.requestsByDay {
+		if err := ctx.Err(); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		result.RequestsByDay[day] = requests
+	}
 	result.RequestsByHour = make(map[string]int64, len(s.requestsByHour))
-	for hour, v := range s.requestsByHour {
-		key := formatHour(hour)
-		result.RequestsByHour[key] = v
+	for hour, requests := range s.requestsByHour {
+		if err := ctx.Err(); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		result.RequestsByHour[formatHour(hour)] = requests
 	}
-
 	result.TokensByDay = make(map[string]int64, len(s.tokensByDay))
-	maps.Copy(result.TokensByDay, s.tokensByDay)
-
+	for day, tokens := range s.tokensByDay {
+		if err := ctx.Err(); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		result.TokensByDay[day] = tokens
+	}
 	result.TokensByHour = make(map[string]int64, len(s.tokensByHour))
-	for hour, v := range s.tokensByHour {
-		key := formatHour(hour)
-		result.TokensByHour[key] = v
+	for hour, tokens := range s.tokensByHour {
+		if err := ctx.Err(); err != nil {
+			return StatisticsSnapshot{}, err
+		}
+		result.TokensByHour[formatHour(hour)] = tokens
 	}
 
-	return result
+	return result, nil
 }
 
 type MergeResult struct {
@@ -615,6 +810,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 }
 
 func (s *RequestStatistics) recordImported(_, modelName string, stats *apiStats, detail requestDetail) {
+	detail.Timestamp = detail.Timestamp.UTC()
 	totalTokens := detail.Tokens.TotalTokens
 
 	s.totalRequests++

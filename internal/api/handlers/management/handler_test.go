@@ -3438,6 +3438,78 @@ func TestAPIKeyContainingEllipsisIsAcceptedAsLiteral(t *testing.T) {
 	}
 }
 
+func TestGetUsageStatisticsTruncatesOversizedLegacySnapshot(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	persister := usage.NewPersister(t.TempDir(), config.UsageRetention{Days: -1})
+	persister.Start(context.Background())
+	if !persister.IsReady() {
+		t.Fatal("usage persister did not start")
+	}
+	defer persister.Stop()
+
+	base := time.Now().UTC().Add(-time.Hour)
+	for index := range 3 {
+		persister.Record(usage.FlatDetail{
+			Timestamp: base.Add(time.Duration(index) * time.Minute),
+			Model:     "legacy-limit-model",
+			Completed: true,
+		})
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		totalRequests, _, err := persister.QueryRequestCountsContext(context.Background())
+		if err == nil && totalRequests == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("usage records were not persisted before deadline: total=%d error=%v", totalRequests, err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""), WithUsagePersister(persister))
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage", nil)
+	h.getUsageStatistics(c, 2)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf(
+			"GetUsageStatistics status = %d, want %d body=%s",
+			recorder.Code,
+			http.StatusOK,
+			recorder.Body.String(),
+		)
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"details_truncated":true`) ||
+		!strings.Contains(body, "compatibility memory budget") ||
+		!strings.Contains(body, "/usage/summary") ||
+		!strings.Contains(body, `"total_requests":3`) ||
+		!strings.Contains(body, `"apis":{}`) {
+		t.Fatalf("GetUsageStatistics body = %s, want bounded aggregate with warning", body)
+	}
+
+	aggregateRecorder := httptest.NewRecorder()
+	aggregateContext, _ := gin.CreateTestContext(aggregateRecorder)
+	aggregateContext.Request = httptest.NewRequest(http.MethodGet, "/usage?details=false", nil)
+	h.getUsageStatistics(aggregateContext, 2)
+	if aggregateRecorder.Code != http.StatusOK {
+		t.Fatalf(
+			"GetUsageStatistics aggregate status = %d, want %d body=%s",
+			aggregateRecorder.Code,
+			http.StatusOK,
+			aggregateRecorder.Body.String(),
+		)
+	}
+	aggregateBody := aggregateRecorder.Body.String()
+	if !strings.Contains(aggregateBody, `"total_requests":3`) ||
+		strings.Contains(aggregateBody, `"details"`) ||
+		!strings.Contains(aggregateBody, `"apis":{}`) {
+		t.Fatalf("GetUsageStatistics aggregate body = %s, want bounded totals without details", aggregateBody)
+	}
+}
+
 func TestGetUsageStatistics_NilPersister(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""), WithUsageStats(nil))

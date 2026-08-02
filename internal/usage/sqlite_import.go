@@ -433,6 +433,7 @@ type ImportResult struct {
 	Added         int64
 	Skipped       int64
 	Format        string
+	Warning       string
 	EarliestDayNs int64
 	LatestDayNs   int64
 	HasDayRange   bool

@@ -1,6 +1,9 @@
 package management
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -42,29 +45,71 @@ func writeRedactedUsageJSON(
 	payload any,
 	masker usageCredentialMasker,
 ) {
-	redacted, err := redactedManagementPayload(payload)
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	redacted, err := redactedManagementPayloadContext(ctx, payload)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to redact management response"})
 		return
 	}
-	maskUsageSourceFields(redacted, masker)
-	c.JSON(status, redacted)
+	if err = maskUsageSourceFieldsContext(ctx, redacted, masker); err != nil {
+		return
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
+	data, err := json.Marshal(redacted)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode management response"})
+		return
+	}
+	if err = ctx.Err(); err != nil {
+		return
+	}
+	c.Data(status, "application/json; charset=utf-8", data)
 }
 
 func maskUsageSourceFields(value any, masker usageCredentialMasker) {
+	_ = maskUsageSourceFieldsContext(context.Background(), value, masker)
+}
+
+func maskUsageSourceFieldsContext(
+	ctx context.Context,
+	value any,
+	masker usageCredentialMasker,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if strings.EqualFold(key, "source") {
 				if source, ok := child.(string); ok {
 					typed[key] = masker.Mask(source)
 				}
 			}
-			maskUsageSourceFields(typed[key], masker)
+			if err := maskUsageSourceFieldsContext(ctx, typed[key], masker); err != nil {
+				return err
+			}
 		}
 	case []any:
 		for _, child := range typed {
-			maskUsageSourceFields(child, masker)
+			if err := maskUsageSourceFieldsContext(ctx, child, masker); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }

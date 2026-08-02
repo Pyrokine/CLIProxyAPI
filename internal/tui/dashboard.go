@@ -132,6 +132,10 @@ func (m *dashboardModel) renderDashboard(
 	sb.WriteString("\n")
 	sb.WriteString(helpStyle.Render(t("dashboard_help")))
 	sb.WriteString("\n\n")
+	if warning := getString(usage, "warning"); warning != "" {
+		sb.WriteString(errorStyle.Render("⚠ " + warning))
+		sb.WriteString("\n\n")
+	}
 
 	// ━━━ Connection Status ━━━
 	connStyle := lipgloss.NewStyle().Bold(true).Foreground(colorSuccess)
