@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,7 +16,6 @@ import (
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
-	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -95,55 +93,41 @@ func TestBuildCodexWebsocketRequestBodyPreservesPreviousResponseID(t *testing.T)
 	}
 }
 
-func TestCodexWebsocketsExecuteStreamHTTPFallbackPreservesPreviousResponseID(t *testing.T) {
-	captured := make(chan []byte, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
-			w.WriteHeader(http.StatusUpgradeRequired)
-			return
-		}
-		body, errRead := io.ReadAll(r.Body)
-		if errRead != nil {
-			t.Errorf("ReadAll() error = %v", errRead)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		captured <- body
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(
-			w,
-			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
-		)
-	}))
+func TestCodexWebsocketsExecuteStreamRejectsUpgradeRequiredWithoutHTTPFallback(t *testing.T) {
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+					t.Errorf("unexpected HTTP fallback request: %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(http.StatusUpgradeRequired)
+			},
+		),
+	)
 	defer server.Close()
 
 	exec := newCodexWebsocketsExecutor(&config.Config{})
 	stream, err := exec.ExecuteStream(
 		cliproxyexecutor.WithDownstreamWebsocket(context.Background()),
 		&cliproxyauth.Auth{
-			ID:         "auth-fallback",
+			ID:         "auth-upgrade-required",
 			Provider:   "codex",
 			Attributes: map[string]string{"api_key": "test-token", "base_url": server.URL},
 		},
 		cliproxyexecutor.Request{
 			Model: "gpt-5-codex",
 			Payload: []byte(
-				`{"model":"gpt-5-codex","previous_response_id":"resp-1","input":[{"type":"message","role":"user","content":"next"}]}`,
+				`{"model":"gpt-5-codex","input":[{"type":"message","role":"user","content":"next"}]}`,
 			),
 		},
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Stream: true},
 	)
-	if err != nil {
-		t.Fatalf("ExecuteStream() error = %v", err)
+	if stream != nil {
+		t.Fatalf("ExecuteStream() result = %#v, want nil", stream)
 	}
-	for chunk := range stream.Chunks {
-		if chunk.Err != nil {
-			t.Fatalf("fallback chunk error = %v", chunk.Err)
-		}
-	}
-	body := <-captured
-	if got := gjson.GetBytes(body, "previous_response_id").String(); got != "resp-1" {
-		t.Fatalf("fallback previous_response_id = %q, want resp-1: %s", got, body)
+	statusErr, ok := err.(interface{ StatusCode() int })
+	if !ok || statusErr.StatusCode() != http.StatusUpgradeRequired {
+		t.Fatalf("ExecuteStream() error = %T %v, want status 426", err, err)
 	}
 }
 
@@ -199,23 +183,45 @@ func TestDeliverCodexWebsocketTerminalReadWaitsForConsumer(t *testing.T) {
 	}
 }
 
+func TestExistingCodexWebsocketSessionRejectsRotatedCredential(t *testing.T) {
+	conn := &websocket.Conn{}
+	sess := &codexWebsocketSession{
+		conn:             conn,
+		authID:           "auth-a",
+		wsURL:            "wss://example.com/responses",
+		credentialSHA256: "credential-a",
+	}
+	if got := existingCodexWebsocketSessionConn(sess, sess.authID, sess.wsURL, "credential-a"); got != conn {
+		t.Fatal("matching credential did not reuse the connection")
+	}
+	if got := existingCodexWebsocketSessionConn(sess, sess.authID, sess.wsURL, "credential-b"); got != nil {
+		t.Fatal("rotated credential reused the old connection")
+	}
+}
+
 func TestEnsureCodexUpstreamConnReconnectsWhenIdentityChanges(t *testing.T) {
 	connectedA := make(chan struct{}, 1)
 	connectedB := make(chan struct{}, 1)
 	newServer := func(connected chan<- struct{}) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(w, r, nil)
-			if err != nil {
-				return
-			}
-			connected <- struct{}{}
-			defer conn.Close()
-			for {
-				if _, _, errRead := conn.ReadMessage(); errRead != nil {
-					return
-				}
-			}
-		}))
+		return httptest.NewServer(
+			http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					conn, err := (&websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}).Upgrade(
+						w, r, nil,
+					)
+					if err != nil {
+						return
+					}
+					connected <- struct{}{}
+					defer func() { _ = conn.Close() }()
+					for {
+						if _, _, errRead := conn.ReadMessage(); errRead != nil {
+							return
+						}
+					}
+				},
+			),
+		)
 	}
 	serverA := newServer(connectedA)
 	defer serverA.Close()
@@ -224,6 +230,9 @@ func TestEnsureCodexUpstreamConnReconnectsWhenIdentityChanges(t *testing.T) {
 
 	exec := newCodexWebsocketsExecutor(&config.Config{})
 	sess := exec.getOrCreateSession("session-1")
+	if sess == nil {
+		t.Fatal("websocket session is nil")
+	}
 	wsURLA := "ws" + strings.TrimPrefix(serverA.URL, "http")
 	wsURLB := "ws" + strings.TrimPrefix(serverB.URL, "http")
 	connA, _, err := exec.ensureUpstreamConn(
@@ -241,7 +250,7 @@ func TestEnsureCodexUpstreamConnReconnectsWhenIdentityChanges(t *testing.T) {
 		t.Fatalf("ensureUpstreamConn(auth-b) error = %v", err)
 	}
 	<-connectedB
-	defer connB.Close()
+	defer func() { _ = connB.Close() }()
 
 	if connA == connB {
 		t.Fatal("connection was reused across auth and upstream URL change")
@@ -271,6 +280,7 @@ func TestApplyCodexWebsocketHeadersDefaultsToCurrentResponsesBeta(t *testing.T) 
 
 func TestApplyCodexWebsocketHeadersUsesConfiguredOAuthDefaults(t *testing.T) {
 	cfg := &config.Config{
+		Codex: config.CodexConfig{DisableCodexCloaking: true},
 		CodexHeaderDefaults: config.CodexHeaderDefaults{
 			UserAgent:    "codex_cli_rs/0.132.0 (Linux; x64)",
 			BetaFeatures: "feature-a,feature-b",
@@ -447,7 +457,7 @@ func TestCodexWebsocketLoggingStoresTimelineAndUpgradeRejection(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ctx := util.WithGinContext(context.Background(), ginCtx)
-	cfg := &config.Config{SDKConfig: sdkconfig.SDKConfig{RequestLog: true}}
+	cfg := &config.Config{RequestLog: true}
 	headers := http.Header{
 		"Authorization": {"Bearer sk-test-secret"},
 	}
@@ -520,7 +530,7 @@ func TestNewProxyAwareWebsocketDialerUnrecognizedSchemeKeepsDefault(t *testing.T
 	// "direct" has no URL scheme, so it falls through to the default case in the
 	// switch and the dialer retains its initial Proxy: http.ProxyFromEnvironment.
 	dialer := newProxyAwareWebsocketDialer(
-		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://global-proxy.example.com:8080"}},
+		&config.Config{ProxyURL: "http://global-proxy.example.com:8080"},
 		&cliproxyauth.Auth{ProxyURL: "direct"},
 	)
 
@@ -577,6 +587,18 @@ func TestCodexWebsocketsCloseAllMarkerClosesSessions(t *testing.T) {
 	}
 }
 
+func TestCodexWebsocketsCloseExecutionSessionsForAuth(t *testing.T) {
+	exec := newCodexWebsocketsExecutor(&config.Config{})
+	exec.sessions["session-a"] = &codexWebsocketSession{sessionID: "session-a", authID: "auth-a"}
+	exec.sessions["session-b"] = &codexWebsocketSession{sessionID: "session-b", authID: "auth-b"}
+
+	exec.CloseExecutionSessionsForAuth("auth-a")
+
+	if exec.sessions["session-a"] != nil || exec.sessions["session-b"] == nil {
+		t.Fatalf("sessions after auth close = %#v", exec.sessions)
+	}
+}
+
 func TestCodexWebsocketsExecuteStreamDownstreamWebsocketForwardsRawResponseDone(t *testing.T) {
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
 	registerTestUsagePlugin(t, plugin)
@@ -589,7 +611,7 @@ func TestCodexWebsocketsExecuteStreamDownstreamWebsocketForwardsRawResponseDone(
 				if err != nil {
 					t.Fatalf("Upgrade() error = %v", err)
 				}
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 
 				_, _, err = conn.ReadMessage()
 				if err != nil {
@@ -661,29 +683,33 @@ func TestCodexWebsocketsExecuteStreamTerminalDeliveryFailureReportsFailedUsage(t
 	registerTestUsagePlugin(t, plugin)
 	written := make(chan struct{})
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("Upgrade error: %v", err)
-			return
-		}
-		defer conn.Close()
-		if _, _, err = conn.ReadMessage(); err != nil {
-			t.Errorf("ReadMessage error: %v", err)
-			return
-		}
-		err = conn.WriteMessage(
-			websocket.TextMessage,
-			[]byte(`{"type":"response.done","response":{"id":"resp-cancel","status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`),
-		)
-		if err != nil {
-			t.Errorf("WriteMessage error: %v", err)
-			return
-		}
-		close(written)
-		<-r.Context().Done()
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					t.Errorf("Upgrade error: %v", err)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				if _, _, err = conn.ReadMessage(); err != nil {
+					t.Errorf("ReadMessage error: %v", err)
+					return
+				}
+				err = conn.WriteMessage(
+					websocket.TextMessage,
+					[]byte(`{"type":"response.done","response":{"id":"resp-cancel","status":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`),
+				)
+				if err != nil {
+					t.Errorf("WriteMessage error: %v", err)
+					return
+				}
+				close(written)
+				<-r.Context().Done()
+			},
+		),
+	)
 	defer server.Close()
 
 	baseCtx, cancel := context.WithCancel(context.Background())
@@ -728,22 +754,26 @@ func TestCodexWebsocketsExecuteStreamRejectsMalformedEvent(t *testing.T) {
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
 	registerTestUsagePlugin(t, plugin)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("Upgrade error: %v", err)
-			return
-		}
-		defer conn.Close()
-		if _, _, err = conn.ReadMessage(); err != nil {
-			t.Errorf("ReadMessage error: %v", err)
-			return
-		}
-		if err = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":`)); err != nil {
-			t.Errorf("WriteMessage error: %v", err)
-		}
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					t.Errorf("Upgrade error: %v", err)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				if _, _, err = conn.ReadMessage(); err != nil {
+					t.Errorf("ReadMessage error: %v", err)
+					return
+				}
+				if err = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":`)); err != nil {
+					t.Errorf("WriteMessage error: %v", err)
+				}
+			},
+		),
+	)
 	defer server.Close()
 
 	exec := newCodexWebsocketsExecutor(&config.Config{})

@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -160,36 +161,42 @@ func TestCodexExecuteRequiresCompleteSSEFrames(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = io.WriteString(w, tt.body)
-			}))
-			defer server.Close()
+		t.Run(
+			tt.name, func(t *testing.T) {
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, _ *http.Request) {
+							w.Header().Set("Content-Type", "text/event-stream")
+							_, _ = io.WriteString(w, tt.body)
+						},
+					),
+				)
+				defer server.Close()
 
-			exec := newCodexExecutor(&config.Config{})
-			resp, err := exec.Execute(
-				context.Background(),
-				&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
-				cliproxyexecutor.Request{
-					Model:   "gpt-5.5",
-					Payload: []byte(`{"model":"gpt-5.5","input":"hi"}`),
-				},
-				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
-			)
-			if tt.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "incomplete SSE frame") {
-					t.Fatalf("Execute error = %v, want incomplete SSE frame", err)
+				exec := newCodexExecutor(&config.Config{})
+				resp, err := exec.Execute(
+					context.Background(),
+					&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+					cliproxyexecutor.Request{
+						Model:   "gpt-5.5",
+						Payload: []byte(`{"model":"gpt-5.5","input":"hi"}`),
+					},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+				)
+				if tt.wantErr {
+					if err == nil || !strings.Contains(err.Error(), "incomplete SSE frame") {
+						t.Fatalf("Execute error = %v, want incomplete SSE frame", err)
+					}
+					return
 				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Execute error: %v", err)
-			}
-			if !bytes.Contains(resp.Payload, []byte(`"resp_multiline"`)) {
-				t.Fatalf("response payload = %s, want multiline completion", resp.Payload)
-			}
-		})
+				if err != nil {
+					t.Fatalf("Execute error: %v", err)
+				}
+				if !bytes.Contains(resp.Payload, []byte(`"resp_multiline"`)) {
+					t.Fatalf("response payload = %s, want multiline completion", resp.Payload)
+				}
+			},
+		)
 	}
 }
 
@@ -286,10 +293,17 @@ func TestCodexExecuteStreamPropagatesUpstreamEventError(t *testing.T) {
 }
 
 func TestCodexExecuteStreamAcceptsMultilineSSEData(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\ndata: \"response.completed\",\"response\":{\"id\":\"resp_multiline\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n")
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(
+					w,
+					"data: {\"type\":\ndata: \"response.completed\",\"response\":{\"id\":\"resp_multiline\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	exec := newCodexExecutor(&config.Config{})
@@ -319,10 +333,17 @@ func TestCodexExecuteStreamAcceptsMultilineSSEData(t *testing.T) {
 }
 
 func TestCodexExecuteStreamRejectsDelimiterlessCompletedEvent(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_truncated\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}")
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(
+					w,
+					"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_truncated\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}",
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	exec := newCodexExecutor(&config.Config{})
@@ -360,12 +381,22 @@ func TestCodexExecuteStreamRejectsMalformedDataFrame(t *testing.T) {
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
 	registerTestUsagePlugin(t, plugin)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_bad\",\"model\":\"gpt-5.5\"}}\n\n")
-		_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":}\n\n")
-		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bad\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n")
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(
+					w,
+					"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_bad\",\"model\":\"gpt-5.5\"}}\n\n",
+				)
+				_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":}\n\n")
+				_, _ = io.WriteString(
+					w,
+					"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_bad\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+				)
+			},
+		),
+	)
 	defer server.Close()
 
 	exec := newCodexExecutor(&config.Config{})
@@ -405,26 +436,30 @@ func TestCodexExecuteStreamRejectsMalformedDataFrame(t *testing.T) {
 	}
 }
 
-func TestCodexExecuteStreamScannerErrorAfterCompletedReportsFailure(t *testing.T) {
+func TestCodexExecuteStreamIgnoresTransportErrorAfterCompleted(t *testing.T) {
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
 	registerTestUsagePlugin(t, plugin)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		hijacker, ok := w.(http.Hijacker)
-		if !ok {
-			t.Fatal("response writer does not support hijacking")
-		}
-		conn, rw, errHijack := hijacker.Hijack()
-		if errHijack != nil {
-			t.Fatalf("Hijack error: %v", errHijack)
-		}
-		defer conn.Close()
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				hijacker, ok := w.(http.Hijacker)
+				if !ok {
+					t.Fatal("response writer does not support hijacking")
+				}
+				conn, rw, errHijack := hijacker.Hijack()
+				if errHijack != nil {
+					t.Fatalf("Hijack error: %v", errHijack)
+				}
+					defer func() { _ = conn.Close() }()
 
-		payload := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_partial\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
-		_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
-		_, _ = rw.WriteString(strconv.FormatInt(int64(len(payload)), 16) + "\r\n" + payload + "\r\n")
-		_ = rw.Flush()
-	}))
+				payload := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_partial\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
+				_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+				_, _ = rw.WriteString(strconv.FormatInt(int64(len(payload)), 16) + "\r\n" + payload + "\r\n")
+				_ = rw.Flush()
+			},
+		),
+	)
 	defer server.Close()
 
 	exec := newCodexExecutor(&config.Config{})
@@ -442,22 +477,118 @@ func TestCodexExecuteStreamScannerErrorAfterCompletedReportsFailure(t *testing.T
 	}
 
 	var streamErr error
+	var payload []byte
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			streamErr = chunk.Err
+			continue
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if streamErr != nil {
+		t.Fatalf("stream error = %v, want terminal completion to win", streamErr)
+	}
+	if !bytes.Contains(payload, []byte(`"response.completed"`)) {
+		t.Fatalf("stream payload missing completed event: %q", payload)
+	}
+
+	select {
+	case record := <-plugin.records:
+		if record.Failed {
+			t.Fatalf("usage record Failed = true, want successful terminal event: %+v", record)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+}
+
+func TestCodexExecuteIncompleteResponseIsSuccessful(t *testing.T) {
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(
+					w,
+					"data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete\",\"model\":\"gpt-5.5\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
+				)
+			},
+		),
+	)
+	defer server.Close()
+
+	exec := newCodexExecutor(&config.Config{})
+	resp, err := exec.Execute(
+		context.Background(),
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+		cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","input":"hi"}`)},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+	)
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !bytes.Contains(resp.Payload, []byte(`"status":"incomplete"`)) {
+		t.Fatalf("response payload missing incomplete status: %s", resp.Payload)
+	}
+}
+
+func TestCodexExecuteMissingCompletionIsRequestScoped(t *testing.T) {
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+			},
+		),
+	)
+	defer server.Close()
+
+	exec := newCodexExecutor(&config.Config{})
+	_, err := exec.Execute(
+		context.Background(),
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+		cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","input":"hi"}`)},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+	)
+	if err == nil {
+		t.Fatal("Execute error = nil, want incomplete stream error")
+	}
+	var requestErr cliproxyexecutor.RequestScopedError
+	if !errors.As(err, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("Execute error = %T %v, want request-scoped error", err, err)
+	}
+}
+
+func TestCodexExecuteStreamMissingCompletionIsRequestScoped(t *testing.T) {
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+			},
+		),
+	)
+	defer server.Close()
+
+	exec := newCodexExecutor(&config.Config{})
+	stream, err := exec.ExecuteStream(
+		context.Background(),
+		&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+		cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","stream":true,"input":"hi"}`)},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	var streamErr error
 	for chunk := range stream.Chunks {
 		if chunk.Err != nil {
 			streamErr = chunk.Err
 		}
 	}
 	if streamErr == nil {
-		t.Fatal("stream error = nil, want truncated chunked response error")
+		t.Fatal("stream error = nil, want incomplete stream error")
 	}
-
-	select {
-	case record := <-plugin.records:
-		if !record.Failed {
-			t.Fatalf("usage record Failed = false, want true: %+v", record)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for failed usage record")
+	var requestErr cliproxyexecutor.RequestScopedError
+	if !errors.As(streamErr, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("stream error = %T %v, want request-scoped error", streamErr, streamErr)
 	}
 }
 

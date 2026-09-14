@@ -144,16 +144,21 @@ func TestParseCodexImageToolUsagePreservesZeroTokens(t *testing.T) {
 	if !ok {
 		t.Fatal("expected zero image usage to parse")
 	}
-	if detail != (usage.Detail{ResponseServiceTier: "priority"}) {
+	if detail.ResponseServiceTier != "priority" || detail.InputTokens != 0 || detail.OutputTokens != 0 || detail.TotalTokens != 0 {
 		t.Fatalf("detail = %#v", detail)
+	}
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete {
+		t.Fatalf("token breakdown = %+v, want valid complete", detail.TokenBreakdown)
 	}
 }
 
 func TestCodexOpenAIImageServiceTierDoesNotInjectDefaultMetadata(t *testing.T) {
 	req := cliproxyexecutor.Request{Payload: []byte(`{"model":"gpt-image-2"}`)}
-	opts := cliproxyexecutor.Options{Metadata: map[string]any{
-		cliproxyexecutor.ServiceTierMetadataKey: usage.DefaultServiceTier,
-	}}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.ServiceTierMetadataKey: usage.DefaultServiceTier,
+		},
+	}
 
 	if got := codexOpenAIImageServiceTier(req, opts); got != "" {
 		t.Fatalf("service tier = %q, want empty", got)

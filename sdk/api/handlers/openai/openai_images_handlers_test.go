@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	codexresponses "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/openai/responses"
@@ -112,7 +114,11 @@ func (s *testImageArtifactStore) PutDataURL(ctx context.Context, raw string) (ha
 	return s.PutBytes(ctx, data, mediaType)
 }
 
-func (s *testImageArtifactStore) PutRemoteImage(ctx context.Context, _ string) (handlers.ImageArtifactRecord, []byte, error) {
+func (s *testImageArtifactStore) PutRemoteImage(ctx context.Context, _ string) (
+	handlers.ImageArtifactRecord,
+	[]byte,
+	error,
+) {
 	data, err := base64.StdEncoding.DecodeString(testPNGBase64)
 	if err != nil {
 		return handlers.ImageArtifactRecord{}, nil, err
@@ -229,6 +235,24 @@ func TestImagesGenerationsRoutesConfiguredOpenAICompatImageModel(t *testing.T) {
 	}
 }
 
+func TestCodexImagesToolModelClassification(t *testing.T) {
+	for _, model := range []string{
+		"gpt-image-1.5",
+		"gpt-image-2",
+		"GPT-IMAGE-2.5-FLARE",
+		"codex/gpt-image-2.5-flare-2026-09-08",
+		"openai/gpt-image-2.5-sunburst",
+		"gpt-image-2.5-sunburst-2026-09-08",
+	} {
+		if !isCodexImagesToolModel(model) {
+			t.Errorf("isCodexImagesToolModel(%q) = false, want true", model)
+		}
+	}
+	if isCodexImagesToolModel("gpt-image-2.5") {
+		t.Fatal("plain gpt-image-2.5 alias must remain unsupported")
+	}
+}
+
 func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	executor := &imageCaptureExecutor{}
@@ -245,12 +269,18 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 		auth.Provider,
 		[]*registry.ModelInfo{
 			{ID: "gpt-image-2", Type: registry.OpenAIImageModelType},
+			{ID: "gpt-image-2.5-flare", Type: registry.OpenAIImageModelType},
+			{ID: "gpt-image-2.5-flare-2026-09-08", Type: registry.OpenAIImageModelType},
+			{ID: "gpt-image-2.5-sunburst", Type: registry.OpenAIImageModelType},
+			{ID: "gpt-image-2.5-sunburst-2026-09-08", Type: registry.OpenAIImageModelType},
 			{ID: "grok-imagine-image-quality", Type: registry.OpenAIImageModelType},
 		},
 	)
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
-	})
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		},
+	)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	setTestImageArtifactDeps(t, base)
@@ -260,10 +290,11 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 	router.POST("/v1/images/edits", h.ImagesEdits)
 
 	tests := []struct {
-		name      string
-		model     string
-		wantModel string
-		request   func(t *testing.T) *http.Request
+		name        string
+		model       string
+		wantModel   string
+		wantQuality string
+		request     func(t *testing.T) *http.Request
 	}{
 		{
 			name:      "generations provider prefix case and suffix",
@@ -281,6 +312,42 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 			},
 		},
 		{
+			name:        "GPT Image 2.5 Flare generations",
+			model:       "OPENAI/GPT-IMAGE-2.5-FLARE",
+			wantModel:   "gpt-image-2.5-flare",
+			wantQuality: "xhigh",
+			request: func(t *testing.T) *http.Request {
+				t.Helper()
+				req := httptest.NewRequest(
+					http.MethodPost,
+					"/v1/images/generations",
+					strings.NewReader(
+						`{"model":"OPENAI/GPT-IMAGE-2.5-FLARE","prompt":"draw","quality":"xhigh"}`,
+					),
+				)
+				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+		},
+		{
+			name:        "GPT Image 2.5 Sunburst snapshot generations",
+			model:       "Codex/GPT-IMAGE-2.5-SUNBURST-2026-09-08",
+			wantModel:   "gpt-image-2.5-sunburst-2026-09-08",
+			wantQuality: "auto",
+			request: func(t *testing.T) *http.Request {
+				t.Helper()
+				req := httptest.NewRequest(
+					http.MethodPost,
+					"/v1/images/generations",
+					strings.NewReader(
+						`{"model":"Codex/GPT-IMAGE-2.5-SUNBURST-2026-09-08","prompt":"draw","quality":"auto"}`,
+					),
+				)
+				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+		},
+		{
 			name:      "xai quality generations provider prefix case and suffix",
 			model:     "XAI/Grok-Imagine-Image-Quality(HIGH)",
 			wantModel: "grok-imagine-image-quality",
@@ -290,6 +357,24 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 					http.MethodPost,
 					"/v1/images/generations",
 					strings.NewReader(`{"model":"XAI/Grok-Imagine-Image-Quality(HIGH)","prompt":"draw"}`),
+				)
+				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+		},
+		{
+			name:        "GPT Image 2.5 Sunburst JSON edits",
+			model:       "gpt-image-2.5-sunburst",
+			wantModel:   "gpt-image-2.5-sunburst",
+			wantQuality: "max",
+			request: func(t *testing.T) *http.Request {
+				t.Helper()
+				req := httptest.NewRequest(
+					http.MethodPost,
+					"/v1/images/edits",
+					strings.NewReader(
+						`{"model":"gpt-image-2.5-sunburst","prompt":"edit","quality":"max","images":[{"file_id":"file-abc"}]}`,
+					),
 				)
 				req.Header.Set("Content-Type", "application/json")
 				return req
@@ -313,18 +398,22 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 			},
 		},
 		{
-			name:      "multipart edits provider prefix case and suffix",
-			model:     "Codex/GPT-IMAGE-2(high)",
-			wantModel: "gpt-image-2",
+			name:        "GPT Image 2.5 Flare snapshot multipart edits",
+			model:       "Codex/GPT-IMAGE-2.5-FLARE-2026-09-08",
+			wantModel:   "gpt-image-2.5-flare-2026-09-08",
+			wantQuality: "low",
 			request: func(t *testing.T) *http.Request {
 				t.Helper()
 				body := &bytes.Buffer{}
 				writer := multipart.NewWriter(body)
-				if err := writer.WriteField("model", "Codex/GPT-IMAGE-2(high)"); err != nil {
+				if err := writer.WriteField("model", "Codex/GPT-IMAGE-2.5-FLARE-2026-09-08"); err != nil {
 					t.Fatalf("WriteField model: %v", err)
 				}
 				if err := writer.WriteField("prompt", "edit"); err != nil {
 					t.Fatalf("WriteField prompt: %v", err)
+				}
+				if err := writer.WriteField("quality", "low"); err != nil {
+					t.Fatalf("WriteField quality: %v", err)
 				}
 				part, err := writer.CreateFormFile("image", "input.png")
 				if err != nil {
@@ -348,19 +437,30 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			executor.model = ""
-			executor.payload = nil
-			resp := httptest.NewRecorder()
-			router.ServeHTTP(resp, tt.request(t))
+		t.Run(
+			tt.name, func(t *testing.T) {
+				executor.model = ""
+				executor.payload = nil
+				resp := httptest.NewRecorder()
+				router.ServeHTTP(resp, tt.request(t))
 
-			if resp.Code != http.StatusOK {
-				t.Fatalf("model %q status = %d, want %d: %s", tt.model, resp.Code, http.StatusOK, resp.Body.String())
-			}
-			if executor.model != tt.wantModel {
-				t.Fatalf("executor model = %q, want %q; payload=%s", executor.model, tt.wantModel, executor.payload)
-			}
-		})
+				if resp.Code != http.StatusOK {
+					t.Fatalf(
+						"model %q status = %d, want %d: %s", tt.model, resp.Code, http.StatusOK, resp.Body.String(),
+					)
+				}
+				if executor.model != tt.wantModel {
+					t.Fatalf("executor model = %q, want %q; payload=%s", executor.model, tt.wantModel, executor.payload)
+				}
+				if tt.wantQuality != "" {
+					quality := gjson.GetBytes(executor.payload, "quality").String()
+					multipartValue := []byte("\r\n" + tt.wantQuality + "\r\n")
+					if quality != tt.wantQuality && !bytes.Contains(executor.payload, multipartValue) {
+						t.Fatalf("quality = %q, want %q; payload=%s", quality, tt.wantQuality, executor.payload)
+					}
+				}
+			},
+		)
 	}
 }
 
@@ -384,9 +484,11 @@ func TestImagesGenerationsPreservesCustomXAIPrefix(t *testing.T) {
 		auth.Provider,
 		[]*registry.ModelInfo{{ID: "TeamA/grok-imagine-image-quality"}},
 	)
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
-	})
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		},
+	)
 
 	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
 	setTestImageArtifactDeps(t, base)
@@ -434,9 +536,11 @@ func TestImagesGenerationsChecksCustomXAIPrefixAccessRule(t *testing.T) {
 		auth.Provider,
 		[]*registry.ModelInfo{{ID: "TeamA/grok-imagine-image-quality"}},
 	)
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
-	})
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		},
+	)
 
 	base := handlers.NewBaseAPIHandlers(
 		&sdkconfig.SDKConfig{
@@ -449,10 +553,12 @@ func TestImagesGenerationsChecksCustomXAIPrefixAccessRule(t *testing.T) {
 	setTestImageArtifactDeps(t, base)
 	h := NewAPIHandler(base)
 	router := gin.New()
-	router.Use(func(c *gin.Context) {
-		c.Set("apiKey", "sk-test")
-		c.Next()
-	})
+	router.Use(
+		func(c *gin.Context) {
+			c.Set("apiKey", "sk-test")
+			c.Next()
+		},
+	)
 	router.POST("/v1/images/generations", h.ImagesGenerations)
 
 	req := httptest.NewRequest(
@@ -493,8 +599,16 @@ func TestCollectImagesFromResponsesStreamFallsBackToPartialImage(t *testing.T) {
 	if got := gjson.GetBytes(out, "data.0.b64_json").String(); got != testPNGBase64 {
 		t.Fatalf("b64_json = %q, want test PNG; body=%s", got, out)
 	}
-	if got := gjson.GetBytes(out, "data.0.content_url").String(); !strings.HasPrefix(got, "https://cpa.test/v1/artifacts/img_") {
+	if got := gjson.GetBytes(out, "data.0.content_url").String(); !strings.HasPrefix(
+		got, "https://cpa.test/v1/artifacts/img_",
+	) {
 		t.Fatalf("content_url = %q, want CPA artifact URL; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "data.0.artifact_id").String(); !strings.HasPrefix(got, "img_") {
+		t.Fatalf("artifact_id = %q, want img_ id; body=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "data.0.sha256").String(); got == "" {
+		t.Fatalf("sha256 missing; body=%s", out)
 	}
 	if got := gjson.GetBytes(out, "output_format").String(); got != "png" {
 		t.Fatalf("output_format = %q, want png; body=%s", got, out)
@@ -562,7 +676,9 @@ func TestRewriteOpenAICompatImagesPayloadMaterializesURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteOpenAICompatImagesPayload: %v", err)
 	}
-	if got := gjson.GetBytes(out, "data.0.url").String(); !strings.HasPrefix(got, "https://cpa.test/v1/artifacts/img_") {
+	if got := gjson.GetBytes(out, "data.0.url").String(); !strings.HasPrefix(
+		got, "https://cpa.test/v1/artifacts/img_",
+	) {
 		t.Fatalf("rewritten url = %q, want CPA artifact URL; body=%s", got, out)
 	}
 	if got := gjson.GetBytes(out, "data.0.artifact_id").String(); !strings.HasPrefix(got, "img_") {
@@ -594,10 +710,10 @@ func TestRewriteOpenAICompatSSEFrameMaterializesURL(t *testing.T) {
 		t.Fatalf("SSE event line was not preserved: %s", out)
 	}
 	payload := ""
-	for _, line := range strings.Split(string(out), "\n") {
+	for line := range strings.SplitSeq(string(out), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "data:") {
-			payload = strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if after, ok := strings.CutPrefix(trimmed, "data:"); ok {
+			payload = strings.TrimSpace(after)
 			break
 		}
 	}
@@ -620,7 +736,9 @@ func TestBuildImagesAPIResponseFromXAIMaterializesDataURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildImagesAPIResponseFromXAI: %v", err)
 	}
-	if got := gjson.GetBytes(out, "data.0.url").String(); !strings.HasPrefix(got, "https://cpa.test/v1/artifacts/img_") {
+	if got := gjson.GetBytes(out, "data.0.url").String(); !strings.HasPrefix(
+		got, "https://cpa.test/v1/artifacts/img_",
+	) {
 		t.Fatalf("xAI url = %q, want CPA artifact URL; body=%s", got, out)
 	}
 }
@@ -993,7 +1111,9 @@ func TestForwardImagesStreamRequiresCompletion(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "disconnected before completion") {
 		t.Fatalf("forwardImagesStream error = %v", err)
 	}
-	if len(events) != 2 || !strings.HasPrefix(events[0], "image_generation.partial_image:") || !strings.HasPrefix(events[1], "error:") {
+	if len(events) != 2 || !strings.HasPrefix(
+		events[0], "image_generation.partial_image:",
+	) || !strings.HasPrefix(events[1], "error:") {
 		t.Fatalf("events = %v, want partial image followed by error", events)
 	}
 }
@@ -1116,9 +1236,11 @@ func TestImagesEditsPropagatesMultipartServiceTier(t *testing.T) {
 	registry.GetGlobalRegistry().RegisterClient(
 		auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "gpt-image-2", Type: registry.OpenAIImageModelType}},
 	)
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
-	})
+	t.Cleanup(
+		func() {
+			registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+		},
+	)
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -1214,6 +1336,50 @@ func TestImagesGenerationsRoutesGPTImage15ToOpenAIImageExecutor(t *testing.T) {
 	}
 	if got := gjson.GetBytes(executor.payload, "model").String(); got != "gpt-image-1.5" {
 		t.Fatalf("payload model = %q, want gpt-image-1.5; body=%s", got, executor.payload)
+	}
+}
+
+func TestImageErrorMessageMapsContextStatuses(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		err      error
+		fallback int
+		want     int
+	}{
+		{
+			name: "canceled", err: context.Canceled,
+			fallback: http.StatusBadGateway, want: clienterror.StatusClientClosedRequest,
+		},
+		{
+			name: "deadline", err: context.DeadlineExceeded,
+			fallback: http.StatusBadGateway, want: http.StatusGatewayTimeout,
+		},
+		{
+			name: "wrapped explicit status",
+			err: fmt.Errorf(
+				"wrapped: %w", &imageHandlerStatusError{
+					statusCode: http.StatusTooManyRequests,
+					err:        errors.New("rate limited"),
+				},
+			),
+			fallback: http.StatusBadGateway,
+			want:     http.StatusTooManyRequests,
+		},
+		{
+			name: "fallback", err: errors.New("boom"),
+			fallback: http.StatusServiceUnavailable, want: http.StatusServiceUnavailable,
+		},
+	} {
+		t.Run(
+			test.name, func(t *testing.T) {
+				got := imageErrorMessage(test.err, test.fallback)
+				// The constructor must retain the exact error value, not only an equivalent unwrap chain.
+				// noinspection GoDirectComparisonOfErrors
+				if got == nil || got.StatusCode != test.want || got.Error != test.err {
+					t.Fatalf("imageErrorMessage() = %#v, want status %d and original error", got, test.want)
+				}
+			},
+		)
 	}
 }
 

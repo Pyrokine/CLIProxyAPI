@@ -3,13 +3,15 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxysession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -34,24 +36,29 @@ func shouldUseImplicitCodexConversationCache(from sdktranslator.Format, model st
 	return sourceFormatEqual(from, sdktranslator.FormatClaude) && codexPromptCacheModelName(model) != ""
 }
 
-func codexPromptCacheFromClaudeRequest(model string, payload []byte) (codexCache, bool) {
-	if len(payload) == 0 {
+func codexPromptCacheFromClaudeRequest(
+	ctx context.Context,
+	model string,
+	payload []byte,
+	headers http.Header,
+) (codexCache, bool) {
+	modelName := codexPromptCacheModelName(model)
+	if modelName == "" {
 		return codexCache{}, false
 	}
-	scope := codexPromptCacheClaudeScope(payload)
-	if scope == "" {
-		return codexCache{}, false
+	executionScope, ok := helps.ClaudeCodeExecutionScope(ctx, payload, headers)
+	if !ok {
+		executionScope = codexPromptCacheClaudeScope(payload)
+		if executionScope == "" {
+			return codexCache{}, false
+		}
+		executionScope += ":agent:" + helps.ExtractClaudeCodeAgentID(ctx, headers)
 	}
-	key := "codex-prompt-cache:" + codexPromptCacheModelName(model) + ":" + scope
-	if cache, ok := getCodexCache(key); ok {
-		return cache, true
-	}
-	cache := codexCache{
-		ID:     uuid.New().String(),
-		Expire: time.Now().Add(time.Hour),
-	}
-	setCodexCache(key, cache)
-	return cache, true
+	identity := strings.Join(
+		[]string{"cli-proxy-api:codex:claude-code", modelName, executionScope},
+		"\x00",
+	)
+	return codexCache{ID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String()}, true
 }
 
 func codexPromptCacheFromOpenAIAPIKey(ctx context.Context) (codexCache, bool) {
@@ -65,10 +72,10 @@ func codexPromptCacheFromOpenAIAPIKey(ctx context.Context) (codexCache, bool) {
 }
 
 func codexPromptCacheClaudeScope(payload []byte) string {
-	if sessionID := extractClaudeCodeSessionIDForCodexReplay(payload); sessionID != "" {
+	if sessionID := helps.ExtractClaudeCodeSessionID(context.Background(), payload, nil); sessionID != "" {
 		return "claude-session:" + sessionID
 	}
-	userID := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String())
+	userID := cliproxysession.NormalizeExplicitID(gjson.GetBytes(payload, "metadata.user_id").String())
 	if userID == "" {
 		return ""
 	}
@@ -85,8 +92,9 @@ func codexPromptCacheModelName(model string) string {
 
 // codexResponsesBodyResult holds the outputs of codexResponsesBody.
 type codexResponsesBodyResult struct {
-	Body            []byte
-	OriginalPayload []byte
+	Body                  []byte
+	OriginalPayload       []byte
+	OptimizedMultiAgentV2 bool
 }
 
 // codexResponsesBody translates and prepares the request body for a Codex /responses call.
@@ -107,16 +115,43 @@ func codexResponsesBody(
 	streaming bool,
 ) (codexResponsesBodyResult, error) {
 	to := sdktranslator.FromString("codex")
+	isCompat := helps.APIKeyModelIsCompat(req)
 
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
+	reasoningSummaryDelivery := gjson.GetBytes(req.Payload, "stream_options.reasoning_summary_delivery")
+	if !reasoningSummaryDelivery.Exists() {
+		reasoningSummaryDelivery = gjson.GetBytes(originalPayloadSource, "stream_options.reasoning_summary_delivery")
+	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, streaming)
-	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, streaming)
+	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(
+		ctx,
+		opts.Headers,
+		cfg,
+		from,
+		to,
+		baseModel,
+		originalPayload,
+		streaming,
+		isCompat,
+	)
+	body := helps.TranslateRequestWithAPIKeyModelCompatibility(
+		ctx,
+		opts.Headers,
+		cfg,
+		from,
+		to,
+		baseModel,
+		req.Payload,
+		streaming,
+		isCompat,
+	)
 
-	body, err := thinking.ApplyThinking(body, model, from.String(), to.String(), executorID)
+	body, err := helps.ApplyThinkingWithSourcePayload(
+		body, req.Payload, originalPayloadSource, model, from.String(), to.String(), executorID, req,
+	)
 	if err != nil {
 		return codexResponsesBodyResult{}, err
 	}
@@ -125,7 +160,12 @@ func codexResponsesBody(
 	body = applyPayloadConfigWithRoot(cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
-	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex", body)
+	body = sanitizeOpenAIResponsesReasoningEncryptedContent(
+		ctx,
+		"codex",
+		body,
+		isCompat,
+	)
 	body, err = preserveCodexPreviousResponseID(body, req.Payload)
 	if err != nil {
 		return codexResponsesBodyResult{}, err
@@ -133,13 +173,28 @@ func codexResponsesBody(
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body = normalizeCodexInstructions(body)
+	if streaming && reasoningSummaryDelivery.Exists() {
+		body, _ = sjson.SetBytes(body, "stream_options.reasoning_summary_delivery", reasoningSummaryDelivery.Value())
+	}
 	if cfg == nil || cfg.DisableImageGeneration == config.DisableImageGenerationOff {
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
+	body = normalizeCodexParallelToolCalls(body, opts.Headers)
+	body, optimizedMultiAgentV2 := helps.OptimizeCodexMultiAgentV2Request(
+		ctx,
+		opts.Headers,
+		body,
+		cfg,
+		isCompat,
+	)
+	if err = validateCodexResponsesToolNames(body, sourceFormatEqual(from, sdktranslator.FormatClaude)); err != nil {
+		return codexResponsesBodyResult{}, statusErr{code: http.StatusBadRequest, msg: "codex executor: " + err.Error()}
+	}
 
 	return codexResponsesBodyResult{
-		Body:            body,
-		OriginalPayload: originalPayload,
+		Body:                  body,
+		OriginalPayload:       originalPayload,
+		OptimizedMultiAgentV2: optimizedMultiAgentV2,
 	}, nil
 }
 

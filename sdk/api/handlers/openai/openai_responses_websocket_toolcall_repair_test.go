@@ -114,7 +114,7 @@ func TestRepairResponsesWebsocketToolCallsDropsOrphanCustomToolCall(t *testing.T
 
 func TestRecordResponsesWebsocketToolCallsFromPayloadWithCache(t *testing.T) {
 	cache := newWebsocketToolOutputCache(0, 8)
-	payload := []byte(`{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call-1","name":"tool"}}`)
+	payload := []byte(`{"type":"response.output_item.added","item":{"type":"function_call","call_id":"call-1","name":"tool","arguments":""}}`)
 
 	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", payload)
 	cached, ok := cache.get("session-1", "call-1")
@@ -128,7 +128,7 @@ func TestRecordResponsesWebsocketToolCallsFromPayloadWithCache(t *testing.T) {
 
 func TestRecordResponsesWebsocketCustomToolCallsFromCompletedPayloadWithCache(t *testing.T) {
 	cache := newWebsocketToolOutputCache(0, 8)
-	payload := []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"call-1","name":"tool"}]}}`)
+	payload := []byte(`{"type":"response.completed","response":{"output":[{"type":"custom_tool_call","call_id":"call-1","name":"tool","input":""}]}}`)
 
 	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", payload)
 	cached, ok := cache.get("session-1", "call-1")
@@ -142,7 +142,7 @@ func TestRecordResponsesWebsocketCustomToolCallsFromCompletedPayloadWithCache(t 
 
 func TestRecordResponsesWebsocketCustomToolCallsFromOutputItemDoneWithCache(t *testing.T) {
 	cache := newWebsocketToolOutputCache(0, 8)
-	payload := []byte(`{"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"call-1","name":"tool"}}`)
+	payload := []byte(`{"type":"response.output_item.done","item":{"type":"custom_tool_call","call_id":"call-1","name":"tool","input":""}}`)
 
 	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", payload)
 	cached, ok := cache.get("session-1", "call-1")
@@ -151,5 +151,52 @@ func TestRecordResponsesWebsocketCustomToolCallsFromOutputItemDoneWithCache(t *t
 	}
 	if gjson.GetBytes(cached, "type").String() != "custom_tool_call" {
 		t.Fatalf("unexpected cached item: %s", string(cached))
+	}
+}
+
+func TestIsCompleteResponsesWebsocketToolCallRequiresStringFields(t *testing.T) {
+	tests := []struct {
+		name string
+		item string
+		want bool
+	}{
+		{name: "numeric call id", item: `{"type":"function_call","call_id":123,"name":"exec","arguments":"{}"}`},
+		{name: "boolean name", item: `{"type":"function_call","call_id":"call-1","name":true,"arguments":"{}"}`},
+		{name: "numeric arguments", item: `{"type":"function_call","call_id":"call-1","name":"exec","arguments":123}`},
+		{name: "object custom input", item: `{"type":"custom_tool_call","call_id":"call-1","name":"exec","input":{}}`},
+		{
+			name: "valid function call",
+			item: `{"type":"function_call","call_id":"call-1","name":"exec","arguments":""}`, want: true,
+		},
+		{
+			name: "valid custom tool call",
+			item: `{"type":"custom_tool_call","call_id":"call-1","name":"exec","input":""}`, want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				if got := isCompleteResponsesWebsocketToolCall(gjson.Parse(tt.item)); got != tt.want {
+					t.Fatalf("isCompleteResponsesWebsocketToolCall() = %t, want %t", got, tt.want)
+				}
+			},
+		)
+	}
+}
+
+func TestRecordResponsesWebsocketToolCallsIgnoresIncompleteCall(t *testing.T) {
+	cache := newWebsocketToolOutputCache(0, 8)
+	pending := make(map[string]struct{})
+	payload := []byte(`{"type":"response.output_item.done","item":{"type":"function_call","call_id":"call-1","name":"exec"}}`)
+
+	recordResponsesWebsocketToolCallsFromPayloadWithCache(cache, "session-1", payload)
+	recordPendingToolCallIDsFromPayload(pending, payload)
+
+	if cached, ok := cache.get("session-1", "call-1"); ok {
+		t.Fatalf("incomplete tool call was cached: %s", cached)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("incomplete tool call was recorded as pending: %v", pending)
 	}
 }

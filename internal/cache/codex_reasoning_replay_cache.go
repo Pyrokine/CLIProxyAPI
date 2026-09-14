@@ -1,22 +1,35 @@
 package cache
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 const (
-	CodexReasoningReplayCacheTTL            = 1 * time.Hour
-	CodexReasoningReplayCacheMaxEntries     = 10240
-	CodexReasoningReplayCacheEvictBatchSize = 128
-	maxGPTReasoningSignatureLen             = 32 * 1024 * 1024
+	// CodexReasoningReplayTurnType identifies an internal turn-boundary marker.
+	CodexReasoningReplayTurnType = "cpa_codex_replay_turn"
+
+	codexReasoningReplayCacheTTL              = 1 * time.Hour
+	codexReasoningReplayCacheMaxEntries       = 10240
+	codexReasoningReplayCacheEvictBatchSize   = 128
+	codexReasoningReplayCacheMaxTurnsPerEntry = 256
+	codexReasoningReplayCacheMaxBytesPerEntry = 16 << 20
+
+	codexReasoningReplayCacheMaxSerializedBytes = 24 << 20
+	maxGPTReasoningSignatureLen                 = 32 * 1024 * 1024
 )
 
 type codexReasoningReplayEntry struct {
@@ -29,11 +42,72 @@ var (
 	codexReasoningReplayEntries = make(map[string]codexReasoningReplayEntry)
 )
 
-func CacheCodexReasoningReplayItem(modelName, sessionKey string, item []byte) bool {
-	return CacheCodexReasoningReplayItems(modelName, sessionKey, [][]byte{item})
+type codexReasoningReplayKVClient interface {
+	KVGet(ctx context.Context, key string) ([]byte, bool, error)
+	KVSet(ctx context.Context, key string, value []byte, opts home.KVSetOptions) (bool, error)
+	KVCompareAndSwap(
+		ctx context.Context,
+		key string,
+		expected []byte,
+		expectedExists bool,
+		value []byte,
+		ttl time.Duration,
+	) (bool, error)
+	KVDel(ctx context.Context, keys ...string) (int64, error)
+	KVExpire(ctx context.Context, key string, ttl time.Duration) (bool, error)
 }
 
-func CacheCodexReasoningReplayItems(modelName, sessionKey string, items [][]byte) bool {
+var currentCodexReasoningReplayKVClient = func() (codexReasoningReplayKVClient, bool, error) {
+	client := home.Current()
+	if client == nil {
+		return nil, false, nil
+	}
+	if !client.Enabled() {
+		return nil, true, fmt.Errorf("home kv store unavailable: %w", home.ErrDisabled)
+	}
+	if !client.HeartbeatOK() {
+		return nil, true, fmt.Errorf("home kv store unavailable: %w", home.ErrNotConnected)
+	}
+	return client, true, nil
+}
+
+func codexReasoningReplayRuntime(
+	ctx context.Context,
+) (client codexReasoningReplayKVClient, homeMode bool, scopeID string, err error) {
+	if scope, ok := home.ClientScopeFromContext(ctx); ok {
+		scopeID = strings.TrimSpace(scope.ID)
+		if !scope.Enabled {
+			return nil, false, scopeID, nil
+		}
+		if scope.Client == nil {
+			return nil, true, scopeID, fmt.Errorf("home kv store unavailable: %w", home.ErrNotConnected)
+		}
+		if !scope.Client.Enabled() {
+			return nil, true, scopeID, fmt.Errorf("home kv store unavailable: %w", home.ErrDisabled)
+		}
+		if !scope.Client.HeartbeatOK() {
+			return nil, true, scopeID, fmt.Errorf("home kv store unavailable: %w", home.ErrNotConnected)
+		}
+		scopedClient, ok := scope.Client.(codexReasoningReplayKVClient)
+		if !ok {
+			return nil, true, scopeID, home.ErrCompareAndSwapUnsupported
+		}
+		return scopedClient, true, scopeID, nil
+	}
+
+	client, homeMode, err = currentCodexReasoningReplayKVClient()
+	if scoped, ok := client.(interface{ RuntimeScopeID() string }); ok {
+		scopeID = strings.TrimSpace(scoped.RuntimeScopeID())
+	}
+	return client, homeMode, scopeID, err
+}
+
+func cacheCodexReasoningReplayItemsBestEffort(
+	ctx context.Context,
+	modelName string,
+	sessionKey string,
+	items [][]byte,
+) bool {
 	key := codexReasoningReplayCacheKey(modelName, sessionKey)
 	if key == "" {
 		return false
@@ -42,57 +116,270 @@ func CacheCodexReasoningReplayItems(modelName, sessionKey string, items [][]byte
 	if !ok {
 		return false
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, scopeID, errClient := codexReasoningReplayRuntime(ctx)
+	if homeMode {
+		if errClient != nil {
+			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errClient)
+			return false
+		}
+		raw, errMarshal := json.Marshal(normalized)
+		if errMarshal != nil {
+			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errMarshal)
+			return false
+		}
+		written, errSet := client.KVSet(
+			ctx,
+			codexReasoningReplayKVKey(modelName, sessionKey),
+			raw,
+			home.KVSetOptions{EX: codexReasoningReplayCacheTTL},
+		)
+		if errSet != nil {
+			log.Errorf("home kv best-effort codex reasoning replay set failed prefix=cpa:codex:*: %v", errSet)
+			return false
+		}
+		return written
+	}
 
+	key = codexReasoningReplayLocalCacheKey(scopeID, key)
 	cacheCleanupOnce.Do(startCacheCleanup)
 	now := time.Now()
 	codexReasoningReplayMu.Lock()
 	defer codexReasoningReplayMu.Unlock()
 	codexReasoningReplayEntries[key] = codexReasoningReplayEntry{Items: normalized, Timestamp: now}
-	if len(codexReasoningReplayEntries) > CodexReasoningReplayCacheMaxEntries {
-		evictOldestCodexReasoningReplayEntries(CodexReasoningReplayCacheEvictBatchSize)
+	if len(codexReasoningReplayEntries) > codexReasoningReplayCacheMaxEntries {
+		evictOldestCodexReasoningReplayEntries(codexReasoningReplayCacheEvictBatchSize)
 	}
 	return true
 }
 
-func GetCodexReasoningReplayItem(modelName, sessionKey string) ([]byte, bool) {
-	items, ok := GetCodexReasoningReplayItems(modelName, sessionKey)
-	if !ok || len(items) == 0 {
-		return nil, false
-	}
-	return items[0], true
-}
-
-func GetCodexReasoningReplayItems(modelName, sessionKey string) ([][]byte, bool) {
+// AppendCodexReasoningReplayItemsBestEffort appends one completed turn to existing replay state.
+func AppendCodexReasoningReplayItemsBestEffort(
+	ctx context.Context,
+	modelName string,
+	sessionKey string,
+	items [][]byte,
+) bool {
 	key := codexReasoningReplayCacheKey(modelName, sessionKey)
 	if key == "" {
-		return nil, false
+		return false
+	}
+	normalized, ok := normalizeCodexReasoningReplayItems(items)
+	if !ok {
+		return false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, scopeID, errClient := codexReasoningReplayRuntime(ctx)
+	if homeMode {
+		if errClient != nil {
+			log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errClient)
+			return false
+		}
+		kvKey := codexReasoningReplayKVKey(modelName, sessionKey)
+		const maxCASAttempts = 32
+		for range maxCASAttempts {
+			if errContext := ctx.Err(); errContext != nil {
+				return false
+			}
+			existingRaw, found, errGet := client.KVGet(ctx, kvKey)
+			if errGet != nil {
+				log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errGet)
+				return false
+			}
+			if len(existingRaw) > codexReasoningReplayCacheMaxSerializedBytes {
+				log.Error("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: value exceeds serialized size limit")
+				return false
+			}
+			var existing [][]byte
+			if found {
+				if errUnmarshal := json.Unmarshal(existingRaw, &existing); errUnmarshal != nil {
+					log.Errorf(
+						"home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errUnmarshal,
+					)
+					return false
+				}
+				normalizedExisting, okExisting := normalizeCodexReasoningReplayItems(existing)
+				if !okExisting || len(normalizedExisting) != len(existing) {
+					log.Error("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: existing value is invalid")
+					return false
+				}
+				existing = normalizedExisting
+			}
+			combined := appendCodexReasoningReplayTurn(existing, normalized)
+			raw, errMarshal := json.Marshal(combined)
+			if errMarshal != nil {
+				log.Errorf(
+					"home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errMarshal,
+				)
+				return false
+			}
+			written, errCAS := client.KVCompareAndSwap(
+				ctx,
+				kvKey,
+				existingRaw,
+				found,
+				raw,
+				codexReasoningReplayCacheTTL,
+			)
+			if errCAS != nil {
+				log.Errorf("home kv best-effort codex reasoning replay append failed prefix=cpa:codex:*: %v", errCAS)
+				return false
+			}
+			if written {
+				return true
+			}
+		}
+		log.Warn("home kv best-effort codex reasoning replay append exhausted compare-and-swap attempts")
+		return false
 	}
 
+	key = codexReasoningReplayLocalCacheKey(scopeID, key)
+	cacheCleanupOnce.Do(startCacheCleanup)
+	now := time.Now()
+	codexReasoningReplayMu.Lock()
+	entry := codexReasoningReplayEntries[key]
+	if now.Sub(entry.Timestamp) > codexReasoningReplayCacheTTL {
+		entry.Items = nil
+	}
+	entry.Items = appendCodexReasoningReplayTurn(entry.Items, normalized)
+	entry.Timestamp = now
+	codexReasoningReplayEntries[key] = entry
+	if len(codexReasoningReplayEntries) > codexReasoningReplayCacheMaxEntries {
+		evictOldestCodexReasoningReplayEntries(codexReasoningReplayCacheEvictBatchSize)
+	}
+	codexReasoningReplayMu.Unlock()
+	return true
+}
+
+func appendCodexReasoningReplayTurn(existing, turn [][]byte) [][]byte {
+	if len(existing) > 0 && strings.TrimSpace(
+		gjson.GetBytes(
+			existing[0], "type",
+		).String(),
+	) != CodexReasoningReplayTurnType {
+		existing = nil
+	}
+	turnID := ""
+	if len(turn) > 0 && strings.TrimSpace(gjson.GetBytes(turn[0], "type").String()) == CodexReasoningReplayTurnType {
+		turnID = strings.TrimSpace(gjson.GetBytes(turn[0], "id").String())
+	}
+	if turnID != "" {
+		for _, item := range existing {
+			if strings.TrimSpace(gjson.GetBytes(item, "type").String()) == CodexReasoningReplayTurnType &&
+				strings.TrimSpace(gjson.GetBytes(item, "id").String()) == turnID {
+				return trimCodexReasoningReplayItems(cloneCodexReasoningReplayItems(existing))
+			}
+		}
+	}
+	combined := make([][]byte, 0, len(existing)+len(turn))
+	combined = append(combined, cloneCodexReasoningReplayItems(existing)...)
+	combined = append(combined, cloneCodexReasoningReplayItems(turn)...)
+	return trimCodexReasoningReplayItems(combined)
+}
+
+func trimCodexReasoningReplayItems(items [][]byte) [][]byte {
+	for {
+		turnStarts := []int{0}
+		totalBytes := 0
+		for index, item := range items {
+			totalBytes += len(item)
+			if index > 0 && strings.TrimSpace(gjson.GetBytes(item, "type").String()) == CodexReasoningReplayTurnType {
+				turnStarts = append(turnStarts, index)
+			}
+		}
+		if len(turnStarts) <= codexReasoningReplayCacheMaxTurnsPerEntry &&
+			totalBytes <= codexReasoningReplayCacheMaxBytesPerEntry {
+			return items
+		}
+		if len(turnStarts) <= 1 {
+			return nil
+		}
+		items = items[turnStarts[1]:]
+	}
+}
+
+func GetCodexReasoningReplayItemsRequired(
+	ctx context.Context,
+	modelName string,
+	sessionKey string,
+) ([][]byte, bool, error) {
+	key := codexReasoningReplayCacheKey(modelName, sessionKey)
+	if key == "" {
+		return nil, false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, scopeID, errClient := codexReasoningReplayRuntime(ctx)
+	if homeMode {
+		if errClient != nil {
+			return nil, false, errClient
+		}
+		remoteKey := codexReasoningReplayKVKey(modelName, sessionKey)
+		raw, found, errGet := client.KVGet(ctx, remoteKey)
+		if errGet != nil || !found {
+			return nil, false, errGet
+		}
+		if len(raw) > codexReasoningReplayCacheMaxSerializedBytes {
+			return nil, false, fmt.Errorf("home kv codex reasoning replay value exceeds serialized size limit")
+		}
+		var items [][]byte
+		if errUnmarshal := json.Unmarshal(raw, &items); errUnmarshal != nil {
+			return nil, false, errUnmarshal
+		}
+		normalized, okNormalize := normalizeCodexReasoningReplayItems(items)
+		if !okNormalize || len(normalized) != len(items) {
+			return nil, false, fmt.Errorf("home kv codex reasoning replay value is invalid")
+		}
+		if _, errExpire := client.KVExpire(ctx, remoteKey, codexReasoningReplayCacheTTL); errExpire != nil {
+			return nil, false, errExpire
+		}
+		return normalized, true, nil
+	}
+
+	key = codexReasoningReplayLocalCacheKey(scopeID, key)
 	cacheCleanupOnce.Do(startCacheCleanup)
 	now := time.Now()
 	codexReasoningReplayMu.Lock()
 	defer codexReasoningReplayMu.Unlock()
 	entry, ok := codexReasoningReplayEntries[key]
 	if !ok {
-		return nil, false
+		return nil, false, nil
 	}
-	if now.Sub(entry.Timestamp) > CodexReasoningReplayCacheTTL {
+	if now.Sub(entry.Timestamp) > codexReasoningReplayCacheTTL {
 		delete(codexReasoningReplayEntries, key)
-		return nil, false
+		return nil, false, nil
 	}
 	entry.Timestamp = now
 	codexReasoningReplayEntries[key] = entry
-	return cloneCodexReasoningReplayItems(entry.Items), true
+	return cloneCodexReasoningReplayItems(entry.Items), true, nil
 }
 
-func DeleteCodexReasoningReplayItem(modelName, sessionKey string) {
+func DeleteCodexReasoningReplayItemRequired(ctx context.Context, modelName, sessionKey string) error {
 	key := codexReasoningReplayCacheKey(modelName, sessionKey)
 	if key == "" {
-		return
+		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	client, homeMode, scopeID, errClient := codexReasoningReplayRuntime(ctx)
+	if homeMode {
+		if errClient != nil {
+			return errClient
+		}
+		_, errDel := client.KVDel(ctx, codexReasoningReplayKVKey(modelName, sessionKey))
+		return errDel
+	}
+	key = codexReasoningReplayLocalCacheKey(scopeID, key)
 	codexReasoningReplayMu.Lock()
 	delete(codexReasoningReplayEntries, key)
 	codexReasoningReplayMu.Unlock()
+	return nil
 }
 
 func ClearCodexReasoningReplayCache() {
@@ -110,6 +397,24 @@ func codexReasoningReplayCacheKey(modelName, sessionKey string) string {
 	return strings.Join([]string{"codex-reasoning-replay", modelName, sessionKey}, "\x00")
 }
 
+func codexReasoningReplayKVKey(modelName, sessionKey string) string {
+	return "cpa:codex:reasoning-replay:" + codexReasoningReplayHashKeyPart(strings.TrimSpace(modelName)) + ":" +
+		codexReasoningReplayHashKeyPart(strings.TrimSpace(sessionKey))
+}
+
+func codexReasoningReplayHashKeyPart(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func codexReasoningReplayLocalCacheKey(scopeID, key string) string {
+	scopeID = strings.TrimSpace(scopeID)
+	if scopeID == "" {
+		return key
+	}
+	return strings.Join([]string{scopeID, key}, "\x00")
+}
+
 func normalizeCodexReasoningReplayItems(items [][]byte) ([][]byte, bool) {
 	normalized := make([][]byte, 0, len(items))
 	for _, item := range items {
@@ -118,12 +423,15 @@ func normalizeCodexReasoningReplayItems(items [][]byte) ([][]byte, bool) {
 			normalized = append(normalized, normalizedItem)
 		}
 	}
+	normalized = trimCodexReasoningReplayItems(normalized)
 	return normalized, len(normalized) > 0
 }
 
 func normalizeCodexReasoningReplayItem(item []byte) ([]byte, bool) {
 	itemResult := gjson.ParseBytes(item)
 	switch strings.TrimSpace(itemResult.Get("type").String()) {
+	case CodexReasoningReplayTurnType:
+		return normalizeCodexReasoningReplayTurn(itemResult)
 	case "reasoning":
 		return normalizeCodexReasoningReplayReasoningItem(itemResult)
 	case "function_call":
@@ -133,6 +441,29 @@ func normalizeCodexReasoningReplayItem(item []byte) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+func normalizeCodexReasoningReplayTurn(itemResult gjson.Result) ([]byte, bool) {
+	turnID := strings.TrimSpace(itemResult.Get("id").String())
+	if turnID == "" {
+		return nil, false
+	}
+	normalized := []byte(`{"type":"` + CodexReasoningReplayTurnType + `"}`)
+	normalized, _ = sjson.SetBytes(normalized, "id", turnID)
+	if fingerprint := strings.TrimSpace(itemResult.Get("assistant_fingerprint").String()); fingerprint != "" {
+		normalized, _ = sjson.SetBytes(normalized, "assistant_fingerprint", fingerprint)
+	}
+	if fingerprint := strings.TrimSpace(itemResult.Get("request_fingerprint").String()); fingerprint != "" {
+		normalized, _ = sjson.SetBytes(normalized, "request_fingerprint", fingerprint)
+	}
+	if callIDs := itemResult.Get("call_ids"); callIDs.IsArray() {
+		for _, callIDResult := range callIDs.Array() {
+			if callID := strings.TrimSpace(callIDResult.String()); callID != "" {
+				normalized, _ = sjson.SetBytes(normalized, "call_ids.-1", callID)
+			}
+		}
+	}
+	return normalized, true
 }
 
 func normalizeCodexReasoningReplayReasoningItem(itemResult gjson.Result) ([]byte, bool) {
@@ -291,7 +622,7 @@ func evictOldestCodexReasoningReplayEntries(count int) {
 func purgeExpiredCodexReasoningReplayCache(now time.Time) {
 	codexReasoningReplayMu.Lock()
 	for key, entry := range codexReasoningReplayEntries {
-		if now.Sub(entry.Timestamp) > CodexReasoningReplayCacheTTL {
+		if now.Sub(entry.Timestamp) > codexReasoningReplayCacheTTL {
 			delete(codexReasoningReplayEntries, key)
 		}
 	}

@@ -63,73 +63,139 @@ func TestCodexExecutorWrappedOpenAIImageAcceptsResponseDone(t *testing.T) {
 		Payload: []byte(`{"model":"gpt-image-1","prompt":"A cute baby sea otter"}`),
 	}
 
-	t.Run("non-stream", func(t *testing.T) {
-		var gotPath string
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			gotPath = r.URL.Path
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write(responseDoneFrame)
-		}))
-		defer server.Close()
+	t.Run(
+		"non-stream", func(t *testing.T) {
+			var gotPath string
+			server := httptest.NewServer(
+				http.HandlerFunc(
+					func(w http.ResponseWriter, r *http.Request) {
+						gotPath = r.URL.Path
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = w.Write(responseDoneFrame)
+					},
+				),
+			)
+			defer server.Close()
 
-		executor := &codexExecutor{cfg: &config.Config{}}
-		resp, errExecute := executor.Execute(
-			context.Background(),
-			newCodexOpenAIImageTestAuth(server.URL),
-			request,
-			codexOpenAIImageTestOptions(codexImagesGenerationsPath, false),
-		)
-		if errExecute != nil {
-			t.Fatalf("Execute() error = %v", errExecute)
-		}
-		if gotPath != "/responses" {
-			t.Fatalf("path = %q, want /responses", gotPath)
-		}
-		if got := gjson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "AA==" {
-			t.Fatalf("data.0.b64_json = %q, want AA==; payload=%s", got, string(resp.Payload))
-		}
-	})
-
-	t.Run("stream", func(t *testing.T) {
-		var gotPath string
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			gotPath = r.URL.Path
-			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write(responseDoneFrame)
-		}))
-		defer server.Close()
-
-		executor := &codexExecutor{cfg: &config.Config{}}
-		stream, errStream := executor.ExecuteStream(
-			context.Background(),
-			newCodexOpenAIImageTestAuth(server.URL),
-			request,
-			codexOpenAIImageTestOptions(codexImagesGenerationsPath, true),
-		)
-		if errStream != nil {
-			t.Fatalf("ExecuteStream() error = %v", errStream)
-		}
-		var combined bytes.Buffer
-		for chunk := range stream.Chunks {
-			if chunk.Err != nil {
-				t.Fatalf("stream chunk error = %v", chunk.Err)
+			executor := &codexExecutor{cfg: &config.Config{}}
+			resp, errExecute := executor.Execute(
+				context.Background(),
+				newCodexOpenAIImageTestAuth(server.URL),
+				request,
+				codexOpenAIImageTestOptions(codexImagesGenerationsPath, false),
+			)
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
 			}
-			combined.Write(chunk.Payload)
-		}
-		if gotPath != "/responses" {
-			t.Fatalf("path = %q, want /responses", gotPath)
-		}
-		eventData, hasData, valid := sseDataPayload(combined.Bytes())
-		if !hasData || !valid {
-			t.Fatalf("invalid completed image SSE frame: %q", combined.String())
-		}
-		if got := gjson.GetBytes(eventData, "type").String(); got != "image_generation.completed" {
-			t.Fatalf("event type = %q, want image_generation.completed; frame=%q", got, combined.String())
-		}
-		if got := gjson.GetBytes(eventData, "b64_json").String(); got != "AA==" {
-			t.Fatalf("b64_json = %q, want AA==; frame=%q", got, combined.String())
-		}
-	})
+			if gotPath != "/responses" {
+				t.Fatalf("path = %q, want /responses", gotPath)
+			}
+			if got := gjson.GetBytes(resp.Payload, "data.0.b64_json").String(); got != "AA==" {
+				t.Fatalf("data.0.b64_json = %q, want AA==; payload=%s", got, string(resp.Payload))
+			}
+		},
+	)
+
+	t.Run(
+		"stream", func(t *testing.T) {
+			var gotPath string
+			server := httptest.NewServer(
+				http.HandlerFunc(
+					func(w http.ResponseWriter, r *http.Request) {
+						gotPath = r.URL.Path
+						w.Header().Set("Content-Type", "text/event-stream")
+						_, _ = w.Write(responseDoneFrame)
+					},
+				),
+			)
+			defer server.Close()
+
+			executor := &codexExecutor{cfg: &config.Config{}}
+			stream, errStream := executor.ExecuteStream(
+				context.Background(),
+				newCodexOpenAIImageTestAuth(server.URL),
+				request,
+				codexOpenAIImageTestOptions(codexImagesGenerationsPath, true),
+			)
+			if errStream != nil {
+				t.Fatalf("ExecuteStream() error = %v", errStream)
+			}
+			var combined bytes.Buffer
+			for chunk := range stream.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream chunk error = %v", chunk.Err)
+				}
+				combined.Write(chunk.Payload)
+			}
+			if gotPath != "/responses" {
+				t.Fatalf("path = %q, want /responses", gotPath)
+			}
+			eventData, hasData, valid := sseDataPayload(combined.Bytes())
+			if !hasData || !valid {
+				t.Fatalf("invalid completed image SSE frame: %q", combined.String())
+			}
+			if got := gjson.GetBytes(eventData, "type").String(); got != "image_generation.completed" {
+				t.Fatalf("event type = %q, want image_generation.completed; frame=%q", got, combined.String())
+			}
+			if got := gjson.GetBytes(eventData, "b64_json").String(); got != "AA==" {
+				t.Fatalf("b64_json = %q, want AA==; frame=%q", got, combined.String())
+			}
+		},
+	)
+}
+
+func TestCodexOpenAIImage25ModelsPreserveDirectAndResponsesToolSelection(t *testing.T) {
+	for _, model := range []string{
+		"gpt-image-2.5-flare",
+		"gpt-image-2.5-flare-2026-09-08",
+		"gpt-image-2.5-sunburst",
+		"gpt-image-2.5-sunburst-2026-09-08",
+	} {
+		t.Run(
+			model, func(t *testing.T) {
+				payload := []byte(`{"model":"` + model + `","prompt":"draw","quality":"xhigh"}`)
+				req := cliproxyexecutor.Request{Model: "codex/" + model, Payload: payload}
+				if directModel := codexDirectOpenAIImageModel(req); directModel != model {
+					t.Fatalf("direct model = %q, want %q", directModel, model)
+				}
+				prepared, errPrepare := codexPrepareOpenAIImageGenerationJSON(payload, model)
+				if errPrepare != nil {
+					t.Fatalf("codexPrepareOpenAIImageGenerationJSON() error = %v", errPrepare)
+				}
+				if toolModel := gjson.GetBytes(prepared.Body, "tools.0.model").String(); toolModel != model {
+					t.Fatalf("tool model = %q, want %q; body=%s", toolModel, model, prepared.Body)
+				}
+				if toolModel := codexImageGenerationToolModel(prepared.Body); toolModel != model {
+					t.Fatalf("usage tool model = %q, want %q", toolModel, model)
+				}
+			},
+		)
+	}
+
+	if model := codexDirectOpenAIImageModel(
+		cliproxyexecutor.Request{Model: "gpt-image-2.5", Payload: []byte(`{"model":"gpt-image-2.5"}`)},
+	); model != "" {
+		t.Fatalf("plain gpt-image-2.5 alias classified as direct model %q", model)
+	}
+}
+
+func TestCodexOpenAIImage25PreservesSupportedQualityValues(t *testing.T) {
+	for _, quality := range []string{"low", "medium", "high", "xhigh", "max", "auto"} {
+		t.Run(
+			quality, func(t *testing.T) {
+				payload := []byte(
+					`{"model":"gpt-image-2.5-flare","prompt":"draw","quality":"` + quality + `"}`,
+				)
+				prepared, errPrepare := codexPrepareOpenAIImageGenerationJSON(payload, "gpt-image-2.5-flare")
+				if errPrepare != nil {
+					t.Fatalf("codexPrepareOpenAIImageGenerationJSON() error = %v", errPrepare)
+				}
+				if got := gjson.GetBytes(prepared.Body, "tools.0.quality").String(); got != quality {
+					t.Fatalf("quality = %q, want %q; body=%s", got, quality, prepared.Body)
+				}
+			},
+		)
+	}
 }
 
 func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T) {
@@ -171,7 +237,9 @@ func TestCodexExecutorDirectOpenAIImageGenerationUsesImagesEndpoint(t *testing.T
 			"Originator":            "Codex Desktop",
 		},
 	)
-	executor := &codexExecutor{cfg: &config.Config{}}
+	executor := &codexExecutor{
+		cfg: &config.Config{Codex: config.CodexConfig{DisableCodexCloaking: true}},
+	}
 	resp, errExecute := executor.Execute(
 		ctx, newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
 			Model: "codex/gpt-image-1.5",
@@ -252,8 +320,10 @@ func TestCodexExecutorDirectOpenAIImageGenerationStreamsImagesEndpoint(t *testin
 	executor := &codexExecutor{cfg: &config.Config{}}
 	stream, errStream := executor.ExecuteStream(
 		context.Background(), newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
-			Model:   "gpt-image-2",
-			Payload: []byte(`{"model":"gpt-image-2","prompt":"A cute baby sea otter","partial_images":2}`),
+			Model: "gpt-image-2.5-sunburst",
+			Payload: []byte(
+				`{"model":"gpt-image-2.5-sunburst","prompt":"A cute baby sea otter","quality":"max","partial_images":2}`,
+			),
 		}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, true),
 	)
 	if errStream != nil {
@@ -279,6 +349,12 @@ func TestCodexExecutorDirectOpenAIImageGenerationStreamsImagesEndpoint(t *testin
 	}
 	if got := gjson.GetBytes(gotBody, "partial_images").Int(); got != 2 {
 		t.Fatalf("partial_images = %d, want 2; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "model").String(); got != "gpt-image-2.5-sunburst" {
+		t.Fatalf("model = %q, want gpt-image-2.5-sunburst; body=%s", got, string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "quality").String(); got != "max" {
+		t.Fatalf("quality = %q, want max; body=%s", got, string(gotBody))
 	}
 	out := combined.String()
 	if !strings.Contains(out, "event: image_generation.partial_image") ||

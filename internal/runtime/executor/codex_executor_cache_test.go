@@ -129,15 +129,17 @@ func TestCodexExecutorCompactNormalizesInstructions(t *testing.T) {
 func TestCodexExecutorCompactDoesNotInjectImageToolOrReorderInput(t *testing.T) {
 	var captured []byte
 	server := httptest.NewServer(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Fatalf("read request body: %v", err)
-			}
-			captured = append([]byte(nil), body...)
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"resp_1","output":[]}`))
-		}),
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("read request body: %v", err)
+				}
+				captured = append([]byte(nil), body...)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"resp_1","output":[]}`))
+			},
+		),
 	)
 	defer server.Close()
 
@@ -324,6 +326,27 @@ func TestApplyModelHeaderOverridesUsesEmbeddedModelConfig(t *testing.T) {
 	}
 }
 
+func TestApplyModelHeaderOverridesUsesAstraMinimumClientVersion(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("User-Agent", codexUserAgent)
+	headers.Set("Originator", codexOriginator)
+
+	applyModelHeaderOverrides(headers, "gpt-6-astra")
+
+	if got := headers.Get("User-Agent"); got != "codex-tui/0.153.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.0)" {
+		t.Fatalf("User-Agent = %q", got)
+	}
+	if got := headers.Get("Originator"); got != "codex-tui" {
+		t.Fatalf("Originator = %q, want codex-tui", got)
+	}
+	if got := headers.Get("Version"); got != "0.153.0" {
+		t.Fatalf("Version = %q, want 0.153.0", got)
+	}
+	if got := headers.Get("Session_id"); got == "" {
+		t.Fatal("Session_id is empty after Astra User-Agent override")
+	}
+}
+
 func TestApplyCodexHeadersKeepsPromptCacheSessionOverCodexClientSession(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
@@ -493,10 +516,9 @@ func TestCodexExecutorCacheHelper_Claude_GeneratesCacheKeyFromUserID(t *testing.
 		t.Fatalf("Conversation_id = %q, want %q", gotConversation, gotKey)
 	}
 
-	// Second call with same user_id should produce the same cache key
-	rawJSON2 := []byte(`{"model":"gpt-5.3-codex","stream":true}`)
+	// A repeated request for the same resolved model must keep the cache key stable.
 	httpReq2, _, _, err := executor.cacheHelper(
-		ctx, sdktranslator.FromString("claude"), url, nil, req, req.Payload, rawJSON2,
+		ctx, sdktranslator.FromString("claude"), url, nil, req, req.Payload, rawJSON,
 	)
 	if err != nil {
 		t.Fatalf("cacheHelper error (second call): %v", err)
@@ -508,6 +530,24 @@ func TestCodexExecutorCacheHelper_Claude_GeneratesCacheKeyFromUserID(t *testing.
 	gotKey2 := gjson.GetBytes(body2, "prompt_cache_key").String()
 	if gotKey2 != gotKey {
 		t.Fatalf("prompt_cache_key (second call) = %q, want %q (should be stable)", gotKey2, gotKey)
+	}
+
+	// A different provider-facing model must not share the same prompt cache.
+	differentModelJSON := []byte(`{"model":"gpt-5.3-codex","stream":true}`)
+	differentModelReq, _, _, err := executor.cacheHelper(
+		ctx, sdktranslator.FromString("claude"), url, nil, req, req.Payload, differentModelJSON,
+	)
+	if err != nil {
+		t.Fatalf("cacheHelper error (different model): %v", err)
+	}
+	differentModelBody, errReadDifferent := io.ReadAll(differentModelReq.Body)
+	if errReadDifferent != nil {
+		t.Fatalf("read request body (different model): %v", errReadDifferent)
+	}
+	if differentModelKey := gjson.GetBytes(
+		differentModelBody, "prompt_cache_key",
+	).String(); differentModelKey == gotKey {
+		t.Fatalf("different resolved models shared prompt_cache_key %q", gotKey)
 	}
 }
 
@@ -645,6 +685,7 @@ func TestApplyCodexHeadersUsesConfiguredOAuthDefaults(t *testing.T) {
 		t.Fatalf("new request: %v", err)
 	}
 	cfg := &config.Config{
+		Codex:               config.CodexConfig{DisableCodexCloaking: true},
 		CodexHeaderDefaults: config.CodexHeaderDefaults{UserAgent: "codex_cli_rs/0.132.0 (Linux; x64)"},
 	}
 
