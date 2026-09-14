@@ -42,14 +42,17 @@ func BeginHomeAppLogScope() func() {
 	activeHomeAppLogScopes.Add(1)
 	var once sync.Once
 	return func() {
-		once.Do(func() {
-			activeHomeAppLogScopes.Add(-1)
-		})
+		once.Do(
+			func() {
+				activeHomeAppLogScopes.Add(-1)
+			},
+		)
 	}
 }
 
 type HomeAppLogForwarder struct {
 	formatter log.Formatter
+	clientMu  sync.RWMutex
 	client    homeAppLogClient
 	queue     chan homeAppLogPayload
 	stop      chan struct{}
@@ -60,10 +63,6 @@ type HomeAppLogForwarder struct {
 
 func StartHomeAppLogForwarder(queueSize int) *HomeAppLogForwarder {
 	return startHomeAppLogForwarder(queueSize, nil)
-}
-
-func StartHomeAppLogForwarderForClient(queueSize int, client *home.Client) *HomeAppLogForwarder {
-	return startHomeAppLogForwarder(queueSize, client)
 }
 
 func startHomeAppLogForwarder(queueSize int, client homeAppLogClient) *HomeAppLogForwarder {
@@ -129,13 +128,50 @@ func (f *HomeAppLogForwarder) Stop() {
 	)
 }
 
+// Bind activates forwarding to client.
+func (f *HomeAppLogForwarder) Bind(client *home.Client) {
+	f.bind(client)
+}
+
+func (f *HomeAppLogForwarder) bind(client homeAppLogClient) {
+	if f == nil {
+		return
+	}
+	f.clientMu.Lock()
+	f.client = client
+	f.enabled.Store(client != nil)
+	f.clientMu.Unlock()
+}
+
+// Deactivate stops forwarding only when client owns the forwarder.
+func (f *HomeAppLogForwarder) Deactivate(client *home.Client) {
+	f.deactivate(client)
+}
+
+func (f *HomeAppLogForwarder) deactivate(client homeAppLogClient) {
+	if f == nil || client == nil {
+		return
+	}
+	f.clientMu.Lock()
+	if f.client == client {
+		f.client = nil
+		f.enabled.Store(false)
+	}
+	f.clientMu.Unlock()
+}
+
 func (f *HomeAppLogForwarder) Levels() []log.Level {
 	return log.AllLevels
 }
 
 func (f *HomeAppLogForwarder) homeClient() homeAppLogClient {
-	if f != nil && f.client != nil {
-		return f.client
+	if f != nil {
+		f.clientMu.RLock()
+		client := f.client
+		f.clientMu.RUnlock()
+		if client != nil {
+			return client
+		}
 	}
 	return currentHomeAppLogClient()
 }
@@ -215,6 +251,17 @@ func (f *HomeAppLogForwarder) forward(payload homeAppLogPayload) {
 		return
 	}
 	if errPush := client.RPushAppLog(context.Background(), raw); errPush != nil && isHomeAppLogUnsupported(errPush) {
+		f.disableIfCurrentOwner(client)
+	}
+}
+
+func (f *HomeAppLogForwarder) disableIfCurrentOwner(client homeAppLogClient) {
+	if f == nil || client == nil {
+		return
+	}
+	f.clientMu.Lock()
+	defer f.clientMu.Unlock()
+	if f.client == client || (f.client == nil && currentHomeAppLogClient() == client) {
 		f.enabled.Store(false)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -348,8 +349,7 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"files": files})
 }
 
-// GetRequestLogByID finds and downloads a request log file by its request ID.
-// The ID is matched against the suffix of log file names (format: *-{requestID}.log).
+// GetRequestLogByID resolves one request log through its persisted lifecycle state.
 func (h *Handler) GetRequestLogByID(c *gin.Context) {
 	dir, ok := h.checkLogDirectory(c)
 	if !ok {
@@ -364,58 +364,12 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing request ID"})
 		return
 	}
-	if strings.ContainsAny(requestID, "/\\") || strings.Contains(requestID, "..") {
+	if len(requestID) > 512 || strings.ContainsAny(requestID, "/\\") || strings.Contains(requestID, "..") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request ID"})
 		return
 	}
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "log directory not found"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to list log directory: %v", err)})
-		return
-	}
-
-	suffix := "-" + requestID + ".log"
-	var matchedFile string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if strings.HasSuffix(name, suffix) {
-			matchedFile = name
-			break
-		}
-	}
-
-	if matchedFile == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "log file not found for the given request ID"})
-		return
-	}
-
-	dirAbs, errAbs := filepath.Abs(dir)
-	if errAbs != nil {
-		c.JSON(
-			http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve log directory: %v", errAbs)},
-		)
-		return
-	}
-	if linesParam := c.Query("lines"); linesParam != "" {
-		maxLines, err := strconv.Atoi(linesParam)
-		if err != nil || maxLines < 1 {
-			maxLines = 100
-		}
-		if maxLines > 10000 {
-			maxLines = 10000
-		}
-		h.previewLogFile(c, dirAbs, matchedFile, maxLines)
-		return
-	}
-	h.serveLogFile(c, dirAbs, matchedFile)
+	h.resolveRequestLogByID(c, dir, requestID)
 }
 
 // DownloadRequestErrorLog downloads a specific error request log file by name.
@@ -462,6 +416,8 @@ func (h *Handler) DownloadRequestErrorLog(c *gin.Context) {
 
 // previewLogFile reads the last maxLines lines from a log file and returns them as JSON.
 func (h *Handler) previewLogFile(c *gin.Context, dirAbs, fileName string, maxLines int) {
+	// A successful open is owned by this function and closed by the following defer.
+	// noinspection GoResourceLeak
 	file, _, ok := openLogFile(c, dirAbs, fileName)
 	if !ok {
 		return
@@ -489,13 +445,10 @@ func (h *Handler) previewLogFile(c *gin.Context, dirAbs, fileName string, maxLin
 	}
 
 	// Extract ring buffer in order
-	count := totalLines
-	if count > maxLines {
-		count = maxLines
-	}
+	count := min(totalLines, maxLines)
 	lines := make([]string, count)
 	start := ringIdx - count
-	for i := 0; i < count; i++ {
+	for i := range count {
 		lines[i] = ring[(start+i)%maxLines]
 	}
 
@@ -510,6 +463,8 @@ func (h *Handler) previewLogFile(c *gin.Context, dirAbs, fileName string, maxLin
 
 // serveLogFile validates the file path, checks for path traversal, and serves the file.
 func (h *Handler) serveLogFile(c *gin.Context, dirAbs, fileName string) {
+	// A successful open is owned by this function and closed by the following defer.
+	// noinspection GoResourceLeak
 	file, info, ok := openLogFile(c, dirAbs, fileName)
 	if !ok {
 		return
@@ -574,27 +529,27 @@ func (h *Handler) collectLogFiles(dir string) ([]string, error) {
 		path  string
 		order int64
 	}
-	cands := make([]candidate, 0, len(entries))
+	candidates := make([]candidate, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
 		if name == defaultLogFileName {
-			cands = append(cands, candidate{path: filepath.Join(dir, name), order: 0})
+			candidates = append(candidates, candidate{path: filepath.Join(dir, name), order: 0})
 			continue
 		}
 		if order, ok := rotationOrder(name); ok {
-			cands = append(cands, candidate{path: filepath.Join(dir, name), order: order})
+			candidates = append(candidates, candidate{path: filepath.Join(dir, name), order: order})
 		}
 	}
-	if len(cands) == 0 {
+	if len(candidates) == 0 {
 		return []string{}, nil
 	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].order < cands[j].order })
-	paths := make([]string, 0, len(cands))
-	for i := len(cands) - 1; i >= 0; i-- {
-		paths = append(paths, cands[i].path)
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].order < candidates[j].order })
+	paths := make([]string, 0, len(candidates))
+	for _, candidate := range slices.Backward(candidates) {
+		paths = append(paths, candidate.path)
 	}
 	return paths, nil
 }
@@ -729,7 +684,7 @@ func tailLogFiles(files []string, limit int, fallbackLatest int64) (logReadResul
 		lines:  []string{},
 		latest: fallbackLatest,
 	}
-	for i := len(files) - 1; i >= 0; i-- {
+	for _, file := range slices.Backward(files) {
 		remaining := 0
 		if limit > 0 {
 			remaining = limit - len(result.lines)
@@ -737,7 +692,7 @@ func tailLogFiles(files []string, limit int, fallbackLatest int64) (logReadResul
 				break
 			}
 		}
-		read, errRead := readTailLogLines(files[i], remaining)
+		read, errRead := readTailLogLines(file, remaining)
 		if errRead != nil {
 			if errors.Is(errRead, os.ErrNotExist) {
 				continue
@@ -816,15 +771,15 @@ func tailStartOffset(path string, boundary int64, limit int) (int64, error) {
 }
 
 func cursorForLatestLogFile(files []string, latest int64) (string, error) {
-	for i := len(files) - 1; i >= 0; i-- {
-		boundary, errBoundary := completeLogBoundary(files[i])
+	for _, file := range slices.Backward(files) {
+		boundary, errBoundary := completeLogBoundary(file)
 		if errBoundary != nil {
 			if errors.Is(errBoundary, os.ErrNotExist) {
 				continue
 			}
 			return "", errBoundary
 		}
-		cursor, errCursor := newLogCursor(files[i], boundary, latest)
+		cursor, errCursor := newLogCursor(file, boundary, latest)
 		if errCursor != nil {
 			if errors.Is(errCursor, os.ErrNotExist) {
 				continue
@@ -960,11 +915,11 @@ func locateLogCursorFile(files []string, cursor logCursor) (int, bool, error) {
 		}
 		return 0, false, nil
 	}
-	for i := len(files) - 1; i >= 0; i-- {
-		if filepath.Base(files[i]) == defaultLogFileName {
+	for i, file := range slices.Backward(files) {
+		if filepath.Base(file) == defaultLogFileName {
 			continue
 		}
-		matches, truncated, errMatch := logFileMatchesCursor(files[i], cursor)
+		matches, truncated, errMatch := logFileMatchesCursor(file, cursor)
 		if errMatch != nil {
 			if errors.Is(errMatch, os.ErrNotExist) {
 				continue

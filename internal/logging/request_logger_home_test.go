@@ -491,7 +491,9 @@ func TestFileStreamingLogWriterConcurrentCloseWritesAPIWebsocketTimelineSource(t
 		t.Fatalf("WriteAPIWebsocketTimelineSource error: %v", errWrite)
 	}
 	writer.WriteChunkAsync([]byte("data: {\"ok\":true}\n\n"))
-	if errStatus := writer.WriteStatus(http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}}); errStatus != nil {
+	if errStatus := writer.WriteStatus(
+		http.StatusOK, map[string][]string{"Content-Type": {"text/event-stream"}},
+	); errStatus != nil {
 		t.Fatalf("WriteStatus error: %v", errStatus)
 	}
 
@@ -503,11 +505,11 @@ func TestFileStreamingLogWriterConcurrentCloseWritesAPIWebsocketTimelineSource(t
 	go func() {
 		defer wg.Done()
 		<-start
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			writer.WriteChunkAsync([]byte("data: concurrent\n\n"))
 		}
 	}()
-	for i := 0; i < closeCount; i++ {
+	for range closeCount {
 		go func() {
 			defer wg.Done()
 			<-start
@@ -604,11 +606,11 @@ func TestHomeStreamingLogWriterConcurrentCloseWritesAPIWebsocketTimelineSource(t
 	go func() {
 		defer wg.Done()
 		<-start
-		for i := 0; i < 200; i++ {
+		for range 200 {
 			writer.WriteChunkAsync([]byte("data: concurrent\n\n"))
 		}
 	}()
-	for i := 0; i < closeCount; i++ {
+	for range closeCount {
 		go func() {
 			defer wg.Done()
 			<-start

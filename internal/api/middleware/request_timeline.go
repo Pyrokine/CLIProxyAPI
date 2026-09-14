@@ -9,12 +9,15 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const routeTraceStreamTerminalWait = 6 * time.Second
+
 func initRequestTimeline(c *gin.Context, timestamp time.Time) {
 	if c == nil {
 		return
 	}
 	timeline := logging.NewRequestTimeline()
 	c.Set(logging.RequestTimelineGinKey, timeline)
+	c.Set(logging.RouteTraceGinKey, logging.NewRouteTrace())
 	if timestamp.IsZero() {
 		timeline.Add("request.received", "")
 		return
@@ -36,12 +39,33 @@ func requestTimeline(c *gin.Context) *logging.RequestTimeline {
 
 func requestTimelineBytes(c *gin.Context) []byte {
 	timeline := requestTimeline(c)
-	if timeline == nil {
+	trace := requestRouteTrace(c)
+	if timeline == nil && trace == nil {
 		return nil
 	}
 	var buf bytes.Buffer
-	if errWrite := logging.WriteRequestTimeline(&buf, timeline.Snapshot()); errWrite != nil {
-		return []byte(fmt.Sprintf("=== REQUEST TIMELINE ===\nError: %s\n\n", errWrite.Error()))
+	if timeline != nil {
+		if errWrite := logging.WriteRequestTimeline(&buf, timeline.Snapshot()); errWrite != nil {
+			_, _ = fmt.Fprintf(&buf, "=== REQUEST TIMELINE ===\nError: %s\n\n", errWrite.Error())
+		}
+	}
+	if trace != nil {
+		trace.WaitForStreamTerminal(routeTraceStreamTerminalWait)
+		if errWrite := logging.WriteRouteTrace(&buf, trace.Snapshot()); errWrite != nil {
+			_, _ = fmt.Fprintf(&buf, "=== ROUTE TRACE ===\nError: %s\n\n", errWrite.Error())
+		}
 	}
 	return buf.Bytes()
+}
+
+func requestRouteTrace(c *gin.Context) *logging.RouteTrace {
+	if c == nil {
+		return nil
+	}
+	value, exists := c.Get(logging.RouteTraceGinKey)
+	if !exists {
+		return nil
+	}
+	trace, _ := value.(*logging.RouteTrace)
+	return trace
 }

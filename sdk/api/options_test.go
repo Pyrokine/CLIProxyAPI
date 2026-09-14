@@ -279,13 +279,13 @@ func (*sdkStreamingWriterSpy) WriteAPIWebsocketTimeline([]byte) error     { retu
 func (*sdkStreamingWriterSpy) SetFirstChunkTimestamp(time.Time)           {}
 func (*sdkStreamingWriterSpy) WriteRequestTimeline([]byte) error          { return nil }
 func (*sdkStreamingWriterSpy) Close() error                               { return nil }
-func (*sdkStreamingWriterSpy) WriteAPIRequestSource(*internallogging.FileBodySource) error {
+func (*sdkStreamingWriterSpy) WriteAPIRequestSource(_ *internallogging.FileBodySource) error {
 	return nil
 }
-func (*sdkStreamingWriterSpy) WriteAPIResponseSource(*internallogging.FileBodySource) error {
+func (*sdkStreamingWriterSpy) WriteAPIResponseSource(_ *internallogging.FileBodySource) error {
 	return nil
 }
-func (*sdkStreamingWriterSpy) WriteAPIWebsocketTimelineSource(*internallogging.FileBodySource) error {
+func (*sdkStreamingWriterSpy) WriteAPIWebsocketTimelineSource(_ *internallogging.FileBodySource) error {
 	return nil
 }
 
@@ -432,39 +432,41 @@ func TestRequestLoggerAdapterLegacySnapshotFreezesEnabledState(t *testing.T) {
 		{name: "disabled remains disabled", entry: false, replacement: true, wantCalls: 0},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			logger := &sdkLegacyToggleLogger{
-				sdkBasicRequestLoggerSpy: &sdkBasicRequestLoggerSpy{},
-				enabled:                  test.entry,
-			}
-			adapter := newRequestLoggerAdapter(logger)
-			snapshot := adapter.Snapshot()
-			if snapshot == nil {
-				t.Fatal("Snapshot returned nil")
-			}
-
-			adapter.SetEnabled(test.replacement)
-			if got := snapshot.IsEnabled(); got != test.entry {
-				t.Fatalf("snapshot enabled = %t, want %t", got, test.entry)
-			}
-			if got := adapter.IsEnabled(); got != test.replacement {
-				t.Fatalf("live adapter enabled = %t, want %t", got, test.replacement)
-			}
-			if snapshot.IsEnabled() {
-				if errLog := snapshot.LogRequest(
-					"/v1/messages", "POST", nil, nil, 200, nil,
-					nil, nil, nil, nil, nil, nil, "request-id", time.Time{}, time.Time{},
-				); errLog != nil {
-					t.Fatalf("LogRequest: %v", errLog)
+		t.Run(
+			test.name, func(t *testing.T) {
+				logger := &sdkLegacyToggleLogger{
+					sdkBasicRequestLoggerSpy: &sdkBasicRequestLoggerSpy{},
+					enabled:                  test.entry,
 				}
-			}
-			logger.sdkBasicRequestLoggerSpy.mu.Lock()
-			logCalls := logger.sdkBasicRequestLoggerSpy.logCalls
-			logger.sdkBasicRequestLoggerSpy.mu.Unlock()
-			if logCalls != test.wantCalls {
-				t.Fatalf("snapshot log calls = %d, want %d", logCalls, test.wantCalls)
-			}
-		})
+				adapter := newRequestLoggerAdapter(logger)
+				snapshot := adapter.Snapshot()
+				if snapshot == nil {
+					t.Fatal("Snapshot returned nil")
+				}
+
+				adapter.SetEnabled(test.replacement)
+				if got := snapshot.IsEnabled(); got != test.entry {
+					t.Fatalf("snapshot enabled = %t, want %t", got, test.entry)
+				}
+				if got := adapter.IsEnabled(); got != test.replacement {
+					t.Fatalf("live adapter enabled = %t, want %t", got, test.replacement)
+				}
+				if snapshot.IsEnabled() {
+					if errLog := snapshot.LogRequest(
+						"/v1/messages", "POST", nil, nil, 200, nil,
+						nil, nil, nil, nil, nil, nil, "request-id", time.Time{}, time.Time{},
+					); errLog != nil {
+						t.Fatalf("LogRequest: %v", errLog)
+					}
+				}
+				logger.sdkBasicRequestLoggerSpy.mu.Lock()
+				logCalls := logger.sdkBasicRequestLoggerSpy.logCalls
+				logger.sdkBasicRequestLoggerSpy.mu.Unlock()
+				if logCalls != test.wantCalls {
+					t.Fatalf("snapshot log calls = %d, want %d", logCalls, test.wantCalls)
+				}
+			},
+		)
 	}
 }
 
@@ -485,7 +487,7 @@ func TestRequestLoggerAdapterForwardsSourcesAndErrors(t *testing.T) {
 			t.Fatalf("NewFileBodySourceInDir(%d): %v", i, errCreate)
 		}
 		sources[i] = source
-		defer func(source *internallogging.FileBodySource) { _ = source.Cleanup() }(source)
+		t.Cleanup(func() { _ = source.Cleanup() })
 	}
 	requestTimeline := []byte("request timeline")
 	apiError := &internalinterfaces.ErrorMessage{
@@ -496,7 +498,8 @@ func TestRequestLoggerAdapterForwardsSourcesAndErrors(t *testing.T) {
 	if errLog := adapter.LogRequestWithOptionsAndAllSources(
 		"/v1/messages", "POST", nil, nil, 429, nil,
 		nil, nil, sources[0], nil, sources[1], nil, sources[2], nil, sources[3],
-		requestTimeline, []*internalinterfaces.ErrorMessage{nil, apiError}, true, "request-id", time.Time{}, time.Time{},
+		requestTimeline, []*internalinterfaces.ErrorMessage{nil, apiError}, true, "request-id", time.Time{},
+		time.Time{},
 	); errLog != nil {
 		t.Fatalf("LogRequestWithOptionsAndAllSources: %v", errLog)
 	}
@@ -630,10 +633,10 @@ func TestRequestLoggerAdapterCallsBasicLoggerWhenCleanupFails(t *testing.T) {
 	if logCalls != 1 {
 		t.Fatalf("log calls = %d, want 1", logCalls)
 	}
-	if sourceIndex := bytes.Index(captured, []byte("source-prefix")); sourceIndex < 0 {
+	if found := bytes.Contains(captured, []byte("source-prefix")); !found {
 		t.Fatalf("captured API request = %q, want source prefix", captured)
 	}
-	if memoryIndex := bytes.Index(captured, []byte("memory-suffix")); memoryIndex < 0 {
+	if found := bytes.Contains(captured, []byte("memory-suffix")); !found {
 		t.Fatalf("captured API request = %q, want memory suffix", captured)
 	}
 	if errRemove := os.Remove(blockingPath); errRemove != nil {
@@ -720,64 +723,68 @@ func TestRequestLoggerAdapterLegacyLoggerUsesMiddlewareFileSources(t *testing.T)
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
-			logger := &sdkBasicRequestLoggerSpy{}
-			adapter := requestLoggerAdapter{logger: logger}
-			engine := gin.New()
-			engine.Use(internalmiddleware.RequestLoggingMiddleware(adapter))
+		t.Run(
+			test.name, func(t *testing.T) {
+				gin.SetMode(gin.TestMode)
+				logger := &sdkBasicRequestLoggerSpy{}
+				adapter := requestLoggerAdapter{logger: logger}
+				engine := gin.New()
+				engine.Use(internalmiddleware.RequestLoggingMiddleware(adapter))
 
-			var source *internallogging.FileBodySource
-			var partPath string
-			engine.POST("/v1/messages", func(c *gin.Context) {
-				value, exists := c.Get(internallogging.APIRequestSourceContextKey)
-				if !exists {
-					t.Fatal("API request source missing")
-				}
-				var ok bool
-				source, ok = value.(*internallogging.FileBodySource)
-				if !ok || source == nil {
-					t.Fatalf("API request source has unexpected type %T", value)
-				}
-				if errAppend := source.AppendBytes(test.payload); errAppend != nil {
-					t.Fatalf("AppendBytes: %v", errAppend)
-				}
-				paths := source.Paths()
-				if len(paths) != 1 {
-					t.Fatalf("source paths = %v, want one path", paths)
-				}
-				partPath = paths[0]
-				c.String(http.StatusOK, "ok")
-			})
+				var source *internallogging.FileBodySource
+				var partPath string
+				engine.POST(
+					"/v1/messages", func(c *gin.Context) {
+						value, exists := c.Get(internallogging.APIRequestSourceContextKey)
+						if !exists {
+							t.Fatal("API request source missing")
+						}
+						var ok bool
+						source, ok = value.(*internallogging.FileBodySource)
+						if !ok || source == nil {
+							t.Fatalf("API request source has unexpected type %T", value)
+						}
+						if errAppend := source.AppendBytes(test.payload); errAppend != nil {
+							t.Fatalf("AppendBytes: %v", errAppend)
+						}
+						paths := source.Paths()
+						if len(paths) != 1 {
+							t.Fatalf("source paths = %v, want one path", paths)
+						}
+						partPath = paths[0]
+						c.String(http.StatusOK, "ok")
+					},
+				)
 
-			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(
-				http.MethodPost,
-				"/v1/messages",
-				bytes.NewBufferString(`{"model":"claude"}`),
-			)
-			engine.ServeHTTP(recorder, request)
+				recorder := httptest.NewRecorder()
+				request := httptest.NewRequest(
+					http.MethodPost,
+					"/v1/messages",
+					bytes.NewBufferString(`{"model":"claude"}`),
+				)
+				engine.ServeHTTP(recorder, request)
 
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
-			}
-			logger.mu.Lock()
-			logCalls := logger.logCalls
-			captured := bytes.Clone(logger.apiRequest)
-			logger.mu.Unlock()
-			if logCalls != 1 {
-				t.Fatalf("log calls = %d, want 1", logCalls)
-			}
-			if !bytes.Contains(captured, test.want) {
-				t.Fatalf("captured API request does not contain %q", string(test.want))
-			}
-			if source == nil || source.HasPayload() {
-				t.Fatal("middleware source was not cleaned")
-			}
-			if _, errStat := os.Stat(partPath); !os.IsNotExist(errStat) {
-				t.Fatalf("source part %q still exists, stat error = %v", partPath, errStat)
-			}
-		})
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+				}
+				logger.mu.Lock()
+				logCalls := logger.logCalls
+				captured := bytes.Clone(logger.apiRequest)
+				logger.mu.Unlock()
+				if logCalls != 1 {
+					t.Fatalf("log calls = %d, want 1", logCalls)
+				}
+				if !bytes.Contains(captured, test.want) {
+					t.Fatalf("captured API request does not contain %q", string(test.want))
+				}
+				if source == nil || source.HasPayload() {
+					t.Fatal("middleware source was not cleaned")
+				}
+				if _, errStat := os.Stat(partPath); !os.IsNotExist(errStat) {
+					t.Fatalf("source part %q still exists, stat error = %v", partPath, errStat)
+				}
+			},
+		)
 	}
 }
 

@@ -32,6 +32,41 @@ func TestRecordAPIRequestSkipsCommercialMode(t *testing.T) {
 	}
 }
 
+func TestRecordAPIRequestClonesDeferredBodyWhenRequestLogDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ginCtx := &gin.Context{}
+	ctx := util.WithGinContext(context.Background(), ginCtx)
+	body := []byte(`{"model":"original"}`)
+	headers := http.Header{"Authorization": []string{"Bearer original-secret"}}
+
+	recordAPIRequest(
+		ctx, &config.Config{}, upstreamRequestLog{
+			URL:     "https://api.example.com/v1/responses",
+			Method:  http.MethodPost,
+			Headers: headers,
+			Body:    body,
+		},
+	)
+	body[10] = 'X'
+	headers.Set("Authorization", "Bearer mutated-secret")
+
+	value, exists := ginCtx.Get(logging.DeferredAPIRequestContextKey)
+	if !exists {
+		t.Fatal("deferred API request was not captured")
+	}
+	requests, ok := value.([]logging.DeferredAPIRequest)
+	if !ok || len(requests) != 1 {
+		t.Fatalf("deferred API requests = %#v, want one request", value)
+	}
+	captured := string(requests[0]())
+	if !strings.Contains(captured, `{"model":"original"}`) {
+		t.Fatalf("captured API request = %q, want original body", captured)
+	}
+	if strings.Contains(captured, "original-secret") || strings.Contains(captured, "mutated-secret") {
+		t.Fatalf("captured API request leaked Authorization: %q", captured)
+	}
+}
+
 func TestRecordAPIRequestSourceFailureKeepsPreviousRequests(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ginCtx := &gin.Context{}

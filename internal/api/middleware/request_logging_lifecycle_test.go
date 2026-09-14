@@ -337,8 +337,7 @@ func (w *sourceStreamingLogCapture) Close() error {
 		w.apiWebsocketTimelineSource,
 	}
 	w.mu.Unlock()
-	cleanupFileBodySources(sources...)
-	return w.streamingLogCapture.Close()
+	return errors.Join(cleanupFileBodySources(sources...), w.streamingLogCapture.Close())
 }
 
 type errorStreamingLogCapture struct {
@@ -352,15 +351,15 @@ func (w *errorStreamingLogCapture) WriteStatus(_ int, _ map[string][]string) err
 	return w.statusErr
 }
 
-func (w *errorStreamingLogCapture) WriteAPIRequestSource(*logging.FileBodySource) error {
+func (w *errorStreamingLogCapture) WriteAPIRequestSource(_ *logging.FileBodySource) error {
 	return w.apiRequestSourceErr
 }
 
-func (*errorStreamingLogCapture) WriteAPIResponseSource(*logging.FileBodySource) error {
+func (*errorStreamingLogCapture) WriteAPIResponseSource(_ *logging.FileBodySource) error {
 	return nil
 }
 
-func (*errorStreamingLogCapture) WriteAPIWebsocketTimelineSource(*logging.FileBodySource) error {
+func (*errorStreamingLogCapture) WriteAPIWebsocketTimelineSource(_ *logging.FileBodySource) error {
 	return nil
 }
 
@@ -405,9 +404,11 @@ func TestRequestLoggingMiddlewareRetriesCleanupWhenLoggerDisabled(t *testing.T) 
 	}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(logger))
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		c.String(http.StatusOK, "ok")
-	})
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			c.String(http.StatusOK, "ok")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
@@ -434,13 +435,17 @@ func TestRequestLoggingMiddlewareRetriesCleanupWhenRuntimeDisabled(t *testing.T)
 		requestLogCapture: &requestLogCapture{enabled: false},
 	}
 	engine := gin.New()
-	engine.Use(RequestLoggingMiddleware(
-		logger,
-		RequestLoggingOptions{RuntimeEnabled: func() bool { return false }},
-	))
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		c.String(http.StatusOK, "ok")
-	})
+	engine.Use(
+		RequestLoggingMiddleware(
+			logger,
+			RequestLoggingOptions{RuntimeEnabled: func() bool { return false }},
+		),
+	)
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			c.String(http.StatusOK, "ok")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
@@ -468,28 +473,30 @@ func TestRequestLoggingMiddlewarePanicFinalizesAndRethrows(t *testing.T) {
 	engine.Use(RequestLoggingMiddleware(logger))
 
 	var partPaths []string
-	engine.GET("/v1/responses", func(c *gin.Context) {
-		for _, key := range []string{
-			logging.APIRequestSourceContextKey,
-			logging.APIResponseSourceContextKey,
-			logging.WebsocketTimelineSourceContextKey,
-			logging.APIWebsocketTimelineSourceContextKey,
-		} {
-			value, exists := c.Get(key)
-			if !exists {
-				t.Fatalf("source %q missing", key)
+	engine.GET(
+		"/v1/responses", func(c *gin.Context) {
+			for _, key := range []string{
+				logging.APIRequestSourceContextKey,
+				logging.APIResponseSourceContextKey,
+				logging.WebsocketTimelineSourceContextKey,
+				logging.APIWebsocketTimelineSourceContextKey,
+			} {
+				value, exists := c.Get(key)
+				if !exists {
+					t.Fatalf("source %q missing", key)
+				}
+				source, ok := value.(*logging.FileBodySource)
+				if !ok || source == nil {
+					t.Fatalf("source %q has unexpected type", key)
+				}
+				if errAppend := source.AppendBytes([]byte(`{"visible":"value"}`)); errAppend != nil {
+					t.Fatalf("AppendBytes(%s): %v", key, errAppend)
+				}
+				partPaths = append(partPaths, source.Paths()...)
 			}
-			source, ok := value.(*logging.FileBodySource)
-			if !ok || source == nil {
-				t.Fatalf("source %q has unexpected type", key)
-			}
-			if errAppend := source.AppendBytes([]byte(`{"visible":"value"}`)); errAppend != nil {
-				t.Fatalf("AppendBytes(%s): %v", key, errAppend)
-			}
-			partPaths = append(partPaths, source.Paths()...)
-		}
-		panic("request panic")
-	})
+			panic("request panic")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
@@ -520,9 +527,11 @@ func TestRequestLoggingMiddlewareRepanicReachesGinRecovery(t *testing.T) {
 	logger := &requestLogCapture{enabled: true}
 	engine := gin.New()
 	engine.Use(gin.RecoveryWithWriter(io.Discard), RequestLoggingMiddleware(logger))
-	engine.POST("/v1/messages", func(*gin.Context) {
-		panic("request panic")
-	})
+	engine.POST(
+		"/v1/messages", func(*gin.Context) {
+			panic("request panic")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude"}`))
@@ -543,9 +552,11 @@ func TestRequestLoggingMiddlewareClosesStreamingLoggerBeforeOuterRecovery(t *tes
 	logger := &requestLogCapture{enabled: true, streamWriter: streamWriter}
 	engine := gin.New()
 	engine.Use(gin.RecoveryWithWriter(io.Discard), RequestLoggingMiddleware(logger))
-	engine.POST("/v1/responses", func(*gin.Context) {
-		panic("request panic")
-	})
+	engine.POST(
+		"/v1/responses", func(*gin.Context) {
+			panic("request panic")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
@@ -578,10 +589,12 @@ func TestRequestLoggingMiddlewarePreservesCommittedStatusAfterPanic(t *testing.T
 	logger := &requestLogCapture{enabled: false}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(logger))
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		c.String(http.StatusAccepted, "accepted")
-		panic("request panic")
-	})
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			c.String(http.StatusAccepted, "accepted")
+			panic("request panic")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude"}`))
@@ -624,31 +637,33 @@ func TestRequestLoggingMiddlewareLoggerPanicDoesNotReplaceHandlerPanic(t *testin
 	engine.Use(RequestLoggingMiddleware(logger))
 
 	var partPath string
-	engine.POST("/v1/responses", func(c *gin.Context) {
-		value, exists := c.Get(logging.APIRequestSourceContextKey)
-		if !exists {
-			t.Fatal("API request source missing")
-		}
-		source, ok := value.(*logging.FileBodySource)
-		if !ok || source == nil {
-			t.Fatalf("API request source has unexpected type %T", value)
-		}
-		if errAppend := source.AppendBytes([]byte(`{"visible":"value"}`)); errAppend != nil {
-			t.Fatalf("AppendBytes: %v", errAppend)
-		}
-		paths := source.Paths()
-		if len(paths) != 1 {
-			t.Fatalf("source paths = %v, want one path", paths)
-		}
-		partPath = paths[0]
-		c.Set("API_REQUEST", []byte("memory request"))
-		c.Header("Content-Type", "text/event-stream")
-		c.Status(http.StatusOK)
-		if _, errWrite := c.Writer.Write([]byte("data: ok\n\n")); errWrite != nil {
-			t.Fatalf("write stream: %v", errWrite)
-		}
-		panic("handler panic")
-	})
+	engine.POST(
+		"/v1/responses", func(c *gin.Context) {
+			value, exists := c.Get(logging.APIRequestSourceContextKey)
+			if !exists {
+				t.Fatal("API request source missing")
+			}
+			source, ok := value.(*logging.FileBodySource)
+			if !ok || source == nil {
+				t.Fatalf("API request source has unexpected type %T", value)
+			}
+			if errAppend := source.AppendBytes([]byte(`{"visible":"value"}`)); errAppend != nil {
+				t.Fatalf("AppendBytes: %v", errAppend)
+			}
+			paths := source.Paths()
+			if len(paths) != 1 {
+				t.Fatalf("source paths = %v, want one path", paths)
+			}
+			partPath = paths[0]
+			c.Set("API_REQUEST", []byte("memory request"))
+			c.Header("Content-Type", "text/event-stream")
+			c.Status(http.StatusOK)
+			if _, errWrite := c.Writer.Write([]byte("data: ok\n\n")); errWrite != nil {
+				t.Fatalf("write stream: %v", errWrite)
+			}
+			panic("handler panic")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"stream":true}`))
@@ -679,13 +694,15 @@ func TestRequestLoggingMiddlewareCleansSourcesWhenFactoryPanics(t *testing.T) {
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(logger))
 	handlerCalled := false
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		handlerCalled = true
-		if _, exists := c.Get(logging.APIRequestSourceContextKey); exists {
-			t.Fatal("partially created source was attached")
-		}
-		c.String(http.StatusOK, "ok")
-	})
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			handlerCalled = true
+			if _, exists := c.Get(logging.APIRequestSourceContextKey); exists {
+				t.Fatal("partially created source was attached")
+			}
+			c.String(http.StatusOK, "ok")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
@@ -766,9 +783,11 @@ func TestRequestLoggingMiddlewareRetainsFactoryRollbackCleanupFailure(t *testing
 	}
 	engine := gin.New()
 	engine.Use(RequestLoggingMiddleware(logger))
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		c.String(http.StatusOK, "ok")
-	})
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			c.String(http.StatusOK, "ok")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(
@@ -809,34 +828,40 @@ func TestRequestLoggingMiddlewareUsesEntrySnapshot(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
-			entry := &requestLogCapture{enabled: test.entryEnabled}
-			replacement := &requestLogCapture{enabled: test.replacement}
-			holder := &requestLoggerSnapshotHolder{
-				requestLogCapture: &requestLogCapture{enabled: true},
-				snapshot:          entry,
-			}
-			engine := gin.New()
-			engine.Use(RequestLoggingMiddleware(holder))
-			engine.POST("/v1/messages", func(c *gin.Context) {
-				holder.setSnapshot(replacement)
-				c.String(http.StatusOK, "ok")
-			})
+		t.Run(
+			test.name, func(t *testing.T) {
+				gin.SetMode(gin.TestMode)
+				entry := &requestLogCapture{enabled: test.entryEnabled}
+				replacement := &requestLogCapture{enabled: test.replacement}
+				holder := &requestLoggerSnapshotHolder{
+					requestLogCapture: &requestLogCapture{enabled: true},
+					snapshot:          entry,
+				}
+				engine := gin.New()
+				engine.Use(RequestLoggingMiddleware(holder))
+				engine.POST(
+					"/v1/messages", func(c *gin.Context) {
+						holder.setSnapshot(replacement)
+						c.String(http.StatusOK, "ok")
+					},
+				)
 
-			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude"}`))
-			engine.ServeHTTP(recorder, request)
+				recorder := httptest.NewRecorder()
+				request := httptest.NewRequest(
+					http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude"}`),
+				)
+				engine.ServeHTTP(recorder, request)
 
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
-			}
-			entryCalls, _, _ := entry.snapshot()
-			replacementCalls, _, _ := replacement.snapshot()
-			if entryCalls != test.wantEntryCalls || replacementCalls != 0 {
-				t.Fatalf("entry calls = %d, replacement calls = %d", entryCalls, replacementCalls)
-			}
-		})
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+				}
+				entryCalls, _, _ := entry.snapshot()
+				replacementCalls, _, _ := replacement.snapshot()
+				if entryCalls != test.wantEntryCalls || replacementCalls != 0 {
+					t.Fatalf("entry calls = %d, replacement calls = %d", entryCalls, replacementCalls)
+				}
+			},
+		)
 	}
 }
 
@@ -876,34 +901,38 @@ func TestResponseWriterImplicitCommitInitializesStreaming(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
-			streamWriter := &streamingLogCapture{}
-			logger := &requestLogCapture{enabled: true, streamWriter: streamWriter}
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			wrapper := newResponseWriterWrapper(c.Writer, logger, &requestInfo{
-				URL:       "/v1/responses",
-				Method:    http.MethodPost,
-				Body:      []byte(`{"stream":true}`),
-				Timestamp: time.Now(),
-			}, nil)
-			c.Writer = wrapper
-			c.Header("Content-Type", "text/event-stream")
+		t.Run(
+			test.name, func(t *testing.T) {
+				gin.SetMode(gin.TestMode)
+				streamWriter := &streamingLogCapture{}
+				logger := &requestLogCapture{enabled: true, streamWriter: streamWriter}
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				wrapper := newResponseWriterWrapper(
+					c.Writer, logger, &requestInfo{
+						URL:       "/v1/responses",
+						Method:    http.MethodPost,
+						Body:      []byte(`{"stream":true}`),
+						Timestamp: time.Now(),
+					}, nil,
+				)
+				c.Writer = wrapper
+				c.Header("Content-Type", "text/event-stream")
 
-			if errCommit := test.commit(wrapper); errCommit != nil {
-				t.Fatalf("commit response: %v", errCommit)
-			}
-			if calls := logger.streamCallCount(); calls != 1 {
-				t.Fatalf("stream initialization calls = %d, want 1", calls)
-			}
-			if !wrapper.headerInitialized {
-				t.Fatal("response headers were not committed")
-			}
-			if errFinalize := wrapper.finalize(c); errFinalize != nil {
-				t.Fatalf("finalize: %v", errFinalize)
-			}
-		})
+				if errCommit := test.commit(wrapper); errCommit != nil {
+					t.Fatalf("commit response: %v", errCommit)
+				}
+				if calls := logger.streamCallCount(); calls != 1 {
+					t.Fatalf("stream initialization calls = %d, want 1", calls)
+				}
+				if !wrapper.headerInitialized {
+					t.Fatal("response headers were not committed")
+				}
+				if errFinalize := wrapper.finalize(c); errFinalize != nil {
+					t.Fatalf("finalize: %v", errFinalize)
+				}
+			},
+		)
 	}
 }
 
@@ -912,12 +941,14 @@ func TestResponseWriterDoesNotInitializeStreamingAfterFinalize(t *testing.T) {
 	logger := &requestLogCapture{enabled: true, streamWriter: &streamingLogCapture{}}
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	wrapper := newResponseWriterWrapper(c.Writer, logger, &requestInfo{
-		URL:       "/v1/responses",
-		Method:    http.MethodPost,
-		Body:      []byte(`{"stream":true}`),
-		Timestamp: time.Now(),
-	}, nil)
+	wrapper := newResponseWriterWrapper(
+		c.Writer, logger, &requestInfo{
+			URL:       "/v1/responses",
+			Method:    http.MethodPost,
+			Body:      []byte(`{"stream":true}`),
+			Timestamp: time.Now(),
+		}, nil,
+	)
 	c.Writer = wrapper
 	c.Header("Content-Type", "text/event-stream")
 
@@ -936,11 +967,13 @@ func TestResponseWriterUsesLastPendingStatusAtCommit(t *testing.T) {
 	logger := &requestLogCapture{enabled: true, streamWriter: streamWriter}
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	wrapper := newResponseWriterWrapper(c.Writer, logger, &requestInfo{
-		URL:       "/v1/responses",
-		Method:    http.MethodPost,
-		Timestamp: time.Now(),
-	}, nil)
+	wrapper := newResponseWriterWrapper(
+		c.Writer, logger, &requestInfo{
+			URL:       "/v1/responses",
+			Method:    http.MethodPost,
+			Timestamp: time.Now(),
+		}, nil,
+	)
 	c.Writer = wrapper
 	c.Header("Content-Type", "text/event-stream")
 	c.Status(http.StatusAccepted)
@@ -975,22 +1008,24 @@ func TestRequestLoggingMiddlewareDoesNotRecheckEnabledStateDuringFinalize(t *tes
 	engine.Use(RequestLoggingMiddleware(logger))
 
 	var partPath string
-	engine.POST("/v1/messages", func(c *gin.Context) {
-		value, exists := c.Get(logging.APIRequestSourceContextKey)
-		if !exists {
-			t.Fatal("API request source missing")
-		}
-		source, ok := value.(*logging.FileBodySource)
-		if !ok || source == nil {
-			t.Fatalf("API request source has unexpected type %T", value)
-		}
-		if errAppend := source.AppendBytes([]byte("source request")); errAppend != nil {
-			t.Fatalf("AppendBytes: %v", errAppend)
-		}
-		partPath = source.Paths()[0]
-		c.Status(http.StatusAccepted)
-		panic("handler panic")
-	})
+	engine.POST(
+		"/v1/messages", func(c *gin.Context) {
+			value, exists := c.Get(logging.APIRequestSourceContextKey)
+			if !exists {
+				t.Fatal("API request source missing")
+			}
+			source, ok := value.(*logging.FileBodySource)
+			if !ok || source == nil {
+				t.Fatalf("API request source has unexpected type %T", value)
+			}
+			if errAppend := source.AppendBytes([]byte("source request")); errAppend != nil {
+				t.Fatalf("AppendBytes: %v", errAppend)
+			}
+			partPath = source.Paths()[0]
+			c.Status(http.StatusAccepted)
+			panic("handler panic")
+		},
+	)
 
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewBufferString(`{"model":"claude"}`))
@@ -1053,11 +1088,13 @@ func TestResponseWriterFinalizeRetainsPersistentlyFailingSourceCleanup(t *testin
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Set(logging.FileBodySourceCleanupQueueContextKey, queue)
-	wrapper := newResponseWriterWrapper(c.Writer, nil, &requestInfo{
-		URL:       "/v1/messages",
-		Method:    http.MethodPost,
-		Timestamp: time.Now(),
-	}, nil)
+	wrapper := newResponseWriterWrapper(
+		c.Writer, nil, &requestInfo{
+			URL:       "/v1/messages",
+			Method:    http.MethodPost,
+			Timestamp: time.Now(),
+		}, nil,
+	)
 	if errFinalize := wrapper.finalize(c); errFinalize == nil {
 		t.Fatal("finalize returned nil for persistent cleanup failure")
 	}
@@ -1139,11 +1176,13 @@ func TestResponseWriterHeaderSnapshotDropsRemovedHeaders(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	logger := &requestLogCapture{enabled: true}
-	wrapper := newResponseWriterWrapper(c.Writer, logger, &requestInfo{
-		URL:       "/v1/messages",
-		Method:    http.MethodPost,
-		Timestamp: time.Now(),
-	}, nil)
+	wrapper := newResponseWriterWrapper(
+		c.Writer, logger, &requestInfo{
+			URL:       "/v1/messages",
+			Method:    http.MethodPost,
+			Timestamp: time.Now(),
+		}, nil,
+	)
 	c.Writer = wrapper
 	c.Header("X-Transient", "old")
 	wrapper.ensureHeadersCaptured()
@@ -1172,11 +1211,13 @@ func TestResponseWriterPartialWriteCapturesOnlyWrittenBytes(t *testing.T) {
 		err:            writeErr,
 	}
 	logger := &requestLogCapture{enabled: true}
-	wrapper := newResponseWriterWrapper(partialWriter, logger, &requestInfo{
-		URL:       "/v1/messages",
-		Method:    http.MethodPost,
-		Timestamp: time.Now(),
-	}, nil)
+	wrapper := newResponseWriterWrapper(
+		partialWriter, logger, &requestInfo{
+			URL:       "/v1/messages",
+			Method:    http.MethodPost,
+			Timestamp: time.Now(),
+		}, nil,
+	)
 	c.Writer = wrapper
 
 	n, errWrite := c.Writer.Write([]byte("abcdef"))
@@ -1200,11 +1241,13 @@ func TestResponseWriterFinalizeIsIdempotent(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	logger := &requestLogCapture{enabled: true}
-	wrapper := newResponseWriterWrapper(c.Writer, logger, &requestInfo{
-		URL:       "/v1/messages",
-		Method:    http.MethodPost,
-		Timestamp: time.Now(),
-	}, nil)
+	wrapper := newResponseWriterWrapper(
+		c.Writer, logger, &requestInfo{
+			URL:       "/v1/messages",
+			Method:    http.MethodPost,
+			Timestamp: time.Now(),
+		}, nil,
+	)
 	c.Writer = wrapper
 	c.String(http.StatusOK, "ok")
 
@@ -1232,7 +1275,9 @@ func TestResponseWriterFinalizeStreamingConvertsAsyncChunkPanicToError(t *testin
 	c, wrapper := newStreamingResponseWriterTestContext(t, logger)
 
 	errFinalize := wrapper.finalize(c)
-	if errFinalize == nil || !strings.Contains(errFinalize.Error(), "write streaming request log response chunk panic") {
+	if errFinalize == nil || !strings.Contains(
+		errFinalize.Error(), "write streaming request log response chunk panic",
+	) {
 		t.Fatalf("finalize error = %v, want async chunk panic", errFinalize)
 	}
 	_, closeCalls := streamWriter.streamingLogCapture.snapshot()
@@ -1269,12 +1314,14 @@ func TestResponseWriterRepeatedWriteHeaderInitializesStreamingOnce(t *testing.T)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"stream":true}`))
-	wrapper := newResponseWriterWrapper(c.Writer, logger, &requestInfo{
-		URL:       "/v1/responses",
-		Method:    http.MethodPost,
-		Body:      []byte(`{"stream":true}`),
-		Timestamp: time.Now(),
-	}, nil)
+	wrapper := newResponseWriterWrapper(
+		c.Writer, logger, &requestInfo{
+			URL:       "/v1/responses",
+			Method:    http.MethodPost,
+			Body:      []byte(`{"stream":true}`),
+			Timestamp: time.Now(),
+		}, nil,
+	)
 	c.Writer = wrapper
 	c.Header("Content-Type", "text/event-stream")
 	c.Status(http.StatusOK)
@@ -1507,31 +1554,33 @@ func TestResponseWriterStreamingInitializationFailureFallsBackToCompleteLog(t *t
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			gin.SetMode(gin.TestMode)
-			logger := &requestLogCapture{
-				enabled:      true,
-				streamWriter: test.streamWriter,
-				streamErr:    test.streamErr,
-				streamPanic:  test.streamPanic,
-			}
-			c, wrapper := newStreamingResponseWriterTestContext(t, logger)
+		t.Run(
+			test.name, func(t *testing.T) {
+				gin.SetMode(gin.TestMode)
+				logger := &requestLogCapture{
+					enabled:      true,
+					streamWriter: test.streamWriter,
+					streamErr:    test.streamErr,
+					streamPanic:  test.streamPanic,
+				}
+				c, wrapper := newStreamingResponseWriterTestContext(t, logger)
 
-			errFinalize := wrapper.finalize(c)
-			if errFinalize == nil {
-				t.Fatal("finalize returned nil error")
-			}
-			if test.streamErr != nil && !errors.Is(errFinalize, test.streamErr) {
-				t.Fatalf("finalize error = %v, want initialization error", errFinalize)
-			}
-			if test.wantMessage != "" && !strings.Contains(errFinalize.Error(), test.wantMessage) {
-				t.Fatalf("finalize error = %v, want %q", errFinalize, test.wantMessage)
-			}
-			calls, statuses, _ := logger.snapshot()
-			if calls != 1 || len(statuses) != 1 || statuses[0] != http.StatusOK {
-				t.Fatalf("fallback log calls = %d, statuses = %v", calls, statuses)
-			}
-		})
+				errFinalize := wrapper.finalize(c)
+				if errFinalize == nil {
+					t.Fatal("finalize returned nil error")
+				}
+				if test.streamErr != nil && !errors.Is(errFinalize, test.streamErr) {
+					t.Fatalf("finalize error = %v, want initialization error", errFinalize)
+				}
+				if test.wantMessage != "" && !strings.Contains(errFinalize.Error(), test.wantMessage) {
+					t.Fatalf("finalize error = %v, want %q", errFinalize, test.wantMessage)
+				}
+				calls, statuses, _ := logger.snapshot()
+				if calls != 1 || len(statuses) != 1 || statuses[0] != http.StatusOK {
+					t.Fatalf("fallback log calls = %d, statuses = %v", calls, statuses)
+				}
+			},
+		)
 	}
 }
 
@@ -1540,11 +1589,13 @@ func TestResponseWriterLiteralTruncationMarkerDoesNotStopCapture(t *testing.T) {
 	logger := &requestLogCapture{enabled: true}
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	wrapper := newResponseWriterWrapper(c.Writer, logger, &requestInfo{
-		URL:       "/v1/messages",
-		Method:    http.MethodPost,
-		Timestamp: time.Now(),
-	}, nil)
+	wrapper := newResponseWriterWrapper(
+		c.Writer, logger, &requestInfo{
+			URL:       "/v1/messages",
+			Method:    http.MethodPost,
+			Timestamp: time.Now(),
+		}, nil,
+	)
 	c.Writer = wrapper
 	if _, errWrite := c.Writer.Write(truncatedResponseBody); errWrite != nil {
 		t.Fatalf("write literal marker: %v", errWrite)
@@ -1589,12 +1640,14 @@ func newStreamingResponseWriterTestContext(
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewBufferString(`{"stream":true}`))
-	wrapper := newResponseWriterWrapper(c.Writer, logger, &requestInfo{
-		URL:       "/v1/responses",
-		Method:    http.MethodPost,
-		Body:      []byte(`{"stream":true}`),
-		Timestamp: time.Now(),
-	}, nil)
+	wrapper := newResponseWriterWrapper(
+		c.Writer, logger, &requestInfo{
+			URL:       "/v1/responses",
+			Method:    http.MethodPost,
+			Body:      []byte(`{"stream":true}`),
+			Timestamp: time.Now(),
+		}, nil,
+	)
 	c.Writer = wrapper
 	c.Header("Content-Type", "text/event-stream")
 	c.Status(http.StatusOK)

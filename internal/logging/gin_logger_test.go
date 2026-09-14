@@ -1,8 +1,10 @@
 package logging
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -49,18 +51,66 @@ func TestGinLogrusRecoveryHandlesRegularPanic(t *testing.T) {
 	}
 }
 
-func TestIsAIAPIPathIncludesCodexBackend(t *testing.T) {
-	paths := []string{
+func TestIsAIAPIPathIncludesPublicAPIGroups(t *testing.T) {
+	for _, path := range []string{
+		"/v1",
+		"/v1/models",
+		"/v1/alpha/search",
+		"/v1beta/interactions",
+		"/openai/v1/videos",
 		"/backend-api/codex/responses",
-		"/backend-api/codex/responses/compact",
-	}
-	for _, path := range paths {
+		"/api/provider/openai/v1/models",
+	} {
 		if !isAIAPIPath(path) {
 			t.Fatalf("expected %s to be treated as AI API path", path)
 		}
 	}
-	if isAIAPIPath("/backend-api/codex-status") {
-		t.Fatalf("expected /backend-api/codex-status not to be treated as AI API path")
+	for _, path := range []string{
+		"/v0/management/config",
+		"/v10/models",
+		"/openai/v10/videos",
+		"/backend-api/codex-status",
+		"/api/providers",
+	} {
+		if isAIAPIPath(path) {
+			t.Fatalf("expected %s not to be treated as AI API path", path)
+		}
+	}
+}
+
+func TestIsAIAPIPathIncludesCodexLive(t *testing.T) {
+	for _, path := range []string{
+		"/v1/live",
+		"/v1/live/call-1",
+		"/v1/realtime",
+		"/v1/realtime/calls",
+		"/v1/realtime/calls/call-1",
+	} {
+		if !isAIAPIPath(path) {
+			t.Fatalf("expected %s to be treated as AI API path", path)
+		}
+	}
+}
+
+func TestGinLogrusLoggerAddsRequestIDForCodexLive(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	engine := gin.New()
+	engine.Use(GinLogrusLogger())
+
+	var requestIDFromContext string
+	var requestIDFromGin string
+	engine.POST(
+		"/v1/live", func(c *gin.Context) {
+			requestIDFromContext = GetRequestID(c.Request.Context())
+			requestIDFromGin = GetGinRequestID(c)
+			c.Status(http.StatusOK)
+		},
+	)
+
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/live", nil))
+	if requestIDFromContext == "" || requestIDFromGin != requestIDFromContext {
+		t.Fatalf("context request ID = %q, Gin request ID = %q", requestIDFromContext, requestIDFromGin)
 	}
 }
 
@@ -92,5 +142,55 @@ func TestGinLogrusLoggerAddsRequestIDForCodexBackend(t *testing.T) {
 	}
 	if requestIDFromGin != requestIDFromContext {
 		t.Fatalf("expected Gin request ID %q to match context request ID %q", requestIDFromGin, requestIDFromContext)
+	}
+}
+
+func TestGinLogrusLoggerAddsRequestStateForRootResponses(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	engine := gin.New()
+	engine.Use(GinLogrusLogger())
+
+	var requestID string
+	var outcomeState *RequestOutcomeState
+	engine.POST(
+		"/responses", func(c *gin.Context) {
+			requestID = GetRequestID(c.Request.Context())
+			outcomeState = RequestOutcomeStateFromContext(c.Request.Context())
+			c.Status(http.StatusOK)
+		},
+	)
+
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/responses", nil))
+	if len(requestID) != 32 {
+		t.Fatalf("request ID length = %d, want 32: %q", len(requestID), requestID)
+	}
+	if outcomeState == nil {
+		t.Fatal("request outcome state was not attached")
+	}
+}
+
+func TestGenerateRequestIDFallbackRemainsUnique(t *testing.T) {
+	previous := readRequestIDRandom
+	readRequestIDRandom = func([]byte) (int, error) {
+		return 0, errors.New("entropy unavailable")
+	}
+	t.Cleanup(
+		func() {
+			readRequestIDRandom = previous
+		},
+	)
+
+	first := generateRequestID()
+	second := generateRequestID()
+	if len(first) != 32 || len(second) != 32 {
+		t.Fatalf("fallback IDs = %q, %q, want 32 hex characters", first, second)
+	}
+	if first == second {
+		t.Fatalf("fallback request IDs collided: %q", first)
+	}
+	if strings.Trim(first, "0") == "" || strings.Trim(second, "0") == "" {
+		t.Fatalf("fallback request ID must not be all zero: %q, %q", first, second)
 	}
 }

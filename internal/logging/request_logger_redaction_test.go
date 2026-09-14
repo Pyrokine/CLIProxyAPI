@@ -35,10 +35,12 @@ func (w *sourcePayloadFailWriter) Write(data []byte) (int, error) {
 }
 
 func (w *blockingBuffer) Write(data []byte) (int, error) {
-	w.once.Do(func() {
-		close(w.entered)
-		<-w.release
-	})
+	w.once.Do(
+		func() {
+			close(w.entered)
+			<-w.release
+		},
+	)
 	return w.Buffer.Write(data)
 }
 
@@ -76,7 +78,9 @@ func TestFileBodySourceWritePayloadToSerializesWithCleanup(t *testing.T) {
 	if got := writer.String(); !strings.Contains(got, "gpt-5") || strings.Contains(got, "source-secret") {
 		t.Fatalf("unexpected payload: %s", got)
 	}
-	if errWrite := source.WritePayloadTo(&bytes.Buffer{}); errWrite == nil || !strings.Contains(errWrite.Error(), "cleaned") {
+	if errWrite := source.WritePayloadTo(&bytes.Buffer{}); errWrite == nil || !strings.Contains(
+		errWrite.Error(), "cleaned",
+	) {
 		t.Fatalf("WritePayloadTo after cleanup error = %v, want cleaned error", errWrite)
 	}
 }
@@ -226,25 +230,27 @@ func TestRequestLogSourcePrefixPrecedesMemorySuffix(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			source, errSource := NewFileBodySourceInDir(t.TempDir(), "source-prefix")
-			if errSource != nil {
-				t.Fatalf("NewFileBodySourceInDir: %v", errSource)
-			}
-			defer func() { _ = source.Cleanup() }()
-			if errAppend := source.AppendBytes([]byte("source-prefix")); errAppend != nil {
-				t.Fatalf("AppendBytes: %v", errAppend)
-			}
-			var output bytes.Buffer
-			if errWrite := test.write(&output, []byte("memory-suffix"), source); errWrite != nil {
-				t.Fatalf("write source section: %v", errWrite)
-			}
-			sourceIndex := strings.Index(output.String(), "source-prefix")
-			memoryIndex := strings.Index(output.String(), "memory-suffix")
-			if sourceIndex < 0 || memoryIndex <= sourceIndex {
-				t.Fatalf("source and memory order = %q", output.String())
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				source, errSource := NewFileBodySourceInDir(t.TempDir(), "source-prefix")
+				if errSource != nil {
+					t.Fatalf("NewFileBodySourceInDir: %v", errSource)
+				}
+				defer func() { _ = source.Cleanup() }()
+				if errAppend := source.AppendBytes([]byte("source-prefix")); errAppend != nil {
+					t.Fatalf("AppendBytes: %v", errAppend)
+				}
+				var output bytes.Buffer
+				if errWrite := test.write(&output, []byte("memory-suffix"), source); errWrite != nil {
+					t.Fatalf("write source section: %v", errWrite)
+				}
+				sourceIndex := strings.Index(output.String(), "source-prefix")
+				memoryIndex := strings.Index(output.String(), "memory-suffix")
+				if sourceIndex < 0 || memoryIndex <= sourceIndex {
+					t.Fatalf("source and memory order = %q", output.String())
+				}
+			},
+		)
 	}
 }
 
@@ -309,34 +315,36 @@ func TestRequestLogSourceReadFailureKeepsMemorySuffix(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			source, errSource := NewFileBodySourceInDir(t.TempDir(), "unreadable-source")
-			if errSource != nil {
-				t.Fatalf("NewFileBodySourceInDir: %v", errSource)
-			}
-			defer func() { _ = source.Cleanup() }()
-			if errAppend := source.AppendBytes([]byte("source-prefix")); errAppend != nil {
-				t.Fatalf("AppendBytes: %v", errAppend)
-			}
-			paths := source.Paths()
-			if len(paths) != 1 {
-				t.Fatalf("source paths = %v, want one path", paths)
-			}
-			if errRemove := os.Remove(paths[0]); errRemove != nil {
-				t.Fatalf("remove source part: %v", errRemove)
-			}
+		t.Run(
+			test.name, func(t *testing.T) {
+				source, errSource := NewFileBodySourceInDir(t.TempDir(), "unreadable-source")
+				if errSource != nil {
+					t.Fatalf("NewFileBodySourceInDir: %v", errSource)
+				}
+				defer func() { _ = source.Cleanup() }()
+				if errAppend := source.AppendBytes([]byte("source-prefix")); errAppend != nil {
+					t.Fatalf("AppendBytes: %v", errAppend)
+				}
+				paths := source.Paths()
+				if len(paths) != 1 {
+					t.Fatalf("source paths = %v, want one path", paths)
+				}
+				if errRemove := os.Remove(paths[0]); errRemove != nil {
+					t.Fatalf("remove source part: %v", errRemove)
+				}
 
-			var output bytes.Buffer
-			if errWrite := test.write(&output, []byte("memory-suffix"), source); errWrite != nil {
-				t.Fatalf("write source section: %v", errWrite)
-			}
-			got := output.String()
-			markerIndex := strings.Index(got, "[source prefix unavailable: read failed]")
-			memoryIndex := strings.Index(got, "memory-suffix")
-			if markerIndex < 0 || memoryIndex <= markerIndex {
-				t.Fatalf("source failure output = %q", got)
-			}
-		})
+				var output bytes.Buffer
+				if errWrite := test.write(&output, []byte("memory-suffix"), source); errWrite != nil {
+					t.Fatalf("write source section: %v", errWrite)
+				}
+				got := output.String()
+				markerIndex := strings.Index(got, "[source prefix unavailable: read failed]")
+				memoryIndex := strings.Index(got, "memory-suffix")
+				if markerIndex < 0 || memoryIndex <= markerIndex {
+					t.Fatalf("source failure output = %q", got)
+				}
+			},
+		)
 	}
 }
 
@@ -477,13 +485,13 @@ func TestRequestLogTempLeasePublishesLockedCanonicalPath(t *testing.T) {
 func TestWriteRequestLogAtomicallyEnforcesFinalArtifactCapacity(t *testing.T) {
 	logsDir := t.TempDir()
 	logger := &FileRequestLogger{logsDir: logsDir}
-	for i := 0; i < maxPendingRequestLogTempFiles; i++ {
+	for i := range maxPendingRequestLogTempFiles {
 		if !logger.reserveFinalTempFileSlot() {
 			t.Fatalf("reserve final temp slot %d returned false", i)
 		}
 	}
 	defer func() {
-		for i := 0; i < maxPendingRequestLogTempFiles; i++ {
+		for range maxPendingRequestLogTempFiles {
 			logger.releaseActiveFinalTempFileSlot()
 		}
 	}()
@@ -501,13 +509,12 @@ func TestWriteRequestLogAtomicallyEnforcesFinalArtifactCapacity(t *testing.T) {
 func TestWriteRequestLogAtomicallyPublishesCompleteFile(t *testing.T) {
 	logsDir := t.TempDir()
 	path := filepath.Join(logsDir, "request.log")
-	if errWrite := os.WriteFile(path, []byte("old-content"), 0o600); errWrite != nil {
-		t.Fatalf("write old request log: %v", errWrite)
-	}
-	if errWrite := writeRequestLogAtomically(nil, path, func(writer io.Writer) error {
-		_, err := writer.Write([]byte("new-content"))
-		return err
-	}); errWrite != nil {
+	if errWrite := writeRequestLogAtomically(
+		nil, path, func(writer io.Writer) error {
+			_, err := writer.Write([]byte("new-content"))
+			return err
+		},
+	); errWrite != nil {
 		t.Fatalf("writeRequestLogAtomically: %v", errWrite)
 	}
 	got, errRead := os.ReadFile(path)
@@ -516,6 +523,34 @@ func TestWriteRequestLogAtomicallyPublishesCompleteFile(t *testing.T) {
 	}
 	if string(got) != "new-content" {
 		t.Fatalf("published request log = %q", got)
+	}
+	assertNoRequestLogPublishArtifacts(t, logsDir)
+}
+
+func TestWriteRequestLogAtomicallyDoesNotReplaceExistingFile(t *testing.T) {
+	logsDir := t.TempDir()
+	path := filepath.Join(logsDir, "request.log")
+	if errWrite := os.WriteFile(path, []byte("old-content"), 0o600); errWrite != nil {
+		t.Fatalf("write old request log: %v", errWrite)
+	}
+	published, errWrite := writeRequestLogAtomicallyWithResult(
+		nil, path, func(writer io.Writer) error {
+			_, err := writer.Write([]byte("new-content"))
+			return err
+		},
+	)
+	if errWrite == nil || !errors.Is(errWrite, os.ErrExist) {
+		t.Fatalf("writeRequestLogAtomicallyWithResult error = %v, want file exists", errWrite)
+	}
+	if published {
+		t.Fatal("writeRequestLogAtomicallyWithResult reported an existing file as published")
+	}
+	got, errRead := os.ReadFile(path)
+	if errRead != nil {
+		t.Fatalf("read existing request log: %v", errRead)
+	}
+	if string(got) != "old-content" {
+		t.Fatalf("existing request log = %q", got)
 	}
 	assertNoRequestLogPublishArtifacts(t, logsDir)
 }
@@ -538,17 +573,19 @@ func TestWriteRequestLogAtomicallyKeepsLeaseWhenTempCleanupFails(t *testing.T) {
 	defer func() {
 		removeRequestLogPath = originalRemove
 	}()
-	errWrite := writeRequestLogAtomically(logger, path, func(writer io.Writer) error {
-		file, ok := writer.(*os.File)
-		if !ok {
-			return fmt.Errorf("unexpected writer type %T", writer)
-		}
-		tempPath = file.Name()
-		if _, err := writer.Write([]byte("partial-content")); err != nil {
-			return err
-		}
-		return injectedErr
-	})
+	errWrite := writeRequestLogAtomically(
+		logger, path, func(writer io.Writer) error {
+			file, ok := writer.(*os.File)
+			if !ok {
+				return fmt.Errorf("unexpected writer type %T", writer)
+			}
+			tempPath = file.Name()
+			if _, err := writer.Write([]byte("partial-content")); err != nil {
+				return err
+			}
+			return injectedErr
+		},
+	)
 	if !errors.Is(errWrite, injectedErr) {
 		t.Fatalf("writeRequestLogAtomically error = %v, want injected error", errWrite)
 	}
@@ -584,12 +621,14 @@ func TestWriteRequestLogAtomicallyPreservesExistingFileOnFailure(t *testing.T) {
 		t.Fatalf("write old request log: %v", errWrite)
 	}
 	injectedErr := errors.New("injected request log write failure")
-	errWrite := writeRequestLogAtomically(nil, path, func(writer io.Writer) error {
-		if _, err := writer.Write([]byte("partial-content")); err != nil {
-			return err
-		}
-		return injectedErr
-	})
+	errWrite := writeRequestLogAtomically(
+		nil, path, func(writer io.Writer) error {
+			if _, err := writer.Write([]byte("partial-content")); err != nil {
+				return err
+			}
+			return injectedErr
+		},
+	)
 	if !errors.Is(errWrite, injectedErr) {
 		t.Fatalf("writeRequestLogAtomically error = %v, want injected error", errWrite)
 	}
@@ -701,32 +740,34 @@ func TestStreamingLogWriterCloseReturnsSourceCleanupError(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			source, sourceDir, partPath, nestedPath := newCleanupFailureSource(t)
-			writer := test.newWriter(source)
-			errClose := writer.Close()
-			if errClose == nil {
-				t.Fatal("Close returned nil cleanup error")
-			}
-			if !strings.Contains(errClose.Error(), partPath) {
-				t.Fatalf("Close error = %v, want failed source path", errClose)
-			}
-			if !source.HasPayload() {
-				t.Fatal("writer discarded failed cleanup state")
-			}
+		t.Run(
+			test.name, func(t *testing.T) {
+				source, sourceDir, partPath, nestedPath := newCleanupFailureSource(t)
+				writer := test.newWriter(source)
+				errClose := writer.Close()
+				if errClose == nil {
+					t.Fatal("Close returned nil cleanup error")
+				}
+				if !strings.Contains(errClose.Error(), partPath) {
+					t.Fatalf("Close error = %v, want failed source path", errClose)
+				}
+				if !source.HasPayload() {
+					t.Fatal("writer discarded failed cleanup state")
+				}
 
-			removeCleanupFailure(t, partPath, nestedPath)
-			errClose = writer.Close()
-			if test.name == "file" && errClose != nil {
-				t.Fatalf("retry Close: %v", errClose)
-			}
-			if source.HasPayload() {
-				t.Fatal("source still has payload after cleanup retry")
-			}
-			if _, errStat := os.Stat(sourceDir); !os.IsNotExist(errStat) {
-				t.Fatalf("source directory %q still exists, stat error = %v", sourceDir, errStat)
-			}
-		})
+				removeCleanupFailure(t, partPath, nestedPath)
+				errClose = writer.Close()
+				if test.name == "file" && errClose != nil {
+					t.Fatalf("retry Close: %v", errClose)
+				}
+				if source.HasPayload() {
+					t.Fatal("source still has payload after cleanup retry")
+				}
+				if _, errStat := os.Stat(sourceDir); !os.IsNotExist(errStat) {
+					t.Fatalf("source directory %q still exists, stat error = %v", sourceDir, errStat)
+				}
+			},
+		)
 	}
 }
 
@@ -912,27 +953,33 @@ func TestFileRequestLoggerRecoversFreshOrphanFileBodySource(t *testing.T) {
 
 func TestFileRequestLoggerScansCleanupDirectoryInBatches(t *testing.T) {
 	logsDir := t.TempDir()
-	for i := 0; i < requestLogCleanupScanBatchSize+10; i++ {
+	for i := range requestLogCleanupScanBatchSize + 10 {
 		path := filepath.Join(logsDir, fmt.Sprintf("ordinary-%03d.log", i))
 		if errWrite := os.WriteFile(path, []byte("log"), 0o600); errWrite != nil {
 			t.Fatalf("write ordinary log %d: %v", i, errWrite)
 		}
 	}
 	logger := NewFileRequestLogger(false, logsDir, "", 0)
-	if logger.cleanupScanDir == nil {
+	logger.cleanupRunMu.Lock()
+	scanPending := logger.cleanupScanDir != nil
+	logger.cleanupRunMu.Unlock()
+	if !scanPending {
 		t.Fatal("cleanup scan consumed more than one batch")
 	}
 	if errCleanup := logger.retryPendingCleanup(true); errCleanup != nil {
 		t.Fatalf("retryPendingCleanup: %v", errCleanup)
 	}
-	if logger.cleanupScanDir != nil {
+	logger.cleanupRunMu.Lock()
+	scanPending = logger.cleanupScanDir != nil
+	logger.cleanupRunMu.Unlock()
+	if scanPending {
 		t.Fatal("cleanup scan did not close directory at end of batch sequence")
 	}
 }
 
 func TestFileRequestLoggerContinuesCleanupScanInBackground(t *testing.T) {
 	logsDir := t.TempDir()
-	for i := 0; i < requestLogCleanupScanBatchSize*2+10; i++ {
+	for i := range requestLogCleanupScanBatchSize*2 + 10 {
 		path := filepath.Join(logsDir, fmt.Sprintf("ordinary-%03d.log", i))
 		if errWrite := os.WriteFile(path, []byte("log"), 0o600); errWrite != nil {
 			t.Fatalf("write ordinary log %d: %v", i, errWrite)
@@ -1090,24 +1137,26 @@ func TestFileRequestLoggerSettersRetryPendingTempFileCleanup(t *testing.T) {
 		{name: "SetHomeEnabled", call: func(logger *FileRequestLogger) { logger.SetHomeEnabled(true) }},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			logsDir := t.TempDir()
-			logger := NewFileRequestLogger(true, logsDir, "", 0)
-			pendingPath := filepath.Join(logsDir, "response-body-pending.tmp")
-			if errWrite := os.WriteFile(pendingPath, []byte("pending response"), 0o600); errWrite != nil {
-				t.Fatalf("write pending response temp file: %v", errWrite)
-			}
-			logger.retainTempFileForCleanup(pendingPath)
+		t.Run(
+			test.name, func(t *testing.T) {
+				logsDir := t.TempDir()
+				logger := NewFileRequestLogger(true, logsDir, "", 0)
+				pendingPath := filepath.Join(logsDir, "response-body-pending.tmp")
+				if errWrite := os.WriteFile(pendingPath, []byte("pending response"), 0o600); errWrite != nil {
+					t.Fatalf("write pending response temp file: %v", errWrite)
+				}
+				logger.retainTempFileForCleanup(pendingPath)
 
-			test.call(logger)
+				test.call(logger)
 
-			if logger.pendingTempFileCount() != 0 {
-				t.Fatalf("pending temp files = %d, want 0", logger.pendingTempFileCount())
-			}
-			if _, errStat := os.Stat(pendingPath); !os.IsNotExist(errStat) {
-				t.Fatalf("pending temp path %q still exists, stat error = %v", pendingPath, errStat)
-			}
-		})
+				if logger.pendingTempFileCount() != 0 {
+					t.Fatalf("pending temp files = %d, want 0", logger.pendingTempFileCount())
+				}
+				if _, errStat := os.Stat(pendingPath); !os.IsNotExist(errStat) {
+					t.Fatalf("pending temp path %q still exists, stat error = %v", pendingPath, errStat)
+				}
+			},
+		)
 	}
 }
 
@@ -1138,7 +1187,7 @@ func TestFileRequestLoggerStopsCreatingSpoolsAtCleanupBacklogLimit(t *testing.T)
 	logger := NewFileRequestLogger(true, logsDir, "", 0)
 	nestedPaths := make([]string, 0, maxPendingRequestLogTempFiles)
 	pendingPaths := make([]string, 0, maxPendingRequestLogTempFiles)
-	for i := 0; i < maxPendingRequestLogTempFiles; i++ {
+	for i := range maxPendingRequestLogTempFiles {
 		path := filepath.Join(logsDir, fmt.Sprintf("response-body-pending-%03d.tmp", i))
 		nestedPaths = append(nestedPaths, createNonEmptyDirectory(t, path))
 		pendingPaths = append(pendingPaths, path)
@@ -1176,7 +1225,7 @@ func TestFileRequestLoggerCountsActiveSpoolsTowardCapacity(t *testing.T) {
 	logsDir := t.TempDir()
 	logger := NewFileRequestLogger(true, logsDir, "", 0)
 	writers := make([]StreamingLogWriter, 0, maxPendingRequestLogTempFiles)
-	for i := 0; i < maxPendingRequestLogTempFiles; i++ {
+	for i := range maxPendingRequestLogTempFiles {
 		writer, errWriter := logger.LogStreamingRequest(
 			"/v1/responses",
 			"POST",
@@ -1212,7 +1261,7 @@ func TestFileRequestLoggerCountsActiveSpoolsTowardCapacity(t *testing.T) {
 func TestFileBodySourceCountsActiveSourcesTowardCapacity(t *testing.T) {
 	baseDir := t.TempDir()
 	sources := make([]*FileBodySource, 0, maxPendingFileBodySourceCount)
-	for i := 0; i < maxPendingFileBodySourceCount; i++ {
+	for i := range maxPendingFileBodySourceCount {
 		source, errSource := NewFileBodySourceInDir(baseDir, fmt.Sprintf("active-%03d", i))
 		if errSource != nil {
 			t.Fatalf("NewFileBodySourceInDir %d: %v", i, errSource)
@@ -1330,47 +1379,58 @@ func TestStreamingLogWritersRejectMetadataAfterClose(t *testing.T) {
 		{name: "home", writer: &homeStreamingLogWriter{closed: true}},
 	}
 	for _, test := range writers {
-		t.Run(test.name, func(t *testing.T) {
-			source, errSource := NewFileBodySourceInDir(t.TempDir(), "closed-writer")
-			if errSource != nil {
-				t.Fatalf("NewFileBodySourceInDir: %v", errSource)
-			}
-			defer func() { _ = source.Cleanup() }()
-			if errAppend := source.AppendBytes([]byte("source-payload")); errAppend != nil {
-				t.Fatalf("AppendBytes: %v", errAppend)
-			}
-
-			operations := []struct {
-				name string
-				call func() error
-			}{
-				{name: "status", call: func() error { return test.writer.WriteStatus(200, nil) }},
-				{name: "API request", call: func() error { return test.writer.WriteAPIRequest([]byte("request")) }},
-				{name: "API response", call: func() error { return test.writer.WriteAPIResponse([]byte("response")) }},
-				{
-					name: "API websocket timeline",
-					call: func() error { return test.writer.WriteAPIWebsocketTimeline([]byte("timeline")) },
-				},
-				{
-					name: "request timeline",
-					call: func() error { return test.writer.WriteRequestTimeline([]byte("timeline")) },
-				},
-				{name: "API request source", call: func() error { return test.writer.WriteAPIRequestSource(source) }},
-				{name: "API response source", call: func() error { return test.writer.WriteAPIResponseSource(source) }},
-				{
-					name: "API websocket timeline source",
-					call: func() error { return test.writer.WriteAPIWebsocketTimelineSource(source) },
-				},
-			}
-			for _, operation := range operations {
-				if errWrite := operation.call(); !errors.Is(errWrite, errStreamingLogWriterClosed) {
-					t.Fatalf("%s error = %v, want closed writer error", operation.name, errWrite)
+		t.Run(
+			test.name, func(t *testing.T) {
+				source, errSource := NewFileBodySourceInDir(t.TempDir(), "closed-writer")
+				if errSource != nil {
+					t.Fatalf("NewFileBodySourceInDir: %v", errSource)
 				}
-			}
-			if !source.HasPayload() {
-				t.Fatal("rejected source ownership was not retained by caller")
-			}
-		})
+				defer func() { _ = source.Cleanup() }()
+				if errAppend := source.AppendBytes([]byte("source-payload")); errAppend != nil {
+					t.Fatalf("AppendBytes: %v", errAppend)
+				}
+
+				operations := []struct {
+					name string
+					call func() error
+				}{
+					{name: "status", call: func() error { return test.writer.WriteStatus(200, nil) }},
+					{name: "API request", call: func() error { return test.writer.WriteAPIRequest([]byte("request")) }},
+					{
+						name: "API response",
+						call: func() error { return test.writer.WriteAPIResponse([]byte("response")) },
+					},
+					{
+						name: "API websocket timeline",
+						call: func() error { return test.writer.WriteAPIWebsocketTimeline([]byte("timeline")) },
+					},
+					{
+						name: "request timeline",
+						call: func() error { return test.writer.WriteRequestTimeline([]byte("timeline")) },
+					},
+					{
+						name: "API request source",
+						call: func() error { return test.writer.WriteAPIRequestSource(source) },
+					},
+					{
+						name: "API response source",
+						call: func() error { return test.writer.WriteAPIResponseSource(source) },
+					},
+					{
+						name: "API websocket timeline source",
+						call: func() error { return test.writer.WriteAPIWebsocketTimelineSource(source) },
+					},
+				}
+				for _, operation := range operations {
+					if errWrite := operation.call(); !errors.Is(errWrite, errStreamingLogWriterClosed) {
+						t.Fatalf("%s error = %v, want closed writer error", operation.name, errWrite)
+					}
+				}
+				if !source.HasPayload() {
+					t.Fatal("rejected source ownership was not retained by caller")
+				}
+			},
+		)
 	}
 }
 
@@ -1493,7 +1553,7 @@ func TestFileBodySourceAppliesPayloadLimitAcrossParts(t *testing.T) {
 	defer func() { _ = source.Cleanup() }()
 
 	partSize := maxMaskedPayloadBytes/2 + 1
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if errAppend := source.AppendPart([]byte(strings.Repeat("x", partSize))); errAppend != nil {
 			t.Fatalf("AppendPart %d: %v", i, errAppend)
 		}

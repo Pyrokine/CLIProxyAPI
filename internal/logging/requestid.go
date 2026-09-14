@@ -3,7 +3,13 @@ package logging
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"os"
+	"strconv"
+	"sync/atomic"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -14,13 +20,27 @@ type requestIDKey struct{}
 // ginRequestIDKey is the Gin context key for request IDs.
 const ginRequestIDKey = "__request_id__"
 
-// generateRequestID creates a new 8-character hex request ID.
+var readRequestIDRandom = rand.Read
+var requestIDFallbackCounter atomic.Uint64
+
+var requestIDFallbackPrefix = func() [8]byte {
+	seed := strconv.FormatInt(time.Now().UnixNano(), 10) + ":" + strconv.Itoa(os.Getpid())
+	digest := sha256.Sum256([]byte(seed))
+	var prefix [8]byte
+	copy(prefix[:], digest[:len(prefix)])
+	return prefix
+}()
+
+// generateRequestID creates a new 128-bit hexadecimal request ID.
 func generateRequestID() string {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
-		return "00000000"
+	var id [16]byte
+	if n, err := readRequestIDRandom(id[:]); err == nil && n == len(id) {
+		return hex.EncodeToString(id[:])
 	}
-	return hex.EncodeToString(b)
+
+	copy(id[:8], requestIDFallbackPrefix[:])
+	binary.BigEndian.PutUint64(id[8:], requestIDFallbackCounter.Add(1))
+	return hex.EncodeToString(id[:])
 }
 
 // WithRequestID returns a new context with the request ID attached.
@@ -58,4 +78,26 @@ func GetGinRequestID(c *gin.Context) string {
 		}
 	}
 	return ""
+}
+
+// EnsureGinRequestID returns the current request ID or creates one for this Gin request.
+func EnsureGinRequestID(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if requestID := GetGinRequestID(c); requestID != "" {
+		return requestID
+	}
+	if c.Request != nil {
+		if requestID := GetRequestID(c.Request.Context()); requestID != "" {
+			setGinRequestID(c, requestID)
+			return requestID
+		}
+	}
+	requestID := generateRequestID()
+	setGinRequestID(c, requestID)
+	if c.Request != nil {
+		c.Request = c.Request.WithContext(WithRequestID(c.Request.Context(), requestID))
+	}
+	return requestID
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -32,8 +33,31 @@ type LogFormatter struct{}
 // logFieldOrder defines the display order for common log fields.
 var logFieldOrder = []string{
 	"provider", "model", "version", "mode", "budget", "level", "original_mode", "original_value", "min", "max",
-	"clamped_to",
-	"error",
+	"clamped_to", "error",
+	"auth_index", "credential", "connection", "proxy_scheme", "remote_transport",
+	"media_session_id", "call_id", "peer", "state", "reason",
+}
+
+var quotedLogFields = map[string]struct{}{
+	"auth_index":       {},
+	"credential":       {},
+	"connection":       {},
+	"proxy_scheme":     {},
+	"remote_transport": {},
+	"media_session_id": {},
+	"call_id":          {},
+	"peer":             {},
+	"state":            {},
+	"reason":           {},
+}
+
+func formatLogFieldValue(key string, value any) string {
+	if _, quoted := quotedLogFields[key]; quoted {
+		if stringValue, ok := value.(string); ok {
+			return strconv.Quote(stringValue)
+		}
+	}
+	return fmt.Sprint(value)
 }
 
 // Format renders a single log entry with custom formatting.
@@ -65,7 +89,7 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 		var fields []string
 		for _, k := range logFieldOrder {
 			if v, ok := entry.Data[k]; ok {
-				fields = append(fields, fmt.Sprintf("%s=%v", k, v))
+				fields = append(fields, fmt.Sprintf("%s=%s", k, formatLogFieldValue(k, v)))
 			}
 		}
 		if len(fields) > 0 {

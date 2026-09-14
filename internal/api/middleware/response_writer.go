@@ -5,6 +5,7 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,12 +30,13 @@ var truncatedResponseBody = []byte("[response body omitted: exceeds capture limi
 
 // requestInfo holds essential details of an incoming HTTP request for logging purposes.
 type requestInfo struct {
-	URL       string              // URL is the request URL.
-	Method    string              // Method is the HTTP method (e.g., GET, POST).
-	Headers   map[string][]string // Headers contains the request headers.
-	Body      []byte              // Body is the raw request body.
-	RequestID string              // RequestID is the unique identifier for the request.
-	Timestamp time.Time           // Timestamp is when the request was received.
+	URL                 string                      // URL is the request URL.
+	Method              string                      // Method is the HTTP method (e.g., GET, POST).
+	Headers             map[string][]string         // Headers contains the request headers.
+	Body                []byte                      // Body is the raw request body.
+	RequestID           string                      // RequestID is the unique identifier for the request.
+	Timestamp           time.Time                   // Timestamp is when the request was received.
+	deferredBodyCapture *deferredRequestBodyCapture // deferredBodyCapture spools large error-only request bodies.
 }
 
 // responseWriterWrapper wraps the standard gin.ResponseWriter to intercept and log response data.
@@ -65,16 +67,11 @@ type responseWriterWrapper struct {
 	finalizeErr         error
 }
 
-// newResponseWriterWrapper creates and initializes a new ResponseWriterWrapper.
-// It takes the original gin.ResponseWriter, a logger instance, and request information.
-//
-// Parameters:
-//   - w: The original gin.ResponseWriter to wrap.
-//   - logger: The logging service to use for recording requests.
-//   - requestInfo: The pre-captured information about the incoming request.
-//
-// Returns:
-//   - A pointer to a new ResponseWriterWrapper.
+// Unwrap returns the original response writer.
+func (w *responseWriterWrapper) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func newResponseWriterWrapper(
 	w gin.ResponseWriter,
 	logger logging.RequestLogger,
@@ -261,10 +258,12 @@ func (w *responseWriterWrapper) commitHeaders() {
 			w.chunkChannel = make(chan []byte, 100)
 			w.streamDone = make(chan struct{})
 			go w.processStreamingChunks(w.streamDone, streamWriter, w.chunkChannel)
-			w.addStreamError(invokeRequestLogOperation(
-				"write streaming request log status",
-				func() error { return streamWriter.WriteStatus(w.statusCode, w.headers) },
-			))
+			w.addStreamError(
+				invokeRequestLogOperation(
+					"write streaming request log status",
+					func() error { return streamWriter.WriteStatus(w.statusCode, w.headers) },
+				),
+			)
 		}
 	}
 
@@ -336,10 +335,12 @@ func (w *responseWriterWrapper) processStreamingChunks(
 
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
-			w.addStreamError(requestLogPanicError(
-				"write streaming request log response chunk",
-				panicValue,
-			))
+			w.addStreamError(
+				requestLogPanicError(
+					"write streaming request log response chunk",
+					panicValue,
+				),
+			)
 		}
 		close(done)
 	}()
@@ -361,13 +362,15 @@ func (w *responseWriterWrapper) finalize(c *gin.Context) error {
 	if w == nil {
 		return nil
 	}
-	w.finalizeOnce.Do(func() {
-		w.finalized.Store(true)
-		w.finalizeErr = invokeRequestLogOperation(
-			"finalize request log",
-			func() error { return w.finalizeRequest(c) },
-		)
-	})
+	w.finalizeOnce.Do(
+		func() {
+			w.finalized.Store(true)
+			w.finalizeErr = invokeRequestLogOperation(
+				"finalize request log",
+				func() error { return w.finalizeRequest(c) },
+			)
+		},
+	)
 	return w.finalizeErr
 }
 
@@ -377,9 +380,14 @@ func (w *responseWriterWrapper) finalizeRequest(c *gin.Context) (err error) {
 	apiResponseSource := w.extractAPIResponseSource(c)
 	apiWebsocketTimelineSource := w.extractAPIWebsocketTimelineSource(c)
 	cleanupQueue := extractFileBodySourceCleanupQueue(c)
+	var deferredBodyCapture *deferredRequestBodyCapture
+	if w.requestInfo != nil {
+		deferredBodyCapture = w.requestInfo.deferredBodyCapture
+	}
 	defer func() {
 		err = errors.Join(
 			err,
+			deferredBodyCapture.cleanup(),
 			cleanupFileBodySources(
 				websocketTimelineSource,
 				apiRequestSource,
@@ -399,6 +407,51 @@ func (w *responseWriterWrapper) finalizeRequest(c *gin.Context) (err error) {
 		finalStatusCode = http.StatusOK
 	}
 
+	var requestOutcome logging.RequestOutcome
+	if c != nil && c.Request != nil {
+		requestContext := c.Request.Context()
+		switch {
+		case w.handlerPanicked:
+			logging.MarkRequestOutcomeFailure(
+				requestContext,
+				logging.RequestOutcomePanic,
+				"handler",
+				"handler panicked",
+			)
+		case errors.Is(requestContext.Err(), context.DeadlineExceeded):
+			logging.MarkRequestOutcomeFailure(
+				requestContext,
+				logging.RequestOutcomeDeadline,
+				"request",
+				context.DeadlineExceeded.Error(),
+			)
+		case errors.Is(requestContext.Err(), context.Canceled):
+			logging.MarkRequestOutcomeFailure(
+				requestContext,
+				logging.RequestOutcomeCanceled,
+				"request",
+				context.Canceled.Error(),
+			)
+		case finalStatusCode >= http.StatusInternalServerError:
+			logging.MarkRequestOutcomeFailure(
+				requestContext,
+				logging.RequestOutcomeServerError,
+				"http",
+				fmt.Sprintf("status %d", finalStatusCode),
+			)
+		case finalStatusCode >= http.StatusBadRequest:
+			logging.MarkRequestOutcomeFailure(
+				requestContext,
+				logging.RequestOutcomeClientError,
+				"http",
+				fmt.Sprintf("status %d", finalStatusCode),
+			)
+		}
+		if state := logging.RequestOutcomeStateFromContext(requestContext); state != nil {
+			requestOutcome = state.Snapshot()
+		}
+	}
+
 	var slicesAPIResponseError []*interfaces.ErrorMessage
 	if c != nil {
 		apiResponseError, isExist := c.Get("API_RESPONSE_ERROR")
@@ -409,9 +462,19 @@ func (w *responseWriterWrapper) finalizeRequest(c *gin.Context) (err error) {
 		}
 	}
 
-	hasAPIError := w.handlerPanicked || len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
+	hasAPIError := requestOutcome.Failed || w.handlerPanicked ||
+		len(slicesAPIResponseError) > 0 || finalStatusCode >= http.StatusBadRequest
 	forceLog := w.logOnErrorOnly && hasAPIError && !w.loggerEnabled
 	if !w.loggerEnabled && !forceLog {
+		if w.requestInfo != nil {
+			recordRequestLogArtifact(
+				w.logger, logging.RequestLogArtifact{
+					RequestID: w.requestInfo.RequestID,
+					State:     logging.RequestLogDisabled,
+					Reason:    "request logging is disabled",
+				},
+			)
+		}
 		return nil
 	}
 
@@ -432,11 +495,15 @@ func (w *responseWriterWrapper) finalizeRequest(c *gin.Context) (err error) {
 		)
 	}
 
+	apiRequest := w.extractAPIRequest(c)
+	if forceLog && len(apiRequest) == 0 {
+		apiRequest = w.extractDeferredAPIRequest(c)
+	}
 	return errors.Join(
 		w.streamError(),
 		w.logRequest(
 			w.extractRequestBody(c), finalStatusCode, w.cloneHeaders(), w.extractResponseBody(c),
-			w.extractWebsocketTimeline(c), websocketTimelineSource, w.extractAPIRequest(c), apiRequestSource,
+			w.extractWebsocketTimeline(c), websocketTimelineSource, apiRequest, apiRequestSource,
 			w.extractAPIResponse(c), apiResponseSource, w.extractAPIWebsocketTimeline(c), apiWebsocketTimelineSource,
 			requestTimelineBytes(c), w.extractAPIResponseTimestamp(c), slicesAPIResponseError, forceLog,
 		),
@@ -499,57 +566,73 @@ func (w *responseWriterWrapper) finalizeStreamingRequest(
 		WriteAPIWebsocketTimelineSource(*logging.FileBodySource) error
 	}); ok {
 		if apiRequestSource != nil && apiRequestSource.HasPayload() {
-			streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-				"write streaming request log API request source",
-				func() error { return sourceWriter.WriteAPIRequestSource(apiRequestSource) },
-			))
+			streamErr = errors.Join(
+				streamErr, invokeRequestLogOperation(
+					"write streaming request log API request source",
+					func() error { return sourceWriter.WriteAPIRequestSource(apiRequestSource) },
+				),
+			)
 		}
 		if len(apiRequest) > 0 {
-			streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-				"write streaming request log API request",
-				func() error { return streamWriter.WriteAPIRequest(apiRequest) },
-			))
+			streamErr = errors.Join(
+				streamErr, invokeRequestLogOperation(
+					"write streaming request log API request",
+					func() error { return streamWriter.WriteAPIRequest(apiRequest) },
+				),
+			)
 		}
 		if apiResponseSource != nil && apiResponseSource.HasPayload() {
-			streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-				"write streaming request log API response source",
-				func() error { return sourceWriter.WriteAPIResponseSource(apiResponseSource) },
-			))
+			streamErr = errors.Join(
+				streamErr, invokeRequestLogOperation(
+					"write streaming request log API response source",
+					func() error { return sourceWriter.WriteAPIResponseSource(apiResponseSource) },
+				),
+			)
 		}
 		if len(apiResponse) > 0 {
-			streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-				"write streaming request log API response",
-				func() error { return streamWriter.WriteAPIResponse(apiResponse) },
-			))
+			streamErr = errors.Join(
+				streamErr, invokeRequestLogOperation(
+					"write streaming request log API response",
+					func() error { return streamWriter.WriteAPIResponse(apiResponse) },
+				),
+			)
 		}
 		if apiWebsocketTimelineSource != nil && apiWebsocketTimelineSource.HasPayload() {
-			streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-				"write streaming request log API websocket timeline source",
-				func() error { return sourceWriter.WriteAPIWebsocketTimelineSource(apiWebsocketTimelineSource) },
-			))
+			streamErr = errors.Join(
+				streamErr, invokeRequestLogOperation(
+					"write streaming request log API websocket timeline source",
+					func() error { return sourceWriter.WriteAPIWebsocketTimelineSource(apiWebsocketTimelineSource) },
+				),
+			)
 		}
 		if len(apiWebsocketTimeline) > 0 {
-			streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-				"write streaming request log API websocket timeline",
-				func() error { return streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline) },
-			))
+			streamErr = errors.Join(
+				streamErr, invokeRequestLogOperation(
+					"write streaming request log API websocket timeline",
+					func() error { return streamWriter.WriteAPIWebsocketTimeline(apiWebsocketTimeline) },
+				),
+			)
 		}
 	} else {
 		mergedAPIRequest, errMerge := mergeFileBodySource(apiRequest, apiRequestSource)
 		streamErr = joinStreamingLogError(streamErr, "merge streaming request log API request source", errMerge)
 		if len(mergedAPIRequest) > 0 {
-			streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-				"write streaming request log API request",
-				func() error { return streamWriter.WriteAPIRequest(mergedAPIRequest) },
-			))
+			streamErr = errors.Join(
+				streamErr, invokeRequestLogOperation(
+					"write streaming request log API request",
+					func() error { return streamWriter.WriteAPIRequest(mergedAPIRequest) },
+				),
+			)
 		}
 		mergedAPIResponse, errMerge := mergeFileBodySource(apiResponse, apiResponseSource)
 		streamErr = joinStreamingLogError(streamErr, "merge streaming request log API response source", errMerge)
 		if len(mergedAPIResponse) > 0 {
-			streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-				"write streaming request log API response",
-				func() error { return streamWriter.WriteAPIResponse(mergedAPIResponse) },
-			))
+			streamErr = errors.Join(
+				streamErr, invokeRequestLogOperation(
+					"write streaming request log API response",
+					func() error { return streamWriter.WriteAPIResponse(mergedAPIResponse) },
+				),
+			)
 		}
 		mergedAPIWebsocketTimeline, errMerge := mergeFileBodySource(
 			apiWebsocketTimeline,
@@ -561,18 +644,22 @@ func (w *responseWriterWrapper) finalizeStreamingRequest(
 			errMerge,
 		)
 		if len(mergedAPIWebsocketTimeline) > 0 {
-			streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-				"write streaming request log API websocket timeline",
-				func() error { return streamWriter.WriteAPIWebsocketTimeline(mergedAPIWebsocketTimeline) },
-			))
+			streamErr = errors.Join(
+				streamErr, invokeRequestLogOperation(
+					"write streaming request log API websocket timeline",
+					func() error { return streamWriter.WriteAPIWebsocketTimeline(mergedAPIWebsocketTimeline) },
+				),
+			)
 		}
 	}
 	requestTimeline := requestTimelineBytes(c)
 	if len(requestTimeline) > 0 {
-		streamErr = errors.Join(streamErr, invokeRequestLogOperation(
-			"write streaming request log request timeline",
-			func() error { return streamWriter.WriteRequestTimeline(requestTimeline) },
-		))
+		streamErr = errors.Join(
+			streamErr, invokeRequestLogOperation(
+				"write streaming request log request timeline",
+				func() error { return streamWriter.WriteRequestTimeline(requestTimeline) },
+			),
+		)
 	}
 	return streamErr
 }
@@ -592,6 +679,43 @@ func (w *responseWriterWrapper) cloneHeaders() map[string][]string {
 
 func (w *responseWriterWrapper) extractAPIRequest(c *gin.Context) []byte {
 	return extractRequestLogPayload(c, "API_REQUEST")
+}
+
+func (w *responseWriterWrapper) extractDeferredAPIRequest(c *gin.Context) []byte {
+	if c == nil {
+		return nil
+	}
+	value, exists := c.Get(logging.DeferredAPIRequestContextKey)
+	if !exists {
+		return nil
+	}
+	requests, ok := value.([]logging.DeferredAPIRequest)
+	if !ok || len(requests) == 0 {
+		return nil
+	}
+	var body bytes.Buffer
+	for _, buildRequest := range requests {
+		if buildRequest == nil {
+			continue
+		}
+		payload, errBuild := invokeDeferredAPIRequest(buildRequest)
+		if errBuild != nil {
+			log.WithError(errBuild).Warn("failed to build deferred API request log")
+			continue
+		}
+		body.Write(payload)
+	}
+	return body.Bytes()
+}
+
+func invokeDeferredAPIRequest(buildRequest logging.DeferredAPIRequest) (payload []byte, err error) {
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			payload = nil
+			err = requestLogPanicError("build deferred API request log", panicValue)
+		}
+	}()
+	return buildRequest(), nil
 }
 
 func (w *responseWriterWrapper) extractAPIResponse(c *gin.Context) []byte {
@@ -631,6 +755,9 @@ func extractRequestLogPayload(c *gin.Context, key string) []byte {
 }
 
 func (w *responseWriterWrapper) extractAPIResponseTimestamp(c *gin.Context) time.Time {
+	if c == nil {
+		return time.Time{}
+	}
 	ts, isExist := c.Get("API_RESPONSE_TIMESTAMP")
 	if !isExist {
 		return time.Time{}
@@ -645,10 +772,35 @@ func (w *responseWriterWrapper) extractRequestBody(c *gin.Context) []byte {
 	if body := extractBodyOverride(c, requestBodyOverrideContextKey); len(body) > 0 {
 		return body
 	}
-	if w.requestInfo != nil && len(w.requestInfo.Body) > 0 {
+	if w.requestInfo == nil {
+		return nil
+	}
+	if len(w.requestInfo.Body) > 0 {
 		return w.requestInfo.Body
 	}
-	return nil
+	if w.requestInfo.deferredBodyCapture == nil {
+		return nil
+	}
+	body, statusMarker, errRead := w.requestInfo.deferredBodyCapture.bytes()
+	if errRead != nil {
+		log.WithError(errRead).Warn("failed to read deferred request body capture")
+		return []byte("[request body unavailable: deferred capture failed]")
+	}
+	encoding := ""
+	for key, values := range w.requestInfo.Headers {
+		if strings.EqualFold(key, "Content-Encoding") && len(values) > 0 {
+			encoding = values[0]
+			break
+		}
+	}
+	body = decodeCapturedRequestBodyForLogWithLimit(body, encoding, maxDeferredErrorRequestBodyBytes)
+	if statusMarker == "" {
+		return body
+	}
+	if len(body) > 0 && !bytes.HasSuffix(body, []byte("\n")) {
+		body = append(body, '\n')
+	}
+	return append(body, statusMarker...)
 }
 
 func (w *responseWriterWrapper) extractResponseBody(c *gin.Context) []byte {

@@ -55,19 +55,21 @@ func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption
 
 // WithRequestLoggerFactory customises request logger creation.
 func WithRequestLoggerFactory(factory func(*config.Config, string) logging.RequestLogger) ServerOption {
-	return internalapi.WithRequestLoggerFactory(func(cfg *config.Config, configPath string) internallogging.RequestLogger {
-		if factory == nil {
-			return nil
-		}
-		logger := factory(cfg, configPath)
-		if logger == nil {
-			return nil
-		}
-		if errCleanup := internallogging.RetryLegacySDKRequestLogCleanup(); errCleanup != nil {
-			log.WithError(errCleanup).Warn("failed to recover legacy SDK request log sources")
-		}
-		return newRequestLoggerAdapter(logger)
-	})
+	return internalapi.WithRequestLoggerFactory(
+		func(cfg *config.Config, configPath string) internallogging.RequestLogger {
+			if factory == nil {
+				return nil
+			}
+			logger := factory(cfg, configPath)
+			if logger == nil {
+				return nil
+			}
+			if errCleanup := internallogging.RetryLegacySDKRequestLogCleanup(); errCleanup != nil {
+				log.WithError(errCleanup).Warn("failed to recover legacy SDK request log sources")
+			}
+			return newRequestLoggerAdapter(logger)
+		},
+	)
 }
 
 // WithPostAuthHook registers a hook to be called after auth record creation.
@@ -156,7 +158,8 @@ func (a requestLoggerAdapter) LogRequestWithOptionsAndTimeline(
 	}); ok {
 		return loggerWithTimeline.LogRequestWithOptionsAndTimeline(
 			url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline,
-			apiRequest, apiResponse, apiWebsocketTimeline, requestTimeline, fromInternalErrorMessages(apiResponseErrors), force,
+			apiRequest, apiResponse, apiWebsocketTimeline, requestTimeline,
+			fromInternalErrorMessages(apiResponseErrors), force,
 			requestID, requestTimestamp, apiResponseTimestamp,
 		)
 	}
@@ -395,11 +398,13 @@ func fromInternalErrorMessages(messages []*internalinterfaces.ErrorMessage) []*h
 		if message == nil {
 			continue
 		}
-		out = append(out, &handlers.ErrorMessage{
-			StatusCode: message.StatusCode,
-			Error:      message.Error,
-			Addon:      message.Addon,
-		})
+		out = append(
+			out, &handlers.ErrorMessage{
+				StatusCode: message.StatusCode,
+				Error:      message.Error,
+				Addon:      message.Addon,
+			},
+		)
 	}
 	return out
 }

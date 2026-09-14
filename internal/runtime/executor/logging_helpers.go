@@ -25,9 +25,11 @@ const (
 	apiRequestKey                       = "API_REQUEST"
 	apiResponseKey                      = "API_RESPONSE"
 	apiWebsocketTimelineKey             = "API_WEBSOCKET_TIMELINE"
+	deferredAPIRequestBytesKey          = "DEFERRED_API_REQUEST_BYTES"
 	apiRequestSourceFailedKey           = "API_REQUEST_SOURCE_FAILED"
 	apiResponseSourceFailedKey          = "API_RESPONSE_SOURCE_FAILED"
 	apiWebsocketTimelineSourceFailedKey = "API_WEBSOCKET_TIMELINE_SOURCE_FAILED"
+	maxDeferredAPIRequestBodyBytes      = (8 << 20) - 1024
 )
 
 // upstreamRequestLog captures the outbound upstream request details for logging.
@@ -101,6 +103,48 @@ func RecordAPIRequest(
 	)
 }
 
+// RecordAPIWebsocketRequest stores an outbound upstream WebSocket request in the API timeline.
+func RecordAPIWebsocketRequest(
+	ctx context.Context,
+	cfg *config.Config,
+	url string,
+	method string,
+	headers http.Header,
+	body []byte,
+	provider string,
+	auth *cliproxyauth.Auth,
+) {
+	var authID, authLabel, authType, authValue string
+	if auth != nil {
+		authID = auth.ID
+		authLabel = auth.Label
+		authType, authValue = auth.AccountInfo()
+	}
+	recordAPIWebsocketRequest(
+		ctx, cfg, upstreamRequestLog{
+			URL:       url,
+			Method:    method,
+			Headers:   headers,
+			Body:      body,
+			Provider:  provider,
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		},
+	)
+}
+
+// RecordAPIWebsocketHandshake stores upstream WebSocket handshake metadata.
+func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+	recordAPIWebsocketHandshake(ctx, cfg, status, headers)
+}
+
+// RecordAPIWebsocketError stores an upstream WebSocket lifecycle error.
+func RecordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage string, err error) {
+	recordAPIWebsocketError(ctx, cfg, stage, err)
+}
+
 // RecordAPIResponseMetadata captures upstream response status/header information for request logging.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	recordAPIResponseMetadata(ctx, cfg, status, headers)
@@ -122,11 +166,15 @@ func requestLogCaptureEnabled(cfg *config.Config) bool {
 }
 
 func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequestLog) {
-	if !requestLogCaptureEnabled(cfg) {
+	if cfg == nil || cfg.CommercialMode {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
+		return
+	}
+	if !cfg.RequestLog {
+		deferAPIRequest(ginCtx, info)
 		return
 	}
 
@@ -134,25 +182,9 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	index := len(attempts) + 1
 	addRequestTimelineEvent(ginCtx, "upstream.request.start", upstreamRequestTimelineDetail(index, info))
 
-	builder := &strings.Builder{}
-	builder.WriteString(fmt.Sprintf("=== API REQUEST %d ===\n", index))
-	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano)))
-	if info.URL != "" {
-		builder.WriteString(fmt.Sprintf("Upstream URL: %s\n", info.URL))
-	} else {
-		builder.WriteString("Upstream URL: <unknown>\n")
-	}
-	if info.Method != "" {
-		builder.WriteString(fmt.Sprintf("HTTP Method: %s\n", info.Method))
-	}
-	if auth := formatAuthInfo(info); auth != "" {
-		builder.WriteString(fmt.Sprintf("Auth: %s\n", auth))
-	}
-	builder.WriteString("\nHeaders:\n")
-	writeHeaders(builder, info.Headers)
-	builder.WriteString("\nBody:\n")
+	builder := newAPIRequestLogBuilder(index, info, time.Now())
 	if len(info.Body) > 0 {
-		builder.WriteString(string(info.Body))
+		builder.Write(info.Body)
 	} else {
 		builder.WriteString("<empty>")
 	}
@@ -184,6 +216,68 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	}
 	attempts = append(attempts, attempt)
 	ginCtx.Set(apiAttemptsKey, attempts)
+}
+
+func deferAPIRequest(ginCtx *gin.Context, info upstreamRequestLog) {
+	if ginCtx == nil {
+		return
+	}
+	var requests []logging.DeferredAPIRequest
+	if value, exists := ginCtx.Get(logging.DeferredAPIRequestContextKey); exists {
+		requests, _ = value.([]logging.DeferredAPIRequest)
+	}
+	index := len(requests) + 1
+	capturedInfo := info
+	capturedInfo.Headers = info.Headers.Clone()
+	capturedAt := time.Now()
+	capturedBytes, _ := ginCtx.Get(deferredAPIRequestBytesKey)
+	bytesUsed, _ := capturedBytes.(int)
+	remaining := max(maxDeferredAPIRequestBodyBytes-bytesUsed, 0)
+	captureLength := min(len(info.Body), remaining)
+	capturedInfo.Body = bytes.Clone(info.Body[:captureLength])
+	bodyEmpty := len(info.Body) == 0
+	bodyTruncated := captureLength < len(info.Body)
+	ginCtx.Set(deferredAPIRequestBytesKey, bytesUsed+captureLength)
+	addRequestTimelineEvent(ginCtx, "upstream.request.start", upstreamRequestTimelineDetail(index, capturedInfo))
+	requests = append(
+		requests, func() []byte {
+			builder := newAPIRequestLogBuilder(index, capturedInfo, capturedAt)
+			if bodyEmpty {
+				builder.WriteString("<empty>")
+			} else {
+				builder.Write(capturedInfo.Body)
+				if bodyTruncated {
+					builder.WriteString(
+						fmt.Sprintf("\n[API REQUEST BODY TRUNCATED: captured first %d bytes]", captureLength),
+					)
+				}
+			}
+			builder.WriteString("\n\n")
+			return []byte(builder.String())
+		},
+	)
+	ginCtx.Set(logging.DeferredAPIRequestContextKey, requests)
+}
+
+func newAPIRequestLogBuilder(index int, info upstreamRequestLog, timestamp time.Time) *strings.Builder {
+	builder := &strings.Builder{}
+	builder.WriteString(fmt.Sprintf("=== API REQUEST %d ===\n", index))
+	builder.WriteString(fmt.Sprintf("Timestamp: %s\n", timestamp.Format(time.RFC3339Nano)))
+	if info.URL != "" {
+		builder.WriteString(fmt.Sprintf("Upstream URL: %s\n", info.URL))
+	} else {
+		builder.WriteString("Upstream URL: <unknown>\n")
+	}
+	if info.Method != "" {
+		builder.WriteString(fmt.Sprintf("HTTP Method: %s\n", info.Method))
+	}
+	if auth := formatAuthInfo(info); auth != "" {
+		builder.WriteString(fmt.Sprintf("Auth: %s\n", auth))
+	}
+	builder.WriteString("\nHeaders:\n")
+	writeHeaders(builder, info.Headers)
+	builder.WriteString("\nBody:\n")
+	return builder
 }
 
 // recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
@@ -422,10 +516,6 @@ func recordAPIWebsocketError(ctx context.Context, cfg *config.Config, stage stri
 
 func ginContextFrom(ctx context.Context) *gin.Context {
 	ginCtx, _ := util.GinContextValue(ctx).(*gin.Context)
-	if ginCtx != nil {
-		return ginCtx
-	}
-	ginCtx, _ = ctx.Value("gin").(*gin.Context)
 	return ginCtx
 }
 

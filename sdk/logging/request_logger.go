@@ -12,12 +12,12 @@ import (
 
 const defaultErrorLogsMaxFiles = 10
 
-// RequestLogger defines the interface for logging HTTP requests and responses.
 // PendingCleanupRetrier is an optional request logger capability for retrying deferred cleanup.
 type PendingCleanupRetrier interface {
 	RetryPendingCleanup() error
 }
 
+// RequestLogger defines the interface for logging HTTP requests and responses.
 type RequestLogger interface {
 	LogRequest(
 		url, method string,
@@ -142,7 +142,8 @@ func (l *FileRequestLogger) LogRequestWithOptionsAndTimeline(
 	}
 	return l.inner.LogRequestWithOptionsAndTimeline(
 		url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline,
-		apiRequest, apiResponse, apiWebsocketTimeline, requestTimeline, toInternalErrorMessages(apiResponseErrors), force,
+		apiRequest, apiResponse, apiWebsocketTimeline, requestTimeline, toInternalErrorMessages(apiResponseErrors),
+		force,
 		requestID, requestTimestamp, apiResponseTimestamp,
 	)
 }
@@ -285,7 +286,8 @@ func (s *fileRequestLoggerSnapshot) LogRequestWithOptionsAndTimeline(
 	}
 	return logger.LogRequestWithOptionsAndTimeline(
 		url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline,
-		apiRequest, apiResponse, apiWebsocketTimeline, requestTimeline, toInternalErrorMessages(apiResponseErrors), force,
+		apiRequest, apiResponse, apiWebsocketTimeline, requestTimeline, toInternalErrorMessages(apiResponseErrors),
+		force,
 		requestID, requestTimestamp, apiResponseTimestamp,
 	)
 }
@@ -388,11 +390,13 @@ func toInternalErrorMessages(messages []*handlers.ErrorMessage) []*interfaces.Er
 		if message == nil {
 			continue
 		}
-		out = append(out, &interfaces.ErrorMessage{
-			StatusCode: message.StatusCode,
-			Error:      message.Error,
-			Addon:      message.Addon,
-		})
+		out = append(
+			out, &interfaces.ErrorMessage{
+				StatusCode: message.StatusCode,
+				Error:      message.Error,
+				Addon:      message.Addon,
+			},
+		)
 	}
 	return out
 }

@@ -17,22 +17,18 @@ import (
 
 // aiAPIPrefixes defines path prefixes for AI API requests that should have request ID tracking.
 var aiAPIPrefixes = []string{
-	"/v1/chat/completions",
-	"/v1/completions",
-	"/v1/messages",
-	"/v1/responses",
-	"/v1beta/models/",
-	"/backend-api/codex/",
-	"/api/provider/",
+	"/v1",
+	"/v1beta",
+	"/openai/v1",
+	"/backend-api/codex",
+	"/api/provider",
 }
-
-const skipGinLogKey = "__gin_skip_request_logging__"
 
 // GinLogrusLogger returns a Gin middleware handler that logs HTTP requests and responses
 // using logrus. It captures request details including method, path, status code, latency,
-// client IP, and any error messages. Request ID is only added for AI API requests.
+// client IP, and any error messages. Request IDs are added for AI and management API requests.
 //
-// Output format (AI API): [2025-12-23 20:14:10] [info ] | a1b2c3d4 | 200 |       23.559s | ...
+// Output format (tracked request): [2025-12-23 20:14:10] [info ] | a1b2c3d4 | 200 |       23.559s | ...
 // Output format (others): [2025-12-23 20:14:10] [info ] | -------- | 200 |       23.559s | ...
 //
 // Returns:
@@ -43,20 +39,14 @@ func GinLogrusLogger() gin.HandlerFunc {
 		path := c.Request.URL.Path
 		raw := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 
-		// Only generate request ID for AI API paths
 		var requestID string
-		if isAIAPIPath(path) {
-			requestID = generateRequestID()
-			setGinRequestID(c, requestID)
-			ctx := WithRequestID(c.Request.Context(), requestID)
+		if requiresRequestID(path) {
+			requestID = EnsureGinRequestID(c)
+			ctx := WithRequestOutcomeState(c.Request.Context(), NewRequestOutcomeState())
 			c.Request = c.Request.WithContext(ctx)
 		}
 
 		c.Next()
-
-		if shouldSkipGinRequestLogging(c) {
-			return
-		}
 
 		if raw != "" {
 			path = path + "?" + raw
@@ -70,7 +60,7 @@ func GinLogrusLogger() gin.HandlerFunc {
 		}
 
 		statusCode := c.Writer.Status()
-		clientIP := c.ClientIP()
+		clientIP := ExtractClientRequestMetadata(c.Request).ClientIP
 		method := c.Request.Method
 		errorMessage := c.Errors.ByType(gin.ErrorTypePrivate).String()
 
@@ -95,10 +85,17 @@ func GinLogrusLogger() gin.HandlerFunc {
 	}
 }
 
+func requiresRequestID(path string) bool {
+	return isAIAPIPath(path) || path == "/v0/management" || strings.HasPrefix(path, "/v0/management/")
+}
+
 // isAIAPIPath checks if the given path is an AI API endpoint that should have request ID tracking.
 func isAIAPIPath(path string) bool {
+	if path == "/responses" || strings.HasPrefix(path, "/responses/") {
+		return true
+	}
 	for _, prefix := range aiAPIPrefixes {
-		if strings.HasPrefix(path, prefix) {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
 			return true
 		}
 	}
@@ -125,28 +122,15 @@ func GinLogrusRecovery() gin.HandlerFunc {
 				},
 			).Error("recovered from panic")
 
+			if c.Request != nil {
+				MarkRequestOutcomeFailure(
+					c.Request.Context(),
+					RequestOutcomePanic,
+					"handler",
+					fmt.Sprint(recovered),
+				)
+			}
 			c.AbortWithStatus(http.StatusInternalServerError)
 		},
 	)
-}
-
-// SkipGinRequestLogging marks the provided Gin context so that GinLogrusLogger
-// will skip emitting a log line for the associated request.
-func SkipGinRequestLogging(c *gin.Context) {
-	if c == nil {
-		return
-	}
-	c.Set(skipGinLogKey, true)
-}
-
-func shouldSkipGinRequestLogging(c *gin.Context) bool {
-	if c == nil {
-		return false
-	}
-	val, exists := c.Get(skipGinLogKey)
-	if !exists {
-		return false
-	}
-	flag, ok := val.(bool)
-	return ok && flag
 }
