@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -22,12 +23,18 @@ const (
 	accountInspectionStatusRunning   = "running"
 	accountInspectionStatusCompleted = "completed"
 	accountInspectionStatusStopped   = "stopped"
-	accountInspectionStatusError     = "error"
 
 	accountHealthNormal      = "normal"
 	accountHealthUnavailable = "unavailable"
 	accountHealthUnknown     = "unknown"
 	accountHealthDisabled    = "disabled"
+
+	accountProbePassed       = "passed"
+	accountProbeFailed       = "failed"
+	accountProbeInconclusive = "inconclusive"
+	accountProbeOutdated     = "outdated"
+
+	accountInspectionProbeRevision = "quota-v1"
 )
 
 type accountInspectionSchedule struct {
@@ -79,16 +86,28 @@ type accountInspectionRun struct {
 }
 
 type accountInspectionResult struct {
-	ID           string    `json:"id"`
-	Account      string    `json:"account"`
-	FileName     string    `json:"file_name"`
-	Provider     string    `json:"provider"`
-	AuthIndex    string    `json:"auth_index,omitempty"`
-	Status       string    `json:"status"`
-	Reason       string    `json:"reason"`
-	Advice       string    `json:"advice"`
-	AutoHandling string    `json:"auto_handling"`
-	CheckedAt    time.Time `json:"checked_at"`
+	ID               string    `json:"id"`
+	Account          string    `json:"account"`
+	FileName         string    `json:"file_name"`
+	Provider         string    `json:"provider"`
+	AuthIndex        string    `json:"auth_index,omitempty"`
+	Status           string    `json:"status"`
+	Reason           string    `json:"reason"`
+	Advice           string    `json:"advice"`
+	AutoHandling     string    `json:"auto_handling"`
+	ProbeStatus      string    `json:"probe_status"`
+	ProbeError       string    `json:"probe_error,omitempty"`
+	AuthGeneration   uint64    `json:"auth_generation"`
+	CredentialDigest string    `json:"credential_digest,omitempty"`
+	ProbeRevision    string    `json:"probe_revision"`
+	CheckedAt        time.Time `json:"checked_at"`
+}
+
+type accountInspectionCandidate struct {
+	auth           *coreauth.Auth
+	quotaEntry     *quota.Entry
+	probeTarget    quota.RefreshTarget
+	hasProbeTarget bool
 }
 
 type accountInspectionLogEntry struct {
@@ -98,10 +117,11 @@ type accountInspectionLogEntry struct {
 }
 
 type accountInspectionRefreshSummary struct {
-	Pending     int        `json:"pending"`
-	Skipped     int        `json:"skipped"`
-	Failed      int        `json:"failed"`
-	NextRefresh *time.Time `json:"next_refresh,omitempty"`
+	Pending     int               `json:"pending"`
+	Skipped     int               `json:"skipped"`
+	Failed      int               `json:"failed"`
+	NextRefresh *time.Time        `json:"next_refresh,omitempty"`
+	LatestTask  *quotaRefreshTask `json:"latest_task,omitempty"`
 }
 
 type accountInspectionStatusResponse struct {
@@ -596,15 +616,16 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 	}
 	auths := s.handler.authManager.List()
 	quotaStatus := quota.StatusResponse{Credentials: map[string]*quota.Entry{}}
+	probeTargets := make(map[string]quota.RefreshTarget)
 	if s.handler.quotaScheduler != nil {
 		quotaStatus = s.handler.quotaScheduler.GetStatus()
+		targets, _ := s.handler.quotaScheduler.ResolveRefreshTargets(nil)
+		for _, probeTarget := range targets {
+			probeTargets[inspectionProbeBindingKey(probeTarget.FileName, probeTarget.AuthIndex)] = probeTarget
+		}
 	}
 	providerSet := s.providerSet()
-	type candidate struct {
-		auth  *coreauth.Auth
-		entry *quota.Entry
-	}
-	candidates := make([]candidate, 0, len(auths))
+	candidates := make([]accountInspectionCandidate, 0, len(auths))
 	for _, auth := range auths {
 		if ctx.Err() != nil {
 			break
@@ -620,23 +641,31 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 		if len(providerSet) > 0 && !providerSet[provider] {
 			continue
 		}
-		if target == "" && inspectionAuthDisabled(auth) {
-			continue
+		probeTarget, hasProbeTarget := probeTargets[inspectionProbeBindingKey(auth.FileName, auth.Index)]
+		entry := quotaStatus.Credentials[probeTarget.EntryKey]
+		if entry == nil {
+			entry = quotaStatus.Credentials[quota.EntryKey(quota.CredentialType(provider), auth.FileName)]
 		}
-		entry := quotaStatus.Credentials[quota.EntryKey(quota.CredentialType(provider), auth.FileName)]
 		if entry == nil {
 			entry = quotaStatus.Credentials[auth.FileName]
 		}
-		candidates = append(candidates, candidate{auth: auth, entry: entry})
+		if target == "" && inspectionAuthRequiresExplicitProbe(auth, entry) {
+			continue
+		}
+		candidates = append(
+			candidates, accountInspectionCandidate{
+				auth:           auth,
+				quotaEntry:     entry,
+				probeTarget:    probeTarget,
+				hasProbeTarget: hasProbeTarget,
+			},
+		)
 	}
 	if len(candidates) == 0 {
 		return []accountInspectionResult{}
 	}
 	results := make([]accountInspectionResult, 0, len(candidates))
-	maxConcurrency := s.maxConcurrency()
-	if maxConcurrency > len(candidates) {
-		maxConcurrency = len(candidates)
-	}
+	maxConcurrency := min(s.maxConcurrency(), len(candidates))
 	sem := make(chan struct{}, maxConcurrency)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -646,13 +675,13 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 		}
 		sem <- struct{}{}
 		wg.Add(1)
-		go func(item candidate) {
+		go func(item accountInspectionCandidate) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			if ctx.Err() != nil {
 				return
 			}
-			result := buildInspectionResult(item.auth, item.entry)
+			result := s.inspectAccount(ctx, item)
 			s.addLog("info", "checked "+result.Account+" result="+result.Status+" reason="+result.Reason)
 			mu.Lock()
 			results = append(results, result)
@@ -662,6 +691,42 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 	wg.Wait()
 	sort.Slice(results, func(i, j int) bool { return results[i].Account < results[j].Account })
 	return results
+}
+
+func (s *accountInspectionService) inspectAccount(
+	ctx context.Context,
+	candidate accountInspectionCandidate,
+) accountInspectionResult {
+	result := buildInspectionResult(candidate.auth, candidate.quotaEntry)
+	result.ProbeRevision = accountInspectionProbeRevision
+	result.AuthGeneration = candidate.auth.Generation
+	result.CredentialDigest = inspectionCredentialDigest(candidate.auth)
+	if !candidate.hasProbeTarget || s.handler.quotaScheduler == nil {
+		applyInspectionProbeInconclusive(&result, "provider-safe probe is not available")
+		return result
+	}
+
+	probe := s.handler.quotaScheduler.ProbeTarget(ctx, candidate.probeTarget)
+	if probe.Outcome == quota.ProbeOutcomeOutdated ||
+		!inspectionAuthBindingCurrent(s.handler.authManager, candidate.auth, result.CredentialDigest) {
+		applyInspectionProbeOutdated(&result)
+		return result
+	}
+	switch probe.Outcome {
+	case quota.ProbeOutcomePassed:
+		result.ProbeStatus = accountProbePassed
+	case quota.ProbeOutcomeFailed:
+		if inspectionProbeAuthRejected(probe.Error) {
+			applyInspectionProbeFailed(&result, probe.Error)
+		} else {
+			applyInspectionProbeInconclusive(&result, probe.Error)
+		}
+	case quota.ProbeOutcomeInconclusive:
+		applyInspectionProbeInconclusive(&result, probe.Error)
+	default:
+		applyInspectionProbeInconclusive(&result, "provider-safe probe returned an unknown outcome")
+	}
+	return result
 }
 
 func (s *accountInspectionService) providerSet() map[string]bool {
@@ -716,10 +781,7 @@ func (s *accountInspectionService) resultsSnapshot(
 	if start >= total {
 		return []accountInspectionResult{}, total, page, pageSize
 	}
-	end := start + pageSize
-	if end > total {
-		end = total
-	}
+	end := min(start+pageSize, total)
 	return append([]accountInspectionResult(nil), filtered[start:end]...), total, page, pageSize
 }
 
@@ -750,19 +812,20 @@ func (s *accountInspectionService) refreshSummaryLocked() accountInspectionRefre
 	}
 	status := s.handler.quotaScheduler.GetStatus()
 	summary := accountInspectionRefreshSummary{}
-	for _, entry := range status.Credentials {
-		if entry == nil {
-			continue
+	if s.handler.quotaRefreshTasks != nil {
+		summary.LatestTask = s.handler.quotaRefreshTasks.latestSnapshot()
+		if summary.LatestTask != nil {
+			summary.Pending = summary.LatestTask.Summary.Queued + summary.LatestTask.Summary.Running
+			summary.Skipped = summary.LatestTask.Summary.Skipped
+			summary.Failed = summary.LatestTask.Summary.Failed +
+				summary.LatestTask.Summary.Inconclusive + summary.LatestTask.Summary.Interrupted
 		}
-		if entry.Disabled || entry.Status == quota.StatusBanned || entry.Status == quota.StatusQuotaExceeded {
-			summary.Skipped++
-			continue
-		}
-		if entry.Status == quota.StatusError {
-			summary.Failed++
-		}
-		if status.Enabled && entry.NextRefresh != nil {
-			summary.Pending++
+	}
+	if status.Enabled {
+		for _, entry := range status.Credentials {
+			if entry == nil || entry.NextRefresh == nil {
+				continue
+			}
 			if summary.NextRefresh == nil || entry.NextRefresh.Before(*summary.NextRefresh) {
 				next := *entry.NextRefresh
 				summary.NextRefresh = &next
@@ -774,6 +837,95 @@ func (s *accountInspectionService) refreshSummaryLocked() accountInspectionRefre
 
 func inspectionAuthDisabled(auth *coreauth.Auth) bool {
 	return auth != nil && (auth.Disabled || auth.Status == coreauth.StatusDisabled)
+}
+
+func inspectionAuthRequiresExplicitProbe(auth *coreauth.Auth, quotaEntry *quota.Entry) bool {
+	if inspectionAuthDisabled(auth) || auth != nil && auth.Quota.Exceeded {
+		return true
+	}
+	return quotaEntry != nil &&
+		(quotaEntry.Status == quota.StatusBanned || quotaEntry.Status == quota.StatusQuotaExceeded)
+}
+
+func inspectionProbeBindingKey(fileName string, authIndex string) string {
+	return strings.TrimSpace(fileName) + "\x00" + strings.TrimSpace(authIndex)
+}
+
+func inspectionCredentialDigest(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if digest := strings.TrimSpace(auth.Attributes[coreauth.PersistedSHA256Attribute]); digest != "" {
+		return strings.ToLower(digest)
+	}
+	version, err := coreauth.PersistedVersionForAuth(auth.FileName, auth)
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(version.SHA256[:])
+}
+
+func inspectionAuthBindingCurrent(
+	manager *coreauth.Manager,
+	expected *coreauth.Auth,
+	expectedDigest string,
+) bool {
+	if manager == nil || expected == nil {
+		return false
+	}
+	current, ok := manager.GetByID(expected.ID)
+	if !ok || current == nil {
+		return false
+	}
+	current.EnsureIndex()
+	return current.Generation == expected.Generation &&
+		current.Index == expected.Index &&
+		strings.TrimSpace(current.FileName) == strings.TrimSpace(expected.FileName) &&
+		strings.EqualFold(strings.TrimSpace(current.Provider), strings.TrimSpace(expected.Provider)) &&
+		strings.EqualFold(inspectionCredentialDigest(current), expectedDigest)
+}
+
+func inspectionProbeAuthRejected(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(message, "status 401") || strings.Contains(message, "status 403")
+}
+
+func applyInspectionProbeFailed(result *accountInspectionResult, message string) {
+	if result == nil {
+		return
+	}
+	result.ProbeStatus = accountProbeFailed
+	result.ProbeError = sanitizeInspectionText(message)
+	result.Status = accountHealthUnavailable
+	result.Reason = "probe_failed"
+	result.Advice = "check_login_or_provider_status"
+	result.AutoHandling = "manual_inspection_available"
+}
+
+func applyInspectionProbeInconclusive(result *accountInspectionResult, message string) {
+	if result == nil {
+		return
+	}
+	result.ProbeStatus = accountProbeInconclusive
+	result.ProbeError = sanitizeInspectionText(message)
+	if result.Status == accountHealthNormal {
+		result.Status = accountHealthUnknown
+		result.Reason = "probe_inconclusive"
+		result.Advice = "wait_or_check_login"
+		result.AutoHandling = "manual_inspection_available"
+	}
+}
+
+func applyInspectionProbeOutdated(result *accountInspectionResult) {
+	if result == nil {
+		return
+	}
+	result.ProbeStatus = accountProbeOutdated
+	result.ProbeError = "credential binding changed while the probe was running"
+	result.Status = accountHealthUnknown
+	result.Reason = "probe_outdated"
+	result.Advice = "none"
+	result.AutoHandling = "none"
 }
 
 func buildInspectionResult(auth *coreauth.Auth, quotaEntry *quota.Entry) accountInspectionResult {
@@ -891,7 +1043,7 @@ func summarizeInspectionResults(results []accountInspectionResult) accountInspec
 		switch result.Reason {
 		case "token_expired":
 			summary.TokenInvalid++
-		case "refresh_failed", "provider_error":
+		case "refresh_failed", "provider_error", "probe_failed":
 			summary.RefreshFailed++
 		case "disabled":
 			summary.Disabled++
@@ -930,7 +1082,7 @@ func summarizeInspectionResultsByProvider(
 		switch result.Reason {
 		case "token_expired":
 			summary.TokenInvalid++
-		case "refresh_failed", "provider_error":
+		case "refresh_failed", "provider_error", "probe_failed":
 			summary.RefreshFailed++
 		}
 		if summary.LastCheckedAt == nil || result.CheckedAt.After(*summary.LastCheckedAt) {

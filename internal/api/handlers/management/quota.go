@@ -22,6 +22,8 @@ var codexRateLimitResetCreditsConsumeURL = codexRateLimitResetCreditsConsumeDefa
 
 func (h *Handler) GetSwitchProject(c *gin.Context) {
 	cfg := h.configSnapshot()
+	// configSnapshot may be nil for a handler created without runtime configuration.
+	// noinspection GoDfaConstantCondition
 	c.JSON(200, gin.H{"switch-project": cfg != nil && cfg.QuotaExceeded.SwitchProject})
 }
 func (h *Handler) PutSwitchProject(c *gin.Context) {
@@ -30,6 +32,8 @@ func (h *Handler) PutSwitchProject(c *gin.Context) {
 
 func (h *Handler) GetSwitchPreviewModel(c *gin.Context) {
 	cfg := h.configSnapshot()
+	// configSnapshot may be nil for a handler created without runtime configuration.
+	// noinspection GoDfaConstantCondition
 	c.JSON(200, gin.H{"switch-preview-model": cfg != nil && cfg.QuotaExceeded.SwitchPreviewModel})
 }
 func (h *Handler) PutSwitchPreviewModel(c *gin.Context) {

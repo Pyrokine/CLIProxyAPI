@@ -29,13 +29,95 @@ func EntryKey(credType CredentialType, fileName string) string {
 	return trimmedType + "::" + trimmedFileName
 }
 
+// FetchCompleteness describes whether a provider result contains every requested quota field.
+type FetchCompleteness string
+
+const (
+	FetchComplete FetchCompleteness = "complete"
+	FetchPartial  FetchCompleteness = "partial"
+)
+
+// Freshness describes whether cached quota data is current for its credential binding.
+type Freshness string
+
+const (
+	FreshnessFresh    Freshness = "fresh"
+	freshnessStale    Freshness = "stale"
+	freshnessPartial  Freshness = "partial"
+	FreshnessOutdated Freshness = "outdated"
+)
+
+// FetchResult carries one provider quota observation before scheduler publication.
+type FetchResult struct {
+	Data               []byte
+	Source             string
+	ObservedAt         time.Time
+	FetchedAt          time.Time
+	Completeness       FetchCompleteness
+	AuthoritativeEmpty bool
+	PartialError       string
+}
+
+// RefreshTarget identifies one provider credential binding for a refresh attempt.
+type RefreshTarget struct {
+	EntryKey   string         `json:"entry_key"`
+	FileName   string         `json:"file_name"`
+	Type       CredentialType `json:"type"`
+	AuthIndex  string         `json:"auth_index,omitempty"`
+	Generation uint64         `json:"generation"`
+	Status     Status         `json:"status"`
+	Disabled   bool           `json:"disabled,omitempty"`
+}
+
+// refreshOutcome describes the terminal result of one target refresh.
+type refreshOutcome string
+
+const (
+	RefreshOutcomeSucceeded    refreshOutcome = "succeeded"
+	RefreshOutcomeFailed       refreshOutcome = "failed"
+	RefreshOutcomeCancelled    refreshOutcome = "cancelled"
+	RefreshOutcomeInconclusive refreshOutcome = "inconclusive"
+)
+
+// RefreshResult is returned by the context-aware single-target refresh primitive.
+type RefreshResult struct {
+	Target          RefreshTarget  `json:"target"`
+	Outcome         refreshOutcome `json:"outcome"`
+	Freshness       Freshness      `json:"freshness,omitempty"`
+	SuccessfulEmpty bool           `json:"successful_empty,omitempty"`
+	Error           string         `json:"error,omitempty"`
+	StartedAt       time.Time      `json:"started_at"`
+	CompletedAt     time.Time      `json:"completed_at"`
+	Shared          bool           `json:"shared_execution,omitempty"`
+}
+
+// ProbeOutcome describes a read-only provider probe result.
+type ProbeOutcome string
+
+const (
+	ProbeOutcomePassed       ProbeOutcome = "passed"
+	ProbeOutcomeFailed       ProbeOutcome = "failed"
+	ProbeOutcomeInconclusive ProbeOutcome = "inconclusive"
+	ProbeOutcomeOutdated     ProbeOutcome = "outdated"
+)
+
+// ProbeResult is returned by the read-only single-target probe primitive.
+type ProbeResult struct {
+	Target      RefreshTarget   `json:"target"`
+	Outcome     ProbeOutcome    `json:"outcome"`
+	Error       string          `json:"error,omitempty"`
+	StartedAt   time.Time       `json:"started_at"`
+	CompletedAt time.Time       `json:"completed_at"`
+	Data        json.RawMessage `json:"-"`
+}
+
 // Status represents the current state of a credential's quota.
 type Status string
 
 // Entry status values.
 const (
 	StatusIdle          Status = "idle"
-	StatusLoading       Status = "loading"
+	statusLoading       Status = "loading"
 	StatusSuccess       Status = "success"
 	StatusError         Status = "error"
 	StatusBanned        Status = "banned"
@@ -46,10 +128,22 @@ const (
 type Entry struct {
 	mu                 sync.RWMutex
 	disabledConfigured bool
+	credentialRevision string
 	FileName           string          `json:"file_name"`
 	Type               CredentialType  `json:"type"`
 	AuthIndex          string          `json:"auth_index,omitempty"` // credential identifier for api-call proxy
+	Generation         uint64          `json:"generation"`
+	StateRevision      uint64          `json:"state_revision"`
 	Status             Status          `json:"status"`
+	Freshness          Freshness       `json:"freshness"`
+	Source             string          `json:"source,omitempty"`
+	ObservedAt         *time.Time      `json:"observed_at,omitempty"`
+	FetchedAt          *time.Time      `json:"fetched_at,omitempty"`
+	LastSuccessAt      *time.Time      `json:"last_success_at,omitempty"`
+	LastError          string          `json:"last_error,omitempty"`
+	LastErrorAt        *time.Time      `json:"last_error_at,omitempty"`
+	RetryAt            *time.Time      `json:"retry_at,omitempty"`
+	SuccessfulEmpty    bool            `json:"successful_empty,omitempty"`
 	LastRefresh        *time.Time      `json:"last_refresh"`
 	NextRefresh        *time.Time      `json:"next_refresh"`
 	Error              string          `json:"error,omitempty"`
@@ -59,19 +153,32 @@ type Entry struct {
 }
 
 type EntryState struct {
-	FileName     string          `json:"file_name"`
-	Type         CredentialType  `json:"type"`
-	AuthIndex    string          `json:"auth_index,omitempty"`
-	Status       Status          `json:"status"`
-	LastRefresh  *time.Time      `json:"last_refresh"`
-	NextRefresh  *time.Time      `json:"next_refresh"`
-	Error        string          `json:"error,omitempty"`
-	FailureCount int             `json:"failure_count"`
-	Data         json.RawMessage `json:"data,omitempty"`
-	Disabled     bool            `json:"disabled,omitempty"`
+	FileName           string          `json:"file_name"`
+	Type               CredentialType  `json:"type"`
+	AuthIndex          string          `json:"auth_index,omitempty"`
+	CredentialRevision string          `json:"credential_revision,omitempty"`
+	Generation         uint64          `json:"generation"`
+	StateRevision      uint64          `json:"state_revision"`
+	Tombstone          bool            `json:"tombstone,omitempty"`
+	Status             Status          `json:"status"`
+	Freshness          Freshness       `json:"freshness"`
+	Source             string          `json:"source,omitempty"`
+	ObservedAt         *time.Time      `json:"observed_at,omitempty"`
+	FetchedAt          *time.Time      `json:"fetched_at,omitempty"`
+	LastSuccessAt      *time.Time      `json:"last_success_at,omitempty"`
+	LastError          string          `json:"last_error,omitempty"`
+	LastErrorAt        *time.Time      `json:"last_error_at,omitempty"`
+	RetryAt            *time.Time      `json:"retry_at,omitempty"`
+	SuccessfulEmpty    bool            `json:"successful_empty,omitempty"`
+	LastRefresh        *time.Time      `json:"last_refresh"`
+	NextRefresh        *time.Time      `json:"next_refresh"`
+	Error              string          `json:"error,omitempty"`
+	FailureCount       int             `json:"failure_count"`
+	Data               json.RawMessage `json:"data,omitempty"`
+	Disabled           bool            `json:"disabled,omitempty"`
 }
 
-func (e *Entry) Snapshot() EntryState {
+func (e *Entry) snapshot() EntryState {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.snapshotLocked()
@@ -79,26 +186,40 @@ func (e *Entry) Snapshot() EntryState {
 
 func (e *Entry) snapshotLocked() EntryState {
 	state := EntryState{
-		FileName:     e.FileName,
-		Type:         e.Type,
-		AuthIndex:    e.AuthIndex,
-		Status:       e.Status,
-		Error:        e.Error,
-		FailureCount: e.FailureCount,
-		Disabled:     e.Disabled,
-	}
-	if e.LastRefresh != nil {
-		last := *e.LastRefresh
-		state.LastRefresh = &last
-	}
-	if e.NextRefresh != nil {
-		next := *e.NextRefresh
-		state.NextRefresh = &next
-	}
+		FileName:           e.FileName,
+		Type:               e.Type,
+		AuthIndex:          e.AuthIndex,
+		CredentialRevision: e.credentialRevision,
+		Generation:         e.Generation,
+		StateRevision:      e.StateRevision,
+		Status:             e.Status,
+		Freshness:          e.Freshness,
+		Source:             e.Source,
+		LastError:          e.LastError,
+		SuccessfulEmpty:    e.SuccessfulEmpty,
+		Error:              e.Error,
+		FailureCount:       e.FailureCount,
+		Disabled:           e.Disabled,
+
+		ObservedAt:    cloneEntryTime(e.ObservedAt),
+		FetchedAt:     cloneEntryTime(e.FetchedAt),
+		LastSuccessAt: cloneEntryTime(e.LastSuccessAt),
+		LastErrorAt:   cloneEntryTime(e.LastErrorAt),
+		RetryAt:       cloneEntryTime(e.RetryAt),
+		LastRefresh:   cloneEntryTime(e.LastRefresh),
+		NextRefresh:   cloneEntryTime(e.NextRefresh)}
 	if e.Data != nil {
 		state.Data = append(json.RawMessage(nil), e.Data...)
 	}
 	return state
+}
+
+func cloneEntryTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // shouldSkipAutoRefresh reports whether auto-refresh (scheduler loop or bulk RefreshNow)
@@ -138,6 +259,11 @@ type ProviderStatusSummary struct {
 	Error           int        `json:"error"`
 	Banned          int        `json:"banned"`
 	QuotaExceeded   int        `json:"quota_exceeded"`
+	Fresh           int        `json:"fresh"`
+	Stale           int        `json:"stale"`
+	Partial         int        `json:"partial"`
+	Outdated        int        `json:"outdated"`
+	SuccessfulEmpty int        `json:"successful_empty"`
 	Disabled        int        `json:"disabled"`
 	FailureCount    int        `json:"failure_count"`
 	LatestRefreshAt *time.Time `json:"latest_refresh_at,omitempty"`

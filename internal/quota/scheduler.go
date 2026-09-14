@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,9 +15,14 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// FetchFunc is called to refresh quota data for a credential.
-// It receives the entry with all credential info, returns raw JSON data or an error.
+// FetchFunc is the compatibility form of a quota fetcher without cancellation.
 type FetchFunc func(entry *Entry) ([]byte, error)
+
+// ContextFetchFunc refreshes quota data for one immutable credential snapshot.
+type ContextFetchFunc func(ctx context.Context, entry *Entry) ([]byte, error)
+
+// ResultFetchFunc refreshes quota data and reports source, completeness, and empty-result authority.
+type ResultFetchFunc func(ctx context.Context, entry *Entry) (FetchResult, error)
 
 // RefreshAttempt describes one successful provider fetch before its state is published.
 type RefreshAttempt struct {
@@ -23,47 +31,113 @@ type RefreshAttempt struct {
 	Type           CredentialType
 	AuthIndex      string
 	PreviousStatus Status
+	StartedAt      time.Time
 	Data           []byte
 }
 
-// RefreshFinalizer applies provider-specific recovery before refresh success is published.
-type RefreshFinalizer func(attempt RefreshAttempt) error
+// refreshFinalizer is the compatibility form of a refresh finalizer without cancellation.
+type refreshFinalizer func(attempt RefreshAttempt) error
 
-type PersistFunc func(entry EntryState)
+// refreshContextFinalizer applies provider-specific recovery before refresh success is published.
+type refreshContextFinalizer func(ctx context.Context, attempt RefreshAttempt) error
 
-type DeleteFunc func(entryKey string)
+type persistFunc func(entry EntryState)
 
-// Scheduler manages periodic quota refresh for all registered credentials.
-// It uses a min-heap priority queue sorted by next refresh time, with a single
-// dispatcher goroutine that serializes all fetch operations.
-type Scheduler struct {
-	mu              sync.RWMutex
-	entries         map[string]*Entry
-	cfg             Config
-	fetchFn         FetchFunc
-	cancel          context.CancelFunc
-	wg              sync.WaitGroup
-	wake            chan struct{} // signal dispatcher to re-check heap
-	updatedAt       time.Time
-	manualRefreshMu sync.Mutex // serializes manual RefreshNow calls so later requests wait instead of being dropped
-	persistFn       PersistFunc
-	deleteFn        DeleteFunc
+type deleteFunc func(entry EntryState)
+
+var errRefreshTargetChanged = errors.New("quota refresh target changed")
+
+type refreshFlight struct {
+	ctx     context.Context
+	cancel  context.CancelCauseFunc
+	done    chan struct{}
+	waiters int
+	result  RefreshResult
 }
 
-// NewScheduler creates a new quota scheduler.
+// Scheduler manages periodic quota refresh for all registered credentials.
+// Periodic work uses a min-heap dispatcher; manual work may refresh unrelated
+// targets concurrently while overlapping target calls share one fetch.
+type Scheduler struct {
+	mu               sync.RWMutex
+	entries          map[string]*Entry
+	history          map[string]EntryState
+	cfg              Config
+	fetchFn          ResultFetchFunc
+	cancel           context.CancelFunc
+	wg               sync.WaitGroup
+	wake             chan struct{} // signal dispatcher to re-check heap
+	updatedAt        time.Time
+	refreshFinalizer refreshContextFinalizer
+	persistFn        persistFunc
+	deleteFn         deleteFunc
+	flightMu         sync.Mutex
+	flights          map[string]*refreshFlight
+}
+
+// NewScheduler creates a quota scheduler for a compatibility fetcher.
 func NewScheduler(cfg Config, fetchFn FetchFunc) *Scheduler {
+	var contextFetchFn ContextFetchFunc
+	if fetchFn != nil {
+		contextFetchFn = func(_ context.Context, entry *Entry) ([]byte, error) {
+			return fetchFn(entry)
+		}
+	}
+	return NewSchedulerWithContext(cfg, contextFetchFn)
+}
+
+// NewSchedulerWithContext creates a quota scheduler whose fetches support cancellation.
+func NewSchedulerWithContext(cfg Config, fetchFn ContextFetchFunc) *Scheduler {
+	var resultFetchFn ResultFetchFunc
+	if fetchFn != nil {
+		resultFetchFn = func(ctx context.Context, entry *Entry) (FetchResult, error) {
+			data, err := fetchFn(ctx, entry)
+			return FetchResult{
+				Data:               data,
+				Completeness:       FetchComplete,
+				AuthoritativeEmpty: err == nil && len(data) == 0,
+			}, err
+		}
+	}
+	return NewSchedulerWithResult(cfg, resultFetchFn)
+}
+
+// NewSchedulerWithResult creates a quota scheduler with explicit freshness semantics.
+func NewSchedulerWithResult(cfg Config, fetchFn ResultFetchFunc) *Scheduler {
 	return &Scheduler{
 		entries: make(map[string]*Entry),
+		history: make(map[string]EntryState),
 		cfg:     cfg,
 		fetchFn: fetchFn,
 		wake:    make(chan struct{}, 1),
+		flights: make(map[string]*refreshFlight),
 	}
 }
 
-func (s *Scheduler) SetPersistence(persist PersistFunc, deleteFn DeleteFunc) {
+func (s *Scheduler) SetPersistence(persist persistFunc, deleteFn deleteFunc) {
 	s.mu.Lock()
 	s.persistFn = persist
 	s.deleteFn = deleteFn
+	s.mu.Unlock()
+}
+
+// setRefreshFinalizer configures a compatibility finalizer for every refresh path.
+func (s *Scheduler) setRefreshFinalizer(finalizer refreshFinalizer) {
+	if finalizer == nil {
+		s.SetRefreshContextFinalizer(nil)
+		return
+	}
+	s.SetRefreshContextFinalizer(
+		func(_ context.Context, attempt RefreshAttempt) error {
+			return finalizer(attempt)
+		},
+	)
+}
+
+// SetRefreshContextFinalizer configures the context-aware finalizer for every refresh path.
+func (s *Scheduler) SetRefreshContextFinalizer(finalizer refreshContextFinalizer) {
+	s.mu.Lock()
+	s.refreshFinalizer = finalizer
 	s.mu.Unlock()
 }
 
@@ -72,37 +146,67 @@ func (s *Scheduler) Restore(entries map[string]EntryState) {
 		return
 	}
 	changed := make([]EntryState, 0, len(entries))
+	now := time.Now().UTC()
 	s.mu.Lock()
-	for name, state := range entries {
+	for name, rawState := range entries {
+		state := normalizeRestoredEntryState(rawState)
 		key := strings.TrimSpace(name)
-		entry, ok := s.entries[key]
-		if !ok {
+		if key == "" {
 			key = EntryKey(state.Type, state.FileName)
-			entry, ok = s.entries[key]
 		}
-		if !ok {
+		if key == "" {
+			continue
+		}
+		if current, exists := s.history[key]; exists && entryGenerationPrecedes(state, current) {
+			continue
+		}
+		s.history[key] = cloneEntryState(state)
+	}
+	for key, state := range s.history {
+		entry := s.entries[key]
+		if entry == nil {
 			continue
 		}
 		entry.mu.Lock()
-		if state.Status == StatusLoading {
-			entry.Status = StatusIdle
-			entry.Error = "quota refresh interrupted by server restart"
-		} else if state.Status != "" {
-			entry.Status = state.Status
-			entry.Error = state.Error
+		disabledConfigured := entry.disabledConfigured
+		disabled := entry.Disabled
+		stateRevision := entry.StateRevision
+		switch {
+		case state.Tombstone:
+			generation := max(entry.Generation, state.Generation+1)
+			resetEntryForBindingLocked(entry, generation)
+		case !entryBindingMatchesStateLocked(entry, state):
+			generation := max(entry.Generation, state.Generation+1)
+			resetEntryForBindingLocked(entry, generation)
+		default:
+			restoreEntryStateLocked(entry, state)
+			if entry.Status == statusLoading {
+				entry.Status = StatusIdle
+				entry.Error = "quota refresh interrupted by server restart"
+				entry.LastError = entry.Error
+				entry.LastErrorAt = cloneTime(&now)
+				entry.StateRevision++
+				if len(entry.Data) > 0 || entry.SuccessfulEmpty {
+					entry.Freshness = freshnessStale
+				} else {
+					entry.Freshness = FreshnessOutdated
+				}
+			}
 		}
-		entry.LastRefresh = cloneTime(state.LastRefresh)
-		entry.NextRefresh = cloneTime(state.NextRefresh)
-		entry.FailureCount = state.FailureCount
-		entry.Data = append(entry.Data[:0], state.Data...)
-		if !entry.disabledConfigured {
-			entry.Disabled = state.Disabled
+		if entry.Generation == state.Generation && entry.StateRevision < stateRevision {
+			entry.StateRevision = stateRevision
 		}
-		changed = append(changed, entry.snapshotLocked())
+		entry.disabledConfigured = disabledConfigured
+		if disabledConfigured {
+			entry.Disabled = disabled
+		}
+		current := entry.snapshotLocked()
+		s.history[key] = cloneEntryState(current)
+		changed = append(changed, current)
 		entry.mu.Unlock()
 	}
 	if len(changed) > 0 {
-		s.updatedAt = time.Now()
+		s.updatedAt = now
 	}
 	s.mu.Unlock()
 	for _, state := range changed {
@@ -143,14 +247,27 @@ func (s *Scheduler) Stop() {
 
 // Register adds or updates a credential in the scheduler.
 func (s *Scheduler) Register(fileName string, credType CredentialType, authIndex string) {
+	s.RegisterBinding(fileName, credType, authIndex, authIndex)
+}
+
+// RegisterBinding adds or updates a credential with a non-secret persisted revision identity.
+func (s *Scheduler) RegisterBinding(
+	fileName string,
+	credType CredentialType,
+	authIndex,
+	credentialRevision string,
+) {
 	fileName = strings.TrimSpace(fileName)
+	authIndex = strings.TrimSpace(authIndex)
+	credentialRevision = strings.TrimSpace(credentialRevision)
 	key := EntryKey(credType, fileName)
 	if key == "" {
 		return
 	}
 
 	var state EntryState
-	removedKeys := make([]string, 0)
+	tombstones := make([]EntryState, 0)
+	now := time.Now().UTC()
 	s.mu.Lock()
 	for existingKey, existing := range s.entries {
 		if existingKey == key {
@@ -159,84 +276,116 @@ func (s *Scheduler) Register(fileName string, credType CredentialType, authIndex
 		existing.mu.RLock()
 		replaceSameAuth := existing.FileName == fileName && existing.AuthIndex == authIndex && authIndex != ""
 		existing.mu.RUnlock()
-		if replaceSameAuth {
-			delete(s.entries, existingKey)
-			removedKeys = append(removedKeys, existingKey)
+		if !replaceSameAuth {
+			continue
 		}
+		existing.mu.Lock()
+		tombstone := tombstoneEntryLocked(existing)
+		existing.mu.Unlock()
+		delete(s.entries, existingKey)
+		s.history[existingKey] = cloneEntryState(tombstone)
+		tombstones = append(tombstones, tombstone)
 	}
 
-	if existing, exists := s.entries[key]; exists {
+	if existing := s.entries[key]; existing != nil {
 		existing.mu.Lock()
-		existing.AuthIndex = authIndex
+		if existing.AuthIndex != authIndex || existing.credentialRevision != credentialRevision {
+			generation := existing.Generation + 1
+			if previous := s.history[key]; previous.Generation >= generation {
+				generation = previous.Generation + 1
+			}
+			existing.AuthIndex = authIndex
+			existing.credentialRevision = credentialRevision
+			resetEntryForBindingLocked(existing, generation)
+		}
 		state = existing.snapshotLocked()
+		s.history[key] = cloneEntryState(state)
 		existing.mu.Unlock()
+		s.updatedAt = now
 		s.poke()
 		s.mu.Unlock()
-		for _, removedKey := range removedKeys {
-			s.deletePersisted(removedKey)
+		for _, tombstone := range tombstones {
+			s.deletePersisted(tombstone)
 		}
 		s.persist(state)
 		return
 	}
 
-	now := time.Now()
-	entry := &Entry{
-		FileName:  fileName,
-		Type:      credType,
-		AuthIndex: authIndex,
-		Status:    StatusIdle,
+	entry := newEntryForBinding(fileName, credType, authIndex, credentialRevision, now)
+	if previous, exists := s.history[key]; exists {
+		if !previous.Tombstone && bindingMatches(previous, authIndex, credentialRevision) {
+			restoreEntryStateLocked(entry, previous)
+		} else {
+			resetEntryForBindingLocked(entry, previous.Generation+1)
+		}
 	}
 	next := now.Add(time.Duration(len(s.entries)) * time.Second * 2) // stagger
-	entry.NextRefresh = &next
+	if entry.NextRefresh == nil {
+		entry.NextRefresh = &next
+	}
 	s.entries[key] = entry
-	state = entry.Snapshot()
+	state = entry.snapshot()
+	s.history[key] = cloneEntryState(state)
+	s.updatedAt = now
 	s.poke()
 	s.mu.Unlock()
-	for _, removedKey := range removedKeys {
-		s.deletePersisted(removedKey)
+	for _, tombstone := range tombstones {
+		s.deletePersisted(tombstone)
 	}
 	s.persist(state)
 }
 
-// Unregister removes credentials for a file from the scheduler.
+// Unregister removes credentials for a file from the scheduler and persists tombstones.
 func (s *Scheduler) Unregister(fileName string) {
 	fileName = strings.TrimSpace(fileName)
 	if fileName == "" {
 		return
 	}
-	removedKeys := make([]string, 0)
+	tombstones := make([]EntryState, 0)
 	s.mu.Lock()
 	for key, entry := range s.entries {
 		entry.mu.RLock()
 		matches := entry.FileName == fileName
 		entry.mu.RUnlock()
-		if matches {
-			delete(s.entries, key)
-			removedKeys = append(removedKeys, key)
+		if !matches {
+			continue
 		}
+		entry.mu.Lock()
+		tombstone := tombstoneEntryLocked(entry)
+		entry.mu.Unlock()
+		delete(s.entries, key)
+		s.history[key] = cloneEntryState(tombstone)
+		tombstones = append(tombstones, tombstone)
 	}
-	if len(removedKeys) > 0 {
+	if len(tombstones) > 0 {
+		s.updatedAt = time.Now().UTC()
 		s.poke()
 	}
 	s.mu.Unlock()
-	for _, key := range removedKeys {
-		s.deletePersisted(key)
+	for _, tombstone := range tombstones {
+		s.deletePersisted(tombstone)
 	}
 }
 
-// UpdateAuthIndex sets the auth_index for a registered entry.
-func (s *Scheduler) UpdateAuthIndex(fileName string, credType CredentialType, authIndex string) {
+// updateAuthIndex sets the auth_index for a registered entry.
+func (s *Scheduler) updateAuthIndex(fileName string, credType CredentialType, authIndex string) {
 	key := EntryKey(credType, fileName)
 	if key == "" {
 		return
 	}
 	var state EntryState
 	s.mu.Lock()
-	if e, ok := s.entries[key]; ok {
-		e.mu.Lock()
-		e.AuthIndex = authIndex
-		state = e.snapshotLocked()
-		e.mu.Unlock()
+	if entry := s.entries[key]; entry != nil {
+		entry.mu.Lock()
+		if entry.AuthIndex != authIndex {
+			entry.AuthIndex = strings.TrimSpace(authIndex)
+			entry.credentialRevision = entry.AuthIndex
+			resetEntryForBindingLocked(entry, entry.Generation+1)
+		}
+		state = entry.snapshotLocked()
+		s.history[key] = cloneEntryState(state)
+		entry.mu.Unlock()
+		s.updatedAt = time.Now().UTC()
 	}
 	s.mu.Unlock()
 	if state.FileName != "" {
@@ -257,10 +406,15 @@ func (s *Scheduler) SetDisabled(fileName string, credType CredentialType, disabl
 	s.mu.Lock()
 	if e, ok := s.entries[key]; ok {
 		e.mu.Lock()
-		e.Disabled = disabled
-		e.disabledConfigured = true
+		if e.Disabled != disabled || !e.disabledConfigured {
+			e.Disabled = disabled
+			e.disabledConfigured = true
+			e.StateRevision++
+		}
 		state = e.snapshotLocked()
+		s.history[key] = cloneEntryState(state)
 		e.mu.Unlock()
+		s.updatedAt = time.Now().UTC()
 		s.poke()
 	}
 	s.mu.Unlock()
@@ -269,81 +423,304 @@ func (s *Scheduler) SetDisabled(fileName string, credType CredentialType, disabl
 	}
 }
 
-// RefreshNow triggers an immediate refresh for specific credentials (or all if empty).
-// Works even when the scheduler is disabled (manual refresh).
-// Manual calls are serialized so later requests wait for the current refresh instead
-// of being silently dropped.
-//
-// When fileNames is non-empty the call is treated as a user-initiated manual refresh
-// and executes every named entry regardless of disabled/banned/quota-exceeded state
-// so the operator can verify whether an account has recovered. Identifiers may be
-// provider-aware entry keys or legacy file names; file names refresh all matching
-// provider entries. When fileNames is empty the call is a bulk auto-refresh and skips
-// entries that shouldSkipAutoRefresh reports as ineligible.
+// RefreshNow triggers an immediate refresh for specific credentials or all eligible credentials.
 func (s *Scheduler) RefreshNow(fileNames []string) {
-	s.refreshNow(fileNames, nil)
+	s.refreshNow(context.Background(), fileNames, nil)
 }
 
-// RefreshNowWithFinalizer refreshes named credentials and finalizes successful fetches before publication.
-func (s *Scheduler) RefreshNowWithFinalizer(fileNames []string, finalizer RefreshFinalizer) {
-	s.refreshNow(fileNames, finalizer)
+// refreshNowWithFinalizer refreshes named credentials with a compatibility finalizer.
+func (s *Scheduler) refreshNowWithFinalizer(fileNames []string, finalizer refreshFinalizer) {
+	var contextFinalizer refreshContextFinalizer
+	if finalizer != nil {
+		contextFinalizer = func(_ context.Context, attempt RefreshAttempt) error {
+			return finalizer(attempt)
+		}
+	}
+	s.refreshNow(context.Background(), fileNames, contextFinalizer)
 }
 
-func (s *Scheduler) refreshNow(fileNames []string, finalizer RefreshFinalizer) {
-	s.manualRefreshMu.Lock()
-	defer s.manualRefreshMu.Unlock()
-
+func (s *Scheduler) refreshNow(
+	ctx context.Context,
+	fileNames []string,
+	finalizer refreshContextFinalizer,
+) {
+	targets, _ := s.ResolveRefreshTargets(fileNames)
 	isManual := len(fileNames) > 0
+	for _, target := range targets {
+		if !isManual && shouldSkipAutoRefreshTarget(target) {
+			continue
+		}
+		if finalizer == nil {
+			_ = s.RefreshTarget(ctx, target)
+			continue
+		}
+		_ = s.refreshTarget(ctx, target, finalizer, false)
+	}
+}
 
+// ResolveRefreshTargets resolves provider-aware keys and legacy file names to stable targets.
+func (s *Scheduler) ResolveRefreshTargets(identifiers []string) ([]RefreshTarget, []string) {
 	s.mu.RLock()
-	toRefresh := make([]*Entry, 0, len(s.entries))
+	defer s.mu.RUnlock()
+
+	targets := make([]RefreshTarget, 0, len(s.entries))
 	seen := make(map[string]struct{}, len(s.entries))
-	if !isManual {
+	unresolved := make([]string, 0)
+	if len(identifiers) == 0 {
 		for key, entry := range s.entries {
-			if entry.shouldSkipAutoRefresh() {
-				continue
-			}
-			seen[key] = struct{}{}
-			toRefresh = append(toRefresh, entry)
+			targets = append(targets, refreshTargetSnapshot(key, entry))
 		}
 	} else {
-		for _, name := range fileNames {
-			identifier := strings.TrimSpace(name)
+		for _, rawIdentifier := range identifiers {
+			identifier := strings.TrimSpace(rawIdentifier)
 			if identifier == "" {
 				continue
 			}
+			matched := false
 			if entry, ok := s.entries[identifier]; ok {
+				matched = true
 				if _, exists := seen[identifier]; !exists {
 					seen[identifier] = struct{}{}
-					toRefresh = append(toRefresh, entry)
+					targets = append(targets, refreshTargetSnapshot(identifier, entry))
 				}
-				continue
+			} else {
+				for key, entry := range s.entries {
+					entry.mu.RLock()
+					matches := entry.FileName == identifier
+					entry.mu.RUnlock()
+					if !matches {
+						continue
+					}
+					matched = true
+					if _, exists := seen[key]; exists {
+						continue
+					}
+					seen[key] = struct{}{}
+					targets = append(targets, refreshTargetSnapshot(key, entry))
+				}
 			}
-			for key, entry := range s.entries {
-				entry.mu.RLock()
-				matches := entry.FileName == identifier
-				entry.mu.RUnlock()
-				if !matches {
-					continue
-				}
-				if _, exists := seen[key]; exists {
-					continue
-				}
-				seen[key] = struct{}{}
-				toRefresh = append(toRefresh, entry)
+			if !matched {
+				unresolved = append(unresolved, identifier)
 			}
 		}
 	}
+	sort.Slice(targets, func(i, j int) bool { return targets[i].EntryKey < targets[j].EntryKey })
+	return targets, unresolved
+}
+
+func refreshTargetSnapshot(key string, entry *Entry) RefreshTarget {
+	if entry == nil {
+		return RefreshTarget{EntryKey: key}
+	}
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
+	if key == "" {
+		key = EntryKey(entry.Type, entry.FileName)
+	}
+	return RefreshTarget{
+		EntryKey:   key,
+		FileName:   entry.FileName,
+		Type:       entry.Type,
+		AuthIndex:  entry.AuthIndex,
+		Generation: entry.Generation,
+		Status:     entry.Status,
+		Disabled:   entry.Disabled,
+	}
+}
+
+func shouldSkipAutoRefreshTarget(target RefreshTarget) bool {
+	return target.Disabled || target.Status == StatusBanned || target.Status == StatusQuotaExceeded
+}
+
+// ProbeTarget calls the configured provider quota endpoint without publishing
+// quota state or invoking the refresh finalizer.
+func (s *Scheduler) ProbeTarget(ctx context.Context, target RefreshTarget) ProbeResult {
+	startedAt := time.Now().UTC()
+	result := ProbeResult{Target: target, StartedAt: startedAt}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = err
+		}
+		result.Outcome = ProbeOutcomeInconclusive
+		result.Error = cause.Error()
+		result.CompletedAt = time.Now().UTC()
+		return result
+	}
+
+	s.mu.RLock()
+	entry := s.entries[target.EntryKey]
+	if entry == nil {
+		s.mu.RUnlock()
+		result.Outcome = ProbeOutcomeOutdated
+		result.Error = errRefreshTargetChanged.Error()
+		result.CompletedAt = time.Now().UTC()
+		return result
+	}
+	entry.mu.RLock()
+	if !refreshTargetMatchesEntryLocked(target, entry) {
+		entry.mu.RUnlock()
+		s.mu.RUnlock()
+		result.Outcome = ProbeOutcomeOutdated
+		result.Error = errRefreshTargetChanged.Error()
+		result.CompletedAt = time.Now().UTC()
+		return result
+	}
+	fetchEntry := &Entry{
+		Generation: target.Generation,
+		FileName:   target.FileName,
+		Type:       target.Type,
+		AuthIndex:  target.AuthIndex,
+		Status:     entry.Status,
+		Disabled:   entry.Disabled,
+	}
+	entry.mu.RUnlock()
 	s.mu.RUnlock()
 
-	// Execute refreshes directly (serialized)
-	for _, entry := range toRefresh {
-		entryFinalizer := finalizer
-		if !isManual {
-			entryFinalizer = nil
-		}
-		s.executeRefresh(entry, entryFinalizer)
+	var fetchResult FetchResult
+	var err error
+	if s.fetchFn == nil {
+		err = errors.New("quota fetcher is not configured")
+	} else {
+		fetchResult, err = s.fetchFn(ctx, fetchEntry)
 	}
+
+	s.mu.RLock()
+	current := s.entries[target.EntryKey]
+	bindingCurrent := current == entry
+	if bindingCurrent {
+		entry.mu.RLock()
+		bindingCurrent = refreshTargetMatchesEntryLocked(target, entry)
+		entry.mu.RUnlock()
+	}
+	s.mu.RUnlock()
+	result.CompletedAt = time.Now().UTC()
+	if !bindingCurrent {
+		result.Outcome = ProbeOutcomeOutdated
+		result.Error = errRefreshTargetChanged.Error()
+		return result
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = errContext
+		}
+		result.Outcome = ProbeOutcomeInconclusive
+		result.Error = cause.Error()
+		return result
+	}
+	if err != nil {
+		result.Outcome = ProbeOutcomeFailed
+		result.Error = err.Error()
+		return result
+	}
+	result.Outcome = ProbeOutcomePassed
+	result.Data = append(result.Data, fetchResult.Data...)
+	return result
+}
+
+// RefreshTarget refreshes one exact provider credential with per-target singleflight.
+func (s *Scheduler) RefreshTarget(ctx context.Context, target RefreshTarget) RefreshResult {
+	return s.refreshTarget(ctx, target, nil, true)
+}
+
+func (s *Scheduler) refreshTarget(
+	ctx context.Context,
+	target RefreshTarget,
+	finalizer refreshContextFinalizer,
+	share bool,
+) RefreshResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if finalizer == nil {
+		finalizer = s.selectRefreshFinalizer()
+	}
+	if !share {
+		return s.executeRefresh(ctx, target, finalizer)
+	}
+
+	flightKey := target.EntryKey + "\x00" + strconv.FormatUint(target.Generation, 10)
+	s.flightMu.Lock()
+	flight, exists := s.flights[flightKey]
+	if exists {
+		flight.waiters++
+	} else {
+		flightCtx, cancel := context.WithCancelCause(context.Background())
+		flight = &refreshFlight{
+			ctx:     flightCtx,
+			cancel:  cancel,
+			done:    make(chan struct{}),
+			waiters: 1,
+		}
+		s.flights[flightKey] = flight
+		go s.runRefreshFlight(flightKey, flight, target, finalizer)
+	}
+	s.flightMu.Unlock()
+
+	select {
+	case <-flight.done:
+		result := flight.result
+		result.Shared = exists
+		return result
+	case <-ctx.Done():
+		if s.leaveRefreshFlight(flightKey, flight) {
+			<-flight.done
+			result := flight.result
+			result.Shared = exists
+			return result
+		}
+		return RefreshResult{
+			Target:      target,
+			Outcome:     RefreshOutcomeCancelled,
+			Error:       context.Cause(ctx).Error(),
+			StartedAt:   time.Now().UTC(),
+			CompletedAt: time.Now().UTC(),
+			Shared:      exists,
+		}
+	}
+}
+
+func (s *Scheduler) leaveRefreshFlight(flightKey string, flight *refreshFlight) bool {
+	s.flightMu.Lock()
+	defer s.flightMu.Unlock()
+	current, ok := s.flights[flightKey]
+	if !ok || current != flight {
+		return false
+	}
+	if flight.waiters > 0 {
+		flight.waiters--
+	}
+	if flight.waiters != 0 {
+		return false
+	}
+	flight.cancel(context.Canceled)
+	return true
+}
+
+func (s *Scheduler) runRefreshFlight(
+	flightKey string,
+	flight *refreshFlight,
+	target RefreshTarget,
+	finalizer refreshContextFinalizer,
+) {
+	result := s.executeRefresh(flight.ctx, target, finalizer)
+	s.flightMu.Lock()
+	flight.result = result
+	if current, ok := s.flights[flightKey]; ok && current == flight {
+		delete(s.flights, flightKey)
+	}
+	close(flight.done)
+	s.flightMu.Unlock()
+}
+
+func (s *Scheduler) selectRefreshFinalizer() refreshContextFinalizer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.refreshFinalizer
 }
 
 // GetStatus returns the current status of all credentials.
@@ -351,29 +728,40 @@ func (s *Scheduler) GetStatus() StatusResponse {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	creds := make(map[string]*Entry, len(s.entries))
+	credentials := make(map[string]*Entry, len(s.entries))
 	for name, e := range s.entries {
 		e.mu.RLock()
 		cp := Entry{
-			FileName:     e.FileName,
-			Type:         e.Type,
-			AuthIndex:    e.AuthIndex,
-			Status:       e.Status,
-			LastRefresh:  cloneTime(e.LastRefresh),
-			NextRefresh:  cloneTime(e.NextRefresh),
-			Error:        e.Error,
-			FailureCount: e.FailureCount,
-			Data:         append(json.RawMessage(nil), e.Data...),
-			Disabled:     e.Disabled,
+			FileName:        e.FileName,
+			Type:            e.Type,
+			AuthIndex:       e.AuthIndex,
+			Generation:      e.Generation,
+			StateRevision:   e.StateRevision,
+			Status:          e.Status,
+			Freshness:       e.Freshness,
+			Source:          e.Source,
+			ObservedAt:      cloneTime(e.ObservedAt),
+			FetchedAt:       cloneTime(e.FetchedAt),
+			LastSuccessAt:   cloneTime(e.LastSuccessAt),
+			LastError:       e.LastError,
+			LastErrorAt:     cloneTime(e.LastErrorAt),
+			RetryAt:         cloneTime(e.RetryAt),
+			SuccessfulEmpty: e.SuccessfulEmpty,
+			LastRefresh:     cloneTime(e.LastRefresh),
+			NextRefresh:     cloneTime(e.NextRefresh),
+			Error:           e.Error,
+			FailureCount:    e.FailureCount,
+			Data:            append(json.RawMessage(nil), e.Data...),
+			Disabled:        e.Disabled,
 		}
 		e.mu.RUnlock()
-		creds[name] = &cp
+		credentials[name] = &cp
 	}
 	return StatusResponse{
 		Enabled:         s.cfg.Enabled,
 		IntervalSeconds: s.cfg.Interval,
-		Credentials:     creds,
-		ByProvider:      summarizeEntriesByProvider(creds),
+		Credentials:     credentials,
+		ByProvider:      summarizeEntriesByProvider(credentials),
 		UpdatedAt:       s.updatedAt,
 	}
 }
@@ -395,10 +783,23 @@ func summarizeEntriesByProvider(entries map[string]*Entry) map[string]ProviderSt
 		if entry.Disabled {
 			summary.Disabled++
 		}
+		switch entry.Freshness {
+		case FreshnessFresh:
+			summary.Fresh++
+		case freshnessStale:
+			summary.Stale++
+		case freshnessPartial:
+			summary.Partial++
+		case FreshnessOutdated:
+			summary.Outdated++
+		}
+		if entry.SuccessfulEmpty {
+			summary.SuccessfulEmpty++
+		}
 		switch entry.Status {
 		case StatusIdle:
 			summary.Idle++
-		case StatusLoading:
+		case statusLoading:
 			summary.Loading++
 		case StatusSuccess:
 			summary.Success++
@@ -455,13 +856,15 @@ func (s *Scheduler) persist(state EntryState) {
 	}
 }
 
-func (s *Scheduler) deletePersisted(entryKey string) {
+func (s *Scheduler) deletePersisted(state EntryState) {
 	s.mu.RLock()
 	deleteFn := s.deleteFn
 	s.mu.RUnlock()
 	if deleteFn != nil {
-		deleteFn(entryKey)
+		deleteFn(state)
+		return
 	}
+	s.persist(state)
 }
 
 func cloneTime(value *time.Time) *time.Time {
@@ -499,10 +902,16 @@ func (s *Scheduler) dispatchLoop(ctx context.Context) {
 		}
 
 		next := h[0]
-		delay := time.Until(*next.NextRefresh)
+		next.mu.RLock()
+		nextRefresh := cloneTime(next.NextRefresh)
+		next.mu.RUnlock()
+		if nextRefresh == nil {
+			continue
+		}
+		target := refreshTargetSnapshot("", next)
+		delay := time.Until(*nextRefresh)
 		if delay <= 0 {
-			// Execute immediately
-			s.executeRefresh(next, nil)
+			_ = s.RefreshTarget(ctx, target)
 			continue
 		}
 
@@ -515,76 +924,457 @@ func (s *Scheduler) dispatchLoop(ctx context.Context) {
 			timer.Stop()
 			continue
 		case <-timer.C:
-			s.executeRefresh(next, nil)
+			_ = s.RefreshTarget(ctx, target)
 		}
 	}
 }
 
 const refreshFinalizerErrorMessage = "quota refreshed, but routing state could not be restored"
 
-func (s *Scheduler) executeRefresh(entry *Entry, finalizer RefreshFinalizer) {
-	entry.mu.Lock()
-	attempt := RefreshAttempt{
-		EntryKey:       EntryKey(entry.Type, entry.FileName),
-		FileName:       entry.FileName,
-		Type:           entry.Type,
-		AuthIndex:      entry.AuthIndex,
-		PreviousStatus: entry.Status,
-	}
-	entry.Status = StatusLoading
-	loadingState := entry.snapshotLocked()
-	entry.mu.Unlock()
-	s.persist(loadingState)
-
-	data, err := s.fetchFn(entry)
-	if err == nil && finalizer != nil {
-		attempt.Data = append([]byte(nil), data...)
-		if errFinalize := finalizer(attempt); errFinalize != nil {
-			log.WithError(errFinalize).Warnf("quota: finalize manual refresh for %s", entry.FileName)
-			err = errors.New(refreshFinalizerErrorMessage)
+func (s *Scheduler) executeRefresh(
+	ctx context.Context,
+	target RefreshTarget,
+	finalizer refreshContextFinalizer,
+) RefreshResult {
+	startedAt := time.Now().UTC()
+	result := RefreshResult{Target: target, StartedAt: startedAt}
+	if err := ctx.Err(); err != nil {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = err
 		}
+		result.Outcome = RefreshOutcomeCancelled
+		result.Error = cause.Error()
+		result.CompletedAt = time.Now().UTC()
+		return result
 	}
 
 	s.mu.Lock()
-	now := time.Now()
+	entry := s.entries[target.EntryKey]
+	if entry == nil {
+		s.mu.Unlock()
+		result.Outcome = RefreshOutcomeInconclusive
+		result.Error = errRefreshTargetChanged.Error()
+		result.CompletedAt = time.Now().UTC()
+		return result
+	}
 	entry.mu.Lock()
-	entry.LastRefresh = &now
-	s.updatedAt = now
-	if len(data) > 0 {
-		entry.Data = append(entry.Data[:0], data...)
+	if !refreshTargetMatchesEntryLocked(target, entry) {
+		entry.mu.Unlock()
+		s.mu.Unlock()
+		result.Outcome = RefreshOutcomeInconclusive
+		result.Error = errRefreshTargetChanged.Error()
+		result.CompletedAt = time.Now().UTC()
+		return result
+	}
+	previousState := entry.snapshotLocked()
+	attempt := RefreshAttempt{
+		EntryKey:       target.EntryKey,
+		FileName:       target.FileName,
+		Type:           target.Type,
+		AuthIndex:      target.AuthIndex,
+		PreviousStatus: entry.Status,
+		StartedAt:      startedAt,
+	}
+	fetchEntry := &Entry{
+		FileName:      target.FileName,
+		Type:          target.Type,
+		AuthIndex:     target.AuthIndex,
+		Generation:    target.Generation,
+		StateRevision: entry.StateRevision,
+		Status:        entry.Status,
+		Freshness:     entry.Freshness,
+		Disabled:      entry.Disabled,
+	}
+	entry.Status = statusLoading
+	entry.StateRevision++
+	loadingState := entry.snapshotLocked()
+	s.history[target.EntryKey] = cloneEntryState(loadingState)
+	entry.mu.Unlock()
+	s.mu.Unlock()
+	s.persist(loadingState)
+
+	var fetchResult FetchResult
+	var err error
+	if s.fetchFn == nil {
+		err = errors.New("quota fetcher is not configured")
+	} else {
+		fetchResult, err = s.fetchFn(ctx, fetchEntry)
+	}
+	completedAt := time.Now().UTC()
+	if err == nil {
+		fetchResult, err = normalizeFetchResult(fetchResult, completedAt)
+	}
+	refreshCommitted := false
+	if err == nil && ctx.Err() == nil {
+		if !s.refreshTargetIsCurrent(target, entry) {
+			result.Outcome = RefreshOutcomeInconclusive
+			result.Error = errRefreshTargetChanged.Error()
+			result.CompletedAt = time.Now().UTC()
+			return result
+		}
+		if finalizer != nil {
+			attempt.Data = append([]byte(nil), fetchResult.Data...)
+			if errFinalize := finalizer(ctx, attempt); errFinalize != nil {
+				log.WithError(errFinalize).Warnf("quota: finalize refresh for %s", target.FileName)
+				err = errors.New(refreshFinalizerErrorMessage)
+			}
+		}
+		refreshCommitted = err == nil
 	}
 
-	if err != nil {
-		errMsg := err.Error()
-		status, backoffMultiplier := classifyError(errMsg)
-
-		entry.Status = status
-		entry.Error = errMsg
-		entry.FailureCount++
-
-		backoff := time.Duration(s.cfg.Interval) * time.Second *
-			time.Duration(backoffMultiplier) * (1 << min(entry.FailureCount, 5))
-		maxInterval := time.Duration(s.cfg.MaxInterval) * time.Second
-		if backoff > maxInterval {
-			backoff = maxInterval
+	s.mu.Lock()
+	current := s.entries[target.EntryKey]
+	if current != entry {
+		s.mu.Unlock()
+		result.Outcome = RefreshOutcomeInconclusive
+		result.Error = errRefreshTargetChanged.Error()
+		result.CompletedAt = time.Now().UTC()
+		return result
+	}
+	entry.mu.Lock()
+	if !refreshTargetMatchesEntryLocked(target, entry) {
+		entry.mu.Unlock()
+		s.mu.Unlock()
+		result.Outcome = RefreshOutcomeInconclusive
+		result.Error = errRefreshTargetChanged.Error()
+		result.CompletedAt = time.Now().UTC()
+		return result
+	}
+	if errContext := ctx.Err(); errContext != nil && !refreshCommitted {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = errContext
 		}
-		entry.NextRefresh = new(time.Time)
-		*entry.NextRefresh = now.Add(backoff)
+		disabled := entry.Disabled
+		disabledConfigured := entry.disabledConfigured
+		previousState.StateRevision = entry.StateRevision + 1
+		restoreEntryStateLocked(entry, previousState)
+		entry.Disabled = disabled
+		entry.disabledConfigured = disabledConfigured
+		state := entry.snapshotLocked()
+		s.history[target.EntryKey] = cloneEntryState(state)
+		entry.mu.Unlock()
+		s.mu.Unlock()
+		s.persist(state)
+		result.Outcome = RefreshOutcomeCancelled
+		result.Freshness = state.Freshness
+		result.SuccessfulEmpty = state.SuccessfulEmpty
+		result.Error = cause.Error()
+		result.CompletedAt = time.Now().UTC()
+		return result
+	}
+
+	entry.StateRevision++
+	entry.FetchedAt = cloneTime(&completedAt)
+	entry.LastRefresh = cloneTime(&completedAt)
+	s.updatedAt = completedAt
+	if err != nil {
+		applyRefreshFailureLocked(entry, err, completedAt, s.cfg)
 		log.Warnf(
-			"quota: refresh failed for %s [%s]: %v (next retry in %v)",
-			entry.FileName, status, err, backoff,
+			"quota: refresh failed for %s [%s]: %v (next retry at %v)",
+			entry.FileName, entry.Status, err, entry.RetryAt,
 		)
+		result.Outcome = RefreshOutcomeFailed
+		result.Error = err.Error()
 	} else {
-		entry.Status = StatusSuccess
-		entry.Error = ""
-		entry.FailureCount = 0
-		entry.NextRefresh = new(time.Time)
-		*entry.NextRefresh = now.Add(time.Duration(s.cfg.Interval) * time.Second)
+		applyRefreshSuccessLocked(entry, fetchResult, completedAt, s.cfg)
+		result.Outcome = RefreshOutcomeSucceeded
 	}
 	state := entry.snapshotLocked()
+	s.history[target.EntryKey] = cloneEntryState(state)
 	entry.mu.Unlock()
 	s.mu.Unlock()
 	s.persist(state)
+	result.Freshness = state.Freshness
+	result.SuccessfulEmpty = state.SuccessfulEmpty
+	result.CompletedAt = completedAt
+	return result
+}
+
+func normalizeFetchResult(result FetchResult, completedAt time.Time) (FetchResult, error) {
+	result.Source = strings.TrimSpace(result.Source)
+	result.PartialError = strings.TrimSpace(result.PartialError)
+	if result.Completeness == "" {
+		result.Completeness = FetchComplete
+	}
+	if result.PartialError != "" && result.Completeness == FetchComplete {
+		result.Completeness = FetchPartial
+	}
+	if result.FetchedAt.IsZero() {
+		result.FetchedAt = completedAt
+	} else {
+		result.FetchedAt = result.FetchedAt.UTC()
+	}
+	if result.ObservedAt.IsZero() {
+		result.ObservedAt = result.FetchedAt
+	} else {
+		result.ObservedAt = result.ObservedAt.UTC()
+	}
+	switch result.Completeness {
+	case FetchComplete:
+	case FetchPartial:
+		if len(result.Data) == 0 {
+			return FetchResult{}, errors.New("partial quota fetch returned no usable data")
+		}
+	default:
+		return FetchResult{}, fmt.Errorf("invalid quota fetch completeness %q", result.Completeness)
+	}
+	if len(result.Data) == 0 {
+		if !result.AuthoritativeEmpty {
+			return FetchResult{}, errors.New("quota fetch returned empty data without authority")
+		}
+		return result, nil
+	}
+	if result.AuthoritativeEmpty {
+		return FetchResult{}, errors.New("quota fetch marked non-empty data as authoritative empty")
+	}
+	if !json.Valid(result.Data) {
+		return FetchResult{}, errors.New("quota fetch returned invalid JSON")
+	}
+	return result, nil
+}
+
+func applyRefreshFailureLocked(entry *Entry, err error, now time.Time, cfg Config) {
+	errMsg := err.Error()
+	status, backoffMultiplier := classifyError(errMsg)
+	entry.Status = status
+	entry.Error = errMsg
+	entry.LastError = errMsg
+	entry.LastErrorAt = cloneTime(&now)
+	entry.FailureCount++
+	if len(entry.Data) > 0 || entry.SuccessfulEmpty {
+		entry.Freshness = freshnessStale
+	} else {
+		entry.Freshness = FreshnessOutdated
+	}
+	interval := cfg.Interval
+	if interval <= 0 {
+		interval = DefaultConfig().Interval
+	}
+	backoff := time.Duration(interval) * time.Second *
+		time.Duration(backoffMultiplier) * (1 << min(entry.FailureCount, 5))
+	maxInterval := time.Duration(cfg.MaxInterval) * time.Second
+	if maxInterval <= 0 {
+		maxInterval = time.Duration(DefaultConfig().MaxInterval) * time.Second
+	}
+	if backoff > maxInterval {
+		backoff = maxInterval
+	}
+	retryAt := now.Add(backoff)
+	entry.RetryAt = cloneTime(&retryAt)
+	entry.NextRefresh = cloneTime(&retryAt)
+}
+
+func applyRefreshSuccessLocked(entry *Entry, fetched FetchResult, now time.Time, cfg Config) {
+	entry.Status = StatusSuccess
+	entry.Error = ""
+	entry.FailureCount = 0
+	entry.Source = fetched.Source
+	entry.ObservedAt = cloneTime(&fetched.ObservedAt)
+	entry.FetchedAt = cloneTime(&fetched.FetchedAt)
+	entry.LastRefresh = cloneTime(&fetched.FetchedAt)
+	entry.LastSuccessAt = cloneTime(&fetched.FetchedAt)
+	entry.RetryAt = nil
+	if len(fetched.Data) > 0 {
+		entry.Data = append(entry.Data[:0], fetched.Data...)
+		entry.SuccessfulEmpty = false
+	} else {
+		entry.Data = nil
+		entry.SuccessfulEmpty = true
+	}
+	if fetched.Completeness == FetchPartial {
+		entry.Freshness = freshnessPartial
+		if fetched.PartialError != "" {
+			entry.LastError = fetched.PartialError
+			entry.LastErrorAt = cloneTime(&now)
+		}
+	} else {
+		entry.Freshness = FreshnessFresh
+	}
+	interval := cfg.Interval
+	if interval <= 0 {
+		interval = DefaultConfig().Interval
+	}
+	nextRefresh := now.Add(time.Duration(interval) * time.Second)
+	entry.NextRefresh = cloneTime(&nextRefresh)
+}
+
+func normalizeRestoredEntryState(state EntryState) EntryState {
+	if state.Generation == 0 {
+		state.Generation = 1
+	}
+	if state.StateRevision == 0 {
+		state.StateRevision = 1
+	}
+	if state.FetchedAt == nil {
+		state.FetchedAt = cloneTime(state.LastRefresh)
+	}
+	if state.LastRefresh == nil {
+		state.LastRefresh = cloneTime(state.FetchedAt)
+	}
+	if state.LastSuccessAt == nil && state.Status == StatusSuccess {
+		state.LastSuccessAt = cloneTime(state.FetchedAt)
+	}
+	if state.ObservedAt == nil && state.Status == StatusSuccess {
+		state.ObservedAt = cloneTime(state.LastSuccessAt)
+	}
+	if state.LastError == "" {
+		state.LastError = state.Error
+	}
+	if state.LastErrorAt == nil && state.LastError != "" {
+		state.LastErrorAt = cloneTime(state.FetchedAt)
+	}
+	if state.RetryAt == nil && state.Status != StatusSuccess {
+		state.RetryAt = cloneTime(state.NextRefresh)
+	}
+	if state.Freshness == "" {
+		switch {
+		case state.Tombstone:
+			state.Freshness = FreshnessOutdated
+		case state.Status == StatusSuccess && (len(state.Data) > 0 || state.SuccessfulEmpty):
+			state.Freshness = FreshnessFresh
+		case len(state.Data) > 0 || state.SuccessfulEmpty:
+			state.Freshness = freshnessStale
+		default:
+			state.Freshness = FreshnessOutdated
+		}
+	}
+	return state
+}
+
+func newEntryForBinding(
+	fileName string,
+	credType CredentialType,
+	authIndex,
+	credentialRevision string,
+	now time.Time,
+) *Entry {
+	return &Entry{
+		credentialRevision: credentialRevision,
+		FileName:           fileName,
+		Type:               credType,
+		AuthIndex:          authIndex,
+		Generation:         1,
+		StateRevision:      1,
+		Status:             StatusIdle,
+		Freshness:          FreshnessOutdated,
+		LastRefresh:        nil,
+		NextRefresh:        cloneTime(&now),
+	}
+}
+
+func resetEntryForBindingLocked(entry *Entry, generation uint64) {
+	if generation == 0 {
+		generation = 1
+	}
+	entry.Generation = generation
+	entry.StateRevision = 1
+	entry.Status = StatusIdle
+	entry.Freshness = FreshnessOutdated
+	entry.Source = ""
+	entry.ObservedAt = nil
+	entry.FetchedAt = nil
+	entry.LastSuccessAt = nil
+	entry.LastError = ""
+	entry.LastErrorAt = nil
+	entry.RetryAt = nil
+	entry.SuccessfulEmpty = false
+	entry.LastRefresh = nil
+	now := time.Now().UTC()
+	entry.NextRefresh = cloneTime(&now)
+	entry.Error = ""
+	entry.FailureCount = 0
+	entry.Data = nil
+}
+
+func restoreEntryStateLocked(entry *Entry, state EntryState) {
+	state = normalizeRestoredEntryState(state)
+	entry.Generation = state.Generation
+	entry.StateRevision = state.StateRevision
+	entry.Status = state.Status
+	entry.Freshness = state.Freshness
+	entry.Source = state.Source
+	entry.ObservedAt = cloneTime(state.ObservedAt)
+	entry.FetchedAt = cloneTime(state.FetchedAt)
+	entry.LastSuccessAt = cloneTime(state.LastSuccessAt)
+	entry.LastError = state.LastError
+	entry.LastErrorAt = cloneTime(state.LastErrorAt)
+	entry.RetryAt = cloneTime(state.RetryAt)
+	entry.SuccessfulEmpty = state.SuccessfulEmpty
+	entry.LastRefresh = cloneTime(state.LastRefresh)
+	entry.NextRefresh = cloneTime(state.NextRefresh)
+	entry.Error = state.Error
+	entry.FailureCount = state.FailureCount
+	entry.Data = append(entry.Data[:0], state.Data...)
+	entry.Disabled = state.Disabled
+	if state.CredentialRevision != "" {
+		entry.credentialRevision = state.CredentialRevision
+	}
+}
+
+func tombstoneEntryLocked(entry *Entry) EntryState {
+	return EntryState{
+		FileName:           entry.FileName,
+		Type:               entry.Type,
+		AuthIndex:          entry.AuthIndex,
+		CredentialRevision: entry.credentialRevision,
+		Generation:         entry.Generation + 1,
+		StateRevision:      1,
+		Tombstone:          true,
+		Status:             StatusIdle,
+		Freshness:          FreshnessOutdated,
+		Disabled:           entry.Disabled,
+	}
+}
+
+func entryBindingMatchesStateLocked(entry *Entry, state EntryState) bool {
+	return entry != nil && bindingMatches(state, entry.AuthIndex, entry.credentialRevision)
+}
+
+func bindingMatches(state EntryState, authIndex, credentialRevision string) bool {
+	if state.AuthIndex != strings.TrimSpace(authIndex) {
+		return false
+	}
+	stateRevision := strings.TrimSpace(state.CredentialRevision)
+	credentialRevision = strings.TrimSpace(credentialRevision)
+	return stateRevision == "" || credentialRevision != "" && stateRevision == credentialRevision
+}
+
+func entryGenerationPrecedes(candidate, current EntryState) bool {
+	return candidate.Generation < current.Generation
+}
+
+func cloneEntryState(state EntryState) EntryState {
+	state.ObservedAt = cloneTime(state.ObservedAt)
+	state.FetchedAt = cloneTime(state.FetchedAt)
+	state.LastSuccessAt = cloneTime(state.LastSuccessAt)
+	state.LastErrorAt = cloneTime(state.LastErrorAt)
+	state.RetryAt = cloneTime(state.RetryAt)
+	state.LastRefresh = cloneTime(state.LastRefresh)
+	state.NextRefresh = cloneTime(state.NextRefresh)
+	state.Data = append(json.RawMessage(nil), state.Data...)
+	return state
+}
+
+func (s *Scheduler) refreshTargetIsCurrent(target RefreshTarget, expected *Entry) bool {
+	s.mu.RLock()
+	entry := s.entries[target.EntryKey]
+	if entry == nil || entry != expected {
+		s.mu.RUnlock()
+		return false
+	}
+	entry.mu.RLock()
+	current := refreshTargetMatchesEntryLocked(target, entry)
+	entry.mu.RUnlock()
+	s.mu.RUnlock()
+	return current
+}
+
+func refreshTargetMatchesEntryLocked(target RefreshTarget, entry *Entry) bool {
+	return entry != nil && target.EntryKey == EntryKey(entry.Type, entry.FileName) &&
+		target.FileName == entry.FileName && target.Type == entry.Type &&
+		target.AuthIndex == entry.AuthIndex && target.Generation == entry.Generation
 }
 
 // classifyError determines the error status and backoff multiplier from the error message.
@@ -633,11 +1423,11 @@ func (h *entryHeap) Less(i, j int) bool {
 }
 func (h *entryHeap) Swap(i, j int) { (*h)[i], (*h)[j] = (*h)[j], (*h)[i] }
 
-func (h *entryHeap) Push(x interface{}) {
+func (h *entryHeap) Push(x any) {
 	*h = append(*h, x.(*Entry))
 }
 
-func (h *entryHeap) Pop() interface{} {
+func (h *entryHeap) Pop() any {
 	old := *h
 	n := len(old)
 	item := old[n-1]
