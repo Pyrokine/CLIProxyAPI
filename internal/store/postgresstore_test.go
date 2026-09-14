@@ -328,7 +328,9 @@ func TestPostgresStoreRecoversInterruptedVersionedDeletionBeforeDatabaseSync(t *
 	if errVersion != nil {
 		t.Fatalf("ReadPersistedVersion() error = %v", errVersion)
 	}
-	if _, matched, errPrepare := cliproxyauth.PrepareDurablePersistedFileDeletion(path, version); errPrepare != nil || !matched {
+	if _, matched, errPrepare := cliproxyauth.PrepareDurablePersistedFileDeletion(
+		path, version,
+	); errPrepare != nil || !matched {
 		t.Fatalf("PrepareDurablePersistedFileDeletion() matched = %v, error = %v", matched, errPrepare)
 	}
 

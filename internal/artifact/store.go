@@ -26,9 +26,9 @@ import (
 )
 
 const (
-	DefaultMaxImageBytes            = 50 << 20
-	DefaultCacheCleanupInterval     = time.Hour
-	DefaultTempFileRetention        = 24 * time.Hour
+	defaultMaxImageBytes            = 50 << 20
+	defaultCacheCleanupInterval     = time.Hour
+	defaultTempFileRetention        = 24 * time.Hour
 	imageIDPrefix                   = "img_"
 	remoteImageUserAgent            = "CLIProxyAPI-image-artifact"
 	tempFilePrefix                  = ".tmp-"
@@ -36,10 +36,10 @@ const (
 )
 
 var (
-	ErrInvalidID       = errors.New("invalid artifact id")
-	ErrIntegrity       = errors.New("artifact content does not match its id")
-	ErrUnsupportedMIME = errors.New("unsupported artifact MIME type")
-	ErrTooLarge        = errors.New("artifact exceeds maximum size")
+	errInvalidID       = errors.New("invalid artifact id")
+	errIntegrity       = errors.New("artifact content does not match its id")
+	errUnsupportedMIME = errors.New("unsupported artifact MIME type")
+	errTooLarge        = errors.New("artifact exceeds maximum size")
 
 	artifactRootMutexes sync.Map
 )
@@ -49,11 +49,11 @@ type integrityError struct {
 }
 
 func (*integrityError) Error() string {
-	return ErrIntegrity.Error()
+	return errIntegrity.Error()
 }
 
 func (*integrityError) Unwrap() error {
-	return ErrIntegrity
+	return errIntegrity
 }
 
 type Record struct {
@@ -70,7 +70,7 @@ type CacheConfig struct {
 	CleanupInterval time.Duration
 }
 
-type Stats struct {
+type StoreStats struct {
 	TotalBytes int64
 	FileCount  int
 }
@@ -79,7 +79,7 @@ type CleanupResult struct {
 	DeletedFiles     int
 	DeletedBytes     int64
 	DeletedTempFiles int
-	Stats            Stats
+	Stats            StoreStats
 }
 
 type Store struct {
@@ -130,7 +130,7 @@ func (s *Store) proxyURLSnapshot() string {
 	return s.proxyURL
 }
 
-func WithMaxBytes(maxBytes int64) Option {
+func withMaxBytes(maxBytes int64) Option {
 	return func(s *Store) {
 		if s != nil && maxBytes > 0 {
 			s.maxBytes = maxBytes
@@ -147,7 +147,7 @@ func Root(configFilePath string) string {
 		}
 		configFilePath = wd
 	}
-	namespace := artifactInstanceNamespace(configFilePath)
+	namespace := InstanceNamespace(configFilePath)
 	if writable := util.WritablePath(); writable != "" {
 		return filepath.Join(writable, "artifacts", "instances", namespace, "images")
 	}
@@ -157,6 +157,10 @@ func Root(configFilePath string) string {
 		base = configFilePath
 	}
 	return filepath.Join(base, "artifacts", "instances", namespace, "images")
+}
+
+func InstanceNamespace(configFilePath string) string {
+	return artifactInstanceNamespace(configFilePath)
 }
 
 func artifactInstanceNamespace(configFilePath string) string {
@@ -179,7 +183,7 @@ func NewStore(root string, opts ...Option) (*Store, error) {
 	root = filepath.Clean(root)
 	store := &Store{
 		root:          root,
-		maxBytes:      DefaultMaxImageBytes,
+		maxBytes:      defaultMaxImageBytes,
 		sharedFilesMu: artifactRootMutex(root),
 	}
 	for _, opt := range opts {
@@ -227,9 +231,11 @@ func evalArtifactRootSymlinks(path string, depth int) (string, error) {
 	} else if current == "" {
 		current = "."
 	}
-	parts := strings.FieldsFunc(rest, func(r rune) bool {
-		return r <= 255 && os.IsPathSeparator(uint8(r))
-	})
+	parts := strings.FieldsFunc(
+		rest, func(r rune) bool {
+			return r <= 255 && os.IsPathSeparator(uint8(r))
+		},
+	)
 	for i, part := range parts {
 		candidate := filepath.Join(current, part)
 		info, err := os.Lstat(candidate)
@@ -282,7 +288,7 @@ func CacheConfigFromLimits(retentionDays int, maxTotalSizeMB int) CacheConfig {
 	return CacheConfig{
 		Retention:       time.Duration(retentionDays) * 24 * time.Hour,
 		MaxTotalBytes:   int64(maxTotalSizeMB) * imageArtifactCacheMegabyteBytes,
-		CleanupInterval: DefaultCacheCleanupInterval,
+		CleanupInterval: defaultCacheCleanupInterval,
 	}
 }
 
@@ -432,13 +438,13 @@ func (s *Store) PutRemoteImage(ctx context.Context, rawURL string) (Record, []by
 	if err != nil {
 		return Record{}, nil, fmt.Errorf("download image from %s failed", host)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return Record{}, nil, fmt.Errorf("download image from %s failed: status %d", host, resp.StatusCode)
 	}
 	if resp.ContentLength > s.maxBytes {
-		return Record{}, nil, ErrTooLarge
+		return Record{}, nil, errTooLarge
 	}
 
 	declaredMIME, err := declaredImageMIME(resp.Header.Get("Content-Type"))
@@ -450,7 +456,7 @@ func (s *Store) PutRemoteImage(ctx context.Context, rawURL string) (Record, []by
 		return Record{}, nil, fmt.Errorf("read remote image failed")
 	}
 	if int64(len(data)) > s.maxBytes {
-		return Record{}, nil, ErrTooLarge
+		return Record{}, nil, errTooLarge
 	}
 
 	record, err := s.PutBytes(ctx, data, declaredMIME)
@@ -476,10 +482,10 @@ func (s *Store) PutBytes(ctx context.Context, data []byte, mediaType string) (Re
 		return Record{}, fmt.Errorf("artifact data is empty")
 	}
 	if int64(len(data)) > s.maxBytes {
-		return Record{}, ErrTooLarge
+		return Record{}, errTooLarge
 	}
 	if maxTotalBytes := s.CacheConfig().MaxTotalBytes; maxTotalBytes > 0 && int64(len(data)) > maxTotalBytes {
-		return Record{}, ErrTooLarge
+		return Record{}, errTooLarge
 	}
 
 	mediaType, ext, err := normalizeImageMIME(mediaType, data)
@@ -504,7 +510,7 @@ func (s *Store) PutBytes(ctx context.Context, data []byte, mediaType string) (Re
 			return Record{}, err
 		}
 		return touched, nil
-	} else if errors.Is(err, ErrIntegrity) {
+	} else if errors.Is(err, errIntegrity) {
 		if errRemove := os.Remove(s.pathForID(id)); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
 			return Record{}, errors.Join(err, errRemove)
 		}
@@ -584,9 +590,9 @@ func (s *Store) Open(id string) (*os.File, Record, error) {
 	return file, s.touchRecord(record), nil
 }
 
-func (s *Store) Stats() (Stats, error) {
+func (s *Store) Stats() (StoreStats, error) {
 	if s == nil {
-		return Stats{}, fmt.Errorf("artifact store is unavailable")
+		return StoreStats{}, fmt.Errorf("artifact store is unavailable")
 	}
 
 	s.lockFiles()
@@ -595,10 +601,10 @@ func (s *Store) Stats() (Stats, error) {
 	return s.stats()
 }
 
-func (s *Store) stats() (Stats, error) {
+func (s *Store) stats() (StoreStats, error) {
 	records, _, err := s.scanRecords()
 	if err != nil {
-		return Stats{}, err
+		return StoreStats{}, err
 	}
 	return statsFromRecords(records), nil
 }
@@ -628,7 +634,7 @@ func (s *Store) Cleanup(ctx context.Context) (CleanupResult, error) {
 			return result, ctx.Err()
 		default:
 		}
-		if now.Sub(tempFile.ModTime) < DefaultTempFileRetention {
+		if now.Sub(tempFile.ModTime) < defaultTempFileRetention {
 			continue
 		}
 		if err = os.Remove(s.pathForID(tempFile.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -664,12 +670,14 @@ func (s *Store) Cleanup(ctx context.Context) (CleanupResult, error) {
 	}
 
 	if cacheCfg.MaxTotalBytes > 0 && result.Stats.TotalBytes > cacheCfg.MaxTotalBytes {
-		sort.Slice(records, func(i int, j int) bool {
-			if records[i].ModTime.Equal(records[j].ModTime) {
-				return records[i].ID < records[j].ID
-			}
-			return records[i].ModTime.Before(records[j].ModTime)
-		})
+		sort.Slice(
+			records, func(i int, j int) bool {
+				if records[i].ModTime.Equal(records[j].ModTime) {
+					return records[i].ID < records[j].ID
+				}
+				return records[i].ModTime.Before(records[j].ModTime)
+			},
+		)
 		for _, record := range records {
 			select {
 			case <-ctx.Done():
@@ -719,12 +727,14 @@ func (s *Store) enforceMaxTotalBytes(ctx context.Context, protectedID string) er
 	if stats.TotalBytes <= maxTotalBytes {
 		return nil
 	}
-	sort.Slice(records, func(i int, j int) bool {
-		if records[i].ModTime.Equal(records[j].ModTime) {
-			return records[i].ID < records[j].ID
-		}
-		return records[i].ModTime.Before(records[j].ModTime)
-	})
+	sort.Slice(
+		records, func(i int, j int) bool {
+			if records[i].ModTime.Equal(records[j].ModTime) {
+				return records[i].ID < records[j].ID
+			}
+			return records[i].ModTime.Before(records[j].ModTime)
+		},
+	)
 	for _, record := range records {
 		select {
 		case <-ctx.Done():
@@ -747,7 +757,7 @@ func (s *Store) enforceMaxTotalBytes(ctx context.Context, protectedID string) er
 		}
 	}
 	if stats.TotalBytes > maxTotalBytes {
-		return ErrTooLarge
+		return errTooLarge
 	}
 	return nil
 }
@@ -755,20 +765,20 @@ func (s *Store) enforceMaxTotalBytes(ctx context.Context, protectedID string) er
 func ValidateID(id string) error {
 	id = strings.TrimSpace(id)
 	if id == "" || filepath.Base(id) != id || strings.ContainsAny(id, `/\\`) || strings.Contains(id, "..") {
-		return ErrInvalidID
+		return errInvalidID
 	}
 	ext := strings.ToLower(filepath.Ext(id))
 	mediaType, ok := mimeByExtension(ext)
 	if !ok || mediaType == "" {
-		return ErrInvalidID
+		return errInvalidID
 	}
 	hash := strings.TrimSuffix(strings.TrimPrefix(id, imageIDPrefix), ext)
 	if !strings.HasPrefix(id, imageIDPrefix) || len(hash) != sha256.Size*2 {
-		return ErrInvalidID
+		return errInvalidID
 	}
 	for _, r := range hash {
 		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
-			return ErrInvalidID
+			return errInvalidID
 		}
 	}
 	return nil
@@ -808,7 +818,7 @@ func (s *Store) touchRecord(record Record) Record {
 func (s *Store) openExistingRecord(id string) (*os.File, Record, error) {
 	path := s.pathForID(id)
 	if !pathWithinRoot(s.root, path) {
-		return nil, Record{}, ErrInvalidID
+		return nil, Record{}, errInvalidID
 	}
 	file, err := openArtifactNoFollow(path)
 	if err != nil {
@@ -821,7 +831,7 @@ func (s *Store) openExistingRecord(id string) (*os.File, Record, error) {
 	}
 	if !info.Mode().IsRegular() {
 		_ = file.Close()
-		return nil, Record{}, ErrInvalidID
+		return nil, Record{}, errInvalidID
 	}
 	record, err := recordFromFileInfo(id, info)
 	if err != nil {
@@ -888,15 +898,14 @@ func (s *Store) deleteRecord(record Record) (bool, error) {
 	}
 	path := s.pathForID(record.ID)
 	if !pathWithinRoot(s.root, path) {
-		return false, ErrInvalidID
+		return false, errInvalidID
 	}
 	file, _, err := s.openExistingRecord(record.ID)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrInvalidID) {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, errInvalidID) {
 			return false, nil
 		}
-		var corrupt *integrityError
-		if errors.As(err, &corrupt) {
+		if corrupt, ok := errors.AsType[*integrityError](err); ok {
 			removed, errRemove := s.removeCorruptRecord(record.ID, corrupt.info)
 			if removed {
 				log.WithField("artifact_id", record.ID).Warn("removed corrupt image artifact during cache cleanup")
@@ -940,8 +949,8 @@ func (s *Store) removeCorruptRecord(id string, expected os.FileInfo) (bool, erro
 	return true, nil
 }
 
-func statsFromRecords(records []Record) Stats {
-	stats := Stats{FileCount: len(records)}
+func statsFromRecords(records []Record) StoreStats {
+	stats := StoreStats{FileCount: len(records)}
 	for _, record := range records {
 		stats.TotalBytes += record.Size
 	}
@@ -1011,7 +1020,7 @@ func decodeDataURL(raw string, maxBytes int64) (string, []byte, error) {
 		return "", nil, fmt.Errorf("data URL must be base64 encoded")
 	}
 	decoder := base64.NewDecoder(base64.StdEncoding, strings.NewReader(strings.TrimSpace(encoded)))
-	var reader io.Reader = decoder
+	var reader = decoder
 	if maxBytes > 0 {
 		reader = io.LimitReader(decoder, maxBytes+1)
 	}
@@ -1020,7 +1029,7 @@ func decodeDataURL(raw string, maxBytes int64) (string, []byte, error) {
 		return "", nil, fmt.Errorf("decode data URL failed: %w", err)
 	}
 	if maxBytes > 0 && int64(len(data)) > maxBytes {
-		return "", nil, ErrTooLarge
+		return "", nil, errTooLarge
 	}
 	return mediaType, data, nil
 }
@@ -1032,7 +1041,7 @@ func declaredImageMIME(raw string) (string, error) {
 	}
 	mediaType, _, err := mime.ParseMediaType(raw)
 	if err != nil {
-		return "", ErrUnsupportedMIME
+		return "", errUnsupportedMIME
 	}
 	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
 	if _, ok := extensionByMIME(mediaType); ok {
@@ -1042,7 +1051,7 @@ func declaredImageMIME(raw string) (string, error) {
 	case "application/octet-stream", "binary/octet-stream":
 		return "", nil
 	default:
-		return "", ErrUnsupportedMIME
+		return "", errUnsupportedMIME
 	}
 }
 
@@ -1056,9 +1065,9 @@ func normalizeImageMIME(declared string, data []byte) (string, string, error) {
 		return sniffed, ext, nil
 	}
 	if declared != "" {
-		return "", "", ErrUnsupportedMIME
+		return "", "", errUnsupportedMIME
 	}
-	return "", "", ErrUnsupportedMIME
+	return "", "", errUnsupportedMIME
 }
 
 func extensionByMIME(mediaType string) (string, bool) {
@@ -1098,7 +1107,7 @@ func recordFromFileInfo(id string, info os.FileInfo) (Record, error) {
 	ext := strings.ToLower(filepath.Ext(id))
 	mediaType, ok := mimeByExtension(ext)
 	if !ok {
-		return Record{}, ErrInvalidID
+		return Record{}, errInvalidID
 	}
 	hash := strings.TrimSuffix(strings.TrimPrefix(id, imageIDPrefix), ext)
 	return Record{

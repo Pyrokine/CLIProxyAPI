@@ -12,9 +12,52 @@ import (
 
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/go-git/go-git/v6"
+	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
+
+func cleanupTestGitRepository(t *testing.T, repo *git.Repository) {
+	t.Helper()
+	t.Cleanup(func() {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close Git repository: %v", errClose)
+		}
+	})
+}
+
+func TestDisableGitCommitSigning(t *testing.T) {
+	repoDir := t.TempDir()
+	repo, errInit := git.PlainInit(repoDir, false)
+	if errInit != nil {
+		t.Fatalf("git.PlainInit() error = %v", errInit)
+	}
+	cfg, errConfig := repo.Config()
+	if errConfig != nil {
+		t.Fatalf("repo.Config() error = %v", errConfig)
+	}
+	cfg.Commit.GpgSign = gitconfig.OptBoolTrue
+	if errSetConfig := repo.SetConfig(cfg); errSetConfig != nil {
+		t.Fatalf("repo.SetConfig() error = %v", errSetConfig)
+	}
+	closeGitRepository(repo, "close signing test repository")
+
+	if errDisable := disableGitCommitSigning(repoDir); errDisable != nil {
+		t.Fatalf("disableGitCommitSigning() error = %v", errDisable)
+	}
+	reopened, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		t.Fatalf("git.PlainOpen() error = %v", errOpen)
+	}
+	defer closeGitRepository(reopened, "close reopened signing test repository")
+	gotConfig, errGetConfig := reopened.Config()
+	if errGetConfig != nil {
+		t.Fatalf("reopened.Config() error = %v", errGetConfig)
+	}
+	if gotConfig.Commit.GpgSign != gitconfig.OptBoolFalse {
+		t.Fatalf("commit.gpgsign = %v, want false", gotConfig.Commit.GpgSign)
+	}
+}
 
 func TestNormalizeGitStoreBranch(t *testing.T) {
 	tests := map[string]string{
@@ -79,11 +122,13 @@ func TestGitTokenStoreSaveRejectsCancellationWhileWaitingForOperationLock(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		_, err := store.Save(ctx, &cliproxyauth.Auth{
-			ID:       "cancelled.json",
-			FileName: "cancelled.json",
-			Metadata: map[string]any{"type": "xai"},
-		})
+		_, err := store.Save(
+			ctx, &cliproxyauth.Auth{
+				ID:       "cancelled.json",
+				FileName: "cancelled.json",
+				Metadata: map[string]any{"type": "xai"},
+			},
+		)
 		result <- err
 	}()
 	cancel()
@@ -105,7 +150,7 @@ func TestGitTokenStoreEnsureRepositoryRejectsCancellationWhileWaitingForOperatio
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
 	go func() {
-		result <- store.EnsureRepositoryContext(ctx)
+		result <- store.ensureRepositoryContext(ctx)
 	}()
 	cancel()
 
@@ -134,13 +179,15 @@ func TestGitTokenStoreSaveStopsWhenMetadataMarshalCancelsContext(t *testing.T) {
 	release := make(chan struct{})
 	result := make(chan error, 1)
 	go func() {
-		_, err := store.Save(ctx, &cliproxyauth.Auth{
-			ID:       "cancelled.json",
-			FileName: "cancelled.json",
-			Metadata: map[string]any{
-				"blocking": blockingJSONMarshaler{started: started, release: release},
+		_, err := store.Save(
+			ctx, &cliproxyauth.Auth{
+				ID:       "cancelled.json",
+				FileName: "cancelled.json",
+				Metadata: map[string]any{
+					"blocking": blockingJSONMarshaler{started: started, release: release},
+				},
 			},
-		})
+		)
 		result <- err
 	}()
 	<-started
@@ -207,7 +254,7 @@ func TestGitTokenStoreSaveRollsBackFileWhenContextCancelsAfterWrite(t *testing.T
 	if errOpen != nil {
 		t.Fatalf("reopen repository: %v", errOpen)
 	}
-	defer repo.Close()
+	cleanupTestGitRepository(t, repo)
 	afterHead, errHead := repo.Head()
 	if errHead != nil {
 		t.Fatalf("read rolled back head: %v", errHead)
@@ -239,10 +286,12 @@ func TestGitTokenStoreSaveReportsUncertaintyWhenRollbackFails(t *testing.T) {
 		_ = os.Remove(target)
 		_ = os.Mkdir(target, 0o700)
 	}
-	t.Cleanup(func() {
-		store.beforeRollback = nil
-		_ = os.RemoveAll(path)
-	})
+	t.Cleanup(
+		func() {
+			store.beforeRollback = nil
+			_ = os.RemoveAll(path)
+		},
+	)
 	updated := initial.Clone()
 	updated.Storage = &cancellingGitTokenStorage{
 		cancel: cancel,
@@ -310,7 +359,7 @@ func TestGitTokenStoreSaveRollsBackLocalStateWhenPushIsUncertain(t *testing.T) {
 	if errOpen != nil {
 		t.Fatalf("reopen repository: %v", errOpen)
 	}
-	defer repo.Close()
+	cleanupTestGitRepository(t, repo)
 	afterHead, errHead := repo.Head()
 	if errHead != nil {
 		t.Fatalf("read rolled back head: %v", errHead)
@@ -402,7 +451,7 @@ func TestGitTokenStoreDeleteCommitsTrackedFileAlreadyMissingLocally(t *testing.T
 	if errClone != nil {
 		t.Fatalf("clone remote repository: %v", errClone)
 	}
-	defer remoteRepo.Close()
+	cleanupTestGitRepository(t, remoteRepo)
 	if _, errStat := os.Stat(filepath.Join(cloneDir, "auths", auth.FileName)); !os.IsNotExist(errStat) {
 		t.Fatalf("remote credential still exists after deletion: %v", errStat)
 	}
@@ -430,13 +479,15 @@ func TestGitTokenStoreRecoversInterruptedVersionedDeletionOnRepositoryOpen(t *te
 	if errVersion != nil {
 		t.Fatalf("ReadPersistedVersion() error = %v", errVersion)
 	}
-	if _, matched, errPrepare := cliproxyauth.PrepareDurablePersistedFileDeletion(path, version); errPrepare != nil || !matched {
+	if _, matched, errPrepare := cliproxyauth.PrepareDurablePersistedFileDeletion(
+		path, version,
+	); errPrepare != nil || !matched {
 		t.Fatalf("PrepareDurablePersistedFileDeletion() matched = %v, error = %v", matched, errPrepare)
 	}
 
 	restarted := NewGitTokenStore(remoteDir, "", "", "")
 	restarted.SetBaseDir(authDir)
-	if errEnsure := restarted.EnsureRepositoryContext(context.Background()); errEnsure != nil {
+	if errEnsure := restarted.ensureRepositoryContext(context.Background()); errEnsure != nil {
 		t.Fatalf("EnsureRepositoryContext() error = %v", errEnsure)
 	}
 	cloneDir := t.TempDir()
@@ -444,7 +495,7 @@ func TestGitTokenStoreRecoversInterruptedVersionedDeletionOnRepositoryOpen(t *te
 	if errClone != nil {
 		t.Fatalf("clone remote repository: %v", errClone)
 	}
-	defer remoteRepo.Close()
+	cleanupTestGitRepository(t, remoteRepo)
 	if _, errStat := os.Stat(filepath.Join(cloneDir, "auths", auth.FileName)); !os.IsNotExist(errStat) {
 		t.Fatalf("remote credential was resurrected after recovery: %v", errStat)
 	}
@@ -476,7 +527,9 @@ func TestGitTokenStoreRecoveryRejectsNewerRemoteCredential(t *testing.T) {
 	if errVersion != nil {
 		t.Fatalf("ReadPersistedVersion() error = %v", errVersion)
 	}
-	if _, matched, errPrepare := cliproxyauth.PrepareDurablePersistedFileDeletion(path, version); errPrepare != nil || !matched {
+	if _, matched, errPrepare := cliproxyauth.PrepareDurablePersistedFileDeletion(
+		path, version,
+	); errPrepare != nil || !matched {
 		t.Fatalf("PrepareDurablePersistedFileDeletion() matched = %v, error = %v", matched, errPrepare)
 	}
 
@@ -493,7 +546,7 @@ func TestGitTokenStoreRecoveryRejectsNewerRemoteCredential(t *testing.T) {
 
 	restarted := NewGitTokenStore(remoteDir, "", "", "")
 	restarted.SetBaseDir(authDir)
-	if errEnsure := restarted.EnsureRepositoryContext(context.Background()); errEnsure == nil || !strings.Contains(
+	if errEnsure := restarted.ensureRepositoryContext(context.Background()); errEnsure == nil || !strings.Contains(
 		errEnsure.Error(),
 		"remote branch diverged",
 	) {
@@ -504,7 +557,7 @@ func TestGitTokenStoreRecoveryRejectsNewerRemoteCredential(t *testing.T) {
 	if errClone != nil {
 		t.Fatalf("clone remote repository: %v", errClone)
 	}
-	defer remoteRepo.Close()
+	cleanupTestGitRepository(t, remoteRepo)
 	remote, errReadRemote := os.ReadFile(filepath.Join(cloneDir, "auths", original.FileName))
 	if errReadRemote != nil || !strings.Contains(string(remote), `"token":"new"`) {
 		t.Fatalf("remote replacement = %s, %v", remote, errReadRemote)
@@ -565,7 +618,7 @@ func TestGitTokenStoreRejectsRemoteDivergenceBeforeLocalMutation(t *testing.T) {
 	if errClone != nil {
 		t.Fatalf("clone remote after divergence: %v", errClone)
 	}
-	defer remoteRepo.Close()
+	cleanupTestGitRepository(t, remoteRepo)
 	if _, errStat := os.Stat(filepath.Join(cloneDir, "auths", concurrent.FileName)); errStat != nil {
 		t.Fatalf("concurrent remote credential missing: %v", errStat)
 	}
@@ -608,7 +661,7 @@ func TestGitTokenStoreLeaseConflictRestoresLocalMutation(t *testing.T) {
 		if errClone != nil {
 			t.Fatalf("clone concurrent repository: %v", errClone)
 		}
-		defer concurrentRepo.Close()
+		cleanupTestGitRepository(t, concurrentRepo)
 		worktree, errWorktree := concurrentRepo.Worktree()
 		if errWorktree != nil {
 			t.Fatalf("open concurrent worktree: %v", errWorktree)
@@ -621,7 +674,9 @@ func TestGitTokenStoreLeaseConflictRestoresLocalMutation(t *testing.T) {
 			t.Fatalf("stage concurrent auth: %v", errAdd)
 		}
 		signature := &object.Signature{Name: "test", Email: "test@example.com", When: time.Now()}
-		if _, errCommit := worktree.Commit("concurrent update", &git.CommitOptions{Author: signature}); errCommit != nil {
+		if _, errCommit := worktree.Commit(
+			"concurrent update", &git.CommitOptions{Author: signature},
+		); errCommit != nil {
 			t.Fatalf("commit concurrent auth: %v", errCommit)
 		}
 		if errPush := concurrentRepo.Push(&git.PushOptions{}); errPush != nil {
@@ -648,7 +703,7 @@ func TestGitTokenStoreLeaseConflictRestoresLocalMutation(t *testing.T) {
 	if errOpen != nil {
 		t.Fatalf("reopen local repository: %v", errOpen)
 	}
-	defer localRepo.Close()
+	cleanupTestGitRepository(t, localRepo)
 	afterHead, errHead := localRepo.Head()
 	if errHead != nil {
 		t.Fatalf("read rolled back head: %v", errHead)

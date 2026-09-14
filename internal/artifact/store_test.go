@@ -186,19 +186,23 @@ func TestStoreRejectsInvalidMIMEAndOversizedData(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	if _, err = store.PutBytes(context.Background(), []byte("bad"), "image/svg+xml"); !errors.Is(err, ErrUnsupportedMIME) {
+	if _, err = store.PutBytes(context.Background(), []byte("bad"), "image/svg+xml"); !errors.Is(
+		err, errUnsupportedMIME,
+	) {
 		t.Fatalf("PutBytes svg err = %v, want ErrUnsupportedMIME", err)
 	}
 
-	limitedStore, err := NewStore(t.TempDir(), WithMaxBytes(8))
+	limitedStore, err := NewStore(t.TempDir(), withMaxBytes(8))
 	if err != nil {
 		t.Fatalf("NewStore limited: %v", err)
 	}
-	if _, err = limitedStore.PutBytes(context.Background(), []byte("123456789"), "image/png"); !errors.Is(err, ErrTooLarge) {
+	if _, err = limitedStore.PutBytes(context.Background(), []byte("123456789"), "image/png"); !errors.Is(
+		err, errTooLarge,
+	) {
 		t.Fatalf("PutBytes oversized err = %v, want ErrTooLarge", err)
 	}
 	oversizedDataURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("123456789"))
-	if _, err = limitedStore.PutDataURL(context.Background(), oversizedDataURL); !errors.Is(err, ErrTooLarge) {
+	if _, err = limitedStore.PutDataURL(context.Background(), oversizedDataURL); !errors.Is(err, errTooLarge) {
 		t.Fatalf("PutDataURL oversized err = %v, want ErrTooLarge", err)
 	}
 }
@@ -209,11 +213,13 @@ func TestStoreValidateIDAndOpenRejectTraversal(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 
-	for _, id := range []string{"", "../x.png", "dir/x.png", `dir\\x.png`, "img_nothex.png", "img_" + strings.Repeat("a", 64) + ".svg"} {
-		if err = ValidateID(id); !errors.Is(err, ErrInvalidID) {
+	for _, id := range []string{
+		"", "../x.png", "dir/x.png", `dir\\x.png`, "img_nothex.png", "img_" + strings.Repeat("a", 64) + ".svg",
+	} {
+		if err = ValidateID(id); !errors.Is(err, errInvalidID) {
 			t.Fatalf("ValidateID(%q) = %v, want ErrInvalidID", id, err)
 		}
-		if _, _, err = store.Open(id); !errors.Is(err, ErrInvalidID) {
+		if _, _, err = store.Open(id); !errors.Is(err, errInvalidID) {
 			t.Fatalf("Open(%q) = %v, want ErrInvalidID", id, err)
 		}
 	}
@@ -323,14 +329,14 @@ func TestStoreRejectsArtifactLargerThanTotalCacheLimit(t *testing.T) {
 	data := testPNGBytes(t)
 	store.ApplyCacheConfig(CacheConfig{MaxTotalBytes: int64(len(data) - 1)})
 
-	if _, err = store.PutBytes(context.Background(), data, "image/png"); !errors.Is(err, ErrTooLarge) {
+	if _, err = store.PutBytes(context.Background(), data, "image/png"); !errors.Is(err, errTooLarge) {
 		t.Fatalf("PutBytes error = %v, want ErrTooLarge", err)
 	}
 	stats, err := store.Stats()
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
-	if stats != (Stats{}) {
+	if stats != (StoreStats{}) {
 		t.Fatalf("Stats = %#v, want empty", stats)
 	}
 }
@@ -343,7 +349,7 @@ func TestStoreConcurrentPutBytesKeepsOneProtectedArtifact(t *testing.T) {
 	base := testPNGBytes(t)
 	store.ApplyCacheConfig(CacheConfig{MaxTotalBytes: int64(len(base) + 3)})
 
-	for round := 0; round < 100; round++ {
+	for round := range 100 {
 		dataA := append(append([]byte(nil), base...), byte(round), byte(round>>8), 1)
 		dataB := append(append([]byte(nil), base...), byte(round), byte(round>>8), 2)
 		start := make(chan struct{})
@@ -462,7 +468,7 @@ func assertStoresSerializeConcurrentPutBytes(t *testing.T, root string, storeA, 
 	storeA.ApplyCacheConfig(cacheCfg)
 	storeB.ApplyCacheConfig(cacheCfg)
 
-	for round := 0; round < 100; round++ {
+	for round := range 100 {
 		dataA := append(append([]byte(nil), base...), byte(round), byte(round>>8), 1)
 		dataB := append(append([]byte(nil), base...), byte(round), byte(round>>8), 2)
 		start := make(chan struct{})
@@ -546,7 +552,10 @@ func TestStoreStatsAndCleanup(t *testing.T) {
 	if err = os.WriteFile(oldTemp, []byte("old"), 0o600); err != nil {
 		t.Fatalf("WriteFile old temp: %v", err)
 	}
-	if err = os.Chtimes(oldTemp, time.Now().Add(-DefaultTempFileRetention-time.Hour), time.Now().Add(-DefaultTempFileRetention-time.Hour)); err != nil {
+	if err = os.Chtimes(
+		oldTemp, time.Now().Add(-defaultTempFileRetention-time.Hour),
+		time.Now().Add(-defaultTempFileRetention-time.Hour),
+	); err != nil {
 		t.Fatalf("Chtimes old temp: %v", err)
 	}
 	if err = os.WriteFile(newTemp, []byte("new"), 0o600); err != nil {

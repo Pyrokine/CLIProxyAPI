@@ -127,8 +127,8 @@ func NewObjectTokenStore(cfg ObjectStoreConfig) (*ObjectTokenStore, error) {
 	}, nil
 }
 
-// SetBaseDir implements the optional interface used by authenticators; it is a no-op because
-// the object store controls its own workspace.
+// SetBaseDir implements the optional token-store directory protocol. The object
+// store controls its own workspace, so runtime directory updates are ignored.
 func (s *ObjectTokenStore) SetBaseDir(_ string) {}
 
 // ConfigPath returns the managed configuration file path inside the spool directory.
@@ -413,11 +413,13 @@ func (s *ObjectTokenStore) deleteAuthObjectIfVersion(
 	if digest != version.SHA256 {
 		return false, nil
 	}
-	tombstoneRaw, errTombstone := json.Marshal(objectStoreAuthTombstone{
-		DeletedVersionID: versionID,
-		DeletedSHA256:    fmt.Sprintf("%x", version.SHA256),
-		Tombstone:        true,
-	})
+	tombstoneRaw, errTombstone := json.Marshal(
+		objectStoreAuthTombstone{
+			DeletedVersionID: versionID,
+			DeletedSHA256:    fmt.Sprintf("%x", version.SHA256),
+			Tombstone:        true,
+		},
+	)
 	if errTombstone != nil {
 		return false, fmt.Errorf("object store: encode auth tombstone: %w", errTombstone)
 	}

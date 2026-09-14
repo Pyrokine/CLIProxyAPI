@@ -23,14 +23,16 @@ func newObjectStoreForTest(t *testing.T, handler http.Handler) *ObjectTokenStore
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	store, err := NewObjectTokenStore(ObjectStoreConfig{
-		Endpoint:  strings.TrimPrefix(server.URL, "http://"),
-		Bucket:    "test-bucket",
-		AccessKey: "access-key",
-		SecretKey: "secret-key",
-		LocalRoot: t.TempDir(),
-		PathStyle: true,
-	})
+	store, err := NewObjectTokenStore(
+		ObjectStoreConfig{
+			Endpoint:  strings.TrimPrefix(server.URL, "http://"),
+			Bucket:    "test-bucket",
+			AccessKey: "access-key",
+			SecretKey: "secret-key",
+			LocalRoot: t.TempDir(),
+			PathStyle: true,
+		},
+	)
 	if err != nil {
 		t.Fatalf("NewObjectTokenStore() error = %v", err)
 	}
@@ -97,12 +99,16 @@ func TestObjectTokenStorePersistsDisabledCredentialWithoutExistingFile(t *testin
 }
 
 func TestObjectTokenStoreRemoteFailureRestoresNewLocalFile(t *testing.T) {
-	store := newObjectStoreForTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if writeObjectStoreLocation(w, r) {
-			return
-		}
-		http.Error(w, "remote failure", http.StatusInternalServerError)
-	}))
+	store := newObjectStoreForTest(
+		t, http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				if writeObjectStoreLocation(w, r) {
+					return
+				}
+				http.Error(w, "remote failure", http.StatusInternalServerError)
+			},
+		),
+	)
 	auth := &cliproxyauth.Auth{
 		ID:       "rollback.json",
 		FileName: "rollback.json",
@@ -122,13 +128,17 @@ func TestObjectTokenStoreRemoteFailureRestoresNewLocalFile(t *testing.T) {
 
 func TestObjectTokenStoreDeleteRemoteFailureRestoresLocalFile(t *testing.T) {
 	var failDelete atomic.Bool
-	store := newObjectStoreForTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && failDelete.Load() {
-			http.Error(w, "remote failure", http.StatusInternalServerError)
-			return
-		}
-		successfulObjectPut(w, r)
-	}))
+	store := newObjectStoreForTest(
+		t, http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete && failDelete.Load() {
+					http.Error(w, "remote failure", http.StatusInternalServerError)
+					return
+				}
+				successfulObjectPut(w, r)
+			},
+		),
+	)
 	auth := &cliproxyauth.Auth{
 		ID:       "delete-rollback.json",
 		FileName: "delete-rollback.json",
@@ -160,16 +170,20 @@ func TestObjectTokenStoreDeleteRemoteFailureRestoresLocalFile(t *testing.T) {
 
 func TestObjectTokenStoreSameLocalContentStillChecksRemote(t *testing.T) {
 	var calls atomic.Int32
-	store := newObjectStoreForTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if writeObjectStoreLocation(w, r) {
-			return
-		}
-		if calls.Add(1) == 1 {
-			successfulObjectPut(w, r)
-			return
-		}
-		http.Error(w, "remote failure", http.StatusInternalServerError)
-	}))
+	store := newObjectStoreForTest(
+		t, http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				if writeObjectStoreLocation(w, r) {
+					return
+				}
+				if calls.Add(1) == 1 {
+					successfulObjectPut(w, r)
+					return
+				}
+				http.Error(w, "remote failure", http.StatusInternalServerError)
+			},
+		),
+	)
 	auth := &cliproxyauth.Auth{
 		ID:       "retry.json",
 		FileName: "retry.json",
@@ -207,49 +221,53 @@ func TestObjectTokenStoreDeleteIfVersionPublishesConditionalTombstone(t *testing
 	var path string
 	var deletionStarted atomic.Bool
 	var localMissingAtRemote atomic.Bool
-	store := newObjectStoreForTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if deletionStarted.Load() {
-			_, errStat := os.Stat(path)
-			localMissingAtRemote.Store(errors.Is(errStat, os.ErrNotExist))
-		}
-		if writeObjectStoreLocation(w, r) {
-			return
-		}
-		switch {
-		case r.Method == http.MethodGet && r.URL.Query().Has("versioning"):
-			w.Header().Set("Content-Type", "application/xml")
-			_, _ = io.WriteString(
-				w,
-				`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`,
-			)
-		case r.Method == http.MethodHead:
-			w.Header().Set("ETag", `"credential-etag"`)
-			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
-			w.Header().Set("X-Amz-Version-Id", "version-1")
-			w.Header().Set("Content-Length", fmt.Sprint(len(authRaw)))
-			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodGet && r.URL.Query().Get("versionId") == "version-1":
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("ETag", `"credential-etag"`)
-			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
-			w.Header().Set("X-Amz-Version-Id", "version-1")
-			w.Header().Set("Content-Length", fmt.Sprint(len(authRaw)))
-			_, _ = w.Write(authRaw)
-		case r.Method == http.MethodPut:
-			if got := r.Header.Get("If-Match"); got != `"credential-etag"` {
-				http.Error(w, "missing conditional ETag", http.StatusPreconditionFailed)
-				return
-			}
-			tombstoneRaw, _ = io.ReadAll(r.Body)
-			w.Header().Set("ETag", `"tombstone-etag"`)
-			w.Header().Set("X-Amz-Version-Id", "version-2")
-			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodDelete && r.URL.Query().Get("versionId") == "version-1":
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-		}
-	}))
+	store := newObjectStoreForTest(
+		t, http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				if deletionStarted.Load() {
+					_, errStat := os.Stat(path)
+					localMissingAtRemote.Store(errors.Is(errStat, os.ErrNotExist))
+				}
+				if writeObjectStoreLocation(w, r) {
+					return
+				}
+				switch {
+				case r.Method == http.MethodGet && r.URL.Query().Has("versioning"):
+					w.Header().Set("Content-Type", "application/xml")
+					_, _ = io.WriteString(
+						w,
+						`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`,
+					)
+				case r.Method == http.MethodHead:
+					w.Header().Set("ETag", `"credential-etag"`)
+					w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+					w.Header().Set("X-Amz-Version-Id", "version-1")
+					w.Header().Set("Content-Length", fmt.Sprint(len(authRaw)))
+					w.WriteHeader(http.StatusOK)
+				case r.Method == http.MethodGet && r.URL.Query().Get("versionId") == "version-1":
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("ETag", `"credential-etag"`)
+					w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+					w.Header().Set("X-Amz-Version-Id", "version-1")
+					w.Header().Set("Content-Length", fmt.Sprint(len(authRaw)))
+					_, _ = w.Write(authRaw)
+				case r.Method == http.MethodPut:
+					if got := r.Header.Get("If-Match"); got != `"credential-etag"` {
+						http.Error(w, "missing conditional ETag", http.StatusPreconditionFailed)
+						return
+					}
+					tombstoneRaw, _ = io.ReadAll(r.Body)
+					w.Header().Set("ETag", `"tombstone-etag"`)
+					w.Header().Set("X-Amz-Version-Id", "version-2")
+					w.WriteHeader(http.StatusOK)
+				case r.Method == http.MethodDelete && r.URL.Query().Get("versionId") == "version-1":
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+				}
+			},
+		),
+	)
 	path = filepath.Join(store.AuthDir(), "versioned.json")
 	if errWrite := os.WriteFile(path, authRaw, 0o600); errWrite != nil {
 		t.Fatalf("write mirrored auth: %v", errWrite)
@@ -269,7 +287,9 @@ func TestObjectTokenStoreDeleteIfVersionPublishesConditionalTombstone(t *testing
 		t.Fatalf("conditional tombstone request body is not JSON: %q", tombstoneRaw)
 	}
 	tombstone, ok := parseObjectStoreAuthTombstone(tombstoneRaw[tombstoneStart : tombstoneEnd+1])
-	if !ok || tombstone.DeletedVersionID != "version-1" || tombstone.DeletedSHA256 != fmt.Sprintf("%x", version.SHA256) {
+	if !ok || tombstone.DeletedVersionID != "version-1" || tombstone.DeletedSHA256 != fmt.Sprintf(
+		"%x", version.SHA256,
+	) {
 		t.Fatalf("published tombstone = %#v, raw=%s", tombstone, tombstoneRaw)
 	}
 	if !localMissingAtRemote.Load() {
@@ -283,41 +303,45 @@ func TestObjectTokenStoreDeleteIfVersionPublishesConditionalTombstone(t *testing
 func TestObjectTokenStoreRecoversInterruptedVersionedDeletionBeforeRemoteSync(t *testing.T) {
 	authRaw := []byte(`{"type":"codex","token":"old"}`)
 	var remoteDeletes atomic.Int32
-	store := newObjectStoreForTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if writeObjectStoreLocation(w, r) {
-			return
-		}
-		switch {
-		case r.Method == http.MethodGet && r.URL.Query().Has("versioning"):
-			w.Header().Set("Content-Type", "application/xml")
-			_, _ = io.WriteString(
-				w,
-				`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`,
-			)
-		case r.Method == http.MethodHead:
-			w.Header().Set("ETag", `"credential-etag"`)
-			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
-			w.Header().Set("X-Amz-Version-Id", "version-1")
-			w.Header().Set("Content-Length", fmt.Sprint(len(authRaw)))
-			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodGet && r.URL.Query().Get("versionId") == "version-1":
-			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("ETag", `"credential-etag"`)
-			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
-			w.Header().Set("X-Amz-Version-Id", "version-1")
-			w.Header().Set("Content-Length", fmt.Sprint(len(authRaw)))
-			_, _ = w.Write(authRaw)
-		case r.Method == http.MethodPut:
-			w.Header().Set("ETag", `"tombstone-etag"`)
-			w.Header().Set("X-Amz-Version-Id", "version-2")
-			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodDelete && r.URL.Query().Get("versionId") == "version-1":
-			remoteDeletes.Add(1)
-			w.WriteHeader(http.StatusNoContent)
-		default:
-			http.Error(w, "unexpected request", http.StatusBadRequest)
-		}
-	}))
+	store := newObjectStoreForTest(
+		t, http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				if writeObjectStoreLocation(w, r) {
+					return
+				}
+				switch {
+				case r.Method == http.MethodGet && r.URL.Query().Has("versioning"):
+					w.Header().Set("Content-Type", "application/xml")
+					_, _ = io.WriteString(
+						w,
+						`<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Status>Enabled</Status></VersioningConfiguration>`,
+					)
+				case r.Method == http.MethodHead:
+					w.Header().Set("ETag", `"credential-etag"`)
+					w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+					w.Header().Set("X-Amz-Version-Id", "version-1")
+					w.Header().Set("Content-Length", fmt.Sprint(len(authRaw)))
+					w.WriteHeader(http.StatusOK)
+				case r.Method == http.MethodGet && r.URL.Query().Get("versionId") == "version-1":
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("ETag", `"credential-etag"`)
+					w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
+					w.Header().Set("X-Amz-Version-Id", "version-1")
+					w.Header().Set("Content-Length", fmt.Sprint(len(authRaw)))
+					_, _ = w.Write(authRaw)
+				case r.Method == http.MethodPut:
+					w.Header().Set("ETag", `"tombstone-etag"`)
+					w.Header().Set("X-Amz-Version-Id", "version-2")
+					w.WriteHeader(http.StatusOK)
+				case r.Method == http.MethodDelete && r.URL.Query().Get("versionId") == "version-1":
+					remoteDeletes.Add(1)
+					w.WriteHeader(http.StatusNoContent)
+				default:
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+				}
+			},
+		),
+	)
 	path := filepath.Join(store.AuthDir(), "interrupted.json")
 	if errWrite := os.WriteFile(path, authRaw, 0o600); errWrite != nil {
 		t.Fatalf("write mirrored auth: %v", errWrite)
@@ -326,7 +350,9 @@ func TestObjectTokenStoreRecoversInterruptedVersionedDeletionBeforeRemoteSync(t 
 	if errVersion != nil {
 		t.Fatalf("ReadPersistedVersion() error = %v", errVersion)
 	}
-	if _, matched, errPrepare := cliproxyauth.PrepareDurablePersistedFileDeletion(path, version); errPrepare != nil || !matched {
+	if _, matched, errPrepare := cliproxyauth.PrepareDurablePersistedFileDeletion(
+		path, version,
+	); errPrepare != nil || !matched {
 		t.Fatalf("PrepareDurablePersistedFileDeletion() matched = %v, error = %v", matched, errPrepare)
 	}
 
@@ -347,13 +373,17 @@ func TestObjectTokenStoreRecoversInterruptedVersionedDeletionBeforeRemoteSync(t 
 
 func TestObjectTokenStoreDeleteIfVersionMismatchHasNoRemoteSideEffect(t *testing.T) {
 	var calls atomic.Int32
-	store := newObjectStoreForTest(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		if writeObjectStoreLocation(w, r) {
-			return
-		}
-		http.Error(w, "unexpected remote request", http.StatusInternalServerError)
-	}))
+	store := newObjectStoreForTest(
+		t, http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if writeObjectStoreLocation(w, r) {
+					return
+				}
+				http.Error(w, "unexpected remote request", http.StatusInternalServerError)
+			},
+		),
+	)
 	path := filepath.Join(store.AuthDir(), "versioned.json")
 	if errWrite := os.WriteFile(path, []byte(`{"type":"codex","token":"old"}`), 0o600); errWrite != nil {
 		t.Fatalf("write original credential: %v", errWrite)

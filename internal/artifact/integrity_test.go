@@ -23,7 +23,7 @@ func TestStoreRejectsAndRebuildsCorruptContentAddressedFile(t *testing.T) {
 	if err = os.WriteFile(path, []byte("corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if file, _, errOpen := store.Open(record.ID); !errors.Is(errOpen, ErrIntegrity) {
+	if file, _, errOpen := store.Open(record.ID); !errors.Is(errOpen, errIntegrity) {
 		if file != nil {
 			_ = file.Close()
 		}

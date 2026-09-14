@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,7 +54,7 @@ func TestGetImageArtifactCacheUsesConfig(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	store.ApplyCacheConfig(artifact.CacheConfigFromLimits(9, 256))
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""), WithImageArtifacts(store))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""), WithImageArtifacts(store))
 
 	c, rec := newArtifactCacheTestContext(http.MethodGet, "/image-artifact-cache", "")
 	h.GetImageArtifactCache(c)
@@ -103,7 +104,7 @@ func TestPutImageArtifactCacheUpdatesConfigStoreAndCleans(t *testing.T) {
 	if err = os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile config: %v", err)
 	}
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""), WithImageArtifacts(store))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""), WithImageArtifacts(store))
 
 	c, rec := newArtifactCacheTestContext(
 		http.MethodPut,
@@ -160,13 +161,15 @@ func TestPutImageArtifactCacheDelegatesRuntimeUpdateToCommitCallback(t *testing.
 		&config.Config{},
 		configPath,
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 		WithImageArtifacts(store),
-		WithConfigCommitted(func(context.Context, ConfigCommit) error {
-			callbackCount++
-			store.ApplyCacheConfig(callbackStoreConfig)
-			return nil
-		}),
+		WithConfigCommitted(
+			func(context.Context, ConfigCommit) error {
+				callbackCount++
+				store.ApplyCacheConfig(callbackStoreConfig)
+				return nil
+			},
+		),
 	)
 
 	c, rec := newArtifactCacheTestContext(
@@ -187,6 +190,44 @@ func TestPutImageArtifactCacheDelegatesRuntimeUpdateToCommitCallback(t *testing.
 	}
 }
 
+func TestPutImageArtifactCacheDoesNotCleanWhenValuesAreUnchanged(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "images")
+	store, err := artifact.NewStore(root)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if err = os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("WriteFile root blocker: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err = os.WriteFile(
+		configPath, []byte("image-artifact-cache:\n  retention-days: 5\n  max-total-size-mb: 1\n"), 0o600,
+	); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+	h := NewHandler(
+		&config.Config{ImageArtifactCache: config.ImageArtifactCache{RetentionDays: 5, MaxTotalSizeMB: 1}},
+		configPath,
+		nil,
+		withEnvSecret(""),
+		WithImageArtifacts(store),
+	)
+
+	c, rec := newArtifactCacheTestContext(
+		http.MethodPut,
+		"/image-artifact-cache",
+		`{"retention_days":5,"max_total_size_mb":1}`,
+	)
+	h.PutImageArtifactCache(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "cleanup_error") {
+		t.Fatalf("unchanged cache config attempted cleanup: %s", rec.Body.String())
+	}
+}
+
 func TestPutImageArtifactCacheSaveFailureKeepsStoreConfig(t *testing.T) {
 	root := t.TempDir()
 	store, err := artifact.NewStore(root)
@@ -202,7 +243,7 @@ func TestPutImageArtifactCacheSaveFailureKeepsStoreConfig(t *testing.T) {
 	if err = os.WriteFile(configPath, []byte("image-artifact-cache: [\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile config: %v", err)
 	}
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""), WithImageArtifacts(store))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""), WithImageArtifacts(store))
 
 	c, rec := newArtifactCacheTestContext(
 		http.MethodPut,
@@ -230,7 +271,7 @@ func TestPutImageArtifactCacheRejectsNegativeValues(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.ImageArtifactCache.RetentionDays = 7
 	cfg.ImageArtifactCache.MaxTotalSizeMB = 10240
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	c, rec := newArtifactCacheTestContext(
 		http.MethodPut,
@@ -248,7 +289,7 @@ func TestPutImageArtifactCacheRejectsNegativeValues(t *testing.T) {
 }
 
 func TestGetImageArtifactCacheSize(t *testing.T) {
-	nilHandler := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""))
+	nilHandler := NewHandler(&config.Config{}, "", nil, withEnvSecret(""))
 	c, rec := newArtifactCacheTestContext(http.MethodGet, "/image-artifact-cache/size", "")
 	nilHandler.GetImageArtifactCacheSize(c)
 	if rec.Code != http.StatusOK {
@@ -273,7 +314,7 @@ func TestGetImageArtifactCacheSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutBytes: %v", err)
 	}
-	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""), WithImageArtifacts(store))
+	h := NewHandler(&config.Config{}, "", nil, withEnvSecret(""), WithImageArtifacts(store))
 	c, rec = newArtifactCacheTestContext(http.MethodGet, "/image-artifact-cache/size", "")
 	h.GetImageArtifactCacheSize(c)
 	if rec.Code != http.StatusOK {

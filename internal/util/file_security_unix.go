@@ -9,8 +9,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ValidateFileOwner requires file to be owned by the effective process user.
-func ValidateFileOwner(file *os.File) error {
+// validateFileOwner requires file to be owned by the effective process user.
+func validateFileOwner(file *os.File) error {
 	if file == nil {
 		return fmt.Errorf("file is nil")
 	}
@@ -26,7 +26,7 @@ func ValidateFileOwner(file *os.File) error {
 
 // SecurePrivateFile restricts a file or directory to the effective process user.
 func SecurePrivateFile(file *os.File, directory bool) error {
-	if err := ValidateFileOwner(file); err != nil {
+	if err := validateFileOwner(file); err != nil {
 		return err
 	}
 	mode := os.FileMode(0o600)

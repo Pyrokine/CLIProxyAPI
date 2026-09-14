@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,15 +22,21 @@ import (
 	"github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/client"
+	"github.com/go-git/go-git/v6/plumbing/filemode"
 	gitindex "github.com/go-git/go-git/v6/plumbing/format/index"
 	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/go-git/go-git/v6/plumbing/transport"
 	"github.com/go-git/go-git/v6/plumbing/transport/http"
+	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 	log "github.com/sirupsen/logrus"
 )
 
-// gcInterval defines minimum time between garbage collection runs.
-const gcInterval = 5 * time.Minute
+const (
+	// gcInterval defines minimum time between garbage collection runs.
+	gcInterval = 5 * time.Minute
+	// gcPruneGracePeriod keeps recently orphaned objects available for recovery.
+	gcPruneGracePeriod = 24 * time.Hour
+)
 
 type contextMutex struct {
 	once  sync.Once
@@ -41,10 +49,10 @@ func (m *contextMutex) initialize() {
 }
 
 func (m *contextMutex) Lock() {
-	_ = m.LockContext(context.Background())
+	_ = m.lockContext(context.Background())
 }
 
-func (m *contextMutex) LockContext(ctx context.Context) error {
+func (m *contextMutex) lockContext(ctx context.Context) error {
 	m.once.Do(m.initialize)
 	if ctx == nil {
 		ctx = context.Background()
@@ -171,12 +179,12 @@ func (s *GitTokenStore) configPathSnapshot() string {
 
 // EnsureRepository prepares the local git working tree by cloning or opening the repository.
 func (s *GitTokenStore) EnsureRepository() error {
-	return s.EnsureRepositoryContext(context.Background())
+	return s.ensureRepositoryContext(context.Background())
 }
 
-// EnsureRepositoryContext prepares the local git working tree with cancellation support.
-func (s *GitTokenStore) EnsureRepositoryContext(ctx context.Context) error {
-	if err := s.operationMu.LockContext(ctx); err != nil {
+// ensureRepositoryContext prepares the local git working tree with cancellation support.
+func (s *GitTokenStore) ensureRepositoryContext(ctx context.Context) error {
+	if err := s.operationMu.lockContext(ctx); err != nil {
 		return err
 	}
 	defer s.operationMu.Unlock()
@@ -301,47 +309,127 @@ func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: open repo: %w", errOpen)
 		}
-		defer closeGitRepository(repo, "git token store: close opened repo")
+		repoOpen := true
+		closeOpenedRepo := func() {
+			if !repoOpen {
+				return
+			}
+			closeGitRepository(repo, "git token store: close opened repo")
+			repoOpen = false
+		}
+		defer closeOpenedRepo()
 		worktree, errWorktree := repo.Worktree()
 		if errWorktree != nil {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: worktree: %w", errWorktree)
 		}
-		branchRef := s.branchRef()
-		if branchRef != "" {
-			if errCheckout := worktree.Checkout(&git.CheckoutOptions{Branch: branchRef}); errCheckout != nil {
-				if errCreate := worktree.Checkout(
-					&git.CheckoutOptions{
-						Branch: branchRef, Create: true,
-					},
-				); errCreate != nil {
+		repositoryRecovered := false
+		if errVerify := verifyRepositoryHead(repo); errVerify != nil {
+			if !isRepositoryCorruptionError(errVerify) {
+				s.dirLock.Unlock()
+				return fmt.Errorf("git token store: verify repository before pull: %w", errVerify)
+			}
+			closeOpenedRepo()
+			if errRecover := s.recoverRepositoryLocked(
+				ctx, repoDir, clientOptions, nil, nil,
+			); errRecover != nil {
+				s.dirLock.Unlock()
+				return errors.Join(
+					fmt.Errorf("git token store: verify repository before pull: %w", errVerify),
+					fmt.Errorf("git token store: repository recovery: %w", errRecover),
+				)
+			}
+			repositoryRecovered = true
+		}
+		if !repositoryRecovered {
+			branchRef := s.branchRef()
+			if branchRef != "" {
+				if errCheckout := worktree.Checkout(&git.CheckoutOptions{Branch: branchRef}); errCheckout != nil {
+					if errCreate := worktree.Checkout(
+						&git.CheckoutOptions{
+							Branch: branchRef, Create: true,
+						},
+					); errCreate != nil {
+						s.dirLock.Unlock()
+						return fmt.Errorf("git token store: checkout branch: %w", errCreate)
+					}
+				}
+			}
+			baselineTree, errBaseline := repositoryHeadTree(repo)
+			if errBaseline != nil {
+				s.dirLock.Unlock()
+				return fmt.Errorf("git token store: inspect head before pull: %w", errBaseline)
+			}
+			var baselineEntries map[string]recoveryTreeEntry
+			if baselineTree != nil {
+				baselineEntries, errBaseline = recoveryTreeEntries(baselineTree)
+				if errBaseline != nil {
 					s.dirLock.Unlock()
-					return fmt.Errorf("git token store: checkout branch: %w", errCreate)
+					return fmt.Errorf("git token store: inspect head tree before pull: %w", errBaseline)
+				}
+			}
+			dirtyPaths, errDirtyPaths := worktreeDirtyPaths(worktree)
+			if errDirtyPaths != nil {
+				s.dirLock.Unlock()
+				return fmt.Errorf("git token store: inspect worktree before pull: %w", errDirtyPaths)
+			}
+			pullOpts := &git.PullOptions{ClientOptions: clientOptions, RemoteName: "origin"}
+			if branchRef != "" {
+				pullOpts.ReferenceName = branchRef
+				pullOpts.SingleBranch = true
+			}
+			if errPull := worktree.PullContext(ctx, pullOpts); errPull != nil {
+				switch {
+				case errors.Is(errPull, git.NoErrAlreadyUpToDate),
+					errors.Is(errPull, git.ErrUnstagedChanges):
+					// Ignore clean syncs and local edits. The push lease still checks the advertised remote ref.
+				case errors.Is(errPull, git.ErrNonFastForwardUpdate):
+					s.dirLock.Unlock()
+					return fmt.Errorf("git token store: remote branch diverged: %w", errPull)
+				case errors.Is(errPull, transport.ErrAuthenticationRequired),
+					errors.Is(errPull, plumbing.ErrReferenceNotFound),
+					errors.Is(errPull, transport.ErrEmptyRemoteRepository):
+					// Ignore authentication prompts and empty remote references on initial sync.
+				case isRepositoryCorruptionError(errPull):
+					closeOpenedRepo()
+					if errRecover := s.recoverRepositoryLocked(
+						ctx, repoDir, clientOptions, baselineEntries, dirtyPaths,
+					); errRecover != nil {
+						s.dirLock.Unlock()
+						return errors.Join(
+							fmt.Errorf("git token store: pull: %w", errPull),
+							fmt.Errorf("git token store: repository recovery: %w", errRecover),
+						)
+					}
+					repositoryRecovered = true
+				default:
+					s.dirLock.Unlock()
+					return fmt.Errorf("git token store: pull: %w", errPull)
+				}
+			}
+			if !repositoryRecovered {
+				if errVerify := verifyRepositoryHead(repo); errVerify != nil {
+					if !isRepositoryCorruptionError(errVerify) {
+						s.dirLock.Unlock()
+						return fmt.Errorf("git token store: verify repository after pull: %w", errVerify)
+					}
+					closeOpenedRepo()
+					if errRecover := s.recoverRepositoryLocked(
+						ctx, repoDir, clientOptions, baselineEntries, dirtyPaths,
+					); errRecover != nil {
+						s.dirLock.Unlock()
+						return errors.Join(
+							fmt.Errorf("git token store: verify repository after pull: %w", errVerify),
+							fmt.Errorf("git token store: repository recovery: %w", errRecover),
+						)
+					}
 				}
 			}
 		}
-		pullOpts := &git.PullOptions{ClientOptions: clientOptions, RemoteName: "origin"}
-		if branchRef != "" {
-			pullOpts.ReferenceName = branchRef
-			pullOpts.SingleBranch = true
-		}
-		if errPull := worktree.PullContext(ctx, pullOpts); errPull != nil {
-			switch {
-			case errors.Is(errPull, git.NoErrAlreadyUpToDate),
-				errors.Is(errPull, git.ErrUnstagedChanges):
-				// Ignore clean syncs and local edits. The push lease still checks the advertised remote ref.
-			case errors.Is(errPull, git.ErrNonFastForwardUpdate):
-				s.dirLock.Unlock()
-				return fmt.Errorf("git token store: remote branch diverged: %w", errPull)
-			case errors.Is(errPull, transport.ErrAuthenticationRequired),
-				errors.Is(errPull, plumbing.ErrReferenceNotFound),
-				errors.Is(errPull, transport.ErrEmptyRemoteRepository):
-				// Ignore authentication prompts and empty remote references on initial sync.
-			default:
-				s.dirLock.Unlock()
-				return fmt.Errorf("git token store: pull: %w", errPull)
-			}
-		}
+	}
+	if err := disableGitCommitSigning(repoDir); err != nil {
+		s.dirLock.Unlock()
+		return err
 	}
 	if err := secureAuthTree(s.baseDir); err != nil {
 		s.dirLock.Unlock()
@@ -368,7 +456,7 @@ func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
 
 // Save persists token storage and metadata to the resolved auth file path.
 func (s *GitTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (string, error) {
-	if err := s.operationMu.LockContext(ctx); err != nil {
+	if err := s.operationMu.lockContext(ctx); err != nil {
 		return "", err
 	}
 	defer s.operationMu.Unlock()
@@ -381,7 +469,7 @@ func (s *GitTokenStore) SaveWithBaseDir(
 	baseDir string,
 	auth *cliproxyauth.Auth,
 ) (string, error) {
-	if err := s.operationMu.LockContext(ctx); err != nil {
+	if err := s.operationMu.lockContext(ctx); err != nil {
 		return "", err
 	}
 	defer s.operationMu.Unlock()
@@ -575,7 +663,7 @@ func (s *GitTokenStore) save(ctx context.Context, auth *cliproxyauth.Auth) (save
 
 // List enumerates all auth JSON files under the configured directory.
 func (s *GitTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) {
-	if err := s.operationMu.LockContext(ctx); err != nil {
+	if err := s.operationMu.lockContext(ctx); err != nil {
 		return nil, err
 	}
 	defer s.operationMu.Unlock()
@@ -621,7 +709,7 @@ func (s *GitTokenStore) DeleteIfVersion(
 	id string,
 	version cliproxyauth.PersistedVersion,
 ) (bool, error) {
-	if err := s.operationMu.LockContext(ctx); err != nil {
+	if err := s.operationMu.lockContext(ctx); err != nil {
 		return false, err
 	}
 	defer s.operationMu.Unlock()
@@ -687,7 +775,7 @@ func (s *GitTokenStore) recoverAuthDeletionsLocked(ctx context.Context) error {
 
 // Delete removes the auth file.
 func (s *GitTokenStore) Delete(ctx context.Context, id string) error {
-	if err := s.operationMu.LockContext(ctx); err != nil {
+	if err := s.operationMu.lockContext(ctx); err != nil {
 		return err
 	}
 	defer s.operationMu.Unlock()
@@ -729,7 +817,7 @@ func (s *GitTokenStore) Delete(ctx context.Context, id string) error {
 // PersistAuthFiles commits and pushes the provided paths to the remote repository.
 // It no-ops when the store is not fully configured or when there are no paths.
 func (s *GitTokenStore) PersistAuthFiles(ctx context.Context, message string, paths ...string) error {
-	if err := s.operationMu.LockContext(ctx); err != nil {
+	if err := s.operationMu.lockContext(ctx); err != nil {
 		return err
 	}
 	defer s.operationMu.Unlock()
@@ -884,6 +972,24 @@ func (s *GitTokenStore) repoDirSnapshot() string {
 	return s.repoDir
 }
 
+func disableGitCommitSigning(repoDir string) error {
+	repo, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		return fmt.Errorf("git token store: open repository config: %w", errOpen)
+	}
+	defer closeGitRepository(repo, "git token store: close repository config")
+
+	cfg, errConfig := repo.Config()
+	if errConfig != nil {
+		return fmt.Errorf("git token store: get repository config: %w", errConfig)
+	}
+	cfg.Commit.GpgSign = config.OptBoolFalse
+	if errSetConfig := repo.SetConfig(cfg); errSetConfig != nil {
+		return fmt.Errorf("git token store: disable commit signing: %w", errSetConfig)
+	}
+	return nil
+}
+
 func (s *GitTokenStore) gitClientOptions() []client.Option {
 	if s.username == "" && s.password == "" {
 		return nil
@@ -920,6 +1026,535 @@ func (s *GitTokenStore) relativeToRepo(path string) (string, error) {
 
 func normalizeGitPath(path string) string {
 	return strings.ReplaceAll(filepath.ToSlash(path), "\\", "/")
+}
+
+func repositoryHeadTree(repo *git.Repository) (*object.Tree, error) {
+	if repo == nil {
+		return nil, fmt.Errorf("repository is nil")
+	}
+	head, errHead := repo.Head()
+	if errors.Is(errHead, plumbing.ErrReferenceNotFound) {
+		return nil, nil
+	}
+	if errHead != nil {
+		return nil, errHead
+	}
+	commit, errCommit := repo.CommitObject(head.Hash())
+	if errCommit != nil {
+		return nil, errCommit
+	}
+	return commit.Tree()
+}
+
+func worktreeDirtyPaths(worktree *git.Worktree) (map[string]struct{}, error) {
+	if worktree == nil {
+		return nil, fmt.Errorf("worktree is nil")
+	}
+	status, errStatus := worktree.Status()
+	if errStatus != nil {
+		return nil, errStatus
+	}
+	dirtyPaths := make(map[string]struct{}, len(status))
+	for path, fileStatus := range status {
+		if fileStatus.Staging == git.Unmodified && fileStatus.Worktree == git.Unmodified {
+			continue
+		}
+		cleanPath, errPath := normalizeRecoveryPath(path)
+		if errPath != nil {
+			return nil, errPath
+		}
+		dirtyPaths[cleanPath] = struct{}{}
+	}
+	return dirtyPaths, nil
+}
+
+func normalizeRecoveryPath(path string) (string, error) {
+	trimmed := strings.TrimSpace(path)
+	clean := filepath.ToSlash(filepath.Clean(trimmed))
+	if trimmed == "" || clean == "." || clean == ".." ||
+		strings.HasPrefix(clean, "../") || filepath.IsAbs(trimmed) {
+		return "", fmt.Errorf("path %q is not repository-relative", path)
+	}
+	return clean, nil
+}
+
+type recoveryTreeEntry struct {
+	hash plumbing.Hash
+	mode string
+}
+
+func recoveryTreeEntries(tree *object.Tree) (map[string]recoveryTreeEntry, error) {
+	if tree == nil {
+		return nil, fmt.Errorf("tree is nil")
+	}
+	entries := make(map[string]recoveryTreeEntry)
+	var visitTree func(*object.Tree, string) error
+	visitTree = func(current *object.Tree, prefix string) error {
+		for _, entry := range current.Entries {
+			path := entry.Name
+			if prefix != "" {
+				path = prefix + "/" + entry.Name
+			}
+			if entry.Mode.IsFile() || entry.Mode == filemode.Submodule {
+				cleanPath, errPath := normalizeRecoveryPath(path)
+				if errPath != nil {
+					return errPath
+				}
+				entries[cleanPath] = recoveryTreeEntry{hash: entry.Hash, mode: entry.Mode.String()}
+				continue
+			}
+			subtree, errSubtree := current.Tree(entry.Name)
+			if errSubtree != nil {
+				return fmt.Errorf("inspect tree %s: %w", path, errSubtree)
+			}
+			if errVisit := visitTree(subtree, path); errVisit != nil {
+				return errVisit
+			}
+		}
+		return nil
+	}
+	if errVisit := visitTree(tree, ""); errVisit != nil {
+		return nil, errVisit
+	}
+	return entries, nil
+}
+
+func overlappingDirtyPath(path string, dirtyPaths map[string]struct{}) (string, bool) {
+	for dirtyPath := range dirtyPaths {
+		if path == dirtyPath || strings.HasPrefix(path, dirtyPath+"/") ||
+			strings.HasPrefix(dirtyPath, path+"/") {
+			return dirtyPath, true
+		}
+	}
+	return "", false
+}
+
+func changedRecoveryTreePaths(
+	baselineEntries,
+	remoteEntries map[string]recoveryTreeEntry,
+) []string {
+	paths := make(map[string]struct{})
+	for path, baselineEntry := range baselineEntries {
+		remoteEntry, exists := remoteEntries[path]
+		if !exists || remoteEntry != baselineEntry {
+			paths[path] = struct{}{}
+		}
+	}
+	for path, remoteEntry := range remoteEntries {
+		baselineEntry, exists := baselineEntries[path]
+		if !exists || baselineEntry != remoteEntry {
+			paths[path] = struct{}{}
+		}
+	}
+	changedPaths := make([]string, 0, len(paths))
+	for path := range paths {
+		changedPaths = append(changedPaths, path)
+	}
+	sort.Strings(changedPaths)
+	return changedPaths
+}
+
+func recoveryPreservedPaths(
+	baselineEntries,
+	remoteEntries map[string]recoveryTreeEntry,
+	dirtyPaths map[string]struct{},
+) (map[string]struct{}, error) {
+	if len(dirtyPaths) == 0 {
+		return nil, nil
+	}
+	if baselineEntries == nil {
+		return nil, fmt.Errorf("baseline tree is unavailable for dirty worktree recovery")
+	}
+	changedPaths := changedRecoveryTreePaths(baselineEntries, remoteEntries)
+	for _, changedPath := range changedPaths {
+		if dirtyPath, conflict := overlappingDirtyPath(changedPath, dirtyPaths); conflict {
+			return nil, fmt.Errorf(
+				"remote path %s conflicts with local change %s during repository recovery",
+				changedPath,
+				dirtyPath,
+			)
+		}
+	}
+	return dirtyPaths, nil
+}
+
+func applyRecoveryLocalChanges(sourceDir, targetDir string, paths map[string]struct{}) error {
+	sortedPaths := make([]string, 0, len(paths))
+	for path := range paths {
+		sortedPaths = append(sortedPaths, path)
+	}
+	sort.Strings(sortedPaths)
+	for _, path := range sortedPaths {
+		cleanPath, errPath := normalizeRecoveryPath(path)
+		if errPath != nil {
+			return errPath
+		}
+		source := filepath.Join(sourceDir, filepath.FromSlash(cleanPath))
+		target := filepath.Join(targetDir, filepath.FromSlash(cleanPath))
+		info, errStat := os.Lstat(source)
+		if errors.Is(errStat, fs.ErrNotExist) {
+			if errRemove := os.RemoveAll(target); errRemove != nil {
+				return fmt.Errorf("preserve deletion %s: %w", cleanPath, errRemove)
+			}
+			continue
+		}
+		if errStat != nil {
+			return fmt.Errorf("inspect local change %s: %w", cleanPath, errStat)
+		}
+		if errRemove := os.RemoveAll(target); errRemove != nil {
+			return fmt.Errorf("replace recovered path %s: %w", cleanPath, errRemove)
+		}
+		if errMkdir := os.MkdirAll(filepath.Dir(target), 0o700); errMkdir != nil {
+			return fmt.Errorf("create recovered parent for %s: %w", cleanPath, errMkdir)
+		}
+		switch {
+		case info.Mode().IsRegular():
+			contents, errRead := os.ReadFile(source)
+			if errRead != nil {
+				return fmt.Errorf("read local change %s: %w", cleanPath, errRead)
+			}
+			if errWrite := os.WriteFile(target, contents, info.Mode().Perm()); errWrite != nil {
+				return fmt.Errorf("write local change %s: %w", cleanPath, errWrite)
+			}
+		case info.Mode()&os.ModeSymlink != 0:
+			linkTarget, errReadlink := os.Readlink(source)
+			if errReadlink != nil {
+				return fmt.Errorf("read local symlink %s: %w", cleanPath, errReadlink)
+			}
+			if errSymlink := os.Symlink(linkTarget, target); errSymlink != nil {
+				return fmt.Errorf("write local symlink %s: %w", cleanPath, errSymlink)
+			}
+		default:
+			return fmt.Errorf("local change %s has unsupported file mode %s", cleanPath, info.Mode())
+		}
+	}
+	return nil
+}
+
+func moveWorktreeEntries(sourceDir, targetDir string) error {
+	if errMkdir := os.MkdirAll(targetDir, 0o700); errMkdir != nil {
+		return errMkdir
+	}
+	entries, errRead := os.ReadDir(sourceDir)
+	if errRead != nil {
+		return errRead
+	}
+	moved := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Name() == ".git" {
+			continue
+		}
+		source := filepath.Join(sourceDir, entry.Name())
+		target := filepath.Join(targetDir, entry.Name())
+		if errRename := os.Rename(source, target); errRename != nil {
+			errMove := fmt.Errorf("move %s: %w", entry.Name(), errRename)
+			for _, name := range slices.Backward(moved) {
+
+				if errRestore := os.Rename(
+					filepath.Join(targetDir, name),
+					filepath.Join(sourceDir, name),
+				); errRestore != nil {
+					errMove = errors.Join(errMove, fmt.Errorf("restore %s: %w", name, errRestore))
+				}
+			}
+			return errMove
+		}
+		moved = append(moved, entry.Name())
+	}
+	return nil
+}
+
+func removeWorktreeEntries(repoDir string) error {
+	entries, errRead := os.ReadDir(repoDir)
+	if errRead != nil {
+		return errRead
+	}
+	for _, entry := range entries {
+		if entry.Name() == ".git" {
+			continue
+		}
+		if errRemove := os.RemoveAll(filepath.Join(repoDir, entry.Name())); errRemove != nil {
+			return errRemove
+		}
+	}
+	return nil
+}
+
+func installRecoveredGitDirectory(
+	gitDir,
+	clonedGitDir,
+	backupGitDir string,
+	rename func(string, string) error,
+) (bool, error) {
+	if errRename := rename(gitDir, backupGitDir); errRename != nil {
+		return false, fmt.Errorf("backup corrupt git directory: %w", errRename)
+	}
+	if errRename := rename(clonedGitDir, gitDir); errRename != nil {
+		if errRestore := rename(backupGitDir, gitDir); errRestore != nil {
+			return true, errors.Join(
+				fmt.Errorf("install recovered git directory: %w", errRename),
+				fmt.Errorf(
+					"restore corrupt git directory; backup retained at %s: %w",
+					backupGitDir,
+					errRestore,
+				),
+			)
+		}
+		return false, fmt.Errorf("install recovered git directory: %w", errRename)
+	}
+	return false, nil
+}
+
+func rollbackRecoveredGitDirectory(gitDir, backupGitDir string) error {
+	if errRemove := os.RemoveAll(gitDir); errRemove != nil {
+		return fmt.Errorf("remove recovered git directory: %w", errRemove)
+	}
+	if errRename := os.Rename(backupGitDir, gitDir); errRename != nil {
+		return fmt.Errorf("restore original git directory: %w", errRename)
+	}
+	return nil
+}
+
+func rollbackRecoveredRepository(repoDir, gitDir, backupGitDir, backupWorktreeDir string) error {
+	if errRemove := removeWorktreeEntries(repoDir); errRemove != nil {
+		return fmt.Errorf("remove recovered worktree: %w", errRemove)
+	}
+	if errRollback := rollbackRecoveredGitDirectory(gitDir, backupGitDir); errRollback != nil {
+		return errRollback
+	}
+	if errRestore := moveWorktreeEntries(backupWorktreeDir, repoDir); errRestore != nil {
+		return fmt.Errorf("restore original worktree: %w", errRestore)
+	}
+	return nil
+}
+
+func inspectRecoveryBaseline(repoDir string) (map[string]recoveryTreeEntry, map[string]struct{}, error) {
+	repo, errOpen := git.PlainOpen(repoDir)
+	if errOpen != nil {
+		return nil, nil, fmt.Errorf("open repository: %w", errOpen)
+	}
+	defer closeGitRepository(repo, "git token store: close recovery baseline repo")
+	worktree, errWorktree := repo.Worktree()
+	if errWorktree != nil {
+		return nil, nil, fmt.Errorf("open worktree: %w", errWorktree)
+	}
+	dirtyPaths, errDirty := worktreeDirtyPaths(worktree)
+	if errDirty != nil {
+		return nil, nil, fmt.Errorf("inspect worktree changes: %w", errDirty)
+	}
+	tree, errTree := repositoryHeadTree(repo)
+	if errTree != nil {
+		return nil, nil, fmt.Errorf("inspect head tree: %w", errTree)
+	}
+	if tree == nil {
+		return nil, nil, fmt.Errorf("repository has no recovery baseline")
+	}
+	entries, errEntries := recoveryTreeEntries(tree)
+	if errEntries != nil {
+		return nil, nil, fmt.Errorf("inspect head tree entries: %w", errEntries)
+	}
+	return entries, dirtyPaths, nil
+}
+
+func restoreBackedUpWorktree(repoDir, backupWorktreeDir string, cause error) error {
+	if errRestore := moveWorktreeEntries(backupWorktreeDir, repoDir); errRestore != nil {
+		return errors.Join(
+			cause,
+			fmt.Errorf(
+				"restore worktree; backup retained at %s: %w",
+				backupWorktreeDir,
+				errRestore,
+			),
+		)
+	}
+	return cause
+}
+
+func (s *GitTokenStore) recoverRepositoryLocked(
+	ctx context.Context,
+	repoDir string,
+	clientOptions []client.Option,
+	baselineEntries map[string]recoveryTreeEntry,
+	dirtyPaths map[string]struct{},
+) (errRecovery error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	parentDir := filepath.Dir(repoDir)
+	recoveryRoot, errTemp := os.MkdirTemp(parentDir, ".gitstore-recovery-")
+	if errTemp != nil {
+		return fmt.Errorf("create recovery directory: %w", errTemp)
+	}
+	cleanupRecovery := true
+	defer func() {
+		if !cleanupRecovery {
+			return
+		}
+		if errRemove := os.RemoveAll(recoveryRoot); errRemove != nil {
+			errCleanup := fmt.Errorf("remove recovery directory: %w", errRemove)
+			if errRecovery == nil {
+				errRecovery = errCleanup
+			} else {
+				errRecovery = errors.Join(errRecovery, errCleanup)
+			}
+		}
+	}()
+
+	if baselineEntries == nil {
+		inspectedEntries, inspectedDirtyPaths, errInspect := inspectRecoveryBaseline(repoDir)
+		if errInspect != nil {
+			return fmt.Errorf("inspect recovery baseline: %w", errInspect)
+		}
+		baselineEntries = inspectedEntries
+		dirtyPaths = inspectedDirtyPaths
+	}
+	cloneDir := filepath.Join(recoveryRoot, "clone")
+	cloneOpts := &git.CloneOptions{ClientOptions: clientOptions, URL: s.remote}
+	if branchRef := s.branchRef(); branchRef != "" {
+		cloneOpts.ReferenceName = branchRef
+		cloneOpts.SingleBranch = true
+	}
+	clonedRepo, errClone := git.PlainCloneContext(ctx, cloneDir, cloneOpts)
+	if errClone != nil {
+		closeGitRepository(clonedRepo, "git token store: close failed recovery clone")
+		return fmt.Errorf("clone remote repository: %w", errClone)
+	}
+	clonedRepoOpen := true
+	closeClonedRepo := func() {
+		if !clonedRepoOpen {
+			return
+		}
+		closeGitRepository(clonedRepo, "git token store: close recovery clone")
+		clonedRepoOpen = false
+	}
+	defer closeClonedRepo()
+	if errVerify := verifyRepositoryHead(clonedRepo); errVerify != nil {
+		return fmt.Errorf("verify cloned repository: %w", errVerify)
+	}
+	remoteTree, errTree := repositoryHeadTree(clonedRepo)
+	if errTree != nil {
+		return fmt.Errorf("inspect cloned repository tree: %w", errTree)
+	}
+	if remoteTree == nil {
+		return fmt.Errorf("cloned repository has no head tree")
+	}
+	remoteEntries, errEntries := recoveryTreeEntries(remoteTree)
+	if errEntries != nil {
+		return fmt.Errorf("inspect cloned repository tree entries: %w", errEntries)
+	}
+	preservedPaths, errPreserve := recoveryPreservedPaths(
+		baselineEntries, remoteEntries, dirtyPaths,
+	)
+	if errPreserve != nil {
+		return errPreserve
+	}
+	if errApply := applyRecoveryLocalChanges(repoDir, cloneDir, preservedPaths); errApply != nil {
+		return fmt.Errorf("preserve local worktree changes: %w", errApply)
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	closeClonedRepo()
+
+	backupWorktreeDir := filepath.Join(recoveryRoot, "worktree")
+	if errBackup := moveWorktreeEntries(repoDir, backupWorktreeDir); errBackup != nil {
+		return fmt.Errorf("backup existing worktree: %w", errBackup)
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return restoreBackedUpWorktree(repoDir, backupWorktreeDir, errContext)
+	}
+	gitDir := filepath.Join(repoDir, ".git")
+	clonedGitDir := filepath.Join(cloneDir, ".git")
+	backupGitDir := filepath.Join(recoveryRoot, "corrupt.git")
+	retainRecovery, errInstall := installRecoveredGitDirectory(
+		gitDir, clonedGitDir, backupGitDir, os.Rename,
+	)
+	if retainRecovery {
+		cleanupRecovery = false
+	}
+	if errInstall != nil {
+		return restoreBackedUpWorktree(repoDir, backupWorktreeDir, errInstall)
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		if errRollback := rollbackRecoveredRepository(
+			repoDir, gitDir, backupGitDir, backupWorktreeDir,
+		); errRollback != nil {
+			cleanupRecovery = false
+			return errors.Join(
+				errContext,
+				fmt.Errorf("rollback recovered repository; backup retained at %s: %w", recoveryRoot, errRollback),
+			)
+		}
+		return errContext
+	}
+	if errMove := moveWorktreeEntries(cloneDir, repoDir); errMove != nil {
+		errMoveWorktree := fmt.Errorf("install recovered worktree: %w", errMove)
+		if errRollback := rollbackRecoveredRepository(
+			repoDir, gitDir, backupGitDir, backupWorktreeDir,
+		); errRollback != nil {
+			cleanupRecovery = false
+			return errors.Join(
+				errMoveWorktree,
+				fmt.Errorf("rollback recovered repository; backup retained at %s: %w", recoveryRoot, errRollback),
+			)
+		}
+		return errMoveWorktree
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		if errRollback := rollbackRecoveredRepository(
+			repoDir, gitDir, backupGitDir, backupWorktreeDir,
+		); errRollback != nil {
+			cleanupRecovery = false
+			return errors.Join(
+				errContext,
+				fmt.Errorf("rollback recovered repository; backup retained at %s: %w", recoveryRoot, errRollback),
+			)
+		}
+		return errContext
+	}
+	recoveredRepo, errOpen := git.PlainOpen(repoDir)
+	if errOpen == nil {
+		errOpen = verifyRepositoryHead(recoveredRepo)
+	}
+	closeGitRepository(recoveredRepo, "git token store: close recovered repo")
+	if errOpen != nil {
+		errRecovered := fmt.Errorf("verify recovered repository: %w", errOpen)
+		if errRollback := rollbackRecoveredRepository(
+			repoDir, gitDir, backupGitDir, backupWorktreeDir,
+		); errRollback != nil {
+			cleanupRecovery = false
+			return errors.Join(
+				errRecovered,
+				fmt.Errorf("rollback recovered repository; backup retained at %s: %w", recoveryRoot, errRollback),
+			)
+		}
+		return errRecovered
+	}
+	return nil
+}
+
+func isRepositoryCorruptionError(err error) bool {
+	return errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound)
+}
+
+func verifyRepositoryHead(repo *git.Repository) error {
+	if repo == nil {
+		return fmt.Errorf("repository is nil")
+	}
+	tree, errTree := repositoryHeadTree(repo)
+	if errTree != nil || tree == nil {
+		return errTree
+	}
+	files := tree.Files()
+	return files.ForEach(
+		func(file *object.File) error {
+			_, errContents := file.Contents()
+			return errContents
+		},
+	)
 }
 
 type fileMutationSnapshot struct {
@@ -1284,7 +1919,7 @@ func (s *GitTokenStore) maybeRunGC(repo *git.Repository) {
 	s.lastGC = now
 
 	pruneOpts := git.PruneOptions{
-		OnlyObjectsOlderThan: now,
+		OnlyObjectsOlderThan: now.Add(-gcPruneGracePeriod),
 		Handler:              repo.DeleteObject,
 	}
 	if err := repo.Prune(pruneOpts); err != nil && !errors.Is(err, git.ErrLooseObjectsNotSupported) {
@@ -1295,7 +1930,7 @@ func (s *GitTokenStore) maybeRunGC(repo *git.Repository) {
 
 // PersistConfig commits and pushes configuration changes to git.
 func (s *GitTokenStore) PersistConfig(ctx context.Context) error {
-	if err := s.operationMu.LockContext(ctx); err != nil {
+	if err := s.operationMu.lockContext(ctx); err != nil {
 		return err
 	}
 	defer s.operationMu.Unlock()
