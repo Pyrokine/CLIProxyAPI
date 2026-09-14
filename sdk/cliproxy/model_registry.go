@@ -22,12 +22,14 @@ type ModelInfo struct {
 	OutputTokenLimit           int              `json:"outputTokenLimit,omitempty"`
 	SupportedGenerationMethods []string         `json:"supportedGenerationMethods,omitempty"`
 	ContextLength              int              `json:"context_length,omitempty"`
+	MaxContextLength           int              `json:"-"`
 	MaxCompletionTokens        int              `json:"max_completion_tokens,omitempty"`
 	SupportedParameters        []string         `json:"supported_parameters,omitempty"`
 	SupportedInputModalities   []string         `json:"supportedInputModalities,omitempty"`
 	SupportedOutputModalities  []string         `json:"supportedOutputModalities,omitempty"`
 	SupportsWebSearch          bool             `json:"supports_web_search,omitempty"`
 	Thinking                   *ThinkingSupport `json:"thinking,omitempty"`
+	IsCompat                   bool             `json:"-"`
 	UserDefined                bool             `json:"-"`
 }
 
@@ -180,12 +182,14 @@ func toRegistryModelInfo(model *ModelInfo) *registry.ModelInfo {
 		OutputTokenLimit:           model.OutputTokenLimit,
 		SupportedGenerationMethods: append([]string(nil), model.SupportedGenerationMethods...),
 		ContextLength:              model.ContextLength,
+		MaxContextLength:           model.MaxContextLength,
 		MaxCompletionTokens:        model.MaxCompletionTokens,
 		SupportedParameters:        append([]string(nil), model.SupportedParameters...),
 		SupportedInputModalities:   append([]string(nil), model.SupportedInputModalities...),
 		SupportedOutputModalities:  append([]string(nil), model.SupportedOutputModalities...),
 		SupportsWebSearch:          model.SupportsWebSearch,
 		Thinking:                   toRegistryThinkingSupport(model.Thinking),
+		IsCompat:                   model.IsCompat,
 		UserDefined:                model.UserDefined,
 	}
 }
@@ -235,12 +239,14 @@ func fromRegistryModelInfo(model *registry.ModelInfo) *ModelInfo {
 		OutputTokenLimit:           model.OutputTokenLimit,
 		SupportedGenerationMethods: append([]string(nil), model.SupportedGenerationMethods...),
 		ContextLength:              model.ContextLength,
+		MaxContextLength:           model.MaxContextLength,
 		MaxCompletionTokens:        model.MaxCompletionTokens,
 		SupportedParameters:        append([]string(nil), model.SupportedParameters...),
 		SupportedInputModalities:   append([]string(nil), model.SupportedInputModalities...),
 		SupportedOutputModalities:  append([]string(nil), model.SupportedOutputModalities...),
 		SupportsWebSearch:          model.SupportsWebSearch,
 		Thinking:                   fromRegistryThinkingSupport(model.Thinking),
+		IsCompat:                   model.IsCompat,
 		UserDefined:                model.UserDefined,
 	}
 }

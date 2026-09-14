@@ -21,6 +21,13 @@ const (
 
 var configuredRefreshInterval = defaultModelsRefreshInterval
 
+func modelRefreshInterval(refreshHours int) (time.Duration, bool) {
+	if refreshHours <= 0 {
+		return 0, false
+	}
+	return time.Duration(refreshHours) * time.Hour, true
+}
+
 var modelsURLs = []string{
 	"https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json",
 	"https://models.router-for.me/models.json",
@@ -132,11 +139,18 @@ func init() {
 // refreshHours sets the interval in hours; 0 or negative disables periodic refresh.
 // Safe to call multiple times; only one updater will run.
 func StartModelsUpdater(ctx context.Context, refreshHours int) {
+	interval, enabled := modelRefreshInterval(refreshHours)
+	if !enabled {
+		configuredRefreshInterval = 0
+		modelsCatalogMetaStore.mu.Lock()
+		modelsCatalogMetaStore.meta.NextRefreshAt = time.Time{}
+		modelsCatalogMetaStore.meta.IntervalHours = 0
+		modelsCatalogMetaStore.mu.Unlock()
+		return
+	}
 	updaterOnce.Do(
 		func() {
-			if refreshHours > 0 {
-				configuredRefreshInterval = time.Duration(refreshHours) * time.Hour
-			}
+			configuredRefreshInterval = interval
 			go runModelsUpdater(ctx)
 		},
 	)
@@ -177,7 +191,7 @@ func tryStartupRefresh(ctx context.Context) {
 func tryRefreshModels(ctx context.Context, label string) {
 	oldData := getModels()
 
-	parsed, url := fetchModelsFromRemote(ctx)
+	parsed, url := fetchModelsFromRemote(ctx, oldData)
 	if parsed == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
 		updateCatalogMetaAfterRefresh("", "fetch failed from all URLs")
@@ -246,11 +260,11 @@ func TriggerCatalogRefresh(ctx context.Context) (CatalogMeta, error) {
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
 // along with the URL it was fetched from. Returns (nil, "") if all fetches fail.
-func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
+func fetchModelsFromRemote(ctx context.Context, current *staticModelsJSON) (*staticModelsJSON, string) {
 	client := &http.Client{Timeout: modelsFetchTimeout}
 	for _, url := range modelsURLs {
 		reqCtx, cancel := context.WithTimeout(ctx, modelsFetchTimeout)
-		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 		if err != nil {
 			cancel()
 			log.Debugf("models fetch request creation failed for %s: %v", url, err)
@@ -264,7 +278,7 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 			continue
 		}
 
-		if resp.StatusCode != 200 {
+		if resp.StatusCode != http.StatusOK {
 			_ = resp.Body.Close()
 			cancel()
 			log.Debugf("models fetch returned %d from %s", resp.StatusCode, url)
@@ -280,19 +294,80 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 			continue
 		}
 
-		var parsed staticModelsJSON
-		if err := json.Unmarshal(data, &parsed); err != nil {
-			log.Warnf("models parse failed from %s: %v", url, err)
+		parsed, err := mergeRemoteModelsCatalog(data, current)
+		if err != nil {
+			log.Warnf("models catalog rejected from %s: %v", url, err)
 			continue
 		}
-		if err := validateModelsCatalog(&parsed); err != nil {
-			log.Warnf("models validate failed from %s: %v", url, err)
-			continue
-		}
-
-		return &parsed, url
+		return parsed, url
 	}
 	return nil, ""
+}
+
+var modelCatalogSectionNames = []string{
+	"claude", "gemini", "vertex", "gemini-cli", "aistudio",
+	"codex-free", "codex-team", "codex-plus", "codex-pro",
+	"qwen", "iflow", "kimi", "antigravity", "xai",
+}
+
+func mergeRemoteModelsCatalog(data []byte, current *staticModelsJSON) (*staticModelsJSON, error) {
+	var remote map[string]json.RawMessage
+	if err := json.Unmarshal(data, &remote); err != nil {
+		return nil, fmt.Errorf("decode remote models catalog: %w", err)
+	}
+
+	if current == nil {
+		current = embeddedModelsCatalog()
+	}
+	merged := make(map[string]json.RawMessage, len(modelCatalogSectionNames))
+	if current != nil {
+		currentData, err := json.Marshal(current)
+		if err != nil {
+			return nil, fmt.Errorf("encode current models catalog: %w", err)
+		}
+		if err = json.Unmarshal(currentData, &merged); err != nil {
+			return nil, fmt.Errorf("decode current models catalog: %w", err)
+		}
+	}
+
+	accepted := 0
+	for _, section := range modelCatalogSectionNames {
+		raw, exists := remote[section]
+		if !exists {
+			continue
+		}
+		var models []*ModelInfo
+		if err := json.Unmarshal(raw, &models); err != nil {
+			log.Warnf("models catalog: %s section decode failed, keeping current section: %v", section, err)
+			continue
+		}
+		if len(models) == 0 {
+			log.Debugf("models catalog: %s section is empty, keeping current section", section)
+			continue
+		}
+		if err := validateModelSection(section, models); err != nil {
+			log.Warnf("models catalog: %s section rejected, keeping current section: %v", section, err)
+			continue
+		}
+		merged[section] = raw
+		accepted++
+	}
+	if accepted == 0 {
+		return nil, fmt.Errorf("remote catalog has no valid populated provider sections")
+	}
+
+	mergedData, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("encode merged models catalog: %w", err)
+	}
+	var parsed staticModelsJSON
+	if err = json.Unmarshal(mergedData, &parsed); err != nil {
+		return nil, fmt.Errorf("decode merged models catalog: %w", err)
+	}
+	if err = validateModelsCatalog(&parsed); err != nil {
+		return nil, fmt.Errorf("validate merged models catalog: %w", err)
+	}
+	return &parsed, nil
 }
 
 // detectChangedProviders compares two model catalogs and returns provider names

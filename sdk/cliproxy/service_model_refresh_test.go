@@ -2,7 +2,9 @@ package cliproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
@@ -91,10 +94,12 @@ func TestAuthRemovalWaitsForInFlightAuthPublication(t *testing.T) {
 		Metadata: map[string]any{"access_token": "new"},
 	}
 	GlobalModelRegistry().UnregisterClient(auth.ID)
-	t.Cleanup(func() {
-		GlobalModelRegistry().UnregisterClient(auth.ID)
-		_ = manager.StopDeferredAuthRecreates(context.Background())
-	})
+	t.Cleanup(
+		func() {
+			GlobalModelRegistry().UnregisterClient(auth.ID)
+			_ = manager.StopDeferredAuthRecreates(context.Background())
+		},
+	)
 
 	applyDone := make(chan error, 1)
 	go func() {
@@ -157,11 +162,13 @@ func TestBlockedAuthPublicationDoesNotBlockDifferentAuthRemoval(t *testing.T) {
 		Provider: "codex",
 		Metadata: map[string]any{"access_token": "blocked"},
 	}
-	t.Cleanup(func() {
-		GlobalModelRegistry().UnregisterClient(blocked.ID)
-		GlobalModelRegistry().UnregisterClient(other.ID)
-		_ = manager.StopDeferredAuthRecreates(context.Background())
-	})
+	t.Cleanup(
+		func() {
+			GlobalModelRegistry().UnregisterClient(blocked.ID)
+			GlobalModelRegistry().UnregisterClient(other.ID)
+			_ = manager.StopDeferredAuthRecreates(context.Background())
+		},
+	)
 
 	applyDone := make(chan error, 1)
 	go func() {
@@ -247,7 +254,7 @@ func TestRuntimeOnlyAuthChurnReleasesPerAuthState(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	service := &Service{cfg: &config.Config{}, coreManager: manager}
 	ctx := coreauth.WithSkipPersist(context.Background())
-	for index := 0; index < 100; index++ {
+	for index := range 100 {
 		id := fmt.Sprintf("runtime-only-%d", index)
 		if errApply := service.applyCoreAuthAddOrUpdate(
 			ctx,
@@ -299,7 +306,7 @@ func TestModelRefreshWorkersBoundExternalDiscoveryConcurrency(t *testing.T) {
 		ctx context.Context,
 		auth *coreauth.Auth,
 		_ *config.Config,
-	) []*registry.ModelInfo {
+	) runtimeexecutor.ModelDiscoveryResult {
 		calls.Add(1)
 		current := active.Add(1)
 		defer active.Add(-1)
@@ -312,15 +319,21 @@ func TestModelRefreshWorkersBoundExternalDiscoveryConcurrency(t *testing.T) {
 		started <- struct{}{}
 		select {
 		case <-release:
-			return []*registry.ModelInfo{{ID: "model-" + auth.ID}}
+			return runtimeexecutor.ModelDiscoveryResult{
+				Outcome: runtimeexecutor.ModelDiscoveryComplete,
+				Models:  []*registry.ModelInfo{{ID: "model-" + auth.ID}},
+			}
 		case <-ctx.Done():
-			return nil
+			return runtimeexecutor.ModelDiscoveryResult{
+				Outcome: runtimeexecutor.ModelDiscoveryInconclusive,
+				Err:     ctx.Err(),
+			}
 		}
 	}
 	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
 
 	auths := make([]*coreauth.Auth, 0, 8)
-	for index := 0; index < 8; index++ {
+	for index := range 8 {
 		auths = append(
 			auths,
 			&coreauth.Auth{
@@ -336,7 +349,7 @@ func TestModelRefreshWorkersBoundExternalDiscoveryConcurrency(t *testing.T) {
 		service.registerModelsForAuth(auth)
 	}
 
-	for index := 0; index < modelRefreshWorkerCount; index++ {
+	for range modelRefreshWorkerCount {
 		select {
 		case <-started:
 		case <-time.After(time.Second):
@@ -371,23 +384,32 @@ func TestModelRefreshPendingJobsCoalesceByAuth(t *testing.T) {
 		ctx context.Context,
 		auth *coreauth.Auth,
 		_ *config.Config,
-	) []*registry.ModelInfo {
+	) runtimeexecutor.ModelDiscoveryResult {
 		if auth.ID != "ag-coalesced" {
 			blockersStarted <- struct{}{}
 			select {
 			case <-releaseBlockers:
-				return []*registry.ModelInfo{{ID: "blocker-model"}}
+				return runtimeexecutor.ModelDiscoveryResult{
+					Outcome: runtimeexecutor.ModelDiscoveryComplete,
+					Models:  []*registry.ModelInfo{{ID: "blocker-model"}},
+				}
 			case <-ctx.Done():
-				return nil
+				return runtimeexecutor.ModelDiscoveryResult{
+					Outcome: runtimeexecutor.ModelDiscoveryInconclusive,
+					Err:     ctx.Err(),
+				}
 			}
 		}
 		targetCalls.Add(1)
-		return []*registry.ModelInfo{{ID: auth.Metadata["generation"].(string)}}
+		return runtimeexecutor.ModelDiscoveryResult{
+			Outcome: runtimeexecutor.ModelDiscoveryComplete,
+			Models:  []*registry.ModelInfo{{ID: auth.Metadata["generation"].(string)}},
+		}
 	}
 	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
 
 	auths := make([]*coreauth.Auth, 0, modelRefreshWorkerCount+1)
-	for index := 0; index < modelRefreshWorkerCount; index++ {
+	for index := range modelRefreshWorkerCount {
 		auths = append(
 			auths,
 			&coreauth.Auth{
@@ -410,7 +432,7 @@ func TestModelRefreshPendingJobsCoalesceByAuth(t *testing.T) {
 	for _, auth := range auths[:modelRefreshWorkerCount] {
 		service.registerModelsForAuth(auth)
 	}
-	for index := 0; index < modelRefreshWorkerCount; index++ {
+	for range modelRefreshWorkerCount {
 		select {
 		case <-blockersStarted:
 		case <-time.After(time.Second):
@@ -452,13 +474,19 @@ func TestAntigravityTimeoutKeepsCurrentConfigProjection(t *testing.T) {
 		ctx context.Context,
 		_ *coreauth.Auth,
 		_ *config.Config,
-	) []*registry.ModelInfo {
+	) runtimeexecutor.ModelDiscoveryResult {
 		if calls.Add(1) == 1 {
-			return []*registry.ModelInfo{{ID: "cached-model"}}
+			return runtimeexecutor.ModelDiscoveryResult{
+				Outcome: runtimeexecutor.ModelDiscoveryComplete,
+				Models:  []*registry.ModelInfo{{ID: "cached-model"}},
+			}
 		}
 		close(secondStarted)
 		<-ctx.Done()
-		return nil
+		return runtimeexecutor.ModelDiscoveryResult{
+			Outcome: runtimeexecutor.ModelDiscoveryInconclusive,
+			Err:     ctx.Err(),
+		}
 	}
 	modelRefreshTimeout = 30 * time.Millisecond
 	t.Cleanup(
@@ -519,12 +547,117 @@ func TestConfigUpdateReprojectsExistingAuthModelsWithoutPluginHost(t *testing.T)
 		nextCfg,
 		1,
 		false,
+		false,
 	)
 	if errApply != nil || !applied {
 		t.Fatalf("applyConfigUpdateRuntimeGenerationOptions() = (%t, %v)", applied, errApply)
 	}
 	if GlobalModelRegistry().ClientSupportsModel(auth.ID, excludedModel) {
 		t.Fatalf("excluded model %q remained routable after config update", excludedModel)
+	}
+}
+
+func TestRefreshModelClientsReprojectsExistingXAIAuths(t *testing.T) {
+	disabled := false
+	cfg := &config.Config{
+		ModelCatalog: config.ModelCatalogConfig{
+			Models: []config.ModelCatalogModel{
+				{
+					Name: "grok-4.5", Enabled: &disabled,
+				},
+			},
+		},
+		XAIKey: []config.XAIKey{
+			{
+				APIKey:  "xai-key",
+				BaseURL: "https://api.x.ai/v1",
+				Models: []config.XAIModel{
+					{
+						Name: "grok-4.3", Alias: "grok-explicit",
+					},
+				},
+			},
+		},
+	}
+	oauth := &coreauth.Auth{
+		ID:         "catalog-refresh-xai-oauth",
+		Provider:   "xai",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	excluded := &coreauth.Auth{
+		ID:       "catalog-refresh-xai-excluded",
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":       "oauth",
+			"excluded_models": "grok-4.6",
+		},
+	}
+	apiKey := &coreauth.Auth{
+		ID:       "catalog-refresh-xai-api-key",
+		Provider: "xai",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"api_key":   "xai-key",
+			"base_url":  "https://api.x.ai/v1",
+			"auth_kind": "apikey",
+		},
+	}
+	serverService := newConfigCommitSequenceServiceWithConfig(t, cfg)
+	service := newModelRefreshTestService(t, cfg, oauth, excluded, apiKey)
+	service.server = serverService.server
+	service.managementConfigGeneration = 7
+	for _, auth := range []*coreauth.Auth{oauth, excluded, apiKey} {
+		GlobalModelRegistry().RegisterClient(
+			auth.ID,
+			"xai",
+			[]*ModelInfo{{ID: "stale-xai-model"}},
+		)
+	}
+
+	service.cfgMu.RLock()
+	beforeConfig := service.cfg
+	service.cfgMu.RUnlock()
+	beforeManagement := service.server.ManagementHandler().ConfigState()
+	beforeGeneration := service.managementConfigGeneration
+	service.refreshModelClients()
+
+	service.cfgMu.RLock()
+	afterConfig := service.cfg
+	service.cfgMu.RUnlock()
+	afterManagement := service.server.ManagementHandler().ConfigState()
+	if afterConfig != beforeConfig || afterManagement.Config != beforeManagement.Config {
+		t.Fatal("catalog refresh replaced the published configuration")
+	}
+	if afterManagement.Generation != beforeManagement.Generation ||
+		service.managementConfigGeneration != beforeGeneration {
+		t.Fatalf(
+			"catalog refresh changed config generations from (%d, %d) to (%d, %d)",
+			beforeManagement.Generation,
+			beforeGeneration,
+			afterManagement.Generation,
+			service.managementConfigGeneration,
+		)
+	}
+	if !GlobalModelRegistry().ClientSupportsModel(oauth.ID, "grok-4.6") {
+		t.Fatal("catalog refresh did not register Grok 4.6 for an existing xAI OAuth credential")
+	}
+	if GlobalModelRegistry().ClientSupportsModel(oauth.ID, "grok-4.5") {
+		t.Fatal("catalog refresh ignored the disabled model catalog entry")
+	}
+	if GlobalModelRegistry().ClientSupportsModel(excluded.ID, "grok-4.6") ||
+		!GlobalModelRegistry().ClientSupportsModel(excluded.ID, "grok-4.3") {
+		t.Fatal("catalog refresh ignored the xAI OAuth exclusion")
+	}
+	if !GlobalModelRegistry().ClientSupportsModel(apiKey.ID, "grok-explicit") ||
+		GlobalModelRegistry().ClientSupportsModel(apiKey.ID, "grok-4.6") {
+		t.Fatal("catalog refresh replaced an explicit xAI API key model list")
+	}
+	for _, auth := range []*coreauth.Auth{oauth, excluded, apiKey} {
+		if GlobalModelRegistry().ClientSupportsModel(auth.ID, "stale-xai-model") {
+			t.Fatalf("catalog refresh left stale models registered for %s", auth.ID)
+		}
 	}
 }
 
@@ -536,13 +669,19 @@ func TestModelRefreshRejectsStaleAuthIdentity(t *testing.T) {
 		ctx context.Context,
 		_ *coreauth.Auth,
 		_ *config.Config,
-	) []*registry.ModelInfo {
+	) runtimeexecutor.ModelDiscoveryResult {
 		close(started)
 		select {
 		case <-release:
-			return []*registry.ModelInfo{{ID: "stale-auth-model"}}
+			return runtimeexecutor.ModelDiscoveryResult{
+				Outcome: runtimeexecutor.ModelDiscoveryComplete,
+				Models:  []*registry.ModelInfo{{ID: "stale-auth-model"}},
+			}
 		case <-ctx.Done():
-			return nil
+			return runtimeexecutor.ModelDiscoveryResult{
+				Outcome: runtimeexecutor.ModelDiscoveryInconclusive,
+				Err:     ctx.Err(),
+			}
 		}
 	}
 	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
@@ -578,16 +717,23 @@ func TestModelRefreshRejectsStalePluginSnapshot(t *testing.T) {
 	service := newModelRefreshTestService(t, &config.Config{}, auth)
 	service.pluginHost = pluginhost.New()
 	service.modelRefreshVersion = map[string]uint64{auth.ID: 1}
+	identity, errIdentity := service.buildModelRefreshIdentity(auth, service.cfg, true)
+	if errIdentity != nil {
+		t.Fatalf("buildModelRefreshIdentity() error = %v", errIdentity)
+	}
 	service.publishModelRefreshResult(
 		context.Background(),
-		modelRefreshJob{auth: auth.Clone(), cfg: service.cfg, version: 1, tryPlugin: true},
-		pluginhost.AuthModelResult{
-			Provider: "plugin-provider",
-			Models:   []*registry.ModelInfo{{ID: "stale-plugin-model"}},
-			Snapshot: &pluginhost.Snapshot{},
-			Handled:  true,
+		modelRefreshJob{
+			auth: auth.Clone(), cfg: service.cfg, identity: identity, version: 1, tryPlugin: true,
 		},
-		nil,
+		modelDiscoveryResultFromPlugin(
+			pluginhost.AuthModelResult{
+				Provider: "plugin-provider",
+				Models:   []*registry.ModelInfo{{ID: "stale-plugin-model"}},
+				Snapshot: &pluginhost.Snapshot{},
+				Handled:  true,
+			},
+		),
 	)
 	if GlobalModelRegistry().ClientSupportsModel(auth.ID, "stale-plugin-model") {
 		t.Fatal("stale plugin snapshot result was registered")
@@ -618,7 +764,7 @@ func TestPluginModelRefreshPersistenceDoesNotHoldPublicationLock(t *testing.T) {
 		modelRefreshVersion: map[string]uint64{auth.ID: 1},
 		modelRefreshCancel:  map[string]context.CancelFunc{auth.ID: cancel},
 		modelRefreshPending: make(map[string]modelRefreshJob),
-		modelRefreshCache:   make(map[string][]*ModelInfo),
+		modelRefreshCache:   make(map[string]modelRefreshCacheEntry),
 	}
 	pluginAuth := registered.Clone()
 	pluginAuth.Metadata["token"] = "new"
@@ -627,19 +773,16 @@ func TestPluginModelRefreshPersistenceDoesNotHoldPublicationLock(t *testing.T) {
 	store.mu.Lock()
 	store.block = true
 	store.mu.Unlock()
+	result := modelDiscoveryResultFromPlugin(
+		pluginhost.AuthModelResult{
+			Provider: "plugin-provider",
+			Models:   []*registry.ModelInfo{{ID: "plugin-model"}},
+			Auth:     pluginAuth,
+			Handled:  true,
+		},
+	)
 	go func() {
-		service.applyPluginModelsForAuth(
-			ctx,
-			job,
-			registered.Clone(),
-			service.cfg,
-			pluginhost.AuthModelResult{
-				Provider: "plugin-provider",
-				Models:   []*registry.ModelInfo{{ID: "plugin-model"}},
-				Auth:     pluginAuth,
-				Handled:  true,
-			},
-		)
+		service.applyModelDiscoveryAuthUpdate(ctx, job, registered.Clone(), result)
 		close(done)
 	}()
 	select {
@@ -715,13 +858,14 @@ func TestPluginModelRefreshPreservesLatestRuntimeState(t *testing.T) {
 	service.publishModelRefreshResult(
 		context.Background(),
 		modelRefreshJob{auth: jobAuth.Clone(), cfg: service.cfg, version: 1},
-		pluginhost.AuthModelResult{
-			Provider: "plugin-provider",
-			Models:   []*registry.ModelInfo{{ID: "plugin-model"}},
-			Auth:     pluginAuth,
-			Handled:  true,
-		},
-		nil,
+		modelDiscoveryResultFromPlugin(
+			pluginhost.AuthModelResult{
+				Provider: "plugin-provider",
+				Models:   []*registry.ModelInfo{{ID: "plugin-model"}},
+				Auth:     pluginAuth,
+				Handled:  true,
+			},
+		),
 	)
 
 	updated, ok := service.coreManager.GetByID(auth.ID)
@@ -737,5 +881,775 @@ func TestPluginModelRefreshPreservesLatestRuntimeState(t *testing.T) {
 	}
 	if updated.Status != coreauth.StatusError {
 		t.Fatalf("auth status = %q, want %q", updated.Status, coreauth.StatusError)
+	}
+}
+
+func currentModelRefreshJob(
+	t *testing.T,
+	service *Service,
+	authID string,
+	tryPlugin bool,
+	version uint64,
+) modelRefreshJob {
+	t.Helper()
+	auth, ok := service.coreManager.GetByID(authID)
+	if !ok {
+		t.Fatalf("auth %q is missing", authID)
+	}
+	identity, errIdentity := service.buildModelRefreshIdentity(auth, service.cfg, tryPlugin)
+	if errIdentity != nil {
+		t.Fatalf("buildModelRefreshIdentity() error = %v", errIdentity)
+	}
+	service.modelRefreshMu.Lock()
+	if service.modelRefreshVersion == nil {
+		service.modelRefreshVersion = make(map[string]uint64)
+	}
+	service.modelRefreshVersion[authID] = version
+	service.modelRefreshMu.Unlock()
+	return modelRefreshJob{
+		auth:      auth,
+		cfg:       service.cfg,
+		identity:  identity,
+		version:   version,
+		tryPlugin: tryPlugin,
+	}
+}
+
+func TestOpenAICompatibilityDiscoveryRegistersGPT6Astra(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID:       "openai-compat-astra-discovery",
+		Provider: "openai-compatibility",
+		Status:   coreauth.StatusActive,
+	}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+	if GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra") {
+		t.Fatal("Astra was registered before provider discovery")
+	}
+
+	service.publishModelRefreshResult(
+		context.Background(),
+		job,
+		modelDiscoveryResultFromPlugin(
+			pluginhost.AuthModelResult{
+				Provider: "openai-compatibility",
+				Outcome:  "complete",
+				Models:   []*registry.ModelInfo{{ID: "gpt-6-astra", Type: "openai-compatibility"}},
+				Handled:  true,
+			},
+		),
+	)
+	if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra") {
+		t.Fatal("authoritatively discovered Astra model was not registered")
+	}
+}
+
+func TestPluginModelDiscoveryOutcomeMapping(t *testing.T) {
+	tests := []struct {
+		name        string
+		plugin      pluginhost.AuthModelResult
+		wantOutcome modelDiscoveryOutcome
+	}{
+		{
+			name: "default complete positive",
+			plugin: pluginhost.AuthModelResult{
+				Models: []*registry.ModelInfo{{ID: "model-1"}}, Handled: true,
+			},
+			wantOutcome: modelDiscoveryAuthoritativePositive,
+		},
+		{
+			name:        "complete empty",
+			plugin:      pluginhost.AuthModelResult{Outcome: "complete", Handled: true},
+			wantOutcome: modelDiscoveryAuthoritativeNegative,
+		},
+		{
+			name: "partial",
+			plugin: pluginhost.AuthModelResult{
+				Models: []*registry.ModelInfo{{ID: "partial-model"}}, Outcome: "partial", Handled: true,
+			},
+			wantOutcome: modelDiscoveryPartial,
+		},
+		{
+			name:        "inconclusive",
+			plugin:      pluginhost.AuthModelResult{Outcome: "inconclusive", Handled: true},
+			wantOutcome: modelDiscoveryInconclusive,
+		},
+		{
+			name:        "failure",
+			plugin:      pluginhost.AuthModelResult{Err: fmt.Errorf("discovery failed"), Handled: true},
+			wantOutcome: modelDiscoveryFailure,
+		},
+	}
+	for _, test := range tests {
+		t.Run(
+			test.name, func(t *testing.T) {
+				result := modelDiscoveryResultFromPlugin(test.plugin)
+				if result.outcome != test.wantOutcome {
+					t.Fatalf("outcome = %q, want %q", result.outcome, test.wantOutcome)
+				}
+			},
+		)
+	}
+}
+
+func TestAntigravityModelDiscoveryPersistsRefreshedAuth(t *testing.T) {
+	previousFetch := fetchAntigravityModels
+	fetchAntigravityModels = func(
+		context.Context,
+		*coreauth.Auth,
+		*config.Config,
+	) runtimeexecutor.ModelDiscoveryResult {
+		return runtimeexecutor.ModelDiscoveryResult{
+			Outcome: runtimeexecutor.ModelDiscoveryComplete,
+			Models:  []*registry.ModelInfo{{ID: "refreshed-model"}},
+			Auth: &coreauth.Auth{
+				ID:         "ignored-id",
+				Provider:   "ignored-provider",
+				ProxyURL:   "http://ignored.example",
+				Attributes: map[string]string{"ignored": "value"},
+				Metadata:   map[string]any{"access_token": "new-token"},
+			},
+		}
+	}
+	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+
+	store := &blockingModelRefreshStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:         "antigravity-refreshed-auth",
+		Provider:   "antigravity",
+		Status:     coreauth.StatusActive,
+		ProxyURL:   "http://original.example",
+		Attributes: map[string]string{"auth_kind": "oauth"},
+		Metadata:   map[string]any{"access_token": "old-token"},
+	}
+	registered, errRegister := manager.Register(context.Background(), auth)
+	if errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+
+	result := service.discoverModelsForRefresh(context.Background(), job)
+	if result.auth == nil || result.auth.Metadata["access_token"] != "new-token" {
+		t.Fatalf("mapped Antigravity auth update = %#v", result.auth)
+	}
+	service.publishModelRefreshResult(context.Background(), job, result)
+
+	current, ok := manager.GetByID(auth.ID)
+	if !ok || current.Metadata["access_token"] != "new-token" {
+		t.Fatalf("refreshed auth was not published: %#v", current)
+	}
+	if current.Provider != registered.Provider || current.ProxyURL != registered.ProxyURL ||
+		!reflect.DeepEqual(current.Attributes, registered.Attributes) {
+		t.Fatalf("Antigravity refresh changed immutable auth fields: %#v", current)
+	}
+	store.mu.Lock()
+	persisted := store.last.Clone()
+	store.mu.Unlock()
+	if persisted == nil || persisted.Metadata["access_token"] != "new-token" {
+		t.Fatalf("refreshed auth was not persisted: %#v", persisted)
+	}
+	GlobalModelRegistry().UnregisterClient(auth.ID)
+}
+
+func TestModelRefreshKeepsAuthoritativeResultUntilAuthoritativeEmpty(t *testing.T) {
+	auth := &coreauth.Auth{ID: "ag-authoritative-cache", Provider: "antigravity", Status: coreauth.StatusActive}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+
+	service.publishModelRefreshResult(
+		context.Background(),
+		job,
+		modelDiscoveryResult{
+			source:  modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryAuthoritativePositive,
+			models:  []*ModelInfo{{ID: "cached-model"}},
+		},
+	)
+	cached := service.modelRefreshCache[auth.ID]
+	if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "cached-model") {
+		t.Fatal("authoritative model was not registered")
+	}
+
+	service.publishModelRefreshResult(
+		context.Background(),
+		job,
+		modelDiscoveryResult{
+			source:  modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryInconclusive,
+			err:     fmt.Errorf("temporary discovery failure"),
+		},
+	)
+	retained := service.modelRefreshCache[auth.ID]
+	if retained.outcome != modelDiscoveryAuthoritativePositive || !retained.observedAt.Equal(cached.observedAt) {
+		t.Fatalf("inconclusive refresh replaced authoritative cache: %#v", retained)
+	}
+	if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "cached-model") {
+		t.Fatal("inconclusive refresh removed the authoritative model")
+	}
+
+	service.publishModelRefreshResult(
+		context.Background(),
+		job,
+		modelDiscoveryResult{
+			source:  modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryAuthoritativeNegative,
+		},
+	)
+	negative := service.modelRefreshCache[auth.ID]
+	if negative.outcome != modelDiscoveryAuthoritativeNegative || len(negative.models) != 0 {
+		t.Fatalf("authoritative empty cache = %#v", negative)
+	}
+	if GlobalModelRegistry().ClientSupportsModel(auth.ID, "cached-model") {
+		t.Fatal("authoritative empty result left the old model registered")
+	}
+}
+
+func TestModelRefreshCacheIsolatesCredentialPositiveAndNegativeResults(t *testing.T) {
+	first := &coreauth.Auth{ID: "ag-isolation-first", Provider: "antigravity", Status: coreauth.StatusActive}
+	second := &coreauth.Auth{ID: "ag-isolation-second", Provider: "antigravity", Status: coreauth.StatusActive}
+	service := newModelRefreshTestService(t, &config.Config{}, first, second)
+	firstJob := currentModelRefreshJob(t, service, first.ID, false, 1)
+	secondJob := currentModelRefreshJob(t, service, second.ID, false, 1)
+
+	service.publishModelRefreshResult(
+		context.Background(),
+		firstJob,
+		modelDiscoveryResult{
+			source:  modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryAuthoritativePositive,
+			models:  []*ModelInfo{{ID: "first-model"}},
+		},
+	)
+	service.publishModelRefreshResult(
+		context.Background(),
+		secondJob,
+		modelDiscoveryResult{
+			source:  modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryAuthoritativeNegative,
+		},
+	)
+	if !GlobalModelRegistry().ClientSupportsModel(first.ID, "first-model") ||
+		len(registry.GetGlobalRegistry().GetModelsForClient(second.ID)) != 0 {
+		t.Fatal("first positive result crossed into the second credential")
+	}
+	if service.modelRefreshCache[first.ID].outcome != modelDiscoveryAuthoritativePositive ||
+		service.modelRefreshCache[second.ID].outcome != modelDiscoveryAuthoritativeNegative {
+		t.Fatalf("credential caches = %#v", service.modelRefreshCache)
+	}
+
+	service.publishModelRefreshResult(
+		context.Background(),
+		secondJob,
+		modelDiscoveryResult{
+			source:  modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryAuthoritativePositive,
+			models:  []*ModelInfo{{ID: "second-model"}},
+		},
+	)
+	service.publishModelRefreshResult(
+		context.Background(),
+		firstJob,
+		modelDiscoveryResult{
+			source:  modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryAuthoritativeNegative,
+		},
+	)
+	if !GlobalModelRegistry().ClientSupportsModel(second.ID, "second-model") ||
+		len(registry.GetGlobalRegistry().GetModelsForClient(first.ID)) != 0 {
+		t.Fatal("second positive result crossed into the first credential")
+	}
+	if service.modelRefreshCache[first.ID].outcome != modelDiscoveryAuthoritativeNegative ||
+		service.modelRefreshCache[second.ID].outcome != modelDiscoveryAuthoritativePositive {
+		t.Fatalf("reversed credential caches = %#v", service.modelRefreshCache)
+	}
+}
+
+func TestPartialModelRefreshDoesNotReplaceAuthoritativeCache(t *testing.T) {
+	auth := &coreauth.Auth{ID: "ag-partial-cache", Provider: "antigravity", Status: coreauth.StatusActive}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+	service.publishModelRefreshResult(
+		context.Background(),
+		job,
+		modelDiscoveryResult{
+			source:  modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryAuthoritativePositive,
+			models:  []*ModelInfo{{ID: "complete-model"}},
+		},
+	)
+	service.publishModelRefreshResult(
+		context.Background(),
+		job,
+		modelDiscoveryResult{
+			source:  modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryPartial,
+			models:  []*ModelInfo{{ID: "partial-model"}},
+		},
+	)
+
+	cached := service.modelRefreshCache[auth.ID]
+	if cached.outcome != modelDiscoveryAuthoritativePositive || len(cached.models) != 1 || cached.models[0].ID != "complete-model" {
+		t.Fatalf("partial refresh replaced authoritative cache: %#v", cached)
+	}
+	if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "complete-model") ||
+		GlobalModelRegistry().ClientSupportsModel(auth.ID, "partial-model") {
+		t.Fatal("partial refresh replaced the authoritative registry projection")
+	}
+}
+
+func TestModelRefreshCacheDoesNotCrossAuthGeneration(t *testing.T) {
+	previousFetch := fetchAntigravityModels
+	started := make(chan struct{})
+	fetchAntigravityModels = func(
+		ctx context.Context,
+		_ *coreauth.Auth,
+		_ *config.Config,
+	) runtimeexecutor.ModelDiscoveryResult {
+		close(started)
+		<-ctx.Done()
+		return runtimeexecutor.ModelDiscoveryResult{
+			Outcome: runtimeexecutor.ModelDiscoveryInconclusive,
+			Err:     ctx.Err(),
+		}
+	}
+	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+
+	auth := &coreauth.Auth{
+		ID: "ag-generation-isolation", Provider: "antigravity", Status: coreauth.StatusActive,
+		Metadata: map[string]any{"credential": "first"},
+	}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+	service.modelRefreshCache = map[string]modelRefreshCacheEntry{
+		auth.ID: {
+			identity: job.identity, source: modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryAuthoritativePositive, models: []*ModelInfo{{ID: "first-model"}},
+			observedAt: time.Now().UTC(),
+		},
+	}
+	service.projectModelDiscoveryLocked(job.auth, service.cfg, service.modelRefreshCache[auth.ID])
+
+	updated := job.auth.Clone()
+	updated.Metadata["credential"] = "second"
+	stored, errUpdate := service.coreManager.Update(context.Background(), updated)
+	if errUpdate != nil {
+		t.Fatalf("update auth generation: %v", errUpdate)
+	}
+	service.registerModelsForAuth(stored)
+	if _, ok := service.modelRefreshCache[auth.ID]; ok {
+		t.Fatal("authoritative cache survived a credential generation change")
+	}
+	if GlobalModelRegistry().ClientSupportsModel(auth.ID, "first-model") {
+		t.Fatal("model from the previous credential generation remained registered")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("new credential generation discovery did not start")
+	}
+}
+
+func TestModelRefreshReusesCacheAcrossUnrelatedConfigUpdate(t *testing.T) {
+	previousFetch := fetchAntigravityModels
+	started := make(chan struct{})
+	fetchAntigravityModels = func(
+		ctx context.Context,
+		_ *coreauth.Auth,
+		_ *config.Config,
+	) runtimeexecutor.ModelDiscoveryResult {
+		close(started)
+		<-ctx.Done()
+		return runtimeexecutor.ModelDiscoveryResult{
+			Outcome: runtimeexecutor.ModelDiscoveryInconclusive,
+			Err:     ctx.Err(),
+		}
+	}
+	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+
+	auth := &coreauth.Auth{ID: "ag-config-cache", Provider: "antigravity", Status: coreauth.StatusActive}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+	service.modelRefreshCache = map[string]modelRefreshCacheEntry{
+		auth.ID: {
+			identity: job.identity, source: modelDiscoverySourceAntigravity,
+			outcome: modelDiscoveryAuthoritativePositive, models: []*ModelInfo{{ID: "cached-model"}},
+			observedAt: time.Now().UTC(),
+		},
+	}
+	service.projectModelDiscoveryLocked(job.auth, service.cfg, service.modelRefreshCache[auth.ID])
+
+	nextCfg := &config.Config{Debug: true}
+	service.publishConfig(nextCfg)
+	service.registerModelsForAuth(job.auth)
+	if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "cached-model") {
+		t.Fatal("unrelated config update discarded the authoritative model cache")
+	}
+	cached, ok := service.modelRefreshCache[auth.ID]
+	if !ok || cached.identity.mappingRevision != job.identity.mappingRevision {
+		t.Fatalf("cache was not retained across unrelated config update: %#v", cached)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("config refresh discovery did not start")
+	}
+}
+
+func TestModelRefreshSingleflightUsesExactIdentity(t *testing.T) {
+	previousFetch := fetchAntigravityModels
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	fetchAntigravityModels = func(
+		context.Context,
+		*coreauth.Auth,
+		*config.Config,
+	) runtimeexecutor.ModelDiscoveryResult {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return runtimeexecutor.ModelDiscoveryResult{
+			Outcome: runtimeexecutor.ModelDiscoveryComplete,
+			Models:  []*registry.ModelInfo{{ID: "singleflight-model"}},
+		}
+	}
+	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+
+	auth := &coreauth.Auth{ID: "ag-singleflight", Provider: "antigravity", Status: coreauth.StatusActive}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+	done := make(chan struct{}, 2)
+	for range 2 {
+		go func() {
+			service.executeModelRefreshJob(context.Background(), job)
+			done <- struct{}{}
+		}()
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("singleflight discovery did not start")
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("exact identity discovery calls = %d, want 1", got)
+	}
+	close(release)
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("singleflight waiter did not finish")
+		}
+	}
+	if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "singleflight-model") {
+		t.Fatal("singleflight result was not published")
+	}
+}
+
+func TestCanceledModelRefreshRemainsTrackedUntilDiscoveryReturns(t *testing.T) {
+	previousFetch := fetchAntigravityModels
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fetchAntigravityModels = func(
+		context.Context,
+		*coreauth.Auth,
+		*config.Config,
+	) runtimeexecutor.ModelDiscoveryResult {
+		close(started)
+		<-release
+		return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryInconclusive}
+	}
+	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+
+	auth := &coreauth.Auth{ID: "ag-canceled-flight", Provider: "antigravity", Status: coreauth.StatusActive}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		service.executeModelRefreshJob(ctx, job)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("model discovery did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("canceled discovery waiter did not return")
+	}
+
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelStop()
+	if errStop := service.stopModelRefreshWorkers(stopCtx); !errors.Is(errStop, context.DeadlineExceeded) {
+		t.Fatalf("stopModelRefreshWorkers() error = %v, want tracked discovery timeout", errStop)
+	}
+	close(release)
+	if errStop := service.stopModelRefreshWorkers(context.Background()); errStop != nil {
+		t.Fatalf("stopModelRefreshWorkers() after release error = %v", errStop)
+	}
+}
+
+func TestCanceledModelRefreshesKeepExternalConcurrencyBounded(t *testing.T) {
+	previousFetch := fetchAntigravityModels
+	started := make(chan struct{}, 8)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	fetchAntigravityModels = func(
+		context.Context,
+		*coreauth.Auth,
+		*config.Config,
+	) runtimeexecutor.ModelDiscoveryResult {
+		calls.Add(1)
+		started <- struct{}{}
+		<-release
+		return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryInconclusive}
+	}
+	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+
+	auths := make([]*coreauth.Auth, 0, 8)
+	for index := range 8 {
+		auths = append(
+			auths,
+			&coreauth.Auth{
+				ID: fmt.Sprintf("ag-canceled-bounded-%d", index), Provider: "antigravity",
+				Status: coreauth.StatusActive,
+			},
+		)
+	}
+	service := newModelRefreshTestService(t, &config.Config{}, auths...)
+	cancels := make([]context.CancelFunc, 0, len(auths))
+	done := make(chan struct{}, len(auths))
+	for index, auth := range auths {
+		job := currentModelRefreshJob(t, service, auth.ID, false, uint64(index+1))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancels = append(cancels, cancel)
+		go func() {
+			service.executeModelRefreshJob(ctx, job)
+			done <- struct{}{}
+		}()
+	}
+	for range modelRefreshWorkerCount {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("model discovery did not reach the concurrency bound")
+		}
+	}
+	for _, cancel := range cancels {
+		cancel()
+	}
+	for range auths {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("canceled model refresh waiter did not return")
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := calls.Load(); got != modelRefreshWorkerCount {
+		t.Fatalf("external calls after waiter cancellation = %d, want %d", got, modelRefreshWorkerCount)
+	}
+	close(release)
+	if errStop := service.stopModelRefreshWorkers(context.Background()); errStop != nil {
+		t.Fatalf("stopModelRefreshWorkers() error = %v", errStop)
+	}
+}
+
+func TestScheduleExternalModelRefreshRejectsRemovedAuth(t *testing.T) {
+	previousFetch := fetchAntigravityModels
+	var calls atomic.Int32
+	fetchAntigravityModels = func(
+		context.Context,
+		*coreauth.Auth,
+		*config.Config,
+	) runtimeexecutor.ModelDiscoveryResult {
+		calls.Add(1)
+		return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryComplete}
+	}
+	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+
+	auth := &coreauth.Auth{ID: "ag-removed-refresh", Provider: "antigravity", Status: coreauth.StatusActive}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	if errRemove := service.coreManager.Remove(
+		coreauth.WithSkipPersist(context.Background()), auth.ID,
+	); errRemove != nil {
+		t.Fatalf("remove auth: %v", errRemove)
+	}
+	GlobalModelRegistry().RegisterClient(auth.ID, "antigravity", []*ModelInfo{{ID: "stale-model"}})
+	service.scheduleExternalModelRefresh(auth, false)
+	if calls.Load() != 0 {
+		t.Fatalf("removed auth discovery calls = %d, want 0", calls.Load())
+	}
+	if models := registry.GetGlobalRegistry().GetModelsForClient(auth.ID); len(models) != 0 {
+		t.Fatalf("removed auth retained models: %#v", models)
+	}
+}
+
+func TestAuthRemovalClearsModelRefreshStateAndRejectsLateResult(t *testing.T) {
+	previousFetch := fetchAntigravityModels
+	started := make(chan struct{})
+	release := make(chan struct{})
+	finished := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	fetchAntigravityModels = func(
+		context.Context,
+		*coreauth.Auth,
+		*config.Config,
+	) runtimeexecutor.ModelDiscoveryResult {
+		close(started)
+		<-release
+		close(finished)
+		return runtimeexecutor.ModelDiscoveryResult{
+			Outcome: runtimeexecutor.ModelDiscoveryComplete,
+			Models:  []*registry.ModelInfo{{ID: "late-model"}},
+		}
+	}
+	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+
+	auth := &coreauth.Auth{ID: "ag-remove-active", Provider: "antigravity", Status: coreauth.StatusActive}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	service.registerModelsForAuth(auth)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("model discovery did not start")
+	}
+	service.modelRefreshMu.Lock()
+	active := service.modelRefreshActive[auth.ID]
+	service.modelRefreshCache[auth.ID] = modelRefreshCacheEntry{
+		identity: active.identity,
+		source:   modelDiscoverySourceAntigravity,
+		outcome:  modelDiscoveryAuthoritativePositive,
+		models:   []*ModelInfo{{ID: "cached-before-removal"}},
+	}
+	service.modelRefreshMu.Unlock()
+	GlobalModelRegistry().RegisterClient(
+		auth.ID,
+		"antigravity",
+		[]*ModelInfo{{ID: "cached-before-removal"}},
+	)
+
+	service.applyCoreAuthRemoval(context.Background(), auth.ID)
+	service.modelRefreshMu.Lock()
+	_, hasCancel := service.modelRefreshCancel[auth.ID]
+	_, hasPending := service.modelRefreshPending[auth.ID]
+	_, hasActive := service.modelRefreshActive[auth.ID]
+	_, hasCache := service.modelRefreshCache[auth.ID]
+	_, hasVersion := service.modelRefreshVersion[auth.ID]
+	service.modelRefreshMu.Unlock()
+	if hasCancel || hasPending || hasActive || hasCache || hasVersion {
+		t.Fatalf(
+			"removed auth retained refresh state: cancel=%t pending=%t active=%t cache=%t version=%t",
+			hasCancel,
+			hasPending,
+			hasActive,
+			hasCache,
+			hasVersion,
+		)
+	}
+	if models := registry.GetGlobalRegistry().GetModelsForClient(auth.ID); len(models) != 0 {
+		t.Fatalf("removed auth retained models: %#v", models)
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("canceled model discovery did not return")
+	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+	defer cancelStop()
+	if errStop := service.stopModelRefreshWorkers(stopCtx); errStop != nil {
+		t.Fatalf("stopModelRefreshWorkers() error = %v", errStop)
+	}
+	if GlobalModelRegistry().ClientSupportsModel(auth.ID, "late-model") {
+		t.Fatal("late model discovery result revived the removed auth")
+	}
+}
+
+func TestPluginAuthUpdateMigratesCacheOnlyForSameSubject(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID: "plugin-cache-migration", Provider: "plugin-provider", Status: coreauth.StatusActive,
+		Metadata: map[string]any{"token": "old"},
+	}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+	service.modelRefreshCache = map[string]modelRefreshCacheEntry{
+		auth.ID: {
+			identity: job.identity, source: modelDiscoverySourcePlugin,
+			outcome: modelDiscoveryAuthoritativePositive, provider: "plugin-provider",
+			models: []*ModelInfo{{ID: "cached-plugin-model"}}, observedAt: time.Now().UTC(),
+		},
+	}
+	service.projectModelDiscoveryLocked(job.auth, service.cfg, service.modelRefreshCache[auth.ID])
+
+	pluginAuth := job.auth.Clone()
+	pluginAuth.Metadata["token"] = "new"
+	service.publishModelRefreshResult(
+		context.Background(),
+		job,
+		modelDiscoveryResultFromPlugin(
+			pluginhost.AuthModelResult{
+				Provider: "plugin-provider", Outcome: "partial", Auth: pluginAuth, Handled: true,
+				Models: []*registry.ModelInfo{{ID: "partial-plugin-model"}},
+			},
+		),
+	)
+	updated, ok := service.coreManager.GetByID(auth.ID)
+	if !ok || updated.Metadata["token"] != "new" {
+		t.Fatalf("plugin auth update was not published: %#v", updated)
+	}
+	cached, ok := service.modelRefreshCache[auth.ID]
+	if !ok || cached.identity.authGeneration != updated.Generation || cached.models[0].ID != "cached-plugin-model" {
+		t.Fatalf("same-subject plugin update did not migrate authoritative cache: %#v", cached)
+	}
+	if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "cached-plugin-model") ||
+		GlobalModelRegistry().ClientSupportsModel(auth.ID, "partial-plugin-model") {
+		t.Fatal("partial plugin result replaced the migrated authoritative cache")
+	}
+
+	endpointJob := currentModelRefreshJob(t, service, auth.ID, false, 2)
+	endpointAuth := updated.Clone()
+	endpointAuth.Provider = "other-provider"
+	endpointAuth.FileName = "other.json"
+	endpointAuth.Label = "other-label"
+	endpointAuth.Prefix = "other-prefix"
+	endpointAuth.ProxyURL = "http://other-proxy.example"
+	endpointAuth.Disabled = true
+	endpointAuth.Attributes = map[string]string{"endpoint": "other"}
+	endpointAuth.Metadata["token"] = "newer"
+	service.publishModelRefreshResult(
+		context.Background(),
+		endpointJob,
+		modelDiscoveryResultFromPlugin(
+			pluginhost.AuthModelResult{
+				Provider: "plugin-provider", Outcome: "inconclusive", Auth: endpointAuth, Handled: true,
+			},
+		),
+	)
+	latest, ok := service.coreManager.GetByID(auth.ID)
+	if !ok || latest.Metadata["token"] != "newer" {
+		t.Fatalf("second plugin auth update was not published: %#v", latest)
+	}
+	if latest.Provider != updated.Provider || latest.FileName != updated.FileName || latest.Label != updated.Label ||
+		latest.Prefix != updated.Prefix || latest.ProxyURL != updated.ProxyURL || latest.Disabled != updated.Disabled ||
+		!reflect.DeepEqual(latest.Attributes, updated.Attributes) {
+		t.Fatalf("plugin model update changed immutable auth fields: %#v", latest)
+	}
+	cached, ok = service.modelRefreshCache[auth.ID]
+	if !ok || cached.identity.authGeneration != latest.Generation || cached.models[0].ID != "cached-plugin-model" {
+		t.Fatalf("immutable plugin fields changed discovery subject: %#v", cached)
+	}
+	if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "cached-plugin-model") {
+		t.Fatal("immutable plugin fields removed the same-subject cached model")
 	}
 }

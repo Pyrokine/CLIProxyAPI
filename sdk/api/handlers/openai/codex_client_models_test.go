@@ -79,6 +79,39 @@ func TestCodexClientModelsAddsMetadataForCustomModels(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsAppliesConfiguredMaxContextLengthToTemplate(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-codex-client-context-override"
+	modelRegistry.RegisterClient(
+		clientID, "openai", []*registry.ModelInfo{
+			{
+				ID:               "gpt-5.5",
+				Object:           "model",
+				OwnedBy:          "test",
+				Type:             "openai",
+				DisplayName:      "Configured GPT",
+				ContextLength:    262144,
+				MaxContextLength: 262144,
+			},
+		},
+	)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	models := codexClientModelsBySlug(t, modelRegistry.GetAvailableModels("openai"))
+	model := models["gpt-5.5"]
+	if model == nil {
+		t.Fatalf("gpt-5.5 missing from response: %#v", models)
+	}
+	if got, _ := model["display_name"].(string); got != "Configured GPT" {
+		t.Fatalf("display_name = %q, want Configured GPT", got)
+	}
+	for _, field := range []string{"context_window", "max_context_window", "max_context_length"} {
+		if got := codexClientTestInt(model[field]); got != 262144 {
+			t.Fatalf("%s = %v, want 262144", field, model[field])
+		}
+	}
+}
+
 func TestCodexClientModelsHidesImageModelsAndClearsModalities(t *testing.T) {
 	modelRegistry := registry.GetGlobalRegistry()
 	clientID := "test-codex-client-image-models"
@@ -116,6 +149,23 @@ func TestCodexClientModelsHidesImageModelsAndClearsModalities(t *testing.T) {
 	}
 	if _, ok := model["supports_image_detail_original"]; ok {
 		t.Fatalf("supports_image_detail_original = %#v, want absent", model["supports_image_detail_original"])
+	}
+}
+
+func TestCodexClientModelsHidesOfficialGPTImage25Models(t *testing.T) {
+	input := make([]map[string]any, 0, len(registry.CodexImageModelIDs()))
+	for _, modelID := range registry.CodexImageModelIDs() {
+		input = append(input, map[string]any{"id": modelID})
+	}
+	models := codexClientModelsBySlug(t, input)
+	for _, modelID := range registry.CodexImageModelIDs() {
+		model := models[modelID]
+		if model == nil {
+			t.Fatalf("%s missing from response", modelID)
+		}
+		if visibility, _ := model["visibility"].(string); visibility != "hide" {
+			t.Fatalf("%s visibility = %q, want hide", modelID, visibility)
+		}
 	}
 }
 
@@ -175,7 +225,7 @@ func TestCodexClientModelsUsesGPT56Templates(t *testing.T) {
 		{
 			slug:              "gpt-5.6-sol",
 			displayName:       "GPT-5.6-Sol",
-			priority:          1,
+			priority:          6,
 			defaultReasoning:  "low",
 			multiAgentVersion: "v2",
 			levels:            []string{"low", "medium", "high", "xhigh", "max", "ultra"},
@@ -183,7 +233,7 @@ func TestCodexClientModelsUsesGPT56Templates(t *testing.T) {
 		{
 			slug:              "gpt-5.6-terra",
 			displayName:       "GPT-5.6-Terra",
-			priority:          2,
+			priority:          7,
 			defaultReasoning:  "medium",
 			multiAgentVersion: "v2",
 			levels:            []string{"low", "medium", "high", "xhigh", "max", "ultra"},
@@ -191,7 +241,7 @@ func TestCodexClientModelsUsesGPT56Templates(t *testing.T) {
 		{
 			slug:              "gpt-5.6-luna",
 			displayName:       "GPT-5.6-Luna",
-			priority:          3,
+			priority:          8,
 			defaultReasoning:  "medium",
 			multiAgentVersion: "v1",
 			levels:            []string{"low", "medium", "high", "xhigh", "max"},
@@ -221,7 +271,10 @@ func TestCodexClientModelsUsesGPT56Templates(t *testing.T) {
 					t.Fatalf("use_responses_lite = %v, want true", got)
 				}
 				if got, ok := model["include_skills_usage_instructions"].(bool); !ok || got {
-					t.Fatalf("include_skills_usage_instructions = %#v, want false", model["include_skills_usage_instructions"])
+					t.Fatalf(
+						"include_skills_usage_instructions = %#v, want false",
+						model["include_skills_usage_instructions"],
+					)
 				}
 				if got, _ := model["minimal_client_version"].(string); got != "0.144.0" {
 					t.Fatalf("minimal_client_version = %q, want 0.144.0", got)
@@ -244,7 +297,40 @@ func TestCodexClientModelsUsesGPT56Templates(t *testing.T) {
 	}
 }
 
-func TestCodexClientModelsResponse_GPT56SolExcludesFreePlans(t *testing.T) {
+func TestCodexClientModelsUsesGPT6AstraTemplate(t *testing.T) {
+	bySlug := codexClientModelsBySlug(t, []map[string]any{{"id": "gpt-6-astra"}})
+	model := bySlug["gpt-6-astra"]
+	if model == nil {
+		t.Fatalf("gpt-6-astra missing from response: %#v", bySlug)
+	}
+	if got, _ := model["display_name"].(string); got != "GPT-6-Astra" {
+		t.Fatalf("display_name = %q, want GPT-6-Astra", got)
+	}
+	if got := codexClientTestInt(model["priority"]); got != 1 {
+		t.Fatalf("priority = %v, want 1", model["priority"])
+	}
+	if got, _ := model["default_reasoning_level"].(string); got != "medium" {
+		t.Fatalf("default_reasoning_level = %q, want medium", got)
+	}
+	if got, _ := model["minimal_client_version"].(string); got != "0.153.0" {
+		t.Fatalf("minimal_client_version = %q, want 0.153.0", got)
+	}
+	if got := codexClientTestInt(model["context_window"]); got != 272000 {
+		t.Fatalf("context_window = %v, want 272000", model["context_window"])
+	}
+	if got := codexClientTestInt(model["max_context_window"]); got != 872000 {
+		t.Fatalf("max_context_window = %v, want 872000", model["max_context_window"])
+	}
+	if got, _ := model["multi_agent_version"].(string); got != "v2" {
+		t.Fatalf("multi_agent_version = %q, want v2", got)
+	}
+	if got, _ := model["supported_in_api"].(bool); !got {
+		t.Fatalf("supported_in_api = %v, want true", got)
+	}
+	assertCodexClientReasoningLevels(t, model, []string{"low", "medium", "high", "xhigh", "max", "ultra"})
+}
+
+func TestCodexClientModelsResponse_GPT56SolIncludesFinalFreePlans(t *testing.T) {
 	resp := CodexClientModelsResponse([]map[string]any{{"id": "gpt-5.6-sol"}})
 	models, ok := resp["models"].([]map[string]any)
 	if !ok {
@@ -257,12 +343,75 @@ func TestCodexClientModelsResponse_GPT56SolExcludesFreePlans(t *testing.T) {
 	if !ok {
 		t.Fatalf("available_in_plans = %T, want []any", models[0]["available_in_plans"])
 	}
+	seen := make(map[string]bool, len(plans))
 	for _, rawPlan := range plans {
 		plan, _ := rawPlan.(string)
-		if plan == "free" || plan == "free_workspace" {
-			t.Fatalf("available_in_plans contains %q: %#v", plan, plans)
+		seen[plan] = true
+	}
+	for _, plan := range []string{"free", "free_workspace"} {
+		if !seen[plan] {
+			t.Fatalf("available_in_plans = %#v, want %q", plans, plan)
 		}
 	}
+}
+
+func TestCodexClientModelsSearchToolRequiresTemplateAndCodexProvider(t *testing.T) {
+	providers := map[string][]string{
+		"new-codex-model": {"codex"},
+		"gpt-5.5":         {"openai-compatible-deepseek"},
+		"gpt-5.4":         {"codex", "xai"},
+		"gpt-5.6-sol":     {"codex"},
+	}
+	resp := codexClientModelsResponse(
+		[]map[string]any{
+			{"id": "new-codex-model"},
+			{"id": "gpt-5.5"},
+			{"id": "gpt-5.4"},
+			{"id": "gpt-5.6-sol"},
+		},
+		func(id string) []string { return providers[id] },
+		false,
+	)
+	models, ok := resp["models"].([]map[string]any)
+	if !ok {
+		t.Fatalf("models type = %T, want []map[string]any", resp["models"])
+	}
+
+	bySlug := make(map[string]map[string]any, len(models))
+	for _, model := range models {
+		bySlug[stringModelValue(model, "slug")] = model
+	}
+	if got, ok := bySlug["gpt-5.6-sol"]["supports_search_tool"].(bool); !ok || !got {
+		t.Errorf("gpt-5.6-sol supports_search_tool = %#v, want true", bySlug["gpt-5.6-sol"]["supports_search_tool"])
+	}
+	for _, slug := range []string{"new-codex-model", "gpt-5.5", "gpt-5.4"} {
+		if got, ok := bySlug[slug]["supports_search_tool"].(bool); !ok || got {
+			t.Errorf("%s supports_search_tool = %#v, want false", slug, bySlug[slug]["supports_search_tool"])
+		}
+	}
+}
+
+func TestCodexClientModelsAcceptsMinimalReasoning(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "test-codex-client-minimal-reasoning"
+	modelRegistry.RegisterClient(
+		clientID, "openai", []*registry.ModelInfo{
+			{
+				ID:       "custom-codex-minimal",
+				Object:   "model",
+				OwnedBy:  "test",
+				Type:     "openai",
+				Thinking: &registry.ThinkingSupport{Levels: []string{"minimal", "low"}},
+			},
+		},
+	)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	model := codexClientModelsBySlug(t, modelRegistry.GetAvailableModels("openai"))["custom-codex-minimal"]
+	if model == nil {
+		t.Fatal("custom-codex-minimal missing from response")
+	}
+	assertCodexClientReasoningLevels(t, model, []string{"minimal", "low"})
 }
 
 func TestCodexClientModelsResponse_PreservesUltraReasoningEffort(t *testing.T) {

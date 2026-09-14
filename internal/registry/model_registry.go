@@ -6,6 +6,7 @@ package registry
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -52,6 +53,8 @@ type ModelInfo struct {
 	SupportedGenerationMethods []string `json:"supportedGenerationMethods,omitempty"`
 	// ContextLength is the context window size
 	ContextLength int `json:"context_length,omitempty"`
+	// MaxContextLength is an explicit per-model context window override from configuration.
+	MaxContextLength int `json:"-"`
 	// MaxCompletionTokens is the maximum completion tokens
 	MaxCompletionTokens int `json:"max_completion_tokens,omitempty"`
 	// SupportedParameters lists supported parameters
@@ -63,12 +66,14 @@ type ModelInfo struct {
 	// SupportsWebSearch indicates this Antigravity model can execute native googleSearch.
 	SupportsWebSearch bool `json:"supports_web_search,omitempty"`
 
-	// Thinking holds provider-specific reasoning/thinking budget capabilities.
-	// This is optional and currently used for Gemini thinking budget normalization.
+	// Thinking holds provider-specific reasoning/thinking capabilities.
 	Thinking *ThinkingSupport `json:"thinking,omitempty"`
 
+	// IsCompat enables compatibility-only request translation for configured API-key models.
+	IsCompat bool `json:"-"`
+
 	// Config holds model-specific runtime overrides loaded from models.json.
-	Config *ModelConfig `json:"config,omitempty"`
+	Config *modelConfig `json:"config,omitempty"`
 
 	// UserDefined indicates this model was defined through config file's models[]
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
@@ -80,20 +85,20 @@ type ModelInfo struct {
 // Values are interpreted in provider-native token units.
 type ThinkingSupport struct {
 	// Min is the minimum allowed thinking budget (inclusive).
-	Min int `json:"min,omitempty"`
+	Min int `json:"min,omitempty" yaml:"min,omitempty"`
 	// Max is the maximum allowed thinking budget (inclusive).
-	Max int `json:"max,omitempty"`
+	Max int `json:"max,omitempty" yaml:"max,omitempty"`
 	// ZeroAllowed indicates whether 0 is a valid value (to disable thinking).
-	ZeroAllowed bool `json:"zero_allowed,omitempty"`
+	ZeroAllowed bool `json:"zero_allowed,omitempty" yaml:"zero-allowed,omitempty"`
 	// DynamicAllowed indicates whether -1 is a valid value (dynamic thinking budget).
-	DynamicAllowed bool `json:"dynamic_allowed,omitempty"`
+	DynamicAllowed bool `json:"dynamic_allowed,omitempty" yaml:"dynamic-allowed,omitempty"`
 	// Levels defines discrete reasoning effort levels (e.g., "low", "medium", "high").
 	// When set, the model uses level-based reasoning instead of token budgets.
-	Levels []string `json:"levels,omitempty"`
+	Levels []string `json:"levels,omitempty" yaml:"levels,omitempty"`
 }
 
-// ModelConfig holds optional runtime overrides for a model definition.
-type ModelConfig struct {
+// modelConfig holds optional runtime overrides for a model definition.
+type modelConfig struct {
 	// OverrideHeader forces upstream request headers when non-empty.
 	// Keys are header names; values replace any existing header.
 	OverrideHeader map[string]string `json:"override_header,omitempty"`
@@ -117,9 +122,9 @@ type modelRegistration struct {
 	SuspendedClients map[string]string
 }
 
-// ModelRegistryHook provides optional callbacks for external integrations to track model list changes.
+// modelRegistryHook provides optional callbacks for external integrations to track model list changes.
 // Hook implementations must be non-blocking and resilient; calls are executed asynchronously and panics are recovered.
-type ModelRegistryHook interface {
+type modelRegistryHook interface {
 	OnModelsRegistered(ctx context.Context, provider, clientID string, models []*ModelInfo)
 	OnModelsUnregistered(ctx context.Context, provider, clientID string)
 }
@@ -138,7 +143,7 @@ type ModelRegistry struct {
 	// mutex ensures thread-safe access to the registry
 	mutex *sync.RWMutex
 	// hook is an optional callback sink for model registration changes
-	hook ModelRegistryHook
+	hook modelRegistryHook
 }
 
 // Global model registry instance
@@ -240,7 +245,7 @@ func modelOverrideHeadersFromInfo(info *ModelInfo) map[string]string {
 }
 
 // SetHook sets an optional hook for observing model registration changes.
-func (r *ModelRegistry) SetHook(hook ModelRegistryHook) {
+func (r *ModelRegistry) SetHook(hook modelRegistryHook) {
 	if r == nil {
 		return
 	}
@@ -600,9 +605,7 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 		copyConfig := *model.Config
 		if model.Config.OverrideHeader != nil {
 			copyConfig.OverrideHeader = make(map[string]string, len(model.Config.OverrideHeader))
-			for key, value := range model.Config.OverrideHeader {
-				copyConfig.OverrideHeader[key] = value
-			}
+			maps.Copy(copyConfig.OverrideHeader, model.Config.OverrideHeader)
 		}
 		copyModel.Config = &copyConfig
 	}
@@ -801,6 +804,29 @@ func (r *ModelRegistry) ClientSupportsModel(clientID, modelID string) bool {
 	return false
 }
 
+// GetModelInfoForClient returns the model metadata registered by a specific client.
+func (r *ModelRegistry) GetModelInfoForClient(clientID, modelID string) *ModelInfo {
+	clientID = strings.TrimSpace(clientID)
+	modelID = strings.TrimSpace(modelID)
+	if clientID == "" || modelID == "" {
+		return nil
+	}
+
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	clientInfos := r.clientModelInfos[clientID]
+	if info := clientInfos[modelID]; info != nil {
+		return cloneModelInfo(info)
+	}
+	for id, info := range clientInfos {
+		if strings.EqualFold(strings.TrimSpace(id), modelID) {
+			return cloneModelInfo(info)
+		}
+	}
+	return nil
+}
+
 // GetAvailableModels returns all models that have at least one available client
 // Parameters:
 //   - handlerType: The handler type to filter models for (e.g., "openai", "claude", "gemini")
@@ -860,28 +886,6 @@ func (r *ModelRegistry) GetAvailableModels(handlerType string) []map[string]any 
 	)
 
 	return models
-}
-
-// GetRegisteredProviders returns provider identifiers currently present in the registry.
-func (r *ModelRegistry) GetRegisteredProviders() []string {
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
-
-	seen := make(map[string]struct{}, len(r.clientProviders))
-	providers := make([]string, 0, len(r.clientProviders))
-	for _, provider := range r.clientProviders {
-		provider = strings.ToLower(strings.TrimSpace(provider))
-		if provider == "" {
-			continue
-		}
-		if _, exists := seen[provider]; exists {
-			continue
-		}
-		seen[provider] = struct{}{}
-		providers = append(providers, provider)
-	}
-	sort.Strings(providers)
-	return providers
 }
 
 // GetAvailableModelsByProvider returns models available for the given provider identifier.
@@ -1179,6 +1183,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.ContextLength > 0 {
 			result["context_length"] = model.ContextLength
 		}
+		if model.MaxContextLength > 0 {
+			result["max_context_length"] = model.MaxContextLength
+		}
 		if model.MaxCompletionTokens > 0 {
 			result["max_completion_tokens"] = model.MaxCompletionTokens
 		}
@@ -1268,24 +1275,6 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 			result["created"] = model.Created
 		}
 		return result
-	}
-}
-
-// CleanupExpiredQuotas removes expired quota tracking entries.
-func (r *ModelRegistry) CleanupExpiredQuotas() {
-	r.mutex.Lock()
-	defer r.mutex.Unlock()
-
-	now := time.Now()
-	quotaExpiredDuration := 5 * time.Minute
-
-	for modelID, registration := range r.models {
-		for clientID, quotaTime := range registration.QuotaExceededClients {
-			if quotaTime != nil && now.Sub(*quotaTime) >= quotaExpiredDuration {
-				delete(registration.QuotaExceededClients, clientID)
-				log.Debugf("Cleaned up expired quota tracking for model %s, client %s", modelID, clientID)
-			}
-		}
 	}
 }
 

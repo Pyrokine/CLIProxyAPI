@@ -12,37 +12,72 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
-func TestRegisterModelsForAuth_CodexPlanControlsGPT56Sol(t *testing.T) {
+func TestRegisterModelsForAuth_CodexPlanControlsFrontierModels(t *testing.T) {
 	service := &Service{
 		cfg:         &config.Config{},
 		coreManager: coreauth.NewManager(nil, nil, nil),
 	}
 
-	freeAuth := &coreauth.Auth{
-		ID:         "codex-free-plan",
-		Provider:   "codex",
-		Status:     coreauth.StatusActive,
-		Attributes: map[string]string{"plan_type": "free"},
+	tests := []struct {
+		plan      string
+		wantSol   bool
+		wantAstra bool
+	}{
+		{plan: "free", wantSol: false, wantAstra: false},
+		{plan: "plus", wantSol: true, wantAstra: true},
+		{plan: "team", wantSol: true, wantAstra: true},
+		{plan: "pro", wantSol: true, wantAstra: true},
 	}
-	service.registerModelsForAuth(freeAuth)
-	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(freeAuth.ID) })
-	if GlobalModelRegistry().ClientSupportsModel(freeAuth.ID, "gpt-5.6-sol") {
-		t.Fatal("free Codex auth unexpectedly supports gpt-5.6-sol")
+	for _, test := range tests {
+		t.Run(
+			test.plan, func(t *testing.T) {
+				auth := &coreauth.Auth{
+					ID:         "codex-" + test.plan + "-plan",
+					Provider:   "codex",
+					Status:     coreauth.StatusActive,
+					Attributes: map[string]string{"plan_type": test.plan},
+				}
+				service.registerModelsForAuth(auth)
+				t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })
+				if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-5.6-sol"); got != test.wantSol {
+					t.Fatalf("gpt-5.6-sol support = %t, want %t", got, test.wantSol)
+				}
+				if got := GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-6-astra"); got != test.wantAstra {
+					t.Fatalf("gpt-6-astra support = %t, want %t", got, test.wantAstra)
+				}
+				if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "gpt-5.6-luna") {
+					t.Fatal("Codex auth should support gpt-5.6-luna")
+				}
+			},
+		)
 	}
-	if !GlobalModelRegistry().ClientSupportsModel(freeAuth.ID, "gpt-5.6-luna") {
-		t.Fatal("free Codex auth should still support gpt-5.6-luna")
-	}
+}
 
-	plusAuth := &coreauth.Auth{
-		ID:         "codex-plus-plan",
-		Provider:   "codex",
-		Status:     coreauth.StatusActive,
-		Attributes: map[string]string{"plan_type": "plus"},
+func TestRegisterModelsForAuthOpenAICompatibilityAllowsExplicitGPT6Astra(t *testing.T) {
+	const authID = "openai-compat-astra-config"
+	cfg := &internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{
+			{
+				Name: "astra-provider",
+				Models: []internalconfig.OpenAICompatibilityModel{
+					{Name: "gpt-6-astra"},
+				},
+			},
+		},
 	}
-	service.registerModelsForAuth(plusAuth)
-	t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(plusAuth.ID) })
-	if !GlobalModelRegistry().ClientSupportsModel(plusAuth.ID, "gpt-5.6-sol") {
-		t.Fatal("plus Codex auth should support gpt-5.6-sol")
+	auth := &coreauth.Auth{ID: authID, Provider: "astra-provider", Status: coreauth.StatusActive}
+	reg := GlobalModelRegistry()
+	reg.UnregisterClient(authID)
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+
+	(&Service{cfg: cfg}).registerModelsForAuthWithConfig(auth, cfg)
+	if !reg.ClientSupportsModel(authID, "gpt-6-astra") {
+		t.Fatal("explicit OpenAI-compatible Astra model was not registered")
+	}
+	models := registry.GetGlobalRegistry().GetModelsForClient(authID)
+	if len(models) != 1 || models[0] == nil || models[0].CatalogName != "gpt-6-astra" ||
+		models[0].Type != "openai-compatibility" {
+		t.Fatalf("registered Astra models = %#v", models)
 	}
 }
 
@@ -197,7 +232,7 @@ func TestRebindExecutorsReplacesAutoExecutorsWithoutCurrentAuth(t *testing.T) {
 	beforeCodex, _ := manager.Executor("codex")
 	beforeXAI, _ := manager.Executor("xai")
 	service := &Service{
-		cfg:         &config.Config{SDKConfig: config.SDKConfig{ProxyURL: "http://new-proxy.example"}},
+		cfg:         &config.Config{ProxyURL: "http://new-proxy.example"},
 		coreManager: manager,
 	}
 	service.rebindExecutors()

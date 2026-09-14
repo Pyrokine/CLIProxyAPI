@@ -2,24 +2,56 @@
 // Static model metadata is stored in model_definitions_static_data.go.
 package registry
 
-import (
-	"sort"
-	"strings"
-)
+import "strings"
 
 const (
-	codexBuiltinImage15ModelID      = "gpt-image-1.5"
-	codexBuiltinImageModelID        = "gpt-image-2"
-	xaiBuiltinImageModelID          = "grok-imagine-image"
-	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
-	xaiBuiltinVideoModelID          = "grok-imagine-video"
-	xaiBuiltinVideo15PreviewModelID = "grok-imagine-video-1.5-preview"
+	codexBuiltinImage15ModelID                       = "gpt-image-1.5"
+	codexBuiltinImageModelID                         = "gpt-image-2"
+	codexBuiltinImage25FlareModelID                  = "gpt-image-2.5-flare"
+	codexBuiltinImage25FlareSnapshotModelID          = "gpt-image-2.5-flare-2026-09-08"
+	codexBuiltinImage25SunburstModelID               = "gpt-image-2.5-sunburst"
+	codexBuiltinImage25SunburstSnapshotModelID       = "gpt-image-2.5-sunburst-2026-09-08"
+	xaiBuiltinImageModelID                           = "grok-imagine-image"
+	xaiBuiltinImageQualityModelID                    = "grok-imagine-image-quality"
+	xaiBuiltinVideoModelID                           = "grok-imagine-video"
+	xaiBuiltinVideo15ModelID                         = "grok-imagine-video-1.5"
+	codexBuiltinImage25ReleaseTimestamp        int64 = 1788825600 // 2026-09-08
 )
 
-// WithCodexBuiltins injects hard-coded Codex-only model definitions that should
+var codexBuiltinImageModelIDs = []string{
+	codexBuiltinImage15ModelID,
+	codexBuiltinImageModelID,
+	codexBuiltinImage25FlareModelID,
+	codexBuiltinImage25FlareSnapshotModelID,
+	codexBuiltinImage25SunburstModelID,
+	codexBuiltinImage25SunburstSnapshotModelID,
+}
+
+// withCodexBuiltins injects hard-coded Codex-only model definitions that should
 // not depend on remote models.json updates.
-func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
+func withCodexBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, codexBuiltinImageModelInfos()...)
+}
+
+// CanonicalCodexImageModel returns the canonical ID for a built-in Codex image model.
+func CanonicalCodexImageModel(modelID string) string {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	for _, candidate := range codexBuiltinImageModelIDs {
+		if modelID == candidate {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// IsCodexImageModel reports whether modelID is a built-in Codex image model.
+func IsCodexImageModel(modelID string) bool {
+	return CanonicalCodexImageModel(modelID) != ""
+}
+
+// CodexImageModelIDs returns all built-in Codex image model IDs.
+func CodexImageModelIDs() []string {
+	return append([]string(nil), codexBuiltinImageModelIDs...)
 }
 
 // cloneModelInfos returns a shallow copy of the slice with each element deep-cloned.
@@ -34,15 +66,15 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 	return out
 }
 
-// WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
+// withXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
-func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
+func withXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(
 		models,
 		xaiBuiltinImageModelInfo(),
 		xaiBuiltinImageQualityModelInfo(),
 		xaiBuiltinVideoModelInfo(),
-		xaiBuiltinVideo15PreviewModelInfo(),
+		xaiBuiltinVideo15ModelInfo(),
 	)
 }
 
@@ -77,27 +109,42 @@ func normalizeAntigravityCapabilityModelID(modelID string) string {
 	return modelID
 }
 
-func codexBuiltinImage15ModelInfo() *ModelInfo {
-	return &ModelInfo{
-		ID:          codexBuiltinImage15ModelID,
-		Object:      "model",
-		Created:     1704067200, // 2024-01-01
-		OwnedBy:     "openai",
-		Type:        "openai",
-		DisplayName: "GPT Image 1.5",
-		Version:     codexBuiltinImage15ModelID,
+func codexBuiltinImageModelInfos() []*ModelInfo {
+	return []*ModelInfo{
+		codexBuiltinImageModelInfo(codexBuiltinImage15ModelID, "GPT Image 1.5", 1704067200),
+		codexBuiltinImageModelInfo(codexBuiltinImageModelID, "GPT Image 2", 1704067200),
+		codexBuiltinImageModelInfo(
+			codexBuiltinImage25FlareModelID,
+			"GPT Image 2.5 Flare",
+			codexBuiltinImage25ReleaseTimestamp,
+		),
+		codexBuiltinImageModelInfo(
+			codexBuiltinImage25FlareSnapshotModelID,
+			"GPT Image 2.5 Flare",
+			codexBuiltinImage25ReleaseTimestamp,
+		),
+		codexBuiltinImageModelInfo(
+			codexBuiltinImage25SunburstModelID,
+			"GPT Image 2.5 Sunburst",
+			codexBuiltinImage25ReleaseTimestamp,
+		),
+		codexBuiltinImageModelInfo(
+			codexBuiltinImage25SunburstSnapshotModelID,
+			"GPT Image 2.5 Sunburst",
+			codexBuiltinImage25ReleaseTimestamp,
+		),
 	}
 }
 
-func codexBuiltinImageModelInfo() *ModelInfo {
+func codexBuiltinImageModelInfo(id, displayName string, created int64) *ModelInfo {
 	return &ModelInfo{
-		ID:          codexBuiltinImageModelID,
+		ID:          id,
 		Object:      "model",
-		Created:     1704067200, // 2024-01-01
+		Created:     created,
 		OwnedBy:     "openai",
 		Type:        "openai",
-		DisplayName: "GPT Image 2",
-		Version:     codexBuiltinImageModelID,
+		DisplayName: displayName,
+		Version:     id,
 	}
 }
 
@@ -140,16 +187,16 @@ func xaiBuiltinVideoModelInfo() *ModelInfo {
 	}
 }
 
-func xaiBuiltinVideo15PreviewModelInfo() *ModelInfo {
+func xaiBuiltinVideo15ModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:          xaiBuiltinVideo15PreviewModelID,
+		ID:          xaiBuiltinVideo15ModelID,
 		Object:      "model",
 		Created:     1735689600,
 		OwnedBy:     "xai",
 		Type:        "xai",
-		DisplayName: "Grok Imagine Video 1.5 Preview",
-		Name:        xaiBuiltinVideo15PreviewModelID,
-		Description: "xAI Grok preview video generation model.",
+		DisplayName: "Grok Imagine Video 1.5",
+		Name:        xaiBuiltinVideo15ModelID,
+		Description: "xAI Grok video generation model.",
 	}
 }
 
@@ -228,7 +275,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "aistudio":
 		return GetAIStudioModels()
 	case "codex":
-		return GetOpenAIModels()
+		return getOpenAIModels()
 	case "qwen":
 		return GetQwenModels()
 	case "iflow":
@@ -236,32 +283,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	case "kimi":
 		return GetKimiModels()
 	case "antigravity":
-		cfg := GetAntigravityModelConfig()
-		if len(cfg) == 0 {
-			return nil
-		}
-		models := make([]*ModelInfo, 0, len(cfg))
-		for modelID, entry := range cfg {
-			if modelID == "" || entry == nil {
-				continue
-			}
-			models = append(
-				models, &ModelInfo{
-					ID:                  modelID,
-					Object:              "model",
-					OwnedBy:             "antigravity",
-					Type:                "antigravity",
-					Thinking:            entry.Thinking,
-					MaxCompletionTokens: entry.MaxCompletionTokens,
-				},
-			)
-		}
-		sort.Slice(
-			models, func(i, j int) bool {
-				return strings.ToLower(models[i].ID) < strings.ToLower(models[j].ID)
-			},
-		)
-		return models
+		return getAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
 	default:
@@ -282,10 +304,11 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetGeminiVertexModels(),
 		GetGeminiCLIModels(),
 		GetAIStudioModels(),
-		GetOpenAIModels(),
+		getOpenAIModels(),
 		GetQwenModels(),
 		GetIFlowModels(),
 		GetKimiModels(),
+		GetDeepSeekModels(),
 		GetXAIModels(),
 	}
 	for _, models := range allModels {

@@ -29,7 +29,13 @@ type modelCatalogRow struct {
 	UserCreated               bool             `json:"user_created"`
 	Enabled                   bool             `json:"enabled"`
 	RuntimeAvailable          bool             `json:"runtime_available"`
+	RuntimeOnly               bool             `json:"runtime_only,omitempty"`
 	RuntimeProviders          []string         `json:"runtime_providers,omitempty"`
+	RuntimeAvailableProviders []string         `json:"runtime_available_providers,omitempty"`
+	RuntimeConfiguredClients  int              `json:"runtime_configured_clients,omitempty"`
+	RuntimeAvailableClients   int              `json:"runtime_available_clients,omitempty"`
+	RuntimeQuotaCooldown      int              `json:"runtime_quota_cooldown_clients,omitempty"`
+	RuntimeSuspended          int              `json:"runtime_suspended_clients,omitempty"`
 	Requestable               bool             `json:"requestable"`
 	NotRequestableReason      string           `json:"not_requestable_reason,omitempty"`
 	Aliases                   []string         `json:"aliases,omitempty"`
@@ -60,6 +66,10 @@ func (h *Handler) GetModelCatalog(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load model catalog"})
 		return
 	}
+	if doc.LoadMetadata.RecoveredFromPrevious {
+		log.WithField("current_error", doc.LoadMetadata.CurrentError).
+			Warn("model-catalog: restored models.json from models.previous.json")
+	}
 	c.JSON(http.StatusOK, h.modelCatalogResponse(cfg, doc))
 }
 
@@ -84,6 +94,7 @@ func (h *Handler) PutModelCatalog(c *gin.Context) {
 				DefaultsVersion:      defaultsVersion,
 				RemovedDefaultModels: append([]string(nil), doc.RemovedDefaultModels...),
 				OAuthModelAlias:      doc.ToOAuthModelAlias(),
+				Prices:               doc.Prices,
 				Models:               body.Models,
 			}
 			return nil
@@ -114,7 +125,7 @@ func (h *Handler) PatchModelCatalogModel(c *gin.Context) {
 		modelCatalogMutationOptions{},
 		func(doc *modelcatalog.File) error {
 			model := doc.EnsureModel(body.Name, true)
-			applyModelCatalogPatch(model, body)
+			applyModelCatalogPatch(doc, model, body)
 			if body.Aliases != nil {
 				modelcatalog.ReplaceModelAliases(doc, body.Name, *body.Aliases)
 			}
@@ -210,8 +221,8 @@ func (h *Handler) ApplyModelCatalogDefaultUpdate(c *gin.Context) {
 	)
 }
 
-func applyModelCatalogPatch(model *modelcatalog.Model, body modelCatalogPatchRequest) {
-	if model == nil {
+func applyModelCatalogPatch(doc *modelcatalog.File, model *modelcatalog.Model, body modelCatalogPatchRequest) {
+	if doc == nil || model == nil {
 		return
 	}
 	if body.Provider != nil {
@@ -233,13 +244,10 @@ func applyModelCatalogPatch(model *modelcatalog.Model, body modelCatalogPatchReq
 		model.Enabled = *body.Enabled
 	}
 	if body.Price != nil {
-		price := modelcatalog.Price{
-			Prompt: body.Price.Prompt, Completion: body.Price.Completion, Cache: body.Price.Cache,
-		}
-		model.Price = &price
+		doc.SetPrice(model.Name, *body.Price)
 	}
 	if body.ClearPrice != nil && *body.ClearPrice {
-		model.Price = nil
+		doc.DeletePrice(model.Name)
 	}
 }
 
@@ -247,57 +255,97 @@ func (h *Handler) modelCatalogResponse(
 	cfg *config.Config,
 	doc modelcatalog.File,
 ) modelCatalogResponse {
+	doc.Models = append([]modelcatalog.Model(nil), doc.Models...)
 	aliasesByModel := make(map[string][]string, len(doc.Models))
 	seenAliases := make(map[string]map[string]struct{}, len(doc.Models))
+	catalogNameByCandidate := make(map[string]string, len(doc.Models))
 	appendAlias := func(name, alias string) {
-		name = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(name, "models/")))
+		nameKey := modelCatalogResponseKey(name)
 		alias = strings.TrimSpace(strings.TrimPrefix(alias, "models/"))
-		if name == "" || alias == "" || strings.EqualFold(name, alias) {
+		aliasKey := modelCatalogResponseKey(alias)
+		if nameKey == "" || aliasKey == "" || nameKey == aliasKey {
 			return
 		}
-		if seenAliases[name] == nil {
-			seenAliases[name] = make(map[string]struct{})
+		if seenAliases[nameKey] == nil {
+			seenAliases[nameKey] = make(map[string]struct{})
 		}
-		aliasKey := strings.ToLower(alias)
-		if _, exists := seenAliases[name][aliasKey]; exists {
+		if _, exists := seenAliases[nameKey][aliasKey]; exists {
 			return
 		}
-		seenAliases[name][aliasKey] = struct{}{}
-		aliasesByModel[name] = append(aliasesByModel[name], alias)
+		seenAliases[nameKey][aliasKey] = struct{}{}
+		aliasesByModel[nameKey] = append(aliasesByModel[nameKey], alias)
+		catalogNameByCandidate[aliasKey] = nameKey
 	}
 	for _, model := range doc.Models {
+		nameKey := modelCatalogResponseKey(model.Name)
+		catalogNameByCandidate[nameKey] = nameKey
 		for _, alias := range model.Aliases {
 			appendAlias(model.Name, alias)
 		}
 	}
 	for _, entries := range doc.OAuthModelAlias {
 		for _, entry := range entries {
+			nameKey := modelCatalogResponseKey(entry.Name)
+			catalogNameByCandidate[nameKey] = nameKey
 			appendAlias(entry.Name, entry.Alias)
 		}
 	}
 	for name := range aliasesByModel {
 		sort.Strings(aliasesByModel[name])
 	}
+
+	availabilityByModel := make(map[string]registry.ModelAvailability)
+	runtimeOnly := make(map[string]bool)
+	for _, availability := range registry.GetGlobalRegistry().GetModelAvailabilitySnapshot() {
+		candidateKey := modelCatalogResponseKey(availability.ModelID)
+		nameKey := catalogNameByCandidate[candidateKey]
+		if nameKey == "" {
+			displayName := ""
+			if availability.Info != nil {
+				displayName = availability.Info.DisplayName
+			}
+			model := doc.EnsureRuntimeModel(availability.ModelID, availability.PreferredProvider, displayName)
+			if model == nil {
+				continue
+			}
+			nameKey = modelCatalogResponseKey(model.Name)
+			catalogNameByCandidate[nameKey] = nameKey
+			runtimeOnly[nameKey] = true
+		}
+		availabilityByModel[nameKey] = mergeModelAvailability(availabilityByModel[nameKey], availability)
+	}
+
 	rows := make([]modelCatalogRow, 0, len(doc.Models))
 	for _, model := range doc.Models {
-		providers := registry.GetGlobalRegistry().GetModelProviders(model.Name)
-		runtimeAvailable := len(providers) > 0
+		nameKey := modelCatalogResponseKey(model.Name)
+		availability := availabilityByModel[nameKey]
+		runtimeAvailable := availability.AvailableClients > 0
 		apiKeyBlocked := apiKeyBlockedCount(cfg, model.Name)
-		credentialExcluded := credentialExcludedCount(cfg, model.Name)
-		credentialConfigured := credentialConfiguredCount(cfg, model.Name)
-		accessRestricted := (apiKeyRuleCount(cfg) > 0 && apiKeyBlocked >= apiKeyRuleCount(cfg)) ||
-			(credentialConfigured > 0 && credentialExcluded >= credentialConfigured)
+		credentialExcluded := h.credentialExcludedCount(
+			model, aliasesByModel[nameKey], availability.ConfiguredProviders,
+		)
+		credentialConfigured := availability.ConfiguredClients + credentialExcluded
+		accessRestricted := apiKeyRuleCount(cfg) > 0 && apiKeyBlocked >= apiKeyRuleCount(cfg)
 		requestable := model.Enabled && runtimeAvailable && !accessRestricted
 		reason := ""
-		if !model.Enabled {
+		switch {
+		case !model.Enabled:
 			reason = "disabled"
-		} else if !runtimeAvailable {
-			reason = "not_runtime"
-		} else if accessRestricted {
+		case accessRestricted:
 			reason = "access_restricted"
+		case availability.ConfiguredClients == 0 && credentialExcluded > 0:
+			reason = "credentials_excluded"
+		case availability.ConfiguredClients == 0:
+			reason = "not_runtime"
+		case availability.QuotaCooldownClients == availability.ConfiguredClients:
+			reason = "quota_cooldown"
+		case availability.SuspendedClients == availability.ConfiguredClients:
+			reason = "suspended"
+		case !runtimeAvailable:
+			reason = "runtime_unavailable"
 		}
 		row := modelCatalogRow{
-			ID:                        "model:" + strings.ToLower(model.Name),
+			ID:                        "model:" + nameKey,
 			Name:                      model.Name,
 			Provider:                  model.Provider,
 			Channel:                   model.Channel,
@@ -306,18 +354,21 @@ func (h *Handler) modelCatalogResponse(
 			UserCreated:               model.UserCreated,
 			Enabled:                   model.Enabled,
 			RuntimeAvailable:          runtimeAvailable,
-			RuntimeProviders:          providers,
+			RuntimeOnly:               runtimeOnly[nameKey],
+			RuntimeProviders:          availability.ConfiguredProviders,
+			RuntimeAvailableProviders: availability.AvailableProviders,
+			RuntimeConfiguredClients:  availability.ConfiguredClients,
+			RuntimeAvailableClients:   availability.AvailableClients,
+			RuntimeQuotaCooldown:      availability.QuotaCooldownClients,
+			RuntimeSuspended:          availability.SuspendedClients,
 			Requestable:               requestable,
 			NotRequestableReason:      reason,
-			Aliases:                   aliasesByModel[strings.ToLower(model.Name)],
+			Aliases:                   aliasesByModel[nameKey],
 			APIKeyBlockedCount:        apiKeyBlocked,
 			CredentialExcludedCount:   credentialExcluded,
 			CredentialConfiguredCount: credentialConfigured,
 		}
-		if model.Price != nil {
-			price := modelPriceEntry{
-				Prompt: model.Price.Prompt, Completion: model.Price.Completion, Cache: model.Price.Cache,
-			}
+		if price, ok := doc.Price(model.Name); ok {
 			row.Price = &price
 		}
 		rows = append(rows, row)
@@ -333,15 +384,67 @@ func (h *Handler) modelCatalogResponse(
 			return rows[i].Provider < rows[j].Provider
 		},
 	)
-	return modelCatalogResponse{
-		Models: rows,
-		Meta: gin.H{
-			"models_config":         modelcatalog.FileName,
-			"defaults_version":      doc.DefaultsVersion,
-			"schema_version":        doc.SchemaVersion,
-			"removed_default_count": len(doc.RemovedDefaultModels),
-		},
+	loadSource := doc.LoadMetadata.Source
+	if loadSource == "" {
+		loadSource = modelcatalog.LoadSourceCurrent
 	}
+	meta := gin.H{
+		"models_config":           modelcatalog.FileName,
+		"previous_models_config":  modelcatalog.PreviousFileName,
+		"load_source":             loadSource,
+		"recovered_from_previous": doc.LoadMetadata.RecoveredFromPrevious,
+		"defaults_version":        doc.DefaultsVersion,
+		"schema_version":          doc.SchemaVersion,
+		"removed_default_count":   len(doc.RemovedDefaultModels),
+	}
+	if doc.LoadMetadata.CurrentError != "" {
+		meta["current_error"] = doc.LoadMetadata.CurrentError
+	}
+	return modelCatalogResponse{Models: rows, Meta: meta}
+}
+
+func modelCatalogResponseKey(name string) string {
+	name = strings.TrimSpace(name)
+	if len(name) >= len("models/") && strings.EqualFold(name[:len("models/")], "models/") {
+		name = name[len("models/"):]
+	}
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func mergeModelAvailability(left, right registry.ModelAvailability) registry.ModelAvailability {
+	if left.ModelID == "" {
+		return right
+	}
+	left.ConfiguredClients += right.ConfiguredClients
+	left.AvailableClients += right.AvailableClients
+	left.QuotaCooldownClients += right.QuotaCooldownClients
+	left.SuspendedClients += right.SuspendedClients
+	left.ConfiguredProviders = mergeCatalogStrings(left.ConfiguredProviders, right.ConfiguredProviders)
+	left.AvailableProviders = mergeCatalogStrings(left.AvailableProviders, right.AvailableProviders)
+	if left.PreferredProvider == "" || left.AvailableClients == right.AvailableClients {
+		left.PreferredProvider = right.PreferredProvider
+		left.Info = right.Info
+	}
+	return left
+}
+
+func mergeCatalogStrings(left, right []string) []string {
+	seen := make(map[string]struct{}, len(left)+len(right))
+	merged := make([]string, 0, len(left)+len(right))
+	for _, values := range [][]string{left, right} {
+		for _, value := range values {
+			key := strings.ToLower(strings.TrimSpace(value))
+			if key == "" {
+				continue
+			}
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			merged = append(merged, value)
+		}
+	}
+	return merged
 }
 
 func (h *Handler) refreshModelPricing(recalculate bool) bool {
@@ -357,18 +460,6 @@ func (h *Handler) refreshModelPricing(recalculate bool) bool {
 		log.Debug("model-catalog: historical cost recalculation already running")
 	}
 	return true
-}
-
-func modelRuntimeAvailable(name string) bool {
-	return len(
-		registry.GetGlobalRegistry().GetModelProviders(
-			strings.TrimSpace(
-				strings.TrimPrefix(
-					name, "models/",
-				),
-			),
-		),
-	) > 0
 }
 
 func apiKeyBlockedCount(cfg *config.Config, name string) int {
@@ -391,41 +482,100 @@ func apiKeyRuleCount(cfg *config.Config) int {
 	return len(cfg.APIKeyRules)
 }
 
-func credentialExcludedCount(cfg *config.Config, name string) int {
-	if cfg == nil {
+func (h *Handler) credentialExcludedCount(
+	model modelcatalog.Model,
+	aliases []string,
+	runtimeProviders []string,
+) int {
+	if h == nil || h.authManager == nil {
 		return 0
 	}
+	providers := make(map[string]struct{}, len(runtimeProviders)+1)
+	for _, provider := range runtimeProviders {
+		if provider = strings.ToLower(strings.TrimSpace(provider)); provider != "" && provider != "other" {
+			providers[provider] = struct{}{}
+		}
+	}
+	if channel := strings.ToLower(strings.TrimSpace(model.Channel)); channel != "" && channel != "other" {
+		providers[channel] = struct{}{}
+	}
+	candidates := append([]string{model.Name}, aliases...)
 	count := 0
-	for _, models := range cfg.OAuthExcludedModels {
-		for _, model := range models {
-			if catalogNamesMatch(model, name) {
-				count++
-			}
+	for _, auth := range h.authManager.List() {
+		if auth == nil || auth.Disabled || !catalogCredentialProviderMatches(auth.Provider, providers) {
+			continue
+		}
+		patterns := authFileExcludedModels(auth)
+		if auth.Attributes != nil {
+			patterns = append(patterns, strings.Split(auth.Attributes["excluded_models"], ",")...)
+		}
+		if catalogModelExcluded(patterns, candidates) {
+			count++
 		}
 	}
 	return count
 }
 
-func credentialConfiguredCount(cfg *config.Config, name string) int {
-	if cfg == nil {
-		return 0
+func catalogCredentialProviderMatches(provider string, candidates map[string]struct{}) bool {
+	if len(candidates) == 0 {
+		return true
 	}
-	count := 0
-	for _, aliases := range cfg.OAuthModelAlias {
-		for _, alias := range aliases {
-			if catalogNamesMatch(alias.Name, name) || catalogNamesMatch(alias.Alias, name) {
-				count++
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if _, ok := candidates[provider]; ok {
+		return true
+	}
+	equivalent := map[string][]string{
+		"openai": {"codex"},
+		"codex":  {"openai"},
+		"xai":    {"grok"},
+		"grok":   {"xai"},
+	}
+	for _, candidate := range equivalent[provider] {
+		if _, ok := candidates[candidate]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func catalogModelExcluded(patterns, names []string) bool {
+	for _, pattern := range patterns {
+		for _, name := range names {
+			if catalogWildcardMatch(pattern, name) {
+				return true
 			}
 		}
 	}
-	return count
+	return false
 }
 
-func catalogNamesMatch(left, right string) bool {
-	left = strings.TrimSpace(strings.TrimPrefix(left, "models/"))
-	right = strings.TrimSpace(strings.TrimPrefix(right, "models/"))
-	if left == "" || right == "" {
+func catalogWildcardMatch(pattern, value string) bool {
+	pattern = modelCatalogResponseKey(pattern)
+	value = modelCatalogResponseKey(value)
+	if pattern == "" || value == "" {
 		return false
 	}
-	return strings.EqualFold(left, right)
+	if !strings.Contains(pattern, "*") {
+		return pattern == value
+	}
+	parts := strings.Split(pattern, "*")
+	position := 0
+	if first := parts[0]; first != "" {
+		if !strings.HasPrefix(value, first) {
+			return false
+		}
+		position = len(first)
+	}
+	for _, part := range parts[1 : len(parts)-1] {
+		if part == "" {
+			continue
+		}
+		index := strings.Index(value[position:], part)
+		if index < 0 {
+			return false
+		}
+		position += index + len(part)
+	}
+	last := parts[len(parts)-1]
+	return last == "" || strings.HasSuffix(value[position:], last)
 }

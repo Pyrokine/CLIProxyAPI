@@ -45,8 +45,8 @@ func TestOpenAIModels_PreservesExtendedMetadata(t *testing.T) {
 	}
 
 	var resp struct {
-		Object string                   `json:"object"`
-		Data   []map[string]interface{} `json:"data"`
+		Object string           `json:"object"`
+		Data   []map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -58,7 +58,7 @@ func TestOpenAIModels_PreservesExtendedMetadata(t *testing.T) {
 		t.Fatal("expected at least one model")
 	}
 
-	var model map[string]interface{}
+	var model map[string]any
 	for _, item := range resp.Data {
 		if item["id"] == "gpt-5.5" {
 			model = item
@@ -74,7 +74,7 @@ func TestOpenAIModels_PreservesExtendedMetadata(t *testing.T) {
 	if got := model["max_completion_tokens"]; got != float64(128000) {
 		t.Fatalf("expected max_completion_tokens 128000, got %#v", got)
 	}
-	if _, ok := model["thinking"].(map[string]interface{}); !ok {
+	if _, ok := model["thinking"].(map[string]any); !ok {
 		t.Fatalf("expected thinking object, got %#v", model["thinking"])
 	}
 }
@@ -117,7 +117,7 @@ func TestOpenAIModels_FiltersDisabledCatalogModels(t *testing.T) {
 	}
 
 	var resp struct {
-		Data []map[string]interface{} `json:"data"`
+		Data []map[string]any `json:"data"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
@@ -159,7 +159,7 @@ func TestCodexClientModelsResponseSanitizesReasoningLevels(t *testing.T) {
 	if got := model["default_reasoning_level"]; got != "medium" {
 		t.Fatalf("default_reasoning_level = %v, want medium", got)
 	}
-	assertCodexSupportedReasoningLevels(t, model, []string{"none", "low", "medium", "high", "xhigh"})
+	assertCodexSupportedReasoningLevels(t, model, []string{"none", "minimal", "low", "medium", "high", "xhigh"})
 }
 
 func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, want []string) {

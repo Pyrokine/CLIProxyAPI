@@ -1,32 +1,30 @@
 package modelcatalog
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 )
 
-type FieldChange struct {
+type fieldChange struct {
 	Current any `json:"current,omitempty"`
 	Default any `json:"default,omitempty"`
 }
 
-type DefaultUpdateChange struct {
+type defaultUpdateChange struct {
 	ID      string                 `json:"id"`
 	Name    string                 `json:"name"`
 	Type    string                 `json:"type"`
 	Current *Model                 `json:"current,omitempty"`
 	Default *Model                 `json:"default,omitempty"`
-	Fields  map[string]FieldChange `json:"fields,omitempty"`
+	Fields  map[string]fieldChange `json:"fields,omitempty"`
 }
 
 type DefaultUpdatePreview struct {
 	CurrentDefaultsVersion string                `json:"current_defaults_version"`
 	LatestDefaultsVersion  string                `json:"latest_defaults_version"`
-	Changes                []DefaultUpdateChange `json:"changes"`
+	Changes                []defaultUpdateChange `json:"changes"`
 }
 
 type ApplyDecision struct {
@@ -54,9 +52,9 @@ func PreviewDefaultUpdate(configPath string) (DefaultUpdatePreview, error) {
 	}, nil
 }
 
-func ApplyDefaultUpdate(configPath string, decisions []ApplyDecision) (ApplyResult, error) {
+func applyDefaultUpdate(configPath string, decisions []ApplyDecision) (ApplyResult, error) {
 	applied := 0
-	_, backupPath, err := Update(
+	_, backupPath, err := update(
 		configPath,
 		nil,
 		UpdateOptions{Backup: true},
@@ -84,26 +82,42 @@ func ApplyDefaultDecisions(current *File, decisions []ApplyDecision) (int, error
 			continue
 		}
 		action := strings.ToLower(strings.TrimSpace(decision.Action))
+		defaultModel, hasDefaultModel := defaults.Find(name)
+		defaultPrice, hasDefaultPrice := defaults.Price(name)
 		switch action {
 		case "use_default", "restore", "adopt":
-			defaultModel, ok := defaults.Find(name)
-			if !ok {
-				if current.RemoveModel(name, defaults) {
+			if !hasDefaultModel && !hasDefaultPrice {
+				changed := current.RemoveModel(name, defaults)
+				changed = current.DeletePrice(name) || changed
+				if changed {
 					applied++
 				}
 				continue
 			}
-			if existing, ok := current.Find(name); ok {
-				enabled := existing.Enabled
-				*existing = *defaultModel
-				existing.Enabled = enabled
-			} else {
-				current.Models = append(current.Models, *defaultModel)
+			if hasDefaultModel {
+				if existing, ok := current.Find(name); ok {
+					enabled := existing.Enabled
+					*existing = *defaultModel
+					existing.Enabled = enabled
+				} else {
+					current.Models = append(current.Models, *defaultModel)
+				}
+				current.RemovedDefaultModels = removeString(current.RemovedDefaultModels, name)
 			}
-			current.RemovedDefaultModels = removeString(current.RemovedDefaultModels, name)
+			if hasDefaultPrice {
+				current.SetPrice(name, defaultPrice)
+			} else {
+				current.DeletePrice(name)
+			}
 			applied++
 		case "remove_default":
-			if current.RemoveModel(name, defaults) {
+			changed := current.RemoveModel(name, defaults)
+			if hasDefaultPrice {
+				current.SetPrice(name, defaultPrice)
+			} else {
+				changed = current.DeletePrice(name) || changed
+			}
+			if changed {
 				applied++
 			}
 		case "keep_current", "skip", "":
@@ -117,8 +131,9 @@ func ApplyDefaultDecisions(current *File, decisions []ApplyDecision) (int, error
 	return applied, nil
 }
 
-func diffDefaults(current, defaults File) []DefaultUpdateChange {
-	changes := make([]DefaultUpdateChange, 0)
+func diffDefaults(current, defaults File) []defaultUpdateChange {
+	changes := make([]defaultUpdateChange, 0)
+	priceChangesHandled := make(map[string]struct{})
 	removed := make(map[string]struct{}, len(current.RemovedDefaultModels))
 	for _, name := range current.RemovedDefaultModels {
 		removed[modelKey(name)] = struct{}{}
@@ -129,7 +144,7 @@ func diffDefaults(current, defaults File) []DefaultUpdateChange {
 		if _, wasRemoved := removed[key]; wasRemoved {
 			modelCopy := defaultModel
 			changes = append(
-				changes, DefaultUpdateChange{
+				changes, defaultUpdateChange{
 					ID:      "restore:" + key,
 					Name:    name,
 					Type:    "restore_removed_default",
@@ -142,7 +157,7 @@ func diffDefaults(current, defaults File) []DefaultUpdateChange {
 		if !ok {
 			modelCopy := defaultModel
 			changes = append(
-				changes, DefaultUpdateChange{ID: "new:" + key, Name: name, Type: "new_default", Default: &modelCopy},
+				changes, defaultUpdateChange{ID: "new:" + key, Name: name, Type: "new_default", Default: &modelCopy},
 			)
 			continue
 		}
@@ -150,11 +165,12 @@ func diffDefaults(current, defaults File) []DefaultUpdateChange {
 			continue
 		}
 		fields := changedDefaultFields(*currentModel, defaultModel)
+		appendPriceFieldChange(fields, current, defaults, name)
 		if len(fields) > 0 {
 			currentCopy := *currentModel
 			defaultCopy := defaultModel
 			changes = append(
-				changes, DefaultUpdateChange{
+				changes, defaultUpdateChange{
 					ID:      "changed:" + key,
 					Name:    name,
 					Type:    "changed_default",
@@ -173,23 +189,61 @@ func diffDefaults(current, defaults File) []DefaultUpdateChange {
 			continue
 		}
 		currentCopy := currentModel
+		fields := make(map[string]fieldChange)
+		appendPriceFieldChange(fields, current, defaults, currentModel.Name)
+		priceChangesHandled[modelKey(currentModel.Name)] = struct{}{}
 		changes = append(
-			changes, DefaultUpdateChange{
+			changes, defaultUpdateChange{
 				ID:      "removed:" + modelKey(currentModel.Name),
 				Name:    currentModel.Name,
 				Type:    "default_removed_upstream",
 				Current: &currentCopy,
+				Fields:  fields,
+			},
+		)
+	}
+
+	priceOnlyNames := make([]string, 0, len(defaults.Prices))
+	for name := range defaults.Prices {
+		if _, ok := defaults.Find(name); !ok {
+			priceOnlyNames = append(priceOnlyNames, name)
+		}
+	}
+	sort.Slice(
+		priceOnlyNames, func(i, j int) bool {
+			return strings.ToLower(priceOnlyNames[i]) < strings.ToLower(priceOnlyNames[j])
+		},
+	)
+	for _, name := range priceOnlyNames {
+		if _, handled := priceChangesHandled[modelKey(name)]; handled {
+			continue
+		}
+		fields := make(map[string]fieldChange)
+		appendPriceFieldChange(fields, current, defaults, name)
+		if len(fields) == 0 {
+			continue
+		}
+		changeType := "changed_default"
+		if _, ok := current.Price(name); !ok {
+			changeType = "new_default"
+		}
+		changes = append(
+			changes, defaultUpdateChange{
+				ID:     "price:" + modelKey(name),
+				Name:   name,
+				Type:   changeType,
+				Fields: fields,
 			},
 		)
 	}
 	return changes
 }
 
-func changedDefaultFields(current, defaults Model) map[string]FieldChange {
-	fields := make(map[string]FieldChange)
+func changedDefaultFields(current, defaults Model) map[string]fieldChange {
+	fields := make(map[string]fieldChange)
 	compare := func(name string, currentValue, defaultValue any) {
 		if !reflect.DeepEqual(currentValue, defaultValue) {
-			fields[name] = FieldChange{Current: currentValue, Default: defaultValue}
+			fields[name] = fieldChange{Current: currentValue, Default: defaultValue}
 		}
 	}
 	compare("provider", current.Provider, defaults.Provider)
@@ -197,8 +251,23 @@ func changedDefaultFields(current, defaults Model) map[string]FieldChange {
 	compare("group", current.Group, defaults.Group)
 	compare("display_name", current.DisplayName, defaults.DisplayName)
 	compare("aliases", current.Aliases, defaults.Aliases)
-	compare("price", current.Price, defaults.Price)
 	return fields
+}
+
+func appendPriceFieldChange(fields map[string]fieldChange, current, defaults File, name string) {
+	currentPrice, hasCurrent := current.Price(name)
+	defaultPrice, hasDefault := defaults.Price(name)
+	if hasCurrent == hasDefault && (!hasCurrent || reflect.DeepEqual(currentPrice, defaultPrice)) {
+		return
+	}
+	var currentValue, defaultValue any
+	if hasCurrent {
+		currentValue = currentPrice
+	}
+	if hasDefault {
+		defaultValue = defaultPrice
+	}
+	fields["price"] = fieldChange{Current: currentValue, Default: defaultValue}
 }
 
 func removeString(values []string, name string) []string {
@@ -211,15 +280,4 @@ func removeString(values []string, name string) []string {
 		out = append(out, value)
 	}
 	return uniqueStrings(out)
-}
-
-func writeDebugJSON(path string, value any) error {
-	if strings.TrimSpace(path) == "" {
-		return nil
-	}
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Clean(path), append(data, '\n'), 0o600)
 }

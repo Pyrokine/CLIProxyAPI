@@ -8,15 +8,71 @@ import (
 )
 
 const (
-	FileName        = "models.json"
-	SchemaVersion   = 2
-	DefaultsVersion = "2026-07-31"
+	FileName         = "models.json"
+	PreviousFileName = "models.previous.json"
+	SchemaVersion    = 3
+	DefaultsVersion  = "2026-09-11"
 )
 
+type LoadSource string
+
+const (
+	LoadSourceCurrent     LoadSource = "current"
+	LoadSourcePrevious    LoadSource = "previous"
+	loadSourceInitialized LoadSource = "initialized"
+)
+
+type loadMetadata struct {
+	Source                LoadSource `json:"-"`
+	RecoveredFromPrevious bool       `json:"-"`
+	CurrentError          string     `json:"-"`
+}
+
+type PriceStatus string
+
+const (
+	PriceStatusComplete PriceStatus = "complete"
+	PriceStatusPartial  PriceStatus = "partial"
+	PriceStatusUnpriced PriceStatus = "unpriced"
+)
+
+type tokenRates struct {
+	Prompt       float64  `json:"prompt,omitempty"`
+	Completion   float64  `json:"completion,omitempty"`
+	Cache        float64  `json:"cache,omitempty"`
+	CacheRead    *float64 `json:"cache_read,omitempty"`
+	CacheWrite   *float64 `json:"cache_write,omitempty"`
+	CacheWrite5m *float64 `json:"cache_write_5m,omitempty"`
+	CacheWrite1h *float64 `json:"cache_write_1h,omitempty"`
+}
+
+type utcPriceBand struct {
+	Weekdays []string `json:"weekdays"`
+	Start    string   `json:"start"`
+	End      string   `json:"end"`
+	tokenRates
+}
+
 type Price struct {
-	Prompt     float64 `json:"prompt"`
-	Completion float64 `json:"completion"`
-	Cache      float64 `json:"cache"`
+	Prompt         float64        `json:"prompt,omitempty"`
+	Completion     float64        `json:"completion,omitempty"`
+	Cache          float64        `json:"cache,omitempty"`
+	CacheRead      *float64       `json:"cache_read,omitempty"`
+	CacheWrite     *float64       `json:"cache_write,omitempty"`
+	CacheWrite5m   *float64       `json:"cache_write_5m,omitempty"`
+	CacheWrite1h   *float64       `json:"cache_write_1h,omitempty"`
+	UTCRateBands   []utcPriceBand `json:"utc_rate_bands,omitempty"`
+	Status         PriceStatus    `json:"status,omitempty"`
+	AutoApply      bool           `json:"auto_apply,omitempty"`
+	Currency       string         `json:"currency,omitempty"`
+	Source         string         `json:"source,omitempty"`
+	CheckedAt      string         `json:"checked_at,omitempty"`
+	EffectiveFrom  string         `json:"effective_from,omitempty"`
+	EffectiveUntil string         `json:"effective_until,omitempty"`
+	Region         string         `json:"region,omitempty"`
+	ServiceTier    string         `json:"service_tier,omitempty"`
+	UnpricedReason string         `json:"unpriced_reason,omitempty"`
+	Limitations    []string       `json:"limitations,omitempty"`
 }
 
 type Model struct {
@@ -29,7 +85,8 @@ type Model struct {
 	Enabled            bool     `json:"enabled"`
 	Aliases            []string `json:"aliases,omitempty"`
 	ForceMappedAliases []string `json:"force_mapped_aliases,omitempty"`
-	Price              *Price   `json:"price,omitempty"`
+	// Price is retained only to migrate schema v1/v2 model-local prices.
+	Price *Price `json:"price,omitempty"`
 }
 
 type File struct {
@@ -37,7 +94,9 @@ type File struct {
 	DefaultsVersion      string                              `json:"defaults_version"`
 	RemovedDefaultModels []string                            `json:"removed_default_models,omitempty"`
 	OAuthModelAlias      map[string][]config.OAuthModelAlias `json:"oauth_model_alias,omitempty"`
+	Prices               map[string]Price                    `json:"prices,omitempty"`
 	Models               []Model                             `json:"models"`
+	LoadMetadata         loadMetadata                        `json:"-"`
 }
 
 func (f *File) Sanitize() {
@@ -51,12 +110,22 @@ func (f *File) Sanitize() {
 		f.DefaultsVersion = DefaultsVersion
 	}
 	removed := uniqueStrings(f.RemovedDefaultModels)
+	prices := sanitizePrices(f.Prices)
 	models := make([]Model, 0, len(f.Models))
 	seen := make(map[string]struct{}, len(f.Models))
 	for _, model := range f.Models {
 		model.sanitize()
 		if model.Name == "" {
 			continue
+		}
+		if model.Price != nil {
+			if prices == nil {
+				prices = make(map[string]Price)
+			}
+			if _, exists := priceByModelKey(prices, model.Name); !exists {
+				setPriceByModelName(prices, model.Name, *model.Price)
+			}
+			model.Price = nil
 		}
 		key := modelKey(model.Name)
 		if _, exists := seen[key]; exists {
@@ -78,6 +147,7 @@ func (f *File) Sanitize() {
 	)
 	f.RemovedDefaultModels = removed
 	f.OAuthModelAlias = config.SanitizeOAuthModelAliasMap(f.OAuthModelAlias)
+	f.Prices = prices
 	f.Models = models
 	f.materializeModelAliases()
 }
@@ -138,6 +208,29 @@ func (f *File) EnsureModel(name string, userCreated bool) *Model {
 	return &f.Models[len(f.Models)-1]
 }
 
+func (f *File) EnsureRuntimeModel(name, channel, displayName string) *Model {
+	if f == nil {
+		return nil
+	}
+	if existing, ok := f.Find(name); ok {
+		return existing
+	}
+	model := f.EnsureModel(name, false)
+	if model == nil {
+		return nil
+	}
+	model.Channel = inferChannel(channel, model.Name)
+	model.Provider = inferProvider("", model.Name)
+	if model.Provider == "Other" {
+		model.Provider = inferProvider(model.Channel, model.Name)
+	}
+	model.Group = inferGroup(model.Provider, model.Name)
+	if displayName = strings.TrimSpace(displayName); displayName != "" {
+		model.DisplayName = displayName
+	}
+	return model
+}
+
 func (f *File) RemoveModel(name string, defaults File) bool {
 	if f == nil {
 		return false
@@ -159,6 +252,7 @@ func (f *File) RemoveModel(name string, defaults File) bool {
 		models = append(models, model)
 	}
 	f.Models = models
+	deletePriceByModelName(f.Prices, name)
 	for channel, aliases := range f.OAuthModelAlias {
 		kept := aliases[:0]
 		for _, alias := range aliases {

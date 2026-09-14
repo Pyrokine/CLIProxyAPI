@@ -5,7 +5,13 @@ import (
 	"strings"
 )
 
-var versionPrefixRE = regexp.MustCompile(`^(?:gpt-|claude-|gemini-|grok-|qwen)(\d+(?:\.\d+)?)`)
+var (
+	versionPrefixRE   = regexp.MustCompile(`^(?:gpt-|claude-|gemini-|grok-|qwen)(\d+(?:\.\d+)?)`)
+	deepSeekVersionRE = regexp.MustCompile(`^deepseek-v(\d+(?:\.\d+)?)`)
+	glmVersionRE      = regexp.MustCompile(`^(?:chat)?glm-(\d+)(?:\.\d+)?`)
+	kimiVersionRE     = regexp.MustCompile(`^kimi-k(\d+(?:\.\d+)?)`)
+	miniMaxVersionRE  = regexp.MustCompile(`^minimax[-_]?m(\d+(?:\.\d+)?)`)
+)
 
 func inferProvider(channel, name string) string {
 	channel = strings.ToLower(strings.TrimSpace(channel))
@@ -74,8 +80,12 @@ func inferChannel(channel, name string) string {
 		return "kimi"
 	case "Grok":
 		return "xai"
-	case "DeepSeek", "GLM":
-		return "iflow"
+	case "DeepSeek":
+		return "deepseek"
+	case "GLM":
+		return "glm"
+	case "MiniMax":
+		return "minimax"
 	default:
 		return "other"
 	}
@@ -133,19 +143,40 @@ func inferGroup(provider, name string) string {
 		}
 		return "Qwen"
 	case "DeepSeek":
+		if lower == "deepseek-flash" {
+			return "V4.1"
+		}
 		if strings.HasPrefix(lower, "deepseek-r1") {
 			return "R1"
 		}
-		if strings.HasPrefix(lower, "deepseek-v3") {
-			return "V3"
+		if match := deepSeekVersionRE.FindStringSubmatch(lower); len(match) == 2 {
+			group := "V" + match[1]
+			if strings.Contains(lower, "vision") {
+				return group + " Vision"
+			}
+			return group
 		}
-		return "DeepSeek"
+		return "DeepSeek Other"
 	case "Grok":
-		return "Grok"
+		if match := versionPrefixRE.FindStringSubmatch(lower); len(match) == 2 {
+			return "Grok " + match[1]
+		}
+		return "Grok Other"
 	case "Kimi":
-		return "Kimi"
+		if match := kimiVersionRE.FindStringSubmatch(lower); len(match) == 2 {
+			return "K" + match[1]
+		}
+		return "Kimi Other"
 	case "GLM":
-		return "GLM"
+		if match := glmVersionRE.FindStringSubmatch(lower); len(match) == 2 {
+			return "GLM " + match[1]
+		}
+		return "GLM Other"
+	case "MiniMax":
+		if match := miniMaxVersionRE.FindStringSubmatch(lower); len(match) == 2 {
+			return "M" + match[1]
+		}
+		return "MiniMax Other"
 	default:
 		return provider
 	}
@@ -163,7 +194,7 @@ func displayNameFromName(name string) string {
 		}
 		lower := strings.ToLower(part)
 		switch lower {
-		case "gpt", "glm", "vl", "oss", "r1", "v3", "api", "cli", "ai":
+		case "gpt", "glm", "vl", "oss", "r1", "v3", "v4", "api", "cli", "ai":
 			parts[i] = strings.ToUpper(part)
 		default:
 			parts[i] = strings.ToUpper(part[:1]) + part[1:]

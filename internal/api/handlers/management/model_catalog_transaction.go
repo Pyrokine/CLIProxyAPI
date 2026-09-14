@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
@@ -28,115 +29,187 @@ func (h *Handler) mutateModelCatalog(
 	options modelCatalogMutationOptions,
 	mutate func(*modelcatalog.File) error,
 ) (modelCatalogMutationResult, bool) {
+	if c == nil {
+		return modelCatalogMutationResult{}, false
+	}
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return modelCatalogMutationResult{}, false
 	}
 
 	h.commitMu.Lock()
-
+	defer h.commitMu.Unlock()
 	h.mu.Lock()
 	if h.cfg == nil {
 		h.mu.Unlock()
-		h.commitMu.Unlock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return modelCatalogMutationResult{}, false
+	}
+	previousConfig, err := config.Clone(h.cfg)
+	if err != nil {
+		h.mu.Unlock()
+		log.WithError(err).Error("failed to clone config for model catalog rollback")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prepare model catalog update"})
 		return modelCatalogMutationResult{}, false
 	}
 	next, err := config.Clone(h.cfg)
 	if err != nil {
 		h.mu.Unlock()
-		h.commitMu.Unlock()
 		log.WithError(err).Error("failed to clone config for model catalog update")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to prepare model catalog update"})
 		return modelCatalogMutationResult{}, false
 	}
-
-	var commit ConfigCommit
-	var callback ConfigCommittedFunc
-	doc, backupPath, err := modelcatalog.Update(
+	transaction, err := modelcatalog.PrepareUpdate(
 		h.configFilePath,
 		h.cfg,
-		modelcatalog.UpdateOptions{
-			Backup: options.backup,
-			Commit: func(saved modelcatalog.File) error {
-				next.ModelCatalog.Models = saved.ToModelCatalogModels()
-				next.OAuthModelAlias = saved.ToOAuthModelAlias()
-				persistedHash, errPersist := h.persistConfigCandidate(next)
-				if errPersist != nil {
-					return errPersist
-				}
-				commit, callback = h.publishConfigLocked(next, persistedHash)
-				return nil
-			},
-		},
+		options.backup,
 		mutate,
 	)
-	h.mu.Unlock()
-	h.commitMu.Unlock()
 	if err != nil {
+		h.mu.Unlock()
 		respondModelCatalogMutationError(c, err)
 		return modelCatalogMutationResult{}, false
 	}
-
-	result := modelCatalogMutationResult{
-		doc:        doc,
-		backupPath: backupPath,
-		config:     commit.Config,
-		generation: commit.Generation,
+	baseDoc := transaction.BaseDocument()
+	doc := transaction.Document()
+	previousConfig.ModelCatalog.Models = baseDoc.ToModelCatalogModels()
+	previousConfig.OAuthModelAlias = baseDoc.ToOAuthModelAlias()
+	next.ModelCatalog.Models = doc.ToModelCatalogModels()
+	next.OAuthModelAlias = doc.ToOAuthModelAlias()
+	persistedHash, err := h.persistConfigCandidate(next)
+	if err != nil {
+		h.mu.Unlock()
+		rollbackErr := transaction.Rollback()
+		respondModelCatalogMutationError(c, errors.Join(err, rollbackErr))
+		return modelCatalogMutationResult{}, false
 	}
-	if err = h.syncModelCatalogCommit(c, callback, commit, doc); err != nil {
+	commit, callback := h.publishConfigLocked(next, persistedHash)
+	commit.ModelCatalogPrepared = true
+	h.mu.Unlock()
+
+	ctx := context.Background()
+	if c.Request != nil {
+		ctx = context.WithoutCancel(c.Request.Context())
+	}
+	if err = h.commitModelCatalogTransaction(
+		ctx,
+		callback,
+		commit,
+		doc,
+		baseDoc,
+		previousConfig,
+		transaction,
+	); err != nil {
 		log.WithError(err).WithField("generation", commit.Generation).
-			Error("model catalog committed but runtime sync failed")
+			Error("model catalog runtime transaction failed")
 		c.JSON(
 			http.StatusServiceUnavailable,
 			gin.H{"error": "model_catalog_runtime_sync_failed", "generation": commit.Generation},
 		)
-		return result, false
+		return modelCatalogMutationResult{}, false
 	}
-	return result, true
+	return modelCatalogMutationResult{
+		doc:        doc,
+		backupPath: transaction.BackupPath(),
+		config:     commit.Config,
+		generation: commit.Generation,
+	}, true
 }
 
-func (h *Handler) syncModelCatalogCommit(
-	c *gin.Context,
+func (h *Handler) commitModelCatalogTransaction(
+	ctx context.Context,
 	callback ConfigCommittedFunc,
 	commit ConfigCommit,
 	doc modelcatalog.File,
+	baseDoc modelcatalog.File,
+	previousConfig *config.Config,
+	transaction *modelcatalog.UpdateTransaction,
 ) error {
-	ctx := context.Background()
-	if c != nil && c.Request != nil {
-		ctx = context.WithoutCancel(c.Request.Context())
-	}
 	h.runtimeCommitMu.Lock()
 	defer h.runtimeCommitMu.Unlock()
 	if !h.configCommitCurrent(commit) {
-		return nil
+		return errors.Join(
+			fmt.Errorf("model catalog config generation changed before runtime commit"),
+			transaction.Rollback(),
+		)
 	}
+
+	var transactionErr error
+	if callback != nil {
+		transactionErr = invokeConfigCommitted(ctx, callback, commit)
+	}
+	if transactionErr == nil && !h.configCommitCurrent(commit) {
+		transactionErr = fmt.Errorf("model catalog config generation changed during service runtime commit")
+	}
+	if transactionErr == nil {
+		transactionErr = h.applyModelCatalogRuntime(commit.Config, doc)
+	}
+	if transactionErr == nil && !h.configCommitCurrent(commit) {
+		transactionErr = fmt.Errorf("model catalog config generation changed during handler runtime commit")
+	}
+	if transactionErr == nil {
+		transactionErr = transaction.CommitFiles()
+	}
+	if transactionErr == nil {
+		return transaction.Finish()
+	}
+
+	rollbackErr := transaction.Rollback()
+	configRollbackErr := h.rollbackModelCatalogConfig(ctx, commit, previousConfig, baseDoc)
+	return errors.Join(transactionErr, rollbackErr, configRollbackErr)
+}
+
+func (h *Handler) rollbackModelCatalogConfig(
+	ctx context.Context,
+	failedCommit ConfigCommit,
+	previousConfig *config.Config,
+	baseDoc modelcatalog.File,
+) error {
+	if previousConfig == nil {
+		return fmt.Errorf("previous model catalog config is nil")
+	}
+	h.mu.Lock()
+	if h.configGeneration != failedCommit.Generation {
+		h.mu.Unlock()
+		return fmt.Errorf("model catalog config generation changed before rollback")
+	}
+	persistedHash, persistErr := h.persistModelCatalogRollback(previousConfig)
+	rollbackCommit, callback := h.publishConfigLocked(previousConfig, persistedHash)
+	rollbackCommit.ModelCatalogPrepared = true
+	h.mu.Unlock()
+
 	var errs []error
+	if persistErr != nil {
+		errs = append(errs, persistErr)
+	}
 	if callback != nil {
-		if err := invokeConfigCommitted(ctx, callback, commit); err != nil {
-			errs = append(errs, err)
+		if err := invokeConfigCommitted(ctx, callback, rollbackCommit); err != nil {
+			errs = append(errs, fmt.Errorf("restore model catalog service runtime: %w", err))
 		}
 	}
-	runtimeCfg := commit.Config
-	if callback != nil {
-		runtimeCfg = h.configSnapshot()
-	}
-	if h.configCommitCurrent(commit) {
-		if err := h.applyModelCatalogRuntime(runtimeCfg, doc); err != nil {
-			errs = append(errs, err)
-		}
+	if err := h.applyModelCatalogRuntime(previousConfig, baseDoc); err != nil {
+		errs = append(errs, fmt.Errorf("restore model catalog handler runtime: %w", err))
 	}
 	return errors.Join(errs...)
 }
 
+func (h *Handler) persistModelCatalogRollback(previousConfig *config.Config) (string, error) {
+	if strings.TrimSpace(h.configFilePath) == "" {
+		return "", nil
+	}
+	persistedHash, err := config.SaveConfigPreserveCommentsWithDigest(h.configFilePath, previousConfig)
+	if err != nil {
+		return "", fmt.Errorf("restore config after model catalog failure: %w", err)
+	}
+	return persistedHash, nil
+}
+
 func respondModelCatalogMutationError(c *gin.Context, err error) {
-	var mutationError *configMutationError
-	if errors.As(err, &mutationError) {
+	if mutationError, ok := errors.AsType[*configMutationError](err); ok {
 		c.JSON(mutationError.status, gin.H{"error": mutationError.message})
 		return
 	}
-	var persistenceError *configPersistenceError
-	if errors.As(err, &persistenceError) {
+	if persistenceError, ok := errors.AsType[*configPersistenceError](err); ok {
 		respondConfigPersistenceError(c, persistenceError)
 		return
 	}
@@ -161,7 +234,7 @@ func (h *Handler) applyModelCatalogRuntime(
 		h.authManager.SetOAuthModelAlias(aliases)
 	}
 	if h != nil && h.modelCatalogRuntimeSync != nil {
-		h.modelCatalogRuntimeSync(cfg)
+		return h.modelCatalogRuntimeSync(cfg)
 	}
 	return nil
 }

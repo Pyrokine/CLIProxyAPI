@@ -245,6 +245,28 @@
                     "max"
                 ]
             }
+        },
+        {
+            "id": "claude-opus-5",
+            "object": "model",
+            "created": 1784038800,
+            "owned_by": "anthropic",
+            "type": "claude",
+            "display_name": "Claude Opus 5",
+            "description": "Latest premium model combining maximum intelligence with practical performance",
+            "context_length": 1000000,
+            "max_completion_tokens": 128000,
+            "thinking": {
+                "zero_allowed": true,
+                "dynamic_allowed": true,
+                "levels": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            }
         }
     ],
     "gemini": [
@@ -520,6 +542,98 @@
                     "high"
                 ]
             }
+        },
+        {
+            "id": "gemini-3.5-flash-lite",
+            "object": "model",
+            "created": 1782864000,
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.5 Flash Lite",
+            "name": "models/gemini-3.5-flash-lite",
+            "version": "3.5",
+            "description": "Gemini 3.5 Flash Lite",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 65536,
+            "supportedGenerationMethods": [
+                "generateContent",
+                "countTokens",
+                "createCachedContent",
+                "batchGenerateContent"
+            ],
+            "thinking": {
+                "min": 128,
+                "max": 32768,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "gemini-3.6-flash",
+            "object": "model",
+            "created": 1782864000,
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.6 Flash",
+            "name": "models/gemini-3.6-flash",
+            "version": "3.6",
+            "description": "Gemini 3.6 Flash",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 65536,
+            "supportedGenerationMethods": [
+                "generateContent",
+                "countTokens",
+                "createCachedContent",
+                "batchGenerateContent"
+            ],
+            "thinking": {
+                "min": 128,
+                "max": 32768,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "gemini-3.7-flash",
+            "object": "model",
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.7 Flash",
+            "name": "models/gemini-3.7-flash",
+            "version": "3.7",
+            "description": "Gemini 3.7 Flash",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "min": 128,
+                "max": 65535,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image",
+                "audio",
+                "video"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ]
         }
     ],
     "vertex": [
@@ -620,15 +734,15 @@
             }
         },
         {
-            "id": "gemini-3-pro-preview",
+            "id": "gemini-3-pro",
             "object": "model",
             "created": 1737158400,
             "owned_by": "google",
             "type": "gemini",
-            "display_name": "Gemini 3 Pro Preview",
-            "name": "models/gemini-3-pro-preview",
+            "display_name": "Gemini 3 Pro",
+            "name": "models/gemini-3-pro",
             "version": "3.0",
-            "description": "Gemini 3 Pro Preview",
+            "description": "Gemini 3 Pro",
             "inputTokenLimit": 1048576,
             "outputTokenLimit": 65536,
             "supportedGenerationMethods": [
@@ -648,13 +762,13 @@
             }
         },
         {
-            "id": "gemini-3-flash-preview",
+            "id": "gemini-3-flash",
             "object": "model",
             "created": 1765929600,
             "owned_by": "google",
             "type": "gemini",
-            "display_name": "Gemini 3 Flash Preview",
-            "name": "models/gemini-3-flash-preview",
+            "display_name": "Gemini 3 Flash",
+            "name": "models/gemini-3-flash",
             "version": "3.0",
             "description": "Our most intelligent model built for speed, combining frontier intelligence with superior search and grounding.",
             "inputTokenLimit": 1048576,
@@ -707,15 +821,15 @@
             }
         },
         {
-            "id": "gemini-3.1-flash-image-preview",
+            "id": "gemini-3.1-flash-image",
             "object": "model",
             "created": 1771459200,
             "owned_by": "google",
             "type": "gemini",
-            "display_name": "Gemini 3.1 Flash Image Preview",
-            "name": "models/gemini-3.1-flash-image-preview",
+            "display_name": "Gemini 3.1 Flash Image",
+            "name": "models/gemini-3.1-flash-image",
             "version": "3.1",
-            "description": "Gemini 3.1 Flash Image Preview",
+            "description": "Gemini 3.1 Flash Image",
             "inputTokenLimit": 1048576,
             "outputTokenLimit": 65536,
             "supportedGenerationMethods": [
@@ -735,13 +849,13 @@
             }
         },
         {
-            "id": "gemini-3.1-flash-lite-preview",
+            "id": "gemini-3.1-flash-lite",
             "object": "model",
             "created": 1776288000,
             "owned_by": "google",
             "type": "gemini",
-            "display_name": "Gemini 3.1 Flash Lite Preview",
-            "name": "models/gemini-3.1-flash-lite-preview",
+            "display_name": "Gemini 3.1 Flash Lite",
+            "name": "models/gemini-3.1-flash-lite",
             "version": "3.1",
             "description": "Our smallest and most cost effective model, built for at scale usage.",
             "inputTokenLimit": 1048576,
@@ -765,15 +879,15 @@
             }
         },
         {
-            "id": "gemini-3-pro-image-preview",
+            "id": "gemini-3-pro-image",
             "object": "model",
             "created": 1737158400,
             "owned_by": "google",
             "type": "gemini",
-            "display_name": "Gemini 3 Pro Image Preview",
-            "name": "models/gemini-3-pro-image-preview",
+            "display_name": "Gemini 3 Pro Image",
+            "name": "models/gemini-3-pro-image",
             "version": "3.0",
-            "description": "Gemini 3 Pro Image Preview",
+            "description": "Gemini 3 Pro Image",
             "inputTokenLimit": 1048576,
             "outputTokenLimit": 65536,
             "supportedGenerationMethods": [
@@ -891,6 +1005,126 @@
                     "high"
                 ]
             }
+        },
+        {
+            "id": "gemini-3.1-pro",
+            "object": "model",
+            "created": 1771459200,
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.1 Pro",
+            "name": "models/gemini-3.1-pro",
+            "version": "3.1",
+            "description": "Gemini 3.1 Pro",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 65536,
+            "supportedGenerationMethods": [
+                "generateContent",
+                "countTokens",
+                "createCachedContent",
+                "batchGenerateContent"
+            ],
+            "thinking": {
+                "min": 128,
+                "max": 32768,
+                "dynamic_allowed": true,
+                "levels": [
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "gemini-3.5-flash-lite",
+            "object": "model",
+            "created": 1782864000,
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.5 Flash Lite",
+            "name": "models/gemini-3.5-flash-lite",
+            "version": "3.5",
+            "description": "Gemini 3.5 Flash Lite",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 65536,
+            "supportedGenerationMethods": [
+                "generateContent",
+                "countTokens",
+                "createCachedContent",
+                "batchGenerateContent"
+            ],
+            "thinking": {
+                "min": 128,
+                "max": 32768,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "gemini-3.6-flash",
+            "object": "model",
+            "created": 1782864000,
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.6 Flash",
+            "name": "models/gemini-3.6-flash",
+            "version": "3.6",
+            "description": "Gemini 3.6 Flash",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 65536,
+            "supportedGenerationMethods": [
+                "generateContent",
+                "countTokens",
+                "createCachedContent",
+                "batchGenerateContent"
+            ],
+            "thinking": {
+                "min": 128,
+                "max": 32768,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "gemini-3.7-flash",
+            "object": "model",
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.7 Flash",
+            "name": "gemini-3.7-flash",
+            "description": "Gemini 3.7 Flash",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "min": 128,
+                "max": 65535,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image",
+                "audio",
+                "video"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ]
         }
     ],
     "gemini-cli": [
@@ -1380,6 +1614,98 @@
                     "high"
                 ]
             }
+        },
+        {
+            "id": "gemini-3.5-flash-lite",
+            "object": "model",
+            "created": 1782864000,
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.5 Flash Lite",
+            "name": "models/gemini-3.5-flash-lite",
+            "version": "3.5",
+            "description": "Gemini 3.5 Flash Lite",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 65536,
+            "supportedGenerationMethods": [
+                "generateContent",
+                "countTokens",
+                "createCachedContent",
+                "batchGenerateContent"
+            ],
+            "thinking": {
+                "min": 128,
+                "max": 32768,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "gemini-3.6-flash",
+            "object": "model",
+            "created": 1782864000,
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.6 Flash",
+            "name": "models/gemini-3.6-flash",
+            "version": "3.6",
+            "description": "Gemini 3.6 Flash",
+            "inputTokenLimit": 1048576,
+            "outputTokenLimit": 65536,
+            "supportedGenerationMethods": [
+                "generateContent",
+                "countTokens",
+                "createCachedContent",
+                "batchGenerateContent"
+            ],
+            "thinking": {
+                "min": 128,
+                "max": 32768,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "gemini-3.7-flash",
+            "object": "model",
+            "owned_by": "google",
+            "type": "gemini",
+            "display_name": "Gemini 3.7 Flash",
+            "name": "models/gemini-3.7-flash",
+            "version": "3.7",
+            "description": "Gemini 3.7 Flash",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "min": 128,
+                "max": 65535,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image",
+                "audio",
+                "video"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ]
         }
     ],
     "codex-free": [
@@ -1583,6 +1909,44 @@
                     "high",
                     "xhigh"
                 ]
+            }
+        },
+        {
+            "id": "gpt-6-astra",
+            "object": "model",
+            "created": 1783616400,
+            "owned_by": "openai",
+            "type": "openai",
+            "display_name": "GPT 6.0 Astra",
+            "version": "gpt-6.0",
+            "description": "GPT-6 Astra is our most intelligent model yet, with state-of-the-art performance in computer use, browsing, software engineering, science, and professional work.",
+            "context_length": 272000,
+            "max_completion_tokens": 128000,
+            "supported_parameters": [
+                "tools"
+            ],
+            "thinking": {
+                "levels": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ],
+            "config": {
+                "override_header": {
+                    "user-agent": "codex-tui/0.153.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.0)",
+                    "originator": "codex-tui",
+                    "version": "0.153.0"
+                }
             }
         },
         {
@@ -1796,6 +2160,44 @@
             }
         },
         {
+            "id": "gpt-6-astra",
+            "object": "model",
+            "created": 1783616400,
+            "owned_by": "openai",
+            "type": "openai",
+            "display_name": "GPT 6.0 Astra",
+            "version": "gpt-6.0",
+            "description": "GPT-6 Astra is our most intelligent model yet, with state-of-the-art performance in computer use, browsing, software engineering, science, and professional work.",
+            "context_length": 272000,
+            "max_completion_tokens": 128000,
+            "supported_parameters": [
+                "tools"
+            ],
+            "thinking": {
+                "levels": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ],
+            "config": {
+                "override_header": {
+                    "user-agent": "codex-tui/0.153.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.0)",
+                    "originator": "codex-tui",
+                    "version": "0.153.0"
+                }
+            }
+        },
+        {
             "id": "gpt-5.6-sol",
             "object": "model",
             "created": 1783616400,
@@ -2003,6 +2405,44 @@
                     "high",
                     "xhigh"
                 ]
+            }
+        },
+        {
+            "id": "gpt-6-astra",
+            "object": "model",
+            "created": 1783616400,
+            "owned_by": "openai",
+            "type": "openai",
+            "display_name": "GPT 6.0 Astra",
+            "version": "gpt-6.0",
+            "description": "GPT-6 Astra is our most intelligent model yet, with state-of-the-art performance in computer use, browsing, software engineering, science, and professional work.",
+            "context_length": 272000,
+            "max_completion_tokens": 128000,
+            "supported_parameters": [
+                "tools"
+            ],
+            "thinking": {
+                "levels": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ],
+            "config": {
+                "override_header": {
+                    "user-agent": "codex-tui/0.153.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.0)",
+                    "originator": "codex-tui",
+                    "version": "0.153.0"
+                }
             }
         },
         {
@@ -2379,6 +2819,71 @@
             "type": "iflow",
             "display_name": "iFlow-ROME",
             "description": "iFlow Rome 30BA3B model"
+        },
+        {
+            "id": "glm-5",
+            "object": "model",
+            "created": 1770854400,
+            "owned_by": "iflow",
+            "type": "iflow",
+            "display_name": "GLM-5",
+            "description": "Zhipu GLM 5 general model",
+            "context_length": 170000,
+            "max_completion_tokens": 128000,
+            "thinking": {
+                "levels": [
+                    "none",
+                    "auto",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                ]
+            }
+        },
+        {
+            "id": "kimi-k2.5",
+            "object": "model",
+            "created": 1769472000,
+            "owned_by": "iflow",
+            "type": "iflow",
+            "display_name": "Kimi-K2.5",
+            "description": "Moonshot Kimi K2.5 multimodal model",
+            "context_length": 262144,
+            "max_completion_tokens": 32768,
+            "thinking": {
+                "levels": [
+                    "none",
+                    "auto",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                ]
+            }
+        },
+        {
+            "id": "minimax-m2.5",
+            "object": "model",
+            "created": 1770854400,
+            "owned_by": "iflow",
+            "type": "iflow",
+            "display_name": "MiniMax-M2.5",
+            "description": "MiniMax M2.5 general model",
+            "context_length": 204800,
+            "thinking": {
+                "levels": [
+                    "none",
+                    "auto",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                ]
+            }
         }
     ],
     "kimi": [
@@ -2404,10 +2909,11 @@
             "context_length": 131072,
             "max_completion_tokens": 32768,
             "thinking": {
-                "min": 1024,
-                "max": 32000,
                 "zero_allowed": true,
-                "dynamic_allowed": true
+                "levels": [
+                    "low",
+                    "high"
+                ]
             }
         },
         {
@@ -2417,14 +2923,15 @@
             "owned_by": "moonshot",
             "type": "kimi",
             "display_name": "Kimi K2.5",
-            "description": "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
-            "context_length": 131072,
+            "description": "Kimi K2.5 - Native multimodal agentic model with text, image, and video input; supports thinking and non-thinking modes",
+            "context_length": 262144,
             "max_completion_tokens": 32768,
             "thinking": {
-                "min": 1024,
-                "max": 32000,
                 "zero_allowed": true,
-                "dynamic_allowed": true
+                "levels": [
+                    "low",
+                    "high"
+                ]
             }
         },
         {
@@ -2434,14 +2941,15 @@
             "owned_by": "moonshot",
             "type": "kimi",
             "display_name": "Kimi K2.6",
-            "description": "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
+            "description": "Kimi K2.6 - Native multimodal agentic model with stronger long-horizon agentic coding, long-context reasoning, and preserved thinking support",
             "context_length": 262144,
             "max_completion_tokens": 65536,
             "thinking": {
-                "min": 1024,
-                "max": 32000,
                 "zero_allowed": true,
-                "dynamic_allowed": true
+                "levels": [
+                    "low",
+                    "high"
+                ]
             }
         },
         {
@@ -2455,10 +2963,67 @@
             "context_length": 262144,
             "max_completion_tokens": 65536,
             "thinking": {
-                "min": 1024,
-                "max": 32000,
                 "zero_allowed": false,
-                "dynamic_allowed": true
+                "levels": [
+                    "low",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "kimi-k2.7-code-highspeed",
+            "object": "model",
+            "created": 1780396800,
+            "owned_by": "moonshot",
+            "type": "kimi",
+            "display_name": "Kimi K2.7 Code HighSpeed",
+            "description": "Kimi K2.7 Code HighSpeed - Same capabilities as Kimi K2.7 Code with higher output speed (~180 tokens/s)",
+            "context_length": 262144,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "zero_allowed": false,
+                "levels": [
+                    "low",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "kimi-k3",
+            "object": "model",
+            "created": 1784073600,
+            "owned_by": "moonshot",
+            "type": "kimi",
+            "display_name": "Kimi K3",
+            "description": "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) with multimodal input",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "zero_allowed": false,
+                "levels": [
+                    "low",
+                    "high",
+                    "max"
+                ]
+            }
+        },
+        {
+            "id": "kimi-k3-256k",
+            "object": "model",
+            "created": 1785110400,
+            "owned_by": "moonshot",
+            "type": "kimi",
+            "display_name": "Kimi K3 256K",
+            "description": "Kimi K3 256K - 256K context version of Kimi K3 delivering the same results within 256K context at reduced quota consumption; supports image input only (no video)",
+            "context_length": 262144,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "zero_allowed": false,
+                "levels": [
+                    "low",
+                    "high",
+                    "max"
+                ]
             }
         }
     ],
@@ -2655,9 +3220,120 @@
                     "high"
                 ]
             }
+        },
+        {
+            "id": "gemini-3.6-flash-high",
+            "object": "model",
+            "owned_by": "antigravity",
+            "type": "antigravity",
+            "display_name": "Gemini 3.6 Flash",
+            "name": "gemini-3.6-flash-high",
+            "description": "Gemini 3.6 Flash (High)",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "min": 1,
+                "max": 65535,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            }
+        },
+        {
+            "id": "gemini-3.7-flash-high",
+            "object": "model",
+            "owned_by": "antigravity",
+            "type": "antigravity",
+            "display_name": "Gemini 3.7 Flash",
+            "name": "gemini-3.7-flash-high",
+            "description": "Gemini 3.7 Flash (High)",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "min": 1,
+                "max": 65535,
+                "dynamic_allowed": true,
+                "levels": [
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image",
+                "audio",
+                "video"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ]
+        },
+        {
+            "id": "gemini-3.5-flash-extra-low",
+            "object": "model",
+            "owned_by": "antigravity",
+            "type": "antigravity",
+            "display_name": "Gemini 3.5 Flash (Low)",
+            "name": "gemini-3.5-flash-extra-low",
+            "description": "Gemini 3.5 Flash (Low)",
+            "context_length": 1048576,
+            "max_completion_tokens": 65535,
+            "thinking": {
+                "min": 1,
+                "max": 65535,
+                "dynamic_allowed": true,
+                "levels": [
+                    "low",
+                    "medium",
+                    "high"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image",
+                "audio",
+                "video"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ]
         }
     ],
     "xai": [
+        {
+            "id": "grok-4.6",
+            "object": "model",
+            "created": 1785974400,
+            "owned_by": "xai",
+            "type": "xai",
+            "display_name": "Grok 4.6",
+            "name": "grok-4.6",
+            "description": "xAI's smartest model built for long-running agents, interactive and visual work.",
+            "context_length": 500000,
+            "max_completion_tokens": 65536,
+            "thinking": {
+                "zero_allowed": false,
+                "levels": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ]
+        },
         {
             "id": "grok-4.5",
             "object": "model",
@@ -2666,7 +3342,7 @@
             "type": "xai",
             "display_name": "Grok 4.5",
             "name": "grok-4.5",
-            "description": "SpaceXAI's intelligent coding model for agentic software, engineering, and workflow tasks.",
+            "description": "xAI's intelligent coding model for agentic software, engineering, and workflow tasks.",
             "context_length": 500000,
             "max_completion_tokens": 65536,
             "thinking": {

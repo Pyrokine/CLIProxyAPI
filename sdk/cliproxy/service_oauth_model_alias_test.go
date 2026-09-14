@@ -133,6 +133,97 @@ func TestApplyManagementConfigCommitDoesNotMutatePublishedConfig(t *testing.T) {
 	}
 }
 
+func TestApplyManagementConfigCommitUsesPreparedModelCatalog(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := modelcatalog.Save(
+		configPath, modelcatalog.File{
+			Models: []modelcatalog.Model{
+				{
+					Name: "disk-model", Provider: "Test", Group: "Test", Enabled: true,
+				},
+			},
+		},
+	); err != nil {
+		t.Fatalf("Save disk catalog: %v", err)
+	}
+	enabled := true
+	published := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {{Name: "prepared-model", Alias: "prepared-alias"}},
+		},
+	}
+	published.ModelCatalog.Models = []config.ModelCatalogModel{
+		{
+			Name: "prepared-model", Provider: "test", Group: "Test", Enabled: &enabled,
+		},
+	}
+	svc := &Service{configPath: configPath, cfg: &config.Config{}}
+	t.Cleanup(func() { config.SetRuntimeModelCatalog(nil) })
+
+	if err := svc.applyManagementConfigCommit(
+		context.Background(),
+		internalapi.ManagementConfigCommit{
+			Config:               published,
+			Generation:           1,
+			ModelCatalogPrepared: true,
+		},
+	); err != nil {
+		t.Fatalf("applyManagementConfigCommit: %v", err)
+	}
+	svc.cfgMu.RLock()
+	runtimeCfg := svc.cfg
+	svc.cfgMu.RUnlock()
+	if len(runtimeCfg.ModelCatalog.Models) != 1 || runtimeCfg.ModelCatalog.Models[0].Name != "prepared-model" {
+		t.Fatalf("runtime models = %#v", runtimeCfg.ModelCatalog.Models)
+	}
+	runtimeAliases := runtimeCfg.OAuthModelAlias["codex"]
+	if len(runtimeAliases) != 1 || runtimeAliases[0].Alias != "prepared-alias" {
+		t.Fatalf("runtime aliases = %#v", runtimeAliases)
+	}
+	if !runtimeCfg.ModelCatalogModelEnabled("prepared-model") {
+		t.Fatal("prepared model was not published to the runtime catalog")
+	}
+
+	rollback := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {{Name: "rollback-model", Alias: "rollback-alias"}},
+		},
+	}
+	rollback.ModelCatalog.Models = []config.ModelCatalogModel{
+		{
+			Name: "rollback-model", Provider: "test", Group: "Test", Enabled: &enabled,
+		},
+	}
+	if err := svc.applyManagementConfigCommit(
+		context.Background(),
+		internalapi.ManagementConfigCommit{
+			Config:               rollback,
+			Generation:           2,
+			ModelCatalogPrepared: true,
+		},
+	); err != nil {
+		t.Fatalf("apply compensating commit: %v", err)
+	}
+	svc.cfgMu.RLock()
+	runtimeCfg = svc.cfg
+	svc.cfgMu.RUnlock()
+	if svc.managementConfigGeneration != 2 || len(runtimeCfg.ModelCatalog.Models) != 1 ||
+		runtimeCfg.ModelCatalog.Models[0].Name != "rollback-model" {
+		t.Fatalf(
+			"compensating runtime = generation %d, models %#v",
+			svc.managementConfigGeneration,
+			runtimeCfg.ModelCatalog.Models,
+		)
+	}
+	if aliases := runtimeCfg.OAuthModelAlias["codex"]; len(aliases) != 1 || aliases[0].Alias != "rollback-alias" {
+		t.Fatalf("compensating aliases = %#v", aliases)
+	}
+}
+
 func TestApplyOAuthModelAlias_Rename(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
@@ -160,16 +251,33 @@ func TestApplyOAuthModelAlias_Rename(t *testing.T) {
 	}
 }
 
+func TestApplyOAuthModelAliasUsesConfiguredDisplayName(t *testing.T) {
+	cfg := &config.Config{
+		OAuthModelAlias: map[string][]config.OAuthModelAlias{
+			"codex": {{Name: "gpt-5.5", Alias: "oauth-gpt", DisplayName: "OAuth GPT"}},
+		},
+	}
+	models := []*ModelInfo{{ID: "gpt-5.5", DisplayName: "GPT-5.5"}}
+
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	if len(out) != 1 {
+		t.Fatalf("models length = %d, want 1", len(out))
+	}
+	if out[0].ID != "oauth-gpt" || out[0].DisplayName != "OAuth GPT" {
+		t.Fatalf("aliased model = %+v", out[0])
+	}
+}
+
 func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	cfg := &config.Config{
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
 			"codex": {
-				{Name: "gpt-5", Alias: "g5", Fork: true},
+				{Name: "gpt-5", Alias: "g5", Fork: true, DisplayName: "Configured GPT Five"},
 			},
 		},
 	}
 	models := []*ModelInfo{
-		{ID: "gpt-5", Name: "models/gpt-5"},
+		{ID: "gpt-5", Name: "models/gpt-5", DisplayName: "Upstream GPT Five"},
 	}
 
 	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
@@ -181,6 +289,9 @@ func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 	}
 	if out[1].ID != "g5" {
 		t.Fatalf("expected second model id %q, got %q", "g5", out[1].ID)
+	}
+	if out[0].DisplayName != "Upstream GPT Five" || out[1].DisplayName != "Configured GPT Five" {
+		t.Fatalf("display names = %q/%q", out[0].DisplayName, out[1].DisplayName)
 	}
 	if out[1].CatalogName != "gpt-5" {
 		t.Fatalf("expected forked catalog name %q, got %q", "gpt-5", out[1].CatalogName)
