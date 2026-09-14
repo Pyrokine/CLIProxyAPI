@@ -21,8 +21,8 @@ var (
 	dataTag = []byte("data:")
 )
 
-// ConvertOpenAIResponseToAnthropicParams holds parameters for response conversion
-type ConvertOpenAIResponseToAnthropicParams struct {
+// convertOpenAIResponseToAnthropicParams holds parameters for response conversion
+type convertOpenAIResponseToAnthropicParams struct {
 	MessageID   string
 	Model       string
 	CreatedAt   int64
@@ -31,7 +31,7 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder
 	// Tool calls accumulator for streaming
-	ToolCallsAccumulator map[int]*ToolCallAccumulator
+	ToolCallsAccumulator map[int]*toolCallAccumulator
 	// Track if text content block has been started
 	TextContentBlockStarted bool
 	// Track if thinking content block has been started
@@ -56,15 +56,15 @@ type ConvertOpenAIResponseToAnthropicParams struct {
 	NextContentBlockIndex int
 }
 
-// ToolCallAccumulator holds the state for accumulating tool call data
-type ToolCallAccumulator struct {
+// toolCallAccumulator holds the state for accumulating tool call data
+type toolCallAccumulator struct {
 	ID           string
 	Name         string
 	Arguments    strings.Builder
 	StartEmitted bool
 }
 
-// ConvertOpenAIResponseToClaude converts OpenAI streaming response format to Anthropic API format.
+// convertOpenAIResponseToClaude converts OpenAI streaming response format to Anthropic API format.
 // This function processes OpenAI streaming chunks and transforms them into Anthropic-compatible JSON responses.
 // It handles text content, tool calls, and usage metadata, outputting responses that match the Anthropic API format.
 //
@@ -76,14 +76,14 @@ type ToolCallAccumulator struct {
 //
 // Returns:
 //   - [][]byte: A slice of byte chunks, each containing an Anthropic-compatible JSON response.
-func ConvertOpenAIResponseToClaude(
+func convertOpenAIResponseToClaude(
 	_ context.Context,
 	_ string,
 	originalRequestRawJSON, _, rawJSON []byte,
 	param *any,
 ) [][]byte {
 	if *param == nil {
-		*param = &ConvertOpenAIResponseToAnthropicParams{
+		*param = &convertOpenAIResponseToAnthropicParams{
 			MessageID:                   "",
 			Model:                       "",
 			CreatedAt:                   0,
@@ -108,23 +108,23 @@ func ConvertOpenAIResponseToClaude(
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
 
-	if (*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap == nil {
-		(*param).(*ConvertOpenAIResponseToAnthropicParams).ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
+	if (*param).(*convertOpenAIResponseToAnthropicParams).ToolNameMap == nil {
+		(*param).(*convertOpenAIResponseToAnthropicParams).ToolNameMap = util.ToolNameMapFromClaudeRequest(originalRequestRawJSON)
 	}
 
 	// Check if this is the [DONE] marker
 	if bytes.Equal(bytes.TrimSpace(rawJSON), []byte("[DONE]")) {
-		return convertOpenAIDoneToAnthropic((*param).(*ConvertOpenAIResponseToAnthropicParams))
+		return convertOpenAIDoneToAnthropic((*param).(*convertOpenAIResponseToAnthropicParams))
 	}
 
 	streamResult := gjson.GetBytes(originalRequestRawJSON, "stream")
 	if !streamResult.Exists() || (streamResult.Exists() && streamResult.Type == gjson.False) {
 		return convertOpenAINonStreamingToAnthropic(rawJSON)
 	}
-	return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*ConvertOpenAIResponseToAnthropicParams))
+	return convertOpenAIStreamingChunkToAnthropic(rawJSON, (*param).(*convertOpenAIResponseToAnthropicParams))
 }
 
-func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) string {
+func effectiveOpenAIFinishReason(param *convertOpenAIResponseToAnthropicParams) string {
 	if param == nil {
 		return ""
 	}
@@ -135,7 +135,7 @@ func effectiveOpenAIFinishReason(param *ConvertOpenAIResponseToAnthropicParams) 
 }
 
 // convertOpenAIStreamingChunkToAnthropic converts OpenAI streaming chunk to Anthropic streaming events
-func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAIResponseToAnthropicParams) [][]byte {
+func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *convertOpenAIResponseToAnthropicParams) [][]byte {
 	root := gjson.ParseBytes(rawJSON)
 	var results [][]byte
 
@@ -237,7 +237,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		// Handle tool calls
 		if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			if param.ToolCallsAccumulator == nil {
-				param.ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
+				param.ToolCallsAccumulator = make(map[int]*toolCallAccumulator)
 			}
 
 			toolCalls.ForEach(
@@ -245,7 +245,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 					index := int(toolCall.Get("index").Int())
 
 					if _, exists := param.ToolCallsAccumulator[index]; !exists {
-						param.ToolCallsAccumulator[index] = &ToolCallAccumulator{}
+						param.ToolCallsAccumulator[index] = &toolCallAccumulator{}
 					}
 
 					accumulator := param.ToolCallsAccumulator[index]
@@ -373,7 +373,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 }
 
 // convertOpenAIDoneToAnthropic handles the [DONE] marker and sends final events
-func convertOpenAIDoneToAnthropic(param *ConvertOpenAIResponseToAnthropicParams) [][]byte {
+func convertOpenAIDoneToAnthropic(param *convertOpenAIResponseToAnthropicParams) [][]byte {
 	var results [][]byte
 
 	// Ensure all content blocks are stopped before final events
@@ -530,7 +530,7 @@ func mapOpenAIFinishReasonToAnthropic(openAIReason string) string {
 	}
 }
 
-func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToolIndex int) int {
+func (p *convertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToolIndex int) int {
 	if idx, ok := p.ToolCallBlockIndexes[openAIToolIndex]; ok {
 		return idx
 	}
@@ -541,9 +541,9 @@ func (p *ConvertOpenAIResponseToAnthropicParams) toolContentBlockIndex(openAIToo
 }
 
 func emitToolUseStart(
-	param *ConvertOpenAIResponseToAnthropicParams,
+	param *convertOpenAIResponseToAnthropicParams,
 	openAIToolIndex int,
-	accumulator *ToolCallAccumulator,
+	accumulator *toolCallAccumulator,
 	results *[][]byte,
 ) {
 	stopThinkingContentBlock(param, results)
@@ -563,7 +563,7 @@ func emitToolUseStart(
 	param.SawToolCall = true
 }
 
-func toolCallAccumulatorIndexes(accumulators map[int]*ToolCallAccumulator) []int {
+func toolCallAccumulatorIndexes(accumulators map[int]*toolCallAccumulator) []int {
 	indexes := make([]int, 0, len(accumulators))
 	for index := range accumulators {
 		indexes = append(indexes, index)
@@ -607,7 +607,7 @@ func collectOpenAIReasoningTexts(node gjson.Result) []string {
 	return texts
 }
 
-func stopThinkingContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results *[][]byte) {
+func stopThinkingContentBlock(param *convertOpenAIResponseToAnthropicParams, results *[][]byte) {
 	if !param.ThinkingContentBlockStarted {
 		return
 	}
@@ -620,7 +620,7 @@ func stopThinkingContentBlock(param *ConvertOpenAIResponseToAnthropicParams, res
 	param.ThinkingContentBlockIndex = -1
 }
 
-func emitMessageStopIfNeeded(param *ConvertOpenAIResponseToAnthropicParams, results *[][]byte) {
+func emitMessageStopIfNeeded(param *convertOpenAIResponseToAnthropicParams, results *[][]byte) {
 	if param.MessageStopSent {
 		return
 	}
@@ -630,7 +630,7 @@ func emitMessageStopIfNeeded(param *ConvertOpenAIResponseToAnthropicParams, resu
 	param.MessageStopSent = true
 }
 
-func stopTextContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results *[][]byte) {
+func stopTextContentBlock(param *convertOpenAIResponseToAnthropicParams, results *[][]byte) {
 	if !param.TextContentBlockStarted {
 		return
 	}
@@ -643,7 +643,7 @@ func stopTextContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results
 	param.TextContentBlockIndex = -1
 }
 
-// ConvertOpenAIResponseToClaudeNonStream converts a non-streaming OpenAI response to a non-streaming Anthropic response.
+// convertOpenAIResponseToClaudeNonStream converts a non-streaming OpenAI response to a non-streaming Anthropic response.
 //
 // Parameters:
 //   - ctx: The context for the request.
@@ -653,7 +653,7 @@ func stopTextContentBlock(param *ConvertOpenAIResponseToAnthropicParams, results
 //
 // Returns:
 //   - []byte: An Anthropic-compatible JSON response.
-func ConvertOpenAIResponseToClaudeNonStream(
+func convertOpenAIResponseToClaudeNonStream(
 	_ context.Context,
 	_ string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,

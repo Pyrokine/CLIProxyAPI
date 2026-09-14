@@ -9,7 +9,7 @@ import (
 
 func TestInteractionsToolCallUsesDenseOpenAIStreamIndex(t *testing.T) {
 	var state any
-	ConvertInteractionsResponseToOpenAI(
+	convertInteractionsResponseToOpenAI(
 		context.Background(),
 		"test-model",
 		nil,
@@ -17,7 +17,7 @@ func TestInteractionsToolCallUsesDenseOpenAIStreamIndex(t *testing.T) {
 		[]byte(`{"event_type":"step.start","index":0,"step":{"type":"thought"}}`),
 		&state,
 	)
-	start := ConvertInteractionsResponseToOpenAI(
+	start := convertInteractionsResponseToOpenAI(
 		context.Background(),
 		"test-model",
 		nil,
@@ -32,7 +32,7 @@ func TestInteractionsToolCallUsesDenseOpenAIStreamIndex(t *testing.T) {
 		t.Fatalf("function start index = %d, want 0", got)
 	}
 
-	delta := ConvertInteractionsResponseToOpenAI(
+	delta := convertInteractionsResponseToOpenAI(
 		context.Background(),
 		"test-model",
 		nil,

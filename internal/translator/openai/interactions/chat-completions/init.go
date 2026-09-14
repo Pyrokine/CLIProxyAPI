@@ -1,28 +1,28 @@
 package chat_completions
 
 import (
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/translator"
 )
 
 func init() {
 	translator.Register(
-		OpenAI,
-		Interactions,
-		ConvertOpenAIRequestToInteractions,
+		constant.OpenAI,
+		constant.Interactions,
+		convertOpenAIRequestToInteractions,
 		interfaces.TranslateResponse{
-			Stream:    ConvertInteractionsResponseToOpenAI,
-			NonStream: ConvertInteractionsResponseToOpenAINonStream,
+			Stream:    convertInteractionsResponseToOpenAI,
+			NonStream: convertInteractionsResponseToOpenAINonStream,
 		},
 	)
 	translator.Register(
-		Interactions,
-		OpenAI,
-		ConvertInteractionsRequestToOpenAI,
+		constant.Interactions,
+		constant.OpenAI,
+		convertInteractionsRequestToOpenAI,
 		interfaces.TranslateResponse{
-			Stream:    ConvertOpenAIResponseToInteractions,
-			NonStream: ConvertOpenAIResponseToInteractionsNonStream,
+			Stream:    convertOpenAIResponseToInteractions,
+			NonStream: convertOpenAIResponseToInteractionsNonStream,
 		},
 	)
 }

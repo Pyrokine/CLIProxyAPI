@@ -8,7 +8,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func ConvertInteractionsRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertInteractionsRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","messages":[]}`)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
@@ -42,10 +42,12 @@ func appendInteractionsInputToOpenAIMessages(out []byte, input gjson.Result) []b
 		return out
 	}
 	if input.IsArray() {
-		input.ForEach(func(_, step gjson.Result) bool {
-			out = appendInteractionsStepToOpenAI(out, step, "user")
-			return true
-		})
+		input.ForEach(
+			func(_, step gjson.Result) bool {
+				out = appendInteractionsStepToOpenAI(out, step, "user")
+				return true
+			},
+		)
 		return out
 	}
 	if input.IsObject() {
@@ -122,10 +124,12 @@ func appendInteractionsContentToOpenAIMessage(msg []byte, content gjson.Result, 
 		contentWrapper, _ = sjson.SetRawBytes(contentWrapper, "items.-1", converted)
 	}
 	if content.IsArray() {
-		content.ForEach(func(_, part gjson.Result) bool {
-			appendPart(part)
-			return true
-		})
+		content.ForEach(
+			func(_, part gjson.Result) bool {
+				appendPart(part)
+				return true
+			},
+		)
 	} else if content.IsObject() {
 		appendPart(content)
 	}
@@ -164,20 +168,26 @@ func copyInteractionsToolsToOpenAI(out []byte, root gjson.Result) []byte {
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if converted, ok := openAIToolFromInteractionsTool(tool); ok {
-			out, _ = sjson.SetRawBytes(out, "tools.-1", converted)
-		}
-		if decls := firstExisting(tool.Get("function_declarations"), tool.Get("functionDeclarations")); decls.Exists() && decls.IsArray() {
-			decls.ForEach(func(_, decl gjson.Result) bool {
-				if converted, ok := openAIToolFromInteractionsTool(decl); ok {
-					out, _ = sjson.SetRawBytes(out, "tools.-1", converted)
-				}
-				return true
-			})
-		}
-		return true
-	})
+	tools.ForEach(
+		func(_, tool gjson.Result) bool {
+			if converted, ok := openAIToolFromInteractionsTool(tool); ok {
+				out, _ = sjson.SetRawBytes(out, "tools.-1", converted)
+			}
+			if decls := firstExisting(
+				tool.Get("function_declarations"), tool.Get("functionDeclarations"),
+			); decls.Exists() && decls.IsArray() {
+				decls.ForEach(
+					func(_, decl gjson.Result) bool {
+						if converted, ok := openAIToolFromInteractionsTool(decl); ok {
+							out, _ = sjson.SetRawBytes(out, "tools.-1", converted)
+						}
+						return true
+					},
+				)
+			}
+			return true
+		},
+	)
 	return out
 }
 
@@ -187,7 +197,12 @@ func copyInteractionsGenerationConfigToOpenAI(out []byte, root gjson.Result) []b
 		gen = root.Get("generationConfig")
 	}
 	copyNumber(&out, "temperature", firstExisting(gen.Get("temperature"), root.Get("temperature")))
-	copyNumber(&out, "max_tokens", firstExisting(gen.Get("max_output_tokens"), gen.Get("maxOutputTokens"), root.Get("max_tokens"), root.Get("max_completion_tokens")))
+	copyNumber(
+		&out, "max_tokens", firstExisting(
+			gen.Get("max_output_tokens"), gen.Get("maxOutputTokens"), root.Get("max_tokens"),
+			root.Get("max_completion_tokens"),
+		),
+	)
 	copyNumber(&out, "top_p", firstExisting(gen.Get("top_p"), gen.Get("topP"), root.Get("top_p")))
 	copyNumber(&out, "top_k", firstExisting(gen.Get("top_k"), gen.Get("topK")))
 	copyNumber(&out, "n", firstExisting(gen.Get("candidate_count"), gen.Get("candidateCount"), root.Get("n")))
@@ -238,7 +253,9 @@ func interactionsContentPartToOpenAI(part gjson.Result, role string) ([]byte, bo
 	case "audio":
 		out := []byte(`{"type":"input_audio","input_audio":{"data":"","format":""}}`)
 		out, _ = sjson.SetBytes(out, "input_audio.data", part.Get("data").String())
-		out, _ = sjson.SetBytes(out, "input_audio.format", openAIInputAudioFormatFromMIME(part.Get("mime_type").String()))
+		out, _ = sjson.SetBytes(
+			out, "input_audio.format", openAIInputAudioFormatFromMIME(part.Get("mime_type").String()),
+		)
 		return out, true
 	case "video":
 		out := []byte(`{"type":"video_url","video_url":{"url":""}}`)
@@ -246,7 +263,10 @@ func interactionsContentPartToOpenAI(part gjson.Result, role string) ([]byte, bo
 		return out, true
 	case "document", "file":
 		out := []byte(`{"type":"file","file":{"filename":"","file_data":""}}`)
-		out, _ = sjson.SetBytes(out, "file.filename", firstNonEmpty(part.Get("filename").String(), openAIFileNameFromMIME(part.Get("mime_type").String())))
+		out, _ = sjson.SetBytes(
+			out, "file.filename",
+			firstNonEmpty(part.Get("filename").String(), openAIFileNameFromMIME(part.Get("mime_type").String())),
+		)
 		out, _ = sjson.SetBytes(out, "file.file_data", part.Get("data").String())
 		if url := firstNonEmpty(part.Get("file_url").String(), part.Get("url").String()); url != "" {
 			out, _ = sjson.DeleteBytes(out, "file.file_data")
@@ -269,7 +289,9 @@ func openAIToolFromInteractionsTool(tool gjson.Result) ([]byte, bool) {
 	if desc := firstExisting(tool.Get("description"), tool.Get("function.description")); desc.Exists() {
 		out, _ = sjson.SetBytes(out, "function.description", desc.String())
 	}
-	if params := firstExisting(tool.Get("parameters"), tool.Get("function.parameters"), tool.Get("parametersJsonSchema")); params.Exists() {
+	if params := firstExisting(
+		tool.Get("parameters"), tool.Get("function.parameters"), tool.Get("parametersJsonSchema"),
+	); params.Exists() {
 		out, _ = sjson.SetRawBytes(out, "function.parameters", []byte(params.Raw))
 	}
 	return out, true
@@ -291,10 +313,12 @@ func interactionsText(value gjson.Result) string {
 			continue
 		}
 		var builder strings.Builder
-		parts.ForEach(func(_, part gjson.Result) bool {
-			builder.WriteString(firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()))
-			return true
-		})
+		parts.ForEach(
+			func(_, part gjson.Result) bool {
+				builder.WriteString(firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()))
+				return true
+			},
+		)
 		return builder.String()
 	}
 	return ""
@@ -317,7 +341,9 @@ func interactionsReasoningEffort(root, gen gjson.Result) string {
 }
 
 func interactionsMediaDataURL(part gjson.Result, fallbackMimeType string) string {
-	if url := firstNonEmpty(part.Get("image_url").String(), part.Get("file_data").String(), part.Get("url").String()); url != "" {
+	if url := firstNonEmpty(
+		part.Get("image_url").String(), part.Get("file_data").String(), part.Get("url").String(),
+	); url != "" {
 		return url
 	}
 	data := part.Get("data").String()

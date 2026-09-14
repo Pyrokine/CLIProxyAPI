@@ -3,11 +3,12 @@ package chat_completions
 import (
 	"strings"
 
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-func ConvertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertOpenAIRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
@@ -35,21 +36,23 @@ func appendOpenAIMessagesToInteractions(out []byte, messages gjson.Result) []byt
 		return out
 	}
 	var systemBuilder strings.Builder
-	messages.ForEach(func(_, message gjson.Result) bool {
-		role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
-		switch role {
-		case "system", "developer":
-			if text := openAIChatContentText(message.Get("content")); text != "" {
-				if systemBuilder.Len() > 0 {
-					systemBuilder.WriteByte('\n')
+	messages.ForEach(
+		func(_, message gjson.Result) bool {
+			role := strings.ToLower(strings.TrimSpace(message.Get("role").String()))
+			switch role {
+			case "system", "developer":
+				if text := openAIChatContentText(message.Get("content")); text != "" {
+					if systemBuilder.Len() > 0 {
+						systemBuilder.WriteByte('\n')
+					}
+					systemBuilder.WriteString(text)
 				}
-				systemBuilder.WriteString(text)
+			default:
+				out = appendOpenAIMessageToInteractions(out, message)
 			}
-		default:
-			out = appendOpenAIMessageToInteractions(out, message)
-		}
-		return true
-	})
+			return true
+		},
+	)
 	if systemBuilder.Len() > 0 {
 		out, _ = sjson.SetBytes(out, "system_instruction", systemBuilder.String())
 	}
@@ -69,12 +72,14 @@ func appendOpenAIMessageToInteractions(out []byte, message gjson.Result) []byte 
 			out, _ = sjson.SetRawBytes(out, "input.-1", step)
 		}
 		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
-			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
-					out, _ = sjson.SetRawBytes(out, "input.-1", step)
-				}
-				return true
-			})
+			toolCalls.ForEach(
+				func(_, toolCall gjson.Result) bool {
+					if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
+						out, _ = sjson.SetRawBytes(out, "input.-1", step)
+					}
+					return true
+				},
+			)
 		}
 	case "tool", "function":
 		out, _ = sjson.SetRawBytes(out, "input.-1", openAIToolResultToInteractions(message))
@@ -104,10 +109,12 @@ func openAIChatContentStep(stepType string, content gjson.Result) ([]byte, bool)
 		}
 	}
 	if content.IsArray() {
-		content.ForEach(func(_, part gjson.Result) bool {
-			appendPart(part)
-			return true
-		})
+		content.ForEach(
+			func(_, part gjson.Result) bool {
+				appendPart(part)
+				return true
+			},
+		)
 	} else if content.IsObject() {
 		appendPart(content)
 	}
@@ -140,24 +147,47 @@ func openAIChatContentPartToInteractions(part gjson.Result) ([]byte, bool) {
 		return out, true
 	case "file", "input_file", "document":
 		file := part.Get("file")
+		filename := firstNonEmpty(file.Get("filename").String(), part.Get("filename").String())
+		fallbackMIMEType := firstNonEmpty(
+			file.Get("mime_type").String(),
+			file.Get("mimeType").String(),
+			part.Get("mime_type").String(),
+			part.Get("mimeType").String(),
+		)
+		fileData := firstNonEmpty(
+			file.Get("file_data").String(),
+			part.Get("file_data").String(),
+			part.Get("data").String(),
+		)
+		fileURL := firstNonEmpty(
+			file.Get("file_url").String(),
+			part.Get("file_url").String(),
+			part.Get("url").String(),
+		)
 		out := []byte(`{"type":"document"}`)
-		if filename := firstNonEmpty(file.Get("filename").String(), part.Get("filename").String()); filename != "" {
+		if filename != "" {
 			out, _ = sjson.SetBytes(out, "filename", filename)
 		}
-		if data := firstNonEmpty(file.Get("file_data").String(), part.Get("file_data").String(), part.Get("data").String()); data != "" {
+		hasContent := false
+		if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, fallbackMIMEType, fileData); ok {
+			out, _ = sjson.SetBytes(out, "mime_type", mimeType)
 			out, _ = sjson.SetBytes(out, "data", data)
+			hasContent = true
 		}
-		if url := firstNonEmpty(file.Get("file_url").String(), part.Get("file_url").String(), part.Get("url").String()); url != "" {
-			out, _ = sjson.SetBytes(out, "file_url", url)
+		if fileURL != "" {
+			out, _ = sjson.SetBytes(out, "file_url", fileURL)
+			hasContent = true
 		}
-		return out, true
+		return out, hasContent
 	}
 	return nil, false
 }
 
 func openAIChatImagePartToInteractions(part gjson.Result) []byte {
 	out := []byte(`{"type":"image"}`)
-	imageURL := firstNonEmpty(part.Get("image_url.url").String(), part.Get("image_url").String(), part.Get("url").String())
+	imageURL := firstNonEmpty(
+		part.Get("image_url.url").String(), part.Get("image_url").String(), part.Get("url").String(),
+	)
 	if mimeType, data, ok := openAIChatParseDataURL(imageURL); ok {
 		out, _ = sjson.SetBytes(out, "mime_type", mimeType)
 		out, _ = sjson.SetBytes(out, "data", data)
@@ -195,7 +225,10 @@ func openAIToolResultToInteractions(message gjson.Result) []byte {
 }
 
 func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result) []byte {
-	copyNumber(&out, "generation_config.max_output_tokens", firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")))
+	copyNumber(
+		&out, "generation_config.max_output_tokens",
+		firstExisting(root.Get("max_completion_tokens"), root.Get("max_tokens")),
+	)
 	copyNumber(&out, "generation_config.temperature", root.Get("temperature"))
 	copyNumber(&out, "generation_config.top_p", root.Get("top_p"))
 	copyNumber(&out, "generation_config.presence_penalty", root.Get("presence_penalty"))
@@ -208,7 +241,9 @@ func copyOpenAIChatGenerationConfigToInteractions(out []byte, root gjson.Result)
 		out, _ = sjson.SetRawBytes(out, "generation_config.tool_choice", []byte(toolChoice.Raw))
 	}
 	if effort := root.Get("reasoning_effort"); effort.Exists() && effort.Type == gjson.String {
-		out, _ = sjson.SetBytes(out, "generation_config.thinking_level", strings.ToLower(strings.TrimSpace(effort.String())))
+		out, _ = sjson.SetBytes(
+			out, "generation_config.thinking_level", strings.ToLower(strings.TrimSpace(effort.String())),
+		)
 	}
 	if responseFormat := root.Get("response_format"); responseFormat.Exists() {
 		out, _ = sjson.SetRawBytes(out, "response_format", []byte(responseFormat.Raw))
@@ -226,12 +261,14 @@ func appendOpenAIChatToolsToInteractions(out []byte, tools gjson.Result) []byte 
 	if !tools.Exists() || !tools.IsArray() {
 		return out
 	}
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if converted, ok := openAIChatToolToInteractions(tool); ok {
-			out, _ = sjson.SetRawBytes(out, "tools.-1", converted)
-		}
-		return true
-	})
+	tools.ForEach(
+		func(_, tool gjson.Result) bool {
+			if converted, ok := openAIChatToolToInteractions(tool); ok {
+				out, _ = sjson.SetRawBytes(out, "tools.-1", converted)
+			}
+			return true
+		},
+	)
 	return out
 }
 
@@ -266,12 +303,14 @@ func openAIChatContentText(content gjson.Result) string {
 		return ""
 	}
 	var builder strings.Builder
-	content.ForEach(func(_, part gjson.Result) bool {
-		if text := part.Get("text").String(); text != "" {
-			builder.WriteString(text)
-		}
-		return true
-	})
+	content.ForEach(
+		func(_, part gjson.Result) bool {
+			if text := part.Get("text").String(); text != "" {
+				builder.WriteString(text)
+			}
+			return true
+		},
+	)
 	return builder.String()
 }
 

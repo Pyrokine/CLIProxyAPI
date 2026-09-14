@@ -16,10 +16,25 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertClaudeRequestToOpenAI parses and transforms an Anthropic API request into OpenAI Chat Completions API format.
+// convertClaudeRequestToOpenAIDefault parses and transforms an Anthropic API request into OpenAI Chat Completions API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
-func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertClaudeRequestToOpenAIDefault(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToOpenAI(modelName, inputRawJSON, stream, false)
+}
+
+// ConvertClaudeRequestToOpenAIWithCompat preserves assistant thinking text for
+// configured compatibility endpoints.
+func ConvertClaudeRequestToOpenAIWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
+	return convertClaudeRequestToOpenAI(modelName, inputRawJSON, stream, true)
+}
+
+func convertClaudeRequestToOpenAI(
+	modelName string,
+	inputRawJSON []byte,
+	stream bool,
+	preserveThinkingBlocks bool,
+) []byte {
 	rawJSON := inputRawJSON
 	// Base OpenAI Chat Completions API template
 	out := []byte(`{"model":"","messages":[]}`)
@@ -117,7 +132,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		} else if system.Type == gjson.JSON {
 			if system.IsArray() {
 				systemResults := system.Array()
-				for i := 0; i < len(systemResults); i++ {
+				for i := range systemResults {
 					if systemResults[i].Get("type").String() == "text" && util.IsClaudeCodeAttributionSystemText(systemResults[i].Get("text").String()) {
 						continue
 					}
@@ -153,7 +168,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				if contentResult.Exists() && contentResult.IsArray() {
 					contentItems := make([][]byte, 0)
 					var reasoningParts []string // Accumulate thinking text for reasoning_content
-					var toolCalls []interface{}
+					var toolCalls []any
 					toolResults := make([][]byte, 0) // Collect tool_result messages to emit after the main message
 
 					contentResult.ForEach(
@@ -164,7 +179,10 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							case "thinking":
 								// Only map thinking to reasoning_content for assistant messages (security: prevent injection)
 								if role == "assistant" {
-									if !shouldMapClaudeThinkingToGPTReasoning(part) {
+									if !shouldMapClaudeThinkingToGPTReasoning(
+										part,
+										preserveThinkingBlocks,
+									) {
 										return true
 									}
 									thinkingText := thinking.GetThinkingText(part)
@@ -361,7 +379,13 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	return out
 }
 
-func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result) bool {
+func shouldMapClaudeThinkingToGPTReasoning(
+	part gjson.Result,
+	preserveThinkingBlocks ...bool,
+) bool {
+	if len(preserveThinkingBlocks) > 0 && preserveThinkingBlocks[0] {
+		return true
+	}
 	rawSignature := strings.TrimSpace(part.Get("signature").String())
 	if rawSignature == "" {
 		return true

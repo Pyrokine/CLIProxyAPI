@@ -28,7 +28,12 @@ type interactionsToOpenAIChatStreamState struct {
 	TextByStepIndex map[int]*strings.Builder
 }
 
-func ConvertInteractionsResponseToOpenAI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func convertInteractionsResponseToOpenAI(
+	ctx context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) [][]byte {
 	_ = ctx
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
@@ -45,7 +50,12 @@ func ConvertInteractionsResponseToOpenAI(ctx context.Context, modelName string, 
 	return convertInteractionsEventToOpenAIChat(modelName, rawJSON, st)
 }
 
-func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func convertInteractionsResponseToOpenAINonStream(
+	ctx context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_ *any,
+) []byte {
 	_ = ctx
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
@@ -55,7 +65,11 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 		interaction = nested
 	}
 	out := []byte(`{"id":"","object":"chat.completion","created":0,"model":"","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`)
-	out, _ = sjson.SetBytes(out, "id", firstNonEmpty(interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano())))
+	out, _ = sjson.SetBytes(
+		out, "id", firstNonEmpty(
+			interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("chatcmpl_%d", time.Now().UnixNano()),
+		),
+	)
 	out, _ = sjson.SetBytes(out, "created", time.Now().Unix())
 	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(interaction.Get("model").String(), modelName))
 	steps := interaction.Get("steps")
@@ -65,22 +79,26 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 	var textBuilder strings.Builder
 	var reasoningBuilder strings.Builder
 	sawToolCall := false
-	steps.ForEach(func(_, step gjson.Result) bool {
-		switch step.Get("type").String() {
-		case "model_output":
-			for _, text := range interactionsContentTextsForOpenAIChat(step.Get("content")) {
-				textBuilder.WriteString(text)
+	steps.ForEach(
+		func(_, step gjson.Result) bool {
+			switch step.Get("type").String() {
+			case "model_output":
+				for _, text := range interactionsContentTextsForOpenAIChat(step.Get("content")) {
+					textBuilder.WriteString(text)
+				}
+			case "thought":
+				for _, text := range interactionsContentTextsForOpenAIChat(step.Get("content")) {
+					reasoningBuilder.WriteString(text)
+				}
+			case "function_call":
+				sawToolCall = true
+				out, _ = sjson.SetRawBytes(
+					out, "choices.0.message.tool_calls.-1", openAIChatToolCallFromInteractions(step, gjson.Result{}),
+				)
 			}
-		case "thought":
-			for _, text := range interactionsContentTextsForOpenAIChat(step.Get("content")) {
-				reasoningBuilder.WriteString(text)
-			}
-		case "function_call":
-			sawToolCall = true
-			out, _ = sjson.SetRawBytes(out, "choices.0.message.tool_calls.-1", openAIChatToolCallFromInteractions(step, gjson.Result{}))
-		}
-		return true
-	})
+			return true
+		},
+	)
 	if textBuilder.Len() > 0 {
 		out, _ = sjson.SetBytes(out, "choices.0.message.content", textBuilder.String())
 	}
@@ -95,7 +113,11 @@ func ConvertInteractionsResponseToOpenAINonStream(ctx context.Context, modelName
 	return out
 }
 
-func convertInteractionsEventToOpenAIChat(modelName string, rawJSON []byte, st *interactionsToOpenAIChatStreamState) [][]byte {
+func convertInteractionsEventToOpenAIChat(
+	modelName string,
+	rawJSON []byte,
+	st *interactionsToOpenAIChatStreamState,
+) [][]byte {
 	payload := openAIChatInteractionsPayload(rawJSON)
 	if len(payload) == 0 || bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
 		return nil
@@ -122,7 +144,11 @@ func convertInteractionsEventToOpenAIChat(modelName string, rawJSON []byte, st *
 	return nil
 }
 
-func interactionsStepStartToOpenAIChat(modelName string, root gjson.Result, st *interactionsToOpenAIChatStreamState) [][]byte {
+func interactionsStepStartToOpenAIChat(
+	modelName string,
+	root gjson.Result,
+	st *interactionsToOpenAIChatStreamState,
+) [][]byte {
 	_ = modelName
 	out := ensureOpenAIChatStarted(nil, st)
 	index := int(root.Get("index").Int())
@@ -132,7 +158,9 @@ func interactionsStepStartToOpenAIChat(modelName string, root gjson.Result, st *
 	switch stepType {
 	case "function_call":
 		st.SawToolCall = true
-		st.ToolIDs[index] = firstNonEmpty(step.Get("call_id").String(), step.Get("id").String(), fmt.Sprintf("call_%d", index))
+		st.ToolIDs[index] = firstNonEmpty(
+			step.Get("call_id").String(), step.Get("id").String(), fmt.Sprintf("call_%d", index),
+		)
 		st.ToolNames[index] = step.Get("name").String()
 		if st.ToolArguments[index] == nil {
 			st.ToolArguments[index] = &strings.Builder{}
@@ -146,7 +174,11 @@ func interactionsStepStartToOpenAIChat(modelName string, root gjson.Result, st *
 	}
 }
 
-func interactionsStepDeltaToOpenAIChat(modelName string, root gjson.Result, st *interactionsToOpenAIChatStreamState) [][]byte {
+func interactionsStepDeltaToOpenAIChat(
+	modelName string,
+	root gjson.Result,
+	st *interactionsToOpenAIChatStreamState,
+) [][]byte {
 	_ = modelName
 	index := int(root.Get("index").Int())
 	delta := root.Get("delta")
@@ -289,12 +321,14 @@ func interactionsContentTextsForOpenAIChat(content gjson.Result) []string {
 		return []string{content.String()}
 	}
 	var out []string
-	content.ForEach(func(_, part gjson.Result) bool {
-		if text := firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()); text != "" {
-			out = append(out, text)
-		}
-		return true
-	})
+	content.ForEach(
+		func(_, part gjson.Result) bool {
+			if text := firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()); text != "" {
+				out = append(out, text)
+			}
+			return true
+		},
+	)
 	return out
 }
 
@@ -307,7 +341,7 @@ func openAIChatInteractionsPayload(rawJSON []byte) []byte {
 		return bytes.TrimSpace(trimmed[len("data:"):])
 	}
 	var dataLines [][]byte
-	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+	for line := range bytes.SplitSeq(trimmed, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if bytes.HasPrefix(line, []byte("data:")) {
 			dataLines = append(dataLines, bytes.TrimSpace(line[len("data:"):]))

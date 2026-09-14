@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/base64"
+	"slices"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -191,7 +192,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+				result := convertClaudeRequestToOpenAIDefault("test-model", []byte(tt.inputJSON), false)
 				resultJSON := gjson.ParseBytes(result)
 
 				// Find the relevant message
@@ -205,9 +206,9 @@ func TestConvertClaudeRequestToOpenAI_ThinkingToReasoningContent(t *testing.T) {
 
 				// Check the last non-system message
 				var targetMsg gjson.Result
-				for i := len(messages) - 1; i >= 0; i-- {
-					if messages[i].Get("role").String() != "system" {
-						targetMsg = messages[i]
+				for _, message := range slices.Backward(messages) {
+					if message.Get("role").String() != "system" {
+						targetMsg = message
 						break
 					}
 				}
@@ -276,7 +277,7 @@ func TestConvertClaudeRequestToOpenAI_DropsClaudeSignedThinkingForGPTReasoning(t
 		}]
 	}`
 
-	output := ConvertClaudeRequestToOpenAI("gpt-5.1", []byte(inputJSON), false)
+	output := convertClaudeRequestToOpenAIDefault("gpt-5.1", []byte(inputJSON), false)
 	assistantMsg := gjson.GetBytes(output, "messages.0")
 	if assistantMsg.Get("reasoning_content").Exists() {
 		t.Fatalf("reasoning_content should be dropped for Claude signature replay. Output: %s", string(output))
@@ -307,7 +308,7 @@ func TestConvertClaudeRequestToOpenAI_ThinkingOnlyMessagePreserved(t *testing.T)
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAIDefault("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 
 	messages := resultJSON.Get("messages").Array()
@@ -394,7 +395,7 @@ func TestConvertClaudeRequestToOpenAI_SystemMessageScenarios(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				result := ConvertClaudeRequestToOpenAI("test-model", []byte(tt.inputJSON), false)
+				result := convertClaudeRequestToOpenAIDefault("test-model", []byte(tt.inputJSON), false)
 				resultJSON := gjson.ParseBytes(result)
 				messages := resultJSON.Get("messages").Array()
 
@@ -445,7 +446,7 @@ func TestConvertClaudeRequestToOpenAI_MessageLevelSystemBecomesReminder(t *testi
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("gpt-5", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAIDefault("gpt-5", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -492,7 +493,7 @@ func TestConvertClaudeRequestToOpenAI_ToolResultOrderAndContent(t *testing.T) {
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAIDefault("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -552,7 +553,7 @@ func TestConvertClaudeRequestToOpenAI_ToolResultObjectContent(t *testing.T) {
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAIDefault("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -605,7 +606,7 @@ func TestConvertClaudeRequestToOpenAI_ToolResultTextAndImageContent(t *testing.T
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAIDefault("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -660,7 +661,7 @@ func TestConvertClaudeRequestToOpenAI_ToolResultURLImageOnly(t *testing.T) {
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAIDefault("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -695,7 +696,7 @@ func TestConvertClaudeRequestToOpenAI_AssistantTextToolUseTextOrder(t *testing.T
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAIDefault("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -747,7 +748,7 @@ func TestConvertClaudeRequestToOpenAI_AssistantThinkingToolUseThinkingSplit(t *t
 		]
 	}`
 
-	result := ConvertClaudeRequestToOpenAI("test-model", []byte(inputJSON), false)
+	result := convertClaudeRequestToOpenAIDefault("test-model", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 

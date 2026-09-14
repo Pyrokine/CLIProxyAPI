@@ -62,3 +62,189 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsIgnoresNonStringSer
 		t.Fatalf("service_tier should be omitted; output=%s", output)
 	}
 }
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsMapsTextFormat(t *testing.T) {
+	tests := []struct {
+		name     string
+		request  string
+		wantType string
+	}{
+		{
+			name:     "text",
+			request:  `{"text":{"format":{"type":"text"}}}`,
+			wantType: "text",
+		},
+		{
+			name:     "json object",
+			request:  `{"text":{"format":{"type":"json_object"}}}`,
+			wantType: "json_object",
+		},
+		{
+			name: "json schema",
+			request: `{
+				"text":{"format":{
+					"type":"json_schema",
+					"name":"answer",
+					"description":"Structured answer",
+					"strict":false,
+					"schema":{
+						"type":"object",
+						"properties":{"ok":{"type":"boolean"}},
+						"required":["ok"],
+						"additionalProperties":false
+					}
+				}}
+			}`,
+			wantType: "json_schema",
+		},
+		{
+			name:    "unsupported",
+			request: `{"text":{"format":{"type":"yaml"}}}`,
+		},
+		{
+			name:    "missing",
+			request: `{"input":"Return plain text."}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(
+			test.name, func(t *testing.T) {
+				output := ConvertOpenAIResponsesRequestToOpenAIChatCompletions(
+					"gpt-4.1",
+					[]byte(test.request),
+					false,
+				)
+				responseFormat := gjson.GetBytes(output, "response_format")
+				if test.wantType == "" {
+					if responseFormat.Exists() {
+						t.Fatalf("response_format should be omitted; output=%s", output)
+					}
+					return
+				}
+				if got := responseFormat.Get("type").String(); got != test.wantType {
+					t.Fatalf("response_format.type = %q, want %q; output=%s", got, test.wantType, output)
+				}
+				if test.wantType != "json_schema" {
+					if responseFormat.Get("json_schema").Exists() {
+						t.Fatalf("response_format.json_schema should be omitted; output=%s", output)
+					}
+					return
+				}
+				if got := responseFormat.Get("json_schema.name").String(); got != "answer" {
+					t.Fatalf("json_schema.name = %q, want answer; output=%s", got, output)
+				}
+				if got := responseFormat.Get("json_schema.description").String(); got != "Structured answer" {
+					t.Fatalf("json_schema.description = %q, want Structured answer; output=%s", got, output)
+				}
+				if strict := responseFormat.Get("json_schema.strict"); !strict.Exists() || strict.Bool() {
+					t.Fatalf("json_schema.strict = %v, want false; output=%s", strict.Value(), output)
+				}
+				if got := responseFormat.Get("json_schema.schema.properties.ok.type").String(); got != "boolean" {
+					t.Fatalf("schema ok type = %q, want boolean; output=%s", got, output)
+				}
+				if additional := responseFormat.Get("json_schema.schema.additionalProperties"); !additional.Exists() || additional.Bool() {
+					t.Fatalf("schema additionalProperties = %v, want false; output=%s", additional.Value(), output)
+				}
+			},
+		)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsPreservesAssistantContentWithToolCalls(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"inspect the next step"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Step 3 completed; continue to step 4."}]},
+			{"type":"function_call","call_id":"call_4","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"},
+			{"type":"function_call_output","call_id":"call_4","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if got := len(messages); got != 2 {
+		t.Fatalf("messages count = %d, want 2; output=%s", got, out)
+	}
+	assistant := messages[0]
+	if got := assistant.Get("content.0.text").String(); got != "Step 3 completed; continue to step 4." {
+		t.Fatalf("assistant content = %q, want preserved text; output=%s", got, out)
+	}
+	if got := assistant.Get("reasoning_content").String(); got != "inspect the next step" {
+		t.Fatalf("assistant reasoning_content = %q, want inspect the next step; output=%s", got, out)
+	}
+	if got := assistant.Get("tool_calls.0.id").String(); got != "call_4" {
+		t.Fatalf("assistant tool call ID = %q, want call_4; output=%s", got, out)
+	}
+	if got := messages[1].Get("tool_call_id").String(); got != "call_4" {
+		t.Fatalf("tool output call ID = %q, want call_4; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsDoesNotMergeToolCallsAcrossUserMessage(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]},
+			{"type":"function_call","call_id":"call_next","name":"exec_command","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_next","output":"ok"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if got := len(messages); got != 4 {
+		t.Fatalf("messages count = %d, want 4; output=%s", got, out)
+	}
+	if messages[0].Get("tool_calls").Exists() {
+		t.Fatalf("messages.0 unexpectedly contains tool calls; output=%s", out)
+	}
+	if got := messages[1].Get("role").String(); got != "user" {
+		t.Fatalf("messages.1 role = %q, want user; output=%s", got, out)
+	}
+	if got := messages[2].Get("tool_calls.0.id").String(); got != "call_next" {
+		t.Fatalf("messages.2 tool call ID = %q, want call_next; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsMergesDistinctReasoningWithinAssistantTurn(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"first"}]},
+			{"type":"message","role":"assistant","reasoning_content":"first","content":[{"type":"output_text","text":"working"}]},
+			{"type":"reasoning","summary":[{"type":"summary_text","text":"second"}]},
+			{"type":"function_call","call_id":"call_reasoning","name":"exec_command","arguments":"{}"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if got := len(messages); got != 1 {
+		t.Fatalf("messages count = %d, want 1; output=%s", got, out)
+	}
+	if got := messages[0].Get("reasoning_content").String(); got != "first\n\nsecond" {
+		t.Fatalf("reasoning_content = %q, want %q; output=%s", got, "first\n\nsecond", out)
+	}
+	if got := messages[0].Get("tool_calls.0.id").String(); got != "call_reasoning" {
+		t.Fatalf("tool call ID = %q, want call_reasoning; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsReplacesUnavailableReasoningWithinAssistantTurn(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","summary":[]},
+			{"type":"message","role":"assistant","reasoning_content":"real reasoning","content":[{"type":"output_text","text":"working"}]},
+			{"type":"function_call","call_id":"call_real_reasoning","name":"exec_command","arguments":"{}"}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if got := len(messages); got != 1 {
+		t.Fatalf("messages count = %d, want 1; output=%s", got, out)
+	}
+	if got := messages[0].Get("reasoning_content").String(); got != "real reasoning" {
+		t.Fatalf("reasoning_content = %q, want real reasoning; output=%s", got, out)
+	}
+}

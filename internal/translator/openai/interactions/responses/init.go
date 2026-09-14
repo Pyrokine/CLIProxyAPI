@@ -1,28 +1,28 @@
 package responses
 
 import (
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/translator"
 )
 
 func init() {
 	translator.Register(
-		OpenaiResponse,
-		Interactions,
-		ConvertOpenAIResponsesRequestToInteractions,
+		constant.OpenaiResponse,
+		constant.Interactions,
+		convertOpenAIResponsesRequestToInteractions,
 		interfaces.TranslateResponse{
-			Stream:    ConvertInteractionsResponseToOpenAIResponses,
-			NonStream: ConvertInteractionsResponseToOpenAIResponsesNonStream,
+			Stream:    convertInteractionsResponseToOpenAIResponses,
+			NonStream: convertInteractionsResponseToOpenAIResponsesNonStream,
 		},
 	)
 	translator.Register(
-		Interactions,
-		OpenaiResponse,
-		ConvertInteractionsRequestToOpenAIResponses,
+		constant.Interactions,
+		constant.OpenaiResponse,
+		convertInteractionsRequestToOpenAIResponses,
 		interfaces.TranslateResponse{
-			Stream:    ConvertOpenAIResponsesResponseToInteractions,
-			NonStream: ConvertOpenAIResponsesResponseToInteractionsNonStream,
+			Stream:    convertOpenAIResponsesResponseToInteractions,
+			NonStream: convertOpenAIResponsesResponseToInteractionsNonStream,
 		},
 	)
 }

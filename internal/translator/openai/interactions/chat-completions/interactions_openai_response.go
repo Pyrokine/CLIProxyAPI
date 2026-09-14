@@ -28,7 +28,12 @@ type openAIToInteractionsStreamState struct {
 	Usage           gjson.Result
 }
 
-func ConvertOpenAIResponseToInteractions(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func convertOpenAIResponseToInteractions(
+	ctx context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) [][]byte {
 	_ = ctx
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
@@ -49,43 +54,58 @@ func ConvertOpenAIResponseToInteractions(ctx context.Context, modelName string, 
 	return convertOpenAIChatStreamToInteractions(modelName, rawJSON, st)
 }
 
-func ConvertOpenAIResponseToInteractionsNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func convertOpenAIResponseToInteractionsNonStream(
+	ctx context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_ *any,
+) []byte {
 	_ = ctx
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
 	out := []byte(`{"id":"","status":"completed","object":"interaction","model":"","steps":[]}`)
-	out, _ = sjson.SetBytes(out, "id", firstNonEmpty(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())))
+	out, _ = sjson.SetBytes(
+		out, "id", firstNonEmpty(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())),
+	)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(modelName, root.Get("model").String()))
 	choices := root.Get("choices")
-	choices.ForEach(func(_, choice gjson.Result) bool {
-		message := choice.Get("message")
-		if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
-			for _, text := range openAIReasoningTexts(reasoning) {
-				out, _ = sjson.SetRawBytes(out, "steps.-1", interactionsTextStep("thought", text))
-			}
-		}
-		if content := message.Get("content"); content.Exists() && content.String() != "" {
-			out, _ = sjson.SetRawBytes(out, "steps.-1", interactionsTextStep("model_output", content.String()))
-		}
-		if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
-			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-				if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
-					out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+	choices.ForEach(
+		func(_, choice gjson.Result) bool {
+			message := choice.Get("message")
+			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
+				for _, text := range openAIReasoningTexts(reasoning) {
+					out, _ = sjson.SetRawBytes(out, "steps.-1", interactionsTextStep("thought", text))
 				}
-				return true
-			})
-		}
-		if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-			out, _ = sjson.SetBytes(out, "finish_reason", finishReason.String())
-		}
-		return true
-	})
+			}
+			if content := message.Get("content"); content.Exists() && content.String() != "" {
+				out, _ = sjson.SetRawBytes(out, "steps.-1", interactionsTextStep("model_output", content.String()))
+			}
+			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+				toolCalls.ForEach(
+					func(_, toolCall gjson.Result) bool {
+						if step, ok := openAIToolCallToInteractionsStep(toolCall); ok {
+							out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+						}
+						return true
+					},
+				)
+			}
+			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+				out, _ = sjson.SetBytes(out, "finish_reason", finishReason.String())
+			}
+			return true
+		},
+	)
 	out = setInteractionsUsageFromOpenAIChat(out, "usage", root.Get("usage"))
 	return out
 }
 
-func convertOpenAIChatStreamToInteractions(modelName string, rawJSON []byte, st *openAIToInteractionsStreamState) [][]byte {
+func convertOpenAIChatStreamToInteractions(
+	modelName string,
+	rawJSON []byte,
+	st *openAIToInteractionsStreamState,
+) [][]byte {
 	payload := openAIChatSSEPayload(rawJSON)
 	if len(payload) == 0 {
 		return nil
@@ -114,34 +134,43 @@ func convertOpenAIChatStreamToInteractions(modelName string, rawJSON []byte, st 
 			}
 			return out
 		}
-		choices.ForEach(func(_, choice gjson.Result) bool {
-			delta := choice.Get("delta")
-			if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
-				for _, text := range openAIReasoningTexts(reasoning) {
-					out = ensureInteractionsStep(out, st, modelName, "thought", root)
-					out = appendInteractionsTextDelta(out, st, text, true)
+		choices.ForEach(
+			func(_, choice gjson.Result) bool {
+				delta := choice.Get("delta")
+				if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
+					for _, text := range openAIReasoningTexts(reasoning) {
+						out = ensureInteractionsStep(out, st, modelName, "thought", root)
+						out = appendInteractionsTextDelta(out, st, text, true)
+					}
 				}
-			}
-			if content := delta.Get("content"); content.Exists() && content.String() != "" {
-				out = ensureInteractionsStep(out, st, modelName, "model_output", root)
-				out = appendInteractionsTextDelta(out, st, content.String(), false)
-			}
-			if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
-				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
-					out = appendOpenAIToolCallDelta(out, st, modelName, root, toolCall)
-					return true
-				})
-			}
-			if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
-				out = appendInteractionsStepStop(out, st)
-			}
-			return true
-		})
+				if content := delta.Get("content"); content.Exists() && content.String() != "" {
+					out = ensureInteractionsStep(out, st, modelName, "model_output", root)
+					out = appendInteractionsTextDelta(out, st, content.String(), false)
+				}
+				if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+					toolCalls.ForEach(
+						func(_, toolCall gjson.Result) bool {
+							out = appendOpenAIToolCallDelta(out, st, modelName, root, toolCall)
+							return true
+						},
+					)
+				}
+				if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+					out = appendInteractionsStepStop(out, st)
+				}
+				return true
+			},
+		)
 	}
 	return out
 }
 
-func appendOpenAIToolCallDelta(out [][]byte, st *openAIToInteractionsStreamState, modelName string, root, toolCall gjson.Result) [][]byte {
+func appendOpenAIToolCallDelta(
+	out [][]byte,
+	st *openAIToInteractionsStreamState,
+	modelName string,
+	root, toolCall gjson.Result,
+) [][]byte {
 	index := int(toolCall.Get("index").Int())
 	if id := toolCall.Get("id").String(); id != "" {
 		st.ToolCallIDs[index] = id
@@ -167,7 +196,12 @@ func appendOpenAIToolCallDelta(out [][]byte, st *openAIToInteractionsStreamState
 	return out
 }
 
-func appendInteractionsCreated(out [][]byte, st *openAIToInteractionsStreamState, modelName string, root gjson.Result) [][]byte {
+func appendInteractionsCreated(
+	out [][]byte,
+	st *openAIToInteractionsStreamState,
+	modelName string,
+	root gjson.Result,
+) [][]byte {
 	if st.Created {
 		return out
 	}
@@ -191,7 +225,12 @@ func appendInteractionsStatusUpdate(out [][]byte, st *openAIToInteractionsStream
 	return out
 }
 
-func ensureInteractionsStep(out [][]byte, st *openAIToInteractionsStreamState, modelName, stepType string, step gjson.Result) [][]byte {
+func ensureInteractionsStep(
+	out [][]byte,
+	st *openAIToInteractionsStreamState,
+	modelName, stepType string,
+	step gjson.Result,
+) [][]byte {
 	out = appendInteractionsCreated(out, st, modelName, step)
 	if st.ActiveStepOpen && st.CurrentStepType == stepType {
 		return out
@@ -200,7 +239,12 @@ func ensureInteractionsStep(out [][]byte, st *openAIToInteractionsStreamState, m
 	return appendInteractionsStepStart(out, st, stepType, step)
 }
 
-func appendInteractionsStepStart(out [][]byte, st *openAIToInteractionsStreamState, stepType string, step gjson.Result) [][]byte {
+func appendInteractionsStepStart(
+	out [][]byte,
+	st *openAIToInteractionsStreamState,
+	stepType string,
+	step gjson.Result,
+) [][]byte {
 	index := st.StepIndex
 	st.StepIndex++
 	st.ActiveStepIndex = index
@@ -224,7 +268,12 @@ func appendInteractionsStepStart(out [][]byte, st *openAIToInteractionsStreamSta
 	return append(out, translatorcommon.SSEEventData("step.start", payload))
 }
 
-func appendInteractionsTextDelta(out [][]byte, st *openAIToInteractionsStreamState, text string, thought bool) [][]byte {
+func appendInteractionsTextDelta(
+	out [][]byte,
+	st *openAIToInteractionsStreamState,
+	text string,
+	thought bool,
+) [][]byte {
 	if thought {
 		payload := []byte(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`)
 		payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
@@ -257,7 +306,12 @@ func appendInteractionsStepStop(out [][]byte, st *openAIToInteractionsStreamStat
 	return out
 }
 
-func appendInteractionsCompleted(out [][]byte, st *openAIToInteractionsStreamState, modelName string, root gjson.Result) [][]byte {
+func appendInteractionsCompleted(
+	out [][]byte,
+	st *openAIToInteractionsStreamState,
+	modelName string,
+	root gjson.Result,
+) [][]byte {
 	if st.Completed {
 		return out
 	}
@@ -289,10 +343,6 @@ func appendInteractionsDone(out [][]byte, st *openAIToInteractionsStreamState) [
 	return out
 }
 
-func isOpenAIStreamDone(rawJSON []byte) bool {
-	return bytes.Equal(bytes.TrimSpace(openAIChatSSEPayload(rawJSON)), []byte("[DONE]"))
-}
-
 func openAIChatSSEPayload(rawJSON []byte) []byte {
 	trimmed := bytes.TrimSpace(rawJSON)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("[DONE]")) {
@@ -302,7 +352,7 @@ func openAIChatSSEPayload(rawJSON []byte) []byte {
 		return bytes.TrimSpace(trimmed[len("data:"):])
 	}
 	var dataLines [][]byte
-	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+	for line := range bytes.SplitSeq(trimmed, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if bytes.HasPrefix(line, []byte("data:")) {
 			dataLines = append(dataLines, bytes.TrimSpace(line[len("data:"):]))
@@ -374,12 +424,14 @@ func openAIReasoningTexts(reasoning gjson.Result) []string {
 	}
 	texts := make([]string, 0)
 	if reasoning.IsArray() {
-		reasoning.ForEach(func(_, item gjson.Result) bool {
-			if text := firstNonEmpty(item.Get("text").String(), item.Get("content").String()); text != "" {
-				texts = append(texts, text)
-			}
-			return true
-		})
+		reasoning.ForEach(
+			func(_, item gjson.Result) bool {
+				if text := firstNonEmpty(item.Get("text").String(), item.Get("content").String()); text != "" {
+					texts = append(texts, text)
+				}
+				return true
+			},
+		)
 	}
 	return texts
 }

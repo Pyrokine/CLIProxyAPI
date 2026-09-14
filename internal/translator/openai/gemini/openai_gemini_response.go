@@ -17,18 +17,18 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertOpenAIResponseToGeminiParams holds parameters for response conversion
-type ConvertOpenAIResponseToGeminiParams struct {
+// convertOpenAIResponseToGeminiParams holds parameters for response conversion
+type convertOpenAIResponseToGeminiParams struct {
 	// Tool calls accumulator for streaming
-	ToolCallsAccumulator map[int]*ToolCallAccumulator
+	ToolCallsAccumulator map[int]*toolCallAccumulator
 	// Content accumulator for streaming
 	ContentAccumulator strings.Builder
 	// Track if this is the first chunk
 	IsFirstChunk bool
 }
 
-// ToolCallAccumulator holds the state for accumulating tool call data
-type ToolCallAccumulator struct {
+// toolCallAccumulator holds the state for accumulating tool call data
+type toolCallAccumulator struct {
 	ID        string
 	Name      string
 	Arguments strings.Builder
@@ -48,7 +48,7 @@ type ToolCallAccumulator struct {
 //   - [][]byte: A slice of Gemini-compatible JSON responses.
 func ConvertOpenAIResponseToGemini(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
-		*param = &ConvertOpenAIResponseToGeminiParams{
+		*param = &convertOpenAIResponseToGeminiParams{
 			ToolCallsAccumulator: nil,
 			ContentAccumulator:   strings.Builder{},
 			IsFirstChunk:         false,
@@ -67,8 +67,8 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, _, _, rawJSON []
 	root := gjson.ParseBytes(rawJSON)
 
 	// Initialize accumulators if needed
-	if (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator == nil {
-		(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
+	if (*param).(*convertOpenAIResponseToGeminiParams).ToolCallsAccumulator == nil {
+		(*param).(*convertOpenAIResponseToGeminiParams).ToolCallsAccumulator = make(map[int]*toolCallAccumulator)
 	}
 
 	// Process choices
@@ -116,12 +116,12 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, _, _, rawJSON []
 				baseTemplate := append([]byte(nil), template...)
 
 				// Handle role (only in first chunk)
-				if role := delta.Get("role"); role.Exists() && (*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk {
+				if role := delta.Get("role"); role.Exists() && (*param).(*convertOpenAIResponseToGeminiParams).IsFirstChunk {
 					// OpenAI assistant -> Gemini model
 					if role.String() == "assistant" {
 						template, _ = sjson.SetBytes(template, "candidates.0.content.role", "model")
 					}
-					(*param).(*ConvertOpenAIResponseToGeminiParams).IsFirstChunk = false
+					(*param).(*convertOpenAIResponseToGeminiParams).IsFirstChunk = false
 					results = append(results, template)
 					return true
 				}
@@ -148,7 +148,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, _, _, rawJSON []
 				// Handle content delta
 				if content := delta.Get("content"); content.Exists() && content.String() != "" {
 					contentText := content.String()
-					(*param).(*ConvertOpenAIResponseToGeminiParams).ContentAccumulator.WriteString(contentText)
+					(*param).(*convertOpenAIResponseToGeminiParams).ContentAccumulator.WriteString(contentText)
 
 					// Create text part for this delta
 					contentTemplate := append([]byte(nil), baseTemplate...)
@@ -186,14 +186,14 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, _, _, rawJSON []
 							functionArgs := function.Get("arguments").String()
 
 							// Initialize accumulator if needed so later deltas without type can append arguments.
-							if _, exists := (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex]; !exists {
-								(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex] = &ToolCallAccumulator{
+							if _, exists := (*param).(*convertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex]; !exists {
+								(*param).(*convertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex] = &toolCallAccumulator{
 									ID:   toolID,
 									Name: functionName,
 								}
 							}
 
-							acc := (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex]
+							acc := (*param).(*convertOpenAIResponseToGeminiParams).ToolCallsAccumulator[toolIndex]
 
 							// Update ID if provided
 							if toolID != "" {
@@ -224,9 +224,9 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, _, _, rawJSON []
 					template, _ = sjson.SetBytes(template, "candidates.0.finishReason", geminiFinishReason)
 
 					// If we have accumulated tool calls, output them now
-					if len((*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator) > 0 {
+					if len((*param).(*convertOpenAIResponseToGeminiParams).ToolCallsAccumulator) > 0 {
 						partIndex := 0
-						for _, accumulator := range (*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator {
+						for _, accumulator := range (*param).(*convertOpenAIResponseToGeminiParams).ToolCallsAccumulator {
 							namePath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.name", partIndex)
 							argsPath := fmt.Sprintf("candidates.0.content.parts.%d.functionCall.args", partIndex)
 							template, _ = sjson.SetBytes(template, namePath, accumulator.Name)
@@ -237,7 +237,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, _, _, rawJSON []
 						}
 
 						// Clear accumulators
-						(*param).(*ConvertOpenAIResponseToGeminiParams).ToolCallsAccumulator = make(map[int]*ToolCallAccumulator)
+						(*param).(*convertOpenAIResponseToGeminiParams).ToolCallsAccumulator = make(map[int]*toolCallAccumulator)
 					}
 
 					results = append(results, template)
@@ -528,7 +528,7 @@ func captureBracketed(runes []rune, i int) (string, int) {
 }
 
 // tryParseNumber attempts to parse a string as an int or float.
-func tryParseNumber(s string) (interface{}, bool) {
+func tryParseNumber(s string) (any, bool) {
 	if s == "" {
 		return nil, false
 	}

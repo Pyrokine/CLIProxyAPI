@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,13 +21,13 @@ func runOpenAIClaudeStream(t *testing.T, chunks ...string) []sseEvent {
 	var emitted [][]byte
 	for _, chunk := range chunks {
 		emitted = append(
-			emitted, ConvertOpenAIResponseToClaude(
+			emitted, convertOpenAIResponseToClaude(
 				context.Background(), "test-model", []byte(`{"stream":true}`), nil, []byte("data: "+chunk), &param,
 			)...,
 		)
 	}
 	emitted = append(
-		emitted, ConvertOpenAIResponseToClaude(
+		emitted, convertOpenAIResponseToClaude(
 			context.Background(), "test-model", []byte(`{"stream":true}`), nil, []byte("data: [DONE]"), &param,
 		)...,
 	)
@@ -37,12 +38,12 @@ func runOpenAIClaudeStream(t *testing.T, chunks ...string) []sseEvent {
 		if !strings.HasPrefix(s, "event: ") {
 			continue
 		}
-		nl := strings.Index(s, "\n")
-		if nl < 0 {
+		before, after, ok := strings.Cut(s, "\n")
+		if !ok {
 			continue
 		}
-		typ := strings.TrimPrefix(s[:nl], "event: ")
-		rest := s[nl+1:]
+		typ := strings.TrimPrefix(before, "event: ")
+		rest := after
 		if !strings.HasPrefix(rest, "data: ") {
 			continue
 		}
@@ -76,9 +77,9 @@ func toolUseStarts(events []sseEvent) []sseEvent {
 }
 
 func lastStopReason(events []sseEvent) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Type == "message_delta" {
-			return gjson.Get(events[i].Payload, "delta.stop_reason").String()
+	for _, event := range slices.Backward(events) {
+		if event.Type == "message_delta" {
+			return gjson.Get(event.Payload, "delta.stop_reason").String()
 		}
 	}
 	return ""
@@ -88,7 +89,7 @@ func TestConvertOpenAIResponseToClaudeStreamIgnoresNullToolNameDelta(t *testing.
 	originalRequest := []byte(`{"stream":true}`)
 	var param any
 
-	firstChunks := ConvertOpenAIResponseToClaude(
+	firstChunks := convertOpenAIResponseToClaude(
 		context.Background(),
 		"test-model",
 		originalRequest,
@@ -101,7 +102,7 @@ func TestConvertOpenAIResponseToClaudeStreamIgnoresNullToolNameDelta(t *testing.
 		t.Fatalf("expected first chunk to start read_file tool block, got %s", firstOutput)
 	}
 
-	secondChunks := ConvertOpenAIResponseToClaude(
+	secondChunks := convertOpenAIResponseToClaude(
 		context.Background(),
 		"test-model",
 		originalRequest,
