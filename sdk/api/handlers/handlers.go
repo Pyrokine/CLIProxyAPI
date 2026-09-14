@@ -9,6 +9,7 @@ import (
 	"compress/zlib"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,17 +19,20 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/klauspost/compress/zstd"
 	"github.com/tidwall/gjson"
 )
@@ -43,6 +47,9 @@ func ReadRequestBody(c *gin.Context) ([]byte, error) {
 func ReadRequestBodyWithLimit(c *gin.Context, maxDecodedBytes int64) ([]byte, error) {
 	if c == nil || c.Request == nil {
 		return nil, nil
+	}
+	if maxDecodedBytes > 0 {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxDecodedBytes)
 	}
 	raw, err := c.GetRawData()
 	if err != nil {
@@ -153,6 +160,7 @@ const idempotencyKeyMetadataKey = "idempotency_key"
 const (
 	defaultStreamingKeepAliveSeconds  = 0
 	defaultStreamingBootstrapRetries  = 0
+	defaultStreamDeliveryTimeout      = 30 * time.Second
 	maxDecodedRequestBodyBytes        = 50 << 20
 	maxStreamInterceptorHistoryChunks = 64
 	maxStreamInterceptorHistoryBytes  = 1 << 20
@@ -420,13 +428,40 @@ func requestHeadersAndQuery(ctx context.Context) (http.Header, url.Values) {
 	return headers, query
 }
 
+func pluginExecutionMetadata(metadata map[string]any) map[string]any {
+	if len(metadata) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		switch key {
+		case coreexecutor.SelectedAuthCallbackMetadataKey,
+			coreexecutor.SelectedAuthInfoCallbackMetadataKey,
+			coreexecutor.SelectedAuthIndexCallbackMetadataKey,
+			coreexecutor.RouteTraceCallbackMetadataKey,
+			coreexecutor.RouteTraceTruncatedCallbackMetadataKey:
+			continue
+		}
+		if strings.HasPrefix(key, "__route_trace_") {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// Only forward it when the client explicitly provides it.
 	key := ""
 	requestPath := ""
+	var ginCtx *gin.Context
 	if ctx != nil {
-		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+		if currentGinCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && currentGinCtx != nil && currentGinCtx.Request != nil {
+			ginCtx = currentGinCtx
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
 			requestPath = strings.TrimSpace(ginCtx.FullPath())
 			if requestPath == "" && ginCtx.Request.URL != nil {
@@ -452,11 +487,27 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if selectedInfoCallback := selectedAuthInfoCallbackFromContext(ctx); selectedInfoCallback != nil {
 		meta[coreexecutor.SelectedAuthInfoCallbackMetadataKey] = selectedInfoCallback
 	}
+	if ginCtx != nil {
+		if routeTraceCallback := logging.GinRouteTraceCallback(ginCtx); routeTraceCallback != nil {
+			meta[coreexecutor.RouteTraceCallbackMetadataKey] = routeTraceCallback
+		}
+		if truncatedCallback := logging.GinRouteTraceTruncatedCallback(ginCtx); truncatedCallback != nil {
+			meta[coreexecutor.RouteTraceTruncatedCallbackMetadataKey] = truncatedCallback
+		}
+		if !websocket.IsWebSocketUpgrade(ginCtx.Request) {
+			if traceCallback := logging.GinCPATraceIDCallback(ginCtx); traceCallback != nil {
+				meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey] = traceCallback
+			}
+		}
+	}
 	if pinSelectedAuthFromContext(ctx) {
 		meta[coreexecutor.PinSelectedAuthMetadataKey] = true
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+	}
+	if callerScope := requestCallerScope(ginCtx); callerScope != "" {
+		meta[coreexecutor.CallerScopeMetadataKey] = callerScope
 	}
 	if disallowFreeAuthFromContext(ctx) {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
@@ -465,6 +516,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		meta[coreexecutor.RequireResponsesContinuationMetadataKey] = true
 	}
 	return meta
+}
+
+func requestCallerScope(ginCtx *gin.Context) string {
+	if ginCtx == nil {
+		return ""
+	}
+	value, exists := ginCtx.Get("userApiKey")
+	if !exists || value == nil {
+		return ""
+	}
+	return coresession.CallerScope(fmt.Sprint(value))
 }
 
 func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {
@@ -499,6 +561,17 @@ func setServiceTierMetadata(meta map[string]any, rawJSON []byte) {
 		}
 	}
 	meta[coreexecutor.ServiceTierMetadataKey] = serviceTier
+}
+
+func setGenerateMetadata(meta map[string]any, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	generate := true
+	if node := gjson.GetBytes(rawJSON, "generate"); node.Exists() && node.IsBool() && !node.Bool() {
+		generate = false
+	}
+	meta[coreexecutor.GenerateMetadataKey] = generate
 }
 
 func pinnedAuthIDFromContext(ctx context.Context) string {
@@ -587,6 +660,9 @@ type BaseAPIHandler struct {
 	ImageArtifactURLBuilder ImageArtifactURLBuilder
 	TranslatorPluginHooks   sdktranslator.PluginHooks
 	UsageManager            *coreusage.Manager
+
+	apiKeyPolicyMu    sync.RWMutex
+	apiKeyPolicyStore coreusage.APIKeyReservationStore
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -666,6 +742,24 @@ func (h *BaseAPIHandler) SetUsageManager(manager *coreusage.Manager) {
 		return
 	}
 	h.UsageManager = manager
+}
+
+func (h *BaseAPIHandler) SetAPIKeyPolicyStore(store coreusage.APIKeyReservationStore) {
+	if h == nil {
+		return
+	}
+	h.apiKeyPolicyMu.Lock()
+	h.apiKeyPolicyStore = store
+	h.apiKeyPolicyMu.Unlock()
+}
+
+func (h *BaseAPIHandler) apiKeyPolicyStoreSnapshot() coreusage.APIKeyReservationStore {
+	if h == nil {
+		return nil
+	}
+	h.apiKeyPolicyMu.RLock()
+	defer h.apiKeyPolicyMu.RUnlock()
+	return h.apiKeyPolicyStore
 }
 
 // SetTranslatorPluginHooks assigns translator hooks owned by this server.
@@ -868,6 +962,11 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		}
 	}
+	if requestCtx != nil {
+		if outcomeState := logging.RequestOutcomeStateFromContext(requestCtx); outcomeState != nil {
+			parentCtx = logging.WithRequestOutcomeState(parentCtx, outcomeState)
+		}
+	}
 	newCtx, cancel := context.WithCancel(parentCtx)
 
 	endpoint := ""
@@ -887,6 +986,9 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 	}
 	if endpoint != "" {
 		newCtx = logging.WithEndpoint(newCtx, endpoint)
+	}
+	if c != nil && c.Request != nil {
+		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ExtractClientRequestMetadata(c.Request))
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)
@@ -1107,27 +1209,18 @@ func (h *BaseAPIHandler) executeNonStream(
 	skipPluginID string,
 	execFn func(context.Context, []string, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error),
 ) ([]byte, http.Header, *ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
+	executionID := newExecutionRequestID()
+	ctx, providers, normalizedModel, reservation, errMsg := h.prepareAPIKeyExecution(
+		ctx, handlerType, modelName, allowImageModel, executionID,
+	)
 	if errMsg != nil {
 		return nil, nil, errMsg
-	}
-	if h.modelCatalogModelDisabled(modelName) || h.modelCatalogModelDisabled(normalizedModel) {
-		return nil, nil, &ErrorMessage{
-			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model %s is disabled", modelName),
-		}
-	}
-	apiKey := apiKeyFromContext(ctx)
-	if h.apiKeyBlocksModel(apiKey, modelName) || h.apiKeyBlocksModel(apiKey, normalizedModel) {
-		return nil, nil, &ErrorMessage{
-			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model %s is blocked for this API key", modelName),
-		}
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
+	setGenerateMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -1143,6 +1236,9 @@ func (h *BaseAPIHandler) executeNonStream(
 	if len(requestQuery) > 0 {
 		query = cloneURLValues(requestQuery)
 	}
+	lifecycle := h.newRequestLifecycleTracker(
+		ctx, executionID, handlerType, normalizedModel, modelName, false, reqMeta, skipPluginID,
+	)
 	afterAuthCapture := &requestAfterAuthCapture{}
 	opts := coreexecutor.Options{
 		Stream:                      false,
@@ -1152,33 +1248,34 @@ func (h *BaseAPIHandler) executeNonStream(
 		OriginalRequest:             rawJSON,
 		SourceFormat:                sdktranslator.FromString(handlerType),
 		ResponseFormat:              sdktranslator.FromString(responseType),
-		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, skipPluginID),
+		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle, skipPluginID),
+
+		Metadata: reqMeta}
+	var termination *ErrorMessage
+	req, opts, termination = h.applyRequestInterceptorsBeforeAuth(
+		ctx, handlerType, modelName, req, opts, lifecycle, skipPluginID,
+	)
+	if termination != nil {
+		reservation.release(ctx, "request terminated before dispatch")
+		lifecycle.completeError(ctx, termination)
+		return nil, nil, termination
 	}
-	opts.Metadata = reqMeta
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, modelName, req, opts, skipPluginID)
 	resp, err := execFn(ctx, providers, req, opts)
 	if err != nil {
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, nil, &ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		reservation.settleError(ctx, err)
+		errMsg = executionErrorMessage(err)
+		lifecycle.completeError(ctx, errMsg)
+		return nil, nil, errMsg
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.ConfigSnapshot()))
 	body, responseHeaders := h.applyResponseInterceptors(
 		ctx, responseType, normalizedModel, modelName, executedOpts, rawResponseHeaders, responseHeaders,
-		executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, skipPluginID,
+		executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, lifecycle.requestID(),
+		skipPluginID,
 	)
+	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
 
@@ -1201,6 +1298,7 @@ func (h *BaseAPIHandler) ExecuteStreamChunksWithAuthManager(
 	rawJSON []byte,
 	alt string,
 ) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *ErrorMessage) {
+	ctx = coreexecutor.WithStreamDeliveryAcknowledgement(ctx)
 	return h.executeStreamChunksWithAuthManager(
 		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, nil, nil, "",
 	)
@@ -1214,6 +1312,19 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(
 	alt string,
 ) (<-chan []byte, http.Header, <-chan *ErrorMessage) {
 	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, true, nil, nil, "")
+}
+
+// ExecuteImageStreamChunksWithAuthManager preserves image-stream delivery acknowledgements.
+func (h *BaseAPIHandler) ExecuteImageStreamChunksWithAuthManager(
+	ctx context.Context,
+	handlerType, modelName string,
+	rawJSON []byte,
+	alt string,
+) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *ErrorMessage) {
+	ctx = coreexecutor.WithStreamDeliveryAcknowledgement(ctx)
+	return h.executeStreamChunksWithAuthManager(
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, true, nil, nil, "",
+	)
 }
 
 func (h *BaseAPIHandler) executeStreamWithAuthManager(
@@ -1274,29 +1385,14 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 	requestQuery url.Values,
 	skipPluginID string,
 ) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
+	requireTransportTerminal := coreexecutor.StreamDeliveryAcknowledgement(ctx)
+	executionID := newExecutionRequestID()
+	ctx, providers, normalizedModel, reservation, errMsg := h.prepareAPIKeyExecution(
+		ctx, handlerType, modelName, allowImageModel, executionID,
+	)
 	if errMsg != nil {
 		errChan := make(chan *ErrorMessage, 1)
 		errChan <- errMsg
-		close(errChan)
-		return nil, nil, errChan
-	}
-	if h.modelCatalogModelDisabled(modelName) || h.modelCatalogModelDisabled(normalizedModel) {
-		errChan := make(chan *ErrorMessage, 1)
-		errChan <- &ErrorMessage{
-			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model %s is disabled", modelName),
-		}
-		close(errChan)
-		return nil, nil, errChan
-	}
-	apiKey := apiKeyFromContext(ctx)
-	if h.apiKeyBlocksModel(apiKey, modelName) || h.apiKeyBlocksModel(apiKey, normalizedModel) {
-		errChan := make(chan *ErrorMessage, 1)
-		errChan <- &ErrorMessage{
-			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model %s is blocked for this API key", modelName),
-		}
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -1304,6 +1400,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	setReasoningEffortMetadata(reqMeta, handlerType, normalizedModel, rawJSON)
 	setServiceTierMetadata(reqMeta, rawJSON)
+	setGenerateMetadata(reqMeta, rawJSON)
 	payload := rawJSON
 	if len(payload) == 0 {
 		payload = nil
@@ -1319,6 +1416,9 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 	if len(requestQuery) > 0 {
 		query = cloneURLValues(requestQuery)
 	}
+	lifecycle := h.newRequestLifecycleTracker(
+		ctx, executionID, handlerType, normalizedModel, modelName, true, reqMeta, skipPluginID,
+	)
 	afterAuthCapture := &requestAfterAuthCapture{}
 	opts := coreexecutor.Options{
 		Stream:                      true,
@@ -1328,26 +1428,28 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		OriginalRequest:             rawJSON,
 		SourceFormat:                sdktranslator.FromString(handlerType),
 		ResponseFormat:              sdktranslator.FromString(responseType),
-		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, skipPluginID),
+		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle, skipPluginID),
+
+		Metadata: reqMeta}
+	var termination *ErrorMessage
+	req, opts, termination = h.applyRequestInterceptorsBeforeAuth(
+		ctx, handlerType, modelName, req, opts, lifecycle, skipPluginID,
+	)
+	if termination != nil {
+		errChan := make(chan *ErrorMessage, 1)
+		reservation.release(ctx, "request terminated before dispatch")
+		lifecycle.completeError(ctx, termination)
+		errChan <- termination
+		close(errChan)
+		return nil, nil, errChan
 	}
-	opts.Metadata = reqMeta
-	req, opts = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, modelName, req, opts, skipPluginID)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		errChan := make(chan *ErrorMessage, 1)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		errChan <- &ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		reservation.settleError(ctx, err)
+		errMsg = executionErrorMessage(err)
+		lifecycle.completeError(ctx, errMsg)
+		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -1387,6 +1489,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		executedReq, executedOpts := executedRequest()
 		intercepted := interceptStreamChunk(
 			ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
+				RequestID:       lifecycle.requestID(),
 				SourceFormat:    responseType,
 				Model:           normalizedModel,
 				RequestedModel:  modelName,
@@ -1395,7 +1498,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 				OriginalRequest: cloneBytes(executedOpts.OriginalRequest),
 				RequestBody:     cloneBytes(executedReq.Payload),
 				ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
-				Metadata:        executedOpts.Metadata,
+				Metadata:        pluginExecutionMetadata(executedOpts.Metadata),
 			}, skipPluginID,
 		)
 		applyStreamHeaders(intercepted.Headers, intercepted.ClearHeaders)
@@ -1425,7 +1528,8 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 				return
 			}
 			pendingChunks = append(pendingChunks, chunk)
-			if chunk.Err != nil {
+			if chunk.Err != nil || chunk.Terminal {
+				applyStreamHeaderInit()
 				return
 			}
 			if len(chunk.Payload) > 0 {
@@ -1437,24 +1541,83 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 	readInitialStreamChunks()
 
 	go func() {
+		completionOutcome := pluginapi.RequestCompletionSucceeded
+		completionStatus := http.StatusOK
+		var completionErr error
+		defer func() {
+			lifecycle.complete(completionOutcome, completionStatus, completionErr)
+		}()
 		defer close(dataChan)
 		defer close(errChan)
 		if streamCanceledBeforeRead {
+			reservation.markUnknown(ctx)
+			completionOutcome = pluginapi.RequestCompletionCanceled
+			completionStatus = 0
+			if ctx != nil {
+				completionErr = ctx.Err()
+			}
 			return
 		}
 		sentPayload := false
+		terminalObserved := false
 		bootstrapRetries := 0
 		chunkIndex := 0
 		var historyChunks [][]byte
 		maxBootstrapRetries := StreamingBootstrapRetries(h.ConfigSnapshot())
+		var deliveryFailureMu sync.Mutex
+		var deliveryFailure error
+		recordDeliveryFailure := func(err error) {
+			if err == nil {
+				return
+			}
+			deliveryFailureMu.Lock()
+			if deliveryFailure == nil {
+				deliveryFailure = err
+			}
+			deliveryFailureMu.Unlock()
+		}
+		currentDeliveryFailure := func() error {
+			deliveryFailureMu.Lock()
+			defer deliveryFailureMu.Unlock()
+			return deliveryFailure
+		}
+		trackAcknowledgement := func(acknowledge func(error)) func(error) {
+			return func(err error) {
+				recordDeliveryFailure(err)
+				if acknowledge != nil {
+					acknowledge(err)
+				}
+			}
+		}
+		completeCancellation := func() {
+			if errDelivery := currentDeliveryFailure(); errDelivery != nil {
+				completionOutcome = pluginapi.RequestCompletionFailed
+				completionStatus = http.StatusInternalServerError
+				completionErr = errDelivery
+				return
+			}
+			completionOutcome = pluginapi.RequestCompletionCanceled
+			completionStatus = 0
+			if ctx != nil {
+				completionErr = ctx.Err()
+			}
+		}
 
 		sendErr := func(msg *ErrorMessage) bool {
+			var sourceAcknowledge func(error)
+			if msg != nil {
+				sourceAcknowledge = msg.Acknowledge
+				msg.Acknowledge = trackAcknowledgement(sourceAcknowledge)
+			}
 			if ctx == nil {
 				errChan <- msg
 				return true
 			}
 			select {
 			case <-ctx.Done():
+				if sourceAcknowledge != nil {
+					sourceAcknowledge(ctx.Err())
+				}
 				return false
 			case errChan <- msg:
 				return true
@@ -1462,14 +1625,16 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		}
 
 		sendData := func(chunk coreexecutor.StreamChunk) bool {
+			sourceAcknowledge := chunk.Acknowledge
+			chunk.Acknowledge = trackAcknowledgement(sourceAcknowledge)
 			if ctx == nil {
 				dataChan <- chunk
 				return true
 			}
 			select {
 			case <-ctx.Done():
-				if chunk.Acknowledge != nil {
-					chunk.Acknowledge(ctx.Err())
+				if sourceAcknowledge != nil {
+					sourceAcknowledge(ctx.Err())
 				}
 				return false
 			case dataChan <- chunk:
@@ -1478,16 +1643,24 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		}
 
 		bootstrapEligible := func(err error) bool {
-			status := statusFromError(err)
-			if status == 0 {
-				return true
+			if isRequestTerminatedExecutionError(err) {
+				return false
 			}
-			switch status {
-			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
-				http.StatusRequestTimeout, http.StatusTooManyRequests:
+			var dispositionErr coreexecutor.ExecutionDispositionError
+			if !errors.As(err, &dispositionErr) || dispositionErr == nil {
+				return false
+			}
+			disposition := dispositionErr.ExecutionDisposition()
+			if disposition.Outcome != coreexecutor.ExecutionOutcomeRejectedBeforeProcessing {
+				return false
+			}
+			switch disposition.RetryDirective {
+			case coreexecutor.RetryDirectiveNextAuth,
+				coreexecutor.RetryDirectiveNextProvider,
+				coreexecutor.RetryDirectiveRetryAfter:
 				return true
 			default:
-				return status >= http.StatusInternalServerError
+				return false
 			}
 		}
 
@@ -1496,10 +1669,26 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 			for {
 				chunk, ok, canceled := nextStreamChunk(ctx, &pendingChunks, &streamClosedBeforeRead, chunks)
 				if canceled {
+					reservation.markUnknown(ctx)
+					completeCancellation()
 					return
 				}
 				if !ok {
 					applyStreamHeaderInit()
+					if errDelivery := currentDeliveryFailure(); errDelivery != nil {
+						completionOutcome = pluginapi.RequestCompletionFailed
+						completionStatus = http.StatusInternalServerError
+						completionErr = errDelivery
+						return
+					}
+					if !terminalObserved {
+						reservation.markUnknown(ctx)
+						if requireTransportTerminal {
+							completionOutcome = pluginapi.RequestCompletionFailed
+							completionStatus = http.StatusBadGateway
+							completionErr = errStreamClosedBeforeTransportTerminal
+						}
+					}
 					return
 				}
 				if chunk.Err != nil {
@@ -1507,6 +1696,14 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 					if !sentPayload {
 						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
+							if errDrain := acknowledgeAndDrainBootstrapAttempt(ctx, chunk, chunks); errDrain != nil {
+								reservation.markUnknown(ctx)
+								completionOutcome = pluginapi.RequestCompletionCanceled
+								completionStatus = 0
+								completionErr = errDrain
+								return
+							}
+							chunk.Acknowledge = nil
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 							if retryErr == nil {
 								rawStreamHeaders = cloneHeader(retryResult.Headers)
@@ -1528,20 +1725,43 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 						}
 					}
 
-					status := http.StatusInternalServerError
-					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
-						if code := se.StatusCode(); code > 0 {
-							status = code
+					reservation.settleError(ctx, streamErr)
+					errMsg := executionErrorMessage(streamErr)
+					errMsg.Acknowledge = reservation.wrapAcknowledgement(ctx, chunk.Acknowledge)
+					completionOutcome = pluginapi.RequestCompletionFailed
+					if errMsg.DirectResponse {
+						completionOutcome = pluginapi.RequestCompletionRejected
+					}
+					completionStatus = errMsg.StatusCode
+					completionErr = streamErr
+					if !sendErr(errMsg) && ctx != nil && ctx.Err() != nil {
+						completeCancellation()
+						return
+					}
+					for {
+						_, ok, canceled := nextStreamChunk(ctx, nil, nil, chunks)
+						if canceled {
+							completeCancellation()
+							return
+						}
+						if !ok {
+							if errDelivery := currentDeliveryFailure(); errDelivery != nil {
+								completionOutcome = pluginapi.RequestCompletionFailed
+								completionStatus = http.StatusInternalServerError
+								completionErr = errDelivery
+							}
+							return
 						}
 					}
-					var addon http.Header
-					if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
-						if hdr := he.Headers(); hdr != nil {
-							addon = hdr.Clone()
-						}
+				}
+				if chunk.Terminal {
+					terminalObserved = true
+					chunk.Acknowledge = reservation.wrapAcknowledgement(ctx, chunk.Acknowledge)
+					if okSendData := sendData(chunk); !okSendData {
+						completeCancellation()
+						return
 					}
-					_ = sendErr(&ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
-					return
+					continue
 				}
 				if len(chunk.Payload) > 0 {
 					applyStreamHeaderInit()
@@ -1550,6 +1770,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 						executedReq, executedOpts := executedRequest()
 						intercepted := interceptStreamChunk(
 							ctx, interceptorHost, pluginapi.StreamChunkInterceptRequest{
+								RequestID:       lifecycle.requestID(),
 								SourceFormat:    responseType,
 								Model:           normalizedModel,
 								RequestedModel:  modelName,
@@ -1560,7 +1781,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 								Body:            payload,
 								HistoryChunks:   cloneByteSlices(historyChunks),
 								ChunkIndex:      chunkIndex,
-								Metadata:        executedOpts.Metadata,
+								Metadata:        pluginExecutionMetadata(executedOpts.Metadata),
 							}, skipPluginID,
 						)
 						applyStreamHeaders(intercepted.Headers, intercepted.ClearHeaders)
@@ -1569,25 +1790,61 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 						}
 						chunkIndex++
 						if intercepted.DropChunk {
+							streamErr := fmt.Errorf("stream chunk dropped by interceptor")
+							errMsg := executionErrorMessage(streamErr)
 							if chunk.Acknowledge != nil {
-								chunk.Acknowledge(fmt.Errorf("stream chunk dropped by interceptor"))
+								errMsg.Acknowledge = func(errDelivery error) {
+									if errDelivery != nil {
+										chunk.Acknowledge(errDelivery)
+										return
+									}
+									chunk.Acknowledge(streamErr)
+								}
 							}
-							continue
+							reservation.markUnknown(ctx)
+							errMsg.Acknowledge = reservation.wrapAcknowledgement(ctx, errMsg.Acknowledge)
+							completionOutcome = pluginapi.RequestCompletionFailed
+							completionStatus = errMsg.StatusCode
+							completionErr = streamErr
+							if !sendErr(errMsg) && ctx != nil && ctx.Err() != nil {
+								completeCancellation()
+								return
+							}
+							for {
+								_, ok, canceled := nextStreamChunk(ctx, nil, nil, chunks)
+								if canceled {
+									completeCancellation()
+									return
+								}
+								if !ok {
+									if errDelivery := currentDeliveryFailure(); errDelivery != nil {
+										completionOutcome = pluginapi.RequestCompletionFailed
+										completionStatus = http.StatusInternalServerError
+										completionErr = errDelivery
+									}
+									return
+								}
+							}
 						}
 					} else {
 						chunkIndex++
 					}
 					sentPayload = true
 					streamHeadersCommitted = true
-					if okSendData := sendData(coreexecutor.StreamChunk{
-						Payload:     payload,
-						Acknowledge: chunk.Acknowledge,
-					}); !okSendData {
+					if okSendData := sendData(
+						coreexecutor.StreamChunk{
+							Payload:     payload,
+							Acknowledge: reservation.wrapAcknowledgement(ctx, chunk.Acknowledge),
+						},
+					); !okSendData {
+						completeCancellation()
 						return
 					}
 					if streamInterceptorsActive {
 						historyChunks = appendStreamInterceptorHistory(historyChunks, payload)
 					}
+				} else if chunk.Acknowledge != nil {
+					chunk.Acknowledge(nil)
 				}
 			}
 		}
@@ -1636,6 +1893,31 @@ func nextStreamChunk(
 		*closed = true
 	}
 	return chunk, ok, false
+}
+
+func acknowledgeAndDrainBootstrapAttempt(
+	ctx context.Context,
+	failure coreexecutor.StreamChunk,
+	chunks <-chan coreexecutor.StreamChunk,
+) error {
+	if failure.Acknowledge != nil {
+		failure.Acknowledge(nil)
+	}
+	for {
+		chunk, ok, canceled := nextStreamChunk(ctx, nil, nil, chunks)
+		if canceled {
+			if ctx != nil && ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return context.Canceled
+		}
+		if !ok {
+			return nil
+		}
+		if chunk.Acknowledge != nil {
+			chunk.Acknowledge(nil)
+		}
+	}
 }
 
 func appendStreamInterceptorHistory(history [][]byte, chunk []byte) [][]byte {
@@ -1853,21 +2135,24 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(
 	handlerType, requestedModel string,
 	req coreexecutor.Request,
 	opts coreexecutor.Options,
+	lifecycle *requestLifecycleTracker,
 	skipPluginID string,
-) (coreexecutor.Request, coreexecutor.Options) {
+) (coreexecutor.Request, coreexecutor.Options, *ErrorMessage) {
 	host := h.interceptorHost()
 	if !requestInterceptorsEnabled(host) {
-		return req, opts
+		return req, opts, nil
 	}
 	resp := interceptRequestBeforeAuth(
 		ctx, host, pluginapi.RequestInterceptRequest{
+			RequestID:      lifecycle.requestID(),
+			TraceID:        lifecycle.traceID(),
 			SourceFormat:   handlerType,
 			Model:          req.Model,
 			RequestedModel: requestedModel,
 			Stream:         opts.Stream,
 			Headers:        cloneHeader(opts.Headers),
 			Body:           cloneBytes(req.Payload),
-			Metadata:       opts.Metadata,
+			Metadata:       pluginExecutionMetadata(opts.Metadata),
 		}, skipPluginID,
 	)
 	opts.Headers = mergeRequestInterceptorHeaders(opts.Headers, resp.Headers, resp.ClearHeaders)
@@ -1875,11 +2160,15 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(
 		req.Payload = cloneBytes(resp.Body)
 		opts.OriginalRequest = cloneBytes(resp.Body)
 	}
-	return req, opts
+	if resp.Terminate {
+		return req, opts, requestTerminationError(resp)
+	}
+	return req, opts, nil
 }
 
 func (h *BaseAPIHandler) requestAfterAuthInterceptor(
 	capture *requestAfterAuthCapture,
+	lifecycle *requestLifecycleTracker,
 	skipPluginID string,
 ) coreexecutor.RequestAfterAuthInterceptor {
 	if !requestInterceptorsEnabled(h.interceptorHost()) {
@@ -1889,10 +2178,10 @@ func (h *BaseAPIHandler) requestAfterAuthInterceptor(
 		ctx context.Context,
 		req coreexecutor.RequestAfterAuthInterceptRequest,
 	) coreexecutor.RequestAfterAuthInterceptResponse {
-		resp := h.applyRequestInterceptorsAfterAuth(ctx, req, skipPluginID)
+		resp := h.applyRequestInterceptorsAfterAuth(ctx, req, lifecycle, skipPluginID)
 		capturedReq := req.Request
 		capturedOpts := req.Options
-		if resp.Handled {
+		if resp.Handled && !resp.Terminate {
 			capturedReq = resp.Request
 			capturedOpts = resp.Options
 		}
@@ -1906,6 +2195,7 @@ func (h *BaseAPIHandler) requestAfterAuthInterceptor(
 func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(
 	ctx context.Context,
 	req coreexecutor.RequestAfterAuthInterceptRequest,
+	lifecycle *requestLifecycleTracker,
 	skipPluginID string,
 ) coreexecutor.RequestAfterAuthInterceptResponse {
 	host := h.interceptorHost()
@@ -1914,6 +2204,8 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(
 	}
 	resp := interceptRequestAfterAuth(
 		ctx, host, pluginapi.RequestInterceptRequest{
+			RequestID:      lifecycle.requestID(),
+			TraceID:        lifecycle.traceID(),
 			SourceFormat:   req.SourceFormat.String(),
 			ToFormat:       req.ToFormat.String(),
 			Model:          req.Model,
@@ -1921,7 +2213,7 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(
 			Stream:         req.Stream,
 			Headers:        cloneHeader(req.Options.Headers),
 			Body:           cloneBytes(req.Request.Payload),
-			Metadata:       req.Options.Metadata,
+			Metadata:       pluginExecutionMetadata(req.Options.Metadata),
 		}, skipPluginID,
 	)
 	nextReq := req.Request
@@ -1931,7 +2223,15 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(
 		nextReq.Payload = cloneBytes(resp.Body)
 		nextOpts.OriginalRequest = cloneBytes(resp.Body)
 	}
-	return coreexecutor.RequestAfterAuthInterceptResponse{Request: nextReq, Options: nextOpts, Handled: true}
+	return coreexecutor.RequestAfterAuthInterceptResponse{
+		Request:         nextReq,
+		Options:         nextOpts,
+		Handled:         true,
+		Terminate:       resp.Terminate,
+		StatusCode:      normalizedTerminationStatus(resp.StatusCode),
+		ResponseHeaders: cloneHeader(resp.ResponseHeaders),
+		ResponseBody:    cloneBytes(resp.ResponseBody),
+	}
 }
 
 func (h *BaseAPIHandler) applyResponseInterceptors(
@@ -1941,6 +2241,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(
 	rawResponseHeaders, responseHeaders http.Header,
 	originalRequest, requestBody, body []byte,
 	statusCode int,
+	requestID,
 	skipPluginID string,
 ) ([]byte, http.Header) {
 	host := h.interceptorHost()
@@ -1949,6 +2250,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(
 	}
 	resp := interceptResponse(
 		ctx, host, pluginapi.ResponseInterceptRequest{
+			RequestID:       requestID,
 			SourceFormat:    handlerType,
 			Model:           normalizedModel,
 			RequestedModel:  requestedModel,
@@ -1959,7 +2261,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(
 			RequestBody:     cloneBytes(requestBody),
 			Body:            cloneBytes(body),
 			StatusCode:      statusCode,
-			Metadata:        opts.Metadata,
+			Metadata:        pluginExecutionMetadata(opts.Metadata),
 		}, skipPluginID,
 	)
 	responseHeaders = downstreamHeadersAfterInterceptors(
@@ -1974,15 +2276,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(
 }
 
 func statusFromError(err error) int {
-	if err == nil {
-		return 0
-	}
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-		if code := se.StatusCode(); code > 0 {
-			return code
-		}
-	}
-	return 0
+	return clienterror.HTTPStatusFromError(err)
 }
 
 func supportsContext1M(modelName string, providers []string) bool {
@@ -2070,8 +2364,21 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	}
 
 	if len(providers) == 0 {
+		body, errMarshal := json.Marshal(
+			ErrorResponse{
+				Error: ErrorDetail{
+					Message: "unknown provider for model " + modelName,
+					Type:    "invalid_request_error",
+					Code:    "model_not_found",
+				},
+			},
+		)
+		if errMarshal != nil {
+			body = []byte(`{"error":{"message":"unknown provider for model","type":"invalid_request_error","code":"model_not_found"}}`)
+		}
 		return nil, "", &ErrorMessage{
-			StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName),
+			StatusCode: http.StatusBadRequest,
+			Error:      errors.New(string(body)),
 		}
 	}
 	if thinking.HasContext1MTag(resolvedModelName) && requiresContext1MCapabilityValidation(providers) &&
@@ -2119,9 +2426,11 @@ func allowsBuiltinImageModelBareFallback(model string) bool {
 	}
 
 	prefix := strings.ToLower(strings.TrimSpace(model[:idx]))
-	switch canonicalImageOnlyModel(model) {
-	case "gpt-image-1.5", "gpt-image-2":
+	canonical := canonicalImageOnlyModel(model)
+	if registry.IsCodexImageModel(canonical) {
 		return prefix == "codex" || prefix == "openai"
+	}
+	switch canonical {
 	case "grok-imagine-image", "grok-imagine-image-quality":
 		return prefix == "xai" || prefix == "x-ai" || prefix == "grok"
 	default:
@@ -2130,11 +2439,11 @@ func allowsBuiltinImageModelBareFallback(model string) bool {
 }
 
 func canonicalImageOnlyModel(model string) string {
-	switch strings.ToLower(strings.TrimSpace(routeModelBaseName(model))) {
-	case "gpt-image-1.5":
-		return "gpt-image-1.5"
-	case "gpt-image-2":
-		return "gpt-image-2"
+	baseModel := strings.ToLower(strings.TrimSpace(routeModelBaseName(model)))
+	if canonical := registry.CanonicalCodexImageModel(baseModel); canonical != "" {
+		return canonical
+	}
+	switch baseModel {
 	case "grok-imagine-image":
 		return "grok-imagine-image"
 	case "grok-imagine-image-quality":
@@ -2181,15 +2490,136 @@ func replaceHeader(dst http.Header, src http.Header) {
 	}
 }
 
+// WriteStreamBytes writes every byte or returns the first write failure.
+func WriteStreamBytes(writer io.Writer, parts ...[]byte) error {
+	if writer == nil {
+		return fmt.Errorf("stream writer is nil")
+	}
+	for _, part := range parts {
+		if len(part) == 0 {
+			continue
+		}
+		n, err := writer.Write(part)
+		if err != nil {
+			return err
+		}
+		if n != len(part) {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+// FlushStreamResponse flushes buffered response bytes and returns observable flush failures.
+func FlushStreamResponse(writer http.ResponseWriter, flusher http.Flusher) error {
+	if writer != nil {
+		err := http.NewResponseController(writer).Flush()
+		if err == nil || !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+	}
+	if flusher == nil {
+		return http.ErrNotSupported
+	}
+	flusher.Flush()
+	return nil
+}
+
+// DeliverStreamResponse writes and flushes one downstream stream unit under a bounded write deadline.
+func DeliverStreamResponse(
+	writer http.ResponseWriter,
+	flusher http.Flusher,
+	write func() error,
+) error {
+	return deliverStreamResponseWithTimeout(writer, flusher, defaultStreamDeliveryTimeout, write)
+}
+
+func deliverStreamResponseWithTimeout(
+	writer http.ResponseWriter,
+	flusher http.Flusher,
+	timeout time.Duration,
+	write func() error,
+) error {
+	return withStreamWriteDeadline(
+		writer, timeout, func() error {
+			if write != nil {
+				if errWrite := write(); errWrite != nil {
+					return errWrite
+				}
+			}
+			return FlushStreamResponse(writer, flusher)
+		},
+	)
+}
+
+func withStreamWriteDeadline(
+	writer http.ResponseWriter,
+	timeout time.Duration,
+	write func() error,
+) (err error) {
+	if write == nil {
+		return nil
+	}
+	controller := http.NewResponseController(writer)
+	deadlineSet := false
+	if writer != nil && timeout > 0 {
+		errDeadline := controller.SetWriteDeadline(time.Now().Add(timeout))
+		if errDeadline == nil {
+			deadlineSet = true
+		} else if !errors.Is(errDeadline, http.ErrNotSupported) {
+			return errDeadline
+		}
+	}
+	if deadlineSet {
+		defer func() {
+			errClear := controller.SetWriteDeadline(time.Time{})
+			if errClear != nil && !errors.Is(errClear, http.ErrNotSupported) {
+				err = errors.Join(err, errClear)
+			}
+		}()
+	}
+	return write()
+}
+
+// AcknowledgeStreamError reports terminal error response delivery at most once upstream.
+func AcknowledgeStreamError(msg *ErrorMessage, err error) {
+	if msg != nil && msg.Acknowledge != nil {
+		msg.Acknowledge(err)
+	}
+}
+
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *ErrorMessage) {
+	_ = h.WriteErrorResponseWithError(c, msg)
+}
+
+// WriteAcknowledgedStreamError writes, flushes, and acknowledges an initial stream error response.
+func (h *BaseAPIHandler) WriteAcknowledgedStreamError(
+	c *gin.Context,
+	flusher http.Flusher,
+	msg *ErrorMessage,
+) error {
+	err := DeliverStreamResponse(
+		c.Writer, flusher, func() error {
+			return h.WriteErrorResponseWithError(c, msg)
+		},
+	)
+	AcknowledgeStreamError(msg, err)
+	return err
+}
+
+// WriteErrorResponseWithError writes an error response and reports downstream write failures.
+func (h *BaseAPIHandler) WriteErrorResponseWithError(c *gin.Context, msg *ErrorMessage) error {
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
+	if msg != nil && msg.DirectResponse {
+		return h.writeDirectErrorResponse(c, status, msg)
+	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.ConfigSnapshot()) {
 		for key, values := range msg.Addon {
-			if len(values) == 0 {
+			if len(values) == 0 || IsCPAReservedResponseHeader(key) {
 				continue
 			}
 			c.Writer.Header().Del(key)
@@ -2226,23 +2656,62 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *ErrorMessage) {
 		c.Writer.Header().Set("Content-Type", "application/json")
 	}
 	c.Status(status)
-	_, _ = c.Writer.Write(body)
+	return WriteStreamBytes(c.Writer, body)
+}
+
+func (h *BaseAPIHandler) writeDirectErrorResponse(c *gin.Context, status int, msg *ErrorMessage) error {
+	for key, values := range FilterUpstreamHeaders(msg.Headers) {
+		if len(values) == 0 || IsCPAReservedResponseHeader(key) {
+			continue
+		}
+		c.Writer.Header().Del(key)
+		for _, value := range values {
+			c.Writer.Header().Add(key, value)
+		}
+	}
+	body := cloneBytes(msg.Body)
+	if h.requestLoggingEnabled() {
+		captured, existsCaptured := c.Get(logging.APIResponseCapturedContextKey)
+		if !existsCaptured || captured != true {
+			appendAPIResponse(c, body)
+		}
+	}
+	if !c.Writer.Written() && c.Writer.Header().Get("Content-Type") == "" {
+		c.Writer.Header().Set("Content-Type", "application/json")
+	}
+	c.Status(status)
+	return WriteStreamBytes(c.Writer, body)
 }
 
 func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *ErrorMessage) {
-	if h.requestLoggingEnabled() {
-		if ginContext, ok := util.GinContextValue(ctx).(*gin.Context); ok {
-			if apiResponseErrors, isExist := ginContext.Get("API_RESPONSE_ERROR"); isExist {
-				if slicesAPIResponseError, isOk := apiResponseErrors.([]*ErrorMessage); isOk {
-					slicesAPIResponseError = append(slicesAPIResponseError, err)
-					ginContext.Set("API_RESPONSE_ERROR", slicesAPIResponseError)
-				}
-			} else {
-				// Create new response data entry
-				ginContext.Set("API_RESPONSE_ERROR", []*ErrorMessage{err})
-			}
+	ginContext, ok := util.GinContextValue(ctx).(*gin.Context)
+	if !ok || ginContext == nil {
+		return
+	}
+	if apiResponseErrors, exists := ginContext.Get("API_RESPONSE_ERROR"); exists {
+		if errorsList, valid := apiResponseErrors.([]*ErrorMessage); valid {
+			ginContext.Set("API_RESPONSE_ERROR", append(errorsList, err))
+		}
+	} else {
+		ginContext.Set("API_RESPONSE_ERROR", []*ErrorMessage{err})
+	}
+
+	requestContext := ctx
+	if ginContext.Request != nil {
+		requestContext = ginContext.Request.Context()
+	}
+	kind := logging.RequestOutcomeUpstreamError
+	stage := "upstream_response"
+	reason := ""
+	if err != nil {
+		if err.StatusCode >= http.StatusBadRequest && err.StatusCode < http.StatusInternalServerError {
+			kind = logging.RequestOutcomeClientError
+		}
+		if err.Error != nil {
+			reason = strings.TrimSpace(err.Error.Error())
 		}
 	}
+	logging.MarkRequestOutcomeFailure(requestContext, kind, stage, reason)
 }
 
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.

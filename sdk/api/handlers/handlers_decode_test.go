@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -41,6 +44,22 @@ func TestDecodeRequestBody(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestReadRequestBodyWithLimitRejectsOversizedRawBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages",
+		strings.NewReader("12345"),
+	)
+
+	_, err := ReadRequestBodyWithLimit(ginContext, 4)
+	if err == nil || !strings.Contains(err.Error(), "request body too large") {
+		t.Fatalf("ReadRequestBodyWithLimit error = %v, want request body too large", err)
 	}
 }
 

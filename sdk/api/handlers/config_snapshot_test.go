@@ -13,13 +13,13 @@ func TestBaseAPIHandlerConfigSnapshotConcurrentPublication(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 10_000; i++ {
+		for i := range 10_000 {
 			handler.UpdateClients(&config.SDKConfig{RequestLog: i%2 == 0})
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 10_000; i++ {
+		for range 10_000 {
 			cfg := handler.ConfigSnapshot()
 			if cfg == nil {
 				t.Error("ConfigSnapshot() returned nil")

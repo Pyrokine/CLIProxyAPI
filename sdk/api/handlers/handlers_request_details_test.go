@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -9,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -17,6 +20,7 @@ import (
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func TestGetContextWithCancelIncludesUsageManager(t *testing.T) {
@@ -26,11 +30,71 @@ func TestGetContextWithCancelIncludesUsageManager(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
 	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	ginCtx.Request.RemoteAddr = "203.0.113.42:4321"
+	ginCtx.Request.Header.Add("X-Forwarded-For", "198.51.100.1")
+	ginCtx.Request.Header.Add("X-Forwarded-For", "203.0.113.42")
+	ginCtx.Request.Header.Set("User-Agent", "handler-test-client/1.0")
 
 	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
 	defer cancel()
 	if got := coreusage.ManagerFromContext(ctx); got != manager {
 		t.Fatalf("usage manager = %p, want %p", got, manager)
+	}
+	metadata := internallogging.GetClientRequestMetadata(ctx)
+	if metadata.ClientIP != "203.0.113.42" || metadata.XForwardedFor != "198.51.100.1, 203.0.113.42" || metadata.UserAgent != "handler-test-client/1.0" {
+		t.Fatalf("client request metadata = %+v", metadata)
+	}
+	ginCtx.Request.RemoteAddr = "127.0.0.1:9"
+	ginCtx.Request.Header.Set("User-Agent", "mutated")
+	if got := internallogging.GetClientRequestMetadata(ctx); got != metadata {
+		t.Fatalf("client request metadata changed after request mutation: %+v", got)
+	}
+}
+
+func TestGetContextWithCancelUsesResolvedClientAddress(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request.RemoteAddr = "127.0.0.1:4321"
+	request.Header.Set("X-Forwarded-For", "198.51.100.20")
+	client := access.ResolveClientAddress(request, []string{"127.0.0.1/32"})
+	request = request.WithContext(access.WithClientAddress(request.Context(), client))
+	ginCtx.Request = request
+
+	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+	defer cancel()
+	metadata := internallogging.GetClientRequestMetadata(ctx)
+	if metadata.ClientIP != "198.51.100.20" || metadata.XForwardedFor != "198.51.100.20" {
+		t.Fatalf("client request metadata = %+v, want trusted forwarded client", metadata)
+	}
+}
+
+func TestGetContextWithCancelPreservesRequestOutcomeState(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	outcomeState := internallogging.NewRequestOutcomeState()
+	request = request.WithContext(
+		internallogging.WithRequestOutcomeState(request.Context(), outcomeState),
+	)
+	ginCtx.Request = request
+
+	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+	defer cancel()
+	if got := internallogging.RequestOutcomeStateFromContext(ctx); got != outcomeState {
+		t.Fatalf("request outcome state = %p, want %p", got, outcomeState)
+	}
+	_ = coreusage.PublishRecord(
+		ctx, coreusage.Record{
+			Failed: true,
+			Fail:   coreusage.Failure{Body: "upstream failed"},
+		},
+	)
+	outcome := outcomeState.Snapshot()
+	if !outcome.Failed || outcome.Kind != internallogging.RequestOutcomeUpstreamError {
+		t.Fatalf("request outcome = %+v, want upstream failure", outcome)
 	}
 }
 
@@ -194,12 +258,52 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	}
 }
 
+func TestGetRequestDetailsUnknownModelErrorResistsJSONInjection(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
+
+	for _, model := range []string{
+		"unroutable-model",
+		`foo"bar`,
+		`x","code":"insufficient_quota","x":"`,
+		`x"}}`,
+		`foo\bar`,
+		"foo\nbar",
+	} {
+		t.Run(
+			model, func(t *testing.T) {
+				_, _, errMsg := handler.getRequestDetails(model)
+				if errMsg == nil || errMsg.Error == nil {
+					t.Fatal("expected an error for an unroutable model")
+				}
+				if errMsg.StatusCode != http.StatusBadRequest {
+					t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusBadRequest)
+				}
+				body := errMsg.Error.Error()
+				if !json.Valid([]byte(body)) {
+					t.Fatalf("error body is not valid JSON: %s", body)
+				}
+				if got := gjson.Get(body, "error.code").String(); got != "model_not_found" {
+					t.Fatalf("error code = %q, want model_not_found; body=%s", got, body)
+				}
+				wantMessage := "unknown provider for model " + model
+				if got := gjson.Get(body, "error.message").String(); got != wantMessage {
+					t.Fatalf("error message = %q, want %q", got, wantMessage)
+				}
+			},
+		)
+	}
+}
+
 func TestGetRequestDetailsImageOnlyModelsReturn503(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 	models := []string{
 		"gpt-image-1.5",
 		"gpt-image-2",
 		"codex/gpt-image-2",
+		"gpt-image-2.5-flare",
+		"codex/gpt-image-2.5-flare-2026-09-08",
+		"openai/gpt-image-2.5-sunburst",
+		"gpt-image-2.5-sunburst-2026-09-08",
 		"grok-imagine-image",
 		"xai/grok-imagine-image",
 		"grok-imagine-image-quality",
@@ -207,19 +311,23 @@ func TestGetRequestDetailsImageOnlyModelsReturn503(t *testing.T) {
 	}
 
 	for _, model := range models {
-		t.Run(model, func(t *testing.T) {
-			_, _, errMsg := handler.getRequestDetails(model)
-			if errMsg == nil {
-				t.Fatalf("getRequestDetails(%q) error = nil, want image-only error", model)
-			}
-			if errMsg.StatusCode != http.StatusServiceUnavailable {
-				t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
-			}
-			message := errMsg.Error.Error()
-			if !strings.Contains(message, "/v1/images/generations") || !strings.Contains(message, "/v1/images/edits") {
-				t.Fatalf("unexpected error message: %q", message)
-			}
-		})
+		t.Run(
+			model, func(t *testing.T) {
+				_, _, errMsg := handler.getRequestDetails(model)
+				if errMsg == nil {
+					t.Fatalf("getRequestDetails(%q) error = nil, want image-only error", model)
+				}
+				if errMsg.StatusCode != http.StatusServiceUnavailable {
+					t.Fatalf("status = %d, want %d", errMsg.StatusCode, http.StatusServiceUnavailable)
+				}
+				message := errMsg.Error.Error()
+				if !strings.Contains(message, "/v1/images/generations") || !strings.Contains(
+					message, "/v1/images/edits",
+				) {
+					t.Fatalf("unexpected error message: %q", message)
+				}
+			},
+		)
 	}
 }
 
@@ -228,16 +336,20 @@ func TestValidateImageOnlyModelAllowsImageEndpoints(t *testing.T) {
 	models := []string{
 		"gpt-image-1.5",
 		"codex/gpt-image-2",
+		"gpt-image-2.5-flare",
+		"openai/gpt-image-2.5-sunburst-2026-09-08",
 		"grok-imagine-image",
 		"xai/grok-imagine-image-quality(high)",
 	}
 
 	for _, model := range models {
-		t.Run(model, func(t *testing.T) {
-			if errMsg := handler.validateImageOnlyModel(model, true); errMsg != nil {
-				t.Fatalf("validateImageOnlyModel(%q, true) = %+v, want nil", model, errMsg)
-			}
-		})
+		t.Run(
+			model, func(t *testing.T) {
+				if errMsg := handler.validateImageOnlyModel(model, true); errMsg != nil {
+					t.Fatalf("validateImageOnlyModel(%q, true) = %+v, want nil", model, errMsg)
+				}
+			},
+		)
 	}
 }
 
@@ -246,7 +358,10 @@ func TestGetRequestDetailsWithOptionsCanonicalizesBuiltinImageModels(t *testing.
 	modelRegistry.RegisterClient(
 		"test-image-details-codex",
 		"codex",
-		[]*registry.ModelInfo{{ID: "gpt-image-2"}},
+		[]*registry.ModelInfo{
+			{ID: "gpt-image-2"},
+			{ID: "gpt-image-2.5-flare-2026-09-08"},
+		},
 	)
 	modelRegistry.RegisterClient(
 		"test-image-details-xai",
@@ -258,11 +373,13 @@ func TestGetRequestDetailsWithOptionsCanonicalizesBuiltinImageModels(t *testing.
 		"codex",
 		[]*registry.ModelInfo{{ID: "TeamA/gpt-image-2"}},
 	)
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient("test-image-details-codex")
-		modelRegistry.UnregisterClient("test-image-details-xai")
-		modelRegistry.UnregisterClient("test-image-details-prefixed")
-	})
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient("test-image-details-codex")
+			modelRegistry.UnregisterClient("test-image-details-xai")
+			modelRegistry.UnregisterClient("test-image-details-prefixed")
+		},
+	)
 
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, coreauth.NewManager(nil, nil, nil))
 	tests := []struct {
@@ -271,6 +388,11 @@ func TestGetRequestDetailsWithOptionsCanonicalizesBuiltinImageModels(t *testing.
 		wantModel    string
 	}{
 		{model: "Codex/GPT-IMAGE-2(high)", wantProvider: "codex", wantModel: "gpt-image-2"},
+		{
+			model:        "OPENAI/GPT-IMAGE-2.5-FLARE-2026-09-08(HIGH)",
+			wantProvider: "codex",
+			wantModel:    "gpt-image-2.5-flare-2026-09-08",
+		},
 		{
 			model:        "XAI/Grok-Imagine-Image-Quality(HIGH)",
 			wantProvider: "xai",
@@ -284,18 +406,20 @@ func TestGetRequestDetailsWithOptionsCanonicalizesBuiltinImageModels(t *testing.
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.model, func(t *testing.T) {
-			providers, model, errMsg := handler.getRequestDetailsWithOptions(tt.model, true)
-			if errMsg != nil {
-				t.Fatalf("getRequestDetailsWithOptions(%q, true) error = %v", tt.model, errMsg.Error)
-			}
-			if len(providers) != 1 || providers[0] != tt.wantProvider {
-				t.Fatalf("providers = %v, want [%s]", providers, tt.wantProvider)
-			}
-			if model != tt.wantModel {
-				t.Fatalf("model = %q, want %q", model, tt.wantModel)
-			}
-		})
+		t.Run(
+			tt.model, func(t *testing.T) {
+				providers, model, errMsg := handler.getRequestDetailsWithOptions(tt.model, true)
+				if errMsg != nil {
+					t.Fatalf("getRequestDetailsWithOptions(%q, true) error = %v", tt.model, errMsg.Error)
+				}
+				if len(providers) != 1 || providers[0] != tt.wantProvider {
+					t.Fatalf("providers = %v, want [%s]", providers, tt.wantProvider)
+				}
+				if model != tt.wantModel {
+					t.Fatalf("model = %q, want %q", model, tt.wantModel)
+				}
+			},
+		)
 	}
 
 	if _, _, errMsg := handler.getRequestDetailsWithOptions("TeamB/GPT-IMAGE-2(HIGH)", true); errMsg == nil {
@@ -310,9 +434,11 @@ func TestExecuteImageWithAuthManagerChecksRequestedModelAccess(t *testing.T) {
 		"codex",
 		[]*registry.ModelInfo{{ID: "TeamA/gpt-image-2"}},
 	)
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient("test-image-access-prefixed")
-	})
+	t.Cleanup(
+		func() {
+			modelRegistry.UnregisterClient("test-image-access-prefixed")
+		},
+	)
 
 	handler := NewBaseAPIHandlers(
 		&sdkconfig.SDKConfig{
@@ -349,6 +475,11 @@ func TestIsOpenAIImageOnlyModel(t *testing.T) {
 	}{
 		{model: "gpt-image-1.5", want: true},
 		{model: "codex/gpt-image-2", want: true},
+		{model: "GPT-IMAGE-2.5-FLARE", want: true},
+		{model: "openai/gpt-image-2.5-flare-2026-09-08", want: true},
+		{model: "gpt-image-2.5-sunburst", want: true},
+		{model: "codex/GPT-IMAGE-2.5-SUNBURST-2026-09-08", want: true},
+		{model: "gpt-image-2.5", want: false},
 		{model: "grok-imagine-image", want: true},
 		{model: "xai/grok-imagine-image", want: true},
 		{model: "XAI/Grok-Imagine-Image-Quality", want: true},
@@ -357,11 +488,13 @@ func TestIsOpenAIImageOnlyModel(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.model, func(t *testing.T) {
-			if got := isOpenAIImageOnlyModel(tt.model); got != tt.want {
-				t.Fatalf("isOpenAIImageOnlyModel(%q) = %v, want %v", tt.model, got, tt.want)
-			}
-		})
+		t.Run(
+			tt.model, func(t *testing.T) {
+				if got := isOpenAIImageOnlyModel(tt.model); got != tt.want {
+					t.Fatalf("isOpenAIImageOnlyModel(%q) = %v, want %v", tt.model, got, tt.want)
+				}
+			},
+		)
 	}
 }
 

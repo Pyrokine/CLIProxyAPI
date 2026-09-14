@@ -21,4 +21,16 @@ type ErrorMessage struct {
 
 	// Addon contains additional headers to be added to the response.
 	Addon http.Header
+
+	// DirectResponse writes Body and Headers without wrapping the payload in an API error envelope.
+	DirectResponse bool
+
+	// Body contains the direct downstream response payload.
+	Body []byte
+
+	// Headers contains direct downstream response headers.
+	Headers http.Header
+
+	// Acknowledge reports whether the downstream transport delivered the terminal error response.
+	Acknowledge func(error)
 }

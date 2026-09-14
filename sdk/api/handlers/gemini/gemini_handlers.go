@@ -16,6 +16,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/gin-gonic/gin"
 )
 
@@ -198,14 +199,12 @@ func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName strin
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamChunksWithAuthManager(
 		cliCtx, h.HandlerType(), modelName, rawJSON, alt,
 	)
 
 	setSSEHeaders := func() {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
+		handlers.SetSSEHeaders(c)
 	}
 
 	// Peek at the first chunk
@@ -221,8 +220,10 @@ func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName strin
 				continue
 			}
 			// Upstream failed immediately. Return proper error status and JSON.
-			h.WriteErrorResponse(c, errMsg)
-			if errMsg != nil {
+			errWrite := h.WriteAcknowledgedStreamError(c, flusher, errMsg)
+			if errWrite != nil {
+				cliCancel(errWrite)
+			} else if errMsg != nil {
 				cliCancel(errMsg.Error)
 			} else {
 				cliCancel(nil)
@@ -235,8 +236,7 @@ func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName strin
 					setSSEHeaders()
 				}
 				handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-				flusher.Flush()
-				cliCancel(nil)
+				cliCancel(handlers.DeliverStreamResponse(c.Writer, flusher, func() error { return nil }))
 				return
 			}
 
@@ -246,18 +246,9 @@ func (h *APIHandler) handleStreamGenerateContent(c *gin.Context, modelName strin
 			}
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
-			// Write first chunk
-			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
-			} else {
-				_, _ = c.Writer.Write(chunk)
-			}
-			flusher.Flush()
-
-			// Continue
-			h.forwardGeminiStream(c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardGeminiStream(
+				c, flusher, alt, func(err error) { cliCancel(err) }, dataChan, errChan, chunk,
+			)
 			return
 		}
 	}
@@ -317,19 +308,18 @@ func (h *APIHandler) forwardGeminiStream(
 	flusher http.Flusher,
 	alt string,
 	cancel func(error),
-	data <-chan []byte,
+	data <-chan coreexecutor.StreamChunk,
 	errs <-chan *handlers.ErrorMessage,
+	initial ...coreexecutor.StreamChunk,
 ) {
 	forwardStream(
-		h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) {
+		h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) error {
 			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
-			} else {
-				_, _ = c.Writer.Write(chunk)
+				return handlers.WriteStreamBytes(c.Writer, []byte("data: "), chunk, []byte("\n\n"))
 			}
+			return handlers.WriteStreamBytes(c.Writer, chunk)
 		},
+		initial...,
 	)
 }
 
@@ -341,22 +331,23 @@ func forwardStream(
 	flusher http.Flusher,
 	alt string,
 	cancel func(error),
-	data <-chan []byte,
+	data <-chan coreexecutor.StreamChunk,
 	errs <-chan *handlers.ErrorMessage,
-	writeChunk func([]byte),
+	writeChunk func([]byte) error,
+	initial ...coreexecutor.StreamChunk,
 ) {
 	var keepAliveInterval *time.Duration
 	if alt != "" {
 		keepAliveInterval = new(time.Duration(0))
 	}
 
-	h.ForwardStream(
-		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
+	h.ForwardStreamChunks(
+		c, flusher, cancel, data, errs, handlers.StreamChunkForwardOptions{
 			KeepAliveInterval: keepAliveInterval,
 			WriteChunk:        writeChunk,
-			WriteTerminalError: func(errMsg *handlers.ErrorMessage) {
+			WriteTerminalError: func(errMsg *handlers.ErrorMessage) error {
 				if errMsg == nil {
-					return
+					return nil
 				}
 				status := http.StatusInternalServerError
 				if errMsg.StatusCode > 0 {
@@ -368,11 +359,13 @@ func forwardStream(
 				}
 				body := handlers.BuildErrorResponseBody(status, errText)
 				if alt == "" {
-					_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", string(body))
-				} else {
-					_, _ = c.Writer.Write(body)
+					return handlers.WriteStreamBytes(
+						c.Writer, []byte("event: error\ndata: "), body, []byte("\n\n"),
+					)
 				}
+				return handlers.WriteStreamBytes(c.Writer, body)
 			},
 		},
+		initial...,
 	)
 }

@@ -193,9 +193,8 @@ func (m *Manager) handleWebsocket(w http.ResponseWriter, r *http.Request) {
 	go s.run(context.Background())
 }
 
-// send forwards the message to the specific provider connection and returns a channel
-// yielding response messages.
-func (m *Manager) send(ctx context.Context, provider string, msg message) (<-chan message, error) {
+// send forwards the message to the specific provider connection and returns its pending response.
+func (m *Manager) send(ctx context.Context, provider string, msg message) (*pendingRequest, error) {
 	s := m.session(provider)
 	if s == nil {
 		return nil, fmt.Errorf("wsrelay: provider %s not connected", provider)

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/gin-gonic/gin"
@@ -56,6 +57,19 @@ func TestGeminiCLIHandlerAllowsEndpointConfigBeforeLocalCheck(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "CLI reply only allow local access") {
 		t.Fatalf("response body = %q, want local access error", rec.Body.String())
+	}
+}
+
+func TestGeminiCLILocalRequestRejectsForwardedClient(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/v1internal:generateContent", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("X-Forwarded-For", "198.51.100.41")
+	client := access.ResolveClientAddress(req, []string{"127.0.0.1/32"})
+	req = req.WithContext(access.WithClientAddress(req.Context(), client))
+
+	if isGeminiCLILocalRequest(req) {
+		t.Fatal("forwarded client was treated as a local Gemini CLI request")
 	}
 }
 

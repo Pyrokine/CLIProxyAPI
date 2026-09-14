@@ -14,11 +14,17 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	multiagentv2 "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/codex/optimize-multi-agent-v2"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -30,25 +36,32 @@ type ResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
-func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
-	if w == nil || len(chunk) == 0 {
-		return
+var responsesStreamKeepAliveInterval = 15 * time.Second
+
+func writeResponsesSSEChunk(w io.Writer, chunk []byte) error {
+	if len(chunk) == 0 {
+		return nil
 	}
-	_, _ = w.Write(chunk)
+	if err := handlers.WriteStreamBytes(w, chunk); err != nil {
+		return err
+	}
 	if bytes.HasSuffix(chunk, []byte("\n\n")) || bytes.HasSuffix(chunk, []byte("\r\n\r\n")) {
-		return
+		return nil
 	}
 	suffix := []byte("\n\n")
 	if bytes.HasSuffix(chunk, []byte("\n")) || bytes.HasSuffix(chunk, []byte("\r\n")) {
 		suffix = []byte("\n")
 	}
-	_, _ = w.Write(suffix)
+	return handlers.WriteStreamBytes(w, suffix)
 }
 
-func writeResponsesSSEFrames(w io.Writer, frames [][]byte) {
+func writeResponsesSSEFrames(w io.Writer, frames [][]byte) error {
 	for _, frame := range frames {
-		writeResponsesSSEChunk(w, frame)
+		if err := writeResponsesSSEChunk(w, frame); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 type responsesStreamFrameWriter struct {
@@ -56,6 +69,7 @@ type responsesStreamFrameWriter struct {
 	deferred      [][]byte
 	deferredBytes int
 	holding       bool
+	deferTerminal bool
 	err           error
 }
 
@@ -64,15 +78,21 @@ func (w *responsesStreamFrameWriter) writeFrames(frames [][]byte) {
 		return
 	}
 	for _, frame := range frames {
-		if !w.holding && !isResponsesTerminalSSEFrame(frame) {
-			writeResponsesSSEChunk(w.writer, frame)
+		if !w.deferTerminal || (!w.holding && !isResponsesTerminalSSEFrame(frame)) {
+			if err := writeResponsesSSEChunk(w.writer, frame); err != nil {
+				w.err = err
+				return
+			}
 			continue
 		}
 		w.holding = true
 		if len(frame) > maxResponsesSSEFrameBytes-w.deferredBytes {
 			w.deferred = nil
 			w.deferredBytes = 0
-			w.err = fmt.Errorf("Responses SSE terminal sequence exceeds maximum allowed size of %d bytes", maxResponsesSSEFrameBytes)
+			w.err = fmt.Errorf(
+				"responses SSE terminal sequence exceeds maximum allowed size of %d bytes",
+				maxResponsesSSEFrameBytes,
+			)
 			return
 		}
 		w.deferred = append(w.deferred, frame)
@@ -84,7 +104,10 @@ func (w *responsesStreamFrameWriter) writeDeferred() {
 	if w == nil || w.err != nil {
 		return
 	}
-	writeResponsesSSEFrames(w.writer, w.deferred)
+	if err := writeResponsesSSEFrames(w.writer, w.deferred); err != nil {
+		w.err = err
+		return
+	}
 	w.discardDeferred()
 }
 
@@ -110,9 +133,9 @@ func isResponsesTerminalSSEFrame(frame []byte) bool {
 	}
 }
 
-func writeResponsesStreamError(w io.Writer, errMsg *handlers.ErrorMessage) {
-	if w == nil || errMsg == nil {
-		return
+func writeResponsesStreamError(c *gin.Context, errMsg *handlers.ErrorMessage) error {
+	if c == nil || c.Writer == nil || errMsg == nil {
+		return nil
 	}
 	status := http.StatusInternalServerError
 	if errMsg.StatusCode > 0 {
@@ -122,8 +145,73 @@ func writeResponsesStreamError(w io.Writer, errMsg *handlers.ErrorMessage) {
 	if errMsg.Error != nil && errMsg.Error.Error() != "" {
 		errText = errMsg.Error.Error()
 	}
+	if isCodexResponsesClientRequest(c) {
+		chunk := handlers.BuildOpenAIResponsesStreamFailedChunk(status, errText, 0)
+		return handlers.WriteStreamBytes(
+			c.Writer, []byte("\nevent: response.failed\ndata: "), chunk, []byte("\n\n"),
+		)
+	}
 	chunk := handlers.BuildOpenAIResponsesStreamErrorChunk(status, errText, 0)
-	_, _ = fmt.Fprintf(w, "\nevent: error\ndata: %s\n\n", string(chunk))
+	return handlers.WriteStreamBytes(c.Writer, []byte("\nevent: error\ndata: "), chunk, []byte("\n\n"))
+}
+
+func writeResponsesStreamTerminalError(c *gin.Context, errMsg *handlers.ErrorMessage) error {
+	if c == nil || errMsg == nil {
+		return nil
+	}
+	if shouldExposeResponsesUpstreamError(errMsg) {
+		return writeResponsesStreamError(c, errMsg)
+	}
+	if isCodexResponsesClientRequest(c) {
+		return writeResponsesStreamError(
+			c, &handlers.ErrorMessage{
+				StatusCode: http.StatusBadGateway,
+				Error:      errors.New(http.StatusText(http.StatusBadGateway)),
+			},
+		)
+	}
+	return nil
+}
+
+func (h *ResponsesAPIHandler) writeInitialResponsesStreamError(
+	c *gin.Context,
+	flusher http.Flusher,
+	setSSEHeaders func(),
+	errMsg *handlers.ErrorMessage,
+) error {
+	errWrite := handlers.DeliverStreamResponse(
+		c.Writer, flusher, func() error {
+			switch {
+			case c.Writer.Written():
+				return writeResponsesStreamTerminalError(c, errMsg)
+			case isResponsesEmptyStreamError(errMsg.Error) && !isCodexResponsesClientRequest(c):
+				setSSEHeaders()
+				return handlers.WriteStreamBytes(c.Writer, []byte("\n"))
+			default:
+				return h.WriteErrorResponseWithError(c, errMsg)
+			}
+		},
+	)
+	handlers.AcknowledgeStreamError(errMsg, errWrite)
+	return errWrite
+}
+
+func isCodexResponsesClientRequest(c *gin.Context) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if multiagentv2.IsCodexClientUserAgent(c.GetHeader("User-Agent")) {
+		return true
+	}
+
+	switch originator := strings.ToLower(strings.TrimSpace(c.GetHeader("Originator"))); originator {
+	case "codex desktop", "codex-tui", "codex_cli_rs":
+		return true
+	default:
+		return strings.HasPrefix(originator, "codex desktop/") ||
+			strings.HasPrefix(originator, "codex-tui/") ||
+			strings.HasPrefix(originator, "codex_cli_rs/")
+	}
 }
 
 func isResponsesEmptyStreamError(err error) bool {
@@ -176,6 +264,34 @@ func (h *ResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 	)
 }
 
+func (h *ResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context, payload []byte) []byte {
+	cfg := h.ConfigSnapshot()
+	if cfg == nil {
+		return payload
+	}
+
+	requestCtx := context.Background()
+	var requestHeaders http.Header
+	if c != nil && c.Request != nil {
+		requestCtx = c.Request.Context()
+		requestHeaders = c.Request.Header
+	}
+	requestCtx = util.WithGinContext(requestCtx, c)
+
+	homeEnabled := h.AuthManager != nil && h.AuthManager.HomeEnabled()
+	updated, prepared := multiagentv2.PrepareCodexMultiAgentV2Tools(
+		requestCtx,
+		requestHeaders,
+		payload,
+		cfg.CodexOptimizeMultiAgentV2,
+		homeEnabled,
+	)
+	if prepared && c != nil {
+		c.Set(multiagentv2.CodexMultiAgentV2ToolsPreparedContextKey, true)
+	}
+	return updated
+}
+
 // Responses handles the /v1/responses endpoint.
 // It determines whether the request is for a streaming or non-streaming response
 // and calls the appropriate handler based on the model provider.
@@ -196,6 +312,8 @@ func (h *ResponsesAPIHandler) Responses(c *gin.Context) {
 		)
 		return
 	}
+
+	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
@@ -285,15 +403,61 @@ func (h *ResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON
 	cliCancel()
 }
 
+func receiveInitialResponsesStreamChunk(
+	ctx context.Context,
+	data <-chan coreexecutor.StreamChunk,
+	errs <-chan *handlers.ErrorMessage,
+	keepAlive <-chan time.Time,
+	writeKeepAlive func() error,
+) (coreexecutor.StreamChunk, *handlers.ErrorMessage, error) {
+	for data != nil || errs != nil {
+		select {
+		case <-ctx.Done():
+			return coreexecutor.StreamChunk{}, nil, ctx.Err()
+		case <-keepAlive:
+			if writeKeepAlive == nil {
+				continue
+			}
+			if err := writeKeepAlive(); err != nil {
+				return coreexecutor.StreamChunk{}, nil, err
+			}
+		case errMsg, ok := <-errs:
+			if !ok {
+				errs = nil
+				continue
+			}
+			if errMsg != nil {
+				return coreexecutor.StreamChunk{}, errMsg, nil
+			}
+		case chunk, ok := <-data:
+			if !ok {
+				data = nil
+				continue
+			}
+			return chunk, nil, nil
+		}
+	}
+	return coreexecutor.StreamChunk{}, nil, fmt.Errorf("responses stream ended before response.completed")
+}
+
 func receiveInitialResponsesStream(
 	ctx context.Context,
 	data <-chan []byte,
 	errs <-chan *handlers.ErrorMessage,
+	keepAlive <-chan time.Time,
+	writeKeepAlive func() error,
 ) ([]byte, *handlers.ErrorMessage, error) {
 	for data != nil || errs != nil {
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
+		case <-keepAlive:
+			if writeKeepAlive == nil {
+				continue
+			}
+			if err := writeKeepAlive(); err != nil {
+				return nil, nil, err
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -310,7 +474,7 @@ func receiveInitialResponsesStream(
 			return chunk, nil, nil
 		}
 	}
-	return nil, nil, fmt.Errorf("Responses stream ended before response.completed")
+	return nil, nil, fmt.Errorf("responses stream ended before response.completed")
 }
 
 // handleStreamingResponse handles streaming responses for constant.Gemini models.
@@ -339,50 +503,121 @@ func (h *ResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 	cliCtx = withResponsesContinuationAuthPin(cliCtx, rawJSON)
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(
-		cliCtx, h.HandlerType(), modelName, rawJSON, "",
-	)
 
+	var upstreamHeaders http.Header
+	headersSet := false
 	setSSEHeaders := func() {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
+		if headersSet {
+			return
+		}
+		handlers.SetSSEHeaders(c)
+		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
+		headersSet = true
+	}
+	writeKeepAlive := func() error {
+		setSSEHeaders()
+		return handlers.DeliverStreamResponse(
+			c.Writer, flusher, func() error {
+				return handlers.WriteStreamBytes(c.Writer, []byte(": keep-alive\n\n"))
+			},
+		)
+	}
+	keepAlive := time.NewTicker(responsesStreamKeepAliveInterval)
+	defer keepAlive.Stop()
+
+	type streamSetup struct {
+		data    <-chan coreexecutor.StreamChunk
+		headers http.Header
+		errs    <-chan *handlers.ErrorMessage
+	}
+	setupChan := make(chan streamSetup, 1)
+	go func() {
+		data, headers, errs := h.ExecuteStreamChunksWithAuthManager(
+			cliCtx, h.HandlerType(), modelName, rawJSON, "",
+		)
+		setupChan <- streamSetup{data: data, headers: headers, errs: errs}
+	}()
+
+	var dataChan <-chan coreexecutor.StreamChunk
+	var errChan <-chan *handlers.ErrorMessage
+	setupReady := false
+	for !setupReady {
+		select {
+		case setup := <-setupChan:
+			dataChan = setup.data
+			upstreamHeaders = setup.headers
+			errChan = setup.errs
+			setupReady = true
+		case <-c.Request.Context().Done():
+			if !c.Writer.Written() {
+				c.Status(clienterror.StatusClientClosedRequest)
+				c.Writer.WriteHeaderNow()
+			}
+			cliCancel(c.Request.Context().Err())
+			return
+		case <-keepAlive.C:
+			if err := writeKeepAlive(); err != nil {
+				internallogging.MarkRequestOutcomeFailure(
+					c.Request.Context(),
+					internallogging.RequestOutcomeStreamError,
+					"stream_initial",
+					err.Error(),
+				)
+				cliCancel(err)
+				return
+			}
+		}
 	}
 
 	acc := newResponsesSSEFrameAccumulator()
-	chunk, errMsg, streamErr := receiveInitialResponsesStream(c.Request.Context(), dataChan, errChan)
+	chunk, errMsg, streamErr := receiveInitialResponsesStreamChunk(
+		c.Request.Context(), dataChan, errChan, keepAlive.C, writeKeepAlive,
+	)
 	if streamErr != nil {
+		internallogging.MarkRequestOutcomeFailure(
+			c.Request.Context(),
+			internallogging.RequestOutcomeStreamError,
+			"stream_initial",
+			streamErr.Error(),
+		)
 		if c.Request.Context().Err() != nil {
+			if !c.Writer.Written() {
+				c.Status(clienterror.StatusClientClosedRequest)
+				c.Writer.WriteHeaderNow()
+			}
 			cliCancel(streamErr)
 			return
 		}
-		setSSEHeaders()
-		handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-		writeResponsesStreamError(c.Writer, &handlers.ErrorMessage{
+		clientErr := &handlers.ErrorMessage{
 			StatusCode: http.StatusBadGateway,
-			Error:      streamErr,
-		})
-		flusher.Flush()
-		cliCancel(streamErr)
+			Error:      errors.New(http.StatusText(http.StatusBadGateway)),
+		}
+		if errWrite := h.writeInitialResponsesStreamError(c, flusher, setSSEHeaders, clientErr); errWrite != nil {
+			cliCancel(errWrite)
+		} else {
+			cliCancel(streamErr)
+		}
 		return
 	}
 	if errMsg != nil {
 		if isResponsesEmptyStreamError(errMsg.Error) {
-			setSSEHeaders()
-			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-			writeResponsesStreamError(c.Writer, errMsg)
-			flusher.Flush()
-			cliCancel(errMsg.Error)
-			return
+			internallogging.MarkRequestOutcomeFailure(
+				c.Request.Context(),
+				internallogging.RequestOutcomeStreamError,
+				"stream_initial",
+				errMsg.Error.Error(),
+			)
 		}
-		h.WriteErrorResponse(c, errMsg)
-		cliCancel(errMsg.Error)
+		if errWrite := h.writeInitialResponsesStreamError(c, flusher, setSSEHeaders, errMsg); errWrite != nil {
+			cliCancel(errWrite)
+		} else {
+			cliCancel(errMsg.Error)
+		}
 		return
 	}
 
 	setSSEHeaders()
-	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-	h.forwardResponsesStream(
+	h.forwardResponsesStreamChunks(
 		c, flusher, func(err error) { cliCancel(err) }, acc, dataChan, errChan, chunk,
 	)
 }
@@ -396,50 +631,90 @@ func (h *ResponsesAPIHandler) forwardResponsesStream(
 	errs <-chan *handlers.ErrorMessage,
 	initialChunks ...[]byte,
 ) {
+	chunks := make(chan coreexecutor.StreamChunk)
+	go func() {
+		defer close(chunks)
+		for chunk := range data {
+			select {
+			case <-c.Request.Context().Done():
+				return
+			case chunks <- coreexecutor.StreamChunk{Payload: chunk}:
+			}
+		}
+	}()
+	initial := make([]coreexecutor.StreamChunk, 0, len(initialChunks))
+	for _, chunk := range initialChunks {
+		initial = append(initial, coreexecutor.StreamChunk{Payload: chunk})
+	}
+	h.forwardResponsesStreamChunksWithMode(c, flusher, cancel, acc, chunks, errs, true, initial...)
+}
+
+func (h *ResponsesAPIHandler) forwardResponsesStreamChunks(
+	c *gin.Context,
+	flusher http.Flusher,
+	cancel func(error),
+	acc *sseFrameAccumulator,
+	data <-chan coreexecutor.StreamChunk,
+	errs <-chan *handlers.ErrorMessage,
+	initialChunks ...coreexecutor.StreamChunk,
+) {
+	h.forwardResponsesStreamChunksWithMode(c, flusher, cancel, acc, data, errs, false, initialChunks...)
+}
+
+func (h *ResponsesAPIHandler) forwardResponsesStreamChunksWithMode(
+	c *gin.Context,
+	flusher http.Flusher,
+	cancel func(error),
+	acc *sseFrameAccumulator,
+	data <-chan coreexecutor.StreamChunk,
+	errs <-chan *handlers.ErrorMessage,
+	deferTerminal bool,
+	initialChunks ...coreexecutor.StreamChunk,
+) {
 	if acc == nil {
 		acc = newResponsesSSEFrameAccumulator()
 	}
-	frameWriter := &responsesStreamFrameWriter{writer: c.Writer}
-	for _, chunk := range initialChunks {
-		frameWriter.writeFrames(acc.AddChunk(chunk))
-	}
-	if len(initialChunks) > 0 {
-		flusher.Flush()
-	}
-
+	frameWriter := &responsesStreamFrameWriter{writer: c.Writer, deferTerminal: deferTerminal}
 	doneError := func() error {
 		if err := acc.Err(); err != nil {
 			return err
 		}
 		return frameWriter.err
 	}
-	h.ForwardStream(
-		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
-			WriteChunk: func(chunk []byte) {
+	keepAliveInterval := responsesStreamKeepAliveInterval
+	h.ForwardStreamChunks(
+		c, flusher, cancel, data, errs, handlers.StreamChunkForwardOptions{
+			KeepAliveInterval: &keepAliveInterval,
+			RequireTerminal:   !deferTerminal,
+			WriteChunk: func(chunk []byte) error {
 				frameWriter.writeFrames(acc.AddChunk(chunk))
+				return doneError()
 			},
-			WriteTerminalError: func(errMsg *handlers.ErrorMessage) {
+			WriteTerminalError: func(errMsg *handlers.ErrorMessage) error {
 				if errMsg == nil {
-					return
+					return nil
 				}
 				frameWriter.writeFrames(acc.Flush())
 				frameWriter.discardDeferred()
-				writeResponsesStreamError(c.Writer, errMsg)
+				if err := doneError(); err != nil {
+					return err
+				}
+				return writeResponsesStreamTerminalError(c, errMsg)
 			},
-			WriteDone: func() {
+			WriteDone: func() error {
 				frameWriter.writeFrames(acc.Finalize())
 				if err := doneError(); err != nil {
 					frameWriter.discardDeferred()
-					writeResponsesStreamError(c.Writer, &handlers.ErrorMessage{
-						StatusCode: http.StatusBadGateway,
-						Error:      err,
-					})
-					return
+					return err
 				}
 				frameWriter.writeDeferred()
-				_, _ = c.Writer.Write([]byte("\n"))
+				if err := doneError(); err != nil {
+					return err
+				}
+				return handlers.WriteStreamBytes(c.Writer, []byte("\n"))
 			},
 			DoneError: doneError,
 		},
+		initialChunks...,
 	)
 }

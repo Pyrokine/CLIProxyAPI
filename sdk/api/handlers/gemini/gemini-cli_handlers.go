@@ -14,10 +14,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -51,12 +53,11 @@ func isGeminiCLILocalRequest(req *http.Request) bool {
 	if req == nil {
 		return false
 	}
-	remoteHost, _, errSplitRemote := net.SplitHostPort(req.RemoteAddr)
-	if errSplitRemote != nil {
-		remoteHost = req.RemoteAddr
+	client, resolved := access.ClientAddressFromContext(req.Context())
+	if !resolved {
+		client = access.ResolveClientAddress(req, nil)
 	}
-	remoteIP := net.ParseIP(remoteHost)
-	if remoteIP == nil || !remoteIP.IsLoopback() {
+	if !client.DirectLoopback {
 		return false
 	}
 
@@ -181,7 +182,7 @@ func (h *CLIAPIHandler) CLIHandler(c *gin.Context) {
 			log.Errorf("Failed to read response body: %v", err)
 			return
 		}
-		if h.BaseAPIHandler != nil && cfg != nil && cfg.RequestLog {
+		if h.BaseAPIHandler != nil && cfg.RequestLog {
 			c.Set("API_RESPONSE_TIMESTAMP", time.Now())
 			if timelineValue, ok := c.Get(logging.RequestTimelineGinKey); ok {
 				if timeline, okTimeline := timelineValue.(*logging.RequestTimeline); okTimeline && timeline != nil {
@@ -203,9 +204,7 @@ func (h *CLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context, rawJ
 	alt := h.GetAlt(c)
 
 	if alt == "" {
-		c.Header("Content-Type", "text/event-stream")
-		c.Header("Cache-Control", "no-cache")
-		c.Header("Connection", "keep-alive")
+		handlers.SetSSEHeaders(c)
 	}
 
 	// Get the http.Flusher interface to manually flush the response.
@@ -226,7 +225,7 @@ func (h *CLIAPIHandler) handleInternalStreamGenerateContent(c *gin.Context, rawJ
 	modelName := modelResult.String()
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamChunksWithAuthManager(
 		cliCtx, h.HandlerType(), modelName, rawJSON, "",
 	)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
@@ -257,25 +256,24 @@ func (h *CLIAPIHandler) forwardCLIStream(
 	flusher http.Flusher,
 	alt string,
 	cancel func(error),
-	data <-chan []byte,
+	data <-chan coreexecutor.StreamChunk,
 	errs <-chan *handlers.ErrorMessage,
+	initial ...coreexecutor.StreamChunk,
 ) {
 	forwardStream(
-		h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) {
+		h.BaseAPIHandler, c, flusher, alt, cancel, data, errs, func(chunk []byte) error {
 			if alt == "" {
 				if bytes.Equal(chunk, []byte("data: [DONE]")) || bytes.Equal(chunk, []byte("[DONE]")) {
-					return
+					return nil
 				}
 
 				if !bytes.HasPrefix(chunk, []byte("data:")) {
-					_, _ = c.Writer.Write([]byte("data: "))
+					return handlers.WriteStreamBytes(c.Writer, []byte("data: "), chunk, []byte("\n\n"))
 				}
-
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
-			} else {
-				_, _ = c.Writer.Write(chunk)
+				return handlers.WriteStreamBytes(c.Writer, chunk, []byte("\n\n"))
 			}
+			return handlers.WriteStreamBytes(c.Writer, chunk)
 		},
+		initial...,
 	)
 }

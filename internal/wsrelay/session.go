@@ -17,22 +17,87 @@ const (
 	heartbeatInterval    = 30 * time.Second
 )
 
-var errClosed = errors.New("websocket session closed")
+var (
+	errClosed            = errors.New("websocket session closed")
+	errPendingBufferFull = errors.New("websocket pending response buffer full")
+)
 
 type pendingRequest struct {
-	ch        chan message
-	closeOnce sync.Once
+	ch            chan message
+	failed        chan error
+	ctx           context.Context
+	sessionClosed <-chan struct{}
 }
 
-func (pr *pendingRequest) close() {
+func newPendingRequest(ctx context.Context, sessionClosed <-chan struct{}) *pendingRequest {
+	return &pendingRequest{
+		ch:            make(chan message, 8),
+		failed:        make(chan error, 1),
+		ctx:           ctx,
+		sessionClosed: sessionClosed,
+	}
+}
+
+func (pr *pendingRequest) deliver(msg message) error {
 	if pr == nil {
+		return errClosed
+	}
+	select {
+	case <-pr.ctx.Done():
+		return pr.ctx.Err()
+	case <-pr.sessionClosed:
+		return errClosed
+	default:
+	}
+	select {
+	case <-pr.ctx.Done():
+		return pr.ctx.Err()
+	case <-pr.sessionClosed:
+		return errClosed
+	case pr.ch <- msg:
+		return nil
+	default:
+		return errPendingBufferFull
+	}
+}
+
+func (pr *pendingRequest) fail(err error) {
+	if pr == nil || err == nil {
 		return
 	}
-	pr.closeOnce.Do(
-		func() {
-			close(pr.ch)
-		},
-	)
+	select {
+	case pr.failed <- err:
+	default:
+	}
+}
+
+func (pr *pendingRequest) receive() (message, error) {
+	if pr == nil {
+		return message{}, errClosed
+	}
+	if err := pr.ctx.Err(); err != nil {
+		return message{}, err
+	}
+	select {
+	case msg := <-pr.ch:
+		return msg, nil
+	default:
+	}
+	select {
+	case msg := <-pr.ch:
+		return msg, nil
+	case err := <-pr.failed:
+		return message{}, err
+	case <-pr.ctx.Done():
+		return message{}, pr.ctx.Err()
+	case <-pr.sessionClosed:
+		select {
+		case msg := <-pr.ch:
+			return msg, nil
+		default:
+			return message{}, errClosed
+		}
+	}
 }
 
 type session struct {
@@ -107,22 +172,31 @@ func (s *session) dispatch(msg message) {
 		_ = s.send(context.Background(), message{ID: msg.ID, Type: messageTypePong})
 		return
 	}
-	if value, ok := s.pending.Load(msg.ID); ok {
-		req := value.(*pendingRequest)
-		select {
-		case req.ch <- msg:
-		default:
-		}
-		if msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd {
-			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
-				actual.(*pendingRequest).close()
-			}
+	value, ok := s.pending.Load(msg.ID)
+	if !ok {
+		if isTerminalMessage(msg.Type) {
+			s.manager.logDebugf(
+				"wsrelay: received terminal message for unknown id %s (provider=%s)", msg.ID, s.provider,
+			)
 		}
 		return
 	}
-	if msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd {
-		s.manager.logDebugf("wsrelay: received terminal message for unknown id %s (provider=%s)", msg.ID, s.provider)
+	req := value.(*pendingRequest)
+	if isTerminalMessage(msg.Type) {
+		actual, loaded := s.pending.LoadAndDelete(msg.ID)
+		if !loaded {
+			return
+		}
+		req = actual.(*pendingRequest)
 	}
+	if errDeliver := req.deliver(msg); errors.Is(errDeliver, errPendingBufferFull) {
+		s.pending.CompareAndDelete(msg.ID, req)
+		req.fail(errDeliver)
+	}
+}
+
+func isTerminalMessage(messageType string) bool {
+	return messageType == MessageTypeHTTPResp || messageType == MessageTypeError || messageType == MessageTypeStreamEnd
 }
 
 func (s *session) send(_ context.Context, msg message) error {
@@ -142,32 +216,29 @@ func (s *session) send(_ context.Context, msg message) error {
 	return nil
 }
 
-func (s *session) request(ctx context.Context, msg message) (<-chan message, error) {
+func (s *session) request(ctx context.Context, msg message) (*pendingRequest, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("wsrelay: request context is nil")
+	}
 	if msg.ID == "" {
 		return nil, fmt.Errorf("wsrelay: message id is required")
 	}
-	if _, loaded := s.pending.LoadOrStore(msg.ID, &pendingRequest{ch: make(chan message, 8)}); loaded {
+	req := newPendingRequest(ctx, s.closed)
+	if _, loaded := s.pending.LoadOrStore(msg.ID, req); loaded {
 		return nil, fmt.Errorf("wsrelay: duplicate message id %s", msg.ID)
 	}
-	value, _ := s.pending.Load(msg.ID)
-	req := value.(*pendingRequest)
 	if err := s.send(ctx, msg); err != nil {
-		if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
-			req := actual.(*pendingRequest)
-			req.close()
-		}
+		s.pending.CompareAndDelete(msg.ID, req)
 		return nil, err
 	}
 	go func() {
 		select {
 		case <-ctx.Done():
-			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
-				actual.(*pendingRequest).close()
-			}
+			s.pending.CompareAndDelete(msg.ID, req)
 		case <-s.closed:
 		}
 	}()
-	return req.ch, nil
+	return req, nil
 }
 
 func (s *session) cleanup(cause error) {
@@ -176,20 +247,13 @@ func (s *session) cleanup(cause error) {
 			close(s.closed)
 			s.pending.Range(
 				func(key, value any) bool {
-					req := value.(*pendingRequest)
-					msg := message{
-						ID: key.(string), Type: MessageTypeError, Payload: map[string]any{"error": cause.Error()},
-					}
-					select {
-					case req.ch <- msg:
-					default:
-					}
-					req.close()
+					s.pending.CompareAndDelete(key, value)
 					return true
 				},
 			)
-			s.pending = sync.Map{}
-			_ = s.conn.Close()
+			if s.conn != nil {
+				_ = s.conn.Close()
+			}
 			if s.manager != nil {
 				s.manager.handleSessionClosed(s, cause)
 			}

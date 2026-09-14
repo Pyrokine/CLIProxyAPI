@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api"
-	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
 )
 
@@ -22,17 +20,14 @@ func (*legacyManagementTokenRequester) RequestIFlowCookieToken(*gin.Context) {}
 func (*legacyManagementTokenRequester) GetAuthStatus(*gin.Context)           {}
 func (*legacyManagementTokenRequester) PostOAuthCallback(*gin.Context)       {}
 
+var _ api.ManagementTokenRequester = (*legacyManagementTokenRequester)(nil)
+var _ = api.NewManagementTokenRequester
+
 func TestLegacySDKAPISourceCompatibility(t *testing.T) {
 	var option api.ServerOption
+	// This compile-time compatibility fixture intentionally verifies the zero function value.
+	// noinspection GoDfaConstantCondition
 	if option != nil {
 		t.Fatal("zero ServerOption must remain nil-comparable")
-	}
-	var requester api.ManagementTokenRequester = &legacyManagementTokenRequester{}
-	if requester == nil {
-		t.Fatal("legacy ManagementTokenRequester implementation is nil")
-	}
-	var factory func(*config.Config, *coreauth.Manager) api.ManagementTokenRequester = api.NewManagementTokenRequester
-	if factory == nil {
-		t.Fatal("legacy NewManagementTokenRequester function type is nil")
 	}
 }
