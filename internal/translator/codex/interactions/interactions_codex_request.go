@@ -10,7 +10,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func ConvertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","instructions":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -43,17 +43,19 @@ func copyInteractionsSystemToCodex(out []byte, root gjson.Result) []byte {
 	}
 	if parts := systemInstruction.Get("parts"); parts.Exists() && parts.IsArray() {
 		var builder strings.Builder
-		parts.ForEach(func(_, part gjson.Result) bool {
-			text := part.Get("text").String()
-			if text == "" {
+		parts.ForEach(
+			func(_, part gjson.Result) bool {
+				text := part.Get("text").String()
+				if text == "" {
+					return true
+				}
+				if builder.Len() > 0 {
+					builder.WriteByte('\n')
+				}
+				builder.WriteString(text)
 				return true
-			}
-			if builder.Len() > 0 {
-				builder.WriteByte('\n')
-			}
-			builder.WriteString(text)
-			return true
-		})
+			},
+		)
 		if builder.Len() > 0 {
 			out, _ = sjson.SetBytes(out, "instructions", builder.String())
 		}
@@ -152,17 +154,11 @@ func interactionsCodexReasoningSummary(cfg gjson.Result) string {
 		"thinkingSummaries",
 		"reasoning.summary",
 	} {
-		if value := cfg.Get(path); value.Exists() {
-			switch value.Type {
-			case gjson.True:
-				return "auto"
-			case gjson.False:
-				return "none"
-			case gjson.String:
-				summary := strings.ToLower(strings.TrimSpace(value.String()))
-				if summary != "" {
-					return summary
-				}
+		if value := cfg.Get(path); value.Type == gjson.String {
+			summary := strings.ToLower(strings.TrimSpace(value.String()))
+			switch summary {
+			case "auto", "none":
+				return summary
 			}
 		}
 	}
@@ -174,10 +170,12 @@ func interactionsCodexReasoningSummary(cfg gjson.Result) string {
 		"thinkingConfig.include_thoughts",
 		"thinkingConfig.includeThoughts",
 	} {
-		if value := cfg.Get(path); value.Exists() {
-			if value.Bool() {
-				return "auto"
-			}
+		// Only JSON booleans have meaning for includeThoughts.
+		// noinspection GoSwitchMissingCasesForIotaConsts
+		switch value := cfg.Get(path); value.Type {
+		case gjson.True:
+			return "auto"
+		case gjson.False:
 			return "none"
 		}
 	}
@@ -192,18 +190,22 @@ func appendInteractionsInputToCodex(out []byte, input gjson.Result) []byte {
 		return appendInteractionsTextToCodex(out, "user", input.String())
 	}
 	if input.IsArray() {
-		input.ForEach(func(_, step gjson.Result) bool {
-			out = appendInteractionsStepToCodex(out, step, "user")
-			return true
-		})
+		input.ForEach(
+			func(_, step gjson.Result) bool {
+				out = appendInteractionsStepToCodex(out, step, "user")
+				return true
+			},
+		)
 		return out
 	}
 	if steps := input.Get("steps"); steps.Exists() && steps.IsArray() {
 		defaultRole := interactionsCodexDefaultRole(input.Get("role").String(), "user")
-		steps.ForEach(func(_, step gjson.Result) bool {
-			out = appendInteractionsStepToCodex(out, step, defaultRole)
-			return true
-		})
+		steps.ForEach(
+			func(_, step gjson.Result) bool {
+				out = appendInteractionsStepToCodex(out, step, defaultRole)
+				return true
+			},
+		)
 		return out
 	}
 	return appendInteractionsStepToCodex(out, input, "user")
@@ -215,10 +217,12 @@ func appendInteractionsStepToCodex(out []byte, step gjson.Result, defaultRole st
 	}
 	if steps := step.Get("steps"); steps.Exists() && steps.IsArray() {
 		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
-		steps.ForEach(func(_, nested gjson.Result) bool {
-			out = appendInteractionsStepToCodex(out, nested, role)
-			return true
-		})
+		steps.ForEach(
+			func(_, nested gjson.Result) bool {
+				out = appendInteractionsStepToCodex(out, nested, role)
+				return true
+			},
+		)
 		return out
 	}
 	stepType := strings.ToLower(strings.TrimSpace(step.Get("type").String()))
@@ -259,13 +263,15 @@ func appendInteractionsContentToCodexItem(out []byte, content gjson.Result, role
 		return appendInteractionsTextToCodex(out, role, content.String())
 	}
 	if content.IsArray() {
-		content.ForEach(func(_, part gjson.Result) bool {
-			item := interactionsCodexMessagePart(part, role)
-			if len(item) > 0 {
-				out = appendInteractionsMessagePartToCodex(out, role, item)
-			}
-			return true
-		})
+		content.ForEach(
+			func(_, part gjson.Result) bool {
+				item := interactionsCodexMessagePart(part, role)
+				if len(item) > 0 {
+					out = appendInteractionsMessagePartToCodex(out, role, item)
+				}
+				return true
+			},
+		)
 		return out
 	}
 	if content.IsObject() {
@@ -317,20 +323,22 @@ func copyInteractionsToolsToCodex(out []byte, root gjson.Result) []byte {
 		return out
 	}
 	normalized := make([]map[string]any, 0)
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if decls := tool.Get("function_declarations"); decls.Exists() {
-			appendCodexToolDeclarations(&normalized, decls)
+	tools.ForEach(
+		func(_, tool gjson.Result) bool {
+			if decls := tool.Get("function_declarations"); decls.Exists() {
+				appendCodexToolDeclarations(&normalized, decls)
+				return true
+			}
+			if decls := tool.Get("functionDeclarations"); decls.Exists() {
+				appendCodexToolDeclarations(&normalized, decls)
+				return true
+			}
+			if name := tool.Get("name"); name.Exists() {
+				normalized = append(normalized, codexToolFromDeclaration(tool))
+			}
 			return true
-		}
-		if decls := tool.Get("functionDeclarations"); decls.Exists() {
-			appendCodexToolDeclarations(&normalized, decls)
-			return true
-		}
-		if name := tool.Get("name"); name.Exists() {
-			normalized = append(normalized, codexToolFromDeclaration(tool))
-		}
-		return true
-	})
+		},
+	)
 	if len(normalized) == 0 {
 		out, _ = sjson.SetRawBytes(out, "tools", []byte(tools.Raw))
 		return out
@@ -349,17 +357,32 @@ func copyInteractionsToolsToCodex(out []byte, root gjson.Result) []byte {
 
 func copyInteractionsCodexTopLevel(out []byte, root gjson.Result) []byte {
 	if serviceTier := normalizeInteractionsCodexServiceTier(root.Get("service_tier")); serviceTier != "" {
-		out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+		current := gjson.GetBytes(out, "service_tier")
+		if current.Type != gjson.String || current.String() != serviceTier {
+			out, _ = sjson.SetBytes(out, "service_tier", serviceTier)
+		}
 	}
 	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(toolChoice.Raw))
+		out = setInteractionsCodexRawIfDifferent(out, "tool_choice", toolChoice)
 	}
 	for _, path := range []string{"parallel_tool_calls", "store", "metadata", "include", "truncation"} {
 		if value := root.Get(path); value.Exists() {
-			out, _ = sjson.SetRawBytes(out, path, []byte(value.Raw))
+			out = setInteractionsCodexRawIfDifferent(out, path, value)
 		}
 	}
 	return out
+}
+
+func setInteractionsCodexRawIfDifferent(out []byte, path string, value gjson.Result) []byte {
+	current := gjson.GetBytes(out, path)
+	if current.Exists() && current.Raw == value.Raw {
+		return out
+	}
+	updated, err := sjson.SetRawBytes(out, path, []byte(value.Raw))
+	if err != nil {
+		return out
+	}
+	return updated
 }
 
 func appendInteractionsThoughtToCodex(out []byte, step gjson.Result) []byte {
@@ -539,12 +562,14 @@ func appendCodexToolDeclarations(normalized *[]map[string]any, declarations gjso
 	if !declarations.IsArray() {
 		return
 	}
-	declarations.ForEach(func(_, declaration gjson.Result) bool {
-		if declaration.Get("name").Exists() {
-			*normalized = append(*normalized, codexToolFromDeclaration(declaration))
-		}
-		return true
-	})
+	declarations.ForEach(
+		func(_, declaration gjson.Result) bool {
+			if declaration.Get("name").Exists() {
+				*normalized = append(*normalized, codexToolFromDeclaration(declaration))
+			}
+			return true
+		},
+	)
 }
 
 func codexToolFromDeclaration(declaration gjson.Result) map[string]any {
@@ -568,9 +593,13 @@ func codexToolFromDeclaration(declaration gjson.Result) map[string]any {
 
 func cleanedCodexToolParameters(params gjson.Result) json.RawMessage {
 	cleaned := []byte(params.Raw)
-	cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-	cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
-	return json.RawMessage(cleaned)
+	if params.Get("$schema").Exists() {
+		cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
+	}
+	if params.Get("additionalProperties").Type != gjson.False {
+		cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+	}
+	return cleaned
 }
 
 func interactionsCodexContentText(content gjson.Result) string {
@@ -585,17 +614,19 @@ func interactionsCodexContentText(content gjson.Result) string {
 	}
 	if content.IsArray() {
 		var builder strings.Builder
-		content.ForEach(func(_, part gjson.Result) bool {
-			text := part.Get("text").String()
-			if text == "" {
+		content.ForEach(
+			func(_, part gjson.Result) bool {
+				text := part.Get("text").String()
+				if text == "" {
+					return true
+				}
+				if builder.Len() > 0 {
+					builder.WriteByte('\n')
+				}
+				builder.WriteString(text)
 				return true
-			}
-			if builder.Len() > 0 {
-				builder.WriteByte('\n')
-			}
-			builder.WriteString(text)
-			return true
-		})
+			},
+		)
 		return builder.String()
 	}
 	return ""

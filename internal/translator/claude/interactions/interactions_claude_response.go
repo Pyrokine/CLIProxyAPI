@@ -33,7 +33,12 @@ type claudeToInteractionsStreamState struct {
 	ToolArgs           map[int]*strings.Builder
 }
 
-func ConvertClaudeResponseToInteractions(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func convertClaudeResponseToInteractions(
+	ctx context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) [][]byte {
 	_ = ctx
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
@@ -50,7 +55,12 @@ func ConvertClaudeResponseToInteractions(ctx context.Context, modelName string, 
 	return convertClaudeEventToInteractions(modelName, rawJSON, st)
 }
 
-func ConvertClaudeResponseToInteractionsNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func convertClaudeResponseToInteractionsNonStream(
+	ctx context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_ *any,
+) []byte {
 	_ = ctx
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
@@ -63,14 +73,18 @@ func ConvertClaudeResponseToInteractionsNonStream(ctx context.Context, modelName
 
 func convertClaudeMessageToInteractions(modelName string, root gjson.Result) []byte {
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
-	out, _ = sjson.SetBytes(out, "id", firstNonEmptyString(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())))
+	out, _ = sjson.SetBytes(
+		out, "id", firstNonEmptyString(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())),
+	)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmptyString(root.Get("model").String(), modelName))
-	root.Get("content").ForEach(func(_, part gjson.Result) bool {
-		if step := claudeContentBlockToInteractionsStep(part); len(step) > 0 {
-			out, _ = sjson.SetRawBytes(out, "steps.-1", step)
-		}
-		return true
-	})
+	root.Get("content").ForEach(
+		func(_, part gjson.Result) bool {
+			if step := claudeContentBlockToInteractionsStep(part); len(step) > 0 {
+				out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+			}
+			return true
+		},
+	)
 	out = setInteractionsUsageFromClaude(out, "usage", root.Get("usage"))
 	return out
 }
@@ -159,7 +173,11 @@ func convertClaudeEventToInteractions(modelName string, rawJSON []byte, st *clau
 	return nil
 }
 
-func claudeContentBlockStartToInteractions(modelName string, root gjson.Result, st *claudeToInteractionsStreamState) [][]byte {
+func claudeContentBlockStartToInteractions(
+	modelName string,
+	root gjson.Result,
+	st *claudeToInteractionsStreamState,
+) [][]byte {
 	out := appendClaudeInteractionsCreated(nil, st, modelName)
 	out = appendClaudeInteractionsStepStop(out, st)
 	index := int(root.Get("index").Int())
@@ -183,7 +201,11 @@ func claudeContentBlockStartToInteractions(modelName string, root gjson.Result, 
 	return appendClaudeInteractionsStepStart(out, st, stepType, step)
 }
 
-func claudeContentBlockDeltaToInteractions(modelName string, root gjson.Result, st *claudeToInteractionsStreamState) [][]byte {
+func claudeContentBlockDeltaToInteractions(
+	modelName string,
+	root gjson.Result,
+	st *claudeToInteractionsStreamState,
+) [][]byte {
 	index := int(root.Get("index").Int())
 	stepType := st.CurrentStepByIndex[index]
 	if stepType == "" {
@@ -214,7 +236,12 @@ func claudeContentBlockStopToInteractions(root gjson.Result, st *claudeToInterac
 	return out
 }
 
-func appendClaudeDeltaToInteractions(out [][]byte, st *claudeToInteractionsStreamState, delta gjson.Result, index int) [][]byte {
+func appendClaudeDeltaToInteractions(
+	out [][]byte,
+	st *claudeToInteractionsStreamState,
+	delta gjson.Result,
+	index int,
+) [][]byte {
 	switch delta.Get("type").String() {
 	case "text_delta":
 		return appendClaudeInteractionsTextDelta(out, st, delta.Get("text").String(), false)
@@ -447,7 +474,12 @@ func appendClaudeInteractionsStatusUpdate(out [][]byte, st *claudeToInteractions
 	return out
 }
 
-func appendClaudeInteractionsStepStart(out [][]byte, st *claudeToInteractionsStreamState, stepType string, step []byte) [][]byte {
+func appendClaudeInteractionsStepStart(
+	out [][]byte,
+	st *claudeToInteractionsStreamState,
+	stepType string,
+	step []byte,
+) [][]byte {
 	st.ActiveStepIndex = st.StepIndex
 	st.ActiveStepType = stepType
 	st.ActiveStepOpen = true
@@ -461,7 +493,12 @@ func appendClaudeInteractionsStepStart(out [][]byte, st *claudeToInteractionsStr
 	return append(out, translatorcommon.SSEEventData("step.start", payload))
 }
 
-func appendClaudeInteractionsTextDelta(out [][]byte, st *claudeToInteractionsStreamState, text string, thought bool) [][]byte {
+func appendClaudeInteractionsTextDelta(
+	out [][]byte,
+	st *claudeToInteractionsStreamState,
+	text string,
+	thought bool,
+) [][]byte {
 	payload := []byte(`{"index":0,"delta":{"text":"","type":"text"},"event_type":"step.delta"}`)
 	payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
 	if thought {
@@ -475,7 +512,11 @@ func appendClaudeInteractionsTextDelta(out [][]byte, st *claudeToInteractionsStr
 	return append(out, translatorcommon.SSEEventData("step.delta", payload))
 }
 
-func appendClaudeInteractionsArgumentsDelta(out [][]byte, st *claudeToInteractionsStreamState, arguments string) [][]byte {
+func appendClaudeInteractionsArgumentsDelta(
+	out [][]byte,
+	st *claudeToInteractionsStreamState,
+	arguments string,
+) [][]byte {
 	payload := []byte(`{"index":0,"delta":{"arguments":"","type":"arguments_delta"},"event_type":"step.delta"}`)
 	payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
 	payload, _ = sjson.SetBytes(payload, "delta.arguments", arguments)
@@ -495,7 +536,12 @@ func appendClaudeInteractionsStepStop(out [][]byte, st *claudeToInteractionsStre
 	return out
 }
 
-func appendClaudeInteractionsCompleted(out [][]byte, st *claudeToInteractionsStreamState, modelName string, root gjson.Result) [][]byte {
+func appendClaudeInteractionsCompleted(
+	out [][]byte,
+	st *claudeToInteractionsStreamState,
+	modelName string,
+	root gjson.Result,
+) [][]byte {
 	if st.Completed {
 		return out
 	}

@@ -13,13 +13,13 @@ func parseClaudeResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 
 	var event string
 	var data string
-	for _, line := range strings.Split(string(chunk), "\n") {
-		if strings.HasPrefix(line, "event: ") {
-			event = strings.TrimPrefix(line, "event: ")
+	for line := range strings.SplitSeq(string(chunk), "\n") {
+		if after, ok := strings.CutPrefix(line, "event: "); ok {
+			event = after
 			continue
 		}
-		if strings.HasPrefix(line, "data: ") {
-			data = strings.TrimPrefix(line, "data: ")
+		if after, ok := strings.CutPrefix(line, "data: "); ok {
+			data = after
 		}
 	}
 	if data == "" {
@@ -27,6 +27,33 @@ func parseClaudeResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 	}
 
 	return event, gjson.Parse(data)
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesCreatedIncludesOriginalRequestModel(t *testing.T) {
+	originalRequest := []byte(`{"request":{"model":"original-claude-model"}}`)
+	translatedRequest := []byte(`{"model":"translated-claude-model"}`)
+	chunk := []byte(`data: {"type":"message_start","message":{"id":"msg_123"}}`)
+
+	var state any
+	outputs := convertClaudeResponseToOpenAIResponses(
+		context.Background(),
+		"fallback-model",
+		originalRequest,
+		translatedRequest,
+		chunk,
+		&state,
+	)
+
+	models := make(map[string]string)
+	for _, output := range outputs {
+		event, data := parseClaudeResponsesSSEEvent(t, output)
+		models[event] = data.Get("response.model").String()
+	}
+	for _, event := range []string{"response.created", "response.in_progress"} {
+		if got := models[event]; got != "original-claude-model" {
+			t.Fatalf("%s model = %q, want original-claude-model", event, got)
+		}
+	}
 }
 
 func TestConvertClaudeResponseToOpenAIResponsesThinkingIncludesSignature(t *testing.T) {
@@ -46,7 +73,7 @@ func TestConvertClaudeResponseToOpenAIResponsesThinkingIncludesSignature(t *test
 	for _, chunk := range chunks {
 		outputs = append(
 			outputs,
-			ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...,
+			convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...,
 		)
 	}
 
@@ -83,7 +110,7 @@ func TestConvertClaudeResponseToOpenAIResponsesThinkingIncludesSignature(t *test
 
 func TestConvertClaudeResponseToOpenAIResponsesSuppressesSignatureDeltaPassthrough(t *testing.T) {
 	var param any
-	outputs := ConvertClaudeResponseToOpenAIResponses(
+	outputs := convertClaudeResponseToOpenAIResponses(
 		context.Background(),
 		"claude-test",
 		nil,
@@ -120,7 +147,7 @@ func TestConvertClaudeResponseToOpenAIResponsesAggregatesTextBlocksUntilMessageS
 	for _, chunk := range chunks {
 		outputs = append(
 			outputs,
-			ConvertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...,
+			convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &param)...,
 		)
 	}
 
@@ -196,7 +223,7 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamAggregatesCitationsAndSu
 		}, "\n",
 	))
 
-	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
 	root := gjson.ParseBytes(out)
 
 	if got := root.Get("output.#").Int(); got != 1 {
@@ -223,7 +250,7 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamThinkingIncludesSignatur
 		}, "\n",
 	))
 
-	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
 	root := gjson.ParseBytes(out)
 
 	if got := root.Get("output.0.encrypted_content").String(); got != signature {
@@ -251,7 +278,7 @@ func TestConvertClaudeResponseToOpenAIResponsesKeepsOutputIndexOrder(t *testing.
 	var param any
 	var completed gjson.Result
 	for _, chunk := range chunks {
-		for _, output := range ConvertClaudeResponseToOpenAIResponses(
+		for _, output := range convertClaudeResponseToOpenAIResponses(
 			context.Background(), "claude-test", nil, nil, chunk, &param,
 		) {
 			event, data := parseClaudeResponsesSSEEvent(t, output)
@@ -291,7 +318,7 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamKeepsOutputIndexOrder(t 
 		}, "\n",
 	))
 
-	out := ConvertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
 	root := gjson.ParseBytes(out)
 
 	if got := root.Get("output.0.type").String(); got != "message" {
@@ -305,5 +332,47 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamKeepsOutputIndexOrder(t 
 	}
 	if got := root.Get("output.1.encrypted_content").String(); got != signature {
 		t.Fatalf("output[1].encrypted_content = %q, want %q", got, signature)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesIncludesZeroReasoningTokens(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_usage","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":2}}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+
+	var param any
+	var completed gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range convertClaudeResponseToOpenAIResponses(
+			context.Background(), "claude-test", nil, nil, chunk, &param,
+		) {
+			event, data := parseClaudeResponsesSSEEvent(t, output)
+			if event == "response.completed" {
+				completed = data
+			}
+		}
+	}
+
+	reasoningTokens := completed.Get("response.usage.output_tokens_details.reasoning_tokens")
+	if !reasoningTokens.Exists() || reasoningTokens.Int() != 0 {
+		t.Fatalf("reasoning_tokens = %s, want present with value 0", reasoningTokens.Raw)
+	}
+}
+
+func TestConvertClaudeResponseToOpenAIResponsesNonStreamIncludesZeroReasoningTokens(t *testing.T) {
+	raw := []byte(strings.Join(
+		[]string{
+			`data: {"type":"message_start","message":{"id":"msg_usage","usage":{"input_tokens":1,"output_tokens":0}}}`,
+			`data: {"type":"message_delta","usage":{"output_tokens":2}}`,
+			`data: {"type":"message_stop"}`,
+		}, "\n",
+	))
+
+	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
+	reasoningTokens := gjson.GetBytes(out, "usage.output_tokens_details.reasoning_tokens")
+	if !reasoningTokens.Exists() || reasoningTokens.Int() != 0 {
+		t.Fatalf("reasoning_tokens = %s, want present with value 0; output: %s", reasoningTokens.Raw, out)
 	}
 }

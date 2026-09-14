@@ -1,10 +1,16 @@
 package responses
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
+
+// noinspection GoUnusedGlobalVariable
+var benchmarkConvertNormalizedOutput []byte
 
 // TestConvertSystemRoleToDeveloper_BasicConversion tests the basic system -> developer role conversion
 func TestConvertSystemRoleToDeveloper_BasicConversion(t *testing.T) {
@@ -265,10 +271,10 @@ func TestConvertSystemRoleToDeveloper_AssistantRole(t *testing.T) {
 }
 
 func TestUserFieldDeletion(t *testing.T) {
-	inputJSON := []byte(`{  
-		"model": "gpt-5.2",  
-		"user": "test-user",  
-		"input": [{"role": "user", "content": "Hello"}]  
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"user": "test-user",
+		"input": [{"role": "user", "content": "Hello"}]
 	}`)
 
 	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
@@ -360,4 +366,183 @@ func TestNormalizeCodexBuiltinTools(t *testing.T) {
 	if got := gjson.Get(outputStr, "tools.2.type").String(); got != "function" {
 		t.Fatalf("function tool type changed to %q", got)
 	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodexReusesNormalizedPayload(t *testing.T) {
+	inputJSON := []byte(`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"service_tier":"priority","tools":[{"type":"function","name":"do_work"}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"do_work"}]},"input":[{"type":"message","role":"user","content":"hello"},{"type":"message","role":"assistant","content":"hi"}]}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+
+	if len(inputJSON) == 0 || len(output) == 0 {
+		t.Fatal("reuse fixture and output must be non-empty")
+	}
+	if !bytes.Equal(output, inputJSON) {
+		t.Fatalf("normalized request changed:\n got: %s\nwant: %s", output, inputJSON)
+	}
+	if &output[0] != &inputJSON[0] {
+		t.Fatal("returned payload does not reuse the input backing array")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodexNormalizesRequiredFields(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gpt-5.6",
+		"stream":"true",
+		"store":true,
+		"parallel_tool_calls":false,
+		"include":["file_search_call.results","reasoning.encrypted_content"],
+		"max_output_tokens":4096,
+		"max_completion_tokens":4096,
+		"temperature":0.2,
+		"top_p":0.9,
+		"stream_options":{"include_usage":true,"reasoning_summary_delivery":"sequential_cutoff"},
+		"service_tier":"standard",
+		"truncation":"auto",
+		"context_management":[{"type":"compaction","compact_threshold":12000}],
+		"user":"request-owner",
+		"tools":[
+			{"type":"web_search_preview","search_context_size":"high"},
+			{"type":"web_search_preview_2025_03_11","user_location":{"type":"approximate","country":"US"}},
+			{"type":"function","name":"do_work","parameters":{"type":"object"}}
+		],
+		"tool_choice":{"type":"allowed_tools","tools":[
+			{"type":"web_search_preview"},
+			{"type":"web_search_preview_2025_03_11"}
+		]},
+		"input":[
+			{"type":"message","role":"system","content":"first system"},
+			{"type":"message","role":"user","content":"hello"},
+			{"type":"message","role":"system","content":"second system"},
+			{"type":"message","role":"assistant","content":"hi"}
+		],
+		"metadata":{"sentinel":"keep"}
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+
+	if stream := gjson.GetBytes(output, "stream"); stream.Type != gjson.True {
+		t.Fatalf("stream = %s, want true", stream.Raw)
+	}
+	if store := gjson.GetBytes(output, "store"); store.Type != gjson.False {
+		t.Fatalf("store = %s, want false", store.Raw)
+	}
+	if parallel := gjson.GetBytes(output, "parallel_tool_calls"); parallel.Type != gjson.True {
+		t.Fatalf("parallel_tool_calls = %s, want true", parallel.Raw)
+	}
+	include := gjson.GetBytes(output, "include").Array()
+	if len(include) != 1 || include[0].Type != gjson.String ||
+		include[0].String() != "reasoning.encrypted_content" {
+		t.Fatalf(
+			"include = %s, want reasoning.encrypted_content only",
+			gjson.GetBytes(output, "include").Raw,
+		)
+	}
+	wantRoles := []string{"developer", "user", "developer", "assistant"}
+	wantContent := []string{"first system", "hello", "second system", "hi"}
+	for index := range wantRoles {
+		rolePath := fmt.Sprintf("input.%d.role", index)
+		if got := gjson.GetBytes(output, rolePath).String(); got != wantRoles[index] {
+			t.Fatalf("%s = %q, want %q", rolePath, got, wantRoles[index])
+		}
+
+		contentPath := fmt.Sprintf("input.%d.content", index)
+		if got := gjson.GetBytes(output, contentPath).String(); got != wantContent[index] {
+			t.Fatalf("%s = %q, want %q", contentPath, got, wantContent[index])
+		}
+	}
+
+	for _, path := range []string{
+		"tools.0.type",
+		"tools.1.type",
+		"tool_choice.tools.0.type",
+		"tool_choice.tools.1.type",
+	} {
+		if got := gjson.GetBytes(output, path).String(); got != "web_search" {
+			t.Fatalf("%s = %q, want web_search", path, got)
+		}
+	}
+	if got := gjson.GetBytes(output, "tool_choice.type").String(); got != "allowed_tools" {
+		t.Fatalf("tool_choice.type = %q, want allowed_tools", got)
+	}
+	if got := gjson.GetBytes(output, "tools.2.type").String(); got != "function" {
+		t.Fatalf("tools.2.type = %q, want function", got)
+	}
+	if got := gjson.GetBytes(output, "tools.2.name").String(); got != "do_work" {
+		t.Fatalf("tools.2.name = %q, want do_work", got)
+	}
+	if got := gjson.GetBytes(output, "tools.0.search_context_size").String(); got != "high" {
+		t.Fatalf("tools.0.search_context_size = %q, want high", got)
+	}
+	if got := gjson.GetBytes(output, "tools.1.user_location.country").String(); got != "US" {
+		t.Fatalf("tools.1.user_location.country = %q, want US", got)
+	}
+	if got := gjson.GetBytes(output, "metadata.sentinel").String(); got != "keep" {
+		t.Fatalf("metadata.sentinel = %q, want keep", got)
+	}
+
+	for _, path := range []string{
+		"max_output_tokens",
+		"max_completion_tokens",
+		"temperature",
+		"top_p",
+		"stream_options",
+		"service_tier",
+		"truncation",
+		"context_management",
+		"user",
+	} {
+		if gjson.GetBytes(output, path).Exists() {
+			t.Fatalf("%s should be removed: %s", path, output)
+		}
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodexNormalizesTopLevelToolChoiceAlias(t *testing.T) {
+	inputJSON := []byte(`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"input":[{"type":"message","role":"user","content":"hello"}],"tool_choice":{"type":"web_search_preview_2025_03_11"}}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+
+	if got := gjson.GetBytes(output, "tool_choice.type").String(); got != "web_search" {
+		t.Fatalf("tool_choice.type = %q, want web_search: %s", got, output)
+	}
+}
+
+func BenchmarkConvertOpenAIResponsesRequestToCodexNormalizedPayload(b *testing.B) {
+	cases := []struct {
+		name      string
+		inputJSON []byte
+	}{
+		{name: "1KiB", inputJSON: makeNormalizedResponsesRequestForBenchmark(1 << 10)},
+		{name: "1MiB", inputJSON: makeNormalizedResponsesRequestForBenchmark(1 << 20)},
+		{name: "8MiB", inputJSON: makeNormalizedResponsesRequestForBenchmark(8 << 20)},
+	}
+
+	for _, testCase := range cases {
+		b.Run(
+			testCase.name, func(b *testing.B) {
+				b.ReportAllocs()
+				b.SetBytes(int64(len(testCase.inputJSON)))
+				b.ResetTimer()
+
+				var output []byte
+				for b.Loop() {
+					output = ConvertOpenAIResponsesRequestToCodex(
+						"gpt-5.6",
+						testCase.inputJSON,
+						true,
+					)
+				}
+				benchmarkConvertNormalizedOutput = output
+			},
+		)
+	}
+}
+
+func makeNormalizedResponsesRequestForBenchmark(contentBytes int) []byte {
+	var builder strings.Builder
+	builder.Grow(contentBytes + 256)
+	builder.WriteString(`{"model":"gpt-5.6","stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"input":[{"type":"message","role":"user","content":"`)
+	builder.WriteString(strings.Repeat("x", contentBytes))
+	builder.WriteString(`"}]}`)
+	return []byte(builder.String())
 }

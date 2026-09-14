@@ -46,9 +46,9 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	shortMap := map[string]string{}
 	if tools := root.Get("tools"); tools.IsArray() {
 		var names []string
-		tarr := tools.Array()
-		for i := 0; i < len(tarr); i++ {
-			fns := tarr[i].Get("functionDeclarations")
+		toolArray := tools.Array()
+		for i := range toolArray {
+			fns := toolArray[i].Get("functionDeclarations")
 			if !fns.IsArray() {
 				continue
 			}
@@ -74,7 +74,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 		var b strings.Builder
 		// 8 chars random suffix
-		for i := 0; i < 24; i++ {
+		for range 24 {
 			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
 			b.WriteByte(letters[n.Int64()])
 		}
@@ -92,7 +92,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if sysParts.IsArray() {
 		msg := []byte(`{"type":"message","role":"developer","content":[]}`)
 		arr := sysParts.Array()
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			p := arr[i]
 			if t := p.Get("text"); t.Exists() {
 				part := []byte(`{}`)
@@ -110,7 +110,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	contents := root.Get("contents")
 	if contents.IsArray() {
 		items := contents.Array()
-		for i := 0; i < len(items); i++ {
+		for i := range items {
 			item := items[i]
 			role := item.Get("role").String()
 			if role == "model" {
@@ -122,7 +122,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				continue
 			}
 			parr := parts.Array()
-			for j := 0; j < len(parr); j++ {
+			for j := range parr {
 				p := parr[j]
 				// text part
 				if t := p.Get("text"); t.Exists() {
@@ -201,15 +201,15 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 	if tools.IsArray() {
 		out, _ = sjson.SetRawBytes(out, "tools", []byte(`[]`))
 		out, _ = sjson.SetBytes(out, "tool_choice", "auto")
-		tarr := tools.Array()
-		for i := 0; i < len(tarr); i++ {
-			td := tarr[i]
+		toolArray := tools.Array()
+		for i := range toolArray {
+			td := toolArray[i]
 			fns := td.Get("functionDeclarations")
 			if !fns.IsArray() {
 				continue
 			}
 			farr := fns.Array()
-			for j := 0; j < len(farr); j++ {
+			for j := range farr {
 				fn := farr[j]
 				tool := []byte(`{}`)
 				tool, _ = sjson.SetBytes(tool, "type", "function")
@@ -226,16 +226,10 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					tool, _ = sjson.SetBytes(tool, "description", v.String())
 				}
 				if prm := fn.Get("parameters"); prm.Exists() {
-					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
-					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+					cleaned := cleanGeminiCodexToolParameters(prm)
 					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
 				} else if prm = fn.Get("parametersJsonSchema"); prm.Exists() {
-					// Remove optional $schema field if present
-					cleaned := []byte(prm.Raw)
-					cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
-					cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+					cleaned := cleanGeminiCodexToolParameters(prm)
 					tool, _ = sjson.SetRawBytes(tool, "parameters", cleaned)
 				}
 				tool, _ = sjson.SetBytes(tool, "strict", false)
@@ -246,6 +240,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// Fixed flags aligning with Codex expectations
 	out, _ = sjson.SetBytes(out, "parallel_tool_calls", true)
+	out = setCodexToolChoiceFromGeminiToolConfig(out, root.Get("toolConfig.functionCallingConfig"))
 
 	// Convert Gemini thinkingConfig to Codex reasoning.effort.
 	// Note: Google official Python SDK sends snake_case fields (thinking_level/thinking_budget).
@@ -280,7 +275,6 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		// No thinking config, set default effort
 		out, _ = sjson.SetBytes(out, "reasoning.effort", "medium")
 	}
-	out, _ = sjson.SetBytes(out, "reasoning.summary", "auto")
 	out, _ = sjson.SetBytes(out, "stream", true)
 	out, _ = sjson.SetBytes(out, "store", false)
 	out, _ = sjson.SetBytes(out, "include", []string{"reasoning.encrypted_content"})
@@ -294,10 +288,52 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		if typeValue.Type != gjson.String {
 			continue
 		}
-		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(typeValue.String()))
+		normalizedType := strings.ToLower(typeValue.String())
+		if normalizedType == typeValue.String() {
+			continue
+		}
+		out, _ = sjson.SetBytes(out, fullPath, normalizedType)
 	}
 
 	return out
+}
+
+func setCodexToolChoiceFromGeminiToolConfig(out []byte, functionCallingConfig gjson.Result) []byte {
+	if !functionCallingConfig.Exists() {
+		return out
+	}
+	mode := functionCallingConfig.Get("mode").String()
+	switch mode {
+	case "NONE":
+		out, _ = sjson.SetBytes(out, "tool_choice", "none")
+	case "AUTO":
+		current := gjson.GetBytes(out, "tool_choice")
+		if current.Type != gjson.String || current.String() != "auto" {
+			out, _ = sjson.SetBytes(out, "tool_choice", "auto")
+		}
+	case "ANY":
+		allowedNames := functionCallingConfig.Get("allowedFunctionNames")
+		allowedNameItems := allowedNames.Array()
+		if allowedNames.IsArray() && len(allowedNameItems) == 1 {
+			choice := []byte(`{"type":"function","name":""}`)
+			choice, _ = sjson.SetBytes(choice, "name", shortenNameIfNeeded(allowedNameItems[0].String()))
+			out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
+		} else {
+			out, _ = sjson.SetBytes(out, "tool_choice", "required")
+		}
+	}
+	return out
+}
+
+func cleanGeminiCodexToolParameters(parameters gjson.Result) []byte {
+	cleaned := []byte(parameters.Raw)
+	if parameters.Get("$schema").Exists() {
+		cleaned, _ = sjson.DeleteBytes(cleaned, "$schema")
+	}
+	if parameters.Get("additionalProperties").Type != gjson.False {
+		cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+	}
+	return cleaned
 }
 
 // shortenNameIfNeeded applies the simple shortening rule for a single name.
@@ -309,11 +345,11 @@ func shortenNameIfNeeded(name string) string {
 	if strings.HasPrefix(name, "mcp__") {
 		idx := strings.LastIndex(name, "__")
 		if idx > 0 {
-			cand := "mcp__" + name[idx+2:]
-			if len(cand) > limit {
-				return cand[:limit]
+			candidate := "mcp__" + name[idx+2:]
+			if len(candidate) > limit {
+				return candidate[:limit]
 			}
-			return cand
+			return candidate
 		}
 	}
 	return name[:limit]
@@ -332,27 +368,24 @@ func buildShortNameMap(names []string) map[string]string {
 		if strings.HasPrefix(n, "mcp__") {
 			idx := strings.LastIndex(n, "__")
 			if idx > 0 {
-				cand := "mcp__" + n[idx+2:]
-				if len(cand) > limit {
-					cand = cand[:limit]
+				candidate := "mcp__" + n[idx+2:]
+				if len(candidate) > limit {
+					candidate = candidate[:limit]
 				}
-				return cand
+				return candidate
 			}
 		}
 		return n[:limit]
 	}
 
-	makeUnique := func(cand string) string {
-		if _, ok := used[cand]; !ok {
-			return cand
+	makeUnique := func(candidate string) string {
+		if _, ok := used[candidate]; !ok {
+			return candidate
 		}
-		base := cand
+		base := candidate
 		for i := 1; ; i++ {
 			suffix := "_" + strconv.Itoa(i)
-			allowed := limit - len(suffix)
-			if allowed < 0 {
-				allowed = 0
-			}
+			allowed := max(limit-len(suffix), 0)
 			tmp := base
 			if len(tmp) > allowed {
 				tmp = tmp[:allowed]
@@ -365,8 +398,8 @@ func buildShortNameMap(names []string) map[string]string {
 	}
 
 	for _, n := range names {
-		cand := baseCandidate(n)
-		uniq := makeUnique(cand)
+		candidate := baseCandidate(n)
+		uniq := makeUnique(candidate)
 		used[uniq] = struct{}{}
 		m[n] = uniq
 	}

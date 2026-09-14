@@ -15,6 +15,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -66,6 +67,9 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
 
 	root := gjson.ParseBytes(rawJSON)
+	messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(
+		int(root.Get("contents.#").Int()) + 1,
+	)
 
 	// Helper for generating tool call IDs in the form: toolu_<alphanum>
 	// This ensures unique identifiers for tool calls in the Claude Code format
@@ -73,7 +77,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 		var b strings.Builder
 		// 24 chars random suffix for uniqueness
-		for i := 0; i < 24; i++ {
+		for range 24 {
 			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
 			b.WriteByte(letters[n.Int64()])
 		}
@@ -195,10 +199,6 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							out, _ = sjson.SetBytes(out, "thinking.budget_tokens", budget)
 						}
 					}
-				} else if includeThoughts := thinkingConfig.Get("includeThoughts"); includeThoughts.Exists() && includeThoughts.Type == gjson.True {
-					out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
-				} else if includeThoughts := thinkingConfig.Get("include_thoughts"); includeThoughts.Exists() && includeThoughts.Type == gjson.True {
-					out, _ = sjson.SetBytes(out, "thinking.type", "enabled")
 				}
 			}
 		}
@@ -223,7 +223,8 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				// Create system message in Claude Code format
 				systemMessage := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
 				systemMessage, _ = sjson.SetBytes(systemMessage, "content.0.text", systemText.String())
-				out, _ = sjson.SetRawBytes(out, "messages.-1", systemMessage)
+				messageAccumulator.Append(systemMessage)
+				messageAccumulator.Flush()
 			}
 		}
 	}
@@ -308,31 +309,19 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 								return true
 							}
 
-							// Image content (inline_data) conversion to Claude Code format
-							if inlineData := part.Get("inline_data"); inlineData.Exists() {
-								imageContent := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
-								if mimeType := inlineData.Get("mime_type"); mimeType.Exists() {
-									imageContent, _ = sjson.SetBytes(
-										imageContent, "source.media_type", mimeType.String(),
-									)
+							// Inline data conversion to Claude Code content format
+							if inlineData := geminiClaudeInlineData(part); inlineData.Exists() {
+								if contentPart, ok := claudeContentPartFromGeminiInlineData(inlineData); ok {
+									msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
 								}
-								if data := inlineData.Get("data"); data.Exists() {
-									imageContent, _ = sjson.SetBytes(imageContent, "source.data", data.String())
-								}
-								msg, _ = sjson.SetRawBytes(msg, "content.-1", imageContent)
 								return true
 							}
 
-							// File data conversion to text content with file info
-							if fileData := part.Get("file_data"); fileData.Exists() {
-								// For file data, we'll convert to text content with file info
-								textContent := []byte(`{"type":"text","text":""}`)
-								fileInfo := "File: " + fileData.Get("file_uri").String()
-								if mimeType := fileData.Get("mime_type"); mimeType.Exists() {
-									fileInfo += " (Type: " + mimeType.String() + ")"
+							// File data conversion to Claude Code content format
+							if fileData := geminiClaudeFileData(part); fileData.Exists() {
+								if contentPart, ok := claudeContentPartFromGeminiFileData(fileData); ok {
+									msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
 								}
-								textContent, _ = sjson.SetBytes(textContent, "text", fileInfo)
-								msg, _ = sjson.SetRawBytes(msg, "content.-1", textContent)
 								return true
 							}
 
@@ -345,17 +334,18 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				if contentArray := gjson.GetBytes(
 					msg, "content",
 				); contentArray.Exists() && len(contentArray.Array()) > 0 {
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					messageAccumulator.Append(msg)
 				}
 
 				return true
 			},
 		)
 	}
+	out = translatorcommon.SetRawArrayItems(out, "messages", messageAccumulator.Messages())
 
 	// Tools mapping: Gemini functionDeclarations -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
-		var anthropicTools []interface{}
+		var anthropicTools []any
 
 		tools.ForEach(
 			func(_, tool gjson.Result) bool {
@@ -371,23 +361,14 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 								anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", desc.String())
 							}
 							if params := funcDecl.Get("parameters"); params.Exists() {
-								// Clean up the parameters schema for Claude Code compatibility
-								cleaned := []byte(params.Raw)
-								cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
-								cleaned, _ = sjson.SetBytes(
-									cleaned, "$schema", "http://json-schema.org/draft-07/schema#",
-								)
+								cleaned := normalizeClaudeToolSchema(params)
 								anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", cleaned)
 							} else if params = funcDecl.Get("parametersJsonSchema"); params.Exists() {
-								// Clean up the parameters schema for Claude Code compatibility
-								cleaned := []byte(params.Raw)
-								cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
-								cleaned, _ = sjson.SetBytes(
-									cleaned, "$schema", "http://json-schema.org/draft-07/schema#",
-								)
+								cleaned := normalizeClaudeToolSchema(params)
 								anthropicTool, _ = sjson.SetRawBytes(anthropicTool, "input_schema", cleaned)
 							}
 
+							anthropicTool = lowercaseClaudeToolSchemaTypes(anthropicTool)
 							anthropicTools = append(anthropicTools, gjson.ParseBytes(anthropicTool).Value())
 							return true
 						},
@@ -421,14 +402,129 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// Stream setting configuration
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	// Convert tool parameter types to lowercase for Claude Code compatibility
-	var pathsToLower []string
-	toolsResult := gjson.GetBytes(out, "tools")
-	util.Walk(toolsResult, "", "type", &pathsToLower)
-	for _, p := range pathsToLower {
-		fullPath := fmt.Sprintf("tools.%s", p)
-		out, _ = sjson.SetBytes(out, fullPath, strings.ToLower(gjson.GetBytes(out, fullPath).String()))
+	return out
+}
+
+func geminiClaudeInlineData(part gjson.Result) gjson.Result {
+	inlineData := part.Get("inlineData")
+	if inlineData.Exists() {
+		return inlineData
+	}
+	return part.Get("inline_data")
+}
+
+func geminiClaudeFileData(part gjson.Result) gjson.Result {
+	fileData := part.Get("fileData")
+	if fileData.Exists() {
+		return fileData
+	}
+	return part.Get("file_data")
+}
+
+func claudeContentPartFromGeminiInlineData(inlineData gjson.Result) ([]byte, bool) {
+	mimeType := inlineData.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = inlineData.Get("mime_type").String()
+	}
+	data := inlineData.Get("data").String()
+	if mimeType == "" || data == "" {
+		return nil, false
+	}
+	lowerMIMEType := strings.ToLower(mimeType)
+	switch {
+	case strings.HasPrefix(lowerMIMEType, "image/"):
+		imageContent := []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+		imageContent, _ = sjson.SetBytes(imageContent, "source.media_type", mimeType)
+		imageContent, _ = sjson.SetBytes(imageContent, "source.data", data)
+		return imageContent, true
+	case strings.HasPrefix(lowerMIMEType, "application/"), strings.HasPrefix(lowerMIMEType, "text/"):
+		documentContent := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
+		documentContent, _ = sjson.SetBytes(documentContent, "source.media_type", mimeType)
+		documentContent, _ = sjson.SetBytes(documentContent, "source.data", data)
+		return documentContent, true
+	default:
+		return claudeTextContentPart(fmt.Sprintf("Media content: inline data (Type: %s)", mimeType)), true
+	}
+}
+
+func claudeContentPartFromGeminiFileData(fileData gjson.Result) ([]byte, bool) {
+	fileURI := fileData.Get("fileUri").String()
+	if fileURI == "" {
+		fileURI = fileData.Get("file_uri").String()
+	}
+	if fileURI == "" {
+		return nil, false
+	}
+	mimeType := fileData.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = fileData.Get("mime_type").String()
+	}
+	lowerMIMEType := strings.ToLower(mimeType)
+	switch {
+	case strings.HasPrefix(lowerMIMEType, "image/"):
+		imageContent := []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+		imageContent, _ = sjson.SetBytes(imageContent, "source.url", fileURI)
+		return imageContent, true
+	case strings.HasPrefix(lowerMIMEType, "application/"), strings.HasPrefix(lowerMIMEType, "text/"):
+		documentContent := []byte(`{"type":"document","source":{"type":"url","url":""}}`)
+		documentContent, _ = sjson.SetBytes(documentContent, "source.url", fileURI)
+		if mimeType != "" {
+			documentContent, _ = sjson.SetBytes(documentContent, "source.media_type", mimeType)
+		}
+		return documentContent, true
+	default:
+		fileInfo := "File: " + fileURI
+		if mimeType != "" {
+			fileInfo += " (Type: " + mimeType + ")"
+		}
+		return claudeTextContentPart(fileInfo), true
+	}
+}
+
+func claudeTextContentPart(text string) []byte {
+	textContent := []byte(`{"type":"text","text":""}`)
+	textContent, _ = sjson.SetBytes(textContent, "text", text)
+	return textContent
+}
+
+func normalizeClaudeToolSchema(parameters gjson.Result) []byte {
+	cleaned := []byte(parameters.Raw)
+	if !parameters.IsObject() ||
+		parameters.Get("type").String() != "object" ||
+		!parameters.Get("properties").IsObject() ||
+		parameters.Get("anyOf").Exists() ||
+		parameters.Get("oneOf").Exists() ||
+		parameters.Get("allOf").Exists() {
+		wrapped := []byte(`{"input_schema":{}}`)
+		if normalizedWrapped, errSet := sjson.SetRawBytes(wrapped, "input_schema", cleaned); errSet == nil {
+			wrapped = lowercaseClaudeToolSchemaTypes(normalizedWrapped)
+			cleaned = []byte(gjson.GetBytes(wrapped, "input_schema").Raw)
+		}
+		cleaned = util.NormalizeClaudeToolInputSchema(cleaned)
 	}
 
-	return out
+	normalized := gjson.ParseBytes(cleaned)
+	if normalized.Get("additionalProperties").Type != gjson.False {
+		cleaned, _ = sjson.SetBytes(cleaned, "additionalProperties", false)
+	}
+	const schema = "http://json-schema.org/draft-07/schema#"
+	currentSchema := normalized.Get("$schema")
+	if currentSchema.Type != gjson.String || currentSchema.String() != schema {
+		cleaned, _ = sjson.SetBytes(cleaned, "$schema", schema)
+	}
+	return cleaned
+}
+
+func lowercaseClaudeToolSchemaTypes(tool []byte) []byte {
+	var pathsToLower []string
+	util.Walk(gjson.ParseBytes(tool), "", "type", &pathsToLower)
+	for _, path := range pathsToLower {
+		typeValue := gjson.GetBytes(tool, path)
+		normalizedType := strings.ToLower(typeValue.String())
+		if typeValue.Type == gjson.String && normalizedType == typeValue.String() {
+			continue
+		}
+		tool, _ = sjson.SetBytes(tool, path, normalizedType)
+	}
+	return tool
 }

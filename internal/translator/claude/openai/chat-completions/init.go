@@ -10,10 +10,10 @@ func init() {
 	translator.Register(
 		constant.OpenAI,
 		constant.Claude,
-		ConvertOpenAIRequestToClaude,
+		convertOpenAIRequestToClaudeDefault,
 		interfaces.TranslateResponse{
-			Stream:    ConvertClaudeResponseToOpenAI,
-			NonStream: ConvertClaudeResponseToOpenAINonStream,
+			Stream:    convertClaudeResponseToOpenAI,
+			NonStream: convertClaudeResponseToOpenAINonStream,
 		},
 	)
 }

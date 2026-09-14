@@ -16,7 +16,7 @@ func TestConvertOpenAIRequestToClaudeDropsTemperature(t *testing.T) {
 		]
 	}`
 
-	result := ConvertOpenAIRequestToClaude("claude-sonnet-5", []byte(inputJSON), false)
+	result := convertOpenAIRequestToClaudeDefault("claude-sonnet-5", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 
 	if resultJSON.Get("temperature").Exists() {
@@ -61,7 +61,7 @@ func TestConvertOpenAIRequestToClaude_ToolResultTextAndBase64Image(t *testing.T)
 		]
 	}`
 
-	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	result := convertOpenAIRequestToClaudeDefault("claude-sonnet-4-5", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -111,7 +111,7 @@ func TestConvertOpenAIRequestToClaudeMapsSystemToTopLevel(t *testing.T) {
 		]
 	}`
 
-	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	result := convertOpenAIRequestToClaudeDefault("claude-sonnet-4-5", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 
 	if got := resultJSON.Get("system.0.text").String(); got != "be concise" {
@@ -155,7 +155,7 @@ func TestConvertOpenAIRequestToClaudeSanitizesToolIDs(t *testing.T) {
 		]
 	}`
 
-	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	result := convertOpenAIRequestToClaudeDefault("claude-sonnet-4-5", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 
 	if got := resultJSON.Get("messages.0.content.0.id").String(); got != "call_bad_id" {
@@ -199,7 +199,7 @@ func TestConvertOpenAIRequestToClaude_ToolResultURLImageOnly(t *testing.T) {
 		]
 	}`
 
-	result := ConvertOpenAIRequestToClaude("claude-sonnet-4-5", []byte(inputJSON), false)
+	result := convertOpenAIRequestToClaudeDefault("claude-sonnet-4-5", []byte(inputJSON), false)
 	resultJSON := gjson.ParseBytes(result)
 	messages := resultJSON.Get("messages").Array()
 
@@ -219,5 +219,205 @@ func TestConvertOpenAIRequestToClaude_ToolResultURLImageOnly(t *testing.T) {
 	}
 	if got := toolContent.Get("0.source.url").String(); got != "https://example.com/tool.png" {
 		t.Fatalf("Unexpected image URL: %q", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeGroupsConsecutiveAssistantMessages(t *testing.T) {
+	inputJSON := `{
+		"messages": [
+			{
+				"role": "assistant",
+				"tool_calls": [{
+					"id": "call_1",
+					"type": "function",
+					"function": {"name": "first", "arguments": "{}"}
+				}]
+			},
+			{"role": "assistant", "content": "answer"},
+			{
+				"role": "assistant",
+				"tool_calls": [{
+					"id": "call_2",
+					"type": "function",
+					"function": {"name": "second", "arguments": "{}"}
+				}]
+			}
+		]
+	}`
+
+	result := convertOpenAIRequestToClaudeDefault("claude-sonnet-5", []byte(inputJSON), false)
+	messages := gjson.GetBytes(result, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1. Output: %s", len(messages), string(result))
+	}
+	content := messages[0].Get("content").Array()
+	wantTypes := []string{"text", "tool_use", "tool_use"}
+	if len(content) != len(wantTypes) {
+		t.Fatalf("content count = %d, want %d. Output: %s", len(content), len(wantTypes), string(result))
+	}
+	for index, wantType := range wantTypes {
+		if got := content[index].Get("type").String(); got != wantType {
+			t.Fatalf("content[%d].type = %q, want %q", index, got, wantType)
+		}
+	}
+	if got := content[1].Get("id").String(); got != "call_1" {
+		t.Fatalf("first tool_use id = %q, want call_1", got)
+	}
+	if got := content[2].Get("id").String(); got != "call_2" {
+		t.Fatalf("second tool_use id = %q, want call_2", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeNormalizesRootToolSchemaUnion(t *testing.T) {
+	inputJSON := `{
+		"messages": [{"role": "user", "content": "hello"}],
+		"tools": [{
+			"type": "function",
+			"function": {
+				"name": "search",
+				"parameters": {
+					"anyOf": [
+						{"type": "object", "properties": {"query": {"type": "string"}}},
+						{"type": "object", "properties": {"limit": {"type": "integer"}}}
+					]
+				}
+			}
+		}]
+	}`
+
+	result := convertOpenAIRequestToClaudeDefault("claude-sonnet-5", []byte(inputJSON), false)
+	schema := gjson.GetBytes(result, "tools.0.input_schema")
+	if got := schema.Get("type").String(); got != "object" {
+		t.Fatalf("input_schema.type = %q, want object. Output: %s", got, string(result))
+	}
+	if schema.Get("anyOf").Exists() {
+		t.Fatalf("root anyOf should be removed. Output: %s", string(result))
+	}
+	if !schema.Get("properties.query").Exists() {
+		t.Fatalf("query property missing. Output: %s", string(result))
+	}
+	if !schema.Get("properties.limit").Exists() {
+		t.Fatalf("limit property missing. Output: %s", string(result))
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeWithCompatGroupsThinkingTextAndTools(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","reasoning_content":"reason","content":"answer"},
+			{"role":"assistant","tool_calls":[
+				{"id":"call_1","type":"function","function":{"name":"first","arguments":"{}"}},
+				{"id":"call_2","type":"function","function":{"name":"second","arguments":"{}"}}
+			]}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToClaudeWithCompat("claude-test", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want 1. Output: %s", len(messages), string(out))
+	}
+	content := messages[0].Get("content").Array()
+	wantTypes := []string{"thinking", "text", "tool_use", "tool_use"}
+	if len(content) != len(wantTypes) {
+		t.Fatalf("content count = %d, want %d. Output: %s", len(content), len(wantTypes), string(out))
+	}
+	for index, wantType := range wantTypes {
+		if got := content[index].Get("type").String(); got != wantType {
+			t.Fatalf("content[%d].type = %q, want %q", index, got, wantType)
+		}
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeMergesToolResultWithAdjacentUserContent(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"work","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":"ok"},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+
+	out := convertOpenAIRequestToClaudeDefault("claude-test", inputJSON, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), string(out))
+	}
+	userContent := messages[1].Get("content").Array()
+	if len(userContent) != 2 {
+		t.Fatalf("user content count = %d, want 2. Output: %s", len(userContent), string(out))
+	}
+	if got := userContent[0].Get("type").String(); got != "tool_result" {
+		t.Fatalf("user content[0].type = %q, want tool_result", got)
+	}
+	if got := userContent[1].Get("text").String(); got != "continue" {
+		t.Fatalf("user content[1].text = %q, want continue", got)
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeMapsDeveloperToTopLevelSystem(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"system","content":"S1"},
+			{"role":"developer","content":[{"type":"text","text":"D1"},{"type":"text","text":"D2"}]},
+			{"role":"user","content":"Hello"}
+		]
+	}`)
+
+	out := convertOpenAIRequestToClaudeDefault("claude-test", inputJSON, false)
+	root := gjson.ParseBytes(out)
+	system := root.Get("system").Array()
+	if len(system) != 3 {
+		t.Fatalf("system block count = %d, want 3. Output: %s", len(system), string(out))
+	}
+	for index, want := range []string{"S1", "D1", "D2"} {
+		if got := system[index].Get("text").String(); got != want {
+			t.Fatalf("system[%d].text = %q, want %q", index, got, want)
+		}
+	}
+	messages := root.Get("messages").Array()
+	if len(messages) != 1 || messages[0].Get("role").String() != "user" {
+		t.Fatalf("messages = %s, want one user message", root.Get("messages").Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeSystemMessageCacheControlAppliesToLastBlock(t *testing.T) {
+	inputJSON := []byte(`{
+		"messages":[
+			{"role":"developer","cache_control":{"type":"ephemeral","ttl":"1h"},"content":[
+				{"type":"text","text":"D1"},
+				{"type":"text","text":"D2","cache_control":{"type":"ephemeral"}}
+			]},
+			{"role":"user","content":"Hello"}
+		]
+	}`)
+
+	system := gjson.GetBytes(
+		convertOpenAIRequestToClaudeDefault("claude-test", inputJSON, false),
+		"system",
+	).Array()
+	if len(system) != 2 {
+		t.Fatalf("system block count = %d, want 2", len(system))
+	}
+	if system[0].Get("cache_control").Exists() {
+		t.Fatalf("system[0] must not carry cache_control: %s", system[0].Raw)
+	}
+	if got := system[1].Get("cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("system[1].cache_control.type = %q, want ephemeral", got)
+	}
+	if system[1].Get("cache_control.ttl").Exists() {
+		t.Fatalf("part-level cache_control must win: %s", system[1].Raw)
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeSystemOnlyInputKeepsFallbackUserMessage(t *testing.T) {
+	out := convertOpenAIRequestToClaudeDefault(
+		"claude-test",
+		[]byte(`{"messages":[{"role":"system","content":"S1"}]}`),
+		false,
+	)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 1 || messages[0].Get("role").String() != "user" {
+		t.Fatalf("messages = %s, want one fallback user message", gjson.GetBytes(out, "messages").Raw)
 	}
 }

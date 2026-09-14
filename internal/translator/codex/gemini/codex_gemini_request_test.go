@@ -97,3 +97,27 @@ func TestConvertGeminiRequestToCodexPreservesSchemaPropertyNamedType(t *testing.
 		t.Fatalf("schema property enum[2] = %q, want yesno; output: %s", got, out)
 	}
 }
+
+func TestSetCodexToolChoiceFromGeminiToolConfigReusesAutoChoice(t *testing.T) {
+	input := []byte(`{"tool_choice":"auto","input":[]}`)
+	config := gjson.Parse(`{"mode":"AUTO"}`)
+
+	output := setCodexToolChoiceFromGeminiToolConfig(input, config)
+
+	if &output[0] != &input[0] {
+		t.Fatal("AUTO tool choice caused a payload copy")
+	}
+}
+
+func TestConvertGeminiRequestToCodexMapsFunctionCallingConfig(t *testing.T) {
+	input := []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"tools":[{"functionDeclarations":[{"name":"lookup","parameters":{"type":"object"}}]}],"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["lookup"]}}}`)
+
+	output := ConvertGeminiRequestToCodex("gpt-5.4", input, false)
+
+	if got := gjson.GetBytes(output, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("tool_choice.type = %q, want function; output: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "tool_choice.name").String(); got != "lookup" {
+		t.Fatalf("tool_choice.name = %q, want lookup; output: %s", got, output)
+	}
+}

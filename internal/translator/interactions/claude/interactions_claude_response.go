@@ -29,7 +29,12 @@ type interactionsToClaudeStreamState struct {
 	ToolSignatures  map[int]string
 }
 
-func ConvertInteractionsResponseToClaude(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func convertInteractionsResponseToClaude(
+	_ context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) [][]byte {
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	if param == nil {
@@ -45,7 +50,12 @@ func ConvertInteractionsResponseToClaude(_ context.Context, modelName string, or
 	return convertInteractionsEventToClaude(modelName, rawJSON, st)
 }
 
-func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func convertInteractionsResponseToClaudeNonStream(
+	_ context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_ *any,
+) []byte {
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
@@ -54,43 +64,49 @@ func ConvertInteractionsResponseToClaudeNonStream(_ context.Context, modelName s
 		interaction = nested
 	}
 	out := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
-	out, _ = sjson.SetBytes(out, "id", firstNonEmpty(interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("msg_%d", time.Now().UnixNano())))
+	out, _ = sjson.SetBytes(
+		out, "id", firstNonEmpty(
+			interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		),
+	)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmpty(interaction.Get("model").String(), modelName))
 	steps := interaction.Get("steps")
 	if !steps.Exists() {
 		steps = root.Get("steps")
 	}
 	sawToolCall := false
-	steps.ForEach(func(_, step gjson.Result) bool {
-		switch step.Get("type").String() {
-		case "thought":
-			for _, text := range interactionsContentTexts(step.Get("content")) {
-				block := []byte(`{"type":"thinking","thinking":""}`)
-				block, _ = sjson.SetBytes(block, "thinking", text)
+	steps.ForEach(
+		func(_, step gjson.Result) bool {
+			switch step.Get("type").String() {
+			case "thought":
+				for _, text := range interactionsContentTexts(step.Get("content")) {
+					block := []byte(`{"type":"thinking","thinking":""}`)
+					block, _ = sjson.SetBytes(block, "thinking", text)
+					out, _ = sjson.SetRawBytes(out, "content.-1", block)
+				}
+			case "function_call":
+				sawToolCall = true
+				block := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
+				block, _ = sjson.SetBytes(block, "id", interactionsToolID(step))
+				block, _ = sjson.SetBytes(block, "name", step.Get("name").String())
+				if signature := interactionsSignature(step); signature != "" {
+					block, _ = sjson.SetBytes(block, "signature", signature)
+				}
+				args := firstExisting(step, "arguments", "args")
+				if args.Exists() && args.IsObject() {
+					block, _ = sjson.SetRawBytes(block, "input", []byte(args.Raw))
+				}
 				out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			default:
+				for _, text := range interactionsContentTexts(step.Get("content")) {
+					block := []byte(`{"type":"text","text":""}`)
+					block, _ = sjson.SetBytes(block, "text", text)
+					out, _ = sjson.SetRawBytes(out, "content.-1", block)
+				}
 			}
-		case "function_call":
-			sawToolCall = true
-			block := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
-			block, _ = sjson.SetBytes(block, "id", interactionsToolID(step))
-			block, _ = sjson.SetBytes(block, "name", step.Get("name").String())
-			if signature := interactionsSignature(step); signature != "" {
-				block, _ = sjson.SetBytes(block, "signature", signature)
-			}
-			args := firstExisting(step, "arguments", "args")
-			if args.Exists() && args.IsObject() {
-				block, _ = sjson.SetRawBytes(block, "input", []byte(args.Raw))
-			}
-			out, _ = sjson.SetRawBytes(out, "content.-1", block)
-		default:
-			for _, text := range interactionsContentTexts(step.Get("content")) {
-				block := []byte(`{"type":"text","text":""}`)
-				block, _ = sjson.SetBytes(block, "text", text)
-				out, _ = sjson.SetRawBytes(out, "content.-1", block)
-			}
-		}
-		return true
-	})
+			return true
+		},
+	)
 	if sawToolCall {
 		out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
 	}
@@ -219,7 +235,9 @@ func appendClaudeToolBlockStart(out [][]byte, stepIndex int, st *interactionsToC
 	out = appendClaudeContentBlockStop(out, st)
 	block := []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`)
 	block, _ = sjson.SetBytes(block, "index", st.BlockIndex)
-	block, _ = sjson.SetBytes(block, "content_block.id", firstNonEmpty(st.ToolIDs[stepIndex], fmt.Sprintf("toolu_%d", stepIndex)))
+	block, _ = sjson.SetBytes(
+		block, "content_block.id", firstNonEmpty(st.ToolIDs[stepIndex], fmt.Sprintf("toolu_%d", stepIndex)),
+	)
 	block, _ = sjson.SetBytes(block, "content_block.name", st.ToolNames[stepIndex])
 	if signature := st.ToolSignatures[stepIndex]; signature != "" {
 		block, _ = sjson.SetBytes(block, "content_block.signature", signature)
@@ -236,7 +254,11 @@ func ensureClaudeContentBlock(out [][]byte, blockType string, st *interactionsTo
 	return appendClaudeContentBlockStart(out, blockType, st)
 }
 
-func appendClaudeContentDelta(out [][]byte, deltaType, field, value string, st *interactionsToClaudeStreamState) [][]byte {
+func appendClaudeContentDelta(
+	out [][]byte,
+	deltaType, field, value string,
+	st *interactionsToClaudeStreamState,
+) [][]byte {
 	if value == "" && deltaType != "input_json_delta" {
 		return out
 	}
@@ -314,7 +336,7 @@ func interactionsSSEPayload(rawJSON []byte) []byte {
 		return bytes.TrimSpace(trimmed[len("data:"):])
 	}
 	var dataLines [][]byte
-	for _, line := range bytes.Split(trimmed, []byte("\n")) {
+	for line := range bytes.SplitSeq(trimmed, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if bytes.HasPrefix(line, []byte("data:")) {
 			dataLines = append(dataLines, bytes.TrimSpace(line[len("data:"):]))
@@ -334,17 +356,21 @@ func interactionsContentTexts(content gjson.Result) []string {
 		return []string{content.String()}
 	}
 	var out []string
-	content.ForEach(func(_, part gjson.Result) bool {
-		if text := firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()); text != "" {
-			out = append(out, text)
-		}
-		return true
-	})
+	content.ForEach(
+		func(_, part gjson.Result) bool {
+			if text := firstNonEmpty(part.Get("text").String(), part.Get("content.text").String()); text != "" {
+				out = append(out, text)
+			}
+			return true
+		},
+	)
 	return out
 }
 
 func interactionsToolID(root gjson.Result) string {
-	return firstNonEmpty(root.Get("call_id").String(), root.Get("id").String(), root.Get("tool_use_id").String(), "toolu_interactions")
+	return firstNonEmpty(
+		root.Get("call_id").String(), root.Get("id").String(), root.Get("tool_use_id").String(), "toolu_interactions",
+	)
 }
 
 func interactionsSignature(root gjson.Result) string {

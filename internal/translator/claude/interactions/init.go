@@ -1,19 +1,19 @@
 package interactions
 
 import (
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/translator"
 )
 
 func init() {
 	translator.Register(
-		Interactions,
-		Claude,
-		ConvertInteractionsRequestToClaude,
+		constant.Interactions,
+		constant.Claude,
+		convertInteractionsRequestToClaude,
 		interfaces.TranslateResponse{
-			Stream:    ConvertClaudeResponseToInteractions,
-			NonStream: ConvertClaudeResponseToInteractionsNonStream,
+			Stream:    convertClaudeResponseToInteractions,
+			NonStream: convertClaudeResponseToInteractionsNonStream,
 		},
 	)
 }

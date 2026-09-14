@@ -7,6 +7,31 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertCodexResponseToOpenAIIncompleteTerminal(t *testing.T) {
+	terminal := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","model":"gpt-5.5","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+
+	var param any
+	streamOut := ConvertCodexResponseToOpenAI(
+		context.Background(), "gpt-5.5", nil, nil, append([]byte("data: "), terminal...), &param,
+	)
+	if len(streamOut) != 1 {
+		t.Fatalf("stream output count = %d, want 1", len(streamOut))
+	}
+	if got := gjson.GetBytes(streamOut[0], "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("stream finish_reason = %q, want length. Output: %s", got, streamOut[0])
+	}
+	if got := gjson.GetBytes(streamOut[0], "choices.0.native_finish_reason").String(); got != "max_output_tokens" {
+		t.Fatalf("stream native_finish_reason = %q, want max_output_tokens. Output: %s", got, streamOut[0])
+	}
+
+	nonStreamOut := ConvertCodexResponseToOpenAINonStream(
+		context.Background(), "gpt-5.5", nil, nil, terminal, nil,
+	)
+	if got := gjson.GetBytes(nonStreamOut, "choices.0.finish_reason").String(); got != "length" {
+		t.Fatalf("non-stream finish_reason = %q, want length. Output: %s", got, nonStreamOut)
+	}
+}
+
 func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *testing.T) {
 	ctx := context.Background()
 	var param any
@@ -90,6 +115,23 @@ func TestConvertCodexResponseToOpenAI_NonStreamMultiMessageEmptyTrailingKeepsCon
 	}
 }
 
+func TestConvertCodexResponseToOpenAINonStreamKeepsAssistantRole(t *testing.T) {
+	input := []byte(`{"type":"response.completed","response":{"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"hello"}]}]}}`)
+
+	output := ConvertCodexResponseToOpenAINonStream(
+		context.Background(),
+		"",
+		nil,
+		nil,
+		input,
+		nil,
+	)
+
+	if role := gjson.GetBytes(output, "choices.0.message.role").String(); role != "assistant" {
+		t.Fatalf("role = %q, want assistant", role)
+	}
+}
+
 func TestConvertCodexResponseToOpenAIForwardsCacheWriteTokens(t *testing.T) {
 	ctx := context.Background()
 	var param any
@@ -127,5 +169,36 @@ func TestConvertCodexResponseToOpenAIForwardsCacheWriteTokens(t *testing.T) {
 	)
 	if got := gjson.GetBytes(nonStream, "usage.prompt_tokens_details.cached_creation_tokens").Int(); got != 40 {
 		t.Fatalf("non-stream cached_creation_tokens = %d, want 40; output: %s", got, nonStream)
+	}
+}
+
+func TestConvertCodexResponseToOpenAINonStreamUsesToolCallsFinishReason(t *testing.T) {
+	input := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"status":"completed",
+			"output":[{
+				"type":"function_call",
+				"call_id":"call_1",
+				"name":"search",
+				"arguments":"{\"query\":\"test\"}"
+			}]
+		}
+	}`)
+
+	output := ConvertCodexResponseToOpenAINonStream(
+		context.Background(),
+		"",
+		nil,
+		nil,
+		input,
+		nil,
+	)
+
+	if got := gjson.GetBytes(output, "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("finish_reason = %q, want tool_calls; output: %s", got, output)
+	}
+	if got := gjson.GetBytes(output, "choices.0.native_finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("native_finish_reason = %q, want tool_calls; output: %s", got, output)
 	}
 }

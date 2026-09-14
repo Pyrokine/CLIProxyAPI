@@ -5,12 +5,13 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-func ConvertInteractionsRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertInteractionsRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","max_tokens":32000,"messages":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -20,6 +21,11 @@ func ConvertInteractionsRequestToClaude(modelName string, inputRawJSON []byte, s
 	out = copyInteractionsSystemToClaude(out, root)
 	out = copyInteractionsGenerationConfigToClaude(out, root)
 	out = appendInteractionsInputToClaudeMessages(out, root.Get("input"))
+	messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(int(root.Get("input.#").Int()))
+	for _, message := range gjson.GetBytes(out, "messages").Array() {
+		messageAccumulator.Append([]byte(message.Raw))
+	}
+	out = translatorcommon.SetRawArrayItems(out, "messages", messageAccumulator.Messages())
 	out = copyInteractionsToolsToClaude(out, root)
 	return out
 }
@@ -134,10 +140,12 @@ func appendInteractionsInputToClaudeMessages(out []byte, input gjson.Result) []b
 	if input.IsObject() {
 		return appendInteractionsInputItemToClaude(out, input)
 	}
-	input.ForEach(func(_, step gjson.Result) bool {
-		out = appendInteractionsInputItemToClaude(out, step)
-		return true
-	})
+	input.ForEach(
+		func(_, step gjson.Result) bool {
+			out = appendInteractionsInputItemToClaude(out, step)
+			return true
+		},
+	)
 	return out
 }
 
@@ -147,10 +155,12 @@ func appendInteractionsInputItemToClaude(out []byte, step gjson.Result) []byte {
 		if role := step.Get("role").String(); role == "model" || role == "assistant" {
 			defaultRole = "assistant"
 		}
-		step.Get("steps").ForEach(func(_, nestedStep gjson.Result) bool {
-			out = appendInteractionsStepToClaude(out, nestedStep, defaultRole)
-			return true
-		})
+		step.Get("steps").ForEach(
+			func(_, nestedStep gjson.Result) bool {
+				out = appendInteractionsStepToClaude(out, nestedStep, defaultRole)
+				return true
+			},
+		)
 		return out
 	}
 	if step.Get("parts").Exists() {
@@ -186,10 +196,12 @@ func appendInteractionsStepToClaude(out []byte, step gjson.Result, defaultRole s
 		part, _ = sjson.SetBytes(part, "text", stepContent.String())
 		content, _ = sjson.SetRawBytes(content, "-1", part)
 	} else if stepContent.IsArray() {
-		stepContent.ForEach(func(_, part gjson.Result) bool {
-			content = appendInteractionsContentToClaude(content, part, role)
-			return true
-		})
+		stepContent.ForEach(
+			func(_, part gjson.Result) bool {
+				content = appendInteractionsContentToClaude(content, part, role)
+				return true
+			},
+		)
 	} else if text := step.Get("text"); text.Exists() {
 		part := []byte(`{"type":"text","text":""}`)
 		part, _ = sjson.SetBytes(part, "text", text.String())
@@ -271,10 +283,12 @@ func appendInteractionsFunctionResultToClaude(out []byte, step gjson.Result) []b
 	switch {
 	case result.IsArray():
 		content := []byte(`[]`)
-		result.ForEach(func(_, part gjson.Result) bool {
-			content = appendInteractionsContentToClaude(content, part, "user")
-			return true
-		})
+		result.ForEach(
+			func(_, part gjson.Result) bool {
+				content = appendInteractionsContentToClaude(content, part, "user")
+				return true
+			},
+		)
 		toolResult, _ = sjson.SetRawBytes(toolResult, "content", content)
 	case result.Exists() && result.Raw != "":
 		toolResult, _ = sjson.SetBytes(toolResult, "content", result.Raw)
@@ -293,24 +307,30 @@ func copyInteractionsToolsToClaude(out []byte, root gjson.Result) []byte {
 		return out
 	}
 	claudeTools := []byte(`[]`)
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if tool.Get("function_declarations").IsArray() {
-			tool.Get("function_declarations").ForEach(func(_, decl gjson.Result) bool {
-				claudeTools = appendInteractionsClaudeTool(claudeTools, decl)
+	tools.ForEach(
+		func(_, tool gjson.Result) bool {
+			if tool.Get("function_declarations").IsArray() {
+				tool.Get("function_declarations").ForEach(
+					func(_, decl gjson.Result) bool {
+						claudeTools = appendInteractionsClaudeTool(claudeTools, decl)
+						return true
+					},
+				)
 				return true
-			})
-			return true
-		}
-		if tool.Get("functionDeclarations").IsArray() {
-			tool.Get("functionDeclarations").ForEach(func(_, decl gjson.Result) bool {
-				claudeTools = appendInteractionsClaudeTool(claudeTools, decl)
+			}
+			if tool.Get("functionDeclarations").IsArray() {
+				tool.Get("functionDeclarations").ForEach(
+					func(_, decl gjson.Result) bool {
+						claudeTools = appendInteractionsClaudeTool(claudeTools, decl)
+						return true
+					},
+				)
 				return true
-			})
+			}
+			claudeTools = appendInteractionsClaudeTool(claudeTools, tool)
 			return true
-		}
-		claudeTools = appendInteractionsClaudeTool(claudeTools, tool)
-		return true
-	})
+		},
+	)
 	if len(gjson.ParseBytes(claudeTools).Array()) > 0 {
 		out, _ = sjson.SetRawBytes(out, "tools", claudeTools)
 	}
@@ -332,10 +352,14 @@ func appendInteractionsClaudeTool(tools []byte, tool gjson.Result) []byte {
 	} else if desc := tool.Get("function.description"); desc.Exists() {
 		converted, _ = sjson.SetBytes(converted, "description", desc.String())
 	}
-	params := firstClaudeInteractionsExisting(tool, "parameters", "parametersJsonSchema", "parameters_json_schema", "input_schema")
-	if params.Exists() && params.IsObject() {
-		converted, _ = sjson.SetRawBytes(converted, "input_schema", []byte(params.Raw))
-	}
+	params := firstClaudeInteractionsExisting(
+		tool, "parameters", "parametersJsonSchema", "parameters_json_schema", "input_schema",
+	)
+	converted, _ = sjson.SetRawBytes(
+		converted,
+		"input_schema",
+		util.NormalizeClaudeToolInputSchema([]byte(params.Raw)),
+	)
 	tools, _ = sjson.SetRawBytes(tools, "-1", converted)
 	return tools
 }
@@ -344,6 +368,8 @@ func copyInteractionsToolChoiceToClaude(out []byte, toolChoice gjson.Result) []b
 	if !toolChoice.Exists() {
 		return out
 	}
+	// Tool choice accepts only the documented string and object forms.
+	// noinspection GoSwitchMissingCasesForIotaConsts
 	switch toolChoice.Type {
 	case gjson.String:
 		switch strings.ToLower(strings.TrimSpace(toolChoice.String())) {
@@ -396,25 +422,27 @@ func interactionsClaudeText(value gjson.Result) string {
 	if text := value.Get("text"); text.Exists() {
 		return text.String()
 	}
-	if thinking := value.Get("thinking"); thinking.Exists() {
-		return thinking.String()
+	if thinkingText := value.Get("thinking"); thinkingText.Exists() {
+		return thinkingText.String()
 	}
 	if content := value.Get("content"); content.Exists() {
 		return interactionsClaudeText(content)
 	}
 	if parts := value.Get("parts"); parts.Exists() && parts.IsArray() {
 		var builder strings.Builder
-		parts.ForEach(func(_, part gjson.Result) bool {
-			text := interactionsClaudeText(part)
-			if text == "" {
+		parts.ForEach(
+			func(_, part gjson.Result) bool {
+				text := interactionsClaudeText(part)
+				if text == "" {
+					return true
+				}
+				if builder.Len() > 0 {
+					builder.WriteByte('\n')
+				}
+				builder.WriteString(text)
 				return true
-			}
-			if builder.Len() > 0 {
-				builder.WriteByte('\n')
-			}
-			builder.WriteString(text)
-			return true
-		})
+			},
+		)
 		return builder.String()
 	}
 	return ""

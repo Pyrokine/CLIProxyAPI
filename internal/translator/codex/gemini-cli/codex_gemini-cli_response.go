@@ -11,7 +11,7 @@ import (
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 )
 
-// ConvertCodexResponseToGeminiCLI converts Codex streaming response format to Gemini CLI format.
+// convertCodexResponseToGeminiCLI converts Codex streaming response format to Gemini CLI format.
 // This function processes various Codex event types and transforms them into Gemini-compatible JSON responses.
 // It handles text content, tool calls, and usage metadata, outputting responses that match the Gemini CLI API format.
 // The function wraps each converted response in a "response" object to match the Gemini CLI API structure.
@@ -24,7 +24,7 @@ import (
 //
 // Returns:
 //   - [][]byte: A slice of Gemini-compatible JSON responses wrapped in a response object
-func ConvertCodexResponseToGeminiCLI(
+func convertCodexResponseToGeminiCLI(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
@@ -34,13 +34,13 @@ func ConvertCodexResponseToGeminiCLI(
 		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
 	)
 	newOutputs := make([][]byte, 0, len(outputs))
-	for i := 0; i < len(outputs); i++ {
+	for i := range outputs {
 		newOutputs = append(newOutputs, translatorcommon.WrapGeminiCLIResponse(outputs[i]))
 	}
 	return newOutputs
 }
 
-// ConvertCodexResponseToGeminiCLINonStream converts a non-streaming Codex response to a non-streaming Gemini CLI response.
+// convertCodexResponseToGeminiCLINonStream converts a non-streaming Codex response to a non-streaming Gemini CLI response.
 // This function processes the complete Codex response and transforms it into a single Gemini-compatible
 // JSON response. It wraps the converted response in a "response" object to match the Gemini CLI API structure.
 //
@@ -52,7 +52,7 @@ func ConvertCodexResponseToGeminiCLI(
 //
 // Returns:
 //   - []byte: A Gemini-compatible JSON response wrapped in a response object
-func ConvertCodexResponseToGeminiCLINonStream(
+func convertCodexResponseToGeminiCLINonStream(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,

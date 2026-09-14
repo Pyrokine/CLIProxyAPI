@@ -10,7 +10,7 @@ import (
 
 func TestCodexFunctionCallNonStreamPreservesItemAndCallIDs(t *testing.T) {
 	raw := []byte(`{"id":"response-1","model":"test","output":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":"{}"}]}`)
-	out := ConvertCodexResponseToInteractionsNonStream(
+	out := convertCodexResponseToInteractionsNonStream(
 		context.Background(),
 		"test",
 		nil,
@@ -28,7 +28,7 @@ func TestCodexFunctionCallNonStreamPreservesItemAndCallIDs(t *testing.T) {
 
 func TestCodexFunctionCallStreamPreservesItemAndCallIDs(t *testing.T) {
 	var state any
-	out := ConvertCodexResponseToInteractions(
+	out := convertCodexResponseToInteractions(
 		context.Background(),
 		"test",
 		nil,
@@ -58,13 +58,39 @@ func TestCodexFunctionCallStreamPreservesItemAndCallIDs(t *testing.T) {
 	}
 }
 
+func TestConvertCodexResponseToInteractionsIncompleteTerminal(t *testing.T) {
+	raw := []byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}`)
+	nonStreamOut := convertCodexResponseToInteractionsNonStream(
+		context.Background(), "codex-test", nil, nil, raw, nil,
+	)
+	if got := gjson.GetBytes(nonStreamOut, "status").String(); got != "incomplete" {
+		t.Fatalf("non-stream status = %q, want incomplete. Output: %s", got, nonStreamOut)
+	}
+
+	var param any
+	streamOut := convertCodexResponseToInteractions(
+		context.Background(), "codex-test", nil, nil, append([]byte("data: "), raw...), &param,
+	)
+	for _, event := range streamOut {
+		payload := codexInteractionEventPayload(event)
+		if payload.Get("event_type").String() != "interaction.completed" {
+			continue
+		}
+		if got := payload.Get("interaction.status").String(); got != "incomplete" {
+			t.Fatalf("stream status = %q, want incomplete. Payload: %s", got, payload.Raw)
+		}
+		return
+	}
+	t.Fatalf("interaction.completed event missing: %q", streamOut)
+}
+
 func codexInteractionEventPayload(raw []byte) gjson.Result {
 	marker := []byte("data: ")
-	index := bytes.Index(raw, marker)
-	if index < 0 {
+	_, after, ok := bytes.Cut(raw, marker)
+	if !ok {
 		return gjson.Result{}
 	}
-	payload := raw[index+len(marker):]
+	payload := after
 	if end := bytes.IndexByte(payload, '\n'); end >= 0 {
 		payload = payload[:end]
 	}
