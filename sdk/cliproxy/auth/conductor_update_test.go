@@ -325,10 +325,12 @@ func TestRefreshAuthForRequestKeepsRotatedCredentialAndRetriesPersistence(t *tes
 	previousMaxDelay := deferredAuthRecreateRetryMaxDelay
 	deferredAuthRecreateRetryInitialDelay = time.Millisecond
 	deferredAuthRecreateRetryMaxDelay = 5 * time.Millisecond
-	t.Cleanup(func() {
-		deferredAuthRecreateRetryInitialDelay = previousInitialDelay
-		deferredAuthRecreateRetryMaxDelay = previousMaxDelay
-	})
+	t.Cleanup(
+		func() {
+			deferredAuthRecreateRetryInitialDelay = previousInitialDelay
+			deferredAuthRecreateRetryMaxDelay = previousMaxDelay
+		},
+	)
 
 	path := filepath.Join(t.TempDir(), "rotating.json")
 	store := &retryingRefreshStore{

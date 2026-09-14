@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -68,6 +69,32 @@ func (s *blockingAuthStore) Save(_ context.Context, auth *Auth) (string, error) 
 
 func (s *blockingAuthStore) Delete(context.Context, string) error {
 	s.deletes.Add(1)
+	return nil
+}
+
+type cancellationAwareAuthStore struct {
+	mu               sync.Mutex
+	last             *Auth
+	lastSaveDeadline bool
+}
+
+func (*cancellationAwareAuthStore) List(context.Context) ([]*Auth, error) {
+	return nil, nil
+}
+
+func (s *cancellationAwareAuthStore) Save(ctx context.Context, auth *Auth) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	_, hasDeadline := ctx.Deadline()
+	s.mu.Lock()
+	s.last = auth.Clone()
+	s.lastSaveDeadline = hasDeadline
+	s.mu.Unlock()
+	return auth.ID, nil
+}
+
+func (*cancellationAwareAuthStore) Delete(context.Context, string) error {
 	return nil
 }
 
@@ -360,8 +387,12 @@ func TestMarkResultRejectsSuccessFromBeforeQuotaBarrier(t *testing.T) {
 	if state.Quota.BackoffLevel != backoffLevel {
 		t.Fatalf("stale 429 backoff level = %d, want %d", state.Quota.BackoffLevel, backoffLevel)
 	}
-	if state.LastError == nil || state.LastError.HTTPStatus != 401 {
-		t.Fatalf("stale non-quota error was not retained: %#v", state.LastError)
+	if state.LastError == nil || state.LastError.HTTPStatus != http.StatusTooManyRequests {
+		t.Fatalf("credential-scoped failure overwrote quota-family state: %#v", state.LastError)
+	}
+	if current.LastError == nil || current.LastError.HTTPStatus != http.StatusUnauthorized ||
+		current.StateEffectScope != cliproxyexecutor.StateEffectScopeCredential {
+		t.Fatalf("credential-scoped failure was not recorded independently: %#v", current.LastError)
 	}
 	if picked, errPick := manager.scheduler.pickSingle(
 		context.Background(), auth.Provider, model, cliproxyexecutor.Options{}, nil,
@@ -518,10 +549,9 @@ func TestRemovePreventsInFlightMarkResultSideEffects(t *testing.T) {
 		t.Fatal("MarkResult did not enter persistence")
 	}
 
-	removeDone := make(chan struct{})
+	removeDone := make(chan error, 1)
 	go func() {
-		manager.Remove(context.Background(), auth.ID)
-		close(removeDone)
+		removeDone <- manager.Remove(context.Background(), auth.ID)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -540,7 +570,10 @@ func TestRemovePreventsInFlightMarkResultSideEffects(t *testing.T) {
 		t.Fatal("MarkResult did not finish")
 	}
 	select {
-	case <-removeDone:
+	case errRemove := <-removeDone:
+		if errRemove != nil {
+			t.Fatalf("Remove() error = %v", errRemove)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Remove did not finish")
 	}
@@ -611,6 +644,19 @@ func TestPickNextRejectsPluginSchedulerAuthCoolingAfterSnapshot(t *testing.T) {
 		if result.auth != nil || result.err == nil {
 			t.Fatalf("PickNext() returned stale cooling auth=%#v error=%v", result.auth, result.err)
 		}
+		var cooldownErr *modelCooldownError
+		if !errors.As(result.err, &cooldownErr) {
+			t.Fatalf("PickNext() error = %T, want *modelCooldownError", result.err)
+		}
+		if cooldownErr.model != model || cooldownErr.provider != auth.Provider {
+			t.Fatalf(
+				"PickNext() cooldown error model=%q provider=%q, want model=%q provider=%q",
+				cooldownErr.model,
+				cooldownErr.provider,
+				model,
+				auth.Provider,
+			)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("PickNext did not finish")
 	}
@@ -648,7 +694,9 @@ func TestPickNextRejectsCustomSelectorAuthRemovedAfterSnapshot(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("custom selector did not receive the auth snapshot")
 	}
-	manager.Remove(context.Background(), auth.ID)
+	if errRemove := manager.Remove(context.Background(), auth.ID); errRemove != nil {
+		t.Fatalf("Remove() error = %v", errRemove)
+	}
 	close(selector.release)
 	select {
 	case result := <-picked:
@@ -706,6 +754,18 @@ func TestPickNextMixedRejectsCustomSelectorAuthCoolingAfterSnapshot(t *testing.T
 	case result := <-picked:
 		if result.auth != nil || result.err == nil {
 			t.Fatalf("pickNextMixed() returned cooling auth=%#v error=%v", result.auth, result.err)
+		}
+		var cooldownErr *modelCooldownError
+		if !errors.As(result.err, &cooldownErr) {
+			t.Fatalf("pickNextMixed() error = %T, want *modelCooldownError", result.err)
+		}
+		if cooldownErr.model != model || cooldownErr.provider != "" {
+			t.Fatalf(
+				"pickNextMixed() cooldown error model=%q provider=%q, want model=%q without provider",
+				cooldownErr.model,
+				cooldownErr.provider,
+				model,
+			)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("pickNextMixed did not finish")
@@ -846,10 +906,9 @@ func TestRemoveDeletesExplicitRecreatePublishedWhileWaitingForMutationLock(t *te
 	<-recreateStarted
 	time.Sleep(20 * time.Millisecond)
 
-	removeDone := make(chan struct{})
+	removeDone := make(chan error, 1)
 	go func() {
-		manager.Remove(context.Background(), authID)
-		close(removeDone)
+		removeDone <- manager.Remove(context.Background(), authID)
 	}()
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -875,7 +934,10 @@ func TestRemoveDeletesExplicitRecreatePublishedWhileWaitingForMutationLock(t *te
 		t.Fatal("explicit recreate did not finish")
 	}
 	select {
-	case <-removeDone:
+	case errRemove := <-removeDone:
+		if errRemove != nil {
+			t.Fatalf("Remove() error = %v", errRemove)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("Remove did not finish")
 	}
@@ -913,6 +975,53 @@ func TestMergePersistentUpdateConditionalRejectsBeforePersistence(t *testing.T) 
 	store.mu.Unlock()
 	if persisted == nil || persisted.Metadata["token"] != "old" {
 		t.Fatalf("rejected update changed persistence: %#v", persisted)
+	}
+}
+
+func TestMergePersistentUpdateConditionalCompletesAfterReservationCancellation(t *testing.T) {
+	store := &cancellationAwareAuthStore{}
+	manager := NewManager(store, nil, nil)
+	registered, errRegister := manager.Register(
+		context.Background(),
+		&Auth{
+			ID:       "conditional-cancel-after-reserve",
+			Provider: "plugin-provider",
+			Metadata: map[string]any{"token": "old"},
+		},
+	)
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	update := registered.Clone()
+	update.Metadata["token"] = "new"
+	ctx, cancel := context.WithCancel(context.Background())
+	merged, errMerge := manager.MergePersistentUpdateConditional(
+		ctx,
+		registered,
+		update,
+		func(reserve func() bool) bool {
+			if !reserve() {
+				return false
+			}
+			cancel()
+			return true
+		},
+	)
+	if errMerge != nil {
+		t.Fatalf("MergePersistentUpdateConditional() error = %v", errMerge)
+	}
+	if merged == nil || merged.Metadata["token"] != "new" {
+		t.Fatalf("merged auth = %#v, want committed update", merged)
+	}
+	store.mu.Lock()
+	persisted := store.last.Clone()
+	hadDeadline := store.lastSaveDeadline
+	store.mu.Unlock()
+	if persisted == nil || persisted.Metadata["token"] != "new" {
+		t.Fatalf("persisted auth = %#v, want committed update", persisted)
+	}
+	if !hadDeadline {
+		t.Fatal("reserved persistent update used an unbounded commit context")
 	}
 }
 
@@ -961,16 +1070,65 @@ func TestDeletePersistedAuthIfMatchUsesCapturedVersionPath(t *testing.T) {
 	}
 }
 
+func TestMergeRefreshedAuthStateUsesCodexAccountEntitlement(t *testing.T) {
+	runtimeState := &struct{ owner string }{owner: "a"}
+	current := &Auth{
+		ID:            "codex-refresh-binding",
+		Provider:      "codex",
+		Status:        StatusError,
+		StatusMessage: "usage limit",
+		Unavailable:   true,
+		Quota:         QuotaState{Exceeded: true, Reason: "usage limit"},
+		LastError:     &Error{HTTPStatus: http.StatusTooManyRequests, Message: "usage limit"},
+		ModelStates: map[string]*ModelState{
+			"gpt-5.6-sol": {Status: StatusError, Unavailable: true},
+		},
+		Metadata: map[string]any{
+			"refresh_token": "refresh-a",
+			"access_token":  "access-a",
+			"id_token":      testCodexBindingToken(t, "account-a", "plus", 1),
+		},
+		Runtime: runtimeState,
+	}
+	rotated := current.Clone()
+	rotated.Metadata["refresh_token"] = "refresh-b"
+	rotated.Metadata["access_token"] = "access-b"
+	rotated.Metadata["id_token"] = testCodexBindingToken(t, "account-a", "plus", 2)
+	preserved, bindingChanged := mergeRefreshedAuthState(current, rotated)
+	if bindingChanged || preserved.Runtime != runtimeState || !preserved.Quota.Exceeded ||
+		len(preserved.ModelStates) != 1 || preserved.LastError == nil {
+		t.Fatalf("same-entitlement refresh state = %#v, binding changed = %t", preserved, bindingChanged)
+	}
+
+	upgraded := rotated.Clone()
+	upgraded.Metadata["id_token"] = testCodexBindingToken(t, "account-a", "pro", 3)
+	cleared, bindingChanged := mergeRefreshedAuthState(current, upgraded)
+	if !bindingChanged || cleared.Status != StatusActive || cleared.Runtime != nil || cleared.Unavailable ||
+		cleared.Quota.Exceeded || len(cleared.ModelStates) != 0 || cleared.LastError != nil {
+		t.Fatalf("changed-entitlement refresh state = %#v, binding changed = %t", cleared, bindingChanged)
+	}
+}
+
 func TestMutatePersistentAuthPreservesRuntimeForSameCredentialOwner(t *testing.T) {
 	runtimeState := &struct{ account string }{account: "a"}
 	manager := NewManager(nil, nil, nil)
 	registered, errRegister := manager.Register(
 		context.Background(),
 		&Auth{
-			ID:       "gemini-runtime-same-owner",
-			Provider: "gemini-cli",
+			ID:            "gemini-runtime-same-owner",
+			Provider:      "gemini-cli",
+			Status:        StatusError,
+			StatusMessage: "current owner state",
+			Unavailable:   true,
+			Quota:         QuotaState{Exceeded: true, Reason: "current owner quota"},
+			LastError:     &Error{HTTPStatus: http.StatusTooManyRequests, Message: "current owner"},
+			Attributes:    map[string]string{"priority": "1"},
 			Metadata: map[string]any{
-				"token": map[string]any{"refresh_token": "account-a-refresh"},
+				"token": map[string]any{
+					"refresh_token": "account-a-refresh",
+					"access_token":  "access-a",
+				},
+				"note": "before",
 			},
 			Runtime: runtimeState,
 		},
@@ -984,6 +1142,10 @@ func TestMutatePersistentAuthPreservesRuntimeForSameCredentialOwner(t *testing.T
 		func(context.Context) (*Auth, error) {
 			replacement := registered.Clone()
 			replacement.Label = "updated"
+			replacement.ProxyURL = "http://proxy.example"
+			replacement.Attributes["priority"] = "2"
+			replacement.Metadata["note"] = "after"
+			replacement.Metadata["token"].(map[string]any)["access_token"] = "access-b"
 			replacement.Runtime = nil
 			return replacement, nil
 		},
@@ -991,8 +1153,11 @@ func TestMutatePersistentAuthPreservesRuntimeForSameCredentialOwner(t *testing.T
 	if errMutate != nil {
 		t.Fatal(errMutate)
 	}
-	if updated == nil || updated.Runtime != runtimeState {
-		t.Fatalf("updated auth runtime = %#v", updated)
+	if updated == nil || updated.Runtime != runtimeState || updated.Status != StatusError ||
+		!updated.Unavailable || !updated.Quota.Exceeded || updated.LastError == nil ||
+		updated.Label != "updated" || updated.ProxyURL != "http://proxy.example" ||
+		updated.Attributes["priority"] != "2" || updated.Metadata["note"] != "after" {
+		t.Fatalf("updated auth = %#v", updated)
 	}
 }
 
@@ -1029,6 +1194,118 @@ func TestMutatePersistentAuthClearsRuntimeWhenCredentialOwnerChanges(t *testing.
 	}
 	if updated == nil || updated.Runtime != nil || authRefreshOwnerToken(updated) != "account-b-refresh" {
 		t.Fatalf("updated auth = %#v", updated)
+	}
+}
+
+func TestMutatePersistentAuthClearsOwnerBoundState(t *testing.T) {
+	ctx := context.Background()
+	manager := NewManager(nil, nil, nil)
+	cooldownStore := &recordingCooldownStateStore{}
+	manager.SetCooldownStateStore(cooldownStore)
+	authID := "binding-owner-state"
+	provider := "binding-owner-provider"
+	model := "binding-owner-model"
+	nextRetry := time.Now().Add(time.Hour)
+	executor := &replaceAwareExecutor{id: provider}
+	manager.RegisterExecutor(executor)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(authID, provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { reg.UnregisterClient(authID) })
+	registered, errRegister := manager.Register(
+		ctx, &Auth{
+			ID:               authID,
+			Provider:         provider,
+			Status:           StatusError,
+			StatusMessage:    "old owner unavailable",
+			Unavailable:      true,
+			NextRetryAfter:   nextRetry,
+			Quota:            QuotaState{Exceeded: true, Reason: "old quota", NextRecoverAt: nextRetry},
+			LastError:        &Error{HTTPStatus: http.StatusTooManyRequests, Message: "old owner"},
+			StateGeneration:  7,
+			StateEffectScope: cliproxyexecutor.StateEffectScopeCredential,
+			StateEffectKey:   authID,
+			ResetAuthority:   StateResetAuthorityOperator,
+			LastRefreshedAt:  nextRetry,
+			Metadata:         map[string]any{"refresh_token": "owner-a-refresh", "access_token": "access-a"},
+			Runtime:          &struct{ owner string }{owner: "a"},
+			Success:          3,
+			Failed:           2,
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					StatusMessage:  "old model quota",
+					Unavailable:    true,
+					NextRetryAfter: nextRetry,
+					LastError:      &Error{HTTPStatus: http.StatusTooManyRequests, Message: "old model"},
+					Quota:          QuotaState{Exceeded: true, Reason: "old model quota", NextRecoverAt: nextRetry},
+					EffectScope:    cliproxyexecutor.StateEffectScopeQuotaFamily,
+					EffectKey:      "old-family",
+					ResetAuthority: StateResetAuthorityOperator,
+					Generation:     9,
+					UpdatedAt:      time.Now(),
+				},
+			},
+		},
+	)
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	manager.rememberHomeRuntimeAuth("binding-session", registered)
+	reg.SetModelQuotaExceeded(authID, model)
+	reg.SuspendClientModel(authID, model, "old owner")
+	manager.PersistCooldownStates(ctx)
+	cooldownStore.mu.Lock()
+	beforeRecords := cloneCooldownStateRecords(cooldownStore.records)
+	cooldownStore.mu.Unlock()
+	if len(beforeRecords) == 0 || beforeRecords[0].BindingSHA256 == "" {
+		t.Fatalf("persisted cooldown records = %#v", beforeRecords)
+	}
+
+	updated, errMutate := manager.MutatePersistentAuth(
+		ctx, authID, func(context.Context) (*Auth, error) {
+			return &Auth{
+				ID:       authID,
+				Provider: provider,
+				Status:   StatusActive,
+				Metadata: map[string]any{"refresh_token": "owner-b-refresh", "access_token": "access-b"},
+			}, nil
+		},
+	)
+	if errMutate != nil {
+		t.Fatal(errMutate)
+	}
+	if updated == nil || updated.Generation <= registered.Generation {
+		t.Fatalf("updated auth = %#v", updated)
+	}
+	if updated.Status != StatusActive || updated.StatusMessage != "" || updated.Unavailable ||
+		!updated.NextRetryAfter.IsZero() || updated.Quota.Exceeded || updated.LastError != nil ||
+		len(updated.ModelStates) != 0 || updated.StateGeneration != 0 || updated.StateEffectScope != "" ||
+		updated.StateEffectKey != "" || updated.ResetAuthority != "" || updated.Runtime != nil ||
+		!updated.LastRefreshedAt.IsZero() {
+		t.Fatalf("old owner state survived replacement: %#v", updated)
+	}
+	if updated.Success != 3 || updated.Failed != 2 {
+		t.Fatalf("request counters = (%d, %d)", updated.Success, updated.Failed)
+	}
+	if _, ok := manager.GetExecutionSessionAuthByID("binding-session", authID); ok {
+		t.Fatal("Home runtime auth survived owner replacement")
+	}
+	if available, errAvailable := reg.GetFirstAvailableModel(provider); errAvailable != nil || available != model {
+		t.Fatalf("registry model after replacement = %q, %v", available, errAvailable)
+	}
+	closedAuths := executor.ClosedAuthIDs()
+	if len(closedAuths) != 1 || closedAuths[0] != authID {
+		t.Fatalf("closed execution-session auths = %#v", closedAuths)
+	}
+	if closed := executor.ClosedSessionIDs(); len(closed) != 0 {
+		t.Fatalf("owner replacement closed unrelated sessions: %#v", closed)
+	}
+	cooldownStore.mu.Lock()
+	afterRecords := cloneCooldownStateRecords(cooldownStore.records)
+	cooldownStore.mu.Unlock()
+	if len(afterRecords) != 0 {
+		t.Fatalf("cooldown records survived replacement: %#v", afterRecords)
 	}
 }
 
@@ -1202,8 +1479,10 @@ func TestMarkResultRejectsStaleAuthGeneration(t *testing.T) {
 		t.Fatalf("stale result changed persisted state: %#v", persisted)
 	}
 
-	manager.Remove(context.Background(), registered.ID)
-	recreated, errRecreate := manager.Register(
+	if errRemove := manager.Remove(context.Background(), registered.ID); errRemove != nil {
+		t.Fatalf("Remove() error = %v", errRemove)
+	}
+	_, errRecreate := manager.Register(
 		WithAllowAuthRecreate(context.Background()),
 		&Auth{
 			ID:       registered.ID,
@@ -1224,7 +1503,7 @@ func TestMarkResultRejectsStaleAuthGeneration(t *testing.T) {
 			Success:        true,
 		},
 	)
-	recreated, ok = manager.GetByID(registered.ID)
+	recreated, ok := manager.GetByID(registered.ID)
 	if !ok || recreated.Metadata["token"] != "recreated" || recreated.Success != 0 {
 		t.Fatalf("stale result changed recreated auth: %#v", recreated)
 	}
@@ -1276,9 +1555,9 @@ func TestPrepareRequestAuthKeepsRuntimeCredentialIsolated(t *testing.T) {
 	release := make(chan struct{})
 	close(release)
 	preparer := &blockingRequestAuthPreparer{
-		replaceAwareExecutor: replaceAwareExecutor{id: "antigravity"},
-		entered:              make(chan *Auth, 1),
-		release:              release,
+		id:      "antigravity",
+		entered: make(chan *Auth, 1),
+		release: release,
 	}
 	runtimeAuth := &Auth{
 		ID:         managed.ID,
@@ -1318,9 +1597,9 @@ func TestPrepareRequestAuthRetriesAfterConcurrentCredentialUpdate(t *testing.T) 
 		t.Fatalf("Register() error = %v", errRegister)
 	}
 	preparer := &blockingRequestAuthPreparer{
-		replaceAwareExecutor: replaceAwareExecutor{id: "antigravity"},
-		entered:              make(chan *Auth, 1),
-		release:              make(chan struct{}),
+		id:      "antigravity",
+		entered: make(chan *Auth, 1),
+		release: make(chan struct{}),
 	}
 	preparedCh := make(chan *Auth, 1)
 	errCh := make(chan error, 1)
@@ -1402,9 +1681,9 @@ func TestPerAuthOperationLocksAreReleasedAfterUse(t *testing.T) {
 	release := make(chan struct{})
 	close(release)
 	preparer := &blockingRequestAuthPreparer{
-		replaceAwareExecutor: replaceAwareExecutor{id: "antigravity"},
-		entered:              make(chan *Auth, 1),
-		release:              release,
+		id:      "antigravity",
+		entered: make(chan *Auth, 1),
+		release: release,
 	}
 	prepared, errPrepare := manager.prepareRequestAuth(context.Background(), preparer, registered)
 	if errPrepare != nil || prepared == nil {

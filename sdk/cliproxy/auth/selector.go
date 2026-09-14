@@ -13,15 +13,36 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/credentialweight"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxysession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 )
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
 	mu      sync.Mutex
-	cursors map[string]int
+	cursors map[string]string
 	maxKeys int
+}
+
+// WeightedRoundRobinSelector provides smooth weighted round-robin selection.
+type WeightedRoundRobinSelector struct {
+	mu      sync.Mutex
+	states  map[string]*smoothWeightedState
+	maxKeys int
+}
+
+// QuotaAwareSelector enables quota-aware scheduling in Manager.
+// Direct selector use preserves weighted round-robin semantics because it has no quota owner.
+type QuotaAwareSelector struct {
+	fallback WeightedRoundRobinSelector
+}
+
+type smoothWeightedState struct {
+	current    map[string]int64
+	weights    map[string]int64
+	lastPicked string
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -53,19 +74,16 @@ func (s *SessionAffinitySelector) FallbackSelector() Selector {
 	return s.fallback
 }
 
-func (s *SessionAffinitySelector) sessionKey(opts cliproxyexecutor.Options, provider string) string {
-	if s == nil {
-		return ""
+func sessionAffinityKeys(opts cliproxyexecutor.Options, provider string) (string, string) {
+	primary, fallback := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	if primary == "" {
+		return "", ""
 	}
-	sessionID := sessionAffinityIDFromOptions(opts)
-	if sessionID == "" {
-		return ""
+	primaryKey := provider + "::" + primary
+	if fallback == "" || fallback == primary {
+		return primaryKey, ""
 	}
-	return provider + "::" + sessionID
-}
-
-func sessionAffinityIDFromOptions(opts cliproxyexecutor.Options) string {
-	return ExtractSessionID(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	return primaryKey, provider + "::" + fallback
 }
 
 func (s *SessionAffinitySelector) PickSticky(provider string, opts cliproxyexecutor.Options, auths []*Auth) *Auth {
@@ -78,30 +96,82 @@ func (s *SessionAffinitySelector) pickStickyForModel(
 	opts cliproxyexecutor.Options,
 	auths []*Auth,
 ) *Auth {
-	cacheKey := s.sessionKey(opts, provider)
+	auth, _ := s.pickStickyForModelWithRule(provider, model, opts, auths)
+	return auth
+}
+
+func (s *SessionAffinitySelector) pickStickyForModelWithRule(
+	provider,
+	model string,
+	opts cliproxyexecutor.Options,
+	auths []*Auth,
+) (*Auth, string) {
+	cacheKey, fallbackKey := sessionAffinityKeys(opts, provider)
 	if cacheKey == "" || s.cache == nil {
-		return nil
+		return nil, ""
 	}
-	available, errAvailable := getAvailableAuths(auths, provider, model, time.Now())
+	availabilityCandidates := auths
+	if selectorUsesPositiveWeights(s.fallback) {
+		availabilityCandidates = positiveWeightAuths(auths, opts, model)
+	}
+	available, errAvailable := getAvailableAuths(availabilityCandidates, provider, model, opts, time.Now())
 	if errAvailable != nil {
-		return nil
+		return nil, ""
+	}
+	bind := func(authID string) {
+		if fallbackKey != "" {
+			s.cache.SetAliases(authID, cacheKey, fallbackKey)
+			return
+		}
+		s.cache.Set(cacheKey, authID)
 	}
 	if authID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for i := range available {
 			if available[i] != nil && available[i].ID == authID {
-				return available[i]
+				bind(authID)
+				publishAuthRouteTraceEvent(
+					opts, available[i], cliproxyexecutor.RouteTraceEvent{
+						Provider: provider,
+						Model:    model,
+						Action:   "candidate.selected",
+						Reason:   "session_affinity",
+					},
+				)
+				return available[i], "session_affinity"
 			}
 		}
 	}
-	return nil
+	if fallbackKey != "" {
+		if authID, ok := s.cache.Get(fallbackKey); ok {
+			for i := range available {
+				if available[i] != nil && available[i].ID == authID {
+					bind(authID)
+					publishAuthRouteTraceEvent(
+						opts, available[i], cliproxyexecutor.RouteTraceEvent{
+							Provider: provider,
+							Model:    model,
+							Action:   "candidate.selected",
+							Reason:   "session_affinity_fallback",
+						},
+					)
+					return available[i], "session_affinity_fallback"
+				}
+			}
+		}
+	}
+	return nil, ""
 }
 
 func (s *SessionAffinitySelector) Remember(provider string, opts cliproxyexecutor.Options, auth *Auth) {
 	if s == nil || s.cache == nil || auth == nil {
 		return
 	}
-	cacheKey := s.sessionKey(opts, provider)
+	cacheKey, fallbackKey := sessionAffinityKeys(opts, provider)
 	if cacheKey == "" {
+		return
+	}
+	if fallbackKey != "" {
+		s.cache.SetAliases(auth.ID, cacheKey, fallbackKey)
 		return
 	}
 	s.cache.Set(cacheKey, auth.ID)
@@ -222,6 +292,27 @@ func authPriority(auth *Auth) int {
 	return parsed
 }
 
+func authWeight(auth *Auth) int64 {
+	if auth == nil {
+		return credentialweight.Default
+	}
+	if rawWeight, ok := auth.Attributes[AttributeWeight]; ok && strings.TrimSpace(rawWeight) != "" {
+		weight, errParse := credentialweight.ParseString(rawWeight)
+		if errParse != nil {
+			return 0
+		}
+		return weight
+	}
+	if rawWeight, ok := auth.Metadata[AttributeWeight]; ok {
+		weight, errParse := credentialweight.ParseValue(rawWeight)
+		if errParse != nil {
+			return 0
+		}
+		return weight
+	}
+	return credentialweight.Default
+}
+
 func canonicalModelKey(model string) string {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -293,7 +384,9 @@ func preferCodexWebsocketAuths(ctx context.Context, provider string, available [
 
 func collectAvailableByPriority(
 	auths []*Auth,
+	provider,
 	model string,
+	opts cliproxyexecutor.Options,
 	now time.Time,
 ) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
@@ -305,22 +398,48 @@ func collectAvailableByPriority(
 			available[priority] = append(available[priority], candidate)
 			continue
 		}
-		if reason == blockReasonCooldown {
+		reasonCode := "blocked"
+		retryAfterMS := int64(0)
+		// None and other blocked reasons retain the generic blocked route reason.
+		// noinspection GoSwitchMissingCasesForIotaConsts
+		switch reason {
+		case blockReasonCooldown:
+			reasonCode = "cooldown"
 			cooldownCount++
 			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
 				earliest = next
 			}
+			if next.After(now) {
+				retryAfterMS = next.Sub(now).Milliseconds()
+			}
+		case blockReasonDisabled:
+			reasonCode = "disabled"
 		}
+		publishAuthRouteTraceEvent(
+			opts, candidate, cliproxyexecutor.RouteTraceEvent{
+				Provider:     provider,
+				Model:        model,
+				Action:       "candidate.excluded",
+				Reason:       reasonCode,
+				RetryAfterMS: retryAfterMS,
+			},
+		)
 	}
 	return available, cooldownCount, earliest
 }
 
-func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+func getAvailableAuths(
+	auths []*Auth,
+	provider,
+	model string,
+	opts cliproxyexecutor.Options,
+	now time.Time,
+) ([]*Auth, error) {
 	if len(auths) == 0 {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
 	}
 
-	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
+	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, provider, model, opts, now)
 	if len(availableByPriority) == 0 {
 		if cooldownCount == len(auths) && !earliest.IsZero() {
 			providerForError := provider
@@ -359,9 +478,8 @@ func (s *RoundRobinSelector) Pick(
 	opts cliproxyexecutor.Options,
 	auths []*Auth,
 ) (*Auth, error) {
-	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuths(auths, provider, model, opts, now)
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +487,7 @@ func (s *RoundRobinSelector) Pick(
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
-		s.cursors = make(map[string]int)
+		s.cursors = make(map[string]string)
 	}
 	limit := s.maxKeys
 	if limit <= 0 {
@@ -383,48 +501,259 @@ func (s *RoundRobinSelector) Pick(
 		// Two-level round-robin: first select a credential group, then pick within it.
 		groupKey := key + "::group"
 		s.ensureCursorKey(groupKey, limit)
-		if _, exists := s.cursors[groupKey]; !exists {
+		groupIndex := 0
+		if lastParent, exists := s.cursors[groupKey]; exists {
+			groupIndex = nextSortedStringIndex(parentOrder, lastParent)
+		} else {
 			// Seed with a random initial offset so the starting credential is randomized.
-			s.cursors[groupKey] = rand.IntN(len(parentOrder))
+			groupIndex = rand.IntN(len(parentOrder))
 		}
-		groupIndex := s.cursors[groupKey]
-		if groupIndex >= 2_147_483_640 {
-			groupIndex = 0
-		}
-		s.cursors[groupKey] = groupIndex + 1
 
-		selectedParent := parentOrder[groupIndex%len(parentOrder)]
+		selectedParent := parentOrder[groupIndex]
+		s.cursors[groupKey] = selectedParent
 		group := groups[selectedParent]
 
 		// Second level: round-robin within the selected credential group.
 		innerKey := key + "::cred:" + selectedParent
 		s.ensureCursorKey(innerKey, limit)
-		innerIndex := s.cursors[innerKey]
-		if innerIndex >= 2_147_483_640 {
-			innerIndex = 0
-		}
-		s.cursors[innerKey] = innerIndex + 1
+		innerIndex := nextSortedAuthIndex(group, s.cursors[innerKey])
+		selected := group[innerIndex]
+		s.cursors[innerKey] = selected.ID
 		s.mu.Unlock()
-		return group[innerIndex%len(group)], nil
+		publishAuthRouteTraceEvent(
+			opts, selected, cliproxyexecutor.RouteTraceEvent{
+				Provider: provider,
+				Model:    model,
+				Action:   "candidate.selected",
+				Reason:   "round_robin_group",
+			},
+		)
+		return selected, nil
 	}
 
 	// Flat round-robin for non-grouped auths (original behavior).
 	s.ensureCursorKey(key, limit)
-	index := s.cursors[key]
-	if index >= 2_147_483_640 {
-		index = 0
-	}
-	s.cursors[key] = index + 1
+	index := nextSortedAuthIndex(available, s.cursors[key])
+	selected := available[index]
+	s.cursors[key] = selected.ID
 	s.mu.Unlock()
-	return available[index%len(available)], nil
+	publishAuthRouteTraceEvent(
+		opts, selected, cliproxyexecutor.RouteTraceEvent{
+			Provider: provider,
+			Model:    model,
+			Action:   "candidate.selected",
+			Reason:   "round_robin",
+		},
+	)
+	return selected, nil
+}
+
+func nextSortedStringIndex(values []string, lastPicked string) int {
+	if len(values) == 0 || lastPicked == "" {
+		return 0
+	}
+	index := sort.SearchStrings(values, lastPicked)
+	if index < len(values) && values[index] == lastPicked {
+		return (index + 1) % len(values)
+	}
+	if index < len(values) {
+		return index
+	}
+	return 0
+}
+
+func nextSortedAuthIndex(auths []*Auth, lastPicked string) int {
+	if len(auths) == 0 || lastPicked == "" {
+		return 0
+	}
+	index := sort.Search(
+		len(auths), func(index int) bool {
+			return auths[index] != nil && auths[index].ID >= lastPicked
+		},
+	)
+	if index < len(auths) && auths[index] != nil && auths[index].ID == lastPicked {
+		return (index + 1) % len(auths)
+	}
+	if index < len(auths) {
+		return index
+	}
+	return 0
 }
 
 // ensureCursorKey ensures the cursor map has capacity for the given key.
 // Must be called with s.mu held.
 func (s *RoundRobinSelector) ensureCursorKey(key string, limit int) {
 	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
-		s.cursors = make(map[string]int)
+		s.cursors = make(map[string]string)
 	}
+}
+
+func selectorUsesPositiveWeights(selector Selector) bool {
+	switch selector.(type) {
+	case *WeightedRoundRobinSelector, *QuotaAwareSelector:
+		return true
+	default:
+		return false
+	}
+}
+
+func positiveWeightAuths(
+	auths []*Auth,
+	opts cliproxyexecutor.Options,
+	model string,
+) []*Auth {
+	weightedCandidates := make([]*Auth, 0, len(auths))
+	for _, auth := range auths {
+		if authWeight(auth) > 0 {
+			weightedCandidates = append(weightedCandidates, auth)
+			continue
+		}
+		traceCandidateExcluded(opts, auth, model, "weight_non_positive")
+	}
+	return weightedCandidates
+}
+
+// Pick selects the next available auth using smooth weighted round-robin.
+func (s *WeightedRoundRobinSelector) Pick(
+	ctx context.Context,
+	provider, model string,
+	opts cliproxyexecutor.Options,
+	auths []*Auth,
+) (*Auth, error) {
+	available, errAvailable := getAvailableAuths(
+		positiveWeightAuths(auths, opts, model), provider, model, opts, time.Now(),
+	)
+	if errAvailable != nil {
+		return nil, errAvailable
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	key := provider + ":" + canonicalModelKey(model)
+
+	s.mu.Lock()
+	if s.states == nil {
+		s.states = make(map[string]*smoothWeightedState)
+	}
+	limit := s.maxKeys
+	if limit <= 0 {
+		limit = 4096
+	}
+	if _, ok := s.states[key]; !ok && len(s.states) >= limit {
+		s.states = make(map[string]*smoothWeightedState)
+	}
+	state := s.states[key]
+	if state == nil {
+		state = &smoothWeightedState{}
+		s.states[key] = state
+	}
+	state.prepare(authWeightVector(available))
+	picked := pickSmoothWeightedAuth(available, state)
+	if picked == nil {
+		s.mu.Unlock()
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available with positive weight"}
+	}
+	s.mu.Unlock()
+	publishAuthRouteTraceEvent(
+		opts, picked, cliproxyexecutor.RouteTraceEvent{
+			Provider: provider,
+			Model:    model,
+			Action:   "candidate.selected",
+			Reason:   "weighted_round_robin",
+		},
+	)
+	return picked, nil
+}
+
+func (s *QuotaAwareSelector) Pick(
+	ctx context.Context,
+	provider, model string,
+	opts cliproxyexecutor.Options,
+	auths []*Auth,
+) (*Auth, error) {
+	if s == nil {
+		return (&WeightedRoundRobinSelector{}).Pick(ctx, provider, model, opts, auths)
+	}
+	return s.fallback.Pick(ctx, provider, model, opts, auths)
+}
+
+func (s *smoothWeightedState) prepare(weights map[string]int64) {
+	if s.current == nil || !weightVectorsEqual(s.weights, weights) {
+		s.current = make(map[string]int64)
+	}
+	s.weights = weights
+}
+
+func weightVectorsEqual(left, right map[string]int64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for authID, weight := range left {
+		if right[authID] != weight {
+			return false
+		}
+	}
+	return true
+}
+
+func authWeightVector(auths []*Auth) map[string]int64 {
+	weights := make(map[string]int64, len(auths))
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if weight := authWeight(auth); weight > 0 {
+			weights[auth.ID] = weight
+		}
+	}
+	return weights
+}
+
+func pickSmoothWeightedAuth(auths []*Auth, state *smoothWeightedState) *Auth {
+	if state == nil {
+		return nil
+	}
+	active := make(map[string]struct{}, len(auths))
+	start := nextSortedAuthIndex(auths, state.lastPicked)
+	var picked *Auth
+	var pickedCurrent int64
+	var totalWeight int64
+	for offset := range auths {
+		auth := auths[(start+offset)%len(auths)]
+		if auth == nil {
+			continue
+		}
+		weight := authWeight(auth)
+		if weight <= 0 {
+			continue
+		}
+		active[auth.ID] = struct{}{}
+		state.current[auth.ID] = saturatingAddInt64(state.current[auth.ID], weight)
+		totalWeight = saturatingAddInt64(totalWeight, weight)
+		if picked == nil || state.current[auth.ID] > pickedCurrent {
+			picked = auth
+			pickedCurrent = state.current[auth.ID]
+		}
+	}
+	for authID := range state.current {
+		if _, ok := active[authID]; !ok {
+			delete(state.current, authID)
+		}
+	}
+	if picked == nil {
+		return nil
+	}
+	state.current[picked.ID] = saturatingAddInt64(state.current[picked.ID], -totalWeight)
+	state.lastPicked = picked.ID
+	return picked
+}
+
+func saturatingAddInt64(value, delta int64) int64 {
+	if delta > 0 && value > math.MaxInt64-delta {
+		return math.MaxInt64
+	}
+	if delta < 0 && value < math.MinInt64-delta {
+		return math.MinInt64
+	}
+	return value + delta
 }
 
 // groupByVirtualParent groups auths by their gemini_virtual_parent attribute.
@@ -463,14 +792,22 @@ func (s *FillFirstSelector) Pick(
 	opts cliproxyexecutor.Options,
 	auths []*Auth,
 ) (*Auth, error) {
-	_ = opts
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	available, err := getAvailableAuths(auths, provider, model, opts, now)
 	if err != nil {
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	return available[0], nil
+	selected := available[0]
+	publishAuthRouteTraceEvent(
+		opts, selected, cliproxyexecutor.RouteTraceEvent{
+			Provider: provider,
+			Model:    model,
+			Action:   "candidate.selected",
+			Reason:   "fill_first",
+		},
+	)
+	return selected, nil
 }
 
 func headerValueIgnoreCase(headers http.Header, name string) string {
@@ -487,6 +824,14 @@ func headerValueIgnoreCase(headers http.Header, name string) string {
 	return ""
 }
 
+func normalizedSessionCandidate(raw string) string {
+	return cliproxysession.NormalizeExplicitID(raw)
+}
+
+func sessionHeaderValue(headers http.Header, name string) string {
+	return cliproxysession.ExplicitHeaderValue(headers, name)
+}
+
 func (s *SessionAffinitySelector) Pick(
 	ctx context.Context,
 	provider, model string,
@@ -496,22 +841,59 @@ func (s *SessionAffinitySelector) Pick(
 	if s == nil {
 		return (&RoundRobinSelector{}).Pick(ctx, provider, model, opts, auths)
 	}
-	sessionID := sessionAffinityIDFromOptions(opts)
-	if sessionID == "" {
+	cacheKey, fallbackKey := sessionAffinityKeys(opts, provider)
+	if cacheKey == "" {
 		return s.fallback.Pick(ctx, provider, model, opts, auths)
 	}
 
 	now := time.Now()
-	available, err := getAvailableAuths(auths, provider, model, now)
+	availabilityCandidates := auths
+	if selectorUsesPositiveWeights(s.fallback) {
+		availabilityCandidates = positiveWeightAuths(auths, opts, model)
+	}
+	available, err := getAvailableAuths(availabilityCandidates, provider, model, opts, now)
 	if err != nil {
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
-	cacheKey := provider + "::" + sessionID
+	bind := func(authID string) {
+		if fallbackKey != "" {
+			s.cache.SetAliases(authID, cacheKey, fallbackKey)
+			return
+		}
+		s.cache.Set(cacheKey, authID)
+	}
 	if authID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for i := range available {
 			if available[i].ID == authID {
+				bind(authID)
+				publishAuthRouteTraceEvent(
+					opts, available[i], cliproxyexecutor.RouteTraceEvent{
+						Provider: provider,
+						Model:    model,
+						Action:   "candidate.selected",
+						Reason:   "session_affinity",
+					},
+				)
 				return available[i], nil
+			}
+		}
+	}
+	if fallbackKey != "" {
+		if authID, ok := s.cache.Get(fallbackKey); ok {
+			for i := range available {
+				if available[i].ID == authID {
+					bind(authID)
+					publishAuthRouteTraceEvent(
+						opts, available[i], cliproxyexecutor.RouteTraceEvent{
+							Provider: provider,
+							Model:    model,
+							Action:   "candidate.selected",
+							Reason:   "session_affinity_fallback",
+						},
+					)
+					return available[i], nil
+				}
 			}
 		}
 	}
@@ -519,7 +901,7 @@ func (s *SessionAffinitySelector) Pick(
 	if err != nil {
 		return nil, err
 	}
-	s.cache.Set(cacheKey, auth.ID)
+	bind(auth.ID)
 	return auth, nil
 }
 
@@ -529,6 +911,21 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
+	}
+	if auth.Unavailable {
+		if auth.NextRetryAfter.IsZero() {
+			return true, blockReasonOther, time.Time{}
+		}
+		if auth.NextRetryAfter.After(now) {
+			next := auth.NextRetryAfter
+			if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+				next = auth.Quota.NextRecoverAt
+			}
+			if auth.Quota.Exceeded {
+				return true, blockReasonCooldown, next
+			}
+			return true, blockReasonOther, next
+		}
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
@@ -546,7 +943,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 				}
 				if state.Unavailable {
 					if state.NextRetryAfter.IsZero() {
-						return false, blockReasonNone, time.Time{}
+						return true, blockReasonOther, time.Time{}
 					}
 					if state.NextRetryAfter.After(now) {
 						next := state.NextRetryAfter
@@ -566,19 +963,6 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 			}
 		}
 		return false, blockReasonNone, time.Time{}
-	}
-	if auth.Unavailable && auth.NextRetryAfter.After(now) {
-		next := auth.NextRetryAfter
-		if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
-			next = auth.Quota.NextRecoverAt
-		}
-		if next.Before(now) {
-			next = now
-		}
-		if auth.Quota.Exceeded {
-			return true, blockReasonCooldown, next
-		}
-		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
 }

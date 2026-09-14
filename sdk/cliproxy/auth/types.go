@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 )
 
@@ -101,6 +103,14 @@ type Auth struct {
 	NextRetryAfter time.Time `json:"next_retry_after"`
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
+	// StateGeneration orders credential-scoped runtime state changes.
+	StateGeneration uint64 `json:"state_generation,omitempty"`
+	// StateEffectScope identifies the source scope of the credential-level state.
+	StateEffectScope cliproxyexecutor.StateEffectScope `json:"state_effect_scope,omitempty"`
+	// StateEffectKey identifies the provider or group associated with the state.
+	StateEffectKey string `json:"state_effect_key,omitempty"`
+	// ResetAuthority defines the weakest action allowed to clear an authoritative state.
+	ResetAuthority StateResetAuthority `json:"reset_authority,omitempty"`
 
 	// Runtime carries non-serializable data used during execution (in-memory only).
 	Runtime any `json:"-"`
@@ -144,16 +154,31 @@ type RecentRequestBucket struct {
 	Failed      int64  `json:"failed"`
 }
 
+// StateResetAuthority defines which action may clear an authoritative runtime state.
+type StateResetAuthority string
+
+const (
+	StateResetAuthoritySuccess  StateResetAuthority = "same_generation_success"
+	StateResetAuthorityReset    StateResetAuthority = "reset"
+	StateResetAuthorityOperator StateResetAuthority = "operator"
+)
+
 // QuotaState contains limiter tracking data for a credential.
 type QuotaState struct {
 	// Exceeded indicates the credential recently hit a quota error.
 	Exceeded bool `json:"exceeded"`
-	// Reason provides an optional provider specific human readable description.
+	// Reason provides an optional provider-specific human-readable description.
 	Reason string `json:"reason,omitempty"`
+	// Family identifies models sharing the same quota state.
+	Family string `json:"family,omitempty"`
 	// NextRecoverAt is when the credential may become available again.
 	NextRecoverAt time.Time `json:"next_recover_at"`
 	// BackoffLevel stores the progressive cooldown exponent used for rate limits.
 	BackoffLevel int `json:"backoff_level,omitempty"`
+	// Generation orders quota-family state changes.
+	Generation uint64 `json:"generation,omitempty"`
+	// ResetAuthority defines the weakest action allowed to clear the quota state.
+	ResetAuthority StateResetAuthority `json:"reset_authority,omitempty"`
 }
 
 // ModelState captures the execution state for a specific model under an auth entry.
@@ -170,6 +195,14 @@ type ModelState struct {
 	LastError *Error `json:"last_error,omitempty"`
 	// Quota retains quota information if this model hit rate limits.
 	Quota QuotaState `json:"quota"`
+	// EffectScope identifies whether this state belongs to one model or a quota family.
+	EffectScope cliproxyexecutor.StateEffectScope `json:"effect_scope,omitempty"`
+	// EffectKey identifies the exact model or quota family represented by this state.
+	EffectKey string `json:"effect_key,omitempty"`
+	// ResetAuthority defines the weakest action allowed to clear an authoritative state.
+	ResetAuthority StateResetAuthority `json:"reset_authority,omitempty"`
+	// Generation orders model runtime state changes.
+	Generation uint64 `json:"generation,omitempty"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
 	// QuotaEpoch invalidates in-flight results from before the latest quota barrier.
@@ -261,15 +294,11 @@ func (a *Auth) Clone() *Auth {
 	copyAuth := *a
 	if len(a.Attributes) > 0 {
 		copyAuth.Attributes = make(map[string]string, len(a.Attributes))
-		for key, value := range a.Attributes {
-			copyAuth.Attributes[key] = value
-		}
+		maps.Copy(copyAuth.Attributes, a.Attributes)
 	}
 	if len(a.Metadata) > 0 {
 		copyAuth.Metadata = make(map[string]any, len(a.Metadata))
-		for key, value := range a.Metadata {
-			copyAuth.Metadata[key] = value
-		}
+		maps.Copy(copyAuth.Metadata, a.Metadata)
 	}
 	if len(a.ModelStates) > 0 {
 		copyAuth.ModelStates = make(map[string]*ModelState, len(a.ModelStates))
@@ -353,6 +382,8 @@ func (a *Auth) indexSeed() string {
 			apiPrefix = "gemini-api-key"
 		case strings.EqualFold(provider, "codex"):
 			apiPrefix = "codex-api-key"
+		case strings.EqualFold(provider, "xai"):
+			apiPrefix = "xai-api-key"
 		case strings.EqualFold(provider, "claude"):
 			apiPrefix = "claude-api-key"
 		}
@@ -414,10 +445,16 @@ func (m *ModelState) Clone() *ModelState {
 	copyState := *m
 	if m.LastError != nil {
 		copyState.LastError = &Error{
-			Code:       m.LastError.Code,
-			Message:    m.LastError.Message,
-			Retryable:  m.LastError.Retryable,
-			HTTPStatus: m.LastError.HTTPStatus,
+			Code:            m.LastError.Code,
+			Message:         m.LastError.Message,
+			Retryable:       m.LastError.Retryable,
+			HTTPStatus:      m.LastError.HTTPStatus,
+			DispatchPhase:   m.LastError.DispatchPhase,
+			Outcome:         m.LastError.Outcome,
+			RetryDirective:  m.LastError.RetryDirective,
+			EffectScope:     m.LastError.EffectScope,
+			EffectKey:       m.LastError.EffectKey,
+			StateGeneration: m.LastError.StateGeneration,
 		}
 	}
 	return &copyState

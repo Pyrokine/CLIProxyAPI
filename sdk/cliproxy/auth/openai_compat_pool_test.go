@@ -220,7 +220,7 @@ func TestManagerExecute_OpenAICompatAliasResolvesToFirstModel(t *testing.T) {
 		}, executor,
 	)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		resp, err := m.Execute(
 			context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
 		)
@@ -392,7 +392,7 @@ func TestManagerExecuteCount_OpenAICompatAliasResolvesToFirstModel(t *testing.T)
 		}, executor,
 	)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		resp, err := m.ExecuteCount(
 			context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{},
 		)

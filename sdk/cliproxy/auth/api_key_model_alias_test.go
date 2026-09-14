@@ -98,7 +98,9 @@ func TestLookupAPIKeyUpstreamModelInteractions(t *testing.T) {
 		},
 	)
 
-	if resolved := mgr.lookupAPIKeyUpstreamModel("interactions-auth", "g25p(high)"); resolved != "gemini-2.5-pro-exp-03-25(high)" {
+	if resolved := mgr.lookupAPIKeyUpstreamModel(
+		"interactions-auth", "g25p(high)",
+	); resolved != "gemini-2.5-pro-exp-03-25(high)" {
 		t.Fatalf("lookupAPIKeyUpstreamModel = %q, want gemini-2.5-pro-exp-03-25(high)", resolved)
 	}
 

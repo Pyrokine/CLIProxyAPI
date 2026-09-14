@@ -14,6 +14,7 @@ type replaceAwareExecutor struct {
 
 	mu               sync.Mutex
 	closedSessionIDs []string
+	closedAuthIDs    []string
 }
 
 func (e *replaceAwareExecutor) Identifier() string {
@@ -63,11 +64,25 @@ func (e *replaceAwareExecutor) CloseExecutionSession(sessionID string) {
 	e.closedSessionIDs = append(e.closedSessionIDs, sessionID)
 }
 
+func (e *replaceAwareExecutor) CloseExecutionSessionsForAuth(authID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.closedAuthIDs = append(e.closedAuthIDs, authID)
+}
+
 func (e *replaceAwareExecutor) ClosedSessionIDs() []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	out := make([]string, len(e.closedSessionIDs))
 	copy(out, e.closedSessionIDs)
+	return out
+}
+
+func (e *replaceAwareExecutor) ClosedAuthIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]string, len(e.closedAuthIDs))
+	copy(out, e.closedAuthIDs)
 	return out
 }
 

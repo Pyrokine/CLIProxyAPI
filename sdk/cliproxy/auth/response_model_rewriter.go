@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"slices"
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -162,8 +163,8 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 
 func extractLastDataPayload(chunk []byte) []byte {
 	lines := bytes.Split(chunk, []byte("\n"))
-	for i := len(lines) - 1; i >= 0; i-- {
-		if _, jsonData, found := extractSSEDataLine(lines[i]); found && len(jsonData) > 0 {
+	for _, line := range slices.Backward(lines) {
+		if _, jsonData, found := extractSSEDataLine(line); found && len(jsonData) > 0 {
 			return jsonData
 		}
 	}

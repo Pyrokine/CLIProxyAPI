@@ -68,24 +68,25 @@ func TestApplyCustomHeadersFromMetadataRejectsRestrictedHeader(t *testing.T) {
 	t.Parallel()
 
 	for _, headerName := range []string{"Authorization", "Api-Key"} {
-		headerName := headerName
-		t.Run(headerName, func(t *testing.T) {
-			t.Parallel()
-			auth := &Auth{
-				Metadata: map[string]any{
-					"headers": map[string]any{
-						headerName: "secret",
+		t.Run(
+			headerName, func(t *testing.T) {
+				t.Parallel()
+				auth := &Auth{
+					Metadata: map[string]any{
+						"headers": map[string]any{
+							headerName: "secret",
+						},
 					},
-				},
-			}
+				}
 
-			if err := ApplyCustomHeadersFromMetadata(auth); err == nil {
-				t.Fatal("expected restricted header error")
-			}
-			if _, exists := auth.Attributes["header:"+headerName]; exists {
-				t.Fatal("restricted header should not be applied")
-			}
-		})
+				if err := ApplyCustomHeadersFromMetadata(auth); err == nil {
+					t.Fatal("expected restricted header error")
+				}
+				if _, exists := auth.Attributes["header:"+headerName]; exists {
+					t.Fatal("restricted header should not be applied")
+				}
+			},
+		)
 	}
 }
 

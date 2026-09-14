@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -61,5 +62,60 @@ func TestFindAllAntigravityCreditsCandidateAuths_PrefersKnownCreditsThenUnknown(
 	}
 	if pinned[0].auth.ID != "aa-unknown" {
 		t.Fatalf("pinned[0].auth.ID = %q, want %q", pinned[0].auth.ID, "aa-unknown")
+	}
+}
+
+func TestAntigravityCreditsContext1MSkipsLowContextCredential(t *testing.T) {
+	const (
+		model      = "claude-context-credits-model"
+		lowAuthID  = "credits-context-low"
+		highAuthID = "credits-context-high"
+	)
+	tests := []struct {
+		name   string
+		stream bool
+	}{
+		{name: "execute"},
+		{name: "stream", stream: true},
+	}
+	for _, testCase := range tests {
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				manager := NewManager(nil, &RoundRobinSelector{}, nil)
+				executor := &context1MTrackingExecutor{
+					id: "antigravity",
+				}
+				manager.RegisterExecutor(executor)
+				registerContext1MTestAuthForModel(t, manager, lowAuthID, "antigravity", model, 200_000)
+				registerContext1MTestAuthForModel(
+					t, manager, highAuthID, "antigravity", model, context1MMinimumTokens,
+				)
+				SetAntigravityCreditsHint(
+					lowAuthID, AntigravityCreditsHint{
+						Known: true, Available: true, UpdatedAt: time.Now(),
+					},
+				)
+
+				request := cliproxyexecutor.Request{Model: model + "[1m]"}
+				if testCase.stream {
+					_, err, ok := manager.tryAntigravityCreditsExecuteStream(
+						context.Background(), request, cliproxyexecutor.Options{},
+					)
+					if err != nil || !ok {
+						t.Fatalf("tryAntigravityCreditsExecuteStream = (%v, %t), want success", err, ok)
+					}
+				} else {
+					_, err, ok := manager.tryAntigravityCreditsExecute(
+						context.Background(), request, cliproxyexecutor.Options{},
+					)
+					if err != nil || !ok {
+						t.Fatalf("tryAntigravityCreditsExecute = (%v, %t), want success", err, ok)
+					}
+				}
+				if got := executor.executedAuthIDs(); len(got) != 1 || got[0] != highAuthID {
+					t.Fatalf("upstream executions = %v, want [%s]", got, highAuthID)
+				}
+			},
+		)
 	}
 }

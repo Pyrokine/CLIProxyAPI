@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -157,7 +158,7 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 		&Auth{ID: "c", Provider: "gemini"},
 	)
 
-	for index := 0; index < 3; index++ {
+	for index := range 3 {
 		got, errPick := scheduler.pickSingle(context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil)
 		if errPick != nil {
 			t.Fatalf("pickSingle() #%d error = %v", index, errPick)
@@ -200,6 +201,43 @@ func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	}
 	if got.ID != "cooldown-expired" {
 		t.Fatalf("pickSingle() auth.ID = %q, want %q", got.ID, "cooldown-expired")
+	}
+}
+
+func TestSchedulerPick_TransientUnavailabilityIsNotQuotaCooldown(t *testing.T) {
+	t.Parallel()
+
+	const (
+		provider = "gemini"
+		model    = "gemini-2.5-pro"
+		authID   = "transient-unavailable"
+	)
+	registerSchedulerModels(t, provider, model, authID)
+	scheduler := newSchedulerForTest(
+		&RoundRobinSelector{},
+		&Auth{
+			ID:       authID,
+			Provider: provider,
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: time.Now().Add(time.Minute),
+				},
+			},
+		},
+	)
+
+	picked, errPick := scheduler.pickSingle(context.Background(), provider, model, cliproxyexecutor.Options{}, nil)
+	if picked != nil || errPick == nil {
+		t.Fatalf("pickSingle() = (%#v, %v), want no auth and an error", picked, errPick)
+	}
+	if _, ok := errors.AsType[*modelCooldownError](errPick); ok {
+		t.Fatalf("pickSingle() error = %T, do not report a transient error as quota cooldown", errPick)
+	}
+	var authErr *Error
+	if !errors.As(errPick, &authErr) || authErr.Code != "auth_unavailable" {
+		t.Fatalf("pickSingle() error = %#v, want auth_unavailable", errPick)
 	}
 }
 
@@ -478,7 +516,7 @@ func TestManager_PickNextMixed_UsesProviderRotationBeforeCredentialRotation(t *t
 	validIDs := map[string]bool{"gemini-a": true, "gemini-b": true, "claude-a": true}
 	validProviders := map[string]bool{"gemini": true, "claude": true}
 	seenIDs := make(map[string]int)
-	for index := 0; index < 4; index++ {
+	for index := range 4 {
 		got, _, provider, errPick := manager.pickNextMixed(
 			context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, map[string]struct{}{},
 		)
@@ -568,7 +606,7 @@ func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
 	// and rotation occurs (not always same auth).
 	validIDs := map[string]bool{"gemini-a": true, "gemini-b": true, "claude-a": true}
 	seenIDs := make(map[string]int)
-	for index := 0; index < 4; index++ {
+	for index := range 4 {
 		got, _, provider, errPick := manager.pickNextMixed(
 			context.Background(), []string{"gemini", "claude"}, "", cliproxyexecutor.Options{}, nil,
 		)

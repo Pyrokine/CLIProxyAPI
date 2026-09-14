@@ -285,6 +285,93 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 	)
 }
 
+func TestSelectorPick_AllTransientUnavailableReturnsAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	model := "test-model"
+	next := time.Now().Add(time.Minute)
+	auths := []*Auth{
+		{
+			ID: "a",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: next,
+				},
+			},
+		},
+		{
+			ID: "b",
+			ModelStates: map[string]*ModelState{
+				model: {
+					Status:         StatusError,
+					Unavailable:    true,
+					NextRetryAfter: next,
+				},
+			},
+		},
+	}
+
+	selector := &FillFirstSelector{}
+	_, err := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, auths)
+	if _, ok := errors.AsType[*modelCooldownError](err); ok {
+		t.Fatalf("Pick() error = %T, do not report a transient error as quota cooldown", err)
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr.Code != "auth_unavailable" {
+		t.Fatalf("Pick() error = %#v, want auth_unavailable", err)
+	}
+}
+
+func TestIsAuthBlockedForModel_TransientUnavailableUsesOtherBlockReason(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	next := now.Add(time.Minute)
+	tests := []struct {
+		name  string
+		auth  *Auth
+		model string
+	}{
+		{
+			name: "model state",
+			auth: &Auth{
+				ModelStates: map[string]*ModelState{
+					"test-model": {
+						Status:         StatusError,
+						Unavailable:    true,
+						NextRetryAfter: next,
+					},
+				},
+			},
+			model: "test-model",
+		},
+		{
+			name: "auth state",
+			auth: &Auth{
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: next,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(
+			test.name, func(t *testing.T) {
+				blocked, reason, retryAt := isAuthBlockedForModel(test.auth, test.model, now)
+				if !blocked || reason != blockReasonOther || !retryAt.Equal(next) {
+					t.Fatalf(
+						"isAuthBlockedForModel() = (%v, %v, %v), want (true, %v, %v)", blocked, reason, retryAt,
+						blockReasonOther, next,
+					)
+				}
+			},
+		)
+	}
+}
+
 func TestSessionAffinitySelector_PicksStickyAuth(t *testing.T) {
 	t.Parallel()
 
@@ -419,13 +506,13 @@ func TestExtractSessionID_CodexConversationIDHeader(t *testing.T) {
 	}
 }
 
-func TestExtractSessionID_CodexPromptCacheKeyBody(t *testing.T) {
+func TestExtractSessionID_ClientRequestIDPriorityOverCodexPromptCacheKey(t *testing.T) {
 	t.Parallel()
 
 	headers := http.Header{"X-Client-Request-Id": {"client-session-1"}}
 	body := []byte(`{"prompt_cache_key":"codex-cache-1"}`)
-	if got := ExtractSessionID(headers, body, nil); got != "codex-cache-1" {
-		t.Fatalf("ExtractSessionID() = %q, want %q", got, "codex-cache-1")
+	if got := ExtractSessionID(headers, body, nil); got != "client-session-1" {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, "client-session-1")
 	}
 }
 
@@ -492,7 +579,7 @@ func TestSessionAffinitySelector_UsesCodexPromptCacheKeyBody(t *testing.T) {
 	}
 }
 
-func TestSessionAffinitySelector_CodexPromptCacheKeyPriorityOverClientSessionID(t *testing.T) {
+func TestSessionAffinitySelector_CodexSessionIDPriorityOverPromptCacheKey(t *testing.T) {
 	t.Parallel()
 
 	selector := NewSessionAffinitySelectorWithConfig(
@@ -505,7 +592,7 @@ func TestSessionAffinitySelector_CodexPromptCacheKeyPriorityOverClientSessionID(
 
 	auths := []*Auth{{ID: "a"}, {ID: "b"}}
 	selector.Remember(
-		"codex", cliproxyexecutor.Options{OriginalRequest: []byte(`{"prompt_cache_key":"codex-cache-1"}`)}, auths[0],
+		"codex", cliproxyexecutor.Options{Headers: http.Header{"Session_id": {"codex-client-session"}}}, auths[0],
 	)
 
 	opts := cliproxyexecutor.Options{
@@ -599,7 +686,7 @@ func TestSessionAffinitySelector_UsesExecutionSessionMetadata(t *testing.T) {
 	}
 }
 
-func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testing.T) {
+func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsBlocked(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -618,11 +705,11 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 
 	blocked, reason, next := isAuthBlockedForModel(auth, model, now)
-	if blocked {
-		t.Fatalf("blocked = true, want false")
+	if !blocked {
+		t.Fatal("blocked = false, want authoritative block")
 	}
-	if reason != blockReasonNone {
-		t.Fatalf("reason = %v, want %v", reason, blockReasonNone)
+	if reason != blockReasonOther {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonOther)
 	}
 	if !next.IsZero() {
 		t.Fatalf("next = %v, want zero", next)

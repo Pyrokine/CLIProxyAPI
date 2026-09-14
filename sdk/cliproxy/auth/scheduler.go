@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"maps"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,8 @@ const (
 	schedulerStrategyCustom schedulerStrategy = iota
 	schedulerStrategyRoundRobin
 	schedulerStrategyFillFirst
+	schedulerStrategyWeightedRoundRobin
+	schedulerStrategyQuotaAware
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -32,11 +35,18 @@ const (
 
 // authScheduler keeps the incremental provider/model scheduling state used by Manager.
 type authScheduler struct {
-	mu            sync.Mutex
-	strategy      schedulerStrategy
-	providers     map[string]*providerScheduler
-	authProviders map[string]string
-	mixedCursors  map[string]int
+	mu                  sync.Mutex
+	strategy            schedulerStrategy
+	providers           map[string]*providerScheduler
+	authProviders       map[string]string
+	mixedCursors        map[string]string
+	mixedWeightedStates map[string]*smoothWeightedState
+	mixedQuotaStates    map[string]*quotaAwareViewState
+	quotaProvider       QuotaSchedulingProvider
+	quotaInFlight       map[uint64]quotaInFlightRecord
+	quotaInFlightByPool map[string]int64
+	quotaInFlightSeq    uint64
+	checkpoint          *schedulerCheckpointRuntime
 }
 
 // providerScheduler stores auth metadata and model shards for a single provider.
@@ -51,6 +61,7 @@ type scheduledAuthMeta struct {
 	auth              *Auth
 	providerKey       string
 	priority          int
+	weight            int64
 	virtualParent     string
 	websocketEnabled  bool
 	supportedModelSet map[string]struct{}
@@ -58,11 +69,12 @@ type scheduledAuthMeta struct {
 
 // modelScheduler tracks ready and blocked auths for one provider/model combination.
 type modelScheduler struct {
-	modelKey        string
-	entries         map[string]*scheduledAuth
-	priorityOrder   []int
-	readyByPriority map[int]*readyBucket
-	blocked         cooldownQueue
+	modelKey               string
+	entries                map[string]*scheduledAuth
+	priorityOrder          []int
+	readyByPriority        map[int]*readyBucket
+	cursorStatesByPriority map[int]readyBucketCursorState
+	blocked                cooldownQueue
 }
 
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
@@ -81,26 +93,30 @@ type readyBucket struct {
 
 // readyView holds the selection order for flat or grouped round-robin traversal.
 type readyView struct {
-	flat         []*scheduledAuth
-	cursor       int
-	parentOrder  []string
-	parentCursor int
-	children     map[string]*childBucket
+	flat             []*scheduledAuth
+	lastPickedAuth   string
+	parentOrder      []string
+	lastPickedParent string
+	children         map[string]*childBucket
+	weightedState    smoothWeightedState
+	quotaState       quotaAwareViewState
 }
 
 // childBucket keeps the per-parent rotation state for grouped Gemini virtual auths.
 type childBucket struct {
-	items  []*scheduledAuth
-	cursor int
+	items          []*scheduledAuth
+	lastPickedAuth string
 }
 
 // cooldownQueue is the blocked auth collection ordered by next retry time during rebuilds.
 type cooldownQueue []*scheduledAuth
 
 type readyViewCursorState struct {
-	cursor       int
-	parentCursor int
-	childCursors map[string]int
+	lastPickedAuth   string
+	lastPickedParent string
+	childLastPicked  map[string]string
+	weightedState    smoothWeightedState
+	quotaState       quotaAwareViewState
 }
 
 type readyBucketCursorState struct {
@@ -110,18 +126,20 @@ type readyBucketCursorState struct {
 
 func snapshotReadyViewCursors(view readyView) readyViewCursorState {
 	state := readyViewCursorState{
-		cursor:       view.cursor,
-		parentCursor: view.parentCursor,
+		lastPickedAuth:   view.lastPickedAuth,
+		lastPickedParent: view.lastPickedParent,
+		weightedState:    cloneSmoothWeightedState(view.weightedState),
+		quotaState:       cloneQuotaAwareViewState(view.quotaState),
 	}
 	if len(view.children) == 0 {
 		return state
 	}
-	state.childCursors = make(map[string]int, len(view.children))
+	state.childLastPicked = make(map[string]string, len(view.children))
 	for parent, child := range view.children {
-		if child == nil {
+		if child == nil || child.lastPickedAuth == "" {
 			continue
 		}
-		state.childCursors[parent] = child.cursor
+		state.childLastPicked[parent] = child.lastPickedAuth
 	}
 	return state
 }
@@ -130,46 +148,100 @@ func restoreReadyViewCursors(view *readyView, state readyViewCursorState) {
 	if view == nil {
 		return
 	}
-	if len(view.flat) > 0 {
-		view.cursor = normalizeCursor(state.cursor, len(view.flat))
+	view.lastPickedAuth = state.lastPickedAuth
+	view.lastPickedParent = state.lastPickedParent
+	weights := scheduledWeightVector(view.flat)
+	view.weightedState.lastPicked = state.weightedState.lastPicked
+	if len(state.weightedState.current) > 0 && weightVectorsEqual(state.weightedState.weights, weights) {
+		view.weightedState.current = state.weightedState.current
+		view.weightedState.weights = weights
 	}
-	if len(view.parentOrder) == 0 || len(view.children) == 0 {
-		return
-	}
-	view.parentCursor = normalizeCursor(state.parentCursor, len(view.parentOrder))
-	if len(state.childCursors) == 0 {
+	view.quotaState = cloneQuotaAwareViewState(state.quotaState)
+	if len(view.children) == 0 || len(state.childLastPicked) == 0 {
 		return
 	}
 	for parent, child := range view.children {
-		if child == nil || len(child.items) == 0 {
+		if child == nil {
 			continue
 		}
-		cursor, ok := state.childCursors[parent]
-		if !ok {
-			continue
-		}
-		child.cursor = normalizeCursor(cursor, len(child.items))
+		child.lastPickedAuth = state.childLastPicked[parent]
 	}
 }
 
-func normalizeCursor(cursor int, size int) int {
-	if size <= 0 || cursor <= 0 {
-		return 0
+func cloneSmoothWeightedState(state smoothWeightedState) smoothWeightedState {
+	cloned := smoothWeightedState{lastPicked: state.lastPicked}
+	if len(state.current) > 0 {
+		cloned.current = make(map[string]int64, len(state.current))
+		maps.Copy(cloned.current, state.current)
 	}
-	cursor %= size
-	if cursor < 0 {
-		cursor += size
+	if len(state.weights) > 0 {
+		cloned.weights = make(map[string]int64, len(state.weights))
+		maps.Copy(cloned.weights, state.weights)
 	}
-	return cursor
+	return cloned
+}
+
+func cloneReadyViewCursorState(state readyViewCursorState) readyViewCursorState {
+	cloned := readyViewCursorState{
+		lastPickedAuth:   state.lastPickedAuth,
+		lastPickedParent: state.lastPickedParent,
+		weightedState:    cloneSmoothWeightedState(state.weightedState),
+		quotaState:       cloneQuotaAwareViewState(state.quotaState),
+	}
+	if len(state.childLastPicked) > 0 {
+		cloned.childLastPicked = make(map[string]string, len(state.childLastPicked))
+		maps.Copy(cloned.childLastPicked, state.childLastPicked)
+	}
+	return cloned
+}
+
+func cloneReadyBucketCursorState(state readyBucketCursorState) readyBucketCursorState {
+	return readyBucketCursorState{
+		all: cloneReadyViewCursorState(state.all),
+		ws:  cloneReadyViewCursorState(state.ws),
+	}
+}
+
+func (m *modelScheduler) snapshotCursorStatesLocked() map[int]readyBucketCursorState {
+	states := make(map[int]readyBucketCursorState, len(m.cursorStatesByPriority)+len(m.readyByPriority))
+	for priority, state := range m.cursorStatesByPriority {
+		states[priority] = cloneReadyBucketCursorState(state)
+	}
+	for priority, bucket := range m.readyByPriority {
+		if bucket == nil {
+			continue
+		}
+		states[priority] = readyBucketCursorState{
+			all: snapshotReadyViewCursors(bucket.all),
+			ws:  snapshotReadyViewCursors(bucket.ws),
+		}
+	}
+	return states
+}
+
+func (m *modelScheduler) hasPriorityLocked(priority int) bool {
+	if m == nil {
+		return false
+	}
+	for _, entry := range m.entries {
+		if entry != nil && entry.meta != nil && entry.meta.priority == priority {
+			return true
+		}
+	}
+	return false
 }
 
 // newAuthScheduler constructs an empty scheduler configured for the supplied selector strategy.
 func newAuthScheduler(selector Selector) *authScheduler {
 	return &authScheduler{
-		strategy:      selectorStrategy(selector),
-		providers:     make(map[string]*providerScheduler),
-		authProviders: make(map[string]string),
-		mixedCursors:  make(map[string]int),
+		strategy:            selectorStrategy(selector),
+		providers:           make(map[string]*providerScheduler),
+		authProviders:       make(map[string]string),
+		mixedCursors:        make(map[string]string),
+		mixedWeightedStates: make(map[string]*smoothWeightedState),
+		mixedQuotaStates:    make(map[string]*quotaAwareViewState),
+		quotaInFlight:       make(map[uint64]quotaInFlightRecord),
+		quotaInFlightByPool: make(map[string]int64),
 	}
 }
 
@@ -188,10 +260,18 @@ func unwrapSchedulerSelector(selector Selector) Selector {
 	}
 }
 
+func schedulerStrategyUsesWeights(strategy schedulerStrategy) bool {
+	return strategy == schedulerStrategyWeightedRoundRobin || strategy == schedulerStrategyQuotaAware
+}
+
 func selectorStrategy(selector Selector) schedulerStrategy {
 	switch unwrapSchedulerSelector(selector).(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
+	case *WeightedRoundRobinSelector:
+		return schedulerStrategyWeightedRoundRobin
+	case *QuotaAwareSelector:
+		return schedulerStrategyQuotaAware
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
@@ -207,6 +287,9 @@ func (s *authScheduler) setSelector(selector Selector) {
 	defer s.mu.Unlock()
 	s.strategy = selectorStrategy(selector)
 	clear(s.mixedCursors)
+	clear(s.mixedWeightedStates)
+	clear(s.mixedQuotaStates)
+	s.markCheckpointDirtyLocked()
 }
 
 func (s *authScheduler) upsertAuth(auth *Auth) {
@@ -238,13 +321,17 @@ func (s *authScheduler) rebuild(auths []*Auth) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	state := s.snapshotStateLocked()
 	s.providers = make(map[string]*providerScheduler)
 	s.authProviders = make(map[string]string)
-	s.mixedCursors = make(map[string]int)
+	s.mixedCursors = make(map[string]string)
+	s.mixedWeightedStates = make(map[string]*smoothWeightedState)
+	s.mixedQuotaStates = make(map[string]*quotaAwareViewState)
 	now := time.Now()
 	for _, auth := range auths {
 		s.upsertAuthLocked(auth, now)
 	}
+	s.restoreStateLocked(state, now)
 }
 
 // pickSingle returns the next auth for a single provider/model request using scheduler state.
@@ -266,6 +353,71 @@ func providerPrefersWebsocketTransport(providerKey string) bool {
 	}
 }
 
+func appendScheduledStateExclusions(
+	events *[]cliproxyexecutor.RouteTraceEvent,
+	opts cliproxyexecutor.Options,
+	shard *modelScheduler,
+	provider,
+	model string,
+) {
+	if routeTraceCallback(opts.Metadata) == nil || shard == nil {
+		return
+	}
+	now := time.Now()
+	for _, entry := range shard.entries {
+		if entry == nil || entry.auth == nil || entry.state == scheduledStateReady {
+			continue
+		}
+		reason := "unavailable"
+		// The loop precondition excludes scheduledStateReady.
+		// noinspection GoSwitchMissingCasesForIotaConsts
+		switch entry.state {
+		case scheduledStateCooldown:
+			reason = "cooldown"
+		case scheduledStateDisabled:
+			reason = "disabled"
+		case scheduledStateBlocked:
+			reason = "blocked"
+		}
+		retryAfterMS := int64(0)
+		if !entry.nextRetryAt.IsZero() && entry.nextRetryAt.After(now) {
+			retryAfterMS = entry.nextRetryAt.Sub(now).Milliseconds()
+		}
+		appendAuthRouteTraceEvent(
+			events, opts, entry.auth, cliproxyexecutor.RouteTraceEvent{
+				Provider:     provider,
+				Model:        model,
+				Action:       "candidate.excluded",
+				Reason:       reason,
+				RetryAfterMS: retryAfterMS,
+			},
+		)
+	}
+}
+
+func appendSchedulerSelection(
+	events *[]cliproxyexecutor.RouteTraceEvent,
+	opts cliproxyexecutor.Options,
+	decision *routeDecisionDraft,
+	auth *Auth,
+	provider,
+	model string,
+	strategy schedulerStrategy,
+	matchedRules ...string,
+) {
+	reason := schedulerRouteTraceReason(strategy)
+	decision.selectCandidate(auth, model, reason)
+	decision.addSelectedRules(auth, matchedRules...)
+	appendAuthRouteTraceEvent(
+		events, opts, auth, cliproxyexecutor.RouteTraceEvent{
+			Provider: provider,
+			Model:    model,
+			Action:   "candidate.selected",
+			Reason:   reason,
+		},
+	)
+}
+
 func (s *authScheduler) pickSingleWithPredicate(
 	ctx context.Context,
 	provider, model string,
@@ -281,34 +433,129 @@ func (s *authScheduler) pickSingleWithPredicate(
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	preferWebsocket := cliproxyexecutor.DownstreamWebsocket(ctx) && providerPrefersWebsocketTransport(providerKey) && pinnedAuthID == ""
 
+	var traceEvents []cliproxyexecutor.RouteTraceEvent
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	decision := newRouteDecisionDraft(opts, []string{providerKey}, model, s.strategy)
+	defer func() {
+		appendRouteDecisionEvent(&traceEvents, opts, decision)
+		s.mu.Unlock()
+		flushRouteTraceEvents(opts.Metadata, traceEvents)
+	}()
 	providerState := s.providers[providerKey]
 	if providerState == nil {
+		attempt, previousAttempt := routeTraceAttempt(opts)
+		appendRouteTraceEvent(
+			&traceEvents, opts.Metadata, cliproxyexecutor.RouteTraceEvent{
+				Attempt:         attempt,
+				PreviousAttempt: previousAttempt,
+				Provider:        providerKey,
+				Model:           model,
+				Action:          "provider.excluded",
+				Reason:          "provider_not_registered",
+			},
+		)
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	shard := providerState.ensureModelLocked(modelKey, time.Now())
 	if shard == nil {
+		attempt, previousAttempt := routeTraceAttempt(opts)
+		appendRouteTraceEvent(
+			&traceEvents, opts.Metadata, cliproxyexecutor.RouteTraceEvent{
+				Attempt:         attempt,
+				PreviousAttempt: previousAttempt,
+				Provider:        providerKey,
+				Model:           model,
+				Action:          "provider.excluded",
+				Reason:          "model_shard_missing",
+			},
+		)
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
+	}
+	shard.promoteExpiredLocked(time.Now())
+	decision.mergeShard(shard, model)
+	appendScheduledStateExclusions(&traceEvents, opts, shard, providerKey, model)
+	tracedExclusions := make(map[string]struct{})
+	traceExclusion := func(entry *scheduledAuth, reason string) {
+		if routeTraceCallback(opts.Metadata) == nil || entry == nil || entry.auth == nil {
+			return
+		}
+		decision.exclude(entry.auth, model, reason)
+		key := entry.auth.ID + "\x00" + reason
+		if _, exists := tracedExclusions[key]; exists {
+			return
+		}
+		tracedExclusions[key] = struct{}{}
+		appendAuthRouteTraceEvent(
+			&traceEvents, opts, entry.auth, cliproxyexecutor.RouteTraceEvent{
+				Provider: providerKey,
+				Model:    model,
+				Action:   "candidate.excluded",
+				Reason:   reason,
+			},
+		)
 	}
 	predicate := func(entry *scheduledAuth) bool {
 		if entry == nil || entry.auth == nil {
 			return false
 		}
+		if schedulerStrategyUsesWeights(s.strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
+			traceExclusion(entry, "weight_non_positive")
+			return false
+		}
 		if pinnedAuthID != "" && entry.auth.ID != pinnedAuthID {
+			traceExclusion(entry, "pinned_auth_mismatch")
 			return false
 		}
 		if requestPredicate != nil && !requestPredicate(entry.auth) {
+			traceExclusion(entry, "request_filter")
 			return false
 		}
 		if len(tried) > 0 {
 			if _, ok := tried[entry.auth.ID]; ok {
+				traceExclusion(entry, "already_tried")
 				return false
 			}
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	if s.strategy == schedulerStrategyQuotaAware {
+		priority, okPriority := shard.highestReadyPriorityLocked(preferWebsocket, predicate)
+		if okPriority {
+			entries := shard.readyEntriesAtPriorityLocked(preferWebsocket, priority, predicate)
+			signals, allFresh := s.quotaSignalsLocked(entries, model, time.Now())
+			decision.mergeQuotaSignals(entries, signals)
+			view := shard.readyViewAtPriorityLocked(preferWebsocket, priority, predicate)
+			if view != nil {
+				pickedEntry, quotaRules := s.pickQuotaAwareLocked(
+					entries, predicate, &view.quotaState, signals, allFresh,
+				)
+				if pickedEntry != nil && pickedEntry.auth != nil {
+					picked := pickedEntry.auth
+					s.captureQuotaInFlightLeaseLocked(ctx, picked, providerKey, time.Now())
+					s.markCheckpointDirtyLocked()
+					matchedRules := shard.routeDecisionSelectionRulesLocked(
+						picked, preferWebsocket, s.strategy, true,
+					)
+					matchedRules = append(matchedRules, quotaRules...)
+					appendSchedulerSelection(
+						&traceEvents, opts, decision, picked, providerKey, model, s.strategy, matchedRules...,
+					)
+					return picked, nil
+				}
+			}
+		}
+	} else if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+		s.markCheckpointDirtyLocked()
+		appendSchedulerSelection(
+			&traceEvents,
+			opts,
+			decision,
+			picked,
+			providerKey,
+			model,
+			s.strategy,
+			shard.routeDecisionSelectionRulesLocked(picked, preferWebsocket, s.strategy, true)...,
+		)
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -340,41 +587,186 @@ func (s *authScheduler) pickMixedWithPredicate(
 	if len(normalized) == 0 {
 		return nil, "", &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	if len(normalized) == 1 {
+		picked, errPick := s.pickSingleWithPredicate(
+			ctx, normalized[0], model, opts, tried, requestPredicate,
+		)
+		return picked, normalized[0], errPick
+	}
 	pinnedAuthID := pinnedAuthIDFromMetadata(opts.Metadata)
 	modelKey := canonicalModelKey(model)
 
+	var traceEvents []cliproxyexecutor.RouteTraceEvent
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	decision := newRouteDecisionDraft(opts, normalized, model, s.strategy)
+	defer func() {
+		appendRouteDecisionEvent(&traceEvents, opts, decision)
+		s.mu.Unlock()
+		flushRouteTraceEvents(opts.Metadata, traceEvents)
+	}()
 	if pinnedAuthID != "" {
 		providerKey := s.authProviders[pinnedAuthID]
 		if providerKey == "" || !containsProvider(normalized, providerKey) {
+			attempt, previousAttempt := routeTraceAttempt(opts)
+			appendRouteTraceEvent(
+				&traceEvents, opts.Metadata, cliproxyexecutor.RouteTraceEvent{
+					Attempt:         attempt,
+					PreviousAttempt: previousAttempt,
+					Provider:        "mixed",
+					Model:           model,
+					Action:          "provider.excluded",
+					Reason:          "pinned_auth_provider_unavailable",
+				},
+			)
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		providerState := s.providers[providerKey]
 		if providerState == nil {
+			attempt, previousAttempt := routeTraceAttempt(opts)
+			appendRouteTraceEvent(
+				&traceEvents, opts.Metadata, cliproxyexecutor.RouteTraceEvent{
+					Attempt:         attempt,
+					PreviousAttempt: previousAttempt,
+					Provider:        providerKey,
+					Model:           model,
+					Action:          "provider.excluded",
+					Reason:          "provider_not_registered",
+				},
+			)
 			return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
 		}
 		shard := providerState.ensureModelLocked(modelKey, time.Now())
+		shard.promoteExpiredLocked(time.Now())
+		decision.mergeShard(shard, model)
+		appendScheduledStateExclusions(&traceEvents, opts, shard, providerKey, model)
+		tracedExclusions := make(map[string]struct{})
+		traceExclusion := func(entry *scheduledAuth, reason string) {
+			if routeTraceCallback(opts.Metadata) == nil || entry == nil || entry.auth == nil {
+				return
+			}
+			key := entry.auth.ID + "\x00" + reason
+			if _, exists := tracedExclusions[key]; exists {
+				return
+			}
+			tracedExclusions[key] = struct{}{}
+			appendAuthRouteTraceEvent(
+				&traceEvents, opts, entry.auth, cliproxyexecutor.RouteTraceEvent{
+					Provider: providerKey,
+					Model:    model,
+					Action:   "candidate.excluded",
+					Reason:   reason,
+				},
+			)
+		}
 		predicate := func(entry *scheduledAuth) bool {
 			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
 				return false
 			}
+			if schedulerStrategyUsesWeights(s.strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
+				traceExclusion(entry, "weight_non_positive")
+				return false
+			}
 			if requestPredicate != nil && !requestPredicate(entry.auth) {
+				traceExclusion(entry, "request_filter")
 				return false
 			}
 			if len(tried) == 0 {
 				return true
 			}
 			_, ok := tried[pinnedAuthID]
+			if ok {
+				traceExclusion(entry, "already_tried")
+			}
 			return !ok
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		if s.strategy == schedulerStrategyQuotaAware {
+			priority, okPriority := shard.highestReadyPriorityLocked(false, predicate)
+			if okPriority {
+				entries := shard.readyEntriesAtPriorityLocked(false, priority, predicate)
+				signals, allFresh := s.quotaSignalsLocked(entries, model, time.Now())
+				decision.mergeQuotaSignals(entries, signals)
+				view := shard.readyViewAtPriorityLocked(false, priority, predicate)
+				if view != nil {
+					pickedEntry, quotaRules := s.pickQuotaAwareLocked(
+						entries, predicate, &view.quotaState, signals, allFresh,
+					)
+					if pickedEntry != nil && pickedEntry.auth != nil {
+						picked := pickedEntry.auth
+						s.captureQuotaInFlightLeaseLocked(ctx, picked, providerKey, time.Now())
+						s.markCheckpointDirtyLocked()
+						matchedRules := shard.routeDecisionSelectionRulesLocked(
+							picked, false, s.strategy, false,
+						)
+						matchedRules = append(matchedRules, quotaRules...)
+						appendSchedulerSelection(
+							&traceEvents, opts, decision, picked, providerKey, model, s.strategy, matchedRules...,
+						)
+						return picked, providerKey, nil
+					}
+				}
+			}
+		} else if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+			s.markCheckpointDirtyLocked()
+			appendSchedulerSelection(
+				&traceEvents,
+				opts,
+				decision,
+				picked,
+				providerKey,
+				model,
+				s.strategy,
+				shard.routeDecisionSelectionRulesLocked(picked, false, s.strategy, false)...,
+			)
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
 	}
 
-	predicate := triedPredicate(tried, requestPredicate)
+	tracedExclusions := make(map[string]struct{})
+	traceExclusion := func(entry *scheduledAuth, reason string) {
+		if routeTraceCallback(opts.Metadata) == nil || entry == nil || entry.auth == nil {
+			return
+		}
+		decision.exclude(entry.auth, model, reason)
+		key := entry.auth.ID + "\x00" + reason
+		if _, exists := tracedExclusions[key]; exists {
+			return
+		}
+		tracedExclusions[key] = struct{}{}
+		providerKey := ""
+		if entry.meta != nil {
+			providerKey = entry.meta.providerKey
+		}
+		appendAuthRouteTraceEvent(
+			&traceEvents, opts, entry.auth, cliproxyexecutor.RouteTraceEvent{
+				Provider: providerKey,
+				Model:    model,
+				Action:   "candidate.excluded",
+				Reason:   reason,
+			},
+		)
+	}
+	predicate := func(entry *scheduledAuth) bool {
+		if entry == nil || entry.auth == nil {
+			return false
+		}
+		if schedulerStrategyUsesWeights(s.strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
+			traceExclusion(entry, "weight_non_positive")
+			return false
+		}
+		if requestPredicate != nil && !requestPredicate(entry.auth) {
+			traceExclusion(entry, "request_filter")
+			return false
+		}
+		if len(tried) == 0 {
+			return true
+		}
+		_, ok := tried[entry.auth.ID]
+		if ok {
+			traceExclusion(entry, "already_tried")
+		}
+		return !ok
+	}
 	candidateShards := make([]*modelScheduler, len(normalized))
 	preferWebsocketByProvider := make([]bool, len(normalized))
 	bestPriority := 0
@@ -383,6 +775,17 @@ func (s *authScheduler) pickMixedWithPredicate(
 	for providerIndex, providerKey := range normalized {
 		providerState := s.providers[providerKey]
 		if providerState == nil {
+			attempt, previousAttempt := routeTraceAttempt(opts)
+			appendRouteTraceEvent(
+				&traceEvents, opts.Metadata, cliproxyexecutor.RouteTraceEvent{
+					Attempt:         attempt,
+					PreviousAttempt: previousAttempt,
+					Provider:        providerKey,
+					Model:           model,
+					Action:          "provider.excluded",
+					Reason:          "provider_not_registered",
+				},
+			)
 			continue
 		}
 		shard := providerState.ensureModelLocked(modelKey, now)
@@ -392,6 +795,9 @@ func (s *authScheduler) pickMixedWithPredicate(
 		if shard == nil {
 			continue
 		}
+		shard.promoteExpiredLocked(now)
+		decision.mergeShard(shard, model)
+		appendScheduledStateExclusions(&traceEvents, opts, shard, providerKey, model)
 		priorityReady, okPriority := shard.highestReadyPriorityLocked(preferWebsocket, predicate)
 		if !okPriority {
 			continue
@@ -415,70 +821,195 @@ func (s *authScheduler) pickMixedWithPredicate(
 				preferWebsocketByProvider[providerIndex], bestPriority, s.strategy, predicate,
 			)
 			if picked != nil {
+				appendSchedulerSelection(
+					&traceEvents,
+					opts,
+					decision,
+					picked,
+					providerKey,
+					model,
+					s.strategy,
+					shard.routeDecisionSelectionRulesLocked(
+						picked, preferWebsocketByProvider[providerIndex], s.strategy, false,
+					)...,
+				)
 				return picked, providerKey, nil
 			}
 		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	cursorKey := strings.Join(normalized, ",") + ":" + modelKey
-	weights := make([]int, len(normalized))
-	segmentStarts := make([]int, len(normalized))
-	segmentEnds := make([]int, len(normalized))
-	totalWeight := 0
-	for providerIndex, shard := range candidateShards {
-		segmentStarts[providerIndex] = totalWeight
-		if shard != nil {
-			weights[providerIndex] = shard.readyCountAtPriorityLocked(
-				preferWebsocketByProvider[providerIndex], bestPriority, predicate,
+	cursorKey := mixedSchedulerCursorKey(normalized, modelKey)
+	if s.strategy == schedulerStrategyQuotaAware {
+		entries := make([]*scheduledAuth, 0)
+		for providerIndex, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			entries = append(
+				entries, shard.readyEntriesAtPriorityLocked(
+					preferWebsocketByProvider[providerIndex], bestPriority, predicate,
+				)...,
 			)
 		}
-		totalWeight += weights[providerIndex]
-		segmentEnds[providerIndex] = totalWeight
+		sort.Slice(
+			entries, func(i, j int) bool {
+				if entries[i] == nil || entries[i].auth == nil {
+					return false
+				}
+				if entries[j] == nil || entries[j].auth == nil {
+					return true
+				}
+				return entries[i].auth.ID < entries[j].auth.ID
+			},
+		)
+		signals, allFresh := s.quotaSignalsLocked(entries, model, now)
+		decision.mergeQuotaSignals(entries, signals)
+		if s.mixedQuotaStates == nil {
+			s.mixedQuotaStates = make(map[string]*quotaAwareViewState)
+		}
+		state := s.mixedQuotaStates[cursorKey]
+		if state == nil {
+			state = &quotaAwareViewState{}
+			s.mixedQuotaStates[cursorKey] = state
+		}
+		picked, quotaRules := s.pickQuotaAwareLocked(entries, predicate, state, signals, allFresh)
+		if picked != nil && picked.auth != nil && picked.meta != nil {
+			providerIndex := providerKeyIndex(normalized, picked.meta.providerKey)
+			var matchedRules []string
+			if providerIndex >= 0 && candidateShards[providerIndex] != nil {
+				matchedRules = candidateShards[providerIndex].routeDecisionSelectionRulesLocked(
+					picked.auth,
+					preferWebsocketByProvider[providerIndex],
+					s.strategy,
+					false,
+				)
+			}
+			matchedRules = append(matchedRules, quotaRules...)
+			s.captureQuotaInFlightLeaseLocked(ctx, picked.auth, picked.meta.providerKey, now)
+			s.markCheckpointDirtyLocked()
+			appendSchedulerSelection(
+				&traceEvents,
+				opts,
+				decision,
+				picked.auth,
+				picked.meta.providerKey,
+				model,
+				s.strategy,
+				matchedRules...,
+			)
+			return picked.auth, picked.meta.providerKey, nil
+		}
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
-	if totalWeight == 0 {
+	if s.strategy == schedulerStrategyWeightedRoundRobin {
+		entries := make([]*scheduledAuth, 0)
+		for providerIndex, shard := range candidateShards {
+			if shard == nil {
+				continue
+			}
+			entries = append(
+				entries,
+				shard.readyEntriesAtPriorityLocked(
+					preferWebsocketByProvider[providerIndex], bestPriority, predicate,
+				)...,
+			)
+		}
+		sort.Slice(
+			entries, func(i, j int) bool {
+				if entries[i] == nil || entries[i].auth == nil {
+					return false
+				}
+				if entries[j] == nil || entries[j].auth == nil {
+					return true
+				}
+				return entries[i].auth.ID < entries[j].auth.ID
+			},
+		)
+		if s.mixedWeightedStates == nil {
+			s.mixedWeightedStates = make(map[string]*smoothWeightedState)
+		}
+		state := s.mixedWeightedStates[cursorKey]
+		if state == nil {
+			state = &smoothWeightedState{}
+			s.mixedWeightedStates[cursorKey] = state
+		}
+		state.prepare(scheduledWeightVectorMatching(entries, predicate))
+		picked := pickSmoothWeightedScheduled(entries, state, predicate)
+		if picked != nil && picked.auth != nil && picked.meta != nil {
+			providerIndex := providerKeyIndex(normalized, picked.meta.providerKey)
+			var matchedRules []string
+			if providerIndex >= 0 && candidateShards[providerIndex] != nil {
+				matchedRules = candidateShards[providerIndex].routeDecisionSelectionRulesLocked(
+					picked.auth,
+					preferWebsocketByProvider[providerIndex],
+					s.strategy,
+					false,
+				)
+			}
+			s.markCheckpointDirtyLocked()
+			appendSchedulerSelection(
+				&traceEvents,
+				opts,
+				decision,
+				picked.auth,
+				picked.meta.providerKey,
+				model,
+				s.strategy,
+				matchedRules...,
+			)
+			return picked.auth, picked.meta.providerKey, nil
+		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	startSlot := s.mixedCursors[cursorKey] % totalWeight
-	startProviderIndex := -1
-	for providerIndex := range normalized {
-		if weights[providerIndex] == 0 {
-			continue
-		}
-		if startSlot < segmentEnds[providerIndex] {
-			startProviderIndex = providerIndex
-			break
-		}
-	}
-	if startProviderIndex < 0 {
-		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
-	}
-
-	slot := startSlot
-	for offset := 0; offset < len(normalized); offset++ {
-		providerIndex := (startProviderIndex + offset) % len(normalized)
-		if weights[providerIndex] == 0 {
-			continue
-		}
-		if providerIndex != startProviderIndex {
-			slot = segmentStarts[providerIndex]
-		}
-		providerKey := normalized[providerIndex]
-		shard := candidateShards[providerIndex]
+	entries := make([]*scheduledAuth, 0)
+	for providerIndex, shard := range candidateShards {
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(
-			preferWebsocketByProvider[providerIndex], bestPriority, schedulerStrategyRoundRobin, predicate,
+		entries = append(
+			entries, shard.readyEntriesAtPriorityLocked(
+				preferWebsocketByProvider[providerIndex], bestPriority, predicate,
+			)...,
 		)
-		if picked == nil {
-			continue
-		}
-		s.mixedCursors[cursorKey] = slot + 1
-		return picked, providerKey, nil
 	}
-	return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	picked := pickStableMixedScheduled(entries, s.mixedCursors[cursorKey])
+	if picked == nil || picked.auth == nil || picked.meta == nil {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
+	providerKey := picked.meta.providerKey
+	providerIndex := providerKeyIndex(normalized, providerKey)
+	if providerIndex < 0 || candidateShards[providerIndex] == nil {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
+	selectedID := picked.auth.ID
+	selected := candidateShards[providerIndex].pickReadyAtPriorityLocked(
+		preferWebsocketByProvider[providerIndex],
+		bestPriority,
+		schedulerStrategyRoundRobin,
+		func(entry *scheduledAuth) bool {
+			return entry != nil && entry.auth != nil && entry.auth.ID == selectedID
+		},
+	)
+	if selected == nil {
+		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
+	}
+	s.mixedCursors[cursorKey] = selected.ID
+	s.markCheckpointDirtyLocked()
+	appendSchedulerSelection(
+		&traceEvents,
+		opts,
+		decision,
+		selected,
+		providerKey,
+		model,
+		s.strategy,
+		candidateShards[providerIndex].routeDecisionSelectionRulesLocked(
+			selected, preferWebsocketByProvider[providerIndex], s.strategy, false,
+		)...,
+	)
+	return selected, providerKey, nil
 }
 
 // mixedUnavailableErrorLocked synthesizes the mixed-provider cooldown or unavailable error.
@@ -511,30 +1042,10 @@ func (s *authScheduler) mixedUnavailableErrorLocked(
 		return &Error{Code: "auth_not_found", Message: "no auth available"}
 	}
 	if cooldownCount == total && !earliest.IsZero() {
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
-		}
+		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownError(model, "", resetIn)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
-}
-
-// triedPredicate builds a filter that excludes auths already attempted for the current request.
-func triedPredicate(tried map[string]struct{}, requestPredicate func(*Auth) bool) func(*scheduledAuth) bool {
-	return func(entry *scheduledAuth) bool {
-		if entry == nil || entry.auth == nil {
-			return false
-		}
-		if requestPredicate != nil && !requestPredicate(entry.auth) {
-			return false
-		}
-		if len(tried) == 0 {
-			return true
-		}
-		_, ok := tried[entry.auth.ID]
-		return !ok
-	}
 }
 
 // normalizeProviderKeys lowercases, trims, and de-duplicates provider keys while preserving order.
@@ -557,12 +1068,52 @@ func normalizeProviderKeys(providers []string) []string {
 
 // containsProvider reports whether provider is present in the normalized provider list.
 func containsProvider(providers []string, provider string) bool {
-	for _, candidate := range providers {
+	return providerKeyIndex(providers, provider) >= 0
+}
+
+func providerKeyIndex(providers []string, provider string) int {
+	for index, candidate := range providers {
 		if candidate == provider {
-			return true
+			return index
 		}
 	}
-	return false
+	return -1
+}
+
+func mixedSchedulerCursorKey(providers []string, model string) string {
+	providerSet := append([]string(nil), providers...)
+	sort.Strings(providerSet)
+	return strings.Join(providerSet, ",") + ":" + model
+}
+
+func pickStableMixedScheduled(entries []*scheduledAuth, lastPicked string) *scheduledAuth {
+	var initial *scheduledAuth
+	var first *scheduledAuth
+	var successor *scheduledAuth
+	for _, entry := range entries {
+		if entry == nil || entry.auth == nil {
+			continue
+		}
+		if initial == nil {
+			initial = entry
+		}
+		if first == nil || entry.auth.ID < first.auth.ID {
+			first = entry
+		}
+		if entry.auth.ID <= lastPicked {
+			continue
+		}
+		if successor == nil || entry.auth.ID < successor.auth.ID {
+			successor = entry
+		}
+	}
+	if lastPicked == "" {
+		return initial
+	}
+	if successor != nil {
+		return successor
+	}
+	return first
 }
 
 // upsertAuthLocked updates one auth in-place while the scheduler mutex is held.
@@ -627,6 +1178,7 @@ func buildScheduledAuthMeta(auth *Auth) *scheduledAuthMeta {
 		auth:              auth,
 		providerKey:       providerKey,
 		priority:          authPriority(auth),
+		weight:            authWeight(auth),
 		virtualParent:     virtualParent,
 		websocketEnabled:  authWebsocketsEnabled(auth),
 		supportedModelSet: supportedModelSetForAuth(auth.ID),
@@ -699,9 +1251,10 @@ func (p *providerScheduler) ensureModelLocked(modelKey string, now time.Time) *m
 		return shard
 	}
 	shard := &modelScheduler{
-		modelKey:        modelKey,
-		entries:         make(map[string]*scheduledAuth),
-		readyByPriority: make(map[int]*readyBucket),
+		modelKey:               modelKey,
+		entries:                make(map[string]*scheduledAuth),
+		readyByPriority:        make(map[int]*readyBucket),
+		cursorStatesByPriority: make(map[int]readyBucketCursorState),
 	}
 	for _, meta := range p.auths {
 		if meta == nil || !meta.supportsModel(modelKey) {
@@ -750,10 +1303,12 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 	previousState := entry.state
 	previousNextRetryAt := entry.nextRetryAt
 	previousPriority := 0
+	previousWeight := int64(0)
 	previousParent := ""
 	previousWebsocketEnabled := false
 	if entry.meta != nil {
 		previousPriority = entry.meta.priority
+		previousWeight = entry.meta.weight
 		previousParent = entry.meta.virtualParent
 		previousWebsocketEnabled = entry.meta.websocketEnabled
 	}
@@ -775,7 +1330,9 @@ func (m *modelScheduler) upsertEntryLocked(meta *scheduledAuthMeta, now time.Tim
 		entry.nextRetryAt = next
 	}
 
-	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) && previousPriority == meta.priority && previousParent == meta.virtualParent && previousWebsocketEnabled == meta.websocketEnabled {
+	if ok && previousState == entry.state && previousNextRetryAt.Equal(entry.nextRetryAt) &&
+		previousPriority == meta.priority && previousWeight == meta.weight && previousParent == meta.virtualParent &&
+		previousWebsocketEnabled == meta.websocketEnabled {
 		return
 	}
 	m.rebuildIndexesLocked()
@@ -877,14 +1434,11 @@ func (m *modelScheduler) highestReadyPriorityLocked(preferWebsocket bool, predic
 	return 0, false
 }
 
-// pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
-// The caller must ensure expired entries are already promoted when needed.
-func (m *modelScheduler) pickReadyAtPriorityLocked(
+func (m *modelScheduler) readyViewAtPriorityLocked(
 	preferWebsocket bool,
 	priority int,
-	strategy schedulerStrategy,
 	predicate func(*scheduledAuth) bool,
-) *Auth {
+) *readyView {
 	if m == nil {
 		return nil
 	}
@@ -896,10 +1450,28 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(
 	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
 		view = &bucket.ws
 	}
+	return view
+}
+
+// pickReadyAtPriorityLocked selects the next ready auth from a specific priority bucket.
+// The caller must ensure expired entries are already promoted when needed.
+func (m *modelScheduler) pickReadyAtPriorityLocked(
+	preferWebsocket bool,
+	priority int,
+	strategy schedulerStrategy,
+	predicate func(*scheduledAuth) bool,
+) *Auth {
+	view := m.readyViewAtPriorityLocked(preferWebsocket, priority, predicate)
+	if view == nil {
+		return nil
+	}
 	var picked *scheduledAuth
-	if strategy == schedulerStrategyFillFirst {
+	switch strategy {
+	case schedulerStrategyFillFirst:
 		picked = view.pickFirst(predicate)
-	} else {
+	case schedulerStrategyWeightedRoundRobin:
+		picked = view.pickWeighted(predicate)
+	default:
 		picked = view.pickRoundRobin(predicate)
 	}
 	if picked == nil || picked.auth == nil {
@@ -908,37 +1480,62 @@ func (m *modelScheduler) pickReadyAtPriorityLocked(
 	return picked.auth
 }
 
-// unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
-func (m *modelScheduler) readyCountAtPriorityLocked(
+func (m *modelScheduler) routeDecisionSelectionRulesLocked(
+	auth *Auth,
+	preferWebsocket bool,
+	strategy schedulerStrategy,
+	groupedRoundRobin bool,
+) []string {
+	if m == nil || auth == nil {
+		return nil
+	}
+	entry := m.entries[auth.ID]
+	if entry == nil || entry.meta == nil {
+		return nil
+	}
+	bucket := m.readyByPriority[entry.meta.priority]
+	if bucket == nil {
+		return nil
+	}
+	view := &bucket.all
+	var rules []string
+	if preferWebsocket && entry.meta.websocketEnabled {
+		rules = append(rules, "transport_preference")
+		view = &bucket.ws
+	}
+	if groupedRoundRobin && strategy == schedulerStrategyRoundRobin &&
+		len(view.parentOrder) > 1 && len(view.children) > 0 {
+		rules = append(rules, "round_robin_group")
+	}
+	return rules
+}
+
+func (m *modelScheduler) readyEntriesAtPriorityLocked(
 	preferWebsocket bool,
 	priority int,
 	predicate func(*scheduledAuth) bool,
-) int {
+) []*scheduledAuth {
 	if m == nil {
-		return 0
+		return nil
 	}
 	bucket := m.readyByPriority[priority]
 	if bucket == nil {
-		return 0
+		return nil
 	}
-	if preferWebsocket {
-		if count := readyViewCount(bucket.ws, predicate); count > 0 {
-			return count
-		}
+	view := bucket.all
+	if preferWebsocket && bucket.ws.pickFirst(predicate) != nil {
+		view = bucket.ws
 	}
-	return readyViewCount(bucket.all, predicate)
-}
-
-func readyViewCount(view readyView, predicate func(*scheduledAuth) bool) int {
-	count := 0
+	entries := make([]*scheduledAuth, 0, len(view.flat))
 	for _, entry := range view.flat {
 		if predicate == nil || predicate(entry) {
-			count++
+			entries = append(entries, entry)
 		}
 	}
-	return count
+	return entries
 }
 
+// unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
 	total, cooldownCount, earliest := m.availabilitySummaryLocked(predicate)
@@ -950,10 +1547,7 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		if providerForError == "mixed" {
 			providerForError = ""
 		}
-		resetIn := earliest.Sub(now)
-		if resetIn < 0 {
-			resetIn = 0
-		}
+		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownError(model, providerForError, resetIn)
 	}
 	return &Error{Code: "auth_unavailable", Message: "no auth available"}
@@ -988,32 +1582,31 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 
 // rebuildIndexesLocked reconstructs ready and blocked views from the current entry map.
 func (m *modelScheduler) rebuildIndexesLocked() {
-	cursorStates := make(map[int]readyBucketCursorState, len(m.readyByPriority))
-	for priority, bucket := range m.readyByPriority {
-		if bucket == nil {
-			continue
-		}
-		cursorStates[priority] = readyBucketCursorState{
-			all: snapshotReadyViewCursors(bucket.all),
-			ws:  snapshotReadyViewCursors(bucket.ws),
-		}
-	}
+	cursorStates := m.snapshotCursorStatesLocked()
+	knownPriorities := make(map[int]struct{})
 
 	m.readyByPriority = make(map[int]*readyBucket)
 	m.priorityOrder = m.priorityOrder[:0]
 	m.blocked = m.blocked[:0]
 	priorityBuckets := make(map[int][]*scheduledAuth)
 	for _, entry := range m.entries {
-		if entry == nil || entry.auth == nil {
+		if entry == nil || entry.auth == nil || entry.meta == nil {
 			continue
 		}
+		priority := entry.meta.priority
+		knownPriorities[priority] = struct{}{}
 		// noinspection GoSwitchMissingCasesForIotaConsts — scheduledStateDisabled entries are skipped (nil guard above).
 		switch entry.state {
 		case scheduledStateReady:
-			priority := entry.meta.priority
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
 		case scheduledStateCooldown, scheduledStateBlocked:
 			m.blocked = append(m.blocked, entry)
+		}
+	}
+	m.cursorStatesByPriority = make(map[int]readyBucketCursorState, len(knownPriorities))
+	for priority := range knownPriorities {
+		if state, ok := cursorStates[priority]; ok {
+			m.cursorStatesByPriority[priority] = state
 		}
 	}
 	for priority, entries := range priorityBuckets {
@@ -1116,44 +1709,128 @@ func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *schedul
 	if len(v.flat) == 0 {
 		return nil
 	}
-	start := 0
-	if len(v.flat) > 0 {
-		start = v.cursor % len(v.flat)
-	}
+	start := nextSortedScheduledAuthIndex(v.flat, v.lastPickedAuth)
 	for offset := 0; offset < len(v.flat); offset++ {
-		index := (start + offset) % len(v.flat)
-		entry := v.flat[index]
-		if predicate != nil && !predicate(entry) {
+		entry := v.flat[(start+offset)%len(v.flat)]
+		if entry == nil || entry.auth == nil || predicate != nil && !predicate(entry) {
 			continue
 		}
-		v.cursor = index + 1
+		v.lastPickedAuth = entry.auth.ID
 		return entry
 	}
 	return nil
 }
 
+func nextSortedScheduledAuthIndex(entries []*scheduledAuth, lastPicked string) int {
+	if len(entries) == 0 || lastPicked == "" {
+		return 0
+	}
+	index := sort.Search(
+		len(entries), func(index int) bool {
+			entry := entries[index]
+			return entry != nil && entry.auth != nil && entry.auth.ID >= lastPicked
+		},
+	)
+	if index < len(entries) && entries[index] != nil && entries[index].auth != nil &&
+		entries[index].auth.ID == lastPicked {
+		return (index + 1) % len(entries)
+	}
+	if index < len(entries) {
+		return index
+	}
+	return 0
+}
+
+// pickWeighted returns the next ready entry using smooth weighted round-robin.
+func (v *readyView) pickWeighted(predicate func(*scheduledAuth) bool) *scheduledAuth {
+	if v == nil || len(v.flat) == 0 {
+		return nil
+	}
+	v.weightedState.prepare(scheduledWeightVectorMatching(v.flat, predicate))
+	return pickSmoothWeightedScheduled(v.flat, &v.weightedState, predicate)
+}
+
+func scheduledWeightVector(entries []*scheduledAuth) map[string]int64 {
+	return scheduledWeightVectorMatching(entries, nil)
+}
+
+func scheduledWeightVectorMatching(
+	entries []*scheduledAuth,
+	predicate func(*scheduledAuth) bool,
+) map[string]int64 {
+	weights := make(map[string]int64, len(entries))
+	for _, entry := range entries {
+		if entry == nil || entry.auth == nil || entry.meta == nil || entry.meta.weight <= 0 {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		weights[entry.auth.ID] = entry.meta.weight
+	}
+	return weights
+}
+
+func pickSmoothWeightedScheduled(
+	entries []*scheduledAuth,
+	state *smoothWeightedState,
+	predicate func(*scheduledAuth) bool,
+) *scheduledAuth {
+	if state == nil {
+		return nil
+	}
+	active := make(map[string]struct{}, len(entries))
+	start := nextSortedScheduledAuthIndex(entries, state.lastPicked)
+	var picked *scheduledAuth
+	var pickedCurrent int64
+	var totalWeight int64
+	for offset := range entries {
+		entry := entries[(start+offset)%len(entries)]
+		if entry == nil || entry.auth == nil || entry.meta == nil || entry.meta.weight <= 0 {
+			continue
+		}
+		if predicate != nil && !predicate(entry) {
+			continue
+		}
+		active[entry.auth.ID] = struct{}{}
+		state.current[entry.auth.ID] = saturatingAddInt64(state.current[entry.auth.ID], entry.meta.weight)
+		totalWeight = saturatingAddInt64(totalWeight, entry.meta.weight)
+		if picked == nil || state.current[entry.auth.ID] > pickedCurrent {
+			picked = entry
+			pickedCurrent = state.current[entry.auth.ID]
+		}
+	}
+	for authID := range state.current {
+		if _, ok := active[authID]; !ok {
+			delete(state.current, authID)
+		}
+	}
+	if picked == nil {
+		return nil
+	}
+	state.current[picked.auth.ID] = saturatingAddInt64(state.current[picked.auth.ID], -totalWeight)
+	state.lastPicked = picked.auth.ID
+	return picked
+}
+
 // pickGroupedRoundRobin rotates across parents first and then within the selected parent.
 func (v *readyView) pickGroupedRoundRobin(predicate func(*scheduledAuth) bool) *scheduledAuth {
-	start := 0
-	if len(v.parentOrder) > 0 {
-		start = v.parentCursor % len(v.parentOrder)
-	}
+	start := nextSortedStringIndex(v.parentOrder, v.lastPickedParent)
 	for offset := 0; offset < len(v.parentOrder); offset++ {
-		parentIndex := (start + offset) % len(v.parentOrder)
-		parent := v.parentOrder[parentIndex]
+		parent := v.parentOrder[(start+offset)%len(v.parentOrder)]
 		child := v.children[parent]
 		if child == nil || len(child.items) == 0 {
 			continue
 		}
-		itemStart := child.cursor % len(child.items)
+		itemStart := nextSortedScheduledAuthIndex(child.items, child.lastPickedAuth)
 		for itemOffset := 0; itemOffset < len(child.items); itemOffset++ {
-			itemIndex := (itemStart + itemOffset) % len(child.items)
-			entry := child.items[itemIndex]
-			if predicate != nil && !predicate(entry) {
+			entry := child.items[(itemStart+itemOffset)%len(child.items)]
+			if entry == nil || entry.auth == nil || predicate != nil && !predicate(entry) {
 				continue
 			}
-			child.cursor = itemIndex + 1
-			v.parentCursor = parentIndex + 1
+			child.lastPickedAuth = entry.auth.ID
+			v.lastPickedAuth = entry.auth.ID
+			v.lastPickedParent = parent
 			return entry
 		}
 	}

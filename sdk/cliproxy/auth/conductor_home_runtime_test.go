@@ -184,10 +184,13 @@ type rejectedPublicationStore struct {
 func (*rejectedPublicationStore) List(context.Context) ([]*Auth, error) { return nil, nil }
 
 func (s *rejectedPublicationStore) Save(_ context.Context, auth *Auth) (string, error) {
+	if auth == nil {
+		return "", errors.New("auth is required")
+	}
 	s.mu.Lock()
 	s.saved = auth.Clone()
 	s.mu.Unlock()
-	if auth != nil && s.manager != nil && s.trigger.CompareAndSwap(true, false) {
+	if s.manager != nil && s.trigger.CompareAndSwap(true, false) {
 		go func(id string) {
 			_ = s.manager.Remove(WithSkipPersist(context.Background()), id)
 			close(s.removeDone)
@@ -312,7 +315,9 @@ func (e *opaqueUnauthorizedRefreshExecutor) Refresh(_ context.Context, auth *Aut
 func (e *removeDuringPrepareExecutor) ShouldPrepareRequestAuth(*Auth) bool { return true }
 
 func (e *removeDuringPrepareExecutor) PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error) {
-	e.manager.Remove(ctx, auth.ID)
+	if errRemove := e.manager.Remove(ctx, auth.ID); errRemove != nil {
+		return nil, fmt.Errorf("remove auth during request preparation: %w", errRemove)
+	}
 	updated := auth.Clone()
 	updated.Metadata = map[string]any{"token": "prepared"}
 	return updated, nil
@@ -322,7 +327,7 @@ type removeDuringSaveStore struct {
 	manager        *Manager
 	removeOnSave   atomic.Bool
 	items          map[string]*Auth
-	deleteCh       chan string
+	deleteCh       chan error
 	removeAfterSeq atomic.Uint64
 }
 
@@ -338,9 +343,9 @@ func (s *removeDuringSaveStore) Save(ctx context.Context, auth *Auth) (string, e
 	if auth != nil && s.manager != nil && s.removeOnSave.Load() {
 		s.removeOnSave.Store(false)
 		go func(authID string) {
-			s.manager.Remove(ctx, authID)
+			errRemove := s.manager.Remove(ctx, authID)
 			if s.deleteCh != nil {
-				s.deleteCh <- authID
+				s.deleteCh <- errRemove
 			}
 		}(auth.ID)
 		deadline := time.Now().Add(time.Second)
@@ -432,11 +437,13 @@ func TestManagerPickNextViaHomeKeepsPinnedHTTPFallbackAuth(t *testing.T) {
 	auth, gotExecutor, provider, err := manager.pickNextViaHome(
 		ctx,
 		"gpt-5",
-		cliproxyexecutor.Options{Metadata: map[string]any{
-			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
-			cliproxyexecutor.PinnedAuthMetadataKey:       "auth-1",
-			homeAuthCountMetadataKey:                     2,
-		}},
+		cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+				cliproxyexecutor.PinnedAuthMetadataKey:       "auth-1",
+				homeAuthCountMetadataKey:                     2,
+			},
+		},
 		nil,
 	)
 	if err != nil {
@@ -462,9 +469,11 @@ func TestManagerPickNextViaHomeDoesNotRedispatchPinnedHTTPAuth(t *testing.T) {
 	_, _, _, err := manager.pickNextViaHome(
 		context.Background(),
 		"gpt-5",
-		cliproxyexecutor.Options{Metadata: map[string]any{
-			cliproxyexecutor.PinnedAuthMetadataKey: "auth-1",
-		}},
+		cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.PinnedAuthMetadataKey: "auth-1",
+			},
+		},
 		map[string]struct{}{"auth-1": {}},
 	)
 	var authErr *Error
@@ -497,11 +506,13 @@ func TestManagerPickNextViaHomeDoesNotFailOverPinnedAuth(t *testing.T) {
 	_, _, _, err := manager.pickNextViaHome(
 		ctx,
 		"gpt-5",
-		cliproxyexecutor.Options{Metadata: map[string]any{
-			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
-			cliproxyexecutor.PinnedAuthMetadataKey:       "auth-1",
-			homeAuthCountMetadataKey:                     2,
-		}},
+		cliproxyexecutor.Options{
+			Metadata: map[string]any{
+				cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+				cliproxyexecutor.PinnedAuthMetadataKey:       "auth-1",
+				homeAuthCountMetadataKey:                     2,
+			},
+		},
 		map[string]struct{}{"auth-1": {}},
 	)
 	var authErr *Error
@@ -541,7 +552,7 @@ func TestApplyAuthFailureStateTreatsCloudflareChallengeAsQuotaCooldown(t *testin
 	}
 }
 
-func TestManagerMarkResultTreatsModelCloudflareChallengeAsQuotaCooldown(t *testing.T) {
+func TestManagerMarkResultKeepsProviderCloudflareChallengeAvailabilityNeutral(t *testing.T) {
 	previous := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(previous) })
@@ -551,7 +562,6 @@ func TestManagerMarkResultTreatsModelCloudflareChallengeAsQuotaCooldown(t *testi
 		t.Fatalf("register auth: %v", err)
 	}
 
-	before := time.Now()
 	manager.MarkResult(
 		context.Background(),
 		Result{
@@ -570,18 +580,14 @@ func TestManagerMarkResultTreatsModelCloudflareChallengeAsQuotaCooldown(t *testi
 	if !ok || updated == nil {
 		t.Fatal("expected auth to remain registered")
 	}
-	state := updated.ModelStates["gpt-5"]
-	if state == nil {
-		t.Fatal("expected model state")
+	if state := updated.ModelStates["gpt-5"]; state != nil && state.Unavailable {
+		t.Fatalf("provider challenge changed model availability: %+v", state)
 	}
-	if state.StatusMessage != "cloudflare challenge" {
-		t.Fatalf("model StatusMessage = %q, want cloudflare challenge", state.StatusMessage)
+	if updated.Unavailable || !updated.NextRetryAfter.IsZero() || updated.Quota.Exceeded {
+		t.Fatalf("provider challenge changed credential availability: %+v", updated)
 	}
-	if !state.Quota.Exceeded || state.Quota.Reason != "cloudflare challenge" {
-		t.Fatalf("model quota = %+v, want cloudflare challenge exceeded", state.Quota)
-	}
-	if state.NextRetryAfter.Sub(before) < 10*time.Second {
-		t.Fatalf("model NextRetryAfter = %v, want at least 10s after %v", state.NextRetryAfter, before)
+	if updated.Failed != 1 {
+		t.Fatalf("provider challenge failure count = %d, want 1", updated.Failed)
 	}
 }
 
@@ -625,7 +631,8 @@ func (c *testHomeRuntimeRefreshClient) HeartbeatOK() bool { return c.heartbeat }
 
 func (c *testHomeRuntimeRefreshClient) GetRefreshAuth(
 	_ context.Context,
-	authIndex string,
+	authIndex,
+	_ string,
 ) ([]byte, error) {
 	c.index = authIndex
 	return c.payload, nil
@@ -1019,8 +1026,8 @@ func TestRefreshAuthForRequestRollsBackAfterProviderReplacement(t *testing.T) {
 	guard := &testRefreshCommitGuard{}
 	manager := NewManager(nil, nil, nil)
 	executor := &guardedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		guard:                guard,
+		id:    "plugin-provider",
+		guard: guard,
 	}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
@@ -1038,10 +1045,12 @@ func TestRefreshAuthForRequestRollsBackAfterProviderReplacement(t *testing.T) {
 	manager.mu.Lock()
 	manager.store = store
 	manager.mu.Unlock()
-	refreshResult := make(chan struct {
-		auth *Auth
-		err  error
-	}, 1)
+	refreshResult := make(
+		chan struct {
+			auth *Auth
+			err  error
+		}, 1,
+	)
 	go func() {
 		refreshed, errRefresh := manager.refreshAuthForRequest(
 			context.Background(), registered.ID, "old", registered.Generation,
@@ -1064,7 +1073,9 @@ func TestRefreshAuthForRequestRollsBackAfterProviderReplacement(t *testing.T) {
 	}
 	close(store.release)
 	result := <-refreshResult
-	if result.auth != nil || result.err == nil || !strings.Contains(result.err.Error(), "owner changed after persistence") {
+	if result.auth != nil || result.err == nil || !strings.Contains(
+		result.err.Error(), "owner changed after persistence",
+	) {
 		t.Fatalf("refreshAuthForRequest() = (%#v, %v), want stale owner error", result.auth, result.err)
 	}
 	store.mu.Lock()
@@ -1083,7 +1094,7 @@ func TestRefreshAuthForRequestRollsBackAfterProviderReplacement(t *testing.T) {
 
 func TestTryRefreshAfterUnauthorizedUsesExecutorCapabilityForOpaqueCredential(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	executor := &opaqueUnauthorizedRefreshExecutor{replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"}}
+	executor := &opaqueUnauthorizedRefreshExecutor{id: "plugin-provider"}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
 		context.Background(),
@@ -1112,8 +1123,8 @@ func TestTryRefreshAfterUnauthorizedUsesExecutorCapabilityForOpaqueCredential(t 
 func TestTryRefreshAfterUnauthorizedRejectsManagedNoOpCredential(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	executor := &opaqueUnauthorizedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		unchanged:            true,
+		id:        "plugin-provider",
+		unchanged: true,
 	}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
@@ -1138,8 +1149,8 @@ func TestTryRefreshAfterUnauthorizedRejectsManagedNoOpCredential(t *testing.T) {
 func TestRefreshAuthForRequestRollsBackRejectedFinalPublication(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	executor := &guardedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		guard:                rejectingAfterCommitGuard{},
+		id:    "plugin-provider",
+		guard: rejectingAfterCommitGuard{},
 	}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
@@ -1158,7 +1169,9 @@ func TestRefreshAuthForRequestRollsBackRejectedFinalPublication(t *testing.T) {
 	refreshed, errRefresh := manager.refreshAuthForRequest(
 		context.Background(), registered.ID, "old", registered.Generation,
 	)
-	if refreshed != nil || errRefresh == nil || !strings.Contains(errRefresh.Error(), "owner changed after persistence") {
+	if refreshed != nil || errRefresh == nil || !strings.Contains(
+		errRefresh.Error(), "owner changed after persistence",
+	) {
 		t.Fatalf("refreshAuthForRequest() = (%#v, %v), want rejected publication", refreshed, errRefresh)
 	}
 	current, ok := manager.GetByID(registered.ID)
@@ -1177,8 +1190,8 @@ func TestRefreshRollbackTimeoutReleasesPersistenceLock(t *testing.T) {
 
 	manager := NewManager(nil, nil, nil)
 	executor := &guardedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		guard:                rejectingAfterCommitGuard{},
+		id:    "plugin-provider",
+		guard: rejectingAfterCommitGuard{},
 	}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
@@ -1232,7 +1245,9 @@ func TestRefreshRollbackTimeoutReleasesPersistenceLock(t *testing.T) {
 
 	current, _ := manager.GetByID(registered.ID)
 	current.Metadata = map[string]any{"access_token": "later"}
-	if _, errUpdate := manager.Update(context.Background(), current); !errors.Is(errUpdate, errAuthDurableStateUncertain) {
+	if _, errUpdate := manager.Update(context.Background(), current); !errors.Is(
+		errUpdate, errAuthDurableStateUncertain,
+	) {
 		t.Fatalf("Update(plugin-auth) error = %v, want isolated durable state", errUpdate)
 	}
 	markDone := make(chan struct{})
@@ -1268,8 +1283,8 @@ func TestRemoveDuringRefreshRollbackDefersDurableDeletion(t *testing.T) {
 
 	manager := NewManager(nil, nil, nil)
 	executor := &guardedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		guard:                rejectingAfterCommitGuard{},
+		id:    "plugin-provider",
+		guard: rejectingAfterCommitGuard{},
 	}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
@@ -1349,8 +1364,8 @@ func TestRecreateDuringRefreshRollbackSupersedesDeferredDeletion(t *testing.T) {
 
 	manager := NewManager(nil, nil, nil)
 	executor := &guardedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		guard:                rejectingAfterCommitGuard{},
+		id:    "plugin-provider",
+		guard: rejectingAfterCommitGuard{},
 	}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
@@ -1418,8 +1433,8 @@ func TestDeleteSupersedesQueuedRecreationDuringRollback(t *testing.T) {
 
 	manager := NewManager(nil, nil, nil)
 	executor := &guardedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		guard:                rejectingAfterCommitGuard{},
+		id:    "plugin-provider",
+		guard: rejectingAfterCommitGuard{},
 	}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
@@ -1487,8 +1502,8 @@ func TestDeleteInvalidatesDeferredRecreationAfterHandlerStarts(t *testing.T) {
 
 	manager := NewManager(nil, nil, nil)
 	executor := &guardedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		guard:                rejectingAfterCommitGuard{},
+		id:    "plugin-provider",
+		guard: rejectingAfterCommitGuard{},
 	}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
@@ -1572,8 +1587,8 @@ func TestRemoveDuringActiveRefreshRollbackDeletesRestoredCredential(t *testing.T
 
 	manager := NewManager(nil, nil, nil)
 	executor := &guardedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		guard:                rejectingAfterCommitGuard{},
+		id:    "plugin-provider",
+		guard: rejectingAfterCommitGuard{},
 	}
 	manager.RegisterExecutor(executor)
 	registered, errRegister := manager.Register(
@@ -1641,10 +1656,12 @@ func TestDeferredAuthDeletionRetriesUntilSuccess(t *testing.T) {
 	previousMaxDelay := deferredAuthRecreateRetryMaxDelay
 	deferredAuthRecreateRetryInitialDelay = time.Millisecond
 	deferredAuthRecreateRetryMaxDelay = 2 * time.Millisecond
-	t.Cleanup(func() {
-		deferredAuthRecreateRetryInitialDelay = previousInitialDelay
-		deferredAuthRecreateRetryMaxDelay = previousMaxDelay
-	})
+	t.Cleanup(
+		func() {
+			deferredAuthRecreateRetryInitialDelay = previousInitialDelay
+			deferredAuthRecreateRetryMaxDelay = previousMaxDelay
+		},
+	)
 
 	store := &blockingRefreshRollbackStore{
 		rollbackEntered: make(chan struct{}),
@@ -1823,7 +1840,7 @@ func TestRejectedWatcherRecreationWaitsForDifferentCredential(t *testing.T) {
 func TestForgetRemovedRuntimeAuthReleasesRemovalState(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	ctx := WithSkipPersist(context.Background())
-	for index := 0; index < 100; index++ {
+	for index := range 100 {
 		id := fmt.Sprintf("runtime-only-%d", index)
 		if _, errRegister := manager.Register(
 			ctx,
@@ -1849,10 +1866,12 @@ func TestForgetRemovedRuntimeAuthReleasesRemovalState(t *testing.T) {
 		t.Fatalf("removed runtime auth state = (%d, %d), want empty", removedAuths, removedAuthAt)
 	}
 	var removalEpochs int
-	manager.authRemovalEpochs.Range(func(_, _ any) bool {
-		removalEpochs++
-		return true
-	})
+	manager.authRemovalEpochs.Range(
+		func(_, _ any) bool {
+			removalEpochs++
+			return true
+		},
+	)
 	if removalEpochs != 0 {
 		t.Fatalf("auth removal epoch entries = %d, want 0", removalEpochs)
 	}
@@ -1898,10 +1917,12 @@ func TestDeferredAuthRecreationRetriesUntilSuccess(t *testing.T) {
 	previousMaxDelay := deferredAuthRecreateRetryMaxDelay
 	deferredAuthRecreateRetryInitialDelay = time.Millisecond
 	deferredAuthRecreateRetryMaxDelay = 2 * time.Millisecond
-	t.Cleanup(func() {
-		deferredAuthRecreateRetryInitialDelay = previousInitialDelay
-		deferredAuthRecreateRetryMaxDelay = previousMaxDelay
-	})
+	t.Cleanup(
+		func() {
+			deferredAuthRecreateRetryInitialDelay = previousInitialDelay
+			deferredAuthRecreateRetryMaxDelay = previousMaxDelay
+		},
+	)
 
 	manager := NewManager(nil, nil, nil)
 	var calls atomic.Int32
@@ -2036,7 +2057,7 @@ func TestCompareAndSwapHomeRuntimeAuthRollsBackRejectedFinalPublication(t *testi
 func TestRefreshAuthForRequestPreservesQuotaCooldown(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	executor := &opaqueUnauthorizedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
+		id: "plugin-provider",
 	}
 	manager.RegisterExecutor(executor)
 	retryAfter := time.Now().Add(time.Minute)
@@ -2058,8 +2079,10 @@ func TestRefreshAuthForRequestPreservesQuotaCooldown(t *testing.T) {
 					StatusMessage:  "rate limited",
 					Unavailable:    true,
 					NextRetryAfter: retryAfter,
-					LastError:      &Error{Code: "rate_limit", Message: "rate limited", HTTPStatus: http.StatusTooManyRequests},
-					Quota:          QuotaState{Exceeded: true, Reason: "rate limited", NextRecoverAt: retryAfter},
+					LastError: &Error{
+						Code: "rate_limit", Message: "rate limited", HTTPStatus: http.StatusTooManyRequests,
+					},
+					Quota: QuotaState{Exceeded: true, Reason: "rate limited", NextRecoverAt: retryAfter},
 				},
 			},
 		},
@@ -2123,12 +2146,12 @@ func TestRefreshAuthForRequestRejectsReplacedExecutorResult(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	previous := &opaqueUnauthorizedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		started:              started,
-		release:              release,
+		id:      "plugin-provider",
+		started: started,
+		release: release,
 	}
 	replacement := &opaqueUnauthorizedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
+		id: "plugin-provider",
 	}
 	manager.RegisterExecutor(previous)
 	registered, errRegister := manager.Register(
@@ -2166,13 +2189,13 @@ func TestRefreshAuthForRequestRejectsReplacedExecutorError(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 	previous := &opaqueUnauthorizedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
-		refreshErr:           testStatusError{status: http.StatusUnauthorized, message: "unauthorized"},
-		started:              started,
-		release:              release,
+		id:         "plugin-provider",
+		refreshErr: testStatusError{status: http.StatusUnauthorized, message: "unauthorized"},
+		started:    started,
+		release:    release,
 	}
 	replacement := &opaqueUnauthorizedRefreshExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "plugin-provider"},
+		id: "plugin-provider",
 	}
 	manager.RegisterExecutor(previous)
 	registered, errRegister := manager.Register(
@@ -2220,7 +2243,9 @@ func TestManagerUpdateRejectsPublicationAfterSuccessfulSaveCancelsContext(t *tes
 	update := registered.Clone()
 	update.Metadata = map[string]any{"token": "new"}
 	updated, errUpdate := manager.Update(ctx, update)
-	if updated != nil || !errors.Is(errUpdate, ErrAuthDurableStateUncertain) || !errors.Is(errUpdate, context.Canceled) {
+	if updated != nil || !errors.Is(errUpdate, ErrAuthDurableStateUncertain) || !errors.Is(
+		errUpdate, context.Canceled,
+	) {
 		t.Fatalf("Update() = (%#v, %v), want canceled durable state uncertainty", updated, errUpdate)
 	}
 	current, ok := manager.GetByID(registered.ID)
@@ -2261,7 +2286,9 @@ func TestManagerRemoveDeletesRuntimeAuthAndClosesExecutorSessions(t *testing.T) 
 		t.Fatal("expected runtime auth before remove")
 	}
 
-	manager.Remove(context.Background(), "auth-1")
+	if errRemove := manager.Remove(context.Background(), "auth-1"); errRemove != nil {
+		t.Fatalf("remove auth: %v", errRemove)
+	}
 
 	if _, ok := manager.GetByID("auth-1"); ok {
 		t.Fatal("expected auth to be removed")
@@ -2294,7 +2321,9 @@ func TestManagerRegisterDoesNotRecreateRemovedAuthWithoutExplicitRecreate(t *tes
 	if _, err := manager.Register(context.Background(), &Auth{ID: "auth-1", Provider: "codex"}); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
-	manager.Remove(context.Background(), "auth-1")
+	if errRemove := manager.Remove(context.Background(), "auth-1"); errRemove != nil {
+		t.Fatalf("remove auth: %v", errRemove)
+	}
 
 	recreated, err := manager.Register(context.Background(), &Auth{ID: "auth-1", Provider: "codex"})
 	if err != nil {
@@ -2322,13 +2351,15 @@ func TestManagerRegisterDoesNotRecreateRemovedAuthWithoutExplicitRecreate(t *tes
 }
 
 func TestManagerExplicitRecreateDoesNotOverrideNewRemove(t *testing.T) {
-	store := &removeDuringSaveStore{deleteCh: make(chan string, 1)}
+	store := &removeDuringSaveStore{deleteCh: make(chan error, 1)}
 	manager := NewManager(store, nil, nil)
 	store.manager = manager
 	if _, err := manager.Register(context.Background(), &Auth{ID: "auth-1", Provider: "codex"}); err != nil {
 		t.Fatalf("register auth: %v", err)
 	}
-	manager.Remove(context.Background(), "auth-1")
+	if errRemove := manager.Remove(context.Background(), "auth-1"); errRemove != nil {
+		t.Fatalf("remove auth: %v", errRemove)
+	}
 	manager.mu.RLock()
 	store.removeAfterSeq.Store(manager.removedAuths["auth-1"])
 	manager.mu.RUnlock()
@@ -2348,7 +2379,10 @@ func TestManagerExplicitRecreateDoesNotOverrideNewRemove(t *testing.T) {
 		t.Fatalf("expected recreate to return nil after new remove, got %+v", recreated)
 	}
 	select {
-	case <-store.deleteCh:
+	case errRemove := <-store.deleteCh:
+		if errRemove != nil {
+			t.Fatalf("concurrent remove: %v", errRemove)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for concurrent remove")
 	}
@@ -2374,7 +2408,9 @@ func TestManagerRemoveDeletesPureHomeRuntimeAuth(t *testing.T) {
 		t.Fatal("expected runtime auth before remove")
 	}
 
-	manager.Remove(context.Background(), "runtime-auth")
+	if errRemove := manager.Remove(context.Background(), "runtime-auth"); errRemove != nil {
+		t.Fatalf("remove runtime auth: %v", errRemove)
+	}
 
 	if _, ok := manager.GetExecutionSessionAuthByID("session-1", "runtime-auth"); ok {
 		t.Fatal("expected pure runtime auth to be removed")
@@ -2387,7 +2423,9 @@ func TestManagerRemoveDeletesPureHomeRuntimeAuth(t *testing.T) {
 
 func TestManagerRememberHomeRuntimeAuthSkipsRemovedAuth(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	manager.Remove(context.Background(), "auth-1")
+	if errRemove := manager.Remove(context.Background(), "auth-1"); errRemove != nil {
+		t.Fatalf("remove auth: %v", errRemove)
+	}
 	manager.rememberHomeRuntimeAuth(
 		"session-1", &Auth{
 			ID:         "auth-1",
@@ -2401,7 +2439,7 @@ func TestManagerRememberHomeRuntimeAuthSkipsRemovedAuth(t *testing.T) {
 }
 
 func TestManagerUpdateDoesNotRecreateAuthRemovedDuringPersist(t *testing.T) {
-	store := &removeDuringSaveStore{deleteCh: make(chan string, 1)}
+	store := &removeDuringSaveStore{deleteCh: make(chan error, 1)}
 	manager := NewManager(store, nil, nil)
 	store.manager = manager
 	if _, err := manager.Register(
@@ -2429,7 +2467,10 @@ func TestManagerUpdateDoesNotRecreateAuthRemovedDuringPersist(t *testing.T) {
 		t.Fatalf("expected update to return nil after remove, got %+v", updated)
 	}
 	select {
-	case <-store.deleteCh:
+	case errRemove := <-store.deleteCh:
+		if errRemove != nil {
+			t.Fatalf("concurrent remove: %v", errRemove)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for concurrent remove")
 	}
@@ -2444,8 +2485,8 @@ func TestManagerUpdateDoesNotRecreateAuthRemovedDuringPersist(t *testing.T) {
 func TestManagerPrepareRequestAuthStopsWhenAuthRemovedDuringPrepare(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	executor := &removeDuringPrepareExecutor{
-		replaceAwareExecutor: replaceAwareExecutor{id: "codex"},
-		manager:              manager,
+		id:      "codex",
+		manager: manager,
 	}
 	if _, err := manager.Register(
 		context.Background(), &Auth{

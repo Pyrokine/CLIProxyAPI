@@ -88,6 +88,27 @@ func (e *forceMappingExecutor) StreamModels() []string {
 	return out
 }
 
+type forceMappingCapacityError struct {
+	cause *Error
+}
+
+func (e *forceMappingCapacityError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *forceMappingCapacityError) StatusCode() int {
+	return e.cause.StatusCode()
+}
+
+func (*forceMappingCapacityError) ExecutionDisposition() cliproxyexecutor.ExecutionDisposition {
+	return cliproxyexecutor.ExecutionDisposition{
+		DispatchPhase:  cliproxyexecutor.DispatchPhaseResponseStarted,
+		Outcome:        cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing,
+		RetryDirective: cliproxyexecutor.RetryDirectiveNextProvider,
+		EffectScope:    cliproxyexecutor.StateEffectScopeProvider,
+	}
+}
+
 type forceMappingCreditsFallbackExecutor struct {
 	id string
 
@@ -112,8 +133,10 @@ func (e *forceMappingCreditsFallbackExecutor) Execute(
 	e.executeCreditsRequested = append(e.executeCreditsRequested, creditsRequested)
 	e.mu.Unlock()
 	if !creditsRequested {
-		return cliproxyexecutor.Response{}, &Error{
-			HTTPStatus: http.StatusServiceUnavailable, Message: "MODEL_CAPACITY_EXHAUSTED",
+		return cliproxyexecutor.Response{}, &forceMappingCapacityError{
+			cause: &Error{
+				HTTPStatus: http.StatusServiceUnavailable, Message: "MODEL_CAPACITY_EXHAUSTED",
+			},
 		}
 	}
 	payload := `{"model":"` + req.Model + `","message":{"model":"` + req.Model + `"}}`
@@ -134,8 +157,10 @@ func (e *forceMappingCreditsFallbackExecutor) ExecuteStream(
 	ch := make(chan cliproxyexecutor.StreamChunk, 1)
 	if !creditsRequested {
 		ch <- cliproxyexecutor.StreamChunk{
-			Err: &Error{
-				HTTPStatus: http.StatusServiceUnavailable, Message: "MODEL_CAPACITY_EXHAUSTED",
+			Err: &forceMappingCapacityError{
+				cause: &Error{
+					HTTPStatus: http.StatusServiceUnavailable, Message: "MODEL_CAPACITY_EXHAUSTED",
+				},
 			},
 		}
 		close(ch)

@@ -12,6 +12,10 @@ type modelAliasEntry interface {
 	GetAlias() string
 }
 
+type modelForceMappingEntry interface {
+	GetForceMapping() bool
+}
+
 type oauthModelAliasEntry struct {
 	upstreamModel string
 	configAlias   string
@@ -111,43 +115,49 @@ func modelAliasLookupCandidates(requestedModel string) (string, []string) {
 	return base, candidates
 }
 
-func resolveModelAliasFromConfigModels(requestedModel string, models []modelAliasEntry) string {
+func resolveModelAliasResultFromConfigModels(
+	requestedModel string,
+	models []modelAliasEntry,
+) OAuthModelAliasResult {
 	requestedModel = strings.TrimSpace(requestedModel)
-	if requestedModel == "" {
-		return ""
-	}
-	if len(models) == 0 {
-		return ""
+	if requestedModel == "" || len(models) == 0 {
+		return OAuthModelAliasResult{}
 	}
 
-	_, candidates := modelAliasLookupCandidates(requestedModel)
+	baseModel, candidates := modelAliasLookupCandidates(requestedModel)
 	if len(candidates) == 0 {
-		return ""
-	}
-
-	preserveSuffix := func(resolved string) string {
-		return thinking.PreserveRequestModelDecorations(resolved, requestedModel)
+		return OAuthModelAliasResult{}
 	}
 
 	for i := range models {
 		name := strings.TrimSpace(models[i].GetName())
 		alias := strings.TrimSpace(models[i].GetAlias())
+		if name == "" || alias == "" {
+			continue
+		}
+		forceMapping := false
+		if forceEntry, ok := models[i].(modelForceMappingEntry); ok {
+			forceMapping = forceEntry.GetForceMapping()
+		}
 		for _, candidate := range candidates {
-			if candidate == "" {
+			if candidate == "" || !strings.EqualFold(alias, candidate) {
 				continue
 			}
-			if alias != "" && strings.EqualFold(alias, candidate) {
-				if name != "" {
-					return preserveSuffix(name)
-				}
-				return preserveSuffix(candidate)
+			if strings.EqualFold(name, baseModel) && !forceMapping {
+				return OAuthModelAliasResult{}
 			}
-			if name != "" && strings.EqualFold(name, candidate) {
-				return preserveSuffix(name)
+			originalAlias := requestedModel
+			if forceMapping {
+				originalAlias = oauthModelAliasForceMappingResponseModel(alias)
+			}
+			return OAuthModelAliasResult{
+				UpstreamModel: thinking.PreserveRequestModelDecorations(name, requestedModel),
+				ForceMapping:  forceMapping,
+				OriginalAlias: originalAlias,
 			}
 		}
 	}
-	return ""
+	return OAuthModelAliasResult{}
 }
 
 // resolveOAuthUpstreamModel resolves the upstream model name from OAuth model alias.

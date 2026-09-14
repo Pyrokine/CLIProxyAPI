@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryDoesNotBlockAuth(t *testing.T) {
+func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryBlocksAuth(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -22,8 +22,8 @@ func TestUpdateAggregatedAvailability_UnavailableWithoutNextRetryDoesNotBlockAut
 
 	updateAggregatedAvailability(auth, now)
 
-	if auth.Unavailable {
-		t.Fatalf("auth.Unavailable = true, want false")
+	if !auth.Unavailable {
+		t.Fatal("auth.Unavailable = false, want authoritative block")
 	}
 	if !auth.NextRetryAfter.IsZero() {
 		t.Fatalf("auth.NextRetryAfter = %v, want zero", auth.NextRetryAfter)
