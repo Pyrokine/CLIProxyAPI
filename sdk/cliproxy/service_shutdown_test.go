@@ -66,7 +66,9 @@ func TestServiceShutdownKeepsUsageQueueDisabled(t *testing.T) {
 	if queue.Enabled() {
 		t.Fatal("usage queue remained enabled after shutdown")
 	}
-	if errApply := service.applyConfigUpdateRuntime(context.Background(), &config.Config{Home: config.HomeConfig{Enabled: true}}); errApply == nil {
+	if errApply := service.applyConfigUpdateRuntime(
+		context.Background(), &config.Config{Home: config.HomeConfig{Enabled: true}},
+	); errApply == nil {
 		t.Fatal("config update succeeded after shutdown")
 	}
 	if queue.Enabled() {

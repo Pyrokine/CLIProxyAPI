@@ -30,6 +30,9 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/artifact"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
+	claudemodels "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/claude/models"
+	codexlive "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/codex/live"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/client/grokbuild"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
@@ -37,6 +40,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/safemode"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -50,7 +54,6 @@ import (
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -194,11 +197,11 @@ type irreversibleBool struct {
 	state atomic.Uint32
 }
 
-func (value *irreversibleBool) Load() bool {
+func (value *irreversibleBool) load() bool {
 	return value != nil && value.state.Load() == irreversibleBoolTrue
 }
 
-func (value *irreversibleBool) Store(enabled bool) {
+func (value *irreversibleBool) store(enabled bool) {
 	if value == nil {
 		return
 	}
@@ -214,7 +217,7 @@ func (value *irreversibleBool) Store(enabled bool) {
 	}
 }
 
-func (value *irreversibleBool) Close() {
+func (value *irreversibleBool) close() {
 	if value != nil {
 		value.state.Store(irreversibleBoolClosed)
 	}
@@ -232,7 +235,7 @@ type serverOptionConfig struct {
 	postAuthHook              auth.PostAuthHook
 	pluginHost                *pluginhost.Host
 	managementConfigCommitted func(context.Context, ManagementConfigCommit) error
-	modelCatalogRuntimeSync   func(*config.Config)
+	modelCatalogRuntimeSync   func(*config.Config) error
 	usageManager              *coreusage.Manager
 	usageQueue                *redisqueue.Queue
 	usageStatisticsToggle     func(bool)
@@ -264,6 +267,7 @@ func effectiveSDKConfig(cfg *config.Config) *config.SDKConfig {
 		return nil
 	}
 	sdkCfg := cfg.SDKConfig
+	sdkCfg.CodexOptimizeMultiAgentV2 = cfg.Codex.OptimizeMultiAgentV2
 	if cfg.CommercialMode {
 		sdkCfg.RequestLog = false
 	}
@@ -343,7 +347,7 @@ func WithManagementConfigCommitted(callback func(context.Context, ManagementConf
 	}
 }
 
-func WithModelCatalogRuntimeSync(sync func(*config.Config)) ServerOption {
+func WithModelCatalogRuntimeSync(sync func(*config.Config) error) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.modelCatalogRuntimeSync = sync
 	}
@@ -397,15 +401,18 @@ type Server struct {
 	redisConnectionsWG sync.WaitGroup
 
 	// handlers contains the API handlers for processing requests.
-	handlers *handlers.BaseAPIHandler
+	handlers         *handlers.BaseAPIHandler
+	codexLiveHandler *codexlive.Handler
 
-	imageArtifacts *artifact.Store
+	imageArtifacts      *artifact.Store
+	imageArtifactSigner *artifact.AccessSigner
 
 	// cfg holds the current server configuration.
 	cfgMu                  sync.RWMutex
 	cfg                    *config.Config
 	configUpdateMu         sync.Mutex
 	configPublicationMu    sync.Mutex
+	authPolicyMu           sync.RWMutex
 	configPublicationCount int
 	configPublicationIdle  chan struct{}
 	stopping               atomic.Bool
@@ -520,6 +527,7 @@ func NewServer(
 	// Add middleware
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(logging.CPATraceIDMiddleware())
 	for _, mw := range optionState.extraMiddleware {
 		engine.Use(mw)
 	}
@@ -564,12 +572,31 @@ func NewServer(
 	authRateLimiter := access.NewAuthRateLimiter()
 	baseHandlers := handlers.NewBaseAPIHandlers(effectiveSDKConfig(cfg), authManager)
 	baseHandlers.SetUsageManager(optionState.usageManager)
-	imageArtifactStore, errArtifactStore := artifact.NewStore(
-		artifact.Root(configFilePath), artifact.WithProxyURL(cfg.ProxyURL),
+	artifactNamespace := artifact.InstanceNamespace(configFilePath)
+	artifactSigningKey, errArtifactSigningKey := managementHandlers.DeriveArtifactAccessSigningKey(
+		configFilePath,
+		artifactNamespace,
 	)
-	if errArtifactStore != nil {
-		log.WithError(errArtifactStore).Warn("image artifact store disabled")
+	var imageArtifactSigner *artifact.AccessSigner
+	if errArtifactSigningKey != nil {
+		log.WithError(errArtifactSigningKey).Error("image artifact capability disabled")
+	} else if signer, errSigner := artifact.NewAccessSigner(artifactNamespace, artifactSigningKey); errSigner != nil {
+		log.WithError(errSigner).Error("image artifact capability disabled")
 	} else {
+		imageArtifactSigner = signer
+	}
+	var imageArtifactStore *artifact.Store
+	if imageArtifactSigner != nil {
+		var errArtifactStore error
+		imageArtifactStore, errArtifactStore = artifact.NewStore(
+			artifact.Root(configFilePath), artifact.WithProxyURL(cfg.ProxyURL),
+		)
+		if errArtifactStore != nil {
+			log.WithError(errArtifactStore).Error("image artifact capability disabled")
+			imageArtifactStore = nil
+		}
+	}
+	if imageArtifactStore != nil {
 		imageArtifactStore.ApplyCacheConfig(
 			artifact.CacheConfigFromLimits(
 				cfg.ImageArtifactCache.RetentionDays,
@@ -591,6 +618,7 @@ func NewServer(
 		engine:                       engine,
 		handlers:                     baseHandlers,
 		imageArtifacts:               imageArtifactStore,
+		imageArtifactSigner:          imageArtifactSigner,
 		cfg:                          cfg,
 		accessManager:                accessManager,
 		authRateLimiter:              authRateLimiter,
@@ -611,6 +639,7 @@ func NewServer(
 		exampleAPIKeySafeModeEnabled: optionState.exampleAPIKeySafeMode,
 	}
 	baseHandlers.SetImageArtifactURLBuilder(s)
+	s.codexLiveHandler = codexlive.NewHandler(s.handlers.AuthManager, s.configSnapshot)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
 	s.exampleAPIKeySafeModeActive.Store(s.exampleAPIKeySafeModeRequired(cfg))
 	// Save initial YAML snapshot
@@ -633,7 +662,7 @@ func NewServer(
 				if optionState.managementConfigCommitted != nil {
 					return optionState.managementConfigCommitted(ctx, commit)
 				}
-				s.UpdateClientsForConfigCommit(commit.Config, commit.Generation)
+				s.UpdateClientsForConfigCommit(ctx, commit.Config, commit.Generation)
 				if optionState.pluginHost != nil {
 					if errApply := optionState.pluginHost.ApplyConfig(ctx, commit.Config); errApply != nil {
 						return errApply
@@ -645,6 +674,7 @@ func NewServer(
 		),
 		managementHandlers.WithPluginHost(optionState.pluginHost),
 		managementHandlers.WithUsageQueue(optionState.usageQueue),
+		managementHandlers.WithHomeClientProvider(optionState.homeClientProvider),
 		managementHandlers.WithImageArtifacts(imageArtifactStore),
 		managementHandlers.WithPluginRuntimeSync(
 			func(ctx context.Context, nextCfg *config.Config) error {
@@ -659,18 +689,21 @@ func NewServer(
 			},
 		),
 		managementHandlers.WithModelCatalogRuntimeSync(
-			func(nextCfg *config.Config) {
+			func(nextCfg *config.Config) error {
 				if !s.beginConfigPublication() {
-					return
+					return errors.New("server is stopping")
 				}
 				defer s.endConfigPublication()
 				if nextCfg != nil {
 					s.setConfig(nextCfg)
 				}
 				if optionState.modelCatalogRuntimeSync != nil {
-					optionState.modelCatalogRuntimeSync(nextCfg)
+					if err := optionState.modelCatalogRuntimeSync(nextCfg); err != nil {
+						return err
+					}
 				}
 				s.handlers.UpdateClients(effectiveSDKConfig(s.configSnapshot()))
+				return nil
 			},
 		),
 	)
@@ -687,34 +720,35 @@ func NewServer(
 	if quotaCfg.MaxInterval <= 0 {
 		quotaCfg.MaxInterval = 1800
 	}
-	localAPICall := quota.NewLocalAPICallFunc(cfg.Port, s.mgmt.InternalToken())
+	localAPICall := quota.NewLocalAPICallContextFunc(cfg.Port, s.mgmt.InternalToken())
 
-	quotaScheduler := quota.NewScheduler(
-		quotaCfg, func(entry *quota.Entry) ([]byte, error) {
+	quotaScheduler := quota.NewSchedulerWithResult(
+		quotaCfg, func(ctx context.Context, entry *quota.Entry) (quota.FetchResult, error) {
 			if entry.AuthIndex == "" {
-				return nil, fmt.Errorf("no auth_index for %s", entry.FileName)
+				return quota.FetchResult{}, fmt.Errorf("no auth_index for %s", entry.FileName)
 			}
 
 			switch entry.Type {
 			case quota.TypeClaude:
-				return fetchClaudeQuota(localAPICall, entry.AuthIndex)
+				return fetchClaudeQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeCodex:
-				return fetchCodexQuota(localAPICall, entry.AuthIndex)
+				return fetchCodexQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeGeminiCli:
-				return fetchGeminiQuota(localAPICall, entry.AuthIndex)
+				return fetchGeminiQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeAntigravity:
-				return fetchAntigravityQuota(localAPICall, entry.AuthIndex)
+				return fetchAntigravityQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeKimi:
-				return fetchKimiQuota(localAPICall, entry.AuthIndex)
+				return fetchKimiQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeXAI:
-				return fetchXAIQuota(localAPICall, entry.AuthIndex)
+				return fetchXAIQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			default:
-				return nil, fmt.Errorf("quota fetch not implemented for type %s", entry.Type)
+				return quota.FetchResult{}, fmt.Errorf("quota fetch not implemented for type %s", entry.Type)
 			}
 		},
 	)
 	if authManager != nil {
 		registerAuthManagerForQuota(quotaScheduler, authManager)
+		authManager.SetQuotaSchedulingProvider(authQuotaSchedulingProvider{scheduler: quotaScheduler})
 	} else if cfg.AuthDir != "" {
 		registerAuthFilesForQuota(quotaScheduler, cfg.AuthDir)
 	}
@@ -749,7 +783,7 @@ func NewServer(
 	// Register management routes when configuration or environment secrets are available,
 	// or when a local management password is provided (e.g. TUI mode).
 	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != ""
-	s.managementRoutesEnabled.Store(hasManagementSecret)
+	s.managementRoutesEnabled.store(hasManagementSecret)
 	s.usageQueue.SetEnabled(hasManagementSecret || (cfg != nil && cfg.Home.Enabled))
 	if hasManagementSecret {
 		s.registerManagementRoutes()
@@ -766,18 +800,43 @@ func NewServer(
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler:           engine,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
 		IdleTimeout:       120 * time.Second,
 	}
 
 	return s
 }
 
-func (s *Server) ImageArtifactContentURL(c *gin.Context, record handlers.ImageArtifactRecord) (string, error) {
-	if err := artifact.ValidateID(record.ID); err != nil {
-		return "", err
-	}
+func imageArtifactPrincipal(c *gin.Context) (string, error) {
 	if c == nil || c.Request == nil {
 		return "", fmt.Errorf("request is unavailable")
+	}
+	if raw, ok := c.Get("apiKey"); ok {
+		if principal := strings.TrimSpace(fmt.Sprint(raw)); principal != "" {
+			return principal, nil
+		}
+	}
+	client, resolved := access.ClientAddressFromContext(c.Request.Context())
+	if !resolved {
+		client = access.ResolveClientAddress(c.Request, nil)
+	}
+	if client.DirectLoopback {
+		return "loopback", nil
+	}
+	return "", fmt.Errorf("authenticated principal is unavailable")
+}
+
+func (s *Server) ImageArtifactContentURL(c *gin.Context, record handlers.ImageArtifactRecord) (string, error) {
+	if s == nil || s.imageArtifacts == nil || s.imageArtifactSigner == nil {
+		return "", fmt.Errorf("artifact capability is unavailable")
+	}
+	principal, err := imageArtifactPrincipal(c)
+	if err != nil {
+		return "", err
+	}
+	accessToken, err := s.imageArtifactSigner.Sign(principal, record.ID)
+	if err != nil {
+		return "", err
 	}
 	host := strings.TrimSpace(c.Request.Host)
 	if host == "" {
@@ -785,7 +844,7 @@ func (s *Server) ImageArtifactContentURL(c *gin.Context, record handlers.ImageAr
 	}
 	scheme := "http"
 	cfg := s.configSnapshot()
-	if c.Request.TLS != nil || (cfg != nil && cfg.TLS.TrustForwardedProto && strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")), "https")) {
+	if c.Request.TLS != nil || requestHasTrustedForwardedHTTPS(c, cfg) {
 		scheme = "https"
 	}
 	artifactURL := &url.URL{
@@ -793,21 +852,34 @@ func (s *Server) ImageArtifactContentURL(c *gin.Context, record handlers.ImageAr
 		Host:   host,
 		Path:   "/v1/artifacts/" + record.ID + "/content",
 	}
+	query := artifactURL.Query()
+	query.Set("access", accessToken)
+	artifactURL.RawQuery = query.Encode()
 	return artifactURL.String(), nil
 }
 
-func (s *Server) ImageArtifactContent(c *gin.Context) {
-	if s == nil || s.imageArtifacts == nil {
+func (s *Server) imageArtifactContent(c *gin.Context) {
+	if s == nil || s.imageArtifacts == nil || s.imageArtifactSigner == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "artifact store unavailable"})
 		return
 	}
 	id := strings.TrimSpace(c.Param("artifact_id"))
+	if err := artifact.ValidateID(id); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid artifact id"})
+		return
+	}
+	principal, err := imageArtifactPrincipal(c)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "artifact access denied"})
+		return
+	}
+	providedToken := strings.TrimSpace(c.Query("access"))
+	if providedToken == "" || !s.imageArtifactSigner.Verify(principal, id, providedToken) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "artifact access denied"})
+		return
+	}
 	file, record, err := s.imageArtifacts.Open(id)
 	if err != nil {
-		if errors.Is(err, artifact.ErrInvalidID) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid artifact id"})
-			return
-		}
 		if errors.Is(err, os.ErrNotExist) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "artifact not found"})
 			return
@@ -938,37 +1010,19 @@ func (s *Server) oauthCallbackRateLimitMiddleware() gin.HandlerFunc {
 			return
 		}
 		cfg := s.configSnapshot()
-		trustForwardedHeaders := cfg != nil && cfg.TLS.TrustForwardedProto
-		if !s.oauthCallbackLimiter.allow(callbackClientIP(c.Request, trustForwardedHeaders), time.Now()) {
+		var trustedProxies []string
+		if cfg != nil {
+			trustedProxies = cfg.RemoteManagement.TrustedProxies
+		}
+		client := access.ResolveClientAddress(c.Request, trustedProxies)
+		c.Request = c.Request.WithContext(access.WithClientAddress(c.Request.Context(), client))
+		if !s.oauthCallbackLimiter.allow(client.Key, time.Now()) {
 			c.Header("Retry-After", "60")
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "too many oauth callback requests"})
 			return
 		}
 		c.Next()
 	}
-}
-
-func callbackClientIP(r *http.Request, trustForwardedHeaders bool) string {
-	if r == nil {
-		return ""
-	}
-	remoteHost, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if remoteHost == "" {
-		remoteHost = r.RemoteAddr
-	}
-	if !trustForwardedHeaders {
-		return remoteHost
-	}
-	if realIP := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); realIP != nil {
-		return realIP.String()
-	}
-	if forwardedFor := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwardedFor != "" {
-		first, _, _ := strings.Cut(forwardedFor, ",")
-		if forwardedIP := net.ParseIP(strings.TrimSpace(first)); forwardedIP != nil {
-			return forwardedIP.String()
-		}
-	}
-	return remoteHost
 }
 
 // setupRoutes configures the API routes for the server.
@@ -983,8 +1037,7 @@ func (s *Server) setupRoutes() {
 
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
-	v1.Use(requireTLSForAuth(s.configSnapshot()), noStoreMiddleware())
-	v1.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.allowQueryAuth()))
+	v1.Use(s.publicAuthMiddlewares()...)
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -994,10 +1047,16 @@ func (s *Server) setupRoutes() {
 		v1.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		v1.POST("/responses", openaiResponsesHandlers.Responses)
 		v1.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		v1.POST("/live", s.codexLiveHandler.Handle)
+		v1.GET("/live/:call_id", s.codexLiveHandler.HandleSideband)
+		v1.POST("/realtime/calls", s.codexLiveHandler.Handle)
+		v1.GET("/realtime/calls/:call_id", s.codexLiveHandler.HandleSideband)
+		v1.GET("/realtime", s.codexLiveHandler.HandleSideband)
+		v1.POST("/alpha/search", s.codexAlphaSearch)
 		v1.POST("/images/generations", openaiHandlers.ImagesGenerations)
 		v1.POST("/images/edits", openaiHandlers.ImagesEdits)
-		v1.GET("/artifacts/:artifact_id/content", s.ImageArtifactContent)
-		v1.HEAD("/artifacts/:artifact_id/content", s.ImageArtifactContent)
+		v1.GET("/artifacts/:artifact_id/content", s.imageArtifactContent)
+		v1.HEAD("/artifacts/:artifact_id/content", s.imageArtifactContent)
 		v1.POST("/videos", openaiHandlers.VideosCreate)
 		v1.POST("/videos/generations", openaiHandlers.XAIVideosGenerations)
 		v1.POST("/videos/edits", openaiHandlers.XAIVideosEdits)
@@ -1007,8 +1066,7 @@ func (s *Server) setupRoutes() {
 	}
 
 	openaiV1 := s.engine.Group("/openai/v1")
-	openaiV1.Use(requireTLSForAuth(s.configSnapshot()), noStoreMiddleware())
-	openaiV1.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.allowQueryAuth()))
+	openaiV1.Use(s.publicAuthMiddlewares()...)
 	{
 		openaiV1.POST("/videos", openaiHandlers.VideosCreate)
 		openaiV1.GET("/videos/:video_id/content", openaiHandlers.VideosContent)
@@ -1018,8 +1076,7 @@ func (s *Server) setupRoutes() {
 	// Root-level Responses API routes (no /v1 prefix).
 	// Codex Desktop configures base_url without /v1 and appends /responses directly.
 	rootResponses := s.engine.Group("")
-	rootResponses.Use(requireTLSForAuth(s.configSnapshot()), noStoreMiddleware())
-	rootResponses.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.allowQueryAuth()))
+	rootResponses.Use(s.publicAuthMiddlewares()...)
 	{
 		rootResponses.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		rootResponses.POST("/responses", openaiResponsesHandlers.Responses)
@@ -1029,18 +1086,17 @@ func (s *Server) setupRoutes() {
 	// Codex Direct routes: /backend-api/codex/responses
 	// Used when Codex Desktop sets chatgpt_base_url to point at this server.
 	codexDirect := s.engine.Group("/backend-api/codex")
-	codexDirect.Use(requireTLSForAuth(s.configSnapshot()), noStoreMiddleware())
-	codexDirect.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.allowQueryAuth()))
+	codexDirect.Use(s.publicAuthMiddlewares()...)
 	{
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
 		codexDirect.POST("/responses/compact", openaiResponsesHandlers.Compact)
+		codexDirect.POST("/alpha/search", s.codexAlphaSearch)
 	}
 
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
-	v1beta.Use(requireTLSForAuth(s.configSnapshot()), noStoreMiddleware())
-	v1beta.Use(authMiddleware(s.accessManager, s.authRateLimiter, s.allowQueryAuth()))
+	v1beta.Use(s.publicAuthMiddlewares()...)
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)
@@ -1066,10 +1122,13 @@ func (s *Server) setupRoutes() {
 	healthHandler := func(c *gin.Context) { c.Status(http.StatusOK) }
 	s.engine.GET("/healthz", healthHandler)
 	s.engine.HEAD("/healthz", healthHandler)
+	s.engine.GET("/v0/management/update-health", noStoreMiddleware(), s.mgmt.GetUpdateHealth)
 	s.engine.POST(
 		"/v1internal:method",
-		requireTLSForAuth(s.configSnapshot()),
-		authMiddleware(s.accessManager, s.authRateLimiter, s.allowQueryAuth()),
+		s.authPolicyReadLockMiddleware(),
+		requireTLSForAuth(s.configSnapshot),
+		authMiddleware(s.accessManager, s.authRateLimiter, s.configSnapshot),
+		authPolicyUnlockMiddleware(),
 		geminiCLIHandlers.CLIHandler,
 	)
 
@@ -1119,7 +1178,7 @@ func (s *Server) setupRoutes() {
 }
 
 // AttachWebsocketRoute registers a websocket upgrade handler on the primary Gin engine.
-// The handler is served as-is without additional middleware beyond the standard stack already configured.
+// When WebSocket authentication is disabled, only loopback peers may access the route.
 func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	if s == nil || s.engine == nil || handler == nil {
 		return
@@ -1139,20 +1198,28 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	s.wsRoutes[trimmed] = struct{}{}
 	s.wsRouteMu.Unlock()
 
-	authMiddleware := authMiddleware(s.accessManager, s.authRateLimiter, s.allowQueryAuth())
+	authenticateRequest := authMiddleware(s.accessManager, s.authRateLimiter, s.configSnapshot)
+	loopbackOnlyMiddleware := authMiddleware(nil, nil, s.configSnapshot)
 	conditionalAuth := func(c *gin.Context) {
-		if !s.wsAuthEnabled.Load() {
-			c.Next()
+		if s.wsAuthEnabled.Load() {
+			authenticateRequest(c)
 			return
 		}
-		authMiddleware(c)
+		loopbackOnlyMiddleware(c)
 	}
 	finalHandler := func(c *gin.Context) {
 		handler.ServeHTTP(c.Writer, c.Request)
 		c.Abort()
 	}
 
-	s.engine.GET(trimmed, conditionalAuth, finalHandler)
+	s.engine.GET(
+		trimmed,
+		s.authPolicyReadLockMiddleware(),
+		requireTLSForAuth(s.configSnapshot),
+		conditionalAuth,
+		authPolicyUnlockMiddleware(),
+		finalHandler,
+	)
 }
 
 func (s *Server) registerManagementRoutes() {
@@ -1167,8 +1234,10 @@ func (s *Server) registerManagementRoutes() {
 
 	mgmt := s.engine.Group("/v0/management")
 	mgmt.Use(
-		requireTLSForAuth(s.configSnapshot()), noStoreMiddleware(), s.managementAvailabilityMiddleware(),
-		managementBodyLimitMiddleware(), s.mgmt.Middleware(),
+		s.authPolicyReadLockMiddleware(), requireTLSForAuthRequest(s.managementConfigSnapshot), noStoreMiddleware(),
+		s.managementAvailabilityMiddleware(), managementBodyLimitMiddleware(),
+		s.mgmt.MiddlewareWithConfig(s.managementConfigSnapshot), authPolicyUnlockMiddleware(),
+		s.mgmt.MutationAuditMiddleware(),
 	)
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
@@ -1242,6 +1311,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/reset-quota", s.mgmt.ResetQuota)
 		mgmt.GET("/quota/status", s.mgmt.GetQuotaStatus)
 		mgmt.POST("/quota/refresh", s.mgmt.PostQuotaRefresh)
+		mgmt.GET("/quota/refresh-tasks", s.mgmt.GetQuotaRefreshTasks)
+		mgmt.GET("/quota/refresh-tasks/:task_id", s.mgmt.GetQuotaRefreshTask)
+		mgmt.POST("/quota/refresh-tasks/:task_id/pause", s.mgmt.PostQuotaRefreshTaskPause)
+		mgmt.POST("/quota/refresh-tasks/:task_id/resume", s.mgmt.PostQuotaRefreshTaskResume)
+		mgmt.POST("/quota/refresh-tasks/:task_id/cancel", s.mgmt.PostQuotaRefreshTaskCancel)
 		mgmt.GET("/quota/config", s.mgmt.GetQuotaConfig)
 		mgmt.PUT("/quota/config", s.mgmt.PutQuotaConfig)
 
@@ -1269,8 +1343,15 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
+		mgmt.POST("/gemini-api-key", s.mgmt.PostGeminiKey)
 		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)
 		mgmt.DELETE("/gemini-api-key", s.mgmt.DeleteGeminiKey)
+
+		mgmt.GET("/interactions-api-key", s.mgmt.GetInteractionsKeys)
+		mgmt.PUT("/interactions-api-key", s.mgmt.PutInteractionsKeys)
+		mgmt.POST("/interactions-api-key", s.mgmt.PostInteractionsKey)
+		mgmt.PATCH("/interactions-api-key", s.mgmt.PatchInteractionsKey)
+		mgmt.DELETE("/interactions-api-key", s.mgmt.DeleteInteractionsKey)
 
 		mgmt.GET("/log-size", s.mgmt.GetLogSize)
 		mgmt.GET("/logs", s.mgmt.GetLogs)
@@ -1306,21 +1387,31 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/claude-api-key", s.mgmt.GetClaudeKeys)
 		mgmt.PUT("/claude-api-key", s.mgmt.PutClaudeKeys)
+		mgmt.POST("/claude-api-key", s.mgmt.PostClaudeKey)
 		mgmt.PATCH("/claude-api-key", s.mgmt.PatchClaudeKey)
 		mgmt.DELETE("/claude-api-key", s.mgmt.DeleteClaudeKey)
 
 		mgmt.GET("/codex-api-key", s.mgmt.GetCodexKeys)
 		mgmt.PUT("/codex-api-key", s.mgmt.PutCodexKeys)
+		mgmt.POST("/codex-api-key", s.mgmt.PostCodexKey)
 		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
 		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
 
+		mgmt.GET("/xai-api-key", s.mgmt.GetXAIKeys)
+		mgmt.PUT("/xai-api-key", s.mgmt.PutXAIKeys)
+		mgmt.POST("/xai-api-key", s.mgmt.PostXAIKey)
+		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)
+		mgmt.DELETE("/xai-api-key", s.mgmt.DeleteXAIKey)
+
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
+		mgmt.POST("/openai-compatibility", s.mgmt.PostOpenAICompat)
 		mgmt.PATCH("/openai-compatibility", s.mgmt.PatchOpenAICompat)
 		mgmt.DELETE("/openai-compatibility", s.mgmt.DeleteOpenAICompat)
 
 		mgmt.GET("/vertex-api-key", s.mgmt.GetVertexCompatKeys)
 		mgmt.PUT("/vertex-api-key", s.mgmt.PutVertexCompatKeys)
+		mgmt.POST("/vertex-api-key", s.mgmt.PostVertexCompatKey)
 		mgmt.PATCH("/vertex-api-key", s.mgmt.PatchVertexCompatKey)
 		mgmt.DELETE("/vertex-api-key", s.mgmt.DeleteVertexCompatKey)
 
@@ -1427,7 +1518,10 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	requireTLSForAuth(s.configSnapshot())(c)
+	s.authPolicyMu.RLock()
+	policyLock := &authPolicyReadLock{mu: &s.authPolicyMu}
+	defer policyLock.release()
+	requireTLSForAuthRequest(s.managementConfigSnapshot)(c)
 	if c.IsAborted() {
 		return
 	}
@@ -1443,10 +1537,11 @@ func (s *Server) pluginManagementNoRoute(c *gin.Context) {
 	if c.IsAborted() {
 		return
 	}
-	s.mgmt.Middleware()(c)
+	s.mgmt.MiddlewareWithConfig(s.managementConfigSnapshot)(c)
 	if c.IsAborted() {
 		return
 	}
+	policyLock.release()
 	if s.pluginHost.ServeManagementHTTP(c.Writer, c.Request) {
 		c.Abort()
 		return
@@ -1462,12 +1557,15 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 		return
 	}
 	path := c.Request.URL.Path
+	s.authPolicyMu.RLock()
+	policyLock := &authPolicyReadLock{mu: &s.authPolicyMu}
+	defer policyLock.release()
 	cfg := s.configSnapshot()
 	if cfg == nil || cfg.Home.Enabled || s.pluginHost == nil || s.mgmt == nil {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
-	requireTLSForAuth(s.configSnapshot())(c)
+	requireTLSForAuthRequest(s.managementConfigSnapshot)(c)
 	if c.IsAborted() {
 		return
 	}
@@ -1485,11 +1583,12 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 	}
 	sessionAuthenticated := s.pluginResourceSessionAuthenticated(c)
 	if !sessionAuthenticated {
-		s.mgmt.Middleware()(c)
+		s.mgmt.MiddlewareWithConfig(s.managementConfigSnapshot)(c)
 		if c.IsAborted() {
 			return
 		}
 	}
+	policyLock.release()
 	if !s.pluginHost.HasResourceRoute(c.Request.Method, path) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
@@ -1544,13 +1643,7 @@ func (s *Server) pluginResourceSessionCookieSecure(c *gin.Context) bool {
 	if c == nil || c.Request == nil {
 		return false
 	}
-	if c.Request.TLS != nil {
-		return true
-	}
-	if cfg := s.configSnapshot(); cfg != nil && cfg.TLS.TrustForwardedProto {
-		return strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")), "https")
-	}
-	return false
+	return c.Request.TLS != nil || requestHasTrustedForwardedHTTPS(c, s.configSnapshot())
 }
 
 func (s *Server) pluginResourceSessionSameSite(c *gin.Context) http.SameSite {
@@ -1606,7 +1699,7 @@ func (s *Server) setPluginResourceSessionCookie(c *gin.Context, token string, ma
 
 func (s *Server) managementAvailabilityMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !s.managementRoutesEnabled.Load() {
+		if !s.managementRoutesEnabled.load() {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
@@ -1634,28 +1727,111 @@ func noStoreMiddleware() gin.HandlerFunc {
 	}
 }
 
-// requireTLSForAuth enforces cfg.TLS.RequireForAuth: if enabled, reject non-TLS
-// requests to authenticated routes with 421. Loopback traffic is allowed based
-// on the actual peer address so Host headers cannot bypass the TLS gate.
-func requireTLSForAuth(cfg *config.Config) gin.HandlerFunc {
-	if cfg == nil || !cfg.TLS.RequireForAuth {
-		return func(c *gin.Context) { c.Next() }
+const (
+	authPolicyReadLockContextKey       = "cpa.auth-policy-read-lock"
+	managementConfigSnapshotContextKey = "cpa.management-config-snapshot"
+)
+
+type authPolicyReadLock struct {
+	mu   *sync.RWMutex
+	once sync.Once
+}
+
+func (l *authPolicyReadLock) release() {
+	if l == nil || l.mu == nil {
+		return
 	}
+	l.once.Do(l.mu.RUnlock)
+}
+
+func (s *Server) authPolicyReadLockMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if s == nil {
+			c.Next()
+			return
+		}
+		s.authPolicyMu.RLock()
+		lock := &authPolicyReadLock{mu: &s.authPolicyMu}
+		c.Set(authPolicyReadLockContextKey, lock)
+		defer lock.release()
+		c.Next()
+	}
+}
+
+func authPolicyUnlockMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if value, exists := c.Get(authPolicyReadLockContextKey); exists {
+			if lock, ok := value.(*authPolicyReadLock); ok {
+				lock.release()
+			}
+		}
+		c.Next()
+	}
+}
+
+func (s *Server) publicAuthMiddlewares() []gin.HandlerFunc {
+	return []gin.HandlerFunc{
+		s.authPolicyReadLockMiddleware(),
+		requireTLSForAuth(s.configSnapshot),
+		noStoreMiddleware(),
+		authMiddleware(s.accessManager, s.authRateLimiter, s.configSnapshot),
+		authPolicyUnlockMiddleware(),
+	}
+}
+
+func requestHasTrustedForwardedHTTPS(c *gin.Context, cfg *config.Config) bool {
+	if c == nil || c.Request == nil || cfg == nil || !cfg.TLS.TrustForwardedProto {
+		return false
+	}
+	client, resolved := access.ClientAddressFromContext(c.Request.Context())
+	if !resolved {
+		client = access.ResolveClientAddress(c.Request, cfg.RemoteManagement.TrustedProxies)
+	}
+	forwardedProto := c.Request.Header.Values("X-Forwarded-Proto")
+	return client.TrustedPeer && len(forwardedProto) == 1 &&
+		strings.EqualFold(strings.TrimSpace(forwardedProto[0]), "https")
+}
+
+// requireTLSForAuth enforces the current TLS authentication policy on every request.
+// Loopback traffic is allowed based on the actual peer address so Host headers cannot bypass the gate.
+func requireTLSForAuth(configSnapshot func() *config.Config) gin.HandlerFunc {
+	return requireTLSForAuthRequest(
+		func(*gin.Context) *config.Config {
+			if configSnapshot == nil {
+				return nil
+			}
+			return configSnapshot()
+		},
+	)
+}
+
+func requireTLSForAuthRequest(configSnapshot func(*gin.Context) *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var cfg *config.Config
+		if configSnapshot != nil {
+			cfg = configSnapshot(c)
+		}
+		var trustedProxies []string
+		if cfg != nil {
+			trustedProxies = cfg.RemoteManagement.TrustedProxies
+		}
+		client := access.ResolveClientAddress(c.Request, trustedProxies)
+		c.Request = c.Request.WithContext(access.WithClientAddress(c.Request.Context(), client))
+		if cfg == nil || !cfg.TLS.RequireForAuth {
+			c.Next()
+			return
+		}
 		if c.Request.TLS != nil {
 			c.Next()
 			return
 		}
-		if isLoopbackRequest(c.Request) {
+		if client.DirectLoopback {
 			c.Next()
 			return
 		}
-		if cfg.TLS.TrustForwardedProto {
-			forwardedProto := strings.ToLower(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")))
-			if forwardedProto == "https" {
-				c.Next()
-				return
-			}
+		if requestHasTrustedForwardedHTTPS(c, cfg) {
+			c.Next()
+			return
 		}
 		c.AbortWithStatusJSON(
 			http.StatusMisdirectedRequest, gin.H{
@@ -1664,19 +1840,6 @@ func requireTLSForAuth(cfg *config.Config) gin.HandlerFunc {
 			},
 		)
 	}
-}
-
-func isLoopbackRequest(r *http.Request) bool {
-	if r == nil {
-		return false
-	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err != nil {
-		host = strings.TrimSpace(r.RemoteAddr)
-	}
-	host = strings.Trim(host, "[]")
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) serveManagementControlPanel(c *gin.Context) {
@@ -1809,6 +1972,11 @@ func (s *Server) unifiedModelsHandler(
 	claudeHandler *claude.CodeAPIHandler,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if grokbuild.IsGrokShellUserAgent(c.GetHeader("User-Agent")) {
+			s.handleGrokModels(c)
+			return
+		}
+
 		if _, ok := c.Request.URL.Query()["client_version"]; ok {
 			if cfg := s.configSnapshot(); cfg != nil && cfg.Home.Enabled {
 				s.handleHomeCodexClientModels(c)
@@ -1834,6 +2002,101 @@ func (s *Server) unifiedModelsHandler(
 			openaiHandler.OpenAIModels(c)
 		}
 	}
+}
+
+func grokModelsFromHomeEntries(entries []homeModelEntry) []grokbuild.ModelInfo {
+	models := make([]grokbuild.ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		models = append(
+			models, grokbuild.ModelInfo{
+				ID:            entry.id,
+				DisplayName:   entry.displayName,
+				ContextLength: entry.contextLength,
+			},
+		)
+	}
+	return models
+}
+
+func grokModelsFromRegistryMaps(models []map[string]any) []grokbuild.ModelInfo {
+	out := make([]grokbuild.ModelInfo, 0, len(models))
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		displayName, _ := model["display_name"].(string)
+		info := grokbuild.ModelInfo{
+			ID:            id,
+			DisplayName:   strings.TrimSpace(displayName),
+			ContextLength: modelMapInt(model, "max_context_length", "context_length"),
+		}
+		if thinking, ok := model["thinking"].(*registry.ThinkingSupport); ok && thinking != nil {
+			info.ReasoningLevels = append([]string(nil), thinking.Levels...)
+		} else if thinking, ok := model["thinking"].(registry.ThinkingSupport); ok {
+			info.ReasoningLevels = append([]string(nil), thinking.Levels...)
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
+func modelMapInt(model map[string]any, keys ...string) int {
+	for _, key := range keys {
+		switch value := model[key].(type) {
+		case int:
+			return value
+		case int64:
+			return int(value)
+		case float64:
+			return int(value)
+		case json.Number:
+			if parsed, err := value.Int64(); err == nil {
+				return int(parsed)
+			}
+		}
+	}
+	return 0
+}
+
+func (s *Server) handleGrokModels(c *gin.Context) {
+	var models []grokbuild.ModelInfo
+	if cfg := s.configSnapshot(); cfg != nil && cfg.Home.Enabled {
+		entries, ok := s.loadHomeModelEntries(c)
+		if !ok {
+			return
+		}
+		models = grokModelsFromHomeEntries(entries)
+	} else {
+		models = grokModelsFromRegistryMaps(registry.GetGlobalRegistry().GetAvailableModels("openai"))
+	}
+	models = s.filterGrokModelsForCurrentAPIKey(c, models)
+	c.JSON(http.StatusOK, grokbuild.BuildResponse(models))
+}
+
+func (s *Server) filterGrokModelsForCurrentAPIKey(c *gin.Context, models []grokbuild.ModelInfo) []grokbuild.ModelInfo {
+	if len(models) == 0 {
+		return models
+	}
+	entries := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		entries = append(entries, map[string]any{"id": model.ID})
+	}
+	allowedEntries := s.handlers.FilterModelsForCurrentAPIKey(c, entries)
+	allowed := make(map[string]struct{}, len(allowedEntries))
+	for _, entry := range allowedEntries {
+		if id, ok := entry["id"].(string); ok {
+			allowed[id] = struct{}{}
+		}
+	}
+	filtered := make([]grokbuild.ModelInfo, 0, len(allowed))
+	for _, model := range models {
+		if _, ok := allowed[model.ID]; ok {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
 }
 
 func (s *Server) handleHomeCodexClientModels(c *gin.Context) {
@@ -1888,10 +2151,11 @@ func (s *Server) geminiGetHandler(geminiHandler *gemini.APIHandler) gin.HandlerF
 }
 
 type homeModelEntry struct {
-	id          string
-	created     int64
-	ownedBy     string
-	displayName string
+	id            string
+	created       int64
+	ownedBy       string
+	displayName   string
+	contextLength int
 }
 
 func (s *Server) handleHomeModels(c *gin.Context) {
@@ -1920,24 +2184,9 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 			out = append(out, model)
 		}
 		out = s.handlers.FilterModelsForCurrentAPIKey(c, out)
-		firstID := ""
-		lastID := ""
-		if len(out) > 0 {
-			if id, okID := out[0]["id"].(string); okID {
-				firstID = id
-			}
-			if id, okID := out[len(out)-1]["id"].(string); okID {
-				lastID = id
-			}
-		}
-		c.JSON(
-			http.StatusOK, gin.H{
-				"data":     out,
-				"has_more": false,
-				"first_id": firstID,
-				"last_id":  lastID,
-			},
-		)
+		cfg := s.configSnapshot()
+		disableCloaking := cfg != nil && cfg.ClaudeCode.DisableCloakingModelList
+		c.JSON(http.StatusOK, claudemodels.NewCatalog(out, disableCloaking).Response())
 		return
 	}
 
@@ -2149,6 +2398,10 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 					created:     created,
 					ownedBy:     ownedBy,
 					displayName: displayName,
+					contextLength: modelMapInt(
+						model, "max_context_length", "context_length", "contextLength", "inputTokenLimit",
+						"max_input_tokens",
+					),
 				},
 			)
 		}
@@ -2159,15 +2412,6 @@ func decodeHomeModels(raw []byte) ([]homeModelEntry, error) {
 		return nil, fmt.Errorf("home models payload contains no models")
 	}
 	return out, nil
-}
-
-// Start begins listening for and serving HTTP or HTTPS requests.
-// It's a blocking call and will only return on an unrecoverable error.
-//
-// Returns:
-//   - error: An error if the server fails to start
-func (s *Server) Start() error {
-	return s.start(nil)
 }
 
 // StartWithReady begins serving and notifies ready after the listener has been prepared.
@@ -2247,9 +2491,9 @@ func (s *Server) start(ready chan<- struct{}) error {
 			NextProtos:   []string{"h2", "http/1.1"},
 		}
 		s.server.TLSConfig = tlsConfig
-		if errHTTP2 := http2.ConfigureServer(s.server, &http2.Server{}); errHTTP2 != nil {
-			log.Warnf("failed to configure HTTP/2: %v", errHTTP2)
-		}
+		s.server.Protocols = new(http.Protocols)
+		s.server.Protocols.SetHTTP1(true)
+		s.server.Protocols.SetHTTP2(true)
 		listener = tls.NewListener(listener, tlsConfig)
 		log.Debugf("Starting API server on %s with TLS", s.server.Addr)
 	} else {
@@ -2381,10 +2625,10 @@ func (s *Server) BeginShutdown() {
 	if s == nil {
 		return
 	}
-	s.stopping.Store(true)
 	s.configPublicationMu.Lock()
+	s.stopping.Store(true)
 	s.configPublicationMu.Unlock()
-	s.managementRoutesEnabled.Close()
+	s.managementRoutesEnabled.close()
 	if s.usageQueue != nil {
 		s.usageQueue.Close()
 	}
@@ -2433,6 +2677,11 @@ func (s *Server) Stop(ctx context.Context) error {
 	s.BeginShutdown()
 	if errWaitConfig := s.WaitForConfigPublications(ctx); errWaitConfig != nil {
 		shutdownErrors = append(shutdownErrors, errWaitConfig)
+	}
+	if s.codexLiveHandler != nil {
+		if errClose := s.codexLiveHandler.Close(); errClose != nil {
+			shutdownErrors = append(shutdownErrors, fmt.Errorf("close Codex Live sessions: %w", errClose))
+		}
 	}
 
 	if s.keepAliveEnabled {
@@ -2537,7 +2786,7 @@ func corsMiddleware(allowedOrigins []string) gin.HandlerFunc {
 		}
 		c.Header(
 			"Access-Control-Expose-Headers",
-			"X-Cpa-Version, X-Cpa-Build-Date, X-Cpa-Commit, X-CPA-SUPPORT-PLUGIN",
+			logging.CPATraceIDHeader+", X-Cpa-Version, X-Cpa-Build-Date, X-Cpa-Commit, X-CPA-SUPPORT-PLUGIN, ETag",
 		)
 		c.Header("X-Cpa-Version", buildinfo.Version)
 		c.Header("X-Cpa-Build-Date", buildinfo.BuildDate)
@@ -2577,6 +2826,24 @@ func (s *Server) configSnapshot() *config.Config {
 	return s.cfg
 }
 
+func (s *Server) managementConfigSnapshot(c *gin.Context) *config.Config {
+	if c != nil {
+		if value, exists := c.Get(managementConfigSnapshotContextKey); exists {
+			if snapshot, ok := value.(*config.Config); ok {
+				return snapshot
+			}
+		}
+	}
+	if s == nil || s.mgmt == nil {
+		return nil
+	}
+	snapshot := s.mgmt.ConfigState().Config
+	if c != nil && snapshot != nil {
+		c.Set(managementConfigSnapshotContextKey, snapshot)
+	}
+	return snapshot
+}
+
 func (s *Server) setConfig(cfg *config.Config) {
 	if s == nil {
 		return
@@ -2586,11 +2853,6 @@ func (s *Server) setConfig(cfg *config.Config) {
 	s.cfgMu.Unlock()
 }
 
-func (s *Server) allowQueryAuth() bool {
-	cfg := s.configSnapshot()
-	return cfg != nil && cfg.AllowQueryAuth
-}
-
 // UpdateClients updates the server's client list and configuration.
 // This method is called when the configuration or authentication tokens change.
 //
@@ -2598,14 +2860,14 @@ func (s *Server) allowQueryAuth() bool {
 //   - clients: The new slice of AI service clients
 //   - cfg: The new application configuration
 func (s *Server) UpdateClients(cfg *config.Config) {
-	s.updateClients(cfg, 0)
+	s.updateClients(context.Background(), cfg, 0)
 }
 
-func (s *Server) UpdateClientsForConfigCommit(cfg *config.Config, generation uint64) {
-	s.updateClients(cfg, generation)
+func (s *Server) UpdateClientsForConfigCommit(ctx context.Context, cfg *config.Config, generation uint64) {
+	s.updateClients(ctx, cfg, generation)
 }
 
-func (s *Server) updateClients(cfg *config.Config, _ uint64) {
+func (s *Server) updateClients(ctx context.Context, cfg *config.Config, _ uint64) {
 	if s == nil || cfg == nil {
 		return
 	}
@@ -2666,8 +2928,12 @@ func (s *Server) updateClients(cfg *config.Config, _ uint64) {
 				cfg.ImageArtifactCache.MaxTotalSizeMB,
 			),
 		)
-		if _, err := s.imageArtifacts.Cleanup(context.Background()); err != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if _, err := s.imageArtifacts.Cleanup(context.WithoutCancel(ctx)); err != nil {
 			log.WithError(err).Warn("image artifact cache cleanup failed")
+			managementHandlers.ReportConfigCommitCleanupError(ctx, err)
 		}
 		s.imageArtifacts.StartCleaner()
 	}
@@ -2709,15 +2975,15 @@ func (s *Server) updateClients(cfg *config.Config, _ uint64) {
 	hasManagementSecret := s.envManagementSecret ||
 		strings.TrimSpace(cfg.RemoteManagement.SecretKey) != "" ||
 		strings.TrimSpace(s.localPassword) != ""
-	wasManagementEnabled := s.managementRoutesEnabled.Load()
+	wasManagementEnabled := s.managementRoutesEnabled.load()
 	if hasManagementSecret {
 		s.registerManagementRoutes()
-		s.managementRoutesEnabled.Store(true)
-		if !wasManagementEnabled && s.managementRoutesEnabled.Load() {
+		s.managementRoutesEnabled.store(true)
+		if !wasManagementEnabled && s.managementRoutesEnabled.load() {
 			log.Info("management routes enabled after credential update")
 		}
 	} else {
-		s.managementRoutesEnabled.Store(false)
+		s.managementRoutesEnabled.store(false)
 		if wasManagementEnabled {
 			log.Info("management routes disabled after credential removal")
 		}
@@ -2725,10 +2991,11 @@ func (s *Server) updateClients(cfg *config.Config, _ uint64) {
 	if s.stopping.Load() {
 		s.usageQueue.SetEnabled(false)
 	} else {
-		s.usageQueue.SetEnabled(s.managementRoutesEnabled.Load() || cfg.Home.Enabled)
+		s.usageQueue.SetEnabled(s.managementRoutesEnabled.load() || cfg.Home.Enabled)
 	}
 
 	exampleAPIKeySafeModeRequired := s.exampleAPIKeySafeModeRequired(cfg)
+	s.authPolicyMu.Lock()
 	if exampleAPIKeySafeModeRequired {
 		s.exampleAPIKeySafeModeActive.Store(true)
 	}
@@ -2736,8 +3003,14 @@ func (s *Server) updateClients(cfg *config.Config, _ uint64) {
 	if accessConfigApplied || exampleAPIKeySafeModeRequired {
 		s.exampleAPIKeySafeModeActive.Store(exampleAPIKeySafeModeRequired)
 	}
+	if s.codexLiveHandler != nil {
+		if errUpdate := s.codexLiveHandler.UpdateConfig(cfg); errUpdate != nil {
+			log.WithError(errUpdate).Error("failed to update Codex Live media relay configuration")
+		}
+	}
 	s.setConfig(cfg)
 	s.wsAuthEnabled.Store(cfg.WebsocketAuth)
+	s.authPolicyMu.Unlock()
 	if oldCfg != nil && s.wsAuthChanged != nil && oldCfg.WebsocketAuth != cfg.WebsocketAuth {
 		s.wsAuthChanged(oldCfg.WebsocketAuth, cfg.WebsocketAuth)
 	}
@@ -2758,9 +3031,10 @@ func (s *Server) updateClients(cfg *config.Config, _ uint64) {
 		dirSetter.SetBaseDir(cfg.AuthDir)
 	}
 	authEntries := util.CountAuthFiles(context.Background(), tokenStore)
-	geminiAPIKeyCount := len(cfg.GeminiKey)
+	geminiAPIKeyCount := len(cfg.GeminiKey) + len(cfg.InteractionsKey)
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
 	codexAPIKeyCount := len(cfg.CodexKey)
+	xaiAPIKeyCount := len(cfg.XAIKey)
 	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {
@@ -2771,14 +3045,15 @@ func (s *Server) updateClients(cfg *config.Config, _ uint64) {
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + vertexAICompatCount + openAICompatCount
+	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + vertexAICompatCount + openAICompatCount
 	fmt.Printf(
-		"server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d Vertex-compat + %d OpenAI-compat)\n",
+		"server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d Vertex-compat + %d OpenAI-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
+		xaiAPIKeyCount,
 		vertexAICompatCount,
 		openAICompatCount,
 	)
@@ -2804,12 +3079,26 @@ func (s *Server) RefreshModelClients(cfg *config.Config) {
 	s.handlers.UpdateClients(effectiveSDKConfig(cfg))
 }
 
-// SetUsagePersister injects the usage statistics persister into the management handler.
+// SetUsagePersister injects usage storage into management reads and request-log lifecycle writes.
 func (s *Server) SetUsagePersister(p *usage.Persister) {
-	if s == nil || s.mgmt == nil {
+	if s == nil {
 		return
 	}
-	s.mgmt.SetUsagePersister(p)
+	if s.mgmt != nil {
+		s.mgmt.SetUsagePersister(p)
+	}
+	if s.handlers != nil {
+		s.handlers.SetAPIKeyPolicyStore(p)
+	}
+	if setter, ok := s.requestLogger.(interface {
+		SetRequestLogArtifactSink(logging.RequestLogArtifactSink)
+	}); ok {
+		var sink logging.RequestLogArtifactSink
+		if p != nil {
+			sink = p
+		}
+		setter.SetRequestLogArtifactSink(sink)
+	}
 }
 
 // SetUsageStatistics injects the service-owned in-memory usage statistics.
@@ -2863,7 +3152,7 @@ func extractAuthCandidate(r *http.Request, readQuery bool) string {
 
 // authMiddleware creates an HTTP middleware that authenticates requests using
 // the access manager. When no auth providers are registered (api-keys empty),
-// only loopback clients are allowed (prevents open-proxy when api-keys is empty).
+// only direct loopback clients are allowed (prevents open-proxy exposure).
 // It enforces rate limiting on authentication failures along two axes:
 //   - per client IP: mitigates a single host brute-forcing
 //   - per account identifier (derived from the offered credential): mitigates
@@ -2871,35 +3160,39 @@ func extractAuthCandidate(r *http.Request, readQuery bool) string {
 func authMiddleware(
 	manager *sdkaccess.Manager,
 	rateLimiter *access.AuthRateLimiter,
-	allowQueryAuth bool,
+	configSnapshot func() *config.Config,
 ) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
-		if manager == nil {
-			// No auth configured — restrict to loopback to prevent open-proxy exposure
-			remoteHost, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
-			if remoteHost == "" {
-				remoteHost = c.Request.RemoteAddr
-			}
-			if ip := net.ParseIP(remoteHost); ip == nil || !ip.IsLoopback() {
-				c.AbortWithStatusJSON(
-					http.StatusUnauthorized, gin.H{
-						"error": "Unauthorized",
-					},
-				)
+
+		var cfg *config.Config
+		if configSnapshot != nil {
+			cfg = configSnapshot()
+		}
+		var trustedProxies []string
+		if cfg != nil {
+			trustedProxies = cfg.RemoteManagement.TrustedProxies
+		}
+		client, resolved := access.ClientAddressFromContext(c.Request.Context())
+		if !resolved {
+			client = access.ResolveClientAddress(c.Request, trustedProxies)
+			c.Request = c.Request.WithContext(access.WithClientAddress(c.Request.Context(), client))
+		}
+
+		authorizeDirectLoopback := func() {
+			if client.DirectLoopback {
+				c.Next()
 				return
 			}
-			c.Next()
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		}
+		if !authManagerHasProviders(manager) {
+			authorizeDirectLoopback()
 			return
 		}
 
-		// Use RemoteAddr to prevent X-Forwarded-For spoofing.
-		remoteHost, _, _ := net.SplitHostPort(c.Request.RemoteAddr)
-		if remoteHost == "" {
-			remoteHost = c.Request.RemoteAddr
-		}
-		clientIP := remoteHost
-		if rateLimiter != nil && rateLimiter.IsLimited(clientIP) {
+		clientKey := client.Key
+		if rateLimiter != nil && rateLimiter.IsLimited(clientKey) {
 			c.AbortWithStatusJSON(
 				http.StatusTooManyRequests, gin.H{
 					"error": "too many authentication failures, please try again later",
@@ -2910,7 +3203,8 @@ func authMiddleware(
 
 		// Derive an account identifier from the raw credential candidate so repeated failures
 		// against a single account can be locked out even when the attacker rotates source IPs.
-		accountHash := access.HashAccountKey(extractAuthCandidate(c.Request, allowQueryAuth))
+		queryAuthAllowed := cfg != nil && cfg.AllowQueryAuth
+		accountHash := access.HashAccountKey(extractAuthCandidate(c.Request, queryAuthAllowed))
 		if rateLimiter != nil && rateLimiter.IsAccountLimited(accountHash) {
 			c.AbortWithStatusJSON(
 				http.StatusTooManyRequests, gin.H{
@@ -2923,32 +3217,31 @@ func authMiddleware(
 		result, err := manager.Authenticate(c.Request.Context(), c.Request)
 		if err == nil {
 			if result == nil {
-				// No providers matched (api-keys empty) — restrict to loopback
-				if ip := net.ParseIP(clientIP); ip == nil || !ip.IsLoopback() {
-					c.AbortWithStatusJSON(
-						http.StatusUnauthorized, gin.H{
-							"error": "Unauthorized",
-						},
-					)
-					return
-				}
-			} else {
-				c.Set("apiKey", result.Principal)
-				c.Set("accessProvider", result.Provider)
-				if len(result.Metadata) > 0 {
-					c.Set("accessMetadata", result.Metadata)
-				}
+				authorizeDirectLoopback()
+				return
+			}
+			c.Set("apiKey", result.Principal)
+			c.Request = c.Request.WithContext(
+				coreusage.WithAPIKeyIdentity(
+					c.Request.Context(),
+					coreusage.HashAPIKeyIdentity(result.Principal),
+				),
+			)
+			c.Set("accessProvider", result.Provider)
+			if len(result.Metadata) > 0 {
+				c.Set("accessMetadata", result.Metadata)
 			}
 			if rateLimiter != nil {
-				rateLimiter.RecordSuccess(clientIP)
+				rateLimiter.RecordSuccess(clientKey)
 				rateLimiter.RecordAccountSuccess(accountHash)
 			}
 			c.Next()
 			return
 		}
 
-		if rateLimiter != nil {
-			rateLimiter.RecordFailure(clientIP)
+		if rateLimiter != nil && (sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeNoCredentials) ||
+			sdkaccess.IsAuthErrorCode(err, sdkaccess.AuthErrorCodeInvalidCredential)) {
+			rateLimiter.RecordFailure(clientKey)
 			rateLimiter.RecordAccountFailure(accountHash)
 		}
 
@@ -2960,4 +3253,16 @@ func authMiddleware(
 		}
 		c.AbortWithStatusJSON(statusCode, gin.H{"error": message})
 	}
+}
+
+func authManagerHasProviders(manager *sdkaccess.Manager) bool {
+	if manager == nil {
+		return false
+	}
+	for _, provider := range manager.Providers() {
+		if provider != nil {
+			return true
+		}
+	}
+	return false
 }

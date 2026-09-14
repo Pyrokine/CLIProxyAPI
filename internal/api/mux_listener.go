@@ -23,7 +23,7 @@ func newMuxListener(addr net.Addr, buffer int) *muxListener {
 	}
 }
 
-func (l *muxListener) Put(conn net.Conn) error {
+func (l *muxListener) put(conn net.Conn) error {
 	if conn == nil {
 		return nil
 	}

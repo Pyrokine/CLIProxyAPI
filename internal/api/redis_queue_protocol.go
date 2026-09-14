@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/redisqueue"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -23,6 +25,8 @@ const (
 	redisUnauthorizedMessage       = "ERR Unauthorized"
 	redisAuthRateLimitErrorMessage = "ERR too many authentication failures, please try again later"
 )
+
+var redisSubscriptionWriteTimeout = 5 * time.Second
 
 type redisSubscriptionCommand struct {
 	args []string
@@ -76,7 +80,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 	}
 
 	for {
-		if s.stopping.Load() || !s.managementRoutesEnabled.Load() {
+		if s.stopping.Load() || !s.managementRoutesEnabled.load() {
 			return
 		}
 
@@ -178,7 +182,14 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				}
 				continue
 			}
-			messages, unsubscribe := s.usageQueue.SubscribeUsage()
+			messages, unsubscribe, subscribed := s.usageQueue.TrySubscribeUsage()
+			if !subscribed {
+				_ = writeRedisError(writer, "ERR maximum usage subscriptions reached")
+				if !flush() {
+					return
+				}
+				continue
+			}
 			if errWrite := writeRedisPubSubSubscribe(writer, redisUsageChannel, 1); errWrite != nil {
 				unsubscribe()
 				log.Errorf("redis protocol subscribe response error: %v", errWrite)
@@ -199,7 +210,7 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 				}
 				continue
 			}
-			if count <= 0 {
+			if count <= 0 || count > redisqueue.MaxPopCount {
 				_ = writeRedisError(writer, "ERR value is not an integer or out of range")
 				if !flush() {
 					return
@@ -268,6 +279,10 @@ func (s *Server) streamRedisUsageSubscription(
 			if !ok {
 				return
 			}
+			if errDeadline := setRedisSubscriptionWriteDeadline(conn); errDeadline != nil {
+				log.Errorf("redis protocol set write deadline error: %v", errDeadline)
+				return
+			}
 			if errWrite := writeRedisPubSubMessage(writer, redisUsageChannel, msg); errWrite != nil {
 				log.Errorf("redis protocol publish message error: %v", errWrite)
 				return
@@ -276,8 +291,13 @@ func (s *Server) streamRedisUsageSubscription(
 				log.Errorf("redis protocol flush error: %v", errFlush)
 				return
 			}
+			_ = conn.SetWriteDeadline(time.Time{})
 		case command, ok := <-commands:
 			if !ok {
+				return
+			}
+			if errDeadline := setRedisSubscriptionWriteDeadline(conn); errDeadline != nil {
+				log.Errorf("redis protocol set write deadline error: %v", errDeadline)
 				return
 			}
 			keepOpen := handleRedisSubscriptionCommand(writer, command)
@@ -285,11 +305,19 @@ func (s *Server) streamRedisUsageSubscription(
 				log.Errorf("redis protocol flush error: %v", errFlush)
 				return
 			}
+			_ = conn.SetWriteDeadline(time.Time{})
 			if !keepOpen {
 				return
 			}
 		}
 	}
+}
+
+func setRedisSubscriptionWriteDeadline(conn net.Conn) error {
+	if conn == nil {
+		return net.ErrClosed
+	}
+	return conn.SetWriteDeadline(time.Now().Add(redisSubscriptionWriteTimeout))
 }
 
 func readRedisSubscriptionCommands(
@@ -458,7 +486,7 @@ func readRESPArray(reader *bufio.Reader) ([]string, error) {
 		return nil, fmt.Errorf("protocol error")
 	}
 	args := make([]string, 0, count)
-	for i := 0; i < count; i++ {
+	for range count {
 		value, errString := readRESPString(reader)
 		if errString != nil {
 			return nil, errString

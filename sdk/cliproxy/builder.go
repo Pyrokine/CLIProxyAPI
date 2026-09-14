@@ -51,6 +51,9 @@ type Builder struct {
 	// coreManager handles core authentication and execution.
 	coreManager *coreauth.Manager
 
+	// cooldownStateStore overrides runtime cooldown persistence.
+	cooldownStateStore coreauth.CooldownStateStore
+
 	// pluginHost manages dynamic plugin lifecycle and callbacks.
 	pluginHost *PluginHost
 
@@ -146,6 +149,12 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 	return b
 }
 
+// WithCooldownStateStore overrides the store used for runtime cooldown persistence.
+func (b *Builder) WithCooldownStateStore(store coreauth.CooldownStateStore) *Builder {
+	b.cooldownStateStore = store
+	return b
+}
+
 // WithPluginHost overrides the dynamic plugin host used by the service.
 func (b *Builder) WithPluginHost(host *PluginHost) *Builder {
 	b.pluginHost = host
@@ -177,6 +186,19 @@ func (b *Builder) WithPostAuthHook(hook coreauth.PostAuthHook) *Builder {
 	return b
 }
 
+func newRoutingSelector(strategy string) coreauth.Selector {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "fill-first", "fillfirst", "ff":
+		return &coreauth.FillFirstSelector{}
+	case "weighted-round-robin", "weightedroundrobin", "wrr":
+		return &coreauth.WeightedRoundRobinSelector{}
+	case "quota-aware", "quotaaware", "qa":
+		return &coreauth.QuotaAwareSelector{}
+	default:
+		return &coreauth.RoundRobinSelector{}
+	}
+}
+
 // Build validates inputs, applies defaults, and returns a ready-to-run service.
 func (b *Builder) Build() (*Service, error) {
 	if b.cfg == nil {
@@ -184,6 +206,10 @@ func (b *Builder) Build() (*Service, error) {
 	}
 	if b.configPath == "" {
 		return nil, fmt.Errorf("cliproxy: configuration path is required")
+	}
+	b.cfg.NormalizePluginsConfig()
+	if errResolvePluginsDir := b.cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && b.cfg.Plugins.Enabled {
+		return nil, fmt.Errorf("cliproxy: %w", errResolvePluginsDir)
 	}
 
 	tokenProvider := b.tokenProvider
@@ -213,12 +239,21 @@ func (b *Builder) Build() (*Service, error) {
 
 	configaccess.Register(&b.cfg.SDKConfig)
 	accessManager.SetProviders(sdkaccess.RegisteredProviders())
+	if errValidate := b.cfg.ValidateCredentialWeights(); errValidate != nil {
+		return nil, fmt.Errorf("cliproxy: invalid credential weight: %w", errValidate)
+	}
 
 	coreManager := b.coreManager
+	cooldownStateStore := b.cooldownStateStore
 	if coreManager == nil {
 		tokenStore := sdkAuth.GetTokenStore()
 		if dirSetter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok && b.cfg != nil {
 			dirSetter.SetBaseDir(b.cfg.AuthDir)
+		}
+		if cooldownStateStore == nil {
+			if provider, ok := tokenStore.(coreauth.CooldownStateStoreProvider); ok {
+				cooldownStateStore = provider.CooldownStateStore()
+			}
 		}
 
 		strategy := ""
@@ -233,13 +268,7 @@ func (b *Builder) Build() (*Service, error) {
 				}
 			}
 		}
-		var selector coreauth.Selector
-		switch strategy {
-		case "fill-first", "fillfirst", "ff":
-			selector = &coreauth.FillFirstSelector{}
-		default:
-			selector = &coreauth.RoundRobinSelector{}
-		}
+		selector := newRoutingSelector(strategy)
 		if sessionAffinity {
 			if sessionAffinityTTL == time.Hour {
 				selector = coreauth.NewSessionAffinitySelector(selector)
@@ -281,29 +310,32 @@ func (b *Builder) Build() (*Service, error) {
 	}
 
 	service := &Service{
-		cfg:            b.cfg,
-		configPath:     b.configPath,
-		tokenProvider:  tokenProvider,
-		apiKeyProvider: apiKeyProvider,
-		watcherFactory: watcherFactory,
-		hooks:          b.hooks,
-		authManager:    authManager,
-		accessManager:  accessManager,
-		coreManager:    coreManager,
-		pluginHost:     internalPluginHost,
-		usageManager:   usageManager,
-		usageStats:     internalUsage.NewRequestStatistics(),
-		usageQueue:     usageQueue,
-		serverOptions:  append([]sdkapi.ServerOption(nil), b.serverOptions...),
+		cfg:                b.cfg,
+		configPath:         b.configPath,
+		tokenProvider:      tokenProvider,
+		apiKeyProvider:     apiKeyProvider,
+		watcherFactory:     watcherFactory,
+		hooks:              b.hooks,
+		authManager:        authManager,
+		accessManager:      accessManager,
+		coreManager:        coreManager,
+		cooldownStateStore: cooldownStateStore,
+		pluginHost:         internalPluginHost,
+		usageManager:       usageManager,
+		usageStats:         internalUsage.NewRequestStatistics(),
+		usageQueue:         usageQueue,
+		serverOptions:      append([]sdkapi.ServerOption(nil), b.serverOptions...),
 	}
 	service.usageStatisticsEnabled.Store(b.cfg.UsageStatisticsEnabled)
-	coreManager.SetHomeClientProvider(func() coreauth.HomeClient {
-		client := service.currentHomeClient()
-		if client == nil {
-			return nil
-		}
-		return client
-	})
+	coreManager.SetHomeClientProvider(
+		func() coreauth.HomeClient {
+			client := service.currentHomeClient()
+			if client == nil {
+				return nil
+			}
+			return client
+		},
+	)
 	coreManager.SetDeferredAuthRecreateHandler(service.applyCoreAuthAddOrUpdate)
 	return service, nil
 }

@@ -122,7 +122,7 @@ func TestServerStopTimeoutClosesRedisDuringBlockedConfigPublication(t *testing.T
 		t.Fatalf("Stop() ignored context while config publication was blocked: %v", elapsed)
 	}
 	requireRedisConnectionClosed(t, clientConn, routeDone)
-	if queue.Enabled() || server.managementRoutesEnabled.Load() {
+	if queue.Enabled() || server.managementRoutesEnabled.load() {
 		t.Fatal("runtime state reopened during timed-out shutdown")
 	}
 
@@ -132,7 +132,7 @@ func TestServerStopTimeoutClosesRedisDuringBlockedConfigPublication(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("config publication did not finish after release")
 	}
-	if queue.Enabled() || server.managementRoutesEnabled.Load() {
+	if queue.Enabled() || server.managementRoutesEnabled.load() {
 		t.Fatal("completed config publication reopened closed runtime state")
 	}
 	if cleanerStop := reflect.ValueOf(server.imageArtifacts).Elem().FieldByName("cleanerStop"); !cleanerStop.IsNil() {

@@ -18,6 +18,17 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
+func TestNewRoutingSelectorSupportsQuotaAware(t *testing.T) {
+	for _, strategy := range []string{"quota-aware", "quotaaware", "qa"} {
+		if _, ok := newRoutingSelector(strategy).(*coreauth.QuotaAwareSelector); !ok {
+			t.Fatalf("newRoutingSelector(%q) did not return quota-aware selector", strategy)
+		}
+	}
+	if _, ok := newRoutingSelector("").(*coreauth.RoundRobinSelector); !ok {
+		t.Fatal("newRoutingSelector(\"\") did not preserve round-robin default")
+	}
+}
+
 func newConfigCommitSequenceService(t *testing.T) *Service {
 	return newConfigCommitSequenceServiceWithConfig(t, &config.Config{Debug: true})
 }
@@ -154,10 +165,12 @@ func TestApplyHomeOverlayKeepsPersistedManagementSnapshot(t *testing.T) {
 	handler := svc.server.ManagementHandler()
 	persistedValue := *svc.cfg
 	persisted := &persistedValue
-	handler.SetConfigCommit(internalapi.ManagementConfigCommit{
-		Config:     persisted,
-		Generation: 1,
-	})
+	handler.SetConfigCommit(
+		internalapi.ManagementConfigCommit{
+			Config:     persisted,
+			Generation: 1,
+		},
+	)
 	if persisted == svc.cfg {
 		t.Fatal("test requires distinct persisted and runtime config pointers")
 	}
@@ -265,12 +278,14 @@ func TestApplyWatcherConfigUpdateAcceptsCommittedConfigWhenPluginSyncFails(t *te
 	svc.pluginHost = internalpluginhost.New()
 	previousDelay := pluginRuntimeRetryInitialDelay
 	pluginRuntimeRetryInitialDelay = time.Millisecond
-	t.Cleanup(func() {
-		if errStop := svc.stopPluginRuntimeRetry(context.Background()); errStop != nil {
-			t.Errorf("stopPluginRuntimeRetry() error = %v", errStop)
-		}
-		pluginRuntimeRetryInitialDelay = previousDelay
-	})
+	t.Cleanup(
+		func() {
+			if errStop := svc.stopPluginRuntimeRetry(context.Background()); errStop != nil {
+				t.Errorf("stopPluginRuntimeRetry() error = %v", errStop)
+			}
+			pluginRuntimeRetryInitialDelay = previousDelay
+		},
+	)
 	data := []byte("debug: false\n")
 	if errWrite := os.WriteFile(svc.configPath, data, 0o600); errWrite != nil {
 		t.Fatalf("write watcher config: %v", errWrite)
@@ -307,11 +322,9 @@ func TestApplyWatcherConfigUpdateAcceptsCommittedConfigWhenPluginSyncFails(t *te
 func TestStopPluginRuntimeRetryHonorsShutdownContext(t *testing.T) {
 	svc := &Service{}
 	release := make(chan struct{})
-	svc.pluginRuntimeRetryWG.Add(1)
-	go func() {
-		defer svc.pluginRuntimeRetryWG.Done()
+	svc.pluginRuntimeRetryWG.Go(func() {
 		<-release
-	}()
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	if errStop := svc.stopPluginRuntimeRetry(ctx); !errors.Is(errStop, context.DeadlineExceeded) {

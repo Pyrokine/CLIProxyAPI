@@ -77,10 +77,14 @@ func TestServiceShutdownKeepsPeerUsageManagerRunning(t *testing.T) {
 	<-firstMessages
 	<-secondMessages
 
-	if err := first.usageManager.Publish(context.Background(), coreusage.Record{Model: "first-before-stop"}); err != nil {
+	if err := first.usageManager.Publish(
+		context.Background(), coreusage.Record{Model: "first-before-stop"},
+	); err != nil {
 		t.Fatalf("first Publish() error = %v", err)
 	}
-	if err := second.usageManager.Publish(context.Background(), coreusage.Record{Model: "second-before-stop"}); err != nil {
+	if err := second.usageManager.Publish(
+		context.Background(), coreusage.Record{Model: "second-before-stop"},
+	); err != nil {
 		t.Fatalf("second Publish() error = %v", err)
 	}
 	requireServiceUsageRecord(t, firstCapture.records, "first-before-stop")
@@ -91,7 +95,9 @@ func TestServiceShutdownKeepsPeerUsageManagerRunning(t *testing.T) {
 	if err := first.Shutdown(shutdownCtx); err != nil {
 		t.Fatalf("first Shutdown() error = %v", err)
 	}
-	if err := first.usageManager.Publish(context.Background(), coreusage.Record{Model: "first-after-stop"}); !errors.Is(err, coreusage.ErrManagerStopped) {
+	if err := first.usageManager.Publish(
+		context.Background(), coreusage.Record{Model: "first-after-stop"},
+	); !errors.Is(err, coreusage.ErrManagerStopped) {
 		t.Fatalf("first Publish() after shutdown error = %v, want ErrManagerStopped", err)
 	}
 	select {
@@ -109,7 +115,9 @@ func TestServiceShutdownKeepsPeerUsageManagerRunning(t *testing.T) {
 		}
 	default:
 	}
-	if err := second.usageManager.Publish(context.Background(), coreusage.Record{Model: "second-after-peer-stop"}); err != nil {
+	if err := second.usageManager.Publish(
+		context.Background(), coreusage.Record{Model: "second-after-peer-stop"},
+	); err != nil {
 		t.Fatalf("second Publish() after peer shutdown error = %v", err)
 	}
 	requireServiceUsageRecord(t, secondCapture.records, "second-after-peer-stop")

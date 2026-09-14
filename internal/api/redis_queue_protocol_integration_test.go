@@ -207,7 +207,7 @@ func readRESPArrayOfBulkStrings(r *bufio.Reader) ([][]byte, error) {
 	}
 
 	out := make([][]byte, 0, count)
-	for i := 0; i < count; i++ {
+	for range count {
 		item, errItem := readTestRESPBulkString(r)
 		if errItem != nil {
 			return nil, errItem
@@ -222,7 +222,7 @@ func TestRedisProtocol_ManagementDisabled_RejectsConnection(t *testing.T) {
 	redisqueue.SetEnabled(false)
 
 	server := newTestServer(t)
-	if server.managementRoutesEnabled.Load() {
+	if server.managementRoutesEnabled.load() {
 		t.Fatalf("expected managementRoutesEnabled to be false")
 	}
 
@@ -351,7 +351,7 @@ func TestRedisProtocol_HomeEnabled_DisablesConnection(t *testing.T) {
 	t.Cleanup(func() { redisqueue.SetEnabled(false) })
 
 	server := newTestServer(t)
-	if !server.managementRoutesEnabled.Load() {
+	if !server.managementRoutesEnabled.load() {
 		t.Fatalf("expected managementRoutesEnabled to be true")
 	}
 	if server.cfg == nil {
@@ -398,7 +398,7 @@ func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 
 	server := newTestServer(t)
 	server.cfg.TLS.RequireForAuth = true
-	if !server.managementRoutesEnabled.Load() {
+	if !server.managementRoutesEnabled.load() {
 		t.Fatalf("expected managementRoutesEnabled to be true")
 	}
 
@@ -427,6 +427,15 @@ func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 	if !redisqueue.Enabled() {
 		t.Fatalf("expected redisqueue to be enabled")
 	}
+	if errWrite := writeTestRESPCommand(conn, "LPOP", "usage", "1001"); errWrite != nil {
+		t.Fatalf("failed to write over-limit LPOP command: %v", errWrite)
+	}
+	if msg, errRead := readTestRESPError(reader); errRead != nil {
+		t.Fatalf("failed to read over-limit LPOP response: %v", errRead)
+	} else if msg != "ERR value is not an integer or out of range" {
+		t.Fatalf("unexpected over-limit LPOP response: %q", msg)
+	}
+
 	redisqueue.Enqueue([]byte("a"))
 	redisqueue.Enqueue([]byte("b"))
 	redisqueue.Enqueue([]byte("c"))
@@ -483,6 +492,53 @@ func TestRedisProtocol_AUTH_And_PopContracts(t *testing.T) {
 	}
 }
 
+func TestRedisProtocol_SUBSCRIBEWriteTimeoutClosesSlowClient(t *testing.T) {
+	const managementPassword = "test-management-password"
+
+	t.Setenv("MANAGEMENT_PASSWORD", managementPassword)
+	previousTimeout := redisSubscriptionWriteTimeout
+	redisSubscriptionWriteTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { redisSubscriptionWriteTimeout = previousTimeout })
+
+	queue := redisqueue.NewQueue()
+	server := newTestServerWithOptions(t, WithUsageQueue(queue))
+	queue.SetEnabled(true)
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { _ = clientConn.Close() })
+	done := make(chan struct{})
+	go func() {
+		server.handleRedisConnection(
+			&redisTestConn{
+				Conn:       serverConn,
+				remoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12345},
+			},
+			nil,
+		)
+		close(done)
+	}()
+
+	reader := bufio.NewReader(clientConn)
+	if errWrite := writeTestRESPCommand(clientConn, "AUTH", managementPassword); errWrite != nil {
+		t.Fatalf("write AUTH: %v", errWrite)
+	}
+	if response, errRead := readTestRESPSimpleString(reader); errRead != nil || response != "OK" {
+		t.Fatalf("AUTH response = %q, error %v", response, errRead)
+	}
+	if errWrite := writeTestRESPCommand(clientConn, "SUBSCRIBE", redisUsageChannel); errWrite != nil {
+		t.Fatalf("write SUBSCRIBE: %v", errWrite)
+	}
+	if errRead := readTestRESPSubscribe(reader, redisUsageChannel); errRead != nil {
+		t.Fatalf("read SUBSCRIBE: %v", errRead)
+	}
+
+	queue.Enqueue(make([]byte, 64<<10))
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("slow Redis subscriber remained connected after write timeout")
+	}
+}
+
 func TestRedisProtocol_SUBSCRIBEConnectionClosesWhenQueueDisabled(t *testing.T) {
 	const managementPassword = "test-management-password"
 
@@ -515,13 +571,13 @@ func TestRedisProtocol_SUBSCRIBEConnectionClosesWhenQueueDisabled(t *testing.T) 
 	} else if response != "OK" {
 		t.Fatalf("unexpected AUTH response: %q", response)
 	}
-	queue.SetEnabled(false)
 	if errWrite := writeTestRESPCommand(clientConn, "SUBSCRIBE", redisUsageChannel); errWrite != nil {
 		t.Fatalf("failed to write SUBSCRIBE command: %v", errWrite)
 	}
 	if errRead := readTestRESPSubscribe(reader, redisUsageChannel); errRead != nil {
 		t.Fatalf("failed to read SUBSCRIBE response: %v", errRead)
 	}
+	queue.SetEnabled(false)
 
 	if _, errRead := io.Copy(io.Discard, reader); errRead != nil {
 		var netErr net.Error
