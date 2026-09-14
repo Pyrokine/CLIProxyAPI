@@ -10,7 +10,7 @@ import (
 func TestJSONBodyEscapesStringValues(t *testing.T) {
 	t.Parallel()
 
-	got, ok := JSONBody([]byte(`{"title":"<script>alert(1)</script>","items":["safe & sound",{"description":"<b>mode</b>"}],"count":1}`))
+	got, ok := jsonBody([]byte(`{"title":"<script>alert(1)</script>","items":["safe & sound",{"description":"<b>mode</b>"}],"count":1}`))
 	if !ok {
 		t.Fatal("JSONBody() ok = false, want true")
 	}
@@ -45,7 +45,7 @@ func TestJSONBodyIfLikelySkipsNonJSONHTML(t *testing.T) {
 	t.Parallel()
 
 	body := []byte("<!doctype html><title>plugin</title>")
-	got, ok := JSONBodyIfLikely(body, "text/html; charset=utf-8")
+	got, ok := jsonBodyIfLikely(body, "text/html; charset=utf-8")
 	if ok {
 		t.Fatal("JSONBodyIfLikely() ok = true, want false")
 	}

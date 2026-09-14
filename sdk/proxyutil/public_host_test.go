@@ -32,7 +32,6 @@ func TestIsRestrictedCustomHeader(t *testing.T) {
 		{name: "X-Custom", want: false},
 	}
 	for _, tt := range tests {
-		tt := tt
 		t.Run(
 			tt.name, func(t *testing.T) {
 				t.Parallel()

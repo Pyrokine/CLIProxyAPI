@@ -12,16 +12,22 @@ import (
 )
 
 type testHomeRefreshClient struct {
-	heartbeat bool
-	payload   []byte
-	err       error
-	index     string
+	heartbeat       bool
+	payload         []byte
+	err             error
+	index           string
+	accessTokenHash string
 }
 
 func (c *testHomeRefreshClient) HeartbeatOK() bool { return c.heartbeat }
 
-func (c *testHomeRefreshClient) GetRefreshAuth(_ context.Context, authIndex string) ([]byte, error) {
+func (c *testHomeRefreshClient) GetRefreshAuth(
+	_ context.Context,
+	authIndex,
+	accessTokenHash string,
+) ([]byte, error) {
 	c.index = authIndex
+	c.accessTokenHash = accessTokenHash
 	return c.payload, c.err
 }
 
@@ -41,10 +47,16 @@ func TestRefreshAuthViaHomeAcceptsAuthEnvelope(t *testing.T) {
 	currentHomeRefreshClient = func() homeRefreshClient { return client }
 	t.Cleanup(func() { currentHomeRefreshClient = previous })
 
+	requestAuth := &cliproxyauth.Auth{
+		ID:       "auth-old",
+		Provider: "codex",
+		Index:    "requested-index",
+		Metadata: map[string]any{"access_token": "observed-access-token"},
+	}
 	updated, attempted, err := refreshAuthViaHome(
 		context.Background(),
 		&config.Config{Home: config.HomeConfig{Enabled: true}},
-		&cliproxyauth.Auth{ID: "auth-old", Provider: "codex", Index: "requested-index"},
+		requestAuth,
 	)
 	if err != nil {
 		t.Fatalf("refreshAuthViaHome() error = %v", err)
@@ -54,6 +66,9 @@ func TestRefreshAuthViaHomeAcceptsAuthEnvelope(t *testing.T) {
 	}
 	if client.index != "requested-index" {
 		t.Fatalf("GetRefreshAuth index = %q, want requested-index", client.index)
+	}
+	if wantHash := cliproxyauth.AccessTokenSHA256(requestAuth); client.accessTokenHash != wantHash {
+		t.Fatalf("GetRefreshAuth access token hash = %q, want %q", client.accessTokenHash, wantHash)
 	}
 	if updated == nil || updated.ID != "auth-old" || updated.Index != "returned-index" {
 		t.Fatalf("updated auth = %+v, want original id auth-old and returned index", updated)
@@ -119,5 +134,29 @@ func TestRefreshAuthViaHomeMapsHomeErrorEnvelope(t *testing.T) {
 	}
 	if statusErr.StatusCode() != http.StatusUnauthorized {
 		t.Fatalf("status code = %d, want %d", statusErr.StatusCode(), http.StatusUnauthorized)
+	}
+}
+
+func TestC08RefreshAuthViaHomeRejectsDisabledCredential(t *testing.T) {
+	payload := []byte(`{"auth":{"provider":"codex","disabled":true,"metadata":{"access_token":"new"}},"auth_index":"idx-1"}`)
+	client := &testHomeRefreshClient{heartbeat: true, payload: payload}
+	previous := currentHomeRefreshClient
+	currentHomeRefreshClient = func() homeRefreshClient { return client }
+	t.Cleanup(func() { currentHomeRefreshClient = previous })
+
+	updated, attempted, errRefresh := refreshAuthViaHome(
+		context.Background(),
+		&config.Config{Home: config.HomeConfig{Enabled: true}},
+		&cliproxyauth.Auth{ID: "auth-1", Provider: "codex", Index: "idx-1"},
+	)
+	if !attempted || updated != nil {
+		t.Fatalf("refresh result = (%#v, %t), want nil, true", updated, attempted)
+	}
+	var refreshStatus statusErr
+	if !errors.As(errRefresh, &refreshStatus) {
+		t.Fatalf("refresh error = %T %v, want statusErr", errRefresh, errRefresh)
+	}
+	if refreshStatus.StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("refresh status = %d, want 401", refreshStatus.StatusCode())
 	}
 }

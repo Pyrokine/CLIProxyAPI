@@ -24,7 +24,7 @@ func TestGetBytesReturnsBodyAndSendsHeaders(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	data, errGet := GetBytes(
+	data, errGet := getBytes(
 		context.Background(), server.Client(), server.URL, map[string]string{
 			"User-Agent": "agent",
 			"Accept":     "application/json",
@@ -50,7 +50,7 @@ func TestGetBytesRejectsErrorStatus(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	_, errGet := GetBytes(context.Background(), server.Client(), server.URL, nil, 0)
+	_, errGet := getBytes(context.Background(), server.Client(), server.URL, nil, 0)
 	if errGet == nil {
 		t.Fatal("GetBytes() error = nil")
 	}
@@ -71,7 +71,7 @@ func TestGetBytesEnforcesMaxSize(t *testing.T) {
 	)
 	t.Cleanup(server.Close)
 
-	_, errGet := GetBytes(context.Background(), server.Client(), server.URL, nil, 4)
+	_, errGet := getBytes(context.Background(), server.Client(), server.URL, nil, 4)
 	if errGet == nil {
 		t.Fatal("GetBytes() error = nil")
 	}

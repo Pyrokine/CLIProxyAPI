@@ -15,6 +15,7 @@ import (
 
 	iflowauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -113,7 +114,9 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	var err error
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "iflow", e.Identifier())
+	body, err = helps.ApplyThinkingWithSourcePayload(
+		body, req.Payload, originalPayloadSource, req.Model, from.String(), "iflow", e.Identifier(), req,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +131,7 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
-	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
+	reporter.setTranslatedReasoningEffort(body, e.Identifier())
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
@@ -185,12 +188,13 @@ func (e *IFlowExecutor) Execute(
 			"request error, error status: %d error message: %s", httpResp.StatusCode,
 			summarizeErrorBody(httpResp.Header.Get("Content-Type"), b),
 		)
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newUpstreamStatusErr(httpResp.StatusCode, b, httpResp.Header)
 		return resp, err
 	}
 
 	data, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if err != nil {
+		err = markResponseStarted(err)
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
@@ -244,7 +248,7 @@ func (e *IFlowExecutor) ExecuteStream(
 			"request error, error status: %d error message: %s", httpResp.StatusCode,
 			summarizeErrorBody(httpResp.Header.Get("Content-Type"), data),
 		)
-		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
+		err = newUpstreamStatusErr(httpResp.StatusCode, data, httpResp.Header)
 		return nil, err
 	}
 
@@ -284,7 +288,7 @@ func (e *IFlowExecutor) ExecuteStream(
 				}
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if errScan := markResponseStarted(scanner.Err()); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})

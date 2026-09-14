@@ -1,94 +1,206 @@
 package executor
 
 import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-func resetAntigravityPrimaryModelsCacheForTest() {
-	antigravityPrimaryModelsCache.mu.Lock()
-	antigravityPrimaryModelsCache.models = nil
-	antigravityPrimaryModelsCache.mu.Unlock()
-}
-
-func TestStoreAntigravityPrimaryModels_EmptyDoesNotOverwrite(t *testing.T) {
-	resetAntigravityPrimaryModelsCacheForTest()
-	t.Cleanup(resetAntigravityPrimaryModelsCacheForTest)
-
-	seed := []*registry.ModelInfo{
-		{ID: "claude-sonnet-4-5"},
-		{ID: "gemini-2.5-pro"},
-	}
-	if updated := storeAntigravityPrimaryModels(seed); !updated {
-		t.Fatal("expected non-empty model list to update primary cache")
-	}
-
-	if updated := storeAntigravityPrimaryModels(nil); updated {
-		t.Fatal("expected nil model list not to overwrite primary cache")
-	}
-	if updated := storeAntigravityPrimaryModels([]*registry.ModelInfo{}); updated {
-		t.Fatal("expected empty model list not to overwrite primary cache")
-	}
-
-	got := loadAntigravityPrimaryModels()
-	if len(got) != 2 {
-		t.Fatalf("expected cached model count 2, got %d", len(got))
-	}
-	if got[0].ID != "claude-sonnet-4-5" || got[1].ID != "gemini-2.5-pro" {
-		t.Fatalf("unexpected cached model ids: %q, %q", got[0].ID, got[1].ID)
-	}
-}
-
-func TestLoadAntigravityPrimaryModels_ReturnsClone(t *testing.T) {
-	resetAntigravityPrimaryModelsCacheForTest()
-	t.Cleanup(resetAntigravityPrimaryModelsCacheForTest)
-
-	if updated := storeAntigravityPrimaryModels(
-		[]*registry.ModelInfo{
-			{
-				ID:                         "gpt-5",
-				DisplayName:                "GPT-5",
-				SupportedGenerationMethods: []string{"generateContent"},
-				SupportedParameters:        []string{"temperature"},
-				Thinking: &registry.ThinkingSupport{
-					Levels: []string{"high"},
-				},
-			},
+func antigravityModelDiscoveryAuth(baseURL string) *cliproxyauth.Auth {
+	return &cliproxyauth.Auth{
+		ID:       "antigravity-discovery-test",
+		Provider: "antigravity",
+		Attributes: map[string]string{
+			"base_url": baseURL,
 		},
-	); !updated {
-		t.Fatal("expected model cache update")
+		Metadata: map[string]any{
+			"access_token": "test-token",
+			"expired":      time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		},
+	}
+}
+
+func TestFetchAntigravityModelsClassifiesResponses(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      int
+		body        string
+		wantOutcome modelDiscoveryOutcome
+		wantModels  int
+		wantErr     bool
+	}{
+		{
+			name:        "authoritative positive",
+			status:      http.StatusOK,
+			body:        `{"models":{"claude-sonnet-4-5":{"displayName":"Gemini 2.5 Pro"}}}`,
+			wantOutcome: ModelDiscoveryComplete,
+			wantModels:  1,
+		},
+		{
+			name:        "authoritative empty",
+			status:      http.StatusOK,
+			body:        `{"models":{}}`,
+			wantOutcome: ModelDiscoveryComplete,
+		},
+		{
+			name:        "missing models field",
+			status:      http.StatusOK,
+			body:        `{}`,
+			wantOutcome: ModelDiscoveryInconclusive,
+			wantErr:     true,
+		},
+		{
+			name:        "invalid models field",
+			status:      http.StatusOK,
+			body:        `{"models":[]}`,
+			wantOutcome: ModelDiscoveryInconclusive,
+			wantErr:     true,
+		},
+		{
+			name:        "provider failure",
+			status:      http.StatusServiceUnavailable,
+			body:        `{"error":"unavailable"}`,
+			wantOutcome: ModelDiscoveryFailed,
+			wantErr:     true,
+		},
 	}
 
-	got := loadAntigravityPrimaryModels()
-	if len(got) != 1 {
-		t.Fatalf("expected one cached model, got %d", len(got))
+	for _, test := range tests {
+		t.Run(
+			test.name, func(t *testing.T) {
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, r *http.Request) {
+							if r.URL.Path != antigravityModelsPath {
+								t.Errorf("request path = %q, want %q", r.URL.Path, antigravityModelsPath)
+							}
+							if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+								t.Errorf("Authorization = %q, want bearer token", got)
+							}
+							w.WriteHeader(test.status)
+							_, _ = w.Write([]byte(test.body))
+						},
+					),
+				)
+				defer server.Close()
+
+				result := FetchAntigravityModels(
+					context.Background(),
+					antigravityModelDiscoveryAuth(server.URL),
+					&config.Config{},
+				)
+				if result.Outcome != test.wantOutcome {
+					t.Fatalf("Outcome = %q, want %q; error = %v", result.Outcome, test.wantOutcome, result.Err)
+				}
+				if len(result.Models) != test.wantModels {
+					t.Fatalf("model count = %d, want %d", len(result.Models), test.wantModels)
+				}
+				if test.wantErr != (result.Err != nil) {
+					t.Fatalf("error = %v, wantErr = %t", result.Err, test.wantErr)
+				}
+			},
+		)
 	}
-	got[0].ID = "mutated-id"
-	if len(got[0].SupportedGenerationMethods) > 0 {
-		got[0].SupportedGenerationMethods[0] = "mutated-method"
-	}
-	if len(got[0].SupportedParameters) > 0 {
-		got[0].SupportedParameters[0] = "mutated-parameter"
-	}
-	if got[0].Thinking != nil && len(got[0].Thinking.Levels) > 0 {
-		got[0].Thinking.Levels[0] = "mutated-level"
+}
+
+func TestFetchAntigravityModelsReturnsRefreshedAuth(t *testing.T) {
+	roundTripper := antigravityRoundTripFunc(
+		func(req *http.Request) (*http.Response, error) {
+			var body string
+			switch {
+			case req.URL.Host == "oauth2.googleapis.com" && req.URL.Path == "/token":
+				body = `{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600,"token_type":"Bearer"}`
+			case req.URL.Host == "models.example" && req.URL.Path == antigravityModelsPath:
+				if got := req.Header.Get("Authorization"); got != "Bearer new-access" {
+					t.Errorf("Authorization = %q, want refreshed access token", got)
+				}
+				body = `{"models":{"claude-sonnet-4-5":{"displayName":"Claude Sonnet 4.5"}}}`
+			default:
+				t.Fatalf("unexpected request URL %s", req.URL)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		},
+	)
+	ctx := util.WithRoundTripper(context.Background(), roundTripper)
+	auth := &cliproxyauth.Auth{
+		ID:       "antigravity-refresh-models",
+		Provider: "antigravity",
+		Attributes: map[string]string{
+			"base_url": "https://models.example",
+		},
+		Metadata: map[string]any{
+			"refresh_token": "model-discovery-refresh-token",
+			"project_id":    "project-id",
+		},
 	}
 
-	again := loadAntigravityPrimaryModels()
-	if len(again) != 1 {
-		t.Fatalf("expected one cached model after mutation, got %d", len(again))
+	result := FetchAntigravityModels(ctx, auth, &config.Config{})
+	if result.Outcome != ModelDiscoveryComplete || result.Err != nil || len(result.Models) != 1 {
+		t.Fatalf("model discovery result = %#v", result)
 	}
-	if again[0].ID != "gpt-5" {
-		t.Fatalf("expected cached model id to remain %q, got %q", "gpt-5", again[0].ID)
+	if result.Auth == nil || metaStringValue(result.Auth.Metadata, "access_token") != "new-access" ||
+		metaStringValue(result.Auth.Metadata, "refresh_token") != "new-refresh" {
+		t.Fatalf("refreshed auth = %#v", result.Auth)
 	}
-	if len(again[0].SupportedGenerationMethods) == 0 || again[0].SupportedGenerationMethods[0] != "generateContent" {
-		t.Fatalf("expected cached generation methods to be unmutated, got %v", again[0].SupportedGenerationMethods)
+	if metaStringValue(auth.Metadata, "access_token") != "" ||
+		metaStringValue(auth.Metadata, "refresh_token") != "model-discovery-refresh-token" {
+		t.Fatalf("source auth was mutated: %#v", auth.Metadata)
 	}
-	if len(again[0].SupportedParameters) == 0 || again[0].SupportedParameters[0] != "temperature" {
-		t.Fatalf("expected cached supported parameters to be unmutated, got %v", again[0].SupportedParameters)
+}
+
+func TestFetchAntigravityModelsCancellationIsInconclusive(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(http.ResponseWriter, *http.Request) {
+				close(started)
+				<-release
+			},
+		),
+	)
+	defer server.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan ModelDiscoveryResult, 1)
+	go func() {
+		resultCh <- FetchAntigravityModels(
+			ctx,
+			antigravityModelDiscoveryAuth(server.URL),
+			&config.Config{},
+		)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("model discovery request did not start")
 	}
-	if again[0].Thinking == nil || len(again[0].Thinking.Levels) == 0 || again[0].Thinking.Levels[0] != "high" {
-		t.Fatalf("expected cached model thinking levels to be unmutated, got %v", again[0].Thinking)
+	cancel()
+
+	select {
+	case result := <-resultCh:
+		if result.Outcome != ModelDiscoveryInconclusive {
+			t.Fatalf("Outcome = %q, want %q", result.Outcome, ModelDiscoveryInconclusive)
+		}
+		if !errors.Is(result.Err, context.Canceled) {
+			t.Fatalf("error = %v, want context cancellation", result.Err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled model discovery did not return")
 	}
 }

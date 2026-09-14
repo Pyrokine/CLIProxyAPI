@@ -13,6 +13,7 @@ import (
 
 	qwenauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/qwen"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -341,7 +342,9 @@ func (e *QwenExecutor) prepareQwenRequest(
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	var err error
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = helps.ApplyThinkingWithSourcePayload(
+		body, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +370,7 @@ func (e *QwenExecutor) prepareQwenRequest(
 	if err != nil {
 		return nil, err
 	}
-	reporter.SetTranslatedReasoningEffort(body, to.String())
+	reporter.setTranslatedReasoningEffort(body, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -433,11 +436,12 @@ func (e *QwenExecutor) Execute(
 			"request error, error status: %d (mapped: %d), error message: %s", httpResp.StatusCode, errCode,
 			summarizeErrorBody(httpResp.Header.Get("Content-Type"), b),
 		)
-		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
+		err = (statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}).withUpstreamResponse(httpResp.Header)
 		return resp, err
 	}
 	data, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if err != nil {
+		err = markResponseStarted(err)
 		recordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
@@ -498,7 +502,7 @@ func (e *QwenExecutor) ExecuteStream(
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("qwen executor: close response body error: %v", errClose)
 		}
-		err = statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}
+		err = (statusErr{code: errCode, msg: string(b), retryAfter: retryAfter}).withUpstreamResponse(httpResp.Header)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -534,7 +538,7 @@ func (e *QwenExecutor) ExecuteStream(
 				return
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if errScan := markResponseStarted(scanner.Err()); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})

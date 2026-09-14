@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/wsrelay"
@@ -140,7 +141,7 @@ func (e *AIStudioExecutor) prepareRequest(
 	if err != nil {
 		return nil, err
 	}
-	reporter.SetTranslatedReasoningEffort(body.payload, body.toFormat.String())
+	reporter.setTranslatedReasoningEffort(body.payload, body.toFormat.String())
 
 	endpoint := e.buildEndpoint(baseModel, body.action, opts.Alt)
 	wsReq := &wsrelay.HTTPRequest{
@@ -189,7 +190,7 @@ func (e *AIStudioExecutor) Execute(
 		appendAPIResponseChunk(ctx, e.cfg, wsResp.Body)
 	}
 	if wsResp.Status < 200 || wsResp.Status >= 300 {
-		return resp, statusErr{code: wsResp.Status, msg: string(wsResp.Body)}
+		return resp, newUpstreamStatusErr(wsResp.Status, wsResp.Body, wsResp.Headers)
 	}
 	p.reporter.publish(ctx, parseGeminiUsage(wsResp.Body))
 	var param any
@@ -236,7 +237,7 @@ func (e *AIStudioExecutor) ExecuteStream(
 			body.Write(firstEvent.Payload)
 		}
 		if firstEvent.Type == wsrelay.MessageTypeStreamEnd {
-			return nil, statusErr{code: firstEvent.Status, msg: body.String()}
+			return nil, newUpstreamStatusErrMessage(firstEvent.Status, body.String(), firstEvent.Headers)
 		}
 		for event := range wsStream {
 			if event.Err != nil {
@@ -258,7 +259,7 @@ func (e *AIStudioExecutor) ExecuteStream(
 				break
 			}
 		}
-		return nil, statusErr{code: firstEvent.Status, msg: body.String()}
+		return nil, newUpstreamStatusErrMessage(firstEvent.Status, body.String(), firstEvent.Headers)
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func(first wsrelay.StreamEvent) {
@@ -385,7 +386,7 @@ func (e *AIStudioExecutor) CountTokens(
 		appendAPIResponseChunk(ctx, e.cfg, resp.Body)
 	}
 	if resp.Status < 200 || resp.Status >= 300 {
-		return cliproxyexecutor.Response{}, statusErr{code: resp.Status, msg: string(resp.Body)}
+		return cliproxyexecutor.Response{}, newUpstreamStatusErr(resp.Status, resp.Body, resp.Headers)
 	}
 	totalTokens := gjson.GetBytes(resp.Body, "totalTokens").Int()
 	if totalTokens <= 0 {
@@ -426,7 +427,9 @@ func (e *AIStudioExecutor) translateRequest(
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, stream)
 	payload := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, stream)
-	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+	payload, err := helps.ApplyThinkingWithSourcePayload(
+		payload, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
+	)
 	if err != nil {
 		return nil, translatedPayload{}, err
 	}
@@ -491,7 +494,7 @@ func ensureColonSpacedJSON(payload []byte) []byte {
 		ch := indented[i]
 		if ch == '"' {
 			// A quote is escaped only when preceded by an odd number of consecutive backslashes.
-			// For example: "\\\"" keeps the quote inside the string, but "\\\\" closes the string.
+			// Three preceding backslashes escape the quote; four close the string.
 			backslashes := 0
 			for j := i - 1; j >= 0 && indented[j] == '\\'; j-- {
 				backslashes++

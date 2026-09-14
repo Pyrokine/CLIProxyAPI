@@ -15,10 +15,10 @@ type Doer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
-// GetBytes performs a GET request with the supplied headers, requires a
+// getBytes performs a GET request with the supplied headers, requires a
 // success status, and returns the response body. When maxSize is positive
 // the body is rejected once it exceeds maxSize bytes.
-func GetBytes(ctx context.Context, client Doer, requestURL string, headers map[string]string, maxSize int64) (
+func getBytes(ctx context.Context, client Doer, requestURL string, headers map[string]string, maxSize int64) (
 	[]byte,
 	error,
 ) {

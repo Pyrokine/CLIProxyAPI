@@ -10,7 +10,7 @@ import (
 func TestApplyPayloadConfigDisableImageGenerationPassthroughKeepsTools(t *testing.T) {
 	payload := []byte(`{"tools":[{"type":"function","function":{"name":"search"}},{"type":"image_generation"}],"tool_choice":{"type":"image_generation"}}`)
 	cfg := &config.Config{
-		SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationPassthrough},
+		DisableImageGeneration: config.DisableImageGenerationPassthrough,
 	}
 
 	out := applyPayloadConfigWithRequest(cfg, "", "", "", "", payload, nil, "", "/v1/responses", nil)
@@ -26,7 +26,7 @@ func TestApplyPayloadConfigDisableImageGenerationPassthroughKeepsTools(t *testin
 func TestApplyPayloadConfigDisableImageGenerationChatKeepsImagesEndpoint(t *testing.T) {
 	payload := []byte(`{"tools":[{"type":"image_generation"}],"tool_choice":{"type":"image_generation"}}`)
 	cfg := &config.Config{
-		SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationChat},
+		DisableImageGeneration: config.DisableImageGenerationChat,
 	}
 
 	out := applyPayloadConfigWithRequest(cfg, "", "", "", "", payload, nil, "", "/v1/images/generations", nil)
@@ -42,7 +42,7 @@ func TestApplyPayloadConfigDisableImageGenerationChatKeepsImagesEndpoint(t *test
 func TestApplyPayloadConfigDisableImageGenerationAllStripsTools(t *testing.T) {
 	payload := []byte(`{"tools":[{"type":"function","function":{"name":"search"}},{"type":"image_generation"}],"tool_choice":{"type":"image_generation"}}`)
 	cfg := &config.Config{
-		SDKConfig: config.SDKConfig{DisableImageGeneration: config.DisableImageGenerationAll},
+		DisableImageGeneration: config.DisableImageGenerationAll,
 	}
 
 	out := applyPayloadConfigWithRequest(cfg, "", "", "", "", payload, nil, "", "/v1/images/generations", nil)

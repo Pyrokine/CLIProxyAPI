@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
@@ -106,10 +107,44 @@ func TestCodexResponsesBodyUsesRequestScopedTranslatorHooks(t *testing.T) {
 	}
 }
 
+func TestCodexResponsesBodyCompatUsesRequestScopedTranslatorHooks(t *testing.T) {
+	hooks := &executorTranslatorHooks{}
+	ctx := sdktranslator.WithPluginHooks(context.Background(), hooks)
+	prepared, err := codexResponsesBody(
+		ctx,
+		&config.Config{},
+		&cliproxyauth.Auth{},
+		"deepseek-v4",
+		"deepseek-v4",
+		"codex",
+		sdktranslator.FormatClaude,
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
+		cliproxyexecutor.Request{
+			Model: "deepseek-v4",
+			Payload: []byte(
+				`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":""}]}]}`,
+			),
+			Metadata: map[string]any{
+				"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},
+			},
+		},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("codexResponsesBody() error = %v", err)
+	}
+	if hooks.requestCalls.Load() != 2 {
+		t.Fatalf("request hook calls = %d, want 2", hooks.requestCalls.Load())
+	}
+	if !gjson.GetBytes(prepared.Body, "plugin_normalized").Bool() {
+		t.Fatalf("prepared body did not retain request hook output: %s", prepared.Body)
+	}
+}
+
 func TestXAICountTokensUsesRequestScopedTranslatorHooks(t *testing.T) {
 	hooks := &executorTranslatorHooks{}
 	ctx := sdktranslator.WithPluginHooks(context.Background(), hooks)
-	executor := NewXAIExecutor(&config.Config{})
+	executor := newXAIExecutor(&config.Config{})
 	_, err := executor.CountTokens(
 		ctx,
 		nil,

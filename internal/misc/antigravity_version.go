@@ -22,7 +22,7 @@ const (
 	antigravityCLIClientName   = "aidev_client"
 	antigravityVersionCacheTTL = 6 * time.Hour
 	antigravityFetchTimeout    = 10 * time.Second
-	AntigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
+	antigravityNodeAPIClientUA = "google-api-nodejs-client/10.3.0"
 	AntigravityGoogAPIClientUA = "gl-node/22.21.1"
 )
 
@@ -111,7 +111,7 @@ func refreshAntigravityVersion(ctx context.Context) {
 	log.WithError(errFetch).Debug("failed to refresh antigravity version, keeping cached value")
 }
 
-func AntigravityLatestVersion() string {
+func antigravityLatestVersion() string {
 	antigravityVersionMu.RLock()
 	if cachedAntigravityVersion != "" && time.Now().Before(antigravityVersionExpiry) {
 		version := cachedAntigravityVersion
@@ -124,7 +124,7 @@ func AntigravityLatestVersion() string {
 }
 
 func AntigravityUserAgent() string {
-	return fmt.Sprintf("antigravity/cli/%s %s", AntigravityLatestVersion(), antigravityCLIUserAgentDetails())
+	return fmt.Sprintf("antigravity/cli/%s %s", antigravityLatestVersion(), antigravityCLIUserAgentDetails())
 }
 
 func antigravityCLIUserAgentDetails() string {
@@ -174,7 +174,7 @@ func AntigravityLoadCodeAssistUserAgent(userAgent string) string {
 func AntigravityOnboardUserUserAgent(userAgent string) string {
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
-		return AntigravityUserAgent() + " " + AntigravityNodeAPIClientUA
+		return AntigravityUserAgent() + " " + antigravityNodeAPIClientUA
 	}
 	lower := strings.ToLower(userAgent)
 	if !isAntigravityFamilyUserAgent(lower) {
@@ -183,7 +183,7 @@ func AntigravityOnboardUserUserAgent(userAgent string) string {
 	if strings.Contains(lower, "google-api-nodejs-client/") {
 		return userAgent
 	}
-	return antigravityBaseUserAgent(userAgent) + " " + AntigravityNodeAPIClientUA
+	return antigravityBaseUserAgent(userAgent) + " " + antigravityNodeAPIClientUA
 }
 
 func AntigravityVersionFromUserAgent(userAgent string) string {
@@ -197,7 +197,7 @@ func AntigravityVersionFromUserAgent(userAgent string) string {
 			}
 			rest = strings.TrimSpace(rest)
 			if rest == "" {
-				return AntigravityLatestVersion()
+				return antigravityLatestVersion()
 			}
 			return rest
 		}
@@ -205,7 +205,7 @@ func AntigravityVersionFromUserAgent(userAgent string) string {
 
 	const legacyPrefix = "antigravity/"
 	if !strings.HasPrefix(lower, legacyPrefix) {
-		return AntigravityLatestVersion()
+		return antigravityLatestVersion()
 	}
 	rest := base[len(legacyPrefix):]
 	if idx := strings.IndexAny(rest, " \t"); idx >= 0 {
@@ -213,7 +213,7 @@ func AntigravityVersionFromUserAgent(userAgent string) string {
 	}
 	rest = strings.TrimSpace(rest)
 	if rest == "" {
-		return AntigravityLatestVersion()
+		return antigravityLatestVersion()
 	}
 	return rest
 }

@@ -26,12 +26,14 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	antigravityclaude "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/antigravity/claude"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/auth"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxysession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
@@ -54,18 +56,26 @@ const (
 	antigravityCreditsHintRefreshInterval = 10 * time.Minute
 	antigravityCreditsHintRefreshTimeout  = 5 * time.Second
 	refreshSkew                           = 3000 * time.Second
-	// systemInstruction              = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**"
 )
 
+type modelDiscoveryOutcome string
+
+const (
+	ModelDiscoveryComplete     modelDiscoveryOutcome = "complete"
+	ModelDiscoveryInconclusive modelDiscoveryOutcome = "inconclusive"
+	ModelDiscoveryFailed       modelDiscoveryOutcome = "failed"
+)
+
+type ModelDiscoveryResult struct {
+	Outcome modelDiscoveryOutcome
+	Models  []*registry.ModelInfo
+	Auth    *cliproxyauth.Auth
+	Err     error
+}
+
 var (
-	randSource      = rand.New(rand.NewSource(time.Now().UnixNano()))
-	randSourceMutex sync.Mutex
-	// antigravityPrimaryModelsCache keeps the latest non-empty model list fetched
-	// from any antigravity auth. Empty fetches never overwrite this cache.
-	antigravityPrimaryModelsCache struct {
-		mu     sync.RWMutex
-		models []*registry.ModelInfo
-	}
+	randSource                        = rand.New(rand.NewSource(time.Now().UnixNano()))
+	randSourceMutex                   sync.Mutex
 	antigravityCreditsHintRefreshByID sync.Map
 	antigravityRefreshGroup           singleflight.Group
 )
@@ -73,70 +83,6 @@ var (
 type antigravityCreditsHintRefreshState struct {
 	mu          sync.Mutex
 	lastAttempt time.Time
-}
-
-func cloneAntigravityModels(models []*registry.ModelInfo) []*registry.ModelInfo {
-	if len(models) == 0 {
-		return nil
-	}
-	out := make([]*registry.ModelInfo, 0, len(models))
-	for _, model := range models {
-		if model == nil || strings.TrimSpace(model.ID) == "" {
-			continue
-		}
-		out = append(out, cloneAntigravityModelInfo(model))
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func cloneAntigravityModelInfo(model *registry.ModelInfo) *registry.ModelInfo {
-	if model == nil {
-		return nil
-	}
-	clone := *model
-	if len(model.SupportedGenerationMethods) > 0 {
-		clone.SupportedGenerationMethods = append([]string(nil), model.SupportedGenerationMethods...)
-	}
-	if len(model.SupportedParameters) > 0 {
-		clone.SupportedParameters = append([]string(nil), model.SupportedParameters...)
-	}
-	if model.Thinking != nil {
-		thinkingClone := *model.Thinking
-		if len(model.Thinking.Levels) > 0 {
-			thinkingClone.Levels = append([]string(nil), model.Thinking.Levels...)
-		}
-		clone.Thinking = &thinkingClone
-	}
-	return &clone
-}
-
-func storeAntigravityPrimaryModels(models []*registry.ModelInfo) bool {
-	cloned := cloneAntigravityModels(models)
-	if len(cloned) == 0 {
-		return false
-	}
-	antigravityPrimaryModelsCache.mu.Lock()
-	antigravityPrimaryModelsCache.models = cloned
-	antigravityPrimaryModelsCache.mu.Unlock()
-	return true
-}
-
-func loadAntigravityPrimaryModels() []*registry.ModelInfo {
-	antigravityPrimaryModelsCache.mu.RLock()
-	cloned := cloneAntigravityModels(antigravityPrimaryModelsCache.models)
-	antigravityPrimaryModelsCache.mu.RUnlock()
-	return cloned
-}
-
-func fallbackAntigravityPrimaryModels() []*registry.ModelInfo {
-	models := loadAntigravityPrimaryModels()
-	if len(models) > 0 {
-		log.Debugf("antigravity executor: using cached primary model list (%d models)", len(models))
-	}
-	return models
 }
 
 // AntigravityExecutor proxies requests to the antigravity upstream.
@@ -153,6 +99,16 @@ type AntigravityExecutor struct {
 //   - *AntigravityExecutor: A new Antigravity executor instance
 func NewAntigravityExecutor(cfg *config.Config) *AntigravityExecutor {
 	return &AntigravityExecutor{cfg: cfg}
+}
+
+func (e *AntigravityExecutor) obfuscateSensitiveWords(payload []byte) []byte {
+	if e == nil || e.cfg == nil || len(e.cfg.Antigravity.SensitiveWords) == 0 {
+		return payload
+	}
+	return obfuscateAntigravitySystemInstruction(
+		payload,
+		buildSensitiveWordMatcher(e.cfg.Antigravity.SensitiveWords),
+	)
 }
 
 // antigravityTransport is a singleton HTTP/1.1 transport shared by all Antigravity requests.
@@ -216,16 +172,22 @@ func newAntigravityHTTPClient(
 	return client
 }
 
-func validateAntigravityRequestSignatures(from sdktranslator.Format, rawJSON []byte) ([]byte, error) {
+func validateAntigravityRequestSignatures(
+	modelName string,
+	from sdktranslator.Format,
+	rawJSON []byte,
+) ([]byte, error) {
 	if from.String() != "claude" {
 		return rawJSON, nil
 	}
-
+	if antigravityUsesReasoningReplayCache(modelName) {
+		return antigravityclaude.StripInvalidGeminiSignatureThinkingBlocks(rawJSON), nil
+	}
 	return antigravityclaude.StripEmptySignatureThinkingBlocks(rawJSON), nil
 }
 
 func hasAntigravityClaudeTypedWebSearchTool(payload []byte) bool {
-	tools := gjson.GetBytes(payload, "tools")
+	tools := util.GetGJSONBytesNoCopy(payload, "tools")
 	if !tools.IsArray() {
 		return false
 	}
@@ -239,7 +201,7 @@ func hasAntigravityClaudeTypedWebSearchTool(payload []byte) bool {
 }
 
 func hasAntigravityGoogleSearchTool(payload []byte) bool {
-	tools := gjson.GetBytes(payload, "request.tools")
+	tools := util.GetGJSONBytesNoCopy(payload, "request.tools")
 	if !tools.IsArray() {
 		return false
 	}
@@ -440,10 +402,6 @@ func (e *AntigravityExecutor) sendAcrossBaseURLs(
 	auth *cliproxyauth.Auth,
 	buildReq func(baseURL string) (*http.Request, error),
 ) (*http.Response, error) {
-	var lastStatus int
-	var lastBody []byte
-	var lastErr error
-
 	for idx, baseURL := range baseURLs {
 		hasNextURL := idx+1 < len(baseURLs)
 
@@ -455,19 +413,6 @@ func (e *AntigravityExecutor) sendAcrossBaseURLs(
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
-			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-				return nil, errDo
-			}
-			lastStatus = 0
-			lastBody = nil
-			lastErr = errDo
-			if hasNextURL {
-				log.Debugf(
-					"antigravity executor: request error on base url %s, retrying with fallback base url: %s",
-					baseURL, baseURLs[idx+1],
-				)
-				continue
-			}
 			return nil, errDo
 		}
 
@@ -484,23 +429,7 @@ func (e *AntigravityExecutor) sendAcrossBaseURLs(
 		}
 		if errRead != nil {
 			recordAPIResponseError(ctx, e.cfg, errRead)
-			if errors.Is(errRead, context.Canceled) || errors.Is(errRead, context.DeadlineExceeded) {
-				return nil, errRead
-			}
-			if errCtx := ctx.Err(); errCtx != nil {
-				return nil, errCtx
-			}
-			lastStatus = 0
-			lastBody = nil
-			lastErr = errRead
-			if hasNextURL {
-				log.Debugf(
-					"antigravity executor: read error on base url %s, retrying with fallback base url: %s",
-					baseURL, baseURLs[idx+1],
-				)
-				continue
-			}
-			return nil, errRead
+			return nil, markResponseStarted(errRead)
 		}
 
 		appendAPIResponseChunk(ctx, e.cfg, bodyBytes)
@@ -509,10 +438,6 @@ func (e *AntigravityExecutor) sendAcrossBaseURLs(
 			"antigravity executor: upstream error status: %d, body: %s", httpResp.StatusCode,
 			summarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes),
 		)
-
-		lastStatus = httpResp.StatusCode
-		lastBody = append([]byte(nil), bodyBytes...)
-		lastErr = nil
 
 		if httpResp.StatusCode == http.StatusTooManyRequests && cliproxyauth.AntigravityCreditsRequested(ctx) &&
 			antigravityCreditsRetryEnabled(e.cfg) && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
@@ -526,15 +451,15 @@ func (e *AntigravityExecutor) sendAcrossBaseURLs(
 		case antigravityRetryNextURL:
 			continue
 		case antigravityRetryNextAttempt:
-			return nil, antigravityRetryError{err: statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}}
+			return nil, antigravityRetryError{err: buildStatusError(httpResp.StatusCode, bodyBytes, httpResp.Header)}
 		case antigravityRetryAbort:
 			// fall through to return error below
 		}
 
-		return nil, buildStatusError(httpResp.StatusCode, bodyBytes)
+		return nil, buildStatusError(httpResp.StatusCode, bodyBytes, httpResp.Header)
 	}
 
-	return nil, resolveLastError(lastStatus, lastBody, lastErr)
+	return nil, statusErr{code: http.StatusServiceUnavailable, msg: "antigravity executor: no base url available"}
 }
 
 // classifyErrorForRetry decides how to handle an error status code in the retry loop.
@@ -579,28 +504,34 @@ func (e *AntigravityExecutor) classifyErrorForRetry(
 	return antigravityRetryAbort
 }
 
+type antigravityNoCapacityError struct {
+	statusErr
+}
+
+func (e antigravityNoCapacityError) ExecutionDisposition() cliproxyexecutor.ExecutionDisposition {
+	return cliproxyexecutor.ExecutionDisposition{
+		DispatchPhase:  cliproxyexecutor.DispatchPhaseResponseStarted,
+		Outcome:        cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing,
+		RetryDirective: cliproxyexecutor.RetryDirectiveNextProvider,
+		EffectScope:    cliproxyexecutor.StateEffectScopeProvider,
+	}
+}
+
 // buildStatusError creates a statusErr, including retryAfter for 429 responses.
-func buildStatusError(statusCode int, body []byte) statusErr {
+func buildStatusError(statusCode int, body []byte, headers ...http.Header) error {
 	sErr := statusErr{code: statusCode, msg: string(body)}
+	if len(headers) > 0 {
+		sErr = sErr.withUpstreamResponse(headers[0])
+	}
 	if statusCode == http.StatusTooManyRequests {
 		if retryAfter, parseErr := parseRetryDelay(body); parseErr == nil && retryAfter != nil {
 			sErr.retryAfter = retryAfter
 		}
 	}
-	return sErr
-}
-
-// resolveLastError converts the last-seen error state from the base URL loop into a
-// terminal error. Called when all base URLs have been exhausted without returning.
-func resolveLastError(lastStatus int, lastBody []byte, lastErr error) error {
-	switch {
-	case lastStatus != 0:
-		return buildStatusError(lastStatus, lastBody)
-	case lastErr != nil:
-		return lastErr
-	default:
-		return statusErr{code: http.StatusServiceUnavailable, msg: "antigravity executor: no base url available"}
+	if antigravityShouldRetryNoCapacity(statusCode, body) {
+		return antigravityNoCapacityError{statusErr: sErr}
 	}
+	return sErr
 }
 
 // Execute performs a non-streaming request to the Antigravity API.
@@ -641,7 +572,7 @@ func (e *AntigravityExecutor) Execute(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	originalPayload, errValidate := validateAntigravityRequestSignatures(baseModel, from, originalPayload)
 	if errValidate != nil {
 		return resp, errValidate
 	}
@@ -649,7 +580,9 @@ func (e *AntigravityExecutor) Execute(
 	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, false)
 	translated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = helps.ApplyThinkingWithSourcePayload(
+		translated, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
+	)
 	if err != nil {
 		return resp, err
 	}
@@ -658,7 +591,9 @@ func (e *AntigravityExecutor) Execute(
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel,
 	)
-	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	translated = e.obfuscateSensitiveWords(translated)
+	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
+	reporter.setTranslatedReasoningEffort(translated, to.String())
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -671,16 +606,24 @@ func (e *AntigravityExecutor) Execute(
 			requestPayload = creditPayload
 		}
 	}
-	requestPayload, replayScope := prepareAntigravityGeminiReasoningReplayPayload(
+	requestPayload, replayScope, errReplay := prepareAntigravityGeminiReasoningReplayPayload(
 		ctx, baseModel, req, opts, requestPayload,
 	)
+	if errReplay != nil {
+		return resp, errReplay
+	}
 	httpResp, err := e.sendWithRetry(
 		ctx, httpClient, baseURLs, attempts, baseModel, auth, func(baseURL string) (*http.Request, error) {
-			return e.buildRequest(ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL)
+			return e.buildRequest(
+				ctx, auth, token, baseModel, requestPayload, false, opts.Alt, baseURL,
+				helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata),
+			)
 		},
 	)
 	if err != nil {
-		clearAntigravityReasoningReplayOnError(ctx, replayScope, err)
+		if errClear := clearAntigravityReasoningReplayOnError(ctx, replayScope, err); errClear != nil {
+			return resp, errClear
+		}
 		return resp, err
 	}
 
@@ -689,6 +632,7 @@ func (e *AntigravityExecutor) Execute(
 		log.Errorf("antigravity executor: close response body error: %v", errClose)
 	}
 	if errRead != nil {
+		errRead = markResponseStarted(errRead)
 		recordAPIResponseError(ctx, e.cfg, errRead)
 		return resp, errRead
 	}
@@ -734,7 +678,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	originalPayload, errValidate := validateAntigravityRequestSignatures(baseModel, from, originalPayload)
 	if errValidate != nil {
 		return resp, errValidate
 	}
@@ -742,7 +686,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, true)
 	translated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, true)
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = helps.ApplyThinkingWithSourcePayload(
+		translated, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
+	)
 	if err != nil {
 		return resp, err
 	}
@@ -751,7 +697,9 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel,
 	)
-	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	translated = e.obfuscateSensitiveWords(translated)
+	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
+	reporter.setTranslatedReasoningEffort(translated, to.String())
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -763,17 +711,25 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 			requestPayload = creditPayload
 		}
 	}
-	requestPayload, replayScope := prepareAntigravityGeminiReasoningReplayPayload(
+	requestPayload, replayScope, errReplay := prepareAntigravityGeminiReasoningReplayPayload(
 		ctx, baseModel, req, opts, requestPayload,
 	)
+	if errReplay != nil {
+		return resp, errReplay
+	}
 
 	httpResp, err := e.sendWithRetry(
 		ctx, httpClient, baseURLs, attempts, baseModel, auth, func(baseURL string) (*http.Request, error) {
-			return e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
+			return e.buildRequest(
+				ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL,
+				helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata),
+			)
 		},
 	)
 	if err != nil {
-		clearAntigravityReasoningReplayOnError(ctx, replayScope, err)
+		if errClear := clearAntigravityReasoningReplayOnError(ctx, replayScope, err); errClear != nil {
+			return resp, errClear
+		}
 		return resp, err
 	}
 
@@ -785,11 +741,13 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 				log.Errorf("antigravity executor: close response body error: %v", errClose)
 			}
 		}()
+		replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
+			replayAccumulator.observeSSELine(line)
 
 			// Filter usage metadata for all models
 			// Only retain usage statistics in the terminal chunk
@@ -808,11 +766,12 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 				return
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if errScan := markResponseStarted(scanner.Err()); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		} else {
+			replayAccumulator.commit(ctx)
 			reporter.ensurePublished(ctx)
 		}
 	}(httpResp)
@@ -828,7 +787,6 @@ func (e *AntigravityExecutor) executeClaudeNonStream(
 		}
 	}
 	resp = cliproxyexecutor.Response{Payload: e.convertStreamToNonStream(buffer.Bytes())}
-	cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, resp.Payload)
 	resp.Payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, requestPayload, resp.Payload)
 
 	reporter.publish(ctx, parseAntigravityUsage(resp.Payload))
@@ -1032,7 +990,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
-) (_ *cliproxyexecutor.StreamResult, err error) {
+) (resp *cliproxyexecutor.StreamResult, err error) {
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -1051,7 +1009,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayload)
+	originalPayload, errValidate := validateAntigravityRequestSignatures(baseModel, from, originalPayload)
 	if errValidate != nil {
 		return nil, errValidate
 	}
@@ -1067,7 +1025,9 @@ func (e *AntigravityExecutor) ExecuteStream(
 		auth = updatedAuth
 	}
 
-	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
+	translated, err = helps.ApplyThinkingWithSourcePayload(
+		translated, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1076,7 +1036,9 @@ func (e *AntigravityExecutor) ExecuteStream(
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, "antigravity", "request", translated, originalTranslated, requestedModel,
 	)
-	reporter.SetTranslatedReasoningEffort(translated, to.String())
+	translated = e.obfuscateSensitiveWords(translated)
+	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
+	reporter.setTranslatedReasoningEffort(translated, to.String())
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -1088,17 +1050,25 @@ func (e *AntigravityExecutor) ExecuteStream(
 			requestPayload = creditPayload
 		}
 	}
-	requestPayload, replayScope := prepareAntigravityGeminiReasoningReplayPayload(
+	requestPayload, replayScope, errReplay := prepareAntigravityGeminiReasoningReplayPayload(
 		ctx, baseModel, req, opts, requestPayload,
 	)
+	if errReplay != nil {
+		return resp, errReplay
+	}
 
 	httpResp, err := e.sendWithRetry(
 		ctx, httpClient, baseURLs, attempts, baseModel, auth, func(baseURL string) (*http.Request, error) {
-			return e.buildRequest(ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL)
+			return e.buildRequest(
+				ctx, auth, token, baseModel, requestPayload, true, opts.Alt, baseURL,
+				helps.DerivedAntigravitySessionID(opts.Metadata, req.Metadata),
+			)
 		},
 	)
 	if err != nil {
-		clearAntigravityReasoningReplayOnError(ctx, replayScope, err)
+		if errClear := clearAntigravityReasoningReplayOnError(ctx, replayScope, err); errClear != nil {
+			return nil, errClear
+		}
 		return nil, err
 	}
 
@@ -1111,7 +1081,6 @@ func (e *AntigravityExecutor) ExecuteStream(
 			}
 		}()
 		replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
-		defer replayAccumulator.Flush(ctx)
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		var param any
@@ -1122,7 +1091,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 			// Filter usage metadata for all models
 			// Only retain usage statistics in the terminal chunk
 			line = filterSSEUsageMetadata(line)
-			replayAccumulator.ObserveSSELine(line)
+			replayAccumulator.observeSSELine(line)
 
 			payload := jsonPayload(line)
 			if payload == nil {
@@ -1143,7 +1112,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 				}
 			}
 		}
-		if errScan := scanner.Err(); errScan != nil {
+		if errScan := markResponseStarted(scanner.Err()); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
@@ -1157,6 +1126,7 @@ func (e *AntigravityExecutor) ExecuteStream(
 				return
 			}
 		}
+		replayAccumulator.commit(ctx)
 		reporter.ensurePublished(ctx)
 	}(httpResp)
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -1231,6 +1201,7 @@ func (e *AntigravityExecutor) CountTokens(
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
+	cliproxyauth.NotifyAccessTokenFingerprint(ctx, auth)
 	if strings.TrimSpace(token) == "" {
 		return cliproxyexecutor.Response{}, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
@@ -1243,7 +1214,7 @@ func (e *AntigravityExecutor) CountTokens(
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
-	originalPayload, errValidate := validateAntigravityRequestSignatures(from, originalPayloadSource)
+	originalPayload, errValidate := validateAntigravityRequestSignatures(baseModel, from, originalPayloadSource)
 	if errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
@@ -1252,9 +1223,23 @@ func (e *AntigravityExecutor) CountTokens(
 	// Prepare payload once (doesn't depend on baseURL)
 	payload := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
 
-	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
+	payload, err := helps.ApplyThinkingWithSourcePayload(
+		payload, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
+	)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
+	}
+	payload = e.obfuscateSensitiveWords(payload)
+	payload = sanitizeAntigravityGeminiRequestSignatures(baseModel, payload)
+	payload, _, errReplay := prepareAntigravityGeminiReasoningReplayPayload(
+		ctx,
+		baseModel,
+		req,
+		opts,
+		payload,
+	)
+	if errReplay != nil {
+		return cliproxyexecutor.Response{}, errReplay
 	}
 
 	payload = deleteJSONField(payload, "project")
@@ -1263,10 +1248,6 @@ func (e *AntigravityExecutor) CountTokens(
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
-
-	var lastStatus int
-	var lastBody []byte
-	var lastErr error
 
 	for idx, baseURL := range baseURLs {
 		base := strings.TrimSuffix(baseURL, "/")
@@ -1301,19 +1282,6 @@ func (e *AntigravityExecutor) CountTokens(
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
-			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-				return cliproxyexecutor.Response{}, errDo
-			}
-			lastStatus = 0
-			lastBody = nil
-			lastErr = errDo
-			if idx+1 < len(baseURLs) {
-				log.Debugf(
-					"antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL,
-					baseURLs[idx+1],
-				)
-				continue
-			}
 			return cliproxyexecutor.Response{}, errDo
 		}
 
@@ -1324,7 +1292,7 @@ func (e *AntigravityExecutor) CountTokens(
 		}
 		if errRead != nil {
 			recordAPIResponseError(ctx, e.cfg, errRead)
-			return cliproxyexecutor.Response{}, errRead
+			return cliproxyexecutor.Response{}, markResponseStarted(errRead)
 		}
 		appendAPIResponseChunk(ctx, e.cfg, bodyBytes)
 
@@ -1334,9 +1302,6 @@ func (e *AntigravityExecutor) CountTokens(
 			return cliproxyexecutor.Response{Payload: translated, Headers: httpResp.Header.Clone()}, nil
 		}
 
-		lastStatus = httpResp.StatusCode
-		lastBody = append([]byte(nil), bodyBytes...)
-		lastErr = nil
 		if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
 			log.Debugf(
 				"antigravity executor: rate limited on base url %s, retrying with fallback base url: %s", baseURL,
@@ -1344,30 +1309,11 @@ func (e *AntigravityExecutor) CountTokens(
 			)
 			continue
 		}
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
-		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
-			}
-		}
-		return cliproxyexecutor.Response{}, sErr
+		return cliproxyexecutor.Response{}, buildStatusError(httpResp.StatusCode, bodyBytes, httpResp.Header)
 	}
 
-	switch {
-	case lastStatus != 0:
-		sErr := statusErr{code: lastStatus, msg: string(lastBody)}
-		if lastStatus == http.StatusTooManyRequests {
-			if retryAfter, parseErr := parseRetryDelay(lastBody); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
-			}
-		}
-		return cliproxyexecutor.Response{}, sErr
-	case lastErr != nil:
-		return cliproxyexecutor.Response{}, lastErr
-	default:
-		return cliproxyexecutor.Response{}, statusErr{
-			code: http.StatusServiceUnavailable, msg: "antigravity executor: no base url available",
-		}
+	return cliproxyexecutor.Response{}, statusErr{
+		code: http.StatusServiceUnavailable, msg: "antigravity executor: no base url available",
 	}
 }
 
@@ -1390,19 +1336,38 @@ func normalizeAntigravityCapabilityModelID(modelID string) string {
 	return strings.ToLower(strings.TrimSpace(modelID))
 }
 
-// FetchAntigravityModels retrieves available models using the supplied auth.
-func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
+// FetchAntigravityModels retrieves the complete model set using the supplied auth.
+func FetchAntigravityModels(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	cfg *config.Config,
+) ModelDiscoveryResult {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	exec := &AntigravityExecutor{cfg: cfg}
 	token, updatedAuth, errToken := exec.ensureAccessToken(ctx, auth)
-	if errToken != nil || token == "" {
-		return fallbackAntigravityPrimaryModels()
+	if errToken != nil {
+		return failedAntigravityModelDiscovery(ctx, fmt.Errorf("resolve access token: %w", errToken))
+	}
+	if token == "" {
+		return ModelDiscoveryResult{
+			Outcome: ModelDiscoveryFailed,
+			Err:     fmt.Errorf("resolve access token: empty access token"),
+		}
 	}
 	if updatedAuth != nil {
 		auth = updatedAuth
 	}
+	withAuthUpdate := func(result ModelDiscoveryResult) ModelDiscoveryResult {
+		result.Auth = updatedAuth
+		return result
+	}
 
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, cfg, auth, 0)
+	var lastErr error
+	var incomplete bool
 
 	for idx, baseURL := range baseURLs {
 		modelsURL := baseURL + antigravityModelsPath
@@ -1419,7 +1384,8 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 
 		httpReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, modelsURL, bytes.NewReader(payload))
 		if errReq != nil {
-			return fallbackAntigravityPrimaryModels()
+			lastErr = fmt.Errorf("create models request for %s: %w", baseURL, errReq)
+			continue
 		}
 		httpReq.Close = true
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -1431,17 +1397,17 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 
 		httpResp, errDo := httpClient.Do(httpReq)
 		if errDo != nil {
-			if errors.Is(errDo, context.Canceled) || errors.Is(errDo, context.DeadlineExceeded) {
-				return fallbackAntigravityPrimaryModels()
+			lastErr = fmt.Errorf("request models from %s: %w", baseURL, errDo)
+			if ctx.Err() != nil {
+				return withAuthUpdate(failedAntigravityModelDiscovery(ctx, lastErr))
 			}
 			if idx+1 < len(baseURLs) {
 				log.Debugf(
 					"antigravity executor: models request error on base url %s, retrying with fallback base url: %s",
 					baseURL, baseURLs[idx+1],
 				)
-				continue
 			}
-			return fallbackAntigravityPrimaryModels()
+			continue
 		}
 
 		bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
@@ -1449,24 +1415,17 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			log.Errorf("antigravity executor: close response body error: %v", errClose)
 		}
 		if errRead != nil {
+			lastErr = fmt.Errorf("read models response from %s: %w", baseURL, errRead)
 			if idx+1 < len(baseURLs) {
 				log.Debugf(
 					"antigravity executor: models read error on base url %s, retrying with fallback base url: %s",
 					baseURL, baseURLs[idx+1],
 				)
-				continue
 			}
-			return fallbackAntigravityPrimaryModels()
+			continue
 		}
 		if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-			if httpResp.StatusCode == http.StatusTooManyRequests && idx+1 < len(baseURLs) {
-				log.Debugf(
-					"antigravity executor: models request rate limited on base url %s, retrying with fallback base url: %s",
-					baseURL,
-					baseURLs[idx+1],
-				)
-				continue
-			}
+			lastErr = buildStatusError(httpResp.StatusCode, bodyBytes, httpResp.Header)
 			if idx+1 < len(baseURLs) {
 				log.Debugf(
 					"antigravity executor: models request failed with status %d on base url %s, retrying with fallback base url: %s",
@@ -1474,21 +1433,21 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 					baseURL,
 					baseURLs[idx+1],
 				)
-				continue
 			}
-			return fallbackAntigravityPrimaryModels()
+			continue
 		}
 
 		result := gjson.GetBytes(bodyBytes, "models")
-		if !result.Exists() {
+		if !result.Exists() || !result.IsObject() {
+			lastErr = fmt.Errorf("models response from %s does not contain an object models field", baseURL)
+			incomplete = true
 			if idx+1 < len(baseURLs) {
 				log.Debugf(
-					"antigravity executor: models field missing on base url %s, retrying with fallback base url: %s",
+					"antigravity executor: models field missing or invalid on base url %s, retrying with fallback base url: %s",
 					baseURL, baseURLs[idx+1],
 				)
-				continue
 			}
-			return fallbackAntigravityPrimaryModels()
+			continue
 		}
 		webSearchModelIDs := antigravityWebSearchModelIDs(bodyBytes)
 
@@ -1511,7 +1470,6 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			}
 			modelCfg := modelConfig[modelID]
 
-			// Extract displayName from upstream response, fallback to modelID
 			displayName := modelData.Get("displayName").String()
 			if displayName == "" {
 				displayName = modelID
@@ -1529,7 +1487,6 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 				Type:        antigravityAuthType,
 			}
 
-			// Build input modalities from upstream capability flags.
 			inputModalities := []string{"TEXT"}
 			if modelData.Get("supportsImages").Bool() {
 				inputModalities = append(inputModalities, "IMAGE")
@@ -1541,18 +1498,14 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			modelInfo.SupportedOutputModalities = []string{"TEXT"}
 			_, modelInfo.SupportsWebSearch = webSearchModelIDs[normalizeAntigravityCapabilityModelID(modelID)]
 
-			// Token limits from upstream.
 			if maxTok := modelData.Get("maxTokens").Int(); maxTok > 0 {
 				modelInfo.InputTokenLimit = int(maxTok)
 			}
 			if maxOut := modelData.Get("maxOutputTokens").Int(); maxOut > 0 {
 				modelInfo.OutputTokenLimit = int(maxOut)
 			}
-
-			// Supported generation methods (Gemini v1beta convention).
 			modelInfo.SupportedGenerationMethods = []string{"generateContent", "countTokens"}
 
-			// Look up Thinking support from static config using upstream model name.
 			if modelCfg != nil {
 				if modelCfg.Thinking != nil {
 					modelInfo.Thinking = modelCfg.Thinking
@@ -1563,21 +1516,22 @@ func FetchAntigravityModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *c
 			}
 			models = append(models, modelInfo)
 		}
-		if len(models) == 0 {
-			if idx+1 < len(baseURLs) {
-				log.Debugf(
-					"antigravity executor: empty models list on base url %s, retrying with fallback base url: %s",
-					baseURL, baseURLs[idx+1],
-				)
-				continue
-			}
-			log.Debug("antigravity executor: fetched empty model list; retaining cached primary model list")
-			return fallbackAntigravityPrimaryModels()
-		}
-		storeAntigravityPrimaryModels(models)
-		return models
+		return withAuthUpdate(ModelDiscoveryResult{Outcome: ModelDiscoveryComplete, Models: models})
 	}
-	return fallbackAntigravityPrimaryModels()
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no Antigravity model discovery endpoint is available")
+	}
+	if incomplete {
+		return withAuthUpdate(ModelDiscoveryResult{Outcome: ModelDiscoveryInconclusive, Err: lastErr})
+	}
+	return withAuthUpdate(failedAntigravityModelDiscovery(ctx, lastErr))
+}
+
+func failedAntigravityModelDiscovery(ctx context.Context, err error) ModelDiscoveryResult {
+	if ctx != nil && ctx.Err() != nil {
+		return ModelDiscoveryResult{Outcome: ModelDiscoveryInconclusive, Err: errors.Join(err, ctx.Err())}
+	}
+	return ModelDiscoveryResult{Outcome: ModelDiscoveryFailed, Err: err}
 }
 
 func (e *AntigravityExecutor) ensureAccessToken(ctx context.Context, auth *cliproxyauth.Auth) (
@@ -1639,7 +1593,7 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	}
 
 	result, errRefresh, _ := antigravityRefreshGroup.Do(
-		refreshToken, func() (interface{}, error) {
+		refreshToken, func() (any, error) {
 			return e.refreshTokenSingleFlight(context.WithoutCancel(ctx), auth, refreshToken)
 		},
 	)
@@ -1705,22 +1659,16 @@ func (e *AntigravityExecutor) refreshTokenSingleFlight(
 
 	bodyBytes, errRead := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
 	if errRead != nil {
-		return nil, errRead
+		return nil, markResponseStarted(errRead)
 	}
 
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
-		sErr := statusErr{code: httpResp.StatusCode, msg: string(bodyBytes)}
-		if httpResp.StatusCode == http.StatusTooManyRequests {
-			if retryAfter, parseErr := parseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil {
-				sErr.retryAfter = retryAfter
-			}
-		}
-		return nil, sErr
+		return nil, buildStatusError(httpResp.StatusCode, bodyBytes, httpResp.Header)
 	}
 
 	var tokenResp antigravityTokenRefreshData
 	if errUnmarshal := json.Unmarshal(bodyBytes, &tokenResp); errUnmarshal != nil {
-		return nil, errUnmarshal
+		return nil, markResponseStarted(errUnmarshal)
 	}
 	return &tokenResp, nil
 }
@@ -1980,6 +1928,7 @@ func (e *AntigravityExecutor) buildRequest(
 	payload []byte,
 	stream bool,
 	alt, baseURL string,
+	derivedSessionIDs ...string,
 ) (*http.Request, error) {
 	if token == "" {
 		return nil, statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
@@ -2012,23 +1961,14 @@ func (e *AntigravityExecutor) buildRequest(
 	if errProject != nil {
 		return nil, errProject
 	}
-	payload = geminiToAntigravity(modelName, payload, projectID)
-	payload, _ = sjson.SetBytes(payload, "model", modelName)
+	payload = geminiToAntigravity(modelName, payload, projectID, derivedSessionIDs...)
 
 	useAntigravitySchema := strings.Contains(modelName, "claude") || strings.Contains(
 		modelName, "gemini-3-pro",
 	) || strings.Contains(modelName, "gemini-3.1-pro")
 	payloadStr := string(payload)
-	paths := make([]string, 0)
-	util.Walk(gjson.Parse(payloadStr), "", "parametersJsonSchema", &paths)
-	for _, p := range paths {
-		payloadStr, _ = util.RenameKey(payloadStr, p, p[:len(p)-len("parametersJsonSchema")]+"parameters")
-	}
-
-	if useAntigravitySchema {
-		payloadStr = util.CleanJSONSchemaForAntigravity(payloadStr)
-	} else {
-		payloadStr = util.CleanJSONSchemaForGemini(payloadStr)
+	if antigravityRequestNeedsSchemaSanitization(payload) {
+		payloadStr = sanitizeAntigravityRequestSchemas(payloadStr, useAntigravitySchema)
 	}
 
 	// if useAntigravitySchema {
@@ -2071,6 +2011,160 @@ func (e *AntigravityExecutor) buildRequest(
 	recordUpstreamRequest(ctx, e.cfg, requestURL.String(), httpReq.Header.Clone(), payloadLog, e.Identifier(), auth)
 
 	return httpReq, nil
+}
+
+// sanitizeAntigravityRequestSchemas cleans only payload locations that carry JSON schemas.
+// Whole-document cleaning would rewrite schema-like keys in replayed function arguments.
+func sanitizeAntigravityRequestSchemas(payloadStr string, useAntigravitySchema bool) string {
+	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
+		oldPath := base + ".parametersJsonSchema"
+		if !gjson.Get(payloadStr, oldPath).Exists() {
+			continue
+		}
+		renamed, errRename := util.RenameKey(payloadStr, oldPath, base+".parameters")
+		if errRename != nil {
+			log.Debugf("antigravity: failed to rename %s: %v", oldPath, errRename)
+			continue
+		}
+		payloadStr = renamed
+	}
+
+	toolSchemaCleaner := util.CleanJSONSchemaForGemini
+	if useAntigravitySchema {
+		toolSchemaCleaner = util.CleanJSONSchemaForAntigravity
+	}
+	cleanNestedToolSchema := func(schemaRaw string) string {
+		return cleanNestedSchema(toolSchemaCleaner, schemaRaw)
+	}
+	payloadStr = cleanAntigravitySchemasAtPaths(
+		payloadStr,
+		antigravityDeclarationSchemaPaths(payloadStr),
+		cleanNestedToolSchema,
+	)
+	return cleanAntigravitySchemasAtPaths(
+		payloadStr,
+		antigravityGenerationSchemaPaths(payloadStr),
+		util.CleanJSONSchemaForAntigravityResponse,
+	)
+}
+
+func cleanAntigravitySchemasAtPaths(
+	payloadStr string,
+	schemaPaths []string,
+	clean func(string) string,
+) string {
+	for _, schemaPath := range schemaPaths {
+		schema := gjson.Get(payloadStr, schemaPath)
+		if !schema.Exists() {
+			continue
+		}
+		updated, errSet := sjson.SetRawBytes(
+			[]byte(payloadStr),
+			schemaPath,
+			[]byte(clean(schema.Raw)),
+		)
+		if errSet != nil {
+			log.Debugf("antigravity: failed to write cleaned schema at %s: %v", schemaPath, errSet)
+			continue
+		}
+		payloadStr = string(updated)
+	}
+	return payloadStr
+}
+
+const antigravitySchemaWrapperKey = "schema"
+
+// cleanNestedSchema preserves the cleaner's nested-schema placeholder behavior.
+func cleanNestedSchema(clean func(string) string, schemaRaw string) string {
+	wrapped, errWrap := sjson.SetRaw("{}", antigravitySchemaWrapperKey, schemaRaw)
+	if errWrap != nil {
+		return clean(schemaRaw)
+	}
+	if unwrapped := gjson.Get(clean(wrapped), antigravitySchemaWrapperKey); unwrapped.Exists() {
+		return unwrapped.Raw
+	}
+	return clean(schemaRaw)
+}
+
+// antigravityFunctionDeclarationPaths returns all function declaration paths in the request.
+func antigravityFunctionDeclarationPaths(payloadStr string) []string {
+	tools := gjson.Get(payloadStr, "request.tools")
+	if !tools.IsArray() {
+		return nil
+	}
+	paths := make([]string, 0, len(tools.Array()))
+	for i, tool := range tools.Array() {
+		for _, declarationKey := range []string{"functionDeclarations", "function_declarations"} {
+			declarations := tool.Get(declarationKey)
+			if !declarations.IsArray() {
+				continue
+			}
+			for j := range declarations.Array() {
+				paths = append(
+					paths,
+					fmt.Sprintf("request.tools.%d.%s.%d", i, declarationKey, j),
+				)
+			}
+		}
+	}
+	return paths
+}
+
+func antigravityDeclarationSchemaPaths(payloadStr string) []string {
+	paths := make([]string, 0, 8)
+	for _, base := range antigravityFunctionDeclarationPaths(payloadStr) {
+		for _, key := range antigravityDeclarationSchemaKeys {
+			path := base + "." + key
+			if gjson.Get(payloadStr, path).IsObject() {
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
+}
+
+func antigravityGenerationSchemaPaths(payloadStr string) []string {
+	paths := make(
+		[]string,
+		0,
+		len(antigravityGenerationConfigContainers)*len(antigravityGenerationSchemaKeys),
+	)
+	for _, container := range antigravityGenerationConfigContainers {
+		for _, key := range antigravityGenerationSchemaKeys {
+			path := container + "." + key
+			if gjson.Get(payloadStr, path).IsObject() {
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
+}
+
+var (
+	antigravityDeclarationSchemaKeys = []string{
+		"parameters", "parametersJsonSchema", "parameters_json_schema",
+		"response", "responseJsonSchema", "response_json_schema",
+	}
+	antigravityGenerationConfigContainers = []string{
+		"request.generationConfig", "request.generation_config",
+	}
+	antigravityGenerationSchemaKeys = []string{
+		"responseSchema", "responseJsonSchema", "response_schema", "response_json_schema",
+	}
+)
+
+func antigravityRequestNeedsSchemaSanitization(payload []byte) bool {
+	if gjson.GetBytes(payload, "request.tools.0").Exists() {
+		return true
+	}
+	for _, container := range antigravityGenerationConfigContainers {
+		for _, key := range antigravityGenerationSchemaKeys {
+			if gjson.GetBytes(payload, container+"."+key).Exists() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func tokenExpiry(metadata map[string]any) time.Time {
@@ -2258,38 +2352,48 @@ func resolveCustomAntigravityBaseURL(auth *cliproxyauth.Auth) string {
 	return ""
 }
 
-func geminiToAntigravity(modelName string, payload []byte, projectID string) []byte {
-	template, _ := sjson.Set(string(payload), "model", modelName)
-	template, _ = sjson.Set(template, "userAgent", "antigravity")
+func geminiToAntigravity(modelName string, payload []byte, projectID string, derivedSessionIDs ...string) []byte {
+	template := payload
+	template = helps.SetStringIfDifferent(template, "model", modelName)
+	template = helps.SetStringIfDifferent(template, "userAgent", "antigravity")
 
 	isImageModel := strings.Contains(modelName, "image")
-	reqType := strings.TrimSpace(gjson.Get(template, "requestType").String())
+	reqType := strings.TrimSpace(gjson.GetBytes(template, "requestType").String())
 	if reqType == "" {
 		if isImageModel {
 			reqType = "image_gen"
 		} else {
 			reqType = "agent"
 		}
-		template, _ = sjson.Set(template, "requestType", reqType)
+		template = helps.SetStringIfDifferent(template, "requestType", reqType)
 	}
 
-	template, _ = sjson.Set(template, "project", projectID)
+	template = helps.SetStringIfDifferent(template, "project", projectID)
 
 	if isImageModel {
-		template, _ = sjson.Set(template, "requestId", generateImageGenRequestID())
+		template, _ = sjson.SetBytes(template, "requestId", generateImageGenRequestID())
 	} else if reqType != "web_search" {
-		template, _ = sjson.Set(template, "requestId", generateRequestID())
-		template, _ = sjson.Set(template, "request.sessionId", generateStableSessionID(payload))
+		template, _ = sjson.SetBytes(template, "requestId", generateRequestID())
+		sessionID := cliproxysession.NormalizeExplicitID(gjson.GetBytes(template, "request.sessionId").String())
+		if sessionID == "" && len(derivedSessionIDs) > 0 {
+			sessionID = cliproxysession.NormalizeExplicitID(derivedSessionIDs[0])
+		}
+		if sessionID == "" {
+			sessionID = generateStableSessionID(payload)
+		}
+		template = helps.SetStringIfDifferent(template, "request.sessionId", sessionID)
 	}
 
-	template, _ = sjson.Delete(template, "request.safetySettings")
-	if toolConfig := gjson.Get(template, "toolConfig"); toolConfig.Exists() && !gjson.Get(
+	if gjson.GetBytes(template, "request.safetySettings").Exists() {
+		template, _ = sjson.DeleteBytes(template, "request.safetySettings")
+	}
+	if toolConfig := gjson.GetBytes(template, "toolConfig"); toolConfig.Exists() && !gjson.GetBytes(
 		template, "request.toolConfig",
 	).Exists() {
-		template, _ = sjson.SetRaw(template, "request.toolConfig", toolConfig.Raw)
-		template, _ = sjson.Delete(template, "toolConfig")
+		template, _ = sjson.SetRawBytes(template, "request.toolConfig", []byte(toolConfig.Raw))
+		template, _ = sjson.DeleteBytes(template, "toolConfig")
 	}
-	return []byte(template)
+	return template
 }
 
 func generateRequestID() string {

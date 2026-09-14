@@ -17,23 +17,29 @@ import (
 )
 
 func TestGeminiCLIExecutorRefreshBuildsPrimaryPersistenceForVirtualCredential(t *testing.T) {
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if errParse := r.ParseForm(); errParse != nil {
-			t.Errorf("ParseForm() error = %v", errParse)
-			http.Error(w, "invalid form", http.StatusBadRequest)
-			return
-		}
-		if got := r.Form.Get("refresh_token"); got != "old-refresh" {
-			t.Errorf("refresh_token = %q, want old-refresh", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token":  "new-access",
-			"refresh_token": "new-refresh",
-			"token_type":    "Bearer",
-			"expires_in":    3600,
-		})
-	}))
+	tokenServer := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				if errParse := r.ParseForm(); errParse != nil {
+					t.Errorf("ParseForm() error = %v", errParse)
+					http.Error(w, "invalid form", http.StatusBadRequest)
+					return
+				}
+				if got := r.Form.Get("refresh_token"); got != "old-refresh" {
+					t.Errorf("refresh_token = %q, want old-refresh", got)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(
+					map[string]any{
+						"access_token":  "new-access",
+						"refresh_token": "new-refresh",
+						"token_type":    "Bearer",
+						"expires_in":    3600,
+					},
+				)
+			},
+		),
+	)
 	defer tokenServer.Close()
 
 	previousTokenParser := geminiTokenAndConfigFromMetadata
@@ -114,11 +120,15 @@ func TestGeminiCLIExecutorRefreshBuildsPrimaryPersistenceForVirtualCredential(t 
 
 func TestPrepareGeminiCLITokenSourceDoesNotRefreshOutsideManager(t *testing.T) {
 	var refreshRequests atomic.Int32
-	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		refreshRequests.Add(1)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"unexpected","token_type":"Bearer","expires_in":3600}`))
-	}))
+	tokenServer := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				refreshRequests.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"access_token":"unexpected","token_type":"Bearer","expires_in":3600}`))
+			},
+		),
+	)
 	defer tokenServer.Close()
 
 	previousTokenParser := geminiTokenAndConfigFromMetadata

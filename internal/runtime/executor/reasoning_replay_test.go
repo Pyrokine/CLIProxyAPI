@@ -56,7 +56,7 @@ func TestApplyXAIReasoningReplayCacheInsertsCachedReasoningAndToolCall(t *testin
 	valid := validGrokEncryptedContentForExecutorTest()
 	model := "grok-4.3"
 	sessionKey := "execution:xai-session-1"
-	if ok := internalcache.CacheXAIReasoningReplayItems(
+	if ok := internalcache.XAIReasoningReplayItems(
 		model, sessionKey, [][]byte{
 			[]byte(fmt.Sprintf(
 				`{"type":"reasoning","encrypted_content":%q,"summary":[{"type":"summary_text","text":"old"}]}`, valid,
@@ -64,7 +64,7 @@ func TestApplyXAIReasoningReplayCacheInsertsCachedReasoningAndToolCall(t *testin
 			[]byte(`{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}"}`),
 		},
 	); !ok {
-		t.Fatal("CacheXAIReasoningReplayItems returned false")
+		t.Fatal("XAIReasoningReplayItems returned false")
 	}
 
 	body := []byte(`{
@@ -110,7 +110,7 @@ func TestAntigravityReasoningReplayCachesFunctionCallBeforeFunctionResponse(t *t
 		t.Fatal("expected valid Antigravity replay scope")
 	}
 	responsePayload := []byte(`{
-		"response":{"candidates":[{"content":{"parts":[
+		"response":{"candidates":[{"finishReason":"STOP","content":{"parts":[
 			{"functionCall":{"id":"call_1","name":"read_file","args":{"path":"a.txt"}},"thoughtSignature":"thought_signature_1234567890"}
 		]}}]}
 	}`)
@@ -119,29 +119,33 @@ func TestAntigravityReasoningReplayCachesFunctionCallBeforeFunctionResponse(t *t
 	nextPayload := []byte(`{
 		"sessionId":"ag-session-1",
 		"request":{"contents":[
+			{"role":"user","parts":[{"text":"call tool"}]},
 			{"role":"user","parts":[{"functionResponse":{"id":"call_1","name":"read_file","response":{"content":"ok"}}}]}
 		]}
 	}`)
-	updated, nextScope := prepareAntigravityGeminiReasoningReplayPayload(
+	updated, nextScope, errReplay := prepareAntigravityGeminiReasoningReplayPayload(
 		context.Background(), model, cliproxyexecutor.Request{Model: model, Payload: nextPayload},
 		cliproxyexecutor.Options{}, nextPayload,
 	)
+	if errReplay != nil {
+		t.Fatal(errReplay)
+	}
 
 	if !nextScope.valid() {
 		t.Fatal("expected valid next replay scope")
 	}
-	if got := gjson.GetBytes(updated, "request.contents.0.role").String(); got != "model" {
-		t.Fatalf("request.contents.0.role = %q, want model; body=%s", got, string(updated))
+	if got := gjson.GetBytes(updated, "request.contents.1.role").String(); got != "model" {
+		t.Fatalf("request.contents.1.role = %q, want model; body=%s", got, string(updated))
 	}
-	if got := gjson.GetBytes(updated, "request.contents.0.parts.0.functionCall.id").String(); got != "call_1" {
+	if got := gjson.GetBytes(updated, "request.contents.1.parts.0.functionCall.id").String(); got != "call_1" {
 		t.Fatalf("replayed functionCall id = %q, want call_1; body=%s", got, string(updated))
 	}
 	if got := gjson.GetBytes(
-		updated, "request.contents.0.parts.0.thoughtSignature",
+		updated, "request.contents.1.parts.0.thoughtSignature",
 	).String(); got != "thought_signature_1234567890" {
 		t.Fatalf("replayed thoughtSignature = %q", got)
 	}
-	if got := gjson.GetBytes(updated, "request.contents.1.parts.0.functionResponse.id").String(); got != "call_1" {
+	if got := gjson.GetBytes(updated, "request.contents.2.parts.0.functionResponse.id").String(); got != "call_1" {
 		t.Fatalf("functionResponse moved unexpectedly, id = %q body=%s", got, string(updated))
 	}
 }

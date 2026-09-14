@@ -9,22 +9,13 @@ import (
 	"strings"
 )
 
-// String escapes text before it is returned to browser-facing management clients.
-func String(value string) string {
+// escapeString escapes text before it is returned to browser-facing management clients.
+func escapeString(value string) string {
 	return html.EscapeString(value)
 }
 
-// Strings escapes each string in values while preserving order.
-func Strings(values []string) []string {
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		out = append(out, String(value))
-	}
-	return out
-}
-
-// JSONBody escapes all string values in a JSON document.
-func JSONBody(body []byte) ([]byte, bool) {
+// jsonBody escapes all string values in a JSON document.
+func jsonBody(body []byte) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
 		return body, false
@@ -44,35 +35,35 @@ func JSONBody(body []byte) ([]byte, bool) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
-	if errEncode := encoder.Encode(JSONValue(value)); errEncode != nil {
+	if errEncode := encoder.Encode(jsonValue(value)); errEncode != nil {
 		return body, false
 	}
 	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), true
 }
 
-// JSONBodyIfLikely escapes JSON bodies when the content type or body shape indicates JSON.
-func JSONBodyIfLikely(body []byte, contentType string) ([]byte, bool) {
-	if IsJSONContentType(contentType) || LooksLikeJSON(body) {
-		return JSONBody(body)
+// jsonBodyIfLikely escapes JSON bodies when the content type or body shape indicates JSON.
+func jsonBodyIfLikely(body []byte, contentType string) ([]byte, bool) {
+	if isJSONContentType(contentType) || looksLikeJSON(body) {
+		return jsonBody(body)
 	}
 	return body, false
 }
 
-// JSONValue recursively escapes string values in JSON-compatible data.
-func JSONValue(value any) any {
+// jsonValue recursively escapes string values in JSON-compatible data.
+func jsonValue(value any) any {
 	switch typed := value.(type) {
 	case string:
-		return String(typed)
+		return escapeString(typed)
 	case []any:
 		out := make([]any, len(typed))
 		for index, item := range typed {
-			out[index] = JSONValue(item)
+			out[index] = jsonValue(item)
 		}
 		return out
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, item := range typed {
-			out[key] = JSONValue(item)
+			out[key] = jsonValue(item)
 		}
 		return out
 	default:
@@ -80,8 +71,8 @@ func JSONValue(value any) any {
 	}
 }
 
-// IsJSONContentType reports whether contentType is application/json or a +json type.
-func IsJSONContentType(contentType string) bool {
+// isJSONContentType reports whether contentType is application/json or a +json type.
+func isJSONContentType(contentType string) bool {
 	mediaType, _, errParse := mime.ParseMediaType(strings.TrimSpace(contentType))
 	if errParse != nil {
 		mediaType = strings.TrimSpace(contentType)
@@ -90,8 +81,8 @@ func IsJSONContentType(contentType string) bool {
 	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
 }
 
-// LooksLikeJSON reports whether body starts with an object or array JSON marker.
-func LooksLikeJSON(body []byte) bool {
+// looksLikeJSON reports whether body starts with an object or array JSON marker.
+func looksLikeJSON(body []byte) bool {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
 		return false

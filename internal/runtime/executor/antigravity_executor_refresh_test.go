@@ -21,12 +21,12 @@ func (f antigravityRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, 
 }
 
 func TestAntigravityRefreshTokenSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	roundTripper := antigravityRoundTripFunc(
 		func(req *http.Request) (*http.Response, error) {
-			if atomic.AddInt32(&calls, 1) == 1 {
+			if calls.Add(1) == 1 {
 				close(entered)
 			}
 			<-release
@@ -83,7 +83,7 @@ func TestAntigravityRefreshTokenSingleflightDeduplicatesConcurrentCalls(t *testi
 			t.Fatalf("refresh failed: %v", err)
 		}
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Fatalf("refresh calls = %d, want 1", got)
 	}
 }

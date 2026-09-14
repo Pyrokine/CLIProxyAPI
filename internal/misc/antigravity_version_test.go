@@ -49,7 +49,7 @@ func TestAntigravityLatestVersionUsesCurrentCLIFallback(t *testing.T) {
 	restore := overrideAntigravityVersionCacheForTest(t, "", time.Time{})
 	defer restore()
 
-	if version := AntigravityLatestVersion(); version != "1.0.13" {
+	if version := antigravityLatestVersion(); version != "1.0.13" {
 		t.Fatalf("AntigravityLatestVersion() = %q, want %q", version, "1.0.13")
 	}
 }

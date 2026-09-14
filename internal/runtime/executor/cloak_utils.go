@@ -4,8 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"regexp"
-	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/google/uuid"
 )
 
@@ -27,19 +27,5 @@ func generateFakeUserID() string {
 
 // isValidUserID checks if a user ID matches Claude Code format.
 func isValidUserID(userID string) bool {
-	return userIDPattern.MatchString(userID)
-}
-
-// shouldCloak determines if request should be cloaked based on config and client User-Agent.
-// Returns true if cloaking should be applied.
-func shouldCloak(cloakMode string, userAgent string) bool {
-	switch strings.ToLower(cloakMode) {
-	case "always":
-		return true
-	case "never":
-		return false
-	default: // "auto" or empty
-		// If client is Claude Code, don't cloak
-		return !strings.HasPrefix(userAgent, "claude-cli")
-	}
+	return userIDPattern.MatchString(userID) || helps.IsValidUserID(userID)
 }

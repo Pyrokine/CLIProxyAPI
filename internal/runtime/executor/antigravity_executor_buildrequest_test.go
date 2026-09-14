@@ -40,7 +40,11 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 func TestValidateAntigravityRequestSignatures_DropsInvalidClaudeThinkingSignature(t *testing.T) {
 	payload := []byte(`{"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"bad","signature":"skip_thought_signature_validator"},{"type":"text","text":"visible"}]}]}`)
 
-	out, err := validateAntigravityRequestSignatures(sdktranslator.FromString("claude"), payload)
+	out, err := validateAntigravityRequestSignatures(
+		"claude-opus-4-6",
+		sdktranslator.FromString("claude"),
+		payload,
+	)
 	if err != nil {
 		t.Fatalf("validateAntigravityRequestSignatures error: %v", err)
 	}

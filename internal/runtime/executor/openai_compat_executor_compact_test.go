@@ -111,6 +111,73 @@ func TestOpenAICompatExecutorCompactDropsInvalidReasoningEncryptedContent(t *tes
 	}
 }
 
+func TestOpenAICompatPromptCacheKeyUsesConfigIndexAndSession(t *testing.T) {
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{Name: "duplicate", BaseURL: "https://first.example/v1"},
+			{Name: "duplicate", BaseURL: "https://second.example/v1", SupportPromptCacheKey: true},
+		},
+	}
+	executor := NewOpenAICompatExecutor("duplicate", cfg)
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"compat_name":  "duplicate",
+			"provider_key": "duplicate",
+			"config_index": "1",
+		},
+	}
+	req := cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","messages":[]}`)}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+		},
+	}
+
+	first := executor.applyPromptCacheKey(
+		auth, opts.SourceFormat, req.Model, req, opts, req.Payload, context.Background(),
+	)
+	second := executor.applyPromptCacheKey(
+		auth, opts.SourceFormat, req.Model, req, opts, req.Payload, context.Background(),
+	)
+	firstKey := gjson.GetBytes(first, "prompt_cache_key").String()
+	if firstKey == "" {
+		t.Fatalf("prompt_cache_key missing from %s", first)
+	}
+	if secondKey := gjson.GetBytes(second, "prompt_cache_key").String(); secondKey != firstKey {
+		t.Fatalf("prompt_cache_key = %q, want stable %q", secondKey, firstKey)
+	}
+}
+
+func TestOpenAICompatPromptCacheKeyPreservesExplicitValue(t *testing.T) {
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:                  "compat",
+				BaseURL:               "https://compat.example/v1",
+				SupportPromptCacheKey: true,
+			},
+		},
+	}
+	executor := NewOpenAICompatExecutor("compat", cfg)
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"config_index": "0"}}
+	req := cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"prompt_cache_key":"client-key"}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai")}
+
+	translated := executor.applyPromptCacheKey(
+		auth,
+		opts.SourceFormat,
+		req.Model,
+		req,
+		opts,
+		[]byte(`{"model":"gpt-5.5"}`),
+		context.Background(),
+	)
+	if got := gjson.GetBytes(translated, "prompt_cache_key").String(); got != "client-key" {
+		t.Fatalf("prompt_cache_key = %q, want client-key", got)
+	}
+}
+
 func TestOpenAICompatExecutorStreamRejectsPlainJSONAfterBlankLines(t *testing.T) {
 	server := httptest.NewServer(
 		http.HandlerFunc(

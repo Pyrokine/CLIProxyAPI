@@ -2,11 +2,14 @@ package proxyutil
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParse(t *testing.T) {
@@ -29,7 +32,6 @@ func TestParse(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(
 			tt.name, func(t *testing.T) {
 				t.Parallel()
@@ -66,7 +68,6 @@ func TestValidateProxyURL(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(
 			tt.name, func(t *testing.T) {
 				t.Parallel()
@@ -99,7 +100,6 @@ func TestValidateHTTPURL(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(
 			tt.name, func(t *testing.T) {
 				t.Parallel()
@@ -132,7 +132,6 @@ func TestValidatePublicHTTPURL(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(
 			tt.name, func(t *testing.T) {
 				t.Parallel()
@@ -220,19 +219,34 @@ func TestBuildDialerHTTPConnectProxy(t *testing.T) {
 	defer func() { _ = listener.Close() }()
 
 	requests := make(chan string, 1)
+	serverDone := make(chan error, 1)
 	go func() {
-		conn, errAccept := listener.Accept()
+		connection, errAccept := listener.Accept()
 		if errAccept != nil {
+			serverDone <- errAccept
 			return
 		}
-		defer func() { _ = conn.Close() }()
-		request, errRequest := http.ReadRequest(bufio.NewReader(conn))
+		defer func() { _ = connection.Close() }()
+		request, errRequest := http.ReadRequest(bufio.NewReader(connection))
 		if errRequest != nil {
-			requests <- "ERR " + errRequest.Error()
+			serverDone <- errRequest
 			return
 		}
 		requests <- fmt.Sprintf("%s %s %s", request.Method, request.Host, request.Header.Get("Proxy-Authorization"))
-		_, _ = conn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+		if _, errWrite := connection.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\nok")); errWrite != nil {
+			serverDone <- errWrite
+			return
+		}
+		payload := make([]byte, len("ping"))
+		if _, errRead := io.ReadFull(connection, payload); errRead != nil {
+			serverDone <- errRead
+			return
+		}
+		if string(payload) != "ping" {
+			serverDone <- fmt.Errorf("tunneled payload = %q, want ping", payload)
+			return
+		}
+		serverDone <- nil
 	}()
 
 	dialer, mode, errBuild := BuildDialer("http://user:pass@" + listener.Addr().String())
@@ -242,14 +256,100 @@ func TestBuildDialerHTTPConnectProxy(t *testing.T) {
 	if mode != ModeProxy {
 		t.Fatalf("mode = %d, want %d", mode, ModeProxy)
 	}
-	conn, errDial := dialer.Dial("tcp", "example.com:443")
+	connection, errDial := dialer.Dial("tcp", "example.com:443")
 	if errDial != nil {
 		t.Fatalf("Dial returned error: %v", errDial)
 	}
-	_ = conn.Close()
+	defer func() { _ = connection.Close() }()
 
 	got := <-requests
 	if !strings.HasPrefix(got, "CONNECT example.com:443 Basic ") {
 		t.Fatalf("proxy request = %q", got)
+	}
+	buffered := make([]byte, len("ok"))
+	if _, errRead := io.ReadFull(connection, buffered); errRead != nil {
+		t.Fatalf("read buffered tunnel payload: %v", errRead)
+	}
+	if string(buffered) != "ok" {
+		t.Fatalf("buffered tunnel payload = %q, want ok", buffered)
+	}
+	if _, errWrite := connection.Write([]byte("ping")); errWrite != nil {
+		t.Fatalf("write tunneled payload: %v", errWrite)
+	}
+	if errServer := <-serverDone; errServer != nil {
+		t.Fatalf("proxy server returned error: %v", errServer)
+	}
+}
+
+func TestBuildDialerHTTPProxyCONNECTCancellation(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("listen failed: %v", errListen)
+	}
+	defer func() { _ = listener.Close() }()
+
+	requestRead := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		connection, errAccept := listener.Accept()
+		if errAccept != nil {
+			serverDone <- errAccept
+			return
+		}
+		defer func() { _ = connection.Close() }()
+		if _, errRead := http.ReadRequest(bufio.NewReader(connection)); errRead != nil {
+			serverDone <- errRead
+			return
+		}
+		close(requestRead)
+		if errDeadline := connection.SetReadDeadline(time.Now().Add(5 * time.Second)); errDeadline != nil {
+			serverDone <- errDeadline
+			return
+		}
+		var buffer [1]byte
+		_, errRead := connection.Read(buffer[:])
+		serverDone <- errRead
+	}()
+
+	dialer, mode, errBuild := BuildDialer("http://" + listener.Addr().String())
+	if errBuild != nil || mode != ModeProxy {
+		t.Fatalf("BuildDialer mode=%d error=%v", mode, errBuild)
+	}
+	contextDialer, ok := dialer.(interface {
+		DialContext(context.Context, string, string) (net.Conn, error)
+	})
+	if !ok {
+		t.Fatal("HTTP CONNECT dialer does not support context cancellation")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	dialDone := make(chan error, 1)
+	go func() {
+		connection, errDial := contextDialer.DialContext(ctx, "tcp", "20.42.0.20:443")
+		if connection != nil {
+			_ = connection.Close()
+		}
+		dialDone <- errDial
+	}()
+	select {
+	case <-requestRead:
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not receive CONNECT request")
+	}
+	cancel()
+	select {
+	case errDial := <-dialDone:
+		if errDial == nil {
+			t.Fatal("canceled CONNECT dial returned nil error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled CONNECT dial did not return")
+	}
+	select {
+	case errServer := <-serverDone:
+		if errServer == nil {
+			t.Fatal("proxy connection stayed open after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy connection was not closed after cancellation")
 	}
 }

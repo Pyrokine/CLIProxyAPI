@@ -55,7 +55,9 @@ func TestGeminiInteractionsExecutorRequestToFormat(t *testing.T) {
 	} {
 		t.Run(
 			sourceFormat.String(), func(t *testing.T) {
-				got := exec.RequestToFormat(cliproxyexecutor.Request{}, cliproxyexecutor.Options{SourceFormat: sourceFormat})
+				got := exec.RequestToFormat(
+					cliproxyexecutor.Request{}, cliproxyexecutor.Options{SourceFormat: sourceFormat},
+				)
 				if got != sdktranslator.FormatInteractions {
 					t.Fatalf("RequestToFormat(%q) = %q, want interactions", sourceFormat, got)
 				}
@@ -63,7 +65,9 @@ func TestGeminiInteractionsExecutorRequestToFormat(t *testing.T) {
 		)
 	}
 
-	if got := exec.RequestToFormat(cliproxyexecutor.Request{}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex}); got != sdktranslator.FormatGemini {
+	if got := exec.RequestToFormat(
+		cliproxyexecutor.Request{}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatCodex},
+	); got != sdktranslator.FormatGemini {
 		t.Fatalf("RequestToFormat(codex) = %q, want gemini", got)
 	}
 }
@@ -107,7 +111,9 @@ func TestGeminiInteractionsExecuteUsesNativeEndpointAndRevision(t *testing.T) {
 			},
 		},
 		cliproxyexecutor.Request{Model: "gemini-2.5-pro", Payload: []byte(`{"model":"client-model","input":"hi"}`)},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions,
+		},
 	)
 	if err != nil {
 		t.Fatalf("Execute error = %v", err)
@@ -152,7 +158,9 @@ func TestGeminiInteractionsExecuteUsesClientRevisionHeader(t *testing.T) {
 	exec := NewGeminiInteractionsExecutor(&config.Config{})
 	_, err := exec.Execute(
 		ctx,
-		&cliproxyauth.Auth{Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "interactions-key"}},
+		&cliproxyauth.Auth{
+			Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "interactions-key"},
+		},
 		cliproxyexecutor.Request{Model: "gemini-2.5-pro", Payload: []byte(`{"input":"hi"}`)},
 		cliproxyexecutor.Options{
 			SourceFormat:   sdktranslator.FormatInteractions,
@@ -194,8 +202,12 @@ func TestGeminiExecuteStreamReadErrorWinsOverBufferedUsage(t *testing.T) {
 	stream, err := exec.ExecuteStream(
 		ctx,
 		&cliproxyauth.Auth{Provider: "gemini", Attributes: map[string]string{"api_key": "test-key"}},
-		cliproxyexecutor.Request{Model: "gemini-2.5-pro", Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini, Stream: true},
+		cliproxyexecutor.Request{
+			Model: "gemini-2.5-pro", Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+		},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini, Stream: true,
+		},
 	)
 	if err != nil {
 		t.Fatalf("ExecuteStream error = %v", err)
@@ -253,7 +265,10 @@ func TestGeminiInteractionsExecuteStreamRejectsOversizedFrame(t *testing.T) {
 		ctx,
 		&cliproxyauth.Auth{Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "test-key"}},
 		cliproxyexecutor.Request{Model: "gemini-2.5-pro", Payload: []byte(`{"input":"hi"}`)},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions, Stream: true},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions,
+			Stream: true,
+		},
 	)
 	if err != nil {
 		t.Fatalf("ExecuteStream error = %v", err)
@@ -304,7 +319,10 @@ func TestGeminiInteractionsExecuteStreamRejectsEOFBeforeTerminalEvent(t *testing
 		ctx,
 		&cliproxyauth.Auth{Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "test-key"}},
 		cliproxyexecutor.Request{Model: "gemini-2.5-pro", Payload: []byte(`{"input":"hi"}`)},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions, Stream: true},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions,
+			Stream: true,
+		},
 	)
 	if err != nil {
 		t.Fatalf("ExecuteStream error = %v", err)
@@ -370,9 +388,14 @@ func TestGeminiInteractionsExecuteStreamForcesStreamAndPassesThroughInteractions
 	exec := NewGeminiInteractionsExecutor(&config.Config{})
 	stream, err := exec.ExecuteStream(
 		ctx,
-		&cliproxyauth.Auth{Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "interactions-key"}},
+		&cliproxyauth.Auth{
+			Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "interactions-key"},
+		},
 		cliproxyexecutor.Request{Model: "gemini-2.5-pro", Payload: []byte(`{"input":"hi"}`)},
-		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions, Stream: true},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions,
+			Stream: true,
+		},
 	)
 	if err != nil {
 		t.Fatalf("ExecuteStream error = %v", err)

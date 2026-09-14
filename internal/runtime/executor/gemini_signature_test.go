@@ -15,8 +15,10 @@ import (
 )
 
 func validGeminiExecutorThoughtSignature() string {
-	payload := protowire.AppendTag(nil, 1, protowire.BytesType)
-	payload = protowire.AppendBytes(payload, []byte{0x01, 0x02, 0x03, 0x04})
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, []byte{0x01, 0x02, 0x03, 0x04})
+	payload := protowire.AppendTag(nil, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
 	return base64.StdEncoding.EncodeToString(payload)
 }
 

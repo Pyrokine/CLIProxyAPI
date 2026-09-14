@@ -7,6 +7,7 @@ package misc
 // This map is used to determine the Content-Type header for file uploads and other
 // operations where the MIME type needs to be identified from a file extension.
 // The list is extensive to cover a wide range of common and uncommon file formats.
+// noinspection SpellCheckingInspection
 var MimeTypes = map[string]string{
 	"ez":          "application/andrew-inset",
 	"aw":          "application/applixware",

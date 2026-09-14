@@ -8,7 +8,6 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
 type proxyTestRoundTripper func(*http.Request) (*http.Response, error)
@@ -33,7 +32,7 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 
 	client := newProxyAwareHTTPClient(
 		context.Background(),
-		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://8.8.4.4:8080"}},
+		&config.Config{ProxyURL: "http://8.8.4.4:8080"},
 		&cliproxyauth.Auth{ProxyURL: "direct"},
 		0,
 	)
@@ -71,7 +70,7 @@ func TestNewProxyAwareHTTPClientGlobalProxyFallback(t *testing.T) {
 
 	client := newProxyAwareHTTPClient(
 		context.Background(),
-		&config.Config{SDKConfig: sdkconfig.SDKConfig{ProxyURL: "http://8.8.4.4:8080"}},
+		&config.Config{ProxyURL: "http://8.8.4.4:8080"},
 		&cliproxyauth.Auth{},
 		0,
 	)
