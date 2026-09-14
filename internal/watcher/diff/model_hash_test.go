@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
 func TestComputeOpenAICompatModelsHash_Deterministic(t *testing.T) {
@@ -107,6 +108,14 @@ func TestComputeCodexModelsHash_Empty(t *testing.T) {
 	}
 }
 
+func TestC04ComputeXAIModelsHashIncludesForceMapping(t *testing.T) {
+	withoutForce := ComputeCodexModelsHash([]config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest"}})
+	withForce := ComputeCodexModelsHash([]config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest", ForceMapping: true}})
+	if withoutForce == "" || withForce == "" || withoutForce == withForce {
+		t.Fatalf("hashes = %q / %q, want distinct non-empty values", withoutForce, withForce)
+	}
+}
+
 func TestComputeClaudeModelsHash_IgnoresBlankAndDedup(t *testing.T) {
 	a := []config.ClaudeModel{
 		{Name: "m1", Alias: "a1"},
@@ -132,6 +141,124 @@ func TestComputeCodexModelsHash_IgnoresBlankAndDedup(t *testing.T) {
 	}
 	if h1, h2 := ComputeCodexModelsHash(a), ComputeCodexModelsHash(b); h1 == "" || h1 != h2 {
 		t.Fatalf("expected same hash ignoring blanks/dupes, got %q / %q", h1, h2)
+	}
+}
+
+func TestConfiguredModelHashesIncludeDisplayNameAndMaxContextLength(t *testing.T) {
+	base := []config.CodexModel{{Name: "gpt-5.5", Alias: "configured-gpt"}}
+	withDisplayName := []config.CodexModel{{Name: "gpt-5.5", Alias: "configured-gpt", DisplayName: "Configured GPT"}}
+	withMaxContext := []config.CodexModel{{Name: "gpt-5.5", Alias: "configured-gpt", MaxContextLength: 262144}}
+
+	baseHash := ComputeCodexModelsHash(base)
+	if baseHash == ComputeCodexModelsHash(withDisplayName) {
+		t.Fatal("Codex model hash did not change for display-name")
+	}
+	if baseHash == ComputeCodexModelsHash(withMaxContext) {
+		t.Fatal("Codex model hash did not change for max-context-length")
+	}
+
+	compatBase := []config.OpenAICompatibilityModel{{Name: "gpt-5.5", Alias: "configured-gpt"}}
+	compatChanged := []config.OpenAICompatibilityModel{
+		{
+			Name:             "gpt-5.5",
+			Alias:            "configured-gpt",
+			DisplayName:      "Configured GPT",
+			MaxContextLength: 262144,
+		},
+	}
+	if ComputeOpenAICompatModelsHash(compatBase) == ComputeOpenAICompatModelsHash(compatChanged) {
+		t.Fatal("OpenAI compatibility model hash did not include metadata overrides")
+	}
+}
+
+func TestConfiguredModelHashesIncludeThinking(t *testing.T) {
+	thinking := &registry.ThinkingSupport{Levels: []string{"high"}}
+	tests := []struct {
+		name string
+		base func() string
+		with func() string
+	}{
+		{
+			name: "openai compatibility",
+			base: func() string {
+				return ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", Alias: "alias"}})
+			},
+			with: func() string {
+				return ComputeOpenAICompatModelsHash(
+					[]config.OpenAICompatibilityModel{
+						{
+							Name: "model", Alias: "alias", Thinking: thinking,
+						},
+					},
+				)
+			},
+		},
+		{
+			name: "vertex",
+			base: func() string {
+				return ComputeVertexCompatModelsHash([]config.VertexCompatModel{{Name: "model", Alias: "alias"}})
+			},
+			with: func() string {
+				return ComputeVertexCompatModelsHash(
+					[]config.VertexCompatModel{
+						{
+							Name: "model", Alias: "alias", Thinking: thinking,
+						},
+					},
+				)
+			},
+		},
+		{
+			name: "claude",
+			base: func() string {
+				return ComputeClaudeModelsHash([]config.ClaudeModel{{Name: "model", Alias: "alias"}})
+			},
+			with: func() string {
+				return ComputeClaudeModelsHash(
+					[]config.ClaudeModel{
+						{
+							Name: "model", Alias: "alias", Thinking: thinking,
+						},
+					},
+				)
+			},
+		},
+		{
+			name: "codex",
+			base: func() string {
+				return ComputeCodexModelsHash([]config.CodexModel{{Name: "model", Alias: "alias"}})
+			},
+			with: func() string {
+				return ComputeCodexModelsHash([]config.CodexModel{{Name: "model", Alias: "alias", Thinking: thinking}})
+			},
+		},
+		{
+			name: "gemini",
+			base: func() string {
+				return ComputeGeminiModelsHash([]config.GeminiModel{{Name: "model", Alias: "alias"}})
+			},
+			with: func() string {
+				return ComputeGeminiModelsHash(
+					[]config.GeminiModel{
+						{
+							Name: "model", Alias: "alias", Thinking: thinking,
+						},
+					},
+				)
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				baseHash := testCase.base()
+				withHash := testCase.with()
+				if baseHash == "" || withHash == "" || baseHash == withHash {
+					t.Fatalf("hashes = %q / %q, want distinct non-empty values", baseHash, withHash)
+				}
+			},
+		)
 	}
 }
 

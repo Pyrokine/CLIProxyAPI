@@ -9,11 +9,10 @@ tls:
     cert: ""
     key: ""
     # Reject plaintext requests to authenticated HTTP endpoints and Redis usage output.
-    # Loopback clients remain allowed.
+    # Direct loopback clients that are not configured as proxies remain allowed.
     require-for-auth: false
-    # Only enable when CPA sits behind a trusted reverse proxy that terminates TLS.
-    # If enabled while CPA is exposed directly, an attacker can forge X-Forwarded-Proto:
-    # https and bypass require-for-auth. Default: false (only trust real TLS connections).
+    # Accept X-Forwarded-Proto only from peers listed in remote-management.trusted-proxies.
+    # Keep false when CPA does not sit behind a TLS-terminating reverse proxy.
     trust-forwarded-proto: false
 # Management API settings
 remote-management:
@@ -21,9 +20,10 @@ remote-management:
     # When false, only localhost can access management endpoints (a key is still required).
     allow-remote: false
     # Direct reverse-proxy IP addresses or CIDR ranges whose X-Forwarded-For/X-Real-IP
-    # headers may identify management clients. Leave empty when CPA is exposed directly.
+    # headers may identify clients for API and management authentication.
+    # Leave empty when CPA is exposed directly. Full-network CIDRs are rejected.
     # Example for a local Nginx proxy: ["127.0.0.1/32", "::1/128"]
-    trusted-proxies: []
+    trusted-proxies: [ ]
     # Management key. If a plaintext value is provided here, it will be hashed on startup.
     # All management requests (even from localhost) require this key.
     # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
@@ -96,6 +96,12 @@ plugins:
 commercial-mode: false
 # When true, disable Claude Code cloak mode globally for all Claude credentials.
 disable-claude-cloak-mode: false
+
+# Claude Code compatibility settings.
+claude-code:
+    # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
+    disable-cloaking-model-list: false
+
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 # Maximum total size (MB) of log files under the logs directory. When exceeded, the oldest log
@@ -114,7 +120,7 @@ usage-statistics-enabled: false
 # Only per-request Details are trimmed; aggregate counters are preserved forever.
 # usage-retention:
 #   days: 30                    # Keep details for this many days. Older entries are removed. Set to -1 to disable cleanup.
-#   max-db-size-mb: 1024        # Hard cap for events.db + WAL + SHM combined. Set to 0 to disable.
+#   max-db-size-mb: 1024        # Stop new writes after the observed events.db + WAL + SHM size reaches this value. Set to 0 to disable.
 #   warning-threshold-pct: 80   # Show warnings when the DB reaches this percentage of max-db-size-mb.
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
@@ -134,6 +140,9 @@ request-retry: 3
 max-retry-credentials: 0
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
+# When true, persist runtime cooldown status independently of auth credentials.
+# PostgreSQL-backed auth stores use their cooldown table; file stores use per-auth .cds files.
+save-cooldown-status: false
 # Number of concurrent OAuth auth refresh workers. When <= 0, the default is 16.
 # auth-auto-refresh-workers: 16
 # Quota exceeded behavior
@@ -143,13 +152,13 @@ quota-exceeded:
     antigravity-credits: false # Whether to retry Claude Antigravity requests with Google One AI credits when quota is exceeded
 # Routing strategy for selecting credentials when multiple match.
 routing:
-    strategy: "round-robin" # round-robin (default), fill-first
+    strategy: "round-robin" # round-robin (default), weighted-round-robin, quota-aware, fill-first
 # CORS allowed origins. Empty = allow all (*) for CLI tool compatibility.
 # Set to restrict browser access: ["http://localhost:5173", "http://127.0.0.1:5173"]
 # cors-allowed-origins: []
 
 # When true (default), enable authentication for the WebSocket API (/v1/ws).
-# Set to false to disable (NOT RECOMMENDED — unauthenticated WebSocket access allows anonymous AI proxy usage).
+# Set false to disable (NOT RECOMMENDED — unauthenticated WebSocket access allows anonymous AI proxy usage).
 ws-auth: true
 # Allow API key authentication via URL query parameters (?key= / ?auth_token=).
 # Disabled by default — query parameters leak credentials to server logs, Referer headers, and browser history.
@@ -163,7 +172,7 @@ auto-refresh-interval: 3
 model-refresh-interval: 3
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
-# Base model used by the legacy hosted image_generation tool path when Codex image requests are not proxied directly through the Image API. Defaults to gpt-5.4-mini.
+# Base model used by the legacy hosted image_generation tool path for GPT Image 2 and 2.5 requests that are not proxied directly through the Images API. Defaults to gpt-5.4-mini.
 # gpt-image-2-base-model: "gpt-5.4-mini"
 # How long video IDs stay pinned to the credential that created them. Accepts duration strings like "30m" or "3h". Defaults to 3h.
 # video-result-auth-cache-ttl: "3h"
@@ -174,6 +183,33 @@ quota-refresh:
 codex:
     # Remap Codex prompt_cache_key and client identity per selected auth when fill-first/session affinity is enabled.
     identity-confuse: false
+    # Disable forcing the official Codex User-Agent and Originator headers on HTTP/SSE and WebSocket requests.
+    disable-codex-cloaking: false
+    # Optimize official Codex multi-agent v2 requests and collaboration tools.
+    optimize-multi-agent-v2: false
+    # Optional in-process WebRTC gateway for Codex Live audio and oai-events.
+    live-media-relay:
+        enabled: false
+        # Maximum concurrent media sessions. Values <= 0 use the default of 32.
+        max-sessions: 32
+        # Reject private, loopback, link-local, multicast, and unspecified downstream candidates.
+        # Leave false for local or LAN Codex Desktop clients.
+        disable-private-remote-ips: false
+        # Public address announced by host candidates when CPA is behind NAT.
+        public-ip: ""
+        # Set both values to reserve a UDP range. The range needs at least two ports per session.
+        udp-port-min: 0
+        udp-port-max: 0
+        # Without a concrete global or per-auth proxy-url, WebRTC uses direct ICE/STUN/TURN connectivity.
+        # With http, https, socks5, or socks5h proxy-url, the OpenAI-facing leg uses authenticated
+        # ICE-TCP through that proxy and does not fall back to UDP or a direct connection.
+        # The Codex Desktop-facing leg remains direct, and configured ICE servers still apply to it.
+        ice-servers: [ ]
+        # Example TURN server:
+        # ice-servers:
+        #     - urls: ["turn:turn.example.com:3478?transport=udp"]
+        #       username: "relay-user"
+        #       credential: "relay-secret"
 auth:
     providers:
         config-api-key:
@@ -201,6 +237,10 @@ redis-usage-queue-retention-seconds: 60
 #     models:
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
+#         is-compat: false            # optional: preserve compatibility-only thinking fields for compatible upstreams
+#         thinking:                   # optional: exact thinking capability for this configured model
+#           levels: ["high", "medium", "low", "none", "auto"]
 #     excluded-models:
 #       - "gemini-2.5-pro"     # exclude specific models from this provider (exact match)
 #       - "gemini-2.5-*"       # wildcard matching prefix (e.g. gemini-2.5-flash, gemini-2.5-pro)
@@ -208,22 +248,84 @@ redis-usage-queue-retention-seconds: 60
 #       - "*flash*"            # wildcard matching substring (e.g. gemini-2.5-flash-lite)
 #   - api-key: "AIzaSy...02"
 
+# Native Interactions API keys
+# These keys use the direct /v1beta/interactions endpoint.
+# interactions-api-key:
+#   - api-key: "AIzaSy...03"
+#     prefix: "native" # optional: require calls like "native/gemini-2.5-flash" to target this credential
+#     base-url: "https://generativelanguage.googleapis.com"
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080"
+#     models:
+#       - name: "gemini-2.5-flash" # upstream model name
+#         alias: "native-gemini-flash" # client alias mapped to the upstream model
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
+#         is-compat: false # optional: preserve compatibility-only thinking fields for compatible upstreams
+#         thinking: # optional: exact thinking capability for this configured model
+#           levels: ["high", "medium", "low", "none", "auto"]
+#     excluded-models:
+#       - "gemini-2.5-pro"
+
 # Codex API keys
 # codex-api-key:
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
+#     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
 #     models:
 #       - name: "gpt-5-codex"   # upstream model name
 #         alias: "codex-latest" # client alias mapped to the upstream model
+#         max-context-length: 1048576 # optional: override Codex client context window metadata
+#         # When true and codex.optimize-multi-agent-v2 is also true, convert Codex
+#         # MultiAgentV2 agent_message items into portable Responses message/user input
+#         # for third-party Responses-compatible endpoints that reject agent_message.
+#         # It also preserves compatibility-only thinking fields for compatible upstreams.
+#         is-compat: false
+#         thinking:              # optional: exact thinking capability for this configured model
+#           levels: ["xhigh", "high", "medium", "low"]
 #     excluded-models:
 #       - "gpt-5.1"         # exclude specific models (exact match)
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
+
+# Antigravity request behavior
+# antigravity:
+#   sensitive-words: # optional: words to obfuscate with zero-width characters in system instructions
+#     - "API"
+#     - "proxy"
+
+# xAI request behavior
+# xai:
+#   inject-x-search: false # inject the native x_search tool when the request does not declare it
+
+# xAI API keys
+# Uses the native xAI executor. API-key credentials route to the configured xAI API endpoint,
+# while existing xAI OAuth credentials continue to use the Grok CLI proxy flow.
+# xai-api-key:
+#   - api-key: "xai-..."
+#     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
+#     base-url: "https://api.x.ai/v1"
+#     websockets: true # optional: enable upstream websocket transport for downstream websocket requests
+#     disable-cooling: false # optional: disable auth/model cooldown scheduling for this credential
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
+#     models:
+#       - name: "grok-4.5"
+#         alias: "grok-latest"
+#         display-name: "Grok Latest"
+#         force-mapping: true # rewrite upstream response model fields back to the alias
+#         max-context-length: 262144
+#         is-compat: false     # optional: preserve compatibility-only thinking fields for compatible upstreams
+#         thinking:           # optional: exact thinking capability for this configured model
+#           levels: ["xhigh", "high", "medium", "low"]
+#     excluded-models:
+#       - "grok-3-*"
 
 # Claude API keys
 # claude-api-key:
@@ -237,6 +339,10 @@ redis-usage-queue-retention-seconds: 60
 #     models:
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
+#         max-context-length: 1048576         # optional: override Codex client context window metadata
+#         is-compat: false                    # optional: preserve compatibility-only thinking fields for compatible upstreams
+#         thinking:                           # optional: exact thinking capability for this configured model
+#           levels: ["max", "xhigh", "high", "medium", "low", "minimal", "none", "auto"]
 #     excluded-models:
 #       - "claude-opus-4-5-20251101" # exclude specific models (exact match)
 #       - "claude-3-*"               # wildcard matching prefix (e.g. claude-3-7-sonnet-20250219)
@@ -260,12 +366,14 @@ redis-usage-queue-retention-seconds: 60
 # Default headers for Claude API requests. Update when Claude Code releases new versions.
 # These are used as fallbacks when the client does not send its own headers.
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.63 (external, cli)"
-#   package-version: "0.74.0"
-#   runtime-version: "v24.3.0"
+#   user-agent: "claude-cli/2.1.220 (external, cli)"
+#   package-version: "0.94.0"
+#   runtime-version: "v26.3.0"
 #   os: "MacOS"
 #   arch: "arm64"
 #   timeout: "600"
+#   timezone: "Asia/Singapore"
+#   stabilize-device-profile: false
 
 # Default headers for Codex OAuth requests. Update when Codex CLI releases new versions.
 # codex-header-defaults:
@@ -277,6 +385,8 @@ redis-usage-queue-retention-seconds: 60
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
 #     prefix: "test" # optional: require calls like "test/kimi-k2" to target this provider's credentials
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
+#     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests with session identity
+#     disable-cooling: false # optional: disable auth/model cooldown scheduling for this provider
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
@@ -286,6 +396,13 @@ redis-usage-queue-retention-seconds: 60
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
+#         display-name: "Kimi K2" # optional catalog display name
+#         max-context-length: 1048576 # optional Codex client context window override
+#         input-modalities: ["text", "image"] # optional chat/responses input capabilities
+#         output-modalities: ["text"] # optional output capabilities
+#         is-compat: false # optional: preserve Claude thinking/tool-call content for Responses-compatible upstreams
+#         thinking: # optional: exact thinking capability for this configured model
+#           levels: ["xhigh", "high", "medium", "low", "none", "auto"]
 #       - name: "gpt-image-1"
 #         alias: "provider-image"
 #         image: true # Route this alias through /v1/images/generations and /v1/images/edits.
@@ -302,6 +419,9 @@ redis-usage-queue-retention-seconds: 60
 #     models:                                     # optional: map aliases to upstream model names
 #       - name: "gemini-2.5-flash"                # upstream model name
 #         alias: "vertex-flash"                   # client-visible alias
+#         display-name: "Vertex Flash"            # optional catalog display name
+#         thinking:                                # optional: exact thinking capability for this configured model
+#           levels: ["high", "medium", "low", "none", "auto"]
 #       - name: "gemini-2.5-pro"
 #         alias: "vertex-pro"
 
@@ -334,6 +454,7 @@ redis-usage-queue-retention-seconds: 60
 #   codex:
 #     - name: "gpt-5"
 #       alias: "g5"
+#       display-name: "GPT-5 OAuth" # optional catalog display name
 #   qwen:
 #     - name: "qwen3-coder-plus"
 #       alias: "qwen-plus"

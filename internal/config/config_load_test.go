@@ -11,7 +11,7 @@ import (
 
 func TestApplyHomeRuntimeConfig(t *testing.T) {
 	cfg := &Config{
-		SDKConfig:              SDKConfig{APIKeys: []string{"local-key"}},
+		APIKeys:                []string{"local-key"},
 		UsageStatisticsEnabled: false,
 		DisableCooling:         false,
 		WebsocketAuth:          true,
@@ -70,7 +70,10 @@ func TestParseConfigBytesImageArtifactCacheDefaultsMatchLoadConfig(t *testing.T)
 	}
 
 	if parsed.ImageArtifactCache != loaded.ImageArtifactCache {
-		t.Fatalf("ParseConfigBytes image artifact cache = %#v, want LoadConfig value %#v", parsed.ImageArtifactCache, loaded.ImageArtifactCache)
+		t.Fatalf(
+			"ParseConfigBytes image artifact cache = %#v, want LoadConfig value %#v", parsed.ImageArtifactCache,
+			loaded.ImageArtifactCache,
+		)
 	}
 }
 
@@ -99,25 +102,27 @@ remote-management:
 `,
 	}
 	for name, content := range tests {
-		t.Run(name, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
-				t.Fatalf("write config: %v", err)
-			}
-			if _, err := LoadConfig(configPath); err == nil || !strings.Contains(
-				err.Error(),
-				errManagementSecretYAMLAlias.Error(),
-			) {
-				t.Fatalf("LoadConfig error = %v, want alias rejection", err)
-			}
-			persisted, errRead := os.ReadFile(configPath)
-			if errRead != nil {
-				t.Fatalf("read config: %v", errRead)
-			}
-			if string(persisted) != content {
-				t.Fatalf("rejected config changed:\n%s", persisted)
-			}
-		})
+		t.Run(
+			name, func(t *testing.T) {
+				configPath := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+					t.Fatalf("write config: %v", err)
+				}
+				if _, err := LoadConfig(configPath); err == nil || !strings.Contains(
+					err.Error(),
+					errManagementSecretYAMLAlias.Error(),
+				) {
+					t.Fatalf("LoadConfig error = %v, want alias rejection", err)
+				}
+				persisted, errRead := os.ReadFile(configPath)
+				if errRead != nil {
+					t.Fatalf("read config: %v", errRead)
+				}
+				if string(persisted) != content {
+					t.Fatalf("rejected config changed:\n%s", persisted)
+				}
+			},
+		)
 	}
 }
 
@@ -132,14 +137,16 @@ remote-management:
   *secret-name: plain-secret
 `,
 	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := ParseConfigBytes([]byte(content)); err == nil || !strings.Contains(
-				err.Error(),
-				errManagementSecretYAMLAlias.Error(),
-			) {
-				t.Fatalf("ParseConfigBytes error = %v, want alias rejection", err)
-			}
-		})
+		t.Run(
+			name, func(t *testing.T) {
+				if _, err := ParseConfigBytes([]byte(content)); err == nil || !strings.Contains(
+					err.Error(),
+					errManagementSecretYAMLAlias.Error(),
+				) {
+					t.Fatalf("ParseConfigBytes error = %v, want alias rejection", err)
+				}
+			},
+		)
 	}
 }
 
@@ -151,14 +158,18 @@ func TestLoadConfigRejectsNegativeImageArtifactCache(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if _, err := LoadConfig(configPath); err == nil || !strings.Contains(err.Error(), "image-artifact-cache.retention-days") {
+	if _, err := LoadConfig(configPath); err == nil || !strings.Contains(
+		err.Error(), "image-artifact-cache.retention-days",
+	) {
 		t.Fatalf("LoadConfig err = %v, want retention-days error", err)
 	}
 }
 
 func TestParseConfigBytesRejectsNegativeImageArtifactCache(t *testing.T) {
 	content := "image-artifact-cache:\n  retention-days: 1\n  max-total-size-mb: -1\n"
-	if _, err := ParseConfigBytes([]byte(content)); err == nil || !strings.Contains(err.Error(), "image-artifact-cache.max-total-size-mb") {
+	if _, err := ParseConfigBytes([]byte(content)); err == nil || !strings.Contains(
+		err.Error(), "image-artifact-cache.max-total-size-mb",
+	) {
 		t.Fatalf("ParseConfigBytes err = %v, want max-total-size-mb error", err)
 	}
 }
@@ -439,7 +450,7 @@ func TestLoadConfig_RemoteManagementDefaults(t *testing.T) {
 
 func TestValidateConfigCoversPanelManagedFields(t *testing.T) {
 	cfg := &Config{
-		SDKConfig:            SDKConfig{APIKeys: []string{"valid-api-key"}},
+		APIKeys:              []string{"valid-api-key"},
 		Port:                 8317,
 		AutoRefreshInterval:  -1,
 		ModelRefreshInterval: -1,
@@ -476,6 +487,13 @@ func TestValidateConfigCoversPanelManagedFields(t *testing.T) {
 		if !hasWarningContaining(warnings, want) {
 			t.Fatalf("warnings missing %q: %#v", want, warnings)
 		}
+	}
+}
+
+func TestValidateConfigAcceptsQuotaAwareRouting(t *testing.T) {
+	warnings := ValidateConfig(&Config{Routing: routingConfig{Strategy: "quota-aware"}})
+	if hasWarningContaining(warnings, "routing.strategy") {
+		t.Fatalf("quota-aware routing warnings = %#v", warnings)
 	}
 }
 

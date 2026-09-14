@@ -51,6 +51,36 @@ func TestOpenAICompatibility_DisabledChanged(t *testing.T) {
 	expectContains(t, changes, "provider updated: provider-a (disabled false -> true)")
 }
 
+func TestOpenAICompatibilityPromptCacheKeyChanged(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{Name: "provider-a"}}
+	newList := []config.OpenAICompatibility{{Name: "provider-a", SupportPromptCacheKey: true}}
+
+	changes := openAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (support-prompt-cache-key false -> true)")
+}
+
+func TestOpenAICompatibilityDisableCoolingChanged(t *testing.T) {
+	oldList := []config.OpenAICompatibility{{Name: "provider-a"}}
+	newList := []config.OpenAICompatibility{{Name: "provider-a", DisableCooling: true}}
+
+	changes := openAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: provider-a (disable-cooling false -> true)")
+}
+
+func TestOpenAICompatibilityPromptCacheKeyChangedWithDuplicateNames(t *testing.T) {
+	oldList := []config.OpenAICompatibility{
+		{Name: "duplicate"},
+		{Name: "duplicate"},
+	}
+	newList := []config.OpenAICompatibility{
+		{Name: "duplicate"},
+		{Name: "duplicate", SupportPromptCacheKey: true},
+	}
+
+	changes := openAICompatibility(oldList, newList)
+	expectContains(t, changes, "provider updated: duplicate (support-prompt-cache-key false -> true)")
+}
+
 func TestOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 	oldList := []config.OpenAICompatibility{
 		{

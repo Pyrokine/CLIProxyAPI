@@ -16,22 +16,21 @@ type modelsSummary struct {
 	count int
 }
 
-// summarizeModelPairs computes a hash-based summary from model name/alias pairs.
-// The accessor extracts (name, alias) from each element.
-func summarizeModelPairs[T any](models []T, accessor func(T) (string, string)) modelsSummary {
+// summarizeModelPairs computes a hash-based summary from model routing metadata.
+func summarizeModelPairs[T any](models []T, accessor func(T) (name, alias, metadata string)) modelsSummary {
 	if len(models) == 0 {
 		return modelsSummary{}
 	}
 	keys := normalizeModelPairs(
 		func(out func(key string)) {
 			for _, model := range models {
-				name, alias := accessor(model)
+				name, alias, metadata := accessor(model)
 				name = strings.TrimSpace(name)
 				alias = strings.TrimSpace(alias)
 				if name == "" && alias == "" {
 					continue
 				}
-				out(strings.ToLower(name) + "|" + strings.ToLower(alias))
+				out(strings.ToLower(name) + "|" + strings.ToLower(alias) + metadata)
 			}
 		},
 	)
@@ -43,17 +42,47 @@ func summarizeModelPairs[T any](models []T, accessor func(T) (string, string)) m
 
 // summarizeGeminiModels hashes Gemini model aliases for change detection.
 func summarizeGeminiModels(models []config.GeminiModel) modelsSummary {
-	return summarizeModelPairs(models, func(m config.GeminiModel) (string, string) { return m.Name, m.Alias })
+	return summarizeModelPairs(
+		models, func(m config.GeminiModel) (string, string, string) {
+			return m.Name, m.Alias, configuredModelCompatHashSuffix(m) + thinkingHashSuffix(m.Thinking)
+		},
+	)
 }
 
 // summarizeClaudeModels hashes Claude model aliases for change detection.
 func summarizeClaudeModels(models []config.ClaudeModel) modelsSummary {
-	return summarizeModelPairs(models, func(m config.ClaudeModel) (string, string) { return m.Name, m.Alias })
+	return summarizeModelPairs(
+		models, func(m config.ClaudeModel) (string, string, string) {
+			return m.Name, m.Alias, configuredModelCompatHashSuffix(m) + thinkingHashSuffix(m.Thinking)
+		},
+	)
 }
 
-// summarizeCodexModels hashes Codex model aliases for change detection.
+// summarizeCodexModels hashes Codex-shaped model aliases for change detection.
 func summarizeCodexModels(models []config.CodexModel) modelsSummary {
-	return summarizeModelPairs(models, func(m config.CodexModel) (string, string) { return m.Name, m.Alias })
+	if len(models) == 0 {
+		return modelsSummary{}
+	}
+	keys := normalizeModelPairs(
+		func(out func(key string)) {
+			for _, model := range models {
+				name := strings.TrimSpace(model.Name)
+				alias := strings.TrimSpace(model.Alias)
+				if name == "" && alias == "" {
+					continue
+				}
+				out(
+					strings.ToLower(name) + "|" + strings.ToLower(alias) +
+						"|display-name=" + strings.TrimSpace(model.DisplayName) +
+						"|max-context-length=" + fmt.Sprintf("%d", model.MaxContextLength) +
+						"|force-mapping=" + fmt.Sprintf("%t", model.ForceMapping) +
+						configuredModelCompatHashSuffix(model) +
+						thinkingHashSuffix(model.Thinking),
+				)
+			}
+		},
+	)
+	return modelsSummary{hash: hashJoined(keys), count: len(keys)}
 }
 
 // summarizeVertexModels hashes Vertex-compatible model aliases for change detection.
@@ -71,7 +100,7 @@ func summarizeVertexModels(models []config.VertexCompatModel) modelsSummary {
 		if alias != "" {
 			name = alias
 		}
-		names = append(names, name)
+		names = append(names, name+thinkingHashSuffix(model.Thinking))
 	}
 	if len(names) == 0 {
 		return modelsSummary{}

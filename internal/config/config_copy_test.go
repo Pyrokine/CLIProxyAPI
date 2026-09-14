@@ -8,7 +8,8 @@ import (
 )
 
 func TestCloneCreatesIndependentConfig(t *testing.T) {
-	cfg, err := ParseConfigBytes([]byte(`
+	cfg, err := ParseConfigBytes(
+		[]byte(`
 api-keys:
   - client-key
 api-key-aliases:
@@ -31,7 +32,12 @@ model-catalog:
     - name: model-a
       aliases:
         - alias-a
-`))
+antigravity:
+  sensitive-words:
+    - API
+    - proxy
+`),
+	)
 	if err != nil {
 		t.Fatalf("ParseConfigBytes: %v", err)
 	}
@@ -61,6 +67,7 @@ model-catalog:
 	cloned.GeminiKey[0].Headers["X-Test"] = "changed-header"
 	cloned.OAuthExcludedModels["codex"][0] = "changed-model"
 	cloned.ModelCatalog.Models[0].Aliases[0] = "changed-model-alias"
+	cloned.Antigravity.SensitiveWords[0] = "changed-sensitive-word"
 	plugin := cloned.Plugins.Configs["sample"]
 	*plugin.Enabled = false
 	plugin.Raw.Content[3].Content[1].Value = "changed-plugin-value"
@@ -81,6 +88,9 @@ model-catalog:
 	}
 	if cfg.ModelCatalog.Models[0].Aliases[0] != "alias-a" {
 		t.Fatalf("source model catalog = %#v", cfg.ModelCatalog)
+	}
+	if got := cfg.Antigravity.SensitiveWords[0]; got != "API" {
+		t.Fatalf("source Antigravity sensitive word = %q, want API", got)
 	}
 	if cfg.Home.NodeID != "node-a" {
 		t.Fatalf("source Home = %#v", cfg.Home)

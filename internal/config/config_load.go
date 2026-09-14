@@ -100,7 +100,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
 				// Missing and optional: return empty config (cloud deploy standby).
-				return &Config{}, nil
+				return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
 			}
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -108,14 +108,23 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(data) == 0 {
-		return &Config{}, nil
+		return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
 	}
 
 	if errValidate := validateManagementSecretYAML(data); errValidate != nil {
 		if optional {
-			return &Config{}, nil
+			return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
 		}
 		return nil, fmt.Errorf("failed to validate config file: %w", errValidate)
+	}
+
+	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
+		if optional {
+			cfgOptional := &Config{}
+			cfgOptional.NormalizePluginsConfig()
+			return cfgOptional, nil
+		}
+		return nil, errValidate
 	}
 
 	// Unmarshal the YAML data into the Config struct.
@@ -130,10 +139,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ImageArtifactCache.RetentionDays = 7
 	cfg.ImageArtifactCache.MaxTotalSizeMB = 10240
 	cfg.DisableCooling = false
+	cfg.SaveCooldownStatus = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.RemoteManagement.CPAGitHubRepository = defaultCPAGitHubRepository
+	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
 	cfg.WebsocketAuth = true // Default to true: require authentication for WebSocket connections
 	// Quota refresh defaults (must match quota.DefaultConfig).
 	// Enabled defaults to false (R-095): auto-polling provider endpoints risks triggering anti-abuse detection.
@@ -149,9 +160,34 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			return &Config{}, nil
+			return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
+		if optional {
+			return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
+		}
+		return nil, errValidate
+	}
+	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
+		if optional {
+			return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
+		}
+		return nil, errValidate
+	}
+	if errValidate := cfg.ValidateCredentialWeights(); errValidate != nil {
+		if optional {
+			return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
+		}
+		return nil, errValidate
+	}
+	if errValidate := validateXAIKeys(cfg.XAIKey); errValidate != nil {
+		if optional {
+			return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
+		}
+		return nil, errValidate
 	}
 	if err = validateImageArtifactCacheConfig(cfg.ImageArtifactCache); err != nil {
 		return nil, err
@@ -183,7 +219,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.RemoteManagement.CPAGitHubRepository == "" {
 		cfg.RemoteManagement.CPAGitHubRepository = defaultCPAGitHubRepository
 	}
-	cfg.RemoteManagement.TrustedProxies, err = NormalizeTrustedProxies(cfg.RemoteManagement.TrustedProxies)
+	cfg.RemoteManagement.TrustedProxies, err = normalizeTrustedProxies(cfg.RemoteManagement.TrustedProxies)
 	if err != nil {
 		return nil, err
 	}
@@ -211,6 +247,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	cfg.NormalizePluginsConfig()
+	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
+		return nil, errResolvePluginsDir
+	}
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 	cfg.SanitizeInteractionsKeys()
@@ -218,9 +259,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Vertex-compatible API keys: drop entries without base-url
 	cfg.SanitizeVertexCompatKeys()
 
-	// Sanitize Codex keys: drop entries without base-url
+	// Sanitize Codex and xAI keys.
 	cfg.SanitizeCodexKeys()
-	cfg.SanitizeCodexHeaderDefaults()
+	cfg.SanitizeXAIKeys()
+	cfg.sanitizeCodexHeaderDefaults()
+	cfg.sanitizeClaudeHeaderDefaults()
 
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
@@ -234,7 +277,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
-	cfg.SanitizeModelCatalog()
+	cfg.sanitizeModelCatalog()
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.sanitizePayloadRules()

@@ -52,6 +52,22 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			changes, fmt.Sprintf("disable-cooling: %t -> %t", oldCfg.DisableCooling, newCfg.DisableCooling),
 		)
 	}
+	if oldCfg.SaveCooldownStatus != newCfg.SaveCooldownStatus {
+		changes = append(
+			changes,
+			fmt.Sprintf("save-cooldown-status: %t -> %t", oldCfg.SaveCooldownStatus, newCfg.SaveCooldownStatus),
+		)
+	}
+	if oldCfg.ClaudeCode.DisableCloakingModelList != newCfg.ClaudeCode.DisableCloakingModelList {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"claude-code.disable-cloaking-model-list: %t -> %t",
+				oldCfg.ClaudeCode.DisableCloakingModelList,
+				newCfg.ClaudeCode.DisableCloakingModelList,
+			),
+		)
+	}
 	if oldCfg.RequestLog != newCfg.RequestLog {
 		changes = append(changes, fmt.Sprintf("request-log: %t -> %t", oldCfg.RequestLog, newCfg.RequestLog))
 	}
@@ -120,6 +136,111 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			),
 		)
 	}
+	if oldCfg.Codex.DisableCodexCloaking != newCfg.Codex.DisableCodexCloaking {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"codex.disable-codex-cloaking: %t -> %t", oldCfg.Codex.DisableCodexCloaking,
+				newCfg.Codex.DisableCodexCloaking,
+			),
+		)
+	}
+	if oldCfg.Codex.OptimizeMultiAgentV2 != newCfg.Codex.OptimizeMultiAgentV2 {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"codex.optimize-multi-agent-v2: %t -> %t", oldCfg.Codex.OptimizeMultiAgentV2,
+				newCfg.Codex.OptimizeMultiAgentV2,
+			),
+		)
+	}
+	oldLiveRelay := oldCfg.Codex.LiveMediaRelay
+	newLiveRelay := newCfg.Codex.LiveMediaRelay
+	if oldLiveRelay.Enabled != newLiveRelay.Enabled {
+		changes = append(
+			changes,
+			fmt.Sprintf("codex.live-media-relay.enabled: %t -> %t", oldLiveRelay.Enabled, newLiveRelay.Enabled),
+		)
+	}
+	if oldLiveRelay.MaxSessions != newLiveRelay.MaxSessions {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"codex.live-media-relay.max-sessions: %d -> %d",
+				oldLiveRelay.MaxSessions,
+				newLiveRelay.MaxSessions,
+			),
+		)
+	}
+	if oldLiveRelay.DisablePrivateRemoteIPs != newLiveRelay.DisablePrivateRemoteIPs {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"codex.live-media-relay.disable-private-remote-ips: %t -> %t",
+				oldLiveRelay.DisablePrivateRemoteIPs,
+				newLiveRelay.DisablePrivateRemoteIPs,
+			),
+		)
+	}
+	if strings.TrimSpace(oldLiveRelay.PublicIP) != strings.TrimSpace(newLiveRelay.PublicIP) {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"codex.live-media-relay.public-ip: %s -> %s",
+				displayOptionalValue(oldLiveRelay.PublicIP),
+				displayOptionalValue(newLiveRelay.PublicIP),
+			),
+		)
+	}
+	if oldLiveRelay.UDPPortMin != newLiveRelay.UDPPortMin {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"codex.live-media-relay.udp-port-min: %d -> %d",
+				oldLiveRelay.UDPPortMin,
+				newLiveRelay.UDPPortMin,
+			),
+		)
+	}
+	if oldLiveRelay.UDPPortMax != newLiveRelay.UDPPortMax {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"codex.live-media-relay.udp-port-max: %d -> %d",
+				oldLiveRelay.UDPPortMax,
+				newLiveRelay.UDPPortMax,
+			),
+		)
+	}
+	if !reflect.DeepEqual(oldLiveRelay.ICEServers, newLiveRelay.ICEServers) {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"codex.live-media-relay.ice-servers: updated (%d -> %d entries, credentials redacted)",
+				len(oldLiveRelay.ICEServers),
+				len(newLiveRelay.ICEServers),
+			),
+		)
+	}
+	if !reflect.DeepEqual(oldCfg.Antigravity.SensitiveWords, newCfg.Antigravity.SensitiveWords) {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"antigravity.sensitive-words: %d -> %d",
+				len(oldCfg.Antigravity.SensitiveWords),
+				len(newCfg.Antigravity.SensitiveWords),
+			),
+		)
+	}
+	if oldCfg.XAI.InjectXSearch != newCfg.XAI.InjectXSearch {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"xai.inject-x-search: %t -> %t", oldCfg.XAI.InjectXSearch,
+				newCfg.XAI.InjectXSearch,
+			),
+		)
+	}
 
 	// Quota-exceeded behavior
 	if oldCfg.QuotaExceeded.SwitchProject != newCfg.QuotaExceeded.SwitchProject {
@@ -173,7 +294,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf(
-						"gemini[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL),
+						"gemini[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL),
 					),
 				)
 			}
@@ -230,7 +351,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf(
-						"claude[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL),
+						"claude[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL),
 					),
 				)
 			}
@@ -319,7 +440,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf(
-						"codex[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL),
+						"codex[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL),
 					),
 				)
 			}
@@ -339,6 +460,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if o.Websockets != n.Websockets {
 				changes = append(changes, fmt.Sprintf("codex[%d].websockets: %t -> %t", i, o.Websockets, n.Websockets))
+			}
+			if o.AlphaSearch != n.AlphaSearch {
+				changes = append(
+					changes, fmt.Sprintf("codex[%d].alpha-search: %t -> %t", i, o.AlphaSearch, n.AlphaSearch),
+				)
 			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("codex[%d].api-key: updated", i))
@@ -361,6 +487,71 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 					changes, fmt.Sprintf(
 						"codex[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count,
 						newExcluded.count,
+					),
+				)
+			}
+		}
+	}
+
+	// xAI keys (do not print key material)
+	if len(oldCfg.XAIKey) != len(newCfg.XAIKey) {
+		changes = append(changes, fmt.Sprintf("xai-api-key count: %d -> %d", len(oldCfg.XAIKey), len(newCfg.XAIKey)))
+	} else {
+		for i := range oldCfg.XAIKey {
+			o := oldCfg.XAIKey[i]
+			n := newCfg.XAIKey[i]
+			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
+				changes = append(
+					changes, fmt.Sprintf("xai[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)),
+				)
+			}
+			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
+				changes = append(
+					changes, fmt.Sprintf(
+						"xai[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL),
+					),
+				)
+			}
+			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
+				changes = append(
+					changes,
+					fmt.Sprintf("xai[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)),
+				)
+			}
+			if o.Priority != n.Priority {
+				changes = append(changes, fmt.Sprintf("xai[%d].priority: %d -> %d", i, o.Priority, n.Priority))
+			}
+			if !reflect.DeepEqual(o.Weight, n.Weight) {
+				changes = append(changes, fmt.Sprintf("xai[%d].weight: updated", i))
+			}
+			if o.Websockets != n.Websockets {
+				changes = append(changes, fmt.Sprintf("xai[%d].websockets: %t -> %t", i, o.Websockets, n.Websockets))
+			}
+			if o.DisableCooling != n.DisableCooling {
+				changes = append(
+					changes, fmt.Sprintf("xai[%d].disable-cooling: %t -> %t", i, o.DisableCooling, n.DisableCooling),
+				)
+			}
+			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
+				changes = append(changes, fmt.Sprintf("xai[%d].api-key: updated", i))
+			}
+			if !equalStringMap(o.Headers, n.Headers) {
+				changes = append(changes, fmt.Sprintf("xai[%d].headers: updated", i))
+			}
+			oldModels := summarizeCodexModels(o.Models)
+			newModels := summarizeCodexModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(
+					changes,
+					fmt.Sprintf("xai[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count),
+				)
+			}
+			oldExcluded := summarizeExcludedModels(o.ExcludedModels)
+			newExcluded := summarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(
+					changes, fmt.Sprintf(
+						"xai[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count,
 					),
 				)
 			}
@@ -415,14 +606,24 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	newPanelRepo := strings.TrimSpace(newCfg.RemoteManagement.PanelGitHubRepository)
 	if oldPanelRepo != newPanelRepo {
 		changes = append(
-			changes, fmt.Sprintf("remote-management.panel-github-repository: %s -> %s", oldPanelRepo, newPanelRepo),
+			changes,
+			fmt.Sprintf(
+				"remote-management.panel-github-repository: %s -> %s",
+				formatURL(oldPanelRepo),
+				formatURL(newPanelRepo),
+			),
 		)
 	}
 	oldCPARepo := strings.TrimSpace(oldCfg.RemoteManagement.CPAGitHubRepository)
 	newCPARepo := strings.TrimSpace(newCfg.RemoteManagement.CPAGitHubRepository)
 	if oldCPARepo != newCPARepo {
 		changes = append(
-			changes, fmt.Sprintf("remote-management.cpa-github-repository: %s -> %s", oldCPARepo, newCPARepo),
+			changes,
+			fmt.Sprintf(
+				"remote-management.cpa-github-repository: %s -> %s",
+				formatURL(oldCPARepo),
+				formatURL(newCPARepo),
+			),
 		)
 	}
 	if oldCfg.RemoteManagement.AutoCheckUpdate != newCfg.RemoteManagement.AutoCheckUpdate {
@@ -482,7 +683,7 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf(
-						"vertex[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL),
+						"vertex[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL),
 					),
 				)
 			}
@@ -567,7 +768,19 @@ func equalStringMap(a, b map[string]string) bool {
 	return true
 }
 
+func displayOptionalValue(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "<none>"
+	}
+	return trimmed
+}
+
 func formatProxyURL(raw string) string {
+	return formatURL(raw)
+}
+
+func formatURL(raw string) string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return "<none>"
@@ -594,27 +807,4 @@ func formatProxyURL(raw string) string {
 		return host
 	}
 	return scheme + "://" + host
-}
-
-func equalStringSet(a, b []string) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	aSet := make(map[string]struct{}, len(a))
-	for _, k := range a {
-		aSet[strings.TrimSpace(k)] = struct{}{}
-	}
-	bSet := make(map[string]struct{}, len(b))
-	for _, k := range b {
-		bSet[strings.TrimSpace(k)] = struct{}{}
-	}
-	if len(aSet) != len(bSet) {
-		return false
-	}
-	for k := range aSet {
-		if _, ok := bSet[k]; !ok {
-			return false
-		}
-	}
-	return true
 }

@@ -11,8 +11,14 @@ func TestLoadConfigOptional_ClaudeHeaderDefaults(t *testing.T) {
 	configPath := filepath.Join(dir, "config.yaml")
 	configYAML := []byte(`
 claude-header-defaults:
-  user-agent: "  my-codex-client/1.0  "
-  package-version: "  2.3.4  "
+  user-agent: "  claude-cli/2.1.220 (external, cli)  "
+  package-version: "  0.94.0  "
+  runtime-version: "  v26.3.0  "
+  os: "  MacOS  "
+  arch: "  arm64  "
+  timeout: "  600  "
+  timezone: "  Asia/Singapore  "
+  stabilize-device-profile: false
 `)
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
 		t.Fatalf("failed to write config: %v", err)
@@ -23,10 +29,28 @@ claude-header-defaults:
 		t.Fatalf("LoadConfigOptional() error = %v", err)
 	}
 
-	if got := cfg.ClaudeHeaderDefaults.UserAgent; got != "  my-codex-client/1.0  " {
-		t.Fatalf("UserAgent = %q, want %q", got, "  my-codex-client/1.0  ")
+	if got := cfg.ClaudeHeaderDefaults.UserAgent; got != "claude-cli/2.1.220 (external, cli)" {
+		t.Fatalf("UserAgent = %q", got)
 	}
-	if got := cfg.ClaudeHeaderDefaults.PackageVersion; got != "  2.3.4  " {
-		t.Fatalf("PackageVersion = %q, want %q", got, "  2.3.4  ")
+	if got := cfg.ClaudeHeaderDefaults.PackageVersion; got != "0.94.0" {
+		t.Fatalf("PackageVersion = %q", got)
+	}
+	if got := cfg.ClaudeHeaderDefaults.RuntimeVersion; got != "v26.3.0" {
+		t.Fatalf("RuntimeVersion = %q", got)
+	}
+	if got := cfg.ClaudeHeaderDefaults.OS; got != "MacOS" {
+		t.Fatalf("OS = %q", got)
+	}
+	if got := cfg.ClaudeHeaderDefaults.Arch; got != "arm64" {
+		t.Fatalf("Arch = %q", got)
+	}
+	if got := cfg.ClaudeHeaderDefaults.Timeout; got != "600" {
+		t.Fatalf("Timeout = %q", got)
+	}
+	if got := cfg.ClaudeHeaderDefaults.Timezone; got != "Asia/Singapore" {
+		t.Fatalf("Timezone = %q", got)
+	}
+	if cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile == nil || *cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile {
+		t.Fatalf("StabilizeDeviceProfile = %v, want false", cfg.ClaudeHeaderDefaults.StabilizeDeviceProfile)
 	}
 }

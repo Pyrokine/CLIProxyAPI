@@ -6,9 +6,13 @@ import (
 )
 
 func TestNormalizePluginsConfigCanonicalizesPluginID(t *testing.T) {
-	cfg := &Config{Plugins: PluginsConfig{Configs: map[string]PluginInstanceConfig{
-		"Alpha": {},
-	}}}
+	cfg := &Config{
+		Plugins: PluginsConfig{
+			Configs: map[string]PluginInstanceConfig{
+				"Alpha": {},
+			},
+		},
+	}
 
 	cfg.NormalizePluginsConfig()
 
@@ -21,10 +25,14 @@ func TestNormalizePluginsConfigCanonicalizesPluginID(t *testing.T) {
 }
 
 func TestValidateConfigWarnsDuplicateCaseInsensitivePluginIDs(t *testing.T) {
-	cfg := &Config{Plugins: PluginsConfig{Configs: map[string]PluginInstanceConfig{
-		"Alpha": {},
-		"alpha": {},
-	}}}
+	cfg := &Config{
+		Plugins: PluginsConfig{
+			Configs: map[string]PluginInstanceConfig{
+				"Alpha": {},
+				"alpha": {},
+			},
+		},
+	}
 
 	warnings := ValidateConfig(cfg)
 	for _, warning := range warnings {

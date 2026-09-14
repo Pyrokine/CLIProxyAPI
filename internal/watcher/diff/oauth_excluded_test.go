@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
 func TestSummarizeExcludedModels_NormalizesAndDedupes(t *testing.T) {
@@ -80,6 +81,70 @@ func TestSummarizeVertexModels(t *testing.T) {
 	}
 	if blank := summarizeVertexModels([]config.VertexCompatModel{{Name: " "}}); blank.count != 0 || blank.hash != "" {
 		t.Fatalf("expected blank model ignored, got %+v", blank)
+	}
+}
+
+func TestConfiguredModelSummariesIncludeThinking(t *testing.T) {
+	thinking := &registry.ThinkingSupport{Levels: []string{"high"}}
+	tests := []struct {
+		name string
+		base func() modelsSummary
+		with func() modelsSummary
+	}{
+		{
+			name: "gemini",
+			base: func() modelsSummary {
+				return summarizeGeminiModels([]config.GeminiModel{{Name: "model", Alias: "alias"}})
+			},
+			with: func() modelsSummary {
+				return summarizeGeminiModels([]config.GeminiModel{{Name: "model", Alias: "alias", Thinking: thinking}})
+			},
+		},
+		{
+			name: "claude",
+			base: func() modelsSummary {
+				return summarizeClaudeModels([]config.ClaudeModel{{Name: "model", Alias: "alias"}})
+			},
+			with: func() modelsSummary {
+				return summarizeClaudeModels([]config.ClaudeModel{{Name: "model", Alias: "alias", Thinking: thinking}})
+			},
+		},
+		{
+			name: "codex",
+			base: func() modelsSummary {
+				return summarizeCodexModels([]config.CodexModel{{Name: "model", Alias: "alias"}})
+			},
+			with: func() modelsSummary {
+				return summarizeCodexModels([]config.CodexModel{{Name: "model", Alias: "alias", Thinking: thinking}})
+			},
+		},
+		{
+			name: "vertex",
+			base: func() modelsSummary {
+				return summarizeVertexModels([]config.VertexCompatModel{{Name: "model", Alias: "alias"}})
+			},
+			with: func() modelsSummary {
+				return summarizeVertexModels(
+					[]config.VertexCompatModel{
+						{
+							Name: "model", Alias: "alias", Thinking: thinking,
+						},
+					},
+				)
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				base := testCase.base()
+				with := testCase.with()
+				if base.hash == "" || with.hash == "" || base.hash == with.hash {
+					t.Fatalf("summary hashes = %q / %q, want distinct non-empty values", base.hash, with.hash)
+				}
+			},
+		)
 	}
 }
 

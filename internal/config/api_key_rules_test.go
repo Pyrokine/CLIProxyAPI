@@ -64,13 +64,11 @@ func TestModelCatalogModelEnabled(t *testing.T) {
 
 func TestPruneGloballyExcludedAPIKeyRules(t *testing.T) {
 	cfg := &Config{
-		SDKConfig: SDKConfig{
-			APIKeyRules: map[string]APIKeyRule{
-				"sk-test": {
-					BlockedModels: []string{"claude-opus-4-7", "models/gemini-2.5-pro", "claude-sonnet-4-6", ""},
-				},
-				"sk-empty": {BlockedModels: []string{"claude-opus-4-7"}},
+		APIKeyRules: map[string]APIKeyRule{
+			"sk-test": {
+				BlockedModels: []string{"claude-opus-4-7", "models/gemini-2.5-pro", "claude-sonnet-4-6", ""},
 			},
+			"sk-empty": {BlockedModels: []string{"claude-opus-4-7"}},
 		},
 		OAuthExcludedModels: map[string][]string{
 			"claude": {"claude-opus-*"},

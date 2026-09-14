@@ -35,7 +35,7 @@ model-catalog:
 		OAuthModelAlias: map[string][]OAuthModelAlias{
 			"codex": {{Name: "catalog-name", Alias: "catalog-alias", Fork: true}},
 		},
-		SDKConfig: SDKConfig{ModelCatalog: ModelCatalogConfig{Models: []ModelCatalogModel{{Name: "runtime-only"}}}},
+		ModelCatalog: ModelCatalogConfig{Models: []ModelCatalogModel{{Name: "runtime-only"}}},
 	}
 
 	if err := SaveConfigPreserveComments(configPath, cfg); err != nil {
@@ -80,10 +80,8 @@ oauth-excluded-models:
 	cfg := &Config{
 		Host: "127.0.0.1",
 		Port: 8317,
-		SDKConfig: SDKConfig{
-			APIKeyRules: map[string]APIKeyRule{
-				"sk-test": {BlockedModels: []string{"claude-sonnet-4-6"}},
-			},
+		APIKeyRules: map[string]APIKeyRule{
+			"sk-test": {BlockedModels: []string{"claude-sonnet-4-6"}},
 		},
 		OAuthExcludedModels: map[string][]string{
 			"claude": {"claude-opus-*"},

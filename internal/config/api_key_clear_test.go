@@ -22,7 +22,7 @@ auth:
 	if err := os.WriteFile(configPath, initial, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &Config{Host: "127.0.0.1", Port: 8317, SDKConfig: SDKConfig{APIKeys: nil}}
+	cfg := &Config{Host: "127.0.0.1", Port: 8317, APIKeys: nil}
 	if err := SaveConfigPreserveComments(configPath, cfg); err != nil {
 		t.Fatal(err)
 	}

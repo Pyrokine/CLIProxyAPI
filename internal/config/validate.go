@@ -79,6 +79,16 @@ func ValidateConfig(cfg *Config) []string {
 		}
 	}
 
+	// xAI Keys
+	for i, key := range cfg.XAIKey {
+		if strings.TrimSpace(key.APIKey) == "" {
+			warnings = append(warnings, fmt.Sprintf("xai-api-key[%d] has empty api-key", i))
+		}
+		if strings.TrimSpace(key.BaseURL) == "" {
+			warnings = append(warnings, fmt.Sprintf("xai-api-key[%d] has empty base-url", i))
+		}
+	}
+
 	// OpenAI Compatibility
 	for i, entry := range cfg.OpenAICompatibility {
 		if strings.TrimSpace(entry.Name) == "" {
@@ -160,11 +170,14 @@ func ValidateConfig(cfg *Config) []string {
 	}
 
 	switch strings.TrimSpace(cfg.Routing.Strategy) {
-	case "", "round-robin", "fill-first":
+	case "", "round-robin", "weighted-round-robin", "quota-aware", "fill-first":
 	default:
 		warnings = append(
 			warnings,
-			fmt.Sprintf("routing.strategy %q is invalid (use round-robin or fill-first)", cfg.Routing.Strategy),
+			fmt.Sprintf(
+				"routing.strategy %q is invalid (use round-robin, weighted-round-robin, quota-aware, or fill-first)",
+				cfg.Routing.Strategy,
+			),
 		)
 	}
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -263,6 +276,8 @@ func ValidateConfig(cfg *Config) []string {
 		}
 	}
 
+	warnings = append(warnings, validateAPIKeyRules(cfg)...)
+
 	// API Key Aliases: reference integrity + duplicate values
 	if len(cfg.APIKeyAliases) > 0 {
 		apiKeySet := make(map[string]struct{}, len(cfg.APIKeys))
@@ -287,6 +302,109 @@ func ValidateConfig(cfg *Config) []string {
 }
 
 // isValidGitHubRepoURL checks if the string is a valid GitHub repository URL or owner/repo format.
+func validateAPIKeyRules(cfg *Config) []string {
+	if cfg == nil || len(cfg.APIKeyRules) == 0 {
+		return nil
+	}
+	configuredKeys := make(map[string]struct{}, len(cfg.APIKeys))
+	for _, key := range cfg.APIKeys {
+		configuredKeys[strings.TrimSpace(key)] = struct{}{}
+	}
+	warnings := make([]string, 0)
+	for apiKey, rule := range cfg.APIKeyRules {
+		trimmedKey := strings.TrimSpace(apiKey)
+		if trimmedKey == "" {
+			warnings = append(warnings, "api-key-rules contains an empty API key")
+		} else if _, exists := configuredKeys[trimmedKey]; !exists {
+			warnings = append(warnings, "api-key-rules contains a rule for an API key not present in api-keys")
+		}
+		for index, provider := range rule.Providers {
+			if strings.TrimSpace(provider) == "" {
+				warnings = append(warnings, fmt.Sprintf("api-key-rules[%q].providers[%d] is empty", apiKey, index))
+			}
+		}
+		mappingKeys := make(map[string]string, len(rule.ModelMappings))
+		for source, target := range rule.ModelMappings {
+			normalizedSource := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(source, "models/")))
+			if normalizedSource == "" || strings.TrimSpace(target) == "" {
+				warnings = append(
+					warnings, fmt.Sprintf("api-key-rules[%q].model-mappings contains an empty model", apiKey),
+				)
+				continue
+			}
+			if previous, duplicate := mappingKeys[normalizedSource]; duplicate {
+				warnings = append(
+					warnings,
+					fmt.Sprintf(
+						"api-key-rules[%q].model-mappings contains duplicate sources %q and %q",
+						apiKey,
+						previous,
+						source,
+					),
+				)
+			}
+			mappingKeys[normalizedSource] = source
+		}
+		profile := strings.TrimSpace(rule.PolicyProfile)
+		if profile != "" && !validAPIKeyPolicyProfile(profile) {
+			warnings = append(
+				warnings, fmt.Sprintf("api-key-rules[%q].policy-profile %q is invalid", apiKey, rule.PolicyProfile),
+			)
+		}
+		if ttl := strings.TrimSpace(rule.ReservationTTL); ttl != "" {
+			parsedTTL, err := time.ParseDuration(ttl)
+			if err != nil || parsedTTL <= 0 {
+				warnings = append(
+					warnings, fmt.Sprintf(
+						"api-key-rules[%q].reservation-ttl %q is not a positive duration", apiKey, rule.ReservationTTL,
+					),
+				)
+			}
+		}
+		windows := make(map[time.Duration]struct{}, len(rule.Limits))
+		for index, limit := range rule.Limits {
+			window, err := time.ParseDuration(strings.TrimSpace(limit.Window))
+			if err != nil || window <= 0 {
+				warnings = append(
+					warnings, fmt.Sprintf(
+						"api-key-rules[%q].limits[%d].window %q is not a positive duration", apiKey, index, limit.Window,
+					),
+				)
+			} else if _, duplicate := windows[window]; duplicate {
+				warnings = append(
+					warnings, fmt.Sprintf("api-key-rules[%q].limits contains duplicate window %q", apiKey, limit.Window),
+				)
+			} else {
+				windows[window] = struct{}{}
+			}
+			if limit.Requests < 0 || limit.Tokens < 0 || limit.CostMicro < 0 {
+				warnings = append(
+					warnings, fmt.Sprintf("api-key-rules[%q].limits[%d] contains a negative limit", apiKey, index),
+				)
+			}
+			if limit.Requests == 0 && limit.Tokens == 0 && limit.CostMicro == 0 {
+				warnings = append(
+					warnings, fmt.Sprintf("api-key-rules[%q].limits[%d] has no enabled dimension", apiKey, index),
+				)
+			}
+		}
+	}
+	return warnings
+}
+
+func validAPIKeyPolicyProfile(profile string) bool {
+	if len(profile) == 0 || len(profile) > 128 {
+		return false
+	}
+	for index := range len(profile) {
+		ch := profile[index]
+		if !isASCIILetterDigit(ch) && ch != '.' && ch != '_' && ch != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 func isValidGitHubRepoURL(s string) bool {
 	// Accept "owner/repo" format
 	if !strings.Contains(s, "://") {

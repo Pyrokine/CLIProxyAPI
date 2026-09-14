@@ -25,18 +25,18 @@ type ModelCatalogModel struct {
 	Enabled     *bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
-func (m ModelCatalogModel) IsEnabled() bool {
+func (m ModelCatalogModel) isEnabled() bool {
 	return m.Enabled == nil || *m.Enabled
 }
 
-func (cfg *Config) SanitizeModelCatalog() {
+func (cfg *Config) sanitizeModelCatalog() {
 	if cfg == nil {
 		return
 	}
-	cfg.SDKConfig.SanitizeModelCatalog()
+	cfg.SDKConfig.sanitizeModelCatalog()
 }
 
-func (cfg *SDKConfig) SanitizeModelCatalog() {
+func (cfg *SDKConfig) sanitizeModelCatalog() {
 	if cfg == nil || len(cfg.ModelCatalog.Models) == 0 {
 		return
 	}
@@ -62,7 +62,7 @@ func (cfg *SDKConfig) SanitizeModelCatalog() {
 	cfg.ModelCatalog.Models = out
 }
 
-func (cfg *SDKConfig) ModelCatalogEntry(model string) (ModelCatalogModel, bool) {
+func (cfg *SDKConfig) modelCatalogEntry(model string) (ModelCatalogModel, bool) {
 	if cfg == nil || len(cfg.ModelCatalog.Models) == 0 {
 		return ModelCatalogModel{}, false
 	}
@@ -94,7 +94,7 @@ func SetRuntimeModelCatalog(models []ModelCatalogModel) {
 			if name == "" {
 				continue
 			}
-			snapshot.enabled[strings.ToLower(name)] = entry.IsEnabled()
+			snapshot.enabled[strings.ToLower(name)] = entry.isEnabled()
 		}
 	}
 	runtimeModelCatalog.Store(snapshot)
@@ -114,8 +114,8 @@ func (cfg *SDKConfig) ModelCatalogModelEnabled(model string) bool {
 			}
 		}
 	}
-	entry, ok := cfg.ModelCatalogEntry(model)
-	return !ok || entry.IsEnabled()
+	entry, ok := cfg.modelCatalogEntry(model)
+	return !ok || entry.isEnabled()
 }
 
 func sanitizeModelCatalogAliases(aliases []string, name string) []string {

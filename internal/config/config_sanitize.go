@@ -103,7 +103,13 @@ func SanitizeOAuthModelAliasMap(entries map[string][]OAuthModelAlias) map[string
 			seenAlias[aliasKey] = struct{}{}
 			clean = append(
 				clean,
-				OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork, ForceMapping: entry.ForceMapping},
+				OAuthModelAlias{
+					Name:         name,
+					Alias:        alias,
+					Fork:         entry.Fork,
+					DisplayName:  strings.TrimSpace(entry.DisplayName),
+					ForceMapping: entry.ForceMapping,
+				},
 			)
 		}
 		if len(clean) > 0 {
@@ -127,7 +133,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 	for i := range cfg.OpenAICompatibility {
 		e := cfg.OpenAICompatibility[i]
 		e.Name = strings.TrimSpace(e.Name)
-		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.Prefix = NormalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		for j := range e.APIKeyEntries {
@@ -143,14 +149,27 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 	cfg.OpenAICompatibility = out
 }
 
-// SanitizeCodexHeaderDefaults removes Codex API key entries missing a BaseURL.
+// sanitizeCodexHeaderDefaults removes Codex API key entries missing a BaseURL.
 // It trims whitespace and preserves order for remaining entries.
-func (cfg *Config) SanitizeCodexHeaderDefaults() {
+func (cfg *Config) sanitizeCodexHeaderDefaults() {
 	if cfg == nil {
 		return
 	}
 	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
+func (cfg *Config) sanitizeClaudeHeaderDefaults() {
+	if cfg == nil {
+		return
+	}
+	cfg.ClaudeHeaderDefaults.UserAgent = strings.TrimSpace(cfg.ClaudeHeaderDefaults.UserAgent)
+	cfg.ClaudeHeaderDefaults.PackageVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.PackageVersion)
+	cfg.ClaudeHeaderDefaults.RuntimeVersion = strings.TrimSpace(cfg.ClaudeHeaderDefaults.RuntimeVersion)
+	cfg.ClaudeHeaderDefaults.OS = strings.TrimSpace(cfg.ClaudeHeaderDefaults.OS)
+	cfg.ClaudeHeaderDefaults.Arch = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Arch)
+	cfg.ClaudeHeaderDefaults.Timeout = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timeout)
+	cfg.ClaudeHeaderDefaults.Timezone = strings.TrimSpace(cfg.ClaudeHeaderDefaults.Timezone)
 }
 
 func (cfg *Config) SanitizeCodexKeys() {
@@ -160,7 +179,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 	out := make([]CodexKey, 0, len(cfg.CodexKey))
 	for i := range cfg.CodexKey {
 		e := cfg.CodexKey[i]
-		e.Prefix = normalizeModelPrefix(e.Prefix)
+		e.Prefix = NormalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
@@ -172,6 +191,29 @@ func (cfg *Config) SanitizeCodexKeys() {
 	cfg.CodexKey = out
 }
 
+// SanitizeXAIKeys normalizes xAI API key entries and removes unusable entries.
+func (cfg *Config) SanitizeXAIKeys() {
+	if cfg == nil || len(cfg.XAIKey) == 0 {
+		return
+	}
+	out := make([]XAIKey, 0, len(cfg.XAIKey))
+	for i := range cfg.XAIKey {
+		e := cfg.XAIKey[i]
+		e.APIKey = strings.TrimSpace(e.APIKey)
+		e.AlphaSearch = false
+		e.Prefix = NormalizeModelPrefix(e.Prefix)
+		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.ProxyURL = strings.TrimSpace(e.ProxyURL)
+		e.Headers = NormalizeHeaders(e.Headers)
+		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
+		if e.APIKey == "" || e.BaseURL == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	cfg.XAIKey = out
+}
+
 // SanitizeClaudeKeys normalizes headers for Claude credentials.
 func (cfg *Config) SanitizeClaudeKeys() {
 	if cfg == nil || len(cfg.ClaudeKey) == 0 {
@@ -179,7 +221,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
-		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.Prefix = NormalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
@@ -191,7 +233,7 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		return
 	}
 
-	seen := make(map[string]struct{}, len(cfg.GeminiKey))
+	seen := make(map[[2]string]struct{}, len(cfg.GeminiKey))
 	out := cfg.GeminiKey[:0]
 	for i := range cfg.GeminiKey {
 		entry := cfg.GeminiKey[i]
@@ -199,15 +241,16 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		if entry.APIKey == "" {
 			continue
 		}
-		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.Prefix = NormalizeModelPrefix(entry.Prefix)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		if _, exists := seen[entry.APIKey]; exists {
+		uniqueKey := [2]string{entry.APIKey, entry.BaseURL}
+		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}
-		seen[entry.APIKey] = struct{}{}
+		seen[uniqueKey] = struct{}{}
 		out = append(out, entry)
 	}
 	cfg.GeminiKey = out
@@ -220,7 +263,7 @@ func (cfg *Config) SanitizeInteractionsKeys() {
 		return
 	}
 
-	seen := make(map[string]struct{}, len(cfg.InteractionsKey))
+	seen := make(map[[2]string]struct{}, len(cfg.InteractionsKey))
 	out := cfg.InteractionsKey[:0]
 	for i := range cfg.InteractionsKey {
 		entry := cfg.InteractionsKey[i]
@@ -228,12 +271,12 @@ func (cfg *Config) SanitizeInteractionsKeys() {
 		if entry.APIKey == "" {
 			continue
 		}
-		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.Prefix = NormalizeModelPrefix(entry.Prefix)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		uniqueKey := entry.APIKey + "|" + entry.BaseURL
+		uniqueKey := [2]string{entry.APIKey, entry.BaseURL}
 		if _, exists := seen[uniqueKey]; exists {
 			continue
 		}
@@ -243,7 +286,8 @@ func (cfg *Config) SanitizeInteractionsKeys() {
 	cfg.InteractionsKey = out
 }
 
-func normalizeModelPrefix(prefix string) string {
+// NormalizeModelPrefix trims whitespace and surrounding slashes from a model route prefix.
+func NormalizeModelPrefix(prefix string) string {
 	trimmed := strings.TrimSpace(prefix)
 	trimmed = strings.Trim(trimmed, "/")
 	if trimmed == "" {

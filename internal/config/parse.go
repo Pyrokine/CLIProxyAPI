@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +19,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if errValidate := validateManagementSecretYAML(data); errValidate != nil {
 		return nil, fmt.Errorf("validate config payload: %w", errValidate)
 	}
+	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
+		return nil, fmt.Errorf("validate config payload: %w", errValidate)
+	}
 
 	var cfg Config
 	cfg.Host = "127.0.0.1"
@@ -29,10 +33,12 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.ImageArtifactCache.RetentionDays = 7
 	cfg.ImageArtifactCache.MaxTotalSizeMB = 10240
 	cfg.DisableCooling = false
+	cfg.SaveCooldownStatus = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.RemoteManagement.CPAGitHubRepository = defaultCPAGitHubRepository
+	cfg.CredentialInFlight = DefaultCredentialInFlightConfig()
 	cfg.WebsocketAuth = true
 	cfg.QuotaRefresh.Enabled = false
 	cfg.QuotaRefresh.Interval = 600
@@ -42,6 +48,19 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config payload: %w", err)
+	}
+	cfg.CredentialConcurrency = cfg.CredentialConcurrency.WithDefaults()
+	if errValidate := cfg.CredentialInFlight.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
+	if errValidate := cfg.Codex.LiveMediaRelay.Validate(); errValidate != nil {
+		return nil, errValidate
+	}
+	if errValidate := cfg.ValidateCredentialWeights(); errValidate != nil {
+		return nil, errValidate
+	}
+	if errValidate := validateXAIKeys(cfg.XAIKey); errValidate != nil {
+		return nil, errValidate
 	}
 	if err := validateImageArtifactCacheConfig(cfg.ImageArtifactCache); err != nil {
 		return nil, err
@@ -64,7 +83,7 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if cfg.RemoteManagement.CPAGitHubRepository == "" {
 		cfg.RemoteManagement.CPAGitHubRepository = defaultCPAGitHubRepository
 	}
-	trustedProxies, errTrustedProxies := NormalizeTrustedProxies(cfg.RemoteManagement.TrustedProxies)
+	trustedProxies, errTrustedProxies := normalizeTrustedProxies(cfg.RemoteManagement.TrustedProxies)
 	if errTrustedProxies != nil {
 		return nil, errTrustedProxies
 	}
@@ -90,18 +109,62 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	}
 
 	cfg.NormalizePluginsConfig()
+	if errResolvePluginsDir := cfg.ResolvePluginsDir(); errResolvePluginsDir != nil && cfg.Plugins.Enabled {
+		return nil, errResolvePluginsDir
+	}
 
 	cfg.SanitizeGeminiKeys()
 	cfg.SanitizeInteractionsKeys()
 	cfg.SanitizeVertexCompatKeys()
 	cfg.SanitizeCodexKeys()
-	cfg.SanitizeCodexHeaderDefaults()
+	cfg.SanitizeXAIKeys()
+	cfg.sanitizeCodexHeaderDefaults()
+	cfg.sanitizeClaudeHeaderDefaults()
 	cfg.SanitizeClaudeKeys()
 	cfg.SanitizeOpenAICompatibility()
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeOAuthModelAlias()
-	cfg.SanitizeModelCatalog()
+	cfg.sanitizeModelCatalog()
 	cfg.sanitizePayloadRules()
 
 	return &cfg, nil
+}
+
+func validateXAIKeys(entries []XAIKey) error {
+	for i := range entries {
+		entry := entries[i]
+		if strings.TrimSpace(entry.APIKey) == "" {
+			return fmt.Errorf("xai-api-key[%d].api-key is empty", i)
+		}
+		baseURL := strings.TrimSpace(entry.BaseURL)
+		if baseURL == "" {
+			return fmt.Errorf("xai-api-key[%d].base-url is empty", i)
+		}
+		if errValidate := proxyutil.ValidateHTTPURL(baseURL); errValidate != nil {
+			return fmt.Errorf("xai-api-key[%d].base-url: %w", i, errValidate)
+		}
+		if proxyURL := strings.TrimSpace(entry.ProxyURL); proxyURL != "" {
+			if errValidate := proxyutil.ValidateProxyURL(proxyURL); errValidate != nil {
+				return fmt.Errorf("xai-api-key[%d].proxy-url: %w", i, errValidate)
+			}
+		}
+		if errValidate := validateXAIHeaders(entry.Headers); errValidate != nil {
+			return fmt.Errorf("xai-api-key[%d].headers: %w", i, errValidate)
+		}
+	}
+	return nil
+}
+
+func validateXAIHeaders(headers map[string]string) error {
+	for name, value := range headers {
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" {
+			continue
+		}
+		if proxyutil.IsRestrictedCustomHeader(name) {
+			return fmt.Errorf("custom header %q is restricted", name)
+		}
+	}
+	return nil
 }

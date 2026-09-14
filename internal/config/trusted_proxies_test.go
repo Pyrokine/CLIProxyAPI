@@ -7,13 +7,15 @@ import (
 )
 
 func TestNormalizeTrustedProxies(t *testing.T) {
-	got, err := NormalizeTrustedProxies([]string{
-		" 127.0.0.1 ",
-		"127.0.0.1/32",
-		"10.0.0.7/8",
-		"::1",
-		"::1",
-	})
+	got, err := normalizeTrustedProxies(
+		[]string{
+			" 127.0.0.1 ",
+			"127.0.0.1/32",
+			"10.0.0.7/8",
+			"::1",
+			"::1",
+		},
+	)
 	if err != nil {
 		t.Fatalf("NormalizeTrustedProxies: %v", err)
 	}
@@ -38,5 +40,18 @@ func TestParseConfigBytesNormalizesTrustedProxies(t *testing.T) {
 	want := []string{"10.0.0.0/8", "::1"}
 	if !reflect.DeepEqual(cfg.RemoteManagement.TrustedProxies, want) {
 		t.Fatalf("TrustedProxies = %v, want %v", cfg.RemoteManagement.TrustedProxies, want)
+	}
+}
+
+func TestNormalizeTrustedProxiesRejectsFullAddressSpace(t *testing.T) {
+	for _, value := range []string{"0.0.0.0/0", "::/0", "10.1.2.3/0"} {
+		t.Run(
+			value, func(t *testing.T) {
+				_, err := normalizeTrustedProxies([]string{value})
+				if err == nil || !strings.Contains(err.Error(), "full address space") {
+					t.Fatalf("NormalizeTrustedProxies(%q) error = %v, want full address space rejection", value, err)
+				}
+			},
+		)
 	}
 }

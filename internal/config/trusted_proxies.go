@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// NormalizeTrustedProxies validates and canonicalizes trusted proxy IP addresses and CIDR ranges.
-func NormalizeTrustedProxies(values []string) ([]string, error) {
+// normalizeTrustedProxies validates and canonicalizes trusted proxy IP addresses and CIDR ranges.
+func normalizeTrustedProxies(values []string) ([]string, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
@@ -27,7 +27,14 @@ func NormalizeTrustedProxies(values []string) ([]string, error) {
 				return nil, fmt.Errorf("remote-management.trusted-proxies contains invalid CIDR %q", value)
 			}
 			if prefix.Addr().Is4In6() {
-				return nil, fmt.Errorf("remote-management.trusted-proxies contains unsupported IPv4-mapped CIDR %q", value)
+				return nil, fmt.Errorf(
+					"remote-management.trusted-proxies contains unsupported IPv4-mapped CIDR %q", value,
+				)
+			}
+			if prefix.Bits() == 0 {
+				return nil, fmt.Errorf(
+					"remote-management.trusted-proxies cannot trust the full address space %q", value,
+				)
 			}
 			canonical = prefix.Masked().String()
 		} else {

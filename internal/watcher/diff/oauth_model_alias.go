@@ -53,6 +53,9 @@ func summarizeOAuthModelAliasList(list []config.OAuthModelAlias) modelsSummary {
 		if alias.Fork {
 			key += "|fork"
 		}
+		if displayName := strings.TrimSpace(alias.DisplayName); displayName != "" {
+			key += "|display-name=" + displayName
+		}
 		if alias.ForceMapping {
 			key += "|force-mapping"
 		}
