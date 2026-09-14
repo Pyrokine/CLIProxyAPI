@@ -18,14 +18,14 @@ func (f kimiRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 func TestRefreshTokenSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	client := &DeviceFlowClient{
 		httpClient: &http.Client{
 			Transport: kimiRoundTripFunc(
 				func(req *http.Request) (*http.Response, error) {
-					if atomic.AddInt32(&calls, 1) == 1 {
+					if calls.Add(1) == 1 {
 						close(entered)
 					}
 					<-release
@@ -73,7 +73,7 @@ func TestRefreshTokenSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
 			t.Fatalf("refresh failed: %v", err)
 		}
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Fatalf("refresh calls = %d, want 1", got)
 	}
 }

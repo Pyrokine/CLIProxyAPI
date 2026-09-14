@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/google/uuid"
@@ -36,8 +37,6 @@ const (
 	defaultPollInterval = 5 * time.Second
 	// maxPollDuration is the maximum time to wait for user authorization.
 	maxPollDuration = 15 * time.Minute
-	// refreshThresholdSeconds is when to refresh token before expiry (5 minutes).
-	refreshThresholdSeconds = 300
 )
 
 var kimiRefreshGroup singleflight.Group
@@ -154,8 +153,8 @@ func getHostname() string {
 // commonHeaders returns headers required for Kimi API requests.
 func (c *DeviceFlowClient) commonHeaders() map[string]string {
 	return map[string]string{
-		"X-Msh-Platform":     "cli-proxy-api",
-		"X-Msh-Version":      "1.0.0",
+		"X-Msh-Platform":     "CLIProxyAPI",
+		"X-Msh-Version":      buildinfo.Version,
 		"X-Msh-Device-Name":  getHostname(),
 		"X-Msh-Device-Model": getDeviceModel(),
 		"X-Msh-Device-Id":    c.deviceID,
@@ -338,18 +337,18 @@ func (c *DeviceFlowClient) RefreshToken(ctx context.Context, refreshToken string
 	}
 
 	result, err, _ := kimiRefreshGroup.Do(
-		refreshToken, func() (interface{}, error) {
+		refreshToken, func() (any, error) {
 			return c.refreshTokenSingleFlight(context.WithoutCancel(ctx), refreshToken)
 		},
 	)
 	if err != nil {
 		return nil, err
 	}
-	tokenData, ok := result.(*TokenData)
-	if !ok || tokenData == nil {
+	TokenData, ok := result.(*TokenData)
+	if !ok || TokenData == nil {
 		return nil, fmt.Errorf("kimi: refresh token failed: invalid single-flight result")
 	}
-	return tokenData, nil
+	return TokenData, nil
 }
 
 func (c *DeviceFlowClient) refreshTokenSingleFlight(ctx context.Context, refreshToken string) (*TokenData, error) {
