@@ -160,24 +160,28 @@ func (e *streamEntry) close(errorMessage string) {
 	if e == nil {
 		return
 	}
-	e.closeOnce.Do(func() {
-		e.mu.Lock()
-		e.closed = true
-		if errorMessage != "" {
-			e.closeErr = fmt.Errorf("%s", errorMessage)
-		}
-		close(e.done)
-		e.mu.Unlock()
-	})
+	e.closeOnce.Do(
+		func() {
+			e.mu.Lock()
+			e.closed = true
+			if errorMessage != "" {
+				e.closeErr = fmt.Errorf("%s", errorMessage)
+			}
+			close(e.done)
+			e.mu.Unlock()
+		},
+	)
 }
 
 func (e *streamEntry) cancel() {
 	if e == nil {
 		return
 	}
-	e.abortOnce.Do(func() {
-		close(e.abort)
-	})
+	e.abortOnce.Do(
+		func() {
+			close(e.abort)
+		},
+	)
 }
 
 func (b *streamBridge) open(
@@ -191,12 +195,14 @@ func (b *streamBridge) open(
 	}
 	id := strconv.FormatUint(b.next.Add(1), 10)
 	var entry *streamEntry
-	entry = newStreamEntry(func() {
-		b.remove(id, entry)
-		if len(onDone) > 0 && onDone[0] != nil {
-			onDone[0]()
-		}
-	})
+	entry = newStreamEntry(
+		func() {
+			b.remove(id, entry)
+			if len(onDone) > 0 && onDone[0] != nil {
+				onDone[0]()
+			}
+		},
+	)
 	b.mu.Lock()
 	b.streams[id] = entry
 	b.mu.Unlock()

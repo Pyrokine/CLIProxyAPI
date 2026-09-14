@@ -14,7 +14,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -50,7 +49,7 @@ var ErrPendingDeletion = errors.New("plugin has a pending deletion transaction")
 // ErrPendingInstall is returned when an unfinished install owns the plugin ID.
 var ErrPendingInstall = errors.New("plugin has a pending install transaction")
 
-const maxPluginLibraryBytes int64 = maxPluginStoreArtifactBytes
+const maxPluginLibraryBytes = maxPluginStoreArtifactBytes
 
 type InstallResult struct {
 	ID          string `json:"id"`
@@ -126,7 +125,10 @@ func (p *PreparedInstall) Close() error {
 }
 
 // Install applies a prepared plugin archive to the target plugin directory.
-func (p PreparedInstall) Install(options InstallOptions) (InstallResult, error) {
+func (p *PreparedInstall) Install(options InstallOptions) (InstallResult, error) {
+	if p == nil {
+		return InstallResult{}, fmt.Errorf("prepared plugin archive is nil")
+	}
 	archiveData := p.archiveData
 	if p.archivePath != "" {
 		var errRead error
@@ -138,7 +140,9 @@ func (p PreparedInstall) Install(options InstallOptions) (InstallResult, error) 
 	if len(archiveData) == 0 {
 		return InstallResult{}, fmt.Errorf("prepared plugin archive is empty")
 	}
-	result, errInstall := InstallArchive(archiveData, p.plugin, options)
+	result, errInstall := installArchive(archiveData, p.plugin, options)
+	// InstallArchive returns target metadata with write failures so callers can reconcile partial installs.
+	// noinspection GoDfaErrorMayBeNotNil
 	result.InstallType = p.installType
 	result.ReleaseTag = p.releaseTag
 	return result, errInstall
@@ -161,7 +165,7 @@ func (c Client) Prepare(ctx context.Context, plugin Plugin, options InstallOptio
 	options = normalizeInstallOptions(options)
 	if PluginInstallType(plugin) == InstallTypeDirect {
 		plugin.Version = normalizeVersion(plugin.Version)
-		return c.PrepareDirect(ctx, plugin, plugin.Install, options)
+		return c.prepareDirect(ctx, plugin, plugin.Install, options)
 	}
 	release, errRelease := c.FetchLatestRelease(ctx, plugin)
 	if errRelease != nil {
@@ -175,7 +179,7 @@ func (c Client) Prepare(ctx context.Context, plugin Plugin, options InstallOptio
 	return c.prepareRelease(ctx, plugin, release, latestVersion, options)
 }
 
-func (c Client) InstallManifest(ctx context.Context, manifest Manifest, options InstallOptions) (InstallResult, error) {
+func (c Client) installManifest(ctx context.Context, manifest Manifest, options InstallOptions) (InstallResult, error) {
 	prepared, errPrepare := c.PrepareManifest(ctx, manifest, options)
 	if errPrepare != nil {
 		return InstallResult{}, errPrepare
@@ -200,7 +204,7 @@ func (c Client) PrepareManifest(
 		if errPlugin != nil {
 			return PreparedInstall{}, errPlugin
 		}
-		return c.PrepareDirect(ctx, plugin, plugin.Install, options)
+		return c.prepareDirect(ctx, plugin, plugin.Install, options)
 	case InstallTypeGitHubRelease:
 		return c.PrepareVersion(ctx, manifest.Plugin(), manifest.ReleaseTag, manifest.Version, options)
 	default:
@@ -268,25 +272,25 @@ func (c Client) prepareRelease(
 	version string,
 	options InstallOptions,
 ) (PreparedInstall, error) {
-	archiveAsset, checksumAsset, errAssets := SelectReleaseAssets(
+	archiveAsset, checksumAsset, errAssets := selectReleaseAssets(
 		release, plugin.ID, plugin.Version, options.GOOS, options.GOARCH,
 	)
 	if errAssets != nil {
 		return PreparedInstall{}, errAssets
 	}
-	archiveData, errArchive := c.DownloadAsset(ctx, archiveAsset)
+	archiveData, errArchive := c.downloadAsset(ctx, archiveAsset)
 	if errArchive != nil {
 		return PreparedInstall{}, fmt.Errorf("download %s: %w", archiveAsset.Name, errArchive)
 	}
-	checksumData, errChecksum := c.DownloadAsset(ctx, checksumAsset)
+	checksumData, errChecksum := c.downloadAsset(ctx, checksumAsset)
 	if errChecksum != nil {
 		return PreparedInstall{}, fmt.Errorf("download checksums.txt: %w", errChecksum)
 	}
-	checksums, errParse := ParseChecksums(checksumData)
+	checksums, errParse := parseChecksums(checksumData)
 	if errParse != nil {
 		return PreparedInstall{}, errParse
 	}
-	if errVerify := VerifyChecksum(archiveAsset.Name, archiveData, checksums); errVerify != nil {
+	if errVerify := verifyChecksum(archiveAsset.Name, archiveData, checksums); errVerify != nil {
 		return PreparedInstall{}, errVerify
 	}
 	plugin.Version = version
@@ -298,22 +302,9 @@ func (c Client) prepareRelease(
 	}, nil
 }
 
-func (c Client) InstallDirect(
-	ctx context.Context,
-	plugin Plugin,
-	plan InstallPlan,
-	options InstallOptions,
-) (InstallResult, error) {
-	prepared, errPrepare := c.PrepareDirect(ctx, plugin, plan, options)
-	if errPrepare != nil {
-		return InstallResult{}, errPrepare
-	}
-	return prepared.Install(options)
-}
-
-// PrepareDirect downloads and verifies a direct plugin artifact without
+// prepareDirect downloads and verifies a direct plugin artifact without
 // changing the plugin directory.
-func (c Client) PrepareDirect(
+func (c Client) prepareDirect(
 	ctx context.Context,
 	plugin Plugin,
 	plan InstallPlan,
@@ -329,19 +320,19 @@ func (c Client) PrepareDirect(
 	}
 	plan = NormalizeInstallPlan(plan)
 	plan.Type = InstallTypeDirect
-	if errValidate := ValidateInstallPlan(plan); errValidate != nil {
+	if errValidate := validateInstallPlan(plan); errValidate != nil {
 		return PreparedInstall{}, errValidate
 	}
 	options = normalizeInstallOptions(options)
-	artifact, errSelect := SelectArtifact(plan, options.GOOS, options.GOARCH)
+	artifact, errSelect := selectArtifact(plan, options.GOOS, options.GOARCH)
 	if errSelect != nil {
 		return PreparedInstall{}, errSelect
 	}
-	archiveData, errDownload := c.DownloadArtifact(ctx, artifact)
+	archiveData, errDownload := c.downloadArtifact(ctx, artifact)
 	if errDownload != nil {
 		return PreparedInstall{}, fmt.Errorf("download artifact: %w", errDownload)
 	}
-	if errVerify := VerifyArtifactChecksum(artifact, archiveData); errVerify != nil {
+	if errVerify := verifyArtifactChecksum(artifact, archiveData); errVerify != nil {
 		return PreparedInstall{}, errVerify
 	}
 	return PreparedInstall{
@@ -392,7 +383,7 @@ func directPluginVersion(plugin Plugin, id string, version string) (Plugin, erro
 		plugin.Version = version
 		plugin.Install = NormalizeInstallPlan(plugin.Install)
 		plugin.Install.Type = InstallTypeDirect
-		if errPlan := ValidateInstallPlan(plugin.Install); errPlan != nil {
+		if errPlan := validateInstallPlan(plugin.Install); errPlan != nil {
 			return Plugin{}, fmt.Errorf("direct install plugin %q version %q: %w", id, version, errPlan)
 		}
 		return plugin, nil
@@ -411,7 +402,7 @@ func directPluginVersion(plugin Plugin, id string, version string) (Plugin, erro
 				"direct install plugin %q version %q resolved as %q", id, version, plugin.Install.Type,
 			)
 		}
-		if errPlan := ValidateInstallPlan(plugin.Install); errPlan != nil {
+		if errPlan := validateInstallPlan(plugin.Install); errPlan != nil {
 			return Plugin{}, fmt.Errorf("direct install plugin %q version %q: %w", id, version, errPlan)
 		}
 		return plugin, nil
@@ -419,7 +410,7 @@ func directPluginVersion(plugin Plugin, id string, version string) (Plugin, erro
 	return Plugin{}, fmt.Errorf("direct install plugin %q version %q not found in source", id, version)
 }
 
-func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (InstallResult, error) {
+func installArchive(archiveData []byte, plugin Plugin, options InstallOptions) (InstallResult, error) {
 	options = normalizeInstallOptions(options)
 	rootLock := options.RootLock
 	if rootLock == nil {
@@ -470,7 +461,7 @@ func InstallArchive(archiveData []byte, plugin Plugin, options InstallOptions) (
 	if errTarget != nil {
 		return InstallResult{}, errTarget
 	}
-	defer targetRoot.Close()
+	defer func() { _ = targetRoot.Close() }()
 	overwritten := false
 	var existingInfo os.FileInfo
 	if info, errStat := targetRoot.Lstat(targetName); errStat == nil {
@@ -626,7 +617,9 @@ func openOrCreatePluginDirectoryRoot(
 		}
 		openedInfo, errOpened := next.Stat(".")
 		verifiedInfo, errVerified := root.Lstat(component)
-		if errOpened != nil || errVerified != nil || !os.SameFile(info, openedInfo) || !os.SameFile(openedInfo, verifiedInfo) {
+		if errOpened != nil || errVerified != nil || !os.SameFile(info, openedInfo) || !os.SameFile(
+			openedInfo, verifiedInfo,
+		) {
 			_ = next.Close()
 			_ = root.Close()
 			if errOpened != nil {
@@ -713,7 +706,7 @@ func writeFileAtomicRooted(root *os.Root, targetName string, data []byte, mode o
 	if errDirectory != nil {
 		return fmt.Errorf("open plugin directory: %w", errDirectory)
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	if errSync := directory.Sync(); errSync != nil {
 		return fmt.Errorf("sync plugin directory: %w", errSync)
 	}
@@ -816,70 +809,6 @@ type pluginFileInfo struct {
 	ID      string
 	Path    string
 	Version string
-}
-
-func discoverCurrentPluginFiles(root string) ([]pluginFileInfo, error) {
-	root = strings.TrimSpace(root)
-	if root == "" {
-		root = "plugins"
-	}
-	candidates := pluginCandidateDirs(root, runtime.GOOS, runtime.GOARCH)
-	extension := pluginExtension(runtime.GOOS)
-	selected := make([]pluginFileInfo, 0)
-	seen := make(map[string]struct{})
-	for _, dir := range candidates {
-		entries, errReadDir := os.ReadDir(dir)
-		if errReadDir != nil {
-			if os.IsNotExist(errReadDir) {
-				continue
-			}
-			return nil, errReadDir
-		}
-		files := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			if entry == nil || !entry.Type().IsRegular() {
-				continue
-			}
-			if strings.HasSuffix(strings.ToLower(entry.Name()), extension) {
-				files = append(files, filepath.Join(dir, entry.Name()))
-			}
-		}
-		sort.Strings(files)
-		for _, candidatePath := range files {
-			file, okFile := pluginFileInfoFromPath(candidatePath, extension)
-			if !okFile {
-				continue
-			}
-			if _, exists := seen[file.ID]; exists {
-				continue
-			}
-			seen[file.ID] = struct{}{}
-			selected = append(selected, file)
-		}
-	}
-	return selected, nil
-}
-
-func pluginCandidateDirs(root string, goos string, goarch string) []string {
-	dirs := make([]string, 0, 2)
-	dirs = append(dirs, filepath.Join(root, goos, goarch))
-	dirs = append(dirs, root)
-	return dirs
-}
-
-func pluginIDFromPath(path string) string {
-	file, ok := pluginFileInfoFromPath(path, "")
-	if ok {
-		return file.ID
-	}
-	base := filepath.Base(path)
-	lowerBase := strings.ToLower(base)
-	for _, extension := range []string{".so", ".dylib", ".dll"} {
-		if strings.HasSuffix(lowerBase, extension) {
-			return CanonicalPluginID(base[:len(base)-len(extension)])
-		}
-	}
-	return CanonicalPluginID(base)
 }
 
 func pluginFileInfoFromPath(filePath string, requiredExtension string) (pluginFileInfo, bool) {

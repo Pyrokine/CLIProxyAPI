@@ -73,10 +73,12 @@ func (l *RootLock) Unlock() {
 	if l == nil {
 		return
 	}
-	l.once.Do(func() {
-		if l.locked && l.mutex != nil {
-			l.locked = false
-			l.mutex.mu.Unlock()
-		}
-	})
+	l.once.Do(
+		func() {
+			if l.locked && l.mutex != nil {
+				l.locked = false
+				l.mutex.mu.Unlock()
+			}
+		},
+	)
 }

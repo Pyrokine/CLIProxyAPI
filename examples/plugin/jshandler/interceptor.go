@@ -59,7 +59,7 @@ func (p *jsHandlerPlugin) InterceptRequestAfterAuth(
 }
 
 func (p *jsHandlerPlugin) interceptRequest(
-	ctx context.Context,
+	_ context.Context,
 	req pluginapi.RequestInterceptRequest,
 	hookName, hostCallbackID string,
 ) (pluginapi.RequestInterceptResponse, error) {
@@ -105,7 +105,7 @@ func (p *jsHandlerPlugin) InterceptResponse(
 }
 
 func (p *jsHandlerPlugin) interceptResponse(
-	ctx context.Context,
+	_ context.Context,
 	req pluginapi.ResponseInterceptRequest,
 	hostCallbackID string,
 ) (pluginapi.ResponseInterceptResponse, error) {
@@ -160,7 +160,7 @@ func (p *jsHandlerPlugin) InterceptStreamChunk(
 }
 
 func (p *jsHandlerPlugin) interceptStreamChunk(
-	ctx context.Context,
+	_ context.Context,
 	req pluginapi.StreamChunkInterceptRequest,
 	hostCallbackID string,
 ) (pluginapi.StreamChunkInterceptResponse, error) {
@@ -220,7 +220,7 @@ func (p *jsHandlerPlugin) interceptStreamChunk(
 	if chunkPtr != nil && *chunkPtr != "" {
 		resp.Body = []byte(*chunkPtr)
 	} else if isHeaderInit {
-		// header-only init, no body to return
+		// Header-only initialization omits the body.
 	} else if chunkModified || len(req.Body) == 0 {
 		resp.DropChunk = true
 	}
@@ -296,7 +296,7 @@ func (p *jsHandlerPlugin) applyJSRequestHook(
 }
 
 func (p *jsHandlerPlugin) applyJSAfterResponse(
-	scriptPath, model, protocol string,
+	scriptPath, _, protocol string,
 	reqHeadersMap map[string]any, reqBody []byte,
 	bodyStr string, chunkStr *string,
 	respHeaders http.Header, isStream bool, historyChunks []string,
@@ -439,7 +439,7 @@ func headerToAnyMap(h http.Header) map[string]any {
 	return m
 }
 
-func updateHeaderFromAny(h http.Header, val interface{}) []string {
+func updateHeaderFromAny(h http.Header, val any) []string {
 	var clearHeaders []string
 	if h == nil || val == nil {
 		return clearHeaders

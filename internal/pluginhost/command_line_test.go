@@ -208,7 +208,7 @@ func (p *commandLinePluginDouble) RegisterCommandLine(
 }
 
 func (p *commandLinePluginDouble) ExecuteCommandLine(
-	ctx context.Context,
+	_ context.Context,
 	req pluginapi.CommandLineExecutionRequest,
 ) (pluginapi.CommandLineExecutionResponse, error) {
 	p.execRequests = append(p.execRequests, req)

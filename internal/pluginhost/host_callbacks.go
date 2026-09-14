@@ -150,9 +150,6 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 		return nil, errDecode
 	}
 	ctx = h.resolveCallbackContext(callbackID, ctx)
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	streamCtx, cancel := context.WithCancel(ctx)
 	defer func() {
 		if cancel != nil {

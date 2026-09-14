@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func SelectArtifact(plan InstallPlan, goos string, goarch string) (Artifact, error) {
+func selectArtifact(plan InstallPlan, goos string, goarch string) (Artifact, error) {
 	plan = NormalizeInstallPlan(plan)
 	goos = normalizeGOOS(goos)
 	goarch = normalizeGOARCH(goarch)
@@ -23,9 +23,9 @@ func SelectArtifact(plan InstallPlan, goos string, goarch string) (Artifact, err
 	return Artifact{}, fmt.Errorf("artifact not found for %s/%s", goos, goarch)
 }
 
-func (c Client) DownloadArtifact(ctx context.Context, artifact Artifact) ([]byte, error) {
+func (c Client) downloadArtifact(ctx context.Context, artifact Artifact) ([]byte, error) {
 	artifact = NormalizeInstallPlan(InstallPlan{Type: InstallTypeDirect, Artifacts: []Artifact{artifact}}).Artifacts[0]
-	if errValidate := ValidateArtifact(artifact); errValidate != nil {
+	if errValidate := validateArtifact(artifact); errValidate != nil {
 		return nil, errValidate
 	}
 	maxSize := maxPluginStoreArtifactBytes
@@ -45,7 +45,7 @@ func (c Client) DownloadArtifact(ctx context.Context, artifact Artifact) ([]byte
 	return data, nil
 }
 
-func VerifyArtifactChecksum(artifact Artifact, data []byte) error {
+func verifyArtifactChecksum(artifact Artifact, data []byte) error {
 	expected := strings.ToLower(strings.TrimSpace(artifact.SHA256))
 	if expected == "" {
 		return fmt.Errorf("artifact checksum missing")

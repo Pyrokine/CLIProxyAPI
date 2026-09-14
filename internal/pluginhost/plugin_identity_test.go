@@ -8,9 +8,13 @@ import (
 )
 
 func TestPluginConfigFingerprintsUseCanonicalPluginID(t *testing.T) {
-	cfg := &config.Config{Plugins: config.PluginsConfig{Configs: map[string]config.PluginInstanceConfig{
-		"Alpha": {},
-	}}}
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Configs: map[string]config.PluginInstanceConfig{
+				"Alpha": {},
+			},
+		},
+	}
 
 	fingerprints, errFingerprints := pluginConfigFingerprints(cfg)
 	if errFingerprints != nil {
@@ -25,10 +29,14 @@ func TestPluginConfigFingerprintsUseCanonicalPluginID(t *testing.T) {
 }
 
 func TestPluginConfigFingerprintsRejectCaseInsensitiveDuplicates(t *testing.T) {
-	cfg := &config.Config{Plugins: config.PluginsConfig{Configs: map[string]config.PluginInstanceConfig{
-		"Alpha": {},
-		"alpha": {},
-	}}}
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Configs: map[string]config.PluginInstanceConfig{
+				"Alpha": {},
+				"alpha": {},
+			},
+		},
+	}
 
 	_, errFingerprints := pluginConfigFingerprints(cfg)
 	if errFingerprints == nil || !strings.Contains(errFingerprints.Error(), "duplicate plugin config ids") {
@@ -37,9 +45,18 @@ func TestPluginConfigFingerprintsRejectCaseInsensitiveDuplicates(t *testing.T) {
 }
 
 func TestRuntimeConfigUsesCanonicalPluginID(t *testing.T) {
-	runtime := runtimeConfigFromConfig(&config.Config{Plugins: config.PluginsConfig{Configs: map[string]config.PluginInstanceConfig{
-		"Alpha": {},
-	}}})
+	runtime, errRuntimeConfig := runtimeConfigFromConfig(
+		&config.Config{
+			Plugins: config.PluginsConfig{
+				Configs: map[string]config.PluginInstanceConfig{
+					"Alpha": {},
+				},
+			},
+		},
+	)
+	if errRuntimeConfig != nil {
+		t.Fatalf("runtimeConfigFromConfig() error = %v", errRuntimeConfig)
+	}
 
 	item, exists := runtime.Items["alpha"]
 	if !exists || item.ID != "alpha" {
@@ -48,19 +65,19 @@ func TestRuntimeConfigUsesCanonicalPluginID(t *testing.T) {
 }
 
 func TestHostPluginIdentityLookupsIgnoreCase(t *testing.T) {
-	host := NewForTest(newTestSymbolLoader())
+	host := newForTest(newTestSymbolLoader())
 	host.mu.Lock()
 	host.loaded["alpha"] = &loadedPlugin{id: "alpha"}
 	host.snapshot.Store(&Snapshot{enabled: true, records: []capabilityRecord{{id: "alpha"}}})
 	host.mu.Unlock()
 
-	if !host.PluginLoaded("Alpha") || !host.PluginBusy("ALPHA") || !host.PluginRegistered("Alpha") {
+	if !host.pluginLoaded("Alpha") || !host.PluginBusy("ALPHA") || !host.PluginRegistered("Alpha") {
 		t.Fatal("case-variant plugin identity was not resolved")
 	}
 	if !host.UnloadPlugin("Alpha") {
 		t.Fatal("UnloadPlugin() did not resolve case-variant plugin identity")
 	}
-	if host.PluginLoaded("alpha") {
+	if host.pluginLoaded("alpha") {
 		t.Fatal("plugin remains loaded after case-variant unload")
 	}
 }

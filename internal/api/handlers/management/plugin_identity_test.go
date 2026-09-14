@@ -31,7 +31,9 @@ func TestValidatePluginStoreInstallSourceUsesCaseInsensitivePluginID(t *testing.
 	if validatePluginStoreInstallSource(ctx, configs, sources, "alpha", "community") {
 		t.Fatal("case-variant plugin id bypassed source ownership")
 	}
-	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "plugin_store_source_conflict") {
+	if recorder.Code != http.StatusConflict || !strings.Contains(
+		recorder.Body.String(), "plugin_store_source_conflict",
+	) {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -43,13 +45,17 @@ func TestPluginConfigMutationAndDeletionUseCaseInsensitivePluginID(t *testing.T)
 	if errWrite := os.WriteFile(configPath, []byte("{}\n"), 0o600); errWrite != nil {
 		t.Fatalf("WriteFile(config) error = %v", errWrite)
 	}
-	handler := NewHandler(&config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     filepath.Join(root, "plugins"),
-		Configs: map[string]config.PluginInstanceConfig{
-			"Alpha": pluginConfigFromYAML(t, "enabled: true\nmode: safe\n"),
-		},
-	}}, configPath, nil)
+	handler := NewHandler(
+		&config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     filepath.Join(root, "plugins"),
+				Configs: map[string]config.PluginInstanceConfig{
+					"Alpha": pluginConfigFromYAML(t, "enabled: true\nmode: safe\n"),
+				},
+			},
+		}, configPath, nil,
+	)
 	t.Cleanup(func() { _ = handler.Close() })
 
 	patchRecorder := httptest.NewRecorder()

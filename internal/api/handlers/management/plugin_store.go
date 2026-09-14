@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"reflect"
 	"runtime"
@@ -146,6 +147,15 @@ type sourcedPlugin struct {
 
 func (h *Handler) ListPluginStore(c *gin.Context) {
 	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, host, _ := h.pluginStoreSnapshot()
+	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
+	if errResolvePluginsDir != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()},
+		)
+		return
+	}
+	pluginsDir = resolvedPluginsDir
 	sources, errSources := h.pluginStoreSources(sourceConfigs)
 	if errSources != nil {
 		c.JSON(
@@ -316,8 +326,18 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	installCtx := c.Request.Context()
-	pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, _, configGeneration :=
+	var pluginsEnabled bool
+	_, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, _, configGeneration :=
 		h.pluginStoreSnapshot()
+	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
+	if errResolvePluginsDir != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()},
+		)
+		return
+	}
+	pluginsDir = resolvedPluginsDir
 	sources, errSources := h.pluginStoreSources(sourceConfigs)
 	if errSources != nil {
 		c.JSON(
@@ -366,28 +386,15 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 
-	h.commitMu.Lock()
-	commitMuHeld := true
-	releaseCommitMu := func() {
-		if commitMuHeld {
-			h.commitMu.Unlock()
-			commitMuHeld = false
-		}
-	}
-	defer releaseCommitMu()
-	rootLock, errRootLock := pluginstore.LockRoot(pluginsDir)
-	if errRootLock != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_install_failed", "message": errRootLock.Error()})
+	coordinator, errCoordinate := beginPluginInstallCoordinator(h, id, pluginsDir)
+	if errCoordinate != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": "plugin_install_failed", "message": errCoordinate.Error()},
+		)
 		return
 	}
-	rootLockHeld := true
-	releaseRootLock := func() {
-		if rootLockHeld {
-			rootLock.Unlock()
-			rootLockHeld = false
-		}
-	}
-	defer releaseRootLock()
+	defer coordinator.release()
 	h.mu.Lock()
 	if h.cfg == nil {
 		h.mu.Unlock()
@@ -397,7 +404,15 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	currentSourceConfigs := append([]string(nil), h.cfg.Plugins.StoreSources...)
 	currentStoreAuth := pluginStoreAuthConfigs(h.cfg.Plugins.StoreAuth)
 	currentProxyURL := strings.TrimSpace(h.cfg.ProxyURL)
-	currentPluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
+	currentPluginsDir, errCurrentPluginsDir := config.ResolvePluginsDir(h.cfg.Plugins.Dir)
+	if errCurrentPluginsDir != nil {
+		h.mu.Unlock()
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": "plugin_directory_invalid", "message": errCurrentPluginsDir.Error()},
+		)
+		return
+	}
 	currentSources, errCurrentSources := h.pluginStoreSources(currentSourceConfigs)
 	if errCurrentSources != nil || h.configGeneration != configGeneration ||
 		currentProxyURL != proxyURL || currentPluginsDir != pluginsDir ||
@@ -432,65 +447,19 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 
 	pluginsEnabled = h.cfg.Plugins.Enabled
 	pluginsDir = currentPluginsDir
-	host := h.pluginHost
-	previousConfig := pluginRuntimeConfigSnapshot(h.cfg)
-	previousGeneration := h.configGeneration
-	var installTransaction *pluginstore.InstallTransaction
-	runtimePrepared := false
-	pluginIsBusy := func() bool { return pluginBusy(host, id) }
-	installOptions := pluginstore.InstallOptions{
-		PluginsDir:   pluginsDir,
-		GOOS:         goos,
-		GOARCH:       goarch,
-		PluginLoaded: pluginIsBusy,
-		BeforePublish: func(path, version string, overwritten bool, digest string) error {
-			transaction, errTransaction := pluginstore.PrepareInstallTransactionLocked(
-				pluginsDir, id, path, version, digest, overwritten, rootLock,
-			)
-			if errTransaction != nil {
-				return errTransaction
-			}
-			installTransaction = transaction
-			return nil
-		},
-		RootLock: rootLock,
-		BeforeWrite: func() error {
-			wasBusy := pluginBusy(host, id)
-			if errOverwrite := preparePluginStoreOverwrite(id, host); errOverwrite != nil {
-				return errOverwrite
-			}
-			runtimePrepared = wasBusy
-			return nil
-		},
-	}
-	rollbackInstall := func(result pluginstore.InstallResult) {
-		if installTransaction != nil {
-			if errRollback := installTransaction.Rollback(result); errRollback != nil {
-				log.WithError(errRollback).WithField("plugin_id", id).Error("pluginstore: failed to roll back artifact")
-			}
-		}
-	}
-	restoreRuntime := func() {
-		if runtimePrepared {
-			previousCommit := ConfigCommit{Config: previousConfig, Generation: previousGeneration}
-			if errSync := h.runPluginRuntimeSyncForCommit(
-				context.Background(), previousCommit, h.pluginRuntimeSync,
-			); errSync != nil {
-				log.WithError(errSync).WithField("plugin_id", id).Error("pluginstore: failed to restore runtime")
-			}
-		}
-	}
-	abortInstall := func(result pluginstore.InstallResult) {
-		rollbackInstall(result)
-		releaseRootLock()
-		releaseCommitMu()
-		restoreRuntime()
-	}
+	coordinator.configureRuntime(
+		h.pluginHost,
+		pluginRuntimeConfigSnapshot(h.cfg),
+		h.configGeneration,
+	)
+	installOptions := coordinator.installOptions(goos, goarch)
 
 	result, errInstall := prepared.Install(installOptions)
 	if errInstall != nil {
 		h.mu.Unlock()
-		abortInstall(result)
+		if errAbort := coordinator.abort(result); errAbort != nil {
+			log.WithError(errAbort).WithField("plugin_id", id).Error("pluginstore: failed to abort install")
+		}
 		if errors.Is(errInstall, pluginstore.ErrLoadedPluginLocked) {
 			c.JSON(
 				http.StatusConflict, gin.H{
@@ -508,7 +477,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		manifest, errPrepare = pluginStoreManifestForInstall(source, plugin, result)
 		if errPrepare != nil {
 			h.mu.Unlock()
-			abortInstall(result)
+			if errAbort := coordinator.abort(result); errAbort != nil {
+				log.WithError(errAbort).WithField("plugin_id", id).Error("pluginstore: failed to abort install")
+			}
 			c.JSON(
 				http.StatusInternalServerError, gin.H{
 					"error": "plugin_manifest_failed",
@@ -530,7 +501,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 					fmt.Sprintf("failed to enable installed plugin: %v", errEnable),
 				)
 			}
-			if installTransaction != nil {
+			if coordinator.hasTransaction() {
 				_, installedConfig, _ := pluginConfigByID(next.Plugins.Configs, id)
 				fingerprint, errFingerprint := config.PluginInstanceConfigFingerprint(installedConfig)
 				if errFingerprint != nil {
@@ -539,7 +510,7 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 						fmt.Sprintf("failed to fingerprint installed plugin config: %v", errFingerprint),
 					)
 				}
-				if errExpected := installTransaction.SetExpectedConfigFingerprint(fingerprint); errExpected != nil {
+				if errExpected := coordinator.setExpectedConfigFingerprint(fingerprint); errExpected != nil {
 					return newConfigMutationError(
 						http.StatusInternalServerError,
 						fmt.Sprintf("failed to journal installed plugin config: %v", errExpected),
@@ -551,19 +522,18 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 	)
 	if !okCommit {
 		h.mu.Unlock()
-		abortInstall(result)
+		if errAbort := coordinator.abort(result); errAbort != nil {
+			log.WithError(errAbort).WithField("plugin_id", id).Error("pluginstore: failed to abort install")
+		}
 		return
 	}
-	if installTransaction != nil {
-		if errCommitArtifact := installTransaction.Commit(); errCommitArtifact != nil {
-			log.WithError(errCommitArtifact).WithField("plugin_id", id).Warn(
-				"pluginstore: failed to remove install transaction",
-			)
-		}
+	if errCommitArtifact := coordinator.commitArtifact(); errCommitArtifact != nil {
+		log.WithError(errCommitArtifact).WithField("plugin_id", id).Warn(
+			"pluginstore: failed to remove install transaction",
+		)
 	}
 	h.mu.Unlock()
-	releaseRootLock()
-	releaseCommitMu()
+	coordinator.release()
 	runtimeCtx := context.WithoutCancel(c.Request.Context())
 	if !h.notifyConfigCommittedContext(c, runtimeCtx, callback, commit) {
 		return
@@ -615,15 +585,8 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		return
 	}
 
-	h.commitMu.Lock()
-	commitMuHeld := true
-	releaseCommitMu := func() {
-		if commitMuHeld {
-			h.commitMu.Unlock()
-			commitMuHeld = false
-		}
-	}
-	defer releaseCommitMu()
+	coordinator := beginPluginDeleteCoordinator(h)
+	defer coordinator.release()
 
 	h.mu.RLock()
 	if h.cfg == nil {
@@ -631,40 +594,28 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "plugin_not_found", "message": "plugin not found"})
 		return
 	}
-	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
+	pluginsDir := h.cfg.Plugins.Dir
 	_, item, configured := pluginConfigByID(h.cfg.Plugins.Configs, id)
 	host := h.pluginHost
 	h.mu.RUnlock()
+	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
+	if errResolvePluginsDir != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()},
+		)
+		return
+	}
+	pluginsDir = resolvedPluginsDir
 	var runtimeIdentity pluginhost.PluginRuntimeIdentity
 	if host != nil {
 		runtimeIdentity = host.PluginRuntimeIdentity(id)
 	}
 
-	rootLock, errRootLock := pluginstore.LockRoot(pluginsDir)
-	if errRootLock != nil {
+	if errRootLock := coordinator.acquireRoot(pluginsDir); errRootLock != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "plugin_delete_failed", "message": errRootLock.Error()})
 		return
 	}
-	rootLockHeld := true
-	releaseRootLock := func() {
-		if rootLockHeld {
-			rootLock.Unlock()
-			rootLockHeld = false
-		}
-	}
-	acquireRootLock := func() error {
-		if rootLockHeld {
-			return nil
-		}
-		lock, errLock := pluginstore.LockRoot(pluginsDir)
-		if errLock != nil {
-			return errLock
-		}
-		rootLock = lock
-		rootLockHeld = true
-		return nil
-	}
-	defer releaseRootLock()
 
 	var desiredVersions map[string]string
 	if configured {
@@ -695,7 +646,7 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		pluginsDir,
 		id,
 		artifactPaths,
-		rootLock,
+		coordinator.rootLock(),
 	)
 	if errPrepare != nil {
 		c.JSON(
@@ -704,22 +655,11 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		)
 		return
 	}
-	defer deletionTransaction.Deactivate()
+	coordinator.setTransaction(deletionTransaction)
 
 	runtimeUnloaded := false
-	rollbackDelete := func() error {
-		var rollbackErrors []error
-		if errLock := acquireRootLock(); errLock != nil {
-			rollbackErrors = append(rollbackErrors, fmt.Errorf("lock root for rollback: %w", errLock))
-		} else if errRollback := deletionTransaction.Rollback(); errRollback != nil {
-			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore deleted artifacts: %w", errRollback))
-		}
-		releaseRootLock()
-		releaseCommitMu()
-		return errors.Join(rollbackErrors...)
-	}
 	respondRollbackFailure := func(status int, code string, cause error) {
-		if errRollback := rollbackDelete(); errRollback != nil {
+		if errRollback := coordinator.rollback(); errRollback != nil {
 			c.JSON(
 				http.StatusInternalServerError,
 				gin.H{
@@ -731,13 +671,6 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 			return
 		}
 		c.JSON(status, gin.H{"error": code, "message": cause.Error()})
-	}
-	commitDelete := func() error {
-		if errLock := acquireRootLock(); errLock != nil {
-			return errLock
-		}
-		defer releaseRootLock()
-		return deletionTransaction.Commit()
 	}
 	if errHide := deletionTransaction.Hide(); errHide != nil {
 		respondRollbackFailure(http.StatusInternalServerError, "plugin_delete_failed", errHide)
@@ -768,37 +701,46 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		)
 		h.mu.Unlock()
 		if !okCommit {
-			if errRollback := rollbackDelete(); errRollback != nil {
+			if errRollback := coordinator.rollback(); errRollback != nil {
 				log.WithError(errRollback).WithField("plugin_id", id).Error(
 					"pluginstore: failed to rollback deletion after config persistence failure",
 				)
 			}
 			return
 		}
-		releaseRootLock()
-		releaseCommitMu()
+		coordinator.releaseLocks()
 		commit.DeferPluginRuntimeSync = true
 		if callback != nil && h.configCommitCurrent(commit) {
 			runtimeCtx := context.WithoutCancel(c.Request.Context())
 			runtimeSyncErr = invokeConfigCommitted(runtimeCtx, callback, commit)
 		}
 	} else {
-		releaseRootLock()
-		releaseCommitMu()
+		coordinator.releaseLocks()
 	}
 
-	h.commitMu.Lock()
-	commitMuHeld = true
+	coordinator.reacquireCommit()
 	h.mu.RLock()
 	currentPluginsDir := ""
+	currentConfigAvailable := h.cfg != nil
 	configuredAgain := false
-	if h.cfg != nil {
-		currentPluginsDir = normalizedPluginsDir(h.cfg.Plugins.Dir)
+	if currentConfigAvailable {
+		currentPluginsDir = h.cfg.Plugins.Dir
 		_, _, configuredAgain = pluginConfigByID(h.cfg.Plugins.Configs, id)
 	}
 	h.mu.RUnlock()
+	if currentConfigAvailable {
+		resolvedCurrentPluginsDir, errResolveCurrentPluginsDir := config.ResolvePluginsDir(currentPluginsDir)
+		if errResolveCurrentPluginsDir != nil {
+			c.JSON(
+				http.StatusInternalServerError,
+				gin.H{"error": "plugin_directory_invalid", "message": errResolveCurrentPluginsDir.Error()},
+			)
+			return
+		}
+		currentPluginsDir = resolvedCurrentPluginsDir
+	}
 	if currentPluginsDir != pluginsDir || configuredAgain {
-		errRollback := rollbackDelete()
+		errRollback := coordinator.rollback()
 		if errRollback != nil {
 			c.JSON(
 				http.StatusInternalServerError,
@@ -816,11 +758,11 @@ func (h *Handler) DeletePlugin(c *gin.Context) {
 		)
 		return
 	}
-	errCommitArtifact := commitDelete()
+	errCommitArtifact := coordinator.commitArtifact()
 	if errCommitArtifact == nil && pluginBusy(host, id) {
 		runtimeUnloaded, runtimeUnloadErr = host.UnloadPluginIfCurrentWithError(runtimeIdentity)
 	}
-	releaseCommitMu()
+	coordinator.releaseLocks()
 	if errCommitArtifact != nil {
 		log.WithError(errCommitArtifact).WithField("plugin_id", id).Error(
 			"pluginstore: failed to commit artifact deletion",
@@ -1046,14 +988,12 @@ func (h *Handler) pluginStoreSnapshot() (
 		return false, "plugins", "", nil, nil, map[string]config.PluginInstanceConfig{}, nil, 0
 	}
 	pluginsEnabled := h.cfg.Plugins.Enabled
-	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
+	pluginsDir := h.cfg.Plugins.Dir
 	proxyURL := strings.TrimSpace(h.cfg.ProxyURL)
 	sourceConfigs := append([]string(nil), h.cfg.Plugins.StoreSources...)
 	storeAuth := pluginStoreAuthConfigs(h.cfg.Plugins.StoreAuth)
 	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg.Plugins.Configs))
-	for id, item := range h.cfg.Plugins.Configs {
-		configs[id] = item
-	}
+	maps.Copy(configs, h.cfg.Plugins.Configs)
 	return pluginsEnabled, pluginsDir, proxyURL, sourceConfigs, storeAuth, configs, h.pluginHost, h.configGeneration
 }
 
@@ -1313,21 +1253,16 @@ func (h *Handler) latestPluginVersions(
 		return versions
 	}
 
-	workerCount := pluginLatestVersionLookupConcurrency
-	if len(plugins) < workerCount {
-		workerCount = len(plugins)
-	}
+	workerCount := min(len(plugins), pluginLatestVersionLookupConcurrency)
 
 	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for worker := 0; worker < workerCount; worker++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workerCount {
+		wg.Go(func() {
 			for index := range jobs {
 				versions[index] = h.latestPluginVersion(ctx, client, plugins[index])
 			}
-		}()
+		})
 	}
 
 sendJobs:
@@ -1525,10 +1460,12 @@ func validatePluginStoreInstallSource(
 		}
 	}
 	if matchingConfigs > 1 {
-		c.JSON(http.StatusConflict, gin.H{
-			"error":   "plugin_config_identity_conflict",
-			"message": "plugin configuration contains duplicate case-insensitive ids",
-		})
+		c.JSON(
+			http.StatusConflict, gin.H{
+				"error":   "plugin_config_identity_conflict",
+				"message": "plugin configuration contains duplicate case-insensitive ids",
+			},
+		)
 		return false
 	}
 	_, item, configured := pluginConfigByID(configs, canonicalID)
@@ -1546,20 +1483,24 @@ func validatePluginStoreInstallSource(
 	}
 	resolvedSourceID, known := pluginStoreResolveInstalledSource(status, sources)
 	if !known {
-		c.JSON(http.StatusConflict, gin.H{
-			"error":               "plugin_store_installed_source_unknown",
-			"message":             "installed plugin source cannot be verified; uninstall it before reinstalling from the store",
-			"requested_source_id": strings.TrimSpace(requestedSourceID),
-		})
+		c.JSON(
+			http.StatusConflict, gin.H{
+				"error":               "plugin_store_installed_source_unknown",
+				"message":             "installed plugin source cannot be verified; uninstall it before reinstalling from the store",
+				"requested_source_id": strings.TrimSpace(requestedSourceID),
+			},
+		)
 		return false
 	}
 	if resolvedSourceID != strings.TrimSpace(requestedSourceID) {
-		c.JSON(http.StatusConflict, gin.H{
-			"error":               "plugin_store_source_conflict",
-			"message":             "installed plugin belongs to a different store source; uninstall it before switching sources",
-			"installed_source_id": resolvedSourceID,
-			"requested_source_id": strings.TrimSpace(requestedSourceID),
-		})
+		c.JSON(
+			http.StatusConflict, gin.H{
+				"error":               "plugin_store_source_conflict",
+				"message":             "installed plugin belongs to a different store source; uninstall it before switching sources",
+				"installed_source_id": resolvedSourceID,
+				"requested_source_id": strings.TrimSpace(requestedSourceID),
+			},
+		)
 		return false
 	}
 	return true

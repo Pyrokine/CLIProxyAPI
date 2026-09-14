@@ -164,7 +164,9 @@ func TestRecoverInstallTransactionsRemovesPartialCleanup(t *testing.T) {
 	); errWrite != nil {
 		t.Fatalf("WriteFile(journal) error = %v", errWrite)
 	}
-	if errWrite := os.WriteFile(filepath.Join(cleanupDir, "previous-sample.so"), []byte("old"), 0o600); errWrite != nil {
+	if errWrite := os.WriteFile(
+		filepath.Join(cleanupDir, "previous-sample.so"), []byte("old"), 0o600,
+	); errWrite != nil {
 		t.Fatalf("WriteFile(staged) error = %v", errWrite)
 	}
 	if errRecover := RecoverInstallTransactions(root, nil); errRecover != nil {
@@ -183,7 +185,7 @@ func TestInstallArchiveCreatesDurableTransactionBeforeWrite(t *testing.T) {
 	}
 	defer rootLock.Unlock()
 	var transaction *InstallTransaction
-	_, errInstall := InstallArchive(
+	_, errInstall := installArchive(
 		makeZip(t, map[string]string{"sample" + pluginExtension(runtime.GOOS): "new"}),
 		Plugin{ID: "sample", Version: "1.0.0"},
 		InstallOptions{

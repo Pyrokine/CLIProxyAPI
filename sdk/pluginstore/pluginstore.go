@@ -16,6 +16,8 @@ func CanonicalPluginID(id string) string {
 	return internalpluginstore.CanonicalPluginID(id)
 }
 
+// These aliases expose the supported registry protocol values to SDK consumers.
+// noinspection GoUnusedConst
 const (
 	DefaultRegistryURL = internalpluginstore.DefaultRegistryURL
 	DefaultSourceID    = internalpluginstore.DefaultSourceID
@@ -289,7 +291,11 @@ func (p *PreparedInstall) Close() error {
 }
 
 // Install applies a prepared plugin artifact.
-func (p PreparedInstall) Install(options InstallOptions) (InstallResult, error) {
+
+func (p *PreparedInstall) Install(options InstallOptions) (InstallResult, error) {
+	if p == nil {
+		return InstallResult{}, fmt.Errorf("prepared plugin archive is nil")
+	}
 	result, err := p.inner.Install(toInternalInstallOptions(options))
 	return fromInternalInstallResult(result), err
 }
@@ -363,6 +369,8 @@ type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
 }
 
+// These aliases expose install transaction errors to SDK consumers.
+// noinspection GoUnusedGlobalVariable
 var (
 	ErrLoadedPluginLocked = internalpluginstore.ErrLoadedPluginLocked
 	ErrPendingDeletion    = internalpluginstore.ErrPendingDeletion
@@ -373,6 +381,7 @@ type Client struct {
 	inner internalpluginstore.Client
 }
 
+// noinspection GoUnusedExportedFunction
 func NewClient(httpClient HTTPDoer, registryURL string) Client {
 	return Client{
 		inner: internalpluginstore.Client{
@@ -396,6 +405,7 @@ func DefaultSource() Source {
 	return fromInternalSource(internalpluginstore.DefaultSource())
 }
 
+// noinspection GoUnusedExportedFunction
 func NormalizeSources(registryURLs []string) ([]Source, error) {
 	sources, err := internalpluginstore.NormalizeSources(registryURLs)
 	return fromInternalSources(sources), err
@@ -405,14 +415,17 @@ func SourceID(registryURL string) string {
 	return internalpluginstore.SourceID(registryURL)
 }
 
+// noinspection GoUnusedExportedFunction
 func ValidatePlugin(plugin Plugin) error {
 	return internalpluginstore.ValidatePlugin(toInternalPlugin(plugin))
 }
 
+// noinspection GoUnusedExportedFunction
 func PluginInstallType(plugin Plugin) string {
 	return internalpluginstore.PluginInstallType(toInternalPlugin(plugin))
 }
 
+// noinspection GoUnusedExportedFunction
 func PluginPlatforms(plugin Plugin) []Platform {
 	return fromInternalPlatforms(internalpluginstore.PluginPlatforms(toInternalPlugin(plugin)))
 }
@@ -425,18 +438,23 @@ func NormalizeAuthConfigs(auth []AuthConfig) []AuthConfig {
 	return fromInternalAuthConfigs(internalpluginstore.NormalizeAuthConfigs(toInternalAuthConfigs(auth)))
 }
 
+// noinspection GoUnusedExportedFunction
 func AuthConfigured(auth []AuthConfig, requestURL string, kind string) bool {
 	return internalpluginstore.AuthConfigured(toInternalAuthConfigs(auth), requestURL, kind)
 }
 
+// noinspection GoUnusedExportedFunction
 func PluginAuthConfigured(source Source, plugin Plugin, auth []AuthConfig) bool {
-	return internalpluginstore.PluginAuthConfigured(toInternalSource(source), toInternalPlugin(plugin), toInternalAuthConfigs(auth))
+	return internalpluginstore.PluginAuthConfigured(
+		toInternalSource(source), toInternalPlugin(plugin), toInternalAuthConfigs(auth),
+	)
 }
 
 func UpdateAvailable(installed, latest string) bool {
 	return internalpluginstore.UpdateAvailable(installed, latest)
 }
 
+// noinspection GoUnusedExportedFunction
 func ReleaseVersion(release Release) (string, error) {
 	return internalpluginstore.ReleaseVersion(toInternalRelease(release))
 }
@@ -502,7 +520,9 @@ func (c Client) InstallVersion(
 	version string,
 	options InstallOptions,
 ) (InstallResult, error) {
-	result, err := c.inner.InstallVersion(ctx, toInternalPlugin(plugin), releaseTag, version, toInternalInstallOptions(options))
+	result, err := c.inner.InstallVersion(
+		ctx, toInternalPlugin(plugin), releaseTag, version, toInternalInstallOptions(options),
+	)
 	return fromInternalInstallResult(result), err
 }
 
@@ -547,7 +567,9 @@ func fromInternalSources(sources []internalpluginstore.Source) []Source {
 }
 
 func toInternalRegistry(registry Registry) internalpluginstore.Registry {
-	return internalpluginstore.Registry{SchemaVersion: registry.SchemaVersion, Plugins: toInternalPlugins(registry.Plugins)}
+	return internalpluginstore.Registry{
+		SchemaVersion: registry.SchemaVersion, Plugins: toInternalPlugins(registry.Plugins),
+	}
 }
 
 func fromInternalRegistry(registry internalpluginstore.Registry) Registry {

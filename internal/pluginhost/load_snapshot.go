@@ -182,7 +182,7 @@ func pluginFileSnapshotCurrent(file pluginFile) (bool, error) {
 	if errOpen != nil {
 		return false, errOpen
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 	hash := sha256.New()
 	if _, errCopy := io.Copy(hash, source); errCopy != nil {
 		return false, errCopy

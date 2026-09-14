@@ -81,7 +81,7 @@ func TestInstallArchiveBlocksLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
-	_, errInstall := InstallArchive(
+	_, errInstall := installArchive(
 		makeZip(
 			t, map[string]string{
 				"sample-provider.dll": "library-data",
@@ -113,7 +113,7 @@ func TestInstallArchivePreparesLoadedWindowsPluginBeforeWrite(t *testing.T) {
 	loaded := true
 	prepared := false
 
-	result, errInstall := InstallArchive(
+	result, errInstall := installArchive(
 		makeZip(
 			t, map[string]string{
 				"sample-provider.dll": "new",
@@ -163,7 +163,7 @@ func TestInstallArchiveStagesAfterLoadedWindowsPluginIsReleased(t *testing.T) {
 	loaded := true
 	order := make([]string, 0, 3)
 
-	_, errInstall := InstallArchive(
+	_, errInstall := installArchive(
 		makeZip(
 			t, map[string]string{
 				"sample-provider.dll": "new",
@@ -215,7 +215,7 @@ func TestInstallArchiveSkipsIdenticalLoadedWindowsPlugin(t *testing.T) {
 	}
 	beforeWriteCalled := false
 
-	result, errInstall := InstallArchive(
+	result, errInstall := installArchive(
 		makeZip(
 			t, map[string]string{
 				"sample-provider.dll": "same",
@@ -269,7 +269,7 @@ func TestInstallArchiveWaitsForPluginRootLock(t *testing.T) {
 	entered := make(chan struct{}, 1)
 	finished := make(chan error, 1)
 	go func() {
-		_, errInstall := InstallArchive(
+		_, errInstall := installArchive(
 			archive,
 			Plugin{ID: "sample", Version: "1.0.0"},
 			InstallOptions{
@@ -311,13 +311,15 @@ func TestInstallArchiveRejectsPendingDeletion(t *testing.T) {
 		t.Fatalf("Hide() error = %v", errHide)
 	}
 	transaction.Deactivate()
-	t.Cleanup(func() {
-		if errRollback := transaction.Rollback(); errRollback != nil {
-			t.Fatalf("Rollback() error = %v", errRollback)
-		}
-	})
+	t.Cleanup(
+		func() {
+			if errRollback := transaction.Rollback(); errRollback != nil {
+				t.Fatalf("Rollback() error = %v", errRollback)
+			}
+		},
+	)
 
-	_, errInstall := InstallArchive(
+	_, errInstall := installArchive(
 		makeZip(t, map[string]string{"sample.so": "replacement"}),
 		Plugin{ID: "sample", Version: "1.0.0"},
 		InstallOptions{PluginsDir: root, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH},
@@ -334,7 +336,7 @@ func TestInstallArchiveWritesPlatformPlugin(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	result, errInstall := InstallArchive(
+	result, errInstall := installArchive(
 		makeZip(
 			t, map[string]string{
 				"README.md":             "ignored",
@@ -376,7 +378,7 @@ func TestInstallArchiveRejectsLinkedTargetFile(t *testing.T) {
 		t.Fatalf("Symlink() error = %v", errSymlink)
 	}
 
-	_, errInstall := InstallArchive(
+	_, errInstall := installArchive(
 		makeZip(t, map[string]string{"sample" + pluginExtension(runtime.GOOS): "same"}),
 		Plugin{ID: "sample", Version: "1.0.0"},
 		InstallOptions{PluginsDir: root, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH},
@@ -399,7 +401,7 @@ func TestInstallArchiveRejectsLinkedPlatformDirectory(t *testing.T) {
 	if errSymlink := os.Symlink(outside, filepath.Join(root, "darwin")); errSymlink != nil {
 		t.Fatalf("Symlink() error = %v", errSymlink)
 	}
-	_, errInstall := InstallArchive(
+	_, errInstall := installArchive(
 		makeZip(t, map[string]string{"sample-provider.dylib": "library-data"}),
 		testPlugin(),
 		InstallOptions{PluginsDir: root, GOOS: "darwin", GOARCH: "arm64"},
@@ -418,7 +420,7 @@ func TestInstallArchiveReturnsVisiblePathForRollbackAfterWriteFailure(t *testing
 
 	root := t.TempDir()
 	writeFailure := errors.New("directory sync failed")
-	result, errInstall := InstallArchive(
+	result, errInstall := installArchive(
 		makeZip(
 			t, map[string]string{
 				"sample-provider.dylib": "library-data",
@@ -449,8 +451,8 @@ func TestInstallArchiveReturnsVisiblePathForRollbackAfterWriteFailure(t *testing
 	if _, errStat := os.Stat(result.Path); errStat != nil {
 		t.Fatalf("visible target missing before rollback: %v", errStat)
 	}
-	transaction := &ArtifactTransaction{}
-	if errRollback := transaction.Rollback(result); errRollback != nil {
+	transaction := &artifactTransaction{}
+	if errRollback := transaction.rollback(result); errRollback != nil {
 		t.Fatalf("Rollback() error = %v", errRollback)
 	}
 	if _, errStat := os.Stat(result.Path); !errors.Is(errStat, os.ErrNotExist) {
@@ -471,7 +473,7 @@ func TestInstallArchiveReportsOverwrite(t *testing.T) {
 	); errWrite != nil {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
-	result, errInstall := InstallArchive(
+	result, errInstall := installArchive(
 		makeZip(
 			t, map[string]string{
 				"sample-provider.dylib": "new",
@@ -500,7 +502,7 @@ func TestInstallArchiveOverwritesRuntimeSelectedPlugin(t *testing.T) {
 		t.Fatalf("WriteFile() error = %v", errWrite)
 	}
 
-	result, errInstall := InstallArchive(
+	result, errInstall := installArchive(
 		makeZip(
 			t, map[string]string{
 				"sample-provider" + pluginExtension(runtime.GOOS): "new",
@@ -577,7 +579,7 @@ func TestInstallArchiveRejectsUnsafeArchives(t *testing.T) {
 			tt.name, func(t *testing.T) {
 				t.Parallel()
 
-				_, errInstall := InstallArchive(
+				_, errInstall := installArchive(
 					makeZip(t, tt.files), testPlugin(),
 					InstallOptions{PluginsDir: t.TempDir(), GOOS: "darwin", GOARCH: "arm64"},
 				)
@@ -651,7 +653,7 @@ func TestDownloadAssetFallsBackToReleaseAssetAPIURLWhenBrowserDownloadURLEmpty(t
 		},
 	}
 
-	data, errDownload := client.DownloadAsset(
+	data, errDownload := client.downloadAsset(
 		context.Background(), ReleaseAsset{
 			Name:   "sample-provider_0.2.0_darwin_arm64.zip",
 			APIURL: apiURL,
@@ -684,7 +686,7 @@ func TestDownloadAssetUsesAPIURLWhenAuthMatchesArtifact(t *testing.T) {
 		},
 	}
 
-	data, errDownload := client.DownloadAsset(
+	data, errDownload := client.downloadAsset(
 		context.Background(), ReleaseAsset{
 			Name:               "sample-provider_0.2.0_darwin_arm64.zip",
 			APIURL:             apiURL,
@@ -716,7 +718,7 @@ func TestDownloadAssetUsesBrowserDownloadURLWithUnrelatedAuth(t *testing.T) {
 		},
 	}
 
-	data, errDownload := client.DownloadAsset(
+	data, errDownload := client.downloadAsset(
 		context.Background(), ReleaseAsset{
 			Name:               "sample-provider_0.2.0_darwin_arm64.zip",
 			APIURL:             "https://api.github.com/repos/author-name/cliproxy-sample-provider-plugin/releases/assets/1",
@@ -820,7 +822,7 @@ func TestInstallManifestResolvesDirectArtifactsFromSource(t *testing.T) {
 		},
 	}
 
-	result, errInstall := client.InstallManifest(
+	result, errInstall := client.installManifest(
 		context.Background(), Manifest{
 			SchemaVersion: SchemaVersionV2,
 			ID:            "sample-provider",
@@ -988,7 +990,7 @@ func TestDownloadArtifactEnforcesDeclaredSizeDuringRead(t *testing.T) {
 	body := &trackingReadCloser{data: []byte("0123456789")}
 	sum := sha256.Sum256(body.data)
 	client := Client{HTTPClient: singleResponseHTTPDoer{body: body}}
-	_, errDownload := client.DownloadArtifact(
+	_, errDownload := client.downloadArtifact(
 		context.Background(), Artifact{
 			GOOS:   "linux",
 			GOARCH: "amd64",

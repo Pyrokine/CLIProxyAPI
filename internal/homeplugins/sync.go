@@ -18,7 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const homePluginStoreHTTPTimeout = 30 * time.Second
+var homePluginStoreHTTPTimeout = 30 * time.Second
 
 type Platform struct {
 	GOOS   string `json:"goos"`
@@ -46,11 +46,11 @@ type SyncReport struct {
 	FinishedAt    time.Time             `json:"finished_at,omitempty"`
 	UpdatedAt     time.Time             `json:"updated_at"`
 	Platform      Platform              `json:"platform"`
-	Plugins       []PluginInstallStatus `json:"plugins"`
+	Plugins       []pluginInstallStatus `json:"plugins"`
 	Error         string                `json:"error,omitempty"`
 }
 
-type PluginInstallStatus struct {
+type pluginInstallStatus struct {
 	ID            string `json:"id"`
 	Version       string `json:"version,omitempty"`
 	ReleaseTag    string `json:"release_tag,omitempty"`
@@ -65,7 +65,7 @@ type PluginInstallStatus struct {
 }
 
 type preparedPluginInstall struct {
-	status            PluginInstallStatus
+	status            pluginInstallStatus
 	artifact          sdkpluginstore.PreparedInstall
 	configFingerprint string
 	prepareError      error
@@ -101,14 +101,14 @@ const (
 	pluginLoadStatusFailed       = "failed"
 )
 
-func CurrentPlatform() Platform {
+func currentPlatform() Platform {
 	return Platform{
 		GOOS:   runtime.GOOS,
 		GOARCH: runtime.GOARCH,
 	}
 }
 
-func NormalizePlatform(platform Platform) Platform {
+func normalizePlatform(platform Platform) Platform {
 	goos := strings.ToLower(strings.TrimSpace(platform.GOOS))
 	switch goos {
 	case "mac", "macos", "osx":
@@ -124,32 +124,22 @@ func NormalizePlatform(platform Platform) Platform {
 	return Platform{GOOS: goos, GOARCH: goarch}
 }
 
-func Sync(ctx context.Context, cfg *config.Config, pluginRuntime PluginRuntime) error {
-	_, errSync := SyncPlatformWithReport(ctx, cfg, pluginRuntime, CurrentPlatform())
-	return errSync
-}
-
-func SyncPlatform(ctx context.Context, cfg *config.Config, pluginRuntime PluginRuntime, platform Platform) error {
-	_, errSync := SyncPlatformWithReport(ctx, cfg, pluginRuntime, platform)
-	return errSync
-}
-
 func SyncWithReport(ctx context.Context, cfg *config.Config, pluginRuntime PluginRuntime) (SyncReport, error) {
-	return SyncPlatformWithReport(ctx, cfg, pluginRuntime, CurrentPlatform())
+	return syncPlatformWithReport(ctx, cfg, pluginRuntime, currentPlatform())
 }
 
-func SyncPlatformWithReport(
+func syncPlatformWithReport(
 	ctx context.Context,
 	cfg *config.Config,
 	pluginRuntime PluginRuntime,
 	platform Platform,
 ) (SyncReport, error) {
 	if errRecover := recoverPluginTransactions(cfg); errRecover != nil {
-		report := newSyncReport(NormalizePlatform(platform))
+		report := newSyncReport(normalizePlatform(platform))
 		finishReport(&report, errRecover)
 		return report, errRecover
 	}
-	prepared, _ := PrepareSyncPlatformWithReport(ctx, cfg, platform)
+	prepared, _ := prepareSyncPlatformWithReport(ctx, cfg, platform)
 	return prepared.Apply(pluginRuntime)
 }
 
@@ -157,9 +147,9 @@ func recoverPluginTransactions(cfg *config.Config) error {
 	if cfg == nil || !cfg.Home.Enabled || !cfg.Plugins.Enabled {
 		return nil
 	}
-	root := strings.TrimSpace(cfg.Plugins.Dir)
-	if root == "" {
-		root = "plugins"
+	root, errResolvePluginsDir := config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if errResolvePluginsDir != nil {
+		return fmt.Errorf("home plugins: %w", errResolvePluginsDir)
 	}
 	fingerprints := make(map[string]string, len(cfg.Plugins.Configs))
 	configured := make(map[string]struct{}, len(cfg.Plugins.Configs))
@@ -193,10 +183,10 @@ func recoverPluginTransactions(cfg *config.Config) error {
 }
 
 func PrepareSyncWithReport(ctx context.Context, cfg *config.Config) (PreparedSync, error) {
-	return PrepareSyncPlatformWithReport(ctx, cfg, CurrentPlatform())
+	return prepareSyncPlatformWithReport(ctx, cfg, currentPlatform())
 }
 
-func PrepareSyncPlatformWithReport(
+func prepareSyncPlatformWithReport(
 	ctx context.Context,
 	cfg *config.Config,
 	platform Platform,
@@ -205,7 +195,7 @@ func PrepareSyncPlatformWithReport(
 	if cfg == nil || !cfg.Home.Enabled || !cfg.Plugins.Enabled {
 		return prepared, nil
 	}
-	platform = NormalizePlatform(platform)
+	platform = normalizePlatform(platform)
 	prepared.platform = platform
 	prepared.report.Platform = platform
 	if platform.GOOS == "" {
@@ -219,9 +209,11 @@ func PrepareSyncPlatformWithReport(
 		return prepared, prepared.terminalError
 	}
 	prepared.enabled = true
-	prepared.root = strings.TrimSpace(cfg.Plugins.Dir)
-	if prepared.root == "" {
-		prepared.root = "plugins"
+	prepared.root, prepared.terminalError = config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if prepared.terminalError != nil {
+		prepared.terminalError = fmt.Errorf("home plugins: %w", prepared.terminalError)
+		finishReport(&prepared.report, prepared.terminalError)
+		return prepared, prepared.terminalError
 	}
 	client := newPluginStoreClient(cfg)
 	ids := make([]string, 0, len(cfg.Plugins.Configs))
@@ -239,7 +231,7 @@ func PrepareSyncPlatformWithReport(
 			prepared.installs = append(
 				prepared.installs,
 				preparedPluginInstall{
-					status: PluginInstallStatus{
+					status: pluginInstallStatus{
 						ID:            sdkpluginstore.CanonicalPluginID(id),
 						InstallStatus: pluginInstallStatusFailed,
 						Error:         errManifest.Error(),
@@ -322,24 +314,33 @@ func (p *PreparedSync) Close() error {
 	return errors.Join(cleanupErrors...)
 }
 
+func (p *PreparedSync) cleanupError() error {
+	if errCleanup := p.Close(); errCleanup != nil {
+		return fmt.Errorf("home plugins: clean prepared archives: %w", errCleanup)
+	}
+	return nil
+}
+
 func (p *PreparedSync) Apply(pluginRuntime PluginRuntime) (SyncReport, error) {
 	if p == nil {
 		return SyncReport{}, fmt.Errorf("home plugins: prepared sync is nil")
 	}
 	report := p.report
 	if p.terminalError != nil {
-		_ = p.Close()
-		return report, p.terminalError
+		errApply := errors.Join(p.terminalError, p.cleanupError())
+		finishReport(&report, errApply)
+		return report, errApply
 	}
 	if !p.enabled {
-		_ = p.Close()
-		return report, nil
+		errApply := p.cleanupError()
+		finishReport(&report, errApply)
+		return report, errApply
 	}
 	rootLock, errRootLock := sdkpluginstore.LockRoot(p.root)
 	if errRootLock != nil {
-		_ = p.Close()
-		finishReport(&report, errRootLock)
-		return report, errRootLock
+		errApply := errors.Join(errRootLock, p.cleanupError())
+		finishReport(&report, errApply)
+		return report, errApply
 	}
 	defer rootLock.Unlock()
 
@@ -376,8 +377,8 @@ func (p *PreparedSync) Apply(pluginRuntime PluginRuntime) (SyncReport, error) {
 		}
 		report.Plugins = append(report.Plugins, status)
 	}
-	if errCleanup := p.Close(); errCleanup != nil {
-		syncErrors = append(syncErrors, fmt.Errorf("home plugins: clean prepared archives: %w", errCleanup))
+	if errCleanup := p.cleanupError(); errCleanup != nil {
+		syncErrors = append(syncErrors, errCleanup)
 	}
 	errSync := errors.Join(syncErrors...)
 	finishReport(&report, errSync)
@@ -465,13 +466,13 @@ func DeleteWithReport(
 	pluginID string,
 ) SyncReport {
 	_ = ctx
-	platform := CurrentPlatform()
+	platform := currentPlatform()
 	report := newSyncReport(platform)
 	report.TaskID = taskID
 	report.Task = pluginDeleteTaskName
 	report.Phase = pluginTaskPhaseDelete
 	pluginID = sdkpluginstore.CanonicalPluginID(pluginID)
-	status := PluginInstallStatus{ID: pluginID}
+	status := pluginInstallStatus{ID: pluginID}
 	if cfg == nil {
 		status.InstallStatus = pluginInstallStatusFailed
 		status.Error = "home plugins: config is nil"
@@ -479,9 +480,14 @@ func DeleteWithReport(
 		finishReport(&report, errors.New(status.Error))
 		return report
 	}
-	root := strings.TrimSpace(cfg.Plugins.Dir)
-	if root == "" {
-		root = "plugins"
+	root, errResolvePluginsDir := config.ResolvePluginsDir(cfg.Plugins.Dir)
+	if errResolvePluginsDir != nil {
+		errPluginsDir := fmt.Errorf("home plugins: %w", errResolvePluginsDir)
+		status.InstallStatus = pluginInstallStatusFailed
+		status.Error = errPluginsDir.Error()
+		report.Plugins = append(report.Plugins, status)
+		finishReport(&report, errPluginsDir)
+		return report
 	}
 	path, deleted, errDelete := deletePluginArtifact(root, pluginID, pluginRuntime)
 	status.Path = strings.TrimSpace(path)
@@ -544,8 +550,8 @@ func newSyncReport(platform Platform) SyncReport {
 		OK:            true,
 		StartedAt:     now,
 		UpdatedAt:     now,
-		Platform:      NormalizePlatform(platform),
-		Plugins:       []PluginInstallStatus{},
+		Platform:      normalizePlatform(platform),
+		Plugins:       []pluginInstallStatus{},
 	}
 }
 
@@ -566,8 +572,8 @@ func finishReport(report *SyncReport, errTask error) {
 	report.Error = ""
 }
 
-func pluginStatusFromManifest(manifest sdkpluginstore.Manifest) PluginInstallStatus {
-	return PluginInstallStatus{
+func pluginStatusFromManifest(manifest sdkpluginstore.Manifest) pluginInstallStatus {
+	return pluginInstallStatus{
 		ID:            sdkpluginstore.CanonicalPluginID(manifest.ID),
 		Version:       strings.TrimSpace(manifest.Version),
 		ReleaseTag:    strings.TrimSpace(manifest.ReleaseTag),
@@ -592,15 +598,12 @@ func storeManifestFromPluginConfig(id string, item config.PluginInstanceConfig) 
 		)
 	}
 	canonicalID := sdkpluginstore.CanonicalPluginID(id)
-	if strings.TrimSpace(manifest.ID) == "" {
-		manifest.ID = canonicalID
-	} else if sdkpluginstore.CanonicalPluginID(manifest.ID) != canonicalID {
+	if strings.TrimSpace(manifest.ID) != "" && sdkpluginstore.CanonicalPluginID(manifest.ID) != canonicalID {
 		return sdkpluginstore.Manifest{}, false, fmt.Errorf(
 			"home plugins: store manifest id %q does not match plugin config id %q", manifest.ID, id,
 		)
-	} else {
-		manifest.ID = canonicalID
 	}
+	manifest.ID = canonicalID
 	if errValidate := manifest.Validate(); errValidate != nil {
 		return sdkpluginstore.Manifest{}, false, fmt.Errorf(
 			"home plugins: invalid store manifest for %s: %w", id, errValidate,

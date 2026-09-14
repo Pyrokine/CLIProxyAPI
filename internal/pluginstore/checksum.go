@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func ParseChecksums(data []byte) (map[string]string, error) {
+func parseChecksums(data []byte) (map[string]string, error) {
 	out := map[string]string{}
 	for lineNumber, rawLine := range strings.Split(string(data), "\n") {
 		line := strings.TrimSpace(rawLine)
@@ -31,7 +31,7 @@ func ParseChecksums(data []byte) (map[string]string, error) {
 	return out, nil
 }
 
-func VerifyChecksum(name string, data []byte, checksums map[string]string) error {
+func verifyChecksum(name string, data []byte, checksums map[string]string) error {
 	expected := strings.ToLower(strings.TrimSpace(checksums[name]))
 	if expected == "" {
 		return fmt.Errorf("checksum for %s not found", name)

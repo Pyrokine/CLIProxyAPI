@@ -181,6 +181,8 @@ type streamPageData struct {
 
 func main() {}
 
+// The exported name is fixed by the plugin C ABI.
+//
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
 	if plugin == nil {
@@ -298,15 +300,15 @@ func handleManagement(raw []byte) ([]byte, error) {
 
 func optionsFromManagementRequest(req managementRequest) (runOptions, error) {
 	opts := runOptions{
-		Model:         defaultModel,
-		Mode:          "non-stream",
-		EntryProtocol: "openai",
-		ExitProtocol:  "openai",
-		Prompt:        defaultPrompt,
-		Headers:       http.Header{},
-		Query:         url.Values{},
+		Model:          defaultModel,
+		Mode:           "non-stream",
+		EntryProtocol:  "openai",
+		ExitProtocol:   "openai",
+		Prompt:         defaultPrompt,
+		Headers:        http.Header{},
+		Query:          url.Values{},
+		HostCallbackID: strings.TrimSpace(req.HostCallbackID),
 	}
-	opts.HostCallbackID = strings.TrimSpace(req.HostCallbackID)
 	if len(req.Body) > 0 {
 		if errApplyBody := applyBodyOptions(&opts, req.Body); errApplyBody != nil {
 			return opts, errApplyBody
@@ -438,16 +440,14 @@ func executeOnce(opts runOptions) (pluginapi.HostModelExecutionResponse, error) 
 	// originating plugin's interceptor chain.
 	result, errCall := callHost(
 		pluginabi.MethodHostModelExecute, hostModelExecutionRequest{
-			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-				EntryProtocol: opts.EntryProtocol,
-				ExitProtocol:  opts.ExitProtocol,
-				Model:         opts.Model,
-				Stream:        false,
-				Body:          body,
-				Headers:       cloneHeader(opts.Headers),
-				Query:         cloneValues(opts.Query),
-				Alt:           opts.Alt,
-			},
+			EntryProtocol:  opts.EntryProtocol,
+			ExitProtocol:   opts.ExitProtocol,
+			Model:          opts.Model,
+			Stream:         false,
+			Body:           body,
+			Headers:        cloneHeader(opts.Headers),
+			Query:          cloneValues(opts.Query),
+			Alt:            opts.Alt,
 			HostCallbackID: opts.HostCallbackID,
 		},
 	)
@@ -472,16 +472,14 @@ func executeStream(opts runOptions) (data streamPageData) {
 	// originating plugin's interceptor chain.
 	result, errCall := callHost(
 		pluginabi.MethodHostModelExecuteStream, hostModelExecutionRequest{
-			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-				EntryProtocol: opts.EntryProtocol,
-				ExitProtocol:  opts.ExitProtocol,
-				Model:         opts.Model,
-				Stream:        true,
-				Body:          body,
-				Headers:       cloneHeader(opts.Headers),
-				Query:         cloneValues(opts.Query),
-				Alt:           opts.Alt,
-			},
+			EntryProtocol:  opts.EntryProtocol,
+			ExitProtocol:   opts.ExitProtocol,
+			Model:          opts.Model,
+			Stream:         true,
+			Body:           body,
+			Headers:        cloneHeader(opts.Headers),
+			Query:          cloneValues(opts.Query),
+			Alt:            opts.Alt,
 			HostCallbackID: opts.HostCallbackID,
 		},
 	)

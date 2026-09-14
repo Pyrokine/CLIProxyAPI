@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -88,6 +89,43 @@ func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
 	}
 }
 
+func TestReadPluginHTTPResponseRejectsContentLengthOverLimit(t *testing.T) {
+	_, err := readPluginHTTPResponse(strings.NewReader("small"), 11, 10)
+	if !errors.Is(err, errPluginHTTPResponseTooLarge) {
+		t.Fatalf("readPluginHTTPResponse() error = %v, want %v", err, errPluginHTTPResponseTooLarge)
+	}
+}
+
+func TestReadPluginHTTPResponseRejectsChunkedBodyOverLimit(t *testing.T) {
+	_, err := readPluginHTTPResponse(strings.NewReader("eleven-byte"), -1, 10)
+	if !errors.Is(err, errPluginHTTPResponseTooLarge) {
+		t.Fatalf("readPluginHTTPResponse() error = %v, want %v", err, errPluginHTTPResponseTooLarge)
+	}
+}
+
+func TestHostHTTPDoAppliesDefaultTimeout(t *testing.T) {
+	previousTimeout := pluginHTTPDefaultTimeout
+	pluginHTTPDefaultTimeout = 20 * time.Millisecond
+	defer func() { pluginHTTPDefaultTimeout = previousTimeout }()
+
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				<-r.Context().Done()
+			},
+		),
+	)
+	defer server.Close()
+
+	_, err := New().newHTTPClient(nil).Do(
+		context.Background(),
+		pluginapi.HTTPRequest{Method: http.MethodGet, URL: server.URL},
+	)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Do() error = %v, want context deadline exceeded", err)
+	}
+}
+
 func TestHostHTTPDoCallbackRestoresRegisteredRequestContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -95,7 +133,7 @@ func TestHostHTTPDoCallbackRestoresRegisteredRequestContext(t *testing.T) {
 
 	host := New()
 	host.mu.Lock()
-	host.runtimeConfig = &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
+	host.runtimeConfig = &config.Config{RequestLog: true}
 	host.mu.Unlock()
 	callbackID, closeCallback := host.openCallbackContext(ctx)
 	defer closeCallback()
@@ -293,15 +331,13 @@ func TestHostModelExecuteCallback(t *testing.T) {
 
 	rawReq, errMarshal := json.Marshal(
 		rpcHostModelExecutionRequest{
-			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-				EntryProtocol: "openai",
-				ExitProtocol:  "claude",
-				Model:         "model-1",
-				Body:          []byte(`{"request":true}`),
-				Headers:       http.Header{"X-Request": []string{"yes"}},
-				Query:         url.Values{"alt": []string{"sse"}},
-				Alt:           "raw",
-			},
+			EntryProtocol: "openai",
+			ExitProtocol:  "claude",
+			Model:         "model-1",
+			Body:          []byte(`{"request":true}`),
+			Headers:       http.Header{"X-Request": []string{"yes"}},
+			Query:         url.Values{"alt": []string{"sse"}},
+			Alt:           "raw",
 		},
 	)
 	if errMarshal != nil {
@@ -358,12 +394,10 @@ func TestHostModelExecuteCallbackCarriesCallerPluginSkipID(t *testing.T) {
 
 	rawReq, errMarshal := json.Marshal(
 		rpcHostModelExecutionRequest{
-			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-				EntryProtocol: "openai",
-				ExitProtocol:  "openai",
-				Model:         "model-1",
-				Body:          []byte(`{"request":true}`),
-			},
+			EntryProtocol:  "openai",
+			ExitProtocol:   "openai",
+			Model:          "model-1",
+			Body:           []byte(`{"request":true}`),
 			HostCallbackID: callbackID,
 		},
 	)
@@ -410,11 +444,9 @@ func TestHostModelExecuteCallbackDoesNotClaimParentDeferredUsage(t *testing.T) {
 
 	rawReq, errMarshal := json.Marshal(
 		rpcHostModelExecutionRequest{
-			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-				EntryProtocol: "openai",
-				ExitProtocol:  "openai",
-				Model:         "model-1",
-			},
+			EntryProtocol:  "openai",
+			ExitProtocol:   "openai",
+			Model:          "model-1",
 			HostCallbackID: callbackID,
 		},
 	)
@@ -455,12 +487,10 @@ func TestHostModelExecuteStreamCallbackDoesNotClaimParentDeferredUsage(t *testin
 
 	rawReq, errMarshal := json.Marshal(
 		rpcHostModelExecutionRequest{
-			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-				EntryProtocol: "openai",
-				ExitProtocol:  "openai",
-				Model:         "model-1",
-				Stream:        true,
-			},
+			EntryProtocol:  "openai",
+			ExitProtocol:   "openai",
+			Model:          "model-1",
+			Stream:         true,
 			HostCallbackID: callbackID,
 		},
 	)
@@ -500,13 +530,11 @@ func TestHostModelStreamClosesWithCallbackScope(t *testing.T) {
 
 	rawReq, errMarshal := json.Marshal(
 		rpcHostModelExecutionRequest{
-			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-				EntryProtocol: "openai",
-				ExitProtocol:  "openai",
-				Model:         "model-1",
-				Stream:        true,
-				Body:          []byte(`{"stream":true}`),
-			},
+			EntryProtocol:  "openai",
+			ExitProtocol:   "openai",
+			Model:          "model-1",
+			Stream:         true,
+			Body:           []byte(`{"stream":true}`),
 			HostCallbackID: callbackID,
 		},
 	)
@@ -559,13 +587,11 @@ func TestHostModelStreamReadAfterCallbackCloseReturnsError(t *testing.T) {
 
 	rawReq, errMarshal := json.Marshal(
 		rpcHostModelExecutionRequest{
-			HostModelExecutionRequest: pluginapi.HostModelExecutionRequest{
-				EntryProtocol: "openai",
-				ExitProtocol:  "openai",
-				Model:         "model-1",
-				Stream:        true,
-				Body:          []byte(`{"stream":true}`),
-			},
+			EntryProtocol:  "openai",
+			ExitProtocol:   "openai",
+			Model:          "model-1",
+			Stream:         true,
+			Body:           []byte(`{"stream":true}`),
 			HostCallbackID: callbackID,
 		},
 	)

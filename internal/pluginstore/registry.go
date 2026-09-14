@@ -102,7 +102,7 @@ func NormalizeSources(registryURLs []string) ([]Source, error) {
 		}
 		source := Source{
 			ID:   SourceID(registryURL),
-			Name: SourceName(registryURL),
+			Name: sourceName(registryURL),
 			URL:  registryURL,
 		}
 		if existingURL, exists := seenIDs[source.ID]; exists {
@@ -120,7 +120,7 @@ func SourceID(registryURL string) string {
 	return "source-" + hex.EncodeToString(sum[:])[:12]
 }
 
-func SourceName(registryURL string) string {
+func sourceName(registryURL string) string {
 	parsed, errParse := url.Parse(strings.TrimSpace(registryURL))
 	if errParse != nil || strings.TrimSpace(parsed.Host) == "" {
 		return strings.TrimSpace(registryURL)
@@ -128,14 +128,14 @@ func SourceName(registryURL string) string {
 	return parsed.Host
 }
 
-func ParseRegistry(data []byte) (Registry, error) {
+func parseRegistry(data []byte) (Registry, error) {
 	var registry Registry
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if errDecode := decoder.Decode(&registry); errDecode != nil {
 		return Registry{}, fmt.Errorf("decode registry: %w", errDecode)
 	}
 	normalizeRegistry(&registry)
-	if errValidate := ValidateRegistry(registry); errValidate != nil {
+	if errValidate := validateRegistry(registry); errValidate != nil {
 		return Registry{}, errValidate
 	}
 	return registry, nil
@@ -168,7 +168,7 @@ func normalizeRegistry(registry *Registry) {
 	}
 }
 
-func ValidateRegistry(registry Registry) error {
+func validateRegistry(registry Registry) error {
 	if registry.SchemaVersion != SchemaVersion && registry.SchemaVersion != SchemaVersionV2 {
 		return fmt.Errorf("unsupported schema_version %d", registry.SchemaVersion)
 	}
@@ -215,17 +215,17 @@ func ValidatePlugin(plugin Plugin) error {
 	}
 	switch installType {
 	case InstallTypeGitHubRelease:
-		if _, _, errRepository := GitHubRepositoryParts(plugin.Repository); errRepository != nil {
+		if _, _, errRepository := gitHubRepositoryParts(plugin.Repository); errRepository != nil {
 			return errRepository
 		}
 	case InstallTypeDirect:
 		if strings.TrimSpace(plugin.Version) == "" {
 			return fmt.Errorf("missing required field version")
 		}
-		if errPlan := ValidateInstallPlan(plugin.Install); errPlan != nil {
+		if errPlan := validateInstallPlan(plugin.Install); errPlan != nil {
 			return errPlan
 		}
-		if errVersions := ValidatePluginVersions(plugin); errVersions != nil {
+		if errVersions := validatePluginVersions(plugin); errVersions != nil {
 			return errVersions
 		}
 	default:
@@ -234,7 +234,7 @@ func ValidatePlugin(plugin Plugin) error {
 	return nil
 }
 
-func ValidatePluginVersions(plugin Plugin) error {
+func validatePluginVersions(plugin Plugin) error {
 	if len(plugin.Versions) == 0 {
 		return nil
 	}
@@ -259,7 +259,7 @@ func ValidatePluginVersions(plugin Plugin) error {
 				PluginInstallType(plugin),
 			)
 		}
-		if errPlan := ValidateInstallPlan(version.Install); errPlan != nil {
+		if errPlan := validateInstallPlan(version.Install); errPlan != nil {
 			return fmt.Errorf("versions[%d]: %w", index, errPlan)
 		}
 	}
@@ -286,7 +286,7 @@ func NormalizeInstallPlan(plan InstallPlan) InstallPlan {
 	return plan
 }
 
-func ValidateInstallPlan(plan InstallPlan) error {
+func validateInstallPlan(plan InstallPlan) error {
 	plan = NormalizeInstallPlan(plan)
 	if plan.Type == "" {
 		return fmt.Errorf("missing install type")
@@ -301,14 +301,14 @@ func ValidateInstallPlan(plan InstallPlan) error {
 		return fmt.Errorf("direct install requires at least one artifact")
 	}
 	for index, artifact := range plan.Artifacts {
-		if errArtifact := ValidateArtifact(artifact); errArtifact != nil {
+		if errArtifact := validateArtifact(artifact); errArtifact != nil {
 			return fmt.Errorf("artifacts[%d]: %w", index, errArtifact)
 		}
 	}
 	return nil
 }
 
-func ValidateArtifact(artifact Artifact) error {
+func validateArtifact(artifact Artifact) error {
 	artifact.GOOS = normalizeGOOS(artifact.GOOS)
 	artifact.GOARCH = normalizeGOARCH(artifact.GOARCH)
 	artifact.URL = strings.TrimSpace(artifact.URL)
@@ -421,7 +421,7 @@ func validPluginID(id string) bool {
 	return pluginIDPattern.MatchString(id)
 }
 
-func GitHubRepositoryParts(repository string) (string, string, error) {
+func gitHubRepositoryParts(repository string) (string, string, error) {
 	repository = strings.TrimSpace(repository)
 	parsed, errParse := url.Parse(repository)
 	if errParse != nil {

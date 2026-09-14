@@ -51,10 +51,16 @@ func registerRPCPlugin(
 		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
 	}
 	resp, errCall := callPlugin[rpcRegistration](
-		ctx, client, method, rpcLifecycleRequest{ConfigYAML: bytes.Clone(configYAML)},
+		ctx, client, method, rpcLifecycleRequest{
+			ConfigYAML:    bytes.Clone(configYAML),
+			SchemaVersion: pluginabi.SchemaVersion,
+		},
 	)
 	if errCall != nil {
 		return pluginapi.Plugin{}, errCall
+	}
+	if resp.SchemaVersion > pluginabi.SchemaVersion {
+		return pluginapi.Plugin{}, fmt.Errorf("plugin schema version %d is not supported", resp.SchemaVersion)
 	}
 	adapter := &rpcPluginAdapter{id: id, host: host, client: client}
 	plugin := pluginapi.Plugin{
@@ -92,6 +98,9 @@ func registerRPCPlugin(
 	}
 	if resp.Capabilities.RequestInterceptor {
 		plugin.Capabilities.RequestInterceptor = adapter
+	}
+	if resp.Capabilities.RequestLifecyclePlugin {
+		plugin.Capabilities.RequestLifecyclePlugin = adapter
 	}
 	if resp.Capabilities.ResponseTranslator {
 		plugin.Capabilities.ResponseTranslator = adapter
@@ -530,6 +539,21 @@ func (a *rpcPluginAdapter) InterceptRequestAfterAuth(
 			HostCallbackID:          callbackID,
 		},
 	)
+}
+
+func (a *rpcPluginAdapter) HandleRequestComplete(
+	ctx context.Context,
+	completion pluginapi.RequestCompletion,
+) error {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	_, errCall := callPlugin[rpcEmptyResponse](
+		ctx, a.client, pluginabi.MethodRequestComplete, rpcRequestCompletion{
+			RequestCompletion: completion,
+			HostCallbackID:    callbackID,
+		},
+	)
+	return errCall
 }
 
 func (a *rpcPluginAdapter) TranslateResponse(

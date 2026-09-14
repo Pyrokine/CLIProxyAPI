@@ -127,10 +127,6 @@ type abiCapabilities struct {
 	StreamChunkInterceptor bool `json:"response_stream_interceptor"`
 }
 
-type abiIdentifierResponse struct {
-	Identifier string `json:"identifier"`
-}
-
 func main() {}
 
 func inferPluginDir() string {
@@ -141,6 +137,8 @@ func inferPluginDir() string {
 	return filepath.Dir(C.GoString(sharedObjectPath))
 }
 
+// The exported name is fixed by the plugin C ABI.
+//
 //export cliproxy_plugin_init
 func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
 	if host == nil || plugin == nil {
@@ -186,7 +184,7 @@ func JSHandlerPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t
 }
 
 //export JSHandlerPluginFree
-func JSHandlerPluginFree(ptr unsafe.Pointer, len C.size_t) {
+func JSHandlerPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 	if ptr != nil {
 		C.free(ptr)
 	}

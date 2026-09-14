@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -91,7 +92,7 @@ func authIDForPath(path, authDir string) string {
 	return filepath.ToSlash(internalauth.FileAuthID(path, authDir))
 }
 
-func (h *Host) AuthProviderIdentifiers() []string {
+func (h *Host) authProviderIdentifiers() []string {
 	if h == nil {
 		return nil
 	}
@@ -214,14 +215,14 @@ func (h *Host) callParseAuth(
 	if normalizeProviderID(data.Provider) == "" {
 		return nil, true, fmt.Errorf("auth provider %s returned auth without provider", record.id)
 	}
-	parsed := h.AuthDataToCoreAuth(data, req.Path, req.FileName)
+	parsed := h.authDataToCoreAuth(data, req.Path, req.FileName)
 	if parsed == nil {
 		return nil, true, fmt.Errorf("auth provider %s returned invalid auth data", record.id)
 	}
 	return parsed, true, nil
 }
 
-func (h *Host) StartLogin(ctx context.Context, provider string, baseURL string) (
+func (h *Host) startLogin(ctx context.Context, provider string, baseURL string) (
 	pluginapi.AuthLoginStartResponse,
 	bool,
 	error,
@@ -264,7 +265,7 @@ func (h *Host) callStartLogin(
 	return resp, true, nil
 }
 
-func (h *Host) PollLogin(
+func (h *Host) pollLogin(
 	ctx context.Context,
 	provider, state string,
 	metadata ...map[string]any,
@@ -312,7 +313,96 @@ func (h *Host) callPollLogin(
 	return resp, true, nil
 }
 
-func (h *Host) AuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string) *coreauth.Auth {
+func (h *Host) refreshAuth(
+	ctx context.Context,
+	auth *coreauth.Auth,
+) (refreshed *coreauth.Auth, handled bool, err error) {
+	if h == nil || auth == nil {
+		return nil, false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	applyGeneration := h.currentApplyGeneration()
+	record := h.authProviderRecord(authProvider(auth))
+	if record == nil || record.plugin.Capabilities.AuthProvider == nil {
+		return nil, false, nil
+	}
+	token, okToken := h.capturePluginOperationToken(*record, applyGeneration)
+	if !okToken {
+		return nil, true, fmt.Errorf("auth provider refresh owner changed: %w", context.Canceled)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
+			refreshed = nil
+			handled = true
+			err = fmt.Errorf("auth provider refresh invalidated: %v: %w", recovered, context.Canceled)
+		}
+	}()
+
+	pluginResp, errRefresh := record.plugin.Capabilities.AuthProvider.RefreshAuth(
+		ctx, pluginapi.AuthRefreshRequest{
+			AuthID:       authID(auth),
+			AuthProvider: authProvider(auth),
+			StorageJSON:  storageJSONFromAuth(auth),
+			Metadata:     cloneAnyMap(authMetadata(auth)),
+			Attributes:   authAttributes(auth),
+			Host:         h.hostConfigSummary(),
+			HTTPClient:   h.newHTTPClient(auth),
+		},
+	)
+	if !h.pluginOperationTokenCurrent(token) {
+		return nil, true, fmt.Errorf("auth provider refresh result is stale: %w", context.Canceled)
+	}
+	if errRefresh != nil {
+		guarded := auth.Clone()
+		if guarded != nil {
+			guarded.RefreshCommit = &pluginRefreshCommitGuard{host: h, token: token}
+		}
+		return guarded, true, errRefresh
+	}
+	data := pluginResp.Auth
+	expectedProvider := authProvider(auth)
+	expectedID := authID(auth)
+	if returnedProvider := strings.TrimSpace(data.Provider); returnedProvider != "" && returnedProvider != expectedProvider {
+		return nil, true, fmt.Errorf("auth provider refresh changed auth provider")
+	}
+	if returnedID := strings.TrimSpace(data.ID); returnedID != "" && returnedID != expectedID {
+		return nil, true, fmt.Errorf("auth provider refresh changed auth id")
+	}
+	data.Provider = expectedProvider
+	data.ID = expectedID
+	data.FileName = auth.FileName
+	data.Label = auth.Label
+	data.Prefix = auth.Prefix
+	data.ProxyURL = auth.ProxyURL
+	data.Disabled = auth.Disabled
+	data.Attributes = cloneStringMap(auth.Attributes)
+	if len(data.Metadata) == 0 {
+		data.Metadata = cloneAnyMap(auth.Metadata)
+	}
+	if len(data.StorageJSON) == 0 {
+		data.StorageJSON = storageJSONFromAuth(auth)
+	}
+	if pluginResp.NextRefreshAfter.IsZero() {
+		data.NextRefreshAfter = auth.NextRefreshAfter
+	} else {
+		data.NextRefreshAfter = pluginResp.NextRefreshAfter
+	}
+	providerUpdate := h.authDataToCoreAuth(data, "", data.FileName)
+	if providerUpdate == nil {
+		return nil, true, fmt.Errorf("auth provider refresh returned invalid auth data")
+	}
+	next := auth.Clone()
+	next.Storage = providerUpdate.Storage
+	next.Metadata = providerUpdate.Metadata
+	next.NextRefreshAfter = providerUpdate.NextRefreshAfter
+	next.RefreshCommit = &pluginRefreshCommitGuard{host: h, token: token}
+	return next, true, nil
+}
+
+func (h *Host) authDataToCoreAuth(data pluginapi.AuthData, path, fileName string) *coreauth.Auth {
 	authDir := ""
 	if h != nil {
 		authDir = h.hostConfigSummary().AuthDir
@@ -394,9 +484,7 @@ func mergedStorageJSON(raw []byte, metadata map[string]any, provider string) ([]
 			out = make(map[string]any)
 		}
 	}
-	for key, value := range metadata {
-		out[key] = value
-	}
+	maps.Copy(out, metadata)
 	provider = normalizeProviderID(provider)
 	if provider != "" {
 		out["type"] = provider

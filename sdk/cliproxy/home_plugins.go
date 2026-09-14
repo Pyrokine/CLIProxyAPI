@@ -50,11 +50,16 @@ func (s *Service) markHomePluginsSynced(syncKey string) {
 	s.homePluginSyncMu.Unlock()
 }
 
-func (s *Service) reportHomePluginStatus(ctx context.Context, cfg *config.Config, report homeplugins.SyncReport) {
+func (s *Service) reportHomePluginStatusWithClient(
+	ctx context.Context,
+	cfg *config.Config,
+	report homeplugins.SyncReport,
+	client *home.Client,
+) {
 	if s == nil || cfg == nil {
 		return
 	}
-	if s.homeClient == nil {
+	if client == nil {
 		log.Warn("failed to report home plugin status: home client is unavailable")
 		return
 	}
@@ -75,19 +80,19 @@ func (s *Service) reportHomePluginStatus(ctx context.Context, cfg *config.Config
 	}
 	reportCtx, cancel := context.WithTimeout(ctx, homePluginStatusReportTimeout)
 	defer cancel()
-	if errReport := s.homeClient.RPushPluginStatus(reportCtx, raw); errReport != nil {
+	if errReport := client.RPushPluginStatus(reportCtx, raw); errReport != nil {
 		log.Warnf("failed to report home plugin status: %v", errReport)
 	}
 }
 
-func (s *Service) processHomePluginTasks(ctx context.Context, cfg *config.Config) {
-	if s == nil || cfg == nil || !cfg.Home.Enabled || s.homeClient == nil {
+func (s *Service) processHomePluginTasksWithClient(ctx context.Context, cfg *config.Config, client *home.Client) {
+	if s == nil || cfg == nil || !cfg.Home.Enabled || client == nil {
 		return
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	tasks, errTasks := s.homeClient.GetPluginTasks(ctx)
+	tasks, errTasks := client.GetPluginTasks(ctx)
 	if errTasks != nil {
 		log.Warnf("failed to fetch home plugin tasks: %v", errTasks)
 		return
@@ -110,7 +115,7 @@ func (s *Service) processHomePluginTasks(ctx context.Context, cfg *config.Config
 		if !report.OK && strings.TrimSpace(report.Error) != "" {
 			log.Warnf("failed to process home plugin delete task %d for %s: %v", task.ID, task.PluginID, report.Error)
 		}
-		s.reportHomePluginStatus(ctx, cfg, report)
+		s.reportHomePluginStatusWithClient(ctx, cfg, report, client)
 	}
 }
 
@@ -127,7 +132,13 @@ func homePluginSyncKey(cfg *config.Config) string {
 		return ""
 	}
 	hash := sha256.New()
-	_, _ = fmt.Fprintf(hash, "enabled=%t\ndir=%s\n", cfg.Plugins.Enabled, strings.TrimSpace(cfg.Plugins.Dir))
+	_, _ = fmt.Fprintf(
+		hash,
+		"enabled=%t\ndir=%s\nauth-revision=%d\n",
+		cfg.Plugins.Enabled,
+		strings.TrimSpace(cfg.Plugins.Dir),
+		cfg.Plugins.AuthRevision,
+	)
 	ids := make([]string, 0, len(cfg.Plugins.Configs))
 	for id := range cfg.Plugins.Configs {
 		ids = append(ids, id)

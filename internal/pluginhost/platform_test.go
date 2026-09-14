@@ -132,11 +132,13 @@ func TestApplyConfigFinalizesInstallTransactionWithPersistedConfigFingerprint(t 
 	}
 	rootLock.Unlock()
 
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: false,
-		Dir:     root,
-		Configs: map[string]config.PluginInstanceConfig{"sample": item},
-	}}
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: false,
+			Dir:     root,
+			Configs: map[string]config.PluginInstanceConfig{"sample": item},
+		},
+	}
 	if errApply := New().ApplyConfig(context.Background(), cfg); errApply != nil {
 		t.Fatalf("ApplyConfig() error = %v", errApply)
 	}

@@ -30,8 +30,8 @@ type pluginFile struct {
 	sourceInfo os.FileInfo
 }
 
-// PluginFileInfo describes a plugin binary selected by the host discovery rules.
-type PluginFileInfo struct {
+// pluginFileInfo describes a plugin binary selected by the host discovery rules.
+type pluginFileInfo struct {
 	ID      string
 	Path    string
 	Version string
@@ -210,7 +210,7 @@ func securePluginCandidateEntries(root, dir string) ([]os.DirEntry, bool, error)
 	}
 	current := root
 	if relative != "." {
-		for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		for component := range strings.SplitSeq(relative, string(filepath.Separator)) {
 			if component == "" || component == "." {
 				continue
 			}
@@ -284,11 +284,8 @@ func pluginFilePreferred(candidate pluginFile, current pluginFile) bool {
 func comparePluginVersions(a, b string) (int, bool) {
 	segmentsA := strings.Split(a, ".")
 	segmentsB := strings.Split(b, ".")
-	length := len(segmentsA)
-	if len(segmentsB) > length {
-		length = len(segmentsB)
-	}
-	for index := 0; index < length; index++ {
+	length := max(len(segmentsB), len(segmentsA))
+	for index := range length {
 		numberA, okA := pluginVersionSegment(segmentsA, index)
 		numberB, okB := pluginVersionSegment(segmentsB, index)
 		if !okA || !okB {
@@ -366,14 +363,14 @@ func cleanupUnselectedPluginFiles(candidates []pluginFile, loaded []pluginFile) 
 }
 
 // DiscoverPluginFiles returns plugin binaries selected by the current host discovery rules.
-func DiscoverPluginFiles(root string, desiredVersionsOpt ...map[string]string) ([]PluginFileInfo, error) {
+func DiscoverPluginFiles(root string, desiredVersionsOpt ...map[string]string) ([]pluginFileInfo, error) {
 	files, errSelect := selectPluginFiles(root, desiredVersionsOpt...)
 	if errSelect != nil {
 		return nil, errSelect
 	}
-	out := make([]PluginFileInfo, 0, len(files))
+	out := make([]pluginFileInfo, 0, len(files))
 	for _, file := range files {
-		out = append(out, PluginFileInfo{ID: file.ID, Path: file.Path, Version: file.Version})
+		out = append(out, pluginFileInfo{ID: file.ID, Path: file.Path, Version: file.Version})
 	}
 	return out, nil
 }

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -372,9 +373,7 @@ func cloneCommandLineFlagValues(in map[string]pluginapi.CommandLineFlagValue) ma
 		return nil
 	}
 	out := make(map[string]pluginapi.CommandLineFlagValue, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -408,7 +407,7 @@ func (h *Host) persistCommandLineAuths(ctx context.Context, auths []pluginapi.Au
 	summary := h.hostConfigSummary()
 	savedPaths := make([]string, 0, len(auths))
 	for index, authData := range auths {
-		record := h.AuthDataToCoreAuth(authData, "", "")
+		record := h.authDataToCoreAuth(authData, "", "")
 		if record == nil {
 			return savedPaths, fmt.Errorf("pluginhost: command-line auth %d is invalid", index+1)
 		}

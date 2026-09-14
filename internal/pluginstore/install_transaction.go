@@ -450,9 +450,9 @@ func validateInstallTargetDirectory(root string, relativeDir string) error {
 	if errRoot != nil {
 		return fmt.Errorf("open plugin root: %w", errRoot)
 	}
-	defer rootHandle.Close()
+	defer func() { _ = rootHandle.Close() }()
 	current := rootHandle
-	for _, component := range strings.Split(filepath.Clean(relativeDir), string(filepath.Separator)) {
+	for component := range strings.SplitSeq(filepath.Clean(relativeDir), string(filepath.Separator)) {
 		if component == "" || component == "." {
 			continue
 		}
@@ -478,7 +478,9 @@ func validateInstallTargetDirectory(root string, relativeDir string) error {
 		}
 		openedInfo, errOpened := next.Stat(".")
 		verifiedInfo, errVerified := current.Lstat(component)
-		if errOpened != nil || errVerified != nil || !os.SameFile(info, openedInfo) || !os.SameFile(openedInfo, verifiedInfo) {
+		if errOpened != nil || errVerified != nil || !os.SameFile(info, openedInfo) || !os.SameFile(
+			openedInfo, verifiedInfo,
+		) {
 			_ = next.Close()
 			if current != rootHandle {
 				_ = current.Close()
@@ -548,7 +550,7 @@ func rollbackInstallJournal(root, stageDir string, journal installJournal) error
 	return nil
 }
 
-func restoreInstallArtifact(stagedPath, targetPath string) error {
+func restoreInstallArtifact(stagedPath, targetPath string) (err error) {
 	stagedInfo, errStaged := os.Lstat(stagedPath)
 	if errStaged != nil {
 		return errStaged
@@ -564,7 +566,11 @@ func restoreInstallArtifact(stagedPath, targetPath string) error {
 	if errLink := os.Link(stagedPath, tempPath); errLink != nil {
 		return errLink
 	}
-	defer os.Remove(tempPath)
+	defer func() {
+		if errRemove := os.Remove(tempPath); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("remove temporary rollback artifact: %w", errRemove))
+		}
+	}()
 	tempInfo, errTemp := os.Lstat(tempPath)
 	if errTemp != nil || !tempInfo.Mode().IsRegular() || !os.SameFile(stagedInfo, tempInfo) {
 		return fmt.Errorf("temporary rollback artifact does not match staged artifact")

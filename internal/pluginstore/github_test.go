@@ -19,7 +19,7 @@ func TestSelectReleaseAssets(t *testing.T) {
 			{Name: "checksums.txt", BrowserDownloadURL: "https://example.com/checksums.txt"},
 		},
 	}
-	archiveAsset, checksumAsset, errSelect := SelectReleaseAssets(
+	archiveAsset, checksumAsset, errSelect := selectReleaseAssets(
 		release, "sample-provider", "0.1.0", "darwin", "arm64",
 	)
 	if errSelect != nil {
@@ -68,7 +68,7 @@ func TestSelectReleaseAssetsRejectsMissingAssets(t *testing.T) {
 			tt.name, func(t *testing.T) {
 				t.Parallel()
 
-				_, _, errSelect := SelectReleaseAssets(tt.release, "sample-provider", "0.1.0", "darwin", "arm64")
+				_, _, errSelect := selectReleaseAssets(tt.release, "sample-provider", "0.1.0", "darwin", "arm64")
 				if errSelect == nil {
 					t.Fatal("SelectReleaseAssets() error = nil")
 				}
@@ -124,11 +124,11 @@ func TestParseChecksumsAndVerifyChecksum(t *testing.T) {
 	data := []byte("zip-data")
 	sum := sha256.Sum256(data)
 	checksumText := hex.EncodeToString(sum[:]) + "  sample-provider_0.1.0_darwin_arm64.zip\n"
-	checksums, errParse := ParseChecksums([]byte(checksumText))
+	checksums, errParse := parseChecksums([]byte(checksumText))
 	if errParse != nil {
 		t.Fatalf("ParseChecksums() error = %v", errParse)
 	}
-	if errVerify := VerifyChecksum("sample-provider_0.1.0_darwin_arm64.zip", data, checksums); errVerify != nil {
+	if errVerify := verifyChecksum("sample-provider_0.1.0_darwin_arm64.zip", data, checksums); errVerify != nil {
 		t.Fatalf("VerifyChecksum() error = %v", errVerify)
 	}
 }
@@ -138,10 +138,10 @@ func TestVerifyChecksumRejectsMissingAndMismatch(t *testing.T) {
 
 	sum := sha256.Sum256([]byte("zip-data"))
 	checksums := map[string]string{"sample-provider.zip": hex.EncodeToString(sum[:])}
-	if errVerify := VerifyChecksum("missing.zip", []byte("zip-data"), checksums); errVerify == nil {
+	if errVerify := verifyChecksum("missing.zip", []byte("zip-data"), checksums); errVerify == nil {
 		t.Fatal("VerifyChecksum() missing checksum error = nil")
 	}
-	if errVerify := VerifyChecksum("sample-provider.zip", []byte("other"), checksums); errVerify == nil {
+	if errVerify := verifyChecksum("sample-provider.zip", []byte("other"), checksums); errVerify == nil {
 		t.Fatal("VerifyChecksum() mismatch error = nil")
 	}
 }

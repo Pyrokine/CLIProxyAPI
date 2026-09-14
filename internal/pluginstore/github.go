@@ -62,7 +62,7 @@ func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
 	if errDownload != nil {
 		return Registry{}, errDownload
 	}
-	registry, errParse := ParseRegistry(data)
+	registry, errParse := parseRegistry(data)
 	if errParse != nil {
 		return Registry{}, errParse
 	}
@@ -72,7 +72,7 @@ func (c Client) FetchRegistry(ctx context.Context) (Registry, error) {
 // FetchLatestRelease returns the latest published release of the plugin's
 // GitHub repository, mirroring the WebUI panel update check.
 func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release, error) {
-	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	owner, repo, errRepository := gitHubRepositoryParts(plugin.Repository)
 	if errRepository != nil {
 		return Release{}, errRepository
 	}
@@ -96,7 +96,7 @@ func (c Client) FetchLatestRelease(ctx context.Context, plugin Plugin) (Release,
 
 // FetchReleases returns published releases from the plugin's GitHub repository.
 func (c Client) FetchReleases(ctx context.Context, plugin Plugin, pageSize int) ([]Release, error) {
-	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	owner, repo, errRepository := gitHubRepositoryParts(plugin.Repository)
 	if errRepository != nil {
 		return nil, errRepository
 	}
@@ -124,7 +124,7 @@ func (c Client) FetchReleases(ctx context.Context, plugin Plugin, pageSize int) 
 
 // FetchReleaseByTag returns a published release by its exact GitHub tag.
 func (c Client) FetchReleaseByTag(ctx context.Context, plugin Plugin, tag string) (Release, error) {
-	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	owner, repo, errRepository := gitHubRepositoryParts(plugin.Repository)
 	if errRepository != nil {
 		return Release{}, errRepository
 	}
@@ -161,7 +161,7 @@ func ReleaseVersion(release Release) (string, error) {
 	return version, nil
 }
 
-func (c Client) DownloadAsset(ctx context.Context, asset ReleaseAsset) ([]byte, error) {
+func (c Client) downloadAsset(ctx context.Context, asset ReleaseAsset) ([]byte, error) {
 	downloadURL := strings.TrimSpace(asset.BrowserDownloadURL)
 	apiURL := strings.TrimSpace(asset.APIURL)
 	if downloadURL == "" || c.releaseAssetAPIAuthenticated(apiURL) {
@@ -338,8 +338,8 @@ func readPluginStoreResponse(resp *http.Response, maxSize int64) ([]byte, error)
 	return data, nil
 }
 
-func SelectReleaseAssets(release Release, id, version, goos, goarch string) (ReleaseAsset, ReleaseAsset, error) {
-	archiveName := ArchiveName(id, version, goos, goarch)
+func selectReleaseAssets(release Release, id, version, goos, goarch string) (ReleaseAsset, ReleaseAsset, error) {
+	archiveName := archiveName(id, version, goos, goarch)
 	var archiveAsset ReleaseAsset
 	var checksumAsset ReleaseAsset
 	for _, asset := range release.Assets {
@@ -359,7 +359,7 @@ func SelectReleaseAssets(release Release, id, version, goos, goarch string) (Rel
 	return archiveAsset, checksumAsset, nil
 }
 
-func ArchiveName(id, version, goos, goarch string) string {
+func archiveName(id, version, goos, goarch string) string {
 	return fmt.Sprintf(
 		"%s_%s_%s_%s.zip",
 		CanonicalPluginID(id),

@@ -257,11 +257,9 @@ func TestRegisterModelsUsesModelProviderStaticModels(t *testing.T) {
 		},
 	)
 	host.runtimeConfig = &config.Config{
-		SDKConfig: config.SDKConfig{
-			ProxyURL:         "http://proxy.local",
-			ForceModelPrefix: true,
-		},
-		AuthDir: "/tmp/plugin-auth",
+		ProxyURL:         "http://proxy.local",
+		ForceModelPrefix: true,
+		AuthDir:          "/tmp/plugin-auth",
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
 			"plugin-provider": {{Name: "upstream-model", Alias: "alias-model"}},
 		},
@@ -288,6 +286,118 @@ func TestRegisterModelsUsesModelProviderStaticModels(t *testing.T) {
 	if _, okLegacy := modelRegistry.clients["plugin:alpha:legacy-provider"]; okLegacy {
 		t.Fatal("legacy ModelRegistrar path was used despite ModelProvider.StaticModels")
 	}
+}
+
+func TestRegisterModelsPreservesStaticModelsUntilCompleteReplacement(t *testing.T) {
+	modelRegistry := newFakeModelRegistry()
+	response := pluginapi.ModelResponse{
+		Provider: "provider",
+		Models:   []pluginapi.ModelInfo{{ID: "model-v1"}},
+		Outcome:  pluginapi.ModelDiscoveryComplete,
+	}
+	var responseErr error
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "alpha",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					ModelProvider: modelProviderFunc{
+						staticModels: func(
+							context.Context,
+							pluginapi.StaticModelRequest,
+						) (pluginapi.ModelResponse, error) {
+							return response, responseErr
+						},
+					},
+				},
+			},
+		},
+	)
+	assertModel := func(wantID string, wantOutcome pluginapi.ModelDiscoveryOutcome) {
+		t.Helper()
+		client := modelRegistry.clients["plugin:alpha:provider"]
+		if client == nil || len(client.models) != 1 || client.models[0].ID != wantID {
+			t.Fatalf("registered client = %#v, want model %q", client, wantID)
+		}
+		registration := host.modelRegistration("alpha")
+		if registration.outcome != wantOutcome {
+			t.Fatalf("registration outcome = %q, want %q", registration.outcome, wantOutcome)
+		}
+	}
+
+	host.RegisterModels(context.Background(), modelRegistry)
+	assertModel("model-v1", pluginapi.ModelDiscoveryComplete)
+
+	response = pluginapi.ModelResponse{
+		Provider: "provider",
+		Models:   []pluginapi.ModelInfo{{ID: "partial-model"}},
+		Outcome:  pluginapi.ModelDiscoveryPartial,
+	}
+	host.RegisterModels(context.Background(), modelRegistry)
+	assertModel("model-v1", pluginapi.ModelDiscoveryComplete)
+
+	response = pluginapi.ModelResponse{
+		Provider: "provider",
+		Outcome:  pluginapi.ModelDiscoveryInconclusive,
+	}
+	host.RegisterModels(context.Background(), modelRegistry)
+	assertModel("model-v1", pluginapi.ModelDiscoveryComplete)
+
+	responseErr = errors.New("discovery failed")
+	host.RegisterModels(context.Background(), modelRegistry)
+	assertModel("model-v1", pluginapi.ModelDiscoveryComplete)
+	responseErr = nil
+
+	response = pluginapi.ModelResponse{
+		Provider: "provider",
+		Models:   []pluginapi.ModelInfo{{ID: "unknown-model"}},
+		Outcome:  "unknown",
+	}
+	host.RegisterModels(context.Background(), modelRegistry)
+	assertModel("model-v1", pluginapi.ModelDiscoveryComplete)
+
+	response = pluginapi.ModelResponse{
+		Provider: "provider",
+		Models:   []pluginapi.ModelInfo{{ID: " "}},
+		Outcome:  pluginapi.ModelDiscoveryComplete,
+	}
+	host.RegisterModels(context.Background(), modelRegistry)
+	assertModel("model-v1", pluginapi.ModelDiscoveryComplete)
+
+	response = pluginapi.ModelResponse{
+		Provider: "provider",
+		Models:   []pluginapi.ModelInfo{{ID: "model-v2"}},
+		Outcome:  pluginapi.ModelDiscoveryComplete,
+	}
+	host.RegisterModels(context.Background(), modelRegistry)
+	assertModel("model-v2", pluginapi.ModelDiscoveryComplete)
+
+	response = pluginapi.ModelResponse{
+		Provider: "provider",
+		Outcome:  pluginapi.ModelDiscoveryComplete,
+	}
+	host.RegisterModels(context.Background(), modelRegistry)
+	if _, okClient := modelRegistry.clients["plugin:alpha:provider"]; okClient {
+		t.Fatal("authoritative empty response retained the old client")
+	}
+	if registration := host.modelRegistration("alpha"); registration.pluginID != "" {
+		t.Fatalf("authoritative empty response retained registration %#v", registration)
+	}
+
+	response = pluginapi.ModelResponse{
+		Provider: "provider",
+		Models:   []pluginapi.ModelInfo{{ID: "partial-model"}},
+		Outcome:  pluginapi.ModelDiscoveryPartial,
+	}
+	host.RegisterModels(context.Background(), modelRegistry)
+	assertModel("partial-model", pluginapi.ModelDiscoveryPartial)
+
+	response = pluginapi.ModelResponse{
+		Provider: "provider",
+		Outcome:  pluginapi.ModelDiscoveryInconclusive,
+	}
+	host.RegisterModels(context.Background(), modelRegistry)
+	assertModel("partial-model", pluginapi.ModelDiscoveryPartial)
 }
 
 func TestRegisterModelsSkipsErrorEmptyAndInvalidModels(t *testing.T) {
@@ -910,6 +1020,324 @@ func TestRegisterExecutorsOAuthScopeSkipsStaticModelClientButRegistersExecutor(t
 	)
 	if !result.Handled || result.Provider != "qoder" || len(result.Models) != 1 || result.Models[0].ID != "oauth-model" {
 		t.Fatalf("OAuth model result = %#v, want oauth-model", result)
+	}
+	if result.Outcome != pluginapi.ModelDiscoveryComplete {
+		t.Fatalf("OAuth model outcome = %q, want complete", result.Outcome)
+	}
+}
+
+func TestModelsForAuthPreservesPartialOutcome(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "partial",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{identifier: "partial-provider"},
+					ModelProvider: modelProviderFunc{
+						modelsForAuth: func(
+							context.Context,
+							pluginapi.AuthModelRequest,
+						) (pluginapi.ModelResponse, error) {
+							return pluginapi.ModelResponse{
+								Provider: "partial-provider",
+								Models:   []pluginapi.ModelInfo{{ID: "partial-model"}},
+								Outcome:  pluginapi.ModelDiscoveryPartial,
+							}, nil
+						},
+					},
+					ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+				},
+			},
+		},
+	)
+
+	result := host.ModelsForAuth(
+		context.Background(),
+		&coreauth.Auth{ID: "partial-auth", Provider: "partial-provider"},
+	)
+	if !result.Handled || result.Err != nil || result.Outcome != pluginapi.ModelDiscoveryPartial ||
+		len(result.Models) != 1 || result.Models[0].ID != "partial-model" {
+		t.Fatalf("partial model result = %#v", result)
+	}
+}
+
+func TestModelsForAuthRejectsUnknownOutcome(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "invalid-outcome",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{identifier: "invalid-provider"},
+					ModelProvider: modelProviderFunc{
+						modelsForAuth: func(
+							context.Context,
+							pluginapi.AuthModelRequest,
+						) (pluginapi.ModelResponse, error) {
+							return pluginapi.ModelResponse{
+								Provider: "invalid-provider",
+								Outcome:  "unknown",
+							}, nil
+						},
+					},
+					ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+				},
+			},
+		},
+	)
+
+	result := host.ModelsForAuth(
+		context.Background(),
+		&coreauth.Auth{ID: "invalid-auth", Provider: "invalid-provider"},
+	)
+	if !result.Handled || result.Err == nil {
+		t.Fatalf("invalid model result = %#v, want handled error", result)
+	}
+}
+
+func TestModelsForAuthCompleteEmptyAndInconclusiveRemainHandled(t *testing.T) {
+	outcome := pluginapi.ModelDiscoveryComplete
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "empty",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{identifier: "empty-provider"},
+					ModelProvider: modelProviderFunc{
+						modelsForAuth: func(
+							context.Context,
+							pluginapi.AuthModelRequest,
+						) (pluginapi.ModelResponse, error) {
+							return pluginapi.ModelResponse{
+								Provider: "empty-provider",
+								Outcome:  outcome,
+							}, nil
+						},
+					},
+					ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+				},
+			},
+		},
+	)
+	auth := &coreauth.Auth{ID: "empty-auth", Provider: "empty-provider"}
+
+	result := host.ModelsForAuth(context.Background(), auth)
+	if !result.Handled || result.Err != nil || result.Outcome != pluginapi.ModelDiscoveryComplete || len(result.Models) != 0 {
+		t.Fatalf("complete empty result = %#v", result)
+	}
+
+	outcome = pluginapi.ModelDiscoveryInconclusive
+	result = host.ModelsForAuth(context.Background(), auth)
+	if !result.Handled || result.Err != nil || result.Outcome != pluginapi.ModelDiscoveryInconclusive || len(result.Models) != 0 {
+		t.Fatalf("inconclusive result = %#v", result)
+	}
+}
+
+func TestModelsForAuthProviderMismatchIsHandledProtocolError(t *testing.T) {
+	backupCalls := 0
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "primary",
+			priority: 10,
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{identifier: "expected-provider"},
+					ModelProvider: modelProviderFunc{
+						modelsForAuth: func(
+							context.Context,
+							pluginapi.AuthModelRequest,
+						) (pluginapi.ModelResponse, error) {
+							return pluginapi.ModelResponse{Provider: "wrong-provider"}, nil
+						},
+					},
+					ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+				},
+			},
+		},
+		capabilityRecord{
+			id: "backup",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{identifier: "expected-provider"},
+					ModelProvider: modelProviderFunc{
+						modelsForAuth: func(
+							context.Context,
+							pluginapi.AuthModelRequest,
+						) (pluginapi.ModelResponse, error) {
+							backupCalls++
+							return pluginapi.ModelResponse{
+								Provider: "expected-provider",
+								Models:   []pluginapi.ModelInfo{{ID: "backup-model"}},
+							}, nil
+						},
+					},
+					ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+				},
+			},
+		},
+	)
+
+	result := host.ModelsForAuth(
+		context.Background(),
+		&coreauth.Auth{ID: "provider-mismatch", Provider: "expected-provider"},
+	)
+	if !result.Handled || result.Err == nil {
+		t.Fatalf("provider mismatch result = %#v, want handled protocol error", result)
+	}
+	if backupCalls != 0 {
+		t.Fatalf("backup model providers called = %d, want 0", backupCalls)
+	}
+}
+
+func TestModelsForAuthRejectsAuthUpdateIdentityChanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		update pluginapi.AuthData
+	}{
+		{
+			name:   "provider",
+			update: pluginapi.AuthData{Provider: "other-provider", Metadata: map[string]any{"token": "new"}},
+		},
+		{
+			name:   "id",
+			update: pluginapi.AuthData{ID: "other-auth", Metadata: map[string]any{"token": "new"}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(
+			test.name, func(t *testing.T) {
+				host := newHostWithRecords(
+					capabilityRecord{
+						id: "identity",
+						plugin: pluginapi.Plugin{
+							Capabilities: pluginapi.Capabilities{
+								AuthProvider: fakeAuthProvider{identifier: "identity-provider"},
+								ModelProvider: modelProviderFunc{
+									modelsForAuth: func(
+										context.Context,
+										pluginapi.AuthModelRequest,
+									) (pluginapi.ModelResponse, error) {
+										return pluginapi.ModelResponse{
+											Provider:   "identity-provider",
+											AuthUpdate: test.update,
+										}, nil
+									},
+								},
+								ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+							},
+						},
+					},
+				)
+				result := host.ModelsForAuth(
+					context.Background(),
+					&coreauth.Auth{ID: "identity-auth", Provider: "identity-provider"},
+				)
+				if !result.Handled || result.Err == nil || result.Auth != nil {
+					t.Fatalf("identity-changing auth update result = %#v", result)
+				}
+			},
+		)
+	}
+}
+
+func TestModelsForAuthRestrictsAuthUpdateAndDeepClonesMetadata(t *testing.T) {
+	requestMetadata := map[string]any{
+		"request_map":   map[string]any{"value": "original"},
+		"request_slice": []any{map[string]any{"value": "original"}},
+		"request_bytes": []byte{1, 2},
+		"inherited_map": map[string]any{"value": "original"},
+	}
+	responseMetadata := map[string]any{
+		"response_map":   map[string]any{"value": "plugin"},
+		"response_slice": []any{map[string]any{"value": "plugin"}},
+		"response_bytes": []byte{3, 4},
+	}
+	nextRefresh := time.Now().Add(time.Hour).UTC()
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "clone",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{identifier: "clone-provider"},
+					ModelProvider: modelProviderFunc{
+						modelsForAuth: func(
+							_ context.Context,
+							req pluginapi.AuthModelRequest,
+						) (pluginapi.ModelResponse, error) {
+							req.Metadata["request_map"].(map[string]any)["value"] = "request-mutated"
+							req.Metadata["request_slice"].([]any)[0].(map[string]any)["value"] = "request-mutated"
+							req.Metadata["request_bytes"].([]byte)[0] = 9
+							return pluginapi.ModelResponse{
+								Provider: "clone-provider",
+								Models:   []pluginapi.ModelInfo{{ID: "clone-model"}},
+								AuthUpdate: pluginapi.AuthData{
+									Provider:         "clone-provider",
+									ID:               "clone-auth",
+									FileName:         "changed.json",
+									Label:            "changed-label",
+									Prefix:           "changed-prefix",
+									ProxyURL:         "http://changed.example",
+									Disabled:         true,
+									StorageJSON:      []byte(`{"access_token":"new"}`),
+									Metadata:         responseMetadata,
+									Attributes:       map[string]string{"immutable": "changed"},
+									NextRefreshAfter: nextRefresh,
+								},
+							}, nil
+						},
+					},
+					ExecutorModelScope: pluginapi.ExecutorModelScopeOAuth,
+				},
+			},
+		},
+	)
+	auth := &coreauth.Auth{
+		ID:         "clone-auth",
+		Index:      "clone-index",
+		Provider:   "clone-provider",
+		FileName:   "original.json",
+		Label:      "original-label",
+		Prefix:     "original-prefix",
+		ProxyURL:   "http://original.example",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"immutable": "original", "path": "/tmp/original.json"},
+		Metadata:   requestMetadata,
+		Generation: 7,
+	}
+
+	result := host.ModelsForAuth(context.Background(), auth)
+	if !result.Handled || result.Err != nil || result.Auth == nil {
+		t.Fatalf("model auth update result = %#v", result)
+	}
+	updated := result.Auth
+	if updated.ID != auth.ID || updated.Index != auth.Index || updated.Provider != auth.Provider ||
+		updated.FileName != auth.FileName || updated.Label != auth.Label || updated.Prefix != auth.Prefix ||
+		updated.ProxyURL != auth.ProxyURL || updated.Disabled != auth.Disabled || updated.Status != auth.Status ||
+		updated.Generation != auth.Generation || updated.Attributes["immutable"] != "original" {
+		t.Fatalf("model auth update changed immutable auth identity: %#v", updated)
+	}
+	if !updated.NextRefreshAfter.Equal(nextRefresh) {
+		t.Fatalf("NextRefreshAfter = %v, want %v", updated.NextRefreshAfter, nextRefresh)
+	}
+	if requestMetadata["request_map"].(map[string]any)["value"] != "original" ||
+		requestMetadata["request_slice"].([]any)[0].(map[string]any)["value"] != "original" ||
+		requestMetadata["request_bytes"].([]byte)[0] != 1 {
+		t.Fatalf("plugin request mutated source metadata: %#v", requestMetadata)
+	}
+	responseMetadata["response_map"].(map[string]any)["value"] = "plugin-mutated"
+	responseMetadata["response_slice"].([]any)[0].(map[string]any)["value"] = "plugin-mutated"
+	responseMetadata["response_bytes"].([]byte)[0] = 8
+	if updated.Metadata["response_map"].(map[string]any)["value"] != "plugin" ||
+		updated.Metadata["response_slice"].([]any)[0].(map[string]any)["value"] != "plugin" ||
+		updated.Metadata["response_bytes"].([]byte)[0] != 3 {
+		t.Fatalf("plugin response metadata aliases returned auth: %#v", updated.Metadata)
+	}
+	updated.Metadata["inherited_map"].(map[string]any)["value"] = "result-mutated"
+	if requestMetadata["inherited_map"].(map[string]any)["value"] != "original" {
+		t.Fatalf("returned auth metadata aliases source auth: %#v", requestMetadata)
+	}
+	updated.Metadata["response_map"].(map[string]any)["value"] = "result-mutated"
+	if responseMetadata["response_map"].(map[string]any)["value"] != "plugin-mutated" {
+		t.Fatalf("returned auth metadata aliases plugin response: %#v", responseMetadata)
 	}
 }
 
@@ -2998,49 +3426,51 @@ func TestUsageAdapterPropagatesServiceTiers(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var captured pluginapi.UsageRecord
-			plugin := usagePluginFunc(
-				func(_ context.Context, record pluginapi.UsageRecord) {
-					captured = record
-				},
-			)
-			host := newHostWithRecords(
-				capabilityRecord{
-					id: "usage-tier",
-					plugin: pluginapi.Plugin{
-						Capabilities: pluginapi.Capabilities{UsagePlugin: plugin},
+		t.Run(
+			tt.name, func(t *testing.T) {
+				var captured pluginapi.UsageRecord
+				plugin := usagePluginFunc(
+					func(_ context.Context, record pluginapi.UsageRecord) {
+						captured = record
 					},
-				},
-			)
-			adapter := &usageAdapter{host: host, pluginID: "usage-tier", plugin: plugin}
-			ctx := context.Background()
-			if tt.contextTier != "" {
-				ctx = coreusage.WithServiceTier(ctx, tt.contextTier)
-			}
-
-			adapter.HandleUsage(ctx, tt.record)
-
-			if captured.ServiceTier != tt.wantRequest || captured.RequestServiceTier != tt.wantRequest ||
-				captured.ResponseServiceTier != tt.wantResponse {
-				t.Fatalf(
-					"captured tiers = (%q, %q, %q), want (%q, %q, %q)",
-					captured.ServiceTier,
-					captured.RequestServiceTier,
-					captured.ResponseServiceTier,
-					tt.wantRequest,
-					tt.wantRequest,
-					tt.wantResponse,
 				)
-			}
-			if captured.Detail.ResponseServiceTier != tt.wantResponse {
-				t.Fatalf(
-					"captured detail response tier = %q, want %q",
-					captured.Detail.ResponseServiceTier,
-					tt.wantResponse,
+				host := newHostWithRecords(
+					capabilityRecord{
+						id: "usage-tier",
+						plugin: pluginapi.Plugin{
+							Capabilities: pluginapi.Capabilities{UsagePlugin: plugin},
+						},
+					},
 				)
-			}
-		})
+				adapter := &usageAdapter{host: host, pluginID: "usage-tier", plugin: plugin}
+				ctx := context.Background()
+				if tt.contextTier != "" {
+					ctx = coreusage.WithServiceTier(ctx, tt.contextTier)
+				}
+
+				adapter.HandleUsage(ctx, tt.record)
+
+				if captured.ServiceTier != tt.wantRequest || captured.RequestServiceTier != tt.wantRequest ||
+					captured.ResponseServiceTier != tt.wantResponse {
+					t.Fatalf(
+						"captured tiers = (%q, %q, %q), want (%q, %q, %q)",
+						captured.ServiceTier,
+						captured.RequestServiceTier,
+						captured.ResponseServiceTier,
+						tt.wantRequest,
+						tt.wantRequest,
+						tt.wantResponse,
+					)
+				}
+				if captured.Detail.ResponseServiceTier != tt.wantResponse {
+					t.Fatalf(
+						"captured detail response tier = %q, want %q",
+						captured.Detail.ResponseServiceTier,
+						tt.wantResponse,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -3058,11 +3488,13 @@ func TestUsageAdapterPanicFusesAndUnregistersPlugin(t *testing.T) {
 			},
 		},
 	)
-	t.Cleanup(func() {
-		host.refreshUsagePlugins(nil)
-		host.waitAllUsageRetirements()
-	})
-	host.RegisterUsagePlugins()
+	t.Cleanup(
+		func() {
+			host.refreshUsagePlugins(nil)
+			host.waitAllUsageRetirements()
+		},
+	)
+	host.registerUsagePlugins()
 	key := host.usagePluginKey("usage-panic")
 	if _, ok := host.usagePluginKeys[key]; !ok {
 		t.Fatalf("usage plugin key %q was not registered", key)
@@ -3102,7 +3534,9 @@ func TestUsageManagerRegisterNamedReplacesWithoutDuplicateDispatch(t *testing.T)
 		),
 	)
 
-	manager.Publish(context.Background(), coreusage.Record{Provider: "provider"})
+	if errPublish := manager.Publish(context.Background(), coreusage.Record{Provider: "provider"}); errPublish != nil {
+		t.Fatalf("publish usage record: %v", errPublish)
+	}
 
 	select {
 	case got := <-calls:
@@ -3130,13 +3564,15 @@ func TestUsageRetirementTrackingSkipsDrainedGenerations(t *testing.T) {
 			},
 		},
 	)
-	t.Cleanup(func() {
-		host.refreshUsagePlugins(nil)
-		host.waitAllUsageRetirements()
-	})
+	t.Cleanup(
+		func() {
+			host.refreshUsagePlugins(nil)
+			host.waitAllUsageRetirements()
+		},
+	)
 
 	for range 4 {
-		host.RegisterUsagePlugins()
+		host.registerUsagePlugins()
 	}
 
 	host.usageMu.Lock()
@@ -3327,7 +3763,7 @@ func TestRegisterFrontendAuthProvidersSelectsHighestPriorityExclusiveProvider(t 
 	normalKey := "plugin:normal-auth:custom-auth"
 	for _, key := range []string{lowKey, highKey, normalKey} {
 		sdkaccess.UnregisterProvider(key)
-		defer sdkaccess.UnregisterProvider(key)
+		t.Cleanup(func() { sdkaccess.UnregisterProvider(key) })
 	}
 	sdkaccess.ClearExclusiveProvider()
 	defer sdkaccess.ClearExclusiveProvider()
@@ -3380,7 +3816,7 @@ func TestRegisterFrontendAuthProvidersSelectsExclusiveProviderByPluginIDWhenPrio
 	betaKey := "plugin:beta-auth:custom-auth"
 	for _, key := range []string{alphaKey, betaKey} {
 		sdkaccess.UnregisterProvider(key)
-		defer sdkaccess.UnregisterProvider(key)
+		t.Cleanup(func() { sdkaccess.UnregisterProvider(key) })
 	}
 	sdkaccess.ClearExclusiveProvider()
 	defer sdkaccess.ClearExclusiveProvider()
@@ -3424,7 +3860,7 @@ func TestRegisterFrontendAuthProvidersClearsExclusiveProviderWhenExclusivePlugin
 	normalKey := "plugin:normal-auth:custom-auth"
 	for _, key := range []string{exclusiveKey, normalKey} {
 		sdkaccess.UnregisterProvider(key)
-		defer sdkaccess.UnregisterProvider(key)
+		t.Cleanup(func() { sdkaccess.UnregisterProvider(key) })
 	}
 	sdkaccess.ClearExclusiveProvider()
 	defer sdkaccess.ClearExclusiveProvider()
@@ -3586,23 +4022,29 @@ func TestRegisterUsagePluginsPrunesRemovedCapability(t *testing.T) {
 			},
 		},
 	)
-	t.Cleanup(func() {
-		host.refreshUsagePlugins(nil)
-		host.waitAllUsageRetirements()
-	})
+	t.Cleanup(
+		func() {
+			host.refreshUsagePlugins(nil)
+			host.waitAllUsageRetirements()
+		},
+	)
 
-	host.RegisterUsagePlugins()
+	host.registerUsagePlugins()
 	key := host.usagePluginKey("usage-active")
 	if _, ok := host.usagePluginKeys[key]; !ok {
 		t.Fatalf("usage plugin key %q was not registered", key)
 	}
 
 	host.snapshot.Store(&Snapshot{enabled: true})
-	host.RegisterUsagePlugins()
+	host.registerUsagePlugins()
 	if _, ok := host.usagePluginKeys[key]; ok {
 		t.Fatalf("removed usage plugin key %q remains registered", key)
 	}
-	coreusage.PublishRecord(context.Background(), coreusage.Record{Provider: "provider"})
+	if errPublish := coreusage.PublishRecord(
+		context.Background(), coreusage.Record{Provider: "provider"},
+	); errPublish != nil {
+		t.Fatalf("publish usage record: %v", errPublish)
+	}
 	select {
 	case got := <-calls:
 		t.Fatalf("removed usage plugin received record: %#v", got)
@@ -3641,19 +4083,25 @@ func TestUsagePluginRegistrationKeysAreScopedToHost(t *testing.T) {
 			},
 		},
 	)
-	t.Cleanup(func() {
-		firstHost.refreshUsagePlugins(nil)
-		secondHost.refreshUsagePlugins(nil)
-		firstHost.waitAllUsageRetirements()
-		secondHost.waitAllUsageRetirements()
-	})
+	t.Cleanup(
+		func() {
+			firstHost.refreshUsagePlugins(nil)
+			secondHost.refreshUsagePlugins(nil)
+			firstHost.waitAllUsageRetirements()
+			secondHost.waitAllUsageRetirements()
+		},
+	)
 
-	firstHost.RegisterUsagePlugins()
-	secondHost.RegisterUsagePlugins()
+	firstHost.registerUsagePlugins()
+	secondHost.registerUsagePlugins()
 	if firstHost.usagePluginKey("shared-id") == secondHost.usagePluginKey("shared-id") {
 		t.Fatal("different hosts generated the same usage plugin registration key")
 	}
-	coreusage.PublishRecord(context.Background(), coreusage.Record{Provider: "provider"})
+	if errPublish := coreusage.PublishRecord(
+		context.Background(), coreusage.Record{Provider: "provider"},
+	); errPublish != nil {
+		t.Fatalf("publish usage record: %v", errPublish)
+	}
 	for name, calls := range map[string]<-chan pluginapi.UsageRecord{
 		"first":  firstCalls,
 		"second": secondCalls,
@@ -3677,13 +4125,13 @@ func TestShutdownAllUnregistersUsagePlugins(t *testing.T) {
 			},
 		},
 	)
-	host.RegisterUsagePlugins()
+	host.registerUsagePlugins()
 	key := host.usagePluginKey("usage-shutdown")
 	if _, ok := host.usagePluginKeys[key]; !ok {
 		t.Fatalf("usage plugin key %q was not registered", key)
 	}
 
-	host.ShutdownAll()
+	host.shutdownAll()
 	if _, ok := host.usagePluginKeys[key]; ok {
 		t.Fatalf("usage plugin key %q remains after ShutdownAll", key)
 	}
@@ -3700,8 +4148,11 @@ func TestUnloadPluginUnregistersUsagePlugin(t *testing.T) {
 			},
 		},
 	)
-	host.loaded["usage-unload"] = &loadedPlugin{id: "usage-unload", client: &capturePluginClient{}}
-	host.RegisterUsagePlugins()
+	host.loaded["usage-unload"] = &loadedPlugin{
+		id:     "usage-unload",
+		client: newTestSymbolLookup(&testPlugin{}),
+	}
+	host.registerUsagePlugins()
 	key := host.usagePluginKey("usage-unload")
 	if _, ok := host.usagePluginKeys[key]; !ok {
 		t.Fatalf("usage plugin key %q was not registered", key)
@@ -3940,37 +4391,42 @@ func TestExecutorAdapterRefreshRejectsAuthIdentityChanges(t *testing.T) {
 		auth pluginapi.AuthData
 	}{
 		{name: "id", auth: pluginapi.AuthData{ID: "auth-2", Metadata: map[string]any{"token": "new"}}},
-		{name: "provider", auth: pluginapi.AuthData{Provider: "other-provider", Metadata: map[string]any{"token": "new"}}},
+		{
+			name: "provider",
+			auth: pluginapi.AuthData{Provider: "other-provider", Metadata: map[string]any{"token": "new"}},
+		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			authProvider := fakeAuthProvider{
-				identifier: "plugin-provider",
-				refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
-					pluginapi.AuthRefreshResponse,
-					error,
-				) {
-					return pluginapi.AuthRefreshResponse{Auth: test.auth}, nil
-				},
-			}
-			host := newHostWithRecords(
-				capabilityRecord{
-					id: "auth-plugin",
-					plugin: pluginapi.Plugin{
-						Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+		t.Run(
+			test.name, func(t *testing.T) {
+				authProvider := fakeAuthProvider{
+					identifier: "plugin-provider",
+					refreshAuth: func(context.Context, pluginapi.AuthRefreshRequest) (
+						pluginapi.AuthRefreshResponse,
+						error,
+					) {
+						return pluginapi.AuthRefreshResponse{Auth: test.auth}, nil
 					},
-				},
-			)
-			adapter := &executorAdapter{
-				host: host, pluginID: "auth-plugin", provider: "plugin-provider",
-				executor: &fakeExecutor{identifier: "plugin-provider"},
-			}
-			if _, errRefresh := adapter.Refresh(
-				context.Background(),
-				&coreauth.Auth{ID: "auth-1", Provider: "plugin-provider"},
-			); errRefresh == nil {
-				t.Fatal("Refresh() accepted plugin-owned auth identity change")
-			}
-		})
+				}
+				host := newHostWithRecords(
+					capabilityRecord{
+						id: "auth-plugin",
+						plugin: pluginapi.Plugin{
+							Capabilities: pluginapi.Capabilities{AuthProvider: authProvider},
+						},
+					},
+				)
+				adapter := &executorAdapter{
+					host: host, pluginID: "auth-plugin", provider: "plugin-provider",
+					executor: &fakeExecutor{identifier: "plugin-provider"},
+				}
+				if _, errRefresh := adapter.Refresh(
+					context.Background(),
+					&coreauth.Auth{ID: "auth-1", Provider: "plugin-provider"},
+				); errRefresh == nil {
+					t.Fatal("Refresh() accepted plugin-owned auth identity change")
+				}
+			},
+		)
 	}
 }
 
@@ -4003,14 +4459,16 @@ func TestExecutorAdapterRefreshPreservesHostRuntimeState(t *testing.T) {
 	}
 	retryAfter := time.Now().Add(time.Minute)
 	original := &coreauth.Auth{
-		ID:             "auth-1",
-		Index:          "home-index",
-		Provider:       "plugin-provider",
-		Status:         coreauth.StatusError,
-		StatusMessage:  "rate limited",
-		Unavailable:    true,
-		Quota:          coreauth.QuotaState{Exceeded: true, Reason: "rate limited", NextRecoverAt: retryAfter},
-		LastError:      &coreauth.Error{Code: "rate_limit", Message: "rate limited", HTTPStatus: http.StatusTooManyRequests},
+		ID:            "auth-1",
+		Index:         "home-index",
+		Provider:      "plugin-provider",
+		Status:        coreauth.StatusError,
+		StatusMessage: "rate limited",
+		Unavailable:   true,
+		Quota:         coreauth.QuotaState{Exceeded: true, Reason: "rate limited", NextRecoverAt: retryAfter},
+		LastError: &coreauth.Error{
+			Code: "rate_limit", Message: "rate limited", HTTPStatus: http.StatusTooManyRequests,
+		},
 		NextRetryAfter: retryAfter,
 		ModelStates: map[string]*coreauth.ModelState{
 			"model-a": {
@@ -4038,8 +4496,12 @@ func TestExecutorAdapterRefreshPreservesHostRuntimeState(t *testing.T) {
 		modelState.NextRetryAfter != retryAfter {
 		t.Fatalf("Refresh() model state = %#v, want preserved cooldown", modelState)
 	}
-	if refreshed.Metadata["token"] != "new" || !bytes.Contains(storageJSONFromAuth(refreshed), []byte(`"token":"new"`)) {
-		t.Fatalf("Refresh() provider state = metadata %#v storage %s", refreshed.Metadata, storageJSONFromAuth(refreshed))
+	if refreshed.Metadata["token"] != "new" || !bytes.Contains(
+		storageJSONFromAuth(refreshed), []byte(`"token":"new"`),
+	) {
+		t.Fatalf(
+			"Refresh() provider state = metadata %#v storage %s", refreshed.Metadata, storageJSONFromAuth(refreshed),
+		)
 	}
 }
 
@@ -4218,10 +4680,12 @@ func TestExecutorAdapterRefreshCommitRejectsFusedPlugin(t *testing.T) {
 	if errRefresh != nil || refreshed == nil || refreshed.RefreshCommit == nil {
 		t.Fatalf("Refresh() = (%#v, %v), want guarded result", refreshed, errRefresh)
 	}
-	if refreshed.RefreshCommit.CommitRefresh(func() bool {
-		host.fusePlugin("auth-plugin", "test", "panic")
-		return true
-	}) {
+	if refreshed.RefreshCommit.CommitRefresh(
+		func() bool {
+			host.fusePlugin("auth-plugin", "test", "panic")
+			return true
+		},
+	) {
 		t.Fatal("plugin fused during final publication committed stale credentials")
 	}
 }
@@ -4617,6 +5081,35 @@ func TestExecutorAdapterConsumesTranslatedStreamChunksWithoutOutput(t *testing.T
 	}
 }
 
+func TestExecutorAdapterClosedStreamEmitsSuccessTail(t *testing.T) {
+	adapter := &executorAdapter{}
+	request := []byte(`{"model":"model-1","stream":true}`)
+	prepared := preparedExecutorCall{
+		req: coreexecutor.Request{Model: "model-1", Payload: request},
+		opts: coreexecutor.Options{
+			OriginalRequest: request,
+		},
+		requestedFormat: sdktranslator.FormatOpenAIResponse,
+		outputFormat:    sdktranslator.FormatOpenAI,
+	}
+	input := make(chan pluginapi.ExecutorStreamChunk, 1)
+	input <- pluginapi.ExecutorStreamChunk{
+		Payload: []byte(`{"choices":[{"delta":{"content":"hello"},"index":0}],"model":"model-1","object":"chat.completion.chunk"}`),
+	}
+	close(input)
+
+	var output bytes.Buffer
+	for chunk := range adapter.translateExecutorStreamChunks(context.Background(), prepared, input) {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		output.Write(chunk.Payload)
+	}
+	if !bytes.Contains(output.Bytes(), []byte("response.completed")) {
+		t.Fatalf("closed stream did not emit response.completed: %q", output.Bytes())
+	}
+}
+
 func TestExecutorAdapterTerminalStreamErrorDoesNotEmitSuccessTail(t *testing.T) {
 	adapter := &executorAdapter{}
 	request := []byte(`{"model":"model-1","stream":true}`)
@@ -4732,6 +5225,8 @@ func TestExecutorAdapterPanicFusesAndReturnsError(t *testing.T) {
 	if errExecute == nil {
 		t.Fatal("Execute() error = nil, want panic converted to error")
 	}
+	// Execute returns a zero response when a plugin panic is converted to an error.
+	// noinspection GoDfaErrorMayBeNotNil
 	if len(resp.Payload) != 0 {
 		t.Fatalf("Execute() response = %#v, want zero response", resp)
 	}
@@ -4748,6 +5243,8 @@ func TestExecutorAdapterPanicFusesAndReturnsError(t *testing.T) {
 	if errCountTokens == nil {
 		t.Fatal("CountTokens() error after fuse = nil, want unavailable error")
 	}
+	// CountTokens returns a zero response when the plugin has already been fused.
+	// noinspection GoDfaErrorMayBeNotNil
 	if len(count.Payload) != 0 {
 		t.Fatalf("CountTokens() response after fuse = %#v, want zero response", count)
 	}
@@ -4887,8 +5384,8 @@ func (panicFrontendAuthProvider) Identifier() string {
 }
 
 func (panicFrontendAuthProvider) Authenticate(
-	ctx context.Context,
-	req pluginapi.FrontendAuthRequest,
+	_ context.Context,
+	_ pluginapi.FrontendAuthRequest,
 ) (pluginapi.FrontendAuthResponse, error) {
 	return pluginapi.FrontendAuthResponse{}, nil
 }
@@ -5121,37 +5618,37 @@ func (e *fakeProviderExecutor) Identifier() string {
 }
 
 func (e *fakeProviderExecutor) Execute(
-	ctx context.Context,
-	auth *coreauth.Auth,
-	req coreexecutor.Request,
-	opts coreexecutor.Options,
+	_ context.Context,
+	_ *coreauth.Auth,
+	_ coreexecutor.Request,
+	_ coreexecutor.Options,
 ) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, nil
 }
 
 func (e *fakeProviderExecutor) ExecuteStream(
-	ctx context.Context,
-	auth *coreauth.Auth,
-	req coreexecutor.Request,
-	opts coreexecutor.Options,
+	_ context.Context,
+	_ *coreauth.Auth,
+	_ coreexecutor.Request,
+	_ coreexecutor.Options,
 ) (*coreexecutor.StreamResult, error) {
 	return nil, nil
 }
 
-func (e *fakeProviderExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+func (e *fakeProviderExecutor) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	return auth, nil
 }
 
 func (e *fakeProviderExecutor) CountTokens(
-	ctx context.Context,
-	auth *coreauth.Auth,
-	req coreexecutor.Request,
-	opts coreexecutor.Options,
+	_ context.Context,
+	_ *coreauth.Auth,
+	_ coreexecutor.Request,
+	_ coreexecutor.Options,
 ) (coreexecutor.Response, error) {
 	return coreexecutor.Response{}, nil
 }
 
-func (e *fakeProviderExecutor) HttpRequest(ctx context.Context, auth *coreauth.Auth, req *http.Request) (
+func (e *fakeProviderExecutor) HttpRequest(_ context.Context, _ *coreauth.Auth, _ *http.Request) (
 	*http.Response,
 	error,
 ) {
@@ -5219,7 +5716,7 @@ func assertExecutorRequest(t *testing.T, req pluginapi.ExecutorRequest) {
 type failingReadCloser struct{}
 
 func (failingReadCloser) Read(p []byte) (int, error) {
-	copy(p, []byte("partial"))
+	copy(p, "partial")
 	return len("partial"), errors.New("read failed")
 }
 

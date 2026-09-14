@@ -47,7 +47,7 @@ Called before credential selection. At this point the target upstream protocol i
 
 **ctx structure:**
 
-```javascript
+```json5
 {
     "id": "request-id",
     "body": "...",        // Request body string
@@ -69,7 +69,7 @@ configuration.
 
 **ctx structure:**
 
-```javascript
+```json5
 {
     "id": "request-id",
     "body": "...",             // Request body string
@@ -90,7 +90,7 @@ Called after a non-streaming response is received from upstream.
 
 **ctx structure (non-streaming):**
 
-```javascript
+```json5
 {
     "id": "request-id",
     "body": "...",        // Full response body
@@ -108,7 +108,7 @@ Called after each streaming response chunk is received from upstream.
 
 **ctx structure:**
 
-```javascript
+```json5
 {
     "id": "request-id",
     "body": null,

@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -205,7 +207,7 @@ func New() *Host {
 	return h
 }
 
-func NewForTest(loader pluginLoader) *Host {
+func newForTest(loader pluginLoader) *Host {
 	h := New()
 	h.loader = loader
 	h.pluginLoadAttempts = &pluginLoadAttemptRegistry{}
@@ -272,9 +274,7 @@ func (h *Host) capturePublicationToken() pluginPublicationToken {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	generations := make(map[string]uint64, len(h.pluginGenerations))
-	for id, generation := range h.pluginGenerations {
-		generations[id] = generation
-	}
+	maps.Copy(generations, h.pluginGenerations)
 	return pluginPublicationToken{
 		snapshot:          h.Snapshot(),
 		applyGeneration:   h.applyGeneration,
@@ -450,7 +450,10 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		}
 		h.mu.Unlock()
 	}()
-	rc := runtimeConfigFromConfig(cfg)
+	rc, errRuntimeConfig := runtimeConfigFromConfig(cfg)
+	if errRuntimeConfig != nil {
+		return fmt.Errorf("pluginhost: resolve runtime config: %w", errRuntimeConfig)
+	}
 	rootLock, errRootLock := pluginstore.LockRoot(rc.Dir)
 	if errRootLock != nil {
 		return fmt.Errorf("pluginhost: lock plugin root: %w", errRootLock)
@@ -565,81 +568,69 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		if lp != nil {
 			lp = nil
 		}
-		var initialization *pluginInitialization
-		if lp == nil {
-			if pluginReloadRequiresRestart() &&
-				(previous != nil || !h.pluginLoadAttempts.claim(file.ID)) {
-				h.mu.Unlock()
-				return fmt.Errorf("pluginhost: plugin %s reload requires process restart", file.ID)
-			}
-			h.loading[file.ID] = struct{}{}
-			initialization = &pluginInitialization{done: make(chan struct{})}
-			h.initializing[file.ID] = initialization
+		if pluginReloadRequiresRestart() &&
+			(previous != nil || !h.pluginLoadAttempts.claim(file.ID)) {
+			h.mu.Unlock()
+			return fmt.Errorf("pluginhost: plugin %s reload requires process restart", file.ID)
 		}
+		h.loading[file.ID] = struct{}{}
+		initialization := &pluginInitialization{done: make(chan struct{})}
+		h.initializing[file.ID] = initialization
 		h.mu.Unlock()
 
-		loadedNow := false
-		if lp == nil {
-			loaded, errLoad := h.load(file)
-			if errLoad == nil {
-				artifactCurrent, errCurrent := pluginFileSnapshotCurrentUnderRoot(rc.Dir, file)
-				if errCurrent != nil {
-					errLoad = fmt.Errorf("verify plugin artifact after load: %w", errCurrent)
-				} else if !artifactCurrent {
-					errLoad = fmt.Errorf("plugin artifact changed while loading: %s", file.Path)
-				}
+		loaded, errLoad := h.load(file)
+		if errLoad == nil {
+			artifactCurrent, errCurrent := pluginFileSnapshotCurrentUnderRoot(rc.Dir, file)
+			if errCurrent != nil {
+				errLoad = fmt.Errorf("verify plugin artifact after load: %w", errCurrent)
+			} else if !artifactCurrent {
+				errLoad = fmt.Errorf("plugin artifact changed while loading: %s", file.Path)
 			}
-			h.mu.Lock()
-			if h.initializing[file.ID] == initialization {
-				delete(h.initializing, file.ID)
-				close(initialization.done)
-			}
-			applyCurrent := h.configApplyCurrentLocked(generation)
-			pluginCurrent := h.pluginGenerationCurrentLocked(file.ID, pluginGeneration)
-			loadedCurrent := h.loaded[file.ID] == previous
-			var retirementDone <-chan struct{}
-			if errLoad == nil && applyCurrent && pluginCurrent && loadedCurrent {
-				h.pendingLoaded[file.ID] = loaded
-			} else {
-				delete(h.loading, file.ID)
-				retirementDone = h.trackRetiredPluginLocked(loaded)
-			}
-			h.mu.Unlock()
-			if errLoad != nil {
-				h.shutdownPreparedDiscardedPlugin(loaded, retirementDone)
-				log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, errLoad)
-				if !applyCurrent {
-					return nil
-				}
-				if previous != nil {
-					return fmt.Errorf("pluginhost: load replacement plugin %s: %w", file.ID, errLoad)
-				}
-				continue
-			}
-			if !applyCurrent || !pluginCurrent || !loadedCurrent {
-				h.shutdownPreparedDiscardedPlugin(loaded, retirementDone)
-				if !applyCurrent {
-					return nil
-				}
-				continue
-			}
-			lp = loaded
-			loadedNow = true
-			pendingLoads[lp] = pendingPluginLoad{plugin: lp, previous: previous}
-			log.WithFields(pluginLogFields(file.ID, "", file.Version, file.Path)).Info("pluginhost: plugin loaded")
 		}
-		plugin, okCall := h.callRegister(ctx, lp, item)
 		h.mu.Lock()
+		if h.initializing[file.ID] == initialization {
+			delete(h.initializing, file.ID)
+			close(initialization.done)
+		}
 		applyCurrent := h.configApplyCurrentLocked(generation)
 		pluginCurrent := h.pluginGenerationCurrentLocked(file.ID, pluginGeneration)
 		loadedCurrent := h.loaded[file.ID] == previous
-		pendingCurrent := true
-		if loadedNow {
-			pendingCurrent = h.pendingLoaded[file.ID] == lp
-			loadedCurrent = loadedCurrent && pendingCurrent
+		var retirementDone <-chan struct{}
+		if errLoad == nil && applyCurrent && pluginCurrent && loadedCurrent {
+			h.pendingLoaded[file.ID] = loaded
 		} else {
-			loadedCurrent = h.loaded[file.ID] == lp
+			delete(h.loading, file.ID)
+			retirementDone = h.trackRetiredPluginLocked(loaded)
 		}
+		h.mu.Unlock()
+		if errLoad != nil {
+			h.shutdownPreparedDiscardedPlugin(loaded, retirementDone)
+			log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, errLoad)
+			if !applyCurrent {
+				return nil
+			}
+			if previous != nil {
+				return fmt.Errorf("pluginhost: load replacement plugin %s: %w", file.ID, errLoad)
+			}
+			continue
+		}
+		if !applyCurrent || !pluginCurrent || !loadedCurrent {
+			h.shutdownPreparedDiscardedPlugin(loaded, retirementDone)
+			if !applyCurrent {
+				return nil
+			}
+			continue
+		}
+		lp = loaded
+		pendingLoads[lp] = pendingPluginLoad{plugin: lp, previous: previous}
+		log.WithFields(pluginLogFields(file.ID, "", file.Version, file.Path)).Info("pluginhost: plugin loaded")
+		plugin, okCall := h.callRegister(ctx, lp, item)
+		h.mu.Lock()
+		applyCurrent = h.configApplyCurrentLocked(generation)
+		pluginCurrent = h.pluginGenerationCurrentLocked(file.ID, pluginGeneration)
+		loadedCurrent = h.loaded[file.ID] == previous
+		pendingCurrent := h.pendingLoaded[file.ID] == lp
+		loadedCurrent = loadedCurrent && pendingCurrent
 		if okCall && applyCurrent && pluginCurrent && loadedCurrent {
 			plugin.Metadata = clonePluginMetadata(plugin.Metadata)
 			lp.name = strings.TrimSpace(plugin.Metadata.Name)
@@ -650,7 +641,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		}
 		discardCandidate := false
 		var discardRetirementDone <-chan struct{}
-		if loadedNow && (!okCall || !applyCurrent || !pluginCurrent || !loadedCurrent) {
+		if !okCall || !applyCurrent || !pluginCurrent || !loadedCurrent {
 			if h.pendingLoaded[file.ID] == lp {
 				delete(h.pendingLoaded, file.ID)
 				delete(h.loading, file.ID)
@@ -944,15 +935,7 @@ func (h *Host) shutdownPreparedDiscardedPlugin(lp *loadedPlugin, retirementDone 
 	cancelShutdown()
 }
 
-func (h *Host) loadedPlugin(id string) *loadedPlugin {
-	id = pluginstore.CanonicalPluginID(id)
-	h.mu.Lock()
-	lp := h.loaded[id]
-	h.mu.Unlock()
-	return lp
-}
-
-func (h *Host) PluginLoaded(id string) bool {
+func (h *Host) pluginLoaded(id string) bool {
 	if h == nil {
 		return false
 	}
@@ -991,33 +974,6 @@ func (h *Host) PluginBusy(id string) bool {
 	}
 	_, ok := h.loading[id]
 	return ok
-}
-
-func (h *Host) storeLoadedPlugin(lp *loadedPlugin) *loadedPlugin {
-	if lp == nil {
-		return nil
-	}
-	h.mu.Lock()
-	if existing := h.loaded[lp.id]; existing != nil {
-		retirementDone := h.trackRetiredPluginLocked(lp)
-		h.mu.Unlock()
-		if lp.client != nil {
-			h.watchRetiredPlugin(lp, retirementDone)
-			shutdownCtx, cancelShutdown := boundedPluginShutdownContext(context.Background())
-			if errShutdown := shutdownPluginClient(shutdownCtx, lp.client); errShutdown != nil {
-				log.WithError(errShutdown).WithField("plugin_id", lp.id).Warn(
-					"pluginhost: duplicate plugin client shutdown deferred",
-				)
-			} else {
-				h.removeRetiredPluginTargets([]pluginUnloadTarget{pluginUnloadTargetFromLoaded(lp)})
-			}
-			cancelShutdown()
-		}
-		return existing
-	}
-	h.loaded[lp.id] = lp
-	h.mu.Unlock()
-	return lp
 }
 
 func (h *Host) load(file pluginFile) (*loadedPlugin, error) {
@@ -1227,12 +1183,6 @@ func (h *Host) UnloadPluginIfCurrentWithError(identity PluginRuntimeIdentity) (b
 	return h.unloadPluginContext(shutdownCtx, identity.ID, &identity)
 }
 
-// UnloadPluginContext removes one plugin from routing and waits up to ctx for
-// in-flight callbacks before releasing the dynamic library.
-func (h *Host) UnloadPluginContext(ctx context.Context, id string) (bool, error) {
-	return h.unloadPluginContext(ctx, id, nil)
-}
-
 func (h *Host) unloadPluginContext(
 	ctx context.Context,
 	id string,
@@ -1327,8 +1277,8 @@ func (h *Host) unloadPluginContext(
 	return true, errors.Join(waitErr, shutdownErr, initializationErr)
 }
 
-// ShutdownAll removes active plugin capabilities and closes all loaded dynamic libraries.
-func (h *Host) ShutdownAll() {
+// shutdownAll removes active plugin capabilities and closes all loaded dynamic libraries.
+func (h *Host) shutdownAll() {
 	shutdownCtx, cancelShutdown := boundedPluginShutdownContext(context.Background())
 	defer cancelShutdown()
 	if errShutdown := h.ShutdownAllContext(shutdownCtx); errShutdown != nil {
@@ -1441,10 +1391,8 @@ func (h *Host) retireLoadedPluginLocked(lp *loadedPlugin) {
 	if h == nil || lp == nil {
 		return
 	}
-	for _, retired := range h.retired[lp.id] {
-		if retired == lp {
-			return
-		}
+	if slices.Contains(h.retired[lp.id], lp) {
+		return
 	}
 	h.retired[lp.id] = append(h.retired[lp.id], lp)
 }

@@ -37,11 +37,8 @@ func normalizeVersion(version string) string {
 func compareVersions(a, b string) (int, bool) {
 	segmentsA := strings.Split(a, ".")
 	segmentsB := strings.Split(b, ".")
-	length := len(segmentsA)
-	if len(segmentsB) > length {
-		length = len(segmentsB)
-	}
-	for index := 0; index < length; index++ {
+	length := max(len(segmentsB), len(segmentsA))
+	for index := range length {
 		numberA, okA := versionSegment(segmentsA, index)
 		numberB, okB := versionSegment(segmentsB, index)
 		if !okA || !okB {

@@ -3,15 +3,24 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	helps "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
+)
+
+const maxPluginHTTPResponseBytes int64 = 64 << 20
+
+var (
+	errPluginHTTPResponseTooLarge = errors.New("pluginhost: non-stream response exceeds 64 MiB")
+	pluginHTTPDefaultTimeout      = 5 * time.Minute
 )
 
 type hostHTTPClient struct {
@@ -32,6 +41,11 @@ func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (plu
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, pluginHTTPDefaultTimeout)
+		defer cancel()
+	}
 	resp, cfg, errDo := c.doHTTP(ctx, req)
 	if errDo != nil {
 		helps.RecordAPIResponseError(ctx, cfg, errDo)
@@ -43,7 +57,7 @@ func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (plu
 		}
 	}()
 	helps.RecordAPIResponseMetadata(ctx, cfg, resp.StatusCode, resp.Header)
-	body, errReadAll := io.ReadAll(resp.Body)
+	body, errReadAll := readPluginHTTPResponse(resp.Body, resp.ContentLength, maxPluginHTTPResponseBytes)
 	if errReadAll != nil {
 		helps.RecordAPIResponseError(ctx, cfg, errReadAll)
 		return pluginapi.HTTPResponse{}, fmt.Errorf("read host http response: %w", errReadAll)
@@ -54,6 +68,20 @@ func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (plu
 		Headers:    cloneHeader(resp.Header),
 		Body:       body,
 	}, nil
+}
+
+func readPluginHTTPResponse(body io.Reader, contentLength, maxBytes int64) ([]byte, error) {
+	if contentLength > maxBytes {
+		return nil, errPluginHTTPResponseTooLarge
+	}
+	data, errRead := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if errRead != nil {
+		return nil, errRead
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errPluginHTTPResponseTooLarge
+	}
+	return data, nil
 }
 
 func (c *hostHTTPClient) DoStream(ctx context.Context, req pluginapi.HTTPRequest) (

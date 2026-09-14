@@ -99,7 +99,7 @@ func (engine *jsEngine) stopInterruptTimer(timer *time.Timer, done <-chan struct
 }
 
 func (engine *jsEngine) frozenStringArray(values []string) (goja.Value, error) {
-	items := make([]interface{}, len(values))
+	items := make([]any, len(values))
 	for i, value := range values {
 		items[i] = value
 	}
@@ -119,7 +119,7 @@ func (engine *jsEngine) frozenStringArray(values []string) (goja.Value, error) {
 	return array, nil
 }
 
-func (engine *jsEngine) callFunction(name string, timeout time.Duration, args ...interface{}) (goja.Value, error) {
+func (engine *jsEngine) callFunction(name string, timeout time.Duration, args ...any) (goja.Value, error) {
 	jsVal := engine.vm.Get(name)
 	if jsVal == nil || goja.IsUndefined(jsVal) {
 		return nil, fmt.Errorf("%w: function '%s' does not exist", ErrFunctionNotFound, name)

@@ -8,15 +8,15 @@ import (
 	"runtime"
 )
 
-// ArtifactTransaction stages the previous artifact so a later config failure
+// artifactTransaction stages the previous artifact so a later config failure
 // can restore the original file object and all metadata attached to it.
-type ArtifactTransaction struct {
+type artifactTransaction struct {
 	targetPath string
 	stagedPath string
 	stageDir   string
 }
 
-func (t *ArtifactTransaction) Backup(targetPath string) error {
+func (t *artifactTransaction) backup(targetPath string) error {
 	if t == nil {
 		return fmt.Errorf("plugin artifact transaction is nil")
 	}
@@ -55,9 +55,9 @@ func (t *ArtifactTransaction) Backup(targetPath string) error {
 	return nil
 }
 
-func (t *ArtifactTransaction) Rollback(result InstallResult) error {
+func (t *artifactTransaction) rollback(result InstallResult) error {
 	if t == nil || result.Skipped {
-		return t.Commit()
+		return t.commit()
 	}
 	if t.stagedPath != "" {
 		targetInfo, errTarget := os.Stat(t.targetPath)
@@ -89,7 +89,7 @@ func (t *ArtifactTransaction) Rollback(result InstallResult) error {
 	return syncDirectory(filepath.Dir(result.Path))
 }
 
-func (t *ArtifactTransaction) Commit() error {
+func (t *artifactTransaction) commit() error {
 	if t == nil || t.stagedPath == "" {
 		return nil
 	}
@@ -104,27 +104,27 @@ func (t *ArtifactTransaction) Commit() error {
 	return syncDirectory(filepath.Dir(stageDir))
 }
 
-func (t *ArtifactTransaction) clear() {
+func (t *artifactTransaction) clear() {
 	t.targetPath = ""
 	t.stagedPath = ""
 	t.stageDir = ""
 }
 
-// StagedRemoval hides an artifact from discovery until its config mutation
+// stagedRemoval hides an artifact from discovery until its config mutation
 // commits, while retaining the original file for rollback.
-type StagedRemoval struct {
+type stagedRemoval struct {
 	targetPath string
 	stagedPath string
 	stageDir   string
 }
 
-func StageRemoval(targetPath string) (*StagedRemoval, error) {
+func stageRemoval(targetPath string) (*stagedRemoval, error) {
 	if targetPath == "" {
-		return &StagedRemoval{}, nil
+		return &stagedRemoval{}, nil
 	}
 	if _, err := os.Stat(targetPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return &StagedRemoval{targetPath: targetPath}, nil
+			return &stagedRemoval{targetPath: targetPath}, nil
 		}
 		return nil, fmt.Errorf("stat plugin artifact: %w", err)
 	}
@@ -148,18 +148,14 @@ func StageRemoval(targetPath string) (*StagedRemoval, error) {
 		_ = os.Remove(stageDir)
 		return nil, fmt.Errorf("sync preserved plugin removal: %w", err)
 	}
-	return &StagedRemoval{
+	return &stagedRemoval{
 		targetPath: targetPath,
 		stagedPath: stagedPath,
 		stageDir:   stageDir,
 	}, nil
 }
 
-func (s *StagedRemoval) Removed() bool {
-	return s != nil && s.stagedPath != ""
-}
-
-func (s *StagedRemoval) Rollback() error {
+func (s *stagedRemoval) Rollback() error {
 	if s == nil || s.stagedPath == "" {
 		return nil
 	}
@@ -174,7 +170,7 @@ func (s *StagedRemoval) Rollback() error {
 	return syncDirectory(filepath.Dir(stageDir))
 }
 
-func (s *StagedRemoval) Commit() error {
+func (s *stagedRemoval) Commit() error {
 	if s == nil || s.stagedPath == "" {
 		return nil
 	}
@@ -195,7 +191,7 @@ func (s *StagedRemoval) Commit() error {
 	return syncDirectory(filepath.Dir(stageDir))
 }
 
-func (s *StagedRemoval) clear() {
+func (s *stagedRemoval) clear() {
 	s.targetPath = ""
 	s.stagedPath = ""
 	s.stageDir = ""

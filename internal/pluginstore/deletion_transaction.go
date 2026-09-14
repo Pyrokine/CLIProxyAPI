@@ -395,7 +395,7 @@ func (t *DeletionTransaction) Commit() error {
 }
 
 func (t *DeletionTransaction) quarantineLateArtifacts() error {
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := range 4 {
 		paths, errFind := FindPluginArtifacts(t.root, t.journal.PluginID)
 		if errFind != nil {
 			return fmt.Errorf("rescan plugin artifacts before deletion commit: %w", errFind)
@@ -725,7 +725,7 @@ func safeDeletionTargetPath(root, relative, pluginID string) (string, error) {
 		return targetPath, nil
 	}
 	current := root
-	for _, component := range strings.Split(parentRelative, string(filepath.Separator)) {
+	for component := range strings.SplitSeq(parentRelative, string(filepath.Separator)) {
 		if component == "" || component == "." {
 			continue
 		}

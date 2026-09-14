@@ -23,6 +23,7 @@ var _ RequestNormalizer = (*compileTimePlugin)(nil)
 var _ ResponseTranslator = (*compileTimePlugin)(nil)
 var _ ResponseNormalizer = (*compileTimePlugin)(nil)
 var _ RequestInterceptor = (*compileTimePlugin)(nil)
+var _ RequestLifecyclePlugin = (*compileTimePlugin)(nil)
 var _ ResponseInterceptor = (*compileTimePlugin)(nil)
 var _ StreamChunkInterceptor = (*compileTimePlugin)(nil)
 var _ ThinkingApplier = (*compileTimePlugin)(nil)
@@ -290,7 +291,7 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 				Priority:   10,
 				Status:     "ready",
 				Attributes: map[string]string{"region": "us"},
-				Metadata:   map[string]any{"load": float64(0.5)},
+				Metadata:   map[string]any{"load": 0.5},
 			},
 		},
 	}
@@ -331,11 +332,51 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	if candidate.Attributes["region"] != "us" {
 		t.Fatalf("Candidate.Attributes = %#v", candidate.Attributes)
 	}
-	if candidate.Metadata["load"] != float64(0.5) {
+	if candidate.Metadata["load"] != 0.5 {
 		t.Fatalf("Candidate.Metadata = %#v", candidate.Metadata)
 	}
 	if response.AuthID != "auth-1" || response.DelegateBuiltin != SchedulerBuiltinRoundRobin || !response.Handled {
 		t.Fatalf("SchedulerPickResponse = %#v", response)
+	}
+}
+
+func TestModelDiscoveryOutcomeWireValues(t *testing.T) {
+	values := map[ModelDiscoveryOutcome]string{
+		ModelDiscoveryComplete:     "complete",
+		ModelDiscoveryPartial:      "partial",
+		ModelDiscoveryInconclusive: "inconclusive",
+	}
+	for outcome, want := range values {
+		if string(outcome) != want {
+			t.Fatalf("model discovery outcome = %q, want %q", outcome, want)
+		}
+	}
+	if response := (ModelResponse{}); response.Outcome != "" {
+		t.Fatalf("zero ModelResponse outcome = %q, want compatibility default", response.Outcome)
+	}
+
+	encoded, errMarshal := json.Marshal(
+		ModelResponse{
+			Provider: "plugin-provider",
+			Models:   []ModelInfo{{ID: "plugin-model"}},
+			Outcome:  ModelDiscoveryPartial,
+			AuthUpdate: AuthData{
+				ID:       "plugin-auth",
+				Metadata: map[string]any{"token": "updated"},
+			},
+		},
+	)
+	if errMarshal != nil {
+		t.Fatalf("json.Marshal(ModelResponse) error = %v", errMarshal)
+	}
+	var decoded ModelResponse
+	if errUnmarshal := json.Unmarshal(encoded, &decoded); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal(ModelResponse) error = %v", errUnmarshal)
+	}
+	if decoded.Provider != "plugin-provider" || decoded.Outcome != ModelDiscoveryPartial ||
+		len(decoded.Models) != 1 || decoded.Models[0].ID != "plugin-model" ||
+		decoded.AuthUpdate.ID != "plugin-auth" || decoded.AuthUpdate.Metadata["token"] != "updated" {
+		t.Fatalf("ModelResponse round trip = %#v", decoded)
 	}
 }
 
@@ -429,6 +470,10 @@ func (compileTimePlugin) InterceptRequestAfterAuth(context.Context, RequestInter
 	error,
 ) {
 	return RequestInterceptResponse{}, nil
+}
+
+func (compileTimePlugin) HandleRequestComplete(context.Context, RequestCompletion) error {
+	return nil
 }
 
 func (compileTimePlugin) InterceptResponse(context.Context, ResponseInterceptRequest) (

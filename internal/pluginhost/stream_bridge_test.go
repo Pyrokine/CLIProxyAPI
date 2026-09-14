@@ -14,7 +14,7 @@ func TestStreamBridgeCloseUnblocksEmitterWithoutPanic(t *testing.T) {
 	id, chunks, cleanup := bridge.open(context.Background())
 	defer cleanup()
 
-	for index := 0; index < 17; index++ {
+	for index := range 17 {
 		if err := bridge.emit(
 			context.Background(),
 			id,

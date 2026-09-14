@@ -67,17 +67,6 @@ func deletePluginArtifact(root string, id string, pluginRuntime PluginRuntime) (
 	return paths[0], true, nil
 }
 
-func currentPluginFilePath(root string, id string) (string, error) {
-	paths, errPaths := pluginFilePaths(root, id)
-	if errPaths != nil {
-		return "", errPaths
-	}
-	if len(paths) == 0 {
-		return "", nil
-	}
-	return paths[0], nil
-}
-
 func pluginFilePaths(root string, id string) ([]string, error) {
 	files, errFiles := pluginFileInfos(root, id)
 	if errFiles != nil {
@@ -99,7 +88,7 @@ func pluginFileInfos(root string, id string) ([]pluginFileInfo, error) {
 		return nil, errResolveRoot
 	}
 	id = sdkpluginstore.CanonicalPluginID(id)
-	platform := CurrentPlatform()
+	platform := currentPlatform()
 	extension := pluginExtension(platform.GOOS)
 	candidates := make([]pluginFileInfo, 0)
 	for _, dir := range pluginCandidateDirs(resolvedRoot, platform.GOOS, platform.GOARCH) {
@@ -175,7 +164,7 @@ func securePluginCandidateEntries(root, dir string) ([]os.DirEntry, bool, error)
 	}
 	current := root
 	if relative != "." {
-		for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		for component := range strings.SplitSeq(relative, string(filepath.Separator)) {
 			if component == "" || component == "." {
 				continue
 			}
@@ -213,21 +202,6 @@ func pluginCandidateDirs(root string, goos string, goarch string) []string {
 	dirs = append(dirs, filepath.Join(root, goos, goarch))
 	dirs = append(dirs, root)
 	return dirs
-}
-
-func pluginIDFromPath(path string) string {
-	file, ok := pluginFileFromPath(path, "")
-	if ok {
-		return file.ID
-	}
-	base := filepath.Base(path)
-	lowerBase := strings.ToLower(base)
-	for _, extension := range []string{".so", ".dylib", ".dll"} {
-		if strings.HasSuffix(lowerBase, extension) {
-			return sdkpluginstore.CanonicalPluginID(base[:len(base)-len(extension)])
-		}
-	}
-	return sdkpluginstore.CanonicalPluginID(base)
 }
 
 func pluginFileFromPath(filePath string, requiredExtension string) (pluginFileInfo, bool) {

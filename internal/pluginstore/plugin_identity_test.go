@@ -19,7 +19,7 @@ func TestValidateRegistryRejectsCaseInsensitiveDuplicatePluginIDs(t *testing.T) 
 	duplicate := plugin
 	duplicate.ID = "alpha"
 
-	errValidate := ValidateRegistry(Registry{SchemaVersion: SchemaVersion, Plugins: []Plugin{plugin, duplicate}})
+	errValidate := validateRegistry(Registry{SchemaVersion: SchemaVersion, Plugins: []Plugin{plugin, duplicate}})
 	if errValidate == nil {
 		t.Fatal("ValidateRegistry() accepted case-insensitive duplicate plugin ids")
 	}
@@ -44,12 +44,14 @@ func TestPendingDeletionBlocksCaseVariantInstall(t *testing.T) {
 		}
 	}()
 
-	_, errInstall := InstallArchive(nil, Plugin{ID: "Alpha", Version: "1.0.0"}, InstallOptions{
-		PluginsDir: root,
-		GOOS:       runtime.GOOS,
-		GOARCH:     runtime.GOARCH,
-		RootLock:   rootLock,
-	})
+	_, errInstall := installArchive(
+		nil, Plugin{ID: "Alpha", Version: "1.0.0"}, InstallOptions{
+			PluginsDir: root,
+			GOOS:       runtime.GOOS,
+			GOARCH:     runtime.GOARCH,
+			RootLock:   rootLock,
+		},
+	)
 	if !errors.Is(errInstall, ErrPendingDeletion) {
 		t.Fatalf("InstallArchive() error = %v, want ErrPendingDeletion", errInstall)
 	}
@@ -151,12 +153,14 @@ func TestPendingInstallBlocksCaseVariantMutation(t *testing.T) {
 	if !errors.Is(errDelete, ErrPendingInstall) {
 		t.Fatalf("PrepareDeletionTransactionLocked() error = %v, want ErrPendingInstall", errDelete)
 	}
-	_, errInstall := InstallArchive(nil, Plugin{ID: "Alpha", Version: "1.0.0"}, InstallOptions{
-		PluginsDir: root,
-		GOOS:       runtime.GOOS,
-		GOARCH:     runtime.GOARCH,
-		RootLock:   rootLock,
-	})
+	_, errInstall := installArchive(
+		nil, Plugin{ID: "Alpha", Version: "1.0.0"}, InstallOptions{
+			PluginsDir: root,
+			GOOS:       runtime.GOOS,
+			GOARCH:     runtime.GOARCH,
+			RootLock:   rootLock,
+		},
+	)
 	if !errors.Is(errInstall, ErrPendingInstall) {
 		t.Fatalf("InstallArchive() error = %v, want ErrPendingInstall", errInstall)
 	}

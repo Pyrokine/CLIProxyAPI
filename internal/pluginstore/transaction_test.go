@@ -25,14 +25,14 @@ func TestArtifactTransactionRollbackRestoresOriginalFileObject(t *testing.T) {
 		t.Fatalf("Stat() error = %v", errStat)
 	}
 
-	transaction := &ArtifactTransaction{}
-	if errBackup := transaction.Backup(targetPath); errBackup != nil {
+	transaction := &artifactTransaction{}
+	if errBackup := transaction.backup(targetPath); errBackup != nil {
 		t.Fatalf("Backup() error = %v", errBackup)
 	}
 	if errWrite := writeFileAtomic(targetPath, []byte("new"), 0o600); errWrite != nil {
 		t.Fatalf("writeFileAtomic(replacement) error = %v", errWrite)
 	}
-	if errRollback := transaction.Rollback(
+	if errRollback := transaction.rollback(
 		InstallResult{Path: targetPath, Overwritten: true},
 	); errRollback != nil {
 		t.Fatalf("Rollback() error = %v", errRollback)
@@ -67,8 +67,8 @@ func TestArtifactTransactionRollbackBeforeReplacementRestoresArtifact(t *testing
 	if err := os.WriteFile(targetPath, []byte("old"), 0o640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	transaction := &ArtifactTransaction{}
-	if errBackup := transaction.Backup(targetPath); errBackup != nil {
+	transaction := &artifactTransaction{}
+	if errBackup := transaction.backup(targetPath); errBackup != nil {
 		t.Fatalf("Backup() error = %v", errBackup)
 	}
 	dataBeforeReplacement, errRead := os.ReadFile(targetPath)
@@ -78,7 +78,7 @@ func TestArtifactTransactionRollbackBeforeReplacementRestoresArtifact(t *testing
 	if string(dataBeforeReplacement) != "old" {
 		t.Fatalf("data before replacement = %q, want old", dataBeforeReplacement)
 	}
-	if errRollback := transaction.Rollback(
+	if errRollback := transaction.rollback(
 		InstallResult{Path: targetPath, Overwritten: true},
 	); errRollback != nil {
 		t.Fatalf("Rollback() error = %v", errRollback)
@@ -98,7 +98,7 @@ func TestStagedRemovalKeepsTargetUntilCommit(t *testing.T) {
 	if err := os.WriteFile(targetPath, []byte("plugin"), 0o640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	removal, errStage := StageRemoval(targetPath)
+	removal, errStage := stageRemoval(targetPath)
 	if errStage != nil {
 		t.Fatalf("StageRemoval() error = %v", errStage)
 	}
@@ -123,7 +123,7 @@ func TestStagedRemovalRollbackKeepsOriginalFileObject(t *testing.T) {
 	if errStat != nil {
 		t.Fatalf("Stat() error = %v", errStat)
 	}
-	removal, errStage := StageRemoval(targetPath)
+	removal, errStage := stageRemoval(targetPath)
 	if errStage != nil {
 		t.Fatalf("StageRemoval() error = %v", errStage)
 	}
@@ -145,14 +145,14 @@ func TestArtifactTransactionCommitKeepsReplacement(t *testing.T) {
 	if err := os.WriteFile(targetPath, []byte("old"), 0o640); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
-	transaction := &ArtifactTransaction{}
-	if errBackup := transaction.Backup(targetPath); errBackup != nil {
+	transaction := &artifactTransaction{}
+	if errBackup := transaction.backup(targetPath); errBackup != nil {
 		t.Fatalf("Backup() error = %v", errBackup)
 	}
 	if errWrite := writeFileAtomic(targetPath, []byte("new"), 0o600); errWrite != nil {
 		t.Fatalf("writeFileAtomic(replacement) error = %v", errWrite)
 	}
-	if errCommit := transaction.Commit(); errCommit != nil {
+	if errCommit := transaction.commit(); errCommit != nil {
 		t.Fatalf("Commit() error = %v", errCommit)
 	}
 	data, errRead := os.ReadFile(targetPath)

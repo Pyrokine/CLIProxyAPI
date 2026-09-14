@@ -120,7 +120,7 @@ func (m Manifest) Validate() error {
 		plan := NormalizeInstallPlan(m.Install)
 		plan.Type = InstallTypeDirect
 		if len(plan.Artifacts) > 0 {
-			return ValidateInstallPlan(plan)
+			return validateInstallPlan(plan)
 		}
 		return validateManifestSourceURL(m.SourceURL)
 	case InstallTypeGitHubRelease:

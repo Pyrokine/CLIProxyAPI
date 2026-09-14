@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -247,7 +246,7 @@ func TestPluginStoreAuthHeaderIsReevaluatedAcrossRedirect(t *testing.T) {
 			},
 		},
 	}
-	data, errDownload := client.DownloadArtifact(
+	data, errDownload := client.downloadArtifact(
 		context.Background(), Artifact{
 			GOOS:   "linux",
 			GOARCH: "amd64",
@@ -283,7 +282,7 @@ func TestPluginStoreAuthHeaderIsAppliedToMatchingRedirect(t *testing.T) {
 					return
 				}
 				redirectedHeader = r.Header.Get("X-Plugin-Token")
-				_, _ = io.WriteString(w, string(artifactData))
+				_, _ = w.Write(artifactData)
 			},
 		),
 	)
@@ -302,7 +301,7 @@ func TestPluginStoreAuthHeaderIsAppliedToMatchingRedirect(t *testing.T) {
 			},
 		},
 	}
-	if _, errDownload := client.DownloadArtifact(
+	if _, errDownload := client.downloadArtifact(
 		context.Background(), Artifact{
 			GOOS:   "linux",
 			GOARCH: "amd64",

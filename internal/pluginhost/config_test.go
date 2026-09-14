@@ -1,12 +1,32 @@
 package pluginhost
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"gopkg.in/yaml.v3"
 )
+
+func TestRuntimeConfigFromConfigResolvesTildePluginDir(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+
+	runtimeConfig, errRuntimeConfig := runtimeConfigFromConfig(
+		&config.Config{
+			Plugins: config.PluginsConfig{Enabled: true, Dir: "~/.cli-proxy-api/plugins"},
+		},
+	)
+	if errRuntimeConfig != nil {
+		t.Fatalf("runtimeConfigFromConfig() error = %v", errRuntimeConfig)
+	}
+	want := filepath.Join(homeDir, ".cli-proxy-api", "plugins")
+	if runtimeConfig.Dir != want {
+		t.Fatalf("runtimeConfig.Dir = %q, want %q", runtimeConfig.Dir, want)
+	}
+}
 
 func TestRuntimeConfigYAMLAddsHostDefaultsToRawPluginConfig(t *testing.T) {
 	var node yaml.Node

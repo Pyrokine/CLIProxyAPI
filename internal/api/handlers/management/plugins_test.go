@@ -252,9 +252,18 @@ func TestPluginConfigMutationFailureKeepsPublishedConfigAndRuntime(t *testing.T)
 		body   string
 		invoke func(*Handler, *gin.Context)
 	}{
-		{name: "patch enabled", method: http.MethodPatch, body: `{"enabled":false}`, invoke: (*Handler).PatchPluginEnabled},
-		{name: "put config", method: http.MethodPut, body: `{"enabled":false,"mode":"strict"}`, invoke: (*Handler).PutPluginConfig},
-		{name: "patch config", method: http.MethodPatch, body: `{"mode":"strict"}`, invoke: (*Handler).PatchPluginConfig},
+		{
+			name: "patch enabled", method: http.MethodPatch, body: `{"enabled":false}`,
+			invoke: (*Handler).PatchPluginEnabled,
+		},
+		{
+			name: "put config", method: http.MethodPut, body: `{"enabled":false,"mode":"strict"}`,
+			invoke: (*Handler).PutPluginConfig,
+		},
+		{
+			name: "patch config", method: http.MethodPatch, body: `{"mode":"strict"}`,
+			invoke: (*Handler).PatchPluginConfig,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -265,9 +274,13 @@ func TestPluginConfigMutationFailureKeepsPublishedConfigAndRuntime(t *testing.T)
 				if err := os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
 					t.Fatalf("write blocking file: %v", err)
 				}
-				cfg := &config.Config{Plugins: config.PluginsConfig{Configs: map[string]config.PluginInstanceConfig{
-					"alpha": pluginConfigFromYAML(t, "enabled: true\nmode: safe\n"),
-				}}}
+				cfg := &config.Config{
+					Plugins: config.PluginsConfig{
+						Configs: map[string]config.PluginInstanceConfig{
+							"alpha": pluginConfigFromYAML(t, "enabled: true\nmode: safe\n"),
+						},
+					},
+				}
 				syncCalled := false
 				h := &Handler{
 					cfg:            cfg,
@@ -358,12 +371,16 @@ func TestPluginConfigMutationsPreserveStoreIdentity(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	cfg := &config.Config{Plugins: config.PluginsConfig{Configs: map[string]config.PluginInstanceConfig{
-		"alpha": pluginConfigFromYAML(
-			t,
-			"enabled: true\nmode: safe\nstore:\n  id: alpha\n  source-id: official\n  source-url: https://official.example/registry.json\n",
-		),
-	}}}
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Configs: map[string]config.PluginInstanceConfig{
+				"alpha": pluginConfigFromYAML(
+					t,
+					"enabled: true\nmode: safe\nstore:\n  id: alpha\n  source-id: official\n  source-url: https://official.example/registry.json\n",
+				),
+			},
+		},
+	}
 	h := NewHandler(cfg, configPath, nil)
 	t.Cleanup(func() { _ = h.Close() })
 
@@ -408,22 +425,24 @@ func TestPluginConfigMutationsPreserveStoreIdentity(t *testing.T) {
 			invoke: (*Handler).PatchPluginConfig,
 		},
 	} {
-		t.Run(mutation.name, func(t *testing.T) {
-			recMutation := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(recMutation)
-			ctx.Params = []gin.Param{{Key: "id", Value: "alpha"}}
-			ctx.Request = httptest.NewRequest(
-				mutation.method,
-				"/plugins/alpha/config",
-				strings.NewReader(mutation.body),
-			)
-			ctx.Request.Header.Set("Content-Type", "application/json")
-			mutation.invoke(h, ctx)
-			if recMutation.Code != http.StatusBadRequest ||
-				!strings.Contains(recMutation.Body.String(), "reserved_plugin_config_field") {
-				t.Fatalf("status = %d, body=%s", recMutation.Code, recMutation.Body.String())
-			}
-		})
+		t.Run(
+			mutation.name, func(t *testing.T) {
+				recMutation := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(recMutation)
+				ctx.Params = []gin.Param{{Key: "id", Value: "alpha"}}
+				ctx.Request = httptest.NewRequest(
+					mutation.method,
+					"/plugins/alpha/config",
+					strings.NewReader(mutation.body),
+				)
+				ctx.Request.Header.Set("Content-Type", "application/json")
+				mutation.invoke(h, ctx)
+				if recMutation.Code != http.StatusBadRequest ||
+					!strings.Contains(recMutation.Body.String(), "reserved_plugin_config_field") {
+					t.Fatalf("status = %d, body=%s", recMutation.Code, recMutation.Body.String())
+				}
+			},
+		)
 	}
 
 	item = h.configSnapshot().Plugins.Configs["alpha"]

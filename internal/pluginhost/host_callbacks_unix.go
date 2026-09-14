@@ -64,7 +64,7 @@ func cliproxyHostCall(
 }
 
 //export cliproxyHostFree
-func cliproxyHostFree(ptr unsafe.Pointer, len C.size_t) {
+func cliproxyHostFree(ptr unsafe.Pointer, _ C.size_t) {
 	if ptr != nil {
 		C.free(ptr)
 	}

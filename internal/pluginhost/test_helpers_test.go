@@ -23,7 +23,7 @@ func newTestSymbolLoader() *testSymbolLoader {
 	return &testSymbolLoader{lookups: make(map[string]*testSymbolLookup)}
 }
 
-func (l *testSymbolLoader) Open(file pluginFile, host *Host) (pluginClient, error) {
+func (l *testSymbolLoader) Open(file pluginFile, _ *Host) (pluginClient, error) {
 	l.openCalls++
 	lookup := l.lookups[file.ID]
 	if lookup == nil {
@@ -41,6 +41,8 @@ type testSymbolLookup struct {
 	shutdownOnce        sync.Once
 	registerOverride    func([]byte) pluginapi.Plugin
 	reconfigureOverride func([]byte) pluginapi.Plugin
+	schemaVersion       uint32
+	lastLifecycle       rpcLifecycleRequest
 }
 
 func newTestSymbolLookup(plugin *testPlugin) *testSymbolLookup {
@@ -94,6 +96,20 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 			return nil, errIntercept
 		}
 		return marshalRPCResult(resp)
+	case pluginabi.MethodRequestComplete:
+		if l.active.Capabilities.RequestLifecyclePlugin == nil {
+			return nil, fmt.Errorf("missing request lifecycle plugin")
+		}
+		var req pluginapi.RequestCompletion
+		if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		if errComplete := l.active.Capabilities.RequestLifecyclePlugin.HandleRequestComplete(
+			ctx, req,
+		); errComplete != nil {
+			return nil, errComplete
+		}
+		return marshalRPCResult(rpcEmptyResponse{})
 	case pluginabi.MethodResponseInterceptAfter:
 		if l.active.Capabilities.ResponseInterceptor == nil {
 			return nil, fmt.Errorf("missing response interceptor")
@@ -169,9 +185,11 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 func (l *testSymbolLookup) Shutdown() {
 	l.shutdownCalls++
 	if l.shutdownStarted != nil {
-		l.shutdownOnce.Do(func() {
-			close(l.shutdownStarted)
-		})
+		l.shutdownOnce.Do(
+			func() {
+				close(l.shutdownStarted)
+			},
+		)
 	}
 	if l.shutdownRelease != nil {
 		<-l.shutdownRelease
@@ -183,6 +201,7 @@ func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, e
 	if errUnmarshal := json.Unmarshal(request, &req); errUnmarshal != nil {
 		return nil, errUnmarshal
 	}
+	l.lastLifecycle = req
 	var plugin pluginapi.Plugin
 	if reload {
 		if l.reconfigureOverride != nil {
@@ -198,9 +217,13 @@ func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, e
 		}
 	}
 	l.active = plugin
+	schemaVersion := l.schemaVersion
+	if schemaVersion == 0 {
+		schemaVersion = pluginabi.SchemaVersion
+	}
 	return marshalRPCResult(
 		rpcRegistration{
-			SchemaVersion: pluginabi.SchemaVersion,
+			SchemaVersion: schemaVersion,
 			Metadata:      plugin.Metadata,
 			Capabilities:  rpcCapabilitiesFromPlugin(plugin),
 		},
@@ -216,7 +239,7 @@ type testPlugin struct {
 	panicOnReload     bool
 }
 
-func (p *testPlugin) Register([]byte) pluginapi.Plugin {
+func (p *testPlugin) Register(_ []byte) pluginapi.Plugin {
 	p.registerCalls++
 	if p.panicOnRegister {
 		panic("register panic")
@@ -224,7 +247,7 @@ func (p *testPlugin) Register([]byte) pluginapi.Plugin {
 	return p.registerResult
 }
 
-func (p *testPlugin) Reconfigure([]byte) pluginapi.Plugin {
+func (p *testPlugin) Reconfigure(_ []byte) pluginapi.Plugin {
 	p.reconfigureCalls++
 	if p.panicOnReload {
 		panic("reconfigure panic")
@@ -248,31 +271,16 @@ func validTestPlugin(name string) pluginapi.Plugin {
 
 type testUsageCapability struct{}
 
-func (testUsageCapability) HandleUsage(ctx context.Context, record pluginapi.UsageRecord) {}
+func (testUsageCapability) HandleUsage(context.Context, pluginapi.UsageRecord) {}
 
-type testThinkingCapability struct {
-	provider string
-}
+type requestLifecyclePluginFunc func(context.Context, pluginapi.RequestCompletion)
 
-func (c testThinkingCapability) Identifier() string {
-	return c.provider
-}
-
-func (c testThinkingCapability) ApplyThinking(
+func (f requestLifecyclePluginFunc) HandleRequestComplete(
 	ctx context.Context,
-	req pluginapi.ThinkingApplyRequest,
-) (pluginapi.PayloadResponse, error) {
-	var payload map[string]any
-	if errUnmarshal := json.Unmarshal(req.Body, &payload); errUnmarshal != nil {
-		return pluginapi.PayloadResponse{}, errUnmarshal
-	}
-	payload["plugin"] = c.provider
-	payload["thinking_budget"] = req.Config.Budget
-	out, errMarshal := json.Marshal(payload)
-	if errMarshal != nil {
-		return pluginapi.PayloadResponse{}, errMarshal
-	}
-	return pluginapi.PayloadResponse{Body: out}, nil
+	completion pluginapi.RequestCompletion,
+) error {
+	f(ctx, completion)
+	return nil
 }
 
 type requestInterceptorFunc func(
@@ -357,17 +365,4 @@ func makePluginDir(t *testing.T, ids ...string) string {
 		}
 	}
 	return root
-}
-
-func makePluginFile(t *testing.T, root string, id string) string {
-	t.Helper()
-	archDir := filepath.Join(root, runtime.GOOS, runtime.GOARCH)
-	if errMkdirAll := os.MkdirAll(archDir, 0o755); errMkdirAll != nil {
-		t.Fatalf("MkdirAll() error = %v", errMkdirAll)
-	}
-	path := filepath.Join(archDir, id+pluginExtension(runtime.GOOS))
-	if errWriteFile := os.WriteFile(path, []byte("x"), 0o644); errWriteFile != nil {
-		t.Fatalf("WriteFile(%s) error = %v", path, errWriteFile)
-	}
-	return path
 }

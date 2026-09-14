@@ -4,9 +4,11 @@ import "encoding/json"
 
 const (
 	ABIVersion    uint32 = 1
-	SchemaVersion uint32 = 1
+	SchemaVersion uint32 = 2
 )
 
+// These method names are part of the public plugin ABI.
+// noinspection GoUnusedConst
 const (
 	MethodPluginRegister    = "plugin.register"
 	MethodPluginReconfigure = "plugin.reconfigure"
@@ -38,6 +40,7 @@ const (
 	MethodRequestNormalize       = "request.normalize"
 	MethodRequestInterceptBefore = "request.intercept_before"
 	MethodRequestInterceptAfter  = "request.intercept_after"
+	MethodRequestComplete        = "request.complete"
 
 	MethodResponseTranslate            = "response.translate"
 	MethodResponseNormalizeBefore      = "response.normalize_before"

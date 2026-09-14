@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -45,6 +47,7 @@ type pluginModelRegistration struct {
 	provider    string
 	priority    int
 	models      []*registry.ModelInfo
+	outcome     pluginapi.ModelDiscoveryOutcome
 	hasExecutor bool
 }
 
@@ -116,22 +119,33 @@ func executorFormatContains(formats []sdktranslator.Format, target sdktranslator
 	if target == "" {
 		return false
 	}
-	for _, format := range formats {
-		if format == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(formats, target)
 }
 
 type AuthModelResult struct {
 	Provider       string
 	Models         []*registry.ModelInfo
+	Outcome        pluginapi.ModelDiscoveryOutcome
 	Auth           *coreauth.Auth
 	Snapshot       *Snapshot
 	operationToken pluginOperationToken
 	Handled        bool
 	Err            error
+}
+
+func normalizePluginModelDiscoveryOutcome(
+	outcome pluginapi.ModelDiscoveryOutcome,
+) (pluginapi.ModelDiscoveryOutcome, error) {
+	switch pluginapi.ModelDiscoveryOutcome(strings.ToLower(strings.TrimSpace(string(outcome)))) {
+	case "", pluginapi.ModelDiscoveryComplete:
+		return pluginapi.ModelDiscoveryComplete, nil
+	case pluginapi.ModelDiscoveryPartial:
+		return pluginapi.ModelDiscoveryPartial, nil
+	case pluginapi.ModelDiscoveryInconclusive:
+		return pluginapi.ModelDiscoveryInconclusive, nil
+	default:
+		return "", fmt.Errorf("unsupported model discovery outcome %q", outcome)
+	}
 }
 
 func pluginModelInfoToRegistryModelInfo(model pluginapi.ModelInfo) *registry.ModelInfo {
@@ -254,58 +268,26 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 	nextClients := make(map[string]struct{})
 	nextProviders := make(map[string]string)
 	nextModelRegistrations := make(map[string]pluginModelRegistration)
-	for _, record := range records {
-		modelProvider := record.plugin.Capabilities.ModelProvider
-		registrar := record.plugin.Capabilities.ModelRegistrar
-		if modelProvider == nil && registrar == nil {
-			continue
+	appendRegistration := func(
+		record capabilityRecord,
+		provider string,
+		models []*registry.ModelInfo,
+		outcome pluginapi.ModelDiscoveryOutcome,
+	) {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		models = cloneRegistryModels(models)
+		if provider == "" || len(models) == 0 {
+			return
 		}
-		if !executorScopeAllowsStaticModels(record.plugin.Capabilities) {
-			continue
+		if outcome == "" {
+			outcome = pluginapi.ModelDiscoveryComplete
 		}
-		var resp pluginapi.ModelRegistrationResponse
-		var errRegisterModels error
-		if modelProvider != nil {
-			modelResp, errStaticModels := h.callModelProviderStaticModels(ctx, record, modelProvider)
-			if errStaticModels != nil {
-				errRegisterModels = errStaticModels
-			} else {
-				resp = pluginapi.ModelRegistrationResponse{
-					Provider: modelResp.Provider,
-					Models:   modelResp.Models,
-				}
-			}
-		} else {
-			resp, errRegisterModels = h.callModelRegistrar(ctx, record, registrar)
-		}
-		if errRegisterModels != nil {
-			log.Warnf("pluginhost: model registrar %s failed: %v", record.id, errRegisterModels)
-			continue
-		}
-
-		provider := strings.ToLower(strings.TrimSpace(resp.Provider))
-		if provider == "" || len(resp.Models) == 0 {
-			continue
-		}
-
-		models := make([]*registry.ModelInfo, 0, len(resp.Models))
-		for _, item := range resp.Models {
-			model := pluginModelInfoToRegistryModelInfo(item)
-			if model == nil || strings.TrimSpace(model.ID) == "" {
-				continue
-			}
-			model.ID = strings.TrimSpace(model.ID)
-			models = append(models, model)
-		}
-		if len(models) == 0 {
-			continue
-		}
-
 		nextModelRegistrations[record.id] = pluginModelRegistration{
 			pluginID:    record.id,
 			provider:    provider,
 			priority:    record.priority,
 			models:      cloneRegistryModels(models),
+			outcome:     outcome,
 			hasExecutor: record.plugin.Capabilities.Executor != nil,
 		}
 		nextProviders[record.id] = provider
@@ -321,6 +303,89 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 			)
 			nextClients[clientID] = struct{}{}
 		}
+	}
+	preserveRegistration := func(record capabilityRecord) bool {
+		previous := h.modelRegistration(record.id)
+		if previous.pluginID == "" || previous.provider == "" || len(previous.models) == 0 {
+			return false
+		}
+		appendRegistration(record, previous.provider, previous.models, previous.outcome)
+		return true
+	}
+
+	for _, record := range records {
+		modelProvider := record.plugin.Capabilities.ModelProvider
+		registrar := record.plugin.Capabilities.ModelRegistrar
+		if modelProvider == nil && registrar == nil {
+			continue
+		}
+		if !executorScopeAllowsStaticModels(record.plugin.Capabilities) {
+			continue
+		}
+
+		var resp pluginapi.ModelRegistrationResponse
+		outcome := pluginapi.ModelDiscoveryComplete
+		var errRegisterModels error
+		if modelProvider != nil {
+			modelResp, errStaticModels := h.callModelProviderStaticModels(ctx, record, modelProvider)
+			if errStaticModels != nil {
+				errRegisterModels = errStaticModels
+			} else {
+				var errOutcome error
+				outcome, errOutcome = normalizePluginModelDiscoveryOutcome(modelResp.Outcome)
+				if errOutcome != nil {
+					errRegisterModels = errOutcome
+				} else {
+					resp = pluginapi.ModelRegistrationResponse{
+						Provider: modelResp.Provider,
+						Models:   modelResp.Models,
+					}
+				}
+			}
+		} else {
+			resp, errRegisterModels = h.callModelRegistrar(ctx, record, registrar)
+		}
+		if errRegisterModels != nil {
+			log.Warnf("pluginhost: model registrar %s failed: %v", record.id, errRegisterModels)
+			preserveRegistration(record)
+			continue
+		}
+		if outcome == pluginapi.ModelDiscoveryInconclusive {
+			preserveRegistration(record)
+			continue
+		}
+		if outcome == pluginapi.ModelDiscoveryPartial && preserveRegistration(record) {
+			continue
+		}
+
+		provider := strings.ToLower(strings.TrimSpace(resp.Provider))
+		if provider == "" {
+			log.Warnf("pluginhost: model registrar %s returned an empty provider", record.id)
+			preserveRegistration(record)
+			continue
+		}
+		if len(resp.Models) == 0 {
+			if outcome != pluginapi.ModelDiscoveryComplete {
+				preserveRegistration(record)
+			}
+			continue
+		}
+
+		models := make([]*registry.ModelInfo, 0, len(resp.Models))
+		for _, item := range resp.Models {
+			model := pluginModelInfoToRegistryModelInfo(item)
+			if model == nil || strings.TrimSpace(model.ID) == "" {
+				continue
+			}
+			model.ID = strings.TrimSpace(model.ID)
+			models = append(models, model)
+		}
+		if len(models) == 0 {
+			log.Warnf("pluginhost: model registrar %s returned no valid models", record.id)
+			preserveRegistration(record)
+			continue
+		}
+		appendRegistration(record, provider, models, outcome)
 	}
 	h.commitModelClients(token, modelRegistry, registrations, nextClients, nextProviders, nextModelRegistrations)
 }
@@ -393,10 +458,37 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 		}
 		respProvider := normalizeProviderID(resp.Provider)
 		if respProvider != "" && respProvider != providerKey {
-			continue
+			return AuthModelResult{
+				Snapshot:       snapshot,
+				operationToken: operationToken,
+				Handled:        true,
+				Err: fmt.Errorf(
+					"model provider %s returned provider %q for %q",
+					record.id,
+					resp.Provider,
+					auth.Provider,
+				),
+			}
 		}
 		if respProvider == "" {
 			respProvider = providerKey
+		}
+		outcome, errOutcome := normalizePluginModelDiscoveryOutcome(resp.Outcome)
+		if errOutcome != nil {
+			return AuthModelResult{
+				Snapshot:       snapshot,
+				operationToken: operationToken,
+				Handled:        true,
+				Err:            errOutcome,
+			}
+		}
+		if errAuthUpdate := validateModelAuthUpdate(resp.AuthUpdate, auth); errAuthUpdate != nil {
+			return AuthModelResult{
+				Snapshot:       snapshot,
+				operationToken: operationToken,
+				Handled:        true,
+				Err:            errAuthUpdate,
+			}
 		}
 		models := make([]*registry.ModelInfo, 0, len(resp.Models))
 		for _, item := range resp.Models {
@@ -413,12 +505,29 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 			path = auth.Attributes["path"]
 		}
 		var updated *coreauth.Auth
-		if authDataHasValue(resp.AuthUpdate) {
-			updated = h.AuthDataToCoreAuth(authDataWithDefaults(resp.AuthUpdate, auth), path, auth.FileName)
+		if authModelUpdateHasValue(resp.AuthUpdate) {
+			providerUpdate := h.authDataToCoreAuth(
+				authDataWithDefaults(resp.AuthUpdate, auth),
+				path,
+				auth.FileName,
+			)
+			if providerUpdate == nil {
+				return AuthModelResult{
+					Snapshot:       snapshot,
+					operationToken: operationToken,
+					Handled:        true,
+					Err:            fmt.Errorf("model provider %s returned invalid auth update", record.id),
+				}
+			}
+			updated = auth.Clone()
+			updated.Storage = providerUpdate.Storage
+			updated.Metadata = providerUpdate.Metadata
+			updated.NextRefreshAfter = providerUpdate.NextRefreshAfter
 		}
 		return AuthModelResult{
 			Provider:       respProvider,
 			Models:         models,
+			Outcome:        outcome,
 			Auth:           updated,
 			Snapshot:       snapshot,
 			operationToken: operationToken,
@@ -438,66 +547,49 @@ func (h *Host) AuthModelResultCurrent(result AuthModelResult) bool {
 	return result.operationToken.pluginID != "" && h.pluginOperationTokenCurrent(result.operationToken)
 }
 
-func authDataHasValue(data pluginapi.AuthData) bool {
-	return strings.TrimSpace(data.Provider) != "" ||
-		strings.TrimSpace(data.ID) != "" ||
-		strings.TrimSpace(data.FileName) != "" ||
-		strings.TrimSpace(data.Label) != "" ||
-		strings.TrimSpace(data.Prefix) != "" ||
-		strings.TrimSpace(data.ProxyURL) != "" ||
-		data.Disabled ||
-		len(data.StorageJSON) > 0 ||
-		len(data.Metadata) > 0 ||
-		len(data.Attributes) > 0 ||
-		!data.NextRefreshAfter.IsZero()
+func authModelUpdateHasValue(data pluginapi.AuthData) bool {
+	return len(data.StorageJSON) > 0 || len(data.Metadata) > 0 || !data.NextRefreshAfter.IsZero()
+}
+
+func validateModelAuthUpdate(data pluginapi.AuthData, auth *coreauth.Auth) error {
+	if auth == nil {
+		return fmt.Errorf("model auth update has no source auth")
+	}
+	if provider := normalizeProviderID(data.Provider); provider != "" && provider != normalizeProviderID(auth.Provider) {
+		return fmt.Errorf("model auth update changed auth provider from %q to %q", auth.Provider, data.Provider)
+	}
+	if id := strings.TrimSpace(data.ID); id != "" && id != strings.TrimSpace(auth.ID) {
+		return fmt.Errorf("model auth update changed auth id from %q to %q", auth.ID, data.ID)
+	}
+	return nil
 }
 
 func authDataWithDefaults(data pluginapi.AuthData, auth *coreauth.Auth) pluginapi.AuthData {
 	if auth == nil {
+		data.Metadata = cloneInterceptorMetadata(data.Metadata)
+		data.Attributes = cloneStringMap(data.Attributes)
+		data.StorageJSON = bytes.Clone(data.StorageJSON)
 		return data
 	}
-	if strings.TrimSpace(data.Provider) == "" {
-		data.Provider = auth.Provider
+	data.Provider = auth.Provider
+	data.ID = auth.ID
+	data.FileName = auth.FileName
+	data.Label = auth.Label
+	data.Prefix = auth.Prefix
+	data.ProxyURL = auth.ProxyURL
+	data.Disabled = auth.Disabled
+	data.Attributes = cloneStringMap(auth.Attributes)
+
+	metadata := cloneInterceptorMetadata(auth.Metadata)
+	if metadata == nil && len(data.Metadata) > 0 {
+		metadata = make(map[string]any, len(data.Metadata))
 	}
-	if strings.TrimSpace(data.ID) == "" {
-		data.ID = auth.ID
-	}
-	if strings.TrimSpace(data.FileName) == "" {
-		data.FileName = auth.FileName
-	}
-	if strings.TrimSpace(data.Label) == "" {
-		data.Label = auth.Label
-	}
-	if strings.TrimSpace(data.Prefix) == "" {
-		data.Prefix = auth.Prefix
-	}
-	if strings.TrimSpace(data.ProxyURL) == "" {
-		data.ProxyURL = auth.ProxyURL
-	}
-	if len(data.Metadata) == 0 {
-		data.Metadata = cloneAnyMap(auth.Metadata)
-	} else {
-		metadata := cloneAnyMap(data.Metadata)
-		for key, value := range auth.Metadata {
-			if _, exists := metadata[key]; !exists {
-				metadata[key] = value
-			}
-		}
-		data.Metadata = metadata
-	}
-	if len(data.Attributes) == 0 {
-		data.Attributes = cloneStringMap(auth.Attributes)
-	} else {
-		attributes := cloneStringMap(data.Attributes)
-		for key, value := range auth.Attributes {
-			if _, exists := attributes[key]; !exists {
-				attributes[key] = value
-			}
-		}
-		data.Attributes = attributes
-	}
+	maps.Copy(metadata, cloneInterceptorMetadata(data.Metadata))
+	data.Metadata = metadata
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
+	} else {
+		data.StorageJSON = bytes.Clone(data.StorageJSON)
 	}
 	if data.NextRefreshAfter.IsZero() {
 		data.NextRefreshAfter = auth.NextRefreshAfter
@@ -575,7 +667,7 @@ func (h *Host) callModelsForAuth(
 			AuthID:       auth.ID,
 			AuthProvider: auth.Provider,
 			StorageJSON:  storageJSONFromAuth(auth),
-			Metadata:     cloneAnyMap(auth.Metadata),
+			Metadata:     cloneInterceptorMetadata(auth.Metadata),
 			Attributes:   cloneStringMap(auth.Attributes),
 			Host:         h.hostConfigSummary(),
 			HTTPClient:   h.newHTTPClient(auth),
@@ -738,9 +830,60 @@ func (h *Host) interceptRequest(
 			if len(resp.Body) > 0 {
 				current.Body = bytes.Clone(resp.Body)
 			}
+			if resp.Terminate {
+				current.Terminate = true
+				current.StatusCode = resp.StatusCode
+				current.ResponseHeaders = cloneHeader(resp.ResponseHeaders)
+				current.ResponseBody = bytes.Clone(resp.ResponseBody)
+				break
+			}
 		}
 	}
 	return current
+}
+
+// CompleteRequest schedules terminal notifications without blocking response delivery.
+func (h *Host) CompleteRequest(ctx context.Context, completion pluginapi.RequestCompletion) {
+	h.CompleteRequestExcept(ctx, completion, "")
+}
+
+// CompleteRequestExcept notifies lifecycle plugins except the plugin that initiated a nested host execution.
+func (h *Host) CompleteRequestExcept(
+	ctx context.Context,
+	completion pluginapi.RequestCompletion,
+	skipPluginID string,
+) {
+	if h == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	} else {
+		ctx = context.WithoutCancel(ctx)
+	}
+	skipPluginID = strings.TrimSpace(skipPluginID)
+	for _, record := range h.activeRecords() {
+		plugin := record.plugin.Capabilities.RequestLifecyclePlugin
+		if h.isPluginFused(record.id) || plugin == nil || record.id == skipPluginID || !h.recordCurrent(record) {
+			continue
+		}
+		next := completion
+		next.Metadata = cloneInterceptorMetadata(completion.Metadata)
+		go func(
+			record capabilityRecord,
+			plugin pluginapi.RequestLifecyclePlugin,
+			completion pluginapi.RequestCompletion,
+		) {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					h.fusePlugin(record.id, "RequestLifecyclePlugin.HandleRequestComplete", recovered)
+				}
+			}()
+			if errComplete := plugin.HandleRequestComplete(ctx, completion); errComplete != nil {
+				log.Warnf("pluginhost: request lifecycle plugin %s failed: %v", record.id, errComplete)
+			}
+		}(record, plugin, next)
+	}
 }
 
 func (h *Host) InterceptResponse(
@@ -1015,7 +1158,9 @@ func (h *Host) RegisterExecutors(manager executorManager, modelRegistry modelPro
 			)
 		}
 	}
-	h.commitExecutorState(token, manager, modelRegistry, providerModels, executorRegistrations, modelClientRegistrations)
+	h.commitExecutorState(
+		token, manager, modelRegistry, providerModels, executorRegistrations, modelClientRegistrations,
+	)
 }
 
 func pluginExecutorModelClientID(pluginID, provider string) string {
@@ -1488,7 +1633,7 @@ func (h *Host) unregisterAccessProviders(pluginID string) {
 	h.syncAccessManagerProviders()
 }
 
-func (h *Host) RegisterUsagePlugins() {
+func (h *Host) registerUsagePlugins() {
 	if h == nil {
 		return
 	}
@@ -2056,31 +2201,34 @@ func (a *executorAdapter) translateExecutorStreamPayload(
 	if len(originalRequest) == 0 {
 		originalRequest = prepared.req.Payload
 	}
-	translationPayload := payload
-	if executorNativeStreamResponseTranslatorExists(prepared.outputFormat, prepared.requestedFormat) {
-		translationPayload = executorStreamTranslationPayload(prepared.outputFormat, payload)
+	translate := func(translationPayload []byte) [][]byte {
+		frames := sdktranslator.TranslateStream(
+			ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest,
+			prepared.req.Payload,
+			translationPayload, param,
+		)
+		if executorStreamTranslationFellBack(prepared, translationPayload, frames) {
+			return nil
+		}
+		return frames
 	}
-	frames := sdktranslator.TranslateStream(
-		ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload,
-		translationPayload, param,
-	)
-	if executorStreamTranslationFellBack(prepared, translationPayload, frames) {
-		return nil
+	if executorNativeStreamResponseTranslatorExists(prepared.outputFormat, prepared.requestedFormat) &&
+		executorStreamPayloadIsDone(payload) {
+		var frames [][]byte
+		if tail := executorStreamDonePayload(prepared.outputFormat); len(tail) > 0 {
+			frames = translate(tail)
+		}
+		return append(frames, translate(payload)...)
 	}
-	return frames
+	return translate(payload)
 }
 
-func executorStreamTranslationPayload(format sdktranslator.Format, payload []byte) []byte {
+func executorStreamPayloadIsDone(payload []byte) bool {
 	trimmed := bytes.TrimSpace(payload)
 	if bytes.HasPrefix(trimmed, []byte("data:")) {
 		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
 	}
-	if bytes.Equal(trimmed, []byte("[DONE]")) {
-		if tail := executorStreamDonePayload(format); len(tail) > 0 {
-			return tail
-		}
-	}
-	return payload
+	return bytes.Equal(trimmed, []byte("[DONE]"))
 }
 
 func executorStreamTranslationFellBack(prepared preparedExecutorCall, payload []byte, frames [][]byte) bool {
@@ -2102,11 +2250,10 @@ func (a *executorAdapter) emitTranslatedExecutorStreamTail(
 	out chan<- pluginapi.ExecutorStreamChunk,
 	param *any,
 ) {
-	tail := executorStreamDonePayload(prepared.outputFormat)
-	if len(tail) == 0 {
+	if len(executorStreamDonePayload(prepared.outputFormat)) == 0 {
 		return
 	}
-	frames := a.translateExecutorStreamPayload(ctx, prepared, tail, param)
+	frames := a.translateExecutorStreamPayload(ctx, prepared, []byte("data: [DONE]"), param)
 	for _, frame := range frames {
 		if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
 			return
@@ -2211,95 +2358,18 @@ func (a *executorAdapter) ShouldRefreshAfterUnauthorized(auth *coreauth.Auth) bo
 	return record != nil && record.plugin.Capabilities.AuthProvider != nil
 }
 
-func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (refreshed *coreauth.Auth, err error) {
+func (a *executorAdapter) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	if auth == nil {
 		return nil, fmt.Errorf("plugin executor refresh auth is nil")
 	}
-	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) {
+	if a == nil || a.executor == nil || a.host == nil || a.host.isPluginFused(a.pluginID) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
-	applyGeneration := a.host.currentApplyGeneration()
-	record := a.host.authProviderRecord(authProvider(auth))
-	if record == nil || record.plugin.Capabilities.AuthProvider == nil {
-		return auth.Clone(), nil
+	refreshed, handled, errRefresh := a.host.refreshAuth(ctx, auth)
+	if handled {
+		return refreshed, errRefresh
 	}
-	token, okToken := a.host.capturePluginOperationToken(*record, applyGeneration)
-	if !okToken {
-		return nil, fmt.Errorf("plugin executor %s refresh owner changed: %w", a.Identifier(), context.Canceled)
-	}
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			a.host.fusePlugin(record.id, "AuthProvider.RefreshAuth", recovered)
-			refreshed = nil
-			err = fmt.Errorf(
-				"plugin executor %s refresh invalidated: %v: %w",
-				a.Identifier(), recovered, context.Canceled,
-			)
-		}
-	}()
-
-	pluginResp, errRefresh := record.plugin.Capabilities.AuthProvider.RefreshAuth(
-		ctx, pluginapi.AuthRefreshRequest{
-			AuthID:       authID(auth),
-			AuthProvider: authProvider(auth),
-			StorageJSON:  storageJSONFromAuth(auth),
-			Metadata:     cloneAnyMap(authMetadata(auth)),
-			Attributes:   authAttributes(auth),
-			Host:         a.host.hostConfigSummary(),
-			HTTPClient:   a.host.newHTTPClient(auth),
-		},
-	)
-	if !a.host.pluginOperationTokenCurrent(token) {
-		return nil, fmt.Errorf("plugin executor %s refresh result is stale: %w", a.Identifier(), context.Canceled)
-	}
-	if errRefresh != nil {
-		guarded := auth.Clone()
-		if guarded != nil {
-			guarded.RefreshCommit = &pluginRefreshCommitGuard{host: a.host, token: token}
-		}
-		return guarded, errRefresh
-	}
-	data := pluginResp.Auth
-	expectedProvider := authProvider(auth)
-	expectedID := authID(auth)
-	if returnedProvider := strings.TrimSpace(data.Provider); returnedProvider != "" && returnedProvider != expectedProvider {
-		return nil, fmt.Errorf("plugin executor %s refresh changed auth provider", a.Identifier())
-	}
-	if returnedID := strings.TrimSpace(data.ID); returnedID != "" && returnedID != expectedID {
-		return nil, fmt.Errorf("plugin executor %s refresh changed auth id", a.Identifier())
-	}
-	data.Provider = expectedProvider
-	data.ID = expectedID
-	if auth != nil {
-		data.FileName = auth.FileName
-		data.Label = auth.Label
-		data.Prefix = auth.Prefix
-		data.ProxyURL = auth.ProxyURL
-		data.Disabled = auth.Disabled
-		data.Attributes = cloneStringMap(auth.Attributes)
-	}
-	if len(data.Metadata) == 0 && auth != nil {
-		data.Metadata = cloneAnyMap(auth.Metadata)
-	}
-	if len(data.StorageJSON) == 0 {
-		data.StorageJSON = storageJSONFromAuth(auth)
-	}
-	if pluginResp.NextRefreshAfter.IsZero() && auth != nil {
-		data.NextRefreshAfter = auth.NextRefreshAfter
-	}
-	if !pluginResp.NextRefreshAfter.IsZero() {
-		data.NextRefreshAfter = pluginResp.NextRefreshAfter
-	}
-	providerUpdate := a.host.AuthDataToCoreAuth(data, "", data.FileName)
-	if providerUpdate == nil || auth == nil {
-		return nil, fmt.Errorf("plugin executor %s refresh returned invalid auth data", a.Identifier())
-	}
-	next := auth.Clone()
-	next.Storage = providerUpdate.Storage
-	next.Metadata = providerUpdate.Metadata
-	next.NextRefreshAfter = providerUpdate.NextRefreshAfter
-	next.RefreshCommit = &pluginRefreshCommitGuard{host: a.host, token: token}
-	return next, nil
+	return auth.Clone(), nil
 }
 
 func (a *executorAdapter) CountTokens(
@@ -2437,6 +2507,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			ServiceTier:         requestServiceTier,
 			RequestServiceTier:  requestServiceTier,
 			ResponseServiceTier: responseServiceTier,
+			Generate:            coreusage.GenerateEnabled(record.Generate),
 			RequestedAt:         record.RequestedAt,
 			Latency:             record.Latency,
 			TTFT:                time.Duration(record.TimeToFirstByteMs) * time.Millisecond,
@@ -2460,7 +2531,7 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	)
 }
 
-func (a *thinkingAdapter) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) (
+func (a *thinkingAdapter) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) (
 	out []byte,
 	err error,
 ) {
@@ -2778,12 +2849,8 @@ func mergeExecutorMetadata(reqMetadata, optsMetadata map[string]any) map[string]
 		return nil
 	}
 	merged := make(map[string]any, len(reqMetadata)+len(optsMetadata))
-	for key, value := range reqMetadata {
-		merged[key] = value
-	}
-	for key, value := range optsMetadata {
-		merged[key] = value
-	}
+	maps.Copy(merged, reqMetadata)
+	maps.Copy(merged, optsMetadata)
 	return merged
 }
 
@@ -2914,9 +2981,7 @@ func cloneAnyMap(in map[string]any) map[string]any {
 		return nil
 	}
 	out := make(map[string]any, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -3068,8 +3133,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }

@@ -181,39 +181,43 @@ func TestListPluginStoreReleasesUsesConfiguredGitHubAuth(t *testing.T) {
 		},
 		{"tag_name": "v0.3.0-draft", "draft": true, "assets": []}
 	]`
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		StoreAuth: []sdkpluginstore.AuthConfig{
-			{
-				Match:    "https://api.github.com/repos/author-name/sample-provider/releases/",
-				ApplyTo:  []string{sdkpluginstore.RequestKindMetadata},
-				Type:     sdkpluginstore.AuthTypeGitHubToken,
-				TokenEnv: "PLUGIN_STORE_TOKEN",
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			StoreAuth: []sdkpluginstore.AuthConfig{
+				{
+					Match:    "https://api.github.com/repos/author-name/sample-provider/releases/",
+					ApplyTo:  []string{sdkpluginstore.RequestKindMetadata},
+					Type:     sdkpluginstore.AuthTypeGitHubToken,
+					TokenEnv: "PLUGIN_STORE_TOKEN",
+				},
 			},
 		},
-	}}
+	}
 	h := &Handler{
 		cfg:                    cfg,
 		pluginStoreRegistryURL: registryURL,
-		pluginStoreHTTPClient: fakePluginStoreHTTPClient(func(req *http.Request) (*http.Response, error) {
-			var data string
-			switch req.URL.String() {
-			case registryURL:
-				data = registryJSON
-			case releasesURL:
-				if gotAuth := req.Header.Get("Authorization"); gotAuth != "Bearer secret-token" {
-					t.Fatalf("Authorization = %q, want Bearer secret-token", gotAuth)
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient(
+			func(req *http.Request) (*http.Response, error) {
+				var data string
+				switch req.URL.String() {
+				case registryURL:
+					data = registryJSON
+				case releasesURL:
+					if gotAuth := req.Header.Get("Authorization"); gotAuth != "Bearer secret-token" {
+						t.Fatalf("Authorization = %q, want Bearer secret-token", gotAuth)
+					}
+					data = releasesJSON
+				default:
+					t.Fatalf("unexpected plugin store URL %s", req.URL)
 				}
-				data = releasesJSON
-			default:
-				t.Fatalf("unexpected plugin store URL %s", req.URL)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(data)),
-				Header:     make(http.Header),
-				Request:    req,
-			}, nil
-		}),
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(data)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			},
+		),
 	}
 
 	rec := httptest.NewRecorder()
@@ -313,34 +317,38 @@ func TestInstallPluginFromStoreRejectsImplicitSourceSwitch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	communityURL := "https://community.example/registry.json"
 	registryJSON := `{"schema_version":2,"plugins":[{"id":"sample-provider","name":"Sample Provider","description":"Sample provider","author":"author-name","version":"0.2.0","install":{"type":"direct","artifacts":[{"goos":"linux","goarch":"amd64","url":"https://community.example/sample.zip","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]}}]}`
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled:      true,
-		Dir:          t.TempDir(),
-		StoreSources: []string{communityURL},
-		Configs: map[string]config.PluginInstanceConfig{
-			"sample-provider": pluginConfigFromYAML(
-				t,
-				fmt.Sprintf(
-					"enabled: true\nstore:\n  id: sample-provider\n  source-id: %s\n  source-url: %s\n",
-					pluginstore.DefaultSourceID,
-					pluginstore.DefaultRegistryURL,
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled:      true,
+			Dir:          t.TempDir(),
+			StoreSources: []string{communityURL},
+			Configs: map[string]config.PluginInstanceConfig{
+				"sample-provider": pluginConfigFromYAML(
+					t,
+					fmt.Sprintf(
+						"enabled: true\nstore:\n  id: sample-provider\n  source-id: %s\n  source-url: %s\n",
+						pluginstore.DefaultSourceID,
+						pluginstore.DefaultRegistryURL,
+					),
 				),
-			),
+			},
 		},
-	}}
+	}
 	h := &Handler{
 		cfg: cfg,
-		pluginStoreHTTPClient: fakePluginStoreHTTPClient(func(req *http.Request) (*http.Response, error) {
-			if req.URL.String() != pluginstore.DefaultRegistryURL && req.URL.String() != communityURL {
-				t.Fatalf("unexpected plugin store URL %s", req.URL)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(registryJSON)),
-				Header:     make(http.Header),
-				Request:    req,
-			}, nil
-		}),
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient(
+			func(req *http.Request) (*http.Response, error) {
+				if req.URL.String() != pluginstore.DefaultRegistryURL && req.URL.String() != communityURL {
+					t.Fatalf("unexpected plugin store URL %s", req.URL)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(registryJSON)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			},
+		),
 	}
 
 	rec := httptest.NewRecorder()
@@ -402,19 +410,23 @@ func TestInstallPluginFromStoreRejectsConfigChangeAfterArtifactPreparation(t *te
 		artifactURL,
 		hex.EncodeToString(checksum[:]),
 	)
-	initialConfig := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     pluginsDir,
-		Configs: map[string]config.PluginInstanceConfig{},
-	}}
-	changedConfig := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     pluginsDir,
-		StoreAuth: []sdkpluginstore.AuthConfig{
-			{Match: "https://registry.example/", Type: sdkpluginstore.AuthTypeNone},
+	initialConfig := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{},
 		},
-		Configs: map[string]config.PluginInstanceConfig{},
-	}}
+	}
+	changedConfig := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			StoreAuth: []sdkpluginstore.AuthConfig{
+				{Match: "https://registry.example/", Type: sdkpluginstore.AuthTypeNone},
+			},
+			Configs: map[string]config.PluginInstanceConfig{},
+		},
+	}
 	externalStarted := make(chan struct{})
 	releaseExternal := make(chan struct{})
 	externalDone := make(chan error, 1)
@@ -422,38 +434,40 @@ func TestInstallPluginFromStoreRejectsConfigChangeAfterArtifactPreparation(t *te
 	h = &Handler{
 		cfg:                    initialConfig,
 		pluginStoreRegistryURL: registryURL,
-		pluginStoreHTTPClient: fakePluginStoreHTTPClient(func(req *http.Request) (*http.Response, error) {
-			var data []byte
-			switch req.URL.String() {
-			case registryURL:
-				data = []byte(registryJSON)
-			case artifactURL:
-				if !h.commitMu.TryLock() {
-					t.Fatal("artifact download ran while the config commit lock was held")
+		pluginStoreHTTPClient: fakePluginStoreHTTPClient(
+			func(req *http.Request) (*http.Response, error) {
+				var data []byte
+				switch req.URL.String() {
+				case registryURL:
+					data = []byte(registryJSON)
+				case artifactURL:
+					if !h.commitMu.TryLock() {
+						t.Fatal("artifact download ran while the config commit lock was held")
+					}
+					h.commitMu.Unlock()
+					go func() {
+						externalDone <- h.ApplyExternalConfigUpdate(
+							func() error {
+								close(externalStarted)
+								<-releaseExternal
+								h.SetConfig(changedConfig)
+								return nil
+							},
+						)
+					}()
+					<-externalStarted
+					data = archiveData
+				default:
+					t.Fatalf("unexpected plugin store URL %s", req.URL)
 				}
-				h.commitMu.Unlock()
-				go func() {
-					externalDone <- h.ApplyExternalConfigUpdate(
-						func() error {
-							close(externalStarted)
-							<-releaseExternal
-							h.SetConfig(changedConfig)
-							return nil
-						},
-					)
-				}()
-				<-externalStarted
-				data = archiveData
-			default:
-				t.Fatalf("unexpected plugin store URL %s", req.URL)
-			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(bytes.NewReader(data)),
-				Header:     make(http.Header),
-				Request:    req,
-			}, nil
-		}),
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader(data)),
+					Header:     make(http.Header),
+					Request:    req,
+				}, nil
+			},
+		),
 	}
 
 	rec := httptest.NewRecorder()
@@ -573,15 +587,17 @@ func TestDeletePluginRemovesAllArtifactVersions(t *testing.T) {
 	); err != nil {
 		t.Fatalf("WriteFile(config) error = %v", err)
 	}
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     pluginsDir,
-		Configs: map[string]config.PluginInstanceConfig{
-			"sample-provider": pluginConfigFromYAML(
-				t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
-			),
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"sample-provider": pluginConfigFromYAML(
+					t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
+				),
+			},
 		},
-	}}
+	}
 	h := &Handler{cfg: cfg, configFilePath: configPath}
 
 	rec := httptest.NewRecorder()
@@ -628,15 +644,17 @@ func TestDeletePluginRejectsSymlinkPlatformDirectory(t *testing.T) {
 		t.Fatalf("WriteFile(config) error = %v", err)
 	}
 	h := &Handler{
-		cfg: &config.Config{Plugins: config.PluginsConfig{
-			Enabled: true,
-			Dir:     pluginsDir,
-			Configs: map[string]config.PluginInstanceConfig{
-				"sample-provider": pluginConfigFromYAML(
-					t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
-				),
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(
+						t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
+					),
+				},
 			},
-		}},
+		},
 		configFilePath: configPath,
 	}
 
@@ -673,11 +691,13 @@ func TestDeleteUnconfiguredPluginDoesNotWaitForRuntimeSync(t *testing.T) {
 	}
 	syncCalls := 0
 	h := &Handler{
-		cfg: &config.Config{Plugins: config.PluginsConfig{
-			Enabled: true,
-			Dir:     pluginsDir,
-			Configs: map[string]config.PluginInstanceConfig{},
-		}},
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{},
+			},
+		},
 		pluginRuntimeSync: func(context.Context, *config.Config) error {
 			syncCalls++
 			return errors.New("unconfigured deletion must not run full runtime sync")
@@ -722,15 +742,17 @@ func TestDeletePluginReportsArtifactCommitFailure(t *testing.T) {
 		t.Fatalf("WriteFile(config) error = %v", errWrite)
 	}
 	h := &Handler{
-		cfg: &config.Config{Plugins: config.PluginsConfig{
-			Enabled: true,
-			Dir:     pluginsDir,
-			Configs: map[string]config.PluginInstanceConfig{
-				"sample-provider": pluginConfigFromYAML(
-					t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
-				),
+		cfg: &config.Config{
+			Plugins: config.PluginsConfig{
+				Enabled: true,
+				Dir:     pluginsDir,
+				Configs: map[string]config.PluginInstanceConfig{
+					"sample-provider": pluginConfigFromYAML(
+						t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
+					),
+				},
 			},
-		}},
+		},
 		configFilePath: configPath,
 		configCommitted: func(_ context.Context, commit ConfigCommit) error {
 			if !commit.DeferPluginRuntimeSync {
@@ -848,15 +870,17 @@ func TestDeletePluginIgnoresUnrelatedConfigGenerationChange(t *testing.T) {
 	); errWrite != nil {
 		t.Fatalf("WriteFile(config) error = %v", errWrite)
 	}
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     pluginsDir,
-		Configs: map[string]config.PluginInstanceConfig{
-			"sample-provider": pluginConfigFromYAML(
-				t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
-			),
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"sample-provider": pluginConfigFromYAML(
+					t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
+				),
+			},
 		},
-	}}
+	}
 	host := &fakePluginRuntimeHost{
 		busy:         true,
 		unloadResult: true,
@@ -866,13 +890,15 @@ func TestDeletePluginIgnoresUnrelatedConfigGenerationChange(t *testing.T) {
 	}
 	h := &Handler{cfg: cfg, configFilePath: configPath, pluginHost: host}
 	h.configCommitted = func(context.Context, ConfigCommit) error {
-		return h.ApplyExternalConfigUpdate(func() error {
-			h.mu.Lock()
-			h.cfg.Debug = !h.cfg.Debug
-			h.configGeneration++
-			h.mu.Unlock()
-			return nil
-		})
+		return h.ApplyExternalConfigUpdate(
+			func() error {
+				h.mu.Lock()
+				h.cfg.Debug = !h.cfg.Debug
+				h.configGeneration++
+				h.mu.Unlock()
+				return nil
+			},
+		)
 	}
 
 	rec := httptest.NewRecorder()
@@ -918,15 +944,17 @@ func TestDeletePluginDoesNotUnloadRuntimeFromSupersedingRoot(t *testing.T) {
 	); errWrite != nil {
 		t.Fatalf("WriteFile(config) error = %v", errWrite)
 	}
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     rootA,
-		Configs: map[string]config.PluginInstanceConfig{
-			"sample-provider": pluginConfigFromYAML(
-				t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
-			),
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     rootA,
+			Configs: map[string]config.PluginInstanceConfig{
+				"sample-provider": pluginConfigFromYAML(
+					t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
+				),
+			},
 		},
-	}}
+	}
 	host := &fakePluginRuntimeHost{
 		busy:         true,
 		unloadResult: true,
@@ -936,20 +964,24 @@ func TestDeletePluginDoesNotUnloadRuntimeFromSupersedingRoot(t *testing.T) {
 	}
 	h := &Handler{cfg: cfg, configFilePath: configPath, pluginHost: host}
 	h.configCommitted = func(context.Context, ConfigCommit) error {
-		return h.ApplyExternalConfigUpdate(func() error {
-			h.mu.Lock()
-			h.cfg = &config.Config{Plugins: config.PluginsConfig{
-				Enabled: true,
-				Dir:     rootB,
-				Configs: map[string]config.PluginInstanceConfig{},
-			}}
-			h.configGeneration++
-			h.mu.Unlock()
-			host.identity = pluginhost.PluginRuntimeIdentity{
-				ID: "sample-provider", Path: rootBPath, Version: "0.2.0", OperationEpoch: 2,
-			}
-			return nil
-		})
+		return h.ApplyExternalConfigUpdate(
+			func() error {
+				h.mu.Lock()
+				h.cfg = &config.Config{
+					Plugins: config.PluginsConfig{
+						Enabled: true,
+						Dir:     rootB,
+						Configs: map[string]config.PluginInstanceConfig{},
+					},
+				}
+				h.configGeneration++
+				h.mu.Unlock()
+				host.identity = pluginhost.PluginRuntimeIdentity{
+					ID: "sample-provider", Path: rootBPath, Version: "0.2.0", OperationEpoch: 2,
+				}
+				return nil
+			},
+		)
 	}
 
 	rec := httptest.NewRecorder()
@@ -990,15 +1022,17 @@ func TestDeletePluginDoesNotUnloadSupersedingRuntimeIdentity(t *testing.T) {
 	); errWrite != nil {
 		t.Fatalf("WriteFile(config) error = %v", errWrite)
 	}
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     pluginsDir,
-		Configs: map[string]config.PluginInstanceConfig{
-			"sample-provider": pluginConfigFromYAML(
-				t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
-			),
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"sample-provider": pluginConfigFromYAML(
+					t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
+				),
+			},
 		},
-	}}
+	}
 	host := &fakePluginRuntimeHost{
 		busy:         true,
 		unloadResult: true,
@@ -1313,11 +1347,13 @@ func TestInstallPluginRollsBackArtifactWhenConfigPersistenceFails(t *testing.T) 
 						),
 					)
 				}
-				cfg := &config.Config{Plugins: config.PluginsConfig{
-					Enabled: true,
-					Dir:     pluginsDir,
-					Configs: configs,
-				}}
+				cfg := &config.Config{
+					Plugins: config.PluginsConfig{
+						Enabled: true,
+						Dir:     pluginsDir,
+						Configs: configs,
+					},
+				}
 				blockedParent := filepath.Join(root, "not-a-directory")
 				if err := os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
 					t.Fatalf("WriteFile(blocking file) error = %v", err)
@@ -1372,15 +1408,17 @@ func TestDeletePluginRestoresArtifactWhenConfigPersistenceFails(t *testing.T) {
 	if err := os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
 		t.Fatalf("WriteFile(blocking file) error = %v", err)
 	}
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     pluginsDir,
-		Configs: map[string]config.PluginInstanceConfig{
-			"sample-provider": pluginConfigFromYAML(
-				t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
-			),
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     pluginsDir,
+			Configs: map[string]config.PluginInstanceConfig{
+				"sample-provider": pluginConfigFromYAML(
+					t, "enabled: true\nstore:\n  id: sample-provider\n  version: v0.2.0\n",
+				),
+			},
 		},
-	}}
+	}
 	h := &Handler{cfg: cfg, configFilePath: filepath.Join(blockedParent, "config.yaml")}
 
 	rec := httptest.NewRecorder()

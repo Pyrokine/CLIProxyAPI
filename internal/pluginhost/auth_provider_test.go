@@ -42,7 +42,7 @@ func TestAuthProviderDiscovery(t *testing.T) {
 		},
 	)
 
-	identifiers := host.AuthProviderIdentifiers()
+	identifiers := host.authProviderIdentifiers()
 	if len(identifiers) != 2 || identifiers[0] != "high-provider" || identifiers[1] != "low-provider" {
 		t.Fatalf("AuthProviderIdentifiers() = %#v, want sorted normalized providers", identifiers)
 	}
@@ -173,14 +173,12 @@ func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 		},
 	)
 	host.runtimeConfig = &config.Config{
-		SDKConfig: config.SDKConfig{
-			ProxyURL:         "http://proxy.local",
-			ForceModelPrefix: true,
-		},
-		AuthDir: authDir,
+		ProxyURL:         "http://proxy.local",
+		ForceModelPrefix: true,
+		AuthDir:          authDir,
 	}
 
-	resp, handled, errStart := host.StartLogin(context.Background(), " Plugin-Provider ", "http://localhost:8080/login")
+	resp, handled, errStart := host.startLogin(context.Background(), " Plugin-Provider ", "http://localhost:8080/login")
 	if errStart != nil {
 		t.Fatalf("StartLogin() error = %v", errStart)
 	}
@@ -231,14 +229,12 @@ func TestPollLoginPassesProviderStateHostAndHTTPClient(t *testing.T) {
 		},
 	)
 	host.runtimeConfig = &config.Config{
-		SDKConfig: config.SDKConfig{
-			ProxyURL:         "http://proxy.local",
-			ForceModelPrefix: true,
-		},
-		AuthDir: authDir,
+		ProxyURL:         "http://proxy.local",
+		ForceModelPrefix: true,
+		AuthDir:          authDir,
 	}
 
-	resp, handled, errPoll := host.PollLogin(context.Background(), " Plugin-Provider ", " state-1 ")
+	resp, handled, errPoll := host.pollLogin(context.Background(), " Plugin-Provider ", " state-1 ")
 	if errPoll != nil {
 		t.Fatalf("PollLogin() error = %v", errPoll)
 	}
@@ -256,10 +252,10 @@ func TestHostAuthDataToCoreAuthRejectsMissingProviderAndUsesAuthDir(t *testing.T
 	host.runtimeConfig = &config.Config{AuthDir: authDir}
 	path := filepath.Join(authDir, "nested", "auth.json")
 
-	if auth := host.AuthDataToCoreAuth(pluginapi.AuthData{ID: "auth-1"}, path, "auth.json"); auth != nil {
+	if auth := host.authDataToCoreAuth(pluginapi.AuthData{ID: "auth-1"}, path, "auth.json"); auth != nil {
 		t.Fatalf("AuthDataToCoreAuth() = %#v, want nil for missing provider", auth)
 	}
-	auth := host.AuthDataToCoreAuth(pluginapi.AuthData{Provider: "Plugin-Provider"}, path, "")
+	auth := host.authDataToCoreAuth(pluginapi.AuthData{Provider: "Plugin-Provider"}, path, "")
 	if auth == nil {
 		t.Fatal("AuthDataToCoreAuth() = nil, want auth")
 	}

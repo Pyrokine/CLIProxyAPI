@@ -117,11 +117,13 @@ func TestHostWindowsRejectedCandidateRequiresRestartBeforeRetry(t *testing.T) {
 	lookup := newTestSymbolLookup(&testPlugin{})
 	lookup.registerOverride = func([]byte) pluginapi.Plugin { return pluginapi.Plugin{} }
 	loader.lookups["alpha"] = lookup
-	host := NewForTest(loader)
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     makePluginDir(t, "alpha"),
-	}}
+	host := newForTest(loader)
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+		},
+	}
 	if errApply := host.ApplyConfig(context.Background(), cfg); errApply != nil {
 		t.Fatalf("initial ApplyConfig() error = %v", errApply)
 	}
@@ -137,15 +139,17 @@ func TestHostWindowsRejectedCandidateRequiresRestartBeforeRetry(t *testing.T) {
 func TestHostWindowsActivePluginRequiresRestartForReplacement(t *testing.T) {
 	loader := newTestSymbolLoader()
 	loader.lookups["alpha"] = newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("alpha")})
-	host := NewForTest(loader)
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     makePluginDir(t, "alpha"),
-	}}
+	host := newForTest(loader)
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, "alpha"),
+		},
+	}
 	if errApply := host.ApplyConfig(context.Background(), cfg); errApply != nil {
 		t.Fatalf("initial ApplyConfig() error = %v", errApply)
 	}
-	t.Cleanup(host.ShutdownAll)
+	t.Cleanup(host.shutdownAll)
 	enabled := true
 	cfg.Plugins.Configs = map[string]config.PluginInstanceConfig{
 		"alpha": {Enabled: &enabled, Priority: 1},
@@ -154,8 +158,8 @@ func TestHostWindowsActivePluginRequiresRestartForReplacement(t *testing.T) {
 		!strings.Contains(errApply.Error(), "requires process restart") {
 		t.Fatalf("replacement ApplyConfig() error = %v, want restart requirement", errApply)
 	}
-	if loader.openCalls != 1 || !host.PluginLoaded("alpha") {
-		t.Fatalf("replacement load calls = %d, active = %v", loader.openCalls, host.PluginLoaded("alpha"))
+	if loader.openCalls != 1 || !host.pluginLoaded("alpha") {
+		t.Fatalf("replacement load calls = %d, active = %v", loader.openCalls, host.pluginLoaded("alpha"))
 	}
 }
 
@@ -169,14 +173,16 @@ func TestHostWindowsLoadAttemptIsSharedAcrossHosts(t *testing.T) {
 	)
 	firstHost := New()
 	firstHost.loader = firstLoader
-	cfg := &config.Config{Plugins: config.PluginsConfig{
-		Enabled: true,
-		Dir:     makePluginDir(t, pluginID),
-	}}
+	cfg := &config.Config{
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     makePluginDir(t, pluginID),
+		},
+	}
 	if errApply := firstHost.ApplyConfig(context.Background(), cfg); errApply != nil {
 		t.Fatalf("first ApplyConfig() error = %v", errApply)
 	}
-	t.Cleanup(firstHost.ShutdownAll)
+	t.Cleanup(firstHost.shutdownAll)
 
 	secondLoader := newTestSymbolLoader()
 	secondLoader.lookups[pluginID] = newTestSymbolLookup(

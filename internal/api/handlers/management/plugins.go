@@ -75,7 +75,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 
 	h.mu.Lock()
 	pluginsEnabled := h.cfg.Plugins.Enabled
-	pluginsDir := normalizedPluginsDir(h.cfg.Plugins.Dir)
+	pluginsDir := h.cfg.Plugins.Dir
 	configs := make(map[string]config.PluginInstanceConfig, len(h.cfg.Plugins.Configs))
 	for id, item := range h.cfg.Plugins.Configs {
 		configs[pluginstore.CanonicalPluginID(id)] = item
@@ -83,6 +83,15 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	host := h.pluginHost
 	h.mu.Unlock()
 
+	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
+	if errResolvePluginsDir != nil {
+		c.JSON(
+			http.StatusInternalServerError,
+			gin.H{"error": "plugin_directory_invalid", "message": errResolvePluginsDir.Error()},
+		)
+		return
+	}
+	pluginsDir = resolvedPluginsDir
 	entries := make(map[string]pluginListEntry)
 	files, errDiscover := pluginhost.DiscoverPluginFiles(pluginsDir)
 	if errDiscover != nil {
@@ -320,6 +329,9 @@ func (h *Handler) mutatePluginConfig(
 	c *gin.Context,
 	mutate func(*config.Config) error,
 ) bool {
+	if c == nil {
+		return false
+	}
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
 		return false
@@ -341,7 +353,7 @@ func (h *Handler) mutatePluginConfig(
 	}
 
 	ctx := context.Background()
-	if c != nil && c.Request != nil {
+	if c.Request != nil {
 		ctx = context.WithoutCancel(c.Request.Context())
 	}
 	if err := h.runPluginRuntimeSyncForCommit(ctx, commit, h.pluginRuntimeSync); err != nil {
@@ -384,14 +396,6 @@ func pluginRuntimeConfigSnapshot(cfg *config.Config) *config.Config {
 		out.Plugins.Configs[id] = copied
 	}
 	return &out
-}
-
-func normalizedPluginsDir(dir string) string {
-	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return "plugins"
-	}
-	return dir
 }
 
 func pluginInstanceEnabled(item config.PluginInstanceConfig) bool {

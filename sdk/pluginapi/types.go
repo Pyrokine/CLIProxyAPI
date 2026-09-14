@@ -35,6 +35,7 @@ type Metadata struct {
 // ConfigFieldType classifies plugin-owned configuration values for management clients.
 type ConfigFieldType string
 
+// noinspection GoUnusedConst
 const (
 	// ConfigFieldTypeString describes a string configuration value.
 	ConfigFieldTypeString ConfigFieldType = "string"
@@ -99,6 +100,8 @@ type Capabilities struct {
 	ResponseAfterTranslator ResponseNormalizer
 	// RequestInterceptor rewrites execution requests before and after credential selection.
 	RequestInterceptor RequestInterceptor
+	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
+	RequestLifecyclePlugin RequestLifecyclePlugin
 	// ResponseInterceptor rewrites successful non-streaming HTTP execution responses before downstream delivery.
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
@@ -305,6 +308,7 @@ type AuthLoginPollRequest struct {
 // AuthLoginStatus describes the current provider login state.
 type AuthLoginStatus string
 
+// noinspection GoUnusedConst
 const (
 	// AuthLoginStatusPending means the login flow is still waiting.
 	AuthLoginStatusPending AuthLoginStatus = "pending"
@@ -403,12 +407,26 @@ type AuthModelRequest struct {
 	HTTPClient HostHTTPClient `json:"-"`
 }
 
+// ModelDiscoveryOutcome describes whether a plugin returned a complete or partial discovery result.
+type ModelDiscoveryOutcome string
+
+const (
+	// ModelDiscoveryComplete means Models is the complete authoritative set, including an empty set.
+	ModelDiscoveryComplete ModelDiscoveryOutcome = "complete"
+	// ModelDiscoveryPartial means Models is usable but does not replace a prior complete result.
+	ModelDiscoveryPartial ModelDiscoveryOutcome = "partial"
+	// ModelDiscoveryInconclusive means the plugin could not determine the model set.
+	ModelDiscoveryInconclusive ModelDiscoveryOutcome = "inconclusive"
+)
+
 // ModelResponse returns provider and model metadata discovered by a plugin.
 type ModelResponse struct {
 	// Provider is the provider key associated with the returned models.
 	Provider string
-	// Models is the complete set of discovered provider models.
+	// Models contains the discovered provider models.
 	Models []ModelInfo
+	// Outcome defaults to ModelDiscoveryComplete for compatibility.
+	Outcome ModelDiscoveryOutcome
 	// AuthUpdate contains updated auth data from model discovery when needed.
 	AuthUpdate AuthData
 }
@@ -748,6 +766,11 @@ type RequestInterceptor interface {
 	InterceptRequestAfterAuth(context.Context, RequestInterceptRequest) (RequestInterceptResponse, error)
 }
 
+// RequestLifecyclePlugin receives asynchronous terminal events after execution finishes, fails, is rejected, or is canceled.
+type RequestLifecyclePlugin interface {
+	HandleRequestComplete(context.Context, RequestCompletion) error
+}
+
 // ResponseInterceptor rewrites successful non-streaming execution responses before downstream delivery.
 type ResponseInterceptor interface {
 	InterceptResponse(context.Context, ResponseInterceptRequest) (ResponseInterceptResponse, error)
@@ -795,6 +818,10 @@ type ResponseTransformRequest struct {
 
 // RequestInterceptRequest describes a request about to be executed upstream.
 type RequestInterceptRequest struct {
+	// RequestID uniquely identifies one model execution and correlates it with RequestCompletion.
+	RequestID string
+	// TraceID identifies the parent inbound HTTP request when available.
+	TraceID string
 	// SourceFormat is the original client protocol format.
 	SourceFormat string
 	// ToFormat is the selected upstream protocol format. It is empty before credential selection.
@@ -821,10 +848,49 @@ type RequestInterceptResponse struct {
 	Body []byte
 	// ClearHeaders explicitly removes current request headers before Headers is applied.
 	ClearHeaders []string
+	// Terminate stops the interceptor chain and prevents the request from reaching an upstream executor.
+	Terminate bool
+	// StatusCode is the downstream HTTP status used when Terminate is true. Invalid values default to 403.
+	StatusCode int
+	// ResponseHeaders contains downstream response headers used when Terminate is true.
+	ResponseHeaders http.Header
+	// ResponseBody contains the downstream response body used when Terminate is true.
+	ResponseBody []byte
+}
+
+// RequestCompletionOutcome identifies how an intercepted request ended.
+type RequestCompletionOutcome string
+
+const (
+	// RequestCompletionSucceeded means the request completed successfully.
+	RequestCompletionSucceeded RequestCompletionOutcome = "succeeded"
+	// RequestCompletionFailed means model execution failed.
+	RequestCompletionFailed RequestCompletionOutcome = "failed"
+	// RequestCompletionRejected means a request interceptor terminated the request before execution.
+	RequestCompletionRejected RequestCompletionOutcome = "rejected"
+	// RequestCompletionCanceled means the request context was canceled or the downstream client disconnected.
+	RequestCompletionCanceled RequestCompletionOutcome = "canceled"
+)
+
+// RequestCompletion describes the terminal state of an intercepted request.
+type RequestCompletion struct {
+	RequestID      string
+	TraceID        string
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Stream         bool
+	Outcome        RequestCompletionOutcome
+	StatusCode     int
+	Error          string
+	StartedAt      time.Time
+	CompletedAt    time.Time
+	Metadata       map[string]any
 }
 
 // ResponseInterceptRequest describes a successful non-streaming response.
 type ResponseInterceptRequest struct {
+	RequestID       string
 	SourceFormat    string
 	Model           string
 	RequestedModel  string
@@ -850,6 +916,7 @@ type ResponseInterceptResponse struct {
 
 // StreamChunkInterceptRequest describes a successful stream chunk before downstream delivery.
 type StreamChunkInterceptRequest struct {
+	RequestID       string
 	SourceFormat    string
 	Model           string
 	RequestedModel  string
@@ -1099,6 +1166,9 @@ type UsageRecord struct {
 	RequestServiceTier string
 	// ResponseServiceTier records the final tier reported by the upstream response.
 	ResponseServiceTier string
+	// Generate reports whether the client requested actual generation.
+	// The host normalizes omitted core usage values to true before delivery.
+	Generate bool
 	// RequestedAt is the time the request was received.
 	RequestedAt time.Time
 	// Latency is the total request latency.

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	internalpluginstore "github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
@@ -78,7 +80,8 @@ store:
 
 func TestStoreManifestFromPluginConfigCanonicalizesPluginID(t *testing.T) {
 	item := pluginConfigFromYAML(
-		t, "enabled: true\nstore:\n  schema-version: 2\n  id: Alpha\n  version: 0.2.0\n  source-url: https://example.com/plugins/alpha.so\n  install:\n    type: direct\n",
+		t,
+		"enabled: true\nstore:\n  schema-version: 2\n  id: Alpha\n  version: 0.2.0\n  source-url: https://example.com/plugins/alpha.so\n  install:\n    type: direct\n",
 	)
 
 	manifest, ok, errManifest := storeManifestFromPluginConfig("alpha", item)
@@ -92,7 +95,8 @@ func TestStoreManifestFromPluginConfigCanonicalizesPluginID(t *testing.T) {
 
 func TestStoreManifestFromPluginConfigRejectsDifferentPluginID(t *testing.T) {
 	item := pluginConfigFromYAML(
-		t, "enabled: true\nstore:\n  schema-version: 2\n  id: beta\n  version: 0.2.0\n  source-url: https://example.com/plugins/beta.so\n  install:\n    type: direct\n",
+		t,
+		"enabled: true\nstore:\n  schema-version: 2\n  id: beta\n  version: 0.2.0\n  source-url: https://example.com/plugins/beta.so\n  install:\n    type: direct\n",
 	)
 
 	_, _, errManifest := storeManifestFromPluginConfig("alpha", item)
@@ -173,6 +177,140 @@ func TestDeleteWithReportRejectsLinkedPlatformDirectory(t *testing.T) {
 	data, errRead := os.ReadFile(outsidePlugin)
 	if errRead != nil || string(data) != "outside" {
 		t.Fatalf("outside plugin = %q, error = %v", data, errRead)
+	}
+}
+
+func TestPrepareSyncHTTPDownloadExceedsHomeRedisTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("test waits beyond the Home Redis timeout")
+	}
+	archiveData := homePluginTestArchive(t, "sample"+homePluginExtension(runtime.GOOS), "plugin-data")
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				time.Sleep(homeRedisTimeoutForTest + 100*time.Millisecond)
+				_, _ = w.Write(archiveData)
+			},
+		),
+	)
+	defer server.Close()
+	useHomePluginTestServerTransport(t, server)
+
+	cfg := homePluginDirectSyncConfig(t, server.URL, archiveData)
+	prepared, errPrepare := PrepareSyncWithReport(context.Background(), cfg)
+	if errPrepare != nil {
+		t.Fatalf("PrepareSyncWithReport() error = %v", errPrepare)
+	}
+	defer func() { _ = prepared.Close() }()
+}
+
+func TestPrepareSyncHTTPDownloadUsesDedicatedTimeout(t *testing.T) {
+	previousTimeout := homePluginStoreHTTPTimeout
+	homePluginStoreHTTPTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { homePluginStoreHTTPTimeout = previousTimeout })
+
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				time.Sleep(200 * time.Millisecond)
+				_, _ = w.Write([]byte("late"))
+			},
+		),
+	)
+	defer server.Close()
+	useHomePluginTestServerTransport(t, server)
+
+	cfg := homePluginDirectSyncConfig(t, server.URL, []byte("late"))
+	startedAt := time.Now()
+	prepared, errPrepare := PrepareSyncWithReport(context.Background(), cfg)
+	// PreparedSync is a value cleanup handle and remains closable when preparation returns an error.
+	// noinspection GoDfaErrorMayBeNotNil
+	_ = prepared.Close()
+	if errPrepare == nil || !strings.Contains(errPrepare.Error(), "Client.Timeout") {
+		t.Fatalf("PrepareSyncWithReport() error = %v, want HTTP client timeout", errPrepare)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= 150*time.Millisecond {
+		t.Fatalf("PrepareSyncWithReport() timeout took %s", elapsed)
+	}
+}
+
+func TestPrepareSyncHTTPDownloadHonorsContextCancellation(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				close(started)
+				<-r.Context().Done()
+			},
+		),
+	)
+	defer server.Close()
+	useHomePluginTestServerTransport(t, server)
+
+	cfg := homePluginDirectSyncConfig(t, server.URL, []byte("unused"))
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-started
+		cancel()
+	}()
+	startedAt := time.Now()
+	prepared, errPrepare := PrepareSyncWithReport(ctx, cfg)
+	// PreparedSync is a value cleanup handle and remains closable when preparation returns an error.
+	// noinspection GoDfaErrorMayBeNotNil
+	_ = prepared.Close()
+	if !errors.Is(errPrepare, context.Canceled) {
+		t.Fatalf("PrepareSyncWithReport() error = %v, want context.Canceled", errPrepare)
+	}
+	if elapsed := time.Since(startedAt); elapsed >= time.Second {
+		t.Fatalf("PrepareSyncWithReport() cancellation took %s", elapsed)
+	}
+}
+
+const homeRedisTimeoutForTest = 3 * time.Second
+
+func useHomePluginTestServerTransport(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	previousFactory := newPluginStoreClient
+	newPluginStoreClient = func(cfg *config.Config) sdkpluginstore.Client {
+		client := &http.Client{Timeout: homePluginStoreHTTPTimeout, Transport: server.Client().Transport}
+		return sdkpluginstore.NewClientWithAuth(client, "", cfg.Plugins.StoreAuth)
+	}
+	t.Cleanup(func() { newPluginStoreClient = previousFactory })
+}
+
+func homePluginDirectSyncConfig(t *testing.T, artifactURL string, archiveData []byte) *config.Config {
+	t.Helper()
+	checksum := sha256.Sum256(archiveData)
+	item := pluginConfigFromYAML(
+		t,
+		"enabled: true\n"+
+			"store:\n"+
+			"  schema-version: 2\n"+
+			"  id: sample\n"+
+			"  version: 0.2.0\n"+
+			"  install:\n"+
+			"    type: direct\n"+
+			"    artifacts:\n"+
+			"      - goos: "+runtime.GOOS+"\n"+
+			"        goarch: "+runtime.GOARCH+"\n"+
+			"        url: "+artifactURL+"\n"+
+			"        sha256: "+hex.EncodeToString(checksum[:])+"\n",
+	)
+	return &config.Config{
+		Home: config.HomeConfig{Enabled: true},
+		Plugins: config.PluginsConfig{
+			Enabled: true,
+			Dir:     t.TempDir(),
+			StoreAuth: []sdkpluginstore.AuthConfig{
+				{
+					Match:         artifactURL + "/",
+					ApplyTo:       []string{sdkpluginstore.RequestKindArtifact},
+					Type:          sdkpluginstore.AuthTypeNone,
+					AllowInsecure: true,
+				},
+			},
+			Configs: map[string]config.PluginInstanceConfig{"sample": item},
+		},
 	}
 }
 
@@ -364,7 +502,7 @@ func TestMarkLoadResultsReportsUnloadedPlugin(t *testing.T) {
 	t.Parallel()
 
 	report := SyncReport{
-		Plugins: []PluginInstallStatus{
+		Plugins: []pluginInstallStatus{
 			{ID: "loaded-plugin", InstallStatus: pluginInstallStatusInstalled},
 			{ID: "missing-plugin", InstallStatus: pluginInstallStatusInstalled},
 		},
@@ -396,16 +534,16 @@ func TestDeleteWithReportUnloadsBusyPluginBeforeDeletingArtifacts(t *testing.T) 
 
 	root := t.TempDir()
 	pluginPath := writePluginFile(t, root, "sample", "0.2.0")
-	runtime := &fakePluginRuntime{busy: true, unloadResult: true}
+	pluginRuntime := &fakePluginRuntime{busy: true, unloadResult: true}
 	cfg := &config.Config{Plugins: config.PluginsConfig{Dir: root}}
 
-	report := DeleteWithReport(context.Background(), cfg, runtime, 42, "sample")
+	report := DeleteWithReport(context.Background(), cfg, pluginRuntime, 42, "sample")
 
 	if !report.OK {
 		t.Fatalf("report.OK = false, want true: %s", report.Error)
 	}
-	if runtime.unloadCalls != 1 {
-		t.Fatalf("runtime.unloadCalls = %d, want 1", runtime.unloadCalls)
+	if pluginRuntime.unloadCalls != 1 {
+		t.Fatalf("pluginRuntime.unloadCalls = %d, want 1", pluginRuntime.unloadCalls)
 	}
 	if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
 		t.Fatalf("Stat(%s) error = %v, want not exist", pluginPath, err)
@@ -448,16 +586,16 @@ func TestDeleteWithReportKeepsBusyPluginWhenUnloadFails(t *testing.T) {
 
 	root := t.TempDir()
 	pluginPath := writePluginFile(t, root, "sample", "0.2.0")
-	runtime := &fakePluginRuntime{busy: true, unloadResult: false}
+	pluginRuntime := &fakePluginRuntime{busy: true, unloadResult: false}
 	cfg := &config.Config{Plugins: config.PluginsConfig{Dir: root}}
 
-	report := DeleteWithReport(context.Background(), cfg, runtime, 7, "sample")
+	report := DeleteWithReport(context.Background(), cfg, pluginRuntime, 7, "sample")
 
 	if report.OK {
 		t.Fatalf("report.OK = true, want false")
 	}
-	if runtime.unloadCalls != 1 {
-		t.Fatalf("runtime.unloadCalls = %d, want 1", runtime.unloadCalls)
+	if pluginRuntime.unloadCalls != 1 {
+		t.Fatalf("pluginRuntime.unloadCalls = %d, want 1", pluginRuntime.unloadCalls)
 	}
 	if _, err := os.Stat(pluginPath); err != nil {
 		t.Fatalf("Stat(%s) error = %v, want kept", pluginPath, err)
@@ -477,30 +615,30 @@ func TestDeleteWithReportKeepsBusyPluginWhenUnloadFails(t *testing.T) {
 func TestPreparePluginOverwriteUnloadsBusyPlugin(t *testing.T) {
 	t.Parallel()
 
-	runtime := &fakePluginRuntime{busy: true, unloadResult: true}
+	pluginRuntime := &fakePluginRuntime{busy: true, unloadResult: true}
 
-	if err := preparePluginOverwrite("sample", runtime); err != nil {
+	if err := preparePluginOverwrite("sample", pluginRuntime); err != nil {
 		t.Fatalf("preparePluginOverwrite() error = %v", err)
 	}
-	if runtime.unloadCalls != 1 {
-		t.Fatalf("runtime.unloadCalls = %d, want 1", runtime.unloadCalls)
+	if pluginRuntime.unloadCalls != 1 {
+		t.Fatalf("pluginRuntime.unloadCalls = %d, want 1", pluginRuntime.unloadCalls)
 	}
-	if runtime.busy {
-		t.Fatal("runtime.busy = true, want false")
+	if pluginRuntime.busy {
+		t.Fatal("pluginRuntime.busy = true, want false")
 	}
 }
 
 func TestPreparePluginOverwriteRejectsStillBusyPlugin(t *testing.T) {
 	t.Parallel()
 
-	runtime := &fakePluginRuntime{busy: true, unloadResult: false}
+	pluginRuntime := &fakePluginRuntime{busy: true, unloadResult: false}
 
-	err := preparePluginOverwrite("sample", runtime)
+	err := preparePluginOverwrite("sample", pluginRuntime)
 	if err == nil {
 		t.Fatal("preparePluginOverwrite() error = nil, want error")
 	}
-	if runtime.unloadCalls != 1 {
-		t.Fatalf("runtime.unloadCalls = %d, want 1", runtime.unloadCalls)
+	if pluginRuntime.unloadCalls != 1 {
+		t.Fatalf("pluginRuntime.unloadCalls = %d, want 1", pluginRuntime.unloadCalls)
 	}
 	if !strings.Contains(err.Error(), "loaded plugin") {
 		t.Fatalf("preparePluginOverwrite() error = %v, want loaded plugin", err)
@@ -546,11 +684,11 @@ func pluginConfigFromYAML(t *testing.T, raw string) config.PluginInstanceConfig 
 
 func writePluginFile(t *testing.T, root string, id string, version string) string {
 	t.Helper()
-	dir := filepath.Join(root, CurrentPlatform().GOOS, CurrentPlatform().GOARCH)
+	dir := filepath.Join(root, currentPlatform().GOOS, currentPlatform().GOARCH)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%s) error = %v", dir, err)
 	}
-	path := filepath.Join(dir, id+"-v"+version+pluginExtension(CurrentPlatform().GOOS))
+	path := filepath.Join(dir, id+"-v"+version+pluginExtension(currentPlatform().GOOS))
 	if err := os.WriteFile(path, []byte("plugin"), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s) error = %v", path, err)
 	}

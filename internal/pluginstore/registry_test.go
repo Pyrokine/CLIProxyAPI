@@ -8,7 +8,7 @@ import (
 func TestParseRegistryValidatesRegistry(t *testing.T) {
 	t.Parallel()
 
-	registry, errParse := ParseRegistry(
+	registry, errParse := parseRegistry(
 		[]byte(`{
 		"schema_version": 1,
 		"plugins": [{
@@ -40,7 +40,7 @@ func TestParseRegistryValidatesRegistry(t *testing.T) {
 func TestParseRegistryNormalizesPluginFields(t *testing.T) {
 	t.Parallel()
 
-	registry, errParse := ParseRegistry(
+	registry, errParse := parseRegistry(
 		[]byte(`{
 		"schema_version": 1,
 		"plugins": [{
@@ -86,7 +86,7 @@ func TestValidateRegistryAllowsMissingVersion(t *testing.T) {
 			},
 		},
 	}
-	if errValidate := ValidateRegistry(registry); errValidate != nil {
+	if errValidate := validateRegistry(registry); errValidate != nil {
 		t.Fatalf("ValidateRegistry() error = %v, want nil for missing version", errValidate)
 	}
 }
@@ -94,7 +94,7 @@ func TestValidateRegistryAllowsMissingVersion(t *testing.T) {
 func TestParseRegistrySupportsDirectInstall(t *testing.T) {
 	t.Parallel()
 
-	registry, errParse := ParseRegistry(
+	registry, errParse := parseRegistry(
 		[]byte(`{
 		"schema_version": 2,
 		"plugins": [{
@@ -183,7 +183,7 @@ func TestValidateRegistryRejectsInvalidDirectInstall(t *testing.T) {
 			},
 		},
 	}
-	errValidate := ValidateRegistry(registry)
+	errValidate := validateRegistry(registry)
 	if errValidate == nil {
 		t.Fatal("ValidateRegistry() error = nil")
 	}
@@ -217,7 +217,7 @@ func TestValidateRegistryRejectsDirectInstallInSchemaV1(t *testing.T) {
 			},
 		},
 	}
-	errValidate := ValidateRegistry(registry)
+	errValidate := validateRegistry(registry)
 	if errValidate == nil {
 		t.Fatal("ValidateRegistry() error = nil")
 	}
@@ -293,7 +293,7 @@ func TestValidateRegistryRejectsInvalidEntries(t *testing.T) {
 
 				registry := Registry{SchemaVersion: 1, Plugins: []Plugin{valid}}
 				tt.mutate(&registry)
-				errValidate := ValidateRegistry(registry)
+				errValidate := validateRegistry(registry)
 				if errValidate == nil {
 					t.Fatal("ValidateRegistry() error = nil")
 				}
@@ -358,7 +358,7 @@ func TestGitHubRepositoryPartsRejectsNonRepositoryURLs(t *testing.T) {
 			repository, func(t *testing.T) {
 				t.Parallel()
 
-				if _, _, errParse := GitHubRepositoryParts(repository); errParse == nil {
+				if _, _, errParse := gitHubRepositoryParts(repository); errParse == nil {
 					t.Fatalf("GitHubRepositoryParts(%q) error = nil", repository)
 				}
 			},

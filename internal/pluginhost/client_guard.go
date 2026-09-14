@@ -61,10 +61,10 @@ func (c *guardedPluginClient) release() {
 }
 
 func (c *guardedPluginClient) Shutdown() {
-	_ = c.ShutdownContext(context.Background())
+	_ = c.shutdownContext(context.Background())
 }
 
-func (c *guardedPluginClient) ShutdownContext(ctx context.Context) error {
+func (c *guardedPluginClient) shutdownContext(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
@@ -117,9 +117,9 @@ func shutdownPluginClient(ctx context.Context, client pluginClient) error {
 		ctx = context.Background()
 	}
 	if contextual, ok := client.(interface {
-		ShutdownContext(context.Context) error
+		shutdownContext(context.Context) error
 	}); ok {
-		return contextual.ShutdownContext(ctx)
+		return contextual.shutdownContext(ctx)
 	}
 	done := make(chan struct{})
 	go func() {

@@ -5,6 +5,14 @@ import (
 	"testing"
 )
 
+func TestSchemaVersionSupportsRequestLifecycle(t *testing.T) {
+	// This contract test intentionally compares a compile-time ABI constant.
+	// noinspection GoBoolExpressions
+	if SchemaVersion != 2 {
+		t.Fatalf("SchemaVersion = %d, want 2", SchemaVersion)
+	}
+}
+
 func TestEnvelopeRoundTrip(t *testing.T) {
 	payload := json.RawMessage(`{"name":"example"}`)
 	env := Envelope{
@@ -27,45 +35,35 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 }
 
 func TestMethodNamesAreStable(t *testing.T) {
-	if MethodPluginRegister != "plugin.register" {
-		t.Fatalf("MethodPluginRegister = %q", MethodPluginRegister)
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"MethodPluginRegister", MethodPluginRegister, "plugin.register"},
+		{"MethodRequestInterceptBefore", MethodRequestInterceptBefore, "request.intercept_before"},
+		{"MethodRequestInterceptAfter", MethodRequestInterceptAfter, "request.intercept_after"},
+		{"MethodRequestComplete", MethodRequestComplete, "request.complete"},
+		{"MethodResponseInterceptAfter", MethodResponseInterceptAfter, "response.intercept_after"},
+		{"MethodResponseInterceptStreamChunk", MethodResponseInterceptStreamChunk, "response.intercept_stream_chunk"},
+		{"MethodHostHTTPDo", MethodHostHTTPDo, "host.http.do"},
+		{"MethodHostHTTPStreamRead", MethodHostHTTPStreamRead, "host.http.stream_read"},
+		{"MethodHostModelExecute", MethodHostModelExecute, "host.model.execute"},
+		{"MethodHostModelExecuteStream", MethodHostModelExecuteStream, "host.model.execute_stream"},
+		{"MethodHostModelStreamRead", MethodHostModelStreamRead, "host.model.stream_read"},
+		{"MethodHostModelStreamClose", MethodHostModelStreamClose, "host.model.stream_close"},
+		{"MethodExecutorExecuteStream", MethodExecutorExecuteStream, "executor.execute_stream"},
 	}
-	if MethodRequestInterceptBefore != "request.intercept_before" {
-		t.Fatalf("MethodRequestInterceptBefore = %q", MethodRequestInterceptBefore)
-	}
-	if MethodRequestInterceptAfter != "request.intercept_after" {
-		t.Fatalf("MethodRequestInterceptAfter = %q", MethodRequestInterceptAfter)
-	}
-	if MethodResponseInterceptAfter != "response.intercept_after" {
-		t.Fatalf("MethodResponseInterceptAfter = %q", MethodResponseInterceptAfter)
-	}
-	if MethodResponseInterceptStreamChunk != "response.intercept_stream_chunk" {
-		t.Fatalf("MethodResponseInterceptStreamChunk = %q", MethodResponseInterceptStreamChunk)
-	}
-	if MethodHostHTTPDo != "host.http.do" {
-		t.Fatalf("MethodHostHTTPDo = %q", MethodHostHTTPDo)
-	}
-	if MethodHostHTTPStreamRead != "host.http.stream_read" {
-		t.Fatalf("MethodHostHTTPStreamRead = %q", MethodHostHTTPStreamRead)
-	}
-	if MethodHostModelExecute != "host.model.execute" {
-		t.Fatalf("MethodHostModelExecute = %q", MethodHostModelExecute)
-	}
-	if MethodHostModelExecuteStream != "host.model.execute_stream" {
-		t.Fatalf("MethodHostModelExecuteStream = %q", MethodHostModelExecuteStream)
-	}
-	if MethodHostModelStreamRead != "host.model.stream_read" {
-		t.Fatalf("MethodHostModelStreamRead = %q", MethodHostModelStreamRead)
-	}
-	if MethodHostModelStreamClose != "host.model.stream_close" {
-		t.Fatalf("MethodHostModelStreamClose = %q", MethodHostModelStreamClose)
-	}
-	if MethodExecutorExecuteStream != "executor.execute_stream" {
-		t.Fatalf("MethodExecutorExecuteStream = %q", MethodExecutorExecuteStream)
+	for _, test := range tests {
+		if test.got != test.want {
+			t.Errorf("%s = %q, want %q", test.name, test.got, test.want)
+		}
 	}
 }
 
 func TestSchedulerPickMethodName(t *testing.T) {
+	// This contract test intentionally compares a compile-time ABI constant.
+	// noinspection GoBoolExpressions
 	if MethodSchedulerPick != "scheduler.pick" {
 		t.Fatalf("MethodSchedulerPick = %q", MethodSchedulerPick)
 	}

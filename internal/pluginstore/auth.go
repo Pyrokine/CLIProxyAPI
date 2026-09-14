@@ -110,7 +110,7 @@ func PluginAuthConfigured(source Source, plugin Plugin, auth []AuthConfig) bool 
 }
 
 func pluginGitHubReleaseAuthConfigured(plugin Plugin, auth []AuthConfig) bool {
-	owner, repo, errRepository := GitHubRepositoryParts(plugin.Repository)
+	owner, repo, errRepository := gitHubRepositoryParts(plugin.Repository)
 	if errRepository != nil {
 		return false
 	}
@@ -228,8 +228,8 @@ func pluginStorePathMatchesAuthRule(requestPath string, rulePath string) bool {
 	if requestPath == rulePath {
 		return true
 	}
-	if strings.HasSuffix(rulePath, "/") {
-		return requestPath == strings.TrimSuffix(rulePath, "/") || strings.HasPrefix(requestPath, rulePath)
+	if before, ok := strings.CutSuffix(rulePath, "/"); ok {
+		return requestPath == before || strings.HasPrefix(requestPath, rulePath)
 	}
 	return strings.HasPrefix(requestPath, rulePath+"/")
 }
