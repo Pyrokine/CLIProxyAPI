@@ -104,32 +104,40 @@ func TestPluginHooksAreIsolatedByContext(t *testing.T) {
 	ctxB := WithPluginHooks(context.Background(), labeledPluginHooks{label: "b"})
 	ctxNil := WithPluginHooks(context.Background(), nil)
 
-	if got := string(registry.TranslateRequestWithContext(
-		ctxA, FormatOpenAI, FormatClaude, "model", []byte("request"), false,
-	)); got != "request|a-request|request-base" {
+	if got := string(
+		registry.TranslateRequestWithContext(
+			ctxA, FormatOpenAI, FormatClaude, "model", []byte("request"), false,
+		),
+	); got != "request|request-base|a-request" {
 		t.Fatalf("service A request = %q", got)
 	}
-	if got := string(registry.TranslateRequestWithContext(
-		ctxB, FormatOpenAI, FormatClaude, "model", []byte("request"), false,
-	)); got != "request|b-request|request-base" {
+	if got := string(
+		registry.TranslateRequestWithContext(
+			ctxB, FormatOpenAI, FormatClaude, "model", []byte("request"), false,
+		),
+	); got != "request|request-base|b-request" {
 		t.Fatalf("service B request = %q", got)
 	}
-	if got := string(registry.TranslateRequestWithContext(
-		ctxNil, FormatOpenAI, FormatClaude, "model", []byte("request"), false,
-	)); got != "request|request-base" {
+	if got := string(
+		registry.TranslateRequestWithContext(
+			ctxNil, FormatOpenAI, FormatClaude, "model", []byte("request"), false,
+		),
+	); got != "request|request-base" {
 		t.Fatalf("explicit nil request hooks inherited global hooks: %q", got)
 	}
 
-	if got := string(registry.TranslateNonStream(
-		ctxA,
-		FormatOpenAI,
-		FormatClaude,
-		"model",
-		nil,
-		nil,
-		[]byte("response"),
-		nil,
-	)); got != "response|a-before|response-base|a-after" {
+	if got := string(
+		registry.TranslateNonStream(
+			ctxA,
+			FormatOpenAI,
+			FormatClaude,
+			"model",
+			nil,
+			nil,
+			[]byte("response"),
+			nil,
+		),
+	); got != "response|a-before|response-base|a-after" {
 		t.Fatalf("service A response = %q", got)
 	}
 	frames := registry.TranslateStream(
@@ -145,16 +153,18 @@ func TestPluginHooksAreIsolatedByContext(t *testing.T) {
 	if len(frames) != 1 || string(frames[0]) != "stream|b-before|stream-base|b-after" {
 		t.Fatalf("service B stream = %q", frames)
 	}
-	if got := string(registry.TranslateNonStream(
-		ctxNil,
-		FormatOpenAI,
-		FormatClaude,
-		"model",
-		nil,
-		nil,
-		[]byte("response"),
-		nil,
-	)); got != "response|response-base" {
+	if got := string(
+		registry.TranslateNonStream(
+			ctxNil,
+			FormatOpenAI,
+			FormatClaude,
+			"model",
+			nil,
+			nil,
+			[]byte("response"),
+			nil,
+		),
+	); got != "response|response-base" {
 		t.Fatalf("explicit nil response hooks inherited global hooks: %q", got)
 	}
 }

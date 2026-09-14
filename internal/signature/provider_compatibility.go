@@ -6,6 +6,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -14,37 +16,41 @@ import (
 type Provider string
 
 const (
-	ProviderUnknown      Provider = "unknown"
+	providerUnknown      Provider = "unknown"
 	ProviderClaude       Provider = "claude"
 	ProviderGemini       Provider = "gemini"
-	ProviderGeminiBypass Provider = "gemini_bypass"
+	providerGeminiBypass Provider = "gemini_bypass"
 	ProviderGPT          Provider = "gpt"
+	providerKimi         Provider = "kimi"
+	// providerGrok is target-only because xAI encrypted_content has no reliable provider marker.
+	providerGrok Provider = "grok"
 )
 
 type BlockKind string
 
 const (
-	BlockKindUnknown            BlockKind = "unknown"
+	blockKindUnknown            BlockKind = "unknown"
 	BlockKindClaudeThinking     BlockKind = "claude_thinking"
 	BlockKindGeminiModelPart    BlockKind = "gemini_model_part"
 	BlockKindGeminiFunctionCall BlockKind = "gemini_function_call"
 	BlockKindGPTReasoning       BlockKind = "gpt_reasoning"
 )
 
-type CompatibilityAction string
+type compatibilityAction string
 
 const (
-	ActionPreserve                CompatibilityAction = "preserve"
-	ActionDropBlock               CompatibilityAction = "drop_block"
-	ActionDropSignature           CompatibilityAction = "drop_signature"
-	ActionReplaceWithGeminiBypass CompatibilityAction = "replace_with_gemini_bypass"
-	ActionNoCompatibleReplacement CompatibilityAction = "no_compatible_replacement"
+	actionPreserve                compatibilityAction = "preserve"
+	actionDropBlock               compatibilityAction = "drop_block"
+	actionDropSignature           compatibilityAction = "drop_signature"
+	actionReplaceWithGeminiBypass compatibilityAction = "replace_with_gemini_bypass"
+	actionNoCompatibleReplacement compatibilityAction = "no_compatible_replacement"
 )
 
 const (
 	GeminiSkipThoughtSignatureValidator = "skip_thought_signature_validator"
-	GeminiContextEngineeringBypass      = "context_engineering_is_the_way_to_go"
+	geminiContextEngineeringBypass      = "context_engineering_is_the_way_to_go"
 	maxSignatureLen                     = 32 * 1024 * 1024
+	MaxGeminiThoughtSignatureLen        = maxSignatureLen
 )
 
 type CompatibilityDecision struct {
@@ -52,7 +58,7 @@ type CompatibilityDecision struct {
 	DetectedProvider     Provider
 	BlockKind            BlockKind
 	Compatible           bool
-	Action               CompatibilityAction
+	Action               compatibilityAction
 	ReplacementSignature string
 	NormalizedSignature  string
 	Reason               string
@@ -64,6 +70,9 @@ type ClaudeMessagesSanitizeOptions struct {
 	DropEmptyMessages             bool
 	DropToolSignatures            bool
 	DropEmptyThinkingPlaceholders bool
+	// PreserveThinkingBlocks keeps compatibility-mode thinking blocks and their
+	// original signatures, including empty and opaque values.
+	PreserveThinkingBlocks bool
 }
 
 type SanitizeReport struct {
@@ -86,68 +95,72 @@ func ProviderFromModelName(modelName string) Provider {
 		lower, "codex",
 	), strings.HasPrefix(lower, "o1"), strings.HasPrefix(lower, "o3"), strings.HasPrefix(lower, "o4"):
 		return ProviderGPT
+	case strings.Contains(lower, "kimi"), strings.Contains(lower, "moonshot"),
+		strings.HasPrefix(lower, "k2"), strings.HasPrefix(lower, "k3"):
+		return providerKimi
+	case strings.Contains(lower, "grok"):
+		return providerGrok
 	default:
-		return ProviderUnknown
+		return providerUnknown
 	}
 }
 
 func DetectProvider(rawSignature string) Provider {
-	return DetectProviderForBlock(rawSignature, BlockKindUnknown)
-}
-
-func DetectProviderForBlock(rawSignature string, blockKind BlockKind) Provider {
 	sig := strings.TrimSpace(rawSignature)
 	if sig == "" {
-		return ProviderUnknown
+		return providerUnknown
 	}
-	if prefixedProvider, unprefixed, ok := SplitProviderPrefix(sig); ok {
+	if prefixedProvider, unprefixed, ok := splitProviderPrefix(sig); ok {
 		switch prefixedProvider {
 		case ProviderGemini:
 			if IsGeminiBypass(unprefixed) {
-				return ProviderGeminiBypass
+				return providerGeminiBypass
 			}
 			if isRecognizedGeminiSignature(unprefixed) {
 				return ProviderGemini
 			}
 		case ProviderClaude:
-			if IsValidClaudeSignature(unprefixed, true) {
+			if isValidClaudeCAISSignature(unprefixed) || isValidClaudeSignature(unprefixed, true) {
 				return ProviderClaude
 			}
 		case ProviderGPT:
-			if IsValidGPTReasoningSignature(unprefixed) {
+			if isValidGPTReasoningSignature(unprefixed) {
 				return ProviderGPT
 			}
 		}
-		return ProviderUnknown
+		return providerUnknown
 	}
 	if strings.Contains(sig, "#") {
-		return ProviderUnknown
+		return providerUnknown
 	}
 	if IsGeminiBypass(sig) {
-		return ProviderGeminiBypass
+		return providerGeminiBypass
 	}
-	if IsValidGPTReasoningSignature(sig) {
+	if isValidGPTReasoningSignature(sig) {
 		return ProviderGPT
 	}
-	if IsValidClaudeSignature(sig, true) {
+	if isValidClaudeCAISSignature(sig) || isValidClaudeSignature(sig, true) {
 		return ProviderClaude
 	}
 	if isRecognizedGeminiSignature(sig) {
 		return ProviderGemini
 	}
-	return ProviderUnknown
+	if isValidKimiThinkingSignature(sig) {
+		return providerKimi
+	}
+	return providerUnknown
 }
 
-func DecideCompatibility(targetProvider Provider, rawSignature string, blockKind BlockKind) CompatibilityDecision {
+func decideCompatibility(targetProvider Provider, rawSignature string, blockKind BlockKind) CompatibilityDecision {
 	targetProvider = normalizeTargetProvider(targetProvider)
 	if blockKind == "" {
-		blockKind = BlockKindUnknown
+		blockKind = blockKindUnknown
 	}
-	detected := DetectProviderForBlock(rawSignature, blockKind)
+	detected := DetectProvider(rawSignature)
 	decision := CompatibilityDecision{TargetProvider: targetProvider, DetectedProvider: detected, BlockKind: blockKind}
 	if providerMatchesTarget(targetProvider, detected) {
 		decision.Compatible = true
-		decision.Action = ActionPreserve
+		decision.Action = actionPreserve
 		decision.NormalizedSignature = normalizeCompatibleSignature(targetProvider, rawSignature)
 		decision.Reason = "signature provider matches target provider"
 		return decision
@@ -155,29 +168,35 @@ func DecideCompatibility(targetProvider Provider, rawSignature string, blockKind
 	decision.Compatible = false
 	switch targetProvider {
 	case ProviderGemini:
-		if blockKind == BlockKindGeminiFunctionCall || blockKind == BlockKindGeminiModelPart || blockKind == BlockKindUnknown {
-			decision.Action = ActionReplaceWithGeminiBypass
+		if blockKind == BlockKindGeminiFunctionCall || blockKind == BlockKindGeminiModelPart || blockKind == blockKindUnknown {
+			decision.Action = actionReplaceWithGeminiBypass
 			decision.ReplacementSignature = GeminiSkipThoughtSignatureValidator
 			decision.Reason = "Gemini can bypass incompatible model-part signatures with the documented sentinel"
 			return decision
 		}
-		decision.Action = ActionDropBlock
+		decision.Action = actionDropBlock
 		decision.Reason = "signature is not compatible with Gemini"
 	case ProviderClaude:
-		decision.Action = ActionDropBlock
+		decision.Action = actionDropBlock
 		decision.Reason = "Claude has no cross-provider bypass sentinel for thinking blocks"
 	case ProviderGPT:
-		decision.Action = ActionDropBlock
+		decision.Action = actionDropBlock
 		decision.Reason = "GPT reasoning encrypted_content cannot be synthesized from another provider signature"
+	case providerKimi:
+		decision.Action = actionDropSignature
+		decision.Reason = "Kimi does not validate replayed thinking signatures, so the block survives without one"
+	case providerGrok:
+		decision.Action = actionDropBlock
+		decision.Reason = "xAI verifies encrypted_content on replay and rejects foreign or mutated blobs"
 	default:
-		decision.Action = ActionNoCompatibleReplacement
+		decision.Action = actionNoCompatibleReplacement
 		decision.Reason = "unknown target provider"
 	}
 	return decision
 }
 
 func CompatibleSignatureForProvider(targetProvider Provider, rawSignature string, blockKind BlockKind) (string, bool) {
-	decision := DecideCompatibility(targetProvider, rawSignature, blockKind)
+	decision := decideCompatibility(targetProvider, rawSignature, blockKind)
 	if !decision.Compatible || decision.NormalizedSignature == "" {
 		return "", false
 	}
@@ -185,50 +204,50 @@ func CompatibleSignatureForProvider(targetProvider Provider, rawSignature string
 }
 
 func CompatibleAntigravityClaudeThinkingSignature(rawSignature string) (string, bool) {
-	if DetectProviderForBlock(rawSignature, BlockKindClaudeThinking) != ProviderClaude {
+	if DetectProvider(rawSignature) != ProviderClaude {
 		return "", false
 	}
-	normalized, err := NormalizeClaudeSignature(PayloadWithoutProviderPrefix(rawSignature), true)
+	normalized, err := normalizeClaudeSignature(PayloadWithoutProviderPrefix(rawSignature), true)
 	if err != nil {
 		return "", false
 	}
 	return normalized, true
 }
 
-func SplitProviderPrefix(rawSignature string) (Provider, string, bool) {
+func splitProviderPrefix(rawSignature string) (Provider, string, bool) {
 	prefix, rest, ok := strings.Cut(strings.TrimSpace(rawSignature), "#")
 	if !ok {
-		return ProviderUnknown, rawSignature, false
+		return providerUnknown, rawSignature, false
 	}
-	provider := ProviderFromCachePrefix(prefix)
-	if provider == ProviderUnknown {
-		return ProviderUnknown, rawSignature, false
+	provider := providerFromCachePrefix(prefix)
+	if provider == providerUnknown {
+		return providerUnknown, rawSignature, false
 	}
 	return provider, strings.TrimSpace(rest), true
 }
 
-func ProviderFromCachePrefix(prefix string) Provider {
+func providerFromCachePrefix(prefix string) Provider {
 	switch strings.ToLower(strings.TrimSpace(prefix)) {
-	case "claude", "anthropic":
+	case "claude", "anthropic", "cais", "claude-cais", "claude_cais", "ccmax", "claude-code-max", "claude_code_max":
 		return ProviderClaude
 	case "gemini", "google":
 		return ProviderGemini
 	case "openai", "gpt", "codex":
 		return ProviderGPT
 	default:
-		return ProviderUnknown
+		return providerUnknown
 	}
 }
 
 func PayloadWithoutProviderPrefix(rawSignature string) string {
-	if _, unprefixed, ok := SplitProviderPrefix(rawSignature); ok {
+	if _, unprefixed, ok := splitProviderPrefix(rawSignature); ok {
 		return unprefixed
 	}
 	return strings.TrimSpace(rawSignature)
 }
 
 func normalizeTargetProvider(provider Provider) Provider {
-	if provider == ProviderGeminiBypass {
+	if provider == providerGeminiBypass {
 		return ProviderGemini
 	}
 	return provider
@@ -237,11 +256,13 @@ func normalizeTargetProvider(provider Provider) Provider {
 func providerMatchesTarget(target, detected Provider) bool {
 	switch target {
 	case ProviderGemini:
-		return detected == ProviderGemini || detected == ProviderGeminiBypass
+		return detected == ProviderGemini || detected == providerGeminiBypass
 	case ProviderClaude:
 		return detected == ProviderClaude
 	case ProviderGPT:
 		return detected == ProviderGPT
+	case providerKimi:
+		return detected == providerKimi
 	default:
 		return false
 	}
@@ -251,7 +272,10 @@ func normalizeCompatibleSignature(targetProvider Provider, rawSignature string) 
 	payload := PayloadWithoutProviderPrefix(rawSignature)
 	switch normalizeTargetProvider(targetProvider) {
 	case ProviderClaude:
-		normalized, err := NormalizeClaudeProviderNativeSignature(payload, true)
+		if isValidClaudeCAISSignature(payload) {
+			return payload
+		}
+		normalized, err := normalizeClaudeProviderNativeSignature(payload, true)
 		if err != nil {
 			return ""
 		}
@@ -261,7 +285,11 @@ func normalizeCompatibleSignature(targetProvider Provider, rawSignature string) 
 			return payload
 		}
 	case ProviderGPT:
-		if IsValidGPTReasoningSignature(payload) {
+		if isValidGPTReasoningSignature(payload) {
+			return payload
+		}
+	case providerKimi:
+		if isValidKimiThinkingSignature(payload) {
 			return payload
 		}
 	}
@@ -270,19 +298,19 @@ func normalizeCompatibleSignature(targetProvider Provider, rawSignature string) 
 
 func IsGeminiBypass(rawSignature string) bool {
 	switch strings.TrimSpace(rawSignature) {
-	case GeminiSkipThoughtSignatureValidator, GeminiContextEngineeringBypass:
+	case GeminiSkipThoughtSignatureValidator, geminiContextEngineeringBypass:
 		return true
 	default:
 		return false
 	}
 }
 
-func IsValidClaudeSignature(rawSignature string, strict bool) bool {
-	_, err := NormalizeClaudeSignature(rawSignature, strict)
+func isValidClaudeSignature(rawSignature string, strict bool) bool {
+	_, err := normalizeClaudeSignature(rawSignature, strict)
 	return err == nil
 }
 
-func NormalizeClaudeSignature(rawSignature string, strict bool) (string, error) {
+func normalizeClaudeSignature(rawSignature string, strict bool) (string, error) {
 	sig := PayloadWithoutProviderPrefix(rawSignature)
 	if sig == "" {
 		return "", fmt.Errorf("empty signature")
@@ -306,7 +334,7 @@ func NormalizeClaudeSignature(rawSignature string, strict bool) (string, error) 
 	}
 }
 
-func NormalizeClaudeProviderNativeSignature(rawSignature string, strict bool) (string, error) {
+func normalizeClaudeProviderNativeSignature(rawSignature string, strict bool) (string, error) {
 	sig := PayloadWithoutProviderPrefix(rawSignature)
 	if sig == "" {
 		return "", fmt.Errorf("empty signature")
@@ -499,7 +527,7 @@ func decodeClaudeBytesField(raw []byte, label string) ([]byte, error) {
 	return value, nil
 }
 
-func IsValidGPTReasoningSignature(rawSignature string) bool {
+func isValidGPTReasoningSignature(rawSignature string) bool {
 	_, err := InspectGPTReasoningSignature(rawSignature)
 	return err == nil
 }
@@ -564,6 +592,9 @@ func firstInvalidGPTReasoningSignatureChar(sig string) (int, rune, bool) {
 }
 
 func isRecognizedGeminiSignature(rawSignature string) bool {
+	if isValidClaudeCAISSignature(rawSignature) {
+		return false
+	}
 	if IsGeminiBypass(rawSignature) {
 		return true
 	}
@@ -611,102 +642,470 @@ func isGeminiField1Envelope(decoded []byte) bool {
 }
 
 func isGeminiField2Envelope(decoded []byte) bool {
+	value, ok := consumeGeminiField2Field1Value(decoded)
+	return ok && (isLikelyGeminiOpaquePayload(value) || isASCIIUUIDBytes(value))
+}
+
+func consumeGeminiField2Field1Value(decoded []byte) ([]byte, bool) {
 	num, typ, n := protowire.ConsumeTag(decoded)
 	if n < 0 || num != 2 || typ != protowire.BytesType {
-		return false
+		return nil, false
 	}
 	offset := n
 	container, n := protowire.ConsumeBytes(decoded[offset:])
 	if n < 0 {
-		return false
+		return nil, false
 	}
 	offset += n
 	if offset != len(decoded) {
-		return false
+		return nil, false
 	}
 	num, typ, n = protowire.ConsumeTag(container)
 	if n < 0 || num != 1 || typ != protowire.BytesType {
-		return false
+		return nil, false
 	}
 	containerOffset := n
 	value, n := protowire.ConsumeBytes(container[containerOffset:])
-	if n < 0 || !isLikelyGeminiOpaquePayload(value) {
-		return false
+	if n < 0 {
+		return nil, false
 	}
 	containerOffset += n
-	return containerOffset == len(container)
+	if containerOffset != len(container) {
+		return nil, false
+	}
+	return value, true
 }
 
 func isLikelyGeminiOpaquePayload(value []byte) bool {
 	return len(value) > 0 && value[0] == 0x01
 }
 
+func isASCIIUUIDBytes(value []byte) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for index, char := range value {
+		switch index {
+		case 8, 13, 18, 23:
+			if char != '-' {
+				return false
+			}
+		default:
+			if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func GeminiReplaySignatureOrBypass(rawSignature string, blockKind BlockKind) string {
 	if signature, ok := CompatibleSignatureForProvider(ProviderGemini, rawSignature, blockKind); ok {
 		return signature
 	}
-	decision := DecideCompatibility(ProviderGemini, rawSignature, blockKind)
-	if decision.Action == ActionReplaceWithGeminiBypass && decision.ReplacementSignature != "" {
+	decision := decideCompatibility(ProviderGemini, rawSignature, blockKind)
+	if decision.Action == actionReplaceWithGeminiBypass && decision.ReplacementSignature != "" {
 		return decision.ReplacementSignature
 	}
 	return GeminiSkipThoughtSignatureValidator
 }
 
-func SanitizeGeminiRequestThoughtSignatures(payload []byte, contentsPath string) []byte {
+func SanitizeGeminiRequestThoughtSignatures(
+	payload []byte,
+	contentsPath string,
+	preserveEmptyThoughtSignatures ...bool,
+) []byte {
+	preserveEmpty := len(preserveEmptyThoughtSignatures) > 0 && preserveEmptyThoughtSignatures[0]
 	contentsPath = strings.TrimSpace(contentsPath)
 	if contentsPath == "" {
 		contentsPath = "contents"
 	}
-	contents := gjson.GetBytes(payload, contentsPath)
-	if !contents.IsArray() {
+	contents := util.GetGJSONBytesNoCopy(payload, contentsPath)
+	if !contents.IsArray() || !geminiContentsThoughtSignaturesNeedSanitize(contents) {
 		return payload
 	}
+
+	contentsChanged := false
+	contentItems := make([][]byte, 0, int(contents.Get("#").Int()))
 	contents.ForEach(
-		func(contentIdx, content gjson.Result) bool {
+		func(contentIndex, content gjson.Result) bool {
+			parts := content.Get("parts")
+			if !parts.IsArray() {
+				contentItems = append(contentItems, []byte(content.Raw))
+				return true
+			}
+
 			isModelTurn := content.Get("role").String() == "model"
+			firstFunctionCallSeen := false
+			partsChanged := false
+			partItems := make([][]byte, 0, int(parts.Get("#").Int()))
+			parts.ForEach(
+				func(partIndex, part gjson.Result) bool {
+					partJSON := []byte(part.Raw)
+					rawSignature, hasSignature := geminiPartThoughtSignature(part)
+					if preserveEmpty &&
+						part.Get("thought").Bool() &&
+						hasSignature &&
+						strings.TrimSpace(rawSignature) == "" {
+						partItems = append(partItems, partJSON)
+						return true
+					}
+					if part.Get("functionResponse").Exists() {
+						if hasSignature {
+							partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
+							partsChanged = true
+							logGeminiThoughtSignatureSanitize(
+								contentsPath, int(contentIndex.Int()), int(partIndex.Int()), CompatibilityDecision{
+									TargetProvider: ProviderGemini,
+									BlockKind:      BlockKindGeminiModelPart,
+									Action:         actionDropSignature,
+									Reason:         "functionResponse parts cannot replay thought signatures",
+								}, rawSignature, true,
+							)
+						}
+						partItems = append(partItems, partJSON)
+						return true
+					}
+					if !isModelTurn {
+						partItems = append(partItems, partJSON)
+						return true
+					}
+
+					hasFunctionCall := part.Get("functionCall").Exists()
+					isFirstFunctionCall := hasFunctionCall && !firstFunctionCallSeen
+					if hasFunctionCall {
+						firstFunctionCallSeen = true
+					}
+					if !hasFunctionCall && !hasSignature {
+						partItems = append(partItems, partJSON)
+						return true
+					}
+
+					blockKind := BlockKindGeminiModelPart
+					if hasFunctionCall {
+						blockKind = BlockKindGeminiFunctionCall
+					}
+					decision := decideCompatibility(ProviderGemini, rawSignature, blockKind)
+					replaySignature := ""
+					switch {
+					case isFirstFunctionCall:
+						replaySignature = GeminiReplaySignatureOrBypass(rawSignature, blockKind)
+					case hasSignature && decision.Action == actionPreserve && !IsGeminiBypass(PayloadWithoutProviderPrefix(rawSignature)):
+						replaySignature = decision.NormalizedSignature
+					case hasSignature:
+						decision.Action = actionDropSignature
+						decision.ReplacementSignature = ""
+						if hasFunctionCall {
+							decision.Reason = "unsigned sibling functionCalls preserve native parallel-call shape"
+						} else {
+							decision.Reason = "non-function model parts do not synthesize Gemini bypass signatures"
+						}
+					}
+
+					partChanged := false
+					if replaySignature != "" {
+						if !hasNormalizedGeminiPartThoughtSignature(part, replaySignature) {
+							partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
+							partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", replaySignature)
+							partChanged = true
+						}
+					} else if hasSignature {
+						partJSON = deleteGeminiPartThoughtSignatureFields(partJSON)
+						partChanged = true
+					}
+					if partChanged {
+						partsChanged = true
+						if decision.Action != actionPreserve {
+							logGeminiThoughtSignatureSanitize(
+								contentsPath, int(contentIndex.Int()), int(partIndex.Int()), decision, rawSignature,
+								hasSignature,
+							)
+						}
+					}
+					partItems = append(partItems, partJSON)
+					return true
+				},
+			)
+
+			contentJSON := []byte(content.Raw)
+			if partsChanged {
+				contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts", joinGeminiSignatureRawArray(partItems))
+				contentsChanged = true
+			}
+			contentItems = append(contentItems, contentJSON)
+			return true
+		},
+	)
+
+	if !contentsChanged {
+		return payload
+	}
+	updated, err := sjson.SetRawBytes(payload, contentsPath, joinGeminiSignatureRawArray(contentItems))
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func geminiContentsThoughtSignaturesNeedSanitize(contents gjson.Result) bool {
+	needsSanitize := false
+	contents.ForEach(
+		func(_, content gjson.Result) bool {
 			parts := content.Get("parts")
 			if !parts.IsArray() {
 				return true
 			}
+			isModelTurn := content.Get("role").String() == "model"
+			firstFunctionCallSeen := false
 			parts.ForEach(
-				func(partIdx, part gjson.Result) bool {
-					partPath := fmt.Sprintf("%s.%d.parts.%d", contentsPath, contentIdx.Int(), partIdx.Int())
+				func(_, part gjson.Result) bool {
+					rawSignature, hasSignature := geminiPartThoughtSignature(part)
 					if part.Get("functionResponse").Exists() {
-						payload = deleteGeminiPartSignatureFields(payload, partPath)
-						return true
+						needsSanitize = hasSignature
+						return !needsSanitize
 					}
 					if !isModelTurn {
 						return true
 					}
 					hasFunctionCall := part.Get("functionCall").Exists()
-					hasThought := part.Get("thought").Exists()
-					rawSignature, hasSignature := geminiPartThoughtSignature(part)
-					if !hasFunctionCall && !hasThought && !hasSignature {
+					isFirstFunctionCall := hasFunctionCall && !firstFunctionCallSeen
+					if hasFunctionCall {
+						firstFunctionCallSeen = true
+					}
+					if isFirstFunctionCall {
+						replaySignature := GeminiReplaySignatureOrBypass(rawSignature, BlockKindGeminiFunctionCall)
+						needsSanitize = !hasNormalizedGeminiPartThoughtSignature(part, replaySignature)
+						return !needsSanitize
+					}
+					if !hasSignature {
 						return true
 					}
 					blockKind := BlockKindGeminiModelPart
 					if hasFunctionCall {
 						blockKind = BlockKindGeminiFunctionCall
 					}
-					payload = deleteGeminiPartSignatureFields(payload, partPath)
-					payload, _ = sjson.SetBytes(
-						payload, partPath+".thoughtSignature", GeminiReplaySignatureOrBypass(rawSignature, blockKind),
-					)
-					return true
+					decision := decideCompatibility(ProviderGemini, rawSignature, blockKind)
+					if decision.Action != actionPreserve || IsGeminiBypass(PayloadWithoutProviderPrefix(rawSignature)) {
+						needsSanitize = true
+						return false
+					}
+					needsSanitize = !hasNormalizedGeminiPartThoughtSignature(part, decision.NormalizedSignature)
+					return !needsSanitize
 				},
 			)
-			return true
+			return !needsSanitize
 		},
 	)
-	return payload
+	return needsSanitize
+}
+
+func validateGeminiThoughtSignatures(payload []byte, allowBypass bool) error {
+	contents, contentsPath := geminiContents(payload)
+	if !contents.IsArray() {
+		return nil
+	}
+	for contentIndex, content := range contents.Array() {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			continue
+		}
+		isModelTurn := strings.EqualFold(strings.TrimSpace(content.Get("role").String()), "model")
+		firstFunctionCallSeen := false
+		for partIndex, part := range parts.Array() {
+			hasFunctionCall := part.Get("functionCall").Exists()
+			isFirstFunctionCall := isModelTurn && hasFunctionCall && !firstFunctionCallSeen
+			if isModelTurn && hasFunctionCall {
+				firstFunctionCallSeen = true
+			}
+			rawSignature, hasSignature := geminiPartThoughtSignature(part)
+			if !hasFunctionCall && !hasSignature {
+				continue
+			}
+			partPath := fmt.Sprintf("%s[%d].parts[%d]", contentsPath, contentIndex, partIndex)
+			rawSignature = strings.TrimSpace(rawSignature)
+			if part.Get("functionResponse").Exists() && hasSignature {
+				return fmt.Errorf("%s: functionResponse must not carry thoughtSignature", partPath)
+			}
+			if rawSignature == "" {
+				if isFirstFunctionCall {
+					return fmt.Errorf("%s: missing thoughtSignature on first functionCall", partPath)
+				}
+				if hasSignature {
+					return fmt.Errorf("%s: empty thoughtSignature", partPath)
+				}
+				continue
+			}
+			if IsGeminiBypass(rawSignature) {
+				if !allowBypass {
+					return fmt.Errorf("%s: Gemini bypass sentinel is not allowed", partPath)
+				}
+				if !isFirstFunctionCall {
+					return fmt.Errorf(
+						"%s: Gemini bypass sentinel is allowed only on the first model functionCall", partPath,
+					)
+				}
+			} else if !isRecognizedGeminiSignature(rawSignature) {
+				return fmt.Errorf("%s: invalid Gemini thoughtSignature", partPath)
+			}
+			if !hasNormalizedGeminiPartThoughtSignature(part, rawSignature) {
+				return fmt.Errorf("%s: thoughtSignature must use one canonical top-level field", partPath)
+			}
+		}
+	}
+	return nil
+}
+
+type geminiFunctionCallRef struct {
+	id   string
+	name string
+	path string
+}
+
+type geminiFunctionResponseRef struct {
+	part gjson.Result
+	path string
+}
+
+func ValidateGeminiFunctionCallPairing(payload []byte) error {
+	contents, contentsPath := geminiContents(payload)
+	if !contents.IsArray() {
+		return nil
+	}
+	var pending []geminiFunctionCallRef
+	for contentIndex, content := range contents.Array() {
+		parts := content.Get("parts")
+		if !parts.IsArray() {
+			if len(pending) > 0 {
+				return fmt.Errorf(
+					"%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, contentIndex,
+					len(pending),
+				)
+			}
+			continue
+		}
+		var calls []geminiFunctionCallRef
+		var responses []geminiFunctionResponseRef
+		for partIndex, part := range parts.Array() {
+			partPath := fmt.Sprintf("%s[%d].parts[%d]", contentsPath, contentIndex, partIndex)
+			if call := part.Get("functionCall"); call.Exists() {
+				if call.Get("name").String() == "" {
+					return fmt.Errorf("%s: missing functionCall.name", partPath)
+				}
+				calls = append(
+					calls,
+					geminiFunctionCallRef{id: call.Get("id").String(), name: call.Get("name").String(), path: partPath},
+				)
+			}
+			if part.Get("functionResponse").Exists() {
+				responses = append(responses, geminiFunctionResponseRef{part: part, path: partPath})
+			}
+		}
+		if len(calls) > 0 && len(responses) > 0 {
+			return fmt.Errorf(
+				"%s[%d]: functionCall and functionResponse parts must not be interleaved in the same content",
+				contentsPath, contentIndex,
+			)
+		}
+		if len(calls) > 0 {
+			if len(pending) > 0 {
+				return fmt.Errorf(
+					"%s[%d]: functionCall appears before %d pending functionResponse part(s)", contentsPath,
+					contentIndex, len(pending),
+				)
+			}
+			pending = calls
+			continue
+		}
+		if len(responses) == 0 {
+			if len(pending) > 0 {
+				return fmt.Errorf(
+					"%s[%d]: content appears before %d pending functionResponse part(s)", contentsPath, contentIndex,
+					len(pending),
+				)
+			}
+			continue
+		}
+		if len(pending) == 0 {
+			return fmt.Errorf("%s[%d]: functionResponse without preceding functionCall", contentsPath, contentIndex)
+		}
+		if len(responses) != len(pending) {
+			return fmt.Errorf(
+				"%s[%d]: functionResponse count %d does not match pending functionCall count %d", contentsPath,
+				contentIndex, len(responses), len(pending),
+			)
+		}
+		for responseIndex, responseRef := range responses {
+			response := responseRef.part.Get("functionResponse")
+			call := pending[responseIndex]
+			responseID := response.Get("id").String()
+			responseName := response.Get("name").String()
+			if call.id != "" && responseID == "" {
+				return fmt.Errorf("%s: missing functionResponse.id for %s", responseRef.path, call.path)
+			}
+			if call.id != "" && responseID != call.id {
+				return fmt.Errorf(
+					"%s: functionResponse.id %q does not match functionCall.id %q at %s", responseRef.path, responseID,
+					call.id, call.path,
+				)
+			}
+			if responseName == "" {
+				return fmt.Errorf("%s: missing functionResponse.name", responseRef.path)
+			}
+			if call.name != "" && responseName != call.name {
+				return fmt.Errorf(
+					"%s: functionResponse.name %q does not match functionCall.name %q at %s", responseRef.path,
+					responseName, call.name, call.path,
+				)
+			}
+		}
+		pending = nil
+	}
+	return nil
+}
+
+func geminiContents(payload []byte) (gjson.Result, string) {
+	if contents := util.GetGJSONBytesNoCopy(payload, "contents"); contents.Exists() {
+		return contents, "contents"
+	}
+	return util.GetGJSONBytesNoCopy(payload, "request.contents"), "request.contents"
+}
+
+func logGeminiThoughtSignatureSanitize(
+	contentsPath string,
+	contentIndex, partIndex int,
+	decision CompatibilityDecision,
+	rawSignature string,
+	hasSignature bool,
+) {
+	log.WithFields(
+		log.Fields{
+			"component":         "signature_sanitizer",
+			"target_provider":   string(ProviderGemini),
+			"action":            string(decision.Action),
+			"reason":            decision.Reason,
+			"contents_path":     contentsPath,
+			"content_index":     contentIndex,
+			"part_index":        partIndex,
+			"block_kind":        string(decision.BlockKind),
+			"detected_provider": string(decision.DetectedProvider),
+			"has_signature":     hasSignature,
+			"signature_length":  len(strings.TrimSpace(rawSignature)),
+		},
+	).Debug("gemini request: sanitized thoughtSignature before upstream")
+}
+
+var geminiPartThoughtSignaturePaths = []string{
+	"thoughtSignature",
+	"thought_signature",
+	"functionCall.thoughtSignature",
+	"functionCall.thought_signature",
+	"functionResponse.thoughtSignature",
+	"functionResponse.thought_signature",
+	"extra_content.google.thought_signature",
 }
 
 func geminiPartThoughtSignature(part gjson.Result) (string, bool) {
-	for _, path := range []string{
-		"thoughtSignature", "thought_signature", "functionCall.thoughtSignature", "functionCall.thought_signature",
-		"functionResponse.thoughtSignature", "functionResponse.thought_signature",
-		"extra_content.google.thought_signature",
-	} {
+	for _, path := range geminiPartThoughtSignaturePaths {
 		result := part.Get(path)
 		if result.Exists() {
 			return result.String(), true
@@ -715,13 +1114,53 @@ func geminiPartThoughtSignature(part gjson.Result) (string, bool) {
 	return "", false
 }
 
-func deleteGeminiPartSignatureFields(payload []byte, partPath string) []byte {
-	for _, path := range []string{
-		"thoughtSignature", "thought_signature", "functionCall.thoughtSignature", "functionCall.thought_signature",
-		"functionResponse.thoughtSignature", "functionResponse.thought_signature",
-		"extra_content.google.thought_signature",
-	} {
-		payload, _ = sjson.DeleteBytes(payload, partPath+"."+path)
+func hasNormalizedGeminiPartThoughtSignature(part gjson.Result, replaySignature string) bool {
+	canonicalCount := 0
+	part.ForEach(
+		func(key, _ gjson.Result) bool {
+			if key.String() == "thoughtSignature" {
+				canonicalCount++
+			}
+			return true
+		},
+	)
+	canonical := part.Get("thoughtSignature")
+	if canonicalCount != 1 || canonical.Type != gjson.String || canonical.String() != replaySignature {
+		return false
+	}
+	for _, path := range geminiPartThoughtSignaturePaths[1:] {
+		if part.Get(path).Exists() {
+			return false
+		}
+	}
+	return true
+}
+
+func deleteGeminiPartThoughtSignatureFields(payload []byte) []byte {
+	for _, path := range geminiPartThoughtSignaturePaths {
+		for gjson.GetBytes(payload, path).Exists() {
+			updated, err := sjson.DeleteBytes(payload, path)
+			if err != nil || len(updated) >= len(payload) {
+				break
+			}
+			payload = updated
+		}
 	}
 	return payload
+}
+
+func joinGeminiSignatureRawArray(items [][]byte) []byte {
+	size := len(items) + 1
+	for _, item := range items {
+		size += len(item)
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '[')
+	for index, item := range items {
+		if index > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item...)
+	}
+	return append(out, ']')
 }

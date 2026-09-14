@@ -25,14 +25,14 @@ const (
 	errBudgetOutOfRange errorCode = "BUDGET_OUT_OF_RANGE"
 )
 
-// Error represents an error that occurred during thinking configuration processing.
+// thinkingError represents an error that occurred during thinking configuration processing.
 //
 // This error type provides structured information about the error, including:
 //   - Code: A machine-readable error code for programmatic handling
 //   - Message: A human-readable description of the error
 //   - Model: The model name related to the error (optional)
 //   - Details: Additional context information (optional)
-type Error struct {
+type thinkingError struct {
 	// Code is the machine-readable error code
 	Code errorCode
 	// Message is the human-readable error description.
@@ -47,21 +47,21 @@ type Error struct {
 // Error implements the error interface.
 // Returns the message directly without code prefix.
 // Use Code field for programmatic error handling.
-func (e *Error) Error() string {
+func (e *thinkingError) Error() string {
 	return e.Message
 }
 
 // newError creates a new Error with the given code and message.
-func newError(code errorCode, message string) *Error {
-	return &Error{
+func newError(code errorCode, message string) *thinkingError {
+	return &thinkingError{
 		Code:    code,
 		Message: message,
 	}
 }
 
 // newErrorWithModel creates a new Error with model context.
-func newErrorWithModel(code errorCode, message, model string) *Error {
-	return &Error{
+func newErrorWithModel(code errorCode, message, model string) *thinkingError {
+	return &thinkingError{
 		Code:    code,
 		Message: message,
 		Model:   model,
@@ -69,6 +69,6 @@ func newErrorWithModel(code errorCode, message, model string) *Error {
 }
 
 // StatusCode implements a portable status code interface for HTTP handlers.
-func (e *Error) StatusCode() int {
+func (e *thinkingError) StatusCode() int {
 	return http.StatusBadRequest
 }

@@ -17,7 +17,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// Applier implements thinking.ProviderApplier for iFlow models.
+// applier implements thinking.ProviderApplier for iFlow models.
 //
 // iFlow-specific behavior:
 //   - enable_thinking toggle models: enable_thinking boolean
@@ -25,13 +25,13 @@ import (
 //   - MiniMax models: reasoning_split boolean
 //   - Level to boolean: none=false, others=true
 //   - No quantized support (only on/off)
-type Applier struct{}
+type applier struct{}
 
-var _ thinking.ProviderApplier = (*Applier)(nil)
+var _ thinking.ProviderApplier = (*applier)(nil)
 
 // newApplier creates a new iFlow thinking applier.
-func newApplier() *Applier {
-	return &Applier{}
+func newApplier() *applier {
+	return &applier{}
 }
 
 func init() {
@@ -54,7 +54,7 @@ func init() {
 //	{
 //	  "reasoning_split": true
 //	}
-func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
 		return body, nil
 	}

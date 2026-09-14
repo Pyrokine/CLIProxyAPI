@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/tidwall/gjson"
 )
 
 func TestMaskSensitiveHeaderValue(t *testing.T) {
@@ -30,6 +32,81 @@ func TestMaskSensitiveHeaderValue(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestSanitizedFunctionNameMapDisambiguatesCollisions(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	raw := []byte(`{"tools":[
+		{"name":"` + first + `"},
+		{"name":"` + first + `"},
+		{"name":"` + second + `"}
+	]}`)
+
+	forward := SanitizedFunctionNameMap(raw)
+	firstMapped := forward[first]
+	secondMapped := forward[second]
+	if firstMapped == "" || secondMapped == "" || secondMapped == firstMapped {
+		t.Fatalf("mapped names = %q and %q, want distinct non-empty names", firstMapped, secondMapped)
+	}
+	if len(firstMapped) > 64 || len(secondMapped) > 64 {
+		t.Fatalf("mapped name lengths = %d and %d, want <= 64", len(firstMapped), len(secondMapped))
+	}
+
+	reversed := []byte(`{"tools":[{"name":"` + second + `"},{"name":"` + first + `"}]}`)
+	reversedForward := SanitizedFunctionNameMap(reversed)
+	if reversedForward[first] != firstMapped || reversedForward[second] != secondMapped {
+		t.Fatalf("mapping changed with declaration order: forward=%v reversed=%v", forward, reversedForward)
+	}
+
+	reverse := DisambiguatedToolNameMap(raw)
+	if got := reverse[firstMapped]; got != first {
+		t.Fatalf("reverse[%q] = %q, want %q", firstMapped, got, first)
+	}
+	if got := reverse[secondMapped]; got != second {
+		t.Fatalf("reverse[%q] = %q, want %q", secondMapped, got, second)
+	}
+}
+
+func TestSanitizedFunctionNameMapReadsSupportedToolShapes(t *testing.T) {
+	raw := []byte(`{"tools":[
+		{"type":"function","function":{"name":"nested/name"}},
+		{"tools":[{"name":"wrapped@name"}]},
+		{
+			"functionDeclarations":[{"name":"camel@name"}],
+			"function_declarations":[{"name":"snake name"}]
+		}
+	]}`)
+	forward := SanitizedFunctionNameMap(raw)
+	for original, want := range map[string]string{
+		"nested/name":  "nested_name",
+		"wrapped@name": "wrapped_name",
+		"camel@name":   "camel_name",
+		"snake name":   "snake_name",
+	} {
+		if got := forward[original]; got != want {
+			t.Errorf("forward[%q] = %q, want %q", original, got, want)
+		}
+	}
+}
+
+func TestDeduplicateFunctionDeclarations(t *testing.T) {
+	raw := []byte(`[
+		{"name":"lookup","description":"first"},
+		{"name":"other"},
+		{"name":"lookup","description":"second"}
+	]`)
+	deduped := DeduplicateFunctionDeclarations(raw)
+	declarations := gjson.ParseBytes(deduped).Array()
+	if len(declarations) != 2 {
+		t.Fatalf("declaration count = %d, want 2: %s", len(declarations), deduped)
+	}
+	if got := declarations[0].Get("description").String(); got != "first" {
+		t.Fatalf("first duplicate description = %q, want first", got)
+	}
+	if got := RestoreSanitizedToolName(map[string]string{"other": "original"}, "other"); got != "original" {
+		t.Fatalf("restored tool name = %q, want original", got)
 	}
 }
 
@@ -209,7 +286,9 @@ func TestMaskSensitivePayloadHandlesUTF8BOM(t *testing.T) {
 		t.Fatalf("MaskSensitivePayload BOM JSON mismatch: %q", maskedJSON)
 	}
 
-	ssePayload := append(append([]byte{}, bom...), []byte("data: {\"api_key\":\"sk-bom-sse-secret\",\"model\":\"gpt-5\"}\n\n")...)
+	ssePayload := append(
+		append([]byte{}, bom...), []byte("data: {\"api_key\":\"sk-bom-sse-secret\",\"model\":\"gpt-5\"}\n\n")...,
+	)
 	maskedSSE := string(MaskSensitivePayload(ssePayload))
 	if strings.Contains(maskedSSE, "sk-bom-sse-secret") || !strings.Contains(maskedSSE, "gpt-5") {
 		t.Fatalf("MaskSensitivePayload BOM SSE mismatch: %q", maskedSSE)
@@ -218,11 +297,13 @@ func TestMaskSensitivePayloadHandlesUTF8BOM(t *testing.T) {
 
 func TestMaskSensitivePayloadFailsClosedForTruncatedTopLevelJSONTokens(t *testing.T) {
 	for _, payload := range []string{`"sk-truncated-secret`, "tru", "fals", "nul", "-", "1e", "1."} {
-		t.Run(payload, func(t *testing.T) {
-			if got := string(MaskSensitivePayload([]byte(payload))); got != "***" {
-				t.Fatalf("MaskSensitivePayload(%q) = %q, want fail-closed marker", payload, got)
-			}
-		})
+		t.Run(
+			payload, func(t *testing.T) {
+				if got := string(MaskSensitivePayload([]byte(payload))); got != "***" {
+					t.Fatalf("MaskSensitivePayload(%q) = %q, want fail-closed marker", payload, got)
+				}
+			},
+		)
 	}
 }
 
@@ -235,7 +316,9 @@ func TestMaskSensitivePayloadPreservesStructuredSecretContainers(t *testing.T) {
 			t.Fatalf("MaskSensitivePayload kept structured secret %q: %s", secret, got)
 		}
 	}
-	for _, value := range []string{"https://example.com", "https://interactions.example.com", "http://127.0.0.1:8080", "api-key"} {
+	for _, value := range []string{
+		"https://example.com", "https://interactions.example.com", "http://127.0.0.1:8080", "api-key",
+	} {
 		if !strings.Contains(got, value) {
 			t.Fatalf("MaskSensitivePayload removed structured value %q: %s", value, got)
 		}

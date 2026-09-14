@@ -13,7 +13,7 @@ const (
 )
 
 // ApplyReasoningEffort applies thinking configuration using the reasoning effort format.
-// Used by openai and codex providers which share identical logic but differ in JSON field paths.
+// OpenAI and Codex providers share this logic but use different JSON field paths.
 func ApplyReasoningEffort(body []byte, config Config, modelInfo *registry.ModelInfo, fieldPath string) ([]byte, error) {
 	if IsUserDefinedModel(modelInfo) {
 		return applyReasoningEffortCompatible(body, config, fieldPath)

@@ -13,17 +13,17 @@ import (
 // Applier implements thinking.ProviderApplier for the native Interactions API.
 type Applier struct{}
 
-// NewApplier creates a new Interactions thinking applier.
-func NewApplier() *Applier {
+// newApplier creates a new Interactions thinking applier.
+func newApplier() *Applier {
 	return &Applier{}
 }
 
 func init() {
-	thinking.RegisterProvider("interactions", NewApplier())
+	thinking.RegisterProvider("interactions", newApplier())
 }
 
 // Apply writes thinking configuration using native Interactions generation_config fields.
-func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeLevel && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
 		return body, nil
 	}
@@ -34,11 +34,11 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	result := stripInteractionsThinkingFields(body)
 	switch config.Mode {
 	case thinking.ModeLevel:
-		return applyInteractionsLevel(result, body, string(config.Level), modelInfo, "auto"), nil
+		return applyInteractionsLevel(result, body, string(config.Level), modelInfo), nil
 	case thinking.ModeBudget:
-		return applyInteractionsBudget(result, body, config.Budget, modelInfo, "auto"), nil
+		return applyInteractionsBudget(result, body, config.Budget, modelInfo), nil
 	case thinking.ModeAuto:
-		return setInteractionsThinkingSummaries(result, body, "auto"), nil
+		return setInteractionsThinkingSummaries(result, body), nil
 	case thinking.ModeNone:
 		return applyInteractionsNone(result, body, config, modelInfo), nil
 	default:
@@ -46,37 +46,38 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	}
 }
 
-func applyInteractionsBudget(result, original []byte, budget int, modelInfo *registry.ModelInfo, summariesFallback string) []byte {
+func applyInteractionsBudget(result, original []byte, budget int, modelInfo *registry.ModelInfo) []byte {
 	level, ok := thinking.ConvertBudgetToLevel(budget)
 	if !ok {
-		return result
+		return setInteractionsThinkingSummaries(result, original)
 	}
 	switch level {
-	case string(thinking.LevelNone):
-		return setInteractionsThinkingSummaries(result, original, "none")
-	case string(thinking.LevelAuto):
-		return setInteractionsThinkingSummaries(result, original, "auto")
+	case string(thinking.LevelNone), string(thinking.LevelAuto):
+		return setInteractionsThinkingSummaries(result, original)
 	default:
-		return applyInteractionsLevel(result, original, level, modelInfo, summariesFallback)
+		return applyInteractionsLevel(result, original, level, modelInfo)
 	}
 }
 
-func applyInteractionsLevel(result, original []byte, level string, modelInfo *registry.ModelInfo, summariesFallback string) []byte {
+func applyInteractionsLevel(result, original []byte, level string, modelInfo *registry.ModelInfo) []byte {
 	level = normalizeInteractionsLevel(level, modelInfo)
-	if level == "" {
-		return result
+	if level != "" {
+		result, _ = sjson.SetBytes(result, "generation_config.thinking_level", level)
 	}
-	result, _ = sjson.SetBytes(result, "generation_config.thinking_level", level)
-	return setInteractionsThinkingSummaries(result, original, summariesFallback)
+	return setInteractionsThinkingSummaries(result, original)
 }
 
-func applyInteractionsNone(result, original []byte, config thinking.ThinkingConfig, modelInfo *registry.ModelInfo) []byte {
+func applyInteractionsNone(
+	result, original []byte,
+	config thinking.Config,
+	modelInfo *registry.ModelInfo,
+) []byte {
 	if config.Level != "" {
-		result = applyInteractionsLevel(result, original, string(config.Level), modelInfo, "none")
-	} else if config.Budget > 0 {
-		result = applyInteractionsBudget(result, original, config.Budget, modelInfo, "none")
+		return applyInteractionsLevel(result, original, string(config.Level), modelInfo)
 	}
-	result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", "none")
+	if config.Budget > 0 {
+		return applyInteractionsBudget(result, original, config.Budget, modelInfo)
+	}
 	return result
 }
 
@@ -104,7 +105,7 @@ func stripInteractionsThinkingFields(body []byte) []byte {
 	return result
 }
 
-func setInteractionsThinkingSummaries(result, original []byte, fallback string) []byte {
+func setInteractionsThinkingSummaries(result, original []byte) []byte {
 	if value, okValue := originalInteractionsThinkingSummaries(original); okValue {
 		result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", value)
 		return result
@@ -112,16 +113,9 @@ func setInteractionsThinkingSummaries(result, original []byte, fallback string) 
 	if includeThoughts, okValue := originalInteractionsIncludeThoughts(original); okValue {
 		value := "none"
 		if includeThoughts {
-			value = fallback
-			if value == "" {
-				value = "auto"
-			}
+			value = "auto"
 		}
 		result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", value)
-		return result
-	}
-	if fallback != "" {
-		result, _ = sjson.SetBytes(result, "generation_config.thinking_summaries", fallback)
 	}
 	return result
 }
@@ -132,8 +126,12 @@ func originalInteractionsThinkingSummaries(body []byte) (string, bool) {
 		"generation_config.thinkingSummaries",
 	} {
 		value := gjson.GetBytes(body, path)
-		if value.Exists() && value.Type == gjson.String {
-			return strings.ToLower(strings.TrimSpace(value.String())), true
+		if value.Type != gjson.String {
+			continue
+		}
+		switch normalized := strings.ToLower(strings.TrimSpace(value.String())); normalized {
+		case "auto", "none":
+			return normalized, true
 		}
 	}
 	return "", false
@@ -146,9 +144,13 @@ func originalInteractionsIncludeThoughts(body []byte) (bool, bool) {
 		"generation_config.thinkingConfig.include_thoughts",
 		"generation_config.thinkingConfig.includeThoughts",
 	} {
-		value := gjson.GetBytes(body, path)
-		if value.Exists() {
-			return value.Bool(), true
+		// Only JSON booleans have meaning for includeThoughts.
+		// noinspection GoSwitchMissingCasesForIotaConsts
+		switch value := gjson.GetBytes(body, path); value.Type {
+		case gjson.True:
+			return true, true
+		case gjson.False:
+			return false, true
 		}
 	}
 	return false, false

@@ -8,9 +8,11 @@ import (
 )
 
 const (
-	MaxGrokEncryptedContentLen          = 8 * 1024 * 1024
-	MinGrokEncryptedContentDecodedLen   = 50
-	MinGrokEncryptedContentEntropyRatio = 0.85
+	maxGrokEncryptedContentLen = 8 * 1024 * 1024
+	// minGrokEncryptedContentDecodedLen keeps headroom below the shortest observed 43-byte native payload.
+	// Entropy remains the primary shape check.
+	minGrokEncryptedContentDecodedLen   = 32
+	minGrokEncryptedContentEntropyRatio = 0.85
 )
 
 type GrokEncryptedContentInfo struct {
@@ -23,8 +25,8 @@ func InspectGrokEncryptedContent(raw string) (*GrokEncryptedContentInfo, error) 
 	if sig == "" {
 		return nil, fmt.Errorf("empty grok encrypted_content")
 	}
-	if len(sig) > MaxGrokEncryptedContentLen {
-		return nil, fmt.Errorf("grok encrypted_content exceeds maximum length (%d bytes)", MaxGrokEncryptedContentLen)
+	if len(sig) > maxGrokEncryptedContentLen {
+		return nil, fmt.Errorf("grok encrypted_content exceeds maximum length (%d bytes)", maxGrokEncryptedContentLen)
 	}
 	if sig != raw {
 		return nil, fmt.Errorf("grok encrypted_content has leading or trailing whitespace")
@@ -40,30 +42,33 @@ func InspectGrokEncryptedContent(raw string) (*GrokEncryptedContentInfo, error) 
 			"invalid grok encrypted_content: contains non-base64 character U+%04X at byte %d", r, index,
 		)
 	}
-	if IsValidClaudeSignature(sig, true) {
+	if isValidClaudeCAISSignature(sig) || isValidClaudeSignature(sig, true) {
 		return nil, fmt.Errorf("grok encrypted_content looks like Claude thinking signature")
 	}
 	if isRecognizedGeminiSignature(sig) {
 		return nil, fmt.Errorf("grok encrypted_content looks like Gemini thoughtSignature")
+	}
+	if isValidKimiThinkingSignature(sig) {
+		return nil, fmt.Errorf("grok encrypted_content has a Kimi thinking signature length")
 	}
 
 	decoded, err := decodeGrokEncryptedContent(sig)
 	if err != nil {
 		return nil, err
 	}
-	if len(decoded) < MinGrokEncryptedContentDecodedLen {
+	if len(decoded) < minGrokEncryptedContentDecodedLen {
 		return nil, fmt.Errorf("invalid grok encrypted_content: decoded payload too short (%d bytes)", len(decoded))
 	}
-	if entropyRatio := byteEntropyRatio(decoded); entropyRatio < MinGrokEncryptedContentEntropyRatio {
+	if entropyRatio := byteEntropyRatio(decoded); entropyRatio < minGrokEncryptedContentEntropyRatio {
 		return nil, fmt.Errorf(
 			"invalid grok encrypted_content: decoded payload entropy ratio %.3f below %.3f", entropyRatio,
-			MinGrokEncryptedContentEntropyRatio,
+			minGrokEncryptedContentEntropyRatio,
 		)
 	}
 	return &GrokEncryptedContentInfo{RawLen: len(sig), DecodedLen: len(decoded)}, nil
 }
 
-func IsValidGrokEncryptedContent(raw string) bool {
+func isValidGrokEncryptedContent(raw string) bool {
 	_, err := InspectGrokEncryptedContent(raw)
 	return err == nil
 }
@@ -107,10 +112,7 @@ func byteEntropyRatio(buf []byte) float64 {
 		p := float64(count) / n
 		entropy -= p * math.Log2(p)
 	}
-	maxSymbols := len(buf)
-	if maxSymbols > 256 {
-		maxSymbols = 256
-	}
+	maxSymbols := min(len(buf), 256)
 	if maxSymbols <= 1 {
 		return 0
 	}

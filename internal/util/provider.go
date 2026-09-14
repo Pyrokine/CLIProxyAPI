@@ -21,7 +21,7 @@ import (
 var (
 	camelBoundaryPattern        = regexp.MustCompile(`([a-z0-9])([A-Z])`)
 	jsonStringFieldPattern      = regexp.MustCompile(`"([^"]+)"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"`)
-	trailingFieldIndexesPattern = regexp.MustCompile(`(\[[0-9]*\])+$`)
+	trailingFieldIndexesPattern = regexp.MustCompile(`(\[[0-9]*])+$`)
 )
 
 // GetProviderName determines all AI service providers capable of serving a registered model.
@@ -101,13 +101,13 @@ func ResolveAutoModel(modelName string) string {
 // otherwise it returns false.
 //
 // Parameters:
-//   - hystack: The slice of strings to search in
+//   - haystack: The slice of strings to search in
 //   - needle: The string to search for
 //
 // Returns:
 //   - bool: True if the string is found, false otherwise
-func InArray(hystack []string, needle string) bool {
-	return slices.Contains(hystack, needle)
+func InArray(haystack []string, needle string) bool {
+	return slices.Contains(haystack, needle)
 }
 
 // HideAPIKey obscures an API key for logging purposes, showing only the first and last few characters.
@@ -226,7 +226,9 @@ func IsSensitiveFieldName(key string) bool {
 	key = strings.ToLower(key)
 	compact := strings.NewReplacer("-", "_", " ", "_").Replace(key)
 	if compact == "key" || compact == "api_key" || compact == "apikey" || compact == "password" || compact == "passwd" || compact == "authorization" || compact == "management_key" || compact == "auth_key" || compact == "access_key" ||
-		strings.HasSuffix(compact, "_management_key") || strings.HasSuffix(compact, "_auth_key") || strings.HasSuffix(compact, "_access_key") {
+		strings.HasSuffix(compact, "_management_key") || strings.HasSuffix(
+		compact, "_auth_key",
+	) || strings.HasSuffix(compact, "_access_key") {
 		return true
 	}
 	parts := strings.FieldsFunc(compact, func(r rune) bool { return r == '_' || r == '.' || r == ':' })
@@ -235,7 +237,9 @@ func IsSensitiveFieldName(key string) bool {
 			return true
 		}
 	}
-	return strings.Contains(compact, "api_key") || strings.Contains(compact, "apikey") || strings.Contains(compact, "management_key")
+	return strings.Contains(compact, "api_key") || strings.Contains(compact, "apikey") || strings.Contains(
+		compact, "management_key",
+	)
 }
 
 func MaskSensitivePayload(payload []byte) []byte {
@@ -563,10 +567,6 @@ func isStructuredAPIKeyJSONField(key string) bool {
 	return normalizedKey == "api_key" || normalizedKey == "apikey"
 }
 
-func maskSensitiveJSONMap(value map[string]any, parentKey string) map[string]any {
-	return maskSensitiveJSONMapWithOrdinals(value, parentKey, nil)
-}
-
 func maskSensitiveJSONMapWithOrdinals(
 	value map[string]any,
 	parentKey string,
@@ -821,8 +821,8 @@ func maskSensitiveSSEEvent(lines []string) ([]string, bool) {
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " \t")
 		dataOffset := len(line) - len(trimmed)
-		if strings.HasPrefix(trimmed, "\xEF\xBB\xBF") {
-			trimmed = strings.TrimPrefix(trimmed, "\xEF\xBB\xBF")
+		if after, ok := strings.CutPrefix(trimmed, "\xEF\xBB\xBF"); ok {
+			trimmed = after
 			dataOffset += len("\xEF\xBB\xBF")
 		}
 		if !strings.HasPrefix(trimmed, "data:") {

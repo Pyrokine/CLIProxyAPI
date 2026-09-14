@@ -13,13 +13,13 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// Applier implements thinking.ProviderApplier for Claude models.
+// applier implements thinking.ProviderApplier for Claude models.
 // This applier is stateless and holds no configuration.
-type Applier struct{}
+type applier struct{}
 
 // newApplier creates a new Claude thinking applier.
-func newApplier() *Applier {
-	return &Applier{}
+func newApplier() *applier {
+	return &applier{}
 }
 
 func init() {
@@ -52,7 +52,7 @@ func init() {
 //	    "type": "disabled"
 //	  }
 //	}
-func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
 		return applyCompatibleClaude(body, config)
 	}
@@ -75,6 +75,7 @@ func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry
 	if config.Budget == 0 {
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.DeleteBytes(result, "thinking.display")
 		return result, nil
 	}
 
@@ -88,7 +89,7 @@ func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry
 
 // normalizeClaudeBudget applies Claude-specific constraints to ensure max_tokens > budget_tokens.
 // Anthropic API requires this constraint; violating it returns a 400 error.
-func (a *Applier) normalizeClaudeBudget(body []byte, budgetTokens int, modelInfo *registry.ModelInfo) []byte {
+func (a *applier) normalizeClaudeBudget(body []byte, budgetTokens int, modelInfo *registry.ModelInfo) []byte {
 	if budgetTokens <= 0 {
 		return body
 	}
@@ -130,7 +131,7 @@ func (a *Applier) normalizeClaudeBudget(body []byte, budgetTokens int, modelInfo
 // effectiveMaxTokens returns the max tokens to cap thinking:
 // prefer request-provided max_tokens; otherwise fall back to model default.
 // The boolean indicates whether the value came from the model default (and thus should be written back).
-func (a *Applier) effectiveMaxTokens(body []byte, modelInfo *registry.ModelInfo) (max int, fromModel bool) {
+func (a *applier) effectiveMaxTokens(body []byte, modelInfo *registry.ModelInfo) (max int, fromModel bool) {
 	if maxTok := gjson.GetBytes(body, "max_tokens"); maxTok.Exists() && maxTok.Int() > 0 {
 		return int(maxTok.Int()), false
 	}
@@ -153,6 +154,7 @@ func applyCompatibleClaude(body []byte, config thinking.Config) ([]byte, error) 
 	case thinking.ModeNone:
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.DeleteBytes(result, "thinking.display")
 		return result, nil
 	case thinking.ModeAuto:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")

@@ -3,6 +3,8 @@ package translator
 import (
 	"context"
 	"sync"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 )
 
 // Registry manages translation functions across schemas.
@@ -55,21 +57,33 @@ func (r *Registry) TranslateRequestWithContext(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	body := rawJSON
-	if hooks := pluginHooksForContext(ctx); hooks != nil {
-		body = hooks.NormalizeRequest(ctx, from, to, model, body, stream)
-		if translated, ok := hooks.TranslateRequest(ctx, from, to, model, body, stream); ok {
-			return translated
+	r.mu.RLock()
+	var fn RequestTransform
+	if byTarget, ok := r.requests[from]; ok {
+		fn = byTarget[to]
+	}
+	r.mu.RUnlock()
+
+	hooks := pluginHooksForContext(ctx)
+	if fn != nil {
+		summaryConfig := thinking.ExtractSummaryConfig(rawJSON, from.String())
+		body := fn(model, rawJSON, stream)
+		body = thinking.ApplySummaryConfigForModel(body, to.String(), model, summaryConfig)
+		if hooks != nil {
+			body = hooks.NormalizeRequest(ctx, from, to, model, body, stream)
 		}
+		return body
 	}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	body := rawJSON
+	if hooks == nil {
+		return body
+	}
 
-	if byTarget, ok := r.requests[from]; ok {
-		if fn, isOk := byTarget[to]; isOk && fn != nil {
-			return fn(model, body, stream)
-		}
+	body = hooks.NormalizeRequest(ctx, from, to, model, body, stream)
+	summaryConfig := thinking.ExtractSummaryConfig(body, from.String())
+	if translated, ok := hooks.TranslateRequest(ctx, from, to, model, body, stream); ok {
+		return thinking.ApplySummaryConfigForModel(translated, to.String(), model, summaryConfig)
 	}
 	return body
 }

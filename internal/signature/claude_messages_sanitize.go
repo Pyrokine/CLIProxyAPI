@@ -8,8 +8,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-func SanitizeClaudeMessagesSignaturesForModel(payload []byte, targetModel string) ([]byte, SanitizeReport) {
-	return SanitizeClaudeMessagesSignaturesForTarget(
+func sanitizeClaudeMessagesSignaturesForModel(payload []byte, targetModel string) ([]byte, SanitizeReport) {
+	return sanitizeClaudeMessagesSignaturesForTarget(
 		payload, ClaudeMessagesSanitizeOptions{
 			TargetProvider:    ProviderFromModelName(targetModel),
 			TargetModel:       targetModel,
@@ -18,24 +18,30 @@ func SanitizeClaudeMessagesSignaturesForModel(payload []byte, targetModel string
 	)
 }
 
-func SanitizeClaudeMessagesForClaudeUpstream(payload []byte, targetModel string) ([]byte, SanitizeReport) {
-	return SanitizeClaudeMessagesSignaturesForTarget(
+func SanitizeClaudeMessagesForClaudeUpstream(
+	payload []byte,
+	targetModel string,
+	preserveThinkingBlocks ...bool,
+) ([]byte, SanitizeReport) {
+	preserveThinking := len(preserveThinkingBlocks) > 0 && preserveThinkingBlocks[0]
+	return sanitizeClaudeMessagesSignaturesForTarget(
 		payload, ClaudeMessagesSanitizeOptions{
 			TargetProvider:                ProviderClaude,
 			TargetModel:                   targetModel,
 			DropEmptyMessages:             true,
 			DropToolSignatures:            true,
-			DropEmptyThinkingPlaceholders: true,
+			DropEmptyThinkingPlaceholders: !preserveThinking,
+			PreserveThinkingBlocks:        preserveThinking,
 		},
 	)
 }
 
-func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessagesSanitizeOptions) (
+func sanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessagesSanitizeOptions) (
 	[]byte,
 	SanitizeReport,
 ) {
 	targetProvider := normalizeTargetProvider(opts.TargetProvider)
-	if targetProvider == ProviderUnknown && opts.TargetModel != "" {
+	if targetProvider == providerUnknown && opts.TargetModel != "" {
 		targetProvider = ProviderFromModelName(opts.TargetModel)
 	}
 	report := SanitizeReport{TargetProvider: targetProvider}
@@ -77,9 +83,9 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 				}
 				for _, decision := range decisions {
 					switch decision.Action {
-					case ActionPreserve:
+					case actionPreserve:
 						report.Preserved++
-					case ActionReplaceWithGeminiBypass:
+					case actionReplaceWithGeminiBypass:
 						report.ReplacedSignatures++
 					default:
 						report.DroppedSignatures++
@@ -99,11 +105,16 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 			}
 
 			rawSignature := part.Get("signature").String()
-			decision := DecideCompatibility(targetProvider, rawSignature, BlockKindClaudeThinking)
+			if opts.PreserveThinkingBlocks {
+				report.Preserved++
+				keptParts = append(keptParts, part.Raw)
+				continue
+			}
+			decision := decideCompatibility(targetProvider, rawSignature, BlockKindClaudeThinking)
 			decision.Reason = fmt.Sprintf("messages[%d].content[%d]: %s", i, j, decision.Reason)
 			report.Decisions = append(report.Decisions, decision)
 			switch decision.Action {
-			case ActionPreserve:
+			case actionPreserve:
 				report.Preserved++
 				if decision.NormalizedSignature != "" && decision.NormalizedSignature != rawSignature {
 					updated, _ := sjson.Set(part.Raw, "signature", decision.NormalizedSignature)
@@ -112,12 +123,12 @@ func SanitizeClaudeMessagesSignaturesForTarget(payload []byte, opts ClaudeMessag
 					continue
 				}
 				keptParts = append(keptParts, part.Raw)
-			case ActionReplaceWithGeminiBypass:
+			case actionReplaceWithGeminiBypass:
 				report.ReplacedSignatures++
 				updated, _ := sjson.Set(part.Raw, "signature", decision.ReplacementSignature)
 				keptParts = append(keptParts, updated)
 				messageModified = true
-			case ActionDropSignature:
+			case actionDropSignature:
 				report.DroppedSignatures++
 				updated, _ := sjson.Delete(part.Raw, "signature")
 				keptParts = append(keptParts, updated)
@@ -187,16 +198,16 @@ func sanitizeClaudeToolUseSignature(part gjson.Result, targetProvider Provider, 
 		} else if targetProvider == ProviderGPT {
 			blockKind = BlockKindGPTReasoning
 		}
-		decision := DecideCompatibility(targetProvider, sigResult.String(), blockKind)
+		decision := decideCompatibility(targetProvider, sigResult.String(), blockKind)
 		decision.Reason = fmt.Sprintf("messages[%d].content[%d].%s: %s", messageIdx, partIdx, sigPath, decision.Reason)
 		decisions = append(decisions, decision)
 		switch decision.Action {
-		case ActionPreserve:
+		case actionPreserve:
 			if decision.NormalizedSignature != "" && decision.NormalizedSignature != sigResult.String() {
 				updated, _ = sjson.Set(updated, sigPath, decision.NormalizedSignature)
 				changed = true
 			}
-		case ActionReplaceWithGeminiBypass:
+		case actionReplaceWithGeminiBypass:
 			updated, _ = sjson.Set(updated, sigPath, decision.ReplacementSignature)
 			changed = true
 		default:

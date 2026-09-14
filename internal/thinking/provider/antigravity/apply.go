@@ -15,14 +15,14 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// Applier applies thinking configuration for Antigravity API format.
-type Applier struct{}
+// applier applies thinking configuration for Antigravity API format.
+type applier struct{}
 
-var _ thinking.ProviderApplier = (*Applier)(nil)
+var _ thinking.ProviderApplier = (*applier)(nil)
 
 // newApplier creates a new Antigravity thinking applier.
-func newApplier() *Applier {
-	return &Applier{}
+func newApplier() *applier {
+	return &applier{}
 }
 
 func init() {
@@ -34,7 +34,7 @@ func init() {
 // For Claude models, additional constraints are applied:
 //   - Ensure thinking budget < max_tokens
 //   - Remove thinkingConfig if budget < minimum allowed
-func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
 		return a.applyCompatible(body, config, modelInfo)
 	}
@@ -62,7 +62,7 @@ func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry
 	return a.applyBudgetFormat(body, config, modelInfo, isClaude)
 }
 
-func (a *Applier) applyCompatible(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) (
+func (a *applier) applyCompatible(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) (
 	[]byte,
 	error,
 ) {
@@ -88,7 +88,7 @@ func (a *Applier) applyCompatible(body []byte, config thinking.Config, modelInfo
 }
 
 // applyBudgetFormat applies Claude-specific budget normalization then delegates to shared logic.
-func (a *Applier) applyBudgetFormat(
+func (a *applier) applyBudgetFormat(
 	body []byte,
 	config thinking.Config,
 	modelInfo *registry.ModelInfo,
@@ -116,7 +116,7 @@ func (a *Applier) applyBudgetFormat(
 //
 // Returns the normalized budget and updated payload.
 // Returns budget=-2 as a sentinel indicating thinkingConfig was removed entirely.
-func (a *Applier) normalizeClaudeBudget(budget int, payload []byte, modelInfo *registry.ModelInfo) (int, []byte) {
+func (a *applier) normalizeClaudeBudget(budget int, payload []byte, modelInfo *registry.ModelInfo) (int, []byte) {
 	if modelInfo == nil {
 		return budget, payload
 	}
@@ -149,7 +149,7 @@ func (a *Applier) normalizeClaudeBudget(budget int, payload []byte, modelInfo *r
 // effectiveMaxTokens returns the max tokens to cap thinking:
 // prefer request-provided maxOutputTokens; otherwise fall back to model default.
 // The boolean indicates whether the value came from the model default (and thus should be written back).
-func (a *Applier) effectiveMaxTokens(payload []byte, modelInfo *registry.ModelInfo) (max int, fromModel bool) {
+func (a *applier) effectiveMaxTokens(payload []byte, modelInfo *registry.ModelInfo) (max int, fromModel bool) {
 	if maxTok := gjson.GetBytes(
 		payload, "request.generationConfig.maxOutputTokens",
 	); maxTok.Exists() && maxTok.Int() > 0 {

@@ -16,17 +16,17 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 )
 
-// Applier applies thinking configuration for Gemini models.
+// applier applies thinking configuration for Gemini models.
 //
 // Gemini-specific behavior:
 //   - Gemini 2.5: thinkingBudget format, flash series supports ZeroAllowed
 //   - Gemini 3.x: thinkingLevel format, cannot be disabled
 //   - Use ThinkingSupport.Levels to decide output format
-type Applier struct{}
+type applier struct{}
 
 // newApplier creates a new Gemini thinking applier.
-func newApplier() *Applier {
-	return &Applier{}
+func newApplier() *applier {
+	return &applier{}
 }
 
 func init() {
@@ -56,7 +56,7 @@ func init() {
 //	    }
 //	  }
 //	}
-func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
 		return thinking.ApplyGeminiCompatible(body, config, applyLevel, applyBudget)
 	}

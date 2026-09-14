@@ -148,6 +148,10 @@ func validateConfig(
 	// Convert ModeAuto to mid-range if dynamic not allowed
 	if config.Mode == ModeAuto && !support.DynamicAllowed {
 		config = convertAutoToMidRange(config, support, toFormat, model)
+		if config.Mode == ModeLevel && len(support.Levels) > 0 &&
+			!isLevelSupported(string(config.Level), support.Levels) {
+			config.Level = clampLevel(config.Level, modelInfo, toFormat)
+		}
 	}
 
 	if config.Mode == ModeNone && toFormat == "claude" {
@@ -164,9 +168,10 @@ func validateConfig(
 			// Level-based config: budget is irrelevant, no clamping needed.
 		}
 
-		// ModeNone with clamped Budget > 0: set Level to lowest for Level-only/Hybrid models
-		// This ensures Apply layer doesn't need to access support.Levels
-		if config.Mode == ModeNone && config.Budget > 0 && len(support.Levels) > 0 {
+		// A model that cannot disable thinking falls back to its lowest supported level.
+		cannotDisableLevelModel := !support.ZeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
+		if config.Mode == ModeNone && len(support.Levels) > 0 &&
+			(config.Budget > 0 || cannotDisableLevelModel) {
 			config.Level = Level(support.Levels[0])
 		}
 	}

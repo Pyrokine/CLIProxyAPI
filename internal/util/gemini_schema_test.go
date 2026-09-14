@@ -735,6 +735,37 @@ func TestCleanJSONSchemaForAntigravity_EmptySchemaWithDescription(t *testing.T) 
 	}
 }
 
+func TestCleanJSONSchemaForAntigravityResponseDoesNotAddToolPlaceholders(t *testing.T) {
+	bare := gjson.Parse(CleanJSONSchemaForAntigravityResponse(`{"type":"object"}`))
+	if bare.Get("properties.reason").Exists() || bare.Get("required").Exists() {
+		t.Fatalf("bare response schema gained tool placeholders: %s", bare.Raw)
+	}
+
+	input := `{
+		"type":"object",
+		"title":"Response",
+		"nullable":true,
+		"properties":{
+			"empty":{"type":"object"},
+			"optional":{"type":"object","properties":{"value":{"type":"string"}}}
+		}
+	}`
+	result := gjson.Parse(CleanJSONSchemaForAntigravityResponse(input))
+	for _, path := range []string{
+		"properties.empty.properties.reason",
+		"properties.empty.required",
+		"properties.optional.properties._",
+		"properties.optional.required",
+	} {
+		if result.Get(path).Exists() {
+			t.Errorf("response schema gained tool-only field %s: %s", path, result.Raw)
+		}
+	}
+	if result.Get("title").String() != "Response" || !result.Get("nullable").Bool() {
+		t.Errorf("Antigravity response metadata was removed: %s", result.Raw)
+	}
+}
+
 // ============================================================================
 // Format field handling (ad-hoc patch removal)
 // ============================================================================
@@ -921,6 +952,113 @@ func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *test
 
 	result := CleanJSONSchemaForGemini(input)
 	compareJSON(t, expected, result)
+}
+
+func TestCleanJSONSchemaForGeminiRemovesAdditionalMetadataAndPreservesPropertyNames(t *testing.T) {
+	input := `{
+		"$comment":"root comment",
+		"type":"object",
+		"properties":{
+			"payload":{
+				"type":"string",
+				"enum":["a","b"],
+				"enumDescriptions":["Alpha","Beta"]
+			},
+			"$comment":{"type":"string"},
+			"enumDescriptions":{"type":"array"}
+		}
+	}`
+
+	result := CleanJSONSchemaForGemini(input)
+
+	if gjson.Get(result, "$comment").Exists() {
+		t.Fatalf("root $comment should be removed: %s", result)
+	}
+	if gjson.Get(result, "properties.payload.enumDescriptions").Exists() {
+		t.Fatalf("enumDescriptions metadata should be removed: %s", result)
+	}
+	if !gjson.Get(result, "properties.\\$comment").Exists() {
+		t.Fatalf("$comment property definition should be preserved: %s", result)
+	}
+	if !gjson.Get(result, "properties.enumDescriptions").Exists() {
+		t.Fatalf("enumDescriptions property definition should be preserved: %s", result)
+	}
+}
+
+func TestIsPropertyDefinitionDistinguishesPropertyNamedProperties(t *testing.T) {
+	for path, want := range map[string]bool{
+		"":                                    false,
+		"properties":                          true,
+		"properties.properties":               false,
+		"properties.properties.properties":    true,
+		"properties.records.items.properties": true,
+		"properties.records.items":            false,
+		"schema.properties":                   true,
+		"request.tools.0.functionDeclarations.0.parameters":                       false,
+		"request.tools.0.functionDeclarations.0.parameters.properties":            true,
+		"request.tools.0.functionDeclarations.0.parameters.properties.properties": false,
+		"$defs":                          true,
+		"$defs.properties":               false,
+		"properties.$defs":               false,
+		"properties.a.patternProperties": true,
+		"properties.patternProperties":   false,
+	} {
+		if got := isPropertyDefinition(path); got != want {
+			t.Errorf("isPropertyDefinition(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+func TestCleanJSONSchemaStripsPropertyNamesUnderPropertyNamedProperties(t *testing.T) {
+	shapes := map[string]string{
+		"arrayItem": `{"type":"object","properties":{"records":{"type":"array","items":{"type":"object",` +
+			`"properties":{"name":{"type":"string"}},"propertyNames":{"type":"string"}}}}}`,
+		"propertyNamedProperties": `{"type":"object","properties":{"properties":{"type":"object",` +
+			`"propertyNames":{"type":"string"}}}}`,
+		"combined": `{"type":"object","properties":{"pages":{"type":"array","items":{"type":"object",` +
+			`"properties":{"properties":{"type":"object","propertyNames":{"type":"string"},` +
+			`"additionalProperties":true}},"propertyNames":{"type":"string"}}}}}`,
+	}
+
+	for name, schema := range shapes {
+		for cleaner, clean := range map[string]func(string) string{
+			"antigravity":         CleanJSONSchemaForAntigravity,
+			"gemini":              CleanJSONSchemaForGemini,
+			"antigravityResponse": CleanJSONSchemaForAntigravityResponse,
+		} {
+			got := clean(schema)
+			if strings.Contains(got, `"propertyNames"`) {
+				t.Errorf("%s/%s: propertyNames survived cleaning: %s", name, cleaner, got)
+			}
+			if strings.Contains(got, `"additionalProperties"`) {
+				t.Errorf("%s/%s: additionalProperties survived cleaning: %s", name, cleaner, got)
+			}
+		}
+	}
+}
+
+func TestCleanJSONSchemaKeepsPropertiesNamedLikeKeywords(t *testing.T) {
+	input := `{"type":"object","properties":{
+		"propertyNames":{"type":"string"},
+		"patternProperties":{"type":"string"},
+		"properties":{"type":"object","properties":{"propertyNames":{"type":"string"}}}
+	}}`
+
+	for cleaner, clean := range map[string]func(string) string{
+		"antigravity": CleanJSONSchemaForAntigravity,
+		"gemini":      CleanJSONSchemaForGemini,
+	} {
+		got := gjson.Parse(clean(input))
+		for _, path := range []string{
+			"properties.propertyNames",
+			"properties.patternProperties",
+			"properties.properties.properties.propertyNames",
+		} {
+			if !got.Get(path).Exists() {
+				t.Errorf("%s: property %s was removed: %s", cleaner, path, got.Raw)
+			}
+		}
+	}
 }
 
 func TestRemoveExtensionFields(t *testing.T) {

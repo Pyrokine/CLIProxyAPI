@@ -9,14 +9,14 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 )
 
-// Applier applies thinking configuration for Gemini CLI API format.
-type Applier struct{}
+// applier applies thinking configuration for Gemini CLI API format.
+type applier struct{}
 
-var _ thinking.ProviderApplier = (*Applier)(nil)
+var _ thinking.ProviderApplier = (*applier)(nil)
 
 // newApplier creates a new Gemini CLI thinking applier.
-func newApplier() *Applier {
-	return &Applier{}
+func newApplier() *applier {
+	return &applier{}
 }
 
 func init() {
@@ -24,7 +24,7 @@ func init() {
 }
 
 // Apply applies thinking configuration to Gemini CLI request body.
-func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	if thinking.IsUserDefinedModel(modelInfo) {
 		return thinking.ApplyGeminiCompatible(body, config, applyLevel, applyBudget)
 	}

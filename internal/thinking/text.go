@@ -5,11 +5,8 @@ import (
 )
 
 // GetThinkingText extracts the thinking text from a content part.
-// Handles various formats:
-// - Simple string: { "thinking": "text" } or { "text": "text" }
-// - Wrapped object: { "thinking": { "text": "text", "cache_control": {...} } }
-// - Gemini-style: { "thought": true, "text": "text" }
-// Returns the extracted text string.
+// It accepts a string in the thinking or text field, a thinking object with
+// nested text, and Gemini content that marks text as a thought.
 func GetThinkingText(part gjson.Result) string {
 	// Try direct text field first (Gemini-style)
 	if text := part.Get("text"); text.Exists() && text.Type == gjson.String {

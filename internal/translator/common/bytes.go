@@ -9,8 +9,8 @@ import (
 )
 
 // EchoRequestFields copies known OpenAI Responses API request fields from req
-// into dest under the given key prefix. For streaming response.completed events
-// the prefix is "response." ; for non-streaming responses it is "".
+// into dest under the given key prefix. The prefix is "response." for streaming
+// response.completed events and empty for non-streaming responses.
 func EchoRequestFields(dest []byte, req gjson.Result, prefix string) []byte {
 	type field struct {
 		key  string
@@ -68,15 +68,15 @@ type ClaudeBlockState struct {
 	HasContent    bool // Whether any content has been emitted
 }
 
-// ClaudeSSEEvent is a single SSE event to emit.
-type ClaudeSSEEvent struct {
+// claudeSSEEvent is a single SSE event to emit.
+type claudeSSEEvent struct {
 	Event string
 	Data  string
 }
 
 // EmitTextOrThinkingBlock generates the SSE events needed to stream a Gemini
 // text/thought part as Claude-format content blocks. It mutates st in place.
-func EmitTextOrThinkingBlock(st *ClaudeBlockState, text string, isThought bool) []ClaudeSSEEvent {
+func EmitTextOrThinkingBlock(st *ClaudeBlockState, text string, isThought bool) []claudeSSEEvent {
 	var (
 		targetType int
 		deltaType  string
@@ -99,16 +99,16 @@ func EmitTextOrThinkingBlock(st *ClaudeBlockState, text string, isThought bool) 
 		return string(data)
 	}
 
-	var events []ClaudeSSEEvent
+	var events []claudeSSEEvent
 	if st.ResponseType == targetType {
 		// Continue existing block
-		events = append(events, ClaudeSSEEvent{"content_block_delta", makeDelta()})
+		events = append(events, claudeSSEEvent{"content_block_delta", makeDelta()})
 		st.HasContent = true
 	} else {
 		// Transition: close existing block if any
 		if st.ResponseType != 0 {
 			events = append(
-				events, ClaudeSSEEvent{
+				events, claudeSSEEvent{
 					"content_block_stop",
 					fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, st.ResponseIndex),
 				},
@@ -117,7 +117,7 @@ func EmitTextOrThinkingBlock(st *ClaudeBlockState, text string, isThought bool) 
 		}
 		// Start new block
 		events = append(
-			events, ClaudeSSEEvent{
+			events, claudeSSEEvent{
 				"content_block_start",
 				fmt.Sprintf(
 					`{"type":"content_block_start","index":%d,"content_block":{"type":"%s","%s":""}}`,
@@ -125,7 +125,7 @@ func EmitTextOrThinkingBlock(st *ClaudeBlockState, text string, isThought bool) 
 				),
 			},
 		)
-		events = append(events, ClaudeSSEEvent{"content_block_delta", makeDelta()})
+		events = append(events, claudeSSEEvent{"content_block_delta", makeDelta()})
 		st.ResponseType = targetType
 		st.HasContent = true
 	}
@@ -158,6 +158,53 @@ func ClaudeInputTokensJSON(count int64) []byte {
 	return out
 }
 
+func NewRawArrayItems(count int64) [][]byte {
+	if count <= 0 {
+		return nil
+	}
+	return make([][]byte, 0, int(count))
+}
+
+func JoinRawArray(items [][]byte) []byte {
+	if len(items) == 0 {
+		return []byte("[]")
+	}
+	size := len(items) + 1
+	for _, item := range items {
+		size += len(item)
+	}
+	out := make([]byte, 0, size)
+	out = append(out, '[')
+	for index, item := range items {
+		if index > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item...)
+	}
+	return append(out, ']')
+}
+
+// SetRawArrayItems replaces an empty JSON array at path with raw items.
+// The single-item path avoids allocating an intermediate joined array.
+func SetRawArrayItems(data []byte, path string, items [][]byte) []byte {
+	if len(items) == 0 {
+		return data
+	}
+	if len(items) == 1 {
+		array := gjson.GetBytes(data, path)
+		if array.Raw == "[]" && array.Index >= 0 && array.Index+len(array.Raw) <= len(data) {
+			out := make([]byte, 0, len(data)+len(items[0]))
+			out = append(out, data[:array.Index]...)
+			out = append(out, '[')
+			out = append(out, items[0]...)
+			out = append(out, ']')
+			return append(out, data[array.Index+len(array.Raw):]...)
+		}
+	}
+	data, _ = sjson.SetRawBytes(data, path, JoinRawArray(items))
+	return data
+}
+
 func SSEEventData(event string, payload []byte) []byte {
 	out := make([]byte, 0, len(event)+len(payload)+16)
 	out = append(out, "event: "...)
@@ -175,7 +222,7 @@ func AppendSSEEventString(out []byte, event, payload string, trailingNewlines in
 	out = append(out, '\n')
 	out = append(out, "data: "...)
 	out = append(out, payload...)
-	for i := 0; i < trailingNewlines; i++ {
+	for range trailingNewlines {
 		out = append(out, '\n')
 	}
 	return out
@@ -187,7 +234,7 @@ func AppendSSEEventBytes(out []byte, event string, payload []byte, trailingNewli
 	out = append(out, '\n')
 	out = append(out, "data: "...)
 	out = append(out, payload...)
-	for i := 0; i < trailingNewlines; i++ {
+	for range trailingNewlines {
 		out = append(out, '\n')
 	}
 	return out

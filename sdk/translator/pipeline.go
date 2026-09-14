@@ -1,5 +1,7 @@
 package translator
 
+import "slices"
+
 import "context"
 
 // RequestEnvelope represents a request in the translation pipeline.
@@ -73,8 +75,8 @@ func (p *Pipeline) TranslateRequest(ctx context.Context, from, to Format, req Re
 	}
 
 	handler := terminal
-	for i := len(p.requestMiddleware) - 1; i >= 0; i-- {
-		mw := p.requestMiddleware[i]
+	for _, mw := range slices.Backward(p.requestMiddleware) {
+
 		next := handler
 		handler = func(ctx context.Context, r RequestEnvelope) (RequestEnvelope, error) {
 			return mw(ctx, r, next)
@@ -107,8 +109,8 @@ func (p *Pipeline) TranslateResponse(
 	}
 
 	handler := terminal
-	for i := len(p.responseMiddleware) - 1; i >= 0; i-- {
-		mw := p.responseMiddleware[i]
+	for _, mw := range slices.Backward(p.responseMiddleware) {
+
 		next := handler
 		handler = func(ctx context.Context, r ResponseEnvelope) (ResponseEnvelope, error) {
 			return mw(ctx, r, next)

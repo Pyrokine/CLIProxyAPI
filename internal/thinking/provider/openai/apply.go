@@ -10,19 +10,19 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 )
 
-// Applier implements thinking.ProviderApplier for OpenAI models.
+// applier implements thinking.ProviderApplier for OpenAI models.
 //
 // OpenAI-specific behavior:
 //   - Output format: reasoning_effort (string: low/medium/high/xhigh)
 //   - Level-only mode: no numeric budget support
 //   - Some models support ZeroAllowed (gpt-5.1, gpt-5.2)
-type Applier struct{}
+type applier struct{}
 
-var _ thinking.ProviderApplier = (*Applier)(nil)
+var _ thinking.ProviderApplier = (*applier)(nil)
 
 // newApplier creates a new OpenAI thinking applier.
-func newApplier() *Applier {
-	return &Applier{}
+func newApplier() *applier {
+	return &applier{}
 }
 
 func init() {
@@ -36,6 +36,6 @@ func init() {
 //	{
 //	  "reasoning_effort": "high"
 //	}
-func (a *Applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
+func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) ([]byte, error) {
 	return thinking.ApplyReasoningEffort(body, config, modelInfo, thinking.OpenAIEffortField)
 }
