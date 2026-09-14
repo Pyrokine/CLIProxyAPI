@@ -8,6 +8,7 @@ import (
 	"time"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -23,9 +24,15 @@ type antigravityToInteractionsStreamState struct {
 	ActiveStepType  string
 	ActiveStepIndex int
 	StepIndex       int
+	ToolNameMap     map[string]string
 }
 
-func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func convertAntigravityResponseToInteractions(
+	ctx context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) [][]byte {
 	_ = ctx
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
@@ -34,7 +41,10 @@ func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName str
 		param = &local
 	}
 	if *param == nil {
-		*param = &antigravityToInteractionsStreamState{ID: fmt.Sprintf("interaction_%d", time.Now().UnixNano())}
+		*param = &antigravityToInteractionsStreamState{
+			ID:          fmt.Sprintf("interaction_%d", time.Now().UnixNano()),
+			ToolNameMap: util.DisambiguatedToolNameMap(originalRequestRawJSON),
+		}
 	}
 	st := (*param).(*antigravityToInteractionsStreamState)
 	payloads := antigravityStreamPayloads(rawJSON)
@@ -49,6 +59,7 @@ func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName str
 			continue
 		}
 		root := unwrapAntigravityResponse(gjson.ParseBytes(payload))
+		root = restoreInteractionsFunctionNames(root, st.ToolNameMap)
 		if !root.Exists() {
 			continue
 		}
@@ -57,10 +68,12 @@ func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName str
 			out = appendAntigravityInteractionsStatusUpdate(out, st)
 			st.Started = true
 		}
-		root.Get("candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
-			out = appendAntigravityPartToInteractionsStream(out, st, part)
-			return true
-		})
+		root.Get("candidates.0.content.parts").ForEach(
+			func(_, part gjson.Result) bool {
+				out = appendAntigravityPartToInteractionsStream(out, st, part)
+				return true
+			},
+		)
 		hasFinish := root.Get("candidates.0.finishReason").Exists()
 		hasUsage := hasAntigravityStreamUsage(root)
 		if hasFinish && !st.Finished {
@@ -74,11 +87,16 @@ func ConvertAntigravityResponseToInteractions(ctx context.Context, modelName str
 	return out
 }
 
-func ConvertAntigravityResponseToInteractionsNonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func convertAntigravityResponseToInteractionsNonStream(
+	ctx context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_ *any,
+) []byte {
 	_ = ctx
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	root := unwrapAntigravityResponse(gjson.ParseBytes(rawJSON))
+	root = restoreInteractionsFunctionNames(root, util.DisambiguatedToolNameMap(originalRequestRawJSON))
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
 	id := root.Get("responseId").String()
 	if id == "" {
@@ -86,12 +104,14 @@ func ConvertAntigravityResponseToInteractionsNonStream(ctx context.Context, mode
 	}
 	out, _ = sjson.SetBytes(out, "id", id)
 	out, _ = sjson.SetBytes(out, "model", modelName)
-	root.Get("candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
-		if step := antigravityPartToInteractionsStep(part); len(step) > 0 {
-			out, _ = sjson.SetRawBytes(out, "steps.-1", step)
-		}
-		return true
-	})
+	root.Get("candidates.0.content.parts").ForEach(
+		func(_, part gjson.Result) bool {
+			if step := antigravityPartToInteractionsStep(part); len(step) > 0 {
+				out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+			}
+			return true
+		},
+	)
 	out = setInteractionsUsageFromAntigravity(out, "usage", root)
 	return out
 }
@@ -104,14 +124,16 @@ func antigravityStreamPayloads(rawJSON []byte) [][]byte {
 	root := gjson.ParseBytes(trimmed)
 	if root.IsArray() {
 		payloads := make([][]byte, 0)
-		root.ForEach(func(_, item gjson.Result) bool {
-			if response := item.Get("response"); response.Exists() {
-				payloads = append(payloads, []byte(response.Raw))
-			} else if item.Exists() {
-				payloads = append(payloads, []byte(item.Raw))
-			}
-			return true
-		})
+		root.ForEach(
+			func(_, item gjson.Result) bool {
+				if response := item.Get("response"); response.Exists() {
+					payloads = append(payloads, []byte(response.Raw))
+				} else if item.Exists() {
+					payloads = append(payloads, []byte(item.Raw))
+				}
+				return true
+			},
+		)
 		if len(payloads) > 0 {
 			return payloads
 		}
@@ -127,6 +149,36 @@ func unwrapAntigravityResponse(root gjson.Result) gjson.Result {
 	return restoreAntigravityUsageMetadata(root)
 }
 
+func restoreInteractionsFunctionNames(root gjson.Result, nameMap map[string]string) gjson.Result {
+	if !root.Exists() || len(nameMap) == 0 {
+		return root
+	}
+	raw := []byte(root.Raw)
+	for candidateIndex, candidate := range root.Get("candidates").Array() {
+		for partIndex, part := range candidate.Get("content.parts").Array() {
+			for _, field := range []string{"functionCall", "functionResponse"} {
+				nameResult := part.Get(field + ".name")
+				name := nameResult.String()
+				if name == "" {
+					continue
+				}
+				restoredName := util.RestoreSanitizedToolName(nameMap, name)
+				if nameResult.Type == gjson.String && restoredName == name {
+					continue
+				}
+				path := fmt.Sprintf(
+					"candidates.%d.content.parts.%d.%s.name",
+					candidateIndex,
+					partIndex,
+					field,
+				)
+				raw, _ = sjson.SetBytes(raw, path, restoredName)
+			}
+		}
+	}
+	return gjson.ParseBytes(raw)
+}
+
 func restoreAntigravityUsageMetadata(root gjson.Result) gjson.Result {
 	if !root.Get("usageMetadata").Exists() {
 		if cpaUsage := root.Get("cpaUsageMetadata"); cpaUsage.Exists() {
@@ -138,7 +190,11 @@ func restoreAntigravityUsageMetadata(root gjson.Result) gjson.Result {
 	return root
 }
 
-func appendAntigravityInteractionsCreated(out [][]byte, st *antigravityToInteractionsStreamState, modelName string) [][]byte {
+func appendAntigravityInteractionsCreated(
+	out [][]byte,
+	st *antigravityToInteractionsStreamState,
+	modelName string,
+) [][]byte {
 	created := []byte(`{"interaction":{"id":"","status":"in_progress","object":"interaction","model":""},"event_type":"interaction.created"}`)
 	created, _ = sjson.SetBytes(created, "interaction.id", st.ID)
 	created, _ = sjson.SetBytes(created, "interaction.model", modelName)
@@ -151,7 +207,12 @@ func appendAntigravityInteractionsStatusUpdate(out [][]byte, st *antigravityToIn
 	return append(out, translatorcommon.SSEEventData("interaction.status_update", statusUpdate))
 }
 
-func appendAntigravityInteractionsCompleted(out [][]byte, st *antigravityToInteractionsStreamState, modelName string, root gjson.Result) [][]byte {
+func appendAntigravityInteractionsCompleted(
+	out [][]byte,
+	st *antigravityToInteractionsStreamState,
+	modelName string,
+	root gjson.Result,
+) [][]byte {
 	now := time.Now().UTC().Format(time.RFC3339)
 	completed := []byte(`{"interaction":{"id":"","status":"completed","usage":{},"created":"","updated":"","service_tier":"standard","object":"interaction","model":""},"event_type":"interaction.completed"}`)
 	completed, _ = sjson.SetBytes(completed, "interaction.id", st.ID)
@@ -175,7 +236,12 @@ func appendAntigravityInteractionsDone(out [][]byte, st *antigravityToInteractio
 	return out
 }
 
-func appendAntigravityInteractionsStepStart(out [][]byte, st *antigravityToInteractionsStreamState, stepType string, part gjson.Result) [][]byte {
+func appendAntigravityInteractionsStepStart(
+	out [][]byte,
+	st *antigravityToInteractionsStreamState,
+	stepType string,
+	part gjson.Result,
+) [][]byte {
 	st.StepID = fmt.Sprintf("step_%d", time.Now().UnixNano())
 	st.ActiveStepIndex = st.StepIndex
 	st.StepIndex++
@@ -209,7 +275,12 @@ func appendAntigravityInteractionsStepStop(out [][]byte, st *antigravityToIntera
 	return out
 }
 
-func ensureAntigravityInteractionsStep(out [][]byte, st *antigravityToInteractionsStreamState, stepType string, part gjson.Result) [][]byte {
+func ensureAntigravityInteractionsStep(
+	out [][]byte,
+	st *antigravityToInteractionsStreamState,
+	stepType string,
+	part gjson.Result,
+) [][]byte {
 	if st.ActiveStepOpen && st.ActiveStepType == stepType {
 		return out
 	}
@@ -217,7 +288,11 @@ func ensureAntigravityInteractionsStep(out [][]byte, st *antigravityToInteractio
 	return appendAntigravityInteractionsStepStart(out, st, stepType, part)
 }
 
-func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToInteractionsStreamState, part gjson.Result) [][]byte {
+func appendAntigravityPartToInteractionsStream(
+	out [][]byte,
+	st *antigravityToInteractionsStreamState,
+	part gjson.Result,
+) [][]byte {
 	if text := part.Get("text"); text.Exists() && text.String() != "" {
 		if part.Get("thought").Bool() {
 			out = ensureAntigravityInteractionsStep(out, st, "thought", gjson.Result{})
@@ -260,7 +335,11 @@ func appendAntigravityPartToInteractionsStream(out [][]byte, st *antigravityToIn
 	return out
 }
 
-func appendAntigravityThoughtSignature(out [][]byte, st *antigravityToInteractionsStreamState, part gjson.Result) [][]byte {
+func appendAntigravityThoughtSignature(
+	out [][]byte,
+	st *antigravityToInteractionsStreamState,
+	part gjson.Result,
+) [][]byte {
 	if signature := antigravityThoughtSignature(part); signature != "" {
 		out = ensureAntigravityInteractionsStep(out, st, "thought", gjson.Result{})
 		signatureDelta := []byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`)
@@ -374,14 +453,25 @@ func setInteractionsUsageFromAntigravity(out []byte, path string, root gjson.Res
 	if !usage.Exists() {
 		return out
 	}
-	out, _ = sjson.SetBytes(out, path+".input_tokens", firstAntigravityUsageInt(usage, "promptTokenCount", "prompt_token_count"))
-	out, _ = sjson.SetBytes(out, path+".output_tokens", firstAntigravityUsageInt(usage, "candidatesTokenCount", "candidates_token_count"))
+	out, _ = sjson.SetBytes(
+		out, path+".input_tokens", firstAntigravityUsageInt(usage, "promptTokenCount", "prompt_token_count"),
+	)
+	out, _ = sjson.SetBytes(
+		out, path+".output_tokens", firstAntigravityUsageInt(usage, "candidatesTokenCount", "candidates_token_count"),
+	)
 	if antigravityUsagePathExists(usage, "thoughtsTokenCount", "thoughts_token_count") {
-		out, _ = sjson.SetBytes(out, path+".reasoning_tokens", firstAntigravityUsageInt(usage, "thoughtsTokenCount", "thoughts_token_count"))
+		out, _ = sjson.SetBytes(
+			out, path+".reasoning_tokens", firstAntigravityUsageInt(usage, "thoughtsTokenCount", "thoughts_token_count"),
+		)
 	}
-	out, _ = sjson.SetBytes(out, path+".total_tokens", firstAntigravityUsageInt(usage, "totalTokenCount", "total_token_count"))
+	out, _ = sjson.SetBytes(
+		out, path+".total_tokens", firstAntigravityUsageInt(usage, "totalTokenCount", "total_token_count"),
+	)
 	if antigravityUsagePathExists(usage, "cachedContentTokenCount", "cached_content_token_count") {
-		out, _ = sjson.SetBytes(out, path+".cached_tokens", firstAntigravityUsageInt(usage, "cachedContentTokenCount", "cached_content_token_count"))
+		out, _ = sjson.SetBytes(
+			out, path+".cached_tokens",
+			firstAntigravityUsageInt(usage, "cachedContentTokenCount", "cached_content_token_count"),
+		)
 	}
 	return out
 }
@@ -398,7 +488,9 @@ func setInteractionsStreamUsageFromAntigravity(out []byte, path string, root gjs
 	cachedTokens := firstAntigravityUsageInt(usage, "cachedContentTokenCount", "cached_content_token_count")
 	out, _ = sjson.SetBytes(out, path+".total_tokens", totalTokens)
 	out, _ = sjson.SetBytes(out, path+".total_input_tokens", inputTokens)
-	out, _ = sjson.SetRawBytes(out, path+".input_tokens_by_modality", []byte(fmt.Sprintf(`[{"modality":"text","tokens":%d}]`, inputTokens)))
+	out, _ = sjson.SetRawBytes(
+		out, path+".input_tokens_by_modality", []byte(fmt.Sprintf(`[{"modality":"text","tokens":%d}]`, inputTokens)),
+	)
 	out, _ = sjson.SetBytes(out, path+".total_cached_tokens", cachedTokens)
 	out, _ = sjson.SetBytes(out, path+".total_output_tokens", outputTokens)
 	out, _ = sjson.SetBytes(out, path+".total_tool_use_tokens", 0)

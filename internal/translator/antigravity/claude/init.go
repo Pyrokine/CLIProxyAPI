@@ -10,10 +10,10 @@ func init() {
 	translator.Register(
 		constant.Claude,
 		constant.Antigravity,
-		ConvertClaudeRequestToAntigravity,
+		convertClaudeRequestToAntigravity,
 		interfaces.TranslateResponse{
-			Stream:     ConvertAntigravityResponseToClaude,
-			NonStream:  ConvertAntigravityResponseToClaudeNonStream,
+			Stream:     convertAntigravityResponseToClaude,
+			NonStream:  convertAntigravityResponseToClaudeNonStream,
 			TokenCount: tokenCount,
 		},
 	)

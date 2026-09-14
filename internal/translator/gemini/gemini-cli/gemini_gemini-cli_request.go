@@ -15,10 +15,10 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertGeminiCLIRequestToGemini transforms a Gemini CLI request into Gemini API format.
+// convertGeminiCLIRequestToGemini transforms a Gemini CLI request into Gemini API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini API.
-func ConvertGeminiCLIRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte {
+func convertGeminiCLIRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 	modelResult := gjson.GetBytes(rawJSON, "model")
 	rawJSON = []byte(gjson.GetBytes(rawJSON, "request").Raw)
@@ -33,11 +33,11 @@ func ConvertGeminiCLIRequestToGemini(_ string, inputRawJSON []byte, _ bool) []by
 	toolsResult := gjson.GetBytes(rawJSON, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() {
 		toolResults := toolsResult.Array()
-		for i := 0; i < len(toolResults); i++ {
+		for i := range toolResults {
 			functionDeclarationsResult := gjson.GetBytes(rawJSON, fmt.Sprintf("tools.%d.function_declarations", i))
 			if functionDeclarationsResult.Exists() && functionDeclarationsResult.IsArray() {
 				functionDeclarationsResults := functionDeclarationsResult.Array()
-				for j := 0; j < len(functionDeclarationsResults); j++ {
+				for j := range functionDeclarationsResults {
 					parametersResult := gjson.GetBytes(
 						rawJSON, fmt.Sprintf("tools.%d.function_declarations.%d.parameters", i, j),
 					)

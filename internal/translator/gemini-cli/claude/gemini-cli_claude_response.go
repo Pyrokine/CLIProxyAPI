@@ -20,10 +20,10 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// Params holds parameters for response conversion and maintains state across streaming chunks.
+// params holds parameters for response conversion and maintains state across streaming chunks.
 // This structure tracks the current state of the response translation process to ensure
 // proper sequencing of SSE events and transitions between different content types.
-type Params struct {
+type params struct {
 	HasFirstResponse bool // Indicates if the initial message_start event has been sent
 	ResponseType     int  // Current response type: 0=none, 1=content, 2=thinking, 3=function
 	ResponseIndex    int  // Index counter for content blocks in the streaming response
@@ -31,9 +31,9 @@ type Params struct {
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
-var toolUseIDCounter uint64
+var toolUseIDCounter atomic.Uint64
 
-// ConvertGeminiCLIResponseToClaude performs sophisticated streaming response format conversion.
+// convertGeminiCLIResponseToClaude performs sophisticated streaming response format conversion.
 // This function implements a complex state machine that translates backend client responses
 // into Claude Code-compatible Server-Sent Events (SSE) format. It manages different response types
 // and handles state transitions between content blocks, thinking processes, and function calls.
@@ -49,9 +49,9 @@ var toolUseIDCounter uint64
 //
 // Returns:
 //   - [][]byte: A slice of bytes, each containing a Claude Code-compatible SSE payload.
-func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
+func convertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
-		*param = &Params{
+		*param = &params{
 			HasFirstResponse: false,
 			ResponseType:     0,
 			ResponseIndex:    0,
@@ -60,7 +60,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		// Only send message_stop if we have actually output content
-		if (*param).(*Params).HasContent {
+		if (*param).(*params).HasContent {
 			return [][]byte{translatorcommon.AppendSSEEventString(nil, "message_stop", `{"type":"message_stop"}`, 3)}
 		}
 		return [][]byte{}
@@ -75,7 +75,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 
 	// Initialize the streaming session with a message_start event
 	// This is only sent for the very first response chunk to establish the streaming session
-	if !(*param).(*Params).HasFirstResponse {
+	if !(*param).(*params).HasFirstResponse {
 		// Create the initial message structure with default values according to Claude Code API specification
 		// This follows the Claude Code API specification for streaming message initialization
 		messageStartTemplate := []byte(`{"type":"message_start","message":{"id":"msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY","type":"message","role":"assistant","content":[],"model":"claude-3-5-sonnet-20241022","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`)
@@ -89,7 +89,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 		}
 		appendEvent("message_start", string(messageStartTemplate))
 
-		(*param).(*Params).HasFirstResponse = true
+		(*param).(*params).HasFirstResponse = true
 	}
 
 	// Process the response parts array from the backend client
@@ -97,7 +97,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
-		for i := 0; i < len(partResults); i++ {
+		for i := range partResults {
 			partResult := partResults[i]
 
 			// Extract the different types of content from each part
@@ -107,18 +107,18 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 			// Handle text content (both regular content and thinking)
 			if partTextResult.Exists() {
 				blockState := &translatorcommon.ClaudeBlockState{
-					ResponseType:  (*param).(*Params).ResponseType,
-					ResponseIndex: (*param).(*Params).ResponseIndex,
-					HasContent:    (*param).(*Params).HasContent,
+					ResponseType:  (*param).(*params).ResponseType,
+					ResponseIndex: (*param).(*params).ResponseIndex,
+					HasContent:    (*param).(*params).HasContent,
 				}
 				for _, ev := range translatorcommon.EmitTextOrThinkingBlock(
 					blockState, partTextResult.String(), partResult.Get("thought").Bool(),
 				) {
 					appendEvent(ev.Event, ev.Data)
 				}
-				(*param).(*Params).ResponseType = blockState.ResponseType
-				(*param).(*Params).ResponseIndex = blockState.ResponseIndex
-				(*param).(*Params).HasContent = blockState.HasContent
+				(*param).(*params).ResponseType = blockState.ResponseType
+				(*param).(*params).ResponseIndex = blockState.ResponseIndex
+				(*param).(*params).HasContent = blockState.HasContent
 			} else if functionCallResult.Exists() {
 				// Handle function/tool calls from the AI model
 				// This processes tool usage requests and formats them for Claude Code API compatibility
@@ -127,12 +127,12 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 
 				// Handle streaming split/delta where name might be empty in subsequent chunks.
 				// If we are already in tool use mode and name is empty, treat as continuation (delta).
-				if (*param).(*Params).ResponseType == 3 && fcName == "" {
+				if (*param).(*params).ResponseType == 3 && fcName == "" {
 					if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
 						data, _ := sjson.SetBytes(
 							[]byte(fmt.Sprintf(
 								`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`,
-								(*param).(*Params).ResponseIndex,
+								(*param).(*params).ResponseIndex,
 							)), "delta.partial_json", fcArgsResult.Raw,
 						)
 						appendEvent("content_block_delta", string(data))
@@ -142,29 +142,29 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 
 				// Handle state transitions when switching to function calls
 				// Close any existing function call block first
-				if (*param).(*Params).ResponseType == 3 {
+				if (*param).(*params).ResponseType == 3 {
 					appendEvent(
 						"content_block_stop",
-						fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex),
+						fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*params).ResponseIndex),
 					)
-					(*param).(*Params).ResponseIndex++
-					(*param).(*Params).ResponseType = 0
+					(*param).(*params).ResponseIndex++
+					(*param).(*params).ResponseType = 0
 				}
 
 				// Special handling for thinking state transition
-				if (*param).(*Params).ResponseType == 2 {
+				if (*param).(*params).ResponseType == 2 {
 					// output = output + "event: content_block_delta\n"
 					// output = output + fmt.Sprintf(`data: {"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":null}}`, (*param).(*Params).ResponseIndex)
 					// output = output + "\n\n\n"
 				}
 
 				// Close any other existing content block
-				if (*param).(*Params).ResponseType != 0 {
+				if (*param).(*params).ResponseType != 0 {
 					appendEvent(
 						"content_block_stop",
-						fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex),
+						fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*params).ResponseIndex),
 					)
-					(*param).(*Params).ResponseIndex++
+					(*param).(*params).ResponseIndex++
 				}
 
 				// Start a new tool use content block
@@ -172,12 +172,12 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 				// Create the tool use block with unique ID and function details
 				data := []byte(fmt.Sprintf(
 					`{"type":"content_block_start","index":%d,"content_block":{"type":"tool_use","id":"","name":"","input":{}}}`,
-					(*param).(*Params).ResponseIndex,
+					(*param).(*params).ResponseIndex,
 				))
 				data, _ = sjson.SetBytes(
 					data, "content_block.id", util.SanitizeClaudeToolID(
 						fmt.Sprintf(
-							"%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1),
+							"%s-%d-%d", fcName, time.Now().UnixNano(), toolUseIDCounter.Add(1),
 						),
 					),
 				)
@@ -188,13 +188,13 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 					data, _ = sjson.SetBytes(
 						[]byte(fmt.Sprintf(
 							`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`,
-							(*param).(*Params).ResponseIndex,
+							(*param).(*params).ResponseIndex,
 						)), "delta.partial_json", fcArgsResult.Raw,
 					)
 					appendEvent("content_block_delta", string(data))
 				}
-				(*param).(*Params).ResponseType = 3
-				(*param).(*Params).HasContent = true
+				(*param).(*params).ResponseType = 3
+				(*param).(*params).HasContent = true
 			}
 		}
 	}
@@ -204,11 +204,11 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 	if usageResult.Exists() && bytes.Contains(rawJSON, []byte(`"finishReason"`)) {
 		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
 			// Only send final events if we have actually output content
-			if (*param).(*Params).HasContent {
+			if (*param).(*params).HasContent {
 				// Close the final content block
 				appendEvent(
 					"content_block_stop",
-					fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*Params).ResponseIndex),
+					fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, (*param).(*params).ResponseIndex),
 				)
 
 				// Create the message delta template with appropriate stop reason
@@ -237,7 +237,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 	return [][]byte{output}
 }
 
-// ConvertGeminiCLIResponseToClaudeNonStream converts a non-streaming Gemini CLI response to a non-streaming Claude response.
+// convertGeminiCLIResponseToClaudeNonStream converts a non-streaming Gemini CLI response to a non-streaming Claude response.
 //
 // Parameters:
 //   - ctx: The context for the request.
@@ -247,7 +247,7 @@ func ConvertGeminiCLIResponseToClaude(_ context.Context, _ string, _, _, rawJSON
 //
 // Returns:
 //   - []byte: A Claude-compatible JSON response.
-func ConvertGeminiCLIResponseToClaudeNonStream(
+func convertGeminiCLIResponseToClaudeNonStream(
 	_ context.Context,
 	_ string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,

@@ -1,15 +1,14 @@
 package common
 
 import (
-	"fmt"
-
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// DefaultSafetySettings returns the default Gemini safety configuration we attach to requests.
-func DefaultSafetySettings() []map[string]string {
+// defaultSafetySettings returns the default Gemini safety configuration we attach to requests.
+func defaultSafetySettings() []map[string]string {
 	return []map[string]string{
 		{
 			"category":  "HARM_CATEGORY_HARASSMENT",
@@ -37,11 +36,11 @@ func DefaultSafetySettings() []map[string]string {
 // AttachDefaultSafetySettings ensures the default safety settings are present when absent.
 // The caller must provide the target JSON path (e.g. "safetySettings" or "request.safetySettings").
 func AttachDefaultSafetySettings(rawJSON []byte, path string) []byte {
-	if gjson.GetBytes(rawJSON, path).Exists() {
+	if util.GetGJSONBytesNoCopy(rawJSON, path).Exists() {
 		return rawJSON
 	}
 
-	out, err := sjson.SetBytes(rawJSON, path, DefaultSafetySettings())
+	out, err := sjson.SetBytes(rawJSON, path, defaultSafetySettings())
 	if err != nil {
 		return rawJSON
 	}
@@ -50,33 +49,73 @@ func AttachDefaultSafetySettings(rawJSON []byte, path string) []byte {
 }
 
 func CleanToolSchemas(rawJSON []byte) []byte {
-	out := rawJSON
-	tools := gjson.GetBytes(out, "tools")
+	tools := util.GetGJSONBytesNoCopy(rawJSON, "tools")
 	if !tools.IsArray() {
-		return out
+		return rawJSON
 	}
 
-	for toolIndex := range tools.Array() {
-		for _, declarationsKey := range []string{"functionDeclarations", "function_declarations"} {
-			declarationsPath := fmt.Sprintf("tools.%d.%s", toolIndex, declarationsKey)
-			declarations := gjson.GetBytes(out, declarationsPath)
-			if !declarations.IsArray() {
-				continue
-			}
-			for declarationIndex := range declarations.Array() {
-				declarationPath := fmt.Sprintf("%s.%d", declarationsPath, declarationIndex)
-				out, _ = sjson.DeleteBytes(out, declarationPath+".eager_input_streaming")
-				for _, schemaKey := range []string{"parametersJsonSchema", "parameters"} {
-					schemaPath := declarationPath + "." + schemaKey
-					schema := gjson.GetBytes(out, schemaPath)
-					if !schema.Exists() {
-						continue
-					}
-					cleaned := util.CleanJSONSchemaForGemini(schema.Raw)
-					out, _ = sjson.SetRawBytes(out, schemaPath, []byte(cleaned))
+	toolsChanged := false
+	toolItems := translatorcommon.NewRawArrayItems(tools.Get("#").Int())
+	tools.ForEach(
+		func(_, tool gjson.Result) bool {
+			toolRaw := []byte(tool.Raw)
+			toolChanged := false
+			for _, declarationsKey := range []string{"functionDeclarations", "function_declarations"} {
+				declarations := util.GetGJSONBytesNoCopy(toolRaw, declarationsKey)
+				if !declarations.IsArray() {
+					continue
+				}
+				declarationsChanged := false
+				declarationItems := translatorcommon.NewRawArrayItems(declarations.Get("#").Int())
+				declarations.ForEach(
+					func(_, declaration gjson.Result) bool {
+						declarationRaw := []byte(declaration.Raw)
+						declarationChanged := false
+						if declaration.Get("eager_input_streaming").Exists() {
+							declarationRaw, _ = sjson.DeleteBytes(declarationRaw, "eager_input_streaming")
+							declarationChanged = true
+						}
+						for _, schemaKey := range []string{"parametersJsonSchema", "parameters"} {
+							schema := util.GetGJSONBytesNoCopy(declarationRaw, schemaKey)
+							if !schema.Exists() {
+								continue
+							}
+							cleaned := util.CleanJSONSchemaForGemini(schema.Raw)
+							if cleaned == schema.Raw {
+								continue
+							}
+							declarationRaw, _ = sjson.SetRawBytes(
+								declarationRaw,
+								schemaKey,
+								[]byte(cleaned),
+							)
+							declarationChanged = true
+						}
+						declarationsChanged = declarationsChanged || declarationChanged
+						declarationItems = append(declarationItems, declarationRaw)
+						return true
+					},
+				)
+				if declarationsChanged {
+					toolRaw, _ = sjson.SetRawBytes(
+						toolRaw,
+						declarationsKey,
+						translatorcommon.JoinRawArray(declarationItems),
+					)
+					toolChanged = true
 				}
 			}
-		}
+			toolsChanged = toolsChanged || toolChanged
+			toolItems = append(toolItems, toolRaw)
+			return true
+		},
+	)
+	if !toolsChanged {
+		return rawJSON
+	}
+	out, err := sjson.SetRawBytes(rawJSON, "tools", translatorcommon.JoinRawArray(toolItems))
+	if err != nil {
+		return rawJSON
 	}
 	return out
 }

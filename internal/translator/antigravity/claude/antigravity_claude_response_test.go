@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 )
 
@@ -38,11 +39,11 @@ func TestConvertAntigravityResponseToClaude_ParamsInitialized(t *testing.T) {
 
 	var param any
 	ctx := context.Background()
-	ConvertAntigravityResponseToClaude(
+	convertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, &param,
 	)
 
-	params := param.(*Params)
+	params := param.(*params)
 	if !params.HasFirstResponse {
 		t.Error("HasFirstResponse should be set after first chunk")
 	}
@@ -84,15 +85,15 @@ func TestConvertAntigravityResponseToClaude_ThinkingTextAccumulated(t *testing.T
 	ctx := context.Background()
 
 	// Process first chunk - starts new thinking block
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
-	params := param.(*Params)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk1, &param)
+	params := param.(*params)
 
 	if params.CurrentThinkingText.Len() == 0 {
 		t.Error("Thinking text should be accumulated after first chunk")
 	}
 
 	// Process second chunk - continues thinking block
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, chunk2, &param)
 
 	text := params.CurrentThinkingText.String()
 	if !strings.Contains(text, "First part") || !strings.Contains(text, "Second part") {
@@ -135,10 +136,10 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	ctx := context.Background()
 
 	// Process thinking chunk
-	ConvertAntigravityResponseToClaude(
+	convertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, thinkingChunk, &param,
 	)
-	params := param.(*Params)
+	params := param.(*params)
 	thinkingText := params.CurrentThinkingText.String()
 
 	if thinkingText == "" {
@@ -146,7 +147,7 @@ func TestConvertAntigravityResponseToClaude_SignatureCached(t *testing.T) {
 	}
 
 	// Process signature chunk - should cache the signature
-	ConvertAntigravityResponseToClaude(
+	convertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, signatureChunk, &param,
 	)
 
@@ -228,13 +229,13 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	ctx := context.Background()
 
 	// Process first thinking block
-	ConvertAntigravityResponseToClaude(
+	convertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Thinking, &param,
 	)
-	params := param.(*Params)
+	params := param.(*params)
 	firstThinkingText := params.CurrentThinkingText.String()
 
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Sig, &param)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block1Sig, &param)
 
 	// Verify first signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", firstThinkingText) != validSig1 {
@@ -242,15 +243,15 @@ func TestConvertAntigravityResponseToClaude_MultipleThinkingBlocks(t *testing.T)
 	}
 
 	// Process text (transitions out of thinking)
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, textBlock, &param)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, textBlock, &param)
 
 	// Process second thinking block
-	ConvertAntigravityResponseToClaude(
+	convertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Thinking, &param,
 	)
 	secondThinkingText := params.CurrentThinkingText.String()
 
-	ConvertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Sig, &param)
+	convertAntigravityResponseToClaude(ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, block2Sig, &param)
 
 	// Verify second signature cached
 	if cache.GetCachedSignature("claude-sonnet-4-5-thinking", secondThinkingText) != validSig2 {
@@ -270,11 +271,11 @@ func TestConvertAntigravityResponseToClaude_EmitsSignatureOnlyChunk(t *testing.T
 
 	var param any
 	ctx := context.Background()
-	ConvertAntigravityResponseToClaude(
+	convertAntigravityResponseToClaude(
 		ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, thinkingChunk, &param,
 	)
 	out := string(
-		ConvertAntigravityResponseToClaude(
+		convertAntigravityResponseToClaude(
 			ctx, "claude-sonnet-4-5-thinking", requestJSON, requestJSON, signatureChunk, &param,
 		)[0],
 	)
@@ -298,7 +299,7 @@ func TestConvertAntigravityResponseToClaudeNonStream_TreatsSignatureAsThinking(t
 		}
 	}`)
 
-	out := ConvertAntigravityResponseToClaudeNonStream(
+	out := convertAntigravityResponseToClaudeNonStream(
 		context.Background(), "claude-sonnet-4-5-thinking", requestJSON, requestJSON, responseJSON, nil,
 	)
 	body := string(out)
@@ -318,7 +319,7 @@ func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGrounding(t *testi
 	translatedRequestJSON := []byte(`{"model":"gemini-3.1-flash-lite","request":{"tools":[{"googleSearch":{}}]}}`)
 	responseJSON := testAntigravityGroundingResponse()
 
-	output := ConvertAntigravityResponseToClaudeNonStream(
+	output := convertAntigravityResponseToClaudeNonStream(
 		context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, responseJSON, nil,
 	)
 
@@ -347,7 +348,7 @@ func TestConvertAntigravityResponseToClaudeNonStream_WebSearchGroundingRequiresN
 	translatedRequestJSON := []byte(`{"model":"gemini-3-flash-agent","request":{"contents":[]}}`)
 	responseJSON := testAntigravityGroundingResponse()
 
-	output := ConvertAntigravityResponseToClaudeNonStream(
+	output := convertAntigravityResponseToClaudeNonStream(
 		context.Background(), "gemini-3-flash-agent", requestJSON, translatedRequestJSON, responseJSON, nil,
 	)
 
@@ -368,7 +369,7 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchGrounding(t *testing.
 
 	var param any
 	output := bytes.Join(
-		ConvertAntigravityResponseToClaude(
+		convertAntigravityResponseToClaude(
 			context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON,
 			testAntigravityGroundingResponse(), &param,
 		),
@@ -377,7 +378,7 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchGrounding(t *testing.
 	output = append(
 		output,
 		bytes.Join(
-			ConvertAntigravityResponseToClaude(
+			convertAntigravityResponseToClaude(
 				context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"),
 				&param,
 			),
@@ -436,20 +437,20 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchBuffersTextUntilGroun
 	}`)
 
 	output := bytes.Join(
-		ConvertAntigravityResponseToClaude(
+		convertAntigravityResponseToClaude(
 			context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, firstChunk, &param,
 		), nil,
 	)
 	output = append(
 		output, bytes.Join(
-			ConvertAntigravityResponseToClaude(
+			convertAntigravityResponseToClaude(
 				context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, finalChunk, &param,
 			), nil,
 		)...,
 	)
 	output = append(
 		output, bytes.Join(
-			ConvertAntigravityResponseToClaude(
+			convertAntigravityResponseToClaude(
 				context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, []byte("[DONE]"),
 				&param,
 			), nil,
@@ -496,7 +497,7 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchMessageStartOutputTok
 
 	var param any
 	output := bytes.Join(
-		ConvertAntigravityResponseToClaude(
+		convertAntigravityResponseToClaude(
 			context.Background(), "gemini-3.1-flash-lite", requestJSON, translatedRequestJSON, responseJSON, &param,
 		),
 		nil,
@@ -506,6 +507,155 @@ func TestConvertAntigravityResponseToClaudeStream_WebSearchMessageStartOutputTok
 	if got := gjson.Get(messageStart, "message.usage.output_tokens").Int(); got != 0 {
 		t.Fatalf("message_start output_tokens = %d, want 0: %s", got, messageStart)
 	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStreamEmptyCandidateReturnsContentArray(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	output := convertAntigravityResponseToClaudeNonStream(
+		context.Background(),
+		"gemini-3-flash-agent",
+		requestJSON,
+		requestJSON,
+		testEmptyAntigravityResponse(),
+		nil,
+	)
+
+	content := gjson.GetBytes(output, "content")
+	if !content.IsArray() || len(content.Array()) != 0 {
+		t.Fatalf("content = %s, want empty array: %s", content.Raw, output)
+	}
+	if got := gjson.GetBytes(output, "stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, output)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStreamEmptyCandidateClosesMessage(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	responseJSON := testEmptyAntigravityResponse()
+
+	var param any
+	output := bytes.Join(
+		convertAntigravityResponseToClaude(
+			context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, responseJSON, &param,
+		),
+		nil,
+	)
+	output = append(
+		output,
+		bytes.Join(
+			convertAntigravityResponseToClaude(
+				context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param,
+			),
+			nil,
+		)...,
+	)
+	outputText := string(output)
+
+	lastIndex := -1
+	for _, eventName := range []string{
+		"message_start",
+		"content_block_start",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	} {
+		index := strings.Index(outputText, "event: "+eventName+"\n")
+		if index < 0 {
+			t.Fatalf("event %q not found in:\n%s", eventName, outputText)
+		}
+		if index <= lastIndex {
+			t.Fatalf("event %q is out of order in:\n%s", eventName, outputText)
+		}
+		lastIndex = index
+	}
+
+	contentBlockStart := sseDataForEvent(t, outputText, "content_block_start")
+	if got := gjson.Get(contentBlockStart, "content_block.type").String(); got != "text" {
+		t.Fatalf("empty content block type = %q, want text: %s", got, contentBlockStart)
+	}
+	if text := gjson.Get(contentBlockStart, "content_block.text"); !text.Exists() || text.String() != "" {
+		t.Fatalf("empty content block text = %s, want empty string: %s", text.Raw, contentBlockStart)
+	}
+
+	messageDelta := sseDataForEvent(t, outputText, "message_delta")
+	if got := gjson.Get(messageDelta, "delta.stop_reason").String(); got != "end_turn" {
+		t.Fatalf("stop_reason = %q, want end_turn: %s", got, messageDelta)
+	}
+	if got := gjson.Get(messageDelta, "usage.input_tokens").Int(); got != 64214 {
+		t.Fatalf("input_tokens = %d, want 64214: %s", got, messageDelta)
+	}
+	if got := gjson.Get(messageDelta, "usage.output_tokens").Int(); got != 0 {
+		t.Fatalf("output_tokens = %d, want 0: %s", got, messageDelta)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStreamRestoresDisambiguatedName(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	original := []byte(`{"model":"gemini-3-flash","tools":[
+		{"name":"` + first + `","input_schema":{"type":"object"}},
+		{"name":"` + second + `","input_schema":{"type":"object"}}
+	]}`)
+	mapped := util.SanitizedFunctionNameMap(original)[second]
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]}}`)
+	var param any
+
+	output := bytes.Join(
+		convertAntigravityResponseToClaude(
+			context.Background(),
+			"gemini-3-flash",
+			original,
+			original,
+			responseJSON,
+			&param,
+		),
+		nil,
+	)
+	contentBlockStart := sseDataForEvent(t, string(output), "content_block_start")
+	if got := gjson.Get(contentBlockStart, "content_block.name").String(); got != second {
+		t.Fatalf("stream tool name = %q, want %q. Output: %s", got, second, output)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeNonStreamRestoresDisambiguatedName(t *testing.T) {
+	first := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build"
+	second := "mcp__plugin_cloudflare_cloudflare-builds__workers_builds_get_build_logs"
+	original := []byte(`{"model":"gemini-3-flash","tools":[
+		{"name":"` + first + `","input_schema":{"type":"object"}},
+		{"name":"` + second + `","input_schema":{"type":"object"}}
+	]}`)
+	mapped := util.SanitizedFunctionNameMap(original)[second]
+	responseJSON := []byte(`{"response":{
+		"responseId":"response-id",
+		"modelVersion":"gemini-3-flash",
+		"candidates":[{"content":{"parts":[{"functionCall":{"name":"` + mapped + `","args":{}}}]}}]
+	}}`)
+
+	output := convertAntigravityResponseToClaudeNonStream(
+		context.Background(),
+		"gemini-3-flash",
+		original,
+		original,
+		responseJSON,
+		nil,
+	)
+	if got := gjson.GetBytes(output, "content.0.name").String(); got != second {
+		t.Fatalf("tool name = %q, want %q. Output: %s", got, second, output)
+	}
+}
+
+func testEmptyAntigravityResponse() []byte {
+	return []byte(`{
+		"response": {
+			"candidates": [{
+				"content": {"role": "model", "parts": [{"text": ""}]},
+				"finishReason": "STOP"
+			}],
+			"usageMetadata": {"promptTokenCount": 64214, "totalTokenCount": 64214},
+			"modelVersion": "gemini-3-flash-a",
+			"responseId": "eBNcat8X5evPsg_lhqyQAg"
+		}
+	}`)
 }
 
 func TestWebSearchResultsFromGrounding_DeduplicatesAndSkipsEmptyURLs(t *testing.T) {
@@ -576,9 +726,9 @@ func sseDataForEvent(t *testing.T, output string, eventName string) string {
 	t.Helper()
 
 	currentEvent := ""
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, "event: ") {
-			currentEvent = strings.TrimPrefix(line, "event: ")
+	for line := range strings.SplitSeq(output, "\n") {
+		if after, ok := strings.CutPrefix(line, "event: "); ok {
+			currentEvent = after
 			continue
 		}
 		if currentEvent == eventName && strings.HasPrefix(line, "data: ") {

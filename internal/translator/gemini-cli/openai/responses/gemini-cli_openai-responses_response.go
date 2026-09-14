@@ -7,7 +7,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func ConvertGeminiCLIResponseToOpenAIResponses(
+func convertGeminiCLIResponseToOpenAIResponses(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
@@ -22,7 +22,7 @@ func ConvertGeminiCLIResponseToOpenAIResponses(
 	)
 }
 
-func ConvertGeminiCLIResponseToOpenAIResponsesNonStream(
+func convertGeminiCLIResponseToOpenAIResponsesNonStream(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,

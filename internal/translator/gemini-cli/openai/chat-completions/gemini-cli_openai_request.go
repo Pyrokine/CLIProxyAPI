@@ -16,7 +16,7 @@ import (
 
 const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
 
-// ConvertOpenAIRequestToGeminiCLI converts an OpenAI Chat Completions request (raw JSON)
+// convertOpenAIRequestToGeminiCLI converts an OpenAI Chat Completions request (raw JSON)
 // into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use gjson.
 //
 // Parameters:
@@ -26,7 +26,7 @@ const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
 //
 // Returns:
 //   - []byte: The transformed request data in Gemini CLI API format
-func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bool) []byte {
+func convertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 	// Base envelope (no default thinkingConfig)
 	out := []byte(`{"project":"","request":{"contents":[]},"model":"gemini-2.5-pro"}`)
@@ -48,10 +48,8 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 			thinkingPath := "request.generationConfig.thinkingConfig"
 			if effort == "auto" {
 				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingBudget", -1)
-				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", true)
 			} else {
 				out, _ = sjson.SetBytes(out, thinkingPath+".thinkingLevel", effort)
-				out, _ = sjson.SetBytes(out, thinkingPath+".includeThoughts", effort != "none")
 			}
 		}
 	}
@@ -108,7 +106,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		arr := messages.Array()
 		// First pass: assistant tool_calls id->name map
 		tcID2Name := map[string]string{}
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			m := arr[i]
 			if m.Get("role").String() == "assistant" {
 				tcs := m.Get("tool_calls")
@@ -128,7 +126,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 
 		// Second pass build systemInstruction/tool responses cache
 		toolResponses := map[string]string{} // tool_call_id -> response text
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			m := arr[i]
 			role := m.Get("role").String()
 			if role == "tool" {
@@ -141,7 +139,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		}
 
 		systemPartIndex := 0
-		for i := 0; i < len(arr); i++ {
+		for i := range arr {
 			m := arr[i]
 			role := m.Get("role").String()
 			content := m.Get("content")
@@ -165,7 +163,7 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 					contents := content.Array()
 					if len(contents) > 0 {
 						out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
-						for j := 0; j < len(contents); j++ {
+						for j := range contents {
 							out, _ = sjson.SetBytes(
 								out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex),
 								contents[j].Get("text").String(),
@@ -263,10 +261,10 @@ func ConvertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 							continue
 						}
 						fid := tc.Get("id").String()
-						fname := tc.Get("function.name").String()
-						fargs := tc.Get("function.arguments").String()
-						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", fname)
-						node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(fargs))
+						functionName := tc.Get("function.name").String()
+						functionArguments := tc.Get("function.arguments").String()
+						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".functionCall.name", functionName)
+						node, _ = sjson.SetRawBytes(node, "parts."+itoa(p)+".functionCall.args", []byte(functionArguments))
 						node, _ = sjson.SetBytes(
 							node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature,
 						)

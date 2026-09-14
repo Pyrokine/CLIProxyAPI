@@ -8,13 +8,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-type StreamState struct {
+type streamState struct {
 	Started         bool
 	Finished        bool
 	Completed       bool
@@ -27,7 +26,7 @@ type StreamState struct {
 	StepIndex       int
 }
 
-func ConvertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, _ bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","contents":[]}`)
 	if modelName != "" && root.Get("model").Exists() {
@@ -44,7 +43,7 @@ func ConvertInteractionsRequestToGemini(modelName string, inputRawJSON []byte, s
 	return out
 }
 
-func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	root := gjson.ParseBytes(inputRawJSON)
 	out := []byte(`{"model":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -55,43 +54,47 @@ func ConvertGeminiRequestToInteractions(modelName string, inputRawJSON []byte, s
 		out = normalizeGeminiThinkingConfigForInteractions(out)
 	}
 	out = copyGeminiToolsToInteractions(out, root)
-	root.Get("contents").ForEach(func(_, content gjson.Result) bool {
-		role := content.Get("role").String()
-		stepType := "user_input"
-		if role == "model" {
-			stepType = "model_output"
-		}
-		content.Get("parts").ForEach(func(_, part gjson.Result) bool {
-			if fc := part.Get("functionCall"); fc.Exists() {
-				step := geminiPartToInteractionsStep(part)
-				if len(step) > 0 {
+	root.Get("contents").ForEach(
+		func(_, content gjson.Result) bool {
+			role := content.Get("role").String()
+			stepType := "user_input"
+			if role == "model" {
+				stepType = "model_output"
+			}
+			content.Get("parts").ForEach(
+				func(_, part gjson.Result) bool {
+					if fc := part.Get("functionCall"); fc.Exists() {
+						step := geminiPartToInteractionsStep(part)
+						if len(step) > 0 {
+							out, _ = sjson.SetRawBytes(out, "input.-1", step)
+						}
+						return true
+					}
+					if fr := part.Get("functionResponse"); fr.Exists() {
+						step := geminiPartToInteractionsStep(part)
+						if len(step) > 0 {
+							out, _ = sjson.SetRawBytes(out, "input.-1", step)
+						}
+						return true
+					}
+					item := geminiPartToInteractionsContent(part)
+					if len(item) == 0 {
+						return true
+					}
+					currentStepType := stepType
+					if part.Get("thought").Bool() && role == "model" {
+						currentStepType = "thought"
+					}
+					step := []byte(`{"type":"","content":[]}`)
+					step, _ = sjson.SetBytes(step, "type", currentStepType)
+					step, _ = sjson.SetRawBytes(step, "content.-1", item)
 					out, _ = sjson.SetRawBytes(out, "input.-1", step)
-				}
-				return true
-			}
-			if fr := part.Get("functionResponse"); fr.Exists() {
-				step := geminiPartToInteractionsStep(part)
-				if len(step) > 0 {
-					out, _ = sjson.SetRawBytes(out, "input.-1", step)
-				}
-				return true
-			}
-			item := geminiPartToInteractionsContent(part)
-			if len(item) == 0 {
-				return true
-			}
-			currentStepType := stepType
-			if part.Get("thought").Bool() && role == "model" {
-				currentStepType = "thought"
-			}
-			step := []byte(`{"type":"","content":[]}`)
-			step, _ = sjson.SetBytes(step, "type", currentStepType)
-			step, _ = sjson.SetRawBytes(step, "content.-1", item)
-			out, _ = sjson.SetRawBytes(out, "input.-1", step)
+					return true
+				},
+			)
 			return true
-		})
-		return true
-	})
+		},
+	)
 	out, _ = sjson.SetBytes(out, "stream", stream)
 	return out
 }
@@ -124,48 +127,78 @@ func geminiSystemInstructionText(sys gjson.Result) string {
 		return ""
 	}
 	var builder strings.Builder
-	parts.ForEach(func(_, part gjson.Result) bool {
-		text := part.Get("text").String()
-		if text == "" {
+	parts.ForEach(
+		func(_, part gjson.Result) bool {
+			text := part.Get("text").String()
+			if text == "" {
+				return true
+			}
+			if builder.Len() > 0 {
+				builder.WriteByte('\n')
+			}
+			builder.WriteString(text)
 			return true
-		}
-		if builder.Len() > 0 {
-			builder.WriteByte('\n')
-		}
-		builder.WriteString(text)
-		return true
-	})
+		},
+	)
 	return builder.String()
 }
 
 func normalizeGeminiThinkingConfigForInteractions(out []byte) []byte {
-	if level := firstExistingPath(gjson.ParseBytes(out), []string{
-		"generation_config.thinking_config.thinking_level",
-		"generation_config.thinkingConfig.thinkingLevel",
-		"generation_config.thinkingConfig.thinking_level",
-	}); level.Exists() {
-		out, _ = sjson.SetBytes(out, "generation_config.thinking_level", strings.ToLower(strings.TrimSpace(level.String())))
+	if level := firstExistingPath(
+		gjson.ParseBytes(out), []string{
+			"generation_config.thinking_config.thinking_level",
+			"generation_config.thinkingConfig.thinkingLevel",
+			"generation_config.thinkingConfig.thinking_level",
+		},
+	); level.Exists() {
+		out, _ = sjson.SetBytes(
+			out, "generation_config.thinking_level", strings.ToLower(strings.TrimSpace(level.String())),
+		)
 	}
-	if budget := firstExistingPath(gjson.ParseBytes(out), []string{
-		"generation_config.thinking_config.thinking_budget",
-		"generation_config.thinkingConfig.thinkingBudget",
-		"generation_config.thinkingConfig.thinking_budget",
-	}); budget.Exists() {
+	if budget := firstExistingPath(
+		gjson.ParseBytes(out), []string{
+			"generation_config.thinking_config.thinking_budget",
+			"generation_config.thinkingConfig.thinkingBudget",
+			"generation_config.thinkingConfig.thinking_budget",
+		},
+	); budget.Exists() {
 		out, _ = sjson.SetRawBytes(out, "generation_config.thinking_budget", []byte(budget.Raw))
 	}
-	if !gjson.GetBytes(out, "generation_config.thinking_summaries").Exists() {
-		if include := firstExistingPath(gjson.ParseBytes(out), []string{
-			"generation_config.thinking_config.include_thoughts",
-			"generation_config.thinking_config.includeThoughts",
-			"generation_config.thinkingConfig.include_thoughts",
-			"generation_config.thinkingConfig.includeThoughts",
-		}); include.Exists() {
-			summary := "none"
-			if include.Bool() {
-				summary = "auto"
-			}
-			out, _ = sjson.SetBytes(out, "generation_config.thinking_summaries", summary)
+	summary := gjson.GetBytes(out, "generation_config.thinking_summaries")
+	hasValidSummary := false
+	if summary.Type == gjson.String {
+		switch strings.ToLower(strings.TrimSpace(summary.String())) {
+		case "auto", "none":
+			hasValidSummary = true
 		}
+	}
+	if !hasValidSummary {
+		out, _ = sjson.DeleteBytes(out, "generation_config.thinking_summaries")
+		if include := firstExistingPath(
+			gjson.ParseBytes(out), []string{
+				"generation_config.thinking_config.include_thoughts",
+				"generation_config.thinking_config.includeThoughts",
+				"generation_config.thinkingConfig.include_thoughts",
+				"generation_config.thinkingConfig.includeThoughts",
+			},
+		); include.Exists() {
+			// Only JSON booleans have meaning for includeThoughts.
+			// noinspection GoSwitchMissingCasesForIotaConsts
+			switch include.Type {
+			case gjson.True:
+				out, _ = sjson.SetBytes(out, "generation_config.thinking_summaries", "auto")
+			case gjson.False:
+				out, _ = sjson.SetBytes(out, "generation_config.thinking_summaries", "none")
+			}
+		}
+	}
+	for _, path := range []string{
+		"generation_config.thinking_config.include_thoughts",
+		"generation_config.thinking_config.includeThoughts",
+		"generation_config.thinkingConfig.include_thoughts",
+		"generation_config.thinkingConfig.includeThoughts",
+	} {
+		out, _ = sjson.DeleteBytes(out, path)
 	}
 	return out
 }
@@ -189,47 +222,51 @@ func copyGeminiToolsToInteractions(out []byte, root gjson.Result) []byte {
 		return out
 	}
 	normalized := make([]map[string]any, 0)
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if name := tool.Get("name"); name.Exists() {
-			entry := map[string]any{
-				"type": "function",
-				"name": name.String(),
-			}
-			if desc := tool.Get("description"); desc.Exists() {
-				entry["description"] = desc.String()
-			}
-			if params := tool.Get("parameters"); params.Exists() {
-				entry["parameters"] = json.RawMessage(params.Raw)
-			} else if params := tool.Get("parametersJsonSchema"); params.Exists() {
-				entry["parameters"] = json.RawMessage(params.Raw)
-			}
-			normalized = append(normalized, entry)
-			return true
-		}
-		decls := tool.Get("functionDeclarations")
-		if !decls.Exists() {
-			decls = tool.Get("function_declarations")
-		}
-		decls.ForEach(func(_, decl gjson.Result) bool {
-			if name := decl.Get("name"); name.Exists() {
+	tools.ForEach(
+		func(_, tool gjson.Result) bool {
+			if name := tool.Get("name"); name.Exists() {
 				entry := map[string]any{
 					"type": "function",
 					"name": name.String(),
 				}
-				if desc := decl.Get("description"); desc.Exists() {
+				if desc := tool.Get("description"); desc.Exists() {
 					entry["description"] = desc.String()
 				}
-				if params := decl.Get("parameters"); params.Exists() {
+				if params := tool.Get("parameters"); params.Exists() {
 					entry["parameters"] = json.RawMessage(params.Raw)
-				} else if params := decl.Get("parametersJsonSchema"); params.Exists() {
+				} else if params := tool.Get("parametersJsonSchema"); params.Exists() {
 					entry["parameters"] = json.RawMessage(params.Raw)
 				}
 				normalized = append(normalized, entry)
+				return true
 			}
+			decls := tool.Get("functionDeclarations")
+			if !decls.Exists() {
+				decls = tool.Get("function_declarations")
+			}
+			decls.ForEach(
+				func(_, decl gjson.Result) bool {
+					if name := decl.Get("name"); name.Exists() {
+						entry := map[string]any{
+							"type": "function",
+							"name": name.String(),
+						}
+						if desc := decl.Get("description"); desc.Exists() {
+							entry["description"] = desc.String()
+						}
+						if params := decl.Get("parameters"); params.Exists() {
+							entry["parameters"] = json.RawMessage(params.Raw)
+						} else if params := decl.Get("parametersJsonSchema"); params.Exists() {
+							entry["parameters"] = json.RawMessage(params.Raw)
+						}
+						normalized = append(normalized, entry)
+					}
+					return true
+				},
+			)
 			return true
-		})
-		return true
-	})
+		},
+	)
 	if len(normalized) == 0 {
 		out, _ = sjson.SetRawBytes(out, "tools", []byte(tools.Raw))
 		return out
@@ -262,12 +299,16 @@ func geminiPartToInteractionsContent(part gjson.Result) []byte {
 	return nil
 }
 
-func ConvertGeminiResponseToInteractionsStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
-	_ = ctx
+func convertGeminiResponseToInteractionsStream(
+	_ context.Context,
+	modelName string,
+	_, _, rawJSON []byte,
+	param *any,
+) [][]byte {
 	if *param == nil {
-		*param = &StreamState{ID: fmt.Sprintf("interaction_%d", time.Now().UnixNano())}
+		*param = &streamState{ID: fmt.Sprintf("interaction_%d", time.Now().UnixNano())}
 	}
-	st := (*param).(*StreamState)
+	st := (*param).(*streamState)
 	if bytes.Equal(bytes.TrimSpace(rawJSON), []byte("[DONE]")) {
 		var out [][]byte
 		if !st.Completed {
@@ -283,10 +324,12 @@ func ConvertGeminiResponseToInteractionsStream(ctx context.Context, modelName st
 		out = appendInteractionsStatusUpdate(out, st)
 		st.Started = true
 	}
-	root.Get("candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
-		out = appendGeminiPartToInteractionsStream(out, st, part)
-		return true
-	})
+	root.Get("candidates.0.content.parts").ForEach(
+		func(_, part gjson.Result) bool {
+			out = appendGeminiPartToInteractionsStream(out, st, part)
+			return true
+		},
+	)
 	hasFinish := root.Get("candidates.0.finishReason").Exists()
 	hasUsage := hasInteractionsGeminiStreamUsage(root)
 	if hasFinish && !st.Finished {
@@ -326,20 +369,20 @@ func hasInteractionsGeminiStreamUsage(root gjson.Result) bool {
 	return false
 }
 
-func appendInteractionsCreated(out [][]byte, st *StreamState, modelName string) [][]byte {
+func appendInteractionsCreated(out [][]byte, st *streamState, modelName string) [][]byte {
 	created := []byte(`{"interaction":{"id":"","status":"in_progress","object":"interaction","model":""},"event_type":"interaction.created"}`)
 	created, _ = sjson.SetBytes(created, "interaction.id", st.ID)
 	created, _ = sjson.SetBytes(created, "interaction.model", modelName)
 	return append(out, translatorcommon.SSEEventData("interaction.created", created))
 }
 
-func appendInteractionsStatusUpdate(out [][]byte, st *StreamState) [][]byte {
+func appendInteractionsStatusUpdate(out [][]byte, st *streamState) [][]byte {
 	statusUpdate := []byte(`{"interaction_id":"","status":"in_progress","event_type":"interaction.status_update"}`)
 	statusUpdate, _ = sjson.SetBytes(statusUpdate, "interaction_id", st.ID)
 	return append(out, translatorcommon.SSEEventData("interaction.status_update", statusUpdate))
 }
 
-func appendInteractionsCompleted(out [][]byte, st *StreamState, modelName string, root gjson.Result) [][]byte {
+func appendInteractionsCompleted(out [][]byte, st *streamState, modelName string, root gjson.Result) [][]byte {
 	now := time.Now().UTC().Format(time.RFC3339)
 	completed := []byte(`{"interaction":{"id":"","status":"completed","usage":{},"created":"","updated":"","service_tier":"standard","object":"interaction","model":""},"event_type":"interaction.completed"}`)
 	completed, _ = sjson.SetBytes(completed, "interaction.id", st.ID)
@@ -354,7 +397,7 @@ func appendInteractionsCompleted(out [][]byte, st *StreamState, modelName string
 	return out
 }
 
-func appendInteractionsDone(out [][]byte, st *StreamState) [][]byte {
+func appendInteractionsDone(out [][]byte, st *streamState) [][]byte {
 	if st.Done {
 		return out
 	}
@@ -363,7 +406,10 @@ func appendInteractionsDone(out [][]byte, st *StreamState) [][]byte {
 	return out
 }
 
-func convertGeminiResponseToInteractionsNonStreamDirect(modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte) []byte {
+func convertGeminiResponseToInteractionsNonStreamDirect(
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+) []byte {
 	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
@@ -374,12 +420,14 @@ func convertGeminiResponseToInteractionsNonStreamDirect(modelName string, origin
 	}
 	out, _ = sjson.SetBytes(out, "id", id)
 	out, _ = sjson.SetBytes(out, "model", modelName)
-	root.Get("candidates.0.content.parts").ForEach(func(_, part gjson.Result) bool {
-		if step := geminiPartToInteractionsStep(part); len(step) > 0 {
-			out, _ = sjson.SetRawBytes(out, "steps.-1", step)
-		}
-		return true
-	})
+	root.Get("candidates.0.content.parts").ForEach(
+		func(_, part gjson.Result) bool {
+			if step := geminiPartToInteractionsStep(part); len(step) > 0 {
+				out, _ = sjson.SetRawBytes(out, "steps.-1", step)
+			}
+			return true
+		},
+	)
 	out = setInteractionsUsageFromGemini(out, "usage", root)
 	return out
 }
@@ -433,8 +481,37 @@ func normalizeInteractionsGenerationConfig(out []byte) []byte {
 		out, _ = sjson.SetRawBytes(out, "generationConfig.thinkingConfig.thinkingBudget", []byte(thinkingBudget.Raw))
 		out, _ = sjson.DeleteBytes(out, "generationConfig.thinkingBudget")
 	}
+	canonicalPath := "generationConfig.thinkingConfig.includeThoughts"
+	nestedInclude := false
+	hasNestedInclude := false
+	for _, path := range []string{canonicalPath, "generationConfig.thinkingConfig.include_thoughts"} {
+		// Only JSON booleans have meaning for includeThoughts.
+		// noinspection GoSwitchMissingCasesForIotaConsts
+		switch includeThoughts := gjson.GetBytes(out, path); includeThoughts.Type {
+		case gjson.True:
+			if !hasNestedInclude {
+				nestedInclude = true
+				hasNestedInclude = true
+			}
+		case gjson.False:
+			if !hasNestedInclude {
+				hasNestedInclude = true
+			}
+		}
+		out, _ = sjson.DeleteBytes(out, path)
+	}
+	if hasNestedInclude {
+		out, _ = sjson.SetBytes(out, canonicalPath, nestedInclude)
+	}
 	if includeThoughts := gjson.GetBytes(out, "generationConfig.includeThoughts"); includeThoughts.Exists() {
-		out, _ = sjson.SetRawBytes(out, "generationConfig.thinkingConfig.includeThoughts", []byte(includeThoughts.Raw))
+		// Only JSON booleans have meaning for includeThoughts.
+		// noinspection GoSwitchMissingCasesForIotaConsts
+		switch includeThoughts.Type {
+		case gjson.True:
+			out, _ = sjson.SetBytes(out, canonicalPath, true)
+		case gjson.False:
+			out, _ = sjson.SetBytes(out, canonicalPath, false)
+		}
 		out, _ = sjson.DeleteBytes(out, "generationConfig.includeThoughts")
 	}
 	if summaries := gjson.GetBytes(out, "generationConfig.thinkingSummaries"); summaries.Exists() {
@@ -447,20 +524,17 @@ func normalizeInteractionsGenerationConfig(out []byte) []byte {
 }
 
 func interactionsThinkingSummariesIncludeThoughts(summary gjson.Result) (bool, bool) {
-	switch summary.Type {
-	case gjson.True:
-		return true, true
-	case gjson.False:
-		return false, true
-	case gjson.String:
-		switch strings.ToLower(strings.TrimSpace(summary.String())) {
-		case "", "none", "off", "false", "disabled":
-			return false, true
-		default:
-			return true, true
-		}
+	if summary.Type != gjson.String {
+		return false, false
 	}
-	return false, false
+	switch strings.ToLower(strings.TrimSpace(summary.String())) {
+	case "auto":
+		return true, true
+	case "none":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func copyInteractionsResponseModalities(out []byte, root gjson.Result) []byte {
@@ -472,17 +546,19 @@ func copyInteractionsResponseModalities(out []byte, root gjson.Result) []byte {
 		return out
 	}
 	var responseMods []string
-	mods.ForEach(func(_, mod gjson.Result) bool {
-		switch strings.ToLower(strings.TrimSpace(mod.String())) {
-		case "text":
-			responseMods = append(responseMods, "TEXT")
-		case "image":
-			responseMods = append(responseMods, "IMAGE")
-		case "audio":
-			responseMods = append(responseMods, "AUDIO")
-		}
-		return true
-	})
+	mods.ForEach(
+		func(_, mod gjson.Result) bool {
+			switch strings.ToLower(strings.TrimSpace(mod.String())) {
+			case "text":
+				responseMods = append(responseMods, "TEXT")
+			case "image":
+				responseMods = append(responseMods, "IMAGE")
+			case "audio":
+				responseMods = append(responseMods, "AUDIO")
+			}
+			return true
+		},
+	)
 	if len(responseMods) > 0 {
 		out, _ = sjson.SetBytes(out, "generationConfig.responseModalities", responseMods)
 	}
@@ -563,19 +639,23 @@ func convertSnakeCaseKeysToCamelCase(raw []byte) []byte {
 
 func copySnakeCaseValueToCamelCase(out []byte, path string, node gjson.Result) []byte {
 	if node.IsObject() {
-		node.ForEach(func(key, value gjson.Result) bool {
-			childPath := joinJSONPath(path, toCamelCase(key.String()))
-			out = copySnakeCaseValueToCamelCase(out, childPath, value)
-			return true
-		})
+		node.ForEach(
+			func(key, value gjson.Result) bool {
+				childPath := joinJSONPath(path, toCamelCase(key.String()))
+				out = copySnakeCaseValueToCamelCase(out, childPath, value)
+				return true
+			},
+		)
 		return out
 	}
 	if node.IsArray() {
-		node.ForEach(func(_, value gjson.Result) bool {
-			childPath := path + ".-1"
-			out = copySnakeCaseValueToCamelCase(out, childPath, value)
-			return true
-		})
+		node.ForEach(
+			func(_, value gjson.Result) bool {
+				childPath := path + ".-1"
+				out = copySnakeCaseValueToCamelCase(out, childPath, value)
+				return true
+			},
+		)
 		return out
 	}
 	out, _ = sjson.SetRawBytes(out, path, []byte(node.Raw))
@@ -594,14 +674,15 @@ func toCamelCase(s string) string {
 	if len(parts) == 0 {
 		return s
 	}
-	out := parts[0]
+	var out strings.Builder
+	out.WriteString(parts[0])
 	for _, p := range parts[1:] {
 		if p == "" {
 			continue
 		}
-		out += strings.ToUpper(p[:1]) + p[1:]
+		out.WriteString(strings.ToUpper(p[:1]) + p[1:])
 	}
-	return out
+	return out.String()
 }
 
 func convertCamelCaseKeysToSnakeCase(raw []byte) []byte {
@@ -616,19 +697,23 @@ func convertCamelCaseKeysToSnakeCase(raw []byte) []byte {
 
 func copyCamelCaseValueToSnakeCase(out []byte, path string, node gjson.Result) []byte {
 	if node.IsObject() {
-		node.ForEach(func(key, value gjson.Result) bool {
-			childPath := joinJSONPath(path, toSnakeCase(key.String()))
-			out = copyCamelCaseValueToSnakeCase(out, childPath, value)
-			return true
-		})
+		node.ForEach(
+			func(key, value gjson.Result) bool {
+				childPath := joinJSONPath(path, toSnakeCase(key.String()))
+				out = copyCamelCaseValueToSnakeCase(out, childPath, value)
+				return true
+			},
+		)
 		return out
 	}
 	if node.IsArray() {
-		node.ForEach(func(_, value gjson.Result) bool {
-			childPath := path + ".-1"
-			out = copyCamelCaseValueToSnakeCase(out, childPath, value)
-			return true
-		})
+		node.ForEach(
+			func(_, value gjson.Result) bool {
+				childPath := path + ".-1"
+				out = copyCamelCaseValueToSnakeCase(out, childPath, value)
+				return true
+			},
+		)
 		return out
 	}
 	out, _ = sjson.SetRawBytes(out, path, []byte(node.Raw))
@@ -656,32 +741,34 @@ func copyInteractionsTools(out []byte, root gjson.Result) []byte {
 		return out
 	}
 	normalized := make([]map[string]any, 0)
-	tools.ForEach(func(_, tool gjson.Result) bool {
-		if tool.Get("functionDeclarations").Exists() {
-			out, _ = sjson.SetRawBytes(out, "tools", []byte(tools.Raw))
-			normalized = nil
-			return false
-		}
-		entry := map[string]any{}
-		if decls := tool.Get("function_declarations"); decls.Exists() && decls.IsArray() {
-			entry["functionDeclarations"] = json.RawMessage(decls.Raw)
-		} else if name := tool.Get("name"); name.Exists() {
-			decl := map[string]any{"name": name.String()}
-			if desc := tool.Get("description"); desc.Exists() {
-				decl["description"] = desc.String()
+	tools.ForEach(
+		func(_, tool gjson.Result) bool {
+			if tool.Get("functionDeclarations").Exists() {
+				out, _ = sjson.SetRawBytes(out, "tools", []byte(tools.Raw))
+				normalized = nil
+				return false
 			}
-			if params := tool.Get("parameters"); params.Exists() {
-				decl["parameters"] = json.RawMessage(params.Raw)
+			entry := map[string]any{}
+			if decls := tool.Get("function_declarations"); decls.Exists() && decls.IsArray() {
+				entry["functionDeclarations"] = json.RawMessage(decls.Raw)
+			} else if name := tool.Get("name"); name.Exists() {
+				decl := map[string]any{"name": name.String()}
+				if desc := tool.Get("description"); desc.Exists() {
+					decl["description"] = desc.String()
+				}
+				if params := tool.Get("parameters"); params.Exists() {
+					decl["parameters"] = json.RawMessage(params.Raw)
+				}
+				entry["functionDeclarations"] = []map[string]any{decl}
+			} else {
+				entry = nil
 			}
-			entry["functionDeclarations"] = []map[string]any{decl}
-		} else {
-			entry = nil
-		}
-		if entry != nil {
-			normalized = append(normalized, entry)
-		}
-		return true
-	})
+			if entry != nil {
+				normalized = append(normalized, entry)
+			}
+			return true
+		},
+	)
 	if normalized == nil {
 		return out
 	}
@@ -706,10 +793,12 @@ func appendInteractionsInput(out []byte, input gjson.Result) []byte {
 		return appendGeminiTextContent(out, "user", input.String())
 	}
 	if input.IsArray() {
-		input.ForEach(func(_, item gjson.Result) bool {
-			out = appendInteractionsInputItem(out, item, "user")
-			return true
-		})
+		input.ForEach(
+			func(_, item gjson.Result) bool {
+				out = appendInteractionsInputItem(out, item, "user")
+				return true
+			},
+		)
 		return out
 	}
 	if steps := input.Get("steps"); steps.Exists() && steps.IsArray() {
@@ -717,10 +806,12 @@ func appendInteractionsInput(out []byte, input gjson.Result) []byte {
 		if role := input.Get("role").String(); role == "model" || role == "assistant" {
 			defaultRole = "model"
 		}
-		steps.ForEach(func(_, step gjson.Result) bool {
-			out = appendInteractionsInputItem(out, step, defaultRole)
-			return true
-		})
+		steps.ForEach(
+			func(_, step gjson.Result) bool {
+				out = appendInteractionsInputItem(out, step, defaultRole)
+				return true
+			},
+		)
 		return out
 	}
 	return appendInteractionsInputItem(out, input, "user")
@@ -737,10 +828,12 @@ func appendInteractionsInputItem(out []byte, item gjson.Result, defaultRole stri
 		} else if itemRole == "user" {
 			role = "user"
 		}
-		steps.ForEach(func(_, step gjson.Result) bool {
-			out = appendInteractionsInputItem(out, step, role)
-			return true
-		})
+		steps.ForEach(
+			func(_, step gjson.Result) bool {
+				out = appendInteractionsInputItem(out, step, role)
+				return true
+			},
+		)
 		return out
 	}
 	stepType := item.Get("type").String()
@@ -778,13 +871,15 @@ func appendInteractionsNativeContent(out []byte, item gjson.Result, defaultRole 
 	role := interactionsGeminiContentRole(item.Get("role").String(), defaultRole)
 	contentObj := []byte(`{"role":"","parts":[]}`)
 	contentObj, _ = sjson.SetBytes(contentObj, "role", role)
-	parts.ForEach(func(_, part gjson.Result) bool {
-		partJSON := interactionsNativeGeminiPart(part)
-		if len(partJSON) > 0 {
-			contentObj, _ = sjson.SetRawBytes(contentObj, "parts.-1", partJSON)
-		}
-		return true
-	})
+	parts.ForEach(
+		func(_, part gjson.Result) bool {
+			partJSON := interactionsNativeGeminiPart(part)
+			if len(partJSON) > 0 {
+				contentObj, _ = sjson.SetRawBytes(contentObj, "parts.-1", partJSON)
+			}
+			return true
+		},
+	)
 	if gjson.GetBytes(contentObj, "parts.#").Int() == 0 {
 		return out
 	}
@@ -878,16 +973,18 @@ func interactionsContentPartToGeminiPart(part gjson.Result, thought bool) []byte
 		return geminiInlineDataPartFromDataURL(part.Get("image_url.url").String())
 	case "input_audio":
 		mimeType := interactionsInputAudioMimeType(part.Get("input_audio.format").String())
-		return geminiInlineDataPartJSON(gjson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, part.Get("input_audio.data").String())))
+		return geminiInlineDataPartJSON(
+			gjson.Parse(
+				fmt.Sprintf(
+					`{"mime_type":%q,"data":%q}`, mimeType, part.Get("input_audio.data").String(),
+				),
+			),
+		)
 	case "file":
 		filename := part.Get("file.filename").String()
 		fileData := part.Get("file.file_data").String()
-		ext := ""
-		if sp := strings.Split(filename, "."); len(sp) > 1 {
-			ext = sp[len(sp)-1]
-		}
-		if mimeType, ok := misc.MimeTypes[ext]; ok && fileData != "" {
-			return geminiInlineDataPartJSON(gjson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, fileData)))
+		if mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(filename, "", fileData); ok {
+			return geminiInlineDataPartJSON(gjson.Parse(fmt.Sprintf(`{"mime_type":%q,"data":%q}`, mimeType, data)))
 		}
 	}
 	return nil
@@ -900,35 +997,6 @@ func geminiTextPartJSON(text string, thought bool) []byte {
 		partJSON, _ = sjson.SetBytes(partJSON, "thought", true)
 	}
 	return partJSON
-}
-
-func appendGeminiInlineDataPart(out []byte, role string, inline gjson.Result) []byte {
-	mimeType := inline.Get("mime_type").String()
-	if mimeType == "" {
-		mimeType = inline.Get("mimeType").String()
-	}
-	data := inline.Get("data").String()
-	if mimeType == "" || data == "" {
-		return out
-	}
-	partJSON := geminiInlineDataPartJSON(gjson.Parse(fmt.Sprintf(`{"mimeType":%q,"data":%q}`, mimeType, data)))
-	contentObj := []byte(`{"role":"","parts":[]}`)
-	contentObj, _ = sjson.SetBytes(contentObj, "role", role)
-	contentObj, _ = sjson.SetRawBytes(contentObj, "parts.-1", partJSON)
-	out, _ = sjson.SetRawBytes(out, "contents.-1", contentObj)
-	return out
-}
-
-func appendGeminiFileDataPart(out []byte, role, mimeType, fileURI string) []byte {
-	if mimeType == "" || fileURI == "" {
-		return out
-	}
-	partJSON := geminiFileDataPartJSON(gjson.Parse(fmt.Sprintf(`{"mimeType":%q,"fileUri":%q}`, mimeType, fileURI)))
-	contentObj := []byte(`{"role":"","parts":[]}`)
-	contentObj, _ = sjson.SetBytes(contentObj, "role", role)
-	contentObj, _ = sjson.SetRawBytes(contentObj, "parts.-1", partJSON)
-	out, _ = sjson.SetRawBytes(out, "contents.-1", contentObj)
-	return out
 }
 
 func geminiInlineDataPartJSON(inline gjson.Result) []byte {
@@ -962,18 +1030,6 @@ func geminiFileDataPartJSON(fileData gjson.Result) []byte {
 	partJSON, _ = sjson.SetBytes(partJSON, "fileData.mimeType", mimeType)
 	partJSON, _ = sjson.SetBytes(partJSON, "fileData.fileUri", fileURI)
 	return partJSON
-}
-
-func appendGeminiInlineDataFromDataURL(out []byte, role, dataURL string) []byte {
-	partJSON := geminiInlineDataPartFromDataURL(dataURL)
-	if len(partJSON) == 0 {
-		return out
-	}
-	contentObj := []byte(`{"role":"","parts":[]}`)
-	contentObj, _ = sjson.SetBytes(contentObj, "role", role)
-	contentObj, _ = sjson.SetRawBytes(contentObj, "parts.-1", partJSON)
-	out, _ = sjson.SetRawBytes(out, "contents.-1", contentObj)
-	return out
 }
 
 func geminiInlineDataPartFromDataURL(dataURL string) []byte {
@@ -1030,10 +1086,12 @@ func appendInteractionsContentList(out []byte, role string, content gjson.Result
 		return out
 	}
 	if content.IsArray() {
-		content.ForEach(func(_, part gjson.Result) bool {
-			out = appendInteractionsContentPart(out, role, part)
-			return true
-		})
+		content.ForEach(
+			func(_, part gjson.Result) bool {
+				out = appendInteractionsContentPart(out, role, part)
+				return true
+			},
+		)
 		return out
 	}
 	if content.IsObject() {
@@ -1053,12 +1111,14 @@ func appendInteractionsStepContent(out []byte, role string, item gjson.Result, t
 	contentObj := []byte(`{"role":"","parts":[]}`)
 	contentObj, _ = sjson.SetBytes(contentObj, "role", role)
 	if content.IsArray() {
-		content.ForEach(func(_, part gjson.Result) bool {
-			if partJSON := interactionsContentPartToGeminiPart(part, thought); len(partJSON) > 0 {
-				contentObj, _ = sjson.SetRawBytes(contentObj, "parts.-1", partJSON)
-			}
-			return true
-		})
+		content.ForEach(
+			func(_, part gjson.Result) bool {
+				if partJSON := interactionsContentPartToGeminiPart(part, thought); len(partJSON) > 0 {
+					contentObj, _ = sjson.SetRawBytes(contentObj, "parts.-1", partJSON)
+				}
+				return true
+			},
+		)
 	} else if content.IsObject() {
 		if partJSON := interactionsContentPartToGeminiPart(content, thought); len(partJSON) > 0 {
 			contentObj, _ = sjson.SetRawBytes(contentObj, "parts.-1", partJSON)
@@ -1115,6 +1175,15 @@ func appendGeminiTextContent(out []byte, role, text string) []byte {
 	return out
 }
 
+func firstInteractionsGeminiUsage(usage gjson.Result, paths ...string) gjson.Result {
+	for _, path := range paths {
+		if value := usage.Get(path); value.Exists() {
+			return value
+		}
+	}
+	return gjson.Result{}
+}
+
 func setInteractionsUsageFromGemini(out []byte, path string, root gjson.Result) []byte {
 	usage := root.Get("usageMetadata")
 	if !usage.Exists() {
@@ -1123,15 +1192,24 @@ func setInteractionsUsageFromGemini(out []byte, path string, root gjson.Result) 
 	if !usage.Exists() {
 		return out
 	}
-	out, _ = sjson.SetBytes(out, path+".input_tokens", usage.Get("promptTokenCount").Int())
-	out, _ = sjson.SetBytes(out, path+".output_tokens", usage.Get("candidatesTokenCount").Int())
-	if reasoning := usage.Get("thoughtsTokenCount"); reasoning.Exists() {
+	out, _ = sjson.SetBytes(
+		out, path+".input_tokens", firstInteractionsGeminiUsage(usage, "promptTokenCount", "prompt_token_count").Int(),
+	)
+	out, _ = sjson.SetBytes(
+		out, path+".output_tokens",
+		firstInteractionsGeminiUsage(usage, "candidatesTokenCount", "candidates_token_count").Int(),
+	)
+	if reasoning := firstInteractionsGeminiUsage(
+		usage, "thoughtsTokenCount", "thoughts_token_count",
+	); reasoning.Exists() {
 		out, _ = sjson.SetBytes(out, path+".reasoning_tokens", reasoning.Int())
 	}
-	out, _ = sjson.SetBytes(out, path+".total_tokens", usage.Get("totalTokenCount").Int())
-	if cached := usage.Get("cachedContentTokenCount"); cached.Exists() {
-		out, _ = sjson.SetBytes(out, path+".cached_tokens", cached.Int())
-	} else if cached := usage.Get("cached_content_token_count"); cached.Exists() {
+	out, _ = sjson.SetBytes(
+		out, path+".total_tokens", firstInteractionsGeminiUsage(usage, "totalTokenCount", "total_token_count").Int(),
+	)
+	if cached := firstInteractionsGeminiUsage(
+		usage, "cachedContentTokenCount", "cached_content_token_count",
+	); cached.Exists() {
 		out, _ = sjson.SetBytes(out, path+".cached_tokens", cached.Int())
 	}
 	return out
@@ -1145,17 +1223,16 @@ func setInteractionsStreamUsageFromGemini(out []byte, path string, root gjson.Re
 	if !usage.Exists() {
 		return out
 	}
-	inputTokens := usage.Get("promptTokenCount").Int()
-	outputTokens := usage.Get("candidatesTokenCount").Int()
-	totalTokens := usage.Get("totalTokenCount").Int()
-	thoughtTokens := usage.Get("thoughtsTokenCount").Int()
-	cachedTokens := usage.Get("cachedContentTokenCount").Int()
-	if cachedTokens == 0 {
-		cachedTokens = usage.Get("cached_content_token_count").Int()
-	}
+	inputTokens := firstInteractionsGeminiUsage(usage, "promptTokenCount", "prompt_token_count").Int()
+	outputTokens := firstInteractionsGeminiUsage(usage, "candidatesTokenCount", "candidates_token_count").Int()
+	totalTokens := firstInteractionsGeminiUsage(usage, "totalTokenCount", "total_token_count").Int()
+	thoughtTokens := firstInteractionsGeminiUsage(usage, "thoughtsTokenCount", "thoughts_token_count").Int()
+	cachedTokens := firstInteractionsGeminiUsage(usage, "cachedContentTokenCount", "cached_content_token_count").Int()
 	out, _ = sjson.SetBytes(out, path+".total_tokens", totalTokens)
 	out, _ = sjson.SetBytes(out, path+".total_input_tokens", inputTokens)
-	out, _ = sjson.SetRawBytes(out, path+".input_tokens_by_modality", []byte(fmt.Sprintf(`[{"modality":"text","tokens":%d}]`, inputTokens)))
+	out, _ = sjson.SetRawBytes(
+		out, path+".input_tokens_by_modality", []byte(fmt.Sprintf(`[{"modality":"text","tokens":%d}]`, inputTokens)),
+	)
 	out, _ = sjson.SetBytes(out, path+".total_cached_tokens", cachedTokens)
 	out, _ = sjson.SetBytes(out, path+".total_output_tokens", outputTokens)
 	out, _ = sjson.SetBytes(out, path+".total_tool_use_tokens", 0)
@@ -1163,7 +1240,7 @@ func setInteractionsStreamUsageFromGemini(out []byte, path string, root gjson.Re
 	return out
 }
 
-func appendInteractionsStepStart(out [][]byte, st *StreamState, stepType string, part gjson.Result) [][]byte {
+func appendInteractionsStepStart(out [][]byte, st *streamState, stepType string, part gjson.Result) [][]byte {
 	st.StepID = fmt.Sprintf("step_%d", time.Now().UnixNano())
 	st.ActiveStepIndex = st.StepIndex
 	st.StepIndex++
@@ -1184,7 +1261,7 @@ func appendInteractionsStepStart(out [][]byte, st *StreamState, stepType string,
 	return append(out, translatorcommon.SSEEventData("step.start", stepStart))
 }
 
-func appendInteractionsStepStop(out [][]byte, st *StreamState) [][]byte {
+func appendInteractionsStepStop(out [][]byte, st *streamState) [][]byte {
 	if !st.ActiveStepOpen {
 		return out
 	}
@@ -1196,7 +1273,7 @@ func appendInteractionsStepStop(out [][]byte, st *StreamState) [][]byte {
 	return out
 }
 
-func ensureInteractionsStep(out [][]byte, st *StreamState, stepType string, part gjson.Result) [][]byte {
+func ensureInteractionsStep(out [][]byte, st *streamState, stepType string, part gjson.Result) [][]byte {
 	if st.ActiveStepOpen && st.ActiveStepType == stepType {
 		return out
 	}
@@ -1204,7 +1281,7 @@ func ensureInteractionsStep(out [][]byte, st *StreamState, stepType string, part
 	return appendInteractionsStepStart(out, st, stepType, part)
 }
 
-func appendGeminiPartToInteractionsStream(out [][]byte, st *StreamState, part gjson.Result) [][]byte {
+func appendGeminiPartToInteractionsStream(out [][]byte, st *streamState, part gjson.Result) [][]byte {
 	if text := part.Get("text"); text.Exists() && text.String() != "" {
 		if part.Get("thought").Bool() {
 			out = ensureInteractionsStep(out, st, "thought", gjson.Result{})
@@ -1247,7 +1324,7 @@ func appendGeminiPartToInteractionsStream(out [][]byte, st *StreamState, part gj
 	return out
 }
 
-func appendInteractionsThoughtSignature(out [][]byte, st *StreamState, part gjson.Result) [][]byte {
+func appendInteractionsThoughtSignature(out [][]byte, st *streamState, part gjson.Result) [][]byte {
 	if signature := interactionsThoughtSignature(part); signature != "" {
 		out = ensureInteractionsStep(out, st, "thought", gjson.Result{})
 		signatureDelta := []byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`)

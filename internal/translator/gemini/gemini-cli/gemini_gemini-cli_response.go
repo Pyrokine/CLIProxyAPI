@@ -14,7 +14,7 @@ import (
 
 var dataTag = []byte("data:")
 
-// ConvertGeminiResponseToGeminiCLI converts Gemini streaming response format to Gemini CLI single-line JSON format.
+// convertGeminiResponseToGeminiCLI converts Gemini streaming response format to Gemini CLI single-line JSON format.
 // This function processes various Gemini event types and transforms them into Gemini CLI-compatible JSON responses.
 // It handles thinking content, regular text content, and function calls, outputting single-line JSON
 // that matches the Gemini CLI API response format.
@@ -27,7 +27,7 @@ var dataTag = []byte("data:")
 //
 // Returns:
 //   - [][]byte: A slice of Gemini CLI-compatible JSON responses.
-func ConvertGeminiResponseToGeminiCLI(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
+func convertGeminiResponseToGeminiCLI(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
 	if !bytes.HasPrefix(rawJSON, dataTag) {
 		return [][]byte{}
 	}
@@ -40,7 +40,7 @@ func ConvertGeminiResponseToGeminiCLI(_ context.Context, _ string, _, _, rawJSON
 	return [][]byte{rawJSON}
 }
 
-// ConvertGeminiResponseToGeminiCLINonStream converts a non-streaming Gemini response to a non-streaming Gemini CLI response.
+// convertGeminiResponseToGeminiCLINonStream converts a non-streaming Gemini response to a non-streaming Gemini CLI response.
 //
 // Parameters:
 //   - ctx: The context for the request.
@@ -50,7 +50,7 @@ func ConvertGeminiResponseToGeminiCLI(_ context.Context, _ string, _, _, rawJSON
 //
 // Returns:
 //   - []byte: A Gemini CLI-compatible JSON response.
-func ConvertGeminiResponseToGeminiCLINonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+func convertGeminiResponseToGeminiCLINonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
 	rawJSON, _ = sjson.SetRawBytes([]byte(`{"response":{}}`), "response", rawJSON)
 	return rawJSON
 }

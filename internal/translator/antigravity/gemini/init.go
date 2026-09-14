@@ -12,8 +12,8 @@ func init() {
 		constant.Antigravity,
 		ConvertGeminiRequestToAntigravity,
 		interfaces.TranslateResponse{
-			Stream:     ConvertAntigravityResponseToGemini,
-			NonStream:  ConvertAntigravityResponseToGeminiNonStream,
+			Stream:     convertAntigravityResponseToGemini,
+			NonStream:  convertAntigravityResponseToGeminiNonStream,
 			TokenCount: tokenCount,
 		},
 	)

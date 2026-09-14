@@ -30,7 +30,7 @@ func TestConvertClaudeRequestToCLI_ToolChoice_SpecificTool(t *testing.T) {
 		"tool_choice": {"type": "tool", "name": "json"}
 	}`)
 
-	output := ConvertClaudeRequestToCLI("gemini-3-flash-preview", inputJSON, false)
+	output := convertClaudeRequestToCLI("gemini-3-flash-preview", inputJSON, false)
 
 	if got := gjson.GetBytes(output, "request.toolConfig.functionCallingConfig.mode").String(); got != "ANY" {
 		t.Fatalf("Expected request.toolConfig.functionCallingConfig.mode 'ANY', got '%s'", got)

@@ -13,7 +13,7 @@ func TestConvertClaudeRequestToAntigravity_NormalizesMessageLevelSystemRole(t *t
 		]
 	}`)
 
-	output := ConvertClaudeRequestToAntigravity("gemini-3-flash-preview", inputJSON, false)
+	output := convertClaudeRequestToAntigravity("gemini-3-flash-preview", inputJSON, false)
 	outputStr := string(output)
 
 	if got := gjson.Get(outputStr, "request.contents.0.role").String(); got != "user" {

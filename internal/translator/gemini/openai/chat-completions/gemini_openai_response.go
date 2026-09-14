@@ -28,9 +28,9 @@ type convertGeminiResponseToOpenAIChatParams struct {
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
-var functionCallIDCounter uint64
+var functionCallIDCounter atomic.Uint64
 
-// ConvertGeminiResponseToOpenAI translates a single chunk of a streaming response from the
+// convertGeminiResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini API format to the OpenAI Chat Completions streaming format.
 // It processes various Gemini event types and transforms them into OpenAI-compatible JSON responses.
 // The function handles text content, tool calls, reasoning content, and usage metadata, outputting
@@ -44,7 +44,7 @@ var functionCallIDCounter uint64
 //
 // Returns:
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
-func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
+func convertGeminiResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
 	// Initialize parameters if nil.
 	if *param == nil {
 		*param = &convertGeminiResponseToOpenAIChatParams{
@@ -104,9 +104,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []
 	// Usage is applied to the base template so it appears in the chunks.
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
 		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
-		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.completion_tokens", candidatesTokenCountResult.Int())
-		}
+		baseTemplate, _ = sjson.SetBytes(
+			baseTemplate, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int(),
+		)
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			baseTemplate, _ = sjson.SetBytes(baseTemplate, "usage.total_tokens", totalTokenCountResult.Int())
 		}
@@ -154,10 +154,18 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []
 				}
 
 				partsResult := candidate.Get("content.parts")
+				assistantRoleSet := false
+				setAssistantRole := func() {
+					if assistantRoleSet {
+						return
+					}
+					template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+					assistantRoleSet = true
+				}
 
 				if partsResult.IsArray() {
 					partResults := partsResult.Array()
-					for i := 0; i < len(partResults); i++ {
+					for i := range partResults {
 						partResult := partResults[i]
 						partTextResult := partResult.Get("text")
 						functionCallResult := partResult.Get("functionCall")
@@ -180,13 +188,13 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []
 
 						if partTextResult.Exists() {
 							text := partTextResult.String()
+							setAssistantRole()
 							// Handle text content, distinguishing between regular content and reasoning/thoughts.
 							if partResult.Get("thought").Bool() {
 								template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", text)
 							} else {
 								template, _ = sjson.SetBytes(template, "choices.0.delta.content", text)
 							}
-							template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 						} else if functionCallResult.Exists() {
 							// Handle function call content.
 							p.SawToolCall[candidateIndex] = true
@@ -207,7 +215,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []
 							functionCallTemplate, _ = sjson.SetBytes(
 								functionCallTemplate, "id", fmt.Sprintf(
 									"%s-%d-%d", fcName, time.Now().UnixNano(),
-									atomic.AddUint64(&functionCallIDCounter, 1),
+									functionCallIDCounter.Add(1),
 								),
 							)
 							functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "index", functionCallIndex)
@@ -217,7 +225,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []
 									functionCallTemplate, "function.arguments", fcArgsResult.Raw,
 								)
 							}
-							template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+							setAssistantRole()
 							template, _ = sjson.SetRawBytes(
 								template, "choices.0.delta.tool_calls.-1", functionCallTemplate,
 							)
@@ -242,7 +250,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []
 							imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 							imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
 							imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
-							template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+							setAssistantRole()
 							template, _ = sjson.SetRawBytes(template, "choices.0.delta.images.-1", imagePayload)
 						}
 					}
@@ -317,9 +325,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, _, _, r
 	}
 
 	if usageResult := gjson.GetBytes(rawJSON, "usageMetadata"); usageResult.Exists() {
-		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			template, _ = sjson.SetBytes(template, "usage.completion_tokens", candidatesTokenCountResult.Int())
-		}
+		template, _ = sjson.SetBytes(template, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int())
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
 		}
@@ -367,7 +373,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, _, _, r
 				hasFunctionCall := false
 				if partsResult.IsArray() {
 					partsResults := partsResult.Array()
-					for i := 0; i < len(partsResults); i++ {
+					for i := range partsResults {
 						partResult := partsResults[i]
 						partTextResult := partResult.Get("text")
 						functionCallResult := partResult.Get("functionCall")
@@ -389,7 +395,6 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, _, _, r
 									choiceTemplate, "message.content", oldVal+partTextResult.String(),
 								)
 							}
-							choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.role", "assistant")
 						} else if functionCallResult.Exists() {
 							// Append function call content to the tool_calls array.
 							hasFunctionCall = true
@@ -404,7 +409,7 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, _, _, r
 							functionCallItemTemplate, _ = sjson.SetBytes(
 								functionCallItemTemplate, "id", fmt.Sprintf(
 									"%s-%d-%d", fcName, time.Now().UnixNano(),
-									atomic.AddUint64(&functionCallIDCounter, 1),
+									functionCallIDCounter.Add(1),
 								),
 							)
 							functionCallItemTemplate, _ = sjson.SetBytes(
@@ -415,7 +420,6 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, _, _, r
 									functionCallItemTemplate, "function.arguments", fcArgsResult.Raw,
 								)
 							}
-							choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.role", "assistant")
 							choiceTemplate, _ = sjson.SetRawBytes(
 								choiceTemplate, "message.tool_calls.-1", functionCallItemTemplate,
 							)
@@ -440,7 +444,6 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, _, _, r
 								imagePayload := []byte(`{"type":"image_url","image_url":{"url":""}}`)
 								imagePayload, _ = sjson.SetBytes(imagePayload, "index", imageIndex)
 								imagePayload, _ = sjson.SetBytes(imagePayload, "image_url.url", imageURL)
-								choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "message.role", "assistant")
 								choiceTemplate, _ = sjson.SetRawBytes(choiceTemplate, "message.images.-1", imagePayload)
 							}
 						}

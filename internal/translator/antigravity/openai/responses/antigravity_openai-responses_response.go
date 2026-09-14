@@ -7,7 +7,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func ConvertAntigravityResponseToOpenAIResponses(
+func convertAntigravityResponseToOpenAIResponses(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
@@ -22,7 +22,7 @@ func ConvertAntigravityResponseToOpenAIResponses(
 	)
 }
 
-func ConvertAntigravityResponseToOpenAIResponsesNonStream(
+func convertAntigravityResponseToOpenAIResponsesNonStream(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
@@ -34,12 +34,12 @@ func ConvertAntigravityResponseToOpenAIResponsesNonStream(
 	}
 
 	requestResult := gjson.GetBytes(originalRequestRawJSON, "request")
-	if responseResult.Exists() {
+	if requestResult.Exists() {
 		originalRequestRawJSON = []byte(requestResult.Raw)
 	}
 
 	requestResult = gjson.GetBytes(requestRawJSON, "request")
-	if responseResult.Exists() {
+	if requestResult.Exists() {
 		requestRawJSON = []byte(requestResult.Raw)
 	}
 

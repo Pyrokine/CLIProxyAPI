@@ -7,8 +7,8 @@ import (
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 )
 
-// PassthroughGeminiResponseStream forwards Gemini responses unchanged.
-func PassthroughGeminiResponseStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
+// passthroughGeminiResponseStream forwards Gemini responses unchanged.
+func passthroughGeminiResponseStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
@@ -20,8 +20,8 @@ func PassthroughGeminiResponseStream(_ context.Context, _ string, _, _, rawJSON 
 	return [][]byte{rawJSON}
 }
 
-// PassthroughGeminiResponseNonStream forwards Gemini responses unchanged.
-func PassthroughGeminiResponseNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+// passthroughGeminiResponseNonStream forwards Gemini responses unchanged.
+func passthroughGeminiResponseNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
 	return rawJSON
 }
 

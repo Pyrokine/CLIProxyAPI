@@ -16,6 +16,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	geminichat "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -26,12 +27,13 @@ type convertCliResponseToOpenAIChatParams struct {
 	FunctionIndex        int
 	SawToolCall          bool   // Tracks if any tool call was seen in the entire stream
 	UpstreamFinishReason string // Caches the upstream finish reason for final chunk
+	SanitizedNameMap     map[string]string
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
-var functionCallIDCounter uint64
+var functionCallIDCounter atomic.Uint64
 
-// ConvertAntigravityResponseToOpenAI translates a single chunk of a streaming response from the
+// convertAntigravityResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini CLI API format to the OpenAI Chat Completions streaming format.
 // It processes various Gemini CLI event types and transforms them into OpenAI-compatible JSON responses.
 // The function handles text content, tool calls, reasoning content, and usage metadata, outputting
@@ -45,12 +47,23 @@ var functionCallIDCounter uint64
 //
 // Returns:
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
-func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
+func convertAntigravityResponseToOpenAI(
+	_ context.Context,
+	_ string,
+	originalRequestRawJSON, _ []byte,
+	rawJSON []byte,
+	param *any,
+) [][]byte {
 	if *param == nil {
 		*param = &convertCliResponseToOpenAIChatParams{
-			UnixTimestamp: 0,
-			FunctionIndex: 0,
+			UnixTimestamp:    0,
+			FunctionIndex:    0,
+			SanitizedNameMap: util.DisambiguatedToolNameMap(originalRequestRawJSON),
 		}
+	}
+	if (*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap == nil {
+		(*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap =
+			util.DisambiguatedToolNameMap(originalRequestRawJSON)
 	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
@@ -95,9 +108,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, _, _, rawJS
 	// Extract and set usage metadata (token counts).
 	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
 		cachedTokenCount := usageResult.Get("cachedContentTokenCount").Int()
-		if candidatesTokenCountResult := usageResult.Get("candidatesTokenCount"); candidatesTokenCountResult.Exists() {
-			template, _ = sjson.SetBytes(template, "usage.completion_tokens", candidatesTokenCountResult.Int())
-		}
+		template, _ = sjson.SetBytes(template, "usage.completion_tokens", usageResult.Get("candidatesTokenCount").Int())
 		if totalTokenCountResult := usageResult.Get("totalTokenCount"); totalTokenCountResult.Exists() {
 			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokenCountResult.Int())
 		}
@@ -123,7 +134,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, _, _, rawJS
 	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
-		for i := 0; i < len(partResults); i++ {
+		for i := range partResults {
 			partResult := partResults[i]
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")
@@ -167,10 +178,13 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, _, _, rawJS
 				}
 
 				functionCallTemplate := []byte(`{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`)
-				fcName := functionCallResult.Get("name").String()
+				fcName := util.RestoreSanitizedToolName(
+					(*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap,
+					functionCallResult.Get("name").String(),
+				)
 				functionCallTemplate, _ = sjson.SetBytes(
 					functionCallTemplate, "id",
-					fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)),
+					fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), functionCallIDCounter.Add(1)),
 				)
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "index", functionCallIndex)
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", fcName)
@@ -232,7 +246,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, _, _, rawJS
 	return [][]byte{template}
 }
 
-// ConvertAntigravityResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
+// convertAntigravityResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
 // This function processes the complete Gemini CLI response and transforms it into a single OpenAI-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the OpenAI API format.
@@ -245,7 +259,7 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, _, _, rawJS
 //
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertAntigravityResponseToOpenAINonStream(
+func convertAntigravityResponseToOpenAINonStream(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
@@ -253,9 +267,48 @@ func ConvertAntigravityResponseToOpenAINonStream(
 ) []byte {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
+		responseJSON := restoreAntigravityOpenAIFunctionNames(
+			[]byte(responseResult.Raw),
+			originalRequestRawJSON,
+		)
 		return geminichat.ConvertGeminiResponseToOpenAINonStream(
-			ctx, modelName, originalRequestRawJSON, requestRawJSON, []byte(responseResult.Raw), param,
+			ctx,
+			modelName,
+			originalRequestRawJSON,
+			requestRawJSON,
+			responseJSON,
+			param,
 		)
 	}
 	return []byte{}
+}
+
+func restoreAntigravityOpenAIFunctionNames(rawJSON, originalRequestRawJSON []byte) []byte {
+	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
+	if len(nameMap) == 0 {
+		return rawJSON
+	}
+	for candidateIndex, candidate := range gjson.GetBytes(rawJSON, "candidates").Array() {
+		for partIndex, part := range candidate.Get("content.parts").Array() {
+			for _, field := range []string{"functionCall", "functionResponse"} {
+				nameResult := part.Get(field + ".name")
+				name := nameResult.String()
+				if name == "" {
+					continue
+				}
+				restoredName := util.RestoreSanitizedToolName(nameMap, name)
+				if nameResult.Type == gjson.String && restoredName == name {
+					continue
+				}
+				path := fmt.Sprintf(
+					"candidates.%d.content.parts.%d.%s.name",
+					candidateIndex,
+					partIndex,
+					field,
+				)
+				rawJSON, _ = sjson.SetBytes(rawJSON, path, restoredName)
+			}
+		}
+	}
+	return rawJSON
 }

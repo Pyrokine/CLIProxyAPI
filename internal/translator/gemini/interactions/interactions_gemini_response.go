@@ -23,15 +23,34 @@ type interactionsToGeminiStreamState struct {
 	StepArguments  map[int]*strings.Builder
 }
 
-func ConvertGeminiResponseToInteractions(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
-	return ConvertGeminiResponseToInteractionsStream(ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param)
+func convertGeminiResponseToInteractions(
+	ctx context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	param *any,
+) [][]byte {
+	return convertGeminiResponseToInteractionsStream(
+		ctx, modelName, originalRequestRawJSON, requestRawJSON, rawJSON, param,
+	)
 }
 
-func ConvertGeminiResponseToInteractionsNonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
-	return convertGeminiResponseToInteractionsNonStreamDirect(modelName, originalRequestRawJSON, requestRawJSON, rawJSON)
+func convertGeminiResponseToInteractionsNonStream(
+	_ context.Context,
+	modelName string,
+	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
+	_ *any,
+) []byte {
+	return convertGeminiResponseToInteractionsNonStreamDirect(
+		modelName, originalRequestRawJSON, requestRawJSON, rawJSON,
+	)
 }
 
-func ConvertInteractionsResponseToGemini(_ context.Context, modelName string, _, _, rawJSON []byte, param *any) [][]byte {
+func convertInteractionsResponseToGemini(
+	_ context.Context,
+	modelName string,
+	_, _, rawJSON []byte,
+	param *any,
+) [][]byte {
 	if param == nil {
 		var local any
 		param = &local
@@ -44,44 +63,57 @@ func ConvertInteractionsResponseToGemini(_ context.Context, modelName string, _,
 	return convertInteractionsEventToGemini(modelName, rawJSON, st)
 }
 
-func ConvertInteractionsResponseToGeminiNonStream(_ context.Context, modelName string, _, _, rawJSON []byte, _ *any) []byte {
+func convertInteractionsResponseToGeminiNonStream(
+	_ context.Context,
+	modelName string,
+	_, _, rawJSON []byte,
+	_ *any,
+) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	interaction := root
 	if nested := root.Get("interaction"); nested.Exists() {
 		interaction = nested
 	}
 	st := &interactionsToGeminiStreamState{
-		ID:          firstNonEmptyInteractionString(interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("response_%d", time.Now().UnixNano())),
-		Model:       firstNonEmptyInteractionString(interaction.Get("model").String(), root.Get("model").String(), modelName),
-		ServiceTier: firstNonEmptyInteractionString(interaction.Get("service_tier").String(), root.Get("service_tier").String()),
+		ID: firstNonEmptyInteractionString(
+			interaction.Get("id").String(), root.Get("id").String(), fmt.Sprintf("response_%d", time.Now().UnixNano()),
+		),
+		Model: firstNonEmptyInteractionString(
+			interaction.Get("model").String(), root.Get("model").String(), modelName,
+		),
+		ServiceTier: firstNonEmptyInteractionString(
+			interaction.Get("service_tier").String(), root.Get("service_tier").String(),
+		),
 	}
 	var parts [][]byte
 	steps := interaction.Get("steps")
 	if !steps.Exists() {
 		steps = root.Get("steps")
 	}
-	steps.ForEach(func(_, step gjson.Result) bool {
-		parts = append(parts, interactionsStepToGeminiParts(step)...)
-		return true
-	})
+	steps.ForEach(
+		func(_, step gjson.Result) bool {
+			parts = append(parts, interactionsStepToGeminiParts(step)...)
+			return true
+		},
+	)
 	out := buildInteractionsGeminiChunk(st, modelName, parts, "STOP", translatorcommon.InteractionsUsage(root), true)
 	return out
 }
 
-func ConvertInteractionsRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertInteractionsRequestToInteractions(modelName string, inputRawJSON []byte, stream bool) []byte {
 	_ = modelName
 	_ = stream
 	return inputRawJSON
 }
 
-func ConvertInteractionsResponsePassthrough(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
+func convertInteractionsResponsePassthrough(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
 	if len(rawJSON) == 0 {
 		return nil
 	}
 	return [][]byte{rawJSON}
 }
 
-func ConvertInteractionsResponsePassthroughNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+func convertInteractionsResponsePassthroughNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
 	return rawJSON
 }
 
@@ -114,7 +146,9 @@ func convertInteractionsEventToGemini(modelName string, rawJSON []byte, st *inte
 		st.ID = firstNonEmptyInteractionString(st.ID, interaction.Get("id").String())
 		st.Model = firstNonEmptyInteractionString(st.Model, interaction.Get("model").String(), modelName)
 		st.ServiceTier = firstNonEmptyInteractionString(st.ServiceTier, interaction.Get("service_tier").String())
-		chunk := buildInteractionsGeminiChunk(st, modelName, nil, "STOP", translatorcommon.InteractionsUsage(root), true)
+		chunk := buildInteractionsGeminiChunk(
+			st, modelName, nil, "STOP", translatorcommon.InteractionsUsage(root), true,
+		)
 		return [][]byte{chunk}
 	}
 	return nil
@@ -126,7 +160,9 @@ func rememberInteractionsGeminiStep(root gjson.Result, st *interactionsToGeminiS
 	st.StepTypes[index] = step.Get("type").String()
 	st.StepNames[index] = step.Get("name").String()
 	st.StepIDs[index] = firstNonEmptyInteractionString(step.Get("call_id").String(), step.Get("id").String())
-	st.StepSignatures[index] = firstNonEmptyInteractionString(step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String())
+	st.StepSignatures[index] = firstNonEmptyInteractionString(
+		step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String(),
+	)
 	if st.StepTypes[index] == "function_call" {
 		st.StepArguments[index] = &strings.Builder{}
 		arguments := strings.TrimSpace(step.Get("arguments").String())
@@ -136,7 +172,11 @@ func rememberInteractionsGeminiStep(root gjson.Result, st *interactionsToGeminiS
 	}
 }
 
-func interactionsStepDeltaToGeminiChunk(modelName string, root gjson.Result, st *interactionsToGeminiStreamState) []byte {
+func interactionsStepDeltaToGeminiChunk(
+	modelName string,
+	root gjson.Result,
+	st *interactionsToGeminiStreamState,
+) []byte {
 	index := int(root.Get("index").Int())
 	delta := root.Get("delta")
 	switch delta.Get("type").String() {
@@ -151,15 +191,22 @@ func interactionsStepDeltaToGeminiChunk(modelName string, root gjson.Result, st 
 		if text == "" {
 			return nil
 		}
-		return buildInteractionsGeminiChunk(st, modelName, [][]byte{geminiTextPartJSON(text, false)}, "", gjson.Result{}, false)
+		return buildInteractionsGeminiChunk(
+			st, modelName, [][]byte{geminiTextPartJSON(text, false)}, "", gjson.Result{}, false,
+		)
 	case "thought_summary":
 		text := firstNonEmptyInteractionString(delta.Get("content.text").String(), delta.Get("text").String())
 		if text == "" {
 			return nil
 		}
-		return buildInteractionsGeminiChunk(st, modelName, [][]byte{geminiTextPartJSON(text, true)}, "", gjson.Result{}, false)
+		return buildInteractionsGeminiChunk(
+			st, modelName, [][]byte{geminiTextPartJSON(text, true)}, "", gjson.Result{}, false,
+		)
 	case "thought_signature":
-		signature := firstNonEmptyInteractionString(delta.Get("signature").String(), delta.Get("thought_signature").String(), delta.Get("thoughtSignature").String())
+		signature := firstNonEmptyInteractionString(
+			delta.Get("signature").String(), delta.Get("thought_signature").String(),
+			delta.Get("thoughtSignature").String(),
+		)
 		if signature == "" {
 			return nil
 		}
@@ -229,12 +276,14 @@ func interactionsContentToGeminiParts(content gjson.Result, thought bool) [][]by
 		return parts
 	}
 	if content.IsArray() {
-		content.ForEach(func(_, item gjson.Result) bool {
-			if part := interactionsContentPartToGeminiPart(item, thought); len(part) > 0 {
-				parts = append(parts, part)
-			}
-			return true
-		})
+		content.ForEach(
+			func(_, item gjson.Result) bool {
+				if part := interactionsContentPartToGeminiPart(item, thought); len(part) > 0 {
+					parts = append(parts, part)
+				}
+				return true
+			},
+		)
 	}
 	return parts
 }
@@ -245,10 +294,14 @@ func interactionsFunctionCallStepToGeminiPart(step gjson.Result) []byte {
 	if id := firstNonEmptyInteractionString(step.Get("call_id").String(), step.Get("id").String()); id != "" {
 		part, _ = sjson.SetBytes(part, "functionCall.id", id)
 	}
-	if signature := firstNonEmptyInteractionString(step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String()); signature != "" {
+	if signature := firstNonEmptyInteractionString(
+		step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String(),
+	); signature != "" {
 		part, _ = sjson.SetBytes(part, "thoughtSignature", signature)
 	}
-	part = setInteractionsGeminiRawObject(part, "functionCall.args", firstExistingInteractionResult(step, "arguments", "args"))
+	part = setInteractionsGeminiRawObject(
+		part, "functionCall.args", firstExistingInteractionResult(step, "arguments", "args"),
+	)
 	return part
 }
 
@@ -258,11 +311,20 @@ func interactionsFunctionResponseStepToGeminiPart(step gjson.Result) []byte {
 	if id := firstNonEmptyInteractionString(step.Get("call_id").String(), step.Get("id").String()); id != "" {
 		part, _ = sjson.SetBytes(part, "functionResponse.id", id)
 	}
-	part = setInteractionsGeminiRawObject(part, "functionResponse.response", firstExistingInteractionResult(step, "result", "response"))
+	part = setInteractionsGeminiRawObject(
+		part, "functionResponse.response", firstExistingInteractionResult(step, "result", "response"),
+	)
 	return part
 }
 
-func buildInteractionsGeminiChunk(st *interactionsToGeminiStreamState, modelName string, parts [][]byte, finishReason string, usage gjson.Result, includeEmptyPart bool) []byte {
+func buildInteractionsGeminiChunk(
+	st *interactionsToGeminiStreamState,
+	modelName string,
+	parts [][]byte,
+	finishReason string,
+	usage gjson.Result,
+	includeEmptyPart bool,
+) []byte {
 	out := []byte(`{"candidates":[{"content":{"parts":[],"role":"model"},"index":0}]}`)
 	if len(parts) == 0 && includeEmptyPart {
 		parts = append(parts, geminiTextPartJSON("", false))
@@ -296,7 +358,10 @@ func setGeminiUsageMetadataFromInteractionsUsage(out []byte, usage gjson.Result)
 	totalTokens, hasTotalTokens := interactionsUsageInt(usage, "total_tokens")
 	if hasInputTokens {
 		out, _ = sjson.SetBytes(out, "usageMetadata.promptTokenCount", inputTokens)
-		out, _ = sjson.SetRawBytes(out, "usageMetadata.promptTokensDetails", []byte(fmt.Sprintf(`[{"modality":"TEXT","tokenCount":%d}]`, inputTokens)))
+		out, _ = sjson.SetRawBytes(
+			out, "usageMetadata.promptTokensDetails",
+			[]byte(fmt.Sprintf(`[{"modality":"TEXT","tokenCount":%d}]`, inputTokens)),
+		)
 	}
 	if hasOutputTokens {
 		out, _ = sjson.SetBytes(out, "usageMetadata.candidatesTokenCount", outputTokens)
@@ -324,7 +389,7 @@ func interactionsGeminiSSEPayload(rawJSON []byte) []byte {
 		return trimmed
 	}
 	var payload []byte
-	for _, line := range bytes.Split(trimmed, []byte{'\n'}) {
+	for line := range bytes.SplitSeq(trimmed, []byte{'\n'}) {
 		line = bytes.TrimSpace(bytes.TrimRight(line, "\r"))
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue

@@ -1,37 +1,37 @@
 package interactions
 
 import (
-	. "github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/translator"
 )
 
 func init() {
 	translator.Register(
-		Interactions,
-		Interactions,
-		ConvertInteractionsRequestToInteractions,
+		constant.Interactions,
+		constant.Interactions,
+		convertInteractionsRequestToInteractions,
 		interfaces.TranslateResponse{
-			Stream:    ConvertInteractionsResponsePassthrough,
-			NonStream: ConvertInteractionsResponsePassthroughNonStream,
+			Stream:    convertInteractionsResponsePassthrough,
+			NonStream: convertInteractionsResponsePassthroughNonStream,
 		},
 	)
 	translator.Register(
-		Interactions,
-		Gemini,
-		ConvertInteractionsRequestToGemini,
+		constant.Interactions,
+		constant.Gemini,
+		convertInteractionsRequestToGemini,
 		interfaces.TranslateResponse{
-			Stream:    ConvertGeminiResponseToInteractions,
-			NonStream: ConvertGeminiResponseToInteractionsNonStream,
+			Stream:    convertGeminiResponseToInteractions,
+			NonStream: convertGeminiResponseToInteractionsNonStream,
 		},
 	)
 	translator.Register(
-		Gemini,
-		Interactions,
-		ConvertGeminiRequestToInteractions,
+		constant.Gemini,
+		constant.Interactions,
+		convertGeminiRequestToInteractions,
 		interfaces.TranslateResponse{
-			Stream:    ConvertInteractionsResponseToGemini,
-			NonStream: ConvertInteractionsResponseToGeminiNonStream,
+			Stream:    convertInteractionsResponseToGemini,
+			NonStream: convertInteractionsResponseToGeminiNonStream,
 		},
 	)
 }

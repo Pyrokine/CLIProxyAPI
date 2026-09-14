@@ -10,9 +10,9 @@ func init() {
 	translator.Register(
 		constant.OpenAI,
 		constant.Gemini,
-		ConvertOpenAIRequestToGemini,
+		convertOpenAIRequestToGemini,
 		interfaces.TranslateResponse{
-			Stream:    ConvertGeminiResponseToOpenAI,
+			Stream:    convertGeminiResponseToOpenAI,
 			NonStream: ConvertGeminiResponseToOpenAINonStream,
 		},
 	)

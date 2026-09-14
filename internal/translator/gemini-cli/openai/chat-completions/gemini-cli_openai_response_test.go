@@ -9,8 +9,8 @@ import (
 
 func TestCliFinishReasonOnlyOnFinalChunk(t *testing.T) {
 	var param any
-	first := ConvertCliResponseToOpenAI(
-		context.TODO(), "gemini-2.5-pro", nil, nil, []byte(`{
+	first := convertCliResponseToOpenAI(
+		context.Background(), "gemini-2.5-pro", nil, nil, []byte(`{
 		"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"x"}}}]},"finishReason":"STOP"}]}
 	}`), &param,
 	)
@@ -21,8 +21,8 @@ func TestCliFinishReasonOnlyOnFinalChunk(t *testing.T) {
 		t.Fatalf("first finish_reason = %s, want null; chunk: %s", got.Raw, first[0])
 	}
 
-	final := ConvertCliResponseToOpenAI(
-		context.TODO(), "gemini-2.5-pro", nil, nil, []byte(`{
+	final := convertCliResponseToOpenAI(
+		context.Background(), "gemini-2.5-pro", nil, nil, []byte(`{
 		"response":{
 			"candidates":[{"finishReason":"STOP"}],
 			"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}

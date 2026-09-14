@@ -13,7 +13,7 @@ func TestConvertClaudeRequestToCLI_NormalizesMessageLevelSystemRole(t *testing.T
 		]
 	}`)
 
-	output := ConvertClaudeRequestToCLI("gemini-3-flash-preview", inputJSON, false)
+	output := convertClaudeRequestToCLI("gemini-3-flash-preview", inputJSON, false)
 
 	if got := gjson.GetBytes(output, "request.contents.0.role").String(); got != "user" {
 		t.Fatalf("request.contents.0.role = %q, want user; output=%s", got, output)

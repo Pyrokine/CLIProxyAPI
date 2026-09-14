@@ -28,9 +28,9 @@ type convertCliResponseToOpenAIChatParams struct {
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
-var functionCallIDCounter uint64
+var functionCallIDCounter atomic.Uint64
 
-// ConvertCliResponseToOpenAI translates a single chunk of a streaming response from the
+// convertCliResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini CLI API format to the OpenAI Chat Completions streaming format.
 // It processes various Gemini CLI event types and transforms them into OpenAI-compatible JSON responses.
 // The function handles text content, tool calls, reasoning content, and usage metadata, outputting
@@ -44,7 +44,7 @@ var functionCallIDCounter uint64
 //
 // Returns:
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
-func ConvertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
+func convertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &convertCliResponseToOpenAIChatParams{
 			UnixTimestamp: 0,
@@ -127,7 +127,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
-		for i := 0; i < len(partResults); i++ {
+		for i := range partResults {
 			partResult := partResults[i]
 			partTextResult := partResult.Get("text")
 			functionCallResult := partResult.Get("functionCall")
@@ -174,7 +174,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 				fcName := functionCallResult.Get("name").String()
 				functionCallTemplate, _ = sjson.SetBytes(
 					functionCallTemplate, "id",
-					fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)),
+					fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), functionCallIDCounter.Add(1)),
 				)
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "index", functionCallIndex)
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", fcName)
@@ -231,7 +231,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 	return [][]byte{template}
 }
 
-// ConvertCliResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
+// convertCliResponseToOpenAINonStream converts a non-streaming Gemini CLI response to a non-streaming OpenAI response.
 // This function processes the complete Gemini CLI response and transforms it into a single OpenAI-compatible
 // JSON response. It handles message content, tool calls, reasoning content, and usage metadata, combining all
 // the information into a single response that matches the OpenAI API format.
@@ -244,7 +244,7 @@ func ConvertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 //
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertCliResponseToOpenAINonStream(
+func convertCliResponseToOpenAINonStream(
 	ctx context.Context,
 	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,

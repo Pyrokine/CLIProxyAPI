@@ -8,6 +8,7 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"fmt"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -15,7 +16,7 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertAntigravityResponseToGemini parses and transforms a Gemini CLI API request into Gemini API format.
+// convertAntigravityResponseToGemini parses and transforms a Gemini CLI API request into Gemini API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Gemini API.
 // The function performs the following transformations:
@@ -31,7 +32,12 @@ import (
 //
 // Returns:
 //   - [][]byte: The transformed response data in Gemini API format.
-func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, _, _, rawJSON []byte, _ *any) [][]byte {
+func convertAntigravityResponseToGemini(
+	ctx context.Context,
+	_ string,
+	originalRequestRawJSON, _, rawJSON []byte,
+	_ *any,
+) [][]byte {
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
@@ -43,13 +49,14 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, _, _, raw
 		if responseResult.Exists() {
 			chunk = []byte(responseResult.Raw)
 			chunk = restoreUsageMetadata(chunk)
+			chunk = restoreGeminiFunctionNames(chunk, originalRequestRawJSON)
 		}
 	} else {
 		chunkTemplate := []byte("[]")
 		responseResult := gjson.ParseBytes(chunk)
 		if responseResult.IsArray() {
 			responseResultItems := responseResult.Array()
-			for i := 0; i < len(responseResultItems); i++ {
+			for i := range responseResultItems {
 				responseResultItem := responseResultItems[i]
 				if responseResultItem.Get("response").Exists() {
 					chunkTemplate, _ = sjson.SetRawBytes(
@@ -63,7 +70,7 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, _, _, raw
 	return [][]byte{chunk}
 }
 
-// ConvertAntigravityResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
+// convertAntigravityResponseToGeminiNonStream converts a non-streaming Gemini CLI request to a non-streaming Gemini response.
 // This function processes the complete Gemini CLI request and transforms it into a single Gemini-compatible
 // JSON response. It extracts the response data from the request and returns it in the expected format.
 //
@@ -75,13 +82,39 @@ func ConvertAntigravityResponseToGemini(ctx context.Context, _ string, _, _, raw
 //
 // Returns:
 //   - []byte: A Gemini-compatible JSON response containing the response data.
-func ConvertAntigravityResponseToGeminiNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+func convertAntigravityResponseToGeminiNonStream(
+	_ context.Context,
+	_ string,
+	originalRequestRawJSON, _, rawJSON []byte,
+	_ *any,
+) []byte {
 	responseResult := gjson.GetBytes(rawJSON, "response")
 	if responseResult.Exists() {
 		chunk := restoreUsageMetadata([]byte(responseResult.Raw))
+		return restoreGeminiFunctionNames(chunk, originalRequestRawJSON)
+	}
+	return restoreGeminiFunctionNames(rawJSON, originalRequestRawJSON)
+}
+
+func restoreGeminiFunctionNames(chunk, originalRequestRawJSON []byte) []byte {
+	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
+	if len(nameMap) == 0 {
 		return chunk
 	}
-	return rawJSON
+	candidates := gjson.GetBytes(chunk, "candidates")
+	for candidateIndex, candidate := range candidates.Array() {
+		for partIndex, part := range candidate.Get("content.parts").Array() {
+			for _, field := range []string{"functionCall", "functionResponse", "function_call", "function_response"} {
+				name := part.Get(field + ".name").String()
+				if name == "" {
+					continue
+				}
+				path := fmt.Sprintf("candidates.%d.content.parts.%d.%s.name", candidateIndex, partIndex, field)
+				chunk, _ = sjson.SetBytes(chunk, path, util.RestoreSanitizedToolName(nameMap, name))
+			}
+		}
+	}
+	return chunk
 }
 
 func tokenCount(_ context.Context, count int64) []byte {

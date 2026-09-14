@@ -15,8 +15,8 @@ func TestConvertGeminiResponseToClaude_EmitsSignatureOnlyChunk(t *testing.T) {
 		"candidates":[{"content":{"parts":[{"thoughtSignature":"sig-123"}]}}]
 	}`)
 
-	ConvertGeminiResponseToClaude(context.TODO(), "gemini-2.5-pro", nil, nil, thinking, &param)
-	out := string(ConvertGeminiResponseToClaude(context.TODO(), "gemini-2.5-pro", nil, nil, signature, &param)[0])
+	convertGeminiResponseToClaude(context.Background(), "gemini-2.5-pro", nil, nil, thinking, &param)
+	out := string(convertGeminiResponseToClaude(context.Background(), "gemini-2.5-pro", nil, nil, signature, &param)[0])
 
 	if !strings.Contains(out, `"type":"signature_delta"`) || !strings.Contains(out, "sig-123") {
 		t.Fatalf("signature_delta missing: %s", out)
@@ -36,9 +36,9 @@ func TestConvertGeminiResponseToClaude_FinalEventsOnlyOnce(t *testing.T) {
 		"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"totalTokenCount":5}
 	}`)
 
-	ConvertGeminiResponseToClaude(context.TODO(), "gemini-2.5-pro", nil, nil, thinking, &param)
-	first := string(ConvertGeminiResponseToClaude(context.TODO(), "gemini-2.5-pro", nil, nil, final, &param)[0])
-	second := string(ConvertGeminiResponseToClaude(context.TODO(), "gemini-2.5-pro", nil, nil, final, &param)[0])
+	convertGeminiResponseToClaude(context.Background(), "gemini-2.5-pro", nil, nil, thinking, &param)
+	first := string(convertGeminiResponseToClaude(context.Background(), "gemini-2.5-pro", nil, nil, final, &param)[0])
+	second := string(convertGeminiResponseToClaude(context.Background(), "gemini-2.5-pro", nil, nil, final, &param)[0])
 
 	if !strings.Contains(first, "message_delta") {
 		t.Fatalf("first final chunk missing message_delta: %s", first)

@@ -16,25 +16,9 @@ import (
 
 const geminiCLIClaudeThoughtSignature = "skip_thought_signature_validator"
 
-// ConvertClaudeRequestToCLI parses and transforms a Claude Code API request into Gemini CLI API format.
-// It extracts the model name, system instruction, message contents, and tool declarations
-// from the raw JSON request and returns them in the format expected by the Gemini CLI API.
-// The function performs the following transformations:
-// 1. Extracts the model information from the request
-// 2. Restructures the JSON to match Gemini CLI API format
-// 3. Converts system instructions to the expected format
-// 4. Maps message contents with proper role transformations
-// 5. Handles tool declarations and tool choices
-// 6. Maps generation configuration parameters
-//
-// Parameters:
-//   - modelName: The name of the model to use for the request
-//   - rawJSON: The raw JSON request data from the Claude Code API
-//   - stream: A boolean indicating if the request is for a streaming response (unused in current implementation)
-//
-// Returns:
-//   - []byte: The transformed request data in Gemini CLI API format
-func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []byte {
+// convertClaudeRequestToCLI converts a Claude request to the Gemini CLI request schema.
+// It maps system instructions, messages, tools, and generation settings; stream is currently unused.
+func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []byte {
 	rawJSON := inputRawJSON
 
 	// Build output Gemini CLI request JSON
@@ -222,7 +206,6 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 			if b := t.Get("budget_tokens"); b.Exists() && b.Type == gjson.Number {
 				budget := int(b.Int())
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingBudget", budget)
-				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 			}
 		case "adaptive", "auto":
 			// For adaptive thinking:
@@ -238,7 +221,6 @@ func ConvertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 			} else {
 				out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.thinkingLevel", "high")
 			}
-			out, _ = sjson.SetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts", true)
 		}
 	}
 	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() && v.Type == gjson.Number {

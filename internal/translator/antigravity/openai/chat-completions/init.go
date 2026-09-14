@@ -12,8 +12,8 @@ func init() {
 		constant.Antigravity,
 		ConvertOpenAIRequestToAntigravity,
 		interfaces.TranslateResponse{
-			Stream:    ConvertAntigravityResponseToOpenAI,
-			NonStream: ConvertAntigravityResponseToOpenAINonStream,
+			Stream:    convertAntigravityResponseToOpenAI,
+			NonStream: convertAntigravityResponseToOpenAINonStream,
 		},
 	)
 }

@@ -9,45 +9,73 @@ import (
 	"time"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+type geminiDetachedReasoningItem struct {
+	Index     int
+	ID        string
+	Signature string
+}
+
+type geminiCompletedMessageItem struct {
+	ID   string
+	Text string
+}
+
+type geminiCompletedReasoningItem struct {
+	ID        string
+	Signature string
+	Text      string
+}
 
 type geminiToResponsesState struct {
 	Seq        int
 	ResponseID string
 	CreatedAt  int64
 	Started    bool
+	Completed  bool
 
 	// message aggregation
 	MsgOpened    bool
 	MsgClosed    bool
 	MsgIndex     int
 	CurrentMsgID string
-	TextBuf      strings.Builder
 	ItemTextBuf  strings.Builder
 
 	// reasoning aggregation
-	ReasoningOpened bool
-	ReasoningIndex  int
-	ReasoningItemID string
-	ReasoningEnc    string
-	ReasoningBuf    strings.Builder
-	ReasoningClosed bool
+	ReasoningOpened           bool
+	ReasoningIndex            int
+	ReasoningItemID           string
+	ReasoningEnc              string
+	ReasoningDirection        string
+	ReasoningTargetKind       string
+	ReasoningBuf              strings.Builder
+	ReasoningPendingDeltas    []string
+	ReasoningClosed           bool
+	PendingReasoningSignature string
+	DetachedReasoning         map[int]geminiDetachedReasoningItem
+	CompletedMessages         map[int]geminiCompletedMessageItem
+	CompletedReasoning        map[int]geminiCompletedReasoningItem
+	SeenReasoningSignatures   map[string]bool
+	LastSemanticKind          string
 
 	// function call aggregation (keyed by output_index)
-	NextIndex   int
-	FuncArgsBuf map[int]*strings.Builder
-	FuncNames   map[int]string
-	FuncCallIDs map[int]string
-	FuncDone    map[int]bool
+	NextIndex        int
+	FuncArgsBuf      map[int]*strings.Builder
+	FuncNames        map[int]string
+	FuncCallIDs      map[int]string
+	FuncDone         map[int]bool
+	SanitizedNameMap map[string]string
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
-var responseIDCounter uint64
+var responseIDCounter atomic.Uint64
 
 // funcCallIDCounter provides a process-wide unique counter for function call identifiers.
-var funcCallIDCounter uint64
+var funcCallIDCounter atomic.Uint64
 
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
@@ -89,16 +117,21 @@ func emitEvent(event string, payload []byte) []byte {
 // ConvertGeminiResponseToOpenAIResponses converts Gemini SSE chunks into OpenAI Responses SSE events.
 func ConvertGeminiResponseToOpenAIResponses(
 	_ context.Context,
-	_ string,
+	modelName string,
 	originalRequestRawJSON, requestRawJSON, rawJSON []byte,
 	param *any,
 ) [][]byte {
 	if *param == nil {
 		*param = &geminiToResponsesState{
-			FuncArgsBuf: make(map[int]*strings.Builder),
-			FuncNames:   make(map[int]string),
-			FuncCallIDs: make(map[int]string),
-			FuncDone:    make(map[int]bool),
+			FuncArgsBuf:             make(map[int]*strings.Builder),
+			FuncNames:               make(map[int]string),
+			FuncCallIDs:             make(map[int]string),
+			FuncDone:                make(map[int]bool),
+			DetachedReasoning:       make(map[int]geminiDetachedReasoningItem),
+			CompletedMessages:       make(map[int]geminiCompletedMessageItem),
+			CompletedReasoning:      make(map[int]geminiCompletedReasoningItem),
+			SeenReasoningSignatures: make(map[string]bool),
+			SanitizedNameMap:        util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
 	}
 	st := (*param).(*geminiToResponsesState)
@@ -114,14 +147,35 @@ func ConvertGeminiResponseToOpenAIResponses(
 	if st.FuncDone == nil {
 		st.FuncDone = make(map[int]bool)
 	}
+	if st.DetachedReasoning == nil {
+		st.DetachedReasoning = make(map[int]geminiDetachedReasoningItem)
+	}
+	if st.CompletedMessages == nil {
+		st.CompletedMessages = make(map[int]geminiCompletedMessageItem)
+	}
+	if st.CompletedReasoning == nil {
+		st.CompletedReasoning = make(map[int]geminiCompletedReasoningItem)
+	}
+	if st.SeenReasoningSignatures == nil {
+		st.SeenReasoningSignatures = make(map[string]bool)
+	}
+	if st.SanitizedNameMap == nil {
+		st.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {
 		rawJSON = bytes.TrimSpace(rawJSON[5:])
 	}
 
 	rawJSON = bytes.TrimSpace(rawJSON)
-	if len(rawJSON) == 0 || bytes.Equal(rawJSON, []byte("[DONE]")) {
+	if len(rawJSON) == 0 || st.Completed {
 		return [][]byte{}
+	}
+	if bytes.Equal(rawJSON, []byte("[DONE]")) {
+		if !st.Started {
+			return [][]byte{}
+		}
+		rawJSON = []byte(`{"candidates":[{"finishReason":"STOP"}]}`)
 	}
 
 	root := gjson.ParseBytes(rawJSON)
@@ -133,10 +187,47 @@ func ConvertGeminiResponseToOpenAIResponses(
 	var out [][]byte
 	nextSeq := func() int { st.Seq++; return st.Seq }
 
+	reasoningEncryptedContent := func() string {
+		if st.ReasoningEnc == "" || st.ReasoningDirection == "" {
+			return st.ReasoningEnc
+		}
+		return encodeGeminiResponsesCarrier(st.ReasoningEnc, st.ReasoningDirection, st.ReasoningTargetKind)
+	}
+	openReasoning := func() {
+		if st.ReasoningOpened || st.ReasoningClosed || (st.ReasoningBuf.Len() == 0 && st.ReasoningEnc == "") {
+			return
+		}
+		st.ReasoningOpened = true
+		st.ReasoningIndex = st.NextIndex
+		st.NextIndex++
+		st.ReasoningItemID = fmt.Sprintf("rs_%s_%d", st.ResponseID, st.ReasoningIndex)
+		item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","encrypted_content":"","summary":[]}}`)
+		item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
+		item, _ = sjson.SetBytes(item, "output_index", st.ReasoningIndex)
+		item, _ = sjson.SetBytes(item, "item.id", st.ReasoningItemID)
+		item, _ = sjson.SetBytes(item, "item.encrypted_content", reasoningEncryptedContent())
+		out = append(out, emitEvent("response.output_item.added", item))
+		partAdded := []byte(`{"type":"response.reasoning_summary_part.added","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
+		partAdded, _ = sjson.SetBytes(partAdded, "sequence_number", nextSeq())
+		partAdded, _ = sjson.SetBytes(partAdded, "item_id", st.ReasoningItemID)
+		partAdded, _ = sjson.SetBytes(partAdded, "output_index", st.ReasoningIndex)
+		out = append(out, emitEvent("response.reasoning_summary_part.added", partAdded))
+		for _, delta := range st.ReasoningPendingDeltas {
+			msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
+			msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
+			msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningItemID)
+			msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
+			msg, _ = sjson.SetBytes(msg, "delta", delta)
+			out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
+		}
+		st.ReasoningPendingDeltas = nil
+	}
+
 	// Helper to finalize reasoning summary events in correct order.
 	// It emits response.reasoning_summary_text.done followed by
 	// response.reasoning_summary_part.done exactly once.
 	finalizeReasoning := func() {
+		openReasoning()
 		if !st.ReasoningOpened || st.ReasoningClosed {
 			return
 		}
@@ -159,11 +250,28 @@ func ConvertGeminiResponseToOpenAIResponses(
 		itemDone, _ = sjson.SetBytes(itemDone, "sequence_number", nextSeq())
 		itemDone, _ = sjson.SetBytes(itemDone, "item.id", st.ReasoningItemID)
 		itemDone, _ = sjson.SetBytes(itemDone, "output_index", st.ReasoningIndex)
-		itemDone, _ = sjson.SetBytes(itemDone, "item.encrypted_content", st.ReasoningEnc)
+		itemDone, _ = sjson.SetBytes(itemDone, "item.encrypted_content", reasoningEncryptedContent())
 		itemDone, _ = sjson.SetBytes(itemDone, "item.summary.0.text", full)
 		out = append(out, emitEvent("response.output_item.done", itemDone))
 
+		st.CompletedReasoning[st.ReasoningIndex] = geminiCompletedReasoningItem{
+			ID:        st.ReasoningItemID,
+			Signature: reasoningEncryptedContent(),
+			Text:      full,
+		}
 		st.ReasoningClosed = true
+	}
+
+	resetReasoning := func() {
+		st.ReasoningOpened = false
+		st.ReasoningClosed = false
+		st.ReasoningIndex = 0
+		st.ReasoningItemID = ""
+		st.ReasoningEnc = ""
+		st.ReasoningDirection = ""
+		st.ReasoningTargetKind = ""
+		st.ReasoningBuf.Reset()
+		st.ReasoningPendingDeltas = nil
 	}
 
 	// Helper to finalize the assistant message in correct order.
@@ -193,14 +301,59 @@ func ConvertGeminiResponseToOpenAIResponses(
 		final, _ = sjson.SetBytes(final, "item.content.0.text", fullText)
 		out = append(out, emitEvent("response.output_item.done", final))
 
+		st.CompletedMessages[st.MsgIndex] = geminiCompletedMessageItem{ID: st.CurrentMsgID, Text: fullText}
 		st.MsgClosed = true
+	}
+
+	emitDetachedReasoning := func(signature, direction, targetKind string) {
+		signature = strings.TrimSpace(signature)
+		if signature == "" || st.SeenReasoningSignatures[signature] {
+			return
+		}
+		finalizeReasoning()
+		finalizeMessage()
+		idx := st.NextIndex
+		st.NextIndex++
+		placement := "before"
+		if direction == geminiResponsesCarrierPrevious {
+			placement = "after"
+		}
+		itemID := fmt.Sprintf("rs_%s_detached_%s_%d", st.ResponseID, placement, idx)
+		carrierSignature := encodeGeminiResponsesCarrier(signature, direction, targetKind)
+
+		added := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","encrypted_content":"","summary":[]}}`)
+		added, _ = sjson.SetBytes(added, "sequence_number", nextSeq())
+		added, _ = sjson.SetBytes(added, "output_index", idx)
+		added, _ = sjson.SetBytes(added, "item.id", itemID)
+		added, _ = sjson.SetBytes(added, "item.encrypted_content", carrierSignature)
+		out = append(out, emitEvent("response.output_item.added", added))
+
+		done := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","encrypted_content":"","summary":[]}}`)
+		done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
+		done, _ = sjson.SetBytes(done, "output_index", idx)
+		done, _ = sjson.SetBytes(done, "item.id", itemID)
+		done, _ = sjson.SetBytes(done, "item.encrypted_content", carrierSignature)
+		out = append(out, emitEvent("response.output_item.done", done))
+
+		st.DetachedReasoning[idx] = geminiDetachedReasoningItem{Index: idx, ID: itemID, Signature: carrierSignature}
+		st.SeenReasoningSignatures[signature] = true
+	}
+	emitTrailingDetachedReasoning := func(signature string) {
+		switch st.LastSemanticKind {
+		case geminiResponsesCarrierText:
+			emitDetachedReasoning(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierText)
+		case geminiResponsesCarrierFunction:
+			emitDetachedReasoning(signature, geminiResponsesCarrierPrevious, geminiResponsesCarrierFunction)
+		default:
+			emitDetachedReasoning(signature, geminiResponsesCarrierStandalone, geminiResponsesCarrierAny)
+		}
 	}
 
 	// Initialize per-response fields and emit created/in_progress once
 	if !st.Started {
 		st.ResponseID = root.Get("responseId").String()
 		if st.ResponseID == "" {
-			st.ResponseID = fmt.Sprintf("resp_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&responseIDCounter, 1))
+			st.ResponseID = fmt.Sprintf("resp_%x_%d", time.Now().UnixNano(), responseIDCounter.Add(1))
 		}
 		if !strings.HasPrefix(st.ResponseID, "resp_") {
 			st.ResponseID = fmt.Sprintf("resp_%s", st.ResponseID)
@@ -218,12 +371,22 @@ func ConvertGeminiResponseToOpenAIResponses(
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
 		created, _ = sjson.SetBytes(created, "response.id", st.ResponseID)
 		created, _ = sjson.SetBytes(created, "response.created_at", st.CreatedAt)
+		requestModelName := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON)
+		if requestModelName == "" {
+			requestModelName = modelName
+		}
+		if requestModelName != "" {
+			created, _ = sjson.SetBytes(created, "response.model", requestModelName)
+		}
 		out = append(out, emitEvent("response.created", created))
 
-		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress"}}`)
+		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","output":[]}}`)
 		inprog, _ = sjson.SetBytes(inprog, "sequence_number", nextSeq())
 		inprog, _ = sjson.SetBytes(inprog, "response.id", st.ResponseID)
 		inprog, _ = sjson.SetBytes(inprog, "response.created_at", st.CreatedAt)
+		if requestModelName != "" {
+			inprog, _ = sjson.SetBytes(inprog, "response.model", requestModelName)
+		}
 		out = append(out, emitEvent("response.in_progress", inprog))
 
 		st.Started = true
@@ -234,55 +397,163 @@ func ConvertGeminiResponseToOpenAIResponses(
 	if parts := root.Get("candidates.0.content.parts"); parts.Exists() && parts.IsArray() {
 		parts.ForEach(
 			func(_, part gjson.Result) bool {
+				signature := strings.TrimSpace(part.Get("thoughtSignature").String())
+				if signature == "" {
+					signature = strings.TrimSpace(part.Get("thought_signature").String())
+				}
+				functionCall := part.Get("functionCall")
+				text := part.Get("text")
+				isThought := part.Get("thought").Bool()
+				if functionCall.Exists() && st.PendingReasoningSignature != "" {
+					if signature == "" {
+						emitDetachedReasoning(
+							st.PendingReasoningSignature, geminiResponsesCarrierNext, geminiResponsesCarrierFunction,
+						)
+					} else {
+						emitTrailingDetachedReasoning(st.PendingReasoningSignature)
+					}
+					st.PendingReasoningSignature = ""
+				}
+				reasoningActive := (st.ReasoningOpened && !st.ReasoningClosed) || (!st.ReasoningOpened && (st.ReasoningBuf.Len() > 0 || st.ReasoningEnc != ""))
+				if signature != "" && !isThought {
+					if reasoningActive {
+						switch {
+						case st.ReasoningEnc == "" || st.ReasoningEnc == signature:
+							st.ReasoningEnc = signature
+							switch {
+							case functionCall.Exists():
+								st.ReasoningDirection = geminiResponsesCarrierNext
+								st.ReasoningTargetKind = geminiResponsesCarrierFunction
+							case text.Exists() && text.String() != "":
+								st.ReasoningDirection = geminiResponsesCarrierNext
+								st.ReasoningTargetKind = geminiResponsesCarrierText
+							default:
+								st.ReasoningDirection = geminiResponsesCarrierStandalone
+								st.ReasoningTargetKind = geminiResponsesCarrierText
+							}
+							st.SeenReasoningSignatures[signature] = true
+						default:
+							finalizeReasoning()
+							if functionCall.Exists() {
+								emitDetachedReasoning(
+									signature, geminiResponsesCarrierNext, geminiResponsesCarrierFunction,
+								)
+							} else if !st.SeenReasoningSignatures[signature] {
+								st.PendingReasoningSignature = signature
+							}
+						}
+						if text.Exists() && text.String() == "" && !functionCall.Exists() {
+							finalizeReasoning()
+							return true
+						}
+					} else {
+						switch {
+						case functionCall.Exists():
+							emitDetachedReasoning(signature, geminiResponsesCarrierNext, geminiResponsesCarrierFunction)
+						case text.Exists() && text.String() != "":
+							if st.PendingReasoningSignature != "" && st.PendingReasoningSignature != signature {
+								emitTrailingDetachedReasoning(st.PendingReasoningSignature)
+								st.PendingReasoningSignature = ""
+							}
+							if !st.SeenReasoningSignatures[signature] {
+								st.PendingReasoningSignature = signature
+							}
+						case text.Exists() && text.String() == "":
+							if st.PendingReasoningSignature != "" {
+								pendingSignature := st.PendingReasoningSignature
+								st.PendingReasoningSignature = ""
+								if pendingSignature != signature {
+									emitTrailingDetachedReasoning(pendingSignature)
+								}
+							}
+							if st.MsgOpened || len(st.FuncDone) > 0 {
+								emitTrailingDetachedReasoning(signature)
+							} else if !st.SeenReasoningSignatures[signature] {
+								st.PendingReasoningSignature = signature
+							}
+							return true
+						}
+					}
+				}
+
 				// Reasoning text
-				if part.Get("thought").Bool() {
+				if isThought {
+					if st.PendingReasoningSignature != "" && st.MsgOpened && !st.MsgClosed {
+						emitTrailingDetachedReasoning(st.PendingReasoningSignature)
+						st.PendingReasoningSignature = ""
+					}
+					incomingSignature := ""
+					if signature != "" && signature != geminiResponsesThoughtSignature {
+						if st.PendingReasoningSignature != "" {
+							if st.PendingReasoningSignature != signature {
+								emitDetachedReasoning(
+									st.PendingReasoningSignature, geminiResponsesCarrierStandalone,
+									geminiResponsesCarrierAny,
+								)
+							}
+							st.PendingReasoningSignature = ""
+						}
+						incomingSignature = signature
+					} else if st.PendingReasoningSignature != "" {
+						incomingSignature = st.PendingReasoningSignature
+						st.PendingReasoningSignature = ""
+					}
+					if st.ReasoningOpened && !st.ReasoningClosed && incomingSignature != "" && st.ReasoningEnc != "" && incomingSignature != st.ReasoningEnc {
+						finalizeReasoning()
+						resetReasoning()
+					}
 					if st.ReasoningClosed {
-						// Ignore any late thought chunks after reasoning is finalized.
-						return true
+						finalizeMessage()
+						resetReasoning()
+					} else if !st.ReasoningOpened && st.ReasoningBuf.Len() == 0 && st.MsgOpened && !st.MsgClosed {
+						finalizeMessage()
 					}
-					if sig := part.Get("thoughtSignature"); sig.Exists() && sig.String() != "" && sig.String() != geminiResponsesThoughtSignature {
-						st.ReasoningEnc = sig.String()
-					} else if sig = part.Get("thought_signature"); sig.Exists() && sig.String() != "" && sig.String() != geminiResponsesThoughtSignature {
-						st.ReasoningEnc = sig.String()
-					}
-					if !st.ReasoningOpened {
-						st.ReasoningOpened = true
-						st.ReasoningIndex = st.NextIndex
-						st.NextIndex++
-						st.ReasoningItemID = fmt.Sprintf("rs_%s_%d", st.ResponseID, st.ReasoningIndex)
-						item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","encrypted_content":"","summary":[]}}`)
-						item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
-						item, _ = sjson.SetBytes(item, "output_index", st.ReasoningIndex)
-						item, _ = sjson.SetBytes(item, "item.id", st.ReasoningItemID)
-						item, _ = sjson.SetBytes(item, "item.encrypted_content", st.ReasoningEnc)
-						out = append(out, emitEvent("response.output_item.added", item))
-						partAdded := []byte(`{"type":"response.reasoning_summary_part.added","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}`)
-						partAdded, _ = sjson.SetBytes(partAdded, "sequence_number", nextSeq())
-						partAdded, _ = sjson.SetBytes(partAdded, "item_id", st.ReasoningItemID)
-						partAdded, _ = sjson.SetBytes(partAdded, "output_index", st.ReasoningIndex)
-						out = append(out, emitEvent("response.reasoning_summary_part.added", partAdded))
+					if incomingSignature != "" {
+						st.ReasoningEnc = incomingSignature
+						st.ReasoningDirection = geminiResponsesCarrierStandalone
+						st.ReasoningTargetKind = geminiResponsesCarrierText
+						st.SeenReasoningSignatures[incomingSignature] = true
 					}
 					if t := part.Get("text"); t.Exists() && t.String() != "" {
+						st.LastSemanticKind = geminiResponsesCarrierText
 						st.ReasoningBuf.WriteString(t.String())
-						msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
-						msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
-						msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningItemID)
-						msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
-						msg, _ = sjson.SetBytes(msg, "delta", t.String())
-						out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
+						if st.ReasoningOpened {
+							msg := []byte(`{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`)
+							msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
+							msg, _ = sjson.SetBytes(msg, "item_id", st.ReasoningItemID)
+							msg, _ = sjson.SetBytes(msg, "output_index", st.ReasoningIndex)
+							msg, _ = sjson.SetBytes(msg, "delta", t.String())
+							out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
+						} else {
+							st.ReasoningPendingDeltas = append(st.ReasoningPendingDeltas, t.String())
+						}
+					}
+					if !st.ReasoningOpened && st.ReasoningEnc != "" {
+						openReasoning()
 					}
 					return true
 				}
 
 				// Assistant visible text
 				if t := part.Get("text"); t.Exists() && t.String() != "" {
-					// Before emitting non-reasoning outputs, finalize reasoning if open.
+					if signature == "" && st.PendingReasoningSignature != "" && st.MsgOpened && !st.MsgClosed {
+						emitTrailingDetachedReasoning(st.PendingReasoningSignature)
+						st.PendingReasoningSignature = ""
+					}
+					// Responses output items are sequential: finish reasoning before
+					// opening the visible message. A signature that arrives later is
+					// emitted as an explicit trailing carrier and recombined on replay.
 					finalizeReasoning()
+					if st.MsgClosed {
+						st.MsgOpened = false
+						st.MsgClosed = false
+						st.ItemTextBuf.Reset()
+					}
 					if !st.MsgOpened {
 						st.MsgOpened = true
 						st.MsgIndex = st.NextIndex
 						st.NextIndex++
-						st.CurrentMsgID = fmt.Sprintf("msg_%s_0", st.ResponseID)
+						st.CurrentMsgID = fmt.Sprintf("msg_%s_%d", st.ResponseID, st.MsgIndex)
 						item := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{"id":"","type":"message","status":"in_progress","content":[],"role":"assistant"}}`)
 						item, _ = sjson.SetBytes(item, "sequence_number", nextSeq())
 						item, _ = sjson.SetBytes(item, "output_index", st.MsgIndex)
@@ -295,7 +566,7 @@ func ConvertGeminiResponseToOpenAIResponses(
 						out = append(out, emitEvent("response.content_part.added", partAdded))
 						st.ItemTextBuf.Reset()
 					}
-					st.TextBuf.WriteString(t.String())
+					st.LastSemanticKind = geminiResponsesCarrierText
 					st.ItemTextBuf.WriteString(t.String())
 					msg := []byte(`{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`)
 					msg, _ = sjson.SetBytes(msg, "sequence_number", nextSeq())
@@ -312,7 +583,8 @@ func ConvertGeminiResponseToOpenAIResponses(
 					// Responses streaming requires message done events before the next output_item.added.
 					finalizeReasoning()
 					finalizeMessage()
-					name := fc.Get("name").String()
+					st.LastSemanticKind = geminiResponsesCarrierFunction
+					name := util.RestoreSanitizedToolName(st.SanitizedNameMap, fc.Get("name").String())
 					idx := st.NextIndex
 					st.NextIndex++
 					// Ensure buffers
@@ -321,7 +593,7 @@ func ConvertGeminiResponseToOpenAIResponses(
 					}
 					if st.FuncCallIDs[idx] == "" {
 						st.FuncCallIDs[idx] = fmt.Sprintf(
-							"call_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1),
+							"call_%d_%d", time.Now().UnixNano(), funcCallIDCounter.Add(1),
 						)
 					}
 					st.FuncNames[idx] = name
@@ -385,6 +657,10 @@ func ConvertGeminiResponseToOpenAIResponses(
 
 	// Finalization on finishReason
 	if fr := root.Get("candidates.0.finishReason"); fr.Exists() && fr.String() != "" {
+		if st.PendingReasoningSignature != "" {
+			emitTrailingDetachedReasoning(st.PendingReasoningSignature)
+			st.PendingReasoningSignature = ""
+		}
 		// Finalize reasoning first to keep ordering tight with last delta
 		finalizeReasoning()
 		finalizeMessage()
@@ -392,18 +668,18 @@ func ConvertGeminiResponseToOpenAIResponses(
 		// Close function calls
 		if len(st.FuncArgsBuf) > 0 {
 			// sort indices (small N); avoid extra imports
-			idxs := make([]int, 0, len(st.FuncArgsBuf))
+			indices := make([]int, 0, len(st.FuncArgsBuf))
 			for idx := range st.FuncArgsBuf {
-				idxs = append(idxs, idx)
+				indices = append(indices, idx)
 			}
-			for i := 0; i < len(idxs); i++ {
-				for j := i + 1; j < len(idxs); j++ {
-					if idxs[j] < idxs[i] {
-						idxs[i], idxs[j] = idxs[j], idxs[i]
+			for i := 0; i < len(indices); i++ {
+				for j := i + 1; j < len(indices); j++ {
+					if indices[j] < indices[i] {
+						indices[i], indices[j] = indices[j], indices[i]
 					}
 				}
 			}
-			for _, idx := range idxs {
+			for _, idx := range indices {
 				if st.FuncDone[idx] {
 					continue
 				}
@@ -447,18 +723,25 @@ func ConvertGeminiResponseToOpenAIResponses(
 		// Compose outputs in output_index order.
 		outputsWrapper := []byte(`{"arr":[]}`)
 		for idx := 0; idx < st.NextIndex; idx++ {
-			if st.ReasoningOpened && idx == st.ReasoningIndex {
+			if completedReasoning, ok := st.CompletedReasoning[idx]; ok {
 				item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}`)
-				item, _ = sjson.SetBytes(item, "id", st.ReasoningItemID)
-				item, _ = sjson.SetBytes(item, "encrypted_content", st.ReasoningEnc)
-				item, _ = sjson.SetBytes(item, "summary.0.text", st.ReasoningBuf.String())
+				item, _ = sjson.SetBytes(item, "id", completedReasoning.ID)
+				item, _ = sjson.SetBytes(item, "encrypted_content", completedReasoning.Signature)
+				item, _ = sjson.SetBytes(item, "summary.0.text", completedReasoning.Text)
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 				continue
 			}
-			if st.MsgOpened && idx == st.MsgIndex {
+			if completedMessage, ok := st.CompletedMessages[idx]; ok {
 				item := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
-				item, _ = sjson.SetBytes(item, "id", st.CurrentMsgID)
-				item, _ = sjson.SetBytes(item, "content.0.text", st.TextBuf.String())
+				item, _ = sjson.SetBytes(item, "id", completedMessage.ID)
+				item, _ = sjson.SetBytes(item, "content.0.text", completedMessage.Text)
+				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
+				continue
+			}
+			if detached, ok := st.DetachedReasoning[idx]; ok {
+				item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
+				item, _ = sjson.SetBytes(item, "id", detached.ID)
+				item, _ = sjson.SetBytes(item, "encrypted_content", detached.Signature)
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 				continue
 			}
@@ -512,6 +795,7 @@ func ConvertGeminiResponseToOpenAIResponses(
 		}
 
 		out = append(out, emitEvent("response.completed", completed))
+		st.Completed = true
 	}
 
 	return out
@@ -526,6 +810,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(
 ) []byte {
 	root := gjson.ParseBytes(rawJSON)
 	root = unwrapGeminiResponseRoot(root)
+	sanitizedNameMap := util.SanitizedToolNameMap(originalRequestRawJSON)
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
@@ -533,7 +818,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(
 	// id: prefer provider responseId, otherwise synthesize
 	id := root.Get("responseId").String()
 	if id == "" {
-		id = fmt.Sprintf("resp_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&responseIDCounter, 1))
+		id = fmt.Sprintf("resp_%x_%d", time.Now().UnixNano(), responseIDCounter.Add(1))
 	}
 	// Normalize to response-style id (prefix resp_ if missing)
 	if !strings.HasPrefix(id, "resp_") {
@@ -554,7 +839,6 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(
 	if reqJSON := pickRequestJSON(originalRequestRawJSON, requestRawJSON); len(reqJSON) > 0 {
 		req := unwrapRequestRoot(gjson.ParseBytes(reqJSON))
 		resp = translatorcommon.EchoRequestFields(resp, req, "")
-		// Fallback model from response when not in request
 		if !req.Get("model").Exists() {
 			if v := root.Get("modelVersion"); v.Exists() {
 				resp, _ = sjson.SetBytes(resp, "model", v.String())
@@ -567,8 +851,73 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(
 	// Build outputs from candidates[0].content.parts
 	var reasoningText strings.Builder
 	var reasoningEncrypted string
-	var messageText strings.Builder
-	var haveMessage bool
+	var reasoningDirection string
+	var reasoningTargetKind string
+	type nonStreamReasoningOutput struct {
+		text       string
+		signature  string
+		direction  string
+		targetKind string
+	}
+	type nonStreamFunctionOutput struct {
+		item      []byte
+		signature string
+	}
+	type nonStreamOutputOrder struct {
+		kind  string
+		index int
+	}
+	type nonStreamDetachedOutput struct {
+		signature  string
+		direction  string
+		targetKind string
+	}
+	type nonStreamMessageOutput struct {
+		text       string
+		signatures []string
+	}
+	var reasoningOutputs []nonStreamReasoningOutput
+	var functionOutputs []nonStreamFunctionOutput
+	var messageOutputs []nonStreamMessageOutput
+	var outputOrder []nonStreamOutputOrder
+	reasoningOutputSignatures := make(map[string]bool)
+	flushReasoningOutput := func() {
+		if reasoningText.Len() == 0 && reasoningEncrypted == "" {
+			return
+		}
+		reasoningIndex := len(reasoningOutputs)
+		reasoningOutputs = append(
+			reasoningOutputs, nonStreamReasoningOutput{
+				text: reasoningText.String(), signature: reasoningEncrypted, direction: reasoningDirection,
+				targetKind: reasoningTargetKind,
+			},
+		)
+		outputOrder = append(outputOrder, nonStreamOutputOrder{kind: "reasoning", index: reasoningIndex})
+		if reasoningEncrypted != "" {
+			reasoningOutputSignatures[reasoningEncrypted] = true
+		}
+		reasoningText.Reset()
+		reasoningEncrypted = ""
+		reasoningDirection = ""
+		reasoningTargetKind = ""
+	}
+	var detachedReasoningOutputs []nonStreamDetachedOutput
+	var currentMessageText strings.Builder
+	var currentMessageSignatures []string
+	flushMessageOutput := func() {
+		if currentMessageText.Len() == 0 {
+			return
+		}
+		messageIndex := len(messageOutputs)
+		messageOutputs = append(
+			messageOutputs, nonStreamMessageOutput{
+				text: currentMessageText.String(), signatures: append([]string(nil), currentMessageSignatures...),
+			},
+		)
+		outputOrder = append(outputOrder, nonStreamOutputOrder{kind: "message", index: messageIndex})
+		currentMessageText.Reset()
+		currentMessageSignatures = nil
+	}
 
 	haveOutput := false
 	ensureOutput := func() {
@@ -582,28 +931,84 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(
 		ensureOutput()
 		resp, _ = sjson.SetRawBytes(resp, "output.-1", itemJSON)
 	}
+	detachedOutputIndex := 0
+	seenDetachedOutputs := make(map[string]bool)
+	appendDetachedOutput := func(signature, direction, targetKind string) {
+		if signature == "" || seenDetachedOutputs[signature] {
+			return
+		}
+		seenDetachedOutputs[signature] = true
+		placement := "before"
+		if direction == geminiResponsesCarrierPrevious {
+			placement = "after"
+		}
+		itemJSON := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
+		itemJSON, _ = sjson.SetBytes(
+			itemJSON, "id",
+			fmt.Sprintf("rs_%s_detached_%s_%d", strings.TrimPrefix(id, "resp_"), placement, detachedOutputIndex),
+		)
+		itemJSON, _ = sjson.SetBytes(
+			itemJSON, "encrypted_content", encodeGeminiResponsesCarrier(signature, direction, targetKind),
+		)
+		detachedOutputIndex++
+		appendOutput(itemJSON)
+	}
 
 	if parts := root.Get("candidates.0.content.parts"); parts.Exists() && parts.IsArray() {
 		parts.ForEach(
 			func(_, p gjson.Result) bool {
+				signature := strings.TrimSpace(p.Get("thoughtSignature").String())
+				if signature == "" {
+					signature = strings.TrimSpace(p.Get("thought_signature").String())
+				}
 				if p.Get("thought").Bool() {
+					flushMessageOutput()
+					if signature != "" && reasoningEncrypted != "" && signature != reasoningEncrypted {
+						flushReasoningOutput()
+					}
 					if t := p.Get("text"); t.Exists() {
 						reasoningText.WriteString(t.String())
 					}
-					if sig := p.Get("thoughtSignature"); sig.Exists() && sig.String() != "" {
-						reasoningEncrypted = sig.String()
+					if signature != "" {
+						reasoningEncrypted = signature
+						reasoningDirection = geminiResponsesCarrierStandalone
+						reasoningTargetKind = geminiResponsesCarrierText
 					}
 					return true
 				}
 				if t := p.Get("text"); t.Exists() && t.String() != "" {
-					messageText.WriteString(t.String())
-					haveMessage = true
+					messageSignature := ""
+					if signature != "" {
+						if reasoningText.Len() > 0 && reasoningEncrypted == "" {
+							reasoningEncrypted = signature
+							reasoningDirection = geminiResponsesCarrierNext
+							reasoningTargetKind = geminiResponsesCarrierText
+						} else {
+							messageSignature = signature
+						}
+					}
+					flushReasoningOutput()
+					if len(currentMessageSignatures) > 0 && (messageSignature == "" || currentMessageSignatures[len(currentMessageSignatures)-1] != messageSignature) {
+						flushMessageOutput()
+					}
+					currentMessageText.WriteString(t.String())
+					if messageSignature != "" && (len(currentMessageSignatures) == 0 || currentMessageSignatures[len(currentMessageSignatures)-1] != messageSignature) {
+						currentMessageSignatures = append(currentMessageSignatures, messageSignature)
+					}
 					return true
 				}
 				if fc := p.Get("functionCall"); fc.Exists() {
-					name := fc.Get("name").String()
+					if reasoningText.Len() > 0 && reasoningEncrypted == "" && signature != "" {
+						reasoningEncrypted = signature
+						reasoningDirection = geminiResponsesCarrierNext
+						reasoningTargetKind = geminiResponsesCarrierFunction
+						signature = ""
+					}
+					flushReasoningOutput()
+					flushMessageOutput()
+					name := util.RestoreSanitizedToolName(sanitizedNameMap, fc.Get("name").String())
 					args := fc.Get("args")
-					callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&funcCallIDCounter, 1))
+					callID := fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), funcCallIDCounter.Add(1))
 					itemJSON := []byte(`{"id":"","type":"function_call","status":"completed","arguments":"","call_id":"","name":""}`)
 					itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
 					itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
@@ -613,35 +1018,137 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(
 						argsStr = args.Raw
 					}
 					itemJSON, _ = sjson.SetBytes(itemJSON, "arguments", argsStr)
-					appendOutput(itemJSON)
+					functionIndex := len(functionOutputs)
+					functionOutputs = append(
+						functionOutputs, nonStreamFunctionOutput{item: itemJSON, signature: signature},
+					)
+					outputOrder = append(outputOrder, nonStreamOutputOrder{kind: "function", index: functionIndex})
 					return true
+				}
+				if signature != "" {
+					if reasoningText.Len() > 0 {
+						switch {
+						case reasoningEncrypted == "":
+							reasoningEncrypted = signature
+							reasoningDirection = geminiResponsesCarrierStandalone
+							reasoningTargetKind = geminiResponsesCarrierText
+						case reasoningEncrypted != signature:
+							flushReasoningOutput()
+							detachedIndex := len(detachedReasoningOutputs)
+							detachedReasoningOutputs = append(
+								detachedReasoningOutputs, nonStreamDetachedOutput{
+									signature: signature, direction: geminiResponsesCarrierPrevious,
+									targetKind: geminiResponsesCarrierText,
+								},
+							)
+							outputOrder = append(
+								outputOrder, nonStreamOutputOrder{kind: "detached", index: detachedIndex},
+							)
+						}
+					} else if currentMessageText.Len() > 0 {
+						if len(currentMessageSignatures) == 0 {
+							currentMessageSignatures = append(currentMessageSignatures, signature)
+						} else if currentMessageSignatures[len(currentMessageSignatures)-1] != signature {
+							flushMessageOutput()
+							detachedIndex := len(detachedReasoningOutputs)
+							detachedReasoningOutputs = append(
+								detachedReasoningOutputs, nonStreamDetachedOutput{
+									signature: signature, direction: geminiResponsesCarrierPrevious,
+									targetKind: geminiResponsesCarrierText,
+								},
+							)
+							outputOrder = append(
+								outputOrder, nonStreamOutputOrder{kind: "detached", index: detachedIndex},
+							)
+						}
+					} else if len(functionOutputs) > 0 {
+						detachedIndex := len(detachedReasoningOutputs)
+						detachedReasoningOutputs = append(
+							detachedReasoningOutputs, nonStreamDetachedOutput{
+								signature: signature, direction: geminiResponsesCarrierPrevious,
+								targetKind: geminiResponsesCarrierFunction,
+							},
+						)
+						outputOrder = append(outputOrder, nonStreamOutputOrder{kind: "detached", index: detachedIndex})
+					} else {
+						detachedIndex := len(detachedReasoningOutputs)
+						detachedReasoningOutputs = append(
+							detachedReasoningOutputs, nonStreamDetachedOutput{
+								signature: signature, direction: geminiResponsesCarrierNext,
+								targetKind: geminiResponsesCarrierAny,
+							},
+						)
+						outputOrder = append(outputOrder, nonStreamOutputOrder{kind: "detached", index: detachedIndex})
+					}
 				}
 				return true
 			},
 		)
 	}
 
-	// Reasoning output item
-	if reasoningText.Len() > 0 || reasoningEncrypted != "" {
-		rid := strings.TrimPrefix(id, "resp_")
-		itemJSON := []byte(`{"id":"","type":"reasoning","encrypted_content":""}`)
-		itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("rs_%s", rid))
-		itemJSON, _ = sjson.SetBytes(itemJSON, "encrypted_content", reasoningEncrypted)
-		if reasoningText.Len() > 0 {
-			summaryJSON := []byte(`{"type":"summary_text","text":""}`)
-			summaryJSON, _ = sjson.SetBytes(summaryJSON, "text", reasoningText.String())
-			itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary", []byte(`[]`))
-			itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary.-1", summaryJSON)
-		}
-		appendOutput(itemJSON)
-	}
+	flushReasoningOutput()
+	flushMessageOutput()
 
-	// Assistant message output item
-	if haveMessage {
-		itemJSON := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
-		itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("msg_%s_0", strings.TrimPrefix(id, "resp_")))
-		itemJSON, _ = sjson.SetBytes(itemJSON, "content.0.text", messageText.String())
-		appendOutput(itemJSON)
+	for _, outputItem := range outputOrder {
+		switch outputItem.kind {
+		case "detached":
+			if outputItem.index < 0 || outputItem.index >= len(detachedReasoningOutputs) {
+				continue
+			}
+			detached := detachedReasoningOutputs[outputItem.index]
+			if !reasoningOutputSignatures[detached.signature] {
+				appendDetachedOutput(detached.signature, detached.direction, detached.targetKind)
+			}
+		case "reasoning":
+			if outputItem.index < 0 || outputItem.index >= len(reasoningOutputs) {
+				continue
+			}
+			reasoningOutput := reasoningOutputs[outputItem.index]
+			rid := strings.TrimPrefix(id, "resp_")
+			reasoningID := fmt.Sprintf("rs_%s", rid)
+			if len(reasoningOutputs) > 1 {
+				reasoningID = fmt.Sprintf("rs_%s_%d", rid, outputItem.index)
+			}
+			itemJSON := []byte(`{"id":"","type":"reasoning","encrypted_content":""}`)
+			itemJSON, _ = sjson.SetBytes(itemJSON, "id", reasoningID)
+			encryptedContent := reasoningOutput.signature
+			if encryptedContent != "" && reasoningOutput.direction != "" {
+				encryptedContent = encodeGeminiResponsesCarrier(
+					encryptedContent, reasoningOutput.direction, reasoningOutput.targetKind,
+				)
+			}
+			itemJSON, _ = sjson.SetBytes(itemJSON, "encrypted_content", encryptedContent)
+			if reasoningOutput.text != "" {
+				summaryJSON := []byte(`{"type":"summary_text","text":""}`)
+				summaryJSON, _ = sjson.SetBytes(summaryJSON, "text", reasoningOutput.text)
+				itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary", []byte(`[]`))
+				itemJSON, _ = sjson.SetRawBytes(itemJSON, "summary.-1", summaryJSON)
+			}
+			appendOutput(itemJSON)
+		case "message":
+			if outputItem.index < 0 || outputItem.index >= len(messageOutputs) {
+				continue
+			}
+			messageOutput := messageOutputs[outputItem.index]
+			for _, signature := range messageOutput.signatures {
+				if !reasoningOutputSignatures[signature] {
+					appendDetachedOutput(signature, geminiResponsesCarrierNext, geminiResponsesCarrierText)
+				}
+			}
+			itemJSON := []byte(`{"id":"","type":"message","status":"completed","content":[{"type":"output_text","annotations":[],"logprobs":[],"text":""}],"role":"assistant"}`)
+			itemJSON, _ = sjson.SetBytes(
+				itemJSON, "id", fmt.Sprintf("msg_%s_%d", strings.TrimPrefix(id, "resp_"), outputItem.index),
+			)
+			itemJSON, _ = sjson.SetBytes(itemJSON, "content.0.text", messageOutput.text)
+			appendOutput(itemJSON)
+		case "function":
+			if outputItem.index < 0 || outputItem.index >= len(functionOutputs) {
+				continue
+			}
+			functionOutput := functionOutputs[outputItem.index]
+			appendDetachedOutput(functionOutput.signature, geminiResponsesCarrierNext, geminiResponsesCarrierFunction)
+			appendOutput(functionOutput.item)
+		}
 	}
 
 	// usage mapping

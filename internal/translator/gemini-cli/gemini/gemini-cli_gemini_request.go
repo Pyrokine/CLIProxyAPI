@@ -85,13 +85,13 @@ func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []by
 	toolsResult := gjson.GetBytes(rawJSON, "request.tools")
 	if toolsResult.Exists() && toolsResult.IsArray() {
 		toolResults := toolsResult.Array()
-		for i := 0; i < len(toolResults); i++ {
+		for i := range toolResults {
 			functionDeclarationsResult := gjson.GetBytes(
 				rawJSON, fmt.Sprintf("request.tools.%d.function_declarations", i),
 			)
 			if functionDeclarationsResult.Exists() && functionDeclarationsResult.IsArray() {
 				functionDeclarationsResults := functionDeclarationsResult.Array()
-				for j := 0; j < len(functionDeclarationsResults); j++ {
+				for j := range functionDeclarationsResults {
 					parametersResult := gjson.GetBytes(
 						rawJSON, fmt.Sprintf("request.tools.%d.function_declarations.%d.parameters", i, j),
 					)
@@ -162,8 +162,8 @@ func ConvertGeminiRequestToGeminiCLI(_ string, inputRawJSON []byte, _ bool) []by
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
 }
 
-// FunctionCallGroup represents a group of function calls and their responses
-type FunctionCallGroup struct {
+// functionCallGroup represents a group of function calls and their responses
+type functionCallGroup struct {
 	ResponsesNeeded int
 	CallNames       []string // ordered function call names for backfilling empty response names
 }
@@ -204,7 +204,7 @@ func fixCLIToolResponse(input string) (string, error) {
 
 	// Initialize data structures for processing and grouping
 	contentsWrapper := []byte(`{"contents":[]}`)
-	var pendingGroups []*FunctionCallGroup // Groups awaiting completion with responses
+	var pendingGroups []*functionCallGroup // Groups awaiting completion with responses
 	var collectedResponses []gjson.Result  // Standalone responses to be matched
 
 	// Process each content object in the conversation
@@ -278,7 +278,7 @@ func fixCLIToolResponse(input string) (string, error) {
 					contentsWrapper, _ = sjson.SetRawBytes(contentsWrapper, "contents.-1", []byte(value.Raw))
 
 					// Create a new group for tracking responses
-					group := &FunctionCallGroup{
+					group := &functionCallGroup{
 						ResponsesNeeded: len(callNames),
 						CallNames:       callNames,
 					}

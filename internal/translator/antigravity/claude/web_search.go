@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -168,8 +169,8 @@ func extractClaudeWebSearchQuery(payload []byte) string {
 		return ""
 	}
 	messageResults := messages.Array()
-	for i := len(messageResults) - 1; i >= 0; i-- {
-		message := messageResults[i]
+	for _, message := range slices.Backward(messageResults) {
+
 		if role := message.Get("role").String(); role != "" && role != "user" {
 			continue
 		}
@@ -238,25 +239,6 @@ func antigravityTextContent(root gjson.Result) string {
 		}
 	}
 	return textBuilder.String()
-}
-
-func antigravityUsageTokens(root gjson.Result) (int64, int64) {
-	usage := root.Get("response.usageMetadata")
-	if !usage.Exists() {
-		usage = root.Get("usageMetadata")
-	}
-	inputTokens := usage.Get("promptTokenCount").Int()
-	outputTokens := usage.Get("candidatesTokenCount").Int() + usage.Get("thoughtsTokenCount").Int()
-	if outputTokens == 0 {
-		totalTokens := usage.Get("totalTokenCount").Int()
-		if totalTokens > 0 {
-			outputTokens = totalTokens - inputTokens
-			if outputTokens < 0 {
-				outputTokens = 0
-			}
-		}
-	}
-	return inputTokens, outputTokens
 }
 
 func webSearchQueryFromGrounding(groundingMetadata gjson.Result) string {
@@ -372,10 +354,7 @@ func buildWebSearchCitedTextBlocks(textContent string, supports []webSearchGroun
 			}
 		}
 
-		citedStart := support.StartIndex
-		if citedStart < lastEnd {
-			citedStart = lastEnd
-		}
+		citedStart := max(support.StartIndex, lastEnd)
 		citedText := ""
 		if citedStart < support.EndIndex {
 			start := min(int(citedStart), len(textBytes))
@@ -525,10 +504,7 @@ func splitRunesForWebSearch(text string, chunkSize int) []string {
 	runes := []rune(text)
 	chunks := make([]string, 0, (len(runes)+chunkSize-1)/chunkSize)
 	for start := 0; start < len(runes); start += chunkSize {
-		end := start + chunkSize
-		if end > len(runes) {
-			end = len(runes)
-		}
+		end := min(start+chunkSize, len(runes))
 		chunks = append(chunks, string(runes[start:end]))
 	}
 	return chunks
