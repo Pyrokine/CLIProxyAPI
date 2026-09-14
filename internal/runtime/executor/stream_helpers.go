@@ -34,11 +34,11 @@ func sendStreamPayloads(ctx context.Context, out chan<- cliproxyexecutor.StreamC
 func scannerOrContextError(ctx context.Context, scanner *bufio.Scanner) error {
 	if scanner != nil {
 		if err := scanner.Err(); err != nil {
-			return err
+			return markResponseStarted(err)
 		}
 	}
-	if ctx != nil {
-		return ctx.Err()
+	if ctx != nil && ctx.Err() != nil {
+		return markResponseStarted(ctx.Err())
 	}
 	return nil
 }
