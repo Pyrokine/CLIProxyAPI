@@ -20,7 +20,7 @@ func newConfigListTestHandler(t *testing.T, cfg *config.Config) *Handler {
 	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	handler := NewHandler(cfg, path, nil, WithEnvSecret(""))
+	handler := NewHandler(cfg, path, nil, withEnvSecret(""))
 	t.Cleanup(
 		func() {
 			if errClose := handler.Close(); errClose != nil {
@@ -121,7 +121,6 @@ func TestPatchProviderBaseURLAllowsLocalTargetsAndRejectsInvalidScheme(t *testin
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(
 			tt.name, func(t *testing.T) {
 				h := newConfigListTestHandler(t, tt.cfg)
@@ -187,7 +186,6 @@ func TestPutProviderBaseURLAllowsLocalTargetsAndRejectsInvalidScheme(t *testing.
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(
 			tt.name, func(t *testing.T) {
 				h := newConfigListTestHandler(t, tt.cfg)
@@ -232,10 +230,8 @@ func TestDeleteProviderKeyAcceptsBodyMatch(t *testing.T) {
 
 func TestDeleteAPIKeyAliasAcceptsBody(t *testing.T) {
 	cfg := &config.Config{
-		SDKConfig: config.SDKConfig{
-			APIKeyAliases: map[string]string{
-				"delete-me": "old", "keep-me": "new",
-			},
+		APIKeyAliases: map[string]string{
+			"delete-me": "old", "keep-me": "new",
 		},
 	}
 	h := newConfigListTestHandler(t, cfg)

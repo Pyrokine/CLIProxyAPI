@@ -2,8 +2,10 @@ package management
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -204,10 +206,12 @@ func TestResolveTokenForAuthRefreshPreservesConcurrentPersistentChanges(t *testi
 		t.Fatal(errRegister)
 	}
 	h := &Handler{authManager: manager}
-	result := make(chan struct {
-		token string
-		err   error
-	}, 1)
+	result := make(
+		chan struct {
+			token string
+			err   error
+		}, 1,
+	)
 	go func() {
 		token, errResolve := h.resolveTokenForAuth(context.Background(), h.configSnapshot(), registered.Clone())
 		result <- struct {
@@ -247,7 +251,9 @@ func TestResolveTokenForAuthRefreshPreservesConcurrentPersistentChanges(t *testi
 		persisted = persisted.Clone()
 	}
 	store.mu.Unlock()
-	if persisted == nil || persisted.Label != "concurrent" || stringValue(persisted.Metadata, "custom") != "preserved" ||
+	if persisted == nil || persisted.Label != "concurrent" || stringValue(
+		persisted.Metadata, "custom",
+	) != "preserved" ||
 		tokenValueFromMetadata(persisted.Metadata) != "new-token" ||
 		stringValue(persisted.Metadata, "refresh_token") != "new-refresh" {
 		t.Fatalf("persisted auth did not preserve concurrent fields and refreshed credentials: %#v", persisted)
@@ -498,6 +504,14 @@ func TestIsAllowedTokenTarget(t *testing.T) {
 		{"API.OPENAI.COM", true},
 		{"sub.api.openai.com", true},
 		{"api.openai.com.evil.com", false},
+		{"api.fenno.ai", true},
+		{"api.fenno.ai.evil.com", false},
+		{"api.qnaigc.com", true},
+		{"api.modelink.ai", true},
+		{"api.deepseek.com", true},
+		{"API.DEEPSEEK.COM", true},
+		{"sub.api.deepseek.com", false},
+		{"api.deepseek.com.evil.com", false},
 		{"iflow.cn", true},
 		{"foo.iflow.cn", true},
 		{"x.ai", true},
@@ -510,6 +524,114 @@ func TestIsAllowedTokenTarget(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isAllowedTokenTarget(%q) = %v, want %v", tt.hostname, got, tt.want)
 		}
+	}
+}
+
+func TestIsAllowedTokenRedirectTarget(t *testing.T) {
+	tests := []struct {
+		name        string
+		originalURL string
+		redirectURL string
+		want        bool
+	}{
+		{
+			name:        "deepseek same origin",
+			originalURL: "https://api.deepseek.com/models",
+			redirectURL: "https://api.deepseek.com/redirected",
+			want:        true,
+		},
+		{
+			name:        "deepseek explicit default port",
+			originalURL: "https://api.deepseek.com/models",
+			redirectURL: "https://api.deepseek.com:443/redirected",
+			want:        true,
+		},
+		{
+			name:        "deepseek non-default port",
+			originalURL: "https://api.deepseek.com/models",
+			redirectURL: "https://api.deepseek.com:8443/redirected",
+			want:        false,
+		},
+		{
+			name:        "deepseek cross provider",
+			originalURL: "https://api.deepseek.com/models",
+			redirectURL: "https://api.openai.com/models",
+			want:        false,
+		},
+		{
+			name:        "deepseek subdomain",
+			originalURL: "https://api.deepseek.com/models",
+			redirectURL: "https://sub.api.deepseek.com/models",
+			want:        false,
+		},
+		{
+			name:        "existing provider behavior",
+			originalURL: "https://api.openai.com/v1/models",
+			redirectURL: "https://api.anthropic.com/v1/models",
+			want:        true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				originalURL, errOriginal := url.Parse(tt.originalURL)
+				if errOriginal != nil {
+					t.Fatal(errOriginal)
+				}
+				redirectURL, errRedirect := url.Parse(tt.redirectURL)
+				if errRedirect != nil {
+					t.Fatal(errRedirect)
+				}
+				got := isAllowedTokenRedirectTarget(originalURL, redirectURL)
+				if got != tt.want {
+					t.Fatalf(
+						"isAllowedTokenRedirectTarget(%q, %q) = %v, want %v", tt.originalURL, tt.redirectURL, got,
+						tt.want,
+					)
+				}
+			},
+		)
+	}
+}
+
+func TestShouldStripTokenRedirectHeaders(t *testing.T) {
+	tests := []struct {
+		name             string
+		originalHostname string
+		redirectHostname string
+		want             bool
+	}{
+		{
+			name:             "same host",
+			originalHostname: "api.deepseek.com",
+			redirectHostname: "api.deepseek.com",
+			want:             false,
+		},
+		{
+			name:             "same host ignores case and whitespace",
+			originalHostname: " API.DEEPSEEK.COM ",
+			redirectHostname: "api.deepseek.com",
+			want:             false,
+		},
+		{
+			name:             "cross provider",
+			originalHostname: "api.openai.com",
+			redirectHostname: "api.anthropic.com",
+			want:             true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				got := shouldStripTokenRedirectHeaders(tt.originalHostname, tt.redirectHostname)
+				if got != tt.want {
+					t.Fatalf(
+						"shouldStripTokenRedirectHeaders(%q, %q) = %v, want %v", tt.originalHostname,
+						tt.redirectHostname, got, tt.want,
+					)
+				}
+			},
+		)
 	}
 }
 
@@ -532,6 +654,227 @@ func TestValidateAPICallHeadersRejectsHostOverride(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Host override to be rejected")
 	}
+}
+
+func TestResolveAPICallTokenPrefersDraftToken(t *testing.T) {
+	h := &Handler{}
+	auth := &coreauth.Auth{Attributes: map[string]string{"api_key": "stored-token"}}
+	token, err := h.resolveAPICallToken(context.Background(), nil, auth, "draft-token")
+	if err != nil {
+		t.Fatalf("resolveAPICallToken error = %v", err)
+	}
+	if token != "draft-token" {
+		t.Fatalf("resolveAPICallToken = %q, want draft-token", token)
+	}
+}
+
+func TestAPICallRejectsDraftTokenWithoutPlaceholder(t *testing.T) {
+	h := newConfigListTestHandler(t, &config.Config{})
+	recorder := runConfigListRequest(
+		h.APICall,
+		http.MethodPost,
+		"/api-call",
+		`{"method":"GET","url":"https://api.openai.com/v1/models","draftToken":"draft-token"}`,
+	)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("APICall status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "requires a $TOKEN$ header placeholder") {
+		t.Fatalf("APICall body = %s", recorder.Body.String())
+	}
+}
+
+func TestAPICallRejectsPlaceholderWithoutToken(t *testing.T) {
+	h := newConfigListTestHandler(t, &config.Config{})
+	recorder := runConfigListRequest(
+		h.APICall,
+		http.MethodPost,
+		"/api-call",
+		`{"method":"GET","url":"https://api.openai.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"}}`,
+	)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("APICall status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "auth token not found") {
+		t.Fatalf("APICall body = %s", recorder.Body.String())
+	}
+}
+
+func TestAPICallRejectsDraftTokenOverHTTP(t *testing.T) {
+	h := newConfigListTestHandler(t, &config.Config{})
+	recorder := runConfigListRequest(
+		h.APICall,
+		http.MethodPost,
+		"/api-call",
+		`{"method":"GET","url":"http://api.openai.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"},"draftToken":"draft-token"}`,
+	)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("APICall status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "requires HTTPS") {
+		t.Fatalf("APICall body = %s", recorder.Body.String())
+	}
+}
+
+func TestValidateTokenTransportURLRejectsDowngrade(t *testing.T) {
+	target, err := url.Parse("http://api.openai.com/v1/models")
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+	if errTransport := validateTokenTransportURL(target); errTransport == nil {
+		t.Fatal("expected HTTP token transport to be rejected")
+	}
+}
+
+func TestAPICallRejectsDraftTokenForUnknownTarget(t *testing.T) {
+	h := newConfigListTestHandler(t, &config.Config{})
+	recorder := runConfigListRequest(
+		h.APICall,
+		http.MethodPost,
+		"/api-call",
+		`{"method":"GET","url":"https://example.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"},"draftToken":"draft-token"}`,
+	)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("APICall status = %d, want 403: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAPICallRejectsUnsafeDeepSeekTargets(t *testing.T) {
+	tests := []struct {
+		name      string
+		targetURL string
+	}{
+		{name: "non-default port", targetURL: "https://api.deepseek.com:8443/models"},
+		{name: "malicious suffix", targetURL: "https://api.deepseek.com.evil.com/models"},
+		{name: "unknown subdomain", targetURL: "https://sub.api.deepseek.com/models"},
+		{name: "private address", targetURL: "https://127.0.0.1/models"},
+	}
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				h := newConfigListTestHandler(t, &config.Config{})
+				body, errMarshal := json.Marshal(
+					map[string]any{
+						"method":     http.MethodGet,
+						"url":        tt.targetURL,
+						"header":     map[string]string{"Authorization": "Bearer $TOKEN$"},
+						"draftToken": "draft-token",
+					},
+				)
+				if errMarshal != nil {
+					t.Fatal(errMarshal)
+				}
+				recorder := runConfigListRequest(h.APICall, http.MethodPost, "/api-call", string(body))
+				if recorder.Code != http.StatusForbidden {
+					t.Fatalf("APICall status = %d, want 403: %s", recorder.Code, recorder.Body.String())
+				}
+			},
+		)
+	}
+}
+
+func TestAPICallRejectsUnsafeDeepSeekRedirects(t *testing.T) {
+	tests := []struct {
+		name     string
+		location string
+	}{
+		{name: "non-default port", location: "https://api.deepseek.com:8443/models"},
+		{name: "cross provider", location: "https://api.openai.com/v1/models"},
+		{name: "unknown subdomain", location: "https://sub.api.deepseek.com/models"},
+		{name: "private address", location: "https://127.0.0.1/models"},
+	}
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				requestCount := 0
+				server := httptest.NewTLSServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, r *http.Request) {
+							requestCount++
+							if got := r.Header.Get("Authorization"); got != "Bearer draft-token" {
+								t.Fatalf("Authorization = %q", got)
+							}
+							http.Redirect(w, r, tt.location, http.StatusFound)
+						},
+					),
+				)
+				t.Cleanup(server.Close)
+
+				installAPICallTLSTestTransport(t, server)
+
+				h := newConfigListTestHandler(t, &config.Config{})
+				recorder := runConfigListRequest(
+					h.APICall,
+					http.MethodPost,
+					"/api-call",
+					`{"method":"GET","url":"https://api.deepseek.com/models","header":{"Authorization":"Bearer $TOKEN$"},"draftToken":"draft-token"}`,
+				)
+				if recorder.Code != http.StatusBadGateway {
+					t.Fatalf("APICall status = %d, want 502: %s", recorder.Code, recorder.Body.String())
+				}
+				if requestCount != 1 {
+					t.Fatalf("request count = %d, want 1", requestCount)
+				}
+			},
+		)
+	}
+}
+
+func TestAPICallAllowsDeepSeekDefaultPortRedirect(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewTLSServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				if got := r.Header.Get("Authorization"); got != "Bearer draft-token" {
+					t.Fatalf("Authorization = %q", got)
+				}
+				if r.URL.Path == "/models" {
+					http.Redirect(w, r, "https://api.deepseek.com:443/redirected", http.StatusFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"data":[]}`))
+			},
+		),
+	)
+	t.Cleanup(server.Close)
+
+	installAPICallTLSTestTransport(t, server)
+
+	h := newConfigListTestHandler(t, &config.Config{})
+	recorder := runConfigListRequest(
+		h.APICall,
+		http.MethodPost,
+		"/api-call",
+		`{"method":"GET","url":"https://api.deepseek.com/models","header":{"Authorization":"Bearer $TOKEN$"},"draftToken":"draft-token"}`,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("APICall status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if requestCount != 2 {
+		t.Fatalf("request count = %d, want 2", requestCount)
+	}
+}
+
+func installAPICallTLSTestTransport(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	transport, ok := server.Client().Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("test server transport = %T", server.Client().Transport)
+	}
+	transport = transport.Clone()
+	// #nosec G402 -- this transport is confined to a local httptest server.
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	serverAddr := server.Listener.Addr().String()
+	dialer := &net.Dialer{Timeout: time.Second}
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, serverAddr)
+	}
+
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = transport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
 }
 
 func TestResolveAndCheckHost_IPLiteral(t *testing.T) {

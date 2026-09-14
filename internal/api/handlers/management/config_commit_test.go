@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,7 +60,7 @@ func TestApplyExternalConfigCommitReleasesCommitLockBeforeRuntime(t *testing.T) 
 	}
 	digest := sha256.Sum256(data)
 	expectedHash := hex.EncodeToString(digest[:])
-	handler := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	handler := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	t.Cleanup(func() { _ = handler.Close() })
 
 	var got ConfigCommit
@@ -90,7 +91,7 @@ func TestApplyExternalConfigCommitRejectsStaleSnapshot(t *testing.T) {
 		t.Fatalf("write old config: %v", errWrite)
 	}
 	oldDigest := sha256.Sum256(oldData)
-	handler := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	handler := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	t.Cleanup(func() { _ = handler.Close() })
 	if errWrite := os.WriteFile(configPath, []byte("debug: false\n"), 0o600); errWrite != nil {
 		t.Fatalf("write new config: %v", errWrite)
@@ -117,7 +118,7 @@ func TestConfigCommitHashRemainsBoundToPersistedCandidate(t *testing.T) {
 	if errWrite := os.WriteFile(configPath, []byte("debug: false\n"), 0o600); errWrite != nil {
 		t.Fatalf("write config: %v", errWrite)
 	}
-	handler := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	handler := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	t.Cleanup(func() { _ = handler.Close() })
 	candidate := &config.Config{Debug: true}
 	persistedHash, errPersist := handler.persistConfigCandidate(candidate)
@@ -142,7 +143,7 @@ func TestConfigCommitHashRemainsBoundToPersistedCandidate(t *testing.T) {
 
 func TestPutDebugCreatesMissingConfig(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	handler := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	handler := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	defer func() { _ = handler.Close() }()
 
 	ginCtx, recorder := newConfigCommitTestContext(http.MethodPut, "/debug", `{"value":true}`)
@@ -177,7 +178,7 @@ func TestConfigCommitCallbackRunsAfterHandlerUnlock(t *testing.T) {
 		original,
 		configPath,
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 		WithConfigCommitted(
 			func(_ context.Context, commit ConfigCommit) error {
 				got = commit
@@ -225,7 +226,7 @@ func TestConfigCommitCallbackFailureKeepsCommittedGeneration(t *testing.T) {
 		&config.Config{},
 		configPath,
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 		WithConfigCommitted(func(context.Context, ConfigCommit) error { return callbackErr }),
 	)
 	defer func() { _ = handler.Close() }()
@@ -254,7 +255,7 @@ func TestConfigCommitCallbackPanicReturnsSyncFailure(t *testing.T) {
 		&config.Config{},
 		"",
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 		WithConfigCommitted(
 			func(context.Context, ConfigCommit) error {
 				panic("runtime panic")
@@ -282,7 +283,7 @@ func TestConfigCommitCallbacksAreOrdered(t *testing.T) {
 		&config.Config{},
 		"",
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 		WithConfigCommitted(
 			func(_ context.Context, commit ConfigCommit) error {
 				generations = append(generations, commit.Generation)
@@ -344,7 +345,7 @@ func TestNotifyConfigCommittedSkipsSupersededGeneration(t *testing.T) {
 		&config.Config{},
 		"",
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 		WithConfigCommitted(
 			func(context.Context, ConfigCommit) error {
 				calls++
@@ -366,16 +367,34 @@ func TestNotifyConfigCommittedSkipsSupersededGeneration(t *testing.T) {
 	}
 }
 
+func TestConfigCommitWarningsCollectConcurrentCleanupErrors(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPut, "/config.yaml", nil)
+	warnings := beginConfigCommitWarnings(ginCtx)
+
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Go(func() {
+			ReportConfigCommitCleanupError(ginCtx.Request.Context(), errors.New("cleanup failed"))
+		})
+	}
+	workers.Wait()
+	if message := warnings.cleanupErrorMessage(); message == "" {
+		t.Fatal("concurrent cleanup errors were not collected")
+	}
+}
+
 func TestExternalConfigUpdateSerializesManagementMutation(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(configPath, []byte("debug: false\nproxy-url: https://old.example\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	handler := NewHandler(
-		&config.Config{SDKConfig: config.SDKConfig{ProxyURL: "https://old.example"}},
+		&config.Config{ProxyURL: "https://old.example"},
 		configPath,
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 	)
 	defer func() { _ = handler.Close() }()
 
@@ -388,7 +407,7 @@ func TestExternalConfigUpdateSerializesManagementMutation(t *testing.T) {
 				close(externalStarted)
 				<-releaseExternal
 				handler.SetConfig(
-					&config.Config{SDKConfig: config.SDKConfig{ProxyURL: "https://new.example"}},
+					&config.Config{ProxyURL: "https://new.example"},
 				)
 				return nil
 			},
@@ -438,7 +457,7 @@ func TestPutConfigYAMLPublishesConfigCommit(t *testing.T) {
 		&config.Config{Port: 8317},
 		configPath,
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 		WithConfigCommitted(
 			func(_ context.Context, commit ConfigCommit) error {
 				got = commit

@@ -76,11 +76,13 @@ func TestPatchClaudeKeyUsesAuthIndexAfterListReorder(t *testing.T) {
 			{APIKey: "second-secret", Prefix: "second"},
 		},
 	}
-	auths, err := synthesizer.NewConfigSynthesizer().Synthesize(&synthesizer.SynthesisContext{
-		Config:      original,
-		Now:         time.Unix(1_700_000_000, 0),
-		IDGenerator: synthesizer.NewStableIDGenerator(),
-	})
+	auths, err := synthesizer.NewConfigSynthesizer().Synthesize(
+		&synthesizer.SynthesisContext{
+			Config:      original,
+			Now:         time.Unix(1_700_000_000, 0),
+			IDGenerator: synthesizer.NewStableIDGenerator(),
+		},
+	)
 	if err != nil {
 		t.Fatalf("synthesize auths: %v", err)
 	}
@@ -103,11 +105,13 @@ func TestPatchClaudeKeyUsesAuthIndexAfterListReorder(t *testing.T) {
 	}
 	h := newConfigListTestHandler(t, current)
 	h.authManager = manager
-	body, err := json.Marshal(map[string]any{
-		"index":      1,
-		"auth-index": staleViews.claude[1],
-		"value":      map[string]any{"prefix": "updated-second"},
-	})
+	body, err := json.Marshal(
+		map[string]any{
+			"index":      1,
+			"auth-index": staleViews.claude[1],
+			"value":      map[string]any{"prefix": "updated-second"},
+		},
+	)
 	if err != nil {
 		t.Fatalf("marshal patch body: %v", err)
 	}

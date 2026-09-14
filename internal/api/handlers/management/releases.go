@@ -105,10 +105,6 @@ func (h *Handler) GetReleases(c *gin.Context) {
 	)
 }
 
-func (h *Handler) panelRepository() string {
-	return panelRepositoryFromConfig(h.configSnapshot())
-}
-
 func panelRepositoryFromConfig(cfg *config.Config) string {
 	repo := "Pyrokine/Cli-Proxy-API-Management-Center"
 	if cfg != nil {
@@ -129,10 +125,6 @@ func panelRepositoryFromConfig(cfg *config.Config) string {
 		}
 	}
 	return repo
-}
-
-func (h *Handler) cpaRepository() string {
-	return cpaRepositoryFromConfig(h.configSnapshot())
 }
 
 func cpaRepositoryFromConfig(cfg *config.Config) string {

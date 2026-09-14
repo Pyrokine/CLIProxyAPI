@@ -45,12 +45,14 @@ func TestConfigYAMLWithManagementSecretRejectsAliasedKeys(t *testing.T) {
 		"remote management key": []byte("remote-name: &remote-name remote-management\n*remote-name:\n  secret-key: plain\n"),
 		"secret key":            []byte("secret-name: &secret-name secret-key\nremote-management:\n  *secret-name: plain\n"),
 	} {
-		t.Run(name, func(t *testing.T) {
-			_, err := configYAMLWithManagementSecret(body, "hashed")
-			if !errors.Is(err, errConfigYAMLManagementSecretAlias) {
-				t.Fatalf("configYAMLWithManagementSecret() error = %v", err)
-			}
-		})
+		t.Run(
+			name, func(t *testing.T) {
+				_, err := configYAMLWithManagementSecret(body, "hashed")
+				if !errors.Is(err, errConfigYAMLManagementSecretAlias) {
+					t.Fatalf("configYAMLWithManagementSecret() error = %v", err)
+				}
+			},
+		)
 	}
 }
 
@@ -68,7 +70,9 @@ func TestConfigYAMLWithManagementSecretAllowsUnrelatedAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(persisted), "secret-key: plain") || !strings.Contains(string(persisted), "secret-key: hashed") {
+	if strings.Contains(string(persisted), "secret-key: plain") || !strings.Contains(
+		string(persisted), "secret-key: hashed",
+	) {
 		t.Fatalf("persisted YAML did not replace direct secret:\n%s", persisted)
 	}
 }

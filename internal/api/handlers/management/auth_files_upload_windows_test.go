@@ -30,6 +30,11 @@ func TestSaveUploadedAuthSerializesCaseVariantPaths(t *testing.T) {
 	if lowerAuth.ID != upperAuth.ID {
 		t.Fatalf("case-variant auth IDs = %q and %q, want one mutation identity", lowerAuth.ID, upperAuth.ID)
 	}
+	lowerDigest := lowerAuth.Attributes[coreauth.PersistedSHA256Attribute]
+	upperDigest := upperAuth.Attributes[coreauth.PersistedSHA256Attribute]
+	if len(lowerDigest) != 64 || len(upperDigest) != 64 || lowerDigest == upperDigest {
+		t.Fatalf("persisted digests = %q and %q", lowerDigest, upperDigest)
+	}
 
 	manager := coreauth.NewManager(nil, nil, nil)
 	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)

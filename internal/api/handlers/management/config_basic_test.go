@@ -43,13 +43,97 @@ func newConfigBasicTestHandler(t *testing.T, cfg *config.Config) *Handler {
 	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	handler := NewHandler(cfg, path, nil, WithEnvSecret(""))
-	t.Cleanup(func() {
-		if err := handler.Close(); err != nil {
-			t.Errorf("close management test handler: %v", err)
-		}
-	})
+	handler := NewHandler(cfg, path, nil, withEnvSecret(""))
+	t.Cleanup(
+		func() {
+			if err := handler.Close(); err != nil {
+				t.Errorf("close management test handler: %v", err)
+			}
+		},
+	)
 	return handler
+}
+
+func TestConfigYAMLConditionalWriteRejectsStaleETag(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	original := []byte("port: 8317\ndebug: false\n")
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	handler := NewHandler(&config.Config{Port: 8317}, configPath, nil, withEnvSecret(""))
+	defer func() { _ = handler.Close() }()
+
+	getRecorder := httptest.NewRecorder()
+	getContext, _ := gin.CreateTestContext(getRecorder)
+	getContext.Request = httptest.NewRequest(http.MethodGet, "/config.yaml", nil)
+	handler.GetConfigYAML(getContext)
+	if getRecorder.Code != http.StatusOK {
+		t.Fatalf("GetConfigYAML status = %d, body = %s", getRecorder.Code, getRecorder.Body.String())
+	}
+	etag := getRecorder.Header().Get("ETag")
+	redactionKey, errKey := handler.configYAMLRedactionKey()
+	if errKey != nil {
+		t.Fatalf("configYAMLRedactionKey: %v", errKey)
+	}
+	if etag != configYAMLETag(original, redactionKey) {
+		t.Fatalf("ETag = %q, want keyed config digest", etag)
+	}
+
+	external := []byte("port: 8317\ndebug: true\n")
+	if err := os.WriteFile(configPath, external, 0o600); err != nil {
+		t.Fatalf("write external config: %v", err)
+	}
+	putRecorder := httptest.NewRecorder()
+	putContext, _ := gin.CreateTestContext(putRecorder)
+	putContext.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/config.yaml",
+		strings.NewReader("port: 8317\ndebug: false\nproxy-url: https://example.com\n"),
+	)
+	putContext.Request.Header.Set("Content-Type", "application/yaml")
+	putContext.Request.Header.Set("If-Match", etag)
+	handler.PutConfigYAML(putContext)
+	if putRecorder.Code != http.StatusPreconditionFailed {
+		t.Fatalf(
+			"PutConfigYAML status = %d, want %d: %s", putRecorder.Code, http.StatusPreconditionFailed,
+			putRecorder.Body.String(),
+		)
+	}
+	stored, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if !bytes.Equal(stored, external) {
+		t.Fatalf("stale write changed config: %q", stored)
+	}
+}
+
+func TestConfigYAMLConditionalWriteAcceptsCurrentETag(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	original := []byte("port: 8317\ndebug: false\n")
+	if err := os.WriteFile(configPath, original, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	handler := NewHandler(&config.Config{Port: 8317}, configPath, nil, withEnvSecret(""))
+	defer func() { _ = handler.Close() }()
+
+	putRecorder := httptest.NewRecorder()
+	putContext, _ := gin.CreateTestContext(putRecorder)
+	putContext.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/config.yaml",
+		strings.NewReader("port: 8317\ndebug: true\n"),
+	)
+	putContext.Request.Header.Set("Content-Type", "application/yaml")
+	redactionKey, errKey := handler.configYAMLRedactionKey()
+	if errKey != nil {
+		t.Fatalf("configYAMLRedactionKey: %v", errKey)
+	}
+	putContext.Request.Header.Set("If-Match", configYAMLETag(original, redactionKey))
+	handler.PutConfigYAML(putContext)
+	if putRecorder.Code != http.StatusOK {
+		t.Fatalf("PutConfigYAML status = %d, want %d: %s", putRecorder.Code, http.StatusOK, putRecorder.Body.String())
+	}
 }
 
 func TestConfigYAMLRedactionKeyPersistsAcrossHandlers(t *testing.T) {
@@ -64,7 +148,7 @@ func TestConfigYAMLRedactionKeyPersistsAcrossHandlers(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	handler := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	handler := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/config.yaml", nil)
@@ -98,7 +182,7 @@ func TestConfigYAMLRedactionKeyPersistsAcrossHandlers(t *testing.T) {
 		}
 	}
 
-	restarted := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	restarted := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	defer func() { _ = restarted.Close() }()
 	secondKey, err := restarted.configYAMLRedactionKey()
 	if err != nil {
@@ -272,32 +356,68 @@ func TestConfigYAMLRedactionKeyRejectsInvalidFiles(t *testing.T) {
 			},
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			configPath := filepath.Join(t.TempDir(), "config.yaml")
-			if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
-				t.Fatalf("write config: %v", err)
-			}
-			keyPath, err := configYAMLRedactionKeyPath(configPath)
-			if err != nil {
-				t.Fatalf("configYAMLRedactionKeyPath: %v", err)
-			}
-			if err = os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
-				t.Fatalf("mkdir redaction state: %v", err)
-			}
-			test.prepare(t, keyPath)
-			handler := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
-			defer func() { _ = handler.Close() }()
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			c.Request = httptest.NewRequest(http.MethodGet, "/config.yaml", nil)
-			handler.GetConfigYAML(c)
-			if recorder.Code != http.StatusInternalServerError {
-				t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
-			}
-			if strings.Contains(recorder.Body.String(), keyPath) || strings.Contains(recorder.Body.String(), configPath) {
-				t.Fatalf("response leaked internal path: %s", recorder.Body.String())
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				configPath := filepath.Join(t.TempDir(), "config.yaml")
+				if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+					t.Fatalf("write config: %v", err)
+				}
+				keyPath, err := configYAMLRedactionKeyPath(configPath)
+				if err != nil {
+					t.Fatalf("configYAMLRedactionKeyPath: %v", err)
+				}
+				if err = os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+					t.Fatalf("mkdir redaction state: %v", err)
+				}
+				test.prepare(t, keyPath)
+				handler := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
+				defer func() { _ = handler.Close() }()
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodGet, "/config.yaml", nil)
+				handler.GetConfigYAML(c)
+				if recorder.Code != http.StatusInternalServerError {
+					t.Fatalf(
+						"status = %d, want %d: %s", recorder.Code, http.StatusInternalServerError,
+						recorder.Body.String(),
+					)
+				}
+				if strings.Contains(recorder.Body.String(), keyPath) || strings.Contains(
+					recorder.Body.String(), configPath,
+				) {
+					t.Fatalf("response leaked internal path: %s", recorder.Body.String())
+				}
+			},
+		)
+	}
+}
+
+func TestPutConfigYAMLWithoutPlaceholdersOrIfMatchDoesNotNeedRedactionKey(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	keyPath, err := configYAMLRedactionKeyPath(configPath)
+	if err != nil {
+		t.Fatalf("configYAMLRedactionKeyPath: %v", err)
+	}
+	if err = os.MkdirAll(filepath.Dir(keyPath), 0o700); err != nil {
+		t.Fatalf("mkdir redaction state: %v", err)
+	}
+	if err = os.WriteFile(keyPath, []byte("invalid"), 0o600); err != nil {
+		t.Fatalf("write invalid redaction key: %v", err)
+	}
+
+	handler := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
+	defer func() { _ = handler.Close() }()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/config.yaml", strings.NewReader("port: 8318\n"))
+	handler.PutConfigYAML(c)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
 	}
 }
 
@@ -372,11 +492,9 @@ func TestLoadOrCreateConfigYAMLRedactionKeyConcurrent(t *testing.T) {
 	errs := make([]error, workers)
 	var group sync.WaitGroup
 	for index := range workers {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			keys[index], errs[index] = loadOrCreateConfigYAMLRedactionKey(configPath)
-		}()
+		})
 	}
 	group.Wait()
 	for index, err := range errs {

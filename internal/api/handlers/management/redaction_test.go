@@ -18,7 +18,9 @@ import (
 func TestUsageRedactionHonorsRequestCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := redactedManagementPayloadContext(ctx, map[string]any{"source": "secret"}); !errors.Is(err, context.Canceled) {
+	if _, err := redactedManagementPayloadContext(ctx, map[string]any{"source": "secret"}); !errors.Is(
+		err, context.Canceled,
+	) {
 		t.Fatalf("redactedManagementPayloadContext() error = %v, want %v", err, context.Canceled)
 	}
 
@@ -52,14 +54,16 @@ func TestMaskUsageEventAPIKeysPreservesAliasIdentityOnMaskCollision(t *testing.T
 		t.Fatalf("maskUsageEventAPIKeys API keys = %#v", masked)
 	}
 	if masked[0].APIKeyAlias != "first" || masked[1].APIKeyAlias != "second" {
-		t.Fatalf("maskUsageEventAPIKeys aliases = %q/%q, want first/second", masked[0].APIKeyAlias, masked[1].APIKeyAlias)
+		t.Fatalf(
+			"maskUsageEventAPIKeys aliases = %q/%q, want first/second", masked[0].APIKeyAlias, masked[1].APIKeyAlias,
+		)
 	}
 }
 
 func TestUsageCredentialMaskerRedactsUntaggedHistory(t *testing.T) {
 	masker := usageCredentialMasker{}
 	for _, raw := range []string{"custom-provider-secret-value", "abcd...wxyz", "user@example.com"} {
-		if got, want := masker.Mask(raw), util.HideAPIKey(raw); got != want {
+		if got, want := masker.mask(raw), util.HideAPIKey(raw); got != want {
 			t.Fatalf("historical source %q = %q, want %q", raw, got, want)
 		}
 	}
@@ -69,10 +73,10 @@ func TestUsageCredentialMaskerPreservesTaggedIdentityAndAPIKey(t *testing.T) {
 	masker := usageCredentialMasker{}
 	identity := "user@example.com"
 	maskedKey := util.HideAPIKey("custom-provider-secret-value")
-	if got := masker.Mask(usage.TagIdentityCredentialSource(identity)); got != identity {
+	if got := masker.mask(usage.TagIdentityCredentialSource(identity)); got != identity {
 		t.Fatalf("tagged identity = %q, want %q", got, identity)
 	}
-	if got := masker.Mask(usage.TagAPIKeyCredentialSource(maskedKey, true)); got != maskedKey {
+	if got := masker.mask(usage.TagAPIKeyCredentialSource(maskedKey, true)); got != maskedKey {
 		t.Fatalf("tagged API key = %q, want %q", got, maskedKey)
 	}
 }
@@ -84,7 +88,7 @@ func TestUsageCredentialMaskerRedactsTagLookalikeHistory(t *testing.T) {
 		"__cpa_identity__:user@example.com",
 		"cpa:usage-source:v1:identity:user@example.com",
 	} {
-		if got, want := masker.Mask(raw), util.HideAPIKey(raw); got != want {
+		if got, want := masker.mask(raw), util.HideAPIKey(raw); got != want {
 			t.Fatalf("tag lookalike %q = %q, want %q", raw, got, want)
 		}
 	}
@@ -133,6 +137,48 @@ func TestMaskUsageEventAPIKeysSerializesExplicitEmptyAlias(t *testing.T) {
 	}
 	if !strings.Contains(string(encoded), `"api_key_alias":""`) {
 		t.Fatalf("usage event omitted explicit empty alias: %s", encoded)
+	}
+}
+
+func TestConfigYAMLRedactsCodexLiveICECredentialsOnly(t *testing.T) {
+	const (
+		username   = "relay-user"
+		credential = "relay-secret"
+	)
+	source := []byte(`owner:
+  username: visible-owner
+codex:
+  live-media-relay:
+    enabled: true
+    ice-servers:
+      - urls: ["turn:turn.example.com:3478?transport=udp"]
+        username: ` + username + `
+        credential: ` + credential + `
+`)
+
+	redacted, err := redactConfigYAML(source)
+	if err != nil {
+		t.Fatalf("redactConfigYAML: %v", err)
+	}
+	for _, secret := range []string{username, credential} {
+		if strings.Contains(string(redacted), secret) {
+			t.Fatalf("redactConfigYAML kept ICE secret %q: %s", secret, redacted)
+		}
+	}
+	for _, visible := range []string{"visible-owner", "turn:turn.example.com:3478?transport=udp"} {
+		if !strings.Contains(string(redacted), visible) {
+			t.Fatalf("redactConfigYAML hid non-secret %q: %s", visible, redacted)
+		}
+	}
+
+	restored, err := restoreConfigYAMLPlaceholders(redacted, source)
+	if err != nil {
+		t.Fatalf("restoreConfigYAMLPlaceholders: %v", err)
+	}
+	for _, secret := range []string{username, credential} {
+		if !strings.Contains(string(restored), secret) {
+			t.Fatalf("restoreConfigYAMLPlaceholders omitted ICE secret %q: %s", secret, restored)
+		}
 	}
 }
 
@@ -543,7 +589,10 @@ func TestConfigYAMLSeparatesValueAndMapKeySensitiveContainers(t *testing.T) {
 		t.Fatalf("redactConfigYAML: %v", err)
 	}
 	text := string(redacted)
-	for _, secret := range []string{"account-name", "user@example.com", "credential-value", "nested-secret-value", "sk-alias-secret-value", "sk-rule-secret-value"} {
+	for _, secret := range []string{
+		"account-name", "user@example.com", "credential-value", "nested-secret-value", "sk-alias-secret-value",
+		"sk-rule-secret-value",
+	} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("redactConfigYAML kept sensitive value %q: %s", secret, text)
 		}
@@ -558,7 +607,10 @@ func TestConfigYAMLSeparatesValueAndMapKeySensitiveContainers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restoreConfigYAMLPlaceholders: %v", err)
 	}
-	for _, value := range []string{"account-name", "user@example.com", "credential-value", "nested-secret-value", "sk-alias-secret-value", "sk-rule-secret-value"} {
+	for _, value := range []string{
+		"account-name", "user@example.com", "credential-value", "nested-secret-value", "sk-alias-secret-value",
+		"sk-rule-secret-value",
+	} {
 		if !strings.Contains(string(restored), value) {
 			t.Fatalf("restoreConfigYAMLPlaceholders omitted %q: %s", value, restored)
 		}
@@ -631,80 +683,92 @@ func TestConfigYAMLRejectsStaleAndMisplacedPlaceholders(t *testing.T) {
 		t.Fatalf("redactConfigYAML: %v", err)
 	}
 
-	t.Run("scalar sequence reorder", func(t *testing.T) {
-		document, errDecode := decodeConfigYAML(redacted)
-		if errDecode != nil {
-			t.Fatalf("decodeConfigYAML: %v", errDecode)
-		}
-		var placeholders []*yaml.Node
-		if errVisit := visitConfigYAMLSecrets(document, func(node *yaml.Node, _ string) error {
-			placeholders = append(placeholders, node)
-			return nil
-		}); errVisit != nil {
-			t.Fatalf("visitConfigYAMLSecrets: %v", errVisit)
-		}
-		if len(placeholders) != 2 {
-			t.Fatalf("placeholder nodes = %d, want 2", len(placeholders))
-		}
-		placeholders[0].Value, placeholders[1].Value = placeholders[1].Value, placeholders[0].Value
-		submitted, errEncode := encodeConfigYAML(document)
-		if errEncode != nil {
-			t.Fatalf("encodeConfigYAML: %v", errEncode)
-		}
-		if _, errRestore := restoreConfigYAMLPlaceholders(submitted, source); errRestore != nil {
-			t.Fatalf("restoreConfigYAMLPlaceholders rejected scalar sequence reorder: %v", errRestore)
-		}
-	})
-
-	t.Run("structured sequence misplacement", func(t *testing.T) {
-		structuredSource := []byte("gemini-api-key:\n  - api-key: sk-first-secret-value\n    base-url: https://first.example\n  - api-key: sk-second-secret-value\n    base-url: https://second.example\n")
-		structuredRedacted, errRedact := redactConfigYAML(structuredSource)
-		if errRedact != nil {
-			t.Fatalf("redactConfigYAML: %v", errRedact)
-		}
-		document, errDecode := decodeConfigYAML(structuredRedacted)
-		if errDecode != nil {
-			t.Fatalf("decodeConfigYAML: %v", errDecode)
-		}
-		var placeholders []*yaml.Node
-		if errVisit := visitConfigYAMLSecrets(document, func(node *yaml.Node, _ string) error {
-			if isConfigYAMLPlaceholder(node.Value) {
-				placeholders = append(placeholders, node)
+	t.Run(
+		"scalar sequence reorder", func(t *testing.T) {
+			document, errDecode := decodeConfigYAML(redacted)
+			if errDecode != nil {
+				t.Fatalf("decodeConfigYAML: %v", errDecode)
 			}
-			return nil
-		}); errVisit != nil {
-			t.Fatalf("visitConfigYAMLSecrets: %v", errVisit)
-		}
-		if len(placeholders) != 2 {
-			t.Fatalf("placeholder nodes = %d, want 2", len(placeholders))
-		}
-		placeholders[0].Value, placeholders[1].Value = placeholders[1].Value, placeholders[0].Value
-		submitted, errEncode := encodeConfigYAML(document)
-		if errEncode != nil {
-			t.Fatalf("encodeConfigYAML: %v", errEncode)
-		}
-		if _, errRestore := restoreConfigYAMLPlaceholders(submitted, structuredSource); errRestore == nil {
-			t.Fatal("restoreConfigYAMLPlaceholders accepted structured placeholder misplacement")
-		}
-	})
+			var placeholders []*yaml.Node
+			if errVisit := visitConfigYAMLSecrets(
+				document, func(node *yaml.Node, _ string) error {
+					placeholders = append(placeholders, node)
+					return nil
+				},
+			); errVisit != nil {
+				t.Fatalf("visitConfigYAMLSecrets: %v", errVisit)
+			}
+			if len(placeholders) != 2 {
+				t.Fatalf("placeholder nodes = %d, want 2", len(placeholders))
+			}
+			placeholders[0].Value, placeholders[1].Value = placeholders[1].Value, placeholders[0].Value
+			submitted, errEncode := encodeConfigYAML(document)
+			if errEncode != nil {
+				t.Fatalf("encodeConfigYAML: %v", errEncode)
+			}
+			if _, errRestore := restoreConfigYAMLPlaceholders(submitted, source); errRestore != nil {
+				t.Fatalf("restoreConfigYAMLPlaceholders rejected scalar sequence reorder: %v", errRestore)
+			}
+		},
+	)
 
-	t.Run("nonsensitive location", func(t *testing.T) {
-		var decoded struct {
-			APIKeys []string `yaml:"api-keys"`
-		}
-		if errDecode := yaml.Unmarshal(redacted, &decoded); errDecode != nil {
-			t.Fatalf("decode redacted YAML: %v", errDecode)
-		}
-		submitted := []byte("proxy-url: \"" + decoded.APIKeys[0] + "\"\n" + string(redacted))
-		if _, errRestore := restoreConfigYAMLPlaceholders(submitted, source); errRestore == nil {
-			t.Fatal("restoreConfigYAMLPlaceholders accepted placeholder in non-sensitive field")
-		}
-	})
+	t.Run(
+		"structured sequence misplacement", func(t *testing.T) {
+			structuredSource := []byte("gemini-api-key:\n  - api-key: sk-first-secret-value\n    base-url: https://first.example\n  - api-key: sk-second-secret-value\n    base-url: https://second.example\n")
+			structuredRedacted, errRedact := redactConfigYAML(structuredSource)
+			if errRedact != nil {
+				t.Fatalf("redactConfigYAML: %v", errRedact)
+			}
+			document, errDecode := decodeConfigYAML(structuredRedacted)
+			if errDecode != nil {
+				t.Fatalf("decodeConfigYAML: %v", errDecode)
+			}
+			var placeholders []*yaml.Node
+			if errVisit := visitConfigYAMLSecrets(
+				document, func(node *yaml.Node, _ string) error {
+					if isConfigYAMLPlaceholder(node.Value) {
+						placeholders = append(placeholders, node)
+					}
+					return nil
+				},
+			); errVisit != nil {
+				t.Fatalf("visitConfigYAMLSecrets: %v", errVisit)
+			}
+			if len(placeholders) != 2 {
+				t.Fatalf("placeholder nodes = %d, want 2", len(placeholders))
+			}
+			placeholders[0].Value, placeholders[1].Value = placeholders[1].Value, placeholders[0].Value
+			submitted, errEncode := encodeConfigYAML(document)
+			if errEncode != nil {
+				t.Fatalf("encodeConfigYAML: %v", errEncode)
+			}
+			if _, errRestore := restoreConfigYAMLPlaceholders(submitted, structuredSource); errRestore == nil {
+				t.Fatal("restoreConfigYAMLPlaceholders accepted structured placeholder misplacement")
+			}
+		},
+	)
 
-	t.Run("stale", func(t *testing.T) {
-		otherSource := []byte("api-keys:\n  - sk-replaced-secret-value\n  - sk-second-secret-value\n")
-		if _, errRestore := restoreConfigYAMLPlaceholders(redacted, otherSource); errRestore == nil {
-			t.Fatal("restoreConfigYAMLPlaceholders accepted stale placeholder")
-		}
-	})
+	t.Run(
+		"nonsensitive location", func(t *testing.T) {
+			var decoded struct {
+				APIKeys []string `yaml:"api-keys"`
+			}
+			if errDecode := yaml.Unmarshal(redacted, &decoded); errDecode != nil {
+				t.Fatalf("decode redacted YAML: %v", errDecode)
+			}
+			submitted := []byte("proxy-url: \"" + decoded.APIKeys[0] + "\"\n" + string(redacted))
+			if _, errRestore := restoreConfigYAMLPlaceholders(submitted, source); errRestore == nil {
+				t.Fatal("restoreConfigYAMLPlaceholders accepted placeholder in non-sensitive field")
+			}
+		},
+	)
+
+	t.Run(
+		"stale", func(t *testing.T) {
+			otherSource := []byte("api-keys:\n  - sk-replaced-secret-value\n  - sk-second-secret-value\n")
+			if _, errRestore := restoreConfigYAMLPlaceholders(redacted, otherSource); errRestore == nil {
+				t.Fatal("restoreConfigYAMLPlaceholders accepted stale placeholder")
+			}
+		},
+	)
 }

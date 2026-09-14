@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -38,11 +37,12 @@ import (
 /* ---------- types ---------- */
 
 type updateState struct {
-	mu      sync.RWMutex
-	status  string // idle | downloading | verifying | replacing | done | error
-	message string
-	version string
-	percent int
+	mu        sync.RWMutex
+	status    string // idle | downloading | verifying | replacing | done | error
+	message   string
+	version   string
+	attemptID string
+	percent   int
 }
 
 type updateRequest struct {
@@ -50,13 +50,22 @@ type updateRequest struct {
 }
 
 type updateCompatibilityResponse struct {
-	CurrentVersion  string                   `json:"current_version"`
-	TargetVersion   string                   `json:"target_version"`
-	MinPanelVersion string                   `json:"min_panel_version"`
-	RequiresRestart bool                     `json:"requires_restart"`
-	Compatible      bool                     `json:"compatible"`
-	Warnings        []string                 `json:"warnings,omitempty"`
-	Usage           updateUsageCompatibility `json:"usage"`
+	CurrentVersion        string                   `json:"current_version"`
+	TargetVersion         string                   `json:"target_version"`
+	MinPanelVersion       string                   `json:"min_panel_version"`
+	RequiresRestart       bool                     `json:"requires_restart"`
+	Compatible            bool                     `json:"compatible"`
+	AutomaticRetryBlocked bool                     `json:"automatic_retry_blocked"`
+	LastFailure           *updateFailureResponse   `json:"last_failure,omitempty"`
+	Warnings              []string                 `json:"warnings,omitempty"`
+	Usage                 updateUsageCompatibility `json:"usage"`
+}
+
+type updateFailureResponse struct {
+	FailureCount  int       `json:"failure_count"`
+	ResultCode    string    `json:"result_code"`
+	LastFailureAt time.Time `json:"last_failure_at"`
+	NextRetryAt   time.Time `json:"next_retry_at"`
 }
 
 type updateUsageCompatibility struct {
@@ -103,18 +112,88 @@ func init() {
 
 // GetUpdateStatus returns the current self-update progress.
 func (h *Handler) GetUpdateStatus(c *gin.Context) {
+	status := snapshotSelfUpdate()
+	stateAvailable := h != nil && h.stateStore != nil
+	var session *updateGuardSession
+	var stateErr error
+	if stateAvailable {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		session, stateErr = h.stateStore.loadUpdateSession(ctx)
+		cancel()
+	}
+	if session != nil && (status.status == "idle" || status.attemptID == session.AttemptID) {
+		status = updateStateFromSession(*session)
+	}
+	response := gin.H{
+		"status":          status.status,
+		"message":         status.message,
+		"target_version":  status.version,
+		"attempt_id":      status.attemptID,
+		"percent":         status.percent,
+		"current_version": buildinfo.Version,
+		"state_available": stateAvailable && stateErr == nil,
+	}
+	if !stateAvailable || stateErr != nil {
+		response["state_error"] = "update_state_unavailable"
+	}
+	if session != nil && (status.attemptID == "" || status.attemptID == session.AttemptID) {
+		response["guard_phase"] = session.Phase
+		response["result_code"] = session.ResultCode
+		response["failure_count"] = session.FailureCount
+		response["next_retry_at"] = session.NextRetryAt
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+func snapshotSelfUpdate() updateState {
 	selfUpdate.mu.RLock()
 	defer selfUpdate.mu.RUnlock()
+	return updateState{
+		status:    selfUpdate.status,
+		message:   selfUpdate.message,
+		version:   selfUpdate.version,
+		attemptID: selfUpdate.attemptID,
+		percent:   selfUpdate.percent,
+	}
+}
 
-	c.JSON(
-		http.StatusOK, gin.H{
-			"status":          selfUpdate.status,
-			"message":         selfUpdate.message,
-			"target_version":  selfUpdate.version,
-			"percent":         selfUpdate.percent,
-			"current_version": buildinfo.Version,
-		},
-	)
+func setSelfUpdate(status, message, version, attemptID string, percent int) {
+	selfUpdate.mu.Lock()
+	selfUpdate.status = status
+	selfUpdate.message = message
+	selfUpdate.version = version
+	selfUpdate.attemptID = attemptID
+	selfUpdate.percent = percent
+	selfUpdate.mu.Unlock()
+}
+
+func updateStateFromSession(session updateGuardSession) updateState {
+	status := "replacing"
+	message := "Update guard is applying and validating the new version"
+	switch session.Phase {
+	case updatePhaseDownloading:
+		status = "downloading"
+		message = "Downloading release archive"
+	case updatePhaseVerifying, updatePhasePreparing:
+		status = "verifying"
+		message = "Verifying and preparing release"
+	case updatePhaseSucceeded:
+		status = "done"
+		message = "Update completed and passed health checks"
+	case updatePhaseRolledBack:
+		status = "error"
+		message = "Update failed and the previous version was restored"
+	case updatePhaseError, updatePhaseLaunchFailed, updatePhaseTerminalFailure:
+		status = "error"
+		message = "Update failed"
+	}
+	return updateState{
+		status:    status,
+		message:   message,
+		version:   session.TargetVersion,
+		attemptID: session.AttemptID,
+		percent:   session.Percent,
+	}
 }
 
 // GetUpdateCompatibility returns real backend upgrade compatibility signals.
@@ -136,6 +215,11 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 	}
 
 	targetVersion := strings.TrimSpace(req.Version)
+	if !validVersion.MatchString(targetVersion) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_version", "message": "Version format is invalid"})
+		return
+	}
+	setManagementMutationTarget(c, "version", targetVersion)
 	cfg := h.configSnapshot()
 	if strings.EqualFold(targetVersion, buildinfo.Version) {
 		c.JSON(
@@ -158,17 +242,22 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 		return
 	}
 
-	selfUpdate.mu.Lock()
-	if selfUpdate.status == "downloading" || selfUpdate.status == "verifying" || selfUpdate.status == "replacing" {
-		selfUpdate.mu.Unlock()
-		c.JSON(http.StatusConflict, gin.H{"error": "update_in_progress", "message": "An update is already in progress"})
+	startCtx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	session, err := h.beginPersistentUpdate(startCtx, cfg, targetVersion, false)
+	cancel()
+	if err != nil {
+		status := http.StatusServiceUnavailable
+		code := "update_guard_unavailable"
+		message := "The update guard is unavailable"
+		if errors.Is(err, errUpdateInProgress) {
+			status = http.StatusConflict
+			code = "update_in_progress"
+			message = "An update is already in progress"
+		}
+		c.JSON(status, gin.H{"error": code, "message": message})
 		return
 	}
-	selfUpdate.status = "downloading"
-	selfUpdate.message = ""
-	selfUpdate.version = targetVersion
-	selfUpdate.percent = 0
-	selfUpdate.mu.Unlock()
+	setSelfUpdate("downloading", "", targetVersion, session.AttemptID, 0)
 
 	repo := cpaRepositoryFromConfig(cfg)
 	proxyURL := ""
@@ -176,120 +265,262 @@ func (h *Handler) PostUpdate(c *gin.Context) {
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	go h.performUpdate(repo, targetVersion, proxyURL)
+	go h.performUpdate(repo, proxyURL, session)
 
 	c.JSON(
-		http.StatusAccepted, gin.H{"status": "downloading", "target_version": targetVersion, "compatibility": compat},
+		http.StatusAccepted,
+		gin.H{
+			"status": "downloading", "target_version": targetVersion,
+			"attempt_id": session.AttemptID, "compatibility": compat,
+		},
 	)
 }
 
 /* ---------- update logic ---------- */
 
-func (h *Handler) performUpdate(repo, version, proxyURL string) {
-	setStatus := func(status, message string, percent int) {
-		selfUpdate.mu.Lock()
-		selfUpdate.status = status
-		selfUpdate.message = message
-		selfUpdate.percent = percent
-		selfUpdate.mu.Unlock()
-	}
-
+func (h *Handler) performUpdate(repo, proxyURL string, session updateGuardSession) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	release, err := h.fetchRelease(repo, version, proxyURL)
+	release, err := h.fetchRelease(ctx, repo, session.TargetVersion, proxyURL)
 	if err != nil {
-		setStatus("error", fmt.Sprintf("fetch release: %v", err), 0)
+		h.failUpdateBeforeGuard(session, updatePhaseDownloading, "download_failed", 0, err)
 		return
 	}
 
-	assetNames := expectedArchiveAssetNames(version)
+	assetNames := expectedArchiveAssetNames(session.TargetVersion)
 	asset, checksumAsset := findReleaseAssets(release.Assets, assetNames)
 	if asset == nil {
-		setStatus(
-			"error", fmt.Sprintf("asset %s not found in release %s", strings.Join(assetNames, " or "), version), 0,
+		h.failUpdateBeforeGuard(
+			session,
+			updatePhaseDownloading,
+			"download_failed",
+			0,
+			fmt.Errorf("release archive is unavailable"),
 		)
 		return
 	}
 	if checksumAsset == nil {
-		setStatus("error", fmt.Sprintf("checksums.txt not found in release %s", version), 0)
+		h.failUpdateBeforeGuard(
+			session,
+			updatePhaseDownloading,
+			"checksum_failed",
+			0,
+			fmt.Errorf("release checksum is unavailable"),
+		)
 		return
 	}
 
-	for label, u := range map[string]string{
+	for label, assetURL := range map[string]string{
 		"archive": asset.BrowserDownloadURL, "checksum": checksumAsset.BrowserDownloadURL,
 	} {
-		if err := validateGitHubDownloadURL(label, u); err != nil {
-			setStatus("error", err.Error(), 0)
+		if err = validateGitHubDownloadURL(label, assetURL); err != nil {
+			h.failUpdateBeforeGuard(session, updatePhaseDownloading, "download_failed", 0, err)
 			return
 		}
 	}
 
-	setStatus("downloading", "Downloading release archive...", 20)
+	setSelfUpdate(
+		"downloading", "Downloading release archive...", session.TargetVersion, session.AttemptID, 20,
+	)
 	client := newUpdateHTTPClient(proxyURL)
 	archiveData, err := githubGet(ctx, client, asset.BrowserDownloadURL)
 	if err != nil {
-		setStatus("error", fmt.Sprintf("download archive: %v", err), 20)
+		h.failUpdateBeforeGuard(session, updatePhaseDownloading, "download_failed", 20, err)
 		return
 	}
 
-	setStatus("verifying", "Verifying checksum...", 55)
+	now := time.Now().UTC()
+	updated, err := h.stateStore.transitionUpdateSession(
+		ctx,
+		session.AttemptID,
+		updatePhaseDownloading,
+		func(next *updateGuardSession) {
+			next.Phase = updatePhaseVerifying
+			next.Percent = 55
+			next.UpdatedAt = now
+		},
+	)
+	if err != nil {
+		h.failUpdateBeforeGuard(session, updatePhaseDownloading, "state_failed", 55, err)
+		return
+	}
+	session = *updated
+	setSelfUpdate("verifying", "Verifying checksum...", session.TargetVersion, session.AttemptID, 55)
 	downloadedHash := sha256Hex(archiveData)
 	expectedHash, err := fetchExpectedHash(ctx, client, checksumAsset.BrowserDownloadURL, asset.Name)
 	if err != nil {
-		setStatus("error", fmt.Sprintf("checksum verification failed: %v", err), 55)
+		h.failUpdateBeforeGuard(session, updatePhaseVerifying, "checksum_failed", 55, err)
 		return
 	}
-	if expectedHash == "" {
-		setStatus("error", fmt.Sprintf("checksum file does not contain hash for %s", asset.Name), 55)
-		return
-	}
-	if !strings.EqualFold(expectedHash, downloadedHash) {
-		setStatus("error", fmt.Sprintf("SHA256 mismatch: expected %s, got %s", expectedHash, downloadedHash), 55)
+	if expectedHash == "" || !strings.EqualFold(expectedHash, downloadedHash) {
+		h.failUpdateBeforeGuard(
+			session,
+			updatePhaseVerifying,
+			"checksum_failed",
+			55,
+			fmt.Errorf("release checksum mismatch"),
+		)
 		return
 	}
 
-	setStatus("replacing", "Extracting archive...", 75)
+	now = time.Now().UTC()
+	updated, err = h.stateStore.transitionUpdateSession(
+		ctx,
+		session.AttemptID,
+		updatePhaseVerifying,
+		func(next *updateGuardSession) {
+			next.Phase = updatePhasePreparing
+			next.Percent = 75
+			next.UpdatedAt = now
+		},
+	)
+	if err != nil {
+		h.failUpdateBeforeGuard(session, updatePhaseVerifying, "state_failed", 75, err)
+		return
+	}
+	session = *updated
+	setSelfUpdate("verifying", "Extracting release archive...", session.TargetVersion, session.AttemptID, 75)
 	binaryData, err := extractBinaryFromArchive(asset.Name, archiveData)
 	if err != nil {
-		setStatus("error", fmt.Sprintf("extract binary: %v", err), 75)
+		h.failUpdateBeforeGuard(session, updatePhasePreparing, "extract_failed", 75, err)
 		return
 	}
 
-	execPath, err := os.Executable()
-	if err != nil {
-		setStatus("error", fmt.Sprintf("resolve executable path: %v", err), 80)
-		return
-	}
-	execPath, err = filepath.EvalSymlinks(execPath)
-	if err != nil {
-		setStatus("error", fmt.Sprintf("resolve symlinks: %v", err), 80)
-		return
-	}
-
-	setStatus("replacing", "Replacing binary...", 90)
-	if err = replaceBinary(execPath, binaryData); err != nil {
-		setStatus("error", fmt.Sprintf("replace binary: %v", err), 90)
-		return
-	}
-
-	setStatus("replacing", fmt.Sprintf("Updated to %s, restarting service...", version), 100)
-	log.Infof(
-		"self-update: binary replaced successfully (version=%s, archive=%s, sha256=%s)", version, asset.Name,
-		downloadedHash,
+	session.CandidatePath = updateCandidatePath(session.ExecutablePath, session.AttemptID)
+	now = time.Now().UTC()
+	updated, err = h.stateStore.transitionUpdateSession(
+		ctx,
+		session.AttemptID,
+		updatePhasePreparing,
+		func(next *updateGuardSession) {
+			next.CandidatePath = session.CandidatePath
+			next.Percent = 85
+			next.UpdatedAt = now
+		},
 	)
-	if err = restartCurrentProcess(); err != nil {
-		setStatus("error", fmt.Sprintf("restart process: %v", err), 100)
+	if err != nil {
+		h.failUpdateBeforeGuard(session, updatePhasePreparing, "state_failed", 85, err)
 		return
 	}
+	session = *updated
+	if err = writeUpdateCandidate(session, binaryData); err != nil {
+		h.failUpdateBeforeGuard(session, updatePhasePreparing, "candidate_failed", 85, err)
+		return
+	}
+
+	session, err = armUpdateGuardSession(ctx, h.stateStore, session, time.Now())
+	if err != nil {
+		h.failUpdateBeforeGuard(session, updatePhasePreparing, "state_failed", 90, err)
+		return
+	}
+	setSelfUpdate("replacing", "Starting independent update guard...", session.TargetVersion, session.AttemptID, 95)
+	launchCtx, launchCancel := context.WithTimeout(context.Background(), updateGuardClaimTimeout+5*time.Second)
+	err = launchUpdateGuard(launchCtx, h.stateStore, session, realUpdateGuardRuntime())
+	launchCancel()
+	if err != nil {
+		h.finishLaunchedUpdateFailure(session, err)
+		return
+	}
+	setSelfUpdate(
+		"replacing", "Update guard claimed the update and is validating the service",
+		session.TargetVersion, session.AttemptID, 95,
+	)
+	log.WithFields(
+		log.Fields{
+			"attempt_id": session.AttemptID,
+			"version":    session.TargetVersion,
+			"sha256":     downloadedHash,
+		},
+	).Info("self-update handed to independent guard")
 }
 
-func restartCurrentProcess() error {
-	if os.Getenv("INVOCATION_ID") != "" {
-		cmd := exec.Command("systemctl", "restart", "--no-block", "cli-proxy-api.service")
-		return cmd.Run()
+func (h *Handler) failUpdateBeforeGuard(
+	session updateGuardSession,
+	fromPhase string,
+	resultCode string,
+	percent int,
+	cause error,
+) {
+	now := time.Now().UTC()
+	updated, transitionErr := h.stateStore.transitionUpdateSession(
+		context.Background(),
+		session.AttemptID,
+		fromPhase,
+		func(next *updateGuardSession) {
+			next.Phase = updatePhaseError
+			next.ResultCode = normalizeUpdateResultCode(resultCode)
+			next.Percent = percent
+			next.UpdatedAt = now
+		},
+	)
+	if transitionErr == nil {
+		session = *updated
+		h.attachUpdateFailure(session, updatePhaseError, resultCode, now)
 	}
-	return fmt.Errorf("service restart is not supported outside systemd")
+	removeCandidateErr := removeUpdateCandidate(session)
+	setSelfUpdate("error", normalizeUpdateResultCode(resultCode), session.TargetVersion, session.AttemptID, percent)
+	log.WithFields(
+		log.Fields{
+			"attempt_id":  session.AttemptID,
+			"version":     session.TargetVersion,
+			"result_code": normalizeUpdateResultCode(resultCode),
+		},
+	).WithError(errors.Join(cause, transitionErr, removeCandidateErr)).Error("self-update preparation failed")
+}
+
+func (h *Handler) finishLaunchedUpdateFailure(session updateGuardSession, cause error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	current, err := h.stateStore.loadUpdateSession(ctx)
+	if err == nil && current != nil && current.AttemptID == session.AttemptID {
+		session = *current
+		if session.Phase == updatePhaseLaunchFailed {
+			h.attachUpdateFailure(session, updatePhaseLaunchFailed, session.ResultCode, time.Now())
+		}
+	}
+	setSelfUpdate("error", "update guard failed", session.TargetVersion, session.AttemptID, session.Percent)
+	log.WithFields(
+		log.Fields{
+			"attempt_id": session.AttemptID,
+			"version":    session.TargetVersion,
+		},
+	).WithError(errors.Join(cause, err)).Error("self-update guard launch failed")
+}
+
+func (h *Handler) attachUpdateFailure(
+	session updateGuardSession,
+	phase string,
+	resultCode string,
+	now time.Time,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	failure, err := h.stateStore.recordUpdateFailure(
+		ctx,
+		session.TargetVersion,
+		resultCode,
+		now,
+		updateFailureBaseDelay,
+		updateFailureMaxDelay,
+	)
+	if err != nil {
+		log.WithError(err).Error("failed to persist update retry state")
+		return
+	}
+	_, err = h.stateStore.transitionUpdateSession(
+		ctx,
+		session.AttemptID,
+		phase,
+		func(next *updateGuardSession) {
+			next.FailureCount = failure.FailureCount
+			next.NextRetryAt = &failure.NextRetryAt
+			next.UpdatedAt = now.UTC()
+		},
+	)
+	if err != nil {
+		log.WithError(err).Error("failed to attach update retry state")
+	}
 }
 
 var validVersion = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -360,13 +591,18 @@ func parseUpdateVersion(raw string) (parsedUpdateVersion, bool) {
 	}, true
 }
 
-func (h *Handler) fetchRelease(repo, version, proxyURL string) (*githubReleaseForUpdate, error) {
+func (h *Handler) fetchRelease(
+	ctx context.Context,
+	repo string,
+	version string,
+	proxyURL string,
+) (*githubReleaseForUpdate, error) {
 	if !validVersion.MatchString(version) {
 		return nil, fmt.Errorf("invalid version format: %q", version)
 	}
 	releaseURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", repo, version)
 	client := newUpdateHTTPClient(proxyURL)
-	body, err := githubGet(context.Background(), client, releaseURL)
+	body, err := githubGet(ctx, client, releaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -453,13 +689,14 @@ func (h *Handler) runCPAAutoUpdater(ctx context.Context) {
 }
 
 func (h *Handler) tryAutoUpdateCPA(ctx context.Context, cfg *config.Config) {
-	if h == nil || cfg == nil {
+	if h == nil || h.stateStore == nil || cfg == nil {
 		return
 	}
 	if !cfg.RemoteManagement.AutoCheckUpdate || !cfg.RemoteManagement.AutoUpdateCPA {
 		return
 	}
-	if selfUpdate.status == "downloading" || selfUpdate.status == "verifying" || selfUpdate.status == "replacing" {
+	current := snapshotSelfUpdate()
+	if current.status == "downloading" || current.status == "verifying" || current.status == "replacing" {
 		return
 	}
 
@@ -481,20 +718,29 @@ func (h *Handler) tryAutoUpdateCPA(ctx context.Context, cfg *config.Config) {
 		return
 	}
 
-	selfUpdate.mu.Lock()
-	busy := selfUpdate.status == "downloading" || selfUpdate.status == "verifying" || selfUpdate.status == "replacing"
-	if !busy {
-		selfUpdate.status = "downloading"
-		selfUpdate.message = ""
-		selfUpdate.version = latest
-		selfUpdate.percent = 0
-	}
-	selfUpdate.mu.Unlock()
-	if busy {
+	failure, err := h.stateStore.loadUpdateFailure(ctx, latest)
+	if err != nil {
+		log.Warnf("cpa auto-update: read retry state for %s failed: %v", latest, err)
 		return
 	}
-
-	go h.performUpdate(repo, latest, proxyURL)
+	if failure != nil && time.Now().Before(failure.NextRetryAt) {
+		log.WithFields(
+			log.Fields{
+				"version":       latest,
+				"next_retry_at": failure.NextRetryAt,
+			},
+		).Warn("cpa auto-update: version is in retry backoff")
+		return
+	}
+	session, err := h.beginPersistentUpdate(ctx, cfg, latest, true)
+	if err != nil {
+		if !errors.Is(err, errUpdateInProgress) {
+			log.Warnf("cpa auto-update: update guard unavailable for %s: %v", latest, err)
+		}
+		return
+	}
+	setSelfUpdate("downloading", "", latest, session.AttemptID, 0)
+	go h.performUpdate(repo, proxyURL, session)
 }
 
 func (h *Handler) fetchLatestReleaseVersion(ctx context.Context, repo string, proxyURL string) (string, error) {
@@ -552,6 +798,20 @@ func (h *Handler) buildUpdateCompatibilityFromConfig(
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if h.stateStore != nil && validVersion.MatchString(compat.TargetVersion) {
+		failure, err := h.stateStore.loadUpdateFailure(ctx, compat.TargetVersion)
+		if err != nil {
+			compat.Warnings = append(compat.Warnings, fmt.Sprintf("failed to read update retry state: %v", err))
+		} else if failure != nil {
+			compat.LastFailure = &updateFailureResponse{
+				FailureCount:  failure.FailureCount,
+				ResultCode:    failure.ResultCode,
+				LastFailureAt: failure.LastFailureAt,
+				NextRetryAt:   failure.NextRetryAt,
+			}
+			compat.AutomaticRetryBlocked = time.Now().Before(failure.NextRetryAt)
+		}
 	}
 	if cfg == nil {
 		cfg = &config.Config{}
@@ -797,48 +1057,6 @@ func fetchExpectedHash(ctx context.Context, client *http.Client, checksumURL, as
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
-}
-
-func replaceBinary(execPath string, newBinary []byte) error {
-	dir := filepath.Dir(execPath)
-
-	// Write new binary to a temp file
-	tmpFile, err := os.CreateTemp(dir, "cpa-update-*")
-	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer func() {
-		_ = os.Remove(tmpPath) // clean up on failure
-	}()
-
-	if _, err = tmpFile.Write(newBinary); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err = tmpFile.Chmod(0o755); err != nil {
-		_ = tmpFile.Close()
-		return fmt.Errorf("chmod temp file: %w", err)
-	}
-	if err = tmpFile.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
-	}
-
-	// Backup old binary
-	backupPath := execPath + ".bak"
-	_ = os.Remove(backupPath)
-	if err = os.Rename(execPath, backupPath); err != nil {
-		return fmt.Errorf("backup old binary: %w", err)
-	}
-
-	// Move new binary into place
-	if err = os.Rename(tmpPath, execPath); err != nil {
-		// Attempt to restore backup
-		_ = os.Rename(backupPath, execPath)
-		return fmt.Errorf("replace binary: %w", err)
-	}
-
-	return nil
 }
 
 // PostPanelUpdate triggers a panel HTML asset refresh. An optional `version`

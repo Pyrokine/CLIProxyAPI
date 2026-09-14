@@ -30,6 +30,8 @@ type structListResource[T any] struct {
 	matchBodyField           string                            // Patch body field for match lookup ("match" or "name")
 	stableMatchBodyField     string                            // Patch body field for stable runtime identity lookup
 	stableMatchIndex         func(h *Handler, cfg *config.Config, value string) int
+	postMatchSecondary       bool // include secondary match key when detecting duplicate POST entries
+	postEntryEqual           func(left, right *T) bool
 	trimMatch                bool                // whether to TrimSpace match values in Delete
 	trimSecondaryMatch       bool                // whether to TrimSpace secondary match values in Delete
 	filter                   func(entry *T) bool // optional PUT filter (nil = keep all)
@@ -56,41 +58,121 @@ func putStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 		submitted = obj.Items
 	}
 
-	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
-		arr := append([]T(nil), submitted...)
-		if r.normalize != nil {
-			for i := range arr {
-				r.normalize(&arr[i])
+	if _, ok := h.mutateConfig(
+		c, func(next *config.Config) error {
+			arr := append([]T(nil), submitted...)
+			if r.normalize != nil {
+				for i := range arr {
+					r.normalize(&arr[i])
+				}
 			}
-		}
-		existing := r.getList(next)
-		var matches []*T
-		arr, matches, err = resolveStructListAPIKeyPlaceholders(arr, existing, r)
-		if err != nil {
-			return err
-		}
-		if r.validate != nil {
-			for i := range arr {
-				if errValidate := r.validate(&arr[i], matches[i]); errValidate != nil {
+			existing := r.getList(next)
+			var matches []*T
+			arr, matches, err = resolveStructListAPIKeyPlaceholders(arr, existing, r)
+			if err != nil {
+				return err
+			}
+			if r.validate != nil {
+				for i := range arr {
+					if errValidate := r.validate(&arr[i], matches[i]); errValidate != nil {
+						return errValidate
+					}
+				}
+			}
+			if r.filter != nil {
+				filtered := make([]T, 0, len(arr))
+				for i := range arr {
+					if r.filter(&arr[i]) {
+						filtered = append(filtered, arr[i])
+					}
+				}
+				arr = filtered
+			}
+			r.setList(next, arr)
+			r.sanitize(next)
+			return nil
+		},
+	); ok {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	}
+}
+
+func postStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T]) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 10<<20)
+	data, err := handlers.ReadRequestBodyWithLimit(c, 10<<20)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read body"})
+		return
+	}
+	var submitted T
+	if err = json.Unmarshal(data, &submitted); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+
+	if _, ok := h.mutateConfig(
+		c, func(next *config.Config) error {
+			if r.normalize != nil {
+				r.normalize(&submitted)
+			}
+			existing := r.getList(next)
+			resolved, _, errResolve := resolveStructListAPIKeyPlaceholders(
+				[]T{submitted},
+				existing,
+				r,
+			)
+			if errResolve != nil {
+				return errResolve
+			}
+			entry := resolved[0]
+			if strings.TrimSpace(r.matchKey(&entry)) == "" {
+				return newConfigMutationError(http.StatusBadRequest, "item identity is empty")
+			}
+			if structEntryExists(entry, existing, r) {
+				return newConfigMutationError(http.StatusConflict, "item already exists")
+			}
+			if r.validate != nil {
+				if errValidate := r.validate(&entry, nil); errValidate != nil {
 					return errValidate
 				}
 			}
-		}
-		if r.filter != nil {
-			filtered := make([]T, 0, len(arr))
-			for i := range arr {
-				if r.filter(&arr[i]) {
-					filtered = append(filtered, arr[i])
-				}
+			if r.filter != nil && !r.filter(&entry) {
+				return newConfigMutationError(http.StatusBadRequest, "item is not valid for this resource")
 			}
-			arr = filtered
-		}
-		r.setList(next, arr)
-		r.sanitize(next)
-		return nil
-	}); ok {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+			r.setList(next, append(existing, entry))
+			r.sanitize(next)
+			return nil
+		},
+	); ok {
+		c.JSON(http.StatusCreated, gin.H{"status": "created"})
 	}
+}
+
+func structEntryExists[T any](entry T, existing []T, r structListResource[T]) bool {
+	if r.postEntryEqual != nil {
+		for i := range existing {
+			if r.postEntryEqual(&entry, &existing[i]) {
+				return true
+			}
+		}
+		return false
+	}
+
+	match := strings.TrimSpace(r.matchKey(&entry))
+	secondary := ""
+	if r.postMatchSecondary && r.secondaryMatchKey != nil {
+		secondary = strings.TrimSpace(r.secondaryMatchKey(&entry))
+	}
+	for i := range existing {
+		if strings.TrimSpace(r.matchKey(&existing[i])) != match {
+			continue
+		}
+		if !r.postMatchSecondary || r.secondaryMatchKey == nil ||
+			strings.TrimSpace(r.secondaryMatchKey(&existing[i])) == secondary {
+			return true
+		}
+	}
+	return false
 }
 
 func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T]) {
@@ -130,54 +212,56 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 		c.JSON(400, gin.H{"error": fmt.Sprintf("missing %s or index", r.matchQueryParam)})
 		return
 	}
-	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
-		list := r.getList(next)
-		if hasMatch {
-			resolvedMatch := matchValue
-			resolvedSecondary := secondaryValue
-			if r.trimMatch {
-				resolvedMatch = strings.TrimSpace(resolvedMatch)
+	if _, ok := h.mutateConfig(
+		c, func(next *config.Config) error {
+			list := r.getList(next)
+			if hasMatch {
+				resolvedMatch := matchValue
+				resolvedSecondary := secondaryValue
+				if r.trimMatch {
+					resolvedMatch = strings.TrimSpace(resolvedMatch)
+				}
+				if r.trimSecondaryMatch {
+					resolvedSecondary = strings.TrimSpace(resolvedSecondary)
+				}
+				if r.matchQueryParam == "api-key" {
+					var errResolve error
+					resolvedMatch, errResolve = resolveStructMatchPlaceholder(
+						list, r, resolvedMatch, resolvedSecondary, hasSecondary,
+					)
+					if errResolve != nil {
+						return errResolve
+					}
+				}
+				out := make([]T, 0, len(list))
+				for i := range list {
+					matched := r.matchKey(&list[i]) == resolvedMatch
+					if matched && hasSecondary && r.secondaryMatchKey != nil {
+						matched = r.secondaryMatchKey(&list[i]) == resolvedSecondary
+					}
+					if !matched {
+						out = append(out, list[i])
+					}
+				}
+				if r.strictDelete && len(out) == len(list) {
+					return newConfigMutationError(http.StatusNotFound, "item not found")
+				}
+				r.setList(next, out)
+				r.sanitize(next)
+				return nil
 			}
-			if r.trimSecondaryMatch {
-				resolvedSecondary = strings.TrimSpace(resolvedSecondary)
-			}
-			if r.matchQueryParam == "api-key" {
-				var errResolve error
-				resolvedMatch, errResolve = resolveStructMatchPlaceholder(
-					list, r, resolvedMatch, resolvedSecondary, hasSecondary,
+			if indexValue < 0 || indexValue >= len(list) {
+				return newConfigMutationError(
+					http.StatusBadRequest,
+					fmt.Sprintf("missing %s or index", r.matchQueryParam),
 				)
-				if errResolve != nil {
-					return errResolve
-				}
 			}
-			out := make([]T, 0, len(list))
-			for i := range list {
-				matched := r.matchKey(&list[i]) == resolvedMatch
-				if matched && hasSecondary && r.secondaryMatchKey != nil {
-					matched = r.secondaryMatchKey(&list[i]) == resolvedSecondary
-				}
-				if !matched {
-					out = append(out, list[i])
-				}
-			}
-			if r.strictDelete && len(out) == len(list) {
-				return newConfigMutationError(http.StatusNotFound, "item not found")
-			}
-			r.setList(next, out)
+			list = append(list[:indexValue], list[indexValue+1:]...)
+			r.setList(next, list)
 			r.sanitize(next)
 			return nil
-		}
-		if indexValue < 0 || indexValue >= len(list) {
-			return newConfigMutationError(
-				http.StatusBadRequest,
-				fmt.Sprintf("missing %s or index", r.matchQueryParam),
-			)
-		}
-		list = append(list[:indexValue], list[indexValue+1:]...)
-		r.setList(next, list)
-		r.sanitize(next)
-		return nil
-	}); ok {
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -282,69 +366,71 @@ func patchStructEntry[T any](
 		}
 	}
 
-	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
-		list := r.getList(next)
-		targetIndex := -1
-		if stableMatchValue != nil && r.stableMatchIndex != nil {
-			stableMatch := strings.TrimSpace(*stableMatchValue)
-			if stableMatch == "" {
-				return newConfigMutationError(http.StatusBadRequest, "stable item identity is empty")
-			}
-			targetIndex = r.stableMatchIndex(h, next, stableMatch)
-		} else if matchValue != nil {
-			match := strings.TrimSpace(*matchValue)
-			if match != "" {
-				if r.matchQueryParam == "api-key" {
-					var errResolve error
-					match, errResolve = resolveStructMatchPlaceholder(list, r, match, "", false)
-					if errResolve != nil {
-						return errResolve
+	if _, ok := h.mutateConfig(
+		c, func(next *config.Config) error {
+			list := r.getList(next)
+			targetIndex := -1
+			if stableMatchValue != nil && r.stableMatchIndex != nil {
+				stableMatch := strings.TrimSpace(*stableMatchValue)
+				if stableMatch == "" {
+					return newConfigMutationError(http.StatusBadRequest, "stable item identity is empty")
+				}
+				targetIndex = r.stableMatchIndex(h, next, stableMatch)
+			} else if matchValue != nil {
+				match := strings.TrimSpace(*matchValue)
+				if match != "" {
+					if r.matchQueryParam == "api-key" {
+						var errResolve error
+						match, errResolve = resolveStructMatchPlaceholder(list, r, match, "", false)
+						if errResolve != nil {
+							return errResolve
+						}
+					}
+					for i := range list {
+						if r.matchKey(&list[i]) == match {
+							targetIndex = i
+							break
+						}
 					}
 				}
-				for i := range list {
-					if r.matchKey(&list[i]) == match {
-						targetIndex = i
-						break
-					}
-				}
+			} else if envelope.Index != nil && *envelope.Index >= 0 && *envelope.Index < len(list) {
+				targetIndex = *envelope.Index
 			}
-		} else if envelope.Index != nil && *envelope.Index >= 0 && *envelope.Index < len(list) {
-			targetIndex = *envelope.Index
-		}
-		if targetIndex == -1 {
-			return newConfigMutationError(http.StatusNotFound, "item not found")
-		}
+			if targetIndex == -1 {
+				return newConfigMutationError(http.StatusNotFound, "item not found")
+			}
 
-		entry := list[targetIndex]
-		if errApply := apply(&entry, envelope.Value); errApply != nil {
-			if errors.Is(errApply, errEntryDeleted) {
-				list = append(list[:targetIndex], list[targetIndex+1:]...)
-				r.setList(next, list)
-				r.sanitize(next)
-				return nil
+			entry := list[targetIndex]
+			if errApply := apply(&entry, envelope.Value); errApply != nil {
+				if errors.Is(errApply, errEntryDeleted) {
+					list = append(list[:targetIndex], list[targetIndex+1:]...)
+					r.setList(next, list)
+					r.sanitize(next)
+					return nil
+				}
+				return errApply
 			}
-			return errApply
-		}
-		if r.normalize != nil {
-			r.normalize(&entry)
-		}
-		if errResolve := resolveStructEntryAPIKeyPlaceholders(
-			&entry,
-			list[targetIndex],
-			collectSensitiveStringsFromStructList(list),
-		); errResolve != nil {
-			return errResolve
-		}
-		if r.validate != nil {
-			if errValidate := r.validate(&entry, &list[targetIndex]); errValidate != nil {
-				return errValidate
+			if r.normalize != nil {
+				r.normalize(&entry)
 			}
-		}
-		list[targetIndex] = entry
-		r.setList(next, list)
-		r.sanitize(next)
-		return nil
-	}); ok {
+			if errResolve := resolveStructEntryAPIKeyPlaceholders(
+				&entry,
+				list[targetIndex],
+				collectSensitiveStringsFromStructList(list),
+			); errResolve != nil {
+				return errResolve
+			}
+			if r.validate != nil {
+				if errValidate := r.validate(&entry, &list[targetIndex]); errValidate != nil {
+					return errValidate
+				}
+			}
+			list[targetIndex] = entry
+			r.setList(next, list)
+			r.sanitize(next)
+			return nil
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -361,9 +447,46 @@ var geminiKeyResource = structListResource[config.GeminiKey]{
 	secondaryMatchKey:        func(e *config.GeminiKey) string { return e.BaseURL },
 	matchQueryParam:          "api-key",
 	secondaryMatchQueryParam: "base-url",
-	trimMatch:                true,
-	trimSecondaryMatch:       true,
-	strictDelete:             true,
+	stableMatchBodyField:     "auth-index",
+	stableMatchIndex: func(h *Handler, cfg *config.Config, value string) int {
+		views := h.buildConfigAuthIndexViews(cfg)
+		for i := range views.gemini {
+			if views.gemini[i] == value {
+				return i
+			}
+		}
+		return -1
+	},
+	postMatchSecondary: true,
+	trimMatch:          true,
+	trimSecondaryMatch: true,
+	strictDelete:       true,
+}
+
+var interactionsKeyResource = structListResource[config.GeminiKey]{
+	configKey:                "interactions-api-key",
+	getList:                  func(cfg *config.Config) []config.GeminiKey { return cfg.InteractionsKey },
+	setList:                  func(cfg *config.Config, list []config.GeminiKey) { cfg.InteractionsKey = list },
+	sanitize:                 func(cfg *config.Config) { cfg.SanitizeInteractionsKeys() },
+	validate:                 validateGeminiKey,
+	matchKey:                 func(e *config.GeminiKey) string { return e.APIKey },
+	secondaryMatchKey:        func(e *config.GeminiKey) string { return e.BaseURL },
+	matchQueryParam:          "api-key",
+	secondaryMatchQueryParam: "base-url",
+	stableMatchBodyField:     "auth-index",
+	stableMatchIndex: func(h *Handler, cfg *config.Config, value string) int {
+		views := h.buildConfigAuthIndexViews(cfg)
+		for i := range views.interactions {
+			if views.interactions[i] == value {
+				return i
+			}
+		}
+		return -1
+	},
+	postMatchSecondary: true,
+	trimMatch:          true,
+	trimSecondaryMatch: true,
+	strictDelete:       true,
 }
 
 var claudeKeyResource = structListResource[config.ClaudeKey]{
@@ -387,13 +510,19 @@ var claudeKeyResource = structListResource[config.ClaudeKey]{
 		}
 		return -1
 	},
+	postEntryEqual:     claudeKeyRouteEqual,
 	trimSecondaryMatch: true,
 }
 
 var openAICompatResource = structListResource[config.OpenAICompatibility]{
-	configKey:                "openai-compatibility",
-	getList:                  func(cfg *config.Config) []config.OpenAICompatibility { return cfg.OpenAICompatibility },
-	setList:                  func(cfg *config.Config, list []config.OpenAICompatibility) { cfg.OpenAICompatibility = list },
+	configKey: "openai-compatibility",
+	getList:   func(cfg *config.Config) []config.OpenAICompatibility { return cfg.OpenAICompatibility },
+	setList: func(
+		cfg *config.Config,
+		list []config.OpenAICompatibility,
+	) {
+		cfg.OpenAICompatibility = list
+	},
 	sanitize:                 func(cfg *config.Config) { cfg.SanitizeOpenAICompatibility() },
 	normalize:                normalizeOpenAICompatibilityEntry,
 	validate:                 validateOpenAICompatibilityEntry,
@@ -417,8 +546,19 @@ var vertexCompatKeyResource = structListResource[config.VertexCompatKey]{
 	secondaryMatchKey:        func(e *config.VertexCompatKey) string { return e.BaseURL },
 	matchQueryParam:          "api-key",
 	secondaryMatchQueryParam: "base-url",
-	trimMatch:                true,
-	trimSecondaryMatch:       true,
+	stableMatchBodyField:     "auth-index",
+	stableMatchIndex: func(h *Handler, cfg *config.Config, value string) int {
+		views := h.buildConfigAuthIndexViews(cfg)
+		for i := range views.vertex {
+			if views.vertex[i] == value {
+				return i
+			}
+		}
+		return -1
+	},
+	postMatchSecondary: true,
+	trimMatch:          true,
+	trimSecondaryMatch: true,
 }
 
 var codexKeyResource = structListResource[config.CodexKey]{
@@ -432,6 +572,46 @@ var codexKeyResource = structListResource[config.CodexKey]{
 	secondaryMatchKey:        func(e *config.CodexKey) string { return e.BaseURL },
 	matchQueryParam:          "api-key",
 	secondaryMatchQueryParam: "base-url",
-	trimSecondaryMatch:       true,
-	filter:                   func(e *config.CodexKey) bool { return e.BaseURL != "" },
+	stableMatchBodyField:     "auth-index",
+	stableMatchIndex: func(h *Handler, cfg *config.Config, value string) int {
+		views := h.buildConfigAuthIndexViews(cfg)
+		for i := range views.codex {
+			if views.codex[i] == value {
+				return i
+			}
+		}
+		return -1
+	},
+	postEntryEqual:     codexKeyRouteEqual,
+	trimSecondaryMatch: true,
+	filter:             func(e *config.CodexKey) bool { return e.BaseURL != "" },
+}
+
+var xaiKeyResource = structListResource[config.XAIKey]{
+	configKey:                "xai-api-key",
+	getList:                  func(cfg *config.Config) []config.XAIKey { return cfg.XAIKey },
+	setList:                  func(cfg *config.Config, list []config.XAIKey) { cfg.XAIKey = list },
+	sanitize:                 func(cfg *config.Config) { cfg.SanitizeXAIKeys() },
+	normalize:                normalizeXAIKey,
+	validate:                 validateXAIKey,
+	matchKey:                 func(e *config.XAIKey) string { return e.APIKey },
+	secondaryMatchKey:        func(e *config.XAIKey) string { return e.BaseURL },
+	matchQueryParam:          "api-key",
+	secondaryMatchQueryParam: "base-url",
+	stableMatchBodyField:     "auth-index",
+	stableMatchIndex: func(h *Handler, cfg *config.Config, value string) int {
+		views := h.buildConfigAuthIndexViews(cfg)
+		for i := range views.xai {
+			if views.xai[i] == value {
+				return i
+			}
+		}
+		return -1
+	},
+	postEntryEqual:     xaiKeyRouteEqual,
+	trimMatch:          true,
+	trimSecondaryMatch: true,
+	filter: func(e *config.XAIKey) bool {
+		return strings.TrimSpace(e.APIKey) != "" && strings.TrimSpace(e.BaseURL) != ""
+	},
 }

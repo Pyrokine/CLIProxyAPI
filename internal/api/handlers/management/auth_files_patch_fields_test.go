@@ -133,7 +133,9 @@ func TestRemoveAuthDeletesAllAuthsFromSameFile(t *testing.T) {
 	}
 
 	h := &Handler{cfg: &config.Config{AuthDir: authDir}, authManager: manager}
-	h.removeAuth(context.Background(), authDir, path)
+	if errRemove := h.removeAuth(context.Background(), authDir, path); errRemove != nil {
+		t.Fatalf("remove auth: %v", errRemove)
+	}
 
 	for _, id := range []string{"codex.json", "derived-path", "derived-source", "derived-file"} {
 		if _, ok := manager.GetByID(id); ok {
@@ -154,7 +156,11 @@ func TestRemoveAuthDeletesFallbackAuthIDForPath(t *testing.T) {
 		t.Fatalf("register auth: %v", err)
 	}
 	h := &Handler{cfg: &config.Config{AuthDir: authDir}, authManager: manager}
-	h.removeAuth(context.Background(), authDir, filepath.Join(authDir, "nested", "codex.json"))
+	if errRemove := h.removeAuth(
+		context.Background(), authDir, filepath.Join(authDir, "nested", "codex.json"),
+	); errRemove != nil {
+		t.Fatalf("remove auth: %v", errRemove)
+	}
 	if _, ok := manager.GetByID("nested/codex.json"); ok {
 		t.Fatal("expected fallback auth ID to be removed")
 	}
@@ -264,47 +270,50 @@ func TestPatchAuthFileFieldsUpdatesHeadersAndNote(t *testing.T) {
 
 func TestPatchAuthFileFieldsRejectsRestrictedHeader(t *testing.T) {
 	for _, headerName := range []string{"Authorization", "Api-Key"} {
-		headerName := headerName
-		t.Run(headerName, func(t *testing.T) {
-			manager := coreauth.NewManager(nil, nil, nil)
-			auth := &coreauth.Auth{
-				ID:        "auth-1",
-				Provider:  "claude",
-				FileName:  "claude.json",
-				Status:    coreauth.StatusActive,
-				Metadata:  map[string]any{},
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
-			}
-			if _, err := manager.Register(context.Background(), auth); err != nil {
-				t.Fatalf("register auth: %v", err)
-			}
+		t.Run(
+			headerName, func(t *testing.T) {
+				manager := coreauth.NewManager(nil, nil, nil)
+				auth := &coreauth.Auth{
+					ID:        "auth-1",
+					Provider:  "claude",
+					FileName:  "claude.json",
+					Status:    coreauth.StatusActive,
+					Metadata:  map[string]any{},
+					CreatedAt: time.Now(),
+					UpdatedAt: time.Now(),
+				}
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatalf("register auth: %v", err)
+				}
 
-			h := &Handler{authManager: manager}
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			body, errMarshal := json.Marshal(map[string]any{
-				"name":    "auth-1",
-				"headers": map[string]string{headerName: "secret"},
-			})
-			if errMarshal != nil {
-				t.Fatalf("marshal request: %v", errMarshal)
-			}
-			c.Request = httptest.NewRequest(http.MethodPatch, "/auth-files/fields", bytes.NewReader(body))
-			c.Request.Header.Set("Content-Type", "application/json")
+				h := &Handler{authManager: manager}
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				body, errMarshal := json.Marshal(
+					map[string]any{
+						"name":    "auth-1",
+						"headers": map[string]string{headerName: "secret"},
+					},
+				)
+				if errMarshal != nil {
+					t.Fatalf("marshal request: %v", errMarshal)
+				}
+				c.Request = httptest.NewRequest(http.MethodPatch, "/auth-files/fields", bytes.NewReader(body))
+				c.Request.Header.Set("Content-Type", "application/json")
 
-			h.PatchAuthFileFields(c)
-			if recorder.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
-			}
-			updated, ok := manager.GetByID("auth-1")
-			if !ok {
-				t.Fatal("updated auth not found")
-			}
-			if headers := coreauth.ExtractCustomHeadersFromMetadata(updated.Metadata); len(headers) != 0 {
-				t.Fatalf("restricted header persisted: %#v", headers)
-			}
-		})
+				h.PatchAuthFileFields(c)
+				if recorder.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+				}
+				updated, ok := manager.GetByID("auth-1")
+				if !ok {
+					t.Fatal("updated auth not found")
+				}
+				if headers := coreauth.ExtractCustomHeadersFromMetadata(updated.Metadata); len(headers) != 0 {
+					t.Fatalf("restricted header persisted: %#v", headers)
+				}
+			},
+		)
 	}
 }
 

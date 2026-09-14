@@ -184,6 +184,84 @@ func TestGuardOAuthSessionPendingForSaveClaimsSession(t *testing.T) {
 	}
 }
 
+func TestWaitForOAuthCallbackValidatesBeforeRemovingFile(t *testing.T) {
+	previous := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	t.Cleanup(func() { oauthSessions = previous })
+
+	authDir := t.TempDir()
+	registerOAuthSessionForAuthDir("state-1", "gemini", "", authDir)
+	filePath, errWrite := WriteOAuthCallbackFileForPendingSession("gemini", "state-1", "code-1", "")
+	if errWrite != nil {
+		t.Fatalf("WriteOAuthCallbackFileForPendingSession() error = %v", errWrite)
+	}
+
+	result, errWait := waitForOAuthCallback(authDir, "gemini", "state-1", time.Second)
+	if errWait != nil {
+		t.Fatalf("waitForOAuthCallback() error = %v", errWait)
+	}
+	if result["state"] != "state-1" || result["code"] != "code-1" || result["error"] != "" {
+		t.Fatalf("callback result = %#v", result)
+	}
+	if _, errStat := os.Stat(filePath); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("validated callback file still exists: %v", errStat)
+	}
+}
+
+func TestWaitForOAuthCallbackPreservesMalformedFileAndSetsSessionError(t *testing.T) {
+	previous := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	t.Cleanup(func() { oauthSessions = previous })
+
+	authDir := t.TempDir()
+	registerOAuthSessionForAuthDir("state-1", "gemini", "", authDir)
+	filePath := filepath.Join(authDir, ".oauth-gemini-state-1.oauth")
+	if errWrite := os.WriteFile(filePath, []byte("{"), 0o600); errWrite != nil {
+		t.Fatalf("write malformed callback: %v", errWrite)
+	}
+
+	if _, errWait := waitForOAuthCallback(authDir, "gemini", "state-1", time.Second); errWait == nil {
+		t.Fatal("waitForOAuthCallback() accepted malformed payload")
+	}
+	if _, errStat := os.Stat(filePath); errStat != nil {
+		t.Fatalf("malformed callback evidence was removed: %v", errStat)
+	}
+	response := performOAuthSessionRequest(t, http.MethodGet, "/?state=state-1", (&Handler{}).GetAuthStatus)
+	payload := decodeOAuthSessionResponse(t, response)
+	if payload["status"] != "error" || payload["error"] != "Invalid OAuth callback payload" {
+		t.Fatalf("status response = %#v", payload)
+	}
+}
+
+func TestWaitForOAuthCallbackRejectsMismatchedStateBeforeRemovingFile(t *testing.T) {
+	previous := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	t.Cleanup(func() { oauthSessions = previous })
+
+	authDir := t.TempDir()
+	registerOAuthSessionForAuthDir("state-1", "gemini", "", authDir)
+	filePath := filepath.Join(authDir, ".oauth-gemini-state-1.oauth")
+	data, errMarshal := json.Marshal(oauthCallbackFilePayload{Code: "code-1", State: "state-2"})
+	if errMarshal != nil {
+		t.Fatalf("marshal callback: %v", errMarshal)
+	}
+	if errWrite := os.WriteFile(filePath, data, 0o600); errWrite != nil {
+		t.Fatalf("write callback: %v", errWrite)
+	}
+
+	if _, errWait := waitForOAuthCallback(authDir, "gemini", "state-1", time.Second); errWait == nil {
+		t.Fatal("waitForOAuthCallback() accepted mismatched state")
+	}
+	if _, errStat := os.Stat(filePath); errStat != nil {
+		t.Fatalf("mismatched callback evidence was removed: %v", errStat)
+	}
+	response := performOAuthSessionRequest(t, http.MethodGet, "/?state=state-1", (&Handler{}).GetAuthStatus)
+	payload := decodeOAuthSessionResponse(t, response)
+	if payload["status"] != "error" || payload["error"] != "Invalid OAuth callback state" {
+		t.Fatalf("status response = %#v", payload)
+	}
+}
+
 func TestWriteOAuthCallbackFileRejectsCancelledSession(t *testing.T) {
 	previous := oauthSessions
 	oauthSessions = newOAuthSessionStore(time.Minute)

@@ -11,7 +11,7 @@ func TestHandlerBatchCloseStopsAttemptCleanup(t *testing.T) {
 	const handlerCount = 32
 	handlers := make([]*Handler, 0, handlerCount)
 	for range handlerCount {
-		handlers = append(handlers, NewHandler(&config.Config{}, "", nil, WithEnvSecret("")))
+		handlers = append(handlers, NewHandler(&config.Config{}, "", nil, withEnvSecret("")))
 	}
 	done := make(chan error, handlerCount)
 	for _, handler := range handlers {
@@ -32,7 +32,7 @@ func TestHandlerBatchCloseStopsAttemptCleanup(t *testing.T) {
 }
 
 func TestHandlerCloseStopsAttemptCleanup(t *testing.T) {
-	handler := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""))
+	handler := NewHandler(&config.Config{}, "", nil, withEnvSecret(""))
 	if handler.attemptCleanupCancel == nil {
 		t.Fatal("attempt cleanup cancel was not initialized")
 	}

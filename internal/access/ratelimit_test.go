@@ -1,6 +1,7 @@
 package access
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func TestRecordFailure_TriggersLockout(t *testing.T) {
 	}
 
 	// Record maxFailures failures.
-	for i := 0; i < maxFailures; i++ {
+	for range maxFailures {
 		rl.RecordFailure(ip)
 	}
 
@@ -34,7 +35,7 @@ func TestLockoutExpires(t *testing.T) {
 
 	ip := "10.0.0.1"
 
-	for i := 0; i < maxFailures; i++ {
+	for range maxFailures {
 		rl.RecordFailure(ip)
 	}
 	if !rl.IsLimited(ip) {
@@ -42,14 +43,14 @@ func TestLockoutExpires(t *testing.T) {
 	}
 
 	// Manually expire the lockout by reaching into the entry.
-	val, ok := rl.ipEntries.Load(ip)
-	if !ok {
+	rl.ipEntries.mu.Lock()
+	entry := rl.ipEntries.entries[ip]
+	if entry == nil {
+		rl.ipEntries.mu.Unlock()
 		t.Fatal("expected entry to exist")
 	}
-	entry := val.(*rateLimitEntry)
-	entry.mu.Lock()
 	entry.lockedUntil = time.Now().Add(-1 * time.Second)
-	entry.mu.Unlock()
+	rl.ipEntries.mu.Unlock()
 
 	if rl.IsLimited(ip) {
 		t.Fatal("expected not limited after lockout expiry")
@@ -61,29 +62,29 @@ func TestLockoutEscalatesAfterRepeatFailures(t *testing.T) {
 	defer rl.Stop()
 
 	ip := "10.0.0.2"
-	for i := 0; i < maxFailures; i++ {
+	for range maxFailures {
 		rl.RecordFailure(ip)
 	}
 
-	val, ok := rl.ipEntries.Load(ip)
-	if !ok {
+	rl.ipEntries.mu.Lock()
+	entry := rl.ipEntries.entries[ip]
+	if entry == nil {
+		rl.ipEntries.mu.Unlock()
 		t.Fatal("expected entry to exist")
 	}
-	entry := val.(*rateLimitEntry)
-	entry.mu.Lock()
 	firstUntil := entry.lockedUntil
 	entry.lockedUntil = time.Now().Add(-time.Second)
 	entry.firstFailure = time.Now().Add(-failureWindow - time.Second)
-	entry.mu.Unlock()
+	rl.ipEntries.mu.Unlock()
 
-	for i := 0; i < maxFailures; i++ {
+	for range maxFailures {
 		rl.RecordFailure(ip)
 	}
 
-	entry.mu.Lock()
+	rl.ipEntries.mu.Lock()
 	secondUntil := entry.lockedUntil
 	level := entry.lockoutLevel
-	entry.mu.Unlock()
+	rl.ipEntries.mu.Unlock()
 
 	if level != 2 {
 		t.Fatalf("lockoutLevel = %d, want 2", level)
@@ -100,7 +101,7 @@ func TestRecordSuccess_ClearsFailures(t *testing.T) {
 	ip := "172.16.0.1"
 
 	// Record some failures (not enough to trigger lockout).
-	for i := 0; i < maxFailures-1; i++ {
+	for range maxFailures - 1 {
 		rl.RecordFailure(ip)
 	}
 
@@ -121,19 +122,19 @@ func TestWindowReset_FailuresOutsideWindowDontCount(t *testing.T) {
 	ip := "10.10.10.10"
 
 	// Record some failures.
-	for i := 0; i < maxFailures-1; i++ {
+	for range maxFailures - 1 {
 		rl.RecordFailure(ip)
 	}
 
 	// Simulate window expiry by backdating firstFailure.
-	val, ok := rl.ipEntries.Load(ip)
-	if !ok {
+	rl.ipEntries.mu.Lock()
+	entry := rl.ipEntries.entries[ip]
+	if entry == nil {
+		rl.ipEntries.mu.Unlock()
 		t.Fatal("expected entry to exist")
 	}
-	entry := val.(*rateLimitEntry)
-	entry.mu.Lock()
 	entry.firstFailure = time.Now().Add(-failureWindow - time.Second)
-	entry.mu.Unlock()
+	rl.ipEntries.mu.Unlock()
 
 	// Next failure resets the window, so only 1 failure in new window.
 	rl.RecordFailure(ip)
@@ -159,7 +160,7 @@ func TestConcurrentAccess(t *testing.T) {
 	goroutines := 50
 
 	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
+	for range goroutines {
 		go func() {
 			defer wg.Done()
 			rl.RecordFailure(ip)
@@ -180,5 +181,82 @@ func TestIsLimited_UnknownIP_ReturnsFalse(t *testing.T) {
 
 	if rl.IsLimited("never-seen") {
 		t.Fatal("expected false for unknown IP")
+	}
+}
+
+func TestRateLimitCapacityKeepsLockoutsAndNewFailures(t *testing.T) {
+	rl := NewAuthRateLimiter()
+	defer rl.Stop()
+	now := time.Now()
+	key := func(index int) string {
+		return fmt.Sprintf("2001:db8::%x", index)
+	}
+	rl.ipEntries.mu.Lock()
+	for i := range maxRateLimitEntriesPerAxis {
+		entry := &rateLimitEntry{
+			failures:     1,
+			firstFailure: now.Add(-time.Minute),
+			lastActivity: now.Add(-time.Hour).Add(time.Duration(i) * time.Millisecond),
+		}
+		if i == 0 {
+			entry.lockedUntil = now.Add(lockoutDuration)
+		}
+		rl.ipEntries.addEntryLocked(key(i), entry)
+	}
+	rl.ipEntries.mu.Unlock()
+
+	newKey := "2001:db8::ffff"
+	rl.RecordFailure(newKey)
+	rl.ipEntries.mu.Lock()
+	defer rl.ipEntries.mu.Unlock()
+	if got := len(rl.ipEntries.entries); got != maxRateLimitEntriesPerAxis {
+		t.Fatalf("tracked entries = %d, want %d", got, maxRateLimitEntriesPerAxis)
+	}
+	if rl.ipEntries.entries[key(0)] == nil {
+		t.Fatal("active lockout was discarded at capacity")
+	}
+	if rl.ipEntries.entries[newKey] == nil {
+		t.Fatal("new failure was not retained at capacity")
+	}
+	discardedUnlocked := false
+	for i := 1; i < maxRateLimitEntriesPerAxis; i++ {
+		if rl.ipEntries.entries[key(i)] == nil {
+			discardedUnlocked = true
+			break
+		}
+	}
+	if !discardedUnlocked {
+		t.Fatal("no unlocked entry was discarded at capacity")
+	}
+}
+
+func TestRateLimitCapacityFailsClosedWhenAllEntriesAreLocked(t *testing.T) {
+	rl := NewAuthRateLimiter()
+	defer rl.Stop()
+	now := time.Now()
+	rl.ipEntries.mu.Lock()
+	for i := range maxRateLimitEntriesPerAxis {
+		key := fmt.Sprintf("2001:db8::%x", i)
+		rl.ipEntries.addEntryLocked(
+			key, &rateLimitEntry{
+				lockedUntil:  now.Add(lockoutDuration),
+				lastActivity: now,
+			},
+		)
+	}
+	rl.ipEntries.mu.Unlock()
+
+	if !rl.IsLimited("2001:db8::ffff") {
+		t.Fatal("unknown client was allowed while capacity contained only active lockouts")
+	}
+}
+
+func TestHashAccountKeyUsesFullSHA256(t *testing.T) {
+	got := HashAccountKey(" account-secret ")
+	if len(got) != 64 {
+		t.Fatalf("hash length = %d, want 64", len(got))
+	}
+	if got != HashAccountKey("account-secret") {
+		t.Fatal("account hash did not normalize surrounding whitespace")
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 type oauthCallbackRequest struct {
@@ -96,6 +97,7 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to persist oauth callback"})
 		return
 	}
+	log.WithField("provider", canonicalProvider).Info("OAuth callback accepted")
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

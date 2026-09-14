@@ -10,11 +10,37 @@ import (
 
 type configAuthIndexViews struct {
 	gemini         []string
+	interactions   []string
 	claude         []string
 	codex          []string
+	xai            []string
 	vertex         []string
 	openAIEntries  [][]string
 	openAIFallback []string
+}
+
+type configAuthIndexResponse struct {
+	Gemini         []string   `json:"gemini"`
+	Interactions   []string   `json:"interactions"`
+	Claude         []string   `json:"claude"`
+	Codex          []string   `json:"codex"`
+	XAI            []string   `json:"xai"`
+	Vertex         []string   `json:"vertex"`
+	OpenAIEntries  [][]string `json:"openai-entries"`
+	OpenAIFallback []string   `json:"openai-fallback"`
+}
+
+func (views configAuthIndexViews) response() configAuthIndexResponse {
+	return configAuthIndexResponse{
+		Gemini:         views.gemini,
+		Interactions:   views.interactions,
+		Claude:         views.claude,
+		Codex:          views.codex,
+		XAI:            views.xai,
+		Vertex:         views.vertex,
+		OpenAIEntries:  views.openAIEntries,
+		OpenAIFallback: views.openAIFallback,
+	}
 }
 
 type geminiKeyWithAuthIndex struct {
@@ -32,6 +58,11 @@ type codexKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type xaiKeyWithAuthIndex struct {
+	config.XAIKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -43,15 +74,17 @@ type openAICompatibilityAPIKeyWithAuthIndex struct {
 }
 
 type openAICompatibilityWithAuthIndex struct {
-	Name          string                                   `json:"name"`
-	Priority      int                                      `json:"priority,omitempty"`
-	Disabled      bool                                     `json:"disabled,omitempty"`
-	Prefix        string                                   `json:"prefix,omitempty"`
-	BaseURL       string                                   `json:"base-url"`
-	APIKeyEntries []openAICompatibilityAPIKeyWithAuthIndex `json:"api-key-entries,omitempty"`
-	Models        []config.OpenAICompatibilityModel        `json:"models,omitempty"`
-	Headers       map[string]string                        `json:"headers,omitempty"`
-	AuthIndex     string                                   `json:"auth-index,omitempty"`
+	Name                  string                                   `json:"name"`
+	Priority              int                                      `json:"priority,omitempty"`
+	Disabled              bool                                     `json:"disabled,omitempty"`
+	Prefix                string                                   `json:"prefix,omitempty"`
+	BaseURL               string                                   `json:"base-url"`
+	APIKeyEntries         []openAICompatibilityAPIKeyWithAuthIndex `json:"api-key-entries,omitempty"`
+	Models                []config.OpenAICompatibilityModel        `json:"models,omitempty"`
+	Headers               map[string]string                        `json:"headers,omitempty"`
+	SupportPromptCacheKey bool                                     `json:"support-prompt-cache-key,omitempty"`
+	DisableCooling        bool                                     `json:"disable-cooling,omitempty"`
+	AuthIndex             string                                   `json:"auth-index,omitempty"`
 }
 
 func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexViews {
@@ -75,8 +108,10 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 
 	views := configAuthIndexViews{
 		gemini:         make([]string, len(cfg.GeminiKey)),
+		interactions:   make([]string, len(cfg.InteractionsKey)),
 		claude:         make([]string, len(cfg.ClaudeKey)),
 		codex:          make([]string, len(cfg.CodexKey)),
+		xai:            make([]string, len(cfg.XAIKey)),
 		vertex:         make([]string, len(cfg.VertexCompatAPIKey)),
 		openAIEntries:  make([][]string, len(cfg.OpenAICompatibility)),
 		openAIFallback: make([]string, len(cfg.OpenAICompatibility)),
@@ -94,11 +129,13 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 	}
 
 	type authIndexQueues struct {
-		gemini []string
-		claude []string
-		codex  []string
-		vertex []string
-		openAI []string
+		gemini       []string
+		interactions []string
+		claude       []string
+		codex        []string
+		xai          []string
+		vertex       []string
+		openAI       []string
 	}
 	queues := authIndexQueues{}
 	for _, auth := range auths {
@@ -110,11 +147,13 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 		case strings.HasPrefix(auth.ID, "gemini:apikey:"):
 			queues.gemini = append(queues.gemini, index)
 		case strings.HasPrefix(auth.ID, "gemini-interactions:apikey:"):
-			continue
+			queues.interactions = append(queues.interactions, index)
 		case strings.HasPrefix(auth.ID, "claude:apikey:"):
 			queues.claude = append(queues.claude, index)
 		case strings.HasPrefix(auth.ID, "codex:apikey:"):
 			queues.codex = append(queues.codex, index)
+		case strings.HasPrefix(auth.ID, "xai:apikey:"):
+			queues.xai = append(queues.xai, index)
 		case strings.HasPrefix(auth.ID, "vertex:apikey:"):
 			queues.vertex = append(queues.vertex, index)
 		case strings.HasPrefix(auth.ID, "openai-compatibility:"):
@@ -127,7 +166,7 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 			return ""
 		}
 		index := indexes[*cursor]
-		(*cursor)++
+		*cursor++
 		return index
 	}
 
@@ -137,6 +176,13 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 			continue
 		}
 		views.gemini[i] = nextAuthIndex(queues.gemini, &geminiCursor)
+	}
+	interactionsCursor := 0
+	for i := range cfg.InteractionsKey {
+		if strings.TrimSpace(cfg.InteractionsKey[i].APIKey) == "" {
+			continue
+		}
+		views.interactions[i] = nextAuthIndex(queues.interactions, &interactionsCursor)
 	}
 	claudeCursor := 0
 	for i := range cfg.ClaudeKey {
@@ -151,6 +197,13 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 			continue
 		}
 		views.codex[i] = nextAuthIndex(queues.codex, &codexCursor)
+	}
+	xaiCursor := 0
+	for i := range cfg.XAIKey {
+		if strings.TrimSpace(cfg.XAIKey[i].APIKey) == "" {
+			continue
+		}
+		views.xai[i] = nextAuthIndex(queues.xai, &xaiCursor)
 	}
 	openAICursor := 0
 	for i := range cfg.OpenAICompatibility {
@@ -195,6 +248,22 @@ func (h *Handler) geminiKeysWithAuthIndex() []geminiKeyWithAuthIndex {
 	return out
 }
 
+func (h *Handler) interactionsKeysWithAuthIndex() []geminiKeyWithAuthIndex {
+	cfg := h.configSnapshot()
+	if cfg == nil {
+		return nil
+	}
+	views := h.buildConfigAuthIndexViews(cfg)
+	out := make([]geminiKeyWithAuthIndex, len(cfg.InteractionsKey))
+	for i := range cfg.InteractionsKey {
+		out[i] = geminiKeyWithAuthIndex{
+			GeminiKey: cfg.InteractionsKey[i],
+			AuthIndex: views.interactions[i],
+		}
+	}
+	return out
+}
+
 func (h *Handler) claudeKeysWithAuthIndex() []claudeKeyWithAuthIndex {
 	cfg := h.configSnapshot()
 	if cfg == nil {
@@ -222,6 +291,22 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 		out[i] = codexKeyWithAuthIndex{
 			CodexKey:  cfg.CodexKey[i],
 			AuthIndex: views.codex[i],
+		}
+	}
+	return out
+}
+
+func (h *Handler) xaiKeysWithAuthIndex() []xaiKeyWithAuthIndex {
+	cfg := h.configSnapshot()
+	if cfg == nil {
+		return nil
+	}
+	views := h.buildConfigAuthIndexViews(cfg)
+	out := make([]xaiKeyWithAuthIndex, len(cfg.XAIKey))
+	for i := range cfg.XAIKey {
+		out[i] = xaiKeyWithAuthIndex{
+			XAIKey:    cfg.XAIKey[i],
+			AuthIndex: views.xai[i],
 		}
 	}
 	return out
@@ -255,14 +340,16 @@ func (h *Handler) openAICompatibilityWithAuthIndex() []openAICompatibilityWithAu
 	for i := range normalized {
 		entry := normalized[i]
 		response := openAICompatibilityWithAuthIndex{
-			Name:      entry.Name,
-			Priority:  entry.Priority,
-			Disabled:  entry.Disabled,
-			Prefix:    entry.Prefix,
-			BaseURL:   entry.BaseURL,
-			Models:    entry.Models,
-			Headers:   entry.Headers,
-			AuthIndex: views.openAIFallback[i],
+			Name:                  entry.Name,
+			Priority:              entry.Priority,
+			Disabled:              entry.Disabled,
+			Prefix:                entry.Prefix,
+			BaseURL:               entry.BaseURL,
+			Models:                entry.Models,
+			Headers:               entry.Headers,
+			SupportPromptCacheKey: entry.SupportPromptCacheKey,
+			DisableCooling:        entry.DisableCooling,
+			AuthIndex:             views.openAIFallback[i],
 		}
 		if len(entry.APIKeyEntries) > 0 {
 			response.APIKeyEntries = make([]openAICompatibilityAPIKeyWithAuthIndex, len(entry.APIKeyEntries))

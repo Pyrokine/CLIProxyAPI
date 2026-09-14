@@ -146,6 +146,9 @@ func TestAuthFromUploadedFileUsesPluginStableID(t *testing.T) {
 	if auth == nil || auth.ID != "account-123" || auth.Provider != "plugin-provider" {
 		t.Fatalf("parsed plugin auth = %#v", auth)
 	}
+	if digest := auth.Attributes[coreauth.PersistedSHA256Attribute]; len(digest) != 64 {
+		t.Fatalf("plugin persisted digest = %q", digest)
+	}
 }
 
 func TestSaveUploadedAuthWaitsForRemotePersistence(t *testing.T) {
@@ -156,7 +159,7 @@ func TestSaveUploadedAuthWaitsForRemotePersistence(t *testing.T) {
 	handler := NewHandlerWithoutConfigFilePath(
 		&config.Config{AuthDir: authDir},
 		manager,
-		WithTokenStore(store),
+		withTokenStore(store),
 	)
 	if errSave := handler.saveUploadedAuth(
 		context.Background(), authDir, path, []byte(`{"type":"codex","token":"saved"}`),
@@ -185,7 +188,7 @@ func TestSaveUploadedAuthRollsBackLocalFileWhenRemotePersistenceFails(t *testing
 	handler := NewHandlerWithoutConfigFilePath(
 		&config.Config{AuthDir: authDir},
 		manager,
-		WithTokenStore(store),
+		withTokenStore(store),
 	)
 	errSave := handler.saveUploadedAuth(
 		context.Background(), authDir, path, []byte(`{"type":"codex","token":"replacement"}`),
@@ -207,8 +210,8 @@ func TestSaveUploadedAuthPublishesPluginStableID(t *testing.T) {
 	path := filepath.Join(authDir, "plugin.json")
 	manager := coreauth.NewManager(nil, nil, nil)
 	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
-	handler.pluginHost = &uploadedPluginHost{parse: uploadedAuthParserFunc(
-		func(_ context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
+	handler.pluginHost = &uploadedPluginHost{
+		parse: func(_ context.Context, req pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error) {
 			return &coreauth.Auth{
 				ID:       "account-123",
 				Provider: "plugin-provider",
@@ -220,7 +223,7 @@ func TestSaveUploadedAuthPublishesPluginStableID(t *testing.T) {
 				Metadata: map[string]any{"type": "plugin-provider"},
 			}, true, nil
 		},
-	)}
+	}
 	if errSave := handler.saveUploadedAuth(
 		context.Background(),
 		authDir,

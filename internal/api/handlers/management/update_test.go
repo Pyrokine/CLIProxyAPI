@@ -59,9 +59,18 @@ func TestCompareUpdateVersions(t *testing.T) {
 		{name: "plain older", left: "v7.2.49", right: "v7.2.50", wantOrder: -1, wantComparable: true},
 		{name: "plain equal", left: "v7.2.50", right: "v7.2.50", wantComparable: true},
 		{name: "augmented after plain", left: "v7.2.50-aug.1", right: "v7.2.50", wantOrder: 1, wantComparable: true},
-		{name: "augmentation zero after plain", left: "v7.2.50-aug.0", right: "v7.2.50", wantOrder: 1, wantComparable: true},
-		{name: "augmentation revision", left: "v7.2.50-aug.1", right: "v7.2.50-aug.2", wantOrder: -1, wantComparable: true},
-		{name: "new base after augmentation", left: "v7.2.51", right: "v7.2.50-aug.9", wantOrder: 1, wantComparable: true},
+		{
+			name: "augmentation zero after plain", left: "v7.2.50-aug.0", right: "v7.2.50", wantOrder: 1,
+			wantComparable: true,
+		},
+		{
+			name: "augmentation revision", left: "v7.2.50-aug.1", right: "v7.2.50-aug.2", wantOrder: -1,
+			wantComparable: true,
+		},
+		{
+			name: "new base after augmentation", left: "v7.2.51", right: "v7.2.50-aug.9", wantOrder: 1,
+			wantComparable: true,
+		},
 		{name: "unprefixed versions", left: "7.2.51", right: "7.2.50", wantOrder: 1, wantComparable: true},
 		{name: "development version", left: "v7.2.51", right: "dev"},
 		{name: "unsupported suffix", left: "v7.2.51-rc.1", right: "v7.2.50"},
@@ -72,23 +81,27 @@ func TestCompareUpdateVersions(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			gotOrder, gotComparable := compareUpdateVersions(test.left, test.right)
-			if gotComparable != test.wantComparable {
-				t.Fatalf("comparable = %t, want %t", gotComparable, test.wantComparable)
-			}
-			if gotOrder != test.wantOrder {
-				t.Fatalf("order = %d, want %d", gotOrder, test.wantOrder)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				gotOrder, gotComparable := compareUpdateVersions(test.left, test.right)
+				if gotComparable != test.wantComparable {
+					t.Fatalf("comparable = %t, want %t", gotComparable, test.wantComparable)
+				}
+				if gotOrder != test.wantOrder {
+					t.Fatalf("order = %d, want %d", gotOrder, test.wantOrder)
+				}
+			},
+		)
 	}
 }
 
 func TestBuildUpdateCompatibility_RejectsComparableDowngrade(t *testing.T) {
 	oldVersion := buildinfo.Version
-	t.Cleanup(func() {
-		buildinfo.Version = oldVersion
-	})
+	t.Cleanup(
+		func() {
+			buildinfo.Version = oldVersion
+		},
+	)
 	buildinfo.Version = "v7.2.50-aug.1"
 
 	var h *Handler
@@ -103,9 +116,11 @@ func TestBuildUpdateCompatibility_RejectsComparableDowngrade(t *testing.T) {
 
 func TestBuildUpdateCompatibility_AllowsNewerAndUncomparableTargets(t *testing.T) {
 	oldVersion := buildinfo.Version
-	t.Cleanup(func() {
-		buildinfo.Version = oldVersion
-	})
+	t.Cleanup(
+		func() {
+			buildinfo.Version = oldVersion
+		},
+	)
 	buildinfo.Version = "v7.2.50-aug.1"
 
 	var h *Handler
@@ -158,7 +173,7 @@ func TestBuildUpdateCompatibility_WithReadySQLitePersister(t *testing.T) {
 	persister.Start(context.Background())
 	defer persister.Stop()
 
-	h := NewHandler(cfg, filepath.Join(dir, "config.yaml"), nil, WithUsagePersister(persister))
+	h := NewHandler(cfg, filepath.Join(dir, "config.yaml"), nil, withUsagePersister(persister))
 	compat := h.buildUpdateCompatibility(context.Background(), "v9.9.9")
 
 	if !compat.Compatible {
@@ -229,7 +244,7 @@ func TestBuildUpdateCompatibility_ReportsMigrationMarker(t *testing.T) {
 	defer persister.Stop()
 
 	h := NewHandler(
-		&config.Config{UsageDataDir: dir}, filepath.Join(dir, "config.yaml"), nil, WithUsagePersister(persister),
+		&config.Config{UsageDataDir: dir}, filepath.Join(dir, "config.yaml"), nil, withUsagePersister(persister),
 	)
 	compat := h.buildUpdateCompatibility(context.Background(), "v9.9.9")
 	if compat.Usage.MigratedFrom != "v1+v2-json" {

@@ -3,9 +3,9 @@ package management
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -19,8 +19,10 @@ func TestResolveManagementClientAddressIgnoresUntrustedHeaders(t *testing.T) {
 	req.Header.Set("X-Real-IP", "198.51.100.11")
 
 	got := resolveManagementClientAddress(req, &config.Config{})
-	if got.ip != "127.0.0.1" || !got.local {
-		t.Fatalf("resolveManagementClientAddress = %+v, want loopback peer", got)
+	if got.ip != "127.0.0.1" || got.local {
+		t.Fatalf(
+			"resolveManagementClientAddress = %+v, want non-local loopback peer with ignored forwarding headers", got,
+		)
 	}
 }
 
@@ -40,13 +42,30 @@ func TestResolveManagementClientAddressUsesRightmostUntrustedHop(t *testing.T) {
 func TestResolveManagementClientAddressRejectsMalformedTrustedHeaderAsLocal(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RemoteManagement.TrustedProxies = []string{"127.0.0.1/32"}
+	resolve := func(value string) managementClientAddress {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "127.0.0.1:12345"
+		req.Header.Set("X-Real-IP", value)
+		return resolveManagementClientAddress(req, cfg)
+	}
+
+	got := resolve("not-an-ip")
+	other := resolve("still-not-an-ip")
+	if got.ip != "invalid-forwarded:127.0.0.1" || other.ip != got.ip || got.local {
+		t.Fatalf("malformed addresses = %+v and %+v, want stable remote classification", got, other)
+	}
+}
+
+func TestResolveManagementClientAddressForwardedLoopbackIsNotLocal(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.RemoteManagement.TrustedProxies = []string{"127.0.0.1/32"}
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.RemoteAddr = "127.0.0.1:12345"
-	req.Header.Set("X-Real-IP", "not-an-ip")
+	req.Header.Set("X-Real-IP", "::1")
 
 	got := resolveManagementClientAddress(req, cfg)
-	if !strings.HasPrefix(got.ip, "invalid-forwarded:") || got.local {
-		t.Fatalf("resolveManagementClientAddress = %+v, want isolated remote classification", got)
+	if got.ip != "::1" || got.local {
+		t.Fatalf("resolveManagementClientAddress = %+v, want forwarded non-local classification", got)
 	}
 }
 
@@ -55,16 +74,16 @@ func TestMiddlewareTrustedProxyRateLimitIsolatesClients(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RemoteManagement.AllowRemote = true
 	cfg.RemoteManagement.TrustedProxies = []string{"127.0.0.1/32"}
-	h := NewHandler(cfg, "", nil, WithEnvSecret("correct"))
+	h := NewHandler(cfg, "", nil, withEnvSecret("correct"))
 	t.Cleanup(func() { _ = h.Close() })
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.Status(http.StatusOK) })
 
-	for i := 0; i < managementMaxFailures; i++ {
+	for i := range managementMaxFailures {
 		rec := httptest.NewRecorder()
-		req := proxiedManagementRequest("198.51.100.10", "wrong")
+		req := proxiedManagementRequest("198.51.100.10", fmt.Sprintf("wrong-%d", i))
 		engine.ServeHTTP(rec, req)
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("failed attempt %d status = %d, want 401", i+1, rec.Code)
@@ -91,12 +110,12 @@ func TestMiddlewareMalformedTrustedHeaderCannotUseLocalPassword(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
 	cfg.RemoteManagement.TrustedProxies = []string{"127.0.0.1/32"}
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 	h.localPassword = "local-pass"
 	t.Cleanup(func() { _ = h.Close() })
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	rec := httptest.NewRecorder()
@@ -114,20 +133,20 @@ func TestMiddlewareMalformedTrustedHeaderDoesNotBanDirectLocalClient(t *testing.
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
 	cfg.RemoteManagement.TrustedProxies = []string{"127.0.0.1/32"}
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 	h.localPassword = "local-pass"
 	t.Cleanup(func() { _ = h.Close() })
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.Status(http.StatusOK) })
 
-	for i := 0; i < managementMaxFailures; i++ {
+	for i := range managementMaxFailures {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/test", nil)
 		req.RemoteAddr = "127.0.0.1:12345"
 		req.Header.Set("X-Real-IP", "not-an-ip")
-		req.Header.Set("X-Management-Key", "wrong")
+		req.Header.Set("X-Management-Key", fmt.Sprintf("wrong-%d", i))
 		engine.ServeHTTP(rec, req)
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("malformed attempt %d status = %d, want 401", i+1, rec.Code)
@@ -144,20 +163,110 @@ func TestMiddlewareMalformedTrustedHeaderDoesNotBanDirectLocalClient(t *testing.
 		t.Fatalf("malformed client status = %d, want 429", blocked.Code)
 	}
 
-	local := httptest.NewRecorder()
-	localRequest := httptest.NewRequest(http.MethodGet, "/test", nil)
-	localRequest.RemoteAddr = "127.0.0.1:12345"
-	localRequest.Header.Set("X-Management-Key", "local-pass")
-	engine.ServeHTTP(local, localRequest)
-	if local.Code != http.StatusOK {
-		t.Fatalf("direct local client status = %d, want 200: %s", local.Code, local.Body.String())
+	localPassword := httptest.NewRecorder()
+	localPasswordRequest := httptest.NewRequest(http.MethodGet, "/test", nil)
+	localPasswordRequest.RemoteAddr = "127.0.0.1:12345"
+	localPasswordRequest.Header.Set("X-Management-Key", "local-pass")
+	engine.ServeHTTP(localPassword, localPasswordRequest)
+	if localPassword.Code != http.StatusUnauthorized {
+		t.Fatalf(
+			"trusted proxy peer local password status = %d, want 401: %s", localPassword.Code,
+			localPassword.Body.String(),
+		)
+	}
+
+	internal := httptest.NewRecorder()
+	internalRequest := httptest.NewRequest(http.MethodGet, "/test", nil)
+	internalRequest.RemoteAddr = "127.0.0.1:12345"
+	internalRequest.Header.Set("X-Management-Key", h.internalToken)
+	engine.ServeHTTP(internal, internalRequest)
+	if internal.Code != http.StatusOK {
+		t.Fatalf("direct internal client status = %d, want 200: %s", internal.Code, internal.Body.String())
+	}
+}
+
+func TestMiddlewareInternalTokenBypassesTrustedPeerBan(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	cfg.RemoteManagement.AllowRemote = true
+	cfg.RemoteManagement.TrustedProxies = []string{"127.0.0.1/32"}
+	h := NewHandler(cfg, "", nil, withEnvSecret("correct"))
+	t.Cleanup(func() { _ = h.Close() })
+
+	engine := gin.New()
+	engine.Use(h.middleware())
+	engine.GET("/test", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for i := range managementMaxFailures {
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, directManagementRequest(fmt.Sprintf("wrong-%d", i)))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failed attempt %d status = %d, want 401", i+1, rec.Code)
+		}
+	}
+
+	blocked := httptest.NewRecorder()
+	engine.ServeHTTP(blocked, directManagementRequest("correct"))
+	if blocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("trusted peer status = %d, want 429", blocked.Code)
+	}
+
+	internal := httptest.NewRecorder()
+	engine.ServeHTTP(internal, directManagementRequest(h.internalToken))
+	if internal.Code != http.StatusOK {
+		t.Fatalf("internal scheduler status = %d, want 200: %s", internal.Code, internal.Body.String())
+	}
+
+	stillBlocked := httptest.NewRecorder()
+	engine.ServeHTTP(stillBlocked, directManagementRequest("correct"))
+	if stillBlocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("trusted peer status after internal request = %d, want 429", stillBlocked.Code)
+	}
+}
+
+func TestMiddlewareInternalTokenDoesNotResetTrustedPeerFailures(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	cfg.RemoteManagement.AllowRemote = true
+	cfg.RemoteManagement.TrustedProxies = []string{"127.0.0.1/32"}
+	h := NewHandler(cfg, "", nil, withEnvSecret("correct"))
+	t.Cleanup(func() { _ = h.Close() })
+
+	engine := gin.New()
+	engine.Use(h.middleware())
+	engine.GET("/test", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	for i := range managementMaxFailures - 1 {
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, directManagementRequest(fmt.Sprintf("wrong-%d", i)))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("failed attempt %d status = %d, want 401", i+1, rec.Code)
+		}
+	}
+
+	internal := httptest.NewRecorder()
+	engine.ServeHTTP(internal, directManagementRequest(h.internalToken))
+	if internal.Code != http.StatusOK {
+		t.Fatalf("internal scheduler status = %d, want 200: %s", internal.Code, internal.Body.String())
+	}
+
+	lastFailure := httptest.NewRecorder()
+	engine.ServeHTTP(lastFailure, directManagementRequest("wrong-final"))
+	if lastFailure.Code != http.StatusUnauthorized {
+		t.Fatalf("final failed attempt status = %d, want 401", lastFailure.Code)
+	}
+
+	blocked := httptest.NewRecorder()
+	engine.ServeHTTP(blocked, directManagementRequest("correct"))
+	if blocked.Code != http.StatusTooManyRequests {
+		t.Fatalf("trusted peer status = %d, want 429", blocked.Code)
 	}
 }
 
 func TestGetConfigIncludesTrustedProxies(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RemoteManagement.TrustedProxies = []string{"127.0.0.1/32", "::1/128"}
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 	t.Cleanup(func() { _ = h.Close() })
 
 	rec := httptest.NewRecorder()
@@ -194,6 +303,13 @@ func TestPutConfigYAMLRejectsInvalidTrustedProxy(t *testing.T) {
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("PutConfigYAML status = %d, want 422: %s", rec.Code, rec.Body.String())
 	}
+}
+
+func directManagementRequest(key string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("X-Management-Key", key)
+	return req
 }
 
 func proxiedManagementRequest(clientIP, key string) *http.Request {

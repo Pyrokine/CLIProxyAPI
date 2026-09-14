@@ -30,6 +30,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/qwen"
 	xaiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/xai"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/credentialweight"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
@@ -283,9 +284,14 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		h.listAuthFilesFromDisk(c, authDir)
 		return
 	}
+	nameFilter := strings.TrimSpace(c.Query("name"))
+	authIndexFilter := strings.TrimSpace(c.Query("auth_index"))
 	auths := h.authManager.List()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
+		if !matchesAuthFileLookup(auth, nameFilter, authIndexFilter) {
+			continue
+		}
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
 			files = append(files, entry)
 		}
@@ -298,6 +304,32 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		},
 	)
 	c.JSON(200, gin.H{"files": files})
+}
+
+func matchesAuthFileLookup(auth *coreauth.Auth, name, authIndex string) bool {
+	if auth == nil {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	authIndex = strings.TrimSpace(authIndex)
+	if name != "" && strings.TrimSpace(auth.ID) != name && strings.TrimSpace(auth.FileName) != name {
+		return false
+	}
+	return authIndex == "" || strings.TrimSpace(auth.EnsureIndex()) == authIndex
+}
+
+func (h *Handler) lookupAuthFile(name, authIndex string) (*coreauth.Auth, bool) {
+	name = strings.TrimSpace(name)
+	authIndex = strings.TrimSpace(authIndex)
+	if h == nil || h.authManager == nil || name == "" && authIndex == "" {
+		return nil, false
+	}
+	for _, auth := range h.authManager.List() {
+		if matchesAuthFileLookup(auth, name, authIndex) {
+			return auth, true
+		}
+	}
+	return nil, false
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file
@@ -356,11 +388,19 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, authDir string) {
 		return
 	}
 	files := make([]gin.H, 0)
+	nameFilter := strings.TrimSpace(c.Query("name"))
+	if strings.TrimSpace(c.Query("auth_index")) != "" {
+		c.JSON(200, gin.H{"files": files})
+		return
+	}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
 		name := e.Name()
+		if nameFilter != "" && name != nameFilter {
+			continue
+		}
 		if !strings.HasSuffix(strings.ToLower(name), ".json") {
 			continue
 		}
@@ -383,6 +423,131 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, authDir string) {
 		}
 	}
 	c.JSON(200, gin.H{"files": files})
+}
+
+type authFileRuntimeError struct {
+	Code            string     `json:"code,omitempty"`
+	Message         string     `json:"message"`
+	HTTPStatus      int        `json:"http_status,omitempty"`
+	Model           string     `json:"model,omitempty"`
+	EffectScope     string     `json:"effect_scope,omitempty"`
+	EffectKey       string     `json:"effect_key,omitempty"`
+	NextRetryAfter  *time.Time `json:"next_retry_after,omitempty"`
+	StateGeneration uint64     `json:"state_generation,omitempty"`
+	ObservedAt      *time.Time `json:"observed_at,omitempty"`
+}
+
+type authFileRuntimeErrorCandidate struct {
+	err             *coreauth.Error
+	statusMessage   string
+	model           string
+	effectScope     string
+	effectKey       string
+	nextRetryAfter  time.Time
+	nextRecoverAt   time.Time
+	stateGeneration uint64
+	observedAt      time.Time
+}
+
+func buildAuthFileRuntimeError(auth *coreauth.Auth) *authFileRuntimeError {
+	if auth == nil {
+		return nil
+	}
+
+	selected := authFileRuntimeErrorCandidate{
+		err:             auth.LastError,
+		statusMessage:   auth.StatusMessage,
+		effectScope:     string(auth.StateEffectScope),
+		effectKey:       auth.StateEffectKey,
+		nextRetryAfter:  auth.NextRetryAfter,
+		nextRecoverAt:   auth.Quota.NextRecoverAt,
+		stateGeneration: auth.StateGeneration,
+		observedAt:      auth.UpdatedAt,
+	}
+	hasSelected := auth.LastError != nil ||
+		auth.Status == coreauth.StatusError && strings.TrimSpace(auth.StatusMessage) != ""
+
+	models := make([]string, 0, len(auth.ModelStates))
+	for model := range auth.ModelStates {
+		models = append(models, model)
+	}
+	sort.Strings(models)
+	for _, model := range models {
+		state := auth.ModelStates[model]
+		if state == nil || state.LastError == nil && state.Status != coreauth.StatusError {
+			continue
+		}
+		selectedScope := selected.effectScope
+		if selected.err != nil && selected.err.EffectScope != "" {
+			selectedScope = string(selected.err.EffectScope)
+		}
+		selectedIsModelAggregate := selected.model == "" &&
+			(selectedScope == "exact_model" || selectedScope == "quota_family")
+		if hasSelected && !selectedIsModelAggregate && !state.UpdatedAt.After(selected.observedAt) {
+			continue
+		}
+		selected = authFileRuntimeErrorCandidate{
+			err:             state.LastError,
+			statusMessage:   state.StatusMessage,
+			model:           model,
+			effectScope:     string(state.EffectScope),
+			effectKey:       state.EffectKey,
+			nextRetryAfter:  state.NextRetryAfter,
+			nextRecoverAt:   state.Quota.NextRecoverAt,
+			stateGeneration: state.Generation,
+			observedAt:      state.UpdatedAt,
+		}
+		hasSelected = true
+	}
+	if !hasSelected {
+		return nil
+	}
+
+	result := &authFileRuntimeError{
+		Message:         selected.statusMessage,
+		Model:           strings.TrimSpace(selected.model),
+		EffectScope:     strings.TrimSpace(selected.effectScope),
+		EffectKey:       strings.TrimSpace(selected.effectKey),
+		StateGeneration: selected.stateGeneration,
+	}
+	if selected.err != nil {
+		result.Code = strings.TrimSpace(selected.err.Code)
+		if message := strings.TrimSpace(selected.err.Message); message != "" {
+			result.Message = message
+		}
+		result.HTTPStatus = selected.err.HTTPStatus
+		if selected.err.EffectScope != "" {
+			result.EffectScope = string(selected.err.EffectScope)
+		}
+		if effectKey := strings.TrimSpace(selected.err.EffectKey); effectKey != "" {
+			result.EffectKey = effectKey
+		}
+		if selected.err.StateGeneration != 0 {
+			result.StateGeneration = selected.err.StateGeneration
+		}
+	}
+	result.Message = strings.TrimSpace(string(util.MaskSensitivePayload([]byte(result.Message))))
+	if result.Message == "" {
+		result.Message = result.Code
+	}
+	if result.Message == "" {
+		result.Message = "request failed"
+	}
+	if result.Model == "" && result.EffectScope == "exact_model" {
+		result.Model = result.EffectKey
+	}
+	if selected.nextRetryAfter.IsZero() {
+		selected.nextRetryAfter = selected.nextRecoverAt
+	}
+	if !selected.nextRetryAfter.IsZero() {
+		nextRetryAfter := selected.nextRetryAfter.UTC()
+		result.NextRetryAfter = &nextRetryAfter
+	}
+	if !selected.observedAt.IsZero() {
+		observedAt := selected.observedAt.UTC()
+		result.ObservedAt = &observedAt
+	}
+	return result
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
@@ -410,7 +575,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"provider":        strings.TrimSpace(auth.Provider),
 		"label":           auth.Label,
 		"status":          auth.Status,
-		"status_message":  auth.StatusMessage,
+		"status_message":  strings.TrimSpace(string(util.MaskSensitivePayload([]byte(auth.StatusMessage)))),
 		"disabled":        auth.Disabled,
 		"unavailable":     auth.Unavailable,
 		"runtime_only":    runtimeOnly,
@@ -419,6 +584,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"success":         auth.Success,
 		"failed":          auth.Failed,
 		"recent_requests": auth.RecentRequestsSnapshot(time.Now()),
+	}
+	if runtimeError := buildAuthFileRuntimeError(auth); runtimeError != nil {
+		entry["runtime_error"] = runtimeError
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
@@ -468,11 +636,26 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if priority, ok := authPriorityValue(auth); ok {
 		entry["priority"] = priority
 	}
+	if weight, ok := authWeightValue(auth); ok {
+		entry["weight"] = weight
+	}
 	if note := authNoteValue(auth); note != "" {
 		entry["note"] = note
 	}
 	if websockets, ok := authWebsocketsValue(auth); ok {
 		entry["websockets"] = websockets
+	}
+	if disableCooling, ok := authMetadataBool(auth, "disable_cooling", "disable-cooling"); ok {
+		entry["disable_cooling"] = disableCooling
+	}
+	if usingAPI, ok := authMetadataBool(auth, "using_api"); ok {
+		entry["using_api"] = usingAPI
+	}
+	if excludedModels := authFileExcludedModels(auth); len(excludedModels) > 0 {
+		entry["excluded_models"] = excludedModels
+	}
+	if projectID := authProjectID(auth); projectID != "" {
+		entry["project_id"] = projectID
 	}
 	return entry
 }
@@ -499,6 +682,28 @@ func authPriorityValue(auth *coreauth.Auth) (int, bool) {
 	if auth.Attributes != nil {
 		if parsed, err := strconv.Atoi(strings.TrimSpace(auth.Attributes["priority"])); err == nil {
 			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func authWeightValue(auth *coreauth.Auth) (int64, bool) {
+	if auth == nil {
+		return 0, false
+	}
+	if raw, ok := auth.Metadata[coreauth.AttributeWeight]; ok {
+		weight, errParse := credentialweight.ParseValue(raw)
+		if errParse == nil {
+			return weight, true
+		}
+	}
+	if auth.Attributes != nil {
+		raw, ok := auth.Attributes[coreauth.AttributeWeight]
+		if ok {
+			weight, errParse := credentialweight.ParseString(raw)
+			if errParse == nil {
+				return weight, true
+			}
 		}
 	}
 	return 0, false
@@ -585,6 +790,96 @@ func authFileBoolValue(value any) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+func authMetadataBool(auth *coreauth.Auth, keys ...string) (bool, bool) {
+	if auth == nil || auth.Metadata == nil {
+		return false, false
+	}
+	for _, key := range keys {
+		if value, ok := auth.Metadata[key]; ok {
+			if parsed, valid := authFileBoolValue(value); valid {
+				return parsed, true
+			}
+		}
+	}
+	return false, false
+}
+
+func authFileExcludedModels(auth *coreauth.Auth) []string {
+	if auth == nil || auth.Metadata == nil {
+		return nil
+	}
+	raw, ok := auth.Metadata["excluded_models"]
+	if !ok {
+		raw = auth.Metadata["excluded-models"]
+	}
+	var values []string
+	switch typed := raw.(type) {
+	case []string:
+		values = typed
+	case []any:
+		values = make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value, okString := item.(string); okString {
+				values = append(values, value)
+			}
+		}
+	}
+	return normalizeAuthFileExcludedModels(values)
+}
+
+func normalizeAuthFileExcludedModels(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		model := strings.ToLower(strings.TrimSpace(value))
+		if model == "" {
+			continue
+		}
+		if _, ok := seen[model]; ok {
+			continue
+		}
+		seen[model] = struct{}{}
+		normalized = append(normalized, model)
+	}
+	sort.Strings(normalized)
+	return normalized
+}
+
+func syncAuthFileExcludedModelsAttribute(auth *coreauth.Auth, cfg *config.Config) {
+	if auth == nil {
+		return
+	}
+	combined := authFileExcludedModels(auth)
+	if !strings.EqualFold(strings.TrimSpace(authAttribute(auth, "auth_kind")), "apikey") && cfg != nil {
+		provider := strings.ToLower(strings.TrimSpace(auth.Provider))
+		combined = normalizeAuthFileExcludedModels(append(combined, cfg.OAuthExcludedModels[provider]...))
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	if len(combined) == 0 {
+		delete(auth.Attributes, "excluded_models")
+		delete(auth.Attributes, "excluded_models_hash")
+		return
+	}
+	auth.Attributes["excluded_models"] = strings.Join(combined, ",")
+	encoded, _ := json.Marshal(combined)
+	hash := sha256.Sum256(encoded)
+	auth.Attributes["excluded_models_hash"] = hex.EncodeToString(hash[:])
+}
+
+func authProjectID(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Metadata != nil {
+		if value, ok := auth.Metadata["project_id"].(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return strings.TrimSpace(authAttribute(auth, "project_id"))
 }
 
 func authFileBoolValueFromGJSON(value gjson.Result) (bool, bool) {
@@ -718,6 +1013,21 @@ type uploadedAuthPersister interface {
 	PersistAuthFiles(context.Context, string, ...string) error
 }
 
+func applyPersistedAuthDigest(auth *coreauth.Auth, data []byte) error {
+	if auth == nil {
+		return fmt.Errorf("auth is nil")
+	}
+	digest, err := coreauth.DigestPersistedJSON(data)
+	if err != nil {
+		return fmt.Errorf("digest persisted auth: %w", err)
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes[coreauth.PersistedSHA256Attribute] = hex.EncodeToString(digest[:])
+	return nil
+}
+
 func authFromUploadedFile(
 	ctx context.Context,
 	parser uploadedAuthParser,
@@ -746,6 +1056,9 @@ func authFromUploadedFile(
 		if handled {
 			if auth == nil || strings.TrimSpace(auth.ID) == "" {
 				return nil, false, fmt.Errorf("plugin auth parser returned an invalid auth")
+			}
+			if errDigest := applyPersistedAuthDigest(auth, data); errDigest != nil {
+				return nil, false, errDigest
 			}
 			if errHeaders := coreauth.ApplyCustomHeadersFromMetadata(auth); errHeaders != nil {
 				return nil, false, errHeaders
@@ -859,7 +1172,9 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			}
 			source, errOpen := file.Open()
 			if errOpen != nil {
-				failed = append(failed, gin.H{"name": file.Filename, "error": fmt.Sprintf("failed to open upload: %v", errOpen)})
+				failed = append(
+					failed, gin.H{"name": file.Filename, "error": fmt.Sprintf("failed to open upload: %v", errOpen)},
+				)
 				continue
 			}
 			data, errRead := io.ReadAll(io.LimitReader(source, 10<<20))
@@ -966,7 +1281,9 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 				if os.IsNotExist(errStat) {
 					failed = append(failed, gin.H{"name": name, "error": "file not found"})
 				} else {
-					failed = append(failed, gin.H{"name": name, "error": fmt.Sprintf("failed to stat file: %v", errStat)})
+					failed = append(
+						failed, gin.H{"name": name, "error": fmt.Sprintf("failed to stat file: %v", errStat)},
+					)
 				}
 				continue
 			}
@@ -1099,6 +1416,10 @@ func mergeAuthRuntimeState(target *coreauth.Auth, existing *coreauth.Auth, hasLa
 	target.LastError = existing.LastError
 	target.Unavailable = existing.Unavailable
 	target.ModelStates = existing.ModelStates
+	target.StateGeneration = existing.StateGeneration
+	target.StateEffectScope = existing.StateEffectScope
+	target.StateEffectKey = existing.StateEffectKey
+	target.ResetAuthority = existing.ResetAuthority
 	if target.StatusMessage == "" {
 		target.StatusMessage = existing.StatusMessage
 	}
@@ -1120,8 +1441,13 @@ func (h *Handler) syncQuotaSchedulerForAuth(auth *coreauth.Auth) {
 		return
 	}
 	auth.EnsureIndex()
-	h.quotaScheduler.Register(fileName, credType, auth.Index)
-	h.quotaScheduler.UpdateAuthIndex(fileName, credType, auth.Index)
+	credentialRevision := auth.Index
+	if auth.Attributes != nil {
+		if digest := strings.ToLower(strings.TrimSpace(auth.Attributes[coreauth.PersistedSHA256Attribute])); digest != "" {
+			credentialRevision = digest
+		}
+	}
+	h.quotaScheduler.RegisterBinding(fileName, credType, auth.Index, credentialRevision)
 	h.quotaScheduler.SetDisabled(fileName, credType, auth.Disabled)
 }
 
@@ -1151,6 +1477,9 @@ func authFromFile(authDir, path string, data []byte) (*coreauth.Auth, bool, erro
 	metadata := make(map[string]any)
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		return nil, false, fmt.Errorf("invalid auth file: %w", errUnmarshal)
+	}
+	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, false, errWeight
 	}
 	provider, _ := metadata["type"].(string)
 	provider = normalizeAuthProvider(provider)
@@ -1229,8 +1558,14 @@ func authFromFile(authDir, path string, data []byte) (*coreauth.Auth, bool, erro
 	if errHeaders := coreauth.ApplyCustomHeadersFromMetadata(auth); errHeaders != nil {
 		return nil, false, errHeaders
 	}
+	if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
+		return nil, false, errWeight
+	}
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
+	}
+	if errDigest := applyPersistedAuthDigest(auth, data); errDigest != nil {
+		return nil, false, errDigest
 	}
 	return auth, hasLastRefresh, nil
 }
@@ -1292,8 +1627,9 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string `json:"name"`
-		Disabled *bool  `json:"disabled"`
+		Name      string `json:"name"`
+		AuthIndex string `json:"auth_index"`
+		Disabled  *bool  `json:"disabled"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1301,8 +1637,9 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+	authIndex := strings.TrimSpace(req.AuthIndex)
+	if name == "" && authIndex == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name or auth_index is required"})
 		return
 	}
 	if req.Disabled == nil {
@@ -1312,20 +1649,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Find auth by name or ID
-	var targetAuth *coreauth.Auth
-	if auth, ok := h.authManager.GetByID(name); ok {
-		targetAuth = auth
-	} else {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name {
-				targetAuth = auth
-				break
-			}
-		}
-	}
-
+	targetAuth, _ := h.lookupAuthFile(name, authIndex)
 	if targetAuth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
@@ -1352,7 +1676,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, priority) of an auth file.
+// PatchAuthFileFields updates editable fields of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -1360,13 +1684,20 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	var req struct {
-		Name       string            `json:"name"`
-		Prefix     *string           `json:"prefix"`
-		ProxyURL   *string           `json:"proxy_url"`
-		Priority   *int              `json:"priority"`
-		Headers    map[string]string `json:"headers"`
-		Note       *string           `json:"note"`
-		Websockets *bool             `json:"websockets"`
+		Name                 string            `json:"name"`
+		AuthIndex            string            `json:"auth-index"`
+		Prefix               *string           `json:"prefix"`
+		ProxyURL             *string           `json:"proxy_url"`
+		Priority             *int              `json:"priority"`
+		Weight               json.RawMessage   `json:"weight"`
+		Headers              map[string]string `json:"headers"`
+		Note                 *string           `json:"note"`
+		DisableCooling       *bool             `json:"disable_cooling"`
+		DisableCoolingLegacy *bool             `json:"disable-cooling"`
+		Websockets           *bool             `json:"websockets"`
+		UsingAPI             *bool             `json:"using_api"`
+		ExcludedModels       *[]string         `json:"excluded_models"`
+		ExcludedModelsLegacy *[]string         `json:"excluded-models"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1374,29 +1705,46 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+	authIndex := strings.TrimSpace(req.AuthIndex)
+	if name == "" && authIndex == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name or auth-index is required"})
 		return
 	}
 
 	ctx := c.Request.Context()
 
-	// Find auth by name or ID
 	var targetAuth *coreauth.Auth
-	if auth, ok := h.authManager.GetByID(name); ok {
-		targetAuth = auth
-	} else {
-		auths := h.authManager.List()
-		for _, auth := range auths {
-			if auth.FileName == name {
-				targetAuth = auth
-				break
+	if authIndex != "" {
+		if auth, ok := h.authManager.GetByID(authIndex); ok {
+			targetAuth = auth
+		} else {
+			for _, auth := range h.authManager.List() {
+				if auth != nil && auth.Index == authIndex {
+					targetAuth = auth
+					break
+				}
+			}
+		}
+	}
+	if targetAuth == nil && name != "" {
+		if auth, ok := h.authManager.GetByID(name); ok {
+			targetAuth = auth
+		} else {
+			for _, auth := range h.authManager.List() {
+				if auth != nil && auth.FileName == name {
+					targetAuth = auth
+					break
+				}
 			}
 		}
 	}
 
 	if targetAuth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+	if authIndex != "" && name != "" && name != targetAuth.ID && name != targetAuth.FileName {
+		c.JSON(http.StatusConflict, gin.H{"error": "auth file identity mismatch"})
 		return
 	}
 
@@ -1444,6 +1792,32 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		} else {
 			targetAuth.Metadata["priority"] = *req.Priority
 			targetAuth.Attributes["priority"] = strconv.Itoa(*req.Priority)
+		}
+		changed = true
+	}
+	if len(req.Weight) > 0 {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if targetAuth.Attributes == nil {
+			targetAuth.Attributes = make(map[string]string)
+		}
+		if strings.TrimSpace(string(req.Weight)) == "null" {
+			delete(targetAuth.Metadata, coreauth.AttributeWeight)
+			delete(targetAuth.Attributes, coreauth.AttributeWeight)
+		} else {
+			var rawWeight int
+			if errUnmarshal := json.Unmarshal(req.Weight, &rawWeight); errUnmarshal != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "weight must be an integer"})
+				return
+			}
+			weight, errWeight := credentialweight.Normalize(int64(rawWeight))
+			if errWeight != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": errWeight.Error()})
+				return
+			}
+			targetAuth.Metadata[coreauth.AttributeWeight] = weight
+			targetAuth.Attributes[coreauth.AttributeWeight] = strconv.FormatInt(weight, 10)
 		}
 		changed = true
 	}
@@ -1501,6 +1875,43 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 		changed = true
 	}
+	disableCooling := req.DisableCooling
+	if disableCooling == nil {
+		disableCooling = req.DisableCoolingLegacy
+	}
+	if disableCooling != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		targetAuth.Metadata["disable_cooling"] = *disableCooling
+		delete(targetAuth.Metadata, "disable-cooling")
+		changed = true
+	}
+	if req.UsingAPI != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if targetAuth.Attributes == nil {
+			targetAuth.Attributes = make(map[string]string)
+		}
+		targetAuth.Metadata["using_api"] = *req.UsingAPI
+		targetAuth.Attributes["using_api"] = strconv.FormatBool(*req.UsingAPI)
+		changed = true
+	}
+	excludedModels := req.ExcludedModels
+	if excludedModels == nil {
+		excludedModels = req.ExcludedModelsLegacy
+	}
+	if excludedModels != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		normalized := normalizeAuthFileExcludedModels(*excludedModels)
+		targetAuth.Metadata["excluded_models"] = normalized
+		delete(targetAuth.Metadata, "excluded-models")
+		syncAuthFileExcludedModelsAttribute(targetAuth, h.configSnapshot())
+		changed = true
+	}
 	if req.Websockets != nil {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
@@ -1556,17 +1967,19 @@ func authsForDeletion(auths []*coreauth.Auth, authDir, path string) []*coreauth.
 		seen[auth.ID] = struct{}{}
 		matched = append(matched, auth)
 	}
-	sort.SliceStable(matched, func(i, j int) bool {
-		iExact := authFileIDsEqual(matched[i].ID, authID)
-		jExact := authFileIDsEqual(matched[j].ID, authID)
-		if iExact != jExact {
-			return iExact
-		}
-		if runtime.GOOS == "windows" {
-			return strings.ToLower(matched[i].ID) < strings.ToLower(matched[j].ID)
-		}
-		return matched[i].ID < matched[j].ID
-	})
+	sort.SliceStable(
+		matched, func(i, j int) bool {
+			iExact := authFileIDsEqual(matched[i].ID, authID)
+			jExact := authFileIDsEqual(matched[j].ID, authID)
+			if iExact != jExact {
+				return iExact
+			}
+			if runtime.GOOS == "windows" {
+				return strings.ToLower(matched[i].ID) < strings.ToLower(matched[j].ID)
+			}
+			return matched[i].ID < matched[j].ID
+		},
+	)
 	return matched
 }
 
@@ -1775,7 +2188,19 @@ func (h *Handler) saveOAuthTokenRecord(
 	if err := guardOAuthSessionPendingForSave(state, provider); err != nil {
 		return "", err
 	}
-	return h.saveTokenRecord(ctx, authDir, record)
+	savedPath, errSave := h.saveTokenRecord(ctx, authDir, record)
+	if errSave != nil {
+		return "", errSave
+	}
+	fields := log.Fields{
+		"provider": provider,
+		"file":     filepath.Base(savedPath),
+	}
+	log.WithFields(fields).Info("OAuth credential file published")
+	if h.authManager != nil {
+		log.WithFields(fields).Info("OAuth credential published to runtime auth manager")
+	}
+	return savedPath, nil
 }
 
 // generatePKCEAndState generates PKCE codes and a random state parameter for OAuth flows.
@@ -1861,7 +2286,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		// Parse code (Claude may append state after '#')
 		rawCode := resultMap["code"]
-		code := strings.Split(rawCode, "#")[0]
+		code, _, _ := strings.Cut(rawCode, "#")
 
 		// Exchange code for tokens using internal auth service
 		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
@@ -1874,12 +2299,25 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 		// Create token storage
 		tokenStorage := anthropicAuth.CreateTokenStorage(bundle)
+		metadata := map[string]any{"email": tokenStorage.Email}
+		if tokenStorage.AccountUUID != "" {
+			metadata["account_uuid"] = tokenStorage.AccountUUID
+		}
+		if tokenStorage.OrganizationUUID != "" {
+			metadata["organization_uuid"] = tokenStorage.OrganizationUUID
+		}
+		if tokenStorage.OrganizationName != "" {
+			metadata["organization_name"] = tokenStorage.OrganizationName
+		}
+		if len(tokenStorage.DeviceIDs) > 0 {
+			metadata[claude.DeviceIDsMetadataKey] = append([]string(nil), tokenStorage.DeviceIDs...)
+		}
 		record := &coreauth.Auth{
 			ID:       fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Provider: "claude",
 			FileName: fmt.Sprintf("claude-%s.json", tokenStorage.Email),
 			Storage:  tokenStorage,
-			Metadata: map[string]any{"email": tokenStorage.Email},
+			Metadata: metadata,
 		}
 		savedPath, errSave := h.saveOAuthTokenRecord(ctx, flowCfg.AuthDir, state, "anthropic", record)
 		if errSave != nil {
@@ -1962,7 +2400,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			if errors.Is(errWait, errOAuthSessionCancelled) {
 				return
 			}
-			log.Error("oauth flow timed out")
+			log.Errorf("Gemini OAuth callback failed: %v", errWait)
 			return
 		}
 		if errStr := resultMap["error"]; errStr != "" {
@@ -1984,6 +2422,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			setOAuthSessionError(state, "Failed to exchange token")
 			return
 		}
+		log.Info("Gemini OAuth token exchanged")
 
 		requestedProjectID := strings.TrimSpace(projectID)
 
@@ -2584,17 +3023,19 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 		completeOAuthSession(state)
 	}()
 
-	c.JSON(http.StatusOK, gin.H{
-		"status":                    "ok",
-		"url":                       strings.TrimSpace(authURL),
-		"state":                     state,
-		"flow":                      "device",
-		"user_code":                 strings.TrimSpace(deviceFlow.UserCode),
-		"verification_uri":          strings.TrimSpace(deviceFlow.VerificationURI),
-		"verification_uri_complete": strings.TrimSpace(deviceFlow.VerificationURIComplete),
-		"expires_in":                deviceFlow.ExpiresIn,
-		"interval":                  deviceFlow.Interval,
-	})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"status":                    "ok",
+			"url":                       strings.TrimSpace(authURL),
+			"state":                     state,
+			"flow":                      "device",
+			"user_code":                 strings.TrimSpace(deviceFlow.UserCode),
+			"verification_uri":          strings.TrimSpace(deviceFlow.VerificationURI),
+			"verification_uri_complete": strings.TrimSpace(deviceFlow.VerificationURIComplete),
+			"expires_in":                deviceFlow.ExpiresIn,
+			"interval":                  deviceFlow.Interval,
+		},
+	)
 }
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
@@ -3062,17 +3503,19 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 	if expiresIn <= 0 {
 		expiresIn = int(xaiauth.MaxPollDuration / time.Second)
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"status":                    "ok",
-		"url":                       authURL,
-		"state":                     state,
-		"flow":                      "device",
-		"user_code":                 strings.TrimSpace(deviceFlow.UserCode),
-		"verification_uri":          strings.TrimSpace(deviceFlow.VerificationURI),
-		"verification_uri_complete": strings.TrimSpace(deviceFlow.VerificationURIComplete),
-		"expires_in":                expiresIn,
-		"interval":                  deviceFlow.Interval,
-	})
+	c.JSON(
+		http.StatusOK, gin.H{
+			"status":                    "ok",
+			"url":                       authURL,
+			"state":                     state,
+			"flow":                      "device",
+			"user_code":                 strings.TrimSpace(deviceFlow.UserCode),
+			"verification_uri":          strings.TrimSpace(deviceFlow.VerificationURI),
+			"verification_uri_complete": strings.TrimSpace(deviceFlow.VerificationURIComplete),
+			"expires_in":                expiresIn,
+			"interval":                  deviceFlow.Interval,
+		},
+	)
 }
 
 // populateAuthContext extracts request info and adds it to the context

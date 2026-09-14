@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -26,7 +27,10 @@ import (
 	"golang.org/x/oauth2"
 )
 
-const defaultAPICallTimeout = 60 * time.Second
+const (
+	defaultAPICallTimeout    = 60 * time.Second
+	maxAPICallDraftTokenSize = 64 << 10
+)
 
 var antigravityOAuthTokenURL = antigravity.TokenEndpoint
 
@@ -37,6 +41,8 @@ type apiCallRequest struct {
 	ProxyURLSnake   *string           `json:"proxy_url"`
 	ProxyURLCamel   *string           `json:"proxyUrl"`
 	ProxyURLPascal  *string           `json:"ProxyUrl"`
+	DraftTokenSnake *string           `json:"draft_token"`
+	DraftTokenCamel *string           `json:"draftToken"`
 	Method          string            `json:"method"`
 	URL             string            `json:"url"`
 	Header          map[string]string `json:"header"`
@@ -76,6 +82,9 @@ type apiCallResponse struct {
 //     3) metadata.token / metadata.id_token / metadata.cookie
 //     Example: {"Authorization":"Bearer $TOKEN$"}.
 //     Literal restricted headers are rejected.
+//   - draft_token / draftToken (optional):
+//     An unsaved credential used only for $TOKEN$ replacement in this request.
+//     It is never persisted and takes precedence over auth_index token resolution.
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
 //
 // Proxy selection (highest priority first):
@@ -143,6 +152,11 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	proxyURL := firstNonEmptyString(body.ProxyURLSnake, body.ProxyURLCamel, body.ProxyURLPascal)
+	draftToken := firstNonEmptyString(body.DraftTokenSnake, body.DraftTokenCamel)
+	if len(draftToken) > maxAPICallDraftTokenSize {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "draft token is too large"})
+		return
+	}
 	auth := h.authByIndex(authIndex)
 
 	reqHeaders := body.Header
@@ -163,34 +177,38 @@ func (h *Handler) APICall(c *gin.Context) {
 			break
 		}
 	}
-	if hasTokenPlaceholder && !isAllowedTokenTarget(parsedURL.Hostname()) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "$TOKEN$ can only be used with known provider domains"})
+	if draftToken != "" && !hasTokenPlaceholder {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "draft token requires a $TOKEN$ header placeholder"})
 		return
+	}
+	if hasTokenPlaceholder {
+		if errTransport := validateTokenTransportURL(parsedURL); errTransport != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errTransport.Error()})
+			return
+		}
+		if !isAllowedTokenTargetURL(parsedURL) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "$TOKEN$ can only be used with known provider domains"})
+			return
+		}
 	}
 
 	var token string
-	var tokenResolved bool
 	var tokenErr error
-	for key, value := range reqHeaders {
-		if !strings.Contains(value, "$TOKEN$") {
-			continue
-		}
-		if !tokenResolved {
-			token, tokenErr = h.resolveTokenForAuth(c.Request.Context(), cfg, auth)
-			tokenResolved = true
-		}
-		if auth != nil && token == "" {
-			if tokenErr != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
-				return
-			}
-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
+	if hasTokenPlaceholder {
+		token, tokenErr = h.resolveAPICallToken(c.Request.Context(), cfg, auth, draftToken)
+	}
+	if hasTokenPlaceholder && token == "" {
+		if tokenErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
 			return
 		}
-		if token == "" {
-			continue
+		c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
+		return
+	}
+	for key, value := range reqHeaders {
+		if strings.Contains(value, "$TOKEN$") {
+			reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
 		}
-		reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
 	}
 
 	var requestBody io.Reader
@@ -221,12 +239,17 @@ func (h *Handler) APICall(c *gin.Context) {
 		// When $TOKEN$ was used, block redirect to non-whitelisted domains
 		// and strip token-bearing headers to prevent credential exfiltration.
 		if hasTokenPlaceholder {
-			if !isAllowedTokenTarget(redirectReq.URL.Hostname()) {
-				return fmt.Errorf("redirect to non-whitelisted domain blocked (token protection)")
+			if errTransport := validateTokenTransportURL(redirectReq.URL); errTransport != nil {
+				return errTransport
 			}
-			for key := range redirectReq.Header {
-				if strings.Contains(redirectReq.Header.Get(key), token) && token != "" {
-					redirectReq.Header.Del(key)
+			if !isAllowedTokenRedirectTarget(parsedURL, redirectReq.URL) {
+				return fmt.Errorf("redirect to untrusted domain blocked (token protection)")
+			}
+			if shouldStripTokenRedirectHeaders(parsedURL.Hostname(), redirectReq.URL.Hostname()) {
+				for key := range redirectReq.Header {
+					if strings.Contains(redirectReq.Header.Get(key), token) && token != "" {
+						redirectReq.Header.Del(key)
+					}
 				}
 			}
 		}
@@ -259,6 +282,13 @@ func (h *Handler) APICall(c *gin.Context) {
 			Body:       string(respBody),
 		},
 	)
+}
+
+func validateTokenTransportURL(target *url.URL) error {
+	if target == nil || !strings.EqualFold(target.Scheme, "https") {
+		return errors.New("$TOKEN$ requires HTTPS and cannot follow a downgrade redirect")
+	}
+	return nil
 }
 
 func firstNonEmptyString(values ...*string) string {
@@ -307,6 +337,18 @@ func validateAPICallHeaders(headers map[string]string) error {
 		}
 	}
 	return nil
+}
+
+func (h *Handler) resolveAPICallToken(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+	draftToken string,
+) (string, error) {
+	if draftToken != "" {
+		return draftToken, nil
+	}
+	return h.resolveTokenForAuth(ctx, cfg, auth)
 }
 
 func (h *Handler) resolveTokenForAuth(
@@ -388,7 +430,9 @@ func mergeRefreshedAuth(current, before, refreshed *coreauth.Auth) *coreauth.Aut
 	}
 	for key, previous := range before.Metadata {
 		if _, exists := refreshedSnapshot.Metadata[key]; !exists {
-			if currentValue, currentExists := next.Metadata[key]; currentExists && reflect.DeepEqual(currentValue, previous) {
+			if currentValue, currentExists := next.Metadata[key]; currentExists && reflect.DeepEqual(
+				currentValue, previous,
+			) {
 				delete(next.Metadata, key)
 			}
 		}
@@ -458,7 +502,18 @@ func (h *Handler) refreshClaudeOAuthAccessToken(
 	if td.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = td.RefreshToken
 	}
-	auth.Metadata["email"] = td.Email
+	if td.Email != "" {
+		auth.Metadata["email"] = td.Email
+	}
+	if td.AccountUUID != "" {
+		auth.Metadata["account_uuid"] = td.AccountUUID
+	}
+	if td.OrganizationUUID != "" {
+		auth.Metadata["organization_uuid"] = td.OrganizationUUID
+	}
+	if td.OrganizationName != "" {
+		auth.Metadata["organization_name"] = td.OrganizationName
+	}
 	auth.Metadata["expired"] = td.Expire
 	auth.Metadata["type"] = "claude"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
@@ -999,10 +1054,45 @@ func pinnedTransport(base http.RoundTripper, hostname string, pinnedAddr string)
 	return proxyutil.PinnedTransport(base, hostname, pinnedAddr)
 }
 
+func shouldStripTokenRedirectHeaders(originalHostname string, redirectHostname string) bool {
+	return !strings.EqualFold(strings.TrimSpace(originalHostname), strings.TrimSpace(redirectHostname))
+}
+
+func isAllowedTokenRedirectTarget(originalURL *url.URL, redirectURL *url.URL) bool {
+	if originalURL == nil || redirectURL == nil {
+		return false
+	}
+	originalHostname := strings.ToLower(strings.TrimSpace(originalURL.Hostname()))
+	redirectHostname := strings.ToLower(strings.TrimSpace(redirectURL.Hostname()))
+	if originalHostname == "api.deepseek.com" {
+		return redirectHostname == originalHostname && isDefaultHTTPSPort(redirectURL)
+	}
+	return isAllowedTokenTargetURL(redirectURL)
+}
+
+func isAllowedTokenTargetURL(target *url.URL) bool {
+	if target == nil {
+		return false
+	}
+	hostname := strings.ToLower(strings.TrimSpace(target.Hostname()))
+	if hostname == "api.deepseek.com" && !isDefaultHTTPSPort(target) {
+		return false
+	}
+	return isAllowedTokenTarget(hostname)
+}
+
+func isDefaultHTTPSPort(target *url.URL) bool {
+	port := target.Port()
+	return port == "" || port == "443"
+}
+
 // isAllowedTokenTarget returns true if the hostname belongs to a known AI provider,
 // preventing $TOKEN$ credential exfiltration to arbitrary domains.
 func isAllowedTokenTarget(hostname string) bool {
-	hostname = strings.ToLower(hostname)
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	if hostname == "api.deepseek.com" {
+		return true
+	}
 	allowed := []string{
 		"api.anthropic.com",
 		"claude.ai",
@@ -1010,6 +1100,9 @@ func isAllowedTokenTarget(hostname string) bool {
 		"aiplatform.googleapis.com",
 		"cloudcode-pa.googleapis.com",
 		"api.openai.com",
+		"api.fenno.ai",
+		"api.qnaigc.com",
+		"api.modelink.ai",
 		"chatgpt.com",
 		"api.githubcopilot.com",
 		"api.individual.githubcopilot.com",

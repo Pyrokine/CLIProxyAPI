@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,10 +42,12 @@ type blockingReadCloser struct {
 }
 
 func (r *blockingReadCloser) Read(p []byte) (int, error) {
-	r.once.Do(func() {
-		close(r.started)
-		<-r.release
-	})
+	r.once.Do(
+		func() {
+			close(r.started)
+			<-r.release
+		},
+	)
 	return r.reader.Read(p)
 }
 
@@ -55,10 +58,10 @@ func (*blockingReadCloser) Close() error {
 func TestMiddlewareSetsSupportPluginHeader(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
-	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret("test-secret"))
+	h := NewHandler(&config.Config{}, "", nil, withEnvSecret("test-secret"))
 	engine := gin.New()
 	engine.GET(
-		"/v0/management/config", h.Middleware(), func(c *gin.Context) {
+		"/v0/management/config", h.middleware(), func(c *gin.Context) {
 			c.Status(http.StatusOK)
 		},
 	)
@@ -117,7 +120,7 @@ func TestFetchAllReleases_ForceBypassesCache(t *testing.T) {
 	)
 	defer proxy.Close()
 
-	h := NewHandler(&config.Config{SDKConfig: config.SDKConfig{ProxyURL: proxy.URL}}, "", nil)
+	h := NewHandler(&config.Config{ProxyURL: proxy.URL}, "", nil)
 	w := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(w)
 	ctx.Request = httptest.NewRequest(http.MethodGet, "/releases?force=1", nil)
@@ -130,25 +133,16 @@ func TestFetchAllReleases_ForceBypassesCache(t *testing.T) {
 	}
 }
 
-func TestRestartCurrentProcess_RequiresSystemd(t *testing.T) {
-	if err := os.Unsetenv("INVOCATION_ID"); err != nil {
-		t.Fatalf("Unsetenv: %v", err)
-	}
-	if err := restartCurrentProcess(); err == nil {
-		t.Fatal("expected restartCurrentProcess to reject non-systemd environment")
-	}
-}
-
 // --- Option pattern tests ---
 
 func TestWithEnvSecret(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(" my-secret "))
+	h := NewHandler(&config.Config{}, "", nil, withEnvSecret(" my-secret "))
 	if h.envSecret != "my-secret" {
 		t.Fatalf("expected envSecret=%q, got %q", "my-secret", h.envSecret)
 	}
 
-	h2 := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""))
+	h2 := NewHandler(&config.Config{}, "", nil, withEnvSecret(""))
 	if h2.envSecret != "" {
 		t.Fatalf("expected empty envSecret, got %q", h2.envSecret)
 	}
@@ -157,7 +151,7 @@ func TestWithEnvSecret(t *testing.T) {
 func TestWithTokenStore(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	store := &memoryAuthStore{}
-	h := NewHandler(&config.Config{}, "", nil, WithTokenStore(store))
+	h := NewHandler(&config.Config{}, "", nil, withTokenStore(store))
 	if h.tokenStore != store {
 		t.Fatal("expected tokenStore to be the injected store")
 	}
@@ -166,7 +160,7 @@ func TestWithTokenStore(t *testing.T) {
 func TestWithUsageStats(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	stats := usage.GetRequestStatistics()
-	h := NewHandler(&config.Config{}, "", nil, WithUsageStats(stats))
+	h := NewHandler(&config.Config{}, "", nil, withUsageStats(stats))
 	if h.usageStats != stats {
 		t.Fatal("expected usageStats to be the injected stats")
 	}
@@ -174,7 +168,7 @@ func TestWithUsageStats(t *testing.T) {
 
 func TestWithLogDir(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	h := NewHandler(&config.Config{}, "", nil, WithLogDir("/tmp/test-logs"))
+	h := NewHandler(&config.Config{}, "", nil, withLogDir("/tmp/test-logs"))
 	if h.logDir != "/tmp/test-logs" {
 		t.Fatalf("expected logDir=%q, got %q", "/tmp/test-logs", h.logDir)
 	}
@@ -183,7 +177,7 @@ func TestWithLogDir(t *testing.T) {
 func TestWithPostAuthHook(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	called := false
-	hook := func(_ interface{}, _ *coreauth.Auth) error { called = true; return nil }
+	hook := func(_ any, _ *coreauth.Auth) error { called = true; return nil }
 	// PostAuthHook is func(context.Context, *Auth) error — we need to match the signature
 	_ = called
 	_ = hook
@@ -227,12 +221,12 @@ func TestMiddleware_BcryptSecret(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RemoteManagement.SecretKey = string(hash)
 	cfg.RemoteManagement.AllowRemote = true
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	// Correct secret
 	rec := httptest.NewRecorder()
 	c, engine := gin.CreateTestContext(rec)
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 	c.Request = newRemoteRequest("GET", "/test", "Bearer "+secret)
 	engine.ServeHTTP(rec, c.Request)
@@ -254,10 +248,10 @@ func TestMiddleware_EnvSecret(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
 	cfg.RemoteManagement.AllowRemote = true
-	h := NewHandler(cfg, "", nil, WithEnvSecret("env-pass"))
+	h := NewHandler(cfg, "", nil, withEnvSecret("env-pass"))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
 	// Correct env secret
@@ -280,10 +274,10 @@ func TestMiddleware_EnvSecret(t *testing.T) {
 func TestMiddleware_EnvSecretDoesNotEnableRemote(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
-	h := NewHandler(cfg, "", nil, WithEnvSecret("env-pass"))
+	h := NewHandler(cfg, "", nil, withEnvSecret("env-pass"))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
 	rec := httptest.NewRecorder()
@@ -294,22 +288,25 @@ func TestMiddleware_EnvSecretDoesNotEnableRemote(t *testing.T) {
 	}
 }
 
-func TestMiddleware_UntrustedXRealIPIsIgnored(t *testing.T) {
+func TestMiddleware_UntrustedForwardingHeaderDoesNotGrantLocalAccess(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 	h.localPassword = "local-pass"
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
 	rec := httptest.NewRecorder()
 	req := newLoopbackRequest("GET", "/test", "Bearer local-pass")
 	req.Header.Set("X-Real-IP", "not-an-ip")
 	engine.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 when untrusted X-Real-IP is ignored, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf(
+			"expected 401 when a loopback peer presents an untrusted forwarding header, got %d: %s", rec.Code,
+			rec.Body.String(),
+		)
 	}
 }
 
@@ -317,11 +314,11 @@ func TestMiddleware_InvalidTrustedXRealIPIsRemote(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
 	cfg.RemoteManagement.TrustedProxies = []string{"127.0.0.1/32"}
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 	h.localPassword = "local-pass"
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
 	rec := httptest.NewRecorder()
@@ -337,15 +334,15 @@ func TestMiddleware_UntrustedXRealIPDoesNotBypassRateLimit(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
 	cfg.RemoteManagement.AllowRemote = true
-	h := NewHandler(cfg, "", nil, WithEnvSecret("env-pass"))
+	h := NewHandler(cfg, "", nil, withEnvSecret("env-pass"))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		rec := httptest.NewRecorder()
-		req := newLoopbackRequest("GET", "/test", "Bearer wrong")
+		req := newLoopbackRequest("GET", "/test", fmt.Sprintf("Bearer wrong-%d", i))
 		req.Header.Set("X-Real-IP", fmt.Sprintf("20.0.0.%d", i+1))
 		engine.ServeHTTP(rec, req)
 	}
@@ -362,11 +359,11 @@ func TestMiddleware_UntrustedXRealIPDoesNotBypassRateLimit(t *testing.T) {
 func TestMiddleware_LocalPassword(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 	h.localPassword = "local-pass"
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
 	// Correct local password from loopback
@@ -398,10 +395,10 @@ func TestMiddleware_MissingKey(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
 	cfg.RemoteManagement.SecretKey = "$2a$04$dummy" // won't match anything
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
 	rec := httptest.NewRecorder()
@@ -416,10 +413,10 @@ func TestMiddleware_XManagementKeyHeader(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
 	cfg.RemoteManagement.AllowRemote = true
-	h := NewHandler(cfg, "", nil, WithEnvSecret("env-key"))
+	h := NewHandler(cfg, "", nil, withEnvSecret("env-key"))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
 	rec := httptest.NewRecorder()
@@ -436,10 +433,10 @@ func TestMiddleware_RemoteDisabled(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.SecretKey = "some-hash"
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
 	rec := httptest.NewRecorder()
@@ -455,15 +452,15 @@ func TestMiddleware_RemoteDisabledConsumesRateLimit(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.SecretKey = "some-hash"
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		rec := httptest.NewRecorder()
-		req := newRemoteRequest("GET", "/test", "Bearer something")
+		req := newRemoteRequest("GET", "/test", fmt.Sprintf("Bearer something-%d", i))
 		engine.ServeHTTP(rec, req)
 	}
 
@@ -482,15 +479,15 @@ func TestMiddleware_IPBanning(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RemoteManagement.SecretKey = string(hash)
 	cfg.RemoteManagement.AllowRemote = true
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		rec := httptest.NewRecorder()
-		req := newRemoteRequest("GET", "/test", "Bearer wrong")
+		req := newRemoteRequest("GET", "/test", fmt.Sprintf("Bearer wrong-%d", i))
 		engine.ServeHTTP(rec, req)
 	}
 
@@ -506,6 +503,121 @@ func TestMiddleware_IPBanning(t *testing.T) {
 	}
 }
 
+func TestMiddlewareCoalescesConcurrentRequestsWithSameInvalidCredential(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	cfg.RemoteManagement.AllowRemote = true
+	h := NewHandler(cfg, "", nil, withEnvSecret("correct"))
+	defer func() { _ = h.Close() }()
+
+	engine := gin.New()
+	engine.Use(h.middleware())
+	engine.GET("/test", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	requestCount := managementMaxFailures * 2
+	start := make(chan struct{})
+	statuses := make(chan int, requestCount)
+	var requests sync.WaitGroup
+	requests.Add(requestCount)
+	for range requestCount {
+		go func() {
+			defer requests.Done()
+			<-start
+			rec := httptest.NewRecorder()
+			engine.ServeHTTP(rec, newRemoteRequest("GET", "/test", "Bearer stale-key"))
+			statuses <- rec.Code
+		}()
+	}
+	close(start)
+	requests.Wait()
+	close(statuses)
+	for status := range statuses {
+		if status != http.StatusUnauthorized {
+			t.Fatalf("duplicate request status = %d, want 401", status)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, newRemoteRequest("GET", "/test", "Bearer correct"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid credential status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	h.attemptsMu.Lock()
+	attempt := h.failedAttempts["203.0.113.1"]
+	h.attemptsMu.Unlock()
+	if attempt == nil || attempt.pendingNoticeFailures != 1 {
+		t.Fatalf("failed attempt state = %#v, want one counted failure", attempt)
+	}
+}
+
+func TestRecordFailedManagementAttemptCoalescesOutOfOrderTimestamps(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	h := NewHandler(&config.Config{}, "", nil, withEnvSecret(""))
+	defer func() { _ = h.Close() }()
+
+	clientIP := "203.0.113.2"
+	fingerprint := managementFailureFingerprint("invalid-credential", "stale-key")
+	latest := time.Now()
+	h.recordFailedManagementAttempt(clientIP, fingerprint, latest)
+	h.recordFailedManagementAttempt(clientIP, fingerprint, latest.Add(-time.Millisecond))
+
+	h.attemptsMu.Lock()
+	attempt := h.failedAttempts[clientIP]
+	h.attemptsMu.Unlock()
+	if attempt == nil || attempt.pendingNoticeFailures != 1 || len(attempt.failures) != 1 {
+		t.Fatalf("failed attempt state = %#v, want one counted failure", attempt)
+	}
+	if !attempt.lastActivity.Equal(latest) {
+		t.Fatalf("last activity = %s, want %s", attempt.lastActivity, latest)
+	}
+}
+
+func TestMiddlewareRateLimitResponseIncludesRetryContract(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	cfg := &config.Config{}
+	cfg.RemoteManagement.AllowRemote = true
+	h := NewHandler(cfg, "", nil, withEnvSecret("correct"))
+	defer func() { _ = h.Close() }()
+
+	engine := gin.New()
+	engine.Use(h.middleware())
+	engine.GET("/test", func(c *gin.Context) { c.Status(http.StatusOK) })
+	for i := range managementMaxFailures {
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(
+			rec,
+			newRemoteRequest("GET", "/test", fmt.Sprintf("Bearer invalid-%d", i)),
+		)
+	}
+
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, newRemoteRequest("GET", "/test", "Bearer correct"))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	var body struct {
+		Code              string    `json:"code"`
+		RetryAfterSeconds int       `json:"retry_after_seconds"`
+		BannedUntil       time.Time `json:"banned_until"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if body.Code != managementRateLimitCode || body.RetryAfterSeconds < 1 || body.BannedUntil.IsZero() {
+		t.Fatalf("rate limit response = %#v", body)
+	}
+	if rec.Header().Get("Retry-After") != strconv.Itoa(body.RetryAfterSeconds) {
+		t.Fatalf("Retry-After = %q, body seconds = %d", rec.Header().Get("Retry-After"), body.RetryAfterSeconds)
+	}
+	if got := managementRetryAfterSeconds(100 * time.Millisecond); got != 1 {
+		t.Fatalf("100ms retry = %d, want 1", got)
+	}
+	if got := managementRetryAfterSeconds(1100 * time.Millisecond); got != 2 {
+		t.Fatalf("1100ms retry = %d, want 2", got)
+	}
+}
+
 func TestRateLimitStatusIncludesBanCountAndUnbanHistory(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	secret := "correct"
@@ -513,16 +625,16 @@ func TestRateLimitStatusIncludesBanCountAndUnbanHistory(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RemoteManagement.SecretKey = string(hash)
 	cfg.RemoteManagement.AllowRemote = true
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
 	triggerBan := func() {
-		for i := 0; i < 10; i++ {
+		for i := range 10 {
 			rec := httptest.NewRecorder()
-			req := newRemoteRequest("GET", "/test", "Bearer wrong")
+			req := newRemoteRequest("GET", "/test", fmt.Sprintf("Bearer wrong-%d", i))
 			engine.ServeHTTP(rec, req)
 		}
 	}
@@ -614,15 +726,15 @@ func TestRateLimitStatusIncludesAndConsumesFailedLoginNotices(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.RemoteManagement.SecretKey = string(hash)
 	cfg.RemoteManagement.AllowRemote = true
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	engine := gin.New()
-	engine.Use(h.Middleware())
+	engine.Use(h.middleware())
 	engine.GET("/test", func(c *gin.Context) { c.JSON(200, gin.H{"ok": true}) })
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		rec := httptest.NewRecorder()
-		req := newRemoteRequest("GET", "/test", "Bearer wrong")
+		req := newRemoteRequest("GET", "/test", fmt.Sprintf("Bearer wrong-%d", i))
 		engine.ServeHTTP(rec, req)
 	}
 	rec := httptest.NewRecorder()
@@ -688,7 +800,7 @@ func TestPutConfigYAML_BodyLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	h := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	prefix := "port: 8317\n#"
 	body := prefix + strings.Repeat("a", int(maxConfigYAMLBytes)-len(prefix)) + "x"
 	rec := httptest.NewRecorder()
@@ -718,7 +830,7 @@ func TestValidateConfigYAML_BodyLimit(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	h := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	prefix := "port: 8317\n#"
 	body := prefix + strings.Repeat("a", int(maxConfigYAMLBytes)-len(prefix)) + "x"
 	rec := httptest.NewRecorder()
@@ -748,7 +860,7 @@ func TestImportUsageStatistics_BodyLimit(t *testing.T) {
 	persister.Start(context.Background())
 	defer persister.Stop()
 
-	h := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""), WithUsagePersister(persister))
+	h := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""), withUsagePersister(persister))
 
 	largeBody := strings.Repeat("a", 101<<20)
 	rec := httptest.NewRecorder()
@@ -781,39 +893,43 @@ func TestImportUsageStatisticsDistinguishesInputAndStorageErrors(t *testing.T) {
 			&config.Config{},
 			configPath,
 			nil,
-			WithEnvSecret(""),
-			WithUsagePersister(persister),
+			withEnvSecret(""),
+			withUsagePersister(persister),
 		)
 		return handler, persister
 	}
 
-	t.Run("invalid payload", func(t *testing.T) {
-		handler, persister := newHandler(t)
-		defer persister.Stop()
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPost, "/usage/import", strings.NewReader("{"))
-		handler.ImportUsageStatistics(c)
-		if recorder.Code != http.StatusBadRequest {
-			t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body.String())
-		}
-	})
+	t.Run(
+		"invalid payload", func(t *testing.T) {
+			handler, persister := newHandler(t)
+			defer persister.Stop()
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/usage/import", strings.NewReader("{"))
+			handler.ImportUsageStatistics(c)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+			}
+		},
+	)
 
-	t.Run("storage failure", func(t *testing.T) {
-		handler, persister := newHandler(t)
-		persister.Stop()
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(
-			http.MethodPost,
-			"/usage/import",
-			strings.NewReader(`{"date":"2026-04-27","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m"}]}`),
-		)
-		handler.ImportUsageStatistics(c)
-		if recorder.Code != http.StatusInternalServerError {
-			t.Fatalf("status = %d, want 500: %s", recorder.Code, recorder.Body.String())
-		}
-	})
+	t.Run(
+		"storage failure", func(t *testing.T) {
+			handler, persister := newHandler(t)
+			persister.Stop()
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(
+				http.MethodPost,
+				"/usage/import",
+				strings.NewReader(`{"date":"2026-04-27","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m"}]}`),
+			)
+			handler.ImportUsageStatistics(c)
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500: %s", recorder.Code, recorder.Body.String())
+			}
+		},
+	)
 }
 
 func TestGetConfigYAML(t *testing.T) {
@@ -826,7 +942,7 @@ func TestGetConfigYAML(t *testing.T) {
 	}
 
 	cfg := &config.Config{}
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -848,7 +964,7 @@ func TestGetConfigYAML(t *testing.T) {
 func TestGetConfigYAML_NotFound(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
-	h := NewHandler(cfg, "/nonexistent/config.yaml", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "/nonexistent/config.yaml", nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -868,7 +984,7 @@ func TestValidateConfigYAML_ReturnsLineForTypeError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	h := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/config.yaml/validate", strings.NewReader("port: nope\n"))
@@ -908,7 +1024,7 @@ func TestValidateConfigYAML_ReturnsYamlFieldForSyntaxError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
+	h := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/config.yaml/validate", strings.NewReader("port: [\n"))
@@ -975,7 +1091,7 @@ func TestGetConfig_IncludesRemoteManagement(t *testing.T) {
 	cfg.RemoteManagement.CPAGitHubRepository = "https://github.com/example/cpa"
 	cfg.RemoteManagement.AutoCheckUpdate = true
 	cfg.RemoteManagement.AutoUpdateCPA = true
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1037,7 +1153,7 @@ func TestPutUsageRetention_Validation(t *testing.T) {
 	cfg := &config.Config{}
 	persister := usage.NewPersister(filepath.Join(tmpDir, "usage"), config.UsageRetention{})
 	defer persister.Stop()
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""), WithUsagePersister(persister))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""), withUsagePersister(persister))
 
 	tests := []struct {
 		name     string
@@ -1082,7 +1198,7 @@ func TestPutUsageRetention_PersistsToConfig(t *testing.T) {
 	cfg := &config.Config{Port: 8317}
 	persister := usage.NewPersister(filepath.Join(tmpDir, "usage"), config.UsageRetention{})
 	defer persister.Stop()
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""), WithUsagePersister(persister))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""), withUsagePersister(persister))
 
 	body := `{"days": 60, "max_db_size_mb": 512, "warning_threshold_pct": 85}`
 	rec := httptest.NewRecorder()
@@ -1143,7 +1259,7 @@ func TestPutUsageRetention_SaveFailureKeepsRuntimeConfig(t *testing.T) {
 	cfg := &config.Config{Port: 8317, UsageRetention: previousRetention}
 	persister := usage.NewPersister(filepath.Join(tmpDir, "usage"), previousRetention)
 	defer persister.Stop()
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""), WithUsagePersister(persister))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""), withUsagePersister(persister))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1169,7 +1285,7 @@ func TestPutUsageRetention_SaveFailureKeepsRuntimeConfig(t *testing.T) {
 
 func TestGetUsageRetention_NoPersister(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""))
+	h := NewHandler(&config.Config{}, "", nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1202,7 +1318,7 @@ func TestUploadAuthFile_MultipartPermissions(t *testing.T) {
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
 	cfg := &config.Config{AuthDir: authDir}
-	h := NewHandler(cfg, "", manager, WithEnvSecret(""), WithTokenStore(store))
+	h := NewHandler(cfg, "", manager, withEnvSecret(""), withTokenStore(store))
 
 	// Create multipart form with a valid auth file
 	authContent := `{"type":"anthropic","key":"sk-ant-test"}`
@@ -1247,7 +1363,7 @@ func TestUploadAuthFile_BodyMethod(t *testing.T) {
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
 	cfg := &config.Config{AuthDir: authDir}
-	h := NewHandler(cfg, "", manager, WithEnvSecret(""), WithTokenStore(store))
+	h := NewHandler(cfg, "", manager, withEnvSecret(""), withTokenStore(store))
 
 	authContent := `{"type":"anthropic","key":"sk-ant-test"}`
 	rec := httptest.NewRecorder()
@@ -1289,7 +1405,7 @@ func TestUploadAuthFileInvalidReplacementPreservesExistingCredential(t *testing.
 	authDir := t.TempDir()
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
-	h := NewHandler(&config.Config{AuthDir: authDir}, "", manager, WithEnvSecret(""), WithTokenStore(store))
+	h := NewHandler(&config.Config{AuthDir: authDir}, "", manager, withEnvSecret(""), withTokenStore(store))
 	path := filepath.Join(authDir, "existing.json")
 	original := []byte(`{"type":"codex","access_token":"old"}`)
 	if errWrite := os.WriteFile(path, original, 0o600); errWrite != nil {
@@ -1320,7 +1436,7 @@ func TestUploadAuthFileUsesCapturedAuthDir(t *testing.T) {
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
 	h := NewHandler(
-		&config.Config{AuthDir: authDirA}, "", manager, WithEnvSecret(""), WithTokenStore(store),
+		&config.Config{AuthDir: authDirA}, "", manager, withEnvSecret(""), withTokenStore(store),
 	)
 
 	started := make(chan struct{})
@@ -1370,7 +1486,7 @@ func TestUploadAuthFile_MultipartBatch(t *testing.T) {
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
 	cfg := &config.Config{AuthDir: authDir}
-	h := NewHandler(cfg, "", manager, WithEnvSecret(""), WithTokenStore(store))
+	h := NewHandler(cfg, "", manager, withEnvSecret(""), withTokenStore(store))
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -1420,7 +1536,7 @@ func TestUploadAuthFile_InvalidName(t *testing.T) {
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
 	cfg := &config.Config{AuthDir: authDir}
-	h := NewHandler(cfg, "", manager, WithEnvSecret(""), WithTokenStore(store))
+	h := NewHandler(cfg, "", manager, withEnvSecret(""), withTokenStore(store))
 
 	tests := []struct {
 		name string
@@ -1452,7 +1568,7 @@ func TestUploadAuthFile_RegistersQuotaEntry(t *testing.T) {
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
 	cfg := &config.Config{AuthDir: authDir}
-	h := NewHandler(cfg, "", manager, WithEnvSecret(""), WithTokenStore(store))
+	h := NewHandler(cfg, "", manager, withEnvSecret(""), withTokenStore(store))
 	h.quotaScheduler = quota.NewScheduler(
 		quota.DefaultConfig(), func(entry *quota.Entry) ([]byte, error) {
 			return json.Marshal(map[string]any{"file": entry.FileName})
@@ -1501,7 +1617,7 @@ func TestSaveTokenRecord_RegistersAuthManagerAndQuotaEntry(t *testing.T) {
 	store := sdkAuth.NewFileTokenStore()
 	manager := coreauth.NewManager(store, nil, nil)
 	cfg := &config.Config{AuthDir: authDir}
-	h := NewHandler(cfg, "", manager, WithEnvSecret(""), WithTokenStore(store))
+	h := NewHandler(cfg, "", manager, withEnvSecret(""), withTokenStore(store))
 	h.quotaScheduler = quota.NewScheduler(
 		quota.DefaultConfig(), func(entry *quota.Entry) ([]byte, error) {
 			return json.Marshal(map[string]any{"file": entry.FileName})
@@ -1545,6 +1661,9 @@ func TestSaveTokenRecord_RegistersAuthManagerAndQuotaEntry(t *testing.T) {
 	if stored.Index == "" {
 		t.Fatal("expected saved auth index to be populated")
 	}
+	if digest := stored.Attributes[coreauth.PersistedSHA256Attribute]; len(digest) != 64 {
+		t.Fatalf("expected persisted digest, got %q", digest)
+	}
 
 	status := h.quotaScheduler.GetStatus()
 	entry, exists := status.Credentials[quota.EntryKey(quota.TypeCodex, "codex-user.json")]
@@ -1557,6 +1676,37 @@ func TestSaveTokenRecord_RegistersAuthManagerAndQuotaEntry(t *testing.T) {
 	if entry.AuthIndex != stored.Index {
 		t.Fatalf("expected quota auth index %q, got %q", stored.Index, entry.AuthIndex)
 	}
+	targets, unresolved := h.quotaScheduler.ResolveRefreshTargets([]string{"codex-user.json"})
+	if len(unresolved) != 0 || len(targets) != 1 {
+		t.Fatalf("quota refresh targets = %#v, unresolved = %#v", targets, unresolved)
+	}
+	if result := h.quotaScheduler.RefreshTarget(
+		t.Context(), targets[0],
+	); result.Outcome != quota.RefreshOutcomeSucceeded {
+		t.Fatalf("quota refresh result = %#v", result)
+	}
+	entry = h.quotaScheduler.GetStatus().Credentials[quota.EntryKey(quota.TypeCodex, "codex-user.json")]
+	if entry == nil || len(entry.Data) == 0 {
+		t.Fatalf("quota entry after refresh = %#v", entry)
+	}
+	beforeGeneration := entry.Generation
+	replacement := &coreauth.Auth{
+		ID:       record.ID,
+		FileName: record.FileName,
+		Provider: record.Provider,
+		Metadata: map[string]any{
+			"type":          "codex",
+			"email":         "codex@example.com",
+			"refresh_token": "replacement-owner",
+		},
+	}
+	if _, err = h.saveTokenRecord(t.Context(), authDir, replacement); err != nil {
+		t.Fatalf("replace token record: %v", err)
+	}
+	after := h.quotaScheduler.GetStatus().Credentials[quota.EntryKey(quota.TypeCodex, "codex-user.json")]
+	if after == nil || after.Generation <= beforeGeneration || len(after.Data) != 0 {
+		t.Fatalf("quota binding after replacement = %#v", after)
+	}
 }
 
 func TestSaveTokenRecordUsesAuthFlowConfigGeneration(t *testing.T) {
@@ -1567,7 +1717,7 @@ func TestSaveTokenRecordUsesAuthFlowConfigGeneration(t *testing.T) {
 	store.SetBaseDir(authDirA)
 	manager := coreauth.NewManager(store, nil, nil)
 	h := NewHandler(
-		&config.Config{AuthDir: authDirA}, "", manager, WithEnvSecret(""), WithTokenStore(store),
+		&config.Config{AuthDir: authDirA}, "", manager, withEnvSecret(""), withTokenStore(store),
 	)
 
 	rec := httptest.NewRecorder()
@@ -1614,8 +1764,8 @@ func TestSaveTokenRecordProvidesScopedPathToLegacyStore(t *testing.T) {
 		&config.Config{AuthDir: authDir},
 		"",
 		nil,
-		WithEnvSecret(""),
-		WithTokenStore(store),
+		withEnvSecret(""),
+		withTokenStore(store),
 	)
 	record := &coreauth.Auth{
 		ID:       "legacy-store.json",
@@ -1642,7 +1792,7 @@ func TestPatchAuthFileStatus_SyncsQuotaDisabledState(t *testing.T) {
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
 	cfg := &config.Config{AuthDir: authDir}
-	h := NewHandler(cfg, "", manager, WithEnvSecret(""), WithTokenStore(store))
+	h := NewHandler(cfg, "", manager, withEnvSecret(""), withTokenStore(store))
 	h.quotaScheduler = quota.NewScheduler(
 		quota.DefaultConfig(), func(entry *quota.Entry) ([]byte, error) {
 			return json.Marshal(map[string]any{"file": entry.FileName})
@@ -1706,7 +1856,7 @@ func TestPatchAuthFileStatus_SyncsQuotaDisabledState(t *testing.T) {
 func TestGetDebug(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{Debug: true}
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1734,7 +1884,7 @@ func TestPutDebug(t *testing.T) {
 	}
 
 	cfg := &config.Config{Debug: false}
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""))
 
 	body := `{"value": true}`
 	rec := httptest.NewRecorder()
@@ -1754,7 +1904,7 @@ func TestPutDebug(t *testing.T) {
 func TestPutDebug_InvalidBody(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1778,6 +1928,9 @@ func TestNormalizeRoutingStrategy(t *testing.T) {
 		{"round-robin", "round-robin", true},
 		{"roundrobin", "round-robin", true},
 		{"rr", "round-robin", true},
+		{"quota-aware", "quota-aware", true},
+		{"quotaaware", "quota-aware", true},
+		{"qa", "quota-aware", true},
 		{"fill-first", "fill-first", true},
 		{"fillfirst", "fill-first", true},
 		{"ff", "fill-first", true},
@@ -1843,6 +1996,76 @@ func TestPurgeStaleAttempts_BannedIPKept(t *testing.T) {
 	}
 }
 
+func TestRateLimitTrackingCapacityKeepsBansAndRecentFailures(t *testing.T) {
+	now := time.Now()
+	h := &Handler{failedAttempts: make(map[string]*attemptInfo, maxManagementRateLimitClients)}
+	clientIP := func(index int) string {
+		return fmt.Sprintf("2001:db8::%x", index)
+	}
+	for i := range maxManagementRateLimitClients {
+		h.failedAttempts[clientIP(i)] = &attemptInfo{
+			failures:              []time.Time{now.Add(-time.Minute)},
+			lastActivity:          now.Add(time.Duration(i) * time.Millisecond),
+			pendingNoticeFailures: 1,
+			lastFailureAt:         now.Add(time.Duration(i) * time.Millisecond),
+		}
+	}
+	h.failedAttempts[clientIP(0)].blockedUntil = now.Add(managementBanDuration)
+	h.failedAttempts[clientIP(1)].blockedUntil = now.Add(-time.Second)
+	h.failedAttempts[clientIP(1)].banCount = 1
+	newClientIP := "2001:db8::ffff"
+	h.recordFailedManagementAttempt(
+		newClientIP,
+		managementFailureFingerprint("invalid-credential", "new-client"),
+		now.Add(2*time.Minute),
+	)
+
+	h.attemptsMu.Lock()
+	defer h.attemptsMu.Unlock()
+	if len(h.failedAttempts) != maxManagementRateLimitClients {
+		t.Fatalf("tracked clients = %d, want %d", len(h.failedAttempts), maxManagementRateLimitClients)
+	}
+	if _, exists := h.failedAttempts[clientIP(0)]; !exists {
+		t.Fatal("active ban was discarded at tracking capacity")
+	}
+	if _, exists := h.failedAttempts[newClientIP]; !exists {
+		t.Fatal("new client failure was not retained at tracking capacity")
+	}
+	if _, exists := h.failedAttempts[clientIP(1)]; exists {
+		t.Fatal("expired client state was retained at tracking capacity")
+	}
+	autoExpired := false
+	for _, event := range h.rateLimitEvents {
+		if event.Type == rateLimitEventAutoExpired && event.IP == clientIP(1) {
+			autoExpired = true
+			break
+		}
+	}
+	if !autoExpired {
+		t.Fatal("expired ban was discarded without an automatic expiry event")
+	}
+}
+
+func TestRateLimitTrackingCapacityFailsClosedWhenAllClientsAreBanned(t *testing.T) {
+	now := time.Now()
+	blockedUntil := now.Add(managementBanDuration)
+	h := &Handler{failedAttempts: make(map[string]*attemptInfo, maxManagementRateLimitClients)}
+	for i := range maxManagementRateLimitClients {
+		h.failedAttempts[fmt.Sprintf("2001:db8::%x", i)] = &attemptInfo{
+			blockedUntil: blockedUntil,
+			lastActivity: now,
+		}
+	}
+
+	remaining, banned := h.currentRateLimitBan("2001:db8::ffff", now)
+	if !banned {
+		t.Fatal("untracked client was allowed while tracking capacity contained only active bans")
+	}
+	if remaining != managementBanDuration {
+		t.Fatalf("remaining = %s, want %s", remaining, managementBanDuration)
+	}
+}
+
 // --- Usage statistics tests ---
 
 func TestDownloadAuthFileRedactsSecrets(t *testing.T) {
@@ -1855,7 +2078,7 @@ func TestDownloadAuthFileRedactsSecrets(t *testing.T) {
 	); err != nil {
 		t.Fatalf("write auth file: %v", err)
 	}
-	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil, WithEnvSecret(""))
+	h := NewHandler(&config.Config{AuthDir: authDir}, "", nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1906,12 +2129,16 @@ func TestWriteRedactedJSONPreservesLargeIntegers(t *testing.T) {
 	const rawAPIKey = "sk-large-integer-secret-value"
 
 	engine := gin.New()
-	engine.GET("/usage", func(c *gin.Context) {
-		writeRedactedJSON(c, http.StatusOK, gin.H{
-			"requests": requests,
-			"api_key":  rawAPIKey,
-		})
-	})
+	engine.GET(
+		"/usage", func(c *gin.Context) {
+			writeRedactedJSON(
+				c, http.StatusOK, gin.H{
+					"requests": requests,
+					"api_key":  rawAPIKey,
+				},
+			)
+		},
+	)
 	recorder := httptest.NewRecorder()
 	engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/usage", nil))
 
@@ -1933,15 +2160,13 @@ func TestGetConfigRedactsSensitiveValues(t *testing.T) {
 	rawProviderKey := "sk-gemini-secret-value"
 	rawAuthorization := "Bearer sk-header-secret-value"
 	cfg := &config.Config{
-		SDKConfig: config.SDKConfig{
-			APIKeys:       []string{rawAPIKey},
-			APIKeyAliases: map[string]string{rawAPIKey: "main"},
-		},
+		APIKeys:       []string{rawAPIKey},
+		APIKeyAliases: map[string]string{rawAPIKey: "main"},
 		GeminiKey: []config.GeminiKey{
 			{APIKey: rawProviderKey, Headers: map[string]string{"Authorization": rawAuthorization}},
 		},
 	}
-	h := NewHandler(cfg, "", nil, WithEnvSecret(""))
+	h := NewHandler(cfg, "", nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -1957,7 +2182,10 @@ func TestGetConfigRedactsSensitiveValues(t *testing.T) {
 			t.Fatalf("GetConfig kept raw secret %q in %s", secret, body)
 		}
 	}
-	for _, masked := range []string{util.HideAPIKey(rawAPIKey), util.HideAPIKey(rawProviderKey), "Bearer " + util.HideAPIKey("sk-header-secret-value")} {
+	for _, masked := range []string{
+		util.HideAPIKey(rawAPIKey), util.HideAPIKey(rawProviderKey),
+		"Bearer " + util.HideAPIKey("sk-header-secret-value"),
+	} {
 		if !strings.Contains(body, masked) {
 			t.Fatalf("GetConfig missing masked value %q in %s", masked, body)
 		}
@@ -1969,11 +2197,9 @@ func TestConfigYAMLRedactsAndRestoresSensitivePlaceholders(t *testing.T) {
 	rawAPIKey := "sk-yaml-secret-value"
 	rawAliasKey := "sk-yaml-alias-value"
 	cfg := &config.Config{
-		Port: 8317,
-		SDKConfig: config.SDKConfig{
-			APIKeys:       []string{rawAPIKey},
-			APIKeyAliases: map[string]string{rawAliasKey: "alias"},
-		},
+		Port:          8317,
+		APIKeys:       []string{rawAPIKey},
+		APIKeyAliases: map[string]string{rawAliasKey: "alias"},
 	}
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
@@ -1990,7 +2216,7 @@ func TestConfigYAMLRedactsAndRestoresSensitivePlaceholders(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -2033,25 +2259,25 @@ func TestConfigYAMLRedactionUsesSensitiveScalarContext(t *testing.T) {
 	rawSecret := ":"
 	masked := util.HideAPIKey(rawSecret)
 	cfg := &config.Config{
-		SDKConfig: config.SDKConfig{
-			APIKeys:  []string{rawSecret},
-			ProxyURL: masked,
-		},
+		APIKeys:  []string{rawSecret},
+		ProxyURL: masked,
 	}
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
-	content := strings.Join([]string{
-		"# keep this comment",
-		"port: 8317",
-		"proxy-url: '" + masked + "'",
-		"api-keys:",
-		"  - ':'",
-		"",
-	}, "\n")
+	content := strings.Join(
+		[]string{
+			"# keep this comment",
+			"port: 8317",
+			"proxy-url: '" + masked + "'",
+			"api-keys:",
+			"  - ':'",
+			"",
+		}, "\n",
+	)
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""))
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -2117,10 +2343,10 @@ func TestConfigYAMLRedactionUsesCurrentFileInsteadOfHandlerConfig(t *testing.T) 
 		t.Fatal(err)
 	}
 	h := NewHandler(
-		&config.Config{Port: 8317, SDKConfig: config.SDKConfig{APIKeys: []string{cfgSecret}}},
+		&config.Config{Port: 8317, APIKeys: []string{cfgSecret}},
 		configPath,
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 	)
 	defer func() { _ = h.Close() }()
 
@@ -2148,10 +2374,10 @@ func TestPutConfigYAMLPublishesAPIKeyAliasSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := NewHandler(
-		&config.Config{Port: 8317, SDKConfig: config.SDKConfig{APIKeyAliases: map[string]string{rawKey: "before"}}},
+		&config.Config{Port: 8317, APIKeyAliases: map[string]string{rawKey: "before"}},
 		configPath,
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 	)
 	defer func() { _ = h.Close() }()
 
@@ -2160,7 +2386,9 @@ func TestPutConfigYAMLPublishesAPIKeyAliasSnapshot(t *testing.T) {
 	getContext.Request = httptest.NewRequest(http.MethodGet, "/config.yaml", nil)
 	h.GetConfigYAML(getContext)
 	if getRecorder.Code != http.StatusOK {
-		t.Fatalf("GetConfigYAML status = %d, want %d body=%s", getRecorder.Code, http.StatusOK, getRecorder.Body.String())
+		t.Fatalf(
+			"GetConfigYAML status = %d, want %d body=%s", getRecorder.Code, http.StatusOK, getRecorder.Body.String(),
+		)
 	}
 	submitted := strings.Replace(getRecorder.Body.String(), "before", "after", 1)
 
@@ -2170,7 +2398,9 @@ func TestPutConfigYAMLPublishesAPIKeyAliasSnapshot(t *testing.T) {
 	putContext.Request.Header.Set("Content-Type", "application/yaml")
 	h.PutConfigYAML(putContext)
 	if putRecorder.Code != http.StatusOK {
-		t.Fatalf("PutConfigYAML status = %d, want %d body=%s", putRecorder.Code, http.StatusOK, putRecorder.Body.String())
+		t.Fatalf(
+			"PutConfigYAML status = %d, want %d body=%s", putRecorder.Code, http.StatusOK, putRecorder.Body.String(),
+		)
 	}
 	if got := h.apiKeyAliasesSnapshot()[rawKey]; got != "after" {
 		t.Fatalf("API key alias snapshot = %q, want after", got)
@@ -2212,93 +2442,114 @@ func TestAPIKeyAliasPersistenceFailureRestoresConfigAndSnapshot(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-			configPath := filepath.Join(tmpDir, "config.yaml")
-			if err := os.WriteFile(configPath, []byte("port: 8317\napi-key-aliases:\n  "+rawKey+": before\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfg := &config.Config{Port: 8317, SDKConfig: config.SDKConfig{APIKeyAliases: map[string]string{rawKey: "before"}}}
-			h := NewHandler(cfg, configPath, nil, WithEnvSecret(""))
-			defer func() { _ = h.Close() }()
-			if err := os.Remove(configPath); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Mkdir(configPath, 0o700); err != nil {
-				t.Fatal(err)
-			}
+		t.Run(
+			test.name, func(t *testing.T) {
+				tmpDir := t.TempDir()
+				configPath := filepath.Join(tmpDir, "config.yaml")
+				if err := os.WriteFile(
+					configPath, []byte("port: 8317\napi-key-aliases:\n  "+rawKey+": before\n"), 0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+				cfg := &config.Config{
+					Port: 8317, APIKeyAliases: map[string]string{rawKey: "before"},
+				}
+				h := NewHandler(cfg, configPath, nil, withEnvSecret(""))
+				defer func() { _ = h.Close() }()
+				if err := os.Remove(configPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(configPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
 
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			c.Request = httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
-			c.Request.Header.Set("Content-Type", "application/json")
-			test.call(h, c)
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+				c.Request.Header.Set("Content-Type", "application/json")
+				test.call(h, c)
 
-			if recorder.Code != http.StatusInternalServerError {
-				t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
-			}
-			if got := h.cfg.APIKeyAliases[rawKey]; got != "before" {
-				t.Fatalf("config alias = %q, want before", got)
-			}
-			if got := h.apiKeyAliasesSnapshot()[rawKey]; got != "before" {
-				t.Fatalf("snapshot alias = %q, want before", got)
-			}
-		})
+				if recorder.Code != http.StatusInternalServerError {
+					t.Fatalf(
+						"status = %d, want %d body=%s", recorder.Code, http.StatusInternalServerError,
+						recorder.Body.String(),
+					)
+				}
+				if got := h.cfg.APIKeyAliases[rawKey]; got != "before" {
+					t.Fatalf("config alias = %q, want before", got)
+				}
+				if got := h.apiKeyAliasesSnapshot()[rawKey]; got != "before" {
+					t.Fatalf("snapshot alias = %q, want before", got)
+				}
+			},
+		)
 	}
 }
 
 func TestPutConfigYAMLWithoutCurrentFileOnlyRejectsValidPlaceholders(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
-	t.Run("prefix in comment", func(t *testing.T) {
-		configPath := filepath.Join(t.TempDir(), "config.yaml")
-		h := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
-		defer func() { _ = h.Close() }()
-		body := "port: 8317\n# " + configYAMLPlaceholderPrefix + "not-a-placeholder\n"
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/config.yaml", strings.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/yaml")
-		h.PutConfigYAML(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("PutConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-	})
+	t.Run(
+		"prefix in comment", func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			h := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
+			defer func() { _ = h.Close() }()
+			body := "port: 8317\n# " + configYAMLPlaceholderPrefix + "not-a-placeholder\n"
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/config.yaml", strings.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/yaml")
+			h.PutConfigYAML(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"PutConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+				)
+			}
+		},
+	)
 
-	t.Run("valid placeholder scalar", func(t *testing.T) {
-		configPath := filepath.Join(t.TempDir(), "config.yaml")
-		h := NewHandler(&config.Config{}, configPath, nil, WithEnvSecret(""))
-		defer func() { _ = h.Close() }()
-		placeholder := configYAMLPlaceholderPrefix + strings.Repeat("a", 32) + "__"
-		body := "port: 8317\napi-keys:\n  - " + placeholder + "\n"
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/config.yaml", strings.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/yaml")
-		h.PutConfigYAML(c)
-		if recorder.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("PutConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusUnprocessableEntity, recorder.Body.String())
-		}
-	})
+	t.Run(
+		"valid placeholder scalar", func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			h := NewHandler(&config.Config{}, configPath, nil, withEnvSecret(""))
+			defer func() { _ = h.Close() }()
+			placeholder := configYAMLPlaceholderPrefix + strings.Repeat("a", 32) + "__"
+			body := "port: 8317\napi-keys:\n  - " + placeholder + "\n"
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/config.yaml", strings.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/yaml")
+			h.PutConfigYAML(c)
+			if recorder.Code != http.StatusUnprocessableEntity {
+				t.Fatalf(
+					"PutConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusUnprocessableEntity,
+					recorder.Body.String(),
+				)
+			}
+		},
+	)
 }
 
 func TestConfigYAMLRejectsMultipleDocuments(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"sk-yaml-multi-doc-secret"}}}
+	cfg := &config.Config{APIKeys: []string{"sk-yaml-multi-doc-secret"}}
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	multipleDocuments := "api-keys:\n  - sk-yaml-multi-doc-secret\n---\nport: 8317\n"
 	if err := os.WriteFile(configPath, []byte(multipleDocuments), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := NewHandler(cfg, configPath, nil, WithEnvSecret(""))
+	h := NewHandler(cfg, configPath, nil, withEnvSecret(""))
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/config.yaml", nil)
 	h.GetConfigYAML(c)
 	if recorder.Code != http.StatusInternalServerError {
-		t.Fatalf("GetConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+		t.Fatalf(
+			"GetConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusInternalServerError,
+			recorder.Body.String(),
+		)
 	}
 
 	recorder = httptest.NewRecorder()
@@ -2307,14 +2558,17 @@ func TestConfigYAMLRejectsMultipleDocuments(t *testing.T) {
 	c.Request.Header.Set("Content-Type", "application/yaml")
 	h.PutConfigYAML(c)
 	if recorder.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("PutConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusUnprocessableEntity, recorder.Body.String())
+		t.Fatalf(
+			"PutConfigYAML status = %d, want %d body=%s", recorder.Code, http.StatusUnprocessableEntity,
+			recorder.Body.String(),
+		)
 	}
 }
 
 func TestAPIKeysMaskedPlaceholdersRoundTrip(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	rawAPIKey := "sk-api-keys-secret-value"
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{rawAPIKey}}}
+	cfg := &config.Config{APIKeys: []string{rawAPIKey}}
 	h := newConfigBasicTestHandler(t, cfg)
 	masked := util.HideAPIKey(rawAPIKey)
 
@@ -2343,7 +2597,9 @@ func TestAPIKeysMaskedPlaceholdersRoundTrip(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPatch, "/api-keys", strings.NewReader(`{"index":0,"value":"`+masked+`"}`))
+	c.Request = httptest.NewRequest(
+		http.MethodPatch, "/api-keys", strings.NewReader(`{"index":0,"value":"`+masked+`"}`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PatchAPIKeys(c)
 	if rec.Code != http.StatusOK {
@@ -2369,7 +2625,7 @@ func TestAPIKeyAliasesMaskedKeysRoundTrip(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	rawA := "sk-alias-aone-zzzz"
 	rawB := "sk-alias-btwo-zzzz"
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeyAliases: map[string]string{rawA: "a", rawB: "b"}}}
+	cfg := &config.Config{APIKeyAliases: map[string]string{rawA: "a", rawB: "b"}}
 	h := newConfigBasicTestHandler(t, cfg)
 	maskedA := util.HideAPIKey(rawA) + "#1"
 	maskedB := util.HideAPIKey(rawB) + "#2"
@@ -2382,13 +2638,17 @@ func TestAPIKeyAliasesMaskedKeysRoundTrip(t *testing.T) {
 		t.Fatalf("GetAPIKeyAliases status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, rawA) || strings.Contains(body, rawB) || !strings.Contains(body, maskedA) || !strings.Contains(body, maskedB) {
+	if strings.Contains(body, rawA) || strings.Contains(body, rawB) || !strings.Contains(
+		body, maskedA,
+	) || !strings.Contains(body, maskedB) {
 		t.Fatalf("GetAPIKeyAliases redaction mismatch: %s", body)
 	}
 
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPut, "/api-key-aliases", strings.NewReader(`{"`+maskedA+`":"a","`+maskedB+`":"b"}`))
+	c.Request = httptest.NewRequest(
+		http.MethodPut, "/api-key-aliases", strings.NewReader(`{"`+maskedA+`":"a","`+maskedB+`":"b"}`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PutAPIKeyAliases(c)
 	if rec.Code != http.StatusOK {
@@ -2401,7 +2661,9 @@ func TestAPIKeyAliasesMaskedKeysRoundTrip(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPatch, "/api-key-aliases", strings.NewReader(`{"key":"`+maskedA+`","alias":"updated"}`))
+	c.Request = httptest.NewRequest(
+		http.MethodPatch, "/api-key-aliases", strings.NewReader(`{"key":"`+maskedA+`","alias":"updated"}`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PatchAPIKeyAlias(c)
 	if rec.Code != http.StatusOK {
@@ -2458,30 +2720,36 @@ func TestAPIKeyAliasesRejectAmbiguousMaskedKey(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeyAliases: map[string]string{rawA: "a", rawB: "b"}}}
-			h := newConfigBasicTestHandler(t, cfg)
-			rec := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(rec)
-			c.Request = httptest.NewRequest(tt.method, "/api-key-aliases", strings.NewReader(tt.body))
-			c.Request.Header.Set("Content-Type", "application/json")
+		t.Run(
+			tt.name, func(t *testing.T) {
+				cfg := &config.Config{
+					APIKeyAliases: map[string]string{
+						rawA: "a", rawB: "b",
+					},
+				}
+				h := newConfigBasicTestHandler(t, cfg)
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(tt.method, "/api-key-aliases", strings.NewReader(tt.body))
+				c.Request.Header.Set("Content-Type", "application/json")
 
-			tt.call(h, c)
+				tt.call(h, c)
 
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
-			}
-			if !strings.Contains(rec.Body.String(), "ambiguous API key placeholder") {
-				t.Fatalf("body = %s, want ambiguous placeholder error", rec.Body.String())
-			}
-			if len(cfg.APIKeyAliases) != 2 || cfg.APIKeyAliases[rawA] != "a" || cfg.APIKeyAliases[rawB] != "b" {
-				t.Fatalf("aliases changed after rejected request: %#v", cfg.APIKeyAliases)
-			}
-			snapshot := h.apiKeyAliasesSnapshot()
-			if len(snapshot) != 2 || snapshot[rawA] != "a" || snapshot[rawB] != "b" {
-				t.Fatalf("alias snapshot changed after rejected request: %#v", snapshot)
-			}
-		})
+				if rec.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+				}
+				if !strings.Contains(rec.Body.String(), "ambiguous API key placeholder") {
+					t.Fatalf("body = %s, want ambiguous placeholder error", rec.Body.String())
+				}
+				if len(cfg.APIKeyAliases) != 2 || cfg.APIKeyAliases[rawA] != "a" || cfg.APIKeyAliases[rawB] != "b" {
+					t.Fatalf("aliases changed after rejected request: %#v", cfg.APIKeyAliases)
+				}
+				snapshot := h.apiKeyAliasesSnapshot()
+				if len(snapshot) != 2 || snapshot[rawA] != "a" || snapshot[rawB] != "b" {
+					t.Fatalf("alias snapshot changed after rejected request: %#v", snapshot)
+				}
+			},
+		)
 	}
 }
 
@@ -2489,7 +2757,7 @@ func TestPutAPIKeyAliasesRejectsDuplicateAfterPlaceholderResolution(t *testing.T
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	rawA := "sk-alias-aone-zzzz"
 	rawB := "sk-alias-btwo-zzzz"
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeyAliases: map[string]string{rawA: "a", rawB: "b"}}}
+	cfg := &config.Config{APIKeyAliases: map[string]string{rawA: "a", rawB: "b"}}
 	h := newConfigBasicTestHandler(t, cfg)
 	maskedA := util.HideAPIKey(rawA) + "#1"
 	rec := httptest.NewRecorder()
@@ -2559,7 +2827,10 @@ func TestProviderMaskedAPIKeyRoundTrip(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPut, "/gemini-api-key", strings.NewReader(`[{"api-key":"`+masked+`","base-url":"https://example.com/gemini"}]`))
+	c.Request = httptest.NewRequest(
+		http.MethodPut, "/gemini-api-key",
+		strings.NewReader(`[{"api-key":"`+masked+`","base-url":"https://example.com/gemini"}]`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PutGeminiKeys(c)
 	if rec.Code != http.StatusOK {
@@ -2572,7 +2843,10 @@ func TestProviderMaskedAPIKeyRoundTrip(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPatch, "/gemini-api-key", strings.NewReader(`{"index":0,"value":{"api-key":"`+masked+`","base-url":"https://example.org/gemini"}}`))
+	c.Request = httptest.NewRequest(
+		http.MethodPatch, "/gemini-api-key",
+		strings.NewReader(`{"index":0,"value":{"api-key":"`+masked+`","base-url":"https://example.org/gemini"}}`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PatchGeminiKey(c)
 	if rec.Code != http.StatusOK {
@@ -2585,7 +2859,10 @@ func TestProviderMaskedAPIKeyRoundTrip(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodDelete, "/gemini-api-key", strings.NewReader(`{"api-key":"`+masked+`","base-url":"https://example.org/gemini"}`))
+	c.Request = httptest.NewRequest(
+		http.MethodDelete, "/gemini-api-key",
+		strings.NewReader(`{"api-key":"`+masked+`","base-url":"https://example.org/gemini"}`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.DeleteGeminiKey(c)
 	if rec.Code != http.StatusOK {
@@ -2606,10 +2883,12 @@ func TestProviderMaskedSecretsFollowStableEntryIdentity(t *testing.T) {
 	authB := "Bearer auth-second-secret"
 	maskedAuthA := util.MaskSensitiveHeaderValue("Authorization", authA)
 	maskedAuthB := util.MaskSensitiveHeaderValue("Authorization", authB)
-	cfg := &config.Config{GeminiKey: []config.GeminiKey{
-		{APIKey: rawA, BaseURL: "https://a.example", Headers: map[string]string{"Authorization": authA}},
-		{APIKey: rawB, BaseURL: "https://b.example", Headers: map[string]string{"Authorization": authB}},
-	}}
+	cfg := &config.Config{
+		GeminiKey: []config.GeminiKey{
+			{APIKey: rawA, BaseURL: "https://a.example", Headers: map[string]string{"Authorization": authA}},
+			{APIKey: rawB, BaseURL: "https://b.example", Headers: map[string]string{"Authorization": authB}},
+		},
+	}
 	h := newConfigBasicTestHandler(t, cfg)
 	body := fmt.Sprintf(
 		`[{"api-key":%q,"base-url":"https://b.example","headers":{"Authorization":%q}},{"api-key":%q,"base-url":"https://a.example","headers":{"Authorization":%q}}]`,
@@ -2643,11 +2922,15 @@ func TestProviderRestrictedHeaderChangesAreRejected(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	rawKey := "sk-gemini-restricted-header"
 	authorization := "Bearer existing-secret"
-	cfg := &config.Config{GeminiKey: []config.GeminiKey{{
-		APIKey:  rawKey,
-		BaseURL: "https://example.com/gemini",
-		Headers: map[string]string{"Authorization": authorization},
-	}}}
+	cfg := &config.Config{
+		GeminiKey: []config.GeminiKey{
+			{
+				APIKey:  rawKey,
+				BaseURL: "https://example.com/gemini",
+				Headers: map[string]string{"Authorization": authorization},
+			},
+		},
+	}
 	h := newConfigBasicTestHandler(t, cfg)
 	maskedKey := util.HideAPIKey(rawKey)
 	maskedAuthorization := util.MaskSensitiveHeaderValue("Authorization", authorization)
@@ -2678,19 +2961,24 @@ func TestProviderRestrictedHeaderChangesAreRejected(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			c.Request = httptest.NewRequest(http.MethodPut, "/gemini-api-key", strings.NewReader(test.body))
-			c.Request.Header.Set("Content-Type", "application/json")
-			h.PutGeminiKeys(c)
-			if recorder.Code != http.StatusBadRequest {
-				t.Fatalf("PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
-			}
-			if len(cfg.GeminiKey) != 1 || cfg.GeminiKey[0].APIKey != rawKey || cfg.GeminiKey[0].Headers["Authorization"] != authorization {
-				t.Fatalf("rejected request changed GeminiKey = %#v", cfg.GeminiKey)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodPut, "/gemini-api-key", strings.NewReader(test.body))
+				c.Request.Header.Set("Content-Type", "application/json")
+				h.PutGeminiKeys(c)
+				if recorder.Code != http.StatusBadRequest {
+					t.Fatalf(
+						"PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest,
+						recorder.Body.String(),
+					)
+				}
+				if len(cfg.GeminiKey) != 1 || cfg.GeminiKey[0].APIKey != rawKey || cfg.GeminiKey[0].Headers["Authorization"] != authorization {
+					t.Fatalf("rejected request changed GeminiKey = %#v", cfg.GeminiKey)
+				}
+			},
+		)
 	}
 }
 
@@ -2699,10 +2987,12 @@ func TestProviderAmbiguousMaskedSecretsAreRejected(t *testing.T) {
 	rawA := "abcd-first-wxyz"
 	rawB := "abcd-second-wxyz"
 	masked := util.HideAPIKey(rawA)
-	cfg := &config.Config{GeminiKey: []config.GeminiKey{
-		{APIKey: rawA, BaseURL: "https://same.example/gemini"},
-		{APIKey: rawB, BaseURL: "https://same.example/gemini"},
-	}}
+	cfg := &config.Config{
+		GeminiKey: []config.GeminiKey{
+			{APIKey: rawA, BaseURL: "https://same.example/gemini"},
+			{APIKey: rawB, BaseURL: "https://same.example/gemini"},
+		},
+	}
 	h := newConfigBasicTestHandler(t, cfg)
 	body := fmt.Sprintf(`[{"api-key":%q,"base-url":"https://same.example/gemini"}]`, masked)
 
@@ -2712,7 +3002,9 @@ func TestProviderAmbiguousMaskedSecretsAreRejected(t *testing.T) {
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PutGeminiKeys(c)
 	if recorder.Code != http.StatusBadRequest {
-		t.Fatalf("PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+		t.Fatalf(
+			"PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String(),
+		)
 	}
 	if len(cfg.GeminiKey) != 2 || cfg.GeminiKey[0].APIKey != rawA || cfg.GeminiKey[1].APIKey != rawB {
 		t.Fatalf("ambiguous request changed GeminiKey = %#v", cfg.GeminiKey)
@@ -2728,542 +3020,644 @@ func TestProviderCollidingMaskedAPIKeysRoundTrip(t *testing.T) {
 		t.Fatal("test API keys do not share a display mask")
 	}
 
-	t.Run("provider entries", func(t *testing.T) {
-		headerSecret := "abcd-header-wxyz"
-		if util.HideAPIKey(headerSecret) != masked {
-			t.Fatal("test header secret does not share the API key display mask")
-		}
-		cfg := &config.Config{GeminiKey: []config.GeminiKey{
-			{
-				APIKey:  rawA,
-				BaseURL: "https://same.example/gemini",
-				Headers: map[string]string{"client-secret": headerSecret},
-			},
-			{APIKey: rawB, BaseURL: "https://same.example/gemini"},
-		}}
-		h := newConfigBasicTestHandler(t, cfg)
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/gemini-api-key", nil)
-		h.GetGeminiKeys(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		var response struct {
-			GeminiKeys []config.GeminiKey `json:"gemini-api-key"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GetGeminiKeys response: %v", err)
-		}
-		if len(response.GeminiKeys) != 2 || response.GeminiKeys[0].APIKey != masked+"#1" || response.GeminiKeys[1].APIKey != masked+"#2" {
-			t.Fatalf("GetGeminiKeys API key masks = %#v", response.GeminiKeys)
-		}
-		body, err := json.Marshal(response.GeminiKeys)
-		if err != nil {
-			t.Fatalf("encode PutGeminiKeys body: %v", err)
-		}
-
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/gemini-api-key", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.PutGeminiKeys(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		snapshot := h.configSnapshot()
-		if len(snapshot.GeminiKey) != 2 || snapshot.GeminiKey[0].APIKey != rawA || snapshot.GeminiKey[1].APIKey != rawB {
-			t.Fatalf("PutGeminiKeys API keys = %#v", snapshot.GeminiKey)
-		}
-		if snapshot.GeminiKey[0].Headers["client-secret"] != headerSecret {
-			t.Fatalf("PutGeminiKeys client-secret = %q, want original", snapshot.GeminiKey[0].Headers["client-secret"])
-		}
-	})
-
-	t.Run("nested API key entries", func(t *testing.T) {
-		cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
-			Name:    "openrouter",
-			BaseURL: "https://openrouter.ai/api/v1",
-			APIKeyEntries: []config.OpenAICompatibilityAPIKey{
-				{APIKey: rawA, ProxyURL: "http://127.0.0.1:8080"},
-				{APIKey: rawB, ProxyURL: "http://127.0.0.1:8080"},
-			},
-		}}}
-		h := newConfigBasicTestHandler(t, cfg)
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
-		h.GetOpenAICompat(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		var response struct {
-			Entries []config.OpenAICompatibility `json:"openai-compatibility"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GetOpenAICompat response: %v", err)
-		}
-		if len(response.Entries) != 1 || len(response.Entries[0].APIKeyEntries) != 2 ||
-			response.Entries[0].APIKeyEntries[0].APIKey != masked+"#1" ||
-			response.Entries[0].APIKeyEntries[1].APIKey != masked+"#2" {
-			t.Fatalf("GetOpenAICompat API key masks = %#v", response.Entries)
-		}
-		body, err := json.Marshal(response.Entries)
-		if err != nil {
-			t.Fatalf("encode PutOpenAICompat body: %v", err)
-		}
-
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.PutOpenAICompat(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		snapshot := h.configSnapshot()
-		if len(snapshot.OpenAICompatibility) != 1 || len(snapshot.OpenAICompatibility[0].APIKeyEntries) != 2 ||
-			snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != rawA ||
-			snapshot.OpenAICompatibility[0].APIKeyEntries[1].APIKey != rawB {
-			t.Fatalf("PutOpenAICompat API keys = %#v", snapshot.OpenAICompatibility)
-		}
-	})
-
-	t.Run("nested API key entries stay provider scoped", func(t *testing.T) {
-		cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{
-			{
-				Name:    "first",
-				BaseURL: "https://first.example/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
-					{APIKey: rawA},
-				},
-			},
-			{
-				Name:    "second",
-				BaseURL: "https://second.example/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
-					{APIKey: rawA, ProxyURL: "http://127.0.0.1:8080"},
-					{APIKey: rawB, ProxyURL: "http://127.0.0.1:8080"},
-				},
-			},
-		}}
-		h := newConfigBasicTestHandler(t, cfg)
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
-		h.GetOpenAICompat(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		var response struct {
-			Entries []config.OpenAICompatibility `json:"openai-compatibility"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GetOpenAICompat response: %v", err)
-		}
-		if len(response.Entries) != 2 || len(response.Entries[1].APIKeyEntries) != 2 ||
-			response.Entries[0].APIKeyEntries[0].APIKey != masked ||
-			response.Entries[1].APIKeyEntries[0].APIKey != masked+"#1" ||
-			response.Entries[1].APIKeyEntries[1].APIKey != masked+"#2" {
-			t.Fatalf("GetOpenAICompat scoped API key masks = %#v", response.Entries)
-		}
-		body, err := json.Marshal(response.Entries)
-		if err != nil {
-			t.Fatalf("encode PutOpenAICompat body: %v", err)
-		}
-
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.PutOpenAICompat(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		snapshot := h.configSnapshot()
-		if len(snapshot.OpenAICompatibility) != 2 ||
-			snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != rawA ||
-			snapshot.OpenAICompatibility[1].APIKeyEntries[0].APIKey != rawA ||
-			snapshot.OpenAICompatibility[1].APIKeyEntries[1].APIKey != rawB {
-			t.Fatalf("PutOpenAICompat scoped API keys = %#v", snapshot.OpenAICompatibility)
-		}
-	})
-
-	t.Run("renamed provider keeps local API key ordinal scope", func(t *testing.T) {
-		firstA := "abcd-first-one-wxyz"
-		firstB := "abcd-first-two-wxyz"
-		secondA := "abcd-second-one-wxyz"
-		secondB := "abcd-second-two-wxyz"
-		for _, key := range []string{firstA, firstB, secondA, secondB} {
-			if util.HideAPIKey(key) != masked {
-				t.Fatalf("test API key %q does not share display mask %q", key, masked)
+	t.Run(
+		"provider entries", func(t *testing.T) {
+			headerSecret := "abcd-header-wxyz"
+			if util.HideAPIKey(headerSecret) != masked {
+				t.Fatal("test header secret does not share the API key display mask")
 			}
-		}
-		cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{
-			{
-				Name:    "first",
-				BaseURL: "https://first.example/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
-					{APIKey: firstA},
-					{APIKey: firstB},
+			cfg := &config.Config{
+				GeminiKey: []config.GeminiKey{
+					{
+						APIKey:  rawA,
+						BaseURL: "https://same.example/gemini",
+						Headers: map[string]string{"client-secret": headerSecret},
+					},
+					{APIKey: rawB, BaseURL: "https://same.example/gemini"},
 				},
-			},
-			{
-				Name:    "second",
-				BaseURL: "https://second.example/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
-					{APIKey: secondA},
-					{APIKey: secondB},
+			}
+			h := newConfigBasicTestHandler(t, cfg)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/gemini-api-key", nil)
+			h.GetGeminiKeys(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"GetGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+				)
+			}
+			var response struct {
+				GeminiKeys []config.GeminiKey `json:"gemini-api-key"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode GetGeminiKeys response: %v", err)
+			}
+			if len(response.GeminiKeys) != 2 || response.GeminiKeys[0].APIKey != masked+"#1" || response.GeminiKeys[1].APIKey != masked+"#2" {
+				t.Fatalf("GetGeminiKeys API key masks = %#v", response.GeminiKeys)
+			}
+			body, err := json.Marshal(response.GeminiKeys)
+			if err != nil {
+				t.Fatalf("encode PutGeminiKeys body: %v", err)
+			}
+
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/gemini-api-key", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.PutGeminiKeys(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+				)
+			}
+			snapshot := h.configSnapshot()
+			if len(snapshot.GeminiKey) != 2 || snapshot.GeminiKey[0].APIKey != rawA || snapshot.GeminiKey[1].APIKey != rawB {
+				t.Fatalf("PutGeminiKeys API keys = %#v", snapshot.GeminiKey)
+			}
+			if snapshot.GeminiKey[0].Headers["client-secret"] != headerSecret {
+				t.Fatalf(
+					"PutGeminiKeys client-secret = %q, want original", snapshot.GeminiKey[0].Headers["client-secret"],
+				)
+			}
+		},
+	)
+
+	t.Run(
+		"nested API key entries", func(t *testing.T) {
+			cfg := &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{
+					{
+						Name:    "openrouter",
+						BaseURL: "https://openrouter.ai/api/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+							{APIKey: rawA, ProxyURL: "http://127.0.0.1:8080"},
+							{APIKey: rawB, ProxyURL: "http://127.0.0.1:8080"},
+						},
+					},
 				},
-			},
-		}}
-		h := newConfigBasicTestHandler(t, cfg)
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
-		h.GetOpenAICompat(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		var response struct {
-			Entries []config.OpenAICompatibility `json:"openai-compatibility"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GetOpenAICompat response: %v", err)
-		}
-		if len(response.Entries) != 2 {
-			t.Fatalf("GetOpenAICompat entries = %#v", response.Entries)
-		}
-		response.Entries[1].Name = "renamed-second"
-		body, err := json.Marshal(response.Entries)
-		if err != nil {
-			t.Fatalf("encode PutOpenAICompat body: %v", err)
-		}
+			}
+			h := newConfigBasicTestHandler(t, cfg)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
+			h.GetOpenAICompat(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			var response struct {
+				Entries []config.OpenAICompatibility `json:"openai-compatibility"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode GetOpenAICompat response: %v", err)
+			}
+			if len(response.Entries) != 1 || len(response.Entries[0].APIKeyEntries) != 2 ||
+				response.Entries[0].APIKeyEntries[0].APIKey != masked+"#1" ||
+				response.Entries[0].APIKeyEntries[1].APIKey != masked+"#2" {
+				t.Fatalf("GetOpenAICompat API key masks = %#v", response.Entries)
+			}
+			body, err := json.Marshal(response.Entries)
+			if err != nil {
+				t.Fatalf("encode PutOpenAICompat body: %v", err)
+			}
 
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.PutOpenAICompat(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		snapshot := h.configSnapshot()
-		if len(snapshot.OpenAICompatibility) != 2 ||
-			snapshot.OpenAICompatibility[1].Name != "renamed-second" ||
-			snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != firstA ||
-			snapshot.OpenAICompatibility[0].APIKeyEntries[1].APIKey != firstB ||
-			snapshot.OpenAICompatibility[1].APIKeyEntries[0].APIKey != secondA ||
-			snapshot.OpenAICompatibility[1].APIKeyEntries[1].APIKey != secondB {
-			t.Fatalf("PutOpenAICompat renamed provider = %#v", snapshot.OpenAICompatibility)
-		}
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.PutOpenAICompat(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			snapshot := h.configSnapshot()
+			if len(snapshot.OpenAICompatibility) != 1 || len(snapshot.OpenAICompatibility[0].APIKeyEntries) != 2 ||
+				snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != rawA ||
+				snapshot.OpenAICompatibility[0].APIKeyEntries[1].APIKey != rawB {
+				t.Fatalf("PutOpenAICompat API keys = %#v", snapshot.OpenAICompatibility)
+			}
+		},
+	)
 
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
-		h.GetOpenAICompat(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("second GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		response = struct {
-			Entries []config.OpenAICompatibility `json:"openai-compatibility"`
-		}{}
-		if err = json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode second GetOpenAICompat response: %v", err)
-		}
-		response.Entries[1].Name = "renamed-and-moved-second"
-		response.Entries[1].BaseURL = "https://moved-second.example/v1"
-		body, err = json.Marshal(response.Entries)
-		if err != nil {
-			t.Fatalf("encode ambiguous PutOpenAICompat body: %v", err)
-		}
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.PutOpenAICompat(c)
-		if recorder.Code != http.StatusBadRequest {
-			t.Fatalf("ambiguous PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
-		}
-		afterRejectedUpdate := h.configSnapshot()
-		if len(afterRejectedUpdate.OpenAICompatibility) != 2 ||
-			afterRejectedUpdate.OpenAICompatibility[1].Name != "renamed-second" ||
-			afterRejectedUpdate.OpenAICompatibility[1].BaseURL != "https://second.example/v1" ||
-			afterRejectedUpdate.OpenAICompatibility[1].APIKeyEntries[0].APIKey != secondA ||
-			afterRejectedUpdate.OpenAICompatibility[1].APIKeyEntries[1].APIKey != secondB {
-			t.Fatalf("rejected provider update changed config = %#v", afterRejectedUpdate.OpenAICompatibility)
-		}
-	})
+	t.Run(
+		"nested API key entries stay provider scoped", func(t *testing.T) {
+			cfg := &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{
+					{
+						Name:    "first",
+						BaseURL: "https://first.example/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+							{APIKey: rawA},
+						},
+					},
+					{
+						Name:    "second",
+						BaseURL: "https://second.example/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+							{APIKey: rawA, ProxyURL: "http://127.0.0.1:8080"},
+							{APIKey: rawB, ProxyURL: "http://127.0.0.1:8080"},
+						},
+					},
+				},
+			}
+			h := newConfigBasicTestHandler(t, cfg)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
+			h.GetOpenAICompat(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			var response struct {
+				Entries []config.OpenAICompatibility `json:"openai-compatibility"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode GetOpenAICompat response: %v", err)
+			}
+			if len(response.Entries) != 2 || len(response.Entries[1].APIKeyEntries) != 2 ||
+				response.Entries[0].APIKeyEntries[0].APIKey != masked ||
+				response.Entries[1].APIKeyEntries[0].APIKey != masked+"#1" ||
+				response.Entries[1].APIKeyEntries[1].APIKey != masked+"#2" {
+				t.Fatalf("GetOpenAICompat scoped API key masks = %#v", response.Entries)
+			}
+			body, err := json.Marshal(response.Entries)
+			if err != nil {
+				t.Fatalf("encode PutOpenAICompat body: %v", err)
+			}
 
-	t.Run("masked keys cannot move to another provider identity", func(t *testing.T) {
-		firstKey := "abcd-first-one-wxyz"
-		secondKey := "abcd-second-one-wxyz"
-		if util.HideAPIKey(firstKey) != util.HideAPIKey(secondKey) {
-			t.Fatal("test API keys do not share a display mask")
-		}
-		cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{
-			{
-				Name:          "first",
-				BaseURL:       "https://first.example/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: firstKey}},
-			},
-			{
-				Name:          "second",
-				BaseURL:       "https://second.example/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: secondKey}},
-			},
-		}}
-		h := newConfigBasicTestHandler(t, cfg)
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
-		h.GetOpenAICompat(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		var response struct {
-			Entries []config.OpenAICompatibility `json:"openai-compatibility"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GetOpenAICompat response: %v", err)
-		}
-		moved := response.Entries[1]
-		moved.Name = response.Entries[0].Name
-		moved.BaseURL = "https://moved.example/v1"
-		body, err := json.Marshal([]config.OpenAICompatibility{moved})
-		if err != nil {
-			t.Fatalf("encode PutOpenAICompat body: %v", err)
-		}
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.PutOpenAICompat(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			snapshot := h.configSnapshot()
+			if len(snapshot.OpenAICompatibility) != 2 ||
+				snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != rawA ||
+				snapshot.OpenAICompatibility[1].APIKeyEntries[0].APIKey != rawA ||
+				snapshot.OpenAICompatibility[1].APIKeyEntries[1].APIKey != rawB {
+				t.Fatalf("PutOpenAICompat scoped API keys = %#v", snapshot.OpenAICompatibility)
+			}
+		},
+	)
 
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.PutOpenAICompat(c)
-		if recorder.Code != http.StatusBadRequest {
-			t.Fatalf("PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
-		}
-		snapshot := h.configSnapshot()
-		if len(snapshot.OpenAICompatibility) != 2 ||
-			snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != firstKey ||
-			snapshot.OpenAICompatibility[1].APIKeyEntries[0].APIKey != secondKey {
-			t.Fatalf("rejected provider move changed config = %#v", snapshot.OpenAICompatibility)
-		}
-	})
+	t.Run(
+		"renamed provider keeps local API key ordinal scope", func(t *testing.T) {
+			firstA := "abcd-first-one-wxyz"
+			firstB := "abcd-first-two-wxyz"
+			secondA := "abcd-second-one-wxyz"
+			secondB := "abcd-second-two-wxyz"
+			for _, key := range []string{firstA, firstB, secondA, secondB} {
+				if util.HideAPIKey(key) != masked {
+					t.Fatalf("test API key %q does not share display mask %q", key, masked)
+				}
+			}
+			cfg := &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{
+					{
+						Name:    "first",
+						BaseURL: "https://first.example/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+							{APIKey: firstA},
+							{APIKey: firstB},
+						},
+					},
+					{
+						Name:    "second",
+						BaseURL: "https://second.example/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+							{APIKey: secondA},
+							{APIKey: secondB},
+						},
+					},
+				},
+			}
+			h := newConfigBasicTestHandler(t, cfg)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
+			h.GetOpenAICompat(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			var response struct {
+				Entries []config.OpenAICompatibility `json:"openai-compatibility"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode GetOpenAICompat response: %v", err)
+			}
+			if len(response.Entries) != 2 {
+				t.Fatalf("GetOpenAICompat entries = %#v", response.Entries)
+			}
+			response.Entries[1].Name = "renamed-second"
+			body, err := json.Marshal(response.Entries)
+			if err != nil {
+				t.Fatalf("encode PutOpenAICompat body: %v", err)
+			}
 
-	t.Run("used colliding source remains ambiguous", func(t *testing.T) {
-		firstKey := "wxyz-first-one-abcd"
-		secondKey := "abcd-second-one-wxyz"
-		thirdKey := "abcd-third-one-wxyz"
-		if util.HideAPIKey(secondKey) != util.HideAPIKey(thirdKey) {
-			t.Fatal("test API keys do not share a display mask")
-		}
-		cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{
-			{
-				Name:          "first",
-				BaseURL:       "https://first.example/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: firstKey}},
-			},
-			{
-				Name:          "second",
-				BaseURL:       "https://second.example/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: secondKey}},
-			},
-			{
-				Name:          "third",
-				BaseURL:       "https://third.example/v1",
-				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: thirdKey}},
-			},
-		}}
-		h := newConfigBasicTestHandler(t, cfg)
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
-		h.GetOpenAICompat(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		var response struct {
-			Entries []config.OpenAICompatibility `json:"openai-compatibility"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GetOpenAICompat response: %v", err)
-		}
-		keptThird := response.Entries[2]
-		movedThird := response.Entries[2]
-		movedThird.Name = response.Entries[1].Name
-		movedThird.BaseURL = "https://moved.example/v1"
-		body, err := json.Marshal([]config.OpenAICompatibility{keptThird, movedThird})
-		if err != nil {
-			t.Fatalf("encode PutOpenAICompat body: %v", err)
-		}
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.PutOpenAICompat(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			snapshot := h.configSnapshot()
+			if len(snapshot.OpenAICompatibility) != 2 ||
+				snapshot.OpenAICompatibility[1].Name != "renamed-second" ||
+				snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != firstA ||
+				snapshot.OpenAICompatibility[0].APIKeyEntries[1].APIKey != firstB ||
+				snapshot.OpenAICompatibility[1].APIKeyEntries[0].APIKey != secondA ||
+				snapshot.OpenAICompatibility[1].APIKeyEntries[1].APIKey != secondB {
+				t.Fatalf("PutOpenAICompat renamed provider = %#v", snapshot.OpenAICompatibility)
+			}
 
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.PutOpenAICompat(c)
-		if recorder.Code != http.StatusBadRequest {
-			t.Fatalf("PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
-		}
-		snapshot := h.configSnapshot()
-		if len(snapshot.OpenAICompatibility) != 3 ||
-			snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != firstKey ||
-			snapshot.OpenAICompatibility[1].APIKeyEntries[0].APIKey != secondKey ||
-			snapshot.OpenAICompatibility[2].APIKeyEntries[0].APIKey != thirdKey {
-			t.Fatalf("rejected provider reuse changed config = %#v", snapshot.OpenAICompatibility)
-		}
-	})
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
+			h.GetOpenAICompat(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"second GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			response = struct {
+				Entries []config.OpenAICompatibility `json:"openai-compatibility"`
+			}{}
+			if err = json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode second GetOpenAICompat response: %v", err)
+			}
+			response.Entries[1].Name = "renamed-and-moved-second"
+			response.Entries[1].BaseURL = "https://moved-second.example/v1"
+			body, err = json.Marshal(response.Entries)
+			if err != nil {
+				t.Fatalf("encode ambiguous PutOpenAICompat body: %v", err)
+			}
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.PutOpenAICompat(c)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf(
+					"ambiguous PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest,
+					recorder.Body.String(),
+				)
+			}
+			afterRejectedUpdate := h.configSnapshot()
+			if len(afterRejectedUpdate.OpenAICompatibility) != 2 ||
+				afterRejectedUpdate.OpenAICompatibility[1].Name != "renamed-second" ||
+				afterRejectedUpdate.OpenAICompatibility[1].BaseURL != "https://second.example/v1" ||
+				afterRejectedUpdate.OpenAICompatibility[1].APIKeyEntries[0].APIKey != secondA ||
+				afterRejectedUpdate.OpenAICompatibility[1].APIKeyEntries[1].APIKey != secondB {
+				t.Fatalf("rejected provider update changed config = %#v", afterRejectedUpdate.OpenAICompatibility)
+			}
+		},
+	)
 
-	t.Run("same-length put cannot copy used ordinal credential", func(t *testing.T) {
-		firstKey := "abcd-first-one-wxyz"
-		secondKey := "abcd-second-one-wxyz"
-		if util.HideAPIKey(firstKey) != util.HideAPIKey(secondKey) {
-			t.Fatal("test API keys do not share a display mask")
-		}
-		cfg := &config.Config{ClaudeKey: []config.ClaudeKey{
-			{APIKey: firstKey, BaseURL: "https://first.example/v1"},
-			{APIKey: secondKey, BaseURL: "https://second.example/v1"},
-		}}
-		h := newConfigBasicTestHandler(t, cfg)
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/claude-api-key", nil)
-		h.GetClaudeKeys(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetClaudeKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		var response struct {
-			Entries []config.ClaudeKey `json:"claude-api-key"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GetClaudeKeys response: %v", err)
-		}
-		if len(response.Entries) != 2 || !strings.HasSuffix(response.Entries[1].APIKey, "#2") {
-			t.Fatalf("GetClaudeKeys entries = %#v", response.Entries)
-		}
-		copiedFirst := response.Entries[0]
-		copiedFirst.APIKey = response.Entries[1].APIKey
-		body, err := json.Marshal([]config.ClaudeKey{response.Entries[1], copiedFirst})
-		if err != nil {
-			t.Fatalf("encode PutClaudeKeys body: %v", err)
-		}
+	t.Run(
+		"masked keys cannot move to another provider identity", func(t *testing.T) {
+			firstKey := "abcd-first-one-wxyz"
+			secondKey := "abcd-second-one-wxyz"
+			if util.HideAPIKey(firstKey) != util.HideAPIKey(secondKey) {
+				t.Fatal("test API keys do not share a display mask")
+			}
+			cfg := &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{
+					{
+						Name:          "first",
+						BaseURL:       "https://first.example/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: firstKey}},
+					},
+					{
+						Name:          "second",
+						BaseURL:       "https://second.example/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: secondKey}},
+					},
+				},
+			}
+			h := newConfigBasicTestHandler(t, cfg)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
+			h.GetOpenAICompat(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			var response struct {
+				Entries []config.OpenAICompatibility `json:"openai-compatibility"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode GetOpenAICompat response: %v", err)
+			}
+			moved := response.Entries[1]
+			moved.Name = response.Entries[0].Name
+			moved.BaseURL = "https://moved.example/v1"
+			body, err := json.Marshal([]config.OpenAICompatibility{moved})
+			if err != nil {
+				t.Fatalf("encode PutOpenAICompat body: %v", err)
+			}
 
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/claude-api-key", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.PutClaudeKeys(c)
-		if recorder.Code != http.StatusBadRequest {
-			t.Fatalf("PutClaudeKeys status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
-		}
-		snapshot := h.configSnapshot()
-		if len(snapshot.ClaudeKey) != 2 || snapshot.ClaudeKey[0].APIKey != firstKey || snapshot.ClaudeKey[1].APIKey != secondKey {
-			t.Fatalf("rejected credential copy changed config = %#v", snapshot.ClaudeKey)
-		}
-	})
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.PutOpenAICompat(c)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf(
+					"PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest,
+					recorder.Body.String(),
+				)
+			}
+			snapshot := h.configSnapshot()
+			if len(snapshot.OpenAICompatibility) != 2 ||
+				snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != firstKey ||
+				snapshot.OpenAICompatibility[1].APIKeyEntries[0].APIKey != secondKey {
+				t.Fatalf("rejected provider move changed config = %#v", snapshot.OpenAICompatibility)
+			}
+		},
+	)
 
-	t.Run("ordinal delete resolves before secondary match", func(t *testing.T) {
-		firstKey := "abcd-first-one-wxyz"
-		secondKey := "abcd-second-one-wxyz"
-		if util.HideAPIKey(firstKey) != util.HideAPIKey(secondKey) {
-			t.Fatal("test API keys do not share a display mask")
-		}
-		cfg := &config.Config{ClaudeKey: []config.ClaudeKey{
-			{APIKey: firstKey, BaseURL: "https://first.example/v1"},
-			{APIKey: secondKey, BaseURL: "https://second.example/v1"},
-		}}
-		h := newConfigBasicTestHandler(t, cfg)
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/claude-api-key", nil)
-		h.GetClaudeKeys(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetClaudeKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		var response struct {
-			Entries []config.ClaudeKey `json:"claude-api-key"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GetClaudeKeys response: %v", err)
-		}
-		if len(response.Entries) != 2 || !strings.HasSuffix(response.Entries[1].APIKey, "#2") {
-			t.Fatalf("GetClaudeKeys entries = %#v", response.Entries)
-		}
-		body, err := json.Marshal(map[string]string{
-			"api-key":  response.Entries[1].APIKey,
-			"base-url": response.Entries[1].BaseURL,
-		})
-		if err != nil {
-			t.Fatalf("encode delete body: %v", err)
-		}
+	t.Run(
+		"used colliding source remains ambiguous", func(t *testing.T) {
+			firstKey := "wxyz-first-one-abcd"
+			secondKey := "abcd-second-one-wxyz"
+			thirdKey := "abcd-third-one-wxyz"
+			if util.HideAPIKey(secondKey) != util.HideAPIKey(thirdKey) {
+				t.Fatal("test API keys do not share a display mask")
+			}
+			cfg := &config.Config{
+				OpenAICompatibility: []config.OpenAICompatibility{
+					{
+						Name:          "first",
+						BaseURL:       "https://first.example/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: firstKey}},
+					},
+					{
+						Name:          "second",
+						BaseURL:       "https://second.example/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: secondKey}},
+					},
+					{
+						Name:          "third",
+						BaseURL:       "https://third.example/v1",
+						APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: thirdKey}},
+					},
+				},
+			}
+			h := newConfigBasicTestHandler(t, cfg)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/openai-compatibility", nil)
+			h.GetOpenAICompat(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"GetOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			var response struct {
+				Entries []config.OpenAICompatibility `json:"openai-compatibility"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode GetOpenAICompat response: %v", err)
+			}
+			keptThird := response.Entries[2]
+			movedThird := response.Entries[2]
+			movedThird.Name = response.Entries[1].Name
+			movedThird.BaseURL = "https://moved.example/v1"
+			body, err := json.Marshal([]config.OpenAICompatibility{keptThird, movedThird})
+			if err != nil {
+				t.Fatalf("encode PutOpenAICompat body: %v", err)
+			}
 
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodDelete, "/claude-api-key", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.DeleteClaudeKey(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("DeleteClaudeKey status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		snapshot := h.configSnapshot()
-		if len(snapshot.ClaudeKey) != 1 || snapshot.ClaudeKey[0].APIKey != firstKey {
-			t.Fatalf("DeleteClaudeKey config = %#v, want first credential only", snapshot.ClaudeKey)
-		}
-	})
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/openai-compatibility", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.PutOpenAICompat(c)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf(
+					"PutOpenAICompat status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest,
+					recorder.Body.String(),
+				)
+			}
+			snapshot := h.configSnapshot()
+			if len(snapshot.OpenAICompatibility) != 3 ||
+				snapshot.OpenAICompatibility[0].APIKeyEntries[0].APIKey != firstKey ||
+				snapshot.OpenAICompatibility[1].APIKeyEntries[0].APIKey != secondKey ||
+				snapshot.OpenAICompatibility[2].APIKeyEntries[0].APIKey != thirdKey {
+				t.Fatalf("rejected provider reuse changed config = %#v", snapshot.OpenAICompatibility)
+			}
+		},
+	)
 
-	t.Run("natural numeric suffix", func(t *testing.T) {
-		rawKey := "abcd-secret-#123"
-		maskedKey := util.HideAPIKey(rawKey)
-		if !strings.HasSuffix(maskedKey, "#123") {
-			t.Fatalf("test mask = %q, want numeric suffix", maskedKey)
-		}
-		cfg := &config.Config{GeminiKey: []config.GeminiKey{{
-			APIKey:  rawKey,
-			BaseURL: "https://numeric.example/gemini",
-		}}}
-		h := newConfigBasicTestHandler(t, cfg)
-		recorder := httptest.NewRecorder()
-		c, _ := gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodGet, "/gemini-api-key", nil)
-		h.GetGeminiKeys(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		var response struct {
-			GeminiKeys []config.GeminiKey `json:"gemini-api-key"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatalf("decode GetGeminiKeys response: %v", err)
-		}
-		body, err := json.Marshal(response.GeminiKeys)
-		if err != nil {
-			t.Fatalf("encode PutGeminiKeys body: %v", err)
-		}
-		recorder = httptest.NewRecorder()
-		c, _ = gin.CreateTestContext(recorder)
-		c.Request = httptest.NewRequest(http.MethodPut, "/gemini-api-key", bytes.NewReader(body))
-		c.Request.Header.Set("Content-Type", "application/json")
-		h.PutGeminiKeys(c)
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		if got := h.configSnapshot().GeminiKey[0].APIKey; got != rawKey {
-			t.Fatalf("PutGeminiKeys API key = %q, want %q", got, rawKey)
-		}
-	})
+	t.Run(
+		"same-length put cannot copy used ordinal credential", func(t *testing.T) {
+			firstKey := "abcd-first-one-wxyz"
+			secondKey := "abcd-second-one-wxyz"
+			if util.HideAPIKey(firstKey) != util.HideAPIKey(secondKey) {
+				t.Fatal("test API keys do not share a display mask")
+			}
+			cfg := &config.Config{
+				ClaudeKey: []config.ClaudeKey{
+					{APIKey: firstKey, BaseURL: "https://first.example/v1"},
+					{APIKey: secondKey, BaseURL: "https://second.example/v1"},
+				},
+			}
+			h := newConfigBasicTestHandler(t, cfg)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/claude-api-key", nil)
+			h.GetClaudeKeys(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"GetClaudeKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+				)
+			}
+			var response struct {
+				Entries []config.ClaudeKey `json:"claude-api-key"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode GetClaudeKeys response: %v", err)
+			}
+			if len(response.Entries) != 2 || !strings.HasSuffix(response.Entries[1].APIKey, "#2") {
+				t.Fatalf("GetClaudeKeys entries = %#v", response.Entries)
+			}
+			copiedFirst := response.Entries[0]
+			copiedFirst.APIKey = response.Entries[1].APIKey
+			body, err := json.Marshal([]config.ClaudeKey{response.Entries[1], copiedFirst})
+			if err != nil {
+				t.Fatalf("encode PutClaudeKeys body: %v", err)
+			}
+
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/claude-api-key", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.PutClaudeKeys(c)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf(
+					"PutClaudeKeys status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest,
+					recorder.Body.String(),
+				)
+			}
+			snapshot := h.configSnapshot()
+			if len(snapshot.ClaudeKey) != 2 || snapshot.ClaudeKey[0].APIKey != firstKey || snapshot.ClaudeKey[1].APIKey != secondKey {
+				t.Fatalf("rejected credential copy changed config = %#v", snapshot.ClaudeKey)
+			}
+		},
+	)
+
+	t.Run(
+		"ordinal delete resolves before secondary match", func(t *testing.T) {
+			firstKey := "abcd-first-one-wxyz"
+			secondKey := "abcd-second-one-wxyz"
+			if util.HideAPIKey(firstKey) != util.HideAPIKey(secondKey) {
+				t.Fatal("test API keys do not share a display mask")
+			}
+			cfg := &config.Config{
+				ClaudeKey: []config.ClaudeKey{
+					{APIKey: firstKey, BaseURL: "https://first.example/v1"},
+					{APIKey: secondKey, BaseURL: "https://second.example/v1"},
+				},
+			}
+			h := newConfigBasicTestHandler(t, cfg)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/claude-api-key", nil)
+			h.GetClaudeKeys(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"GetClaudeKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+				)
+			}
+			var response struct {
+				Entries []config.ClaudeKey `json:"claude-api-key"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode GetClaudeKeys response: %v", err)
+			}
+			if len(response.Entries) != 2 || !strings.HasSuffix(response.Entries[1].APIKey, "#2") {
+				t.Fatalf("GetClaudeKeys entries = %#v", response.Entries)
+			}
+			body, err := json.Marshal(
+				map[string]string{
+					"api-key":  response.Entries[1].APIKey,
+					"base-url": response.Entries[1].BaseURL,
+				},
+			)
+			if err != nil {
+				t.Fatalf("encode delete body: %v", err)
+			}
+
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodDelete, "/claude-api-key", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.DeleteClaudeKey(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"DeleteClaudeKey status = %d, want %d body=%s", recorder.Code, http.StatusOK,
+					recorder.Body.String(),
+				)
+			}
+			snapshot := h.configSnapshot()
+			if len(snapshot.ClaudeKey) != 1 || snapshot.ClaudeKey[0].APIKey != firstKey {
+				t.Fatalf("DeleteClaudeKey config = %#v, want first credential only", snapshot.ClaudeKey)
+			}
+		},
+	)
+
+	t.Run(
+		"natural numeric suffix", func(t *testing.T) {
+			rawKey := "abcd-secret-#123"
+			maskedKey := util.HideAPIKey(rawKey)
+			if !strings.HasSuffix(maskedKey, "#123") {
+				t.Fatalf("test mask = %q, want numeric suffix", maskedKey)
+			}
+			cfg := &config.Config{
+				GeminiKey: []config.GeminiKey{
+					{
+						APIKey:  rawKey,
+						BaseURL: "https://numeric.example/gemini",
+					},
+				},
+			}
+			h := newConfigBasicTestHandler(t, cfg)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/gemini-api-key", nil)
+			h.GetGeminiKeys(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"GetGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+				)
+			}
+			var response struct {
+				GeminiKeys []config.GeminiKey `json:"gemini-api-key"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode GetGeminiKeys response: %v", err)
+			}
+			body, err := json.Marshal(response.GeminiKeys)
+			if err != nil {
+				t.Fatalf("encode PutGeminiKeys body: %v", err)
+			}
+			recorder = httptest.NewRecorder()
+			c, _ = gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/gemini-api-key", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			h.PutGeminiKeys(c)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf(
+					"PutGeminiKeys status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+				)
+			}
+			if got := h.configSnapshot().GeminiKey[0].APIKey; got != rawKey {
+				t.Fatalf("PutGeminiKeys API key = %q, want %q", got, rawKey)
+			}
+		},
+	)
 }
 
 func TestOpenAICompatibilityNestedAPIKeyPlaceholdersRoundTrip(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	rawKey := "sk-openai-nested-value"
-	cfg := &config.Config{OpenAICompatibility: []config.OpenAICompatibility{{
-		Name:    "openrouter",
-		BaseURL: "https://openrouter.ai/api/v1",
-		APIKeyEntries: []config.OpenAICompatibilityAPIKey{
-			{APIKey: rawKey, ProxyURL: "http://127.0.0.1:8080"},
+	cfg := &config.Config{
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{
+				Name:    "openrouter",
+				BaseURL: "https://openrouter.ai/api/v1",
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
+					{APIKey: rawKey, ProxyURL: "http://127.0.0.1:8080"},
+				},
+			},
 		},
-	}}}
+	}
 	h := newConfigBasicTestHandler(t, cfg)
 	masked := util.HideAPIKey(rawKey)
 
@@ -3312,16 +3706,20 @@ func TestAmbiguousMaskedAPIKeyPlaceholderIsRejected(t *testing.T) {
 	rawA := "sk-ambiguous-one-zzzz"
 	rawB := "sk-ambiguous-two-zzzz"
 	masked := util.HideAPIKey(rawA)
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{rawA, rawB}}}
+	cfg := &config.Config{APIKeys: []string{rawA, rawB}}
 	h := newConfigBasicTestHandler(t, cfg)
 
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodPatch, "/api-keys", strings.NewReader(`{"old":"`+rawA+`","new":"`+masked+`"}`))
+	c.Request = httptest.NewRequest(
+		http.MethodPatch, "/api-keys", strings.NewReader(`{"old":"`+rawA+`","new":"`+masked+`"}`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PatchAPIKeys(c)
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("PatchAPIKeys ambiguous status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+		t.Fatalf(
+			"PatchAPIKeys ambiguous status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String(),
+		)
 	}
 	if cfg.APIKeys[0] != rawA || cfg.APIKeys[1] != rawB {
 		t.Fatalf("ambiguous placeholder changed APIKeys = %#v", cfg.APIKeys)
@@ -3333,7 +3731,7 @@ func TestAPIKeyCollisionPlaceholdersAreOrdinalAndUnambiguous(t *testing.T) {
 	rawA := "sk-ambiguous-one-zzzz"
 	rawB := "sk-ambiguous-two-zzzz"
 	masked := util.HideAPIKey(rawA)
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{rawA, rawB}}}
+	cfg := &config.Config{APIKeys: []string{rawA, rawB}}
 	h := newConfigBasicTestHandler(t, cfg)
 
 	recorder := httptest.NewRecorder()
@@ -3355,7 +3753,9 @@ func TestAPIKeyCollisionPlaceholdersAreOrdinalAndUnambiguous(t *testing.T) {
 
 	recorder = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(recorder)
-	c.Request = httptest.NewRequest(http.MethodPut, "/api-keys", strings.NewReader(`[`+fmt.Sprintf("%q", response.APIKeys[1])+`]`))
+	c.Request = httptest.NewRequest(
+		http.MethodPut, "/api-keys", strings.NewReader(`[`+fmt.Sprintf("%q", response.APIKeys[1])+`]`),
+	)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.PutAPIKeys(c)
 	if recorder.Code != http.StatusOK {
@@ -3400,23 +3800,27 @@ func TestAmbiguousAPIKeyListMutationsAreRejected(t *testing.T) {
 			call:   (*Handler).DeleteAPIKeys,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{rawA, rawB}}}
-			h := newConfigBasicTestHandler(t, cfg)
-			recorder := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(recorder)
-			c.Request = httptest.NewRequest(test.method, test.target, strings.NewReader(test.body))
-			if test.body != "" {
-				c.Request.Header.Set("Content-Type", "application/json")
-			}
-			test.call(h, c)
-			if recorder.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
-			}
-			if len(cfg.APIKeys) != 2 || cfg.APIKeys[0] != rawA || cfg.APIKeys[1] != rawB {
-				t.Fatalf("rejected mutation changed APIKeys = %#v", cfg.APIKeys)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				cfg := &config.Config{APIKeys: []string{rawA, rawB}}
+				h := newConfigBasicTestHandler(t, cfg)
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(test.method, test.target, strings.NewReader(test.body))
+				if test.body != "" {
+					c.Request.Header.Set("Content-Type", "application/json")
+				}
+				test.call(h, c)
+				if recorder.Code != http.StatusBadRequest {
+					t.Fatalf(
+						"status = %d, want %d body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String(),
+					)
+				}
+				if len(cfg.APIKeys) != 2 || cfg.APIKeys[0] != rawA || cfg.APIKeys[1] != rawB {
+					t.Fatalf("rejected mutation changed APIKeys = %#v", cfg.APIKeys)
+				}
+			},
+		)
 	}
 }
 
@@ -3449,11 +3853,13 @@ func TestGetUsageStatisticsTruncatesOversizedLegacySnapshot(t *testing.T) {
 
 	base := time.Now().UTC().Add(-time.Hour)
 	for index := range 3 {
-		persister.Record(usage.FlatDetail{
-			Timestamp: base.Add(time.Duration(index) * time.Minute),
-			Model:     "legacy-limit-model",
-			Completed: true,
-		})
+		persister.Record(
+			usage.FlatDetail{
+				Timestamp: base.Add(time.Duration(index) * time.Minute),
+				Model:     "legacy-limit-model",
+				Completed: true,
+			},
+		)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -3467,7 +3873,7 @@ func TestGetUsageStatisticsTruncatesOversizedLegacySnapshot(t *testing.T) {
 		time.Sleep(25 * time.Millisecond)
 	}
 
-	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""), WithUsagePersister(persister))
+	h := NewHandler(&config.Config{}, "", nil, withEnvSecret(""), withUsagePersister(persister))
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodGet, "/usage", nil)
@@ -3512,7 +3918,7 @@ func TestGetUsageStatisticsTruncatesOversizedLegacySnapshot(t *testing.T) {
 
 func TestGetUsageStatistics_NilPersister(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""), WithUsageStats(nil))
+	h := NewHandler(&config.Config{}, "", nil, withEnvSecret(""), withUsageStats(nil))
 	h.usageStats = nil
 
 	rec := httptest.NewRecorder()
@@ -3533,15 +3939,19 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 	credentialRawA := "sk-credential-first-wxyz"
 	credentialRawB := "sk-credential-other-wxyz"
 	credentialMasked := util.HideAPIKey(credentialRawA)
+	// These guards keep future fixture edits from removing the intended masked collisions.
+	// noinspection GoBoolExpressions
 	if rawA == rawB || masked != util.HideAPIKey(rawB) ||
 		credentialRawA == credentialRawB || credentialMasked != util.HideAPIKey(credentialRawB) {
 		t.Fatalf("invalid collision fixtures: %q/%q, %q/%q", rawA, rawB, credentialRawA, credentialRawB)
 	}
 
 	persister := usage.NewPersister(t.TempDir(), config.UsageRetention{Days: -1})
-	persister.SetPriceFunc(func(string) (float64, float64, float64, bool) {
-		return 1000, 2000, 1000, true
-	})
+	persister.SetPriceFunc(
+		func(string) (float64, float64, float64, bool) {
+			return 1000, 2000, 1000, true
+		},
+	)
 	persister.Start(context.Background())
 	if !persister.IsReady() {
 		t.Fatal("usage persister did not start")
@@ -3558,8 +3968,10 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		LatencyMs: 100,
 		Completed: true,
 	}
-	first.Tokens.InputTokens = 1
+	first.Tokens.InputTokens = 4
 	first.Tokens.CachedTokens = 3
+	first.Tokens.CacheReadTokens = 2
+	first.Tokens.CacheWriteTokens = 1
 	first.Tokens.TotalTokens = 4
 	second := usage.FlatDetail{
 		Timestamp: bucket.Add(10 * time.Minute),
@@ -3590,11 +4002,11 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 	persister.Record(third)
 
 	h := NewHandler(
-		&config.Config{},
+		&config.Config{APIKeys: []string{rawA, rawB}},
 		"",
 		nil,
-		WithEnvSecret(""),
-		WithUsagePersister(persister),
+		withEnvSecret(""),
+		withUsagePersister(persister),
 	)
 	basePath := fmt.Sprintf(
 		"/usage/summary?from=%s&to=%s",
@@ -3608,7 +4020,9 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		c.Request = httptest.NewRequest(http.MethodGet, path, nil)
 		h.GetUsageSummary(c)
 		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetUsageSummary status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+			t.Fatalf(
+				"GetUsageSummary status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+			)
 		}
 		var response summaryResponse
 		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
@@ -3646,7 +4060,9 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		if stats.Requests != 3 || stats.Success != 2 || stats.Failure != 1 {
 			t.Fatalf("%s API key counts = %+v, want requests/success/failure 3/2/1", label, stats)
 		}
-		wantTokens := (summaryTokens{Input: 3, Output: 2, Cached: 3, Reasoning: 5, Total: 13})
+		wantTokens := summaryTokens{
+			Input: 6, Output: 2, Cached: 3, CacheRead: 2, CacheWrite: 1, Reasoning: 5, Total: 13,
+		}
 		if stats.Tokens != wantTokens {
 			t.Fatalf("%s API key tokens = %+v, want %+v", label, stats.Tokens, wantTokens)
 		}
@@ -3669,7 +4085,10 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 		}
 		if credentialStats.Success != 2 || credentialStats.Failure != 1 ||
 			credentialStats.Provider != "test" || credentialStats.Source != credentialMasked {
-			t.Fatalf("%s credential stats = %+v, want success/failure/provider/source 2/1/test/%s", label, credentialStats, credentialMasked)
+			t.Fatalf(
+				"%s credential stats = %+v, want success/failure/provider/source 2/1/test/%s", label, credentialStats,
+				credentialMasked,
+			)
 		}
 		credentialSeries := got.TimeSeriesByCredential[credentialKey]
 		if len(credentialSeries) != 2 || credentialSeries[0].Requests != 2 || credentialSeries[1].Requests != 1 {
@@ -3681,10 +4100,12 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 			t.Fatalf("%s masked time series has %d points, want 2: %#v", label, len(series), series)
 		}
 		firstPoint := series[0]
-		firstTokens := summaryTokens{Input: 1, Output: 2, Cached: 3, Reasoning: 5, Total: 11}
+		firstTokens := summaryTokens{
+			Input: 4, Output: 2, Cached: 3, CacheRead: 2, CacheWrite: 1, Reasoning: 5, Total: 11,
+		}
 		if firstPoint.Time != bucket.Format(time.RFC3339) ||
 			firstPoint.Requests != 2 || firstPoint.Success != 1 || firstPoint.Failure != 1 ||
-			firstPoint.Tokens != firstTokens || firstPoint.Cost != 0.01 || !firstPoint.HasCost {
+			firstPoint.Tokens != firstTokens || firstPoint.Cost != 0 || !firstPoint.HasCost {
 			t.Fatalf("%s first masked time point = %+v", label, firstPoint)
 		}
 		secondPoint := series[1]
@@ -3722,7 +4143,10 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 	)
 	assertNoRawSecrets("raw credential filtered usage summary", rawCredentialFilteredBody)
 	if rawCredentialFiltered.Totals.Requests != 2 {
-		t.Fatalf("raw credential filter requests = %d, want historical and tagged rows", rawCredentialFiltered.Totals.Requests)
+		t.Fatalf(
+			"raw credential filter requests = %d, want historical and tagged rows",
+			rawCredentialFiltered.Totals.Requests,
+		)
 	}
 
 	eventsRecorder := httptest.NewRecorder()
@@ -3734,7 +4158,10 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 	)
 	h.GetUsageEvents(eventsContext)
 	if eventsRecorder.Code != http.StatusOK {
-		t.Fatalf("GetUsageEvents status = %d, want %d body=%s", eventsRecorder.Code, http.StatusOK, eventsRecorder.Body.String())
+		t.Fatalf(
+			"GetUsageEvents status = %d, want %d body=%s", eventsRecorder.Code, http.StatusOK,
+			eventsRecorder.Body.String(),
+		)
 	}
 	assertNoRawSecrets("usage events", eventsRecorder.Body.String())
 
@@ -3743,7 +4170,10 @@ func TestGetUsageSummaryAggregatesMaskedAPIKeyCollisions(t *testing.T) {
 	usageContext.Request = httptest.NewRequest(http.MethodGet, "/usage", nil)
 	h.GetUsageStatistics(usageContext)
 	if usageRecorder.Code != http.StatusOK {
-		t.Fatalf("GetUsageStatistics status = %d, want %d body=%s", usageRecorder.Code, http.StatusOK, usageRecorder.Body.String())
+		t.Fatalf(
+			"GetUsageStatistics status = %d, want %d body=%s", usageRecorder.Code, http.StatusOK,
+			usageRecorder.Body.String(),
+		)
 	}
 	assertNoRawSecrets("legacy usage snapshot", usageRecorder.Body.String())
 }
@@ -3759,22 +4189,26 @@ func TestGetUsageSummarySeparatesCredentialSourceKinds(t *testing.T) {
 
 	bucket := time.Now().UTC().Add(-time.Hour).Truncate(time.Hour)
 	display := "abcd...wxyz"
-	persister.Record(usage.FlatDetail{
-		Timestamp: bucket.Add(5 * time.Minute),
-		Model:     "kind-collision-model",
-		Source:    usage.TagIdentityCredentialSource(display),
-		Provider:  "test",
-		Completed: true,
-	})
-	persister.Record(usage.FlatDetail{
-		Timestamp: bucket.Add(10 * time.Minute),
-		Model:     "kind-collision-model",
-		Source:    usage.TagAPIKeyCredentialSource(display, true),
-		Provider:  "test",
-		Completed: true,
-	})
+	persister.Record(
+		usage.FlatDetail{
+			Timestamp: bucket.Add(5 * time.Minute),
+			Model:     "kind-collision-model",
+			Source:    usage.TagIdentityCredentialSource(display),
+			Provider:  "test",
+			Completed: true,
+		},
+	)
+	persister.Record(
+		usage.FlatDetail{
+			Timestamp: bucket.Add(10 * time.Minute),
+			Model:     "kind-collision-model",
+			Source:    usage.TagAPIKeyCredentialSource(display, true),
+			Provider:  "test",
+			Completed: true,
+		},
+	)
 
-	h := NewHandler(&config.Config{}, "", nil, WithEnvSecret(""), WithUsagePersister(persister))
+	h := NewHandler(&config.Config{}, "", nil, withEnvSecret(""), withUsagePersister(persister))
 	basePath := fmt.Sprintf(
 		"/usage/summary?from=%s&to=%s",
 		bucket.Format(time.RFC3339),
@@ -3787,7 +4221,9 @@ func TestGetUsageSummarySeparatesCredentialSourceKinds(t *testing.T) {
 		c.Request = httptest.NewRequest(http.MethodGet, path, nil)
 		h.GetUsageSummary(c)
 		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetUsageSummary status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+			t.Fatalf(
+				"GetUsageSummary status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String(),
+			)
 		}
 		var response summaryResponse
 		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
@@ -3819,11 +4255,16 @@ func TestGetUsageSummarySeparatesCredentialSourceKinds(t *testing.T) {
 		stats := response.ByCredential[key]
 		if stats == nil || stats.Success != 1 || stats.Failure != 0 || stats.Source != display ||
 			stats.SourceKind != wantKind || stats.FilterKey == "" {
-			t.Fatalf("credential %q = %#v, want one successful %s request with a typed filter key", key, stats, wantKind)
+			t.Fatalf(
+				"credential %q = %#v, want one successful %s request with a typed filter key", key, stats, wantKind,
+			)
 		}
 		filtered := requestSummary(basePath + "&credential=" + url.QueryEscape(stats.FilterKey))
 		if filtered.Totals.Requests != 1 || len(filtered.ByCredential) != 1 || filtered.ByCredential[key] == nil {
-			t.Fatalf("credential filter %q = totals %d entries %#v, want stable key with one request", stats.FilterKey, filtered.Totals.Requests, filtered.ByCredential)
+			t.Fatalf(
+				"credential filter %q = totals %d entries %#v, want stable key with one request", stats.FilterKey,
+				filtered.Totals.Requests, filtered.ByCredential,
+			)
 		}
 	}
 }
@@ -3862,17 +4303,16 @@ func TestGetUsageSummaryAPIKeyFilterBoundaries(t *testing.T) {
 
 	h := NewHandler(
 		&config.Config{
-			SDKConfig: config.SDKConfig{
-				APIKeyAliases: map[string]string{
-					collidingRawA: "comma-first",
-					collidingRawB: "comma-second",
-				},
+			APIKeys: keys,
+			APIKeyAliases: map[string]string{
+				collidingRawA: "comma-first",
+				collidingRawB: "comma-second",
 			},
 		},
 		"",
 		nil,
-		WithEnvSecret(""),
-		WithUsagePersister(persister),
+		withEnvSecret(""),
+		withUsagePersister(persister),
 	)
 	basePath := fmt.Sprintf(
 		"/usage/summary?from=%s&to=%s",
@@ -3895,7 +4335,10 @@ func TestGetUsageSummaryAPIKeyFilterBoundaries(t *testing.T) {
 		c.Request = httptest.NewRequest(http.MethodGet, path, nil)
 		h.GetUsageSummary(c)
 		if recorder.Code != http.StatusOK {
-			t.Fatalf("GetUsageSummary(%q) status = %d, want %d body=%s", filters, recorder.Code, http.StatusOK, recorder.Body.String())
+			t.Fatalf(
+				"GetUsageSummary(%q) status = %d, want %d body=%s", filters, recorder.Code, http.StatusOK,
+				recorder.Body.String(),
+			)
 		}
 		var response summaryResponse
 		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
@@ -3922,11 +4365,13 @@ func TestGetUsageSummaryAPIKeyFilterBoundaries(t *testing.T) {
 		{name: "masked display containing comma", filter: util.HideAPIKey("ab,c-first-zzzz"), want: 2},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := requestTotals(test.filter); got != test.want {
-				t.Fatalf("GetUsageSummary(%q) totals = %d, want %d", test.filter, got, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				if got := requestTotals(test.filter); got != test.want {
+					t.Fatalf("GetUsageSummary(%q) totals = %d, want %d", test.filter, got, test.want)
+				}
+			},
+		)
 	}
 
 	repeated := []string{util.HideAPIKey("ab,c-first-zzzz"), "abcd...wxyz"}
@@ -4026,8 +4471,8 @@ func TestUsageSnapshotHandlersReturnDatabaseErrors(t *testing.T) {
 		&config.Config{},
 		"",
 		nil,
-		WithEnvSecret(""),
-		WithUsagePersister(persister),
+		withEnvSecret(""),
+		withUsagePersister(persister),
 	)
 	tests := []struct {
 		name      string
@@ -4049,19 +4494,23 @@ func TestUsageSnapshotHandlersReturnDatabaseErrors(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			c, _ := gin.CreateTestContext(rec)
-			c.Request = httptest.NewRequest(http.MethodGet, test.path, nil)
-			test.invoke(h, c)
+		t.Run(
+			test.name, func(t *testing.T) {
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodGet, test.path, nil)
+				test.invoke(h, c)
 
-			if rec.Code != http.StatusInternalServerError {
-				t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String())
-			}
-			if !strings.Contains(rec.Body.String(), test.wantError) {
-				t.Fatalf("body = %s, want error %q", rec.Body.String(), test.wantError)
-			}
-		})
+				if rec.Code != http.StatusInternalServerError {
+					t.Fatalf(
+						"status = %d, want %d body=%s", rec.Code, http.StatusInternalServerError, rec.Body.String(),
+					)
+				}
+				if !strings.Contains(rec.Body.String(), test.wantError) {
+					t.Fatalf("body = %s, want error %q", rec.Body.String(), test.wantError)
+				}
+			},
+		)
 	}
 }
 
@@ -4091,7 +4540,7 @@ func TestGetLogsFullRefreshKeepsNewestLines(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := NewHandler(&config.Config{LoggingToFile: true}, "", nil, WithEnvSecret(""), WithLogDir(logDir))
+	h := NewHandler(&config.Config{LoggingToFile: true}, "", nil, withEnvSecret(""), withLogDir(logDir))
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodGet, "/logs?limit=50", nil)

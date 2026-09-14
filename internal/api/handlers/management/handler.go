@@ -15,11 +15,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/access"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/artifact"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
@@ -33,21 +36,28 @@ import (
 )
 
 type attemptInfo struct {
-	failures              []time.Time // sliding window of failure timestamps
-	blockedUntil          time.Time
-	lastActivity          time.Time // track last activity for cleanup
-	banCount              int
-	pendingNoticeFailures int
-	lastFailureAt         time.Time
-	lastSuccessfulAuthAt  time.Time
+	failures               []time.Time // sliding window of failure timestamps
+	blockedUntil           time.Time
+	lastActivity           time.Time // track last activity for cleanup
+	banCount               int
+	pendingNoticeFailures  int
+	lastFailureAt          time.Time
+	lastSuccessfulAuthAt   time.Time
+	lastFailureFingerprint string
+	lastCountedFailureAt   time.Time
 }
 
 const (
-	managementFailureWindow      = 5 * time.Minute
-	managementMaxFailures        = 10
-	managementBanDuration        = 30 * time.Minute
-	managementAuthFailureMessage = "Unauthorized"
-	managementRateLimitMessage   = "too many authentication failures, please try again later"
+	managementFailureWindow                    = 5 * time.Minute
+	managementDuplicateFailureWindow           = 5 * time.Second
+	managementMaxFailures                      = 10
+	managementBanDuration                      = 30 * time.Minute
+	managementAuthFailureMessage               = "Unauthorized"
+	managementRateLimitMessage                 = "too many authentication failures, please try again later"
+	managementRateLimitCode                    = "management_rate_limited"
+	maxManagementRateLimitClients              = 4096
+	maxManagementRateLimitStateBytes           = 8 << 20
+	managementRateLimitCapacityWarningInterval = time.Minute
 )
 
 // attemptCleanupInterval controls how often stale IP entries are purged
@@ -70,75 +80,131 @@ type ConfigCommit struct {
 	Generation             uint64
 	ConfigFileHash         string
 	DeferPluginRuntimeSync bool
+	ModelCatalogPrepared   bool
 }
 
 // ConfigCommittedFunc applies a persisted management config to the running server.
 type ConfigCommittedFunc func(context.Context, ConfigCommit) error
 
+type configCommitWarningContextKey struct{}
+
+type configCommitWarnings struct {
+	mu           sync.Mutex
+	cleanupError error
+}
+
+func beginConfigCommitWarnings(c *gin.Context) *configCommitWarnings {
+	warnings := &configCommitWarnings{}
+	if c != nil && c.Request != nil {
+		ctx := context.WithValue(c.Request.Context(), configCommitWarningContextKey{}, warnings)
+		c.Request = c.Request.WithContext(ctx)
+	}
+	return warnings
+}
+
+func ReportConfigCommitCleanupError(ctx context.Context, err error) {
+	if ctx == nil || err == nil {
+		return
+	}
+	warnings, _ := ctx.Value(configCommitWarningContextKey{}).(*configCommitWarnings)
+	if warnings == nil {
+		return
+	}
+	warnings.mu.Lock()
+	warnings.cleanupError = errors.Join(warnings.cleanupError, err)
+	warnings.mu.Unlock()
+}
+
+func (w *configCommitWarnings) cleanupErrorMessage() string {
+	if w == nil {
+		return ""
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.cleanupError == nil {
+		return ""
+	}
+	return w.cleanupError.Error()
+}
+
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                     *config.Config
-	configFilePath          string
-	commitMu                sync.Mutex
-	runtimeCommitMu         sync.Mutex
-	mu                      sync.RWMutex
-	configGeneration        uint64
-	configCommitted         ConfigCommittedFunc
-	configYAMLKeyMu         sync.Mutex
-	configYAMLKey           [32]byte
-	configYAMLKeyLoaded     bool
-	apiKeyAliasesMu         sync.RWMutex
-	apiKeyAliases           map[string]string
-	attemptsMu              sync.Mutex
-	failedAttempts          map[string]*attemptInfo // keyed by client IP
-	rateLimitUnbanHistory   []rateLimitUnbanHistoryEntry
-	authManager             *coreauth.Manager
-	usageStats              *usage.RequestStatistics
-	usagePersister          *usage.Persister
-	usageQueue              *redisqueue.Queue
-	imageArtifacts          *artifact.Store
-	tokenStore              coreauth.Store
-	localPassword           string
-	envSecret               string
-	logDir                  string
-	postAuthHook            coreauth.PostAuthHook
-	quotaScheduler          *quota.Scheduler
-	pluginHost              pluginRuntimeHost
-	pluginRuntimeSync       func(context.Context, *config.Config) error
-	pluginStoreRegistryURL  string
-	pluginStoreHTTPClient   pluginstore.HTTPDoer
-	pluginReleaseCacheMu    sync.Mutex
-	pluginReleaseCache      map[string]pluginReleaseCacheEntry
-	modelCatalogRuntimeSync func(*config.Config)
-	accountInspection       *accountInspectionService
-	stateStore              *managementStateStore
-	internalToken           string // random token for internal localhost requests (quota scheduler)
-	attemptCleanupCancel    context.CancelFunc
-	attemptCleanupWG        sync.WaitGroup
-	closeOnce               sync.Once
-	closeErr                error
+	cfg                            *config.Config
+	configFilePath                 string
+	commitMu                       sync.Mutex
+	runtimeCommitMu                sync.Mutex
+	mu                             sync.RWMutex
+	configGeneration               uint64
+	configCommitted                ConfigCommittedFunc
+	configYAMLKeyMu                sync.Mutex
+	configYAMLKey                  [32]byte
+	configYAMLKeyLoaded            bool
+	apiKeyAliasesMu                sync.RWMutex
+	apiKeyAliases                  map[string]string
+	attemptsMu                     sync.Mutex
+	failedAttempts                 map[string]*attemptInfo // keyed by client IP
+	rateLimitEvents                []rateLimitEventEntry
+	rateLimitRevision              int64
+	rateLimitCapacityWarningAt     time.Time
+	rateLimitPersistenceAvailable  atomic.Bool
+	rateLimitPersistenceMu         sync.Mutex
+	rateLimitPendingState          *rateLimitPersistedState
+	rateLimitPersistenceDirty      bool
+	rateLimitPersistenceWake       chan struct{}
+	rateLimitPersistenceStop       chan struct{}
+	rateLimitPersistenceWG         sync.WaitGroup
+	rateLimitPersistenceCloseErr   error
+	rateLimitPersistenceTimeout    time.Duration
+	rateLimitPersistenceRetryDelay time.Duration
+	authManager                    *coreauth.Manager
+	usageStats                     *usage.RequestStatistics
+	usagePersister                 *usage.Persister
+	usageQueue                     *redisqueue.Queue
+	homeClientProvider             func() *home.Client
+	imageArtifacts                 *artifact.Store
+	tokenStore                     coreauth.Store
+	localPassword                  string
+	envSecret                      string
+	logDir                         string
+	postAuthHook                   coreauth.PostAuthHook
+	quotaScheduler                 *quota.Scheduler
+	quotaRefreshTasks              *quotaRefreshTaskService
+	pluginHost                     pluginRuntimeHost
+	pluginRuntimeSync              func(context.Context, *config.Config) error
+	pluginStoreRegistryURL         string
+	pluginStoreHTTPClient          pluginstore.HTTPDoer
+	pluginReleaseCacheMu           sync.Mutex
+	pluginReleaseCache             map[string]pluginReleaseCacheEntry
+	modelCatalogRuntimeSync        func(*config.Config) error
+	accountInspection              *accountInspectionService
+	stateStore                     *managementStateStore
+	internalToken                  string // random token for internal localhost requests (quota scheduler)
+	attemptCleanupCancel           context.CancelFunc
+	attemptCleanupWG               sync.WaitGroup
+	closeOnce                      sync.Once
+	closeErr                       error
 }
 
 // Option configures a Handler.
 type Option func(*Handler)
 
-// WithEnvSecret overrides the management password (default: from MANAGEMENT_PASSWORD env).
-func WithEnvSecret(secret string) Option {
+// withEnvSecret overrides the management password (default: from MANAGEMENT_PASSWORD env).
+func withEnvSecret(secret string) Option {
 	return func(h *Handler) { h.envSecret = strings.TrimSpace(secret) }
 }
 
-// WithUsageStats overrides the usage statistics source.
-func WithUsageStats(stats *usage.RequestStatistics) Option {
+// withUsageStats overrides the usage statistics source.
+func withUsageStats(stats *usage.RequestStatistics) Option {
 	return func(h *Handler) { h.usageStats = stats }
 }
 
-// WithTokenStore overrides the token store.
-func WithTokenStore(store coreauth.Store) Option {
+// withTokenStore overrides the token store.
+func withTokenStore(store coreauth.Store) Option {
 	return func(h *Handler) { h.tokenStore = store }
 }
 
-// WithUsagePersister sets the usage persister.
-func WithUsagePersister(p *usage.Persister) Option {
+// withUsagePersister sets the usage persister.
+func withUsagePersister(p *usage.Persister) Option {
 	return func(h *Handler) { h.usagePersister = p }
 }
 
@@ -147,13 +213,17 @@ func WithUsageQueue(queue *redisqueue.Queue) Option {
 	return func(h *Handler) { h.usageQueue = queue }
 }
 
+func WithHomeClientProvider(provider func() *home.Client) Option {
+	return func(h *Handler) { h.homeClientProvider = provider }
+}
+
 // WithImageArtifacts sets the image artifact store.
 func WithImageArtifacts(store *artifact.Store) Option {
 	return func(h *Handler) { h.imageArtifacts = store }
 }
 
-// WithQuotaScheduler sets the quota refresh scheduler.
-func WithQuotaScheduler(s *quota.Scheduler) Option {
+// withQuotaScheduler sets the quota refresh scheduler.
+func withQuotaScheduler(s *quota.Scheduler) Option {
 	return func(h *Handler) { h.quotaScheduler = s }
 }
 
@@ -172,12 +242,12 @@ func WithPluginRuntimeSync(sync func(context.Context, *config.Config) error) Opt
 	return func(h *Handler) { h.pluginRuntimeSync = sync }
 }
 
-func WithModelCatalogRuntimeSync(sync func(*config.Config)) Option {
+func WithModelCatalogRuntimeSync(sync func(*config.Config) error) Option {
 	return func(h *Handler) { h.modelCatalogRuntimeSync = sync }
 }
 
-// WithLogDir sets the log directory.
-func WithLogDir(dir string) Option {
+// withLogDir sets the log directory.
+func withLogDir(dir string) Option {
 	return func(h *Handler) { h.logDir = dir }
 }
 
@@ -187,17 +257,19 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 	envSecret = strings.TrimSpace(envSecret)
 
 	h := &Handler{
-		cfg:                cfg,
-		configFilePath:     configFilePath,
-		usageQueue:         redisqueue.DefaultQueue(),
-		apiKeyAliases:      copyAPIKeyAliases(configAPIKeyAliases(cfg)),
-		failedAttempts:     make(map[string]*attemptInfo),
-		authManager:        manager,
-		usageStats:         usage.GetRequestStatistics(),
-		tokenStore:         sdkAuth.GetTokenStore(),
-		envSecret:          envSecret,
-		internalToken:      generateInternalToken(),
-		pluginReleaseCache: make(map[string]pluginReleaseCacheEntry),
+		cfg:                            cfg,
+		configFilePath:                 configFilePath,
+		usageQueue:                     redisqueue.DefaultQueue(),
+		apiKeyAliases:                  copyAPIKeyAliases(configAPIKeyAliases(cfg)),
+		failedAttempts:                 make(map[string]*attemptInfo),
+		rateLimitPersistenceTimeout:    defaultRateLimitPersistenceTimeout,
+		rateLimitPersistenceRetryDelay: defaultRateLimitPersistenceRetryDelay,
+		authManager:                    manager,
+		usageStats:                     usage.GetRequestStatistics(),
+		tokenStore:                     sdkAuth.GetTokenStore(),
+		envSecret:                      envSecret,
+		internalToken:                  generateInternalToken(),
+		pluginReleaseCache:             make(map[string]pluginReleaseCacheEntry),
 	}
 
 	for _, opt := range opts {
@@ -208,9 +280,17 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		log.WithError(err).Warn("management state persistence disabled")
 	} else {
 		h.stateStore = stateStore
+		h.rateLimitPersistenceAvailable.Store(stateStore != nil)
+		if stateStore != nil {
+			h.rateLimitPersistenceWake = make(chan struct{}, 1)
+			h.rateLimitPersistenceStop = make(chan struct{})
+			h.restoreRateLimitState()
+			h.startRateLimitPersistence()
+		}
 	}
-	h.accountInspection = newAccountInspectionService(h)
 	h.configureQuotaScheduler(h.quotaScheduler)
+	h.quotaRefreshTasks = newQuotaRefreshTaskService(h)
+	h.accountInspection = newAccountInspectionService(h)
 
 	h.startAttemptCleanup()
 	return h
@@ -247,11 +327,17 @@ func (h *Handler) Close() error {
 				h.attemptCleanupCancel()
 			}
 			h.attemptCleanupWG.Wait()
+			if h.quotaRefreshTasks != nil {
+				h.closeErr = errors.Join(h.closeErr, h.quotaRefreshTasks.close())
+			}
 			if h.accountInspection != nil {
 				h.accountInspection.close()
 			}
+			if err := h.stopRateLimitPersistence(); err != nil {
+				h.closeErr = errors.Join(h.closeErr, fmt.Errorf("flush management rate limit state: %w", err))
+			}
 			if h.stateStore != nil {
-				h.closeErr = h.stateStore.Close()
+				h.closeErr = errors.Join(h.closeErr, h.stateStore.Close())
 			}
 		},
 	)
@@ -259,7 +345,11 @@ func (h *Handler) Close() error {
 }
 
 func (h *Handler) configureQuotaScheduler(s *quota.Scheduler) {
-	if h == nil || s == nil || h.stateStore == nil {
+	if h == nil || s == nil {
+		return
+	}
+	s.SetRefreshContextFinalizer(h.finalizeQuotaRefreshContext)
+	if h.stateStore == nil {
 		return
 	}
 	s.SetPersistence(h.saveQuotaEntry, h.deleteQuotaEntry)
@@ -284,14 +374,14 @@ func (h *Handler) saveQuotaEntry(entry quota.EntryState) {
 	}
 }
 
-func (h *Handler) deleteQuotaEntry(entryKey string) {
+func (h *Handler) deleteQuotaEntry(entry quota.EntryState) {
 	if h == nil || h.stateStore == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := h.stateStore.deleteQuotaEntry(ctx, entryKey); err != nil {
-		log.WithError(err).Warn("failed to delete quota state")
+	if err := h.stateStore.deleteQuotaEntry(ctx, entry); err != nil {
+		log.WithError(err).Warn("failed to save quota tombstone")
 	}
 }
 
@@ -300,9 +390,7 @@ func (h *Handler) deleteQuotaEntry(entryKey string) {
 func (h *Handler) startAttemptCleanup() {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.attemptCleanupCancel = cancel
-	h.attemptCleanupWG.Add(1)
-	go func() {
-		defer h.attemptCleanupWG.Done()
+	h.attemptCleanupWG.Go(func() {
 		ticker := time.NewTicker(attemptCleanupInterval)
 		defer ticker.Stop()
 		for {
@@ -313,61 +401,113 @@ func (h *Handler) startAttemptCleanup() {
 				h.purgeStaleAttempts()
 			}
 		}
-	}()
+	})
 }
 
 // purgeStaleAttempts removes IP entries that have been idle beyond attemptMaxIdleTime
 // and whose ban (if any) has expired.
 func (h *Handler) purgeStaleAttempts() {
 	now := time.Now()
+	changed := false
 	h.attemptsMu.Lock()
-	defer h.attemptsMu.Unlock()
+	cutoff := now.Add(-managementFailureWindow)
 	for ip, ai := range h.failedAttempts {
-		// Skip if still banned
+		changed = h.expireRateLimitBanLocked(ip, ai, now) || changed
+		kept := 0
+		for _, failureAt := range ai.failures {
+			if failureAt.After(cutoff) {
+				ai.failures[kept] = failureAt
+				kept++
+			}
+		}
+		if kept != len(ai.failures) {
+			ai.failures = ai.failures[:kept]
+			changed = true
+		}
 		if !ai.blockedUntil.IsZero() && now.Before(ai.blockedUntil) {
 			continue
 		}
-		// Remove if idle too long
 		if now.Sub(ai.lastActivity) > attemptMaxIdleTime {
 			delete(h.failedAttempts, ip)
+			changed = true
 		}
 	}
+	h.attemptsMu.Unlock()
+	if changed {
+		h.persistRateLimitState()
+	}
+}
+
+func managementRetryAfterSeconds(remaining time.Duration) int {
+	if remaining <= 0 {
+		return 1
+	}
+	seconds := int((remaining + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		return 1
+	}
+	return seconds
+}
+
+func managementFailureFingerprint(reason string, provided string) string {
+	digest := sha256.Sum256([]byte(reason + "\x00" + provided))
+	return hex.EncodeToString(digest[:])
 }
 
 func (h *Handler) currentRateLimitBan(clientIP string, now time.Time) (time.Duration, bool) {
+	changed := false
 	h.attemptsMu.Lock()
-	defer h.attemptsMu.Unlock()
-
 	ai := h.failedAttempts[clientIP]
-	if ai == nil || ai.blockedUntil.IsZero() {
+	if ai == nil {
+		remaining, blocked := h.rateLimitCapacityBanLocked(now)
+		h.attemptsMu.Unlock()
+		return remaining, blocked
+	}
+	if ai.blockedUntil.IsZero() {
+		h.attemptsMu.Unlock()
 		return 0, false
 	}
 	if now.Before(ai.blockedUntil) {
-		return ai.blockedUntil.Sub(now).Round(time.Second), true
+		remaining := ai.blockedUntil.Sub(now)
+		h.attemptsMu.Unlock()
+		return remaining, true
 	}
-	ai.blockedUntil = time.Time{}
-	ai.failures = ai.failures[:0]
+	changed = h.expireRateLimitBanLocked(clientIP, ai, now)
+	h.attemptsMu.Unlock()
+	if changed {
+		h.persistRateLimitState()
+	}
 	return 0, false
 }
 
-func (h *Handler) recordFailedManagementAttempt(clientIP string, now time.Time) {
+func (h *Handler) recordFailedManagementAttempt(clientIP string, fingerprint string, now time.Time) {
 	h.attemptsMu.Lock()
-	defer h.attemptsMu.Unlock()
-
 	ai := h.failedAttempts[clientIP]
 	if ai == nil {
 		ai = &attemptInfo{}
 		h.failedAttempts[clientIP] = ai
 	}
-	ai.lastActivity = now
+	if now.After(ai.lastActivity) {
+		ai.lastActivity = now
+	}
+	if fingerprint != "" &&
+		ai.lastFailureFingerprint == fingerprint &&
+		!ai.lastCountedFailureAt.IsZero() {
+		if now.Sub(ai.lastCountedFailureAt).Abs() < managementDuplicateFailureWindow {
+			h.attemptsMu.Unlock()
+			return
+		}
+	}
+	ai.lastFailureFingerprint = fingerprint
+	ai.lastCountedFailureAt = now
 	ai.pendingNoticeFailures++
 	ai.lastFailureAt = now
 
 	cutoff := now.Add(-managementFailureWindow)
 	kept := 0
-	for _, t := range ai.failures {
-		if t.After(cutoff) {
-			ai.failures[kept] = t
+	for _, failureAt := range ai.failures {
+		if failureAt.After(cutoff) {
+			ai.failures[kept] = failureAt
 			kept++
 		}
 	}
@@ -378,18 +518,50 @@ func (h *Handler) recordFailedManagementAttempt(clientIP string, now time.Time) 
 		ai.banCount++
 		ai.blockedUntil = now.Add(managementBanDuration)
 		ai.failures = ai.failures[:0]
+		h.appendRateLimitEventLocked(
+			rateLimitEventBanStarted,
+			clientIP,
+			now,
+			ai.blockedUntil,
+			ai.banCount,
+		)
+	}
+	dropped := h.trimRateLimitAttemptsLocked(now)
+	retained := h.failedAttempts[clientIP] == ai
+	warnCapacity := dropped > 0 && h.rateLimitCapacityWarningDueLocked(now)
+	h.attemptsMu.Unlock()
+	if warnCapacity {
+		log.WithFields(
+			log.Fields{
+				"capacity":  maxManagementRateLimitClients,
+				"discarded": dropped,
+			},
+		).Warn("management rate limit client tracking reached capacity; discarded lower-priority state")
+	}
+	if retained {
+		h.persistRateLimitState()
 	}
 }
 
 func (h *Handler) resetManagementAttempts(clientIP string, now time.Time) {
+	changed := false
 	h.attemptsMu.Lock()
-	defer h.attemptsMu.Unlock()
-
 	if ai := h.failedAttempts[clientIP]; ai != nil {
+		changed = len(ai.failures) > 0 ||
+			!ai.blockedUntil.IsZero() ||
+			ai.lastFailureFingerprint != "" ||
+			!ai.lastCountedFailureAt.IsZero() ||
+			ai.pendingNoticeFailures > 0
 		ai.failures = ai.failures[:0]
 		ai.blockedUntil = time.Time{}
 		ai.lastActivity = now
 		ai.lastSuccessfulAuthAt = now
+		ai.lastFailureFingerprint = ""
+		ai.lastCountedFailureAt = time.Time{}
+	}
+	h.attemptsMu.Unlock()
+	if changed {
+		h.persistRateLimitState()
 	}
 }
 
@@ -536,8 +708,39 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 // SetUsagePersister sets the usage statistics persister reference.
 func (h *Handler) SetUsagePersister(p *usage.Persister) { h.usagePersister = p }
 
-// SetImageArtifacts sets the image artifact store reference.
-func (h *Handler) SetImageArtifacts(store *artifact.Store) { h.imageArtifacts = store }
+func (h *Handler) currentHomeClient() *home.Client {
+	if h == nil {
+		return nil
+	}
+	if h.homeClientProvider != nil {
+		return h.homeClientProvider()
+	}
+	return home.Current()
+}
+
+func managementKeyFromRequest(c *gin.Context) string {
+	if authorization := c.GetHeader("Authorization"); authorization != "" {
+		parts := strings.SplitN(authorization, " ", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+			return parts[1]
+		}
+		return authorization
+	}
+	return c.GetHeader("X-Management-Key")
+}
+
+func abortManagementRateLimit(c *gin.Context, now time.Time, remaining time.Duration) {
+	retryAfterSeconds := managementRetryAfterSeconds(remaining)
+	c.Header("Retry-After", fmt.Sprintf("%d", retryAfterSeconds))
+	c.AbortWithStatusJSON(
+		http.StatusTooManyRequests, gin.H{
+			"error":               managementRateLimitMessage,
+			"code":                managementRateLimitCode,
+			"retry_after_seconds": retryAfterSeconds,
+			"banned_until":        now.Add(time.Duration(retryAfterSeconds) * time.Second).UTC(),
+		},
+	)
+}
 
 // AuthenticateManagementKey verifies a management key outside Gin middleware.
 func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, provided string) (bool, int, string) {
@@ -557,53 +760,48 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		return false, http.StatusTooManyRequests, managementRateLimitMessage
 	}
 
-	fail := func() {
-		h.recordFailedManagementAttempt(clientIP, time.Now())
+	fail := func(reason string) {
+		h.recordFailedManagementAttempt(
+			clientIP,
+			managementFailureFingerprint(reason, provided),
+			time.Now(),
+		)
 	}
-
 	if !localClient && !allowRemote {
-		fail()
+		fail("remote-disabled")
 		return false, http.StatusUnauthorized, managementAuthFailureMessage
 	}
 
 	reset := func() {
 		h.resetManagementAttempts(clientIP, time.Now())
 	}
-
 	if secretHash == "" && envSecret == "" {
 		if !(localClient && h.localPassword != "") {
-			fail()
+			fail("management-secret-unavailable")
 			return false, http.StatusUnauthorized, managementAuthFailureMessage
 		}
 	}
-
 	if provided == "" {
-		fail()
+		fail("missing-credential")
 		return false, http.StatusUnauthorized, managementAuthFailureMessage
 	}
 
 	if localClient {
-		if lp := h.localPassword; lp != "" {
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
-				reset()
-				return true, 0, ""
-			}
+		if lp := h.localPassword; lp != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+			reset()
+			return true, 0, ""
 		}
-		if it := h.internalToken; it != "" {
-			if subtle.ConstantTimeCompare([]byte(provided), []byte(it)) == 1 {
-				reset()
-				return true, 0, ""
-			}
+		if it := h.internalToken; it != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(it)) == 1 {
+			reset()
+			return true, 0, ""
 		}
 	}
-
 	if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
 		reset()
 		return true, 0, ""
 	}
-
 	if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
-		fail()
+		fail("invalid-credential")
 		return false, http.StatusUnauthorized, managementAuthFailureMessage
 	}
 
@@ -611,10 +809,15 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	return true, 0, ""
 }
 
-// Middleware enforces access control for management endpoints.
+// middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
-func (h *Handler) Middleware() gin.HandlerFunc {
+func (h *Handler) middleware() gin.HandlerFunc {
+	return h.MiddlewareWithConfig(nil)
+}
+
+// MiddlewareWithConfig authenticates against a request-scoped config snapshot when provided.
+func (h *Handler) MiddlewareWithConfig(configSnapshot func(*gin.Context) *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
 		c.Header("X-CPA-VERSION", buildinfo.Version)
@@ -623,9 +826,19 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header(pluginhost.SupportPluginHeader, pluginhost.SupportPluginHeaderValue())
 
 		cfg := h.configSnapshot()
+		if configSnapshot != nil {
+			cfg = configSnapshot(c)
+		}
 		client := resolveManagementClientAddress(c.Request, cfg)
+		if c.Request != nil {
+			c.Request = c.Request.WithContext(
+				access.WithClientAddress(c.Request.Context(), client.resolved),
+			)
+		}
+		c.Set(managementClientAddressContextKey, client)
 		clientIP := client.ip
 		localClient := client.local
+		provided := managementKeyFromRequest(c)
 		var (
 			allowRemote bool
 			secretHash  string
@@ -636,18 +849,29 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 		envSecret := h.envSecret
 
+		if client.peerLocal {
+			if it := h.internalToken; it != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(it)) == 1 {
+				setManagementMutationActor(c, managementMutationActorInternal)
+				c.Next()
+				return
+			}
+		}
+
 		now := time.Now()
 		if remaining, banned := h.currentRateLimitBan(clientIP, now); banned {
-			c.Header("Retry-After", fmt.Sprintf("%d", int(remaining.Seconds())))
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": managementRateLimitMessage})
+			abortManagementRateLimit(c, now, remaining)
 			return
 		}
 
-		fail := func() {
-			h.recordFailedManagementAttempt(clientIP, time.Now())
+		fail := func(reason string) {
+			h.recordFailedManagementAttempt(
+				clientIP,
+				managementFailureFingerprint(reason, provided),
+				time.Now(),
+			)
 		}
 		if !localClient && !allowRemote {
-			fail()
+			fail("remote-disabled")
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
 			return
 		}
@@ -656,66 +880,40 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 			h.resetManagementAttempts(clientIP, time.Now())
 		}
 		if secretHash == "" && envSecret == "" {
-			if localClient && h.localPassword != "" {
-				// Allow local requests to proceed — localPassword will be validated below
-			} else {
-				fail()
+			if !(localClient && h.localPassword != "") {
+				fail("management-secret-unavailable")
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
 				return
 			}
 		}
-
-		// Accept either Authorization: Bearer <key> or X-Management-Key
-		var provided string
-		if ah := c.GetHeader("Authorization"); ah != "" {
-			parts := strings.SplitN(ah, " ", 2)
-			if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-				provided = parts[1]
-			} else {
-				provided = ah
-			}
-		}
 		if provided == "" {
-			provided = c.GetHeader("X-Management-Key")
-		}
-
-		if provided == "" {
-			fail()
+			fail("missing-credential")
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
 			return
 		}
 
 		if localClient {
-			if lp := h.localPassword; lp != "" {
-				if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
-					reset()
-					c.Next()
-					return
-				}
-			}
-			// Internal token for quota scheduler and other internal services
-			if it := h.internalToken; it != "" {
-				if subtle.ConstantTimeCompare([]byte(provided), []byte(it)) == 1 {
-					reset()
-					c.Next()
-					return
-				}
+			if lp := h.localPassword; lp != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+				reset()
+				setManagementMutationActor(c, managementMutationActorLocal)
+				c.Next()
+				return
 			}
 		}
-
 		if envSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envSecret)) == 1 {
 			reset()
+			setManagementMutationActor(c, managementMutationActorKey)
 			c.Next()
 			return
 		}
-
 		if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
-			fail()
+			fail("invalid-credential")
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": managementAuthFailureMessage})
 			return
 		}
 
 		reset()
+		setManagementMutationActor(c, managementMutationActorKey)
 		c.Next()
 	}
 }
@@ -776,13 +974,16 @@ func (h *Handler) mutateConfigLocked(
 	if mutate != nil {
 		if err = mutate(next); err != nil {
 			status := http.StatusBadRequest
-			var mutationError *configMutationError
-			if errors.As(err, &mutationError) {
+			if mutationError, ok := errors.AsType[*configMutationError](err); ok {
 				status = mutationError.status
 			}
 			c.JSON(status, gin.H{"error": err.Error()})
 			return ConfigCommit{}, nil, false
 		}
+	}
+	if err = next.ValidateCredentialWeights(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return ConfigCommit{}, nil, false
 	}
 	persistedHash, ok := h.saveConfigCandidateLocked(c, next)
 	if !ok {
@@ -951,8 +1152,7 @@ func (h *Handler) persistConfigCandidate(candidate *config.Config) (string, erro
 }
 
 func respondConfigPersistenceError(c *gin.Context, err error) {
-	var persistenceError *configPersistenceError
-	if errors.As(err, &persistenceError) {
+	if persistenceError, ok := errors.AsType[*configPersistenceError](err); ok {
 		log.WithError(persistenceError.err).Error(persistenceError.logMessage)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": persistenceError.userMessage})
 		return
@@ -973,46 +1173,6 @@ func (h *Handler) saveConfigCandidateLocked(
 	return persistedHash, true
 }
 
-// persist saves the current in-memory config to disk with last-good protection.
-func (h *Handler) persist(c *gin.Context) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.persistLocked(c)
-}
-
-func (h *Handler) persistLocked(c *gin.Context) bool {
-	if !h.saveConfigLocked(c) {
-		return false
-	}
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	return true
-}
-
-func (h *Handler) saveConfigLocked(c *gin.Context) bool {
-	_, ok := h.saveConfigCandidateLocked(c, h.cfg)
-	return ok
-}
-
-// rollbackLastGood restores config.yaml from the last-good backup and reloads it into memory.
-// Caller must hold h.mu.
-func (h *Handler) rollbackLastGood() {
-	lastGood := config.LastGoodPath(h.configFilePath)
-	data, err := os.ReadFile(lastGood)
-	if err != nil {
-		log.WithError(err).Error("rollback: failed to read last-good backup")
-		return
-	}
-	if errWrite := writeConfigFileAtomically(h.configFilePath, data); errWrite != nil {
-		log.WithError(errWrite).Error("rollback: failed to restore config from last-good")
-		return
-	}
-	if restored, errLoad := config.LoadConfig(h.configFilePath); errLoad == nil {
-		h.setConfigLocked(restored)
-	} else {
-		log.WithError(errLoad).Error("rollback: failed to reload config after restore")
-	}
-}
-
 // Helper methods for simple types
 func (h *Handler) updateBoolField(c *gin.Context, set func(*config.Config, bool)) {
 	var body struct {
@@ -1022,10 +1182,12 @@ func (h *Handler) updateBoolField(c *gin.Context, set func(*config.Config, bool)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
-		set(next, *body.Value)
-		return nil
-	}); ok {
+	if _, ok := h.mutateConfig(
+		c, func(next *config.Config) error {
+			set(next, *body.Value)
+			return nil
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1038,26 +1200,12 @@ func (h *Handler) updateIntField(c *gin.Context, set func(*config.Config, int)) 
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
-	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
-		set(next, *body.Value)
-		return nil
-	}); ok {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	}
-}
-
-func (h *Handler) updateStringField(c *gin.Context, set func(*config.Config, string)) {
-	var body struct {
-		Value *string `json:"value"`
-	}
-	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
-		return
-	}
-	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
-		set(next, *body.Value)
-		return nil
-	}); ok {
+	if _, ok := h.mutateConfig(
+		c, func(next *config.Config) error {
+			set(next, *body.Value)
+			return nil
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1078,10 +1226,12 @@ func (h *Handler) updateStringFieldValidated(
 		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		return
 	}
-	if _, ok := h.mutateConfig(c, func(next *config.Config) error {
-		set(next, *body.Value)
-		return nil
-	}); ok {
+	if _, ok := h.mutateConfig(
+		c, func(next *config.Config) error {
+			set(next, *body.Value)
+			return nil
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }

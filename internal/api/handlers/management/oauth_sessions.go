@@ -51,10 +51,7 @@ func newOAuthSessionStore(ttl time.Duration) *oauthSessionStore {
 	if ttl <= 0 {
 		ttl = oauthSessionTTL
 	}
-	completedTTL := oauthCompletedSessionTTL
-	if ttl < completedTTL {
-		completedTTL = ttl
-	}
+	completedTTL := min(ttl, oauthCompletedSessionTTL)
 	return &oauthSessionStore{
 		ttl:          ttl,
 		completedTTL: completedTTL,

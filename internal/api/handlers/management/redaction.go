@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
@@ -609,6 +608,7 @@ func visitConfigYAMLScalarNodes(
 type configYAMLContextVisitState struct {
 	node               *yaml.Node
 	fieldName          string
+	parentFieldName    string
 	inheritedSensitive bool
 }
 
@@ -663,6 +663,7 @@ func visitConfigYAMLNodeContexts(
 	return visitConfigYAMLContextNode(
 		document,
 		"",
+		"",
 		"$",
 		"$",
 		false,
@@ -674,6 +675,7 @@ func visitConfigYAMLNodeContexts(
 func visitConfigYAMLContextNode(
 	node *yaml.Node,
 	fieldName string,
+	parentFieldName string,
 	ordinalPath string,
 	semanticPath string,
 	inheritedSensitive bool,
@@ -686,6 +688,7 @@ func visitConfigYAMLContextNode(
 	state := configYAMLContextVisitState{
 		node:               node,
 		fieldName:          fieldName,
+		parentFieldName:    parentFieldName,
 		inheritedSensitive: inheritedSensitive,
 	}
 	if _, ok := seen[state]; ok {
@@ -693,16 +696,20 @@ func visitConfigYAMLContextNode(
 	}
 	seen[state] = struct{}{}
 
-	valueSensitive := inheritedSensitive || isValueSensitiveConfigField(fieldName)
+	valueSensitive := inheritedSensitive || isValueSensitiveConfigField(fieldName) ||
+		isCodexLiveICEServerSecretField(parentFieldName, fieldName)
 	if err := visit(node, ordinalPath, semanticPath, valueSensitive); err != nil {
 		return err
 	}
 	switch node.Kind {
+	case yaml.ScalarNode:
+		return nil
 	case yaml.DocumentNode:
 		for index, child := range node.Content {
 			if err := visitConfigYAMLContextNode(
 				child,
 				fieldName,
+				parentFieldName,
 				fmt.Sprintf("%s/document%d", ordinalPath, index),
 				semanticPath+"/document",
 				valueSensitive,
@@ -728,6 +735,7 @@ func visitConfigYAMLContextNode(
 				if err := visitConfigYAMLContextNode(
 					keyNode,
 					"",
+					fieldName,
 					entryOrdinalPath+"/key",
 					entrySemanticPath+"/key",
 					true,
@@ -740,6 +748,7 @@ func visitConfigYAMLContextNode(
 			if err := visitConfigYAMLContextNode(
 				valueNode,
 				childFieldName,
+				fieldName,
 				entryOrdinalPath+"/value",
 				entrySemanticPath+"/value",
 				valueSensitive,
@@ -758,6 +767,7 @@ func visitConfigYAMLContextNode(
 			if err := visitConfigYAMLContextNode(
 				child,
 				fieldName,
+				parentFieldName,
 				fmt.Sprintf("%s/sequence%d", ordinalPath, index),
 				childSemanticPath,
 				valueSensitive,
@@ -771,6 +781,7 @@ func visitConfigYAMLContextNode(
 		return visitConfigYAMLContextNode(
 			node.Alias,
 			fieldName,
+			parentFieldName,
 			ordinalPath+"/alias",
 			semanticPath+"/alias",
 			valueSensitive,
@@ -800,6 +811,7 @@ func configYAMLSemanticSequenceItemID(node *yaml.Node, fieldName string, sensiti
 	signature := configYAMLNodeSignature(
 		node,
 		fieldName,
+		"",
 		sensitive,
 		make(map[*yaml.Node]struct{}),
 	)
@@ -810,6 +822,7 @@ func configYAMLSemanticSequenceItemID(node *yaml.Node, fieldName string, sensiti
 func configYAMLNodeSignature(
 	node *yaml.Node,
 	fieldName string,
+	parentFieldName string,
 	inheritedSensitive bool,
 	seen map[*yaml.Node]struct{},
 ) string {
@@ -821,12 +834,13 @@ func configYAMLNodeSignature(
 	}
 	seen[node] = struct{}{}
 
-	valueSensitive := inheritedSensitive || isValueSensitiveConfigField(fieldName)
+	valueSensitive := inheritedSensitive || isValueSensitiveConfigField(fieldName) ||
+		isCodexLiveICEServerSecretField(parentFieldName, fieldName)
 	switch node.Kind {
 	case yaml.DocumentNode:
 		parts := make([]string, 0, len(node.Content))
 		for _, child := range node.Content {
-			parts = append(parts, configYAMLNodeSignature(child, fieldName, valueSensitive, seen))
+			parts = append(parts, configYAMLNodeSignature(child, fieldName, parentFieldName, valueSensitive, seen))
 		}
 		return "document(" + strings.Join(parts, ",") + ")"
 	case yaml.MappingNode:
@@ -841,7 +855,7 @@ func configYAMLNodeSignature(
 				childFieldName = ""
 			}
 			keySignature := configYAMLSemanticMapKey(keyNode, redactKeys)
-			valueSignature := configYAMLNodeSignature(valueNode, childFieldName, valueSensitive, seen)
+			valueSignature := configYAMLNodeSignature(valueNode, childFieldName, fieldName, valueSensitive, seen)
 			parts = append(parts, keySignature+":"+valueSignature)
 		}
 		sort.Strings(parts)
@@ -849,12 +863,18 @@ func configYAMLNodeSignature(
 	case yaml.SequenceNode:
 		parts := make([]string, 0, len(node.Content))
 		for _, child := range node.Content {
-			parts = append(parts, configYAMLNodeSignature(child, fieldName, valueSensitive, seen))
+			parts = append(parts, configYAMLNodeSignature(child, fieldName, parentFieldName, valueSensitive, seen))
 		}
 		sort.Strings(parts)
 		return "sequence(" + strings.Join(parts, ",") + ")"
 	case yaml.AliasNode:
-		return "alias(" + configYAMLNodeSignature(node.Alias, fieldName, valueSensitive, seen) + ")"
+		return "alias(" + configYAMLNodeSignature(
+			node.Alias,
+			fieldName,
+			parentFieldName,
+			valueSensitive,
+			seen,
+		) + ")"
 	case yaml.ScalarNode:
 		if valueSensitive || isConfigYAMLPlaceholder(node.Value) {
 			return "secret"
@@ -869,6 +889,21 @@ func isValueSensitiveConfigField(fieldName string) bool {
 	return isSensitiveConfigField(fieldName) &&
 		!shouldRedactMapKey(fieldName) &&
 		!isStructuredSensitiveConfigContainer(fieldName)
+}
+
+func isCodexLiveICEServerSecretField(parentFieldName, fieldName string) bool {
+	normalize := func(value string) string {
+		return strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(strings.TrimSpace(value)))
+	}
+	if normalize(parentFieldName) != "ice_servers" {
+		return false
+	}
+	switch normalize(fieldName) {
+	case "username", "credential":
+		return true
+	default:
+		return false
+	}
 }
 
 func isStructuredSensitiveConfigContainer(fieldName string) bool {
@@ -900,25 +935,6 @@ func yamlSemanticScalar(node *yaml.Node) (*yaml.Node, string, bool) {
 	return nil, "", false
 }
 
-func configSensitiveValues(cfg *config.Config) []string {
-	if cfg == nil {
-		return nil
-	}
-	values := uniqueNonEmptyStrings(sensitiveStringsFromValue(reflect.ValueOf(cfg), ""))
-	sort.SliceStable(values, func(i, j int) bool {
-		if len(values[i]) != len(values[j]) {
-			return len(values[i]) > len(values[j])
-		}
-		maskedI := util.HideAPIKey(values[i])
-		maskedJ := util.HideAPIKey(values[j])
-		if maskedI != maskedJ {
-			return maskedI < maskedJ
-		}
-		return values[i] < values[j]
-	})
-	return values
-}
-
 func uniqueNonEmptyStrings(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	out := make([]string, 0, len(values))
@@ -940,7 +956,7 @@ func sensitiveStringsFromValue(value reflect.Value, fieldName string) []string {
 	if !value.IsValid() {
 		return nil
 	}
-	if value.Type() == reflect.TypeOf(yaml.Node{}) && value.CanInterface() {
+	if value.Type() == reflect.TypeFor[yaml.Node]() && value.CanInterface() {
 		node := value.Interface().(yaml.Node)
 		return sensitiveStringsFromYAMLNode(&node, fieldName, false, make(map[*yaml.Node]struct{}))
 	}
@@ -996,6 +1012,7 @@ func sensitiveStringsFromYAMLNode(
 	_ = visitConfigYAMLContextNode(
 		node,
 		fieldName,
+		"",
 		"$",
 		"$",
 		sensitiveContext,
@@ -1031,7 +1048,9 @@ func isSensitiveConfigField(fieldName string) bool {
 		return true
 	}
 	compact := strings.NewReplacer("-", "", "_", "", ".", "").Replace(name)
-	return strings.Contains(compact, "apikey") || strings.Contains(compact, "secret") || strings.Contains(compact, "token")
+	return strings.Contains(compact, "apikey") || strings.Contains(compact, "secret") || strings.Contains(
+		compact, "token",
+	)
 }
 
 func indirectValue(value reflect.Value) reflect.Value {
@@ -1115,24 +1134,6 @@ func matchingMaskedAPIKeyCandidates(masked string, candidates []string) []string
 		matches = append(matches, candidate)
 	}
 	return matches
-}
-
-func maskedAPIKeyMatches(value string, candidate string) bool {
-	candidate = strings.TrimSpace(candidate)
-	if candidate == "" {
-		return false
-	}
-	if util.HideAPIKey(candidate) == strings.TrimSpace(value) {
-		return true
-	}
-	base, _, hasOrdinal := splitMaskedAPIKeyOrdinal(value)
-	if hasOrdinal {
-		return false
-	}
-	if !strings.Contains(base, "...") && base != "***" {
-		return false
-	}
-	return util.HideAPIKey(candidate) == base
 }
 
 func maskAPIKeyList(values []string) []string {
@@ -1476,6 +1477,8 @@ func collectStructuredAPIKeyStringsFromValue(value reflect.Value, fieldName stri
 			out = append(out, collectStructuredAPIKeyStringsFromValue(value.Index(i), fieldName)...)
 		}
 		return uniqueNonEmptyStrings(out)
+	default:
+		return nil
 	}
 	return nil
 }
@@ -1590,6 +1593,8 @@ func sensitivePlaceholdersResolveAgainstCandidates(
 				return false
 			}
 		}
+	default:
+		return true
 	}
 	return true
 }
@@ -1605,7 +1610,10 @@ func resolvedSensitivePlaceholdersBelongToEntry(
 ) bool {
 	submitted = indirectValue(submitted)
 	resolved = indirectValue(resolved)
-	if !submitted.IsValid() || !resolved.IsValid() || submitted.Type() != resolved.Type() {
+	if !submitted.IsValid() || !resolved.IsValid() {
+		return submitted.IsValid() == resolved.IsValid()
+	}
+	if submitted.Type() != resolved.Type() {
 		return false
 	}
 	switch submitted.Kind() {
@@ -1683,6 +1691,8 @@ func resolvedSensitivePlaceholdersBelongToEntry(
 				return false
 			}
 		}
+	default:
+		return true
 	}
 	return true
 }
@@ -1762,6 +1772,8 @@ func hasSensitivePlaceholderInValue(
 				return true
 			}
 		}
+	default:
+		return false
 	}
 	return false
 }
@@ -1820,7 +1832,9 @@ func resolveSensitiveStringsInValueForField(
 			}
 			childAPIKeyCandidates := apiKeyCandidates
 			if isStructuredSensitiveConfigContainer(fieldName) {
-				if localCandidates := collectStructuredAPIKeyStringsFromValue(sameField, fieldName); len(localCandidates) > 0 {
+				if localCandidates := collectStructuredAPIKeyStringsFromValue(
+					sameField, fieldName,
+				); len(localCandidates) > 0 {
 					childAPIKeyCandidates = localCandidates
 				}
 			}
@@ -1873,6 +1887,8 @@ func resolveSensitiveStringsInValueForField(
 			}
 			value.SetMapIndex(key, reflect.ValueOf(resolved).Convert(value.Type().Elem()))
 		}
+	default:
+		return nil
 	}
 	return nil
 }
@@ -1931,7 +1947,9 @@ func resolveSensitiveConfigString(value, fieldName, same string, candidates []st
 	if hasOrdinal {
 		maskedValue = base
 	}
-	if same = strings.TrimSpace(same); same != "" && maskSensitiveConfigString(fieldName, same) == maskedValue && !hasOrdinal {
+	if same = strings.TrimSpace(same); same != "" && maskSensitiveConfigString(
+		fieldName, same,
+	) == maskedValue && !hasOrdinal {
 		return same, nil
 	}
 

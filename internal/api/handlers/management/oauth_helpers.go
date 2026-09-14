@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -33,12 +34,37 @@ func waitForOAuthCallback(
 		if !isOAuthSessionPending(state, provider) {
 			return nil, errOAuthSessionCancelled
 		}
-		data, err := os.ReadFile(waitFile)
-		if err == nil {
-			_ = os.Remove(waitFile)
-			var m map[string]string
-			_ = json.Unmarshal(data, &m)
-			return m, nil
+		data, errRead := os.ReadFile(waitFile)
+		if errRead == nil {
+			var payload oauthCallbackFilePayload
+			if errUnmarshal := json.Unmarshal(data, &payload); errUnmarshal != nil {
+				setOAuthSessionError(state, "Invalid OAuth callback payload")
+				return nil, fmt.Errorf("decode oauth callback payload: %w", errUnmarshal)
+			}
+			payload.Code = strings.TrimSpace(payload.Code)
+			payload.State = strings.TrimSpace(payload.State)
+			payload.Error = strings.TrimSpace(payload.Error)
+			if payload.State != strings.TrimSpace(state) {
+				setOAuthSessionError(state, "Invalid OAuth callback state")
+				return nil, fmt.Errorf("oauth callback state mismatch")
+			}
+			if payload.Code == "" && payload.Error == "" {
+				setOAuthSessionError(state, "Invalid OAuth callback payload")
+				return nil, fmt.Errorf("oauth callback contains neither code nor error")
+			}
+			if errRemove := os.Remove(waitFile); errRemove != nil {
+				setOAuthSessionError(state, "Failed to finalize OAuth callback")
+				return nil, fmt.Errorf("remove oauth callback file: %w", errRemove)
+			}
+			return map[string]string{
+				"code":  payload.Code,
+				"state": payload.State,
+				"error": payload.Error,
+			}, nil
+		}
+		if !errors.Is(errRead, os.ErrNotExist) {
+			setOAuthSessionError(state, "Failed to read OAuth callback")
+			return nil, fmt.Errorf("read oauth callback file: %w", errRead)
 		}
 		if time.Now().After(deadline) {
 			setOAuthSessionError(state, "Timeout waiting for OAuth callback")

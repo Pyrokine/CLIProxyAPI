@@ -1,8 +1,11 @@
 package management
 
 import (
+	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +106,7 @@ var (
 type configResponse struct {
 	*config.Config
 	RemoteManagement remoteManagementConfigResponse `json:"remote-management"`
+	AuthIndexes      configAuthIndexResponse        `json:"auth-indexes"`
 }
 
 func (h *Handler) GetConfig(c *gin.Context) {
@@ -117,9 +121,11 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		checkInterval = int(defaultBackendUpdateCheckInterval / time.Minute)
 	}
 
+	authIndexes := h.buildConfigAuthIndexViews(cfg).response()
 	writeRedactedJSON(
 		c, 200, configResponse{
-			Config: cfg,
+			Config:      cfg,
+			AuthIndexes: authIndexes,
 			RemoteManagement: remoteManagementConfigResponse{
 				AllowRemote:            cfg.RemoteManagement.AllowRemote,
 				TrustedProxies:         append([]string(nil), cfg.RemoteManagement.TrustedProxies...),
@@ -229,8 +235,7 @@ func (h *Handler) GetVersion(c *gin.Context) {
 func readConfigYAMLBody(c *gin.Context) ([]byte, error) {
 	body, err := io.ReadAll(io.LimitReader(c.Request.Body, maxConfigYAMLBytes+1))
 	if err != nil {
-		var maxBytesError *http.MaxBytesError
-		if errors.As(err, &maxBytesError) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return nil, errConfigYAMLBodyTooLarge
 		}
 		return nil, err
@@ -339,6 +344,23 @@ func loadOrCreateConfigYAMLRedactionKey(configFilePath string) ([32]byte, error)
 			return key, nil
 		},
 	)
+}
+
+func DeriveArtifactAccessSigningKey(configFilePath string, namespace string) ([32]byte, error) {
+	namespace = strings.TrimSpace(namespace)
+	decodedNamespace, err := hex.DecodeString(namespace)
+	if err != nil || len(decodedNamespace) != sha256.Size || namespace != strings.ToLower(namespace) {
+		return [32]byte{}, fmt.Errorf("artifact instance namespace is invalid")
+	}
+	masterKey, err := loadOrCreateConfigYAMLRedactionKey(configFilePath)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("load config YAML redaction key for artifact access: %w", err)
+	}
+	mac := hmac.New(sha256.New, masterKey[:])
+	_, _ = mac.Write([]byte("CLIProxyAPI/artifact-access-signing/v1"))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(namespace))
+	return [sha256.Size]byte(mac.Sum(nil)), nil
 }
 
 func openConfigYAMLRedactionKeyRoot(configFilePath string) (*os.Root, string, error) {
@@ -507,10 +529,6 @@ func resolveConfigTargetPath(path string) (string, error) {
 	return path, nil
 }
 
-func writeConfig(path string, data []byte) error {
-	return writeConfigFileAtomically(path, config.NormalizeCommentIndentation(data))
-}
-
 func writeConfigFileAtomically(path string, data []byte) error {
 	targetPath, err := resolveConfigTargetPath(path)
 	if err != nil {
@@ -558,7 +576,25 @@ func writeConfigFileAtomically(path string, data []byte) error {
 	return syncConfigDirectory(dir)
 }
 
+func configYAMLETag(data []byte, key [32]byte) string {
+	mac := hmac.New(sha256.New, key[:])
+	_, _ = mac.Write(data)
+	return `"` + fmt.Sprintf("%x", mac.Sum(nil)) + `"`
+}
+
+func configYAMLMatchesIfMatch(header string, current []byte, key [32]byte) bool {
+	expected := configYAMLETag(current, key)
+	for candidate := range strings.SplitSeq(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) PutConfigYAML(c *gin.Context) {
+	warnings := beginConfigCommitWarnings(c)
 	body, err := readConfigYAMLBody(c)
 	if err != nil {
 		if errors.Is(err, errConfigYAMLBodyTooLarge) {
@@ -585,7 +621,11 @@ func (h *Handler) PutConfigYAML(c *gin.Context) {
 	if !h.notifyConfigCommitted(c, callback, commit) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "changed": []string{"config"}})
+	response := gin.H{"ok": true, "changed": []string{"config"}}
+	if cleanupError := warnings.cleanupErrorMessage(); cleanupError != "" {
+		response["cleanup_error"] = cleanupError
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // commitConfigYAMLLocked validates, persists and publishes a complete YAML config.
@@ -597,9 +637,11 @@ func (h *Handler) commitConfigYAMLLocked(
 ) (ConfigCommit, ConfigCommittedFunc, bool) {
 	current, errRead := os.ReadFile(h.configFilePath)
 	currentExists := errRead == nil
-	switch {
-	case currentExists && containsPlaceholder:
-		placeholderKey, errKey := h.configYAMLRedactionKey()
+	ifMatch := strings.TrimSpace(c.GetHeader("If-Match"))
+	var placeholderKey [32]byte
+	if currentExists && (containsPlaceholder || ifMatch != "") {
+		var errKey error
+		placeholderKey, errKey = h.configYAMLRedactionKey()
 		if errKey != nil {
 			log.WithError(errKey).Error("failed to load config YAML redaction key")
 			c.JSON(
@@ -608,6 +650,19 @@ func (h *Handler) commitConfigYAMLLocked(
 			)
 			return ConfigCommit{}, nil, false
 		}
+	}
+	if ifMatch != "" && (!currentExists || !configYAMLMatchesIfMatch(ifMatch, current, placeholderKey)) {
+		c.JSON(
+			http.StatusPreconditionFailed,
+			gin.H{
+				"error":   "config_changed",
+				"message": "config changed since it was loaded; review the latest version before saving again",
+			},
+		)
+		return ConfigCommit{}, nil, false
+	}
+	switch {
+	case currentExists && containsPlaceholder:
 		var err error
 		body, err = restoreConfigYAMLPlaceholdersWithKey(body, current, placeholderKey)
 		if err != nil {
@@ -629,10 +684,11 @@ func (h *Handler) commitConfigYAMLLocked(
 
 	newCfg, _, errValidate := h.validateConfigBody(body)
 	if errValidate != nil {
-		var internalError *configValidationInternalError
-		if errors.As(errValidate, &internalError) {
+		if internalError, ok := errors.AsType[*configValidationInternalError](errValidate); ok {
 			log.WithError(internalError.Unwrap()).Error("failed to validate config YAML")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "validation_failed", "message": internalError.Error()})
+			c.JSON(
+				http.StatusInternalServerError, gin.H{"error": "validation_failed", "message": internalError.Error()},
+			)
 			return ConfigCommit{}, nil, false
 		}
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_config", "message": errValidate.Error()})
@@ -640,10 +696,26 @@ func (h *Handler) commitConfigYAMLLocked(
 	}
 
 	if currentExists {
+		latest, errLatest := os.ReadFile(h.configFilePath)
+		if errLatest != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "read_failed", "message": errLatest.Error()})
+			return ConfigCommit{}, nil, false
+		}
+		if !bytes.Equal(latest, current) {
+			c.JSON(
+				http.StatusPreconditionFailed,
+				gin.H{
+					"error":   "config_changed",
+					"message": "config changed since it was loaded; review the latest version before saving again",
+				},
+			)
+			return ConfigCommit{}, nil, false
+		}
 		if err := config.SaveLastGood(h.configFilePath); err != nil {
 			log.Errorf("failed to save last-good config: %v", err)
 			c.JSON(
-				http.StatusInternalServerError, gin.H{"error": "backup_failed", "message": "failed to save config backup"},
+				http.StatusInternalServerError,
+				gin.H{"error": "backup_failed", "message": "failed to save config backup"},
 			)
 			return ConfigCommit{}, nil, false
 		}
@@ -844,10 +916,11 @@ func (h *Handler) ValidateConfigYAML(c *gin.Context) {
 	}
 	_, warnings, errValidate := h.validateConfigBody(body)
 	if errValidate != nil {
-		var internalError *configValidationInternalError
-		if errors.As(errValidate, &internalError) {
+		if internalError, ok := errors.AsType[*configValidationInternalError](errValidate); ok {
 			log.WithError(internalError.Unwrap()).Error("failed to validate config YAML")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "validation_failed", "message": internalError.Error()})
+			c.JSON(
+				http.StatusInternalServerError, gin.H{"error": "validation_failed", "message": internalError.Error()},
+			)
 			return
 		}
 		message := errValidate.Error()
@@ -935,6 +1008,7 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 		return
 	}
 	c.Header("Content-Type", "application/yaml; charset=utf-8")
+	c.Header("ETag", configYAMLETag(data, placeholderKey))
 	c.Header("Cache-Control", "no-store")
 	c.Header("X-Content-Type-Options", "nosniff")
 	if _, err = c.Writer.Write(redacted); err != nil {
@@ -945,6 +1019,8 @@ func (h *Handler) GetConfigYAML(c *gin.Context) {
 // GetDebug returns the debug flag.
 func (h *Handler) GetDebug(c *gin.Context) {
 	cfg := h.configSnapshot()
+	// configSnapshot may be nil for a handler created without runtime configuration.
+	// noinspection GoDfaConstantCondition
 	c.JSON(200, gin.H{"debug": cfg != nil && cfg.Debug})
 }
 func (h *Handler) PutDebug(c *gin.Context) {
@@ -954,6 +1030,8 @@ func (h *Handler) PutDebug(c *gin.Context) {
 // GetUsageStatisticsEnabled returns the usage statistics enabled flag.
 func (h *Handler) GetUsageStatisticsEnabled(c *gin.Context) {
 	cfg := h.configSnapshot()
+	// configSnapshot may be nil for a handler created without runtime configuration.
+	// noinspection GoDfaConstantCondition
 	c.JSON(200, gin.H{"usage-statistics-enabled": cfg != nil && cfg.UsageStatisticsEnabled})
 }
 func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
@@ -963,6 +1041,8 @@ func (h *Handler) PutUsageStatisticsEnabled(c *gin.Context) {
 // GetLoggingToFile returns the logging-to-file flag.
 func (h *Handler) GetLoggingToFile(c *gin.Context) {
 	cfg := h.configSnapshot()
+	// configSnapshot may be nil for a handler created without runtime configuration.
+	// noinspection GoDfaConstantCondition
 	c.JSON(200, gin.H{"logging-to-file": cfg != nil && cfg.LoggingToFile})
 }
 func (h *Handler) PutLoggingToFile(c *gin.Context) {
@@ -987,10 +1067,12 @@ func (h *Handler) PutLogsMaxTotalSizeMB(c *gin.Context) {
 		return
 	}
 	value := max(*body.Value, 0)
-	if _, ok := h.mutateConfig(c, func(cfg *config.Config) error {
-		cfg.LogsMaxTotalSizeMB = value
-		return nil
-	}); ok {
+	if _, ok := h.mutateConfig(
+		c, func(cfg *config.Config) error {
+			cfg.LogsMaxTotalSizeMB = value
+			return nil
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1016,10 +1098,12 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 	if value < 0 {
 		value = 10
 	}
-	if _, ok := h.mutateConfig(c, func(cfg *config.Config) error {
-		cfg.ErrorLogsMaxFiles = value
-		return nil
-	}); ok {
+	if _, ok := h.mutateConfig(
+		c, func(cfg *config.Config) error {
+			cfg.ErrorLogsMaxFiles = value
+			return nil
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1027,6 +1111,8 @@ func (h *Handler) PutErrorLogsMaxFiles(c *gin.Context) {
 // GetRequestLog returns the request log flag.
 func (h *Handler) GetRequestLog(c *gin.Context) {
 	cfg := h.configSnapshot()
+	// configSnapshot may be nil for a handler created without runtime configuration.
+	// noinspection GoDfaConstantCondition
 	c.JSON(200, gin.H{"request-log": cfg != nil && cfg.RequestLog})
 }
 func (h *Handler) PutRequestLog(c *gin.Context) {
@@ -1036,6 +1122,8 @@ func (h *Handler) PutRequestLog(c *gin.Context) {
 // GetWebsocketAuth returns the websocket auth flag.
 func (h *Handler) GetWebsocketAuth(c *gin.Context) {
 	cfg := h.configSnapshot()
+	// configSnapshot may be nil for a handler created without runtime configuration.
+	// noinspection GoDfaConstantCondition
 	c.JSON(200, gin.H{"ws-auth": cfg != nil && cfg.WebsocketAuth})
 }
 func (h *Handler) PutWebsocketAuth(c *gin.Context) {
@@ -1071,6 +1159,8 @@ func (h *Handler) PutMaxRetryInterval(c *gin.Context) {
 // GetForceModelPrefix returns the force model prefix flag.
 func (h *Handler) GetForceModelPrefix(c *gin.Context) {
 	cfg := h.configSnapshot()
+	// configSnapshot may be nil for a handler created without runtime configuration.
+	// noinspection GoDfaConstantCondition
 	c.JSON(200, gin.H{"force-model-prefix": cfg != nil && cfg.ForceModelPrefix})
 }
 func (h *Handler) PutForceModelPrefix(c *gin.Context) {
@@ -1082,6 +1172,10 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 	switch normalized {
 	case "", "round-robin", "roundrobin", "rr":
 		return "round-robin", true
+	case "weighted-round-robin", "weightedroundrobin", "wrr":
+		return "weighted-round-robin", true
+	case "quota-aware", "quotaaware", "qa":
+		return "quota-aware", true
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
 	default:
@@ -1116,10 +1210,12 @@ func (h *Handler) PutRoutingStrategy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid strategy"})
 		return
 	}
-	if _, ok = h.mutateConfig(c, func(cfg *config.Config) error {
-		cfg.Routing.Strategy = normalized
-		return nil
-	}); ok {
+	if _, ok = h.mutateConfig(
+		c, func(cfg *config.Config) error {
+			cfg.Routing.Strategy = normalized
+			return nil
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1142,10 +1238,12 @@ func (h *Handler) PutAutoRefreshInterval(c *gin.Context) {
 		return
 	}
 	value := max(*body.Value, 0)
-	if _, ok := h.mutateConfig(c, func(cfg *config.Config) error {
-		cfg.AutoRefreshInterval = value
-		return nil
-	}); ok {
+	if _, ok := h.mutateConfig(
+		c, func(cfg *config.Config) error {
+			cfg.AutoRefreshInterval = value
+			return nil
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
@@ -1173,10 +1271,12 @@ func (h *Handler) PutProxyURL(c *gin.Context) {
 	)
 }
 func (h *Handler) DeleteProxyURL(c *gin.Context) {
-	if _, ok := h.mutateConfig(c, func(cfg *config.Config) error {
-		cfg.ProxyURL = ""
-		return nil
-	}); ok {
+	if _, ok := h.mutateConfig(
+		c, func(cfg *config.Config) error {
+			cfg.ProxyURL = ""
+			return nil
+		},
+	); ok {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
