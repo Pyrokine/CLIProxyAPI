@@ -1,4 +1,4 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 WORKDIR /app
 
@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
       -X 'main.buildDate=${BUILD_DATE}'" \
     -o ./CLIProxyAPI ./cmd/server/
 
-FROM alpine:3.22.0
+FROM alpine:3.24.1
 
 RUN apk add --no-cache tzdata
 
