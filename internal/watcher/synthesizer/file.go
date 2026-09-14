@@ -102,6 +102,9 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		return nil, fmt.Errorf("parse auth JSON: %w", errUnmarshal)
 	}
+	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, errWeight
+	}
 	t, _ := metadata["type"].(string)
 	provider := strings.ToLower(strings.TrimSpace(t))
 	if ctx.PluginAuthParser != nil {
@@ -131,6 +134,9 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 			ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
 			if err := coreauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
 				return nil, err
+			}
+			if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
+				return nil, errWeight
 			}
 			return []*coreauth.Auth{auth}, nil
 		}
@@ -191,6 +197,9 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 	if err := coreauth.ApplyCustomHeadersFromMetadata(a); err != nil {
 		return nil, err
 	}
+	if errWeight := coreauth.ApplyAuthWeightMetadata(a, metadata); errWeight != nil {
+		return nil, errWeight
+	}
 	// Read priority from auth file
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {
@@ -205,13 +214,13 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 	}
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
 	if provider == "gemini-cli" {
-		if virtuals := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
-			for _, v := range virtuals {
+		if virtualAuths := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtualAuths) > 0 {
+			for _, v := range virtualAuths {
 				ApplyAuthExcludedModelsMeta(v, cfg, perAccountExcluded, "oauth")
 			}
-			out := make([]*coreauth.Auth, 0, 1+len(virtuals))
+			out := make([]*coreauth.Auth, 0, 1+len(virtualAuths))
 			out = append(out, a)
-			out = append(out, virtuals...)
+			out = append(out, virtualAuths...)
 			return out, nil
 		}
 	}
@@ -248,7 +257,7 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 	if label == "" {
 		label = originalProvider
 	}
-	virtuals := make([]*coreauth.Auth, 0, len(projects))
+	virtualAuths := make([]*coreauth.Auth, 0, len(projects))
 	for _, projectID := range projects {
 		attrs := map[string]string{
 			"runtime_only":           "true",
@@ -261,9 +270,12 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 		if authPath != "" {
 			attrs["path"] = authPath
 		}
-		// Propagate priority from primary auth to virtual auths
+		// Propagate routing attributes from primary auth to virtual auths.
 		if priorityVal, hasPriority := primary.Attributes["priority"]; hasPriority && priorityVal != "" {
 			attrs["priority"] = priorityVal
+		}
+		if weight, hasWeight := primary.Attributes[coreauth.AttributeWeight]; hasWeight {
+			attrs[coreauth.AttributeWeight] = weight
 		}
 		metadataCopy := map[string]any{
 			"email":             email,
@@ -304,9 +316,9 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			UpdatedAt:  primary.UpdatedAt,
 			Runtime:    geminicli.NewVirtualCredential(projectID, shared),
 		}
-		virtuals = append(virtuals, virtual)
+		virtualAuths = append(virtualAuths, virtual)
 	}
-	return virtuals
+	return virtualAuths
 }
 
 // splitGeminiProjectIDs extracts and deduplicates project IDs from metadata.

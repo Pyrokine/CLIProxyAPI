@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
@@ -31,8 +30,8 @@ const (
 	oAuthGrantType = "urn:ietf:params:oauth:grant-type:device_code"
 )
 
-// TokenData represents the OAuth credentials, including access and refresh tokens.
-type TokenData struct {
+// OAuthTokenData represents the OAuth credentials, including access and refresh tokens.
+type OAuthTokenData struct {
 	AccessToken string `json:"access_token"`
 	// RefreshToken is used to obtain a new access token when the current one expires.
 	RefreshToken string `json:"refresh_token,omitempty"`
@@ -115,7 +114,7 @@ func (a *Auth) generatePKCEPair() (string, string, error) {
 }
 
 // RefreshTokens exchanges a refresh token for a new access token.
-func (a *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenData, error) {
+func (a *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*OAuthTokenData, error) {
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", refreshToken)
@@ -157,7 +156,7 @@ func (a *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
 
-	return &TokenData{
+	return &OAuthTokenData{
 		AccessToken:  tokenData.AccessToken,
 		TokenType:    tokenData.TokenType,
 		RefreshToken: tokenData.RefreshToken,
@@ -226,7 +225,7 @@ func (a *Auth) InitiateDeviceFlow(ctx context.Context) (*DeviceFlow, error) {
 }
 
 // PollForToken polls the token endpoint with the device code to obtain an access token.
-func (a *Auth) PollForToken(ctx context.Context, deviceCode, codeVerifier string) (*TokenData, error) {
+func (a *Auth) PollForToken(ctx context.Context, deviceCode, codeVerifier string) (*OAuthTokenData, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -316,7 +315,7 @@ func (a *Auth) PollForToken(ctx context.Context, deviceCode, codeVerifier string
 			return nil, fmt.Errorf("failed to parse token response: %w", err)
 		}
 
-		return &TokenData{
+		return &OAuthTokenData{
 			AccessToken:  response.AccessToken,
 			RefreshToken: response.RefreshToken,
 			TokenType:    response.TokenType,
@@ -339,16 +338,8 @@ func waitForQwenPoll(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-// RefreshTokensWithRetry attempts to refresh tokens with a specified number of retries upon failure.
-func (a *Auth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (
-	*TokenData,
-	error,
-) {
-	return auth.RefreshWithRetry(ctx, refreshToken, maxRetries, a.RefreshTokens, nil)
-}
-
-// CreateTokenStorage creates a TokenStorage object from a TokenData object.
-func (a *Auth) CreateTokenStorage(tokenData *TokenData) *TokenStorage {
+// CreateTokenStorage creates a TokenStorage object from a OAuthTokenData object.
+func (a *Auth) CreateTokenStorage(tokenData *OAuthTokenData) *TokenStorage {
 	storage := &TokenStorage{
 		AccessToken:  tokenData.AccessToken,
 		RefreshToken: tokenData.RefreshToken,
@@ -358,13 +349,4 @@ func (a *Auth) CreateTokenStorage(tokenData *TokenData) *TokenStorage {
 	}
 
 	return storage
-}
-
-// UpdateTokenStorage updates an existing token storage with new token data
-func (a *Auth) UpdateTokenStorage(storage *TokenStorage, tokenData *TokenData) {
-	storage.AccessToken = tokenData.AccessToken
-	storage.RefreshToken = tokenData.RefreshToken
-	storage.LastRefresh = time.Now().Format(time.RFC3339)
-	storage.ResourceURL = tokenData.ResourceURL
-	storage.Expire = tokenData.Expire
 }

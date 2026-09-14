@@ -57,7 +57,7 @@ type cancellingBaseDirManagerStore struct {
 	cancel context.CancelFunc
 }
 
-func (s *cancellingBaseDirManagerStore) SetBaseDir(string) {
+func (s *cancellingBaseDirManagerStore) SetBaseDir(_ string) {
 	s.cancel()
 }
 

@@ -70,15 +70,16 @@ func TestBuildAPIKeyClientsCounts(t *testing.T) {
 		},
 		ClaudeKey: []config.ClaudeKey{{APIKey: "c1"}},
 		CodexKey:  []config.CodexKey{{APIKey: "x1"}, {APIKey: "x2"}},
+		XAIKey:    []config.XAIKey{{APIKey: "xai-1"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
 			{APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "o1"}, {APIKey: "o2"}}},
 			{Disabled: true, APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "skip-me"}}},
 		},
 	}
 
-	gemini, vertex, claude, codex, compat := BuildAPIKeyClients(cfg)
-	if gemini != 3 || vertex != 1 || claude != 1 || codex != 2 || compat != 2 {
-		t.Fatalf("unexpected counts: %d %d %d %d %d", gemini, vertex, claude, codex, compat)
+	gemini, vertex, claude, codex, xai, compat := BuildAPIKeyClients(cfg)
+	if gemini != 3 || vertex != 1 || claude != 1 || codex != 2 || xai != 1 || compat != 2 {
+		t.Fatalf("unexpected counts: %d %d %d %d %d %d", gemini, vertex, claude, codex, xai, compat)
 	}
 }
 
@@ -177,7 +178,7 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 
 	var geminiAPIKeyAuth *coreauth.Auth
 	var geminiPrimary *coreauth.Auth
-	virtuals := make([]*coreauth.Auth, 0)
+	virtualAuths := make([]*coreauth.Auth, 0)
 	for _, a := range auths {
 		switch {
 		case a.Provider == "gemini" && a.Attributes["api_key"] == "g-key":
@@ -185,7 +186,7 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 		case a.Attributes["gemini_virtual_primary"] == "true":
 			geminiPrimary = a
 		case strings.TrimSpace(a.Attributes["gemini_virtual_parent"]) != "":
-			virtuals = append(virtuals, a)
+			virtualAuths = append(virtualAuths, a)
 		}
 	}
 	if geminiAPIKeyAuth == nil {
@@ -219,10 +220,10 @@ func TestSnapshotCoreAuths_ConfigAndAuthFiles(t *testing.T) {
 		t.Fatalf("expected auth_kind=oauth, got %s", geminiPrimary.Attributes["auth_kind"])
 	}
 
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtual auths, got %d", len(virtuals))
+	if len(virtualAuths) != 2 {
+		t.Fatalf("expected 2 virtual auths, got %d", len(virtualAuths))
 	}
-	for _, v := range virtuals {
+	for _, v := range virtualAuths {
 		if v.Attributes["gemini_virtual_parent"] != geminiPrimary.ID {
 			t.Fatalf("virtual auth missing parent link to %s", geminiPrimary.ID)
 		}
@@ -450,10 +451,10 @@ func TestStartAndStopSuccess(t *testing.T) {
 		t.Fatalf("failed to create config file: %v", err)
 	}
 
-	var reloads int32
+	var reloads atomic.Int32
 	w, err := NewWatcher(
 		configPath, authDir, func(*config.Config) bool {
-			atomic.AddInt32(&reloads, 1)
+			reloads.Add(1)
 			return true
 		},
 	)
@@ -472,7 +473,7 @@ func TestStartAndStopSuccess(t *testing.T) {
 	if err := w.Stop(); err != nil {
 		t.Fatalf("expected Stop to succeed: %v", err)
 	}
-	if got := atomic.LoadInt32(&reloads); got != 1 {
+	if got := reloads.Load(); got != 1 {
 		t.Fatalf("expected one reload callback, got %d", got)
 	}
 }
@@ -498,19 +499,20 @@ func TestStartObservesAtomicConfigReplace(t *testing.T) {
 	writeConfig(configPath, 8317)
 
 	reloadedPorts := make(chan int, 4)
-	w, err := NewWatcher(configPath, authDir, func(cfg *config.Config) bool {
-		select {
-		case reloadedPorts <- cfg.Port:
-		default:
-		}
-		return true
-	})
+	w, err := NewWatcher(
+		configPath, authDir, func(cfg *config.Config) bool {
+			select {
+			case reloadedPorts <- cfg.Port:
+			default:
+			}
+			return true
+		},
+	)
 	if err != nil {
 		t.Fatalf("create watcher: %v", err)
 	}
 	w.SetConfig(&config.Config{Port: 8317, AuthDir: authDir})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	defer func() { _ = w.Stop() }()
 	if err = w.Start(ctx); err != nil {
 		t.Fatalf("start watcher: %v", err)
@@ -605,12 +607,12 @@ func TestAddOrUpdateClientSkipsUnchanged(t *testing.T) {
 	data, _ := os.ReadFile(authFile)
 	sum := sha256.Sum256(data)
 
-	var reloads int32
+	var reloads atomic.Int32
 	w := &Watcher{
 		authDir:        tmpDir,
 		lastAuthHashes: make(map[string]string),
 		reloadCallback: func(*config.Config) bool {
-			atomic.AddInt32(&reloads, 1)
+			reloads.Add(1)
 			return true
 		},
 	}
@@ -619,7 +621,7 @@ func TestAddOrUpdateClientSkipsUnchanged(t *testing.T) {
 	w.lastAuthHashes[w.normalizeAuthPath(authFile)] = hexString(sum[:])
 
 	w.addOrUpdateClient(authFile)
-	if got := atomic.LoadInt32(&reloads); got != 0 {
+	if got := reloads.Load(); got != 0 {
 		t.Fatalf("expected no reload for unchanged file, got %d", got)
 	}
 }
@@ -631,12 +633,12 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 		t.Fatalf("failed to create auth file: %v", err)
 	}
 
-	var reloads int32
+	var reloads atomic.Int32
 	w := &Watcher{
 		authDir:        tmpDir,
 		lastAuthHashes: make(map[string]string),
 		reloadCallback: func(*config.Config) bool {
-			atomic.AddInt32(&reloads, 1)
+			reloads.Add(1)
 			return true
 		},
 	}
@@ -644,7 +646,7 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 
 	w.addOrUpdateClient(authFile)
 
-	if got := atomic.LoadInt32(&reloads); got != 1 {
+	if got := reloads.Load(); got != 1 {
 		t.Fatalf("expected reload callback once, got %d", got)
 	}
 	// Use normalizeAuthPath to match how addOrUpdateClient stores the key
@@ -657,13 +659,13 @@ func TestAddOrUpdateClientTriggersReloadAndHash(t *testing.T) {
 func TestRemoveClientRemovesHash(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
-	var reloads int32
+	var reloads atomic.Int32
 
 	w := &Watcher{
 		authDir:        tmpDir,
 		lastAuthHashes: make(map[string]string),
 		reloadCallback: func(*config.Config) bool {
-			atomic.AddInt32(&reloads, 1)
+			reloads.Add(1)
 			return true
 		},
 	}
@@ -675,7 +677,7 @@ func TestRemoveClientRemovesHash(t *testing.T) {
 	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; ok {
 		t.Fatal("expected hash to be removed after deletion")
 	}
-	if got := atomic.LoadInt32(&reloads); got != 1 {
+	if got := reloads.Load(); got != 1 {
 		t.Fatalf("expected reload callback once, got %d", got)
 	}
 }
@@ -1053,19 +1055,39 @@ func TestHandleEventConfigChangeSchedulesReload(t *testing.T) {
 	}
 
 	var reloads int32
+	reloadDone := make(chan struct{}, 1)
 	w := &Watcher{
 		authDir:        authDir,
 		configPath:     configPath,
 		lastAuthHashes: make(map[string]string),
-		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
+		reloadCallback: func(*config.Config) bool {
+			atomic.AddInt32(&reloads, 1)
+			select {
+			case reloadDone <- struct{}{}:
+			default:
+			}
+			return true
+		},
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
 	w.handleEvent(fsnotify.Event{Name: configPath, Op: fsnotify.Write})
 
-	time.Sleep(400 * time.Millisecond)
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("config change did not trigger reload")
+	}
+	w.configApplyMu.Lock()
+	w.clientsMutex.RLock()
+	lastConfigHash := w.lastConfigHash
+	w.clientsMutex.RUnlock()
+	w.configApplyMu.Unlock()
 	if atomic.LoadInt32(&reloads) != 1 {
 		t.Fatalf("expected config change to trigger reload once, got %d", reloads)
+	}
+	if lastConfigHash == "" {
+		t.Fatal("expected lastConfigHash to be set after reload")
 	}
 }
 
@@ -1970,7 +1992,7 @@ func TestPersistConfigAndAuthAsyncInvokePersister(t *testing.T) {
 
 	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
-	for completed := 0; completed < 2; completed++ {
+	for range 2 {
 		select {
 		case <-store.persisted:
 		case <-timer.C:
@@ -2000,24 +2022,38 @@ func TestScheduleConfigReloadDebounces(t *testing.T) {
 	}
 
 	var reloads int32
+	reloadDone := make(chan struct{}, 1)
 	w := &Watcher{
-		configPath:     cfgPath,
-		authDir:        authDir,
-		reloadCallback: func(*config.Config) bool { atomic.AddInt32(&reloads, 1); return true },
+		configPath: cfgPath,
+		authDir:    authDir,
+		reloadCallback: func(*config.Config) bool {
+			atomic.AddInt32(&reloads, 1)
+			select {
+			case reloadDone <- struct{}{}:
+			default:
+			}
+			return true
+		},
 	}
 	w.SetConfig(&config.Config{AuthDir: authDir})
 
 	w.scheduleConfigReload()
 	w.scheduleConfigReload()
 
-	time.Sleep(400 * time.Millisecond)
+	select {
+	case <-reloadDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("debounced config reload did not run")
+	}
+	w.configApplyMu.Lock()
+	w.clientsMutex.RLock()
+	lastConfigHash := w.lastConfigHash
+	w.clientsMutex.RUnlock()
+	w.configApplyMu.Unlock()
 
 	if atomic.LoadInt32(&reloads) != 1 {
 		t.Fatalf("expected single debounced reload, got %d", reloads)
 	}
-	w.clientsMutex.RLock()
-	lastConfigHash := w.lastConfigHash
-	w.clientsMutex.RUnlock()
 	if lastConfigHash == "" {
 		t.Fatal("expected lastConfigHash to be set after reload")
 	}

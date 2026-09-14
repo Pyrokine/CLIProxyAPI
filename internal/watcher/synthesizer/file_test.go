@@ -125,6 +125,9 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	if auths[0].Attributes["header:X-Test"] != "value" {
 		t.Errorf("expected custom header to be applied, got %q", auths[0].Attributes["header:X-Test"])
 	}
+	if digest := auths[0].Attributes[coreauth.PersistedSHA256Attribute]; len(digest) != 64 {
+		t.Fatalf("synthesized persisted digest = %q", digest)
+	}
 }
 
 func TestFileSynthesizer_Synthesize_RejectsRestrictedHeader(t *testing.T) {
@@ -470,9 +473,9 @@ func TestSynthesizeGeminiVirtualAuths_SingleProject(t *testing.T) {
 		"type":       "gemini",
 	}
 
-	virtuals := synthesizeGeminiVirtualAuths(primary, metadata, now)
-	if virtuals != nil {
-		t.Error("single project should not create virtuals")
+	virtualAuths := synthesizeGeminiVirtualAuths(primary, metadata, now)
+	if virtualAuths != nil {
+		t.Error("single project should not create virtual auths")
 	}
 }
 
@@ -497,10 +500,10 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 		"disable_cooling": true,
 	}
 
-	virtuals := synthesizeGeminiVirtualAuths(primary, metadata, now)
+	virtualAuths := synthesizeGeminiVirtualAuths(primary, metadata, now)
 
-	if len(virtuals) != 3 {
-		t.Fatalf("expected 3 virtuals, got %d", len(virtuals))
+	if len(virtualAuths) != 3 {
+		t.Fatalf("expected 3 virtual auths, got %d", len(virtualAuths))
 	}
 
 	// Check primary is disabled
@@ -517,9 +520,9 @@ func TestSynthesizeGeminiVirtualAuths_MultiProject(t *testing.T) {
 		t.Error("expected virtual_children to contain project-a")
 	}
 
-	// Check virtuals
+	// Check virtual auths
 	projectIDs := []string{"project-a", "project-b", "project-c"}
-	for i, v := range virtuals {
+	for i, v := range virtualAuths {
 		if v.Provider != "gemini-cli" {
 			t.Errorf("expected provider gemini-cli, got %s", v.Provider)
 		}
@@ -570,19 +573,19 @@ func TestSynthesizeGeminiVirtualAuths_EmptyProviderAndLabel(t *testing.T) {
 		"type":       "gemini",
 	}
 
-	virtuals := synthesizeGeminiVirtualAuths(primary, metadata, now)
+	virtualAuths := synthesizeGeminiVirtualAuths(primary, metadata, now)
 
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
+	if len(virtualAuths) != 2 {
+		t.Fatalf("expected 2 virtual auths, got %d", len(virtualAuths))
 	}
 
 	// Check that empty provider defaults to gemini-cli
-	if virtuals[0].Provider != "gemini-cli" {
-		t.Errorf("expected provider gemini-cli (default), got %s", virtuals[0].Provider)
+	if virtualAuths[0].Provider != "gemini-cli" {
+		t.Errorf("expected provider gemini-cli (default), got %s", virtualAuths[0].Provider)
 	}
 	// Check that empty label defaults to provider
-	if !strings.Contains(virtuals[0].Label, "gemini-cli") {
-		t.Errorf("expected label to contain gemini-cli, got %s", virtuals[0].Label)
+	if !strings.Contains(virtualAuths[0].Label, "gemini-cli") {
+		t.Errorf("expected label to contain gemini-cli, got %s", virtualAuths[0].Label)
 	}
 }
 
@@ -600,10 +603,10 @@ func TestSynthesizeGeminiVirtualAuths_NilPrimaryAttributes(t *testing.T) {
 		"type":       "gemini",
 	}
 
-	virtuals := synthesizeGeminiVirtualAuths(primary, metadata, now)
+	virtualAuths := synthesizeGeminiVirtualAuths(primary, metadata, now)
 
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
+	if len(virtualAuths) != 2 {
+		t.Fatalf("expected 2 virtual auths, got %d", len(virtualAuths))
 	}
 	// Nil attributes should be initialized
 	if primary.Attributes == nil {
@@ -704,9 +707,9 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Should have 4 auths: 1 primary (disabled) + 3 virtuals
+	// Should have 4 auths: 1 primary (disabled) + 3 virtual auths
 	if len(auths) != 4 {
-		t.Fatalf("expected 4 auths (1 primary + 3 virtuals), got %d", len(auths))
+		t.Fatalf("expected 4 auths (1 primary + 3 virtual auths), got %d", len(auths))
 	}
 
 	// First auth should be the primary (disabled)
@@ -721,7 +724,7 @@ func TestFileSynthesizer_Synthesize_MultiProjectGemini(t *testing.T) {
 		t.Errorf("expected primary priority 10, got %q", gotPriority)
 	}
 
-	// Remaining auths should be virtuals
+	// Remaining auths should be virtual auths
 	for i := 1; i < 4; i++ {
 		v := auths[i]
 		if v.Status != coreauth.StatusActive {

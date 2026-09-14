@@ -3,6 +3,8 @@ package synthesizer
 import (
 	"testing"
 	"time"
+
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func TestSynthesizeAuthFileCanonicalizesWindowsCaseVariantID(t *testing.T) {
@@ -23,5 +25,8 @@ func TestSynthesizeAuthFileCanonicalizesWindowsCaseVariantID(t *testing.T) {
 	}
 	if auths[0].ID != "shared.json" || auths[0].FileName != "shared.json" {
 		t.Fatalf("synthesized auth identity = (%q, %q)", auths[0].ID, auths[0].FileName)
+	}
+	if digest := auths[0].Attributes[coreauth.PersistedSHA256Attribute]; len(digest) != 64 {
+		t.Fatalf("synthesized persisted digest = %q", digest)
 	}
 }

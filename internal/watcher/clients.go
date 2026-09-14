@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,10 +74,10 @@ func (w *Watcher) reloadClientsWithConfig(
 		w.clientsMutex.Unlock()
 	}
 
-	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount := BuildAPIKeyClients(
+	geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, openAICompatCount := BuildAPIKeyClients(
 		cfg,
 	)
-	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	totalAPIKeyClients := geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + openAICompatCount
 	log.Debugf("loaded %d API key clients", totalAPIKeyClients)
 
 	var authFileCount int
@@ -123,7 +124,9 @@ func (w *Watcher) reloadClientsWithConfig(
 									Path: path, SHA256: digest,
 								}
 							} else {
-								log.WithError(errDigest).Warnf("failed to capture auth version for %s", filepath.Base(path))
+								log.WithError(errDigest).Warnf(
+									"failed to capture auth version for %s", filepath.Base(path),
+								)
 							}
 							if cacheAuthContents {
 								var auth coreauth.Auth
@@ -156,19 +159,20 @@ func (w *Watcher) reloadClientsWithConfig(
 		w.authRescanMu.Unlock()
 	}
 
-	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
+	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + openAICompatCount
 
 	w.refreshAuthState(forceAuthRefresh)
 	w.notifyUsageRefresh()
 
 	log.Infof(
-		"full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d OpenAI-compat)",
+		"full client load complete - %d clients (%d auth files + %d Gemini API keys + %d Vertex API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d OpenAI-compat)",
 		totalNewClients,
 		authFileCount,
 		geminiAPIKeyCount,
 		vertexCompatAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
+		xaiAPIKeyCount,
 		openAICompatCount,
 	)
 	return true
@@ -213,14 +217,14 @@ func (w *Watcher) addOrUpdateClient(path string) {
 		log.Error("config is nil, cannot add or update client")
 		return
 	}
-	sctx := &synthesizer.SynthesisContext{
+	synthesisContext := &synthesizer.SynthesisContext{
 		Config:           cfg,
 		AuthDir:          authDir,
 		Now:              readAt,
 		IDGenerator:      synthesizer.NewStableIDGenerator(),
 		PluginAuthParser: parser,
 	}
-	generated, errSynthesize := synthesizer.SynthesizeAuthFile(sctx, path, data)
+	generated, errSynthesize := synthesizer.SynthesizeAuthFile(synthesisContext, path, data)
 	if errSynthesize != nil {
 		log.Errorf("failed to synthesize auth file %s: %v", filepath.Base(path), errSynthesize)
 		return
@@ -277,9 +281,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 	}
 
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
-	for id, a := range w.fileAuthsByPath[normalized] {
-		oldByID[id] = a
-	}
+	maps.Copy(oldByID, w.fileAuthsByPath[normalized])
 	if len(newByID) > 0 {
 		w.fileAuthsByPath[normalized] = authIDSet(newByID)
 	} else {
@@ -312,9 +314,7 @@ func (w *Watcher) removeClient(path string) {
 	w.clientsMutex.Lock()
 	cfg := w.config
 	oldByID := make(map[string]*coreauth.Auth, len(w.fileAuthsByPath[normalized]))
-	for id, a := range w.fileAuthsByPath[normalized] {
-		oldByID[id] = a
-	}
+	maps.Copy(oldByID, w.fileAuthsByPath[normalized])
 	version, hasVersion := w.lastAuthVersions[normalized]
 	delete(w.lastAuthHashes, normalized)
 	delete(w.lastAuthVersions, normalized)
@@ -433,11 +433,12 @@ func (w *Watcher) loadFileClients(cfg *config.Config) int {
 	return authFileCount
 }
 
-func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
+func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int) {
 	geminiAPIKeyCount := 0
 	vertexCompatAPIKeyCount := 0
 	claudeAPIKeyCount := 0
 	codexAPIKeyCount := 0
+	xaiAPIKeyCount := 0
 	openAICompatCount := 0
 
 	if len(cfg.GeminiKey) > 0 {
@@ -455,6 +456,9 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 	if len(cfg.CodexKey) > 0 {
 		codexAPIKeyCount += len(cfg.CodexKey)
 	}
+	if len(cfg.XAIKey) > 0 {
+		xaiAPIKeyCount += len(cfg.XAIKey)
+	}
 	if len(cfg.OpenAICompatibility) > 0 {
 		for _, compatConfig := range cfg.OpenAICompatibility {
 			if compatConfig.Disabled {
@@ -463,7 +467,7 @@ func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int) {
 			openAICompatCount += len(compatConfig.APIKeyEntries)
 		}
 	}
-	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, openAICompatCount
+	return geminiAPIKeyCount, vertexCompatAPIKeyCount, claudeAPIKeyCount, codexAPIKeyCount, xaiAPIKeyCount, openAICompatCount
 }
 
 func (w *Watcher) persistConfigAsync() {
@@ -593,10 +597,7 @@ func (w *Watcher) triggerServerUpdate(cfg *config.Config) {
 		return
 	}
 
-	delay := serverUpdateDebounce - now.Sub(w.serverUpdateLast)
-	if delay < 10*time.Millisecond {
-		delay = 10 * time.Millisecond
-	}
+	delay := max(serverUpdateDebounce-now.Sub(w.serverUpdateLast), 10*time.Millisecond)
 	w.serverUpdatePend = true
 	if w.serverUpdateTimer != nil {
 		w.serverUpdateTimer.Stop()

@@ -43,7 +43,7 @@ func shouldForcePersist(ctx context.Context) bool {
 	return ok && enabled
 }
 
-// WithAllowAuthRecreate marks an auth update as an intentional recreate after removal.
+// WithAllowAuthRecreate marks an auth update as an intentional re-creation after removal.
 func WithAllowAuthRecreate(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -61,6 +61,7 @@ func shouldAllowAuthRecreate(ctx context.Context) bool {
 }
 
 // WithRuntimeOnlyRemove marks a removal whose durable store deletion has already completed.
+// noinspection GoUnusedExportedFunction
 func WithRuntimeOnlyRemove(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()

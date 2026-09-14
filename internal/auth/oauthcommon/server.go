@@ -217,10 +217,3 @@ func (s *OAuthServer) isPortAvailable() bool {
 	}()
 	return true
 }
-
-// IsRunning returns whether the server is currently running.
-func (s *OAuthServer) IsRunning() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.running
-}

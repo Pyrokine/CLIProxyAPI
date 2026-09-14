@@ -18,10 +18,12 @@ func TestMetadataRefreshCommitRejectsStalePublication(t *testing.T) {
 		t.Fatal("stale metadata commit reported current")
 	}
 	called := false
-	if staleCommit.CommitRefresh(func() bool {
-		called = true
-		return true
-	}) {
+	if staleCommit.CommitRefresh(
+		func() bool {
+			called = true
+			return true
+		},
+	) {
 		t.Fatal("stale metadata commit succeeded")
 	}
 	if called {
@@ -44,10 +46,12 @@ func TestMetadataRefreshCommitPublishesWithManagerState(t *testing.T) {
 		t.Fatalf("shared metadata changed before manager publication: %#v", got)
 	}
 	managerPublished := false
-	if !commit.CommitRefresh(func() bool {
-		managerPublished = true
-		return true
-	}) {
+	if !commit.CommitRefresh(
+		func() bool {
+			managerPublished = true
+			return true
+		},
+	) {
 		t.Fatal("metadata commit failed")
 	}
 	if !managerPublished {

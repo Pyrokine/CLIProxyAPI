@@ -43,6 +43,54 @@ func TestConfigSynthesizer_Synthesize_NilConfig(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizerAddsConfigIndexToEveryProvider(t *testing.T) {
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			GeminiKey:       []config.GeminiKey{{APIKey: "gemini-key"}},
+			InteractionsKey: []config.GeminiKey{{APIKey: "interactions-key"}},
+			ClaudeKey:       []config.ClaudeKey{{APIKey: "claude-key"}},
+			CodexKey:        []config.CodexKey{{APIKey: "codex-key"}},
+			XAIKey:          []config.XAIKey{{APIKey: "xai-key"}},
+			OpenAICompatibility: []config.OpenAICompatibility{
+				{
+					Name: "compat", APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "compat-key"}},
+				},
+			},
+			VertexCompatAPIKey: []config.VertexCompatKey{{APIKey: "vertex-key"}},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := NewConfigSynthesizer().Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	wantProviders := map[string]bool{
+		"gemini":              false,
+		"gemini-interactions": false,
+		"claude":              false,
+		"codex":               false,
+		"xai":                 false,
+		"compat":              false,
+		"vertex":              false,
+	}
+	for _, auth := range auths {
+		if _, expected := wantProviders[auth.Provider]; !expected {
+			continue
+		}
+		if got := auth.Attributes[coreauth.AttributeConfigIndex]; got != "0" {
+			t.Fatalf("provider %s config_index = %q, want 0", auth.Provider, got)
+		}
+		wantProviders[auth.Provider] = true
+	}
+	for provider, found := range wantProviders {
+		if !found {
+			t.Fatalf("provider %s auth was not synthesized", provider)
+		}
+	}
+}
+
 func TestConfigSynthesizer_GeminiKeys(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -345,6 +393,34 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 	if auths[0].Attributes["websockets"] != "true" {
 		t.Errorf("expected websockets=true, got %s", auths[0].Attributes["websockets"])
+	}
+	if auths[0].Attributes[coreauth.AttributeConfigIndex] != "0" {
+		t.Errorf("expected config_index=0, got %s", auths[0].Attributes[coreauth.AttributeConfigIndex])
+	}
+}
+
+func TestConfigSynthesizer_CodexKeys_PreservesSourceConfigIndex(t *testing.T) {
+	synth := NewConfigSynthesizer()
+	ctx := &SynthesisContext{
+		Config: &config.Config{
+			CodexKey: []config.CodexKey{
+				{APIKey: ""},
+				{APIKey: "codex-key", BaseURL: "https://api.openai.com"},
+			},
+		},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("auth count = %d, want 1", len(auths))
+	}
+	if got := auths[0].Attributes[coreauth.AttributeConfigIndex]; got != "1" {
+		t.Fatalf("config_index = %q, want 1", got)
 	}
 }
 
@@ -685,11 +761,13 @@ func TestConfigSynthesizer_RouteIdentityStableAcrossReorderAndDelete(t *testing.
 			buildConfig: func(proxyURLs []string) *config.Config {
 				keys := make([]config.ClaudeKey, 0, len(proxyURLs))
 				for _, proxyURL := range proxyURLs {
-					keys = append(keys, config.ClaudeKey{
-						APIKey:   "shared-claude-key",
-						BaseURL:  "https://claude.example.com",
-						ProxyURL: proxyURL,
-					})
+					keys = append(
+						keys, config.ClaudeKey{
+							APIKey:   "shared-claude-key",
+							BaseURL:  "https://claude.example.com",
+							ProxyURL: proxyURL,
+						},
+					)
 				}
 				return &config.Config{ClaudeKey: keys}
 			},
@@ -700,11 +778,13 @@ func TestConfigSynthesizer_RouteIdentityStableAcrossReorderAndDelete(t *testing.
 			buildConfig: func(proxyURLs []string) *config.Config {
 				keys := make([]config.CodexKey, 0, len(proxyURLs))
 				for _, proxyURL := range proxyURLs {
-					keys = append(keys, config.CodexKey{
-						APIKey:   "shared-codex-key",
-						BaseURL:  "https://codex.example.com",
-						ProxyURL: proxyURL,
-					})
+					keys = append(
+						keys, config.CodexKey{
+							APIKey:   "shared-codex-key",
+							BaseURL:  "https://codex.example.com",
+							ProxyURL: proxyURL,
+						},
+					)
 				}
 				return &config.Config{CodexKey: keys}
 			},
@@ -712,56 +792,60 @@ func TestConfigSynthesizer_RouteIdentityStableAcrossReorderAndDelete(t *testing.
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			idsByProxy := func(proxyURLs []string) map[string]string {
-				t.Helper()
-				auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
-					Config:      tt.buildConfig(proxyURLs),
-					Now:         time.Unix(1_700_000_000, 0),
-					IDGenerator: NewStableIDGenerator(),
-				})
-				if err != nil {
-					t.Fatalf("synthesize %s auths: %v", tt.provider, err)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				idsByProxy := func(proxyURLs []string) map[string]string {
+					t.Helper()
+					auths, err := NewConfigSynthesizer().Synthesize(
+						&SynthesisContext{
+							Config:      tt.buildConfig(proxyURLs),
+							Now:         time.Unix(1_700_000_000, 0),
+							IDGenerator: NewStableIDGenerator(),
+						},
+					)
+					if err != nil {
+						t.Fatalf("synthesize %s auths: %v", tt.provider, err)
+					}
+					ids := make(map[string]string, len(auths))
+					for _, auth := range auths {
+						if auth.Provider == tt.provider {
+							ids[auth.ProxyURL] = auth.ID
+						}
+					}
+					if len(ids) != len(proxyURLs) {
+						t.Fatalf("got %d %s auths, want %d", len(ids), tt.provider, len(proxyURLs))
+					}
+					return ids
 				}
-				ids := make(map[string]string, len(auths))
-				for _, auth := range auths {
-					if auth.Provider == tt.provider {
-						ids[auth.ProxyURL] = auth.ID
+
+				proxyA := "https://proxy-a.example.com"
+				proxyB := "https://proxy-b.example.com"
+				original := idsByProxy([]string{proxyA, proxyB})
+				reordered := idsByProxy([]string{proxyB, proxyA})
+				remaining := idsByProxy([]string{proxyB})
+
+				if original[proxyA] == original[proxyB] {
+					t.Fatalf("different routes received the same auth ID %q", original[proxyA])
+				}
+				for _, proxyURL := range []string{proxyA, proxyB} {
+					if reordered[proxyURL] != original[proxyURL] {
+						t.Errorf(
+							"auth ID changed after reorder for %s: got %q, want %q",
+							proxyURL,
+							reordered[proxyURL],
+							original[proxyURL],
+						)
 					}
 				}
-				if len(ids) != len(proxyURLs) {
-					t.Fatalf("got %d %s auths, want %d", len(ids), tt.provider, len(proxyURLs))
-				}
-				return ids
-			}
-
-			proxyA := "https://proxy-a.example.com"
-			proxyB := "https://proxy-b.example.com"
-			original := idsByProxy([]string{proxyA, proxyB})
-			reordered := idsByProxy([]string{proxyB, proxyA})
-			remaining := idsByProxy([]string{proxyB})
-
-			if original[proxyA] == original[proxyB] {
-				t.Fatalf("different routes received the same auth ID %q", original[proxyA])
-			}
-			for _, proxyURL := range []string{proxyA, proxyB} {
-				if reordered[proxyURL] != original[proxyURL] {
+				if remaining[proxyB] != original[proxyB] {
 					t.Errorf(
-						"auth ID changed after reorder for %s: got %q, want %q",
-						proxyURL,
-						reordered[proxyURL],
-						original[proxyURL],
+						"auth ID changed after deleting the other route: got %q, want %q",
+						remaining[proxyB],
+						original[proxyB],
 					)
 				}
-			}
-			if remaining[proxyB] != original[proxyB] {
-				t.Errorf(
-					"auth ID changed after deleting the other route: got %q, want %q",
-					remaining[proxyB],
-					original[proxyB],
-				)
-			}
-		})
+			},
+		)
 	}
 }
 
@@ -832,79 +916,83 @@ func TestConfigSynthesizer_RoutingMetadataStableAcrossReorderAndDelete(t *testin
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			buildConfig := func(variants []string) *config.Config {
-				cfg := &config.Config{}
-				for _, variant := range variants {
-					if tt.configureClaude != nil {
-						key := config.ClaudeKey{
-							APIKey:  "shared-claude-key",
-							BaseURL: "https://claude.example.com",
+		t.Run(
+			tt.name, func(t *testing.T) {
+				buildConfig := func(variants []string) *config.Config {
+					cfg := &config.Config{}
+					for _, variant := range variants {
+						if tt.configureClaude != nil {
+							key := config.ClaudeKey{
+								APIKey:  "shared-claude-key",
+								BaseURL: "https://claude.example.com",
+							}
+							tt.configureClaude(&key, variant)
+							cfg.ClaudeKey = append(cfg.ClaudeKey, key)
+							continue
 						}
-						tt.configureClaude(&key, variant)
-						cfg.ClaudeKey = append(cfg.ClaudeKey, key)
-						continue
+						key := config.CodexKey{
+							APIKey:  "shared-codex-key",
+							BaseURL: "https://codex.example.com",
+						}
+						tt.configureCodex(&key, variant)
+						cfg.CodexKey = append(cfg.CodexKey, key)
 					}
-					key := config.CodexKey{
-						APIKey:  "shared-codex-key",
-						BaseURL: "https://codex.example.com",
+					return cfg
+				}
+				idsByMetadata := func(variants []string) map[string]string {
+					t.Helper()
+					auths, err := NewConfigSynthesizer().Synthesize(
+						&SynthesisContext{
+							Config:      buildConfig(variants),
+							Now:         time.Unix(1_700_000_000, 0),
+							IDGenerator: NewStableIDGenerator(),
+						},
+					)
+					if err != nil {
+						t.Fatalf("synthesize %s auths: %v", tt.provider, err)
 					}
-					tt.configureCodex(&key, variant)
-					cfg.CodexKey = append(cfg.CodexKey, key)
-				}
-				return cfg
-			}
-			idsByMetadata := func(variants []string) map[string]string {
-				t.Helper()
-				auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
-					Config:      buildConfig(variants),
-					Now:         time.Unix(1_700_000_000, 0),
-					IDGenerator: NewStableIDGenerator(),
-				})
-				if err != nil {
-					t.Fatalf("synthesize %s auths: %v", tt.provider, err)
-				}
-				ids := make(map[string]string, len(auths))
-				for _, auth := range auths {
-					if auth.Provider != tt.provider {
-						continue
+					ids := make(map[string]string, len(auths))
+					for _, auth := range auths {
+						if auth.Provider != tt.provider {
+							continue
+						}
+						identity := auth.Attributes[tt.identityAttr]
+						if identity == "" {
+							t.Fatalf("%s auth missing %s", tt.provider, tt.identityAttr)
+						}
+						ids[identity] = auth.ID
 					}
-					identity := auth.Attributes[tt.identityAttr]
-					if identity == "" {
-						t.Fatalf("%s auth missing %s", tt.provider, tt.identityAttr)
+					if len(ids) != len(variants) {
+						t.Fatalf("got %d %s auth identities, want %d", len(ids), tt.provider, len(variants))
 					}
-					ids[identity] = auth.ID
+					return ids
 				}
-				if len(ids) != len(variants) {
-					t.Fatalf("got %d %s auth identities, want %d", len(ids), tt.provider, len(variants))
-				}
-				return ids
-			}
 
-			original := idsByMetadata([]string{"a", "b"})
-			reordered := idsByMetadata([]string{"b", "a"})
-			remaining := idsByMetadata([]string{"b"})
-			for identity, originalID := range original {
-				if reordered[identity] != originalID {
-					t.Errorf(
-						"auth ID changed after reorder for %s: got %q, want %q",
-						identity,
-						reordered[identity],
-						originalID,
-					)
+				original := idsByMetadata([]string{"a", "b"})
+				reordered := idsByMetadata([]string{"b", "a"})
+				remaining := idsByMetadata([]string{"b"})
+				for identity, originalID := range original {
+					if reordered[identity] != originalID {
+						t.Errorf(
+							"auth ID changed after reorder for %s: got %q, want %q",
+							identity,
+							reordered[identity],
+							originalID,
+						)
+					}
 				}
-			}
-			for identity, remainingID := range remaining {
-				if original[identity] != remainingID {
-					t.Errorf(
-						"auth ID changed after deleting the other route for %s: got %q, want %q",
-						identity,
-						remainingID,
-						original[identity],
-					)
+				for identity, remainingID := range remaining {
+					if original[identity] != remainingID {
+						t.Errorf(
+							"auth ID changed after deleting the other route for %s: got %q, want %q",
+							identity,
+							remainingID,
+							original[identity],
+						)
+					}
 				}
-			}
-		})
+			},
+		)
 	}
 }
 

@@ -110,7 +110,9 @@ func PublishTokenFile(path string, writeCandidate func(string) error) error {
 		return fmt.Errorf("stat token candidate: %w", errStat)
 	}
 	pathInfo, errPathInfo := os.Lstat(candidatePath)
-	if errPathInfo != nil || !pathInfo.Mode().IsRegular() || !os.SameFile(candidateInfo, openInfo) || !os.SameFile(openInfo, pathInfo) {
+	if errPathInfo != nil || !pathInfo.Mode().IsRegular() || !os.SameFile(
+		candidateInfo, openInfo,
+	) || !os.SameFile(openInfo, pathInfo) {
 		_ = candidateFile.Close()
 		return fmt.Errorf("token candidate changed before publication")
 	}

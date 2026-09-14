@@ -167,9 +167,14 @@ func (w *Watcher) reloadConfigSnapshot(snapshot *configSnapshot) bool {
 			newConfig.AuthDir = resolvedAuthDir
 		}
 	}
-	if _, err := modelcatalog.LoadOrInit(w.configPath, newConfig); err != nil {
+	modelCatalog, err := modelcatalog.LoadOrInit(w.configPath, newConfig)
+	if err != nil {
 		log.Errorf("failed to reload model catalog: %v", err)
 		return false
+	}
+	if modelCatalog.LoadMetadata.RecoveredFromPrevious {
+		log.WithField("current_error", modelCatalog.LoadMetadata.CurrentError).
+			Warn("model-catalog: restored models.json from models.previous.json during config reload")
 	}
 
 	w.clientsMutex.RLock()

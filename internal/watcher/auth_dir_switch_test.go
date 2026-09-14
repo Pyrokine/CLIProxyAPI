@@ -9,6 +9,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func cleanupTestWatcher(t *testing.T, watcher *Watcher) {
+	t.Helper()
+	t.Cleanup(func() {
+		if errStop := watcher.Stop(); errStop != nil {
+			t.Errorf("stop watcher: %v", errStop)
+		}
+	})
+}
+
 func TestAcknowledgeConfigFileSwitchesAuthDirectoryWatch(t *testing.T) {
 	root := t.TempDir()
 	oldDir := filepath.Join(root, "old-auth")
@@ -32,7 +41,7 @@ func TestAcknowledgeConfigFileSwitchesAuthDirectoryWatch(t *testing.T) {
 	if errNew != nil {
 		t.Fatal(errNew)
 	}
-	defer watcher.Stop()
+	cleanupTestWatcher(t, watcher)
 	watcher.SetConfig(oldCfg)
 	if errAdd := watcher.watcher.Add(filepath.Dir(configPath)); errAdd != nil {
 		t.Fatal(errAdd)
@@ -102,7 +111,7 @@ func TestReloadConfigPreparesAuthWatchBeforeRuntimeCallback(t *testing.T) {
 	if errNew != nil {
 		t.Fatal(errNew)
 	}
-	defer watcher.Stop()
+	cleanupTestWatcher(t, watcher)
 	watcher.SetConfig(&config.Config{AuthDir: oldDir, Port: 8317})
 	if errAdd := watcher.watcher.Add(filepath.Dir(configPath)); errAdd != nil {
 		t.Fatal(errAdd)
@@ -140,7 +149,7 @@ func TestReloadConfigSwitchesAuthDirectoryWatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer watcher.Stop()
+	cleanupTestWatcher(t, watcher)
 	watcher.SetConfig(oldCfg)
 	if err = watcher.watcher.Add(filepath.Dir(configPath)); err != nil {
 		t.Fatal(err)

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -114,6 +116,78 @@ func TestFileTokenStorePersistsDisabledCredentialWithoutExistingFile(t *testing.
 	}
 }
 
+func TestFileTokenStoreSaveExistingMetadataRefreshesAuthState(t *testing.T) {
+	tests := []struct {
+		name          string
+		existingToken string
+		savedToken    string
+	}{
+		{name: "unchanged content", existingToken: "token", savedToken: "token"},
+		{name: "overwritten content", existingToken: "old-token", savedToken: "new-token"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				baseDir := t.TempDir()
+				fileName := "antigravity-user.json"
+				path := filepath.Join(baseDir, fileName)
+				existing := []byte(`{"type":"antigravity","access_token":"` + testCase.existingToken + `","disabled":false}`)
+				if errWrite := os.WriteFile(path, existing, 0o644); errWrite != nil {
+					t.Fatalf("write existing auth file: %v", errWrite)
+				}
+
+				store := NewFileTokenStore()
+				store.SetBaseDir(baseDir)
+				auth := &cliproxyauth.Auth{
+					ID: fileName,
+					Metadata: map[string]any{
+						"type":         "antigravity",
+						"access_token": testCase.savedToken,
+					},
+				}
+
+				savedPath, errSave := store.Save(context.Background(), auth)
+				if errSave != nil {
+					t.Fatalf("Save() error = %v", errSave)
+				}
+				if savedPath != path {
+					t.Fatalf("Save() path = %q, want %q", savedPath, path)
+				}
+				if auth.FileName != fileName {
+					t.Errorf("FileName = %q, want %q", auth.FileName, fileName)
+				}
+				for attribute, want := range map[string]string{
+					cliproxyauth.AttributePath:          path,
+					cliproxyauth.AttributeSource:        path,
+					cliproxyauth.AttributeSourceBackend: cliproxyauth.AuthSourceFile,
+				} {
+					if got := auth.Attributes[attribute]; got != want {
+						t.Errorf("attribute %s = %q, want %q", attribute, got, want)
+					}
+				}
+				info, errStat := os.Stat(path)
+				if errStat != nil {
+					t.Fatalf("stat saved auth file: %v", errStat)
+				}
+				if runtime.GOOS != "windows" {
+					if got := info.Mode().Perm(); got != 0o600 {
+						t.Errorf("saved auth mode = %04o, want 0600", got)
+					}
+				}
+				persisted, errRead := os.ReadFile(path)
+				if errRead != nil {
+					t.Fatalf("read saved auth file: %v", errRead)
+				}
+				expected := []byte(`{"type":"antigravity","access_token":"` + testCase.savedToken + `","disabled":false}`)
+				if !util.JSONEqual(persisted, expected) {
+					t.Errorf("saved auth file = %s, want JSON equal to %s", persisted, expected)
+				}
+			},
+		)
+	}
+}
+
 func TestFileTokenStoreSaveWithBaseDirUsesScopedDirectory(t *testing.T) {
 	defaultDir := t.TempDir()
 	scopedDir := t.TempDir()
@@ -197,7 +271,7 @@ type cancellingFileTokenStorage struct {
 	saved  bool
 }
 
-func (s *cancellingFileTokenStorage) SetMetadata(map[string]any) {
+func (s *cancellingFileTokenStorage) SetMetadata(_ map[string]any) {
 	s.cancel()
 }
 

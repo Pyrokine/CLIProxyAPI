@@ -31,7 +31,7 @@ const (
 )
 
 var codexRefreshGroup singleflight.Group
-var codexRefreshTimeout = 60 * time.Second
+var codexRefreshTimeout = 30 * time.Second
 
 // Auth handles the OpenAI OAuth2 authentication flow.
 // It manages the HTTP client and provides methods for generating authorization URLs,
@@ -178,10 +178,10 @@ func (o *Auth) ExchangeCodeForTokensWithRedirect(
 	return bundle, nil
 }
 
-// RefreshTokens refreshes an access token using a refresh token.
+// refreshTokens refreshes an access token using a refresh token.
 // This method is called when an access token has expired. It makes a request to the
 // token endpoint to obtain a new set of tokens.
-func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenData, error) {
+func (o *Auth) refreshTokens(ctx context.Context, refreshToken string) (*TokenData, error) {
 	if refreshToken == "" {
 		return nil, fmt.Errorf("refresh token is required")
 	}
@@ -189,10 +189,10 @@ func (o *Auth) RefreshTokens(ctx context.Context, refreshToken string) (*TokenDa
 		ctx = context.Background()
 	}
 
-	refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
-	defer cancelRefresh()
 	result, err, _ := codexRefreshGroup.Do(
-		refreshToken, func() (interface{}, error) {
+		refreshToken, func() (any, error) {
+			refreshCtx, cancelRefresh := context.WithTimeout(context.WithoutCancel(ctx), codexRefreshTimeout)
+			defer cancelRefresh()
 			return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
 		},
 	)
@@ -297,7 +297,7 @@ func (o *Auth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, 
 	*TokenData,
 	error,
 ) {
-	return auth.RefreshWithRetry(ctx, refreshToken, maxRetries, o.RefreshTokens, isNonRetryableRefreshErr)
+	return auth.RefreshWithRetry(ctx, refreshToken, maxRetries, o.refreshTokens, isNonRetryableRefreshErr)
 }
 
 func isNonRetryableRefreshErr(err error) bool {
@@ -306,16 +306,4 @@ func isNonRetryableRefreshErr(err error) bool {
 	}
 	raw := strings.ToLower(err.Error())
 	return strings.Contains(raw, "refresh_token_reused")
-}
-
-// UpdateTokenStorage updates an existing TokenStorage with new token data.
-// This is typically called after a successful token refresh to persist the new credentials.
-func (o *Auth) UpdateTokenStorage(storage *TokenStorage, TokenData *TokenData) {
-	storage.IDToken = TokenData.IDToken
-	storage.AccessToken = TokenData.AccessToken
-	storage.RefreshToken = TokenData.RefreshToken
-	storage.AccountID = TokenData.AccountID
-	storage.LastRefresh = time.Now().Format(time.RFC3339)
-	storage.Email = TokenData.Email
-	storage.Expire = TokenData.Expire
 }

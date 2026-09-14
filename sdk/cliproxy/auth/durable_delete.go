@@ -134,22 +134,24 @@ func RecoverDurablePersistedFileDeletions(
 		return nil, fmt.Errorf("persisted credential root is empty")
 	}
 	deletions := make([]*DurablePersistedFileDeletion, 0)
-	errWalk := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), durablePersistedDeletionJournalSuffix) {
+	errWalk := filepath.WalkDir(
+		root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), durablePersistedDeletionJournalSuffix) {
+				return nil
+			}
+			deletion, keep, errRecover := recoverDurablePersistedFileDeletion(path)
+			if errRecover != nil {
+				return errRecover
+			}
+			if keep {
+				deletions = append(deletions, deletion)
+			}
 			return nil
-		}
-		deletion, keep, errRecover := recoverDurablePersistedFileDeletion(path)
-		if errRecover != nil {
-			return errRecover
-		}
-		if keep {
-			deletions = append(deletions, deletion)
-		}
-		return nil
-	})
+		},
+	)
 	if errWalk != nil {
 		return nil, fmt.Errorf("recover persisted credential deletions: %w", errWalk)
 	}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 )
@@ -97,9 +98,7 @@ func PersistedVersionForAuth(path string, auth *Auth) (PersistedVersion, error) 
 			if errUnmarshal := json.Unmarshal(storageRaw, &merged); errUnmarshal != nil {
 				err = errUnmarshal
 			} else {
-				for key, value := range auth.Metadata {
-					merged[key] = value
-				}
+				maps.Copy(merged, auth.Metadata)
 				raw, err = json.Marshal(merged)
 			}
 		}

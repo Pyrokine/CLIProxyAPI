@@ -26,14 +26,18 @@ func TestRefreshTokensDetachedRequestHasTimeout(t *testing.T) {
 	defer func() { codexRefreshTimeout = originalTimeout }()
 	codexRefreshGroup = singleflight.Group{}
 	defer func() { codexRefreshGroup = singleflight.Group{} }()
-	auth := &Auth{httpClient: &http.Client{Transport: roundTripFunc(
-		func(req *http.Request) (*http.Response, error) {
-			<-req.Context().Done()
-			return nil, req.Context().Err()
+	auth := &Auth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				},
+			),
 		},
-	)}}
+	}
 	started := time.Now()
-	_, errRefresh := auth.RefreshTokens(context.Background(), "timeout-refresh-token")
+	_, errRefresh := auth.refreshTokens(context.Background(), "timeout-refresh-token")
 	if !errors.Is(errRefresh, context.DeadlineExceeded) {
 		t.Fatalf("RefreshTokens() error = %v", errRefresh)
 	}
@@ -43,12 +47,12 @@ func TestRefreshTokensDetachedRequestHasTimeout(t *testing.T) {
 }
 
 func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	auth := &Auth{
 		httpClient: &http.Client{
 			Transport: roundTripFunc(
 				func(req *http.Request) (*http.Response, error) {
-					atomic.AddInt32(&calls, 1)
+					calls.Add(1)
 					return &http.Response{
 						StatusCode: http.StatusBadRequest,
 						Body: io.NopCloser(
@@ -69,20 +73,20 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 	if !strings.Contains(strings.ToLower(err.Error()), "refresh_token_reused") {
 		t.Fatalf("expected refresh_token_reused in error, got: %v", err)
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Fatalf("expected 1 refresh attempt, got %d", got)
 	}
 }
 
 func TestRefreshTokensSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	auth := &Auth{
 		httpClient: &http.Client{
 			Transport: roundTripFunc(
 				func(req *http.Request) (*http.Response, error) {
-					if atomic.AddInt32(&calls, 1) == 1 {
+					if calls.Add(1) == 1 {
 						close(entered)
 					}
 					<-release
@@ -108,7 +112,7 @@ func TestRefreshTokensSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			_, err := auth.RefreshTokens(context.Background(), "shared_codex_refresh_token")
+			_, err := auth.refreshTokens(context.Background(), "shared_codex_refresh_token")
 			errs <- err
 		}()
 	}
@@ -129,7 +133,7 @@ func TestRefreshTokensSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
 			t.Fatalf("refresh failed: %v", err)
 		}
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Fatalf("refresh calls = %d, want 1", got)
 	}
 }

@@ -109,6 +109,13 @@ func ParsePluginAuthFile(
 	if errHeaders := cliproxyauth.ApplyCustomHeadersFromMetadata(auth); errHeaders != nil {
 		return nil, true, errHeaders
 	}
+	var metadata map[string]any
+	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+		return nil, true, fmt.Errorf("parse plugin auth metadata: %w", errUnmarshal)
+	}
+	if errWeight := cliproxyauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
+		return nil, true, errWeight
+	}
 	return auth, true, nil
 }
 
@@ -162,6 +169,9 @@ func (s *FileTokenStore) saveWithBaseDir(
 	if auth == nil {
 		return "", fmt.Errorf("auth filestore: auth is nil")
 	}
+	if errWeight := cliproxyauth.ValidateAuthWeight(auth); errWeight != nil {
+		return "", errWeight
+	}
 
 	path, err := s.resolveAuthPath(auth, baseDir)
 	if err != nil {
@@ -214,12 +224,12 @@ func (s *FileTokenStore) saveWithBaseDir(
 				if errSecure := internalauth.SecureTokenFile(path); errSecure != nil {
 					return "", fmt.Errorf("auth filestore: secure existing file failed: %w", errSecure)
 				}
-				return path, nil
+				break
 			}
 			if errWrite := internalauth.WriteTokenFileAtomic(path, raw); errWrite != nil {
 				return "", fmt.Errorf("auth filestore: write existing failed: %w", errWrite)
 			}
-			return path, nil
+			break
 		} else if !os.IsNotExist(errRead) {
 			return "", fmt.Errorf("auth filestore: read existing failed: %w", errRead)
 		}
@@ -236,7 +246,9 @@ func (s *FileTokenStore) saveWithBaseDir(
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
-	auth.Attributes["path"] = path
+	auth.Attributes[cliproxyauth.AttributePath] = path
+	auth.Attributes[cliproxyauth.AttributeSource] = path
+	auth.Attributes[cliproxyauth.AttributeSourceBackend] = cliproxyauth.AuthSourceFile
 
 	if strings.TrimSpace(auth.FileName) == "" {
 		auth.FileName = auth.ID
@@ -353,6 +365,9 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 	if err = json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
+	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, errWeight
+	}
 	provider, _ := metadata["type"].(string)
 	provider = strings.TrimSpace(provider)
 	info, errStat := os.Stat(path)
@@ -440,6 +455,9 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 	}
 	if err := cliproxyauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
 		return nil, err
+	}
+	if errWeight := cliproxyauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
+		return nil, errWeight
 	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email

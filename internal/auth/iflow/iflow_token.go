@@ -22,7 +22,7 @@ type TokenStorage struct {
 	Metadata map[string]any `json:"-"`
 }
 
-// SetMetadata allows external callers to inject metadata into the storage before saving.
+// SetMetadata injects metadata before the token is persisted.
 func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }

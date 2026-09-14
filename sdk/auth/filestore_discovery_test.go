@@ -32,17 +32,23 @@ func TestFileTokenStoreProjectDiscoveryPreservesConcurrentSave(t *testing.T) {
 	release := make(chan struct{})
 	store := NewFileTokenStore()
 	store.SetBaseDir(dir)
-	store.httpClient = &http.Client{Transport: discoveryRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		close(started)
-		<-release
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body: io.NopCloser(strings.NewReader(
-				`{"cloudaicompanionProject":"discovered-project"}`,
-			)),
-			Header: make(http.Header),
-		}, nil
-	})}
+	store.httpClient = &http.Client{
+		Transport: discoveryRoundTripFunc(
+			func(*http.Request) (*http.Response, error) {
+				close(started)
+				<-release
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(
+						strings.NewReader(
+							`{"cloudaicompanionProject":"discovered-project"}`,
+						),
+					),
+					Header: make(http.Header),
+				}, nil
+			},
+		),
+	}
 
 	type listResult struct {
 		auths []*cliproxyauth.Auth
@@ -55,15 +61,17 @@ func TestFileTokenStoreProjectDiscoveryPreservesConcurrentSave(t *testing.T) {
 	}()
 	<-started
 
-	_, errSave := store.Save(context.Background(), &cliproxyauth.Auth{
-		ID:       "antigravity.json",
-		FileName: "antigravity.json",
-		Metadata: map[string]any{
-			"type":          "antigravity",
-			"access_token":  "new-token",
-			"refresh_token": "new-refresh",
+	_, errSave := store.Save(
+		context.Background(), &cliproxyauth.Auth{
+			ID:       "antigravity.json",
+			FileName: "antigravity.json",
+			Metadata: map[string]any{
+				"type":          "antigravity",
+				"access_token":  "new-token",
+				"refresh_token": "new-refresh",
+			},
 		},
-	})
+	)
 	if errSave != nil {
 		t.Fatalf("Save() error = %v", errSave)
 	}
@@ -108,17 +116,21 @@ func TestFileTokenStoreProjectDiscoveryPersistsRefreshedGeminiToken(t *testing.T
 
 	store := NewFileTokenStore()
 	store.SetBaseDir(dir)
-	store.httpClient = &http.Client{Transport: discoveryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		body := `{"cloudaicompanionProject":"gemini-project"}`
-		if req.URL.Host == "oauth.test" {
-			body = `{"access_token":"refreshed-token"}`
-		}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(body)),
-			Header:     make(http.Header),
-		}, nil
-	})}
+	store.httpClient = &http.Client{
+		Transport: discoveryRoundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				body := `{"cloudaicompanionProject":"gemini-project"}`
+				if req.URL.Host == "oauth.test" {
+					body = `{"access_token":"refreshed-token"}`
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Header:     make(http.Header),
+				}, nil
+			},
+		),
+	}
 
 	auths, errList := store.List(context.Background())
 	if errList != nil {
@@ -152,11 +164,15 @@ func TestFileTokenStoreListCancelsProjectDiscovery(t *testing.T) {
 	started := make(chan struct{})
 	store := NewFileTokenStore()
 	store.SetBaseDir(dir)
-	store.httpClient = &http.Client{Transport: discoveryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		close(started)
-		<-req.Context().Done()
-		return nil, req.Context().Err()
-	})}
+	store.httpClient = &http.Client{
+		Transport: discoveryRoundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				close(started)
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			},
+		),
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
@@ -190,10 +206,14 @@ func TestFileTokenStoreProjectDiscoveryHasInternalTimeout(t *testing.T) {
 	store := NewFileTokenStore()
 	store.SetBaseDir(dir)
 	store.projectDiscoveryTimeout = 25 * time.Millisecond
-	store.httpClient = &http.Client{Transport: discoveryRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		<-req.Context().Done()
-		return nil, req.Context().Err()
-	})}
+	store.httpClient = &http.Client{
+		Transport: discoveryRoundTripFunc(
+			func(req *http.Request) (*http.Response, error) {
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			},
+		),
+	}
 
 	startedAt := time.Now()
 	auths, errList := store.List(context.Background())

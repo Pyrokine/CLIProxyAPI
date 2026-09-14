@@ -68,11 +68,13 @@ func TestPollForTokenCancellationWinsCompletedErrorResponse(t *testing.T) {
 		t.Fatalf("create stdout pipe: %v", err)
 	}
 	os.Stdout = writer
-	t.Cleanup(func() {
-		os.Stdout = originalStdout
-		_ = reader.Close()
-		_ = writer.Close()
-	})
+	t.Cleanup(
+		func() {
+			os.Stdout = originalStdout
+			_ = reader.Close()
+			_ = writer.Close()
+		},
+	)
 
 	_, err = auth.PollForToken(ctx, "device-code", "code-verifier")
 	if !errors.Is(err, context.Canceled) {
@@ -114,11 +116,13 @@ func TestPollForTokenCancellationDuringBodyReadDoesNotLogFailure(t *testing.T) {
 		t.Fatalf("create stdout pipe: %v", err)
 	}
 	os.Stdout = writer
-	t.Cleanup(func() {
-		os.Stdout = originalStdout
-		_ = reader.Close()
-		_ = writer.Close()
-	})
+	t.Cleanup(
+		func() {
+			os.Stdout = originalStdout
+			_ = reader.Close()
+			_ = writer.Close()
+		},
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

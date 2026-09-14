@@ -240,25 +240,6 @@ func (ia *Auth) CreateTokenStorage(data *TokenData) *TokenStorage {
 	}
 }
 
-// UpdateTokenStorage updates the persisted token storage with latest token data.
-func (ia *Auth) UpdateTokenStorage(storage *TokenStorage, data *TokenData) {
-	if storage == nil || data == nil {
-		return
-	}
-	storage.AccessToken = data.AccessToken
-	storage.RefreshToken = data.RefreshToken
-	storage.LastRefresh = time.Now().Format(time.RFC3339)
-	storage.Expire = data.Expire
-	if data.APIKey != "" {
-		storage.APIKey = data.APIKey
-	}
-	if data.Email != "" {
-		storage.Email = data.Email
-	}
-	storage.TokenType = data.TokenType
-	storage.Scope = data.Scope
-}
-
 // tokenResponse models the OAuth token endpoint response.
 type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
@@ -488,7 +469,9 @@ func (ia *Auth) RefreshAPIKey(ctx context.Context, cookie, name string) (*KeyDat
 	}
 
 	if !keyResp.Success {
-		return nil, fmt.Errorf("iflow cookie refresh: POST request not successful: %s", sanitizeIFlowText(keyResp.Message))
+		return nil, fmt.Errorf(
+			"iflow cookie refresh: POST request not successful: %s", sanitizeIFlowText(keyResp.Message),
+		)
 	}
 
 	return &keyResp.Data, nil
@@ -535,15 +518,4 @@ func (ia *Auth) CreateCookieTokenStorage(data *TokenData) *TokenStorage {
 		LastRefresh: time.Now().Format(time.RFC3339),
 		Type:        "iflow",
 	}
-}
-
-// UpdateCookieTokenStorage updates the persisted token storage with refreshed API key data.
-func (ia *Auth) UpdateCookieTokenStorage(storage *TokenStorage, KeyData *KeyData) {
-	if storage == nil || KeyData == nil {
-		return
-	}
-
-	storage.APIKey = KeyData.APIKey
-	storage.Expire = KeyData.ExpireTime
-	storage.LastRefresh = time.Now().Format(time.RFC3339)
 }

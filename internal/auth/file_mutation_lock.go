@@ -32,15 +32,17 @@ func LockFileMutation(path string) func() {
 	lock.mu.Lock()
 	var once sync.Once
 	return func() {
-		once.Do(func() {
-			lock.mu.Unlock()
-			fileMutationLocks.Lock()
-			lock.refs--
-			if lock.refs == 0 && fileMutationLocks.byPath[key] == lock {
-				delete(fileMutationLocks.byPath, key)
-			}
-			fileMutationLocks.Unlock()
-		})
+		once.Do(
+			func() {
+				lock.mu.Unlock()
+				fileMutationLocks.Lock()
+				lock.refs--
+				if lock.refs == 0 && fileMutationLocks.byPath[key] == lock {
+					delete(fileMutationLocks.byPath, key)
+				}
+				fileMutationLocks.Unlock()
+			},
+		)
 	}
 }
 

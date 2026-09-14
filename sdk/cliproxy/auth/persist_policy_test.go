@@ -150,7 +150,9 @@ func TestLoadClearsTombstoneForLoadedAuth(t *testing.T) {
 		},
 	}
 	mgr := NewManager(store, nil, nil)
-	mgr.Remove(context.Background(), "auth-1")
+	if errRemove := mgr.Remove(context.Background(), "auth-1"); errRemove != nil {
+		t.Fatalf("Remove returned error: %v", errRemove)
+	}
 
 	if err := mgr.Load(context.Background()); err != nil {
 		t.Fatalf("Load returned error: %v", err)
@@ -166,7 +168,7 @@ func TestLoadClearsTombstoneForLoadedAuth(t *testing.T) {
 		t.Fatalf("Update after Load returned error: %v", err)
 	}
 	if updated == nil {
-		t.Fatal("expected loaded auth to be updateable")
+		t.Fatal("expected loaded auth to be updatable")
 	}
 	if updated.Metadata["token"] != "new" {
 		t.Fatalf("token = %#v, want new", updated.Metadata["token"])

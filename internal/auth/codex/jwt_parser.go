@@ -19,7 +19,7 @@ type JWTClaims struct {
 	Email         string   `json:"email"`
 	EmailVerified bool     `json:"email_verified"`
 	Exp           int      `json:"exp"`
-	AuthInfo      authInfo `json:"https://api.openai.com/auth"`
+	AuthInfo      AuthInfo `json:"https://api.openai.com/auth"`
 	Iat           int      `json:"iat"`
 	Iss           string   `json:"iss"`
 	Jti           string   `json:"jti"`
@@ -28,18 +28,18 @@ type JWTClaims struct {
 	Sub           string   `json:"sub"`
 }
 
-// organizations defines the structure for organization details within the JWT claims.
+// Organization defines the structure for organization details within the JWT claims.
 // It holds information about the user's organization, such as ID, role, and title.
-type organizations struct {
+type Organization struct {
 	ID        string `json:"id"`
 	IsDefault bool   `json:"is_default"`
 	Role      string `json:"role"`
 	Title     string `json:"title"`
 }
 
-// authInfo contains authentication-related details specific to Codex.
+// AuthInfo contains authentication-related details specific to Codex.
 // This includes ChatGPT account information, subscription status, and user/organization IDs.
-type authInfo struct {
+type AuthInfo struct {
 	ChatgptAccountID               string          `json:"chatgpt_account_id"`
 	ChatgptPlanType                string          `json:"chatgpt_plan_type"`
 	ChatgptSubscriptionActiveStart any             `json:"chatgpt_subscription_active_start"`
@@ -47,7 +47,7 @@ type authInfo struct {
 	ChatgptSubscriptionLastChecked time.Time       `json:"chatgpt_subscription_last_checked"`
 	ChatgptUserID                  string          `json:"chatgpt_user_id"`
 	Groups                         []any           `json:"groups"`
-	Organizations                  []organizations `json:"organizations"`
+	Organizations                  []Organization `json:"Organization"`
 	UserID                         string          `json:"user_id"`
 }
 
