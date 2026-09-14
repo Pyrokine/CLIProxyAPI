@@ -19,14 +19,14 @@ func (f xaiRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func TestRefreshTokensSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
-	var calls int32
+	var calls atomic.Int32
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	auth := &Auth{
 		httpClient: &http.Client{
 			Transport: xaiRoundTripFunc(
 				func(req *http.Request) (*http.Response, error) {
-					if atomic.AddInt32(&calls, 1) == 1 {
+					if calls.Add(1) == 1 {
 						close(entered)
 					}
 					<-release
@@ -73,7 +73,7 @@ func TestRefreshTokensSingleflightDeduplicatesConcurrentCalls(t *testing.T) {
 			t.Fatalf("refresh failed: %v", err)
 		}
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Fatalf("refresh calls = %d, want 1", got)
 	}
 }
@@ -347,7 +347,7 @@ func TestRefreshTokensRejectsRedirectOutsideXAI(t *testing.T) {
 func TestRefreshTokensSingleflightDoesNotShareDiscoveryFailureWithExplicitEndpoint(t *testing.T) {
 	discoveryEntered := make(chan struct{})
 	releaseDiscovery := make(chan struct{})
-	var tokenCalls int32
+	var tokenCalls atomic.Int32
 	auth := &Auth{
 		httpClient: &http.Client{
 			Transport: xaiRoundTripFunc(
@@ -362,7 +362,7 @@ func TestRefreshTokensSingleflightDoesNotShareDiscoveryFailureWithExplicitEndpoi
 							Request:    req,
 						}, nil
 					}
-					atomic.AddInt32(&tokenCalls, 1)
+					tokenCalls.Add(1)
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body: io.NopCloser(
@@ -423,7 +423,7 @@ func TestRefreshTokensSingleflightDoesNotShareDiscoveryFailureWithExplicitEndpoi
 	if err := <-missingEndpointErr; err == nil {
 		t.Fatal("missing endpoint refresh succeeded, want discovery error")
 	}
-	if got := atomic.LoadInt32(&tokenCalls); got != 1 {
+	if got := tokenCalls.Load(); got != 1 {
 		t.Fatalf("token calls = %d, want 1", got)
 	}
 }

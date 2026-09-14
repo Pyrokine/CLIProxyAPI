@@ -3,7 +3,10 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 
 	internalcache "github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
@@ -36,7 +39,11 @@ func applyXAIReasoningReplayCache(
 	if !scope.valid() {
 		return body, scope
 	}
-	items, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey)
+	items, ok, err := internalcache.GetXAIReasoningReplayItemsRequired(ctx, scope.modelName, scope.sessionKey)
+	if err != nil {
+		log.WithContext(ctx).Warnf("xai reasoning replay cache read failed: %v", err)
+		return body, scope
+	}
 	if !ok {
 		return body, scope
 	}
@@ -58,29 +65,52 @@ func xaiReasoningReplayScopeFromRequest(
 	opts cliproxyexecutor.Options,
 	body []byte,
 ) xaiReasoningReplayScope {
-	if !sourceFormatEqual(from, sdktranslator.FormatClaude) {
+	if !xaiReasoningReplayEnabledForSource(from) {
 		return xaiReasoningReplayScope{}
 	}
+	if cliproxyexecutor.DownstreamWebsocket(ctx) &&
+		strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()) != "" {
+		return xaiReasoningReplayScope{}
+	}
+	sessionKey := codexReasoningReplaySessionKey(ctx, from, req, opts, body)
+	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
 	return xaiReasoningReplayScope{
 		modelName:  thinking.ParseSuffix(req.Model).ModelName,
-		sessionKey: codexReasoningReplaySessionKey(ctx, from, req, opts, body),
+		sessionKey: sessionKey,
 	}
 }
 
-func xaiInputHasValidReasoningEncryptedContent(body []byte) bool {
-	input := gjson.GetBytes(body, "input")
-	if !input.IsArray() {
+func xaiReasoningReplayIsolateSessionKey(ctx context.Context, sessionKey string) string {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return ""
+	}
+	if strings.HasPrefix(sessionKey, "execution:") {
+		return sessionKey
+	}
+	apiKey := strings.TrimSpace(apiKeyFromContext(ctx))
+	if apiKey == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(apiKey))
+	return "caller:" + hex.EncodeToString(sum[:8]) + ":" + sessionKey
+}
+
+func xaiReasoningReplayEnabledForSource(from sdktranslator.Format) bool {
+	return sourceFormatEqual(from, sdktranslator.FormatClaude) ||
+		sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse)
+}
+
+func xaiInputHasReasoningEncryptedContent(inputItems []gjson.Result, encryptedContent string) bool {
+	if encryptedContent == "" {
 		return false
 	}
-	for _, item := range input.Array() {
+	for _, item := range inputItems {
 		if strings.TrimSpace(item.Get("type").String()) != "reasoning" {
 			continue
 		}
-		encryptedContent := item.Get("encrypted_content")
-		if encryptedContent.Type != gjson.String {
-			continue
-		}
-		if signature.IsValidGrokEncryptedContent(encryptedContent.String()) {
+		inputEncryptedContent := item.Get("encrypted_content")
+		if inputEncryptedContent.Type == gjson.String && inputEncryptedContent.String() == encryptedContent {
 			return true
 		}
 	}
@@ -93,10 +123,18 @@ func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte
 		return nil
 	}
 
-	hasInputReasoning := xaiInputHasValidReasoningEncryptedContent(body)
+	inputItems := input.Array()
+	lastAssistantMessage, hasLastAssistantMessage := xaiInputLastAssistantMessage(inputItems)
+	cachedAssistantMessage, hasCachedAssistantMessage := xaiReplayAssistantMessage(items)
+	assistantMessageMatches := hasLastAssistantMessage && hasCachedAssistantMessage &&
+		xaiAssistantMessageContentEqual(lastAssistantMessage.Get("content"), cachedAssistantMessage.Get("content"))
+	if hasLastAssistantMessage && hasCachedAssistantMessage && !assistantMessageMatches {
+		return nil
+	}
+
 	existingCalls := make(map[string]bool)
 	existingOutputs := make(map[string]bool)
-	for _, inputItem := range input.Array() {
+	for _, inputItem := range inputItems {
 		itemType := strings.TrimSpace(inputItem.Get("type").String())
 		if itemType == "function_call_output" || itemType == "custom_tool_call_output" {
 			callID := strings.TrimSpace(inputItem.Get("call_id").String())
@@ -112,11 +150,17 @@ func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte
 	}
 
 	filtered := make([][]byte, 0, len(items))
+	hasReplayAnchor := false
 	for _, item := range items {
 		itemResult := gjson.ParseBytes(item)
 		switch strings.TrimSpace(itemResult.Get("type").String()) {
 		case "reasoning":
-			if hasInputReasoning {
+			if xaiInputHasReasoningEncryptedContent(inputItems, itemResult.Get("encrypted_content").String()) {
+				continue
+			}
+			hasReplayAnchor = true
+		case "message":
+			if assistantMessageMatches {
 				continue
 			}
 		case "function_call", "custom_tool_call":
@@ -140,15 +184,96 @@ func filterXAIReasoningReplayItemsForInput(body []byte, items [][]byte) [][]byte
 			for _, key := range keys {
 				existingCalls[key] = true
 			}
+			hasReplayAnchor = true
 		default:
 			continue
 		}
 		filtered = append(filtered, item)
 	}
+	if !hasReplayAnchor {
+		return nil
+	}
 	return filtered
 }
 
-func cacheXAIReasoningReplayFromCompleted(scope xaiReasoningReplayScope, completedData []byte) {
+func xaiInputLastAssistantMessage(inputItems []gjson.Result) (gjson.Result, bool) {
+	for _, inputItem := range slices.Backward(inputItems) {
+
+		itemType := strings.TrimSpace(inputItem.Get("type").String())
+		if (itemType != "" && itemType != "message") ||
+			!strings.EqualFold(strings.TrimSpace(inputItem.Get("role").String()), "assistant") {
+			continue
+		}
+		return inputItem, true
+	}
+	return gjson.Result{}, false
+}
+
+func xaiReplayAssistantMessage(items [][]byte) (gjson.Result, bool) {
+	for _, item := range items {
+		itemResult := gjson.ParseBytes(item)
+		if strings.TrimSpace(itemResult.Get("type").String()) == "message" &&
+			strings.EqualFold(strings.TrimSpace(itemResult.Get("role").String()), "assistant") {
+			return itemResult, true
+		}
+	}
+	return gjson.Result{}, false
+}
+
+type xaiAssistantMessagePart struct {
+	partType string
+	value    string
+}
+
+func xaiAssistantMessageContentEqual(left, right gjson.Result) bool {
+	leftParts, leftOK := xaiAssistantMessageParts(left)
+	rightParts, rightOK := xaiAssistantMessageParts(right)
+	if !leftOK || !rightOK || len(leftParts) != len(rightParts) {
+		return false
+	}
+	for i := range leftParts {
+		if leftParts[i] != rightParts[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func xaiAssistantMessageParts(content gjson.Result) ([]xaiAssistantMessagePart, bool) {
+	if content.Type == gjson.String {
+		return []xaiAssistantMessagePart{{partType: "output_text", value: content.String()}}, true
+	}
+	if !content.IsArray() {
+		return nil, false
+	}
+	parts := make([]xaiAssistantMessagePart, 0, len(content.Array()))
+	for _, part := range content.Array() {
+		partType := strings.TrimSpace(part.Get("type").String())
+		switch partType {
+		case "output_text":
+			text := part.Get("text")
+			if text.Type != gjson.String {
+				return nil, false
+			}
+			parts = append(parts, xaiAssistantMessagePart{partType: partType, value: text.String()})
+		case "refusal":
+			refusal := part.Get("refusal")
+			if refusal.Type != gjson.String {
+				return nil, false
+			}
+			parts = append(parts, xaiAssistantMessagePart{partType: partType, value: refusal.String()})
+		default:
+			return nil, false
+		}
+	}
+	return parts, len(parts) > 0
+}
+
+func cacheXAIReasoningReplayFromCompleted(
+	ctx context.Context,
+	scope xaiReasoningReplayScope,
+	completedData []byte,
+) {
 	if !scope.valid() {
 		return
 	}
@@ -159,28 +284,65 @@ func cacheXAIReasoningReplayFromCompleted(scope xaiReasoningReplayScope, complet
 	items := make([][]byte, 0, len(output.Array()))
 	for _, item := range output.Array() {
 		switch strings.TrimSpace(item.Get("type").String()) {
-		case "reasoning", "function_call", "custom_tool_call":
+		case "reasoning", "message", "function_call", "custom_tool_call":
 			items = append(items, []byte(item.Raw))
 		default:
 			continue
 		}
 	}
-	if !internalcache.CacheXAIReasoningReplayItems(scope.modelName, scope.sessionKey, items) {
-		internalcache.DeleteXAIReasoningReplayItem(scope.modelName, scope.sessionKey)
+	switch internalcache.StoreXAIReasoningReplayItems(
+		ctx, scope.modelName, scope.sessionKey, items,
+	) {
+	case internalcache.XAIReasoningReplayStored:
+		return
+	case internalcache.XAIReasoningReplayNoReplayableState:
+		if err := internalcache.DeleteXAIReasoningReplayItemRequired(
+			ctx, scope.modelName, scope.sessionKey,
+		); err != nil {
+			log.Warnf("xai reasoning replay cache delete failed after non-replayable completed output: %v", err)
+		}
+	case internalcache.XAIReasoningReplayStoreBackendError:
+		log.Debug("xai reasoning replay cache store backend error; retaining previous entry")
+	default:
 	}
 }
 
-func clearXAIReasoningReplayOnInvalidSignature(scope xaiReasoningReplayScope, statusCode int, body []byte) {
+func clearXAIReasoningReplayAfterCompaction(ctx context.Context, scope xaiReasoningReplayScope) {
+	if !scope.valid() {
+		return
+	}
+	if err := internalcache.DeleteXAIReasoningReplayItemRequired(
+		ctx, scope.modelName, scope.sessionKey,
+	); err != nil {
+		log.Warnf("xai reasoning replay cache delete failed after successful compaction: %v", err)
+	}
+}
+
+func clearXAIReasoningReplayOnInvalidSignature(
+	ctx context.Context,
+	scope xaiReasoningReplayScope,
+	statusCode int,
+	body []byte,
+) {
 	if !scope.valid() {
 		return
 	}
 	code, _, ok := codexStatusErrorClassification(statusCode, body)
 	if ok && code == "thinking_signature_invalid" {
-		internalcache.DeleteXAIReasoningReplayItem(scope.modelName, scope.sessionKey)
+		if err := internalcache.DeleteXAIReasoningReplayItemRequired(
+			ctx, scope.modelName, scope.sessionKey,
+		); err != nil {
+			log.Warnf("xai reasoning replay cache delete failed after invalid signature: %v", err)
+		}
 	}
 }
 
-func sanitizeXAIInputEncryptedContent(ctx context.Context, body []byte) []byte {
+func sanitizeXAIInputEncryptedContent(
+	ctx context.Context,
+	body []byte,
+	preserveEmptyEncryptedContent ...bool,
+) []byte {
+	preserveEmpty := len(preserveEmptyEncryptedContent) > 0 && preserveEmptyEncryptedContent[0]
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || !input.IsArray() {
 		return body
@@ -188,8 +350,8 @@ func sanitizeXAIInputEncryptedContent(ctx context.Context, body []byte) []byte {
 
 	updated := body
 	items := input.Array()
-	for index := len(items) - 1; index >= 0; index-- {
-		item := items[index]
+	for index, item := range slices.Backward(items) {
+
 		itemType := strings.TrimSpace(item.Get("type").String())
 		if itemType != "reasoning" && itemType != "compaction" {
 			continue
@@ -203,6 +365,9 @@ func sanitizeXAIInputEncryptedContent(ctx context.Context, body []byte) []byte {
 		reason := ""
 		switch encryptedContent.Type {
 		case gjson.String:
+			if preserveEmpty && encryptedContent.String() == "" {
+				continue
+			}
 			if _, err := signature.InspectGrokEncryptedContent(encryptedContent.String()); err != nil {
 				reason = err.Error()
 			}

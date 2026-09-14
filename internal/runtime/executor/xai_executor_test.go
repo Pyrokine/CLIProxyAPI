@@ -3,22 +3,225 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	xaiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/xai"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
+
+type xaiMediaRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f xaiMediaRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type xaiMediaReadErrorBody struct{}
+
+func (xaiMediaReadErrorBody) Read([]byte) (int, error) { return 0, errors.New("read failed") }
+func (xaiMediaReadErrorBody) Close() error             { return nil }
+
+func waitForXAIUsageRecord(t *testing.T, records <-chan usage.Record) usage.Record {
+	t.Helper()
+	select {
+	case record := <-records:
+		select {
+		case duplicate := <-records:
+			t.Fatalf("duplicate usage record: %#v", duplicate)
+		case <-time.After(25 * time.Millisecond):
+		}
+		return record
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for xAI usage record")
+		return usage.Record{}
+	}
+}
+
+func TestXAIImageUsagePublishesExactlyOnce(t *testing.T) {
+	tests := []struct {
+		name       string
+		ctx        func() context.Context
+		baseURL    string
+		transport  xaiMediaRoundTripper
+		wantFailed bool
+	}{
+		{
+			name:    "success",
+			baseURL: "https://xai.test",
+			transport: func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{"data":[]}`)),
+				}, nil
+			},
+		},
+		{
+			name:       "request build failure",
+			baseURL:    "://invalid",
+			wantFailed: true,
+		},
+		{
+			name:    "dial failure",
+			baseURL: "https://xai.test",
+			transport: func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("dial failed")
+			},
+			wantFailed: true,
+		},
+		{
+			name:    "body read failure",
+			baseURL: "https://xai.test",
+			transport: func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK, Header: make(http.Header), Body: xaiMediaReadErrorBody{},
+				}, nil
+			},
+			wantFailed: true,
+		},
+		{
+			name:    "non-2xx",
+			baseURL: "https://xai.test",
+			transport: func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusBadGateway, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{"error":"upstream"}`)),
+				}, nil
+			},
+			wantFailed: true,
+		},
+		{
+			name: "cancellation",
+			ctx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			baseURL: "https://xai.test",
+			transport: func(req *http.Request) (*http.Response, error) {
+				return nil, req.Context().Err()
+			},
+			wantFailed: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+				registerTestUsagePlugin(t, plugin)
+				ctx := context.Background()
+				if tt.ctx != nil {
+					ctx = tt.ctx()
+				}
+				if tt.transport != nil {
+					ctx = util.WithRoundTripper(ctx, tt.transport)
+				}
+				exec := newXAIExecutor(&config.Config{})
+				auth := &cliproxyauth.Auth{
+					Provider: "xai", Attributes: map[string]string{"base_url": tt.baseURL, "api_key": "test-key"},
+				}
+				_, errExecute := exec.Execute(
+					ctx, auth, cliproxyexecutor.Request{
+						Model: "grok-imagine", Payload: []byte(`{"model":"grok-imagine","prompt":"draw"}`),
+					}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString(xaiImageHandlerType)},
+				)
+				if tt.wantFailed != (errExecute != nil) {
+					t.Fatalf("Execute() error = %v, wantFailed = %t", errExecute, tt.wantFailed)
+				}
+				record := waitForXAIUsageRecord(t, plugin.records)
+				if record.Failed != tt.wantFailed || record.Model != "grok-imagine" {
+					t.Fatalf("usage record = %#v", record)
+				}
+			},
+		)
+	}
+}
+
+func TestXAIVideoUsagePublishesExactlyOnce(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    []byte
+		wantMethod string
+		wantPath   string
+		cancel     bool
+		wantFailed bool
+	}{
+		{
+			name: "generation post", payload: []byte(`{"model":"grok-video","prompt":"move"}`),
+			wantMethod: http.MethodPost, wantPath: xaiVideosGenerationsPath,
+		},
+		{
+			name: "polling get", payload: []byte(`{"model":"grok-video","request_id":"request/1"}`),
+			wantMethod: http.MethodGet, wantPath: xaiVideosPath + "/request%2F1",
+		},
+		{
+			name: "cancellation", payload: []byte(`{"model":"grok-video","prompt":"move"}`),
+			wantMethod: http.MethodPost, wantPath: xaiVideosGenerationsPath, cancel: true, wantFailed: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+				registerTestUsagePlugin(t, plugin)
+				ctx := context.Background()
+				if tt.cancel {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithCancel(ctx)
+					cancel()
+				}
+				ctx = util.WithRoundTripper(
+					ctx, xaiMediaRoundTripper(
+						func(req *http.Request) (*http.Response, error) {
+							if req.Method != tt.wantMethod || req.URL.EscapedPath() != tt.wantPath {
+								t.Fatalf(
+									"video request = %s %s, want %s %s", req.Method, req.URL.EscapedPath(),
+									tt.wantMethod, tt.wantPath,
+								)
+							}
+							if tt.cancel {
+								return nil, req.Context().Err()
+							}
+							return &http.Response{
+								StatusCode: http.StatusOK, Header: make(http.Header),
+								Body: io.NopCloser(strings.NewReader(`{"id":"video-1"}`)),
+							}, nil
+						},
+					),
+				)
+				exec := newXAIExecutor(&config.Config{})
+				auth := &cliproxyauth.Auth{
+					Provider:   "xai",
+					Attributes: map[string]string{"base_url": "https://xai.test", "api_key": "test-key"},
+				}
+				_, errExecute := exec.Execute(
+					ctx, auth, cliproxyexecutor.Request{Model: "grok-video", Payload: tt.payload},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString(xaiVideoHandlerType)},
+				)
+				if tt.wantFailed != (errExecute != nil) {
+					t.Fatalf("Execute() error = %v, wantFailed = %t", errExecute, tt.wantFailed)
+				}
+				record := waitForXAIUsageRecord(t, plugin.records)
+				if record.Failed != tt.wantFailed || record.Model != "grok-video" {
+					t.Fatalf("usage record = %#v", record)
+				}
+			},
+		)
+	}
+}
 
 func TestReadXAIResponseBodyRejectsOversizedBody(t *testing.T) {
 	_, err := readXAIResponseBody(strings.NewReader("abcde"), 4)
@@ -31,7 +234,7 @@ func TestReadXAIResponseBodyRejectsOversizedBody(t *testing.T) {
 }
 
 func TestXAIExecutorAppliesThinkingSuffix(t *testing.T) {
-	executor := NewXAIExecutor(&config.Config{})
+	executor := newXAIExecutor(&config.Config{})
 	req := cliproxyexecutor.Request{
 		Model:   "grok-4.3(low)",
 		Payload: []byte(`{"model":"grok-4.3(low)","input":"hello"}`),
@@ -120,7 +323,7 @@ func TestXAIReasoningTextEventsNormalizeToReasoningSummary(t *testing.T) {
 }
 
 func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
-	exec := NewXAIExecutor(&config.Config{})
+	exec := newXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
 		Provider: "xai",
 		Metadata: map[string]any{"access_token": "xai-token"},
@@ -249,7 +452,7 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	)
 	defer server.Close()
 
-	exec := NewXAIExecutor(&config.Config{})
+	exec := newXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
 		Provider: "xai",
 		Attributes: map[string]string{
@@ -314,7 +517,7 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 	)
 	defer server.Close()
 
-	exec := NewXAIExecutor(&config.Config{})
+	exec := newXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
 		Provider: "xai",
 		Attributes: map[string]string{
@@ -328,8 +531,9 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 			Model:   "grok-4.3",
 			Payload: []byte(`{"model":"grok-4.3","stream":true,"input":[{"role":"user","content":"hello"},{"type":"compaction_trigger"}]}`),
 		}, cliproxyexecutor.Options{
-			SourceFormat: sdktranslator.FormatOpenAIResponse,
-			Stream:       true,
+			SourceFormat:    sdktranslator.FormatOpenAIResponse,
+			Stream:          true,
+			OriginalRequest: []byte(`{"model":"original-grok-model","stream":true,"input":[{"role":"user","content":"hello"},{"type":"compaction_trigger"}]}`),
 		},
 	)
 	if err != nil {
@@ -367,6 +571,9 @@ func TestXAIExecutorExecuteStreamCompactionTriggerUsesCompactEndpoint(t *testing
 			t.Fatalf("missing %s event in stream: %s", eventName, output)
 		}
 	}
+	if strings.Count(output, `"model":"original-grok-model"`) != 2 {
+		t.Fatalf("original request model missing from created/in_progress events: %s", output)
+	}
 	if !strings.Contains(output, `"type":"compaction"`) || !strings.Contains(output, `"encrypted_content":"opaque"`) {
 		t.Fatalf("compaction output missing from stream: %s", output)
 	}
@@ -385,18 +592,22 @@ func TestXAIChatBaseURL(t *testing.T) {
 		{name: "api key default", auth: &cliproxyauth.Auth{Provider: "xai"}, want: xaiauth.DefaultAPIBaseURL},
 		{
 			name: "OAuth default",
-			auth: &cliproxyauth.Auth{Attributes: map[string]string{
-				"auth_kind": "oauth",
-				"base_url":  xaiauth.DefaultAPIBaseURL,
-			}},
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
+			},
 			want: xaiauth.CLIChatProxyBaseURL,
 		},
 		{
 			name: "metadata OAuth default",
-			auth: &cliproxyauth.Auth{Metadata: map[string]any{
-				"auth_kind": "oauth",
-				"base_url":  xaiauth.DefaultAPIBaseURL,
-			}},
+			auth: &cliproxyauth.Auth{
+				Metadata: map[string]any{
+					"auth_kind": "oauth",
+					"base_url":  xaiauth.DefaultAPIBaseURL,
+				},
+			},
 			want: xaiauth.CLIChatProxyBaseURL,
 		},
 		{
@@ -411,37 +622,45 @@ func TestXAIChatBaseURL(t *testing.T) {
 		},
 		{
 			name: "OAuth using api true",
-			auth: &cliproxyauth.Auth{Attributes: map[string]string{
-				"auth_kind":     "oauth",
-				xaiUsingAPIAttr: "true",
-			}},
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					xaiUsingAPIAttr: "true",
+				},
+			},
 			want: xaiauth.DefaultAPIBaseURL,
 		},
 		{
 			name: "custom gateway",
-			auth: &cliproxyauth.Auth{Attributes: map[string]string{
-				"auth_kind":     "oauth",
-				"base_url":      "https://gateway.example.com/v1",
-				xaiUsingAPIAttr: "false",
-			}},
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					"base_url":      "https://gateway.example.com/v1",
+					xaiUsingAPIAttr: "false",
+				},
+			},
 			want: "https://gateway.example.com/v1",
 		},
 		{
 			name: "invalid using api follows OAuth default",
-			auth: &cliproxyauth.Auth{Attributes: map[string]string{
-				"auth_kind":     "oauth",
-				xaiUsingAPIAttr: "invalid",
-			}},
+			auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					xaiUsingAPIAttr: "invalid",
+				},
+			},
 			want: xaiauth.CLIChatProxyBaseURL,
 		},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := xaiChatBaseURL(tt.auth); got != tt.want {
-				t.Fatalf("xaiChatBaseURL() = %q, want %q", got, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				if got := xaiChatBaseURL(tt.auth); got != tt.want {
+					t.Fatalf("xaiChatBaseURL() = %q, want %q", got, tt.want)
+				}
+			},
+		)
 	}
 }
 
@@ -550,6 +769,70 @@ func TestApplyXAIRefreshTokenSynchronizesTokenStorage(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorPrepareHonorsInjectXSearchConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         *config.Config
+		wantXSearch bool
+	}{
+		{name: "default disabled", cfg: &config.Config{}, wantXSearch: false},
+		{
+			name: "explicitly enabled", cfg: &config.Config{XAI: config.XAIConfig{InjectXSearch: true}},
+			wantXSearch: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				exec := newXAIExecutor(tt.cfg)
+				prepared, err := exec.prepareResponsesRequest(
+					cliproxyexecutor.Request{
+						Model: "grok-4.5",
+						Payload: []byte(`{
+						"model":"grok-4.5",
+						"input":"search X",
+						"tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],
+						"tool_choice":{"type":"allowed_tools","tools":[{"type":"function","name":"lookup"}]}
+					}`),
+					},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+					false,
+				)
+				if err != nil {
+					t.Fatalf("prepareResponsesRequest() error = %v", err)
+				}
+
+				toolCount := 0
+				for _, tool := range gjson.GetBytes(prepared.body, "tools").Array() {
+					if tool.Get("type").String() == xaiXSearchToolType {
+						toolCount++
+					}
+				}
+				allowedCount := 0
+				for _, tool := range gjson.GetBytes(prepared.body, "tool_choice.tools").Array() {
+					if tool.Get("type").String() == xaiXSearchToolType {
+						allowedCount++
+					}
+				}
+				wantCount := 0
+				if tt.wantXSearch {
+					wantCount = 1
+				}
+				if toolCount != wantCount || allowedCount != wantCount {
+					t.Fatalf(
+						"x_search counts = tools:%d allowed:%d, want %d; body=%s", toolCount, allowedCount, wantCount,
+						prepared.body,
+					)
+				}
+				if prepared.filterInternalXSearch != tt.wantXSearch {
+					t.Fatalf("filterInternalXSearch = %t, want %t", prepared.filterInternalXSearch, tt.wantXSearch)
+				}
+			},
+		)
+	}
+}
+
 func TestXAIExecutorPrepareRequestAppliesChatProxyIdentity(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "https://CLI-CHAT-PROXY.GROK.COM:443/v1/responses", nil)
 	auth := &cliproxyauth.Auth{
@@ -559,7 +842,7 @@ func TestXAIExecutorPrepareRequestAppliesChatProxyIdentity(t *testing.T) {
 		},
 	}
 
-	executor := NewXAIExecutor(&config.Config{})
+	executor := newXAIExecutor(&config.Config{})
 	if err := executor.PrepareRequest(req, auth); err != nil {
 		t.Fatalf("PrepareRequest() error = %v", err)
 	}
@@ -575,98 +858,132 @@ func TestXAIExecutorPrepareRequestAppliesChatProxyIdentity(t *testing.T) {
 }
 
 func TestApplyXAIChatHeaders(t *testing.T) {
-	t.Run("OAuth chat proxy", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
-		auth := &cliproxyauth.Auth{Attributes: map[string]string{"auth_kind": "oauth"}}
-		applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1")
+	t.Run(
+		"OAuth chat proxy", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"auth_kind": "oauth"}}
+			applyXAIChatHeaders(req, auth, "xai-token", true, "conv-1")
 
-		if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
-			t.Fatalf("Authorization = %q, want Bearer xai-token", got)
-		}
-		if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
-			t.Fatalf("%s = %q, want %q", xaiTokenAuthHeader, got, xaiTokenAuthValue)
-		}
-		if got := req.Header.Get(xaiClientVersionHeader); got != xaiClientVersionValue {
-			t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
-		}
-	})
+			if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
+				t.Fatalf("Authorization = %q, want Bearer xai-token", got)
+			}
+			if got := req.Header.Get(xaiTokenAuthHeader); got != xaiTokenAuthValue {
+				t.Fatalf("%s = %q, want %q", xaiTokenAuthHeader, got, xaiTokenAuthValue)
+			}
+			if got := req.Header.Get(xaiClientVersionHeader); got != xaiClientVersionValue {
+				t.Fatalf("%s = %q, want %q", xaiClientVersionHeader, got, xaiClientVersionValue)
+			}
+			if got := req.Header.Get("User-Agent"); got != "xai-grok-workspace/0.2.120" {
+				t.Fatalf("User-Agent = %q, want xai-grok-workspace/0.2.120", got)
+			}
+			if got := req.Header.Get(xaiClientIdentifierHeader); got != xaiClientIdentifierValue {
+				t.Fatalf("%s = %q, want %q", xaiClientIdentifierHeader, got, xaiClientIdentifierValue)
+			}
+			if got := req.Header.Get(xaiAuthenticateResponseHeader); got != xaiAuthenticateResponseValue {
+				t.Fatalf("%s = %q, want %q", xaiAuthenticateResponseHeader, got, xaiAuthenticateResponseValue)
+			}
+		},
+	)
 
-	t.Run("custom headers override chat proxy", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
-		auth := &cliproxyauth.Auth{Attributes: map[string]string{
-			"auth_kind":                        "oauth",
-			"header:Authorization":             "blocked-custom-auth",
-			"header:" + xaiTokenAuthHeader:     "custom-token-auth",
-			"header:" + xaiClientVersionHeader: "custom-client-version",
-		}}
-		applyXAIChatHeaders(req, auth, "xai-token", true, "")
+	t.Run(
+		"custom headers override chat proxy", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, xaiauth.CLIChatProxyBaseURL+"/responses", nil)
+			auth := &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":                        "oauth",
+					"header:Authorization":             "blocked-custom-auth",
+					"header:" + xaiTokenAuthHeader:     "custom-token-auth",
+					"header:" + xaiClientVersionHeader: "custom-client-version",
+				},
+			}
+			applyXAIChatHeaders(req, auth, "xai-token", true, "")
 
-		if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
-			t.Fatalf("Authorization = %q, want protected Bearer token", got)
-		}
-		if got := req.Header.Get(xaiTokenAuthHeader); got != "custom-token-auth" {
-			t.Fatalf("%s = %q, want custom-token-auth", xaiTokenAuthHeader, got)
-		}
-		if got := req.Header.Get(xaiClientVersionHeader); got != "custom-client-version" {
-			t.Fatalf("%s = %q, want custom-client-version", xaiClientVersionHeader, got)
-		}
-	})
+			if got := req.Header.Get("Authorization"); got != "Bearer xai-token" {
+				t.Fatalf("Authorization = %q, want protected Bearer token", got)
+			}
+			if got := req.Header.Get(xaiTokenAuthHeader); got != "custom-token-auth" {
+				t.Fatalf("%s = %q, want custom-token-auth", xaiTokenAuthHeader, got)
+			}
+			if got := req.Header.Get(xaiClientVersionHeader); got != "custom-client-version" {
+				t.Fatalf("%s = %q, want custom-client-version", xaiClientVersionHeader, got)
+			}
+		},
+	)
 
-	t.Run("using API suppresses chat proxy identity", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodPost, "https://CLI-CHAT-PROXY.GROK.COM:443/v1/responses", nil)
-		auth := &cliproxyauth.Auth{Attributes: map[string]string{
-			"auth_kind":     "oauth",
-			xaiUsingAPIAttr: "true",
-		}}
-		applyXAIChatHeaders(req, auth, "xai-token", true, "")
+	t.Run(
+		"using API suppresses chat proxy identity", func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "https://CLI-CHAT-PROXY.GROK.COM:443/v1/responses", nil)
+			auth := &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind":     "oauth",
+					xaiUsingAPIAttr: "true",
+				},
+			}
+			applyXAIChatHeaders(req, auth, "xai-token", true, "")
 
-		if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
-			t.Fatalf("%s = %q, want empty", xaiTokenAuthHeader, got)
-		}
-		if got := req.Header.Get(xaiClientVersionHeader); got != "" {
-			t.Fatalf("%s = %q, want empty", xaiClientVersionHeader, got)
-		}
-	})
-
-	for _, tt := range []struct {
-		name string
-		auth *cliproxyauth.Auth
-	}{
-		{name: "official API", auth: &cliproxyauth.Auth{Attributes: map[string]string{xaiUsingAPIAttr: "true"}}},
-		{name: "custom gateway", auth: &cliproxyauth.Auth{Attributes: map[string]string{
-			"auth_kind": "oauth", "base_url": "https://gateway.example.com/v1",
-		}}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
-			applyXAIChatHeaders(req, tt.auth, "xai-token", false, "")
 			if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
 				t.Fatalf("%s = %q, want empty", xaiTokenAuthHeader, got)
 			}
 			if got := req.Header.Get(xaiClientVersionHeader); got != "" {
 				t.Fatalf("%s = %q, want empty", xaiClientVersionHeader, got)
 			}
-		})
+		},
+	)
+
+	for _, tt := range []struct {
+		name string
+		auth *cliproxyauth.Auth
+	}{
+		{name: "official API", auth: &cliproxyauth.Auth{Attributes: map[string]string{xaiUsingAPIAttr: "true"}}},
+		{
+			name: "custom gateway", auth: &cliproxyauth.Auth{
+				Attributes: map[string]string{
+					"auth_kind": "oauth", "base_url": "https://gateway.example.com/v1",
+				},
+			},
+		},
+	} {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodPost, "https://example.invalid/responses", nil)
+				applyXAIChatHeaders(req, tt.auth, "xai-token", false, "")
+				if got := req.Header.Get(xaiTokenAuthHeader); got != "" {
+					t.Fatalf("%s = %q, want empty", xaiTokenAuthHeader, got)
+				}
+				if got := req.Header.Get(xaiClientVersionHeader); got != "" {
+					t.Fatalf("%s = %q, want empty", xaiClientVersionHeader, got)
+				}
+			},
+		)
 	}
 }
 
-func TestNormalizeXAIToolsSimplifiesCodexAutomationSchema(t *testing.T) {
+func TestNormalizeXAIToolsNormalizesCodexAutomationSchemaWithoutFabrication(t *testing.T) {
 	largeParameters := `{"oneOf":[{"type":"object","properties":{"mode":{"type":"string"}}}],"$defs":{"mode":{"type":"string"}}}`
 	body := []byte(`{"tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"automation_update","strict":true,"parameters":` + largeParameters + `}]},{"type":"function","name":"exec_command","strict":true,"parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}]}`)
 
-	tools := gjson.GetBytes(normalizeXAITools(body), "tools").Array()
+	normalized, err := normalizeXAITools(body)
+	if err != nil {
+		t.Fatalf("normalizeXAITools() error = %v", err)
+	}
+	tools := gjson.GetBytes(normalized, "tools").Array()
 	if len(tools) != 2 {
 		t.Fatalf("tools length = %d, want 2", len(tools))
 	}
 	for _, tool := range tools {
 		switch tool.Get("name").String() {
-		case "automation_update":
-			if tool.Get("parameters.type").String() != "object" ||
-				tool.Get("parameters.additionalProperties").Type != gjson.True {
-				t.Fatalf("automation_update parameters not simplified: %s", tool.Raw)
+		case "codex_app__automation_update":
+			if tool.Get("parameters.type").String() != "object" || tool.Get("parameters.oneOf.0.type").String() != "object" {
+				t.Fatalf("automation_update object union not normalized: %s", tool.Raw)
 			}
-			if tool.Get("strict").Type != gjson.False {
-				t.Fatalf("automation_update strict = %s, want false", tool.Get("strict").Raw)
+			if got := tool.Get("parameters.oneOf.0.properties.mode.type").String(); got != "string" {
+				t.Fatalf("automation_update schema was discarded: %s", tool.Raw)
+			}
+			if !tool.Get("parameters.$defs.mode").Exists() {
+				t.Fatalf("automation_update $defs was discarded: %s", tool.Raw)
+			}
+			if tool.Get("strict").Type != gjson.True {
+				t.Fatalf("automation_update strict = %s, want true", tool.Get("strict").Raw)
 			}
 		case "exec_command":
 			if got := tool.Get("parameters.properties.cmd.type").String(); got != "string" {
@@ -699,18 +1016,71 @@ func TestNormalizeXAIToolsPreservesUnrelatedAutomationSchemas(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tool := gjson.GetBytes(normalizeXAITools(tt.body), "tools.0")
-			if tool.Get("strict").Type != gjson.True {
-				t.Fatalf("strict changed: %s", tool.Raw)
-			}
-			if got := tool.Get("parameters.properties.cron.type").String(); got != "string" {
-				t.Fatalf("parameters changed: %s", tool.Raw)
-			}
-			if tool.Get("parameters.additionalProperties").Type != gjson.False {
-				t.Fatalf("additionalProperties changed: %s", tool.Raw)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				normalized, err := normalizeXAITools(tt.body)
+				if err != nil {
+					t.Fatalf("normalizeXAITools() error = %v", err)
+				}
+				tool := gjson.GetBytes(normalized, "tools.0")
+				if tool.Get("strict").Type != gjson.True {
+					t.Fatalf("strict changed: %s", tool.Raw)
+				}
+				if got := tool.Get("parameters.properties.cron.type").String(); got != "string" {
+					t.Fatalf("parameters changed: %s", tool.Raw)
+				}
+				if tool.Get("parameters.additionalProperties").Type != gjson.False {
+					t.Fatalf("additionalProperties changed: %s", tool.Raw)
+				}
+			},
+		)
+	}
+}
+
+func TestXAIStatusErrBadCredentials403RemapsToUnauthorized(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"code":"unauthenticated:bad-credentials","error":"The OAuth2 access token could not be validated."}`),
+		[]byte(`{"error":{"code":"unauthenticated:bad-credentials","message":"The OAuth2 access token could not be validated."}}`),
+		[]byte(`{"error":"The OAuth2 access token could not be validated."}`),
+	} {
+		err := xaiStatusErr(http.StatusForbidden, body)
+		if err.StatusCode() != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401; body=%s", err.StatusCode(), body)
+		}
+		if err.Error() != string(body) {
+			t.Fatalf("error body = %q, want %q", err.Error(), body)
+		}
+		if err.RetryAfter() != nil {
+			t.Fatalf("RetryAfter = %v, want nil", err.RetryAfter())
+		}
+	}
+}
+
+func TestXAIStatusErrContentSafety403IsRequestScoped(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"code":"permission-denied","error":"Content violates usage guidelines. Failed check: SAFETY_CHECK_TYPE_BIO"}`),
+		[]byte(`{"error":{"code":"permission-denied","message":"Failed check: SAFETY_CHECK_TYPE_VIOLENCE"}}`),
+	} {
+		err := xaiStatusErr(http.StatusForbidden, body)
+		if err.StatusCode() != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403; body=%s", err.StatusCode(), body)
+		}
+		if !err.IsRequestScoped() {
+			t.Fatalf("IsRequestScoped() = false, want true; body=%s", body)
+		}
+	}
+}
+
+func TestXAIStatusErrGeneric403Unchanged(t *testing.T) {
+	err := xaiStatusErr(
+		http.StatusForbidden,
+		[]byte(`{"code":"permission_denied","error":"model access is not allowed"}`),
+	)
+	if err.StatusCode() != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", err.StatusCode())
+	}
+	if err.IsRequestScoped() {
+		t.Fatal("generic permission denial became request-scoped")
 	}
 }
 

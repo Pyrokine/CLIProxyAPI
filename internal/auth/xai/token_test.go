@@ -21,12 +21,10 @@ func TestSaveTokenToFilePublishesConcurrentWritesAtomically(t *testing.T) {
 	errs := make(chan error, len(storages))
 	var group sync.WaitGroup
 	for _, storage := range storages {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			<-start
 			errs <- storage.SaveTokenToFile(path)
-		}()
+		})
 	}
 	close(start)
 	group.Wait()

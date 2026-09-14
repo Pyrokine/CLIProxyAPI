@@ -11,16 +11,16 @@ const (
 	// CLIChatProxyBaseURL is the Grok CLI chat-proxy base URL for non-media
 	// HTTP chat when using_api is false, including the OAuth default.
 	CLIChatProxyBaseURL = "https://cli-chat-proxy.grok.com/v1"
-	// Issuer is xAI's OAuth issuer.
-	Issuer = "https://auth.x.ai"
-	// DiscoveryURL is the OIDC discovery endpoint used to resolve OAuth endpoints.
-	DiscoveryURL = Issuer + "/.well-known/openid-configuration"
-	// ClientID is the public xAI Grok CLI OAuth client ID.
-	ClientID = "b1a00492-073a-47ea-816f-4c329264a828"
-	// Scope is the OAuth scope set required for xAI API access.
-	Scope = "openid profile email offline_access grok-cli:access api:access"
-	// DeviceCodeGrantType is the OAuth 2.0 device authorization grant type.
-	DeviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
+	// issuer is xAI's OAuth issuer.
+	issuer = "https://auth.x.ai"
+	// discoveryURL is the OIDC discovery endpoint used to resolve OAuth endpoints.
+	discoveryURL = issuer + "/.well-known/openid-configuration"
+	// clientID is the public xAI Grok CLI OAuth client ID.
+	clientID = "b1a00492-073a-47ea-816f-4c329264a828"
+	// scope is the OAuth scope set required for xAI API access.
+	scope = "openid profile email offline_access grok-cli:access api:access"
+	// deviceCodeGrantType is the OAuth 2.0 device authorization grant type.
+	deviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
 	// MaxPollDuration bounds device authorization polling.
 	MaxPollDuration = 30 * time.Minute
 
@@ -35,8 +35,8 @@ func RefreshLead() time.Duration {
 	return refreshLead
 }
 
-// Discovery contains OAuth endpoints resolved from xAI OIDC discovery.
-type Discovery struct {
+// discovery contains OAuth endpoints resolved from xAI OIDC discovery.
+type discovery struct {
 	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint"`
 	TokenEndpoint               string `json:"token_endpoint"`
 }

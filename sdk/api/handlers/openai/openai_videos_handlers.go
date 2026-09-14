@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -31,6 +32,7 @@ const (
 	xaiVideosExtensionsAPI        = "/v1/videos/extensions"
 	defaultOpenAIVideosModel      = "sora-2"
 	defaultXAIVideosModel         = "grok-imagine-video"
+	xaiVideos15Model              = "grok-imagine-video-1.5"
 	xaiVideos15PreviewModel       = "grok-imagine-video-1.5-preview"
 	xaiVideosHandlerType          = "openai-video"
 	defaultVideosSeconds          = "4"
@@ -49,12 +51,12 @@ const (
 var videoAuthBindings = newVideoAuthBindingStore()
 
 type xaiVideoCreateMetadata struct {
-	Model         string
-	UpstreamModel string
-	Prompt        string
-	Seconds       string
-	Size          string
-	CreatedAt     int64
+	Model        string
+	RoutingModel string
+	Prompt       string
+	Seconds      string
+	Size         string
+	CreatedAt    int64
 }
 
 type videoAuthBinding struct {
@@ -73,10 +75,6 @@ func newVideoAuthBindingStore() *videoAuthBindingStore {
 	return &videoAuthBindingStore{
 		entries: make(map[string]videoAuthBinding),
 	}
-}
-
-func (s *videoAuthBindingStore) set(videoID string, authID string, ttl time.Duration) {
-	s.setWithModel(videoID, authID, "", ttl)
 }
 
 func (s *videoAuthBindingStore) setWithModel(videoID string, authID string, model string, ttl time.Duration) {
@@ -169,7 +167,7 @@ func videosModelBase(model string) string {
 func isXAIVideosModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
 	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
-	if baseModel != defaultXAIVideosModel && baseModel != xaiVideos15PreviewModel {
+	if baseModel != defaultXAIVideosModel && baseModel != xaiVideos15Model && baseModel != xaiVideos15PreviewModel {
 		return false
 	}
 
@@ -232,6 +230,21 @@ func canonicalXAIVideosModel(model string) string {
 	switch videosModelBase(model) {
 	case defaultXAIVideosModel:
 		return defaultXAIVideosModel
+	case xaiVideos15Model, xaiVideos15PreviewModel:
+		return xaiVideos15Model
+	}
+	return defaultXAIVideosModel
+}
+
+func routingXAIVideosModel(model string) string {
+	if isSoraVideosModel(model) {
+		return defaultXAIVideosModel
+	}
+	switch videosModelBase(model) {
+	case defaultXAIVideosModel:
+		return defaultXAIVideosModel
+	case xaiVideos15Model:
+		return xaiVideos15Model
 	case xaiVideos15PreviewModel:
 		return xaiVideos15PreviewModel
 	}
@@ -292,7 +305,7 @@ func videosCreateRequestFromForm(c *gin.Context) ([]byte, error) {
 		rawJSON, _ = sjson.SetBytes(rawJSON, "input_reference.file_id", value)
 	}
 	if refs := strings.TrimSpace(c.PostForm("reference_image_urls")); refs != "" {
-		for _, ref := range strings.Split(refs, ",") {
+		for ref := range strings.SplitSeq(refs, ",") {
 			if ref = strings.TrimSpace(ref); ref != "" {
 				rawJSON, _ = sjson.SetBytes(rawJSON, "reference_image_urls.-1", ref)
 			}
@@ -330,20 +343,16 @@ func videoIDFromPayload(payload []byte) string {
 	return videoID
 }
 
-func (h *APIHandler) bindVideoAuthIDFromPayload(payload []byte, authID string) {
-	h.bindVideoAuthIDAndModelFromPayload(payload, authID, strings.TrimSpace(gjson.GetBytes(payload, "model").String()))
-}
-
 func (h *APIHandler) bindVideoAuthIDAndModelFromPayload(payload []byte, authID string, model string) {
 	videoID := videoIDFromPayload(payload)
 	if videoID == "" {
 		return
 	}
-	videoAuthBindings.setWithModel(videoID, authID, canonicalXAIVideosModel(model), h.videoAuthBindingTTL())
+	videoAuthBindings.setWithModel(videoID, authID, routingXAIVideosModel(model), h.videoAuthBindingTTL())
 }
 
 func (h *APIHandler) bindVideoAuthID(videoID string, authID string, model string) {
-	videoAuthBindings.setWithModel(videoID, authID, canonicalXAIVideosModel(model), h.videoAuthBindingTTL())
+	videoAuthBindings.setWithModel(videoID, authID, routingXAIVideosModel(model), h.videoAuthBindingTTL())
 }
 
 func (h *APIHandler) contextWithVideoAuthBinding(ctx context.Context, videoID string) context.Context {
@@ -417,12 +426,12 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 	}
 
 	meta := xaiVideoCreateMetadata{
-		Model:         responseVideosModel(model),
-		UpstreamModel: videoModel,
-		Prompt:        prompt,
-		Seconds:       seconds,
-		Size:          size,
-		CreatedAt:     time.Now().Unix(),
+		Model:        responseVideosModel(model),
+		RoutingModel: routingXAIVideosModel(model),
+		Prompt:       prompt,
+		Seconds:      seconds,
+		Size:         size,
+		CreatedAt:    time.Now().Unix(),
 	}
 	return req, meta, nil
 }
@@ -796,7 +805,9 @@ func (h *APIHandler) handleXAIVideosNativePost(c *gin.Context) {
 		return
 	}
 
-	h.collectXAIVideosNative(c, rawJSON, videoModel, true)
+	routingModel := routingXAIVideosModel(videoModel)
+	rawJSON, _ = sjson.SetBytes(rawJSON, "model", canonicalXAIVideosModel(videoModel))
+	h.collectXAIVideosNative(c, rawJSON, routingModel, true)
 }
 
 func (h *APIHandler) XAIVideosRetrieve(c *gin.Context) {
@@ -953,7 +964,10 @@ func (h *APIHandler) VideosContent(c *gin.Context) {
 func (h *APIHandler) writeVideoContentFromURL(c *gin.Context, contentURL string) error {
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, contentURL, nil)
 	if err != nil {
-		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		errMsg := &handlers.ErrorMessage{
+			StatusCode: clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway),
+			Error:      err,
+		}
 		h.WriteErrorResponse(c, errMsg)
 		return err
 	}
@@ -961,7 +975,10 @@ func (h *APIHandler) writeVideoContentFromURL(c *gin.Context, contentURL string)
 	httpClient := h.videoContentHTTPClient(c)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		errMsg := &handlers.ErrorMessage{StatusCode: http.StatusBadGateway, Error: err}
+		errMsg := &handlers.ErrorMessage{
+			StatusCode: clienterror.HTTPStatusFromErrorOr(err, http.StatusBadGateway),
+			Error:      err,
+		}
 		h.WriteErrorResponse(c, errMsg)
 		return err
 	}
@@ -1104,12 +1121,12 @@ func (h *APIHandler) collectXAIVideosCreate(c *gin.Context, xaiReq []byte, meta 
 			selectedAuthID = authID
 		},
 	)
-	upstreamModel := strings.TrimSpace(meta.UpstreamModel)
-	if upstreamModel == "" {
-		upstreamModel = meta.Model
+	routingModel := strings.TrimSpace(meta.RoutingModel)
+	if routingModel == "" {
+		routingModel = routingXAIVideosModel(meta.Model)
 	}
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
-	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, upstreamModel, xaiReq, "")
+	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, xaiVideosHandlerType, routingModel, xaiReq, "")
 	stopKeepAlive()
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
@@ -1129,7 +1146,7 @@ func (h *APIHandler) collectXAIVideosCreate(c *gin.Context, xaiReq []byte, meta 
 		return
 	}
 
-	h.bindVideoAuthIDFromPayload(out, selectedAuthID)
+	h.bindVideoAuthIDAndModelFromPayload(out, selectedAuthID, routingModel)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(out)
 	cliCancel(nil)

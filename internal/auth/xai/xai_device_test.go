@@ -15,27 +15,31 @@ func TestRequestDeviceCodePostsClientIDAndScope(t *testing.T) {
 	var gotForm url.Values
 	auth := &Auth{
 		httpClient: &http.Client{
-			Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				if req.Method != http.MethodPost {
-					t.Fatalf("method = %s, want POST", req.Method)
-				}
-				if err := req.ParseForm(); err != nil {
-					t.Fatalf("ParseForm() error = %v", err)
-				}
-				gotForm = req.PostForm
-				return xaiJSONResponse(req, http.StatusOK, map[string]any{
-					"device_code":               "device-abc",
-					"user_code":                 "ABCD-1234",
-					"verification_uri":          "https://accounts.x.ai/oauth2/device",
-					"verification_uri_complete": "https://accounts.x.ai/oauth2/device?user_code=ABCD-1234",
-					"expires_in":                1800,
-					"interval":                  5,
-				}), nil
-			}),
+			Transport: xaiRoundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					if req.Method != http.MethodPost {
+						t.Fatalf("method = %s, want POST", req.Method)
+					}
+					if err := req.ParseForm(); err != nil {
+						t.Fatalf("ParseForm() error = %v", err)
+					}
+					gotForm = req.PostForm
+					return xaiJSONResponse(
+						req, http.StatusOK, map[string]any{
+							"device_code":               "device-abc",
+							"user_code":                 "ABCD-1234",
+							"verification_uri":          "https://accounts.x.ai/oauth2/device",
+							"verification_uri_complete": "https://accounts.x.ai/oauth2/device?user_code=ABCD-1234",
+							"expires_in":                1800,
+							"interval":                  5,
+						},
+					), nil
+				},
+			),
 		},
 	}
 
-	deviceCode, err := auth.RequestDeviceCode(
+	deviceCode, err := auth.requestDeviceCode(
 		context.Background(),
 		"https://auth.x.ai/oauth2/device/code",
 		"https://auth.x.ai/oauth2/token",
@@ -49,28 +53,34 @@ func TestRequestDeviceCodePostsClientIDAndScope(t *testing.T) {
 	if deviceCode.TokenEndpoint != "https://auth.x.ai/oauth2/token" {
 		t.Fatalf("TokenEndpoint = %q", deviceCode.TokenEndpoint)
 	}
-	if gotForm.Get("client_id") != ClientID {
-		t.Fatalf("client_id = %q, want %q", gotForm.Get("client_id"), ClientID)
+	if gotForm.Get("client_id") != clientID {
+		t.Fatalf("client_id = %q, want %q", gotForm.Get("client_id"), clientID)
 	}
-	if gotForm.Get("scope") != Scope {
-		t.Fatalf("scope = %q, want %q", gotForm.Get("scope"), Scope)
+	if gotForm.Get("scope") != scope {
+		t.Fatalf("scope = %q, want %q", gotForm.Get("scope"), scope)
 	}
 }
 
 func TestRequestDeviceCodeRejectsUntrustedEndpoints(t *testing.T) {
-	auth := &Auth{httpClient: &http.Client{Transport: xaiRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("unexpected HTTP request")
-		return nil, nil
-	})}}
+	auth := &Auth{
+		httpClient: &http.Client{
+			Transport: xaiRoundTripFunc(
+				func(*http.Request) (*http.Response, error) {
+					t.Fatal("unexpected HTTP request")
+					return nil, nil
+				},
+			),
+		},
+	}
 
-	if _, err := auth.RequestDeviceCode(
+	if _, err := auth.requestDeviceCode(
 		context.Background(),
 		"https://evil.example/device",
 		"https://auth.x.ai/oauth2/token",
 	); err == nil {
 		t.Fatal("untrusted device endpoint was accepted")
 	}
-	if _, err := auth.RequestDeviceCode(
+	if _, err := auth.requestDeviceCode(
 		context.Background(),
 		"https://auth.x.ai/oauth2/device",
 		"http://auth.x.ai/oauth2/token",
@@ -83,41 +93,47 @@ func TestPollForTokenImmediateSuccess(t *testing.T) {
 	var gotForm url.Values
 	auth := &Auth{
 		httpClient: &http.Client{
-			Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				if err := req.ParseForm(); err != nil {
-					t.Fatalf("ParseForm() error = %v", err)
-				}
-				gotForm = req.PostForm
-				return xaiJSONResponse(req, http.StatusOK, map[string]any{
-					"access_token":  "access-1",
-					"refresh_token": "refresh-1",
-					"token_type":    "Bearer",
-					"expires_in":    3600,
-				}), nil
-			}),
+			Transport: xaiRoundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					if err := req.ParseForm(); err != nil {
+						t.Fatalf("ParseForm() error = %v", err)
+					}
+					gotForm = req.PostForm
+					return xaiJSONResponse(
+						req, http.StatusOK, map[string]any{
+							"access_token":  "access-1",
+							"refresh_token": "refresh-1",
+							"token_type":    "Bearer",
+							"expires_in":    3600,
+						},
+					), nil
+				},
+			),
 		},
 	}
 
-	tokenData, err := auth.PollForToken(context.Background(), &DeviceCodeResponse{
-		DeviceCode:    "device-abc",
-		ExpiresIn:     60,
-		Interval:      5,
-		TokenEndpoint: "https://auth.x.ai/oauth2/token",
-	})
+	tokenData, err := auth.pollForToken(
+		context.Background(), &DeviceCodeResponse{
+			DeviceCode:    "device-abc",
+			ExpiresIn:     60,
+			Interval:      5,
+			TokenEndpoint: "https://auth.x.ai/oauth2/token",
+		},
+	)
 	if err != nil {
 		t.Fatalf("PollForToken() error = %v", err)
 	}
 	if tokenData.AccessToken != "access-1" || tokenData.RefreshToken != "refresh-1" {
 		t.Fatalf("token data = %#v", tokenData)
 	}
-	if gotForm.Get("grant_type") != DeviceCodeGrantType {
-		t.Fatalf("grant_type = %q, want %q", gotForm.Get("grant_type"), DeviceCodeGrantType)
+	if gotForm.Get("grant_type") != deviceCodeGrantType {
+		t.Fatalf("grant_type = %q, want %q", gotForm.Get("grant_type"), deviceCodeGrantType)
 	}
 	if gotForm.Get("device_code") != "device-abc" {
 		t.Fatalf("device_code = %q, want device-abc", gotForm.Get("device_code"))
 	}
-	if gotForm.Get("client_id") != ClientID {
-		t.Fatalf("client_id = %q, want %q", gotForm.Get("client_id"), ClientID)
+	if gotForm.Get("client_id") != clientID {
+		t.Fatalf("client_id = %q, want %q", gotForm.Get("client_id"), clientID)
 	}
 }
 
@@ -125,22 +141,28 @@ func TestPollForTokenStopsAtDeviceExpiryBeforeNextInterval(t *testing.T) {
 	requests := 0
 	auth := &Auth{
 		httpClient: &http.Client{
-			Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				requests++
-				return xaiJSONResponse(req, http.StatusBadRequest, map[string]any{
-					"error": "authorization_pending",
-				}), nil
-			}),
+			Transport: xaiRoundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					requests++
+					return xaiJSONResponse(
+						req, http.StatusBadRequest, map[string]any{
+							"error": "authorization_pending",
+						},
+					), nil
+				},
+			),
 		},
 	}
 
 	started := time.Now()
-	_, err := auth.PollForToken(context.Background(), &DeviceCodeResponse{
-		DeviceCode:    "device-abc",
-		ExpiresIn:     1,
-		Interval:      5,
-		TokenEndpoint: "https://auth.x.ai/oauth2/token",
-	})
+	_, err := auth.pollForToken(
+		context.Background(), &DeviceCodeResponse{
+			DeviceCode:    "device-abc",
+			ExpiresIn:     1,
+			Interval:      5,
+			TokenEndpoint: "https://auth.x.ai/oauth2/token",
+		},
+	)
 	elapsed := time.Since(started)
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Fatalf("PollForToken() error = %v, want expired", err)
@@ -157,20 +179,24 @@ func TestPollForTokenCancelsInFlightRequestAtDeviceExpiry(t *testing.T) {
 	requestCancelled := make(chan struct{}, 1)
 	auth := &Auth{
 		httpClient: &http.Client{
-			Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-				<-req.Context().Done()
-				requestCancelled <- struct{}{}
-				return nil, req.Context().Err()
-			}),
+			Transport: xaiRoundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					<-req.Context().Done()
+					requestCancelled <- struct{}{}
+					return nil, req.Context().Err()
+				},
+			),
 		},
 	}
 
-	_, err := auth.PollForToken(context.Background(), &DeviceCodeResponse{
-		DeviceCode:    "device-abc",
-		ExpiresIn:     1,
-		Interval:      5,
-		TokenEndpoint: "https://auth.x.ai/oauth2/token",
-	})
+	_, err := auth.pollForToken(
+		context.Background(), &DeviceCodeResponse{
+			DeviceCode:    "device-abc",
+			ExpiresIn:     1,
+			Interval:      5,
+			TokenEndpoint: "https://auth.x.ai/oauth2/token",
+		},
+	)
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Fatalf("PollForToken() error = %v, want expired", err)
 	}
@@ -221,37 +247,41 @@ func TestExchangeDeviceCodeOAuthStates(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			auth := &Auth{
-				httpClient: &http.Client{
-					Transport: xaiRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-						return xaiJSONResponse(req, tt.status, tt.payload), nil
-					}),
-				},
-			}
-			token, err, interval, shouldContinue := auth.exchangeDeviceCode(
-				context.Background(),
-				"https://auth.x.ai/oauth2/token",
-				"device-abc",
-				5*time.Second,
-			)
-			if token != nil {
-				t.Fatalf("token = %#v, want nil", token)
-			}
-			if shouldContinue != tt.wantContinue {
-				t.Fatalf("shouldContinue = %v, want %v", shouldContinue, tt.wantContinue)
-			}
-			if interval != tt.wantInterval {
-				t.Fatalf("interval = %s, want %s", interval, tt.wantInterval)
-			}
-			if tt.wantErrorContain == "" {
-				if err != nil {
-					t.Fatalf("error = %v, want nil", err)
+		t.Run(
+			tt.name, func(t *testing.T) {
+				auth := &Auth{
+					httpClient: &http.Client{
+						Transport: xaiRoundTripFunc(
+							func(req *http.Request) (*http.Response, error) {
+								return xaiJSONResponse(req, tt.status, tt.payload), nil
+							},
+						),
+					},
 				}
-			} else if err == nil || !strings.Contains(err.Error(), tt.wantErrorContain) {
-				t.Fatalf("error = %v, want containing %q", err, tt.wantErrorContain)
-			}
-		})
+				token, interval, shouldContinue, err := auth.exchangeDeviceCode(
+					context.Background(),
+					"https://auth.x.ai/oauth2/token",
+					"device-abc",
+					5*time.Second,
+				)
+				if token != nil {
+					t.Fatalf("token = %#v, want nil", token)
+				}
+				if shouldContinue != tt.wantContinue {
+					t.Fatalf("shouldContinue = %v, want %v", shouldContinue, tt.wantContinue)
+				}
+				if interval != tt.wantInterval {
+					t.Fatalf("interval = %s, want %s", interval, tt.wantInterval)
+				}
+				if tt.wantErrorContain == "" {
+					if err != nil {
+						t.Fatalf("error = %v, want nil", err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), tt.wantErrorContain) {
+					t.Fatalf("error = %v, want containing %q", err, tt.wantErrorContain)
+				}
+			},
+		)
 	}
 }
 
