@@ -3,6 +3,7 @@ package management
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -44,6 +45,7 @@ func (h *Handler) GetUsageQueue(c *gin.Context) {
 	if queue == nil {
 		queue = redisqueue.DefaultQueue()
 	}
+	c.Header("X-Usage-Queue-Dropped", strconv.FormatUint(queue.DroppedCount(), 10))
 	items := queue.PopOldest(count)
 	records := make([]usageQueueRecord, 0, len(items))
 	for _, item := range items {
@@ -61,6 +63,9 @@ func parseUsageQueueCount(value string) (int, error) {
 	count, errCount := strconv.Atoi(value)
 	if errCount != nil || count <= 0 {
 		return 0, errors.New("count must be a positive integer")
+	}
+	if count > redisqueue.MaxPopCount {
+		return 0, fmt.Errorf("count must not exceed %d", redisqueue.MaxPopCount)
 	}
 	return count, nil
 }
@@ -113,6 +118,9 @@ func (h *Handler) getUsageStatistics(c *gin.Context, maxEvents int64) {
 		} else {
 			snapshot, err = h.usageStats.AggregateSnapshotContext(ctx)
 		}
+		if includeDetails && h.usageStats.DetailsTruncated() {
+			detailsTruncated = true
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -142,8 +150,8 @@ func (h *Handler) getUsageStatistics(c *gin.Context, maxEvents int64) {
 }
 
 // ExportUsageStatistics returns a versioned, reversible backup of canonical
-// SQLite events. Raw API keys are encrypted with the authenticated management
-// credential, or with X-Usage-Backup-Key when the caller supplies a portable
+// SQLite events. Irreversible API key identities are encrypted with the authenticated
+// management credential, or with X-Usage-Backup-Key when the caller supplies a portable
 // backup key. Optional filters scope the exported event set.
 func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	if h == nil || h.usagePersister == nil {
@@ -159,16 +167,24 @@ func (h *Handler) ExportUsageStatistics(c *gin.Context) {
 	if !from.IsZero() && !to.IsZero() && from.After(to) {
 		from, to = to, from
 	}
+	apiKeyFilter, apiKeyFilters := newUsageAPIKeyPresenter(h.configSnapshot()).expandFilters(
+		c.Query("api_key"),
+		c.QueryArray("api_key"),
+	)
 	filters := usage.EventFilters{
 		Model:   c.Query("model"),
-		APIKey:  c.Query("api_key"),
-		APIKeys: c.QueryArray("api_key"),
+		APIKey:  apiKeyFilter,
+		APIKeys: apiKeyFilters,
 		Source:  c.Query("credential"),
 	}
 	events, err := h.usagePersister.QueryBackupEventsContext(c.Request.Context(), from, to, filters)
 	if err != nil {
 		if errors.Is(err, usage.ErrPortableBackupTooLarge) {
 			writeUsageBackupTooLarge(c)
+			return
+		}
+		if errors.Is(err, usage.ErrTimestampOutOfRange) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "from/to parameter is outside the supported time range"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query usage export"})
@@ -283,7 +299,10 @@ func writeUsageImportResult(
 	failureCount int64,
 	queryErr error,
 ) {
-	if c != nil && c.Request != nil && c.Request.Context().Err() != nil {
+	if c == nil {
+		return
+	}
+	if c.Request != nil && c.Request.Context().Err() != nil {
 		return
 	}
 	payload := gin.H{
@@ -390,26 +409,28 @@ func (h *Handler) PutUsageRetention(c *gin.Context) {
 	}
 
 	runtimeRetention := h.usagePersister.Retention()
-	committed, ok := h.mutateConfig(c, func(next *config.Config) error {
-		retention := next.UsageRetention
-		if retention == (config.UsageRetention{}) {
-			retention = runtimeRetention
-		}
-		if body.Days != nil {
-			retention.Days = *body.Days
-		}
-		if body.MaxDBSizeMB != nil {
-			retention.MaxDBSizeMB = *body.MaxDBSizeMB
-		}
-		if body.WarningThresholdPct != nil {
-			retention.WarningThresholdPct = *body.WarningThresholdPct
-		}
-		if retention.WarningThresholdPct == 0 {
-			retention.WarningThresholdPct = 80
-		}
-		next.UsageRetention = retention
-		return nil
-	})
+	committed, ok := h.mutateConfig(
+		c, func(next *config.Config) error {
+			retention := next.UsageRetention
+			if retention == (config.UsageRetention{}) {
+				retention = runtimeRetention
+			}
+			if body.Days != nil {
+				retention.Days = *body.Days
+			}
+			if body.MaxDBSizeMB != nil {
+				retention.MaxDBSizeMB = *body.MaxDBSizeMB
+			}
+			if body.WarningThresholdPct != nil {
+				retention.WarningThresholdPct = *body.WarningThresholdPct
+			}
+			if retention.WarningThresholdPct == 0 {
+				retention.WarningThresholdPct = 80
+			}
+			next.UsageRetention = retention
+			return nil
+		},
+	)
 	if !ok {
 		return
 	}

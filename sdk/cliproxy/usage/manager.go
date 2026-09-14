@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
+	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -28,8 +30,10 @@ type Record struct {
 	Model               string
 	Alias               string
 	APIKey              string
+	ReservationID       string
 	AuthID              string
 	AuthIndex           string
+	AccessTokenSHA256   string
 	AuthType            string
 	Source              string
 	SourceKind          CredentialSourceKind
@@ -38,17 +42,23 @@ type Record struct {
 	ServiceTier         string
 	RequestServiceTier  string
 	ResponseServiceTier string
-	RequestedAt         time.Time
-	Latency             time.Duration
-	RequestID           string
-	TimeToFirstByteMs   int64
-	TotalDurationMs     int64
-	Completed           bool
-	Thinking            *Thinking
-	Failed              bool
-	Fail                Failure
-	Detail              Detail
-	ResponseHeaders     http.Header
+	// Generate reports whether the client requested actual generation.
+	// nil or true means generation is enabled; only an explicit false disables generation.
+	Generate          *bool
+	RequestedAt       time.Time
+	Latency           time.Duration
+	RequestID         string
+	ClientIP          string
+	XForwardedFor     string
+	UserAgent         string
+	TimeToFirstByteMs int64
+	TotalDurationMs   int64
+	Completed         bool
+	Thinking          *Thinking
+	Failed            bool
+	Fail              Failure
+	Detail            Detail
+	ResponseHeaders   http.Header
 }
 
 const DefaultServiceTier = "default"
@@ -56,6 +66,7 @@ const DefaultServiceTier = "default"
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
+type generateContextKey struct{}
 type deferredRecordContextKey struct{}
 type managerContextKey struct{}
 
@@ -179,6 +190,39 @@ func ServiceTierFromContext(ctx context.Context) string {
 	}
 }
 
+// WithGenerate stores whether the client requested actual generation for usage sinks.
+func WithGenerate(ctx context.Context, generate bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, generateContextKey{}, generate)
+}
+
+// GenerateFromContext returns whether the client requested actual generation.
+// Missing values default to true.
+func GenerateFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return true
+	}
+	value, ok := ctx.Value(generateContextKey{}).(bool)
+	if !ok {
+		return true
+	}
+	return value
+}
+
+// GenerateFlag returns a pointer suitable for Record.Generate.
+//
+//go:fix inline
+func GenerateFlag(generate bool) *bool {
+	return new(generate)
+}
+
+// GenerateEnabled applies the backward-compatible default for omitted values.
+func GenerateEnabled(generate *bool) bool {
+	return generate == nil || *generate
+}
+
 // WithDeferredRecord stores a deferred main usage record in ctx.
 func WithDeferredRecord(ctx context.Context, deferred *DeferredRecord) context.Context {
 	if ctx == nil {
@@ -238,7 +282,7 @@ func (d *DeferredRecord) Complete(ctx context.Context, err error) {
 	}
 	d.published = true
 	d.mu.Unlock()
-	PublishRecord(publishCtx, deferredRecordWithOutcome(record, err))
+	_ = PublishRecord(publishCtx, deferredRecordWithOutcome(record, err))
 }
 
 func (d *DeferredRecord) store(ctx context.Context, record Record) bool {
@@ -263,7 +307,7 @@ func (d *DeferredRecord) store(ctx context.Context, record Record) bool {
 	}
 	d.published = true
 	d.mu.Unlock()
-	PublishRecord(publishCtx, deferredRecordWithOutcome(record, err))
+	_ = PublishRecord(publishCtx, deferredRecordWithOutcome(record, err))
 	return true
 }
 
@@ -277,10 +321,7 @@ func deferredRecordWithOutcome(record Record, err error) Record {
 		record.Fail.Body = strings.TrimSpace(err.Error())
 	}
 	if record.Fail.StatusCode == 0 {
-		var statusErr interface{ StatusCode() int }
-		if errors.As(err, &statusErr) && statusErr != nil {
-			record.Fail.StatusCode = statusErr.StatusCode()
-		}
+		record.Fail.StatusCode = clienterror.HTTPStatusFromError(err)
 	}
 	return record
 }
@@ -305,14 +346,17 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens         int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	CachedTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	TotalTokens         int64
-	ResponseServiceTier string
+	InputTokens                int64
+	OutputTokens               int64
+	ReasoningTokens            int64
+	CachedTokens               int64
+	CacheReadTokens            int64
+	CacheCreationTokens        int64
+	CacheCreation5mInputTokens int64
+	CacheCreation1hInputTokens int64
+	TotalTokens                int64
+	TokenBreakdown             TokenBreakdown
+	ResponseServiceTier        string
 }
 
 // Thinking describes the requested thinking intensity for a usage record.
@@ -517,6 +561,7 @@ func (m *Manager) StopContext(ctx context.Context) error {
 		m.state = managerStateStopping
 		close(m.stopping)
 		m.cond.Broadcast()
+	case managerStateStopping:
 	}
 	done := m.done
 	m.mu.Unlock()
@@ -730,6 +775,7 @@ func RegisterNamedPlugin(name string, plugin Plugin) {
 
 // RegisterNamedPluginWithRetirement registers or replaces a named plugin and
 // returns the retirement for the replaced generation.
+// noinspection GoUnusedExportedFunction
 func RegisterNamedPluginWithRetirement(name string, plugin Plugin) *Retirement {
 	return DefaultManager().RegisterNamedWithRetirement(name, plugin)
 }
@@ -739,9 +785,28 @@ func UnregisterNamedPlugin(name string) *Retirement {
 	return DefaultManager().UnregisterNamed(name)
 }
 
+func markRequestOutcomeFromRecord(ctx context.Context, record Record) {
+	if !record.Failed {
+		return
+	}
+	kind := internallogging.RequestOutcomeUpstreamError
+	reason := strings.TrimSpace(record.Fail.Body)
+	switch {
+	case errors.Is(context.Cause(ctx), context.DeadlineExceeded) ||
+		strings.Contains(strings.ToLower(reason), context.DeadlineExceeded.Error()):
+		kind = internallogging.RequestOutcomeDeadline
+	case errors.Is(context.Cause(ctx), context.Canceled) ||
+		record.Fail.StatusCode == clienterror.StatusClientClosedRequest ||
+		strings.EqualFold(reason, context.Canceled.Error()):
+		kind = internallogging.RequestOutcomeCanceled
+	}
+	internallogging.MarkRequestOutcomeFailure(ctx, kind, "usage", reason)
+}
+
 // PublishRecord publishes a record using the manager assigned to ctx, or the
 // default manager when no instance manager is present.
 func PublishRecord(ctx context.Context, record Record) error {
+	markRequestOutcomeFromRecord(ctx, record)
 	manager := ManagerFromContext(ctx)
 	if manager == nil {
 		manager = DefaultManager()
@@ -754,10 +819,13 @@ func PublishRecord(ctx context.Context, record Record) error {
 }
 
 // StartDefault starts the default manager's dispatcher.
+// noinspection GoUnusedExportedFunction
 func StartDefault(ctx context.Context) { DefaultManager().Start(ctx) }
 
 // StopDefault stops the default manager's dispatcher.
+// noinspection GoUnusedExportedFunction
 func StopDefault() { DefaultManager().Stop() }
 
 // StopDefaultContext stops the default manager and waits up to ctx.
+// noinspection GoUnusedExportedFunction
 func StopDefaultContext(ctx context.Context) error { return DefaultManager().StopContext(ctx) }

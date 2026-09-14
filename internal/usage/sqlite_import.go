@@ -16,9 +16,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Parser describes one importable on-disk format. ParseAny tries Detect on
-// each parser in priority order; the first match wins.
-type Parser interface {
+// parser describes one importable on-disk format. ParseAny calls each parser's
+// Detect method in priority order; the first match wins.
+type parser interface {
 	Detect(data []byte) bool
 	Parse(data []byte) ([]FlatDetail, error)
 }
@@ -319,29 +319,34 @@ func csvReaderFor(data []byte) *csv.Reader {
 // flatArray because a JSON array CAN be the "details" value of a backend
 // envelope, and we want the envelope path to win when both match. csvParser
 // is last because Detect on text data is more expensive than the JSON probes.
-var allParsers = []Parser{
+var allParsers = []parser{
 	flatDetailsParser{},
 	statisticsSnapshotParser{},
 	flatArrayParser{},
 	csvParser{},
 }
 
-// ParseAny detects the format and returns the flattened FlatDetail slice.
+// parseAny detects the format and returns the flattened FlatDetail slice.
 // Encrypted backups require ParseAnyWithSecret; legacy formats remain importable
 // without an encryption key.
-func ParseAny(data []byte) ([]FlatDetail, string, error) {
-	return ParseAnyWithSecret(data, "")
+func parseAny(data []byte) ([]FlatDetail, string, error) {
+	return parseAnyWithSecret(data, "")
 }
 
-// ParseAnyWithSecret detects encrypted v3 backups before the legacy parser
-// chain. The secret is ignored for formats that never contained encrypted keys.
-func ParseAnyWithSecret(data []byte, secret string) ([]FlatDetail, string, error) {
+// parseAnyWithSecret detects encrypted backups before the legacy parser chain.
+// The secret is ignored for formats that never contained encrypted keys.
+func parseAnyWithSecret(data []byte, secret string) ([]FlatDetail, string, error) {
 	if IsUsageBackup(data) {
+		var envelope usageBackupEnvelope
+		if err := json.Unmarshal(data, &envelope); err != nil {
+			return nil, "usageBackup", err
+		}
+		format := fmt.Sprintf("usageBackupV%d", envelope.Version)
 		details, err := ParseUsageBackup(data, secret)
 		if err != nil {
-			return nil, "usageBackupV3", err
+			return nil, format, err
 		}
-		return details, "usageBackupV3", nil
+		return details, format, nil
 	}
 	for _, p := range allParsers {
 		if p.Detect(data) {
@@ -384,6 +389,16 @@ func flattenSnapshot(snap StatisticsSnapshot) []FlatDetail {
 						AuthIndex:           normaliseDimName(d.AuthIndex, ""),
 						APIKey:              cleanAPI,
 						LatencyMs:           d.LatencyMs,
+						RequestID:           strings.TrimSpace(d.RequestID),
+						TimeToFirstByteMs:   d.TimeToFirstByteMs,
+						TotalDurationMs:     d.TotalDurationMs,
+						Completed:           d.Completed,
+						Generate:            d.Generate,
+						ClientIP:            strings.TrimSpace(d.ClientIP),
+						XForwardedFor:       strings.TrimSpace(d.XForwardedFor),
+						UserAgent:           strings.TrimSpace(d.UserAgent),
+						AccountingVersion:   d.AccountingVersion,
+						TokenBreakdown:      d.TokenBreakdown,
 						ReasoningEffort:     strings.TrimSpace(d.ReasoningEffort),
 						ServiceTier:         requestServiceTier,
 						RequestServiceTier:  requestServiceTier,
@@ -393,6 +408,7 @@ func flattenSnapshot(snap StatisticsSnapshot) []FlatDetail {
 						ResponseHeaders:     cloneHTTPHeader(d.ResponseHeaders),
 						Tokens:              d.Tokens,
 						Failed:              d.Failed,
+						generateRecorded:    true,
 					},
 				)
 			}
@@ -462,14 +478,14 @@ func importDayRange(details []FlatDetail) (int64, int64, bool, error) {
 	return earliest, latest, true, nil
 }
 
-// ImportBytes is the synchronous entry point for legacy, non-encrypted input.
-func ImportBytes(ctx context.Context, store *Store, priceFn PriceFunc, data []byte) (ImportResult, error) {
-	return ImportBytesWithSecret(ctx, store, priceFn, data, "")
+// importBytes is the synchronous entry point for legacy, non-encrypted input.
+func importBytes(ctx context.Context, store *Store, priceFn PriceFunc, data []byte) (ImportResult, error) {
+	return importBytesWithSecret(ctx, store, priceFn, data, "")
 }
 
-// ImportBytesWithSecret parses encrypted backups and every legacy format, then
+// importBytesWithSecret parses encrypted backups and every legacy format, then
 // imports all details in one transaction so the caller sees consistent counts.
-func ImportBytesWithSecret(
+func importBytesWithSecret(
 	ctx context.Context,
 	store *Store,
 	priceFn PriceFunc,
@@ -479,13 +495,13 @@ func ImportBytesWithSecret(
 	if store == nil {
 		return ImportResult{}, errors.New("usage: import on nil store")
 	}
-	details, format, err := ParseAnyWithSecret(data, secret)
+	details, format, err := parseAnyWithSecret(data, secret)
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("%w: %v", ErrInvalidImport, err)
 	}
-	preserveEncryptedBackup := format == "usageBackupV3"
+	preserveEncryptedBackup := format == "usageBackupV3" || format == "usageBackupV4"
 	for i := range details {
-		details[i].Source = NormalizeImportedCredentialSource(details[i].Source, preserveEncryptedBackup)
+		details[i].Source = normalizeImportedCredentialSource(details[i].Source, preserveEncryptedBackup)
 	}
 	earliestDayNs, latestDayNs, hasDayRange, err := importDayRange(details)
 	if err != nil {
@@ -505,9 +521,9 @@ func ImportBytesWithSecret(
 	}, nil
 }
 
-// ImportFile reads, parses and imports a single file. Used by migrate_legacy
+// importFile reads, parses and imports a single file. Used by migrate_legacy
 // and could be exposed via a future CLI subcommand.
-func ImportFile(ctx context.Context, store *Store, priceFn PriceFunc, path string) (ImportResult, error) {
+func importFile(ctx context.Context, store *Store, priceFn PriceFunc, path string) (ImportResult, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("stat %s: %w", path, err)
@@ -521,7 +537,7 @@ func ImportFile(ctx context.Context, store *Store, priceFn PriceFunc, path strin
 	if err != nil {
 		return ImportResult{}, fmt.Errorf("read %s: %w", path, err)
 	}
-	return ImportBytes(ctx, store, priceFn, data)
+	return importBytes(ctx, store, priceFn, data)
 }
 
 // importDetails persists the entire payload in one transaction. Imports are
@@ -534,7 +550,7 @@ func importDetails(ctx context.Context, store *Store, priceFn PriceFunc, details
 	if len(details) == 0 {
 		return 0, 0, nil
 	}
-	tx, err := store.DB().BeginTx(ctx, nil)
+	tx, err := store.database().BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, fmt.Errorf("begin import tx: %w", err)
 	}

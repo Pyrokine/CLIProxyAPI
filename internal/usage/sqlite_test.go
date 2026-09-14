@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	_ "modernc.org/sqlite"
 )
 
@@ -20,7 +22,7 @@ import (
 // SQLite database and the WAL files clean up automatically.
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := OpenStore(filepath.Join(t.TempDir(), "events.db"))
+	store, err := openStore(filepath.Join(t.TempDir(), "events.db"))
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
@@ -34,7 +36,7 @@ func TestOpenStore_Idempotent(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "events.db")
 
-	store1, err := OpenStore(dbPath)
+	store1, err := openStore(dbPath)
 	if err != nil {
 		t.Fatalf("first OpenStore: %v", err)
 	}
@@ -42,7 +44,7 @@ func TestOpenStore_Idempotent(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	store2, err := OpenStore(dbPath)
+	store2, err := openStore(dbPath)
 	if err != nil {
 		t.Fatalf("second OpenStore: %v", err)
 	}
@@ -61,6 +63,18 @@ func TestOpenStore_Idempotent(t *testing.T) {
 	}
 }
 
+func TestOpenStoreUsesFileTemporaryStorage(t *testing.T) {
+	store := openTestStore(t)
+
+	var tempStore int
+	if err := store.db.QueryRow("PRAGMA temp_store").Scan(&tempStore); err != nil {
+		t.Fatalf("read temp_store: %v", err)
+	}
+	if tempStore != 1 {
+		t.Fatalf("temp_store = %d, want FILE (1)", tempStore)
+	}
+}
+
 // TestResolveDimIDs verifies dim_* tables INSERT-OR-IGNORE plus return-on-
 // existing-id semantics for both required (model) and nullable (api_key,
 // source, auth_index, credential) dimensions.
@@ -73,21 +87,25 @@ func TestOpenStoreRejectsFutureSchemaWithoutMutatingDatabase(t *testing.T) {
 	if _, err := raw.Exec("PRAGMA journal_mode=DELETE"); err != nil {
 		t.Fatalf("set journal mode: %v", err)
 	}
-	if _, err := raw.Exec(`
+	if _, err := raw.Exec(
+		`
 		CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
-		INSERT INTO meta(key, value) VALUES ('schema_version', '5');
+		INSERT INTO meta(key, value) VALUES ('schema_version', '10');
 		CREATE TABLE future_only (id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
-	`); err != nil {
+	`,
+	); err != nil {
 		t.Fatalf("create future schema: %v", err)
 	}
 
 	snapshotSchema := func(db *sql.DB) string {
 		t.Helper()
-		rows, err := db.Query(`
+		rows, err := db.Query(
+			`
 			SELECT type, name, tbl_name, ifnull(sql, '')
 			  FROM sqlite_master
 			 ORDER BY type, name
-		`)
+		`,
+		)
 		if err != nil {
 			t.Fatalf("query sqlite_master: %v", err)
 		}
@@ -120,12 +138,12 @@ func TestOpenStoreRejectsFutureSchemaWithoutMutatingDatabase(t *testing.T) {
 		t.Fatalf("close raw database: %v", err)
 	}
 
-	store, err := OpenStore(dbPath)
+	store, err := openStore(dbPath)
 	if store != nil {
 		_ = store.Close()
 		t.Fatal("OpenStore returned a store for future schema")
 	}
-	if err == nil || !strings.Contains(err.Error(), "unexpected schema_version=5") {
+	if err == nil || !strings.Contains(err.Error(), "unexpected schema_version=10") {
 		t.Fatalf("OpenStore error = %v, want future schema rejection", err)
 	}
 
@@ -154,11 +172,11 @@ func TestResolveDimIDs(t *testing.T) {
 
 	// Required dim: empty string is rejected by callers, so we only test the
 	// happy path here.
-	id1, err := store.ResolveModelID(ctx, tx, "claude-sonnet-4-6")
+	id1, err := store.resolveModelID(ctx, tx, "claude-sonnet-4-6")
 	if err != nil {
 		t.Fatalf("resolve model 1: %v", err)
 	}
-	id2, err := store.ResolveModelID(ctx, tx, "claude-sonnet-4-6")
+	id2, err := store.resolveModelID(ctx, tx, "claude-sonnet-4-6")
 	if err != nil {
 		t.Fatalf("resolve model 2: %v", err)
 	}
@@ -172,9 +190,9 @@ func TestResolveDimIDs(t *testing.T) {
 	// Nullable dim: empty string returns NullInt64{Valid: false} without
 	// inserting a row.
 	for _, fn := range []func(context.Context, dbExec, string) (sql.NullInt64, error){
-		store.ResolveAPIKeyID,
-		store.ResolveSourceID,
-		store.ResolveAuthIndexID,
+		store.resolveAPIKeyID,
+		store.resolveSourceID,
+		store.resolveAuthIndexID,
 	} {
 		got, err := fn(ctx, tx, "")
 		if err != nil {
@@ -186,7 +204,7 @@ func TestResolveDimIDs(t *testing.T) {
 	}
 
 	// ResolveCredentialID: takes (source, authIndex). Both empty -> NULL.
-	got, err := store.ResolveCredentialID(ctx, tx, "", "")
+	got, err := store.resolveCredentialID(ctx, tx, "", "")
 	if err != nil {
 		t.Fatalf("resolve credential empty: %v", err)
 	}
@@ -204,7 +222,7 @@ func TestResolveDimIDsRollbackDoesNotPopulateCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if _, err := store.ResolveModelID(ctx, tx, model); err != nil {
+	if _, err := store.resolveModelID(ctx, tx, model); err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("resolve model in transaction: %v", err)
 	}
@@ -215,7 +233,7 @@ func TestResolveDimIDsRollbackDoesNotPopulateCache(t *testing.T) {
 		t.Fatalf("model cache contains %q after rollback", model)
 	}
 
-	id, err := store.ResolveModelID(ctx, store.db, model)
+	id, err := store.resolveModelID(ctx, store.db, model)
 	if err != nil {
 		t.Fatalf("resolve model after rollback: %v", err)
 	}
@@ -231,6 +249,82 @@ func TestResolveDimIDsRollbackDoesNotPopulateCache(t *testing.T) {
 // TestPersistEvent_Idempotent verifies INSERT OR IGNORE on events.fingerprint
 // dedupes a second insert of the same logical event, and the hour_bucket is
 // only incremented on the first insert.
+func TestStoreMaxSizeBytesAppliesToEveryConnection(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), dbFileName))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	var pageSize, pageCount int64
+	if err = store.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
+		t.Fatalf("query page size: %v", err)
+	}
+	if err = store.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount); err != nil {
+		t.Fatalf("query page count: %v", err)
+	}
+	maxPages := pageCount + 10
+	if err = store.setMaxSizeBytes(ctx, maxPages*pageSize); err != nil {
+		t.Fatalf("SetMaxSizeBytes: %v", err)
+	}
+
+	connections := make([]*sql.Conn, 0, 2)
+	defer func() {
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+	}()
+	for index := range 2 {
+		conn, errConn := store.db.Conn(ctx)
+		if errConn != nil {
+			t.Fatalf("connection %d: %v", index, errConn)
+		}
+		connections = append(connections, conn)
+		var applied int64
+		if errConn = conn.QueryRowContext(ctx, "PRAGMA max_page_count").Scan(&applied); errConn != nil {
+			t.Fatalf("connection %d max_page_count: %v", index, errConn)
+		}
+		if applied != maxPages {
+			t.Fatalf("connection %d max_page_count = %d, want %d", index, applied, maxPages)
+		}
+	}
+}
+
+func TestStoreMaxSizeBytesBlocksTransactionGrowth(t *testing.T) {
+	store, err := openStore(filepath.Join(t.TempDir(), dbFileName))
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx := context.Background()
+	var pageSize, pageCount int64
+	if err = store.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
+		t.Fatalf("query page size: %v", err)
+	}
+	if err = store.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&pageCount); err != nil {
+		t.Fatalf("query page count: %v", err)
+	}
+	maxPages := pageCount + 10
+	if err = store.setMaxSizeBytes(ctx, maxPages*pageSize); err != nil {
+		t.Fatalf("SetMaxSizeBytes: %v", err)
+	}
+	if _, err = store.db.ExecContext(ctx, "CREATE TABLE cap_test(data BLOB)"); err != nil {
+		t.Fatalf("create cap test table: %v", err)
+	}
+	if _, err = store.db.ExecContext(ctx, "INSERT INTO cap_test(data) VALUES (zeroblob(?))", pageSize*32); err == nil {
+		t.Fatal("oversized transaction succeeded despite max_page_count")
+	}
+	var finalPageCount int64
+	if err = store.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&finalPageCount); err != nil {
+		t.Fatalf("query final page count: %v", err)
+	}
+	if finalPageCount > maxPages {
+		t.Fatalf("page count = %d, exceeds limit %d", finalPageCount, maxPages)
+	}
+}
+
 func TestPersistEvent_Idempotent(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
@@ -354,14 +448,16 @@ func TestComputeCostMicroRejectsInvalidAndOutOfRangeValues(t *testing.T) {
 		{name: "multiplication overflow", tokens: tokenStats{InputTokens: math.MaxInt64}, prompt: math.MaxFloat64},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			priceFn := func(string) (float64, float64, float64, bool) {
-				return test.prompt, test.completion, test.cache, true
-			}
-			if _, err := computeCostMicro(test.tokens, priceFn, "m"); err == nil {
-				t.Fatal("computeCostMicro returned nil error")
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				priceFn := func(string) (float64, float64, float64, bool) {
+					return test.prompt, test.completion, test.cache, true
+				}
+				if _, err := computeCostMicro(test.tokens, priceFn, "m"); err == nil {
+					t.Fatal("computeCostMicro returned nil error")
+				}
+			},
+		)
 	}
 
 	belowLimit := math.Nextafter(math.Exp2(63), 0)
@@ -372,7 +468,7 @@ func TestComputeCostMicroRejectsInvalidAndOutOfRangeValues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("computeCostMicro below limit: %v", err)
 	}
-	if cost <= 0 || cost >= math.MaxInt64 {
+	if cost <= 0 || cost == math.MaxInt64 {
 		t.Fatalf("cost below limit = %d", cost)
 	}
 }
@@ -388,18 +484,22 @@ func TestWriterFlushUsesOnePriceSnapshotPerBatch(t *testing.T) {
 	writer := newWriterWithPriceProviderAndGate(store, provider, nil, nil)
 	base := time.Date(2026, 4, 27, 9, 0, 0, 0, time.UTC)
 
-	if err := writer.flush([]FlatDetail{
-		{Timestamp: base, Model: "m1", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
-		{Timestamp: base.Add(time.Minute), Model: "m2", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
-	}); err != nil {
+	if err := writer.flush(
+		[]FlatDetail{
+			{Timestamp: base, Model: "m1", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
+			{Timestamp: base.Add(time.Minute), Model: "m2", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
+		},
+	); err != nil {
 		t.Fatalf("first flush: %v", err)
 	}
 	if got := provider.CallCount(); got != 1 {
 		t.Fatalf("Snapshot calls after first batch = %d, want 1", got)
 	}
-	if err := writer.flush([]FlatDetail{
-		{Timestamp: base.Add(time.Hour), Model: "m1", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
-	}); err != nil {
+	if err := writer.flush(
+		[]FlatDetail{
+			{Timestamp: base.Add(time.Hour), Model: "m1", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
+		},
+	); err != nil {
 		t.Fatalf("second flush: %v", err)
 	}
 	if got := provider.CallCount(); got != 2 {
@@ -447,7 +547,10 @@ func TestWriterFlushIsolatesBadRecord(t *testing.T) {
 	batch := []FlatDetail{
 		{Timestamp: base, Model: "good-model-1", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
 		{Timestamp: base.Add(time.Minute), Model: "bad-model", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
-		{Timestamp: base.Add(2 * time.Minute), Model: "good-model-2", Tokens: tokenStats{InputTokens: 1, TotalTokens: 1}},
+		{
+			Timestamp: base.Add(2 * time.Minute), Model: "good-model-2",
+			Tokens: tokenStats{InputTokens: 1, TotalTokens: 1},
+		},
 	}
 
 	err := writer.flush(batch)
@@ -480,7 +583,7 @@ func TestWriterFlushIsolatesBadRecord(t *testing.T) {
 
 func TestWriterRetriesBatchAfterTransientFlushFailure(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "events.db")
-	initial, err := OpenStore(dbPath)
+	initial, err := openStore(dbPath)
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
@@ -521,19 +624,23 @@ func TestWriterRetriesBatchAfterTransientFlushFailure(t *testing.T) {
 		}
 	}()
 
-	provider := &scriptedPriceProvider{snapshots: []PriceFunc{
-		func(string) (float64, float64, float64, bool) {
-			return 1, 0, 0, true
+	provider := &scriptedPriceProvider{
+		snapshots: []PriceFunc{
+			func(string) (float64, float64, float64, bool) {
+				return 1, 0, 0, true
+			},
 		},
-	}}
+	}
 	writer := newWriterWithPriceProviderAndGate(store, provider, nil, nil)
-	writer.Start(ctx)
-	writer.Submit(FlatDetail{
-		Timestamp: time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC),
-		Model:     "m",
-		APIKey:    "k",
-		Tokens:    tokenStats{TotalTokens: 1},
-	})
+	writer.start(ctx)
+	writer.submit(
+		FlatDetail{
+			Timestamp: time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC),
+			Model:     "m",
+			APIKey:    "k",
+			Tokens:    tokenStats{TotalTokens: 1},
+		},
+	)
 
 	time.Sleep(3 * writerFlushInterval)
 	snapshotDeadline := time.Now().Add(time.Second)
@@ -613,7 +720,7 @@ func TestQueryLatencyStatsFromBuckets(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	qr, err := store.Query(ctx, base.Add(-time.Hour), base.Add(time.Hour), EventFilters{}, "hourly", true)
+	qr, err := store.querySummary(ctx, base.Add(-time.Hour), base.Add(time.Hour), EventFilters{}, "hourly", true)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -624,13 +731,13 @@ func TestQueryLatencyStatsFromBuckets(t *testing.T) {
 	if model == nil || model.Latency.TotalMs != 400 || model.Latency.SampleCount != 2 {
 		t.Fatalf("model latency = %+v, want total 400 sample 2", model)
 	}
-	apiKey := qr.ByAPIKey["k"]
+	apiKey := qr.ByAPIKey[coreusage.HashAPIKeyIdentity("k")]
 	if apiKey == nil || apiKey.Latency.TotalMs != 400 || apiKey.Latency.SampleCount != 2 {
 		t.Fatalf("api key latency = %+v, want total 400 sample 2", apiKey)
 	}
 
 	dayStart := time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC).UnixNano()
-	if err := store.RollupDay(ctx, dayStart); err != nil {
+	if err := store.rollupDay(ctx, dayStart); err != nil {
 		t.Fatalf("RollupDay: %v", err)
 	}
 	var dayLatency, daySamples int64
@@ -672,7 +779,7 @@ func TestQueryFiltered_ZeroMatchNoFallback(t *testing.T) {
 	to := time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)
 
 	// Filter with a model that doesn't exist -> totals must be zero.
-	qr, err := store.Query(ctx, from, to, EventFilters{Model: "ghost-model"}, "hourly", true)
+	qr, err := store.querySummary(ctx, from, to, EventFilters{Model: "ghost-model"}, "hourly", true)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -681,7 +788,7 @@ func TestQueryFiltered_ZeroMatchNoFallback(t *testing.T) {
 	}
 
 	// Sanity check: no filter should still see the inserted event.
-	qrAll, err := store.Query(ctx, from, to, EventFilters{}, "hourly", true)
+	qrAll, err := store.querySummary(ctx, from, to, EventFilters{}, "hourly", true)
 	if err != nil {
 		t.Fatalf("Query all: %v", err)
 	}
@@ -702,7 +809,7 @@ func TestQueryEvents_Pagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	for i := 0; i < 25; i++ {
+	for i := range 25 {
 		d := FlatDetail{
 			Timestamp: base.Add(time.Duration(i) * time.Minute),
 			Model:     "m",
@@ -720,7 +827,7 @@ func TestQueryEvents_Pagination(t *testing.T) {
 	to := base.Add(time.Hour)
 
 	// Page 1, size 10.
-	events, total, err := store.QueryEvents(ctx, from, to, EventFilters{}, 1, 10, "timestamp", false)
+	events, total, err := store.queryEventDetails(ctx, from, to, EventFilters{}, 1, 10, "timestamp", false)
 	if err != nil {
 		t.Fatalf("QueryEvents: %v", err)
 	}
@@ -732,7 +839,7 @@ func TestQueryEvents_Pagination(t *testing.T) {
 	}
 
 	// Page 3 should have 5 leftovers.
-	events3, _, err := store.QueryEvents(ctx, from, to, EventFilters{}, 3, 10, "timestamp", false)
+	events3, _, err := store.queryEventDetails(ctx, from, to, EventFilters{}, 3, 10, "timestamp", false)
 	if err != nil {
 		t.Fatalf("QueryEvents page 3: %v", err)
 	}
@@ -741,11 +848,7 @@ func TestQueryEvents_Pagination(t *testing.T) {
 	}
 }
 
-// TestComputeFingerprint_NULLProviderEquivalent locks in the v2 compatibility
-// guarantee: for legacy rows where Provider == "", ComputeFingerprint must
-// produce the exact SHA-1 the v1 11-field algorithm did. Otherwise a
-// re-import of pre-v2 JSON would explode events.fingerprint UNIQUE collisions
-// against rows already present from previous imports.
+// TestPersistEvent_ResponseHeadersRoundTrip verifies that request metadata survives persistence and query decoding.
 func TestPersistEvent_ResponseHeadersRoundTrip(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
@@ -779,7 +882,7 @@ func TestPersistEvent_ResponseHeadersRoundTrip(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	events, total, err := store.QueryEvents(
+	events, total, err := store.queryEventDetails(
 		ctx, d.Timestamp.Add(-time.Minute), d.Timestamp.Add(time.Minute), EventFilters{}, 1, 10, "timestamp", false,
 	)
 	if err != nil {
@@ -833,95 +936,273 @@ func TestDecodeEventMetadataLegacyServiceTierFallback(t *testing.T) {
 	}
 }
 
-func TestWriterSubmitBlocksInsteadOfDropping(t *testing.T) {
-	writer := NewWriter(nil, nil)
-	writer.stopped.Store(false)
-	for i := 0; i < writerChanCap; i++ {
-		writer.ch <- FlatDetail{Timestamp: time.Now(), Model: "model"}
+func TestWriterCapacityCheckRejectsBatchBeforePersistence(t *testing.T) {
+	store := openTestStore(t)
+	writer := newWriter(store, nil)
+	writer.setCapacityCheck(func() bool { return true })
+
+	err := writer.flushWithTimeout(
+		[]FlatDetail{
+			{
+				Timestamp: time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC),
+				Model:     "blocked",
+				Tokens:    tokenStats{TotalTokens: 1},
+			},
+		},
+		time.Second,
+	)
+	if !errors.Is(err, errWriterStorageCap) {
+		t.Fatalf("flushWithTimeout error = %v, want %v", err, errWriterStorageCap)
 	}
-
-	started := make(chan struct{})
-	done := make(chan struct{})
-	go func() {
-		close(started)
-		writer.Submit(FlatDetail{Timestamp: time.Now(), Model: "model"})
-		close(done)
-	}()
-	<-started
-
-	select {
-	case <-done:
-		t.Fatal("Submit returned while writer queue was full")
-	case <-time.After(20 * time.Millisecond):
+	var events int
+	if err = store.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
 	}
-
-	<-writer.ch
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("Submit did not resume after queue capacity became available")
+	if events != 0 {
+		t.Fatalf("persisted events = %d, want 0", events)
 	}
 }
 
-func TestWriterStopUnblocksSubmitWaitingOnFullQueue(t *testing.T) {
-	writer := NewWriter(nil, nil)
-	for i := 0; i < writerChanCap; i++ {
-		writer.ch <- FlatDetail{Timestamp: time.Now(), Model: "model"}
+func TestWriterCapacityCheckRefreshesAfterBatch(t *testing.T) {
+	store := openTestStore(t)
+	writer := newWriter(store, nil)
+	checks := 0
+	writer.setCapacityCheck(
+		func() bool {
+			checks++
+			return checks >= 2
+		},
+	)
+
+	err := writer.flushWithTimeout(
+		[]FlatDetail{
+			{
+				Timestamp: time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC),
+				Model:     "accepted",
+				Tokens:    tokenStats{TotalTokens: 1},
+			},
+		},
+		time.Second,
+	)
+	if err != nil {
+		t.Fatalf("flushWithTimeout: %v", err)
+	}
+	if checks != 2 {
+		t.Fatalf("capacity checks = %d, want 2", checks)
+	}
+}
+
+func TestWriterSubmitBlocksWhenQueueIsFull(t *testing.T) {
+	store := openTestStore(t)
+	writer := newWriter(store, nil)
+	writer.ch = make(chan FlatDetail, 1)
+	base := time.Date(2026, 9, 6, 10, 0, 0, 0, time.UTC)
+	if !writer.submit(FlatDetail{Timestamp: base, Model: "first"}) {
+		t.Fatal("first record was not accepted")
 	}
 
-	submitDone := make(chan struct{})
+	submitted := make(chan bool, 1)
 	go func() {
-		writer.Submit(FlatDetail{Timestamp: time.Now(), Model: "blocked"})
-		close(submitDone)
+		submitted <- writer.submit(FlatDetail{Timestamp: base.Add(time.Minute), Model: "second"})
 	}()
 	select {
-	case <-submitDone:
-		t.Fatal("Submit returned while writer queue was full")
-	case <-time.After(20 * time.Millisecond):
+	case <-submitted:
+		t.Fatal("Submit returned while the writer queue was full")
+	case <-time.After(50 * time.Millisecond):
 	}
 
-	stopDone := make(chan struct{})
-	go func() {
-		writer.Stop()
-		close(stopDone)
-	}()
+	writer.start(context.Background())
 	select {
-	case <-submitDone:
-	case <-time.After(time.Second):
-		t.Fatal("Submit did not return when writer stopped")
+	case accepted := <-submitted:
+		if !accepted {
+			t.Fatal("blocked record was rejected after queue capacity became available")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked Submit did not resume after queue capacity became available")
 	}
-	select {
-	case <-stopDone:
-	case <-time.After(time.Second):
-		t.Fatal("Stop did not return after waking blocked Submit")
+	writer.Stop()
+
+	var events int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if events != 2 {
+		t.Fatalf("persisted events = %d, want 2", events)
+	}
+	stats := writer.stats()
+	if stats.EventAccepted != 2 || stats.EventCommitted != 2 || stats.EventRejected != 0 {
+		t.Fatalf("writer stats = %#v, want 2 accepted, 2 committed, 0 rejected", stats)
+	}
+}
+
+func TestWriterSubmitRejectsAfterStop(t *testing.T) {
+	writer := newWriter(nil, nil)
+	writer.Stop()
+
+	if writer.submit(FlatDetail{Timestamp: time.Now(), Model: "rejected"}) {
+		t.Fatal("Submit accepted a record after Stop")
+	}
+	if stats := writer.stats(); stats.EventAccepted != 0 || stats.EventCommitted != 0 || stats.EventRejected != 0 {
+		t.Fatalf("writer stats after rejected submit = %#v, want zero", stats)
+	}
+}
+
+func TestWriterStatsDistinguishCommittedAndRejectedRecords(t *testing.T) {
+	store := openTestStore(t)
+	priceFn := func(string) (float64, float64, float64, bool) {
+		return 1, 0, 0, true
+	}
+	writer := newWriter(store, priceFn)
+	writer.start(context.Background())
+	base := time.Date(2026, 9, 6, 11, 0, 0, 0, time.UTC)
+	if !writer.submit(
+		FlatDetail{
+			Timestamp: base,
+			Model:     "good-model",
+			Tokens:    tokenStats{InputTokens: 1, TotalTokens: 1},
+		},
+	) {
+		t.Fatal("good record was not accepted")
+	}
+	if !writer.submit(
+		FlatDetail{
+			Timestamp: time.Date(2500, 1, 1, 0, 0, 0, 0, time.UTC),
+			Model:     "bad-model",
+			Tokens:    tokenStats{InputTokens: 1, TotalTokens: 1},
+		},
+	) {
+		t.Fatal("bad record was not accepted for persistence")
+	}
+	writer.Stop()
+
+	stats := writer.stats()
+	if stats.EventAccepted != 2 || stats.EventCommitted != 1 || stats.EventRejected != 1 {
+		t.Fatalf("writer stats = %#v, want 2 accepted, 1 committed, 1 rejected", stats)
+	}
+	var events int
+	if err := store.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if events != 1 {
+		t.Fatalf("persisted events = %d, want 1", events)
 	}
 }
 
 func TestWriterSubmitDuringStopDoesNotPanic(t *testing.T) {
-	writer := NewWriter(nil, nil)
-	writer.Start(context.Background())
+	writer := newWriter(nil, nil)
+	writer.start(context.Background())
 	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			writer.Submit(FlatDetail{Timestamp: time.Now(), Model: "model"})
-		}()
+	for range 32 {
+		wg.Go(func() {
+			writer.submit(FlatDetail{Timestamp: time.Now(), Model: "model"})
+		})
 	}
 	writer.Stop()
 	wg.Wait()
 }
 
+func TestWriterShutdownWaitsForTransientSQLiteLock(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "events.db")
+	initial, err := openStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if err = initial.Close(); err != nil {
+		t.Fatalf("close initial store: %v", err)
+	}
+
+	writerDB, err := sql.Open(
+		"sqlite",
+		dbPath+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(20)",
+	)
+	if err != nil {
+		t.Fatalf("open writer database: %v", err)
+	}
+	defer func() { _ = writerDB.Close() }()
+	writerDB.SetMaxOpenConns(1)
+	store := &Store{db: writerDB}
+
+	lockerDB, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(20)")
+	if err != nil {
+		t.Fatalf("open locker database: %v", err)
+	}
+	defer func() { _ = lockerDB.Close() }()
+	lockerDB.SetMaxOpenConns(1)
+	ctx := context.Background()
+	locker, err := lockerDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("open locker connection: %v", err)
+	}
+	defer func() { _ = locker.Close() }()
+	if _, err = locker.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("begin immediate: %v", err)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			_, _ = locker.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
+	writer := newWriter(store, nil)
+	writer.start(ctx)
+	if !writer.submit(
+		FlatDetail{
+			Timestamp: time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC),
+			Model:     "locked",
+			Tokens:    tokenStats{TotalTokens: 1},
+		},
+	) {
+		t.Fatal("record was not accepted")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		writer.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		_, _ = locker.ExecContext(ctx, "ROLLBACK")
+		locked = false
+		t.Fatal("writer stopped before the accepted record could be committed")
+	case <-time.After(3 * writerFlushInterval):
+	}
+
+	if _, err = locker.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("release writer lock: %v", err)
+	}
+	locked = false
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("writer did not stop after the SQLite lock was released")
+	}
+
+	var events int
+	if err = writerDB.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if events != 1 {
+		t.Fatalf("persisted events = %d, want 1", events)
+	}
+	stats := writer.stats()
+	if stats.EventAccepted != 1 || stats.EventCommitted != 1 || stats.EventRejected != 0 {
+		t.Fatalf("writer stats = %#v, want 1 accepted, 1 committed, 0 rejected", stats)
+	}
+}
+
 func TestWriterContextCancellationStopsAcceptanceAndDrains(t *testing.T) {
 	store := openTestStore(t)
 	ctx, cancel := context.WithCancel(context.Background())
-	writer := NewWriter(store, nil)
-	writer.Start(ctx)
-	writer.Submit(FlatDetail{
-		Timestamp: time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC),
-		Model:     "accepted",
-		Tokens:    tokenStats{TotalTokens: 1},
-	})
+	writer := newWriter(store, nil)
+	writer.start(ctx)
+	writer.submit(
+		FlatDetail{
+			Timestamp: time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC),
+			Model:     "accepted",
+			Tokens:    tokenStats{TotalTokens: 1},
+		},
+	)
 	cancel()
 	select {
 	case <-writer.done:
@@ -932,11 +1213,13 @@ func TestWriterContextCancellationStopsAcceptanceAndDrains(t *testing.T) {
 		t.Fatal("writer stopped flag = false after context cancellation")
 	}
 
-	writer.Submit(FlatDetail{
-		Timestamp: time.Date(2026, 5, 20, 11, 0, 0, 0, time.UTC),
-		Model:     "rejected",
-		Tokens:    tokenStats{TotalTokens: 1},
-	})
+	writer.submit(
+		FlatDetail{
+			Timestamp: time.Date(2026, 5, 20, 11, 0, 0, 0, time.UTC),
+			Model:     "rejected",
+			Tokens:    tokenStats{TotalTokens: 1},
+		},
+	)
 	var events int64
 	if err := store.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); err != nil {
 		t.Fatalf("count events: %v", err)
@@ -974,17 +1257,19 @@ func TestPersistEventRejectsInvalidTokensAndTimestamp(t *testing.T) {
 			want: "outside the UnixNano range",
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			tx, err := store.db.BeginTx(ctx, nil)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			_, err = persistEvent(ctx, tx, store, &test.detail, nil)
-			_ = tx.Rollback()
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("persistEvent error = %v, want contain %q", err, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				tx, err := store.db.BeginTx(ctx, nil)
+				if err != nil {
+					t.Fatalf("begin: %v", err)
+				}
+				_, err = persistEvent(ctx, tx, store, &test.detail, nil)
+				_ = tx.Rollback()
+				if err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("persistEvent error = %v, want contain %q", err, test.want)
+				}
+			},
+		)
 	}
 }
 
@@ -1036,7 +1321,7 @@ func TestComputeFingerprintUsesUnambiguousIdentity(t *testing.T) {
 	withRequestID.RequestID = "request-1"
 	otherRequestID := base
 	otherRequestID.RequestID = "request-2"
-	if ComputeFingerprint(withRequestID) == ComputeFingerprint(otherRequestID) {
+	if computeFingerprint(withRequestID) == computeFingerprint(otherRequestID) {
 		t.Fatal("different request IDs produced the same fingerprint")
 	}
 
@@ -1046,13 +1331,13 @@ func TestComputeFingerprintUsesUnambiguousIdentity(t *testing.T) {
 	right := base
 	right.APIKey = "a"
 	right.Model = "b|c"
-	if ComputeFingerprint(left) == ComputeFingerprint(right) {
+	if computeFingerprint(left) == computeFingerprint(right) {
 		t.Fatal("delimiter-ambiguous fields produced the same fingerprint")
 	}
 
 	otherProvider := base
 	otherProvider.Provider = "codex"
-	if ComputeFingerprint(base) == ComputeFingerprint(otherProvider) {
+	if computeFingerprint(base) == computeFingerprint(otherProvider) {
 		t.Fatal("different providers produced the same fingerprint")
 	}
 }
@@ -1085,7 +1370,7 @@ func TestQueryByCredential_DistinctProviders(t *testing.T) {
 		t.Fatalf("commit: %v", err)
 	}
 
-	qr, err := store.Query(
+	qr, err := store.querySummary(
 		ctx,
 		base.Add(-time.Hour), base.Add(time.Hour),
 		EventFilters{}, "hourly", true,
@@ -1104,7 +1389,7 @@ func TestQueryByCredential_DistinctProviders(t *testing.T) {
 	}
 
 	// Filter "claude:shared@..." must isolate the claude row only.
-	qrClaude, err := store.Query(
+	qrClaude, err := store.querySummary(
 		ctx,
 		base.Add(-time.Hour), base.Add(time.Hour),
 		EventFilters{Source: wantClaude}, "hourly", true,
@@ -1162,7 +1447,7 @@ func TestQueryByCredentialMatchesRawMaskedAndTaggedSources(t *testing.T) {
 
 	requestCount := func(filter string) int64 {
 		t.Helper()
-		result, errQuery := store.Query(
+		result, errQuery := store.querySummary(
 			ctx,
 			base.Add(-time.Hour),
 			base.Add(time.Hour),
@@ -1204,7 +1489,7 @@ func mapKeys[V any](m map[string]V) []string {
 // the pre-v2 schema literally), pre-populates it with one event, then opens
 // it through OpenStore so the migration runs and verifies:
 //
-//   - schema_version is advanced through every migration to 4
+//   - schema_version is advanced through every migration to the current version
 //   - provider_id column appears on events / hour_bucket / day_bucket
 //   - latency aggregate columns appear on hour_bucket / day_bucket
 //   - the legacy event row survives with provider_id NULL
@@ -1227,11 +1512,11 @@ func TestMigrateV3ToV4RewritesFingerprintsBeforeReimport(t *testing.T) {
 		Completed: true,
 	}
 
-	store, errOpen := OpenStore(dbPath)
+	store, errOpen := openStore(dbPath)
 	if errOpen != nil {
 		t.Fatal(errOpen)
 	}
-	writer := NewWriter(store, nil)
+	writer := newWriter(store, nil)
 	if errFlush := writer.flush([]FlatDetail{detail}); errFlush != nil {
 		_ = store.Close()
 		t.Fatalf("initial flush: %v", errFlush)
@@ -1259,7 +1544,7 @@ func TestMigrateV3ToV4RewritesFingerprintsBeforeReimport(t *testing.T) {
 		t.Fatal(errClose)
 	}
 
-	migrated, errMigrate := OpenStore(dbPath)
+	migrated, errMigrate := openStore(dbPath)
 	if errMigrate != nil {
 		t.Fatalf("OpenStore v3 database: %v", errMigrate)
 	}
@@ -1269,12 +1554,13 @@ func TestMigrateV3ToV4RewritesFingerprintsBeforeReimport(t *testing.T) {
 	if errQuery := migrated.db.QueryRow("SELECT fingerprint FROM events").Scan(&fingerprint); errQuery != nil {
 		t.Fatal(errQuery)
 	}
-	wantFingerprint := ComputeFingerprint(detail)
+	detail.APIKey = coreusage.EnsureAPIKeyIdentity(detail.APIKey)
+	wantFingerprint := computeFingerprint(detail)
 	if string(fingerprint) != string(wantFingerprint[:]) {
 		t.Fatalf("migrated fingerprint = %x, want %x", fingerprint, wantFingerprint)
 	}
 
-	migratedWriter := NewWriter(migrated, nil)
+	migratedWriter := newWriter(migrated, nil)
 	if errFlush := migratedWriter.flush([]FlatDetail{detail}); errFlush != nil {
 		t.Fatalf("reimport migrated event: %v", errFlush)
 	}
@@ -1291,6 +1577,186 @@ func TestMigrateV3ToV4RewritesFingerprintsBeforeReimport(t *testing.T) {
 	}
 	if requests != 1 {
 		t.Fatalf("hour bucket requests after reimport = %d, want 1", requests)
+	}
+}
+
+func TestMigrateV7ToV8HashesAPIKeyIdentitiesAndRecomputesFingerprints(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "events.db")
+	rawAPIKey := "sk-v7-migration-secret"
+	detail := FlatDetail{
+		Timestamp: time.Date(2026, 9, 8, 8, 30, 0, 123, time.UTC),
+		RequestID: "request-v7",
+		Model:     "model-v7",
+		APIKey:    rawAPIKey,
+		Provider:  "provider-v7",
+		Tokens:    tokenStats{InputTokens: 2, OutputTokens: 3, TotalTokens: 5},
+		Completed: true,
+	}
+
+	store, err := openStore(dbPath)
+	if err != nil {
+		t.Fatalf("create current database: %v", err)
+	}
+	writer := newWriter(store, nil)
+	if err = writer.flush([]FlatDetail{detail}); err != nil {
+		_ = store.Close()
+		t.Fatalf("seed event: %v", err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatalf("close current database: %v", err)
+	}
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open current database for downgrade: %v", err)
+	}
+	if _, err = rawDB.Exec(
+		"UPDATE dim_api_key SET name = ? WHERE name = ?",
+		rawAPIKey,
+		coreusage.HashAPIKeyIdentity(rawAPIKey),
+	); err != nil {
+		_ = rawDB.Close()
+		t.Fatalf("restore raw API key identity: %v", err)
+	}
+	legacyFingerprint := computeFingerprint(detail)
+	if _, err = rawDB.Exec(
+		"UPDATE events SET fingerprint = ?",
+		legacyFingerprint[:],
+	); err != nil {
+		_ = rawDB.Close()
+		t.Fatalf("restore raw API key fingerprint: %v", err)
+	}
+	if _, err = rawDB.Exec(
+		`DROP TABLE api_key_reservation_event;
+		 DROP TABLE api_key_reservation_window;
+		 DROP TABLE api_key_reservation;
+		 UPDATE meta SET value = '7' WHERE key = 'schema_version'`,
+	); err != nil {
+		_ = rawDB.Close()
+		t.Fatalf("downgrade to schema v7: %v", err)
+	}
+	if err = rawDB.Close(); err != nil {
+		t.Fatalf("close downgraded database: %v", err)
+	}
+
+	migrated, err := openStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore v7 database: %v", err)
+	}
+	defer func() { _ = migrated.Close() }()
+
+	var version, identity string
+	var fingerprint []byte
+	if err = migrated.db.QueryRow(
+		`SELECT meta.value, k.name, e.fingerprint
+		   FROM meta
+		   JOIN events e
+		   JOIN dim_api_key k ON k.id = e.api_key_id
+		  WHERE meta.key = 'schema_version'`,
+	).Scan(&version, &identity, &fingerprint); err != nil {
+		t.Fatalf("query migrated identity: %v", err)
+	}
+	wantIdentity := coreusage.HashAPIKeyIdentity(rawAPIKey)
+	if version != CurrentSchemaVersion || identity != wantIdentity {
+		t.Fatalf("migrated version/identity = %q/%q, want %q/%q", version, identity, CurrentSchemaVersion, wantIdentity)
+	}
+	migratedDetail := detail
+	migratedDetail.APIKey = wantIdentity
+	wantFingerprint := computeFingerprint(migratedDetail)
+	if string(fingerprint) != string(wantFingerprint[:]) {
+		t.Fatalf("migrated fingerprint = %x, want %x", fingerprint, wantFingerprint)
+	}
+	for _, table := range []string{
+		"api_key_reservation",
+		"api_key_reservation_window",
+		"api_key_reservation_event",
+	} {
+		var count int
+		if err = migrated.db.QueryRow(
+			"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+			table,
+		).Scan(&count); err != nil {
+			t.Fatalf("query table %s: %v", table, err)
+		}
+		if count != 1 {
+			t.Fatalf("table %s count = %d, want 1", table, count)
+		}
+	}
+}
+
+func TestMigrateV7ToV8RollsBackIdentityCollision(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "events.db")
+	store, err := openStore(dbPath)
+	if err != nil {
+		t.Fatalf("create current database: %v", err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatalf("close current database: %v", err)
+	}
+
+	rawAPIKey := "sk-v7-collision-secret"
+	identity := coreusage.HashAPIKeyIdentity(rawAPIKey)
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open current database for downgrade: %v", err)
+	}
+	if _, err = rawDB.Exec(
+		`INSERT INTO dim_api_key(name) VALUES (?), (?);
+		 DROP TABLE api_key_reservation_event;
+		 DROP TABLE api_key_reservation_window;
+		 DROP TABLE api_key_reservation;
+		 UPDATE meta SET value = '7' WHERE key = 'schema_version'`,
+		rawAPIKey,
+		identity,
+	); err != nil {
+		_ = rawDB.Close()
+		t.Fatalf("prepare identity collision: %v", err)
+	}
+	if err = rawDB.Close(); err != nil {
+		t.Fatalf("close downgraded database: %v", err)
+	}
+
+	migrated, err := openStore(dbPath)
+	if migrated != nil {
+		_ = migrated.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "resolve to the same persistent identity") {
+		t.Fatalf("OpenStore collision error = %v", err)
+	}
+
+	rawDB, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen rejected v7 database: %v", err)
+	}
+	defer func() { _ = rawDB.Close() }()
+	var version string
+	if err = rawDB.QueryRow(
+		"SELECT value FROM meta WHERE key = 'schema_version'",
+	).Scan(&version); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if version != "7" {
+		t.Fatalf("schema version after rollback = %q, want 7", version)
+	}
+	var identities int
+	if err = rawDB.QueryRow(
+		"SELECT COUNT(*) FROM dim_api_key WHERE name IN (?, ?)",
+		rawAPIKey,
+		identity,
+	).Scan(&identities); err != nil {
+		t.Fatalf("query API key identities after rollback: %v", err)
+	}
+	if identities != 2 {
+		t.Fatalf("API key identities after rollback = %d, want 2", identities)
+	}
+	var reservationTables int
+	if err = rawDB.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'api_key_reservation%'",
+	).Scan(&reservationTables); err != nil {
+		t.Fatalf("query reservation tables after rollback: %v", err)
+	}
+	if reservationTables != 0 {
+		t.Fatalf("reservation tables after rollback = %d, want 0", reservationTables)
 	}
 }
 
@@ -1391,7 +1857,7 @@ INSERT INTO day_bucket(id, bucket_ts_ns, model_id, requests, success, failure, t
 	}
 
 	// Step 2: open through OpenStore — this triggers migrateV1ToV2.
-	store, err := OpenStore(dbPath)
+	store, err := openStore(dbPath)
 	if err != nil {
 		t.Fatalf("OpenStore (v1→v2): %v", err)
 	}
@@ -1402,8 +1868,8 @@ INSERT INTO day_bucket(id, bucket_ts_ns, model_id, requests, success, failure, t
 	if err := store.db.QueryRow("SELECT value FROM meta WHERE key='schema_version'").Scan(&ver); err != nil {
 		t.Fatalf("read schema_version: %v", err)
 	}
-	if ver != "4" {
-		t.Fatalf("schema_version = %q, want \"4\"", ver)
+	if ver != CurrentSchemaVersion {
+		t.Fatalf("schema_version = %q, want %q", ver, CurrentSchemaVersion)
 	}
 
 	// provider_id column must exist on every fact table.
@@ -1448,7 +1914,7 @@ INSERT INTO day_bucket(id, bucket_ts_ns, model_id, requests, success, failure, t
 	if err := store.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	store2, err := OpenStore(dbPath)
+	store2, err := openStore(dbPath)
 	if err != nil {
 		t.Fatalf("re-OpenStore: %v", err)
 	}
@@ -1460,37 +1926,229 @@ INSERT INTO day_bucket(id, bucket_ts_ns, model_id, requests, success, failure, t
 	if err := store2.db.QueryRow("SELECT value FROM meta WHERE key='schema_version'").Scan(&ver); err != nil {
 		t.Fatalf("re-read schema_version: %v", err)
 	}
-	if ver != "4" {
-		t.Fatalf("schema_version after re-open = %q, want \"4\"", ver)
+	if ver != CurrentSchemaVersion {
+		t.Fatalf("schema_version after re-open = %q, want %q", ver, CurrentSchemaVersion)
+	}
+}
+
+func TestMigrateV5ToV6BackfillsCanonicalTokenBuckets(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "events.db")
+	store, err := openStore(dbPath)
+	if err != nil {
+		t.Fatalf("create current database: %v", err)
+	}
+	breakdown := coreusage.NewSubsetTokenBreakdown(100, 20, 10, 30, 5, 130)
+	writer := newWriter(store, nil)
+	if err = writer.flush(
+		[]FlatDetail{
+			{
+				Timestamp:         time.Date(2026, 8, 30, 1, 0, 0, 0, time.UTC),
+				Model:             "canonical-v5",
+				AccountingVersion: coreusage.TokenAccountingSchemaVersion,
+				TokenBreakdown:    breakdown,
+				Tokens: tokenStats{
+					InputTokens:      100,
+					OutputTokens:     30,
+					ReasoningTokens:  5,
+					CachedTokens:     30,
+					CacheReadTokens:  20,
+					CacheWriteTokens: 10,
+					TotalTokens:      130,
+				},
+			},
+			{
+				Timestamp: time.Date(2026, 8, 30, 2, 0, 0, 0, time.UTC),
+				Model:     "legacy-v5",
+				Tokens: tokenStats{
+					InputTokens:  50,
+					OutputTokens: 10,
+					CachedTokens: 20,
+					TotalTokens:  60,
+				},
+			},
+		},
+	); err != nil {
+		_ = store.Close()
+		t.Fatalf("seed events: %v", err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatalf("close current database: %v", err)
+	}
+
+	rawDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open current database for downgrade: %v", err)
+	}
+	for _, table := range []string{"events", "hour_bucket", "day_bucket"} {
+		for _, operation := range []string{"insert", "update"} {
+			if _, err = rawDB.Exec("DROP TRIGGER IF EXISTS usage_" + table + "_integer_" + operation); err != nil {
+				_ = rawDB.Close()
+				t.Fatalf("drop %s %s trigger: %v", table, operation, err)
+			}
+		}
+	}
+	if _, err = rawDB.Exec(
+		`
+		UPDATE events
+		   SET cost_micro = 123
+		 WHERE model_id = (SELECT id FROM dim_model WHERE name = 'legacy-v5');
+		DROP TABLE dirty_day;
+		ALTER TABLE events DROP COLUMN cost_reason;
+		ALTER TABLE events DROP COLUMN cost_status;
+		ALTER TABLE events DROP COLUMN cache_write_tokens;
+		ALTER TABLE events DROP COLUMN cache_read_tokens;
+		ALTER TABLE hour_bucket DROP COLUMN cache_write_tokens;
+		ALTER TABLE hour_bucket DROP COLUMN cache_read_tokens;
+		ALTER TABLE day_bucket DROP COLUMN cache_write_tokens;
+		ALTER TABLE day_bucket DROP COLUMN cache_read_tokens;
+		UPDATE meta SET value = '5' WHERE key = 'schema_version';
+	`,
+	); err != nil {
+		_ = rawDB.Close()
+		t.Fatalf("downgrade to schema v5: %v", err)
+	}
+	if err = rawDB.Close(); err != nil {
+		t.Fatalf("close downgraded database: %v", err)
+	}
+
+	migrated, err := openStore(dbPath)
+	if err != nil {
+		t.Fatalf("OpenStore v5 database: %v", err)
+	}
+	defer func() { _ = migrated.Close() }()
+
+	type migratedEvent struct {
+		input, output, reasoning, cached, cacheRead, cacheWrite, total int64
+		cost                                                           int64
+		status                                                         CostStatus
+		reason                                                         string
+	}
+	events := make(map[string]migratedEvent)
+	rows, err := migrated.db.Query(
+		`
+		SELECT m.name,
+		       e.input_tokens, e.output_tokens, e.reasoning_tokens, e.cached_tokens,
+		       e.cache_read_tokens, e.cache_write_tokens, e.total_tokens,
+		       e.cost_micro, e.cost_status, e.cost_reason
+		  FROM events e
+		  JOIN dim_model m ON m.id = e.model_id
+		 ORDER BY e.id`,
+	)
+	if err != nil {
+		t.Fatalf("query migrated events: %v", err)
+	}
+	for rows.Next() {
+		var name string
+		var event migratedEvent
+		if err = rows.Scan(
+			&name,
+			&event.input,
+			&event.output,
+			&event.reasoning,
+			&event.cached,
+			&event.cacheRead,
+			&event.cacheWrite,
+			&event.total,
+			&event.cost,
+			&event.status,
+			&event.reason,
+		); err != nil {
+			_ = rows.Close()
+			t.Fatalf("scan migrated event: %v", err)
+		}
+		events[name] = event
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		t.Fatalf("iterate migrated events: %v", err)
+	}
+	if err = rows.Close(); err != nil {
+		t.Fatalf("close migrated events: %v", err)
+	}
+
+	canonical := events["canonical-v5"]
+	if canonical.input != 100 || canonical.output != 30 || canonical.reasoning != 5 ||
+		canonical.cached != 30 || canonical.cacheRead != 20 || canonical.cacheWrite != 10 ||
+		canonical.total != 130 || canonical.cost != 0 || canonical.status != CostStatusUnpriced {
+		t.Fatalf("canonical event after migration = %+v", canonical)
+	}
+	legacy := events["legacy-v5"]
+	if legacy.input != 50 || legacy.output != 10 || legacy.cached != 20 ||
+		legacy.cacheRead != 20 || legacy.cacheWrite != 0 || legacy.total != 60 ||
+		legacy.cost != 123 || legacy.status != costStatusPartial {
+		t.Fatalf("legacy event after migration = %+v", legacy)
+	}
+
+	for _, table := range []string{"hour_bucket", "day_bucket"} {
+		var cacheRead, cacheWrite int64
+		var completeRequests, partialRequests, unpricedRequests int64
+		var completeTokens, partialTokens, unpricedTokens int64
+		if err = migrated.db.QueryRow(
+			"SELECT SUM(cache_read_tokens), SUM(cache_write_tokens), "+
+				"SUM(complete_requests), SUM(partial_requests), SUM(unpriced_requests), "+
+				"SUM(complete_tokens), SUM(partial_tokens), SUM(unpriced_tokens) FROM "+table,
+		).Scan(
+			&cacheRead,
+			&cacheWrite,
+			&completeRequests,
+			&partialRequests,
+			&unpricedRequests,
+			&completeTokens,
+			&partialTokens,
+			&unpricedTokens,
+		); err != nil {
+			t.Fatalf("read %s cache and coverage buckets: %v", table, err)
+		}
+		if cacheRead != 40 || cacheWrite != 10 {
+			t.Fatalf("%s cache buckets = %d/%d, want 40/10", table, cacheRead, cacheWrite)
+		}
+		if completeRequests != 0 || partialRequests != 1 || unpricedRequests != 1 ||
+			completeTokens != 0 || partialTokens != 60 || unpricedTokens != 130 {
+			t.Fatalf(
+				"%s coverage = requests %d/%d/%d, tokens %d/%d/%d",
+				table,
+				completeRequests,
+				partialRequests,
+				unpricedRequests,
+				completeTokens,
+				partialTokens,
+				unpricedTokens,
+			)
+		}
 	}
 }
 
 func TestMigrateV3ToV4RewritesMultipleFingerprintPages(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "events.db")
-	store, err := OpenStore(dbPath)
+	store, err := openStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	const eventCount = fingerprintMigrationPageSize + 1
 	base := time.Date(2026, 7, 30, 4, 0, 0, 0, time.UTC)
 	details := make([]FlatDetail, 0, eventCount)
-	for i := 0; i < eventCount; i++ {
-		details = append(details, FlatDetail{
-			Timestamp: base.Add(time.Duration(i) * time.Second),
-			RequestID: fmt.Sprintf("request-%d", i),
-			Model:     "model-v3-pages",
-			APIKey:    "key-v3",
-			Source:    "source-v3",
-			AuthIndex: "auth-v3",
-			Provider:  "provider-v3",
-			Tokens:    tokenStats{InputTokens: int64(i + 1), TotalTokens: int64(i + 1)},
-			Completed: true,
-		})
+	for i := range eventCount {
+		details = append(
+			details, FlatDetail{
+				Timestamp: base.Add(time.Duration(i) * time.Second),
+				RequestID: fmt.Sprintf("request-%d", i),
+				Model:     "model-v3-pages",
+				APIKey:    "key-v3",
+				Source:    "source-v3",
+				AuthIndex: "auth-v3",
+				Provider:  "provider-v3",
+				Tokens:    tokenStats{InputTokens: int64(i + 1), TotalTokens: int64(i + 1)},
+				Completed: true,
+			},
+		)
 	}
-	writer := NewWriter(store, nil)
-	if err := writer.flush(details); err != nil {
-		_ = store.Close()
-		t.Fatalf("initial flush: %v", err)
+	writer := newWriter(store, nil)
+	for start := 0; start < len(details); start += writerBatchSize {
+		end := min(start+writerBatchSize, len(details))
+		if err := writer.flush(details[start:end]); err != nil {
+			_ = store.Close()
+			t.Fatalf("initial flush batch %d-%d: %v", start, end, err)
+		}
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -1500,10 +2158,12 @@ func TestMigrateV3ToV4RewritesMultipleFingerprintPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rawDB.Exec(`
+	if _, err := rawDB.Exec(
+		`
 		UPDATE events SET fingerprint = CAST(printf('%020d', id) AS BLOB);
 		UPDATE meta SET value = '3' WHERE key = 'schema_version';
-	`); err != nil {
+	`,
+	); err != nil {
 		_ = rawDB.Close()
 		t.Fatal(err)
 	}
@@ -1511,7 +2171,7 @@ func TestMigrateV3ToV4RewritesMultipleFingerprintPages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	migrated, err := OpenStore(dbPath)
+	migrated, err := openStore(dbPath)
 	if err != nil {
 		t.Fatalf("OpenStore v3 database: %v", err)
 	}
@@ -1531,7 +2191,7 @@ func TestMigrateV3ToV4RewritesMultipleFingerprintPages(t *testing.T) {
 		if id <= 0 || id > int64(len(details)) {
 			t.Fatalf("event id = %d, want 1..%d", id, len(details))
 		}
-		want := ComputeFingerprint(details[id-1])
+		want := computeFingerprint(details[id-1])
 		if string(fingerprint) != string(want[:]) {
 			t.Fatalf("event %d fingerprint = %x, want %x", id, fingerprint, want)
 		}
@@ -1551,7 +2211,8 @@ func TestMigrateV3ToV4RejectsNonIntegerStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open raw v3 db: %v", err)
 	}
-	if _, err := rawDB.Exec(`
+	if _, err := rawDB.Exec(
+		`
 		INSERT INTO dim_model(id, name) VALUES (1, 'legacy-real-model');
 		INSERT INTO events(
 			fingerprint, ts_ns, model_id, failed,
@@ -1560,7 +2221,8 @@ func TestMigrateV3ToV4RejectsNonIntegerStorage(t *testing.T) {
 		) VALUES (
 			zeroblob(20), 1, 1, 0,
 			1.5, 0, 0, 0, 1, 0
-		)`); err != nil {
+		)`,
+	); err != nil {
 		_ = rawDB.Close()
 		t.Fatalf("insert real storage class: %v", err)
 	}
@@ -1568,7 +2230,7 @@ func TestMigrateV3ToV4RejectsNonIntegerStorage(t *testing.T) {
 		t.Fatalf("close raw v3 db: %v", err)
 	}
 
-	store, err := OpenStore(dbPath)
+	store, err := openStore(dbPath)
 	if store != nil {
 		_ = store.Close()
 	}
@@ -1599,7 +2261,7 @@ func TestMigrateV3ToV4RejectsNonIntegerStorage(t *testing.T) {
 
 func TestMigrateV3ToV4InstallsIntegerStorageTriggers(t *testing.T) {
 	dbPath := prepareV3TestDB(t)
-	store, err := OpenStore(dbPath)
+	store, err := openStore(dbPath)
 	if err != nil {
 		t.Fatalf("OpenStore v3 database: %v", err)
 	}
@@ -1611,8 +2273,8 @@ func TestMigrateV3ToV4InstallsIntegerStorageTriggers(t *testing.T) {
 	).Scan(&version); err != nil {
 		t.Fatalf("read schema version: %v", err)
 	}
-	if version != "4" {
-		t.Fatalf("schema version=%q, want 4", version)
+	if version != CurrentSchemaVersion {
+		t.Fatalf("schema version=%q, want %q", version, CurrentSchemaVersion)
 	}
 	for _, name := range []string{
 		"usage_events_integer_insert",
@@ -1655,7 +2317,7 @@ func TestMigrateV3ToV4InstallsIntegerStorageTriggers(t *testing.T) {
 func prepareV3TestDB(t *testing.T) string {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "events.db")
-	store, err := OpenStore(dbPath)
+	store, err := openStore(dbPath)
 	if err != nil {
 		t.Fatalf("create current database: %v", err)
 	}

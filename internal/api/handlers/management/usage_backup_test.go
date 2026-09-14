@@ -138,8 +138,8 @@ func TestUsageExportImportEncryptedRoundTrip(t *testing.T) {
 		&config.Config{},
 		"",
 		nil,
-		WithEnvSecret(""),
-		WithUsagePersister(source),
+		withEnvSecret(""),
+		withUsagePersister(source),
 	)
 	exportRecorder := httptest.NewRecorder()
 	exportContext, _ := gin.CreateTestContext(exportRecorder)
@@ -163,8 +163,8 @@ func TestUsageExportImportEncryptedRoundTrip(t *testing.T) {
 		&config.Config{},
 		"",
 		nil,
-		WithEnvSecret(""),
-		WithUsagePersister(target),
+		withEnvSecret(""),
+		withUsagePersister(target),
 	)
 	importRecorder := httptest.NewRecorder()
 	importContext, _ := gin.CreateTestContext(importRecorder)

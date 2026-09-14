@@ -59,7 +59,7 @@ func TestParseAny_DetectsAllFormats(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(
 			tt.name, func(t *testing.T) {
-				details, parser, err := ParseAny(tt.data)
+				details, parser, err := parseAny(tt.data)
 				if err != nil {
 					t.Fatalf("ParseAny: %v", err)
 				}
@@ -123,12 +123,14 @@ func TestCSVParserStrictValidation(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, _, err := ParseAny([]byte(test.payload))
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("ParseAny error = %v, want contain %q", err, test.want)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				_, _, err := parseAny([]byte(test.payload))
+				if err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("ParseAny error = %v, want contain %q", err, test.want)
+				}
+			},
+		)
 	}
 }
 
@@ -140,7 +142,7 @@ func TestCSVParserDoesNotUseMaskedAPIKeyAsIdentity(t *testing.T) {
 		},
 		"\n",
 	))
-	details, _, err := ParseAny(payload)
+	details, _, err := parseAny(payload)
 	if err != nil {
 		t.Fatalf("ParseAny: %v", err)
 	}
@@ -175,20 +177,22 @@ func TestImportBytesRejectsInvalidJSONDetails(t *testing.T) {
 			want: "outside the UnixNano range",
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			store := openTestStore(t)
-			_, err := ImportBytes(context.Background(), store, nil, []byte(test.payload))
-			if !errors.Is(err, ErrInvalidImport) || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("ImportBytes error = %v, want ErrInvalidImport containing %q", err, test.want)
-			}
-			var events int64
-			if countErr := store.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); countErr != nil {
-				t.Fatalf("count events: %v", countErr)
-			}
-			if events != 0 {
-				t.Fatalf("events = %d after invalid import, want 0", events)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				store := openTestStore(t)
+				_, err := importBytes(context.Background(), store, nil, []byte(test.payload))
+				if !errors.Is(err, ErrInvalidImport) || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("ImportBytes error = %v, want ErrInvalidImport containing %q", err, test.want)
+				}
+				var events int64
+				if countErr := store.db.QueryRow("SELECT COUNT(*) FROM events").Scan(&events); countErr != nil {
+					t.Fatalf("count events: %v", countErr)
+				}
+				if events != 0 {
+					t.Fatalf("events = %d after invalid import, want 0", events)
+				}
+			},
+		)
 	}
 }
 
@@ -207,7 +211,7 @@ func TestImportBytesRollsBackWholePayloadOnPersistError(t *testing.T) {
 		return 1, 0, 0, true
 	}
 
-	_, err := ImportBytes(ctx, store, priceFn, payload)
+	_, err := importBytes(ctx, store, priceFn, payload)
 	if err == nil || !strings.Contains(err.Error(), "import event[1]") {
 		t.Fatalf("ImportBytes error = %v, want event[1] rejection", err)
 	}
@@ -230,28 +234,30 @@ func TestImportBytesMasksUntaggedCredentialSources(t *testing.T) {
 	ctx := context.Background()
 	raw := "custom-provider-secret-value"
 	lookalike := "\x1fcpa:usage-source:v1:identity:sk-imported-secret-value"
-	payload, err := json.Marshal([]FlatDetail{
-		{
-			Timestamp: time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC),
-			Model:     "import-model",
-			Source:    raw,
-			Tokens:    tokenStats{TotalTokens: 1},
+	payload, err := json.Marshal(
+		[]FlatDetail{
+			{
+				Timestamp: time.Date(2026, 8, 2, 10, 0, 0, 0, time.UTC),
+				Model:     "import-model",
+				Source:    raw,
+				Tokens:    tokenStats{TotalTokens: 1},
+			},
+			{
+				Timestamp: time.Date(2026, 8, 2, 10, 1, 0, 0, time.UTC),
+				Model:     "import-model",
+				Source:    lookalike,
+				Tokens:    tokenStats{TotalTokens: 1},
+			},
 		},
-		{
-			Timestamp: time.Date(2026, 8, 2, 10, 1, 0, 0, time.UTC),
-			Model:     "import-model",
-			Source:    lookalike,
-			Tokens:    tokenStats{TotalTokens: 1},
-		},
-	})
+	)
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
-	if _, err = ImportBytes(ctx, store, nil, payload); err != nil {
+	if _, err = importBytes(ctx, store, nil, payload); err != nil {
 		t.Fatalf("ImportBytes: %v", err)
 	}
 
-	events, err := store.QueryBackupEvents(ctx, time.Time{}, time.Time{}, EventFilters{})
+	events, err := store.queryBackupEventSet(ctx, time.Time{}, time.Time{}, EventFilters{})
 	if err != nil {
 		t.Fatalf("QueryBackupEvents: %v", err)
 	}
@@ -278,7 +284,7 @@ func TestImportBytes_Idempotent(t *testing.T) {
 		]
 	}`)
 
-	r1, err := ImportBytes(ctx, store, nil, payload)
+	r1, err := importBytes(ctx, store, nil, payload)
 	if err != nil {
 		t.Fatalf("first import: %v", err)
 	}
@@ -286,7 +292,7 @@ func TestImportBytes_Idempotent(t *testing.T) {
 		t.Fatalf("first import added=%d skipped=%d, want 2/0", r1.Added, r1.Skipped)
 	}
 
-	r2, err := ImportBytes(ctx, store, nil, payload)
+	r2, err := importBytes(ctx, store, nil, payload)
 	if err != nil {
 		t.Fatalf("second import: %v", err)
 	}
@@ -310,26 +316,26 @@ func TestFingerprint_StableAcrossFormats(t *testing.T) {
 		Source:    "src",
 		Tokens:    tokenStats{InputTokens: 10, OutputTokens: 20, TotalTokens: 30},
 	}
-	want := ComputeFingerprint(canonical)
+	want := computeFingerprint(canonical)
 
 	// 1) v2 detail envelope round-trip via JSON.
 	v2 := map[string]any{"date": "2026-04-27", "details": []FlatDetail{canonical}}
 	v2Bytes, _ := json.Marshal(v2)
-	v2Details, _, err := ParseAny(v2Bytes)
+	v2Details, _, err := parseAny(v2Bytes)
 	if err != nil || len(v2Details) != 1 {
 		t.Fatalf("v2 parse: %v, len=%d", err, len(v2Details))
 	}
-	if got := ComputeFingerprint(v2Details[0]); got != want {
+	if got := computeFingerprint(v2Details[0]); got != want {
 		t.Fatalf("v2 fingerprint differs: %x vs %x", got, want)
 	}
 
 	// 2) Bare array round-trip.
 	arrBytes, _ := json.Marshal([]FlatDetail{canonical})
-	arrDetails, _, err := ParseAny(arrBytes)
+	arrDetails, _, err := parseAny(arrBytes)
 	if err != nil || len(arrDetails) != 1 {
 		t.Fatalf("array parse: %v, len=%d", err, len(arrDetails))
 	}
-	if got := ComputeFingerprint(arrDetails[0]); got != want {
+	if got := computeFingerprint(arrDetails[0]); got != want {
 		t.Fatalf("array fingerprint differs: %x vs %x", got, want)
 	}
 
@@ -355,7 +361,7 @@ func TestFingerprint_StableAcrossFormats(t *testing.T) {
 	if len(flat) != 1 {
 		t.Fatalf("flattenSnapshot len=%d, want 1", len(flat))
 	}
-	if got := ComputeFingerprint(flat[0]); got != want {
+	if got := computeFingerprint(flat[0]); got != want {
 		t.Fatalf("v1 nested fingerprint differs: %x vs %x", got, want)
 	}
 }
@@ -371,7 +377,7 @@ func TestCSVParserPreservesRuntimeMetadata(t *testing.T) {
 		}, "\n",
 	))
 
-	legacyDetails, _, err := ParseAny(legacyPayload)
+	legacyDetails, _, err := parseAny(legacyPayload)
 	if err != nil {
 		t.Fatalf("ParseAny legacy CSV: %v", err)
 	}
@@ -401,7 +407,7 @@ func TestCSVParserPreservesRuntimeMetadata(t *testing.T) {
 		}, "\n",
 	))
 
-	details, _, err := ParseAny(payload)
+	details, _, err := parseAny(payload)
 	if err != nil {
 		t.Fatalf("ParseAny CSV: %v", err)
 	}
@@ -486,9 +492,11 @@ func TestMergeSnapshotHookPreservesServiceTiers(t *testing.T) {
 	}
 
 	var imported FlatDetail
-	result := newRequestStatistics().MergeSnapshot(snap, func(detail FlatDetail) {
-		imported = detail
-	})
+	result := newRequestStatistics().mergeSnapshot(
+		snap, func(detail FlatDetail) {
+			imported = detail
+		},
+	)
 	if result.Added != 1 {
 		t.Fatalf("MergeSnapshot added=%d, want 1", result.Added)
 	}
@@ -508,7 +516,7 @@ func TestImport_CrossFormatDedup(t *testing.T) {
 	ctx := context.Background()
 
 	v2 := []byte(`{"date":"2026-04-27","details":[{"timestamp":"2026-04-27T10:00:00Z","model":"m","api_key":"k","source":"src","tokens":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}]}`)
-	r1, err := ImportBytes(ctx, store, nil, v2)
+	r1, err := importBytes(ctx, store, nil, v2)
 	if err != nil {
 		t.Fatalf("v2 import: %v", err)
 	}
@@ -517,7 +525,7 @@ func TestImport_CrossFormatDedup(t *testing.T) {
 	}
 
 	v1 := []byte(`{"version":1,"usage":{"apis":{"k":{"models":{"m":{"details":[{"timestamp":"2026-04-27T10:00:00Z","source":"src","tokens":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}]}}}}}}`)
-	r2, err := ImportBytes(ctx, store, nil, v1)
+	r2, err := importBytes(ctx, store, nil, v1)
 	if err != nil {
 		t.Fatalf("v1 import: %v", err)
 	}
@@ -538,7 +546,7 @@ func TestImportBytes_ReturnsDayRange(t *testing.T) {
 		]
 	}`)
 
-	result, err := ImportBytes(ctx, store, nil, payload)
+	result, err := importBytes(ctx, store, nil, payload)
 	if err != nil {
 		t.Fatalf("ImportBytes: %v", err)
 	}
@@ -576,7 +584,7 @@ func TestImportBytesRollsBackEventsAndBucketsWhenDayRollupFails(t *testing.T) {
 			{"timestamp":"2026-04-27T01:00:00Z","model":"m","tokens":{"total_tokens":1}}
 		]
 	}`)
-	_, err := ImportBytes(ctx, store, nil, payload)
+	_, err := importBytes(ctx, store, nil, payload)
 	if err == nil || !strings.Contains(err.Error(), "rollup imported day") {
 		t.Fatalf("ImportBytes error = %v, want day rollup failure", err)
 	}
@@ -611,7 +619,7 @@ func TestImportBytesReturnsUnixEpochDayRange(t *testing.T) {
 		]
 	}`)
 
-	result, err := ImportBytes(ctx, store, nil, payload)
+	result, err := importBytes(ctx, store, nil, payload)
 	if err != nil {
 		t.Fatalf("ImportBytes: %v", err)
 	}
@@ -652,14 +660,17 @@ func TestImportBytesUsesFloorBucketsBeforeUnixEpoch(t *testing.T) {
 	ctx := context.Background()
 	payload := []byte(`[{"timestamp":"1969-12-31T23:30:00Z","model":"m","tokens":{"total_tokens":1}}]`)
 
-	result, err := ImportBytes(ctx, store, nil, payload)
+	result, err := importBytes(ctx, store, nil, payload)
 	if err != nil {
 		t.Fatalf("ImportBytes: %v", err)
 	}
 	wantHour := time.Date(1969, 12, 31, 23, 0, 0, 0, time.UTC).UnixNano()
 	wantDay := time.Date(1969, 12, 31, 0, 0, 0, 0, time.UTC).UnixNano()
 	if !result.HasDayRange || result.EarliestDayNs != wantDay || result.LatestDayNs != wantDay {
-		t.Fatalf("day range = (%v, %d, %d), want (true, %d, %d)", result.HasDayRange, result.EarliestDayNs, result.LatestDayNs, wantDay, wantDay)
+		t.Fatalf(
+			"day range = (%v, %d, %d), want (true, %d, %d)", result.HasDayRange, result.EarliestDayNs,
+			result.LatestDayNs, wantDay, wantDay,
+		)
 	}
 	var hourNs, dayNs int64
 	if err := store.db.QueryRow("SELECT bucket_ts_ns FROM hour_bucket").Scan(&hourNs); err != nil {
@@ -703,7 +714,7 @@ func TestImportBytes_LegacySnapshotPreservesFailedFlags(t *testing.T) {
 		}
 	}`)
 
-	result, err := ImportBytes(ctx, store, nil, payload)
+	result, err := importBytes(ctx, store, nil, payload)
 	if err != nil {
 		t.Fatalf("ImportBytes legacy snapshot: %v", err)
 	}
@@ -711,7 +722,7 @@ func TestImportBytes_LegacySnapshotPreservesFailedFlags(t *testing.T) {
 		t.Fatalf("legacy import added=%d skipped=%d, want 2/0", result.Added, result.Skipped)
 	}
 
-	events, total, err := store.QueryEvents(
+	events, total, err := store.queryEventDetails(
 		ctx,
 		time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
@@ -745,7 +756,7 @@ func TestCsvParser_RoundTrip(t *testing.T) {
 		}, []byte("\n"),
 	)
 
-	r, err := ImportBytes(ctx, store, nil, csv)
+	r, err := importBytes(ctx, store, nil, csv)
 	if err != nil {
 		t.Fatalf("import csv: %v", err)
 	}
@@ -753,7 +764,7 @@ func TestCsvParser_RoundTrip(t *testing.T) {
 		t.Fatalf("csv added=%d want 2", r.Added)
 	}
 
-	events, total, err := store.QueryEvents(
+	events, total, err := store.queryEventDetails(
 		ctx,
 		time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 		time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC),
@@ -777,7 +788,7 @@ func TestCsvParser_RoundTrip(t *testing.T) {
 // second run short-circuits without error.
 func TestImportFile_RejectsLargeInput(t *testing.T) {
 	baseDir := t.TempDir()
-	store, err := OpenStore(filepath.Join(baseDir, "events.db"))
+	store, err := openStore(filepath.Join(baseDir, "events.db"))
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
@@ -800,7 +811,7 @@ func TestImportFile_RejectsLargeInput(t *testing.T) {
 		t.Fatalf("close large file: %v", err)
 	}
 
-	_, err = ImportFile(context.Background(), store, nil, largeFile)
+	_, err = importFile(context.Background(), store, nil, largeFile)
 	if err == nil {
 		t.Fatal("expected oversized import file to be rejected")
 	}
@@ -811,7 +822,7 @@ func TestImportFile_RejectsLargeInput(t *testing.T) {
 
 func TestMigrateLegacy_EmptyDirIsIdempotent(t *testing.T) {
 	baseDir := t.TempDir()
-	store, err := OpenStore(filepath.Join(baseDir, "events.db"))
+	store, err := openStore(filepath.Join(baseDir, "events.db"))
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
@@ -822,10 +833,10 @@ func TestMigrateLegacy_EmptyDirIsIdempotent(t *testing.T) {
 	}()
 
 	ctx := context.Background()
-	if err := MigrateLegacyToSQLite(ctx, store, nil, baseDir); err != nil {
+	if err := migrateLegacyToSQLite(ctx, store, nil, baseDir); err != nil {
 		t.Fatalf("first migrate: %v", err)
 	}
-	status1, err := CheckMigrationStatus(ctx, store)
+	status1, err := checkMigrationStatus(ctx, store)
 	if err != nil {
 		t.Fatalf("status 1: %v", err)
 	}
@@ -833,10 +844,10 @@ func TestMigrateLegacy_EmptyDirIsIdempotent(t *testing.T) {
 		t.Fatalf("expected meta marker after first migrate")
 	}
 
-	if err := MigrateLegacyToSQLite(ctx, store, nil, baseDir); err != nil {
+	if err := migrateLegacyToSQLite(ctx, store, nil, baseDir); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
-	status2, err := CheckMigrationStatus(ctx, store)
+	status2, err := checkMigrationStatus(ctx, store)
 	if err != nil {
 		t.Fatalf("status 2: %v", err)
 	}

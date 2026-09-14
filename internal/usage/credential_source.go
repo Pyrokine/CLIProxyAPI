@@ -42,16 +42,16 @@ func DecodeCredentialSource(
 	source string,
 ) (display string, kind coreusage.CredentialSourceKind, tagged bool) {
 	trimmed := strings.TrimSpace(source)
-	if strings.HasPrefix(trimmed, credentialSourceAPIKeyPrefix) {
-		return strings.TrimPrefix(trimmed, credentialSourceAPIKeyPrefix), coreusage.CredentialSourceKindAPIKey, true
+	if after, ok := strings.CutPrefix(trimmed, credentialSourceAPIKeyPrefix); ok {
+		return after, coreusage.CredentialSourceKindAPIKey, true
 	}
-	if strings.HasPrefix(trimmed, credentialSourceIdentityPrefix) {
-		return strings.TrimPrefix(trimmed, credentialSourceIdentityPrefix), coreusage.CredentialSourceKindIdentity, true
+	if after, ok := strings.CutPrefix(trimmed, credentialSourceIdentityPrefix); ok {
+		return after, coreusage.CredentialSourceKindIdentity, true
 	}
 	return trimmed, "", false
 }
 
-func NormalizeImportedCredentialSource(source string, preserveEncryptedBackup bool) string {
+func normalizeImportedCredentialSource(source string, preserveEncryptedBackup bool) string {
 	trimmed := strings.TrimSpace(source)
 	if trimmed == "" {
 		return ""
@@ -78,7 +78,7 @@ func EncodeCredentialFilter(display string, kind coreusage.CredentialSourceKind)
 	return credentialFilterPrefix + string(kind) + ":" + encoded
 }
 
-func DecodeCredentialFilter(
+func decodeCredentialFilter(
 	value string,
 ) (display string, kind coreusage.CredentialSourceKind, typed bool) {
 	trimmed := strings.TrimSpace(value)

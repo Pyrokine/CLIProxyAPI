@@ -21,6 +21,13 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
 			ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
 			ctx = internallogging.WithResponseStatusHolder(ctx)
+			ctx = internallogging.WithClientRequestMetadata(
+				ctx, internallogging.ClientRequestMetadata{
+					ClientIP:      "203.0.113.10",
+					XForwardedFor: "198.51.100.2, 203.0.113.10",
+					UserAgent:     "redis-test-client/1.0",
+				},
+			)
 			internallogging.SetResponseStatus(ctx, http.StatusOK)
 			responseHeaders := http.Header{}
 			responseHeaders.Add("X-Upstream-Request-Id", "upstream-req-1")
@@ -43,6 +50,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 					ReasoningEffort:     "medium",
 					ServiceTier:         "flex",
 					ResponseServiceTier: "default",
+					Generate:            new(false),
 					RequestedAt:         time.Date(2026, 4, 25, 0, 0, 0, 0, time.UTC),
 					Latency:             1500 * time.Millisecond,
 					TimeToFirstByteMs:   250,
@@ -70,8 +78,14 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireStringField(t, payload, "service_tier", "flex")
 			requireStringField(t, payload, "request_service_tier", "flex")
 			requireStringField(t, payload, "response_service_tier", "default")
+			requireStringField(t, payload, "client_ip", "203.0.113.10")
+			requireStringField(t, payload, "x_forwarded_for", "198.51.100.2, 203.0.113.10")
+			requireStringField(t, payload, "user_agent", "redis-test-client/1.0")
+			requireBoolField(t, payload, "generate", false)
+			requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
 			requireIntField(t, payload, "ttft_ms", 250)
-			requireTokenField(t, payload, "total_tokens", 35)
+			requireTokenField(t, payload, "total_tokens", 30)
+			requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityComplete, 30, 0)
 			requireTokenField(t, payload, "cached_tokens", 5)
 			requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
 			requireHeaderField(t, payload, "response_headers", "Retry-After", []string{"30"})
@@ -110,7 +124,7 @@ func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 			)
 			mgr.Register(&usageQueuePlugin{})
 
-			mgr.Publish(
+			if errPublish := mgr.Publish(
 				ctx, coreusage.Record{
 					Provider:    "openai",
 					Model:       "gpt-5.4",
@@ -128,7 +142,9 @@ func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {
 					},
 					ResponseHeaders: internallogging.GetResponseHeaders(ctx),
 				},
-			)
+			); errPublish != nil {
+				t.Fatalf("publish usage record: %v", errPublish)
+			}
 
 			payload := waitForSinglePayload(t, 2*time.Second)
 			requireHeaderField(t, payload, "response_headers", "X-Upstream-Request-Id", []string{"upstream-req-1"})
@@ -206,7 +222,7 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 			)
 			mgr.Register(&usageQueuePlugin{})
 
-			mgr.Publish(
+			if errPublish := mgr.Publish(
 				ctx, coreusage.Record{
 					Provider:    "openai",
 					Model:       "gpt-5.4",
@@ -227,7 +243,9 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 						TotalTokens:  30,
 					},
 				},
-			)
+			); errPublish != nil {
+				t.Fatalf("publish usage record: %v", errPublish)
+			}
 
 			payload := waitForSinglePayload(t, 2*time.Second)
 			requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
@@ -241,7 +259,7 @@ func TestUsageQueuePluginAsyncIgnoresRecycledGinContext(t *testing.T) {
 	)
 }
 
-func TestUsageQueuePluginRejectsInvalidTokenTotals(t *testing.T) {
+func TestUsageQueuePluginPublishesInvalidTokenTotalsAsInconsistent(t *testing.T) {
 	tests := []struct {
 		name   string
 		detail coreusage.Detail
@@ -268,16 +286,22 @@ func TestUsageQueuePluginRejectsInvalidTokenTotals(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			withEnabledQueue(t, func() {
-				plugin := &usageQueuePlugin{}
-				plugin.HandleUsage(
-					context.Background(),
-					coreusage.Record{Model: "m", Detail: test.detail},
+		t.Run(
+			test.name, func(t *testing.T) {
+				withEnabledQueue(
+					t, func() {
+						plugin := &usageQueuePlugin{}
+						plugin.HandleUsage(
+							context.Background(),
+							coreusage.Record{Model: "m", Detail: test.detail},
+						)
+						payload := popSinglePayload(t)
+						requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
+						requireTokenBreakdown(t, payload, coreusage.TokenAccountingQualityInconsistent, 0, 0)
+					},
 				)
-				requireNoQueuedPayload(t)
-			})
-		})
+			},
+		)
 	}
 }
 
@@ -285,7 +309,7 @@ func withEnabledQueue(t *testing.T, fn func()) {
 	t.Helper()
 
 	prevQueueEnabled := Enabled()
-	prevUsageEnabled := UsageStatisticsEnabled()
+	prevUsageEnabled := usageStatisticsEnabled()
 
 	SetEnabled(false)
 	SetEnabled(true)
@@ -311,13 +335,6 @@ func newTestGinContext(t *testing.T, method, path string, status int) *gin.Conte
 		ginCtx.Status(status)
 	}
 	return ginCtx
-}
-
-func requireNoQueuedPayload(t *testing.T) {
-	t.Helper()
-	if items := PopOldest(10); len(items) != 0 {
-		t.Fatalf("PopOldest() items = %d, want 0", len(items))
-	}
 }
 
 func popSinglePayload(t *testing.T) map[string]json.RawMessage {
@@ -433,6 +450,30 @@ func requireTokenField(t *testing.T, payload map[string]json.RawMessage, key str
 	}
 	if got := tokens[key]; got != want {
 		t.Fatalf("tokens[%q] = %d, want %d", key, got, want)
+	}
+}
+
+func requireTokenBreakdown(
+	t *testing.T,
+	payload map[string]json.RawMessage,
+	wantQuality coreusage.TokenAccountingQuality,
+	wantTotal int64,
+	wantUnclassified int64,
+) {
+	t.Helper()
+	raw, ok := payload["token_breakdown"]
+	if !ok {
+		t.Fatal("payload missing token_breakdown")
+	}
+	var got coreusage.TokenBreakdown
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal token_breakdown: %v", err)
+	}
+	if !got.Valid() || got.Quality != wantQuality || got.TotalTokens != wantTotal || got.UnclassifiedTokens != wantUnclassified {
+		t.Fatalf(
+			"token_breakdown = %+v, want quality=%s total=%d unclassified=%d", got, wantQuality, wantTotal,
+			wantUnclassified,
+		)
 	}
 }
 

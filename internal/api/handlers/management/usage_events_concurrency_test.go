@@ -21,10 +21,10 @@ func TestAPIKeyAliasSnapshotsAreSafeDuringManagementUpdates(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 	h := NewHandler(
-		&config.Config{SDKConfig: config.SDKConfig{APIKeyAliases: map[string]string{"initial-key": "initial"}}},
+		&config.Config{APIKeyAliases: map[string]string{"initial-key": "initial"}},
 		configPath,
 		nil,
-		WithEnvSecret(""),
+		withEnvSecret(""),
 	)
 	defer func() { _ = h.Close() }()
 
@@ -33,7 +33,7 @@ func TestAPIKeyAliasSnapshotsAreSafeDuringManagementUpdates(t *testing.T) {
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 100; i++ {
+		for range 100 {
 			aliases := h.apiKeyAliasesSnapshot()
 			_ = maskUsageEvents(
 				[]usage.FlatDetail{{APIKey: "initial-key"}},
@@ -44,7 +44,7 @@ func TestAPIKeyAliasSnapshotsAreSafeDuringManagementUpdates(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			recorder := httptest.NewRecorder()
 			ctx, _ := gin.CreateTestContext(recorder)
 			ctx.Request = httptest.NewRequest(
@@ -62,12 +62,10 @@ func TestAPIKeyAliasSnapshotsAreSafeDuringManagementUpdates(t *testing.T) {
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			h.SetConfig(
 				&config.Config{
-					SDKConfig: config.SDKConfig{
-						APIKeyAliases: map[string]string{"initial-key": fmt.Sprintf("reload-%d", i)},
-					},
+					APIKeyAliases: map[string]string{"initial-key": fmt.Sprintf("reload-%d", i)},
 				},
 			)
 		}

@@ -8,15 +8,16 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
@@ -49,7 +50,10 @@ const (
 // PriceFunc returns the pricing for a model: prices are in USD per 1M tokens.
 type PriceFunc func(model string) (prompt, completion, cache float64, found bool)
 
-var renameUsageDataDir = os.Rename
+var (
+	renameUsageDataDir = os.Rename
+	statUsageFile      = os.Stat
+)
 
 // ErrLegacySnapshotTooLarge reports that the detail-heavy compatibility
 // response would exceed its event-count or estimated-size limit.
@@ -57,11 +61,10 @@ var ErrLegacySnapshotTooLarge = errors.New("usage: legacy snapshot exceeds size 
 
 // Persister is the SQLite-backed coordinator for usage data. It owns the
 // Store + Writer + rollup goroutine, exposes a stable surface to the rest of
-// the codebase, and hides the schema / WAL / dim_table details. Public method
-// signatures match the JSON-era persister 1:1 so handler / SDK / test code
-// keeps compiling unchanged.
+// the codebase, and hides the schema / WAL / dim_table details.
 type Persister struct {
 	mu           sync.RWMutex
+	lifecycleMu  sync.Mutex
 	pricingMu    sync.RWMutex
 	costRecalcMu sync.RWMutex
 
@@ -78,6 +81,8 @@ type Persister struct {
 	priceProvider PriceProvider
 	baseDir       string
 	retention     config.UsageRetention
+	dbSizeCapped  atomic.Bool
+	stopRequested atomic.Bool
 
 	costRecalcRunning atomic.Bool
 	costRecalcPending bool
@@ -117,7 +122,7 @@ func (p *Persister) SetPriceFunc(fn PriceFunc) {
 	w := p.writer
 	p.mu.Unlock()
 	if w != nil {
-		w.SetPriceFunc(fn)
+		w.setPriceFunc(fn)
 	}
 }
 
@@ -136,21 +141,17 @@ func (p *Persister) SetPriceProvider(provider PriceProvider) {
 	w := p.writer
 	p.mu.Unlock()
 	if w != nil {
-		w.SetPriceProvider(provider)
+		w.setPriceProvider(provider)
 	}
 }
 
 // HasPricing reports whether a price lookup function has been configured.
 func (p *Persister) HasPricing() bool {
-	return p != nil && p.priceFn() != nil
-}
-
-// BaseDir returns the usage data directory.
-func (p *Persister) BaseDir() string {
 	if p == nil {
-		return ""
+		return false
 	}
-	return p.baseDir
+	pricing := p.currentPricingSnapshot()
+	return pricing.priceFn != nil || pricing.detailedPriceFn != nil
 }
 
 // IsReady reports whether Start successfully opened the SQLite store.
@@ -158,12 +159,56 @@ func (p *Persister) BaseDir() string {
 // startup fails, they keep the instance persister nil so records continue into
 // that service's in-memory RequestStatistics.
 func (p *Persister) IsReady() bool {
-	if p == nil {
+	if p == nil || p.stopRequested.Load() {
 		return false
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.store != nil && p.writer != nil
+}
+
+func (p *Persister) apiKeyReservationStore() *Store {
+	if p == nil || p.stopRequested.Load() {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.store
+}
+
+func (p *Persister) ReserveAPIKey(
+	ctx context.Context,
+	request coreusage.APIKeyReservationRequest,
+) (coreusage.APIKeyReservation, error) {
+	store := p.apiKeyReservationStore()
+	if store == nil {
+		return coreusage.APIKeyReservation{}, errors.New("usage: API key reservation store is unavailable")
+	}
+	return store.ReserveAPIKey(ctx, request)
+}
+
+func (p *Persister) ReleaseAPIKeyReservation(ctx context.Context, reservationID, reason string) error {
+	store := p.apiKeyReservationStore()
+	if store == nil {
+		return errors.New("usage: API key reservation store is unavailable")
+	}
+	return store.ReleaseAPIKeyReservation(ctx, reservationID, reason)
+}
+
+func (p *Persister) MarkAPIKeyReservationUnknown(ctx context.Context, reservationID, reason string) error {
+	store := p.apiKeyReservationStore()
+	if store == nil {
+		return errors.New("usage: API key reservation store is unavailable")
+	}
+	return store.MarkAPIKeyReservationUnknown(ctx, reservationID, reason)
+}
+
+func (p *Persister) CommitAPIKeyReservation(ctx context.Context, reservationID, reason string) error {
+	store := p.apiKeyReservationStore()
+	if store == nil {
+		return errors.New("usage: API key reservation store is unavailable")
+	}
+	return store.CommitAPIKeyReservation(ctx, reservationID, reason)
 }
 
 // DBSize returns the on-disk size of events.db plus its WAL/SHM sidecars.
@@ -174,7 +219,7 @@ func (p *Persister) DBSize() int64 {
 	}
 	var total int64
 	for _, name := range []string{dbFileName, dbFileName + "-wal", dbFileName + "-shm"} {
-		info, err := os.Stat(filepath.Join(p.baseDir, name))
+		info, err := statUsageFile(filepath.Join(p.baseDir, name))
 		if err != nil {
 			continue
 		}
@@ -220,9 +265,36 @@ func (p *Persister) DBSizeStatus() (
 	return p.dbSizeStatus()
 }
 
-func (p *Persister) overDBSizeCap() bool {
-	_, _, _, _, capped := p.dbSizeStatus()
+func (p *Persister) dbSizeCapLimit() int64 {
+	if p == nil {
+		return 0
+	}
+	p.mu.RLock()
+	maxDBSizeMB := p.retention.MaxDBSizeMB
+	p.mu.RUnlock()
+	if maxDBSizeMB <= 0 {
+		return 0
+	}
+	return int64(maxDBSizeMB) << 20
+}
+
+func (p *Persister) refreshDBSizeCap() bool {
+	maxBytes := p.dbSizeCapLimit()
+	if maxBytes == 0 {
+		p.dbSizeCapped.Store(false)
+		return false
+	}
+	capped := p.DBSize() >= maxBytes
+	p.dbSizeCapped.Store(capped)
 	return capped
+}
+
+func (p *Persister) overDBSizeCap() bool {
+	return p != nil && p.refreshDBSizeCap()
+}
+
+func (p *Persister) dbSizeCapReached() bool {
+	return p != nil && p.dbSizeCapLimit() > 0 && p.dbSizeCapped.Load()
 }
 
 // SchemaVersion returns the current schema_version meta value.
@@ -258,7 +330,7 @@ func (p *Persister) MigrationStatus(ctx context.Context) (MigrationStatus, error
 	if s == nil || s.db == nil {
 		return MigrationStatus{}, errors.New("usage: store not initialized")
 	}
-	return CheckMigrationStatus(ctx, s)
+	return checkMigrationStatus(ctx, s)
 }
 
 // Start opens the SQLite store, performs the legacy-JSON migration when
@@ -268,6 +340,11 @@ func (p *Persister) MigrationStatus(ctx context.Context) (MigrationStatus, error
 // so the service can retain its in-memory RequestStatistics path.
 func (p *Persister) Start(ctx context.Context) {
 	if p == nil || p.baseDir == "" {
+		return
+	}
+	p.lifecycleMu.Lock()
+	defer p.lifecycleMu.Unlock()
+	if p.stopRequested.Load() || p.IsReady() {
 		return
 	}
 
@@ -280,11 +357,19 @@ func (p *Persister) Start(ctx context.Context) {
 	}
 
 	dbPath := filepath.Join(p.baseDir, dbFileName)
-	store, err := OpenStore(dbPath)
+	store, err := openStore(dbPath)
 	if err != nil {
 		log.Errorf(
 			"usage: failed to open SQLite store %s: %v — falling back to in-memory request statistics; no usage data will be persisted across restarts; legacy summary.json / detail/* JSON files are NOT touched, so manual migration is still possible after the underlying issue is fixed",
 			dbPath, err,
+		)
+		return
+	}
+	if err = store.setMaxSizeBytes(ctx, p.dbSizeCapLimit()); err != nil {
+		_ = store.Close()
+		log.Errorf(
+			"usage: failed to apply SQLite DB size limit: %v — falling back to in-memory request statistics",
+			err,
 		)
 		return
 	}
@@ -295,7 +380,7 @@ func (p *Persister) Start(ctx context.Context) {
 	if priceProvider != nil {
 		priceFn = priceProvider.Snapshot()
 	}
-	if err := MigrateLegacyToSQLite(ctx, store, priceFn, p.baseDir); err != nil {
+	if err := migrateLegacyToSQLite(ctx, store, priceFn, p.baseDir); err != nil {
 		log.Errorf("usage: legacy migration failed: %v", err)
 		// Migration failure is recoverable — the user can fix the file and
 		// restart. Continue serving with whatever we already have on disk.
@@ -307,10 +392,12 @@ func (p *Persister) Start(ctx context.Context) {
 		configuredPriceFn,
 		&p.pricingMu,
 	)
+	writer.setCapacityCheck(p.refreshDBSizeCap)
+	p.refreshDBSizeCap()
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
-	writer.Start(lifecycleCtx)
+	writer.start(lifecycleCtx)
 
-	rollupStop := store.StartRollup(lifecycleCtx)
+	rollupStop := store.startRollup(lifecycleCtx)
 
 	p.mu.Lock()
 	p.store = store
@@ -320,6 +407,7 @@ func (p *Persister) Start(ctx context.Context) {
 	p.mu.Unlock()
 	p.pricingMu.RUnlock()
 
+	p.restoreCostRecalculation(lifecycleCtx)
 	trimStop := p.startRetentionTrim(lifecycleCtx)
 
 	p.mu.Lock()
@@ -377,21 +465,26 @@ func (p *Persister) StopContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	p.stopOnce.Do(func() {
-		p.mu.RLock()
-		stop := p.stopFn
-		cancel := p.lifecycleCancel
-		p.mu.RUnlock()
-		if cancel != nil {
-			cancel()
-		}
-		go func() {
-			if stop != nil {
-				stop()
-			}
-			close(p.stopDone)
-		}()
-	})
+	p.stopRequested.Store(true)
+	p.stopOnce.Do(
+		func() {
+			go func() {
+				p.lifecycleMu.Lock()
+				defer p.lifecycleMu.Unlock()
+				p.mu.RLock()
+				stop := p.stopFn
+				cancel := p.lifecycleCancel
+				p.mu.RUnlock()
+				if cancel != nil {
+					cancel()
+				}
+				if stop != nil {
+					stop()
+				}
+				close(p.stopDone)
+			}()
+		},
+	)
 	select {
 	case <-p.stopDone:
 		return nil
@@ -407,7 +500,13 @@ func (p *Persister) maintenanceContext(parent context.Context, timeout time.Dura
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(parent, timeout)
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(parent, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(parent)
+	}
 	p.mu.RLock()
 	lifecycleCtx := p.lifecycleCtx
 	p.mu.RUnlock()
@@ -440,23 +539,81 @@ func (p *Persister) acquireMaintenance(ctx context.Context) (func(), error) {
 	}
 }
 
-// Record submits a usage record to the writer goroutine. Non-blocking — the
-// writer drops on overflow rather than back-pressuring the request path.
-func (p *Persister) Record(detail FlatDetail) {
+// Record submits a usage record and applies writer backpressure until it is
+// accepted or the persister stops.
+func (p *Persister) Record(detail FlatDetail) bool {
 	if p == nil {
-		return
+		return false
 	}
-	if p.overDBSizeCap() {
-		log.Warn("usage: SQLite DB size cap reached, dropping live usage record")
-		return
+	if p.dbSizeCapReached() {
+		log.Warn("usage: SQLite DB size cap reached, live usage record was not accepted")
+		return false
 	}
 	p.mu.RLock()
 	w := p.writer
 	p.mu.RUnlock()
 	if w == nil {
-		return
+		log.Warn("usage: writer unavailable, live usage record was not accepted")
+		return false
 	}
-	w.Submit(detail)
+	return w.submit(detail)
+}
+
+// SubmitRequestLogArtifact implements logging.RequestLogArtifactSink.
+func (p *Persister) SubmitRequestLogArtifact(artifact logging.RequestLogArtifact) bool {
+	if p == nil {
+		log.Warn("usage: persister unavailable, request log artifact was not accepted")
+		return false
+	}
+	p.mu.RLock()
+	w := p.writer
+	p.mu.RUnlock()
+	if w == nil {
+		log.Warn("usage: writer unavailable, request log artifact was not accepted")
+		return false
+	}
+	return w.SubmitRequestLogArtifact(artifact)
+}
+
+// QueryRequestLogArtifactContext returns the latest persisted lifecycle state.
+func (p *Persister) QueryRequestLogArtifactContext(
+	parent context.Context,
+	requestID string,
+) (logging.RequestLogArtifact, bool, error) {
+	if p == nil {
+		return logging.RequestLogArtifact{}, false, errors.New("usage: nil persister")
+	}
+	p.mu.RLock()
+	s := p.store
+	p.mu.RUnlock()
+	if s == nil {
+		return logging.RequestLogArtifact{}, false, errors.New("usage: store not initialized")
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	return s.queryRequestLogArtifact(ctx, requestID)
+}
+
+// HasEventRequestIDContext reports whether a legacy event carries the request ID.
+func (p *Persister) HasEventRequestIDContext(parent context.Context, requestID string) (bool, error) {
+	if p == nil {
+		return false, errors.New("usage: nil persister")
+	}
+	p.mu.RLock()
+	s := p.store
+	p.mu.RUnlock()
+	if s == nil {
+		return false, errors.New("usage: store not initialized")
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
+	defer cancel()
+	return s.hasEventRequestID(ctx, requestID)
 }
 
 // Query is the read-side entry point used by /usage/summary.
@@ -477,11 +634,40 @@ func (p *Persister) Query(
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return s.Query(ctx, from, to, filters, granularity, includeGroups)
+	return s.querySummary(ctx, from, to, filters, granularity, includeGroups)
+}
+
+func (p *Persister) QueryWithAuthIndexGranularity(
+	from, to time.Time,
+	filters EventFilters,
+	granularity string,
+	authIndexGranularity string,
+	includeGroups bool,
+) (QueryResult, error) {
+	if p == nil {
+		return QueryResult{}, errors.New("usage: nil persister")
+	}
+	p.mu.RLock()
+	s := p.store
+	p.mu.RUnlock()
+	if s == nil {
+		return QueryResult{}, errors.New("usage: store not initialized")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return s.queryWithAuthIndexGranularity(
+		ctx,
+		from,
+		to,
+		filters,
+		granularity,
+		authIndexGranularity,
+		includeGroups,
+	)
 }
 
 // QueryRequestCountsContext returns the current request and failure totals
-// without materialising per-request details.
+// without materializing per-request details.
 func (p *Persister) QueryRequestCountsContext(parent context.Context) (int64, int64, error) {
 	if p == nil {
 		return 0, 0, errors.New("usage: nil persister")
@@ -517,6 +703,49 @@ func (p *Persister) QueryEvents(
 	sortField string,
 	sortDesc bool,
 ) ([]FlatDetail, int, error) {
+	return p.QueryEventsContext(
+		context.Background(),
+		from,
+		to,
+		filters,
+		page,
+		pageSize,
+		sortField,
+		sortDesc,
+	)
+}
+
+func (p *Persister) QueryEventsContext(
+	parent context.Context,
+	from, to time.Time,
+	filters EventFilters,
+	page, pageSize int,
+	sortField string,
+	sortDesc bool,
+) ([]FlatDetail, int, error) {
+	return p.queryEventsContext(parent, from, to, filters, page, pageSize, sortField, sortDesc, false)
+}
+
+func (p *Persister) QueryCompactEventsContext(
+	parent context.Context,
+	from, to time.Time,
+	filters EventFilters,
+	page, pageSize int,
+	sortField string,
+	sortDesc bool,
+) ([]FlatDetail, int, error) {
+	return p.queryEventsContext(parent, from, to, filters, page, pageSize, sortField, sortDesc, true)
+}
+
+func (p *Persister) queryEventsContext(
+	parent context.Context,
+	from, to time.Time,
+	filters EventFilters,
+	page, pageSize int,
+	sortField string,
+	sortDesc bool,
+	compact bool,
+) ([]FlatDetail, int, error) {
 	if p == nil {
 		return nil, 0, errors.New("usage: nil persister")
 	}
@@ -526,9 +755,15 @@ func (p *Persister) QueryEvents(
 	if s == nil {
 		return nil, 0, errors.New("usage: store not initialized")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	return s.QueryEvents(ctx, from, to, filters, page, pageSize, sortField, sortDesc)
+	if compact {
+		return s.queryCompactEventDetails(ctx, from, to, filters, page, pageSize, sortField, sortDesc)
+	}
+	return s.queryEventDetails(ctx, from, to, filters, page, pageSize, sortField, sortDesc)
 }
 
 // QueryBackupEventsContext reads a complete, transactionally consistent event
@@ -552,21 +787,7 @@ func (p *Persister) QueryBackupEventsContext(
 	}
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
-	return s.QueryBackupEvents(ctx, from, to, filters)
-}
-
-// Save flushes the WAL to the main database file. Non-blocking, no
-// guarantee writers are quiesced — the WAL checkpoint is "PASSIVE" so it
-// completes only as much as it can without forcing other connections to wait.
-func (p *Persister) Save() {
-	if p == nil {
-		return
-	}
-	_ = p.checkpoint("PASSIVE")
-}
-
-func (p *Persister) checkpoint(mode string) error {
-	return p.checkpointContext(context.Background(), mode)
+	return s.queryBackupEventSet(ctx, from, to, filters)
 }
 
 func (p *Persister) checkpointContext(parent context.Context, mode string) error {
@@ -643,8 +864,20 @@ func (p *Persister) trimBefore(cutoff time.Time) error {
 		}
 	}()
 
-	if _, err := tx.ExecContext(ctx, "DELETE FROM events WHERE ts_ns < ?", cutoffNs); err != nil {
+	deleteResult, err := tx.ExecContext(ctx, "DELETE FROM events WHERE ts_ns < ?", cutoffNs)
+	if err != nil {
 		return fmt.Errorf("delete expired events: %w", err)
+	}
+	deleted, err := deleteResult.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count expired events: %w", err)
+	}
+	if deleted == 0 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit empty trim tx: %w", err)
+		}
+		committed = true
+		return nil
 	}
 	if err := rebuildUsageBucketsTx(ctx, tx); err != nil {
 		return err
@@ -753,7 +986,16 @@ func (p *Persister) SetRetention(r config.UsageRetention) {
 	}
 	p.mu.Lock()
 	p.retention = r
+	store := p.store
 	p.mu.Unlock()
+	if store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := store.setMaxSizeBytes(ctx, p.dbSizeCapLimit()); err != nil {
+			log.Errorf("usage: apply updated SQLite DB size limit: %v", err)
+		}
+		cancel()
+	}
+	p.refreshDBSizeCap()
 }
 
 func emptyStatisticsSnapshot() StatisticsSnapshot {
@@ -764,17 +1006,6 @@ func emptyStatisticsSnapshot() StatisticsSnapshot {
 		TokensByDay:    make(map[string]int64),
 		TokensByHour:   make(map[string]int64),
 	}
-}
-
-// Snapshot reconstructs the bounded v1-style compatibility response. Modern
-// callers should use Query, QueryEvents, or QueryBackupEventsContext.
-func (p *Persister) Snapshot() StatisticsSnapshot {
-	snap, err := p.QuerySnapshot()
-	if err != nil {
-		log.Warnf("usage: snapshot: %v", err)
-		return emptyStatisticsSnapshot()
-	}
-	return snap
 }
 
 // QueryAggregateSnapshotContext reconstructs the legacy aggregate fields from
@@ -896,9 +1127,9 @@ func (p *Persister) QueryAggregateSnapshotContext(parent context.Context) (Stati
 	return snap, nil
 }
 
-// QuerySnapshot reconstructs the full v1-style snapshot and reports storage
+// querySnapshot reconstructs the full v1-style snapshot and reports storage
 // errors instead of returning an incomplete snapshot.
-func (p *Persister) QuerySnapshot() (StatisticsSnapshot, error) {
+func (p *Persister) querySnapshot() (StatisticsSnapshot, error) {
 	return p.querySnapshotFilteredContext(
 		context.Background(),
 		time.Time{},
@@ -929,23 +1160,11 @@ func (p *Persister) QuerySnapshotLimitedContext(
 	)
 }
 
-// SnapshotFiltered reconstructs a v1-style StatisticsSnapshot scoped by the
-// given time range and event filters. Storage errors are logged and represented
-// by an empty snapshot for compatibility with callers that predate SQLite.
-func (p *Persister) SnapshotFiltered(from, to time.Time, filters EventFilters) StatisticsSnapshot {
-	snap, err := p.QuerySnapshotFiltered(from, to, filters)
-	if err != nil {
-		log.Warnf("usage: filtered snapshot: %v", err)
-		return emptyStatisticsSnapshot()
-	}
-	return snap
-}
-
-// QuerySnapshotFiltered reconstructs a filtered v1-style snapshot. Zero-valued
+// querySnapshotFiltered reconstructs a filtered v1-style snapshot. Zero-valued
 // from/to means "no time bound"; an empty EventFilters means "no dimension
 // filter". Every storage error aborts the query so callers never receive
 // partial usage data.
-func (p *Persister) QuerySnapshotFiltered(
+func (p *Persister) querySnapshotFiltered(
 	from, to time.Time,
 	filters EventFilters,
 ) (StatisticsSnapshot, error) {
@@ -1090,7 +1309,8 @@ func (p *Persister) querySnapshotFilteredContext(
 		       (SELECT name FROM dim_source     WHERE id = events.source_id),
 		       (SELECT name FROM dim_auth_index WHERE id = events.auth_index_id),
 		       (SELECT name FROM dim_api_key    WHERE id = events.api_key_id),
-		       events.input_tokens, events.output_tokens, events.reasoning_tokens, events.cached_tokens, events.total_tokens,
+		       events.input_tokens, events.output_tokens, events.reasoning_tokens, events.cached_tokens,
+		       events.cache_read_tokens, events.cache_write_tokens, events.total_tokens,
 		       events.failed, events.metadata
 		  FROM events` + eventsWhere + ` ORDER BY events.ts_ns`
 	rows, err := tx.QueryContext(ctx, eventsSQL, eventsArgs...)
@@ -1114,7 +1334,8 @@ func (p *Persister) querySnapshotFilteredContext(
 		if err := rows.Scan(
 			&tsNs,
 			&model, &source, &authIdx, &apiKey,
-			&t.InputTokens, &t.OutputTokens, &t.ReasoningTokens, &t.CachedTokens, &t.TotalTokens,
+			&t.InputTokens, &t.OutputTokens, &t.ReasoningTokens, &t.CachedTokens,
+			&t.CacheReadTokens, &t.CacheWriteTokens, &t.TotalTokens,
 			&failedInt,
 			&metadata,
 		); err != nil {
@@ -1159,6 +1380,12 @@ func (p *Persister) querySnapshotFilteredContext(
 		detail.TimeToFirstByteMs = flat.TimeToFirstByteMs
 		detail.TotalDurationMs = flat.TotalDurationMs
 		detail.Completed = flat.Completed
+		detail.Generate = flat.Generate
+		detail.ClientIP = flat.ClientIP
+		detail.XForwardedFor = flat.XForwardedFor
+		detail.UserAgent = flat.UserAgent
+		detail.AccountingVersion = flat.AccountingVersion
+		detail.TokenBreakdown = flat.TokenBreakdown
 		detail.ReasoningEffort = flat.ReasoningEffort
 		detail.ServiceTier = flat.ServiceTier
 		detail.RequestServiceTier = flat.RequestServiceTier
@@ -1263,30 +1490,46 @@ func (p *Persister) querySnapshotFilteredContext(
 
 // RecalculateCostsResult holds the outcome of a cost recalculation.
 type RecalculateCostsResult struct {
+	TaskID           string  `json:"task_id,omitempty"`
 	RecalculatedDays int     `json:"recalculated_days"`
 	TotalCost        float64 `json:"total_cost"`
 	AlreadyRunning   bool    `json:"already_running,omitempty"`
 }
 
-// CostRecalculationStatus reports the latest asynchronous recalculation job.
+// CostRecalculationStatus reports the durable asynchronous job state.
 type CostRecalculationStatus struct {
-	Status           string  `json:"status"`
-	Running          bool    `json:"running"`
-	RecalculatedDays int     `json:"recalculated_days,omitempty"`
-	TotalCost        float64 `json:"total_cost,omitempty"`
-	Error            string  `json:"error,omitempty"`
+	Status             string  `json:"status"`
+	Running            bool    `json:"running"`
+	TaskID             string  `json:"task_id,omitempty"`
+	Phase              string  `json:"phase,omitempty"`
+	PriceRevision      string  `json:"price_revision,omitempty"`
+	ProcessedEvents    int64   `json:"processed_events,omitempty"`
+	TotalEvents        int64   `json:"total_events,omitempty"`
+	ChangedEvents      int64   `json:"changed_events,omitempty"`
+	RollupTotalDays    int     `json:"rollup_total_days,omitempty"`
+	RollupDoneDays     int     `json:"rollup_done_days,omitempty"`
+	DirtyDaysRemaining int     `json:"dirty_days_remaining,omitempty"`
+	Percent            float64 `json:"percent,omitempty"`
+	RecalculatedDays   int     `json:"recalculated_days,omitempty"`
+	TotalCost          float64 `json:"total_cost,omitempty"`
+	Error              string  `json:"error,omitempty"`
+	StartedAt          string  `json:"started_at,omitempty"`
+	UpdatedAt          string  `json:"updated_at,omitempty"`
+	Resumable          bool    `json:"resumable,omitempty"`
+	Resumed            bool    `json:"resumed,omitempty"`
+	RestartReason      string  `json:"restart_reason,omitempty"`
 }
 
-// RecalculateCosts re-prices every event using the current PriceFunc, then
+// recalculateCosts re-prices every event using the current PriceFunc, then
 // rebuilds hour_bucket and day_bucket from the updated events table. Heavy
 // SQL — this is intended for occasional admin-triggered recalculation, not
 // per-request use.
-func (p *Persister) RecalculateCosts() (RecalculateCostsResult, error) {
+func (p *Persister) recalculateCosts() (RecalculateCostsResult, error) {
 	return p.RecalculateCostsContext(context.Background())
 }
 
 // RecalculateCostsContext recalculates historical costs and allows lock waits,
-// SQL work, and shutdown cancellation to share one deadline.
+// SQL work, caller cancellation, and shutdown cancellation to share one context.
 func (p *Persister) RecalculateCostsContext(parent context.Context) (RecalculateCostsResult, error) {
 	if p == nil {
 		return RecalculateCostsResult{}, errors.New("usage: nil persister")
@@ -1368,13 +1611,20 @@ func (p *Persister) finishCostRecalculation(result RecalculateCostsResult, err e
 		log.Info("usage: historical cost recalculation queued again for updated prices")
 		return true
 	}
-	status := CostRecalculationStatus{
-		Status:           "ok",
-		RecalculatedDays: result.RecalculatedDays,
-		TotalCost:        result.TotalCost,
-	}
+	status := p.costRecalcStatus
 	if err != nil {
-		status = CostRecalculationStatus{Status: "error", Error: err.Error()}
+		status.Status = "error"
+		status.Running = false
+		status.Error = err.Error()
+	} else {
+		status.Status = "ok"
+		status.Running = false
+		status.Phase = "complete"
+		status.RecalculatedDays = result.RecalculatedDays
+		status.TotalCost = result.TotalCost
+		if status.TaskID == "" {
+			status.TaskID = result.TaskID
+		}
 	}
 	p.costRecalcStatus = status
 	p.costRecalcRunning.Store(false)
@@ -1392,98 +1642,7 @@ func (p *Persister) finishCostRecalculation(result RecalculateCostsResult, err e
 }
 
 func (p *Persister) recalculateCostsContext(parent context.Context) (RecalculateCostsResult, error) {
-	ctx, cancel := p.maintenanceContext(parent, 5*time.Minute)
-	defer cancel()
-	unlockMaintenance, errLock := p.acquireMaintenance(ctx)
-	if errLock != nil {
-		return RecalculateCostsResult{}, fmt.Errorf("wait for usage maintenance: %w", errLock)
-	}
-	defer unlockMaintenance()
-
-	p.pricingMu.RLock()
-	priceFn := p.priceFn()
-	p.pricingMu.RUnlock()
-
-	p.mu.RLock()
-	s := p.store
-	p.mu.RUnlock()
-	if s == nil || s.db == nil {
-		return RecalculateCostsResult{}, errors.New("usage: store not initialized")
-	}
-	if priceFn == nil {
-		return RecalculateCostsResult{}, errors.New("usage: no pricing function configured")
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return RecalculateCostsResult{}, fmt.Errorf("begin recalculation tx: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-
-	// Enumerate models inside the same transaction as repricing so no model can
-	// appear between the snapshot and the bucket rebuild.
-	models, err := fetchAllModels(ctx, tx)
-	if err != nil {
-		return RecalculateCostsResult{}, fmt.Errorf("fetch models: %w", err)
-	}
-	for _, m := range models {
-		prompt, completion, cache, ok := priceFn(m.name)
-		if !ok {
-			// No price → zero out so stale costs don't linger.
-			if _, err := tx.ExecContext(
-				ctx,
-				"UPDATE events SET cost_micro = 0 WHERE model_id = ?", m.id,
-			); err != nil {
-				return RecalculateCostsResult{}, fmt.Errorf("zero costs for %s: %w", m.name, err)
-			}
-			continue
-		}
-		if err := repriceModelEvents(
-			ctx,
-			tx,
-			m,
-			prompt,
-			completion,
-			cache,
-		); err != nil {
-			return RecalculateCostsResult{}, err
-		}
-	}
-
-	if err := rebuildUsageBucketsTx(ctx, tx); err != nil {
-		return RecalculateCostsResult{}, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return RecalculateCostsResult{}, fmt.Errorf("commit rebuild: %w", err)
-	}
-	committed = true
-
-	var totalMicro float64
-	if err := s.db.QueryRowContext(
-		ctx,
-		"SELECT TOTAL(cost_micro) FROM hour_bucket",
-	).Scan(&totalMicro); err != nil {
-		return RecalculateCostsResult{}, fmt.Errorf("total cost after recalc: %w", err)
-	}
-
-	var days int
-	if err := s.db.QueryRowContext(
-		ctx,
-		"SELECT COUNT(DISTINCT bucket_ts_ns) FROM day_bucket",
-	).Scan(&days); err != nil {
-		return RecalculateCostsResult{}, fmt.Errorf("count recalculated days: %w", err)
-	}
-
-	return RecalculateCostsResult{
-		RecalculatedDays: days,
-		TotalCost:        totalMicro / costMicroPerUSD,
-	}, nil
+	return p.recalculateCostsIncrementalContext(parent)
 }
 
 func rebuildUsageBucketsTx(ctx context.Context, tx *sql.Tx) error {
@@ -1496,12 +1655,17 @@ func rebuildUsageBucketsTx(ctx context.Context, tx *sql.Tx) error {
 	hourExpr := sqliteFloorBucketExpr("ts_ns", nsPerHour)
 	if _, err := tx.ExecContext(
 		ctx,
-		fmt.Sprintf(`
+		fmt.Sprintf(
+			`
 		INSERT INTO hour_bucket (
 		    bucket_ts_ns, model_id, credential_id, api_key_id, provider_id,
 		    requests, success, failure,
-		    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-		    cost_micro, latency_ms_total, latency_samples
+		    input_tokens, output_tokens, reasoning_tokens, cached_tokens,
+			    cache_read_tokens, cache_write_tokens, total_tokens,
+		    cost_micro,
+			    complete_requests, partial_requests, unpriced_requests,
+			    complete_tokens, partial_tokens, unpriced_tokens,
+			    latency_ms_total, latency_samples
 		)
 		SELECT
 		    %s AS bucket_ts_ns,
@@ -1509,11 +1673,20 @@ func rebuildUsageBucketsTx(ctx context.Context, tx *sql.Tx) error {
 		    COUNT(*) AS requests,
 		    SUM(CASE WHEN failed = 0 THEN 1 ELSE 0 END) AS success,
 		    SUM(CASE WHEN failed = 1 THEN 1 ELSE 0 END) AS failure,
-		    SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cached_tokens), SUM(total_tokens),
-		    SUM(cost_micro), 0, 0
+		    SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cached_tokens),
+			    SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(total_tokens),
+		    SUM(cost_micro),
+			    SUM(CASE WHEN cost_status = 'complete' THEN 1 ELSE 0 END),
+			    SUM(CASE WHEN cost_status = 'partial' THEN 1 ELSE 0 END),
+			    SUM(CASE WHEN cost_status = 'unpriced' THEN 1 ELSE 0 END),
+			    SUM(CASE WHEN cost_status = 'complete' THEN total_tokens ELSE 0 END),
+			    SUM(CASE WHEN cost_status = 'partial' THEN total_tokens ELSE 0 END),
+			    SUM(CASE WHEN cost_status = 'unpriced' THEN total_tokens ELSE 0 END),
+			    0, 0
 		  FROM events
 		 GROUP BY %s, model_id, credential_id, api_key_id, provider_id
-	`, hourExpr, hourExpr),
+	`, hourExpr, hourExpr,
+		),
 	); err != nil {
 		return fmt.Errorf("rebuild hour_bucket: %w", err)
 	}
@@ -1527,22 +1700,32 @@ func rebuildUsageBucketsTx(ctx context.Context, tx *sql.Tx) error {
 	dayExpr := sqliteFloorBucketExpr("bucket_ts_ns", nsPerDay)
 	if _, err := tx.ExecContext(
 		ctx,
-		fmt.Sprintf(`
+		fmt.Sprintf(
+			`
 		INSERT INTO day_bucket (
 		    bucket_ts_ns, model_id, credential_id, api_key_id, provider_id,
 		    requests, success, failure,
-		    input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
-		    cost_micro, latency_ms_total, latency_samples
+		    input_tokens, output_tokens, reasoning_tokens, cached_tokens,
+			    cache_read_tokens, cache_write_tokens, total_tokens,
+		    cost_micro,
+			    complete_requests, partial_requests, unpriced_requests,
+			    complete_tokens, partial_tokens, unpriced_tokens,
+			    latency_ms_total, latency_samples
 		)
 		SELECT
 		    %s AS bucket_ts_ns,
 		    model_id, credential_id, api_key_id, provider_id,
 		    SUM(requests), SUM(success), SUM(failure),
-		    SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cached_tokens), SUM(total_tokens),
-		    SUM(cost_micro), SUM(latency_ms_total), SUM(latency_samples)
+		    SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cached_tokens),
+			    SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(total_tokens),
+		    SUM(cost_micro),
+			    SUM(complete_requests), SUM(partial_requests), SUM(unpriced_requests),
+			    SUM(complete_tokens), SUM(partial_tokens), SUM(unpriced_tokens),
+			    SUM(latency_ms_total), SUM(latency_samples)
 		  FROM hour_bucket
 		 GROUP BY %s, model_id, credential_id, api_key_id, provider_id
-		`, dayExpr, dayExpr),
+		`, dayExpr, dayExpr,
+		),
 	); err != nil {
 		return fmt.Errorf("rebuild day_bucket: %w", err)
 	}
@@ -1574,75 +1757,149 @@ type modelRow struct {
 	name string
 }
 
-const costMicroSQLExpression = `CAST(input_tokens AS REAL) * ?1 +
-	CAST(output_tokens AS REAL) * ?2 +
-	CAST(cached_tokens AS REAL) * ?3`
+const repriceEventPageSize = 512
+
+type repriceEvent struct {
+	id             int64
+	tsNs           int64
+	tokens         tokenStats
+	metadata       sql.NullString
+	pricingReceipt *PricingReceipt
+	current        costResult
+	updated        costResult
+}
 
 func repriceModelEvents(
 	ctx context.Context,
 	tx *sql.Tx,
 	model modelRow,
-	promptPrice float64,
-	completionPrice float64,
-	cachePrice float64,
+	pricing pricingSnapshot,
 ) error {
-	priceFn := func(string) (float64, float64, float64, bool) {
-		return promptPrice, completionPrice, cachePrice, true
-	}
-	if _, err := computeCostMicro(tokenStats{}, priceFn, model.name); err != nil {
-		return err
-	}
-
-	var maxCost sql.NullFloat64
-	if err := tx.QueryRowContext(
+	update, err := tx.PrepareContext(
 		ctx,
-		"SELECT MAX("+costMicroSQLExpression+") FROM events WHERE model_id = ?",
-		promptPrice,
-		completionPrice,
-		cachePrice,
-		model.id,
-	).Scan(&maxCost); err != nil {
-		return fmt.Errorf("validate costs for %s: %w", model.name, err)
+		`UPDATE events
+		    SET cost_micro = ?, cost_status = ?, cost_reason = ?
+		  WHERE id = ?
+		    AND (cost_micro <> ? OR cost_status <> ? OR cost_reason <> ?)`,
+	)
+	if err != nil {
+		return fmt.Errorf("prepare cost updates for %s: %w", model.name, err)
 	}
-	if maxCost.Valid && (math.IsNaN(maxCost.Float64) || math.IsInf(maxCost.Float64, 0) ||
-		maxCost.Float64 < 0 || maxCost.Float64 >= math.Exp2(63)) {
-		return fmt.Errorf("usage: cost_micro out of int64 range for model %q", model.name)
-	}
+	defer func() { _ = update.Close() }()
 
-	if _, err := tx.ExecContext(
-		ctx,
-		"UPDATE events SET cost_micro = CAST("+costMicroSQLExpression+
-			" AS INTEGER) WHERE model_id = ? AND cost_micro <> CAST("+costMicroSQLExpression+" AS INTEGER)",
-		promptPrice,
-		completionPrice,
-		cachePrice,
-		model.id,
-	); err != nil {
-		return fmt.Errorf("update costs for %s: %w", model.name, err)
+	var afterID int64
+	for {
+		rows, errQuery := tx.QueryContext(
+			ctx,
+			`SELECT id, ts_ns,
+			        input_tokens, output_tokens, reasoning_tokens, cached_tokens,
+			        cache_read_tokens, cache_write_tokens, total_tokens,
+			        metadata, pricing_receipt, cost_micro, cost_status, cost_reason
+			   FROM events
+			  WHERE model_id = ? AND id > ?
+			  ORDER BY id
+			  LIMIT ?`,
+			model.id,
+			afterID,
+			repriceEventPageSize,
+		)
+		if errQuery != nil {
+			return fmt.Errorf("query costs for %s: %w", model.name, errQuery)
+		}
+
+		batch := make([]repriceEvent, 0, repriceEventPageSize)
+		for rows.Next() {
+			var event repriceEvent
+			var pricingReceipt sql.NullString
+			if errScan := rows.Scan(
+				&event.id,
+				&event.tsNs,
+				&event.tokens.InputTokens,
+				&event.tokens.OutputTokens,
+				&event.tokens.ReasoningTokens,
+				&event.tokens.CachedTokens,
+				&event.tokens.CacheReadTokens,
+				&event.tokens.CacheWriteTokens,
+				&event.tokens.TotalTokens,
+				&event.metadata,
+				&pricingReceipt,
+				&event.current.Micro,
+				&event.current.Status,
+				&event.current.Reason,
+			); errScan != nil {
+				_ = rows.Close()
+				return fmt.Errorf("scan costs for %s: %w", model.name, errScan)
+			}
+			event.tokens, err = validatedTokenStats(event.tokens)
+			if err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("validate tokens for %s event %d: %w", model.name, event.id, err)
+			}
+			event.pricingReceipt, err = decodePricingReceipt(pricingReceipt)
+			if err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("decode pricing receipt for %s event %d: %w", model.name, event.id, err)
+			}
+			eventTime := time.Unix(0, event.tsNs).UTC()
+			if event.pricingReceipt != nil {
+				event.updated, err = computeCurrentCatalogCostFromPricingReceipt(
+					event.tokens,
+					event.pricingReceipt,
+					pricing,
+					eventTime,
+				)
+			} else {
+				var breakdown *coreusage.TokenBreakdown
+				breakdown, err = decodeEventTokenBreakdown(event.metadata)
+				if err == nil {
+					event.updated, err = computeCost(
+						event.tokens,
+						breakdown,
+						pricing,
+						model.name,
+						eventTime,
+					)
+				}
+			}
+			if err != nil {
+				_ = rows.Close()
+				return err
+			}
+			batch = append(batch, event)
+			afterID = event.id
+		}
+		if errRows := rows.Err(); errRows != nil {
+			_ = rows.Close()
+			return fmt.Errorf("iterate costs for %s: %w", model.name, errRows)
+		}
+		if errClose := rows.Close(); errClose != nil {
+			return fmt.Errorf("close costs for %s: %w", model.name, errClose)
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+
+		for i := range batch {
+			event := &batch[i]
+			if _, errExec := update.ExecContext(
+				ctx,
+				event.updated.Micro,
+				event.updated.Status,
+				event.updated.Reason,
+				event.id,
+				event.updated.Micro,
+				event.updated.Status,
+				event.updated.Reason,
+			); errExec != nil {
+				return fmt.Errorf("update cost for %s event %d: %w", model.name, event.id, errExec)
+			}
+		}
 	}
-	return nil
 }
 
 type dbQueryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-func fetchAllModels(ctx context.Context, queryer dbQueryer) ([]modelRow, error) {
-	rows, err := queryer.QueryContext(ctx, "SELECT id, name FROM dim_model")
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []modelRow
-	for rows.Next() {
-		var m modelRow
-		if err := rows.Scan(&m.id, &m.name); err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
 }
 
 // Import reads a payload (any of the supported legacy formats), inserts the
@@ -1692,7 +1949,7 @@ func (p *Persister) ImportContextWithSecret(
 	if s == nil {
 		return ImportResult{}, errors.New("usage: store not initialized")
 	}
-	result, err := ImportBytesWithSecret(ctx, s, priceFn, data, secret)
+	result, err := importBytesWithSecret(ctx, s, priceFn, data, secret)
 	if err != nil {
 		return ImportResult{}, err
 	}
@@ -1730,6 +1987,19 @@ func handlePostImportMaintenanceError(
 	result.Warning = "usage imported, but post-import maintenance did not finish"
 	log.Warnf("usage: %s: %v", operation, maintenanceErr)
 	return nil
+}
+
+func (p *Persister) currentPricingSnapshot() pricingSnapshot {
+	p.pricingMu.RLock()
+	defer p.pricingMu.RUnlock()
+	provider, fn := p.priceSource()
+	if provider == nil {
+		return pricingSnapshot{priceFn: fn}
+	}
+	if detailedProvider, ok := provider.(detailedPriceProvider); ok {
+		return pricingSnapshot{detailedPriceFn: detailedProvider.DetailedSnapshot()}
+	}
+	return pricingSnapshot{priceFn: provider.Snapshot()}
 }
 
 func (p *Persister) priceFn() PriceFunc {
@@ -1968,9 +2238,9 @@ func copyDirRecursive(src, dst string) error {
 	if errWalk != nil {
 		return errWalk
 	}
-	for index := len(directories) - 1; index >= 0; index-- {
-		if errSync := syncDirectory(directories[index]); errSync != nil {
-			return fmt.Errorf("sync copied directory %s: %w", directories[index], errSync)
+	for _, directory := range slices.Backward(directories) {
+		if errSync := syncDirectory(directory); errSync != nil {
+			return fmt.Errorf("sync copied directory %s: %w", directory, errSync)
 		}
 	}
 	return nil

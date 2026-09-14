@@ -3,10 +3,14 @@ package usage
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 )
 
 type capturedUsageRecord struct {
@@ -25,7 +29,7 @@ type registerNamedCompatibility interface {
 }
 
 var _ registerNamedCompatibility = (*Manager)(nil)
-var _ func(string, Plugin) = RegisterNamedPlugin
+var _ = RegisterNamedPlugin
 
 func (f usagePluginFunc) HandleUsage(ctx context.Context, record Record) {
 	f(ctx, record)
@@ -64,9 +68,11 @@ func waitForDeferredRecord(t *testing.T, records <-chan capturedUsageRecord, mod
 func registerTestNamedPlugin(t *testing.T, name string, plugin Plugin) {
 	t.Helper()
 	RegisterNamedPlugin(name, plugin)
-	t.Cleanup(func() {
-		UnregisterNamedPlugin(name).Wait()
-	})
+	t.Cleanup(
+		func() {
+			UnregisterNamedPlugin(name).Wait()
+		},
+	)
 }
 
 func assertNoDeferredRecord(t *testing.T, records <-chan capturedUsageRecord, model string) {
@@ -134,6 +140,48 @@ func TestDeferredRecordCompleteBeforeStorePublishesFailure(t *testing.T) {
 	assertNoDeferredRecord(t, plugin.records, "deferred-complete-first-model")
 }
 
+func TestDeferredRecordWithOutcomeMapsContextStatuses(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "canceled", err: context.Canceled, want: clienterror.StatusClientClosedRequest},
+		{name: "deadline", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
+		{
+			name: "url error wraps canceled",
+			err:  &url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled},
+			want: clienterror.StatusClientClosedRequest,
+		},
+		{name: "plain error", err: errors.New("boom"), want: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(
+			test.name, func(t *testing.T) {
+				got := deferredRecordWithOutcome(Record{Completed: true}, test.err)
+				if !got.Failed || got.Completed {
+					t.Fatalf("record outcome = %#v, want failed and incomplete", got)
+				}
+				if got.Fail.StatusCode != test.want {
+					t.Fatalf("StatusCode = %d, want %d", got.Fail.StatusCode, test.want)
+				}
+				if got.Fail.Body == "" {
+					t.Fatal("expected failure body")
+				}
+			},
+		)
+	}
+}
+
+func TestDeferredRecordWithOutcomePreservesFailureMetadata(t *testing.T) {
+	want := Failure{StatusCode: http.StatusTeapot, Body: "existing failure"}
+	got := deferredRecordWithOutcome(Record{Completed: true, Fail: want}, context.Canceled)
+	if got.Fail != want {
+		t.Fatalf("failure metadata = %#v, want %#v", got.Fail, want)
+	}
+}
+
 func TestDeferredRecordConcurrentStoreAndCompletePublishesExactlyOnce(t *testing.T) {
 	plugin := &deferredCapturePlugin{records: make(chan capturedUsageRecord, 128)}
 	registerTestNamedPlugin(t, "test-deferred-concurrent", plugin)
@@ -142,7 +190,7 @@ func TestDeferredRecordConcurrentStoreAndCompletePublishesExactlyOnce(t *testing
 	ctx := WithDeferredRecord(context.Background(), deferred)
 	var accepted atomic.Int32
 	var wg sync.WaitGroup
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
@@ -201,7 +249,9 @@ func TestPublishUsesRegistrationSnapshot(t *testing.T) {
 			},
 		),
 	)
-	manager.Publish(context.Background(), Record{Model: "block"})
+	if errPublish := manager.Publish(context.Background(), Record{Model: "block"}); errPublish != nil {
+		t.Fatalf("Publish(block) error = %v", errPublish)
+	}
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
@@ -217,7 +267,9 @@ func TestPublishUsesRegistrationSnapshot(t *testing.T) {
 			},
 		),
 	)
-	manager.Publish(context.Background(), Record{Model: "stale"})
+	if errPublish := manager.Publish(context.Background(), Record{Model: "stale"}); errPublish != nil {
+		t.Fatalf("Publish(stale) error = %v", errPublish)
+	}
 	manager.UnregisterNamed("test")
 	manager.RegisterNamed(
 		"test", usagePluginFunc(
@@ -260,7 +312,9 @@ func TestRegisterNamedRetirementWaitsForCapturedGeneration(t *testing.T) {
 			},
 		),
 	)
-	manager.Publish(context.Background(), Record{Model: "old"})
+	if errPublish := manager.Publish(context.Background(), Record{Model: "old"}); errPublish != nil {
+		t.Fatalf("Publish(old) error = %v", errPublish)
+	}
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
@@ -285,7 +339,9 @@ func TestRegisterNamedRetirementWaitsForCapturedGeneration(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	manager.Publish(context.Background(), Record{Model: "new"})
+	if errPublish := manager.Publish(context.Background(), Record{Model: "new"}); errPublish != nil {
+		t.Fatalf("Publish(new) error = %v", errPublish)
+	}
 	close(release)
 	select {
 	case <-retired:
@@ -326,7 +382,9 @@ func TestUnregisterNamedRetirementWaitsForCapturedGeneration(t *testing.T) {
 			},
 		),
 	)
-	manager.Publish(context.Background(), Record{Model: "captured"})
+	if errPublish := manager.Publish(context.Background(), Record{Model: "captured"}); errPublish != nil {
+		t.Fatalf("Publish(captured) error = %v", errPublish)
+	}
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
@@ -345,7 +403,9 @@ func TestUnregisterNamedRetirementWaitsForCapturedGeneration(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	manager.Publish(context.Background(), Record{Model: "detached"})
+	if errPublish := manager.Publish(context.Background(), Record{Model: "detached"}); errPublish != nil {
+		t.Fatalf("Publish(detached) error = %v", errPublish)
+	}
 	close(release)
 	select {
 	case <-retired:
@@ -379,7 +439,9 @@ func TestStopContextReturnsWhileUsageCallbackStalls(t *testing.T) {
 			},
 		),
 	)
-	manager.Publish(context.Background(), Record{Model: "blocked"})
+	if errPublish := manager.Publish(context.Background(), Record{Model: "blocked"}); errPublish != nil {
+		t.Fatalf("Publish(blocked) error = %v", errPublish)
+	}
 	select {
 	case <-entered:
 	case <-time.After(time.Second):
@@ -404,7 +466,12 @@ func TestPublishAfterStopReleasesCapturedGeneration(t *testing.T) {
 	manager.RegisterNamed("target", usagePluginFunc(func(context.Context, Record) {}))
 	manager.Stop()
 
-	manager.Publish(context.Background(), Record{Model: "closed"})
+	if errPublish := manager.Publish(context.Background(), Record{Model: "closed"}); !errors.Is(
+		errPublish,
+		ErrManagerStopped,
+	) {
+		t.Fatalf("Publish(closed) error = %v, want %v", errPublish, ErrManagerStopped)
+	}
 	retirement := manager.UnregisterNamed("target")
 	retired := make(chan struct{})
 	go func() {
@@ -423,14 +490,18 @@ func TestManagerQueueCapacityAppliesBackpressure(t *testing.T) {
 	manager := NewManager(1)
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	manager.Register(usagePluginFunc(func(context.Context, Record) {
-		select {
-		case <-entered:
-		default:
-			close(entered)
-		}
-		<-release
-	}))
+	manager.Register(
+		usagePluginFunc(
+			func(context.Context, Record) {
+				select {
+				case <-entered:
+				default:
+					close(entered)
+				}
+				<-release
+			},
+		),
+	)
 	if err := manager.Publish(context.Background(), Record{Model: "active"}); err != nil {
 		t.Fatalf("Publish(active) error = %v", err)
 	}
@@ -462,9 +533,13 @@ func TestManagerQueueCapacityAppliesBackpressure(t *testing.T) {
 func TestManagerCanRestartAfterStop(t *testing.T) {
 	manager := NewManager(2)
 	records := make(chan string, 2)
-	manager.Register(usagePluginFunc(func(_ context.Context, record Record) {
-		records <- record.Model
-	}))
+	manager.Register(
+		usagePluginFunc(
+			func(_ context.Context, record Record) {
+				records <- record.Model
+			},
+		),
+	)
 	manager.Start(context.Background())
 	if err := manager.Publish(context.Background(), Record{Model: "first"}); err != nil {
 		t.Fatalf("Publish(first) error = %v", err)
@@ -491,9 +566,13 @@ func TestManagerCanRestartAfterStop(t *testing.T) {
 func TestPublishRecordUsesContextManager(t *testing.T) {
 	manager := NewManager(1)
 	records := make(chan Record, 1)
-	manager.Register(usagePluginFunc(func(_ context.Context, record Record) {
-		records <- record
-	}))
+	manager.Register(
+		usagePluginFunc(
+			func(_ context.Context, record Record) {
+				records <- record
+			},
+		),
+	)
 	ctx := WithManager(context.Background(), manager)
 	if err := PublishRecord(ctx, Record{Model: "instance"}); err != nil {
 		t.Fatalf("PublishRecord() error = %v", err)

@@ -1,4 +1,4 @@
--- Usage DB schema v4
+-- Usage DB schema v9
 -- All *_ns timestamps are UTC Unix nanoseconds.
 -- cost_micro = USD * 1e6 (micro-dollars).
 -- IF NOT EXISTS lets the same script run idempotently on every startup.
@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS meta
 ) WITHOUT ROWID;
 
 INSERT
-OR IGNORE INTO meta(key, value) VALUES ('schema_version', '4');
+OR IGNORE INTO meta(key, value) VALUES ('schema_version', '9');
+INSERT
+OR IGNORE INTO meta(key, value) VALUES ('api_key_reservation_clock_ns', '0');
 
 CREATE TABLE IF NOT EXISTS dim_model
 (
@@ -265,6 +267,18 @@ CREATE TABLE IF NOT EXISTS events
     >=
     0
 ),
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    cache_read_tokens
+    >=
+    0
+),
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    cache_write_tokens
+    >=
+    0
+),
     total_tokens INTEGER NOT NULL DEFAULT 0 CHECK
 (
     total_tokens
@@ -278,7 +292,42 @@ CREATE TABLE IF NOT EXISTS events
     >=
     0
 ),
+    cost_status TEXT NOT NULL DEFAULT 'unpriced' CHECK
+(
+    cost_status
+    IN
+(
+    'complete',
+    'partial',
+    'unpriced'
+)
+    ),
+    cost_reason TEXT NOT NULL DEFAULT '',
 
+    pricing_receipt TEXT CHECK
+(
+    pricing_receipt
+    IS
+    NULL
+    OR
+    (
+    typeof
+(
+    pricing_receipt
+) = 'text' AND
+    length
+(
+    CAST
+(
+    pricing_receipt AS
+    BLOB
+)) <= 16384 AND
+    json_valid
+(
+    pricing_receipt
+)
+    )
+    ),
     metadata TEXT
     );
 
@@ -291,6 +340,123 @@ CREATE INDEX IF NOT EXISTS idx_events_cred_ts_ns ON events(credential_id, ts_ns)
 CREATE INDEX IF NOT EXISTS idx_events_provider_ts_ns ON events(provider_id, ts_ns);
 CREATE INDEX IF NOT EXISTS idx_events_failed_ts_ns ON events(failed, ts_ns);
 CREATE INDEX IF NOT EXISTS idx_events_total_tokens ON events(total_tokens);
+CREATE INDEX IF NOT EXISTS idx_events_request_id ON events(
+    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.request_id') END
+    );
+
+CREATE TABLE IF NOT EXISTS request_log_artifact
+(
+    request_id
+    TEXT
+    PRIMARY
+    KEY
+    CHECK (
+    request_id =
+    trim
+(
+    request_id
+))
+    CHECK
+(
+    length
+(
+    request_id
+) > 0 AND length
+(
+    request_id
+) <= 512),
+    state TEXT NOT NULL
+    CHECK
+(
+    state
+    IN
+(
+    'pending',
+    'available',
+    'disabled',
+    'not_captured',
+    'publish_failed',
+    'expired',
+    'legacy_unknown'
+)),
+    location TEXT NOT NULL DEFAULT ''
+    CHECK
+(
+    location
+    IN
+(
+    '',
+    'local',
+    'home'
+)),
+    file_name TEXT NOT NULL DEFAULT ''
+    CHECK
+(
+    file_name =
+    trim
+(
+    file_name
+)),
+    home_ip TEXT NOT NULL DEFAULT ''
+    CHECK
+(
+    home_ip =
+    trim
+(
+    home_ip
+)),
+    reason TEXT NOT NULL DEFAULT ''
+    CHECK
+(
+    reason =
+    trim
+(
+    reason
+)),
+    revision INTEGER NOT NULL
+    CHECK
+(
+    typeof
+(
+    revision
+) = 'integer' AND revision > 0),
+    updated_at_ns INTEGER NOT NULL
+    CHECK
+(
+    typeof
+(
+    updated_at_ns
+) = 'integer'),
+    CHECK
+(
+    state
+    <>
+    'available'
+    OR
+    location
+    <>
+    ''
+),
+    CHECK
+(
+    state
+    <>
+    'available'
+    OR
+    location
+    <>
+    'local'
+    OR
+    length
+(
+    file_name
+) > 0)
+    ) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_request_log_artifact_state_updated
+    ON request_log_artifact(state, updated_at_ns);
+CREATE INDEX IF NOT EXISTS idx_request_log_artifact_updated
+    ON request_log_artifact(updated_at_ns);
 
 CREATE TABLE IF NOT EXISTS hour_bucket
 (
@@ -371,6 +537,18 @@ CREATE TABLE IF NOT EXISTS hour_bucket
     >=
     0
 ),
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    cache_read_tokens
+    >=
+    0
+),
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    cache_write_tokens
+    >=
+    0
+),
     total_tokens INTEGER NOT NULL DEFAULT 0 CHECK
 (
     total_tokens
@@ -381,6 +559,42 @@ CREATE TABLE IF NOT EXISTS hour_bucket
     cost_micro INTEGER NOT NULL DEFAULT 0 CHECK
 (
     cost_micro
+    >=
+    0
+),
+    complete_requests INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    complete_requests
+    >=
+    0
+),
+    partial_requests INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    partial_requests
+    >=
+    0
+),
+    unpriced_requests INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    unpriced_requests
+    >=
+    0
+),
+    complete_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    complete_tokens
+    >=
+    0
+),
+    partial_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    partial_tokens
+    >=
+    0
+),
+    unpriced_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    unpriced_tokens
     >=
     0
 ),
@@ -499,6 +713,18 @@ CREATE TABLE IF NOT EXISTS day_bucket
     >=
     0
 ),
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    cache_read_tokens
+    >=
+    0
+),
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    cache_write_tokens
+    >=
+    0
+),
     total_tokens INTEGER NOT NULL DEFAULT 0 CHECK
 (
     total_tokens
@@ -509,6 +735,42 @@ CREATE TABLE IF NOT EXISTS day_bucket
     cost_micro INTEGER NOT NULL DEFAULT 0 CHECK
 (
     cost_micro
+    >=
+    0
+),
+    complete_requests INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    complete_requests
+    >=
+    0
+),
+    partial_requests INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    partial_requests
+    >=
+    0
+),
+    unpriced_requests INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    unpriced_requests
+    >=
+    0
+),
+    complete_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    complete_tokens
+    >=
+    0
+),
+    partial_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    partial_tokens
+    >=
+    0
+),
+    unpriced_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    unpriced_tokens
     >=
     0
 ),
@@ -552,5 +814,352 @@ CREATE INDEX IF NOT EXISTS idx_day_bucket_prov_ts_ns ON day_bucket(provider_id, 
 -- late events survive restarts and are eventually included in long-range reads.
 CREATE TABLE IF NOT EXISTS dirty_day
 (
-    day_ts_ns INTEGER PRIMARY KEY
+    day_ts_ns
+    INTEGER
+    PRIMARY
+    KEY
 ) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS api_key_reservation
+(
+    id
+    TEXT
+    PRIMARY
+    KEY
+    CHECK (
+    id =
+    trim
+(
+    id
+))
+    CHECK
+(
+    length
+(
+    id
+) = 68),
+    key_identity TEXT NOT NULL
+    CHECK
+(
+    key_identity =
+    trim
+(
+    key_identity
+))
+    CHECK
+(
+    length
+(
+    key_identity
+) = 71),
+    logical_request_id TEXT NOT NULL
+    CHECK
+(
+    logical_request_id =
+    trim
+(
+    logical_request_id
+))
+    CHECK
+(
+    length
+(
+    logical_request_id
+) > 0 AND length
+(
+    logical_request_id
+) <= 512),
+    policy_profile TEXT NOT NULL
+    CHECK
+(
+    policy_profile =
+    trim
+(
+    policy_profile
+))
+    CHECK
+(
+    length
+(
+    policy_profile
+) > 0 AND length
+(
+    policy_profile
+) <= 128),
+    requested_model TEXT NOT NULL
+    CHECK
+(
+    requested_model =
+    trim
+(
+    requested_model
+)),
+    canonical_model TEXT NOT NULL
+    CHECK
+(
+    canonical_model =
+    trim
+(
+    canonical_model
+))
+    CHECK
+(
+    length
+(
+    canonical_model
+) > 0),
+    providers_json TEXT NOT NULL
+    CHECK
+(
+    json_valid
+(
+    providers_json
+))
+    CHECK
+(
+    json_type
+(
+    providers_json
+) = 'array'),
+    state TEXT NOT NULL
+    CHECK
+(
+    state
+    IN
+(
+    'open',
+    'unknown',
+    'settled',
+    'released',
+    'committed',
+    'expired_committed'
+)),
+    created_at_ns INTEGER NOT NULL,
+    expires_at_ns INTEGER NOT NULL,
+    updated_at_ns INTEGER NOT NULL,
+    terminal_at_ns INTEGER,
+    terminal_reason TEXT NOT NULL DEFAULT ''
+    CHECK
+(
+    length
+(
+    terminal_reason
+) <= 1024),
+    CHECK
+(
+    expires_at_ns >
+    created_at_ns
+),
+    CHECK
+(
+    updated_at_ns
+    >=
+    created_at_ns
+),
+    CHECK
+(
+(
+    terminal_at_ns
+    IS
+    NULL
+) =
+(
+    state
+    IN
+(
+    'open',
+    'unknown'
+))),
+    UNIQUE
+(
+    key_identity,
+    logical_request_id,
+    policy_profile
+)
+    ) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_api_key_reservation_expiry
+    ON api_key_reservation(state, expires_at_ns);
+CREATE INDEX IF NOT EXISTS idx_api_key_reservation_identity
+    ON api_key_reservation(key_identity, policy_profile, created_at_ns);
+
+CREATE TABLE IF NOT EXISTS api_key_reservation_window
+(
+    reservation_id
+    TEXT
+    NOT
+    NULL
+    REFERENCES
+    api_key_reservation
+(
+    id
+) ON DELETE CASCADE,
+    window_ns INTEGER NOT NULL CHECK
+(
+    window_ns >
+    0
+),
+    window_start_ns INTEGER NOT NULL,
+    window_end_ns INTEGER NOT NULL,
+    max_requests INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    max_requests
+    >=
+    0
+),
+    max_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    max_tokens
+    >=
+    0
+),
+    max_cost_micro INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    max_cost_micro
+    >=
+    0
+),
+    reserved_requests INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    reserved_requests
+    >=
+    0
+),
+    reserved_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    reserved_tokens
+    >=
+    0
+),
+    reserved_cost_micro INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    reserved_cost_micro
+    >=
+    0
+),
+    actual_requests INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    actual_requests
+    >=
+    0
+),
+    actual_tokens INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    actual_tokens
+    >=
+    0
+),
+    actual_cost_micro INTEGER NOT NULL DEFAULT 0 CHECK
+(
+    actual_cost_micro
+    >=
+    0
+),
+    CHECK
+(
+    window_end_ns >
+    window_start_ns
+),
+    CHECK
+(
+    window_end_ns
+    -
+    window_start_ns =
+    window_ns
+),
+    CHECK
+(
+    max_requests >
+    0
+    OR
+    max_tokens >
+    0
+    OR
+    max_cost_micro >
+    0
+),
+    CHECK
+(
+(
+    max_requests =
+    0
+    AND
+    reserved_requests =
+    0
+) OR reserved_requests <= max_requests),
+    CHECK
+(
+(
+    max_tokens =
+    0
+    AND
+    reserved_tokens =
+    0
+) OR reserved_tokens <= max_tokens),
+    CHECK
+(
+(
+    max_cost_micro =
+    0
+    AND
+    reserved_cost_micro =
+    0
+) OR reserved_cost_micro <= max_cost_micro),
+    PRIMARY KEY
+(
+    reservation_id,
+    window_ns,
+    window_start_ns
+)
+    )
+  WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS idx_api_key_reservation_window_lookup
+    ON api_key_reservation_window(window_ns, window_start_ns, window_end_ns);
+
+CREATE TABLE IF NOT EXISTS api_key_reservation_event
+(
+    reservation_id
+    TEXT
+    NOT
+    NULL
+    REFERENCES
+    api_key_reservation
+(
+    id
+) ON DELETE CASCADE,
+    event_fingerprint BLOB NOT NULL CHECK
+(
+    length
+(
+    event_fingerprint
+) = 20),
+    total_tokens INTEGER NOT NULL CHECK
+(
+    total_tokens
+    >=
+    0
+),
+    cost_micro INTEGER NOT NULL CHECK
+(
+    cost_micro
+    >=
+    0
+),
+    cost_status TEXT NOT NULL CHECK
+(
+    cost_status
+    IN
+(
+    'complete',
+    'partial',
+    'unpriced'
+)),
+    created_at_ns INTEGER NOT NULL,
+    PRIMARY KEY
+(
+    reservation_id,
+    event_fingerprint
+)
+    )
+  WITHOUT ROWID;

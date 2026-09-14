@@ -25,8 +25,8 @@ type MigrationStatus struct {
 	At   time.Time
 }
 
-// CheckMigrationStatus reads the meta row that flags a completed JSON import.
-func CheckMigrationStatus(ctx context.Context, store *Store) (MigrationStatus, error) {
+// checkMigrationStatus reads the meta row that flags a completed JSON import.
+func checkMigrationStatus(ctx context.Context, store *Store) (MigrationStatus, error) {
 	var status MigrationStatus
 	if store == nil || store.db == nil {
 		return status, errors.New("usage: nil store")
@@ -49,18 +49,18 @@ func CheckMigrationStatus(ctx context.Context, store *Store) (MigrationStatus, e
 	return status, nil
 }
 
-// MigrateLegacyToSQLite imports every JSON file the v1/v2 era left behind in
-// baseDir into the store. Old JSON files are left in place — events.db is the
-// authoritative data source after migration, and meta.migrated_from_json
-// guarantees subsequent restarts skip the rescan.
+// migrateLegacyToSQLite imports every JSON file the v1/v2 era left behind in
+// baseDir into the store. Old JSON files remain in place; events.db becomes the
+// authoritative data source after migration. A persisted migration marker makes
+// subsequent restarts skip the rescan.
 //
-// Idempotent: a successful run records meta.migrated_from_json, and subsequent
-// invocations short-circuit immediately without scanning disk.
+// A successful run records the marker, and subsequent invocations return
+// immediately without scanning disk.
 //
 // On parse failure the migration aborts with the failing file's path attached,
 // the meta row is NOT written, and the caller can decide whether to retry or
 // surface the failure.
-func MigrateLegacyToSQLite(ctx context.Context, store *Store, priceFn PriceFunc, baseDir string) error {
+func migrateLegacyToSQLite(ctx context.Context, store *Store, priceFn PriceFunc, baseDir string) error {
 	if store == nil || store.db == nil {
 		return errors.New("usage: nil store")
 	}
@@ -68,7 +68,7 @@ func MigrateLegacyToSQLite(ctx context.Context, store *Store, priceFn PriceFunc,
 		return errors.New("usage: empty base dir")
 	}
 
-	status, err := CheckMigrationStatus(ctx, store)
+	status, err := checkMigrationStatus(ctx, store)
 	if err != nil {
 		return fmt.Errorf("check migration status: %w", err)
 	}
@@ -92,7 +92,7 @@ func MigrateLegacyToSQLite(ctx context.Context, store *Store, priceFn PriceFunc,
 
 	var totalAdded, totalSkipped int64
 	for _, p := range paths {
-		result, err := ImportFile(ctx, store, priceFn, p)
+		result, err := importFile(ctx, store, priceFn, p)
 		if err != nil {
 			return fmt.Errorf("import %s: %w", p, err)
 		}

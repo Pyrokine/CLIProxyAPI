@@ -22,27 +22,6 @@ import (
 
 var statisticsEnabled atomic.Bool
 
-// globalPersister is retained for callers using the process-wide default usage
-// manager. Service instances bind their own persister directly to loggerPlugin.
-var (
-	globalPersisterMu sync.RWMutex
-	globalPersister   *Persister
-)
-
-// SetGlobalPersister configures the compatibility logger on the default manager.
-func SetGlobalPersister(p *Persister) {
-	globalPersisterMu.Lock()
-	defer globalPersisterMu.Unlock()
-	globalPersister = p
-}
-
-// getGlobalPersister returns the active Persister, if any.
-func getGlobalPersister() *Persister {
-	globalPersisterMu.RLock()
-	defer globalPersisterMu.RUnlock()
-	return globalPersister
-}
-
 func init() {
 	statisticsEnabled.Store(true)
 	coreusage.RegisterPlugin(newLoggerPlugin())
@@ -54,12 +33,11 @@ type loggerPlugin struct {
 	stats     *RequestStatistics
 	persister *Persister
 	enabled   func() bool
-	useGlobal bool
 }
 
 // newLoggerPlugin constructs the compatibility plugin used by the default manager.
 func newLoggerPlugin() *loggerPlugin {
-	return &loggerPlugin{stats: defaultRequestStatistics, useGlobal: true}
+	return &loggerPlugin{stats: defaultRequestStatistics}
 }
 
 // NewLoggerPlugin constructs a logger bound to one service's storage and enabled state.
@@ -113,6 +91,7 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if p == nil {
 		return
 	}
+	record.APIKey = coreusage.EnsureAPIKeyIdentity(record.APIKey)
 	if p.enabled != nil {
 		if !p.enabled() {
 			return
@@ -125,7 +104,8 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if timestamp.IsZero() {
 		timestamp = time.Now()
 	}
-	tokens := normaliseDetail(record.Detail)
+	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
+	tokens := normaliseDetail(usageDetail)
 	modelName := record.Model
 	if modelName == "" {
 		modelName = "unknown"
@@ -169,12 +149,7 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	}
 	executorType := strings.TrimSpace(record.ExecutorType)
 
-	// Prefer the service-owned persister. The compatibility plugin resolves the
-	// process-global pointer for callers that still use the default manager.
 	persister := p.persister
-	if p.useGlobal {
-		persister = getGlobalPersister()
-	}
 	if persister != nil {
 		detail := FlatDetail{
 			Timestamp:           timestamp,
@@ -182,12 +157,21 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 			Source:              source,
 			AuthIndex:           authIndex,
 			APIKey:              record.APIKey,
+			ReservationID:       record.ReservationID,
 			Provider:            record.Provider,
 			LatencyMs:           latencyMilliseconds(record.Latency),
 			RequestID:           strings.TrimSpace(record.RequestID),
 			TimeToFirstByteMs:   record.TimeToFirstByteMs,
 			TotalDurationMs:     record.TotalDurationMs,
 			Completed:           record.Completed,
+			Generate:            coreusage.GenerateEnabled(record.Generate),
+			ClientIP:            strings.TrimSpace(record.ClientIP),
+			XForwardedFor:       strings.TrimSpace(record.XForwardedFor),
+			UserAgent:           strings.TrimSpace(record.UserAgent),
+			AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
+			TokenBreakdown:      usageDetail.TokenBreakdown,
+			cacheWrite5mTokens:  usageDetail.CacheCreation5mInputTokens,
+			cacheWrite1hTokens:  usageDetail.CacheCreation1hInputTokens,
 			ReasoningEffort:     reasoningEffort,
 			ServiceTier:         requestServiceTier,
 			RequestServiceTier:  requestServiceTier,
@@ -197,16 +181,19 @@ func (p *loggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 			ResponseHeaders:     sanitizeResponseHeaders(record.ResponseHeaders),
 			Tokens:              tokens,
 			Failed:              failed,
+			generateRecorded:    true,
 		}
-		persister.Record(detail)
+		if !persister.Record(detail) {
+			log.Warn("usage: SQLite persister did not accept live usage record")
+		}
 		return
 	}
 
 	// Fallback: legacy RequestStatistics (used when no Persister is configured)
-	if p == nil || p.stats == nil {
+	if p.stats == nil {
 		return
 	}
-	p.stats.Record(ctx, record)
+	p.stats.record(ctx, record)
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
@@ -217,10 +204,13 @@ func SetStatisticsEnabled(enabled bool) { statisticsEnabled.Store(enabled) }
 type RequestStatistics struct {
 	mu sync.RWMutex
 
-	totalRequests int64
-	successCount  int64
-	failureCount  int64
-	totalTokens   int64
+	totalRequests  int64
+	successCount   int64
+	failureCount   int64
+	totalTokens    int64
+	detailsCount   int64
+	detailsBytes   int64
+	detailsDropped int64
 
 	apis map[string]*apiStats
 
@@ -246,32 +236,57 @@ type modelStats struct {
 
 // requestDetail stores the timestamp and token usage for a single request.
 type requestDetail struct {
-	Timestamp           time.Time   `json:"timestamp"`
-	Source              string      `json:"source"`
-	AuthIndex           string      `json:"auth_index"`
-	LatencyMs           int64       `json:"latency_ms,omitempty"`
-	RequestID           string      `json:"request_id,omitempty"`
-	TimeToFirstByteMs   int64       `json:"time_to_first_byte_ms,omitempty"`
-	TotalDurationMs     int64       `json:"total_duration_ms,omitempty"`
-	Completed           bool        `json:"completed"`
-	ReasoningEffort     string      `json:"reasoning_effort,omitempty"`
-	ServiceTier         string      `json:"service_tier,omitempty"`
-	RequestServiceTier  string      `json:"request_service_tier,omitempty"`
-	ResponseServiceTier string      `json:"response_service_tier,omitempty"`
-	ExecutorType        string      `json:"executor_type,omitempty"`
-	Thinking            *Thinking   `json:"thinking,omitempty"`
-	ResponseHeaders     http.Header `json:"response_headers,omitempty"`
-	Tokens              tokenStats  `json:"tokens"`
-	Failed              bool        `json:"failed"`
+	Timestamp           time.Time                `json:"timestamp"`
+	Source              string                   `json:"source"`
+	AuthIndex           string                   `json:"auth_index"`
+	LatencyMs           int64                    `json:"latency_ms,omitempty"`
+	RequestID           string                   `json:"request_id,omitempty"`
+	TimeToFirstByteMs   int64                    `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs     int64                    `json:"total_duration_ms,omitempty"`
+	Completed           bool                     `json:"completed"`
+	Generate            bool                     `json:"generate"`
+	ClientIP            string                   `json:"client_ip,omitempty"`
+	XForwardedFor       string                   `json:"x_forwarded_for,omitempty"`
+	UserAgent           string                   `json:"user_agent,omitempty"`
+	AccountingVersion   int                      `json:"accounting_version,omitempty"`
+	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown,omitempty"`
+	ReasoningEffort     string                   `json:"reasoning_effort,omitempty"`
+	ServiceTier         string                   `json:"service_tier,omitempty"`
+	RequestServiceTier  string                   `json:"request_service_tier,omitempty"`
+	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+	ExecutorType        string                   `json:"executor_type,omitempty"`
+	Thinking            *Thinking                `json:"thinking,omitempty"`
+	ResponseHeaders     http.Header              `json:"response_headers,omitempty"`
+	Tokens              tokenStats               `json:"tokens"`
+	Failed              bool                     `json:"failed"`
+	generateRecorded    bool
+}
+
+// UnmarshalJSON preserves generation for snapshots written before the field existed.
+func (d *requestDetail) UnmarshalJSON(data []byte) error {
+	type requestDetailAlias requestDetail
+	*d = requestDetail{}
+	decoded := struct {
+		Generate *bool `json:"generate"`
+		*requestDetailAlias
+	}{requestDetailAlias: (*requestDetailAlias)(d)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	d.Generate = decoded.Generate == nil || *decoded.Generate
+	d.generateRecorded = decoded.Generate != nil
+	return nil
 }
 
 // tokenStats captures the token usage breakdown for a request.
 type tokenStats struct {
-	InputTokens     int64 `json:"input_tokens"`
-	OutputTokens    int64 `json:"output_tokens"`
-	ReasoningTokens int64 `json:"reasoning_tokens"`
-	CachedTokens    int64 `json:"cached_tokens"`
-	TotalTokens     int64 `json:"total_tokens"`
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+	ReasoningTokens  int64 `json:"reasoning_tokens"`
+	CachedTokens     int64 `json:"cached_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+	TotalTokens      int64 `json:"total_tokens"`
 }
 
 // StatisticsSnapshot represents an immutable view of the aggregated metrics.
@@ -321,8 +336,8 @@ func NewRequestStatistics() *RequestStatistics {
 
 func newRequestStatistics() *RequestStatistics { return NewRequestStatistics() }
 
-// Record ingests a new usage record and updates the aggregates (legacy path).
-func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record) {
+// record ingests a new usage record and updates the aggregates (legacy path).
+func (s *RequestStatistics) record(ctx context.Context, record coreusage.Record) {
 	if s == nil {
 		return
 	}
@@ -334,7 +349,8 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		timestamp = time.Now()
 	}
 	timestamp = timestamp.UTC()
-	detail := normaliseDetail(record.Detail)
+	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
+	detail := normaliseDetail(usageDetail)
 	totalTokens := detail.TotalTokens
 	statsKey := record.APIKey
 	if statsKey == "" {
@@ -393,6 +409,12 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 			TimeToFirstByteMs:   record.TimeToFirstByteMs,
 			TotalDurationMs:     record.TotalDurationMs,
 			Completed:           record.Completed,
+			Generate:            coreusage.GenerateEnabled(record.Generate),
+			ClientIP:            strings.TrimSpace(record.ClientIP),
+			XForwardedFor:       strings.TrimSpace(record.XForwardedFor),
+			UserAgent:           strings.TrimSpace(record.UserAgent),
+			AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
+			TokenBreakdown:      usageDetail.TokenBreakdown,
 			ReasoningEffort:     reasoningEffort,
 			ServiceTier:         requestServiceTier,
 			RequestServiceTier:  requestServiceTier,
@@ -402,6 +424,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 			ResponseHeaders:     sanitizeResponseHeaders(record.ResponseHeaders),
 			Tokens:              detail,
 			Failed:              failed,
+			generateRecorded:    true,
 		},
 	)
 
@@ -418,7 +441,15 @@ func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail
 		stats.Models[model] = modelStatsValue
 	}
 	modelStatsValue.TotalRequests++
-	modelStatsValue.Details = append(modelStatsValue.Details, detail)
+	detailBytes := estimateRequestDetailBytes(detail)
+	if s.detailsCount < MaxLegacySnapshotEvents &&
+		detailBytes <= MaxLegacySnapshotDetailBytes-s.detailsBytes {
+		modelStatsValue.Details = append(modelStatsValue.Details, detail)
+		s.detailsCount++
+		s.detailsBytes += detailBytes
+	} else {
+		s.detailsDropped++
+	}
 	return modelStatsValue
 }
 
@@ -445,15 +476,15 @@ func (s *RequestStatistics) updateTokenAggregates(
 	s.tokensByHour[hourKey] = hourTotal
 }
 
-// Snapshot returns a copy of the aggregated metrics and request details.
-func (s *RequestStatistics) Snapshot() StatisticsSnapshot {
+// snapshot returns a copy of the aggregated metrics and request details.
+func (s *RequestStatistics) snapshot() StatisticsSnapshot {
 	snapshot, _ := s.snapshotContext(context.Background(), true)
 	return snapshot
 }
 
-// SnapshotLimited returns the full snapshot only when its request count and
+// snapshotLimited returns the full snapshot only when its request count and
 // estimated detail size fit the compatibility limits.
-func (s *RequestStatistics) SnapshotLimited(
+func (s *RequestStatistics) snapshotLimited(
 	maxEvents int64,
 	maxDetailBytes int64,
 ) (StatisticsSnapshot, error) {
@@ -556,6 +587,9 @@ func estimateRequestDetailBytes(detail requestDetail) int64 {
 			len(detail.Source)+
 				len(detail.AuthIndex)+
 				len(detail.RequestID)+
+				len(detail.ClientIP)+
+				len(detail.XForwardedFor)+
+				len(detail.UserAgent)+
 				len(detail.ReasoningEffort)+
 				len(detail.ServiceTier)+
 				len(detail.RequestServiceTier)+
@@ -580,9 +614,9 @@ func estimateRequestDetailBytes(detail requestDetail) int64 {
 	return estimatedBytes
 }
 
-// AggregateSnapshot returns the legacy aggregate shape without copying request
+// aggregateSnapshot returns the legacy aggregate shape without copying request
 // details. It is used by bounded management and TUI views.
-func (s *RequestStatistics) AggregateSnapshot() StatisticsSnapshot {
+func (s *RequestStatistics) aggregateSnapshot() StatisticsSnapshot {
 	snapshot, _ := s.AggregateSnapshotContext(context.Background())
 	return snapshot
 }
@@ -699,7 +733,7 @@ func (s *RequestStatistics) snapshotLockedContext(
 	return result, nil
 }
 
-type MergeResult struct {
+type mergeResult struct {
 	Added   int64 `json:"added"`
 	Skipped int64 `json:"skipped"`
 }
@@ -707,14 +741,14 @@ type MergeResult struct {
 // maxImportFieldLen limits apiName/modelName length in imports to prevent memory abuse.
 const maxImportFieldLen = 256
 
-// ImportHook is called for each successfully imported detail with the resolved fields.
-type ImportHook func(detail FlatDetail)
+// importHook is called for each successfully imported detail with the resolved fields.
+type importHook func(detail FlatDetail)
 
-// MergeSnapshot merges an exported statistics snapshot into the current store.
+// mergeSnapshot merges an exported statistics snapshot into the current store.
 // Existing data is preserved and duplicate request details are skipped.
 // An optional hook is called for each newly added detail (after dedup, before return).
-func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...ImportHook) MergeResult {
-	result := MergeResult{}
+func (s *RequestStatistics) mergeSnapshot(snapshot StatisticsSnapshot, hooks ...importHook) mergeResult {
+	result := mergeResult{}
 	if s == nil {
 		return result
 	}
@@ -765,6 +799,9 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 				if detail.Timestamp.IsZero() {
 					detail.Timestamp = time.Now()
 				}
+				if !detail.generateRecorded {
+					detail.Generate = true
+				}
 				key := dedupKey(apiName, modelName, detail)
 				if _, exists := seen[key]; exists {
 					result.Skipped++
@@ -790,6 +827,12 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 							TimeToFirstByteMs:   detail.TimeToFirstByteMs,
 							TotalDurationMs:     detail.TotalDurationMs,
 							Completed:           detail.Completed,
+							Generate:            detail.Generate,
+							ClientIP:            strings.TrimSpace(detail.ClientIP),
+							XForwardedFor:       strings.TrimSpace(detail.XForwardedFor),
+							UserAgent:           strings.TrimSpace(detail.UserAgent),
+							AccountingVersion:   detail.AccountingVersion,
+							TokenBreakdown:      detail.TokenBreakdown,
 							ReasoningEffort:     strings.TrimSpace(detail.ReasoningEffort),
 							ServiceTier:         requestServiceTier,
 							RequestServiceTier:  requestServiceTier,
@@ -799,6 +842,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot, hooks ...
 							ResponseHeaders:     cloneHTTPHeader(detail.ResponseHeaders),
 							Tokens:              detail.Tokens,
 							Failed:              detail.Failed,
+							generateRecorded:    true,
 						},
 					)
 				}
@@ -892,17 +936,28 @@ func resolveSuccess(ctx context.Context) bool {
 const httpStatusBadRequest = 400
 
 func normaliseDetail(detail coreusage.Detail) tokenStats {
-	if detail.CacheReadTokens < 0 || detail.CacheCreationTokens < 0 {
-		log.Warn("usage: rejected negative token detail")
+	breakdown := detail.TokenBreakdown
+	if !breakdown.Valid() {
+		log.Warn("usage: rejected invalid token breakdown")
+		return tokenStats{}
+	}
+	cachedTokens, ok := coreusage.AddNonNegativeInt64(
+		breakdown.Input.CacheReadTokens,
+		breakdown.Input.CacheWriteTokens,
+	)
+	if !ok {
+		log.Warn("usage: cached token total overflows int64")
 		return tokenStats{}
 	}
 	return normaliseTokenStats(
 		tokenStats{
-			InputTokens:     detail.InputTokens,
-			OutputTokens:    detail.OutputTokens,
-			ReasoningTokens: detail.ReasoningTokens,
-			CachedTokens:    detail.CachedTokens,
-			TotalTokens:     detail.TotalTokens,
+			InputTokens:      breakdown.Input.TotalTokens,
+			OutputTokens:     breakdown.Output.TotalTokens,
+			ReasoningTokens:  breakdown.Output.ReasoningTokens,
+			CachedTokens:     cachedTokens,
+			CacheReadTokens:  breakdown.Input.CacheReadTokens,
+			CacheWriteTokens: breakdown.Input.CacheWriteTokens,
+			TotalTokens:      breakdown.TotalTokens,
 		},
 	)
 }
@@ -934,23 +989,34 @@ func validatedTokenStats(tokens tokenStats) (tokenStats, error) {
 		{name: "output_tokens", value: tokens.OutputTokens},
 		{name: "reasoning_tokens", value: tokens.ReasoningTokens},
 		{name: "cached_tokens", value: tokens.CachedTokens},
+		{name: "cache_read_tokens", value: tokens.CacheReadTokens},
+		{name: "cache_write_tokens", value: tokens.CacheWriteTokens},
 		{name: "total_tokens", value: tokens.TotalTokens},
 	} {
 		if field.value < 0 {
 			return tokenStats{}, fmt.Errorf("usage: %s must be non-negative", field.name)
 		}
 	}
+	cacheTotal, okCache := coreusage.AddNonNegativeInt64(tokens.CacheReadTokens, tokens.CacheWriteTokens)
+	if !okCache {
+		return tokenStats{}, errors.New("usage: cached token detail total overflows int64")
+	}
+	if cacheTotal > 0 {
+		tokens.CachedTokens = cacheTotal
+	}
 	if tokens.TotalTokens != 0 {
 		return tokens, nil
 	}
-	total, ok := coreusage.AddNonNegativeInt64(
-		tokens.InputTokens,
-		tokens.OutputTokens,
-		tokens.ReasoningTokens,
-		tokens.CachedTokens,
-	)
+	total, ok := coreusage.AddNonNegativeInt64(tokens.InputTokens, tokens.OutputTokens)
 	if !ok {
 		return tokenStats{}, errors.New("usage: token detail total overflows int64")
+	}
+	if total == 0 {
+		cacheTotal, okCache := coreusage.AddNonNegativeInt64(tokens.CacheReadTokens, tokens.CacheWriteTokens)
+		if !okCache {
+			return tokenStats{}, errors.New("usage: cached token detail total overflows int64")
+		}
+		total = max(tokens.CachedTokens, cacheTotal, tokens.ReasoningTokens)
 	}
 	tokens.TotalTokens = total
 	return tokens, nil
@@ -973,16 +1039,26 @@ func formatHour(hour int) string {
 	return fmt.Sprintf("%02d", hour)
 }
 
-// ArchivedDetail pairs a trimmed requestDetail with its API and model names for archival.
-type ArchivedDetail struct {
+// archivedDetail pairs a trimmed requestDetail with its API and model names for archival.
+type archivedDetail struct {
 	APIName   string
 	ModelName string
 	Detail    requestDetail
 }
 
-// TrimDetails removes all details older than the cutoff time from memory.
+// DetailsTruncated reports whether the bounded in-memory fallback discarded request details.
+func (s *RequestStatistics) DetailsTruncated() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.detailsDropped > 0
+}
+
+// trimDetails removes all details older than the cutoff time from memory.
 // Aggregate counters are preserved. Trimmed records are returned for archival.
-func (s *RequestStatistics) TrimDetails(cutoff time.Time) []ArchivedDetail {
+func (s *RequestStatistics) trimDetails(cutoff time.Time) []archivedDetail {
 	if s == nil {
 		return nil
 	}
@@ -990,7 +1066,9 @@ func (s *RequestStatistics) TrimDetails(cutoff time.Time) []ArchivedDetail {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var archived []ArchivedDetail
+	var archived []archivedDetail
+	var removedCount int64
+	var removedBytes int64
 	for apiName, stats := range s.apis {
 		if stats == nil {
 			continue
@@ -1003,8 +1081,10 @@ func (s *RequestStatistics) TrimDetails(cutoff time.Time) []ArchivedDetail {
 			for _, d := range ms.Details {
 				d.ResponseHeaders = cloneHTTPHeader(d.ResponseHeaders)
 				if d.Timestamp.Before(cutoff) {
+					removedCount++
+					removedBytes += estimateRequestDetailBytes(d)
 					archived = append(
-						archived, ArchivedDetail{
+						archived, archivedDetail{
 							APIName:   apiName,
 							ModelName: modelName,
 							Detail:    d,
@@ -1016,6 +1096,14 @@ func (s *RequestStatistics) TrimDetails(cutoff time.Time) []ArchivedDetail {
 			}
 			ms.Details = kept
 		}
+	}
+	s.detailsCount -= removedCount
+	if s.detailsCount < 0 {
+		s.detailsCount = 0
+	}
+	s.detailsBytes -= removedBytes
+	if s.detailsBytes < 0 {
+		s.detailsBytes = 0
 	}
 	return archived
 }

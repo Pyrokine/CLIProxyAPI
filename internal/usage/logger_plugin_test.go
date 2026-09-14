@@ -24,11 +24,13 @@ func TestNormaliseTokenStatsRejectsNegativeAndOverflowingValues(t *testing.T) {
 		{name: "overflowing fallback total", tokens: tokenStats{InputTokens: math.MaxInt64, OutputTokens: 1}},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := normaliseTokenStats(test.tokens); got != (tokenStats{}) {
-				t.Fatalf("normaliseTokenStats(%+v) = %+v, want zero", test.tokens, got)
-			}
-		})
+		t.Run(
+			test.name, func(t *testing.T) {
+				if got := normaliseTokenStats(test.tokens); got != (tokenStats{}) {
+					t.Fatalf("normaliseTokenStats(%+v) = %+v, want zero", test.tokens, got)
+				}
+			},
+		)
 	}
 
 	explicit := tokenStats{InputTokens: math.MaxInt64, OutputTokens: 1, TotalTokens: 7}
@@ -39,15 +41,17 @@ func TestNormaliseTokenStatsRejectsNegativeAndOverflowingValues(t *testing.T) {
 
 func TestRequestStatisticsAggregateSnapshotOmitsDetails(t *testing.T) {
 	stats := newRequestStatistics()
-	stats.Record(context.Background(), coreusage.Record{
-		APIKey: "client-key",
-		Model:  "model",
-		Detail: coreusage.Detail{
-			TotalTokens: 3,
+	stats.record(
+		context.Background(), coreusage.Record{
+			APIKey: "client-key",
+			Model:  "model",
+			Detail: coreusage.Detail{
+				TotalTokens: 3,
+			},
 		},
-	})
+	)
 
-	if _, err := stats.SnapshotLimited(1, MaxLegacySnapshotDetailBytes); err != nil {
+	if _, err := stats.snapshotLimited(1, MaxLegacySnapshotDetailBytes); err != nil {
 		t.Fatalf("SnapshotLimited() exact limit error = %v", err)
 	}
 	stats.mu.Lock()
@@ -55,32 +59,34 @@ func TestRequestStatisticsAggregateSnapshotOmitsDetails(t *testing.T) {
 		"X-Test": {strings.Repeat("x", 8<<10)},
 	}
 	stats.mu.Unlock()
-	if _, err := stats.SnapshotLimited(1, 4<<10); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+	if _, err := stats.snapshotLimited(1, 4<<10); !errors.Is(err, ErrLegacySnapshotTooLarge) {
 		t.Fatalf("SnapshotLimited() detail size error = %v, want %v", err, ErrLegacySnapshotTooLarge)
 	}
 	emptyDimensions := newRequestStatistics()
 	emptyDimensions.apis[strings.Repeat("k", 4<<10)] = &apiStats{
 		Models: map[string]*modelStats{},
 	}
-	if _, err := emptyDimensions.SnapshotLimited(1, 2<<10); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+	if _, err := emptyDimensions.snapshotLimited(1, 2<<10); !errors.Is(err, ErrLegacySnapshotTooLarge) {
 		t.Fatalf("SnapshotLimited() dimension size error = %v, want %v", err, ErrLegacySnapshotTooLarge)
 	}
-	stats.Record(context.Background(), coreusage.Record{
-		APIKey: "client-key",
-		Model:  "model",
-		Detail: coreusage.Detail{
-			TotalTokens: 2,
+	stats.record(
+		context.Background(), coreusage.Record{
+			APIKey: "client-key",
+			Model:  "model",
+			Detail: coreusage.Detail{
+				TotalTokens: 2,
+			},
 		},
-	})
-	if _, err := stats.SnapshotLimited(1, MaxLegacySnapshotDetailBytes); !errors.Is(err, ErrLegacySnapshotTooLarge) {
+	)
+	if _, err := stats.snapshotLimited(1, MaxLegacySnapshotDetailBytes); !errors.Is(err, ErrLegacySnapshotTooLarge) {
 		t.Fatalf("SnapshotLimited() error = %v, want %v", err, ErrLegacySnapshotTooLarge)
 	}
 
-	aggregate := stats.AggregateSnapshot()
+	aggregate := stats.aggregateSnapshot()
 	if aggregate.TotalRequests != 2 || aggregate.TotalTokens != 5 || len(aggregate.APIs) != 0 {
 		t.Fatalf("aggregate snapshot = %+v, want global totals without API dimensions", aggregate)
 	}
-	if len(stats.Snapshot().APIs["client-key"].Models["model"].Details) != 2 {
+	if len(stats.snapshot().APIs["client-key"].Models["model"].Details) != 2 {
 		t.Fatal("full snapshot lost request details")
 	}
 	cancelledContext, cancel := context.WithCancel(context.Background())
@@ -97,6 +103,62 @@ func TestRequestStatisticsAggregateSnapshotOmitsDetails(t *testing.T) {
 	}
 }
 
+func TestRequestStatisticsBoundsStoredDetailBytes(t *testing.T) {
+	stats := newRequestStatistics()
+	stats.detailsBytes = MaxLegacySnapshotDetailBytes - 1
+	stats.record(
+		context.Background(), coreusage.Record{
+			APIKey: "client-key",
+			Model:  "model",
+			Detail: coreusage.Detail{TotalTokens: 3},
+		},
+	)
+
+	if !stats.DetailsTruncated() {
+		t.Fatal("DetailsTruncated() = false after detail byte budget was exhausted")
+	}
+	snapshot := stats.snapshot()
+	if snapshot.TotalRequests != 1 || snapshot.TotalTokens != 3 {
+		t.Fatalf("global totals = %d requests/%d tokens, want 1/3", snapshot.TotalRequests, snapshot.TotalTokens)
+	}
+	if details := snapshot.APIs["client-key"].Models["model"].Details; len(details) != 0 {
+		t.Fatalf("stored details = %d, want 0", len(details))
+	}
+	if stats.detailsCount != 0 || stats.detailsBytes != MaxLegacySnapshotDetailBytes-1 {
+		t.Fatalf("detail budget state = %d events/%d bytes", stats.detailsCount, stats.detailsBytes)
+	}
+}
+
+func TestRequestStatisticsTrimReleasesDetailBudget(t *testing.T) {
+	stats := newRequestStatistics()
+	base := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	for _, timestamp := range []time.Time{base, base.Add(time.Hour)} {
+		stats.record(
+			context.Background(), coreusage.Record{
+				APIKey:      "client-key",
+				Model:       "model",
+				RequestedAt: timestamp,
+				Detail:      coreusage.Detail{TotalTokens: 1},
+			},
+		)
+	}
+	beforeBytes := stats.detailsBytes
+	if beforeBytes <= 0 || stats.detailsCount != 2 {
+		t.Fatalf("initial detail budget = %d events/%d bytes, want 2/positive", stats.detailsCount, beforeBytes)
+	}
+
+	archived := stats.trimDetails(base.Add(30 * time.Minute))
+	if len(archived) != 1 {
+		t.Fatalf("archived details = %d, want 1", len(archived))
+	}
+	if stats.detailsCount != 1 || stats.detailsBytes <= 0 || stats.detailsBytes >= beforeBytes {
+		t.Fatalf(
+			"remaining detail budget = %d events/%d bytes, before %d", stats.detailsCount, stats.detailsBytes,
+			beforeBytes,
+		)
+	}
+}
+
 func TestLegacyAggregateBackendsUseUTC(t *testing.T) {
 	location := time.FixedZone("UTC+8", 8*60*60)
 	timestamp := time.Date(2026, 8, 3, 0, 30, 0, 0, location)
@@ -104,13 +166,15 @@ func TestLegacyAggregateBackendsUseUTC(t *testing.T) {
 	wantHour := "16"
 
 	stats := newRequestStatistics()
-	stats.Record(context.Background(), coreusage.Record{
-		APIKey:      "client-key",
-		Model:       "model",
-		RequestedAt: timestamp,
-	})
-	memorySnapshot := stats.AggregateSnapshot()
-	memoryDetail := stats.Snapshot().APIs["client-key"].Models["model"].Details[0]
+	stats.record(
+		context.Background(), coreusage.Record{
+			APIKey:      "client-key",
+			Model:       "model",
+			RequestedAt: timestamp,
+		},
+	)
+	memorySnapshot := stats.aggregateSnapshot()
+	memoryDetail := stats.snapshot().APIs["client-key"].Models["model"].Details[0]
 	if memorySnapshot.RequestsByDay[wantDay] != 1 ||
 		memorySnapshot.RequestsByHour[wantHour] != 1 ||
 		memoryDetail.Timestamp.Location() != time.UTC {
@@ -143,14 +207,16 @@ func TestLoggerPluginRedactsAPIKeySourceForLegacyStatistics(t *testing.T) {
 	raw := "abcd...wxyz"
 	stats := newRequestStatistics()
 	plugin := &loggerPlugin{stats: stats, enabled: func() bool { return true }}
-	plugin.HandleUsage(context.Background(), coreusage.Record{
-		APIKey:   "client-key",
-		Model:    "model",
-		Source:   raw,
-		AuthType: "api_key",
-	})
+	plugin.HandleUsage(
+		context.Background(), coreusage.Record{
+			APIKey:   "client-key",
+			Model:    "model",
+			Source:   raw,
+			AuthType: "api_key",
+		},
+	)
 
-	detail := stats.Snapshot().APIs["client-key"].Models["model"].Details[0]
+	detail := stats.snapshot().APIs[coreusage.HashAPIKeyIdentity("client-key")].Models["model"].Details[0]
 	display, kind, tagged := DecodeCredentialSource(detail.Source)
 	if got, want := display, util.HideAPIKey(raw); got != want || kind != coreusage.CredentialSourceKindAPIKey || !tagged {
 		t.Fatalf("legacy source = %q/%v/%v, want %q/true/true", got, kind, tagged, want)
@@ -162,15 +228,17 @@ func TestLoggerPluginPreservesRedactedAPIKeySource(t *testing.T) {
 	masked := util.HideAPIKey(raw)
 	stats := newRequestStatistics()
 	plugin := &loggerPlugin{stats: stats, enabled: func() bool { return true }}
-	plugin.HandleUsage(context.Background(), coreusage.Record{
-		APIKey:         "client-key",
-		Model:          "model",
-		Source:         masked,
-		SourceRedacted: true,
-		AuthType:       "apikey",
-	})
+	plugin.HandleUsage(
+		context.Background(), coreusage.Record{
+			APIKey:         "client-key",
+			Model:          "model",
+			Source:         masked,
+			SourceRedacted: true,
+			AuthType:       "apikey",
+		},
+	)
 
-	detail := stats.Snapshot().APIs["client-key"].Models["model"].Details[0]
+	detail := stats.snapshot().APIs[coreusage.HashAPIKeyIdentity("client-key")].Models["model"].Details[0]
 	display, kind, tagged := DecodeCredentialSource(detail.Source)
 	if display != masked || kind != coreusage.CredentialSourceKindAPIKey || !tagged {
 		t.Fatalf("redacted source = %q/%q/%v, want %q/api_key/true", display, kind, tagged, masked)
@@ -180,15 +248,17 @@ func TestLoggerPluginPreservesRedactedAPIKeySource(t *testing.T) {
 func TestLoggerPluginPreservesTypedIdentityWithAPIKeyAuth(t *testing.T) {
 	stats := newRequestStatistics()
 	plugin := &loggerPlugin{stats: stats, enabled: func() bool { return true }}
-	plugin.HandleUsage(context.Background(), coreusage.Record{
-		APIKey:     "client-key",
-		Model:      "model",
-		Source:     "project-123",
-		SourceKind: coreusage.CredentialSourceKindIdentity,
-		AuthType:   "api_key",
-	})
+	plugin.HandleUsage(
+		context.Background(), coreusage.Record{
+			APIKey:     "client-key",
+			Model:      "model",
+			Source:     "project-123",
+			SourceKind: coreusage.CredentialSourceKindIdentity,
+			AuthType:   "api_key",
+		},
+	)
 
-	detail := stats.Snapshot().APIs["client-key"].Models["model"].Details[0]
+	detail := stats.snapshot().APIs[coreusage.HashAPIKeyIdentity("client-key")].Models["model"].Details[0]
 	display, kind, tagged := DecodeCredentialSource(detail.Source)
 	if display != "project-123" || kind != coreusage.CredentialSourceKindIdentity || !tagged {
 		t.Fatalf("identity source = %q/%q/%v, want project-123/identity/true", display, kind, tagged)
@@ -206,13 +276,15 @@ func TestLoggerPluginRedactsAPIKeySourceForSQLite(t *testing.T) {
 
 	plugin := &loggerPlugin{persister: persister, enabled: func() bool { return true }}
 	requestedAt := time.Now().UTC().Add(-time.Minute)
-	plugin.HandleUsage(context.Background(), coreusage.Record{
-		APIKey:      "client-key",
-		Model:       "model",
-		Source:      raw,
-		AuthType:    "apikey",
-		RequestedAt: requestedAt,
-	})
+	plugin.HandleUsage(
+		context.Background(), coreusage.Record{
+			APIKey:      "client-key",
+			Model:       "model",
+			Source:      raw,
+			AuthType:    "apikey",
+			RequestedAt: requestedAt,
+		},
+	)
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -263,7 +335,7 @@ func TestRequestStatisticsAggregateOverflowKeepsRequestMetadata(t *testing.T) {
 	stats.tokensByDay[dayKey] = 5
 	stats.tokensByHour[hourKey] = 5
 
-	stats.Record(
+	stats.record(
 		context.Background(),
 		coreusage.Record{
 			APIKey:              "api-key",
@@ -275,7 +347,7 @@ func TestRequestStatisticsAggregateOverflowKeepsRequestMetadata(t *testing.T) {
 		},
 	)
 
-	snapshot := stats.Snapshot()
+	snapshot := stats.snapshot()
 	if snapshot.TotalRequests != 1 || snapshot.SuccessCount != 1 {
 		t.Fatalf("request counts = total %d success %d", snapshot.TotalRequests, snapshot.SuccessCount)
 	}
@@ -288,7 +360,10 @@ func TestRequestStatisticsAggregateOverflowKeepsRequestMetadata(t *testing.T) {
 		t.Fatalf("api/model tokens = %d/%d, want 5/5", apiSnapshot.TotalTokens, modelSnapshot.TotalTokens)
 	}
 	if snapshot.TokensByDay[dayKey] != 5 || snapshot.TokensByHour[formatHour(hourKey)] != 5 {
-		t.Fatalf("day/hour tokens = %d/%d, want 5/5", snapshot.TokensByDay[dayKey], snapshot.TokensByHour[formatHour(hourKey)])
+		t.Fatalf(
+			"day/hour tokens = %d/%d, want 5/5", snapshot.TokensByDay[dayKey],
+			snapshot.TokensByHour[formatHour(hourKey)],
+		)
 	}
 	if len(modelSnapshot.Details) != 1 {
 		t.Fatalf("details = %d, want 1", len(modelSnapshot.Details))
@@ -306,12 +381,14 @@ func TestMergeSnapshotNormalisesInvalidTokenDetail(t *testing.T) {
 			"api-key": {
 				Models: map[string]modelSnapshot{
 					"model": {
-						Details: []requestDetail{{
-							Timestamp:           timestamp,
-							RequestServiceTier:  "flex",
-							ResponseServiceTier: "priority",
-							Tokens:              tokenStats{TotalTokens: -1},
-						}},
+						Details: []requestDetail{
+							{
+								Timestamp:           timestamp,
+								RequestServiceTier:  "flex",
+								ResponseServiceTier: "priority",
+								Tokens:              tokenStats{TotalTokens: -1},
+							},
+						},
 					},
 				},
 			},
@@ -320,14 +397,14 @@ func TestMergeSnapshotNormalisesInvalidTokenDetail(t *testing.T) {
 
 	stats := newRequestStatistics()
 	var imported FlatDetail
-	result := stats.MergeSnapshot(snapshot, func(detail FlatDetail) { imported = detail })
+	result := stats.mergeSnapshot(snapshot, func(detail FlatDetail) { imported = detail })
 	if result.Added != 1 || result.Skipped != 0 {
 		t.Fatalf("merge result = %+v", result)
 	}
 	if imported.Tokens != (tokenStats{}) {
 		t.Fatalf("imported tokens = %+v, want zero", imported.Tokens)
 	}
-	got := stats.Snapshot()
+	got := stats.snapshot()
 	if got.TotalRequests != 1 || got.TotalTokens != 0 {
 		t.Fatalf("snapshot totals = requests %d tokens %d", got.TotalRequests, got.TotalTokens)
 	}

@@ -3,14 +3,16 @@ package executor
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -29,13 +31,16 @@ type usageReporter struct {
 	alias           string
 	authID          string
 	authIndex       string
+	accessTokenHash string
 	authType        string
 	apiKey          string
+	reservationID   string
 	source          string
 	sourceKind      usage.CredentialSourceKind
 	sourceRedacted  bool
 	reasoningEffort string
 	serviceTier     string
+	generate        bool
 	thinking        *usage.Thinking
 	requestedAt     time.Time
 	once            sync.Once
@@ -52,8 +57,12 @@ func newUsageReporter(
 	auth *cliproxyauth.Auth,
 ) *usageReporter {
 	provider, executorType := usageReporterProvider(providerOrExecutor)
-	apiKey := apiKeyFromContext(ctx)
-	source, sourceKind, sourceRedacted := resolveUsageSource(auth, apiKey)
+	rawAPIKey := apiKeyFromContext(ctx)
+	source, sourceKind, sourceRedacted := resolveUsageSource(auth, rawAPIKey)
+	apiKeyIdentity := usage.APIKeyIdentityFromContext(ctx)
+	if apiKeyIdentity == "" {
+		apiKeyIdentity = usage.HashAPIKeyIdentity(rawAPIKey)
+	}
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
 		alias = model
@@ -64,23 +73,26 @@ func newUsageReporter(
 		model:           model,
 		alias:           strings.TrimSpace(alias),
 		requestedAt:     time.Now(),
-		apiKey:          apiKey,
+		apiKey:          apiKeyIdentity,
+		reservationID:   usage.APIKeyReservationFromContext(ctx),
 		source:          source,
 		sourceKind:      sourceKind,
 		sourceRedacted:  sourceRedacted,
 		authType:        resolveUsageAuthType(auth),
 		reasoningEffort: usage.ReasoningEffortFromContext(ctx),
 		serviceTier:     usage.ServiceTierFromContext(ctx),
+		generate:        usage.GenerateFromContext(ctx),
 		thinking:        thinkingFromAlias(alias),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
+		reporter.accessTokenHash = cliproxyauth.AccessTokenSHA256(auth)
 	}
 	return reporter
 }
 
-func (r *usageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+func (r *usageReporter) setTranslatedReasoningEffort(payload []byte, format string) {
 	if r == nil {
 		return
 	}
@@ -90,11 +102,50 @@ func (r *usageReporter) SetTranslatedReasoningEffort(payload []byte, format stri
 	}
 }
 
-func extractServiceTierFromPayload(payload []byte) string {
-	if serviceTier, ok := explicitServiceTierFromPayload(payload); ok {
-		return serviceTier
+func (r *usageReporter) trackHTTPClient(client *http.Client) *http.Client {
+	if r == nil || client == nil {
+		return client
 	}
-	return usage.DefaultServiceTier
+	tracked := *client
+	transport := tracked.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	tracked.Transport = usageTimingRoundTripper{base: transport}
+	return &tracked
+}
+
+type usageTimingRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (t usageTimingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.Body == nil {
+		return resp, err
+	}
+	resp.Body = &usageTimingReadCloser{
+		ReadCloser: resp.Body,
+		mark:       func() { logging.MarkFirstResponseByte(req.Context()) },
+	}
+	return resp, nil
+}
+
+type usageTimingReadCloser struct {
+	io.ReadCloser
+	once sync.Once
+	mark func()
+}
+
+func (r *usageTimingReadCloser) Read(p []byte) (int, error) {
+	if r == nil || r.ReadCloser == nil {
+		return 0, io.ErrClosedPipe
+	}
+	n, err := r.ReadCloser.Read(p)
+	if n > 0 && r.mark != nil {
+		r.once.Do(r.mark)
+	}
+	return n, err
 }
 
 func explicitServiceTierFromPayload(payload []byte) (string, bool) {
@@ -203,7 +254,7 @@ func (r *usageReporter) publishAdditionalModel(ctx context.Context, model string
 	if model == "" {
 		return
 	}
-	detail = normalizeUsageDetailTotal(detail)
+	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	r.publishRecordImmediate(
 		ctx, usage.Record{
 			Provider:            r.provider,
@@ -216,11 +267,13 @@ func (r *usageReporter) publishAdditionalModel(ctx context.Context, model string
 			APIKey:              r.apiKey,
 			AuthID:              r.authID,
 			AuthIndex:           r.authIndex,
+			AccessTokenSHA256:   r.accessTokenHash,
 			AuthType:            r.authType,
 			ReasoningEffort:     r.reasoningEffort,
 			ServiceTier:         r.serviceTier,
 			RequestServiceTier:  r.serviceTier,
 			ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+			Generate:            new(r.generate),
 			RequestedAt:         r.requestedAt,
 			Latency:             r.latency(),
 			Thinking:            cloneUsageThinking(r.thinking),
@@ -256,7 +309,7 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	if r == nil {
 		return
 	}
-	detail = normalizeUsageDetailTotal(detail)
+	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	r.once.Do(
 		func() {
 			r.publishRecord(
@@ -271,11 +324,13 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 					APIKey:              r.apiKey,
 					AuthID:              r.authID,
 					AuthIndex:           r.authIndex,
+					AccessTokenSHA256:   r.accessTokenHash,
 					AuthType:            r.authType,
 					ReasoningEffort:     r.reasoningEffort,
 					ServiceTier:         r.serviceTier,
 					RequestServiceTier:  r.serviceTier,
 					ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+					Generate:            new(r.generate),
 					RequestedAt:         r.requestedAt,
 					Latency:             r.latency(),
 					Thinking:            cloneUsageThinking(r.thinking),
@@ -288,31 +343,8 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	)
 }
 
-func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
-	for _, value := range []int64{
-		detail.InputTokens,
-		detail.OutputTokens,
-		detail.ReasoningTokens,
-		detail.CachedTokens,
-		detail.CacheReadTokens,
-		detail.CacheCreationTokens,
-		detail.TotalTokens,
-	} {
-		if value < 0 {
-			log.Warn("usage: rejected negative token detail")
-			return usage.Detail{ResponseServiceTier: detail.ResponseServiceTier}
-		}
-	}
-	if detail.TotalTokens != 0 {
-		return detail
-	}
-	total, ok := usage.AddNonNegativeInt64(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens)
-	if !ok {
-		log.Warn("usage: rejected overflowing token detail")
-		return usage.Detail{ResponseServiceTier: detail.ResponseServiceTier}
-	}
-	detail.TotalTokens = total
-	return detail
+func normalizeUsageDetailTotal(detail usage.Detail, provider, executorType string) usage.Detail {
+	return usage.EnsureTokenBreakdownForProvider(detail, provider, executorType)
 }
 
 // ensurePublished guarantees that a usage record is emitted exactly once.
@@ -341,6 +373,7 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 					ReasoningEffort:    r.reasoningEffort,
 					ServiceTier:        r.serviceTier,
 					RequestServiceTier: r.serviceTier,
+					Generate:           new(r.generate),
 					RequestedAt:        r.requestedAt,
 					Latency:            r.latency(),
 					Thinking:           cloneUsageThinking(r.thinking),
@@ -357,14 +390,20 @@ func (r *usageReporter) publishRecord(ctx context.Context, record usage.Record) 
 	if !record.Failed && usage.DeferRecord(ctx, record) {
 		return
 	}
-	usage.PublishRecord(ctx, record)
+	_ = usage.PublishRecord(ctx, record)
 }
 
 func (r *usageReporter) publishRecordImmediate(ctx context.Context, record usage.Record) {
-	usage.PublishRecord(ctx, r.finalizeRecord(ctx, record))
+	_ = usage.PublishRecord(ctx, r.finalizeRecord(ctx, record))
 }
 
 func (r *usageReporter) finalizeRecord(ctx context.Context, record usage.Record) usage.Record {
+	if record.APIKey == "" {
+		record.APIKey = r.apiKey
+	}
+	if record.ReservationID == "" {
+		record.ReservationID = r.reservationID
+	}
 	if record.RequestID == "" {
 		record.RequestID = logging.GetRequestID(ctx)
 	}
@@ -381,6 +420,10 @@ func (r *usageReporter) finalizeRecord(ctx context.Context, record usage.Record)
 	}
 	record.Completed = !record.Failed
 	record.ResponseHeaders = logging.GetResponseHeaders(ctx)
+	metadata := logging.GetClientRequestMetadata(ctx)
+	record.ClientIP = metadata.ClientIP
+	record.XForwardedFor = metadata.XForwardedFor
+	record.UserAgent = metadata.UserAgent
 	return record
 }
 
@@ -400,14 +443,10 @@ func failFromErrors(errs ...error) usage.Failure {
 		if err == nil {
 			continue
 		}
-		fail := usage.Failure{
-			Body: strings.TrimSpace(err.Error()),
+		return usage.Failure{
+			StatusCode: clienterror.HTTPStatusFromError(err),
+			Body:       strings.TrimSpace(err.Error()),
 		}
-		var se interface{ StatusCode() int }
-		if errors.As(err, &se) && se != nil {
-			fail.StatusCode = se.StatusCode()
-		}
-		return fail
 	}
 	return usage.Failure{}
 }
@@ -679,32 +718,76 @@ func parseClaudeUsage(data []byte) usage.Detail {
 func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	cacheReadTokens := firstExistingUsageNode(usageNode, "cache_read_input_tokens").Int()
 	cacheCreationTokens := firstExistingUsageNode(usageNode, "cache_creation_input_tokens").Int()
+	cacheCreation5mTokens := firstExistingUsageNode(
+		usageNode,
+		"cache_creation.ephemeral_5m_input_tokens",
+	).Int()
+	cacheCreation1hTokens := firstExistingUsageNode(
+		usageNode,
+		"cache_creation.ephemeral_1h_input_tokens",
+	).Int()
+	knownCacheCreationTokens, knownCacheCreationOK := usage.AddNonNegativeInt64(
+		cacheCreation5mTokens,
+		cacheCreation1hTokens,
+	)
+	if !knownCacheCreationOK {
+		log.Warn("usage: rejected overflowing Claude cache creation detail")
+		return usage.Detail{}
+	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = knownCacheCreationTokens
+	}
+	rawOutputTokens := firstExistingUsageNode(usageNode, "output_tokens").Int()
+	reasoningTokens := firstExistingUsageNode(
+		usageNode,
+		"output_tokens_details.thinking_tokens",
+		"output_tokens_details.reasoning_tokens",
+		"thinking_tokens",
+	).Int()
+	nonReasoningOutput := rawOutputTokens
+	if reasoningTokens <= rawOutputTokens {
+		nonReasoningOutput -= reasoningTokens
+	} else {
+		nonReasoningOutput = 0
+	}
 	detail := usage.Detail{
-		InputTokens:         firstExistingUsageNode(usageNode, "input_tokens").Int(),
-		OutputTokens:        firstExistingUsageNode(usageNode, "output_tokens").Int(),
-		CachedTokens:        cacheReadTokens,
-		CacheReadTokens:     cacheReadTokens,
-		CacheCreationTokens: cacheCreationTokens,
-		ResponseServiceTier: usageServiceTier(usageNode),
+		InputTokens:                firstExistingUsageNode(usageNode, "input_tokens").Int(),
+		OutputTokens:               nonReasoningOutput,
+		ReasoningTokens:            reasoningTokens,
+		CachedTokens:               cacheReadTokens,
+		CacheReadTokens:            cacheReadTokens,
+		CacheCreationTokens:        cacheCreationTokens,
+		CacheCreation5mInputTokens: cacheCreation5mTokens,
+		CacheCreation1hInputTokens: cacheCreation1hTokens,
+		ResponseServiceTier:        usageServiceTier(usageNode),
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
 	}
 	total, ok := usage.AddNonNegativeInt64(
-		detail.InputTokens, detail.OutputTokens, detail.CacheReadTokens, detail.CacheCreationTokens,
+		detail.InputTokens, rawOutputTokens, detail.CacheReadTokens, detail.CacheCreationTokens,
 	)
 	if !ok {
 		log.Warn("usage: rejected overflowing Claude token detail")
 		return usage.Detail{}
 	}
 	detail.TotalTokens = total
+	detail.TokenBreakdown = usage.NewIndependentTokenBreakdown(
+		detail.InputTokens,
+		detail.CacheReadTokens,
+		detail.CacheCreationTokens,
+		detail.OutputTokens,
+		detail.ReasoningTokens,
+		detail.TotalTokens,
+	)
 	return detail
 }
 
 type claudeStreamUsageBuffer struct {
-	detail   usage.Detail
-	hasUsage bool
-	hasTier  bool
+	detail          usage.Detail
+	rawOutputTokens int64
+	hasUsage        bool
+	hasTier         bool
 }
 
 func (b *claudeStreamUsageBuffer) observe(line []byte) {
@@ -722,19 +805,29 @@ func (b *claudeStreamUsageBuffer) observe(line []byte) {
 	}
 	if claudeUsageTokenFieldsExist(usageNode) {
 		candidate := b.detail
-		mergeClaudeUsageNode(&candidate, usageNode)
+		rawOutputTokens := b.rawOutputTokens
+		mergeClaudeUsageNode(&candidate, &rawOutputTokens, usageNode)
 		total, ok := usage.AddNonNegativeInt64(
 			candidate.InputTokens,
-			candidate.OutputTokens,
+			rawOutputTokens,
 			candidate.CacheReadTokens,
 			candidate.CacheCreationTokens,
 		)
 		if ok {
 			candidate.TotalTokens = total
+			b.rawOutputTokens = rawOutputTokens
 			candidate.CachedTokens = candidate.CacheReadTokens
 			if candidate.CachedTokens == 0 {
 				candidate.CachedTokens = candidate.CacheCreationTokens
 			}
+			candidate.TokenBreakdown = usage.NewIndependentTokenBreakdown(
+				candidate.InputTokens,
+				candidate.CacheReadTokens,
+				candidate.CacheCreationTokens,
+				candidate.OutputTokens,
+				candidate.ReasoningTokens,
+				candidate.TotalTokens,
+			)
 			b.detail = candidate
 			b.hasUsage = true
 		} else {
@@ -778,6 +871,11 @@ func claudeUsageTokenFieldsExist(node gjson.Result) bool {
 		"output_tokens",
 		"cache_read_input_tokens",
 		"cache_creation_input_tokens",
+		"cache_creation.ephemeral_5m_input_tokens",
+		"cache_creation.ephemeral_1h_input_tokens",
+		"output_tokens_details.thinking_tokens",
+		"output_tokens_details.reasoning_tokens",
+		"thinking_tokens",
 	} {
 		if validUsageTokenNode(node.Get(path)) {
 			return true
@@ -786,21 +884,56 @@ func claudeUsageTokenFieldsExist(node gjson.Result) bool {
 	return false
 }
 
-func mergeClaudeUsageNode(detail *usage.Detail, node gjson.Result) {
-	if detail == nil {
+func mergeClaudeUsageNode(detail *usage.Detail, rawOutputTokens *int64, node gjson.Result) {
+	if detail == nil || rawOutputTokens == nil {
 		return
 	}
 	if value := node.Get("input_tokens"); validUsageTokenNode(value) {
 		detail.InputTokens = value.Int()
 	}
 	if value := node.Get("output_tokens"); validUsageTokenNode(value) {
-		detail.OutputTokens = value.Int()
+		*rawOutputTokens = value.Int()
+	}
+	if value := firstExistingUsageNode(
+		node,
+		"output_tokens_details.thinking_tokens",
+		"output_tokens_details.reasoning_tokens",
+		"thinking_tokens",
+	); value.Exists() {
+		detail.ReasoningTokens = value.Int()
+	}
+	detail.OutputTokens = *rawOutputTokens
+	if detail.ReasoningTokens <= *rawOutputTokens {
+		detail.OutputTokens -= detail.ReasoningTokens
+	} else {
+		detail.OutputTokens = 0
 	}
 	if value := node.Get("cache_read_input_tokens"); validUsageTokenNode(value) {
 		detail.CacheReadTokens = value.Int()
 	}
-	if value := node.Get("cache_creation_input_tokens"); validUsageTokenNode(value) {
-		detail.CacheCreationTokens = value.Int()
+	cacheCreation := node.Get("cache_creation_input_tokens")
+	if validUsageTokenNode(cacheCreation) {
+		detail.CacheCreationTokens = cacheCreation.Int()
+	}
+	cacheCreation5m := node.Get("cache_creation.ephemeral_5m_input_tokens")
+	if validUsageTokenNode(cacheCreation5m) {
+		detail.CacheCreation5mInputTokens = cacheCreation5m.Int()
+	}
+	cacheCreation1h := node.Get("cache_creation.ephemeral_1h_input_tokens")
+	if validUsageTokenNode(cacheCreation1h) {
+		detail.CacheCreation1hInputTokens = cacheCreation1h.Int()
+	}
+	if !validUsageTokenNode(cacheCreation) &&
+		(validUsageTokenNode(cacheCreation5m) || validUsageTokenNode(cacheCreation1h)) {
+		known, ok := usage.AddNonNegativeInt64(
+			detail.CacheCreation5mInputTokens,
+			detail.CacheCreation1hInputTokens,
+		)
+		if !ok {
+			log.Warn("usage: ignored overflowing Claude cache creation TTL detail")
+		} else {
+			detail.CacheCreationTokens = known
+		}
 	}
 }
 
@@ -833,7 +966,9 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 
 func parseGeminiCLIUsage(data []byte) usage.Detail {
 	root := gjson.ParseBytes(data)
-	node := firstValidUsageObject(root, geminiUsageTokenFieldsExist, "response.usageMetadata", "response.usage_metadata")
+	node := firstValidUsageObject(
+		root, geminiUsageTokenFieldsExist, "response.usageMetadata", "response.usage_metadata",
+	)
 	if !node.Exists() {
 		return usage.Detail{}
 	}
@@ -865,13 +1000,21 @@ func parseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 	cacheRead := firstExistingUsageNode(node, "cache_read_tokens", "cacheReadTokens")
 	detail := usage.Detail{
-		InputTokens:         firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
-		OutputTokens:        firstExistingUsageNode(node, "output_tokens", "completion_tokens", "total_output_tokens").Int(),
-		ReasoningTokens:     firstExistingUsageNode(node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens").Int(),
-		TotalTokens:         firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
-		CachedTokens:        firstExistingUsageNode(node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens").Int(),
-		CacheReadTokens:     cacheRead.Int(),
-		CacheCreationTokens: firstExistingUsageNode(node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens").Int(),
+		InputTokens: firstExistingUsageNode(node, "input_tokens", "prompt_tokens", "total_input_tokens").Int(),
+		OutputTokens: firstExistingUsageNode(
+			node, "output_tokens", "completion_tokens", "total_output_tokens",
+		).Int(),
+		ReasoningTokens: firstExistingUsageNode(
+			node, "reasoning_tokens", "thoughtsTokenCount", "total_thought_tokens",
+		).Int(),
+		TotalTokens: firstExistingUsageNode(node, "total_tokens", "totalTokenCount").Int(),
+		CachedTokens: firstExistingUsageNode(
+			node, "cached_tokens", "cachedContentTokenCount", "total_cached_tokens",
+		).Int(),
+		CacheReadTokens: cacheRead.Int(),
+		CacheCreationTokens: firstExistingUsageNode(
+			node, "cache_creation_tokens", "cacheCreationTokens", "cache_write_tokens", "cacheWriteTokens",
+		).Int(),
 	}
 	if !cacheRead.Exists() && detail.CachedTokens > 0 {
 		detail.CacheReadTokens = detail.CachedTokens
@@ -921,11 +1064,6 @@ func validUsageTokenNode(value gjson.Result) bool {
 	}
 	parsed, err := strconv.ParseInt(raw, 10, 64)
 	return err == nil && parsed >= 0
-}
-
-func hasUsageDetail(detail usage.Detail) bool {
-	return detail.InputTokens != 0 || detail.OutputTokens != 0 || detail.ReasoningTokens != 0 || detail.TotalTokens != 0 ||
-		detail.CachedTokens != 0 || detail.CacheReadTokens != 0 || detail.CacheCreationTokens != 0
 }
 
 func interactionsUsageNode(root gjson.Result) gjson.Result {
@@ -1063,7 +1201,9 @@ func parseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	root := gjson.ParseBytes(payload)
-	node := firstValidUsageObject(root, geminiUsageTokenFieldsExist, "response.usageMetadata", "response.usage_metadata")
+	node := firstValidUsageObject(
+		root, geminiUsageTokenFieldsExist, "response.usageMetadata", "response.usage_metadata",
+	)
 	if !node.Exists() {
 		return usage.Detail{}, false
 	}

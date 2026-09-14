@@ -2,6 +2,6 @@
 
 package usage
 
-func isNativeCrossDeviceError(error) bool {
+func isNativeCrossDeviceError(_ error) bool {
 	return false
 }

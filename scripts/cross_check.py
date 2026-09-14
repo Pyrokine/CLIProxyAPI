@@ -7,6 +7,7 @@ import datetime as dt
 import hashlib
 import json
 import sqlite3
+import struct
 import sys
 from pathlib import Path
 from typing import Optional
@@ -24,32 +25,46 @@ SUMMARY_FIELDS = (
 )
 
 
+def append_fingerprint_string(
+        payload: bytearray,
+        value: object
+) -> None:
+    encoded = str(value or "").encode()
+    payload.extend(struct.pack("<Q", len(encoded)))
+    payload.extend(encoded)
+
+
+def append_fingerprint_int64(
+        payload: bytearray,
+        value: object
+) -> None:
+    payload.extend(struct.pack("<q", int(value or 0)))
+
+
 def fingerprint(
         d: dict
 ) -> str:
-    ts = d["timestamp"]
-    if not ts.endswith("Z") and "+" not in ts:
-        ts = ts + "Z"
-    common = [
-        d.get("api_key", "") or "",
-        d.get("model", "") or "",
-        ts,
-        d.get("source", "") or "",
-        d.get("auth_index", "") or "",
-    ]
-    if d.get("provider"):
-        fields = common + [d["provider"]]
-    else:
-        fields = common
-    fields += [
-        "true" if d.get("failed") else "false",
-        str(int(d.get("input_tokens", 0) or 0)),
-        str(int(d.get("output_tokens", 0) or 0)),
-        str(int(d.get("reasoning_tokens", 0) or 0)),
-        str(int(d.get("cached_tokens", 0) or 0)),
-        str(int(d.get("total_tokens", 0) or 0)),
-    ]
-    return hashlib.sha1("|".join(fields).encode()).hexdigest()
+    payload = bytearray(b"usage-fingerprint-v2")
+    for field in (
+        "request_id",
+        "api_key",
+        "model",
+        "timestamp",
+        "source",
+        "auth_index",
+        "provider",
+    ):
+        append_fingerprint_string(payload, d.get(field, ""))
+    payload.append(1 if d.get("failed") else 0)
+    for field in (
+        "input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "cached_tokens",
+        "total_tokens",
+    ):
+        append_fingerprint_int64(payload, d.get(field, 0))
+    return hashlib.sha256(payload).digest()[:20].hex()
 
 
 def fail(
@@ -157,6 +172,10 @@ def check_fingerprint_roundtrip(
     rows = conn.execute(
         """
         SELECT events.fingerprint,
+               CASE WHEN json_valid(events.metadata)
+                    THEN COALESCE(json_extract(events.metadata, '$.request_id'), '')
+                    ELSE ''
+               END,
                (SELECT name FROM dim_api_key WHERE id = events.api_key_id),
                (SELECT name FROM dim_model WHERE id = events.model_id),
                events.ts_ns,
@@ -176,10 +195,11 @@ def check_fingerprint_roundtrip(
     sample = []
 
     for row in rows:
-        (fp_db, api_key, model, ts_ns, source, auth_index, provider, failed,
-         it, ot, rt, ct, tt) = row
+        (fp_db, request_id, api_key, model, ts_ns, source, auth_index, provider,
+         failed, it, ot, rt, ct, tt) = row
         ts_iso = ns_to_rfc3339_nano(ts_ns)
         d = {
+            "request_id": request_id or "",
             "api_key": api_key or "",
             "model": model or "",
             "timestamp": ts_iso,

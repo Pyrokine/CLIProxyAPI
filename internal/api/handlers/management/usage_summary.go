@@ -1,6 +1,7 @@
 package management
 
 import (
+	"errors"
 	"math"
 	"net/http"
 	"sort"
@@ -8,30 +9,43 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
 
 // summaryTokens holds a token breakdown.
 type summaryTokens struct {
-	Input     int64 `json:"input"`
-	Output    int64 `json:"output"`
-	Cached    int64 `json:"cached"`
-	Reasoning int64 `json:"reasoning"`
-	Total     int64 `json:"total"`
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	Cached     int64 `json:"cached"`
+	CacheRead  int64 `json:"cache_read"`
+	CacheWrite int64 `json:"cache_write"`
+	Reasoning  int64 `json:"reasoning"`
+	Total      int64 `json:"total"`
+}
+
+type summaryCostCoverageCount struct {
+	Requests int64 `json:"requests"`
+	Tokens   int64 `json:"tokens"`
+}
+
+type summaryCostCoverage struct {
+	Complete summaryCostCoverageCount `json:"complete"`
+	Partial  summaryCostCoverageCount `json:"partial"`
+	Unpriced summaryCostCoverageCount `json:"unpriced"`
 }
 
 // summaryTotals holds the global aggregation.
 type summaryTotals struct {
-	Requests           int64         `json:"requests"`
-	Success            int64         `json:"success"`
-	Failure            int64         `json:"failure"`
-	Tokens             summaryTokens `json:"tokens"`
-	Cost               float64       `json:"cost"`
-	AverageLatencyMs   *float64      `json:"average_latency_ms,omitempty"`
-	TotalLatencyMs     *int64        `json:"total_latency_ms,omitempty"`
-	LatencySampleCount int64         `json:"latency_sample_count,omitempty"`
+	Requests           int64               `json:"requests"`
+	Success            int64               `json:"success"`
+	Failure            int64               `json:"failure"`
+	Tokens             summaryTokens       `json:"tokens"`
+	Cost               float64             `json:"cost"`
+	CostCoverage       summaryCostCoverage `json:"cost_coverage"`
+	AverageLatencyMs   *float64            `json:"average_latency_ms,omitempty"`
+	TotalLatencyMs     *int64              `json:"total_latency_ms,omitempty"`
+	LatencySampleCount int64               `json:"latency_sample_count,omitempty"`
 }
 
 // summaryModelStats holds per-model aggregation.
@@ -125,10 +139,12 @@ type summaryResponse struct {
 	ByCredential           map[string]*summaryCredentialStats `json:"by_credential"`
 	ByProvider             map[string]*summaryProviderStats   `json:"by_provider"`
 	ByAPIKey               map[string]*summaryAPIKeyStats     `json:"by_api_key"`
+	ByAuthIndex            map[string]*summaryAPIKeyStats     `json:"by_auth_index,omitempty"`
 	TimeSeries             []summaryTimePoint                 `json:"time_series"`
 	TimeSeriesByModel      map[string][]summaryTimePoint      `json:"time_series_by_model"`
 	TimeSeriesByCredential map[string][]summaryTimePoint      `json:"time_series_by_credential"`
 	TimeSeriesByAPIKey     map[string][]summaryTimePoint      `json:"time_series_by_api_key"`
+	TimeSeriesByAuthIndex  map[string][]summaryTimePoint      `json:"time_series_by_auth_index,omitempty"`
 }
 
 type summaryPeriod struct {
@@ -153,9 +169,16 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 		from, to = to, from
 	}
 
-	granularity := c.DefaultQuery("granularity", "hourly")
+	granularity := strings.ToLower(strings.TrimSpace(c.DefaultQuery("granularity", "hourly")))
 	if granularity != "hourly" && granularity != "daily" {
-		granularity = "hourly"
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid granularity parameter"})
+		return
+	}
+	authIndexGranularity := strings.ToLower(strings.TrimSpace(c.Query("auth_index_granularity")))
+	if authIndexGranularity != "" && authIndexGranularity != "10m" &&
+		authIndexGranularity != "hourly" && authIndexGranularity != "daily" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid auth_index_granularity parameter"})
+		return
 	}
 
 	modelFilter := c.Query("model")
@@ -163,21 +186,47 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 	apiKeyFilters := c.QueryArray("api_key")
 	credentialFilter := c.Query("credential")
 	includeGroups := c.DefaultQuery("groups", "all") != "none"
+	includeAuthIndex := strings.EqualFold(strings.TrimSpace(c.Query("auth_index_groups")), "true")
 
 	if h.usagePersister == nil {
 		c.JSON(http.StatusOK, emptySummaryResponse(from, to))
 		return
 	}
 
-	qr, err := h.usagePersister.Query(
-		from, to, usage.EventFilters{
-			Model:   modelFilter,
-			Source:  credentialFilter,
-			APIKey:  apiKeyFilter,
-			APIKeys: apiKeyFilters,
-		}, granularity, includeGroups,
-	)
+	apiKeyPresenter := newUsageAPIKeyPresenter(h.configSnapshot())
+	apiKeyFilter, apiKeyFilters = apiKeyPresenter.expandFilters(apiKeyFilter, apiKeyFilters)
+	filters := usage.EventFilters{
+		Model:   modelFilter,
+		Source:  credentialFilter,
+		APIKey:  apiKeyFilter,
+		APIKeys: apiKeyFilters,
+	}
+	var qr usage.QueryResult
+	var err error
+	if includeAuthIndex {
+		qr, err = h.usagePersister.QueryWithAuthIndexGranularity(
+			from,
+			to,
+			filters,
+			granularity,
+			authIndexGranularity,
+			includeGroups,
+		)
+	} else {
+		qr, err = h.usagePersister.Query(from, to, filters, granularity, includeGroups)
+	}
 	if err != nil {
+		switch {
+		case errors.Is(err, usage.ErrSummaryQueryTooLarge):
+			c.JSON(
+				http.StatusBadRequest,
+				gin.H{"error": "summary range or dimension count exceeds the supported resource limit"},
+			)
+			return
+		case errors.Is(err, usage.ErrTimestampOutOfRange):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "from/to parameter is outside the supported time range"})
+			return
+		}
 		log.Errorf("usage: GetUsageSummary query failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to query summary"})
 		return
@@ -187,8 +236,8 @@ func (h *Handler) GetUsageSummary(c *gin.Context) {
 		from,
 		to,
 		qr,
-		h.usagePersister.HasPricing(),
 		newUsageCredentialMasker(h.configSnapshot()),
+		apiKeyPresenter,
 	)
 
 	log.Debugf(
@@ -208,9 +257,11 @@ func emptySummaryResponse(from, to time.Time) summaryResponse {
 		ByCredential:           make(map[string]*summaryCredentialStats),
 		ByProvider:             make(map[string]*summaryProviderStats),
 		ByAPIKey:               make(map[string]*summaryAPIKeyStats),
+		ByAuthIndex:            make(map[string]*summaryAPIKeyStats),
 		TimeSeriesByModel:      make(map[string][]summaryTimePoint),
 		TimeSeriesByCredential: make(map[string][]summaryTimePoint),
 		TimeSeriesByAPIKey:     make(map[string][]summaryTimePoint),
+		TimeSeriesByAuthIndex:  make(map[string][]summaryTimePoint),
 	}
 }
 
@@ -218,8 +269,8 @@ func buildSummaryResponse(
 	from,
 	to time.Time,
 	qr usage.QueryResult,
-	hasPricing bool,
 	credentialMasker usageCredentialMasker,
+	apiKeyPresenter usageAPIKeyPresenter,
 ) summaryResponse {
 	totalAverageLatency, totalLatency, totalLatencySamples := latencyResponseFields(
 		qr.Totals.Latency.TotalMs,
@@ -235,13 +286,29 @@ func buildSummaryResponse(
 			Success:  qr.Totals.Success,
 			Failure:  qr.Totals.Failure,
 			Tokens: summaryTokens{
-				Input:     qr.Totals.Tokens.InputTokens,
-				Output:    qr.Totals.Tokens.OutputTokens,
-				Cached:    qr.Totals.Tokens.CachedTokens,
-				Reasoning: qr.Totals.Tokens.ReasoningTokens,
-				Total:     qr.Totals.Tokens.TotalTokens,
+				Input:      qr.Totals.Tokens.InputTokens,
+				Output:     qr.Totals.Tokens.OutputTokens,
+				Cached:     qr.Totals.Tokens.CachedTokens,
+				CacheRead:  qr.Totals.Tokens.CacheReadTokens,
+				CacheWrite: qr.Totals.Tokens.CacheWriteTokens,
+				Reasoning:  qr.Totals.Tokens.ReasoningTokens,
+				Total:      qr.Totals.Tokens.TotalTokens,
 			},
-			Cost:               roundCost(qr.Totals.Cost),
+			Cost: roundCost(qr.Totals.Cost),
+			CostCoverage: summaryCostCoverage{
+				Complete: summaryCostCoverageCount{
+					Requests: qr.Totals.CostCoverage.Complete.Requests,
+					Tokens:   qr.Totals.CostCoverage.Complete.Tokens,
+				},
+				Partial: summaryCostCoverageCount{
+					Requests: qr.Totals.CostCoverage.Partial.Requests,
+					Tokens:   qr.Totals.CostCoverage.Partial.Tokens,
+				},
+				Unpriced: summaryCostCoverageCount{
+					Requests: qr.Totals.CostCoverage.Unpriced.Requests,
+					Tokens:   qr.Totals.CostCoverage.Unpriced.Tokens,
+				},
+			},
 			AverageLatencyMs:   totalAverageLatency,
 			TotalLatencyMs:     totalLatency,
 			LatencySampleCount: totalLatencySamples,
@@ -250,9 +317,11 @@ func buildSummaryResponse(
 		ByCredential:           make(map[string]*summaryCredentialStats, len(qr.ByCredential)),
 		ByProvider:             make(map[string]*summaryProviderStats),
 		ByAPIKey:               make(map[string]*summaryAPIKeyStats, len(qr.ByAPIKey)),
+		ByAuthIndex:            make(map[string]*summaryAPIKeyStats, len(qr.ByAuthIndex)),
 		TimeSeriesByModel:      make(map[string][]summaryTimePoint, len(qr.TimeSeriesByModel)),
 		TimeSeriesByCredential: make(map[string][]summaryTimePoint, len(qr.TimeSeriesByCredential)),
 		TimeSeriesByAPIKey:     make(map[string][]summaryTimePoint, len(qr.TimeSeriesByAPIKey)),
+		TimeSeriesByAuthIndex:  make(map[string][]summaryTimePoint, len(qr.TimeSeriesByAuthIndex)),
 	}
 
 	for model, ms := range qr.ByModel {
@@ -265,11 +334,13 @@ func buildSummaryResponse(
 			Success:  ms.Success,
 			Failure:  ms.Failure,
 			Tokens: summaryTokens{
-				Input:     ms.Tokens.InputTokens,
-				Output:    ms.Tokens.OutputTokens,
-				Cached:    ms.Tokens.CachedTokens,
-				Reasoning: ms.Tokens.ReasoningTokens,
-				Total:     ms.Tokens.TotalTokens,
+				Input:      ms.Tokens.InputTokens,
+				Output:     ms.Tokens.OutputTokens,
+				Cached:     ms.Tokens.CachedTokens,
+				CacheRead:  ms.Tokens.CacheReadTokens,
+				CacheWrite: ms.Tokens.CacheWriteTokens,
+				Reasoning:  ms.Tokens.ReasoningTokens,
+				Total:      ms.Tokens.TotalTokens,
 			},
 			Cost:               roundCost(ms.Cost),
 			AverageLatencyMs:   averageLatency,
@@ -284,7 +355,7 @@ func buildSummaryResponse(
 		len(qr.ByCredential),
 	)
 	for cred, cs := range qr.ByCredential {
-		displaySource, kind := credentialMasker.Describe(cs.Source)
+		displaySource, kind := credentialMasker.describe(cs.Source)
 		displayKey := summaryCredentialMapKey(
 			cs.Provider,
 			usage.DisambiguateCredentialSource(displaySource, kind),
@@ -336,7 +407,7 @@ func buildSummaryResponse(
 
 	apiKeyAccumulators := make(map[string]*summaryAPIKeyAccumulator, len(qr.ByAPIKey))
 	for key, aks := range qr.ByAPIKey {
-		maskedKey := maskSummaryAPIKey(key)
+		maskedKey := apiKeyPresenter.present(key).display
 		accumulator := apiKeyAccumulators[maskedKey]
 		if accumulator == nil {
 			accumulator = &summaryAPIKeyAccumulator{}
@@ -348,6 +419,8 @@ func buildSummaryResponse(
 		accumulator.Tokens.Input += aks.Tokens.InputTokens
 		accumulator.Tokens.Output += aks.Tokens.OutputTokens
 		accumulator.Tokens.Cached += aks.Tokens.CachedTokens
+		accumulator.Tokens.CacheRead += aks.Tokens.CacheReadTokens
+		accumulator.Tokens.CacheWrite += aks.Tokens.CacheWriteTokens
 		accumulator.Tokens.Reasoning += aks.Tokens.ReasoningTokens
 		accumulator.Tokens.Total += aks.Tokens.TotalTokens
 		accumulator.Cost += aks.Cost
@@ -371,6 +444,31 @@ func buildSummaryResponse(
 		}
 	}
 
+	for authIndex, stats := range qr.ByAuthIndex {
+		averageLatency, totalLatency, latencySamples := latencyResponseFields(
+			stats.Latency.TotalMs,
+			stats.Latency.SampleCount,
+		)
+		resp.ByAuthIndex[authIndex] = &summaryAPIKeyStats{
+			Requests: stats.Requests,
+			Success:  stats.Success,
+			Failure:  stats.Failure,
+			Tokens: summaryTokens{
+				Input:      stats.Tokens.InputTokens,
+				Output:     stats.Tokens.OutputTokens,
+				Cached:     stats.Tokens.CachedTokens,
+				CacheRead:  stats.Tokens.CacheReadTokens,
+				CacheWrite: stats.Tokens.CacheWriteTokens,
+				Reasoning:  stats.Tokens.ReasoningTokens,
+				Total:      stats.Tokens.TotalTokens,
+			},
+			Cost:               roundCost(stats.Cost),
+			AverageLatencyMs:   averageLatency,
+			TotalLatencyMs:     totalLatency,
+			LatencySampleCount: latencySamples,
+		}
+	}
+
 	resp.TimeSeries = make([]summaryTimePoint, len(qr.TimeSeries))
 	for i, tp := range qr.TimeSeries {
 		resp.TimeSeries[i] = summaryTimePoint{
@@ -379,14 +477,16 @@ func buildSummaryResponse(
 			Success:  tp.Success,
 			Failure:  tp.Failure,
 			Tokens: summaryTokens{
-				Input:     tp.Tokens.InputTokens,
-				Output:    tp.Tokens.OutputTokens,
-				Cached:    tp.Tokens.CachedTokens,
-				Reasoning: tp.Tokens.ReasoningTokens,
-				Total:     tp.Tokens.TotalTokens,
+				Input:      tp.Tokens.InputTokens,
+				Output:     tp.Tokens.OutputTokens,
+				Cached:     tp.Tokens.CachedTokens,
+				CacheRead:  tp.Tokens.CacheReadTokens,
+				CacheWrite: tp.Tokens.CacheWriteTokens,
+				Reasoning:  tp.Tokens.ReasoningTokens,
+				Total:      tp.Tokens.TotalTokens,
 			},
 			Cost:    roundCost(tp.Cost),
-			HasCost: tp.Cost > 0 || (hasPricing && tp.Requests > 0),
+			HasCost: tp.Cost > 0,
 		}
 	}
 
@@ -399,14 +499,16 @@ func buildSummaryResponse(
 				Success:  tp.Success,
 				Failure:  tp.Failure,
 				Tokens: summaryTokens{
-					Input:     tp.Tokens.InputTokens,
-					Output:    tp.Tokens.OutputTokens,
-					Cached:    tp.Tokens.CachedTokens,
-					Reasoning: tp.Tokens.ReasoningTokens,
-					Total:     tp.Tokens.TotalTokens,
+					Input:      tp.Tokens.InputTokens,
+					Output:     tp.Tokens.OutputTokens,
+					Cached:     tp.Tokens.CachedTokens,
+					CacheRead:  tp.Tokens.CacheReadTokens,
+					CacheWrite: tp.Tokens.CacheWriteTokens,
+					Reasoning:  tp.Tokens.ReasoningTokens,
+					Total:      tp.Tokens.TotalTokens,
 				},
 				Cost:    roundCost(tp.Cost),
-				HasCost: tp.Cost > 0 || (hasPricing && tp.Requests > 0),
+				HasCost: tp.Cost > 0,
 			}
 		}
 		resp.TimeSeriesByModel[model] = converted
@@ -438,6 +540,8 @@ func buildSummaryResponse(
 			accumulator.Tokens.Input += tp.Tokens.InputTokens
 			accumulator.Tokens.Output += tp.Tokens.OutputTokens
 			accumulator.Tokens.Cached += tp.Tokens.CachedTokens
+			accumulator.Tokens.CacheRead += tp.Tokens.CacheReadTokens
+			accumulator.Tokens.CacheWrite += tp.Tokens.CacheWriteTokens
 			accumulator.Tokens.Reasoning += tp.Tokens.ReasoningTokens
 			accumulator.Tokens.Total += tp.Tokens.TotalTokens
 			accumulator.Cost += tp.Cost
@@ -452,16 +556,17 @@ func buildSummaryResponse(
 		converted := make([]summaryTimePoint, 0, len(times))
 		for _, pointTime := range times {
 			accumulator := byTime[pointTime]
-			converted = append(converted, summaryTimePoint{
-				Time:     pointTime,
-				Requests: accumulator.Requests,
-				Success:  accumulator.Success,
-				Failure:  accumulator.Failure,
-				Tokens:   accumulator.Tokens,
-				Cost:     roundCost(accumulator.Cost),
-				HasCost: accumulator.Cost > 0 ||
-					(hasPricing && accumulator.Requests > 0),
-			})
+			converted = append(
+				converted, summaryTimePoint{
+					Time:     pointTime,
+					Requests: accumulator.Requests,
+					Success:  accumulator.Success,
+					Failure:  accumulator.Failure,
+					Tokens:   accumulator.Tokens,
+					Cost:     roundCost(accumulator.Cost),
+					HasCost:  accumulator.Cost > 0,
+				},
+			)
 		}
 		resp.TimeSeriesByCredential[key] = converted
 	}
@@ -471,7 +576,7 @@ func buildSummaryResponse(
 		len(qr.TimeSeriesByAPIKey),
 	)
 	for key, points := range qr.TimeSeriesByAPIKey {
-		maskedKey := maskSummaryAPIKey(key)
+		maskedKey := apiKeyPresenter.present(key).display
 		byTime := timeSeriesAccumulators[maskedKey]
 		if byTime == nil {
 			byTime = make(map[string]*summaryTimePointAccumulator, len(points))
@@ -489,6 +594,8 @@ func buildSummaryResponse(
 			accumulator.Tokens.Input += tp.Tokens.InputTokens
 			accumulator.Tokens.Output += tp.Tokens.OutputTokens
 			accumulator.Tokens.Cached += tp.Tokens.CachedTokens
+			accumulator.Tokens.CacheRead += tp.Tokens.CacheReadTokens
+			accumulator.Tokens.CacheWrite += tp.Tokens.CacheWriteTokens
 			accumulator.Tokens.Reasoning += tp.Tokens.ReasoningTokens
 			accumulator.Tokens.Total += tp.Tokens.TotalTokens
 			accumulator.Cost += tp.Cost
@@ -503,18 +610,43 @@ func buildSummaryResponse(
 		converted := make([]summaryTimePoint, 0, len(times))
 		for _, pointTime := range times {
 			accumulator := byTime[pointTime]
-			converted = append(converted, summaryTimePoint{
-				Time:     pointTime,
-				Requests: accumulator.Requests,
-				Success:  accumulator.Success,
-				Failure:  accumulator.Failure,
-				Tokens:   accumulator.Tokens,
-				Cost:     roundCost(accumulator.Cost),
-				HasCost: accumulator.Cost > 0 ||
-					(hasPricing && accumulator.Requests > 0),
-			})
+			converted = append(
+				converted, summaryTimePoint{
+					Time:     pointTime,
+					Requests: accumulator.Requests,
+					Success:  accumulator.Success,
+					Failure:  accumulator.Failure,
+					Tokens:   accumulator.Tokens,
+					Cost:     roundCost(accumulator.Cost),
+					HasCost:  accumulator.Cost > 0,
+				},
+			)
 		}
 		resp.TimeSeriesByAPIKey[key] = converted
+	}
+
+	for authIndex, points := range qr.TimeSeriesByAuthIndex {
+		converted := make([]summaryTimePoint, len(points))
+		for i, point := range points {
+			converted[i] = summaryTimePoint{
+				Time:     point.Time,
+				Requests: point.Requests,
+				Success:  point.Success,
+				Failure:  point.Failure,
+				Tokens: summaryTokens{
+					Input:      point.Tokens.InputTokens,
+					Output:     point.Tokens.OutputTokens,
+					Cached:     point.Tokens.CachedTokens,
+					CacheRead:  point.Tokens.CacheReadTokens,
+					CacheWrite: point.Tokens.CacheWriteTokens,
+					Reasoning:  point.Tokens.ReasoningTokens,
+					Total:      point.Tokens.TotalTokens,
+				},
+				Cost:    roundCost(point.Cost),
+				HasCost: point.Cost > 0,
+			}
+		}
+		resp.TimeSeriesByAuthIndex[authIndex] = converted
 	}
 
 	return resp
@@ -529,7 +661,7 @@ func summaryCredentialMapKey(provider, source string) string {
 
 func maskSummaryCredentialMapKey(key string, masker usageCredentialMasker) string {
 	provider, source := splitSummaryCredentialMapKey(key)
-	return summaryCredentialMapKey(provider, masker.Mask(source))
+	return summaryCredentialMapKey(provider, masker.mask(source))
 }
 
 func splitSummaryCredentialMapKey(key string) (string, string) {
@@ -538,14 +670,6 @@ func splitSummaryCredentialMapKey(key string) (string, string) {
 		return "", key
 	}
 	return key[:separator], key[separator+1:]
-}
-
-func maskSummaryAPIKey(key string) string {
-	trimmed := strings.TrimSpace(key)
-	if trimmed == "" || trimmed == "(none)" {
-		return key
-	}
-	return util.HideAPIKey(trimmed)
 }
 
 func latencyResponseFields(totalMs, sampleCount int64) (*float64, *int64, int64) {

@@ -6,7 +6,7 @@ func SetUsageStatisticsEnabled(enabled bool) {
 	defaultQueue.SetUsageStatisticsEnabled(enabled)
 }
 
-// UsageStatisticsEnabled reports the compatibility queue's usage setting.
-func UsageStatisticsEnabled() bool {
-	return defaultQueue.UsageStatisticsEnabled()
+// usageStatisticsEnabled reports the compatibility queue's usage setting.
+func usageStatisticsEnabled() bool {
+	return defaultQueue.usageStatisticsOn()
 }

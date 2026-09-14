@@ -34,6 +34,8 @@ var integerStorageTables = []integerStorageTable{
 			{name: "output_tokens"},
 			{name: "reasoning_tokens"},
 			{name: "cached_tokens"},
+			{name: "cache_read_tokens"},
+			{name: "cache_write_tokens"},
 			{name: "total_tokens"},
 			{name: "cost_micro"},
 		},
@@ -53,8 +55,16 @@ var integerStorageTables = []integerStorageTable{
 			{name: "output_tokens"},
 			{name: "reasoning_tokens"},
 			{name: "cached_tokens"},
+			{name: "cache_read_tokens"},
+			{name: "cache_write_tokens"},
 			{name: "total_tokens"},
 			{name: "cost_micro"},
+			{name: "complete_requests"},
+			{name: "partial_requests"},
+			{name: "unpriced_requests"},
+			{name: "complete_tokens"},
+			{name: "partial_tokens"},
+			{name: "unpriced_tokens"},
 			{name: "latency_ms_total"},
 			{name: "latency_samples"},
 		},
@@ -74,10 +84,52 @@ var integerStorageTables = []integerStorageTable{
 			{name: "output_tokens"},
 			{name: "reasoning_tokens"},
 			{name: "cached_tokens"},
+			{name: "cache_read_tokens"},
+			{name: "cache_write_tokens"},
 			{name: "total_tokens"},
 			{name: "cost_micro"},
+			{name: "complete_requests"},
+			{name: "partial_requests"},
+			{name: "unpriced_requests"},
+			{name: "complete_tokens"},
+			{name: "partial_tokens"},
+			{name: "unpriced_tokens"},
 			{name: "latency_ms_total"},
 			{name: "latency_samples"},
+		},
+	},
+	{
+		name: "api_key_reservation",
+		columns: []integerStorageColumn{
+			{name: "created_at_ns"},
+			{name: "expires_at_ns"},
+			{name: "updated_at_ns"},
+			{name: "terminal_at_ns", nullable: true},
+		},
+	},
+	{
+		name: "api_key_reservation_window",
+		columns: []integerStorageColumn{
+			{name: "window_ns"},
+			{name: "window_start_ns"},
+			{name: "window_end_ns"},
+			{name: "max_requests"},
+			{name: "max_tokens"},
+			{name: "max_cost_micro"},
+			{name: "reserved_requests"},
+			{name: "reserved_tokens"},
+			{name: "reserved_cost_micro"},
+			{name: "actual_requests"},
+			{name: "actual_tokens"},
+			{name: "actual_cost_micro"},
+		},
+	},
+	{
+		name: "api_key_reservation_event",
+		columns: []integerStorageColumn{
+			{name: "total_tokens"},
+			{name: "cost_micro"},
+			{name: "created_at_ns"},
 		},
 	},
 }
@@ -95,7 +147,20 @@ func migrateV3ToV4(ctx context.Context, db *sql.DB) error {
 	}()
 
 	for _, table := range integerStorageTables {
-		predicate := integerStoragePredicate(table, "")
+		existing := integerStorageTable{name: table.name}
+		for _, column := range table.columns {
+			exists, errColumn := columnExists(ctx, tx, table.name, column.name)
+			if errColumn != nil {
+				return errColumn
+			}
+			if exists {
+				existing.columns = append(existing.columns, column)
+			}
+		}
+		if len(existing.columns) == 0 {
+			continue
+		}
+		predicate := integerStoragePredicate(existing, "")
 		var count int64
 		if err := tx.QueryRowContext(
 			ctx,
@@ -216,7 +281,7 @@ LIMIT ?`,
 			return fmt.Errorf("close event fingerprint migration rows: %w", errClose)
 		}
 		for i := range batch {
-			fingerprint := ComputeFingerprint(batch[i].detail)
+			fingerprint := computeFingerprint(batch[i].detail)
 			if _, errUpdate := update.ExecContext(ctx, fingerprint[:], batch[i].id); errUpdate != nil {
 				return fmt.Errorf("update event %d fingerprint: %w", batch[i].id, errUpdate)
 			}

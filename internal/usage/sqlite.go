@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	_ "embed"
 	"encoding/binary"
 	"errors"
@@ -12,10 +13,13 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
-	_ "modernc.org/sqlite" // pure-Go SQLite driver — required by .goreleaser CGO_ENABLED=0
+	"modernc.org/sqlite" // pure-Go SQLite driver — required by .goreleaser CGO_ENABLED=0
 )
 
 //go:embed schema.sql
@@ -25,15 +29,33 @@ const (
 	// CurrentSchemaVersion mirrors the 'schema_version' row inserted by schema.sql.
 	// OpenStore refuses to run when the persisted value disagrees, forcing an
 	// explicit migration step rather than silent corruption.
-	CurrentSchemaVersion = "4"
+	CurrentSchemaVersion = "9"
 
 	// dbFileName is the SQLite database file inside the usage data dir.
 	dbFileName = "events.db"
 
-	// Large databases can require several minutes for forward migrations. Keep
-	// one deadline across setup and migration so startup still fails predictably.
-	storeOpenTimeout = 5 * time.Minute
+	eventFingerprintBytes = 20
+
+	// Production-size databases can require more than five minutes for forward
+	// migrations. Keep one bounded deadline across setup and migration.
+	storeOpenTimeout = 15 * time.Minute
+
+	maxSQLitePageCount      = int64(2147483646)
+	storeMaxOpenConnections = 8
 )
+
+type sqliteConnector struct {
+	driver *sqlite.Driver
+	dsn    string
+}
+
+func (c *sqliteConnector) Connect(context.Context) (driver.Conn, error) {
+	return c.driver.Open(c.dsn)
+}
+
+func (c *sqliteConnector) Driver() driver.Driver {
+	return c.driver
+}
 
 func inspectExistingSchemaVersion(dbPath string) (string, bool, error) {
 	if _, err := os.Stat(dbPath); err != nil {
@@ -84,7 +106,7 @@ func inspectExistingSchemaVersion(dbPath string) (string, bool, error) {
 
 func isSupportedSchemaVersion(version string) bool {
 	switch version {
-	case "1", "2", "3", CurrentSchemaVersion:
+	case "1", "2", "3", "4", "5", "6", "7", "8", CurrentSchemaVersion:
 		return true
 	default:
 		return false
@@ -100,7 +122,8 @@ func isSupportedSchemaVersion(version string) bool {
 // (the events INSERT). The cache never invalidates because dim ids never change
 // — rows are never deleted (FK ON DELETE RESTRICT) and ROWIDs are stable.
 type Store struct {
-	db *sql.DB
+	db           *sql.DB
+	maxPageCount atomic.Int64
 
 	modelCache      sync.Map // string → int64
 	apiKeyCache     sync.Map
@@ -110,13 +133,13 @@ type Store struct {
 	providerCache   sync.Map
 }
 
-// OpenStore opens (or creates) the SQLite database, applies PRAGMAs, runs the
+// openStore opens (or creates) the SQLite database, applies PRAGMAs, runs the
 // schema (idempotent thanks to IF NOT EXISTS), and validates schema_version.
 //
-// Connection limits: SQLite serialises writes regardless of pool size, so a
+// Connection limits: SQLite serializes writes regardless of pool size, so a
 // large pool just inflates context overhead. Eight connections gives readers
 // breathing room without wasting memory.
-func OpenStore(dbPath string) (*Store, error) {
+func openStore(dbPath string) (*Store, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("usage: empty SQLite db path")
 	}
@@ -142,13 +165,21 @@ func OpenStore(dbPath string) (*Store, error) {
 		"&_pragma=synchronous(NORMAL)" +
 		"&_pragma=busy_timeout(5000)" +
 		"&_pragma=cache_size(-64000)" +
-		"&_pragma=temp_store(MEMORY)"
+		"&_pragma=temp_store(FILE)"
 
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("usage: open sqlite %s: %w", dbPath, err)
-	}
-	db.SetMaxOpenConns(8)
+	store := &Store{}
+	store.maxPageCount.Store(maxSQLitePageCount)
+	sqliteDriver := &sqlite.Driver{}
+	sqliteDriver.RegisterConnectionHook(
+		func(conn sqlite.ExecQuerierContext, _ string) error {
+			query := fmt.Sprintf("PRAGMA max_page_count = %d", store.maxPageCount.Load())
+			_, errHook := conn.ExecContext(context.Background(), query, nil)
+			return errHook
+		},
+	)
+	db := sql.OpenDB(&sqliteConnector{driver: sqliteDriver, dsn: dsn})
+	store.db = db
+	db.SetMaxOpenConns(storeMaxOpenConnections)
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(0)
 
@@ -214,6 +245,41 @@ func OpenStore(dbPath string) (*Store, error) {
 		}
 		version = "4"
 	}
+	if version == "4" {
+		if err := migrateV4ToV5(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("usage: migrate v4→v5: %w", err)
+		}
+		version = "5"
+	}
+	if version == "5" {
+		if err := migrateV5ToV6(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("usage: migrate v5→v6: %w", err)
+		}
+		version = "6"
+	}
+	if version == "6" {
+		if err := migrateV6ToV7(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("usage: migrate v6→v7: %w", err)
+		}
+		version = "7"
+	}
+	if version == "7" {
+		if err := migrateV7ToV8(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("usage: migrate v7→v8: %w", err)
+		}
+		version = "8"
+	}
+	if version == "8" {
+		if err := migrateV8ToV9(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("usage: migrate v8→v9: %w", err)
+		}
+		version = "9"
+	}
 
 	schemaTx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -240,12 +306,26 @@ func OpenStore(dbPath string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("usage: unexpected schema_version=%s (want %s)", version, CurrentSchemaVersion)
 	}
+	if err := ensurePricingReceiptImmutabilityTrigger(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("usage: enforce immutable pricing receipts: %w", err)
+	}
 	if err := ensureIntegerStorageTriggers(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("usage: enforce integer storage: %w", err)
 	}
+	var maxRequestLogRevision sql.NullInt64
+	if err := db.QueryRowContext(ctx, "SELECT MAX(revision) FROM request_log_artifact").Scan(
+		&maxRequestLogRevision,
+	); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("usage: read maximum request log artifact revision: %w", err)
+	}
+	if maxRequestLogRevision.Valid {
+		internallogging.AdvanceRequestLogArtifactRevision(maxRequestLogRevision.Int64)
+	}
 
-	return &Store{db: db}, nil
+	return store, nil
 }
 
 // migrateV1ToV2 rewrites the old (v1) events / hour_bucket / day_bucket tables
@@ -272,14 +352,14 @@ func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, 
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var (
-			cid     int
-			name    string
-			colType string
-			notnull int
-			dflt    sql.NullString
-			pk      int
+			cid          int
+			name         string
+			colType      string
+			notnull      int
+			defaultValue sql.NullString
+			pk           int
 		)
-		if err := rows.Scan(&cid, &name, &colType, &notnull, &dflt, &pk); err != nil {
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &defaultValue, &pk); err != nil {
 			return false, fmt.Errorf("scan table_info(%s): %w", table, err)
 		}
 		if name == column {
@@ -483,7 +563,8 @@ func backfillLatencyBucket(
 	bucketSize int64,
 ) error {
 	bucketExpr := sqliteFloorBucketExpr("ts_ns", bucketSize)
-	statement := fmt.Sprintf(`
+	statement := fmt.Sprintf(
+		`
 		WITH event_latency AS (
 		    SELECT
 		        ts_ns, model_id, credential_id, api_key_id, provider_id,
@@ -516,9 +597,381 @@ func backfillLatencyBucket(
 		   AND bucket.credential_id IS latency.credential_id
 		   AND bucket.api_key_id IS latency.api_key_id
 		   AND bucket.provider_id IS latency.provider_id
-	`, bucketExpr, bucketExpr, table)
+	`, bucketExpr, bucketExpr, table,
+	)
 	if _, err := tx.ExecContext(ctx, statement); err != nil {
 		return fmt.Errorf("backfill %s latency: %w", table, err)
+	}
+	return nil
+}
+
+func migrateV5ToV6(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	columns := map[string][]struct {
+		name       string
+		definition string
+	}{
+		"events": {
+			{name: "cache_read_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0)"},
+			{name: "cache_write_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)"},
+			{
+				name:       "cost_status",
+				definition: "TEXT NOT NULL DEFAULT 'unpriced' CHECK(cost_status IN ('complete','partial','unpriced'))",
+			},
+			{name: "cost_reason", definition: "TEXT NOT NULL DEFAULT ''"},
+		},
+		"hour_bucket": {
+			{name: "cache_read_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0)"},
+			{name: "cache_write_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)"},
+		},
+		"day_bucket": {
+			{name: "cache_read_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_read_tokens >= 0)"},
+			{name: "cache_write_tokens", definition: "INTEGER NOT NULL DEFAULT 0 CHECK(cache_write_tokens >= 0)"},
+		},
+	}
+	for table, definitions := range columns {
+		for _, column := range definitions {
+			exists, errColumn := columnExists(ctx, tx, table, column.name)
+			if errColumn != nil {
+				return errColumn
+			}
+			if exists {
+				continue
+			}
+			statement := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column.name, column.definition)
+			if _, errColumn = tx.ExecContext(ctx, statement); errColumn != nil {
+				return fmt.Errorf("alter %s add %s: %w", table, column.name, errColumn)
+			}
+		}
+	}
+	if _, err = tx.ExecContext(
+		ctx,
+		"CREATE TABLE IF NOT EXISTS dirty_day (day_ts_ns INTEGER PRIMARY KEY) WITHOUT ROWID",
+	); err != nil {
+		return fmt.Errorf("create dirty_day: %w", err)
+	}
+
+	if _, err = tx.ExecContext(
+		ctx,
+		`UPDATE events
+		    SET cache_read_tokens = cached_tokens,
+		        cache_write_tokens = 0,
+		        cost_status = CASE WHEN cost_micro > 0 THEN 'partial' ELSE 'unpriced' END,
+		        cost_reason = CASE
+		            WHEN cost_micro > 0 THEN 'legacy pricing did not preserve component status'
+		            ELSE 'legacy event has no applied price'
+		        END`,
+	); err != nil {
+		return fmt.Errorf("backfill legacy cost state: %w", err)
+	}
+
+	if _, err = tx.ExecContext(
+		ctx,
+		`UPDATE events
+		    SET input_tokens = json_extract(metadata, '$.token_breakdown.input.total_tokens'),
+		        output_tokens = json_extract(metadata, '$.token_breakdown.output.total_tokens'),
+		        reasoning_tokens = json_extract(metadata, '$.token_breakdown.output.reasoning_tokens'),
+		        cache_read_tokens = json_extract(metadata, '$.token_breakdown.input.cache_read_tokens'),
+		        cache_write_tokens = json_extract(metadata, '$.token_breakdown.input.cache_write_tokens'),
+		        cached_tokens = json_extract(metadata, '$.token_breakdown.input.cache_read_tokens') +
+		            json_extract(metadata, '$.token_breakdown.input.cache_write_tokens'),
+		        total_tokens = json_extract(metadata, '$.token_breakdown.total_tokens')
+		  WHERE json_valid(metadata)
+		    AND json_extract(metadata, '$.accounting_version') = 2
+		    AND json_extract(metadata, '$.token_breakdown.schema_version') = 2
+		    AND json_extract(metadata, '$.token_breakdown.quality') = 'complete'
+		    AND json_type(metadata, '$.token_breakdown.input.total_tokens') = 'integer'
+		    AND json_type(metadata, '$.token_breakdown.input.uncached_tokens') = 'integer'
+		    AND json_type(metadata, '$.token_breakdown.input.cache_read_tokens') = 'integer'
+		    AND json_type(metadata, '$.token_breakdown.input.cache_write_tokens') = 'integer'
+		    AND json_type(metadata, '$.token_breakdown.output.total_tokens') = 'integer'
+		    AND json_type(metadata, '$.token_breakdown.output.non_reasoning_tokens') = 'integer'
+		    AND json_type(metadata, '$.token_breakdown.output.reasoning_tokens') = 'integer'
+		    AND json_type(metadata, '$.token_breakdown.unclassified_tokens') = 'integer'
+		    AND json_type(metadata, '$.token_breakdown.total_tokens') = 'integer'
+		    AND json_extract(metadata, '$.token_breakdown.input.total_tokens') >= 0
+		    AND json_extract(metadata, '$.token_breakdown.input.uncached_tokens') >= 0
+		    AND json_extract(metadata, '$.token_breakdown.input.cache_read_tokens') >= 0
+		    AND json_extract(metadata, '$.token_breakdown.input.cache_write_tokens') >= 0
+		    AND json_extract(metadata, '$.token_breakdown.output.total_tokens') >= 0
+		    AND json_extract(metadata, '$.token_breakdown.output.non_reasoning_tokens') >= 0
+		    AND json_extract(metadata, '$.token_breakdown.output.reasoning_tokens') >= 0
+		    AND json_extract(metadata, '$.token_breakdown.unclassified_tokens') = 0
+		    AND json_extract(metadata, '$.token_breakdown.total_tokens') >= 0
+		    AND json_extract(metadata, '$.token_breakdown.input.total_tokens') =
+		        json_extract(metadata, '$.token_breakdown.input.uncached_tokens') +
+		        json_extract(metadata, '$.token_breakdown.input.cache_read_tokens') +
+		        json_extract(metadata, '$.token_breakdown.input.cache_write_tokens')
+		    AND json_extract(metadata, '$.token_breakdown.output.total_tokens') =
+		        json_extract(metadata, '$.token_breakdown.output.non_reasoning_tokens') +
+		        json_extract(metadata, '$.token_breakdown.output.reasoning_tokens')
+		    AND json_extract(metadata, '$.token_breakdown.total_tokens') =
+		        json_extract(metadata, '$.token_breakdown.input.total_tokens') +
+		        json_extract(metadata, '$.token_breakdown.output.total_tokens')`,
+	); err != nil {
+		return fmt.Errorf("backfill canonical token buckets: %w", err)
+	}
+
+	// The immediately following v6→v7 migration rebuilds both bucket tables
+	// after adding cost-coverage columns.
+	if _, err = tx.ExecContext(
+		ctx,
+		"UPDATE meta SET value = '6' WHERE key = 'schema_version'",
+	); err != nil {
+		return fmt.Errorf("update schema_version: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration tx: %w", err)
+	}
+	committed = true
+	log.Infof("usage: migrated events.db schema v5 → v6 (canonical cache buckets and cost state)")
+	return nil
+}
+
+func migrateV6ToV7(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	columns := []string{
+		"complete_requests",
+		"partial_requests",
+		"unpriced_requests",
+		"complete_tokens",
+		"partial_tokens",
+		"unpriced_tokens",
+	}
+	for _, table := range []string{"hour_bucket", "day_bucket"} {
+		for _, column := range columns {
+			exists, errColumn := columnExists(ctx, tx, table, column)
+			if errColumn != nil {
+				return errColumn
+			}
+			if exists {
+				continue
+			}
+			statement := fmt.Sprintf(
+				"ALTER TABLE %s ADD COLUMN %s INTEGER NOT NULL DEFAULT 0 CHECK(%s >= 0)",
+				table,
+				column,
+				column,
+			)
+			if _, errColumn = tx.ExecContext(ctx, statement); errColumn != nil {
+				return fmt.Errorf("alter %s add %s: %w", table, column, errColumn)
+			}
+		}
+		for _, operation := range []string{"insert", "update"} {
+			if _, err = tx.ExecContext(
+				ctx,
+				"DROP TRIGGER IF EXISTS usage_"+table+"_integer_"+operation,
+			); err != nil {
+				return fmt.Errorf("drop %s integer %s trigger: %w", table, operation, err)
+			}
+		}
+	}
+	if err = rebuildUsageBucketsTx(ctx, tx); err != nil {
+		return fmt.Errorf("rebuild usage buckets for schema v7: %w", err)
+	}
+	if _, err = tx.ExecContext(
+		ctx,
+		"UPDATE meta SET value = '7' WHERE key = 'schema_version'",
+	); err != nil {
+		return fmt.Errorf("update schema_version: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration tx: %w", err)
+	}
+	committed = true
+	log.Infof("usage: migrated events.db schema v6 → v7 (cost coverage aggregates)")
+	return nil
+}
+
+type apiKeyIdentityMigration struct {
+	id        int64
+	temporary string
+	target    string
+}
+
+func migrateAPIKeyIdentitiesV8(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, "SELECT id, name FROM dim_api_key ORDER BY id")
+	if err != nil {
+		return fmt.Errorf("query API key identities: %w", err)
+	}
+	migrations := make([]apiKeyIdentityMigration, 0)
+	occupied := make(map[string]struct{})
+	targetOwner := make(map[string]int64)
+	for rows.Next() {
+		var id int64
+		var name string
+		if err = rows.Scan(&id, &name); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan API key identity: %w", err)
+		}
+		name = strings.TrimSpace(name)
+		occupied[name] = struct{}{}
+		target := coreusage.EnsureAPIKeyIdentity(name)
+		if owner, duplicate := targetOwner[target]; duplicate {
+			_ = rows.Close()
+			return fmt.Errorf("API key identities %d and %d resolve to the same persistent identity", owner, id)
+		}
+		targetOwner[target] = id
+		if target != name {
+			migrations = append(migrations, apiKeyIdentityMigration{id: id, target: target})
+		}
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate API key identities: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return fmt.Errorf("close API key identity rows: %w", err)
+	}
+	if len(migrations) == 0 {
+		return nil
+	}
+	for index := range migrations {
+		candidate := fmt.Sprintf("__cpa_v8_api_key_migration__:%d", migrations[index].id)
+		for {
+			if _, exists := occupied[candidate]; !exists {
+				break
+			}
+			candidate += ":"
+		}
+		migrations[index].temporary = candidate
+		occupied[candidate] = struct{}{}
+		if _, err = tx.ExecContext(
+			ctx,
+			"UPDATE dim_api_key SET name = ? WHERE id = ?",
+			candidate,
+			migrations[index].id,
+		); err != nil {
+			return fmt.Errorf("stage API key identity %d migration: %w", migrations[index].id, err)
+		}
+	}
+	for _, migration := range migrations {
+		if _, err = tx.ExecContext(
+			ctx,
+			"UPDATE dim_api_key SET name = ? WHERE id = ? AND name = ?",
+			migration.target,
+			migration.id,
+			migration.temporary,
+		); err != nil {
+			return fmt.Errorf("persist API key identity %d: %w", migration.id, err)
+		}
+	}
+	if err = migrateEventFingerprintsV2(ctx, tx); err != nil {
+		return fmt.Errorf("recompute API key event fingerprints: %w", err)
+	}
+	return nil
+}
+
+func migrateV7ToV8(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.ExecContext(ctx, schemaSQL); err != nil {
+		return fmt.Errorf("create API key reservation schema: %w", err)
+	}
+	if err = migrateAPIKeyIdentitiesV8(ctx, tx); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(
+		ctx,
+		"UPDATE meta SET value = '8' WHERE key = 'schema_version'",
+	); err != nil {
+		return fmt.Errorf("update schema_version: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration tx: %w", err)
+	}
+	committed = true
+	log.Infof("usage: migrated events.db schema v7 → v8 (API key reservations)")
+	return nil
+}
+
+func migrateV8ToV9(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	hasPricingReceipt, err := columnExists(ctx, tx, "events", "pricing_receipt")
+	if err != nil {
+		return err
+	}
+	if !hasPricingReceipt {
+		if _, err = tx.ExecContext(
+			ctx, `ALTER TABLE events ADD COLUMN pricing_receipt TEXT CHECK (
+			pricing_receipt IS NULL OR (
+				typeof(pricing_receipt) = 'text' AND
+				length(CAST(pricing_receipt AS BLOB)) <= 16384 AND
+				json_valid(pricing_receipt)
+			)
+		)`,
+		); err != nil {
+			return fmt.Errorf("add events.pricing_receipt: %w", err)
+		}
+	}
+	if err = ensurePricingReceiptImmutabilityTrigger(ctx, tx); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(
+		ctx,
+		"UPDATE meta SET value = '9' WHERE key = 'schema_version'",
+	); err != nil {
+		return fmt.Errorf("update schema_version: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration tx: %w", err)
+	}
+	committed = true
+	log.Infof("usage: migrated events.db schema v8 → v9 (immutable pricing receipts)")
+	return nil
+}
+
+func ensurePricingReceiptImmutabilityTrigger(ctx context.Context, exec dbExec) error {
+	if exec == nil {
+		return errors.New("usage: create pricing receipt trigger on nil database")
+	}
+	_, err := exec.ExecContext(
+		ctx, `CREATE TRIGGER IF NOT EXISTS usage_events_pricing_receipt_immutable
+		BEFORE UPDATE OF pricing_receipt ON events
+		WHEN OLD.pricing_receipt IS NOT NEW.pricing_receipt
+	BEGIN
+		SELECT RAISE(ABORT, 'events.pricing_receipt is immutable');
+	END`,
+	)
+	if err != nil {
+		return fmt.Errorf("create immutable pricing receipt trigger: %w", err)
 	}
 	return nil
 }
@@ -531,12 +984,72 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// DB exposes the underlying *sql.DB for writer / query / import packages.
-func (s *Store) DB() *sql.DB {
+// database exposes the underlying *sql.DB for writer / query / import packages.
+func (s *Store) database() *sql.DB {
 	if s == nil {
 		return nil
 	}
 	return s.db
+}
+
+func (s *Store) setMaxSizeBytes(ctx context.Context, maxBytes int64) error {
+	if s == nil || s.db == nil {
+		return errors.New("usage: set max size on nil store")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var pageSize int64
+	if err := s.db.QueryRowContext(ctx, "PRAGMA page_size").Scan(&pageSize); err != nil {
+		return fmt.Errorf("usage: query SQLite page size: %w", err)
+	}
+	if pageSize <= 0 {
+		return errors.New("usage: SQLite returned an invalid page size")
+	}
+	maxPages := maxSQLitePageCount
+	if maxBytes > 0 {
+		maxPages = max(maxBytes/pageSize, 1)
+	}
+	s.maxPageCount.Store(maxPages)
+	appliedPages, err := s.applyMaxPageCountToConnections(ctx, maxPages)
+	if err != nil {
+		return err
+	}
+	if maxBytes > 0 && appliedPages > maxPages {
+		log.Warnf(
+			"usage: SQLite database already uses %d pages, above configured maximum %d; future growth is blocked",
+			appliedPages,
+			maxPages,
+		)
+	}
+	return nil
+}
+
+func (s *Store) applyMaxPageCountToConnections(ctx context.Context, maxPages int64) (int64, error) {
+	connections := make([]*sql.Conn, 0, storeMaxOpenConnections)
+	defer func() {
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+	}()
+
+	query := fmt.Sprintf("PRAGMA max_page_count = %d", maxPages)
+	appliedPages := maxPages
+	for range storeMaxOpenConnections {
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("usage: acquire SQLite connection for page limit: %w", err)
+		}
+		connections = append(connections, conn)
+		var applied int64
+		if err = conn.QueryRowContext(ctx, query).Scan(&applied); err != nil {
+			return 0, fmt.Errorf("usage: set SQLite max page count: %w", err)
+		}
+		if applied > appliedPages {
+			appliedPages = applied
+		}
+	}
+	return appliedPages, nil
 }
 
 // dbExec is the minimal interface satisfied by both *sql.DB and *sql.Tx so
@@ -547,7 +1060,7 @@ type dbExec interface {
 }
 
 // resolveDimID is the shared get-or-create path for every dim_* table.
-// An empty (or whitespace-only) name returns ok=false without touching the DB
+// An empty (or whitespace-only) name returns ok=false without touching the database
 // so the caller can map it to NULL in the events row.
 func (s *Store) resolveDimID(
 	ctx context.Context,
@@ -630,7 +1143,7 @@ func (s *Store) warmDimensionCaches(ctx context.Context, details []FlatDetail) e
 	return nil
 }
 
-func (s *Store) ResolveModelID(ctx context.Context, exec dbExec, name string) (int64, error) {
+func (s *Store) resolveModelID(ctx context.Context, exec dbExec, name string) (int64, error) {
 	if strings.TrimSpace(name) == "" {
 		name = "unknown"
 	}
@@ -644,32 +1157,32 @@ func (s *Store) ResolveModelID(ctx context.Context, exec dbExec, name string) (i
 	return id, nil
 }
 
-// ResolveAPIKeyID returns the dim_api_key id, or a NULL when name is blank.
-func (s *Store) ResolveAPIKeyID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
+// resolveAPIKeyID returns the dim_api_key id, or a NULL when name is blank.
+func (s *Store) resolveAPIKeyID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
 	return s.resolveNullableDim(ctx, exec, &s.apiKeyCache, "dim_api_key", name)
 }
 
-// ResolveSourceID returns the dim_source id, or a NULL when name is blank.
-func (s *Store) ResolveSourceID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
+// resolveSourceID returns the dim_source id, or a NULL when name is blank.
+func (s *Store) resolveSourceID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
 	return s.resolveNullableDim(ctx, exec, &s.sourceCache, "dim_source", name)
 }
 
-// ResolveAuthIndexID returns the dim_auth_index id, or a NULL when name is blank.
-func (s *Store) ResolveAuthIndexID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
+// resolveAuthIndexID returns the dim_auth_index id, or a NULL when name is blank.
+func (s *Store) resolveAuthIndexID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
 	return s.resolveNullableDim(ctx, exec, &s.authIndexCache, "dim_auth_index", name)
 }
 
-// ResolveCredentialID returns the dim_credential id for COALESCE(source, auth_index).
+// resolveCredentialID returns the dim_credential id for COALESCE(source, auth_index).
 // Both inputs blank → NULL credential, matching summary.go::credKey semantics.
-func (s *Store) ResolveCredentialID(ctx context.Context, exec dbExec, source, authIndex string) (sql.NullInt64, error) {
+func (s *Store) resolveCredentialID(ctx context.Context, exec dbExec, source, authIndex string) (sql.NullInt64, error) {
 	return s.resolveNullableDim(ctx, exec, &s.credentialCache, "dim_credential", credentialName(source, authIndex))
 }
 
-// ResolveProviderID returns the dim_provider id, or a NULL when name is blank.
+// resolveProviderID returns the dim_provider id, or a NULL when name is blank.
 // Old v1/v2 JSON imports never carried provider, so a blank string is the
 // expected steady-state for backfilled rows — the NULL surfaces in /usage
 // queries as the "(unknown)" bucket so the dimension chart doesn't drop them.
-func (s *Store) ResolveProviderID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
+func (s *Store) resolveProviderID(ctx context.Context, exec dbExec, name string) (sql.NullInt64, error) {
 	return s.resolveNullableDim(ctx, exec, &s.providerCache, "dim_provider", name)
 }
 
@@ -698,8 +1211,8 @@ func credentialName(source, authIndex string) string {
 	return strings.TrimSpace(authIndex)
 }
 
-// ComputeFingerprint produces a 20-byte digest over an unambiguous, versioned payload
-func ComputeFingerprint(d FlatDetail) [20]byte {
+// computeFingerprint produces a 20-byte digest over an unambiguous, versioned payload
+func computeFingerprint(d FlatDetail) [eventFingerprintBytes]byte {
 	tokens := normaliseTokenStats(d.Tokens)
 	var payload bytes.Buffer
 	payload.WriteString("usage-fingerprint-v2")
@@ -721,7 +1234,7 @@ func ComputeFingerprint(d FlatDetail) [20]byte {
 	writeFingerprintInt64(&payload, tokens.CachedTokens)
 	writeFingerprintInt64(&payload, tokens.TotalTokens)
 	digest := sha256.Sum256(payload.Bytes())
-	var fingerprint [20]byte
+	var fingerprint [eventFingerprintBytes]byte
 	copy(fingerprint[:], digest[:len(fingerprint)])
 	return fingerprint
 }

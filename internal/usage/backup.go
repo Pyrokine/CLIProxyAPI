@@ -17,29 +17,32 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"golang.org/x/crypto/scrypt"
 )
 
 const (
-	usageBackupFormat       = "cliproxy-usage-backup"
-	usageBackupVersion      = 3
-	usageBackupKDFAlgorithm = "scrypt"
-	usageBackupKDFN         = 1 << 15
-	usageBackupKDFR         = 8
-	usageBackupKDFP         = 1
-	usageBackupKeyBytes     = 32
-	usageBackupSaltBytes    = 16
-	usageBackupIdentityType = "hmac-sha256:"
+	usageBackupFormat        = "cliproxy-usage-backup"
+	usageBackupVersion       = 4
+	usageBackupLegacyVersion = 3
+	usageBackupKDFAlgorithm  = "scrypt"
+	usageBackupKDFN          = 1 << 15
+	usageBackupKDFR          = 8
+	usageBackupKDFP          = 1
+	usageBackupKeyBytes      = 32
+	usageBackupSaltBytes     = 16
+	usageBackupIdentityType  = "hmac-sha256:"
 )
 
 // MaxPortableBackupBytes is the maximum encoded backup accepted by every
 // portable usage import path and emitted by the management export endpoint.
 const MaxPortableBackupBytes int64 = 100 << 20
 
-// MaxPortableBackupPlaintextBytes leaves enough room for AES-GCM overhead,
+// maxPortableBackupPlaintextBytes leaves enough room for AES-GCM overhead,
 // base64 expansion and the visible envelope before the final file reaches the
 // portable limit.
-const MaxPortableBackupPlaintextBytes = ((MaxPortableBackupBytes - 1024) * 3 / 4) - 16
+const maxPortableBackupPlaintextBytes = ((MaxPortableBackupBytes - 1024) * 3 / 4) - 16
 
 var ErrPortableBackupTooLarge = errors.New("usage: portable backup exceeds size limit")
 
@@ -53,28 +56,46 @@ type usageBackupKeyDerivation struct {
 }
 
 type usageBackupEvent struct {
-	Timestamp           time.Time   `json:"timestamp"`
-	Model               string      `json:"model"`
-	Source              string      `json:"source"`
-	AuthIndex           string      `json:"auth_index"`
-	APIKeyIdentity      string      `json:"api_key_identity,omitempty"`
-	Provider            string      `json:"provider"`
-	LatencyMs           int64       `json:"latency_ms,omitempty"`
-	RequestID           string      `json:"request_id,omitempty"`
-	TimeToFirstByteMs   int64       `json:"time_to_first_byte_ms,omitempty"`
-	TotalDurationMs     int64       `json:"total_duration_ms,omitempty"`
-	Completed           bool        `json:"completed"`
-	MetadataRecorded    bool        `json:"metadata_recorded,omitempty"`
-	ReasoningEffort     string      `json:"reasoning_effort,omitempty"`
-	ServiceTier         string      `json:"service_tier,omitempty"`
-	RequestServiceTier  string      `json:"request_service_tier,omitempty"`
-	ResponseServiceTier string      `json:"response_service_tier,omitempty"`
-	ExecutorType        string      `json:"executor_type,omitempty"`
-	Thinking            *Thinking   `json:"thinking,omitempty"`
-	ResponseHeaders     http.Header `json:"response_headers,omitempty"`
-	Tokens              tokenStats  `json:"tokens"`
-	CostMicro           int64       `json:"cost_micro"`
-	Failed              bool        `json:"failed"`
+	Fingerprint         string                     `json:"fingerprint,omitempty"`
+	Timestamp           time.Time                  `json:"timestamp"`
+	Model               string                     `json:"model"`
+	Source              string                     `json:"source"`
+	AuthIndex           string                     `json:"auth_index"`
+	APIKeyIdentity      string                     `json:"api_key_identity,omitempty"`
+	Provider            string                     `json:"provider"`
+	LatencyMs           int64                      `json:"latency_ms,omitempty"`
+	RequestID           string                     `json:"request_id,omitempty"`
+	RequestLogState     logging.RequestLogState    `json:"request_log_state,omitempty"`
+	RequestLogLocation  logging.RequestLogLocation `json:"request_log_location,omitempty"`
+	RequestLogFileName  string                     `json:"request_log_file_name,omitempty"`
+	RequestLogHomeIP    string                     `json:"request_log_home_ip,omitempty"`
+	RequestLogReason    string                     `json:"request_log_reason,omitempty"`
+	RequestLogRevision  int64                      `json:"request_log_revision,omitempty"`
+	RequestLogUpdatedAt time.Time                  `json:"request_log_updated_at,omitzero"`
+	TimeToFirstByteMs   int64                      `json:"time_to_first_byte_ms,omitempty"`
+	TotalDurationMs     int64                      `json:"total_duration_ms,omitempty"`
+	Completed           bool                       `json:"completed"`
+	Generate            *bool                      `json:"generate,omitempty"`
+	ClientIP            string                     `json:"client_ip,omitempty"`
+	XForwardedFor       string                     `json:"x_forwarded_for,omitempty"`
+	UserAgent           string                     `json:"user_agent,omitempty"`
+	AccountingVersion   int                        `json:"accounting_version,omitempty"`
+	TokenBreakdown      *coreusage.TokenBreakdown  `json:"token_breakdown,omitempty"`
+	MetadataRecorded    bool                       `json:"metadata_recorded,omitempty"`
+	MetadataTruncated   bool                       `json:"metadata_truncated,omitempty"`
+	ReasoningEffort     string                     `json:"reasoning_effort,omitempty"`
+	ServiceTier         string                     `json:"service_tier,omitempty"`
+	RequestServiceTier  string                     `json:"request_service_tier,omitempty"`
+	ResponseServiceTier string                     `json:"response_service_tier,omitempty"`
+	ExecutorType        string                     `json:"executor_type,omitempty"`
+	Thinking            *Thinking                  `json:"thinking,omitempty"`
+	ResponseHeaders     http.Header                `json:"response_headers,omitempty"`
+	Tokens              tokenStats                 `json:"tokens"`
+	CostMicro           int64                      `json:"cost_micro"`
+	CostStatus          CostStatus                 `json:"cost_status,omitempty"`
+	CostReason          string                     `json:"cost_reason,omitempty"`
+	PricingReceipt      *PricingReceipt            `json:"pricing_receipt,omitempty"`
+	Failed              bool                       `json:"failed"`
 }
 
 type usageBackupContent struct {
@@ -100,7 +121,8 @@ func IsUsageBackup(data []byte) bool {
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return false
 	}
-	return probe.Format == usageBackupFormat && probe.Version == usageBackupVersion
+	return probe.Format == usageBackupFormat &&
+		(probe.Version == usageBackupLegacyVersion || probe.Version == usageBackupVersion)
 }
 
 // MarshalUsageBackup encrypts the complete canonical backup content, including
@@ -142,6 +164,9 @@ func MarshalUsageBackup(details []FlatDetail, secret string, exportedAt time.Tim
 		if err = validateSanitizedResponseHeaders(detail.ResponseHeaders); err != nil {
 			return nil, fmt.Errorf("usage: backup event[%d]: %w", i, err)
 		}
+		if err = validatePricingReceipt(detail.PricingReceipt); err != nil {
+			return nil, fmt.Errorf("usage: backup event[%d]: %w", i, err)
+		}
 		if detail.costTrusted && detail.costMicro < 0 {
 			return nil, fmt.Errorf("usage: backup event[%d]: negative cost_micro", i)
 		}
@@ -166,7 +191,7 @@ func MarshalUsageBackup(details []FlatDetail, secret string, exportedAt time.Tim
 	if _, err = rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("usage: generate backup nonce: %w", err)
 	}
-	ciphertext := gcm.Seal(nil, nonce, plaintext, usageBackupAAD(kdf))
+	ciphertext := gcm.Seal(nil, nonce, plaintext, usageBackupAAD(usageBackupVersion, kdf))
 	return json.Marshal(
 		usageBackupEnvelope{
 			Format:        usageBackupFormat,
@@ -178,7 +203,7 @@ func MarshalUsageBackup(details []FlatDetail, secret string, exportedAt time.Tim
 	)
 }
 
-// ParseUsageBackup authenticates and decrypts a version 3 backup before
+// ParseUsageBackup authenticates and decrypts a supported portable backup before
 // reconstructing canonical FlatDetail records.
 func ParseUsageBackup(data []byte, secret string) ([]FlatDetail, error) {
 	secret = strings.TrimSpace(secret)
@@ -189,7 +214,8 @@ func ParseUsageBackup(data []byte, secret string) ([]FlatDetail, error) {
 	if err := decodeSingleJSONValue(data, &envelope); err != nil {
 		return nil, fmt.Errorf("usage: decode backup: %w", err)
 	}
-	if envelope.Format != usageBackupFormat || envelope.Version != usageBackupVersion {
+	if envelope.Format != usageBackupFormat ||
+		(envelope.Version != usageBackupLegacyVersion && envelope.Version != usageBackupVersion) {
 		return nil, fmt.Errorf("usage: unsupported backup format %q version %d", envelope.Format, envelope.Version)
 	}
 	if err := validateUsageBackupKDF(envelope.KeyDerivation); err != nil {
@@ -215,7 +241,7 @@ func ParseUsageBackup(data []byte, secret string) ([]FlatDetail, error) {
 	if err != nil {
 		return nil, errors.New("usage: invalid backup ciphertext")
 	}
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, usageBackupAAD(envelope.KeyDerivation))
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, usageBackupAAD(envelope.Version, envelope.KeyDerivation))
 	if err != nil {
 		return nil, errors.New("usage: backup decryption failed; use the key that created the backup")
 	}
@@ -241,6 +267,12 @@ func ParseUsageBackup(data []byte, secret string) ([]FlatDetail, error) {
 		if event.CostMicro < 0 {
 			return nil, fmt.Errorf("usage: backup event[%d] has negative cost_micro", i)
 		}
+		if envelope.Version == usageBackupLegacyVersion && event.PricingReceipt != nil {
+			return nil, fmt.Errorf("usage: backup event[%d] has a pricing receipt in version 3", i)
+		}
+		if err = validatePricingReceipt(event.PricingReceipt); err != nil {
+			return nil, fmt.Errorf("usage: backup event[%d]: %w", i, err)
+		}
 		if err = validateSanitizedResponseHeaders(event.ResponseHeaders); err != nil {
 			return nil, fmt.Errorf("usage: backup event[%d]: %w", i, err)
 		}
@@ -252,7 +284,11 @@ func ParseUsageBackup(data []byte, secret string) ([]FlatDetail, error) {
 				return nil, fmt.Errorf("usage: backup event[%d] references an unknown API key identity", i)
 			}
 		}
-		details = append(details, event.flatDetail(rawAPIKey))
+		detail, errDetail := event.flatDetail(rawAPIKey)
+		if errDetail != nil {
+			return nil, fmt.Errorf("usage: backup event[%d]: %w", i, errDetail)
+		}
+		details = append(details, detail)
 	}
 	return details, nil
 }
@@ -338,12 +374,12 @@ func validUsageBackupAPIKeyIdentity(identity string) bool {
 	return err == nil
 }
 
-func usageBackupAAD(kdf usageBackupKeyDerivation) []byte {
+func usageBackupAAD(version int, kdf usageBackupKeyDerivation) []byte {
 	return fmt.Appendf(
 		nil,
 		"%s\x00%d\x00%s\x00%s\x00%d\x00%d\x00%d\x00%d",
 		usageBackupFormat,
-		usageBackupVersion,
+		version,
 		kdf.Algorithm,
 		kdf.Salt,
 		kdf.N,
@@ -374,7 +410,23 @@ func estimateUsageBackupDetailBytes(detail FlatDetail, includeAPIKey bool) (int6
 }
 
 func usageBackupEventFromFlatDetail(detail FlatDetail, identity string) usageBackupEvent {
+	fingerprint := detail.fingerprint
+	if !detail.fingerprintTrusted {
+		fingerprint = computeFingerprint(detail)
+	}
+	generate := true
+	if detail.generateRecorded {
+		generate = detail.Generate
+	}
+	var tokenBreakdown *coreusage.TokenBreakdown
+	accountingVersion := detail.AccountingVersion
+	if detail.TokenBreakdown.Valid() {
+		breakdown := detail.TokenBreakdown
+		tokenBreakdown = &breakdown
+		accountingVersion = coreusage.TokenAccountingSchemaVersion
+	}
 	return usageBackupEvent{
+		Fingerprint:         hex.EncodeToString(fingerprint[:]),
 		Timestamp:           detail.Timestamp,
 		Model:               detail.Model,
 		Source:              detail.Source,
@@ -383,10 +435,24 @@ func usageBackupEventFromFlatDetail(detail FlatDetail, identity string) usageBac
 		Provider:            detail.Provider,
 		LatencyMs:           detail.LatencyMs,
 		RequestID:           detail.RequestID,
+		RequestLogState:     detail.RequestLogState,
+		RequestLogLocation:  detail.RequestLogLocation,
+		RequestLogFileName:  detail.RequestLogFileName,
+		RequestLogHomeIP:    detail.RequestLogHomeIP,
+		RequestLogReason:    detail.RequestLogReason,
+		RequestLogRevision:  detail.RequestLogRevision,
+		RequestLogUpdatedAt: detail.RequestLogUpdatedAt,
 		TimeToFirstByteMs:   detail.TimeToFirstByteMs,
 		TotalDurationMs:     detail.TotalDurationMs,
 		Completed:           detail.Completed,
+		Generate:            &generate,
+		ClientIP:            detail.ClientIP,
+		XForwardedFor:       detail.XForwardedFor,
+		UserAgent:           detail.UserAgent,
+		AccountingVersion:   accountingVersion,
+		TokenBreakdown:      tokenBreakdown,
 		MetadataRecorded:    detail.MetadataRecorded,
+		MetadataTruncated:   detail.MetadataTruncated,
 		ReasoningEffort:     detail.ReasoningEffort,
 		ServiceTier:         detail.ServiceTier,
 		RequestServiceTier:  detail.RequestServiceTier,
@@ -396,11 +462,35 @@ func usageBackupEventFromFlatDetail(detail FlatDetail, identity string) usageBac
 		ResponseHeaders:     cloneHTTPHeader(detail.ResponseHeaders),
 		Tokens:              detail.Tokens,
 		CostMicro:           detail.costMicro,
+		CostStatus:          detail.CostStatus,
+		CostReason:          detail.CostReason,
+		PricingReceipt:      clonePricingReceipt(detail.PricingReceipt),
 		Failed:              detail.Failed,
 	}
 }
 
-func (event usageBackupEvent) flatDetail(rawAPIKey string) FlatDetail {
+func (event usageBackupEvent) flatDetail(rawAPIKey string) (FlatDetail, error) {
+	if event.TokenBreakdown != nil {
+		if event.AccountingVersion != coreusage.TokenAccountingSchemaVersion || !event.TokenBreakdown.Valid() {
+			return FlatDetail{}, errors.New("invalid token breakdown")
+		}
+	} else if event.AccountingVersion != 0 {
+		return FlatDetail{}, errors.New("accounting version has no token breakdown")
+	}
+	var fingerprint [eventFingerprintBytes]byte
+	fingerprintTrusted := event.Fingerprint != ""
+	if fingerprintTrusted {
+		fingerprintRaw, err := hex.DecodeString(event.Fingerprint)
+		if err != nil || len(fingerprintRaw) != eventFingerprintBytes {
+			return FlatDetail{}, errors.New("invalid event fingerprint")
+		}
+		copy(fingerprint[:], fingerprintRaw)
+	}
+	generate := event.Generate == nil || *event.Generate
+	var tokenBreakdown coreusage.TokenBreakdown
+	if event.TokenBreakdown != nil {
+		tokenBreakdown = *event.TokenBreakdown
+	}
 	return FlatDetail{
 		Timestamp:           event.Timestamp,
 		Model:               event.Model,
@@ -410,10 +500,24 @@ func (event usageBackupEvent) flatDetail(rawAPIKey string) FlatDetail {
 		Provider:            event.Provider,
 		LatencyMs:           event.LatencyMs,
 		RequestID:           event.RequestID,
+		RequestLogState:     event.RequestLogState,
+		RequestLogLocation:  event.RequestLogLocation,
+		RequestLogFileName:  event.RequestLogFileName,
+		RequestLogHomeIP:    event.RequestLogHomeIP,
+		RequestLogReason:    event.RequestLogReason,
+		RequestLogRevision:  event.RequestLogRevision,
+		RequestLogUpdatedAt: event.RequestLogUpdatedAt,
 		TimeToFirstByteMs:   event.TimeToFirstByteMs,
 		TotalDurationMs:     event.TotalDurationMs,
 		Completed:           event.Completed,
+		Generate:            generate,
+		ClientIP:            event.ClientIP,
+		XForwardedFor:       event.XForwardedFor,
+		UserAgent:           event.UserAgent,
+		AccountingVersion:   event.AccountingVersion,
+		TokenBreakdown:      tokenBreakdown,
 		MetadataRecorded:    event.MetadataRecorded,
+		MetadataTruncated:   event.MetadataTruncated,
 		ReasoningEffort:     event.ReasoningEffort,
 		ServiceTier:         event.ServiceTier,
 		RequestServiceTier:  event.RequestServiceTier,
@@ -422,9 +526,16 @@ func (event usageBackupEvent) flatDetail(rawAPIKey string) FlatDetail {
 		Thinking:            cloneThinking(event.Thinking),
 		ResponseHeaders:     cloneHTTPHeader(event.ResponseHeaders),
 		Tokens:              event.Tokens,
+		PricingReceipt:      clonePricingReceipt(event.PricingReceipt),
+		CostStatus:          event.CostStatus,
+		CostReason:          event.CostReason,
 		Failed:              event.Failed,
+		generateRecorded:    event.Generate != nil,
 		metadataTrusted:     true,
+		fingerprint:         fingerprint,
+		fingerprintTrusted:  fingerprintTrusted,
+		Cost:                float64(event.CostMicro) / costMicroPerUSD,
 		costMicro:           event.CostMicro,
 		costTrusted:         true,
-	}
+	}, nil
 }

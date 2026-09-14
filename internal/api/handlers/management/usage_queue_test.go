@@ -47,6 +47,52 @@ func TestGetUsageQueuePopsRequestedRecords(t *testing.T) {
 	)
 }
 
+func TestGetUsageQueueRejectsCountAboveLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	queue := redisqueue.NewQueue()
+	queue.SetEnabled(true)
+	queue.Enqueue([]byte(`{"id":1}`))
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(
+		http.MethodGet,
+		"/v0/management/usage-queue?count=1001",
+		nil,
+	)
+
+	h := &Handler{usageQueue: queue}
+	h.GetUsageQueue(ginCtx)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if items := queue.PopOldest(1); len(items) != 1 {
+		t.Fatalf("queue items = %d, want original item", len(items))
+	}
+}
+
+func TestGetUsageQueueReportsDroppedCount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	queue := redisqueue.NewQueue()
+	queue.SetEnabled(true)
+	queue.Enqueue(make([]byte, 1<<20+1))
+
+	rec := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(rec)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue", nil)
+
+	h := &Handler{usageQueue: queue}
+	h.GetUsageQueue(ginCtx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if dropped := rec.Header().Get("X-Usage-Queue-Dropped"); dropped != "1" {
+		t.Fatalf("X-Usage-Queue-Dropped = %q, want 1", dropped)
+	}
+}
+
 func TestGetUsageQueueInvalidCountDoesNotPop(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	withManagementUsageQueue(

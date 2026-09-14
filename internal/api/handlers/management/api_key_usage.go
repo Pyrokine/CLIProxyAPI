@@ -24,11 +24,8 @@ func mergeRecentRequestBuckets(dst, src []coreauth.RecentRequestBucket) []coreau
 		return dst
 	}
 	if len(dst) != len(src) {
-		n := len(dst)
-		if len(src) < n {
-			n = len(src)
-		}
-		for i := 0; i < n; i++ {
+		n := min(len(src), len(dst))
+		for i := range n {
 			dst[i].Success += src[i].Success
 			dst[i].Failed += src[i].Failed
 		}

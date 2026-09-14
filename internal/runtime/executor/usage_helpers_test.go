@@ -5,9 +5,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -33,9 +36,11 @@ func registerTestUsagePlugin(t *testing.T, plugin usage.Plugin) {
 	t.Helper()
 	name := t.Name()
 	usage.RegisterNamedPlugin(name, plugin)
-	t.Cleanup(func() {
-		usage.UnregisterNamedPlugin(name).Wait()
-	})
+	t.Cleanup(
+		func() {
+			usage.UnregisterNamedPlugin(name).Wait()
+		},
+	)
 }
 
 func TestResponseTimingStartsAtBodyChunk(t *testing.T) {
@@ -223,7 +228,7 @@ func TestUsageReporterIncludesRuntimeMetadata(t *testing.T) {
 func TestUsageReporterSetTranslatedReasoningEffortOverridesContext(t *testing.T) {
 	reporter := &usageReporter{reasoningEffort: "medium"}
 
-	reporter.SetTranslatedReasoningEffort([]byte(`{"reasoning_effort":"high"}`), "openai")
+	reporter.setTranslatedReasoningEffort([]byte(`{"reasoning_effort":"high"}`), "openai")
 
 	if reporter.reasoningEffort != "high" {
 		t.Fatalf("reasoning effort = %q, want high", reporter.reasoningEffort)
@@ -233,7 +238,7 @@ func TestUsageReporterSetTranslatedReasoningEffortOverridesContext(t *testing.T)
 func TestUsageReporterSetTranslatedReasoningEffortPreservesContextServiceTier(t *testing.T) {
 	reporter := &usageReporter{reasoningEffort: "medium", serviceTier: "flex"}
 
-	reporter.SetTranslatedReasoningEffort([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), "openai")
+	reporter.setTranslatedReasoningEffort([]byte(`{"messages":[{"role":"user","content":"hi"}]}`), "openai")
 
 	if reporter.reasoningEffort != "" {
 		t.Fatalf("reasoning effort = %q, want empty", reporter.reasoningEffort)
@@ -246,7 +251,7 @@ func TestUsageReporterSetTranslatedReasoningEffortPreservesContextServiceTier(t 
 func TestUsageReporterSetTranslatedReasoningEffortExtractsServiceTier(t *testing.T) {
 	reporter := &usageReporter{serviceTier: usage.DefaultServiceTier}
 
-	reporter.SetTranslatedReasoningEffort(
+	reporter.setTranslatedReasoningEffort(
 		[]byte(`{"reasoning":{"effort":"high"},"service_tier":"priority"}`), "openai-response",
 	)
 
@@ -402,16 +407,19 @@ func TestStreamUsageBufferMergesFinalUsageAndTier(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var buffer streamUsageBuffer
-			for _, chunk := range tt.chunks {
-				buffer.observeOpenAIStream(chunk)
-			}
-			got, ok := buffer.detailValue()
-			if !ok || got != tt.want {
-				t.Fatalf("detail = %+v ok=%v, want %+v", got, ok, tt.want)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				var buffer streamUsageBuffer
+				for _, chunk := range tt.chunks {
+					buffer.observeOpenAIStream(chunk)
+				}
+				got, ok := buffer.detailValue()
+				if !ok {
+					t.Fatalf("detail = %+v ok=false, want %+v", got, tt.want)
+				}
+				assertUsageDetailWithBreakdown(t, got, tt.want)
+			},
+		)
 	}
 }
 
@@ -433,7 +441,10 @@ func TestStreamUsageBufferDropsOversizedLineAndRecovers(t *testing.T) {
 	var buffer streamUsageBuffer
 	buffer.observeOpenAIStreamChunk(bytes.Repeat([]byte("x"), maxStreamUsageLineBytes+1))
 	if !buffer.pendingOverflow || len(buffer.pending) != 0 {
-		t.Fatalf("overflow state = %v pending=%d, want overflow with empty pending", buffer.pendingOverflow, len(buffer.pending))
+		t.Fatalf(
+			"overflow state = %v pending=%d, want overflow with empty pending", buffer.pendingOverflow,
+			len(buffer.pending),
+		)
 	}
 
 	buffer.observeOpenAIStreamChunk(
@@ -456,9 +467,10 @@ func TestStreamUsageBufferIgnoresInvalidUsageAndTierTypes(t *testing.T) {
 
 	detail, ok := buffer.detailValue()
 	want := usage.Detail{InputTokens: 5, OutputTokens: 7, TotalTokens: 12, ResponseServiceTier: "default"}
-	if !ok || detail != want {
-		t.Fatalf("detail = %+v ok=%v, want %+v", detail, ok, want)
+	if !ok {
+		t.Fatalf("detail = %+v ok=false, want %+v", detail, want)
 	}
+	assertUsageDetailWithBreakdown(t, detail, want)
 }
 
 func TestStreamUsageBufferParsesEscapedUsageAndServiceTierKeys(t *testing.T) {
@@ -469,9 +481,10 @@ func TestStreamUsageBufferParsesEscapedUsageAndServiceTierKeys(t *testing.T) {
 
 	detail, ok := buffer.detailValue()
 	want := usage.Detail{InputTokens: 2, OutputTokens: 3, TotalTokens: 5, ResponseServiceTier: "priority"}
-	if !ok || detail != want {
-		t.Fatalf("detail = %+v ok=%v, want %+v", detail, ok, want)
+	if !ok {
+		t.Fatalf("detail = %+v ok=false, want %+v", detail, want)
 	}
+	assertUsageDetailWithBreakdown(t, detail, want)
 }
 
 func TestStreamUsageBufferParsesEscapedServiceTierWithoutUsage(t *testing.T) {
@@ -502,8 +515,11 @@ func TestParseOpenAIUsageRejectsInvalidTokenNumbers(t *testing.T) {
 	detail := parseOpenAIUsage(
 		[]byte(`{"usage":{"prompt_tokens":-1,"input_tokens":5,"completion_tokens":1.5,"output_tokens":7,"total_tokens":9223372036854775808,"prompt_tokens_details":{"cached_tokens":-2},"input_tokens_details":{"cached_tokens":3}}}`),
 	)
-	if detail.InputTokens != 5 || detail.OutputTokens != 7 || detail.TotalTokens != 0 || detail.CachedTokens != 3 {
+	if detail.InputTokens != 5 || detail.OutputTokens != 7 || detail.TotalTokens != 12 || detail.CachedTokens != 3 {
 		t.Fatalf("detail = %+v", detail)
+	}
+	if !detail.TokenBreakdown.Valid() || detail.TokenBreakdown.Quality != usage.TokenAccountingQualityComplete {
+		t.Fatalf("token breakdown = %+v, want valid complete", detail.TokenBreakdown)
 	}
 }
 
@@ -514,9 +530,10 @@ func TestStreamUsageBufferKeepsValidUsageAfterNegativeUpdate(t *testing.T) {
 
 	detail, ok := buffer.detailValue()
 	want := usage.Detail{InputTokens: 5, OutputTokens: 7, TotalTokens: 12}
-	if !ok || detail != want {
-		t.Fatalf("detail = %+v ok=%v, want %+v", detail, ok, want)
+	if !ok {
+		t.Fatalf("detail = %+v ok=false, want %+v", detail, want)
 	}
+	assertUsageDetailWithBreakdown(t, detail, want)
 }
 
 func TestUsageReporterAdditionalModelPublishesZeroUsage(t *testing.T) {
@@ -535,9 +552,7 @@ func TestUsageReporterAdditionalModelPublishesZeroUsage(t *testing.T) {
 		if got.Model != "gpt-image-2" || got.ResponseServiceTier != "priority" {
 			t.Fatalf("record = %#v", got)
 		}
-		if got.Detail != (usage.Detail{ResponseServiceTier: "priority"}) {
-			t.Fatalf("detail = %#v", got.Detail)
-		}
+		assertUsageDetailWithBreakdown(t, got.Detail, usage.Detail{ResponseServiceTier: "priority"})
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for zero additional-model usage record")
 	}
@@ -545,7 +560,7 @@ func TestUsageReporterAdditionalModelPublishesZeroUsage(t *testing.T) {
 
 func TestUsageReporterPreservesServiceTierForNonStringPayloadValue(t *testing.T) {
 	reporter := &usageReporter{serviceTier: "priority"}
-	reporter.SetTranslatedReasoningEffort([]byte(`{"service_tier":123}`), "openai-response")
+	reporter.setTranslatedReasoningEffort([]byte(`{"service_tier":123}`), "openai-response")
 	if reporter.serviceTier != "priority" {
 		t.Fatalf("service tier = %q, want priority", reporter.serviceTier)
 	}
@@ -581,11 +596,56 @@ func TestStreamUsageFailureWinsBeforeDeferredSuccess(t *testing.T) {
 		if !got.Failed {
 			t.Fatalf("Failed = false, want true: %#v", got)
 		}
-		if got.Detail != (usage.Detail{}) {
-			t.Fatalf("Detail = %#v, want zero detail", got.Detail)
-		}
+		assertUsageDetailWithBreakdown(t, got.Detail, usage.Detail{})
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for failed usage record")
+	}
+}
+
+func assertUsageDetailWithBreakdown(t *testing.T, got, want usage.Detail) {
+	t.Helper()
+	breakdown := got.TokenBreakdown
+	got.TokenBreakdown = usage.TokenBreakdown{}
+	if got != want {
+		t.Fatalf("detail = %+v, want %+v", got, want)
+	}
+	if !breakdown.Valid() || breakdown.TotalTokens != got.TotalTokens {
+		t.Fatalf("token breakdown = %+v, want valid total %d", breakdown, got.TotalTokens)
+	}
+}
+
+func TestFailFromErrorsMapsContextStatuses(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "canceled", err: context.Canceled, want: clienterror.StatusClientClosedRequest},
+		{name: "deadline", err: context.DeadlineExceeded, want: http.StatusGatewayTimeout},
+		{
+			name: "url error wraps canceled",
+			err:  &url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled},
+			want: clienterror.StatusClientClosedRequest,
+		},
+		{name: "plain error", err: errors.New("boom"), want: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(
+			test.name, func(t *testing.T) {
+				fail := failFromErrors(test.err)
+				if fail.StatusCode != test.want {
+					t.Fatalf("StatusCode = %d, want %d; body=%q", fail.StatusCode, test.want, fail.Body)
+				}
+				if strings.TrimSpace(fail.Body) == "" {
+					t.Fatal("expected non-empty failure body")
+				}
+			},
+		)
+	}
+
+	if fail := failFromErrors(nil, nil); fail.StatusCode != 0 || fail.Body != "" {
+		t.Fatalf("failFromErrors(nil) = %+v, want empty failure", fail)
 	}
 }
 
@@ -611,15 +671,17 @@ func TestParseOpenAIUsageNormalizesCacheTokenAliases(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			detail := parseOpenAIUsage([]byte(tt.usage))
-			if detail.CachedTokens != tt.read || detail.CacheReadTokens != tt.read {
-				t.Fatalf("cache read detail = %#v, want cached/read %d", detail, tt.read)
-			}
-			if detail.CacheCreationTokens != tt.created {
-				t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, tt.created)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				detail := parseOpenAIUsage([]byte(tt.usage))
+				if detail.CachedTokens != tt.read || detail.CacheReadTokens != tt.read {
+					t.Fatalf("cache read detail = %#v, want cached/read %d", detail, tt.read)
+				}
+				if detail.CacheCreationTokens != tt.created {
+					t.Fatalf("cache creation tokens = %d, want %d", detail.CacheCreationTokens, tt.created)
+				}
+			},
+		)
 	}
 }
 
@@ -643,6 +705,19 @@ func TestParseClaudeUsageIncludesCacheTokensInTotal(t *testing.T) {
 	}
 	if detail.TotalTokens != 22859 {
 		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 22859)
+	}
+}
+
+func TestParseClaudeUsageCapturesCacheCreationTTLBreakdown(t *testing.T) {
+	data := []byte(`{"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3,"cache_creation_input_tokens":15,"cache_creation":{"ephemeral_5m_input_tokens":6,"ephemeral_1h_input_tokens":7},"output_tokens_details":{"thinking_tokens":2}}}`)
+	detail := parseClaudeUsage(data)
+	if detail.CacheCreationTokens != 15 || detail.CacheCreation5mInputTokens != 6 ||
+		detail.CacheCreation1hInputTokens != 7 {
+		t.Fatalf("cache creation detail = %#v, want aggregate/5m/1h 15/6/7", detail)
+	}
+	if detail.OutputTokens != 3 || detail.ReasoningTokens != 2 || detail.TotalTokens != 33 ||
+		!detail.TokenBreakdown.Valid() {
+		t.Fatalf("Claude usage detail = %#v", detail)
 	}
 }
 
@@ -693,6 +768,37 @@ func TestClaudeStreamUsageBufferMergesMessageStartAndDelta(t *testing.T) {
 	}
 	if detail.ResponseServiceTier != "priority" {
 		t.Fatalf("response service tier = %q, want priority", detail.ResponseServiceTier)
+	}
+}
+
+func TestClaudeStreamUsageBufferMergesCumulativeCacheCreationTTLBreakdown(t *testing.T) {
+	var buffer claudeStreamUsageBuffer
+	buffer.observe(
+		[]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":3,"cache_creation_input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":6}}}}`),
+	)
+	buffer.observe(
+		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":5}}}`),
+	)
+	detail, ok := buffer.detailValue()
+	if !ok {
+		t.Fatal("detailValue() ok = false, want true")
+	}
+	if detail.CacheCreationTokens != 11 || detail.CacheCreation5mInputTokens != 5 ||
+		detail.CacheCreation1hInputTokens != 6 || detail.TotalTokens != 29 {
+		t.Fatalf("first merged cache creation detail = %#v", detail)
+	}
+
+	buffer.observe(
+		[]byte(`data: {"type":"message_delta","usage":{"output_tokens":7,"cache_creation_input_tokens":12}}`),
+	)
+	detail, ok = buffer.detailValue()
+	if !ok {
+		t.Fatal("detailValue() after aggregate delta ok = false, want true")
+	}
+	if detail.CacheCreationTokens != 12 || detail.CacheCreation5mInputTokens != 5 ||
+		detail.CacheCreation1hInputTokens != 6 || detail.TotalTokens != 32 ||
+		!detail.TokenBreakdown.Valid() {
+		t.Fatalf("second merged cache creation detail = %#v", detail)
 	}
 }
 
@@ -823,18 +929,20 @@ func TestParseInteractionsUsageCacheWriteAliasesAndTotal(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			detail := parseInteractionsUsage([]byte(tt.usage))
-			if detail.CachedTokens != 3 || detail.CacheCreationTokens != 5 {
-				t.Fatalf("cache detail = %#v, want cached 3 and creation 5", detail)
-			}
-			if detail.CacheReadTokens == 0 {
-				t.Fatalf("cache read tokens were not normalized: %#v", detail)
-			}
-			if detail.TotalTokens != tt.wantTotal {
-				t.Fatalf("total tokens = %d, want %d: %#v", detail.TotalTokens, tt.wantTotal, detail)
-			}
-		})
+		t.Run(
+			tt.name, func(t *testing.T) {
+				detail := parseInteractionsUsage([]byte(tt.usage))
+				if detail.CachedTokens != 3 || detail.CacheCreationTokens != 5 {
+					t.Fatalf("cache detail = %#v, want cached 3 and creation 5", detail)
+				}
+				if detail.CacheReadTokens == 0 {
+					t.Fatalf("cache read tokens were not normalized: %#v", detail)
+				}
+				if detail.TotalTokens != tt.wantTotal {
+					t.Fatalf("total tokens = %d, want %d: %#v", detail.TotalTokens, tt.wantTotal, detail)
+				}
+			},
+		)
 	}
 }
 
@@ -879,7 +987,9 @@ func TestResolveUsageSourceRedactsAPIKeyAccountInfo(t *testing.T) {
 
 func TestResolveUsageSourcePreservesNonSecretAccountInfo(t *testing.T) {
 	oauth := &cliproxyauth.Auth{Metadata: map[string]any{"email": "user@example.com"}}
-	if got, kind, redacted := resolveUsageSource(oauth, ""); got != "user@example.com" || kind != usage.CredentialSourceKindIdentity || redacted {
+	if got, kind, redacted := resolveUsageSource(
+		oauth, "",
+	); got != "user@example.com" || kind != usage.CredentialSourceKindIdentity || redacted {
 		t.Fatalf("resolveUsageSource OAuth = %q/%q/%v, want user@example.com/identity/false", got, kind, redacted)
 	}
 
@@ -888,7 +998,9 @@ func TestResolveUsageSourcePreservesNonSecretAccountInfo(t *testing.T) {
 		Metadata:   map[string]any{"project_id": "project-123"},
 		Attributes: map[string]string{"api_key": "vertex-secret-value"},
 	}
-	if got, kind, redacted := resolveUsageSource(vertex, ""); got != "project-123" || kind != usage.CredentialSourceKindIdentity || redacted {
+	if got, kind, redacted := resolveUsageSource(
+		vertex, "",
+	); got != "project-123" || kind != usage.CredentialSourceKindIdentity || redacted {
 		t.Fatalf("resolveUsageSource Vertex = %q/%q/%v, want project-123/identity/false", got, kind, redacted)
 	}
 }

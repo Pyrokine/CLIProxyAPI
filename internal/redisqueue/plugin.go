@@ -10,15 +10,14 @@ import (
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
-	log "github.com/sirupsen/logrus"
 )
 
 func init() {
-	coreusage.RegisterPlugin(NewUsagePlugin())
+	coreusage.RegisterPlugin(newUsagePlugin())
 }
 
-// NewUsagePlugin creates the Redis usage queue adapter for the compatibility queue.
-func NewUsagePlugin() coreusage.Plugin { return NewUsagePluginForQueue(defaultQueue) }
+// newUsagePlugin creates the Redis usage queue adapter for the compatibility queue.
+func newUsagePlugin() coreusage.Plugin { return NewUsagePluginForQueue(defaultQueue) }
 
 // NewUsagePluginForQueue creates an adapter bound to one service's queue.
 func NewUsagePluginForQueue(queue *Queue) coreusage.Plugin {
@@ -78,7 +77,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if queue == nil {
 		queue = defaultQueue
 	}
-	if !queue.Enabled() || !queue.UsageStatisticsEnabled() {
+	if !queue.Enabled() || !queue.usageStatisticsOn() {
 		return
 	}
 
@@ -125,54 +124,17 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		executorType = "unknown"
 	}
 
+	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
 	tokens := tokenStats{
-		InputTokens:         record.Detail.InputTokens,
-		OutputTokens:        record.Detail.OutputTokens,
-		ReasoningTokens:     record.Detail.ReasoningTokens,
-		CachedTokens:        record.Detail.CachedTokens,
-		CacheReadTokens:     record.Detail.CacheReadTokens,
-		CacheCreationTokens: record.Detail.CacheCreationTokens,
-		TotalTokens:         record.Detail.TotalTokens,
+		InputTokens:         usageDetail.InputTokens,
+		OutputTokens:        usageDetail.OutputTokens,
+		ReasoningTokens:     usageDetail.ReasoningTokens,
+		CachedTokens:        usageDetail.CachedTokens,
+		CacheReadTokens:     usageDetail.CacheReadTokens,
+		CacheCreationTokens: usageDetail.CacheCreationTokens,
+		TotalTokens:         usageDetail.TotalTokens,
 	}
-	for _, value := range []int64{
-		tokens.InputTokens,
-		tokens.OutputTokens,
-		tokens.ReasoningTokens,
-		tokens.CachedTokens,
-		tokens.CacheReadTokens,
-		tokens.CacheCreationTokens,
-		tokens.TotalTokens,
-	} {
-		if value < 0 {
-			log.Warn("redis usage queue: rejected negative token detail")
-			return
-		}
-	}
-	if tokens.TotalTokens == 0 {
-		cachedTokens := tokens.CachedTokens
-		if cachedTokens == 0 {
-			var ok bool
-			cachedTokens, ok = coreusage.AddNonNegativeInt64(
-				tokens.CacheReadTokens,
-				tokens.CacheCreationTokens,
-			)
-			if !ok {
-				log.Warn("redis usage queue: rejected overflowing cached token detail")
-				return
-			}
-		}
-		totalTokens, ok := coreusage.AddNonNegativeInt64(
-			tokens.InputTokens,
-			tokens.OutputTokens,
-			tokens.ReasoningTokens,
-			cachedTokens,
-		)
-		if !ok {
-			log.Warn("redis usage queue: rejected overflowing token detail")
-			return
-		}
-		tokens.TotalTokens = totalTokens
-	}
+	clientMetadata := internallogging.GetClientRequestMetadata(ctx)
 
 	failed := record.Failed
 	if !failed {
@@ -187,8 +149,13 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		Thinking:        cloneThinking(record.Thinking),
 		Source:          record.Source,
 		AuthIndex:       record.AuthIndex,
+		AccessTokenHash: record.AccessTokenSHA256,
+		ClientIP:        strings.TrimSpace(clientMetadata.ClientIP),
+		XForwardedFor:   strings.TrimSpace(clientMetadata.XForwardedFor),
+		UserAgent:       strings.TrimSpace(clientMetadata.UserAgent),
 		Tokens:          tokens,
 		Failed:          failed,
+		Generate:        coreusage.GenerateEnabled(record.Generate),
 		Fail:            fail,
 		ResponseHeaders: sanitizeResponseHeaders(record.ResponseHeaders),
 	}
@@ -196,6 +163,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	payload, err := json.Marshal(
 		queuedUsageDetail{
 			requestDetail:       detail,
+			AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
+			TokenBreakdown:      usageDetail.TokenBreakdown,
 			Provider:            provider,
 			ExecutorType:        executorType,
 			Model:               modelName,
@@ -218,18 +187,20 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 
 type queuedUsageDetail struct {
 	requestDetail
-	Provider            string `json:"provider"`
-	ExecutorType        string `json:"executor_type"`
-	Model               string `json:"model"`
-	Alias               string `json:"alias"`
-	Endpoint            string `json:"endpoint"`
-	AuthType            string `json:"auth_type"`
-	APIKey              string `json:"api_key"`
-	RequestID           string `json:"request_id"`
-	ReasoningEffort     string `json:"reasoning_effort"`
-	ServiceTier         string `json:"service_tier"`
-	RequestServiceTier  string `json:"request_service_tier"`
-	ResponseServiceTier string `json:"response_service_tier,omitempty"`
+	AccountingVersion   int                      `json:"accounting_version"`
+	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown"`
+	Provider            string                   `json:"provider"`
+	ExecutorType        string                   `json:"executor_type"`
+	Model               string                   `json:"model"`
+	Alias               string                   `json:"alias"`
+	Endpoint            string                   `json:"endpoint"`
+	AuthType            string                   `json:"auth_type"`
+	APIKey              string                   `json:"api_key"`
+	RequestID           string                   `json:"request_id"`
+	ReasoningEffort     string                   `json:"reasoning_effort"`
+	ServiceTier         string                   `json:"service_tier"`
+	RequestServiceTier  string                   `json:"request_service_tier"`
+	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
 }
 
 type requestDetail struct {
@@ -239,8 +210,13 @@ type requestDetail struct {
 	Thinking        *coreusage.Thinking `json:"thinking,omitempty"`
 	Source          string              `json:"source"`
 	AuthIndex       string              `json:"auth_index"`
+	AccessTokenHash string              `json:"access_token_sha256,omitempty"`
+	ClientIP        string              `json:"client_ip"`
+	XForwardedFor   string              `json:"x_forwarded_for"`
+	UserAgent       string              `json:"user_agent"`
 	Tokens          tokenStats          `json:"tokens"`
 	Failed          bool                `json:"failed"`
+	Generate        bool                `json:"generate"`
 	Fail            failDetail          `json:"fail"`
 	ResponseHeaders http.Header         `json:"response_headers,omitempty"`
 }
