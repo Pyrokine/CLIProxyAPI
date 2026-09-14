@@ -10,16 +10,22 @@ permissions:
   contents: write
 
 jobs:
+  deep-quality:
+    uses: ./.github/workflows/deep-quality.yml
+    permissions:
+      contents: read
+
   goreleaser:
+    needs: deep-quality
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - run: git fetch --force --tags
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v7
         with:
-          go-version: '>=1.26.0'
+          go-version-file: go.mod
           cache: true
       - name: Generate Build Metadata
         run: |
@@ -40,7 +46,7 @@ jobs:
               raise SystemExit(f"CHANGELOG.md has no entry for {tag}")
           Path("release-notes.md").write_text(match.group(0).strip() + "\n", encoding="utf-8")
           PY
-      - uses: goreleaser/goreleaser-action@v4
+      - uses: goreleaser/goreleaser-action@v7
         with:
           distribution: goreleaser
           version: latest

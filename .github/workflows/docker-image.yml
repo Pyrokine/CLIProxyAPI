@@ -10,7 +10,13 @@ env:
   DOCKERHUB_REPO: pyrokine/cli-proxy-api
 
 jobs:
+  deep-quality:
+    uses: ./.github/workflows/deep-quality.yml
+    permissions:
+      contents: read
+
   docker_amd64:
+    needs: deep-quality
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -30,7 +36,7 @@ jobs:
       - name: Prepare management panel asset
         env:
           PANEL_REPO: Pyrokine/Cli-Proxy-API-Management-Center
-          PANEL_TAG: v1.17.14-aug.2
+          PANEL_TAG: v1.22.2-aug.1
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-management-panel.sh
       - name: Build and push (amd64)
@@ -48,6 +54,7 @@ jobs:
             ${{ env.DOCKERHUB_REPO }}:${{ env.VERSION }}-amd64
 
   docker_arm64:
+    needs: deep-quality
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
@@ -67,7 +74,7 @@ jobs:
       - name: Prepare management panel asset
         env:
           PANEL_REPO: Pyrokine/Cli-Proxy-API-Management-Center
-          PANEL_TAG: v1.17.14-aug.2
+          PANEL_TAG: v1.22.2-aug.1
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-management-panel.sh
       - name: Build and push (arm64)

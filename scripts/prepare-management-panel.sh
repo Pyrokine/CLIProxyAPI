@@ -3,7 +3,7 @@
 set -euo pipefail
 
 PANEL_REPO="${PANEL_REPO:-Pyrokine/Cli-Proxy-API-Management-Center}"
-PANEL_TAG="${PANEL_TAG:-v1.17.14-aug.2}"
+PANEL_TAG="${PANEL_TAG:-v1.22.2-aug.1}"
 PANEL_OUTPUT="${PANEL_OUTPUT:-static/management.html}"
 PANEL_SOURCE="${PANEL_SOURCE:-}"
 
