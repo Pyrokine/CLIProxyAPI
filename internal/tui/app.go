@@ -101,9 +101,9 @@ func (a *app) Init() tea.Cmd {
 	if !a.authenticated {
 		return textinput.Blink
 	}
-	cmds := []tea.Cmd{a.dashboard.Init()}
+	cmds := []tea.Cmd{a.dashboard.init()}
 	if a.logsEnabled {
-		cmds = append(cmds, a.logs.Init())
+		cmds = append(cmds, a.logs.init())
 	}
 	return tea.Batch(cmds...)
 }
@@ -119,13 +119,13 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		contentH := max(a.height-4, 1) // tab bar + status bar
 		contentW := a.width
-		a.dashboard.SetSize(contentW, contentH)
-		a.config.SetSize(contentW, contentH)
-		a.auth.SetSize(contentW, contentH)
-		a.keys.SetSize(contentW, contentH)
-		a.oauth.SetSize(contentW, contentH)
-		a.usage.SetSize(contentW, contentH)
-		a.logs.SetSize(contentW, contentH)
+		a.dashboard.setSize(contentW, contentH)
+		a.config.setSize(contentW, contentH)
+		a.auth.setSize(contentW, contentH)
+		a.keys.setSize(contentW, contentH)
+		a.oauth.setSize(contentW, contentH)
+		a.usage.setSize(contentW, contentH)
+		a.logs.setSize(contentW, contentH)
 		return a, nil
 
 	case authConnectMsg:
@@ -140,10 +140,10 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.refreshTabs()
 		a.initialized = [7]bool{}
 		a.initialized[tabDashboard] = true
-		cmds := []tea.Cmd{a.dashboard.Init()}
+		cmds := []tea.Cmd{a.dashboard.init()}
 		if a.logsEnabled {
 			a.initialized[tabLogs] = true
-			cmds = append(cmds, a.logs.Init())
+			cmds = append(cmds, a.logs.init())
 		}
 		return a, tea.Batch(cmds...)
 
@@ -162,13 +162,13 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if !logsEnabledBefore && a.logsEnabled {
 					a.initialized[tabLogs] = true
-					cmdLogs = a.logs.Init()
+					cmdLogs = a.logs.init()
 				}
 			}
 		}
 
 		var cmdConfig tea.Cmd
-		a.config, cmdConfig = a.config.Update(msg)
+		a.config, cmdConfig = a.config.update(msg)
 		if cmdConfig != nil && cmdLogs != nil {
 			return a, tea.Batch(cmdConfig, cmdLogs)
 		}
@@ -245,7 +245,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg.(type) {
 	case oauthStartMsg, oauthPollMsg, oauthCallbackSubmitMsg, oauthCancelMsg:
 		var cmd tea.Cmd
-		a.oauth, cmd = a.oauth.Update(msg)
+		a.oauth, cmd = a.oauth.update(msg)
 		return a, cmd
 	}
 
@@ -253,19 +253,19 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch a.activeTab {
 	case tabDashboard:
-		a.dashboard, cmd = a.dashboard.Update(msg)
+		a.dashboard, cmd = a.dashboard.update(msg)
 	case tabConfig:
-		a.config, cmd = a.config.Update(msg)
+		a.config, cmd = a.config.update(msg)
 	case tabAuthFiles:
-		a.auth, cmd = a.auth.Update(msg)
+		a.auth, cmd = a.auth.update(msg)
 	case tabAPIKeys:
-		a.keys, cmd = a.keys.Update(msg)
+		a.keys, cmd = a.keys.update(msg)
 	case tabOAuth:
-		a.oauth, cmd = a.oauth.Update(msg)
+		a.oauth, cmd = a.oauth.update(msg)
 	case tabUsage:
-		a.usage, cmd = a.usage.Update(msg)
+		a.usage, cmd = a.usage.update(msg)
 	case tabLogs:
-		a.logs, cmd = a.logs.Update(msg)
+		a.logs, cmd = a.logs.update(msg)
 	}
 
 	// Keep logs polling alive even when logs tab is not active.
@@ -273,7 +273,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.(type) {
 		case logsPollMsg, logsTickMsg, logLineMsg:
 			var logCmd tea.Cmd
-			a.logs, logCmd = a.logs.Update(msg)
+			a.logs, logCmd = a.logs.update(msg)
 			if logCmd != nil {
 				cmd = logCmd
 			}
@@ -317,22 +317,22 @@ func (a *app) initTabIfNeeded(_ int) tea.Cmd {
 	a.initialized[a.activeTab] = true
 	switch a.activeTab {
 	case tabDashboard:
-		return a.dashboard.Init()
+		return a.dashboard.init()
 	case tabConfig:
-		return a.config.Init()
+		return a.config.init()
 	case tabAuthFiles:
-		return a.auth.Init()
+		return a.auth.init()
 	case tabAPIKeys:
-		return a.keys.Init()
+		return a.keys.init()
 	case tabOAuth:
-		return a.oauth.Init()
+		return a.oauth.init()
 	case tabUsage:
-		return a.usage.Init()
+		return a.usage.init()
 	case tabLogs:
 		if !a.logsEnabled {
 			return nil
 		}
-		return a.logs.Init()
+		return a.logs.init()
 	}
 	return nil
 }
@@ -355,20 +355,20 @@ func (a *app) View() string {
 	// Content
 	switch a.activeTab {
 	case tabDashboard:
-		sb.WriteString(a.dashboard.View())
+		sb.WriteString(a.dashboard.view())
 	case tabConfig:
-		sb.WriteString(a.config.View())
+		sb.WriteString(a.config.view())
 	case tabAuthFiles:
-		sb.WriteString(a.auth.View())
+		sb.WriteString(a.auth.view())
 	case tabAPIKeys:
-		sb.WriteString(a.keys.View())
+		sb.WriteString(a.keys.view())
 	case tabOAuth:
-		sb.WriteString(a.oauth.View())
+		sb.WriteString(a.oauth.view())
 	case tabUsage:
-		sb.WriteString(a.usage.View())
+		sb.WriteString(a.usage.view())
 	case tabLogs:
 		if a.logsEnabled {
-			sb.WriteString(a.logs.View())
+			sb.WriteString(a.logs.view())
 		}
 	}
 
@@ -504,31 +504,31 @@ func (a *app) broadcastToAllTabs(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 
-	a.dashboard, cmd = a.dashboard.Update(msg)
+	a.dashboard, cmd = a.dashboard.update(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	a.config, cmd = a.config.Update(msg)
+	a.config, cmd = a.config.update(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	a.auth, cmd = a.auth.Update(msg)
+	a.auth, cmd = a.auth.update(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	a.keys, cmd = a.keys.Update(msg)
+	a.keys, cmd = a.keys.update(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	a.oauth, cmd = a.oauth.Update(msg)
+	a.oauth, cmd = a.oauth.update(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	a.usage, cmd = a.usage.Update(msg)
+	a.usage, cmd = a.usage.update(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}
-	a.logs, cmd = a.logs.Update(msg)
+	a.logs, cmd = a.logs.update(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}

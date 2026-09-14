@@ -72,7 +72,7 @@ func (h *LogHook) Fire(entry *log.Entry) error {
 	return nil
 }
 
-// Chan returns the channel to read log lines from.
-func (h *LogHook) Chan() <-chan string {
+// channel returns the channel to read log lines from.
+func (h *LogHook) channel() <-chan string {
 	return h.ch
 }

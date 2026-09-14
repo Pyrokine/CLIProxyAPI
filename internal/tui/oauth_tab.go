@@ -123,11 +123,11 @@ func newOAuthTabModel(client *Client) oauthTabModel {
 	}
 }
 
-func (m oauthTabModel) Init() tea.Cmd {
+func (m oauthTabModel) init() tea.Cmd {
 	return nil
 }
 
-func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
+func (m oauthTabModel) update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderContent())
@@ -349,7 +349,9 @@ func (m oauthTabModel) startOAuth(provider oauthProvider, generation int) tea.Cm
 		// Call the auth URL endpoint with is_webui=true
 		data, err := m.client.getJSON("/v0/management/" + provider.apiPath + "?is_webui=true")
 		if err != nil {
-			return oauthStartMsg{generation: generation, err: fmt.Errorf("failed to start %s login: %w", provider.name, err)}
+			return oauthStartMsg{
+				generation: generation, err: fmt.Errorf("failed to start %s login: %w", provider.name, err),
+			}
 		}
 
 		authURL := getString(data, "url")
@@ -403,7 +405,7 @@ func (m oauthTabModel) cancelOAuthSession(state string, generation int, flowErr 
 				err: fmt.Errorf("OAuth management client is unavailable"),
 			}
 		}
-		cancelled, err := m.client.CancelAuthSession(state)
+		cancelled, err := m.client.cancelAuthSession(state)
 		return oauthCancelMsg{
 			state:      state,
 			generation: generation,
@@ -472,7 +474,7 @@ func (m oauthTabModel) pollOAuthStatus(state string, expiresIn int, deviceFlow b
 
 			time.Sleep(oauthStatusPollInterval)
 
-			status, errMsg, err := m.client.GetAuthStatus(state)
+			status, errMsg, err := m.client.getAuthStatus(state)
 			if err != nil {
 				consecutiveErrors++
 				if shouldFailOAuthStatusPoll(consecutiveErrors, maxOAuthStatusPollErrors) {
@@ -553,7 +555,7 @@ func shouldFailOAuthStatusPoll(consecutiveErrors, maxErrors int) bool {
 	return consecutiveErrors >= maxErrors
 }
 
-func (m *oauthTabModel) SetSize(w, h int) {
+func (m *oauthTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	m.callbackInput.Width = w - 16
@@ -567,7 +569,7 @@ func (m *oauthTabModel) SetSize(w, h int) {
 	}
 }
 
-func (m oauthTabModel) View() string {
+func (m oauthTabModel) view() string {
 	if !m.ready {
 		return t("loading")
 	}
@@ -615,7 +617,9 @@ func (m oauthTabModel) renderContent() string {
 
 		label := fmt.Sprintf("%s %s", p.emoji, p.name)
 		if isSelected {
-			label = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(colorPrimary).Padding(0, 1).Render(label)
+			label = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(colorPrimary).Padding(
+				0, 1,
+			).Render(label)
 		} else {
 			label = lipgloss.NewStyle().Foreground(colorText).Padding(0, 1).Render(label)
 		}
@@ -642,10 +646,7 @@ func (m oauthTabModel) renderRemoteMode() string {
 
 	// Wrap URL to fit terminal width
 	urlStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	maxURLWidth := m.width - 6
-	if maxURLWidth < 40 {
-		maxURLWidth = 40
-	}
+	maxURLWidth := max(m.width-6, 40)
 	wrappedURL := wrapText(m.authURL, maxURLWidth)
 	for _, line := range wrappedURL {
 		sb.WriteString("  " + urlStyle.Render(line) + "\n")
@@ -684,10 +685,7 @@ func (m oauthTabModel) renderDeviceMode() string {
 	sb.WriteString("\n")
 
 	urlStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	maxURLWidth := m.width - 6
-	if maxURLWidth < 40 {
-		maxURLWidth = 40
-	}
+	maxURLWidth := max(m.width-6, 40)
 	for _, line := range wrapText(m.authURL, maxURLWidth) {
 		sb.WriteString("  " + urlStyle.Render(line) + "\n")
 	}
@@ -696,7 +694,9 @@ func (m oauthTabModel) renderDeviceMode() string {
 	if strings.TrimSpace(m.userCode) != "" {
 		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(t("oauth_user_code")))
 		sb.WriteString("\n")
-		codeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(colorPrimary).Padding(0, 1)
+		codeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FFFFFF")).Background(colorPrimary).Padding(
+			0, 1,
+		)
 		sb.WriteString("  " + codeStyle.Render(m.userCode) + "\n\n")
 	}
 

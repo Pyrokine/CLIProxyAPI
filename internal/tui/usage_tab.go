@@ -33,7 +33,7 @@ func newUsageTabModel(client *Client) usageTabModel {
 	}
 }
 
-func (m *usageTabModel) Init() tea.Cmd {
+func (m *usageTabModel) init() tea.Cmd {
 	return m.fetchData
 }
 
@@ -42,7 +42,7 @@ func (m *usageTabModel) fetchData() tea.Msg {
 	return usageDataMsg{usage: usage, err: err}
 }
 
-func (m *usageTabModel) Update(msg tea.Msg) (usageTabModel, tea.Cmd) {
+func (m *usageTabModel) update(msg tea.Msg) (usageTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderContent())
@@ -71,7 +71,7 @@ func (m *usageTabModel) Update(msg tea.Msg) (usageTabModel, tea.Cmd) {
 	return *m, cmd
 }
 
-func (m *usageTabModel) SetSize(w, h int) {
+func (m *usageTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	if !m.ready {
@@ -84,7 +84,7 @@ func (m *usageTabModel) SetSize(w, h int) {
 	}
 }
 
-func (m *usageTabModel) View() string {
+func (m *usageTabModel) view() string {
 	if !m.ready {
 		return t("loading")
 	}
@@ -250,11 +250,11 @@ func (m *usageTabModel) renderContent() string {
 		for apiName, apiSnap := range apis {
 			if apiMap, ok := apiSnap.(map[string]any); ok {
 				apiReqs := int64(getFloat(apiMap, "total_requests"))
-				apiToks := int64(getFloat(apiMap, "total_tokens"))
+				apiTokens := int64(getFloat(apiMap, "total_tokens"))
 
 				row := fmt.Sprintf(
 					"  %-30s %10d %12s",
-					truncate(maskKey(apiName), 30), apiReqs, formatLargeNumber(apiToks),
+					truncate(maskKey(apiName), 30), apiReqs, formatLargeNumber(apiTokens),
 				)
 				sb.WriteString(lipgloss.NewStyle().Bold(true).Render(row))
 				sb.WriteString("\n")
@@ -264,10 +264,10 @@ func (m *usageTabModel) renderContent() string {
 					for model, v := range models {
 						if stats, ok := v.(map[string]any); ok {
 							mReqs := int64(getFloat(stats, "total_requests"))
-							mToks := int64(getFloat(stats, "total_tokens"))
+							modelTokens := int64(getFloat(stats, "total_tokens"))
 							mRow := fmt.Sprintf(
 								"    ├─ %-28s %10d %12s",
-								truncate(model, 28), mReqs, formatLargeNumber(mToks),
+								truncate(model, 28), mReqs, formatLargeNumber(modelTokens),
 							)
 							sb.WriteString(tableCellStyle.Render(mRow))
 							sb.WriteString("\n")

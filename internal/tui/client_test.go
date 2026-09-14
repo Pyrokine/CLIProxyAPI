@@ -16,9 +16,13 @@ import (
 )
 
 func TestNewClientUsesConfiguredTLSCertificate(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
+	server := httptest.NewTLSServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			},
+		),
+	)
 	defer server.Close()
 
 	certificate := server.Certificate()
@@ -62,38 +66,48 @@ func TestClientCancelAuthSessionReturnsServerDecision(t *testing.T) {
 		{name: "cancelled", body: `{"status":"ok","cancelled":true}`, want: true},
 		{name: "not cancelled", body: `{"status":"ok","cancelled":false}`, want: false},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodDelete {
-					t.Fatalf("method = %s, want DELETE", r.Method)
-				}
-				if got := r.URL.Query().Get("state"); got != "state-1" {
-					t.Fatalf("state = %q, want state-1", got)
-				}
-				_, _ = w.Write([]byte(tt.body))
-			}))
-			defer server.Close()
+		t.Run(
+			tt.name, func(t *testing.T) {
+				server := httptest.NewServer(
+					http.HandlerFunc(
+						func(w http.ResponseWriter, r *http.Request) {
+							if r.Method != http.MethodDelete {
+								t.Fatalf("method = %s, want DELETE", r.Method)
+							}
+							if got := r.URL.Query().Get("state"); got != "state-1" {
+								t.Fatalf("state = %q, want state-1", got)
+							}
+							_, _ = w.Write([]byte(tt.body))
+						},
+					),
+				)
+				defer server.Close()
 
-			client := &Client{baseURL: server.URL, http: server.Client()}
-			got, err := client.CancelAuthSession("state-1")
-			if err != nil {
-				t.Fatalf("CancelAuthSession() error = %v", err)
-			}
-			if got != tt.want {
-				t.Fatalf("CancelAuthSession() = %v, want %v", got, tt.want)
-			}
-		})
+				client := &Client{baseURL: server.URL, http: server.Client()}
+				got, err := client.cancelAuthSession("state-1")
+				if err != nil {
+					t.Fatalf("CancelAuthSession() error = %v", err)
+				}
+				if got != tt.want {
+					t.Fatalf("CancelAuthSession() = %v, want %v", got, tt.want)
+				}
+			},
+		)
 	}
 }
 
 func TestClientCancelAuthSessionRejectsMissingDecision(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			},
+		),
+	)
 	defer server.Close()
 
 	client := &Client{baseURL: server.URL, http: server.Client()}
-	_, err := client.CancelAuthSession("state-1")
+	_, err := client.cancelAuthSession("state-1")
 	if err == nil || !strings.Contains(err.Error(), "missing cancelled field") {
 		t.Fatalf("CancelAuthSession() error = %v", err)
 	}

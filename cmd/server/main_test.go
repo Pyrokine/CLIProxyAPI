@@ -19,6 +19,44 @@ func TestCloudDeployHomeConfigIsAvailableWithoutLocalFile(t *testing.T) {
 	}
 }
 
+func TestModelCatalogUpdaterPlan(t *testing.T) {
+	tests := []struct {
+		name            string
+		localModel      bool
+		homeEnabled     bool
+		wantModels      bool
+		wantCodexClient bool
+	}{
+		{name: "normal CPA refreshes both catalogs", wantModels: true, wantCodexClient: true},
+		{
+			name:            "home mode keeps models local and refreshes Codex templates",
+			homeEnabled:     true,
+			wantCodexClient: true,
+		},
+		{name: "local model disables remote catalogs", localModel: true},
+		{name: "local model disables remote catalogs under home", localModel: true, homeEnabled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(
+			tt.name, func(t *testing.T) {
+				gotModels, gotCodex := modelCatalogUpdaterPlan(tt.localModel, tt.homeEnabled)
+				if gotModels != tt.wantModels || gotCodex != tt.wantCodexClient {
+					t.Fatalf(
+						"modelCatalogUpdaterPlan(%v, %v) = (%v, %v), want (%v, %v)",
+						tt.localModel,
+						tt.homeEnabled,
+						gotModels,
+						gotCodex,
+						tt.wantModels,
+						tt.wantCodexClient,
+					)
+				}
+			},
+		)
+	}
+}
+
 func TestShouldCreateExampleAPIKeyLocalManagementPassword(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	cfg := &config.Config{}
@@ -76,7 +114,7 @@ func TestWriteExampleAPIKeyLocalManagementPasswordRejectsNullDevice(t *testing.T
 }
 
 func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
-	cfg := &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"your-api-key-1"}}}
+	cfg := &config.Config{APIKeys: []string{"your-api-key-1"}}
 	tests := []struct {
 		name               string
 		cfg                *config.Config
@@ -89,7 +127,7 @@ func TestShouldEnableExampleAPIKeySafeMode(t *testing.T) {
 	}{
 		{name: "normal server with example key", cfg: cfg, want: true},
 		{
-			name: "real key", cfg: &config.Config{SDKConfig: config.SDKConfig{APIKeys: []string{"real-key"}}},
+			name: "real key", cfg: &config.Config{APIKeys: []string{"real-key"}},
 			want: false,
 		},
 		{name: "command mode", cfg: cfg, commandMode: true, want: false},

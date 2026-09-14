@@ -65,7 +65,7 @@ func newAuthTabModel(client *Client) authTabModel {
 	}
 }
 
-func (m *authTabModel) Init() tea.Cmd {
+func (m *authTabModel) init() tea.Cmd {
 	return m.fetchFiles
 }
 
@@ -74,7 +74,7 @@ func (m *authTabModel) fetchFiles() tea.Msg {
 	return authFilesMsg{files: files, err: err}
 }
 
-func (m *authTabModel) Update(msg tea.Msg) (authTabModel, tea.Cmd) {
+func (m *authTabModel) update(msg tea.Msg) (authTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderContent())
@@ -143,7 +143,7 @@ func (m *authTabModel) startEdit(fieldIdx int) tea.Cmd {
 	return textinput.Blink
 }
 
-func (m *authTabModel) SetSize(w, h int) {
+func (m *authTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	m.editInput.Width = w - 20
@@ -157,7 +157,7 @@ func (m *authTabModel) SetSize(w, h int) {
 	}
 }
 
-func (m *authTabModel) View() string {
+func (m *authTabModel) view() string {
 	if !m.ready {
 		return t("loading")
 	}
@@ -345,7 +345,7 @@ func (m *authTabModel) handleEditInput(msg tea.KeyMsg) (authTabModel, tea.Cmd) {
 			fields[fieldKey] = value
 		}
 		return *m, func() tea.Msg {
-			err := m.client.PatchAuthFileFields(fileName, fields)
+			err := m.client.patchAuthFileFields(fileName, fields)
 			if err != nil {
 				return authActionMsg{err: err}
 			}
@@ -372,7 +372,7 @@ func (m *authTabModel) handleConfirmInput(msg tea.KeyMsg) (authTabModel, tea.Cmd
 		if idx < len(m.files) {
 			name := getString(m.files[idx], "name")
 			return *m, func() tea.Msg {
-				err := m.client.DeleteAuthFile(name)
+				err := m.client.deleteAuthFile(name)
 				if err != nil {
 					return authActionMsg{err: err}
 				}

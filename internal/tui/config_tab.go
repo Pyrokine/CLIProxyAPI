@@ -55,7 +55,7 @@ func newConfigTabModel(client *Client) configTabModel {
 	}
 }
 
-func (m *configTabModel) Init() tea.Cmd {
+func (m *configTabModel) init() tea.Cmd {
 	return m.fetchConfig
 }
 
@@ -64,7 +64,7 @@ func (m *configTabModel) fetchConfig() tea.Msg {
 	return configDataMsg{config: cfg, err: err}
 }
 
-func (m *configTabModel) Update(msg tea.Msg) (configTabModel, tea.Cmd) {
+func (m *configTabModel) update(msg tea.Msg) (configTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderContent())
@@ -215,7 +215,7 @@ func configFieldEditValue(f configField) string {
 	return f.value
 }
 
-func (m *configTabModel) SetSize(w, h int) {
+func (m *configTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	if !m.ready {
@@ -239,7 +239,7 @@ func (m *configTabModel) ensureCursorVisible() {
 	}
 }
 
-func (m *configTabModel) View() string {
+func (m *configTabModel) view() string {
 	if !m.ready {
 		return t("loading")
 	}
@@ -437,11 +437,4 @@ func getBoolNested(m map[string]any, keys ...string) bool {
 		}
 	}
 	return false
-}
-
-func maskIfNotEmpty(s string) string {
-	if s == "" {
-		return t("not_set")
-	}
-	return maskKey(s)
 }

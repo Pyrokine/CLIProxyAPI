@@ -43,7 +43,7 @@ func newLogsTabModel(client *Client, hook *LogHook) logsTabModel {
 	}
 }
 
-func (m *logsTabModel) Init() tea.Cmd {
+func (m *logsTabModel) init() tea.Cmd {
 	if m.hook != nil {
 		return m.waitForLog
 	}
@@ -51,7 +51,7 @@ func (m *logsTabModel) Init() tea.Cmd {
 }
 
 func (m *logsTabModel) fetchLogs() tea.Msg {
-	lines, latest, err := m.client.GetLogs(m.after, 200)
+	lines, latest, err := m.client.getLogs(m.after, 200)
 	return logsPollMsg{
 		lines:  lines,
 		latest: latest,
@@ -71,14 +71,14 @@ func (m *logsTabModel) waitForLog() tea.Msg {
 	if m.hook == nil {
 		return nil
 	}
-	line, ok := <-m.hook.Chan()
+	line, ok := <-m.hook.channel()
 	if !ok {
 		return nil
 	}
 	return logLineMsg(line)
 }
 
-func (m *logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
+func (m *logsTabModel) update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderLogs())
@@ -170,7 +170,7 @@ func (m *logsTabModel) Update(msg tea.Msg) (logsTabModel, tea.Cmd) {
 	return *m, cmd
 }
 
-func (m *logsTabModel) SetSize(w, h int) {
+func (m *logsTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	if !m.ready {
@@ -183,7 +183,7 @@ func (m *logsTabModel) SetSize(w, h int) {
 	}
 }
 
-func (m *logsTabModel) View() string {
+func (m *logsTabModel) view() string {
 	if !m.ready {
 		return t("loading")
 	}

@@ -56,12 +56,14 @@ func TestOAuthTabUpdateIgnoresStalePollMsg(t *testing.T) {
 	m.viewport = viewport.New(80, 24)
 	m.viewport.SetContent(m.renderContent())
 
-	updated, cmd := m.Update(oauthPollMsg{
-		state:      "state-old",
-		generation: 1,
-		done:       true,
-		message:    "should be ignored",
-	})
+	updated, cmd := m.update(
+		oauthPollMsg{
+			state:      "state-old",
+			generation: 1,
+			done:       true,
+			message:    "should be ignored",
+		},
+	)
 	if cmd != nil {
 		t.Fatal("expected no command for stale poll")
 	}
@@ -82,12 +84,14 @@ func TestOAuthTabUpdateAcceptsCurrentPollMsg(t *testing.T) {
 	m.viewport = viewport.New(80, 24)
 	m.viewport.SetContent(m.renderContent())
 
-	updated, _ := m.Update(oauthPollMsg{
-		state:      "state-current",
-		generation: 3,
-		done:       true,
-		message:    "Authentication successful",
-	})
+	updated, _ := m.update(
+		oauthPollMsg{
+			state:      "state-current",
+			generation: 3,
+			done:       true,
+			message:    "Authentication successful",
+		},
+	)
 	if updated.state != oauthSuccess {
 		t.Fatalf("state = %v, want oauthSuccess", updated.state)
 	}
@@ -104,7 +108,7 @@ func TestOAuthTabEscRemoteWaitsForCancellationResult(t *testing.T) {
 	m.viewport = viewport.New(80, 24)
 	m.viewport.SetContent(m.renderContent())
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, cmd := m.update(tea.KeyMsg{Type: tea.KeyEsc})
 	if updated.state != oauthCancelling {
 		t.Fatalf("state = %v, want oauthCancelling", updated.state)
 	}
@@ -138,7 +142,7 @@ func TestOAuthTabEscWithActiveCallbackInputPreservesFlowUntilCancelled(t *testin
 	m.viewport = viewport.New(80, 24)
 	m.viewport.SetContent(m.renderContent())
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated, cmd := m.update(tea.KeyMsg{Type: tea.KeyEsc})
 	if updated.state != oauthCancelling {
 		t.Fatalf("state = %v, want oauthCancelling", updated.state)
 	}
@@ -175,11 +179,13 @@ func TestOAuthTabStaleStartIsIgnored(t *testing.T) {
 	m.viewport = viewport.New(80, 24)
 	m.viewport.SetContent(m.renderContent())
 
-	updated, cmd := m.Update(oauthStartMsg{
-		url:        "https://example.com",
-		state:      "stale-state",
-		generation: 1,
-	})
+	updated, cmd := m.update(
+		oauthStartMsg{
+			url:        "https://example.com",
+			state:      "stale-state",
+			generation: 1,
+		},
+	)
 	if updated.state != oauthIdle {
 		t.Fatalf("state = %v, want oauthIdle after stale start", updated.state)
 	}
@@ -212,15 +218,17 @@ func TestOAuthTabCurrentStartOpensBrowserAfterGenerationCheck(t *testing.T) {
 	m.ready = true
 	m.viewport = viewport.New(80, 24)
 
-	updated, cmd := m.Update(oauthStartMsg{
-		url:          "https://example.com",
-		state:        "current-state",
-		providerName: "Gemini CLI",
-		providerKey:  "gemini",
-		deviceFlow:   true,
-		expiresIn:    60,
-		generation:   3,
-	})
+	updated, cmd := m.update(
+		oauthStartMsg{
+			url:          "https://example.com",
+			state:        "current-state",
+			providerName: "Gemini CLI",
+			providerKey:  "gemini",
+			deviceFlow:   true,
+			expiresIn:    60,
+			generation:   3,
+		},
+	)
 	if openCalls != 1 {
 		t.Fatalf("browser opened %d times, want 1", openCalls)
 	}
@@ -243,9 +251,11 @@ func TestOAuthTabCancellationConfirmationClearsRemoteState(t *testing.T) {
 	m.ready = true
 	m.viewport = viewport.New(80, 24)
 
-	updated, cmd := m.Update(oauthCancelMsg{
-		state: "state-to-cancel", generation: 5, cancelled: true,
-	})
+	updated, cmd := m.update(
+		oauthCancelMsg{
+			state: "state-to-cancel", generation: 5, cancelled: true,
+		},
+	)
 	if cmd != nil {
 		t.Fatal("successful cancellation returned a command")
 	}
@@ -269,7 +279,7 @@ func TestOAuthTabCancellationRejectionResumesPolling(t *testing.T) {
 	m.ready = true
 	m.viewport = viewport.New(80, 24)
 
-	updated, cmd := m.Update(oauthCancelMsg{state: "saving-state", generation: 6})
+	updated, cmd := m.update(oauthCancelMsg{state: "saving-state", generation: 6})
 	if updated.state != oauthRemote {
 		t.Fatalf("state = %v, want oauthRemote", updated.state)
 	}
@@ -290,16 +300,23 @@ func TestOAuthTabPollFailureCancelsBeforeShowingTerminalError(t *testing.T) {
 	m.ready = true
 	m.viewport = viewport.New(80, 24)
 
-	cancelling, cancelCmd := m.Update(oauthPollMsg{
-		state: "state-to-cancel", generation: 7, cancelSession: true, err: flowErr,
-	})
-	if cancelling.state != oauthCancelling || cancelCmd == nil {
-		t.Fatalf("poll failure state = %v cmd=%v", cancelling.state, cancelCmd)
+	cancelling, cancelCmd := m.update(
+		oauthPollMsg{
+			state: "state-to-cancel", generation: 7, cancelSession: true, err: flowErr,
+		},
+	)
+	if cancelling.state != oauthCancelling {
+		t.Fatalf("poll failure state = %v, want %v", cancelling.state, oauthCancelling)
+	}
+	if cancelCmd == nil {
+		t.Fatal("poll failure did not return a cancellation command")
 	}
 
-	updated, cmd := cancelling.Update(oauthCancelMsg{
-		state: "state-to-cancel", generation: 7, cancelled: true, flowErr: flowErr,
-	})
+	updated, cmd := cancelling.update(
+		oauthCancelMsg{
+			state: "state-to-cancel", generation: 7, cancelled: true, flowErr: flowErr,
+		},
+	)
 	if cmd != nil {
 		t.Fatal("confirmed failure cancellation returned a command")
 	}
@@ -320,9 +337,11 @@ func TestOAuthTabIgnoresStaleCallbackSubmitResult(t *testing.T) {
 	m.ready = true
 	m.viewport = viewport.New(80, 24)
 
-	updated, cmd := m.Update(oauthCallbackSubmitMsg{
-		state: "old-state", generation: 8, err: errors.New("stale error"),
-	})
+	updated, cmd := m.update(
+		oauthCallbackSubmitMsg{
+			state: "old-state", generation: 8, err: errors.New("stale error"),
+		},
+	)
 	if cmd != nil {
 		t.Fatal("stale callback result returned a command")
 	}

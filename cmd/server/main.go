@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	configaccess "github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access"
+	managementHandlers "github.com/Pyrokine/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cmd"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -99,6 +100,13 @@ func init() {
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
 func main() {
+	if handled, exitCode := managementHandlers.RunUpdateGuardCommand(os.Args[1:]); handled {
+		if exitCode != 0 {
+			os.Exit(exitCode)
+		}
+		return
+	}
+
 	fmt.Printf(
 		"CLIProxyAPI Version: %s, Commit: %s, BuiltAt: %s\n", buildinfo.Version, buildinfo.Commit, buildinfo.BuildDate,
 	)
@@ -231,9 +239,11 @@ func main() {
 	}
 	cfg := result.cfg
 	configFilePath := result.configFilePath
-	if result.homeClient != nil {
-		defer result.homeClient.Close()
-	}
+	defer func() {
+		if result.homeClient != nil {
+			result.homeClient.Close()
+		}
+	}()
 
 	// -t: test configuration and exit
 	if testConfig {
@@ -301,6 +311,10 @@ func main() {
 			return
 		}
 	}
+	if result.homeClient != nil {
+		result.homeClient.Close()
+		result.homeClient = nil
+	}
 	if pluginHost.HasTriggeredCommandLineFlags() {
 		if exitCode, handled := pluginHost.ExecuteCommandLine(
 			context.Background(), os.Args[0], os.Args[1:], configFilePath, flag.CommandLine,
@@ -356,20 +370,18 @@ func main() {
 		if standalone {
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
+			startModelCatalogUpdaters(localModel, cfg.Home.Enabled, cfg.ModelRefreshInterval)
 		}
-		if !localModel && !cfg.Home.Enabled {
-			registry.StartModelsUpdater(context.Background(), cfg.ModelRefreshInterval)
-		}
-		if errRun := runTUIMode(cfg, configFilePath, password, standalone, pluginHost, serverOptions...); errRun != nil {
+		if errRun := runTUIMode(
+			cfg, configFilePath, password, standalone, pluginHost, serverOptions...,
+		); errRun != nil {
 			log.Errorf("TUI exited with error: %v", errRun)
 			os.Exit(1)
 		}
 	} else {
 		managementasset.StartAutoUpdater(context.Background(), configFilePath)
 		misc.StartAntigravityVersionUpdater(context.Background())
-		if !localModel && !cfg.Home.Enabled {
-			registry.StartModelsUpdater(context.Background(), cfg.ModelRefreshInterval)
-		}
+		startModelCatalogUpdaters(localModel, cfg.Home.Enabled, cfg.ModelRefreshInterval)
 		if errStart := cmd.StartServiceWithPluginHost(
 			cfg, configFilePath, password, pluginHost, serverOptions...,
 		); errStart != nil {
@@ -379,10 +391,32 @@ func main() {
 	}
 }
 
+// modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
+// Codex client templates still refresh under Home mode because the model list
+// comes from Home IDs while template metadata stays edge-local.
+func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient bool) {
+	if localModel {
+		return false, false
+	}
+	return !homeEnabled, true
+}
+
+func startModelCatalogUpdaters(localModel, homeEnabled bool, refreshHours int) {
+	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
+	if startCodexClient {
+		registry.StartCodexClientModelsUpdater(context.Background(), refreshHours)
+	}
+	if startModels {
+		registry.StartModelsUpdater(context.Background(), refreshHours)
+	} else if homeEnabled && !localModel {
+		log.Info("Home mode: remote models.json updates disabled; Codex client model list follows Home model IDs")
+	}
+}
+
 // checkCloudConfig validates the configuration file for cloud deploy mode
 // and returns true if a usable configuration exists.
 func pluginBootstrapConfigPath(args []string, defaultPath string) string {
-	for i := 0; i < len(args); i++ {
+	for i := range args {
 		arg := args[i]
 		switch {
 		case arg == "--":

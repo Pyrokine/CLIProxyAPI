@@ -62,27 +62,27 @@ func newKeysTabModel(client *Client) keysTabModel {
 	}
 }
 
-func (m *keysTabModel) Init() tea.Cmd {
+func (m *keysTabModel) init() tea.Cmd {
 	return m.fetchKeys
 }
 
 func (m *keysTabModel) fetchKeys() tea.Msg {
 	result := keysDataMsg{}
-	apiKeys, err := m.client.GetAPIKeys()
+	apiKeys, err := m.client.getAPIKeys()
 	if err != nil {
 		result.err = err
 		return result
 	}
 	result.apiKeys = apiKeys
-	result.gemini, _ = m.client.GetGeminiKeys()
-	result.claude, _ = m.client.GetClaudeKeys()
-	result.codex, _ = m.client.GetCodexKeys()
+	result.gemini, _ = m.client.getGeminiKeys()
+	result.claude, _ = m.client.getClaudeKeys()
+	result.codex, _ = m.client.getCodexKeys()
 	result.vertex, _ = m.client.getVertexKeys()
-	result.openai, _ = m.client.GetOpenAICompat()
+	result.openai, _ = m.client.getOpenAICompat()
 	return result
 }
 
-func (m *keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
+func (m *keysTabModel) update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		m.viewport.SetContent(m.renderContent())
@@ -254,7 +254,7 @@ func (m *keysTabModel) Update(msg tea.Msg) (keysTabModel, tea.Cmd) {
 	return *m, cmd
 }
 
-func (m *keysTabModel) SetSize(w, h int) {
+func (m *keysTabModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	m.editInput.Width = w - 16
@@ -268,7 +268,7 @@ func (m *keysTabModel) SetSize(w, h int) {
 	}
 }
 
-func (m *keysTabModel) View() string {
+func (m *keysTabModel) view() string {
 	if !m.ready {
 		return t("loading")
 	}

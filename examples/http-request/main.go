@@ -125,7 +125,7 @@ func main() {
 	}
 	fmt.Printf("Prepared request status: %d\n%s\n\n", respPrepared.StatusCode, bodyPrepared)
 
-	// Example 2: Execute a raw request via core.HttpRequest (auto inject + do).
+	// Example 2: Execute a raw request via core.HttpRequest (automatic injection and execution).
 	rawBody := []byte(`{"hello":"world"}`)
 	rawReq, errRawReq := http.NewRequestWithContext(
 		ctx, http.MethodPost, "https://httpbin.org/anything", bytes.NewReader(rawBody),

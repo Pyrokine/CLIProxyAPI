@@ -192,21 +192,6 @@ func (c *Client) GetConfig() (map[string]any, error) {
 	return c.getJSON("/v0/management/config")
 }
 
-// GetConfigYAML fetches the raw config.yaml content.
-func (c *Client) GetConfigYAML() (string, error) {
-	data, err := c.get("/v0/management/config.yaml")
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
-}
-
-// PutConfigYAML uploads new config.yaml content.
-func (c *Client) PutConfigYAML(yamlContent string) error {
-	_, err := c.put("/v0/management/config.yaml", strings.NewReader(yamlContent))
-	return err
-}
-
 // getUsage fetches usage statistics.
 func (c *Client) getUsage() (map[string]any, error) {
 	return c.getJSON("/v0/management/usage")
@@ -222,8 +207,8 @@ func (c *Client) getAuthFiles() ([]map[string]any, error) {
 	return extractList(wrapper, "files")
 }
 
-// DeleteAuthFile deletes a single auth file by name.
-func (c *Client) DeleteAuthFile(name string) error {
+// deleteAuthFile deletes a single auth file by name.
+func (c *Client) deleteAuthFile(name string) error {
 	query := url.Values{}
 	query.Set("name", name)
 	path := "/v0/management/auth-files?" + query.Encode()
@@ -244,16 +229,16 @@ func (c *Client) toggleAuthFile(name string, disabled bool) error {
 	return err
 }
 
-// PatchAuthFileFields updates editable fields on an auth file.
-func (c *Client) PatchAuthFileFields(name string, fields map[string]any) error {
+// patchAuthFileFields updates editable fields on an auth file.
+func (c *Client) patchAuthFileFields(name string, fields map[string]any) error {
 	fields["name"] = name
 	body, _ := json.Marshal(fields)
 	_, err := c.patch("/v0/management/auth-files/fields", strings.NewReader(string(body)))
 	return err
 }
 
-// GetLogs fetches log lines from the server.
-func (c *Client) GetLogs(after int64, limit int) ([]string, int64, error) {
+// getLogs fetches log lines from the server.
+func (c *Client) getLogs(after int64, limit int) ([]string, int64, error) {
 	query := url.Values{}
 	if limit > 0 {
 		query.Set("limit", strconv.Itoa(limit))
@@ -306,9 +291,9 @@ func (c *Client) GetLogs(after int64, limit int) ([]string, int64, error) {
 	return lines, latest, nil
 }
 
-// GetAPIKeys fetches the list of API keys.
+// getAPIKeys fetches the list of API keys.
 // API returns {"api-keys": [...]}.
-func (c *Client) GetAPIKeys() ([]string, error) {
+func (c *Client) getAPIKeys() ([]string, error) {
 	wrapper, err := c.getJSON("/v0/management/api-keys")
 	if err != nil {
 		return nil, err
@@ -356,19 +341,19 @@ func (c *Client) deleteAPIKey(index int) error {
 	return nil
 }
 
-// GetGeminiKeys fetches Gemini API keys.
+// getGeminiKeys fetches Gemini API keys.
 // API returns {"gemini-api-key": [...]}.
-func (c *Client) GetGeminiKeys() ([]map[string]any, error) {
+func (c *Client) getGeminiKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/gemini-api-key", "gemini-api-key")
 }
 
-// GetClaudeKeys fetches Claude API keys.
-func (c *Client) GetClaudeKeys() ([]map[string]any, error) {
+// getClaudeKeys fetches Claude API keys.
+func (c *Client) getClaudeKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/claude-api-key", "claude-api-key")
 }
 
-// GetCodexKeys fetches Codex API keys.
-func (c *Client) GetCodexKeys() ([]map[string]any, error) {
+// getCodexKeys fetches Codex API keys.
+func (c *Client) getCodexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/codex-api-key", "codex-api-key")
 }
 
@@ -377,8 +362,8 @@ func (c *Client) getVertexKeys() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/vertex-api-key", "vertex-api-key")
 }
 
-// GetOpenAICompat fetches OpenAI compatibility entries.
-func (c *Client) GetOpenAICompat() ([]map[string]any, error) {
+// getOpenAICompat fetches OpenAI compatibility entries.
+func (c *Client) getOpenAICompat() ([]map[string]any, error) {
 	return c.getWrappedKeyList("/v0/management/openai-compatibility", "openai-compatibility")
 }
 
@@ -408,23 +393,9 @@ func extractList(wrapper map[string]any, key string) ([]map[string]any, error) {
 	return result, nil
 }
 
-// GetDebug fetches the current debug setting.
-func (c *Client) GetDebug() (bool, error) {
-	wrapper, err := c.getJSON("/v0/management/debug")
-	if err != nil {
-		return false, err
-	}
-	if v, ok := wrapper["debug"]; ok {
-		if b, ok := v.(bool); ok {
-			return b, nil
-		}
-	}
-	return false, nil
-}
-
-// GetAuthStatus polls the OAuth session status.
+// getAuthStatus polls the OAuth session status.
 // Returns status ("wait", "ok", "error") and optional error message.
-func (c *Client) GetAuthStatus(state string) (string, string, error) {
+func (c *Client) getAuthStatus(state string) (string, string, error) {
 	query := url.Values{}
 	query.Set("state", state)
 	path := "/v0/management/get-auth-status?" + query.Encode()
@@ -437,8 +408,8 @@ func (c *Client) GetAuthStatus(state string) (string, string, error) {
 	return status, errMsg, nil
 }
 
-// CancelAuthSession cancels a pending OAuth session on the management server.
-func (c *Client) CancelAuthSession(state string) (bool, error) {
+// cancelAuthSession cancels a pending OAuth session on the management server.
+func (c *Client) cancelAuthSession(state string) (bool, error) {
 	state = strings.TrimSpace(state)
 	if state == "" {
 		return false, nil
@@ -485,11 +456,5 @@ func (c *Client) putIntField(path string, value int) error {
 func (c *Client) putStringField(path string, value string) error {
 	body, _ := json.Marshal(map[string]any{"value": value})
 	_, err := c.put("/v0/management/"+path, strings.NewReader(string(body)))
-	return err
-}
-
-// DeleteField sends a DELETE request for a config field.
-func (c *Client) DeleteField(path string) error {
-	_, _, err := c.doRequest("DELETE", "/v0/management/"+path, nil)
 	return err
 }

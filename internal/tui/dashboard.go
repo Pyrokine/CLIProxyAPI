@@ -41,7 +41,7 @@ func newDashboardModel(client *Client) dashboardModel {
 	}
 }
 
-func (m *dashboardModel) Init() tea.Cmd {
+func (m *dashboardModel) init() tea.Cmd {
 	return m.fetchData
 }
 
@@ -49,7 +49,7 @@ func (m *dashboardModel) fetchData() tea.Msg {
 	cfg, cfgErr := m.client.GetConfig()
 	usage, usageErr := m.client.getUsage()
 	authFiles, authErr := m.client.getAuthFiles()
-	apiKeys, keysErr := m.client.GetAPIKeys()
+	apiKeys, keysErr := m.client.getAPIKeys()
 
 	var err error
 	for _, e := range []error{cfgErr, usageErr, authErr, keysErr} {
@@ -61,7 +61,7 @@ func (m *dashboardModel) fetchData() tea.Msg {
 	return dashboardDataMsg{config: cfg, usage: usage, authFiles: authFiles, apiKeys: apiKeys, err: err}
 }
 
-func (m *dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
+func (m *dashboardModel) update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case localeChangedMsg:
 		// Re-render immediately with cached data using new locale
@@ -101,7 +101,7 @@ func (m *dashboardModel) Update(msg tea.Msg) (dashboardModel, tea.Cmd) {
 	return *m, cmd
 }
 
-func (m *dashboardModel) SetSize(w, h int) {
+func (m *dashboardModel) setSize(w, h int) {
 	m.width = w
 	m.height = h
 	if !m.ready {
@@ -114,7 +114,7 @@ func (m *dashboardModel) SetSize(w, h int) {
 	}
 }
 
-func (m *dashboardModel) View() string {
+func (m *dashboardModel) view() string {
 	if !m.ready {
 		return t("loading")
 	}
@@ -308,9 +308,9 @@ func (m *dashboardModel) renderDashboard(
 							for model, v := range models {
 								if stats, ok := v.(map[string]any); ok {
 									reqs := int64(getFloat(stats, "total_requests"))
-									toks := int64(getFloat(stats, "total_tokens"))
+									tokens := int64(getFloat(stats, "total_tokens"))
 									row := fmt.Sprintf(
-										"  %-40s %10d %12s", truncate(model, 40), reqs, formatLargeNumber(toks),
+										"  %-40s %10d %12s", truncate(model, 40), reqs, formatLargeNumber(tokens),
 									)
 									sb.WriteString(tableCellStyle.Render(row))
 									sb.WriteString("\n")

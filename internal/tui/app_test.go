@@ -21,9 +21,11 @@ func TestAppRoutesOAuthAsyncMessagesWhileAnotherTabIsActive(t *testing.T) {
 	root.oauth.ready = true
 	root.oauth.viewport = viewport.New(80, 24)
 
-	_, cmd := root.Update(oauthPollMsg{
-		state: "state-1", generation: 3, done: true, message: "Authentication successful",
-	})
+	_, cmd := root.Update(
+		oauthPollMsg{
+			state: "state-1", generation: 3, done: true, message: "Authentication successful",
+		},
+	)
 	if cmd != nil {
 		t.Fatal("completed OAuth message returned a command")
 	}
