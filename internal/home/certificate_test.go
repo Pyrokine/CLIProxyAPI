@@ -188,7 +188,7 @@ func readCertificateTestRESPArray(reader *bufio.Reader) ([]string, error) {
 		return nil, errCount
 	}
 	args := make([]string, 0, count)
-	for i := 0; i < count; i++ {
+	for range count {
 		bulkPrefix, errBulkPrefix := reader.ReadByte()
 		if errBulkPrefix != nil {
 			return nil, errBulkPrefix

@@ -4,13 +4,34 @@ import (
 	"context"
 	"net/http"
 	"testing"
+	"time"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
 )
 
 type isolatedHomeClient struct {
 	label string
 }
 
+func (*isolatedHomeClient) Enabled() bool { return true }
+
 func (*isolatedHomeClient) HeartbeatOK() bool { return true }
+
+func (*isolatedHomeClient) KVGet(context.Context, string) ([]byte, bool, error) {
+	return nil, false, nil
+}
+
+func (*isolatedHomeClient) KVSet(context.Context, string, []byte, home.KVSetOptions) (bool, error) {
+	return true, nil
+}
+
+func (*isolatedHomeClient) KVDel(context.Context, ...string) (int64, error) {
+	return 0, nil
+}
+
+func (*isolatedHomeClient) KVExpire(context.Context, string, time.Duration) (bool, error) {
+	return true, nil
+}
 
 func (c *isolatedHomeClient) RPopAuth(
 	context.Context,
@@ -22,7 +43,7 @@ func (c *isolatedHomeClient) RPopAuth(
 	return []byte(c.label + "-dispatch"), nil
 }
 
-func (c *isolatedHomeClient) GetRefreshAuth(context.Context, string) ([]byte, error) {
+func (c *isolatedHomeClient) GetRefreshAuth(context.Context, string, string) ([]byte, error) {
 	return []byte(c.label + "-refresh"), nil
 }
 
@@ -32,10 +53,12 @@ func TestManagerHomeClientsAreIsolated(t *testing.T) {
 	previousRefreshClient := currentHomeRuntimeRefreshClient
 	currentHomeDispatcher = func() homeAuthDispatcher { return globalClient }
 	currentHomeRuntimeRefreshClient = func() HomeRefreshClient { return globalClient }
-	t.Cleanup(func() {
-		currentHomeDispatcher = previousDispatcher
-		currentHomeRuntimeRefreshClient = previousRefreshClient
-	})
+	t.Cleanup(
+		func() {
+			currentHomeDispatcher = previousDispatcher
+			currentHomeRuntimeRefreshClient = previousRefreshClient
+		},
+	)
 
 	clientA := &isolatedHomeClient{label: "service-a"}
 	clientB := &isolatedHomeClient{label: "service-b"}
@@ -72,6 +95,18 @@ func TestManagerHomeClientsAreIsolated(t *testing.T) {
 	if !ok || refreshClientB != clientB {
 		t.Fatalf("service B refresh client = (%#v, %t)", refreshClientB, ok)
 	}
+	scopeA, scopeAOK := home.ClientScopeFromContext(ctxA)
+	scopeB, scopeBOK := home.ClientScopeFromContext(ctxB)
+	if !scopeAOK || !scopeBOK || !scopeA.Enabled || !scopeB.Enabled || scopeA.ID == "" || scopeB.ID == "" {
+		t.Fatalf("service scopes = (%+v, %t) and (%+v, %t)", scopeA, scopeAOK, scopeB, scopeBOK)
+	}
+	if scopeA.ID == scopeB.ID {
+		t.Fatalf("different managers share runtime scope %q", scopeA.ID)
+	}
+	if scopeA.Client != clientA || scopeB.Client != clientB {
+		t.Fatalf("service-scoped KV clients = %#v and %#v", scopeA.Client, scopeB.Client)
+	}
+
 	ctxNil := managerNil.withHomeRefreshClient(context.Background())
 	refreshClientNil, ok := HomeRefreshClientFromContext(ctxNil)
 	if !ok || refreshClientNil != nil {
@@ -79,5 +114,9 @@ func TestManagerHomeClientsAreIsolated(t *testing.T) {
 	}
 	if managerNil.homeDispatcher() != nil {
 		t.Fatal("explicit nil Home provider inherited compatibility dispatcher")
+	}
+	scopeNil, scopeNilOK := home.ClientScopeFromContext(ctxNil)
+	if !scopeNilOK || scopeNil.Enabled {
+		t.Fatalf("local nil Home provider scope = (%+v, %t), want disabled", scopeNil, scopeNilOK)
 	}
 }
