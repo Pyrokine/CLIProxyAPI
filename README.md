@@ -2,12 +2,10 @@
 
 English | [中文](README_CN.md)
 
-A proxy server that provides OpenAI/Gemini/Claude/Codex compatible API interfaces for CLI.
+CLIProxyAPI exposes OpenAI, Gemini, Claude, and Codex-compatible APIs for CLI tools and SDKs
 
-It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
-
-So you can use local or multi-account CLI access with OpenAI(include Responses)/Gemini/Claude-compatible clients and
-SDKs.
+It supports OAuth and API-key providers, multiple accounts, streaming responses, tool calls, text and image input,
+configurable upstream routing, and a built-in model catalog with current DeepSeek V4.1 model identifiers
 
 ## Sponsor
 
@@ -36,33 +34,21 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 </tbody>
 </table>
 
-## Overview
+## Highlights
 
-- OpenAI/Gemini/Claude compatible API endpoints for CLI models
-- OpenAI Codex support (GPT models) via OAuth login
-- Claude Code support via OAuth login
-- Qwen Code support via OAuth login
-- iFlow support via OAuth login
-- OpenAI `/v1/models` returns dynamic model metadata, including context length and other capability fields
-- OpenAI Responses `/responses/compact` endpoint for compatible upstreams
-- Streaming and non-streaming responses
-- Function calling/tools support
-- Multimodal input support (text and images)
-- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Qwen and iFlow)
-- Simple CLI authentication flows (Gemini, OpenAI, Claude, Qwen and iFlow)
-- Generative Language API Key support
-- AI Studio Build multi-account load balancing
-- Gemini CLI multi-account load balancing
-- Claude Code multi-account load balancing
-- Qwen Code multi-account load balancing
-- iFlow multi-account load balancing
-- OpenAI Codex multi-account load balancing
-- OpenAI-compatible upstream providers via config (e.g., OpenRouter)
-- Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
+- OpenAI, Gemini, Claude, and Codex-compatible API endpoints
+- OAuth and API-key access for supported providers
+- Multiple-account routing, round-robin selection, and configurable provider prefixes
+- Streaming and non-streaming responses, function calls, tools, and text and image input
+- Dynamic OpenAI model metadata and compatible Responses endpoints
+- Current DeepSeek V4.1 catalog entries: `deepseek-flash` and `deepseek-v4-pro`
+- Configurable OpenAI-compatible upstream providers
+- Management API and bundled control panel support
+- Reusable Go SDK for embedding the proxy
 
-## Getting Started
+## Quick start
 
-CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
+The full user guide is available at [help.router-for.me](https://help.router-for.me/)
 
 ### Docker Compose
 
@@ -74,206 +60,59 @@ cp config.example.yaml config/config.yaml
 docker compose up -d
 ```
 
-Compose mounts the directory at `/CLIProxyAPI/config` so management API updates can atomically replace `config.yaml` and
-maintain `config.yaml.last-good`. Edit `config/config.yaml` for the local deployment.
+Compose mounts `./config` at `/CLIProxyAPI/config`, which allows management updates to replace `config.yaml` atomically
+and retain `config.yaml.last-good`
 
-For an existing root-level `config.yaml`, either move it into the directory or keep the old layout temporarily:
+Existing root-level `config.yaml` deployments can move the file to `config/config.yaml` or temporarily set
+`CLI_PROXY_CONFIG_DIR=.`. The Compose file defines its default image; set `CLI_PROXY_IMAGE` when using another
+compatible image
 
-```bash
-mkdir -p config
-mv -n config.yaml config/config.yaml
-# Temporary compatibility mode:
-CLI_PROXY_CONFIG_DIR=. docker compose up -d
-```
+Before exposing the service outside localhost, read the [production deployment guide](docs/production-deployment.md)
 
-The `docker-build.sh` and `docker-build.ps1` helpers detect the legacy file and print a compatibility notice. New
-installations use `config/config.yaml`. Source builds download the fixed management panel release required by this
-backend (`v1.17.14-aug.2`) before building the image. Set `PANEL_SOURCE=/path/to/management.html` to test a local panel
-candidate, or set `PANEL_TAG` only when deliberately testing another compatible release.
+## Documentation
 
-## Management API
+- [User guide](https://help.router-for.me/)
+- [Production deployment: Nginx, Cloudflare, timeouts, and diagnostics](docs/production-deployment.md)
+- [Management API](https://help.router-for.me/management/api)
+- [Usage SQLite capacity, retention, backup, and migration](docs/usage-sqlite-capacity.md)
+- [Model price sources and request-time pricing receipts](internal/modelcatalog/PRICE_SOURCES.md)
+- [Go SDK usage](docs/sdk-usage.md)
+- [Go SDK advanced executors and translators](docs/sdk-advanced.md)
+- [Go SDK access](docs/sdk-access.md)
+- [Go SDK watcher](docs/sdk-watcher.md)
+- Custom provider example: [`examples/custom-provider`](examples/custom-provider)
 
-see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
+## Development
 
-The management layer now covers more than basic config editing:
-
-- auth file status, recent request buckets, OAuth excluded models and model alias management
-- quota scheduler status/config/refresh endpoints for supported providers
-- usage statistics backed by the SQLite usage store and local model price data
-- release metadata used by the bundled management panel for version history and updates
-
-## Usage SQLite capacity
-
-CPA stores usage data in `usage-data/events.db` plus `events.db-wal` and `events.db-shm`. `/usage/db-size` reports the
-combined size.
-
-JSON import planning maps to SQLite rows as:
-
-```text
-SQLite rows = N events + H hour_bucket + D day_bucket + dimension rows
-H <= min(N, hours * models * credentials * api_keys * providers)
-D <= min(N, days  * models * credentials * api_keys * providers)
-```
-
-Use parsed request details as the upper bound for `N`, because duplicate fingerprints are ignored during import. Set
-`usage-retention.max-db-size-mb` with WAL and index headroom:
-
-```text
-max-db-size-mb >= ceil(estimated_sqlite_bytes * 1.2 / 1048576)
-```
-
-Portable usage backups have a 100 MiB limit. HTTP `/usage/import` and local legacy import reject larger files;
-`/usage/export` checks the final encrypted JSON before sending it and returns HTTP 413 when it exceeds the same limit.
-Use the existing `from`, `to`, `model`, `api_key`, or `credential` filters to export smaller ranges. When
-`events.db + WAL + SHM` reaches `usage-retention.max-db-size-mb`, live usage writes and imports are refused, and
-`/usage/db-size` exposes warning/capped state. CPA does not split usage data across multiple SQLite files, so operators
-must raise the cap, trim retention, or archive externally.
-
-`/usage/export` writes a version 3 backup containing the canonical SQLite event fields. AES-GCM authenticates and
-encrypts the complete backup content under keys derived with salted scrypt; the visible envelope contains only format,
-KDF, nonce, and ciphertext fields. API keys use a separate derived HMAC identity key, so the JSON file exposes neither
-API keys nor linkable event metadata. Version 3 restores the original `cost_micro` values. Repricing historical events
-requires an explicit `POST /v0/management/usage/recalculate-costs` request. Import with the same management credential.
-To move data between servers that use different management credentials, send the same `X-Usage-Backup-Key` header on
-export and import. `/usage/import` still accepts v1 snapshots, v2 detail envelopes, bare `FlatDetail` arrays, and
-supported CSV exports.
-
-## Release deployment
-
-Tags named `vX.Y.Z` publish backend artifacts through `.github/workflows/release.yaml`; Docker images are published
-through `.github/workflows/docker-image.yml`.
-
-Deploy from a fast-forwarded git working copy instead of ad-hoc local files:
+The root module targets Go 1.27.0. Install dependencies from `go.mod` and run the baseline checks before opening a pull
+request:
 
 ```bash
-git pull --ff-only --tags
-git describe --tags --always
-go build -o cli-proxy-api ./cmd/server
-```
-
-## SDK Docs
-
-- Usage: [docs/sdk-usage.md](docs/sdk-usage.md)
-- Advanced (executors & translators): [docs/sdk-advanced.md](docs/sdk-advanced.md)
-- Access: [docs/sdk-access.md](docs/sdk-access.md)
-- Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
-- Custom Provider Example: `examples/custom-provider`
-
-## Development checks
-
-```bash
+go mod verify
+go mod tidy -diff
+go test -count=1 ./...
 go vet ./...
 go build ./cmd/server
 ```
 
+Release-candidate validation also runs the race detector, Staticcheck v0.8.1, govulncheck v1.7.0, and `CGO_ENABLED=0`
+builds for Linux AMD64 and ARM64
+
+## Version and release behavior
+
+Local source and Docker builds resolve the displayed version through `git describe --tags --always --dirty`. Release builds
+embed the release version, short commit SHA, and UTC build date through linker flags. Without release metadata, the server
+reports `dev`, `none`, and `unknown`
+
+Local augmented releases use tags in the form `v<upstream>-aug.N`; the first local release based on a new upstream version
+uses `aug.1`. Tags trigger the GoReleaser workflow, while `v*` tags also trigger the multi-architecture Docker workflow. A
+matching entry in `CHANGELOG.md` is required before publishing release assets
+
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## Who is with us?
-
-Those projects are based on CLIProxyAPI:
-
-### [vibeproxy](https://github.com/automazeio/vibeproxy)
-
-Native macOS menu bar app to use your Claude Code & ChatGPT subscriptions with AI coding tools - no API keys needed
-
-### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
-
-Browser-based tool to translate SRT subtitles using your Gemini subscription via CLIProxyAPI with automatic
-validation/error correction - no API keys needed
-
-### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
-
-CLI wrapper for instant switching between multiple Claude accounts and alternative models (Gemini, Codex, Antigravity)
-via CLIProxyAPI OAuth - no API keys needed
-
-### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
-
-Native macOS GUI for managing CLIProxyAPI: configure providers, model mappings, and endpoints via OAuth - no API keys
-needed.
-
-### [Quotio](https://github.com/nguyenphutrong/quotio)
-
-Native macOS menu bar app that unifies Claude, Gemini, OpenAI, Qwen, and Antigravity subscriptions with real-time quota
-tracking and smart auto-failover for AI coding tools like Claude Code, OpenCode, and Droid - no API keys needed.
-
-### [CodMate](https://github.com/loocor/CodMate)
-
-Native macOS SwiftUI app for managing CLI AI sessions (Codex, Claude Code, Gemini CLI) with unified provider management,
-Git review, project organization, global search, and terminal integration. Integrates CLIProxyAPI to provide OAuth
-authentication for Codex, Claude, Gemini, Antigravity, and Qwen Code, with built-in and third-party provider rerouting
-through a single proxy endpoint - no API keys needed for OAuth providers.
-
-### [ProxyPilot](https://github.com/Finesssee/ProxyPilot)
-
-Windows-native CLIProxyAPI fork with TUI, system tray, and multi-provider OAuth for AI coding tools - no API keys
-needed.
-
-### [Claude Proxy VSCode](https://github.com/uzhao/claude-proxy-vscode)
-
-VSCode extension for quick switching between Claude Code models, featuring integrated CLIProxyAPI as its backend with
-automatic background lifecycle management.
-
-### [ZeroLimit](https://github.com/0xtbug/zero-limit)
-
-Windows desktop app built with Tauri + React for monitoring AI coding assistant quotas via CLIProxyAPI. Track usage
-across Gemini, Claude, OpenAI Codex, and Antigravity accounts with real-time dashboard, system tray integration, and
-one-click proxy control - no API keys needed.
-
-### [CPA-XXX Panel](https://github.com/ferretgeek/CPA-X)
-
-A lightweight web admin panel for CLIProxyAPI with health checks, resource monitoring, real-time logs, auto-update,
-request statistics and pricing display. Supports one-click installation and systemd service.
-
-### [CLIProxyAPI Tray](https://github.com/kitephp/CLIProxyAPI_Tray)
-
-A Windows tray application implemented using PowerShell scripts, without relying on any third-party libraries. The main
-features include: automatic creation of shortcuts, silent running, password management, channel switching (Main / Plus),
-and automatic downloading and updating.
-
-### [霖君](https://github.com/wangdabaoqq/LinJun)
-
-霖君 is a cross-platform desktop application for managing AI programming assistants, supporting macOS, Windows, and
-Linux systems. Unified management of Claude Code, Gemini CLI, OpenAI Codex, Qwen Code, and other AI coding tools, with
-local proxy for multi-account quota tracking and one-click configuration.
-
-### [CLIProxyAPI Dashboard](https://github.com/itsmylife44/cliproxyapi-dashboard)
-
-A modern web-based management dashboard for CLIProxyAPI built with Next.js, React, and PostgreSQL. Features real-time
-log streaming, structured configuration editing, API key management, OAuth provider integration for Claude/Gemini/Codex,
-usage analytics, container management, and config sync with OpenCode via companion plugin - no manual YAML editing
-needed.
-
-> [!NOTE]
-> If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.
-
-## More choices
-
-Those projects are ports of CLIProxyAPI or inspired by it:
-
-### [9Router](https://github.com/decolua/9router)
-
-A Next.js implementation inspired by CLIProxyAPI, easy to install and use, built from scratch with format translation (
-OpenAI/Claude/Gemini/Ollama), combo system with auto-fallback, multi-account management with exponential backoff, a
-Next.js web dashboard, and support for CLI tools (Cursor, Claude Code, Cline, RooCode) - no API keys needed.
-
-### [OmniRoute](https://github.com/diegosouzapw/OmniRoute)
-
-Never stop coding. Smart routing to FREE & low-cost AI models with automatic fallback.
-
-OmniRoute is an AI gateway for multi-provider LLMs: an OpenAI-compatible endpoint with smart routing, load balancing,
-retries, and fallbacks. Add policies, rate limits, caching, and observability for reliable, cost-aware inference.
-
-> [!NOTE]
-> If you have developed a port of CLIProxyAPI or a project inspired by it, please open a PR to add it to this list.
+Contributions are welcome. Keep changes focused, run the relevant checks, and open a pull request with the behavior and
+verification described clearly
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+CLIProxyAPI is licensed under the [MIT License](LICENSE)

@@ -1,134 +1,161 @@
-# SDK 高级指南：执行器与翻译器
+# SDK 执行器与翻译器
 
-本文介绍如何使用 SDK 扩展内嵌代理：
+本文说明如何为内嵌的 CLIProxyAPI 服务实现自定义 Provider 执行器、协议翻译器和模型注册。SDK 使用 Go 1.27 和
+`/v6` 模块路径。
 
-- 实现自定义 Provider 执行器以调用你的上游 API
-- 注册请求/响应翻译器进行协议转换
-- 注册模型以出现在 `/v1/models`
+`examples/custom-provider/main.go` 是可构建的参考实现。下列片段只展示单个接口，省略外围 package 和错误处理代码。
 
-示例基于 Go 1.24+ 与 v6 模块路径。
+## Provider 执行器接口
 
-## 概念
+每个自定义 Provider key 需要注册一个 `sdk/cliproxy/auth.ProviderExecutor` 实现。当前接口包含以下方法：
 
-- Provider 执行器：实现 `auth.ProviderExecutor` 的运行时组件，负责某个 provider key（如 `gemini`、`claude`、`codex`
-  ）的真正出站调用。若实现 `RequestPreparer` 接口，可在原始 HTTP 请求上注入凭据。
-- 翻译器注册表：由 `sdk/translator` 驱动的协议转换函数。内置了 OpenAI/Gemini/Claude/Codex 的互转；你也可以注册新的格式转换。
-- 模型注册表：对外发布可用模型列表，供 `/v1/models` 与路由参考。
-
-## 1) 实现 Provider 执行器
-
-创建类型满足 `auth.ProviderExecutor` 接口。
-
-```go
-package myprov
-
-import (
-    "context"
-    "net/http"
-
-    coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
-    clipexec "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
-)
-
+```text
 type Executor struct{}
 
-func (Executor) Identifier() string { return "myprov" }
-
-// 可选：在原始 HTTP 请求上注入凭据
-func (Executor) PrepareRequest(req *http.Request, a *coreauth.Auth) error {
-    // 例如：req.Header.Set("Authorization", "Bearer "+a.Attributes["api_key"]) 
-    return nil
-}
-
-func (Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (clipexec.Response, error) {
-    // 基于 req.Payload 构造上游请求，返回上游 JSON 负载
-    return clipexec.Response{Payload: []byte(`{"ok":true}`)}, nil
-}
-
-func (Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (<-chan clipexec.StreamChunk, error) {
-    ch := make(chan clipexec.StreamChunk, 1)
-    go func() { defer close(ch); ch <- clipexec.StreamChunk{Payload: []byte("data: {\\"done\\":true}\\n\\n")} }()
-    return ch, nil
-}
-
-func (Executor) Refresh(ctx context.Context, a *coreauth.Auth) (*coreauth.Auth, error) { return a, nil }
+func (Executor) Identifier() string
+func (Executor) Execute(
+    context.Context,
+    *coreauth.Auth,
+    clipexec.Request,
+    clipexec.Options,
+) (clipexec.Response, error)
+func (Executor) ExecuteStream(
+    context.Context,
+    *coreauth.Auth,
+    clipexec.Request,
+    clipexec.Options,
+) (*clipexec.StreamResult, error)
+func (Executor) Refresh(context.Context, *coreauth.Auth) (*coreauth.Auth, error)
+func (Executor) CountTokens(
+    context.Context,
+    *coreauth.Auth,
+    clipexec.Request,
+    clipexec.Options,
+) (clipexec.Response, error)
+func (Executor) HttpRequest(
+    context.Context,
+    *coreauth.Auth,
+    *http.Request,
+) (*http.Response, error)
 ```
 
-在启动服务前将执行器注册到核心管理器：
+`Identifier` 返回认证记录使用的 Provider key。`Execute` 返回完整的 Provider 响应。`ExecuteStream` 返回响应头和
+`StreamChunk` channel。流生产者通过 `StreamChunk.Err` 报告终态错误，通过 `StreamChunk.Terminal` 标记明确的完成
+边界，最后关闭 channel。
 
-```go
-core := coreauth.NewManager(coreauth.NewFileStore(cfg.AuthDir), nil, nil)
-core.RegisterExecutor(myprov.Executor{})
-svc, _ := cliproxy.NewBuilder().WithConfig(cfg).WithConfigPath(cfgPath).WithCoreAuthManager(core).Build()
+`HttpRequest` 执行原始 Provider 请求。调用方负责关闭非 nil 响应的 body。Provider 不支持 token count 接口时，
+`CountTokens` 应返回 request-scoped 错误，避免认证管理器把能力缺失误判为凭证故障。
+
+执行器还可以实现 `coreauth.RequestPreparer`：
+
+```text
+func (Executor) PrepareRequest(request *http.Request, auth *coreauth.Auth) error
 ```
 
-当凭据的 `Provider` 为 `"myprov"` 时，管理器会将请求路由到你的执行器。
+该方法用于向原始请求注入 Provider 凭证，不应修改共享 transport 或认证记录。
 
-## 2) 注册翻译器
+## 注册执行器
 
-内置处理器接受 OpenAI/Gemini/Claude/Codex 的入站格式。要支持新的 provider 协议，需要在 `sdk/translator` 的默认注册表中注册转换函数。
+使用 SDK token store 创建管理器，注册执行器，再传给 builder：
 
-方向很重要：
+```text
+tokenStore := sdkauth.GetTokenStore()
+if setter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok {
+    setter.SetBaseDir(cfg.AuthDir)
+}
+core := coreauth.NewManager(tokenStore, nil, nil)
+core.RegisterExecutor(Executor{})
 
-- 请求：从“入站格式”转换为“provider 格式”
-- 响应：从“provider 格式”转换回“入站格式”
+service, err := cliproxy.NewBuilder().
+    WithConfig(cfg).
+    WithConfigPath(configPath).
+    WithCoreAuthManager(core).
+    Build()
+```
 
-示例：OpenAI Chat → MyProv Chat 及其反向。
+认证记录的有效 Provider key 与 `Identifier()` 一致时，请求会交给该执行器。`RegisterExecutor` 会替换同 key 的
+当前执行器。插件生命周期需要拒绝过期替换时，可使用带 generation 校验的注册方法。
 
-```go
-package myprov
+## 按认证记录提供 transport
 
-import (
-  "context"
-  sdktr "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+`Manager.SetRoundTripperProvider` 可根据认证记录返回 `http.RoundTripper`：
+
+```text
+type roundTripperProvider struct{}
+
+func (roundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.RoundTripper {
+    return transportFor(auth.ProxyURL)
+}
+```
+
+执行器应遵守宿主提供的 transport 策略，不要修改 `http.DefaultTransport`。原始请求路径可调用
+`Manager.InjectCredentials(request, authID)`，它会调用所选执行器的可选 `RequestPreparer`。
+
+## 注册翻译器
+
+`sdk/translator.Register` 保存从入站格式到 Provider 格式的请求转换，以及反向的响应转换。请求转换返回 `[]byte`，
+流式响应转换返回 `[][]byte`，非流式响应转换返回 `[]byte`。
+
+```text
+var (
+    formatOpenAI = sdktr.Format("openai.chat")
+    formatMyProv = sdktr.Format("myprov.chat")
 )
 
-const (
-  FOpenAI = sdktr.Format("openai.chat")
-  FMyProv = sdktr.Format("myprov.chat")
-)
-
-func init() {
-  sdktr.Register(FOpenAI, FMyProv,
-    func(model string, raw []byte, stream bool) []byte { return convertOpenAIToMyProv(model, raw, stream) },
-    sdktr.ResponseTransform{
-      Stream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) []string {
-        return convertStreamMyProvToOpenAI(model, originalReq, translatedReq, raw)
-      },
-      NonStream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) string {
-        return convertMyProvToOpenAI(model, originalReq, translatedReq, raw)
-      },
+sdktr.Register(
+    formatOpenAI,
+    formatMyProv,
+    func(model string, raw []byte, stream bool) []byte {
+        return convertOpenAIToMyProv(model, raw, stream)
     },
-  )
-}
+    sdktr.ResponseTransform{
+        Stream: func(
+            ctx context.Context,
+            model string,
+            originalRequest, translatedRequest, raw []byte,
+            param *any,
+        ) [][]byte {
+            return convertStreamMyProvToOpenAI(
+                model, originalRequest, translatedRequest, raw,
+            )
+        },
+        NonStream: func(
+            ctx context.Context,
+            model string,
+            originalRequest, translatedRequest, raw []byte,
+            param *any,
+        ) []byte {
+            return convertMyProvToOpenAI(
+                model, originalRequest, translatedRequest, raw,
+            )
+        },
+    },
+)
 ```
 
-当 OpenAI 处理器接到需要路由到 `myprov` 的请求时，流水线会自动应用已注册的转换。
+注册方向决定查找结果。请求按 `from → to` 查找；响应按 Provider 到客户端的反向路径查找。没有匹配转换时，注册表会
+保留原始负载，并继续应用已注册的插件钩子。
 
-## 3) 注册模型
+## 注册模型
 
-通过全局模型注册表将模型暴露到 `/v1/models`：
+按认证 ID 注册模型后，它们会出现在 `/v1/models` 和模型查询中：
 
-```go
+```text
 models := []*cliproxy.ModelInfo{
-  { ID: "myprov-pro-1", Object: "model", Type: "myprov", DisplayName: "MyProv Pro 1" },
+    {
+        ID:          "myprov-pro-1",
+        Object:      "model",
+        Type:        "myprov",
+        DisplayName: "MyProv Pro 1",
+    },
 }
 cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 ```
 
-内置 Provider 会自动注册；自定义 Provider 建议在启动时（例如加载到 Auth 后）或在 Auth 注册钩子中调用。
+服务会自动注册内建 Provider。自定义执行器应在认证记录可用后发布模型，并在 Provider 模型列表变化时替换该注册。
 
-## 凭据与传输
+## 验证
 
-- 使用 `Manager.SetRoundTripperProvider` 注入按账户的 `*http.Transport`（例如代理）：
-  ```go
-  core.SetRoundTripperProvider(myProvider) // 按账户返回 transport
-  ```
-- 对于原始 HTTP 请求，若实现了 `PrepareRequest`，或通过 `Manager.InjectCredentials(req, authID)` 进行头部注入。
-
-## 测试建议
-
-- 启用请求日志：管理 API GET/PUT `/v0/management/request-log`
-- 切换调试日志：管理 API GET/PUT `/v0/management/debug`
-- 热更新：`config.yaml` 与 `auths/` 变化会自动被侦测并应用
-
+执行器测试应使用 `httptest.Server` 或假的 `http.RoundTripper`，避免依赖真实上游。覆盖非流式响应、流终态、上下文
+取消、响应 body 所有权、凭证注入、token count 错误、翻译方向和模型替换。发布检查会编译仓库中的
+`examples/custom-provider` package。

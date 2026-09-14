@@ -15,7 +15,7 @@ handled.
   consumer goroutine (`consumeAuthUpdates`). The consumer drains bursts by looping through the backlog before
   reacquiring the select loop.
 
-## Watcher Behaviour
+## Watcher behavior
 
 - `internal/watcher/watcher.go` keeps a shadow snapshot of auth state (`currentAuths`). Each filesystem or configuration
   event triggers a recomputation and a diff against the previous snapshot to produce minimal `AuthUpdate` entries that

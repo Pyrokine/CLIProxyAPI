@@ -2,11 +2,9 @@
 
 [English](README.md) | 中文
 
-一个为 CLI 提供 OpenAI/Gemini/Claude/Codex 兼容 API 接口的代理服务器。
+CLIProxyAPI 为 CLI 工具和 SDK 提供 OpenAI、Gemini、Claude 与 Codex 兼容 API
 
-现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
-
-您可以使用本地或多账户的CLI方式，通过任何与 OpenAI（包括Responses）/Gemini/Claude 兼容的客户端和SDK进行访问。
+支持 OAuth 与 API Key 提供商、多账户路由、流式响应、工具调用、多模态输入、可配置的上游转发，以及包含当前 DeepSeek V4.1 模型标识的内置模型目录
 
 ## 赞助商
 
@@ -34,33 +32,21 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 </tbody>
 </table>
 
-## 功能特性
+## 核心能力
 
-- 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex 兼容的 API 端点
-- 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
-- 新增 Claude Code 支持（OAuth 登录）
-- 新增 Qwen Code 支持（OAuth 登录）
-- 新增 iFlow 支持（OAuth 登录）
-- OpenAI `/v1/models` 返回动态模型元数据，包括上下文长度等能力字段
-- 为兼容上游提供 OpenAI Responses `/responses/compact` 端点
-- 支持流式与非流式响应
-- 函数调用/工具支持
-- 多模态输入（文本、图片）
-- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Qwen 与 iFlow）
-- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Qwen 与 iFlow）
-- 支持 Gemini AIStudio API 密钥
-- 支持 AI Studio Build 多账户轮询
-- 支持 Gemini CLI 多账户轮询
-- 支持 Claude Code 多账户轮询
-- 支持 Qwen Code 多账户轮询
-- 支持 iFlow 多账户轮询
-- 支持 OpenAI Codex 多账户轮询
-- 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
-- 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
+- 提供 OpenAI、Gemini、Claude 与 Codex 兼容 API
+- 支持已接入提供商的 OAuth 与 API Key 认证
+- 支持多账户路由、轮询选择和提供商前缀
+- 支持流式与非流式响应、函数调用、工具和多模态输入
+- 返回动态 OpenAI 模型元数据，并提供兼容的 Responses 端点
+- 内置当前 DeepSeek V4.1 模型目录项：`deepseek-flash` 与 `deepseek-v4-pro`
+- 通过配置接入 OpenAI 兼容上游
+- 提供管理 API 和内置控制面板
+- 提供可嵌入代理的 Go SDK
 
-## 新手入门
+## 快速开始
 
-CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
+完整用户手册位于 [help.router-for.me](https://help.router-for.me/cn/)
 
 ### Docker Compose
 
@@ -72,196 +58,57 @@ cp config.example.yaml config/config.yaml
 docker compose up -d
 ```
 
-Compose 会把该目录挂载到 `/CLIProxyAPI/config`，管理 API 可以原子替换 `config.yaml`，并维护
-`config.yaml.last-good`，本地部署使用 `config/config.yaml`
+Compose 会把 `./config` 挂载到 `/CLIProxyAPI/config`，管理接口可以原子替换 `config.yaml`，并保留 `config.yaml.last-good`
 
-已有根目录 `config.yaml` 的部署可以迁移文件，也可以暂时保留旧目录结构：
+已有根目录 `config.yaml` 的部署可以把文件迁移到 `config/config.yaml`，也可以暂时设置 `CLI_PROXY_CONFIG_DIR=.`；Compose
+文件定义默认镜像，使用其他兼容镜像时设置 `CLI_PROXY_IMAGE`
 
-```bash
-mkdir -p config
-mv -n config.yaml config/config.yaml
-# 临时兼容旧目录结构：
-CLI_PROXY_CONFIG_DIR=. docker compose up -d
-```
+将服务开放到本机之外前，先阅读[生产部署指南](docs/production-deployment_CN.md)
 
-`docker-build.sh` 和 `docker-build.ps1` 会识别旧配置文件并输出兼容提示，新部署默认使用
-`config/config.yaml`，源码构建会先下载当前后端固定要求的管理面板版本 `v1.17.14-aug.2`，再构建镜像，
-测试本地面板候选产物时设置 `PANEL_SOURCE=/path/to/management.html`，只有明确测试其他兼容发布版本时才设置
-`PANEL_TAG`
+## 文档
 
-## 管理 API 文档
-
-请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
-
-当前管理层不再只是基础配置编辑，还包括：
-
-- 认证文件状态、最近请求分桶、OAuth 排除模型和模型别名管理
-- 已支持提供商的 quota scheduler 状态 / 配置 / 手动刷新接口
-- 基于 SQLite 使用量存储与本地模型价格数据的使用统计接口
-- 供管理面板展示版本历史与更新动作使用的 release 元数据接口
-
-## SQLite 使用量容量规划
-
-CPA 使用 `usage-data/events.db`、`events.db-wal`、`events.db-shm` 保存使用量数据，`/usage/db-size` 返回三者合计大小。
-
-JSON 导入后的 SQLite 行数按下面估算：
-
-```text
-SQLite rows = N events + H hour_bucket + D day_bucket + dimension rows
-H <= min(N, hours * models * credentials * api_keys * providers)
-D <= min(N, days  * models * credentials * api_keys * providers)
-```
-
-`N` 用导入文件解析出的 request detail 数量作为上限，因为重复 fingerprint 会被忽略。配置 `usage-retention.max-db-size-mb`
-时给 WAL 和索引留 20% 余量：
-
-```text
-max-db-size-mb >= ceil(estimated_sqlite_bytes * 1.2 / 1048576)
-```
-
-便携使用量备份统一限制为 100 MiB。HTTP `/usage/import` 和本地旧数据导入会拒绝更大的文件；`/usage/export` 会在发送前检查
-最终加密 JSON，超限返回 HTTP 413。可使用现有的 `from`、`to`、`model`、`api_key` 或 `credential` 过滤条件分段导出。当
-`events.db + WAL + SHM` 达到 `usage-retention.max-db-size-mb` 后，新的使用量写入和导入都会被拒绝，`/usage/db-size` 会返回
-warning/capped 状态。CPA 不把使用量自动拆成多个 SQLite 文件，运维侧需要调高上限、启用保留天数清理，或在 CPA 外部归档。
-
-`/usage/export` 输出版本 3 备份，完整保存 SQLite 事件字段。带随机 salt 的 scrypt 派生独立加密密钥和身份密钥，AES-GCM 对完整
-备份内容进行认证加密；可见 envelope 只包含格式、KDF、nonce 和 ciphertext。API Key 使用独立派生的 HMAC 身份，JSON 文件不会
-暴露 API Key、事件元数据或可跨备份关联的身份。版本 3 恢复原始 `cost_micro`；历史成本重估必须显式调用
-`POST /v0/management/usage/recalculate-costs`。导入时使用与导出时相同的管理凭证；两台服务器的管理凭证不同时，在导出和导入请求中
-传入相同的 `X-Usage-Backup-Key`。`/usage/import` 继续兼容 v1 snapshot、v2 detail envelope、`FlatDetail` 数组和已支持的 CSV
-格式。
-
-## Release 部署
-
-`vX.Y.Z` 标签会通过 `.github/workflows/release.yaml` 发布后端产物；Docker 镜像通过 `.github/workflows/docker-image.yml`
-发布。
-
-部署时从 git 工作区快进到 release，不使用临时本地产物：
-
-```bash
-git pull --ff-only --tags
-git describe --tags --always
-go build -o cli-proxy-api ./cmd/server
-```
-
-## SDK 文档
-
-- 使用文档：[docs/sdk-usage_CN.md](docs/sdk-usage_CN.md)
-- 高级（执行器与翻译器）：[docs/sdk-advanced_CN.md](docs/sdk-advanced_CN.md)
-- 认证: [docs/sdk-access_CN.md](docs/sdk-access_CN.md)
-- 凭据加载/更新: [docs/sdk-watcher_CN.md](docs/sdk-watcher_CN.md)
-- 自定义 Provider 示例：`examples/custom-provider`
+- [用户手册](https://help.router-for.me/cn/)
+- [生产部署：Nginx、Cloudflare、超时与排查](docs/production-deployment_CN.md)
+- [管理 API](https://help.router-for.me/cn/management/api)
+- [使用量 SQLite 容量、保留、备份与迁移](docs/usage-sqlite-capacity_CN.md)
+- [Go SDK 使用](docs/sdk-usage_CN.md)
+- [Go SDK 高级执行器与翻译器](docs/sdk-advanced_CN.md)
+- [Go SDK 认证](docs/sdk-access_CN.md)
+- [Go SDK 凭据加载与更新](docs/sdk-watcher_CN.md)
+- 自定义 Provider 示例：[`examples/custom-provider`](examples/custom-provider)
 
 ## 开发检查
 
+根 module 使用 Go 1.27.0。按 `go.mod` 安装依赖，并在提交 Pull Request 前执行基础检查：
+
 ```bash
+go mod verify
+go mod tidy -diff
+go test -count=1 ./...
 go vet ./...
 go build ./cmd/server
 ```
 
+发布候选验证还会执行 race detector、Staticcheck v0.8.1、govulncheck v1.7.0，以及 Linux AMD64 和 ARM64 的 `CGO_ENABLED=0` 构建
+
+## 版本与发布行为
+
+本地源码构建和 Docker 构建通过 `git describe --tags --always --dirty` 确定显示版本。正式构建通过 linker flags
+写入发布版本、短 commit SHA 和 UTC 构建时间；没有发布元数据时，服务分别显示 `dev`、`none` 和 `unknown`
+
+本地增强版本使用 `v<upstream>-aug.N` tag；基于新上游版本的首个本地版本从 `aug.1` 开始。所有 tag 都会触发
+GoReleaser，`v*` tag 还会触发多架构 Docker 构建。发布资产前，`CHANGELOG.md` 必须存在与 tag 匹配的条目
+
 ## 贡献
 
-欢迎贡献！请随时提交 Pull Request。
-
-1. Fork 仓库
-2. 创建您的功能分支（`git checkout -b feature/amazing-feature`）
-3. 提交您的更改（`git commit -m 'Add some amazing feature'`）
-4. 推送到分支（`git push origin feature/amazing-feature`）
-5. 打开 Pull Request
-
-## 谁与我们在一起？
-
-这些项目基于 CLIProxyAPI:
-
-### [vibeproxy](https://github.com/automazeio/vibeproxy)
-
-一个原生 macOS 菜单栏应用，让您可以使用 Claude Code & ChatGPT 订阅服务和 AI 编程工具，无需 API 密钥。
-
-### [Subtitle Translator](https://github.com/VjayC/SRT-Subtitle-Translator-Validator)
-
-一款基于浏览器的 SRT 字幕翻译工具，可通过 CLI 代理 API 使用您的 Gemini 订阅。内置自动验证与错误修正功能，无需 API 密钥。
-
-### [CCS (Claude Code Switch)](https://github.com/kaitranntt/ccs)
-
-CLI 封装器，用于通过 CLIProxyAPI OAuth 即时切换多个 Claude 账户和替代模型（Gemini, Codex, Antigravity），无需 API 密钥。
-
-### [ProxyPal](https://github.com/heyhuynhgiabuu/proxypal)
-
-基于 macOS 平台的原生 CLIProxyAPI GUI：配置供应商、模型映射以及OAuth端点，无需 API 密钥。
-
-### [Quotio](https://github.com/nguyenphutrong/quotio)
-
-原生 macOS 菜单栏应用，统一管理 Claude、Gemini、OpenAI、Qwen 和 Antigravity 订阅，提供实时配额追踪和智能自动故障转移，支持
-Claude Code、OpenCode 和 Droid 等 AI 编程工具，无需 API 密钥。
-
-### [CodMate](https://github.com/loocor/CodMate)
-
-原生 macOS SwiftUI 应用，用于管理 CLI AI 会话（Claude Code、Codex、Gemini CLI），提供统一的提供商管理、Git 审查、项目组织、全局搜索和终端集成。集成
-CLIProxyAPI 为 Codex、Claude、Gemini、Antigravity 和 Qwen Code 提供统一的 OAuth
-认证，支持内置和第三方提供商通过单一代理端点重路由 - OAuth 提供商无需 API 密钥。
-
-### [ProxyPilot](https://github.com/Finesssee/ProxyPilot)
-
-原生 Windows CLIProxyAPI 分支，集成 TUI、系统托盘及多服务商 OAuth 认证，专为 AI 编程工具打造，无需 API 密钥。
-
-### [Claude Proxy VSCode](https://github.com/uzhao/claude-proxy-vscode)
-
-一款 VSCode 扩展，提供了在 VSCode 中快速切换 Claude Code 模型的功能，内置 CLIProxyAPI 作为其后端，支持后台自动启动和关闭。
-
-### [ZeroLimit](https://github.com/0xtbug/zero-limit)
-
-Windows 桌面应用，基于 Tauri + React 构建，用于通过 CLIProxyAPI 监控 AI 编程助手配额。支持跨 Gemini、Claude、OpenAI Codex 和
-Antigravity 账户的使用量追踪，提供实时仪表盘、系统托盘集成和一键代理控制，无需 API 密钥。
-
-### [CPA-XXX Panel](https://github.com/ferretgeek/CPA-X)
-
-面向 CLIProxyAPI 的 Web 管理面板，提供健康检查、资源监控、日志查看、自动更新、请求统计与定价展示，支持一键安装与 systemd 服务。
-
-### [CLIProxyAPI Tray](https://github.com/kitephp/CLIProxyAPI_Tray)
-
-Windows 托盘应用，基于 PowerShell
-脚本实现，不依赖任何第三方库。主要功能包括：自动创建快捷方式、静默运行、密码管理、通道切换（Main / Plus）以及自动下载与更新。
-
-### [霖君](https://github.com/wangdabaoqq/LinJun)
-
-霖君是一款用于管理AI编程助手的跨平台桌面应用，支持macOS、Windows、Linux系统。统一管理Claude Code、Gemini CLI、OpenAI
-Codex、Qwen Code等AI编程工具，本地代理实现多账户配额跟踪和一键配置。
-
-### [CLIProxyAPI Dashboard](https://github.com/itsmylife44/cliproxyapi-dashboard)
-
-一个面向 CLIProxyAPI 的现代化 Web 管理仪表盘，基于 Next.js、React 和 PostgreSQL 构建。支持实时日志流、结构化配置编辑、API Key
-管理、Claude/Gemini/Codex 的 OAuth 提供方集成、使用量分析、容器管理，并可通过配套插件与 OpenCode 同步配置，无需手动编辑 YAML。
-
-> [!NOTE]
-> 如果你开发了基于 CLIProxyAPI 的项目，请提交一个 PR（拉取请求）将其添加到此列表中。
-
-## 更多选择
-
-以下项目是 CLIProxyAPI 的移植版或受其启发：
-
-### [9Router](https://github.com/decolua/9router)
-
-基于 Next.js 的实现，灵感来自 CLIProxyAPI，易于安装使用；自研格式转换（OpenAI/Claude/Gemini/Ollama）、组合系统与自动回退、多账户管理（指数退避）、Next.js
-Web 控制台，并支持 Cursor、Claude Code、Cline、RooCode 等 CLI 工具，无需 API 密钥。
-
-### [OmniRoute](https://github.com/diegosouzapw/OmniRoute)
-
-代码不止，创新不停。智能路由至免费及低成本 AI 模型，并支持自动故障转移。
-
-OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼容 OpenAI
-的端点，具备智能路由、负载均衡、重试及回退机制。通过添加策略、速率限制、缓存和可观测性，确保推理过程既可靠又具备成本意识。
-
-> [!NOTE]
-> 如果你开发了 CLIProxyAPI 的移植或衍生项目，请提交 PR 将其添加到此列表中。
+欢迎贡献，请保持变更范围清楚，执行相关检查，并在 Pull Request 中说明行为变化与验证结果
 
 ## 许可证
 
-此项目根据 MIT 许可证授权 - 有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
+CLIProxyAPI 使用 [MIT License](LICENSE)
 
-## 写给所有中国网友的
+## 社区
 
 QQ 群：188637136
-
-或
 
 Telegram 群：https://t.me/CLIProxyAPI

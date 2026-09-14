@@ -1,147 +1,168 @@
-# SDK Advanced: Executors & Translators
+# SDK executors and translators
 
-This guide explains how to extend the embedded proxy with custom providers and schemas using the SDK. You will:
+This guide covers custom provider executors, protocol translators, and model registration for an embedded CLIProxyAPI
+service. The SDK uses Go 1.27 and the `/v6` module path.
 
-- Implement a provider executor that talks to your upstream API
-- Register request/response translators for schema conversion
-- Register models so they appear in `/v1/models`
+`examples/custom-provider/main.go` is the buildable reference implementation. The excerpts below focus on individual
+contracts and omit surrounding package and error-handling code.
 
-The examples use Go 1.24+ and the v6 module path.
+## Provider executor contract
 
-## Concepts
+Register an implementation of `sdk/cliproxy/auth.ProviderExecutor` for each custom provider key. The interface currently
+contains these methods:
 
-- Provider executor: a runtime component implementing `auth.ProviderExecutor` that performs outbound calls for a given
-  provider key (e.g., `gemini`, `claude`, `codex`). Executors can also implement `RequestPreparer` to inject credentials
-  on raw HTTP requests.
-- Translator registry: schema conversion functions routed by `sdk/translator`. The built‑in handlers translate between
-  OpenAI/Gemini/Claude/Codex formats; you can register new ones.
-- Model registry: publishes the list of available models per client/provider to power `/v1/models` and routing hints.
-
-## 1) Implement a Provider Executor
-
-Create a type that satisfies `auth.ProviderExecutor`.
-
-```go
-package myprov
-
-import (
-  "context"
-  "net/http"
-
-  coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
-  clipexec "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
-)
-
+```text
 type Executor struct{}
 
-func (Executor) Identifier() string { return "myprov" }
+func (Executor) Identifier() string
+func (Executor) Execute(
+    context.Context,
+    *coreauth.Auth,
+    clipexec.Request,
+    clipexec.Options,
+) (clipexec.Response, error)
+func (Executor) ExecuteStream(
+    context.Context,
+    *coreauth.Auth,
+    clipexec.Request,
+    clipexec.Options,
+) (*clipexec.StreamResult, error)
+func (Executor) Refresh(context.Context, *coreauth.Auth) (*coreauth.Auth, error)
+func (Executor) CountTokens(
+    context.Context,
+    *coreauth.Auth,
+    clipexec.Request,
+    clipexec.Options,
+) (clipexec.Response, error)
+func (Executor) HttpRequest(
+    context.Context,
+    *coreauth.Auth,
+    *http.Request,
+) (*http.Response, error)
+```
 
-// Optional: mutate outbound HTTP requests with credentials
-func (Executor) PrepareRequest(req *http.Request, a *coreauth.Auth) error {
-  // Example: req.Header.Set("Authorization", "Bearer "+a.APIKey)
-  return nil
+`Identifier` returns the provider key used by auth records. `Execute` returns the complete provider payload.
+`ExecuteStream` returns response headers and a channel of `StreamChunk` values. A stream producer reports terminal errors
+through `StreamChunk.Err`, marks an explicit completion boundary with `StreamChunk.Terminal`, and closes the channel.
+
+`HttpRequest` executes raw provider requests. Its caller owns any non-nil response body and closes it. `CountTokens` should
+return a request-scoped error when the provider has no token-count endpoint, so the auth manager does not treat that
+capability gap as a credential failure.
+
+An executor may also implement `coreauth.RequestPreparer`:
+
+```text
+func (Executor) PrepareRequest(request *http.Request, auth *coreauth.Auth) error
+```
+
+Use it to inject provider credentials into a raw request. Do not mutate shared transports or auth records from this method.
+
+## Register the executor
+
+Create the manager from the SDK token store, register the executor, and pass the manager to the builder:
+
+```text
+tokenStore := sdkauth.GetTokenStore()
+if setter, ok := tokenStore.(interface{ SetBaseDir(string) }); ok {
+    setter.SetBaseDir(cfg.AuthDir)
 }
+core := coreauth.NewManager(tokenStore, nil, nil)
+core.RegisterExecutor(Executor{})
 
-func (Executor) Execute(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (clipexec.Response, error) {
-  // Build HTTP request based on req.Payload (already translated into provider format)
-  // Use per‑auth transport if provided: transport := a.RoundTripper // via RoundTripperProvider
-  // Perform call and return provider JSON payload
-  return clipexec.Response{Payload: []byte(`{"ok":true}`)}, nil
-}
+service, err := cliproxy.NewBuilder().
+    WithConfig(cfg).
+    WithConfigPath(configPath).
+    WithCoreAuthManager(core).
+    Build()
+```
 
-func (Executor) ExecuteStream(ctx context.Context, a *coreauth.Auth, req clipexec.Request, opts clipexec.Options) (<-chan clipexec.StreamChunk, error) {
-  ch := make(chan clipexec.StreamChunk, 1)
-  go func() { defer close(ch); ch <- clipexec.StreamChunk{Payload: []byte("data: {\"done\":true}\n\n")} }()
-  return ch, nil
-}
+Auth records whose effective provider key matches `Identifier()` route to this executor. `RegisterExecutor` replaces the
+current executor for that key. Generation-aware registration methods are available when a plugin lifecycle must reject a
+stale replacement.
 
-func (Executor) Refresh(ctx context.Context, a *coreauth.Auth) (*coreauth.Auth, error) {
-  // Optionally refresh tokens and return updated auth
-  return a, nil
+## Per-auth transports
+
+`Manager.SetRoundTripperProvider` installs a provider that returns an `http.RoundTripper` for each auth record:
+
+```text
+type roundTripperProvider struct{}
+
+func (roundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.RoundTripper {
+    return transportFor(auth.ProxyURL)
 }
 ```
 
-Register the executor with the core manager before starting the service:
+Executors should use the provided transport policy instead of modifying `http.DefaultTransport`. For raw request flows,
+`Manager.InjectCredentials(request, authID)` invokes the selected executor's optional `RequestPreparer`.
 
-```go
-core := coreauth.NewManager(coreauth.NewFileStore(cfg.AuthDir), nil, nil)
-core.RegisterExecutor(myprov.Executor{})
-svc, _ := cliproxy.NewBuilder().WithConfig(cfg).WithConfigPath(cfgPath).WithCoreAuthManager(core).Build()
-```
+## Translator registration
 
-If your auth entries use provider `"myprov"`, the manager routes requests to your executor.
+`sdk/translator.Register` stores a request transform from the inbound format to the provider format and response transforms
+for the reverse direction. Request transforms return `[]byte`; streaming response transforms return `[][]byte`; non-stream
+response transforms return `[]byte`.
 
-## 2) Register Translators
-
-The handlers accept OpenAI/Gemini/Claude/Codex inputs. To support a new provider format, register translation functions
-in `sdk/translator`’s default registry.
-
-Direction matters:
-
-- Request: register from inbound schema to provider schema
-- Response: register from provider schema back to inbound schema
-
-Example: Convert OpenAI Chat → MyProv Chat and back.
-
-```go
-package myprov
-
-import (
-  "context"
-  sdktr "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+```text
+var (
+    formatOpenAI = sdktr.Format("openai.chat")
+    formatMyProv = sdktr.Format("myprov.chat")
 )
 
-const (
-  FOpenAI = sdktr.Format("openai.chat")
-  FMyProv = sdktr.Format("myprov.chat")
-)
-
-func init() {
-  sdktr.Register(FOpenAI, FMyProv,
-    // Request transform (model, rawJSON, stream)
-    func(model string, raw []byte, stream bool) []byte { return convertOpenAIToMyProv(model, raw, stream) },
-    // Response transform (stream & non‑stream)
-    sdktr.ResponseTransform{
-      Stream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) []string {
-        return convertStreamMyProvToOpenAI(model, originalReq, translatedReq, raw)
-      },
-      NonStream: func(ctx context.Context, model string, originalReq, translatedReq, raw []byte, param *any) string {
-        return convertMyProvToOpenAI(model, originalReq, translatedReq, raw)
-      },
+sdktr.Register(
+    formatOpenAI,
+    formatMyProv,
+    func(model string, raw []byte, stream bool) []byte {
+        return convertOpenAIToMyProv(model, raw, stream)
     },
-  )
-}
+    sdktr.ResponseTransform{
+        Stream: func(
+            ctx context.Context,
+            model string,
+            originalRequest, translatedRequest, raw []byte,
+            param *any,
+        ) [][]byte {
+            return convertStreamMyProvToOpenAI(
+                model, originalRequest, translatedRequest, raw,
+            )
+        },
+        NonStream: func(
+            ctx context.Context,
+            model string,
+            originalRequest, translatedRequest, raw []byte,
+            param *any,
+        ) []byte {
+            return convertMyProvToOpenAI(
+                model, originalRequest, translatedRequest, raw,
+            )
+        },
+    },
+)
 ```
 
-When the OpenAI handler receives a request that should route to `myprov`, the pipeline uses the registered transforms
-automatically.
+Registration direction matters. Request lookup uses `from → to`; response lookup uses the reverse provider-to-client
+path. When no matching transform exists, the registry preserves the input payload and still applies registered plugin
+hooks.
 
-## 3) Register Models
+## Model registration
 
-Expose models under `/v1/models` by registering them in the global model registry using the auth ID (client ID) and
-provider name.
+Register custom models under each auth ID so they appear in `/v1/models` and model lookup:
 
-```go
+```text
 models := []*cliproxy.ModelInfo{
-  { ID: "myprov-pro-1", Object: "model", Type: "myprov", DisplayName: "MyProv Pro 1" },
+    {
+        ID:          "myprov-pro-1",
+        Object:      "model",
+        Type:        "myprov",
+        DisplayName: "MyProv Pro 1",
+    },
 }
 cliproxy.GlobalModelRegistry().RegisterClient(authID, "myprov", models)
 ```
 
-The embedded server calls this automatically for built‑in providers; for custom providers, register during startup (
-e.g., after loading auths) or upon auth registration hooks.
+The service registers built-in providers automatically. Custom executors should publish models after their auth records are
+available and replace that registration when the provider's inventory changes.
 
-## Credentials & Transports
+## Verification
 
-- Use `Manager.SetRoundTripperProvider` to inject per‑auth `*http.Transport` (e.g., proxy):
-  ```go
-  core.SetRoundTripperProvider(myProvider) // returns transport per auth
-  ```
-- For raw HTTP flows, implement `PrepareRequest` and/or call `Manager.InjectCredentials(req, authID)` to set headers.
-
-## Testing Tips
-
-- Enable request logging: Management API GET/PUT `/v0/management/request-log`
-- Toggle debug logs: Management API GET/PUT `/v0/management/debug`
-- Hot reload changes in `config.yaml` and `auths/` are picked up automatically by the watcher
-
+Keep executor tests local by using an `httptest.Server` or a fake `http.RoundTripper`. Cover non-stream responses, stream
+terminal behavior, context cancellation, response-body ownership, credential injection, token-count errors, translator
+direction, and model replacement. The repository's `examples/custom-provider` package is compiled by the release checks.

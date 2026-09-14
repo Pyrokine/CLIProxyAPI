@@ -36,8 +36,12 @@ usage-data/*
 auths/*
 !auths/.gitkeep
 
-# Documentation (auto-generated)
+# Documentation (ignore generated files; keep maintained guides)
 docs/*
+!docs/production-deployment.md
+!docs/production-deployment_CN.md
+!docs/usage-sqlite-capacity.md
+!docs/usage-sqlite-capacity_CN.md
 
 # AI tooling
 AGENTS.md

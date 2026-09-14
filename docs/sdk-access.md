@@ -1,109 +1,97 @@
-# @sdk/access SDK Reference
+# `sdk/access` reference
 
-The `github.com/Pyrokine/CLIProxyAPI/v6/sdk/access` package centralizes inbound request authentication for the
-proxy. It offers a lightweight manager that chains credential providers, so servers can reuse the same access control
-logic inside or outside the CLI runtime.
+`github.com/Pyrokine/CLIProxyAPI/v6/sdk/access` defines inbound request authentication for embedded servers. A `Manager`
+evaluates registered credential providers in order and returns a provider-specific principal and metadata.
 
-## Importing
+## Install
 
-```go
-import (
-    sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
-)
+```bash
+go get github.com/Pyrokine/CLIProxyAPI/v6/sdk/access
 ```
 
-Add the module with `go get github.com/Pyrokine/CLIProxyAPI/v6/sdk/access`.
+## Provider registry
 
-## Provider Registry
+`RegisterProvider(type, provider)` stores an initialized provider under a type identifier. The first registration of each
+type fixes its position. A later registration with the same type replaces the instance without changing that position.
+`RegisteredProviders()` returns the current instances in registration order.
 
-Providers are registered globally and then attached to a `Manager` as a snapshot:
+A manager uses a snapshot of the registry:
 
-- `RegisterProvider(type, provider)` installs a pre-initialized provider instance.
-- Registration order is preserved the first time each `type` is seen.
-- `RegisteredProviders()` returns the providers in that order.
-
-## Manager Lifecycle
-
-```go
+```text
 manager := sdkaccess.NewManager()
 manager.SetProviders(sdkaccess.RegisteredProviders())
 ```
 
-* `NewManager` constructs an empty manager.
-* `SetProviders` replaces the provider slice using a defensive copy.
-* `Providers` retrieves a snapshot that can be iterated safely from other goroutines.
+`SetProviders` and `Providers` use defensive slice copies. A nil manager or a manager with no providers returns
+`nil, nil` from `Authenticate`, which represents disabled access control.
 
-If the manager itself is `nil` or no providers are configured, the call returns `nil, nil`, allowing callers to treat
-access control as disabled.
+## Authenticate a request
 
-## Authenticating Requests
-
-```go
-result, authErr := manager.Authenticate(ctx, req)
+```text
+result, authErr := manager.Authenticate(ctx, request)
 switch {
 case authErr == nil:
-    // Authentication succeeded; result describes the provider and principal.
+    // result identifies the provider, principal, and provider metadata.
 case sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeNoCredentials):
-    // No recognizable credentials were supplied.
+    // No recognized credential was supplied.
 case sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeInvalidCredential):
-    // Supplied credentials were present but rejected.
+    // A recognized credential was supplied but rejected.
 default:
-    // Internal/transport failure was returned by a provider.
+    // A provider returned an internal or transport failure.
 }
 ```
 
-`Manager.Authenticate` walks the configured providers in order. It returns on the first success, skips providers that
-return `AuthErrorCodeNotHandled`, and aggregates `AuthErrorCodeNoCredentials` / `AuthErrorCodeInvalidCredential` for a
-final result.
+`Manager.Authenticate` returns the first success. `AuthErrorCodeNotHandled` advances to the next provider.
+`AuthErrorCodeNoCredentials` and `AuthErrorCodeInvalidCredential` are accumulated; invalid credentials take precedence if
+no provider succeeds. Internal errors return immediately.
 
-Each `Result` includes the provider identifier, the resolved principal, and optional metadata (for example, which header
-carried the credential).
+## Built-in `config-api-key` provider
 
-## Built-in `config-api-key` Provider
+`sdk/cliproxy.Builder` registers the built-in `config-api-key` provider from `Config.SDKConfig.APIKeys` and installs the
+current registry snapshot on the access manager.
 
-The proxy includes one built-in access provider:
+The provider accepts these headers:
 
-- `config-api-key`: Validates API keys declared under top-level `api-keys`.
-    - Credential sources: `Authorization: Bearer`, `X-Goog-Api-Key`, `X-Api-Key`, `?key=`, `?auth_token=`
-    - Metadata: `Result.Metadata["source"]` is set to the matched source label.
+- `Authorization: Bearer <key>`
+- `X-Goog-Api-Key: <key>`
+- `X-Api-Key: <key>`
 
-In the CLI server and `sdk/cliproxy`, this provider is registered automatically based on the loaded configuration.
+The query parameters `?key=` and `?auth_token=` are accepted only when `allow-query-auth: true` is configured. Successful
+results set `Metadata["source"]` to `authorization`, `x-goog-api-key`, `x-api-key`, `query-key`, or
+`query-auth-token`.
 
 ```yaml
 api-keys:
   - sk-test-123
-  - sk-prod-456
+allow-query-auth: false
 ```
 
-## Loading Providers from External Go Modules
+Configured keys must contain at least eight printable ASCII characters. Comparison is constant-time across all configured
+keys.
 
-To consume a provider shipped in another Go module, import it for its registration side effect:
+## Write a custom provider
+
+This complete package registers a provider during initialization:
 
 ```go
+package partneraccess
+
 import (
-    _ "github.com/acme/xplatform/sdk/access/providers/partner" // registers partner-token
+    "context"
+    "net/http"
+
     sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 )
-```
 
-The blank identifier import ensures `init` runs so `sdkaccess.RegisterProvider` executes before you call
-`RegisteredProviders()` (or before `cliproxy.NewBuilder().Build()`).
+type provider struct{}
 
-### Metadata and auditing
+func (*provider) Identifier() string { return "partner-token" }
 
-`Result.Metadata` carries provider-specific context. The built-in `config-api-key` provider, for example, stores the
-credential source (`authorization`, `x-goog-api-key`, `x-api-key`, `query-key`, `query-auth-token`). Populate this map
-in custom providers to enrich logs and downstream auditing.
-
-## Writing Custom Providers
-
-```go
-type customProvider struct{}
-
-func (p *customProvider) Identifier() string { return "my-provider" }
-
-func (p *customProvider) Authenticate(ctx context.Context, r *http.Request) (*sdkaccess.Result, *sdkaccess.AuthError) {
-    token := r.Header.Get("X-Custom")
+func (p *provider) Authenticate(
+    _ context.Context,
+    request *http.Request,
+) (*sdkaccess.Result, *sdkaccess.AuthError) {
+    token := request.Header.Get("X-Partner-Token")
     if token == "" {
         return nil, sdkaccess.NewNotHandledError()
     }
@@ -113,56 +101,53 @@ func (p *customProvider) Authenticate(ctx context.Context, r *http.Request) (*sd
     return &sdkaccess.Result{
         Provider:  p.Identifier(),
         Principal: "service-user",
-        Metadata:  map[string]string{"source": "x-custom"},
+        Metadata:  map[string]string{"source": "x-partner-token"},
     }, nil
 }
 
 func init() {
-    sdkaccess.RegisterProvider("custom", &customProvider{})
+    sdkaccess.RegisterProvider("partner-token", &provider{})
 }
 ```
 
-A provider must implement `Identifier()` and `Authenticate()`. To make it available to the access manager, call
-`RegisterProvider` inside `init` with an initialized provider instance.
+A provider must implement `Identifier()` and `Authenticate(context.Context, *http.Request)`. Use `Metadata` for
+provider-specific audit context such as the credential source; do not place credential material in metadata.
 
-## Error Semantics
+An external provider module can register itself through a blank import:
 
-- `NewNoCredentialsError()` (`AuthErrorCodeNoCredentials`): no credentials were present or recognized. (HTTP 401)
-- `NewInvalidCredentialError()` (`AuthErrorCodeInvalidCredential`): credentials were present but rejected. (HTTP 401)
-- `NewNotHandledError()` (`AuthErrorCodeNotHandled`): fall through to the next provider.
-- `NewInternalAuthError(message, cause)` (`AuthErrorCodeInternal`): transport/system failure. (HTTP 500)
-
-Errors propagate immediately to the caller unless they are classified as `not_handled` / `no_credentials` /
-`invalid_credential` and can be aggregated by the manager.
-
-## Integration with cliproxy Service
-
-`sdk/cliproxy` wires `@sdk/access` automatically when you build a CLI service via `cliproxy.NewBuilder`. Supplying a
-manager lets you reuse the same instance in your host process:
-
-```go
-coreCfg, _ := config.LoadConfig("config.yaml")
-accessManager := sdkaccess.NewManager()
-
-svc, _ := cliproxy.NewBuilder().
-  WithConfig(coreCfg).
-  WithConfigPath("config.yaml").
-  WithRequestAccessManager(accessManager).
-  Build()
+```text
+import _ "github.com/acme/xplatform/sdk/access/providers/partner"
 ```
 
-Register any custom providers (typically via blank imports) before calling `Build()` so they are present in the global
-registry snapshot.
+Import it before calling `RegisteredProviders` or `cliproxy.Builder.Build`.
 
-### Hot reloading
+## Integrate with `sdk/cliproxy`
 
-When configuration changes, refresh any config-backed providers and then reset the manager's provider chain:
+Supply a manager when the host needs to share or inspect the same access-control instance:
 
-```go
-// configaccess is github.com/Pyrokine/CLIProxyAPI/v6/internal/access/config_access
-configaccess.Register(&newCfg.SDKConfig)
+```text
+accessManager := sdkaccess.NewManager()
+service, err := cliproxy.NewBuilder().
+    WithConfig(cfg).
+    WithConfigPath(configPath).
+    WithRequestAccessManager(accessManager).
+    Build()
+```
+
+`Build` registers the config-backed provider and initializes the manager snapshot. The service repeats that update after a
+configuration change. Custom provider implementations that change at runtime must register the replacement instance and
+refresh the snapshot:
+
+```text
+sdkaccess.RegisterProvider("partner-token", replacement)
 accessManager.SetProviders(sdkaccess.RegisteredProviders())
 ```
 
-This mirrors the behavior in `internal/access.ApplyAccessProviders`, enabling runtime updates without restarting the
-process.
+## Error semantics
+
+- `NewNotHandledError()` means this provider did not recognize the request
+- `NewNoCredentialsError()` means this provider recognized its credential scheme but found no credential
+- `NewInvalidCredentialError()` means a recognized credential failed validation
+- `NewInternalAuthError(message, cause)` reports a provider failure that must stop authentication
+
+The CLI HTTP layer maps missing or invalid credentials to HTTP 401 and internal authentication failures to HTTP 500.
