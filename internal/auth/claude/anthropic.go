@@ -8,6 +8,12 @@ type TokenData struct {
 	RefreshToken string `json:"refresh_token"`
 	// Email is the Anthropic account email
 	Email string `json:"email"`
+	// AccountUUID identifies the Anthropic account returned by OAuth.
+	AccountUUID string `json:"account_uuid"`
+	// OrganizationUUID identifies the Anthropic organization returned by OAuth.
+	OrganizationUUID string `json:"organization_uuid"`
+	// OrganizationName is the display name returned by OAuth.
+	OrganizationName string `json:"organization_name"`
 	// Expire is the timestamp of the token expire
 	Expire string `json:"expired"`
 }
@@ -18,6 +24,8 @@ type AuthBundle struct {
 	APIKey string `json:"api_key"`
 	// TokenData contains the OAuth tokens from the authentication flow
 	TokenData TokenData `json:"token_data"`
+	// DeviceIDs contains the device identity persisted with this credential.
+	DeviceIDs []string `json:"claude_device_ids"`
 	// LastRefresh is the timestamp of the last token refresh
 	LastRefresh string `json:"last_refresh"`
 }

@@ -24,12 +24,16 @@ func TestRefreshTokensDetachedRequestHasTimeout(t *testing.T) {
 	defer func() { claudeRefreshTimeout = originalTimeout }()
 	resetClaudeRefreshState()
 	defer resetClaudeRefreshState()
-	auth := &Auth{httpClient: &http.Client{Transport: roundTripFunc(
-		func(req *http.Request) (*http.Response, error) {
-			<-req.Context().Done()
-			return nil, req.Context().Err()
+	auth := &Auth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(
+				func(req *http.Request) (*http.Response, error) {
+					<-req.Context().Done()
+					return nil, req.Context().Err()
+				},
+			),
 		},
-	)}}
+	}
 	started := time.Now()
 	_, errRefresh := auth.RefreshTokens(context.Background(), "timeout-refresh-token")
 	if !errors.Is(errRefresh, context.DeadlineExceeded) {
@@ -44,12 +48,12 @@ func TestRefreshTokensWithRetry429BlocksImmediateReplay(t *testing.T) {
 	resetClaudeRefreshState()
 	defer resetClaudeRefreshState()
 
-	var calls int32
+	var calls atomic.Int32
 	auth := &Auth{
 		httpClient: &http.Client{
 			Transport: roundTripFunc(
 				func(req *http.Request) (*http.Response, error) {
-					atomic.AddInt32(&calls, 1)
+					calls.Add(1)
 					return &http.Response{
 						StatusCode: http.StatusTooManyRequests,
 						Body:       io.NopCloser(strings.NewReader(`{"error":"rate_limited"}`)),
@@ -68,7 +72,7 @@ func TestRefreshTokensWithRetry429BlocksImmediateReplay(t *testing.T) {
 	if !strings.Contains(err.Error(), "status 429") {
 		t.Fatalf("expected status 429 in error, got %v", err)
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Fatalf("expected 1 refresh attempt after 429, got %d", got)
 	}
 
@@ -76,7 +80,7 @@ func TestRefreshTokensWithRetry429BlocksImmediateReplay(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected immediate blocked refresh error")
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := calls.Load(); got != 1 {
 		t.Fatalf("expected blocked retry to avoid a second refresh call, got %d attempts", got)
 	}
 	if blockedUntil := claudeRefreshBlockedUntil("dummy_refresh_token"); !blockedUntil.After(time.Now()) {
@@ -88,7 +92,8 @@ func TestRefreshTokensDeduplicatesConcurrentRefresh(t *testing.T) {
 	resetClaudeRefreshState()
 	defer resetClaudeRefreshState()
 
-	var calls int32
+	var tokenCalls atomic.Int32
+	var profileCalls atomic.Int32
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
@@ -97,25 +102,46 @@ func TestRefreshTokensDeduplicatesConcurrentRefresh(t *testing.T) {
 		httpClient: &http.Client{
 			Transport: roundTripFunc(
 				func(req *http.Request) (*http.Response, error) {
-					atomic.AddInt32(&calls, 1)
-					once.Do(func() { close(started) })
-					<-release
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body: io.NopCloser(
-							strings.NewReader(
-								`{
-						"access_token":"new-access",
-						"refresh_token":"new-refresh",
-						"token_type":"Bearer",
-						"expires_in":3600,
-						"account":{"email_address":"shared@example.com"}
-					}`,
+					switch req.URL.String() {
+					case refreshTokenURL:
+						tokenCalls.Add(1)
+						once.Do(func() { close(started) })
+						<-release
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body: io.NopCloser(
+								strings.NewReader(
+									`{
+							"access_token":"new-access",
+							"refresh_token":"new-refresh",
+							"token_type":"Bearer",
+							"expires_in":3600,
+							"scope":"user:profile user:inference"
+						}`,
+								),
 							),
-						),
-						Header:  make(http.Header),
-						Request: req,
-					}, nil
+							Header:  make(http.Header),
+							Request: req,
+						}, nil
+					case profileURL:
+						profileCalls.Add(1)
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body: io.NopCloser(
+								strings.NewReader(
+									`{
+							"account":{"uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","email":"shared@example.com"},
+							"organization":{"uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","name":"Shared Org"}
+						}`,
+								),
+							),
+							Header:  make(http.Header),
+							Request: req,
+						}, nil
+					default:
+						t.Fatalf("unexpected OAuth request URL %s", req.URL)
+						return nil, nil
+					}
 				},
 			),
 		},
@@ -139,13 +165,13 @@ func TestRefreshTokensDeduplicatesConcurrentRefresh(t *testing.T) {
 		t.Fatal("refresh request did not start")
 	}
 	time.Sleep(20 * time.Millisecond)
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := tokenCalls.Load(); got != 1 {
 		close(release)
 		t.Fatalf("expected concurrent refresh to share a single upstream call, got %d", got)
 	}
 	close(release)
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := <-errs; err != nil {
 			t.Fatalf("expected refresh to succeed, got %v", err)
 		}
@@ -153,8 +179,17 @@ func TestRefreshTokensDeduplicatesConcurrentRefresh(t *testing.T) {
 		if td == nil || td.AccessToken != "new-access" {
 			t.Fatalf("expected refreshed access token, got %#v", td)
 		}
+		if td.AccountUUID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
+			t.Fatalf("account UUID = %q, want OAuth profile account", td.AccountUUID)
+		}
+		if td.OrganizationUUID != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" || td.OrganizationName != "Shared Org" {
+			t.Fatalf("organization = %q/%q, want OAuth profile organization", td.OrganizationUUID, td.OrganizationName)
+		}
 	}
-	if got := atomic.LoadInt32(&calls); got != 1 {
+	if got := tokenCalls.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 upstream refresh call, got %d", got)
+	}
+	if got := profileCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 OAuth profile call, got %d", got)
 	}
 }

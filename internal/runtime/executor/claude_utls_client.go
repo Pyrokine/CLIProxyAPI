@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	stdtls "crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,20 +11,42 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	helpers "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
-	tls "github.com/refraction-networking/utls"
+	utls "github.com/refraction-networking/utls"
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
 
 type claudeUtlsRoundTripper struct {
 	mu          sync.Mutex
-	connections map[string]*http2.ClientConn
+	connections map[string]*http.ClientConn
 	pending     map[string]*sync.Cond
 	dialer      proxy.Dialer
+}
+
+type utlsHTTPConn struct {
+	*utls.UConn
+}
+
+func (c *utlsHTTPConn) ConnectionState() stdtls.ConnectionState {
+	state := c.UConn.ConnectionState()
+	return stdtls.ConnectionState{
+		Version:                     state.Version,
+		HandshakeComplete:           state.HandshakeComplete,
+		DidResume:                   state.DidResume,
+		CipherSuite:                 state.CipherSuite,
+		NegotiatedProtocol:          state.NegotiatedProtocol,
+		ServerName:                  state.ServerName,
+		PeerCertificates:            state.PeerCertificates,
+		VerifiedChains:              state.VerifiedChains,
+		SignedCertificateTimestamps: state.SignedCertificateTimestamps,
+		OCSPResponse:                state.OCSPResponse,
+		TLSUnique:                   state.TLSUnique,
+		ECHAccepted:                 state.ECHAccepted,
+	}
 }
 
 type proxyErrorDialer struct {
@@ -48,21 +71,25 @@ func newClaudeUtlsRoundTripper(proxyURL string) *claudeUtlsRoundTripper {
 		}
 	}
 	return &claudeUtlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
+		connections: make(map[string]*http.ClientConn),
 		pending:     make(map[string]*sync.Cond),
 		dialer:      dialer,
 	}
 }
 
-func (t *claudeUtlsRoundTripper) getOrCreateConnection(host string, addr string) (*http2.ClientConn, error) {
+func (t *claudeUtlsRoundTripper) getOrCreateConnection(
+	ctx context.Context,
+	host string,
+	addr string,
+) (*http.ClientConn, error) {
 	t.mu.Lock()
-	if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
+	if h2Conn, ok := t.connections[host]; ok && h2Conn.Err() == nil && h2Conn.Available() > 0 {
 		t.mu.Unlock()
 		return h2Conn, nil
 	}
 	if cond, ok := t.pending[host]; ok {
 		cond.Wait()
-		if h2Conn, ok := t.connections[host]; ok && h2Conn.CanTakeNewRequest() {
+		if h2Conn, ok := t.connections[host]; ok && h2Conn.Err() == nil && h2Conn.Available() > 0 {
 			t.mu.Unlock()
 			return h2Conn, nil
 		}
@@ -71,7 +98,7 @@ func (t *claudeUtlsRoundTripper) getOrCreateConnection(host string, addr string)
 	t.pending[host] = cond
 	t.mu.Unlock()
 
-	h2Conn, err := t.createConnection(host, addr)
+	h2Conn, err := t.createConnection(ctx, host, addr)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -84,19 +111,35 @@ func (t *claudeUtlsRoundTripper) getOrCreateConnection(host string, addr string)
 	return h2Conn, nil
 }
 
-func (t *claudeUtlsRoundTripper) createConnection(host string, addr string) (*http2.ClientConn, error) {
+func (t *claudeUtlsRoundTripper) createConnection(
+	ctx context.Context,
+	host string,
+	addr string,
+) (*http.ClientConn, error) {
 	conn, err := t.dialer.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 
-	tlsConn := tls.UClient(conn, &tls.Config{ServerName: host}, tls.HelloChrome_Auto)
-	if err := tlsConn.Handshake(); err != nil {
+	tlsConn := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloChrome_Auto)
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		_ = tlsConn.Close()
 		return nil, err
 	}
+	if protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol != "h2" {
+		_ = tlsConn.Close()
+		return nil, fmt.Errorf("upstream negotiated %q instead of HTTP/2", protocol)
+	}
 
-	h2Conn, err := (&http2.Transport{}).NewClientConn(tlsConn)
+	protocols := new(http.Protocols)
+	protocols.SetHTTP2(true)
+	transport := &http.Transport{
+		Protocols: protocols,
+		DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
+			return &utlsHTTPConn{UConn: tlsConn}, nil
+		},
+	}
+	h2Conn, err := transport.NewClientConn(ctx, "https", addr)
 	if err != nil {
 		_ = tlsConn.Close()
 		return nil, err
@@ -118,7 +161,7 @@ func (t *claudeUtlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		port = "443"
 	}
 	addr := net.JoinHostPort(pinnedAddr, port)
-	h2Conn, err := t.getOrCreateConnection(hostname, addr)
+	h2Conn, err := t.getOrCreateConnection(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -135,20 +178,18 @@ func (t *claudeUtlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 }
 
 type claudeFallbackRoundTripper struct {
-	utls     http.RoundTripper
-	fallback http.RoundTripper
-}
-
-var utlsProtectedHosts = map[string]struct{}{
-	"api.anthropic.com": {},
-	"chatgpt.com":       {},
+	anthropic http.RoundTripper
+	chrome    http.RoundTripper
+	fallback  http.RoundTripper
 }
 
 func (f *claudeFallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL != nil && req.URL.Scheme == "https" {
-		if _, ok := utlsProtectedHosts[strings.ToLower(req.URL.Hostname())]; ok {
-			return f.utls.RoundTrip(req)
-		}
+	if req != nil && helpers.IsAnthropicUpstreamURL(req.URL) {
+		return f.anthropic.RoundTrip(req)
+	}
+	if req != nil && req.URL != nil && req.URL.Scheme == "https" &&
+		strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
+		return f.chrome.RoundTrip(req)
 	}
 	return f.fallback.RoundTrip(req)
 }
@@ -167,23 +208,24 @@ func newProtectedUtlsHTTPClient(
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	var utlsTransport http.RoundTripper = newClaudeUtlsRoundTripper(proxyURL)
+	var chromeTransport http.RoundTripper = newClaudeUtlsRoundTripper(proxyURL)
+	var anthropicTransport = cachedClaudeCodeRoundTripper(proxyURL)
 	var fallback http.RoundTripper = &http.Transport{
 		DialContext: (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 	}
 	if proxyURL != "" {
-		if transport := buildProxyTransport(proxyURL); transport != nil {
-			fallback = transport
-		}
+		fallback = buildProxyTransport(proxyURL)
 	} else if roundTripper, ok := util.RoundTripperValue(ctx).(http.RoundTripper); ok && roundTripper != nil {
-		utlsTransport = roundTripper
+		chromeTransport = roundTripper
+		anthropicTransport = roundTripper
 		fallback = roundTripper
 	}
 
 	client := &http.Client{
 		Transport: &claudeFallbackRoundTripper{
-			utls:     utlsTransport,
-			fallback: fallback,
+			anthropic: anthropicTransport,
+			chrome:    chromeTransport,
+			fallback:  fallback,
 		},
 	}
 	if timeout > 0 {

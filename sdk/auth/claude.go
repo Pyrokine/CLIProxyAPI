@@ -127,6 +127,18 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}
+	if tokenStorage.AccountUUID != "" {
+		metadata["account_uuid"] = tokenStorage.AccountUUID
+	}
+	if tokenStorage.OrganizationUUID != "" {
+		metadata["organization_uuid"] = tokenStorage.OrganizationUUID
+	}
+	if tokenStorage.OrganizationName != "" {
+		metadata["organization_name"] = tokenStorage.OrganizationName
+	}
+	if len(tokenStorage.DeviceIDs) > 0 {
+		metadata[claude.DeviceIDsMetadataKey] = append([]string(nil), tokenStorage.DeviceIDs...)
+	}
 
 	fmt.Println("Claude authentication successful")
 	if authBundle.APIKey != "" {
