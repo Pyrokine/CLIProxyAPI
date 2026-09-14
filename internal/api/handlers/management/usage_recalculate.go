@@ -21,19 +21,23 @@ func (h *Handler) RecalculateCosts(c *gin.Context) {
 	}
 
 	if !h.usagePersister.StartRecalculateCosts() {
-		c.JSON(http.StatusOK, gin.H{
-			"status":          "busy",
-			"running":         true,
-			"already_running": true,
-		})
+		c.JSON(
+			http.StatusOK, gin.H{
+				"status":          "busy",
+				"running":         true,
+				"already_running": true,
+			},
+		)
 		return
 	}
 
-	c.JSON(http.StatusAccepted, gin.H{
-		"status":          "started",
-		"running":         true,
-		"already_running": false,
-	})
+	c.JSON(
+		http.StatusAccepted, gin.H{
+			"status":          "started",
+			"running":         true,
+			"already_running": false,
+		},
+	)
 }
 
 // GetRecalculateCostsStatus returns the latest historical cost recalculation state.

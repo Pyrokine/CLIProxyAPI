@@ -1,22 +1,76 @@
 # Default model price sources
 
-`default_prices.json` stores USD prices per one million tokens
+`default_prices.json` is a reference-price manifest. Its keys do not create model inventory entries. Model inventory
+comes from the embedded provider catalogs and runtime discovery.
+
+All numeric token rates use USD per one million tokens. Usage totals use these rates to estimate the reference amount
+for each recorded token bucket.
 
 - `prompt`: uncached input
-- `completion`: output
-- `cache`: cached input or cache hit
+- `completion`: total output, including reasoning tokens already contained in output usage
+- `cache`: legacy cached-input rate
+- `cache_read`: cache-read input
+- `cache_write`: cache-write input when the TTL is not represented separately
+- `cache_write_5m`: cache-write input with a 5-minute TTL
+- `cache_write_1h`: cache-write input with a 1-hour TTL
+- `complete`: all request token buckets needed by the model have fixed rates
+- `partial`: a rate, tier, storage charge, or effective condition is not fully identifiable from request usage
+- `unpriced`: no numeric token reference rate is recorded
+- `auto_apply`: legacy metadata describing whether known parts of a `partial` price used to be applied automatically; it
+  does not gate reference amount calculation
 
-Media APIs priced per image or per second are intentionally omitted from the token price table
+`partial` and `unpriced` are compatibility status values. A status value does not discard numeric reference rates. A
+known 5-minute or 1-hour write uses its matching rate, then `cache_write`, then the prompt rate. A write with unknown
+TTL uses `cache_write`; if that rate is absent, it uses the higher configured TTL rate, then the prompt rate. An
+explicit zero rate remains zero. Models without any numeric token rate do not receive a fabricated amount.
 
-## 2026-07-31 baseline
+`effective_from` and `effective_until` restrict a reference rate to the event timestamp. A date-only `effective_until`
+includes the entire stated day. The usage store captures the catalog revision, effective range, provider, requested and
+canonical model, currency, token coverage, and line items before accepting a live event. Historical repricing updates
+only the current-catalog derived amount; it does not change this request-time receipt.
 
-| Models | Source | Notes |
-|---|---|---|
-| `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | [OpenAI GPT-5.6](https://openai.com/index/gpt-5-6/) | Standard context rates; the current schema cannot represent long-context multipliers |
-| `claude-sonnet-5`, `claude-fable-5` | [Anthropic Claude pricing](https://platform.claude.com/docs/en/docs/about-claude/pricing) | Sonnet 5 introductory pricing ends on 2026-08-31; standard pricing starts on 2026-09-01 |
-| `gemini-3.5-flash` | [Google Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing) | Standard paid-tier rates |
-| `deepseek-v4-pro` | [DeepSeek Models & Pricing](https://api-docs.deepseek.com/quick_start/pricing) | `prompt` is cache-miss input; `cache` is cache-hit input |
-| `grok-4.5` | [xAI Grok 4.5](https://docs.x.ai/developers/models/grok-4.5) | Standard context rates; the current schema cannot represent long-context multipliers |
-| `kimi-k2.7-code` | [Kimi K2.7 Code](https://www.kimi.com/resources/kimi-k2-7-code) | `prompt` is uncached input; `cache` is cached input |
+Usage aggregates are denominated in USD. New price records with another currency are rejected. A legacy non-USD record
+can still be read for audit evidence, but its request amount is marked `unpriced` and excluded from USD aggregation.
 
-A model added to the default runtime catalog must have a token price or an explicit exemption in `default_prices_test.go`
+Media output priced per image, video duration, or another non-token unit is marked `unpriced` in this manifest.
+
+## 2026-09-11 DeepSeek update
+
+| Models                                              | Source                                                                 | Manifest treatment                                                                                                                                                                                                   |
+| --------------------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deepseek-flash`                                    | [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/) | Off-peak rates are USD 0.15 uncached input, USD 0.003 cache-read input, and USD 0.60 output per one million tokens. Weekday peak rates are USD 0.30, USD 0.006, and USD 1.20 during 01:00-04:00 and 06:00-10:00 UTC. |
+| `deepseek-v4-pro`                                   | [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/) | Off-peak rates remain USD 0.66 uncached input, USD 0.022 cache-read input, and USD 1.98 output. Weekday peak rates are USD 1.32, USD 0.044, and USD 3.96 during the same recurring UTC bands.                        |
+| `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp` | [DeepSeek models](https://api-docs.deepseek.com/api/list-models/)      | These retired IDs are temporarily forwarded to `deepseek-flash`. They remain price-only entries using V4.1 Flash rates, so historical usage can still be priced without restoring them to the default inventory.     |
+
+The resolver selects the recurring UTC band from the usage event timestamp. Band start times are inclusive, end times
+are exclusive, and weekends use off-peak rates
+
+## 2026-09-04 OpenAI update
+
+| Models          | Source                                                                                    | Manifest treatment                                                                                                                                                                                                                                                                                                                                                                                                   |
+|-----------------|-------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `gpt-6-astra`   | [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6-astra)   | Standard requests use USD 10 uncached input, USD 1 cache-read input, USD 12.50 cache-write input, and USD 50 output per one million tokens. Requests above 272K input tokens double input and cache rates and use 1.5x output rates; the current resolver cannot select that tier automatically. Access is rolling out through the Trusted Access Program.                                                           |
+| `gpt-5.6-cyber` | [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-5.6-cyber) | Standard requests use USD 12.50 uncached input, USD 1.25 cache-read input, USD 15.625 cache-write input, and USD 75 output per one million tokens. Requests above 272K input tokens double input rates and use 1.5x output rates; the source does not publish long-context cache rates, and the current resolver cannot select that tier automatically. Access requires separate Daybreak approval and provisioning. |
+
+These entries provide reference prices only. They do not add model inventory, routing, OAuth aliases, or access
+entitlement.
+
+## 2026-08-30 baseline
+
+| Models                                                                            | Source                                                                                                                        | Manifest treatment                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`                                    | [OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-5.6-sol)                                       | Base input, cache-read, cache-write, and output rates are recorded as reference rates. Requests above 272K input tokens use 2x input and 1.5x output rates, which the current resolver cannot select automatically. The public API documentation states a 1,050,000-token context window and 128,000-token output limit. The Codex runtime manifest currently advertises a 372,000-token route limit, so the Codex registry retains that lower requestable limit. |
+| `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`, `claude-haiku-4-5-20251001` | [Anthropic pricing](https://platform.claude.com/docs/en/about-claude/pricing)                                                 | Base input, cache-read, 5-minute cache-write, 1-hour cache-write, and output rates are recorded. Anthropic usage exposes the two cache-creation TTL buckets; when a response provides only aggregate cache creation, the receipt records an unknown-TTL line item and uses the higher configured TTL rate.                                                                                                                                                        |
+| `gemini-3.6-flash`, `gemini-3.7-flash`, provider aliases                          | [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing)                                                           | Promotional rates through 2026-12-31 are used as reference rates. Context-cache storage is billed separately and is excluded from request token cost.                                                                                                                                                                                                                                                                                                             |
+| `gemini-3.5-flash-extra-low`                                                      | [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing)                                                           | Antigravity exposes a thinking-level alias. Google publishes no separate alias price, so the Gemini 3.5 Flash family rate is used. Cache storage is billed separately.                                                                                                                                                                                                                                                                                            |
+| DeepSeek V4 models                                                                | [DeepSeek pricing](https://api-docs.deepseek.com/quick_start/pricing/)                                                        | Historical baseline superseded by the 2026-09-11 DeepSeek update above.                                                                                                                                                                                                                                                                                                                                                                                           |
+| `grok-4.5`, `grok-4.6`                                                            | [xAI pricing](https://docs.x.ai/developers/pricing)                                                                           | Below-200K rates are used as reference rates. Input, cached-input, and output prices double at 200K input tokens, which the current resolver cannot select from usage metadata.                                                                                                                                                                                                                                                                                   |
+| `kimi-k3`                                                                         | [Kimi K3 announcement](https://www.kimi.com/en/blog/kimi-k3)                                                                  | Input, cache-read, and output rates are used as reference rates. No cache-write rate is published, so the prompt rate estimates that bucket.                                                                                                                                                                                                                                                                                                                      |
+| `kimi-k2.5`                                                                       | [Kimi API pricing](https://platform.kimi.ai/docs/pricing/chat), [iFlow changelog](https://platform.iflow.cn/en/cli/changelog) | iFlow publishes the runtime model, but the current Kimi pricing page does not publish a verified direct USD token rate for this ID. No reference amount is generated.                                                                                                                                                                                                                                                                                             |
+| `MiniMax-M3`, `MiniMax-M2.7`, `MiniMax-M2.7-highspeed`, `minimax-m2.5`            | [MiniMax pay-as-you-go pricing](https://platform.minimax.io/docs/guides/pricing-paygo)                                        | M2.5 has fixed legacy rates. M2.7 variants use standard-tier reference rates because service-tier selection is not represented. M3 uses standard reference rates because prices vary by service tier and above-512K context.                                                                                                                                                                                                                                      |
+| GLM 4 and GLM 5 families                                                          | [Zhipu pricing](https://open.bigmodel.cn/pricing)                                                                             | Current exact USD rates were not independently recoverable from the client-rendered official page. No reference amount is generated.                                                                                                                                                                                                                                                                                                                              |
+| Qwen 3 families                                                                   | [Alibaba Cloud Model Studio pricing](https://help.aliyun.com/zh/model-studio/model-pricing)                                   | Region, context tier, thinking mode, cache, and batch pricing vary. No single fixed reference rate is recorded.                                                                                                                                                                                                                                                                                                                                                   |
+| Imagen and Grok video models                                                      | [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing), [xAI pricing](https://docs.x.ai/developers/pricing)      | Output uses non-token units, so no reference amount is generated.                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+Every model in the default runtime inventory must have either numeric token reference rates or an explicit manifest
+entry explaining why no reference amount is generated. This invariant is checked by `default_prices_test.go`.

@@ -4,6 +4,19 @@
         "completion": 25.0,
         "cache": 0.5
     },
+    "claude-opus-5": {
+        "prompt": 5.0,
+        "completion": 25.0,
+        "cache": 0.5,
+        "cache_read": 0.5,
+        "cache_write_5m": 6.25,
+        "cache_write_1h": 10.0,
+        "status": "complete",
+        "region": "global",
+        "currency": "USD",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "checked_at": "2026-08-30"
+    },
     "claude-opus-4-7-thinking": {
         "prompt": 5.0,
         "completion": 25.0,
@@ -37,7 +50,15 @@
     "claude-sonnet-5": {
         "prompt": 2.0,
         "completion": 10.0,
-        "cache": 0.2
+        "cache": 0.2,
+        "cache_read": 0.2,
+        "cache_write_5m": 2.5,
+        "cache_write_1h": 4.0,
+        "status": "complete",
+        "region": "global",
+        "currency": "USD",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "checked_at": "2026-08-30"
     },
     "claude-sonnet-4-6": {
         "prompt": 3.0,
@@ -57,7 +78,15 @@
     "claude-haiku-4-5-20251001": {
         "prompt": 1.0,
         "completion": 5.0,
-        "cache": 0.1
+        "cache": 0.1,
+        "cache_read": 0.1,
+        "cache_write_5m": 1.25,
+        "cache_write_1h": 2.0,
+        "status": "complete",
+        "region": "global",
+        "currency": "USD",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "checked_at": "2026-08-30"
     },
     "claude-3-7-sonnet-20250219": {
         "prompt": 3.0,
@@ -69,20 +98,82 @@
         "completion": 4.0,
         "cache": 0.08
     },
+    "gpt-6-astra": {
+        "prompt": 10.0,
+        "completion": 50.0,
+        "cache": 1.0,
+        "cache_read": 1.0,
+        "cache_write": 12.5,
+        "status": "partial",
+        "region": "global",
+        "limitations": [
+            "Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
+            "Access is rolling out through the Trusted Access Program; this reference price does not establish entitlement."
+        ],
+        "currency": "USD",
+        "source": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+        "checked_at": "2026-09-04"
+    },
+    "gpt-5.6-cyber": {
+        "prompt": 12.5,
+        "completion": 75.0,
+        "cache": 1.25,
+        "cache_read": 1.25,
+        "cache_write": 15.625,
+        "status": "partial",
+        "region": "global",
+        "limitations": [
+            "Requests with more than 272K input tokens use 2x input and 1.5x output pricing; the current manifest does not select that tier automatically. The official source does not publish long-context cache rates.",
+            "Access requires separate Daybreak approval and provisioning."
+        ],
+        "currency": "USD",
+        "source": "https://developers.openai.com/api/docs/models/gpt-5.6-cyber",
+        "checked_at": "2026-09-04"
+    },
     "gpt-5.6-sol": {
-        "prompt": 5.0,
-        "completion": 30.0,
-        "cache": 0.5
+        "prompt": 4.0,
+        "completion": 20.0,
+        "cache": 0.4,
+        "cache_read": 0.4,
+        "cache_write": 5.0,
+        "status": "partial",
+        "region": "global",
+        "limitations": [
+            "Requests with more than 272K input tokens use 2x input and 1.5x output pricing; the current manifest does not select that tier automatically."
+        ],
+        "currency": "USD",
+        "source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+        "checked_at": "2026-09-04"
     },
     "gpt-5.6-terra": {
-        "prompt": 2.5,
-        "completion": 15.0,
-        "cache": 0.25
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2,
+        "cache_read": 0.2,
+        "cache_write": 2.5,
+        "status": "partial",
+        "region": "global",
+        "limitations": [
+            "Requests with more than 272K input tokens use 2x input and 1.5x output pricing; the current manifest does not select that tier automatically."
+        ],
+        "currency": "USD",
+        "source": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
+        "checked_at": "2026-09-04"
     },
     "gpt-5.6-luna": {
-        "prompt": 1.0,
-        "completion": 6.0,
-        "cache": 0.1
+        "prompt": 0.2,
+        "completion": 1.2,
+        "cache": 0.02,
+        "cache_read": 0.02,
+        "cache_write": 0.25,
+        "status": "partial",
+        "region": "global",
+        "limitations": [
+            "Requests with more than 272K input tokens use 2x input and 1.5x output pricing; the current manifest does not select that tier automatically."
+        ],
+        "currency": "USD",
+        "source": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
+        "checked_at": "2026-09-04"
     },
     "gpt-5.5": {
         "prompt": 5.0,
@@ -155,9 +246,14 @@
         "cache": 0.1
     },
     "gpt-oss-120b-medium": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "No verified direct USD token price is published for this bundled runtime model.",
+        "checked_at": "2026-08-30"
+    },
+    "gemini-3.1-pro": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
     },
     "gemini-3.1-pro-preview": {
         "prompt": 2.0,
@@ -174,6 +270,11 @@
         "completion": 12.0,
         "cache": 0.2
     },
+    "gemini-3-pro": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
     "gemini-3-pro-preview": {
         "prompt": 2.0,
         "completion": 12.0,
@@ -185,6 +286,11 @@
         "cache": 0.2
     },
     "gemini-3-pro-low": {
+        "prompt": 2.0,
+        "completion": 12.0,
+        "cache": 0.2
+    },
+    "gemini-3-pro-image": {
         "prompt": 2.0,
         "completion": 12.0,
         "cache": 0.2
@@ -255,34 +361,115 @@
         "cache": 0.01
     },
     "imagen-4.0-generate-001": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "Image output is priced per image rather than per token.",
+        "checked_at": "2026-08-30"
     },
     "imagen-4.0-ultra-generate-001": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "Image output is priced per image rather than per token.",
+        "checked_at": "2026-08-30"
     },
     "imagen-4.0-fast-generate-001": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "Image output is priced per image rather than per token.",
+        "checked_at": "2026-08-30"
     },
     "imagen-3.0-generate-002": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "Image output is priced per image rather than per token.",
+        "checked_at": "2026-08-30"
     },
     "imagen-3.0-fast-generate-001": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "Image output is priced per image rather than per token.",
+        "checked_at": "2026-08-30"
+    },
+    "deepseek-flash": {
+        "prompt": 0.15,
+        "completion": 0.6,
+        "cache": 0.003,
+        "cache_read": 0.003,
+        "utc_rate_bands": [
+            {
+                "weekdays": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday"
+                ],
+                "start": "01:00",
+                "end": "04:00",
+                "prompt": 0.3,
+                "completion": 1.2,
+                "cache": 0.006,
+                "cache_read": 0.006
+            },
+            {
+                "weekdays": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday"
+                ],
+                "start": "06:00",
+                "end": "10:00",
+                "prompt": 0.3,
+                "completion": 1.2,
+                "cache": 0.006,
+                "cache_read": 0.006
+            }
+        ],
+        "status": "complete",
+        "region": "global",
+        "currency": "USD",
+        "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+        "checked_at": "2026-09-11"
     },
     "deepseek-v4-pro": {
-        "prompt": 0.435,
-        "completion": 0.87,
-        "cache": 0.003625
+        "prompt": 0.66,
+        "completion": 1.98,
+        "cache": 0.022,
+        "cache_read": 0.022,
+        "utc_rate_bands": [
+            {
+                "weekdays": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday"
+                ],
+                "start": "01:00",
+                "end": "04:00",
+                "prompt": 1.32,
+                "completion": 3.96,
+                "cache": 0.044,
+                "cache_read": 0.044
+            },
+            {
+                "weekdays": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday"
+                ],
+                "start": "06:00",
+                "end": "10:00",
+                "prompt": 1.32,
+                "completion": 3.96,
+                "cache": 0.044,
+                "cache_read": 0.044
+            }
+        ],
+        "status": "complete",
+        "region": "global",
+        "currency": "USD",
+        "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+        "checked_at": "2026-09-11"
     },
     "deepseek-r1": {
         "prompt": 0.55,
@@ -305,84 +492,111 @@
         "cache": 0.028
     },
     "kimi-k2": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "A verified direct USD token price is not available for this provider-specific model alias.",
+        "checked_at": "2026-08-30"
     },
     "kimi-k2-thinking": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "A verified direct USD token price is not available for this provider-specific model alias.",
+        "checked_at": "2026-08-30"
     },
     "kimi-k2.5": {
-        "prompt": 0.6,
-        "completion": 3.0,
-        "cache": 0.1
+        "status": "unpriced",
+        "unpriced_reason": "iFlow publishes this runtime model ID, but the current Kimi API pricing page does not publish a verified direct USD token rate for it.",
+        "currency": "USD",
+        "source": "https://platform.kimi.ai/docs/pricing/chat",
+        "checked_at": "2026-08-30"
     },
     "qwen3-coder-plus": {
-        "prompt": 1.0,
-        "completion": 5.0,
-        "cache": 0.1
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "qwen3-coder-flash": {
-        "prompt": 0.3,
-        "completion": 1.5,
-        "cache": 0.03
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "qwen3-max": {
-        "prompt": 1.2,
-        "completion": 6.0,
-        "cache": 0.12
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "qwen3-max-preview": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "qwen3-vl-plus": {
-        "prompt": 0.2,
-        "completion": 1.6,
-        "cache": 0.02
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "qwen3-32b": {
-        "prompt": 0.16,
-        "completion": 0.64,
-        "cache": 0.016
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "qwen3-235b": {
-        "prompt": 0.7,
-        "completion": 2.8,
-        "cache": 0.07
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "qwen3-235b-a22b-instruct": {
-        "prompt": 0.23,
-        "completion": 0.92,
-        "cache": 0.023
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "qwen3-235b-a22b-thinking-2507": {
-        "prompt": 0.23,
-        "completion": 2.3,
-        "cache": 0.023
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "glm-4.6": {
-        "prompt": 0.6,
-        "completion": 2.2,
-        "cache": 0.11
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
     },
     "iflow-rome-30ba3b": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "iFlow does not publish a direct USD token rate for this model alias.",
+        "checked_at": "2026-08-30",
+        "source": "https://platform.iflow.cn/"
     },
     "coder-model": {
-        "prompt": 0.4,
-        "completion": 2.4,
-        "cache": 0.04
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "vision-model": {
-        "prompt": 0.0,
-        "completion": 0.0,
-        "cache": 0.0
+        "status": "unpriced",
+        "unpriced_reason": "Qwen pricing varies by region, context tier, thinking mode, cache, and batch mode; one fixed token rate would be misleading.",
+        "currency": "USD",
+        "source": "https://help.aliyun.com/zh/model-studio/model-pricing",
+        "checked_at": "2026-08-30"
     },
     "codex-auto-review": {
         "prompt": 1.75,
@@ -399,6 +613,45 @@
         "completion": 1.5,
         "cache": 0.025
     },
+    "gemini-3.5-flash-lite": {
+        "prompt": 0.3,
+        "completion": 2.5,
+        "cache": 0.03
+    },
+    "gemini-3.6-flash": {
+        "prompt": 0.75,
+        "completion": 3.75,
+        "cache": 0.075,
+        "cache_read": 0.075,
+        "status": "partial",
+        "auto_apply": true,
+        "region": "global",
+        "effective_until": "2026-12-31",
+        "limitations": [
+            "Context cache storage is billed separately at $0.50/MTok/hour and is not represented by request token usage.",
+            "Rates increase to $1.50 input, $0.15 cached input, and $7.50 output from 2027-01-01."
+        ],
+        "currency": "USD",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "gemini-3.6-flash-high": {
+        "prompt": 0.75,
+        "completion": 3.75,
+        "cache": 0.075,
+        "cache_read": 0.075,
+        "status": "partial",
+        "auto_apply": true,
+        "region": "global",
+        "effective_until": "2026-12-31",
+        "limitations": [
+            "Context cache storage is billed separately at $0.50/MTok/hour and is not represented by request token usage.",
+            "Rates increase to $1.50 input, $0.15 cached input, and $7.50 output from 2027-01-01."
+        ],
+        "currency": "USD",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "checked_at": "2026-08-30"
+    },
     "gemini-3.5-flash": {
         "prompt": 1.5,
         "completion": 9.0,
@@ -408,6 +661,22 @@
         "prompt": 1.5,
         "completion": 9.0,
         "cache": 0.15
+    },
+    "gemini-3.5-flash-extra-low": {
+        "prompt": 1.5,
+        "completion": 9.0,
+        "cache": 0.15,
+        "cache_read": 0.15,
+        "status": "partial",
+        "auto_apply": true,
+        "currency": "USD",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "checked_at": "2026-08-30",
+        "region": "global",
+        "limitations": [
+            "Antigravity exposes this as a thinking-level alias; Google does not publish a separate model price for the alias.",
+            "Gemini 3.5 Flash context cache storage is billed separately at $1.00/MTok/hour and is not represented by request token usage."
+        ]
     },
     "gemini-pro-agent": {
         "prompt": 2.0,
@@ -439,10 +708,33 @@
         "completion": 2.5,
         "cache": 0.2
     },
+    "grok-4.6": {
+        "prompt": 2.0,
+        "completion": 6.0,
+        "cache": 0.5,
+        "cache_read": 0.5,
+        "status": "partial",
+        "region": "global",
+        "limitations": [
+            "Input, cached-input, and output prices double at 200K input tokens; the current manifest does not select that tier automatically."
+        ],
+        "currency": "USD",
+        "source": "https://docs.x.ai/developers/pricing",
+        "checked_at": "2026-08-30"
+    },
     "grok-4.5": {
         "prompt": 2.0,
         "completion": 6.0,
-        "cache": 0.3
+        "cache": 0.3,
+        "cache_read": 0.3,
+        "status": "partial",
+        "region": "global",
+        "limitations": [
+            "Input, cached-input, and output prices double at 200K input tokens; the current manifest does not select that tier automatically."
+        ],
+        "currency": "USD",
+        "source": "https://docs.x.ai/developers/pricing",
+        "checked_at": "2026-08-30"
     },
     "grok-4.3": {
         "prompt": 1.25,
@@ -467,7 +759,15 @@
     "claude-fable-5": {
         "prompt": 10.0,
         "completion": 50.0,
-        "cache": 1.0
+        "cache": 1.0,
+        "cache_read": 1.0,
+        "cache_write_5m": 12.5,
+        "cache_write_1h": 20.0,
+        "status": "complete",
+        "region": "global",
+        "currency": "USD",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "checked_at": "2026-08-30"
     },
     "grok-build-0.1": {
         "prompt": 1.25,
@@ -478,5 +778,313 @@
         "prompt": 1.25,
         "completion": 2.5,
         "cache": 0.2
+    },
+    "deepseek-v4-flash": {
+        "prompt": 0.15,
+        "completion": 0.6,
+        "cache": 0.003,
+        "cache_read": 0.003,
+        "utc_rate_bands": [
+            {
+                "weekdays": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday"
+                ],
+                "start": "01:00",
+                "end": "04:00",
+                "prompt": 0.3,
+                "completion": 1.2,
+                "cache": 0.006,
+                "cache_read": 0.006
+            },
+            {
+                "weekdays": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday"
+                ],
+                "start": "06:00",
+                "end": "10:00",
+                "prompt": 0.3,
+                "completion": 1.2,
+                "cache": 0.006,
+                "cache_read": 0.006
+            }
+        ],
+        "status": "complete",
+        "region": "global",
+        "currency": "USD",
+        "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+        "checked_at": "2026-09-11",
+        "limitations": [
+            "Legacy model ID temporarily forwarded to deepseek-flash by DeepSeek."
+        ]
+    },
+    "deepseek-v4-flash-vision-exp": {
+        "prompt": 0.15,
+        "completion": 0.6,
+        "cache": 0.003,
+        "cache_read": 0.003,
+        "utc_rate_bands": [
+            {
+                "weekdays": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday"
+                ],
+                "start": "01:00",
+                "end": "04:00",
+                "prompt": 0.3,
+                "completion": 1.2,
+                "cache": 0.006,
+                "cache_read": 0.006
+            },
+            {
+                "weekdays": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday"
+                ],
+                "start": "06:00",
+                "end": "10:00",
+                "prompt": 0.3,
+                "completion": 1.2,
+                "cache": 0.006,
+                "cache_read": 0.006
+            }
+        ],
+        "status": "complete",
+        "region": "global",
+        "currency": "USD",
+        "source": "https://api-docs.deepseek.com/quick_start/pricing/",
+        "checked_at": "2026-09-11",
+        "limitations": [
+            "Legacy model ID temporarily forwarded to deepseek-flash by DeepSeek."
+        ]
+    },
+    "gemini-3.7-flash": {
+        "prompt": 0.75,
+        "completion": 3.75,
+        "cache": 0.075,
+        "cache_read": 0.075,
+        "status": "partial",
+        "auto_apply": true,
+        "region": "global",
+        "effective_until": "2026-12-31",
+        "limitations": [
+            "Context cache storage is billed separately at $0.50/MTok/hour and is not represented by request token usage.",
+            "Rates increase to $1.50 input, $0.15 cached input, and $7.50 output from 2027-01-01."
+        ],
+        "currency": "USD",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "checked_at": "2026-08-30",
+        "effective_from": "2026-08-13"
+    },
+    "gemini-3.7-flash-high": {
+        "prompt": 0.75,
+        "completion": 3.75,
+        "cache": 0.075,
+        "cache_read": 0.075,
+        "status": "partial",
+        "auto_apply": true,
+        "region": "global",
+        "effective_until": "2026-12-31",
+        "limitations": [
+            "Context cache storage is billed separately at $0.50/MTok/hour and is not represented by request token usage.",
+            "Rates increase to $1.50 input, $0.15 cached input, and $7.50 output from 2027-01-01."
+        ],
+        "currency": "USD",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "checked_at": "2026-08-30",
+        "effective_from": "2026-08-13"
+    },
+    "kimi-k3": {
+        "prompt": 3.0,
+        "completion": 15.0,
+        "cache": 0.3,
+        "cache_read": 0.3,
+        "status": "partial",
+        "auto_apply": true,
+        "region": "global",
+        "limitations": [
+            "The published source does not provide a cache-write token rate."
+        ],
+        "currency": "USD",
+        "source": "https://www.kimi.com/en/blog/kimi-k3",
+        "checked_at": "2026-08-30"
+    },
+    "kimi-k3-256k": {
+        "status": "unpriced",
+        "unpriced_reason": "Kimi Code publishes subscription quota consumption rather than a direct USD token rate for this model.",
+        "currency": "USD",
+        "source": "https://www.kimi.com/code/docs/kimi-code/models.html",
+        "checked_at": "2026-08-30"
+    },
+    "MiniMax-M3": {
+        "prompt": 0.3,
+        "completion": 1.2,
+        "cache": 0.06,
+        "cache_read": 0.06,
+        "status": "partial",
+        "region": "global",
+        "service_tier": "standard",
+        "limitations": [
+            "Input and output prices double above 512K context; Priority service is 1.5x Standard. These tiers are not selected automatically."
+        ],
+        "currency": "USD",
+        "source": "https://platform.minimax.io/docs/guides/pricing-paygo",
+        "checked_at": "2026-08-30"
+    },
+    "MiniMax-M2.7": {
+        "prompt": 0.3,
+        "completion": 1.2,
+        "cache": 0.06,
+        "cache_read": 0.06,
+        "cache_write": 0.375,
+        "status": "partial",
+        "region": "global",
+        "service_tier": "standard",
+        "limitations": [
+            "Priority service is 1.5x Standard; service-tier selection is not represented by the current cost resolver."
+        ],
+        "currency": "USD",
+        "source": "https://platform.minimax.io/docs/guides/pricing-paygo",
+        "checked_at": "2026-08-30"
+    },
+    "MiniMax-M2.7-highspeed": {
+        "prompt": 0.6,
+        "completion": 2.4,
+        "cache": 0.06,
+        "cache_read": 0.06,
+        "cache_write": 0.375,
+        "status": "partial",
+        "region": "global",
+        "service_tier": "standard",
+        "limitations": [
+            "Priority service is 1.5x Standard; service-tier selection is not represented by the current cost resolver."
+        ],
+        "currency": "USD",
+        "source": "https://platform.minimax.io/docs/guides/pricing-paygo",
+        "checked_at": "2026-08-30"
+    },
+    "minimax-m2.5": {
+        "prompt": 0.3,
+        "completion": 1.2,
+        "cache": 0.03,
+        "cache_read": 0.03,
+        "cache_write": 0.375,
+        "status": "complete",
+        "region": "global",
+        "service_tier": "legacy",
+        "currency": "USD",
+        "source": "https://platform.minimax.io/docs/guides/pricing-paygo",
+        "checked_at": "2026-08-30"
+    },
+    "glm-5.3": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-5.2": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-5.1": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-5": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-5-turbo": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-4.7": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-4.7-flashx": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-4.5-air": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-4.5-airx": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-4-long": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-4-flashx-250414": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-4.7-flash": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-4.5-flash": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
+    },
+    "glm-4-flash-250414": {
+        "status": "unpriced",
+        "unpriced_reason": "The official pricing page requires client-side rendering and an exact current token rate was not independently verified.",
+        "currency": "USD",
+        "source": "https://open.bigmodel.cn/pricing",
+        "checked_at": "2026-08-30"
     }
 }

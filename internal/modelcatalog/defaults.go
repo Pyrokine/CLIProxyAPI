@@ -3,7 +3,6 @@ package modelcatalog
 import (
 	_ "embed"
 	"encoding/json"
-	"sort"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
@@ -31,10 +30,44 @@ var defaultChannels = []defaultChannel{
 	{Channel: "xai", Provider: "Grok"},
 }
 
+var documentedProviderDefaults = []Model{
+	{
+		Name: "deepseek-flash", Provider: "DeepSeek", Channel: "claude", DisplayName: "DeepSeek V4.1 Flash",
+	},
+	{Name: "deepseek-v4-pro", Provider: "DeepSeek", Channel: "claude", DisplayName: "DeepSeek V4 Pro"},
+	{Name: "glm-5.3", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-5.3-flash", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-5.2", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-5.1", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-5-turbo", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-5", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.7", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.7-flash", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.7-flashx", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.6", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.5-air", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.5-airx", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.5-flash", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4-flash-250414", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4-flashx-250414", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-5v-turbo", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.6v", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "autoglm-phone", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.6v-flash", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.6v-flashx", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4v-flash", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.1v-thinking-flashx", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4.1v-thinking-flash", Provider: "GLM", Channel: "openai-compatibility"},
+	{Name: "glm-4-voice", Provider: "GLM", Channel: "openai-compatibility"},
+}
+
 func DefaultFile() File {
-	prices := DefaultPrices()
 	byName := make(map[string]int)
-	out := File{SchemaVersion: SchemaVersion, DefaultsVersion: DefaultsVersion}
+	out := File{
+		SchemaVersion:   SchemaVersion,
+		DefaultsVersion: DefaultsVersion,
+		Prices:          DefaultPrices(),
+	}
 	ensure := func(name, provider, channel, displayName string, userCreated bool) *Model {
 		name = normalizeModelName(name)
 		if name == "" {
@@ -78,15 +111,8 @@ func DefaultFile() File {
 			ensure(info.ID, item.Provider, item.Channel, info.DisplayName, false)
 		}
 	}
-	priceNames := make([]string, 0, len(prices))
-	for name := range prices {
-		priceNames = append(priceNames, name)
-	}
-	sort.Strings(priceNames)
-	for _, name := range priceNames {
-		model := ensure(name, "", "", "", false)
-		price := prices[name]
-		model.Price = &price
+	for _, model := range documentedProviderDefaults {
+		ensure(model.Name, model.Provider, model.Channel, model.DisplayName, false)
 	}
 	out.Sanitize()
 	return out

@@ -1,6 +1,7 @@
 package management
 
 import (
+	"maps"
 	"net/http"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
@@ -9,13 +10,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const modelPricesFileName = "model-prices.json"
-
-type modelPriceEntry struct {
-	Prompt     float64 `json:"prompt"`
-	Completion float64 `json:"completion"`
-	Cache      float64 `json:"cache"`
-}
+type modelPriceEntry = modelcatalog.Price
 
 func (h *Handler) GetModelPrices(c *gin.Context) {
 	doc, err := modelcatalog.LoadOrInit(h.configFilePath, h.configSnapshot())
@@ -24,17 +19,9 @@ func (h *Handler) GetModelPrices(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read model prices"})
 		return
 	}
-	prices := make(map[string]modelcatalog.Price)
-	for _, model := range doc.Models {
-		if model.Price != nil {
-			prices[model.Name] = *model.Price
-		}
-	}
-	out := make(map[string]modelPriceEntry, len(prices))
-	for name, price := range prices {
-		out[name] = modelPriceEntry{Prompt: price.Prompt, Completion: price.Completion, Cache: price.Cache}
-	}
-	c.JSON(http.StatusOK, gin.H{"prices": out})
+	prices := make(map[string]modelPriceEntry, len(doc.Prices))
+	maps.Copy(prices, doc.Prices)
+	c.JSON(http.StatusOK, gin.H{"prices": prices})
 }
 
 func (h *Handler) PutModelPrices(c *gin.Context) {
@@ -53,9 +40,7 @@ func (h *Handler) PutModelPrices(c *gin.Context) {
 		body.Prices = make(map[string]modelPriceEntry)
 	}
 	prices := make(map[string]modelcatalog.Price, len(body.Prices))
-	for name, price := range body.Prices {
-		prices[name] = modelcatalog.Price{Prompt: price.Prompt, Completion: price.Completion, Cache: price.Cache}
-	}
+	maps.Copy(prices, body.Prices)
 	result, ok := h.mutateModelCatalog(
 		c,
 		modelCatalogMutationOptions{},

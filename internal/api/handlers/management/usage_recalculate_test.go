@@ -35,26 +35,28 @@ func TestRecalculateCostsRejectsMissingPersisterAndPricing(t *testing.T) {
 			want: "no model prices configured",
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(w)
-			ctx.Request = httptest.NewRequest(http.MethodPost, "/usage/recalculate-costs", nil)
+		t.Run(
+			tc.name, func(t *testing.T) {
+				w := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(w)
+				ctx.Request = httptest.NewRequest(http.MethodPost, "/usage/recalculate-costs", nil)
 
-			tc.h.RecalculateCosts(ctx)
+				tc.h.RecalculateCosts(ctx)
 
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
-			}
-			var payload struct {
-				Error string `json:"error"`
-			}
-			if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
-				t.Fatalf("decode response: %v", err)
-			}
-			if payload.Error != tc.want {
-				t.Fatalf("error = %q, want %q", payload.Error, tc.want)
-			}
-		})
+				if w.Code != http.StatusBadRequest {
+					t.Fatalf("status = %d, want %d; body=%s", w.Code, http.StatusBadRequest, w.Body.String())
+				}
+				var payload struct {
+					Error string `json:"error"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+					t.Fatalf("decode response: %v", err)
+				}
+				if payload.Error != tc.want {
+					t.Fatalf("error = %q, want %q", payload.Error, tc.want)
+				}
+			},
+		)
 	}
 }
 
@@ -69,21 +71,25 @@ func TestRecalculateCostsStartsOnceAndPublishesStatus(t *testing.T) {
 	}
 	defer persister.Stop()
 
-	if _, err := persister.Import([]byte(`[
+	if _, err := persister.Import(
+		[]byte(`[
 		{"timestamp":"2026-07-31T00:00:00Z","model":"test-model","completed":true,
 		 "tokens":{"input_tokens":1,"total_tokens":1}}
-	]`)); err != nil {
+	]`),
+	); err != nil {
 		t.Fatalf("seed usage event: %v", err)
 	}
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var enteredOnce sync.Once
-	persister.SetPriceFunc(func(string) (float64, float64, float64, bool) {
-		enteredOnce.Do(func() { close(entered) })
-		<-release
-		return 1, 0, 0, true
-	})
+	persister.SetPriceFunc(
+		func(string) (float64, float64, float64, bool) {
+			enteredOnce.Do(func() { close(entered) })
+			<-release
+			return 1, 0, 0, true
+		},
+	)
 	defer func() {
 		select {
 		case <-release:
@@ -112,7 +118,8 @@ func TestRecalculateCostsStartsOnceAndPublishesStatus(t *testing.T) {
 	assertRecalculationPayload(t, busy, "busy", true, true)
 
 	running := getRecalculateCostsStatus(t, h)
-	if running.Status != "running" || !running.Running {
+	if running.Status != "running" || !running.Running || running.Phase != "repricing" ||
+		running.TotalEvents != 1 || running.Percent < 0 || running.Percent > 95 {
 		t.Fatalf("running status = %+v", running)
 	}
 
