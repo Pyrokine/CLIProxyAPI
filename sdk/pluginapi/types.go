@@ -3,6 +3,8 @@ package pluginapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -14,6 +16,9 @@ type Plugin struct {
 	Metadata Metadata
 	// Capabilities declares the optional integration points implemented by the plugin.
 	Capabilities Capabilities
+	// SchemaVersion is the plugin contract version negotiated at registration.
+	// Zero means unset and is treated as legacy schema 1 by the host.
+	SchemaVersion uint32
 }
 
 // Metadata describes a plugin for registry, logging, and diagnostics.
@@ -106,6 +111,8 @@ type Capabilities struct {
 	ResponseInterceptor ResponseInterceptor
 	// StreamChunkInterceptor rewrites successful HTTP stream chunks before downstream delivery.
 	StreamChunkInterceptor StreamChunkInterceptor
+	// WebSocketResponseObserver receives sanitized upstream WebSocket response events during execution.
+	WebSocketResponseObserver WebSocketResponseObserver
 	// ThinkingApplier applies validated thinking configuration to provider payloads.
 	ThinkingApplier ThinkingApplier
 	// UsagePlugin receives completed usage records.
@@ -114,6 +121,8 @@ type Capabilities struct {
 	CommandLinePlugin CommandLinePlugin
 	// ManagementAPI declares plugin-owned diagnostic Management API and resource routes.
 	ManagementAPI ManagementAPI
+	// QuotaProvider surfaces normalized credential quota information.
+	QuotaProvider QuotaProvider
 }
 
 // ExecutorModelScope declares which model-registration paths a plugin executor supports.
@@ -252,6 +261,8 @@ type AuthParseResponse struct {
 	Handled bool
 	// Auth is the parsed auth record when Handled is true.
 	Auth AuthData
+	// Auths contains multiple parsed records when one source expands into several runtime auths.
+	Auths []AuthData
 }
 
 // AuthProvider parses, logs in, polls, and refreshes plugin provider auths.
@@ -326,6 +337,8 @@ type AuthLoginPollResponse struct {
 	Message string
 	// Auth is the completed auth record when Status is success.
 	Auth AuthData
+	// Auths contains multiple completed records when one login expands into several runtime auths.
+	Auths []AuthData
 }
 
 // AuthRefreshRequest asks a plugin to refresh provider auth data.
@@ -604,6 +617,48 @@ type HostModelStreamCloseRequest struct {
 	StreamID string `json:"stream_id"`
 }
 
+// Host affinity lookup status outcomes.
+const (
+	HostAffinityStatusBound       = "bound"
+	HostAffinityStatusUnbound     = "unbound"
+	HostAffinityStatusAmbiguous   = "ambiguous"
+	HostAffinityStatusUnsupported = "unsupported"
+)
+
+// HostAffinityLookupRequest asks the host to observe the current session binding.
+type HostAffinityLookupRequest struct {
+	// Provider identifies the requested model provider.
+	Provider string `json:"provider"`
+	// Model identifies the requested model.
+	Model string `json:"model"`
+	// SessionID identifies the client session.
+	SessionID string `json:"session_id"`
+}
+
+// HostAffinityLookupResponse describes a read-only affinity observation.
+type HostAffinityLookupResponse struct {
+	// Status is bound, unbound, ambiguous, or unsupported.
+	Status string `json:"status"`
+	// AuthIndex identifies the bound credential without exposing credential material.
+	AuthIndex string `json:"auth_index,omitempty"`
+	// ObservedAt is the time at which the binding was observed.
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+	// Disabled reports whether the bound credential is disabled.
+	Disabled bool `json:"disabled,omitempty"`
+	// Unavailable reports whether the bound credential is unavailable.
+	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// HTTPWireProfile configures transport-level wire representation for plugin HTTP requests.
+type HTTPWireProfile struct {
+	// HTTP1Only forces HTTP/1.1 and rejects any TLS negotiation of HTTP/2.
+	HTTP1Only bool `json:"http1_only,omitempty"`
+	// DisableAutoCompression prevents transparent decompression and automatic Accept-Encoding injection.
+	DisableAutoCompression bool `json:"disable_auto_compression,omitempty"`
+	// HeaderProfile defines header-name order and exact casing on the wire.
+	HeaderProfile []string `json:"header_profile,omitempty"`
+}
+
 // HTTPRequest describes an upstream HTTP request issued through the host.
 type HTTPRequest struct {
 	// Method is the HTTP method.
@@ -614,6 +669,8 @@ type HTTPRequest struct {
 	Headers http.Header
 	// Body contains the raw request body.
 	Body []byte
+	// WireProfile specifies optional outbound HTTP wire settings.
+	WireProfile *HTTPWireProfile `json:"wire_profile,omitempty"`
 }
 
 // HTTPResponse describes a non-streaming host HTTP response.
@@ -781,6 +838,15 @@ type StreamChunkInterceptor interface {
 	InterceptStreamChunk(context.Context, StreamChunkInterceptRequest) (StreamChunkInterceptResponse, error)
 }
 
+// WebSocketResponseObserver observes sanitized upstream WebSocket response events.
+type WebSocketResponseObserver interface {
+	ObserveWebSocketResponseEvent(context.Context, WebSocketResponseEvent) error
+}
+
+// WebSocketResponseCallback is a request-scoped raw WebSocket event callback.
+// Hosts invalidate callbacks when the request ends; callers must not retain them.
+type WebSocketResponseCallback func(WebSocketResponseEvent)
+
 // StreamChunkHeaderInitIndex marks the header-only stream initialization interceptor call.
 const StreamChunkHeaderInitIndex = -1
 
@@ -922,11 +988,15 @@ type StreamChunkInterceptRequest struct {
 	RequestedModel  string
 	RequestHeaders  http.Header
 	ResponseHeaders http.Header
+	// OriginalRequest contains the raw client request body.
+	// It is always retained on header-init. On payload chunks schema 3 and newer omit it.
 	OriginalRequest []byte
-	RequestBody     []byte
-	Body            []byte
+	// RequestBody contains the provider request body and follows the same schema rules as OriginalRequest.
+	RequestBody []byte
+	Body        []byte
 	// HistoryChunks contains a bounded recent history of chunks already delivered downstream.
-	// The host currently retains at most 64 chunks and 1 MiB total history bytes.
+	// It is always retained on header-init. On payload chunks schema 5 and newer omit it.
+	// Legacy plugins receive an independent clone for every invocation.
 	HistoryChunks [][]byte
 	// ChunkIndex starts at 0 for payload chunks. StreamChunkHeaderInitIndex marks the header-only initialization call.
 	ChunkIndex int
@@ -945,6 +1015,23 @@ type StreamChunkInterceptResponse struct {
 	// DropChunk skips delivery of the current payload chunk and prevents it from entering HistoryChunks.
 	// Header updates returned with DropChunk still apply to the interceptor chain state.
 	DropChunk bool
+}
+
+// WebSocketResponseEvent describes an upstream WebSocket response event received during execution.
+type WebSocketResponseEvent struct {
+	RequestID      string
+	TraceID        string
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Provider       string
+	AuthID         string
+	AuthLabel      string
+	AuthType       string
+	EventType      string
+	Payload        []byte
+	// Metadata is cloned and stripped of secret-bearing fields before delivery.
+	Metadata map[string]any
 }
 
 // PayloadResponse returns a transformed raw payload.
@@ -1134,7 +1221,8 @@ type ManagementResponse struct {
 	StatusCode int
 	// Headers contains response headers.
 	Headers http.Header
-	// Body contains the raw response body.
+	// Body contains raw response bytes. Schema 6 makes preservation of JSON angle
+	// brackets and ampersands explicit; hosts also preserve the existing raw behavior for legacy schemas.
 	Body []byte
 }
 
@@ -1142,14 +1230,22 @@ type ManagementResponse struct {
 type UsageRecord struct {
 	// Provider identifies the upstream provider.
 	Provider string
+	// BaseURL is the configured upstream base URL when available.
+	BaseURL string
 	// ExecutorType identifies the executor implementation.
 	ExecutorType string
 	// Model is the model used for the request.
 	Model string
+	// Stream reports whether the request used streaming execution.
+	Stream bool
 	// Alias is the user-facing model alias when one was used.
 	Alias string
 	// APIKey is the client API key identifier when available.
 	APIKey string
+	// SessionID identifies the client session when present.
+	SessionID string
+	// ParentSessionID identifies the parent session in a hierarchy or fork.
+	ParentSessionID string
 	// AuthID identifies the selected credential.
 	AuthID string
 	// AuthIndex identifies the credential index when applicable.
@@ -1211,4 +1307,178 @@ type UsageDetail struct {
 	TotalTokens int64
 	// ResponseServiceTier records the final tier reported by the upstream response.
 	ResponseServiceTier string
+}
+
+// ErrQuotaUnsupported lets a quota provider explicitly decline an operation so the host may try a declarative probe.
+var ErrQuotaUnsupported = errors.New("quota operation unsupported")
+
+// QuotaProvider surfaces normalized credential quota information.
+type QuotaProvider interface {
+	Identifier() string
+	DescribeQuota(context.Context, QuotaDescribeRequest) (QuotaDescribeResponse, error)
+	FetchQuota(context.Context, QuotaFetchRequest) (QuotaFetchResponse, error)
+	ResetQuota(context.Context, QuotaResetRequest) (QuotaResetResponse, error)
+}
+
+// QuotaDescribeRequest carries host context for describing quota capabilities.
+type QuotaDescribeRequest struct {
+	Plugin Metadata `json:"plugin,omitempty"`
+}
+
+// QuotaDescribeResponse describes supported providers and reset capability.
+type QuotaDescribeResponse struct {
+	SupportedProviders []string `json:"supported_providers,omitempty"`
+	DisplayName        string   `json:"display_name,omitempty"`
+	SupportsReset      bool     `json:"supports_reset,omitempty"`
+}
+
+// QuotaFetchRequest carries credential context for querying quota.
+type QuotaFetchRequest struct {
+	AuthIndex   string            `json:"auth_index"`
+	AuthID      string            `json:"auth_id"`
+	Provider    string            `json:"provider"`
+	StorageJSON []byte            `json:"storage_json,omitempty"`
+	Metadata    map[string]any    `json:"metadata,omitempty"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
+	Host        HostConfigSummary `json:"host,omitempty"`
+	HTTPClient  HostHTTPClient    `json:"-"`
+}
+
+// QuotaSubscription describes normalized plan and tier information.
+type QuotaSubscription struct {
+	Plan     string `json:"plan,omitempty"`
+	TierName string `json:"tierName,omitempty"`
+	TierID   string `json:"tierId,omitempty"`
+}
+
+// UnmarshalJSON accepts both camelCase and snake_case field names.
+func (s *QuotaSubscription) UnmarshalJSON(data []byte) error {
+	type alias QuotaSubscription
+	aux := struct {
+		*alias
+		AltTierName string `json:"tier_name"`
+		AltTierID   string `json:"tier_id"`
+	}{alias: (*alias)(s)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if s.TierName == "" {
+		s.TierName = aux.AltTierName
+	}
+	if s.TierID == "" {
+		s.TierID = aux.AltTierID
+	}
+	return nil
+}
+
+// QuotaGroup describes a group of normalized quota buckets.
+type QuotaGroup struct {
+	DisplayName string        `json:"displayName,omitempty"`
+	Buckets     []QuotaBucket `json:"buckets,omitempty"`
+}
+
+// UnmarshalJSON accepts both camelCase and snake_case field names.
+func (g *QuotaGroup) UnmarshalJSON(data []byte) error {
+	type alias QuotaGroup
+	aux := struct {
+		*alias
+		AltDisplayName string `json:"display_name"`
+	}{alias: (*alias)(g)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if g.DisplayName == "" {
+		g.DisplayName = aux.AltDisplayName
+	}
+	return nil
+}
+
+// QuotaBucket describes one normalized quota window or limit.
+type QuotaBucket struct {
+	Window            string  `json:"window,omitempty"`
+	RemainingFraction float64 `json:"remainingFraction"`
+	ResetTime         string  `json:"resetTime,omitempty"`
+	Description       string  `json:"description,omitempty"`
+}
+
+// UnmarshalJSON accepts both camelCase and snake_case fields while preserving an explicit zero fraction.
+func (b *QuotaBucket) UnmarshalJSON(data []byte) error {
+	type alias QuotaBucket
+	aux := struct {
+		*alias
+		RemainingFraction    *float64 `json:"remainingFraction"`
+		AltRemainingFraction *float64 `json:"remaining_fraction"`
+		AltResetTime         string   `json:"reset_time"`
+	}{alias: (*alias)(b)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.RemainingFraction != nil {
+		b.RemainingFraction = *aux.RemainingFraction
+	} else if aux.AltRemainingFraction != nil {
+		b.RemainingFraction = *aux.AltRemainingFraction
+	}
+	if b.ResetTime == "" {
+		b.ResetTime = aux.AltResetTime
+	}
+	return nil
+}
+
+// QuotaFetchResponse carries normalized quota information.
+type QuotaFetchResponse struct {
+	Subscription       *QuotaSubscription `json:"subscription,omitempty"`
+	ServerTimeOffsetMs int64              `json:"serverTimeOffsetMs,omitempty"`
+	Groups             []QuotaGroup       `json:"groups,omitempty"`
+}
+
+// UnmarshalJSON accepts both camelCase and snake_case field names.
+func (r *QuotaFetchResponse) UnmarshalJSON(data []byte) error {
+	type alias QuotaFetchResponse
+	aux := struct {
+		*alias
+		AltServerTimeOffsetMs *int64 `json:"server_time_offset_ms"`
+	}{alias: (*alias)(r)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if r.ServerTimeOffsetMs == 0 && aux.AltServerTimeOffsetMs != nil {
+		r.ServerTimeOffsetMs = *aux.AltServerTimeOffsetMs
+	}
+	return nil
+}
+
+// QuotaResetRequest carries credential context for an explicitly authorized quota reset.
+type QuotaResetRequest struct {
+	AuthIndex   string            `json:"auth_index"`
+	AuthID      string            `json:"auth_id"`
+	Provider    string            `json:"provider"`
+	StorageJSON []byte            `json:"storage_json,omitempty"`
+	Metadata    map[string]any    `json:"metadata,omitempty"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
+	Host        HostConfigSummary `json:"host,omitempty"`
+	HTTPClient  HostHTTPClient    `json:"-"`
+}
+
+// QuotaResetResponse returns the result of a quota reset action.
+type QuotaResetResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+}
+
+const (
+	// QuotaProbeMetadataKey is the auth metadata key containing a declarative quota probe.
+	QuotaProbeMetadataKey = "quota_probe"
+	// QuotaProbeTokenPlaceholder is replaced by the credential token only by an authorized probe executor.
+	QuotaProbeTokenPlaceholder = "TOKEN"
+)
+
+// QuotaProbe describes the declarative HTTP probe contract consumed after plugin providers decline a credential.
+// Probe execution, target validation, redirects, limits, and response mapping belong to the management integration.
+type QuotaProbe struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method,omitempty"`
+	Data    any               `json:"data,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	// Mapping maps normalized quota output fields to gjson response paths.
+	Mapping map[string]string `json:"mapping,omitempty"`
 }

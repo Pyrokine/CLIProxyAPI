@@ -2,11 +2,13 @@ package pluginhost
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
 
@@ -91,6 +93,49 @@ func TestRegisterManagementRoutesSkipsReservedAndUsesPriority(t *testing.T) {
 	rec = httptest.NewRecorder()
 	if host.ServeManagementHTTP(rec, req) {
 		t.Fatal("reserved route was served by plugin")
+	}
+}
+
+func TestServeManagementPreservesRawJSONForLegacyAndSchemaSix(t *testing.T) {
+	const rawJSON = `{"prompt":"Analyze <input> & preserve > output"}`
+	for _, schemaVersion := range []uint32{0, pluginabi.SchemaVersionRawManagementResponse} {
+		t.Run(fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
+			plugin := validTestPlugin("raw-json")
+			plugin.Capabilities = pluginapi.Capabilities{ManagementAPI: &managementPluginDouble{}}
+			lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+			lookup.schemaVersion = schemaVersion
+			lookup.schemaVersionSet = true
+			lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+				pluginabi.MethodManagementRegister: func(context.Context, []byte) ([]byte, error) {
+					return marshalRPCResult(rpcManagementRegistrationResponse{Routes: []pluginapi.ManagementRoute{{
+						Method: http.MethodGet,
+						Path:   "/plugins/raw-json/config",
+					}}})
+				},
+				pluginabi.MethodManagementHandle: func(context.Context, []byte) ([]byte, error) {
+					return marshalRPCResult(pluginapi.ManagementResponse{
+						Headers: http.Header{"Content-Type": {"application/json"}},
+						Body:    []byte(rawJSON),
+					})
+				},
+			}
+			registered, errRegister := registerRPCPlugin(
+				context.Background(), New(), "raw-json", lookup, pluginabi.MethodPluginRegister, nil,
+			)
+			if errRegister != nil {
+				t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+			}
+			host := newHostWithRecords(capabilityRecord{id: "raw-json", plugin: registered})
+			host.RegisterManagementRoutes(context.Background(), nil)
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/v0/management/plugins/raw-json/config", nil)
+			if !host.ServeManagementHTTP(recorder, request) {
+				t.Fatal("ServeManagementHTTP() = false, want true")
+			}
+			if recorder.Body.String() != rawJSON {
+				t.Fatalf("body = %q, want raw %q", recorder.Body.String(), rawJSON)
+			}
+		})
 	}
 }
 

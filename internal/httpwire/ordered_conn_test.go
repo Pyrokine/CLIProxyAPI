@@ -80,6 +80,61 @@ func TestOrderedRequestConnReordersKeepAliveRequestsWithoutChangingBodies(t *tes
 	}
 }
 
+func TestOrderedRequestConnRewritesExactHeaderCasing(t *testing.T) {
+	input := []byte("GET / HTTP/1.1\r\nHost: example.test\r\nX-Custom-B: b\r\nX-Custom-A: a\r\n\r\n")
+	ordered, _, _ := orderRequestHeader(input, func(string, string) []string {
+		return []string{"x-custom-b", "X-CUSTOM-A", "host"}
+	})
+	want := "GET / HTTP/1.1\r\nx-custom-b: b\r\nX-CUSTOM-A: a\r\nhost: example.test\r\n\r\n"
+	if string(ordered) != want {
+		t.Fatalf("ordered header = %q, want %q", ordered, want)
+	}
+}
+
+func TestOrderedRequestConnBypassesNonHTTPHandshakeBytes(t *testing.T) {
+	for _, payload := range [][]byte{
+		{0x16, 0x03, 0x01, 0x00, 0x05, 0x01, 0x02},
+		{0x05, 0x01, 0x00},
+	} {
+		underlying := &partialErrorConn{}
+		conn := NewOrderedRequestConn(underlying, func(string, string) []string { return []string{"Host"} })
+		written, errWrite := conn.Write(payload)
+		if errWrite != nil || written != len(payload) {
+			t.Fatalf("handshake write = %d, %v", written, errWrite)
+		}
+		if !bytes.Equal(underlying.Bytes(), payload) {
+			t.Fatalf("handshake bytes = %v, want %v", underlying.Bytes(), payload)
+		}
+		if buffered := conn.(*orderedRequestConn).header; len(buffered) != 0 {
+			t.Fatalf("non-HTTP bytes remained buffered: %v", buffered)
+		}
+	}
+}
+
+func TestOrderedRequestConnSupportsSplitLowercaseCustomMethod(t *testing.T) {
+	underlying := &partialErrorConn{}
+	conn := NewOrderedRequestConn(underlying, func(method, target string) []string {
+		if method != "propfind-custom-method" || target != "/resource" {
+			t.Fatalf("method and target = %q %q", method, target)
+		}
+		return []string{"x-custom", "host"}
+	})
+	parts := [][]byte{
+		[]byte("prop"),
+		[]byte("find-custom-method /resource HTTP/1.1\r\nHost: example.test\r\nX-Custom: value\r\n\r\n"),
+	}
+	for _, part := range parts {
+		written, errWrite := conn.Write(part)
+		if errWrite != nil || written != len(part) {
+			t.Fatalf("custom method write = %d, %v", written, errWrite)
+		}
+	}
+	want := "propfind-custom-method /resource HTTP/1.1\r\nx-custom: value\r\nhost: example.test\r\n\r\n"
+	if underlying.String() != want {
+		t.Fatalf("custom method wire = %q, want %q", underlying.String(), want)
+	}
+}
+
 func TestOrderedRequestConnPreservesChunkedBodyAndReordersNextRequest(t *testing.T) {
 	t.Parallel()
 

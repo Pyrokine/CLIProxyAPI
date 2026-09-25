@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
@@ -24,6 +25,7 @@ import (
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator/builtin"
@@ -950,10 +952,22 @@ func (h *Host) InterceptStreamChunkExcept(
 		nextReq := req
 		nextReq.RequestHeaders = cloneHeader(req.RequestHeaders)
 		nextReq.ResponseHeaders = cloneHeader(current.Headers)
-		nextReq.OriginalRequest = bytes.Clone(req.OriginalRequest)
-		nextReq.RequestBody = bytes.Clone(req.RequestBody)
+		schemaVersion := normalizedPluginSchemaVersion(record.plugin.SchemaVersion)
+		if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex ||
+			schemaVersion < pluginabi.SchemaVersionStreamChunkOmitRequestBody {
+			nextReq.OriginalRequest = bytes.Clone(req.OriginalRequest)
+			nextReq.RequestBody = bytes.Clone(req.RequestBody)
+		} else {
+			nextReq.OriginalRequest = nil
+			nextReq.RequestBody = nil
+		}
 		nextReq.Body = bytes.Clone(current.Body)
-		nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
+		if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex ||
+			schemaVersion < pluginabi.SchemaVersionStreamChunkOmitHistory {
+			nextReq.HistoryChunks = cloneByteSlices(req.HistoryChunks)
+		} else {
+			nextReq.HistoryChunks = nil
+		}
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
 		if resp, ok := h.callStreamChunkInterceptor(ctx, record.id, interceptor, nextReq); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
@@ -977,6 +991,33 @@ func (h *Host) HasStreamInterceptors() bool {
 			continue
 		}
 		if record.plugin.Capabilities.StreamChunkInterceptor != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// StreamChunkPayloadIncludesRequestBody reports whether any active legacy interceptor
+// still requires request bodies on every payload chunk.
+func (h *Host) StreamChunkPayloadIncludesRequestBody() bool {
+	return h.streamChunkPayloadRequiresSchemaBefore(pluginabi.SchemaVersionStreamChunkOmitRequestBody)
+}
+
+// StreamChunkPayloadIncludesHistory reports whether any active legacy interceptor
+// still requires history on every payload chunk.
+func (h *Host) StreamChunkPayloadIncludesHistory() bool {
+	return h.streamChunkPayloadRequiresSchemaBefore(pluginabi.SchemaVersionStreamChunkOmitHistory)
+}
+
+func (h *Host) streamChunkPayloadRequiresSchemaBefore(schemaVersion uint32) bool {
+	if h == nil {
+		return false
+	}
+	for _, record := range h.activeRecords() {
+		if h.isPluginFused(record.id) || record.plugin.Capabilities.StreamChunkInterceptor == nil {
+			continue
+		}
+		if normalizedPluginSchemaVersion(record.plugin.SchemaVersion) < schemaVersion {
 			return true
 		}
 	}
@@ -2458,6 +2499,8 @@ func (a *executorAdapter) HttpRequest(ctx context.Context, auth *coreauth.Auth, 
 	return resp, nil
 }
 
+var pluginUsageDeliveryTimeout = 15 * time.Second
+
 type usageAdapter struct {
 	host     *Host
 	pluginID string
@@ -2475,6 +2518,8 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if a == nil || a.plugin == nil {
 		return
 	}
+	ctx, cancelDelivery := usageDeliveryContext(a.host, ctx)
+	defer cancelDelivery()
 	plugin := a.plugin
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -2492,13 +2537,29 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if responseServiceTier == "" {
 		responseServiceTier = strings.TrimSpace(record.Detail.ResponseServiceTier)
 	}
+	sessionID := strings.TrimSpace(record.SessionID)
+	parentSessionID := strings.TrimSpace(record.ParentSessionID)
+	clientMetadata := internallogging.GetClientRequestMetadata(ctx)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(clientMetadata.SessionID)
+		parentSessionID = strings.TrimSpace(clientMetadata.ParentSessionID)
+	} else if parentSessionID == "" && sessionID == strings.TrimSpace(clientMetadata.SessionID) {
+		parentSessionID = strings.TrimSpace(clientMetadata.ParentSessionID)
+	}
+	if sessionID == "" || sessionID == parentSessionID {
+		parentSessionID = ""
+	}
 	plugin.HandleUsage(
 		ctx, pluginapi.UsageRecord{
 			Provider:            record.Provider,
+			BaseURL:             record.BaseURL,
 			ExecutorType:        record.ExecutorType,
 			Model:               record.Model,
+			Stream:              record.Stream,
 			Alias:               record.Alias,
 			APIKey:              record.APIKey,
+			SessionID:           sessionID,
+			ParentSessionID:     parentSessionID,
 			AuthID:              record.AuthID,
 			AuthIndex:           record.AuthIndex,
 			AuthType:            record.AuthType,
@@ -2529,6 +2590,23 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 			ResponseHeaders: cloneHeader(record.ResponseHeaders),
 		},
 	)
+}
+
+func usageDeliveryContext(host *Host, requestCtx context.Context) (context.Context, context.CancelFunc) {
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	} else {
+		requestCtx = context.WithoutCancel(requestCtx)
+	}
+	deliveryCtx, cancelDelivery := context.WithTimeout(requestCtx, pluginUsageDeliveryTimeout)
+	if host == nil || host.shutdownContext == nil {
+		return deliveryCtx, cancelDelivery
+	}
+	stopShutdownCancellation := context.AfterFunc(host.shutdownContext, cancelDelivery)
+	return deliveryCtx, func() {
+		stopShutdownCancellation()
+		cancelDelivery()
+	}
 }
 
 func (a *thinkingAdapter) Apply(body []byte, config thinking.Config, modelInfo *registry.ModelInfo) (

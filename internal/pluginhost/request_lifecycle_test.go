@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -218,6 +219,39 @@ func TestRPCCapabilitiesAndAdapterIncludeRequestLifecycle(t *testing.T) {
 	}
 	if got.RequestID != "request-rpc" || got.Outcome != pluginapi.RequestCompletionSucceeded {
 		t.Fatalf("RPC completion = %#v", got)
+	}
+}
+
+func TestValidPluginAcceptsRequestLifecycleOnly(t *testing.T) {
+	plugin := validTestPlugin("request-lifecycle-only")
+	plugin.Capabilities = pluginapi.Capabilities{
+		RequestLifecyclePlugin: requestLifecyclePluginFunc(func(context.Context, pluginapi.RequestCompletion) {}),
+	}
+	if !validPlugin(plugin) {
+		t.Fatal("request-lifecycle-only plugin was rejected")
+	}
+}
+
+func TestRPCRegistrationNegotiatesSchemaVersionsZeroThroughSix(t *testing.T) {
+	for schemaVersion := uint32(0); schemaVersion <= pluginabi.SchemaVersion; schemaVersion++ {
+		t.Run(fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
+			lookup := newTestSymbolLookup(&testPlugin{registerResult: validTestPlugin("schema")})
+			lookup.schemaVersion = schemaVersion
+			lookup.schemaVersionSet = true
+			registered, errRegister := registerRPCPlugin(
+				context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, nil,
+			)
+			if errRegister != nil {
+				t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+			}
+			want := schemaVersion
+			if want == 0 {
+				want = 1
+			}
+			if registered.SchemaVersion != want {
+				t.Fatalf("SchemaVersion = %d, want %d", registered.SchemaVersion, want)
+			}
+		})
 	}
 }
 

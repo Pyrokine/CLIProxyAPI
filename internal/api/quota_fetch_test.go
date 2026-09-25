@@ -118,6 +118,24 @@ func TestFetchAntigravityQuotaReportsPartialAuxiliaryFailure(t *testing.T) {
 	}
 }
 
+func TestFetchCodexQuotaRejectsNullUsageWithoutFurtherRequests(t *testing.T) {
+	calls := 0
+	_, err := fetchCodexQuotaResultContext(
+		context.Background(),
+		func(_ context.Context, _ quota.APICallRequest) (*quota.APICallResponse, error) {
+			calls++
+			return &quota.APICallResponse{StatusCode: http.StatusOK, Body: json.RawMessage(`null`)}, nil
+		},
+		"mock-index",
+	)
+	if err == nil {
+		t.Fatal("fetchCodexQuotaResultContext() accepted null usage data")
+	}
+	if calls != 1 {
+		t.Fatalf("mock API calls = %d, want 1", calls)
+	}
+}
+
 func TestFetchCodexQuotaIncludesResetCredits(t *testing.T) {
 	var requests []quota.APICallRequest
 	body, err := fetchCodexQuota(
@@ -189,6 +207,18 @@ func TestFetchCodexQuotaThroughLocalAPICallWire(t *testing.T) {
 							if err := json.NewDecoder(req.Body).Decode(&call); err != nil {
 								t.Errorf("decode api-call request: %v", err)
 								return
+							}
+							if call.Method != http.MethodGet ||
+								(call.URL != codexUsageURL && call.URL != codexRateLimitResetCreditsURL) {
+								t.Errorf("quota refresh attempted a non-read-only request: %s %s", call.Method, call.URL)
+								http.Error(w, "unexpected quota request", http.StatusBadRequest)
+								return
+							}
+							if call.Header["User-Agent"] != "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)" {
+								t.Errorf("quota User-Agent = %q", call.Header["User-Agent"])
+							}
+							if call.AuthIndex != "codex-index" {
+								t.Errorf("quota auth index = %q", call.AuthIndex)
 							}
 							requests = append(requests, call.URL)
 							status := http.StatusOK

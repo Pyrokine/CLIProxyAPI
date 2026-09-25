@@ -34,9 +34,29 @@ type rpcThinkingApplier struct {
 	*rpcPluginAdapter
 }
 
+type rpcQuotaProvider struct {
+	*rpcPluginAdapter
+}
+
 type rpcResponseNormalizer struct {
 	*rpcPluginAdapter
 	method string
+}
+
+type rpcError struct {
+	Code    string
+	message string
+}
+
+func (e rpcError) Error() string {
+	return e.message
+}
+
+func normalizedPluginSchemaVersion(version uint32) uint32 {
+	if version == 0 {
+		return 1
+	}
+	return version
 }
 
 func registerRPCPlugin(
@@ -59,12 +79,14 @@ func registerRPCPlugin(
 	if errCall != nil {
 		return pluginapi.Plugin{}, errCall
 	}
-	if resp.SchemaVersion > pluginabi.SchemaVersion {
+	schemaVersion := normalizedPluginSchemaVersion(resp.SchemaVersion)
+	if schemaVersion > pluginabi.SchemaVersion {
 		return pluginapi.Plugin{}, fmt.Errorf("plugin schema version %d is not supported", resp.SchemaVersion)
 	}
 	adapter := &rpcPluginAdapter{id: id, host: host, client: client}
 	plugin := pluginapi.Plugin{
-		Metadata: resp.Metadata,
+		Metadata:      resp.Metadata,
+		SchemaVersion: schemaVersion,
 		Capabilities: pluginapi.Capabilities{
 			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
 			ExecutorModelScope:            resp.Capabilities.ExecutorModelScope,
@@ -121,6 +143,9 @@ func registerRPCPlugin(
 	if resp.Capabilities.StreamChunkInterceptor {
 		plugin.Capabilities.StreamChunkInterceptor = adapter
 	}
+	if resp.Capabilities.WebSocketResponseObserver && schemaVersion >= pluginabi.SchemaVersionWebSocketResponseObserver {
+		plugin.Capabilities.WebSocketResponseObserver = adapter
+	}
 	if resp.Capabilities.ThinkingApplier {
 		plugin.Capabilities.ThinkingApplier = rpcThinkingApplier{rpcPluginAdapter: adapter}
 	}
@@ -132,6 +157,9 @@ func registerRPCPlugin(
 	}
 	if resp.Capabilities.ManagementAPI {
 		plugin.Capabilities.ManagementAPI = adapter
+	}
+	if resp.Capabilities.QuotaProvider {
+		plugin.Capabilities.QuotaProvider = rpcQuotaProvider{rpcPluginAdapter: adapter}
 	}
 	return plugin, nil
 }
@@ -190,6 +218,17 @@ func sanitizePluginRequest(request any) any {
 	case pluginapi.StreamChunkInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
+	case pluginapi.WebSocketResponseEvent:
+		req.Metadata = sanitizeWebSocketMetadata(req.Metadata)
+		return req
+	case pluginapi.QuotaFetchRequest:
+		req.HTTPClient = nil
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case pluginapi.QuotaResetRequest:
+		req.HTTPClient = nil
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
 	case rpcRequestInterceptRequest:
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
@@ -197,6 +236,17 @@ func sanitizePluginRequest(request any) any {
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case rpcStreamChunkInterceptRequest:
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcWebSocketResponseEvent:
+		req.Metadata = sanitizeWebSocketMetadata(req.Metadata)
+		return req
+	case rpcQuotaFetchRequest:
+		req.HTTPClient = nil
+		req.Metadata = sanitizePluginMetadata(req.Metadata)
+		return req
+	case rpcQuotaResetRequest:
+		req.HTTPClient = nil
 		req.Metadata = sanitizePluginMetadata(req.Metadata)
 		return req
 	case pluginapi.ExecutorHTTPRequest:
@@ -270,7 +320,11 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 	var zero T
 	if !envelope.OK {
 		if envelope.Error != nil {
-			return zero, fmt.Errorf("%s", envelope.Error.Message)
+			message := strings.TrimSpace(envelope.Error.Message)
+			if message == "" {
+				message = "plugin call failed"
+			}
+			return zero, rpcError{Code: strings.TrimSpace(envelope.Error.Code), message: message}
 		}
 		return zero, fmt.Errorf("plugin call failed")
 	}
@@ -598,6 +652,21 @@ func (a *rpcPluginAdapter) InterceptStreamChunk(
 	)
 }
 
+func (a *rpcPluginAdapter) ObserveWebSocketResponseEvent(
+	ctx context.Context,
+	event pluginapi.WebSocketResponseEvent,
+) error {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	_, errCall := callPlugin[rpcEmptyResponse](
+		ctx, a.client, pluginabi.MethodWebSocketResponseEvent, rpcWebSocketResponseEvent{
+			WebSocketResponseEvent: event,
+			HostCallbackID:         callbackID,
+		},
+	)
+	return errCall
+}
+
 func (a rpcThinkingApplier) ApplyThinking(
 	ctx context.Context,
 	req pluginapi.ThinkingApplyRequest,
@@ -669,6 +738,45 @@ func (a *rpcPluginAdapter) HandleManagement(
 	return callPlugin[pluginapi.ManagementResponse](
 		ctx, a.client, pluginabi.MethodManagementHandle, rpcManagementRequest{
 			ManagementRequest: req,
+			HostCallbackID:    callbackID,
+		},
+	)
+}
+
+func (a rpcQuotaProvider) Identifier() string {
+	return callPluginIdentifier(a.client, pluginabi.MethodQuotaIdentifier)
+}
+
+func (a rpcQuotaProvider) DescribeQuota(
+	ctx context.Context,
+	req pluginapi.QuotaDescribeRequest,
+) (pluginapi.QuotaDescribeResponse, error) {
+	return callPlugin[pluginapi.QuotaDescribeResponse](ctx, a.client, pluginabi.MethodQuotaDescribe, req)
+}
+
+func (a rpcQuotaProvider) FetchQuota(
+	ctx context.Context,
+	req pluginapi.QuotaFetchRequest,
+) (pluginapi.QuotaFetchResponse, error) {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.QuotaFetchResponse](
+		ctx, a.client, pluginabi.MethodQuotaFetch, rpcQuotaFetchRequest{
+			QuotaFetchRequest: req,
+			HostCallbackID:    callbackID,
+		},
+	)
+}
+
+func (a rpcQuotaProvider) ResetQuota(
+	ctx context.Context,
+	req pluginapi.QuotaResetRequest,
+) (pluginapi.QuotaResetResponse, error) {
+	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+	defer closeCallback()
+	return callPlugin[pluginapi.QuotaResetResponse](
+		ctx, a.client, pluginabi.MethodQuotaReset, rpcQuotaResetRequest{
+			QuotaResetRequest: req,
 			HostCallbackID:    callbackID,
 		},
 	)

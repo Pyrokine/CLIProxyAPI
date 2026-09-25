@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
 
@@ -135,6 +136,126 @@ func TestParseAuthDefaultsProviderFromAuthProviderIdentifier(t *testing.T) {
 	}
 }
 
+func TestParseAuthsExpandsMultiplePluginAuths(t *testing.T) {
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "multi-auth-plugin",
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					AuthProvider: fakeAuthProvider{
+						identifier: "plugin-provider",
+						parseAuth: func(
+							context.Context,
+							pluginapi.AuthParseRequest,
+						) (pluginapi.AuthParseResponse, error) {
+							return pluginapi.AuthParseResponse{
+								Handled: true,
+								Auths: []pluginapi.AuthData{
+									{
+										ID:          "plugin-a",
+										StorageJSON: []byte(`{"type":"plugin-provider","account":"a"}`),
+									},
+									{
+										ID:          "plugin-b",
+										StorageJSON: []byte(`{"type":"plugin-provider","account":"b"}`),
+										Metadata:    map[string]any{"account": "b", "request-retry": 2},
+									},
+								},
+							}, nil
+						},
+					},
+				},
+			},
+		},
+	)
+
+	auths, handled, errParse := host.ParseAuths(
+		context.Background(),
+		pluginapi.AuthParseRequest{Provider: "plugin-provider"},
+	)
+	if errParse != nil || !handled || len(auths) != 2 {
+		t.Fatalf("ParseAuths() handled=%t len=%d err=%v", handled, len(auths), errParse)
+	}
+	for index, wantID := range []string{"plugin-a", "plugin-b"} {
+		if auths[index].ID != wantID || auths[index].Provider != "plugin-provider" {
+			t.Fatalf("auth %d = %#v, want id=%s provider fallback", index, auths[index], wantID)
+		}
+	}
+	if auths[1].Metadata["account"] != "b" || auths[1].Metadata["request_retry"] != 2 {
+		t.Fatalf("second auth metadata = %#v", auths[1].Metadata)
+	}
+	if _, legacy := auths[1].Metadata["request-retry"]; legacy {
+		t.Fatalf("second auth retained legacy metadata = %#v", auths[1].Metadata)
+	}
+
+	first, handled, errFirst := host.ParseAuth(
+		context.Background(),
+		pluginapi.AuthParseRequest{Provider: "plugin-provider"},
+	)
+	if errFirst != nil || !handled || first == nil || first.ID != "plugin-a" {
+		t.Fatalf("ParseAuth() first=%#v handled=%t err=%v", first, handled, errFirst)
+	}
+}
+
+func TestParseAuthsPreservesLegacyAndExplicitEmptyContracts(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		response pluginapi.AuthParseResponse
+		wantIDs  []string
+	}{
+		{
+			name: "legacy single auth",
+			response: pluginapi.AuthParseResponse{
+				Handled: true,
+				Auth:    pluginapi.AuthData{ID: "legacy-auth"},
+			},
+			wantIDs: []string{"legacy-auth"},
+		},
+		{
+			name: "explicit handled empty",
+			response: pluginapi.AuthParseResponse{
+				Handled: true,
+				Auth:    pluginapi.AuthData{ID: "must-not-fallback"},
+				Auths:   []pluginapi.AuthData{},
+			},
+			wantIDs: []string{},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			host := newHostWithRecords(
+				capabilityRecord{
+					id: "auth-plugin",
+					plugin: pluginapi.Plugin{
+						Capabilities: pluginapi.Capabilities{
+							AuthProvider: fakeAuthProvider{
+								identifier: "plugin-provider",
+								parseAuth: func(
+									context.Context,
+									pluginapi.AuthParseRequest,
+								) (pluginapi.AuthParseResponse, error) {
+									return testCase.response, nil
+								},
+							},
+						},
+					},
+				},
+			)
+			auths, handled, errParse := host.ParseAuths(
+				context.Background(),
+				pluginapi.AuthParseRequest{Provider: "plugin-provider"},
+			)
+			if errParse != nil || !handled || len(auths) != len(testCase.wantIDs) {
+				t.Fatalf("ParseAuths() handled=%t len=%d err=%v", handled, len(auths), errParse)
+			}
+			for index, wantID := range testCase.wantIDs {
+				if auths[index].ID != wantID {
+					t.Fatalf("auth %d ID = %q, want %q", index, auths[index].ID, wantID)
+				}
+			}
+		})
+	}
+}
+
 func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 	authDir := t.TempDir()
 	expiresAt := time.Now().Add(time.Minute).UTC()
@@ -187,6 +308,89 @@ func TestStartLoginPassesProviderBaseURLHostAndHTTPClient(t *testing.T) {
 	}
 	if resp.Provider != "plugin-provider" || resp.URL != "http://provider/login" || resp.State != "state-1" || !resp.ExpiresAt.Equal(expiresAt) {
 		t.Fatalf("StartLogin() response = %#v, want plugin response", resp)
+	}
+}
+
+func TestStartLoginPassesSingleAndMultiValueMetadataByDefensiveCopy(t *testing.T) {
+	metadata := map[string]any{
+		"single": "one",
+		"multi":  []string{"first", "second"},
+	}
+	var captured map[string]any
+	host := newHostWithRecords(capabilityRecord{
+		id: "auth-plugin",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			AuthProvider: fakeAuthProvider{
+				identifier: "plugin-provider",
+				startLogin: func(
+					_ context.Context,
+					req pluginapi.AuthLoginStartRequest,
+				) (pluginapi.AuthLoginStartResponse, error) {
+					captured = req.Metadata
+					req.Metadata["single"] = "mutated"
+					req.Metadata["multi"].([]string)[0] = "mutated"
+					return pluginapi.AuthLoginStartResponse{}, nil
+				},
+			},
+		}},
+	})
+
+	_, handled, errStart := host.startLogin(
+		context.Background(), "plugin-provider", "http://localhost/login", metadata,
+	)
+	if errStart != nil || !handled {
+		t.Fatalf("startLogin() handled=%t error=%v", handled, errStart)
+	}
+	if captured == nil {
+		t.Fatal("StartLogin metadata = nil")
+	}
+	if metadata["single"] != "one" || metadata["multi"].([]string)[0] != "first" {
+		t.Fatalf("caller metadata was mutated: %#v", metadata)
+	}
+}
+
+func TestRPCStartLoginPreservesSingleAndMultiValueMetadata(t *testing.T) {
+	plugin := validTestPlugin("rpc-auth")
+	plugin.Capabilities.AuthProvider = fakeAuthProvider{identifier: "plugin-provider"}
+	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+	var captured rpcAuthLoginStartRequest
+	lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+		pluginabi.MethodAuthLoginStart: func(_ context.Context, raw []byte) ([]byte, error) {
+			if errUnmarshal := json.Unmarshal(raw, &captured); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			captured.Metadata["single"] = "mutated"
+			captured.Metadata["multi"].([]any)[0] = "mutated"
+			return marshalRPCResult(pluginapi.AuthLoginStartResponse{State: "state"})
+		},
+	}
+	registered, errRegister := registerRPCPlugin(
+		context.Background(), New(), "rpc-auth", lookup, pluginabi.MethodPluginRegister, nil,
+	)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	metadata := map[string]any{
+		"single": "one",
+		"multi":  []string{"first", "second"},
+	}
+	response, errStart := registered.Capabilities.AuthProvider.StartLogin(
+		context.Background(), pluginapi.AuthLoginStartRequest{
+			Provider: "plugin-provider",
+			Metadata: metadata,
+		},
+	)
+	if errStart != nil {
+		t.Fatalf("StartLogin() error = %v", errStart)
+	}
+	if response.State != "state" {
+		t.Fatalf("StartLogin() state = %q, want state", response.State)
+	}
+	if captured.Metadata["single"] != "mutated" || len(captured.Metadata["multi"].([]any)) != 2 {
+		t.Fatalf("RPC metadata = %#v", captured.Metadata)
+	}
+	if metadata["single"] != "one" || metadata["multi"].([]string)[0] != "first" {
+		t.Fatalf("caller metadata was mutated through RPC: %#v", metadata)
 	}
 }
 

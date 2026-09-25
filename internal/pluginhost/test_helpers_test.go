@@ -41,7 +41,10 @@ type testSymbolLookup struct {
 	shutdownOnce        sync.Once
 	registerOverride    func([]byte) pluginapi.Plugin
 	reconfigureOverride func([]byte) pluginapi.Plugin
+	methodHandlers      map[string]func(context.Context, []byte) ([]byte, error)
+	shutdownHook        func()
 	schemaVersion       uint32
+	schemaVersionSet    bool
 	lastLifecycle       rpcLifecycleRequest
 }
 
@@ -50,6 +53,9 @@ func newTestSymbolLookup(plugin *testPlugin) *testSymbolLookup {
 }
 
 func (l *testSymbolLookup) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
+	if handler := l.methodHandlers[method]; handler != nil {
+		return handler(ctx, request)
+	}
 	switch method {
 	case pluginabi.MethodPluginRegister:
 		return l.callLifecycle(request, false)
@@ -177,6 +183,8 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 		}
 		l.active.Capabilities.UsagePlugin.HandleUsage(ctx, record)
 		return marshalRPCResult(rpcEmptyResponse{})
+	case pluginabi.MethodPluginQuiesce:
+		return marshalRPCError("method_not_found", "plugin quiesce is unsupported"), nil
 	default:
 		return nil, fmt.Errorf("missing test method %s", method)
 	}
@@ -184,6 +192,9 @@ func (l *testSymbolLookup) Call(ctx context.Context, method string, request []by
 
 func (l *testSymbolLookup) Shutdown() {
 	l.shutdownCalls++
+	if l.shutdownHook != nil {
+		l.shutdownHook()
+	}
 	if l.shutdownStarted != nil {
 		l.shutdownOnce.Do(
 			func() {
@@ -218,7 +229,7 @@ func (l *testSymbolLookup) callLifecycle(request []byte, reload bool) ([]byte, e
 	}
 	l.active = plugin
 	schemaVersion := l.schemaVersion
-	if schemaVersion == 0 {
+	if schemaVersion == 0 && !l.schemaVersionSet {
 		schemaVersion = pluginabi.SchemaVersion
 	}
 	return marshalRPCResult(

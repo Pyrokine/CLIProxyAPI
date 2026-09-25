@@ -26,7 +26,9 @@ var _ RequestInterceptor = (*compileTimePlugin)(nil)
 var _ RequestLifecyclePlugin = (*compileTimePlugin)(nil)
 var _ ResponseInterceptor = (*compileTimePlugin)(nil)
 var _ StreamChunkInterceptor = (*compileTimePlugin)(nil)
+var _ WebSocketResponseObserver = (*compileTimePlugin)(nil)
 var _ ThinkingApplier = (*compileTimePlugin)(nil)
+var _ QuotaProvider = (*compileTimePlugin)(nil)
 var _ UsagePlugin = (*compileTimePlugin)(nil)
 var _ CommandLinePlugin = (*compileTimePlugin)(nil)
 var _ ManagementAPI = (*compileTimePlugin)(nil)
@@ -101,6 +103,16 @@ func TestHostInjectedHTTPClientIsNotEncodedInPluginJSON(t *testing.T) {
 			req:  ExecutorHTTPRequest{AuthID: "auth-1", HTTPClient: compileTimePlugin{}},
 			dst:  &ExecutorHTTPRequest{},
 		},
+		{
+			name: "quota fetch",
+			req:  QuotaFetchRequest{AuthID: "auth-1", HTTPClient: compileTimePlugin{}},
+			dst:  &QuotaFetchRequest{},
+		},
+		{
+			name: "quota reset",
+			req:  QuotaResetRequest{AuthID: "auth-1", HTTPClient: compileTimePlugin{}},
+			dst:  &QuotaResetRequest{},
+		},
 	}
 
 	for _, tt := range requests {
@@ -115,6 +127,88 @@ func TestHostInjectedHTTPClientIsNotEncodedInPluginJSON(t *testing.T) {
 		if errUnmarshal := json.Unmarshal(withLegacyHTTPClient, tt.dst); errUnmarshal != nil {
 			t.Fatalf("%s unmarshal with legacy HTTPClient object error = %v", tt.name, errUnmarshal)
 		}
+	}
+}
+
+func TestAuthMultiRecordResponsesPreserveNativeAndRPCCompatibility(t *testing.T) {
+	tests := []struct {
+		name       string
+		value      any
+		newValue   func() any
+		assertWire func(*testing.T, any)
+	}{
+		{
+			name: "parse legacy single auth",
+			value: AuthParseResponse{
+				Handled: true,
+				Auth:    AuthData{ID: "legacy"},
+			},
+			newValue: func() any { return &AuthParseResponse{} },
+			assertWire: func(t *testing.T, value any) {
+				response := value.(*AuthParseResponse)
+				if response.Auth.ID != "legacy" || response.Auths != nil {
+					t.Fatalf("legacy parse response = %#v", response)
+				}
+			},
+		},
+		{
+			name: "parse explicit handled empty",
+			value: AuthParseResponse{
+				Handled: true,
+				Auth:    AuthData{ID: "must-not-fallback"},
+				Auths:   []AuthData{},
+			},
+			newValue: func() any { return &AuthParseResponse{} },
+			assertWire: func(t *testing.T, value any) {
+				response := value.(*AuthParseResponse)
+				if response.Auths == nil || len(response.Auths) != 0 || response.Auth.ID != "must-not-fallback" {
+					t.Fatalf("explicit empty parse response = %#v", response)
+				}
+			},
+		},
+		{
+			name: "parse batch auths",
+			value: AuthParseResponse{
+				Handled: true,
+				Auths:   []AuthData{{ID: "a"}, {ID: "b"}},
+			},
+			newValue: func() any { return &AuthParseResponse{} },
+			assertWire: func(t *testing.T, value any) {
+				response := value.(*AuthParseResponse)
+				if len(response.Auths) != 2 || response.Auths[0].ID != "a" || response.Auths[1].ID != "b" {
+					t.Fatalf("batch parse response = %#v", response)
+				}
+			},
+		},
+		{
+			name: "poll batch auths",
+			value: AuthLoginPollResponse{
+				Status: AuthLoginStatusSuccess,
+				Auth:   AuthData{ID: "legacy"},
+				Auths:  []AuthData{{ID: "a"}, {ID: "b"}},
+			},
+			newValue: func() any { return &AuthLoginPollResponse{} },
+			assertWire: func(t *testing.T, value any) {
+				response := value.(*AuthLoginPollResponse)
+				if response.Status != AuthLoginStatusSuccess || len(response.Auths) != 2 || response.Auth.ID != "legacy" {
+					t.Fatalf("batch poll response = %#v", response)
+				}
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			raw, errMarshal := json.Marshal(testCase.value)
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+			decoded := testCase.newValue()
+			if errUnmarshal := json.Unmarshal(raw, decoded); errUnmarshal != nil {
+				t.Fatal(errUnmarshal)
+			}
+			testCase.assertWire(t, decoded)
+		})
 	}
 }
 
@@ -340,6 +434,87 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	}
 }
 
+func TestQuotaPayloadAcceptsCamelAndSnakeCase(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "camel case",
+			raw: `{
+				"subscription":{"plan":"pro","tierName":"Pro","tierId":"tier-pro"},
+				"serverTimeOffsetMs":123,
+				"groups":[{"displayName":"Requests","buckets":[{
+					"window":"daily","remainingFraction":0.8,"resetTime":"2026-09-23T00:00:00Z"
+				}]}]
+			}`,
+		},
+		{
+			name: "snake case",
+			raw: `{
+				"subscription":{"plan":"pro","tier_name":"Pro","tier_id":"tier-pro"},
+				"server_time_offset_ms":123,
+				"groups":[{"display_name":"Requests","buckets":[{
+					"window":"daily","remaining_fraction":0.8,"reset_time":"2026-09-23T00:00:00Z"
+				}]}]
+			}`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var response QuotaFetchResponse
+			if errUnmarshal := json.Unmarshal([]byte(testCase.raw), &response); errUnmarshal != nil {
+				t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+			}
+			if response.Subscription == nil || response.Subscription.Plan != "pro" ||
+				response.Subscription.TierName != "Pro" || response.Subscription.TierID != "tier-pro" ||
+				response.ServerTimeOffsetMs != 123 || len(response.Groups) != 1 ||
+				response.Groups[0].DisplayName != "Requests" || len(response.Groups[0].Buckets) != 1 ||
+				response.Groups[0].Buckets[0].RemainingFraction != 0.8 ||
+				response.Groups[0].Buckets[0].ResetTime != "2026-09-23T00:00:00Z" {
+				t.Fatalf("quota response = %#v", response)
+			}
+		})
+	}
+
+	var exhausted QuotaBucket
+	if errUnmarshal := json.Unmarshal(
+		[]byte(`{"remainingFraction":0,"remaining_fraction":0.8}`), &exhausted,
+	); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal(explicit zero) error = %v", errUnmarshal)
+	}
+	if exhausted.RemainingFraction != 0 {
+		t.Fatalf("explicit zero RemainingFraction = %v", exhausted.RemainingFraction)
+	}
+}
+
+func TestQuotaProbeContractRoundTrip(t *testing.T) {
+	probe := QuotaProbe{
+		URL:    "https://quota.example.test/v1/usage",
+		Method: http.MethodPost,
+		Data:   map[string]any{"scope": "account"},
+		Headers: map[string]string{
+			"Authorization": "Bearer " + QuotaProbeTokenPlaceholder,
+		},
+		Mapping: map[string]string{
+			"remaining_fraction": "quota.remaining",
+		},
+	}
+	raw, errMarshal := json.Marshal(probe)
+	if errMarshal != nil {
+		t.Fatalf("json.Marshal() error = %v", errMarshal)
+	}
+	var decoded QuotaProbe
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+	}
+	if QuotaProbeMetadataKey != "quota_probe" || QuotaProbeTokenPlaceholder != "TOKEN" ||
+		decoded.URL != probe.URL || decoded.Method != http.MethodPost ||
+		decoded.Headers["Authorization"] != "Bearer TOKEN" ||
+		decoded.Mapping["remaining_fraction"] != "quota.remaining" {
+		t.Fatalf("quota probe contract = %#v", decoded)
+	}
+}
+
 func TestModelDiscoveryOutcomeWireValues(t *testing.T) {
 	values := map[ModelDiscoveryOutcome]string{
 		ModelDiscoveryComplete:     "complete",
@@ -490,8 +665,24 @@ func (compileTimePlugin) InterceptStreamChunk(
 	return StreamChunkInterceptResponse{}, nil
 }
 
+func (compileTimePlugin) ObserveWebSocketResponseEvent(context.Context, WebSocketResponseEvent) error {
+	return nil
+}
+
 func (compileTimePlugin) ApplyThinking(context.Context, ThinkingApplyRequest) (PayloadResponse, error) {
 	return PayloadResponse{}, nil
+}
+
+func (compileTimePlugin) DescribeQuota(context.Context, QuotaDescribeRequest) (QuotaDescribeResponse, error) {
+	return QuotaDescribeResponse{}, nil
+}
+
+func (compileTimePlugin) FetchQuota(context.Context, QuotaFetchRequest) (QuotaFetchResponse, error) {
+	return QuotaFetchResponse{}, nil
+}
+
+func (compileTimePlugin) ResetQuota(context.Context, QuotaResetRequest) (QuotaResetResponse, error) {
+	return QuotaResetResponse{}, nil
 }
 
 func (compileTimePlugin) HandleUsage(context.Context, UsageRecord) {}

@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,17 +11,20 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
@@ -2574,6 +2578,607 @@ func TestResponseInterceptorsChainAndStreamHistory(t *testing.T) {
 	}
 }
 
+func TestStreamChunkSchemaPayloadAndHeaderContracts(t *testing.T) {
+	for schemaVersion := uint32(0); schemaVersion <= pluginabi.SchemaVersion; schemaVersion++ {
+		t.Run(fmt.Sprintf("schema-%d", schemaVersion), func(t *testing.T) {
+			originalRequest := []byte("original")
+			requestBody := []byte("request")
+			history := [][]byte{[]byte("history")}
+			var captured []pluginapi.StreamChunkInterceptRequest
+			interceptor := responseInterceptorFunc{
+				interceptStreamChunk: func(
+					_ context.Context,
+					req pluginapi.StreamChunkInterceptRequest,
+				) (pluginapi.StreamChunkInterceptResponse, error) {
+					captured = append(captured, req)
+					if len(req.OriginalRequest) > 0 {
+						req.OriginalRequest[0] = 'X'
+					}
+					if len(req.RequestBody) > 0 {
+						req.RequestBody[0] = 'X'
+					}
+					if len(req.HistoryChunks) > 0 && len(req.HistoryChunks[0]) > 0 {
+						req.HistoryChunks[0][0] = 'X'
+					}
+					return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+				},
+			}
+			host := newHostWithRecords(capabilityRecord{
+				id: "stream",
+				plugin: pluginapi.Plugin{
+					SchemaVersion: schemaVersion,
+					Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: interceptor},
+				},
+			})
+
+			baseRequest := pluginapi.StreamChunkInterceptRequest{
+				OriginalRequest: originalRequest,
+				RequestBody:     requestBody,
+				Body:            []byte("chunk"),
+				HistoryChunks:   history,
+			}
+			payloadRequest := baseRequest
+			payloadRequest.ChunkIndex = 0
+			host.InterceptStreamChunk(context.Background(), payloadRequest)
+			headerRequest := baseRequest
+			headerRequest.ChunkIndex = pluginapi.StreamChunkHeaderInitIndex
+			host.InterceptStreamChunk(context.Background(), headerRequest)
+
+			if len(captured) != 2 {
+				t.Fatalf("interceptor calls = %d, want 2", len(captured))
+			}
+			normalizedSchema := normalizedPluginSchemaVersion(schemaVersion)
+			payload := captured[0]
+			if got, want := len(payload.OriginalRequest) > 0, normalizedSchema < pluginabi.SchemaVersionStreamChunkOmitRequestBody; got != want {
+				t.Fatalf("payload OriginalRequest present = %t, want %t", got, want)
+			}
+			if got, want := len(payload.RequestBody) > 0, normalizedSchema < pluginabi.SchemaVersionStreamChunkOmitRequestBody; got != want {
+				t.Fatalf("payload RequestBody present = %t, want %t", got, want)
+			}
+			if got, want := len(payload.HistoryChunks) > 0, normalizedSchema < pluginabi.SchemaVersionStreamChunkOmitHistory; got != want {
+				t.Fatalf("payload HistoryChunks present = %t, want %t", got, want)
+			}
+			header := captured[1]
+			if len(header.OriginalRequest) == 0 || len(header.RequestBody) == 0 || len(header.HistoryChunks) == 0 {
+				t.Fatalf("header-init request omitted retained fields: %#v", header)
+			}
+			if string(originalRequest) != "original" || string(requestBody) != "request" || string(history[0]) != "history" {
+				t.Fatalf("interceptor mutated caller input: original=%q request=%q history=%q", originalRequest, requestBody, history[0])
+			}
+		})
+	}
+}
+
+func TestStreamChunkSchemaClonesAreIsolatedPerLegacyPlugin(t *testing.T) {
+	var secondOriginal string
+	var secondRequest string
+	var secondHistory string
+	first := responseInterceptorFunc{
+		interceptStreamChunk: func(
+			_ context.Context,
+			req pluginapi.StreamChunkInterceptRequest,
+		) (pluginapi.StreamChunkInterceptResponse, error) {
+			req.OriginalRequest[0] = 'X'
+			req.RequestBody[0] = 'X'
+			req.HistoryChunks[0][0] = 'X'
+			return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+		},
+	}
+	second := responseInterceptorFunc{
+		interceptStreamChunk: func(
+			_ context.Context,
+			req pluginapi.StreamChunkInterceptRequest,
+		) (pluginapi.StreamChunkInterceptResponse, error) {
+			secondOriginal = string(req.OriginalRequest)
+			secondRequest = string(req.RequestBody)
+			secondHistory = string(req.HistoryChunks[0])
+			return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "first",
+			priority: 20,
+			plugin: pluginapi.Plugin{
+				SchemaVersion: 1,
+				Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: first},
+			},
+		},
+		capabilityRecord{
+			id:       "second",
+			priority: 10,
+			plugin: pluginapi.Plugin{
+				SchemaVersion: 1,
+				Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: second},
+			},
+		},
+	)
+	req := pluginapi.StreamChunkInterceptRequest{
+		OriginalRequest: []byte("original"),
+		RequestBody:     []byte("request"),
+		Body:            []byte("chunk"),
+		HistoryChunks:   [][]byte{[]byte("history")},
+		ChunkIndex:      0,
+	}
+	host.InterceptStreamChunk(context.Background(), req)
+	if secondOriginal != "original" || secondRequest != "request" || secondHistory != "history" {
+		t.Fatalf("second plugin observed mutation: original=%q request=%q history=%q", secondOriginal, secondRequest, secondHistory)
+	}
+	if string(req.OriginalRequest) != "original" || string(req.RequestBody) != "request" || string(req.HistoryChunks[0]) != "history" {
+		t.Fatalf("caller request was mutated: %#v", req)
+	}
+}
+
+func TestStreamChunkPayloadPolicyReflectsMixedPluginSchemas(t *testing.T) {
+	interceptor := responseInterceptorFunc{
+		interceptStreamChunk: func(
+			_ context.Context,
+			req pluginapi.StreamChunkInterceptRequest,
+		) (pluginapi.StreamChunkInterceptResponse, error) {
+			return pluginapi.StreamChunkInterceptResponse{Body: req.Body}, nil
+		},
+	}
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "legacy",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: 0,
+				Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: interceptor},
+			},
+		},
+		capabilityRecord{
+			id: "modern",
+			plugin: pluginapi.Plugin{
+				SchemaVersion: pluginabi.SchemaVersion,
+				Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: interceptor},
+			},
+		},
+	)
+	if !host.StreamChunkPayloadIncludesRequestBody() || !host.StreamChunkPayloadIncludesHistory() {
+		t.Fatal("mixed schemas must retain payload request bodies and history for legacy plugin")
+	}
+	host.mu.Lock()
+	host.fused["legacy"] = "test"
+	host.mu.Unlock()
+	if host.StreamChunkPayloadIncludesRequestBody() || host.StreamChunkPayloadIncludesHistory() {
+		t.Fatal("fused legacy plugin must not keep payload request bodies or history enabled")
+	}
+
+	schemaThree := newHostWithRecords(capabilityRecord{
+		id: "schema-three",
+		plugin: pluginapi.Plugin{
+			SchemaVersion: pluginabi.SchemaVersionStreamChunkOmitRequestBody,
+			Capabilities:  pluginapi.Capabilities{StreamChunkInterceptor: interceptor},
+		},
+	})
+	if schemaThree.StreamChunkPayloadIncludesRequestBody() || !schemaThree.StreamChunkPayloadIncludesHistory() {
+		t.Fatal("schema 3 should omit payload request bodies and retain history")
+	}
+}
+
+func TestWebSocketObserversCloneSanitizeSkipAndFuse(t *testing.T) {
+	originCalls := 0
+	secondCalls := 0
+	var secondEvent pluginapi.WebSocketResponseEvent
+	origin := webSocketObserverFunc(func(context.Context, pluginapi.WebSocketResponseEvent) error {
+		originCalls++
+		return nil
+	})
+	mutating := webSocketObserverFunc(func(_ context.Context, event pluginapi.WebSocketResponseEvent) error {
+		event.Payload[0] = 'X'
+		event.Metadata["safe"] = "mutated"
+		event.Metadata["nested"].(map[string]any)["value"] = "mutated"
+		return nil
+	})
+	second := webSocketObserverFunc(func(_ context.Context, event pluginapi.WebSocketResponseEvent) error {
+		secondCalls++
+		secondEvent = event
+		return nil
+	})
+	panicking := webSocketObserverFunc(func(context.Context, pluginapi.WebSocketResponseEvent) error {
+		panic("observer panic")
+	})
+	host := newHostWithRecords(
+		capabilityRecord{
+			id: "origin", priority: 40,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{WebSocketResponseObserver: origin}},
+		},
+		capabilityRecord{
+			id: "mutating", priority: 30,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{WebSocketResponseObserver: mutating}},
+		},
+		capabilityRecord{
+			id: "panic", priority: 20,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{WebSocketResponseObserver: panicking}},
+		},
+		capabilityRecord{
+			id: "second", priority: 10,
+			plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{WebSocketResponseObserver: second}},
+		},
+	)
+	event := pluginapi.WebSocketResponseEvent{
+		RequestID: "request",
+		Payload:   []byte("payload"),
+		Metadata: map[string]any{
+			"safe":          "original",
+			"token":         "secret",
+			"authorization": "Bearer secret",
+			"nested": map[string]any{
+				"value":      "original",
+				"api_secret": "secret",
+			},
+		},
+	}
+	host.ObserveWebSocketResponseEventExcept(context.Background(), event, "origin")
+	if originCalls != 0 {
+		t.Fatalf("initiating observer calls = %d, want 0", originCalls)
+	}
+	if secondCalls != 1 || string(secondEvent.Payload) != "payload" || secondEvent.Metadata["safe"] != "original" ||
+		secondEvent.Metadata["nested"].(map[string]any)["value"] != "original" {
+		t.Fatalf("second observer event = %#v, calls=%d", secondEvent, secondCalls)
+	}
+	if _, ok := secondEvent.Metadata["token"]; ok {
+		t.Fatalf("observer metadata retained token: %#v", secondEvent.Metadata)
+	}
+	if _, ok := secondEvent.Metadata["authorization"]; ok {
+		t.Fatalf("observer metadata retained authorization: %#v", secondEvent.Metadata)
+	}
+	if _, ok := secondEvent.Metadata["nested"].(map[string]any)["api_secret"]; ok {
+		t.Fatalf("observer metadata retained nested secret: %#v", secondEvent.Metadata)
+	}
+	if string(event.Payload) != "payload" || event.Metadata["safe"] != "original" ||
+		event.Metadata["nested"].(map[string]any)["value"] != "original" {
+		t.Fatalf("observer mutated caller event: %#v", event)
+	}
+	if !host.isPluginFused("panic") {
+		t.Fatal("panicking websocket observer was not fused")
+	}
+}
+
+func TestWebSocketResponseCallbackExpiresOnCloseAndRequestCancellation(t *testing.T) {
+	calls := 0
+	host := newHostWithRecords(capabilityRecord{
+		id: "observer",
+		plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			WebSocketResponseObserver: webSocketObserverFunc(func(context.Context, pluginapi.WebSocketResponseEvent) error {
+				calls++
+				return nil
+			}),
+		}},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	callback, closeCallback := host.OpenWebSocketResponseCallback(ctx, "")
+	if callback == nil {
+		t.Fatal("OpenWebSocketResponseCallback() returned nil callback")
+	}
+	callback(pluginapi.WebSocketResponseEvent{Payload: []byte("first")})
+	closeCallback()
+	closeCallback()
+	callback(pluginapi.WebSocketResponseEvent{Payload: []byte("after-close")})
+	if calls != 1 {
+		t.Fatalf("observer calls after close = %d, want 1", calls)
+	}
+
+	callback, closeCallback = host.OpenWebSocketResponseCallback(ctx, "")
+	cancel()
+	callback(pluginapi.WebSocketResponseEvent{Payload: []byte("after-cancel")})
+	closeCallback()
+	if calls != 1 {
+		t.Fatalf("observer calls after request cancellation = %d, want 1", calls)
+	}
+}
+
+func TestRPCWebSocketObserverRequiresSchemaFourAndSanitizesEvent(t *testing.T) {
+	plugin := validTestPlugin("rpc-websocket")
+	plugin.Capabilities.WebSocketResponseObserver = webSocketObserverFunc(
+		func(context.Context, pluginapi.WebSocketResponseEvent) error { return nil },
+	)
+	legacyLookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+	legacyLookup.schemaVersion = pluginabi.SchemaVersionStreamChunkOmitRequestBody
+	legacy, errLegacy := registerRPCPlugin(
+		context.Background(), New(), "rpc-websocket", legacyLookup, pluginabi.MethodPluginRegister, nil,
+	)
+	if errLegacy != nil {
+		t.Fatalf("legacy registerRPCPlugin() error = %v", errLegacy)
+	}
+	if legacy.Capabilities.WebSocketResponseObserver != nil {
+		t.Fatal("schema 3 unexpectedly enabled websocket observer")
+	}
+
+	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+	lookup.schemaVersion = pluginabi.SchemaVersionWebSocketResponseObserver
+	var captured rpcWebSocketResponseEvent
+	lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+		pluginabi.MethodWebSocketResponseEvent: func(_ context.Context, raw []byte) ([]byte, error) {
+			if errUnmarshal := json.Unmarshal(raw, &captured); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			return marshalRPCResult(rpcEmptyResponse{})
+		},
+	}
+	registered, errRegister := registerRPCPlugin(
+		context.Background(), New(), "rpc-websocket", lookup, pluginabi.MethodPluginRegister, nil,
+	)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	observer := registered.Capabilities.WebSocketResponseObserver
+	if observer == nil {
+		t.Fatal("schema 4 websocket observer = nil")
+	}
+	if errObserve := observer.ObserveWebSocketResponseEvent(
+		context.Background(), pluginapi.WebSocketResponseEvent{
+			Payload:  []byte("payload"),
+			Metadata: map[string]any{"safe": "value", "token": "secret"},
+		},
+	); errObserve != nil {
+		t.Fatalf("ObserveWebSocketResponseEvent() error = %v", errObserve)
+	}
+	if captured.HostCallbackID == "" || string(captured.Payload) != "payload" || captured.Metadata["safe"] != "value" {
+		t.Fatalf("RPC websocket event = %#v", captured)
+	}
+	if _, ok := captured.Metadata["token"]; ok {
+		t.Fatalf("RPC websocket metadata retained token: %#v", captured.Metadata)
+	}
+}
+
+func TestQuotaProviderListFetchResetAndUnsupportedContracts(t *testing.T) {
+	sharedResponse := pluginapi.QuotaFetchResponse{
+		Subscription: &pluginapi.QuotaSubscription{Plan: "pro", TierName: "Pro"},
+		Groups: []pluginapi.QuotaGroup{{
+			DisplayName: "Requests",
+			Buckets: []pluginapi.QuotaBucket{{
+				Window: "daily", RemainingFraction: 0.75,
+			}},
+		}},
+	}
+	fetchCalls := 0
+	resetCalls := 0
+	provider := quotaProviderStub{
+		identifier: "quota-plugin",
+		describe: func(context.Context, pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error) {
+			return pluginapi.QuotaDescribeResponse{
+				SupportedProviders: []string{" OpenAI ", "openai", "Claude"},
+				DisplayName:        "Quota Plugin",
+				SupportsReset:      true,
+			}, nil
+		},
+		fetch: func(_ context.Context, req pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+			fetchCalls++
+			if req.Provider != "openai" || req.HTTPClient == nil || req.Host.AuthDir != "/tmp/auth" {
+				t.Fatalf("FetchQuota request = %#v", req)
+			}
+			req.StorageJSON[0] = 'X'
+			req.Metadata["nested"].(map[string]any)["value"] = "mutated"
+			req.Attributes["region"] = "mutated"
+			return sharedResponse, nil
+		},
+		reset: func(_ context.Context, req pluginapi.QuotaResetRequest) (pluginapi.QuotaResetResponse, error) {
+			resetCalls++
+			if req.Provider != "openai" || req.HTTPClient == nil {
+				t.Fatalf("ResetQuota request = %#v", req)
+			}
+			return pluginapi.QuotaResetResponse{Success: true, Message: "reset"}, nil
+		},
+	}
+	host := newHostWithRecords(capabilityRecord{
+		id:   "quota-plugin",
+		meta: pluginapi.Metadata{Name: "Metadata Name"},
+		plugin: pluginapi.Plugin{
+			Capabilities: pluginapi.Capabilities{QuotaProvider: provider},
+		},
+	})
+	host.runtimeConfig = &config.Config{AuthDir: "/tmp/auth"}
+
+	providers := host.QuotaProviders(context.Background())
+	if len(providers) != 1 || providers[0].PluginID != "quota-plugin" ||
+		providers[0].Provider != "quota-plugin" || providers[0].DisplayName != "Quota Plugin" ||
+		!providers[0].SupportsReset || !reflect.DeepEqual(providers[0].SupportedProviders, []string{"claude", "openai"}) {
+		t.Fatalf("QuotaProviders() = %#v", providers)
+	}
+	if identifiers := host.QuotaProviderIdentifiers(); !reflect.DeepEqual(identifiers, []string{"quota-plugin"}) {
+		t.Fatalf("QuotaProviderIdentifiers() = %#v", identifiers)
+	}
+	if !host.HasQuotaProvider("openai") || !host.HasQuotaProviderForPlugin("quota-plugin") {
+		t.Fatal("quota provider lookup did not match declared provider and plugin ID")
+	}
+
+	request := pluginapi.QuotaFetchRequest{
+		Provider:    " OpenAI ",
+		StorageJSON: []byte(`{"token":"secret"}`),
+		Metadata:    map[string]any{"nested": map[string]any{"value": "original"}},
+		Attributes:  map[string]string{"region": "original"},
+	}
+	response, handled, errFetch := host.FetchQuota(context.Background(), request)
+	if errFetch != nil || !handled || fetchCalls != 1 || response.Subscription == nil ||
+		response.Subscription.Plan != "pro" || response.Groups[0].Buckets[0].RemainingFraction != 0.75 {
+		t.Fatalf("FetchQuota() response=%#v handled=%t calls=%d error=%v", response, handled, fetchCalls, errFetch)
+	}
+	if request.StorageJSON[0] != '{' || request.Metadata["nested"].(map[string]any)["value"] != "original" ||
+		request.Attributes["region"] != "original" {
+		t.Fatalf("FetchQuota() mutated caller request: %#v", request)
+	}
+	response.Subscription.Plan = "mutated"
+	response.Groups[0].Buckets[0].RemainingFraction = 0
+	if sharedResponse.Subscription.Plan != "pro" || sharedResponse.Groups[0].Buckets[0].RemainingFraction != 0.75 {
+		t.Fatalf("FetchQuota() returned aliased plugin response: %#v", sharedResponse)
+	}
+
+	reset, resetHandled, errReset := host.ResetQuota(
+		context.Background(), pluginapi.QuotaResetRequest{Provider: "openai"},
+	)
+	if errReset != nil || !resetHandled || resetCalls != 1 || !reset.Success || reset.Message != "reset" {
+		t.Fatalf("ResetQuota() response=%#v handled=%t calls=%d error=%v", reset, resetHandled, resetCalls, errReset)
+	}
+
+	unsupported := quotaProviderStub{
+		identifier: "unsupported",
+		describe: func(context.Context, pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error) {
+			return pluginapi.QuotaDescribeResponse{}, pluginapi.ErrQuotaUnsupported
+		},
+		fetch: func(context.Context, pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+			return pluginapi.QuotaFetchResponse{}, pluginapi.ErrQuotaUnsupported
+		},
+		reset: func(context.Context, pluginapi.QuotaResetRequest) (pluginapi.QuotaResetResponse, error) {
+			return pluginapi.QuotaResetResponse{}, pluginapi.ErrQuotaUnsupported
+		},
+	}
+	unsupportedHost := newHostWithRecords(capabilityRecord{
+		id: "unsupported",
+		plugin: pluginapi.Plugin{
+			Metadata:     pluginapi.Metadata{Name: "Unsupported"},
+			Capabilities: pluginapi.Capabilities{QuotaProvider: unsupported},
+		},
+	})
+	if listed := unsupportedHost.QuotaProviders(context.Background()); len(listed) != 1 || listed[0].Provider != "unsupported" {
+		t.Fatalf("unsupported provider list = %#v, want identifier fallback", listed)
+	}
+	if _, unsupportedHandled, errUnsupported := unsupportedHost.FetchQuota(
+		context.Background(), pluginapi.QuotaFetchRequest{Provider: "unsupported"},
+	); errUnsupported != nil || unsupportedHandled {
+		t.Fatalf("unsupported FetchQuota() handled=%t error=%v", unsupportedHandled, errUnsupported)
+	}
+	if _, unsupportedHandled, errUnsupported := unsupportedHost.ResetQuota(
+		context.Background(), pluginapi.QuotaResetRequest{Provider: "unsupported"},
+	); errUnsupported != nil || unsupportedHandled {
+		t.Fatalf("unsupported ResetQuota() handled=%t error=%v", unsupportedHandled, errUnsupported)
+	}
+}
+
+func TestQuotaProviderPluginIDFallbackDoesNotRequireIdentifier(t *testing.T) {
+	fetchCalls := 0
+	provider := quotaProviderStub{
+		fetch: func(context.Context, pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error) {
+			fetchCalls++
+			return pluginapi.QuotaFetchResponse{}, nil
+		},
+	}
+	host := newHostWithRecords(capabilityRecord{
+		id: "quota-no-identifier",
+		plugin: pluginapi.Plugin{
+			Metadata:     pluginapi.Metadata{Name: "Quota without identifier"},
+			Capabilities: pluginapi.Capabilities{QuotaProvider: provider},
+		},
+	})
+	if providers := host.QuotaProviders(context.Background()); len(providers) != 1 ||
+		providers[0].Provider != "quota-no-identifier" {
+		t.Fatalf("QuotaProviders() = %#v, want plugin ID fallback", providers)
+	}
+	if !host.HasQuotaProvider("quota-no-identifier") {
+		t.Fatal("HasQuotaProvider() = false for plugin ID fallback")
+	}
+	if _, handled, errFetch := host.FetchQuota(
+		context.Background(), pluginapi.QuotaFetchRequest{Provider: "quota-no-identifier"},
+	); errFetch != nil || !handled || fetchCalls != 1 {
+		t.Fatalf("FetchQuota() handled=%t calls=%d error=%v", handled, fetchCalls, errFetch)
+	}
+}
+
+func TestQuotaProviderRPCContract(t *testing.T) {
+	plugin := validTestPlugin("rpc-quota")
+	plugin.Capabilities.QuotaProvider = quotaProviderStub{identifier: "rpc-quota"}
+	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+	lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+		pluginabi.MethodQuotaIdentifier: func(context.Context, []byte) ([]byte, error) {
+			return marshalRPCResult(rpcIdentifierResponse{Identifier: "rpc-quota"})
+		},
+		pluginabi.MethodQuotaDescribe: func(_ context.Context, raw []byte) ([]byte, error) {
+			var req pluginapi.QuotaDescribeRequest
+			if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			return marshalRPCResult(pluginapi.QuotaDescribeResponse{
+				SupportedProviders: []string{"openai"}, SupportsReset: true,
+			})
+		},
+		pluginabi.MethodQuotaFetch: func(_ context.Context, raw []byte) ([]byte, error) {
+			var req rpcQuotaFetchRequest
+			if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			if req.Provider != "openai" || req.HostCallbackID == "" || req.HTTPClient != nil {
+				t.Fatalf("RPC FetchQuota request = %#v", req)
+			}
+			return marshalRPCResult(pluginapi.QuotaFetchResponse{
+				Groups: []pluginapi.QuotaGroup{{Buckets: []pluginapi.QuotaBucket{{RemainingFraction: 0.5}}}},
+			})
+		},
+		pluginabi.MethodQuotaReset: func(_ context.Context, raw []byte) ([]byte, error) {
+			var req rpcQuotaResetRequest
+			if errUnmarshal := json.Unmarshal(raw, &req); errUnmarshal != nil {
+				return nil, errUnmarshal
+			}
+			if req.Provider != "openai" || req.HostCallbackID == "" || req.HTTPClient != nil {
+				t.Fatalf("RPC ResetQuota request = %#v", req)
+			}
+			return marshalRPCResult(pluginapi.QuotaResetResponse{Success: true})
+		},
+	}
+	registered, errRegister := registerRPCPlugin(
+		context.Background(), New(), "rpc-quota", lookup, pluginabi.MethodPluginRegister, nil,
+	)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	provider := registered.Capabilities.QuotaProvider
+	if provider == nil || provider.Identifier() != "rpc-quota" {
+		t.Fatalf("registered quota provider = %#v", provider)
+	}
+	description, errDescribe := provider.DescribeQuota(context.Background(), pluginapi.QuotaDescribeRequest{})
+	if errDescribe != nil || !description.SupportsReset || !reflect.DeepEqual(description.SupportedProviders, []string{"openai"}) {
+		t.Fatalf("DescribeQuota() = %#v, error=%v", description, errDescribe)
+	}
+	response, errFetch := provider.FetchQuota(
+		context.Background(), pluginapi.QuotaFetchRequest{Provider: "openai", HTTPClient: New().newHTTPClient(nil)},
+	)
+	if errFetch != nil || response.Groups[0].Buckets[0].RemainingFraction != 0.5 {
+		t.Fatalf("FetchQuota() = %#v, error=%v", response, errFetch)
+	}
+	reset, errReset := provider.ResetQuota(
+		context.Background(), pluginapi.QuotaResetRequest{Provider: "openai", HTTPClient: New().newHTTPClient(nil)},
+	)
+	if errReset != nil || !reset.Success {
+		t.Fatalf("ResetQuota() = %#v, error=%v", reset, errReset)
+	}
+}
+
+func TestQuotaProviderRPCExplicitUnsupportedAllowsFallback(t *testing.T) {
+	plugin := validTestPlugin("rpc-quota-unsupported")
+	plugin.Capabilities.QuotaProvider = quotaProviderStub{identifier: "rpc-quota-unsupported"}
+	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
+	lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+		pluginabi.MethodQuotaDescribe: func(context.Context, []byte) ([]byte, error) {
+			return marshalRPCError("method_not_found", "describe unsupported"), nil
+		},
+		pluginabi.MethodQuotaFetch: func(context.Context, []byte) ([]byte, error) {
+			return marshalRPCError("unsupported_method", "fetch unsupported"), nil
+		},
+		pluginabi.MethodQuotaReset: func(context.Context, []byte) ([]byte, error) {
+			return marshalRPCError("unknown_method", "reset unsupported"), nil
+		},
+	}
+	registered, errRegister := registerRPCPlugin(
+		context.Background(), New(), "rpc-quota-unsupported", lookup, pluginabi.MethodPluginRegister, nil,
+	)
+	if errRegister != nil {
+		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
+	}
+	host := newHostWithRecords(capabilityRecord{id: "rpc-quota-unsupported", plugin: registered})
+	if _, handled, errDescribe := host.DescribeQuota(context.Background(), "rpc-quota-unsupported"); errDescribe != nil || handled {
+		t.Fatalf("DescribeQuota() handled=%t error=%v", handled, errDescribe)
+	}
+	if _, handled, errFetch := host.FetchQuotaByPlugin(
+		context.Background(), "rpc-quota-unsupported", pluginapi.QuotaFetchRequest{},
+	); errFetch != nil || handled {
+		t.Fatalf("FetchQuotaByPlugin() handled=%t error=%v", handled, errFetch)
+	}
+	if _, handled, errReset := host.ResetQuotaByPlugin(
+		context.Background(), "rpc-quota-unsupported", pluginapi.QuotaResetRequest{},
+	); errReset != nil || handled {
+		t.Fatalf("ResetQuotaByPlugin() handled=%t error=%v", handled, errReset)
+	}
+}
+
 func TestInterceptorsSkipErrorsAndFusePanics(t *testing.T) {
 	host := newHostWithRecords(
 		capabilityRecord{
@@ -3471,6 +4076,124 @@ func TestUsageAdapterPropagatesServiceTiers(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestUsageAdapterPropagatesDeliveryTarget(t *testing.T) {
+	var captured pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
+		captured = record
+	})
+	adapter := &usageAdapter{pluginID: "usage-target", plugin: plugin}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		BaseURL: "https://upstream.example/v1",
+		Stream:  true,
+	})
+
+	if captured.BaseURL != "https://upstream.example/v1" || !captured.Stream {
+		t.Fatalf("captured target = baseURL:%q stream:%t", captured.BaseURL, captured.Stream)
+	}
+}
+
+func TestUsageAdapterPropagatesSessionHierarchy(t *testing.T) {
+	var captured pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
+		captured = record
+	})
+	adapter := &usageAdapter{pluginID: "usage-session", plugin: plugin}
+	ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
+		SessionID:       "session:child",
+		ParentSessionID: "session:parent",
+	})
+
+	adapter.HandleUsage(ctx, coreusage.Record{})
+	if captured.SessionID != "session:child" || captured.ParentSessionID != "session:parent" {
+		t.Fatalf("context session hierarchy = (%q, %q)", captured.SessionID, captured.ParentSessionID)
+	}
+
+	adapter.HandleUsage(ctx, coreusage.Record{SessionID: "session:independent"})
+	if captured.SessionID != "session:independent" || captured.ParentSessionID != "" {
+		t.Fatalf("independent record hierarchy = (%q, %q)", captured.SessionID, captured.ParentSessionID)
+	}
+
+	adapter.HandleUsage(ctx, coreusage.Record{SessionID: "session:self", ParentSessionID: "session:self"})
+	if captured.SessionID != "session:self" || captured.ParentSessionID != "" {
+		t.Fatalf("self-referential record hierarchy = (%q, %q)", captured.SessionID, captured.ParentSessionID)
+	}
+}
+
+func TestUsageAdapterDeliveryContextPreservesValuesAfterRequestCancellation(t *testing.T) {
+	type contextKey struct{}
+	var capturedValue string
+	var capturedErr error
+	plugin := usagePluginFunc(func(ctx context.Context, _ pluginapi.UsageRecord) {
+		capturedValue, _ = ctx.Value(contextKey{}).(string)
+		capturedErr = ctx.Err()
+	})
+	host := New()
+	adapter := &usageAdapter{host: host, pluginID: "usage", plugin: plugin}
+	requestCtx, cancelRequest := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "preserved"))
+	cancelRequest()
+	adapter.HandleUsage(requestCtx, coreusage.Record{})
+	if capturedValue != "preserved" || capturedErr != nil {
+		t.Fatalf("delivery context value=%q error=%v", capturedValue, capturedErr)
+	}
+}
+
+func TestUsageAdapterDeliveryStopsOnHostShutdown(t *testing.T) {
+	started := make(chan struct{})
+	finished := make(chan error, 1)
+	plugin := usagePluginFunc(func(ctx context.Context, _ pluginapi.UsageRecord) {
+		close(started)
+		<-ctx.Done()
+		finished <- ctx.Err()
+	})
+	host := New()
+	adapter := &usageAdapter{host: host, pluginID: "usage", plugin: plugin}
+	deliveryDone := make(chan struct{})
+	go func() {
+		adapter.HandleUsage(context.Background(), coreusage.Record{})
+		close(deliveryDone)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("usage delivery did not start")
+	}
+	if errShutdown := host.ShutdownAllContext(context.Background()); errShutdown != nil {
+		t.Fatalf("ShutdownAllContext() error = %v", errShutdown)
+	}
+	select {
+	case errDelivery := <-finished:
+		if !errors.Is(errDelivery, context.Canceled) {
+			t.Fatalf("delivery context error = %v, want canceled", errDelivery)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("host shutdown did not cancel usage delivery")
+	}
+	select {
+	case <-deliveryDone:
+	case <-time.After(time.Second):
+		t.Fatal("usage adapter did not return after host shutdown")
+	}
+}
+
+func TestUsageAdapterDeliveryDeadlineStopsBlockingPlugin(t *testing.T) {
+	previousTimeout := pluginUsageDeliveryTimeout
+	pluginUsageDeliveryTimeout = 20 * time.Millisecond
+	defer func() {
+		pluginUsageDeliveryTimeout = previousTimeout
+	}()
+	var deliveryErr error
+	plugin := usagePluginFunc(func(ctx context.Context, _ pluginapi.UsageRecord) {
+		<-ctx.Done()
+		deliveryErr = ctx.Err()
+	})
+	adapter := &usageAdapter{host: New(), pluginID: "usage", plugin: plugin}
+	adapter.HandleUsage(context.Background(), coreusage.Record{})
+	if !errors.Is(deliveryErr, context.DeadlineExceeded) {
+		t.Fatalf("delivery context error = %v, want deadline exceeded", deliveryErr)
 	}
 }
 
@@ -4487,7 +5210,7 @@ func TestExecutorAdapterRefreshPreservesHostRuntimeState(t *testing.T) {
 	}
 	if refreshed == nil || refreshed.Index != original.Index || refreshed.Status != original.Status ||
 		refreshed.StatusMessage != original.StatusMessage || refreshed.Unavailable != original.Unavailable ||
-		refreshed.Quota != original.Quota || refreshed.NextRetryAfter != original.NextRetryAfter ||
+		!reflect.DeepEqual(refreshed.Quota, original.Quota) || refreshed.NextRetryAfter != original.NextRetryAfter ||
 		refreshed.LastError == nil || refreshed.LastError.Code != original.LastError.Code {
 		t.Fatalf("Refresh() lost host runtime state: %#v", refreshed)
 	}
@@ -5328,6 +6051,56 @@ func (f responseTranslatorFunc) TranslateResponse(
 	req pluginapi.ResponseTransformRequest,
 ) (pluginapi.PayloadResponse, error) {
 	return f(ctx, req)
+}
+
+type webSocketObserverFunc func(context.Context, pluginapi.WebSocketResponseEvent) error
+
+func (f webSocketObserverFunc) ObserveWebSocketResponseEvent(
+	ctx context.Context,
+	event pluginapi.WebSocketResponseEvent,
+) error {
+	return f(ctx, event)
+}
+
+type quotaProviderStub struct {
+	identifier string
+	describe   func(context.Context, pluginapi.QuotaDescribeRequest) (pluginapi.QuotaDescribeResponse, error)
+	fetch      func(context.Context, pluginapi.QuotaFetchRequest) (pluginapi.QuotaFetchResponse, error)
+	reset      func(context.Context, pluginapi.QuotaResetRequest) (pluginapi.QuotaResetResponse, error)
+}
+
+func (p quotaProviderStub) Identifier() string {
+	return p.identifier
+}
+
+func (p quotaProviderStub) DescribeQuota(
+	ctx context.Context,
+	req pluginapi.QuotaDescribeRequest,
+) (pluginapi.QuotaDescribeResponse, error) {
+	if p.describe == nil {
+		return pluginapi.QuotaDescribeResponse{}, pluginapi.ErrQuotaUnsupported
+	}
+	return p.describe(ctx, req)
+}
+
+func (p quotaProviderStub) FetchQuota(
+	ctx context.Context,
+	req pluginapi.QuotaFetchRequest,
+) (pluginapi.QuotaFetchResponse, error) {
+	if p.fetch == nil {
+		return pluginapi.QuotaFetchResponse{}, pluginapi.ErrQuotaUnsupported
+	}
+	return p.fetch(ctx, req)
+}
+
+func (p quotaProviderStub) ResetQuota(
+	ctx context.Context,
+	req pluginapi.QuotaResetRequest,
+) (pluginapi.QuotaResetResponse, error) {
+	if p.reset == nil {
+		return pluginapi.QuotaResetResponse{}, pluginapi.ErrQuotaUnsupported
+	}
+	return p.reset(ctx, req)
 }
 
 type usagePluginFunc func(context.Context, pluginapi.UsageRecord)

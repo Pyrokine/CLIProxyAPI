@@ -5,11 +5,23 @@ import (
 	"testing"
 )
 
-func TestSchemaVersionSupportsRequestLifecycle(t *testing.T) {
-	// This contract test intentionally compares a compile-time ABI constant.
+func TestSchemaVersionCapabilities(t *testing.T) {
+	// These contract tests intentionally compare compile-time ABI constants.
 	// noinspection GoBoolExpressions
-	if SchemaVersion != 2 {
-		t.Fatalf("SchemaVersion = %d, want 2", SchemaVersion)
+	if SchemaVersion != 6 {
+		t.Fatalf("SchemaVersion = %d, want 6", SchemaVersion)
+	}
+	if SchemaVersionStreamChunkOmitRequestBody != 3 {
+		t.Fatalf("SchemaVersionStreamChunkOmitRequestBody = %d, want 3", SchemaVersionStreamChunkOmitRequestBody)
+	}
+	if SchemaVersionWebSocketResponseObserver != 4 {
+		t.Fatalf("SchemaVersionWebSocketResponseObserver = %d, want 4", SchemaVersionWebSocketResponseObserver)
+	}
+	if SchemaVersionStreamChunkOmitHistory != 5 {
+		t.Fatalf("SchemaVersionStreamChunkOmitHistory = %d, want 5", SchemaVersionStreamChunkOmitHistory)
+	}
+	if SchemaVersionRawManagementResponse != 6 {
+		t.Fatalf("SchemaVersionRawManagementResponse = %d, want 6", SchemaVersionRawManagementResponse)
 	}
 }
 
@@ -41,11 +53,18 @@ func TestMethodNamesAreStable(t *testing.T) {
 		want string
 	}{
 		{"MethodPluginRegister", MethodPluginRegister, "plugin.register"},
+		{"MethodPluginQuiesce", MethodPluginQuiesce, "plugin.quiesce"},
 		{"MethodRequestInterceptBefore", MethodRequestInterceptBefore, "request.intercept_before"},
 		{"MethodRequestInterceptAfter", MethodRequestInterceptAfter, "request.intercept_after"},
 		{"MethodRequestComplete", MethodRequestComplete, "request.complete"},
 		{"MethodResponseInterceptAfter", MethodResponseInterceptAfter, "response.intercept_after"},
 		{"MethodResponseInterceptStreamChunk", MethodResponseInterceptStreamChunk, "response.intercept_stream_chunk"},
+		{"MethodWebSocketResponseEvent", MethodWebSocketResponseEvent, "websocket.response_event"},
+		{"MethodQuotaIdentifier", MethodQuotaIdentifier, "quota.identifier"},
+		{"MethodQuotaDescribe", MethodQuotaDescribe, "quota.describe"},
+		{"MethodQuotaFetch", MethodQuotaFetch, "quota.fetch"},
+		{"MethodQuotaReset", MethodQuotaReset, "quota.reset"},
+		{"MethodHostAffinityLookup", MethodHostAffinityLookup, "host.affinity.lookup"},
 		{"MethodHostHTTPDo", MethodHostHTTPDo, "host.http.do"},
 		{"MethodHostHTTPStreamRead", MethodHostHTTPStreamRead, "host.http.stream_read"},
 		{"MethodHostModelExecute", MethodHostModelExecute, "host.model.execute"},

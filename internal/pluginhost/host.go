@@ -131,6 +131,7 @@ type Host struct {
 	cleanupFilesPending          bool
 	runtimeConfig                *config.Config
 	modelExecutor                modelExecutor
+	affinityManager              affinityLookupManager
 	modelClientIDs               map[string]struct{}
 	modelClientOwners            map[string]string
 	modelRegistry                modelRegistry
@@ -163,10 +164,13 @@ type Host struct {
 	httpStreams                  *hostHTTPStreamBridge
 	modelStreams                 *modelStreamBridge
 	callbackContexts             *callbackContextRegistry
+	shutdownContext              context.Context
+	shutdownCancel               context.CancelFunc
 	snapshot                     atomic.Value
 }
 
 func New() *Host {
+	shutdownContext, shutdownCancel := context.WithCancel(context.Background())
 	h := &Host{
 		loader:                    defaultPluginLoader(),
 		loaded:                    make(map[string]*loadedPlugin),
@@ -202,6 +206,8 @@ func New() *Host {
 		httpStreams:               newHostHTTPStreamBridge(),
 		modelStreams:              newModelStreamBridge(),
 		callbackContexts:          newCallbackContextRegistry(),
+		shutdownContext:           shutdownContext,
+		shutdownCancel:            shutdownCancel,
 	}
 	h.snapshot.Store(emptySnapshot())
 	return h
@@ -435,6 +441,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 	if h == nil {
 		return nil
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	h.applyMu.Lock()
 	defer h.applyMu.Unlock()
@@ -511,6 +520,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 	recordPlugins := make(map[string]*loadedPlugin, len(files))
 	recordGenerations := make(map[string]uint64, len(files))
 	pendingLoads := make(map[*loadedPlugin]pendingPluginLoad)
+	quiescedReplacements := make(map[*loadedPlugin]struct{})
 	publishedRecords := make(map[string]capabilityRecord)
 	for _, record := range h.activeRecords() {
 		publishedRecords[record.id] = record
@@ -525,6 +535,18 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 			retirementDone := h.trackRetiredPluginLocked(candidate)
 			h.mu.Unlock()
 			h.shutdownPreparedDiscardedPlugin(candidate, retirementDone)
+		}
+		if err != nil {
+			h.mu.Lock()
+			if h.configApplyCurrentLocked(generation) && h.runtimeConfig == cfg {
+				h.runtimeConfig = previousRuntimeConfig
+			}
+			h.mu.Unlock()
+		}
+		for previous := range quiescedReplacements {
+			if errRestore := h.restoreQuiescedPlugin(previous); errRestore != nil {
+				err = errors.Join(err, errRestore)
+			}
 		}
 	}()
 	for _, file := range files {
@@ -578,6 +600,20 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		h.initializing[file.ID] = initialization
 		h.mu.Unlock()
 
+		if previous != nil {
+			restoreRequired, errQuiesce := h.callQuiesce(ctx, previous)
+			if restoreRequired {
+				quiescedReplacements[previous] = struct{}{}
+			}
+			if errQuiesce != nil || ctx.Err() != nil {
+				h.finishAbortedInitialization(file.ID, initialization)
+				if errQuiesce != nil {
+					return fmt.Errorf("pluginhost: quiesce replacement plugin %s: %w", file.ID, errQuiesce)
+				}
+				return ctx.Err()
+			}
+		}
+
 		loaded, errLoad := h.load(file)
 		if errLoad == nil {
 			artifactCurrent, errCurrent := pluginFileSnapshotCurrentUnderRoot(rc.Dir, file)
@@ -625,6 +661,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		pendingLoads[lp] = pendingPluginLoad{plugin: lp, previous: previous}
 		log.WithFields(pluginLogFields(file.ID, "", file.Version, file.Path)).Info("pluginhost: plugin loaded")
 		plugin, okCall := h.callRegister(ctx, lp, item)
+		if errContext := ctx.Err(); errContext != nil {
+			return errContext
+		}
 		h.mu.Lock()
 		applyCurrent = h.configApplyCurrentLocked(generation)
 		pluginCurrent = h.pluginGenerationCurrentLocked(file.ID, pluginGeneration)
@@ -660,7 +699,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 			return nil
 		}
 		if !okCall {
-			if previous != nil && !h.isPluginFused(file.ID) {
+			if previous != nil {
 				return fmt.Errorf("pluginhost: register replacement plugin %s", file.ID)
 			}
 			continue
@@ -683,6 +722,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		recordGenerations[file.ID] = pluginGeneration
 	}
 
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
 	publicationRootLock, errPublicationRootLock := pluginstore.LockRoot(rc.Dir)
 	if errPublicationRootLock != nil {
 		return fmt.Errorf("pluginhost: lock plugin root before publication: %w", errPublicationRootLock)
@@ -700,6 +742,12 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 	}
 	h.publicationMu.Lock()
 	h.mu.Lock()
+	if errContext := ctx.Err(); errContext != nil {
+		h.mu.Unlock()
+		h.publicationMu.Unlock()
+		publicationRootLock.Unlock()
+		return errContext
+	}
 	if !h.configApplyCurrentLocked(generation) {
 		h.mu.Unlock()
 		h.publicationMu.Unlock()
@@ -742,6 +790,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 			delete(h.fused, record.id)
 			h.advancePluginOperationLocked(record.id)
 			h.loaded[record.id] = candidate.plugin
+			delete(quiescedReplacements, candidate.previous)
 			delete(h.pendingLoaded, record.id)
 			delete(h.loading, record.id)
 			delete(pendingLoads, candidate.plugin)
@@ -1295,6 +1344,9 @@ func (h *Host) ShutdownAllContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if h.shutdownCancel != nil {
+		h.shutdownCancel()
+	}
 
 	h.publicationMu.Lock()
 	targets := make([]pluginUnloadTarget, 0)
@@ -1630,6 +1682,144 @@ func (h *Host) rebuildActivePluginMapsLocked(records []capabilityRecord) {
 	}
 }
 
+func (h *Host) finishAbortedInitialization(id string, initialization *pluginInitialization) {
+	if h == nil || initialization == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.initializing[id] == initialization {
+		delete(h.initializing, id)
+		close(initialization.done)
+	}
+	if h.pendingLoaded[id] == nil {
+		delete(h.loading, id)
+	}
+	h.mu.Unlock()
+}
+
+func (h *Host) callQuiesce(ctx context.Context, lp *loadedPlugin) (bool, error) {
+	if h == nil || lp == nil || lp.client == nil {
+		return false, nil
+	}
+	actionStarted := false
+	errQuiesce, okCall := h.safePluginAction(ctx, lp.id, pluginabi.MethodPluginQuiesce, func() error {
+		actionStarted = true
+		_, errCall := callPlugin[rpcEmptyResponse](ctx, lp.client, pluginabi.MethodPluginQuiesce, rpcEmptyResponse{})
+		return errCall
+	})
+	if !okCall {
+		return actionStarted, errQuiesce
+	}
+	if errQuiesce == nil {
+		return true, nil
+	}
+	entry := log.WithError(errQuiesce).WithField("plugin_id", lp.id)
+	switch {
+	case quiesceUnsupported(errQuiesce):
+		entry.Debug("pluginhost: plugin quiesce unsupported")
+		return false, nil
+	case errors.Is(errQuiesce, context.Canceled), errors.Is(errQuiesce, context.DeadlineExceeded):
+		entry.Debug("pluginhost: plugin quiesce canceled")
+	default:
+		entry.Warn("pluginhost: plugin quiesce failed")
+	}
+	return true, errQuiesce
+}
+
+func quiesceUnsupported(errQuiesce error) bool {
+	if errQuiesce == nil {
+		return false
+	}
+	if errors.Is(errQuiesce, errors.ErrUnsupported) {
+		return true
+	}
+	var errRPC rpcError
+	if errors.As(errQuiesce, &errRPC) {
+		switch strings.ToLower(strings.TrimSpace(errRPC.Code)) {
+		case "unknown_method", "method_not_found", "unsupported_method":
+			return true
+		}
+	}
+	message := strings.ToLower(strings.TrimSpace(errQuiesce.Error()))
+	for _, indication := range []string{
+		"unknown method",
+		"method not found",
+		"unsupported method",
+		"method unsupported",
+		"method is not supported",
+		"method not supported",
+	} {
+		if strings.Contains(message, indication) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) restoreQuiescedPlugin(lp *loadedPlugin) error {
+	if h == nil || lp == nil || lp.client == nil {
+		return nil
+	}
+	h.mu.Lock()
+	current := h.loaded[lp.id] == lp
+	configYAML := bytes.Clone(lp.configYAML)
+	h.mu.Unlock()
+	if !current {
+		return nil
+	}
+	restoreCtx, cancelRestore := context.WithTimeout(context.Background(), pluginShutdownTimeout)
+	defer cancelRestore()
+	plugin, errRestore := registerRPCPlugin(
+		restoreCtx,
+		h,
+		lp.id,
+		lp.client,
+		pluginabi.MethodPluginReconfigure,
+		configYAML,
+	)
+	if errRestore != nil {
+		return fmt.Errorf("pluginhost: restore quiesced plugin %s: %w", lp.id, errRestore)
+	}
+	if !validPlugin(plugin) {
+		return fmt.Errorf("pluginhost: restore quiesced plugin %s returned invalid registration", lp.id)
+	}
+	h.mu.Lock()
+	restored := h.loaded[lp.id] == lp
+	if restored {
+		delete(h.fused, lp.id)
+	}
+	h.mu.Unlock()
+	if restored {
+		records := h.activeRecords()
+		h.refreshUsagePlugins(records)
+		h.refreshThinkingProviders(records)
+	}
+	return nil
+}
+
+func (h *Host) safePluginAction(
+	ctx context.Context,
+	id string,
+	method string,
+	fn func() error,
+) (err error, ok bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.fusePlugin(id, method, recovered)
+			err = fmt.Errorf("plugin %s %s panic: %v", id, method, recovered)
+			ok = false
+		}
+	}()
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err(), false
+		default:
+		}
+	}
+	return fn(), true
+}
+
 func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
 	if lp == nil {
 		return pluginapi.Plugin{}, false
@@ -1712,13 +1902,16 @@ func validPlugin(plugin pluginapi.Plugin) bool {
 		caps.RequestTranslator != nil ||
 		caps.RequestNormalizer != nil ||
 		caps.RequestInterceptor != nil ||
+		caps.RequestLifecyclePlugin != nil ||
 		caps.ResponseTranslator != nil ||
 		caps.ResponseBeforeTranslator != nil ||
 		caps.ResponseAfterTranslator != nil ||
 		caps.ResponseInterceptor != nil ||
 		caps.StreamChunkInterceptor != nil ||
+		caps.WebSocketResponseObserver != nil ||
 		caps.ThinkingApplier != nil ||
 		caps.UsagePlugin != nil ||
 		caps.CommandLinePlugin != nil ||
-		caps.ManagementAPI != nil
+		caps.ManagementAPI != nil ||
+		caps.QuotaProvider != nil
 }

@@ -1,13 +1,19 @@
 package pluginhost
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -16,12 +22,19 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
+
+type affinityLookupFunc func(provider, model, sessionID string) (*coreauth.Auth, string)
+
+func (f affinityLookupFunc) LookupSessionAffinity(provider, model, sessionID string) (*coreauth.Auth, string) {
+	return f(provider, model, sessionID)
+}
 
 type fakeHostModelExecutor struct {
 	executeModel func(context.Context, handlers.ModelExecutionRequest) (
@@ -46,6 +59,111 @@ func (e *fakeHostModelExecutor) ExecuteModelStream(
 	req handlers.ModelExecutionRequest,
 ) (handlers.ModelExecutionStream, *handlers.ErrorMessage) {
 	return e.executeModelStream(ctx, req)
+}
+
+func TestHostAffinityLookupValidatesRequiredFields(t *testing.T) {
+	host := New()
+	for _, testCase := range []struct {
+		name    string
+		request string
+		want    string
+	}{
+		{name: "invalid JSON", request: `{`, want: "decode host affinity lookup request"},
+		{name: "provider", request: `{"model":"m","session_id":"s"}`, want: "provider is required"},
+		{name: "model", request: `{"provider":"p","session_id":"s"}`, want: "model is required"},
+		{name: "session", request: `{"provider":"p","model":"m"}`, want: "session_id is required"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, errLookup := host.callHostAffinityLookup(context.Background(), []byte(testCase.request))
+			if errLookup == nil || !strings.Contains(errLookup.Error(), testCase.want) {
+				t.Fatalf("callHostAffinityLookup() error = %v, want %q", errLookup, testCase.want)
+			}
+		})
+	}
+}
+
+func TestHostAffinityLookupReturnsReadOnlyStatusContract(t *testing.T) {
+	host := New()
+	unsupportedRaw, errUnsupported := host.callFromPlugin(
+		context.Background(),
+		pluginabi.MethodHostAffinityLookup,
+		[]byte(`{"provider":"openai","model":"model","session_id":"session"}`),
+	)
+	if errUnsupported != nil {
+		t.Fatalf("unsupported lookup error = %v", errUnsupported)
+	}
+	unsupported, errDecode := decodeRPCEnvelope[pluginapi.HostAffinityLookupResponse](unsupportedRaw)
+	if errDecode != nil || unsupported.Status != pluginapi.HostAffinityStatusUnsupported || unsupported.ObservedAt.IsZero() {
+		t.Fatalf("unsupported response = %#v, error=%v", unsupported, errDecode)
+	}
+
+	calls := 0
+	host.SetAffinityManager(affinityLookupFunc(func(provider, model, sessionID string) (*coreauth.Auth, string) {
+		calls++
+		if provider != "openai" || model != "model" || sessionID != "session" {
+			t.Fatalf("lookup arguments = %q %q %q", provider, model, sessionID)
+		}
+		return &coreauth.Auth{
+			ID:          "secret-auth-id",
+			Index:       "auth-index",
+			Provider:    "openai",
+			Disabled:    true,
+			Unavailable: true,
+			Metadata:    map[string]any{"token": "secret-token"},
+		}, pluginapi.HostAffinityStatusBound
+	}))
+	boundRaw, errBound := host.callFromPlugin(
+		context.Background(),
+		pluginabi.MethodHostAffinityLookup,
+		[]byte(`{"provider":" openai ","model":" model ","session_id":" session "}`),
+	)
+	if errBound != nil {
+		t.Fatalf("bound lookup error = %v", errBound)
+	}
+	if bytes.Contains(boundRaw, []byte("secret-auth-id")) || bytes.Contains(boundRaw, []byte("secret-token")) {
+		t.Fatalf("affinity response leaked credential data: %s", boundRaw)
+	}
+	bound, errDecodeBound := decodeRPCEnvelope[pluginapi.HostAffinityLookupResponse](boundRaw)
+	if errDecodeBound != nil {
+		t.Fatalf("decode bound response: %v", errDecodeBound)
+	}
+	if calls != 1 || bound.Status != pluginapi.HostAffinityStatusBound || bound.AuthIndex != "auth-index" ||
+		!bound.Disabled || !bound.Unavailable || bound.ObservedAt.IsZero() {
+		t.Fatalf("bound response = %#v, calls=%d", bound, calls)
+	}
+
+	missingIndexAuth := &coreauth.Auth{ID: "derivable-auth-id", Provider: "openai"}
+	host.SetAffinityManager(affinityLookupFunc(func(string, string, string) (*coreauth.Auth, string) {
+		return missingIndexAuth, pluginapi.HostAffinityStatusBound
+	}))
+	if _, errMissingIndex := host.callHostAffinityLookup(
+		context.Background(), []byte(`{"provider":"p","model":"m","session_id":"s"}`),
+	); errMissingIndex == nil || !strings.Contains(errMissingIndex.Error(), "without auth index") {
+		t.Fatalf("missing-index lookup error = %v", errMissingIndex)
+	}
+	if missingIndexAuth.Index != "" {
+		t.Fatalf("read-only affinity lookup mutated auth index to %q", missingIndexAuth.Index)
+	}
+
+	for _, status := range []string{
+		pluginapi.HostAffinityStatusUnbound,
+		pluginapi.HostAffinityStatusAmbiguous,
+		pluginapi.HostAffinityStatusUnsupported,
+	} {
+		host.SetAffinityManager(affinityLookupFunc(func(string, string, string) (*coreauth.Auth, string) {
+			return nil, status
+		}))
+		raw, errLookup := host.callHostAffinityLookup(
+			context.Background(), []byte(`{"provider":"p","model":"m","session_id":"s"}`),
+		)
+		if errLookup != nil {
+			t.Fatalf("status %q lookup error = %v", status, errLookup)
+		}
+		response, errDecodeStatus := decodeRPCEnvelope[pluginapi.HostAffinityLookupResponse](raw)
+		if errDecodeStatus != nil || response.Status != status || response.AuthIndex != "" || response.ObservedAt.IsZero() {
+			t.Fatalf("status %q response = %#v, error=%v", status, response, errDecodeStatus)
+		}
+	}
 }
 
 func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
@@ -89,6 +207,569 @@ func TestHostHTTPDoCallbackUsesHostHTTPClient(t *testing.T) {
 	}
 }
 
+func TestDecodeHostHTTPRequestPrefersNestedWireProfileAndClonesIt(t *testing.T) {
+	raw := []byte(`{
+		"wire_profile":{"http1_only":true,"header_profile":["Top-Level"]},
+		"request":{
+			"method":"POST",
+			"url":"https://example.test",
+			"wire_profile":{"disable_auto_compression":true,"header_profile":["Nested-Header"]}
+		}
+	}`)
+	decoded, _, errDecode := decodeHostHTTPRequestWithCallbackID(raw)
+	if errDecode != nil {
+		t.Fatalf("decodeHostHTTPRequestWithCallbackID() error = %v", errDecode)
+	}
+	if decoded.WireProfile == nil || decoded.WireProfile.HTTP1Only ||
+		!decoded.WireProfile.DisableAutoCompression ||
+		!reflect.DeepEqual(decoded.WireProfile.HeaderProfile, []string{"Nested-Header"}) {
+		t.Fatalf("decoded nested wire profile = %#v", decoded.WireProfile)
+	}
+
+	profile := &pluginapi.HTTPWireProfile{HTTP1Only: true, HeaderProfile: []string{"Original"}}
+	encoded, errMarshal := json.Marshal(rpcHostHTTPRequest{
+		Request: &httpRequest{Method: http.MethodGet, URL: "http://example.test", WireProfile: profile},
+	})
+	if errMarshal != nil {
+		t.Fatalf("json.Marshal() error = %v", errMarshal)
+	}
+	cloned, _, errClone := decodeHostHTTPRequestWithCallbackID(encoded)
+	if errClone != nil {
+		t.Fatalf("decodeHostHTTPRequestWithCallbackID() clone error = %v", errClone)
+	}
+	profile.HeaderProfile[0] = "Mutated"
+	if cloned.WireProfile == nil || cloned.WireProfile.HeaderProfile[0] != "Original" {
+		t.Fatalf("wire profile was not defensively copied: %#v", cloned.WireProfile)
+	}
+}
+
+func TestHostHTTPClientAppliesHTTP1HeaderWireProfile(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen() error = %v", errListen)
+	}
+	defer listener.Close()
+	type serverResult struct {
+		header string
+		err    error
+	}
+	result := make(chan serverResult, 1)
+	go func() {
+		connection, errAccept := listener.Accept()
+		if errAccept != nil {
+			result <- serverResult{err: errAccept}
+			return
+		}
+		defer connection.Close()
+		reader := bufio.NewReader(connection)
+		var raw strings.Builder
+		for {
+			line, errRead := reader.ReadString('\n')
+			if errRead != nil {
+				result <- serverResult{err: errRead}
+				return
+			}
+			raw.WriteString(line)
+			if line == "\r\n" {
+				break
+			}
+		}
+		_, errWrite := connection.Write([]byte("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"))
+		result <- serverResult{header: raw.String(), err: errWrite}
+	}()
+
+	profile := &pluginapi.HTTPWireProfile{
+		HTTP1Only:              true,
+		DisableAutoCompression: true,
+		HeaderProfile:          []string{"x-custom-b", "X-Custom-A", "User-Agent", "Host"},
+	}
+	response, errDo := New().newHTTPClient(nil).Do(context.Background(), pluginapi.HTTPRequest{
+		Method: http.MethodGet,
+		URL:    "http://" + listener.Addr().String() + "/wire",
+		Headers: http.Header{
+			"X-Custom-A": {"a"},
+			"X-Custom-B": {"b"},
+			"User-Agent": {"wire-test"},
+		},
+		WireProfile: profile,
+	})
+	if errDo != nil {
+		t.Fatalf("HostHTTPClient.Do() error = %v", errDo)
+	}
+	if response.StatusCode != http.StatusOK || string(response.Body) != "ok" {
+		t.Fatalf("response = %#v", response)
+	}
+	server := <-result
+	if server.err != nil {
+		t.Fatalf("raw server error = %v", server.err)
+	}
+	if !strings.HasPrefix(server.header, "GET /wire HTTP/1.1\r\n") {
+		t.Fatalf("request line = %q", server.header)
+	}
+	positions := []int{
+		strings.Index(server.header, "\r\nx-custom-b: b\r\n"),
+		strings.Index(server.header, "\r\nX-Custom-A: a\r\n"),
+		strings.Index(server.header, "\r\nUser-Agent: wire-test\r\n"),
+		strings.Index(server.header, "\r\nHost: "+listener.Addr().String()+"\r\n"),
+	}
+	for index, position := range positions {
+		if position < 0 {
+			t.Fatalf("profile header %d missing from raw request: %q", index, server.header)
+		}
+		if index > 0 && positions[index-1] >= position {
+			t.Fatalf("profile header order = %#v in %q", positions, server.header)
+		}
+	}
+	if strings.Contains(strings.ToLower(server.header), "accept-encoding:") {
+		t.Fatalf("DisableAutoCompression injected Accept-Encoding: %q", server.header)
+	}
+}
+
+func TestHostHTTPClientWireProfileUsesPlainHTTPProxy(t *testing.T) {
+	proxyRequest := make(chan string, 1)
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		proxyRequest <- request.Method + " " + request.URL.String()
+		_, _ = w.Write([]byte("proxied"))
+	}))
+	defer proxyServer.Close()
+	host := New()
+	host.runtimeConfig = &config.Config{ProxyURL: proxyServer.URL}
+	response, errDo := host.newHTTPClient(nil).Do(context.Background(), pluginapi.HTTPRequest{
+		Method: http.MethodGet,
+		URL:    "http://example.test/resource",
+		WireProfile: &pluginapi.HTTPWireProfile{
+			HTTP1Only:     true,
+			HeaderProfile: []string{"Host", "User-Agent"},
+		},
+	})
+	if errDo != nil {
+		t.Fatalf("HostHTTPClient.Do() error = %v", errDo)
+	}
+	if string(response.Body) != "proxied" {
+		t.Fatalf("proxy response body = %q", response.Body)
+	}
+	select {
+	case got := <-proxyRequest:
+		if got != "GET http://example.test/resource" {
+			t.Fatalf("proxy request = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not receive request")
+	}
+}
+
+func TestHostHTTPClientWireProfileRejectsCustomTLSHTTP2(t *testing.T) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+	serverTransport := server.Client().Transport.(*http.Transport)
+	customTransport := &http.Transport{
+		TLSClientConfig: serverTransport.TLSClientConfig.Clone(),
+		DialTLSContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			rawConnection, errDial := (&net.Dialer{}).DialContext(ctx, network, address)
+			if errDial != nil {
+				return nil, errDial
+			}
+			tlsConfig := serverTransport.TLSClientConfig.Clone()
+			tlsConfig.InsecureSkipVerify = true
+			tlsConfig.NextProtos = []string{"h2"}
+			connection := tls.Client(rawConnection, tlsConfig)
+			if errHandshake := connection.HandshakeContext(ctx); errHandshake != nil {
+				_ = rawConnection.Close()
+				return nil, errHandshake
+			}
+			return connection, nil
+		},
+	}
+	ctx := util.WithRoundTripper(context.Background(), customTransport)
+	_, errDo := New().newHTTPClient(nil).Do(ctx, pluginapi.HTTPRequest{
+		URL: server.URL,
+		WireProfile: &pluginapi.HTTPWireProfile{
+			HTTP1Only: true,
+		},
+	})
+	if errDo == nil || !strings.Contains(errDo.Error(), "requires HTTP/1.1") {
+		t.Fatalf("HostHTTPClient.Do() error = %v, want HTTP/2 rejection", errDo)
+	}
+}
+
+func TestDialProxyTunnelHTTPConnectCarriesTraffic(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen() error = %v", errListen)
+	}
+	defer listener.Close()
+	serverErr := make(chan error, 1)
+	go func() {
+		connection, errAccept := listener.Accept()
+		if errAccept != nil {
+			serverErr <- errAccept
+			return
+		}
+		defer connection.Close()
+		reader := bufio.NewReader(connection)
+		for {
+			line, errRead := reader.ReadString('\n')
+			if errRead != nil {
+				serverErr <- errRead
+				return
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		if _, errWrite := connection.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); errWrite != nil {
+			serverErr <- errWrite
+			return
+		}
+		payload := make([]byte, 4)
+		if _, errRead := io.ReadFull(reader, payload); errRead != nil {
+			serverErr <- errRead
+			return
+		}
+		if string(payload) != "ping" {
+			serverErr <- fmt.Errorf("tunnel payload = %q", payload)
+			return
+		}
+		_, errWrite := connection.Write([]byte("pong"))
+		serverErr <- errWrite
+	}()
+	proxyURL, errParse := url.Parse("http://" + listener.Addr().String())
+	if errParse != nil {
+		t.Fatalf("url.Parse() error = %v", errParse)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	connection, errTunnel := dialProxyTunnel(
+		ctx, (&net.Dialer{}).DialContext, nil, proxyURL, "target.example:443", &http.Transport{},
+	)
+	if errTunnel != nil {
+		t.Fatalf("dialProxyTunnel() error = %v", errTunnel)
+	}
+	defer connection.Close()
+	if _, errWrite := connection.Write([]byte("ping")); errWrite != nil {
+		t.Fatalf("tunnel write error = %v", errWrite)
+	}
+	response := make([]byte, 4)
+	if _, errRead := io.ReadFull(connection, response); errRead != nil {
+		t.Fatalf("tunnel read error = %v", errRead)
+	}
+	if string(response) != "pong" {
+		t.Fatalf("tunnel response = %q", response)
+	}
+	if errServer := <-serverErr; errServer != nil {
+		t.Fatalf("proxy server error = %v", errServer)
+	}
+}
+
+func TestDialProxyTunnelHTTPSConnectCarriesTraffic(t *testing.T) {
+	serverErr := make(chan error, 1)
+	proxyServer := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodConnect || request.Host != "target.example:443" {
+			serverErr <- fmt.Errorf("HTTPS proxy request = %s %s", request.Method, request.Host)
+			http.Error(writer, "unexpected CONNECT", http.StatusBadRequest)
+			return
+		}
+		hijacker, ok := writer.(http.Hijacker)
+		if !ok {
+			serverErr <- fmt.Errorf("HTTPS proxy response writer does not support hijacking")
+			return
+		}
+		connection, buffered, errHijack := hijacker.Hijack()
+		if errHijack != nil {
+			serverErr <- errHijack
+			return
+		}
+		defer connection.Close()
+		if _, errWrite := buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); errWrite != nil {
+			serverErr <- errWrite
+			return
+		}
+		if errFlush := buffered.Flush(); errFlush != nil {
+			serverErr <- errFlush
+			return
+		}
+		payload := make([]byte, 4)
+		if _, errRead := io.ReadFull(buffered, payload); errRead != nil {
+			serverErr <- errRead
+			return
+		}
+		if string(payload) != "ping" {
+			serverErr <- fmt.Errorf("HTTPS tunnel payload = %q", payload)
+			return
+		}
+		if _, errWrite := buffered.WriteString("pong"); errWrite != nil {
+			serverErr <- errWrite
+			return
+		}
+		serverErr <- buffered.Flush()
+	}))
+	defer proxyServer.Close()
+	proxyURL, errParse := url.Parse(proxyServer.URL)
+	if errParse != nil {
+		t.Fatalf("url.Parse() error = %v", errParse)
+	}
+	proxyTransport := proxyServer.Client().Transport.(*http.Transport)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	connection, errTunnel := dialProxyTunnel(
+		ctx,
+		(&net.Dialer{}).DialContext,
+		nil,
+		proxyURL,
+		"target.example:443",
+		&http.Transport{TLSClientConfig: proxyTransport.TLSClientConfig.Clone()},
+	)
+	if errTunnel != nil {
+		t.Fatalf("dialProxyTunnel() error = %v", errTunnel)
+	}
+	defer connection.Close()
+	if _, errWrite := connection.Write([]byte("ping")); errWrite != nil {
+		t.Fatalf("HTTPS tunnel write error = %v", errWrite)
+	}
+	response := make([]byte, 4)
+	if _, errRead := io.ReadFull(connection, response); errRead != nil {
+		t.Fatalf("HTTPS tunnel read error = %v", errRead)
+	}
+	if string(response) != "pong" {
+		t.Fatalf("HTTPS tunnel response = %q", response)
+	}
+	if errServer := <-serverErr; errServer != nil {
+		t.Fatalf("HTTPS proxy server error = %v", errServer)
+	}
+}
+
+func TestDialProxyTunnelPreservesBufferedPayload(t *testing.T) {
+	clientConnection, proxyConnection := net.Pipe()
+	defer clientConnection.Close()
+	defer proxyConnection.Close()
+	serverErr := make(chan error, 1)
+	go func() {
+		reader := bufio.NewReader(proxyConnection)
+		for {
+			line, errRead := reader.ReadString('\n')
+			if errRead != nil {
+				serverErr <- errRead
+				return
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		if _, errWrite := proxyConnection.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\npong")); errWrite != nil {
+			serverErr <- errWrite
+			return
+		}
+		payload := make([]byte, 4)
+		if _, errRead := io.ReadFull(reader, payload); errRead != nil {
+			serverErr <- errRead
+			return
+		}
+		if string(payload) != "ping" {
+			serverErr <- fmt.Errorf("tunnel payload = %q", payload)
+			return
+		}
+		serverErr <- nil
+	}()
+	proxyURL, errParse := url.Parse("http://proxy.test")
+	if errParse != nil {
+		t.Fatalf("url.Parse() error = %v", errParse)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	connection, errTunnel := dialProxyTunnel(
+		ctx,
+		func(context.Context, string, string) (net.Conn, error) {
+			return clientConnection, nil
+		},
+		nil,
+		proxyURL,
+		"target.example:443",
+		&http.Transport{},
+	)
+	if errTunnel != nil {
+		t.Fatalf("dialProxyTunnel() error = %v", errTunnel)
+	}
+	if errDeadline := connection.SetDeadline(time.Now().Add(time.Second)); errDeadline != nil {
+		t.Fatalf("SetDeadline() error = %v", errDeadline)
+	}
+	if _, errWrite := connection.Write([]byte("ping")); errWrite != nil {
+		t.Fatalf("tunnel write error = %v", errWrite)
+	}
+	response := make([]byte, 4)
+	if _, errRead := io.ReadFull(connection, response); errRead != nil {
+		t.Fatalf("tunnel read error = %v", errRead)
+	}
+	if string(response) != "pong" {
+		t.Fatalf("tunnel response = %q", response)
+	}
+	if errServer := <-serverErr; errServer != nil {
+		t.Fatalf("proxy server error = %v", errServer)
+	}
+}
+
+func TestDialProxyTunnelSOCKS5CarriesTraffic(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen() error = %v", errListen)
+	}
+	defer listener.Close()
+	serverErr := make(chan error, 1)
+	go func() {
+		connection, errAccept := listener.Accept()
+		if errAccept != nil {
+			serverErr <- errAccept
+			return
+		}
+		defer connection.Close()
+		greeting := make([]byte, 3)
+		if _, errRead := io.ReadFull(connection, greeting); errRead != nil {
+			serverErr <- errRead
+			return
+		}
+		if !bytes.Equal(greeting, []byte{0x05, 0x01, 0x00}) {
+			serverErr <- fmt.Errorf("SOCKS greeting = %v", greeting)
+			return
+		}
+		if _, errWrite := connection.Write([]byte{0x05, 0x00}); errWrite != nil {
+			serverErr <- errWrite
+			return
+		}
+		requestHeader := make([]byte, 4)
+		if _, errRead := io.ReadFull(connection, requestHeader); errRead != nil {
+			serverErr <- errRead
+			return
+		}
+		if requestHeader[0] != 0x05 || requestHeader[1] != 0x01 {
+			serverErr <- fmt.Errorf("SOCKS request header = %v", requestHeader)
+			return
+		}
+		switch requestHeader[3] {
+		case 0x01:
+			_, errAccept = io.ReadFull(connection, make([]byte, 4+2))
+		case 0x03:
+			length := make([]byte, 1)
+			if _, errAccept = io.ReadFull(connection, length); errAccept == nil {
+				_, errAccept = io.ReadFull(connection, make([]byte, int(length[0])+2))
+			}
+		case 0x04:
+			_, errAccept = io.ReadFull(connection, make([]byte, 16+2))
+		default:
+			errAccept = fmt.Errorf("SOCKS address type = %d", requestHeader[3])
+		}
+		if errAccept != nil {
+			serverErr <- errAccept
+			return
+		}
+		if _, errWrite := connection.Write([]byte{0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 80}); errWrite != nil {
+			serverErr <- errWrite
+			return
+		}
+		payload := make([]byte, 4)
+		if _, errRead := io.ReadFull(connection, payload); errRead != nil {
+			serverErr <- errRead
+			return
+		}
+		if string(payload) != "ping" {
+			serverErr <- fmt.Errorf("SOCKS payload = %q", payload)
+			return
+		}
+		_, errWrite := connection.Write([]byte("pong"))
+		serverErr <- errWrite
+	}()
+	proxyURL, errParse := url.Parse("socks5://" + listener.Addr().String())
+	if errParse != nil {
+		t.Fatalf("url.Parse() error = %v", errParse)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	connection, errTunnel := dialProxyTunnel(
+		ctx, (&net.Dialer{}).DialContext, nil, proxyURL, "target.example:443", &http.Transport{},
+	)
+	if errTunnel != nil {
+		t.Fatalf("dialProxyTunnel() error = %v", errTunnel)
+	}
+	defer connection.Close()
+	if _, errWrite := connection.Write([]byte("ping")); errWrite != nil {
+		t.Fatalf("SOCKS tunnel write error = %v", errWrite)
+	}
+	response := make([]byte, 4)
+	if _, errRead := io.ReadFull(connection, response); errRead != nil {
+		t.Fatalf("SOCKS tunnel read error = %v", errRead)
+	}
+	if string(response) != "pong" {
+		t.Fatalf("SOCKS tunnel response = %q", response)
+	}
+	if errServer := <-serverErr; errServer != nil {
+		t.Fatalf("SOCKS server error = %v", errServer)
+	}
+}
+
+func TestDialProxyTunnelCancellationClosesConnection(t *testing.T) {
+	listener, errListen := net.Listen("tcp", "127.0.0.1:0")
+	if errListen != nil {
+		t.Fatalf("net.Listen() error = %v", errListen)
+	}
+	defer listener.Close()
+	accepted := make(chan struct{})
+	closed := make(chan struct{})
+	go func() {
+		connection, errAccept := listener.Accept()
+		if errAccept != nil {
+			close(accepted)
+			close(closed)
+			return
+		}
+		defer connection.Close()
+		close(accepted)
+		reader := bufio.NewReader(connection)
+		for {
+			line, errRead := reader.ReadString('\n')
+			if errRead != nil {
+				close(closed)
+				return
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		_, _ = reader.ReadByte()
+		close(closed)
+	}()
+	proxyURL, errParse := url.Parse("http://" + listener.Addr().String())
+	if errParse != nil {
+		t.Fatalf("url.Parse() error = %v", errParse)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, errTunnel := dialProxyTunnel(
+			ctx, (&net.Dialer{}).DialContext, nil, proxyURL, "target.example:443", &http.Transport{},
+		)
+		result <- errTunnel
+	}()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("proxy did not accept connection")
+	}
+	cancel()
+	select {
+	case errTunnel := <-result:
+		if errTunnel == nil {
+			t.Fatal("dialProxyTunnel() error = nil after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dialProxyTunnel() did not return after cancellation")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("proxy connection remained open after cancellation")
+	}
+}
+
 func TestReadPluginHTTPResponseRejectsContentLengthOverLimit(t *testing.T) {
 	_, err := readPluginHTTPResponse(strings.NewReader("small"), 11, 10)
 	if !errors.Is(err, errPluginHTTPResponseTooLarge) {
@@ -123,6 +804,57 @@ func TestHostHTTPDoAppliesDefaultTimeout(t *testing.T) {
 	)
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Do() error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestHostHTTPStreamWireProfileCancellationClosesUpstream(t *testing.T) {
+	upstreamCanceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("response writer does not support flushing")
+			return
+		}
+		_, _ = w.Write([]byte("first"))
+		flusher.Flush()
+		<-request.Context().Done()
+		close(upstreamCanceled)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	response, errDo := New().newHTTPClient(nil).DoStream(ctx, pluginapi.HTTPRequest{
+		URL: server.URL,
+		WireProfile: &pluginapi.HTTPWireProfile{
+			HTTP1Only: true,
+		},
+	})
+	if errDo != nil {
+		cancel()
+		t.Fatalf("DoStream() error = %v", errDo)
+	}
+	select {
+	case chunk := <-response.Chunks:
+		if string(chunk.Payload) != "first" || chunk.Err != nil {
+			t.Fatalf("first stream chunk = %#v", chunk)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("stream did not produce first chunk")
+	}
+	cancel()
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("stream cancellation did not close upstream request")
+	}
+	select {
+	case _, open := <-response.Chunks:
+		if open {
+			for range response.Chunks {
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stream channel did not close after cancellation")
 	}
 }
 
@@ -909,6 +1641,38 @@ func hostModelStreamCountForTest(t *testing.T, host *Host) int {
 	host.modelStreams.mu.Lock()
 	defer host.modelStreams.mu.Unlock()
 	return len(host.modelStreams.streams)
+}
+
+func TestRPCUsageDeliveryErrorsAreLogged(t *testing.T) {
+	lookup := newTestSymbolLookup(&testPlugin{})
+	lookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+		pluginabi.MethodUsageHandle: func(context.Context, []byte) ([]byte, error) {
+			return marshalRPCError("delivery_failed", "usage receiver unavailable"), nil
+		},
+	}
+	adapter := &rpcPluginAdapter{id: "usage-plugin", client: lookup}
+
+	var output bytes.Buffer
+	logger := log.StandardLogger()
+	originalOutput := logger.Out
+	originalFormatter := logger.Formatter
+	originalLevel := logger.Level
+	log.SetOutput(&output)
+	log.SetFormatter(&log.TextFormatter{DisableColors: true, DisableTimestamp: true})
+	log.SetLevel(log.ErrorLevel)
+	defer func() {
+		log.SetOutput(originalOutput)
+		log.SetFormatter(originalFormatter)
+		log.SetLevel(originalLevel)
+	}()
+
+	adapter.HandleUsage(context.Background(), pluginapi.UsageRecord{Provider: "openai"})
+	logged := output.String()
+	if !strings.Contains(logged, "usage delivery failed") ||
+		!strings.Contains(logged, "usage receiver unavailable") ||
+		!strings.Contains(logged, "plugin_id=usage-plugin") {
+		t.Fatalf("usage error log = %q", logged)
+	}
 }
 
 func TestHostLogCallbackRestoresRegisteredRequestContext(t *testing.T) {

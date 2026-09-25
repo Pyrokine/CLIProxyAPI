@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginabi"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
 
@@ -150,6 +153,333 @@ func TestApplyConfigFinalizesInstallTransactionWithPersistedConfigFingerprint(t 
 	if errRead != nil || string(written) != string(data) {
 		t.Fatalf("committed artifact = %q, error = %v", written, errRead)
 	}
+}
+
+func TestApplyConfigQuiescesBeforePublishingReplacement(t *testing.T) {
+	for _, testCase := range []struct {
+		name          string
+		quiesceResult func(context.Context, []byte) ([]byte, error)
+	}{
+		{
+			name: "supported",
+			quiesceResult: func(context.Context, []byte) ([]byte, error) {
+				return marshalRPCResult(rpcEmptyResponse{})
+			},
+		},
+		{
+			name: "explicitly unsupported",
+			quiesceResult: func(context.Context, []byte) ([]byte, error) {
+				return marshalRPCError("method_not_found", "quiesce unsupported"), nil
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := makePluginDir(t, "alpha")
+			loader := newTestSymbolLoader()
+			oldPlugin := reloadTestPlugin("old")
+			newPlugin := reloadTestPlugin("new")
+			oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
+			loader.lookups["alpha"] = oldLookup
+			host := newForTest(loader)
+			t.Cleanup(func() {
+				_ = host.ShutdownAllContext(context.Background())
+			})
+			initialConfig := pluginRuntimeConfigForTest(root, 1)
+			if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
+				t.Fatalf("initial ApplyConfig() error = %v", errApply)
+			}
+
+			events := make([]string, 0, 3)
+			oldLookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+				pluginabi.MethodPluginQuiesce: func(ctx context.Context, raw []byte) ([]byte, error) {
+					events = append(events, "old-quiesce")
+					return testCase.quiesceResult(ctx, raw)
+				},
+			}
+			oldLookup.shutdownHook = func() {
+				events = append(events, "old-shutdown")
+			}
+			newLookup := newTestSymbolLookup(&testPlugin{registerResult: newPlugin, reconfigureResult: newPlugin})
+			newLookup.registerOverride = func([]byte) pluginapi.Plugin {
+				events = append(events, "candidate-register")
+				return newPlugin
+			}
+			loader.lookups["alpha"] = newLookup
+
+			if errApply := host.ApplyConfig(
+				context.Background(), pluginRuntimeConfigForTest(root, 2),
+			); errApply != nil {
+				t.Fatalf("replacement ApplyConfig() error = %v", errApply)
+			}
+			wantEvents := "old-quiesce,candidate-register,old-shutdown"
+			if strings.Join(events, ",") != wantEvents {
+				t.Fatalf("replacement events = %q, want %q", strings.Join(events, ","), wantEvents)
+			}
+			records := host.activeRecords()
+			if len(records) != 1 || records[0].plugin.Metadata.Name != "new" {
+				t.Fatalf("published records = %#v", records)
+			}
+			if newLookup.shutdownCalls != 0 {
+				t.Fatalf("new plugin shutdown calls = %d before host cleanup", newLookup.shutdownCalls)
+			}
+		})
+	}
+}
+
+func TestApplyConfigClosesFailedCandidateBeforeRestoringQuiescedPlugin(t *testing.T) {
+	root := makePluginDir(t, "alpha")
+	loader := newTestSymbolLoader()
+	oldPlugin := reloadTestPlugin("old")
+	oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
+	loader.lookups["alpha"] = oldLookup
+	host := newForTest(loader)
+	t.Cleanup(func() {
+		_ = host.ShutdownAllContext(context.Background())
+	})
+	initialConfig := pluginRuntimeConfigForTest(root, 1)
+	if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+	originalConfigYAML := string(oldLookup.lastLifecycle.ConfigYAML)
+
+	events := make([]string, 0, 4)
+	oldLookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+		pluginabi.MethodPluginQuiesce: func(context.Context, []byte) ([]byte, error) {
+			events = append(events, "old-quiesce")
+			return marshalRPCResult(rpcEmptyResponse{})
+		},
+	}
+	oldLookup.reconfigureOverride = func(configYAML []byte) pluginapi.Plugin {
+		events = append(events, "old-reconfigure")
+		if string(configYAML) != originalConfigYAML {
+			t.Fatalf("restored config = %q, want %q", configYAML, originalConfigYAML)
+		}
+		if host.currentRuntimeConfig() != initialConfig {
+			t.Fatal("old plugin reconfigured before previous runtime config was restored")
+		}
+		return oldPlugin
+	}
+	candidatePlugin := reloadTestPlugin("candidate")
+	candidateLookup := newTestSymbolLookup(&testPlugin{registerResult: candidatePlugin})
+	candidateLookup.registerOverride = func([]byte) pluginapi.Plugin {
+		events = append(events, "candidate-register")
+		panic("candidate register panic")
+	}
+	candidateLookup.shutdownHook = func() {
+		events = append(events, "candidate-shutdown")
+	}
+	loader.lookups["alpha"] = candidateLookup
+
+	errApply := host.ApplyConfig(context.Background(), pluginRuntimeConfigForTest(root, 2))
+	if errApply == nil {
+		t.Fatal("replacement ApplyConfig() error = nil, want registration failure")
+	}
+	wantEvents := "old-quiesce,candidate-register,candidate-shutdown,old-reconfigure"
+	if strings.Join(events, ",") != wantEvents {
+		t.Fatalf("rollback events = %q, want %q", strings.Join(events, ","), wantEvents)
+	}
+	if candidateLookup.shutdownCalls != 1 || oldLookup.shutdownCalls != 0 {
+		t.Fatalf(
+			"lifecycle calls: candidate shutdown=%d old shutdown=%d",
+			candidateLookup.shutdownCalls,
+			oldLookup.shutdownCalls,
+		)
+	}
+	if host.currentRuntimeConfig() != initialConfig || host.isPluginFused("alpha") {
+		t.Fatalf("old runtime was not restored: config=%p want=%p fused=%t", host.currentRuntimeConfig(), initialConfig, host.isPluginFused("alpha"))
+	}
+	records := host.activeRecords()
+	if len(records) != 1 || records[0].plugin.Metadata.Name != "old" {
+		t.Fatalf("active records after rollback = %#v", records)
+	}
+	host.mu.Lock()
+	_, pending := host.pendingLoaded["alpha"]
+	_, loading := host.loading["alpha"]
+	host.mu.Unlock()
+	if pending || loading {
+		t.Fatalf("candidate state remained after rollback: pending=%t loading=%t", pending, loading)
+	}
+}
+
+func TestApplyConfigCancellationAfterQuiesceRestoresOldPluginWithoutLoadingCandidate(t *testing.T) {
+	root := makePluginDir(t, "alpha")
+	loader := newTestSymbolLoader()
+	oldPlugin := reloadTestPlugin("old")
+	oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
+	loader.lookups["alpha"] = oldLookup
+	host := newForTest(loader)
+	t.Cleanup(func() {
+		_ = host.ShutdownAllContext(context.Background())
+	})
+	initialConfig := pluginRuntimeConfigForTest(root, 1)
+	if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	events := make([]string, 0, 2)
+	oldLookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+		pluginabi.MethodPluginQuiesce: func(context.Context, []byte) ([]byte, error) {
+			events = append(events, "old-quiesce")
+			cancel()
+			return marshalRPCResult(rpcEmptyResponse{})
+		},
+	}
+	oldLookup.reconfigureOverride = func([]byte) pluginapi.Plugin {
+		events = append(events, "old-reconfigure")
+		return oldPlugin
+	}
+	candidateLookup := newTestSymbolLookup(&testPlugin{registerResult: reloadTestPlugin("candidate")})
+	loader.lookups["alpha"] = candidateLookup
+	openCallsBefore := loader.openCalls
+
+	errApply := host.ApplyConfig(ctx, pluginRuntimeConfigForTest(root, 2))
+	if !errors.Is(errApply, context.Canceled) {
+		t.Fatalf("replacement ApplyConfig() error = %v, want canceled", errApply)
+	}
+	if strings.Join(events, ",") != "old-quiesce,old-reconfigure" {
+		t.Fatalf("cancellation events = %q", strings.Join(events, ","))
+	}
+	if loader.openCalls != openCallsBefore {
+		t.Fatalf("candidate load calls = %d, want unchanged %d", loader.openCalls, openCallsBefore)
+	}
+	if host.currentRuntimeConfig() != initialConfig || host.isPluginFused("alpha") {
+		t.Fatal("old plugin state was not restored after cancellation")
+	}
+}
+
+func TestApplyConfigCancellationDuringQuiesceRestoresOldPlugin(t *testing.T) {
+	root := makePluginDir(t, "alpha")
+	loader := newTestSymbolLoader()
+	oldPlugin := reloadTestPlugin("old")
+	oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
+	loader.lookups["alpha"] = oldLookup
+	host := newForTest(loader)
+	t.Cleanup(func() {
+		_ = host.ShutdownAllContext(context.Background())
+	})
+	initialConfig := pluginRuntimeConfigForTest(root, 1)
+	if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	events := make([]string, 0, 2)
+	oldLookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+		pluginabi.MethodPluginQuiesce: func(callCtx context.Context, _ []byte) ([]byte, error) {
+			events = append(events, "old-quiesce")
+			cancel()
+			<-callCtx.Done()
+			return nil, callCtx.Err()
+		},
+	}
+	oldLookup.reconfigureOverride = func([]byte) pluginapi.Plugin {
+		events = append(events, "old-reconfigure")
+		return oldPlugin
+	}
+	candidateLookup := newTestSymbolLookup(&testPlugin{registerResult: reloadTestPlugin("candidate")})
+	loader.lookups["alpha"] = candidateLookup
+	openCallsBefore := loader.openCalls
+
+	errApply := host.ApplyConfig(ctx, pluginRuntimeConfigForTest(root, 2))
+	if !errors.Is(errApply, context.Canceled) {
+		t.Fatalf("replacement ApplyConfig() error = %v, want canceled", errApply)
+	}
+	if strings.Join(events, ",") != "old-quiesce,old-reconfigure" {
+		t.Fatalf("quiesce cancellation events = %q", strings.Join(events, ","))
+	}
+	if loader.openCalls != openCallsBefore {
+		t.Fatalf("candidate load calls = %d, want unchanged %d", loader.openCalls, openCallsBefore)
+	}
+	if host.currentRuntimeConfig() != initialConfig || host.isPluginFused("alpha") {
+		t.Fatal("old plugin state was not restored after quiesce cancellation")
+	}
+}
+
+func TestApplyConfigCancellationDuringCandidateRegistrationClosesCandidateBeforeRestore(t *testing.T) {
+	root := makePluginDir(t, "alpha")
+	loader := newTestSymbolLoader()
+	oldPlugin := reloadTestPlugin("old")
+	oldLookup := newTestSymbolLookup(&testPlugin{registerResult: oldPlugin, reconfigureResult: oldPlugin})
+	loader.lookups["alpha"] = oldLookup
+	host := newForTest(loader)
+	t.Cleanup(func() {
+		_ = host.ShutdownAllContext(context.Background())
+	})
+	initialConfig := pluginRuntimeConfigForTest(root, 1)
+	if errApply := host.ApplyConfig(context.Background(), initialConfig); errApply != nil {
+		t.Fatalf("initial ApplyConfig() error = %v", errApply)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	events := make([]string, 0, 4)
+	oldLookup.methodHandlers = map[string]func(context.Context, []byte) ([]byte, error){
+		pluginabi.MethodPluginQuiesce: func(context.Context, []byte) ([]byte, error) {
+			events = append(events, "old-quiesce")
+			return marshalRPCResult(rpcEmptyResponse{})
+		},
+	}
+	oldLookup.reconfigureOverride = func([]byte) pluginapi.Plugin {
+		events = append(events, "old-reconfigure")
+		return oldPlugin
+	}
+	candidatePlugin := reloadTestPlugin("candidate")
+	candidateLookup := newTestSymbolLookup(&testPlugin{registerResult: candidatePlugin})
+	candidateLookup.registerOverride = func([]byte) pluginapi.Plugin {
+		events = append(events, "candidate-register")
+		cancel()
+		return candidatePlugin
+	}
+	candidateLookup.shutdownHook = func() {
+		events = append(events, "candidate-shutdown")
+	}
+	loader.lookups["alpha"] = candidateLookup
+
+	errApply := host.ApplyConfig(ctx, pluginRuntimeConfigForTest(root, 2))
+	if !errors.Is(errApply, context.Canceled) {
+		t.Fatalf("replacement ApplyConfig() error = %v, want canceled", errApply)
+	}
+	wantEvents := "old-quiesce,candidate-register,candidate-shutdown,old-reconfigure"
+	if strings.Join(events, ",") != wantEvents {
+		t.Fatalf("cancellation events = %q, want %q", strings.Join(events, ","), wantEvents)
+	}
+	if candidateLookup.shutdownCalls != 1 || oldLookup.shutdownCalls != 0 {
+		t.Fatalf(
+			"lifecycle calls: candidate shutdown=%d old shutdown=%d",
+			candidateLookup.shutdownCalls,
+			oldLookup.shutdownCalls,
+		)
+	}
+	if host.currentRuntimeConfig() != initialConfig || host.isPluginFused("alpha") {
+		t.Fatal("old plugin state was not restored after candidate registration cancellation")
+	}
+	records := host.activeRecords()
+	if len(records) != 1 || records[0].plugin.Metadata.Name != "old" {
+		t.Fatalf("active records after cancellation = %#v", records)
+	}
+}
+
+func pluginRuntimeConfigForTest(root string, priority int) *config.Config {
+	enabled := true
+	return &config.Config{Plugins: config.PluginsConfig{
+		Enabled: true,
+		Dir:     root,
+		Configs: map[string]config.PluginInstanceConfig{
+			"alpha": {Enabled: &enabled, Priority: priority},
+		},
+	}}
+}
+
+func reloadTestPlugin(name string) pluginapi.Plugin {
+	plugin := validTestPlugin(name)
+	plugin.Capabilities = pluginapi.Capabilities{
+		RequestInterceptor: requestInterceptorFunc(func(
+			_ context.Context,
+			req pluginapi.RequestInterceptRequest,
+		) (pluginapi.RequestInterceptResponse, error) {
+			return pluginapi.RequestInterceptResponse{Body: req.Body}, nil
+		}),
+	}
+	return plugin
 }
 
 func TestCleanupUnselectedPluginFilesPreservesConcurrentReplacement(t *testing.T) {

@@ -32,6 +32,8 @@ type pluginListEntry struct {
 	Enabled          bool                    `json:"enabled"`
 	EffectiveEnabled bool                    `json:"effective_enabled"`
 	SupportsOAuth    bool                    `json:"supports_oauth"`
+	SupportsQuota    bool                    `json:"supports_quota"`
+	QuotaProvider    string                  `json:"quota_provider,omitempty"`
 	Logo             string                  `json:"logo"`
 	Config           map[string]any          `json:"config"`
 	ConfigFields     []pluginConfigFieldInfo `json:"config_fields"`
@@ -83,6 +85,16 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 	host := h.pluginHost
 	h.mu.Unlock()
 
+	quotaProvidersByPlugin := make(map[string]pluginhost.RegisteredQuotaProviderInfo)
+	if quotaHost, okQuotaHost := host.(quotaPluginHost); okQuotaHost && quotaHost != nil {
+		for _, info := range quotaHost.QuotaProviders(c.Request.Context()) {
+			pluginID := pluginstore.CanonicalPluginID(info.PluginID)
+			if pluginID != "" {
+				quotaProvidersByPlugin[pluginID] = info
+			}
+		}
+	}
+
 	resolvedPluginsDir, errResolvePluginsDir := config.ResolvePluginsDir(pluginsDir)
 	if errResolvePluginsDir != nil {
 		c.JSON(
@@ -131,6 +143,10 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry.ID = id
 			entry.Registered = true
 			entry.SupportsOAuth = info.SupportsOAuth
+			if quotaInfo, supportsQuota := quotaProvidersByPlugin[id]; supportsQuota {
+				entry.SupportsQuota = true
+				entry.QuotaProvider = quotaInfo.Provider
+			}
 			entry.Logo = info.Metadata.Logo
 			entry.ConfigFields = pluginConfigFields(info.Metadata.ConfigFields)
 			_, configuredItem, configured := pluginConfigByID(configs, id)

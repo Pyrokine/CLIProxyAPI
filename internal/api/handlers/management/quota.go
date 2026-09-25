@@ -126,7 +126,7 @@ func (h *Handler) consumeCodexResetCredit(
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(token))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex_cli_rs/0.76.0")
+	req.Header.Set("User-Agent", "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)")
 
 	client := &http.Client{Timeout: defaultAPICallTimeout, Transport: h.apiCallTransport(cfg, auth, "")}
 	resp, err := client.Do(req)

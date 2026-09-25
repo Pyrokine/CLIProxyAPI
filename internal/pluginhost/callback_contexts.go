@@ -86,6 +86,19 @@ func (r *callbackContextRegistry) addCleanup(id string, cleanup func()) bool {
 	return true
 }
 
+func (r *callbackContextRegistry) lookup(id string) (context.Context, string, bool) {
+	if r == nil || id == "" {
+		return nil, "", false
+	}
+	r.mu.RLock()
+	entry, ok := r.contexts[id]
+	r.mu.RUnlock()
+	if !ok || entry.ctx == nil {
+		return nil, "", false
+	}
+	return entry.ctx, strings.TrimSpace(entry.pluginID), true
+}
+
 func (r *callbackContextRegistry) resolve(id string, fallback context.Context) context.Context {
 	if fallback == nil {
 		fallback = context.Background()
@@ -138,4 +151,11 @@ func (h *Host) callbackContextPluginID(id string) string {
 		return ""
 	}
 	return h.callbackContexts.pluginID(id)
+}
+
+func (h *Host) activeCallbackContext(id string) (context.Context, string, bool) {
+	if h == nil || h.callbackContexts == nil {
+		return nil, "", false
+	}
+	return h.callbackContexts.lookup(id)
 }

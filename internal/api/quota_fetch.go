@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -12,9 +13,12 @@ import (
 	"strings"
 	"time"
 
+	devinauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/devin"
 	xaiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/xai"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -46,7 +50,7 @@ var claudeHeaders = map[string]string{
 var codexHeaders = map[string]string{
 	"Authorization": "Bearer $TOKEN$",
 	"Content-Type":  "application/json",
-	"User-Agent":    "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+	"User-Agent":    "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)",
 }
 
 var codexResetCreditsHeaders = map[string]string{
@@ -54,7 +58,7 @@ var codexResetCreditsHeaders = map[string]string{
 	"Accept":        "application/json",
 	"OpenAI-Beta":   "codex-1",
 	"Originator":    "Codex Desktop",
-	"User-Agent":    "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+	"User-Agent":    "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)",
 }
 
 var geminiHeaders = map[string]string{
@@ -188,6 +192,9 @@ func fetchCodexQuotaResultContext(
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
 		return newQuotaFetchResult(resp.Body, "codex_usage", observedAt, ""), nil
+	}
+	if payload == nil {
+		return quota.FetchResult{}, errors.New("codex usage returned null payload")
 	}
 
 	partialError := ""
@@ -398,6 +405,51 @@ func fetchKimiQuotaResultContext(
 		return quota.FetchResult{}, fmt.Errorf("kimi usage returned status %d", resp.StatusCode)
 	}
 	return newQuotaFetchResult(resp.Body, "kimi_usage", observedAt, ""), nil
+}
+
+func fetchDevinQuotaResultContext(
+	ctx context.Context,
+	cfg *config.Config,
+	authManager *coreauth.Manager,
+	authIndex string,
+) (quota.FetchResult, error) {
+	auth := quotaAuthByIndex(authManager, authIndex)
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "devin") {
+		return quota.FetchResult{}, fmt.Errorf("devin credential %q is unavailable", authIndex)
+	}
+	token, baseURL, deviceSeed := devinauth.CredentialsFromAuth(auth)
+	if token == "" {
+		return quota.FetchResult{}, fmt.Errorf("devin credential %q is missing a session token", authIndex)
+	}
+	client := executor.NewProxyAwareHTTPClient(ctx, cfg, auth, 30*time.Second)
+	service := devinauth.NewDevinAuthService(client)
+	service.SetServerBaseURL(baseURL)
+	status, err := service.FetchUserStatus(ctx, token, deviceSeed)
+	observedAt := time.Now().UTC()
+	if err != nil {
+		return quota.FetchResult{}, fmt.Errorf("devin user status request failed: %w", err)
+	}
+	data, err := json.Marshal(status)
+	if err != nil {
+		return quota.FetchResult{}, fmt.Errorf("encode Devin user status: %w", err)
+	}
+	return newQuotaFetchResult(data, "devin_user_status", observedAt, ""), nil
+}
+
+func quotaAuthByIndex(authManager *coreauth.Manager, authIndex string) *coreauth.Auth {
+	if authManager == nil || strings.TrimSpace(authIndex) == "" {
+		return nil
+	}
+	for _, auth := range authManager.List() {
+		if auth == nil {
+			continue
+		}
+		auth.EnsureIndex()
+		if auth.Index == authIndex {
+			return auth
+		}
+	}
+	return nil
 }
 
 func fetchXAIQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]byte, error) {
@@ -632,7 +684,7 @@ func registerAuthManagerForQuota(scheduler *quota.Scheduler, authManager *coreau
 			continue
 		}
 		scheduler.RegisterBinding(fileName, credType, auth.Index, quotaCredentialRevision(auth))
-		scheduler.SetDisabled(fileName, credType, auth.Disabled)
+		scheduler.SetBindingDisabled(fileName, credType, auth.Index, auth.Disabled)
 		registered++
 	}
 	return registered
@@ -692,6 +744,8 @@ func quotaCredentialTypeForProvider(provider string) (quota.CredentialType, bool
 		return quota.TypeKimi, true
 	case "xai", "x-ai", "grok":
 		return quota.TypeXAI, true
+	case "devin", "cognition":
+		return quota.TypeDevin, true
 	default:
 		return "", false
 	}
@@ -713,6 +767,8 @@ func quotaCredentialTypeForFileName(nameLower string) (quota.CredentialType, boo
 		nameLower, "grok",
 	):
 		return quota.TypeXAI, true
+	case strings.HasPrefix(nameLower, "devin"), strings.HasPrefix(nameLower, "cognition"):
+		return quota.TypeDevin, true
 	default:
 		return "", false
 	}

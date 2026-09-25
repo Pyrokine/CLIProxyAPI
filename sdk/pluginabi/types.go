@@ -3,14 +3,27 @@ package pluginabi
 import "encoding/json"
 
 const (
-	ABIVersion    uint32 = 1
-	SchemaVersion uint32 = 2
+	ABIVersion uint32 = 1
+	// SchemaVersion is the newest plugin contract understood by the host.
+	SchemaVersion uint32 = 6
+	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
+	// OriginalRequest and RequestBody from payload stream-chunk interceptor calls.
+	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
+	// SchemaVersionWebSocketResponseObserver is the first schema version that supports
+	// upstream WebSocket response event observation.
+	SchemaVersionWebSocketResponseObserver uint32 = 4
+	// SchemaVersionStreamChunkOmitHistory is the first schema version that omits
+	// HistoryChunks from payload stream-chunk interceptor calls.
+	SchemaVersionStreamChunkOmitHistory uint32 = 5
+	// SchemaVersionRawManagementResponse guarantees raw JSON management response bytes.
+	SchemaVersionRawManagementResponse uint32 = 6
 )
 
 // These method names are part of the public plugin ABI.
 // noinspection GoUnusedConst
 const (
 	MethodPluginRegister    = "plugin.register"
+	MethodPluginQuiesce     = "plugin.quiesce"
 	MethodPluginReconfigure = "plugin.reconfigure"
 	MethodPluginShutdown    = "plugin.shutdown"
 
@@ -48,6 +61,8 @@ const (
 	MethodResponseInterceptAfter       = "response.intercept_after"
 	MethodResponseInterceptStreamChunk = "response.intercept_stream_chunk"
 
+	MethodWebSocketResponseEvent = "websocket.response_event"
+
 	MethodThinkingIdentifier = "thinking.identifier"
 	MethodThinkingApply      = "thinking.apply"
 
@@ -59,6 +74,12 @@ const (
 	MethodManagementRegister = "management.register"
 	MethodManagementHandle   = "management.handle"
 
+	MethodQuotaIdentifier = "quota.identifier"
+	MethodQuotaDescribe   = "quota.describe"
+	MethodQuotaFetch      = "quota.fetch"
+	MethodQuotaReset      = "quota.reset"
+
+	MethodHostAffinityLookup     = "host.affinity.lookup"
 	MethodHostHTTPDo             = "host.http.do"
 	MethodHostHTTPDoStream       = "host.http.do_stream"
 	MethodHostHTTPStreamRead     = "host.http.stream_read"
