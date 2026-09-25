@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
@@ -78,6 +79,86 @@ func NewProxyAwareHTTPClient(
 	}
 
 	return httpClient
+}
+
+type devinTransportKey struct {
+	proxyURL      string
+	baseTransport *http.Transport
+}
+
+var devinTransports = helps.NewTransportCache[devinTransportKey](helps.DefaultTransportCacheCapacity)
+
+// newDevinHTTPClient preserves Connect-RPC framing by disabling automatic gzip
+// while reusing a bounded transport pool across Devin requests.
+func newDevinHTTPClient(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *cliproxyauth.Auth,
+	timeout time.Duration,
+) *http.Client {
+	if ctx != nil {
+		if roundTripper, ok := util.RoundTripperValue(ctx).(http.RoundTripper); ok && roundTripper != nil {
+			if transport, isTransport := roundTripper.(*http.Transport); isTransport {
+				key := devinTransportKey{baseTransport: transport}
+				cloned, err := devinTransports.Get(key, func() (*http.Transport, error) {
+					copyTransport := transport.Clone()
+					copyTransport.DisableCompression = true
+					return copyTransport, nil
+				})
+				if err == nil {
+					return &http.Client{Transport: cloned, Timeout: timeout}
+				}
+			}
+			return &http.Client{
+				Transport: devinNoGzipRoundTripper{base: roundTripper},
+				Timeout:   timeout,
+			}
+		}
+	}
+
+	proxyURL := ""
+	if auth != nil {
+		proxyURL = strings.TrimSpace(auth.ProxyURL)
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
+
+	key := devinTransportKey{proxyURL: proxyURL}
+	transport, err := devinTransports.Get(key, func() (*http.Transport, error) {
+		if proxyURL != "" {
+			if errValidate := proxyutil.ValidateProxyURL(proxyURL); errValidate != nil {
+				return nil, errValidate
+			}
+			built, _, errBuild := proxyutil.BuildHTTPTransport(proxyURL)
+			if errBuild != nil {
+				return nil, errBuild
+			}
+			built.DisableCompression = true
+			return built, nil
+		}
+		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+			cloned := defaultTransport.Clone()
+			cloned.DisableCompression = true
+			return cloned, nil
+		}
+		return &http.Transport{DisableCompression: true}, nil
+	})
+	if err != nil {
+		return &http.Client{Transport: proxyErrorTransport{err: err}, Timeout: timeout}
+	}
+	return &http.Client{Transport: transport, Timeout: timeout}
+}
+
+type devinNoGzipRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (r devinNoGzipRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
+	return r.base.RoundTrip(req)
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.
