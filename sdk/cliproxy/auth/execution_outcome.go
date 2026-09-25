@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
@@ -17,6 +18,11 @@ func executionDispositionForAttempt(
 	model string,
 ) cliproxyexecutor.ExecutionDisposition {
 	disposition := executionDispositionForError(err, fallbackPhase)
+	if isCloudflareOriginStatus(statusCodeFromError(err)) &&
+		disposition.EffectScope == cliproxyexecutor.StateEffectScopeExactModel &&
+		canonicalModelKey(model) == "" {
+		disposition.EffectScope = cliproxyexecutor.StateEffectScopeCredential
+	}
 	switch disposition.EffectScope {
 	case cliproxyexecutor.StateEffectScopeExactModel:
 		if disposition.EffectKey == "" {
@@ -58,12 +64,13 @@ func executionDispositionForError(
 	var dispositionErr cliproxyexecutor.ExecutionDispositionError
 	var disposition cliproxyexecutor.ExecutionDisposition
 	normalizationPhase := fallbackPhase
+	status := statusCodeFromError(err)
 	if errors.As(err, &dispositionErr) && dispositionErr != nil {
 		disposition = dispositionErr.ExecutionDisposition()
 		if disposition.DispatchPhase != "" {
 			normalizationPhase = disposition.DispatchPhase
 		}
-	} else if status := statusCodeFromError(err); status != 0 {
+	} else if status != 0 {
 		disposition = cliproxyexecutor.HTTPStatusDisposition(status, retryAfterFromError(err) != nil)
 	} else if fallbackPhase == cliproxyexecutor.DispatchPhaseNotSent {
 		disposition = cliproxyexecutor.ExecutionDisposition{
@@ -86,8 +93,7 @@ func executionDispositionForError(
 	case isRequestScopedError(err):
 		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNoRetry
 		disposition.EffectScope = cliproxyexecutor.StateEffectScopeRequest
-		if disposition.DispatchPhase == cliproxyexecutor.DispatchPhaseNotSent ||
-			statusCodeFromError(err) >= http.StatusBadRequest {
+		if disposition.DispatchPhase == cliproxyexecutor.DispatchPhaseNotSent || status >= http.StatusBadRequest {
 			disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
 		} else {
 			disposition.Outcome = cliproxyexecutor.ExecutionOutcomeUnknown
@@ -96,6 +102,11 @@ func executionDispositionForError(
 		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeUnknown
 		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNoRetry
 		disposition.EffectScope = cliproxyexecutor.StateEffectScopeRequest
+	case isCloudflareOriginStatus(status):
+		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeFailed
+		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNoRetry
+		disposition.EffectScope = cliproxyexecutor.StateEffectScopeExactModel
+		disposition.EffectKey = ""
 	case isCloudflareChallengeError(err):
 		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
 		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNextProvider
@@ -104,12 +115,150 @@ func executionDispositionForError(
 		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
 		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
 		disposition.EffectScope = cliproxyexecutor.StateEffectScopeCredential
+	case isExplicitModelNotFoundError(err, "") &&
+		status != http.StatusUnauthorized && status != http.StatusPaymentRequired &&
+		status != http.StatusForbidden && status != http.StatusTooManyRequests:
+		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
+		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
+		disposition.EffectScope = cliproxyexecutor.StateEffectScopeExactModel
 	case isModelSupportError(err):
 		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
 		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
 		disposition.EffectScope = cliproxyexecutor.StateEffectScopeExactModel
 	}
 	return disposition
+}
+
+func isCloudflareOriginStatus(status int) bool {
+	return status >= 520 && status <= 526
+}
+
+func isResponsesCompactRequest(opts cliproxyexecutor.Options) bool {
+	return opts.Alt == "responses/compact"
+}
+
+func errorDispositionUsesCredentialState(err error) bool {
+	if err == nil {
+		return false
+	}
+	type credentialScopedProvider interface {
+		IsCredentialScoped() bool
+	}
+	var credentialScoped credentialScopedProvider
+	if errors.As(err, &credentialScoped) && credentialScoped != nil && credentialScoped.IsCredentialScoped() {
+		return true
+	}
+	var dispositionErr cliproxyexecutor.ExecutionDispositionError
+	if !errors.As(err, &dispositionErr) || dispositionErr == nil {
+		return false
+	}
+	switch dispositionErr.ExecutionDisposition().EffectScope {
+	case cliproxyexecutor.StateEffectScopeCredential,
+		cliproxyexecutor.StateEffectScopeQuotaFamily:
+		return true
+	default:
+		return false
+	}
+}
+
+func isResponsesCompactRequestFaultError(
+	opts cliproxyexecutor.Options,
+	err error,
+) bool {
+	if !isResponsesCompactRequest(opts) || err == nil {
+		return false
+	}
+	var ruleErr *requestRuleDispositionError
+	if errors.As(err, &ruleErr) && ruleErr != nil {
+		return false
+	}
+	if errorDispositionUsesCredentialState(err) ||
+		isCloudflareChallengeError(err) || isInvalidGrantError(err) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	switch status {
+	case http.StatusUnauthorized,
+		http.StatusPaymentRequired,
+		http.StatusForbidden,
+		http.StatusTooManyRequests:
+		return false
+	}
+	if clienterror.IsRequestFault(status, err) {
+		return true
+	}
+	switch status {
+	case http.StatusBadRequest,
+		http.StatusNotFound,
+		http.StatusMethodNotAllowed,
+		http.StatusConflict,
+		http.StatusRequestEntityTooLarge,
+		http.StatusUnprocessableEntity,
+		http.StatusNotImplemented:
+		return true
+	default:
+		return false
+	}
+}
+
+func isResponsesCompactAvailabilityNeutralError(
+	opts cliproxyexecutor.Options,
+	err error,
+	result Result,
+) bool {
+	if !isResponsesCompactRequest(opts) || err == nil || isForceCooldownResult(result) {
+		return false
+	}
+	if isCloudflareChallengeError(err) || isInvalidGrantError(err) ||
+		(result.Error != nil &&
+			(isCloudflareChallengeResultError(result.Error) || isInvalidGrantResultError(result.Error))) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == 0 && result.Error != nil {
+		status = statusCodeFromResult(result.Error)
+	}
+	switch status {
+	case http.StatusUnauthorized,
+		http.StatusPaymentRequired,
+		http.StatusForbidden,
+		http.StatusTooManyRequests:
+		return false
+	}
+	switch result.Disposition.EffectScope {
+	case cliproxyexecutor.StateEffectScopeCredential,
+		cliproxyexecutor.StateEffectScopeQuotaFamily:
+		return false
+	default:
+		return true
+	}
+}
+
+func applyResponsesCompactErrorDisposition(
+	opts cliproxyexecutor.Options,
+	err error,
+	result *Result,
+) bool {
+	requestInvalid := isResponsesCompactRequest(opts) && isRequestInvalidError(err)
+	requestFault := isResponsesCompactRequestFaultError(opts, err) || requestInvalid
+	if result == nil {
+		return requestFault
+	}
+	if !requestInvalid && !isResponsesCompactAvailabilityNeutralError(opts, err, *result) {
+		return requestFault
+	}
+
+	disposition := result.Disposition
+	disposition.EffectScope = cliproxyexecutor.StateEffectScopeRequest
+	disposition.EffectKey = ""
+	if requestFault {
+		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
+		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNoRetry
+	}
+	result.Disposition = disposition.Normalize(disposition.DispatchPhase)
+	result.StateGeneration = 0
+	result.Error = errorForResultWithDisposition(err, result.Disposition, 0)
+	return requestFault
 }
 
 func successDispositionForAttempt(
@@ -148,10 +297,11 @@ func executionResult(
 		disposition = successDispositionForAttempt(phase, auth, model)
 	}
 	result := Result{
-		Provider:    provider,
-		Model:       model,
-		Success:     err == nil,
-		Disposition: disposition,
+		Provider:             provider,
+		Model:                model,
+		Success:              err == nil,
+		Disposition:          disposition,
+		SkipQuotaObservation: phase == cliproxyexecutor.DispatchPhaseNotSent,
 	}
 	if auth == nil {
 		return result
@@ -161,6 +311,7 @@ func executionResult(
 	result.RuntimeOnly = auth.Generation == 0
 	result.ModelQuotaEpoch = modelQuotaEpoch(auth, model)
 	result.StateGeneration = stateGenerationForDisposition(auth, model, disposition)
+	result.generationSnapshot = captureResultGenerationSnapshot(auth, model)
 	if err != nil {
 		result.Error = errorForResultWithDisposition(err, disposition, result.StateGeneration)
 	}
@@ -489,7 +640,8 @@ func retryDirectiveAllowsRefresh(disposition cliproxyexecutor.ExecutionDispositi
 }
 
 func retryDirectiveAllowsRedispatch(disposition cliproxyexecutor.ExecutionDisposition) bool {
-	if disposition.Outcome != cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing {
+	if disposition.DispatchPhase == cliproxyexecutor.DispatchPhaseDownstreamCommitted ||
+		disposition.Outcome != cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing {
 		return false
 	}
 	switch disposition.RetryDirective {
@@ -503,7 +655,8 @@ func retryDirectiveAllowsRedispatch(disposition cliproxyexecutor.ExecutionDispos
 }
 
 func retryDirectiveAllowsCooldownRetry(disposition cliproxyexecutor.ExecutionDisposition) bool {
-	if disposition.Outcome != cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing {
+	if disposition.DispatchPhase == cliproxyexecutor.DispatchPhaseDownstreamCommitted ||
+		disposition.Outcome != cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing {
 		return false
 	}
 	switch disposition.RetryDirective {

@@ -153,6 +153,9 @@ func TestManagerRecoverQuotaAfterRefreshClearsPersistedFamilyCooldownAndRestores
 	if state == nil || state.Unavailable || state.Quota.Exceeded || state.QuotaEpoch != 7 {
 		t.Fatalf("recovered model state = %+v", state)
 	}
+	if reg.IsModelSuspendedForClient(authID, model) || reg.IsModelQuotaExceededForClient(authID, model) {
+		t.Fatal("authoritative quota-family recovery did not restore registry routing")
+	}
 	if picked, errPick := manager.scheduler.pickSingle(
 		ctx, provider, model, cliproxyexecutor.Options{}, nil,
 	); errPick != nil || picked == nil || picked.ID != authID {

@@ -71,6 +71,7 @@ func PrepareAuthForPersistence(auth *Auth) {
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
+	NormalizeCredentialMetadata(auth.Metadata)
 	auth.Metadata["disabled"] = auth.Disabled
 	if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 		setter.SetMetadata(auth.Metadata)

@@ -14,6 +14,7 @@ import (
 )
 
 const c08HomeRefreshProvider = "c08-home-refresh"
+const c08UnauthorizedBody = `{"error":{"type":"authentication_error","message":"synthetic upstream token expired","detail":{"reason":"expired_token"}}}`
 
 type c08HomeRefreshDispatcher struct {
 	calls atomic.Int32
@@ -168,7 +169,7 @@ func (e *c08HomeRefreshExecutor) validateAuth(auth *Auth) error {
 }
 
 func c08UnauthorizedError() error {
-	return &Error{HTTPStatus: http.StatusUnauthorized, Message: "expired access token"}
+	return &Error{HTTPStatus: http.StatusUnauthorized, Message: c08UnauthorizedBody}
 }
 
 func newC08HomeRefreshManager(
@@ -182,7 +183,38 @@ func newC08HomeRefreshManager(
 	return manager
 }
 
-func TestC08HomeUnauthorizedRefreshRepreparesAllExecutionModes(t *testing.T) {
+func TestHomeUnauthorizedSelectionOnlyReadsInstalledSnapshot(t *testing.T) {
+	for _, test := range []struct {
+		name, id, token string
+		disabled, reuse bool
+	}{
+		{"same token", "synthetic-home-auth", "old", false, false},
+		{"new token", "synthetic-home-auth", "new", false, true},
+		{"missing token", "synthetic-home-auth", "", false, false},
+		{"different identity", "another-home-auth", "new", false, false},
+		{"disabled", "synthetic-home-auth", "new", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			failed := &Auth{ID: "synthetic-home-auth", Metadata: map[string]any{"access_token": "old"}}
+			current := &Auth{ID: test.id, Disabled: test.disabled, Metadata: map[string]any{"access_token": test.token}}
+			executor := &c08HomeRefreshExecutor{requirePrepare: true}
+			selection := &HomeDispatchSelection{Auth: current, Executor: executor, Provider: c08HomeRefreshProvider}
+			updated, reuse, err := NewManager(nil, nil, nil).RefreshHomeSelectionAfterUnauthorized(context.Background(), selection, failed)
+			if err != nil || reuse != test.reuse || executor.refreshCalls.Load() != 0 || executor.prepareCalls.Load() != 0 {
+				t.Fatalf("reuse=%v refresh=%d prepare=%d err=%v", reuse, executor.refreshCalls.Load(), executor.prepareCalls.Load(), err)
+			}
+			if updated == current || authAccessToken(updated) != test.token || authAccessToken(failed) != "old" {
+				t.Fatal("returned snapshot aliases or changed credential state")
+			}
+			updated.Metadata["access_token"] = "caller-change"
+			if authAccessToken(current) != test.token || current.Metadata["project_id"] != nil {
+				t.Fatal("selection was mutated or prepared")
+			}
+		})
+	}
+}
+
+func TestC08HomeUnauthorizedStopsAllExecutionModes(t *testing.T) {
 	tests := []struct {
 		name string
 		run  func(*Manager) error
@@ -234,24 +266,27 @@ func TestC08HomeUnauthorizedRefreshRepreparesAllExecutionModes(t *testing.T) {
 				executor := &c08HomeRefreshExecutor{requirePrepare: true}
 				manager := newC08HomeRefreshManager(dispatcher, executor)
 
-				if errRun := test.run(manager); errRun != nil {
-					t.Fatalf("execution error = %v", errRun)
+				if errRun := test.run(manager); statusCodeFromError(errRun) != http.StatusUnauthorized || errRun.Error() != c08UnauthorizedBody {
+					t.Fatalf("execution error = %v, want original upstream 401", errRun)
 				}
 				if got := dispatcher.calls.Load(); got != 1 {
 					t.Fatalf("Home dispatch calls = %d, want 1", got)
 				}
-				if got := executor.refreshCalls.Load(); got != 1 {
-					t.Fatalf("refresh calls = %d, want 1", got)
+				if got := executor.refreshCalls.Load(); got != 0 {
+					t.Fatalf("refresh calls = %d, want 0", got)
 				}
-				if got := executor.prepareCalls.Load(); got != 2 {
-					t.Fatalf("prepare calls = %d, want initial and refreshed preparation", got)
+				if got := executor.prepareCalls.Load(); got != 1 {
+					t.Fatalf("prepare calls = %d, want only initial preparation", got)
+				}
+				if got := executor.executeCalls.Load() + executor.countCalls.Load() + executor.streamCalls.Load(); got != 1 {
+					t.Fatalf("upstream attempts = %d, want 1", got)
 				}
 			},
 		)
 	}
 }
 
-func TestC08HomeUnauthorizedBootstrapRetryRejectsInvalidStream(t *testing.T) {
+func TestC08HomeUnauthorizedBootstrapDoesNotReplayIntoInvalidStream(t *testing.T) {
 	for _, test := range []struct {
 		name           string
 		nilRetryStream bool
@@ -279,12 +314,14 @@ func TestC08HomeUnauthorizedBootstrapRetryRejectsInvalidStream(t *testing.T) {
 				for chunk := range result.Chunks {
 					streamErr = errors.Join(streamErr, chunk.Err)
 				}
-				var authErr *Error
-				if !errors.As(streamErr, &authErr) || authErr.Code != "empty_stream" {
-					t.Fatalf("stream error = %#v, want empty_stream", streamErr)
+				if statusCodeFromError(streamErr) != http.StatusUnauthorized || streamErr.Error() != c08UnauthorizedBody {
+					t.Fatalf("stream error = %v, want original upstream 401", streamErr)
 				}
-				if got := executor.streamCalls.Load(); got != 2 {
-					t.Fatalf("stream calls = %d, want initial attempt and one retry", got)
+				if got := executor.streamCalls.Load(); got != 1 {
+					t.Fatalf("stream calls = %d, want only initial attempt", got)
+				}
+				if got := executor.refreshCalls.Load(); got != 0 {
+					t.Fatalf("refresh calls = %d, want 0", got)
 				}
 			},
 		)

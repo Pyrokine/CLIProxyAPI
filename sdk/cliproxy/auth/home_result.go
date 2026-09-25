@@ -12,8 +12,12 @@ import (
 const homeResultExecutorType = "home-result"
 
 // ReportHomeUnauthorized publishes a result-only zero-token usage record for a Home 401 attempt.
-func (m *Manager) ReportHomeUnauthorized(ctx context.Context, auth *Auth, provider, model string) {
-	m.reportHomeUnauthorized(ctx, auth, provider, model, AccessTokenSHA256(auth))
+func (m *Manager) ReportHomeUnauthorized(ctx context.Context, auth *Auth, provider, model string, upstreamBody ...[]byte) {
+	failureBody := "upstream unauthorized"
+	if len(upstreamBody) > 0 {
+		failureBody = string(upstreamBody[0])
+	}
+	m.reportHomeUnauthorized(ctx, auth, provider, model, AccessTokenSHA256(auth), failureBody)
 }
 
 func (m *Manager) reportHomeUnauthorized(
@@ -21,7 +25,8 @@ func (m *Manager) reportHomeUnauthorized(
 	auth *Auth,
 	provider,
 	model,
-	accessTokenSHA256 string,
+	accessTokenSHA256,
+	failureBody string,
 ) {
 	if m == nil || auth == nil {
 		return
@@ -64,7 +69,7 @@ func (m *Manager) reportHomeUnauthorized(
 		Failed:            true,
 		Fail: coreusage.Failure{
 			StatusCode: http.StatusUnauthorized,
-			Body:       "upstream unauthorized",
+			Body:       failureBody,
 		},
 	}
 	if source != "" && strings.EqualFold(authType, "oauth") {

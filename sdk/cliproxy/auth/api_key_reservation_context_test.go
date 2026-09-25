@@ -123,6 +123,8 @@ func TestRetryWithCooldownPreservesAPIKeyReservationAcrossAttempts(t *testing.T)
 	)
 	manager := NewManager(nil, nil, nil)
 	manager.SetRetryConfig(1, 100*time.Millisecond, 0)
+	manager.RegisterExecutor(schedulerTestExecutor{})
+	registerReservationContextModels(t, provider, model, authID)
 	if _, err := manager.Register(
 		context.Background(), &Auth{
 			ID:       authID,
@@ -133,6 +135,7 @@ func TestRetryWithCooldownPreservesAPIKeyReservationAcrossAttempts(t *testing.T)
 					Status:         StatusError,
 					Unavailable:    true,
 					NextRetryAfter: time.Now().Add(10 * time.Millisecond),
+					Quota:          QuotaState{Exceeded: true},
 					EffectScope:    coreexecutor.StateEffectScopeQuotaFamily,
 					EffectKey:      model,
 				},

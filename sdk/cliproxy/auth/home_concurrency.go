@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 const (
@@ -239,17 +240,37 @@ func decodeHomeDispatchError(raw []byte) error {
 		message = "home returned error"
 	}
 
+	retryAfter := time.Duration(detail.RetryAfterMS) * time.Millisecond
+	if detail.RetryAfterMS < 0 || int64(retryAfter/time.Millisecond) != detail.RetryAfterMS {
+		return &Error{
+			Code: "invalid_auth", Message: "home returned invalid retry delay", HTTPStatus: http.StatusBadGateway,
+		}
+	}
 	result := &Error{Code: code, Message: message, Retryable: detail.Retryable, HTTPStatus: http.StatusBadGateway}
 	switch strings.ToLower(code) {
+	case "model_cooldown":
+		result.HTTPStatus = http.StatusTooManyRequests
+		if detail.Retryable {
+			result.DispatchPhase = cliproxyexecutor.DispatchPhaseNotSent
+			result.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
+			result.RetryDirective = cliproxyexecutor.RetryDirectiveRetryAfter
+		}
 	case "model_not_found":
 		result.HTTPStatus = http.StatusNotFound
 	case "authentication_error", "unauthorized", "no_credentials", "invalid_credential":
 		result.HTTPStatus = http.StatusUnauthorized
 	case "credential_concurrency_exceeded", "credential_model_concurrency_exceeded":
 		result.HTTPStatus = http.StatusTooManyRequests
-		return newHomeConcurrencyBusyError(result, time.Duration(detail.RetryAfterMS)*time.Millisecond)
+		return newHomeConcurrencyBusyError(result, retryAfter)
+	case "user_credits_insufficient":
+		result.HTTPStatus = http.StatusPaymentRequired
+	case "user_period_limit_exceeded":
+		result.HTTPStatus = http.StatusTooManyRequests
 	case "concurrency_protocol_required", "concurrency_tracker_unavailable", "concurrency_node_unavailable":
 		result.HTTPStatus = http.StatusServiceUnavailable
+	}
+	if detail.RequestRetry != nil || code == "model_cooldown" {
+		return &homeDispatchRetryAfterError{cause: result, requestRetry: detail.RequestRetry, retryAfter: retryAfter}
 	}
 	return result
 }
@@ -268,8 +289,12 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 	return nil
 }
 
-// SafeResponseHeaders returns trusted response headers only for CPA's concrete Home busy error.
+// SafeResponseHeaders 返回 Home 调度错误中可信的重试响应头
 func SafeResponseHeaders(err error) http.Header {
+	var cooldown *homeDispatchRetryAfterError
+	if errors.As(err, &cooldown) {
+		return safeRetryAfterHeader(cooldown.retryAfter)
+	}
 	var busy *HomeConcurrencyBusyError
 	if !errors.As(err, &busy) || busy == nil {
 		return nil

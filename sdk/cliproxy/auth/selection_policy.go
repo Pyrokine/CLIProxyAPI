@@ -22,6 +22,9 @@ type homeCredentialPolicyDispatcher interface {
 }
 
 type authSelectionEligibility struct {
+	retryRound          int
+	defaultRetry        int
+	excluded            map[string]struct{}
 	requiredKind        string
 	credentialPolicy    string
 	disallowFreeAuth    bool
@@ -46,6 +49,7 @@ func credentialPolicyFromContext(ctx context.Context) string {
 
 func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecutor.Options) authSelectionEligibility {
 	eligibility := authSelectionEligibility{
+		excluded:            excludedAuthIDs(opts),
 		disallowFreeAuth:    disallowFreeAuthFromMetadata(opts.Metadata),
 		requireContinuation: requireResponsesContinuationFromMetadata(opts.Metadata),
 	}
@@ -53,15 +57,24 @@ func authSelectionEligibilityForRequest(ctx context.Context, opts cliproxyexecut
 		eligibility.requiredKind, _ = ctx.Value(requiredAuthKindContextKey{}).(string)
 		eligibility.credentialPolicy, _ = ctx.Value(credentialPolicyContextKey{}).(string)
 	}
+	if state := retryRoundFromContext(ctx); state != nil {
+		eligibility.retryRound, eligibility.defaultRetry = state.round, state.defaultRetry
+	}
 	return eligibility
 }
 
 func (e authSelectionEligibility) unrestricted() bool {
-	return e.requiredKind == "" && e.credentialPolicy == "" && !e.disallowFreeAuth && !e.requireContinuation
+	return e.retryRound == 0 && len(e.excluded) == 0 && e.requiredKind == "" && e.credentialPolicy == "" && !e.disallowFreeAuth && !e.requireContinuation
 }
 
 func (e authSelectionEligibility) allows(auth *Auth) bool {
 	if auth == nil {
+		return false
+	}
+	if _, excluded := e.excluded[auth.ID]; excluded {
+		return false
+	}
+	if e.retryRound > effectiveRequestRetryLimit(auth, e.defaultRetry) {
 		return false
 	}
 	if e.requiredKind != "" && auth.AuthKind() != e.requiredKind {

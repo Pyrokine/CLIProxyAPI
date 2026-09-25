@@ -38,9 +38,24 @@ func (m *Manager) pickHomeDispatchSelection(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	state := retryRoundFromContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if state != nil && state.maxCredentials > 0 && len(state.attempted) >= state.maxCredentials {
+		return nil, repeatedHomeAuthError()
+	}
+	constraints := homeDispatchConstraints(ctx, opts)
 	if retained, okRetained, errRetained := m.retainedHomeSessionSelection(ctx, opts, model); errRetained != nil {
 		return nil, errRetained
 	} else if okRetained {
+		if state != nil {
+			var requestRetry *int
+			if retained.hasRequestRetry {
+				requestRetry = &retained.requestRetry
+			}
+			state.observeHomeLimit(requestRetry, retained.CloneAuth())
+		}
 		return retained, nil
 	}
 
@@ -79,7 +94,9 @@ func (m *Manager) pickHomeDispatchSelection(
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
-	if credentialPolicy == "" {
+	if constrained, ok := client.(homeConstraintsDispatcher); ok {
+		raw, errRPop = constrained.RPopAuthWithConstraints(ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata), constraints)
+	} else if credentialPolicy == "" {
 		raw, errRPop = client.RPopAuth(
 			ctx, requestedModel, sessionID, dispatchHeaders, homeAuthCountFromMetadata(opts.Metadata),
 		)
@@ -166,6 +183,7 @@ func (m *Manager) pickHomeDispatchSelection(
 			return nil, invalidHomeConcurrencyResponse("Home returned both accounted concurrency and an error")
 		}
 		pending.End()
+		state.observeHomeError(errHome)
 		return nil, errHome
 	}
 
@@ -278,6 +296,26 @@ func (m *Manager) pickHomeDispatchSelection(
 	}
 	if concurrencyPresent {
 		selection.accountedModel = concurrencyTuple.Model
+	}
+	if dispatch.RequestRetry != nil {
+		selection.requestRetry, selection.hasRequestRetry = max(*dispatch.RequestRetry, 0), true
+	}
+	state.observeHomeLimit(dispatch.RequestRetry, authCopy)
+	excluded := false
+	for _, id := range constraints.ExcludedAuthIDs {
+		if id == authCopy.ID {
+			excluded = true
+			break
+		}
+	}
+	if (constraints.PinnedAuthID != "" && constraints.PinnedAuthID != authCopy.ID) || excluded || (state != nil && ((state.homeAuthority && state.round > state.homeLimit) || (!state.homeAuthority && state.round > effectiveRequestRetryLimit(authCopy, state.defaultRetry)))) {
+		if errEnd := m.endHomeSelectionBeforeRedispatch(ctx, selection, "retry_constraint_mismatch"); errEnd != nil {
+			return nil, errEnd
+		}
+		if state != nil {
+			state.homeStopped = true
+		}
+		return nil, repeatedHomeAuthError()
 	}
 	return selection, nil
 }

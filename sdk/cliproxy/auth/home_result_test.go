@@ -25,7 +25,15 @@ func (p c08HomeResultCapturePlugin) HandleUsage(_ context.Context, record coreus
 	}
 }
 
+type c08HomeResponseError struct{ body []byte }
+
+func (e c08HomeResponseError) Error() string        { return "synthetic diagnostic" }
+func (e c08HomeResponseError) StatusCode() int      { return http.StatusUnauthorized }
+func (e c08HomeResponseError) DirectResponse() bool { return true }
+func (e c08HomeResponseError) ResponseBody() []byte { return e.body }
+
 type c08HomeCountTokensExecutor struct {
+	failure         error
 	calls           atomic.Int32
 	refreshCalls    atomic.Int32
 	refreshInputsMu sync.Mutex
@@ -82,9 +90,12 @@ func (e *c08HomeCountTokensExecutor) CountTokens(
 		effective.Metadata["access_token"] = "retry-internal-token"
 	}
 	NotifyAccessTokenFingerprint(ctx, effective)
+	if e.failure != nil {
+		return cliproxyexecutor.Response{}, e.failure
+	}
 	return cliproxyexecutor.Response{}, &Error{
 		HTTPStatus: http.StatusUnauthorized,
-		Message:    "expired access token",
+		Message:    c08UnauthorizedBody,
 	}
 }
 
@@ -160,7 +171,9 @@ func TestC08HomeCountTokensReportsEveryUnauthorizedAttempt(t *testing.T) {
 		},
 	)
 
-	executor := &c08HomeCountTokensExecutor{}
+	executor := &c08HomeCountTokensExecutor{
+		failure: fmt.Errorf("synthetic wrapper: %w", c08HomeResponseError{body: []byte(c08UnauthorizedBody)}),
+	}
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(executor)
 	manager.SetConfig(&internalconfig.Config{Home: internalconfig.HomeConfig{Enabled: true}})
@@ -192,22 +205,21 @@ func TestC08HomeCountTokensReportsEveryUnauthorizedAttempt(t *testing.T) {
 	if statusCodeFromError(errCount) != http.StatusUnauthorized {
 		t.Fatalf("ExecuteCount() error = %v, want final 401", errCount)
 	}
-	if got := executor.calls.Load(); got != 2 {
-		t.Fatalf("CountTokens calls = %d, want 2", got)
+	if got := executor.calls.Load(); got != 1 {
+		t.Fatalf("CountTokens calls = %d, want 1", got)
 	}
-	if got := executor.refreshCalls.Load(); got != 1 {
-		t.Fatalf("refresh calls = %d, want 1", got)
+	if got := executor.refreshCalls.Load(); got != 0 {
+		t.Fatalf("refresh calls = %d, want 0", got)
 	}
 	executor.refreshInputsMu.Lock()
 	refreshInputs := append([]string(nil), executor.refreshInputs...)
 	executor.refreshInputsMu.Unlock()
-	if len(refreshInputs) != 1 || refreshInputs[0] != "executor-internal-token" {
-		t.Fatalf("refresh input tokens = %#v, want executor-internal-token", refreshInputs)
+	if len(refreshInputs) != 0 {
+		t.Fatalf("refresh inputs = %d, want no refresh", len(refreshInputs))
 	}
 
 	wantHashes := map[string]bool{
 		AccessTokenSHA256(&Auth{Metadata: map[string]any{"access_token": "executor-internal-token"}}): false,
-		AccessTokenSHA256(&Auth{Metadata: map[string]any{"access_token": "retry-internal-token"}}):    false,
 	}
 	matched := 0
 	deadline := time.After(time.Second)
@@ -219,6 +231,9 @@ func TestC08HomeCountTokensReportsEveryUnauthorizedAttempt(t *testing.T) {
 				continue
 			}
 			matched++
+			if record.Fail.Body != c08UnauthorizedBody || coreusage.GenerateEnabled(record.Generate) || record.Detail.TotalTokens != 0 {
+				t.Fatalf("unexpected unauthorized usage: body=%q generate=%v tokens=%d", record.Fail.Body, coreusage.GenerateEnabled(record.Generate), record.Detail.TotalTokens)
+			}
 			if seen, ok := wantHashes[record.AccessTokenSHA256]; ok && !seen {
 				wantHashes[record.AccessTokenSHA256] = true
 				remaining--
@@ -237,8 +252,8 @@ func TestC08HomeCountTokensReportsEveryUnauthorizedAttempt(t *testing.T) {
 				matched++
 			}
 		case <-timer.C:
-			if matched != 2 {
-				t.Fatalf("unauthorized usage records = %d, want exactly 2", matched)
+			if matched != 1 {
+				t.Fatalf("unauthorized usage records = %d, want exactly 1", matched)
 			}
 			return
 		}

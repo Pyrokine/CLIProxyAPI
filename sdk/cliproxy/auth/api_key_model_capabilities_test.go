@@ -144,6 +144,9 @@ func TestAttachResolvedAPIKeyModelInfoPropagatesIsCompat(t *testing.T) {
 	if modelInfo.UserDefined {
 		t.Fatalf("resolved configured model remained user-defined: %+v", modelInfo)
 	}
+	if modelInfo.Thinking != nil {
+		t.Fatalf("unknown compatible model inferred thinking metadata: %+v", modelInfo.Thinking)
+	}
 }
 
 func TestAttachResolvedAPIKeyModelInfoLeavesUnknownConfiguredModelUnresolved(t *testing.T) {
@@ -173,6 +176,44 @@ func TestAttachResolvedAPIKeyModelInfoLeavesUnknownConfiguredModelUnresolved(t *
 	}
 	if modelInfo, ok := ResolvedAPIKeyModelInfo(req); ok || modelInfo != nil {
 		t.Fatalf("ResolvedAPIKeyModelInfo() = (%+v, %t), want unresolved user-defined model", modelInfo, ok)
+	}
+}
+
+func TestAttachResolvedAPIKeyModelInfoPreservesExplicitNativeFalse(t *testing.T) {
+	const authID = "native-capability-false"
+	webSearch := false
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.RegisterClient(authID, "claude", []*registry.ModelInfo{{
+		ID:          "native-alias",
+		CatalogName: "native-upstream",
+		NativeCapabilities: &registry.NativeCapabilities{
+			WebSearch: &webSearch,
+		},
+		UserDefined: true,
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(authID) })
+
+	webSearch = true
+	req, err := attachResolvedAPIKeyModelInfo(
+		cliproxyexecutor.Request{},
+		&Auth{ID: authID, Provider: "claude", Attributes: map[string]string{"api_key": "key"}},
+		"native-alias",
+		"native-upstream",
+	)
+	if err != nil {
+		t.Fatalf("attach model info: %v", err)
+	}
+	modelInfo, ok := ResolvedAPIKeyModelInfo(req)
+	if !ok || modelInfo == nil || modelInfo.NativeCapabilities == nil ||
+		modelInfo.NativeCapabilities.WebSearch == nil || *modelInfo.NativeCapabilities.WebSearch {
+		t.Fatalf("resolved native capability = (%+v, %t), want explicit false", modelInfo, ok)
+	}
+
+	*modelInfo.NativeCapabilities.WebSearch = true
+	registered := modelRegistry.GetModelInfoForClient(authID, "native-alias")
+	if registered == nil || registered.NativeCapabilities == nil || registered.NativeCapabilities.WebSearch == nil ||
+		*registered.NativeCapabilities.WebSearch {
+		t.Fatalf("resolved capability mutation leaked into registry: %+v", registered)
 	}
 }
 

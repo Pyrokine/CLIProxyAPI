@@ -152,7 +152,7 @@ func (s *Scheduler) Restore(entries map[string]EntryState) {
 		state := normalizeRestoredEntryState(rawState)
 		key := strings.TrimSpace(name)
 		if key == "" {
-			key = EntryKey(state.Type, state.FileName)
+			key = BindingEntryKey(state.Type, state.FileName, state.AuthIndex)
 		}
 		if key == "" {
 			continue
@@ -260,7 +260,7 @@ func (s *Scheduler) RegisterBinding(
 	fileName = strings.TrimSpace(fileName)
 	authIndex = strings.TrimSpace(authIndex)
 	credentialRevision = strings.TrimSpace(credentialRevision)
-	key := EntryKey(credType, fileName)
+	key := BindingEntryKey(credType, fileName, authIndex)
 	if key == "" {
 		return
 	}
@@ -367,6 +367,29 @@ func (s *Scheduler) Unregister(fileName string) {
 	}
 }
 
+// UnregisterBinding removes one exact credential identity while preserving siblings from the same file.
+func (s *Scheduler) UnregisterBinding(fileName string, credType CredentialType, authIndex string) {
+	key := BindingEntryKey(credType, fileName, authIndex)
+	if key == "" {
+		return
+	}
+	var tombstone EntryState
+	s.mu.Lock()
+	if entry := s.entries[key]; entry != nil {
+		entry.mu.Lock()
+		tombstone = tombstoneEntryLocked(entry)
+		entry.mu.Unlock()
+		delete(s.entries, key)
+		s.history[key] = cloneEntryState(tombstone)
+		s.updatedAt = time.Now().UTC()
+		s.poke()
+	}
+	s.mu.Unlock()
+	if tombstone.FileName != "" {
+		s.deletePersisted(tombstone)
+	}
+}
+
 // updateAuthIndex sets the auth_index for a registered entry.
 func (s *Scheduler) updateAuthIndex(fileName string, credType CredentialType, authIndex string) {
 	key := EntryKey(credType, fileName)
@@ -393,27 +416,34 @@ func (s *Scheduler) updateAuthIndex(fileName string, credType CredentialType, au
 	}
 }
 
-// SetDisabled updates the disabled state of a registered entry and pokes the
-// dispatcher to re-evaluate the heap. Disabled entries are skipped by the auto
-// refresh loop; manual RefreshNow(fileNames) still executes them so users can
-// verify whether a banned/disabled account has recovered.
+// SetDisabled updates the disabled state for a legacy single-identity binding.
 func (s *Scheduler) SetDisabled(fileName string, credType CredentialType, disabled bool) {
-	key := EntryKey(credType, fileName)
+	s.SetBindingDisabled(fileName, credType, "", disabled)
+}
+
+// SetBindingDisabled updates one exact credential binding and wakes the dispatcher.
+func (s *Scheduler) SetBindingDisabled(
+	fileName string,
+	credType CredentialType,
+	authIndex string,
+	disabled bool,
+) {
+	key := BindingEntryKey(credType, fileName, authIndex)
 	if key == "" {
 		return
 	}
 	var state EntryState
 	s.mu.Lock()
-	if e, ok := s.entries[key]; ok {
-		e.mu.Lock()
-		if e.Disabled != disabled || !e.disabledConfigured {
-			e.Disabled = disabled
-			e.disabledConfigured = true
-			e.StateRevision++
+	if entry, ok := s.entries[key]; ok {
+		entry.mu.Lock()
+		if entry.Disabled != disabled || !entry.disabledConfigured {
+			entry.Disabled = disabled
+			entry.disabledConfigured = true
+			entry.StateRevision++
 		}
-		state = e.snapshotLocked()
+		state = entry.snapshotLocked()
 		s.history[key] = cloneEntryState(state)
-		e.mu.Unlock()
+		entry.mu.Unlock()
 		s.updatedAt = time.Now().UTC()
 		s.poke()
 	}
@@ -515,7 +545,7 @@ func refreshTargetSnapshot(key string, entry *Entry) RefreshTarget {
 	entry.mu.RLock()
 	defer entry.mu.RUnlock()
 	if key == "" {
-		key = EntryKey(entry.Type, entry.FileName)
+		key = BindingEntryKey(entry.Type, entry.FileName, entry.AuthIndex)
 	}
 	return RefreshTarget{
 		EntryKey:   key,
@@ -1372,7 +1402,7 @@ func (s *Scheduler) refreshTargetIsCurrent(target RefreshTarget, expected *Entry
 }
 
 func refreshTargetMatchesEntryLocked(target RefreshTarget, entry *Entry) bool {
-	return entry != nil && target.EntryKey == EntryKey(entry.Type, entry.FileName) &&
+	return entry != nil && target.EntryKey == BindingEntryKey(entry.Type, entry.FileName, entry.AuthIndex) &&
 		target.FileName == entry.FileName && target.Type == entry.Type &&
 		target.AuthIndex == entry.AuthIndex && target.Generation == entry.Generation
 }

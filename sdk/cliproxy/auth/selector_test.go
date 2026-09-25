@@ -285,6 +285,28 @@ func TestSelectorPick_AllCooldownReturnsModelCooldownError(t *testing.T) {
 	)
 }
 
+func TestModelCooldownErrorDoesNotExposePreviousRequestCause(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("prior-client-private-diagnostic")
+	cooldown := newModelCooldownErrorWithCause("test-model", "gemini", time.Minute, cause)
+	var payload struct {
+		Error map[string]any `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(cooldown.Error()), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error["message"] != "All credentials for model test-model are cooling down via provider gemini" {
+		t.Fatalf("cooldown message contains previous request data: %v", payload.Error["message"])
+	}
+	if _, exposed := payload.Error["last_upstream_error"]; exposed {
+		t.Fatal("cooldown response contains previous request diagnostic")
+	}
+	if !errors.Is(cooldown, cause) {
+		t.Fatal("cooldown error lost its internal cause")
+	}
+}
+
 func TestSelectorPick_AllTransientUnavailableReturnsAuthUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -400,6 +422,51 @@ func TestSessionAffinitySelector_PicksStickyAuth(t *testing.T) {
 	if first.ID != second.ID {
 		t.Fatalf("sticky session mismatch: %q vs %q", first.ID, second.ID)
 	}
+}
+
+func TestSessionAffinitySelector_RespectsAvailablePriority(t *testing.T) {
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &FillFirstSelector{},
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+
+	const model = "model-a"
+	low := &Auth{ID: "low", Provider: "gemini", Attributes: map[string]string{"priority": "0"}}
+	high := &Auth{ID: "high", Provider: "gemini", Attributes: map[string]string{"priority": "10"}}
+	auths := []*Auth{low, high}
+	opts := cliproxyexecutor.Options{
+		Headers:  http.Header{"X-Session-ID": {"sess-priority"}},
+		Metadata: map[string]any{cliproxyexecutor.SessionAffinityModelMetadataKey: model},
+	}
+	selector.Remember("gemini", opts, low)
+
+	pick := func(want string) {
+		t.Helper()
+		selected, err := selector.Pick(context.Background(), "gemini", model, opts, auths)
+		if err != nil {
+			t.Fatalf("Pick() error = %v", err)
+		}
+		if selected == nil {
+			t.Fatal("Pick() returned no auth")
+		}
+		if selected.ID != want {
+			t.Fatalf("Pick() = auth %s, want auth %s", selected.ID, want)
+		}
+	}
+
+	pick("high")
+	high.ModelStates = map[string]*ModelState{
+		model: {
+			Status:         StatusError,
+			Unavailable:    true,
+			NextRetryAfter: time.Now().Add(time.Hour),
+			Quota:          QuotaState{Exceeded: true, NextRecoverAt: time.Now().Add(time.Hour)},
+		},
+	}
+	pick("low")
+	high.ModelStates = nil
+	pick("high")
 }
 
 func TestSessionAffinitySelector_SkipsStickyAuthCoolingDownForModel(t *testing.T) {
@@ -938,5 +1005,88 @@ func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *test
 		if got.ID != expectedID {
 			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, expectedID)
 		}
+	}
+}
+
+type selectorStopProbe struct {
+	mu    sync.Mutex
+	stops int
+}
+
+func (*selectorStopProbe) Pick(
+	context.Context,
+	string,
+	string,
+	cliproxyexecutor.Options,
+	[]*Auth,
+) (*Auth, error) {
+	return nil, nil
+}
+
+func (s *selectorStopProbe) Stop() {
+	s.mu.Lock()
+	s.stops++
+	s.mu.Unlock()
+}
+
+func (s *selectorStopProbe) stopCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stops
+}
+
+type uncomparableSelector struct {
+	values []string
+}
+
+func (uncomparableSelector) Pick(
+	context.Context,
+	string,
+	string,
+	cliproxyexecutor.Options,
+	[]*Auth,
+) (*Auth, error) {
+	return nil, nil
+}
+
+func TestManagerSetSelectorUncomparableTypes(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	manager.SetSelector(uncomparableSelector{values: []string{"first"}})
+	manager.SetSelector(uncomparableSelector{values: []string{"second"}})
+	manager.SetSelector(nil)
+}
+
+func TestManagerSetSelectorSameInstanceDoesNotStop(t *testing.T) {
+	t.Parallel()
+	selector := &selectorStopProbe{}
+	manager := NewManager(nil, selector, nil)
+
+	manager.SetSelector(selector)
+
+	if stops := selector.stopCount(); stops != 0 {
+		t.Fatalf("Stop() calls = %d, want 0", stops)
+	}
+	if manager.Selector() != selector {
+		t.Fatalf("Selector() = %#v, want original selector", manager.Selector())
+	}
+}
+
+func TestManagerSetSelectorConcurrent(t *testing.T) {
+	t.Parallel()
+	manager := NewManager(nil, nil, nil)
+	var workers sync.WaitGroup
+	for range 20 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for range 10 {
+				manager.SetSelector(&selectorStopProbe{})
+			}
+		}()
+	}
+	workers.Wait()
+	if manager.Selector() == nil {
+		t.Fatal("Selector() = nil after concurrent replacements")
 	}
 }

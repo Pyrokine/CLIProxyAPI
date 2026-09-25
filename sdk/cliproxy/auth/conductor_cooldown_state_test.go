@@ -187,6 +187,87 @@ func TestManagerRestoreCooldownAdvancesQuotaEpoch(t *testing.T) {
 	}
 }
 
+func TestManagerRestoreCooldownPreservesPassiveQuotaObservations(t *testing.T) {
+	now := time.Now().UTC()
+	credentialObservedAt := now.Add(-2 * time.Minute)
+	modelObservedAt := now.Add(-time.Minute)
+	store := &recordingCooldownStateStore{
+		load: []CooldownStateRecord{
+			{
+				AuthID:         "auth-1",
+				NextRetryAfter: now.Add(time.Hour),
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "credential cooldown",
+					NextRecoverAt: now.Add(time.Hour),
+					ObservedAt:    now.Add(-time.Hour),
+					Signals:       map[string]string{"X-Codex-Primary-Used-Percent": "10"},
+				},
+				UpdatedAt: now,
+			},
+			{
+				AuthID:         "auth-1",
+				Model:          "gpt-test",
+				NextRetryAfter: now.Add(time.Hour),
+				Quota: QuotaState{
+					Exceeded:      true,
+					Reason:        "model cooldown",
+					NextRecoverAt: now.Add(time.Hour),
+					ObservedAt:    now.Add(-time.Hour),
+					Signals:       map[string]string{"X-Codex-Primary-Used-Percent": "20"},
+				},
+				UpdatedAt: now,
+			},
+		},
+	}
+	manager := NewManager(nil, nil, nil)
+	manager.SetCooldownStateStore(store)
+	_, errRegister := manager.Register(
+		WithSkipPersist(context.Background()), &Auth{
+			ID:       "auth-1",
+			Provider: "codex",
+			Quota: QuotaState{
+				ObservedAt: credentialObservedAt,
+				Signals:    map[string]string{"X-Codex-Primary-Used-Percent": "80"},
+			},
+			ModelStates: map[string]*ModelState{
+				"gpt-test": {
+					Quota: QuotaState{
+						ObservedAt: modelObservedAt,
+						Signals:    map[string]string{"X-Codex-Primary-Used-Percent": "90"},
+					},
+				},
+			},
+		},
+	)
+	if errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+
+	if errRestore := manager.RestoreCooldownStates(context.Background()); errRestore != nil {
+		t.Fatalf("RestoreCooldownStates() error = %v", errRestore)
+	}
+	auth, ok := manager.GetByID("auth-1")
+	if !ok || auth == nil {
+		t.Fatal("restored auth is missing")
+	}
+	if !auth.Quota.Exceeded || auth.Quota.Reason != "credential cooldown" {
+		t.Fatalf("credential cooldown was not restored: %#v", auth.Quota)
+	}
+	if !auth.Quota.ObservedAt.Equal(credentialObservedAt) ||
+		auth.Quota.Signals["X-Codex-Primary-Used-Percent"] != "80" {
+		t.Fatalf("credential passive observation was replaced: %#v", auth.Quota)
+	}
+	state := auth.ModelStates["gpt-test"]
+	if state == nil || !state.Quota.Exceeded || state.Quota.Reason != "model cooldown" {
+		t.Fatalf("model cooldown was not restored: %#v", state)
+	}
+	if !state.Quota.ObservedAt.Equal(modelObservedAt) ||
+		state.Quota.Signals["X-Codex-Primary-Used-Percent"] != "90" {
+		t.Fatalf("model passive observation was replaced: %#v", state.Quota)
+	}
+}
+
 func TestManagerConfigDisableClearsRuntimeAndPersistedCooldown(t *testing.T) {
 	store := &recordingCooldownStateStore{}
 	manager := NewManager(nil, nil, nil)

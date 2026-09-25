@@ -140,7 +140,7 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 
 	now := time.Now()
 	authLevelRecords := make([]CooldownStateRecord, 0)
-	snapshotsByID := make(map[string]*Auth)
+	restoredAuthIDs := make(map[string]struct{})
 	m.mu.Lock()
 	for _, record := range records {
 		if strings.TrimSpace(record.Model) == "" {
@@ -149,21 +149,30 @@ func (m *Manager) RestoreCooldownStates(ctx context.Context) error {
 		}
 		if m.restoreCooldownRecordLocked(record, now) {
 			if auth := m.auths[strings.TrimSpace(record.AuthID)]; auth != nil {
-				snapshotsByID[auth.ID] = auth.Clone()
+				restoredAuthIDs[auth.ID] = struct{}{}
 			}
 		}
 	}
 	for _, record := range authLevelRecords {
 		if m.restoreCooldownRecordLocked(record, now) {
 			if auth := m.auths[strings.TrimSpace(record.AuthID)]; auth != nil {
-				snapshotsByID[auth.ID] = auth.Clone()
+				restoredAuthIDs[auth.ID] = struct{}{}
 			}
+		}
+	}
+	snapshotsByID := make(map[string]*Auth, len(restoredAuthIDs))
+	projectionGenerations := make(map[string]uint64, len(restoredAuthIDs))
+	for authID := range restoredAuthIDs {
+		if auth := m.auths[authID]; auth != nil {
+			snapshotsByID[authID] = auth.Clone()
+			projectionGenerations[authID] = m.nextAuthGenerationLocked()
 		}
 	}
 	m.mu.Unlock()
 
-	if m.scheduler != nil {
-		for _, snapshot := range snapshotsByID {
+	for authID, snapshot := range snapshotsByID {
+		m.publishClientModelProjections(snapshot, projectionGenerations[authID], now)
+		if m.scheduler != nil {
 			m.scheduler.upsertAuth(snapshot)
 		}
 	}
@@ -217,7 +226,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		auth.Unavailable = true
 		auth.Status = StatusError
 		auth.NextRetryAfter = record.NextRetryAfter
-		auth.Quota = quota
+		applyCooldownFields(&auth.Quota, quota)
 		auth.StateEffectScope = effectScope
 		auth.StateEffectKey = effectKey
 		auth.ResetAuthority = resetAuthority
@@ -264,7 +273,7 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 	state.Unavailable = true
 	state.Status = StatusError
 	state.NextRetryAfter = record.NextRetryAfter
-	state.Quota = quota
+	applyCooldownFields(&state.Quota, quota)
 	state.EffectScope = effectScope
 	state.EffectKey = effectKey
 	state.ResetAuthority = resetAuthority
@@ -294,8 +303,8 @@ func quotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Conf
 		if override, ok := auth.DisableCoolingOverride(); ok {
 			return override
 		}
-		if providerCoolingDisabledForAuth(auth, cfg) {
-			return true
+		if override, ok := providerCoolingDisabledForAuth(auth, cfg); ok {
+			return override
 		}
 	}
 	if cfg != nil && cfg.DisableCooling {
@@ -304,13 +313,13 @@ func quotaCooldownDisabledForAuthWithConfig(auth *Auth, cfg *internalconfig.Conf
 	return quotaCooldownDisabled.Load()
 }
 
-func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) bool {
+func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) (bool, bool) {
 	if auth == nil || cfg == nil {
-		return false
+		return false, false
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if provider == "" {
-		return false
+		return false, false
 	}
 	providerKey := ""
 	compatName := ""
@@ -319,13 +328,16 @@ func providerCoolingDisabledForAuth(auth *Auth, cfg *internalconfig.Config) bool
 		compatName = strings.TrimSpace(auth.Attributes["compat_name"])
 	}
 	if providerKey == "" && compatName == "" && provider != "openai-compatibility" {
-		return false
+		return false, false
 	}
 	if providerKey == "" {
 		providerKey = provider
 	}
 	entry := resolveOpenAICompatConfig(cfg, providerKey, compatName, provider)
-	return entry != nil && entry.DisableCooling
+	if entry == nil || entry.DisableCooling == nil {
+		return false, false
+	}
+	return *entry.DisableCooling, true
 }
 
 func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {

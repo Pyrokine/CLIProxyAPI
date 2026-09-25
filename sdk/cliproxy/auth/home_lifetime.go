@@ -152,6 +152,11 @@ func (m *Manager) retainedHomeSessionSelection(
 	}
 	routeModel, validRouteModel := validCanonicalHomeConcurrencyModelKey(model)
 	fallbackAttempt := homeAuthCountFromMetadata(opts.Metadata) > 1
+	constraints := homeDispatchConstraints(ctx, opts)
+	excluded := make(map[string]struct{}, len(constraints.ExcludedAuthIDs))
+	for _, id := range constraints.ExcludedAuthIDs {
+		excluded[id] = struct{}{}
+	}
 	var retained *HomeDispatchSelection
 	var ended []*HomeDispatchSelection
 	m.mu.Lock()
@@ -163,7 +168,8 @@ func (m *Manager) retainedHomeSessionSelection(
 		}
 		matchesCredential := credentialID == "" || key.credentialID == credentialID
 		matchesRoute := validRouteModel && key.routeModel == routeModel
-		if !fallbackAttempt && matchesCredential && matchesRoute && selection.Active() && retained == nil {
+		_, excludedCredential := excluded[key.credentialID]
+		if !excludedCredential && !fallbackAttempt && matchesCredential && matchesRoute && selection.Active() && retained == nil {
 			retained = selection
 			continue
 		}
@@ -280,25 +286,6 @@ func (m *Manager) rememberHomeSelectionRuntimeAuth(sessionID string, selection *
 	}
 	m.homeRuntimeAuths[sessionID][authID] = auth
 	m.homeRuntimeAuthOwners[sessionID][authID] = selection
-	m.mu.Unlock()
-}
-
-func (m *Manager) replaceHomeSelectionAuth(selection *HomeDispatchSelection, auth *Auth) {
-	if m == nil || selection == nil || auth == nil {
-		return
-	}
-	m.mu.Lock()
-	selection.ReplaceAuth(auth)
-	updated := selection.CloneAuth()
-	if updated != nil {
-		for sessionID, owners := range m.homeRuntimeAuthOwners {
-			for authID, owner := range owners {
-				if owner == selection && m.homeRuntimeAuths[sessionID] != nil {
-					m.homeRuntimeAuths[sessionID][authID] = updated.Clone()
-				}
-			}
-		}
-	}
 	m.mu.Unlock()
 }
 

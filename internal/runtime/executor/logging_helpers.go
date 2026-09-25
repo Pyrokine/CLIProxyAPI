@@ -54,6 +54,7 @@ type upstreamAttempt struct {
 	bodyStarted          bool
 	bodyHasContent       bool
 	errorWritten         bool
+	trailingNewlines     int
 }
 
 // recordUpstreamRequest records an upstream API request with auth info extracted from the given auth.
@@ -138,6 +139,11 @@ func RecordAPIWebsocketRequest(
 // RecordAPIWebsocketHandshake stores upstream WebSocket handshake metadata.
 func RecordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	recordAPIWebsocketHandshake(ctx, cfg, status, headers)
+}
+
+// AppendAPIWebsocketResponse 记录上游 WebSocket 响应正文
+func AppendAPIWebsocketResponse(ctx context.Context, cfg *config.Config, payload []byte) {
+	appendAPIWebsocketResponse(ctx, cfg, payload)
 }
 
 // RecordAPIWebsocketError stores an upstream WebSocket lifecycle error.
@@ -283,6 +289,7 @@ func newAPIRequestLogBuilder(index int, info upstreamRequestLog, timestamp time.
 // recordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func recordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
+	cliproxyauth.RecordUpstreamResponseHeaders(ctx, headers)
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -405,6 +412,7 @@ func recordAPIWebsocketRequest(ctx context.Context, cfg *config.Config, info ups
 
 func recordAPIWebsocketHandshake(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
 	logging.SetResponseHeaders(ctx, headers)
+	cliproxyauth.RecordUpstreamResponseHeaders(ctx, headers)
 	if !requestLogCaptureEnabled(cfg) {
 		return
 	}
@@ -618,6 +626,17 @@ func ensureResponseIntro(ginCtx *gin.Context, attempt *upstreamAttempt) {
 	if attempt == nil || attempt.responseIntroWritten {
 		return
 	}
+	attempts := getAttempts(ginCtx)
+	for i := len(attempts) - 1; i >= 0; i-- {
+		previous := attempts[i]
+		if previous == nil || previous == attempt || !previous.responseIntroWritten {
+			continue
+		}
+		if missing := 2 - previous.trailingNewlines; missing > 0 {
+			writeAttemptResponse(ginCtx, attempt, []byte(strings.Repeat("\n", missing)))
+		}
+		break
+	}
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("=== API RESPONSE %d ===\n", attempt.index)))
 	writeAttemptResponse(ginCtx, attempt, []byte(fmt.Sprintf("Timestamp: %s\n", time.Now().Format(time.RFC3339Nano))))
 	writeAttemptResponse(ginCtx, attempt, []byte("\n"))
@@ -628,6 +647,14 @@ func writeAttemptResponse(ginCtx *gin.Context, attempt *upstreamAttempt, payload
 	if attempt == nil || len(payload) == 0 {
 		return
 	}
+	trailing := 0
+	for i := len(payload) - 1; i >= 0 && payload[i] == '\n' && trailing < 2; i-- {
+		trailing++
+	}
+	if trailing == len(payload) {
+		trailing = min(2, trailing+attempt.trailingNewlines)
+	}
+	attempt.trailingNewlines = trailing
 	if attempt.responseSource == nil {
 		attempt.responseSource = apiResponseSourceOrNil(ginCtx)
 	}

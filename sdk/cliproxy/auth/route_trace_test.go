@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -1374,69 +1375,71 @@ func TestManagerRouteTraceStreamBootstrapUnknownOutcomeStopsReplay(t *testing.T)
 }
 
 func TestManagerRouteTraceCooldownWait(t *testing.T) {
-	const (
-		provider = "route-trace-cooldown-provider"
-		model    = "route-trace-cooldown-model"
-	)
-	var executeCount int
-	executor := &routeTraceTestExecutor{
-		provider: provider,
-		executeFn: func(auth *Auth) (cliproxyexecutor.Response, error) {
-			executeCount++
-			if executeCount == 1 {
-				return cliproxyexecutor.Response{}, routeTraceTestError{
-					status:     http.StatusTooManyRequests,
-					retryAfter: 5 * time.Millisecond,
-					message:    "private cooldown detail",
+	synctest.Test(t, func(t *testing.T) {
+		const (
+			provider = "route-trace-cooldown-provider"
+			model    = "route-trace-cooldown-model"
+		)
+		var executeCount int
+		executor := &routeTraceTestExecutor{
+			provider: provider,
+			executeFn: func(auth *Auth) (cliproxyexecutor.Response, error) {
+				executeCount++
+				if executeCount == 1 {
+					return cliproxyexecutor.Response{}, routeTraceTestError{
+						status:     http.StatusTooManyRequests,
+						retryAfter: 5 * time.Millisecond,
+						message:    "private cooldown detail",
+					}
 				}
-			}
-			return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
-		},
-	}
-	manager := NewManager(nil, &RoundRobinSelector{}, nil)
-	manager.SetRetryConfig(1, 50*time.Millisecond, 0)
-	manager.RegisterExecutor(executor)
-	registerRouteTraceTestAuths(
-		t,
-		manager,
-		provider,
-		model,
-		&Auth{ID: "route-trace-cooldown-auth", Provider: provider},
-	)
-	recorder := &routeTraceTestRecorder{}
+				return cliproxyexecutor.Response{Payload: []byte(auth.ID)}, nil
+			},
+		}
+		manager := NewManager(nil, &RoundRobinSelector{}, nil)
+		manager.SetRetryConfig(1, 2*minQuotaCooldownFloor, 0)
+		manager.RegisterExecutor(executor)
+		registerRouteTraceTestAuths(
+			t,
+			manager,
+			provider,
+			model,
+			&Auth{ID: "route-trace-cooldown-auth", Provider: provider},
+		)
+		recorder := &routeTraceTestRecorder{}
 
-	response, errExecute := manager.Execute(
-		context.Background(),
-		[]string{provider},
-		cliproxyexecutor.Request{Model: model},
-		routeTraceTestOptions(recorder.Add),
-	)
-	if errExecute != nil {
-		t.Fatalf("Execute() error = %v", errExecute)
-	}
-	if got := string(response.Payload); got != "route-trace-cooldown-auth" {
-		t.Fatalf("response payload = %q", got)
-	}
-	if got := executor.ExecuteCalls(); !reflect.DeepEqual(
-		got,
-		[]string{"route-trace-cooldown-auth", "route-trace-cooldown-auth"},
-	) {
-		t.Fatalf("execute calls = %v", got)
-	}
+		response, errExecute := manager.Execute(
+			context.Background(),
+			[]string{provider},
+			cliproxyexecutor.Request{Model: model},
+			routeTraceTestOptions(recorder.Add),
+		)
+		if errExecute != nil {
+			t.Fatalf("Execute() error = %v", errExecute)
+		}
+		if got := string(response.Payload); got != "route-trace-cooldown-auth" {
+			t.Fatalf("response payload = %q", got)
+		}
+		if got := executor.ExecuteCalls(); !reflect.DeepEqual(
+			got,
+			[]string{"route-trace-cooldown-auth", "route-trace-cooldown-auth"},
+		) {
+			t.Fatalf("execute calls = %v", got)
+		}
 
-	events := recorder.Events()
-	cooldownWait := findRouteTraceEvent(t, events, "cooldown.wait", 2)
-	if cooldownWait.ResultCode != "rate_limited" || cooldownWait.HTTPStatus != http.StatusTooManyRequests {
-		t.Fatalf("cooldown wait event = %+v", cooldownWait)
-	}
-	if cooldownWait.RetryAfterMS <= 0 || cooldownWait.RetryAfterMS > 50 {
-		t.Fatalf("cooldown retry_after_ms = %d", cooldownWait.RetryAfterMS)
-	}
-	findRouteTraceEvent(t, events, "cooldown.completed", 2)
-	completed := findRouteTraceEvent(t, events, "attempt.completed", 3)
-	if !completed.FinalTarget {
-		t.Fatalf("completed event = %+v", completed)
-	}
+		events := recorder.Events()
+		cooldownWait := findRouteTraceEvent(t, events, "cooldown.wait", 2)
+		if cooldownWait.ResultCode != "rate_limited" || cooldownWait.HTTPStatus != http.StatusTooManyRequests {
+			t.Fatalf("cooldown wait event = %+v", cooldownWait)
+		}
+		if cooldownWait.RetryAfterMS != minQuotaCooldownFloor.Milliseconds() {
+			t.Fatalf("cooldown retry_after_ms = %d", cooldownWait.RetryAfterMS)
+		}
+		findRouteTraceEvent(t, events, "cooldown.completed", 2)
+		completed := findRouteTraceEvent(t, events, "attempt.completed", 3)
+		if !completed.FinalTarget {
+			t.Fatalf("completed event = %+v", completed)
+		}
+	})
 }
 
 func TestManagerRouteTraceAllCandidatesExcluded(t *testing.T) {

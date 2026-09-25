@@ -81,6 +81,41 @@ func TestManager_Update_PreservesModelStates(t *testing.T) {
 	}
 }
 
+func TestManagerDurableUpdatePublishesAfterPersistenceCancelsRequest(t *testing.T) {
+	store := &cancelAfterSaveAuthStore{}
+	manager := NewManager(store, nil, nil)
+	registered, errRegister := manager.Register(
+		context.Background(),
+		&Auth{
+			ID:       "canceled-update.json",
+			Provider: "test",
+			Metadata: map[string]any{"token": "old"},
+		},
+	)
+	if errRegister != nil {
+		t.Fatal(errRegister)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	store.cancel = cancel
+	next := registered.Clone()
+	next.Metadata["token"] = "new"
+	updated, errUpdate := manager.Update(WithDurableAuthPublication(ctx), next)
+	if errUpdate != nil {
+		t.Fatalf("Update() error = %v", errUpdate)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test store did not cancel the request context")
+	}
+	if updated == nil || updated.Metadata["token"] != "new" {
+		t.Fatalf("updated auth = %#v", updated)
+	}
+	current, ok := manager.GetByID(registered.ID)
+	if !ok || current == nil || current.Metadata["token"] != "new" {
+		t.Fatalf("published auth = %#v", current)
+	}
+}
+
 func TestManager_SetConfigUpdatesAutoRefreshWorkers(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	m.SetConfig(&internalconfig.Config{AuthAutoRefreshWorkers: 3})
@@ -149,6 +184,25 @@ func (e *cancelAfterSuccessRefreshExecutor) Refresh(_ context.Context, auth *Aut
 	}
 	e.cancel()
 	return updated, nil
+}
+
+type cancelAfterSaveAuthStore struct {
+	cancel context.CancelFunc
+}
+
+func (*cancelAfterSaveAuthStore) List(context.Context) ([]*Auth, error) {
+	return nil, nil
+}
+
+func (s *cancelAfterSaveAuthStore) Save(_ context.Context, auth *Auth) (string, error) {
+	if s.cancel != nil {
+		s.cancel()
+	}
+	return auth.ID, nil
+}
+
+func (*cancelAfterSaveAuthStore) Delete(context.Context, string) error {
+	return nil
 }
 
 type contextCheckingRefreshStore struct {

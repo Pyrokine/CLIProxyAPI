@@ -181,6 +181,25 @@ func TestC08HomeSessionAliasTTLRefreshPreservesLiveGroup(t *testing.T) {
 	}
 }
 
+func TestHomeDispatchSessionIDsPreserveParentLineage(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, nil, nil)
+	child, parent := manager.homeDispatchSessionIDs(cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"session_id":"child","parent_session_id":"parent"}`),
+	})
+	if child != "session:child" || parent != "session:parent" {
+		t.Fatalf("home session hierarchy = (%q, %q), want (session:child, session:parent)", child, parent)
+	}
+
+	alias, aliasParent := manager.homeDispatchSessionIDs(cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"prompt_cache_key":"cache","conversation":{"id":"conversation"}}`),
+	})
+	if alias != "pck:cache" || aliasParent != "" {
+		t.Fatalf("home aliases = (%q, %q), want (pck:cache, empty parent)", alias, aliasParent)
+	}
+}
+
 func TestC08HomeSessionAliasCacheClearsOnTTLChange(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	firstConfig := &internalconfig.Config{}

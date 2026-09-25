@@ -2,31 +2,14 @@ package auth
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
-
-type homeUnauthorizedRefreshTracker struct {
-	attempted bool
-	tokenHash string
-}
-
-func (t *homeUnauthorizedRefreshTracker) try(tokenHash string) bool {
-	if t == nil || t.attempted {
-		return false
-	}
-	tokenHash = strings.TrimSpace(tokenHash)
-	if tokenHash == "" {
-		return false
-	}
-	t.attempted = true
-	t.tokenHash = tokenHash
-	return true
-}
 
 type homePreparedAttempt struct {
 	ctx         context.Context
@@ -55,7 +38,9 @@ func (m *Manager) prepareHomeAttempt(
 		},
 	)
 	attemptCtx := contextWithRequestedModelAlias(ctx, opts, routeModel)
+	prepareStarted := time.Now()
 	preparedAuth, errPrepare := m.prepareRequestAuth(attemptCtx, selection.Executor, auth)
+	warnLogUpstreamFailure(attemptCtx, auth, selection.Provider, routeModel, prepareStarted, errPrepare, cliproxyexecutor.DispatchPhaseNotSent)
 	if errPrepare != nil {
 		resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errPrepare, "prepare_failed")
 		publishAuthRouteTraceEvent(
@@ -150,173 +135,24 @@ func (m *Manager) prepareHomeAttempt(
 	}, nil
 }
 
-func homeAuthIsOAuth(auth *Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["auth_kind"]), "oauth") {
-		return true
-	}
-	authType, _ := auth.AccountInfo()
-	return strings.EqualFold(authType, "oauth")
-}
-
-func (m *Manager) lockHomeUnauthorizedRefresh(ctx context.Context, auth *Auth, tokenHash string) (func(), error) {
-	if m == nil || auth == nil {
-		return func() {}, nil
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	key := "home:" + strings.TrimSpace(auth.ID) + ":" + strings.TrimSpace(tokenHash)
-	m.refreshLocksMu.Lock()
-	lock := m.refreshLocks[key]
-	if lock == nil {
-		lock = newAuthRefreshLock()
-		m.refreshLocks[key] = lock
-	}
-	lock.refs++
-	m.refreshLocksMu.Unlock()
-	releaseRef := func() {
-		m.refreshLocksMu.Lock()
-		lock.refs--
-		if lock.refs == 0 && m.refreshLocks[key] == lock {
-			delete(m.refreshLocks, key)
-		}
-		m.refreshLocksMu.Unlock()
-	}
-	select {
-	case <-ctx.Done():
-		releaseRef()
-		return func() {}, ctx.Err()
-	case <-lock.token:
-	}
-	var once sync.Once
-	return func() {
-		once.Do(
-			func() {
-				lock.token <- struct{}{}
-				releaseRef()
-			},
-		)
-	}, nil
-}
-
-func (m *Manager) refreshHomeSelectionAfterUnauthorized(
-	ctx context.Context,
-	selection *HomeDispatchSelection,
-	failedAuth *Auth,
-	execErr error,
-	tracker *homeUnauthorizedRefreshTracker,
-	reuseNewerSelection bool,
-) (*Auth, bool, error) {
-	if m == nil || selection == nil || selection.Executor == nil || failedAuth == nil || execErr == nil {
-		return failedAuth, false, nil
-	}
-	if !isUnauthorizedError(execErr) || !homeAuthIsOAuth(failedAuth) {
-		return failedAuth, false, nil
-	}
-	failedHash := AccessTokenSHA256(failedAuth)
-	current := selection.CloneAuth()
-	if reuseNewerSelection && current != nil && current.ID == failedAuth.ID {
-		currentHash := AccessTokenSHA256(current)
-		if currentHash != "" && failedHash != "" && currentHash != failedHash {
-			prepared, errPrepare := m.prepareRequestAuth(ctx, selection.Executor, current)
-			if errPrepare != nil {
-				return current, false, errPrepare
-			}
-			preserveHomeRoutingAttributes(prepared, current)
-			m.replaceHomeSelectionAuth(selection, prepared)
-			return selection.CloneAuth(), true, nil
-		}
-	}
-	if !tracker.try(failedHash) {
-		return failedAuth, false, nil
-	}
-	unlock, errLock := m.lockHomeUnauthorizedRefresh(ctx, failedAuth, failedHash)
-	if errLock != nil {
-		return failedAuth, false, errLock
-	}
-	defer unlock()
-	current = selection.CloneAuth()
-	if reuseNewerSelection && current != nil && current.ID == failedAuth.ID {
-		currentHash := AccessTokenSHA256(current)
-		if currentHash != "" && currentHash != failedHash {
-			prepared, errPrepare := m.prepareRequestAuth(ctx, selection.Executor, current)
-			if errPrepare != nil {
-				return current, false, errPrepare
-			}
-			preserveHomeRoutingAttributes(prepared, current)
-			m.replaceHomeSelectionAuth(selection, prepared)
-			return selection.CloneAuth(), true, nil
-		}
-	}
-
-	target := failedAuth.Clone()
-	updated, errRefresh := selection.Executor.Refresh(ctx, target)
-	if errRefresh != nil {
-		return failedAuth, false, errRefresh
-	}
-	if updated == nil {
-		updated = target
-	}
-	if updated.Disabled || updated.Status == StatusDisabled {
-		return failedAuth, false, &Error{
-			Code:       "unauthorized",
-			Message:    "credential unauthorized",
-			HTTPStatus: http.StatusUnauthorized,
-		}
-	}
-	if updated.ID == "" {
-		updated.ID = failedAuth.ID
-	}
-	if updated.Index == "" {
-		updated.Index = failedAuth.Index
-	}
-	if updated.Provider == "" {
-		updated.Provider = failedAuth.Provider
-	}
-	if updated.Runtime == nil {
-		updated.Runtime = failedAuth.Runtime
-	}
-	if updated.executorKey == "" {
-		updated.executorKey = failedAuth.executorKey
-	}
-	updated.Generation = 0
-	preserveHomeRoutingAttributes(updated, failedAuth)
-	if reuseNewerSelection {
-		prepared, errPrepare := m.prepareRequestAuth(ctx, selection.Executor, updated)
-		if errPrepare != nil {
-			return failedAuth, false, errPrepare
-		}
-		preserveHomeRoutingAttributes(prepared, updated)
-		updated = prepared
-	}
-	m.replaceHomeSelectionAuth(selection, updated)
-	return selection.CloneAuth(), true, nil
-}
-
-// RefreshHomeSelectionAfterUnauthorized refreshes a Home selection once for the token version that received a 401.
+// RefreshHomeSelectionAfterUnauthorized 只读取 Home 已安装的新 token 快照，不刷新或修改凭证
 func (m *Manager) RefreshHomeSelectionAfterUnauthorized(
-	ctx context.Context,
+	_ context.Context,
 	selection *HomeDispatchSelection,
 	failedAuth *Auth,
 ) (*Auth, bool, error) {
-	if selection == nil {
+	if m == nil || selection == nil {
 		return nil, false, nil
 	}
-	if failedAuth == nil {
-		failedAuth = selection.CloneAuth()
+	current := selection.CloneAuth()
+	if current != nil && failedAuth != nil && current.ID == failedAuth.ID &&
+		!current.Disabled && current.Status != StatusDisabled {
+		currentHash, failedHash := AccessTokenSHA256(current), AccessTokenSHA256(failedAuth)
+		if currentHash != "" && failedHash != "" && currentHash != failedHash {
+			return current, true, nil
+		}
 	}
-	tracker := &homeUnauthorizedRefreshTracker{}
-	return m.refreshHomeSelectionAfterUnauthorized(
-		ctx,
-		selection,
-		failedAuth,
-		&Error{HTTPStatus: http.StatusUnauthorized, Message: "upstream unauthorized"},
-		tracker,
-		true,
-	)
+	return current, false, nil
 }
 
 func (m *Manager) executeHome(
@@ -335,9 +171,14 @@ func (m *Manager) executeHome(
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	opts = ensureRouteTraceState(opts)
 	tried := make(map[string]struct{})
-	refreshTracker := &homeUnauthorizedRefreshTracker{}
+	if state := retryRoundFromContext(ctx); state != nil {
+		tried = state.attempted
+	}
 	var lastErr error
 	for count := 1; ; count++ {
+		if err := ctx.Err(); err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
 		attemptOrdinal, previousAttempt := nextRouteTraceAttempt(opts)
 		attemptOpts := withRouteTraceAttempt(opts, attemptOrdinal, previousAttempt)
 		selection, errSelection := m.pickHomeDispatchSelection(
@@ -345,8 +186,11 @@ func (m *Manager) executeHome(
 		)
 		if errSelection != nil {
 			returnedErr := errSelection
-			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) {
+			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) || (lastErr != nil && isHomeCooldownError(errSelection)) {
 				returnedErr = lastErr
+				if state := retryRoundFromContext(ctx); state != nil && isHomeCooldownError(errSelection) {
+					returnedErr = &homeDispatchRetryAfterError{cause: lastErr, retryAfter: state.homeWait}
+				}
 			}
 			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, returnedErr, "home_dispatch_failed")
 			publishRouteTraceEvent(
@@ -440,6 +284,7 @@ func (m *Manager) executeHome(
 			applyDispositionToRouteTrace(&recordedEvent, result.Disposition, result.StateGeneration)
 			publishAuthRouteTraceEvent(attemptOpts, auth, recordedEvent)
 			lastErr = errPrepare
+			retryRoundFromContext(ctx).observeHomeAttempt(errPrepare)
 			if !retryDirectiveAllowsRedispatch(result.Disposition) {
 				selection.End("retry_forbidden")
 				return cliproxyexecutor.Response{}, errPrepare
@@ -495,67 +340,35 @@ func (m *Manager) executeHome(
 				Action:      "attempt.execute_started",
 			},
 		)
+		started := time.Now()
 		response, errExecute := execute(attempt)
-		failedAuth := attempt.auth
+		warnLogUpstreamFailure(attempt.ctx, attempt.auth, selection.Provider, attempt.request.Model, started, errExecute, cliproxyexecutor.DispatchPhaseMaybeSent)
 		if countTokens && isUnauthorizedError(errExecute) {
-			failedAuth = getEffectiveAuth()
-			m.reportHomeUnauthorized(
-				attempt.ctx, failedAuth, selection.Provider, routeModel, AccessTokenSHA256(failedAuth),
-			)
-		}
-		if errExecute != nil {
-			refreshed, didRefresh, errRefresh := m.refreshHomeSelectionAfterUnauthorized(
-				attempt.ctx, selection, failedAuth, errExecute, refreshTracker, false,
-			)
-			switch {
-			case errRefresh != nil:
-				errExecute = errRefresh
-			case didRefresh && refreshed != nil:
-				refreshedRouteAuth := selection.CloneAuthForRoute(routeModel)
-				attempt, errPrepare = m.prepareHomeAttempt(
-					attemptCtx, selection, refreshedRouteAuth, req, attemptOpts, routeModel,
-				)
-				if errPrepare != nil {
-					errExecute = errPrepare
-					break
-				}
-				publishAuthRouteTraceEvent(
-					attemptOpts, attempt.auth, cliproxyexecutor.RouteTraceEvent{
-						Provider:    selection.Provider,
-						Model:       routeModel,
-						TargetModel: attempt.request.Model,
-						Action:      "auth.refresh_completed",
-						ResultCode:  "success",
-					},
-				)
-				setEffectiveAuth(attempt.auth)
-				if countTokens {
-					attempt.ctx = withAccessTokenFingerprintObserver(attempt.ctx, setEffectiveAuth)
-				}
-				publishAuthRouteTraceEvent(
-					attemptOpts, attempt.auth, cliproxyexecutor.RouteTraceEvent{
-						Provider:    selection.Provider,
-						Model:       routeModel,
-						TargetModel: attempt.request.Model,
-						Action:      "attempt.execute_retried",
-						Reason:      "auth_refreshed",
-					},
-				)
-				response, errExecute = execute(attempt)
-				if countTokens && isUnauthorizedError(errExecute) {
-					retryAuth := getEffectiveAuth()
-					m.reportHomeUnauthorized(
-						attempt.ctx, retryAuth, selection.Provider, routeModel, AccessTokenSHA256(retryAuth),
-					)
-				}
+			failedAuth := getEffectiveAuth()
+			failureBody := errExecute.Error()
+			if body, direct := clienterror.ResponseBodyFromError(errExecute); direct {
+				failureBody = string(body)
 			}
+			m.reportHomeUnauthorized(
+				attempt.ctx, failedAuth, selection.Provider, routeModel, AccessTokenSHA256(failedAuth), failureBody,
+			)
 		}
 		phase := cliproxyexecutor.DispatchPhaseResponseStarted
 		if errExecute != nil {
 			phase = cliproxyexecutor.DispatchPhaseMaybeSent
 		}
 		result := executionResult(attempt.auth, selection.Provider, routeModel, errExecute, phase)
-		if isRequestScopedError(errExecute) {
+		decision := requestScopedActionDecision{err: errExecute}
+		compactRequestFault := false
+		if errExecute != nil {
+			result.RetryAfter = retryAfterFromError(errExecute)
+			decision = m.applyRequestScopedErrorRule(attempt.auth, errExecute, &result)
+			errExecute = decision.err
+			if !decision.matched {
+				compactRequestFault = applyResponsesCompactErrorDisposition(opts, errExecute, &result)
+			}
+		}
+		if !decision.matched && isRequestScopedError(errExecute) {
 			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errExecute, "request_scoped")
 			publishResultRouteTraceEvent(
 				attemptOpts, attempt.auth, cliproxyexecutor.RouteTraceEvent{
@@ -625,14 +438,21 @@ func (m *Manager) executeHome(
 			return response, nil
 		}
 		lastErr = errExecute
-		if isRequestInvalidError(errExecute) || !retryDirectiveAllowsRedispatch(result.Disposition) {
+		retryRoundFromContext(ctx).observeHomeAttempt(errExecute)
+		requestInvalid := !decision.matched && (compactRequestFault || isRequestInvalidError(errExecute))
+		if decision.stop || requestInvalid || !retryDirectiveAllowsRedispatch(result.Disposition) {
 			reason := "retry_forbidden"
-			if isRequestInvalidError(errExecute) {
+			if decision.stop {
+				reason = "request_scoped_rule"
+			} else if requestInvalid {
 				reason = "request_invalid"
 			} else if result.Disposition.Outcome == cliproxyexecutor.ExecutionOutcomeUnknown {
 				reason = "outcome_unknown"
 			}
 			selection.End(reason)
+			if decision.stop {
+				return cliproxyexecutor.Response{}, wrapRequestStopError(errExecute)
+			}
 			return cliproxyexecutor.Response{}, errExecute
 		}
 		publishAuthRouteTraceEvent(
@@ -656,7 +476,8 @@ func (m *Manager) recordHomeExecutionResult(ctx context.Context, result Result, 
 	if result.AuthID == "" {
 		return
 	}
-	if countTokens && result.Error != nil && isCountTokensEndpointNotFoundError(result.Error, result.Model) {
+	if countTokens && result.Error != nil && !isForceCooldownResult(result) &&
+		isCountTokensEndpointNotFoundError(result.Error, result.Model) {
 		m.recordAvailabilityNeutralResult(ctx, result)
 		return
 	}
@@ -735,9 +556,14 @@ func (m *Manager) executeHomeStream(
 	opts = ensureRequestedModelMetadata(opts, routeModel)
 	opts = ensureRouteTraceState(opts)
 	tried := make(map[string]struct{})
-	refreshTracker := &homeUnauthorizedRefreshTracker{}
+	if state := retryRoundFromContext(ctx); state != nil {
+		tried = state.attempted
+	}
 	var lastErr error
 	for count := 1; ; count++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		attemptOrdinal, previousAttempt := nextRouteTraceAttempt(opts)
 		attemptOpts := withRouteTraceAttempt(opts, attemptOrdinal, previousAttempt)
 		selection, errSelection := m.pickHomeDispatchSelection(
@@ -745,8 +571,11 @@ func (m *Manager) executeHomeStream(
 		)
 		if errSelection != nil {
 			returnedErr := errSelection
-			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) {
+			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) || (lastErr != nil && isHomeCooldownError(errSelection)) {
 				returnedErr = lastErr
+				if state := retryRoundFromContext(ctx); state != nil && isHomeCooldownError(errSelection) {
+					returnedErr = &homeDispatchRetryAfterError{cause: lastErr, retryAfter: state.homeWait}
+				}
 			}
 			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, returnedErr, "home_dispatch_failed")
 			publishRouteTraceEvent(
@@ -840,6 +669,7 @@ func (m *Manager) executeHomeStream(
 			applyDispositionToRouteTrace(&recordedEvent, result.Disposition, result.StateGeneration)
 			publishAuthRouteTraceEvent(attemptOpts, auth, recordedEvent)
 			lastErr = errPrepare
+			retryRoundFromContext(ctx).observeHomeAttempt(errPrepare)
 			if !retryDirectiveAllowsRedispatch(result.Disposition) {
 				selection.End("retry_forbidden")
 				return nil, errPrepare
@@ -867,49 +697,9 @@ func (m *Manager) executeHomeStream(
 			},
 		)
 		failurePhase := cliproxyexecutor.DispatchPhaseMaybeSent
+		started := time.Now()
 		streamResult, errStream := m.startHomeStreamAttempt(attempt, selection, routeModel)
-		if errStream != nil {
-			failedErr := errStream
-			if bootstrapErr, ok := errors.AsType[*streamBootstrapError](errStream); ok && bootstrapErr != nil {
-				failedErr = bootstrapErr.cause
-			}
-			refreshed, didRefresh, errRefresh := m.refreshHomeSelectionAfterUnauthorized(
-				attempt.ctx, selection, attempt.auth, failedErr, refreshTracker, false,
-			)
-			switch {
-			case errRefresh != nil:
-				errStream = errRefresh
-			case didRefresh && refreshed != nil:
-				refreshedRouteAuth := selection.CloneAuthForRoute(routeModel)
-				attempt, errPrepare = m.prepareHomeAttempt(
-					attemptCtx, selection, refreshedRouteAuth, req, attemptOpts, routeModel,
-				)
-				if errPrepare != nil {
-					errStream = errPrepare
-					failurePhase = cliproxyexecutor.DispatchPhaseNotSent
-					break
-				}
-				publishAuthRouteTraceEvent(
-					attemptOpts, attempt.auth, cliproxyexecutor.RouteTraceEvent{
-						Provider:    selection.Provider,
-						Model:       routeModel,
-						TargetModel: attempt.request.Model,
-						Action:      "auth.refresh_completed",
-						ResultCode:  "success",
-					},
-				)
-				publishAuthRouteTraceEvent(
-					attemptOpts, attempt.auth, cliproxyexecutor.RouteTraceEvent{
-						Provider:    selection.Provider,
-						Model:       routeModel,
-						TargetModel: attempt.request.Model,
-						Action:      "attempt.execute_retried",
-						Reason:      "auth_refreshed",
-					},
-				)
-				streamResult, errStream = m.startHomeStreamAttempt(attempt, selection, routeModel)
-			}
-		}
+		warnLogUpstreamFailure(attempt.ctx, attempt.auth, selection.Provider, attempt.request.Model, started, errStream, failurePhase)
 		if errStream == nil {
 			publishAuthRouteTraceEvent(
 				attemptOpts, attempt.auth, cliproxyexecutor.RouteTraceEvent{
@@ -925,6 +715,9 @@ func (m *Manager) executeHomeStream(
 			return wrapHomeOwnedStream(attempt.ctx, streamResult, selection, releaseAttempt, !retained), nil
 		}
 		result := executionResult(attempt.auth, selection.Provider, routeModel, errStream, failurePhase)
+		result.RetryAfter = retryAfterFromError(errStream)
+		decision := m.applyRequestScopedErrorRule(attempt.auth, errStream, &result)
+		errStream = decision.err
 		resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errStream, "stream_bootstrap_failed")
 		publishResultRouteTraceEvent(
 			attemptOpts, attempt.auth, cliproxyexecutor.RouteTraceEvent{
@@ -940,7 +733,7 @@ func (m *Manager) executeHomeStream(
 			}, result,
 		)
 		releaseAttempt()
-		if isRequestScopedError(errStream) {
+		if !decision.matched && isRequestScopedError(errStream) {
 			selection.End("request_invalid")
 			return nil, errStream
 		}
@@ -957,14 +750,21 @@ func (m *Manager) executeHomeStream(
 			}, result,
 		)
 		lastErr = errStream
-		if isRequestInvalidError(errStream) || !retryDirectiveAllowsRedispatch(result.Disposition) {
+		retryRoundFromContext(ctx).observeHomeAttempt(errStream)
+		requestInvalid := !decision.matched && isRequestInvalidError(errStream)
+		if decision.stop || requestInvalid || !retryDirectiveAllowsRedispatch(result.Disposition) {
 			reason := "retry_forbidden"
-			if isRequestInvalidError(errStream) {
+			if decision.stop {
+				reason = "request_scoped_rule"
+			} else if requestInvalid {
 				reason = "request_invalid"
 			} else if result.Disposition.Outcome == cliproxyexecutor.ExecutionOutcomeUnknown {
 				reason = "outcome_unknown"
 			}
 			selection.End(reason)
+			if decision.stop {
+				return nil, wrapRequestStopError(errStream)
+			}
 			return nil, errStream
 		}
 		publishAuthRouteTraceEvent(

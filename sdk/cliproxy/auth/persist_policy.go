@@ -5,6 +5,7 @@ import "context"
 type skipPersistContextKey struct{}
 type forcePersistContextKey struct{}
 type allowAuthRecreateContextKey struct{}
+type durableAuthPublicationContextKey struct{}
 type runtimeOnlyRemoveContextKey struct{}
 
 // WithSkipPersist returns a derived context that disables persistence for Manager Update/Register calls.
@@ -56,6 +57,23 @@ func shouldAllowAuthRecreate(ctx context.Context) bool {
 		return false
 	}
 	v := ctx.Value(allowAuthRecreateContextKey{})
+	enabled, ok := v.(bool)
+	return ok && enabled
+}
+
+// WithDurableAuthPublication keeps runtime publication alive after persistence succeeds.
+func WithDurableAuthPublication(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, durableAuthPublicationContextKey{}, true)
+}
+
+func shouldCompleteDurableAuthPublication(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v := ctx.Value(durableAuthPublicationContextKey{})
 	enabled, ok := v.(bool)
 	return ok && enabled
 }

@@ -17,6 +17,38 @@ type statusError struct {
 func (e statusError) Error() string   { return e.body }
 func (e statusError) StatusCode() int { return e.status }
 
+type directBodyError struct {
+	body   []byte
+	direct bool
+}
+
+func (e directBodyError) Error() string        { return "synthetic diagnostic" }
+func (e directBodyError) DirectResponse() bool { return e.direct }
+func (e directBodyError) ResponseBody() []byte { return e.body }
+
+func TestResponseBodyFromError(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		body   string
+		direct bool
+	}{
+		{"nil", nil, "", false},
+		{"plain", errors.New("failure"), "", false},
+		{"unmarked", directBodyError{body: []byte("private diagnostic")}, "", false},
+		{"marked", directBodyError{body: []byte(" denied\n"), direct: true}, " denied\n", true},
+		{"wrapped", fmt.Errorf("wrapper: %w", directBodyError{body: []byte(" denied\n"), direct: true}), " denied\n", true},
+		{"empty", directBodyError{direct: true}, "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, direct := ResponseBodyFromError(test.err)
+			if direct != test.direct || string(body) != test.body {
+				t.Fatalf("body=%q direct=%t", body, direct)
+			}
+		})
+	}
+}
+
 func TestHTTPStatusFromError(t *testing.T) {
 	tests := []struct {
 		name string
@@ -187,6 +219,35 @@ func TestIsRequestFault(t *testing.T) {
 			want: true,
 		},
 		{name: "unauthorized", status: http.StatusUnauthorized, err: errors.New("invalid token")},
+		{
+			name:   "authentication error status overrides invalid request body",
+			status: http.StatusUnauthorized,
+			err: errors.New(
+				`{"error":{"type":"authentication_error","code":"invalid_request_error","message":"invalid key"}}`,
+			),
+		},
+		{
+			name:   "payment status overrides invalid request body",
+			status: http.StatusPaymentRequired,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","code":"invalid_request_error"}}`),
+		},
+		{
+			name:   "rate limit status overrides invalid request body",
+			status: http.StatusTooManyRequests,
+			err:    errors.New(`{"error":{"type":"invalid_request_error","code":"invalid_request_error"}}`),
+		},
+		{
+			name:   "model not found overrides invalid request type",
+			status: http.StatusBadRequest,
+			err: errors.New(
+				`{"error":{"type":"invalid_request_error","code":"model_not_found","message":"unknown model"}}`,
+			),
+		},
+		{
+			name:   "model not found code prefix",
+			status: http.StatusBadRequest,
+			err:    errors.New("model_not_found: unknown model"),
+		},
 		{name: "quota", status: http.StatusTooManyRequests, err: errors.New("quota")},
 		{name: "transport", status: http.StatusBadGateway, err: errors.New("unexpected EOF")},
 		{name: "invalid JSON body", status: http.StatusBadGateway, err: fmt.Errorf("%s", `{"error":`)},

@@ -8,6 +8,7 @@ import (
 
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	cliproxysession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 )
 
 const (
@@ -227,11 +228,75 @@ func homeSessionAliasTTL(cfg *internalconfig.Config) time.Duration {
 	return parsed
 }
 
-func (m *Manager) homeDispatchSessionID(opts cliproxyexecutor.Options) string {
-	primary, fallback := extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
-	if primary == "" || m == nil {
-		return primary
+func isHierarchyParent(primary, fallback string) bool {
+	if primary == "" || fallback == "" || primary == fallback {
+		return false
 	}
+	if strings.Contains(primary, ":agent:") {
+		return true
+	}
+	primaryPrefix, _, primaryHasPrefix := strings.Cut(primary, ":")
+	fallbackPrefix, _, fallbackHasPrefix := strings.Cut(fallback, ":")
+	if primaryHasPrefix && fallbackHasPrefix {
+		return primaryPrefix == fallbackPrefix
+	}
+	return !primaryHasPrefix && !fallbackHasPrefix
+}
+
+func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string, string) {
+	primary, fallback := extractExplicitSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+	hasAuthoritativeInput := primary != ""
+	if primary == "" {
+		if canonicalID := sessionMetadataString(opts.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey); canonicalID != "" {
+			primary = canonicalID
+		} else if lcpID := sessionMetadataString(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey); lcpID != "" {
+			primary = lcpID
+		} else {
+			primary, fallback = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+			hasAuthoritativeInput = primary != ""
+		}
+	}
+	if primary == "" || m == nil {
+		return primary, ""
+	}
+
+	parentSessionID := ""
+	aliasFallback := ""
+	if fallback != "" && fallback != primary {
+		if isHierarchyParent(primary, fallback) {
+			parentSessionID = fallback
+		} else {
+			aliasFallback = fallback
+		}
+	}
+	if !hasAuthoritativeInput && parentSessionID == "" {
+		parentSessionID = sessionMetadataString(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+	}
+
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
-	return m.homeSessionAliases.canonical(primary, fallback, homeSessionAliasTTL(cfg), time.Now())
+	ttl := homeSessionAliasTTL(cfg)
+	now := time.Now()
+	canonical := m.homeSessionAliases.canonical(primary, aliasFallback, ttl, now)
+	if parentSessionID != "" {
+		if parentSessionID == canonical || parentSessionID == primary ||
+			(aliasFallback != "" && parentSessionID == aliasFallback) {
+			parentSessionID = ""
+		} else {
+			parentSessionID = m.homeSessionAliases.canonical(parentSessionID, "", ttl, now)
+			if parentSessionID == canonical {
+				parentSessionID = ""
+			}
+		}
+	}
+	canonical = cliproxysession.BoundSessionIdentity(canonical)
+	parentSessionID = cliproxysession.BoundSessionIdentity(parentSessionID)
+	if canonical == parentSessionID {
+		parentSessionID = ""
+	}
+	return canonical, parentSessionID
+}
+
+func (m *Manager) homeDispatchSessionID(opts cliproxyexecutor.Options) string {
+	sessionID, _ := m.homeDispatchSessionIDs(opts)
+	return sessionID
 }

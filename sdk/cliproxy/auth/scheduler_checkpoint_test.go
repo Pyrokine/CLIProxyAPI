@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -330,6 +331,58 @@ func TestSchedulerCheckpointRestoresWeightedProgress(t *testing.T) {
 	)
 	if errPick != nil || picked == nil || picked.ID != "b" {
 		t.Fatalf("restored weighted pickSingle() = (%#v, %v), want b", picked, errPick)
+	}
+}
+
+func TestSchedulerCheckpointRestoresWeightedSurvivorCreditsAfterPoolChange(t *testing.T) {
+	store := NewFileSchedulerCheckpointStore(t.TempDir())
+	first := newSchedulerForTest(
+		&WeightedRoundRobinSelector{},
+		&Auth{ID: "a", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "3"}},
+		&Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "2"}},
+		&Auth{ID: "c", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1"}},
+	)
+	if errStart := first.startCheckpoint(context.Background(), store); errStart != nil {
+		t.Fatalf("startCheckpoint() error = %v", errStart)
+	}
+	picked, errPick := first.pickSingle(
+		context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil,
+	)
+	if errPick != nil || picked == nil || picked.ID != "a" {
+		t.Fatalf("first weighted pickSingle() = (%#v, %v), want a", picked, errPick)
+	}
+	if errStop := first.stopCheckpoint(context.Background()); errStop != nil {
+		t.Fatalf("stopCheckpoint() error = %v", errStop)
+	}
+
+	second := newSchedulerForTest(
+		&WeightedRoundRobinSelector{},
+		&Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "2"}},
+		&Auth{ID: "c", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1"}},
+		&Auth{ID: "d", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1"}},
+	)
+	if errStart := second.startCheckpoint(context.Background(), store); errStart != nil {
+		t.Fatalf("restore startCheckpoint() error = %v", errStart)
+	}
+	cleanupSchedulerCheckpoint(t, second)
+
+	provider := second.providers["gemini"]
+	if provider == nil || provider.modelShards[""] == nil || provider.modelShards[""].readyByPriority[0] == nil {
+		t.Fatal("restored weighted ready view is missing")
+	}
+	state := provider.modelShards[""].readyByPriority[0].all.weightedState
+	if len(state.current) != 2 || state.current["b"] != 2 || state.current["c"] != 1 {
+		t.Fatalf("restored survivor credits = %#v, want b:2 c:1", state.current)
+	}
+	if _, restoredRemoved := state.current["a"]; restoredRemoved {
+		t.Fatalf("removed auth credit was restored: %#v", state.current)
+	}
+	wantWeights := map[string]int64{"b": 2, "c": 1, "d": 1}
+	if !maps.Equal(state.weights, wantWeights) {
+		t.Fatalf("restored weights = %#v, want %#v", state.weights, wantWeights)
+	}
+	if state.lastPicked != "a" {
+		t.Fatalf("restored last picked = %q, want a", state.lastPicked)
 	}
 }
 

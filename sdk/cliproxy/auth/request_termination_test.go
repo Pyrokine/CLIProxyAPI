@@ -25,7 +25,7 @@ func TestRequestTerminatedErrorSkipsRetryAndCreditsFallback(t *testing.T) {
 		t.Fatal("terminated request must not use Antigravity credits fallback")
 	}
 	if _, retry := manager.shouldRetryAfterError(
-		errTerminated,
+		context.Background(), cliproxyexecutor.Options{}, errTerminated,
 		0,
 		[]string{"antigravity"},
 		"claude-test",

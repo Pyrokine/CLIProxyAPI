@@ -709,7 +709,7 @@ func TestWrapStreamResultStopsAfterTerminalError(t *testing.T) {
 	}
 }
 
-func TestTryRefreshAfterUnauthorizedUsesRuntimeAuthIndex(t *testing.T) {
+func TestTryRefreshAfterUnauthorizedSkipsRuntimeAuthWithIndex(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	executor := &runtimeIndexRefreshExecutor{}
 	manager.RegisterExecutor(executor)
@@ -728,15 +728,12 @@ func TestTryRefreshAfterUnauthorizedUsesRuntimeAuthIndex(t *testing.T) {
 		&Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
 		false,
 	)
-	if !ok || !executor.called {
-		t.Fatalf("tryRefreshAfterUnauthorized() = (%#v, %v), refresh called = %v", refreshed, ok, executor.called)
-	}
-	if refreshed == nil || refreshed.Generation != 0 || authAccessToken(refreshed) != "refreshed" {
-		t.Fatalf("refreshed auth = %#v", refreshed)
+	if ok || executor.called || refreshed != auth || authAccessToken(auth) != "expired" {
+		t.Fatalf("runtime credential refreshed: ok=%v called=%v changed=%v", ok, executor.called, refreshed != auth)
 	}
 }
 
-func TestTryRefreshAfterUnauthorizedRefreshesRuntimeAuthThroughHome(t *testing.T) {
+func TestTryRefreshAfterUnauthorizedSkipsHomeRefreshForRuntimeAuth(t *testing.T) {
 	payload, errMarshal := json.Marshal(
 		homeAuthDispatchResponse{
 			AuthIndex: "returned-index",
@@ -772,16 +769,8 @@ func TestTryRefreshAfterUnauthorizedRefreshesRuntimeAuthThroughHome(t *testing.T
 		&Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
 		false,
 	)
-	if !ok || refreshed == nil {
-		t.Fatalf("tryRefreshAfterUnauthorized() = (%#v, %v)", refreshed, ok)
-	}
-	if executor.called {
-		t.Fatal("executor refresh was called after Home returned a refreshed credential")
-	}
-	if client.index != "home-index" || refreshed.ID != "home-auth" ||
-		refreshed.Index != "returned-index" || authAccessToken(refreshed) != "refreshed" ||
-		refreshed.Generation != 0 {
-		t.Fatalf("refreshed auth = %#v, requested index = %q", refreshed, client.index)
+	if ok || refreshed != auth || executor.called || client.index != "" {
+		t.Fatalf("runtime refresh: ok=%v changed=%v executor=%v home index=%q", ok, refreshed != auth, executor.called, client.index)
 	}
 }
 
@@ -820,7 +809,7 @@ func TestTryRefreshAfterUnauthorizedRejectsUnchangedHomeCredential(t *testing.T)
 		&Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
 		false,
 	)
-	if ok || refreshed != auth || !executor.called {
+	if ok || refreshed != auth || executor.called {
 		t.Fatalf("tryRefreshAfterUnauthorized() = (%#v, %v), refresh called = %v", refreshed, ok, executor.called)
 	}
 }
@@ -846,7 +835,7 @@ func TestTryRefreshAfterUnauthorizedRejectsUnchangedRuntimeCredential(t *testing
 		&Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"},
 		false,
 	)
-	if ok || refreshed != auth || !executor.called {
+	if ok || refreshed != auth || executor.called {
 		t.Fatalf("tryRefreshAfterUnauthorized() = (%#v, %v), refresh called = %v", refreshed, ok, executor.called)
 	}
 }

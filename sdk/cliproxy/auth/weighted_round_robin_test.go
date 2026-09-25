@@ -3,12 +3,42 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
+
+func assertWeightedRetryDistribution(
+	t *testing.T,
+	pick func(map[string]struct{}) (*Auth, error),
+) {
+	t.Helper()
+	counts := make(map[string]int)
+	for request := range 8 {
+		tried := make(map[string]struct{})
+		for attempt := range 3 {
+			picked, errPick := pick(tried)
+			if errPick != nil {
+				t.Fatalf("pick request %d attempt %d error = %v", request, attempt, errPick)
+			}
+			if picked == nil {
+				t.Fatalf("pick request %d attempt %d returned nil", request, attempt)
+			}
+			counts[picked.ID]++
+			tried[picked.ID] = struct{}{}
+		}
+	}
+
+	want := map[string]int{"a": 8, "b": 7, "c": 7, "d": 2}
+	for authID, wantCount := range want {
+		if counts[authID] != wantCount {
+			t.Fatalf("auth %q picks = %d, want %d; all = %#v", authID, counts[authID], wantCount, counts)
+		}
+	}
+}
 
 func TestWeightedRoundRobinSelectorDistributesAndSkipsNonPositiveWeights(t *testing.T) {
 	selector := &WeightedRoundRobinSelector{}
@@ -31,6 +61,75 @@ func TestWeightedRoundRobinSelectorDistributesAndSkipsNonPositiveWeights(t *test
 		if counts[authID] != want {
 			t.Fatalf("auth %q picks = %d, want %d; all = %#v", authID, counts[authID], want, counts)
 		}
+	}
+}
+
+func TestWeightedRoundRobinSelectorPreservesCreditsAcrossRetryExclusions(t *testing.T) {
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{AttributeWeight: "5"}},
+		{ID: "b", Attributes: map[string]string{AttributeWeight: "3"}},
+		{ID: "c", Attributes: map[string]string{AttributeWeight: "2"}},
+		{ID: "d", Attributes: map[string]string{AttributeWeight: "1"}},
+	}
+
+	assertWeightedRetryDistribution(t, func(tried map[string]struct{}) (*Auth, error) {
+		candidates := make([]*Auth, 0, len(auths)-len(tried))
+		for _, auth := range auths {
+			if _, alreadyTried := tried[auth.ID]; !alreadyTried {
+				candidates = append(candidates, auth)
+			}
+		}
+		return selector.Pick(
+			context.Background(), "gemini", "model", cliproxyexecutor.Options{}, candidates,
+		)
+	})
+}
+
+func TestSmoothWeightedStatePreservesTransientCreditsAndBoundsStaleEntries(t *testing.T) {
+	authA := &Auth{ID: "a", Attributes: map[string]string{AttributeWeight: "1"}}
+	authB := &Auth{ID: "b", Attributes: map[string]string{AttributeWeight: "1"}}
+	state := &smoothWeightedState{lastPicked: authA.ID}
+	state.prepare(authWeightVector([]*Auth{authA, authB}))
+	state.current[authA.ID] = -2
+	state.current[authB.ID] = 1
+
+	state.prepare(authWeightVector([]*Auth{authB}))
+	if state.current[authA.ID] != -2 || state.current[authB.ID] != 1 {
+		t.Fatalf("credits after subset prepare = %#v, want a:-2 b:1", state.current)
+	}
+	if picked := pickSmoothWeightedAuth([]*Auth{authB}, state); picked != authB {
+		t.Fatalf("pickSmoothWeightedAuth() = %#v, want auth b", picked)
+	}
+	if state.current[authA.ID] != -2 {
+		t.Fatalf("excluded auth credit = %d, want -2", state.current[authA.ID])
+	}
+
+	lastPicked := state.lastPicked
+	authB.Attributes[AttributeWeight] = "5"
+	state.prepare(authWeightVector([]*Auth{authB}))
+	if len(state.current) != 0 {
+		t.Fatalf("credits after configured weight change = %#v, want empty", state.current)
+	}
+	if state.lastPicked != lastPicked {
+		t.Fatalf("last picked after weight change = %q, want %q", state.lastPicked, lastPicked)
+	}
+
+	for index := range maxSmoothWeightedStateEntries * 3 {
+		auth := &Auth{
+			ID:         fmt.Sprintf("churn-%d", index),
+			Attributes: map[string]string{AttributeWeight: "5"},
+		}
+		state.prepare(authWeightVector([]*Auth{auth}))
+		if picked := pickSmoothWeightedAuth([]*Auth{auth}, state); picked != auth {
+			t.Fatalf("pickSmoothWeightedAuth() churn #%d = %#v, want current auth", index, picked)
+		}
+	}
+	if len(state.current) > maxSmoothWeightedStateEntries || len(state.weights) > maxSmoothWeightedStateEntries {
+		t.Fatalf(
+			"weighted state grew beyond limit: current=%d weights=%d limit=%d",
+			len(state.current), len(state.weights), maxSmoothWeightedStateEntries,
+		)
 	}
 }
 
@@ -74,6 +173,46 @@ func TestSchedulerWeightedRoundRobinSkipsZeroWeightPriorityTier(t *testing.T) {
 	}
 }
 
+func TestSchedulerWeightedRoundRobinPreservesCreditsAcrossRetryTriedFilter(t *testing.T) {
+	scheduler := newSchedulerForTest(
+		&WeightedRoundRobinSelector{},
+		&Auth{ID: "a", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "5"}},
+		&Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "3"}},
+		&Auth{ID: "c", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "2"}},
+		&Auth{ID: "d", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1"}},
+	)
+
+	assertWeightedRetryDistribution(t, func(tried map[string]struct{}) (*Auth, error) {
+		return scheduler.pickSingle(
+			context.Background(), "gemini", "", cliproxyexecutor.Options{}, tried,
+		)
+	})
+}
+
+func TestSchedulerWeightedRoundRobinPreservesSurvivorCreditsDuringCooldown(t *testing.T) {
+	authA := &Auth{ID: "a", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "3"}}
+	authB := &Auth{ID: "b", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "2"}}
+	authC := &Auth{ID: "c", Provider: "gemini", Attributes: map[string]string{AttributeWeight: "1"}}
+	scheduler := newSchedulerForTest(&WeightedRoundRobinSelector{}, authA, authB, authC)
+
+	picked, errPick := scheduler.pickSingle(
+		context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil,
+	)
+	if errPick != nil || picked == nil || picked.ID != authA.ID {
+		t.Fatalf("first pickSingle() = (%#v, %v), want auth a", picked, errPick)
+	}
+
+	authB.Unavailable = true
+	authB.NextRetryAfter = time.Now().Add(time.Hour)
+	scheduler.upsertAuth(authB)
+	picked, errPick = scheduler.pickSingle(
+		context.Background(), "gemini", "", cliproxyexecutor.Options{}, nil,
+	)
+	if errPick != nil || picked == nil || picked.ID != authC.ID {
+		t.Fatalf("pickSingle() while auth b is cooling = (%#v, %v), want auth c", picked, errPick)
+	}
+}
+
 func TestSchedulerMixedProvidersUsesCredentialWeights(t *testing.T) {
 	scheduler := newSchedulerForTest(
 		&WeightedRoundRobinSelector{},
@@ -101,6 +240,24 @@ func TestSchedulerMixedProvidersUsesCredentialWeights(t *testing.T) {
 	if providers["gemini"] != 50 || providers["claude"] != 50 {
 		t.Fatalf("provider picks = %#v, want gemini:claude=50:50", providers)
 	}
+}
+
+func TestSchedulerMixedProvidersPreservesCreditsAcrossRetryTriedFilter(t *testing.T) {
+	scheduler := newSchedulerForTest(
+		&WeightedRoundRobinSelector{},
+		&Auth{ID: "a", Provider: "provider-a", Attributes: map[string]string{AttributeWeight: "5"}},
+		&Auth{ID: "b", Provider: "provider-b", Attributes: map[string]string{AttributeWeight: "3"}},
+		&Auth{ID: "c", Provider: "provider-c", Attributes: map[string]string{AttributeWeight: "2"}},
+		&Auth{ID: "d", Provider: "provider-d", Attributes: map[string]string{AttributeWeight: "1"}},
+	)
+	providers := []string{"provider-a", "provider-b", "provider-c", "provider-d"}
+
+	assertWeightedRetryDistribution(t, func(tried map[string]struct{}) (*Auth, error) {
+		picked, _, errPick := scheduler.pickMixed(
+			context.Background(), providers, "", cliproxyexecutor.Options{}, tried,
+		)
+		return picked, errPick
+	})
 }
 
 func TestSchedulerWeightedRoundRobinResetsCreditsWhenWeightsChange(t *testing.T) {

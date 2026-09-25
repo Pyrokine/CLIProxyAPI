@@ -17,9 +17,10 @@ const (
 	TypeAntigravity CredentialType = "antigravity"
 	TypeKimi        CredentialType = "kimi"
 	TypeXAI         CredentialType = "xai"
+	TypeDevin       CredentialType = "devin"
 )
 
-// EntryKey returns the provider-aware credential key used by quota status and persistence.
+// EntryKey returns the provider-aware credential key used by legacy single-identity providers.
 func EntryKey(credType CredentialType, fileName string) string {
 	trimmedType := strings.TrimSpace(string(credType))
 	trimmedFileName := strings.TrimSpace(fileName)
@@ -27,6 +28,19 @@ func EntryKey(credType CredentialType, fileName string) string {
 		return ""
 	}
 	return trimmedType + "::" + trimmedFileName
+}
+
+// BindingEntryKey preserves legacy keys and scopes multi-identity Devin files by auth index.
+func BindingEntryKey(credType CredentialType, fileName, authIndex string) string {
+	base := EntryKey(credType, fileName)
+	if base == "" || credType != TypeDevin {
+		return base
+	}
+	authIndex = strings.TrimSpace(authIndex)
+	if authIndex == "" {
+		return base
+	}
+	return base + "::" + authIndex
 }
 
 // FetchCompleteness describes whether a provider result contains every requested quota field.

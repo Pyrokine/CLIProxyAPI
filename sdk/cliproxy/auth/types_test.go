@@ -152,3 +152,35 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 		t.Fatalf("duplicate config entries should be separated by source-derived seed, got %q", geminiIndex)
 	}
 }
+
+func TestEnsureIndexPrefersExplicitSeedWithoutChangingLegacyFileIdentity(t *testing.T) {
+	t.Parallel()
+
+	legacyA := (&Auth{Provider: "devin", FileName: "devin-shared.json"}).EnsureIndex()
+	legacyB := (&Auth{Provider: "devin", FileName: "devin-shared.json"}).EnsureIndex()
+	if legacyA == "" || legacyA != legacyB {
+		t.Fatalf("legacy file indexes = %q/%q, want equal non-empty indexes", legacyA, legacyB)
+	}
+
+	seededA := (&Auth{
+		Provider: "devin", FileName: "devin-shared.json",
+		Attributes: map[string]string{AttributeAuthIndexSeed: "devin-user-a"},
+	}).EnsureIndex()
+	seededB := (&Auth{
+		Provider: "devin", FileName: "devin-shared.json",
+		Attributes: map[string]string{AttributeAuthIndexSeed: "devin-user-b"},
+	}).EnsureIndex()
+	seededACopy := (&Auth{
+		Provider: "devin", FileName: "renamed.json",
+		Attributes: map[string]string{AttributeAuthIndexSeed: " devin-user-a "},
+	}).EnsureIndex()
+	if seededA == "" || seededB == "" || seededA == seededB {
+		t.Fatalf("explicit seed indexes = %q/%q, want distinct non-empty indexes", seededA, seededB)
+	}
+	if seededA != seededACopy {
+		t.Fatalf("same explicit seed indexes = %q/%q, want equal indexes", seededA, seededACopy)
+	}
+	if seededA == legacyA || seededB == legacyA {
+		t.Fatalf("explicit seed reused legacy file index %q", legacyA)
+	}
+}

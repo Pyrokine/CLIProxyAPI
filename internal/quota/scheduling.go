@@ -150,6 +150,8 @@ func parseSchedulingWindow(
 		return parseKimiSchedulingWindow(value, now)
 	case TypeXAI:
 		return parseXAISchedulingWindow(value, model)
+	case TypeDevin:
+		return parseDevinSchedulingWindow(value)
 	default:
 		return quotaWindow{}, fmt.Errorf("quota scheduling is not supported for type %s", credType)
 	}
@@ -438,6 +440,31 @@ func kimiQuotaWindow(value map[string]any, now time.Time) (quotaWindow, bool) {
 		}
 	}
 	return quotaWindow{headroom: headroom, resetAt: resetAt}, true
+}
+
+func parseDevinSchedulingWindow(value any) (quotaWindow, error) {
+	root := quotaMap(value)
+	if root == nil {
+		return quotaWindow{}, errors.New("devin quota status is missing")
+	}
+	windows := make([]quotaWindow, 0, 2)
+	appendWindow := func(presentKey, remainingKey, resetKey string) {
+		present, known := quotaBool(root[presentKey])
+		if !known || !present {
+			return
+		}
+		remaining, ok := quotaNumber(root[remainingKey])
+		if !ok || remaining < 0 || remaining > 100 {
+			return
+		}
+		windows = append(windows, quotaWindow{
+			headroom: remaining / 100,
+			resetAt:  quotaAbsoluteTime(root[resetKey]),
+		})
+	}
+	appendWindow("daily_quota_present", "daily_quota_remaining_percent", "daily_quota_reset_at")
+	appendWindow("weekly_quota_present", "weekly_quota_remaining_percent", "weekly_quota_reset_at")
+	return strictestQuotaWindow(windows)
 }
 
 func parseXAISchedulingWindow(value any, model string) (quotaWindow, error) {
