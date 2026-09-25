@@ -3,9 +3,11 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestCodexFunctionCallNonStreamPreservesItemAndCallIDs(t *testing.T) {
@@ -82,6 +84,71 @@ func TestConvertCodexResponseToInteractionsIncompleteTerminal(t *testing.T) {
 		return
 	}
 	t.Fatalf("interaction.completed event missing: %q", streamOut)
+}
+
+func TestCodexResponseToInteractionsValidatesReasoningSignatures(t *testing.T) {
+	valid := codexSourceSignatureForTest()
+	for _, testCase := range []struct {
+		name      string
+		signature string
+		want      string
+	}{
+		{name: "valid", signature: valid, want: valid},
+		{name: "foreign", signature: codexClaudeSignatureForTest()},
+		{name: "invalid", signature: "gpt#invalid"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			raw := []byte(`{"id":"response-1","model":"gpt-test","output":[{"type":"reasoning","encrypted_content":"` + testCase.signature + `","summary":[]}]}`)
+			out := convertCodexResponseToInteractionsNonStream(
+				context.Background(), "gpt-test", nil, nil, raw, nil,
+			)
+			if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
+				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
+			}
+			if testCase.want == "" && gjson.GetBytes(out, "steps.#").Int() != 0 {
+				t.Fatalf("invalid signature-only reasoning produced a step: %s", out)
+			}
+		})
+	}
+}
+
+func TestCodexResponseToInteractionsStreamPreservesSignatureOnlyReasoning(t *testing.T) {
+	valid := codexSourceSignatureForTest()
+	var state any
+	events := convertCodexResponseToInteractions(
+		context.Background(),
+		"gpt-test",
+		nil,
+		nil,
+		[]byte(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","encrypted_content":"`+valid+`","summary":[]}}`),
+		&state,
+	)
+	for _, event := range events {
+		payload := codexInteractionEventPayload(event)
+		if got := payload.Get("step.signature").String(); got == valid {
+			return
+		}
+		if got := payload.Get("delta.signature").String(); got == valid {
+			return
+		}
+	}
+	t.Fatalf("valid reasoning signature missing: %q", events)
+}
+
+func codexSourceSignatureForTest() string {
+	payload := make([]byte, 1+8+16+16+32)
+	payload[0] = 0x80
+	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func codexClaudeSignatureForTest() string {
+	channel := protowire.AppendTag(nil, 1, protowire.VarintType)
+	channel = protowire.AppendVarint(channel, 12)
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channel)
+	payload := protowire.AppendTag(nil, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	return base64.StdEncoding.EncodeToString(payload)
 }
 
 func codexInteractionEventPayload(raw []byte) gjson.Result {

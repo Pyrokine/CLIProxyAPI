@@ -3,10 +3,12 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestConvertInteractionsRequestToAntigravityEffortDoesNotSetSummary(t *testing.T) {
@@ -193,4 +195,86 @@ func TestRewriteInteractionsFunctionNamesNormalizesNonStringNames(t *testing.T) 
 	); name.Type != gjson.String || name.String() != "true" {
 		t.Fatalf("allowedFunctionNames.0 = %s, want string true", name.Raw)
 	}
+}
+
+func TestConvertInteractionsRequestToAntigravityToolChoiceNoneOmitsTools(t *testing.T) {
+	for _, choice := range []string{`"none"`, `{"type":"none"}`} {
+		input := []byte(`{"input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}],"tool_choice":` + choice + `}`)
+		out := convertInteractionsRequestToAntigravity("gemini-test", input, false)
+		if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+			t.Fatalf("tool mode = %q, want NONE; output=%s", got, out)
+		}
+		if gjson.GetBytes(out, "request.tools").Exists() {
+			t.Fatalf("request.tools must be omitted; output=%s", out)
+		}
+	}
+}
+
+func TestConvertAntigravityResponseToInteractionsValidatesSignatures(t *testing.T) {
+	valid := antigravityInteractionsSignatureForTest()
+	for _, testCase := range []struct {
+		name      string
+		signature string
+		want      string
+	}{
+		{name: "valid", signature: valid, want: valid},
+		{name: "foreign", signature: antigravityClaudeSignatureForTest()},
+		{name: "invalid", signature: "gemini#invalid"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			raw := []byte(`{"response":{"candidates":[{"content":{"parts":[{"thought":true,"thoughtSignature":"` + testCase.signature + `"}]}}]}}`)
+			out := convertAntigravityResponseToInteractionsNonStream(
+				context.Background(), "antigravity-test", nil, nil, raw, nil,
+			)
+			if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
+				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
+			}
+			if testCase.want == "" && gjson.GetBytes(out, "steps.#").Int() != 0 {
+				t.Fatalf("invalid signature-only part produced a step: %s", out)
+			}
+		})
+	}
+}
+
+func TestConvertAntigravityResponseToInteractionsStreamPreservesSignatureOnlyPart(t *testing.T) {
+	valid := antigravityInteractionsSignatureForTest()
+	var state any
+	events := convertAntigravityResponseToInteractions(
+		context.Background(),
+		"antigravity-test",
+		nil,
+		nil,
+		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"thought":true,"thoughtSignature":"`+valid+`"}]}}]}}`),
+		&state,
+	)
+	for _, event := range events {
+		for line := range bytes.SplitSeq(event, []byte("\n")) {
+			if !bytes.HasPrefix(line, []byte("data:")) {
+				continue
+			}
+			payload := gjson.ParseBytes(bytes.TrimSpace(line[len("data:"):]))
+			if got := payload.Get("delta.signature").String(); got == valid {
+				return
+			}
+		}
+	}
+	t.Fatalf("valid signature delta missing: %q", events)
+}
+
+func antigravityInteractionsSignatureForTest() string {
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, []byte{0x01, 0x02, 0x03, 0x04})
+	payload := protowire.AppendTag(nil, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func antigravityClaudeSignatureForTest() string {
+	channel := protowire.AppendTag(nil, 1, protowire.VarintType)
+	channel = protowire.AppendVarint(channel, 12)
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channel)
+	payload := protowire.AppendTag(nil, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	return base64.StdEncoding.EncodeToString(payload)
 }

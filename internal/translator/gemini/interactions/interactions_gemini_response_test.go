@@ -3,9 +3,11 @@ package interactions
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"testing"
 
 	"github.com/tidwall/gjson"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 func TestConvertGeminiResponseToInteractionsNonStreamSnakeCaseUsage(t *testing.T) {
@@ -68,6 +70,92 @@ func assertInteractionsUsage(t *testing.T, payload []byte, prefix string, want m
 			t.Fatalf("%s = %s, want %d; payload: %s", path, value.Raw, expected, payload)
 		}
 	}
+}
+
+func TestGeminiResponseToInteractionsValidatesSignatures(t *testing.T) {
+	valid := geminiInteractionsSignatureForTest()
+	for _, testCase := range []struct {
+		name      string
+		signature string
+		want      string
+	}{
+		{name: "valid", signature: valid, want: valid},
+		{name: "foreign", signature: claudeInteractionsSignatureForTest()},
+		{name: "invalid", signature: "gemini#invalid"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			raw := []byte(`{"responseId":"resp-1","candidates":[{"content":{"role":"model","parts":[{"thought":true,"thoughtSignature":"` + testCase.signature + `"}]}}]}`)
+			out := convertGeminiResponseToInteractionsNonStream(
+				context.Background(), "gemini-test", nil, nil, raw, nil,
+			)
+			if got := gjson.GetBytes(out, "steps.0.signature").String(); got != testCase.want {
+				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.want, out)
+			}
+			if testCase.want == "" && gjson.GetBytes(out, "steps.#").Int() != 0 {
+				t.Fatalf("invalid signature-only part produced a step: %s", out)
+			}
+		})
+	}
+}
+
+func TestInteractionsResponseToGeminiPreservesRecognizedSignatureOnlyParts(t *testing.T) {
+	tests := []struct {
+		name      string
+		model     string
+		signature string
+	}{
+		{name: "gemini", model: "gemini-test", signature: geminiInteractionsSignatureForTest()},
+		{name: "claude", model: "claude-test", signature: claudeInteractionsSignatureForTest()},
+		{name: "gpt", model: "gpt-test", signature: gptInteractionsSignatureForTest()},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			raw := []byte(`{"interaction":{"id":"interaction-1","model":"` + testCase.model + `","steps":[{"type":"thought","signature":"` + testCase.signature + `","content":[]}]}}`)
+			out := convertInteractionsResponseToGeminiNonStream(
+				context.Background(), testCase.model, nil, nil, raw, nil,
+			)
+			if got := gjson.GetBytes(out, "candidates.0.content.parts.0.thoughtSignature").String(); got != testCase.signature {
+				t.Fatalf("signature = %q, want %q; output=%s", got, testCase.signature, out)
+			}
+		})
+	}
+}
+
+func TestInteractionsResponseToGeminiDropsForeignSignature(t *testing.T) {
+	raw := []byte(`{"interaction":{"id":"interaction-1","model":"gemini-test","steps":[{"type":"thought","signature":"` + claudeInteractionsSignatureForTest() + `","content":[{"type":"text","text":"reason"}]}]}}`)
+	out := convertInteractionsResponseToGeminiNonStream(
+		context.Background(), "gemini-test", nil, nil, raw, nil,
+	)
+	if signature := gjson.GetBytes(out, "candidates.0.content.parts.0.thoughtSignature"); signature.Exists() {
+		t.Fatalf("foreign signature survived: %s; output=%s", signature.Raw, out)
+	}
+	if got := gjson.GetBytes(out, "candidates.0.content.parts.0.text").String(); got != "reason" {
+		t.Fatalf("thought text = %q, want reason; output=%s", got, out)
+	}
+}
+
+func geminiInteractionsSignatureForTest() string {
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, []byte{0x01, 0x02, 0x03, 0x04})
+	payload := protowire.AppendTag(nil, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func claudeInteractionsSignatureForTest() string {
+	channel := protowire.AppendTag(nil, 1, protowire.VarintType)
+	channel = protowire.AppendVarint(channel, 12)
+	container := protowire.AppendTag(nil, 1, protowire.BytesType)
+	container = protowire.AppendBytes(container, channel)
+	payload := protowire.AppendTag(nil, 2, protowire.BytesType)
+	payload = protowire.AppendBytes(payload, container)
+	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func gptInteractionsSignatureForTest() string {
+	payload := make([]byte, 1+8+16+16+32)
+	payload[0] = 0x80
+	return base64.RawURLEncoding.EncodeToString(payload)
 }
 
 func TestInteractionsFunctionArgumentsAreAssembledAtStepStop(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -1321,7 +1322,7 @@ func appendGeminiPartToInteractionsStream(out [][]byte, st *streamState, part gj
 		out = append(out, translatorcommon.SSEEventData("step.delta", delta))
 		return appendInteractionsStepStop(out, st)
 	}
-	return out
+	return appendInteractionsThoughtSignature(out, st, part)
 }
 
 func appendInteractionsThoughtSignature(out [][]byte, st *streamState, part gjson.Result) [][]byte {
@@ -1346,8 +1347,20 @@ func interactionsFunctionPartID(part gjson.Result) string {
 }
 
 func interactionsThoughtSignature(part gjson.Result) string {
+	blockKind := sigcompat.BlockKindGeminiModelPart
+	if part.Get("functionCall").Exists() {
+		blockKind = sigcompat.BlockKindGeminiFunctionCall
+	}
 	for _, path := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
-		if signature := strings.TrimSpace(part.Get(path).String()); signature != "" {
+		rawSignature := strings.TrimSpace(part.Get(path).String())
+		if rawSignature == "" {
+			continue
+		}
+		if signature, compatible := sigcompat.CompatibleSignatureForProvider(
+			sigcompat.ProviderGemini,
+			rawSignature,
+			blockKind,
+		); compatible {
 			return signature
 		}
 	}
@@ -1365,6 +1378,9 @@ func geminiPartToInteractionsStep(part gjson.Result) []byte {
 		}
 		if args := fc.Get("args"); args.Exists() {
 			step, _ = sjson.SetRawBytes(step, "arguments", []byte(args.Raw))
+		}
+		if signature := interactionsThoughtSignature(part); signature != "" {
+			step, _ = sjson.SetBytes(step, "signature", signature)
 		}
 		return step
 	}
@@ -1389,6 +1405,14 @@ func geminiPartToInteractionsStep(part gjson.Result) []byte {
 		item := []byte(`{"text":""}`)
 		item, _ = sjson.SetBytes(item, "text", text.String())
 		step, _ = sjson.SetRawBytes(step, "content.-1", item)
+		if signature := interactionsThoughtSignature(part); signature != "" {
+			step, _ = sjson.SetBytes(step, "signature", signature)
+		}
+		return step
+	}
+	if signature := interactionsThoughtSignature(part); signature != "" {
+		step := []byte(`{"type":"thought","content":[]}`)
+		step, _ = sjson.SetBytes(step, "signature", signature)
 		return step
 	}
 	if inline := part.Get("inlineData"); inline.Exists() {

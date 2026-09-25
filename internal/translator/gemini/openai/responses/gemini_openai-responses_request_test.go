@@ -2,10 +2,12 @@ package responses
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
 	internalsignature "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 )
 
@@ -25,6 +27,41 @@ func TestReorderOpenAIResponsesDetachedReasoningDoesNotCrossUserMessage(t *testi
 	}
 	if got := reordered[1].Get("type").String(); got != "reasoning" {
 		t.Fatalf("item 1 = %q, want reasoning", got)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiMatchesMissingOutputBeforeFutureExplicitID(t *testing.T) {
+	inputJSON := []byte(`{
+		"input":[
+			{"type":"function_call","call_id":"call-a","name":"same","arguments":"{}"},
+			{"type":"function_call","name":"same","arguments":"{}"},
+			{"type":"function_call_output","name":"same","output":"generated-result"},
+			{"type":"function_call_output","call_id":"call-a","output":"explicit-result"}
+		]
+	}`)
+
+	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", inputJSON, false)
+	var callIDs []string
+	resultIDsByValue := make(map[string]string)
+	for _, content := range gjson.GetBytes(result, "contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if call := part.Get("functionCall"); call.Exists() {
+				callIDs = append(callIDs, call.Get("id").String())
+			}
+			if response := part.Get("functionResponse"); response.Exists() {
+				resultIDsByValue[response.Get("response.result").String()] = response.Get("id").String()
+			}
+		}
+	}
+	const generated = "call_responses_0000000000000001"
+	if len(callIDs) != 2 || callIDs[0] != "call-a" || callIDs[1] != generated {
+		t.Fatalf("function call IDs = %#v; result: %s", callIDs, result)
+	}
+	if got := resultIDsByValue["generated-result"]; got != generated {
+		t.Fatalf("named result ID = %q, want %q; result: %s", got, generated, result)
+	}
+	if got := resultIDsByValue["explicit-result"]; got != "call-a" {
+		t.Fatalf("future explicit result ID = %q, want call-a; result: %s", got, result)
 	}
 }
 
@@ -1082,6 +1119,143 @@ func TestConvertOpenAIResponsesRequestToGeminiCleansToolSchemaRequiredFields(t *
 	}
 	if got := required[1].String(); got != "industry" {
 		t.Fatalf("required[1] = %q, want industry. Schema: %s", got, schema.Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiConvertsNamespaceCustomTools(t *testing.T) {
+	input := []byte(`{
+		"tools":[{
+			"type":"namespace",
+			"name":"mcp__editor",
+			"tools":[{"type":"custom","name":"apply_patch","description":"Apply a patch"}]
+		}],
+		"tool_choice":{"type":"custom","name":"apply_patch","namespace":"mcp__editor"},
+		"input":[
+			{"type":"additional_tools","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]},
+			{"type":"custom_tool_call","call_id":"call-1","name":"apply_patch","namespace":"mcp__editor","input":"*** Begin Patch"},
+			{"type":"custom_tool_call_output","call_id":"call-1","output":"applied"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", input, false)
+	if len(output) == 0 {
+		t.Fatal("translation was rejected")
+	}
+	if got := gjson.GetBytes(output, "tools.0.functionDeclarations.0.name").String(); got != "mcp__editor__apply_patch" {
+		t.Fatalf("custom declaration name = %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "tools.0.functionDeclarations.0.parametersJsonSchema.required.0").String(); got != "input" {
+		t.Fatalf("custom declaration schema missing input wrapper: %s", output)
+	}
+	if got := gjson.GetBytes(output, "tools.0.functionDeclarations.1.name").String(); got != "lookup" {
+		t.Fatalf("additional tool declaration name = %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "toolConfig.functionCallingConfig.allowedFunctionNames.0").String(); got != "mcp__editor__apply_patch" {
+		t.Fatalf("tool choice = %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "contents.0.parts.0.functionCall.name").String(); got != "mcp__editor__apply_patch" {
+		t.Fatalf("custom call name = %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "contents.0.parts.0.functionCall.args.input").String(); got != "*** Begin Patch" {
+		t.Fatalf("custom call input = %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "contents.1.parts.0.functionResponse.name").String(); got != "mcp__editor__apply_patch" {
+		t.Fatalf("custom response name = %q; output=%s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiResolvesUniqueShortToolName(t *testing.T) {
+	input := []byte(`{
+		"tools":[{"type":"namespace","name":"first","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}],
+		"input":[{"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{}"}]
+	}`)
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", input, false)
+	if got := gjson.GetBytes(output, "contents.0.parts.0.functionCall.name").String(); got != "first__lookup" {
+		t.Fatalf("resolved name = %q, want first__lookup; output=%s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiRejectsAmbiguousShortToolName(t *testing.T) {
+	input := []byte(`{
+		"tools":[
+			{"type":"namespace","name":"first","tools":[{"type":"function","name":"lookup"}]},
+			{"type":"namespace","name":"second","tools":[{"type":"custom","name":"lookup"}]}
+		],
+		"input":[{"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{}"}]
+	}`)
+	output, errConvert := convertOpenAIResponsesRequestToGemini("gemini-3.6-flash", input, false)
+	if !errors.Is(errConvert, translatorcommon.ErrResponsesToolNameAmbiguous) {
+		t.Fatalf("error = %v, want ambiguous tool name", errConvert)
+	}
+	if output != nil {
+		t.Fatalf("ambiguous translation output = %s, want nil", output)
+	}
+	if publicOutput := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", input, false); publicOutput != nil {
+		t.Fatalf("public translator did not reject ambiguity: %s", publicOutput)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiPreservesStructuredAndMixedToolOutputs(t *testing.T) {
+	input := []byte(`{
+		"input":[
+			{"type":"function_call","call_id":"call-string","name":"read","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call-string","output":"{\"value\":1}"},
+			{"type":"function_call","call_id":"call-object","name":"read","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call-object","output":{"value":1}},
+			{"type":"function_call","call_id":"call-mixed","name":"read","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call-mixed","output":[
+				{"type":"text","text":"first"},
+				{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="},
+				{"type":"input_image","image_url":"data:image/jpeg;base64,d29ybGQ="},
+				{"type":"text","text":"second"}
+			]}
+		]
+	}`)
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", input, false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if got := contents[1].Get("parts.0.functionResponse.response.result"); got.Type != gjson.String || got.String() != `{"value":1}` {
+		t.Fatalf("raw string result changed type: %s; output=%s", got.Raw, output)
+	}
+	if got := contents[3].Get("parts.0.functionResponse.response.result.value").Int(); got != 1 {
+		t.Fatalf("object result = %d, want 1; output=%s", got, output)
+	}
+	mixed := contents[5].Get("parts.0.functionResponse")
+	if got := mixed.Get("response.result").String(); got != "first\nsecond" {
+		t.Fatalf("mixed text result = %q; output=%s", got, output)
+	}
+	if got := mixed.Get("parts.#").Int(); got != 2 {
+		t.Fatalf("mixed image part count = %d, want 2; output=%s", got, output)
+	}
+	if got := mixed.Get("parts.0.inlineData.mimeType").String(); got != "image/png" {
+		t.Fatalf("first image MIME = %q; output=%s", got, output)
+	}
+	if got := mixed.Get("parts.1.inlineData.mimeType").String(); got != "image/jpeg" {
+		t.Fatalf("second image MIME = %q; output=%s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGeminiDeduplicatesResultsAndKeepsImageSlots(t *testing.T) {
+	input := []byte(`{
+		"input":[
+			{"type":"function_call","call_id":"call-1","name":"read","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call-1","output":"old"},
+			{"type":"function_call_output","call_id":"call-1","output":"new"},
+			{"type":"message","role":"user","content":[
+				{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="},
+				{"type":"input_text","text":"continue"}
+			]}
+		]
+	}`)
+	output := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash", input, false)
+	contents := gjson.GetBytes(output, "contents").Array()
+	if len(contents) != 2 {
+		t.Fatalf("contents count = %d, want 2; output=%s", len(contents), output)
+	}
+	parts := contents[1].Get("parts").Array()
+	if len(parts) != 3 || parts[0].Get("text").String() != "continue" ||
+		parts[1].Get("inline_data.data").String() != "aGVsbG8=" ||
+		parts[2].Get("functionResponse.response.result").String() != "new" {
+		t.Fatalf("result-slot ordering or de-duplication failed: %s", contents[1].Raw)
 	}
 }
 

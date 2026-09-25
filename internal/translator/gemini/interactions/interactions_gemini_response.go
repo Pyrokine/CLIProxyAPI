@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -92,7 +93,7 @@ func convertInteractionsResponseToGeminiNonStream(
 	}
 	steps.ForEach(
 		func(_, step gjson.Result) bool {
-			parts = append(parts, interactionsStepToGeminiParts(step)...)
+			parts = append(parts, interactionsStepToGeminiParts(step, st.Model)...)
 			return true
 		},
 	)
@@ -160,8 +161,12 @@ func rememberInteractionsGeminiStep(root gjson.Result, st *interactionsToGeminiS
 	st.StepTypes[index] = step.Get("type").String()
 	st.StepNames[index] = step.Get("name").String()
 	st.StepIDs[index] = firstNonEmptyInteractionString(step.Get("call_id").String(), step.Get("id").String())
-	st.StepSignatures[index] = firstNonEmptyInteractionString(
-		step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String(),
+	st.StepSignatures[index] = compatibleGeminiInteractionSignature(
+		st.Model,
+		firstNonEmptyInteractionString(
+			step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String(),
+		),
+		st.StepTypes[index] == "function_call",
 	)
 	if st.StepTypes[index] == "function_call" {
 		st.StepArguments[index] = &strings.Builder{}
@@ -203,9 +208,13 @@ func interactionsStepDeltaToGeminiChunk(
 			st, modelName, [][]byte{geminiTextPartJSON(text, true)}, "", gjson.Result{}, false,
 		)
 	case "thought_signature":
-		signature := firstNonEmptyInteractionString(
-			delta.Get("signature").String(), delta.Get("thought_signature").String(),
-			delta.Get("thoughtSignature").String(),
+		signature := compatibleGeminiInteractionSignature(
+			st.Model,
+			firstNonEmptyInteractionString(
+				delta.Get("signature").String(), delta.Get("thought_signature").String(),
+				delta.Get("thoughtSignature").String(),
+			),
+			false,
 		)
 		if signature == "" {
 			return nil
@@ -248,14 +257,30 @@ func interactionsStepStopToGeminiChunk(
 	return buildInteractionsGeminiChunk(st, modelName, [][]byte{part}, "", gjson.Result{}, false)
 }
 
-func interactionsStepToGeminiParts(step gjson.Result) [][]byte {
+func interactionsStepToGeminiParts(step gjson.Result, modelName string) [][]byte {
 	switch step.Get("type").String() {
 	case "function_call":
-		return [][]byte{interactionsFunctionCallStepToGeminiPart(step)}
+		return [][]byte{interactionsFunctionCallStepToGeminiPart(step, modelName)}
 	case "function_result":
 		return [][]byte{interactionsFunctionResponseStepToGeminiPart(step)}
 	case "thought":
-		return interactionsContentToGeminiParts(step.Get("content"), true)
+		parts := interactionsContentToGeminiParts(step.Get("content"), true)
+		signature := compatibleGeminiInteractionSignature(
+			modelName,
+			firstNonEmptyInteractionString(
+				step.Get("signature").String(), step.Get("thoughtSignature").String(),
+				step.Get("thought_signature").String(),
+			),
+			false,
+		)
+		if signature == "" {
+			return parts
+		}
+		if len(parts) == 0 {
+			parts = append(parts, geminiTextPartJSON("", true))
+		}
+		parts[len(parts)-1], _ = sjson.SetBytes(parts[len(parts)-1], "thoughtSignature", signature)
+		return parts
 	default:
 		return interactionsContentToGeminiParts(step.Get("content"), false)
 	}
@@ -288,14 +313,18 @@ func interactionsContentToGeminiParts(content gjson.Result, thought bool) [][]by
 	return parts
 }
 
-func interactionsFunctionCallStepToGeminiPart(step gjson.Result) []byte {
+func interactionsFunctionCallStepToGeminiPart(step gjson.Result, modelName string) []byte {
 	part := []byte(`{"functionCall":{"name":"","args":{}}}`)
 	part, _ = sjson.SetBytes(part, "functionCall.name", step.Get("name").String())
 	if id := firstNonEmptyInteractionString(step.Get("call_id").String(), step.Get("id").String()); id != "" {
 		part, _ = sjson.SetBytes(part, "functionCall.id", id)
 	}
-	if signature := firstNonEmptyInteractionString(
-		step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String(),
+	if signature := compatibleGeminiInteractionSignature(
+		modelName,
+		firstNonEmptyInteractionString(
+			step.Get("signature").String(), step.Get("thoughtSignature").String(), step.Get("thought_signature").String(),
+		),
+		true,
 	); signature != "" {
 		part, _ = sjson.SetBytes(part, "thoughtSignature", signature)
 	}
@@ -303,6 +332,34 @@ func interactionsFunctionCallStepToGeminiPart(step gjson.Result) []byte {
 		part, "functionCall.args", firstExistingInteractionResult(step, "arguments", "args"),
 	)
 	return part
+}
+
+func compatibleGeminiInteractionSignature(modelName, rawSignature string, functionCall bool) string {
+	rawSignature = strings.TrimSpace(rawSignature)
+	if rawSignature == "" {
+		return ""
+	}
+	provider := sigcompat.ProviderFromModelName(modelName)
+	switch provider {
+	case sigcompat.ProviderClaude, sigcompat.ProviderGemini, sigcompat.ProviderGPT:
+	default:
+		provider = sigcompat.DetectProvider(rawSignature)
+	}
+	blockKind := sigcompat.BlockKindGPTReasoning
+	switch provider {
+	case sigcompat.ProviderClaude:
+		blockKind = sigcompat.BlockKindClaudeThinking
+	case sigcompat.ProviderGemini:
+		blockKind = sigcompat.BlockKindGeminiModelPart
+		if functionCall {
+			blockKind = sigcompat.BlockKindGeminiFunctionCall
+		}
+	}
+	normalized, compatible := sigcompat.CompatibleSignatureForProvider(provider, rawSignature, blockKind)
+	if !compatible {
+		return ""
+	}
+	return normalized
 }
 
 func interactionsFunctionResponseStepToGeminiPart(step gjson.Result) []byte {

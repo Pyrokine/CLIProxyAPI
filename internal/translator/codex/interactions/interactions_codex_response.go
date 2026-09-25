@@ -7,26 +7,28 @@ import (
 	"strings"
 	"time"
 
+	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 type codexToInteractionsStreamState struct {
-	Started            bool
-	Completed          bool
-	Done               bool
-	ActiveStepOpen     bool
-	ActiveStepType     string
-	ActiveStepIndex    int
-	StepIndex          int
-	ID                 string
-	Model              string
-	CreatedAt          int64
-	HasOutputText      bool
-	FunctionCallName   string
-	FunctionCallItemID string
-	FunctionCallID     string
+	Started                bool
+	Completed              bool
+	Done                   bool
+	ActiveStepOpen         bool
+	ActiveStepType         string
+	ActiveStepIndex        int
+	StepIndex              int
+	ID                     string
+	Model                  string
+	CreatedAt              int64
+	HasOutputText          bool
+	FunctionCallName       string
+	FunctionCallItemID     string
+	FunctionCallID         string
+	ReasoningSignatureSent bool
 }
 
 func convertCodexResponseToInteractions(
@@ -291,6 +293,12 @@ func appendCodexInteractionsStepStart(
 	stepStart := []byte(`{"index":0,"step":{"type":""},"event_type":"step.start"}`)
 	stepStart, _ = sjson.SetBytes(stepStart, "index", st.ActiveStepIndex)
 	stepStart, _ = sjson.SetBytes(stepStart, "step.type", stepType)
+	if stepType == "thought" {
+		if signature := compatibleCodexSourceSignature(item.Get("encrypted_content").String()); signature != "" {
+			stepStart, _ = sjson.SetBytes(stepStart, "step.signature", signature)
+			st.ReasoningSignatureSent = true
+		}
+	}
 	if stepType == "function_call" {
 		name := item.Get("name").String()
 		if name == "" {
@@ -332,6 +340,7 @@ func appendCodexInteractionsStepStop(out [][]byte, st *codexToInteractionsStream
 	out = append(out, translatorcommon.SSEEventData("step.stop", stepStop))
 	st.ActiveStepOpen = false
 	st.ActiveStepType = ""
+	st.ReasoningSignatureSent = false
 	return out
 }
 
@@ -354,11 +363,19 @@ func appendCodexMessageItemToInteractions(out []byte, item gjson.Result) []byte 
 
 func appendCodexReasoningItemToInteractions(out []byte, item gjson.Result) []byte {
 	text := codexReasoningText(item)
-	if text == "" {
+	signature := compatibleCodexSourceSignature(item.Get("encrypted_content").String())
+	if text == "" && signature == "" {
 		return out
 	}
-	step := []byte(`{"type":"thought","content":[{"type":"text","text":""}]}`)
-	step, _ = sjson.SetBytes(step, "content.0.text", text)
+	step := []byte(`{"type":"thought","content":[]}`)
+	if text != "" {
+		content := []byte(`{"type":"text","text":""}`)
+		content, _ = sjson.SetBytes(content, "text", text)
+		step, _ = sjson.SetRawBytes(step, "content.-1", content)
+	}
+	if signature != "" {
+		step, _ = sjson.SetBytes(step, "signature", signature)
+	}
 	out, _ = sjson.SetRawBytes(out, "steps.-1", step)
 	return out
 }
@@ -419,10 +436,21 @@ func appendCodexReasoningItemToInteractionsStream(
 	item gjson.Result,
 ) [][]byte {
 	text := codexReasoningText(item)
-	if text == "" {
+	signature := compatibleCodexSourceSignature(item.Get("encrypted_content").String())
+	if text == "" && signature == "" {
 		return out
 	}
 	out = ensureCodexInteractionsStep(out, st, "thought", item)
+	if signature != "" && !st.ReasoningSignatureSent {
+		delta := []byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`)
+		delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
+		delta, _ = sjson.SetBytes(delta, "delta.signature", signature)
+		out = append(out, translatorcommon.SSEEventData("step.delta", delta))
+		st.ReasoningSignatureSent = true
+	}
+	if text == "" {
+		return out
+	}
 	delta := []byte(`{"index":0,"delta":{"content":{"text":"","type":"text"},"type":"thought_summary"},"event_type":"step.delta"}`)
 	delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 	delta, _ = sjson.SetBytes(delta, "delta.content.text", text)
@@ -606,6 +634,18 @@ func setCodexInteractionsUsage(out []byte, path string, usage gjson.Result, stre
 		out, _ = sjson.SetBytes(out, path+".cached_tokens", cachedTokens)
 	}
 	return out
+}
+
+func compatibleCodexSourceSignature(rawSignature string) string {
+	normalized, compatible := sigcompat.CompatibleSignatureForProvider(
+		sigcompat.ProviderGPT,
+		rawSignature,
+		sigcompat.BlockKindGPTReasoning,
+	)
+	if !compatible {
+		return ""
+	}
+	return normalized
 }
 
 func mimeTypeFromCodexOutputFormat(outputFormat string) string {

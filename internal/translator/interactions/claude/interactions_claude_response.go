@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -74,14 +75,23 @@ func convertInteractionsResponseToClaudeNonStream(
 	if !steps.Exists() {
 		steps = root.Get("steps")
 	}
+	signatureModel := firstNonEmpty(interaction.Get("model").String(), root.Get("model").String(), modelName)
 	sawToolCall := false
 	steps.ForEach(
 		func(_, step gjson.Result) bool {
 			switch step.Get("type").String() {
 			case "thought":
-				for _, text := range interactionsContentTexts(step.Get("content")) {
+				signature := compatibleInteractionSignature(signatureModel, interactionsSignature(step), false)
+				texts := interactionsContentTexts(step.Get("content"))
+				if len(texts) == 0 && signature != "" {
+					texts = []string{""}
+				}
+				for _, text := range texts {
 					block := []byte(`{"type":"thinking","thinking":""}`)
 					block, _ = sjson.SetBytes(block, "thinking", text)
+					if signature != "" {
+						block, _ = sjson.SetBytes(block, "signature", signature)
+					}
 					out, _ = sjson.SetRawBytes(out, "content.-1", block)
 				}
 			case "function_call":
@@ -89,7 +99,7 @@ func convertInteractionsResponseToClaudeNonStream(
 				block := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 				block, _ = sjson.SetBytes(block, "id", interactionsToolID(step))
 				block, _ = sjson.SetBytes(block, "name", step.Get("name").String())
-				if signature := interactionsSignature(step); signature != "" {
+				if signature := compatibleInteractionSignature(signatureModel, interactionsSignature(step), true); signature != "" {
 					block, _ = sjson.SetBytes(block, "signature", signature)
 				}
 				args := firstExisting(step, "arguments", "args")
@@ -158,10 +168,14 @@ func interactionsStepStartToClaude(modelName string, root gjson.Result, st *inte
 		st.SawToolCall = true
 		st.ToolNames[index] = step.Get("name").String()
 		st.ToolIDs[index] = interactionsToolID(step)
-		st.ToolSignatures[index] = interactionsSignature(step)
+		st.ToolSignatures[index] = compatibleInteractionSignature(st.Model, interactionsSignature(step), true)
 		return appendClaudeToolBlockStart(out, index, st)
 	case "thought":
-		return appendClaudeContentBlockStart(out, "thinking", st)
+		out = appendClaudeContentBlockStart(out, "thinking", st)
+		if signature := compatibleInteractionSignature(st.Model, interactionsSignature(step), false); signature != "" {
+			out = appendClaudeContentDelta(out, "signature_delta", "signature", signature, st)
+		}
+		return out
 	default:
 		_ = modelName
 		return appendClaudeContentBlockStart(out, "text", st)
@@ -179,7 +193,8 @@ func interactionsStepDeltaToClaude(modelName string, root gjson.Result, st *inte
 		return appendClaudeContentDelta(out, "thinking_delta", "thinking", text, st)
 	case "thought_signature":
 		if st.ActiveBlock && st.ActiveBlockType == "thinking" {
-			return appendClaudeContentDelta(nil, "signature_delta", "signature", delta.Get("signature").String(), st)
+			signature := compatibleInteractionSignature(st.Model, interactionsSignature(delta), false)
+			return appendClaudeContentDelta(nil, "signature_delta", "signature", signature, st)
 		}
 	case "arguments_delta":
 		out := appendClaudeMessageStart(nil, st)
@@ -380,6 +395,34 @@ func interactionsSignature(root gjson.Result) string {
 		root.Get("thoughtSignature").String(),
 		root.Get("extra_content.google.thought_signature").String(),
 	)
+}
+
+func compatibleInteractionSignature(modelName, rawSignature string, functionCall bool) string {
+	rawSignature = strings.TrimSpace(rawSignature)
+	if rawSignature == "" {
+		return ""
+	}
+	provider := sigcompat.ProviderFromModelName(modelName)
+	switch provider {
+	case sigcompat.ProviderClaude, sigcompat.ProviderGemini, sigcompat.ProviderGPT:
+	default:
+		provider = sigcompat.DetectProvider(rawSignature)
+	}
+	blockKind := sigcompat.BlockKindGPTReasoning
+	switch provider {
+	case sigcompat.ProviderClaude:
+		blockKind = sigcompat.BlockKindClaudeThinking
+	case sigcompat.ProviderGemini:
+		blockKind = sigcompat.BlockKindGeminiModelPart
+		if functionCall {
+			blockKind = sigcompat.BlockKindGeminiFunctionCall
+		}
+	}
+	normalized, compatible := sigcompat.CompatibleSignatureForProvider(provider, rawSignature, blockKind)
+	if !compatible {
+		return ""
+	}
+	return normalized
 }
 
 func firstExisting(root gjson.Result, paths ...string) gjson.Result {

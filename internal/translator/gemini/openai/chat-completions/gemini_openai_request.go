@@ -3,7 +3,9 @@
 package chat_completions
 
 import (
+	"encoding/base64"
 	"fmt"
+	"mime"
 	"strings"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
@@ -214,18 +216,16 @@ func convertOpenAIRequestToGemini(modelName string, inputRawJSON []byte, _ bool)
 							}
 						case "video_url":
 							videoURL := item.Get("video_url.url").String()
-							if strings.HasPrefix(videoURL, "data:") {
-								pieces := strings.SplitN(videoURL[5:], ";", 2)
-								if len(pieces) == 2 && strings.HasPrefix(pieces[1], "base64,") {
-									mime := pieces[0]
-									data := strings.TrimPrefix(pieces[1], "base64,")
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									node, _ = sjson.SetBytes(
-										node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature,
-									)
-									p++
-								}
+							videoMIME, videoData, ok := parseOpenAIVideoDataURL(videoURL)
+							if ok {
+								node, _ = sjson.SetBytes(
+									node, "parts."+itoa(p)+".inlineData.mime_type", videoMIME,
+								)
+								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", videoData)
+								node, _ = sjson.SetBytes(
+									node, "parts."+itoa(p)+".thoughtSignature", geminiFunctionThoughtSignature,
+								)
+								p++
 							}
 						case "file":
 							filename := item.Get("file.filename").String()
@@ -514,6 +514,34 @@ func applyOpenAIResponseFormatToGemini(out []byte, rawJSON []byte) []byte {
 	}
 
 	return out
+}
+
+func parseOpenAIVideoDataURL(rawURL string) (string, string, bool) {
+	dataURL, ok := strings.CutPrefix(strings.TrimSpace(rawURL), "data:")
+	if !ok {
+		return "", "", false
+	}
+	metadata, payload, ok := strings.Cut(dataURL, ",")
+	if !ok || payload == "" {
+		return "", "", false
+	}
+	metadataParts := strings.Split(metadata, ";")
+	if len(metadataParts) < 2 || !strings.EqualFold(strings.TrimSpace(metadataParts[len(metadataParts)-1]), "base64") {
+		return "", "", false
+	}
+	mediaType, _, errParseMediaType := mime.ParseMediaType(strings.Join(metadataParts[:len(metadataParts)-1], ";"))
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if errParseMediaType != nil || !strings.HasPrefix(mediaType, "video/") || len(mediaType) == len("video/") {
+		return "", "", false
+	}
+	decoded, errDecode := base64.StdEncoding.DecodeString(payload)
+	if errDecode != nil {
+		decoded, errDecode = base64.RawStdEncoding.DecodeString(payload)
+	}
+	if errDecode != nil || len(decoded) == 0 {
+		return "", "", false
+	}
+	return mediaType, payload, true
 }
 
 // itoa converts int to string without strconv import for few usages.

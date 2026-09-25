@@ -8,12 +8,15 @@ import (
 	"strings"
 	"time"
 
+	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 type interactionsToResponsesStreamState struct {
+	EnvironmentID      string
+	Model              string
 	FunctionCalls      map[int]*interactionsFunctionCallState
 	ItemIDs            map[int]string
 	ItemTypes          map[int]string
@@ -21,6 +24,7 @@ type interactionsToResponsesStreamState struct {
 	ReasoningSummaries map[int][]string
 	TextOutputs        map[int]*strings.Builder
 	Seq                int
+	Completed          bool
 	Done               bool
 }
 
@@ -35,19 +39,22 @@ type interactionsFunctionCallState struct {
 }
 
 type responsesToInteractionsStreamState struct {
-	ID                  string
-	Created             bool
-	StatusUpdated       bool
-	Completed           bool
-	Done                bool
-	StepIndex           int
-	ActiveStepIndex     int
-	ActiveStepType      string
-	ActiveStepOpen      bool
-	SentText            map[string]bool
-	UnkeyedTextDelta    bool
-	FunctionCallIndexes map[string]int
-	FunctionArgsSent    map[string]bool
+	ID                     string
+	EnvironmentID          string
+	Model                  string
+	ActiveThoughtSignature string
+	Created                bool
+	StatusUpdated          bool
+	Completed              bool
+	Done                   bool
+	StepIndex              int
+	ActiveStepIndex        int
+	ActiveStepType         string
+	ActiveStepOpen         bool
+	SentText               map[string]bool
+	UnkeyedTextDelta       bool
+	FunctionCallIndexes    map[string]int
+	FunctionArgsSent       map[string]bool
 }
 
 func convertInteractionsResponseToOpenAIResponses(
@@ -65,6 +72,9 @@ func convertInteractionsResponseToOpenAIResponses(
 		*param = &interactionsToResponsesStreamState{}
 	}
 	st := (*param).(*interactionsToResponsesStreamState)
+	if st.Model == "" {
+		st.Model = modelName
+	}
 	if st.FunctionCalls == nil {
 		st.FunctionCalls = make(map[int]*interactionsFunctionCallState)
 	}
@@ -104,19 +114,29 @@ func convertInteractionsResponseToOpenAIResponsesNonStream(
 	root := gjson.ParseBytes(rawJSON)
 	out := []byte(`{"id":"","object":"response","status":"completed","model":"","output":[]}`)
 	out, _ = sjson.SetBytes(out, "id", firstNonEmpty(root.Get("id").String(), root.Get("interaction.id").String()))
-	out, _ = sjson.SetBytes(out, "model", responseModel(modelName, root))
+	model := responseModel(modelName, root)
+	signatureModel := firstNonEmpty(root.Get("interaction.model").String(), root.Get("model").String(), model)
+	out, _ = sjson.SetBytes(out, "model", model)
+	if status := interactionTerminalStatus(root); status != "" {
+		out, _ = sjson.SetBytes(out, "status", status)
+	}
+	out = copyInteractionIncompleteDetailsToResponse(out, root, "incomplete_details")
 	steps := root.Get("steps")
 	if !steps.Exists() {
 		steps = root.Get("interaction.steps")
 	}
+	forAntigravity := isAntigravityModel(model)
 	steps.ForEach(
 		func(_, step gjson.Result) bool {
-			if item, ok := interactionsStepToResponsesOutput(step); ok {
+			if item, ok := interactionsStepToResponsesOutput(step, signatureModel, forAntigravity); ok {
 				out, _ = sjson.SetRawBytes(out, "output.-1", item)
 			}
 			return true
 		},
 	)
+	if environmentID := interactionEnvironmentID(root); environmentID != "" {
+		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
+	}
 	out = setResponsesUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root))
 	return out
 }
@@ -153,13 +173,16 @@ func convertInteractionsEventToResponses(
 			),
 		}
 	case "step.start":
-		return interactionsStepStartToResponses(root, st)
+		return interactionsStepStartToResponses(modelName, root, st)
 	case "step.delta":
 		return interactionsStepDeltaToResponses(root, st)
 	case "step.stop":
 		return interactionsStepStopToResponses(root, st)
 	case "interaction.completed", "finish":
-		return [][]byte{responsesCompletedEvent(modelName, root, st)}
+		if event := responsesCompletedEvent(modelName, root, st); len(event) > 0 {
+			return [][]byte{event}
+		}
+		return nil
 	case "done":
 		if st.Done {
 			return nil
@@ -170,7 +193,7 @@ func convertInteractionsEventToResponses(
 	return nil
 }
 
-func interactionsStepToResponsesOutput(step gjson.Result) ([]byte, bool) {
+func interactionsStepToResponsesOutput(step gjson.Result, modelName string, forAntigravity bool) ([]byte, bool) {
 	switch step.Get("type").String() {
 	case "model_output":
 		item := []byte(`{"type":"message","status":"completed","role":"assistant","content":[]}`)
@@ -195,7 +218,7 @@ func interactionsStepToResponsesOutput(step gjson.Result) ([]byte, bool) {
 		return item, true
 	case "thought":
 		item := []byte(`{"type":"reasoning","status":"completed","summary":[]}`)
-		if signature := interactionsThoughtSignature(step); signature != "" {
+		if signature := interactionsThoughtSignature(step, modelName); signature != "" {
 			item, _ = sjson.SetBytes(item, "encrypted_content", signature)
 		}
 		for _, text := range interactionsContentTexts(step.Get("content")) {
@@ -205,7 +228,7 @@ func interactionsStepToResponsesOutput(step gjson.Result) ([]byte, bool) {
 		}
 		return item, true
 	case "function_call":
-		item := interactionsFunctionCallToResponses(step)
+		item := interactionsFunctionCallToResponses(step, forAntigravity)
 		item, _ = sjson.SetBytes(item, "status", "completed")
 		return item, true
 	}
@@ -223,17 +246,26 @@ func responsesCreatedEvent(
 	payload, _ = sjson.SetBytes(
 		payload, "response.id", firstNonEmpty(root.Get("interaction.id").String(), root.Get("id").String()),
 	)
+	if environmentID := interactionEnvironmentID(root); environmentID != "" {
+		st.EnvironmentID = environmentID
+		payload, _ = sjson.SetBytes(payload, "response.environment_id", environmentID)
+	}
 	requestModelName := translatorcommon.RequestModelName(originalRequestRawJSON, requestRawJSON)
 	if requestModelName == "" {
 		requestModelName = modelName
 	}
+	st.Model = firstNonEmpty(root.Get("interaction.model").String(), root.Get("model").String(), st.Model, requestModelName)
 	if requestModelName != "" {
 		payload, _ = sjson.SetBytes(payload, "response.model", requestModelName)
 	}
 	return emitResponsesEvent("response.created", payload)
 }
 
-func interactionsStepStartToResponses(root gjson.Result, st *interactionsToResponsesStreamState) [][]byte {
+func interactionsStepStartToResponses(
+	modelName string,
+	root gjson.Result,
+	st *interactionsToResponsesStreamState,
+) [][]byte {
 	index := int(root.Get("index").Int())
 	step := root.Get("step")
 	stepType := step.Get("type").String()
@@ -259,6 +291,9 @@ func interactionsStepStartToResponses(root gjson.Result, st *interactionsToRespo
 			emitResponsesEvent("response.content_part.added", part),
 		}
 	case "thought":
+		if signature := interactionsThoughtSignature(step, firstNonEmpty(st.Model, modelName)); signature != "" {
+			st.ReasoningEncrypted[index] = signature
+		}
 		added := []byte(`{"type":"response.output_item.added","output_index":0,"item":{"id":"","type":"reasoning","status":"in_progress","encrypted_content":"","summary":[]}}`)
 		added, _ = sjson.SetBytes(added, "sequence_number", nextResponsesSeq(st))
 		added, _ = sjson.SetBytes(added, "output_index", index)
@@ -268,10 +303,14 @@ func interactionsStepStartToResponses(root gjson.Result, st *interactionsToRespo
 		}
 		return [][]byte{emitResponsesEvent("response.output_item.added", added)}
 	case "function_call":
+		name := step.Get("name").String()
+		if isAntigravityModel(modelName) {
+			name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
+		}
 		call := &interactionsFunctionCallState{
 			ID:     itemID,
 			CallID: callID,
-			Name:   step.Get("name").String(),
+			Name:   name,
 		}
 		if args := step.Get("arguments"); args.Exists() && strings.TrimSpace(args.Raw) != "{}" {
 			call.Arguments.WriteString(jsonStringValue(args, "{}"))
@@ -308,7 +347,7 @@ func interactionsStepDeltaToResponses(root gjson.Result, st *interactionsToRespo
 		payload, _ = sjson.SetBytes(payload, "delta", text)
 		return [][]byte{emitResponsesEvent("response.reasoning_summary_text.delta", payload)}
 	case "thought_signature":
-		if signature := delta.Get("signature").String(); signature != "" {
+		if signature := interactionsThoughtSignature(delta, st.Model); signature != "" {
 			st.ReasoningEncrypted[index] = signature
 		}
 		return nil
@@ -423,19 +462,39 @@ func interactionsStepStopToResponses(root gjson.Result, st *interactionsToRespon
 }
 
 func responsesCompletedEvent(modelName string, root gjson.Result, st *interactionsToResponsesStreamState) []byte {
-	payload := []byte(`{"type":"response.completed","response":{"id":"","object":"response","status":"completed","model":"","output":[],"usage":{}}}`)
+	if st.Completed {
+		return nil
+	}
+	status := interactionTerminalStatus(root)
+	if status == "" {
+		status = "completed"
+	}
+	eventType := "response.completed"
+	if status == "incomplete" {
+		eventType = "response.incomplete"
+	}
+	payload := []byte(`{"type":"","response":{"id":"","object":"response","status":"","model":"","output":[],"usage":{}}}`)
+	payload, _ = sjson.SetBytes(payload, "type", eventType)
 	payload, _ = sjson.SetBytes(payload, "sequence_number", nextResponsesSeq(st))
 	interaction := root.Get("interaction")
 	payload, _ = sjson.SetBytes(
 		payload, "response.id", firstNonEmpty(interaction.Get("id").String(), root.Get("id").String()),
 	)
+	payload, _ = sjson.SetBytes(payload, "response.status", status)
+	st.Model = firstNonEmpty(interaction.Get("model").String(), root.Get("model").String(), st.Model, modelName)
 	payload, _ = sjson.SetBytes(payload, "response.model", firstNonEmpty(interaction.Get("model").String(), modelName))
+	payload = copyInteractionIncompleteDetailsToResponse(payload, root, "response.incomplete_details")
+	if environmentID := firstNonEmpty(interactionEnvironmentID(root), st.EnvironmentID); environmentID != "" {
+		st.EnvironmentID = environmentID
+		payload, _ = sjson.SetBytes(payload, "response.environment_id", environmentID)
+	}
 	payload = setResponsesCompletedOutput(payload, st)
 	payload = setResponsesUsageFromInteractions(payload, "response.usage", translatorcommon.InteractionsUsage(root))
-	return emitResponsesEvent("response.completed", payload)
+	st.Completed = true
+	return emitResponsesEvent(eventType, payload)
 }
 
-func interactionsThoughtSignature(step gjson.Result) string {
+func interactionsThoughtSignature(step gjson.Result, modelName string) string {
 	for _, path := range []string{
 		"encrypted_content",
 		"signature",
@@ -443,27 +502,57 @@ func interactionsThoughtSignature(step gjson.Result) string {
 		"thoughtSignature",
 		"extra_content.google.thought_signature",
 	} {
-		if signature := step.Get(path).String(); signature != "" {
+		if signature := compatibleResponsesInteractionSignature(modelName, step.Get(path).String()); signature != "" {
 			return signature
 		}
 	}
 	content := step.Get("content")
-	if content.IsArray() {
-		var signature string
-		content.ForEach(
-			func(_, part gjson.Result) bool {
-				signature = firstNonEmpty(
-					part.Get("signature").String(),
-					part.Get("thought_signature").String(),
-					part.Get("thoughtSignature").String(),
-					part.Get("extra_content.google.thought_signature").String(),
-				)
-				return signature == ""
-			},
-		)
-		return signature
+	if !content.IsArray() {
+		return ""
 	}
-	return ""
+	var signature string
+	content.ForEach(
+		func(_, part gjson.Result) bool {
+			for _, path := range []string{
+				"signature",
+				"thought_signature",
+				"thoughtSignature",
+				"extra_content.google.thought_signature",
+			} {
+				signature = compatibleResponsesInteractionSignature(modelName, part.Get(path).String())
+				if signature != "" {
+					return false
+				}
+			}
+			return true
+		},
+	)
+	return signature
+}
+
+func compatibleResponsesInteractionSignature(modelName, rawSignature string) string {
+	rawSignature = strings.TrimSpace(rawSignature)
+	if rawSignature == "" {
+		return ""
+	}
+	provider := sigcompat.ProviderFromModelName(modelName)
+	switch provider {
+	case sigcompat.ProviderClaude, sigcompat.ProviderGemini, sigcompat.ProviderGPT:
+	default:
+		provider = sigcompat.DetectProvider(rawSignature)
+	}
+	blockKind := sigcompat.BlockKindGPTReasoning
+	switch provider {
+	case sigcompat.ProviderClaude:
+		blockKind = sigcompat.BlockKindClaudeThinking
+	case sigcompat.ProviderGemini:
+		blockKind = sigcompat.BlockKindGeminiModelPart
+	}
+	normalized, compatible := sigcompat.CompatibleSignatureForProvider(provider, rawSignature, blockKind)
+	if !compatible {
+		return ""
+	}
+	return normalized
 }
 
 func recordResponsesReasoningSummary(st *interactionsToResponsesStreamState, index int, text string) {
@@ -573,6 +662,39 @@ func setResponsesUsageFromInteractions(out []byte, path string, usage gjson.Resu
 	return out
 }
 
+func interactionTerminalStatus(root gjson.Result) string {
+	return firstNonEmpty(root.Get("interaction.status").String(), root.Get("status").String())
+}
+
+func copyInteractionIncompleteDetailsToResponse(out []byte, root gjson.Result, path string) []byte {
+	details := root.Get("interaction.incomplete_details")
+	if !details.Exists() {
+		details = root.Get("incomplete_details")
+	}
+	if details.Exists() {
+		out, _ = sjson.SetRawBytes(out, path, []byte(details.Raw))
+	}
+	return out
+}
+
+func interactionEnvironmentID(root gjson.Result) string {
+	return firstNonEmpty(
+		root.Get("interaction.environment_id").String(),
+		root.Get("interaction.environment.id").String(),
+		root.Get("environment_id").String(),
+		root.Get("environment.id").String(),
+	)
+}
+
+func responseEnvironmentID(root gjson.Result) string {
+	return firstNonEmpty(
+		root.Get("response.environment_id").String(),
+		root.Get("response.environment.id").String(),
+		root.Get("environment_id").String(),
+		root.Get("environment.id").String(),
+	)
+}
+
 func convertOpenAIResponsesResponseToInteractions(
 	ctx context.Context,
 	modelName string,
@@ -590,6 +712,9 @@ func convertOpenAIResponsesResponseToInteractions(
 		*param = &responsesToInteractionsStreamState{}
 	}
 	st := (*param).(*responsesToInteractionsStreamState)
+	if st.Model == "" {
+		st.Model = modelName
+	}
 	if st.FunctionCallIndexes == nil {
 		st.FunctionCallIndexes = make(map[string]int)
 	}
@@ -610,16 +735,28 @@ func convertOpenAIResponsesResponseToInteractionsNonStream(
 	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
 	out := []byte(`{"id":"","object":"interaction","status":"completed","model":"","steps":[]}`)
+	if status := root.Get("status").String(); status != "" {
+		out, _ = sjson.SetBytes(out, "status", status)
+	}
 	out, _ = sjson.SetBytes(out, "id", root.Get("id").String())
-	out, _ = sjson.SetBytes(out, "model", responseModel(modelName, root))
+	model := responseModel(modelName, root)
+	signatureModel := firstNonEmpty(root.Get("model").String(), root.Get("response.model").String(), model)
+	out, _ = sjson.SetBytes(out, "model", model)
+	if incompleteDetails := root.Get("incomplete_details"); incompleteDetails.Exists() {
+		out, _ = sjson.SetRawBytes(out, "incomplete_details", []byte(incompleteDetails.Raw))
+	}
+	forAntigravity := isAntigravityModel(model)
 	root.Get("output").ForEach(
 		func(_, item gjson.Result) bool {
-			if step, ok := openAIResponsesOutputItemToInteractionsStep(item); ok {
+			if step, ok := openAIResponsesOutputItemToInteractionsStep(item, signatureModel, forAntigravity); ok {
 				out, _ = sjson.SetRawBytes(out, "steps.-1", step)
 			}
 			return true
 		},
 	)
+	if environmentID := responseEnvironmentID(root); environmentID != "" {
+		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
+	}
 	out = setInteractionsUsageFromResponses(out, "usage", root.Get("usage"))
 	return out
 }
@@ -649,7 +786,7 @@ func convertOpenAIResponsesEventToInteractions(
 		st.markTextSent(textKeysFromResponsesEvent(root))
 		return out
 	case "response.reasoning_summary_text.delta":
-		out := ensureInteractionsStepDirect(nil, st, modelName, "thought", gjson.Result{})
+		out := ensureInteractionsThoughtStepDirect(nil, st, modelName, gjson.Result{})
 		return appendInteractionsTextDeltaDirect(out, st, root.Get("delta").String(), true)
 	case "response.output_item.added":
 		return openAIResponsesOutputItemAddedToInteractions(modelName, root, st)
@@ -660,13 +797,17 @@ func convertOpenAIResponsesEventToInteractions(
 		return out
 	case "response.output_item.done":
 		return openAIResponsesOutputItemDoneToInteractions(modelName, root, st)
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		return openAIResponsesCompletedToInteractions(modelName, root.Get("response"), st)
 	}
 	return nil
 }
 
-func openAIResponsesOutputItemToInteractionsStep(item gjson.Result) ([]byte, bool) {
+func openAIResponsesOutputItemToInteractionsStep(
+	item gjson.Result,
+	modelName string,
+	forAntigravity bool,
+) ([]byte, bool) {
 	switch item.Get("type").String() {
 	case "message":
 		step := []byte(`{"type":"model_output","content":[]}`)
@@ -680,20 +821,29 @@ func openAIResponsesOutputItemToInteractionsStep(item gjson.Result) ([]byte, boo
 		)
 		return step, true
 	case "function_call":
-		return responsesFunctionCallToInteractions(item), true
+		return responsesFunctionCallToInteractions(item, forAntigravity), true
 	case "reasoning":
 		step := []byte(`{"type":"thought","content":[]}`)
+		hasContent := false
 		item.Get("summary").ForEach(
 			func(_, summary gjson.Result) bool {
 				if text := summary.Get("text").String(); text != "" {
 					part := []byte(`{"type":"text","text":""}`)
 					part, _ = sjson.SetBytes(part, "text", text)
 					step, _ = sjson.SetRawBytes(step, "content.-1", part)
+					hasContent = true
 				}
 				return true
 			},
 		)
-		return step, true
+		if signature := compatibleResponsesInteractionSignature(
+			modelName,
+			item.Get("encrypted_content").String(),
+		); signature != "" {
+			step, _ = sjson.SetBytes(step, "signature", signature)
+			hasContent = true
+		}
+		return step, hasContent
 	}
 	return nil, false
 }
@@ -709,7 +859,11 @@ func openAIResponsesOutputItemAddedToInteractions(
 		out := ensureInteractionsCreatedDirect(nil, st, modelName)
 		out = appendInteractionsStepStopDirect(out, st)
 		step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-		step, _ = sjson.SetBytes(step, "name", item.Get("name").String())
+		name := item.Get("name").String()
+		if isAntigravityModel(modelName) {
+			name = translatorcommon.AntigravityToolNameToUpstream(name)
+		}
+		step, _ = sjson.SetBytes(step, "name", name)
 		itemID := firstNonEmpty(item.Get("id").String(), item.Get("call_id").String())
 		callID := firstNonEmpty(item.Get("call_id").String(), item.Get("id").String())
 		if itemID != "" {
@@ -724,7 +878,13 @@ func openAIResponsesOutputItemAddedToInteractions(
 	case "message":
 		return ensureInteractionsStepDirect(nil, st, modelName, "model_output", gjson.Result{})
 	case "reasoning":
-		return ensureInteractionsStepDirect(nil, st, modelName, "thought", gjson.Result{})
+		if compatibleResponsesInteractionSignature(
+			firstNonEmpty(st.Model, modelName),
+			item.Get("encrypted_content").String(),
+		) == "" {
+			return nil
+		}
+		return ensureInteractionsThoughtStepDirect(nil, st, modelName, item)
 	}
 	return nil
 }
@@ -743,7 +903,25 @@ func openAIResponsesOutputItemDoneToInteractions(
 		}
 		return appendInteractionsStepStopDirect(out, st)
 	case "reasoning":
-		out := ensureInteractionsStepDirect(nil, st, modelName, "thought", gjson.Result{})
+		hasSummary := false
+		item.Get("summary").ForEach(
+			func(_, summary gjson.Result) bool {
+				if summary.Get("text").String() != "" {
+					hasSummary = true
+					return false
+				}
+				return true
+			},
+		)
+		signature := compatibleResponsesInteractionSignature(
+			firstNonEmpty(st.Model, modelName),
+			item.Get("encrypted_content").String(),
+		)
+		hasActiveThought := st.ActiveStepOpen && st.ActiveStepType == "thought"
+		if !hasActiveThought && !hasSummary && signature == "" {
+			return nil
+		}
+		out := ensureInteractionsThoughtStepDirect(nil, st, modelName, item)
 		item.Get("summary").ForEach(
 			func(_, summary gjson.Result) bool {
 				if text := summary.Get("text").String(); text != "" {
@@ -841,7 +1019,12 @@ func appendInteractionsCreatedDirect(
 	st.ID = firstNonEmpty(response.Get("id").String(), st.ID, fmt.Sprintf("interaction_%d", time.Now().UnixNano()))
 	created := []byte(`{"interaction":{"id":"","status":"in_progress","object":"interaction","model":""},"event_type":"interaction.created"}`)
 	created, _ = sjson.SetBytes(created, "interaction.id", st.ID)
+	st.Model = firstNonEmpty(response.Get("model").String(), response.Get("response.model").String(), modelName, st.Model)
 	created, _ = sjson.SetBytes(created, "interaction.model", responseModel(modelName, response))
+	if environmentID := responseEnvironmentID(response); environmentID != "" {
+		st.EnvironmentID = environmentID
+		created, _ = sjson.SetBytes(created, "interaction.environment_id", environmentID)
+	}
 	out = append(out, emitInteractionsEvent("interaction.created", created))
 	st.Created = true
 	if len(markStatus) == 0 || markStatus[0] {
@@ -875,6 +1058,28 @@ func ensureInteractionsStepDirect(
 	return appendInteractionsStepStartDirect(out, st, stepType, step)
 }
 
+func ensureInteractionsThoughtStepDirect(
+	out [][]byte,
+	st *responsesToInteractionsStreamState,
+	modelName string,
+	item gjson.Result,
+) [][]byte {
+	signature := compatibleResponsesInteractionSignature(
+		firstNonEmpty(st.Model, modelName),
+		item.Get("encrypted_content").String(),
+	)
+	step := []byte(`{"type":"thought"}`)
+	if signature != "" {
+		step, _ = sjson.SetBytes(step, "signature", signature)
+	}
+	thoughtAlreadyOpen := st.ActiveStepOpen && st.ActiveStepType == "thought"
+	out = ensureInteractionsStepDirect(out, st, modelName, "thought", gjson.ParseBytes(step))
+	if thoughtAlreadyOpen && signature != "" && signature != st.ActiveThoughtSignature {
+		out = appendInteractionsThoughtSignatureDeltaDirect(out, st, signature)
+	}
+	return out
+}
+
 func ensureInteractionsCreatedDirect(out [][]byte, st *responsesToInteractionsStreamState, modelName string) [][]byte {
 	return appendInteractionsCreatedDirect(out, st, modelName, gjson.Result{})
 }
@@ -893,6 +1098,12 @@ func appendInteractionsStepStartDirect(
 	payload := []byte(`{"index":0,"step":{"type":""},"event_type":"step.start"}`)
 	payload, _ = sjson.SetBytes(payload, "index", index)
 	payload, _ = sjson.SetBytes(payload, "step.type", stepType)
+	if stepType == "thought" {
+		if signature := step.Get("signature").String(); signature != "" {
+			payload, _ = sjson.SetBytes(payload, "step.signature", signature)
+			st.ActiveThoughtSignature = signature
+		}
+	}
 	if stepType == "function_call" {
 		if itemID := firstNonEmpty(step.Get("id").String(), step.Get("call_id").String()); itemID != "" {
 			payload, _ = sjson.SetBytes(payload, "step.id", itemID)
@@ -924,6 +1135,18 @@ func appendInteractionsTextDeltaDirect(
 	return append(out, emitInteractionsEvent("step.delta", payload))
 }
 
+func appendInteractionsThoughtSignatureDeltaDirect(
+	out [][]byte,
+	st *responsesToInteractionsStreamState,
+	signature string,
+) [][]byte {
+	payload := []byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`)
+	payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
+	payload, _ = sjson.SetBytes(payload, "delta.signature", signature)
+	st.ActiveThoughtSignature = signature
+	return append(out, emitInteractionsEvent("step.delta", payload))
+}
+
 func appendInteractionsArgumentsDeltaDirect(
 	out [][]byte,
 	st *responsesToInteractionsStreamState,
@@ -944,6 +1167,7 @@ func appendInteractionsStepStopDirect(out [][]byte, st *responsesToInteractionsS
 	out = append(out, emitInteractionsEvent("step.stop", payload))
 	st.ActiveStepOpen = false
 	st.ActiveStepType = ""
+	st.ActiveThoughtSignature = ""
 	return out
 }
 
@@ -961,7 +1185,18 @@ func appendInteractionsCompletedDirect(
 	payload, _ = sjson.SetBytes(payload, "interaction.id", st.ID)
 	payload, _ = sjson.SetBytes(payload, "interaction.created", now)
 	payload, _ = sjson.SetBytes(payload, "interaction.updated", now)
+	st.Model = firstNonEmpty(response.Get("model").String(), response.Get("response.model").String(), st.Model, modelName)
 	payload, _ = sjson.SetBytes(payload, "interaction.model", responseModel(modelName, response))
+	if status := response.Get("status").String(); status != "" {
+		payload, _ = sjson.SetBytes(payload, "interaction.status", status)
+	}
+	if details := response.Get("incomplete_details"); details.Exists() {
+		payload, _ = sjson.SetRawBytes(payload, "interaction.incomplete_details", []byte(details.Raw))
+	}
+	if environmentID := firstNonEmpty(responseEnvironmentID(response), st.EnvironmentID); environmentID != "" {
+		st.EnvironmentID = environmentID
+		payload, _ = sjson.SetBytes(payload, "interaction.environment_id", environmentID)
+	}
 	payload = setInteractionsUsageFromResponses(payload, "interaction.usage", response.Get("usage"))
 	out = append(out, emitInteractionsEvent("interaction.completed", payload))
 	st.Completed = true
@@ -991,7 +1226,11 @@ func ensureInteractionsFunctionCallStep(
 		item = root
 	}
 	step := []byte(`{"type":"function_call","name":"","arguments":{}}`)
-	step, _ = sjson.SetBytes(step, "name", item.Get("name").String())
+	name := item.Get("name").String()
+	if isAntigravityModel(modelName) {
+		name = translatorcommon.AntigravityToolNameToUpstream(name)
+	}
+	step, _ = sjson.SetBytes(step, "name", name)
 	itemID := firstNonEmpty(
 		item.Get("id").String(), root.Get("item_id").String(), item.Get("call_id").String(),
 		root.Get("call_id").String(),

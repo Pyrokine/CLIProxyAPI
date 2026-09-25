@@ -53,6 +53,38 @@ func TestConvertOpenAIRequestToGeminiPreservesVideoURL(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToGeminiRejectsInvalidVideoURLs(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{name: "remote URL", url: "https://example.com/video.mp4"},
+		{name: "non-video MIME", url: "data:text/plain;base64,aGVsbG8="},
+		{name: "missing base64 marker", url: "data:video/mp4,aGVsbG8="},
+		{name: "invalid base64", url: "data:video/mp4;base64,%%%"},
+		{name: "empty payload", url: "data:video/mp4;base64,"},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			input := []byte(`{"messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"` + testCase.url + `"}},{"type":"text","text":"describe"}]}]}`)
+			out := convertOpenAIRequestToGemini("gemini-3-flash", input, false)
+			parts := gjson.GetBytes(out, "contents.0.parts").Array()
+			if len(parts) != 1 || parts[0].Get("text").String() != "describe" {
+				t.Fatalf("invalid video URL created a media part: %s", out)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToGeminiAcceptsParameterizedVideoMIME(t *testing.T) {
+	input := []byte(`{"messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"data:video/mp4;codecs=avc1;base64,aGVsbG8="}}]}]}`)
+	out := convertOpenAIRequestToGemini("gemini-3-flash", input, false)
+	if got := gjson.GetBytes(out, "contents.0.parts.0.inlineData.mime_type").String(); got != "video/mp4" {
+		t.Fatalf("video MIME = %q, want video/mp4; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIRequestToGeminiNormalizesFunctionDeclarations(t *testing.T) {
 	input := []byte(`{
 		"messages":[{"role":"user","content":"hi"}],

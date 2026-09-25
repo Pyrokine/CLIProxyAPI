@@ -14,6 +14,28 @@ const largeInlineDataSize = 20 << 20
 // noinspection GoUnusedGlobalVariable
 var largeInlineDataBenchmarkOutput []byte
 
+func TestConvertGeminiRequestToGeminiDefaultsFunctionResponseRoleToUser(t *testing.T) {
+	tests := []struct {
+		name    string
+		role    string
+		partKey string
+	}{
+		{name: "missing camel role", partKey: "functionResponse"},
+		{name: "invalid snake role", role: `"role":"function",`, partKey: "function_response"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			input := []byte(`{"contents":[{"role":"user","parts":[{"text":"before"}]},{` + testCase.role + `"parts":[{"` + testCase.partKey + `":{"name":"lookup","response":{"result":"ok"}}}]}]}`)
+
+			output := convertGeminiRequestToGemini("gemini-test", input, false)
+
+			if got := gjson.GetBytes(output, "contents.1.role").String(); got != "user" {
+				t.Fatalf("function response role = %q, want user; output: %s", got, output)
+			}
+		})
+	}
+}
+
 func TestConvertGeminiRequestToGeminiReusesLargeNormalizedPayload(t *testing.T) {
 	input := largeInlineDataGeminiRequest(true)
 

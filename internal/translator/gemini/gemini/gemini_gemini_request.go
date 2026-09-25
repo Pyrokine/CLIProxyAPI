@@ -91,7 +91,11 @@ func convertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 			func(_, value gjson.Result) bool {
 				role := value.Get("role").String()
 				if role != "user" && role != "model" {
-					role = nextGeminiRole(previousRole)
+					if translatorcommon.ContentHasGeminiFunctionResponse([]byte(value.Raw)) {
+						role = "user"
+					} else {
+						role = nextGeminiRole(previousRole)
+					}
 					rolesChanged = true
 				}
 				previousRole = role
@@ -106,7 +110,11 @@ func convertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 					role := value.Get("role").String()
 					item := []byte(value.Raw)
 					if role != "user" && role != "model" {
-						role = nextGeminiRole(previousRole)
+						if translatorcommon.ContentHasGeminiFunctionResponse(item) {
+							role = "user"
+						} else {
+							role = nextGeminiRole(previousRole)
+						}
 						item, _ = sjson.SetBytes(item, "role", role)
 					}
 					previousRole = role
@@ -122,7 +130,11 @@ func convertGeminiRequestToGemini(_ string, inputRawJSON []byte, _ bool) []byte 
 			func(_ gjson.Result, value gjson.Result) bool {
 				role := value.Get("role").String()
 				if role != "user" && role != "model" {
-					role = nextGeminiRole(previousRole)
+					if translatorcommon.ContentHasGeminiFunctionResponse([]byte(value.Raw)) {
+						role = "user"
+					} else {
+						role = nextGeminiRole(previousRole)
+					}
 					out, _ = sjson.SetBytes(out, fmt.Sprintf("contents.%d.role", index), role)
 				}
 				previousRole = role

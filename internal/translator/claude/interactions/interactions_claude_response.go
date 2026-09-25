@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -31,6 +32,7 @@ type claudeToInteractionsStreamState struct {
 	ToolNames          map[int]string
 	ToolIDs            map[int]string
 	ToolArgs           map[int]*strings.Builder
+	Signatures         map[int]string
 }
 
 func convertClaudeResponseToInteractions(
@@ -184,6 +186,9 @@ func claudeContentBlockStartToInteractions(
 	block := root.Get("content_block")
 	stepType := claudeBlockInteractionsStepType(block.Get("type").String())
 	st.CurrentStepByIndex[index] = stepType
+	if signature := compatibleClaudeSourceSignature(block.Get("signature").String()); signature != "" {
+		st.Signatures[index] = signature
+	}
 	if stepType == "function_call" {
 		if name := block.Get("name").String(); name != "" {
 			st.ToolNames[index] = name
@@ -233,6 +238,7 @@ func claudeContentBlockStopToInteractions(root gjson.Result, st *claudeToInterac
 	delete(st.ToolNames, index)
 	delete(st.ToolIDs, index)
 	delete(st.ToolArgs, index)
+	delete(st.Signatures, index)
 	return out
 }
 
@@ -247,6 +253,13 @@ func appendClaudeDeltaToInteractions(
 		return appendClaudeInteractionsTextDelta(out, st, delta.Get("text").String(), false)
 	case "thinking_delta":
 		return appendClaudeInteractionsTextDelta(out, st, delta.Get("thinking").String(), true)
+	case "signature_delta":
+		signature := compatibleClaudeSourceSignature(delta.Get("signature").String())
+		if signature == "" {
+			return out
+		}
+		st.Signatures[index] = signature
+		return appendClaudeInteractionsSignatureDelta(out, st, signature)
 	case "input_json_delta":
 		if st.ToolArgs[index] == nil {
 			st.ToolArgs[index] = &strings.Builder{}
@@ -271,6 +284,9 @@ func claudeContentBlockToInteractionsStep(part gjson.Result) []byte {
 		content := []byte(`{"type":"text","text":""}`)
 		content, _ = sjson.SetBytes(content, "text", part.Get("thinking").String())
 		step, _ = sjson.SetRawBytes(step, "content.-1", content)
+		if signature := compatibleClaudeSourceSignature(part.Get("signature").String()); signature != "" {
+			step, _ = sjson.SetBytes(step, "signature", signature)
+		}
 		return step
 	case "tool_use":
 		return claudeToolUseToInteractionsStep(part, strings.TrimSpace(part.Get("input").Raw))
@@ -288,12 +304,18 @@ func claudeToolUseToInteractionsStep(part gjson.Result, argsRaw string) []byte {
 	if argsRaw != "" && gjson.Valid(argsRaw) {
 		step, _ = sjson.SetRawBytes(step, "arguments", []byte(argsRaw))
 	}
+	if signature := compatibleClaudeSourceSignature(part.Get("signature").String()); signature != "" {
+		step, _ = sjson.SetBytes(step, "signature", signature)
+	}
 	return step
 }
 
 func claudeBlockToInteractionsStep(block gjson.Result, stepType string) []byte {
 	step := []byte(`{"type":""}`)
 	step, _ = sjson.SetBytes(step, "type", stepType)
+	if signature := compatibleClaudeSourceSignature(block.Get("signature").String()); signature != "" {
+		step, _ = sjson.SetBytes(step, "signature", signature)
+	}
 	if stepType == "function_call" {
 		step, _ = sjson.SetBytes(step, "name", block.Get("name").String())
 		if id := block.Get("id").String(); id != "" {
@@ -308,6 +330,9 @@ func claudeBlockToInteractionsStep(block gjson.Result, stepType string) []byte {
 func claudeStepForKnownIndex(stepType string, index int, st *claudeToInteractionsStreamState) []byte {
 	step := []byte(`{"type":""}`)
 	step, _ = sjson.SetBytes(step, "type", stepType)
+	if signature := st.Signatures[index]; signature != "" {
+		step, _ = sjson.SetBytes(step, "signature", signature)
+	}
 	if stepType == "function_call" {
 		step, _ = sjson.SetBytes(step, "name", st.ToolNames[index])
 		if id := st.ToolIDs[index]; id != "" {
@@ -323,6 +348,9 @@ func claudeNonStreamContentBlockStart(root gjson.Result, st *claudeToInteraction
 	index := int(root.Get("index").Int())
 	block := root.Get("content_block")
 	st.CurrentStepByIndex[index] = claudeBlockInteractionsStepType(block.Get("type").String())
+	if signature := compatibleClaudeSourceSignature(block.Get("signature").String()); signature != "" {
+		st.Signatures[index] = signature
+	}
 	if block.Get("type").String() != "tool_use" {
 		return
 	}
@@ -347,6 +375,10 @@ func claudeNonStreamContentBlockDelta(root gjson.Result, st *claudeToInteraction
 			st.ToolArgs[index].WriteString(delta.Get("text").String())
 		} else {
 			st.ToolArgs[index].WriteString(delta.Get("thinking").String())
+		}
+	case "signature_delta":
+		if signature := compatibleClaudeSourceSignature(delta.Get("signature").String()); signature != "" {
+			st.Signatures[index] = signature
 		}
 	case "input_json_delta":
 		if st.ToolArgs[index] == nil {
@@ -382,10 +414,14 @@ func claudeNonStreamContentBlockStop(root gjson.Result, st *claudeToInteractions
 		content, _ = sjson.SetBytes(content, "text", text)
 		step, _ = sjson.SetRawBytes(step, "content.-1", content)
 	}
+	if signature := st.Signatures[index]; signature != "" {
+		step, _ = sjson.SetBytes(step, "signature", signature)
+	}
 	delete(st.CurrentStepByIndex, index)
 	delete(st.ToolNames, index)
 	delete(st.ToolIDs, index)
 	delete(st.ToolArgs, index)
+	delete(st.Signatures, index)
 	return step
 }
 
@@ -512,6 +548,17 @@ func appendClaudeInteractionsTextDelta(
 	return append(out, translatorcommon.SSEEventData("step.delta", payload))
 }
 
+func appendClaudeInteractionsSignatureDelta(
+	out [][]byte,
+	st *claudeToInteractionsStreamState,
+	signature string,
+) [][]byte {
+	payload := []byte(`{"index":0,"delta":{"signature":"","type":"thought_signature"},"event_type":"step.delta"}`)
+	payload, _ = sjson.SetBytes(payload, "index", st.ActiveStepIndex)
+	payload, _ = sjson.SetBytes(payload, "delta.signature", signature)
+	return append(out, translatorcommon.SSEEventData("step.delta", payload))
+}
+
 func appendClaudeInteractionsArgumentsDelta(
 	out [][]byte,
 	st *claudeToInteractionsStreamState,
@@ -617,6 +664,21 @@ func (st *claudeToInteractionsStreamState) ensureMaps() {
 	if st.ToolArgs == nil {
 		st.ToolArgs = make(map[int]*strings.Builder)
 	}
+	if st.Signatures == nil {
+		st.Signatures = make(map[int]string)
+	}
+}
+
+func compatibleClaudeSourceSignature(rawSignature string) string {
+	normalized, compatible := sigcompat.CompatibleSignatureForProvider(
+		sigcompat.ProviderClaude,
+		rawSignature,
+		sigcompat.BlockKindClaudeThinking,
+	)
+	if !compatible {
+		return ""
+	}
+	return normalized
 }
 
 func firstNonEmptyString(values ...string) string {

@@ -969,7 +969,7 @@ func TestConvertGeminiResponseToOpenAIResponses_LateThoughtSignatureIsImmutable(
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponsesDoneFinalizesStartedStreamExactlyOnce(t *testing.T) {
+func TestConvertGeminiResponseToOpenAIResponsesDoneFailsStartedStreamWithoutFinishReasonOnce(t *testing.T) {
 	var param any
 	ConvertGeminiResponseToOpenAIResponses(
 		context.Background(),
@@ -990,7 +990,7 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneFinalizesStartedStreamExactly
 
 	var deltas []string
 	outputDoneCount := 0
-	completedCount := 0
+	failedCount := 0
 	for _, chunk := range out {
 		event, data := parseSSEEvent(t, chunk)
 		switch event {
@@ -998,14 +998,19 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneFinalizesStartedStreamExactly
 			deltas = append(deltas, data.Get("delta").String())
 		case "response.output_item.done":
 			outputDoneCount++
+		case "response.failed":
+			failedCount++
+			if got := data.Get("response.error.code").String(); got != "provider_stream_ended" {
+				t.Fatalf("failure code = %q, want provider_stream_ended", got)
+			}
 		case "response.completed":
-			completedCount++
+			t.Fatal("DONE without a provider finish reason emitted response.completed")
 		}
 	}
-	if strings.Join(deltas, "") != "unsigned thought" || outputDoneCount != 1 || completedCount != 1 {
+	if strings.Join(deltas, "") != "unsigned thought" || outputDoneCount != 1 || failedCount != 1 {
 		t.Fatalf(
-			"DONE finalization malformed: deltas=%q output_done=%d completed=%d", deltas, outputDoneCount,
-			completedCount,
+			"DONE finalization malformed: deltas=%q output_done=%d failed=%d", deltas, outputDoneCount,
+			failedCount,
 		)
 	}
 	if duplicate := ConvertGeminiResponseToOpenAIResponses(
@@ -1015,7 +1020,7 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneFinalizesStartedStreamExactly
 	}
 }
 
-func TestConvertGeminiResponseToOpenAIResponsesDoneClosesMessageBeforeCompletion(t *testing.T) {
+func TestConvertGeminiResponseToOpenAIResponsesDoneClosesMessageBeforeFailure(t *testing.T) {
 	var param any
 	ConvertGeminiResponseToOpenAIResponses(
 		context.Background(),
@@ -1038,17 +1043,20 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneClosesMessageBeforeCompletion
 	for index, chunk := range out {
 		event, data := parseSSEEvent(t, chunk)
 		positions[event] = index
-		if event == "response.completed" {
+		if event == "response.failed" {
 			if got := data.Get("response.output.0.content.0.text").String(); got != "answer" {
-				t.Fatalf("completed message text = %q, want answer", got)
+				t.Fatalf("failed response message text = %q, want answer", got)
 			}
+		}
+		if event == "response.completed" {
+			t.Fatal("DONE without a provider finish reason emitted response.completed")
 		}
 	}
 	for _, event := range []string{
 		"response.output_text.done",
 		"response.content_part.done",
 		"response.output_item.done",
-		"response.completed",
+		"response.failed",
 	} {
 		if _, exists := positions[event]; !exists {
 			t.Fatalf("missing %s; output=%q", event, out)
@@ -1056,7 +1064,7 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneClosesMessageBeforeCompletion
 	}
 	if !(positions["response.output_text.done"] < positions["response.content_part.done"] &&
 		positions["response.content_part.done"] < positions["response.output_item.done"] &&
-		positions["response.output_item.done"] < positions["response.completed"]) {
+		positions["response.output_item.done"] < positions["response.failed"]) {
 		t.Fatalf("DONE event order malformed: %v", positions)
 	}
 }
@@ -1639,5 +1647,320 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 	}
 	if !(posMsgAdded < posCompleted) {
 		t.Fatalf("expected response.completed after message added: msgAdded=%d completed=%d", posMsgAdded, posCompleted)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesMessageOutputItemDoneFields(t *testing.T) {
+	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"responseId":"message-fields"}`)
+	var state any
+	for _, output := range ConvertGeminiResponseToOpenAIResponses(
+		context.Background(), "gemini-test", nil, nil, chunk, &state,
+	) {
+		event, data := parseSSEEvent(t, output)
+		if event != "response.output_item.done" || data.Get("item.type").String() != "message" {
+			continue
+		}
+		for _, field := range []string{"item.content.0.annotations", "item.content.0.logprobs"} {
+			value := data.Get(field)
+			if !value.Exists() || !value.IsArray() || len(value.Array()) != 0 {
+				t.Fatalf("%s = %s, want empty array; event=%s", field, value.Raw, data.Raw)
+			}
+		}
+		return
+	}
+	t.Fatal("missing message response.output_item.done")
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesRestoresNamespacedCustomTool(t *testing.T) {
+	request := []byte(`{
+		"model":"request-model",
+		"tools":[{
+			"type":"namespace",
+			"name":"ops",
+			"tools":[{"type":"custom","name":"run","description":"run input"}]
+		}]
+	}`)
+	var state any
+	first := ConvertGeminiResponseToOpenAIResponses(
+		context.Background(),
+		"fallback-model",
+		request,
+		nil,
+		[]byte(`{"response":{"responseId":"response-1","modelVersion":"provider-model","usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2,"thoughtsTokenCount":4,"totalTokenCount":9}}}`),
+		&state,
+	)
+	if len(first) != 2 {
+		t.Fatalf("metadata events = %d, want created and in_progress", len(first))
+	}
+	second := ConvertGeminiResponseToOpenAIResponses(
+		context.Background(),
+		"fallback-model",
+		request,
+		nil,
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"id":"native-call","name":"ops__run","args":{"input":"raw input"}}}]},"finishReason":"STOP"}]}}`),
+		&state,
+	)
+
+	var added, inputDone, itemDone, completed gjson.Result
+	for _, chunk := range second {
+		event, data := parseSSEEvent(t, chunk)
+		switch event {
+		case "response.output_item.added":
+			if data.Get("item.type").String() == "custom_tool_call" {
+				added = data
+			}
+		case "response.custom_tool_call_input.done":
+			inputDone = data
+		case "response.output_item.done":
+			if data.Get("item.type").String() == "custom_tool_call" {
+				itemDone = data
+			}
+		case "response.completed":
+			completed = data
+		}
+	}
+	for label, item := range map[string]gjson.Result{"added": added.Get("item"), "done": itemDone.Get("item")} {
+		if item.Get("type").String() != "custom_tool_call" || item.Get("name").String() != "run" ||
+			item.Get("namespace").String() != "ops" || item.Get("call_id").String() != "native-call" {
+			t.Fatalf("%s custom identity malformed: %s", label, item.Raw)
+		}
+	}
+	if got := inputDone.Get("input").String(); got != "raw input" {
+		t.Fatalf("custom input done = %q, want raw input", got)
+	}
+	if got := itemDone.Get("item.input").String(); got != "raw input" {
+		t.Fatalf("custom item input = %q, want raw input", got)
+	}
+	if completed.Get("response.id").String() != "resp_response-1" ||
+		completed.Get("response.model").String() != "provider-model" {
+		t.Fatalf("completed metadata was not accumulated: %s", completed.Raw)
+	}
+	if got := completed.Get("response.usage.output_tokens").Int(); got != 6 {
+		t.Fatalf("output_tokens = %d, want 6; event=%s", got, completed.Raw)
+	}
+	output := completed.Get("response.output.0")
+	if output.Get("type").String() != "custom_tool_call" || output.Get("name").String() != "run" ||
+		output.Get("namespace").String() != "ops" || output.Get("input").String() != "raw input" ||
+		output.Get("call_id").String() != "native-call" {
+		t.Fatalf("completed custom tool output malformed: %s", output.Raw)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesNonStreamRestoresNamespacedCustomTool(t *testing.T) {
+	request := []byte(`{"tools":[{"type":"namespace","name":"ops","tools":[{"type":"custom","name":"run"}]}]}`)
+	response := []byte(`{
+		"responseId":"nonstream-custom",
+		"candidates":[{
+			"content":{"parts":[{"functionCall":{"id":"native-custom","name":"ops__run","args":{"input":"raw input"}}}]},
+			"finishReason":"STOP"
+		}]
+	}`)
+	output := ConvertGeminiResponseToOpenAIResponsesNonStream(
+		context.Background(), "fallback-model", request, nil, response, nil,
+	)
+	item := gjson.GetBytes(output, "output.0")
+	if item.Get("type").String() != "custom_tool_call" || item.Get("name").String() != "run" ||
+		item.Get("namespace").String() != "ops" || item.Get("input").String() != "raw input" ||
+		item.Get("call_id").String() != "native-custom" {
+		t.Fatalf("non-stream custom tool output malformed: %s", output)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesPreservesTextAndAudioOrder(t *testing.T) {
+	var state any
+	output := ConvertGeminiResponseToOpenAIResponses(
+		context.Background(),
+		"gemini-model",
+		nil,
+		nil,
+		[]byte(`{"candidates":[{"content":{"parts":[{"text":"first "},{"audioTranscription":{"text":"second "}},{"text":"third"}]},"finishReason":"STOP"}]}`),
+		&state,
+	)
+	var deltas strings.Builder
+	var completed gjson.Result
+	for _, chunk := range output {
+		event, data := parseSSEEvent(t, chunk)
+		switch event {
+		case "response.output_text.delta":
+			deltas.WriteString(data.Get("delta").String())
+		case "response.completed":
+			completed = data
+		}
+	}
+	if got := deltas.String(); got != "first second third" {
+		t.Fatalf("stream deltas = %q, want first second third", got)
+	}
+	if got := completed.Get("response.output.0.content.0.text").String(); got != "first second third" {
+		t.Fatalf("completed text = %q, want first second third; event=%s", got, completed.Raw)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesNonStreamPreservesAllCandidatesAndAudioOrder(t *testing.T) {
+	response := []byte(`{
+		"response":{
+			"responseId":"multi-candidate",
+			"candidates":[
+				{"index":0,"content":{"parts":[{"text":"first "},{"audioTranscription":{"text":"audio"}}]},"finishReason":"STOP"},
+				{"index":1,"content":{"parts":[{"text":"second"}]},"finishReason":"STOP"}
+			]
+		},
+		"traceId":"vertex-trace"
+	}`)
+	output := ConvertGeminiResponseToOpenAIResponsesNonStream(
+		context.Background(), "gemini-model", nil, nil, response, nil,
+	)
+	if got := gjson.GetBytes(output, "status").String(); got != "completed" {
+		t.Fatalf("status = %q, want completed; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "output.#").Int(); got != 2 {
+		t.Fatalf("output count = %d, want 2; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "output.0.content.0.text").String(); got != "first audio" {
+		t.Fatalf("first candidate text = %q; output=%s", got, output)
+	}
+	if got := gjson.GetBytes(output, "output.1.content.0.text").String(); got != "second" {
+		t.Fatalf("second candidate text = %q; output=%s", got, output)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesTerminalClassification(t *testing.T) {
+	t.Run("max tokens is incomplete", func(t *testing.T) {
+		response := []byte(`{
+			"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}],
+			"usageMetadata":{"promptTokenCount":-1,"candidatesTokenCount":7,"thoughtsTokenCount":2,"totalTokenCount":"9","cachedContentTokenCount":1.5}
+		}`)
+		var state any
+		var terminal gjson.Result
+		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+			context.Background(), "model", nil, nil, response, &state,
+		) {
+			event, data := parseSSEEvent(t, chunk)
+			if event == "response.completed" {
+				t.Fatal("MAX_TOKENS emitted response.completed")
+			}
+			if event == "response.incomplete" {
+				terminal = data
+			}
+		}
+		if terminal.Get("response.status").String() != "incomplete" ||
+			terminal.Get("response.incomplete_details.reason").String() != "max_output_tokens" {
+			t.Fatalf("MAX_TOKENS terminal malformed: %s", terminal.Raw)
+		}
+		if got := terminal.Get("response.usage.output_tokens").Int(); got != 9 {
+			t.Fatalf("output_tokens = %d, want 9; terminal=%s", got, terminal.Raw)
+		}
+		for path, want := range map[string]int64{
+			"response.usage.input_tokens":                       0,
+			"response.usage.input_tokens_details.cached_tokens": 0,
+			"response.usage.total_tokens":                       0,
+		} {
+			if got := terminal.Get(path).Int(); got != want {
+				t.Fatalf("%s = %d, want %d; terminal=%s", path, got, want, terminal.Raw)
+			}
+		}
+	})
+
+	t.Run("provider error is failed", func(t *testing.T) {
+		var state any
+		var failed gjson.Result
+		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+			context.Background(),
+			"model",
+			nil,
+			nil,
+			[]byte(`{"response":{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}}`),
+			&state,
+		) {
+			event, data := parseSSEEvent(t, chunk)
+			if event == "response.completed" {
+				t.Fatal("provider error emitted response.completed")
+			}
+			if event == "response.failed" {
+				failed = data
+			}
+		}
+		if failed.Get("response.status").String() != "failed" ||
+			failed.Get("response.error.code").String() != "RESOURCE_EXHAUSTED" ||
+			failed.Get("response.error.message").String() != "quota" {
+			t.Fatalf("provider failure malformed: %s", failed.Raw)
+		}
+	})
+
+	t.Run("empty stop emits no terminal", func(t *testing.T) {
+		var state any
+		output := ConvertGeminiResponseToOpenAIResponses(
+			context.Background(),
+			"model",
+			nil,
+			nil,
+			[]byte(`{"candidates":[{"content":{"parts":[]},"finishReason":"STOP"}]}`),
+			&state,
+		)
+		for _, chunk := range output {
+			event, _ := parseSSEEvent(t, chunk)
+			if event == "response.completed" || event == "response.incomplete" || event == "response.failed" {
+				t.Fatalf("empty response emitted terminal event %s", event)
+			}
+		}
+	})
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesNonStreamTerminalClassification(t *testing.T) {
+	tests := []struct {
+		name       string
+		response   string
+		wantStatus string
+		wantReason string
+		wantCode   string
+	}{
+		{
+			name:       "max tokens",
+			response:   `{"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}]}`,
+			wantStatus: "incomplete",
+			wantReason: "max_output_tokens",
+		},
+		{
+			name:       "safety",
+			response:   `{"candidates":[{"content":{"parts":[{"text":"partial"}]},"finishReason":"SAFETY"}]}`,
+			wantStatus: "incomplete",
+			wantReason: "content_filter",
+		},
+		{
+			name:       "missing finish reason",
+			response:   `{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}`,
+			wantStatus: "failed",
+			wantCode:   "provider_finish_reason_missing",
+		},
+		{
+			name:       "provider error",
+			response:   `{"error":{"status":"INTERNAL","message":"failed upstream"}}`,
+			wantStatus: "failed",
+			wantCode:   "INTERNAL",
+		},
+		{
+			name:       "empty response",
+			response:   `{}`,
+			wantStatus: "failed",
+			wantCode:   "provider_stream_ended",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := ConvertGeminiResponseToOpenAIResponsesNonStream(
+				context.Background(), "model", nil, nil, []byte(test.response), nil,
+			)
+			if got := gjson.GetBytes(output, "status").String(); got != test.wantStatus {
+				t.Fatalf("status = %q, want %q; output=%s", got, test.wantStatus, output)
+			}
+			if got := gjson.GetBytes(output, "incomplete_details.reason").String(); got != test.wantReason {
+				t.Fatalf("incomplete reason = %q, want %q; output=%s", got, test.wantReason, output)
+			}
+			if got := gjson.GetBytes(output, "error.code").String(); got != test.wantCode {
+				t.Fatalf("error code = %q, want %q; output=%s", got, test.wantCode, output)
+			}
+			if got := gjson.GetBytes(output, "status").String(); got == "completed" {
+				t.Fatalf("non-success response was marked completed: %s", output)
+			}
+		})
 	}
 }

@@ -6,12 +6,11 @@
 package gemini
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -25,18 +24,6 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	out := []byte(`{"model":"","messages":[]}`)
 
 	root := gjson.ParseBytes(rawJSON)
-
-	// Helper for generating tool call IDs in the form: call_<alphanum>
-	genToolCallID := func() string {
-		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-		var b strings.Builder
-		// 24 chars random suffix
-		for range 24 {
-			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-			b.WriteByte(letters[n.Int64()])
-		}
-		return "call_" + b.String()
-	}
 
 	// Model mapping
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -114,7 +101,12 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
 	// Process contents (Gemini messages) -> OpenAI messages
-	var toolCallIDs []string // Track tool call IDs for matching with tool results
+	var toolCalls translatorcommon.GeminiToolCallQueue
+	toolCallCounter := 0
+	newToolCallID := func() string {
+		toolCallCounter++
+		return fmt.Sprintf("call_gemini_%016d", toolCallCounter)
+	}
 
 	// System instruction -> OpenAI system message
 	// Gemini may provide `systemInstruction` or `system_instruction`; support both keys.
@@ -130,6 +122,10 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		if parts.Exists() && parts.IsArray() {
 			parts.ForEach(
 				func(_, part gjson.Result) bool {
+					if translatorcommon.IsGeminiThoughtPart(part) {
+						return true
+					}
+
 					// Handle text parts
 					if text := part.Get("text"); text.Exists() {
 						contentPart := []byte(`{"type":"text","text":""}`)
@@ -182,10 +178,16 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				onlyTextContent := true
 				toolCallsWrapper := []byte(`{"arr":[]}`)
 				toolCallsCount := 0
+				droppedThought := false
 
 				if parts.Exists() && parts.IsArray() {
 					parts.ForEach(
 						func(_, part gjson.Result) bool {
+							if translatorcommon.IsGeminiThoughtPart(part) {
+								droppedThought = true
+								return true
+							}
+
 							// Handle text parts
 							if text := part.Get("text"); text.Exists() {
 								formattedText := text.String()
@@ -215,18 +217,22 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 							// Handle function calls (Gemini) -> tool calls (OpenAI)
 							if functionCall := part.Get("functionCall"); functionCall.Exists() {
-								toolCallID := genToolCallID()
-								toolCallIDs = append(toolCallIDs, toolCallID)
+								functionName := functionCall.Get("name").String()
+								argumentsRaw := ""
+								if args := functionCall.Get("args"); args.Exists() {
+									argumentsRaw = args.Raw
+								}
+								toolCallID := translatorcommon.GeminiToolCallID(functionCall)
+								if toolCallID == "" {
+									toolCallID = newToolCallID()
+								}
+								toolCalls.Add(functionName, toolCallID)
 
 								toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 								toolCall, _ = sjson.SetBytes(toolCall, "id", toolCallID)
-								toolCall, _ = sjson.SetBytes(
-									toolCall, "function.name", functionCall.Get("name").String(),
-								)
-
-								// Convert args to arguments JSON string
-								if args := functionCall.Get("args"); args.Exists() {
-									toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", args.Raw)
+								toolCall, _ = sjson.SetBytes(toolCall, "function.name", functionName)
+								if argumentsRaw != "" {
+									toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", argumentsRaw)
 								} else {
 									toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", "{}")
 								}
@@ -237,31 +243,24 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 							// Handle function responses (Gemini) -> tool role messages (OpenAI)
 							if functionResponse := part.Get("functionResponse"); functionResponse.Exists() {
-								// Create tool message for function response
+								functionName := functionResponse.Get("name").String()
 								toolMsg := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 
-								// Convert response.content to JSON string
+								responseRaw := ""
 								if response := functionResponse.Get("response"); response.Exists() {
 									if contentField := response.Get("content"); contentField.Exists() {
-										toolMsg, _ = sjson.SetBytes(toolMsg, "content", contentField.Raw)
+										responseRaw = contentField.Raw
 									} else {
-										toolMsg, _ = sjson.SetBytes(toolMsg, "content", response.Raw)
+										responseRaw = response.Raw
 									}
+									toolMsg, _ = sjson.SetBytes(toolMsg, "content", responseRaw)
 								}
 
-								// Try to match with previous tool call ID
-								_ = functionResponse.Get("name").String() // functionName not used for now
-								if len(toolCallIDs) > 0 {
-									// Use the last tool call ID (simple matching by function name)
-									// In a real implementation, you might want more sophisticated matching
-									toolMsg, _ = sjson.SetBytes(
-										toolMsg, "tool_call_id", toolCallIDs[len(toolCallIDs)-1],
-									)
-								} else {
-									// Generate a tool call ID if none available
-									toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", genToolCallID())
+								toolCallID := toolCalls.Match(functionName, translatorcommon.GeminiToolCallID(functionResponse))
+								if toolCallID == "" {
+									toolCallID = newToolCallID()
 								}
-
+								toolMsg, _ = sjson.SetBytes(toolMsg, "tool_call_id", toolCallID)
 								out, _ = sjson.SetRawBytes(out, "messages.-1", toolMsg)
 							}
 
@@ -282,6 +281,10 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				// Set tool calls if any
 				if toolCallsCount > 0 {
 					msg, _ = sjson.SetRawBytes(msg, "tool_calls", []byte(gjson.GetBytes(toolCallsWrapper, "arr").Raw))
+				}
+
+				if droppedThought && contentPartsCount == 0 && toolCallsCount == 0 {
+					return true
 				}
 
 				out, _ = sjson.SetRawBytes(out, "messages.-1", msg)

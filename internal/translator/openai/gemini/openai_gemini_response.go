@@ -164,7 +164,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, _, _, rawJSON []
 				}
 
 				// Handle tool calls delta
-				if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
+				if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
 					toolCalls.ForEach(
 						func(_, toolCall gjson.Result) bool {
 							toolIndex := int(toolCall.Get("index").Int())
@@ -219,7 +219,7 @@ func ConvertOpenAIResponseToGemini(_ context.Context, _ string, _, _, rawJSON []
 				}
 
 				// Handle finish reason
-				if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+				if finishReason := choice.Get("finish_reason"); finishReason.Type == gjson.String && finishReason.String() != "" {
 					geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
 					template, _ = sjson.SetBytes(template, "candidates.0.finishReason", geminiFinishReason)
 
@@ -627,7 +627,7 @@ func ConvertOpenAIResponseToGeminiNonStream(_ context.Context, _ string, _, _, r
 				}
 
 				// Handle finish reason
-				if finishReason := choice.Get("finish_reason"); finishReason.Exists() {
+				if finishReason := choice.Get("finish_reason"); finishReason.Type == gjson.String && finishReason.String() != "" {
 					geminiFinishReason := mapOpenAIFinishReasonToGemini(finishReason.String())
 					out, _ = sjson.SetBytes(out, "candidates.0.finishReason", geminiFinishReason)
 				}
