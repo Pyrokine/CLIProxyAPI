@@ -152,6 +152,82 @@ func TestEmbeddedCodexClientModelsIncludeGPT6Astra(t *testing.T) {
 	}
 }
 
+func TestEmbeddedCodexClientModelsIncludeGPT6SolAndLuna(t *testing.T) {
+	var payload codexClientModelsPayload
+	if err := json.Unmarshal(GetCodexClientModelsJSON(), &payload); err != nil {
+		t.Fatalf("decode embedded catalog: %v", err)
+	}
+	bySlug := make(map[string]map[string]any, len(payload.Models))
+	for _, model := range payload.Models {
+		slug, _ := model["slug"].(string)
+		bySlug[slug] = model
+	}
+	if obsolete := bySlug["gpt-5.3-codex-spark"]; obsolete != nil {
+		t.Fatalf("retired Spark entry remains in client manifest: %#v", obsolete)
+	}
+
+	tests := []struct {
+		slug        string
+		displayName string
+		priority    float64
+		levels      []string
+	}{
+		{
+			slug:        "gpt-6-sol",
+			displayName: "GPT-6-Sol",
+			priority:    2,
+			levels:      []string{"low", "medium", "high", "xhigh", "max", "ultra"},
+		},
+		{
+			slug:        "gpt-6-luna",
+			displayName: "GPT-6-Luna",
+			priority:    3,
+			levels:      []string{"low", "medium", "high", "xhigh", "max"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.slug, func(t *testing.T) {
+			model := bySlug[test.slug]
+			if model == nil {
+				t.Fatal("model missing from Codex client manifest")
+			}
+			if model["display_name"] != test.displayName || model["minimal_client_version"] != "0.155.0" {
+				t.Fatalf("client identity = (%v, %v)", model["display_name"], model["minimal_client_version"])
+			}
+			if model["context_window"] != float64(272000) || model["max_context_window"] != float64(872000) ||
+				model["priority"] != test.priority {
+				t.Fatalf(
+					"client limits = (%v, %v), priority=%v",
+					model["context_window"],
+					model["max_context_window"],
+					model["priority"],
+				)
+			}
+			if model["default_reasoning_level"] != "medium" || model["supported_in_api"] != true ||
+				model["tool_mode"] != "code_mode_only" || model["multi_agent_version"] != "v2" ||
+				model["use_responses_lite"] != true {
+				t.Fatalf("client contract = %#v", model)
+			}
+			levels, ok := model["supported_reasoning_levels"].([]any)
+			if !ok || len(levels) != len(test.levels) {
+				t.Fatalf("reasoning levels = %#v, want %v", model["supported_reasoning_levels"], test.levels)
+			}
+			for index, want := range test.levels {
+				level, okLevel := levels[index].(map[string]any)
+				if !okLevel || level["effort"] != want {
+					t.Fatalf("reasoning level %d = %#v, want %q", index, levels[index], want)
+				}
+			}
+			baseInstructions, okInstructions := model["base_instructions"].(string)
+			messages, okMessages := model["model_messages"].(map[string]any)
+			if !okInstructions || baseInstructions == "" || !okMessages ||
+				messages["instructions_template"] != baseInstructions {
+				t.Fatal("client instructions are incomplete or inconsistent")
+			}
+		})
+	}
+}
+
 func TestEmbeddedCodexClientModelsExcludeObsoleteFields(t *testing.T) {
 	var payload codexClientModelsPayload
 	if err := json.Unmarshal(GetCodexClientModelsJSON(), &payload); err != nil {

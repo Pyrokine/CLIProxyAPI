@@ -169,7 +169,8 @@ func configuredModelHasCapability(modelInfo *registry.ModelInfo) bool {
 	if modelInfo == nil {
 		return false
 	}
-	if modelInfo.IsCompat || modelInfo.Thinking != nil || modelInfo.ContextLength > 0 || modelInfo.MaxContextLength > 0 {
+	if modelInfo.IsCompat || modelInfo.Thinking != nil || modelInfo.NativeCapabilities != nil ||
+		modelInfo.ContextLength > 0 || modelInfo.MaxContextLength > 0 {
 		return true
 	}
 	configured := strings.TrimSpace(modelInfo.CatalogName)

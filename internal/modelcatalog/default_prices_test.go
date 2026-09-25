@@ -16,6 +16,29 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 	cacheWriteLuna := 0.25
 	cacheWriteAstra := 12.5
 	cacheWriteCyber := 15.625
+	cacheWriteGPT6Sol := 2.5
+	cacheWriteGPT6Luna := 0.125
+	gptImage15Limitations := []string{
+		"Image input is USD 8 per one million tokens and cached image input is USD 2; the current manifest records the text-input and cached-text-input rates because it cannot distinguish input modality.",
+		"Image output is USD 32 per one million tokens. Fixed per-image examples vary by quality and resolution and cannot be represented by this token-only manifest.",
+		"OpenAI has deprecated this model and schedules its API shutdown for 2026-12-01.",
+	}
+	gptImage2Limitations := []string{
+		"Image input is USD 4 per one million tokens and cached image input is USD 1; the current manifest records the text-input and cached-text-input rates because it cannot distinguish input modality.",
+		"Image output is USD 15 per one million tokens. Per-image cost varies by output-token consumption, quality, and resolution and cannot be represented by this token-only manifest.",
+	}
+	gptImage25Limitations := []string{
+		"Image input is USD 8 per one million tokens and cached image input is USD 2; the current manifest records the USD 5 text-input and USD 1.25 cached-text-input rates because it cannot distinguish input modality.",
+		"Image output is USD 30 per one million tokens. The official source does not publish a fixed per-image quality or size table, and the GPT Image 2 calculator does not estimate token consumption for these models.",
+	}
+	gemini38Limitations := []string{
+		"Context cache storage is billed separately at USD 0.50 per one million tokens per hour and is not represented by request token usage.",
+		"Batch uses separate rates, and standard rates increase to USD 1.50 input, USD 0.15 cached input, and USD 7.50 output from 2027-01-01.",
+	}
+	gemini38HighLimitations := []string{
+		"This thinking-level alias uses the Gemini 3.8 Flash family rate because Google publishes no separate price for the alias.",
+		"Context cache storage and Batch use separate rates, and standard rates increase to USD 1.50 input, USD 0.15 cached input, and USD 7.50 output from 2027-01-01.",
+	}
 	want := map[string]Price{
 		"gpt-5.6-sol": {
 			Prompt: 4, Completion: 20, Cache: 0.4, CacheWrite: &cacheWriteSol,
@@ -37,6 +60,55 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 			Prompt: 12.5, Completion: 75, Cache: 1.25, CacheWrite: &cacheWriteCyber,
 			Status: PriceStatusPartial,
 		},
+		"gpt-6-sol": {
+			Prompt: 2, Completion: 10, Cache: 0.2, CacheWrite: &cacheWriteGPT6Sol,
+			Status: PriceStatusPartial,
+		},
+		"gpt-6-luna": {
+			Prompt: 0.1, Completion: 0.5, Cache: 0.01, CacheWrite: &cacheWriteGPT6Luna,
+			Status: PriceStatusPartial,
+		},
+		"gpt-image-1.5": {
+			Prompt: 5, Completion: 32, Cache: 1.25, Status: PriceStatusPartial,
+		},
+		"gpt-image-2": {
+			Prompt: 2.5, Completion: 15, Cache: 0.625, Status: PriceStatusPartial,
+		},
+		"gpt-image-2.5-flare": {
+			Prompt: 5, Completion: 30, Cache: 1.25, Status: PriceStatusPartial,
+		},
+		"gpt-image-2.5-flare-2026-09-08": {
+			Prompt: 5, Completion: 30, Cache: 1.25, Status: PriceStatusPartial,
+		},
+		"gpt-image-2.5-sunburst": {
+			Prompt: 5, Completion: 30, Cache: 1.25, Status: PriceStatusPartial,
+		},
+		"gpt-image-2.5-sunburst-2026-09-08": {
+			Prompt: 5, Completion: 30, Cache: 1.25, Status: PriceStatusPartial,
+		},
+		"claude-fable-5-1": {
+			Prompt: 10, Completion: 50, Cache: 0.25, Status: PriceStatusComplete,
+		},
+		"claude-opus-5-5": {
+			Prompt: 4, Completion: 20, Cache: 0.2, Status: PriceStatusComplete,
+		},
+		"grok-4.7": {
+			Prompt: 2, Completion: 6, Cache: 0.5, Status: PriceStatusPartial,
+		},
+		"gemini-3.1-flash-image": {
+			Prompt: 0.5, Completion: 3, Cache: 0.05, Status: PriceStatusPartial,
+		},
+		"gemini-3.1-flash-lite-image": {
+			Prompt: 0.25, Completion: 1.5, Cache: 0.025, Status: PriceStatusPartial,
+		},
+		"gemini-3.8-flash": {
+			Prompt: 0.75, Completion: 3.75, Cache: 0.075,
+			Status: PriceStatusPartial, AutoApply: true,
+		},
+		"gemini-3.8-flash-high": {
+			Prompt: 0.75, Completion: 3.75, Cache: 0.075,
+			Status: PriceStatusPartial, AutoApply: true,
+		},
 		"deepseek-flash": {
 			Prompt: 0.15, Completion: 0.6, Cache: 0.003,
 			Status: PriceStatusComplete,
@@ -56,6 +128,12 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 		"gemini-3.7-flash": {
 			Prompt: 0.75, Completion: 3.75, Cache: 0.075,
 			Status: PriceStatusPartial, AutoApply: true,
+		},
+		"kimi-k2.7-code": {
+			Prompt: 0.95, Completion: 4, Cache: 0.19, Status: PriceStatusComplete,
+		},
+		"kimi-k2.7-code-highspeed": {
+			Prompt: 1.9, Completion: 8, Cache: 0.38, Status: PriceStatusComplete,
 		},
 		"kimi-k3": {
 			Prompt: 3, Completion: 15, Cache: 0.3,
@@ -84,26 +162,98 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 
 	metadata := map[string]struct {
 		source      string
+		checkedAt   string
 		limitations []string
 	}{
 		"gpt-6-astra": {
-			source: "https://developers.openai.com/api/docs/models/gpt-6-astra",
+			source:    "https://developers.openai.com/api/docs/models/gpt-6-astra",
+			checkedAt: "2026-09-04",
 			limitations: []string{
 				"Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
 				"Access is rolling out through the Trusted Access Program; this reference price does not establish entitlement.",
 			},
 		},
 		"gpt-5.6-cyber": {
-			source: "https://developers.openai.com/api/docs/models/gpt-5.6-cyber",
+			source:    "https://developers.openai.com/api/docs/models/gpt-5.6-cyber",
+			checkedAt: "2026-09-04",
 			limitations: []string{
 				"Requests with more than 272K input tokens use 2x input and 1.5x output pricing; the current manifest does not select that tier automatically. The official source does not publish long-context cache rates.",
 				"Access requires separate Daybreak approval and provisioning.",
 			},
 		},
+		"gpt-6-sol": {
+			source:    "https://developers.openai.com/api/docs/models/gpt-6-sol",
+			checkedAt: "2026-09-23",
+			limitations: []string{
+				"Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
+			},
+		},
+		"gpt-6-luna": {
+			source:    "https://developers.openai.com/api/docs/models/gpt-6-luna",
+			checkedAt: "2026-09-23",
+			limitations: []string{
+				"Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
+			},
+		},
+		"gpt-image-1.5": {
+			source:      "https://developers.openai.com/api/docs/models/gpt-image-1.5",
+			checkedAt:   "2026-09-23",
+			limitations: gptImage15Limitations,
+		},
+		"gpt-image-2": {
+			source:      "https://developers.openai.com/api/docs/models/gpt-image-2",
+			checkedAt:   "2026-09-23",
+			limitations: gptImage2Limitations,
+		},
+		"gpt-image-2.5-flare": {
+			source:      "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare",
+			checkedAt:   "2026-09-23",
+			limitations: gptImage25Limitations,
+		},
+		"gpt-image-2.5-flare-2026-09-08": {
+			source:      "https://developers.openai.com/api/docs/models/gpt-image-2.5-flare",
+			checkedAt:   "2026-09-23",
+			limitations: gptImage25Limitations,
+		},
+		"gpt-image-2.5-sunburst": {
+			source:      "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+			checkedAt:   "2026-09-23",
+			limitations: gptImage25Limitations,
+		},
+		"gpt-image-2.5-sunburst-2026-09-08": {
+			source:      "https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst",
+			checkedAt:   "2026-09-23",
+			limitations: gptImage25Limitations,
+		},
+		"gemini-3.8-flash": {
+			source:      "https://ai.google.dev/gemini-api/docs/pricing",
+			checkedAt:   "2026-09-23",
+			limitations: gemini38Limitations,
+		},
+		"gemini-3.8-flash-high": {
+			source:      "https://ai.google.dev/gemini-api/docs/pricing",
+			checkedAt:   "2026-09-23",
+			limitations: gemini38HighLimitations,
+		},
+		"kimi-k2.7-code": {
+			source:    "https://platform.kimi.ai/docs/pricing/chat",
+			checkedAt: "2026-09-23",
+		},
+		"kimi-k2.7-code-highspeed": {
+			source:    "https://platform.kimi.ai/docs/pricing/chat",
+			checkedAt: "2026-09-23",
+		},
+		"grok-4.7": {
+			source:    "https://docs.x.ai/developers/models/grok-4.7",
+			checkedAt: "2026-09-23",
+			limitations: []string{
+				"Input, cached-input, and output prices double above 200K input tokens; the current manifest does not select that tier automatically.",
+			},
+		},
 	}
 	for name, expected := range metadata {
 		got := prices[name]
-		if got.Source != expected.source || got.CheckedAt != "2026-09-04" ||
+		if got.Source != expected.source || got.CheckedAt != expected.checkedAt ||
 			!reflect.DeepEqual(got.Limitations, expected.limitations) {
 			t.Errorf(
 				"DefaultPrices()[%q] metadata = %+v, want source %q and limitations %v", name, got, expected.source,
@@ -111,11 +261,68 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 			)
 		}
 	}
+	for _, name := range []string{"gemini-3.8-flash", "gemini-3.8-flash-high"} {
+		if got := prices[name]; got.EffectiveUntil != "2026-12-31" {
+			t.Errorf("DefaultPrices()[%q].EffectiveUntil = %q, want 2026-12-31", name, got.EffectiveUntil)
+		}
+	}
+
+	for _, name := range []string{
+		"kimi-k2.8",
+		"k2.8",
+		"kimi-k2.8-preview",
+		"k2.8-preview",
+		"kimi-k2.8-code",
+		"k2.8-code",
+	} {
+		if price, ok := prices[name]; ok {
+			t.Errorf("DefaultPrices()[%q] = %+v, want removed", name, price)
+		}
+	}
+
+	for _, name := range []string{
+		"grok-imagine-image",
+		"grok-imagine-image-quality",
+		"grok-imagine-image-2.0",
+		"grok-imagine-video",
+		"grok-imagine-video-1.5",
+		"qwen3.8-max",
+		"qwen3.8-max-0902",
+		"qwen3.8-flash",
+		"qwen3-coder-next",
+		"glm-4-voice",
+		"glm-4.1v-thinking-flash",
+		"glm-4.1v-thinking-flashx",
+		"glm-4.6v",
+		"glm-4.6v-flash",
+		"glm-4.6v-flashx",
+		"glm-4v-flash",
+		"glm-5v-turbo",
+		"autoglm-phone",
+		"glm-5.3-flash",
+	} {
+		price, ok := prices[name]
+		if !ok || price.EffectiveStatus() != PriceStatusUnpriced || price.HasReferenceTokenRates() ||
+			price.Source == "" || price.CheckedAt != "2026-09-23" || price.UnpricedReason == "" {
+			t.Errorf("DefaultPrices()[%q] = %+v, %t, want sourced unpriced entry", name, price, ok)
+		}
+	}
+
+	fable := prices["claude-fable-5-1"]
+	if fable.CacheWrite5m == nil || *fable.CacheWrite5m != 12.5 ||
+		fable.CacheWrite1h == nil || *fable.CacheWrite1h != 20 {
+		t.Fatalf("Claude Fable 5.1 cache-write rates = (%v, %v)", fable.CacheWrite5m, fable.CacheWrite1h)
+	}
+	opus := prices["claude-opus-5-5"]
+	if opus.CacheWrite5m == nil || *opus.CacheWrite5m != 5 ||
+		opus.CacheWrite1h == nil || *opus.CacheWrite1h != 8 {
+		t.Fatalf("Claude Opus 5.5 cache-write rates = (%v, %v)", opus.CacheWrite5m, opus.CacheWrite1h)
+	}
 
 	// This contract test intentionally compares a compile-time manifest version.
 	// noinspection GoBoolExpressions
-	if DefaultsVersion != "2026-09-11" {
-		t.Fatalf("DefaultsVersion = %q, want 2026-09-11", DefaultsVersion)
+	if DefaultsVersion != "2026-09-23.2" {
+		t.Fatalf("DefaultsVersion = %q, want 2026-09-23.2", DefaultsVersion)
 	}
 }
 
@@ -201,12 +408,30 @@ func TestDeepSeekDefaultPricesSelectRecurringUTCBands(t *testing.T) {
 	}
 }
 
+func TestDefaultInventoryHasExplicitPriceStatus(t *testing.T) {
+	t.Parallel()
+
+	catalog := DefaultFile()
+	for _, model := range catalog.Models {
+		price, ok := catalog.Price(model.Name)
+		if !ok {
+			t.Errorf("default inventory model %q has no price-status record", model.Name)
+			continue
+		}
+		switch price.EffectiveStatus() {
+		case PriceStatusComplete, PriceStatusPartial, PriceStatusUnpriced:
+		default:
+			t.Errorf("default inventory model %q has invalid price status %q", model.Name, price.EffectiveStatus())
+		}
+	}
+}
+
 func TestDefaultCatalogKeepsPriceManifestSeparateFromInventory(t *testing.T) {
 	t.Parallel()
 
 	catalog := DefaultFile()
 	aliases := catalog.ToOAuthModelAlias()
-	for _, name := range []string{"gpt-5", "MiniMax-M3", "gpt-5.6-cyber"} {
+	for _, name := range []string{"gpt-5", "gpt-5.6-cyber"} {
 		if _, ok := catalog.Price(name); !ok {
 			t.Errorf("default price manifest missing %q", name)
 		}
@@ -242,7 +467,7 @@ func TestDefaultUpdateAppliesInventoryAndPriceManifestIndependently(t *testing.T
 	const previousDefaultsVersion = "2026-08-26"
 	current := DefaultFile()
 	current.DefaultsVersion = previousDefaultsVersion
-	current.DeletePrice("MiniMax-M3")
+	current.DeletePrice("gpt-5")
 	current.SetPrice("gpt-5.6-sol", Price{Prompt: 5, Completion: 30, Cache: 0.5})
 	current.DeletePrice("gpt-6-astra")
 	current.SetPrice("gpt-5.6-cyber", Price{Prompt: 1, Completion: 2, Cache: 0.1})
@@ -267,7 +492,7 @@ func TestDefaultUpdateAppliesInventoryAndPriceManifestIndependently(t *testing.T
 	for _, change := range preview.Changes {
 		changes[change.Name] = change
 	}
-	for _, name := range []string{"MiniMax-M3", "gpt-5.6-sol", "gpt-6-astra", "gpt-5.6-cyber", "gemini-3.7-flash"} {
+	for _, name := range []string{"gpt-5", "gpt-5.6-sol", "gpt-6-astra", "gpt-5.6-cyber", "gemini-3.7-flash"} {
 		if _, ok := changes[name]; !ok {
 			t.Errorf("default update missing %q: %#v", name, preview.Changes)
 		}
@@ -292,7 +517,7 @@ func TestDefaultUpdateAppliesInventoryAndPriceManifestIndependently(t *testing.T
 		t.Fatalf("updated versions = (%d, %q)", updated.SchemaVersion, updated.DefaultsVersion)
 	}
 	defaults := DefaultFile()
-	for _, name := range []string{"MiniMax-M3", "gpt-5.6-cyber"} {
+	for _, name := range []string{"gpt-5", "gpt-5.6-cyber"} {
 		if _, ok := updated.Find(name); ok {
 			t.Fatalf("price-only default %q became inventory during update", name)
 		}

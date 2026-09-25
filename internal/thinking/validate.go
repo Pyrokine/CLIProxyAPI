@@ -60,11 +60,24 @@ func validateConfig(
 		return &config, nil
 	}
 
-	allowClampUnsupported := isBudgetCapableProvider(fromFormat) && isLevelBasedProvider(toFormat)
-	strictBudget := !fromSuffix && fromFormat != "" && isSameProviderFamily(fromFormat, toFormat)
+	toCapability := detectModelCapability(modelInfo)
+	modelFamilyMismatch := false
+	if modelInfo != nil {
+		modelType := strings.ToLower(strings.TrimSpace(modelInfo.Type))
+		if modelType != "" {
+			if (fromFormat != "" && !isSameProviderFamily(fromFormat, modelType)) ||
+				(toFormat != "" && !isSameProviderFamily(toFormat, modelType)) {
+				modelFamilyMismatch = true
+			}
+		}
+	}
+	allowClampUnsupported := isBudgetCapableProvider(fromFormat) && isLevelBasedProvider(toFormat) ||
+		modelFamilyMismatch && isSameProviderFamily(fromFormat, toFormat)
+	strictBudget := !fromSuffix && fromFormat != "" &&
+		isSameProviderFamily(fromFormat, toFormat) && !modelFamilyMismatch
 	budgetDerivedFromLevel := false
 
-	capability := detectModelCapability(modelInfo)
+	capability := toCapability
 	// noinspection GoSwitchMissingCasesForIotaConsts — capabilityNone/capabilityUnknown are impossible here (support != nil guard above).
 	switch capability {
 	case capabilityBudgetOnly:
@@ -154,11 +167,14 @@ func validateConfig(
 		}
 	}
 
+	cannotDisableLevelModel := !support.ZeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
 	if config.Mode == ModeNone && toFormat == "claude" {
-		// Claude supports explicit disable via thinking.type="disabled".
-		// Keep Budget=0 so applier can omit budget_tokens.
 		config.Budget = 0
 		config.Level = ""
+		if cannotDisableLevelModel && len(support.Levels) > 0 {
+			config.Mode = ModeLevel
+			config.Level = Level(support.Levels[0])
+		}
 	} else {
 		// noinspection GoSwitchMissingCasesForIotaConsts — all Mode values are covered.
 		switch config.Mode {
@@ -169,7 +185,6 @@ func validateConfig(
 		}
 
 		// A model that cannot disable thinking falls back to its lowest supported level.
-		cannotDisableLevelModel := !support.ZeroAllowed && !isLevelSupported(string(LevelNone), support.Levels)
 		if config.Mode == ModeNone && len(support.Levels) > 0 &&
 			(config.Budget > 0 || cannotDisableLevelModel) {
 			config.Level = Level(support.Levels[0])
@@ -234,7 +249,7 @@ func convertAutoToMidRange(
 }
 
 // standardLevelOrder defines the canonical ordering of thinking levels from lowest to highest.
-var standardLevelOrder = []Level{levelMinimal, levelLow, levelMedium, LevelHigh, LevelXHigh}
+var standardLevelOrder = []Level{levelMinimal, levelLow, levelMedium, LevelHigh, LevelXHigh, LevelMax}
 
 // clampLevel clamps the given level to the nearest supported level.
 // On tie, prefers the lower level.
@@ -390,11 +405,20 @@ func isGeminiFamily(provider string) bool {
 	}
 }
 
+func isOpenAIFamily(provider string) bool {
+	switch provider {
+	case "openai", "openai-response", "codex":
+		return true
+	default:
+		return false
+	}
+}
+
 func isSameProviderFamily(from, to string) bool {
 	if from == to {
 		return true
 	}
-	return isGeminiFamily(from) && isGeminiFamily(to)
+	return isGeminiFamily(from) && isGeminiFamily(to) || isOpenAIFamily(from) && isOpenAIFamily(to)
 }
 
 func abs(x int) int {

@@ -477,7 +477,7 @@ func applyUserDefinedModel(
 		},
 	).Debug("thinking: applying config for user-defined model (skip validation)")
 
-	config = normalizeUserDefinedConfig(config, fromFormat, toFormat)
+	config = normalizeUserDefinedConfig(config, fromFormat, toFormat, suffixResult.HasSuffix)
 	applied, err := applier.Apply(body, config, modelInfo)
 	if err != nil {
 		return applied, err
@@ -495,8 +495,8 @@ func applyUserDefinedModel(
 	), nil
 }
 
-func normalizeUserDefinedConfig(config Config, fromFormat, toFormat string) Config {
-	if config.Mode != ModeLevel {
+func normalizeUserDefinedConfig(config Config, fromFormat, toFormat string, fromSuffix bool) Config {
+	if config.Mode != ModeLevel || toFormat == "claude" && !fromSuffix {
 		return config
 	}
 	if !isBudgetCapableProvider(toFormat) || !isLevelBasedProvider(fromFormat) {
@@ -564,17 +564,26 @@ func ExtractReasoningEffort(body []byte, provider, model string) string {
 // ExtractTranslatedReasoningEffort returns the final provider payload's thinking setting.
 func ExtractTranslatedReasoningEffort(body []byte, provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
-	config := extractConfig(body, provider)
+	config := extractConfigForUsage(body, provider)
 	if !hasConfig(config) {
 		switch provider {
 		case "openai", "openai-response":
-			config = extractCodexConfig(body)
+			config = extractCodexUsageConfig(body)
 			if !hasConfig(config) {
 				config = extractOpenAIConfig(body)
 			}
 		}
 	}
 	return reasoningEffortFromConfig(config)
+}
+
+func extractConfigForUsage(body []byte, provider string) Config {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "xai", "openai-response":
+		return extractCodexUsageConfig(body)
+	default:
+		return extractConfig(body, provider)
+	}
 }
 
 func reasoningEffortFromSuffix(suffix SuffixResult) string {
@@ -609,16 +618,32 @@ func reasoningEffortFromConfig(config Config) string {
 // extractClaudeConfig extracts thinking configuration from Claude format request body.
 //
 // Claude API format:
-//   - thinking.type: "enabled" or "disabled"
+//   - thinking.type: "enabled", "adaptive", "auto", or "disabled"
 //   - thinking.budget_tokens: integer (-1=auto, 0=disabled, >0=budget)
+//   - output_config.effort: discrete effort for adaptive thinking
 //
-// Priority: thinking.type="disabled" takes precedence over budget_tokens.
-// When type="enabled" without budget_tokens, returns ModeAuto to indicate
-// the user wants thinking enabled but didn't specify a budget.
+// Explicit disable takes precedence over other fields. Adaptive and auto modes
+// use output_config.effort when present; enabled without a budget maps to ModeAuto.
 func extractClaudeConfig(body []byte) Config {
 	thinkingType := gjson.GetBytes(body, "thinking.type").String()
 	if thinkingType == "disabled" {
 		return Config{Mode: ModeNone, Budget: 0}
+	}
+	if thinkingType == "adaptive" || thinkingType == "auto" {
+		effort := gjson.GetBytes(body, "output_config.effort")
+		if !effort.Exists() || effort.Type != gjson.String {
+			return Config{}
+		}
+		switch value := strings.ToLower(strings.TrimSpace(effort.String())); value {
+		case "":
+			return Config{}
+		case "none":
+			return Config{Mode: ModeNone, Budget: 0}
+		case "auto":
+			return Config{Mode: ModeAuto, Budget: -1}
+		default:
+			return Config{Mode: ModeLevel, Level: Level(value)}
+		}
 	}
 
 	// Check budget_tokens
@@ -769,6 +794,42 @@ func extractCodexConfig(body []byte) Config {
 	}
 
 	return Config{}
+}
+
+// extractCodexUsageConfig reads the last applicable configuration_update
+// reasoning effort, falling back to the request-level value when no update sets it.
+func extractCodexUsageConfig(body []byte) Config {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return Config{}
+	}
+
+	var latest string
+	if input := gjson.GetBytes(body, "input"); input.IsArray() {
+		input.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() != "configuration_update" {
+				return true
+			}
+			effort := item.Get("reasoning.effort")
+			if !effort.Exists() {
+				return true
+			}
+			value := strings.ToLower(strings.TrimSpace(effort.String()))
+			if value != "" {
+				latest = value
+			}
+			return true
+		})
+	}
+	if latest == "" {
+		return extractCodexConfig(body)
+	}
+	if latest == "none" {
+		return Config{Mode: ModeNone, Budget: 0}
+	}
+	if latest == "auto" {
+		return Config{Mode: ModeAuto, Budget: -1}
+	}
+	return Config{Mode: ModeLevel, Level: Level(latest)}
 }
 
 // extractIFlowConfig extracts thinking configuration from iFlow format request body.

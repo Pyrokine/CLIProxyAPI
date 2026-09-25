@@ -148,6 +148,67 @@ func TestDefaultCatalogIncludesDocumentedDeepSeekAndGLMModels(t *testing.T) {
 	}
 }
 
+func TestDefaultCatalogIncludesCurrentDocumentedCompatibilityModels(t *testing.T) {
+	t.Parallel()
+
+	catalog := DefaultFile()
+	for _, test := range []struct {
+		name     string
+		provider string
+	}{
+		{name: "qwen3.8-max", provider: "Qwen"},
+		{name: "qwen3.8-max-0902", provider: "Qwen"},
+		{name: "qwen3.8-flash", provider: "Qwen"},
+		{name: "qwen3-coder-next", provider: "Qwen"},
+		{name: "MiniMax-M3", provider: "MiniMax"},
+		{name: "MiniMax-M2.7", provider: "MiniMax"},
+		{name: "MiniMax-M2.7-highspeed", provider: "MiniMax"},
+	} {
+		model, ok := catalog.Find(test.name)
+		if !ok {
+			t.Errorf("default inventory missing %q", test.name)
+			continue
+		}
+		if model.Provider != test.provider || model.Channel != "openai-compatibility" {
+			t.Errorf("model %q = provider %q, channel %q", test.name, model.Provider, model.Channel)
+		}
+		if _, ok = catalog.Price(test.name); !ok {
+			t.Errorf("model %q is missing a price-status record", test.name)
+		}
+	}
+
+	for _, name := range []string{
+		"glm-5.3-flashx",
+		"kimi-k2.8",
+		"kimi-k2.8-code",
+		"kimi-k3-256k",
+		"gpt-5.3-codex-spark",
+	} {
+		if model, ok := catalog.Find(name); ok {
+			t.Errorf("unsupported or lookup-only model %q remains in default inventory: %+v", name, model)
+		}
+	}
+	for _, name := range []string{
+		"claude-opus-5-5",
+		"gpt-6-sol",
+		"gpt-6-luna",
+		"gpt-image-2.5-flare",
+		"gpt-image-2.5-flare-2026-09-08",
+		"gpt-image-2.5-sunburst",
+		"gpt-image-2.5-sunburst-2026-09-08",
+		"gemini-3.1-flash-lite-image",
+		"grok-4.7",
+		"grok-imagine-image-2.0",
+	} {
+		if _, ok := catalog.Find(name); !ok {
+			t.Errorf("current native model %q is missing from default inventory", name)
+		}
+		if _, ok := catalog.Price(name); !ok {
+			t.Errorf("current native model %q is missing a price-status record", name)
+		}
+	}
+}
+
 func TestDeepSeekV41DefaultMigrationAddsCanonicalAndRemovesLegacyInventory(t *testing.T) {
 	t.Parallel()
 

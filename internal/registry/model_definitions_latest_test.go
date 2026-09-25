@@ -61,7 +61,7 @@ func TestKimiModelsIncludeK27Code(t *testing.T) {
 	}
 }
 
-func TestKimiModelsIncludeFinalK3Variants(t *testing.T) {
+func TestKimiModelsKeepK3256KAsLookupOnly(t *testing.T) {
 	tests := []struct {
 		id             string
 		contextLength  int
@@ -69,7 +69,6 @@ func TestKimiModelsIncludeFinalK3Variants(t *testing.T) {
 	}{
 		{id: "kimi-k2.7-code-highspeed", contextLength: 262144, thinkingLevels: []string{"low", "high"}},
 		{id: "kimi-k3", contextLength: 1048576, thinkingLevels: []string{"low", "high", "max"}},
-		{id: "kimi-k3-256k", contextLength: 262144, thinkingLevels: []string{"low", "high", "max"}},
 	}
 
 	for _, test := range tests {
@@ -85,19 +84,130 @@ func TestKimiModelsIncludeFinalK3Variants(t *testing.T) {
 				if model.MaxCompletionTokens != 65536 {
 					t.Fatalf("MaxCompletionTokens = %d, want 65536", model.MaxCompletionTokens)
 				}
-				if model.Thinking == nil {
-					t.Fatal("Thinking = nil")
-				}
-				if len(model.Thinking.Levels) != len(test.thinkingLevels) {
-					t.Fatalf("Thinking.Levels = %v, want %v", model.Thinking.Levels, test.thinkingLevels)
-				}
-				for index := range test.thinkingLevels {
-					if model.Thinking.Levels[index] != test.thinkingLevels[index] {
-						t.Fatalf("Thinking.Levels = %v, want %v", model.Thinking.Levels, test.thinkingLevels)
-					}
-				}
+				assertThinkingLevelsEqual(t, model.Thinking, test.thinkingLevels)
 			},
 		)
+	}
+
+	if model := findModelByID(GetKimiModels(), "kimi-k3-256k"); model != nil {
+		t.Fatalf("Kimi default inventory contains lookup-only model: %+v", model)
+	}
+	legacy := LookupStaticModelInfoByChannel("kimi-k3-256k", "kimi")
+	if legacy == nil || legacy.ContextLength != 262144 {
+		t.Fatalf("Kimi K3 256K legacy lookup = %+v", legacy)
+	}
+}
+
+func TestCatalogIncludesCurrentClaudeGeminiAndKimiModels(t *testing.T) {
+	lookup := func(channel, modelID string) *ModelInfo {
+		t.Helper()
+		model := LookupStaticModelInfoByChannel(modelID, channel)
+		if model == nil {
+			t.Fatalf("%s model %q is missing", channel, modelID)
+		}
+		return model
+	}
+
+	for _, modelID := range []string{"claude-fable-5-1", "claude-opus-5-5"} {
+		model := lookup("claude", modelID)
+		if model.ContextLength != 1000000 || model.MaxCompletionTokens != 128000 {
+			t.Fatalf("%s token limits = %d/%d, want 1000000/128000", modelID, model.ContextLength, model.MaxCompletionTokens)
+		}
+		assertThinkingLevelsEqual(t, model.Thinking, []string{"low", "medium", "high", "xhigh", "max"})
+		if model.Thinking.ZeroAllowed || !model.Thinking.DynamicAllowed {
+			t.Fatalf("%s thinking flags = %+v, want always-on adaptive thinking", modelID, model.Thinking)
+		}
+	}
+
+	for _, channel := range []string{"gemini", "vertex", "aistudio"} {
+		gemini := lookup(channel, "gemini-3.8-flash")
+		if gemini.ContextLength != 1048576 || gemini.MaxCompletionTokens != 65536 {
+			t.Fatalf(
+				"%s Gemini 3.8 token limits = %d/%d, want 1048576/65536",
+				channel,
+				gemini.ContextLength,
+				gemini.MaxCompletionTokens,
+			)
+		}
+		assertThinkingLevelsEqual(t, gemini.Thinking, []string{"low", "medium", "high"})
+
+		image := lookup(channel, "gemini-3.1-flash-image")
+		if image.InputTokenLimit != 131072 || image.OutputTokenLimit != 32768 {
+			t.Fatalf("%s Gemini 3.1 Flash Image limits = %d/%d", channel, image.InputTokenLimit, image.OutputTokenLimit)
+		}
+		assertThinkingLevelsEqual(t, image.Thinking, []string{"minimal", "high"})
+		assertStringSliceEqual(t, image.SupportedInputModalities, []string{"text", "image", "video", "pdf"})
+		assertStringSliceEqual(t, image.SupportedOutputModalities, []string{"text", "image"})
+
+		lite := lookup(channel, "gemini-3.1-flash-lite-image")
+		if lite.InputTokenLimit != 65536 || lite.OutputTokenLimit != 4096 {
+			t.Fatalf("%s Gemini 3.1 Flash-Lite Image limits = %d/%d", channel, lite.InputTokenLimit, lite.OutputTokenLimit)
+		}
+		assertThinkingLevelsEqual(t, lite.Thinking, []string{"minimal", "high"})
+		assertStringSliceEqual(t, lite.SupportedOutputModalities, []string{"text", "image"})
+		if lite.NativeCapabilities != nil && lite.NativeCapabilities.WebSearch != nil &&
+			*lite.NativeCapabilities.WebSearch {
+			t.Fatalf("%s Gemini 3.1 Flash-Lite Image unexpectedly supports search grounding", channel)
+		}
+	}
+	assertThinkingLevelsEqual(
+		t,
+		lookup("antigravity", "gemini-3.8-flash-high").Thinking,
+		[]string{"low", "medium", "high"},
+	)
+
+	for _, channel := range []string{"gemini", "vertex", "gemini-cli", "aistudio"} {
+		for _, modelID := range []string{
+			"gemini-3-pro-preview",
+			"gemini-3.1-flash-image-preview",
+			"gemini-3.1-flash-lite-preview",
+		} {
+			if model := LookupStaticModelInfoByChannel(modelID, channel); model != nil {
+				t.Fatalf("retired %s model %q remains: %+v", channel, modelID, model)
+			}
+		}
+	}
+
+	for _, modelID := range []string{
+		"kimi-k2.8",
+		"k2.8",
+		"kimi-k2.8-preview",
+		"k2.8-preview",
+		"kimi-k2.8-code",
+		"k2.8-code",
+	} {
+		if model := LookupStaticModelInfo(modelID); model != nil {
+			t.Fatalf("unsupported Kimi model %q remains: %+v", modelID, model)
+		}
+	}
+	assertThinkingLevelsEqual(t, lookup("kimi", "kimi-k2.5").Thinking, []string{"low", "high"})
+
+	for _, supported := range []struct {
+		channel string
+		modelID string
+	}{
+		{channel: "claude", modelID: "claude-opus-5"},
+		{channel: "codex", modelID: "gpt-5.6-sol"},
+		{channel: "xai", modelID: "grok-4.6"},
+	} {
+		model := lookup(supported.channel, supported.modelID)
+		if model.NativeCapabilities == nil || model.NativeCapabilities.WebSearch == nil ||
+			!*model.NativeCapabilities.WebSearch {
+			t.Fatalf(
+				"%s model %q native web search metadata = %+v, want true",
+				supported.channel,
+				supported.modelID,
+				model.NativeCapabilities,
+			)
+		}
+	}
+
+	kimi := lookup("kimi", "kimi-k2.5")
+	capability := ResolveResponsesWebSearchCapability([]NativeCapabilityRoute{
+		{Provider: "kimi", NativeCapabilities: kimi.NativeCapabilities},
+	})
+	if capability == nil || *capability {
+		t.Fatalf("Kimi K2.5 web search capability = %v, want false", capability)
 	}
 }
 
@@ -185,15 +295,27 @@ func TestC05FinalModelCatalogEntries(t *testing.T) {
 		)
 	}
 	vertexModels := GetGeminiVertexModels()
-	for _, modelID := range []string{"gemini-3.1-flash-image", "gemini-3-pro-image"} {
-		model := findModelByID(vertexModels, modelID)
+	for _, test := range []struct {
+		modelID string
+		input   int
+		output  int
+	}{
+		{modelID: "gemini-3.1-flash-image", input: 131072, output: 32768},
+		{modelID: "gemini-3.1-flash-lite-image", input: 65536, output: 4096},
+		{modelID: "gemini-3-pro-image", input: 1048576, output: 65536},
+	} {
+		model := findModelByID(vertexModels, test.modelID)
 		if model == nil {
-			t.Fatalf("Vertex catalog must expose %s", modelID)
+			t.Fatalf("Vertex catalog must expose %s", test.modelID)
 		}
-		if model.InputTokenLimit != 1048576 || model.OutputTokenLimit != 65536 {
+		if model.InputTokenLimit != test.input || model.OutputTokenLimit != test.output {
 			t.Fatalf(
-				"Vertex %s token limits = %d/%d, want 1048576/65536", modelID, model.InputTokenLimit,
+				"Vertex %s token limits = %d/%d, want %d/%d",
+				test.modelID,
+				model.InputTokenLimit,
 				model.OutputTokenLimit,
+				test.input,
+				test.output,
 			)
 		}
 	}
@@ -209,8 +331,17 @@ func TestC05FinalModelCatalogEntries(t *testing.T) {
 		}
 	}
 	models := getModels()
-	if models == nil || findModelByID(models.Gemini, "gemini-3.1-flash-lite-preview") == nil {
-		t.Fatal("embedded Gemini catalog must retain gemini-3.1-flash-lite-preview")
+	if models == nil {
+		t.Fatal("embedded Gemini catalog is unavailable")
+	}
+	for _, modelID := range []string{
+		"gemini-3-pro-preview",
+		"gemini-3.1-flash-image-preview",
+		"gemini-3.1-flash-lite-preview",
+	} {
+		if model := findModelByID(models.Gemini, modelID); model != nil {
+			t.Fatalf("embedded Gemini catalog retains retired model %s", modelID)
+		}
 	}
 
 	antigravity := GetAntigravityModelConfig()
@@ -274,6 +405,28 @@ func TestAntigravityStaticConfigExcludesDeprecatedGeminiProVariants(t *testing.T
 	}
 }
 
+func TestFinalCatalogExcludesWithdrawnModelsAndWorkMode(t *testing.T) {
+	for _, modelID := range []string{
+		"gpt-5.4",
+		"gpt-5.4-mini",
+		"gpt-5.6-sol-wm",
+		"gpt-5.6-sol-work-mode",
+	} {
+		if model := LookupStaticModelInfoByChannel(modelID, "codex"); model != nil {
+			t.Errorf("withdrawn Codex model %q = %+v, want nil", modelID, model)
+		}
+	}
+	for _, modelID := range []string{
+		"gemini-3-flash-agent",
+		"gemini-3.5-flash-extra-low",
+		"gemini-3.5-flash-low",
+	} {
+		if model := LookupStaticModelInfoByChannel(modelID, "antigravity"); model != nil {
+			t.Errorf("withdrawn Antigravity model %q = %+v, want nil", modelID, model)
+		}
+	}
+}
+
 func TestXAIModelsSimplifyComposerThinking(t *testing.T) {
 	model := LookupStaticModelInfo("grok-composer-2.5-fast")
 	if model == nil {
@@ -322,14 +475,54 @@ func TestCodexStaticTiersIncludeGPT6AstraByPlan(t *testing.T) {
 				assertThinkingLevelsEqual(t, model.Thinking, []string{"low", "medium", "high", "xhigh", "max"})
 				assertStringSliceEqual(t, model.SupportedInputModalities, []string{"text", "image"})
 				assertStringSliceEqual(t, model.SupportedOutputModalities, []string{"text"})
-				if model.Config == nil ||
-					model.Config.OverrideHeader["user-agent"] != "codex-tui/0.153.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.0)" ||
-					model.Config.OverrideHeader["originator"] != "codex-tui" ||
-					model.Config.OverrideHeader["version"] != "0.153.0" {
-					t.Fatalf("Astra header override = %#v", model.Config)
+				if model.Config != nil {
+					t.Fatalf("Astra config = %#v, want no catalog header override", model.Config)
 				}
 			},
 		)
+	}
+}
+
+func TestCodexStaticTiersPlaceGPT6AndExcludeSpark(t *testing.T) {
+	tiers := []struct {
+		name    string
+		models  []*ModelInfo
+		wantSol bool
+	}{
+		{name: "free", models: GetCodexFreeModels()},
+		{name: "team", models: GetCodexTeamModels(), wantSol: true},
+		{name: "plus", models: GetCodexPlusModels(), wantSol: true},
+		{name: "pro", models: GetCodexProModels(), wantSol: true},
+	}
+	for _, tier := range tiers {
+		t.Run(tier.name, func(t *testing.T) {
+			if spark := findModelByID(tier.models, "gpt-5.3-codex-spark"); spark != nil {
+				t.Fatalf("retired Spark model remains in %s inventory: %+v", tier.name, spark)
+			}
+			sol := findModelByID(tier.models, "gpt-6-sol")
+			if (sol != nil) != tier.wantSol {
+				t.Fatalf("gpt-6-sol present = %t, want %t", sol != nil, tier.wantSol)
+			}
+			luna := findModelByID(tier.models, "gpt-6-luna")
+			if luna == nil {
+				t.Fatal("gpt-6-luna is missing")
+			}
+			for _, model := range []*ModelInfo{sol, luna} {
+				if model == nil {
+					continue
+				}
+				if model.ContextLength != 272000 || model.MaxCompletionTokens != 128000 {
+					t.Fatalf("%s token limits = %d/%d", model.ID, model.ContextLength, model.MaxCompletionTokens)
+				}
+				assertThinkingLevelsEqual(t, model.Thinking, []string{"low", "medium", "high", "xhigh", "max"})
+				assertStringSliceEqual(t, model.SupportedInputModalities, []string{"text", "image"})
+			}
+		})
+	}
+
+	legacy := LookupStaticModelInfoByChannel("gpt-5.3-codex-spark", "codex")
+	if legacy == nil || legacy.ContextLength != 128000 {
+		t.Fatalf("Spark legacy lookup = %+v", legacy)
 	}
 }
 
@@ -350,8 +543,8 @@ func TestOpenAIModelsIncludeGPT56CodexTiers(t *testing.T) {
 				if model == nil {
 					t.Fatalf("missing %s", tt.id)
 				}
-				if model.ContextLength != 372000 {
-					t.Fatalf("ContextLength = %d, want 372000", model.ContextLength)
+				if model.ContextLength != 921000 {
+					t.Fatalf("ContextLength = %d, want 921000", model.ContextLength)
 				}
 				if model.MaxCompletionTokens != 128000 {
 					t.Fatalf("MaxCompletionTokens = %d, want 128000", model.MaxCompletionTokens)
@@ -364,7 +557,7 @@ func TestOpenAIModelsIncludeGPT56CodexTiers(t *testing.T) {
 }
 
 func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
-	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
+	const wantUA = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
 	GetGlobalRegistry().RegisterClient("test-model-override-shadow", "codex", []*ModelInfo{{ID: "gpt-5.6-luna"}})
 	defer GetGlobalRegistry().UnregisterClient("test-model-override-shadow")
 
@@ -375,7 +568,7 @@ func TestModelOverrideHeadersFromEmbeddedModels(t *testing.T) {
 }
 
 func TestModelOverrideHeadersFallsBackToEmbeddedCatalog(t *testing.T) {
-	const wantUA = "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)"
+	const wantUA = "codex-tui/0.154.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.154.0)"
 	original := getModels()
 	modelsCatalogStore.mu.Lock()
 	modelsCatalogStore.data = &staticModelsJSON{CodexPro: []*ModelInfo{{ID: "gpt-5.6-luna"}}}
@@ -391,6 +584,32 @@ func TestModelOverrideHeadersFallsBackToEmbeddedCatalog(t *testing.T) {
 	assertGPT56ModelOverrideHeaders(t, ModelOverrideHeaders("gpt-5.6-luna"), wantUA)
 }
 
+func TestEmbeddedStaticModelDefinitionsIgnoreRemoteCatalog(t *testing.T) {
+	original := getModels()
+	modelsCatalogStore.mu.Lock()
+	modelsCatalogStore.data = &staticModelsJSON{Kimi: []*ModelInfo{{ID: "kimi-k2.8"}}}
+	modelsCatalogStore.mu.Unlock()
+	t.Cleanup(
+		func() {
+			modelsCatalogStore.mu.Lock()
+			modelsCatalogStore.data = original
+			modelsCatalogStore.mu.Unlock()
+		},
+	)
+
+	dynamic := GetStaticModelDefinitionsByChannel("kimi")
+	if len(dynamic) != 1 || dynamic[0] == nil || dynamic[0].ID != "kimi-k2.8" {
+		t.Fatalf("dynamic Kimi catalog = %+v, want remote kimi-k2.8", dynamic)
+	}
+	embedded := GetEmbeddedStaticModelDefinitionsByChannel("kimi")
+	if findModelByID(embedded, "kimi-k2.8") != nil {
+		t.Fatalf("embedded Kimi catalog contains remote-only kimi-k2.8: %+v", embedded)
+	}
+	if findModelByID(embedded, "kimi-k3") == nil {
+		t.Fatalf("embedded Kimi catalog is missing kimi-k3: %+v", embedded)
+	}
+}
+
 func assertGPT56ModelOverrideHeaders(t *testing.T, got map[string]string, wantUA string) {
 	t.Helper()
 	if got == nil {
@@ -402,8 +621,8 @@ func assertGPT56ModelOverrideHeaders(t *testing.T, got map[string]string, wantUA
 	if got["originator"] != "codex-tui" {
 		t.Fatalf("originator = %q, want codex-tui", got["originator"])
 	}
-	if got["version"] != "0.144.0" {
-		t.Fatalf("version = %q, want 0.144.0", got["version"])
+	if version, exists := got["version"]; exists {
+		t.Fatalf("version = %q, want no version override", version)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +53,7 @@ type staticModelsJSON struct {
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
+	Devin       []*ModelInfo `json:"devin"`
 }
 
 type modelStore struct {
@@ -148,6 +150,7 @@ func StartModelsUpdater(ctx context.Context, refreshHours int) {
 		modelsCatalogMetaStore.mu.Unlock()
 		return
 	}
+	StartDevinModelsUpdater(ctx, refreshHours)
 	updaterOnce.Do(
 		func() {
 			configuredRefreshInterval = interval
@@ -307,7 +310,7 @@ func fetchModelsFromRemote(ctx context.Context, current *staticModelsJSON) (*sta
 var modelCatalogSectionNames = []string{
 	"claude", "gemini", "vertex", "gemini-cli", "aistudio",
 	"codex-free", "codex-team", "codex-plus", "codex-pro",
-	"qwen", "iflow", "kimi", "antigravity", "xai",
+	"qwen", "iflow", "kimi", "antigravity", "xai", "devin",
 }
 
 func mergeRemoteModelsCatalog(data []byte, current *staticModelsJSON) (*staticModelsJSON, error) {
@@ -387,6 +390,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 	sections := []section{
 		{"claude", oldData.Claude, newData.Claude},
 		{"gemini", oldData.Gemini, newData.Gemini},
+		{"gemini-interactions", oldData.Gemini, newData.Gemini},
 		{"vertex", oldData.Vertex, newData.Vertex},
 		{"gemini-cli", oldData.GeminiCLI, newData.GeminiCLI},
 		{"aistudio", oldData.AIStudio, newData.AIStudio},
@@ -399,6 +403,7 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"kimi", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
+		{"devin", oldData.Devin, newData.Devin},
 	}
 
 	seen := make(map[string]bool, len(sections))
@@ -415,13 +420,19 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 	return changed
 }
 
-// modelSectionChanged reports whether two model slices differ.
+// modelSectionChanged reports whether two model slices differ, including
+// internal metadata that is intentionally omitted from normal JSON responses.
 func modelSectionChanged(a, b []*ModelInfo) bool {
 	if len(a) != len(b) {
 		return true
 	}
 	if len(a) == 0 {
 		return false
+	}
+	for i := range a {
+		if a[i] != nil && b[i] != nil && !reflect.DeepEqual(a[i].NativeCapabilities, b[i].NativeCapabilities) {
+			return true
+		}
 	}
 	aj, err1 := json.Marshal(a)
 	bj, err2 := json.Marshal(b)
@@ -522,6 +533,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "kimi", models: data.Kimi},
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
+		{name: "devin", models: data.Devin},
 	}
 
 	// Upstream occasionally ships a catalog with some providers removed (e.g. qwen

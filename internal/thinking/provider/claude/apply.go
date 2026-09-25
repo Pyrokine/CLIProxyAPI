@@ -1,8 +1,7 @@
 // Package claude implements thinking configuration scaffolding for Claude models.
 //
-// Claude models use the thinking.budget_tokens format with values in the range
-// 1024-128000. Some Claude models support ZeroAllowed (sonnet-4-5, opus-4-5),
-// while older models do not.
+// Claude models use manual thinking budgets or adaptive output_config.effort levels.
+// Some models allow thinking to be disabled, while older models do not.
 // See: _bmad-output/planning-artifacts/architecture.md#Epic-6
 package claude
 
@@ -34,7 +33,7 @@ func init() {
 //   - Budget clamping to model range
 //   - ZeroAllowed constraint enforcement
 //
-// Apply only processes ModeBudget and ModeNone; other modes are passed through unchanged.
+// Apply handles manual budgets, adaptive effort levels, automatic mode, and explicit disable.
 //
 // Expected output format when enabled:
 //
@@ -60,31 +59,59 @@ func (a *applier) Apply(body []byte, config thinking.Config, modelInfo *registry
 		return body, nil
 	}
 
-	// Only process ModeBudget and ModeNone; other modes pass through
-	// (caller should use ValidateConfig first to normalize modes)
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone {
-		return body, nil
-	}
-
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		body = []byte(`{}`)
 	}
 
-	// Budget is expected to be pre-validated by ValidateConfig (clamped, ZeroAllowed enforced)
-	// Decide enabled/disabled based on budget value
-	if config.Budget == 0 {
+	switch config.Mode {
+	case thinking.ModeLevel:
+		if config.Level == "" {
+			return body, nil
+		}
+		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
+		return result, nil
+	case thinking.ModeAuto:
+		thinkingType := "enabled"
+		if len(modelInfo.Thinking.Levels) > 0 {
+			thinkingType = "adaptive"
+		}
+		result, _ := sjson.SetBytes(body, "thinking.type", thinkingType)
+		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		return deleteEmptyClaudeOutputConfig(result), nil
+	case thinking.ModeNone:
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		result, _ = sjson.DeleteBytes(result, "thinking.display")
-		return result, nil
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		return deleteEmptyClaudeOutputConfig(result), nil
+	case thinking.ModeBudget:
+		if config.Budget == 0 {
+			result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			result, _ = sjson.DeleteBytes(result, "thinking.display")
+			result, _ = sjson.DeleteBytes(result, "output_config.effort")
+			return deleteEmptyClaudeOutputConfig(result), nil
+		}
+
+		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
+		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		result = deleteEmptyClaudeOutputConfig(result)
+		return a.normalizeClaudeBudget(result, config.Budget, modelInfo), nil
+	default:
+		return body, nil
 	}
+}
 
-	result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
-	result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
-
-	// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint)
-	result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
-	return result, nil
+func deleteEmptyClaudeOutputConfig(body []byte) []byte {
+	outputConfig := gjson.GetBytes(body, "output_config")
+	if outputConfig.IsObject() && len(outputConfig.Map()) == 0 {
+		body, _ = sjson.DeleteBytes(body, "output_config")
+	}
+	return body
 }
 
 // normalizeClaudeBudget applies Claude-specific constraints to ensure max_tokens > budget_tokens.

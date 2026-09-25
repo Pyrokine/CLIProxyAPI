@@ -50,6 +50,12 @@ func GetCodexClientModelsSnapshot() ([]byte, uint64) {
 	return append([]byte(nil), codexClientCatalogStore.data...), codexClientCatalogStore.revision
 }
 
+// GetCodexClientModelsRevision returns the current validated catalog revision.
+func GetCodexClientModelsRevision() uint64 {
+	_, revision := GetCodexClientModelsSnapshot()
+	return revision
+}
+
 func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
 	if err := validateCodexClientModelsJSON(data); err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)

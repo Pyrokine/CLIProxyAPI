@@ -12,6 +12,7 @@ const (
 	codexBuiltinImage25SunburstModelID               = "gpt-image-2.5-sunburst"
 	codexBuiltinImage25SunburstSnapshotModelID       = "gpt-image-2.5-sunburst-2026-09-08"
 	xaiBuiltinImageModelID                           = "grok-imagine-image"
+	xaiBuiltinImage20ModelID                         = "grok-imagine-image-2.0"
 	xaiBuiltinImageQualityModelID                    = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID                           = "grok-imagine-video"
 	xaiBuiltinVideo15ModelID                         = "grok-imagine-video-1.5"
@@ -72,6 +73,7 @@ func withXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(
 		models,
 		xaiBuiltinImageModelInfo(),
+		xaiBuiltinImage20ModelInfo(),
 		xaiBuiltinImageQualityModelInfo(),
 		xaiBuiltinVideoModelInfo(),
 		xaiBuiltinVideo15ModelInfo(),
@@ -161,6 +163,21 @@ func xaiBuiltinImageModelInfo() *ModelInfo {
 	}
 }
 
+func xaiBuiltinImage20ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                        xaiBuiltinImage20ModelID,
+		Object:                    "model",
+		Created:                   1790035200, // 2026-09-22
+		OwnedBy:                   "xai",
+		Type:                      "xai",
+		DisplayName:               "Grok Imagine Image 2.0",
+		Name:                      xaiBuiltinImage20ModelID,
+		Description:               "xAI image generation and editing model with 1K and 2K output.",
+		SupportedInputModalities:  []string{"text", "image"},
+		SupportedOutputModalities: []string{"image"},
+	}
+}
+
 func xaiBuiltinImageQualityModelInfo() *ModelInfo {
 	return &ModelInfo{
 		ID:          xaiBuiltinImageQualityModelID,
@@ -246,6 +263,47 @@ func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
 	return filtered
 }
 
+func legacyStaticLookupModelsByChannel(channel string) []*ModelInfo {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case "codex":
+		return []*ModelInfo{
+			{
+				ID:                  "gpt-5.3-codex-spark",
+				Object:              "model",
+				Created:             1770912000,
+				OwnedBy:             "openai",
+				Type:                "openai",
+				DisplayName:         "GPT 5.3 Codex Spark",
+				Version:             "gpt-5.3",
+				Description:         "Retired Codex model retained for historical request lookup.",
+				ContextLength:       128000,
+				MaxCompletionTokens: 128000,
+				SupportedParameters: []string{"tools"},
+				Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+			},
+		}
+	case "kimi":
+		return []*ModelInfo{
+			{
+				ID:                        "kimi-k3-256k",
+				Object:                    "model",
+				Created:                   1785110400,
+				OwnedBy:                   "moonshot",
+				Type:                      "kimi",
+				DisplayName:               "Kimi K3 256K",
+				Description:               "Historical Kimi K3 256K route retained for exact-ID lookup.",
+				ContextLength:             262144,
+				MaxCompletionTokens:       65536,
+				SupportedInputModalities:  []string{"text", "image"},
+				SupportedOutputModalities: []string{"text"},
+				Thinking:                  &ThinkingSupport{ZeroAllowed: true, Levels: []string{"low", "high", "max"}},
+			},
+		}
+	default:
+		return nil
+	}
+}
+
 // GetStaticModelDefinitionsByChannel returns static model definitions for a given channel/provider.
 // It returns nil when the channel is unknown.
 //
@@ -261,6 +319,7 @@ func upsertModelInfos(models []*ModelInfo, extras ...*ModelInfo) []*ModelInfo {
 //   - kimi
 //   - antigravity (returns static overrides only)
 //   - xai
+//   - devin
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
@@ -286,14 +345,79 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return getAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "devin":
+		return GetDevinModels()
 	default:
 		return nil
 	}
 }
 
+// GetEmbeddedStaticModelDefinitionsByChannel returns the versioned embedded
+// catalog without applying mutable remote refresh data.
+func GetEmbeddedStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
+	catalog := embeddedModelsCatalog()
+	if catalog == nil {
+		return nil
+	}
+	key := strings.ToLower(strings.TrimSpace(channel))
+	switch key {
+	case "claude":
+		return cloneModelInfos(catalog.Claude)
+	case "gemini":
+		return cloneModelInfos(catalog.Gemini)
+	case "vertex":
+		return cloneModelInfos(catalog.Vertex)
+	case "gemini-cli":
+		return cloneModelInfos(catalog.GeminiCLI)
+	case "aistudio":
+		return cloneModelInfos(catalog.AIStudio)
+	case "codex":
+		return GetEmbeddedOpenAIModels()
+	case "qwen":
+		return cloneModelInfos(catalog.Qwen)
+	case "iflow":
+		return cloneModelInfos(catalog.IFlow)
+	case "kimi":
+		return cloneModelInfos(catalog.Kimi)
+	case "antigravity":
+		return cloneModelInfos(catalog.Antigravity)
+	case "xai", "x-ai", "grok":
+		return GetEmbeddedXAIModels()
+	case "devin":
+		return cloneModelInfos(catalog.Devin)
+	default:
+		return nil
+	}
+}
+
+// LookupStaticModelInfoByChannel searches one provider-specific static section.
+// It does not fall back across providers, so callers can preserve provenance.
+func LookupStaticModelInfoByChannel(modelID, channel string) *ModelInfo {
+	modelID = canonicalStaticModelID(modelID)
+	if modelID == "" {
+		return nil
+	}
+	for _, model := range GetStaticModelDefinitionsByChannel(channel) {
+		if model != nil && model.ID == modelID {
+			return cloneModelInfo(model)
+		}
+	}
+	for _, model := range legacyStaticLookupModelsByChannel(channel) {
+		if model != nil && model.ID == modelID {
+			return cloneModelInfo(model)
+		}
+	}
+	return nil
+}
+
+func canonicalStaticModelID(modelID string) string {
+	return strings.TrimSpace(modelID)
+}
+
 // LookupStaticModelInfo searches all static model definitions for a model by ID.
 // Returns nil if no matching model is found.
 func LookupStaticModelInfo(modelID string) *ModelInfo {
+	modelID = canonicalStaticModelID(modelID)
 	if modelID == "" {
 		return nil
 	}
@@ -308,13 +432,16 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetQwenModels(),
 		GetIFlowModels(),
 		GetKimiModels(),
+		legacyStaticLookupModelsByChannel("kimi"),
 		GetDeepSeekModels(),
 		GetXAIModels(),
+		legacyStaticLookupModelsByChannel("codex"),
+		GetDevinModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {
 			if m != nil && m.ID == modelID {
-				return m
+				return cloneModelInfo(m)
 			}
 		}
 	}

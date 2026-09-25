@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	antigravityFallbackVersion = "1.0.13"
+	antigravityFallbackVersion = "2.9.1"
 	antigravityCLIPlatform     = "darwin/arm64"
 	antigravityCLIClientName   = "aidev_client"
 	antigravityVersionCacheTTL = 6 * time.Hour

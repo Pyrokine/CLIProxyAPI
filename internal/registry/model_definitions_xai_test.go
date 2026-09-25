@@ -47,21 +47,41 @@ func TestEmbeddedXAIModelsIncludeGrok46(t *testing.T) {
 	}
 }
 
-func TestWithXAIBuiltinsRegistersVideo15GAOnly(t *testing.T) {
-	models := withXAIBuiltins(nil)
-	seenGA := false
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		switch model.ID {
-		case xaiBuiltinVideo15ModelID:
-			seenGA = true
-		case "grok-imagine-video-1.5-preview":
-			t.Fatal("preview alias must not be exposed by the default xAI catalog")
-		}
+func TestEmbeddedXAIModelsIncludeGrok47(t *testing.T) {
+	model := findModelByID(GetEmbeddedXAIModels(), "grok-4.7")
+	if model == nil {
+		t.Fatal("missing embedded Grok 4.7 model")
 	}
-	if !seenGA {
+	if model.ContextLength != 500000 || model.MaxCompletionTokens != 500000 {
+		t.Fatalf("Grok 4.7 limits = (%d, %d), want (500000, 500000)", model.ContextLength, model.MaxCompletionTokens)
+	}
+	if model.Thinking == nil || model.Thinking.ZeroAllowed ||
+		!slices.Equal(model.Thinking.Levels, []string{"low", "medium", "high", "xhigh"}) {
+		t.Fatalf("Grok 4.7 thinking metadata = %#v", model.Thinking)
+	}
+	if !slices.Equal(model.SupportedInputModalities, []string{"text", "image"}) ||
+		!slices.Equal(model.SupportedOutputModalities, []string{"text"}) {
+		t.Fatalf("Grok 4.7 modalities = (%v, %v)", model.SupportedInputModalities, model.SupportedOutputModalities)
+	}
+}
+
+func TestWithXAIBuiltinsRegistersCurrentMediaModels(t *testing.T) {
+	models := withXAIBuiltins(nil)
+	image20 := findModelByID(models, xaiBuiltinImage20ModelID)
+	if image20 == nil {
+		t.Fatalf("missing %s builtin model", xaiBuiltinImage20ModelID)
+	}
+	if !slices.Equal(image20.SupportedInputModalities, []string{"text", "image"}) ||
+		!slices.Equal(image20.SupportedOutputModalities, []string{"image"}) {
+		t.Fatalf("Image 2.0 modalities = (%v, %v)", image20.SupportedInputModalities, image20.SupportedOutputModalities)
+	}
+	if findModelByID(models, xaiBuiltinImageModelID) == nil {
+		t.Fatalf("legacy %s builtin model is missing", xaiBuiltinImageModelID)
+	}
+	if findModelByID(models, xaiBuiltinVideo15ModelID) == nil {
 		t.Fatalf("missing %s builtin model", xaiBuiltinVideo15ModelID)
+	}
+	if preview := findModelByID(models, "grok-imagine-video-1.5-preview"); preview != nil {
+		t.Fatal("preview alias must not be exposed by the default xAI catalog")
 	}
 }

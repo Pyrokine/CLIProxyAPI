@@ -662,6 +662,34 @@ func TestModelCatalogAstraPriceDoesNotImplyRuntimeAvailability(t *testing.T) {
 	}
 }
 
+func TestModelCatalogDocumentedCompatibilityModelsRequireRuntime(t *testing.T) {
+	response := (&Handler{}).modelCatalogResponse(&config.Config{}, modelcatalog.DefaultFile())
+	models := map[string]struct {
+		provider string
+		channel  string
+	}{
+		"qwen3.8-max":            {provider: "Qwen", channel: "openai-compatibility"},
+		"qwen3.8-max-0902":       {provider: "Qwen", channel: "openai-compatibility"},
+		"qwen3.8-flash":          {provider: "Qwen", channel: "openai-compatibility"},
+		"qwen3-coder-next":       {provider: "Qwen", channel: "openai-compatibility"},
+		"MiniMax-M3":             {provider: "MiniMax", channel: "openai-compatibility"},
+		"MiniMax-M2.7":           {provider: "MiniMax", channel: "openai-compatibility"},
+		"MiniMax-M2.7-highspeed": {provider: "MiniMax", channel: "openai-compatibility"},
+	}
+	for modelID, want := range models {
+		row, ok := findModelCatalogResponseRow(response.Models, modelID)
+		if !ok {
+			t.Errorf("documented compatibility model %q is missing", modelID)
+			continue
+		}
+		if row.Provider != want.provider || row.Channel != want.channel || !row.Enabled || row.RuntimeOnly ||
+			row.RuntimeAvailable || row.Requestable || row.RuntimeConfiguredClients != 0 ||
+			row.RuntimeAvailableClients != 0 || row.NotRequestableReason != "not_runtime" {
+			t.Errorf("documented compatibility model %q runtime state = %#v", modelID, row)
+		}
+	}
+}
+
 func TestModelCatalogResponseMapsRuntimeAliasToCatalogModel(t *testing.T) {
 	const (
 		clientID = "management-runtime-alias-client"

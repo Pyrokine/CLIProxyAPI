@@ -56,6 +56,23 @@ func TestMergeRemoteModelsCatalogRejectsCatalogWithoutValidSections(t *testing.T
 	}
 }
 
+func TestDetectChangedProvidersIncludesGeminiInteractions(t *testing.T) {
+	t.Parallel()
+
+	oldData := &staticModelsJSON{Gemini: []*ModelInfo{{ID: "gemini-old"}}}
+	newData := &staticModelsJSON{Gemini: []*ModelInfo{{ID: "gemini-new"}}}
+	changed := detectChangedProviders(oldData, newData)
+	want := []string{"gemini", "gemini-interactions"}
+	if len(changed) != len(want) {
+		t.Fatalf("detectChangedProviders() = %v, want %v", changed, want)
+	}
+	for index := range want {
+		if changed[index] != want[index] {
+			t.Fatalf("detectChangedProviders() = %v, want %v", changed, want)
+		}
+	}
+}
+
 func assertOnlyModelID(t *testing.T, models []*ModelInfo, want string) {
 	t.Helper()
 	if len(models) != 1 || models[0] == nil || models[0].ID != want {

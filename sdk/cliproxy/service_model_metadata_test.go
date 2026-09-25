@@ -333,6 +333,81 @@ func TestRegisterModelsForAuthRegistersXAIModels(t *testing.T) {
 	}
 }
 
+func TestRegisterModelsForAuthPublishesCurrentNativeModels(t *testing.T) {
+	tests := []struct {
+		provider string
+		present  []string
+		absent   []string
+	}{
+		{
+			provider: "claude",
+			present:  []string{"claude-fable-5-1", "claude-opus-5-5"},
+		},
+		{
+			provider: "gemini",
+			present: []string{
+				"gemini-3.8-flash",
+				"gemini-3.1-flash-image",
+				"gemini-3.1-flash-lite-image",
+			},
+			absent: []string{"gemini-3-pro-preview", "gemini-3.1-flash-image-preview"},
+		},
+		{
+			provider: "vertex",
+			present: []string{
+				"gemini-3.8-flash",
+				"gemini-3.1-flash-image",
+				"gemini-3.1-flash-lite-image",
+			},
+			absent: []string{"gemini-3-pro-preview", "gemini-3.1-flash-lite-preview"},
+		},
+		{
+			provider: "aistudio",
+			present: []string{
+				"gemini-3.8-flash",
+				"gemini-3.1-flash-image",
+				"gemini-3.1-flash-lite-image",
+			},
+			absent: []string{"gemini-3-pro-preview", "gemini-3.1-flash-lite-preview"},
+		},
+		{
+			provider: "xai",
+			present:  []string{"grok-4.7", "grok-imagine-image-2.0"},
+			absent:   []string{"grok-imagine-video-1.5-preview"},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.provider, func(t *testing.T) {
+			authID := "current-native-models-" + testCase.provider
+			GlobalModelRegistry().UnregisterClient(authID)
+			t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(authID) })
+
+			cfg := &internalconfig.Config{}
+			svc := &Service{cfg: cfg}
+			svc.registerModelsForAuthWithConfig(
+				&coreauth.Auth{
+					ID:       authID,
+					Provider: testCase.provider,
+					Attributes: map[string]string{
+						"auth_kind": "oauth",
+					},
+				},
+				cfg,
+			)
+			for _, modelID := range testCase.present {
+				if !GlobalModelRegistry().ClientSupportsModel(authID, modelID) {
+					t.Errorf("%s credential did not publish current model %q", testCase.provider, modelID)
+				}
+			}
+			for _, modelID := range testCase.absent {
+				if GlobalModelRegistry().ClientSupportsModel(authID, modelID) {
+					t.Errorf("%s credential published retired model %q", testCase.provider, modelID)
+				}
+			}
+		})
+	}
+}
+
 func TestC04RegisterModelsForXAIAPIKeyUsesConfiguredModels(t *testing.T) {
 	const authID = "xai-api-key-model-registration-test"
 	GlobalModelRegistry().UnregisterClient(authID)

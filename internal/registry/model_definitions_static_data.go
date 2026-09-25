@@ -24,6 +24,23 @@ func getCodexModels(selectModels func(*staticModelsJSON) []*ModelInfo) []*ModelI
 	return getCatalogModels(selectModels)
 }
 
+func withoutModelIDs(models []*ModelInfo, ids ...string) []*ModelInfo {
+	excluded := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		excluded[id] = struct{}{}
+	}
+	filtered := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if _, remove := excluded[model.ID]; !remove {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
 // GetCodexFreeModels returns the Codex free-plan model definitions.
 func GetCodexFreeModels() []*ModelInfo {
 	if dynamic := getCodexModels(func(data *staticModelsJSON) []*ModelInfo { return data.CodexFree }); len(dynamic) > 0 {
@@ -149,6 +166,40 @@ func GetClaudeModels() []*ModelInfo {
 			MaxCompletionTokens: 128000,
 			Thinking: &ThinkingSupport{
 				ZeroAllowed: true, DynamicAllowed: true,
+				Levels: []string{"low", "medium", "high", "xhigh", "max"},
+			},
+		},
+		{
+			ID:                        "claude-fable-5-1",
+			Object:                    "model",
+			Created:                   1788220800,
+			OwnedBy:                   "anthropic",
+			Type:                      "claude",
+			DisplayName:               "Claude Fable 5.1",
+			Description:               "Claude Fable 5.1 extends Claude Fable 5 at the same input and output prices, with cache reads at a quarter of the cost, and brings stronger long-running agentic coding, multistep research, and document, spreadsheet, and slide work.",
+			ContextLength:             1000000,
+			MaxCompletionTokens:       128000,
+			SupportedInputModalities:  []string{"text", "image"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking: &ThinkingSupport{
+				ZeroAllowed: false, DynamicAllowed: true,
+				Levels: []string{"low", "medium", "high", "xhigh", "max"},
+			},
+		},
+		{
+			ID:                        "claude-opus-5-5",
+			Object:                    "model",
+			Created:                   1790035200,
+			OwnedBy:                   "anthropic",
+			Type:                      "claude",
+			DisplayName:               "Claude Opus 5.5",
+			Description:               "Latest premium model combining maximum intelligence with practical performance",
+			ContextLength:             1000000,
+			MaxCompletionTokens:       128000,
+			SupportedInputModalities:  []string{"text", "image"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking: &ThinkingSupport{
+				ZeroAllowed: false, DynamicAllowed: true,
 				Levels: []string{"low", "medium", "high", "xhigh", "max"},
 			},
 		},
@@ -441,7 +492,28 @@ func gemini37Flash() *ModelInfo {
 		SupportedOutputModalities: []string{"text"},
 		Thinking: &ThinkingSupport{
 			Min: 128, Max: 65535, DynamicAllowed: true,
-			Levels: []string{"minimal", "low", "medium", "high"},
+			Levels: []string{"low", "medium", "high"},
+		},
+	}
+}
+
+func gemini38Flash(name string) *ModelInfo {
+	return &ModelInfo{
+		ID:                        "gemini-3.8-flash",
+		Object:                    "model",
+		OwnedBy:                   "google",
+		Type:                      "gemini",
+		Name:                      name,
+		Version:                   "3.8",
+		DisplayName:               "Gemini 3.8 Flash",
+		Description:               "Gemini 3.8 Flash",
+		ContextLength:             1048576,
+		MaxCompletionTokens:       65536,
+		SupportedInputModalities:  []string{"text", "image", "audio", "video"},
+		SupportedOutputModalities: []string{"text"},
+		Thinking: &ThinkingSupport{
+			Min: 128, Max: 65535, DynamicAllowed: true,
+			Levels: []string{"low", "medium", "high"},
 		},
 	}
 }
@@ -557,15 +629,38 @@ func gemini31FlashImage() *ModelInfo {
 		Name:             "models/gemini-3.1-flash-image",
 		Version:          "3.1",
 		DisplayName:      "Gemini 3.1 Flash Image",
-		Description:      "Gemini 3.1 Flash Image",
-		InputTokenLimit:  1048576,
-		OutputTokenLimit: 65536,
+		Description:      "Stable image generation and editing model with text and image output.",
+		InputTokenLimit:  131072,
+		OutputTokenLimit: 32768,
 		SupportedGenerationMethods: []string{
 			"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
 		},
-		Thinking: &ThinkingSupport{
-			Min: 128, Max: 32768, ZeroAllowed: false, DynamicAllowed: true, Levels: []string{"minimal", "high"},
+		Thinking:                  &ThinkingSupport{Levels: []string{"minimal", "high"}},
+		SupportedInputModalities:  []string{"text", "image", "video", "pdf"},
+		SupportedOutputModalities: []string{"text", "image"},
+		NativeCapabilities:        &NativeCapabilities{WebSearch: boolPointer(true)},
+	}
+}
+
+func gemini31FlashLiteImage() *ModelInfo {
+	return &ModelInfo{
+		ID:               "gemini-3.1-flash-lite-image",
+		Object:           "model",
+		Created:          1782172800,
+		OwnedBy:          "google",
+		Type:             "gemini",
+		Name:             "models/gemini-3.1-flash-lite-image",
+		Version:          "3.1",
+		DisplayName:      "Gemini 3.1 Flash-Lite Image",
+		Description:      "Low-latency stable image generation and editing model with 1K image output.",
+		InputTokenLimit:  65536,
+		OutputTokenLimit: 4096,
+		SupportedGenerationMethods: []string{
+			"generateContent", "countTokens", "createCachedContent", "batchGenerateContent",
 		},
+		Thinking:                  &ThinkingSupport{Levels: []string{"minimal", "high"}},
+		SupportedInputModalities:  []string{"text", "image", "video", "pdf"},
+		SupportedOutputModalities: []string{"text", "image"},
 	}
 }
 
@@ -585,8 +680,17 @@ func GetGeminiModels() []*ModelInfo {
 			},
 		)...,
 	)
-	models = append(models, gemini35FlashLite(), gemini36Flash(), gemini37Flash(), geminiProImagePreview())
-	return models
+	models = append(
+		models,
+		gemini35FlashLite(),
+		gemini36Flash(),
+		gemini37Flash(),
+		gemini38Flash("models/gemini-3.8-flash"),
+		geminiProImagePreview(),
+		gemini31FlashImage(),
+		gemini31FlashLiteImage(),
+	)
+	return withoutModelIDs(models, "gemini-3-pro-preview")
 }
 
 func GetGeminiVertexModels() []*ModelInfo {
@@ -599,10 +703,12 @@ func GetGeminiVertexModels() []*ModelInfo {
 		models,
 		gemini31Pro(),
 		gemini31FlashImage(),
+		gemini31FlashLiteImage(),
 		gemini31FlashLite(),
 		gemini35FlashLite(),
 		gemini36Flash(),
 		gemini37Flash(),
+		gemini38Flash("gemini-3.8-flash"),
 		geminiProImage(),
 		// Imagen image generation models - use :predict action
 		&ModelInfo{
@@ -661,7 +767,7 @@ func GetGeminiCLIModels() []*ModelInfo {
 			},
 		)...,
 	)
-	return models
+	return withoutModelIDs(models, "gemini-3-pro-preview")
 }
 
 // GetAIStudioModels returns the Gemini model definitions for AI Studio integrations
@@ -683,6 +789,9 @@ func GetAIStudioModels() []*ModelInfo {
 		gemini35FlashLite(),
 		gemini36Flash(),
 		gemini37Flash(),
+		gemini38Flash("models/gemini-3.8-flash"),
+		gemini31FlashImage(),
+		gemini31FlashLiteImage(),
 		&ModelInfo{
 			ID:               "gemini-pro-latest",
 			Object:           "model",
@@ -769,7 +878,7 @@ func GetAIStudioModels() []*ModelInfo {
 			// image models don't support thinkingConfig; leave Thinking nil
 		},
 	)
-	return models
+	return withoutModelIDs(models, "gemini-3-pro-preview")
 }
 
 // getOpenAIModels returns the default Codex/OpenAI model definitions.
@@ -890,20 +999,6 @@ func GetEmbeddedOpenAIModels() []*ModelInfo {
 			DisplayName:         "GPT 5.2 Codex",
 			Description:         "Stable version of GPT 5.2 Codex, The best model for coding and agentic tasks across domains.",
 			ContextLength:       400000,
-			MaxCompletionTokens: 128000,
-			SupportedParameters: []string{"tools"},
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
-		},
-		{
-			ID:                  "gpt-5.3-codex-spark",
-			Object:              "model",
-			Created:             1770912000,
-			OwnedBy:             "openai",
-			Type:                "openai",
-			Version:             "gpt-5.3",
-			DisplayName:         "GPT 5.3 Codex Spark",
-			Description:         "Ultra-fast coding model.",
-			ContextLength:       128000,
 			MaxCompletionTokens: 128000,
 			SupportedParameters: []string{"tools"},
 			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
@@ -1133,10 +1228,17 @@ func GetAntigravityModelConfig() map[string]*antigravityModelConfig {
 				Levels: []string{"low", "high"},
 			},
 		},
+		"gemini-3.8-flash-high": {
+			Thinking: &ThinkingSupport{
+				Min: 1, Max: 65535, DynamicAllowed: true,
+				Levels: []string{"low", "medium", "high"},
+			},
+			MaxCompletionTokens: 65536,
+		},
 		"gemini-3.7-flash-high": {
 			Thinking: &ThinkingSupport{
 				Min: 1, Max: 65535, DynamicAllowed: true,
-				Levels: []string{"minimal", "low", "medium", "high"},
+				Levels: []string{"low", "medium", "high"},
 			},
 			MaxCompletionTokens: 65536,
 		},
@@ -1146,13 +1248,6 @@ func GetAntigravityModelConfig() map[string]*antigravityModelConfig {
 				Levels: []string{"minimal", "low", "medium", "high"},
 			},
 			MaxCompletionTokens: 65536,
-		},
-		"gemini-3.5-flash-extra-low": {
-			Thinking: &ThinkingSupport{
-				Min: 1, Max: 65535, DynamicAllowed: true,
-				Levels: []string{"low", "medium", "high"},
-			},
-			MaxCompletionTokens: 65535,
 		},
 		"gemini-3.1-flash-image": {
 			Thinking: &ThinkingSupport{
@@ -1182,7 +1277,7 @@ func GetAntigravityModelConfig() map[string]*antigravityModelConfig {
 
 // GetDeepSeekModels returns the DeepSeek models supported by its Anthropic-compatible API.
 func GetDeepSeekModels() []*ModelInfo {
-	return []*ModelInfo{
+	models := []*ModelInfo{
 		{
 			ID:                  "deepseek-flash",
 			Object:              "model",
@@ -1224,6 +1319,13 @@ func GetDeepSeekModels() []*ModelInfo {
 			IsCompat:            true,
 		},
 	}
+	for _, model := range models {
+		model.SupportedParameters = []string{"tools"}
+		model.SupportedInputModalities = []string{"text", "image"}
+		model.SupportedOutputModalities = []string{"text"}
+		model.Thinking = &ThinkingSupport{DynamicAllowed: true}
+	}
+	return models
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions
@@ -1233,99 +1335,101 @@ func GetKimiModels() []*ModelInfo {
 	}
 	return []*ModelInfo{
 		{
-			ID:                  "kimi-k2",
-			Object:              "model",
-			Created:             1752192000, // 2025-07-11
-			OwnedBy:             "moonshot",
-			Type:                "kimi",
-			DisplayName:         "Kimi K2",
-			Description:         "Kimi K2 - Moonshot AI's flagship coding model",
-			ContextLength:       131072,
-			MaxCompletionTokens: 32768,
+			ID:                        "kimi-k2",
+			Object:                    "model",
+			Created:                   1752192000, // 2025-07-11
+			OwnedBy:                   "moonshot",
+			Type:                      "kimi",
+			DisplayName:               "Kimi K2",
+			Description:               "Kimi K2 - Moonshot AI's flagship coding model",
+			ContextLength:             131072,
+			MaxCompletionTokens:       32768,
+			SupportedInputModalities:  []string{"text"},
+			SupportedOutputModalities: []string{"text"},
 		},
 		{
-			ID:                  "kimi-k2-thinking",
-			Object:              "model",
-			Created:             1762387200, // 2025-11-06
-			OwnedBy:             "moonshot",
-			Type:                "kimi",
-			DisplayName:         "Kimi K2 Thinking",
-			Description:         "Kimi K2 Thinking - Extended reasoning model",
-			ContextLength:       131072,
-			MaxCompletionTokens: 32768,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+			ID:                        "kimi-k2-thinking",
+			Object:                    "model",
+			Created:                   1762387200, // 2025-11-06
+			OwnedBy:                   "moonshot",
+			Type:                      "kimi",
+			DisplayName:               "Kimi K2 Thinking",
+			Description:               "Kimi K2 Thinking - Extended reasoning model",
+			ContextLength:             131072,
+			MaxCompletionTokens:       32768,
+			SupportedInputModalities:  []string{"text"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking:                  &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
-			ID:                  "kimi-k2.5",
-			Object:              "model",
-			Created:             1769472000, // 2026-01-26
-			OwnedBy:             "moonshot",
-			Type:                "kimi",
-			DisplayName:         "Kimi K2.5",
-			Description:         "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
-			ContextLength:       131072,
-			MaxCompletionTokens: 32768,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+			ID:                        "kimi-k2.5",
+			Object:                    "model",
+			Created:                   1769472000, // 2026-01-26
+			OwnedBy:                   "moonshot",
+			Type:                      "kimi",
+			DisplayName:               "Kimi K2.5",
+			Description:               "Kimi K2.5 - Latest Moonshot AI coding model with improved capabilities",
+			ContextLength:             262144,
+			MaxCompletionTokens:       32768,
+			SupportedInputModalities:  []string{"text", "image", "video"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking:                  &ThinkingSupport{ZeroAllowed: true, Levels: []string{"low", "high"}},
 		},
 		{
-			ID:                  "kimi-k2.6",
-			Object:              "model",
-			Created:             1776729600, // 2026-04-21
-			OwnedBy:             "moonshot",
-			Type:                "kimi",
-			DisplayName:         "Kimi K2.6",
-			Description:         "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
-			ContextLength:       262144,
-			MaxCompletionTokens: 65536,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: true, DynamicAllowed: true},
+			ID:                        "kimi-k2.6",
+			Object:                    "model",
+			Created:                   1776729600, // 2026-04-21
+			OwnedBy:                   "moonshot",
+			Type:                      "kimi",
+			DisplayName:               "Kimi K2.6",
+			Description:               "Kimi K2.6 - Latest Moonshot AI coding model with improved capabilities",
+			ContextLength:             262144,
+			MaxCompletionTokens:       65536,
+			SupportedInputModalities:  []string{"text", "image", "video"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking:                  &ThinkingSupport{ZeroAllowed: true, Levels: []string{"low", "high"}},
 		},
 		{
-			ID:                  "kimi-k2.7-code",
-			Object:              "model",
-			Created:             1780396800, // 2026-06-02
-			OwnedBy:             "moonshot",
-			Type:                "kimi",
-			DisplayName:         "Kimi K2.7 Code",
-			Description:         "Kimi K2.7 Code - Moonshot AI's latest coding-focused model",
-			ContextLength:       262144,
-			MaxCompletionTokens: 65536,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 32000, ZeroAllowed: false, DynamicAllowed: true},
+			ID:                        "kimi-k2.7-code",
+			Object:                    "model",
+			Created:                   1780396800, // 2026-06-02
+			OwnedBy:                   "moonshot",
+			Type:                      "kimi",
+			DisplayName:               "Kimi K2.7 Code",
+			Description:               "Kimi K2.7 Code - Moonshot AI's latest coding-focused model",
+			ContextLength:             262144,
+			MaxCompletionTokens:       65536,
+			SupportedInputModalities:  []string{"text", "image", "video"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking:                  &ThinkingSupport{ZeroAllowed: false, Levels: []string{"low", "high"}},
 		},
 		{
-			ID:                  "kimi-k2.7-code-highspeed",
-			Object:              "model",
-			Created:             1780396800, // 2026-06-02
-			OwnedBy:             "moonshot",
-			Type:                "kimi",
-			DisplayName:         "Kimi K2.7 Code HighSpeed",
-			Description:         "Kimi K2.7 Code HighSpeed - Same capabilities as Kimi K2.7 Code with higher output speed (~180 tokens/s)",
-			ContextLength:       262144,
-			MaxCompletionTokens: 65536,
-			Thinking:            &ThinkingSupport{ZeroAllowed: false, Levels: []string{"low", "high"}},
+			ID:                        "kimi-k2.7-code-highspeed",
+			Object:                    "model",
+			Created:                   1780396800, // 2026-06-02
+			OwnedBy:                   "moonshot",
+			Type:                      "kimi",
+			DisplayName:               "Kimi K2.7 Code HighSpeed",
+			Description:               "Kimi K2.7 Code HighSpeed - Same capabilities as Kimi K2.7 Code with higher output speed (~180 tokens/s)",
+			ContextLength:             262144,
+			MaxCompletionTokens:       65536,
+			SupportedInputModalities:  []string{"text", "image", "video"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking:                  &ThinkingSupport{ZeroAllowed: false, Levels: []string{"low", "high"}},
 		},
 		{
-			ID:                  "kimi-k3",
-			Object:              "model",
-			Created:             1784073600, // 2026-07-15
-			OwnedBy:             "moonshot",
-			Type:                "kimi",
-			DisplayName:         "Kimi K3",
-			Description:         "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) with multimodal input",
-			ContextLength:       1048576,
-			MaxCompletionTokens: 65536,
-			Thinking:            &ThinkingSupport{ZeroAllowed: false, Levels: []string{"low", "high", "max"}},
-		},
-		{
-			ID:                  "kimi-k3-256k",
-			Object:              "model",
-			Created:             1785110400, // 2026-07-27
-			OwnedBy:             "moonshot",
-			Type:                "kimi",
-			DisplayName:         "Kimi K3 256K",
-			Description:         "Kimi K3 256K - 256K context version of Kimi K3 delivering the same results within 256K context at reduced quota consumption; supports image input only (no video)",
-			ContextLength:       262144,
-			MaxCompletionTokens: 65536,
-			Thinking:            &ThinkingSupport{ZeroAllowed: false, Levels: []string{"low", "high", "max"}},
+			ID:                        "kimi-k3",
+			Object:                    "model",
+			Created:                   1784073600, // 2026-07-15
+			OwnedBy:                   "moonshot",
+			Type:                      "kimi",
+			DisplayName:               "Kimi K3",
+			Description:               "Kimi K3 - Moonshot AI's next-generation flagship model (~2.8T MoE) with multimodal input",
+			ContextLength:             1048576,
+			MaxCompletionTokens:       65536,
+			SupportedInputModalities:  []string{"text", "image", "video"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking:                  &ThinkingSupport{ZeroAllowed: true, Levels: []string{"low", "high", "max"}},
 		},
 	}
 }

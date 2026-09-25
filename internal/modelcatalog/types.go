@@ -11,7 +11,7 @@ const (
 	FileName         = "models.json"
 	PreviousFileName = "models.previous.json"
 	SchemaVersion    = 3
-	DefaultsVersion  = "2026-09-11"
+	DefaultsVersion  = "2026-09-23.2"
 )
 
 type LoadSource string

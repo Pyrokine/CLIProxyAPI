@@ -35,6 +35,13 @@ var documentedProviderDefaults = []Model{
 		Name: "deepseek-flash", Provider: "DeepSeek", Channel: "claude", DisplayName: "DeepSeek V4.1 Flash",
 	},
 	{Name: "deepseek-v4-pro", Provider: "DeepSeek", Channel: "claude", DisplayName: "DeepSeek V4 Pro"},
+	{Name: "qwen3.8-max", Provider: "Qwen", Channel: "openai-compatibility"},
+	{Name: "qwen3.8-max-0902", Provider: "Qwen", Channel: "openai-compatibility"},
+	{Name: "qwen3.8-flash", Provider: "Qwen", Channel: "openai-compatibility"},
+	{Name: "qwen3-coder-next", Provider: "Qwen", Channel: "openai-compatibility"},
+	{Name: "MiniMax-M3", Provider: "MiniMax", Channel: "openai-compatibility"},
+	{Name: "MiniMax-M2.7", Provider: "MiniMax", Channel: "openai-compatibility"},
+	{Name: "MiniMax-M2.7-highspeed", Provider: "MiniMax", Channel: "openai-compatibility"},
 	{Name: "glm-5.3", Provider: "GLM", Channel: "openai-compatibility"},
 	{Name: "glm-5.3-flash", Provider: "GLM", Channel: "openai-compatibility"},
 	{Name: "glm-5.2", Provider: "GLM", Channel: "openai-compatibility"},
@@ -119,14 +126,7 @@ func DefaultFile() File {
 }
 
 func defaultModelsByChannel(channel string) []*registry.ModelInfo {
-	switch strings.ToLower(strings.TrimSpace(channel)) {
-	case "codex":
-		return registry.GetEmbeddedOpenAIModels()
-	case "xai", "x-ai", "grok":
-		return registry.GetEmbeddedXAIModels()
-	default:
-		return registry.GetStaticModelDefinitionsByChannel(channel)
-	}
+	return registry.GetEmbeddedStaticModelDefinitionsByChannel(channel)
 }
 
 func DefaultPrices() map[string]Price {
