@@ -256,12 +256,10 @@ func (h *ResponsesAPIHandler) Models() []map[string]any {
 // It returns a list of available AI models with their capabilities
 // and specifications in OpenAIResponses-compatible format.
 func (h *ResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
-	c.JSON(
-		http.StatusOK, gin.H{
-			"object": "list",
-			"data":   h.FilterModelsForCurrentAPIKey(c, h.Models()),
-		},
-	)
+	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
+		"object": "list",
+		"data":   h.FilterModelsForCurrentAPIKey(c, h.Models()),
+	})
 }
 
 func (h *ResponsesAPIHandler) prepareCodexMultiAgentV2Tools(c *gin.Context, payload []byte) []byte {

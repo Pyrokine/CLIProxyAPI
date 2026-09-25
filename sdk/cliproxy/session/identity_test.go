@@ -241,6 +241,43 @@ func TestEnrichSkipsDerivationForExplicitSessions(t *testing.T) {
 	}
 }
 
+func TestEnrichWritesCanonicalSessionHierarchyToRequestAndOptions(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"session_id":"child","parent_session_id":"parent"}`)
+	req := cliproxyexecutor.Request{
+		Payload: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:stale-request",
+			cliproxyexecutor.ParentSessionIDMetadataKey:  "session:stale-request-parent",
+		},
+	}
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: payload,
+		SourceFormat:    sdktranslator.FormatOpenAI,
+		Metadata: map[string]any{
+			cliproxyexecutor.DerivedSessionIDMetadataKey: "ctx:v1:stale-options",
+			cliproxyexecutor.ParentSessionIDMetadataKey:  "session:stale-options-parent",
+		},
+	}
+
+	enrichedReq, enrichedOpts := Enrich(req, opts)
+	for name, metadata := range map[string]map[string]any{
+		"request": enrichedReq.Metadata,
+		"options": enrichedOpts.Metadata,
+	} {
+		if got := metadataString(metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey); got != "session:child" {
+			t.Fatalf("%s canonical session = %q, want session:child", name, got)
+		}
+		if got := metadataString(metadata, cliproxyexecutor.ParentSessionIDMetadataKey); got != "session:parent" {
+			t.Fatalf("%s parent session = %q, want session:parent", name, got)
+		}
+		if got := DerivedID(metadata); got != "" {
+			t.Fatalf("%s derived session = %q, want empty", name, got)
+		}
+	}
+}
+
 func TestEnrichDerivesAfterInvalidSessionIdentity(t *testing.T) {
 	t.Parallel()
 

@@ -54,6 +54,9 @@ type Builder struct {
 	// cooldownStateStore overrides runtime cooldown persistence.
 	cooldownStateStore coreauth.CooldownStateStore
 
+	// resultPolicy intercepts execution results before state mutation and persistence.
+	resultPolicy coreauth.ResultPolicy
+
 	// pluginHost manages dynamic plugin lifecycle and callbacks.
 	pluginHost *PluginHost
 
@@ -152,6 +155,12 @@ func (b *Builder) WithCoreAuthManager(mgr *coreauth.Manager) *Builder {
 // WithCooldownStateStore overrides the store used for runtime cooldown persistence.
 func (b *Builder) WithCooldownStateStore(store coreauth.CooldownStateStore) *Builder {
 	b.cooldownStateStore = store
+	return b
+}
+
+// WithResultPolicy sets an execution result policy invoked before state mutation and persistence.
+func (b *Builder) WithResultPolicy(policy coreauth.ResultPolicy) *Builder {
+	b.resultPolicy = policy
 	return b
 }
 
@@ -259,9 +268,11 @@ func (b *Builder) Build() (*Service, error) {
 		strategy := ""
 		sessionAffinity := false
 		sessionAffinityTTL := time.Hour
+		var sessionAffinitySubagents *bool
 		if b.cfg != nil {
 			strategy = strings.ToLower(strings.TrimSpace(b.cfg.Routing.Strategy))
 			sessionAffinity = b.cfg.Routing.SessionAffinity
+			sessionAffinitySubagents = b.cfg.Routing.SessionAffinitySubagents
 			if ttl := strings.TrimSpace(b.cfg.Routing.SessionAffinityTTL); ttl != "" {
 				if parsed, err := time.ParseDuration(ttl); err == nil && parsed > 0 {
 					sessionAffinityTTL = parsed
@@ -270,16 +281,13 @@ func (b *Builder) Build() (*Service, error) {
 		}
 		selector := newRoutingSelector(strategy)
 		if sessionAffinity {
-			if sessionAffinityTTL == time.Hour {
-				selector = coreauth.NewSessionAffinitySelector(selector)
-			} else {
-				selector = coreauth.NewSessionAffinitySelectorWithConfig(
-					coreauth.SessionAffinityConfig{
-						Fallback: selector,
-						TTL:      sessionAffinityTTL,
-					},
-				)
-			}
+			selector = coreauth.NewSessionAffinitySelectorWithConfig(
+				coreauth.SessionAffinityConfig{
+					Fallback:         selector,
+					TTL:              sessionAffinityTTL,
+					SubagentAffinity: sessionAffinitySubagents,
+				},
+			)
 		}
 
 		coreManager = coreauth.NewManager(tokenStore, selector, nil)
@@ -288,6 +296,9 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+	if b.resultPolicy != nil {
+		coreManager.SetResultPolicy(b.resultPolicy)
+	}
 
 	pluginHost := b.pluginHost
 	if pluginHost == nil {
@@ -337,5 +348,35 @@ func (b *Builder) Build() (*Service, error) {
 		},
 	)
 	coreManager.SetDeferredAuthRecreateHandler(service.applyCoreAuthAddOrUpdate)
+	service.serverOptions = append(
+		service.serverOptions,
+		sdkapi.WithPostAuthPersistHook(service.runtimeAuthSyncHook()),
+	)
 	return service, nil
+}
+
+func (s *Service) runtimeAuthSyncHook() coreauth.PostAuthHook {
+	return func(_ context.Context, auth *coreauth.Auth) error {
+		if s == nil || auth == nil || strings.TrimSpace(auth.ID) == "" {
+			return nil
+		}
+
+		s.authUpdateMu.Lock()
+		defer s.authUpdateMu.Unlock()
+
+		action := AuthUpdateActionAdd
+		if s.coreManager != nil {
+			if _, ok := s.coreManager.GetByID(auth.ID); ok {
+				action = AuthUpdateActionModify
+			}
+		}
+		update := AuthUpdate{Action: action, ID: auth.ID, Auth: auth}
+		if watcher := s.currentWatcher(); watcher != nil {
+			_, revision := watcher.DispatchPersistedAuthUpdateWithRevision(&update)
+			update.SetRevision(revision)
+		}
+
+		syncCtx := coreauth.WithSkipPersist(context.Background())
+		return s.handleAuthUpdateLocked(syncCtx, update)
+	}
 }

@@ -46,6 +46,24 @@ const (
 	DerivedSessionIDMetadataKey = "derived_session_id"
 	// CallerScopeMetadataKey isolates inferred session identities between downstream callers.
 	CallerScopeMetadataKey = "caller_scope"
+	// LCPAffinitySessionIDMetadataKey stores the rolling-prefix session selected for affinity.
+	LCPAffinitySessionIDMetadataKey = "lcp_affinity_session_id"
+	// CanonicalSessionIDMetadataKey stores the authoritative bounded session identity.
+	CanonicalSessionIDMetadataKey = "canonical_session_id"
+	// ParentSessionIDMetadataKey stores the parent lineage for subagents and forks.
+	ParentSessionIDMetadataKey = "parent_session_id"
+	// IsForkMetadataKey marks a request as a fork rather than a subagent.
+	IsForkMetadataKey = "session_is_fork"
+	// LCPAccessGenerationMetadataKey records the matched generation for stale-result protection.
+	LCPAccessGenerationMetadataKey = "lcp_access_generation"
+	// LCPFingerprintMetadataKey carries bounded turn fingerprints through request execution.
+	LCPFingerprintMetadataKey = "lcp_fingerprints"
+	// LCPMinPrefixLengthMetadataKey stores the first non-system prefix boundary.
+	LCPMinPrefixLengthMetadataKey = "lcp_min_prefix_length"
+	// SessionAffinityProviderMetadataKey records the affinity provider namespace.
+	SessionAffinityProviderMetadataKey = "session_affinity_provider"
+	// SessionAffinityModelMetadataKey records the affinity model namespace.
+	SessionAffinityModelMetadataKey = "session_affinity_model"
 	// RequestPathMetadataKey stores the inbound HTTP request path (e.g. "/v1/images/generations") in Options.Metadata.
 	RequestPathMetadataKey = "request_path"
 	// DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
@@ -402,10 +420,31 @@ func (e *RequestTerminatedError) ExecutionDisposition() ExecutionDisposition {
 	}
 }
 
+// WebSocketResponseEvent describes an upstream WebSocket response event received during execution.
+type WebSocketResponseEvent struct {
+	RequestID      string
+	TraceID        string
+	SourceFormat   string
+	Model          string
+	RequestedModel string
+	Provider       string
+	AuthID         string
+	AuthLabel      string
+	AuthType       string
+	EventType      string
+	Payload        []byte
+	Metadata       map[string]any
+}
+
+// WebSocketResponseObserver receives upstream WebSocket response events during execution.
+type WebSocketResponseObserver func(context.Context, WebSocketResponseEvent)
+
 // Options controls execution behavior for both streaming and non-streaming calls.
 type Options struct {
 	// Stream toggles streaming mode.
 	Stream bool
+	// CountTokens 由 Manager 入口设置，标识本次操作使用计数协议
+	CountTokens bool
 	// Alt carries optional alternate format hint (e.g. SSE JSON key).
 	Alt string
 	// Headers are forwarded to the provider request builder.
@@ -424,6 +463,8 @@ type Options struct {
 	ExecutionLifecycle ExecutionLifecycle
 	// RequestAfterAuthInterceptor runs after credential selection and before executor translation.
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
+	// WebSocketResponseObserver receives raw upstream WebSocket response events during execution.
+	WebSocketResponseObserver WebSocketResponseObserver
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.

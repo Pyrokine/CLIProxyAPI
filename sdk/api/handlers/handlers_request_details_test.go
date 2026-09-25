@@ -51,6 +51,50 @@ func TestGetContextWithCancelIncludesUsageManager(t *testing.T) {
 	}
 }
 
+func TestGetContextWithCancelCapturesSessionHierarchy(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ginCtx.Request.Header.Set("X-Claude-Code-Session-Id", "root-session")
+	ginCtx.Request.Header.Set("X-Claude-Code-Agent-Id", "worker")
+
+	ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+	defer cancel()
+	metadata := internallogging.GetClientRequestMetadata(ctx)
+	if metadata.SessionID != "claude:root-session:agent:worker" || metadata.ParentSessionID != "claude:root-session" {
+		t.Fatalf("session hierarchy = (%q, %q)", metadata.SessionID, metadata.ParentSessionID)
+	}
+	if got := util.SessionIDFromContext(ctx); got != metadata.SessionID {
+		t.Fatalf("context session ID = %q, want %q", got, metadata.SessionID)
+	}
+}
+
+func TestEnrichContextWithSessionHierarchyReplacesAndClearsMetadata(t *testing.T) {
+	ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
+		ClientIP:        "192.0.2.1",
+		SessionID:       "header:old-child",
+		ParentSessionID: "header:old-parent",
+	})
+	ctx = util.WithSessionID(ctx, "header:old-child")
+	ctx = EnrichContextWithSessionHierarchy(
+		ctx,
+		nil,
+		[]byte(`{"session_id":"new-child","parent_session_id":"new-parent"}`),
+		nil,
+	)
+	metadata := internallogging.GetClientRequestMetadata(ctx)
+	if metadata.ClientIP != "192.0.2.1" || metadata.SessionID != "session:new-child" || metadata.ParentSessionID != "session:new-parent" {
+		t.Fatalf("replaced session metadata = %+v", metadata)
+	}
+
+	ctx = EnrichContextWithSessionHierarchy(ctx, nil, nil, nil)
+	metadata = internallogging.GetClientRequestMetadata(ctx)
+	if metadata.SessionID != "" || metadata.ParentSessionID != "" || util.SessionIDFromContext(ctx) != "" {
+		t.Fatalf("cleared session metadata = %+v, context session = %q", metadata, util.SessionIDFromContext(ctx))
+	}
+}
+
 func TestGetContextWithCancelUsesResolvedClientAddress(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	recorder := httptest.NewRecorder()
@@ -308,6 +352,7 @@ func TestGetRequestDetailsImageOnlyModelsReturn503(t *testing.T) {
 		"xai/grok-imagine-image",
 		"grok-imagine-image-quality",
 		"XAI/Grok-Imagine-Image-Quality(HIGH)",
+		"xai/grok-imagine-image-2.0",
 	}
 
 	for _, model := range models {
@@ -340,6 +385,7 @@ func TestValidateImageOnlyModelAllowsImageEndpoints(t *testing.T) {
 		"openai/gpt-image-2.5-sunburst-2026-09-08",
 		"grok-imagine-image",
 		"xai/grok-imagine-image-quality(high)",
+		"grok/grok-imagine-image-2.0",
 	}
 
 	for _, model := range models {
@@ -366,7 +412,10 @@ func TestGetRequestDetailsWithOptionsCanonicalizesBuiltinImageModels(t *testing.
 	modelRegistry.RegisterClient(
 		"test-image-details-xai",
 		"xai",
-		[]*registry.ModelInfo{{ID: "grok-imagine-image-quality"}},
+		[]*registry.ModelInfo{
+			{ID: "grok-imagine-image-quality"},
+			{ID: "grok-imagine-image-2.0"},
+		},
 	)
 	modelRegistry.RegisterClient(
 		"test-image-details-prefixed",
@@ -397,6 +446,11 @@ func TestGetRequestDetailsWithOptionsCanonicalizesBuiltinImageModels(t *testing.
 			model:        "XAI/Grok-Imagine-Image-Quality(HIGH)",
 			wantProvider: "xai",
 			wantModel:    "grok-imagine-image-quality",
+		},
+		{
+			model:        "XAI/Grok-Imagine-Image-2.0",
+			wantProvider: "xai",
+			wantModel:    "grok-imagine-image-2.0",
 		},
 		{
 			model:        "teama/GPT-IMAGE-2(HIGH)",
@@ -483,6 +537,7 @@ func TestIsOpenAIImageOnlyModel(t *testing.T) {
 		{model: "grok-imagine-image", want: true},
 		{model: "xai/grok-imagine-image", want: true},
 		{model: "XAI/Grok-Imagine-Image-Quality", want: true},
+		{model: "grok/GROK-IMAGINE-IMAGE-2.0", want: true},
 		{model: "grok-3", want: false},
 		{model: "grok-imagine-video", want: false},
 	}

@@ -77,6 +77,11 @@ func WithPostAuthHook(hook coreauth.PostAuthHook) ServerOption {
 	return internalapi.WithPostAuthHook(hook)
 }
 
+// WithPostAuthPersistHook registers a hook to be called after auth persistence.
+func WithPostAuthPersistHook(hook coreauth.PostAuthHook) ServerOption {
+	return internalapi.WithPostAuthPersistHook(hook)
+}
+
 // WithExampleAPIKeySafeMode blocks proxy API endpoints while template API keys remain configured.
 func WithExampleAPIKeySafeMode() ServerOption {
 	return internalapi.WithExampleAPIKeySafeMode()

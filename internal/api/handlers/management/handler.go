@@ -133,6 +133,7 @@ type Handler struct {
 	configFilePath                 string
 	commitMu                       sync.Mutex
 	runtimeCommitMu                sync.Mutex
+	authStatusMu                   sync.Mutex
 	mu                             sync.RWMutex
 	configGeneration               uint64
 	configCommitted                ConfigCommittedFunc
@@ -167,6 +168,7 @@ type Handler struct {
 	envSecret                      string
 	logDir                         string
 	postAuthHook                   coreauth.PostAuthHook
+	postAuthPersistHook            coreauth.PostAuthHook
 	quotaScheduler                 *quota.Scheduler
 	quotaRefreshTasks              *quotaRefreshTaskService
 	pluginHost                     pluginRuntimeHost
@@ -703,6 +705,11 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+// SetPostAuthPersistHook registers a hook to be called after auth persistence.
+func (h *Handler) SetPostAuthPersistHook(hook coreauth.PostAuthHook) {
+	h.postAuthPersistHook = hook
 }
 
 // SetUsagePersister sets the usage statistics persister reference.

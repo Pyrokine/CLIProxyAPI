@@ -71,11 +71,9 @@ func (h *APIHandler) GeminiModels(c *gin.Context) {
 		}
 		normalizedModels = append(normalizedModels, normalizedModel)
 	}
-	c.JSON(
-		http.StatusOK, gin.H{
-			"models": normalizedModels,
-		},
-	)
+	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
+		"models": normalizedModels,
+	})
 }
 
 // GeminiGetHandler handles GET requests for specific constant.Gemini model information.

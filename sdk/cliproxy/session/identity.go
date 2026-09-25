@@ -24,7 +24,27 @@ const (
 	instructionRuneLimit = 50
 )
 
-var legacyClaudeSessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
+var (
+	legacyClaudeSessionPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`)
+	canonicalUUIDPattern       = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+)
+
+// CandidateSessionPrefixes lists protocol-specific prefixes accepted by affinity lookup.
+var CandidateSessionPrefixes = []string{
+	"lcp:v1:", "lcp:",
+	"codex:", "claude:", "header:", "session:",
+	"affinity:", "slot:", "task:", "conv:",
+	"thread:", "clientreq:", "geminicache:",
+	"pck:", "user:", "execution:", "agy:", "derived:",
+}
+
+var knownSessionPrefixes = []string{
+	"lcp:v1:", "lcp:", "ctx:v1:", "ctx:",
+	"codex:", "claude:", "header:", "session:",
+	"affinity:", "slot:", "task:", "conv:",
+	"thread:", "clientreq:", "geminicache:",
+	"pck:", "user:", "execution:", "agy:", "derived:",
+}
 
 type canonicalRoot struct {
 	Version      string          `json:"version"`
@@ -39,6 +59,47 @@ type canonicalPart struct {
 	Kind  string `json:"kind"`
 	MIME  string `json:"mime,omitempty"`
 	Value string `json:"value"`
+}
+
+// NormalizeToCanonicalUUID projects any non-empty session identity to a stable RFC 9562 UUIDv8.
+func NormalizeToCanonicalUUID(rawID string) string {
+	clean := strings.TrimSpace(rawID)
+	if clean == "" {
+		return ""
+	}
+	if canonicalUUIDPattern.MatchString(clean) {
+		return strings.ToLower(clean)
+	}
+	for {
+		stripped := false
+		for _, prefix := range knownSessionPrefixes {
+			if strings.HasPrefix(clean, prefix) {
+				clean = strings.TrimSpace(strings.TrimPrefix(clean, prefix))
+				stripped = true
+				break
+			}
+		}
+		if !stripped {
+			break
+		}
+	}
+	if clean == "" {
+		return ""
+	}
+	if canonicalUUIDPattern.MatchString(clean) {
+		return strings.ToLower(clean)
+	}
+	if separator := strings.IndexByte(clean, ':'); separator > 0 {
+		candidate := strings.TrimSpace(clean[separator+1:])
+		if canonicalUUIDPattern.MatchString(candidate) {
+			return strings.ToLower(candidate)
+		}
+	}
+	sum := sha256.Sum256([]byte("cpa:canonical-uuid:v1\x00" + clean))
+	uuid := [16]byte(sum[:16])
+	uuid[6] = (uuid[6] & 0x0f) | 0x80
+	uuid[8] = (uuid[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
 }
 
 // NormalizeExplicitID validates an explicit client-provided session identifier.
@@ -56,24 +117,66 @@ func NormalizeExplicitID(raw string) string {
 	return raw
 }
 
-// ClaudeMetadataSessionID extracts the explicit Claude Code session from
-// current JSON metadata or the legacy user_id suffix before bounding the
-// surrounding metadata container.
-func ClaudeMetadataSessionID(payload []byte) string {
+// ClaudeMetadataIdentities extracts session, parent, and agent identities from Claude metadata.
+func ClaudeMetadataIdentities(payload []byte) (sessionID, parentSessionID, agentID string) {
 	if len(payload) == 0 {
-		return ""
+		return "", "", ""
 	}
-	userID := strings.TrimSpace(gjson.GetBytes(payload, "metadata.user_id").String())
+	root := util.ParseGJSONBytesNoCopy(payload)
+	userID := strings.TrimSpace(root.Get("metadata.user_id").String())
 	if userID == "" {
-		return ""
+		request := root.Get("request")
+		if request.Exists() && !root.Get("contents").Exists() {
+			root = request
+			userID = strings.TrimSpace(root.Get("metadata.user_id").String())
+		}
+	}
+	if userID == "" {
+		return "", "", ""
 	}
 	if strings.HasPrefix(userID, "{") {
-		return NormalizeExplicitID(gjson.Get(userID, "session_id").String())
+		parsed := gjson.Parse(userID)
+		sessionID = NormalizeExplicitID(parsed.Get("session_id").String())
+		for _, path := range []string{"parent_session_id", "parent_agent_id", "parent_id"} {
+			if parentSessionID = NormalizeExplicitID(parsed.Get(path).String()); parentSessionID != "" {
+				break
+			}
+		}
+		for _, path := range []string{"agent_id", "subagent_id"} {
+			if agentID = NormalizeExplicitID(parsed.Get(path).String()); agentID != "" {
+				break
+			}
+		}
+		return sessionID, parentSessionID, agentID
 	}
-	if matches := legacyClaudeSessionPattern.FindStringSubmatch(userID); len(matches) >= 2 {
-		return NormalizeExplicitID(matches[1])
+	matches := legacyClaudeSessionPattern.FindStringSubmatch(userID)
+	if len(matches) < 2 {
+		return "", "", ""
 	}
-	return ""
+	sessionID = NormalizeExplicitID(matches[1])
+	for _, path := range []string{"metadata.parent_agent_id", "metadata.parent_session_id", "metadata.parent_id"} {
+		if parentSessionID = NormalizeExplicitID(root.Get(path).String()); parentSessionID != "" {
+			break
+		}
+	}
+	for _, path := range []string{"metadata.agent_id", "metadata.subagent_id"} {
+		if agentID = NormalizeExplicitID(root.Get(path).String()); agentID != "" {
+			break
+		}
+	}
+	return sessionID, parentSessionID, agentID
+}
+
+// ClaudeMetadataSessionID extracts the explicit Claude Code session.
+func ClaudeMetadataSessionID(payload []byte) string {
+	sessionID, _, _ := ClaudeMetadataIdentities(payload)
+	return sessionID
+}
+
+// ClaudeMetadataParentSessionID extracts the explicit Claude Code parent session.
+func ClaudeMetadataParentSessionID(payload []byte) string {
+	_, parentSessionID, _ := ClaudeMetadataIdentities(payload)
+	return parentSessionID
 }
 
 // CallerScope returns an irreversible namespace for a downstream caller credential.
@@ -105,27 +208,66 @@ func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (
 		opts.OriginalRequest = bytes.Clone(req.Payload)
 		payload = opts.OriginalRequest
 	}
-	if executionID := firstNormalizedMetadataID(
+	executionID := firstNormalizedMetadataID(
 		cliproxyexecutor.ExecutionSessionMetadataKey, opts.Metadata, req.Metadata,
-	); executionID != "" {
-		req.Metadata = metadataWithValue(
-			metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey),
-			cliproxyexecutor.ExecutionSessionMetadataKey, executionID,
-		)
-		opts.Metadata = metadataWithValue(
-			metadataWithoutKey(
-				opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey,
-			), cliproxyexecutor.ExecutionSessionMetadataKey, executionID,
-		)
-		return req, opts
-	}
-	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
-	opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+	)
+
 	if hasExplicitSession(opts.Headers, payload) {
 		req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
 		opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		req.Metadata, opts.Metadata = retainExecutionMetadata(req.Metadata, opts.Metadata, executionID)
+		if info, ok := ExtractSessionInfo(opts.Headers, payload, opts.Metadata); ok {
+			req.Metadata, opts.Metadata = setSessionHierarchyMetadata(
+				req.Metadata, opts.Metadata, info.SessionID, info.ParentSessionID,
+			)
+		}
 		return req, opts
 	}
+
+	if canonicalID := firstNormalizedMetadataID(
+		cliproxyexecutor.CanonicalSessionIDMetadataKey, opts.Metadata, req.Metadata,
+	); canonicalID != "" {
+		req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		req.Metadata, opts.Metadata = retainExecutionMetadata(req.Metadata, opts.Metadata, executionID)
+		parentID := firstNormalizedMetadataID(
+			cliproxyexecutor.ParentSessionIDMetadataKey, opts.Metadata, req.Metadata,
+		)
+		req.Metadata, opts.Metadata = setSessionHierarchyMetadata(
+			req.Metadata, opts.Metadata, canonicalID, parentID,
+		)
+		return req, opts
+	}
+
+	if lcpID := firstNormalizedMetadataID(
+		cliproxyexecutor.LCPAffinitySessionIDMetadataKey, opts.Metadata, req.Metadata,
+	); lcpID != "" {
+		req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		req.Metadata, opts.Metadata = retainExecutionMetadata(req.Metadata, opts.Metadata, executionID)
+		parentID := firstNormalizedMetadataID(
+			cliproxyexecutor.ParentSessionIDMetadataKey, opts.Metadata, req.Metadata,
+		)
+		req.Metadata, opts.Metadata = setSessionHierarchyMetadata(
+			req.Metadata, opts.Metadata, lcpID, parentID,
+		)
+		return req, opts
+	}
+
+	if executionID != "" {
+		req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
+		req.Metadata, opts.Metadata = retainExecutionMetadata(req.Metadata, opts.Metadata, executionID)
+		req.Metadata, opts.Metadata = setSessionHierarchyMetadata(
+			req.Metadata, opts.Metadata, "execution:"+executionID, "",
+		)
+		return req, opts
+	}
+
+	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+	opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+	opts.Metadata = metadataWithoutKey(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
 
 	derivedID := firstNormalizedMetadataID(cliproxyexecutor.DerivedSessionIDMetadataKey, opts.Metadata, req.Metadata)
 	req.Metadata = metadataWithoutKey(req.Metadata, cliproxyexecutor.DerivedSessionIDMetadataKey)
@@ -145,10 +287,44 @@ func Enrich(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (
 	return req, opts
 }
 
+func retainExecutionMetadata(requestMetadata, optionMetadata map[string]any, executionID string) (map[string]any, map[string]any) {
+	if executionID == "" {
+		return metadataWithoutKey(requestMetadata, cliproxyexecutor.ExecutionSessionMetadataKey),
+			metadataWithoutKey(optionMetadata, cliproxyexecutor.ExecutionSessionMetadataKey)
+	}
+	return metadataWithValue(requestMetadata, cliproxyexecutor.ExecutionSessionMetadataKey, executionID),
+		metadataWithValue(optionMetadata, cliproxyexecutor.ExecutionSessionMetadataKey, executionID)
+}
+
+func setSessionHierarchyMetadata(
+	requestMetadata, optionMetadata map[string]any,
+	sessionID, parentSessionID string,
+) (map[string]any, map[string]any) {
+	sessionID = BoundSessionIdentity(sessionID)
+	parentSessionID = BoundSessionIdentity(parentSessionID)
+	if sessionID == "" {
+		return metadataWithoutKey(requestMetadata, cliproxyexecutor.CanonicalSessionIDMetadataKey),
+			metadataWithoutKey(optionMetadata, cliproxyexecutor.CanonicalSessionIDMetadataKey)
+	}
+	requestMetadata = metadataWithValue(requestMetadata, cliproxyexecutor.CanonicalSessionIDMetadataKey, sessionID)
+	optionMetadata = metadataWithValue(optionMetadata, cliproxyexecutor.CanonicalSessionIDMetadataKey, sessionID)
+	if parentSessionID == "" || parentSessionID == sessionID {
+		return metadataWithoutKey(requestMetadata, cliproxyexecutor.ParentSessionIDMetadataKey),
+			metadataWithoutKey(optionMetadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+	}
+	return metadataWithValue(requestMetadata, cliproxyexecutor.ParentSessionIDMetadataKey, parentSessionID),
+		metadataWithValue(optionMetadata, cliproxyexecutor.ParentSessionIDMetadataKey, parentSessionID)
+}
+
 func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 	for _, header := range []string{
-		"X-Claude-Code-Session-Id", "X-Session-ID", "Session-Id", "Session_id", "X-Session-Affinity", "Conversation_id",
-		"X-Amp-Thread-Id", "X-Client-Request-Id",
+		"X-Claude-Code-Session-Id", "X-Claude-Code-Agent-Id", "X-Claude-Code-Parent-Agent-Id",
+		"Session-Id", "Session_id", "Thread-Id", "Thread_id", "X-Codex-Turn-Metadata", "X-Openai-Subagent",
+		"X-Http-Session-Id", "X-Session-ID", "X-Session-Affinity", "X-Slot-Session-Id",
+		"X-Task-ID", "X-Task-Id", "X-Conversation-Id", "X-Thread-Id", "X-Client-Request-Id",
+		"X-Parent-Session-ID", "X-Parent-Session-Id", "X-Parent-Session-Affinity",
+		"X-Parent-ID", "X-Parent-Id", "X-Parent-Task-ID", "X-Parent-Task-Id",
+		"X-Parent-Conversation-Id", "X-Parent-Thread-Id", "X-Parent-Slot-Session-Id",
 	} {
 		if ExplicitHeaderValue(headers, header) != "" {
 			return true
@@ -157,31 +333,47 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 	if len(payload) == 0 {
 		return false
 	}
-	// Parsing without copying matters here because this runs on every request and
-	// payloads may contain multi-megabyte inline data.
 	root := util.ParseGJSONBytesNoCopy(payload)
-	for _, path := range []string{
-		"session_id", "sessionId", "conversation_id", "prompt_cache_key", "client_metadata.x-codex-window-id",
-	} {
-		if NormalizeExplicitID(root.Get(path).String()) != "" {
-			return true
-		}
+	requestRoot := root
+	request := root.Get("request")
+	hasNestedRequest := request.Exists() && !root.Get("contents").Exists()
+	if hasNestedRequest {
+		requestRoot = request
 	}
-	if turnMetadata := strings.TrimSpace(root.Get("client_metadata.x-codex-turn-metadata").String()); turnMetadata != "" {
-		for _, path := range []string{"prompt_cache_key", "window_id"} {
-			if NormalizeExplicitID(gjson.Get(turnMetadata, path).String()) != "" {
-				return true
-			}
+	for _, path := range []string{
+		"session_id", "sessionId", "sessionID", "child_session_id", "childSessionId",
+		"task_id", "taskId", "taskID", "action_id", "actionId",
+		"cachedContent", "cached_content", "thread_id", "threadId",
+		"conversation_id", "conversationId", "chat_id", "chatId",
+		"prompt_cache_key", "promptCacheKey", "parent_session_id", "parentSessionId",
+		"parent_thread_id", "parentThreadId", "parent_id", "parentId", "parentID",
+		"parent_task_id", "parentTaskId", "parent_action_id", "parentActionId",
+		"parent_session", "parentSession", "parent_subagent_id",
+		"forkSource.sessionId", "previousSessionId", "forked_from_thread_id", "forked_from_id",
+		"metadata.session_id", "metadata.sessionId", "metadata.task_id", "metadata.taskId",
+		"metadata.thread_id", "metadata.conversation_id", "metadata.parent_id",
+		"metadata.parent_task_id", "metadata.parent_agent_id",
+		"extra_body.session_id", "extra_body.task_id", "extra_body.parent_id", "extra_body.parent_task_id",
+	} {
+		if NormalizeExplicitID(root.Get(path).String()) != "" ||
+			(hasNestedRequest && NormalizeExplicitID(requestRoot.Get(path).String()) != "") {
+			return true
 		}
 	}
 	if ClaudeMetadataSessionID(payload) != "" {
 		return true
 	}
-	userID := root.Get("metadata.user_id").String()
+	userID := strings.TrimSpace(root.Get("metadata.user_id").String())
+	if userID == "" && hasNestedRequest {
+		userID = strings.TrimSpace(requestRoot.Get("metadata.user_id").String())
+	}
 	if NormalizeExplicitID(userID) != "" {
 		return true
 	}
 	conversation := root.Get("conversation")
+	if !conversation.Exists() && hasNestedRequest {
+		conversation = requestRoot.Get("conversation")
+	}
 	if NormalizeExplicitID(conversation.Get("id").String()) != "" {
 		return true
 	}
@@ -218,12 +410,16 @@ func DeriveID(format sdktranslator.Format, payload []byte, callerScope string) s
 		Format:      format.String(),
 		CallerScope: strings.TrimSpace(callerScope),
 	}
-	if sourceFormatEqual(format, sdktranslator.FormatGemini) {
-		root.Resource = stringField(body, "cachedContent", "cached_content")
+	if sourceFormatEqual(format, sdktranslator.FormatGemini) || sourceFormatEqual(format, sdktranslator.FormatAntigravity) {
+		resourceBody := body
+		if nested, ok := body["request"].(map[string]any); ok {
+			resourceBody = nested
+		}
+		root.Resource = stringField(resourceBody, "cachedContent", "cached_content")
 	}
 
 	switch {
-	case sourceFormatEqual(format, sdktranslator.FormatGemini):
+	case sourceFormatEqual(format, sdktranslator.FormatGemini), sourceFormatEqual(format, sdktranslator.FormatAntigravity):
 		root.Instructions, root.User = geminiRoot(body)
 	case sourceFormatEqual(format, sdktranslator.FormatInteractions):
 		root.Instructions, root.User = interactionsRoot(body)
@@ -260,7 +456,9 @@ func messagesRoot(body map[string]any, includeTopLevelSystem bool) ([]string, []
 		case "system", "developer":
 			instructions = appendInstruction(instructions, message["content"])
 		case "user":
-			return instructions, canonicalParts(message["content"])
+			if parts := canonicalParts(message["content"]); len(parts) > 0 {
+				return instructions, parts
+			}
 		}
 	}
 	return instructions, nil
@@ -289,13 +487,18 @@ func responsesRoot(body map[string]any) ([]string, []canonicalPart) {
 		case "system", "developer":
 			instructions = appendInstruction(instructions, item["content"])
 		case "user":
-			return instructions, canonicalParts(item["content"])
+			if parts := canonicalParts(item["content"]); len(parts) > 0 {
+				return instructions, parts
+			}
 		}
 	}
 	return instructions, nil
 }
 
 func geminiRoot(body map[string]any) ([]string, []canonicalPart) {
+	if nested, ok := body["request"].(map[string]any); ok {
+		body = nested
+	}
 	instructions := make([]string, 0)
 	if value, ok := firstField(body, "systemInstruction", "system_instruction"); ok {
 		instructions = appendInstruction(instructions, contentValue(value))
@@ -306,7 +509,9 @@ func geminiRoot(body map[string]any) ([]string, []canonicalPart) {
 		if !okContent || normalizedString(content["role"]) != "user" {
 			continue
 		}
-		return instructions, canonicalParts(contentValue(content))
+		if parts := canonicalParts(contentValue(content)); len(parts) > 0 {
+			return instructions, parts
+		}
 	}
 	return instructions, nil
 }

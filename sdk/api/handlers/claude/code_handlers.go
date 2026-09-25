@@ -327,7 +327,7 @@ func (h *CodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 func (h *CodeAPIHandler) ClaudeModels(c *gin.Context) {
 	models := h.FilterModelsForCurrentAPIKey(c, h.Models())
 	disableCloaking := claudeModelListCloakingDisabled(h.ConfigSnapshot())
-	c.JSON(http.StatusOK, claudemodels.NewCatalog(models, disableCloaking).Response())
+	h.WriteModelListResponse(c, h.HandlerType(), claudemodels.NewCatalog(models, disableCloaking).Response())
 }
 
 func claudeModelListCloakingDisabled(cfg *config.SDKConfig) bool {

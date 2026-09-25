@@ -18,12 +18,11 @@ func TestRequiresContext1MCapabilityValidation_RequiresKnownProvider(t *testing.
 	}
 }
 
-func TestSupportsContext1M_UsesStaticMetadataForOpenAIModels(t *testing.T) {
-	if !supportsContext1M("gpt-5.4[1m]", []string{"openai"}) {
-		t.Fatal("expected gpt-5.4 to support [1m]")
-	}
-	if supportsContext1M("gpt-5.5[1m]", []string{"openai"}) {
-		t.Fatal("expected gpt-5.5 to reject native [1m] capability")
+func TestSupportsContext1M_RejectsStaticOpenAIModelsBelowOneMillion(t *testing.T) {
+	for _, model := range []string{"gpt-5.6-sol[1m]", "gpt-6-astra[1m]"} {
+		if supportsContext1M(model, []string{"openai"}) {
+			t.Fatalf("expected %s to reject native [1m] capability", model)
+		}
 	}
 }
 

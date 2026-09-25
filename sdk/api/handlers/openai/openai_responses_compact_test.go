@@ -3,6 +3,7 @@ package openai
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,6 +21,8 @@ type compactCaptureExecutor struct {
 	alt          string
 	sourceFormat string
 	calls        int
+	compactErr   error
+	normalResp   []byte
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -33,7 +36,14 @@ func (e *compactCaptureExecutor) Execute(
 	e.calls++
 	e.alt = opts.Alt
 	e.sourceFormat = opts.SourceFormat.String()
-	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+	if opts.Alt == "responses/compact" && e.compactErr != nil {
+		return coreexecutor.Response{}, e.compactErr
+	}
+	payload := e.normalResp
+	if len(payload) == 0 {
+		payload = []byte(`{"ok":true}`)
+	}
+	return coreexecutor.Response{Payload: payload}, nil
 }
 
 func (e *compactCaptureExecutor) ExecuteStream(
@@ -139,5 +149,117 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+type compactHandlerStatusError struct {
+	status  int
+	message string
+}
+
+func (e *compactHandlerStatusError) Error() string   { return e.message }
+func (e *compactHandlerStatusError) StatusCode() int { return e.status }
+
+func TestOpenAIResponsesCompactFailurePreservesErrorAndAvailability(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for index, test := range []struct {
+		name       string
+		status     int
+		message    string
+		wantPhrase string
+	}{
+		{
+			name:       "transient 500",
+			status:     http.StatusInternalServerError,
+			message:    `{"error":{"message":"compact upstream temporary error","type":"api_error"}}`,
+			wantPhrase: "compact upstream temporary error",
+		},
+		{
+			name:       "request fault 404",
+			status:     http.StatusNotFound,
+			message:    "compact endpoint not found",
+			wantPhrase: "compact endpoint not found",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			executor := &compactCaptureExecutor{
+				compactErr: &compactHandlerStatusError{status: test.status, message: test.message},
+				normalResp: []byte(`{"id":"normal","status":"completed"}`),
+			}
+			manager := coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)
+			manager.SetRetryConfig(2, 0, 1)
+			manager.RegisterExecutor(executor)
+			authIDs := []string{
+				fmt.Sprintf("compact-handler-auth-%d-a", index),
+				fmt.Sprintf("compact-handler-auth-%d-b", index),
+			}
+			for authIndex, authID := range authIDs {
+				auth := &coreauth.Auth{
+					ID:       authID,
+					Provider: executor.Identifier(),
+					Status:   coreauth.StatusActive,
+					Attributes: map[string]string{
+						"priority": fmt.Sprintf("%d", 10-authIndex),
+					},
+				}
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatalf("Register auth: %v", err)
+				}
+				registry.GetGlobalRegistry().RegisterClient(
+					auth.ID,
+					auth.Provider,
+					[]*registry.ModelInfo{{ID: "test-model"}},
+				)
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+			}
+
+			base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+			h := NewResponsesAPIHandler(base)
+			router := gin.New()
+			router.POST("/v1/responses/compact", h.Compact)
+			router.POST("/v1/responses", h.Responses)
+
+			compactReq := httptest.NewRequest(
+				http.MethodPost,
+				"/v1/responses/compact",
+				strings.NewReader(`{"model":"test-model","input":"hello"}`),
+			)
+			compactReq.Header.Set("Content-Type", "application/json")
+			compactResp := httptest.NewRecorder()
+			router.ServeHTTP(compactResp, compactReq)
+			if compactResp.Code != test.status || !strings.Contains(compactResp.Body.String(), test.wantPhrase) {
+				t.Fatalf("compact response = %d/%s", compactResp.Code, compactResp.Body.String())
+			}
+			if executor.calls != 1 {
+				t.Fatalf("compact executor calls = %d, want 1", executor.calls)
+			}
+
+			for _, authID := range authIDs {
+				auth, ok := manager.GetByID(authID)
+				if !ok || auth == nil {
+					t.Fatalf("auth %s missing", authID)
+				}
+				if auth.Unavailable || !auth.NextRetryAfter.IsZero() {
+					t.Fatalf("compact failure changed credential state: %#v", auth)
+				}
+				if state := auth.ModelStates["test-model"]; state != nil &&
+					(state.Unavailable || !state.NextRetryAfter.IsZero()) {
+					t.Fatalf("compact failure changed model state: %#v", state)
+				}
+			}
+
+			normalReq := httptest.NewRequest(
+				http.MethodPost,
+				"/v1/responses",
+				strings.NewReader(`{"model":"test-model","input":"hello"}`),
+			)
+			normalReq.Header.Set("Content-Type", "application/json")
+			normalResp := httptest.NewRecorder()
+			router.ServeHTTP(normalResp, normalReq)
+			if normalResp.Code != http.StatusOK ||
+				!strings.Contains(normalResp.Body.String(), `"id":"normal"`) {
+				t.Fatalf("normal response = %d/%s", normalResp.Code, normalResp.Body.String())
+			}
+		})
 	}
 }

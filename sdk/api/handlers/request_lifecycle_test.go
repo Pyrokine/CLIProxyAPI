@@ -88,6 +88,42 @@ func (h *lifecycleTestHost) CompleteRequest(ctx context.Context, completion plug
 	}
 }
 
+func TestWriteModelListResponseAppliesResponseInterceptor(t *testing.T) {
+	var captured pluginapi.ResponseInterceptRequest
+	host := &lifecycleTestHost{interceptResponse: func(
+		_ context.Context,
+		req pluginapi.ResponseInterceptRequest,
+	) pluginapi.ResponseInterceptResponse {
+		captured = req
+		return pluginapi.ResponseInterceptResponse{
+			Headers: http.Header{"X-Plugin-Model-List": {"applied"}},
+			Body:    []byte(`{"object":"list","data":[{"id":"rewritten"}]}`),
+		}
+	}}
+	handler := &BaseAPIHandler{PluginHost: host}
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("X-Client", "catalog")
+	request = request.WithContext(logging.WithRequestID(request.Context(), "req-model-list"))
+	ginContext.Request = request
+
+	handler.WriteModelListResponse(ginContext, "openai", gin.H{
+		"object": "list",
+		"data":   []map[string]any{{"id": "original"}},
+	})
+
+	if captured.SourceFormat != "openai" || captured.StatusCode != http.StatusOK ||
+		captured.RequestID != "req-model-list" || captured.RequestHeaders.Get("X-Client") != "catalog" ||
+		!strings.Contains(string(captured.Body), `"id":"original"`) {
+		t.Fatalf("captured model list response = %#v", captured)
+	}
+	if recorder.Header().Get("X-Plugin-Model-List") != "applied" ||
+		!strings.Contains(recorder.Body.String(), `"id":"rewritten"`) {
+		t.Fatalf("intercepted response headers=%v body=%s", recorder.Header(), recorder.Body.String())
+	}
+}
+
 type lifecycleCaptureExecutor struct {
 	provider string
 
@@ -939,48 +975,64 @@ func TestHandlerStreamBootstrapReplayBoundary(t *testing.T) {
 }
 
 func TestHandlerLifecycleCompletesFailedStream(t *testing.T) {
-	model := "handler-lifecycle-stream-failed"
-	streamErr := fmt.Errorf("stream failed")
-	executor := &lifecycleCaptureExecutor{
-		stream: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (
-			*coreexecutor.StreamResult,
-			error,
-		) {
-			chunks := make(chan coreexecutor.StreamChunk, 1)
-			chunks <- coreexecutor.StreamChunk{Err: streamErr}
-			close(chunks)
-			return &coreexecutor.StreamResult{Chunks: chunks}, nil
-		},
-	}
-	handler := newLifecycleHandler(t, model, executor)
-	completions := make(chan pluginapi.RequestCompletion, 1)
-	handler.SetPluginHost(
-		&lifecycleTestHost{
-			completeRequest: func(_ context.Context, completion pluginapi.RequestCompletion) {
-				completions <- completion
-			},
-		},
-	)
+	for _, test := range []struct {
+		name    string
+		err     error
+		status  int
+		outcome pluginapi.RequestCompletionOutcome
+		direct  bool
+		body    string
+	}{
+		{"plain", errors.New("stream failed"), http.StatusInternalServerError, pluginapi.RequestCompletionFailed, false, ""},
+		{"upstream", fmt.Errorf("wrapper: %w", &lifecycleUpstreamError{body: []byte(" synthetic denied\n"), direct: true}), http.StatusUnauthorized, pluginapi.RequestCompletionFailed, true, " synthetic denied\n"},
+		{"upstream-empty", &lifecycleUpstreamError{direct: true}, http.StatusUnauthorized, pluginapi.RequestCompletionFailed, true, ""},
+		{"plugin", &coreexecutor.RequestTerminatedError{HTTPStatus: http.StatusForbidden, Body: []byte("policy")}, http.StatusForbidden, pluginapi.RequestCompletionRejected, true, "policy"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := "handler-lifecycle-stream-failed-" + test.name
+			streamErr := test.err
+			executor := &lifecycleCaptureExecutor{
+				stream: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (
+					*coreexecutor.StreamResult,
+					error,
+				) {
+					chunks := make(chan coreexecutor.StreamChunk, 1)
+					chunks <- coreexecutor.StreamChunk{Err: streamErr}
+					close(chunks)
+					return &coreexecutor.StreamResult{Chunks: chunks}, nil
+				},
+			}
+			handler := newLifecycleHandler(t, model, executor)
+			completions := make(chan pluginapi.RequestCompletion, 1)
+			handler.SetPluginHost(
+				&lifecycleTestHost{
+					completeRequest: func(_ context.Context, completion pluginapi.RequestCompletion) {
+						completions <- completion
+					},
+				},
+			)
 
-	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
-		context.Background(),
-		"openai",
-		model,
-		[]byte(`{"model":"`+model+`","stream":true}`),
-		"",
-	)
-	if chunk, ok := <-dataChan; ok {
-		t.Fatalf("unexpected stream chunk = %q", chunk)
-	}
-	errMsg := <-errChan
-	if errMsg == nil || !errors.Is(errMsg.Error, streamErr) {
-		t.Fatalf("stream error = %#v", errMsg)
-	}
-	completion := <-completions
-	if completion.Outcome != pluginapi.RequestCompletionFailed ||
-		completion.StatusCode != http.StatusInternalServerError ||
-		completion.Error != streamErr.Error() {
-		t.Fatalf("stream completion = %#v", completion)
+			dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(
+				context.Background(),
+				"openai",
+				model,
+				[]byte(`{"model":"`+model+`","stream":true}`),
+				"",
+			)
+			if chunk, ok := <-dataChan; ok {
+				t.Fatalf("unexpected stream chunk = %q", chunk)
+			}
+			errMsg := <-errChan
+			if errMsg == nil || !errors.Is(errMsg.Error, streamErr) || errMsg.DirectResponse != test.direct || string(errMsg.Body) != test.body {
+				t.Fatalf("stream error = %#v", errMsg)
+			}
+			completion := <-completions
+			if completion.Outcome != test.outcome ||
+				completion.StatusCode != test.status ||
+				completion.Error != streamErr.Error() {
+				t.Fatalf("stream completion = %#v", completion)
+			}
+		})
 	}
 }
 
@@ -1033,6 +1085,78 @@ func TestExecutionErrorMessagePreservesTerminationResponse(t *testing.T) {
 	if !errors.Is(msg.Error, errTerminated) || msg.Headers.Get("X-Policy") != "blocked" ||
 		string(msg.Body) != `{"error":"blocked"}` {
 		t.Fatalf("direct response = %#v", msg)
+	}
+}
+
+type lifecycleUpstreamError struct {
+	body   []byte
+	direct bool
+}
+
+func (e *lifecycleUpstreamError) Error() string        { return "synthetic diagnostic" }
+func (e *lifecycleUpstreamError) StatusCode() int      { return http.StatusUnauthorized }
+func (e *lifecycleUpstreamError) DirectResponse() bool { return e.direct }
+func (e *lifecycleUpstreamError) ResponseBody() []byte { return e.body }
+
+func TestExecutionErrorMessagePreservesUpstreamResponse(t *testing.T) {
+	for _, test := range []struct{ name, body, contentType string }{
+		{"json", "  {\"error\":\"synthetic denied\"}\n", "application/json"},
+		{"text", " synthetic denied\n", "text/plain; charset=utf-8"},
+		{"empty", "", "text/plain; charset=utf-8"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			original := &lifecycleUpstreamError{body: []byte(test.body), direct: true}
+			wrapped := fmt.Errorf("transport wrapper: %w", original)
+			msg := executionErrorMessage(wrapped)
+			if !msg.DirectResponse || msg.StatusCode != http.StatusUnauthorized || string(msg.Body) != test.body || msg.Headers.Get("Content-Type") != test.contentType || !errors.Is(msg.Error, original) {
+				t.Fatalf("response=%#v", msg)
+			}
+			if len(original.body) > 0 {
+				original.body[0] = 'X'
+			}
+			if string(msg.Body) != test.body {
+				t.Fatal("response aliases error body")
+			}
+			for _, loggingEnabled := range []bool{false, true} {
+				recorder := httptest.NewRecorder()
+				var ctx *gin.Context
+				handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{RequestLog: loggingEnabled}, nil)
+				engine := gin.New()
+				engine.POST("/v1/messages", func(c *gin.Context) {
+					ctx = c
+					if err := handler.WriteErrorResponseWithError(c, msg); err != nil {
+						t.Fatal(err)
+					}
+				})
+				engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages", nil))
+				if recorder.Code != http.StatusUnauthorized || recorder.Body.String() != test.body || recorder.Header().Get("Content-Type") != test.contentType {
+					t.Fatalf("wire status=%d body=%q headers=%v", recorder.Code, recorder.Body.String(), recorder.Header())
+				}
+				wantLog := ""
+				if loggingEnabled {
+					wantLog = test.body
+				}
+				if got := string(requestLogContextBytes(ctx, "API_RESPONSE")); got != wantLog {
+					t.Fatalf("logged body=%q want=%q", got, wantLog)
+				}
+			}
+			calls := 0
+			tracker := &requestLifecycleTracker{ctx: context.Background(), host: &lifecycleTestHost{completeRequest: func(_ context.Context, completion pluginapi.RequestCompletion) {
+				calls++
+				if completion.Outcome != pluginapi.RequestCompletionFailed || completion.StatusCode != http.StatusUnauthorized {
+					t.Fatalf("completion=%#v", completion)
+				}
+			}}}
+			tracker.completeError(context.Background(), msg)
+			tracker.completeError(context.Background(), msg)
+			if calls != 1 {
+				t.Fatalf("completion calls=%d", calls)
+			}
+		})
+	}
+	msg := executionErrorMessage(&lifecycleUpstreamError{body: []byte("private control message")})
+	if msg.DirectResponse || len(msg.Body) != 0 {
+		t.Fatalf("unmarked response=%#v", msg)
 	}
 }
 

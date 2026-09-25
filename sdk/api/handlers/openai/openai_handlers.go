@@ -142,18 +142,22 @@ func (h *APIHandler) OpenAIModels(c *gin.Context) {
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
 		cfg := h.ConfigSnapshot()
 		optimizeMultiAgentV2 := cfg != nil && cfg.CodexOptimizeMultiAgentV2
-		c.JSON(
-			http.StatusOK,
-			codexClientModelsResponse(models, registry.GetGlobalRegistry().GetModelProviders, optimizeMultiAgentV2),
+		h.WriteModelListResponse(
+			c,
+			h.HandlerType(),
+			codexClientModelsResponse(
+				models,
+				registry.GetGlobalRegistry().GetModelProviders,
+				optimizeMultiAgentV2,
+				c.Query("client_version"),
+			),
 		)
 		return
 	}
-	c.JSON(
-		http.StatusOK, gin.H{
-			"object": "list",
-			"data":   models,
-		},
-	)
+	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
+		"object": "list",
+		"data":   models,
+	})
 }
 
 // ChatCompletions handles the /v1/chat/completions endpoint.

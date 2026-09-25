@@ -425,44 +425,6 @@ func (s *Server) codexAlphaSearchWithRouter(c *gin.Context, router codexAlphaSea
 		return
 	}
 
-	if selection != nil && response.StatusCode == http.StatusUnauthorized {
-		s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
-		executor.RecordAPIResponseMetadata(ctx, s.configSnapshot(), response.StatusCode, response.Header.Clone())
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
-		if errClose := response.Body.Close(); errClose != nil {
-			log.WithError(errClose).Error("codex alpha search: close unauthorized response body")
-		}
-		refreshed, didRefresh, errRefresh := s.handlers.AuthManager.RefreshHomeSelectionAfterUnauthorized(
-			ctx,
-			selection,
-			selected,
-		)
-		if errRefresh != nil {
-			selection.End("refresh_failed")
-			c.JSON(
-				codexAlphaSearchStatus(errRefresh, http.StatusServiceUnavailable), gin.H{"error": errRefresh.Error()},
-			)
-			return
-		}
-		if !didRefresh || refreshed == nil {
-			selection.End("refresh_unavailable")
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Codex credential unauthorized"})
-			return
-		}
-		selected = refreshed
-		logging.SetGinCPATraceID(c, selected.EnsureIndex())
-		response, errRequest = performRequest(selected)
-		if errRequest != nil {
-			selection.End("retry_failed")
-			executor.RecordAPIResponseError(ctx, s.configSnapshot(), errRequest)
-			c.JSON(codexAlphaSearchStatus(errRequest, http.StatusBadGateway), gin.H{"error": errRequest.Error()})
-			return
-		}
-		if response.StatusCode == http.StatusUnauthorized {
-			s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel)
-		}
-	}
-
 	closeResponseBody := func() error {
 		errClose := response.Body.Close()
 		if errClose != nil {
@@ -498,6 +460,10 @@ func (s *Server) codexAlphaSearchWithRouter(c *gin.Context, router codexAlphaSea
 		return
 	}
 	executor.AppendAPIResponseChunk(ctx, s.configSnapshot(), upstreamBody)
+	if selection != nil && response.StatusCode == http.StatusUnauthorized {
+		s.handlers.AuthManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, upstreamBody)
+		log.WithField("status", response.StatusCode).Warnf("codex alpha search upstream request failed: %s", logging.SafeDiagnosticForLog(string(upstreamBody)))
+	}
 	if contentType := response.Header.Get("Content-Type"); contentType != "" {
 		c.Header("Content-Type", contentType)
 	}

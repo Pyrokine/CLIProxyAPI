@@ -84,10 +84,28 @@ type AuthUpdate struct {
 	ID                string
 	Auth              *coreauth.Auth
 	AllowAuthRecreate bool
+	revision          uint64
+}
+
+// Revision returns the watcher-local ordering assigned to this update.
+func (u AuthUpdate) Revision() uint64 {
+	return u.revision
+}
+
+// SetRevision assigns watcher-local ordering to a custom watcher update.
+func (u *AuthUpdate) SetRevision(revision uint64) {
+	if u != nil {
+		u.revision = revision
+	}
 }
 
 type PluginAuthParser interface {
 	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
+}
+
+// PluginMultiAuthParser expands one source into multiple plugin runtime auths.
+type PluginMultiAuthParser interface {
+	ParseAuths(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error)
 }
 
 // WatcherFactory creates a watcher for configuration and token changes.
@@ -108,14 +126,15 @@ type WatcherWrapper struct {
 	start func(ctx context.Context) error
 	stop  func() error
 
-	setConfig               func(cfg *config.Config)
-	setConfigReloadCallback func(callback func(*config.Config, string) bool)
-	acknowledgeConfigFile   func(cfg *config.Config, expectedHash string) bool
-	setPluginAuthParser     func(parser PluginAuthParser)
-	setUsageQueue           func(queue *redisqueue.Queue)
-	snapshotAuths           func() []*coreauth.Auth
-	setUpdateQueue          func(queue chan<- AuthUpdate)
-	dispatchRuntimeUpdate   func(update AuthUpdate) bool
+	setConfig                    func(cfg *config.Config)
+	setConfigReloadCallback      func(callback func(*config.Config, string) bool)
+	acknowledgeConfigFile        func(cfg *config.Config, expectedHash string) bool
+	setPluginAuthParser          func(parser PluginAuthParser)
+	setUsageQueue                func(queue *redisqueue.Queue)
+	snapshotAuths                func() []*coreauth.Auth
+	setUpdateQueue               func(queue chan<- AuthUpdate)
+	dispatchRuntimeUpdate        func(update AuthUpdate) bool
+	dispatchPersistedAuthWithRev func(update *AuthUpdate) (bool, uint64)
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -164,6 +183,14 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 		return false
 	}
 	return w.dispatchRuntimeUpdate(update)
+}
+
+// DispatchPersistedAuthUpdateWithRevision forwards an already-persisted update and returns its revision.
+func (w *WatcherWrapper) DispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (bool, uint64) {
+	if w == nil || w.dispatchPersistedAuthWithRev == nil {
+		return false, 0
+	}
+	return w.dispatchPersistedAuthWithRev(update)
 }
 
 // SetPluginAuthParser updates the parser used for plugin-owned auth files.

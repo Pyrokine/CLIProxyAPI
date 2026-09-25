@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -111,7 +112,7 @@ func (t *requestLifecycleTracker) complete(
 
 func (t *requestLifecycleTracker) completeError(ctx context.Context, msg *ErrorMessage) {
 	outcome := pluginapi.RequestCompletionFailed
-	if msg != nil && msg.DirectResponse {
+	if msg != nil && msg.DirectResponse && (msg.Error == nil || isRequestTerminatedExecutionError(msg.Error)) {
 		outcome = pluginapi.RequestCompletionRejected
 	} else if ctx != nil && ctx.Err() != nil {
 		outcome = pluginapi.RequestCompletionCanceled
@@ -168,6 +169,16 @@ func executionErrorMessage(err error) *ErrorMessage {
 		)
 	}
 	status := clienterror.HTTPStatusFromErrorOr(err, http.StatusInternalServerError)
+	if body, direct := clienterror.ResponseBodyFromError(err); direct {
+		contentType := http.DetectContentType(body)
+		if json.Valid(body) {
+			contentType = "application/json"
+		}
+		return &ErrorMessage{
+			StatusCode: status, Error: err, DirectResponse: true,
+			Body: cloneBytes(body), Headers: http.Header{"Content-Type": {contentType}},
+		}
+	}
 	var addon http.Header
 	if headerError, ok := err.(interface{ Headers() http.Header }); ok && headerError != nil {
 		if headers := headerError.Headers(); headers != nil {

@@ -230,6 +230,22 @@ type requestInterceptorDetector interface {
 	HasRequestInterceptors() bool
 }
 
+type webSocketResponseObserverDetector interface {
+	HasWebSocketResponseObservers() bool
+}
+
+type webSocketResponseObserverHost interface {
+	ObserveWebSocketResponseEvent(context.Context, pluginapi.WebSocketResponseEvent)
+}
+
+type webSocketResponseObserverSkipHost interface {
+	ObserveWebSocketResponseEventExcept(context.Context, pluginapi.WebSocketResponseEvent, string)
+}
+
+type webSocketResponseCallbackHost interface {
+	OpenWebSocketResponseCallback(context.Context, string) (pluginapi.WebSocketResponseCallback, func())
+}
+
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
 func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
 	authID = strings.TrimSpace(authID)
@@ -428,6 +444,51 @@ func requestHeadersAndQuery(ctx context.Context) (http.Header, url.Values) {
 	return headers, query
 }
 
+func extractSessionIDsFromRequest(request *http.Request) (string, string) {
+	if request == nil {
+		return "", ""
+	}
+	if info, ok := coresession.ExtractSessionInfo(request.Header, nil, nil); ok {
+		return info.SessionID, info.ParentSessionID
+	}
+	return "", ""
+}
+
+// EnrichContextWithSessionHierarchy records the session hierarchy extracted from the current request state.
+func EnrichContextWithSessionHierarchy(
+	ctx context.Context,
+	headers http.Header,
+	payload []byte,
+	metadata map[string]any,
+) context.Context {
+	clientMetadata := logging.GetClientRequestMetadata(ctx)
+	if info, ok := coresession.ExtractSessionInfo(headers, payload, metadata); ok {
+		clientMetadata.SessionID = info.SessionID
+		clientMetadata.ParentSessionID = info.ParentSessionID
+		if clientMetadata.SessionID == clientMetadata.ParentSessionID {
+			clientMetadata.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, clientMetadata)
+		return util.WithSessionID(ctx, clientMetadata.SessionID)
+	}
+	if clientMetadata.SessionID != "" || clientMetadata.ParentSessionID != "" || util.SessionIDFromContext(ctx) != "" {
+		clientMetadata.SessionID = ""
+		clientMetadata.ParentSessionID = ""
+		ctx = logging.WithClientRequestMetadata(ctx, clientMetadata)
+		return util.WithSessionID(ctx, "")
+	}
+	return ctx
+}
+
+func enrichContextWithSessionHierarchy(
+	ctx context.Context,
+	headers http.Header,
+	payload []byte,
+	metadata map[string]any,
+) context.Context {
+	return EnrichContextWithSessionHierarchy(ctx, headers, payload, metadata)
+}
+
 func pluginExecutionMetadata(metadata map[string]any) map[string]any {
 	if len(metadata) == 0 {
 		return nil
@@ -522,7 +583,7 @@ func requestCallerScope(ginCtx *gin.Context) string {
 	if ginCtx == nil {
 		return ""
 	}
-	value, exists := ginCtx.Get("userApiKey")
+	value, exists := ginCtx.Get("apiKey")
 	if !exists || value == nil {
 		return ""
 	}
@@ -806,6 +867,44 @@ func (h *BaseAPIHandler) FilterModelsForCurrentAPIKey(c *gin.Context, models []m
 	return filtered
 }
 
+// WriteModelListResponse applies response interceptors to a successful model catalog response.
+func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat string, payload any) {
+	if c == nil {
+		return
+	}
+	body, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		c.JSON(http.StatusInternalServerError, ErrorResponse{Error: ErrorDetail{
+			Message: "Failed to encode model catalog",
+			Type:    "server_error",
+		}})
+		return
+	}
+	ctx := context.Background()
+	var requestHeaders http.Header
+	if c.Request != nil {
+		ctx = c.Request.Context()
+		requestHeaders = c.Request.Header
+	}
+	body, responseHeaders := h.applyResponseInterceptors(
+		ctx,
+		sourceFormat,
+		"",
+		"",
+		coreexecutor.Options{Headers: cloneHeader(requestHeaders)},
+		nil,
+		nil,
+		nil,
+		nil,
+		body,
+		http.StatusOK,
+		logging.GetRequestID(ctx),
+		"",
+	)
+	WriteUpstreamHeaders(c.Writer.Header(), responseHeaders)
+	c.Data(http.StatusOK, "application/json; charset=utf-8", body)
+}
+
 func (h *BaseAPIHandler) modelCatalogModelDisabled(model string) bool {
 	cfg := h.ConfigSnapshot()
 	if cfg == nil {
@@ -988,7 +1087,10 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 		newCtx = logging.WithEndpoint(newCtx, endpoint)
 	}
 	if c != nil && c.Request != nil {
-		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ExtractClientRequestMetadata(c.Request))
+		clientMetadata := logging.ExtractClientRequestMetadata(c.Request)
+		clientMetadata.SessionID, clientMetadata.ParentSessionID = extractSessionIDsFromRequest(c.Request)
+		newCtx = logging.WithClientRequestMetadata(newCtx, clientMetadata)
+		newCtx = util.WithSessionID(newCtx, clientMetadata.SessionID)
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)
@@ -1249,8 +1351,10 @@ func (h *BaseAPIHandler) executeNonStream(
 		SourceFormat:                sdktranslator.FromString(handlerType),
 		ResponseFormat:              sdktranslator.FromString(responseType),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle, skipPluginID),
+		WebSocketResponseObserver:   h.webSocketResponseObserver(lifecycle, skipPluginID),
 
 		Metadata: reqMeta}
+	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	var termination *ErrorMessage
 	req, opts, termination = h.applyRequestInterceptorsBeforeAuth(
 		ctx, handlerType, modelName, req, opts, lifecycle, skipPluginID,
@@ -1260,6 +1364,7 @@ func (h *BaseAPIHandler) executeNonStream(
 		lifecycle.completeError(ctx, termination)
 		return nil, nil, termination
 	}
+	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	resp, err := execFn(ctx, providers, req, opts)
 	if err != nil {
 		reservation.settleError(ctx, err)
@@ -1268,6 +1373,7 @@ func (h *BaseAPIHandler) executeNonStream(
 		return nil, nil, errMsg
 	}
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
+	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.ConfigSnapshot()))
 	body, responseHeaders := h.applyResponseInterceptors(
@@ -1429,8 +1535,10 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		SourceFormat:                sdktranslator.FromString(handlerType),
 		ResponseFormat:              sdktranslator.FromString(responseType),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle, skipPluginID),
+		WebSocketResponseObserver:   h.webSocketResponseObserver(lifecycle, skipPluginID),
 
 		Metadata: reqMeta}
+	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	var termination *ErrorMessage
 	req, opts, termination = h.applyRequestInterceptorsBeforeAuth(
 		ctx, handlerType, modelName, req, opts, lifecycle, skipPluginID,
@@ -1443,6 +1551,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		close(errChan)
 		return nil, nil, errChan
 	}
+	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 	if err != nil {
 		errChan := make(chan *ErrorMessage, 1)
@@ -1456,6 +1565,8 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 	executedRequest := func() (coreexecutor.Request, coreexecutor.Options) {
 		return afterAuthCapture.apply(req, opts)
 	}
+	executedReq, executedOpts := executedRequest()
+	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.ConfigSnapshot())
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
@@ -1729,7 +1840,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 					errMsg := executionErrorMessage(streamErr)
 					errMsg.Acknowledge = reservation.wrapAcknowledgement(ctx, chunk.Acknowledge)
 					completionOutcome = pluginapi.RequestCompletionFailed
-					if errMsg.DirectResponse {
+					if isRequestTerminatedExecutionError(streamErr) {
 						completionOutcome = pluginapi.RequestCompletionRejected
 					}
 					completionStatus = errMsg.StatusCode
@@ -2018,6 +2129,18 @@ func requestInterceptorsEnabled(host PluginInterceptorHost) bool {
 	return true
 }
 
+func webSocketResponseObserversEnabled(host PluginInterceptorHost) bool {
+	if host == nil {
+		return false
+	}
+	if detector, ok := host.(webSocketResponseObserverDetector); ok {
+		return detector.HasWebSocketResponseObservers()
+	}
+	_, callbackHost := host.(webSocketResponseCallbackHost)
+	_, observerHost := host.(webSocketResponseObserverHost)
+	return callbackHost || observerHost
+}
+
 type requestAfterAuthCapture struct {
 	mu   sync.Mutex
 	set  bool
@@ -2189,6 +2312,63 @@ func (h *BaseAPIHandler) requestAfterAuthInterceptor(
 			capture.record(capturedReq, capturedOpts)
 		}
 		return resp
+	}
+}
+
+func (h *BaseAPIHandler) webSocketResponseObserver(
+	lifecycle *requestLifecycleTracker,
+	skipPluginID string,
+) coreexecutor.WebSocketResponseObserver {
+	host := h.interceptorHost()
+	if !webSocketResponseObserversEnabled(host) {
+		return nil
+	}
+	callbackHost, hasCallbackHost := host.(webSocketResponseCallbackHost)
+	observerHost, hasObserverHost := host.(webSocketResponseObserverHost)
+	skipHost, _ := host.(webSocketResponseObserverSkipHost)
+	if !hasCallbackHost && !hasObserverHost {
+		return nil
+	}
+
+	var openCallback sync.Once
+	var callback pluginapi.WebSocketResponseCallback
+	return func(ctx context.Context, event coreexecutor.WebSocketResponseEvent) {
+		if lifecycle != nil {
+			if event.RequestID == "" {
+				event.RequestID = lifecycle.requestID()
+			}
+			if event.TraceID == "" {
+				event.TraceID = lifecycle.traceID()
+			}
+		}
+		pluginEvent := pluginapi.WebSocketResponseEvent{
+			RequestID:      event.RequestID,
+			TraceID:        event.TraceID,
+			SourceFormat:   event.SourceFormat,
+			Model:          event.Model,
+			RequestedModel: event.RequestedModel,
+			Provider:       event.Provider,
+			AuthID:         event.AuthID,
+			AuthLabel:      event.AuthLabel,
+			AuthType:       event.AuthType,
+			EventType:      event.EventType,
+			Payload:        cloneBytes(event.Payload),
+			Metadata:       pluginExecutionMetadata(event.Metadata),
+		}
+		if hasCallbackHost {
+			openCallback.Do(func() {
+				callback, _ = callbackHost.OpenWebSocketResponseCallback(ctx, skipPluginID)
+			})
+			if callback != nil {
+				callback(pluginEvent)
+			}
+			return
+		}
+		if skipPluginID != "" && skipHost != nil {
+			skipHost.ObserveWebSocketResponseEventExcept(ctx, pluginEvent, skipPluginID)
+			return
+		}
+		observerHost.ObserveWebSocketResponseEvent(ctx, pluginEvent)
 	}
 }
 
@@ -2431,7 +2611,7 @@ func allowsBuiltinImageModelBareFallback(model string) bool {
 		return prefix == "codex" || prefix == "openai"
 	}
 	switch canonical {
-	case "grok-imagine-image", "grok-imagine-image-quality":
+	case "grok-imagine-image", "grok-imagine-image-2.0", "grok-imagine-image-quality":
 		return prefix == "xai" || prefix == "x-ai" || prefix == "grok"
 	default:
 		return false
@@ -2446,6 +2626,8 @@ func canonicalImageOnlyModel(model string) string {
 	switch baseModel {
 	case "grok-imagine-image":
 		return "grok-imagine-image"
+	case "grok-imagine-image-2.0":
+		return "grok-imagine-image-2.0"
 	case "grok-imagine-image-quality":
 		return "grok-imagine-image-quality"
 	default:

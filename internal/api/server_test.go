@@ -1130,6 +1130,22 @@ func TestOAuthCallbackRateLimitUsesTrustedXRealIP(t *testing.T) {
 	}
 }
 
+func TestDevinCallbackAliasUsesOAuthCallbackHandler(t *testing.T) {
+	server := newTestServer(t)
+	for _, path := range []string{"/callback", "/devin/callback"} {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, path+"?state=missing&code=callback-code", nil)
+		request.RemoteAddr = "127.0.0.1:12345"
+		server.engine.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("%s status = %d, want %d body=%s", path, recorder.Code, http.StatusConflict, recorder.Body.String())
+		}
+		if cacheControl := recorder.Header().Get("Cache-Control"); cacheControl != "no-store" {
+			t.Fatalf("%s Cache-Control = %q, want no-store", path, cacheControl)
+		}
+	}
+}
+
 func TestRegisteredManagementRouteKeysIncludeFixedPluginRoutes(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-password")
 	server := newTestServer(t)
@@ -1139,6 +1155,13 @@ func TestRegisteredManagementRouteKeysIncludeFixedPluginRoutes(t *testing.T) {
 		"PATCH /v0/management/plugins/:id/enabled",
 		"PUT /v0/management/plugins/:id/config",
 		"PATCH /v0/management/plugins/:id/config",
+		"GET /v0/management/plugins/:id/quota",
+		"POST /v0/management/plugins/:id/quota",
+		"DELETE /v0/management/plugins/:id/quota",
+		"POST /v0/management/plugins/:id/quota/reset",
+		"GET /v0/management/quota/providers",
+		"POST /v0/management/quota/fetch",
+		"POST /v0/management/quota/reset",
 		"GET /v0/management/plugin-store",
 		"POST /v0/management/plugin-store/:id/install",
 		"POST /v0/management/gemini-api-key",

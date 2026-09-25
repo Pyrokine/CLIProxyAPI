@@ -61,6 +61,7 @@ func toWatcherAuthUpdate(update AuthUpdate) watcher.AuthUpdate {
 		Auth:              update.Auth,
 		AllowAuthRecreate: update.AllowAuthRecreate,
 	}
+	converted.SetRevision(update.Revision())
 	switch update.Action {
 	case AuthUpdateActionAdd:
 		converted.Action = watcher.AuthUpdateActionAdd
@@ -78,6 +79,7 @@ func fromWatcherAuthUpdate(update watcher.AuthUpdate) AuthUpdate {
 		Auth:              update.Auth,
 		AllowAuthRecreate: update.AllowAuthRecreate,
 	}
+	converted.SetRevision(update.Revision())
 	switch update.Action {
 	case watcher.AuthUpdateActionAdd:
 		converted.Action = AuthUpdateActionAdd
@@ -139,6 +141,15 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		},
 		dispatchRuntimeUpdate: func(update AuthUpdate) bool {
 			return w.DispatchRuntimeAuthUpdate(toWatcherAuthUpdate(update))
+		},
+		dispatchPersistedAuthWithRev: func(update *AuthUpdate) (bool, uint64) {
+			if update == nil {
+				return false, 0
+			}
+			converted := toWatcherAuthUpdate(*update)
+			queued, revision := w.DispatchPersistedAuthUpdateWithRevision(&converted)
+			update.SetRevision(revision)
+			return queued, revision
 		},
 	}, nil
 }
