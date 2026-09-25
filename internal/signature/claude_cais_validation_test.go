@@ -13,22 +13,24 @@ const observedClaudeCAISFable5Sample = "CAISqwIKiAEIEBgCKkBHRlRBsNiptQUWfPoOhuQK
 const observedClaudeCAISContextID = "d9743975-4bb0-4936-9e28-d5b0d21bdc48"
 
 type claudeCAISTestParts struct {
-	includeEnvelopeVersion bool
-	envelopeVersion        uint64
-	includeTrailer         bool
-	includeContainer       bool
-	includeChannelBlock    bool
-	includeChannelID       bool
-	channelID              uint64
-	channelIDAsBytes       bool
-	includeChannelVersion  bool
-	includeSignature       bool
-	signatureLen           int
-	includeModelText       bool
-	modelText              []byte
-	includeField7          bool
-	blockKind              string
-	contextID              string
+	includeEnvelopeVersion    bool
+	envelopeVersion           uint64
+	includeTrailer            bool
+	includeContainer          bool
+	includeChannelBlock       bool
+	includeContainerSignature bool
+	containerSignatureLen     int
+	includeChannelID          bool
+	channelID                 uint64
+	channelIDAsBytes          bool
+	includeChannelVersion     bool
+	includeSignature          bool
+	signatureLen              int
+	includeModelText          bool
+	modelText                 []byte
+	includeField7             bool
+	blockKind                 string
+	contextID                 string
 }
 
 func defaultClaudeCAISTestParts(model string) claudeCAISTestParts {
@@ -92,6 +94,10 @@ func (p claudeCAISTestParts) encode() string {
 		container = protowire.AppendTag(container, 1, protowire.BytesType)
 		container = protowire.AppendBytes(container, channelBlock)
 	}
+	if p.includeContainerSignature {
+		container = protowire.AppendTag(container, 5, protowire.BytesType)
+		container = protowire.AppendBytes(container, make([]byte, p.containerSignatureLen))
+	}
 
 	var payload []byte
 	if p.includeEnvelopeVersion {
@@ -107,6 +113,18 @@ func (p claudeCAISTestParts) encode() string {
 		payload = protowire.AppendVarint(payload, 1)
 	}
 	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func defaultClaudeCAQSTestParts(blockKind string) claudeCAISTestParts {
+	parts := defaultClaudeCAISTestParts("")
+	parts.envelopeVersion = 4
+	parts.channelID = 17
+	parts.includeSignature = false
+	parts.includeModelText = false
+	parts.includeContainerSignature = true
+	parts.containerSignatureLen = 128
+	parts.blockKind = blockKind
+	return parts
 }
 
 func TestClaudeCAISSignatureObservedSample(t *testing.T) {
@@ -165,6 +183,69 @@ func TestClaudeCAISSignatureObservedSample(t *testing.T) {
 	}
 	if isValidGrokEncryptedContent(observedClaudeCAISFable5Sample) {
 		t.Fatal("Claude CAIS signature must not be accepted as Grok encrypted_content")
+	}
+}
+
+func TestClaudeCAQSV4ContainerSignature(t *testing.T) {
+	for _, blockKind := range []string{"thinking", "narration"} {
+		t.Run(
+			blockKind, func(t *testing.T) {
+				signature := defaultClaudeCAQSTestParts(blockKind).encode()
+				info, err := inspectClaudeCAISSignature(signature)
+				if err != nil {
+					t.Fatalf("inspectClaudeCAISSignature failed: %v", err)
+				}
+				if info.EnvelopeVersion != 4 || info.ChannelID != 17 || info.ModelText != "" ||
+					info.BlockKind != blockKind || info.SignatureLen != 128 {
+					t.Fatalf("unexpected CAQS metadata: %+v", info)
+				}
+				if got := DetectProvider(signature); got != ProviderClaude {
+					t.Fatalf("DetectProvider = %q, want %q", got, ProviderClaude)
+				}
+			},
+		)
+	}
+}
+
+func TestClaudeCAQSV4RejectsMalformedPayloads(t *testing.T) {
+	tests := []struct {
+		name  string
+		parts claudeCAISTestParts
+	}{
+		{
+			name: "missing container signature",
+			parts: func() claudeCAISTestParts {
+				parts := defaultClaudeCAQSTestParts("thinking")
+				parts.includeContainerSignature = false
+				return parts
+			}(),
+		},
+		{
+			name: "empty container signature",
+			parts: func() claudeCAISTestParts {
+				parts := defaultClaudeCAQSTestParts("thinking")
+				parts.containerSignatureLen = 0
+				return parts
+			}(),
+		},
+		{name: "invalid block kind", parts: defaultClaudeCAQSTestParts("redacted_thinking")},
+		{
+			name: "v3 still requires model text",
+			parts: func() claudeCAISTestParts {
+				parts := defaultClaudeCAQSTestParts("thinking")
+				parts.envelopeVersion = 3
+				return parts
+			}(),
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(
+			testCase.name, func(t *testing.T) {
+				if _, err := inspectClaudeCAISSignature(testCase.parts.encode()); err == nil {
+					t.Fatal("malformed CAQS payload was accepted")
+				}
+			},
+		)
 	}
 }
 

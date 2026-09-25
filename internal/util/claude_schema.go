@@ -1,8 +1,9 @@
 package util
 
-import "slices"
-
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 const emptyClaudeToolInputSchema = `{"type":"object","properties":{}}`
 
@@ -53,7 +54,7 @@ func NormalizeClaudeToolInputSchema(schema []byte) []byte {
 	if errMarshalRoot != nil {
 		return []byte(emptyClaudeToolInputSchema)
 	}
-	return normalized
+	return NormalizeClaudeSchemaDialect(normalized)
 }
 
 func claudeSchemaObject(raw json.RawMessage) map[string]json.RawMessage {
@@ -116,4 +117,177 @@ func mergeClaudeSchemaRequired(root map[string]json.RawMessage, branchRequired j
 	if errMarshal == nil {
 		root["required"] = requiredRaw
 	}
+}
+
+// NormalizeClaudeSchemaDialect removes unsupported dialect metadata and Unicode
+// property escapes only from schema positions. User properties with matching
+// names remain intact.
+func NormalizeClaudeSchemaDialect(schema []byte) []byte {
+	root, ok := decodeSchemaJSON(string(schema))
+	if !ok || root == nil || !normalizeClaudeSchemaNode(root) {
+		return schema
+	}
+	normalized, err := marshalJSONNoHTMLEscape(root)
+	if err != nil {
+		return schema
+	}
+	return normalized
+}
+
+func normalizeClaudeSchemaNode(value any) bool {
+	changed := false
+	switch schema := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"$schema", "$id"} {
+			if _, exists := schema[key]; exists {
+				delete(schema, key)
+				changed = true
+			}
+		}
+		if pattern, ok := schema["pattern"].(string); ok && HasUnsupportedUnicodePropertyEscape(pattern) {
+			delete(schema, "pattern")
+			changed = true
+		}
+
+		if patternProperties, ok := schema["patternProperties"].(map[string]any); ok {
+			for pattern, child := range patternProperties {
+				if HasUnsupportedUnicodePropertyEscape(pattern) {
+					delete(patternProperties, pattern)
+					changed = true
+					continue
+				}
+				if normalizeClaudeSchemaNode(child) {
+					changed = true
+				}
+			}
+		}
+		for _, keyword := range SchemaMapKeywords {
+			if keyword == "patternProperties" {
+				continue
+			}
+			children, ok := schema[keyword].(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, child := range children {
+				if normalizeClaudeSchemaNode(child) {
+					changed = true
+				}
+			}
+		}
+		for _, keyword := range SchemaValueKeywords {
+			child, exists := schema[keyword]
+			if !exists {
+				continue
+			}
+			if normalizeClaudeSchemaNode(child) {
+				changed = true
+			}
+		}
+	case []any:
+		for _, child := range schema {
+			if normalizeClaudeSchemaNode(child) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// ClaudeSchemaMissesRequired reports whether any object subschema has a declared
+// property absent from its sibling required array.
+func ClaudeSchemaMissesRequired(schema []byte) bool {
+	root, ok := decodeSchemaJSON(string(schema))
+	return ok && claudeSchemaMissesRequired(root)
+}
+
+func claudeSchemaMissesRequired(value any) bool {
+	switch schema := value.(type) {
+	case map[string]any:
+		if properties, ok := schema["properties"].(map[string]any); ok && len(properties) > 0 {
+			required := make(map[string]struct{})
+			if requiredValues, ok := schema["required"].([]any); ok {
+				for _, value := range requiredValues {
+					if name, ok := value.(string); ok {
+						required[name] = struct{}{}
+					}
+				}
+			}
+			for name := range properties {
+				if _, exists := required[name]; !exists {
+					return true
+				}
+			}
+		}
+		for _, keyword := range SchemaMapKeywords {
+			children, ok := schema[keyword].(map[string]any)
+			if !ok {
+				continue
+			}
+			for _, child := range children {
+				if claudeSchemaMissesRequired(child) {
+					return true
+				}
+			}
+		}
+		for _, keyword := range SchemaValueKeywords {
+			if child, exists := schema[keyword]; exists && claudeSchemaMissesRequired(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range schema {
+			if claudeSchemaMissesRequired(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasUnsupportedUnicodePropertyEscape reports whether a regular expression string
+// contains unescaped Unicode property escape sequences (\p{...} or \P{...}).
+func HasUnsupportedUnicodePropertyEscape(pattern string) bool {
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] != '\\' {
+			continue
+		}
+		if i+2 < len(pattern) &&
+			(pattern[i+1] == 'p' || pattern[i+1] == 'P') &&
+			pattern[i+2] == '{' {
+			return true
+		}
+		i++
+	}
+	return false
+}
+
+// SchemaMapKeywords lists JSON Schema keywords whose values are maps of subschemas.
+var SchemaMapKeywords = [...]string{
+	"properties",
+	"$defs",
+	"definitions",
+	"patternProperties",
+	"dependentSchemas",
+	"dependencies",
+}
+
+// SchemaValueKeywords lists JSON Schema keywords with a single nested subschema or a slice of subschemas.
+var SchemaValueKeywords = [...]string{
+	"items",
+	"prefixItems",
+	"contains",
+	"additionalProperties",
+	"propertyNames",
+	"unevaluatedProperties",
+	"unevaluatedItems",
+	"additionalItems",
+	"contentSchema",
+	"anyOf",
+	"oneOf",
+	"allOf",
+	"not",
+	"if",
+	"then",
+	"else",
 }

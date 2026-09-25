@@ -82,6 +82,66 @@ func TestDecideCompatibilityCrossProviderActions(t *testing.T) {
 	}
 }
 
+func TestCompatibleSignatureForProviderWithOptionsPreservesOnlyUnknownNonEmpty(t *testing.T) {
+	options := SignatureCompatibilityOptions{PreserveUnknownNonEmpty: true}
+	unknown := `opaque:"token"\\with-unicode-一`
+
+	if signature, ok := CompatibleSignatureForProvider(
+		ProviderGPT,
+		unknown,
+		BlockKindGPTReasoning,
+	); ok || signature != "" {
+		t.Fatalf("strict compatibility accepted unknown signature: %q, %v", signature, ok)
+	}
+	if signature, ok := CompatibleSignatureForProviderWithOptions(
+		ProviderGPT,
+		unknown,
+		BlockKindGPTReasoning,
+		options,
+	); !ok || signature != unknown {
+		t.Fatalf("compatibility signature = %q, %v, want exact unknown value", signature, ok)
+	}
+	for _, signature := range []string{"", " \t\n"} {
+		if normalized, ok := CompatibleSignatureForProviderWithOptions(
+			ProviderGPT,
+			signature,
+			BlockKindGPTReasoning,
+			options,
+		); ok || normalized != "" {
+			t.Fatalf("compatibility accepted empty signature %q: %q, %v", signature, normalized, ok)
+		}
+	}
+
+	claudeSignature := validClaudeThinkingSignatureForTest()
+	if signature, ok := CompatibleSignatureForProviderWithOptions(
+		ProviderGPT,
+		claudeSignature,
+		BlockKindGPTReasoning,
+		options,
+	); ok || signature != "" {
+		t.Fatalf("compatibility accepted known foreign signature: %q, %v", signature, ok)
+	}
+	for _, signature := range []string{"claude#opaque", "gpt#opaque"} {
+		if normalized, ok := CompatibleSignatureForProviderWithOptions(
+			ProviderGPT,
+			signature,
+			BlockKindGPTReasoning,
+			options,
+		); ok || normalized != "" {
+			t.Fatalf("compatibility accepted invalid known-prefix signature %q: %q, %v", signature, normalized, ok)
+		}
+	}
+	gptSignature := validGPTReasoningSignatureForTest()
+	if signature, ok := CompatibleSignatureForProviderWithOptions(
+		ProviderGPT,
+		"gpt#"+gptSignature,
+		BlockKindGPTReasoning,
+		options,
+	); !ok || signature != gptSignature {
+		t.Fatalf("native signature = %q, %v, want normalized GPT value", signature, ok)
+	}
+}
+
 func TestSanitizeClaudeMessagesForClaudeUpstreamDropsIncompatibleBlocksAndToolSignatures(t *testing.T) {
 	payload := []byte(`{
 		"messages":[{
@@ -218,6 +278,81 @@ func TestGeminiField1EnvelopeIsRecognized(t *testing.T) {
 	}
 }
 
+func TestGeminiField2ServerToolEnvelopeIsRecognized(t *testing.T) {
+	inner := protowire.AppendTag(nil, 1, protowire.VarintType)
+	inner = protowire.AppendVarint(inner, 2)
+	inner = protowire.AppendTag(inner, 2, protowire.BytesType)
+	inner = protowire.AppendBytes(inner, []byte{0x01, 0x12, 0x34, 0x56})
+	signature := geminiField2ThoughtSignatureForTest(inner)
+
+	if !isRecognizedGeminiSignature(signature) {
+		t.Fatal("nested server-tool Tink envelope should be recognized")
+	}
+	if provider := DetectProvider(signature); provider != ProviderGemini {
+		t.Fatalf("DetectProvider = %q, want %q", provider, ProviderGemini)
+	}
+	payload := []byte(`{"contents":[{"role":"model","parts":[{"toolCall":{"id":"search-1"},"thoughtSignature":"` + signature + `"}]}]}`)
+	if err := validateGeminiThoughtSignatures(payload, false); err != nil {
+		t.Fatalf("valid server-tool envelope was rejected: %v", err)
+	}
+}
+
+func TestGeminiField2ServerToolEnvelopeRejectsMalformedPayloads(t *testing.T) {
+	cases := map[string][]byte{
+		"truncated bytes": {0x08, 0x02, 0x12, 0x10, 0x01},
+		"bytes without Tink marker": protowire.AppendBytes(
+			protowire.AppendTag(nil, 2, protowire.BytesType),
+			[]byte{0x99, 0x98, 0x97},
+		),
+		"varint only": protowire.AppendVarint(
+			protowire.AppendTag(nil, 2, protowire.VarintType),
+			5,
+		),
+	}
+	for name, inner := range cases {
+		t.Run(
+			name, func(t *testing.T) {
+				signature := geminiField2ThoughtSignatureForTest(inner)
+				if isRecognizedGeminiSignature(signature) {
+					t.Fatalf("malformed server-tool envelope was recognized: %s", signature)
+				}
+				payload := []byte(`{"contents":[{"role":"model","parts":[{"toolResponse":{"id":"search-1"},"thoughtSignature":"` + signature + `"}]}]}`)
+				if err := validateGeminiThoughtSignatures(payload, false); err == nil {
+					t.Fatal("malformed server-tool envelope passed strict validation")
+				}
+			},
+		)
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesPreservesServerToolParts(t *testing.T) {
+	const opaqueToolSignature = "opaque-server-tool-signature"
+	input := []byte(`{"contents":[{"role":"model","parts":[` +
+		`{"toolCall":{"id":"search-1"},"thoughtSignature":"` + opaqueToolSignature + `"},` +
+		`{"tool_response":{"id":"search-1"},"thought_signature":"` + opaqueToolSignature + `"},` +
+		`{"functionCall":{"name":"lookup","args":{}}}` +
+		`]}]}`)
+
+	output := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+	if got := gjson.GetBytes(output, "contents.0.parts.0.thoughtSignature").String(); got != opaqueToolSignature {
+		t.Fatalf("toolCall signature = %q, want %q", got, opaqueToolSignature)
+	}
+	if got := gjson.GetBytes(output, "contents.0.parts.1.thought_signature").String(); got != opaqueToolSignature {
+		t.Fatalf("tool_response signature = %q, want %q", got, opaqueToolSignature)
+	}
+	if got := gjson.GetBytes(output, "contents.0.parts.2.thoughtSignature").String(); got != GeminiSkipThoughtSignatureValidator {
+		t.Fatalf("functionCall signature = %q, want bypass; output=%s", got, output)
+	}
+}
+
+func TestSanitizeGeminiRequestThoughtSignaturesReusesServerToolPayload(t *testing.T) {
+	input := []byte(`{"contents":[{"role":"model","parts":[{"toolCall":{"id":"search-1"},"thoughtSignature":"opaque"}]}]}`)
+	output := SanitizeGeminiRequestThoughtSignatures(input, "contents")
+	if &output[0] != &input[0] {
+		t.Fatal("unchanged server-tool payload was copied")
+	}
+}
+
 func TestValidateGeminiThoughtSignaturesAllowsUnsignedParallelSibling(t *testing.T) {
 	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"read_file","args":{}},"thoughtSignature":"skip_thought_signature_validator"},{"functionCall":{"id":"call-2","name":"read_file","args":{}}}]}]}`)
 	if err := validateGeminiThoughtSignatures(input, true); err != nil {
@@ -229,6 +364,17 @@ func TestValidateGeminiFunctionCallPairingValidParallelGroup(t *testing.T) {
 	input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"id":"call-1","name":"weather","args":{}}},{"functionCall":{"id":"call-2","name":"weather","args":{}}}]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"weather","response":{}}},{"functionResponse":{"id":"call-2","name":"weather","response":{}}}]}]}`)
 	if err := ValidateGeminiFunctionCallPairing(input); err != nil {
 		t.Fatalf("valid pairing failed: %v", err)
+	}
+}
+
+func TestValidateGeminiFunctionCallPairingAllowsServerToolBlocks(t *testing.T) {
+	input := []byte(`{"contents":[{"role":"model","parts":[` +
+		`{"toolCall":{"id":"search-1"}},` +
+		`{"toolResponse":{"id":"search-1","response":{}}},` +
+		`{"functionCall":{"id":"call-1","name":"weather","args":{}}}` +
+		`]},{"role":"user","parts":[{"functionResponse":{"id":"call-1","name":"weather","response":{}}}]}]}`)
+	if err := ValidateGeminiFunctionCallPairing(input); err != nil {
+		t.Fatalf("server-tool blocks should not affect function pairing: %v", err)
 	}
 }
 

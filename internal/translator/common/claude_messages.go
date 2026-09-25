@@ -1,6 +1,8 @@
 package common
 
 import (
+	"sort"
+
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -74,6 +76,60 @@ func (a *ClaudeMessageAccumulator) Flush() {
 func (a *ClaudeMessageAccumulator) Messages() [][]byte {
 	a.Flush()
 	return a.messages
+}
+
+// AlignClaudeToolResults orders matched tool_result blocks by the preceding
+// tool_use IDs. Partial matches are allowed, and only matched result slots are
+// replaced, so text, image, and unmatched result blocks keep their positions.
+func AlignClaudeToolResults(content gjson.Result, toolUseIDs []string) gjson.Result {
+	if !content.IsArray() || len(toolUseIDs) == 0 {
+		return content
+	}
+
+	orderByID := make(map[string]int, len(toolUseIDs))
+	for index, toolUseID := range toolUseIDs {
+		if toolUseID == "" {
+			continue
+		}
+		if _, exists := orderByID[toolUseID]; !exists {
+			orderByID[toolUseID] = index
+		}
+	}
+
+	type matchedResult struct {
+		part  gjson.Result
+		order int
+	}
+	parts := content.Array()
+	matchedSlots := make([]int, 0, len(parts))
+	matchedResults := make([]matchedResult, 0, len(parts))
+	for index, part := range parts {
+		if part.Get("type").String() != "tool_result" {
+			continue
+		}
+		order, exists := orderByID[part.Get("tool_use_id").String()]
+		if !exists {
+			continue
+		}
+		matchedSlots = append(matchedSlots, index)
+		matchedResults = append(matchedResults, matchedResult{part: part, order: order})
+	}
+	if len(matchedResults) < 2 {
+		return content
+	}
+
+	sort.SliceStable(matchedResults, func(left, right int) bool {
+		return matchedResults[left].order < matchedResults[right].order
+	})
+
+	ordered := make([][]byte, len(parts))
+	for index, part := range parts {
+		ordered[index] = []byte(part.Raw)
+	}
+	for index, slot := range matchedSlots {
+		ordered[slot] = []byte(matchedResults[index].part.Raw)
+	}
+	return gjson.ParseBytes(JoinRawArray(ordered))
 }
 
 func claudeMessageContentParts(content gjson.Result) [][]byte {

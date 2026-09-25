@@ -2,7 +2,10 @@
 package util
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"slices"
 	"sort"
 	"strconv"
@@ -23,10 +26,12 @@ const placeholderReasonDescription = "Brief explanation of why you are calling t
 // rewrites tool-call arguments in conversation history, so every call site must select the schema.
 
 type jsonSchemaCleanOptions struct {
-	addPlaceholder       bool
-	removeGeminiMetadata bool
-	flattenUnions        bool
-	forceEnumStringType  bool
+	addPlaceholder                    bool
+	addMissingArrayItems              bool
+	removeGeminiMetadata              bool
+	flattenUnions                     bool
+	forceEnumStringType               bool
+	preserveAdditionalPropertiesFalse bool
 }
 
 // CleanJSONSchemaForAntigravity transforms a tool schema to be compatible with Antigravity API.
@@ -35,9 +40,10 @@ type jsonSchemaCleanOptions struct {
 func CleanJSONSchemaForAntigravity(jsonStr string) string {
 	return cleanJSONSchema(
 		jsonStr, jsonSchemaCleanOptions{
-			addPlaceholder:      true,
-			flattenUnions:       true,
-			forceEnumStringType: true,
+			addPlaceholder:       true,
+			addMissingArrayItems: true,
+			flattenUnions:        true,
+			forceEnumStringType:  true,
 		},
 	)
 }
@@ -45,7 +51,10 @@ func CleanJSONSchemaForAntigravity(jsonStr string) string {
 // CleanJSONSchemaForAntigravityResponse transforms a response schema without applying tool-only
 // compatibility rewrites that would alter the client's structured output contract.
 func CleanJSONSchemaForAntigravityResponse(jsonStr string) string {
-	return cleanJSONSchema(jsonStr, jsonSchemaCleanOptions{})
+	return cleanJSONSchema(
+		jsonStr,
+		jsonSchemaCleanOptions{preserveAdditionalPropertiesFalse: true},
+	)
 }
 
 // CleanJSONSchemaForGemini transforms a JSON schema to be compatible with Gemini tool calling.
@@ -53,6 +62,7 @@ func CleanJSONSchemaForAntigravityResponse(jsonStr string) string {
 func CleanJSONSchemaForGemini(jsonStr string) string {
 	return cleanJSONSchema(
 		jsonStr, jsonSchemaCleanOptions{
+			addMissingArrayItems: true,
 			removeGeminiMetadata: true,
 			flattenUnions:        true,
 			forceEnumStringType:  true,
@@ -62,23 +72,30 @@ func CleanJSONSchemaForGemini(jsonStr string) string {
 
 // cleanJSONSchema performs the core cleaning operations on the JSON schema.
 func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
+	// Phase 0: Repair malformed schema nodes before keyword-based transforms.
+	jsonStr = normalizeMalformedSchemaObjects(jsonStr, options.addMissingArrayItems)
+
 	// Phase 1: Convert and add hints
 	jsonStr = convertRefsToHints(jsonStr)
 	jsonStr = convertConstToEnum(jsonStr)
 	jsonStr = convertEnumValuesToStrings(jsonStr, options.forceEnumStringType)
 	jsonStr = addEnumHints(jsonStr)
-	jsonStr = addAdditionalPropertiesHints(jsonStr)
+	if !options.preserveAdditionalPropertiesFalse {
+		jsonStr = addAdditionalPropertiesHints(jsonStr)
+	}
 	jsonStr = moveConstraintsToDescription(jsonStr)
 
 	// Phase 2: Flatten complex structures
+	jsonStr = mergeConditionals(jsonStr)
 	jsonStr = mergeAllOf(jsonStr)
+	jsonStr = mergeObjectUnions(jsonStr)
 	if options.flattenUnions {
 		jsonStr = flattenAnyOfOneOf(jsonStr)
 	}
 	jsonStr = flattenTypeArrays(jsonStr)
 
 	// Phase 3: Cleanup
-	jsonStr = removeUnsupportedKeywords(jsonStr)
+	jsonStr = removeUnsupportedKeywords(jsonStr, options)
 	if options.removeGeminiMetadata {
 		// Gemini schema cleanup: remove nullable/title and placeholder-only fields.
 		jsonStr = removeKeywords(jsonStr, []string{"nullable", "title"})
@@ -179,6 +196,370 @@ func removePlaceholderFields(jsonStr string) string {
 	return jsonStr
 }
 
+// normalizeMalformedSchemaObjects repairs malformed schema shapes emitted by
+// tool providers while leaving complete API request documents untouched.
+func normalizeMalformedSchemaObjects(jsonStr string, addMissingArrayItems bool) string {
+	trimmed := strings.TrimSpace(jsonStr)
+	if trimmed == "" || trimmed == "null" {
+		return emptyClaudeToolInputSchema
+	}
+
+	root, ok := decodeSchemaJSON(trimmed)
+	if !ok {
+		return jsonStr
+	}
+	rootMap, rootWasStringified := schemaMapFromValue(root)
+	if rootMap == nil || isAPIRequestDocument(rootMap) {
+		return jsonStr
+	}
+
+	if len(rootMap) == 1 {
+		if inner, innerWasStringified := schemaMapFromValue(rootMap["schema"]); inner != nil {
+			repairedInner, modified := repairSchemaNode(inner, addMissingArrayItems)
+			if !modified && !innerWasStringified && !rootWasStringified {
+				return jsonStr
+			}
+			out, err := marshalJSONNoHTMLEscape(map[string]any{"schema": repairedInner})
+			if err != nil {
+				return jsonStr
+			}
+			return string(out)
+		}
+	}
+
+	repaired, modified := repairSchemaNode(rootMap, addMissingArrayItems)
+	if !modified && !rootWasStringified {
+		return jsonStr
+	}
+	out, err := marshalJSONNoHTMLEscape(repaired)
+	if err != nil {
+		return jsonStr
+	}
+	return string(out)
+}
+
+func decodeSchemaJSON(raw string) (any, bool) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, false
+	}
+	return value, true
+}
+
+func schemaMapFromValue(value any) (map[string]any, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		return typed, false
+	case string:
+		decoded, ok := decodeSchemaJSON(strings.TrimSpace(typed))
+		if !ok {
+			return nil, false
+		}
+		if schema, ok := decoded.(map[string]any); ok {
+			return schema, true
+		}
+	}
+	return nil, false
+}
+
+func marshalJSONNoHTMLEscape(value any) ([]byte, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'}), nil
+}
+
+func isKnownSchemaKeywordOrExtension(key string) bool {
+	if strings.HasPrefix(key, "x-") {
+		return true
+	}
+	switch key {
+	case "properties", "patternProperties", "additionalProperties", "items", "prefixItems",
+		"$defs", "definitions", "dependentSchemas", "dependentRequired", "dependencies",
+		"if", "then", "else", "not", "contains", "propertyNames",
+		"unevaluatedProperties", "unevaluatedItems", "contentSchema", "additionalItems",
+		"default", "const", "example", "examples", "discriminator", "xml", "externalDocs",
+		"enumDescriptions", "enumTitles":
+		return true
+	default:
+		return false
+	}
+}
+
+func isNonObjectDeclaredType(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return typed != "" && typed != "object"
+	case []any:
+		for _, item := range typed {
+			if itemType, ok := item.(string); ok && itemType == "object" {
+				return false
+			}
+		}
+		return len(typed) > 0
+	default:
+		return false
+	}
+}
+
+func isArrayDeclaredType(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return typed == "array"
+	case []any:
+		for _, item := range typed {
+			if itemType, ok := item.(string); ok && itemType == "array" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isAPIRequestDocument(value map[string]any) bool {
+	for _, key := range []string{"tools", "contents", "messages", "functionDeclarations", "function_declarations"} {
+		if _, ok := value[key].([]any); ok {
+			return true
+		}
+	}
+	if request, ok := value["request"].(map[string]any); ok {
+		return isAPIRequestDocument(request)
+	}
+	return false
+}
+
+func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[string]any, bool) {
+	if node == nil {
+		return nil, false
+	}
+
+	clone := make(map[string]any, len(node))
+	for key, value := range node {
+		clone[key] = value
+	}
+	modified := false
+
+	if !isNonObjectDeclaredType(clone["type"]) {
+		bareProperties := make(map[string]any)
+		for key, value := range clone {
+			if isKnownSchemaKeywordOrExtension(key) {
+				continue
+			}
+			if child, ok := value.(map[string]any); ok {
+				bareProperties[key] = child
+			}
+		}
+		if len(bareProperties) > 0 {
+			repairedProperties, promotedRequired, _ := repairPropertyMap(bareProperties, addMissingArrayItems)
+			for key := range bareProperties {
+				delete(clone, key)
+			}
+			if existing, ok := clone["properties"].(map[string]any); ok {
+				merged := make(map[string]any, len(existing)+len(repairedProperties))
+				for key, value := range existing {
+					merged[key] = value
+				}
+				for key, value := range repairedProperties {
+					merged[key] = value
+				}
+				clone["properties"] = merged
+			} else {
+				clone["properties"] = repairedProperties
+				if _, hasType := clone["type"]; !hasType {
+					clone["type"] = "object"
+				}
+			}
+			if len(promotedRequired) > 0 {
+				clone["required"] = mergeStringSlices(extractStringArray(clone["required"]), promotedRequired)
+			}
+			modified = true
+		}
+	}
+
+	if properties, ok := clone["properties"].(map[string]any); ok {
+		repairedProperties, promotedRequired, propertiesModified := repairPropertyMap(
+			properties,
+			addMissingArrayItems,
+		)
+		if propertiesModified {
+			clone["properties"] = repairedProperties
+			modified = true
+		}
+		if len(promotedRequired) > 0 {
+			clone["required"] = mergeStringSlices(extractStringArray(clone["required"]), promotedRequired)
+			modified = true
+		}
+	}
+
+	if addMissingArrayItems && isArrayDeclaredType(clone["type"]) {
+		if _, hasItems := clone["items"]; !hasItems {
+			clone["items"] = map[string]any{"type": "string"}
+			modified = true
+		}
+	}
+
+	if items, stringified := schemaMapFromValue(clone["items"]); items != nil {
+		repairedItems, itemsModified := repairSchemaNode(items, addMissingArrayItems)
+		if itemsModified || stringified {
+			clone["items"] = repairedItems
+			modified = true
+		}
+	} else if itemsList, ok := clone["items"].([]any); ok {
+		repairedList, listModified := repairSchemaList(itemsList, addMissingArrayItems)
+		if listModified {
+			clone["items"] = repairedList
+			modified = true
+		}
+	}
+
+	if additionalProperties, stringified := schemaMapFromValue(clone["additionalProperties"]); additionalProperties != nil {
+		repaired, childModified := repairSchemaNode(additionalProperties, addMissingArrayItems)
+		if childModified || stringified {
+			clone["additionalProperties"] = repaired
+			modified = true
+		}
+	}
+	if patternProperties, ok := clone["patternProperties"].(map[string]any); ok {
+		repaired, _, childModified := repairPropertyMap(patternProperties, addMissingArrayItems)
+		if childModified {
+			clone["patternProperties"] = repaired
+			modified = true
+		}
+	}
+
+	for _, key := range []string{
+		"if", "then", "else", "not", "contains", "propertyNames", "unevaluatedProperties",
+		"unevaluatedItems", "contentSchema", "additionalItems",
+	} {
+		if child, stringified := schemaMapFromValue(clone[key]); child != nil {
+			repaired, childModified := repairSchemaNode(child, addMissingArrayItems)
+			if childModified || stringified {
+				clone[key] = repaired
+				modified = true
+			}
+		}
+	}
+	for _, key := range []string{"anyOf", "oneOf", "allOf", "prefixItems"} {
+		if list, ok := clone[key].([]any); ok {
+			repaired, listModified := repairSchemaList(list, addMissingArrayItems)
+			if listModified {
+				clone[key] = repaired
+				modified = true
+			}
+		}
+	}
+	for _, key := range []string{"$defs", "definitions", "dependentSchemas"} {
+		definitions, ok := clone[key].(map[string]any)
+		if !ok {
+			continue
+		}
+		repairedDefinitions := make(map[string]any, len(definitions))
+		definitionsModified := false
+		for name, value := range definitions {
+			if child, stringified := schemaMapFromValue(value); child != nil {
+				repaired, childModified := repairSchemaNode(child, addMissingArrayItems)
+				repairedDefinitions[name] = repaired
+				definitionsModified = definitionsModified || childModified || stringified
+				continue
+			}
+			repairedDefinitions[name] = value
+		}
+		if definitionsModified {
+			clone[key] = repairedDefinitions
+			modified = true
+		}
+	}
+	return clone, modified
+}
+
+func repairSchemaList(list []any, addMissingArrayItems bool) ([]any, bool) {
+	repaired := make([]any, 0, len(list))
+	modified := false
+	for _, value := range list {
+		if child, stringified := schemaMapFromValue(value); child != nil {
+			repairedChild, childModified := repairSchemaNode(child, addMissingArrayItems)
+			repaired = append(repaired, repairedChild)
+			modified = modified || childModified || stringified
+			continue
+		}
+		repaired = append(repaired, value)
+	}
+	return repaired, modified
+}
+
+func repairPropertyMap(properties map[string]any, addMissingArrayItems bool) (map[string]any, []string, bool) {
+	repaired := make(map[string]any, len(properties))
+	promotedRequired := make([]string, 0)
+	modified := false
+	for name, value := range properties {
+		child, stringified := schemaMapFromValue(value)
+		if child == nil {
+			repaired[name] = value
+			continue
+		}
+		childClone := make(map[string]any, len(child))
+		for key, childValue := range child {
+			childClone[key] = childValue
+		}
+		if required, ok := childClone["required"].(bool); ok {
+			delete(childClone, "required")
+			modified = true
+			if required {
+				promotedRequired = append(promotedRequired, name)
+			}
+		}
+		repairedChild, childModified := repairSchemaNode(childClone, addMissingArrayItems)
+		repaired[name] = repairedChild
+		modified = modified || childModified || stringified
+	}
+	sort.Strings(promotedRequired)
+	return repaired, promotedRequired, modified
+}
+
+func extractStringArray(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		if stringsValue, ok := value.([]string); ok {
+			return stringsValue
+		}
+		return nil
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if stringValue, ok := item.(string); ok {
+			result = append(result, stringValue)
+		}
+	}
+	return result
+}
+
+func mergeStringSlices(existing, additional []string) []string {
+	seen := make(map[string]struct{}, len(existing)+len(additional))
+	merged := make([]string, 0, len(existing)+len(additional))
+	for _, values := range [][]string{existing, additional} {
+		for _, value := range values {
+			if value == "" {
+				continue
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			merged = append(merged, value)
+		}
+	}
+	return merged
+}
+
 // convertRefsToHints converts $ref to description hints (Lazy Hint strategy).
 func convertRefsToHints(jsonStr string) string {
 	paths := findPaths(jsonStr, "$ref")
@@ -277,7 +658,7 @@ func addAdditionalPropertiesHints(jsonStr string) string {
 
 var unsupportedConstraints = []string{
 	"minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum",
-	"pattern", "minItems", "maxItems", "uniqueItems", "format",
+	"pattern", "minItems", "maxItems", "uniqueItems", "contains", "format",
 	"default", "examples", // Claude rejects these in VALIDATED mode
 }
 
@@ -286,14 +667,137 @@ func moveConstraintsToDescription(jsonStr string) string {
 	for _, key := range unsupportedConstraints {
 		for _, p := range pathsByField[key] {
 			val := gjson.Get(jsonStr, p)
-			if !val.Exists() || val.IsObject() || val.IsArray() {
+			if !val.Exists() {
 				continue
 			}
 			parentPath := trimSuffix(p, "."+key)
 			if isPropertyDefinition(parentPath) {
 				continue
 			}
-			jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, val.String()))
+			value := val.String()
+			if val.IsObject() || val.IsArray() {
+				value = val.Raw
+			}
+			jsonStr = appendHint(jsonStr, parentPath, fmt.Sprintf("%s: %s", key, value))
+		}
+	}
+	return jsonStr
+}
+
+func mergeConditionals(jsonStr string) string {
+	pathsByField := findPathsByFields(jsonStr, []string{"then", "else"})
+	paths := make([]string, 0, len(pathsByField["then"])+len(pathsByField["else"]))
+	for _, key := range []string{"then", "else"} {
+		for _, path := range pathsByField[key] {
+			if !isPropertyDefinition(trimSuffix(path, "."+key)) {
+				paths = append(paths, path)
+			}
+		}
+	}
+	sortByDepth(paths)
+
+	for _, path := range paths {
+		properties := gjson.Get(jsonStr, joinPath(path, "properties"))
+		if !properties.IsObject() {
+			continue
+		}
+		var parentPath string
+		switch {
+		case path == "then" || path == "else":
+			parentPath = ""
+		case strings.HasSuffix(path, ".then"):
+			parentPath = trimSuffix(path, ".then")
+		case strings.HasSuffix(path, ".else"):
+			parentPath = trimSuffix(path, ".else")
+		default:
+			continue
+		}
+		properties.ForEach(
+			func(key, value gjson.Result) bool {
+				destination := joinPath(parentPath, "properties."+escapeGJSONPathKey(key.String()))
+				if !gjson.Get(jsonStr, destination).Exists() {
+					updated, _ := sjson.SetRawBytes([]byte(jsonStr), destination, []byte(value.Raw))
+					jsonStr = string(updated)
+				}
+				return true
+			},
+		)
+	}
+	return jsonStr
+}
+
+// mergeObjectUnions retains an existing object schema and projects only missing
+// branch properties into it. Alternative required lists are intentionally not
+// promoted because no branch is unconditionally required.
+func mergeObjectUnions(jsonStr string) string {
+	for _, key := range []string{"anyOf", "oneOf"} {
+		paths := findPaths(jsonStr, key)
+		sortByDepth(paths)
+		for _, path := range paths {
+			parentPath := trimSuffix(path, "."+key)
+			if isPropertyDefinition(parentPath) {
+				continue
+			}
+			parent := gjson.Get(jsonStr, parentPath)
+			if parentPath == "" {
+				parent = gjson.Parse(jsonStr)
+			}
+			if !parent.Get("properties").IsObject() {
+				continue
+			}
+			union := gjson.Get(jsonStr, path)
+			if !union.IsArray() {
+				continue
+			}
+			branches := union.Array()
+			hasObjectConstraint := false
+			eligible := true
+			for _, branch := range branches {
+				branchType := branch.Get("type").String()
+				if branchType != "" && branchType != "object" && branchType != "null" {
+					eligible = false
+					break
+				}
+				if branch.Get("properties").IsObject() || branch.Get("required").IsArray() {
+					hasObjectConstraint = true
+				}
+			}
+			if !eligible || !hasObjectConstraint {
+				continue
+			}
+
+			hasNull := false
+			for _, branch := range branches {
+				if branch.Get("type").String() == "null" {
+					hasNull = true
+				}
+				properties := branch.Get("properties")
+				if !properties.IsObject() {
+					continue
+				}
+				properties.ForEach(
+					func(propertyName, propertySchema gjson.Result) bool {
+						destination := joinPath(
+							parentPath,
+							"properties."+escapeGJSONPathKey(propertyName.String()),
+						)
+						if !gjson.Get(jsonStr, destination).Exists() {
+							updated, _ := sjson.SetRawBytes(
+								[]byte(jsonStr),
+								destination,
+								[]byte(propertySchema.Raw),
+							)
+							jsonStr = string(updated)
+						}
+						return true
+					},
+				)
+			}
+			if hasNull {
+				updated, _ := sjson.SetBytes([]byte(jsonStr), joinPath(parentPath, "nullable"), true)
+				jsonStr = string(updated)
+			}
+			jsonStr, _ = sjson.Delete(jsonStr, path)
 		}
 	}
 	return jsonStr
@@ -473,12 +977,13 @@ func flattenTypeArrays(jsonStr string) string {
 	return jsonStr
 }
 
-func removeUnsupportedKeywords(jsonStr string) string {
+func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) string {
 	keywords := append(
 		unsupportedConstraints,
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
-		"$comment", "enumDescriptions", "enumTitles", "prefill",
+		"if", "then", "else",
+		"$comment", "enumDescriptions", "enumTitles", "prefill", "encrypted",
 		"deprecated", // Schema metadata fields unsupported by Gemini
 	)
 
@@ -487,6 +992,10 @@ func removeUnsupportedKeywords(jsonStr string) string {
 	for _, key := range keywords {
 		for _, p := range pathsByField[key] {
 			if isPropertyDefinition(trimSuffix(p, "."+key)) {
+				continue
+			}
+			if options.preserveAdditionalPropertiesFalse && key == "additionalProperties" &&
+				gjson.Get(jsonStr, p).Type == gjson.False {
 				continue
 			}
 			deletePaths = append(deletePaths, p)
@@ -553,7 +1062,11 @@ func cleanupRequiredFields(jsonStr string) string {
 
 		req := gjson.Get(jsonStr, p)
 		props := gjson.Get(jsonStr, propsPath)
-		if !req.IsArray() || !props.IsObject() {
+		if !req.IsArray() {
+			continue
+		}
+		if !props.IsObject() {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
 			continue
 		}
 

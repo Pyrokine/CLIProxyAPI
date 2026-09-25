@@ -108,3 +108,47 @@ func TestClaudeMessageAccumulatorPreservesBlockCacheControl(t *testing.T) {
 		t.Fatalf("second block should not have cache_control: %s", string(messages[0]))
 	}
 }
+
+func TestAlignClaudeToolResultsSupportsPartialNonContiguousResults(t *testing.T) {
+	content := gjson.Parse(`[
+		{"type":"tool_result","tool_use_id":"call-c","content":"three"},
+		{"type":"text","text":"keep text here"},
+		{"type":"tool_result","tool_use_id":"external","content":"external"},
+		{"type":"image","source":{"type":"base64","data":"image"}},
+		{"type":"tool_result","tool_use_id":"call-a","content":"one"}
+	]`)
+
+	aligned := AlignClaudeToolResults(content, []string{"call-a", "call-b", "call-c"})
+	parts := aligned.Array()
+	if got := parts[0].Get("tool_use_id").String(); got != "call-a" {
+		t.Fatalf("first matched result = %q, want call-a", got)
+	}
+	if got := parts[1].Get("text").String(); got != "keep text here" {
+		t.Fatalf("text slot moved or changed: %q", got)
+	}
+	if got := parts[2].Get("tool_use_id").String(); got != "external" {
+		t.Fatalf("unmatched result slot moved or changed: %q", got)
+	}
+	if got := parts[3].Get("source.data").String(); got != "image" {
+		t.Fatalf("image slot moved or changed: %q", got)
+	}
+	if got := parts[4].Get("tool_use_id").String(); got != "call-c" {
+		t.Fatalf("second matched result = %q, want call-c", got)
+	}
+}
+
+func TestAlignClaudeToolResultsMatchesRawIDsExactly(t *testing.T) {
+	content := gjson.Parse(`[
+		{"type":"tool_result","tool_use_id":"call_a","content":"underscore"},
+		{"type":"tool_result","tool_use_id":"call.a","content":"dot"}
+	]`)
+
+	aligned := AlignClaudeToolResults(content, []string{"call.a", "call_a"})
+	parts := aligned.Array()
+	if got := parts[0].Get("content").String(); got != "dot" {
+		t.Fatalf("raw ID call.a result = %q, want dot", got)
+	}
+	if got := parts[1].Get("content").String(); got != "underscore" {
+		t.Fatalf("raw ID call_a result = %q, want underscore", got)
+	}
+}

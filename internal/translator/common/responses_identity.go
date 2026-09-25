@@ -1,26 +1,36 @@
 package common
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-// responsesToolKind identifies the Responses tool family represented by a
+// ResponsesToolKind identifies the Responses tool family represented by a
 // provider-neutral declaration.
-type responsesToolKind string
+type ResponsesToolKind string
 
 const (
-	responsesFunctionTool responsesToolKind = "function"
-	ResponsesCustomTool   responsesToolKind = "custom"
+	ResponsesFunctionTool ResponsesToolKind = "function"
+	ResponsesCustomTool   ResponsesToolKind = "custom"
+)
+
+var (
+	// ErrResponsesToolNameAmbiguous reports a local alias shared by multiple
+	// namespace declarations.
+	ErrResponsesToolNameAmbiguous = errors.New("responses tool name is ambiguous")
+	// ErrResponsesToolNameUnknown reports a name with no winning declaration.
+	ErrResponsesToolNameUnknown = errors.New("responses tool name is unknown")
 )
 
 // ResponsesToolDeclaration is a tool declaration after namespace expansion.
 // QualifiedName is the provider-facing name, while Name and Namespace retain
 // the reversible Responses identity.
 type ResponsesToolDeclaration struct {
-	Kind           responsesToolKind
+	Kind           ResponsesToolKind
 	Name           string
 	Namespace      string
 	QualifiedName  string
@@ -33,9 +43,10 @@ type ResponsesToolDeclaration struct {
 // ResponsesToolIdentity is a request-local registry of the tool declarations
 // that survive namespace expansion and collision resolution.
 type ResponsesToolIdentity struct {
-	declarations []ResponsesToolDeclaration
-	winners      map[string]ResponsesToolDeclaration
-	aliases      map[string]string
+	declarations     []ResponsesToolDeclaration
+	winners          map[string]ResponsesToolDeclaration
+	aliases          map[string]string
+	ambiguousAliases map[string]struct{}
 }
 
 // NewResponsesToolIdentity builds a deterministic identity registry from the
@@ -85,6 +96,37 @@ func (identity *ResponsesToolIdentity) resolve(qualifiedName string) (ResponsesT
 	}
 	declaration, ok := identity.winners[strings.TrimSpace(qualifiedName)]
 	return declaration, ok
+}
+
+// ResolveDeclaration resolves an exact emitted name, an explicit namespace
+// pair, or a unique local alias. Ambiguous local aliases are rejected.
+func (identity *ResponsesToolIdentity) ResolveDeclaration(
+	name, namespace string,
+) (ResponsesToolDeclaration, error) {
+	name = strings.TrimSpace(name)
+	namespace = strings.TrimSpace(namespace)
+	if name == "" {
+		return ResponsesToolDeclaration{}, ErrResponsesToolNameUnknown
+	}
+	if namespace != "" {
+		qualifiedName := qualifyResponsesToolName(namespace, name)
+		if declaration, ok := identity.resolve(qualifiedName); ok {
+			return declaration, nil
+		}
+		return ResponsesToolDeclaration{}, fmt.Errorf("%w: %s", ErrResponsesToolNameUnknown, qualifiedName)
+	}
+	if declaration, ok := identity.resolve(name); ok {
+		return declaration, nil
+	}
+	if identity != nil {
+		if _, ambiguous := identity.ambiguousAliases[name]; ambiguous {
+			return ResponsesToolDeclaration{}, fmt.Errorf("%w: %s", ErrResponsesToolNameAmbiguous, name)
+		}
+		if qualifiedName := identity.aliases[name]; qualifiedName != "" {
+			return identity.winners[qualifiedName], nil
+		}
+	}
+	return ResponsesToolDeclaration{}, fmt.Errorf("%w: %s", ErrResponsesToolNameUnknown, name)
 }
 
 // ResolveName maps a Responses name/namespace pair or a unique local alias to
@@ -155,10 +197,10 @@ func (identity *ResponsesToolIdentity) collect(tools gjson.Result, sourcePriorit
 			continue
 		}
 
-		var kind responsesToolKind
+		var kind ResponsesToolKind
 		switch toolType {
 		case "", "function":
-			kind = responsesFunctionTool
+			kind = ResponsesFunctionTool
 		case "custom":
 			kind = ResponsesCustomTool
 		default:
@@ -191,19 +233,21 @@ func (identity *ResponsesToolIdentity) selectWinners() {
 		}
 	}
 
-	ambiguousAliases := make(map[string]struct{})
-	for qualifiedName, declaration := range identity.winners {
-		if declaration.Direct || declaration.Name == qualifiedName {
-			identity.aliases[declaration.Name] = qualifiedName
+	identity.aliases = make(map[string]string)
+	identity.ambiguousAliases = make(map[string]struct{})
+	for _, declaration := range identity.declarations {
+		winner, exists := identity.winners[declaration.QualifiedName]
+		if !exists || winner.Order != declaration.Order {
 			continue
 		}
-		if existing, exists := identity.aliases[declaration.Name]; exists && existing != qualifiedName {
-			delete(identity.aliases, declaration.Name)
-			ambiguousAliases[declaration.Name] = struct{}{}
+		name := declaration.Name
+		if existing, exists := identity.aliases[name]; exists && existing != declaration.QualifiedName {
+			delete(identity.aliases, name)
+			identity.ambiguousAliases[name] = struct{}{}
 			continue
 		}
-		if _, ambiguous := ambiguousAliases[declaration.Name]; !ambiguous {
-			identity.aliases[declaration.Name] = qualifiedName
+		if _, ambiguous := identity.ambiguousAliases[name]; !ambiguous {
+			identity.aliases[name] = declaration.QualifiedName
 		}
 	}
 }
@@ -332,4 +376,184 @@ func ResponsesToolOutputText(output gjson.Result) string {
 		return output.Raw
 	}
 	return ""
+}
+
+// ExtractResponsesCallID extracts a tool call reference while ignoring fco_
+// output item IDs, which identify the output item rather than the call.
+func ExtractResponsesCallID(node gjson.Result) string {
+	if callID := strings.TrimSpace(node.Get("call_id").String()); callID != "" {
+		return callID
+	}
+	if toolCallID := strings.TrimSpace(node.Get("tool_call_id").String()); toolCallID != "" {
+		return toolCallID
+	}
+	if callID := strings.TrimSpace(node.Get("callId").String()); callID != "" {
+		return callID
+	}
+	id := strings.TrimSpace(node.Get("id").String())
+	if strings.HasPrefix(id, "fco_") {
+		return ""
+	}
+	return id
+}
+
+// NormalizeResponsesToolCallOutputs pairs tool outputs that omit call_id with
+// pending calls. Explicit output IDs are reserved before name or FIFO matching.
+func NormalizeResponsesToolCallOutputs(items []gjson.Result) []gjson.Result {
+	if len(items) == 0 {
+		return items
+	}
+
+	normalized := append([]gjson.Result(nil), items...)
+	explicitOutputCounts := make(map[string]int)
+	reservedCallIDs := make(map[string]struct{})
+	for _, item := range items {
+		callID := ExtractResponsesCallID(item)
+		if callID != "" {
+			reservedCallIDs[callID] = struct{}{}
+		}
+		if isResponsesToolCallOutput(item.Get("type").String()) && callID != "" {
+			explicitOutputCounts[callID]++
+		}
+	}
+	generatedCallIndex := 0
+	newCallID := func() string {
+		for {
+			generatedCallIndex++
+			callID := fmt.Sprintf("call_responses_%016d", generatedCallIndex)
+			if _, reserved := reservedCallIDs[callID]; reserved {
+				continue
+			}
+			reservedCallIDs[callID] = struct{}{}
+			return callID
+		}
+	}
+
+	var pendingCallIDs []string
+	pendingCallNames := make(map[string]string)
+	for index := 0; index < len(normalized); {
+		item := normalized[index]
+		switch item.Get("type").String() {
+		case "function_call", "custom_tool_call":
+			callID := ExtractResponsesCallID(item)
+			if callID == "" {
+				raw, _ := sjson.SetBytes([]byte(item.Raw), "call_id", newCallID())
+				item = gjson.ParseBytes(raw)
+				normalized[index] = item
+				callID = ExtractResponsesCallID(item)
+			}
+			pendingCallIDs = append(pendingCallIDs, callID)
+			pendingCallNames[callID] = strings.TrimSpace(item.Get("name").String())
+			index++
+		case "function_call_output", "custom_tool_call_output":
+			start := index
+			for index < len(normalized) && isResponsesToolCallOutput(normalized[index].Get("type").String()) {
+				index++
+			}
+			normalizeResponsesToolCallOutputGroup(
+				normalized, start, index, &pendingCallIDs, pendingCallNames, explicitOutputCounts,
+			)
+		default:
+			index++
+		}
+	}
+	return normalized
+}
+
+func isResponsesToolCallOutput(itemType string) bool {
+	return itemType == "function_call_output" || itemType == "custom_tool_call_output"
+}
+
+func normalizeResponsesToolCallOutputGroup(
+	items []gjson.Result,
+	start, end int,
+	pendingCallIDs *[]string,
+	pendingCallNames map[string]string,
+	explicitOutputCounts map[string]int,
+) {
+	outputs := items[start:end]
+	consumeExplicitOutputs := func() {
+		for _, output := range outputs {
+			if explicitID := ExtractResponsesCallID(output); explicitID != "" {
+				explicitOutputCounts[explicitID]--
+			}
+		}
+	}
+	if len(*pendingCallIDs) == 0 {
+		consumeExplicitOutputs()
+		return
+	}
+	used := make([]bool, len(outputs))
+	matchedOutputIndexes := make([]int, len(*pendingCallIDs))
+	for index := range matchedOutputIndexes {
+		matchedOutputIndexes[index] = -1
+	}
+
+	for pendingIndex, pendingID := range *pendingCallIDs {
+		for outputIndex, output := range outputs {
+			if used[outputIndex] || ExtractResponsesCallID(output) != pendingID {
+				continue
+			}
+			used[outputIndex] = true
+			matchedOutputIndexes[pendingIndex] = outputIndex
+			break
+		}
+	}
+	consumeExplicitOutputs()
+
+	for pendingIndex, pendingID := range *pendingCallIDs {
+		if matchedOutputIndexes[pendingIndex] >= 0 || explicitOutputCounts[pendingID] > 0 {
+			continue
+		}
+		expectedName := pendingCallNames[pendingID]
+		if expectedName == "" {
+			continue
+		}
+		for outputIndex, output := range outputs {
+			if used[outputIndex] || ExtractResponsesCallID(output) != "" {
+				continue
+			}
+			if strings.TrimSpace(output.Get("name").String()) == expectedName {
+				used[outputIndex] = true
+				matchedOutputIndexes[pendingIndex] = outputIndex
+				break
+			}
+		}
+	}
+
+	for pendingIndex, pendingID := range *pendingCallIDs {
+		if matchedOutputIndexes[pendingIndex] >= 0 || explicitOutputCounts[pendingID] > 0 {
+			continue
+		}
+		for outputIndex, output := range outputs {
+			if used[outputIndex] || ExtractResponsesCallID(output) != "" {
+				continue
+			}
+			outputName := strings.TrimSpace(output.Get("name").String())
+			expectedName := pendingCallNames[pendingID]
+			if outputName != "" && expectedName != "" && outputName != expectedName {
+				continue
+			}
+			used[outputIndex] = true
+			matchedOutputIndexes[pendingIndex] = outputIndex
+			break
+		}
+	}
+
+	remainingPending := make([]string, 0, len(*pendingCallIDs))
+	for pendingIndex, pendingID := range *pendingCallIDs {
+		outputIndex := matchedOutputIndexes[pendingIndex]
+		if outputIndex < 0 {
+			remainingPending = append(remainingPending, pendingID)
+			continue
+		}
+		matchedOutput := outputs[outputIndex]
+		if matchedOutput.Get("call_id").String() == pendingID {
+			continue
+		}
+		raw := []byte(matchedOutput.Raw)
+		raw, _ = sjson.SetBytes(raw, "call_id", pendingID)
+		items[start+outputIndex] = gjson.ParseBytes(raw)
+	}
+	*pendingCallIDs = remainingPending
 }

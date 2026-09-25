@@ -65,6 +65,12 @@ func WithPluginHooks(ctx context.Context, hooks PluginHooks) context.Context {
 	return context.WithValue(ctx, pluginHooksContextKey{}, pluginHooksContextValue{hooks: hooks})
 }
 
+// HasPluginHooks reports whether translation hooks apply to this request.
+// An explicit nil request value overrides package-level hooks.
+func HasPluginHooks(ctx context.Context) bool {
+	return pluginHooksForContext(ctx) != nil
+}
+
 func pluginHooksForContext(ctx context.Context) PluginHooks {
 	if ctx != nil {
 		if value, ok := ctx.Value(pluginHooksContextKey{}).(pluginHooksContextValue); ok {

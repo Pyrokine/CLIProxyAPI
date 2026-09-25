@@ -93,17 +93,23 @@ func inspectClaudeCAISSignature(rawSignature string) (*claudeCAISSignatureInfo, 
 		return nil, fmt.Errorf("invalid Claude CAIS signature: missing top-level field 2 container")
 	}
 
-	var channelBlock []byte
+	var channelBlock, containerSignatureBytes []byte
 	err = walkClaudeProtobufFields(
 		container, func(num protowire.Number, typ protowire.Type, raw []byte) error {
-			if num != 1 {
-				return nil
+			switch num {
+			case 1:
+				value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 1 channel block")
+				if errField != nil {
+					return errField
+				}
+				channelBlock = value
+			case 5:
+				value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 5 signature bytes")
+				if errField != nil {
+					return errField
+				}
+				containerSignatureBytes = value
 			}
-			value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 1 channel block")
-			if errField != nil {
-				return errField
-			}
-			channelBlock = value
 			return nil
 		},
 	)
@@ -182,13 +188,24 @@ func inspectClaudeCAISSignature(rawSignature string) (*claudeCAISSignatureInfo, 
 	if err != nil {
 		return nil, err
 	}
+	if !haveSignatureBytes && info.EnvelopeVersion >= 4 && len(containerSignatureBytes) > 0 {
+		info.SignatureLen = len(containerSignatureBytes)
+		haveSignatureBytes = true
+	}
 	switch {
 	case !haveChannelID:
 		return nil, fmt.Errorf("invalid Claude CAIS signature: missing channel field 1 channel_id")
 	case !haveSignatureBytes:
-		return nil, fmt.Errorf("invalid Claude CAIS signature: missing channel field 5 signature bytes")
-	case !haveModelText:
+		return nil, fmt.Errorf("invalid Claude CAIS signature: missing signature bytes")
+	case !haveModelText && info.EnvelopeVersion < 4:
 		return nil, fmt.Errorf("invalid Claude CAIS signature: missing channel field 6 model_text")
+	case info.EnvelopeVersion >= 4 && info.BlockKind != "thinking" && info.BlockKind != "narration":
+		return nil, fmt.Errorf(
+			"invalid Claude CAQS signature: expected block kind %q or %q, got %q",
+			"thinking",
+			"narration",
+			info.BlockKind,
+		)
 	}
 
 	return info, nil

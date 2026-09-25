@@ -64,6 +64,14 @@ type CompatibilityDecision struct {
 	Reason               string
 }
 
+// SignatureCompatibilityOptions controls compatibility-only signature handling.
+// Strict provider targets should use the zero value.
+type SignatureCompatibilityOptions struct {
+	// PreserveUnknownNonEmpty retains an opaque signature only when no known
+	// provider claims it. Known foreign signatures remain incompatible.
+	PreserveUnknownNonEmpty bool
+}
+
 type ClaudeMessagesSanitizeOptions struct {
 	TargetProvider                Provider
 	TargetModel                   string
@@ -152,6 +160,15 @@ func DetectProvider(rawSignature string) Provider {
 }
 
 func decideCompatibility(targetProvider Provider, rawSignature string, blockKind BlockKind) CompatibilityDecision {
+	return decideCompatibilityWithOptions(targetProvider, rawSignature, blockKind, SignatureCompatibilityOptions{})
+}
+
+func decideCompatibilityWithOptions(
+	targetProvider Provider,
+	rawSignature string,
+	blockKind BlockKind,
+	options SignatureCompatibilityOptions,
+) CompatibilityDecision {
 	targetProvider = normalizeTargetProvider(targetProvider)
 	if blockKind == "" {
 		blockKind = blockKindUnknown
@@ -163,6 +180,15 @@ func decideCompatibility(targetProvider Provider, rawSignature string, blockKind
 		decision.Action = actionPreserve
 		decision.NormalizedSignature = normalizeCompatibleSignature(targetProvider, rawSignature)
 		decision.Reason = "signature provider matches target provider"
+		return decision
+	}
+	_, _, hasKnownProviderPrefix := splitProviderPrefix(rawSignature)
+	if options.PreserveUnknownNonEmpty && detected == providerUnknown && !hasKnownProviderPrefix &&
+		strings.TrimSpace(rawSignature) != "" {
+		decision.Compatible = true
+		decision.Action = actionPreserve
+		decision.NormalizedSignature = rawSignature
+		decision.Reason = "compatibility mode preserves a non-empty signature with unknown provider"
 		return decision
 	}
 	decision.Compatible = false
@@ -196,7 +222,23 @@ func decideCompatibility(targetProvider Provider, rawSignature string, blockKind
 }
 
 func CompatibleSignatureForProvider(targetProvider Provider, rawSignature string, blockKind BlockKind) (string, bool) {
-	decision := decideCompatibility(targetProvider, rawSignature, blockKind)
+	return CompatibleSignatureForProviderWithOptions(
+		targetProvider,
+		rawSignature,
+		blockKind,
+		SignatureCompatibilityOptions{},
+	)
+}
+
+// CompatibleSignatureForProviderWithOptions applies provider validation while
+// allowing an explicit compatibility endpoint to retain an unknown opaque value.
+func CompatibleSignatureForProviderWithOptions(
+	targetProvider Provider,
+	rawSignature string,
+	blockKind BlockKind,
+	options SignatureCompatibilityOptions,
+) (string, bool) {
+	decision := decideCompatibilityWithOptions(targetProvider, rawSignature, blockKind, options)
 	if !decision.Compatible || decision.NormalizedSignature == "" {
 		return "", false
 	}
@@ -643,7 +685,8 @@ func isGeminiField1Envelope(decoded []byte) bool {
 
 func isGeminiField2Envelope(decoded []byte) bool {
 	value, ok := consumeGeminiField2Field1Value(decoded)
-	return ok && (isLikelyGeminiOpaquePayload(value) || isASCIIUUIDBytes(value))
+	return ok && (isLikelyGeminiOpaquePayload(value) || isASCIIUUIDBytes(value) ||
+		isLikelyGeminiToolInvocationPayload(value))
 }
 
 func consumeGeminiField2Field1Value(decoded []byte) ([]byte, bool) {
@@ -678,6 +721,44 @@ func consumeGeminiField2Field1Value(decoded []byte) ([]byte, bool) {
 
 func isLikelyGeminiOpaquePayload(value []byte) bool {
 	return len(value) > 0 && value[0] == 0x01
+}
+
+func isLikelyGeminiToolInvocationPayload(value []byte) bool {
+	if len(value) == 0 {
+		return false
+	}
+
+	hasTinkField := false
+	for offset := 0; offset < len(value); {
+		_, fieldType, tagLen := protowire.ConsumeTag(value[offset:])
+		if tagLen < 0 {
+			return false
+		}
+		offset += tagLen
+
+		var fieldLen int
+		switch fieldType {
+		case protowire.VarintType:
+			_, fieldLen = protowire.ConsumeVarint(value[offset:])
+		case protowire.BytesType:
+			var bytesValue []byte
+			bytesValue, fieldLen = protowire.ConsumeBytes(value[offset:])
+			if fieldLen >= 0 && isLikelyGeminiOpaquePayload(bytesValue) {
+				hasTinkField = true
+			}
+		case protowire.Fixed32Type:
+			_, fieldLen = protowire.ConsumeFixed32(value[offset:])
+		case protowire.Fixed64Type:
+			_, fieldLen = protowire.ConsumeFixed64(value[offset:])
+		default:
+			return false
+		}
+		if fieldLen < 0 {
+			return false
+		}
+		offset += fieldLen
+	}
+	return hasTinkField
 }
 
 func isASCIIUUIDBytes(value []byte) bool {
@@ -767,6 +848,10 @@ func SanitizeGeminiRequestThoughtSignatures(
 						return true
 					}
 					if !isModelTurn {
+						partItems = append(partItems, partJSON)
+						return true
+					}
+					if isGeminiServerToolPart(part) {
 						partItems = append(partItems, partJSON)
 						return true
 					}
@@ -865,6 +950,9 @@ func geminiContentsThoughtSignaturesNeedSanitize(contents gjson.Result) bool {
 						return !needsSanitize
 					}
 					if !isModelTurn {
+						return true
+					}
+					if isGeminiServerToolPart(part) {
 						return true
 					}
 					hasFunctionCall := part.Get("functionCall").Exists()
@@ -1102,6 +1190,15 @@ var geminiPartThoughtSignaturePaths = []string{
 	"functionResponse.thoughtSignature",
 	"functionResponse.thought_signature",
 	"extra_content.google.thought_signature",
+}
+
+func isGeminiServerToolPart(part gjson.Result) bool {
+	for _, path := range []string{"toolCall", "tool_call", "toolResponse", "tool_response"} {
+		if part.Get(path).Exists() {
+			return true
+		}
+	}
+	return false
 }
 
 func geminiPartThoughtSignature(part gjson.Result) (string, bool) {
