@@ -67,11 +67,7 @@ func convertClaudeRequestToOpenAI(
 				},
 			)
 			if len(stops) > 0 {
-				if len(stops) == 1 {
-					out, _ = sjson.SetBytes(out, "stop", stops[0])
-				} else {
-					out, _ = sjson.SetBytes(out, "stop", stops)
-				}
+				out, _ = sjson.SetBytes(out, "stop", stops)
 			}
 		}
 	}
@@ -115,214 +111,179 @@ func convertClaudeRequestToOpenAI(
 		}
 	}
 
-	// Process messages and system
-	messagesJSON := []byte(`[]`)
+	// Process messages and system.
+	messageItems := make([][]byte, 0, int(root.Get("messages.#").Int())+1)
 
-	// Handle system message first
-	systemMsgJSON := []byte(`{"role":"system","content":[]}`)
-	hasSystemContent := false
-	if system := root.Get("system"); system.Exists() {
-		if system.Type == gjson.String {
-			if system.String() != "" && !util.IsClaudeCodeAttributionSystemText(system.String()) {
-				oldSystem := []byte(`{"type":"text","text":""}`)
-				oldSystem, _ = sjson.SetBytes(oldSystem, "text", system.String())
-				systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", oldSystem)
-				hasSystemContent = true
+	systemItems := make([][]byte, 0, 2)
+	appendSystemContent := func(content gjson.Result) {
+		if !content.Exists() {
+			return
+		}
+		if content.Type == gjson.String {
+			if content.String() == "" || util.IsClaudeCodeAttributionSystemText(content.String()) {
+				return
 			}
-		} else if system.Type == gjson.JSON {
-			if system.IsArray() {
-				systemResults := system.Array()
-				for i := range systemResults {
-					if systemResults[i].Get("type").String() == "text" && util.IsClaudeCodeAttributionSystemText(systemResults[i].Get("text").String()) {
-						continue
-					}
-					if contentItem, ok := convertClaudeContentPart(systemResults[i]); ok {
-						systemMsgJSON, _ = sjson.SetRawBytes(systemMsgJSON, "content.-1", []byte(contentItem))
-						hasSystemContent = true
-					}
+			item := []byte(`{"type":"text","text":""}`)
+			item, _ = sjson.SetBytes(item, "text", content.String())
+			systemItems = append(systemItems, item)
+			return
+		}
+		if content.IsArray() {
+			content.ForEach(func(_, item gjson.Result) bool {
+				if contentItem, ok := convertClaudeContentPart(item); ok {
+					systemItems = append(systemItems, []byte(contentItem))
 				}
-			}
+				return true
+			})
 		}
 	}
-	// Only add system message if it has content
-	if hasSystemContent {
-		messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", systemMsgJSON)
+	appendSystemContent(root.Get("system"))
+	if len(systemItems) > 0 {
+		systemMessage := []byte(`{"role":"system","content":[]}`)
+		systemMessage, _ = sjson.SetRawBytes(systemMessage, "content", translatorcommon.JoinRawArray(systemItems))
+		messageItems = append(messageItems, systemMessage)
 	}
 
-	// Process Anthropic messages
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
-		messages.ForEach(
-			func(_, message gjson.Result) bool {
-				role := message.Get("role").String()
-				contentResult := message.Get("content")
-				if role == "system" {
-					if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentResult); ok {
-						msgJSON := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
-						msgJSON, _ = sjson.SetBytes(msgJSON, "content.0.text", reminderText)
-						messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+		var pendingToolUseIDs []string
+		var pendingSystemReminders [][]byte
+
+		messages.ForEach(func(_, message gjson.Result) bool {
+			role := message.Get("role").String()
+			contentResult := message.Get("content")
+			if role == "system" {
+				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentResult); ok {
+					reminder := []byte(`{"role":"user","content":[{"type":"text","text":""}]}`)
+					reminder, _ = sjson.SetBytes(reminder, "content.0.text", reminderText)
+					if len(pendingToolUseIDs) > 0 {
+						pendingSystemReminders = append(pendingSystemReminders, reminder)
+					} else {
+						messageItems = append(messageItems, reminder)
+					}
+				}
+				return true
+			}
+
+			if contentResult.Exists() && contentResult.IsArray() {
+				if role == "user" && len(pendingToolUseIDs) > 0 {
+					contentResult = translatorcommon.AlignClaudeToolResults(contentResult, pendingToolUseIDs)
+				}
+				precedingToolCallsPending := len(pendingToolUseIDs) > 0
+				pendingToolUseIDs = nil
+
+				contentItems := make([][]byte, 0)
+				var reasoningParts []string
+				var toolCalls []any
+				toolResults := make([][]byte, 0)
+				relayedToolImages := make([][]byte, 0)
+
+				contentResult.ForEach(func(_, part gjson.Result) bool {
+					switch part.Get("type").String() {
+					case "thinking":
+						if role == "assistant" && shouldMapClaudeThinkingToGPTReasoning(part, preserveThinkingBlocks) {
+							if text := thinking.GetThinkingText(part); strings.TrimSpace(text) != "" {
+								reasoningParts = append(reasoningParts, text)
+							}
+						}
+					case "redacted_thinking":
+					case "text", "image":
+						if contentItem, ok := convertClaudeContentPart(part); ok {
+							contentItems = append(contentItems, []byte(contentItem))
+						}
+					case "tool_use":
+						if role == "assistant" {
+							toolUseID := part.Get("id").String()
+							if toolUseID != "" {
+								pendingToolUseIDs = append(pendingToolUseIDs, toolUseID)
+							}
+							toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
+							toolCall, _ = sjson.SetBytes(toolCall, "id", toolUseID)
+							toolCall, _ = sjson.SetBytes(toolCall, "function.name", part.Get("name").String())
+							if input := part.Get("input"); input.Exists() {
+								toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", input.Raw)
+							} else {
+								toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", "{}")
+							}
+							toolCalls = append(toolCalls, gjson.ParseBytes(toolCall).Value())
+						}
+					case "tool_result":
+						toolResult := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
+						toolResult, _ = sjson.SetBytes(toolResult, "tool_call_id", part.Get("tool_use_id").String())
+						text, images := convertClaudeToolResultContent(part.Get("content"))
+						toolResult, _ = sjson.SetBytes(toolResult, "content", text)
+						toolResults = append(toolResults, toolResult)
+						relayedToolImages = append(relayedToolImages, images...)
 					}
 					return true
+				})
+
+				hasContent := len(contentItems) > 0
+				hasReasoning := len(reasoningParts) > 0
+				hasToolCalls := len(toolCalls) > 0
+				hasToolResults := len(toolResults) > 0
+				if precedingToolCallsPending && !hasToolResults && len(pendingSystemReminders) > 0 {
+					messageItems = append(messageItems, pendingSystemReminders...)
+					pendingSystemReminders = nil
 				}
+				messageItems = append(messageItems, toolResults...)
 
-				// Handle content
-				if contentResult.Exists() && contentResult.IsArray() {
-					contentItems := make([][]byte, 0)
-					var reasoningParts []string // Accumulate thinking text for reasoning_content
-					var toolCalls []any
-					toolResults := make([][]byte, 0) // Collect tool_result messages to emit after the main message
-
-					contentResult.ForEach(
-						func(_, part gjson.Result) bool {
-							partType := part.Get("type").String()
-
-							switch partType {
-							case "thinking":
-								// Only map thinking to reasoning_content for assistant messages (security: prevent injection)
-								if role == "assistant" {
-									if !shouldMapClaudeThinkingToGPTReasoning(
-										part,
-										preserveThinkingBlocks,
-									) {
-										return true
-									}
-									thinkingText := thinking.GetThinkingText(part)
-									// Skip empty or whitespace-only thinking
-									if strings.TrimSpace(thinkingText) != "" {
-										reasoningParts = append(reasoningParts, thinkingText)
-									}
-								}
-								// Ignore thinking in user/system roles (AC4)
-
-							case "redacted_thinking":
-								// Explicitly ignore redacted_thinking - never map to reasoning_content (AC2)
-
-							case "text", "image":
-								if contentItem, ok := convertClaudeContentPart(part); ok {
-									contentItems = append(contentItems, []byte(contentItem))
-								}
-
-							case "tool_use":
-								// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
-								if role == "assistant" {
-									toolCallJSON := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-									toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "id", part.Get("id").String())
-									toolCallJSON, _ = sjson.SetBytes(
-										toolCallJSON, "function.name", part.Get("name").String(),
-									)
-
-									// Convert input to arguments JSON string
-									if input := part.Get("input"); input.Exists() {
-										toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.arguments", input.Raw)
-									} else {
-										toolCallJSON, _ = sjson.SetBytes(toolCallJSON, "function.arguments", "{}")
-									}
-
-									toolCalls = append(toolCalls, gjson.ParseBytes(toolCallJSON).Value())
-								}
-
-							case "tool_result":
-								// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
-								toolResultJSON := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-								toolResultJSON, _ = sjson.SetBytes(
-									toolResultJSON, "tool_call_id", part.Get("tool_use_id").String(),
-								)
-								toolResultContent, toolResultContentRaw := convertClaudeToolResultContent(part.Get("content"))
-								if toolResultContentRaw {
-									toolResultJSON, _ = sjson.SetRawBytes(
-										toolResultJSON, "content", []byte(toolResultContent),
-									)
-								} else {
-									toolResultJSON, _ = sjson.SetBytes(toolResultJSON, "content", toolResultContent)
-								}
-								toolResults = append(toolResults, toolResultJSON)
-							}
-							return true
-						},
-					)
-
-					// Build reasoning content string
-					reasoningContent := ""
-					if len(reasoningParts) > 0 {
-						reasoningContent = strings.Join(reasoningParts, "\n\n")
-					}
-
-					hasContent := len(contentItems) > 0
-					hasReasoning := reasoningContent != ""
-					hasToolCalls := len(toolCalls) > 0
-					hasToolResults := len(toolResults) > 0
-
-					// OpenAI requires: tool messages MUST immediately follow the assistant message with tool_calls.
-					// Therefore, we emit tool_result messages FIRST (they respond to the previous assistant's tool_calls),
-					// then emit the current message's content.
-					for _, toolResultJSON := range toolResults {
-						messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", toolResultJSON)
-					}
-
-					// For assistant messages: emit a single unified message with content, tool_calls, and reasoning_content
-					// This avoids splitting into multiple assistant messages which breaks OpenAI tool-call adjacency
-					if role == "assistant" {
-						if hasContent || hasReasoning || hasToolCalls {
-							msgJSON := []byte(`{"role":"assistant"}`)
-
-							// Add content (as array if we have items, empty string if reasoning-only)
-							if hasContent {
-								contentArrayJSON := []byte(`[]`)
-								for _, contentItem := range contentItems {
-									contentArrayJSON, _ = sjson.SetRawBytes(contentArrayJSON, "-1", contentItem)
-								}
-								msgJSON, _ = sjson.SetRawBytes(msgJSON, "content", contentArrayJSON)
-							} else {
-								// Ensure content field exists for OpenAI compatibility
-								msgJSON, _ = sjson.SetBytes(msgJSON, "content", "")
-							}
-
-							// Add reasoning_content if present
-							if hasReasoning {
-								msgJSON, _ = sjson.SetBytes(msgJSON, "reasoning_content", reasoningContent)
-							}
-
-							// Add tool_calls if present (in same message as content)
-							if hasToolCalls {
-								msgJSON, _ = sjson.SetBytes(msgJSON, "tool_calls", toolCalls)
-							}
-
-							messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
-						}
+				if len(relayedToolImages) > 0 {
+					relayItems := make([][]byte, 0, len(relayedToolImages)+1)
+					notice := []byte(`{"type":"text","text":""}`)
+					notice, _ = sjson.SetBytes(notice, "text", toolResultImageRelayNotice)
+					relayItems = append(relayItems, notice)
+					relayItems = append(relayItems, relayedToolImages...)
+					if role == "user" && hasContent {
+						contentItems = append(relayItems, contentItems...)
 					} else {
-						// For non-assistant roles: emit content message if we have content
-						// If the message only contains tool_results (no text/image), we still processed them above
-						if hasContent {
-							msgJSON := []byte(`{"role":""}`)
-							msgJSON, _ = sjson.SetBytes(msgJSON, "role", role)
-
-							contentArrayJSON := []byte(`[]`)
-							for _, contentItem := range contentItems {
-								contentArrayJSON, _ = sjson.SetRawBytes(contentArrayJSON, "-1", contentItem)
-							}
-							msgJSON, _ = sjson.SetRawBytes(msgJSON, "content", contentArrayJSON)
-
-							messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
-						} else if hasToolResults && !hasContent {
-							// tool_results already emitted above, no additional user message needed
-						}
+						relay := []byte(`{"role":"user","content":[]}`)
+						relay, _ = sjson.SetRawBytes(relay, "content", translatorcommon.JoinRawArray(relayItems))
+						messageItems = append(messageItems, relay)
 					}
-
-				} else if contentResult.Exists() && contentResult.Type == gjson.String {
-					// Simple string content
-					msgJSON := []byte(`{"role":"","content":""}`)
-					msgJSON, _ = sjson.SetBytes(msgJSON, "role", role)
-					msgJSON, _ = sjson.SetBytes(msgJSON, "content", contentResult.String())
-					messagesJSON, _ = sjson.SetRawBytes(messagesJSON, "-1", msgJSON)
+				}
+				if len(pendingSystemReminders) > 0 {
+					messageItems = append(messageItems, pendingSystemReminders...)
+					pendingSystemReminders = nil
 				}
 
-				return true
-			},
-		)
+				if role == "assistant" {
+					if hasContent || hasReasoning || hasToolCalls {
+						msg := []byte(`{"role":"assistant","content":""}`)
+						if hasContent {
+							msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
+						}
+						if hasReasoning {
+							msg, _ = sjson.SetBytes(msg, "reasoning_content", strings.Join(reasoningParts, "\n\n"))
+						}
+						if hasToolCalls {
+							msg, _ = sjson.SetBytes(msg, "tool_calls", toolCalls)
+						}
+						messageItems = append(messageItems, msg)
+					}
+				} else if hasContent {
+					msg := []byte(`{"role":"","content":[]}`)
+					msg, _ = sjson.SetBytes(msg, "role", role)
+					msg, _ = sjson.SetRawBytes(msg, "content", translatorcommon.JoinRawArray(contentItems))
+					messageItems = append(messageItems, msg)
+				}
+			} else if contentResult.Exists() && contentResult.Type == gjson.String {
+				if len(pendingToolUseIDs) > 0 && len(pendingSystemReminders) > 0 {
+					messageItems = append(messageItems, pendingSystemReminders...)
+					pendingSystemReminders = nil
+					pendingToolUseIDs = nil
+				}
+				msg := []byte(`{"role":"","content":""}`)
+				msg, _ = sjson.SetBytes(msg, "role", role)
+				msg, _ = sjson.SetBytes(msg, "content", contentResult.String())
+				messageItems = append(messageItems, msg)
+			}
+			return true
+		})
+		messageItems = append(messageItems, pendingSystemReminders...)
 	}
 
-	// Set messages
-	if msgs := gjson.ParseBytes(messagesJSON); msgs.IsArray() && len(msgs.Array()) > 0 {
-		out, _ = sjson.SetRawBytes(out, "messages", messagesJSON)
+	if len(messageItems) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	}
 
 	// Process tools - convert Anthropic tools to OpenAI functions
@@ -337,9 +298,20 @@ func convertClaudeRequestToOpenAI(
 					openAIToolJSON, "function.description", tool.Get("description").String(),
 				)
 
-				// Convert Anthropic input_schema to OpenAI function parameters
-				if inputSchema := tool.Get("input_schema"); inputSchema.Exists() {
-					openAIToolJSON, _ = sjson.SetBytes(openAIToolJSON, "function.parameters", inputSchema.Value())
+				// Convert Anthropic input_schema to an OpenAI object schema.
+				inputSchema := tool.Get("input_schema")
+				if !inputSchema.Exists() || inputSchema.Type == gjson.Null {
+					openAIToolJSON, _ = sjson.SetRawBytes(
+						openAIToolJSON,
+						"function.parameters",
+						[]byte(`{"type":"object","properties":{}}`),
+					)
+				} else {
+					openAIToolJSON, _ = sjson.SetRawBytes(
+						openAIToolJSON,
+						"function.parameters",
+						util.NormalizeClaudeToolInputSchema([]byte(inputSchema.Raw)),
+					)
 				}
 
 				toolsJSON, _ = sjson.SetRawBytes(toolsJSON, "-1", openAIToolJSON)
@@ -447,76 +419,58 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 	}
 }
 
-func convertClaudeToolResultContent(content gjson.Result) (string, bool) {
+const toolResultImagePlaceholder = "[Tool returned image content; the images follow in the next user message.]"
+
+const toolResultImageRelayNotice = "Images returned by the preceding tool call(s):"
+
+func convertClaudeToolResultContent(content gjson.Result) (string, [][]byte) {
 	if !content.Exists() {
-		return "", false
+		return "", nil
 	}
-
 	if content.Type == gjson.String {
-		return content.String(), false
+		return content.String(), nil
 	}
-
 	if content.IsArray() {
 		var parts []string
-		contentJSON := []byte(`[]`)
-		hasImagePart := false
-		content.ForEach(
-			func(_, item gjson.Result) bool {
-				switch {
-				case item.Type == gjson.String:
-					text := item.String()
-					parts = append(parts, text)
-					textContent := []byte(`{"type":"text","text":""}`)
-					textContent, _ = sjson.SetBytes(textContent, "text", text)
-					contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", textContent)
-				case item.IsObject() && item.Get("type").String() == "text":
-					text := item.Get("text").String()
-					parts = append(parts, text)
-					textContent := []byte(`{"type":"text","text":""}`)
-					textContent, _ = sjson.SetBytes(textContent, "text", text)
-					contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", textContent)
-				case item.IsObject() && item.Get("type").String() == "image":
-					contentItem, ok := convertClaudeContentPart(item)
-					if ok {
-						contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", []byte(contentItem))
-						hasImagePart = true
-					} else {
-						parts = append(parts, item.Raw)
-					}
-				case item.IsObject() && item.Get("text").Exists() && item.Get("text").Type == gjson.String:
-					parts = append(parts, item.Get("text").String())
-				default:
+		var images [][]byte
+		content.ForEach(func(_, item gjson.Result) bool {
+			switch {
+			case item.Type == gjson.String:
+				parts = append(parts, item.String())
+			case item.IsObject() && item.Get("type").String() == "text":
+				parts = append(parts, item.Get("text").String())
+			case item.IsObject() && item.Get("type").String() == "image":
+				if image, ok := convertClaudeContentPart(item); ok {
+					images = append(images, []byte(image))
+				} else {
 					parts = append(parts, item.Raw)
 				}
-				return true
-			},
-		)
-
-		if hasImagePart {
-			return string(contentJSON), true
+			case item.IsObject() && item.Get("text").Type == gjson.String:
+				parts = append(parts, item.Get("text").String())
+			default:
+				parts = append(parts, item.Raw)
+			}
+			return true
+		})
+		text := strings.Join(parts, "\n\n")
+		if strings.TrimSpace(text) == "" {
+			if len(images) > 0 {
+				return toolResultImagePlaceholder, images
+			}
+			return content.Raw, nil
 		}
-
-		joined := strings.Join(parts, "\n\n")
-		if strings.TrimSpace(joined) != "" {
-			return joined, false
-		}
-		return content.Raw, false
+		return text, images
 	}
-
 	if content.IsObject() {
 		if content.Get("type").String() == "image" {
-			contentItem, ok := convertClaudeContentPart(content)
-			if ok {
-				contentJSON := []byte(`[]`)
-				contentJSON, _ = sjson.SetRawBytes(contentJSON, "-1", []byte(contentItem))
-				return string(contentJSON), true
+			if image, ok := convertClaudeContentPart(content); ok {
+				return toolResultImagePlaceholder, [][]byte{[]byte(image)}
 			}
 		}
-		if text := content.Get("text"); text.Exists() && text.Type == gjson.String {
-			return text.String(), false
+		if text := content.Get("text"); text.Type == gjson.String {
+			return text.String(), nil
 		}
-		return content.Raw, false
+		return content.Raw, nil
 	}
-
-	return content.Raw, false
+	return content.Raw, nil
 }

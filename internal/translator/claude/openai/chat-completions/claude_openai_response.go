@@ -28,6 +28,7 @@ type convertAnthropicResponseToOpenAIParams struct {
 	Usage        claudeUsageTokens
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*toolCallAccumulator
+	NextToolCallIndex    int
 }
 
 type claudeUsageTokens struct {
@@ -72,6 +73,7 @@ func (u *claudeUsageTokens) openAIUsage() (
 type toolCallAccumulator struct {
 	ID        string
 	Name      string
+	Index     int
 	Arguments strings.Builder
 }
 
@@ -141,6 +143,7 @@ func convertClaudeResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 			if (*param).(*convertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
 				(*param).(*convertAnthropicResponseToOpenAIParams).ToolCallsAccumulator = make(map[int]*toolCallAccumulator)
 			}
+			(*param).(*convertAnthropicResponseToOpenAIParams).NextToolCallIndex = 0
 			(*param).(*convertAnthropicResponseToOpenAIParams).Usage.merge(message.Get("usage"))
 		}
 		return [][]byte{template}
@@ -160,9 +163,12 @@ func convertClaudeResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 					(*param).(*convertAnthropicResponseToOpenAIParams).ToolCallsAccumulator = make(map[int]*toolCallAccumulator)
 				}
 
+				toolCallIndex := (*param).(*convertAnthropicResponseToOpenAIParams).NextToolCallIndex
+				(*param).(*convertAnthropicResponseToOpenAIParams).NextToolCallIndex++
 				(*param).(*convertAnthropicResponseToOpenAIParams).ToolCallsAccumulator[index] = &toolCallAccumulator{
-					ID:   toolCallID,
-					Name: toolName,
+					ID:    toolCallID,
+					Name:  toolName,
+					Index: toolCallIndex,
 				}
 
 				// Don't output anything yet - wait for complete tool call
@@ -219,7 +225,7 @@ func convertClaudeResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 				if arguments == "" {
 					arguments = "{}"
 				}
-				template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.index", index)
+				template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.index", accumulator.Index)
 				template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.id", accumulator.ID)
 				template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.type", "function")
 				template, _ = sjson.SetBytes(template, "choices.0.delta.tool_calls.0.function.name", accumulator.Name)
@@ -298,6 +304,8 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 		return "length"
 	case "stop_sequence":
 		return "stop"
+	case "refusal", "sensitive":
+		return "content_filter"
 	default:
 		return "stop"
 	}
@@ -444,8 +452,7 @@ func convertClaudeResponseToOpenAINonStream(_ context.Context, _ string, _, _, r
 	// Add reasoning content if available (following OpenAI reasoning format)
 	if len(reasoningParts) > 0 {
 		reasoningContent := strings.Join(reasoningParts, "")
-		// Add reasoning as a separate field in the message
-		out, _ = sjson.SetBytes(out, "choices.0.message.reasoning", reasoningContent)
+		out, _ = sjson.SetBytes(out, "choices.0.message.reasoning_content", reasoningContent)
 	}
 
 	// Set tool calls if any were accumulated during processing

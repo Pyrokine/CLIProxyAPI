@@ -165,7 +165,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			appendRegularMessage(message)
 		}
 
-		inputArray := input.Array()
+		inputArray := translatorcommon.NormalizeResponsesToolCallOutputs(input.Array())
 		for _, item := range inputArray {
 			itemType := item.Get("type").String()
 			if itemType == "" && item.Get("role").String() != "" {
@@ -242,11 +242,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					item.Get("reasoning_content").String(),
 				)
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
-				if callID := item.Get("call_id"); callID.Exists() {
-					toolCall, _ = sjson.SetBytes(toolCall, "id", callID.String())
-					if callID.String() != "" {
-						pendingToolCallIDs[callID.String()] = struct{}{}
-					}
+				if callID := translatorcommon.ExtractResponsesCallID(item); callID != "" {
+					toolCall, _ = sjson.SetBytes(toolCall, "id", callID)
+					pendingToolCallIDs[callID] = struct{}{}
 				}
 				name := toolIdentity.ResolveName(item.Get("name").String(), item.Get("namespace").String())
 				toolCall, _ = sjson.SetBytes(toolCall, "function.name", name)
@@ -262,11 +260,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			case "function_call_output", "custom_tool_call_output":
 				mergeableAssistantIndex = -1
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-				if callID := item.Get("call_id"); callID.Exists() {
-					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID.String())
-					if callID.String() != "" {
-						pendingToolOutputIDs[callID.String()] = struct{}{}
-					}
+				if callID := translatorcommon.ExtractResponsesCallID(item); callID != "" {
+					toolMessage, _ = sjson.SetBytes(toolMessage, "tool_call_id", callID)
+					pendingToolOutputIDs[callID] = struct{}{}
 				}
 				if output := item.Get("output"); output.Exists() {
 					toolMessage = setResponsesToolOutputContent(toolMessage, output)

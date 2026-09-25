@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -20,6 +21,69 @@ import (
 var (
 	dataTag = []byte("data:")
 )
+
+func geminiResponseSignature(rawSignature string, blockKind signature.BlockKind) string {
+	if strings.TrimSpace(rawSignature) == "" {
+		return ""
+	}
+	if normalized, ok := signature.CompatibleSignatureForProvider(
+		signature.ProviderGemini,
+		rawSignature,
+		blockKind,
+	); ok {
+		return normalized
+	}
+	return signature.GeminiReplaySignatureOrBypass(rawSignature, blockKind)
+}
+
+func rawClaudeContentBlockSignature(block gjson.Result) string {
+	for _, path := range []string{
+		"signature",
+		"thought_signature",
+		"extra_content.google.thought_signature",
+	} {
+		if value := strings.TrimSpace(block.Get(path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func claudeContentBlockSignature(block gjson.Result, blockKind signature.BlockKind) string {
+	return geminiResponseSignature(rawClaudeContentBlockSignature(block), blockKind)
+}
+
+func appendClaudeThinkingSignature(
+	state *convertAnthropicResponseToGeminiParams,
+	index int,
+	fragment string,
+) {
+	fragment = strings.TrimSpace(fragment)
+	if state == nil || fragment == "" {
+		return
+	}
+	if state.ThinkingSignatures == nil {
+		state.ThinkingSignatures = make(map[int]*strings.Builder)
+	}
+	builder := state.ThinkingSignatures[index]
+	if builder == nil {
+		builder = &strings.Builder{}
+		state.ThinkingSignatures[index] = builder
+	}
+	builder.WriteString(fragment)
+}
+
+func takeGeminiThinkingSignature(state *convertAnthropicResponseToGeminiParams, index int) string {
+	if state == nil || state.ThinkingSignatures == nil {
+		return ""
+	}
+	builder := state.ThinkingSignatures[index]
+	delete(state.ThinkingSignatures, index)
+	if builder == nil {
+		return ""
+	}
+	return geminiResponseSignature(builder.String(), signature.BlockKindGeminiModelPart)
+}
 
 // convertAnthropicResponseToGeminiParams holds parameters for response conversion
 // It also carries minimal streaming state across calls to assemble tool_use input_json_delta.
@@ -35,8 +99,11 @@ type convertAnthropicResponseToGeminiParams struct {
 
 	// Streaming state for tool_use assembly
 	// Keyed by content_block index from Claude SSE events
-	ToolUseNames map[int]string           // function/tool name per block index
-	ToolUseArgs  map[int]*strings.Builder // accumulates partial_json across deltas
+	ToolUseNames       map[int]string           // function/tool name per block index
+	ToolUseArgs        map[int]*strings.Builder // accumulates partial_json across deltas
+	ToolUseIDs         map[int]string           // provider-visible tool ID per block index
+	ToolUseSignatures  map[int]string           // Gemini thought signature per tool block index
+	ThinkingSignatures map[int]*strings.Builder // raw Claude signature fragments per thinking block index
 }
 
 // ConvertClaudeResponseToGemini converts Claude Code streaming response format to Gemini format.
@@ -105,16 +172,35 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, _, _, ra
 		return [][]byte{}
 
 	case "content_block_start":
-		// Start of a content block - record tool_use name by index for functionCall assembly
+		// Start of a content block - record tool_use or thinking state.
 		if cb := root.Get("content_block"); cb.Exists() {
-			if cb.Get("type").String() == "tool_use" {
-				idx := int(root.Get("index").Int())
-				if (*param).(*convertAnthropicResponseToGeminiParams).ToolUseNames == nil {
-					(*param).(*convertAnthropicResponseToGeminiParams).ToolUseNames = map[int]string{}
+			params := (*param).(*convertAnthropicResponseToGeminiParams)
+			idx := int(root.Get("index").Int())
+			switch cb.Get("type").String() {
+			case "tool_use":
+				if params.ToolUseNames == nil {
+					params.ToolUseNames = map[int]string{}
 				}
 				if name := cb.Get("name"); name.Exists() {
-					(*param).(*convertAnthropicResponseToGeminiParams).ToolUseNames[idx] = name.String()
+					params.ToolUseNames[idx] = name.String()
 				}
+				if toolID := strings.TrimSpace(cb.Get("id").String()); toolID != "" {
+					if params.ToolUseIDs == nil {
+						params.ToolUseIDs = map[int]string{}
+					}
+					params.ToolUseIDs[idx] = toolID
+				}
+				if thoughtSignature := claudeContentBlockSignature(
+					cb,
+					signature.BlockKindGeminiFunctionCall,
+				); thoughtSignature != "" {
+					if params.ToolUseSignatures == nil {
+						params.ToolUseSignatures = map[int]string{}
+					}
+					params.ToolUseSignatures[idx] = thoughtSignature
+				}
+			case "thinking":
+				appendClaudeThinkingSignature(params, idx, rawClaudeContentBlockSignature(cb))
 			}
 		}
 		return [][]byte{}
@@ -139,6 +225,14 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, _, _, ra
 					thinkingPart, _ = sjson.SetBytes(thinkingPart, "text", text.String())
 					template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", thinkingPart)
 				}
+			case "signature_delta":
+				idx := int(root.Get("index").Int())
+				appendClaudeThinkingSignature(
+					(*param).(*convertAnthropicResponseToGeminiParams),
+					idx,
+					delta.Get("signature").String(),
+				)
+				return [][]byte{}
 			case "input_json_delta":
 				// Tool use input delta - accumulate partial_JSON by index for later assembly at content_block_stop
 				idx := int(root.Get("index").Int())
@@ -160,18 +254,19 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, _, _, ra
 		return [][]byte{template}
 
 	case "content_block_stop":
-		// End of content block - finalize tool calls if any
+		// End of content block - finalize tool calls or an aggregated thinking signature.
 		idx := int(root.Get("index").Int())
 		// Claude's content_block_stop often doesn't include content_block payload (see docs/response-claude.txt)
 		// So we finalize using accumulated state captured during content_block_start and input_json_delta.
+		params := (*param).(*convertAnthropicResponseToGeminiParams)
 		name := ""
-		if (*param).(*convertAnthropicResponseToGeminiParams).ToolUseNames != nil {
-			name = (*param).(*convertAnthropicResponseToGeminiParams).ToolUseNames[idx]
+		if params.ToolUseNames != nil {
+			name = params.ToolUseNames[idx]
 		}
 		var argsTrim string
-		if (*param).(*convertAnthropicResponseToGeminiParams).ToolUseArgs != nil {
-			if b := (*param).(*convertAnthropicResponseToGeminiParams).ToolUseArgs[idx]; b != nil {
-				argsTrim = strings.TrimSpace(b.String())
+		if params.ToolUseArgs != nil {
+			if builder := params.ToolUseArgs[idx]; builder != nil {
+				argsTrim = strings.TrimSpace(builder.String())
 			}
 		}
 		if name != "" || argsTrim != "" {
@@ -182,16 +277,26 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, _, _, ra
 			if argsTrim != "" {
 				functionCall, _ = sjson.SetRawBytes(functionCall, "functionCall.args", []byte(argsTrim))
 			}
+			if toolID := params.ToolUseIDs[idx]; toolID != "" {
+				functionCall, _ = sjson.SetBytes(functionCall, "functionCall.id", toolID)
+			}
+			if thoughtSignature := params.ToolUseSignatures[idx]; thoughtSignature != "" {
+				functionCall, _ = sjson.SetBytes(functionCall, "thoughtSignature", thoughtSignature)
+			}
 			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", functionCall)
 			template, _ = sjson.SetBytes(template, "candidates.0.finishReason", "STOP")
-			(*param).(*convertAnthropicResponseToGeminiParams).LastStorageOutput = append([]byte(nil), template...)
-			// cleanup used state for this index
-			if (*param).(*convertAnthropicResponseToGeminiParams).ToolUseArgs != nil {
-				delete((*param).(*convertAnthropicResponseToGeminiParams).ToolUseArgs, idx)
-			}
-			if (*param).(*convertAnthropicResponseToGeminiParams).ToolUseNames != nil {
-				delete((*param).(*convertAnthropicResponseToGeminiParams).ToolUseNames, idx)
-			}
+			params.LastStorageOutput = append([]byte(nil), template...)
+			delete(params.ToolUseArgs, idx)
+			delete(params.ToolUseNames, idx)
+			delete(params.ToolUseIDs, idx)
+			delete(params.ToolUseSignatures, idx)
+			delete(params.ThinkingSignatures, idx)
+			return [][]byte{template}
+		}
+		if thoughtSignature := takeGeminiThinkingSignature(params, idx); thoughtSignature != "" {
+			thinkingPart := []byte(`{"thought":true,"thoughtSignature":""}`)
+			thinkingPart, _ = sjson.SetBytes(thinkingPart, "thoughtSignature", thoughtSignature)
+			template, _ = sjson.SetRawBytes(template, "candidates.0.content.parts.-1", thinkingPart)
 			return [][]byte{template}
 		}
 		return [][]byte{}
@@ -315,6 +420,8 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 		IsStreaming:       false,
 		ToolUseNames:      nil,
 		ToolUseArgs:       nil,
+		ToolUseIDs:        nil,
+		ToolUseSignatures: nil,
 	}
 
 	// Process each streaming event and collect parts
@@ -345,16 +452,34 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 			}
 
 		case "content_block_start":
-			// Prepare for content block; record tool_use name by index for later functionCall assembly
+			// Prepare for content block and retain request-local tool or thinking state.
 			idx := int(root.Get("index").Int())
 			if cb := root.Get("content_block"); cb.Exists() {
-				if cb.Get("type").String() == "tool_use" {
+				switch cb.Get("type").String() {
+				case "tool_use":
 					if newParam.ToolUseNames == nil {
 						newParam.ToolUseNames = map[int]string{}
 					}
 					if name := cb.Get("name"); name.Exists() {
 						newParam.ToolUseNames[idx] = name.String()
 					}
+					if toolID := strings.TrimSpace(cb.Get("id").String()); toolID != "" {
+						if newParam.ToolUseIDs == nil {
+							newParam.ToolUseIDs = map[int]string{}
+						}
+						newParam.ToolUseIDs[idx] = toolID
+					}
+					if thoughtSignature := claudeContentBlockSignature(
+						cb,
+						signature.BlockKindGeminiFunctionCall,
+					); thoughtSignature != "" {
+						if newParam.ToolUseSignatures == nil {
+							newParam.ToolUseSignatures = map[int]string{}
+						}
+						newParam.ToolUseSignatures[idx] = thoughtSignature
+					}
+				case "thinking":
+					appendClaudeThinkingSignature(newParam, idx, rawClaudeContentBlockSignature(cb))
 				}
 			}
 			continue
@@ -378,6 +503,12 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 						partJSON, _ = sjson.SetBytes(partJSON, "text", text.String())
 						allParts = append(allParts, partJSON)
 					}
+				case "signature_delta":
+					appendClaudeThinkingSignature(
+						newParam,
+						int(root.Get("index").Int()),
+						delta.Get("signature").String(),
+					)
 				case "input_json_delta":
 					// accumulate args partial_JSON for this index
 					idx := int(root.Get("index").Int())
@@ -416,14 +547,24 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 				if argsTrim != "" {
 					functionCallJSON, _ = sjson.SetRawBytes(functionCallJSON, "functionCall.args", []byte(argsTrim))
 				}
+				if toolID := newParam.ToolUseIDs[idx]; toolID != "" {
+					functionCallJSON, _ = sjson.SetBytes(functionCallJSON, "functionCall.id", toolID)
+				}
+				if thoughtSignature := newParam.ToolUseSignatures[idx]; thoughtSignature != "" {
+					functionCallJSON, _ = sjson.SetBytes(functionCallJSON, "thoughtSignature", thoughtSignature)
+				}
 				allParts = append(allParts, functionCallJSON)
-				// cleanup used state for this index
-				if newParam.ToolUseArgs != nil {
-					delete(newParam.ToolUseArgs, idx)
-				}
-				if newParam.ToolUseNames != nil {
-					delete(newParam.ToolUseNames, idx)
-				}
+				delete(newParam.ToolUseArgs, idx)
+				delete(newParam.ToolUseNames, idx)
+				delete(newParam.ToolUseIDs, idx)
+				delete(newParam.ToolUseSignatures, idx)
+				delete(newParam.ThinkingSignatures, idx)
+				continue
+			}
+			if thoughtSignature := takeGeminiThinkingSignature(newParam, idx); thoughtSignature != "" {
+				partJSON := []byte(`{"thought":true,"thoughtSignature":""}`)
+				partJSON, _ = sjson.SetBytes(partJSON, "thoughtSignature", thoughtSignature)
+				allParts = append(allParts, partJSON)
 			}
 
 		case "message_delta":
@@ -508,6 +649,7 @@ func consolidateParts(parts [][]byte) [][]byte {
 	var consolidated [][]byte
 	var currentTextPart strings.Builder
 	var currentThoughtPart strings.Builder
+	var currentThoughtSignature string
 	var hasText, hasThought bool
 
 	flushText := func() {
@@ -522,12 +664,20 @@ func consolidateParts(parts [][]byte) [][]byte {
 	}
 
 	flushThought := func() {
-		// Flush accumulated thinking content to the consolidated parts array
-		if hasThought && currentThoughtPart.Len() > 0 {
+		// Flush accumulated thinking content and its latest non-empty signature.
+		if hasThought && (currentThoughtPart.Len() > 0 || currentThoughtSignature != "") {
 			thoughtPartJSON := []byte(`{"thought":true,"text":""}`)
 			thoughtPartJSON, _ = sjson.SetBytes(thoughtPartJSON, "text", currentThoughtPart.String())
+			if currentThoughtSignature != "" {
+				thoughtPartJSON, _ = sjson.SetBytes(
+					thoughtPartJSON,
+					"thoughtSignature",
+					currentThoughtSignature,
+				)
+			}
 			consolidated = append(consolidated, thoughtPartJSON)
 			currentThoughtPart.Reset()
+			currentThoughtSignature = ""
 			hasThought = false
 		}
 	}
@@ -549,6 +699,10 @@ func consolidateParts(parts [][]byte) [][]byte {
 
 			if text := part.Get("text"); text.Exists() && text.Type == gjson.String {
 				currentThoughtPart.WriteString(text.String())
+				hasThought = true
+			}
+			if thoughtSignature := part.Get("thoughtSignature"); thoughtSignature.Type == gjson.String && thoughtSignature.String() != "" {
+				currentThoughtSignature = thoughtSignature.String()
 				hasThought = true
 			}
 		} else if text := part.Get("text"); text.Exists() && text.Type == gjson.String {

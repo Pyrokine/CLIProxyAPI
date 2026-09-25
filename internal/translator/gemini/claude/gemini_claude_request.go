@@ -10,15 +10,15 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
-
-const geminiClaudeThoughtSignature = "skip_thought_signature_validator"
 
 // convertClaudeRequestToGeminiDefault parses a Claude API request and returns a complete
 // Gemini CLI request body (as JSON bytes) ready to be sent via SendRawMessageStream.
@@ -126,16 +126,22 @@ func convertClaudeRequestToGemini(
 								contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
 							case "thinking":
-								if !preserveEmptyThinkingBlocks || role != "model" {
+								if role != "model" {
+									return true
+								}
+								thinkingText := contentResult.Get("thinking").String()
+								thoughtSignature, keep := resolveGeminiThinkingSignature(
+									modelName,
+									thinkingText,
+									contentResult.Get("signature").String(),
+									preserveEmptyThinkingBlocks,
+								)
+								if !keep {
 									return true
 								}
 								part := []byte(`{"text":"","thought":true,"thoughtSignature":""}`)
-								part, _ = sjson.SetBytes(part, "text", contentResult.Get("thinking").String())
-								part, _ = sjson.SetBytes(
-									part,
-									"thoughtSignature",
-									contentResult.Get("signature").String(),
-								)
+								part, _ = sjson.SetBytes(part, "text", thinkingText)
+								part, _ = sjson.SetBytes(part, "thoughtSignature", thoughtSignature)
 								contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
 							case "tool_use":
@@ -149,7 +155,11 @@ func convertClaudeRequestToGemini(
 								argsResult := gjson.Parse(functionArgs)
 								if argsResult.IsObject() && gjson.Valid(functionArgs) {
 									part := []byte(`{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`)
-									part, _ = sjson.SetBytes(part, "thoughtSignature", geminiClaudeThoughtSignature)
+									part, _ = sjson.SetBytes(
+										part,
+										"thoughtSignature",
+										resolveGeminiFunctionCallSignature(contentResult, preserveEmptyThinkingBlocks),
+									)
 									part, _ = sjson.SetBytes(part, "functionCall.name", functionName)
 									part, _ = sjson.SetRawBytes(part, "functionCall.args", []byte(functionArgs))
 									contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
@@ -352,6 +362,61 @@ func convertClaudeRequestToGemini(
 	}
 
 	return common.AttachDefaultSafetySettings(out, "safetySettings")
+}
+
+func resolveGeminiThinkingSignature(
+	modelName, thinkingText, rawSignature string,
+	compatibilityMode bool,
+) (string, bool) {
+	if strings.TrimSpace(rawSignature) == "" && thinkingText != "" {
+		rawSignature = cache.GetCachedSignature(modelName, thinkingText)
+	}
+	if strings.TrimSpace(rawSignature) == "" {
+		return "", compatibilityMode
+	}
+
+	if compatibilityMode {
+		if normalized, ok := signature.CompatibleSignatureForProviderWithOptions(
+			signature.ProviderGemini,
+			rawSignature,
+			signature.BlockKindGeminiModelPart,
+			signature.SignatureCompatibilityOptions{PreserveUnknownNonEmpty: true},
+		); ok {
+			return normalized, true
+		}
+		return signature.GeminiReplaySignatureOrBypass(rawSignature, signature.BlockKindGeminiModelPart), true
+	}
+
+	return signature.CompatibleSignatureForProvider(
+		signature.ProviderGemini,
+		rawSignature,
+		signature.BlockKindGeminiModelPart,
+	)
+}
+
+func resolveGeminiFunctionCallSignature(content gjson.Result, compatibilityMode bool) string {
+	rawSignature := ""
+	for _, path := range []string{
+		"signature",
+		"thought_signature",
+		"extra_content.google.thought_signature",
+	} {
+		if value := strings.TrimSpace(content.Get(path).String()); value != "" {
+			rawSignature = value
+			break
+		}
+	}
+	if compatibilityMode {
+		if normalized, ok := signature.CompatibleSignatureForProviderWithOptions(
+			signature.ProviderGemini,
+			rawSignature,
+			signature.BlockKindGeminiFunctionCall,
+			signature.SignatureCompatibilityOptions{PreserveUnknownNonEmpty: true},
+		); ok {
+			return normalized
+		}
+	}
+	return signature.GeminiReplaySignatureOrBypass(rawSignature, signature.BlockKindGeminiFunctionCall)
 }
 
 func toolNameFromClaudeToolUseID(toolUseID string) string {

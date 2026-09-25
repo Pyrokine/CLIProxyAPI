@@ -421,3 +421,24 @@ func TestConvertOpenAIRequestToClaudeSystemOnlyInputKeepsFallbackUserMessage(t *
 		t.Fatalf("messages = %s, want one fallback user message", gjson.GetBytes(out, "messages").Raw)
 	}
 }
+
+func TestConvertOpenAIRequestToClaudeMaxCompletionTokensFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int64
+	}{
+		{"completion only", `{"messages":[{"role":"user","content":"hi"}],"max_completion_tokens":128000}`, 128000},
+		{"max tokens only", `{"messages":[{"role":"user","content":"hi"}],"max_tokens":4096}`, 4096},
+		{"max tokens wins", `{"messages":[{"role":"user","content":"hi"}],"max_tokens":4096,"max_completion_tokens":128000}`, 4096},
+		{"default", `{"messages":[{"role":"user","content":"hi"}]}`, 32000},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out := convertOpenAIRequestToClaudeDefault("claude-test", []byte(test.body), false)
+			if got := gjson.GetBytes(out, "max_tokens").Int(); got != test.want {
+				t.Fatalf("max_tokens = %d, want %d; output=%s", got, test.want, out)
+			}
+		})
+	}
+}

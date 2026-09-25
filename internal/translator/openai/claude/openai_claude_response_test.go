@@ -127,17 +127,18 @@ func TestConvertOpenAIResponseToClaudeStreamSuppressesEmptyToolNameStopReason(t 
 		`{"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
 	)
 
-	if got := len(toolUseStarts(events)); got != 0 {
-		t.Fatalf("tool_use start count = %d, want 0", got)
+	starts := toolUseStarts(events)
+	if len(starts) != 1 {
+		t.Fatalf("tool_use start count = %d, want 1", len(starts))
 	}
-	if got := countSSEEvents(events, "content_block_delta"); got != 0 {
-		t.Fatalf("content_block_delta count = %d, want 0", got)
+	if got := gjson.Get(starts[0].Payload, "content_block.name").String(); got != "tool_0" {
+		t.Fatalf("synthesized tool name = %q, want tool_0", got)
 	}
-	if got := countSSEEvents(events, "content_block_stop"); got != 0 {
-		t.Fatalf("content_block_stop count = %d, want 0", got)
+	if got := countSSEEvents(events, "content_block_delta"); got != 1 {
+		t.Fatalf("content_block_delta count = %d, want 1", got)
 	}
-	if got := lastStopReason(events); got == "tool_use" {
-		t.Fatalf("stop_reason = %q, want non-tool_use when no tool block was emitted", got)
+	if got := lastStopReason(events); got != "tool_use" {
+		t.Fatalf("stop_reason = %q, want tool_use", got)
 	}
 }
 

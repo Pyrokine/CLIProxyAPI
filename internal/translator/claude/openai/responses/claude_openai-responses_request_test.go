@@ -154,15 +154,12 @@ func TestConvertOpenAIResponsesRequestToClaudeTrailingReasoningFlushes(t *testin
 	out := convertOpenAIResponsesRequestToClaudeDefault("claude-test", raw, false)
 	root := gjson.ParseBytes(out)
 
-	thinking := root.Get("messages.1.content.0")
-	if got := thinking.Get("type").String(); got != "thinking" {
-		t.Fatalf("trailing content type = %q, want thinking. Output: %s", got, string(out))
+	messages := root.Get("messages").Array()
+	if len(messages) != 1 {
+		t.Fatalf("message count = %d, want only the user message. Output: %s", len(messages), string(out))
 	}
-	if got := thinking.Get("signature").String(); got != signature {
-		t.Fatalf("trailing thinking signature = %q, want %q", got, signature)
-	}
-	if got := thinking.Get("thinking").String(); got != "tail reasoning" {
-		t.Fatalf("trailing thinking text = %q, want tail reasoning", got)
+	if got := messages[0].Get("role").String(); got != "user" {
+		t.Fatalf("remaining role = %q, want user", got)
 	}
 }
 
@@ -384,6 +381,38 @@ func TestConvertOpenAIResponsesRequestToClaudeGroupsAssistantAndToolResultTurns(
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToClaudeMatchesMissingOutputBeforeFutureExplicitID(t *testing.T) {
+	raw := []byte(`{
+		"input":[
+			{"type":"function_call","call_id":"call-a","name":"same","arguments":"{}"},
+			{"type":"function_call","name":"same","arguments":"{}"},
+			{"type":"function_call_output","name":"same","output":"generated-result"},
+			{"type":"function_call_output","call_id":"call-a","output":"explicit-result"}
+		]
+	}`)
+
+	out := convertOpenAIResponsesRequestToClaudeDefault("claude-test", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2; output: %s", len(messages), out)
+	}
+	toolUses := messages[0].Get("content").Array()
+	if got := toolUses[0].Get("id").String(); got != "call-a" {
+		t.Fatalf("explicit tool use ID = %q, want call-a; output: %s", got, out)
+	}
+	const generated = "call_responses_0000000000000001"
+	if got := toolUses[1].Get("id").String(); got != generated {
+		t.Fatalf("generated tool use ID = %q, want %q; output: %s", got, generated, out)
+	}
+	results := messages[1].Get("content").Array()
+	if got := results[0].Get("tool_use_id").String(); got != generated {
+		t.Fatalf("named result ID = %q, want %q; output: %s", got, generated, out)
+	}
+	if got := results[1].Get("tool_use_id").String(); got != "call-a" {
+		t.Fatalf("future explicit result ID = %q, want call-a; output: %s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToClaudeMergesUserMessagesAndPreservesCacheControl(t *testing.T) {
 	raw := []byte(`{
 		"input":[
@@ -563,5 +592,32 @@ func TestConvertOpenAIResponsesRequestToClaudeSystemCacheControlAppliesToLastBlo
 	}
 	if system[1].Get("cache_control.ttl").Exists() {
 		t.Fatalf("part-level cache_control must win: %s", system[1].Raw)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaudeServiceTierAndTokenDefaults(t *testing.T) {
+	tests := []struct {
+		name      string
+		model     string
+		body      string
+		wantToken int64
+		wantSpeed string
+	}{
+		{"priority", "claude-test", `{"service_tier":"priority","input":"hi"}`, 32000, "fast"},
+		{"default tier", "claude-test", `{"service_tier":"default","input":"hi"}`, 32000, ""},
+		{"fable default", "claude-fable-5-1", `{"input":"hi"}`, 64000, ""},
+		{"registered maximum", "claude-3-5-haiku-20241022", `{"max_output_tokens":128000,"input":"hi"}`, 8192, ""},
+		{"null keeps default", "claude-fable-5-1", `{"max_output_tokens":null,"input":"hi"}`, 64000, ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out := convertOpenAIResponsesRequestToClaudeDefault(test.model, []byte(test.body), false)
+			if got := gjson.GetBytes(out, "max_tokens").Int(); got != test.wantToken {
+				t.Fatalf("max_tokens = %d, want %d; output=%s", got, test.wantToken, out)
+			}
+			if got := gjson.GetBytes(out, "speed").String(); got != test.wantSpeed {
+				t.Fatalf("speed = %q, want %q; output=%s", got, test.wantSpeed, out)
+			}
+		})
 	}
 }

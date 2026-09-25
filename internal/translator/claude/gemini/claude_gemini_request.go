@@ -6,26 +6,17 @@
 package gemini
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
-	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-)
-
-var (
-	user    = ""
-	account = ""
-	session = ""
 )
 
 // ConvertGeminiRequestToClaude parses and transforms a Gemini API request into Claude Code API format.
@@ -49,46 +40,21 @@ var (
 func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 
-	if account == "" {
-		u, _ := uuid.NewRandom()
-		account = u.String()
-	}
-	if session == "" {
-		u, _ := uuid.NewRandom()
-		session = u.String()
-	}
-	if user == "" {
-		sum := sha256.Sum256([]byte(account + session))
-		user = hex.EncodeToString(sum[:])
-	}
-	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
-
 	// Base Claude message payload
-	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
+	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
+	out, _ = sjson.SetBytes(out, "metadata.user_id", deriveClaudeMetadataUserID(modelName, rawJSON))
 
 	root := gjson.ParseBytes(rawJSON)
 	messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(
 		int(root.Get("contents.#").Int()) + 1,
 	)
 
-	// Helper for generating tool call IDs in the form: toolu_<alphanum>
-	// This ensures unique identifiers for tool calls in the Claude Code format
-	genToolCallID := func() string {
-		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-		var b strings.Builder
-		// 24 chars random suffix for uniqueness
-		for range 24 {
-			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-			b.WriteByte(letters[n.Int64()])
-		}
-		return "toolu_" + b.String()
+	var toolCalls translatorcommon.GeminiToolCallQueue
+	toolCallCounter := 0
+	newToolCallID := func() string {
+		toolCallCounter++
+		return fmt.Sprintf("toolu_gemini_%016d", toolCallCounter)
 	}
-
-	// FIFO queue to store tool call IDs for matching with tool results
-	// Gemini uses sequential pairing across possibly multiple in-flight
-	// functionCalls, so we keep a FIFO queue of generated tool IDs and
-	// consume them in order when functionResponses arrive.
-	var pendingToolIDs []string
 
 	// Model mapping to specify which Claude Code model to use
 	out, _ = sjson.SetBytes(out, "model", modelName)
@@ -210,6 +176,9 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 			var systemText strings.Builder
 			parts.ForEach(
 				func(_, part gjson.Result) bool {
+					if translatorcommon.IsGeminiThoughtPart(part) {
+						return true
+					}
 					if text := part.Get("text"); text.Exists() {
 						if systemText.Len() > 0 {
 							systemText.WriteString("\n")
@@ -254,6 +223,10 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				if parts := content.Get("parts"); parts.Exists() && parts.IsArray() {
 					parts.ForEach(
 						func(_, part gjson.Result) bool {
+							if translatorcommon.IsGeminiThoughtPart(part) {
+								return true
+							}
+
 							// Text content conversion
 							if text := part.Get("text"); text.Exists() {
 								textContent := []byte(`{"type":"text","text":""}`)
@@ -266,15 +239,14 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							if fc := part.Get("functionCall"); fc.Exists() && role == "assistant" {
 								toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 
-								// Generate a unique tool ID and enqueue it for later matching
-								// with the corresponding functionResponse
-								toolID := genToolCallID()
-								pendingToolIDs = append(pendingToolIDs, toolID)
-								toolUse, _ = sjson.SetBytes(toolUse, "id", toolID)
-
-								if name := fc.Get("name"); name.Exists() {
-									toolUse, _ = sjson.SetBytes(toolUse, "name", name.String())
+								functionName := fc.Get("name").String()
+								toolID := translatorcommon.GeminiToolCallID(fc)
+								if toolID == "" {
+									toolID = newToolCallID()
 								}
+								toolCalls.Add(functionName, toolID)
+								toolUse, _ = sjson.SetBytes(toolUse, "id", toolID)
+								toolUse, _ = sjson.SetBytes(toolUse, "name", functionName)
 								if args := fc.Get("args"); args.Exists() && args.IsObject() {
 									toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(args.Raw))
 								}
@@ -286,16 +258,10 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							if fr := part.Get("functionResponse"); fr.Exists() {
 								toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 
-								// Attach the oldest queued tool_id to pair the response
-								// with its call. If the queue is empty, generate a new id.
-								var toolID string
-								if len(pendingToolIDs) > 0 {
-									toolID = pendingToolIDs[0]
-									// Pop the first element from the queue
-									pendingToolIDs = pendingToolIDs[1:]
-								} else {
-									// Fallback: generate new ID if no pending tool_use found
-									toolID = genToolCallID()
+								functionName := fr.Get("name").String()
+								toolID := toolCalls.Match(functionName, translatorcommon.GeminiToolCallID(fr))
+								if toolID == "" {
+									toolID = newToolCallID()
 								}
 								toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", toolID)
 
@@ -403,6 +369,82 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
 	return out
+}
+
+func deriveClaudeMetadataUserID(modelName string, rawJSON []byte) string {
+	root := gjson.ParseBytes(rawJSON)
+	if userID := root.Get("metadata.user_id"); userID.Type == gjson.String && strings.TrimSpace(userID.String()) != "" {
+		return userID.String()
+	}
+
+	var seed string
+	for _, path := range []string{
+		"prompt_cache_key",
+		"promptCacheKey",
+		"session_id",
+		"sessionId",
+		"metadata.session_id",
+		"metadata.sessionId",
+		"metadata.canonical_session_id",
+		"canonical_session_id",
+	} {
+		if value := strings.TrimSpace(root.Get(path).String()); value != "" {
+			seed = path + "\x00" + value
+			break
+		}
+	}
+
+	if seed == "" {
+		conversation := root.Get("conversation")
+		switch {
+		case strings.TrimSpace(conversation.Get("id").String()) != "":
+			seed = "conversation.id\x00" + strings.TrimSpace(conversation.Get("id").String())
+		case conversation.Type == gjson.String && strings.TrimSpace(conversation.String()) != "":
+			seed = "conversation\x00" + strings.TrimSpace(conversation.String())
+		case strings.TrimSpace(root.Get("conversation_id").String()) != "":
+			seed = "conversation_id\x00" + strings.TrimSpace(root.Get("conversation_id").String())
+		}
+	}
+
+	if seed == "" {
+		for _, content := range root.Get("contents").Array() {
+			role := strings.ToLower(strings.TrimSpace(content.Get("role").String()))
+			if role != "" && role != "user" {
+				continue
+			}
+			var text strings.Builder
+			for _, part := range content.Get("parts").Array() {
+				if translatorcommon.IsGeminiThoughtPart(part) {
+					continue
+				}
+				if value := strings.TrimSpace(part.Get("text").String()); value != "" {
+					if text.Len() > 0 {
+						text.WriteByte('\n')
+					}
+					text.WriteString(value)
+				}
+			}
+			if text.Len() > 0 {
+				seed = "content\x00" + text.String()
+				break
+			}
+		}
+	}
+
+	if seed == "" {
+		seed = "model\x00" + strings.TrimSpace(modelName)
+		if systemInstruction := root.Get("system_instruction"); systemInstruction.Exists() {
+			seed += "\x00system_instruction\x00" + systemInstruction.Raw
+		} else if systemInstruction = root.Get("systemInstruction"); systemInstruction.Exists() {
+			seed += "\x00systemInstruction\x00" + systemInstruction.Raw
+		}
+	}
+	if strings.Trim(seed, "\x00") == "model" {
+		return "unknown"
+	}
+
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])
 }
 
 func geminiClaudeInlineData(part gjson.Result) gjson.Result {

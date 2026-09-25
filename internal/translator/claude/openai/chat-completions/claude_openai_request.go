@@ -9,7 +9,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"math/big"
 	"strings"
 
@@ -17,15 +16,8 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
-	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
-)
-
-var (
-	user    = ""
-	account = ""
-	session = ""
 )
 
 // convertOpenAIRequestToClaudeDefault parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
@@ -62,25 +54,11 @@ func convertOpenAIRequestToClaude(
 	preserveThinkingBlocks bool,
 ) []byte {
 	rawJSON := inputRawJSON
-
-	if account == "" {
-		u, _ := uuid.NewRandom()
-		account = u.String()
-	}
-	if session == "" {
-		u, _ := uuid.NewRandom()
-		session = u.String()
-	}
-	if user == "" {
-		sum := sha256.Sum256([]byte(account + session))
-		user = hex.EncodeToString(sum[:])
-	}
-	userID := fmt.Sprintf("user_%s_account_%s_session_%s", user, account, session)
-
-	// Base Claude Code API template with default max_tokens value
-	out := []byte(fmt.Sprintf(`{"model":"","max_tokens":32000,"messages":[],"metadata":{"user_id":"%s"}}`, userID))
-
 	root := gjson.ParseBytes(rawJSON)
+
+	// Base Claude Code API template with a deterministic request identity.
+	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
+	out, _ = sjson.SetBytes(out, "metadata.user_id", deriveClaudeUserID(root, modelName, "messages"))
 
 	// Convert OpenAI reasoning_effort to Claude thinking config.
 	if v := root.Get("reasoning_effort"); v.Exists() {
@@ -147,8 +125,13 @@ func convertOpenAIRequestToClaude(
 	// Model mapping to specify which Claude Code model to use
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
-	// Max tokens configuration with fallback to default value
-	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
+	// OpenAI deprecated max_tokens in favor of max_completion_tokens, so
+	// accept either spelling while preserving max_tokens precedence.
+	maxTokens := root.Get("max_tokens")
+	if !maxTokens.Exists() {
+		maxTokens = root.Get("max_completion_tokens")
+	}
+	if maxTokens.Exists() {
 		out, _ = sjson.SetBytes(out, "max_tokens", maxTokens.Int())
 	}
 
@@ -179,8 +162,19 @@ func convertOpenAIRequestToClaude(
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
 	// Process messages and transform them to Claude Code format
+	systemBlocks := make([][]byte, 0)
+	var messageBlocks [][]byte
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
-		systemBlocks := make([][]byte, 0)
+		lastToolMessage := make(map[string]gjson.Result)
+		messages.ForEach(func(_, message gjson.Result) bool {
+			if message.Get("role").String() == "tool" {
+				if rawID := message.Get("tool_call_id").String(); rawID != "" {
+					lastToolMessage[rawID] = message
+				}
+			}
+			return true
+		})
+		emittedToolResults := make(map[string]struct{})
 		messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(
 			int(messages.Get("#").Int()),
 		)
@@ -297,9 +291,22 @@ func convertOpenAIRequestToClaude(
 					messageAccumulator.Append(msg)
 
 				case "tool":
-					// Handle tool result messages conversion
-					toolCallID := util.SanitizeClaudeToolID(message.Get("tool_call_id").String())
-					toolContentResult := message.Get("content")
+					// Deduplicate by the unsanitized call ID so collisions introduced by
+					// Claude ID normalization do not merge unrelated tool results. The
+					// first slot is retained while the last result value wins.
+					rawID := message.Get("tool_call_id").String()
+					if rawID != "" {
+						if _, exists := emittedToolResults[rawID]; exists {
+							return true
+						}
+						emittedToolResults[rawID] = struct{}{}
+					}
+					targetMessage := message
+					if lastMessage, exists := lastToolMessage[rawID]; rawID != "" && exists {
+						targetMessage = lastMessage
+					}
+					toolCallID := util.SanitizeClaudeToolID(rawID)
+					toolContentResult := targetMessage.Get("content")
 
 					msg := []byte(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"","content":""}]}`)
 					msg, _ = sjson.SetBytes(msg, "content.0.tool_use_id", toolCallID)
@@ -315,19 +322,25 @@ func convertOpenAIRequestToClaude(
 			},
 		)
 
-		messageBlocks := messageAccumulator.Messages()
-		if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
-			messageBlocks = append(
-				messageBlocks,
-				[]byte(`{"role":"user","content":[{"type":"text","text":""}]}`),
-			)
-		}
-		if len(systemBlocks) > 0 {
-			out, _ = sjson.SetRawBytes(out, "system", translatorcommon.JoinRawArray(systemBlocks))
-		}
-		if len(messageBlocks) > 0 {
-			out = translatorcommon.SetRawArrayItems(out, "messages", messageBlocks)
-		}
+		messageBlocks = messageAccumulator.Messages()
+	}
+
+	if formatInstruction := claudeStructuredOutputInstruction(root.Get("response_format")); formatInstruction != "" {
+		systemBlock := []byte(`{"type":"text","text":""}`)
+		systemBlock, _ = sjson.SetBytes(systemBlock, "text", formatInstruction)
+		systemBlocks = append(systemBlocks, systemBlock)
+	}
+	if len(messageBlocks) == 0 && len(systemBlocks) > 0 {
+		messageBlocks = append(
+			messageBlocks,
+			[]byte(`{"role":"user","content":[{"type":"text","text":""}]}`),
+		)
+	}
+	if len(systemBlocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "system", translatorcommon.JoinRawArray(systemBlocks))
+	}
+	if len(messageBlocks) > 0 {
+		out = translatorcommon.SetRawArrayItems(out, "messages", messageBlocks)
 	}
 
 	// Tools mapping: OpenAI tools -> Claude Code tools
@@ -337,7 +350,7 @@ func convertOpenAIRequestToClaude(
 			func(_, tool gjson.Result) bool {
 				if tool.Get("type").String() == "function" {
 					function := tool.Get("function")
-					anthropicTool := []byte(`{"name":"","description":""}`)
+					anthropicTool := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
 					anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", function.Get("name").String())
 					anthropicTool, _ = sjson.SetBytes(
 						anthropicTool, "description", function.Get("description").String(),
@@ -505,4 +518,109 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 	}
 
 	return content.Raw, false
+}
+
+func deriveClaudeUserID(root gjson.Result, modelName, messagePath string) string {
+	for _, path := range []string{"metadata.user_id", "user"} {
+		value := root.Get(path)
+		if value.Type == gjson.String && strings.TrimSpace(value.String()) != "" {
+			return value.String()
+		}
+	}
+
+	var seed string
+	for _, path := range []string{"prompt_cache_key", "session_id", "sessionId", "conversation.id", "conversation_id"} {
+		if value := strings.TrimSpace(root.Get(path).String()); value != "" {
+			seed = path + "\x00" + value
+			break
+		}
+	}
+	if seed == "" {
+		for _, message := range root.Get(messagePath).Array() {
+			if strings.EqualFold(strings.TrimSpace(message.Get("role").String()), "user") {
+				if text := stableMessageText(message.Get("content")); text != "" {
+					seed = "content\x00" + text
+					break
+				}
+			}
+		}
+	}
+	if seed == "" {
+		seed = "model\x00" + strings.TrimSpace(modelName)
+		for _, path := range []string{"instructions", "system"} {
+			if value := root.Get(path); value.Exists() {
+				seed += "\x00" + path + "\x00" + value.Raw
+			}
+		}
+	}
+	if strings.Trim(seed, "\x00") == "model" {
+		return "unknown"
+	}
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])
+}
+
+func stableMessageText(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String())
+	}
+	if !content.IsArray() {
+		return ""
+	}
+	var texts []string
+	content.ForEach(func(_, part gjson.Result) bool {
+		switch part.Get("type").String() {
+		case "text", "input_text", "output_text":
+			if text := strings.TrimSpace(part.Get("text").String()); text != "" {
+				texts = append(texts, text)
+			}
+		}
+		return true
+	})
+	return strings.Join(texts, "\n")
+}
+
+func claudeStructuredOutputInstruction(format gjson.Result) string {
+	if !format.Exists() {
+		return ""
+	}
+	switch strings.ToLower(strings.TrimSpace(format.Get("type").String())) {
+	case "json_object":
+		return "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object."
+	case "json_schema":
+		jsonSchema := format.Get("json_schema")
+		schema := jsonSchema.Get("schema")
+		if !schema.Exists() {
+			schema = format.Get("schema")
+		}
+		if !schema.Exists() {
+			return "You must format your entire response as a valid JSON object. Do not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object."
+		}
+		var instruction strings.Builder
+		instruction.WriteString("You must format your entire response as valid JSON that conforms strictly to the following JSON schema:\n")
+		name := strings.TrimSpace(jsonSchema.Get("name").String())
+		if name == "" {
+			name = strings.TrimSpace(format.Get("name").String())
+		}
+		if name != "" {
+			instruction.WriteString("Schema Name: ")
+			instruction.WriteString(name)
+			instruction.WriteByte('\n')
+		}
+		description := strings.TrimSpace(jsonSchema.Get("description").String())
+		if description == "" {
+			description = strings.TrimSpace(format.Get("description").String())
+		}
+		if description != "" {
+			instruction.WriteString("Schema Description: ")
+			instruction.WriteString(description)
+			instruction.WriteByte('\n')
+		}
+		instruction.WriteString("JSON Schema:\n")
+		instruction.WriteString(schema.Raw)
+		instruction.WriteString("\nDo not include any explanations, markdown code blocks (such as ```json), or any text outside of the JSON object.")
+		return instruction.String()
+	default:
+		return ""
+	}
 }

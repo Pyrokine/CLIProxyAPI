@@ -171,20 +171,20 @@ func TestConvertClaudeResponseToOpenAIResponsesAggregatesTextBlocksUntilMessageS
 		}
 	}
 
-	if counts["response.output_item.added"] != 1 {
-		t.Fatalf("response.output_item.added count = %d, want 1", counts["response.output_item.added"])
+	if counts["response.output_item.added"] != 3 {
+		t.Fatalf("response.output_item.added count = %d, want 3", counts["response.output_item.added"])
 	}
-	if counts["response.content_part.added"] != 1 {
-		t.Fatalf("response.content_part.added count = %d, want 1", counts["response.content_part.added"])
+	if counts["response.content_part.added"] != 2 {
+		t.Fatalf("response.content_part.added count = %d, want 2", counts["response.content_part.added"])
 	}
-	if counts["response.output_text.done"] != 1 {
-		t.Fatalf("response.output_text.done count = %d, want 1", counts["response.output_text.done"])
+	if counts["response.output_text.done"] != 2 {
+		t.Fatalf("response.output_text.done count = %d, want 2", counts["response.output_text.done"])
 	}
-	if counts["response.content_part.done"] != 1 {
-		t.Fatalf("response.content_part.done count = %d, want 1", counts["response.content_part.done"])
+	if counts["response.content_part.done"] != 2 {
+		t.Fatalf("response.content_part.done count = %d, want 2", counts["response.content_part.done"])
 	}
-	if counts["response.output_item.done"] != 1 {
-		t.Fatalf("response.output_item.done count = %d, want 1", counts["response.output_item.done"])
+	if counts["response.output_item.done"] != 3 {
+		t.Fatalf("response.output_item.done count = %d, want 3", counts["response.output_item.done"])
 	}
 	if counts["response.function_call_arguments.delta"] != 0 {
 		t.Fatalf(
@@ -193,17 +193,23 @@ func TestConvertClaudeResponseToOpenAIResponsesAggregatesTextBlocksUntilMessageS
 		)
 	}
 
-	wantText := "**对比竞品**\n- Qwen 3.7 Max leads."
+	wantText := "Qwen 3.7 Max leads."
 	if got := outputTextDone.Get("text").String(); got != wantText {
-		t.Fatalf("output_text.done text = %q, want %q", got, wantText)
+		t.Fatalf("last output_text.done text = %q, want %q", got, wantText)
 	}
 	if got := contentPartDone.Get("part.annotations.0.type").String(); got != "web_search_result_location" {
 		t.Fatalf("content_part.done annotation type = %q", got)
 	}
-	if got := completed.Get("response.output.0.content.0.text").String(); got != wantText {
-		t.Fatalf("completed message text = %q, want %q", got, wantText)
+	if got := completed.Get("response.output.0.content.0.text").String(); got != "**对比竞品**\n- " {
+		t.Fatalf("first completed message text = %q", got)
 	}
-	if got := completed.Get("response.output.0.content.0.annotations.0.type").String(); got != "web_search_result_location" {
+	if got := completed.Get("response.output.1.type").String(); got != "web_search_call" {
+		t.Fatalf("completed output[1].type = %q, want web_search_call", got)
+	}
+	if got := completed.Get("response.output.2.content.0.text").String(); got != wantText {
+		t.Fatalf("last completed message text = %q, want %q", got, wantText)
+	}
+	if got := completed.Get("response.output.2.content.0.annotations.0.type").String(); got != "web_search_result_location" {
 		t.Fatalf("completed annotation type = %q", got)
 	}
 }
@@ -226,14 +232,17 @@ func TestConvertClaudeResponseToOpenAIResponsesNonStreamAggregatesCitationsAndSu
 	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, raw, nil)
 	root := gjson.ParseBytes(out)
 
-	if got := root.Get("output.#").Int(); got != 1 {
-		t.Fatalf("output count = %d, want 1", got)
+	if got := root.Get("output.#").Int(); got != 2 {
+		t.Fatalf("output count = %d, want 2", got)
 	}
 	if got := root.Get("output.0.type").String(); got != "message" {
 		t.Fatalf("output[0].type = %q, want message", got)
 	}
-	if got := root.Get("output.0.content.0.annotations.0.type").String(); got != "web_search_result_location" {
-		t.Fatalf("non-stream annotation type = %q", got)
+	if got := root.Get("output.1.type").String(); got != "web_search_call" {
+		t.Fatalf("output[1].type = %q, want web_search_call", got)
+	}
+	if got := root.Get("output.1.action.query").String(); got != "Qwen3" {
+		t.Fatalf("web search query = %q, want Qwen3", got)
 	}
 }
 

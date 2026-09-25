@@ -39,6 +39,37 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsAggregatesContinuou
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsMatchesMissingOutputBeforeFutureExplicitID(t *testing.T) {
+	inputJSON := []byte(`{
+		"input":[
+			{"type":"function_call","call_id":"call-a","name":"same","arguments":"{}"},
+			{"type":"function_call","name":"same","arguments":"{}"},
+			{"type":"function_call_output","name":"same","output":"generated-result"},
+			{"type":"function_call_output","call_id":"call-a","output":"explicit-result"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("gpt-4.1", inputJSON, false)
+	messages := gjson.GetBytes(output, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("message count = %d, want 3; output: %s", len(messages), output)
+	}
+	toolCalls := messages[0].Get("tool_calls").Array()
+	if got := toolCalls[0].Get("id").String(); got != "call-a" {
+		t.Fatalf("explicit tool call ID = %q, want call-a; output: %s", got, output)
+	}
+	const generated = "call_responses_0000000000000001"
+	if got := toolCalls[1].Get("id").String(); got != generated {
+		t.Fatalf("generated tool call ID = %q, want %q; output: %s", got, generated, output)
+	}
+	if got := messages[1].Get("tool_call_id").String(); got != generated {
+		t.Fatalf("named output ID = %q, want %q; output: %s", got, generated, output)
+	}
+	if got := messages[2].Get("tool_call_id").String(); got != "call-a" {
+		t.Fatalf("future explicit output ID = %q, want call-a; output: %s", got, output)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsPreservesStringServiceTier(t *testing.T) {
 	output := ConvertOpenAIResponsesRequestToOpenAIChatCompletions(
 		"gpt-4.1",

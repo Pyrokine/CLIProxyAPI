@@ -1,6 +1,8 @@
 package gemini
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -213,5 +215,112 @@ func TestConvertGeminiRequestToClaudeKeepsSystemInstructionSeparate(t *testing.T
 	}
 	if got := messages[1].Get("content.0.text").String(); got != "question" {
 		t.Fatalf("user text = %q, want question", got)
+	}
+}
+
+func TestConvertGeminiRequestToClaudePreservesAndMatchesToolCallIDs(t *testing.T) {
+	raw := []byte(`{
+		"contents":[
+			{"role":"model","parts":[
+				{"functionCall":{"name":"alpha","args":{}}},
+				{"functionCall":{"call_id":"beta-id","name":"beta","args":{}}},
+				{"functionCall":{"id":"alpha-two","name":"alpha","args":{}}}
+			]},
+			{"role":"user","parts":[
+				{"functionResponse":{"callId":"alpha-two","name":"alpha","response":{"result":"explicit"}}},
+				{"functionResponse":{"name":"beta","response":{"result":"named"}}},
+				{"functionResponse":{"response":{"result":"fifo"}}}
+			]}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToClaude("claude-test", raw, false)
+	messages := gjson.GetBytes(out, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("message count = %d, want 2. Output: %s", len(messages), out)
+	}
+	toolUses := messages[0].Get("content").Array()
+	wantUses := []string{"toolu_gemini_0000000000000001", "beta-id", "alpha-two"}
+	for index, want := range wantUses {
+		if got := toolUses[index].Get("id").String(); got != want {
+			t.Fatalf("tool use %d ID = %q, want %q; output: %s", index, got, want, out)
+		}
+	}
+	toolResults := messages[1].Get("content").Array()
+	wantResults := []string{"alpha-two", "beta-id", "toolu_gemini_0000000000000001"}
+	for index, want := range wantResults {
+		if got := toolResults[index].Get("tool_use_id").String(); got != want {
+			t.Fatalf("tool result %d ID = %q, want %q; output: %s", index, got, want, out)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToClaudeScopesMetadataUserID(t *testing.T) {
+	userID := func(raw string) string {
+		out := ConvertGeminiRequestToClaude("claude-test", []byte(raw), false)
+		return gjson.GetBytes(out, "metadata.user_id").String()
+	}
+
+	firstRetry := userID(`{"metadata":{"canonical_session_id":"session-a"},"contents":[{"role":"user","parts":[{"text":"first"}]}]}`)
+	secondRetry := userID(`{"metadata":{"canonical_session_id":"session-a"},"contents":[{"role":"user","parts":[{"text":"first"},{"text":"second turn"}]}]}`)
+	if firstRetry == "" || firstRetry != secondRetry {
+		t.Fatalf("same canonical session user IDs differ: %q != %q", firstRetry, secondRetry)
+	}
+
+	otherSession := userID(`{"metadata":{"canonical_session_id":"session-b"},"contents":[{"role":"user","parts":[{"text":"first"}]}]}`)
+	if otherSession == firstRetry {
+		t.Fatalf("different canonical sessions share user ID %q", firstRetry)
+	}
+
+	credentialA := `{"device_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"11111111-1111-4111-8111-111111111111"}`
+	credentialB := `{"device_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","account_uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","session_id":"11111111-1111-4111-8111-111111111111"}`
+	explicitIDs := make([]string, 0, 2)
+	for _, explicit := range []string{credentialA, credentialB} {
+		raw := fmt.Sprintf(`{"metadata":{"user_id":%q},"contents":[{"role":"user","parts":[{"text":"first"}]}]}`, explicit)
+		got := userID(raw)
+		if got != explicit {
+			t.Fatalf("explicit metadata.user_id = %q, want %q", got, explicit)
+		}
+		if retry := userID(raw); retry != got {
+			t.Fatalf("explicit credential identity changed across retries: %q != %q", retry, got)
+		}
+		explicitIDs = append(explicitIDs, got)
+	}
+	if explicitIDs[0] == explicitIDs[1] {
+		t.Fatalf("different credential identities share metadata.user_id %q", explicitIDs[0])
+	}
+}
+
+func TestConvertGeminiRequestToClaudeConcurrentIdentityIsolation(t *testing.T) {
+	const workers = 64
+	expected := make([]string, workers)
+	for index := range expected {
+		raw := fmt.Sprintf(`{"session_id":"session-%d","contents":[{"role":"user","parts":[{"text":"request"}]}]}`, index)
+		expected[index] = gjson.GetBytes(
+			ConvertGeminiRequestToClaude("claude-test", []byte(raw), false),
+			"metadata.user_id",
+		).String()
+	}
+
+	errors := make(chan string, workers)
+	var waitGroup sync.WaitGroup
+	for index := range expected {
+		waitGroup.Add(1)
+		go func(index int) {
+			defer waitGroup.Done()
+			raw := fmt.Sprintf(`{"session_id":"session-%d","contents":[{"role":"user","parts":[{"text":"request"}]}]}`, index)
+			got := gjson.GetBytes(
+				ConvertGeminiRequestToClaude("claude-test", []byte(raw), false),
+				"metadata.user_id",
+			).String()
+			if got != expected[index] {
+				errors <- fmt.Sprintf("session-%d user ID = %q, want %q", index, got, expected[index])
+			}
+		}(index)
+	}
+	waitGroup.Wait()
+	close(errors)
+	for message := range errors {
+		t.Error(message)
 	}
 }

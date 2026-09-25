@@ -50,6 +50,176 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesCreatedIncludesOri
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesIncompleteToolStreamDoesNotFinalize(t *testing.T) {
+	request := []byte(`{"model":"gpt-test"}`)
+	tests := []struct {
+		name  string
+		chunk string
+	}{
+		{
+			name:  "empty arguments",
+			chunk: `data: {"id":"interrupted-empty","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":null}]}`,
+		},
+		{
+			name:  "partial arguments",
+			chunk: `data: {"id":"interrupted-partial","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"query\":\"hel"}}]},"finish_reason":null}]}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var state any
+			chunks := []string{test.chunk, `data: [DONE]`}
+			for _, chunk := range chunks {
+				for _, output := range convertOpenAIChatCompletionsResponseToOpenAIResponses(
+					context.Background(), "gpt-test", request, request, []byte(chunk), &state,
+				) {
+					event, _ := openAIResponsesSSEData(t, output)
+					switch event {
+					case "response.completed", "response.incomplete", "response.output_item.done",
+						"response.function_call_arguments.done", "response.custom_tool_call_input.done":
+						t.Fatalf("incomplete tool stream emitted terminal event %q: %s", event, output)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesIncompleteFinishReasons(t *testing.T) {
+	request := []byte(`{"model":"gpt-test"}`)
+	tests := []struct {
+		finishReason string
+		wantReason   string
+	}{
+		{finishReason: "length", wantReason: "max_output_tokens"},
+		{finishReason: "max_tokens", wantReason: "max_output_tokens"},
+		{finishReason: "content_filter", wantReason: "content_filter"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.finishReason, func(t *testing.T) {
+			var state any
+			chunks := []string{
+				`data: {"id":"incomplete-tool","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":""}}]},"finish_reason":null}]}`,
+				`data: {"id":"incomplete-tool","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"` + test.finishReason + `"}]}`,
+				`data: [DONE]`,
+			}
+			var itemDone, incomplete gjson.Result
+			completedCount := 0
+			for _, chunk := range chunks {
+				for _, output := range convertOpenAIChatCompletionsResponseToOpenAIResponses(
+					context.Background(), "gpt-test", request, request, []byte(chunk), &state,
+				) {
+					event, data := openAIResponsesSSEData(t, output)
+					switch event {
+					case "response.output_item.done":
+						if data.Get("item.type").String() == "function_call" {
+							itemDone = data
+						}
+					case "response.incomplete":
+						incomplete = data
+					case "response.completed":
+						completedCount++
+					}
+				}
+			}
+			if completedCount != 0 {
+				t.Fatalf("response.completed count = %d, want 0", completedCount)
+			}
+			if !itemDone.Exists() {
+				t.Fatal("missing function_call response.output_item.done")
+			}
+			if got := itemDone.Get("item.status").String(); got != "incomplete" {
+				t.Fatalf("item.status = %q, want incomplete", got)
+			}
+			if got := itemDone.Get("item.arguments").String(); got == "{}" {
+				t.Fatalf("item.arguments = %q, must not synthesize empty object", got)
+			}
+			if !incomplete.Exists() {
+				t.Fatal("missing response.incomplete")
+			}
+			if got := incomplete.Get("response.incomplete_details.reason").String(); got != test.wantReason {
+				t.Fatalf("incomplete reason = %q, want %q", got, test.wantReason)
+			}
+			if got := incomplete.Get("response.output.0.status").String(); got != "incomplete" {
+				t.Fatalf("response.output.0.status = %q, want incomplete", got)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesEmptyToolCallsDoNotCloseContent(t *testing.T) {
+	request := []byte(`{"model":"gpt-test"}`)
+	chunks := []string{
+		`data: {"id":"empty-tools","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"reasoning_content":"think ","tool_calls":[]},"finish_reason":null}]}`,
+		`data: {"id":"empty-tools","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"reasoning_content":"more","tool_calls":[]},"finish_reason":null}]}`,
+		`data: {"id":"empty-tools","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"content":"hello ","tool_calls":[]},"finish_reason":null}]}`,
+		`data: {"id":"empty-tools","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"content":"world","tool_calls":[]},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	var state any
+	var reasoningDone, messageDone, completed gjson.Result
+	for _, chunk := range chunks {
+		for _, output := range convertOpenAIChatCompletionsResponseToOpenAIResponses(
+			context.Background(), "gpt-test", request, request, []byte(chunk), &state,
+		) {
+			event, data := openAIResponsesSSEData(t, output)
+			switch event {
+			case "response.output_item.done":
+				switch data.Get("item.type").String() {
+				case "reasoning":
+					reasoningDone = data
+				case "message":
+					messageDone = data
+				}
+			case "response.completed":
+				completed = data
+			}
+		}
+	}
+	if got := reasoningDone.Get("item.summary.0.text").String(); got != "think more" {
+		t.Fatalf("reasoning text = %q, want think more", got)
+	}
+	if got := messageDone.Get("item.content.0.text").String(); got != "hello world" {
+		t.Fatalf("message text = %q, want hello world", got)
+	}
+	if got := completed.Get("response.output.1.content.0.text").String(); got != "hello world" {
+		t.Fatalf("completed message text = %q, want hello world", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStreamIncompleteFinishReasons(t *testing.T) {
+	for _, test := range []struct {
+		finishReason string
+		wantReason   string
+	}{
+		{finishReason: "length", wantReason: "max_output_tokens"},
+		{finishReason: "max_tokens", wantReason: "max_output_tokens"},
+		{finishReason: "content_filter", wantReason: "content_filter"},
+	} {
+		t.Run(test.finishReason, func(t *testing.T) {
+			raw := []byte(`{"id":"chatcmpl_1","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":"partial","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},"finish_reason":"` + test.finishReason + `"}]}`)
+			out := convertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(
+				context.Background(), "gpt-test", nil, nil, raw, nil,
+			)
+			data := gjson.ParseBytes(out)
+			if got := data.Get("status").String(); got != "incomplete" {
+				t.Fatalf("status = %q, want incomplete; output=%s", got, out)
+			}
+			if got := data.Get("incomplete_details.reason").String(); got != test.wantReason {
+				t.Fatalf("incomplete reason = %q, want %q; output=%s", got, test.wantReason, out)
+			}
+			for _, output := range data.Get("output").Array() {
+				if got := output.Get("status").String(); got != "incomplete" {
+					t.Fatalf("output status = %q, want incomplete; output=%s", got, out)
+				}
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesReasoningSummaryPath(t *testing.T) {
 	chunks := [][]byte{
 		[]byte(`{"id":"chatcmpl_1","created":1700000000,"choices":[{"index":0,"delta":{"reasoning_content":"think"}}]}`),
@@ -176,5 +346,149 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesResponseCompletedW
 				}
 			},
 		)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStreamReasoningFallback(t *testing.T) {
+	tests := []struct {
+		name          string
+		message       string
+		request       string
+		wantReasoning bool
+		wantText      string
+	}{
+		{
+			name:          "reasoning content",
+			message:       `{"content":"answer","reasoning_content":"primary"}`,
+			wantReasoning: true,
+			wantText:      "primary",
+		},
+		{
+			name:          "reasoning fallback",
+			message:       `{"content":"answer","reasoning":"fallback"}`,
+			wantReasoning: true,
+			wantText:      "fallback",
+		},
+		{
+			name:          "reasoning content priority",
+			message:       `{"content":"answer","reasoning_content":"primary","reasoning":"fallback"}`,
+			wantReasoning: true,
+			wantText:      "primary",
+		},
+		{
+			name:          "empty reasoning content fallback",
+			message:       `{"content":"answer","reasoning_content":"","reasoning":"fallback"}`,
+			wantReasoning: true,
+			wantText:      "fallback",
+		},
+		{
+			name:    "no reasoning",
+			message: `{"content":"answer"}`,
+		},
+		{
+			name:          "request reasoning preserves empty item",
+			message:       `{"content":"answer"}`,
+			request:       `{"model":"gpt-test","reasoning":{"effort":"medium"}}`,
+			wantReasoning: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := []byte(`{"id":"chatcmpl_reasoning","created":1,"choices":[{"index":0,"message":` + test.message + `,"finish_reason":"stop"}]}`)
+			request := []byte(test.request)
+			out := convertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(
+				context.Background(), "gpt-test", request, request, raw, nil,
+			)
+
+			var reasoning gjson.Result
+			for _, item := range gjson.GetBytes(out, "output").Array() {
+				if item.Get("type").String() == "reasoning" {
+					reasoning = item
+					break
+				}
+			}
+			if reasoning.Exists() != test.wantReasoning {
+				t.Fatalf("reasoning exists = %v, want %v; output=%s", reasoning.Exists(), test.wantReasoning, out)
+			}
+			if got := reasoning.Get("summary.0.text").String(); got != test.wantText {
+				t.Fatalf("reasoning text = %q, want %q; output=%s", got, test.wantText, out)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesReasoningPrecedesSameChunkContent(t *testing.T) {
+	request := []byte(`{"model":"gpt-test"}`)
+	chunks := []string{
+		`data: {"id":"same-chunk","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"reasoning_content":"thought","content":"answer"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	type eventRecord struct {
+		typeName string
+		itemType string
+		index    int64
+	}
+	var state any
+	var events []eventRecord
+	for _, chunk := range chunks {
+		for _, output := range convertOpenAIChatCompletionsResponseToOpenAIResponses(
+			context.Background(), "gpt-test", request, request, []byte(chunk), &state,
+		) {
+			event, data := openAIResponsesSSEData(t, output)
+			if event != "response.output_item.added" && event != "response.output_item.done" {
+				continue
+			}
+			events = append(events, eventRecord{event, data.Get("item.type").String(), data.Get("output_index").Int()})
+		}
+	}
+
+	want := []eventRecord{
+		{"response.output_item.added", "reasoning", 0},
+		{"response.output_item.done", "reasoning", 0},
+		{"response.output_item.added", "message", 1},
+		{"response.output_item.done", "message", 1},
+	}
+	if len(events) != len(want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("events[%d] = %#v, want %#v", i, events[i], want[i])
+		}
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesMultipleReasoningItems(t *testing.T) {
+	request := []byte(`{"model":"gpt-test"}`)
+	chunks := []string{
+		`data: {"id":"multi-reasoning","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"reasoning_content":"first"},"finish_reason":null}]}`,
+		`data: {"id":"multi-reasoning","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"content":"answer "},"finish_reason":null}]}`,
+		`data: {"id":"multi-reasoning","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"reasoning":"second"},"finish_reason":null}]}`,
+		`data: {"id":"multi-reasoning","object":"chat.completion.chunk","created":1,"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+	}
+
+	var state any
+	var reasoningIndices []int64
+	var reasoningIDs []string
+	for _, chunk := range chunks {
+		for _, output := range convertOpenAIChatCompletionsResponseToOpenAIResponses(
+			context.Background(), "gpt-test", request, request, []byte(chunk), &state,
+		) {
+			event, data := openAIResponsesSSEData(t, output)
+			if event == "response.output_item.added" && data.Get("item.type").String() == "reasoning" {
+				reasoningIndices = append(reasoningIndices, data.Get("output_index").Int())
+				reasoningIDs = append(reasoningIDs, data.Get("item.id").String())
+			}
+		}
+	}
+
+	if len(reasoningIndices) != 2 || reasoningIndices[0] != 0 || reasoningIndices[1] != 2 {
+		t.Fatalf("reasoning output indexes = %v, want [0 2]", reasoningIndices)
+	}
+	if reasoningIDs[0] == reasoningIDs[1] {
+		t.Fatalf("reasoning item IDs must be distinct: %v", reasoningIDs)
 	}
 }
