@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -69,6 +70,19 @@ func assertClaudeSystemTestMessage(t *testing.T, payload []byte, index int, want
 	}
 	if got := content[0].Get("cache_control.type").String(); got != "ephemeral" {
 		t.Fatalf("messages[%d] cache_control.type = %q, want ephemeral", index, got)
+	}
+}
+
+func TestCollectForwardedClaudeSystemPromptBlocksPreservesCallerIdentity(t *testing.T) {
+	system := gjson.Parse(`[
+		{"type":"text","text":"x-anthropic-billing-header: cc_entrypoint=cli; cch=abcde;"},
+		{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."},
+		{"type":"text","text":"caller rule"}
+	]`)
+
+	blocks := collectForwardedClaudeSystemPromptBlocks(system)
+	if !reflect.DeepEqual(blocks, []string{claudeCodeCLIIdentity, "caller rule"}) {
+		t.Fatalf("forwarded blocks = %#v", blocks)
 	}
 }
 
@@ -278,7 +292,7 @@ func TestValidateClaudeCallerSystemBlocks(t *testing.T) {
 
 func TestApplyCloakingHandlesNonTextCallerSystemByMode(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"input_image"}],"messages":[{"role":"user","content":"U1"}]}`)
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "key-123", "fingerprint_profile": "claude-code-cli"}}
 
 	out, cloaked, errCloaking := applyCloaking(
 		context.Background(),
@@ -325,7 +339,7 @@ func TestClaudeCountTokensRejectsNonTextCallerSystemBeforeUpstream(t *testing.T)
 		},
 	)
 	ctx := util.WithRoundTripper(context.Background(), roundTripper)
-	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-api03-test"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-api03-test", "fingerprint_profile": "claude-code-cli"}}
 	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"S1"},{"type":"input_image"}],"messages":[{"role":"user","content":"x"}]}`)
 
 	_, errCount := NewClaudeExecutor(&config.Config{}).countTokensUpstream(
@@ -341,6 +355,77 @@ func TestClaudeCountTokensRejectsNonTextCallerSystemBeforeUpstream(t *testing.T)
 	if upstreamCalled {
 		t.Fatal("countTokensUpstream() called upstream before rejecting the caller system block")
 	}
+}
+
+func TestClaudeCurrentDateFollowsAllLeadingToolResults(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","messages":[` +
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}},{"type":"tool_use","id":"toolu_2","name":"Grep","input":{}}]},` +
+		`{"role":"user","content":[` +
+		`{"type":"tool_result","tool_use_id":"toolu_1","content":"first","cache_control":{"type":"ephemeral","ttl":"1h"}},` +
+		`{"type":"tool_result","tool_use_id":"toolu_2","content":"second"},` +
+		`{"type":"text","text":"continue"}]}` +
+		`]}`)
+
+	first := cloakClaudeSystemForTest(payload, false)
+	second := cloakClaudeSystemForTest(first, false)
+	if !bytes.Equal(first, second) {
+		t.Fatalf("current-date insertion is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
+	}
+	content := gjson.GetBytes(first, "messages.1.content").Array()
+	if len(content) != 4 {
+		t.Fatalf("content count = %d, want 4: %s", len(content), first)
+	}
+	for index, wantID := range []string{"toolu_1", "toolu_2"} {
+		if got := content[index].Get("type").String(); got != "tool_result" {
+			t.Fatalf("content[%d].type = %q, want tool_result", index, got)
+		}
+		if got := content[index].Get("tool_use_id").String(); got != wantID {
+			t.Fatalf("content[%d].tool_use_id = %q, want %q", index, got, wantID)
+		}
+	}
+	if got := content[0].Get("cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("first tool result cache_control.ttl = %q, want 1h", got)
+	}
+	assertClaudeSystemTestCurrentDate(t, content[2])
+	assertClaudeSystemTestUserText(t, content[3], "continue")
+}
+
+func TestClaudeCurrentDateOrderingEdgeCases(t *testing.T) {
+	t.Run("empty message list remains unchanged", func(t *testing.T) {
+		input := []byte(`{"messages":[]}`)
+		output := injectClaudeCodeCurrentDate(input, claudeSystemCloakingTestTime)
+		if !bytes.Equal(output, input) {
+			t.Fatalf("empty message list changed: %s", output)
+		}
+	})
+
+	t.Run("empty user content receives only date", func(t *testing.T) {
+		output := injectClaudeCodeCurrentDate(
+			[]byte(`{"messages":[{"role":"user","content":[]}]}`),
+			claudeSystemCloakingTestTime,
+		)
+		content := gjson.GetBytes(output, "messages.0.content").Array()
+		if len(content) != 1 {
+			t.Fatalf("content count = %d, want 1: %s", len(content), output)
+		}
+		assertClaudeSystemTestCurrentDate(t, content[0])
+	})
+
+	t.Run("non-leading tool result stays after date", func(t *testing.T) {
+		output := injectClaudeCodeCurrentDate(
+			[]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"continue"},{"type":"tool_result","tool_use_id":"toolu_1","content":"late"}]}]}`),
+			claudeSystemCloakingTestTime,
+		)
+		content := gjson.GetBytes(output, "messages.0.content").Array()
+		if len(content) != 3 {
+			t.Fatalf("content count = %d, want 3: %s", len(content), output)
+		}
+		assertClaudeSystemTestCurrentDate(t, content[0])
+		assertClaudeSystemTestUserText(t, content[1], "continue")
+		if got := content[2].Get("type").String(); got != "tool_result" {
+			t.Fatalf("content[2].type = %q, want tool_result: %s", got, output)
+		}
+	})
 }
 
 func TestClaudeSystemInsertionFollowsToolResultsAndIsIdempotent(t *testing.T) {
@@ -386,10 +471,11 @@ func TestInjectClaudeCodeContextManagementRespectsThinkingAndCallerOwnership(t *
 		payload string
 		want    bool
 	}{
-		{name: "omitted thinking", payload: `{"model":"claude-opus-5"}`, want: true},
+		{name: "omitted thinking", payload: `{"model":"claude-opus-5"}`},
 		{name: "enabled thinking", payload: `{"thinking":{"type":"enabled"}}`, want: true},
 		{name: "adaptive thinking", payload: `{"thinking":{"type":"adaptive"}}`, want: true},
 		{name: "disabled thinking", payload: `{"thinking":{"type":"disabled"}}`},
+		{name: "unknown thinking", payload: `{"thinking":{"type":"unexpected"}}`},
 		{name: "caller owned", payload: `{"context_management":{"edits":[]}}`},
 	} {
 		t.Run(
@@ -413,6 +499,21 @@ func TestInjectClaudeCodeContextManagementRespectsThinkingAndCallerOwnership(t *
 	}
 }
 
+func TestInjectClaudeCodeContextManagementIsIdempotent(t *testing.T) {
+	payload := []byte(`{"thinking":{"type":"adaptive"}}`)
+	first, firstInjected := injectClaudeCodeContextManagement(payload)
+	if !firstInjected {
+		t.Fatal("first injection was not reported")
+	}
+	second, secondInjected := injectClaudeCodeContextManagement(first)
+	if secondInjected {
+		t.Fatal("second injection was reported as automatic")
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("context management injection is not idempotent:\nfirst:  %s\nsecond: %s", first, second)
+	}
+}
+
 func TestReconcileClaudeCodeContextManagement(t *testing.T) {
 	withAutomatic := func(thinkingType string) string {
 		return `{"thinking":{"type":"` + thinkingType + `"},"context_management":` + claudeCodeContextManagement + `}`
@@ -428,6 +529,22 @@ func TestReconcileClaudeCodeContextManagement(t *testing.T) {
 			name:    "removes unchanged automatic object when disabled",
 			payload: withAutomatic("disabled"),
 			state:   claudeCodeContextManagementState{eligible: true, automaticallyInjected: true},
+		},
+		{
+			name:    "removes unchanged automatic object when thinking is omitted",
+			payload: `{"context_management":` + claudeCodeContextManagement + `}`,
+			state:   claudeCodeContextManagementState{eligible: true, automaticallyInjected: true},
+		},
+		{
+			name:    "removes unchanged automatic object when thinking is unknown",
+			payload: withAutomatic("unexpected"),
+			state:   claudeCodeContextManagementState{eligible: true, automaticallyInjected: true},
+		},
+		{
+			name:    "preserves caller owned object when thinking is omitted",
+			payload: `{"context_management":` + claudeCodeContextManagement + `}`,
+			state:   claudeCodeContextManagementState{eligible: true, callerOwned: true, automaticallyInjected: true},
+			wantRaw: claudeCodeContextManagement,
 		},
 		{
 			name:    "preserves caller owned object when disabled",
@@ -629,8 +746,8 @@ func TestApplyPayloadConfigWithRequestTrackedReportsContextManagementTouches(t *
 					nil,
 					"context_management",
 				)
-				if touched != test.wantTouched {
-					t.Fatalf("context_management touched = %t, want %t", touched, test.wantTouched)
+				if touched["context_management"] != test.wantTouched {
+					t.Fatalf("context_management touched = %t, want %t", touched["context_management"], test.wantTouched)
 				}
 			},
 		)
@@ -759,11 +876,11 @@ func TestPrepareClaudeRequestReconcilesContextManagement(t *testing.T) {
 			wantAbsent: true,
 		},
 		{
-			name:     "forced tool choice retains automatic context management",
-			cfg:      &config.Config{},
-			payload:  `{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"tool_choice":{"type":"any"}}`,
-			wantRaw:  claudeCodeContextManagement,
-			wantType: "",
+			name:       "forced tool choice drops automatic context management",
+			cfg:        &config.Config{},
+			payload:    `{"model":"claude-opus-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}],"thinking":{"type":"adaptive"},"tool_choice":{"type":"any"}}`,
+			wantType:   "",
+			wantAbsent: true,
 		},
 	} {
 		for _, forceStream := range []bool{false, true} {
@@ -802,8 +919,9 @@ func prepareClaudeContextManagementBody(
 		context.Background(),
 		&cliproxyauth.Auth{
 			Attributes: map[string]string{
-				"api_key":  "context-management-test-key",
-				"base_url": "https://api.anthropic.com",
+				"api_key":             "context-management-test-key",
+				"fingerprint_profile": "claude-code-cli",
+				"base_url":            "https://api.anthropic.com",
 			},
 		},
 		cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload},

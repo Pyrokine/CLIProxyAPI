@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -97,30 +98,41 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 				return true
 			},
 		)
+		passthroughMCPTools := make([]string, 0, 4)
 		tools.ForEach(
 			func(_, tool gjson.Result) bool {
 				if helps.IsClaudeServerToolType(tool.Get("type").String()) {
 					return true
 				}
 				name := tool.Get("name").String()
-				if name == "" || helps.IsClaudeMCPToolName(name) {
+				if name == "" {
+					return true
+				}
+				if helps.IsClaudeMCPToolName(name) {
+					passthroughMCPTools = append(passthroughMCPTools, name)
 					return true
 				}
 				if _, exists := forwardMap[name]; exists {
 					return true
 				}
-				for attempt := uint32(0); ; attempt++ {
-					alias := helps.ClaudeMCPToolAlias(mcpAliases.callerIdentity, name, attempt)
-					if reservedNames[alias] {
-						continue
-					}
-					forwardMap[name] = alias
-					reservedNames[alias] = true
-					break
+				alias, allocated := helps.AllocateClaudeMCPToolAlias(
+					mcpAliases.callerIdentity,
+					name,
+					reservedNames,
+				)
+				if !allocated {
+					log.Warnf(
+						"claude oauth mcp alias: no free alias left for tool %q, forwarding the original name",
+						name,
+					)
+					return true
 				}
+				forwardMap[name] = alias
+				reservedNames[alias] = true
 				return true
 			},
 		)
+		recordPassthroughMCPTools(recordRename, forwardMap, passthroughMCPTools)
 	}
 
 	rewriteName := func(name string) (string, bool) {
@@ -146,7 +158,7 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 		return true
 	}
 	appendStringEdit := func(result gjson.Result, replacement string) bool {
-		// ClaudeMCPToolAlias only emits [A-Za-z0-9_-], so adding quotes is
+		// Generated aliases only emit [A-Za-z0-9_-], so adding quotes is
 		// byte-identical to sjson's encoding without another allocation.
 		return appendRawEdit(result, `"`+replacement+`"`)
 	}
@@ -283,6 +295,25 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 									},
 								)
 							}
+						case "tool_search_tool_result":
+							toolRefs := part.Get("content.tool_references")
+							if toolRefs.Exists() && toolRefs.IsArray() {
+								toolRefs.ForEach(func(_, refPart gjson.Result) bool {
+									if refPart.Get("type").String() != "tool_reference" {
+										return true
+									}
+									nameResult := refPart.Get("tool_name")
+									refToolName := nameResult.String()
+									if newName, renamed := rewriteName(refToolName); renamed {
+										if !appendStringEdit(nameResult, newName) {
+											validOffsets = false
+											return false
+										}
+										recordRename(refToolName, newName)
+									}
+									return true
+								})
+							}
 						}
 						return validOffsets
 					},
@@ -369,30 +400,41 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 				return true
 			},
 		)
+		passthroughMCPTools := make([]string, 0, 4)
 		tools.ForEach(
 			func(_, tool gjson.Result) bool {
 				if helps.IsClaudeServerToolType(tool.Get("type").String()) {
 					return true
 				}
 				name := tool.Get("name").String()
-				if name == "" || helps.IsClaudeMCPToolName(name) {
+				if name == "" {
+					return true
+				}
+				if helps.IsClaudeMCPToolName(name) {
+					passthroughMCPTools = append(passthroughMCPTools, name)
 					return true
 				}
 				if _, exists := forwardMap[name]; exists {
 					return true
 				}
-				for attempt := uint32(0); ; attempt++ {
-					alias := helps.ClaudeMCPToolAlias(mcpAliases.callerIdentity, name, attempt)
-					if reservedNames[alias] {
-						continue
-					}
-					forwardMap[name] = alias
-					reservedNames[alias] = true
-					break
+				alias, allocated := helps.AllocateClaudeMCPToolAlias(
+					mcpAliases.callerIdentity,
+					name,
+					reservedNames,
+				)
+				if !allocated {
+					log.Warnf(
+						"claude oauth mcp alias: no free alias left for tool %q, forwarding the original name",
+						name,
+					)
+					return true
 				}
+				forwardMap[name] = alias
+				reservedNames[alias] = true
 				return true
 			},
 		)
+		recordPassthroughMCPTools(recordRename, forwardMap, passthroughMCPTools)
 	}
 
 	rewriteName := func(name string) (string, bool) {
@@ -528,6 +570,25 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 									},
 								)
 							}
+						case "tool_search_tool_result":
+							toolRefs := part.Get("content.tool_references")
+							if toolRefs.Exists() && toolRefs.IsArray() {
+								toolRefs.ForEach(func(refIndex, refPart gjson.Result) bool {
+									if refPart.Get("type").String() != "tool_reference" {
+										return true
+									}
+									refToolName := refPart.Get("tool_name").String()
+									if newName, renamed := rewriteName(refToolName); renamed {
+										refPath := fmt.Sprintf(
+											"messages.%d.content.%d.content.tool_references.%d.tool_name",
+											msgIndex.Int(), contentIndex.Int(), refIndex.Int(),
+										)
+										body, _ = sjson.SetBytes(body, refPath, newName)
+										recordRename(refToolName, newName)
+									}
+									return true
+								})
+							}
 						}
 						return true
 					},
@@ -558,6 +619,18 @@ type claudeMCPAliasResolver struct {
 	servers map[string]struct{}
 }
 
+type claudeMCPAliasRestoreError struct {
+	error
+}
+
+func (e claudeMCPAliasRestoreError) Unwrap() error {
+	return e.error
+}
+
+func (claudeMCPAliasRestoreError) IsRequestScoped() bool {
+	return true
+}
+
 func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResolver {
 	resolver := claudeMCPAliasResolver{
 		exact:   reverseMap,
@@ -565,6 +638,9 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 		servers: make(map[string]struct{}),
 	}
 	for alias, original := range reverseMap {
+		if alias == original {
+			continue
+		}
 		parts, ok := parseClaudeMCPAlias(alias)
 		if !ok {
 			continue
@@ -582,31 +658,22 @@ func newClaudeMCPAliasResolver(reverseMap map[string]string) claudeMCPAliasResol
 }
 
 func parseClaudeMCPAlias(name string) (claudeMCPAliasParts, bool) {
+	if !helps.IsClaudeMCPToolName(name) {
+		return claudeMCPAliasParts{}, false
+	}
 	rest, ok := strings.CutPrefix(name, "mcp__")
 	if !ok {
 		return claudeMCPAliasParts{}, false
 	}
 	server, tool, ok := strings.Cut(rest, "__")
-	if !ok || !isClaudeMCPAliasDigest(server) {
+	if !ok || server == "" {
 		return claudeMCPAliasParts{}, false
 	}
 	toolID, semantic, ok := strings.Cut(tool, "_")
-	if !ok || !isClaudeMCPAliasDigest(toolID) || semantic == "" {
+	if !ok || toolID == "" || semantic == "" {
 		return claudeMCPAliasParts{}, false
 	}
 	return claudeMCPAliasParts{server: server, toolID: toolID, semantic: semantic}, true
-}
-
-func isClaudeMCPAliasDigest(value string) bool {
-	if len(value) != 12 {
-		return false
-	}
-	for _, char := range value {
-		if (char < 'a' || char > 'z') && (char < '2' || char > '7') {
-			return false
-		}
-	}
-	return true
 }
 
 func claudeMCPAliasServer(name string) string {
@@ -621,14 +688,47 @@ func claudeMCPAliasServer(name string) string {
 	return server
 }
 
+// recordPassthroughMCPTools remembers caller-owned MCP tool names that were left
+// untouched, but only when the same request generated aliases and needs restore.
+func recordPassthroughMCPTools(
+	recordRename func(original, renamed string),
+	forwardMap map[string]string,
+	passthrough []string,
+) {
+	if len(forwardMap) == 0 {
+		return
+	}
+	for _, name := range passthrough {
+		recordRename(name, name)
+	}
+}
+
 func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error) {
 	if original, ok := resolver.exact[name]; ok {
+		if original == name {
+			return "", false, nil
+		}
 		return original, true, nil
 	}
 
 	server := claudeMCPAliasServer(name)
 	if _, known := resolver.servers[server]; !known {
 		return "", false, nil
+	}
+
+	canonicalServerPrefix := "mcp__" + server + "__"
+	normalizedName := name
+	suffix := strings.TrimPrefix(name, canonicalServerPrefix)
+	for {
+		strippedSuffix, repeatedServer := strings.CutPrefix(suffix, server+"__")
+		if !repeatedServer {
+			break
+		}
+		suffix = strippedSuffix
+		normalizedName = canonicalServerPrefix + suffix
+		if original, exact := resolver.exact[normalizedName]; exact {
+			return original, true, nil
+		}
 	}
 
 	matchedOriginal := ""
@@ -643,30 +743,68 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 		return matchedOriginal, true, nil
 	}
 	if matchCount > 1 {
-		return "", false, fmt.Errorf(
+		return "", false, claudeMCPAliasRestoreError{fmt.Errorf(
 			"cannot restore Claude OAuth MCP tool alias %q: matched multiple declared aliases", name,
-		)
+		)}
 	}
 
-	parts, ok := parseClaudeMCPAlias(name)
-	if ok {
+	parts, validAlias := parseClaudeMCPAlias(normalizedName)
+	if validAlias {
 		for _, entry := range resolver.aliases {
 			if entry.parts.server == parts.server && entry.parts.semantic == parts.semantic {
 				matchedOriginal = entry.original
 				matchCount++
 			}
 		}
-		if matchCount == 1 {
-			return matchedOriginal, true, nil
+	}
+	if matchCount == 0 {
+		var suffixMatches []claudeMCPAliasEntry
+		for _, entry := range resolver.aliases {
+			if entry.parts.server == server && strings.HasSuffix(normalizedName, "_"+entry.parts.semantic) {
+				suffixMatches = append(suffixMatches, entry)
+			}
 		}
-		if matchCount > 1 {
-			return "", false, fmt.Errorf(
-				"cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name,
+		if len(suffixMatches) == 1 {
+			matchedOriginal = suffixMatches[0].original
+			matchCount = 1
+		} else if len(suffixMatches) > 1 {
+			longest := suffixMatches[0]
+			tie := false
+			for _, candidate := range suffixMatches[1:] {
+				if len(candidate.parts.semantic) > len(longest.parts.semantic) {
+					longest = candidate
+					tie = false
+				} else if len(candidate.parts.semantic) == len(longest.parts.semantic) {
+					tie = true
+				}
+			}
+			if !tie {
+				matchedOriginal = longest.original
+				matchCount = 1
+			} else {
+				matchCount = len(suffixMatches)
+			}
+		}
+		if matchCount == 1 {
+			log.Debugf(
+				"claude oauth mcp alias: recovered drifted tool name %q as %q via semantic suffix",
+				name,
+				matchedOriginal,
 			)
 		}
 	}
+	if matchCount == 1 {
+		return matchedOriginal, true, nil
+	}
+	if matchCount > 1 {
+		return "", false, claudeMCPAliasRestoreError{fmt.Errorf(
+			"cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name,
+		)}
+	}
 
-	return "", false, fmt.Errorf("cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name)
+	return "", false, claudeMCPAliasRestoreError{fmt.Errorf(
+		"cannot restore Claude OAuth MCP tool alias %q: no unique request-local match", name,
+	)}
 }
 
 // reverseRemapOAuthToolNames reverses the tool name mapping for non-stream responses
@@ -730,6 +868,28 @@ func reverseRemapOAuthToolNames(body []byte, reverseMap map[string]string) ([]by
 						},
 					)
 				}
+			case "tool_search_tool_result":
+				toolRefs := part.Get("content.tool_references")
+				if toolRefs.Exists() && toolRefs.IsArray() {
+					toolRefs.ForEach(func(refIndex, refPart gjson.Result) bool {
+						if refPart.Get("type").String() != "tool_reference" {
+							return true
+						}
+						toolName := refPart.Get("tool_name").String()
+						origName, matched, errResolve := resolver.resolve(toolName)
+						if errResolve != nil {
+							resolveErr = errResolve
+							return false
+						}
+						if matched {
+							path := fmt.Sprintf(
+								"content.%d.content.tool_references.%d.tool_name", index.Int(), refIndex.Int(),
+							)
+							body, _ = sjson.SetBytes(body, path, origName)
+						}
+						return true
+					})
+				}
 			}
 			return resolveErr == nil
 		},
@@ -779,6 +939,44 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte, reverseMap map[string
 			return line, nil
 		}
 		updated, err = sjson.SetBytes(payload, "content_block.tool_name", origName)
+	case "tool_search_tool_result":
+		toolRefs := contentBlock.Get("content.tool_references")
+		if !toolRefs.Exists() || !toolRefs.IsArray() {
+			return line, nil
+		}
+		updatedPayload := payload
+		var resolveErr error
+		hasChange := false
+		toolRefs.ForEach(func(refIndex, refPart gjson.Result) bool {
+			if refPart.Get("type").String() != "tool_reference" {
+				return true
+			}
+			toolName := refPart.Get("tool_name").String()
+			origName, matched, errResolve := resolver.resolve(toolName)
+			if errResolve != nil {
+				resolveErr = errResolve
+				return false
+			}
+			if matched {
+				path := fmt.Sprintf("content_block.content.tool_references.%d.tool_name", refIndex.Int())
+				updatedPayload, err = sjson.SetBytes(updatedPayload, path, origName)
+				if err != nil {
+					return false
+				}
+				hasChange = true
+			}
+			return true
+		})
+		if resolveErr != nil {
+			return line, resolveErr
+		}
+		if err != nil {
+			return line, fmt.Errorf("rewrite Claude OAuth MCP tool alias: %w", err)
+		}
+		if !hasChange {
+			return line, nil
+		}
+		updated = updatedPayload
 	default:
 		return line, nil
 	}

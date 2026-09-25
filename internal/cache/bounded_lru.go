@@ -68,6 +68,19 @@ func (cache *BoundedLRU[K, V]) GetOrAdd(key K, create func() V) V {
 	return value
 }
 
+// Delete removes a cached value without invoking the eviction callback.
+func (cache *BoundedLRU[K, V]) Delete(key K) bool {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	element, ok := cache.entries[key]
+	if !ok {
+		return false
+	}
+	delete(cache.entries, key)
+	cache.order.Remove(element)
+	return true
+}
+
 func (cache *BoundedLRU[K, V]) get(key K) (V, bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()

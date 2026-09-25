@@ -57,9 +57,11 @@ func (e *IFlowExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Aut
 		return nil
 	}
 	apiKey, _ := iflowCreds(auth)
+	bearer := ""
 	if strings.TrimSpace(apiKey) != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		bearer = "Bearer " + apiKey
 	}
+	util.ApplyCredentialHeader(req, "Authorization", bearer)
 	return nil
 }
 
@@ -468,7 +470,11 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 
 func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
 	r.Header.Set("Content-Type", "application/json")
-	r.Header.Set("Authorization", "Bearer "+apiKey)
+	bearer := ""
+	if strings.TrimSpace(apiKey) != "" {
+		bearer = "Bearer " + apiKey
+	}
+	util.ApplyCredentialHeader(r, "Authorization", bearer)
 	r.Header.Set("User-Agent", iflowUserAgent)
 
 	// Generate session-id

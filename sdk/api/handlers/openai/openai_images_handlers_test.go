@@ -274,6 +274,7 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 			{ID: "gpt-image-2.5-sunburst", Type: registry.OpenAIImageModelType},
 			{ID: "gpt-image-2.5-sunburst-2026-09-08", Type: registry.OpenAIImageModelType},
 			{ID: "grok-imagine-image-quality", Type: registry.OpenAIImageModelType},
+			{ID: "grok-imagine-image-2.0", Type: registry.OpenAIImageModelType},
 		},
 	)
 	t.Cleanup(
@@ -359,6 +360,71 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 					strings.NewReader(`{"model":"XAI/Grok-Imagine-Image-Quality(HIGH)","prompt":"draw"}`),
 				)
 				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+		},
+		{
+			name:      "xai image 2 generations preserve canonical ID",
+			model:     "XAI/Grok-Imagine-Image-2.0",
+			wantModel: "grok-imagine-image-2.0",
+			request: func(t *testing.T) *http.Request {
+				t.Helper()
+				req := httptest.NewRequest(
+					http.MethodPost,
+					"/v1/images/generations",
+					strings.NewReader(`{"model":"XAI/Grok-Imagine-Image-2.0","prompt":"draw"}`),
+				)
+				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+		},
+		{
+			name:      "xai image 2 JSON edits preserve canonical ID",
+			model:     "XAI/Grok-Imagine-Image-2.0",
+			wantModel: "grok-imagine-image-2.0",
+			request: func(t *testing.T) *http.Request {
+				t.Helper()
+				req := httptest.NewRequest(
+					http.MethodPost,
+					"/v1/images/edits",
+					strings.NewReader(
+						`{"model":"XAI/Grok-Imagine-Image-2.0","prompt":"edit","images":[{"image_url":"data:image/png;base64,iVBORw0KGgo="}]}`,
+					),
+				)
+				req.Header.Set("Content-Type", "application/json")
+				return req
+			},
+		},
+		{
+			name:      "xai image 2 multipart edits preserve canonical ID",
+			model:     "grok-imagine-image-2.0",
+			wantModel: "grok-imagine-image-2.0",
+			request: func(t *testing.T) *http.Request {
+				t.Helper()
+				body := &bytes.Buffer{}
+				writer := multipart.NewWriter(body)
+				if err := writer.WriteField("model", "grok-imagine-image-2.0"); err != nil {
+					t.Fatalf("WriteField model: %v", err)
+				}
+				if err := writer.WriteField("prompt", "edit"); err != nil {
+					t.Fatalf("WriteField prompt: %v", err)
+				}
+				part, err := writer.CreateFormFile("image", "input.png")
+				if err != nil {
+					t.Fatalf("CreateFormFile: %v", err)
+				}
+				image, err := base64.StdEncoding.DecodeString(testPNGBase64)
+				if err != nil {
+					t.Fatalf("DecodeString: %v", err)
+				}
+				if _, err = part.Write(image); err != nil {
+					t.Fatalf("write multipart image: %v", err)
+				}
+				if err = writer.Close(); err != nil {
+					t.Fatalf("Close multipart writer: %v", err)
+				}
+				req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", bytes.NewReader(body.Bytes()))
+				req.Header.Set("Content-Type", writer.FormDataContentType())
 				return req
 			},
 		},
@@ -534,7 +600,7 @@ func TestImagesGenerationsChecksCustomXAIPrefixAccessRule(t *testing.T) {
 	registry.GetGlobalRegistry().RegisterClient(
 		auth.ID,
 		auth.Provider,
-		[]*registry.ModelInfo{{ID: "TeamA/grok-imagine-image-quality"}},
+		[]*registry.ModelInfo{{ID: "TeamA/grok-imagine-image-2.0"}},
 	)
 	t.Cleanup(
 		func() {
@@ -545,7 +611,7 @@ func TestImagesGenerationsChecksCustomXAIPrefixAccessRule(t *testing.T) {
 	base := handlers.NewBaseAPIHandlers(
 		&sdkconfig.SDKConfig{
 			APIKeyRules: map[string]internalconfig.APIKeyRule{
-				"sk-test": {BlockedModels: []string{"TeamA/grok-imagine-image-quality"}},
+				"sk-test": {BlockedModels: []string{"TeamA/grok-imagine-image-2.0"}},
 			},
 		},
 		manager,
@@ -564,7 +630,7 @@ func TestImagesGenerationsChecksCustomXAIPrefixAccessRule(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/images/generations",
-		strings.NewReader(`{"model":"teama/GROK-IMAGINE-IMAGE-QUALITY(HIGH)","prompt":"draw"}`),
+		strings.NewReader(`{"model":"teama/GROK-IMAGINE-IMAGE-2.0","prompt":"draw"}`),
 	)
 	req.Header.Set("Content-Type", "application/json")
 	resp := httptest.NewRecorder()
@@ -979,6 +1045,39 @@ func TestInspectImageSSEFrameAcceptsValidMultilineData(t *testing.T) {
 	}
 	if !info.sawPayload || !info.terminal {
 		t.Fatalf("frame info = %#v, want terminal payload", info)
+	}
+}
+
+func TestInspectImageSSEFrameAcceptsResponseIncomplete(t *testing.T) {
+	info := inspectImageSSEFrame([]byte("data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\"}}\n\n"))
+	if info.err != nil {
+		t.Fatalf("frame error = %v, want nil", info.err)
+	}
+	if !info.sawPayload || !info.terminal {
+		t.Fatalf("frame info = %#v, want incomplete terminal payload", info)
+	}
+}
+
+func TestExtractImagesFromResponsesIncomplete(t *testing.T) {
+	results, _, usage, metadata, err := extractImagesFromResponsesCompleted([]byte(`{
+		"type":"response.incomplete",
+		"response":{
+			"status":"incomplete",
+			"output":[{"type":"image_generation_call","result":"AA==","output_format":"png"}],
+			"tool_usage":{"image_gen":{"generated_images":1}}
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("extractImagesFromResponsesCompleted() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Result != "AA==" {
+		t.Fatalf("results = %#v, want incomplete image output", results)
+	}
+	if metadata.OutputFormat != "png" {
+		t.Fatalf("output format = %q, want png", metadata.OutputFormat)
+	}
+	if got := gjson.GetBytes(usage, "generated_images").Int(); got != 1 {
+		t.Fatalf("generated_images = %d, want 1; usage=%s", got, usage)
 	}
 }
 

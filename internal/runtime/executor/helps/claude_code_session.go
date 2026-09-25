@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	claudeCodeSessionHeader = "X-Claude-Code-Session-Id"
+	ClaudeCodeSessionHeader = "X-Claude-Code-Session-Id"
 	claudeCodeAgentHeader   = "X-Claude-Code-Agent-Id"
 	claudeCodeMainAgentID   = "main"
 )
@@ -21,7 +21,7 @@ var claudeCodeSessionSuffixPattern = regexp.MustCompile(`_session_([a-f0-9-]+)$`
 
 // ExtractClaudeCodeSessionID resolves a Claude Code session ID, preferring X-Claude-Code-Session-Id over payload metadata.
 func ExtractClaudeCodeSessionID(ctx context.Context, payload []byte, headers http.Header) string {
-	if sessionID := claudeCodeHeader(ctx, headers, claudeCodeSessionHeader); sessionID != "" {
+	if sessionID := claudeCodeHeader(ctx, headers, ClaudeCodeSessionHeader); sessionID != "" {
 		return sessionID
 	}
 	return extractClaudeCodeSessionIDFromPayload(payload)
@@ -74,6 +74,30 @@ func headerValueCaseInsensitive(headers http.Header, name string) string {
 		}
 	}
 	return ""
+}
+
+// HeaderValueCaseInsensitive returns the first non-empty value for name.
+func HeaderValueCaseInsensitive(headers http.Header, name string) string {
+	return headerValueCaseInsensitive(headers, name)
+}
+
+// HeaderValuesCaseInsensitive returns all non-empty values for name in wire order.
+func HeaderValuesCaseInsensitive(headers http.Header, name string) []string {
+	if headers == nil {
+		return nil
+	}
+	var result []string
+	for key, values := range headers {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				result = append(result, value)
+			}
+		}
+	}
+	return result
 }
 
 func extractClaudeCodeSessionIDFromPayload(payload []byte) string {

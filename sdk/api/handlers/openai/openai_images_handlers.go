@@ -32,6 +32,7 @@ const (
 	defaultImagesMainModel            = "gpt-5.4-mini"
 	defaultImagesToolModel            = "gpt-image-2"
 	defaultXAIImagesModel             = "grok-imagine-image"
+	xaiImages20Model                  = "grok-imagine-image-2.0"
 	xaiImagesQualityModel             = "grok-imagine-image-quality"
 	xaiImagesHandlerType              = "openai-image"
 	xaiImagesDefaultAspectRatio       = "1:1"
@@ -319,7 +320,7 @@ func inspectImageSSEFrame(frame []byte) imageSSEFrameInfo {
 	switch eventType {
 	case "error", "response.failed":
 		info.err = imageSSEEventError(payload)
-	case "response.completed", "image_generation.completed", "image_edit.completed":
+	case "response.completed", "response.done", "response.incomplete", "image_generation.completed", "image_edit.completed":
 		info.terminal = true
 	}
 	return info
@@ -365,7 +366,9 @@ func imagesModelBase(model string) string {
 func isXAIImagesModel(model string) bool {
 	prefix, baseModel := imagesModelParts(model)
 	baseModel = strings.ToLower(strings.TrimSpace(baseModel))
-	if baseModel != defaultXAIImagesModel && baseModel != xaiImagesQualityModel {
+	switch baseModel {
+	case defaultXAIImagesModel, xaiImages20Model, xaiImagesQualityModel:
+	default:
 		return false
 	}
 
@@ -417,12 +420,13 @@ func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
 		http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf(
-					"Model %s is not supported on %s or %s. Use one of %s, %s, %s, or a configured openai-compatibility image model.",
+					"Model %s is not supported on %s or %s. Use one of %s, %s, %s, %s, or a configured openai-compatibility image model.",
 					model,
 					imagesGenerationsPath,
 					imagesEditsPath,
 					strings.Join(registry.CodexImageModelIDs(), ", "),
 					defaultXAIImagesModel,
+					xaiImages20Model,
 					xaiImagesQualityModel,
 				),
 				Type: "invalid_request_error",
@@ -907,11 +911,12 @@ func (h *APIHandler) rewriteOpenAICompatSSEFrame(ctx context.Context, c *gin.Con
 }
 
 func canonicalXAIImagesModel(model string) string {
-	baseModel := imagesModelBase(model)
-	if baseModel == xaiImagesQualityModel {
-		return xaiImagesQualityModel
+	switch baseModel := imagesModelBase(model); baseModel {
+	case xaiImages20Model, xaiImagesQualityModel:
+		return baseModel
+	default:
+		return defaultXAIImagesModel
 	}
-	return defaultXAIImagesModel
 }
 
 func xaiImagesAspectRatio(raw string, fallback string) string {
@@ -2247,7 +2252,7 @@ func (collector *imagesFromResponsesCollector) processFrame(frame []byte) (
 		}
 		return nil, false, nil
 	}
-	if eventType != "response.completed" {
+	if eventType != "response.completed" && eventType != "response.done" && eventType != "response.incomplete" {
 		return nil, false, nil
 	}
 
@@ -2410,7 +2415,8 @@ func extractImagesFromResponsesCompleted(payload []byte) (
 	firstMeta imageCallResult,
 	err error,
 ) {
-	if gjson.GetBytes(payload, "type").String() != "response.completed" {
+	eventType := gjson.GetBytes(payload, "type").String()
+	if eventType != "response.completed" && eventType != "response.done" && eventType != "response.incomplete" {
 		return nil, 0, nil, imageCallResult{}, fmt.Errorf("unexpected event type")
 	}
 
@@ -2738,7 +2744,7 @@ func (h *APIHandler) forwardImagesStreamChunksWithMode(
 				return errWrite
 			}
 			emittedPartial = true
-		case "response.completed":
+		case "response.completed", "response.done", "response.incomplete":
 			if completed {
 				return fmt.Errorf("upstream returned multiple completion events")
 			}

@@ -4,13 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+func (e statusErr) LogDiagnostic() string {
+	return logging.SafeDiagnosticForLog(e.logDiagnostic)
+}
 
 type homeRefreshErrorEnvelope struct {
 	Error *homeRefreshErrorDetail `json:"error"`
@@ -22,9 +28,16 @@ type homeRefreshAuthEnvelope struct {
 }
 
 type homeRefreshErrorDetail struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
-	Code    string `json:"code,omitempty"`
+	Type       string                       `json:"type"`
+	Message    string                       `json:"message"`
+	Code       string                       `json:"code,omitempty"`
+	Diagnostic string                       `json:"diagnostic,omitempty"`
+	Upstream   *homeRefreshUpstreamResponse `json:"upstream,omitempty"`
+}
+
+type homeRefreshUpstreamResponse struct {
+	Status int    `json:"status"`
+	Body   []byte `json:"body"`
 }
 
 type homeRefreshClient interface {
@@ -76,11 +89,32 @@ func refreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, true, err
 		}
-		return nil, true, statusErr{code: http.StatusServiceUnavailable, msg: "home refresh temporarily unavailable"}
+		return nil, true, statusErr{
+			code: http.StatusServiceUnavailable, msg: "home refresh temporarily unavailable",
+			logDiagnostic: "Home refresh transport failed: " + logging.SafeErrorDiagnostic(err),
+		}
 	}
 
 	var env homeRefreshErrorEnvelope
-	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal == nil && env.Error != nil {
+	if errUnmarshal := json.Unmarshal(raw, &env); errUnmarshal != nil {
+		return nil, true, statusErr{
+			code: http.StatusBadGateway, msg: "home returned invalid auth payload",
+			logDiagnostic: "Home refresh response decode failed: " + logging.SafeErrorDiagnostic(errUnmarshal),
+		}
+	}
+	if env.Error != nil {
+		diagnostic := strings.TrimSpace(env.Error.Diagnostic)
+		if upstream := env.Error.Upstream; upstream != nil {
+			if upstream.Status < http.StatusBadRequest || upstream.Status > 599 {
+				return nil, true, statusErr{code: http.StatusBadGateway, msg: "home returned invalid upstream status"}
+			}
+			if diagnostic == "" {
+				diagnostic = fmt.Sprintf("Home refresh upstream response: status=%d", upstream.Status)
+			}
+			return nil, true, statusErr{
+				code: upstream.Status, msg: string(upstream.Body), directResponse: true, logDiagnostic: diagnostic,
+			}.withUpstreamResponse(nil)
+		}
 		code := strings.TrimSpace(env.Error.Type)
 		if code == "" {
 			code = strings.TrimSpace(env.Error.Code)
@@ -93,12 +127,22 @@ func refreshAuthViaHome(ctx context.Context, cfg *config.Config, auth *cliproxya
 		case http.StatusNotFound:
 			message = "credential refresh target not found"
 		}
-		return nil, true, statusErr{code: statusCode, msg: message}
+		if diagnostic == "" {
+			diagnostic = message
+			switch safeType := strings.ToLower(code); safeType {
+			case "authentication_error", "unauthorized", "invalid_grant", "refresh_token_expired", "refresh_token_revoked", "refresh_token_reused", "model_not_found", "auth_not_found", "auth_unavailable", "refresh_temporarily_unavailable", "refresh_unsupported", "home_unavailable":
+				diagnostic = "Home refresh failed: type=" + safeType
+			}
+		}
+		return nil, true, statusErr{code: statusCode, msg: message, logDiagnostic: diagnostic}
 	}
 
 	updated, returnedIndex, errParse := parseHomeRefreshAuth(raw)
 	if errParse != nil {
-		return nil, true, statusErr{code: http.StatusBadGateway, msg: "home returned invalid auth payload"}
+		return nil, true, statusErr{
+			code: http.StatusBadGateway, msg: "home returned invalid auth payload",
+			logDiagnostic: "Home refresh response decode failed: " + logging.SafeErrorDiagnostic(errParse),
+		}
 	}
 	if updated.Disabled || updated.Status == cliproxyauth.StatusDisabled {
 		return nil, true, statusErr{code: http.StatusUnauthorized, msg: "credential unauthorized"}

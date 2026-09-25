@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -43,9 +44,10 @@ func TestEnsureCacheControl(t *testing.T) {
 		},
 	)
 
-	// Test case 3: Tools are cached
+	// Test case 3: A usable system prompt covers the tools prefix, so native
+	// Claude Code does not add a redundant tools breakpoint.
 	t.Run(
-		"Tools Caching", func(t *testing.T) {
+		"Tools Not Auto Cached", func(t *testing.T) {
 			input := []byte(`{
 			"model": "claude-3-5-sonnet",
 			"tools": [
@@ -57,21 +59,16 @@ func TestEnsureCacheControl(t *testing.T) {
 		}`)
 			output := ensureCacheControl(input)
 
-			// cache_control should only be on the LAST tool
-			tool0Cache := gjson.GetBytes(output, "tools.0.cache_control")
-			tool1Cache := gjson.GetBytes(output, "tools.1.cache_control.type")
-
-			if tool0Cache.Exists() {
-				t.Errorf("cache_control should NOT be on the first tool")
+			if gjson.GetBytes(output, "tools.0.cache_control").Exists() ||
+				gjson.GetBytes(output, "tools.1.cache_control").Exists() {
+				t.Errorf("default ensureCacheControl must not stamp tools: %s", string(output))
 			}
-			if tool1Cache.String() != "ephemeral" {
-				t.Errorf("cache_control not found on last tool. Output: %s", string(output))
-			}
-
-			// System should also have cache_control
-			systemCache := gjson.GetBytes(output, "system.0.cache_control.type")
-			if systemCache.String() != "ephemeral" {
+			systemCache := gjson.GetBytes(output, "system.0.cache_control")
+			if systemCache.Get("type").String() != "ephemeral" {
 				t.Errorf("cache_control not found in system. Output: %s", string(output))
+			}
+			if systemCache.Get("ttl").Exists() {
+				t.Errorf("default system cache_control must not carry ttl. Output: %s", string(output))
 			}
 		},
 	)
@@ -105,21 +102,61 @@ func TestEnsureCacheControl(t *testing.T) {
 		},
 	)
 
-	// Test case 5: Only tools, no system
+	// Test case 5: Without a usable system prompt, the last non-deferred tool
+	// hosts the stable-prefix fallback while the rolling message marker remains.
 	t.Run(
-		"Only Tools No System", func(t *testing.T) {
+		"Only Tools No System Falls Back To Tools Breakpoint", func(t *testing.T) {
 			input := []byte(`{
 			"model": "claude-3-5-sonnet",
 			"tools": [
-				{"name": "tool1", "description": "Tool", "input_schema": {"type": "object"}}
+				{"name": "tool1", "description": "Tool", "input_schema": {"type": "object"}},
+				{"name": "tool2", "description": "Tool", "input_schema": {"type": "object"}}
 			],
 			"messages": [{"role": "user", "content": "Hi"}]
 		}`)
 			output := ensureCacheControl(input)
 
-			toolCache := gjson.GetBytes(output, "tools.0.cache_control.type")
-			if toolCache.String() != "ephemeral" {
-				t.Errorf("cache_control not found on tool. Output: %s", string(output))
+			if gjson.GetBytes(output, "tools.0.cache_control").Exists() {
+				t.Errorf("only the last tool may host the fallback breakpoint: %s", string(output))
+			}
+			if got := gjson.GetBytes(output, "tools.1.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("missing tools fallback breakpoint when system is absent: %s", string(output))
+			}
+			if gjson.GetBytes(output, "tools.1.cache_control.ttl").Exists() {
+				t.Errorf("tools fallback breakpoint must not carry a default ttl: %s", string(output))
+			}
+			if got := gjson.GetBytes(output, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("rolling message breakpoint should still be present: %s", string(output))
+			}
+		},
+	)
+
+	t.Run(
+		"Empty System Still Falls Back To Tools", func(t *testing.T) {
+			for name, system := range map[string]string{
+				"empty array":  `"system": [],`,
+				"empty string": `"system": "",`,
+				"blank string": `"system": "   ",`,
+			} {
+				t.Run(name, func(t *testing.T) {
+					input := []byte(`{
+					"model": "claude-3-5-sonnet",
+					` + system + `
+					"tools": [{"name": "tool1", "description": "Tool", "input_schema": {"type": "object"}}],
+					"messages": [{"role": "user", "content": "Hi"}]
+				}`)
+					output := ensureCacheControl(input)
+
+					if got := gjson.GetBytes(output, "tools.0.cache_control.type").String(); got != "ephemeral" {
+						t.Errorf("an unusable system prompt must still yield a tools breakpoint: %s", string(output))
+					}
+					if gjson.GetBytes(output, "system.0.cache_control").Exists() {
+						t.Errorf("unusable system must not receive its own breakpoint: %s", string(output))
+					}
+					if countCacheControls(output) != 2 {
+						t.Errorf("want tools and message breakpoints only, got %d in %s", countCacheControls(output), string(output))
+					}
+				})
 			}
 		},
 	)
@@ -154,26 +191,23 @@ func TestEnsureCacheControl(t *testing.T) {
 
 			output := ensureCacheControl(input)
 
-			// Only the last tool (index 49) should have cache_control
-			for i := range 49 {
+			for i := range 50 {
 				path := fmt.Sprintf("tools.%d.cache_control", i)
 				if gjson.GetBytes(output, path).Exists() {
-					t.Errorf("tool %d should NOT have cache_control", i)
+					t.Errorf("tool %d should NOT have cache_control under default ensure", i)
 				}
 			}
 
-			lastToolCache := gjson.GetBytes(output, "tools.49.cache_control.type")
-			if lastToolCache.String() != "ephemeral" {
-				t.Errorf("last tool (49) should have cache_control")
+			helperOut := injectToolsCacheControl(input)
+			if got := gjson.GetBytes(helperOut, "tools.49.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("injectToolsCacheControl should still mark last tool")
 			}
-
-			// System should also have cache_control
-			systemCache := gjson.GetBytes(output, "system.0.cache_control.type")
-			if systemCache.String() != "ephemeral" {
-				t.Errorf("system should have cache_control")
+			if got := gjson.GetBytes(output, "system.0.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("system should have cache_control, got %q", got)
 			}
-
-			t.Log("test passed: 50 tools - cache_control only on last tool")
+			if got := gjson.GetBytes(output, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("latest user should have cache_control, got %q", got)
+			}
 		},
 	)
 
@@ -191,9 +225,10 @@ func TestEnsureCacheControl(t *testing.T) {
 		},
 	)
 
-	// Test case 8: Messages caching for multi-turn (second-to-last user)
+	// Test case 8: Messages caching follows native Claude Code and rolls onto
+	// the latest eligible turn.
 	t.Run(
-		"Messages Caching Second-To-Last User", func(t *testing.T) {
+		"Messages Caching Latest User", func(t *testing.T) {
 			input := []byte(`{
 			"model": "claude-3-5-sonnet",
 			"messages": [
@@ -206,21 +241,21 @@ func TestEnsureCacheControl(t *testing.T) {
 		}`)
 			output := ensureCacheControl(input)
 
-			cacheType := gjson.GetBytes(output, "messages.2.content.0.cache_control.type")
-			if cacheType.String() != "ephemeral" {
-				t.Errorf("cache_control not found on second-to-last user turn. Output: %s", string(output))
+			if got := gjson.GetBytes(output, "messages.4.content.0.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("cache_control.type on latest user = %q, want ephemeral. Output: %s", got, string(output))
 			}
-
-			lastUserCache := gjson.GetBytes(output, "messages.4.content.0.cache_control")
-			if lastUserCache.Exists() {
-				t.Errorf("last user turn should NOT have cache_control")
+			if gjson.GetBytes(output, "messages.4.content.0.cache_control.ttl").Exists() {
+				t.Errorf("default rolling marker must not carry ttl. Output: %s", string(output))
+			}
+			if gjson.GetBytes(output, "messages.2.content.0.cache_control").Exists() {
+				t.Errorf("second-to-last user turn should NOT have cache_control")
 			}
 		},
 	)
 
-	// Test case 9: Existing message cache_control should skip injection
+	// Test case 9: An earlier marker does not freeze the rolling breakpoint.
 	t.Run(
-		"Messages Skip When Cache Control Exists", func(t *testing.T) {
+		"Messages Inject Despite Earlier Cache Control", func(t *testing.T) {
 			input := []byte(`{
 			"model": "claude-3-5-sonnet",
 			"messages": [
@@ -231,14 +266,123 @@ func TestEnsureCacheControl(t *testing.T) {
 		}`)
 			output := ensureCacheControl(input)
 
-			userCache := gjson.GetBytes(output, "messages.0.content.0.cache_control")
-			if userCache.Exists() {
-				t.Errorf("cache_control should NOT be injected when a message already has cache_control")
-			}
-
-			existingCache := gjson.GetBytes(output, "messages.1.content.0.cache_control.type")
-			if existingCache.String() != "ephemeral" {
+			if got := gjson.GetBytes(output, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
 				t.Errorf("existing cache_control should be preserved. Output: %s", string(output))
+			}
+			if got := gjson.GetBytes(output, "messages.2.content.0.cache_control.type").String(); got != "ephemeral" {
+				t.Errorf("latest eligible message should receive the rolling marker. Output: %s", string(output))
+			}
+		},
+	)
+
+	t.Run(
+		"Messages Caching Trailing System String", func(t *testing.T) {
+			input := []byte(`{
+			"messages": [
+				{"role": "user", "content": "User"},
+				{"role": "assistant", "content": "Assistant"},
+				{"role": "system", "content": "Internal system"}
+			]
+		}`)
+			output := ensureCacheControl(input)
+			systemContent := gjson.GetBytes(output, "messages.2.content")
+			if !systemContent.IsArray() || len(systemContent.Array()) != 1 {
+				t.Fatalf("trailing string system was not replaced by one text block: %s", output)
+			}
+			if got := systemContent.Get("0.text").String(); got != "Internal system" {
+				t.Fatalf("trailing system text = %q, want original text: %s", got, output)
+			}
+			if got := systemContent.Get("0.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("trailing string system did not take the native special case: %s", output)
+			}
+			if gjson.GetBytes(output, "messages.1.content.0.cache_control").Exists() {
+				t.Fatalf("preceding assistant must not also receive the rolling marker: %s", output)
+			}
+		},
+	)
+
+	t.Run(
+		"Messages Caching Trailing System Array Falls Back", func(t *testing.T) {
+			input := []byte(`{
+			"messages": [
+				{"role": "user", "content": "User"},
+				{"role": "assistant", "content": "Assistant"},
+				{"role": "system", "content": [{"type": "text", "text": "Internal 1"}, {"type": "text", "text": "Internal 2"}]}
+			]
+		}`)
+			output := ensureCacheControl(input)
+			if gjson.GetBytes(output, "messages.2.content.1.cache_control").Exists() {
+				t.Fatalf("array-content trailing system must not be marked: %s", output)
+			}
+			if got := gjson.GetBytes(output, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("marker should fall back to the last eligible assistant turn: %s", output)
+			}
+		},
+	)
+
+	t.Run(
+		"Messages Caching Trailing Assistant Text", func(t *testing.T) {
+			input := []byte(`{
+			"messages": [
+				{"role": "user", "content": "User"},
+				{"role": "assistant", "content": "Assistant prefill"}
+			]
+		}`)
+			output := ensureCacheControl(input)
+			if got := gjson.GetBytes(output, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
+				t.Fatalf("trailing assistant cache_control.type = %q, want ephemeral. Output: %s", got, output)
+			}
+			if gjson.GetBytes(output, "messages.0.content.0.cache_control").Exists() {
+				t.Fatalf("preceding user must not receive the assistant rolling marker: %s", output)
+			}
+		},
+	)
+
+	for _, blockType := range []string{"thinking", "redacted_thinking"} {
+		t.Run(
+			"Messages Skip Trailing Assistant "+blockType, func(t *testing.T) {
+				input := []byte(`{
+				"messages": [
+					{"role": "user", "content": "User"},
+					{"role": "system", "content": "Internal system"},
+					{"role": "assistant", "content": [
+						{"type": "text", "text": "Assistant"},
+						{"type": "` + blockType + `", "thinking": "Internal", "data": "encrypted"}
+					]}
+				]
+			}`)
+				output := ensureCacheControl(input)
+				if got := gjson.GetBytes(output, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
+					t.Fatalf("preceding user cache_control.type = %q, want fallback ephemeral. Output: %s", got, output)
+				}
+				if got := gjson.GetBytes(output, "messages.1.content"); got.Type != gjson.String {
+					t.Fatalf("internal system message was rewritten instead of skipped: %s", output)
+				}
+				if gjson.GetBytes(output, "messages.2.content.1.cache_control").Exists() {
+					t.Fatalf("assistant %s block must not receive cache_control: %s", blockType, output)
+				}
+			},
+		)
+	}
+
+	t.Run(
+		"Native Cache Control Wire Order", func(t *testing.T) {
+			input := []byte(`{
+			"system": [{"type": "text", "text": "System"}],
+			"messages": [{"role": "user", "content": [{"type": "text", "text": "User"}]}]
+		}`)
+			output := ensureCacheControl(input)
+			want := []byte(`"cache_control":{"type":"ephemeral"}`)
+			if got := bytes.Count(output, want); got != 2 {
+				t.Fatalf("native cache_control wire shape count = %d, want 2. Output: %s", got, output)
+			}
+			upgraded := upgradeClaudeCacheControlTTL(output, claudeCacheControlTTL1h)
+			wantUpgraded := []byte(`"cache_control":{"type":"ephemeral","ttl":"1h"}`)
+			if got := bytes.Count(upgraded, wantUpgraded); got != 2 {
+				t.Fatalf("upgraded cache_control wire shape count = %d, want 2. Output: %s", got, upgraded)
+			}
+			if bytes.Contains(upgraded, []byte(`"cache_control":{"ttl":"1h","type":"ephemeral"}`)) {
+				t.Fatalf("cache_control keys emitted in non-native order: %s", upgraded)
 			}
 		},
 	)
@@ -355,25 +499,25 @@ func TestCacheControlOrder(t *testing.T) {
 
 	output := ensureCacheControl(input)
 
-	// 1. Last tool has cache_control
-	if gjson.GetBytes(output, "tools.1.cache_control.type").String() != "ephemeral" {
-		t.Error("last tool should have cache_control")
+	// A usable system prompt covers the tools prefix, so default native
+	// placement does not add a redundant tools marker.
+	if gjson.GetBytes(output, "tools.0.cache_control").Exists() ||
+		gjson.GetBytes(output, "tools.1.cache_control").Exists() {
+		t.Error("default ensureCacheControl must not stamp tools")
 	}
 
-	// 2. First tool has NO cache_control
-	if gjson.GetBytes(output, "tools.0.cache_control").Exists() {
-		t.Error("first tool should NOT have cache_control")
-	}
-
-	// 3. Last system element has cache_control
+	// The last system element receives the default marker without a ttl.
 	if gjson.GetBytes(output, "system.1.cache_control.type").String() != "ephemeral" {
 		t.Error("last system element should have cache_control")
 	}
+	if gjson.GetBytes(output, "system.1.cache_control.ttl").Exists() {
+		t.Error("default last system element must not carry a ttl")
+	}
+	if got := gjson.GetBytes(upgradeClaudeCacheControlTTL(output, claudeCacheControlTTL1h), "system.1.cache_control.ttl").String(); got != "1h" {
+		t.Errorf("upgraded last system element ttl = %q, want 1h", got)
+	}
 
-	// 4. First system element has NO cache_control
 	if gjson.GetBytes(output, "system.0.cache_control").Exists() {
 		t.Error("first system element should NOT have cache_control")
 	}
-
-	t.Log("cache order correct: tools -> system")
 }

@@ -17,7 +17,7 @@ func claudeCodeDetectionPayload(userID string) []byte {
 
 func confirmedClaudeCodeHeaders() http.Header {
 	return http.Header{
-		"User-Agent":     {"claude-cli/2.1.220 (external, cli)"},
+		"User-Agent":     {"claude-cli/2.1.258 (external, cli)"},
 		"X-App":          {"cli"},
 		"Anthropic-Beta": {"claude-code-20250219,interleaved-thinking-2025-05-14"},
 	}
@@ -64,7 +64,7 @@ func TestDetectClaudeCodeRequestRejectsEachMissingMessageSignal(t *testing.T) {
 	}{
 		{
 			name: "x-app", headers: http.Header{
-				"User-Agent": {"claude-cli/2.1.220 (external, cli)"}, "Anthropic-Beta": {"claude-code-20250219"},
+				"User-Agent": {"claude-cli/2.1.258 (external, cli)"}, "Anthropic-Beta": {"claude-code-20250219"},
 			}, body: payload,
 		},
 		{
@@ -73,7 +73,7 @@ func TestDetectClaudeCodeRequestRejectsEachMissingMessageSignal(t *testing.T) {
 			}, body: payload,
 		},
 		{
-			name: "betas", headers: http.Header{"User-Agent": {"claude-cli/2.1.220 (external, cli)"}, "X-App": {"cli"}},
+			name: "betas", headers: http.Header{"User-Agent": {"claude-cli/2.1.258 (external, cli)"}, "X-App": {"cli"}},
 			body: payload,
 		},
 		{name: "metadata", headers: confirmedClaudeCodeHeaders(), body: []byte(`{"messages":[]}`)},
@@ -99,42 +99,42 @@ func TestDetectClaudeCodeRequestClassifiesEntrypoints(t *testing.T) {
 		native          bool
 	}{
 		{
-			name: "cli", userAgent: "claude-cli/2.1.220 (external, cli)", entrypoint: "cli",
+			name: "cli", userAgent: "claude-cli/2.1.258 (external, cli)", entrypoint: "cli",
 			subclient: "claude-code-cli", native: true,
 		},
 		{
-			name: "vscode-agent-sdk", userAgent: "claude-cli/2.1.220 (external, claude-vscode, agent-sdk/0.3.220)",
-			entrypoint: "claude-vscode", subclient: "claude-code-vscode", agentSDKVersion: "0.3.220", native: true,
+			name: "vscode-agent-sdk", userAgent: "claude-cli/2.1.258 (external, claude-vscode, agent-sdk/0.3.258)",
+			entrypoint: "claude-vscode", subclient: "claude-code-vscode", agentSDKVersion: "0.3.258", native: true,
 		},
 		{
-			name: "sdk-cli", userAgent: "claude-cli/2.1.220 (external, sdk-cli)", entrypoint: "sdk-cli",
+			name: "sdk-cli", userAgent: "claude-cli/2.1.258 (external, sdk-cli)", entrypoint: "sdk-cli",
 			subclient: "claude-code-cli-sdk", native: true,
 		},
 		{
-			name: "sdk-ts", userAgent: "claude-cli/2.1.220 (external, sdk-ts, agent-sdk/0.3.220)", entrypoint: "sdk-ts",
-			subclient: "claude-code-sdk-ts", agentSDKVersion: "0.3.220",
+			name: "sdk-ts", userAgent: "claude-cli/2.1.258 (external, sdk-ts, agent-sdk/0.3.258)", entrypoint: "sdk-ts",
+			subclient: "claude-code-sdk-ts", agentSDKVersion: "0.3.258",
 		},
 		{
-			name: "sdk-py", userAgent: "claude-cli/2.1.220 (external, sdk-py, agent-sdk/0.1.0)", entrypoint: "sdk-py",
+			name: "sdk-py", userAgent: "claude-cli/2.1.258 (external, sdk-py, agent-sdk/0.1.0)", entrypoint: "sdk-py",
 			subclient: "claude-code-sdk-py", agentSDKVersion: "0.1.0",
 		},
 		{
-			name: "desktop", userAgent: "claude-cli/2.1.220 (external, claude-desktop)", entrypoint: "claude-desktop",
+			name: "desktop", userAgent: "claude-cli/2.1.258 (external, claude-desktop)", entrypoint: "claude-desktop",
 			subclient: "claude-desktop",
 		},
 		{
-			name: "desktop-third-party-inference", userAgent: "claude-cli/2.1.220 (external, claude-desktop-3p)",
+			name: "desktop-third-party-inference", userAgent: "claude-cli/2.1.258 (external, claude-desktop-3p)",
 			entrypoint: "claude-desktop-3p", subclient: "claude-desktop-3p",
 		},
 		{
-			name: "remote", userAgent: "claude-cli/2.1.220 (external, remote)", entrypoint: "remote",
+			name: "remote", userAgent: "claude-cli/2.1.258 (external, remote)", entrypoint: "remote",
 			subclient: "claude-remote",
 		},
 		{
-			name: "github-action", userAgent: "claude-cli/2.1.220 (external, claude-code-github-action)",
+			name: "github-action", userAgent: "claude-cli/2.1.258 (external, claude-code-github-action)",
 			entrypoint: "claude-code-github-action", subclient: "claude-code-gh-action",
 		},
-		{name: "unknown", userAgent: "claude-cli/2.1.220 (external, copied-client)", entrypoint: "copied-client"},
+		{name: "unknown", userAgent: "claude-cli/2.1.258 (external, copied-client)", entrypoint: "copied-client"},
 	} {
 		t.Run(
 			test.name, func(t *testing.T) {
@@ -160,7 +160,7 @@ func TestDetectClaudeCodeRequestClassifiesEntrypoints(t *testing.T) {
 
 func TestDetectClaudeCodeCountTokensAllowsMissingMetadata(t *testing.T) {
 	headers := confirmedClaudeCodeHeaders()
-	headers.Set("User-Agent", "claude-cli/2.1.220 (external, claude-vscode, agent-sdk/0.3.220)")
+	headers.Set("User-Agent", "claude-cli/2.1.258 (external, claude-vscode, agent-sdk/0.3.258)")
 	detection := DetectClaudeCodeRequest(headers, []byte(`{"messages":[]}`), true)
 	if !detection.Confirmed {
 		t.Fatalf("detection = %#v, want confirmed", detection)
@@ -168,7 +168,7 @@ func TestDetectClaudeCodeCountTokensAllowsMissingMetadata(t *testing.T) {
 	if detection.MetadataUserID {
 		t.Fatalf("metadata signal = true, want false: %#v", detection)
 	}
-	if detection.Subclient != "claude-code-vscode" || detection.AgentSDKVersion != "0.3.220" {
+	if detection.Subclient != "claude-code-vscode" || detection.AgentSDKVersion != "0.3.258" {
 		t.Fatalf("count_tokens identity = %#v, want VSCode Agent SDK", detection)
 	}
 }
@@ -212,7 +212,7 @@ func TestDetectClaudeCodeRequestRejectsMalformedNativeSignals(t *testing.T) {
 		},
 		{
 			name: "unrelated beta", headers: http.Header{
-				"User-Agent": {"claude-cli/2.1.220 (external, cli)"}, "X-App": {"cli"}, "Anthropic-Beta": {"anything"},
+				"User-Agent": {"claude-cli/2.1.258 (external, cli)"}, "X-App": {"cli"}, "Anthropic-Beta": {"anything"},
 			}, userID: validClaudeCodeMetadataUserID,
 		},
 	}

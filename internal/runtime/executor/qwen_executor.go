@@ -15,6 +15,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
@@ -288,9 +289,11 @@ func (e *QwenExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth
 		return nil
 	}
 	token, _ := qwenCreds(auth)
+	bearer := ""
 	if strings.TrimSpace(token) != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		bearer = "Bearer " + token
 	}
+	util.ApplyCredentialHeader(req, "Authorization", bearer)
 	return nil
 }
 
@@ -647,7 +650,11 @@ func applyQwenHeaders(r *http.Request, token string, stream bool) {
 	r.Header.Set("X-Stainless-Runtime", "node")
 	r.Header.Set("X-Stainless-Retry-Count", "0")
 	r.Header.Set("Accept-Encoding", "gzip, deflate")
-	r.Header.Set("Authorization", "Bearer "+token)
+	bearer := ""
+	if strings.TrimSpace(token) != "" {
+		bearer = "Bearer " + token
+	}
+	util.ApplyCredentialHeader(r, "Authorization", bearer)
 	r.Header.Set("X-Stainless-Package-Version", "5.11.0")
 	r.Header.Set("Sec-Fetch-Mode", "cors")
 	r.Header.Set("Content-Type", "application/json")

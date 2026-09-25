@@ -406,11 +406,6 @@ func buildXAIVideosCreateRequest(rawJSON []byte, model string) ([]byte, xaiVideo
 	if imageURL != "" && len(referenceImages) > 0 {
 		return nil, xaiVideoCreateMetadata{}, fmt.Errorf("image and reference_images cannot be combined on xAI")
 	}
-	if len(referenceImages) > 0 && duration > 10 {
-		duration = 10
-		seconds = "10"
-	}
-
 	videoModel := canonicalXAIVideosModel(model)
 	req := []byte(`{}`)
 	req, _ = sjson.SetBytes(req, "model", videoModel)
@@ -452,6 +447,35 @@ func normalizeXAIVideosSeconds(raw string) (string, int64, error) {
 		duration = 15
 	}
 	return strconv.FormatInt(duration, 10), duration, nil
+}
+
+func normalizedXAIVideosResponseSeconds(payload []byte) (string, bool, error) {
+	for _, value := range []gjson.Result{
+		gjson.GetBytes(payload, "seconds"),
+		gjson.GetBytes(payload, "video.duration"),
+	} {
+		if value.Type == gjson.Null {
+			continue
+		}
+		var raw string
+		switch value.Type {
+		case gjson.Number:
+			raw = value.Raw
+		case gjson.String:
+			raw = value.String()
+		default:
+			return "", false, fmt.Errorf("xAI video response included non-integer seconds")
+		}
+		if strings.TrimSpace(raw) == "" {
+			return "", false, fmt.Errorf("xAI video response included invalid seconds")
+		}
+		seconds, _, err := normalizeXAIVideosSeconds(raw)
+		if err != nil {
+			return "", false, fmt.Errorf("xAI video response included invalid seconds: %w", err)
+		}
+		return seconds, true, nil
+	}
+	return "", false, nil
 }
 
 func xaiVideosSizeOptions(raw string) (size string, aspectRatio string, resolution string, err error) {
@@ -644,10 +668,12 @@ func buildVideosRetrieveAPIResponseFromXAI(videoID string, payload []byte, fallb
 	if progress := gjson.GetBytes(payload, "progress"); progress.Exists() {
 		out, _ = sjson.SetRawBytes(out, "progress", []byte(progress.Raw))
 	}
-	if seconds := gjson.GetBytes(payload, "seconds"); seconds.Exists() {
-		out, _ = sjson.SetRawBytes(out, "seconds", []byte(seconds.Raw))
-	} else if duration := gjson.GetBytes(payload, "video.duration"); duration.Exists() {
-		out, _ = sjson.SetBytes(out, "seconds", duration.String())
+	seconds, hasSeconds, err := normalizedXAIVideosResponseSeconds(payload)
+	if err != nil {
+		return nil, err
+	}
+	if hasSeconds {
+		out, _ = sjson.SetBytes(out, "seconds", seconds)
 	}
 	if videoURL := strings.TrimSpace(gjson.GetBytes(payload, "video.url").String()); videoURL != "" {
 		out, _ = sjson.SetBytes(out, "video_url", videoURL)

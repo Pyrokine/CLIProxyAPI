@@ -136,7 +136,7 @@ func TestC09ProviderSessionUseRejectsInvalidExplicitIDs(t *testing.T) {
 	if got := gjson.GetBytes(websocketBody, "prompt_cache_key").String(); got != wantCodexID {
 		t.Fatalf("Codex WebSocket prompt cache = %q, want derived %q", got, wantCodexID)
 	}
-	if got := websocketHeaders.Get("Session_id"); got != wantCodexID {
+	if got := websocketHeaders.Get("Session-Id"); got != wantCodexID {
 		t.Fatalf("Codex WebSocket session header = %q, want derived %q", got, wantCodexID)
 	}
 

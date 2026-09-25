@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	internalcache "github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -766,4 +768,204 @@ func TestXAIWebsocketsExecuteStreamCompletesGenerateFalseWarmup(t *testing.T) {
 			t.Fatalf("timed out waiting for warmup stream to close; event types so far: %v", gotTypes)
 		}
 	}
+}
+
+func TestXAIWebsocketsExecuteStreamAcceptsIncompleteWithoutReplacingReplay(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	releaseServer := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if _, _, errRead := conn.ReadMessage(); errRead != nil {
+			t.Errorf("read request: %v", errRead)
+			return
+		}
+		for _, payload := range [][]byte{
+			[]byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]}}`),
+			[]byte(`{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","output":[],"usage":{"input_tokens":8,"output_tokens":1,"total_tokens":9}}}`),
+		} {
+			if errWrite := conn.WriteMessage(websocket.TextMessage, payload); errWrite != nil {
+				t.Errorf("write response: %v", errWrite)
+				return
+			}
+		}
+		<-releaseServer
+	}))
+	defer server.Close()
+	defer close(releaseServer)
+
+	ctx := cliproxyexecutor.WithDownstreamWebsocket(xaiC03ContextWithAPIKey("ws-incomplete-caller"))
+	payload := []byte(`{"model":"grok-4.6","prompt_cache_key":"ws-incomplete-session","input":[{"role":"user","content":"hi"}]}`)
+	req := cliproxyexecutor.Request{Model: "grok-4.6", Payload: payload}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "ws-incomplete-session",
+		},
+	}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, opts.SourceFormat, req, opts, payload)
+	seedXAIReasoningReplay(t, scope)
+
+	exec := newXAIWebsocketsExecutor(&config.Config{})
+	t.Cleanup(func() { exec.CloseExecutionSession("ws-incomplete-session") })
+	auth := &cliproxyauth.Auth{
+		ID:         "xai-ws-incomplete-auth",
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL},
+	}
+	result, err := exec.ExecuteStream(ctx, auth, req, opts)
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var events [][]byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		events = append(events, bytes.Clone(chunk.Payload))
+	}
+	if len(events) != 2 || gjson.GetBytes(events[1], "type").String() != "response.incomplete" {
+		t.Fatalf("events = %q, want output item and response.incomplete", events)
+	}
+	if got := gjson.GetBytes(events[1], "response.output.#").Int(); got != 1 {
+		t.Fatalf("incomplete output length = %d, want 1; event=%s", got, events[1])
+	}
+	if _, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey); !ok {
+		t.Fatal("response.incomplete replaced or deleted completed-only replay state")
+	}
+}
+
+func TestConfigureXAIWebsocketConnPongDoesNotWaitForPayloadWrite(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	serverConn := make(chan *websocket.Conn, 1)
+	pongReceived := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade websocket: %v", err)
+			return
+		}
+		conn.SetPongHandler(func(appData string) error {
+			pongReceived <- appData
+			return nil
+		})
+		serverConn <- conn
+		for {
+			if _, _, errRead := conn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	clientConn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = clientConn.Close() }()
+	upstreamConn := <-serverConn
+	defer func() { _ = upstreamConn.Close() }()
+
+	sess := &codexWebsocketSession{sessionID: "xai-pong-test"}
+	configureXAIWebsocketConn(sess, clientConn)
+	go func() {
+		for {
+			if _, _, errRead := clientConn.ReadMessage(); errRead != nil {
+				return
+			}
+		}
+	}()
+
+	sess.writeMu.Lock()
+	defer sess.writeMu.Unlock()
+	if errPing := upstreamConn.WriteControl(
+		websocket.PingMessage,
+		[]byte("keepalive"),
+		time.Now().Add(time.Second),
+	); errPing != nil {
+		t.Fatalf("write ping: %v", errPing)
+	}
+	select {
+	case pong := <-pongReceived:
+		if pong != "keepalive" {
+			t.Fatalf("pong = %q, want keepalive", pong)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("pong waited for the payload write mutex")
+	}
+}
+
+func TestBuildXAIWebsocketCompactionFallbackPayload(t *testing.T) {
+	t.Run("recorded transcript", func(t *testing.T) {
+		state := &xaiWebsocketIDState{transcriptInput: []json.RawMessage{
+			json.RawMessage(`{"type":"message","id":"recorded","role":"user","content":"old"}`),
+		}}
+		payload, err := buildXAIWebsocketCompactionFallbackPayload(
+			[]byte(`{"previous_response_id":"drop","input":[{"type":"compaction_trigger"}]}`),
+			&xaiWebsocketRequestIDMapper{state: state},
+		)
+		if err != nil {
+			t.Fatalf("build fallback error = %v", err)
+		}
+		if got := gjson.GetBytes(payload, "input.0.id").String(); got != "recorded" {
+			t.Fatalf("recorded input id = %q; payload=%s", got, payload)
+		}
+		if gjson.GetBytes(payload, "previous_response_id").Exists() {
+			t.Fatalf("previous_response_id remains with transcript: %s", payload)
+		}
+	})
+
+	t.Run("request input", func(t *testing.T) {
+		payload, err := buildXAIWebsocketCompactionFallbackPayload(
+			[]byte(`{"previous_response_id":"drop","input":[{"type":"message","id":"request","role":"user","content":"new"},{"type":"compaction_trigger"}]}`),
+			&xaiWebsocketRequestIDMapper{},
+		)
+		if err != nil {
+			t.Fatalf("build fallback error = %v", err)
+		}
+		if got := gjson.GetBytes(payload, "input.0.id").String(); got != "request" {
+			t.Fatalf("request input id = %q; payload=%s", got, payload)
+		}
+		if gjson.GetBytes(payload, "previous_response_id").Exists() {
+			t.Fatalf("previous_response_id remains with request input: %s", payload)
+		}
+	})
+
+	t.Run("previous response id", func(t *testing.T) {
+		payload, err := buildXAIWebsocketCompactionFallbackPayload(
+			[]byte(`{"previous_response_id":"downstream","input":[{"type":"compaction_trigger"}]}`),
+			&xaiWebsocketRequestIDMapper{upstreamPreviousID: "upstream"},
+		)
+		if err != nil {
+			t.Fatalf("build fallback error = %v", err)
+		}
+		if got := gjson.GetBytes(payload, "previous_response_id").String(); got != "upstream" {
+			t.Fatalf("previous_response_id = %q, want upstream; payload=%s", got, payload)
+		}
+		if xaiInputHasItemType(payload, "compaction_trigger") {
+			t.Fatalf("compaction_trigger remains: %s", payload)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		_, err := buildXAIWebsocketCompactionFallbackPayload(
+			[]byte(`{"input":[{"type":"compaction_trigger"}]}`),
+			&xaiWebsocketRequestIDMapper{},
+		)
+		if err == nil {
+			t.Fatal("build fallback error = nil")
+		}
+		status, ok := err.(interface{ StatusCode() int })
+		if !ok || status.StatusCode() != http.StatusBadRequest {
+			t.Fatalf("error = %#v, want status 400", err)
+		}
+	})
 }

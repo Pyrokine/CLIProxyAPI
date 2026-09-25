@@ -12,19 +12,26 @@ import (
 )
 
 type claudeDiagnosticsRequestState struct {
-	key      string
-	sequence uint64
+	key               string
+	sequence          uint64
+	promptID          string
+	requestID         string
+	previousMessageID string
 }
 
 func injectClaudeDiagnostics(
 	body []byte,
 	auth *cliproxyauth.Auth,
 	sessionID string,
+	states ...claudeDiagnosticsRequestState,
 ) ([]byte, claudeDiagnosticsRequestState) {
-	key, sequence, previousMessageID := helps.BeginClaudeDiagnostics(
-		claudeDiagnosticsCredentialIdentity(auth),
-		sessionID,
-	)
+	var key, previousMessageID string
+	var sequence uint64
+	if len(states) > 0 {
+		key, sequence, previousMessageID = states[0].key, states[0].sequence, states[0].previousMessageID
+	} else {
+		key, sequence, previousMessageID = helps.BeginClaudeDiagnostics(claudeDiagnosticsCredentialIdentity(auth), sessionID)
+	}
 	if key == "" {
 		return body, claudeDiagnosticsRequestState{}
 	}
@@ -59,6 +66,38 @@ func injectClaudeDiagnostics(
 	return updated, claudeDiagnosticsRequestState{key: key, sequence: sequence}
 }
 
+func prepareClaudeContinuity(body, continuityBody []byte, auth *cliproxyauth.Auth, sessionID string, executionMetadata, signing, diagnosticsAllowed, diagnosticsTouched bool) ([]byte, claudeDiagnosticsRequestState) {
+	if helps.IsClaudeProbeOrHelperRequest(body) {
+		return helps.StripClaudeBillingTags(body), claudeDiagnosticsRequestState{}
+	}
+	if len(continuityBody) == 0 {
+		continuityBody = body
+	}
+	previousRequest, explicitPrompt := helps.ExtractClaudeBillingTags(continuityBody)
+	key, sequence, previousMessage, storedRequest, prompt := helps.BeginClaudeContinuity(claudeDiagnosticsCredentialIdentity(auth), sessionID, helps.IsClaudeNewPromptTurn(continuityBody), explicitPrompt)
+	if key == "" {
+		return body, claudeDiagnosticsRequestState{}
+	}
+	if explicitPrompt == "" && !executionMetadata && (previousMessage == "" || helps.IsClaudeNewPromptTurn(continuityBody)) {
+		prompt = helps.ClaudeDeterministicPromptID("cpa:prompt:" + claudeBillingFingerprintMessageText(continuityBody))
+	}
+	if executionMetadata || previousRequest != "" {
+		if storedRequest != "" {
+			previousRequest = storedRequest
+		}
+	} else {
+		previousMessage = ""
+	}
+	state := claudeDiagnosticsRequestState{key: key, sequence: sequence, promptID: prompt, previousMessageID: previousMessage}
+	if signing {
+		body = helps.InjectClaudeBillingTags(body, previousRequest, prompt)
+	}
+	if diagnosticsAllowed && !diagnosticsTouched && !gjson.GetBytes(body, "diagnostics").Exists() {
+		body, _ = injectClaudeDiagnostics(body, auth, sessionID, state)
+	}
+	return body, state
+}
+
 func claudeDiagnosticsCredentialIdentity(auth *cliproxyauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -76,14 +115,20 @@ func claudeDiagnosticsCredentialIdentity(auth *cliproxyauth.Auth) string {
 	if accountUUID := helps.ClaudeCredentialAccountUUID(auth); accountUUID != "" {
 		return "account:" + accountUUID
 	}
+	if apiKey, _ := claudeCreds(auth); strings.TrimSpace(apiKey) != "" {
+		return "key:" + apiKey
+	}
 	return ""
 }
 
 func commitClaudeDiagnostics(state claudeDiagnosticsRequestState, messageID string) {
-	helps.CommitClaudeDiagnostics(state.key, state.sequence, messageID)
+	helps.CommitClaudeContinuity(state.key, state.sequence, messageID, state.requestID, state.promptID)
 }
 
 func claudeMessageIDFromResponse(data []byte) string {
+	if !gjson.ValidBytes(data) || gjson.GetBytes(data, "error").Exists() {
+		return ""
+	}
 	return strings.TrimSpace(gjson.GetBytes(data, "id").String())
 }
 

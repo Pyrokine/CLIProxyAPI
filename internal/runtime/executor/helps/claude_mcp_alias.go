@@ -3,12 +3,11 @@ package helps
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base32"
 	"encoding/binary"
 	"strings"
-)
 
-var claudeMCPBase32 = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
+	log "github.com/sirupsen/logrus"
+)
 
 // IsClaudeMCPToolName reports whether name follows Claude Code's MCP tool
 // convention and contains only characters accepted by Anthropic tool names.
@@ -31,18 +30,71 @@ func IsClaudeMCPToolName(name string) bool {
 	return true
 }
 
+// ClaudeMCPAliasWordCount is the BIP-39 English dictionary size used for the
+// virtual server pair and the one-word tool ID.
+func ClaudeMCPAliasWordCount() int {
+	return len(claudeMCPAliasEnglishWords)
+}
+
 // ClaudeMCPToolAlias derives a Claude Code-style MCP tool name. Aliases from
 // one caller share a virtual server component. The tool component combines a
 // stable keyed ID with a truncated semantic suffix so the model can distinguish
 // tools by name while the request-local symbol table restores the exact original.
-// A higher attempt changes the stable ID when a collision must be avoided.
+// A higher attempt linearly probes the next word when a collision must be avoided.
 func ClaudeMCPToolAlias(secret, original string, attempt uint32) string {
-	serverDigest := claudeMCPAliasDigest(secret, "server", "", 0)
-	toolDigest := claudeMCPAliasDigest(secret, "tool", original, attempt)
-	server := claudeMCPBase32.EncodeToString(serverDigest)[:12]
-	toolID := claudeMCPBase32.EncodeToString(toolDigest)[:12]
-	semantic := claudeMCPToolSemanticSuffix(original, 32)
-	return "mcp__" + server + "__" + toolID + "_" + semantic
+	toolDigest := claudeMCPAliasDigest(secret, "tool", original)
+	return claudeMCPAliasFor(
+		claudeMCPAliasServerComponent(secret),
+		claudeMCPAliasWord(toolDigest, 0, attempt),
+		original,
+	)
+}
+
+// AllocateClaudeMCPToolAlias picks an alias that is not already reserved.
+// Attempts are capped at the wordlist size so allocation cannot spin forever.
+func AllocateClaudeMCPToolAlias(secret, original string, reserved map[string]bool) (string, bool) {
+	words := claudeMCPAliasEnglishWords
+	totalWords := len(words)
+	if totalWords == 0 {
+		log.Error("claude oauth mcp alias: embedded BIP-39 wordlist is empty, tool aliasing is disabled")
+		return "", false
+	}
+
+	server := claudeMCPAliasServerComponent(secret)
+	toolDigest := claudeMCPAliasDigest(secret, "tool", original)
+	baseIndex := int(binary.BigEndian.Uint16(toolDigest[0:2])) % totalWords
+	for attempt := 0; attempt < totalWords; attempt++ {
+		alias := claudeMCPAliasFor(server, words[(baseIndex+attempt)%totalWords], original)
+		if reserved != nil && reserved[alias] {
+			continue
+		}
+		return alias, true
+	}
+	return "", false
+}
+
+func claudeMCPAliasFor(server, toolID, original string) string {
+	prefix := "mcp__" + server + "__" + toolID + "_"
+	maxSemanticLen := 64 - len(prefix)
+	if maxSemanticLen < 1 {
+		maxSemanticLen = 1
+	}
+	return prefix + claudeMCPToolSemanticSuffix(original, maxSemanticLen)
+}
+
+func claudeMCPAliasServerComponent(secret string) string {
+	serverDigest := claudeMCPAliasDigest(secret, "server", "")
+	return claudeMCPAliasWord(serverDigest, 0, 0) + "_" +
+		claudeMCPAliasWord(serverDigest, 2, 0)
+}
+
+func claudeMCPAliasWord(digest []byte, offset int, attempt uint32) string {
+	words := claudeMCPAliasEnglishWords
+	if len(words) == 0 || offset < 0 || offset+2 > len(digest) {
+		return "tool"
+	}
+	base := int(binary.BigEndian.Uint16(digest[offset : offset+2]))
+	return words[(base+int(attempt))%len(words)]
 }
 
 func claudeMCPToolSemanticSuffix(original string, maxLength int) string {
@@ -72,14 +124,11 @@ func claudeMCPToolSemanticSuffix(original string, maxLength int) string {
 	return result
 }
 
-func claudeMCPAliasDigest(secret, purpose, original string, attempt uint32) []byte {
+func claudeMCPAliasDigest(secret, purpose, original string) []byte {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte("cpa-claude-mcp-alias-v2\x00"))
 	_, _ = mac.Write([]byte(purpose))
 	_, _ = mac.Write([]byte{0})
 	_, _ = mac.Write([]byte(original))
-	var counter [4]byte
-	binary.BigEndian.PutUint32(counter[:], attempt)
-	_, _ = mac.Write(counter[:])
 	return mac.Sum(nil)
 }

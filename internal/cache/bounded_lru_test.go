@@ -30,6 +30,21 @@ func TestBoundedLRUEvictsLeastRecentlyUsed(t *testing.T) {
 	}
 }
 
+func TestBoundedLRUDelete(t *testing.T) {
+	cache := NewBoundedLRU[string, string](2, nil)
+	cache.GetOrAdd("a", func() string { return "A" })
+
+	if !cache.Delete("a") {
+		t.Fatal("Delete(a) = false, want true")
+	}
+	if cache.Delete("a") {
+		t.Fatal("second Delete(a) = true, want false")
+	}
+	if got := cache.Len(); got != 0 {
+		t.Fatalf("Len() = %d, want 0", got)
+	}
+}
+
 func TestBoundedLRUCreatesOneValuePerKeyConcurrently(t *testing.T) {
 	cache := NewBoundedLRU[string, int](2, nil)
 	started := make(chan struct{})

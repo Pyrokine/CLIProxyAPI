@@ -59,6 +59,38 @@ func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
 	return out
 }
 
+// NormalizeClaudeToolResultsTextOnly removes image parts before Claude requests
+// are translated, preserving the omission marker on the originating tool result.
+func NormalizeClaudeToolResultsTextOnly(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() {
+		return payload
+	}
+
+	out := payload
+	for messageIndex, message := range messages.Array() {
+		content := message.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for partIndex, part := range content.Array() {
+			if !strings.EqualFold(strings.TrimSpace(part.Get("type").String()), "tool_result") {
+				continue
+			}
+			toolContent := part.Get("content")
+			if !toolContent.Exists() || toolContent.Type == gjson.String {
+				continue
+			}
+			path := fmt.Sprintf("messages.%d.content.%d.content", messageIndex, partIndex)
+			updated, errSet := sjson.SetBytes(out, path, flattenOpenAIToolResultContent(toolContent))
+			if errSet == nil {
+				out = updated
+			}
+		}
+	}
+	return out
+}
+
 func openAICompatibilityModelExcludesImages(models []config.OpenAICompatibilityModel, model string) (bool, bool) {
 	model = normalizeOpenAICompatibilityModelName(model)
 	if model == "" {

@@ -38,6 +38,29 @@ func TestNormalizeOpenAIToolResultsTextOnly(t *testing.T) {
 	}
 }
 
+func TestNormalizeClaudeToolResultsTextOnly(t *testing.T) {
+	input := []byte(`{"messages":[
+		{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"inspect_image","input":{}}]},
+		{"role":"user","content":[
+			{"type":"tool_result","tool_use_id":"call_1","content":[
+				{"type":"text","text":"image inspected"},
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}
+			]},
+			{"type":"image","source":{"type":"base64","media_type":"image/png","data":"BB=="}}
+		]}
+	]}`)
+
+	got := NormalizeClaudeToolResultsTextOnly(input)
+
+	want := "image inspected\n\n" + openAIToolResultImageOmittedText
+	if content := gjson.GetBytes(got, "messages.1.content.0.content"); content.String() != want {
+		t.Fatalf("tool result content = %q, want %q", content.String(), want)
+	}
+	if image := gjson.GetBytes(got, "messages.1.content.1"); image.Get("type").String() != "image" {
+		t.Fatalf("ordinary user image changed: %s", image.Raw)
+	}
+}
+
 func TestNormalizeOpenAIToolResultsTextOnlyImageAndUnknownContent(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -19,12 +19,12 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 		name            string
 		stream          bool
 		inputModalities []string
-		wantString      bool
+		textOnly        bool
 	}{
-		{name: "non-stream text-only", stream: false, inputModalities: []string{"text"}, wantString: true},
-		{name: "stream text-only", stream: true, inputModalities: []string{"text"}, wantString: true},
-		{name: "non-stream multimodal", stream: false, inputModalities: []string{"text", "image"}, wantString: false},
-		{name: "non-stream unspecified", stream: false, inputModalities: nil, wantString: false},
+		{name: "non-stream text-only", stream: false, inputModalities: []string{"text"}, textOnly: true},
+		{name: "stream text-only", stream: true, inputModalities: []string{"text"}, textOnly: true},
+		{name: "non-stream multimodal", stream: false, inputModalities: []string{"text", "image"}},
+		{name: "non-stream unspecified", stream: false, inputModalities: nil},
 	}
 
 	for _, tt := range tests {
@@ -95,16 +95,26 @@ func TestOpenAICompatExecutorToolResultContentByInputModalities(t *testing.T) {
 				}
 
 				toolContent := gjson.GetBytes(gotBody, "messages.1.content")
-				if tt.wantString {
-					if toolContent.Type != gjson.String {
-						t.Fatalf("tool content type = %s, want string; body=%s", toolContent.Type, string(gotBody))
+				if toolContent.Type != gjson.String {
+					t.Fatalf("tool content type = %s, want string; body=%s", toolContent.Type, string(gotBody))
+				}
+				wantToolContent := "image inspected"
+				wantMessageCount := int64(3)
+				if tt.textOnly {
+					wantToolContent += "\n\n[image omitted: unsupported by upstream]"
+					wantMessageCount = 2
+				}
+				if toolContent.String() != wantToolContent {
+					t.Fatalf("tool content = %q, want %q", toolContent.String(), wantToolContent)
+				}
+				if got := gjson.GetBytes(gotBody, "messages.#").Int(); got != wantMessageCount {
+					t.Fatalf("message count = %d, want %d; body=%s", got, wantMessageCount, string(gotBody))
+				}
+				if !tt.textOnly {
+					relay := gjson.GetBytes(gotBody, "messages.2")
+					if relay.Get("role").String() != "user" || relay.Get("content.1.type").String() != "image_url" {
+						t.Fatalf("tool image relay missing; body=%s", string(gotBody))
 					}
-					want := "image inspected\n\n[image omitted: unsupported by upstream]"
-					if toolContent.String() != want {
-						t.Fatalf("tool content = %q, want %q", toolContent.String(), want)
-					}
-				} else if !toolContent.IsArray() {
-					t.Fatalf("tool content type = %s, want array; body=%s", toolContent.Type, string(gotBody))
 				}
 			},
 		)

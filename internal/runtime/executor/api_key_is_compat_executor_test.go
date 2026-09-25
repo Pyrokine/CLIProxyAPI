@@ -154,16 +154,20 @@ func TestClaudeExecutorUsesResolvedModelIsCompat(t *testing.T) {
 	tests := []struct {
 		name                 string
 		baseURL              string
+		wantAuthorization    string
+		wantAPIKey           string
 		wantAnthropicVersion string
 	}{
 		{
 			name:                 "DeepSeek Anthropic endpoint",
 			baseURL:              "https://api.deepseek.com/anthropic",
+			wantAPIKey:           "test-key",
 			wantAnthropicVersion: "",
 		},
 		{
 			name:                 "other Claude-compatible endpoint",
 			baseURL:              "https://claude-compatible.example.com",
+			wantAuthorization:    "Bearer test-key",
 			wantAnthropicVersion: "2023-06-01",
 		},
 	}
@@ -200,16 +204,16 @@ func TestClaudeExecutorUsesResolvedModelIsCompat(t *testing.T) {
 				if err != nil {
 					t.Fatalf("prepareClaudeRequest error: %v", err)
 				}
-					t.Cleanup(func() {
-						if errClose := prepared.httpReq.Body.Close(); errClose != nil {
-							t.Errorf("close request body: %v", errClose)
-						}
-					})
-				if got := prepared.httpReq.Header.Get("Authorization"); got != "Bearer test-key" {
-					t.Fatalf("Authorization = %q, want Bearer test-key", got)
+				t.Cleanup(func() {
+					if errClose := prepared.httpReq.Body.Close(); errClose != nil {
+						t.Errorf("close request body: %v", errClose)
+					}
+				})
+				if got := prepared.httpReq.Header.Get("Authorization"); got != testCase.wantAuthorization {
+					t.Fatalf("Authorization = %q, want %q", got, testCase.wantAuthorization)
 				}
-				if got := prepared.httpReq.Header.Get("x-api-key"); got != "" {
-					t.Fatalf("x-api-key = %q, want empty for custom base", got)
+				if got := prepared.httpReq.Header.Get("x-api-key"); got != testCase.wantAPIKey {
+					t.Fatalf("x-api-key = %q, want %q", got, testCase.wantAPIKey)
 				}
 				if got := prepared.httpReq.Header.Get("Anthropic-Version"); got != testCase.wantAnthropicVersion {
 					t.Fatalf("Anthropic-Version = %q, want %q", got, testCase.wantAnthropicVersion)
@@ -231,6 +235,126 @@ func TestClaudeExecutorUsesResolvedModelIsCompat(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestDeepSeekAnthropicCompatibilityRequest(t *testing.T) {
+	modelInfo := registry.LookupStaticModelInfo("deepseek-flash")
+	if modelInfo == nil {
+		t.Fatal("deepseek-flash static metadata is missing")
+	}
+	tests := []struct {
+		name         string
+		thinking     string
+		wantThinking string
+		wantBudget   bool
+	}{
+		{
+			name:         "thinking enabled",
+			thinking:     `{"type":"enabled","budget_tokens":4096}`,
+			wantThinking: "enabled",
+			wantBudget:   true,
+		},
+		{
+			name:         "thinking disabled",
+			thinking:     `{"type":"disabled"}`,
+			wantThinking: "disabled",
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			var upstreamBody []byte
+			var upstreamHeaders http.Header
+			var upstreamURL string
+			ctx := util.WithRoundTripper(
+				t.Context(),
+				apiKeyCompatRoundTripper(func(req *http.Request) (*http.Response, error) {
+					var errRead error
+					upstreamBody, errRead = io.ReadAll(req.Body)
+					if errRead != nil {
+						t.Fatalf("read DeepSeek upstream body: %v", errRead)
+					}
+					upstreamHeaders = req.Header.Clone()
+					upstreamURL = req.URL.String()
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(strings.NewReader(
+							`{"id":"msg_1","type":"message","role":"assistant","model":"deepseek-flash","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+						)),
+						Request: req,
+					}, nil
+				}),
+			)
+			payload := []byte(`{
+				"model":"deepseek-flash",
+				"max_tokens":128,
+				"thinking":` + testCase.thinking + `,
+				"messages":[
+					{"role":"user","content":[
+						{"type":"text","text":"Describe this image."},
+						{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}
+					]},
+					{"role":"assistant","content":[{"type":"tool_use","id":"tool_1","name":"lookup","input":{"id":"42"}}]},
+					{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool_1","content":"found"}]}
+				],
+				"tools":[{"name":"lookup","description":"Look up an item","input_schema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}]
+			}`)
+			_, errExecute := NewClaudeExecutor(&config.Config{}).Execute(
+				ctx,
+				&cliproxyauth.Auth{
+					Provider: "claude",
+					Attributes: map[string]string{
+						"base_url": "https://api.deepseek.com/anthropic",
+						"api_key":  "test-key",
+					},
+				},
+				cliproxyexecutor.Request{
+					Model:   "deepseek-flash",
+					Payload: payload,
+					Metadata: map[string]any{
+						"cliproxy.resolved_api_key_model_info": modelInfo,
+					},
+				},
+				cliproxyexecutor.Options{
+					SourceFormat:   sdktranslator.FormatClaude,
+					ResponseFormat: sdktranslator.FormatClaude,
+				},
+			)
+			if errExecute != nil {
+				t.Fatalf("Execute DeepSeek request: %v", errExecute)
+			}
+			if upstreamURL != "https://api.deepseek.com/anthropic/v1/messages?beta=true" {
+				t.Fatalf("DeepSeek upstream URL = %q", upstreamURL)
+			}
+			if got := upstreamHeaders.Get("x-api-key"); got != "test-key" {
+				t.Fatalf("DeepSeek x-api-key = %q, want test-key", got)
+			}
+			if got := upstreamHeaders.Get("Authorization"); got != "" {
+				t.Fatalf("DeepSeek Authorization = %q, want empty", got)
+			}
+			if got := upstreamHeaders.Get("Anthropic-Version"); got != "" {
+				t.Fatalf("DeepSeek Anthropic-Version = %q, want empty", got)
+			}
+			if got := gjson.GetBytes(upstreamBody, "thinking.type").String(); got != testCase.wantThinking {
+				t.Fatalf("DeepSeek thinking.type = %q, want %q; body=%s", got, testCase.wantThinking, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "thinking.budget_tokens").Exists(); got != testCase.wantBudget {
+				t.Fatalf("DeepSeek thinking budget presence = %t, want %t; body=%s", got, testCase.wantBudget, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "messages.0.content.1.source.data").String(); got != "iVBORw0KGgo=" {
+				t.Fatalf("DeepSeek image payload = %q; body=%s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "tools.0.name").String(); got != "lookup" {
+				t.Fatalf("DeepSeek tool definition = %q; body=%s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "messages.1.content.0.type").String(); got != "tool_use" {
+				t.Fatalf("DeepSeek tool_use block = %q; body=%s", got, upstreamBody)
+			}
+			if got := gjson.GetBytes(upstreamBody, "messages.2.content.0.type").String(); got != "tool_result" {
+				t.Fatalf("DeepSeek tool_result block = %q; body=%s", got, upstreamBody)
+			}
+		})
 	}
 }
 
@@ -258,7 +382,7 @@ func TestGeminiExecutorUsesResolvedModelIsCompat(t *testing.T) {
 		t.Fatalf("prepareGeminiRequest error: %v", err)
 	}
 
-	part := gjson.GetBytes(prepared.body, "contents.0.parts.0")
+	part := gjson.GetBytes(prepared.body, `contents.#(role=="model").parts.0`)
 	if !part.Get("thought").Bool() || part.Get("text").String() != "prior reasoning" {
 		t.Fatalf("Gemini thought part missing: %s", prepared.body)
 	}

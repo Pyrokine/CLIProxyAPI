@@ -93,6 +93,10 @@ var reviewedInPlaceByteWrites = map[string]reviewedInPlaceByteWrite{
 		2,
 		"copies digest and fallback prefix bytes into fresh local fixed-size request ID arrays",
 	},
+	"internal/runtime/executor/claude_signing.go": {
+		2,
+		"仅修改 bytes.Clone 的五位 CCH，GJSON 结果来自原始 body，hash view 由独立 append 构造且不返回别名",
+	},
 	"internal/usage/backup.go": {
 		1,
 		"copies a decoded fingerprint into a local fixed-size array",

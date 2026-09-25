@@ -44,8 +44,8 @@ func applyPayloadConfigWithRootTracked(
 	model, protocol, root string,
 	payload, original []byte,
 	requestedModel string,
-	trackedPath string,
-) ([]byte, bool) {
+	trackedPaths ...string,
+) ([]byte, map[string]bool) {
 	return applyPayloadConfigWithRequestTracked(
 		cfg,
 		model,
@@ -57,7 +57,7 @@ func applyPayloadConfigWithRootTracked(
 		requestedModel,
 		"",
 		nil,
-		trackedPath,
+		trackedPaths...,
 	)
 }
 
@@ -87,8 +87,7 @@ func applyPayloadConfigWithRequest(
 	return out
 }
 
-// applyPayloadConfigWithRequestTracked also reports whether an applied rule targeted
-// trackedPath or one of its descendants.
+// applyPayloadConfigWithRequestTracked 记录规则实际处理的目标路径及子路径，包括同值覆盖和显式删除
 func applyPayloadConfigWithRequestTracked(
 	cfg *config.Config,
 	model, protocol, fromProtocol, root string,
@@ -96,14 +95,24 @@ func applyPayloadConfigWithRequestTracked(
 	requestedModel string,
 	requestPath string,
 	headers http.Header,
-	trackedPath string,
-) ([]byte, bool) {
+	trackedPaths ...string,
+) ([]byte, map[string]bool) {
 	if cfg == nil || len(payload) == 0 {
-		return payload, false
+		return payload, nil
 	}
 	out := payload
-	trackedPath = strings.TrimSpace(trackedPath)
-	trackedPathTouched := false
+	var touched map[string]bool
+	markTouched := func(path string) {
+		for _, trackedPath := range trackedPaths {
+			trackedPath = strings.TrimSpace(trackedPath)
+			if payloadRuleTargetsPath(path, trackedPath) {
+				if touched == nil {
+					touched = make(map[string]bool)
+				}
+				touched[trackedPath] = true
+			}
+		}
+	}
 
 	// Apply disable-image-generation filtering before payload rules so config payload
 	// overrides can explicitly re-enable image_generation when desired.
@@ -116,12 +125,12 @@ func applyPayloadConfigWithRequestTracked(
 	hasPayloadRules := len(rules.Default) != 0 || len(rules.DefaultRaw) != 0 || len(rules.Override) != 0 ||
 		len(rules.OverrideRaw) != 0 || len(rules.Filter) != 0
 	if !hasPayloadRules {
-		return out, false
+		return out, nil
 	}
 	model = strings.TrimSpace(model)
 	requestedModel = strings.TrimSpace(requestedModel)
 	if model == "" && requestedModel == "" {
-		return out, false
+		return out, nil
 	}
 	candidates := payloadModelCandidates(model, requestedModel)
 	source := original
@@ -153,7 +162,7 @@ func applyPayloadConfigWithRequestTracked(
 				}
 				out = updated
 				appliedDefaults[resolvedPath] = struct{}{}
-				trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+				markTouched(resolvedPath)
 			}
 		}
 	}
@@ -185,7 +194,7 @@ func applyPayloadConfigWithRequestTracked(
 				}
 				out = updated
 				appliedDefaults[resolvedPath] = struct{}{}
-				trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+				markTouched(resolvedPath)
 			}
 		}
 	}
@@ -204,7 +213,7 @@ func applyPayloadConfigWithRequestTracked(
 				var applied bool
 				out, applied = setPayloadValueIfDifferentTracked(out, resolvedPath, value)
 				if applied {
-					trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+					markTouched(resolvedPath)
 				}
 			}
 		}
@@ -228,7 +237,7 @@ func applyPayloadConfigWithRequestTracked(
 				var applied bool
 				out, applied = setPayloadRawValueIfDifferentTracked(out, resolvedPath, rawValue)
 				if applied {
-					trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+					markTouched(resolvedPath)
 				}
 			}
 		}
@@ -252,11 +261,11 @@ func applyPayloadConfigWithRequestTracked(
 					continue
 				}
 				out = updated
-				trackedPathTouched = trackedPathTouched || payloadRuleTargetsPath(resolvedPath, trackedPath)
+				markTouched(resolvedPath)
 			}
 		}
 	}
-	return out, trackedPathTouched
+	return out, touched
 }
 
 func isImagesEndpointRequestPath(path string) bool {

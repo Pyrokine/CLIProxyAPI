@@ -25,7 +25,10 @@ import (
 func TestSignAnthropicMessagesBodyReplacesCCHPlaceholder(t *testing.T) {
 	body := []byte(`{"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.63.abc; cc_entrypoint=cli; cch=00000;"}],"messages":[{"role":"user","content":"hi"}]}`)
 
-	out := signAnthropicMessagesBody(body)
+	out, err := signAnthropicMessagesBody(body)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if bytes.Contains(out, []byte("cch=00000;")) {
 		t.Fatalf("expected cch placeholder to be signed, got %s", out)
@@ -69,12 +72,12 @@ func TestRebuildMidSystemMessagesToTopLevel(t *testing.T) {
 	}
 }
 
-func TestExperimentalCCHSigningEnabled(t *testing.T) {
+func TestExperimentalCCHSigningDoesNotAuthorizeRuntime(t *testing.T) {
 	cfg := &config.Config{ClaudeKey: []config.ClaudeKey{{APIKey: "sk-ant-api03-test", ExperimentalCCHSigning: true}}}
 	auth := &cliproxyauth.Auth{Provider: "claude", Attributes: map[string]string{"api_key": "sk-ant-api03-test"}}
-
-	if !experimentalCCHSigningEnabled(cfg, auth) {
-		t.Fatal("expected experimental cch signing to be enabled for matching Claude key")
+	policy := resolveClaudeFingerprintPolicy(cfg, auth, "sk-ant-api03-test")
+	if policy.ProfileClaudeCodeCLI || claudeCCHSigningEnabled("sk-ant-api03-test", policy.ProfileClaudeCodeCLI, "https://api.anthropic.com") {
+		t.Fatal("experimental setting authorized CLI runtime")
 	}
 }
 
@@ -184,8 +187,9 @@ func TestPrepareClaudeRequestSignsOAuthCCHByDefault(t *testing.T) {
 	auth := &cliproxyauth.Auth{
 		Provider: "claude",
 		Metadata: map[string]any{
-			"access_token": "sk-ant-oat-test",
-			"account_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			"access_token":      "sk-ant-oat-test",
+			"account_uuid":      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			"claude_device_ids": []string{strings.Repeat("a", 64)},
 		},
 		Attributes: map[string]string{
 			"base_url":                 "https://example.com",
@@ -442,7 +446,7 @@ func TestApplyClaudeToolPrefix_NestedToolReference(t *testing.T) {
 
 func TestNormalizeClaudeSamplingForUpstreamRemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"}}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -451,16 +455,25 @@ func TestNormalizeClaudeSamplingForUpstreamRemovesTemperature(t *testing.T) {
 
 func TestNormalizeClaudeSamplingForUpstreamRemovesTemperatureWithThinkingEnabled(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"thinking":{"type":"enabled","budget_tokens":2048}}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
 	}
 }
 
+func TestNormalizeClaudeSamplingForUpstreamPreservesNativeHelperTemperature(t *testing.T) {
+	payload := []byte(`{"temperature":1,"thinking":{"type":"adaptive"}}`)
+	out := normalizeClaudeSamplingForUpstream(payload, true)
+
+	if got := gjson.GetBytes(out, "temperature"); !got.Exists() || got.Num != 1 {
+		t.Fatalf("temperature = %s, want 1", got.Raw)
+	}
+}
+
 func TestNormalizeClaudeSamplingForUpstreamRemovesTopPAndTopKForThinking(t *testing.T) {
 	payload := []byte(`{"temperature":0.2,"top_p":0.9,"top_k":40,"thinking":{"type":"adaptive"}}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -475,7 +488,7 @@ func TestNormalizeClaudeSamplingForUpstreamRemovesTopPAndTopKForThinking(t *test
 
 func TestNormalizeClaudeSamplingForUpstreamNoThinkingRemovesTemperatureAndTopP(t *testing.T) {
 	payload := []byte(`{"temperature":0,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`)
-	out := normalizeClaudeSamplingForUpstream(payload)
+	out := normalizeClaudeSamplingForUpstream(payload, false)
 
 	if gjson.GetBytes(out, "temperature").Exists() {
 		t.Fatalf("temperature should be removed")
@@ -491,7 +504,7 @@ func TestNormalizeClaudeSamplingForUpstreamNoThinkingRemovesTemperatureAndTopP(t
 func TestNormalizeClaudeSamplingForUpstreamAfterForcedToolChoiceRemovesTemperature(t *testing.T) {
 	payload := []byte(`{"temperature":0,"thinking":{"type":"adaptive"},"output_config":{"effort":"max"},"tool_choice":{"type":"any"}}`)
 	out := disableThinkingIfToolChoiceForced(payload)
-	out = normalizeClaudeSamplingForUpstream(out)
+	out = normalizeClaudeSamplingForUpstream(out, false)
 
 	if gjson.GetBytes(out, "thinking").Exists() {
 		t.Fatalf("thinking should be removed when tool_choice forces tool use")
@@ -662,8 +675,9 @@ func TestPrepareClaudeRequestAddsFastModeBetaAcrossStreamAndCredentials(t *testi
 			auth: &cliproxyauth.Auth{
 				Attributes: map[string]string{"base_url": "https://example.com"},
 				Metadata: map[string]any{
-					"access_token": "sk-ant-oat-test",
-					"account_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+					"access_token":      "sk-ant-oat-test",
+					"account_uuid":      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+					"claude_device_ids": []string{strings.Repeat("a", 64)},
 				},
 			},
 		},
@@ -969,7 +983,7 @@ func TestClaudeExecutor_ReusesUserIDAcrossModelsWhenCacheEnabled(t *testing.T) {
 	t.Logf("✓ End-to-end test passed: Same user_id (%s) was used for both models", userIDs[0])
 }
 
-func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
+func TestClaudeExecutor_DefaultPreservesAbsentUserID(t *testing.T) {
 	resetUserIDCache()
 
 	var userIDs []string
@@ -1015,14 +1029,8 @@ func TestClaudeExecutor_GeneratesNewUserIDByDefault(t *testing.T) {
 	if len(userIDs) != 2 {
 		t.Fatalf("expected 2 requests, got %d", len(userIDs))
 	}
-	if userIDs[0] == "" || userIDs[1] == "" {
-		t.Fatal("expected user_id to be populated")
-	}
-	if userIDs[0] == userIDs[1] {
-		t.Fatalf("expected user_id to change when caching is not enabled, got identical values %q", userIDs[0])
-	}
-	if !isValidUserID(userIDs[0]) || !isValidUserID(userIDs[1]) {
-		t.Fatalf("user_ids should be valid, got %q and %q", userIDs[0], userIDs[1])
+	if userIDs[0] != "" || userIDs[1] != "" {
+		t.Fatalf("default profile injected user IDs: %v", userIDs)
 	}
 }
 
@@ -1577,6 +1585,13 @@ func TestClaudeStreamingValidator(t *testing.T) {
 				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
 			},
 			wantErr: "missing message_stop",
+		},
+		{
+			name: "valid empty completion",
+			lines: []string{
+				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test"}}`,
+				`data: {"type":"message_stop"}`,
+			},
 		},
 		{
 			name: "valid stream",

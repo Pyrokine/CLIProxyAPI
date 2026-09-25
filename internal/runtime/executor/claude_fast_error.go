@@ -2,15 +2,17 @@ package executor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
-// claudeFastRequestError marks any Fast request failure as request-scoped so
-// it cannot trigger another credential or change credential availability.
+// claudeFastRequestError keeps Fast-only local and entitlement failures tied to
+// the request while preserving genuine Claude rate-limit scope and timing.
 type claudeFastRequestError struct {
 	cause  error
 	status int
@@ -38,13 +40,33 @@ func (e *claudeFastRequestError) StatusCode() int {
 }
 
 func (e *claudeFastRequestError) IsRequestScoped() bool {
-	return e != nil
+	if e == nil {
+		return false
+	}
+	return claudeRateLimitErrorFrom(e.cause) == nil
 }
 
-// claudeFastDirectResponseError preserves an upstream Fast error response for
-// direct downstream forwarding without auth retry or response reconstruction.
+func (e *claudeFastRequestError) IsCredentialScoped() bool {
+	rateLimit := claudeRateLimitErrorFrom(e.cause)
+	return rateLimit != nil && rateLimit.IsCredentialScoped()
+}
+
+func (e *claudeFastRequestError) RetryAfter() *time.Duration {
+	if e == nil {
+		return nil
+	}
+	var retryAfter interface{ RetryAfter() *time.Duration }
+	if errors.As(e.cause, &retryAfter) && retryAfter != nil {
+		return retryAfter.RetryAfter()
+	}
+	return nil
+}
+
+// claudeFastDirectResponseError preserves the upstream response for direct
+// forwarding while exposing genuine 429 state scope to the auth manager.
 type claudeFastDirectResponseError struct {
-	response *cliproxyexecutor.RequestTerminatedError
+	response  *cliproxyexecutor.RequestTerminatedError
+	rateLimit *claudeRateLimitError
 }
 
 func (e *claudeFastDirectResponseError) Error() string {
@@ -62,16 +84,38 @@ func (e *claudeFastDirectResponseError) Unwrap() error {
 }
 
 func (e *claudeFastDirectResponseError) IsRequestScoped() bool {
-	return e != nil
+	return e != nil && e.rateLimit == nil
+}
+
+func (e *claudeFastDirectResponseError) IsCredentialScoped() bool {
+	return e != nil && e.rateLimit != nil && e.rateLimit.IsCredentialScoped()
+}
+
+func (e *claudeFastDirectResponseError) RetryAfter() *time.Duration {
+	if e == nil || e.rateLimit == nil {
+		return nil
+	}
+	return e.rateLimit.RetryAfter()
 }
 
 func (e *claudeFastDirectResponseError) ExecutionDisposition() cliproxyexecutor.ExecutionDisposition {
+	if e != nil && e.rateLimit != nil {
+		return e.rateLimit.ExecutionDisposition()
+	}
 	return cliproxyexecutor.ExecutionDisposition{
 		DispatchPhase:  cliproxyexecutor.DispatchPhaseResponseStarted,
 		Outcome:        cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing,
 		RetryDirective: cliproxyexecutor.RetryDirectiveNoRetry,
 		EffectScope:    cliproxyexecutor.StateEffectScopeRequest,
 	}
+}
+
+func claudeRateLimitErrorFrom(err error) *claudeRateLimitError {
+	var rateLimit *claudeRateLimitError
+	if errors.As(err, &rateLimit) {
+		return rateLimit
+	}
+	return nil
 }
 
 func wrapClaudeFastRequestError(fastRequest bool, status int, err error) error {
@@ -88,12 +132,18 @@ func newClaudeFastDirectResponseError(resp *http.Response, body []byte) error {
 	headers := resp.Header.Clone()
 	headers.Del("Content-Encoding")
 	headers.Del("Content-Length")
+
+	var rateLimit *claudeRateLimitError
+	if resp.StatusCode == http.StatusTooManyRequests {
+		rateLimit = claudeRateLimitErrorFrom(classifyClaudeUpstreamError(resp.StatusCode, body, resp.Header))
+	}
 	return &claudeFastDirectResponseError{
 		response: &cliproxyexecutor.RequestTerminatedError{
 			HTTPStatus: resp.StatusCode,
 			Header:     headers,
 			Body:       bytes.Clone(body),
 		},
+		rateLimit: rateLimit,
 	}
 }
 

@@ -30,6 +30,21 @@ type OAuthCallback struct {
 	ErrorDescription string
 }
 
+// AsyncPrompt runs an interactive prompt without blocking OAuth callback handling.
+func AsyncPrompt(prompt func(string) (string, error), message string) (<-chan string, <-chan error) {
+	input := make(chan string, 1)
+	errors := make(chan error, 1)
+	go func() {
+		value, err := prompt(message)
+		if err != nil {
+			errors <- err
+			return
+		}
+		input <- value
+	}()
+	return input, errors
+}
+
 // ParseOAuthCallback extracts OAuth parameters from a callback URL.
 // It returns nil when the input is empty.
 func ParseOAuthCallback(input string) (*OAuthCallback, error) {

@@ -86,10 +86,11 @@ func TranslateRequestWithAPIKeyModelCompatibility(
 		)
 	}
 
-	if from == sdktranslator.FormatOpenAIResponse &&
-		to != sdktranslator.FormatCodex &&
-		to != sdktranslator.FormatOpenAIResponse {
-		payload = rewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+	if from == sdktranslator.FormatOpenAIResponse {
+		payload = rewriteCodexOrphanDelegationInput(ctx, headers, payload, cfg)
+		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
+			payload = rewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+		}
 	}
 	if apiKeyCompatRequestRegistry.HasRequestTransformer(from, to) {
 		return apiKeyCompatRequestRegistry.TranslateRequestWithContext(

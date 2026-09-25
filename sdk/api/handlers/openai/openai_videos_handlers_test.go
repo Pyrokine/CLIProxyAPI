@@ -294,6 +294,89 @@ func TestBuildVideosRetrieveAPIResponseFromXAI(t *testing.T) {
 	}
 }
 
+func TestBuildXAIVideosCreateRequestPreservesMultiReferenceDuration(t *testing.T) {
+	for _, seconds := range []string{"1", "6", "10", "11", "15"} {
+		t.Run(seconds, func(t *testing.T) {
+			request, metadata, errBuild := buildXAIVideosCreateRequest(
+				[]byte(fmt.Sprintf(
+					`{"prompt":"make a clip","seconds":%q,"reference_images":["https://example.com/one.png","https://example.com/two.png"]}`,
+					seconds,
+				)),
+				defaultXAIVideosModel,
+			)
+			if errBuild != nil {
+				t.Fatalf("buildXAIVideosCreateRequest() error = %v", errBuild)
+			}
+			if duration := gjson.GetBytes(request, "duration").String(); duration != seconds {
+				t.Fatalf("upstream duration = %q, want %q; request=%s", duration, seconds, request)
+			}
+			if metadata.Seconds != seconds {
+				t.Fatalf("metadata seconds = %q, want %q", metadata.Seconds, seconds)
+			}
+		})
+	}
+}
+
+func TestBuildVideosRetrieveAPIResponseFromXAINormalizesDuration(t *testing.T) {
+	tests := []struct {
+		name        string
+		payload     string
+		wantSeconds string
+		wantError   bool
+	}{
+		{
+			name: "clamps top level numeric seconds", payload: `{"seconds":16}`,
+			wantSeconds: "15",
+		},
+		{
+			name: "clamps top level string seconds", payload: `{"seconds":"0"}`,
+			wantSeconds: "1",
+		},
+		{
+			name: "uses numeric video duration", payload: `{"video":{"duration":4}}`,
+			wantSeconds: "4",
+		},
+		{
+			name: "uses string video duration", payload: `{"video":{"duration":"15"}}`,
+			wantSeconds: "15",
+		},
+		{
+			name: "falls back from null seconds to video duration", payload: `{"seconds":null,"video":{"duration":6}}`,
+			wantSeconds: "6",
+		},
+		{
+			name: "rejects empty string seconds", payload: `{"seconds":""}`,
+			wantError: true,
+		},
+		{
+			name: "rejects fractional seconds", payload: `{"seconds":4.5}`,
+			wantError: true,
+		},
+		{
+			name: "rejects boolean duration", payload: `{"video":{"duration":true}}`,
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out, errBuild := buildVideosRetrieveAPIResponseFromXAI("video_123", []byte(test.payload), defaultXAIVideosModel)
+			if test.wantError {
+				if errBuild == nil {
+					t.Fatalf("buildVideosRetrieveAPIResponseFromXAI() error = nil; output=%s", out)
+				}
+				return
+			}
+			if errBuild != nil {
+				t.Fatalf("buildVideosRetrieveAPIResponseFromXAI() error = %v", errBuild)
+			}
+			seconds := gjson.GetBytes(out, "seconds")
+			if seconds.Type != gjson.String || seconds.String() != test.wantSeconds {
+				t.Fatalf("seconds = %s (%s), want string %q; output=%s", seconds.Raw, seconds.Type, test.wantSeconds, out)
+			}
+		})
+	}
+}
+
 func TestBuildVideosRetrieveAPIResponseFromXAINormalizesErrors(t *testing.T) {
 	payload := []byte(`{"status":"failed","error":{"message":"The request was rejected by the safety system.","type":"invalid_request_error","code":"content_policy_violation"}}`)
 

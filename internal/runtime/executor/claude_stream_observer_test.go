@@ -52,6 +52,7 @@ func consumeClaudeStreamReaderForObserverTest(
 		out,
 		newUsageReporter(ctx, NewClaudeExecutor(&config.Config{}), "claude-test", nil),
 		false,
+		false,
 		nil,
 		false,
 		http.StatusOK,

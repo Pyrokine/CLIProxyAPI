@@ -3,7 +3,9 @@ package executor
 import (
 	"context"
 	stdtls "crypto/tls"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -20,11 +22,60 @@ import (
 	"golang.org/x/net/proxy"
 )
 
+type claudeHTTP2ClientConn interface {
+	RoundTrip(*http.Request) (*http.Response, error)
+	Close() error
+}
+
 type claudeUtlsRoundTripper struct {
-	mu          sync.Mutex
-	connections map[string]*http.ClientConn
-	pending     map[string]*sync.Cond
-	dialer      proxy.Dialer
+	dialer            proxy.Dialer
+	connectionFactory func(context.Context, string, string) (claudeHTTP2ClientConn, error)
+}
+
+type closeConnectionBody struct {
+	io.ReadCloser
+	closeConnection func() error
+	stopContext     func() bool
+	once            sync.Once
+	err             error
+}
+
+func (b *closeConnectionBody) Close() error {
+	if b == nil {
+		return nil
+	}
+	b.once.Do(func() {
+		if b.stopContext != nil {
+			b.stopContext()
+		}
+		var errConnection error
+		if b.closeConnection != nil {
+			errConnection = b.closeConnection()
+		}
+		var errBody error
+		if b.ReadCloser != nil {
+			errBody = b.ReadCloser.Close()
+		}
+		b.err = errors.Join(errBody, errConnection)
+	})
+	return b.err
+}
+
+func newCloseConnectionBody(
+	ctx context.Context,
+	body io.ReadCloser,
+	closeConnection func() error,
+) *closeConnectionBody {
+	wrapped := &closeConnectionBody{
+		ReadCloser:      body,
+		closeConnection: closeConnection,
+	}
+	if ctx != nil {
+		wrapped.stopContext = context.AfterFunc(ctx, func() {
+			_ = wrapped.Close()
+		})
+	}
+	return wrapped
 }
 
 type utlsHTTPConn struct {
@@ -57,6 +108,10 @@ func (d proxyErrorDialer) Dial(string, string) (net.Conn, error) {
 	return nil, d.err
 }
 
+func (d proxyErrorDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	return nil, d.err
+}
+
 func newClaudeUtlsRoundTripper(proxyURL string) *claudeUtlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
 	if proxyURL != "" {
@@ -70,65 +125,48 @@ func newClaudeUtlsRoundTripper(proxyURL string) *claudeUtlsRoundTripper {
 			dialer = proxyDialer
 		}
 	}
-	return &claudeUtlsRoundTripper{
-		connections: make(map[string]*http.ClientConn),
-		pending:     make(map[string]*sync.Cond),
-		dialer:      dialer,
-	}
-}
-
-func (t *claudeUtlsRoundTripper) getOrCreateConnection(
-	ctx context.Context,
-	host string,
-	addr string,
-) (*http.ClientConn, error) {
-	t.mu.Lock()
-	if h2Conn, ok := t.connections[host]; ok && h2Conn.Err() == nil && h2Conn.Available() > 0 {
-		t.mu.Unlock()
-		return h2Conn, nil
-	}
-	if cond, ok := t.pending[host]; ok {
-		cond.Wait()
-		if h2Conn, ok := t.connections[host]; ok && h2Conn.Err() == nil && h2Conn.Available() > 0 {
-			t.mu.Unlock()
-			return h2Conn, nil
-		}
-	}
-	cond := sync.NewCond(&t.mu)
-	t.pending[host] = cond
-	t.mu.Unlock()
-
-	h2Conn, err := t.createConnection(ctx, host, addr)
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.pending, host)
-	cond.Broadcast()
-	if err != nil {
-		return nil, err
-	}
-	t.connections[host] = h2Conn
-	return h2Conn, nil
+	return &claudeUtlsRoundTripper{dialer: dialer}
 }
 
 func (t *claudeUtlsRoundTripper) createConnection(
 	ctx context.Context,
 	host string,
 	addr string,
-) (*http.ClientConn, error) {
-	conn, err := t.dialer.Dial("tcp", addr)
-	if err != nil {
-		return nil, err
+) (claudeHTTP2ClientConn, error) {
+	if t.connectionFactory != nil {
+		return t.connectionFactory(ctx, host, addr)
+	}
+	contextDialer, ok := t.dialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("utls: dialer does not support context cancellation")
+	}
+	conn, errDial := contextDialer.DialContext(ctx, "tcp", addr)
+	if errDial != nil {
+		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
 
 	tlsConn := utls.UClient(conn, &utls.Config{ServerName: host}, utls.HelloChrome_Auto)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		_ = tlsConn.Close()
-		return nil, err
+	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+		// HandshakeContext closes the underlying connection when its context is
+		// canceled. Avoid closing it a second time while preserving the context
+		// error for callers.
+		if errors.Is(errHandshake, context.Canceled) || errors.Is(errHandshake, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
+		}
+		if errClose := tlsConn.Close(); errClose != nil {
+			return nil, fmt.Errorf("utls: TLS handshake: %w; close connection: %v", errHandshake, errClose)
+		}
+		return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 	}
 	if protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol != "h2" {
-		_ = tlsConn.Close()
-		return nil, fmt.Errorf("upstream negotiated %q instead of HTTP/2", protocol)
+		if errClose := tlsConn.Close(); errClose != nil {
+			return nil, fmt.Errorf(
+				"utls: upstream negotiated %q instead of HTTP/2; close connection: %v",
+				protocol,
+				errClose,
+			)
+		}
+		return nil, fmt.Errorf("utls: upstream negotiated %q instead of HTTP/2", protocol)
 	}
 
 	protocols := new(http.Protocols)
@@ -139,10 +177,32 @@ func (t *claudeUtlsRoundTripper) createConnection(
 			return &utlsHTTPConn{UConn: tlsConn}, nil
 		},
 	}
-	h2Conn, err := transport.NewClientConn(ctx, "https", addr)
-	if err != nil {
-		_ = tlsConn.Close()
-		return nil, err
+	return initializeClaudeHTTP2ClientConn(
+		ctx,
+		addr,
+		tlsConn,
+		func(ctx context.Context, scheme, address string) (claudeHTTP2ClientConn, error) {
+			return transport.NewClientConn(ctx, scheme, address)
+		},
+	)
+}
+
+func initializeClaudeHTTP2ClientConn(
+	ctx context.Context,
+	addr string,
+	tlsConn *utls.UConn,
+	initialize func(context.Context, string, string) (claudeHTTP2ClientConn, error),
+) (claudeHTTP2ClientConn, error) {
+	h2Conn, errClientConn := initialize(ctx, "https", addr)
+	if errClientConn != nil {
+		if errClose := tlsConn.Close(); errClose != nil {
+			return nil, fmt.Errorf(
+				"utls: initialize HTTP/2 connection: %w; close TLS connection: %v",
+				errClientConn,
+				errClose,
+			)
+		}
+		return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
 	}
 	return h2Conn, nil
 }
@@ -161,19 +221,27 @@ func (t *claudeUtlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		port = "443"
 	}
 	addr := net.JoinHostPort(pinnedAddr, port)
-	h2Conn, err := t.getOrCreateConnection(req.Context(), hostname, addr)
-	if err != nil {
-		return nil, err
+	h2Conn, errConnect := t.createConnection(req.Context(), hostname, addr)
+	if errConnect != nil {
+		return nil, errConnect
 	}
-	resp, err := h2Conn.RoundTrip(req)
-	if err != nil {
-		t.mu.Lock()
-		if cached, ok := t.connections[hostname]; ok && cached == h2Conn {
-			delete(t.connections, hostname)
+	resp, errRoundTrip := h2Conn.RoundTrip(req)
+	if errRoundTrip != nil {
+		if errClose := h2Conn.Close(); errClose != nil {
+			log.Debugf("utls: close connection after round trip failure: %v", errClose)
 		}
-		t.mu.Unlock()
-		return nil, err
+		return nil, errRoundTrip
 	}
+	if resp == nil {
+		if errClose := h2Conn.Close(); errClose != nil {
+			log.Debugf("utls: close connection after empty response: %v", errClose)
+		}
+		return nil, fmt.Errorf("utls: upstream returned an empty response")
+	}
+	if resp.Body == nil {
+		resp.Body = http.NoBody
+	}
+	resp.Body = newCloseConnectionBody(req.Context(), resp.Body, h2Conn.Close)
 	return resp, nil
 }
 

@@ -1,6 +1,35 @@
 package util
 
-import "context"
+import (
+	"context"
+	"strings"
+)
+
+type sessionIDContextKey struct{}
+
+// WithSessionID 保存内部会话标识，空值明确覆盖父 context 的标识
+func WithSessionID(ctx context.Context, sessionID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, sessionIDContextKey{}, strings.TrimSpace(sessionID))
+}
+
+func SessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(sessionIDContextKey{}).(string)
+	return value
+}
+
+func HasExplicitSessionID(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	_, exists := ctx.Value(sessionIDContextKey{}).(string)
+	return exists
+}
 
 // altContextKey is the unexported key for storing the Gemini "alt" parameter in context.
 type altContextKey struct{}

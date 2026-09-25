@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 type testHomeRefreshClient struct {
@@ -134,6 +137,88 @@ func TestRefreshAuthViaHomeMapsHomeErrorEnvelope(t *testing.T) {
 	}
 	if statusErr.StatusCode() != http.StatusUnauthorized {
 		t.Fatalf("status code = %d, want %d", statusErr.StatusCode(), http.StatusUnauthorized)
+	}
+}
+
+func TestRefreshAuthViaHomePreservesMarkedUpstreamResponse(t *testing.T) {
+	for _, test := range []struct {
+		name, body string
+		status     int
+	}{
+		{"json", "  {\"error\":\"synthetic denied\"}\n", http.StatusUnauthorized},
+		{"text", " synthetic rate limited\n", http.StatusTooManyRequests},
+		{"empty", "", http.StatusUnauthorized},
+		{"binary", "\xff\x00synthetic", http.StatusBadGateway},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"error": map[string]any{"type": "authentication_error", "message": "private control diagnostic", "upstream": map[string]any{"status": test.status, "body": []byte(test.body)}},
+				"auth":  map[string]any{"metadata": map[string]any{"access_token": "synthetic-private-token"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &testHomeRefreshClient{heartbeat: true, payload: payload}
+			ctx := cliproxyauth.WithHomeRefreshClient(context.Background(), client)
+			updated, attempted, err := refreshAuthViaHome(ctx, &config.Config{Home: config.HomeConfig{Enabled: true}}, &cliproxyauth.Auth{ID: "synthetic", Index: "synthetic-index"})
+			if !attempted || updated != nil || err == nil {
+				t.Fatalf("updated=%v attempted=%t err=%v", updated, attempted, err)
+			}
+			for _, cause := range []error{err, fmt.Errorf("wrapper: %w", err), markResponseStarted(err)} {
+				body, direct := clienterror.ResponseBodyFromError(cause)
+				if !direct || string(body) != test.body || clienterror.HTTPStatusFromError(cause) != test.status {
+					t.Fatalf("status=%d body=%q direct=%t", clienterror.HTTPStatusFromError(cause), body, direct)
+				}
+				failure := failFromErrors(nil, cause)
+				if failure.StatusCode != test.status || failure.Body != test.body {
+					t.Fatalf("usage failure=%#v", failure)
+				}
+			}
+			var upstream statusErr
+			if !errors.As(err, &upstream) || upstream.IsRequestScoped() || upstream.ExecutionDisposition().DispatchPhase != cliproxyexecutor.DispatchPhaseResponseStarted {
+				t.Fatalf("upstream disposition=%#v", upstream)
+			}
+			var terminated *cliproxyexecutor.RequestTerminatedError
+			if errors.As(err, &terminated) {
+				t.Fatal("upstream response became plugin termination")
+			}
+		})
+	}
+}
+
+func TestRefreshAuthViaHomeRejectsMalformedUpstreamEnvelope(t *testing.T) {
+	for _, payload := range []string{
+		`{"error":{"upstream":{"status":0,"body":"cHJpdmF0ZQ=="}}}`,
+		`{"error":{"upstream":{"status":-1,"body":"cHJpdmF0ZQ=="}}}`,
+		`{"error":{"upstream":{"status":200,"body":"cHJpdmF0ZQ=="}}}`,
+		`{"error":{"upstream":{"status":399,"body":"cHJpdmF0ZQ=="}}}`,
+		`{"error":{"upstream":{"status":600,"body":"cHJpdmF0ZQ=="}}}`,
+		`{"error":{"upstream":{"status":401,"body":"not-base64"}},"auth":{"metadata":{"access_token":"synthetic-private"}}}`,
+		`{"error":{"upstream":{"status":401,"body":{"access_token":"synthetic-private"}}}}`,
+	} {
+		client := &testHomeRefreshClient{heartbeat: true, payload: []byte(payload)}
+		updated, attempted, err := refreshAuthViaHome(cliproxyauth.WithHomeRefreshClient(context.Background(), client), &config.Config{Home: config.HomeConfig{Enabled: true}}, &cliproxyauth.Auth{ID: "synthetic", Index: "synthetic-index"})
+		if !attempted || updated != nil || clienterror.HTTPStatusFromError(err) != http.StatusBadGateway {
+			t.Fatalf("updated=%v attempted=%t err=%v", updated, attempted, err)
+		}
+		if body, direct := clienterror.ResponseBodyFromError(err); direct || len(body) != 0 {
+			t.Fatalf("invalid envelope exposed body=%q", body)
+		}
+	}
+}
+
+func TestRefreshAuthViaHomeKeepsControlErrorsPrivate(t *testing.T) {
+	client := &testHomeRefreshClient{heartbeat: true, payload: []byte(`{"error":{"type":"authentication_error","message":"synthetic-private-token"},"auth":{"metadata":{"access_token":"synthetic-private-token"}}}`)}
+	updated, attempted, err := refreshAuthViaHome(cliproxyauth.WithHomeRefreshClient(context.Background(), client), &config.Config{Home: config.HomeConfig{Enabled: true}}, &cliproxyauth.Auth{ID: "synthetic", Index: "synthetic-index"})
+	if !attempted || updated != nil || err == nil || err.Error() != "credential unauthorized" {
+		t.Fatalf("updated=%v attempted=%t err=%v", updated, attempted, err)
+	}
+	if _, direct := clienterror.ResponseBodyFromError(err); direct {
+		t.Fatal("unmarked control error became direct response")
+	}
+	failure := failFromErrors(err)
+	if failure.StatusCode != http.StatusUnauthorized || failure.Body != "credential unauthorized" {
+		t.Fatalf("failure=%#v", failure)
 	}
 }
 

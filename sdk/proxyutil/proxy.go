@@ -29,6 +29,8 @@ const (
 	ModeProxy
 	// ModeInvalid means the proxy setting is present but malformed or unsupported.
 	ModeInvalid
+
+	defaultHTTPProxyTLSHandshakeTimeout = 10 * time.Second
 )
 
 // Setting is the normalized interpretation of a proxy configuration value.
@@ -316,6 +318,53 @@ func BuildHTTPTransport(raw string) (*http.Transport, Mode, error) {
 			}
 		case "http", "https":
 			clone.Proxy = http.ProxyURL(setting.URL)
+			if setting.URL.Scheme == "https" {
+				dialContext := clone.DialContext
+				if dialContext == nil {
+					dialer := &net.Dialer{}
+					dialContext = dialer.DialContext
+				}
+				proxyHostname := setting.URL.Hostname()
+				clone.DialTLSContext = func(
+					ctx context.Context,
+					network string,
+					address string,
+				) (net.Conn, error) {
+					if ctx == nil {
+						ctx = context.Background()
+					}
+					connection, errDial := dialContext(ctx, network, address)
+					if errDial != nil {
+						return nil, errDial
+					}
+
+					handshakeCtx := ctx
+					cancelHandshake := func() {}
+					if timeout := clone.TLSHandshakeTimeout; timeout > 0 {
+						handshakeCtx, cancelHandshake = context.WithTimeout(ctx, timeout)
+					}
+					defer cancelHandshake()
+
+					tlsConfig := &tls.Config{}
+					if clone.TLSClientConfig != nil {
+						tlsConfig = clone.TLSClientConfig.Clone()
+					}
+					tlsConfig.ServerName = proxyHostname
+					tlsConfig.NextProtos = []string{"http/1.1"}
+					tlsConnection := tls.Client(connection, tlsConfig)
+					if errHandshake := tlsConnection.HandshakeContext(handshakeCtx); errHandshake != nil {
+						if errClose := connection.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+							return nil, fmt.Errorf(
+								"HTTPS proxy TLS handshake failed: %w; close failed: %v",
+								errHandshake,
+								errClose,
+							)
+						}
+						return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w", errHandshake)
+					}
+					return tlsConnection, nil
+				}
+			}
 		default:
 			return nil, setting.Mode, fmt.Errorf("unsupported proxy scheme: %s", setting.URL.Scheme)
 		}
@@ -358,7 +407,11 @@ func NewDialerForURL(proxyURL *url.URL) (proxy.Dialer, error) {
 	case "socks5", "socks5h":
 		return newSOCKS5Dialer(proxyURL)
 	case "http", "https":
-		return &httpConnectDialer{proxyURL: proxyURL, dialer: proxy.Direct}, nil
+		return &httpConnectDialer{
+			proxyURL:            proxyURL,
+			dialer:              proxy.Direct,
+			tlsHandshakeTimeout: defaultHTTPProxyTLSHandshakeTimeout,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme: %s", proxyURL.Scheme)
 	}
@@ -379,8 +432,9 @@ func newSOCKS5Dialer(proxyURL *url.URL) (proxy.Dialer, error) {
 }
 
 type httpConnectDialer struct {
-	proxyURL *url.URL
-	dialer   proxy.Dialer
+	proxyURL            *url.URL
+	dialer              proxy.Dialer
+	tlsHandshakeTimeout time.Duration
 }
 
 func (d *httpConnectDialer) Dial(network string, addr string) (net.Conn, error) {
@@ -417,10 +471,23 @@ func (d *httpConnectDialer) DialContext(ctx context.Context, network string, add
 		}
 	}()
 	if d.proxyURL.Scheme == "https" {
+		handshakeCtx := ctx
+		cancelHandshake := func() {}
+		if d.tlsHandshakeTimeout > 0 {
+			handshakeCtx, cancelHandshake = context.WithTimeout(ctx, d.tlsHandshakeTimeout)
+		}
+		defer cancelHandshake()
+
 		// A successful TLS connection is returned to the caller; failure closes the underlying connection.
 		// noinspection GoResourceLeak
-		tlsConnection := tls.Client(connection, &tls.Config{ServerName: d.proxyURL.Hostname()})
-		if errHandshake := tlsConnection.HandshakeContext(ctx); errHandshake != nil {
+		tlsConnection := tls.Client(
+			connection,
+			&tls.Config{
+				ServerName: d.proxyURL.Hostname(),
+				NextProtos: []string{"http/1.1"},
+			},
+		)
+		if errHandshake := tlsConnection.HandshakeContext(handshakeCtx); errHandshake != nil {
 			if errClose := connection.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
 				return nil, fmt.Errorf("HTTPS proxy TLS handshake failed: %w; close failed: %v", errHandshake, errClose)
 			}

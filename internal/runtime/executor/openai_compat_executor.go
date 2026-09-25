@@ -57,15 +57,18 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if req == nil {
 		return nil
 	}
+	clientHeaders := req.Header.Clone()
 	_, apiKey := e.resolveCredentials(auth)
+	bearer := ""
 	if strings.TrimSpace(apiKey) != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		bearer = "Bearer " + apiKey
 	}
+	util.ApplyCredentialHeader(req, "Authorization", bearer)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	util.ApplyCustomHeadersFromAttrs(req, attrs, clientHeaders)
 	return nil
 }
 
@@ -122,7 +125,16 @@ func (e *OpenAICompatExecutor) Execute(
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	normalizeToolResults := helps.ShouldNormalizeOpenAIToolResultsForModel(
+		e.resolveCompatConfig(auth), baseModel, requestedModel,
+	)
 	originalPayload := originalPayloadSource
+	translatedPayload := req.Payload
+	if normalizeToolResults && from == sdktranslator.FormatClaude {
+		originalPayload = helps.NormalizeClaudeToolResultsTextOnly(originalPayload)
+		translatedPayload = helps.NormalizeClaudeToolResultsTextOnly(translatedPayload)
+	}
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(
 		ctx,
 		opts.Headers,
@@ -141,15 +153,14 @@ func (e *OpenAICompatExecutor) Execute(
 		from,
 		to,
 		baseModel,
-		req.Payload,
+		translatedPayload,
 		opts.Stream,
 		isCompat,
 	)
-	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel,
 	)
-	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
+	if normalizeToolResults {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
 	if opts.Alt != "responses/compact" {
@@ -181,15 +192,17 @@ func (e *OpenAICompatExecutor) Execute(
 		return resp, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	credential := ""
 	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		credential = "Bearer " + apiKey
 	}
+	util.ApplyCredentialHeader(httpReq, "Authorization", credential)
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translated, e.Identifier(), auth)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -267,15 +280,17 @@ func (e *OpenAICompatExecutor) executeImages(
 		return resp, err
 	}
 	httpReq.Header.Set("Content-Type", contentType)
+	credential := ""
 	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		credential = "Bearer " + apiKey
 	}
+	util.ApplyCredentialHeader(httpReq, "Authorization", credential)
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), payload, e.Identifier(), auth)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -342,7 +357,16 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
 	}
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	normalizeToolResults := helps.ShouldNormalizeOpenAIToolResultsForModel(
+		e.resolveCompatConfig(auth), baseModel, requestedModel,
+	)
 	originalPayload := originalPayloadSource
+	translatedPayload := req.Payload
+	if normalizeToolResults && from == sdktranslator.FormatClaude {
+		originalPayload = helps.NormalizeClaudeToolResultsTextOnly(originalPayload)
+		translatedPayload = helps.NormalizeClaudeToolResultsTextOnly(translatedPayload)
+	}
 	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(
 		ctx,
 		opts.Headers,
@@ -361,15 +385,14 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		from,
 		to,
 		baseModel,
-		req.Payload,
+		translatedPayload,
 		true,
 		isCompat,
 	)
-	requestedModel := payloadRequestedModel(opts, req.Model)
 	translated = applyPayloadConfigWithRoot(
 		e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel,
 	)
-	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
+	if normalizeToolResults {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
 	translated = e.applyPromptCacheKey(auth, from, baseModel, req, opts, translated, ctx)
@@ -392,15 +415,17 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	credential := ""
 	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		credential = "Bearer " + apiKey
 	}
+	util.ApplyCredentialHeader(httpReq, "Authorization", credential)
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translated, e.Identifier(), auth)
@@ -524,15 +549,17 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 	httpReq.Header.Set("Content-Type", contentType)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
+	credential := ""
 	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+		credential = "Bearer " + apiKey
 	}
+	util.ApplyCredentialHeader(httpReq, "Authorization", credential)
 	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), payload, e.Identifier(), auth)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -936,15 +963,25 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 }
 
 type statusErr struct {
-	code          int
-	msg           string
-	retryAfter    *time.Duration
-	requestScoped bool
-	dispatchPhase cliproxyexecutor.DispatchPhase
+	code           int
+	msg            string
+	logDiagnostic  string
+	retryAfter     *time.Duration
+	requestScoped  bool
+	directResponse bool
+	dispatchPhase  cliproxyexecutor.DispatchPhase
+}
+
+func (e statusErr) DirectResponse() bool { return e.directResponse }
+func (e statusErr) ResponseBody() []byte {
+	if !e.directResponse {
+		return nil
+	}
+	return []byte(e.msg)
 }
 
 func (e statusErr) Error() string {
-	if e.msg != "" {
+	if e.msg != "" || e.directResponse {
 		return e.msg
 	}
 	return fmt.Sprintf("status %d", e.code)
