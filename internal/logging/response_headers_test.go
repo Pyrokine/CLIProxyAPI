@@ -21,3 +21,20 @@ func TestResponseHeadersHolderClonesHeaders(t *testing.T) {
 		t.Fatalf("retrieved header mutated stored value: %q", gotAgain)
 	}
 }
+
+func TestResponseHeadersHolderIsFreshForEachAttemptContext(t *testing.T) {
+	parent := WithResponseHeadersHolder(context.Background())
+	SetResponseHeaders(parent, http.Header{"X-Attempt": {"first"}})
+
+	attempt := WithResponseHeadersHolder(parent)
+	if inherited := GetResponseHeaders(attempt); len(inherited) != 0 {
+		t.Fatalf("fresh attempt inherited response headers: %#v", inherited)
+	}
+	SetResponseHeaders(attempt, http.Header{"X-Attempt": {"second"}})
+	if got := GetResponseHeaders(parent).Get("X-Attempt"); got != "first" {
+		t.Fatalf("parent attempt headers = %q, want first", got)
+	}
+	if got := GetResponseHeaders(attempt).Get("X-Attempt"); got != "second" {
+		t.Fatalf("child attempt headers = %q, want second", got)
+	}
+}

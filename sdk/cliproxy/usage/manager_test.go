@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
+	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 )
 
 type capturedUsageRecord struct {
@@ -98,9 +100,13 @@ func TestDeferredRecordPreservesContextAfterCancellation(t *testing.T) {
 	baseCtx, cancel := context.WithCancel(context.WithValue(context.Background(), contextKey{}, "preserved"))
 	deferred := NewDeferredRecord()
 	ctx := WithDeferredRecord(baseCtx, deferred)
-	if !DeferRecord(ctx, Record{Model: "deferred-context-model", Completed: true}) {
+	headers := http.Header{"X-Upstream-Request-Id": {"deferred-1"}}
+	if !DeferRecord(ctx, Record{
+		Model: "deferred-context-model", Completed: true, ResponseHeaders: headers,
+	}) {
 		t.Fatal("DeferRecord rejected the first record")
 	}
+	headers.Set("X-Upstream-Request-Id", "mutated")
 	cancel()
 	deferred.Complete(ctx, nil)
 	deferred.Complete(ctx, errors.New("late failure"))
@@ -114,6 +120,9 @@ func TestDeferredRecordPreservesContextAfterCancellation(t *testing.T) {
 	}
 	if got.record.Failed || !got.record.Completed {
 		t.Fatalf("record outcome = %#v, want completed success", got.record)
+	}
+	if got.record.ResponseHeaders.Get("X-Upstream-Request-Id") != "deferred-1" {
+		t.Fatalf("deferred response headers = %#v", got.record.ResponseHeaders)
 	}
 	assertNoDeferredRecord(t, plugin.records, "deferred-context-model")
 }
@@ -229,6 +238,162 @@ func TestWithoutDeferredRecordIsolatesNestedExecution(t *testing.T) {
 	}
 	if !DeferRecord(parentCtx, Record{Model: "parent"}) {
 		t.Fatal("parent record did not claim its deferred holder")
+	}
+}
+
+func TestManagerDeliverySnapshotsRecordAndDetachesRequestCancellation(t *testing.T) {
+	manager := NewManager(2)
+	defer manager.Stop()
+
+	blockEntered := make(chan struct{})
+	releaseBlock := make(chan struct{})
+	var releaseBlockOnce sync.Once
+	releaseBlockedDelivery := func() {
+		releaseBlockOnce.Do(func() { close(releaseBlock) })
+	}
+	defer releaseBlockedDelivery()
+	captured := make(chan capturedUsageRecord, 1)
+	manager.Register(usagePluginFunc(func(ctx context.Context, record Record) {
+		switch record.Model {
+		case "block":
+			close(blockEntered)
+			<-releaseBlock
+		case "target":
+			captured <- capturedUsageRecord{ctx: ctx, record: record}
+		}
+	}))
+	if errPublish := manager.Publish(context.Background(), Record{Model: "block"}); errPublish != nil {
+		t.Fatalf("Publish(block) error = %v", errPublish)
+	}
+	select {
+	case <-blockEntered:
+	case <-time.After(time.Second):
+		t.Fatal("blocking delivery did not start")
+	}
+
+	type contextKey struct{}
+	requestCtx, cancelRequest := context.WithCancel(
+		context.WithValue(context.Background(), contextKey{}, "preserved"),
+	)
+	requestCtx = internallogging.WithClientRequestMetadata(requestCtx, internallogging.ClientRequestMetadata{
+		SessionID:       "slot:child",
+		ParentSessionID: "slot:parent",
+	})
+	requestCtx = WithStream(requestCtx, true)
+	generate := false
+	budget := 7
+	headers := http.Header{"X-Upstream-Request-Id": {"request-1"}}
+	record := Record{
+		BaseURL:         " https://upstream.example/v1 ",
+		Model:           "target",
+		SessionID:       "slot:child",
+		Generate:        &generate,
+		Thinking:        &Thinking{Mode: "budget", Budget: &budget},
+		ResponseHeaders: headers,
+	}
+	if errPublish := manager.Publish(requestCtx, record); errPublish != nil {
+		t.Fatalf("Publish(target) error = %v", errPublish)
+	}
+	headers.Set("X-Upstream-Request-Id", "mutated")
+	generate = true
+	budget = 99
+	cancelRequest()
+	releaseBlockedDelivery()
+
+	select {
+	case got := <-captured:
+		if got.ctx.Value(contextKey{}) != "preserved" || got.ctx.Err() != nil {
+			t.Fatalf("delivery context value=%v error=%v", got.ctx.Value(contextKey{}), got.ctx.Err())
+		}
+		if got.record.BaseURL != "https://upstream.example/v1" || !got.record.Stream {
+			t.Fatalf("delivery target metadata = baseURL:%q stream:%t", got.record.BaseURL, got.record.Stream)
+		}
+		if got.record.SessionID != coresession.NormalizeToCanonicalUUID("slot:child") ||
+			got.record.ParentSessionID != coresession.NormalizeToCanonicalUUID("slot:parent") {
+			t.Fatalf("delivery session hierarchy = (%q, %q)", got.record.SessionID, got.record.ParentSessionID)
+		}
+		if got.record.ResponseHeaders.Get("X-Upstream-Request-Id") != "request-1" {
+			t.Fatalf("delivery headers = %#v", got.record.ResponseHeaders)
+		}
+		if got.record.Generate == nil || *got.record.Generate || got.record.Thinking == nil ||
+			got.record.Thinking.Budget == nil || *got.record.Thinking.Budget != 7 {
+			t.Fatalf("delivery pointer fields changed: %#v", got.record)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for detached usage delivery")
+	}
+}
+
+func TestPrepareRecordForDeliverySessionFallbackIsSameOrigin(t *testing.T) {
+	ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
+		SessionID:       "session:current",
+		ParentSessionID: "session:parent",
+	})
+	tests := []struct {
+		name        string
+		record      Record
+		wantSession string
+		wantParent  string
+	}{
+		{
+			name:        "context fallback",
+			wantSession: "session:current",
+			wantParent:  "session:parent",
+		},
+		{
+			name:        "same origin inherits parent",
+			record:      Record{SessionID: "session:current"},
+			wantSession: "session:current",
+			wantParent:  "session:parent",
+		},
+		{
+			name:        "independent session rejects stale parent",
+			record:      Record{SessionID: "session:independent"},
+			wantSession: "session:independent",
+		},
+		{
+			name:        "self parent is removed",
+			record:      Record{SessionID: "session:self", ParentSessionID: "session:self"},
+			wantSession: "session:self",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := prepareRecordForDelivery(ctx, test.record)
+			if got.SessionID != coresession.NormalizeToCanonicalUUID(test.wantSession) ||
+				got.ParentSessionID != coresession.NormalizeToCanonicalUUID(test.wantParent) {
+				t.Fatalf("session hierarchy = (%q, %q)", got.SessionID, got.ParentSessionID)
+			}
+		})
+	}
+}
+
+func TestManagerIsolatesMutableHeadersBetweenPlugins(t *testing.T) {
+	manager := NewManager(1)
+	defer manager.Stop()
+
+	captured := make(chan http.Header, 1)
+	manager.Register(usagePluginFunc(func(_ context.Context, record Record) {
+		record.ResponseHeaders.Set("X-Plugin", "mutated")
+	}))
+	manager.Register(usagePluginFunc(func(_ context.Context, record Record) {
+		captured <- record.ResponseHeaders
+	}))
+	if errPublish := manager.Publish(context.Background(), Record{
+		Model:           "isolated",
+		ResponseHeaders: http.Header{"X-Plugin": {"original"}},
+	}); errPublish != nil {
+		t.Fatalf("Publish(isolated) error = %v", errPublish)
+	}
+
+	select {
+	case headers := <-captured:
+		if headers.Get("X-Plugin") != "original" {
+			t.Fatalf("second plugin headers = %#v", headers)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second plugin")
 	}
 }
 

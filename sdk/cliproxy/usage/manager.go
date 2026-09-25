@@ -11,6 +11,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -26,10 +27,14 @@ const (
 // Record contains the usage statistics captured for a single provider request.
 type Record struct {
 	Provider            string
+	BaseURL             string
 	ExecutorType        string
 	Model               string
+	Stream              bool
 	Alias               string
 	APIKey              string
+	SessionID           string
+	ParentSessionID     string
 	ReservationID       string
 	AuthID              string
 	AuthIndex           string
@@ -67,6 +72,7 @@ type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
+type streamContextKey struct{}
 type deferredRecordContextKey struct{}
 type managerContextKey struct{}
 
@@ -223,6 +229,23 @@ func GenerateEnabled(generate *bool) bool {
 	return generate == nil || *generate
 }
 
+// WithStream stores whether the current execution uses streaming delivery.
+func WithStream(ctx context.Context, stream bool) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, streamContextKey{}, stream)
+}
+
+// StreamFromContext returns whether the current execution uses streaming delivery.
+func StreamFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	stream, _ := ctx.Value(streamContextKey{}).(bool)
+	return stream
+}
+
 // WithDeferredRecord stores a deferred main usage record in ctx.
 func WithDeferredRecord(ctx context.Context, deferred *DeferredRecord) context.Context {
 	if ctx == nil {
@@ -291,7 +314,7 @@ func (d *DeferredRecord) store(ctx context.Context, record Record) bool {
 		d.mu.Unlock()
 		return false
 	}
-	stored := record
+	stored := cloneRecord(record)
 	d.record = &stored
 	if ctx != nil {
 		d.ctx = context.WithoutCancel(ctx)
@@ -307,7 +330,7 @@ func (d *DeferredRecord) store(ctx context.Context, record Record) bool {
 	}
 	d.published = true
 	d.mu.Unlock()
-	_ = PublishRecord(publishCtx, deferredRecordWithOutcome(record, err))
+	_ = PublishRecord(publishCtx, deferredRecordWithOutcome(stored, err))
 	return true
 }
 
@@ -322,6 +345,49 @@ func deferredRecordWithOutcome(record Record, err error) Record {
 	}
 	if record.Fail.StatusCode == 0 {
 		record.Fail.StatusCode = clienterror.HTTPStatusFromError(err)
+	}
+	return record
+}
+
+func prepareRecordForDelivery(ctx context.Context, record Record) Record {
+	record = cloneRecord(record)
+	record.BaseURL = strings.TrimSpace(record.BaseURL)
+	if !record.Stream {
+		record.Stream = StreamFromContext(ctx)
+	}
+
+	metadata := internallogging.GetClientRequestMetadata(ctx)
+	sessionID := coresession.NormalizeToCanonicalUUID(strings.TrimSpace(record.SessionID))
+	parentSessionID := coresession.NormalizeToCanonicalUUID(strings.TrimSpace(record.ParentSessionID))
+	fallbackSessionID := coresession.NormalizeToCanonicalUUID(strings.TrimSpace(metadata.SessionID))
+	fallbackParentSessionID := coresession.NormalizeToCanonicalUUID(strings.TrimSpace(metadata.ParentSessionID))
+	if sessionID == "" {
+		sessionID = fallbackSessionID
+		parentSessionID = fallbackParentSessionID
+	} else if parentSessionID == "" && sessionID == fallbackSessionID {
+		parentSessionID = fallbackParentSessionID
+	}
+	if sessionID == "" || sessionID == parentSessionID {
+		parentSessionID = ""
+	}
+	record.SessionID = sessionID
+	record.ParentSessionID = parentSessionID
+	return record
+}
+
+func cloneRecord(record Record) Record {
+	record.ResponseHeaders = record.ResponseHeaders.Clone()
+	if record.Generate != nil {
+		generate := *record.Generate
+		record.Generate = &generate
+	}
+	if record.Thinking != nil {
+		thinking := *record.Thinking
+		if record.Thinking.Budget != nil {
+			budget := *record.Thinking.Budget
+			thinking.Budget = &budget
+		}
+		record.Thinking = &thinking
 	}
 	return record
 }
@@ -653,8 +719,8 @@ func (m *Manager) Publish(ctx context.Context, record Record) error {
 	m.mu.Unlock()
 
 	item := queueItem{
-		ctx:     ctx,
-		record:  record,
+		ctx:     context.WithoutCancel(ctx),
+		record:  prepareRecordForDelivery(ctx, record),
 		plugins: m.registeredPlugins(),
 	}
 	select {
@@ -739,7 +805,7 @@ func invokePlugin(invocation pluginInvocation, ctx context.Context, record Recor
 		defer invocation.release()
 	}
 	if invocation.plugin != nil {
-		safeInvoke(invocation.plugin, ctx, record)
+		safeInvoke(invocation.plugin, ctx, cloneRecord(record))
 	}
 }
 

@@ -52,12 +52,10 @@ func WithResponseStatusHolder(ctx context.Context) context.Context {
 	return context.WithValue(ctx, responseStatusKey{}, &responseStatusHolder{})
 }
 
+// WithResponseHeadersHolder installs a fresh holder for one upstream attempt.
 func WithResponseHeadersHolder(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if holder, ok := ctx.Value(responseHeadersKey{}).(*responseHeadersHolder); ok && holder != nil {
-		return ctx
 	}
 	return context.WithValue(ctx, responseHeadersKey{}, &responseHeadersHolder{})
 }

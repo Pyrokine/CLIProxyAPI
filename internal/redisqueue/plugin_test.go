@@ -11,6 +11,7 @@ import (
 
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
 )
@@ -23,9 +24,11 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			ctx = internallogging.WithResponseStatusHolder(ctx)
 			ctx = internallogging.WithClientRequestMetadata(
 				ctx, internallogging.ClientRequestMetadata{
-					ClientIP:      "203.0.113.10",
-					XForwardedFor: "198.51.100.2, 203.0.113.10",
-					UserAgent:     "redis-test-client/1.0",
+					ClientIP:        "203.0.113.10",
+					XForwardedFor:   "198.51.100.2, 203.0.113.10",
+					UserAgent:       "redis-test-client/1.0",
+					SessionID:       "slot:worker",
+					ParentSessionID: "slot:root",
 				},
 			)
 			internallogging.SetResponseStatus(ctx, http.StatusOK)
@@ -40,8 +43,10 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			plugin.HandleUsage(
 				ctx, coreusage.Record{
 					Provider:            "openai",
+					BaseURL:             " https://upstream.example/v1 ",
 					ExecutorType:        "OpenAICompatExecutor",
 					Model:               "gpt-5.4",
+					Stream:              true,
 					Alias:               "client-gpt",
 					APIKey:              "test-key",
 					AuthIndex:           "0",
@@ -66,8 +71,10 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 
 			payload := popSinglePayload(t)
 			requireStringField(t, payload, "provider", "openai")
+			requireStringField(t, payload, "base_url", "https://upstream.example/v1")
 			requireStringField(t, payload, "executor_type", "OpenAICompatExecutor")
 			requireStringField(t, payload, "model", "gpt-5.4")
+			requireBoolField(t, payload, "stream", true)
 			requireStringField(t, payload, "alias", "client-gpt")
 			requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
 			requireStringField(t, payload, "auth_type", "apikey")
@@ -81,6 +88,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireStringField(t, payload, "client_ip", "203.0.113.10")
 			requireStringField(t, payload, "x_forwarded_for", "198.51.100.2, 203.0.113.10")
 			requireStringField(t, payload, "user_agent", "redis-test-client/1.0")
+			requireStringField(t, payload, "session_id", coresession.NormalizeToCanonicalUUID("slot:worker"))
+			requireStringField(t, payload, "parent_session_id", coresession.NormalizeToCanonicalUUID("slot:root"))
 			requireBoolField(t, payload, "generate", false)
 			requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
 			requireIntField(t, payload, "ttft_ms", 250)
@@ -96,6 +105,40 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireFailField(t, payload, http.StatusOK, "")
 		},
 	)
+}
+
+func TestUsageQueuePluginSessionParentFallbackIsSameOrigin(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		record coreusage.Record
+	}{
+		{
+			name:   "independent record does not inherit stale parent",
+			record: coreusage.Record{SessionID: "session:new-root"},
+		},
+		{
+			name: "self parent is removed",
+			record: coreusage.Record{
+				SessionID:       "session:self",
+				ParentSessionID: "session:self",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			withEnabledQueue(t, func() {
+				ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
+					SessionID:       "session:old-child",
+					ParentSessionID: "session:old-parent",
+				})
+				test.record.Provider = "openai"
+				test.record.Model = "gpt-test"
+				(&usageQueuePlugin{}).HandleUsage(ctx, test.record)
+				payload := popSinglePayload(t)
+				requireStringField(t, payload, "session_id", coresession.NormalizeToCanonicalUUID(test.record.SessionID))
+				requireMissingField(t, payload, "parent_session_id")
+			})
+		})
+	}
 }
 
 func TestUsageQueuePluginAsyncUsesRecordResponseHeaders(t *testing.T) {

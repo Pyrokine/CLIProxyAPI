@@ -60,13 +60,20 @@ func (b TokenBreakdown) Valid() bool {
 		b.Output.ReasoningTokens < 0 {
 		return false
 	}
-	if b.Input.TotalTokens != b.Input.UncachedTokens+b.Input.CacheReadTokens+b.Input.CacheWriteTokens {
+	inputTotal, okInput := AddNonNegativeInt64(
+		b.Input.UncachedTokens,
+		b.Input.CacheReadTokens,
+		b.Input.CacheWriteTokens,
+	)
+	if !okInput || b.Input.TotalTokens != inputTotal {
 		return false
 	}
-	if b.Output.TotalTokens != b.Output.NonReasoningTokens+b.Output.ReasoningTokens {
+	outputTotal, okOutput := AddNonNegativeInt64(b.Output.NonReasoningTokens, b.Output.ReasoningTokens)
+	if !okOutput || b.Output.TotalTokens != outputTotal {
 		return false
 	}
-	if b.TotalTokens != b.Input.TotalTokens+b.Output.TotalTokens+b.UnclassifiedTokens {
+	total, okTotal := AddNonNegativeInt64(b.Input.TotalTokens, b.Output.TotalTokens, b.UnclassifiedTokens)
+	if !okTotal || b.TotalTokens != total {
 		return false
 	}
 	if b.Quality == TokenAccountingQualityComplete && b.UnclassifiedTokens != 0 {

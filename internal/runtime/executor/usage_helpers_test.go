@@ -14,6 +14,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -197,13 +198,27 @@ func TestUsageReporterIncludesRuntimeMetadata(t *testing.T) {
 
 	ctx := usage.WithReasoningEffort(context.Background(), "medium")
 	ctx = usage.WithServiceTier(ctx, "flex")
-	reporter := newUsageReporter(ctx, testUsageExecutor{}, "gpt-5.4", nil)
+	ctx = usage.WithStream(ctx, true)
+	ctx = logging.WithClientRequestMetadata(ctx, logging.ClientRequestMetadata{
+		SessionID:       "slot:worker",
+		ParentSessionID: "slot:root",
+	})
+	reporter := newUsageReporter(ctx, testUsageExecutor{}, "gpt-5.4", &cliproxyauth.Auth{
+		Attributes: map[string]string{"base_url": " https://selected.example/v1 "},
+	})
 	reporter.publish(ctx, usage.Detail{TotalTokens: 1, ResponseServiceTier: "default"})
 
 	select {
 	case got := <-plugin.records:
 		if got.Provider != "test-provider" {
 			t.Fatalf("provider = %q, want %q", got.Provider, "test-provider")
+		}
+		if got.BaseURL != "https://selected.example/v1" || !got.Stream {
+			t.Fatalf("target metadata = baseURL:%q stream:%t", got.BaseURL, got.Stream)
+		}
+		if got.SessionID != coresession.NormalizeToCanonicalUUID("slot:worker") ||
+			got.ParentSessionID != coresession.NormalizeToCanonicalUUID("slot:root") {
+			t.Fatalf("session hierarchy = (%q, %q)", got.SessionID, got.ParentSessionID)
 		}
 		if got.ExecutorType != "testUsageExecutor" {
 			t.Fatalf("executor type = %q, want %q", got.ExecutorType, "testUsageExecutor")
@@ -371,6 +386,121 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 	if detail.ReasoningTokens != 2 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
+	}
+}
+
+func TestStreamUsageBuffersMarkReporterWithoutUsage(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		publish func(*usageReporter) bool
+	}{
+		{
+			name: "generic",
+			publish: func(reporter *usageReporter) bool {
+				var buffer streamUsageBuffer
+				return buffer.publish(context.Background(), reporter)
+			},
+		},
+		{
+			name: "claude",
+			publish: func(reporter *usageReporter) bool {
+				var buffer claudeStreamUsageBuffer
+				return buffer.publish(context.Background(), reporter)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reporter := &usageReporter{}
+			if test.publish(reporter) {
+				t.Fatal("empty stream buffer reported usage")
+			}
+			if !reporter.stream {
+				t.Fatal("stream reporter was not marked")
+			}
+		})
+	}
+}
+
+func TestParseGeminiStreamUsageSkipsZeroPlaceholders(t *testing.T) {
+	tests := []struct {
+		name       string
+		lines      [][]byte
+		want       usage.Detail
+		wantAccept int
+	}{
+		{
+			name: "non-zero then zero",
+			lines: [][]byte{
+				[]byte(`data: {"usageMetadata":{"promptTokenCount":17984,"candidatesTokenCount":2668,"thoughtsTokenCount":1028,"totalTokenCount":21680}}`),
+				[]byte(`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":0}}`),
+			},
+			want: usage.Detail{
+				InputTokens: 17984, OutputTokens: 2668, ReasoningTokens: 1028, TotalTokens: 21680,
+			},
+			wantAccept: 1,
+		},
+		{
+			name: "zero then non-zero",
+			lines: [][]byte{
+				[]byte(`data: {"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":0}}`),
+				[]byte(`data: {"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":7}}`),
+			},
+			want:       usage.Detail{InputTokens: 5, OutputTokens: 7, TotalTokens: 12},
+			wantAccept: 1,
+		},
+		{
+			name:       "cache only",
+			lines:      [][]byte{[]byte(`data: {"usageMetadata":{"cachedContentTokenCount":9}}`)},
+			want:       usage.Detail{CachedTokens: 9, CacheReadTokens: 9},
+			wantAccept: 1,
+		},
+		{
+			name:       "thought only",
+			lines:      [][]byte{[]byte(`data: {"usageMetadata":{"thoughtsTokenCount":4}}`)},
+			want:       usage.Detail{ReasoningTokens: 4, TotalTokens: 4},
+			wantAccept: 1,
+		},
+		{
+			name:       "missing usage",
+			lines:      [][]byte{[]byte(`data: {"candidates":[]}`)},
+			wantAccept: 0,
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			var accepted int
+			var buffered streamUsageBuffer
+			for _, line := range testCase.lines {
+				detail, ok := parseGeminiStreamUsage(line)
+				if !ok {
+					continue
+				}
+				accepted++
+				buffered.observe(detail, true, false)
+			}
+			if accepted != testCase.wantAccept {
+				t.Fatalf("accepted usage count = %d, want %d", accepted, testCase.wantAccept)
+			}
+			got, ok := buffered.detailValue()
+			if testCase.wantAccept == 0 {
+				if ok {
+					t.Fatalf("usage detail = %+v, want no usage", got)
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("usage detail missing")
+			}
+			if got.InputTokens != testCase.want.InputTokens ||
+				got.OutputTokens != testCase.want.OutputTokens ||
+				got.ReasoningTokens != testCase.want.ReasoningTokens ||
+				got.CachedTokens != testCase.want.CachedTokens ||
+				got.CacheReadTokens != testCase.want.CacheReadTokens ||
+				got.TotalTokens != testCase.want.TotalTokens {
+				t.Fatalf("usage detail = %+v, want %+v", got, testCase.want)
+			}
+		})
 	}
 }
 
@@ -599,6 +729,68 @@ func TestStreamUsageFailureWinsBeforeDeferredSuccess(t *testing.T) {
 		assertUsageDetailWithBreakdown(t, got.Detail, usage.Detail{})
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for failed usage record")
+	}
+}
+
+func TestUsageReporterCancellationAfterFinalizerCheckWinsOverSuccess(t *testing.T) {
+	tests := []struct {
+		name    string
+		publish func(context.Context, *usageReporter)
+	}{
+		{
+			name: "buffered usage",
+			publish: func(ctx context.Context, reporter *usageReporter) {
+				var buffer streamUsageBuffer
+				buffer.observeOpenAIStream(
+					[]byte(`data: {"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5},"service_tier":"default"}`),
+				)
+				buffer.publish(ctx, reporter)
+			},
+		},
+		{
+			name: "zero usage",
+			publish: func(ctx context.Context, reporter *usageReporter) {
+				reporter.ensurePublished(ctx)
+			},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+			registerTestUsagePlugin(t, plugin)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			reporter := &usageReporter{provider: "openai", model: "gpt-test"}
+			if errContext := scannerOrContextError(ctx, nil); errContext != nil {
+				t.Fatalf("pre-publication context error = %v, want nil", errContext)
+			}
+			cancel()
+
+			testCase.publish(ctx, reporter)
+			reporter.publish(ctx, usage.Detail{TotalTokens: 99})
+
+			select {
+			case got := <-plugin.records:
+				if !got.Failed {
+					t.Fatalf("Failed = false, want true: %#v", got)
+				}
+				if got.Fail.StatusCode != clienterror.StatusClientClosedRequest ||
+					!strings.Contains(got.Fail.Body, context.Canceled.Error()) {
+					t.Fatalf("failure = %#v, want canceled request", got.Fail)
+				}
+				if got.Detail.InputTokens != 0 || got.Detail.OutputTokens != 0 || got.Detail.TotalTokens != 0 {
+					t.Fatalf("detail = %#v, want canceled success usage discarded", got.Detail)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for canceled usage record")
+			}
+			select {
+			case duplicate := <-plugin.records:
+				t.Fatalf("duplicate usage record = %#v", duplicate)
+			case <-time.After(20 * time.Millisecond):
+			}
+		})
 	}
 }
 

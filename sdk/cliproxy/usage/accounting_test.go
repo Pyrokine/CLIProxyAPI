@@ -1,6 +1,9 @@
 package usage
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestNewSubsetTokenBreakdownAvoidsCacheAndReasoningDoubleCount(t *testing.T) {
 	breakdown := NewSubsetTokenBreakdown(100, 40, 10, 30, 12, 130)
@@ -173,5 +176,55 @@ func TestEnsureTokenBreakdownDoesNotOverrideCanonicalZeroCacheRead(t *testing.T)
 	detail := EnsureTokenBreakdownForProvider(Detail{CachedTokens: 13, CacheCreationTokens: 13}, "openai", "")
 	if detail.CacheReadTokens != 0 {
 		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestTokenBreakdownValidRejectsOverflowingSums(t *testing.T) {
+	tests := []struct {
+		name      string
+		breakdown TokenBreakdown
+	}{
+		{
+			name: "input buckets wrap back to zero",
+			breakdown: TokenBreakdown{
+				SchemaVersion: TokenAccountingSchemaVersion,
+				Quality:       TokenAccountingQualityComplete,
+				Input: TokenInputBreakdown{
+					UncachedTokens:   math.MaxInt64,
+					CacheReadTokens:  math.MaxInt64,
+					CacheWriteTokens: 2,
+				},
+			},
+		},
+		{
+			name: "output buckets overflow",
+			breakdown: TokenBreakdown{
+				SchemaVersion: TokenAccountingSchemaVersion,
+				Quality:       TokenAccountingQualityComplete,
+				Output: TokenOutputBreakdown{
+					TotalTokens:        0,
+					NonReasoningTokens: math.MaxInt64,
+					ReasoningTokens:    1,
+				},
+			},
+		},
+		{
+			name: "top-level buckets wrap back to zero",
+			breakdown: TokenBreakdown{
+				SchemaVersion:      TokenAccountingSchemaVersion,
+				Quality:            TokenAccountingQualityInconsistent,
+				Input:              TokenInputBreakdown{TotalTokens: math.MaxInt64, UncachedTokens: math.MaxInt64},
+				Output:             TokenOutputBreakdown{TotalTokens: math.MaxInt64, NonReasoningTokens: math.MaxInt64},
+				UnclassifiedTokens: 2,
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.breakdown.Valid() {
+				t.Fatalf("overflowing breakdown reported valid: %+v", test.breakdown)
+			}
+		})
 	}
 }

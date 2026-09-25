@@ -63,6 +63,9 @@ func GinLogrusLogger() gin.HandlerFunc {
 		clientIP := ExtractClientRequestMetadata(c.Request).ClientIP
 		method := c.Request.Method
 		errorMessage := c.Errors.ByType(gin.ErrorTypePrivate).String()
+		if shouldSuppressAccessLog(method, c.Request.URL.Path, statusCode) {
+			return
+		}
 
 		if requestID == "" {
 			requestID = "--------"
@@ -83,6 +86,12 @@ func GinLogrusLogger() gin.HandlerFunc {
 			entry.Info(logLine)
 		}
 	}
+}
+
+func shouldSuppressAccessLog(method, path string, statusCode int) bool {
+	return path == "/healthz" &&
+		(method == http.MethodGet || method == http.MethodHead) &&
+		statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
 }
 
 func requiresRequestID(path string) bool {

@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +15,106 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/gin-gonic/gin"
 )
+
+func TestAPIResponseAttemptsAreSeparated(t *testing.T) {
+	for _, storage := range []string{"memory", "file", "fallback"} {
+		for _, tc := range []struct {
+			name        string
+			body        string
+			skipInitial bool
+			skipMiddle  bool
+		}{
+			{name: "error"},
+			{name: "partial", body: "partial"},
+			{name: "one_newline", body: "partial\n"},
+			{name: "two_newlines", body: "partial\n\n"},
+			{name: "three_newlines", body: "partial\n\n\n"},
+			{name: "missing_initial_response", body: "partial", skipInitial: true},
+			{name: "missing_middle_response", body: "partial", skipMiddle: true},
+		} {
+			t.Run(storage+"/"+tc.name, func(t *testing.T) {
+				ginCtx := &gin.Context{}
+				ctx := util.WithGinContext(context.Background(), ginCtx)
+				cfg := &config.Config{}
+				cfg.RequestLog = true
+				var source *logging.FileBodySource
+				if storage != "memory" {
+					var err error
+					source, err = logging.NewFileBodySourceInDir(t.TempDir(), "api-response")
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() {
+						if err := source.Cleanup(); err != nil {
+							t.Error(err)
+						}
+					})
+					ginCtx.Set(logging.APIResponseSourceContextKey, source)
+				}
+				firstHeader, nextHeader := "=== API RESPONSE 1 ===", "=== API RESPONSE 2 ==="
+				if tc.skipInitial {
+					recordAPIRequest(ctx, cfg, upstreamRequestLog{URL: "https://example.test/skipped", Method: http.MethodPost})
+					firstHeader, nextHeader = "=== API RESPONSE 2 ===", "=== API RESPONSE 3 ==="
+				}
+				recordAPIRequest(ctx, cfg, upstreamRequestLog{URL: "https://example.test/first", Method: http.MethodPost})
+				previous := "Error: EOF\n\n"
+				if tc.body == "" {
+					recordAPIResponseError(ctx, cfg, errors.New("EOF"))
+				} else {
+					appendAPIResponseChunk(ctx, cfg, []byte("partial"))
+					_, attempt := ensureAttempt(ginCtx)
+					for range len(tc.body) - len("partial") {
+						writeAttemptResponse(ginCtx, attempt, []byte("\n"))
+					}
+					previous = "partial" + strings.Repeat("\n", max(2, len(tc.body)-len("partial")))
+				}
+				if storage == "fallback" {
+					paths := source.Paths()
+					if len(paths) == 0 {
+						t.Fatal("missing response source file")
+					}
+					if err := os.Chmod(paths[0], 0o400); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if tc.skipMiddle {
+					recordAPIRequest(ctx, cfg, upstreamRequestLog{URL: "https://example.test/skipped", Method: http.MethodPost})
+					nextHeader = "=== API RESPONSE 3 ==="
+				}
+				recordAPIRequest(ctx, cfg, upstreamRequestLog{URL: "https://example.test/second", Method: http.MethodPost})
+				recordAPIResponseError(ctx, cfg, errors.New("retry failed"))
+				_, attempt := ensureAttempt(ginCtx)
+				ensureResponseIntro(ginCtx, attempt)
+				var response string
+				if storage == "file" {
+					payload, err := source.Bytes()
+					if err != nil {
+						t.Fatal(err)
+					}
+					response = string(payload)
+				} else {
+					value, ok := ginCtx.Get(apiResponseKey)
+					if !ok {
+						t.Fatal("missing response capture")
+					}
+					response = value.(*logging.BoundedLogBuffer).String()
+				}
+				boundary := previous + nextHeader
+				if !strings.Contains(response, boundary) {
+					t.Fatalf("missing boundary %q in %q", boundary, response)
+				}
+				if !strings.HasPrefix(response, firstHeader) ||
+					strings.Count(response, "=== API RESPONSE") != 2 ||
+					!strings.HasSuffix(response, "Error: retry failed\n") {
+					t.Fatalf("unexpected response capture: %q", response)
+				}
+				if storage == "fallback" && (attempt.responseSource != nil || apiResponseSourceOrNil(ginCtx) != nil) {
+					t.Fatal("failed response source was not disabled")
+				}
+			})
+		}
+	}
+}
 
 func TestRecordAPIRequestSkipsCommercialMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)

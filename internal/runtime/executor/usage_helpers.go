@@ -26,8 +26,10 @@ import (
 
 type usageReporter struct {
 	provider        string
+	baseURL         string
 	executorType    string
 	model           string
+	stream          bool
 	alias           string
 	authID          string
 	authIndex       string
@@ -69,8 +71,10 @@ func newUsageReporter(
 	}
 	reporter := &usageReporter{
 		provider:        provider,
+		baseURL:         selectedAuthBaseURL(auth),
 		executorType:    executorType,
 		model:           model,
+		stream:          usage.StreamFromContext(ctx),
 		alias:           strings.TrimSpace(alias),
 		requestedAt:     time.Now(),
 		apiKey:          apiKeyIdentity,
@@ -90,6 +94,19 @@ func newUsageReporter(
 		reporter.accessTokenHash = cliproxyauth.AccessTokenSHA256(auth)
 	}
 	return reporter
+}
+
+func selectedAuthBaseURL(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.Attributes["base_url"])
+}
+
+func (r *usageReporter) markStream() {
+	if r != nil {
+		r.stream = true
+	}
 }
 
 func (r *usageReporter) setTranslatedReasoningEffort(payload []byte, format string) {
@@ -258,7 +275,9 @@ func (r *usageReporter) publishAdditionalModel(ctx context.Context, model string
 	r.publishRecordImmediate(
 		ctx, usage.Record{
 			Provider:            r.provider,
+			BaseURL:             r.baseURL,
 			ExecutorType:        r.executorType,
+			Stream:              r.stream,
 			Model:               model,
 			Alias:               model,
 			Source:              r.source,
@@ -309,14 +328,25 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	if r == nil {
 		return
 	}
-	detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 	r.once.Do(
 		func() {
+			publishCtx := ctx
+			if !failed {
+				if errContext := scannerOrContextError(ctx, nil); errContext != nil {
+					detail = usage.Detail{}
+					failed = true
+					fail = failFromErrors(errContext)
+					publishCtx = context.WithoutCancel(ctx)
+				}
+			}
+			detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
 			r.publishRecord(
-				ctx, usage.Record{
+				publishCtx, usage.Record{
 					Provider:            r.provider,
+					BaseURL:             r.baseURL,
 					ExecutorType:        r.executorType,
 					Model:               r.model,
+					Stream:              r.stream,
 					Alias:               r.alias,
 					Source:              r.source,
 					SourceKind:          r.sourceKind,
@@ -357,11 +387,21 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 	}
 	r.once.Do(
 		func() {
+			failed := false
+			fail := usage.Failure{}
+			publishCtx := ctx
+			if errContext := scannerOrContextError(ctx, nil); errContext != nil {
+				failed = true
+				fail = failFromErrors(errContext)
+				publishCtx = context.WithoutCancel(ctx)
+			}
 			r.publishRecord(
-				ctx, usage.Record{
+				publishCtx, usage.Record{
 					Provider:           r.provider,
+					BaseURL:            r.baseURL,
 					ExecutorType:       r.executorType,
 					Model:              r.model,
+					Stream:             r.stream,
 					Alias:              r.alias,
 					Source:             r.source,
 					SourceKind:         r.sourceKind,
@@ -377,7 +417,8 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 					RequestedAt:        r.requestedAt,
 					Latency:            r.latency(),
 					Thinking:           cloneUsageThinking(r.thinking),
-					Failed:             false,
+					Failed:             failed,
+					Fail:               fail,
 					Detail:             usage.Detail{},
 				},
 			)
@@ -443,9 +484,13 @@ func failFromErrors(errs ...error) usage.Failure {
 		if err == nil {
 			continue
 		}
+		body := strings.TrimSpace(err.Error())
+		if upstreamBody, direct := clienterror.ResponseBodyFromError(err); direct {
+			body = string(upstreamBody)
+		}
 		return usage.Failure{
 			StatusCode: clienterror.HTTPStatusFromError(err),
-			Body:       strings.TrimSpace(err.Error()),
+			Body:       body,
 		}
 	}
 	return usage.Failure{}
@@ -650,7 +695,11 @@ func (b *streamUsageBuffer) flushOpenAIStream() {
 }
 
 func (b *streamUsageBuffer) publish(ctx context.Context, reporter *usageReporter) bool {
-	if b == nil || reporter == nil || (!b.hasUsage && !b.hasTier) {
+	if reporter == nil {
+		return false
+	}
+	reporter.markStream()
+	if b == nil || (!b.hasUsage && !b.hasTier) {
 		return false
 	}
 	reporter.publish(ctx, b.detail)
@@ -841,7 +890,11 @@ func (b *claudeStreamUsageBuffer) observe(line []byte) {
 }
 
 func (b *claudeStreamUsageBuffer) publish(ctx context.Context, reporter *usageReporter) bool {
-	if b == nil || reporter == nil || (!b.hasUsage && !b.hasTier) {
+	if reporter == nil {
+		return false
+	}
+	reporter.markStream()
+	if b == nil || (!b.hasUsage && !b.hasTier) {
 		return false
 	}
 	reporter.publish(ctx, b.detail)
@@ -852,6 +905,7 @@ func (b *claudeStreamUsageBuffer) publishFailure(ctx context.Context, reporter *
 	if reporter == nil {
 		return
 	}
+	reporter.markStream()
 	reporter.publishFailureWithDetail(ctx, b.detail, errs...)
 }
 
@@ -994,7 +1048,15 @@ func parseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
 	if !node.Exists() {
 		return usage.Detail{}, false
 	}
-	return parseGeminiFamilyUsageDetail(node), true
+	detail := parseGeminiFamilyUsageDetail(node)
+	if detail.InputTokens == 0 &&
+		detail.OutputTokens == 0 &&
+		detail.ReasoningTokens == 0 &&
+		detail.CachedTokens == 0 &&
+		detail.TotalTokens == 0 {
+		return usage.Detail{}, false
+	}
+	return detail, true
 }
 
 func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {

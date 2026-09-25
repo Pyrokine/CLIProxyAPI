@@ -23,6 +23,26 @@ func TestIsClaudeCodeAttributionSystemText(t *testing.T) {
 			text: "You are a helpful assistant",
 			want: false,
 		},
+		{
+			name: "Claude Code identity remains system content",
+			text: "You are Claude Code, Anthropic's official CLI for Claude.",
+			want: false,
+		},
+		{
+			name: "embedded CCH text is not attribution",
+			text: "Keep the literal cch=00000; in this system instruction",
+			want: false,
+		},
+		{
+			name: "billing header must start the block",
+			text: "Keep this note before x-anthropic-billing-header: cch=00000;",
+			want: false,
+		},
+		{
+			name: "mixed billing and caller instructions remain",
+			text: "x-anthropic-billing-header: cch=00000;\nKeep this caller instruction",
+			want: false,
+		},
 	}
 
 	for _, tc := range cases {

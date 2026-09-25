@@ -9,6 +9,7 @@ import (
 
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -135,6 +136,19 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		TotalTokens:         usageDetail.TotalTokens,
 	}
 	clientMetadata := internallogging.GetClientRequestMetadata(ctx)
+	sessionID := strings.TrimSpace(record.SessionID)
+	parentSessionID := strings.TrimSpace(record.ParentSessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(clientMetadata.SessionID)
+		parentSessionID = strings.TrimSpace(clientMetadata.ParentSessionID)
+	} else if parentSessionID == "" && sessionID == strings.TrimSpace(clientMetadata.SessionID) {
+		parentSessionID = strings.TrimSpace(clientMetadata.ParentSessionID)
+	}
+	sessionID = coresession.NormalizeToCanonicalUUID(sessionID)
+	parentSessionID = coresession.NormalizeToCanonicalUUID(parentSessionID)
+	if sessionID == "" || sessionID == parentSessionID {
+		parentSessionID = ""
+	}
 
 	failed := record.Failed
 	if !failed {
@@ -166,13 +180,17 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 			AccountingVersion:   coreusage.TokenAccountingSchemaVersion,
 			TokenBreakdown:      usageDetail.TokenBreakdown,
 			Provider:            provider,
+			BaseURL:             strings.TrimSpace(record.BaseURL),
 			ExecutorType:        executorType,
 			Model:               modelName,
+			Stream:              record.Stream,
 			Alias:               aliasName,
 			Endpoint:            resolveEndpoint(ctx),
 			AuthType:            authType,
 			APIKey:              apiKey,
 			RequestID:           requestID,
+			SessionID:           sessionID,
+			ParentSessionID:     parentSessionID,
 			ReasoningEffort:     reasoningEffort,
 			ServiceTier:         requestServiceTier,
 			RequestServiceTier:  requestServiceTier,
@@ -190,13 +208,17 @@ type queuedUsageDetail struct {
 	AccountingVersion   int                      `json:"accounting_version"`
 	TokenBreakdown      coreusage.TokenBreakdown `json:"token_breakdown"`
 	Provider            string                   `json:"provider"`
+	BaseURL             string                   `json:"base_url,omitempty"`
 	ExecutorType        string                   `json:"executor_type"`
 	Model               string                   `json:"model"`
+	Stream              bool                     `json:"stream"`
 	Alias               string                   `json:"alias"`
 	Endpoint            string                   `json:"endpoint"`
 	AuthType            string                   `json:"auth_type"`
 	APIKey              string                   `json:"api_key"`
 	RequestID           string                   `json:"request_id"`
+	SessionID           string                   `json:"session_id,omitempty"`
+	ParentSessionID     string                   `json:"parent_session_id,omitempty"`
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
 	RequestServiceTier  string                   `json:"request_service_tier"`

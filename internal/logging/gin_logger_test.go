@@ -10,6 +10,32 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestShouldSuppressAccessLogOnlyForSuccessfulHealthReads(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		statusCode int
+		want       bool
+	}{
+		{name: "get success", method: http.MethodGet, path: "/healthz", statusCode: http.StatusOK, want: true},
+		{name: "head success", method: http.MethodHead, path: "/healthz", statusCode: http.StatusNoContent, want: true},
+		{name: "get redirect", method: http.MethodGet, path: "/healthz", statusCode: http.StatusTemporaryRedirect},
+		{name: "get failure", method: http.MethodGet, path: "/healthz", statusCode: http.StatusServiceUnavailable},
+		{name: "post success", method: http.MethodPost, path: "/healthz", statusCode: http.StatusOK},
+		{name: "similar path", method: http.MethodGet, path: "/healthz/", statusCode: http.StatusOK},
+		{name: "other path", method: http.MethodGet, path: "/v1/models", statusCode: http.StatusOK},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldSuppressAccessLog(test.method, test.path, test.statusCode); got != test.want {
+				t.Fatalf("shouldSuppressAccessLog(%q, %q, %d) = %t, want %t", test.method, test.path, test.statusCode, got, test.want)
+			}
+		})
+	}
+}
+
 // TestGinLogrusRecoveryHandlesErrAbortHandler verifies that gin v1.12.0 handles
 // http.ErrAbortHandler internally without calling our custom recovery handler.
 func TestGinLogrusRecoveryHandlesErrAbortHandler(t *testing.T) {
