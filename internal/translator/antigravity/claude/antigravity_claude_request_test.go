@@ -14,8 +14,14 @@ import (
 )
 
 func validClaudeThinkingSignatureForAntigravityTest() string {
+	return claudeThinkingSignatureForAntigravityTest(12)
+}
+
+func claudeThinkingSignatureForAntigravityTest(channelID uint64) string {
 	channel := protowire.AppendTag(nil, 1, protowire.VarintType)
-	channel = protowire.AppendVarint(channel, 12)
+	channel = protowire.AppendVarint(channel, channelID)
+	channel = protowire.AppendTag(channel, 6, protowire.BytesType)
+	channel = protowire.AppendBytes(channel, []byte("claude-sonnet-4-5-thinking-test-signature-payload"))
 	container := protowire.AppendTag(nil, 1, protowire.BytesType)
 	container = protowire.AppendBytes(container, channel)
 	payload := protowire.AppendTag(nil, 2, protowire.BytesType)
@@ -125,7 +131,10 @@ func TestConvertClaudeRequestToAntigravity_ThinkingBlocks(t *testing.T) {
 	if firstPart.Get("text").String() != thinkingText {
 		t.Error("thinking text mismatch")
 	}
-	expectedSignature := resolveBypassModeSignature(validSignature)
+	expectedSignature, compatible := signature.CompatibleAntigravityClaudeThinkingSignature(validSignature)
+	if !compatible {
+		t.Fatal("test signature should be valid for Antigravity Claude replay")
+	}
 	if firstPart.Get("thoughtSignature").String() != expectedSignature {
 		t.Errorf(
 			"Expected thoughtSignature '%s', got '%s'", expectedSignature, firstPart.Get("thoughtSignature").String(),
@@ -496,7 +505,10 @@ func TestConvertClaudeRequestToAntigravity_ToolUse_WithSignature(t *testing.T) {
 	if part.Get("functionCall.name").String() != "get_weather" {
 		t.Errorf("Expected functionCall, got %s", part.Raw)
 	}
-	expectedSignature := resolveBypassModeSignature(validSignature)
+	expectedSignature, compatible := signature.CompatibleAntigravityClaudeThinkingSignature(validSignature)
+	if !compatible {
+		t.Fatal("test signature should be valid for Antigravity Claude replay")
+	}
 	if part.Get("thoughtSignature").String() != expectedSignature {
 		t.Errorf(
 			"Expected thoughtSignature '%s' on tool_use, got '%s'", expectedSignature,
@@ -1849,5 +1861,228 @@ func TestConvertClaudeRequestToAntigravityStripsPropertyNames(t *testing.T) {
 	}
 	if !declarations.Get("1.parametersJsonSchema.properties.properties").Exists() {
 		t.Errorf("property named properties was removed: %s", declarations.Get("1").Raw)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravityToolChoiceNoneOmitsToolsAndHint(t *testing.T) {
+	for _, choice := range []string{`"none"`, `{"type":"none"}`} {
+		input := []byte(`{
+			"messages":[{"role":"user","content":"hi"}],
+			"tools":[{"name":"lookup","input_schema":{"type":"object"}}],
+			"tool_choice":` + choice + `,
+			"thinking":{"type":"enabled","budget_tokens":1024}
+		}`)
+		out := convertClaudeRequestToAntigravity("claude-sonnet-4-5-thinking", input, false)
+		if got := gjson.GetBytes(out, "request.toolConfig.functionCallingConfig.mode").String(); got != "NONE" {
+			t.Fatalf("tool mode = %q, want NONE; output=%s", got, out)
+		}
+		if gjson.GetBytes(out, "request.tools").Exists() {
+			t.Fatalf("request.tools must be omitted; output=%s", out)
+		}
+		if strings.Contains(gjson.GetBytes(out, "request.systemInstruction").Raw, "Interleaved thinking is enabled") {
+			t.Fatalf("interleaved thinking hint must be omitted; output=%s", out)
+		}
+	}
+}
+
+func TestResolveThinkingSignaturePrefersExplicitClientValue(t *testing.T) {
+	cache.ClearSignatureCache("")
+	t.Cleanup(func() { cache.ClearSignatureCache("") })
+
+	modelName := "claude-sonnet-4-5-thinking"
+	thinkingText := "client/cache precedence"
+	clientSignature := claudeThinkingSignatureForAntigravityTest(12)
+	cachedSignature := claudeThinkingSignatureForAntigravityTest(11)
+	cache.StoreSignature(modelName, thinkingText, cachedSignature)
+
+	wantClient, compatible := signature.CompatibleAntigravityClaudeThinkingSignature(clientSignature)
+	if !compatible {
+		t.Fatal("client test signature should be compatible")
+	}
+	if got := resolveThinkingSignature(modelName, thinkingText, clientSignature); got != wantClient {
+		t.Fatalf("explicit client signature = %q, want %q", got, wantClient)
+	}
+	if got := resolveThinkingSignature(modelName, thinkingText, "invalid-explicit-signature"); got != "" {
+		t.Fatalf("invalid explicit signature was replaced from cache: %q", got)
+	}
+
+	wantCached, compatible := signature.CompatibleAntigravityClaudeThinkingSignature(cachedSignature)
+	if !compatible {
+		t.Fatal("cached test signature should be compatible")
+	}
+	if got := resolveThinkingSignature(modelName, thinkingText, "  "); got != wantCached {
+		t.Fatalf("blank client signature resolved to %q, want cached %q", got, wantCached)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravityKeepsMidSessionSystemMessagesInUserTurn(t *testing.T) {
+	for _, role := range []string{"system", "developer"} {
+		t.Run(role, func(t *testing.T) {
+			input := []byte(`{
+				"system":"global instruction",
+				"messages":[
+					{"role":"user","content":"first user"},
+					{"role":"assistant","content":"first answer"},
+					{"role":"` + role + `","content":"mid-session notice"},
+					{"role":"user","content":"second user"}
+				]
+			}`)
+
+			out := convertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
+			if got := gjson.GetBytes(out, "request.systemInstruction.parts.0.text").String(); got != "global instruction" {
+				t.Fatalf("global system instruction = %q; output=%s", got, out)
+			}
+			contents := gjson.GetBytes(out, "request.contents").Array()
+			if len(contents) != 3 {
+				t.Fatalf("contents count = %d, want 3; output=%s", len(contents), out)
+			}
+			parts := contents[2].Get("parts").Array()
+			if len(parts) != 2 {
+				t.Fatalf("merged user parts count = %d, want 2; output=%s", len(parts), out)
+			}
+			if !strings.Contains(parts[0].Get("text").String(), "mid-session notice") {
+				t.Fatalf("mid-session notice missing from user boundary; output=%s", out)
+			}
+			if got := parts[1].Get("text").String(); got != "second user" {
+				t.Fatalf("second user text = %q; output=%s", got, out)
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToAntigravityAlignsOnlyMatchedParallelResultSlots(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_a","name":"tool_a","input":{}},
+				{"type":"tool_use","id":"call_b","name":"tool_b","input":{}}
+			]},
+			{"role":"user","content":[
+				{"type":"text","text":"keep-first"},
+				{"type":"tool_result","tool_use_id":"call_b","content":"B"},
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"IMAGE"}},
+				{"type":"tool_result","tool_use_id":"unmatched","content":"X"},
+				{"type":"tool_result","tool_use_id":"call_a","content":"A"}
+			]}
+		]
+	}`)
+
+	out := convertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
+	parts := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	if len(parts) != 5 {
+		t.Fatalf("result parts count = %d, want 5; output=%s", len(parts), out)
+	}
+	if got := parts[0].Get("text").String(); got != "keep-first" {
+		t.Fatalf("text slot moved or changed: %q; output=%s", got, out)
+	}
+	if got := parts[1].Get("functionResponse.id").String(); got != "call_a" {
+		t.Fatalf("first matched result = %q, want call_a; output=%s", got, out)
+	}
+	if got := parts[2].Get("inlineData.data").String(); got != "IMAGE" {
+		t.Fatalf("image slot moved or changed: %q; output=%s", got, out)
+	}
+	if got := parts[3].Get("functionResponse.id").String(); got != "unmatched" {
+		t.Fatalf("unmatched result slot moved or changed: %q; output=%s", got, out)
+	}
+	if got := parts[4].Get("functionResponse.id").String(); got != "call_b" {
+		t.Fatalf("second matched result = %q, want call_b; output=%s", got, out)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravityDeduplicatesRawToolResultIDs(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call.a","name":"tool_a","input":{}},
+				{"type":"tool_use","id":"call_a","name":"tool_b","input":{}}
+			]},
+			{"role":"user","content":[
+				{"type":"text","text":"keep-first"},
+				{"type":"tool_result","tool_use_id":"call.a","content":"old"},
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"IMAGE"}},
+				{"type":"tool_result","tool_use_id":"call_a","content":"other"},
+				{"type":"tool_result","tool_use_id":"call.a","content":"new"}
+			]}
+		]
+	}`)
+
+	out := convertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
+	parts := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	if len(parts) != 4 {
+		t.Fatalf("deduplicated parts count = %d, want 4; output=%s", len(parts), out)
+	}
+	if got := parts[0].Get("text").String(); got != "keep-first" {
+		t.Fatalf("text slot moved or changed: %q; output=%s", got, out)
+	}
+	if got := parts[1].Get("functionResponse.id").String(); got != "call.a" {
+		t.Fatalf("first raw result ID = %q, want call.a; output=%s", got, out)
+	}
+	if got := parts[1].Get("functionResponse.response.result").String(); got != "new" {
+		t.Fatalf("deduplicated result = %q, want new; output=%s", got, out)
+	}
+	if got := parts[2].Get("inlineData.data").String(); got != "IMAGE" {
+		t.Fatalf("image slot moved or changed: %q; output=%s", got, out)
+	}
+	if got := parts[3].Get("functionResponse.id").String(); got != "call_a" {
+		t.Fatalf("distinct raw result ID = %q, want call_a; output=%s", got, out)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravityKeepsPendingResultsAcrossDeveloperMessage(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"tool_use","id":"call_a","name":"tool_a","input":{}},
+				{"type":"tool_use","id":"call_b","name":"tool_b","input":{}}
+			]},
+			{"role":"developer","content":"permission notice"},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"call_b","content":"B"},
+				{"type":"tool_result","tool_use_id":"call_a","content":"A"}
+			]}
+		]
+	}`)
+
+	out := convertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
+	parts := gjson.GetBytes(out, "request.contents.1.parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("merged developer/result parts count = %d, want 3; output=%s", len(parts), out)
+	}
+	if !strings.Contains(parts[0].Get("text").String(), "permission notice") {
+		t.Fatalf("developer notice missing; output=%s", out)
+	}
+	if got := parts[1].Get("functionResponse.id").String(); got != "call_a" {
+		t.Fatalf("first result = %q, want call_a; output=%s", got, out)
+	}
+	if got := parts[2].Get("functionResponse.id").String(); got != "call_b" {
+		t.Fatalf("second result = %q, want call_b; output=%s", got, out)
+	}
+}
+
+func TestConvertClaudeRequestToAntigravityMapsExternalToolNameChain(t *testing.T) {
+	input := []byte(`{
+		"messages":[
+			{"role":"assistant","content":[{
+				"type":"tool_use","id":"call_1","name":"external_external_read_file","input":{}
+			}]},
+			{"role":"user","content":[{
+				"type":"tool_result","tool_use_id":"call_1","content":"ok"
+			}]}
+		],
+		"tools":[{"name":"external_external_read_file","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"external_external_read_file"}
+	}`)
+
+	out := convertClaudeRequestToAntigravity("gemini-3-flash", input, false)
+	const expected = "external_external_external_read_file"
+	for _, path := range []string{
+		"request.tools.0.functionDeclarations.0.name",
+		"request.toolConfig.functionCallingConfig.allowedFunctionNames.0",
+		"request.contents.0.parts.0.functionCall.name",
+		"request.contents.1.parts.0.functionResponse.name",
+	} {
+		if got := gjson.GetBytes(out, path).String(); got != expected {
+			t.Fatalf("%s = %q, want %q; output=%s", path, got, expected, out)
+		}
 	}
 }

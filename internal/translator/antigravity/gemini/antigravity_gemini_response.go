@@ -98,9 +98,6 @@ func convertAntigravityResponseToGeminiNonStream(
 
 func restoreGeminiFunctionNames(chunk, originalRequestRawJSON []byte) []byte {
 	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
-	if len(nameMap) == 0 {
-		return chunk
-	}
 	candidates := gjson.GetBytes(chunk, "candidates")
 	for candidateIndex, candidate := range candidates.Array() {
 		for partIndex, part := range candidate.Get("content.parts").Array() {
@@ -110,6 +107,7 @@ func restoreGeminiFunctionNames(chunk, originalRequestRawJSON []byte) []byte {
 					continue
 				}
 				path := fmt.Sprintf("candidates.%d.content.parts.%d.%s.name", candidateIndex, partIndex, field)
+				name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
 				chunk, _ = sjson.SetBytes(chunk, path, util.RestoreSanitizedToolName(nameMap, name))
 			}
 		}

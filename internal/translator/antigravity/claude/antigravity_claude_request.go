@@ -21,14 +21,13 @@ import (
 
 func resolveThinkingSignature(modelName, thinkingText, rawSignature string) string {
 	targetProvider := signature.ProviderFromModelName(modelName)
-	if targetProvider != signature.ProviderGemini && thinkingText != "" {
-		if cachedSignature := cache.GetCachedSignature(modelName, thinkingText); cachedSignature != "" {
-			rawSignature = cachedSignature
-		}
+	if strings.TrimSpace(rawSignature) == "" && thinkingText != "" {
+		rawSignature = cache.GetCachedSignature(modelName, thinkingText)
 	}
 	if strings.TrimSpace(rawSignature) == "" {
 		return ""
 	}
+
 	switch targetProvider {
 	case signature.ProviderGemini:
 		innerSignature, _, targetKind, marked, ok := decodeGeminiClaudeCarrierSignature(rawSignature)
@@ -41,21 +40,21 @@ func resolveThinkingSignature(modelName, thinkingText, rawSignature string) stri
 		}
 		return signature.GeminiReplaySignatureOrBypass(innerSignature, blockKind)
 	case signature.ProviderClaude:
-		return resolveBypassModeSignature(rawSignature)
+		normalized, compatible := signature.CompatibleAntigravityClaudeThinkingSignature(rawSignature)
+		if compatible {
+			return normalized
+		}
 	default:
-		return resolveBypassModeSignature(rawSignature)
+		normalized, compatible := signature.CompatibleSignatureForProvider(
+			targetProvider,
+			rawSignature,
+			signature.BlockKindClaudeThinking,
+		)
+		if compatible {
+			return normalized
+		}
 	}
-}
-
-func resolveBypassModeSignature(rawSignature string) string {
-	if rawSignature == "" {
-		return ""
-	}
-	normalized, err := normalizeClaudeBypassSignature(rawSignature)
-	if err != nil {
-		return ""
-	}
-	return normalized
+	return ""
 }
 
 func hasResolvedThinkingSignature(signature string) bool {
@@ -93,6 +92,12 @@ func antigravityClaudeContent(role string, parts [][]byte) []byte {
 	content, _ = sjson.SetBytes(content, "role", role)
 	content, _ = sjson.SetRawBytes(content, "parts", translatorcommon.JoinRawArray(parts))
 	return content
+}
+
+func mapClaudeFunctionNameToAntigravity(functionNameMap map[string]string, name string) string {
+	return translatorcommon.AntigravityToolNameToUpstream(
+		util.MapSanitizedFunctionName(functionNameMap, name),
+	)
 }
 
 // convertClaudeRequestToAntigravity converts a Claude request to the Gemini CLI request schema.
@@ -141,6 +146,7 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// tool_use_id → tool_name lookup, populated incrementally during the main loop.
 	// Claude's tool_result references tool_use by ID; Gemini requires functionResponse.name.
 	toolNameByID := make(map[string]string)
+	var pendingToolUseIDs []string
 
 	messagesResult := gjson.GetBytes(rawJSON, "messages")
 	if messagesResult.IsArray() {
@@ -153,10 +159,15 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				continue
 			}
 			originalRole := roleResult.String()
+			var precedingToolUseIDs []string
+			if originalRole != "system" && originalRole != "developer" {
+				precedingToolUseIDs = pendingToolUseIDs
+				pendingToolUseIDs = nil
+			}
 			role := originalRole
 			if role == "assistant" {
 				role = "model"
-			} else if role == "system" {
+			} else if role == "system" || role == "developer" {
 				role = "user"
 			}
 			partItems := make([][]byte, 0, 4)
@@ -179,7 +190,7 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				pendingDetachedTargetKind = targetKind
 			}
 			contentsResult := messageResult.Get("content")
-			if originalRole == "system" {
+			if originalRole == "system" || originalRole == "developer" {
 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
 					partJSON := []byte(`{}`)
 					partJSON, _ = sjson.SetBytes(partJSON, "text", reminderText)
@@ -194,6 +205,23 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				continue
 			}
 			if contentsResult.IsArray() {
+				if originalRole == "user" {
+					contentResults := translatorcommon.DeduplicateToolResultsByRawID(
+						contentsResult.Array(),
+						func(content gjson.Result) (string, bool) {
+							if content.Get("type").String() != "tool_result" {
+								return "", false
+							}
+							return content.Get("tool_use_id").String(), true
+						},
+					)
+					rawContents := make([][]byte, len(contentResults))
+					for contentIndex, content := range contentResults {
+						rawContents[contentIndex] = []byte(content.Raw)
+					}
+					contentsResult = gjson.ParseBytes(translatorcommon.JoinRawArray(rawContents))
+					contentsResult = translatorcommon.AlignClaudeToolResults(contentsResult, precedingToolUseIDs)
+				}
 				contentResults := contentsResult.Array()
 				numContents := len(contentResults)
 				var currentMessageThinkingSignature string
@@ -375,7 +403,7 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						// Antigravity API validates signatures, so dummy values are rejected.
 
 						originalFunctionName := contentResult.Get("name").String()
-						functionName := util.MapSanitizedFunctionName(functionNameMap, originalFunctionName)
+						functionName := mapClaudeFunctionNameToAntigravity(functionNameMap, originalFunctionName)
 						argsResult := contentResult.Get("input")
 						functionID := contentResult.Get("id").String()
 
@@ -438,6 +466,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							partJSON, _ = sjson.SetBytes(partJSON, "functionCall.name", functionName)
 							partJSON, _ = sjson.SetRawBytes(partJSON, "functionCall.args", []byte(argsRaw))
 							partItems = append(partItems, partJSON)
+							if originalRole == "assistant" && functionID != "" {
+								pendingToolUseIDs = append(pendingToolUseIDs, functionID)
+							}
 						}
 					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "tool_result" {
 						toolCallID := contentResult.Get("tool_use_id").String()
@@ -466,7 +497,7 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							functionResponseJSON, _ = sjson.SetBytes(
 								functionResponseJSON,
 								"name",
-								util.MapSanitizedFunctionName(functionNameMap, funcName),
+								mapClaudeFunctionNameToAntigravity(functionNameMap, funcName),
 							)
 
 							responseData := ""
@@ -625,6 +656,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						partItems = append(partItems, trailingParts...)
 					}
 				}
+				if role == "user" {
+					partItems = translatorcommon.ReorderGeminiUserParts(partItems)
+				}
 
 				contentsJSON, _ = sjson.SetRawBytes(
 					contentsJSON,
@@ -673,7 +707,7 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				tool, _ = sjson.SetBytes(
 					tool,
 					"name",
-					util.MapSanitizedFunctionName(functionNameMap, gjson.GetBytes(tool, "name").String()),
+					mapClaudeFunctionNameToAntigravity(functionNameMap, gjson.GetBytes(tool, "name").String()),
 				)
 				for toolKey := range gjson.ParseBytes(tool).Map() {
 					if util.InArray(allowedToolKeys, toolKey) {
@@ -701,8 +735,21 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	out := []byte(`{"model":"","request":{"contents":[]}}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
+	toolChoiceResult := gjson.GetBytes(rawJSON, "tool_choice")
+	toolChoiceType := ""
+	toolChoiceName := ""
+	if toolChoiceResult.Exists() {
+		if toolChoiceResult.IsObject() {
+			toolChoiceType = toolChoiceResult.Get("type").String()
+			toolChoiceName = toolChoiceResult.Get("name").String()
+		} else if toolChoiceResult.Type == gjson.String {
+			toolChoiceType = toolChoiceResult.String()
+		}
+	}
+	isToolChoiceNone := strings.EqualFold(strings.TrimSpace(toolChoiceType), "none")
+
 	// Inject interleaved thinking hint when both tools and thinking are active
-	hasTools := toolDeclCount > 0
+	hasTools := toolDeclCount > 0 && !isToolChoiceNone
 	thinkingResult := gjson.GetBytes(rawJSON, "thinking")
 	thinkingType := thinkingResult.Get("type").String()
 	hasThinking := thinkingResult.Exists() && thinkingResult.IsObject() && (thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto")
@@ -730,29 +777,26 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetRawBytes(out, "request.systemInstruction", systemInstructionJSON)
 	}
 	if hasContents {
+		contentResults := gjson.ParseBytes(contentsJSON).Array()
+		contentItems := make([][]byte, 0, len(contentResults))
+		for _, content := range contentResults {
+			contentItems = append(contentItems, []byte(content.Raw))
+		}
+		contentsJSON = translatorcommon.JoinRawArray(translatorcommon.MergeAdjacentGeminiContents(contentItems))
 		out, _ = sjson.SetRawBytes(out, "request.contents", contentsJSON)
 	}
-	if toolDeclCount > 0 {
+	if toolDeclCount > 0 && !isToolChoiceNone {
 		out, _ = sjson.SetRawBytes(out, "request.tools", toolsJSON)
 	}
 
 	// tool_choice
-	toolChoiceResult := gjson.GetBytes(rawJSON, "tool_choice")
 	if toolChoiceResult.Exists() {
-		toolChoiceType := ""
-		toolChoiceName := ""
-		if toolChoiceResult.IsObject() {
-			toolChoiceType = toolChoiceResult.Get("type").String()
-			toolChoiceName = toolChoiceResult.Get("name").String()
-		} else if toolChoiceResult.Type == gjson.String {
-			toolChoiceType = toolChoiceResult.String()
-		}
-
-		switch toolChoiceType {
+		switch strings.ToLower(strings.TrimSpace(toolChoiceType)) {
 		case "auto":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "AUTO")
 		case "none":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "NONE")
+			out, _ = sjson.DeleteBytes(out, "request.tools")
 		case "any":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
 		case "tool":
@@ -761,7 +805,7 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				out, _ = sjson.SetBytes(
 					out,
 					"request.toolConfig.functionCallingConfig.allowedFunctionNames",
-					[]string{util.MapSanitizedFunctionName(functionNameMap, toolChoiceName)},
+					[]string{mapClaudeFunctionNameToAntigravity(functionNameMap, toolChoiceName)},
 				)
 			}
 		}

@@ -340,6 +340,39 @@ func TestStreamOptionsRemovedForCodexCompatibility(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToCodexStripsCacheFields(t *testing.T) {
+	inputJSON := []byte(`{
+		"model":"gpt-5.6",
+		"prompt_cache_options":{"mode":"implicit"},
+		"prompt_cache_retention":"24h",
+		"input":[{
+			"type":"message",
+			"role":"user",
+			"content":[
+				{"type":"input_text","text":"hello","prompt_cache_breakpoint":true},
+				{"type":"input_image","image_url":"data:image/png;base64,AA=="}
+			]
+		}]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", inputJSON, true)
+	for _, path := range []string{
+		"prompt_cache_options",
+		"prompt_cache_retention",
+		"input.0.content.0.prompt_cache_breakpoint",
+	} {
+		if gjson.GetBytes(output, path).Exists() {
+			t.Fatalf("%s should be removed: %s", path, output)
+		}
+	}
+	if got := gjson.GetBytes(output, "input.0.content.0.text").String(); got != "hello" {
+		t.Fatalf("input text = %q, want hello", got)
+	}
+	if got := gjson.GetBytes(output, "input.0.content.1.type").String(); got != "input_image" {
+		t.Fatalf("second content type = %q, want input_image", got)
+	}
+}
+
 func TestNormalizeCodexBuiltinTools(t *testing.T) {
 	inputJSON := []byte(`{
 		"model": "gpt-5.2",
@@ -504,6 +537,41 @@ func TestConvertOpenAIResponsesRequestToCodexNormalizesTopLevelToolChoiceAlias(t
 
 	if got := gjson.GetBytes(output, "tool_choice.type").String(); got != "web_search" {
 		t.Fatalf("tool_choice.type = %q, want web_search: %s", got, output)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToCodexPreservesConfigurationUpdates(t *testing.T) {
+	input := []byte(`{
+		"model":"gpt-5.6",
+		"reasoning":{"effort":"xhigh"},
+		"input":[
+			{"type":"configuration_update","reasoning":{"effort":"low"}},
+			{"type":"message","role":"system","content":"instructions"},
+			{"type":"configuration_update","reasoning":{"effort":"medium"}},
+			{"type":"configuration_update","tools":[]},
+			{"type":"message","role":"user","content":"hello"}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.6", input, true)
+	if got := gjson.GetBytes(output, "reasoning.effort").String(); got != "xhigh" {
+		t.Fatalf("top-level reasoning.effort = %q, want xhigh; output=%s", got, output)
+	}
+	items := gjson.GetBytes(output, "input").Array()
+	if len(items) != 5 {
+		t.Fatalf("input items = %d, want 5; output=%s", len(items), output)
+	}
+	if got := items[0].Get("reasoning.effort").String(); got != "low" {
+		t.Fatalf("first configuration_update effort = %q, want low", got)
+	}
+	if got := items[1].Get("role").String(); got != "developer" {
+		t.Fatalf("system role = %q, want developer", got)
+	}
+	if got := items[2].Get("reasoning.effort").String(); got != "medium" {
+		t.Fatalf("last valid configuration_update effort = %q, want medium", got)
+	}
+	if items[3].Get("type").String() != "configuration_update" || items[3].Get("reasoning.effort").Exists() {
+		t.Fatalf("trailing configuration_update changed: %s", items[3].Raw)
 	}
 }
 

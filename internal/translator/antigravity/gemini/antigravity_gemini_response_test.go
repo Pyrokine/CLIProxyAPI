@@ -163,3 +163,50 @@ func TestConvertAntigravityResponseToGeminiNonStreamRestoresDisambiguatedNames(t
 		t.Fatalf("functionResponse.name = %q, want %q. Output: %s", got, second, output)
 	}
 }
+
+func TestConvertAntigravityResponseToGeminiRestoresExternalToolNameChain(t *testing.T) {
+	const clientName = "external_external_read_file"
+	const upstreamName = "external_external_external_read_file"
+	original := []byte(`{"tools":[{"functionDeclarations":[{"name":"` + clientName + `"}]}]}`)
+	response := `{"response":{"candidates":[{"content":{"parts":[
+		{"functionCall":{"name":"` + upstreamName + `","args":{}}},
+		{"functionResponse":{"name":"` + upstreamName + `","response":{"result":"ok"}}}
+	]}}]}}`
+
+	stream := convertAntigravityResponseToGemini(
+		util.WithAlt(context.Background(), ""),
+		"gemini-3-flash",
+		original,
+		nil,
+		[]byte("data: "+response),
+		nil,
+	)
+	if len(stream) != 1 {
+		t.Fatalf("stream output count = %d, want 1", len(stream))
+	}
+	for _, path := range []string{
+		"candidates.0.content.parts.0.functionCall.name",
+		"candidates.0.content.parts.1.functionResponse.name",
+	} {
+		if got := gjson.GetBytes(stream[0], path).String(); got != clientName {
+			t.Fatalf("stream %s = %q, want %q; output=%s", path, got, clientName, stream[0])
+		}
+	}
+
+	nonStream := convertAntigravityResponseToGeminiNonStream(
+		context.Background(),
+		"gemini-3-flash",
+		original,
+		nil,
+		[]byte(response),
+		nil,
+	)
+	for _, path := range []string{
+		"candidates.0.content.parts.0.functionCall.name",
+		"candidates.0.content.parts.1.functionResponse.name",
+	} {
+		if got := gjson.GetBytes(nonStream, path).String(); got != clientName {
+			t.Fatalf("non-stream %s = %q, want %q; output=%s", path, got, clientName, nonStream)
+		}
+	}
+}

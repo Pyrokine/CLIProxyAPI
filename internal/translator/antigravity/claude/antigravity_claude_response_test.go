@@ -644,6 +644,50 @@ func TestConvertAntigravityResponseToClaudeNonStreamRestoresDisambiguatedName(t 
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeRestoresExternalToolNameChain(t *testing.T) {
+	const clientName = "external_external_read_file"
+	const upstreamName = "external_external_external_read_file"
+	original := []byte(`{"model":"gemini-3-flash","tools":[{
+		"name":"` + clientName + `","input_schema":{"type":"object"}
+	}]}`)
+	response := []byte(`{"response":{
+		"responseId":"response-id",
+		"modelVersion":"gemini-3-flash",
+		"candidates":[{"content":{"parts":[{
+			"functionCall":{"name":"` + upstreamName + `","args":{}}
+		}]}}]
+	}}`)
+
+	var param any
+	stream := bytes.Join(
+		convertAntigravityResponseToClaude(
+			context.Background(),
+			"gemini-3-flash",
+			original,
+			original,
+			response,
+			&param,
+		),
+		nil,
+	)
+	contentBlockStart := sseDataForEvent(t, string(stream), "content_block_start")
+	if got := gjson.Get(contentBlockStart, "content_block.name").String(); got != clientName {
+		t.Fatalf("stream tool name = %q, want %q; output=%s", got, clientName, stream)
+	}
+
+	nonStream := convertAntigravityResponseToClaudeNonStream(
+		context.Background(),
+		"gemini-3-flash",
+		original,
+		original,
+		response,
+		nil,
+	)
+	if got := gjson.GetBytes(nonStream, "content.0.name").String(); got != clientName {
+		t.Fatalf("non-stream tool name = %q, want %q; output=%s", got, clientName, nonStream)
+	}
+}
+
 func testEmptyAntigravityResponse() []byte {
 	return []byte(`{
 		"response": {
@@ -785,4 +829,106 @@ func testAntigravityGroundingResponse() []byte {
 	}
 	raw, _ := json.Marshal(resp)
 	return raw
+}
+
+func TestConvertAntigravityResponseToClaudeStreamEmptyTextKeepsThinkingBlockOpen(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	chunks := [][]byte{
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"thinking one","thought":true}]}}]}}`),
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":""}]}}]}}`),
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":" thinking two","thought":true}]}}]}}`),
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible"}]}}]}}`),
+		[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"thoughtsTokenCount":2,"totalTokenCount":13}}}`),
+		[]byte("[DONE]"),
+	}
+
+	var param any
+	var output []byte
+	for index, chunk := range chunks {
+		translated := bytes.Join(
+			convertAntigravityResponseToClaude(
+				context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, chunk, &param,
+			),
+			nil,
+		)
+		if index == 1 && strings.Contains(string(translated), "content_block_stop") {
+			t.Fatalf("empty text closed the thinking block: %s", translated)
+		}
+		output = append(output, translated...)
+	}
+
+	stream := string(output)
+	if got := strings.Count(stream, "event: content_block_start\n"); got != 2 {
+		t.Fatalf("content_block_start count = %d, want 2:\n%s", got, stream)
+	}
+	if got := strings.Count(stream, "event: content_block_stop\n"); got != 2 {
+		t.Fatalf("content_block_stop count = %d, want 2:\n%s", got, stream)
+	}
+	if !strings.Contains(stream, "thinking one") || !strings.Contains(stream, " thinking two") {
+		t.Fatalf("thinking deltas were not kept in one active block:\n%s", stream)
+	}
+	if !strings.Contains(stream, `"delta":{"type":"text_delta","text":"visible"}`) {
+		t.Fatalf("visible text delta missing:\n%s", stream)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStreamEmitsTerminalEventsExactlyOnce(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	responseJSON := []byte(`{
+		"response":{
+			"candidates":[{"content":{"parts":[{"text":"done"}]},"finishReason":"STOP"}],
+			"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":1,"totalTokenCount":11}
+		}
+	}`)
+
+	var param any
+	output := bytes.Join(
+		convertAntigravityResponseToClaude(
+			context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, responseJSON, &param,
+		),
+		nil,
+	)
+	lateContent := bytes.Join(
+		convertAntigravityResponseToClaude(
+			context.Background(),
+			"gemini-3-flash-agent",
+			requestJSON,
+			requestJSON,
+			[]byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"late"}]}}]}}`),
+			&param,
+		),
+		nil,
+	)
+	if len(lateContent) != 0 {
+		t.Fatalf("content after message_delta emitted data: %s", lateContent)
+	}
+	output = append(
+		output,
+		bytes.Join(
+			convertAntigravityResponseToClaude(
+				context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param,
+			),
+			nil,
+		)...,
+	)
+	secondDone := bytes.Join(
+		convertAntigravityResponseToClaude(
+			context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param,
+		),
+		nil,
+	)
+	if len(secondDone) != 0 {
+		t.Fatalf("repeated [DONE] emitted data: %s", secondDone)
+	}
+
+	stream := string(output)
+	if got := strings.Count(stream, "event: message_delta\n"); got != 1 {
+		t.Fatalf("message_delta count = %d, want 1:\n%s", got, stream)
+	}
+	if got := strings.Count(stream, "event: message_stop\n"); got != 1 {
+		t.Fatalf("message_stop count = %d, want 1:\n%s", got, stream)
+	}
+	if strings.Index(stream, "event: message_delta\n") >= strings.Index(stream, "event: message_stop\n") {
+		t.Fatalf("message_delta must precede message_stop:\n%s", stream)
+	}
 }

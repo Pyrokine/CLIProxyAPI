@@ -400,6 +400,127 @@ func TestConvertClaudeRequestToCodex_PreservesMixedRequestSemantics(t *testing.T
 	}
 }
 
+func TestConvertClaudeRequestToCodexOutputConfigFormat(t *testing.T) {
+	tests := []struct {
+		name       string
+		format     string
+		wantFormat bool
+		wantName   string
+		wantStrict bool
+	}{
+		{
+			name: "complete nested required schema remains strict",
+			format: `{"type":"json_schema","name":"answer","schema":{"$schema":"draft","$id":"root","type":"object","properties":{` +
+				`"answer":{"$id":"field","type":"string","pattern":"^\\p{L}+$"},` +
+				`"meta":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}` +
+				`},"required":["answer","meta"]}}`,
+			wantFormat: true,
+			wantName:   "answer",
+			wantStrict: true,
+		},
+		{
+			name: "nested missing required downgrades default strict",
+			format: `{"type":"json_schema","schema":{"type":"object","properties":{` +
+				`"answer":{"type":"string"},` +
+				`"meta":{"type":"object","properties":{"id":{"type":"string"}}}` +
+				`},"required":["answer","meta"]}}`,
+			wantFormat: true,
+			wantName:   "cli_proxy_structured_output",
+			wantStrict: false,
+		},
+		{
+			name:       "missing required downgrades default strict",
+			format:     `{"type":"json_schema","schema":{"type":"object","properties":{"answer":{"type":"string"}}}}`,
+			wantFormat: true,
+			wantName:   "cli_proxy_structured_output",
+			wantStrict: false,
+		},
+		{
+			name:       "explicit non-strict remains false",
+			format:     `{"type":"json_schema","strict":false,"schema":{"type":"object","properties":{}}}`,
+			wantFormat: true,
+			wantName:   "cli_proxy_structured_output",
+			wantStrict: false,
+		},
+		{name: "missing schema is ignored", format: `{"type":"json_schema","name":"answer"}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := []byte(`{"messages":[],"output_config":{"format":` + test.format + `}}`)
+			output := ConvertClaudeRequestToCodex("gpt-5.6", input, false)
+			format := gjson.GetBytes(output, "text.format")
+			if format.Exists() != test.wantFormat {
+				t.Fatalf("text.format exists = %v, want %v; output=%s", format.Exists(), test.wantFormat, output)
+			}
+			if !test.wantFormat {
+				return
+			}
+			if got := format.Get("name").String(); got != test.wantName {
+				t.Fatalf("name = %q, want %q; output=%s", got, test.wantName, output)
+			}
+			if strict := format.Get("strict"); !strict.Exists() || strict.Bool() != test.wantStrict {
+				t.Fatalf("strict = %s, want %v; output=%s", strict.Raw, test.wantStrict, output)
+			}
+			for _, path := range []string{
+				"schema.$schema",
+				"schema.$id",
+				"schema.properties.answer.$id",
+				"schema.properties.answer.pattern",
+			} {
+				if format.Get(path).Exists() {
+					t.Fatalf("%s should be removed: %s", path, output)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToCodexDoesNotInferReasoningSummary(t *testing.T) {
+	input := []byte(`{"messages":[],"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`)
+	output := ConvertClaudeRequestToCodex("gpt-5.6", input, false)
+	if got := gjson.GetBytes(output, "reasoning.effort").String(); got != "high" {
+		t.Fatalf("reasoning.effort = %q, want high; output=%s", got, output)
+	}
+	if summary := gjson.GetBytes(output, "reasoning.summary"); summary.Exists() {
+		t.Fatalf("reasoning.summary was inferred from effort: %s", output)
+	}
+}
+
+func TestConvertClaudeRequestToCodexNormalizesToolInputSchemas(t *testing.T) {
+	input := []byte(`{
+		"messages":[],
+		"tools":[
+			{"name":"default_schema"},
+			{"name":"normalized_schema","input_schema":{
+				"$schema":"draft-07",
+				"type":"object",
+				"properties":{"query":{"$id":"query","type":"string","pattern":"^\\P{N}+$"}}
+			}}
+		]
+	}`)
+
+	output := ConvertClaudeRequestToCodex("gpt-5.6", input, false)
+	parameters := gjson.GetBytes(output, "tools.0.parameters")
+	if parameters.Get("type").String() != "object" || !parameters.Get("properties").IsObject() {
+		t.Fatalf("default input_schema = %s, want object with properties; output=%s", parameters.Raw, output)
+	}
+	for _, path := range []string{
+		"tools.1.parameters.$schema",
+		"tools.1.parameters.properties.query.$id",
+		"tools.1.parameters.properties.query.pattern",
+	} {
+		if gjson.GetBytes(output, path).Exists() {
+			t.Fatalf("%s should be removed: %s", path, output)
+		}
+	}
+	for index := range 2 {
+		if strict := gjson.GetBytes(output, fmt.Sprintf("tools.%d.strict", index)); strict.Type != gjson.False {
+			t.Fatalf("tools.%d.strict = %s, want false; output=%s", index, strict.Raw, output)
+		}
+	}
+}
+
 func TestConvertClaudeRequestToCodexPreservesBase64PDFDocumentContent(t *testing.T) {
 	inputJSON := `{
 		"messages":[{

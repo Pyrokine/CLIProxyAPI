@@ -6,13 +6,12 @@
 package gemini
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
 	"strconv"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -63,22 +62,11 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		}
 	}
 
-	// helper for generating paired call IDs in the form: call_<alphanum>
-	// Gemini uses sequential pairing across possibly multiple in-flight
-	// functionCalls, so we keep a FIFO queue of generated call IDs and
-	// consume them in order when functionResponses arrive.
-	var pendingCallIDs []string
-
-	// genCallID creates a random call id like: call_<8chars>
-	genCallID := func() string {
-		const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-		var b strings.Builder
-		// 8 chars random suffix
-		for range 24 {
-			n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-			b.WriteByte(letters[n.Int64()])
-		}
-		return "call_" + b.String()
+	var toolCalls translatorcommon.GeminiToolCallQueue
+	toolCallCounter := 0
+	newToolCallID := func() string {
+		toolCallCounter++
+		return fmt.Sprintf("call_gemini_%016d", toolCallCounter)
 	}
 
 	// Model
@@ -94,6 +82,9 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		arr := sysParts.Array()
 		for i := range arr {
 			p := arr[i]
+			if translatorcommon.IsGeminiThoughtPart(p) {
+				continue
+			}
 			if t := p.Get("text"); t.Exists() {
 				part := []byte(`{}`)
 				part, _ = sjson.SetBytes(part, "type", "input_text")
@@ -124,11 +115,12 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			parr := parts.Array()
 			for j := range parr {
 				p := parr[j]
+				if translatorcommon.IsGeminiThoughtPart(p) {
+					continue
+				}
+
 				// text part
 				if t := p.Get("text"); t.Exists() {
-					if p.Get("thought").Bool() || p.Get("thoughtSignature").Exists() {
-						continue
-					}
 					msg := []byte(`{"type":"message","role":"","content":[]}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
 					partType := "input_text"
@@ -146,24 +138,23 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 				// function call from model
 				if fc := p.Get("functionCall"); fc.Exists() {
 					fn := []byte(`{"type":"function_call"}`)
-					if name := fc.Get("name"); name.Exists() {
-						n := name.String()
-						if short, ok := shortMap[n]; ok {
-							n = short
-						} else {
-							n = shortenNameIfNeeded(n)
-						}
-						fn, _ = sjson.SetBytes(fn, "name", n)
+					functionName := fc.Get("name").String()
+					providerName := functionName
+					if short, ok := shortMap[providerName]; ok {
+						providerName = short
+					} else {
+						providerName = shortenNameIfNeeded(providerName)
 					}
+					fn, _ = sjson.SetBytes(fn, "name", providerName)
 					if args := fc.Get("args"); args.Exists() {
 						fn, _ = sjson.SetBytes(fn, "arguments", args.Raw)
 					}
-					// generate a paired random call_id and enqueue it so the
-					// corresponding functionResponse can pop the earliest id
-					// to preserve ordering when multiple calls are present.
-					id := genCallID()
+					id := translatorcommon.GeminiToolCallID(fc)
+					if id == "" {
+						id = newToolCallID()
+					}
+					toolCalls.Add(functionName, id)
 					fn, _ = sjson.SetBytes(fn, "call_id", id)
-					pendingCallIDs = append(pendingCallIDs, id)
 					out, _ = sjson.SetRawBytes(out, "input.-1", fn)
 					continue
 				}
@@ -177,16 +168,10 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					} else if resp := fr.Get("response"); resp.Exists() {
 						fno, _ = sjson.SetBytes(fno, "output", resp.Raw)
 					}
-					// fno, _ = sjson.SetBytes(fno, "call_id", "call_W6nRJzFXyPM2LFBbfo98qAbq")
-					// attach the oldest queued call_id to pair the response
-					// with its call. If the queue is empty, generate a new id.
-					var id string
-					if len(pendingCallIDs) > 0 {
-						id = pendingCallIDs[0]
-						// pop the first element
-						pendingCallIDs = pendingCallIDs[1:]
-					} else {
-						id = genCallID()
+					functionName := fr.Get("name").String()
+					id := toolCalls.Match(functionName, translatorcommon.GeminiToolCallID(fr))
+					if id == "" {
+						id = newToolCallID()
 					}
 					fno, _ = sjson.SetBytes(fno, "call_id", id)
 					out, _ = sjson.SetRawBytes(out, "input.-1", fno)

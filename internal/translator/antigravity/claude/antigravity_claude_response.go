@@ -54,6 +54,7 @@ type params struct {
 	TotalTokenCount      int64             // Cached total token count from usage metadata
 	CachedTokenCount     int64             // Cached content token count (indicates prompt caching)
 	HasSentFinalEvents   bool              // Indicates if final content/message events have been sent
+	HasSentMessageStop   bool              // Indicates if the terminal message_stop event has been sent
 	HasToolUse           bool              // Indicates if tool use was observed in the stream
 	HasContent           bool              // Tracks whether any content (text, thinking, or tool use) has been output
 	ToolNameMap          map[string]string // Maps provider-facing names back to client-facing names.
@@ -83,6 +84,11 @@ func antigravityClaudeToolUseID(modelName string, functionCall gjson.Result, fal
 		}
 	}
 	return util.SanitizeClaudeToolID(fallback)
+}
+
+func restoreClaudeFunctionNameFromAntigravity(toolNameMap map[string]string, name string) string {
+	name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
+	return util.RestoreSanitizedToolName(toolNameMap, name)
 }
 
 // convertAntigravityResponseToClaude performs sophisticated streaming response format conversion.
@@ -118,6 +124,10 @@ func convertAntigravityResponseToClaude(
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
 
 	params := (*param).(*params)
+	if params.HasSentMessageStop ||
+		(params.HasSentFinalEvents && !bytes.Equal(rawJSON, []byte("[DONE]"))) {
+		return [][]byte{}
+	}
 
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
 		output := make([]byte, 0, 256)
@@ -137,6 +147,7 @@ func convertAntigravityResponseToClaude(
 		if params.HasContent {
 			appendFinalEvents(params, &output, true)
 			output = translatorcommon.AppendSSEEventString(output, "message_stop", `{"type":"message_stop"}`, 3)
+			params.HasSentMessageStop = true
 			return [][]byte{output}
 		}
 		return [][]byte{}
@@ -379,42 +390,37 @@ func convertAntigravityResponseToClaude(
 							geminiClaudeCarrierText,
 						)
 					}
-					finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason")
-					if partText != "" || !finishReasonResult.Exists() {
-						if params.ResponseType == 1 {
-							data, _ := sjson.SetBytes(
-								[]byte(fmt.Sprintf(
-									`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`,
-									params.ResponseIndex,
-								)),
-								"delta.text",
-								partText,
-							)
-							appendEvent("content_block_delta", string(data))
-							params.HasContent = true
-						} else {
-							closeCurrentBlock()
-							if partText != "" {
-								appendEvent(
-									"content_block_start",
-									fmt.Sprintf(
-										`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`,
-										params.ResponseIndex,
-									),
-								)
-								data, _ := sjson.SetBytes(
-									[]byte(fmt.Sprintf(
-										`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`,
-										params.ResponseIndex,
-									)),
-									"delta.text",
-									partText,
-								)
-								appendEvent("content_block_delta", string(data))
-								params.ResponseType = 1
-								params.HasContent = true
-							}
-						}
+					if params.ResponseType == 1 {
+						data, _ := sjson.SetBytes(
+							[]byte(fmt.Sprintf(
+								`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`,
+								params.ResponseIndex,
+							)),
+							"delta.text",
+							partText,
+						)
+						appendEvent("content_block_delta", string(data))
+						params.HasContent = true
+					} else if partText != "" {
+						closeCurrentBlock()
+						appendEvent(
+							"content_block_start",
+							fmt.Sprintf(
+								`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`,
+								params.ResponseIndex,
+							),
+						)
+						data, _ := sjson.SetBytes(
+							[]byte(fmt.Sprintf(
+								`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`,
+								params.ResponseIndex,
+							)),
+							"delta.text",
+							partText,
+						)
+						appendEvent("content_block_delta", string(data))
+						params.ResponseType = 1
+						params.HasContent = true
 					}
 					if partText != "" {
 						params.HasSemanticContent = true
@@ -434,7 +440,7 @@ func convertAntigravityResponseToClaude(
 					)
 				}
 				params.HasToolUse = true
-				fcName := util.RestoreSanitizedToolName(
+				fcName := restoreClaudeFunctionNameFromAntigravity(
 					params.ToolNameMap,
 					functionCallResult.Get("name").String(),
 				)
@@ -767,7 +773,7 @@ func convertAntigravityResponseToClaudeNonStream(
 				flushText()
 				hasToolCall = true
 
-				name := util.RestoreSanitizedToolName(toolNameMap, functionCall.Get("name").String())
+				name := restoreClaudeFunctionNameFromAntigravity(toolNameMap, functionCall.Get("name").String())
 				toolIDCounter++
 				if !isClaudeTarget && rawSignature != "" && !signatureAttachedToThought {
 					appendSignatureCarrier(

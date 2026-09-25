@@ -7,13 +7,13 @@ package claude
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
+	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -44,7 +44,7 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, stream b
 }
 
 // ConvertClaudeRequestToCodexWithCompat preserves assistant thinking blocks with
-// empty signatures for configured compatibility endpoints.
+// empty or unknown-format signatures for configured compatibility endpoints.
 func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte, stream bool) []byte {
 	return convertClaudeRequestToCodex(modelName, inputRawJSON, stream, true)
 }
@@ -53,7 +53,7 @@ func convertClaudeRequestToCodex(
 	modelName string,
 	inputRawJSON []byte,
 	_ bool,
-	preserveEmptyThinkingBlocks bool,
+	preserveCompatThinkingBlocks bool,
 ) []byte {
 	rootResult := gjson.ParseBytes(inputRawJSON)
 	inputItems := translatorcommon.NewRawArrayItems(rootResult.Get("messages.#").Int())
@@ -174,15 +174,32 @@ func convertClaudeRequestToCodex(
 					return
 				}
 
-				signature := part.Get("signature").String()
-				if !isFernetLikeReasoningSignature(signature) &&
-					!(preserveEmptyThinkingBlocks && strings.TrimSpace(signature) == "") {
+				signatureValue := part.Get("signature")
+				rawSignature := signatureValue.String()
+				options := sigcompat.SignatureCompatibilityOptions{}
+				if preserveCompatThinkingBlocks {
+					options.PreserveUnknownNonEmpty = true
+				}
+				replaySignature, ok := "", false
+				if signatureValue.Type == gjson.String {
+					replaySignature, ok = sigcompat.CompatibleSignatureForProviderWithOptions(
+						sigcompat.ProviderGPT,
+						rawSignature,
+						sigcompat.BlockKindClaudeThinking,
+						options,
+					)
+				}
+				if !ok && preserveCompatThinkingBlocks && strings.TrimSpace(rawSignature) == "" {
+					replaySignature = rawSignature
+					ok = true
+				}
+				if !ok {
 					return
 				}
 
 				flushMessage()
 				reasoningItem := []byte(`{"type":"reasoning","summary":[],"content":null}`)
-				reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", signature)
+				reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", replaySignature)
 				inputItems = append(inputItems, reasoningItem)
 			}
 
@@ -417,8 +434,9 @@ func convertClaudeRequestToCodex(
 	if speed := rootResult.Get("speed"); speed.Type == gjson.String && speed.String() == "fast" {
 		serviceTier = "priority"
 	}
+	textFormat := mapClaudeOutputFormatToCodex(rootResult.Get("output_config.format"))
 
-	capacity := len(modelName) + len(reasoningEffort) + len(serviceTier) + 216
+	capacity := len(modelName) + len(reasoningEffort) + len(serviceTier) + len(textFormat) + 240
 	for i := 0; i < len(inputItems); i++ {
 		capacity += len(inputItems[i]) + 1
 	}
@@ -450,13 +468,47 @@ func convertClaudeRequestToCodex(
 	output = strconv.AppendBool(output, parallelToolCalls)
 	output = append(output, `,"reasoning":{"effort":`...)
 	output = appendJSONString(output, reasoningEffort)
-	output = append(output, `,"summary":"auto"}`...)
+	output = append(output, '}')
+	if len(textFormat) > 0 {
+		output = append(output, `,"text":{"format":`...)
+		output = append(output, textFormat...)
+		output = append(output, '}')
+	}
 	if serviceTier != "" {
 		output = append(output, `,"service_tier":`...)
 		output = appendJSONString(output, serviceTier)
 	}
 	output = append(output, `,"stream":true,"store":false,"include":["reasoning.encrypted_content"]}`...)
 	return output
+}
+
+func mapClaudeOutputFormatToCodex(format gjson.Result) []byte {
+	if !format.IsObject() || format.Get("type").String() != "json_schema" {
+		return nil
+	}
+	schema := format.Get("schema")
+	if !schema.IsObject() {
+		return nil
+	}
+
+	normalizedSchema := util.NormalizeClaudeSchemaDialect([]byte(schema.Raw))
+	name := strings.TrimSpace(format.Get("name").String())
+	if name == "" {
+		name = "cli_proxy_structured_output"
+	}
+	strict := true
+	if value := format.Get("strict"); value.Exists() && value.Type == gjson.False {
+		strict = false
+	}
+	if strict && util.ClaudeSchemaMissesRequired(normalizedSchema) {
+		strict = false
+	}
+
+	translated := []byte(`{"type":"json_schema","name":"","strict":true,"schema":{}}`)
+	translated, _ = sjson.SetBytes(translated, "name", name)
+	translated, _ = sjson.SetBytes(translated, "strict", strict)
+	translated, _ = sjson.SetRawBytes(translated, "schema", normalizedSchema)
+	return translated
 }
 
 func normalizeCodexServiceTier(result gjson.Result) string {
@@ -478,37 +530,6 @@ func appendJSONString(dst []byte, value string) []byte {
 		panic(err)
 	}
 	return append(dst, encoded...)
-}
-
-func isFernetLikeReasoningSignature(signature string) bool {
-	const (
-		fernetVersionLen = 1
-		fernetTimestamp  = 8
-		fernetIV         = 16
-		fernetHMAC       = 32
-		aesBlockSize     = 16
-	)
-
-	signature = strings.TrimSpace(signature)
-	if !strings.HasPrefix(signature, "gAAAA") {
-		return false
-	}
-
-	decoded, err := base64.URLEncoding.DecodeString(signature)
-	if err != nil {
-		decoded, err = base64.RawURLEncoding.DecodeString(signature)
-		if err != nil {
-			return false
-		}
-	}
-
-	minLen := fernetVersionLen + fernetTimestamp + fernetIV + aesBlockSize + fernetHMAC
-	if len(decoded) < minLen || decoded[0] != 0x80 {
-		return false
-	}
-
-	ciphertextLen := len(decoded) - fernetVersionLen - fernetTimestamp - fernetIV - fernetHMAC
-	return ciphertextLen > 0 && ciphertextLen%aesBlockSize == 0
 }
 
 func shortenCodexCallIDIfNeeded(id string) string {
@@ -596,21 +617,12 @@ func buildShortNameMap(names []string) map[string]string {
 	return m
 }
 
-// normalizeToolParameters ensures object schemas contain at least an empty properties map.
+// normalizeToolParameters returns an object input schema accepted by Codex and
+// removes schema dialect metadata and unsupported Unicode property escapes.
 func normalizeToolParameters(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "null" || !gjson.Valid(raw) {
 		return `{"type":"object","properties":{}}`
 	}
-	result := gjson.Parse(raw)
-	schema := []byte(raw)
-	schemaType := result.Get("type").String()
-	if schemaType == "" {
-		schema, _ = sjson.SetBytes(schema, "type", "object")
-		schemaType = "object"
-	}
-	if schemaType == "object" && !result.Get("properties").Exists() {
-		schema, _ = sjson.SetRawBytes(schema, "properties", []byte(`{}`))
-	}
-	return string(schema)
+	return string(util.NormalizeClaudeToolInputSchema([]byte(raw)))
 }

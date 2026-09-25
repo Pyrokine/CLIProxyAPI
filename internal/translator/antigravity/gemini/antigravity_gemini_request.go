@@ -64,6 +64,8 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "request.system_instruction")
 	}
 
+	rawJSON = normalizeGeminiGenerationConfigResponseSchema(rawJSON)
+
 	// Normalize roles in request.contents: default to valid values if missing/invalid.
 	// The contents array is only materialized when a role actually changes; copying
 	// every content up front duplicates the whole payload for large inline data.
@@ -76,7 +78,9 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				role := value.Get("role").String()
 				content := []byte(value.Raw)
 				if role != "user" && role != "model" {
-					if previousRole == "" || previousRole == "model" {
+					if translatorcommon.ContentHasGeminiFunctionResponse(content) {
+						role = "user"
+					} else if previousRole == "" || previousRole == "model" {
 						role = "user"
 					} else {
 						role = "model"
@@ -116,7 +120,7 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						func(_, declaration gjson.Result) bool {
 							nameResult := declaration.Get("name")
 							originalName := nameResult.String()
-							mappedName := util.MapSanitizedFunctionName(functionNameMap, originalName)
+							mappedName := mapGeminiFunctionNameToAntigravity(functionNameMap, originalName)
 							if mappedName != "" {
 								if _, exists := seenFunctionNames[mappedName]; exists {
 									declarationsChanged = true
@@ -180,6 +184,48 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings")
 }
 
+func normalizeGeminiGenerationConfigResponseSchema(rawJSON []byte) []byte {
+	containers := []string{"request.generationConfig", "request.generation_config"}
+	schemaKeys := []string{"responseSchema", "responseJsonSchema", "response_json_schema", "response_schema"}
+
+	selectedContainer := ""
+	selectedSchema := gjson.Result{}
+	for _, container := range containers {
+		if !util.GetGJSONBytesNoCopy(rawJSON, container).Exists() {
+			continue
+		}
+		for _, schemaKey := range schemaKeys {
+			if schema := util.GetGJSONBytesNoCopy(rawJSON, container+"."+schemaKey); schema.Exists() {
+				selectedContainer = container
+				selectedSchema = schema
+				break
+			}
+		}
+		if selectedSchema.Exists() {
+			break
+		}
+	}
+	if !selectedSchema.Exists() {
+		return rawJSON
+	}
+
+	targetContainer := selectedContainer
+	if util.GetGJSONBytesNoCopy(rawJSON, containers[0]).Exists() {
+		targetContainer = containers[0]
+	}
+	cleanedSchema := util.CleanJSONSchemaForAntigravityResponse(selectedSchema.Raw)
+	rawJSON, _ = sjson.SetRawBytes(rawJSON, targetContainer+".responseSchema", []byte(cleanedSchema))
+	for _, container := range containers {
+		for _, schemaKey := range schemaKeys {
+			path := container + "." + schemaKey
+			if path != targetContainer+".responseSchema" {
+				rawJSON, _ = sjson.DeleteBytes(rawJSON, path)
+			}
+		}
+	}
+	return rawJSON
+}
+
 func geminiContentRolesNeedNormalization(contents gjson.Result) bool {
 	needsNormalization := false
 	contents.ForEach(
@@ -241,6 +287,12 @@ var geminiFunctionNameFields = []string{
 	"function_response",
 }
 
+func mapGeminiFunctionNameToAntigravity(functionNameMap map[string]string, name string) string {
+	return translatorcommon.AntigravityToolNameToUpstream(
+		util.MapSanitizedFunctionName(functionNameMap, name),
+	)
+}
+
 func geminiFunctionNamesNeedRewrite(contents gjson.Result, functionNameMap map[string]string) bool {
 	needsRewrite := false
 	contents.ForEach(
@@ -253,7 +305,7 @@ func geminiFunctionNamesNeedRewrite(contents gjson.Result, functionNameMap map[s
 						if name == "" {
 							continue
 						}
-						if nameResult.Type == gjson.String && util.MapSanitizedFunctionName(
+						if nameResult.Type == gjson.String && mapGeminiFunctionNameToAntigravity(
 							functionNameMap, name,
 						) == name {
 							continue
@@ -301,7 +353,7 @@ func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]strin
 							if name == "" {
 								continue
 							}
-							mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+							mappedName := mapGeminiFunctionNameToAntigravity(functionNameMap, name)
 							if nameResult.Type == gjson.String && mappedName == name {
 								continue
 							}
@@ -337,7 +389,7 @@ func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]strin
 					if name == "" {
 						continue
 					}
-					mappedName := util.MapSanitizedFunctionName(functionNameMap, name)
+					mappedName := mapGeminiFunctionNameToAntigravity(functionNameMap, name)
 					if nameResult.Type == gjson.String && mappedName == name {
 						continue
 					}
@@ -365,7 +417,7 @@ func rewriteGeminiFunctionNames(rawJSON []byte, functionNameMap map[string]strin
 		nameItems := make([][]byte, 0, len(allowedNames.Array()))
 		allowedNames.ForEach(
 			func(_, name gjson.Result) bool {
-				mappedName := util.MapSanitizedFunctionName(functionNameMap, name.String())
+				mappedName := mapGeminiFunctionNameToAntigravity(functionNameMap, name.String())
 				namesChanged = namesChanged || name.Type != gjson.String || mappedName != name.String()
 				mappedNameJSON, _ := json.Marshal(mappedName)
 				nameItems = append(nameItems, mappedNameJSON)
@@ -552,6 +604,119 @@ type functionCallGroup struct {
 	CallNames       []string // ordered function call names for backfilling empty response names
 }
 
+func normalizeAntigravityInlineDataPart(part gjson.Result) ([]byte, bool) {
+	inlineData := part.Get("inlineData")
+	if !inlineData.Exists() {
+		inlineData = part.Get("inline_data")
+	}
+	if !inlineData.Exists() {
+		return nil, false
+	}
+	data := inlineData.Get("data").String()
+	if data == "" {
+		return nil, false
+	}
+	mimeType := inlineData.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = inlineData.Get("mime_type").String()
+	}
+	if mimeType == "" {
+		mimeType = "image/png"
+	}
+	out := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
+	out, _ = sjson.SetBytes(out, "inlineData.mimeType", mimeType)
+	out, _ = sjson.SetBytes(out, "inlineData.data", data)
+	return out, true
+}
+
+func attachInlineDataToFunctionResponse(response gjson.Result, images [][]byte) gjson.Result {
+	if len(images) == 0 {
+		return response
+	}
+	target := []byte(response.Raw)
+	for _, image := range images {
+		target, _ = sjson.SetRawBytes(target, "functionResponse.parts.-1", image)
+	}
+	return gjson.ParseBytes(target)
+}
+
+func collectFunctionResponsesWithSiblingInlineData(parts gjson.Result) []gjson.Result {
+	responses := make([]gjson.Result, 0)
+	leadingImages := make([][]byte, 0)
+	currentResponse := -1
+	parts.ForEach(
+		func(_, part gjson.Result) bool {
+			if part.Get("functionResponse").Exists() {
+				responses = append(responses, part)
+				currentResponse = len(responses) - 1
+				if len(leadingImages) > 0 {
+					responses[currentResponse] = attachInlineDataToFunctionResponse(
+						responses[currentResponse], leadingImages,
+					)
+					leadingImages = nil
+				}
+				return true
+			}
+			image, ok := normalizeAntigravityInlineDataPart(part)
+			if !ok {
+				return true
+			}
+			if currentResponse >= 0 {
+				responses[currentResponse] = attachInlineDataToFunctionResponse(
+					responses[currentResponse], [][]byte{image},
+				)
+				return true
+			}
+			leadingImages = append(leadingImages, image)
+			return true
+		},
+	)
+	return responses
+}
+
+func normalizeFunctionResponseContentParts(parts gjson.Result) ([][]byte, int) {
+	responses := collectFunctionResponsesWithSiblingInlineData(parts)
+	if len(responses) == 0 {
+		return nil, 0
+	}
+
+	partItems := make([][]byte, 0, len(parts.Array()))
+	responseIndex := 0
+	parts.ForEach(
+		func(_, part gjson.Result) bool {
+			if part.Get("functionResponse").Exists() {
+				partItems = append(partItems, []byte(responses[responseIndex].Raw))
+				responseIndex++
+				return true
+			}
+			if _, consumed := normalizeAntigravityInlineDataPart(part); consumed {
+				return true
+			}
+			partItems = append(partItems, []byte(part.Raw))
+			return true
+		},
+	)
+	return translatorcommon.ReorderGeminiUserParts(partItems), len(responses)
+}
+
+func takeFunctionResponseGroup(parts [][]byte, responseCount int) (group, remaining [][]byte, ok bool) {
+	seenResponses := 0
+	cut := 0
+	for cut < len(parts) {
+		if gjson.GetBytes(parts[cut], "functionResponse").Exists() {
+			seenResponses++
+		}
+		cut++
+		if seenResponses == responseCount {
+			for cut < len(parts) && !gjson.GetBytes(parts[cut], "functionResponse").Exists() {
+				cut++
+			}
+			return parts[:cut], parts[cut:], true
+		}
+	}
+	return nil, parts, false
+}
+
 // parseFunctionResponseRaw attempts to normalize a function response part into a JSON object string.
 // Falls back to a minimal "functionResponse" object when parsing fails.
 // fallbackName is used when the response's own name is empty.
@@ -639,15 +804,28 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 
 	contentItems := translatorcommon.NewRawArrayItems(contents.Get("#").Int())
 	var pendingGroups []*functionCallGroup
-	var collectedResponses []gjson.Result
-	appendFunctionResponses := func(responses []gjson.Result, callNames []string) {
-		partItems := make([][]byte, 0, len(responses))
-		for responseIndex, response := range responses {
-			partRaw := parseFunctionResponseRaw(response, callNames[responseIndex])
+	var collectedParts [][]byte
+	collectedResponseCount := 0
+	appendFunctionResponses := func(parts [][]byte, callNames []string) {
+		partItems := make([][]byte, 0, len(parts))
+		responseIndex := 0
+		for _, part := range parts {
+			response := gjson.ParseBytes(part)
+			if !response.Get("functionResponse").Exists() {
+				partItems = append(partItems, part)
+				continue
+			}
+			fallbackName := ""
+			if responseIndex < len(callNames) {
+				fallbackName = callNames[responseIndex]
+			}
+			partRaw := parseFunctionResponseRaw(response, fallbackName)
 			if partRaw != "" {
 				partItems = append(partItems, []byte(partRaw))
 			}
+			responseIndex++
 		}
+		partItems = translatorcommon.ReorderGeminiUserParts(partItems)
 		if len(partItems) > 0 {
 			functionResponseContent := []byte(`{"parts":[],"role":"function"}`)
 			functionResponseContent, _ = sjson.SetRawBytes(
@@ -658,30 +836,34 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 			contentItems = append(contentItems, functionResponseContent)
 		}
 	}
+	flushReadyGroups := func() {
+		for len(pendingGroups) > 0 && collectedResponseCount >= pendingGroups[0].ResponsesNeeded {
+			group := pendingGroups[0]
+			groupParts, remaining, ok := takeFunctionResponseGroup(collectedParts, group.ResponsesNeeded)
+			if !ok {
+				return
+			}
+			pendingGroups = pendingGroups[1:]
+			collectedParts = remaining
+			collectedResponseCount -= group.ResponsesNeeded
+			appendFunctionResponses(groupParts, group.CallNames)
+		}
+	}
 
 	contents.ForEach(
 		func(_, value gjson.Result) bool {
 			role := value.Get("role").String()
 			parts := value.Get("parts")
 
-			var responsePartsInThisContent []gjson.Result
-			parts.ForEach(
-				func(_, part gjson.Result) bool {
-					if part.Get("functionResponse").Exists() {
-						responsePartsInThisContent = append(responsePartsInThisContent, part)
-					}
-					return true
-				},
-			)
-
-			if len(responsePartsInThisContent) > 0 {
-				collectedResponses = append(collectedResponses, responsePartsInThisContent...)
-				for len(pendingGroups) > 0 && len(collectedResponses) >= pendingGroups[0].ResponsesNeeded {
-					group := pendingGroups[0]
-					pendingGroups = pendingGroups[1:]
-					groupResponses := collectedResponses[:group.ResponsesNeeded]
-					collectedResponses = collectedResponses[group.ResponsesNeeded:]
-					appendFunctionResponses(groupResponses, group.CallNames)
+			responsePartsInThisContent, responseCount := normalizeFunctionResponseContentParts(parts)
+			if responseCount > 0 {
+				collectedParts = append(collectedParts, responsePartsInThisContent...)
+				collectedResponseCount += responseCount
+				flushReadyGroups()
+				if len(pendingGroups) == 0 && collectedResponseCount > 0 {
+					appendFunctionResponses(collectedParts, nil)
+					collectedParts = nil
+					collectedResponseCount = 0
 				}
 				return true
 			}
@@ -720,12 +902,9 @@ func fixCLIToolResponse(input []byte) ([]byte, error) {
 		},
 	)
 
-	for _, group := range pendingGroups {
-		if len(collectedResponses) >= group.ResponsesNeeded {
-			groupResponses := collectedResponses[:group.ResponsesNeeded]
-			collectedResponses = collectedResponses[group.ResponsesNeeded:]
-			appendFunctionResponses(groupResponses, group.CallNames)
-		}
+	flushReadyGroups()
+	if len(collectedParts) > 0 {
+		appendFunctionResponses(collectedParts, nil)
 	}
 
 	result, _ := sjson.SetRawBytes(

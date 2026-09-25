@@ -15,6 +15,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	geminichat "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -32,6 +33,11 @@ type convertCliResponseToOpenAIChatParams struct {
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
 var functionCallIDCounter atomic.Uint64
+
+func restoreOpenAIFunctionNameFromAntigravity(toolNameMap map[string]string, name string) string {
+	name = translatorcommon.AntigravityUpstreamToolNameToClient(name)
+	return util.RestoreSanitizedToolName(toolNameMap, name)
+}
 
 // convertAntigravityResponseToOpenAI translates a single chunk of a streaming response from the
 // Gemini CLI API format to the OpenAI Chat Completions streaming format.
@@ -137,6 +143,9 @@ func convertAntigravityResponseToOpenAI(
 		for i := range partResults {
 			partResult := partResults[i]
 			partTextResult := partResult.Get("text")
+			if !partTextResult.Exists() {
+				partTextResult = partResult.Get("audioTranscription.text")
+			}
 			functionCallResult := partResult.Get("functionCall")
 			thoughtSignatureResult := partResult.Get("thoughtSignature")
 			if !thoughtSignatureResult.Exists() {
@@ -160,9 +169,13 @@ func convertAntigravityResponseToOpenAI(
 
 				// Handle text content, distinguishing between regular content and reasoning/thoughts.
 				if partResult.Get("thought").Bool() {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", textContent)
+					current := gjson.GetBytes(template, "choices.0.delta.reasoning_content").String()
+					template, _ = sjson.SetBytes(
+						template, "choices.0.delta.reasoning_content", current+textContent,
+					)
 				} else {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)
+					current := gjson.GetBytes(template, "choices.0.delta.content").String()
+					template, _ = sjson.SetBytes(template, "choices.0.delta.content", current+textContent)
 				}
 				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
@@ -178,7 +191,7 @@ func convertAntigravityResponseToOpenAI(
 				}
 
 				functionCallTemplate := []byte(`{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`)
-				fcName := util.RestoreSanitizedToolName(
+				fcName := restoreOpenAIFunctionNameFromAntigravity(
 					(*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap,
 					functionCallResult.Get("name").String(),
 				)
@@ -285,9 +298,6 @@ func convertAntigravityResponseToOpenAINonStream(
 
 func restoreAntigravityOpenAIFunctionNames(rawJSON, originalRequestRawJSON []byte) []byte {
 	nameMap := util.DisambiguatedToolNameMap(originalRequestRawJSON)
-	if len(nameMap) == 0 {
-		return rawJSON
-	}
 	for candidateIndex, candidate := range gjson.GetBytes(rawJSON, "candidates").Array() {
 		for partIndex, part := range candidate.Get("content.parts").Array() {
 			for _, field := range []string{"functionCall", "functionResponse"} {
@@ -296,7 +306,7 @@ func restoreAntigravityOpenAIFunctionNames(rawJSON, originalRequestRawJSON []byt
 				if name == "" {
 					continue
 				}
-				restoredName := util.RestoreSanitizedToolName(nameMap, name)
+				restoredName := restoreOpenAIFunctionNameFromAntigravity(nameMap, name)
 				if nameResult.Type == gjson.String && restoredName == name {
 					continue
 				}

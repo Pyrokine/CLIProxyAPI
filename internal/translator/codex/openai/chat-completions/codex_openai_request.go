@@ -434,6 +434,8 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					}
 					if value := function.Get("strict"); value.Exists() {
 						item, _ = sjson.SetBytes(item, "strict", value.Value())
+					} else {
+						item, _ = sjson.SetBytes(item, "strict", false)
 					}
 				}
 				out, _ = sjson.SetRawBytes(out, "tools.-1", item)

@@ -1,6 +1,8 @@
 package responses
 
 import (
+	"bytes"
+
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -41,7 +43,13 @@ func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool)
 		rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
 	}
 
-	rawJSON = deleteCodexRequestFields(rawJSON, "truncation")
+	rawJSON = deleteCodexRequestFields(
+		rawJSON,
+		"truncation",
+		"prompt_cache_options",
+		"prompt_cache_retention",
+	)
+	rawJSON = stripCodexResponsesCacheBreakpoints(rawJSON)
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
 	// Delete the user field as it is not supported by the Codex upstream.
@@ -99,6 +107,64 @@ func deleteCodexRequestFields(rawJSON []byte, paths ...string) []byte {
 		}
 	}
 	return rawJSON
+}
+
+// stripCodexResponsesCacheBreakpoints removes unsupported cache hints from
+// individual Responses content parts.
+func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
+	if !bytes.Contains(rawJSON, []byte(`"prompt_cache_breakpoint"`)) {
+		return rawJSON
+	}
+
+	input := util.GetGJSONBytesNoCopy(rawJSON, "input")
+	if !input.IsArray() {
+		return rawJSON
+	}
+
+	changed := false
+	inputItems := make([][]byte, 0, len(input.Array()))
+	for _, item := range input.Array() {
+		itemRaw := []byte(item.Raw)
+		content := item.Get("content")
+		if content.IsArray() {
+			parts := make([][]byte, 0, len(content.Array()))
+			contentChanged := false
+			for _, part := range content.Array() {
+				partRaw := []byte(part.Raw)
+				if part.Get("prompt_cache_breakpoint").Exists() {
+					if updated, err := sjson.DeleteBytes(partRaw, "prompt_cache_breakpoint"); err == nil {
+						partRaw = updated
+						contentChanged = true
+					}
+				}
+				parts = append(parts, partRaw)
+			}
+			if contentChanged {
+				if updated, err := sjson.SetRawBytes(
+					itemRaw,
+					"content",
+					translatorcommon.JoinRawArray(parts),
+				); err == nil {
+					itemRaw = updated
+					changed = true
+				}
+			}
+		}
+		inputItems = append(inputItems, itemRaw)
+	}
+	if !changed {
+		return rawJSON
+	}
+
+	updated, err := sjson.SetRawBytes(
+		rawJSON,
+		"input",
+		translatorcommon.JoinRawArray(inputItems),
+	)
+	if err != nil {
+		return rawJSON
+	}
+	return updated
 }
 
 // applyResponsesCompactionCompatibility handles OpenAI Responses context_management.compaction

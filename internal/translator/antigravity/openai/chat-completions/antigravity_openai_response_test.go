@@ -191,3 +191,76 @@ func TestConvertAntigravityResponseToOpenAINonStreamRestoresDisambiguatedName(t 
 		t.Fatalf("function.name = %q, want %q. Output: %s", got, second, output)
 	}
 }
+
+func TestConvertAntigravityResponseToOpenAIRestoresExternalToolNameChain(t *testing.T) {
+	const clientName = "external_external_read_file"
+	const upstreamName = "external_external_external_read_file"
+	original := []byte(`{"tools":[{"type":"function","function":{"name":"` + clientName + `"}}]}`)
+	response := []byte(`{"response":{"candidates":[{"content":{"parts":[{
+		"functionCall":{"name":"` + upstreamName + `","args":{}}
+	}]}}]}}`)
+
+	var param any
+	stream := convertAntigravityResponseToOpenAI(
+		context.Background(),
+		"gemini-3-flash",
+		original,
+		nil,
+		response,
+		&param,
+	)
+	if len(stream) != 1 {
+		t.Fatalf("stream output count = %d, want 1", len(stream))
+	}
+	if got := gjson.GetBytes(stream[0], "choices.0.delta.tool_calls.0.function.name").String(); got != clientName {
+		t.Fatalf("stream function.name = %q, want %q; output=%s", got, clientName, stream[0])
+	}
+
+	nonStream := convertAntigravityResponseToOpenAINonStream(
+		context.Background(),
+		"gemini-3-flash",
+		original,
+		nil,
+		response,
+		nil,
+	)
+	if got := gjson.GetBytes(nonStream, "choices.0.message.tool_calls.0.function.name").String(); got != clientName {
+		t.Fatalf("non-stream function.name = %q, want %q; output=%s", got, clientName, nonStream)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAIPreservesAudioTranscriptionOrder(t *testing.T) {
+	response := []byte(`{"response":{"candidates":[{"content":{"parts":[
+		{"text":"first "},
+		{"audioTranscription":{"text":"second "}},
+		{"text":"third"}
+	]}}]}}`)
+
+	var param any
+	stream := convertAntigravityResponseToOpenAI(
+		context.Background(),
+		"gemini-3-flash",
+		nil,
+		nil,
+		response,
+		&param,
+	)
+	if len(stream) != 1 {
+		t.Fatalf("stream output count = %d, want 1", len(stream))
+	}
+	if got := gjson.GetBytes(stream[0], "choices.0.delta.content").String(); got != "first second third" {
+		t.Fatalf("stream content = %q, want ordered transcription; output=%s", got, stream[0])
+	}
+
+	nonStream := convertAntigravityResponseToOpenAINonStream(
+		context.Background(),
+		"gemini-3-flash",
+		nil,
+		nil,
+		response,
+		nil,
+	)
+	if got := gjson.GetBytes(nonStream, "choices.0.message.content").String(); got != "first second third" {
+		t.Fatalf("non-stream content = %q, want ordered transcription; output=%s", got, nonStream)
+	}
+}

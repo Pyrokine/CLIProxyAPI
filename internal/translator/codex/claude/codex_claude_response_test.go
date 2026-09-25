@@ -790,6 +790,71 @@ func TestConvertCodexResponseToClaudeAggregatesReasoningSummaryParts(t *testing.
 	}
 }
 
+func TestConvertCodexResponseToClaudeMapsCacheWriteAndReasoningUsage(t *testing.T) {
+	events := collectStructuredCodexClaudeEvents(
+		t,
+		`{"type":"response.created","response":{"id":"resp_1","model":"gpt-5.6"}}`,
+		`{"type":"response.completed","response":{"usage":{`+
+			`"input_tokens":1000,"output_tokens":50,`+
+			`"input_tokens_details":{"cached_tokens":800,"cache_write_tokens":150},`+
+			`"output_tokens_details":{"reasoning_tokens":163}`+
+			`}}}`,
+	)
+	messageDeltas := codexClaudeEventsByName(events, "message_delta")
+	if len(messageDeltas) != 1 {
+		t.Fatalf("message_delta count = %d, want 1", len(messageDeltas))
+	}
+	usage := messageDeltas[0].Data.Get("usage")
+	for path, want := range map[string]int64{
+		"input_tokens":                          200,
+		"output_tokens":                         50,
+		"cache_read_input_tokens":               800,
+		"cache_creation_input_tokens":           150,
+		"output_tokens_details.thinking_tokens": 50,
+	} {
+		if got := usage.Get(path).Int(); got != want {
+			t.Fatalf("usage.%s = %d, want %d; usage=%s", path, got, want, usage.Raw)
+		}
+	}
+}
+
+func TestConvertCodexResponseToClaudeNonStreamMapsReasoningUsage(t *testing.T) {
+	tests := []struct {
+		name       string
+		detail     string
+		wantExists bool
+		want       int64
+	}{
+		{name: "positive", detail: "20", wantExists: true, want: 20},
+		{name: "explicit zero", detail: "0", wantExists: true},
+		{name: "oversized", detail: "999", wantExists: true, want: 50},
+		{name: "negative", detail: "-1"},
+		{name: "string", detail: `"20"`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := []byte(`{"type":"response.completed","response":{` +
+				`"id":"resp_1","model":"gpt-5.6",` +
+				`"usage":{"input_tokens":100,"output_tokens":50,` +
+				`"input_tokens_details":{"cache_creation_tokens":10},` +
+				`"output_tokens_details":{"reasoning_tokens":` + test.detail + `}},` +
+				`"output":[]}}`)
+			output := ConvertCodexResponseToClaudeNonStream(context.Background(), "gpt-5.6", nil, nil, input, nil)
+			if got := gjson.GetBytes(output, "usage.cache_creation_input_tokens").Int(); got != 10 {
+				t.Fatalf("cache_creation_input_tokens = %d, want 10; output=%s", got, output)
+			}
+			thinking := gjson.GetBytes(output, "usage.output_tokens_details.thinking_tokens")
+			if thinking.Exists() != test.wantExists {
+				t.Fatalf("thinking_tokens exists = %v, want %v; output=%s", thinking.Exists(), test.wantExists, output)
+			}
+			if test.wantExists && thinking.Int() != test.want {
+				t.Fatalf("thinking_tokens = %d, want %d; output=%s", thinking.Int(), test.want, output)
+			}
+		})
+	}
+}
+
 func TestConvertCodexResponseToClaudeEmitsSignatureOnlyReasoning(t *testing.T) {
 	events := collectStructuredCodexClaudeEvents(
 		t,

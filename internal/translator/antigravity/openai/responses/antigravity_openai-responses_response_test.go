@@ -2,6 +2,7 @@ package responses
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -106,5 +107,56 @@ func TestConvertAntigravityResponseToOpenAIResponsesNonStreamUnwrapsRequestsInde
 				}
 			},
 		)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAIResponsesRestoresExternalToolNameChain(t *testing.T) {
+	const clientName = "external_external_read_file"
+	const upstreamName = "external_external_external_read_file"
+	original := []byte(`{
+		"model":"gemini-test",
+		"tools":[{"type":"function","name":"` + clientName + `","parameters":{"type":"object"}}]
+	}`)
+	translated := []byte(`{"request":{
+		"tools":[{"functionDeclarations":[{"name":"` + upstreamName + `"}]}]
+	}}`)
+	response := []byte(`{"response":{
+		"responseId":"antigravity-tool-response",
+		"candidates":[{"content":{"parts":[{
+			"functionCall":{"name":"` + upstreamName + `","args":{}}
+		}]},"finishReason":"STOP"}],
+		"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}
+	}}`)
+
+	nonStream := convertAntigravityResponseToOpenAIResponsesNonStream(
+		context.Background(),
+		"gemini-test",
+		original,
+		translated,
+		response,
+		nil,
+	)
+	if got := gjson.GetBytes(nonStream, "output.0.name").String(); got != clientName {
+		t.Fatalf("non-stream tool name = %q, want %q; output=%s", got, clientName, nonStream)
+	}
+
+	var param any
+	stream := convertAntigravityResponseToOpenAIResponses(
+		context.Background(),
+		"gemini-test",
+		original,
+		translated,
+		append([]byte("data: "), response...),
+		&param,
+	)
+	joined := ""
+	for _, chunk := range stream {
+		joined += string(chunk)
+	}
+	if !strings.Contains(joined, `"name":"`+clientName+`"`) {
+		t.Fatalf("stream tool name missing or changed; output=%s", joined)
+	}
+	if strings.Contains(joined, upstreamName) {
+		t.Fatalf("stream leaked upstream tool name %q; output=%s", upstreamName, joined)
 	}
 }

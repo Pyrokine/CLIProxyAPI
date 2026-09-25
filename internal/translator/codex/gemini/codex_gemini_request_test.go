@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -119,5 +120,42 @@ func TestConvertGeminiRequestToCodexMapsFunctionCallingConfig(t *testing.T) {
 	}
 	if got := gjson.GetBytes(output, "tool_choice.name").String(); got != "lookup" {
 		t.Fatalf("tool_choice.name = %q, want lookup; output: %s", got, output)
+	}
+}
+
+func TestConvertGeminiRequestToCodexPreservesAndMatchesToolCallIDs(t *testing.T) {
+	input := []byte(`{
+		"contents":[
+			{"role":"model","parts":[
+				{"functionCall":{"name":"alpha","args":{}}},
+				{"functionCall":{"call_id":"beta-id","name":"beta","args":{}}},
+				{"functionCall":{"id":"alpha-two","name":"alpha","args":{}}}
+			]},
+			{"role":"user","parts":[
+				{"functionResponse":{"callId":"alpha-two","name":"alpha","response":{"result":"explicit"}}},
+				{"functionResponse":{"name":"beta","response":{"result":"named"}}},
+				{"functionResponse":{"response":{"result":"fifo"}}}
+			]}
+		]
+	}`)
+
+	output := ConvertGeminiRequestToCodex("gpt-5.4", input, false)
+	var callIDs []string
+	var outputIDs []string
+	for _, item := range gjson.GetBytes(output, "input").Array() {
+		switch item.Get("type").String() {
+		case "function_call":
+			callIDs = append(callIDs, item.Get("call_id").String())
+		case "function_call_output":
+			outputIDs = append(outputIDs, item.Get("call_id").String())
+		}
+	}
+	wantCalls := []string{"call_gemini_0000000000000001", "beta-id", "alpha-two"}
+	if !reflect.DeepEqual(callIDs, wantCalls) {
+		t.Fatalf("function call IDs = %#v, want %#v; output: %s", callIDs, wantCalls, output)
+	}
+	wantOutputs := []string{"alpha-two", "beta-id", "call_gemini_0000000000000001"}
+	if !reflect.DeepEqual(outputIDs, wantOutputs) {
+		t.Fatalf("function output IDs = %#v, want %#v; output: %s", outputIDs, wantOutputs, output)
 	}
 }

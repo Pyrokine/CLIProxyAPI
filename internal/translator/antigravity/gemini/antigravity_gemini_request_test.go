@@ -2,7 +2,9 @@ package gemini
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -18,6 +20,28 @@ func validGeminiThoughtSignature() string {
 	payload := protowire.AppendTag(nil, 2, protowire.BytesType)
 	payload = protowire.AppendBytes(payload, container)
 	return base64.StdEncoding.EncodeToString(payload)
+}
+
+func TestConvertGeminiRequestToAntigravityDefaultsFunctionResponseRoleToUser(t *testing.T) {
+	tests := []struct {
+		name    string
+		role    string
+		partKey string
+	}{
+		{name: "missing camel role", partKey: "functionResponse"},
+		{name: "invalid snake role", role: `"role":"function",`, partKey: "function_response"},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			input := []byte(`{"contents":[{"role":"model","parts":[{"functionCall":{"name":"lookup","args":{}}}]},{"role":"user","parts":[{"text":"before"}]},{` + testCase.role + `"parts":[{"` + testCase.partKey + `":{"name":"lookup","response":{"result":"ok"}}}]}]}`)
+
+			output := ConvertGeminiRequestToAntigravity("gemini-3-pro-preview", input, false)
+
+			if got := gjson.GetBytes(output, "request.contents.2.role").String(); got != "user" {
+				t.Fatalf("function response role = %q, want user; output: %s", got, output)
+			}
+		})
+	}
 }
 
 func TestConvertGeminiRequestToAntigravity_PreserveValidSignature(t *testing.T) {
@@ -856,5 +880,278 @@ func TestSanitizeAntigravityClaudeGeminiRequestSignatures_StripsFunctionCallSign
 	sig := gjson.Get(outputStr, "request.contents.0.parts.0.thoughtSignature")
 	if sig.Exists() {
 		t.Fatalf("expected functionCall thoughtSignature to be stripped for Claude target model, got %s", sig.Raw)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityNormalizesResponseJSONSchema(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		containerPath string
+		wantSchema    string
+	}{
+		{
+			name: "camel case",
+			input: `{
+				"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+				"generationConfig":{"responseJsonSchema":{
+					"type":"object",
+					"properties":{"message":{"type":"string"}},
+					"required":["message"],
+					"additionalProperties":false
+				}}
+			}`,
+			containerPath: "request.generationConfig",
+			wantSchema:    `{"type":"object","properties":{"message":{"type":"string"}},"required":["message"],"additionalProperties":false}`,
+		},
+		{
+			name: "snake case",
+			input: `{
+				"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+				"generation_config":{"response_json_schema":{"type":"array","items":{"type":"integer"}}}
+			}`,
+			containerPath: "request.generation_config",
+			wantSchema:    `{"type":"array","items":{"type":"integer"}}`,
+		},
+		{
+			name: "snake response schema alias",
+			input: `{
+				"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+				"generation_config":{"response_schema":{"type":"boolean"}}
+			}`,
+			containerPath: "request.generation_config",
+			wantSchema:    `{"type":"boolean"}`,
+		},
+		{
+			name: "malformed scalar remains explicit",
+			input: `{
+				"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+				"generationConfig":{"responseJsonSchema":"invalid schema"}
+			}`,
+			containerPath: "request.generationConfig",
+			wantSchema:    `"invalid schema"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			output := ConvertGeminiRequestToAntigravity("gemini-3-flash", []byte(test.input), false)
+			generationConfig := gjson.GetBytes(output, test.containerPath)
+			var gotSchema any
+			if err := json.Unmarshal([]byte(generationConfig.Get("responseSchema").Raw), &gotSchema); err != nil {
+				t.Fatalf("invalid responseSchema: %v; output: %s", err, output)
+			}
+			var wantSchema any
+			if err := json.Unmarshal([]byte(test.wantSchema), &wantSchema); err != nil {
+				t.Fatalf("invalid expected schema: %v", err)
+			}
+			if !reflect.DeepEqual(gotSchema, wantSchema) {
+				t.Fatalf("responseSchema = %#v, want %#v; output: %s", gotSchema, wantSchema, output)
+			}
+			for _, alias := range []string{"responseJsonSchema", "response_json_schema", "response_schema"} {
+				if generationConfig.Get(alias).Exists() {
+					t.Fatalf("%s should be removed; output: %s", alias, output)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityPreservesCanonicalResponseSchema(t *testing.T) {
+	input := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"generationConfig":{
+			"responseSchema":{"type":"object","properties":{"canonical":{"type":"string"}},"additionalProperties":false},
+			"responseJsonSchema":{"type":"object","properties":{"stale":{"type":"string"}}},
+			"response_json_schema":{"type":"object","properties":{"alsoStale":{"type":"string"}}},
+			"response_schema":{"type":"object","properties":{"snakeStale":{"type":"string"}}}
+		}
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	schema := gjson.GetBytes(output, "request.generationConfig.responseSchema")
+	if !schema.Get("properties.canonical").Exists() {
+		t.Fatalf("canonical responseSchema was replaced; output: %s", output)
+	}
+	if schema.Get("properties.stale").Exists() || schema.Get("properties.alsoStale").Exists() ||
+		schema.Get("properties.snakeStale").Exists() {
+		t.Fatalf("deprecated response schema alias replaced the canonical schema; output: %s", output)
+	}
+	if additionalProperties := schema.Get("additionalProperties"); !additionalProperties.Exists() || additionalProperties.Bool() {
+		t.Fatalf("additionalProperties = %s, want explicit false; output: %s", additionalProperties.Raw, output)
+	}
+	for _, alias := range []string{"responseJsonSchema", "response_json_schema", "response_schema"} {
+		if gjson.GetBytes(output, "request.generationConfig."+alias).Exists() {
+			t.Fatalf("%s should be removed; output: %s", alias, output)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityUsesResponseSchemaCleanerOnlyOnSelectedNode(t *testing.T) {
+	input := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"metadata":{"default":"keep-default","title":"keep-title","format":"keep-format","const":"keep-const"},
+		"generationConfig":{"responseSchema":{
+			"type":"object",
+			"properties":{
+				"empty":{"type":"object","properties":{}},
+				"values":{"type":"array"},
+				"choice":{"anyOf":[{"type":"string"},{"type":"integer"}]},
+				"code":{"enum":[1,2]}
+			}
+		}}
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	schema := gjson.GetBytes(output, "request.generationConfig.responseSchema")
+	if schema.Get("properties.empty.properties.reason").Exists() || schema.Get("properties.empty.properties._").Exists() {
+		t.Fatalf("response schema received a tool placeholder: %s", schema.Raw)
+	}
+	if schema.Get("properties.values.items").Exists() {
+		t.Fatalf("response schema received tool-only array items: %s", schema.Raw)
+	}
+	if !schema.Get("properties.choice.anyOf").IsArray() {
+		t.Fatalf("response schema union was flattened: %s", schema.Raw)
+	}
+	if got := schema.Get("properties.code.type"); got.Exists() {
+		t.Fatalf("response enum forced a tool-only string type: %s", schema.Raw)
+	}
+	for key, want := range map[string]string{
+		"default": "keep-default",
+		"title":   "keep-title",
+		"format":  "keep-format",
+		"const":   "keep-const",
+	} {
+		if got := gjson.GetBytes(output, "request.metadata."+key).String(); got != want {
+			t.Fatalf("request metadata %s = %q, want %q; output=%s", key, got, want, output)
+		}
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityResponseSchemaContainerPriority(t *testing.T) {
+	input := []byte(`{
+		"contents":[{"role":"user","parts":[{"text":"hello"}]}],
+		"generationConfig":{"responseJsonSchema":{"type":"object","properties":{"camel":{"type":"string"}}}},
+		"generation_config":{"responseSchema":{"type":"object","properties":{"snake":{"type":"string"}}}}
+	}`)
+
+	output := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	if !gjson.GetBytes(output, "request.generationConfig.responseSchema.properties.camel").Exists() {
+		t.Fatalf("camel generationConfig schema did not win: %s", output)
+	}
+	if gjson.GetBytes(output, "request.generationConfig.responseSchema.properties.snake").Exists() {
+		t.Fatalf("lower-priority snake schema replaced camel schema: %s", output)
+	}
+	if gjson.GetBytes(output, "request.generation_config.responseSchema").Exists() {
+		t.Fatalf("lower-priority schema alias survived: %s", output)
+	}
+}
+
+func TestFixCLIToolResponseAttachesSiblingImagesToNearestResponse(t *testing.T) {
+	input := []byte(`{
+		"request":{"contents":[
+			{"role":"model","parts":[
+				{"functionCall":{"name":"read_a","id":"call_a","args":{}}},
+				{"functionCall":{"name":"read_b","id":"call_b","args":{}}}
+			]},
+			{"role":"user","parts":[
+				{"inline_data":{"data":"LEADING"}},
+				{"functionResponse":{"name":"read_a","id":"call_a","response":{"result":"A"},"parts":[{"inlineData":{"mimeType":"image/gif","data":"EXISTING"}}]}},
+				{"inlineData":{"mimeType":"image/webp","data":"AFTER_A"}},
+				{"text":"keep text"},
+				{"functionResponse":{"name":"read_b","id":"call_b","response":{"result":"B"}}},
+				{"inline_data":{"mime_type":"image/jpeg","data":"AFTER_B"}},
+				{"custom":{"value":"keep other slot"}}
+			]}
+		]}
+	}`)
+
+	output, err := fixCLIToolResponse(input)
+	if err != nil {
+		t.Fatalf("fixCLIToolResponse failed: %v", err)
+	}
+	parts := gjson.GetBytes(output, "request.contents.1.parts").Array()
+	if len(parts) != 4 {
+		t.Fatalf("parts count = %d, want 4; output=%s", len(parts), output)
+	}
+	if got := parts[0].Get("text").String(); got != "keep text" {
+		t.Fatalf("text part = %q, want keep text; output=%s", got, output)
+	}
+	first := parts[1].Get("functionResponse")
+	second := parts[2].Get("functionResponse")
+	if first.Get("id").String() != "call_a" || second.Get("id").String() != "call_b" {
+		t.Fatalf("function response order changed: %s", output)
+	}
+	firstImages := first.Get("parts").Array()
+	if len(firstImages) != 3 {
+		t.Fatalf("call_a image count = %d, want 3; output=%s", len(firstImages), output)
+	}
+	if got := firstImages[0].Get("inlineData.data").String(); got != "EXISTING" {
+		t.Fatalf("existing image changed: %q; output=%s", got, output)
+	}
+	if got := firstImages[1].Get("inlineData.data").String(); got != "LEADING" {
+		t.Fatalf("leading image = %q, want LEADING; output=%s", got, output)
+	}
+	if got := firstImages[1].Get("inlineData.mimeType").String(); got != "image/png" {
+		t.Fatalf("default MIME = %q, want image/png; output=%s", got, output)
+	}
+	if got := firstImages[2].Get("inlineData.data").String(); got != "AFTER_A" {
+		t.Fatalf("call_a trailing image = %q, want AFTER_A; output=%s", got, output)
+	}
+	secondImages := second.Get("parts").Array()
+	if len(secondImages) != 1 || secondImages[0].Get("inlineData.data").String() != "AFTER_B" {
+		t.Fatalf("call_b image attribution failed: %s", output)
+	}
+	if got := parts[3].Get("custom.value").String(); got != "keep other slot" {
+		t.Fatalf("unrelated part moved or changed: %q; output=%s", got, output)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravityMapsExternalToolNameChains(t *testing.T) {
+	input := []byte(`{
+		"tools":[{"functionDeclarations":[
+			{"name":"read_file"},
+			{"name":"external_read_file"},
+			{"name":"external_external_read_file"},
+			{"name":"external_lookup"}
+		]}],
+		"toolConfig":{"functionCallingConfig":{"allowedFunctionNames":[
+			"read_file","external_read_file","external_external_read_file","external_lookup"
+		]}},
+		"contents":[
+			{"role":"model","parts":[
+				{"functionCall":{"name":"read_file","args":{}}},
+				{"functionCall":{"name":"external_read_file","args":{}}},
+				{"functionCall":{"name":"external_external_read_file","args":{}}},
+				{"functionCall":{"name":"external_lookup","args":{}}}
+			]},
+			{"role":"user","parts":[
+				{"functionResponse":{"name":"read_file","response":{"result":"a"}}},
+				{"functionResponse":{"name":"external_read_file","response":{"result":"b"}}},
+				{"functionResponse":{"name":"external_external_read_file","response":{"result":"c"}}},
+				{"functionResponse":{"name":"external_lookup","response":{"result":"d"}}}
+			]}
+		]
+	}`)
+
+	out := ConvertGeminiRequestToAntigravity("gemini-3-flash", input, false)
+	want := []string{
+		"external_read_file",
+		"external_external_read_file",
+		"external_external_external_read_file",
+		"external_lookup",
+	}
+	for index, expected := range want {
+		paths := []string{
+			fmt.Sprintf("request.tools.0.functionDeclarations.%d.name", index),
+			fmt.Sprintf("request.toolConfig.functionCallingConfig.allowedFunctionNames.%d", index),
+			fmt.Sprintf("request.contents.0.parts.%d.functionCall.name", index),
+			fmt.Sprintf("request.contents.1.parts.%d.functionResponse.name", index),
+		}
+		for _, path := range paths {
+			if got := gjson.GetBytes(out, path).String(); got != expected {
+				t.Fatalf("%s = %q, want %q; output=%s", path, got, expected, out)
+			}
+		}
 	}
 }

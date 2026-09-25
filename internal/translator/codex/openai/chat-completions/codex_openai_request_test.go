@@ -757,6 +757,31 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 	}
 }
 
+func TestConvertOpenAIRequestToCodexFunctionToolStrictDefaultsToFalse(t *testing.T) {
+	input := []byte(`{
+		"messages":[{"role":"user","content":"hello"}],
+		"tools":[
+			{"type":"function","function":{"name":"omitted","parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"explicit_true","strict":true,"parameters":{"type":"object"}}},
+			{"type":"function","function":{"name":"explicit_false","strict":false,"parameters":{"type":"object"}}}
+		]
+	}`)
+
+	output := ConvertOpenAIRequestToCodex("gpt-5.6", input, true)
+	tools := gjson.GetBytes(output, "tools").Array()
+	if len(tools) != 3 {
+		t.Fatalf("tools = %d, want 3; output=%s", len(tools), output)
+	}
+	want := map[string]bool{"omitted": false, "explicit_true": true, "explicit_false": false}
+	for _, tool := range tools {
+		strict := tool.Get("strict")
+		name := tool.Get("name").String()
+		if !strict.Exists() || strict.Bool() != want[name] {
+			t.Fatalf("tool %q strict = %s, want %v; output=%s", name, strict.Raw, want[name], output)
+		}
+	}
+}
+
 func TestConvertOpenAIRequestToCodexPreservesStringServiceTier(t *testing.T) {
 	out := ConvertOpenAIRequestToCodex(
 		"gpt-5.4",
