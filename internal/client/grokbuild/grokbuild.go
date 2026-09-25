@@ -1,6 +1,18 @@
 package grokbuild
 
-import "strings"
+import (
+	"bytes"
+	"context"
+	"net/http"
+	"slices"
+	"strings"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
+)
+
+var keepaliveSSEComment = []byte(": keepalive\n\n")
 
 // ModelInfo contains the model metadata used by Grok Shell.
 type ModelInfo struct {
@@ -32,9 +44,64 @@ type Response struct {
 	Data   []modelEntry `json:"data"`
 }
 
-// IsGrokShellUserAgent reports whether userAgent belongs to Grok Shell.
+// IsGrokShellUserAgent reports whether userAgent belongs to a Grok CLI client.
 func IsGrokShellUserAgent(userAgent string) bool {
-	return strings.Contains(strings.ToLower(userAgent), "grok-shell")
+	return IsGrokClientUserAgent(userAgent)
+}
+
+// IsGrokClientUserAgent reports whether userAgent belongs to Grok Shell or Grok Pager.
+func IsGrokClientUserAgent(userAgent string) bool {
+	normalized := strings.ToLower(userAgent)
+	return strings.Contains(normalized, "grok-shell") || strings.Contains(normalized, "grok-pager")
+}
+
+// IsGrokClientHeaders reports whether headers identify a Grok CLI client.
+func IsGrokClientHeaders(headers http.Header) bool {
+	for name, values := range headers {
+		if strings.EqualFold(name, "User-Agent") && slices.ContainsFunc(values, IsGrokClientUserAgent) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsGrokClientContext checks request headers from context before the explicit headers.
+func IsGrokClientContext(ctx context.Context, headers http.Header) bool {
+	if ctx != nil {
+		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			if IsGrokClientHeaders(ginCtx.Request.Header) {
+				return true
+			}
+		}
+	}
+	return IsGrokClientHeaders(headers)
+}
+
+// TransformKeepaliveSSEFrame converts a Grok keepalive event to an SSE comment.
+func TransformKeepaliveSSEFrame(frame []byte, isGrokClient bool) ([]byte, bool) {
+	if !isGrokClient || !IsKeepaliveSSEFrame(frame) {
+		return frame, false
+	}
+	return bytes.Clone(keepaliveSSEComment), true
+}
+
+// IsKeepaliveSSEFrame reports whether an SSE frame carries a keepalive event.
+func IsKeepaliveSSEFrame(frame []byte) bool {
+	for _, line := range bytes.Split(frame, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		switch {
+		case bytes.HasPrefix(line, []byte("event:")):
+			if bytes.Equal(bytes.TrimSpace(line[len("event:"):]), []byte("keepalive")) {
+				return true
+			}
+		case bytes.HasPrefix(line, []byte("data:")):
+			payload := bytes.TrimSpace(line[len("data:"):])
+			if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "type").String()), "keepalive") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // BuildResponse formats model metadata for Grok Shell.

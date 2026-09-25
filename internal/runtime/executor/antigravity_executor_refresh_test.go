@@ -88,4 +88,38 @@ func TestAntigravityRefreshTokenSingleflightDeduplicatesConcurrentCalls(t *testi
 	}
 }
 
+func TestFetchAntigravityProjectIDPreservesExactCancellation(t *testing.T) {
+	started := make(chan struct{})
+	roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		close(started)
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+	ctx, cancel := context.WithCancel(util.WithRoundTripper(context.Background(), roundTripper))
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := (&AntigravityExecutor{}).fetchAntigravityProjectID(
+			ctx,
+			&cliproxyauth.Auth{Metadata: map[string]any{"access_token": "token"}},
+			"token",
+		)
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("project ID request did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err != context.Canceled {
+			t.Fatalf("fetchAntigravityProjectID error = %#v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled project ID request did not return")
+	}
+}
+
 var errUnexpectedAccessToken = statusErr{code: http.StatusInternalServerError, msg: "unexpected access token"}

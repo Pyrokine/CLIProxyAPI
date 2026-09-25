@@ -18,6 +18,15 @@ func rewriteCodexMultiAgentV2Input(
 	return multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
 }
 
+func rewriteCodexOrphanDelegationInput(
+	ctx context.Context,
+	headers http.Header,
+	payload []byte,
+	cfg *config.Config,
+) []byte {
+	return multiagentv2.RewriteCodexOrphanDelegationInputForConfig(ctx, headers, payload, cfg)
+}
+
 func translateRequestWithCodexMultiAgentV2(
 	ctx context.Context,
 	headers http.Header,
@@ -29,6 +38,12 @@ func translateRequestWithCodexMultiAgentV2(
 	stream bool,
 ) []byte {
 	return multiagentv2.TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream)
+}
+
+// HasCodexMultiAgentV2NamespaceConflict reports whether the request defines
+// the reserved optimized namespace, which must remain untouched.
+func HasCodexMultiAgentV2NamespaceConflict(payload []byte) bool {
+	return multiagentv2.HasCodexMultiAgentV2NamespaceConflict(payload)
 }
 
 func OptimizeCodexMultiAgentV2Request(

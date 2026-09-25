@@ -144,6 +144,66 @@ func TestCodexExecutorWrappedOpenAIImageAcceptsResponseDone(t *testing.T) {
 	)
 }
 
+func TestCodexExecutorWrappedOpenAIImageUsesExplicitDynamicHeaderSource(t *testing.T) {
+	responseDoneFrame := []byte(
+		"event: response.done\n" +
+			"data: {\"type\":\"response.done\",\"response\":{\"created_at\":1713833628," +
+			"\"output\":[{\"type\":\"image_generation_call\",\"result\":\"AA==\",\"output_format\":\"png\"}]}}\n\n",
+	)
+	for _, stream := range []bool{false, true} {
+		name := "non-stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			var gotHeaders http.Header
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write(responseDoneFrame)
+			}))
+			defer server.Close()
+
+			auth := newCodexOpenAIImageTestAuth(server.URL)
+			auth.Attributes["header:X-Copied"] = "$x-client-value"
+			auth.Attributes["header:X-CPA-Session"] = "$CPA-SESSION-ID"
+			auth.Attributes["header:Authorization"] = "must-not-replace"
+			opts := codexOpenAIImageTestOptions(codexImagesGenerationsPath, stream)
+			opts.Headers = http.Header{"X-Client-Value": []string{"from-options"}}
+			ctx := util.WithSessionID(context.Background(), "image-session")
+			executor := &codexExecutor{cfg: &config.Config{Codex: config.CodexConfig{DisableCodexCloaking: true}}}
+			request := cliproxyexecutor.Request{
+				Model:   "gpt-image-1",
+				Payload: []byte(`{"model":"gpt-image-1","prompt":"draw"}`),
+			}
+
+			if stream {
+				result, errStream := executor.ExecuteStream(ctx, auth, request, opts)
+				if errStream != nil {
+					t.Fatalf("ExecuteStream() error = %v", errStream)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else if _, errExecute := executor.Execute(ctx, auth, request, opts); errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+
+			if got := gotHeaders.Get("X-Copied"); got != "from-options" {
+				t.Fatalf("X-Copied = %q, want from-options", got)
+			}
+			if got := gotHeaders.Get("X-CPA-Session"); got != "image-session" {
+				t.Fatalf("X-CPA-Session = %q, want image-session", got)
+			}
+			if got := gotHeaders.Get("Authorization"); got != "Bearer codex-token" {
+				t.Fatalf("Authorization = %q, want Bearer codex-token", got)
+			}
+		})
+	}
+}
+
 func TestCodexOpenAIImage25ModelsPreserveDirectAndResponsesToolSelection(t *testing.T) {
 	for _, model := range []string{
 		"gpt-image-2.5-flare",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"regexp"
 	"testing"
 
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -35,6 +36,63 @@ func TestAntigravityBuildRequest_SanitizesAntigravityToolSchema(t *testing.T) {
 		t.Fatalf("parameters missing or invalid type")
 	}
 	assertSchemaSanitizedAndPropertyPreserved(t, params)
+}
+
+func TestAntigravityBuildRequestRoutesImageGeneration(t *testing.T) {
+	tests := []struct {
+		name            string
+		payload         []byte
+		wantRequestType string
+	}{
+		{
+			name:            "default image request type",
+			payload:         []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"draw a cat"}]}]}}`),
+			wantRequestType: "image_gen",
+		},
+		{
+			name:            "explicit request type",
+			payload:         []byte(`{"requestType":"custom_image","request":{"contents":[{"role":"user","parts":[{"text":"draw a cat"}]}]}}`),
+			wantRequestType: "custom_image",
+		},
+	}
+	requestIDPattern := regexp.MustCompile(`^image_gen/[0-9]+/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/12$`)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			executor := &AntigravityExecutor{}
+			auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "test-project"}}
+			req, err := executor.buildRequest(
+				context.Background(),
+				auth,
+				"token",
+				"gemini-3.1-flash-image",
+				test.payload,
+				false,
+				"",
+				"https://example.com",
+				"derived-session-id",
+			)
+			if err != nil {
+				t.Fatalf("buildRequest error: %v", err)
+			}
+			if req.URL.Path != antigravityGeneratePath || req.URL.RawQuery != "" {
+				t.Fatalf("request URL = %s, want non-stream generation path", req.URL.String())
+			}
+			body, errRead := io.ReadAll(req.Body)
+			if errRead != nil {
+				t.Fatalf("read request body: %v", errRead)
+			}
+			if got := gjson.GetBytes(body, "requestType").String(); got != test.wantRequestType {
+				t.Fatalf("requestType = %q, want %q; body=%s", got, test.wantRequestType, body)
+			}
+			if requestID := gjson.GetBytes(body, "requestId").String(); !requestIDPattern.MatchString(requestID) {
+				t.Fatalf("requestId = %q, want image_gen/<millis>/<uuid>/12", requestID)
+			}
+			if sessionID := gjson.GetBytes(body, "request.sessionId"); sessionID.Exists() {
+				t.Fatalf("image request generated sessionId = %s; body=%s", sessionID.Raw, body)
+			}
+		})
+	}
 }
 
 func TestValidateAntigravityRequestSignatures_DropsInvalidClaudeThinkingSignature(t *testing.T) {

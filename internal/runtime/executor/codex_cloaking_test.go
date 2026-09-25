@@ -36,7 +36,7 @@ func TestApplyCodexHeadersCloaking(t *testing.T) {
 					t.Fatalf("NewRequest() error = %v", err)
 				}
 
-				applyCodexHeadersFromSources(req, auth, "api-key", false, cfg, http.Header{})
+				applyCodexHeadersFromSources(req, auth, "api-key", false, cfg, http.Header{}, nil)
 				if got := req.Header.Get("User-Agent"); got != testCase.wantAgent {
 					t.Fatalf("HTTP User-Agent = %q, want %q", got, testCase.wantAgent)
 				}
@@ -44,7 +44,7 @@ func TestApplyCodexHeadersCloaking(t *testing.T) {
 					t.Fatalf("HTTP Originator = %q, want %q", got, testCase.wantOrigin)
 				}
 
-				headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "api-key", cfg)
+				headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, auth, "api-key", cfg, false)
 				if got := headers.Get("User-Agent"); got != testCase.wantAgent {
 					t.Fatalf("WebSocket User-Agent = %q, want %q", got, testCase.wantAgent)
 				}

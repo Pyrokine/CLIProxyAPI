@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/client/grokbuild"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
@@ -54,11 +55,12 @@ type codexWebsocketSession struct {
 
 	reqMu sync.Mutex
 
-	connMu           sync.Mutex
-	conn             *websocket.Conn
-	wsURL            string
-	authID           string
-	credentialSHA256 string
+	connMu                    sync.Mutex
+	conn                      *websocket.Conn
+	wsURL                     string
+	authID                    string
+	credentialSHA256          string
+	multiAgentV2OptimizedConn *websocket.Conn
 
 	writeMu sync.Mutex
 
@@ -152,6 +154,30 @@ func (s *codexWebsocketSession) writeMessage(conn *websocket.Conn, msgType int, 
 	return conn.WriteMessage(msgType, payload)
 }
 
+func (s *codexWebsocketSession) setMultiAgentV2Optimized(conn *websocket.Conn, optimized bool) {
+	if s == nil || conn == nil {
+		return
+	}
+	s.connMu.Lock()
+	if s.conn == conn {
+		if optimized {
+			s.multiAgentV2OptimizedConn = conn
+		} else {
+			s.multiAgentV2OptimizedConn = nil
+		}
+	}
+	s.connMu.Unlock()
+}
+
+func (s *codexWebsocketSession) isMultiAgentV2Optimized(conn *websocket.Conn) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.conn == conn && s.multiAgentV2OptimizedConn == conn
+}
+
 func (s *codexWebsocketSession) resetUpstreamDisconnectError(conn *websocket.Conn) {
 	if s == nil || conn == nil {
 		return
@@ -231,7 +257,7 @@ func (e *codexWebsocketsExecutor) Execute(
 	if err != nil {
 		return resp, err
 	}
-	body := prepared.Body
+	body := helps.NormalizeCodexToolSchemas(prepared.Body)
 	originalPayload := prepared.OriginalPayload
 	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if errReplay != nil {
@@ -248,7 +274,7 @@ func (e *codexWebsocketsExecutor) Execute(
 	reporter.setTranslatedReasoningEffort(body, to.String())
 	clientBody := body
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayload, body)
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, prepared.Native, opts.Headers)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
@@ -315,6 +341,11 @@ func (e *codexWebsocketsExecutor) Execute(
 			sess.clearActive(conn, readCh)
 		}()
 	}
+	restoreMultiAgentV2 := prepared.OptimizedMultiAgentV2
+	if sess != nil {
+		restoreMultiAgentV2 = !prepared.MultiAgentV2Conflict &&
+			(prepared.OptimizedMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
+	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
@@ -325,8 +356,16 @@ func (e *codexWebsocketsExecutor) Execute(
 		recordAPIWebsocketError(ctx, e.cfg, "send", errSend)
 		return resp, errSend
 	}
+	if sess != nil && (prepared.OptimizedMultiAgentV2 || prepared.MultiAgentV2Conflict) {
+		sess.setMultiAgentV2Optimized(
+			conn,
+			prepared.OptimizedMultiAgentV2 && !prepared.MultiAgentV2Conflict,
+		)
+	}
 
 	responseStarted := false
+	outputItemsByIndex := make(map[int64][]byte)
+	var outputItemsFallback [][]byte
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -380,10 +419,19 @@ func (e *codexWebsocketsExecutor) Execute(
 		}
 
 		payload = normalizeCodexCompletionEvent(payload)
-		payload = helps.RestoreCodexMultiAgentV2Response(payload, prepared.OptimizedMultiAgentV2)
+		payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
 		eventType := gjson.GetBytes(payload, "type").String()
-		if eventType == "response.completed" {
-			cacheCodexReasoningReplayFromCompleted(ctx, replayScope, payload)
+		switch eventType {
+		case "response.output_item.done":
+			collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
+			continue
+		case "response.completed", "response.incomplete":
+			if !prepared.Native {
+				payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+			}
+			if eventType == "response.completed" {
+				cacheCodexReasoningReplayFromCompleted(ctx, replayScope, payload)
+			}
 			if detail, ok := parseCodexUsage(payload); ok {
 				reporter.publish(ctx, detail)
 			}
@@ -423,12 +471,13 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 	if err != nil {
 		return nil, err
 	}
-	body := prepared.Body
+	body := helps.NormalizeCodexToolSchemas(prepared.Body)
 	originalPayload := prepared.OriginalPayload
 	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if errReplay != nil {
 		return nil, errReplay
 	}
+	isGrokClient := grokbuild.IsGrokClientContext(ctx, opts.Headers)
 
 	httpURL := strings.TrimSuffix(baseURL, "/") + "/responses"
 	wsURL, err := buildCodexResponsesWebsocketURL(httpURL)
@@ -440,7 +489,7 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 	reporter.setTranslatedReasoningEffort(body, to.String())
 	clientBody := body
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayload, body)
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg, prepared.Native, opts.Headers)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
 
@@ -504,6 +553,11 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 		readCh = make(chan codexWebsocketRead, 4096)
 		sess.setActive(conn, readCh)
 	}
+	restoreMultiAgentV2 := prepared.OptimizedMultiAgentV2
+	if sess != nil {
+		restoreMultiAgentV2 = !prepared.MultiAgentV2Conflict &&
+			(prepared.OptimizedMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
+	}
 
 	if errSend := writeCodexWebsocketMessage(sess, conn, wsReqBody); errSend != nil {
 		errSend = mapCodexWebsocketWriteError(sess, conn, errSend)
@@ -520,6 +574,12 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 			}
 		}
 		return nil, errSend
+	}
+	if sess != nil && (prepared.OptimizedMultiAgentV2 || prepared.MultiAgentV2Conflict) {
+		sess.setMultiAgentV2Optimized(
+			conn,
+			prepared.OptimizedMultiAgentV2 && !prepared.MultiAgentV2Conflict,
+		)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -615,11 +675,12 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 			if len(payload) == 0 {
 				continue
 			}
+			helps.EmitWebSocketResponseEvent(ctx, opts, auth, e.Identifier(), req.Model, payload)
 			responseStarted = true
-			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
-			payload = helps.RestoreCodexMultiAgentV2Response(payload, prepared.OptimizedMultiAgentV2)
-			appendAPIResponseChunk(ctx, e.cfg, payload)
 			appendAPIWebsocketResponse(ctx, e.cfg, payload)
+			payload = applyCodexIdentityConfuseResponsePayload(payload, identityState)
+			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgentV2)
+			appendAPIResponseChunk(ctx, e.cfg, payload)
 
 			if !gjson.ValidBytes(payload) {
 				errMalformed := markResponseStarted(
@@ -669,7 +730,16 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 			}
 
 			eventType := gjson.GetBytes(payload, "type").String()
-			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" || eventType == "error"
+			switch eventType {
+			case "response.output_item.done":
+				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
+			case "response.completed", "response.done", "response.incomplete":
+				if !prepared.Native {
+					payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
+				}
+			}
+			isTerminalEvent := eventType == "response.completed" || eventType == "response.done" ||
+				eventType == "response.incomplete" || eventType == "error"
 			if cliproxyexecutor.DownstreamWebsocket(ctx) {
 				chunk := cliproxyexecutor.StreamChunk{
 					Payload: applyCodexIdentityExposeResponsePayload(payload, identityState),
@@ -722,16 +792,17 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 			payload = normalizeCodexCompletionEvent(payload)
 			eventType = gjson.GetBytes(payload, "type").String()
 			var completedUsagePayload []byte
-			switch eventType {
-			case "response.output_item.done":
-				collectCodexOutputItemDone(payload, outputItemsByIndex, &outputItemsFallback)
-			case "response.completed", "response.done":
-				payload = patchCodexCompletedOutput(payload, outputItemsByIndex, outputItemsFallback)
-				cacheCodexReasoningReplayFromCompleted(ctx, replayScope, payload)
+			if eventType == "response.completed" || eventType == "response.incomplete" {
+				if eventType == "response.completed" {
+					cacheCodexReasoningReplayFromCompleted(ctx, replayScope, payload)
+				}
 				completedUsagePayload = bytes.Clone(payload)
 			}
 
 			line := encodeCodexWebsocketAsSSE(payload)
+			if transformed, ok := grokbuild.TransformKeepaliveSSEFrame(line, isGrokClient); ok {
+				line = transformed
+			}
 			chunks := sdktranslator.TranslateStream(
 				ctx, to, from, req.Model, originalPayload, clientBody,
 				applyCodexIdentityExposeResponsePayload(line, identityState), &param,
@@ -742,7 +813,7 @@ func (e *codexWebsocketsExecutor) ExecuteStream(
 					return
 				}
 			}
-			if eventType == "response.completed" || eventType == "response.done" {
+			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
 				if detail, ok := parseCodexUsage(completedUsagePayload); ok {
 					reporter.publish(ctx, detail)
 				} else {
@@ -976,7 +1047,7 @@ func applyCodexPromptCacheHeadersWithContext(
 	if cache.ID != "" {
 		rawJSON = helps.SetStringIfDifferent(rawJSON, "prompt_cache_key", cache.ID)
 		headers.Set("Conversation_id", cache.ID)
-		headers.Set("Session_id", cache.ID)
+		setCodexSessionHeader(headers, cache.ID)
 	}
 
 	return rawJSON, headers
@@ -988,37 +1059,69 @@ func applyCodexWebsocketHeaders(
 	auth *cliproxyauth.Auth,
 	token string,
 	cfg *config.Config,
+	nativeRequest bool,
+	clientHeaders ...http.Header,
 ) http.Header {
 	if headers == nil {
 		headers = http.Header{}
 	}
+	bearer := ""
 	if strings.TrimSpace(token) != "" {
-		headers.Set("Authorization", "Bearer "+token)
+		bearer = "Bearer " + token
 	}
+	util.ApplyCredentialHeaders(headers, "Authorization", bearer)
 
-	var ginHeaders http.Header
-	if ginCtx := ginContextFrom(ctx); ginCtx != nil && ginCtx.Request != nil {
-		ginHeaders = trustedCodexClientHeaders(ginCtx.Request.Header)
+	var identityHeaders http.Header
+	var customHeaderSource http.Header
+	if len(clientHeaders) > 0 && clientHeaders[0] != nil {
+		customHeaderSource = clientHeaders[0]
+		identityHeaders = trustedCodexClientHeaders(customHeaderSource)
+	} else if ginCtx := ginContextFrom(ctx); ginCtx != nil && ginCtx.Request != nil {
+		customHeaderSource = ginCtx.Request.Header
+		identityHeaders = trustedCodexClientHeaders(customHeaderSource)
 	}
 
 	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
-	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
+	ensureHeaderWithPriority(headers, identityHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
+	misc.EnsureHeader(headers, identityHeaders, "X-Codex-Turn-State", "")
+	misc.EnsureHeader(headers, identityHeaders, "X-Codex-Turn-Metadata", "")
+	misc.EnsureHeader(headers, identityHeaders, "X-Client-Request-Id", "")
+	misc.EnsureHeader(headers, identityHeaders, "X-Codex-Window-Id", "")
+	misc.EnsureHeader(headers, identityHeaders, "Thread-Id", "")
+	misc.EnsureHeader(headers, identityHeaders, "X-ResponsesAPI-Include-Timing-Metrics", "")
+	if nativeRequest {
+		misc.EnsureHeader(headers, identityHeaders, codexResponsesLiteHeader, "")
+		misc.EnsureHeader(headers, identityHeaders, "Conversation_id", "")
+		misc.EnsureHeader(headers, identityHeaders, "X-Codex-Routing-Hint", "")
+	}
 
-	misc.EnsureHeader(headers, ginHeaders, "Version", codexClientVersion)
+	misc.EnsureHeader(headers, identityHeaders, "Version", "")
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
-	if betaHeader == "" && ginHeaders != nil {
-		betaHeader = strings.TrimSpace(ginHeaders.Get("OpenAI-Beta"))
+	if betaHeader == "" && identityHeaders != nil {
+		betaHeader = strings.TrimSpace(identityHeaders.Get("OpenAI-Beta"))
 	}
 	if betaHeader == "" || !strings.Contains(betaHeader, "responses_websockets=") {
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
-	ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
-	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
-		ensureHeaderWithTargetPrecedence(headers, ginHeaders, "Session_id", uuid.NewString())
+	ensureHeaderWithConfigPrecedence(headers, identityHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	if nativeRequest && cfg != nil && cfg.Codex.DisableCodexCloaking {
+		setCodexSessionHeader(headers, "")
+		ensureCodexSessionHeader(headers, identityHeaders, "")
+		for key := range headers {
+			if strings.EqualFold(key, "Conversation_id") {
+				delete(headers, key)
+			}
+		}
+		if conversationID := strings.TrimSpace(headerValueCaseInsensitive(identityHeaders, "Conversation_id")); conversationID != "" {
+			setHeaderCasePreserved(headers, "Conversation_id", conversationID)
+		}
+	} else {
+		sessionFallback := ""
+		if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
+			sessionFallback = uuid.NewString()
+		}
+		ensureCodexSessionHeader(headers, identityHeaders, sessionFallback)
 	}
 
 	isAPIKey := false
@@ -1027,13 +1130,15 @@ func applyCodexWebsocketHeaders(
 			isAPIKey = true
 		}
 	}
-	if !isAPIKey {
+	if originator := strings.TrimSpace(identityHeaders.Get("Originator")); originator != "" {
+		headers.Set("Originator", originator)
+	} else if !isAPIKey {
 		headers.Set("Originator", codexOriginator)
-		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
-					setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
-				}
+	}
+	if !isAPIKey && auth != nil && auth.Metadata != nil {
+		if accountID, ok := auth.Metadata["account_id"].(string); ok {
+			if trimmed := strings.TrimSpace(accountID); trimmed != "" {
+				setHeaderCasePreserved(headers, "ChatGPT-Account-ID", trimmed)
 			}
 		}
 	}
@@ -1042,7 +1147,12 @@ func applyCodexWebsocketHeaders(
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
+	customHeaderRequest := &http.Request{Header: headers}
+	if ctx != nil {
+		customHeaderRequest = customHeaderRequest.WithContext(ctx)
+	}
+	util.ApplyCustomHeadersFromAttrs(customHeaderRequest, attrs, customHeaderSource)
+	headers.Del("Content-Length")
 	applyCodexCloakingHeaders(headers, cfg)
 
 	return headers
@@ -1290,6 +1400,7 @@ func (e *codexWebsocketsExecutor) ensureUpstreamConn(
 	if conn != nil && (staleAuthID != authID || staleWSURL != wsURL || staleCredentialSHA256 != credentialSHA256) {
 		staleConn = conn
 		sess.conn = nil
+		sess.multiAgentV2OptimizedConn = nil
 		if sess.readerConn == conn {
 			sess.readerConn = nil
 		}
@@ -1332,6 +1443,7 @@ func (e *codexWebsocketsExecutor) ensureUpstreamConn(
 		return previous, nil, nil
 	}
 	sess.conn = conn
+	sess.multiAgentV2OptimizedConn = nil
 	sess.wsURL = wsURL
 	sess.authID = authID
 	sess.credentialSHA256 = credentialSHA256
@@ -1454,6 +1566,7 @@ func (e *codexWebsocketsExecutor) invalidateUpstreamConn(
 		return
 	}
 	sess.conn = nil
+	sess.multiAgentV2OptimizedConn = nil
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}
@@ -1547,6 +1660,7 @@ func (e *codexWebsocketsExecutor) closeExecutionSession(sess *codexWebsocketSess
 	authID := sess.authID
 	wsURL := sess.wsURL
 	sess.conn = nil
+	sess.multiAgentV2OptimizedConn = nil
 	if sess.readerConn == conn {
 		sess.readerConn = nil
 	}

@@ -95,6 +95,8 @@ type codexResponsesBodyResult struct {
 	Body                  []byte
 	OriginalPayload       []byte
 	OptimizedMultiAgentV2 bool
+	MultiAgentV2Conflict  bool
+	Native                bool
 }
 
 // codexResponsesBody translates and prepares the request body for a Codex /responses call.
@@ -116,6 +118,7 @@ func codexResponsesBody(
 ) (codexResponsesBodyResult, error) {
 	to := sdktranslator.FromString("codex")
 	isCompat := helps.APIKeyModelIsCompat(req)
+	nativeRequest := helps.IsNativeCodexRequest(req.Payload, opts)
 
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -172,7 +175,7 @@ func codexResponsesBody(
 	}
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
-	body = normalizeCodexInstructions(body)
+	body = normalizeCodexInstructions(body, nativeRequest)
 	if streaming && reasoningSummaryDelivery.Exists() {
 		body, _ = sjson.SetBytes(body, "stream_options.reasoning_summary_delivery", reasoningSummaryDelivery.Value())
 	}
@@ -180,6 +183,7 @@ func codexResponsesBody(
 		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
 	}
 	body = normalizeCodexParallelToolCalls(body, opts.Headers)
+	multiAgentV2Conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
 	body, optimizedMultiAgentV2 := helps.OptimizeCodexMultiAgentV2Request(
 		ctx,
 		opts.Headers,
@@ -195,6 +199,8 @@ func codexResponsesBody(
 		Body:                  body,
 		OriginalPayload:       originalPayload,
 		OptimizedMultiAgentV2: optimizedMultiAgentV2,
+		MultiAgentV2Conflict:  multiAgentV2Conflict,
+		Native:                nativeRequest,
 	}, nil
 }
 

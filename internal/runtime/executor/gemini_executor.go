@@ -120,13 +120,13 @@ func (e *GeminiExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 		return nil
 	}
 	apiKey, bearer := geminiCreds(auth)
+	credentialName, credentialValue := "Authorization", ""
 	if apiKey != "" {
-		req.Header.Set("x-goog-api-key", apiKey)
-		req.Header.Del("Authorization")
+		credentialName, credentialValue = "X-Goog-Api-Key", apiKey
 	} else if bearer != "" {
-		req.Header.Set("Authorization", "Bearer "+bearer)
-		req.Header.Del("x-goog-api-key")
+		credentialValue = "Bearer " + bearer
 	}
+	util.ApplyCredentialHeader(req, credentialName, credentialValue)
 	applyGeminiHeaders(req, auth)
 	return nil
 }
@@ -223,6 +223,10 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 			action = "countTokens"
 		}
 	}
+	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
+	if action != "countTokens" {
+		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
+	}
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, action)
 	if isStream {
@@ -243,12 +247,14 @@ func (e *GeminiExecutor) prepareGeminiRequest(
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	credentialName, credentialValue := "Authorization", ""
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		credentialName, credentialValue = "X-Goog-Api-Key", apiKey
 	} else if bearer != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
+		credentialValue = "Bearer " + bearer
 	}
-	applyGeminiHeaders(httpReq, auth)
+	util.ApplyCredentialHeader(httpReq, credentialName, credentialValue)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
 	return &geminiRequest{
@@ -367,8 +373,13 @@ func (e *GeminiExecutor) ExecuteStream(
 		defer close(out)
 		var streamUsage streamUsageBuffer
 		defer func() {
-			streamUsage.publish(ctx, reporter)
-			reporter.ensurePublished(ctx)
+			if errStream := scannerOrContextError(ctx, nil); errStream != nil {
+				recordAPIResponseError(ctx, e.cfg, errStream)
+				reporter.publishFailure(ctx, errStream)
+			} else {
+				streamUsage.publish(ctx, reporter)
+				reporter.ensurePublished(ctx)
+			}
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("gemini executor: close response body error: %v", errClose)
 			}
@@ -483,12 +494,14 @@ func (e *GeminiExecutor) executeInteractions(
 		return resp, errRequest
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	credentialName, credentialValue := "Authorization", ""
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		credentialName, credentialValue = "X-Goog-Api-Key", apiKey
 	} else if bearer != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
+		credentialValue = "Bearer " + bearer
 	}
-	applyGeminiHeaders(httpReq, auth)
+	util.ApplyCredentialHeader(httpReq, credentialName, credentialValue)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
@@ -597,12 +610,14 @@ func (e *GeminiExecutor) executeInteractionsStream(
 		return nil, errRequest
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	credentialName, credentialValue := "Authorization", ""
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		credentialName, credentialValue = "X-Goog-Api-Key", apiKey
 	} else if bearer != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
+		credentialValue = "Bearer " + bearer
 	}
-	applyGeminiHeaders(httpReq, auth)
+	util.ApplyCredentialHeader(httpReq, credentialName, credentialValue)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	applyGeminiInteractionsRequestHeaders(httpReq, opts.Headers)
 	applyGeminiInteractionsRevisionHeader(httpReq)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
@@ -629,8 +644,13 @@ func (e *GeminiExecutor) executeInteractionsStream(
 		defer close(out)
 		var streamUsage streamUsageBuffer
 		defer func() {
-			streamUsage.publish(ctx, reporter)
-			reporter.ensurePublished(ctx)
+			if errStream := scannerOrContextError(ctx, nil); errStream != nil {
+				recordAPIResponseError(ctx, e.cfg, errStream)
+				reporter.publishFailure(ctx, errStream)
+			} else {
+				streamUsage.publish(ctx, reporter)
+				reporter.ensurePublished(ctx)
+			}
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("gemini executor: close interactions stream body error: %v", errClose)
 			}
@@ -792,6 +812,7 @@ func (e *GeminiExecutor) CountTokens(
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
 	translatedReq = helps.SetStringIfDifferent(translatedReq, "model", baseModel)
+	translatedReq = helps.EnsureGeminiLeadingUserContent(translatedReq, "contents")
 
 	baseURL := resolveGeminiBaseURL(auth)
 	url := fmt.Sprintf("%s/%s/models/%s:%s", baseURL, glAPIVersion, baseModel, "countTokens")
@@ -803,12 +824,14 @@ func (e *GeminiExecutor) CountTokens(
 		return cliproxyexecutor.Response{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	credentialName, credentialValue := "Authorization", ""
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
-	} else {
-		httpReq.Header.Set("Authorization", "Bearer "+bearer)
+		credentialName, credentialValue = "X-Goog-Api-Key", apiKey
+	} else if bearer != "" {
+		credentialValue = "Bearer " + bearer
 	}
-	applyGeminiHeaders(httpReq, auth)
+	util.ApplyCredentialHeader(httpReq, credentialName, credentialValue)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translatedReq, e.Identifier(), auth)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -1037,12 +1060,19 @@ func geminiInteractionsSSEDone(frame []byte) bool {
 	return sawDoneEvent
 }
 
-func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth) {
+func applyGeminiHeaders(req *http.Request, auth *cliproxyauth.Auth, clientHeaders ...http.Header) {
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	if len(clientHeaders) > 0 && clientHeaders[0] != nil {
+		util.ApplyCustomHeadersFromAttrs(req, attrs, clientHeaders[0])
+	} else {
+		util.ApplyCustomHeadersFromAttrs(req, attrs)
+	}
+	if req != nil {
+		req.Header.Del("Content-Length")
+	}
 }
 
 func fixGeminiImageAspectRatio(modelName string, rawJSON []byte) []byte {

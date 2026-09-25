@@ -235,6 +235,15 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = stripVertexOpenAIResponsesToolCallIDs(body, from.String())
 	body = signature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
+	body = helps.EnsureGeminiLeadingUserContent(body, "contents")
+	isCountTokens := false
+	if req.Metadata != nil {
+		action, _ := req.Metadata["action"].(string)
+		isCountTokens = action == "countTokens"
+	}
+	if !isCountTokens {
+		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
+	}
 
 	return &vertexGeminiBody{from: from, to: to, body: body}, nil
 }
@@ -246,8 +255,7 @@ func (e *GeminiVertexExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	}
 	apiKey, _ := vertexAPICreds(auth)
 	if strings.TrimSpace(apiKey) != "" {
-		req.Header.Set("x-goog-api-key", apiKey)
-		req.Header.Del("Authorization")
+		util.ApplyCredentialHeader(req, "X-Goog-Api-Key", apiKey)
 		return nil
 	}
 	_, _, saJSON, errCreds := vertexCreds(auth)
@@ -261,8 +269,7 @@ func (e *GeminiVertexExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 	if strings.TrimSpace(token) == "" {
 		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Del("x-goog-api-key")
+	util.ApplyCredentialHeader(req, "Authorization", "Bearer "+token)
 	return nil
 }
 
@@ -431,12 +438,12 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+token)
+		util.ApplyCredentialHeader(httpReq, "Authorization", "Bearer "+token)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return resp, statusErr{code: 500, msg: "internal server error"}
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
@@ -529,9 +536,9 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		util.ApplyCredentialHeader(httpReq, "X-Goog-Api-Key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
@@ -616,12 +623,12 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+token)
+		util.ApplyCredentialHeader(httpReq, "Authorization", "Bearer "+token)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return nil, statusErr{code: 500, msg: "internal server error"}
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
@@ -672,9 +679,9 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		util.ApplyCredentialHeader(httpReq, "X-Goog-Api-Key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
@@ -716,6 +723,16 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
+		var streamUsage streamUsageBuffer
+		defer func() {
+			if errStream := scannerOrContextError(ctx, nil); errStream != nil {
+				recordAPIResponseError(ctx, e.cfg, errStream)
+				reporter.publishFailure(ctx, errStream)
+				return
+			}
+			streamUsage.publish(ctx, reporter)
+			reporter.ensurePublished(ctx)
+		}()
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("vertex executor: close response body error: %v", errClose)
@@ -728,29 +745,38 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := parseGeminiStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+				streamUsage.observe(detail, true, false)
 			}
 			lines := sdktranslator.TranslateStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
 			for i := range lines {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
+					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+						recordAPIResponseError(ctx, e.cfg, errStream)
+						reporter.publishFailure(ctx, errStream)
+					}
 					return
 				}
 			}
+		}
+		if errScan := scannerOrContextError(ctx, scanner); errScan != nil {
+			recordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.publishFailure(ctx, errScan)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+			return
 		}
 		lines := sdktranslator.TranslateStream(
 			ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param,
 		)
 		for i := range lines {
 			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
+				if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+					recordAPIResponseError(ctx, e.cfg, errStream)
+					reporter.publishFailure(ctx, errStream)
+				}
 				return
 			}
-		}
-		if errScan := markResponseStarted(scanner.Err()); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
-			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -787,6 +813,7 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
+	translatedReq = helps.EnsureGeminiLeadingUserContent(translatedReq, "contents")
 
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf(
@@ -800,12 +827,12 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if token, errTok := vertexAccessToken(ctx, e.cfg, auth, saJSON); errTok == nil && token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+token)
+		util.ApplyCredentialHeader(httpReq, "Authorization", "Bearer "+token)
 	} else if errTok != nil {
 		log.Errorf("vertex executor: access token error: %v", errTok)
 		return cliproxyexecutor.Response{}, statusErr{code: 500, msg: "internal server error"}
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translatedReq, e.Identifier(), auth)
 
@@ -872,6 +899,7 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
 	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
+	translatedReq = helps.EnsureGeminiLeadingUserContent(translatedReq, "contents")
 
 	// For API key auth, use simpler URL format without project/location
 	if baseURL == "" {
@@ -885,9 +913,9 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if apiKey != "" {
-		httpReq.Header.Set("x-goog-api-key", apiKey)
+		util.ApplyCredentialHeader(httpReq, "X-Goog-Api-Key", apiKey)
 	}
-	applyGeminiHeaders(httpReq, auth)
+	applyGeminiHeaders(httpReq, auth, opts.Headers)
 
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translatedReq, e.Identifier(), auth)
 

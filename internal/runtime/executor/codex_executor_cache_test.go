@@ -200,25 +200,77 @@ func TestCodexResponsesBodyDropsInvalidReasoningEncryptedContent(t *testing.T) {
 	}
 }
 
-func TestCodexResponsesBodyNormalizesNullInstructions(t *testing.T) {
-	payload := []byte(`{
-		"model":"gpt-5.3-codex",
-		"instructions": null,
-		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}]
-	}`)
-	req := cliproxyexecutor.Request{Model: "gpt-5.3-codex", Payload: payload}
-
-	prepared, err := codexResponsesBody(
-		context.Background(), &config.Config{}, nil, "gpt-5.3-codex", req.Model, "codex",
-		sdktranslator.FromString("openai-response"), cliproxyexecutor.Options{}, req, true,
-	)
-	if err != nil {
-		t.Fatalf("codexResponsesBody error: %v", err)
+func TestCodexResponsesBodyInstructionFidelity(t *testing.T) {
+	tests := []struct {
+		name        string
+		payload     string
+		opts        cliproxyexecutor.Options
+		wantNative  bool
+		wantPresent bool
+		wantType    gjson.Type
+		wantValue   string
+	}{
+		{
+			name:        "compatibility missing instructions",
+			payload:     `{"model":"gpt-5.3-codex","input":[]}`,
+			opts:        cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+			wantPresent: true,
+			wantType:    gjson.String,
+		},
+		{
+			name:        "compatibility null instructions",
+			payload:     `{"model":"gpt-5.3-codex","instructions":null,"input":[]}`,
+			opts:        cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+			wantPresent: true,
+			wantType:    gjson.String,
+		},
+		{
+			name:       "native header missing instructions",
+			payload:    `{"model":"gpt-5.3-codex","input":[]}`,
+			opts:       cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Headers: http.Header{"x-openai-internal-codex-responses-lite": []string{"true"}}},
+			wantNative: true,
+		},
+		{
+			name:        "native header null instructions",
+			payload:     `{"model":"gpt-5.3-codex","instructions":null,"input":[]}`,
+			opts:        cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Headers: http.Header{"X-OpenAI-Internal-Codex-Responses-Lite": []string{"true"}}},
+			wantNative:  true,
+			wantPresent: true,
+			wantType:    gjson.Null,
+		},
+		{
+			name:       "native metadata missing instructions",
+			payload:    `{"model":"gpt-5.3-codex","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":true},"input":[]}`,
+			opts:       cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
+			wantNative: true,
+		},
 	}
 
-	instructions := gjson.GetBytes(prepared.Body, "instructions")
-	if !instructions.Exists() || instructions.Type != gjson.String || instructions.String() != "" {
-		t.Fatalf("instructions = %s, want empty string in %s", instructions.Raw, string(prepared.Body))
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := cliproxyexecutor.Request{Model: "gpt-5.3-codex", Payload: []byte(testCase.payload)}
+			prepared, err := codexResponsesBody(
+				context.Background(), &config.Config{}, nil, "gpt-5.3-codex", req.Model, "codex",
+				sdktranslator.FromString("openai-response"), testCase.opts, req, true,
+			)
+			if err != nil {
+				t.Fatalf("codexResponsesBody error: %v", err)
+			}
+			if prepared.Native != testCase.wantNative {
+				t.Fatalf("Native = %t, want %t", prepared.Native, testCase.wantNative)
+			}
+
+			instructions := gjson.GetBytes(prepared.Body, "instructions")
+			if instructions.Exists() != testCase.wantPresent {
+				t.Fatalf("instructions present = %t, want %t in %s", instructions.Exists(), testCase.wantPresent, string(prepared.Body))
+			}
+			if !testCase.wantPresent {
+				return
+			}
+			if instructions.Type != testCase.wantType || instructions.String() != testCase.wantValue {
+				t.Fatalf("instructions = %s (%v), want %q (%v) in %s", instructions.Raw, instructions.Type, testCase.wantValue, testCase.wantType, string(prepared.Body))
+			}
+		})
 	}
 }
 
@@ -300,8 +352,8 @@ func TestCodexExecutorCacheHelper_OpenAIResponses_PreservesPromptCacheKey(t *tes
 	if gotConversation := httpReq.Header.Get("Conversation_id"); gotConversation != expectedKey {
 		t.Fatalf("Conversation_id = %q, want %q", gotConversation, expectedKey)
 	}
-	if gotSession := httpReq.Header.Get("Session_id"); gotSession != expectedKey {
-		t.Fatalf("Session_id = %q, want %q", gotSession, expectedKey)
+	if gotSession := httpReq.Header.Get("Session-Id"); gotSession != expectedKey {
+		t.Fatalf("Session-Id = %q, want %q", gotSession, expectedKey)
 	}
 }
 
@@ -309,41 +361,40 @@ func TestApplyModelHeaderOverridesUsesEmbeddedModelConfig(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("User-Agent", codexUserAgent)
 	headers.Set("Originator", codexOriginator)
+	headers.Set("Version", codexClientVersion)
 
 	applyModelHeaderOverrides(headers, "gpt-5.6-luna")
 
-	if got := headers.Get("User-Agent"); got != "codex-tui/0.144.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.144.0)" {
-		t.Fatalf("User-Agent = %q", got)
+	if got := headers.Get("User-Agent"); got != codexUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, codexUserAgent)
 	}
-	if got := headers.Get("Originator"); got != "codex-tui" {
-		t.Fatalf("Originator = %q, want codex-tui", got)
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
 	}
-	if got := headers.Get("Version"); got != "0.144.0" {
-		t.Fatalf("Version = %q, want 0.144.0", got)
+	if got := headers.Get("Version"); got != codexClientVersion {
+		t.Fatalf("Version = %q, want %q", got, codexClientVersion)
 	}
-	if got := headers.Get("Session_id"); got == "" {
+	if got := headers.Get("Session-Id"); got == "" {
 		t.Fatal("Session_id is empty after Mac OS User-Agent override")
 	}
 }
 
-func TestApplyModelHeaderOverridesUsesAstraMinimumClientVersion(t *testing.T) {
+func TestApplyModelHeaderOverridesKeepsCurrentClientVersionForAstra(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("User-Agent", codexUserAgent)
 	headers.Set("Originator", codexOriginator)
+	headers.Set("Version", codexClientVersion)
 
 	applyModelHeaderOverrides(headers, "gpt-6-astra")
 
-	if got := headers.Get("User-Agent"); got != "codex-tui/0.153.0 (Mac OS 26.5.1; arm64) iTerm.app/3.6.11 (codex-tui; 0.153.0)" {
-		t.Fatalf("User-Agent = %q", got)
+	if got := headers.Get("User-Agent"); got != codexUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, codexUserAgent)
 	}
-	if got := headers.Get("Originator"); got != "codex-tui" {
-		t.Fatalf("Originator = %q, want codex-tui", got)
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
 	}
-	if got := headers.Get("Version"); got != "0.153.0" {
-		t.Fatalf("Version = %q, want 0.153.0", got)
-	}
-	if got := headers.Get("Session_id"); got == "" {
-		t.Fatal("Session_id is empty after Astra User-Agent override")
+	if got := headers.Get("Version"); got != codexClientVersion {
+		t.Fatalf("Version = %q, want %q", got, codexClientVersion)
 	}
 }
 
@@ -372,8 +423,8 @@ func TestApplyCodexHeadersKeepsPromptCacheSessionOverCodexClientSession(t *testi
 	}
 	applyCodexHeaders(httpReq, &cliproxyauth.Auth{Metadata: map[string]any{"account_id": "acct-1"}}, "token", true, nil)
 
-	if got := httpReq.Header.Get("Session_id"); got != expectedKey {
-		t.Fatalf("Session_id = %q, want prompt cache key %q", got, expectedKey)
+	if got := httpReq.Header.Get("Session-Id"); got != expectedKey {
+		t.Fatalf("Session-Id = %q, want prompt cache key %q", got, expectedKey)
 	}
 	if got := httpReq.Header.Get("Conversation_id"); got != expectedKey {
 		t.Fatalf("Conversation_id = %q, want prompt cache key %q", got, expectedKey)
@@ -425,8 +476,8 @@ codex:
 	if strings.Contains(string(body), "client-installation") {
 		t.Fatalf("upstream body leaked original installation id: %s", string(body))
 	}
-	if got := httpReq.Header.Get("Session_id"); got != identityState.promptCacheKey {
-		t.Fatalf("Session_id = %q, want %q", got, identityState.promptCacheKey)
+	if got := httpReq.Header.Get("Session-Id"); got != identityState.promptCacheKey {
+		t.Fatalf("Session-Id = %q, want %q", got, identityState.promptCacheKey)
 	}
 
 	upstreamPayload := []byte(`{"prompt_cache_key":"client-cache","turn_id":"turn-1"}`)
@@ -581,8 +632,8 @@ func TestCodexExecutorCacheHelper_Claude_GPT5UsesStablePromptCache(t *testing.T)
 	if got := httpReq.Header.Get("Conversation_id"); got != gotKey {
 		t.Fatalf("Conversation_id = %q, want %q", got, gotKey)
 	}
-	if got := httpReq.Header.Get("Session_id"); got != gotKey {
-		t.Fatalf("Session_id = %q, want %q", got, gotKey)
+	if got := httpReq.Header.Get("Session-Id"); got != gotKey {
+		t.Fatalf("Session-Id = %q, want %q", got, gotKey)
 	}
 
 	rawJSON2 := []byte(`{"model":"gpt-5.5","stream":true}`)
@@ -634,8 +685,65 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_UsesAPIKeyPromptCache(t 
 	if got := httpReq.Header.Get("Conversation_id"); got != gotKey {
 		t.Fatalf("Conversation_id = %q, want %q", got, gotKey)
 	}
-	if got := httpReq.Header.Get("Session_id"); got != gotKey {
-		t.Fatalf("Session_id = %q, want %q", got, gotKey)
+	if got := httpReq.Header.Get("Session-Id"); got != gotKey {
+		t.Fatalf("Session-Id = %q, want %q", got, gotKey)
+	}
+}
+
+func TestCodexExecutorGPT6SolDoesNotInjectVersionForClaudeCode(t *testing.T) {
+	var gotHeaders http.Header
+	server := httptest.NewServer(
+		http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				gotHeaders = r.Header.Clone()
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte(
+					"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+				))
+			},
+		),
+	)
+	defer server.Close()
+
+	executor := newCodexExecutor(&config.Config{DisableImageGeneration: config.DisableImageGenerationAll})
+	auth := &cliproxyauth.Auth{
+		Provider:   "codex",
+		Attributes: map[string]string{"base_url": server.URL},
+		Metadata: map[string]any{
+			"access_token": "oauth-token",
+			"account_id":   "acct-1",
+		},
+	}
+	req := cliproxyexecutor.Request{
+		Model:   "gpt-6-sol",
+		Payload: []byte(`{"model":"gpt-6-sol","input":"hello"}`),
+	}
+	opts := cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Headers: http.Header{
+			"User-Agent": []string{"claude-cli/2.1.278 (external, cli)"},
+			"Version":    []string{"0.154.0"},
+		},
+	}
+
+	if _, err := executor.Execute(context.Background(), auth, req, opts); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := gotHeaders.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty for Claude Code gpt-6-sol request", got)
+	}
+	if got := gotHeaders.Get("Authorization"); got != "Bearer oauth-token" {
+		t.Fatalf("Authorization = %q, want Bearer oauth-token", got)
+	}
+	if got := headerValueCaseInsensitive(gotHeaders, "ChatGPT-Account-ID"); got != "acct-1" {
+		t.Fatalf("ChatGPT-Account-ID = %q, want acct-1", got)
+	}
+	if got := gotHeaders.Get("User-Agent"); got != codexUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, codexUserAgent)
+	}
+	if got := gotHeaders.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
 	}
 }
 
@@ -663,11 +771,11 @@ func TestApplyCodexHeadersRejectsCherryClientIdentity(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != codexUserAgent {
 		t.Fatalf("User-Agent = %q, want %q", got, codexUserAgent)
 	}
-	if got := req.Header.Get("Version"); got != codexClientVersion {
-		t.Fatalf("Version = %q, want %q", got, codexClientVersion)
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty for non-Codex client", got)
 	}
-	if got := req.Header.Get("Session_id"); got == "" || got == "cherry-session" {
-		t.Fatalf("Session_id = %q, want generated non-Cherry value", got)
+	if got := req.Header.Get("Session-Id"); got == "" || got == "cherry-session" {
+		t.Fatalf("Session-Id = %q, want generated non-Cherry value", got)
 	}
 	if got := req.Header.Get("Originator"); got != codexOriginator {
 		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
@@ -694,8 +802,11 @@ func TestApplyCodexHeadersUsesConfiguredOAuthDefaults(t *testing.T) {
 	if got := req.Header.Get("User-Agent"); got != cfg.CodexHeaderDefaults.UserAgent {
 		t.Fatalf("User-Agent = %q, want configured default", got)
 	}
-	if got := req.Header.Get("Session_id"); got != "" {
-		t.Fatalf("Session_id = %q, want empty for non-Mac configured UA", got)
+	if got := req.Header.Get("Session-Id"); got != "" {
+		t.Fatalf("Session-Id = %q, want empty for non-Mac configured UA", got)
+	}
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty without trusted client version", got)
 	}
 }
 
@@ -745,8 +856,8 @@ func TestApplyCodexHeadersPreservesCodexClientIdentity(t *testing.T) {
 	if got := req.Header.Get("Version"); got != "0.131.0" {
 		t.Fatalf("Version = %q, want Codex client value", got)
 	}
-	if got := req.Header.Get("Session_id"); got != "codex-session" {
-		t.Fatalf("Session_id = %q, want Codex client value", got)
+	if got := req.Header.Get("Session-Id"); got != "codex-session" {
+		t.Fatalf("Session-Id = %q, want Codex client value", got)
 	}
 }
 
@@ -770,8 +881,8 @@ func TestApplyCodexHeadersPreservesLegacyOriginatorOnlyClientIdentity(t *testing
 	if got := req.Header.Get("Version"); got != "0.131.0" {
 		t.Fatalf("Version = %q, want legacy Codex client value", got)
 	}
-	if got := req.Header.Get("Session_id"); got != "codex-session" {
-		t.Fatalf("Session_id = %q, want legacy Codex client value", got)
+	if got := req.Header.Get("Session-Id"); got != "codex-session" {
+		t.Fatalf("Session-Id = %q, want legacy Codex client value", got)
 	}
 	if got := req.Header.Get("Originator"); got != "codex_cli_rs" {
 		t.Fatalf("Originator = %q, want legacy Codex client value", got)

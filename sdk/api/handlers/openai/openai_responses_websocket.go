@@ -215,6 +215,22 @@ func (w *responsesWebsocketWriter) closeWithoutError() (bool, error) {
 	return true, w.conn.Close()
 }
 
+func (w *responsesWebsocketWriter) writePing() error {
+	if w == nil || w.conn == nil {
+		return errors.New("responses websocket: writer is nil")
+	}
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	if w.closing.Load() {
+		return websocket.ErrCloseSent
+	}
+	deadline := time.Time{}
+	if w.writeTimeout > 0 {
+		deadline = time.Now().Add(w.writeTimeout)
+	}
+	return w.conn.WriteControl(websocket.PingMessage, nil, deadline)
+}
+
 func (w *responsesWebsocketWriter) closeWithPayload(payload []byte) (bool, error) {
 	if w == nil || w.conn == nil {
 		return false, nil
@@ -321,6 +337,8 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	lastResponseID := ""
+	// Remains pending until a generating request commits successfully.
+	pendingPrewarmID := ""
 	lastResponseOwnerAuthID := ""
 	lastResponseOwnerSupportsContinuation := false
 	responseOwners := make(map[string]responsesWebsocketResponseOwner)
@@ -366,7 +384,8 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		frameReplacementRetryOwnerSupportsContinuation := replacementRetryOwnerSupportsContinuation
 
 		rawPreviousResponseID := strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String())
-		if upstreamMode == responsesWebsocketUpstreamModeUnknown && rawPreviousResponseID != "" {
+		if upstreamMode == responsesWebsocketUpstreamModeUnknown && rawPreviousResponseID != "" &&
+			rawPreviousResponseID != pendingPrewarmID {
 			errMsg := responsesWebsocketPreviousResponseNotFoundError()
 			_, errWrite := h.sendWebsocketError(c, writer, errMsg, wsTimelineLog, passthroughSessionID)
 			if errWrite != nil {
@@ -376,7 +395,8 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 		unknownPreviousResponseOwner := false
-		if rawPreviousResponseID != "" {
+		prewarmContinuation := pendingPrewarmID != "" && rawPreviousResponseID == pendingPrewarmID
+		if rawPreviousResponseID != "" && !prewarmContinuation {
 			knownOwner, hasKnownOwner := responseOwners[rawPreviousResponseID]
 			unknownPreviousResponseOwner = !hasKnownOwner
 			forceReplayCurrentResponse := forceTranscriptReplayNextRequest &&
@@ -428,7 +448,7 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			retryingTranscriptReplacement = false
 		}
 
-		toolCacheTurn := newResponsesWebsocketToolCacheTurn(downstreamSessionKey)
+		var toolCacheTurn *responsesWebsocketToolCacheTurn
 		previousLastRequest := bytes.Clone(lastRequest)
 		previousLastResponseOutput := bytes.Clone(lastResponseOutput)
 		previousLastResponseID := lastResponseID
@@ -466,6 +486,25 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var requestJSON []byte
 		var errMsg *handlers.ErrorMessage
 		switch {
+		case pendingPrewarmID != "" && rawPreviousResponseID != "":
+			if rawPreviousResponseID != pendingPrewarmID {
+				errMsg = responsesWebsocketPreviousResponseNotFoundError()
+			} else {
+				requestJSON, _, errMsg = normalizeResponsesWebsocketPrewarmFollowup(payload, previousLastRequest)
+			}
+		case pendingPrewarmID != "" &&
+			strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeCreate:
+			input := gjson.GetBytes(payload, "input")
+			if input.Exists() && !input.IsArray() {
+				errMsg = &handlers.ErrorMessage{
+					StatusCode: http.StatusBadRequest,
+					Error:      fmt.Errorf("websocket request requires array field: input"),
+				}
+			} else {
+				requestJSON, _, errMsg = normalizeResponseCreateRequest(
+					normalizeResponseTranscriptReplacement(payload, previousLastRequest),
+				)
+			}
 		case retryingTranscriptReplacement:
 			requestJSON, errMsg = normalizeResponseTranscriptReplacementRetry(payload, replacementRetryBaseline)
 		case forceTranscriptReplacement:
@@ -512,15 +551,40 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
-		toolCacheTurn.recordRequest(requestJSON)
-		requestJSON = repairResponsesWebsocketToolCallsWithoutRecording(downstreamSessionKey, requestJSON)
-		requestJSON = dedupeResponsesWebsocketInputItemsByID(requestJSON)
+		if shouldHandleResponsesWebsocketPrewarmLocally(
+			payload, previousLastRequest, allowIncrementalInputWithPreviousResponseID,
+		) {
+			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
+				requestJSON = updated
+			}
+			lastRequest = bytes.Clone(requestJSON)
+			lastResponseOutput = []byte("[]")
+			lastResponseID = ""
+			lastResponsePendingToolCallIDs = nil
+			replayRequest = nil
+			prewarmID, errWrite := writeResponsesWebsocketSyntheticPrewarm(
+				c, writer, requestJSON, wsTimelineLog, passthroughSessionID,
+			)
+			if errWrite != nil {
+				wsTerminateErr = errWrite
+				return
+			}
+			pendingPrewarmID = prewarmID
+			continue
+		}
+		requestJSON, toolCacheTurn = prepareResponsesWebsocketFallbackTurn(downstreamSessionKey, requestJSON)
 		requestPreviousResponseID := strings.TrimSpace(
 			gjson.GetBytes(requestJSON, "previous_response_id").String(),
 		)
 		requestHasContinuationOwner := requestPreviousResponseID != ""
 		requestLineage := responsesWebsocketLineageReplacement
-		if !retryingTranscriptReplacement && !forceTranscriptReplacement {
+		switch {
+		case prewarmContinuation:
+			requestLineage = responsesWebsocketLineageFullTranscript
+		case pendingPrewarmID != "" && rawPreviousResponseID == "" &&
+			strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeCreate:
+			requestLineage = responsesWebsocketLineageReplacement
+		case !retryingTranscriptReplacement && !forceTranscriptReplacement:
 			requestLineage = classifyResponsesWebsocketLineage(
 				payload,
 				previousLastRequest,
@@ -537,6 +601,8 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		selectedAuthIDForRequest := requestStartingPinnedAuthID
 		selectedAuthSupportsContinuationForRequest := requestStartingPinnedAuthSupportsContinuation
 		selectedAuthSupportsWebsocketForRequest := false
+		nativeRequest := isCodexResponsesLiteRequest(payload, c.Request.Header)
+		var preserveNativeOutput atomic.Bool
 		modelName := gjson.GetBytes(requestJSON, "model").String()
 		cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
 		cliCtx = cliproxyexecutor.WithDownstreamWebsocket(cliCtx)
@@ -549,12 +615,22 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 		cliCtx = handlers.WithSelectedAuthInfoCallback(
 			cliCtx, func(selectedAuth cliproxyexecutor.SelectedAuthInfo) {
+				preserveNativeOutput.Store(false)
 				selectedAuthID := strings.TrimSpace(selectedAuth.ID)
 				selectedAuthIDForRequest = selectedAuthID
 				selectedAuthSupportsContinuationForRequest = selectedAuthID != "" &&
 					selectedAuth.SupportsResponsesContinuation
 				selectedAuthSupportsWebsocketForRequest = selectedAuthID != "" &&
 					selectedAuth.SupportsIncrementalResponsesWebsocket
+				if nativeRequest && selectedAuthID != "" && h != nil && h.AuthManager != nil {
+					auth, ok := h.AuthManager.GetByID(selectedAuthID)
+					if !ok {
+						auth, ok = h.AuthManager.GetExecutionSessionAuthByID(passthroughSessionID, selectedAuthID)
+					}
+					if ok && auth != nil {
+						preserveNativeOutput.Store(strings.EqualFold(strings.TrimSpace(auth.Provider), "codex"))
+					}
+				}
 				pinnedAuthSupportsContinuation = selectedAuthSupportsContinuationForRequest
 				if requestHasContinuationOwner || pinnedAuthSupportsContinuation {
 					pinnedAuthID = selectedAuthID
@@ -585,8 +661,9 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			passthroughSessionID,
 			downstreamSessionKey,
 			responsesWebsocketForwardOptions{
-				toolCacheTurn: toolCacheTurn,
-				suppressError: replayPinnedAuthFailure,
+				preserveCompletionOutput: preserveNativeOutput.Load,
+				toolCacheTurn:            toolCacheTurn,
+				suppressError:            replayPinnedAuthFailure,
 			},
 		)
 		rememberResponsesWebsocketResponseOwner(
@@ -667,6 +744,7 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		toolCacheTurn.commit()
+		pendingPrewarmID = ""
 
 		var nextReplayRequest []byte
 		var errReplay error
@@ -768,19 +846,14 @@ func buildResponsesWebsocketReplayRequest(
 		return normalizeResponseTranscriptReplacement(requestJSON, requestJSON), nil
 	}
 
-	existingInput := gjson.GetBytes(replayRequest, "input")
-	mergedInput, errMerge := mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(previousResponseOutput))
-	if errMerge != nil {
-		return nil, fmt.Errorf("merge previous response output: %w", errMerge)
-	}
 	nextInput := gjson.GetBytes(requestJSON, "input")
-	mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, nextInput.Raw)
+	mergedInput, errMerge := mergeResponsesWebsocketInput(replayRequest, previousResponseOutput, nextInput.Raw)
 	if errMerge != nil {
-		return nil, fmt.Errorf("merge next request input: %w", errMerge)
+		return nil, fmt.Errorf("merge replay input: %w", errMerge)
 	}
 
 	normalized := normalizeResponseTranscriptReplacement(requestJSON, replayRequest)
-	normalized, errSet := sjson.SetRawBytes(normalized, "input", []byte(mergedInput))
+	normalized, errSet := sjson.SetRawBytes(normalized, "input", mergedInput)
 	if errSet != nil {
 		return nil, fmt.Errorf("set replay input: %w", errSet)
 	}
@@ -876,6 +949,15 @@ func shouldReplaceCodexLocalCompactionTranscript(rawJSON []byte, nextInput gjson
 func responsesWebsocketRequestRequiresCurrentUpstream(payload []byte) bool {
 	return strings.TrimSpace(gjson.GetBytes(payload, "previous_response_id").String()) != "" ||
 		strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeAppend
+}
+
+func isCodexResponsesLiteRequest(body []byte, headers http.Header) bool {
+	if strings.EqualFold(strings.TrimSpace(headers.Get("X-OpenAI-Internal-Codex-Responses-Lite")), "true") {
+		return true
+	}
+	value := gjson.GetBytes(body, "client_metadata.ws_request_header_x_openai_internal_codex_responses_lite")
+	return value.Type == gjson.True ||
+		value.Type == gjson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true")
 }
 
 func responsesWebsocketPreviousResponseNotFoundError() *handlers.ErrorMessage {
@@ -1002,6 +1084,14 @@ func normalizeResponsesWebsocketRequestWithIncrementalState(
 }
 
 func normalizeResponseCreateRequest(rawJSON []byte) ([]byte, []byte, *handlers.ErrorMessage) {
+	input := gjson.GetBytes(rawJSON, "input")
+	if input.Exists() && !input.IsArray() {
+		return nil, nil, &handlers.ErrorMessage{
+			StatusCode: http.StatusBadRequest,
+			Error:      fmt.Errorf("websocket request requires array field: input"),
+		}
+	}
+
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
 	if errDelete != nil {
 		normalized = bytes.Clone(rawJSON)
@@ -1080,27 +1170,12 @@ func normalizeResponseSubsequentRequest(
 		}
 	}
 
-	existingInput := gjson.GetBytes(lastRequest, "input")
-	mergedInput, errMerge := mergeJSONArrayRaw(existingInput.Raw, normalizeJSONArrayRaw(lastResponseOutput))
+	mergedInput, errMerge := mergeResponsesWebsocketInput(lastRequest, lastResponseOutput, nextInput.Raw)
 	if errMerge != nil {
 		return nil, lastRequest, &handlers.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("invalid previous response output: %w", errMerge),
+			Error:      errMerge,
 		}
-	}
-
-	mergedInput, errMerge = mergeJSONArrayRaw(mergedInput, nextInput.Raw)
-	if errMerge != nil {
-		return nil, lastRequest, &handlers.ErrorMessage{
-			StatusCode: http.StatusBadRequest,
-			Error:      fmt.Errorf("invalid request input: %w", errMerge),
-		}
-	}
-	if dedupedInput, errDedupe := dedupeFunctionCallsByCallID(mergedInput); errDedupe == nil {
-		mergedInput = dedupedInput
-	}
-	if dedupedInput, errDedupe := dedupeInputItemsByID(mergedInput); errDedupe == nil {
-		mergedInput = dedupedInput
 	}
 
 	normalized, errDelete := sjson.DeleteBytes(rawJSON, "type")
@@ -1109,7 +1184,7 @@ func normalizeResponseSubsequentRequest(
 	}
 	normalized, _ = sjson.DeleteBytes(normalized, "previous_response_id")
 	var errSet error
-	normalized, errSet = sjson.SetRawBytes(normalized, "input", []byte(mergedInput))
+	normalized, errSet = sjson.SetRawBytes(normalized, "input", mergedInput)
 	if errSet != nil {
 		return nil, lastRequest, &handlers.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
@@ -1132,43 +1207,331 @@ func normalizeResponseSubsequentRequest(
 	return normalized, bytes.Clone(normalized), nil
 }
 
-func mergeJSONArrayRaw(existingRaw, appendRaw string) (string, error) {
-	existingRaw = strings.TrimSpace(existingRaw)
-	appendRaw = strings.TrimSpace(appendRaw)
-	if existingRaw == "" {
-		existingRaw = "[]"
+type responsesWebsocketInputItem struct {
+	raw      json.RawMessage
+	itemType string
+	id       string
+	callID   string
+}
+
+type responsesWebsocketMergeInputItem struct {
+	// raw may reference caller-owned request buffers and must not escape the merge.
+	raw      string
+	itemType string
+	id       string
+	callID   string
+}
+
+func mergeResponsesWebsocketInput(lastRequest []byte, lastResponseOutput []byte, appendRaw string) ([]byte, error) {
+	previousInput, errPrevious := responsesWebsocketPreviousInputNoCopy(lastRequest)
+	if errPrevious != nil {
+		return nil, fmt.Errorf("invalid previous request input: %w", errPrevious)
 	}
-	if appendRaw == "" {
-		appendRaw = "[]"
+	items, errExisting := appendResponsesWebsocketMergeInputResult(nil, previousInput)
+	if errExisting != nil {
+		return nil, fmt.Errorf("invalid previous request input: %w", errExisting)
 	}
 
-	var existing []json.RawMessage
-	if err := json.Unmarshal([]byte(existingRaw), &existing); err != nil {
-		return "", err
-	}
-	var appendItems []json.RawMessage
-	if err := json.Unmarshal([]byte(appendRaw), &appendItems); err != nil {
-		return "", err
+	trimmedResponse := bytes.TrimSpace(lastResponseOutput)
+	if len(trimmedResponse) > 0 && trimmedResponse[0] == '[' && json.Valid(trimmedResponse) {
+		responseInput := util.ParseGJSONBytesNoCopy(trimmedResponse)
+		if inputContainsFullTranscript(responseInput) {
+			items = slices.DeleteFunc(items, func(item responsesWebsocketMergeInputItem) bool {
+				return item.itemType == "compaction_trigger"
+			})
+		}
+		var errResponse error
+		items, errResponse = appendResponsesWebsocketMergeInputResult(items, responseInput)
+		if errResponse != nil {
+			return nil, fmt.Errorf("invalid previous response output: %w", errResponse)
+		}
 	}
 
-	merged := append(existing, appendItems...)
-	out, err := json.Marshal(merged)
-	if err != nil {
-		return "", err
+	items, errAppend := appendResponsesWebsocketMergeInputItems(items, appendRaw)
+	if errAppend != nil {
+		return nil, fmt.Errorf("invalid request input: %w", errAppend)
+	}
+
+	items = dedupeResponsesWebsocketMergeFunctionCalls(items)
+	items = dedupeResponsesWebsocketMergeInputItems(items)
+	return marshalResponsesWebsocketMergeInputItems(items), nil
+}
+
+func responsesWebsocketPreviousInputNoCopy(lastRequest []byte) (gjson.Result, error) {
+	if !json.Valid(lastRequest) {
+		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+	}
+
+	root := util.ParseGJSONBytesNoCopy(lastRequest)
+	if root.Type == gjson.Null {
+		return gjson.Parse("[]"), nil
+	}
+	if !root.IsObject() {
+		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+	}
+
+	var input gjson.Result
+	inputFound := false
+	invalidInput := false
+	root.ForEach(func(key, value gjson.Result) bool {
+		if !strings.EqualFold(key.String(), "input") {
+			return true
+		}
+		inputFound = true
+		input = value
+		if value.Type != gjson.Null && !value.IsArray() {
+			invalidInput = true
+		}
+		return true
+	})
+	if invalidInput {
+		return gjson.Result{}, responsesWebsocketPreviousInputDecodeError(lastRequest)
+	}
+	if !inputFound || input.Type == gjson.Null {
+		return gjson.Parse("[]"), nil
+	}
+	return input, nil
+}
+
+func responsesWebsocketPreviousInputDecodeError(lastRequest []byte) error {
+	var previousRequest struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	return json.Unmarshal(lastRequest, &previousRequest)
+}
+
+func appendResponsesWebsocketMergeInputItems(
+	items []responsesWebsocketMergeInputItem,
+	rawArray string,
+) ([]responsesWebsocketMergeInputItem, error) {
+	rawArray = strings.TrimSpace(rawArray)
+	if rawArray == "" {
+		rawArray = "[]"
+	}
+	parsed := gjson.Parse(rawArray)
+	if gjson.Valid(rawArray) {
+		return appendResponsesWebsocketMergeInputResult(items, parsed)
+	}
+
+	var rawItems []json.RawMessage
+	if errUnmarshal := json.Unmarshal([]byte(rawArray), &rawItems); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	return items, nil
+}
+
+func appendResponsesWebsocketMergeInputResult(
+	items []responsesWebsocketMergeInputItem,
+	input gjson.Result,
+) ([]responsesWebsocketMergeInputItem, error) {
+	if input.Type == gjson.Null {
+		return items, nil
+	}
+	if !input.IsArray() {
+		var rawItems []json.RawMessage
+		if errUnmarshal := json.Unmarshal([]byte(input.Raw), &rawItems); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		return items, nil
+	}
+
+	rawItems := input.Array()
+	items = slices.Grow(items, len(rawItems))
+	for _, rawItem := range rawItems {
+		item := responsesWebsocketMergeInputItem{raw: rawItem.Raw}
+		if rawItem.IsObject() {
+			rawItem.ForEach(func(key, value gjson.Result) bool {
+				metadataKey := key.String()
+				switch {
+				case strings.EqualFold(metadataKey, "type"):
+					item.itemType = strings.TrimSpace(value.String())
+				case strings.EqualFold(metadataKey, "id"):
+					item.id = strings.TrimSpace(value.String())
+				case strings.EqualFold(metadataKey, "call_id"):
+					item.callID = strings.TrimSpace(value.String())
+				}
+				return true
+			})
+		}
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+func dedupeResponsesWebsocketMergeFunctionCalls(
+	items []responsesWebsocketMergeInputItem,
+) []responsesWebsocketMergeInputItem {
+	seenCallIDs := make(map[string]struct{}, len(items))
+	filtered := items[:0]
+	for _, item := range items {
+		if isResponsesToolCallType(item.itemType) && item.callID != "" {
+			if _, ok := seenCallIDs[item.callID]; ok {
+				continue
+			}
+			seenCallIDs[item.callID] = struct{}{}
+		}
+		filtered = append(filtered, item)
+	}
+	clear(items[len(filtered):])
+	return filtered
+}
+
+func dedupeResponsesWebsocketMergeInputItems(
+	items []responsesWebsocketMergeInputItem,
+) []responsesWebsocketMergeInputItem {
+	referencedCallIDs := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if isResponsesToolCallOutputType(item.itemType) && item.callID != "" {
+			referencedCallIDs[item.callID] = struct{}{}
+		}
+	}
+
+	keepIndexByID := make(map[string]int, len(items))
+	keepReferencedByID := make(map[string]bool, len(items))
+	for index, item := range items {
+		if item.id == "" {
+			continue
+		}
+		_, referenced := referencedCallIDs[item.callID]
+		referenced = referenced && item.callID != ""
+		if _, seen := keepIndexByID[item.id]; !seen {
+			keepIndexByID[item.id] = index
+			keepReferencedByID[item.id] = referenced
+			continue
+		}
+		if referenced || !keepReferencedByID[item.id] {
+			keepIndexByID[item.id] = index
+			keepReferencedByID[item.id] = referenced
+		}
+	}
+
+	filtered := items[:0]
+	for index, item := range items {
+		if item.id != "" && keepIndexByID[item.id] != index {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	clear(items[len(filtered):])
+	return filtered
+}
+
+func marshalResponsesWebsocketMergeInputItems(items []responsesWebsocketMergeInputItem) []byte {
+	outputLength := 2
+	if len(items) > 1 {
+		outputLength += len(items) - 1
+	}
+	for _, item := range items {
+		outputLength += len(item.raw)
+	}
+
+	out := make([]byte, 0, outputLength)
+	out = append(out, '[')
+	for index, item := range items {
+		if index > 0 {
+			out = append(out, ',')
+		}
+		out = append(out, item.raw...)
+	}
+	out = append(out, ']')
+	return out
+}
+
+func inputContainsFullTranscript(input gjson.Result) bool {
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "compaction", "compaction_summary":
+			return true
+		}
+	}
+	return false
+}
+
+func parseResponsesWebsocketInputItem(rawItem json.RawMessage) (responsesWebsocketInputItem, error) {
+	item := responsesWebsocketInputItem{raw: rawItem}
+	trimmed := bytes.TrimSpace(rawItem)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return item, nil
+	}
+	var metadata struct {
+		Type   json.RawMessage `json:"type"`
+		ID     json.RawMessage `json:"id"`
+		CallID json.RawMessage `json:"call_id"`
+	}
+	if errUnmarshal := json.Unmarshal(trimmed, &metadata); errUnmarshal != nil {
+		return responsesWebsocketInputItem{}, errUnmarshal
+	}
+	item.itemType = responsesWebsocketMetadataString(metadata.Type)
+	item.id = responsesWebsocketMetadataString(metadata.ID)
+	item.callID = responsesWebsocketMetadataString(metadata.CallID)
+	return item, nil
+}
+
+func responsesWebsocketMetadataString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	if raw[0] == '"' {
+		var value string
+		if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal == nil {
+			return strings.TrimSpace(value)
+		}
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func marshalResponsesWebsocketInputItems(items []responsesWebsocketInputItem) (string, error) {
+	rawItems := make([]json.RawMessage, len(items))
+	for index := range items {
+		rawItems[index] = items[index].raw
+	}
+	out, errMarshal := json.Marshal(rawItems)
+	if errMarshal != nil {
+		return "", errMarshal
 	}
 	return string(out), nil
 }
 
-func normalizeJSONArrayRaw(raw []byte) string {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" {
-		return "[]"
+func dedupeResponsesWebsocketInputItems(items []responsesWebsocketInputItem) []responsesWebsocketInputItem {
+	referencedCallIDs := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if isResponsesToolCallOutputType(item.itemType) && item.callID != "" {
+			referencedCallIDs[item.callID] = struct{}{}
+		}
 	}
-	result := gjson.Parse(trimmed)
-	if result.Type == gjson.JSON && result.IsArray() {
-		return trimmed
+
+	keepIndexByID := make(map[string]int, len(items))
+	keepReferencedByID := make(map[string]bool, len(items))
+	for index, item := range items {
+		if item.id == "" {
+			continue
+		}
+		_, referenced := referencedCallIDs[item.callID]
+		referenced = referenced && item.callID != ""
+		if _, seen := keepIndexByID[item.id]; !seen {
+			keepIndexByID[item.id] = index
+			keepReferencedByID[item.id] = referenced
+			continue
+		}
+		if referenced || !keepReferencedByID[item.id] {
+			keepIndexByID[item.id] = index
+			keepReferencedByID[item.id] = referenced
+		}
 	}
-	return "[]"
+
+	filtered := items[:0]
+	for index, item := range items {
+		if item.id != "" && keepIndexByID[item.id] != index {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	clear(items[len(filtered):])
+	return filtered
 }
 
 func inputSatisfiesPendingToolCalls(input gjson.Result, pendingCallIDs []string) bool {
@@ -1251,135 +1614,6 @@ func normalizeResponseTranscriptReplacement(rawJSON []byte, lastRequest []byte) 
 	return bytes.Clone(normalized)
 }
 
-func dedupeFunctionCallsByCallID(rawArray string) (string, error) {
-	rawArray = strings.TrimSpace(rawArray)
-	if rawArray == "" {
-		return "[]", nil
-	}
-	var items []json.RawMessage
-	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
-		return "", errUnmarshal
-	}
-
-	seenCallIDs := make(map[string]struct{}, len(items))
-	filtered := make([]json.RawMessage, 0, len(items))
-	for _, item := range items {
-		if len(item) == 0 {
-			continue
-		}
-		itemType := strings.TrimSpace(gjson.GetBytes(item, "type").String())
-		if isResponsesToolCallType(itemType) {
-			callID := strings.TrimSpace(gjson.GetBytes(item, "call_id").String())
-			if callID != "" {
-				if _, ok := seenCallIDs[callID]; ok {
-					continue
-				}
-				seenCallIDs[callID] = struct{}{}
-			}
-		}
-		filtered = append(filtered, item)
-	}
-
-	out, errMarshal := json.Marshal(filtered)
-	if errMarshal != nil {
-		return "", errMarshal
-	}
-	return string(out), nil
-}
-
-func dedupeResponsesWebsocketInputItemsByID(payload []byte) []byte {
-	input := gjson.GetBytes(payload, "input")
-	if !input.Exists() || !input.IsArray() {
-		return payload
-	}
-	dedupedInput, errDedupe := dedupeInputItemsByID(input.Raw)
-	if errDedupe != nil || dedupedInput == input.Raw {
-		return payload
-	}
-	updated, errSet := sjson.SetRawBytes(payload, "input", []byte(dedupedInput))
-	if errSet != nil {
-		return payload
-	}
-	return updated
-}
-
-func dedupeInputItemsByID(rawArray string) (string, error) {
-	rawArray = strings.TrimSpace(rawArray)
-	if rawArray == "" {
-		return "[]", nil
-	}
-	var items []json.RawMessage
-	if errUnmarshal := json.Unmarshal([]byte(rawArray), &items); errUnmarshal != nil {
-		return "", errUnmarshal
-	}
-
-	type itemMetadata struct {
-		itemType string
-		id       string
-		callID   string
-	}
-	meta := make([]itemMetadata, len(items))
-	for i, item := range items {
-		if len(item) == 0 {
-			continue
-		}
-		res := gjson.GetManyBytes(item, "type", "id", "call_id")
-		meta[i] = itemMetadata{
-			itemType: strings.TrimSpace(res[0].String()),
-			id:       strings.TrimSpace(res[1].String()),
-			callID:   strings.TrimSpace(res[2].String()),
-		}
-	}
-
-	referencedCallIDs := make(map[string]struct{}, len(items))
-	for i := range items {
-		switch meta[i].itemType {
-		case "function_call_output", "custom_tool_call_output":
-			if meta[i].callID != "" {
-				referencedCallIDs[meta[i].callID] = struct{}{}
-			}
-		}
-	}
-
-	keepIndexByID := make(map[string]int, len(items))
-	keepReferencedByID := make(map[string]bool, len(items))
-	for i := range items {
-		itemID := meta[i].id
-		if itemID == "" {
-			continue
-		}
-		_, referenced := referencedCallIDs[meta[i].callID]
-		referenced = referenced && meta[i].callID != ""
-		if _, seen := keepIndexByID[itemID]; !seen {
-			keepIndexByID[itemID] = i
-			keepReferencedByID[itemID] = referenced
-			continue
-		}
-		if referenced || !keepReferencedByID[itemID] {
-			keepIndexByID[itemID] = i
-			keepReferencedByID[itemID] = referenced
-		}
-	}
-
-	filtered := make([]json.RawMessage, 0, len(items))
-	for i, item := range items {
-		if len(item) == 0 {
-			continue
-		}
-		itemID := meta[i].id
-		if itemID != "" && keepIndexByID[itemID] != i {
-			continue
-		}
-		filtered = append(filtered, item)
-	}
-
-	out, errMarshal := json.Marshal(filtered)
-	if errMarshal != nil {
-		return "", errMarshal
-	}
-	return string(out), nil
-}
-
 // sendWebsocketError logs, writes, and records an error event on the websocket connection.
 // Returns the serialized error payload and any write error.
 func (h *ResponsesAPIHandler) sendWebsocketError(
@@ -1404,8 +1638,10 @@ func (h *ResponsesAPIHandler) sendWebsocketError(
 }
 
 type responsesWebsocketForwardOptions struct {
-	toolCacheTurn *responsesWebsocketToolCacheTurn
-	suppressError func(*handlers.ErrorMessage) bool
+	preserveCompletionOutput func() bool
+	toolCacheTurn            *responsesWebsocketToolCacheTurn
+	suppressError            func(*handlers.ErrorMessage) bool
+	keepAliveInterval        *time.Duration
 }
 
 func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
@@ -1460,11 +1696,31 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
 		return false, wrote, errTerminate
 	}
 
+	var keepAliveTicker *time.Ticker
+	var keepAliveC <-chan time.Time
+	keepAliveInterval := time.Duration(0)
+	if h != nil {
+		keepAliveInterval = handlers.StreamingKeepAliveInterval(h.ConfigSnapshot())
+	}
+	if opts.keepAliveInterval != nil {
+		keepAliveInterval = *opts.keepAliveInterval
+	}
+	if keepAliveInterval > 0 {
+		keepAliveTicker = time.NewTicker(keepAliveInterval)
+		defer keepAliveTicker.Stop()
+		keepAliveC = keepAliveTicker.C
+	}
+
 	for {
 		select {
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
+		case <-keepAliveC:
+			if errPing := writer.writePing(); errPing != nil {
+				cancel(errPing)
+				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, errPing
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -1516,12 +1772,16 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
 				cancel(nil)
 				return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, nil
 			}
+			if keepAliveTicker != nil {
+				keepAliveTicker.Reset(keepAliveInterval)
+			}
 
 			payloads := websocketJSONPayloadsFromChunk(chunk.Payload)
 			for i := range payloads {
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				eventType := gjson.GetBytes(payloads[i], "type").String()
-				if isResponsesWebsocketCompletionEvent(eventType) {
+				if isResponsesWebsocketCompletionEvent(eventType) &&
+					(opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
 					payloads[i] = restoreResponsesWebsocketCompletionOutput(
 						payloads[i], outputItemsByIndex, outputItemsFallback,
 					)

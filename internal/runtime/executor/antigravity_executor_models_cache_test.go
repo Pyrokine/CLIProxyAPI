@@ -2,11 +2,11 @@ package executor
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +14,20 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+type antigravityCancelReadBody struct {
+	ctx     context.Context
+	started chan struct{}
+	once    sync.Once
+}
+
+func (b *antigravityCancelReadBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.started) })
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *antigravityCancelReadBody) Close() error { return nil }
 
 func antigravityModelDiscoveryAuth(baseURL string) *cliproxyauth.Auth {
 	return &cliproxyauth.Auth{
@@ -162,6 +176,46 @@ func TestFetchAntigravityModelsReturnsRefreshedAuth(t *testing.T) {
 	}
 }
 
+func TestFetchAntigravityModelsCancellationDuringBodyReadIsExact(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	roundTripper := antigravityRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: &antigravityCancelReadBody{
+				ctx:     req.Context(),
+				started: started,
+			},
+			Request: req,
+		}, nil
+	})
+	resultCh := make(chan ModelDiscoveryResult, 1)
+	go func() {
+		resultCh <- FetchAntigravityModels(
+			util.WithRoundTripper(ctx, roundTripper),
+			antigravityModelDiscoveryAuth("https://models.example"),
+			&config.Config{},
+		)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("model discovery response body was not read")
+	}
+	cancel()
+
+	select {
+	case result := <-resultCh:
+		if result.Outcome != ModelDiscoveryInconclusive || result.Err != context.Canceled {
+			t.Fatalf("model discovery result = %#v, want exact context.Canceled", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled model discovery body read did not return")
+	}
+}
+
 func TestFetchAntigravityModelsCancellationIsInconclusive(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -197,8 +251,8 @@ func TestFetchAntigravityModelsCancellationIsInconclusive(t *testing.T) {
 		if result.Outcome != ModelDiscoveryInconclusive {
 			t.Fatalf("Outcome = %q, want %q", result.Outcome, ModelDiscoveryInconclusive)
 		}
-		if !errors.Is(result.Err, context.Canceled) {
-			t.Fatalf("error = %v, want context cancellation", result.Err)
+		if result.Err != context.Canceled {
+			t.Fatalf("error = %#v, want context.Canceled", result.Err)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("canceled model discovery did not return")

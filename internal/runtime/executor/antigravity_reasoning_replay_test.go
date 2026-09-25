@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -36,6 +37,40 @@ func TestPrepareAntigravityGeminiReasoningReplayPayloadToleratesHomeKVFailure(t 
 	}
 	if got := gjson.GetBytes(out, "sessionId").String(); got != "kv-failure" {
 		t.Fatalf("payload sessionId = %q, want kv-failure", got)
+	}
+}
+
+func TestClearAntigravityReasoningReplayOnInvalidSignatureKeepsNewGeneration(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+	const model, session = "gemini-3.6-flash-high", "session:invalid-signature-generation"
+	oldItem := []byte(`{"type":"thought_signature","contentIndex":0,"partIndex":0,"thoughtSignature":"old-signature-123456789"}`)
+	newItem := []byte(`{"type":"thought_signature","contentIndex":0,"partIndex":0,"thoughtSignature":"new-signature-123456789"}`)
+	if !internalcache.AntigravityReasoningReplayItems(model, session, [][]byte{oldItem}) {
+		t.Fatal("initial replay cache write failed")
+	}
+	_, snapshot, found, errGet := internalcache.GetAntigravityReasoningReplayItemsWithSnapshotRequired(
+		context.Background(), model, session,
+	)
+	if errGet != nil || !found {
+		t.Fatalf("snapshot read failed: found=%t err=%v", found, errGet)
+	}
+	if !internalcache.AntigravityReasoningReplayItems(model, session, [][]byte{newItem}) {
+		t.Fatal("new replay generation write failed")
+	}
+
+	errClear := clearAntigravityReasoningReplayOnInvalidSignature(
+		context.Background(),
+		antigravityReasoningReplayScope{modelName: model, sessionKey: session, cacheSnapshot: snapshot},
+		http.StatusBadRequest,
+		[]byte(`{"error":"invalid thoughtSignature"}`),
+	)
+	if errClear != nil {
+		t.Fatalf("invalid-signature cleanup error = %v", errClear)
+	}
+	items, ok := internalcache.GetAntigravityReasoningReplayItems(model, session)
+	if !ok || len(items) != 1 || gjson.GetBytes(items[0], "thoughtSignature").String() != "new-signature-123456789" {
+		t.Fatalf("new replay generation was deleted: found=%t items=%q", ok, items)
 	}
 }
 
@@ -1718,6 +1753,76 @@ func TestPrepareAntigravityGeminiReasoningReplayRestoresClaudeToolProvenanceWith
 	}
 }
 
+func TestApplyAntigravityReasoningReplayRejectsDuplicateStableIDInSequentialFallback(t *testing.T) {
+	const nativeID = "native-duplicate"
+	const args = `{"file_path":"/tmp/a"}`
+	stableID := util.GeminiClaudeToolUseID(nativeID, "Read", args)
+	payload := []byte(`{"request":{"contents":[{"role":"model","parts":[` +
+		`{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}},` +
+		`{"functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}}]}]}}`)
+	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `,"thoughtSignature":"duplicate-stable-signature-123456789"}`)
+
+	out, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item}, nil)
+	if changed {
+		t.Fatalf("duplicate stable ID replay reported a mutation: %s", out)
+	}
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("duplicate stable ID replay changed payload: %s", out)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayRebuildsIndexAfterIdentityMutation(t *testing.T) {
+	const nativeID = "native-successor"
+	const signature = "successor-signature-123456789"
+	const args = `{"file_path":"/tmp/a"}`
+	stableID := util.GeminiClaudeToolUseID(nativeID, "Read", args)
+	payload := []byte(`{"request":{"contents":[` +
+		`{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}}]},` +
+		`{"role":"user","parts":[{"functionResponse":{"id":"` + stableID + `","name":"unknown","response":{"result":"ok"}}}]}]}}`)
+	items := [][]byte{
+		[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `}`),
+		[]byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `,"thoughtSignature":"` + signature + `"}`),
+	}
+
+	out, changed := applyAntigravityReasoningReplayItems(payload, items, nil)
+	if !changed {
+		t.Fatal("identity mutation and successor signature were not applied")
+	}
+	call := gjson.GetBytes(out, "request.contents.0.parts.0")
+	if call.Get("functionCall.id").String() != nativeID || call.Get("thoughtSignature").String() != signature {
+		t.Fatalf("successor replay did not use rebuilt index: %s", call.Raw)
+	}
+	response := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse")
+	if response.Get("id").String() != nativeID || response.Get("name").String() != "Read" {
+		t.Fatalf("response identity was not restored with call identity: %s", response.Raw)
+	}
+}
+
+func TestApplyAntigravityReasoningReplayCompletesFinalIdentityMutation(t *testing.T) {
+	const nativeID = "native-final"
+	const signature = "final-signature-123456789"
+	const args = `{"file_path":"/tmp/a"}`
+	stableID := util.GeminiClaudeToolUseID(nativeID, "Read", args)
+	payload := []byte(`{"request":{"contents":[` +
+		`{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}}]},` +
+		`{"role":"user","parts":[{"functionResponse":{"id":"` + stableID + `","name":"unknown","response":{"result":"ok"}}}]}]}}`)
+	item := []byte(`{"type":"function_call_part","contentIndex":0,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `,"thoughtSignature":"` + signature + `"}`)
+
+	out, changed := applyAntigravityReasoningReplayItems(payload, [][]byte{item}, nil)
+	if !changed {
+		t.Fatal("final identity mutation was not applied")
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.functionCall.id").String(); got != nativeID {
+		t.Fatalf("functionCall.id = %q, want %q", got, nativeID)
+	}
+	if got := gjson.GetBytes(out, "request.contents.0.parts.0.thoughtSignature").String(); got != signature {
+		t.Fatalf("thoughtSignature = %q, want %q", got, signature)
+	}
+	if got := gjson.GetBytes(out, "request.contents.1.parts.0.functionResponse.id").String(); got != nativeID {
+		t.Fatalf("functionResponse.id = %q, want %q", got, nativeID)
+	}
+}
+
 func TestPrepareAntigravityGeminiReasoningReplayRestoresLegacyClaudeToolIDWithSchemaDefault(t *testing.T) {
 	internalcache.ClearAntigravityReasoningReplayCache()
 	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
@@ -2015,6 +2120,49 @@ func TestDegradeAntigravityClaudeToolProvenanceIDsKeepsParallelShape(t *testing.
 	}
 	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(out); errPairing != nil {
 		t.Fatalf("degraded history is invalid: %v", errPairing)
+	}
+}
+
+func TestPrepareAntigravityGeminiReasoningReplayDegradesAndDeletesReplayThatBreaksPairing(t *testing.T) {
+	internalcache.ClearAntigravityReasoningReplayCache()
+	t.Cleanup(internalcache.ClearAntigravityReasoningReplayCache)
+
+	const (
+		model    = "gemini-3.6-flash-high"
+		nativeID = "native-reused-response"
+		args     = `{"file_path":"/tmp/a"}`
+	)
+	stableID := util.GeminiClaudeToolUseID(nativeID, "Read", args)
+	payload := []byte(`{"sessionId":"sess-replay-pairing-failure","request":{"contents":[` +
+		`{"role":"model","parts":[{"functionCall":{"name":"unknown","args":{"phase":1}}}]},` +
+		`{"role":"user","parts":[{"functionResponse":{"id":"` + stableID + `","name":"unknown","response":{"result":"old"}}}]},` +
+		`{"role":"model","parts":[{"thoughtSignature":"skip_thought_signature_validator","functionCall":{"id":"` + stableID + `","name":"Read","args":` + args + `}}]},` +
+		`{"role":"user","parts":[{"functionResponse":{"id":"` + stableID + `","name":"Read","response":{"result":"new"}}}]}` +
+		`]}}`)
+	if errPairing := internalsignature.ValidateGeminiFunctionCallPairing(payload); errPairing != nil {
+		t.Fatalf("test payload pairing = %v", errPairing)
+	}
+	item := []byte(`{"type":"function_call_part","contentIndex":2,"partIndex":0,"targetOccurrence":0,"name":"Read","call_id":"` + nativeID + `","args":` + args + `,"thoughtSignature":"pairing-failure-signature-123456789"}`)
+	sessionKey := antigravityReasoningReplayScopeFromPayload(model, payload).sessionKey
+	if !internalcache.AntigravityReasoningReplayItems(model, sessionKey, [][]byte{item}) {
+		t.Fatal("failed to cache pairing-failure replay item")
+	}
+
+	out, _, errPrepare := prepareAntigravityGeminiReasoningReplayPayload(
+		context.Background(),
+		model,
+		cliproxyexecutor.Request{Model: model, Payload: payload},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")},
+		payload,
+	)
+	if errPrepare != nil {
+		t.Fatalf("prepare failed instead of degrading: %v", errPrepare)
+	}
+	if !bytes.Equal(out, payload) {
+		t.Fatalf("pairing failure did not degrade to original payload: %s", out)
+	}
+	if _, found := internalcache.GetAntigravityReasoningReplayItems(model, sessionKey); found {
+		t.Fatal("pairing-breaking replay generation was not conditionally deleted")
 	}
 }
 

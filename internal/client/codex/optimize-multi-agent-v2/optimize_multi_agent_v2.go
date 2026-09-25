@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
@@ -26,6 +27,7 @@ const (
 	codexCollaborationNamespace           = "collaboration"
 	codexOptimizedCollaborationNamespace  = "collaboration-optimize"
 	codexOptimizedCollaborationNamePrefix = codexOptimizedCollaborationNamespace + "__"
+	codexOptimizedCollaborationDotPrefix  = codexOptimizedCollaborationNamespace + "."
 )
 
 // CodexMultiAgentV2ToolsPreparedContextKey marks a request whose collaboration
@@ -92,8 +94,11 @@ func TranslateRequestWithCodexMultiAgentV2(
 	payload []byte,
 	stream bool,
 ) []byte {
-	if from == sdktranslator.FormatOpenAIResponse && to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
-		payload = RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+	if from == sdktranslator.FormatOpenAIResponse {
+		payload = RewriteCodexOrphanDelegationInputForConfig(ctx, headers, payload, cfg)
+		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
+			payload = RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+		}
 	}
 	return sdktranslator.TranslateRequestWithContext(
 		ctx,
@@ -123,8 +128,8 @@ func PrepareCodexMultiAgentV2Tools(
 		return updated, true
 	}
 
-	models := codexSpawnAgentModelsForRequest(ctx, headers, homeEnabled)
-	updated = rewriteCodexSpawnAgentTools(updated, toolPaths, models)
+	_, modelList := codexSpawnAgentModelsAndMarkdownForRequest(ctx, headers, homeEnabled)
+	updated = rewriteCodexSpawnAgentToolsWithModelList(updated, toolPaths, modelList)
 	return updated, true
 }
 
@@ -217,20 +222,59 @@ func isCodexMultiAgentClient(userAgent string) bool {
 	return IsCodexClientUserAgent(userAgent)
 }
 
-func codexSpawnAgentModelsForRequest(
+var (
+	codexSpawnAgentCacheMu         sync.RWMutex
+	codexSpawnAgentCacheRevision   uint64
+	codexSpawnAgentCacheGeneration uint64
+	codexSpawnAgentCachedModels    []codexSpawnAgentModel
+	codexSpawnAgentCachedMarkdown  string
+)
+
+func codexSpawnAgentModelsAndMarkdownForRequest(
 	ctx context.Context,
 	headers http.Header,
 	homeEnabled bool,
-) []codexSpawnAgentModel {
-	availableModels := registry.GetGlobalRegistry().GetAvailableModels("openai")
-	if homeEnabled {
-		availableModels = codexHomeAvailableModels(ctx, headers)
+) ([]codexSpawnAgentModel, string) {
+	lookup := func(modelID string) *registry.ModelInfo {
+		return registry.LookupModelInfo(modelID)
 	}
-	return codexSpawnAgentModelsFromSources(
-		availableModels, registry.GetCodexClientModelsJSON(), func(modelID string) *registry.ModelInfo {
-			return registry.LookupModelInfo(modelID)
-		},
+	if homeEnabled {
+		models := codexSpawnAgentModelsFromSources(
+			codexHomeAvailableModels(ctx, headers), registry.GetCodexClientModelsJSON(), lookup,
+		)
+		return models, formatCodexSpawnAgentModels(models)
+	}
+
+	currentRevision := registry.GetCodexClientModelsRevision()
+	currentGeneration := registry.GetGlobalRegistry().GetGeneration()
+	codexSpawnAgentCacheMu.RLock()
+	if codexSpawnAgentCachedModels != nil &&
+		codexSpawnAgentCacheRevision == currentRevision &&
+		codexSpawnAgentCacheGeneration == currentGeneration {
+		models := codexSpawnAgentCachedModels
+		markdown := codexSpawnAgentCachedMarkdown
+		codexSpawnAgentCacheMu.RUnlock()
+		return models, markdown
+	}
+	codexSpawnAgentCacheMu.RUnlock()
+
+	models := codexSpawnAgentModelsFromSources(
+		registry.GetGlobalRegistry().GetAvailableModels("openai"),
+		registry.GetCodexClientModelsJSON(),
+		lookup,
 	)
+	markdown := formatCodexSpawnAgentModels(models)
+
+	codexSpawnAgentCacheMu.Lock()
+	if currentRevision == registry.GetCodexClientModelsRevision() &&
+		currentGeneration == registry.GetGlobalRegistry().GetGeneration() {
+		codexSpawnAgentCacheRevision = currentRevision
+		codexSpawnAgentCacheGeneration = currentGeneration
+		codexSpawnAgentCachedModels = models
+		codexSpawnAgentCachedMarkdown = markdown
+	}
+	codexSpawnAgentCacheMu.Unlock()
+	return models, markdown
 }
 
 func codexHomeAvailableModels(ctx context.Context, headers http.Header) []map[string]any {
@@ -520,10 +564,13 @@ func rewriteCodexSpawnAgentDescription(payload []byte, models []codexSpawnAgentM
 }
 
 func rewriteCodexSpawnAgentTools(payload []byte, toolPaths []string, models []codexSpawnAgentModel) []byte {
+	return rewriteCodexSpawnAgentToolsWithModelList(payload, toolPaths, formatCodexSpawnAgentModels(models))
+}
+
+func rewriteCodexSpawnAgentToolsWithModelList(payload []byte, toolPaths []string, modelList string) []byte {
 	if len(toolPaths) == 0 {
 		return payload
 	}
-	modelList := formatCodexSpawnAgentModels(models)
 	updated := payload
 	for _, toolPath := range toolPaths {
 		descriptionPath := toolPath + ".description"
@@ -546,6 +593,12 @@ func rewriteCodexSpawnAgentTools(payload []byte, toolPaths []string, models []co
 		}
 	}
 	return updated
+}
+
+// HasCodexMultiAgentV2NamespaceConflict reports whether the request defines
+// the reserved optimized namespace, which must remain untouched.
+func HasCodexMultiAgentV2NamespaceConflict(payload []byte) bool {
+	return hasCodexOptimizedCollaborationConflict(payload)
 }
 
 func hasCodexOptimizedCollaborationConflict(payload []byte) bool {
@@ -654,6 +707,11 @@ func restoreCodexCollaborationValue(value any) bool {
 			case isToolCall && strings.HasPrefix(name, codexOptimizedCollaborationNamePrefix):
 				typed["name"] = codexCollaborationNamespace + "__" + strings.TrimPrefix(
 					name, codexOptimizedCollaborationNamePrefix,
+				)
+				changed = true
+			case isToolCall && strings.HasPrefix(name, codexOptimizedCollaborationDotPrefix):
+				typed["name"] = codexCollaborationNamespace + "." + strings.TrimPrefix(
+					name, codexOptimizedCollaborationDotPrefix,
 				)
 				changed = true
 			}

@@ -444,6 +444,7 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 			"output":[
 				{"type":"function_call","name":"spawn_agent","namespace":"collaboration-optimize","arguments":{"namespace":"collaboration-optimize","name":"collaboration-optimize__opaque"}},
 				{"type":"function_call","name":"collaboration-optimize__send_message"},
+				{"type":"function_call","name":"collaboration-optimize.send_message"},
 				{"type":"message","namespace":"collaboration-optimize","name":"collaboration-optimize__plain"}
 			],
 			"tools":[{"type":"namespace","name":"collaboration-optimize"}]
@@ -458,6 +459,9 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	if name := gjson.GetBytes(got, "response.output.1.name").String(); name != "collaboration__send_message" {
 		t.Fatalf("qualified function name = %q, want collaboration__send_message", name)
 	}
+	if name := gjson.GetBytes(got, "response.output.2.name").String(); name != "collaboration.send_message" {
+		t.Fatalf("dotted function name = %q, want collaboration.send_message", name)
+	}
 	if name := gjson.GetBytes(got, "response.tools.0.name").String(); name != codexCollaborationNamespace {
 		t.Fatalf("namespace tool name = %q, want collaboration", name)
 	}
@@ -467,11 +471,11 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 		t.Fatalf("opaque arguments namespace was unexpectedly rewritten: %q", namespace)
 	}
 	if namespace := gjson.GetBytes(
-		got, "response.output.2.namespace",
+		got, "response.output.3.namespace",
 	).String(); namespace != codexOptimizedCollaborationNamespace {
 		t.Fatalf("ordinary namespace field was unexpectedly rewritten: %q", namespace)
 	}
-	if name := gjson.GetBytes(got, "response.output.2.name").String(); name != "collaboration-optimize__plain" {
+	if name := gjson.GetBytes(got, "response.output.3.name").String(); name != "collaboration-optimize__plain" {
 		t.Fatalf("ordinary name field was unexpectedly rewritten: %q", name)
 	}
 	if unchanged := RestoreCodexMultiAgentV2Response(payload, false); string(unchanged) != string(payload) {

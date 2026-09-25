@@ -59,3 +59,54 @@ func TestCodexResponsesBodyUsesResolvedModelIsCompat(t *testing.T) {
 		t.Fatalf("compat input text = %q, want task; output=%s", got, compat.Body)
 	}
 }
+
+func TestCodexResponsesBodyAppliesIndependentOrphanDelegationCompatibility(t *testing.T) {
+	cfg := &config.Config{Codex: config.CodexConfig{OrphanDelegationCompatibility: true}}
+	opts := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:      http.Header{"X-Openai-Subagent": []string{"collab_spawn"}},
+	}
+	payload := []byte(`{
+		"model":"compat-model",
+		"input":[{
+			"type":"function_call_output",
+			"namespace":"codex_app",
+			"name":"create_thread",
+			"call_id":"orphan-call",
+			"output":"worker result"
+		}]
+	}`)
+	req := cliproxyexecutor.Request{
+		Model:   "compat-model",
+		Payload: payload,
+		Metadata: map[string]any{
+			"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},
+		},
+	}
+
+	prepared, err := codexResponsesBody(
+		context.Background(),
+		cfg,
+		&cliproxyauth.Auth{},
+		"compat-model",
+		"compat-model",
+		"codex",
+		sdktranslator.FormatOpenAIResponse,
+		opts,
+		req,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("codexResponsesBody() error = %v", err)
+	}
+	if got := gjson.GetBytes(prepared.Body, "input.0.type").String(); got != "message" {
+		t.Fatalf("orphan input type = %q, want message; output=%s", got, prepared.Body)
+	}
+	wantText := "Tool output from codex_app__create_thread:\nworker result"
+	if got := gjson.GetBytes(prepared.Body, "input.0.content.0.text").String(); got != wantText {
+		t.Fatalf("orphan input text = %q, want %q; output=%s", got, wantText, prepared.Body)
+	}
+	if prepared.OptimizedMultiAgentV2 {
+		t.Fatal("orphan compatibility enabled multi-agent v2 optimization")
+	}
+}

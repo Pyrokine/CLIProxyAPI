@@ -40,69 +40,154 @@ func TestReadCodexResponseBodyRequiresEOFWithinLimit(t *testing.T) {
 
 func TestParseCodexRetryAfter(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
+	tests := []struct {
+		name   string
+		status int
+		quota  string
+		want   time.Duration
+	}{
+		{name: "relative reset", status: http.StatusTooManyRequests, quota: `{"type":"usage_limit_reached","resets_in_seconds":123}`, want: 123 * time.Second},
+		{name: "absolute reset wins", status: http.StatusTooManyRequests, quota: `{"type":"usage_limit_reached","resets_at":1700000300,"resets_in_seconds":1}`, want: 5 * time.Minute},
+		{name: "expired absolute reset falls back", status: http.StatusTooManyRequests, quota: `{"type":"usage_limit_reached","resets_at":1699999940,"resets_in_seconds":77}`, want: 77 * time.Second},
+		{name: "case and whitespace", status: http.StatusTooManyRequests, quota: `{"type":" USAGE_LIMIT_REACHED ","resets_in_seconds":30}`, want: 30 * time.Second},
+		{name: "missing reset", status: http.StatusTooManyRequests, quota: `{"type":"usage_limit_reached"}`},
+		{name: "nonpositive reset", status: http.StatusTooManyRequests, quota: `{"type":"usage_limit_reached","resets_at":0,"resets_in_seconds":-1}`},
+		{name: "transient limit", status: http.StatusTooManyRequests, quota: `{"type":"rate_limit_error","resets_in_seconds":30}`},
+		{name: "non 429", status: http.StatusBadRequest, quota: `{"type":"usage_limit_reached","resets_in_seconds":30}`},
+	}
+	for _, layout := range []string{"nested", "top-level"} {
+		for _, test := range tests {
+			t.Run(layout+"/"+test.name, func(t *testing.T) {
+				body := []byte(test.quota)
+				if layout == "nested" {
+					body = []byte(`{"error":` + test.quota + `}`)
+				}
+				got := parseCodexRetryAfter(test.status, body, now)
+				if test.want == 0 {
+					if got != nil {
+						t.Fatalf("retryAfter = %v, want nil", *got)
+					}
+					return
+				}
+				if got == nil || *got != test.want {
+					t.Fatalf("retryAfter = %v, want %v", got, test.want)
+				}
+			})
+		}
+	}
+}
 
-	t.Run(
-		"resets_in_seconds", func(t *testing.T) {
-			body := []byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":123}}`)
-			retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
-			if retryAfter == nil {
-				t.Fatalf("expected retryAfter, got nil")
-			}
-			if *retryAfter != 123*time.Second {
-				t.Fatalf("retryAfter = %v, want %v", *retryAfter, 123*time.Second)
-			}
+func TestCodexUsageLimitClassificationAcrossTransports(t *testing.T) {
+	quota := `{"type":" USAGE_LIMIT_REACHED ","message":"quota exhausted","resets_in_seconds":7}`
+	for _, test := range []struct {
+		name string
+		call func() (error, bool)
+	}{
+		{
+			name: "HTTP nested",
+			call: func() (error, bool) {
+				err := newCodexStatusErr(http.StatusBadRequest, []byte(`{"error":`+quota+`}`))
+				return err, true
+			},
 		},
-	)
+		{
+			name: "HTTP top-level without reset",
+			call: func() (error, bool) {
+				err := newCodexStatusErr(http.StatusBadRequest, []byte(`{"type":"usage_limit_reached"}`))
+				return err, true
+			},
+		},
+		{
+			name: "SSE response.failed",
+			call: func() (error, bool) {
+				return parseCodexEventError([]byte(`{"type":"response.failed","response":{"error":` + quota + `}}`))
+			},
+		},
+		{
+			name: "WebSocket error",
+			call: func() (error, bool) {
+				return parseCodexWebsocketError([]byte(`{"type":"error","status":429,"error":` + quota + `}`))
+			},
+		},
+		{
+			name: "WebSocket body.error",
+			call: func() (error, bool) {
+				return parseCodexWebsocketError([]byte(`{"type":"error","status":429,"body":{"error":` + quota + `}}`))
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err, ok := test.call()
+			if !ok || err == nil {
+				t.Fatalf("quota error = %v, %t", err, ok)
+			}
+			if got := statusErrCode(err); got != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want 429; error=%v", got, err)
+			}
+			if strings.Contains(test.name, "without reset") {
+				if retry := err.(interface{ RetryAfter() *time.Duration }).RetryAfter(); retry != nil {
+					t.Fatalf("retryAfter = %v, want nil", *retry)
+				}
+				return
+			}
+			retryable, supportsRetry := err.(interface{ RetryAfter() *time.Duration })
+			if !supportsRetry || retryable.RetryAfter() == nil || *retryable.RetryAfter() != 7*time.Second {
+				t.Fatalf("retryAfter = %#v, want 7s", err)
+			}
+		})
+	}
+}
 
-	t.Run(
-		"prefers resets_at", func(t *testing.T) {
-			resetAt := now.Add(5 * time.Minute).Unix()
-			body := []byte(
-				`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":1}}`,
+func TestCodexExecuteStreamTransformsGrokKeepaliveOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.5\"}}\n\n")
+		_, _ = io.WriteString(w, "event: keepalive\ndata: {\"type\":\"keepalive\",\"sequence_number\":3}\n\n")
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer server.Close()
+
+	for _, test := range []struct {
+		name         string
+		userAgent    string
+		wantComment  bool
+		wantRawEvent bool
+	}{
+		{name: "Grok Shell", userAgent: "grok-shell/1.0", wantComment: true},
+		{name: "Grok Pager", userAgent: "grok-pager/1.0", wantComment: true},
+		{name: "ordinary client", userAgent: "curl/8.7.1", wantRawEvent: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			exec := newCodexExecutor(&config.Config{})
+			result, errExecute := exec.ExecuteStream(
+				context.Background(),
+				&cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test", "base_url": server.URL}},
+				cliproxyexecutor.Request{Model: "gpt-5.5", Payload: []byte(`{"model":"gpt-5.5","input":"hi"}`)},
+				cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAIResponse,
+					Headers:      http.Header{"User-Agent": {test.userAgent}},
+				},
 			)
-			retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
-			if retryAfter == nil {
-				t.Fatalf("expected retryAfter, got nil")
+			if errExecute != nil {
+				t.Fatalf("ExecuteStream() error = %v", errExecute)
 			}
-			if *retryAfter != 5*time.Minute {
-				t.Fatalf("retryAfter = %v, want %v", *retryAfter, 5*time.Minute)
+			var output bytes.Buffer
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream error = %v", chunk.Err)
+				}
+				output.Write(chunk.Payload)
 			}
-		},
-	)
-
-	t.Run(
-		"fallback when resets_at is past", func(t *testing.T) {
-			resetAt := now.Add(-1 * time.Minute).Unix()
-			body := []byte(
-				`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `,"resets_in_seconds":77}}`,
-			)
-			retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
-			if retryAfter == nil {
-				t.Fatalf("expected retryAfter, got nil")
+			got := output.String()
+			if strings.Contains("\n"+got, "\n: keepalive\n") != test.wantComment {
+				t.Fatalf("keepalive comment mismatch: %s", got)
 			}
-			if *retryAfter != 77*time.Second {
-				t.Fatalf("retryAfter = %v, want %v", *retryAfter, 77*time.Second)
+			hasRawEvent := strings.Contains(got, `"type":"keepalive"`) || strings.Contains(got, "event: keepalive")
+			if hasRawEvent != test.wantRawEvent {
+				t.Fatalf("raw keepalive mismatch: %s", got)
 			}
-		},
-	)
-
-	t.Run(
-		"non-429 status code", func(t *testing.T) {
-			body := []byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":30}}`)
-			if got := parseCodexRetryAfter(http.StatusBadRequest, body, now); got != nil {
-				t.Fatalf("expected nil for non-429, got %v", *got)
-			}
-		},
-	)
-
-	t.Run(
-		"non usage_limit_reached error type", func(t *testing.T) {
-			body := []byte(`{"error":{"type":"server_error","resets_in_seconds":30}}`)
-			if got := parseCodexRetryAfter(http.StatusTooManyRequests, body, now); got != nil {
-				t.Fatalf("expected nil for non-usage_limit_reached, got %v", *got)
-			}
-		},
-	)
+		})
+	}
 }
 
 func TestCodexExecuteRetriesHTTP408Once(t *testing.T) {
@@ -232,10 +317,6 @@ func TestCodexExecuteRecoversWhenCompletedEventIsMissing(t *testing.T) {
 	if !bytes.Contains(resp.Payload, []byte(`"ok"`)) {
 		t.Fatalf("response payload missing recovered text: %s", string(resp.Payload))
 	}
-}
-
-func itoa(v int64) string {
-	return strconv.FormatInt(v, 10)
 }
 
 func TestCodexExecuteStreamPropagatesUpstreamEventError(t *testing.T) {
@@ -451,7 +532,7 @@ func TestCodexExecuteStreamIgnoresTransportErrorAfterCompleted(t *testing.T) {
 				if errHijack != nil {
 					t.Fatalf("Hijack error: %v", errHijack)
 				}
-					defer func() { _ = conn.Close() }()
+				defer func() { _ = conn.Close() }()
 
 				payload := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_partial\",\"model\":\"gpt-5.5\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n"
 				_, _ = rw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")

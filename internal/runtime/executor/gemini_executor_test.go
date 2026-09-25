@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
 
@@ -176,6 +178,132 @@ func TestGeminiInteractionsExecuteUsesClientRevisionHeader(t *testing.T) {
 	}
 }
 
+func TestGeminiExecuteUsesExplicitDynamicHeaderSource(t *testing.T) {
+	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginContext.Request.Header.Set("X-Client-Value", "from-gin")
+
+	var upstreamHeaders http.Header
+	ctx := util.WithGinContext(context.Background(), ginContext)
+	ctx = util.WithSessionID(ctx, "gemini-session")
+	ctx = util.WithRoundTripper(ctx, geminiInteractionsRoundTripper(func(req *http.Request) (*http.Response, error) {
+		upstreamHeaders = req.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}`,
+			)),
+			Request: req,
+		}, nil
+	}))
+
+	exec := NewGeminiExecutor(&config.Config{})
+	_, err := exec.Execute(
+		ctx,
+		&cliproxyauth.Auth{
+			Provider: "gemini",
+			Attributes: map[string]string{
+				"api_key":               "test-key",
+				"header:X-Copied":       "$X-CLIENT-VALUE",
+				"header:X-CPA-Session":  "$cpa-session-id",
+				"header:X-Missing":      "$Missing-Header",
+				"header:X-Auth-Copy":    "$Authorization",
+				"header:X-Cookie-Copy":  "$Cookie",
+				"header:Authorization":  "Bearer custom",
+				"header:Content-Length": "999",
+			},
+		},
+		cliproxyexecutor.Request{
+			Model: "gemini-2.5-pro",
+			Payload: []byte(
+				`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			),
+		},
+		cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatGemini,
+			ResponseFormat: sdktranslator.FormatGemini,
+			Headers: http.Header{
+				"x-cLiEnT-vAlUe": []string{"from-options"},
+				"Authorization":  []string{"Bearer caller"},
+				"Cookie":         []string{"caller=cookie"},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
+	}
+	if got := upstreamHeaders.Get("X-Copied"); got != "from-options" {
+		t.Fatalf("X-Copied = %q, want from-options", got)
+	}
+	if got := upstreamHeaders.Get("X-CPA-Session"); got != "gemini-session" {
+		t.Fatalf("X-CPA-Session = %q, want gemini-session", got)
+	}
+	for _, name := range []string{"X-Missing", "X-Auth-Copy", "X-Cookie-Copy", "Authorization"} {
+		if got := upstreamHeaders.Get(name); got != "" {
+			t.Fatalf("%s = %q, want empty", name, got)
+		}
+	}
+	if got := upstreamHeaders.Get("Content-Length"); got != "" {
+		t.Fatalf("Content-Length = %q, want empty", got)
+	}
+	if got := upstreamHeaders.Get("x-goog-api-key"); got != "test-key" {
+		t.Fatalf("x-goog-api-key = %q, want test-key", got)
+	}
+}
+
+func TestGeminiExecuteFallsBackToGinDynamicHeaderSource(t *testing.T) {
+	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	ginContext.Request.Header.Set("X-Client-Value", "from-gin")
+
+	var upstreamHeaders http.Header
+	ctx := util.WithGinContext(context.Background(), ginContext)
+	ctx = util.WithRoundTripper(ctx, geminiInteractionsRoundTripper(func(req *http.Request) (*http.Response, error) {
+		upstreamHeaders = req.Header.Clone()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"candidates":[{"content":{"role":"model","parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`,
+			)),
+			Request: req,
+		}, nil
+	}))
+
+	exec := NewGeminiExecutor(&config.Config{})
+	_, err := exec.Execute(
+		ctx,
+		&cliproxyauth.Auth{
+			Provider: "gemini",
+			Attributes: map[string]string{
+				"api_key":               "test-key",
+				"header:X-Copied":       "$X-CLIENT-VALUE",
+				"header:Content-Length": "999",
+			},
+		},
+		cliproxyexecutor.Request{
+			Model: "gemini-2.5-pro",
+			Payload: []byte(
+				`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`,
+			),
+		},
+		cliproxyexecutor.Options{
+			SourceFormat:   sdktranslator.FormatGemini,
+			ResponseFormat: sdktranslator.FormatGemini,
+		},
+	)
+	if err != nil {
+		t.Fatalf("Execute error = %v", err)
+	}
+	if got := upstreamHeaders.Get("X-Copied"); got != "from-gin" {
+		t.Fatalf("X-Copied = %q, want from-gin", got)
+	}
+	if got := upstreamHeaders.Get("Content-Length"); got != "" {
+		t.Fatalf("Content-Length = %q, want empty", got)
+	}
+}
+
 func TestGeminiExecuteStreamReadErrorWinsOverBufferedUsage(t *testing.T) {
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 64)}
 	registerTestUsagePlugin(t, plugin)
@@ -224,6 +352,7 @@ func TestGeminiExecuteStreamReadErrorWinsOverBufferedUsage(t *testing.T) {
 	}
 
 	deadline := time.After(time.Second)
+waitForReadErrorUsage:
 	for {
 		select {
 		case record := <-plugin.records:
@@ -233,9 +362,146 @@ func TestGeminiExecuteStreamReadErrorWinsOverBufferedUsage(t *testing.T) {
 			if !record.Failed {
 				t.Fatalf("usage record = %#v, want failure", record)
 			}
-			return
+			break waitForReadErrorUsage
 		case <-deadline:
 			t.Fatal("timed out waiting for failed usage record")
+		}
+	}
+	select {
+	case record := <-plugin.records:
+		if record.Alias == "gemini-read-error-test" {
+			t.Fatalf("received duplicate usage record: %#v", record)
+		}
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestGeminiExecuteStreamCancellationWinsOverBufferedUsage(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
+	registerTestUsagePlugin(t, plugin)
+
+	baseCtx := util.WithRoundTripper(
+		context.Background(),
+		geminiInteractionsRoundTripper(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(
+					"data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":4,\"totalTokenCount\":7}}\n",
+				)),
+				Request: req,
+			}, nil
+		}),
+	)
+	baseCtx = usage.WithRequestedModelAlias(baseCtx, "gemini-cancel-test")
+	ctx, cancel := context.WithCancel(baseCtx)
+
+	exec := NewGeminiExecutor(&config.Config{})
+	stream, err := exec.ExecuteStream(
+		ctx,
+		&cliproxyauth.Auth{Provider: "gemini", Attributes: map[string]string{"api_key": "test-key"}},
+		cliproxyexecutor.Request{
+			Model: "gemini-2.5-pro", Payload: []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`),
+		},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini, Stream: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream error = %v", err)
+	}
+	cancel()
+	for range stream.Chunks {
+	}
+
+	deadline := time.After(time.Second)
+waitForCanceledUsage:
+	for {
+		select {
+		case record := <-plugin.records:
+			if record.Alias != "gemini-cancel-test" {
+				continue
+			}
+			if !record.Failed || record.Fail.StatusCode != 499 {
+				t.Fatalf("usage record = %#v, want canceled failure", record)
+			}
+			if record.Detail.InputTokens != 0 || record.Detail.OutputTokens != 0 || record.Detail.TotalTokens != 0 {
+				t.Fatalf("failure usage detail = %+v, want zero", record.Detail)
+			}
+			break waitForCanceledUsage
+		case <-deadline:
+			t.Fatal("timed out waiting for canceled usage record")
+		}
+	}
+	select {
+	case record := <-plugin.records:
+		if record.Alias == "gemini-cancel-test" {
+			t.Fatalf("received duplicate usage record: %#v", record)
+		}
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestGeminiInteractionsExecuteStreamCancellationWinsOverBufferedUsage(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
+	registerTestUsagePlugin(t, plugin)
+
+	baseCtx := util.WithRoundTripper(
+		context.Background(),
+		geminiInteractionsRoundTripper(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(
+					"data: {\"delta\":\"ok\",\"usage\":{\"input_tokens\":3,\"output_tokens\":4,\"total_tokens\":7}}\n\n" +
+						"event: done\n\n",
+				)),
+				Request: req,
+			}, nil
+		}),
+	)
+	baseCtx = usage.WithRequestedModelAlias(baseCtx, "gemini-interactions-cancel-test")
+	ctx, cancel := context.WithCancel(baseCtx)
+
+	exec := NewGeminiInteractionsExecutor(&config.Config{})
+	stream, err := exec.ExecuteStream(
+		ctx,
+		&cliproxyauth.Auth{Provider: "gemini-interactions", Attributes: map[string]string{"api_key": "test-key"}},
+		cliproxyexecutor.Request{Model: "gemini-2.5-pro", Payload: []byte(`{"input":"hi"}`)},
+		cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions, Stream: true,
+		},
+	)
+	if err != nil {
+		t.Fatalf("ExecuteStream error = %v", err)
+	}
+	cancel()
+	for range stream.Chunks {
+	}
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case record := <-plugin.records:
+			if record.Alias != "gemini-interactions-cancel-test" {
+				continue
+			}
+			if !record.Failed || record.Fail.StatusCode != 499 {
+				t.Fatalf("usage record = %#v, want canceled failure", record)
+			}
+			if record.Detail.InputTokens != 0 || record.Detail.OutputTokens != 0 || record.Detail.TotalTokens != 0 {
+				t.Fatalf("failure usage detail = %+v, want zero", record.Detail)
+			}
+			select {
+			case duplicate := <-plugin.records:
+				if duplicate.Alias == "gemini-interactions-cancel-test" {
+					t.Fatalf("received duplicate usage record: %#v", duplicate)
+				}
+			case <-time.After(20 * time.Millisecond):
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for canceled usage record")
 		}
 	}
 }
@@ -430,4 +696,41 @@ func TestGeminiInteractionsExecuteStreamForcesStreamAndPassesThroughInteractions
 			t.Fatal("timed out waiting for stream chunks")
 		}
 	}
+}
+
+func TestPrepareGeminiRequestNormalizesBoundaryTurns(t *testing.T) {
+	executor := NewGeminiExecutor(&config.Config{})
+	prepared, errPrepare := executor.prepareGeminiRequest(
+		context.Background(),
+		&cliproxyauth.Auth{},
+		cliproxyexecutor.Request{
+			Model:   "gemini-2.5-pro",
+			Payload: []byte(`{"contents":[{"role":"model","parts":[{"text":"answer"}]}]}`),
+		},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini},
+		false,
+	)
+	if errPrepare != nil {
+		t.Fatalf("prepareGeminiRequest() error = %v", errPrepare)
+	}
+	assertGeminiBoundaryRoles(t, prepared.body, []string{"user", "model", "user"})
+}
+
+func TestPrepareGeminiCountTokensPreservesTrailingModelTurn(t *testing.T) {
+	executor := NewGeminiExecutor(&config.Config{})
+	prepared, errPrepare := executor.prepareGeminiRequest(
+		context.Background(),
+		&cliproxyauth.Auth{},
+		cliproxyexecutor.Request{
+			Model:    "gemini-2.5-pro",
+			Payload:  []byte(`{"contents":[{"role":"model","parts":[{"text":"answer"}]}]}`),
+			Metadata: map[string]any{"action": "countTokens"},
+		},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini},
+		false,
+	)
+	if errPrepare != nil {
+		t.Fatalf("prepareGeminiRequest() error = %v", errPrepare)
+	}
+	assertGeminiBoundaryRoles(t, prepared.body, []string{"user", "model"})
 }

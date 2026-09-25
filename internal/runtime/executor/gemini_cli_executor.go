@@ -102,7 +102,7 @@ func (e *GeminiCLIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth
 	if strings.TrimSpace(tok.AccessToken) == "" {
 		return statusErr{code: http.StatusUnauthorized, msg: "missing access token"}
 	}
-	req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	util.ApplyCredentialHeader(req, "Authorization", "Bearer "+tok.AccessToken)
 	applyGeminiCLIHeaders(req, "unknown")
 	return nil
 }
@@ -249,7 +249,7 @@ func (e *GeminiCLIExecutor) Execute(
 			return resp, err
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
-		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		util.ApplyCredentialHeader(reqHTTP, "Authorization", "Bearer "+tok.AccessToken)
 		applyGeminiCLIHeaders(reqHTTP, attemptModel)
 		reqHTTP.Header.Set("Accept", "application/json")
 		recordUpstreamRequest(ctx, e.cfg, url, reqHTTP.Header.Clone(), payload, e.Identifier(), auth)
@@ -361,7 +361,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(
 			return nil, err
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
-		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		util.ApplyCredentialHeader(reqHTTP, "Authorization", "Bearer "+tok.AccessToken)
 		applyGeminiCLIHeaders(reqHTTP, attemptModel)
 		reqHTTP.Header.Set("Accept", "text/event-stream")
 		recordUpstreamRequest(ctx, e.cfg, url, reqHTTP.Header.Clone(), payload, e.Identifier(), auth)
@@ -560,7 +560,7 @@ func (e *GeminiCLIExecutor) CountTokens(
 			return cliproxyexecutor.Response{}, errReq
 		}
 		reqHTTP.Header.Set("Content-Type", "application/json")
-		reqHTTP.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		util.ApplyCredentialHeader(reqHTTP, "Authorization", "Bearer "+tok.AccessToken)
 		applyGeminiCLIHeaders(reqHTTP, baseModel)
 		reqHTTP.Header.Set("Accept", "application/json")
 		recordUpstreamRequest(ctx, e.cfg, url, reqHTTP.Header.Clone(), payload, e.Identifier(), auth)

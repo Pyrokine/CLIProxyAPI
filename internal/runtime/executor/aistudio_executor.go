@@ -48,8 +48,9 @@ func NewAIStudioExecutor(cfg *config.Config, provider string, relay *wsrelay.Man
 // Identifier returns the executor identifier.
 func (e *AIStudioExecutor) Identifier() string { return "aistudio" }
 
-// PrepareRequest prepares the HTTP request for execution (no-op for AI Studio).
-func (e *AIStudioExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error {
+// PrepareRequest prepares the HTTP request for execution.
+func (e *AIStudioExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
+	applyGeminiHeaders(req, auth)
 	return nil
 }
 
@@ -74,6 +75,7 @@ func (e *AIStudioExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.A
 	if httpReq.URL == nil || strings.TrimSpace(httpReq.URL.String()) == "" {
 		return nil, fmt.Errorf("aistudio executor: request URL is empty")
 	}
+	applyGeminiHeaders(httpReq, auth, req.Header.Clone())
 
 	var body []byte
 	if httpReq.Body != nil {
@@ -124,6 +126,20 @@ type aistudioPrepared struct {
 	authID        string
 }
 
+func aistudioRequestHeaders(
+	ctx context.Context,
+	auth *cliproxyauth.Auth,
+	clientHeaders http.Header,
+) http.Header {
+	headers := http.Header{"Content-Type": []string{"application/json"}}
+	req := &http.Request{Header: headers}
+	if ctx != nil {
+		req = req.WithContext(ctx)
+	}
+	applyGeminiHeaders(req, auth, clientHeaders)
+	return req.Header
+}
+
 func (e *AIStudioExecutor) prepareRequest(
 	ctx context.Context,
 	auth *cliproxyauth.Auth,
@@ -147,7 +163,7 @@ func (e *AIStudioExecutor) prepareRequest(
 	wsReq := &wsrelay.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     endpoint,
-		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Headers: aistudioRequestHeaders(ctx, auth, opts.Headers),
 		Body:    body.payload,
 	}
 	var authID string
@@ -264,12 +280,22 @@ func (e *AIStudioExecutor) ExecuteStream(
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func(first wsrelay.StreamEvent) {
 		defer close(out)
+		var streamUsage streamUsageBuffer
+		defer func() {
+			if errStream := scannerOrContextError(ctx, nil); errStream != nil {
+				recordAPIResponseError(ctx, e.cfg, errStream)
+				p.reporter.publishFailure(ctx, errStream)
+				return
+			}
+			streamUsage.publish(ctx, p.reporter)
+			p.reporter.ensurePublished(ctx)
+		}()
 		var param any
 		metadataLogged := false
 		processEvent := func(event wsrelay.StreamEvent) bool {
 			if event.Err != nil {
 				recordAPIResponseError(ctx, e.cfg, event.Err)
-				p.reporter.publishFailure(ctx)
+				p.reporter.publishFailure(ctx, event.Err)
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}) {
 					return false
 				}
@@ -284,10 +310,10 @@ func (e *AIStudioExecutor) ExecuteStream(
 			case wsrelay.MessageTypeStreamChunk:
 				if len(event.Payload) > 0 {
 					appendAPIResponseChunk(ctx, e.cfg, event.Payload)
-					filtered := filterSSEUsageMetadata(event.Payload)
-					if detail, ok := parseGeminiStreamUsage(filtered); ok {
-						p.reporter.publish(ctx, detail)
+					if detail, ok := parseGeminiStreamUsage(event.Payload); ok {
+						streamUsage.observe(detail, true, false)
 					}
+					filtered := filterSSEUsageMetadata(event.Payload)
 					lines := sdktranslator.TranslateStream(
 						ctx, p.body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, p.translatedReq,
 						filtered,
@@ -297,6 +323,10 @@ func (e *AIStudioExecutor) ExecuteStream(
 						if !sendStreamChunk(
 							ctx, out, cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])},
 						) {
+							if errStream := scannerOrContextError(ctx, nil); errStream != nil {
+								recordAPIResponseError(ctx, e.cfg, errStream)
+								p.reporter.publishFailure(ctx, errStream)
+							}
 							return false
 						}
 					}
@@ -312,6 +342,9 @@ func (e *AIStudioExecutor) ExecuteStream(
 				if len(event.Payload) > 0 {
 					appendAPIResponseChunk(ctx, e.cfg, event.Payload)
 				}
+				if detail, ok := parseGeminiStreamUsage(event.Payload); ok {
+					streamUsage.observe(detail, true, false)
+				}
 				lines := sdktranslator.TranslateStream(
 					ctx, p.body.toFormat, opts.SourceFormat, req.Model, opts.OriginalRequest, p.translatedReq,
 					event.Payload, &param,
@@ -320,14 +353,17 @@ func (e *AIStudioExecutor) ExecuteStream(
 					if !sendStreamChunk(
 						ctx, out, cliproxyexecutor.StreamChunk{Payload: ensureColonSpacedJSON(lines[i])},
 					) {
+						if errStream := scannerOrContextError(ctx, nil); errStream != nil {
+							recordAPIResponseError(ctx, e.cfg, errStream)
+							p.reporter.publishFailure(ctx, errStream)
+						}
 						return false
 					}
 				}
-				p.reporter.publish(ctx, parseGeminiUsage(event.Payload))
 				return false
 			case wsrelay.MessageTypeError:
 				recordAPIResponseError(ctx, e.cfg, event.Err)
-				p.reporter.publishFailure(ctx)
+				p.reporter.publishFailure(ctx, event.Err)
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: fmt.Errorf("wsrelay: %v", event.Err)}) {
 					return false
 				}
@@ -342,6 +378,10 @@ func (e *AIStudioExecutor) ExecuteStream(
 			if !processEvent(event) {
 				return
 			}
+		}
+		if errStream := scannerOrContextError(ctx, nil); errStream != nil {
+			recordAPIResponseError(ctx, e.cfg, errStream)
+			p.reporter.publishFailure(ctx, errStream)
 		}
 	}(firstEvent)
 	return &cliproxyexecutor.StreamResult{Headers: firstEvent.Headers.Clone(), Chunks: out}, nil
@@ -368,7 +408,7 @@ func (e *AIStudioExecutor) CountTokens(
 	wsReq := &wsrelay.HTTPRequest{
 		Method:  http.MethodPost,
 		URL:     endpoint,
-		Headers: http.Header{"Content-Type": []string{"application/json"}},
+		Headers: aistudioRequestHeaders(ctx, auth, opts.Headers),
 		Body:    body.payload,
 	}
 	var authID string
@@ -451,7 +491,37 @@ func (e *AIStudioExecutor) translateRequest(
 		action = "streamGenerateContent"
 	}
 	payload, _ = sjson.DeleteBytes(payload, "session_id")
+	payload = helps.EnsureGeminiLeadingUserContent(payload, "contents")
+	if action != "countTokens" {
+		payload = helps.EnsureGeminiTrailingUserContent(payload, "contents")
+	}
+	payload = normalizeAIStudioThinkingLevel(payload)
 	return payload, translatedPayload{payload: payload, action: action, toFormat: to}, nil
+}
+
+// normalizeAIStudioThinkingLevel normalizes supported thinking levels to Google's uppercase wire values.
+func normalizeAIStudioThinkingLevel(payload []byte) []byte {
+	const path = "generationConfig.thinkingConfig.thinkingLevel"
+	level := gjson.GetBytes(payload, path)
+	if level.Type != gjson.String {
+		return payload
+	}
+
+	normalized := strings.ToUpper(level.String())
+	switch normalized {
+	case "MINIMAL", "LOW", "MEDIUM", "HIGH":
+	default:
+		return payload
+	}
+	if normalized == level.String() {
+		return payload
+	}
+
+	result, errSet := sjson.SetBytes(payload, path, normalized)
+	if errSet != nil {
+		return payload
+	}
+	return result
 }
 
 func (e *AIStudioExecutor) buildEndpoint(model, action, alt string) string {

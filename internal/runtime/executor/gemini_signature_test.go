@@ -48,7 +48,7 @@ func TestPrepareGeminiRequestSanitizesThoughtSignatures(t *testing.T) {
 	}
 
 	if got := gjson.GetBytes(
-		body, "contents.0.parts.0.thoughtSignature",
+		body, `contents.#(role=="model").parts.0.thoughtSignature`,
 	).String(); got != "skip_thought_signature_validator" {
 		t.Fatalf("thoughtSignature = %q, want skip sentinel. Body: %s", got, string(body))
 	}
@@ -80,7 +80,7 @@ func TestPrepareGeminiRequestPreservesValidThoughtSignatures(t *testing.T) {
 		t.Fatalf("read request body: %v", err)
 	}
 
-	if got := gjson.GetBytes(body, "contents.0.parts.0.thoughtSignature").String(); got != signature {
+	if got := gjson.GetBytes(body, `contents.#(role=="model").parts.0.thoughtSignature`).String(); got != signature {
 		t.Fatalf("thoughtSignature = %q, want %q. Body: %s", got, signature, string(body))
 	}
 }
@@ -106,7 +106,7 @@ func TestAIStudioTranslateRequestSanitizesThoughtSignatures(t *testing.T) {
 	}
 
 	if got := gjson.GetBytes(
-		translated, "contents.0.parts.0.thoughtSignature",
+		translated, `contents.#(role=="model").parts.0.thoughtSignature`,
 	).String(); got != "skip_thought_signature_validator" {
 		t.Fatalf("thoughtSignature = %q, want skip sentinel. Body: %s", got, string(translated))
 	}
@@ -134,7 +134,7 @@ func TestPrepareVertexGeminiBodySanitizesThoughtSignatures(t *testing.T) {
 	}
 
 	if got := gjson.GetBytes(
-		prepared.body, "contents.0.parts.0.thoughtSignature",
+		prepared.body, `contents.#(role=="model").parts.0.thoughtSignature`,
 	).String(); got != "skip_thought_signature_validator" {
 		t.Fatalf("thoughtSignature = %q, want skip sentinel. Body: %s", got, string(prepared.body))
 	}
