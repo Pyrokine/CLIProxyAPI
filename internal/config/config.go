@@ -22,6 +22,18 @@ const (
 	DefaultPprofAddr             = "127.0.0.1:8316"
 )
 
+// RequestScopedErrorRule configures custom classification and handling for upstream errors.
+type RequestScopedErrorRule struct {
+	// Status matches the HTTP status code of the upstream response.
+	Status int `yaml:"status,omitempty" json:"status,omitempty"`
+	// Match matches case-sensitive substrings in the upstream error body.
+	Match []string `yaml:"match,omitempty" json:"match,omitempty"`
+	// MatchRegexr matches regular expressions in the upstream error body.
+	MatchRegexr []string `yaml:"match-regexr,omitempty" json:"match-regexr,omitempty"`
+	// Action specifies stop, stop-and-cooldown, continue, or continue-and-cooldown.
+	Action string `yaml:"action,omitempty" json:"action,omitempty"`
+}
+
 // Config represents the application's configuration, loaded from a YAML file.
 type Config struct {
 	SDKConfig `yaml:",inline"`
@@ -146,6 +158,9 @@ type Config struct {
 	// Antigravity configures provider-wide Antigravity request behavior.
 	Antigravity AntigravityConfig `yaml:"antigravity" json:"antigravity"`
 
+	// Devin configures provider-wide Devin request behavior.
+	Devin DevinConfig `yaml:"devin" json:"devin"`
+
 	// XAI configures provider-wide xAI request behavior.
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 
@@ -179,6 +194,9 @@ type Config struct {
 	// gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key,
 	// openai-compatibility, and vertex-api-key.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
+
+	// OAuthRequestScopedErrors defines per-provider error rules for OAuth/file-backed auth entries.
+	OAuthRequestScopedErrors map[string][]RequestScopedErrorRule `yaml:"oauth-request-scoped-errors,omitempty" json:"oauth-request-scoped-errors,omitempty"`
 
 	// AutoRefreshInterval is the interval (in seconds) for the management panel to auto-refresh data
 	// when the browser window regains focus. Set to 0 to disable auto-refresh. Default: 3.
@@ -303,6 +321,30 @@ type CodexHeaderDefaults struct {
 type AntigravityConfig struct {
 	// SensitiveWords lists words obfuscated with zero-width characters in system instructions.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// ConnectionPool configures upstream HTTP connection pooling behavior for Antigravity.
+	ConnectionPool AntigravityConnectionPoolConfig `yaml:"connection-pool,omitempty" json:"connection-pool,omitempty"`
+}
+
+// AntigravityConnectionPoolConfig controls upstream HTTP/1.1 connection pooling behavior for Antigravity.
+type AntigravityConnectionPoolConfig struct {
+	// Enabled controls whether upstream connection pooling is enabled.
+	// Defaults to false (short-lived connection mode). Set to true to enable connection pooling.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
+	// IdleConnTimeout specifies how long an idle connection stays in the pool before expiring.
+	// Defaults to "30s". Capped at 210s to prevent exceeding Google Frontend (GFE) 240s cutoff.
+	IdleConnTimeout string `yaml:"idle-conn-timeout,omitempty" json:"idle-conn-timeout,omitempty"`
+
+	// MaxIdleConnsPerHost specifies the maximum number of idle connections to retain per host per credential.
+	// Defaults to 2.
+	MaxIdleConnsPerHost *int `yaml:"max-idle-conns-per-host,omitempty" json:"max-idle-conns-per-host,omitempty"`
+}
+
+// DevinConfig configures provider-wide Devin request behavior.
+type DevinConfig struct {
+	// SensitiveWords lists words whose matching system-prompt lines are removed before obfuscation.
+	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
 }
 
 // XAIConfig configures provider-wide xAI request behavior.
@@ -416,6 +458,8 @@ type CodexConfig struct {
 	IdentityConfuse      bool `yaml:"identity-confuse" json:"identity-confuse"`
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	// OrphanDelegationCompatibility enables opt-in compatibility for orphan Codex delegation outputs.
+	OrphanDelegationCompatibility bool `yaml:"orphan-delegation-compatibility" json:"orphan-delegation-compatibility"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
 }
@@ -477,6 +521,10 @@ type routingConfig struct {
 
 	// SessionAffinityTTL controls how long session bindings are retained.
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// SessionAffinitySubagents controls whether child agents inherit their parent's credential.
+	// Nil preserves the default enabled behavior; false explicitly disables inheritance.
+	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -607,7 +655,19 @@ type ClaudeKey struct {
 	// Cloak configures request cloaking for non-Claude-Code clients.
 	Cloak *CloakConfig `yaml:"cloak,omitempty" json:"cloak,omitempty"`
 
-	// ExperimentalCCHSigning enables final-body cch signing for cloaked /v1/messages requests.
+	// DisableCooling 覆盖全局冷却策略，nil 继承，false 明确启用冷却
+	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// RequestRetry 指定额外重试轮数，nil 或负值继承，零禁用额外重试
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
+	// RequestScopedErrors configures custom classification rules for upstream errors.
+	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
+
+	// FingerprintProfile 选择请求身份，不改变凭证的认证权限和刷新方式
+	FingerprintProfile string `yaml:"fingerprint-profile,omitempty" json:"fingerprint-profile,omitempty"`
+
+	// ExperimentalCCHSigning 仅保留旧配置兼容，不授权请求签名
 	ExperimentalCCHSigning bool `yaml:"experimental-cch-signing,omitempty" json:"experimental-cch-signing,omitempty"`
 }
 
@@ -683,8 +743,14 @@ type CodexKey struct {
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
 
-	// DisableCooling disables auth/model cooldown scheduling for this credential when true.
-	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+	// DisableCooling 覆盖全局冷却策略，nil 继承，false 明确启用冷却
+	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// RequestRetry 指定额外重试轮数，nil 或负值继承，零禁用额外重试
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
+	// RequestScopedErrors configures custom classification rules for upstream errors.
+	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
 }
 
 func (k CodexKey) GetAPIKey() string  { return k.APIKey }
@@ -761,6 +827,15 @@ type GeminiKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// DisableCooling 覆盖全局冷却策略，nil 继承，false 明确启用冷却
+	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// RequestRetry 指定额外重试轮数，nil 或负值继承，零禁用额外重试
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
+	// RequestScopedErrors configures custom classification rules for upstream errors.
+	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
 }
 
 func (k GeminiKey) GetAPIKey() string  { return k.APIKey }
@@ -827,8 +902,14 @@ type OpenAICompatibility struct {
 	// SupportPromptCacheKey enables derived prompt_cache_key injection for supported requests.
 	SupportPromptCacheKey bool `yaml:"support-prompt-cache-key,omitempty" json:"support-prompt-cache-key,omitempty"`
 
-	// DisableCooling disables auth/model cooldown scheduling for this provider when true.
-	DisableCooling bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+	// DisableCooling 覆盖全局冷却策略，nil 继承，false 明确启用冷却
+	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// RequestRetry 指定额外重试轮数，nil 或负值继承，零禁用额外重试
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
+
+	// RequestScopedErrors configures custom classification rules for upstream errors.
+	RequestScopedErrors []RequestScopedErrorRule `yaml:"request-scoped-errors,omitempty" json:"request-scoped-errors,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.

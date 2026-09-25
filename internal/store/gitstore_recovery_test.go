@@ -236,7 +236,7 @@ func TestGitTokenStoreRecoveryHonorsCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if errRecover := store.recoverRepositoryLocked(
-		ctx, workspaceDir, store.gitClientOptions(), nil, nil,
+		ctx, workspaceDir, store.gitClientOptions(), nil, nil, nil, (*git.Repository).Close,
 	); !errors.Is(errRecover, context.Canceled) {
 		t.Fatalf("cancelled recovery error = %v, want context.Canceled", errRecover)
 	}
@@ -247,6 +247,168 @@ func TestGitTokenStoreRecoveryHonorsCancelledContext(t *testing.T) {
 	if !os.SameFile(beforeGitInfo, afterGitInfo) {
 		t.Fatal("cancelled recovery replaced the repository")
 	}
+}
+
+func TestGitTokenStoreRecoveryAbortsBeforeMutationWhenCallerCloseFails(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := filepath.Join(root, "remote.git")
+	if _, errInit := git.PlainInit(remoteDir, true); errInit != nil {
+		t.Fatalf("initialize remote repository: %v", errInit)
+	}
+	workspaceDir := filepath.Join(root, "workspace")
+	store := newRecoveryTestStore(t, remoteDir, workspaceDir)
+	authPath := saveRecoveryTestAuth(t, store, "saved.json", "original")
+	beforeGitInfo, errStat := os.Stat(filepath.Join(workspaceDir, ".git"))
+	if errStat != nil {
+		t.Fatalf("stat repository before recovery: %v", errStat)
+	}
+	callerRepo, errOpen := git.PlainOpen(workspaceDir)
+	if errOpen != nil {
+		t.Fatalf("open caller repository: %v", errOpen)
+	}
+	closeErr := errors.New("caller close failed")
+	closeRepository := func(repo *git.Repository) error {
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close caller repository: %v", errClose)
+		}
+		return closeErr
+	}
+
+	errRecover := store.recoverRepositoryLocked(
+		context.Background(), workspaceDir, store.gitClientOptions(), callerRepo, nil, nil, closeRepository,
+	)
+	if !errors.Is(errRecover, closeErr) {
+		t.Fatalf("recovery error = %v, want caller close error", errRecover)
+	}
+	afterGitInfo, errStat := os.Stat(filepath.Join(workspaceDir, ".git"))
+	if errStat != nil {
+		t.Fatalf("stat repository after recovery: %v", errStat)
+	}
+	if !os.SameFile(beforeGitInfo, afterGitInfo) {
+		t.Fatal("caller close failure replaced the repository")
+	}
+	assertRecoveryTestAuthToken(t, authPath, "original")
+}
+
+func TestGitTokenStoreRecoveryAbortsBeforeMutationWhenRecoveryHandlesCloseFail(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := filepath.Join(root, "remote.git")
+	if _, errInit := git.PlainInit(remoteDir, true); errInit != nil {
+		t.Fatalf("initialize remote repository: %v", errInit)
+	}
+	workspaceDir := filepath.Join(root, "workspace")
+	store := newRecoveryTestStore(t, remoteDir, workspaceDir)
+	authPath := saveRecoveryTestAuth(t, store, "saved.json", "original")
+	beforeGitInfo, errStat := os.Stat(filepath.Join(workspaceDir, ".git"))
+	if errStat != nil {
+		t.Fatalf("stat repository before recovery: %v", errStat)
+	}
+	callerRepo, errOpen := git.PlainOpen(workspaceDir)
+	if errOpen != nil {
+		t.Fatalf("open caller repository: %v", errOpen)
+	}
+	baselineTree, errTree := repositoryHeadTree(callerRepo)
+	if errTree != nil {
+		t.Fatalf("inspect caller repository tree: %v", errTree)
+	}
+	baselineEntries, errEntries := recoveryTreeEntries(baselineTree)
+	if errEntries != nil {
+		t.Fatalf("inspect caller repository entries: %v", errEntries)
+	}
+	baselineCloseErr := errors.New("baseline close failed")
+	cloneCloseErr := errors.New("clone close failed")
+	closeCalls := 0
+	closeRepository := func(repo *git.Repository) error {
+		closeCalls++
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close recovery repository: %v", errClose)
+		}
+		switch closeCalls {
+		case 1:
+			return baselineCloseErr
+		case 2:
+			return cloneCloseErr
+		default:
+			return nil
+		}
+	}
+
+	errRecover := store.recoverRepositoryLocked(
+		context.Background(), workspaceDir, store.gitClientOptions(), callerRepo,
+		baselineEntries, map[string]struct{}{}, closeRepository,
+	)
+	if !errors.Is(errRecover, baselineCloseErr) || !errors.Is(errRecover, cloneCloseErr) {
+		t.Fatalf("recovery error = %v, want baseline and clone close errors", errRecover)
+	}
+	if closeCalls != 2 {
+		t.Fatalf("close calls = %d, want 2 before worktree mutation", closeCalls)
+	}
+	afterGitInfo, errStat := os.Stat(filepath.Join(workspaceDir, ".git"))
+	if errStat != nil {
+		t.Fatalf("stat repository after recovery: %v", errStat)
+	}
+	if !os.SameFile(beforeGitInfo, afterGitInfo) {
+		t.Fatal("recovery handle close failure replaced the repository")
+	}
+	assertRecoveryTestAuthToken(t, authPath, "original")
+}
+
+func TestGitTokenStoreRecoveryRollsBackWhenRecoveredRepoCloseFails(t *testing.T) {
+	root := t.TempDir()
+	remoteDir := filepath.Join(root, "remote.git")
+	if _, errInit := git.PlainInit(remoteDir, true); errInit != nil {
+		t.Fatalf("initialize remote repository: %v", errInit)
+	}
+	workspaceDir := filepath.Join(root, "workspace")
+	store := newRecoveryTestStore(t, remoteDir, workspaceDir)
+	authPath := saveRecoveryTestAuth(t, store, "saved.json", "original")
+	beforeGitInfo, errStat := os.Stat(filepath.Join(workspaceDir, ".git"))
+	if errStat != nil {
+		t.Fatalf("stat repository before recovery: %v", errStat)
+	}
+	callerRepo, errOpen := git.PlainOpen(workspaceDir)
+	if errOpen != nil {
+		t.Fatalf("open caller repository: %v", errOpen)
+	}
+	baselineTree, errTree := repositoryHeadTree(callerRepo)
+	if errTree != nil {
+		t.Fatalf("inspect caller repository tree: %v", errTree)
+	}
+	baselineEntries, errEntries := recoveryTreeEntries(baselineTree)
+	if errEntries != nil {
+		t.Fatalf("inspect caller repository entries: %v", errEntries)
+	}
+	recoveredCloseErr := errors.New("recovered close failed")
+	closeCalls := 0
+	closeRepository := func(repo *git.Repository) error {
+		closeCalls++
+		if errClose := repo.Close(); errClose != nil {
+			t.Errorf("close recovery repository: %v", errClose)
+		}
+		if closeCalls == 3 {
+			return recoveredCloseErr
+		}
+		return nil
+	}
+
+	errRecover := store.recoverRepositoryLocked(
+		context.Background(), workspaceDir, store.gitClientOptions(), callerRepo,
+		baselineEntries, map[string]struct{}{}, closeRepository,
+	)
+	if !errors.Is(errRecover, recoveredCloseErr) {
+		t.Fatalf("recovery error = %v, want recovered close error", errRecover)
+	}
+	if closeCalls != 3 {
+		t.Fatalf("close calls = %d, want baseline, clone, and recovered repositories", closeCalls)
+	}
+	afterGitInfo, errStat := os.Stat(filepath.Join(workspaceDir, ".git"))
+	if errStat != nil {
+		t.Fatalf("stat repository after recovery: %v", errStat)
+	}
+	if !os.SameFile(beforeGitInfo, afterGitInfo) {
+		t.Fatal("recovered repository close failure did not roll back the original repository")
+	}
+	assertRecoveryTestAuthToken(t, authPath, "original")
 }
 
 func newRecoveryTestStore(t *testing.T, remoteDir, repoDir string) *GitTokenStore {

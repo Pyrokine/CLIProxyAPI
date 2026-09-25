@@ -402,10 +402,8 @@ func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
 	}
 	srcIdx := findMapKeyIndex(srcRoot, key)
 	if srcIdx < 0 {
-		// Keep an explicit empty mapping for oauth-model-alias when it was previously present.
-		// When users delete the last channel from oauth-model-alias via the management API,
-		// we want that deletion to persist across hot reloads and restarts.
-		if key == "oauth-model-alias" {
+		// Keep explicit empty mappings when the last OAuth channel is deleted through the management API.
+		if key == "oauth-model-alias" || key == "oauth-request-scoped-errors" {
 			dstRoot.Content[dstIdx+1] = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 			return
 		}
@@ -494,9 +492,43 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
+	// 凭证覆盖项的 false 和零带有明确语义，不能按全局默认值省略
+	if len(path) == 2 && node != nil && node.Kind == yaml.ScalarNode {
+		switch path[0] {
+		case "claude-api-key", "codex-api-key", "xai-api-key", "gemini-api-key", "interactions-api-key", "vertex-api-key", "openai-compatibility":
+			if (path[1] == "disable-cooling" && node.Tag == "!!bool") ||
+				(path[1] == "request-retry" && node.Tag == "!!int") {
+				return false
+			}
+		}
+	}
+
 	// Weight is pointer-backed, so an explicit zero is meaningful and must be preserved.
 	if len(path) > 0 && path[len(path)-1] == "weight" && node != nil && node.Kind == yaml.ScalarNode && node.Tag == "!!int" {
 		return false
+	}
+
+	// Antigravity connection-pool pointer fields preserve explicit false and zero values.
+	if len(path) == 1 && path[0] == "antigravity" && node != nil && node.Kind == yaml.MappingNode {
+		if poolIndex := findMapKeyIndex(node, "connection-pool"); poolIndex >= 0 && poolIndex+1 < len(node.Content) {
+			poolNode := node.Content[poolIndex+1]
+			if poolNode != nil && poolNode.Kind == yaml.MappingNode &&
+				(findMapKeyIndex(poolNode, "enabled") >= 0 || findMapKeyIndex(poolNode, "max-idle-conns-per-host") >= 0) {
+				return false
+			}
+		}
+	}
+	if len(path) == 2 && path[0] == "antigravity" && path[1] == "connection-pool" &&
+		node != nil && node.Kind == yaml.MappingNode &&
+		(findMapKeyIndex(node, "enabled") >= 0 || findMapKeyIndex(node, "max-idle-conns-per-host") >= 0) {
+		return false
+	}
+	if len(path) == 3 && path[0] == "antigravity" && path[1] == "connection-pool" &&
+		node != nil && node.Kind == yaml.ScalarNode {
+		if (path[2] == "enabled" && node.Tag == "!!bool") ||
+			(path[2] == "max-idle-conns-per-host" && node.Tag == "!!int") {
+			return false
+		}
 	}
 
 	// First check if it's a zero value

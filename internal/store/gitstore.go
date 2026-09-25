@@ -191,7 +191,7 @@ func (s *GitTokenStore) ensureRepositoryContext(ctx context.Context) error {
 	return s.ensureRepository(ctx)
 }
 
-func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
+func (s *GitTokenStore) ensureRepository(ctx context.Context) (errResult error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -241,7 +241,10 @@ func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
 		}
 		repo, errClone := git.PlainCloneContext(ctx, repoDir, cloneOpts)
 		if errClone != nil {
-			closeGitRepository(repo, "git token store: close failed clone repo")
+			if errClose := closeGitRepository(repo, "git token store: close failed clone repo"); errClose != nil {
+				s.dirLock.Unlock()
+				return errors.Join(fmt.Errorf("git token store: clone remote: %w", errClone), errClose)
+			}
 			if errors.Is(errClone, transport.ErrEmptyRemoteRepository) {
 				_ = os.RemoveAll(gitDir)
 				repo, errInit := git.PlainInit(repoDir, false)
@@ -249,7 +252,11 @@ func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
 					s.dirLock.Unlock()
 					return fmt.Errorf("git token store: init empty repo: %w", errInit)
 				}
-				defer closeGitRepository(repo, "git token store: close initialized repo")
+				defer func() {
+					if errClose := closeGitRepository(repo, "git token store: close initialized repo"); errClose != nil {
+						errResult = errors.Join(errResult, errClose)
+					}
+				}()
 				if branchRef != "" {
 					worktree, errWorktree := repo.Worktree()
 					if errWorktree != nil {
@@ -300,8 +307,9 @@ func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
 				s.dirLock.Unlock()
 				return fmt.Errorf("git token store: clone remote: %w", errClone)
 			}
-		} else {
-			defer closeGitRepository(repo, "git token store: close cloned repo")
+		} else if errClose := closeGitRepository(repo, "git token store: close cloned repo"); errClose != nil {
+			s.dirLock.Unlock()
+			return errClose
 		}
 	} else {
 		repo, errOpen := git.PlainOpen(repoDir)
@@ -309,15 +317,14 @@ func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
 			s.dirLock.Unlock()
 			return fmt.Errorf("git token store: open repo: %w", errOpen)
 		}
-		repoOpen := true
-		closeOpenedRepo := func() {
-			if !repoOpen {
+		defer func() {
+			if repo == nil {
 				return
 			}
-			closeGitRepository(repo, "git token store: close opened repo")
-			repoOpen = false
-		}
-		defer closeOpenedRepo()
+			if errClose := closeGitRepository(repo, "git token store: close opened repo"); errClose != nil {
+				errResult = errors.Join(errResult, errClose)
+			}
+		}()
 		worktree, errWorktree := repo.Worktree()
 		if errWorktree != nil {
 			s.dirLock.Unlock()
@@ -329,10 +336,11 @@ func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
 				s.dirLock.Unlock()
 				return fmt.Errorf("git token store: verify repository before pull: %w", errVerify)
 			}
-			closeOpenedRepo()
-			if errRecover := s.recoverRepositoryLocked(
-				ctx, repoDir, clientOptions, nil, nil,
-			); errRecover != nil {
+			errRecover := s.recoverRepositoryLocked(
+				ctx, repoDir, clientOptions, repo, nil, nil, (*git.Repository).Close,
+			)
+			repo = nil
+			if errRecover != nil {
 				s.dirLock.Unlock()
 				return errors.Join(
 					fmt.Errorf("git token store: verify repository before pull: %w", errVerify),
@@ -391,10 +399,11 @@ func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
 					errors.Is(errPull, transport.ErrEmptyRemoteRepository):
 					// Ignore authentication prompts and empty remote references on initial sync.
 				case isRepositoryCorruptionError(errPull):
-					closeOpenedRepo()
-					if errRecover := s.recoverRepositoryLocked(
-						ctx, repoDir, clientOptions, baselineEntries, dirtyPaths,
-					); errRecover != nil {
+					errRecover := s.recoverRepositoryLocked(
+						ctx, repoDir, clientOptions, repo, baselineEntries, dirtyPaths, (*git.Repository).Close,
+					)
+					repo = nil
+					if errRecover != nil {
 						s.dirLock.Unlock()
 						return errors.Join(
 							fmt.Errorf("git token store: pull: %w", errPull),
@@ -413,10 +422,11 @@ func (s *GitTokenStore) ensureRepository(ctx context.Context) error {
 						s.dirLock.Unlock()
 						return fmt.Errorf("git token store: verify repository after pull: %w", errVerify)
 					}
-					closeOpenedRepo()
-					if errRecover := s.recoverRepositoryLocked(
-						ctx, repoDir, clientOptions, baselineEntries, dirtyPaths,
-					); errRecover != nil {
+					errRecover := s.recoverRepositoryLocked(
+						ctx, repoDir, clientOptions, repo, baselineEntries, dirtyPaths, (*git.Repository).Close,
+					)
+					repo = nil
+					if errRecover != nil {
 						s.dirLock.Unlock()
 						return errors.Join(
 							fmt.Errorf("git token store: verify repository after pull: %w", errVerify),
@@ -508,6 +518,13 @@ func (s *GitTokenStore) save(ctx context.Context, auth *cliproxyauth.Auth) (save
 	}
 	if path == "" {
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
+	}
+	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
+		if _, errStat := os.Stat(path); errors.Is(errStat, os.ErrNotExist) {
+			return "", nil
+		} else if errStat != nil {
+			return "", fmt.Errorf("auth filestore: stat disabled credential: %w", errStat)
+		}
 	}
 
 	if ctx != nil {
@@ -686,14 +703,12 @@ func (s *GitTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 				return nil
 			}
-			auth, err := s.readAuthFile(ctx, path, dir)
-			if err != nil {
-				log.WithError(err).Warnf("git store: skip auth %s", path)
+			auths, errRead := s.readAuthFiles(ctx, path, dir)
+			if errRead != nil {
+				log.WithError(errRead).Warnf("git store: skip auth %s", path)
 				return nil
 			}
-			if auth != nil {
-				entries = append(entries, auth)
-			}
+			entries = append(entries, auths...)
 			return nil
 		},
 	)
@@ -864,6 +879,45 @@ func (s *GitTokenStore) resolveDeletePath(id string) (string, error) {
 	return filepath.Join(dir, id), nil
 }
 
+func (s *GitTokenStore) readAuthFiles(ctx context.Context, path, baseDir string) ([]*cliproxyauth.Auth, error) {
+	data, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return nil, fmt.Errorf("read file: %w", errRead)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	metadata := make(map[string]any)
+	if errJSON := json.Unmarshal(data, &metadata); errJSON != nil {
+		return nil, fmt.Errorf("unmarshal auth json: %w", errJSON)
+	}
+	cliproxyauth.NormalizeCredentialMetadata(metadata)
+	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, errWeight
+	}
+	provider, _ := metadata["type"].(string)
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		return nil, fmt.Errorf("stat file: %w", errStat)
+	}
+	auths, handled, errParse := sdkauth.ParsePluginAuthFiles(ctx, provider, path, s.idFor(path, baseDir), data)
+	if errParse != nil {
+		return nil, errParse
+	}
+	if handled {
+		for _, auth := range auths {
+			auth.CreatedAt = info.ModTime()
+			auth.UpdatedAt = info.ModTime()
+		}
+		return auths, nil
+	}
+	auth, errBuiltIn := s.readAuthFile(sdkauth.WithPluginAuthParser(ctx, nil), path, baseDir)
+	if errBuiltIn != nil || auth == nil {
+		return nil, errBuiltIn
+	}
+	return []*cliproxyauth.Auth{auth}, nil
+}
+
 func (s *GitTokenStore) readAuthFile(ctx context.Context, path, baseDir string) (*cliproxyauth.Auth, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -875,6 +929,10 @@ func (s *GitTokenStore) readAuthFile(ctx context.Context, path, baseDir string) 
 	metadata := make(map[string]any)
 	if err = json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
+	}
+	cliproxyauth.NormalizeCredentialMetadata(metadata)
+	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, errWeight
 	}
 	provider, _ := metadata["type"].(string)
 	provider = strings.TrimSpace(provider)
@@ -972,12 +1030,16 @@ func (s *GitTokenStore) repoDirSnapshot() string {
 	return s.repoDir
 }
 
-func disableGitCommitSigning(repoDir string) error {
+func disableGitCommitSigning(repoDir string) (errResult error) {
 	repo, errOpen := git.PlainOpen(repoDir)
 	if errOpen != nil {
 		return fmt.Errorf("git token store: open repository config: %w", errOpen)
 	}
-	defer closeGitRepository(repo, "git token store: close repository config")
+	defer func() {
+		if errClose := closeGitRepository(repo, "git token store: close repository config"); errClose != nil {
+			errResult = errors.Join(errResult, errClose)
+		}
+	}()
 
 	cfg, errConfig := repo.Config()
 	if errConfig != nil {
@@ -1328,32 +1390,67 @@ func rollbackRecoveredRepository(repoDir, gitDir, backupGitDir, backupWorktreeDi
 	return nil
 }
 
-func inspectRecoveryBaseline(repoDir string) (map[string]recoveryTreeEntry, map[string]struct{}, error) {
+func inspectRecoveryBaseline(
+	repoDir string,
+) (
+	repoResult *git.Repository,
+	entriesResult map[string]recoveryTreeEntry,
+	dirtyResult map[string]struct{},
+	errResult error,
+) {
 	repo, errOpen := git.PlainOpen(repoDir)
 	if errOpen != nil {
-		return nil, nil, fmt.Errorf("open repository: %w", errOpen)
+		return nil, nil, nil, fmt.Errorf("open repository: %w", errOpen)
 	}
-	defer closeGitRepository(repo, "git token store: close recovery baseline repo")
+	defer func() {
+		if errResult == nil || repo == nil {
+			return
+		}
+		if errClose := closeGitRepository(repo, "git token store: close recovery baseline repo"); errClose != nil {
+			errResult = errors.Join(errResult, errClose)
+		}
+	}()
 	worktree, errWorktree := repo.Worktree()
 	if errWorktree != nil {
-		return nil, nil, fmt.Errorf("open worktree: %w", errWorktree)
+		return nil, nil, nil, fmt.Errorf("open worktree: %w", errWorktree)
 	}
 	dirtyPaths, errDirty := worktreeDirtyPaths(worktree)
 	if errDirty != nil {
-		return nil, nil, fmt.Errorf("inspect worktree changes: %w", errDirty)
+		return nil, nil, nil, fmt.Errorf("inspect worktree changes: %w", errDirty)
 	}
 	tree, errTree := repositoryHeadTree(repo)
 	if errTree != nil {
-		return nil, nil, fmt.Errorf("inspect head tree: %w", errTree)
+		return nil, nil, nil, fmt.Errorf("inspect head tree: %w", errTree)
 	}
 	if tree == nil {
-		return nil, nil, fmt.Errorf("repository has no recovery baseline")
+		return nil, nil, nil, fmt.Errorf("repository has no recovery baseline")
 	}
 	entries, errEntries := recoveryTreeEntries(tree)
 	if errEntries != nil {
-		return nil, nil, fmt.Errorf("inspect head tree entries: %w", errEntries)
+		return nil, nil, nil, fmt.Errorf("inspect head tree entries: %w", errEntries)
 	}
-	return entries, dirtyPaths, nil
+	return repo, entries, dirtyPaths, nil
+}
+
+func closeRecoveryRepositories(
+	closeRepository func(*git.Repository) error,
+	baselineRepo, clonedRepo *git.Repository,
+) error {
+	if closeRepository == nil {
+		closeRepository = (*git.Repository).Close
+	}
+	var errClose error
+	if baselineRepo != nil {
+		if err := closeRepository(baselineRepo); err != nil {
+			errClose = errors.Join(errClose, fmt.Errorf("close recovery baseline repository: %w", err))
+		}
+	}
+	if clonedRepo != nil {
+		if err := closeRepository(clonedRepo); err != nil {
+			errClose = errors.Join(errClose, fmt.Errorf("close cloned recovery repository: %w", err))
+		}
+	}
+	return errClose
 }
 
 func restoreBackedUpWorktree(repoDir, backupWorktreeDir string, cause error) error {
@@ -1374,18 +1471,36 @@ func (s *GitTokenStore) recoverRepositoryLocked(
 	ctx context.Context,
 	repoDir string,
 	clientOptions []client.Option,
+	callerRepo *git.Repository,
 	baselineEntries map[string]recoveryTreeEntry,
 	dirtyPaths map[string]struct{},
+	closeRepository func(*git.Repository) error,
 ) (errRecovery error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if closeRepository == nil {
+		closeRepository = (*git.Repository).Close
+	}
 	if errContext := ctx.Err(); errContext != nil {
+		if callerRepo != nil {
+			if errClose := closeRepository(callerRepo); errClose != nil {
+				return errors.Join(errContext, fmt.Errorf("close recovery caller repository: %w", errClose))
+			}
+		}
 		return errContext
 	}
 	parentDir := filepath.Dir(repoDir)
 	recoveryRoot, errTemp := os.MkdirTemp(parentDir, ".gitstore-recovery-")
 	if errTemp != nil {
+		if callerRepo != nil {
+			if errClose := closeRepository(callerRepo); errClose != nil {
+				return errors.Join(
+					fmt.Errorf("create recovery directory: %w", errTemp),
+					fmt.Errorf("close recovery caller repository: %w", errClose),
+				)
+			}
+		}
 		return fmt.Errorf("create recovery directory: %w", errTemp)
 	}
 	cleanupRecovery := true
@@ -1403,13 +1518,23 @@ func (s *GitTokenStore) recoverRepositoryLocked(
 		}
 	}()
 
+	var baselineRepo *git.Repository
 	if baselineEntries == nil {
-		inspectedEntries, inspectedDirtyPaths, errInspect := inspectRecoveryBaseline(repoDir)
+		if callerRepo != nil {
+			if errClose := closeRepository(callerRepo); errClose != nil {
+				return fmt.Errorf("close recovery caller repository before baseline inspection: %w", errClose)
+			}
+		}
+		callerRepo = nil
+		inspectedRepo, inspectedEntries, inspectedDirtyPaths, errInspect := inspectRecoveryBaseline(repoDir)
 		if errInspect != nil {
 			return fmt.Errorf("inspect recovery baseline: %w", errInspect)
 		}
+		baselineRepo = inspectedRepo
 		baselineEntries = inspectedEntries
 		dirtyPaths = inspectedDirtyPaths
+	} else {
+		baselineRepo = callerRepo
 	}
 	cloneDir := filepath.Join(recoveryRoot, "clone")
 	cloneOpts := &git.CloneOptions{ClientOptions: clientOptions, URL: s.remote}
@@ -1419,18 +1544,16 @@ func (s *GitTokenStore) recoverRepositoryLocked(
 	}
 	clonedRepo, errClone := git.PlainCloneContext(ctx, cloneDir, cloneOpts)
 	if errClone != nil {
-		closeGitRepository(clonedRepo, "git token store: close failed recovery clone")
+		if errClose := closeRecoveryRepositories(closeRepository, baselineRepo, clonedRepo); errClose != nil {
+			return errors.Join(fmt.Errorf("clone remote repository: %w", errClone), errClose)
+		}
 		return fmt.Errorf("clone remote repository: %w", errClone)
 	}
-	clonedRepoOpen := true
-	closeClonedRepo := func() {
-		if !clonedRepoOpen {
-			return
+	defer func() {
+		if errClose := closeRecoveryRepositories(closeRepository, baselineRepo, clonedRepo); errClose != nil {
+			errRecovery = errors.Join(errRecovery, errClose)
 		}
-		closeGitRepository(clonedRepo, "git token store: close recovery clone")
-		clonedRepoOpen = false
-	}
-	defer closeClonedRepo()
+	}()
 	if errVerify := verifyRepositoryHead(clonedRepo); errVerify != nil {
 		return fmt.Errorf("verify cloned repository: %w", errVerify)
 	}
@@ -1457,7 +1580,13 @@ func (s *GitTokenStore) recoverRepositoryLocked(
 	if errContext := ctx.Err(); errContext != nil {
 		return errContext
 	}
-	closeClonedRepo()
+	if errClose := closeRecoveryRepositories(closeRepository, baselineRepo, clonedRepo); errClose != nil {
+		baselineRepo = nil
+		clonedRepo = nil
+		return errClose
+	}
+	baselineRepo = nil
+	clonedRepo = nil
 
 	backupWorktreeDir := filepath.Join(recoveryRoot, "worktree")
 	if errBackup := moveWorktreeEntries(repoDir, backupWorktreeDir); errBackup != nil {
@@ -1517,9 +1646,17 @@ func (s *GitTokenStore) recoverRepositoryLocked(
 	}
 	recoveredRepo, errOpen := git.PlainOpen(repoDir)
 	if errOpen == nil {
-		errOpen = verifyRepositoryHead(recoveredRepo)
+		errVerify := verifyRepositoryHead(recoveredRepo)
+		errClose := closeRepository(recoveredRepo)
+		switch {
+		case errVerify != nil && errClose != nil:
+			errOpen = errors.Join(errVerify, fmt.Errorf("close recovered repository: %w", errClose))
+		case errVerify != nil:
+			errOpen = errVerify
+		case errClose != nil:
+			errOpen = fmt.Errorf("close recovered repository: %w", errClose)
+		}
 	}
-	closeGitRepository(recoveredRepo, "git token store: close recovered repo")
 	if errOpen != nil {
 		errRecovered := fmt.Errorf("verify recovered repository: %w", errOpen)
 		if errRollback := rollbackRecoveredRepository(
@@ -1684,13 +1821,14 @@ func restoreGitMutationState(
 	return errRestore
 }
 
-func closeGitRepository(repo *git.Repository, operation string) {
+func closeGitRepository(repo *git.Repository, operation string) error {
 	if repo == nil {
-		return
+		return nil
 	}
-	if err := repo.Close(); err != nil {
-		log.Warnf("%s: %v", operation, err)
+	if errClose := repo.Close(); errClose != nil {
+		return fmt.Errorf("%s: %w", operation, errClose)
 	}
+	return nil
 }
 
 func (s *GitTokenStore) commitAndPushLocked(ctx context.Context, message string, relPaths ...string) error {
@@ -1715,13 +1853,18 @@ func (s *GitTokenStore) commitAndPushWithRollbackLocked(
 	}
 	relPaths = normalizedPaths
 	var repo *git.Repository
+	pushAttempted := false
 	defer func() {
-		closeGitRepository(repo, "git token store: close commit repo")
+		if errClose := closeGitRepository(repo, "git token store: close commit repo"); errClose != nil {
+			err = errors.Join(err, errClose)
+			if pushAttempted {
+				err = errors.Join(cliproxyauth.ErrAuthDurableStateUncertain, err)
+			}
+		}
 	}()
 	var headSnapshot gitHeadSnapshot
 	var indexEntries map[string][]gitindex.Entry
 	stateCaptured := false
-	pushAttempted := false
 	if rollback != nil {
 		defer func() {
 			if err == nil {

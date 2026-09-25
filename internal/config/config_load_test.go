@@ -77,6 +77,42 @@ func TestParseConfigBytesImageArtifactCacheDefaultsMatchLoadConfig(t *testing.T)
 	}
 }
 
+func TestParseConfigBytesPreservesAntigravityPoolAndCodexOrphanSettings(t *testing.T) {
+	cfg, err := ParseConfigBytes([]byte(`antigravity:
+  connection-pool:
+    enabled: false
+    idle-conn-timeout: ""
+    max-idle-conns-per-host: 0
+codex:
+  orphan-delegation-compatibility: true
+`))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes: %v", err)
+	}
+	pool := cfg.Antigravity.ConnectionPool
+	if pool.Enabled == nil || *pool.Enabled {
+		t.Fatalf("Enabled = %v, want explicit false", pool.Enabled)
+	}
+	if pool.MaxIdleConnsPerHost == nil || *pool.MaxIdleConnsPerHost != 0 {
+		t.Fatalf("MaxIdleConnsPerHost = %v, want explicit zero", pool.MaxIdleConnsPerHost)
+	}
+	if pool.IdleConnTimeout != "" {
+		t.Fatalf("IdleConnTimeout = %q, want empty", pool.IdleConnTimeout)
+	}
+	if !cfg.Codex.OrphanDelegationCompatibility {
+		t.Fatal("OrphanDelegationCompatibility = false, want true")
+	}
+
+	unset, err := ParseConfigBytes([]byte("antigravity:\n  connection-pool: {}\n"))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes unset pool: %v", err)
+	}
+	if unset.Antigravity.ConnectionPool.Enabled != nil ||
+		unset.Antigravity.ConnectionPool.MaxIdleConnsPerHost != nil {
+		t.Fatalf("unset pool gained explicit pointer values: %#v", unset.Antigravity.ConnectionPool)
+	}
+}
+
 func TestLoadConfigRejectsAliasedManagementSecret(t *testing.T) {
 	tests := map[string]string{
 		"remote management alias": `shared: &management
@@ -251,6 +287,7 @@ interactions-api-key:
         alias: g25p
   - api-key: "interactions-key-1"
     base-url: "https://interactions.example.com"
+    prefix: duplicate
   - api-key: "interactions-key-1"
     base-url: "https://other-interactions.example.com"
 `)
@@ -268,8 +305,8 @@ interactions-api-key:
 
 func assertSanitizedInteractionsKeys(t *testing.T, cfg *Config) {
 	t.Helper()
-	if len(cfg.InteractionsKey) != 2 {
-		t.Fatalf("InteractionsKey length = %d, want 2", len(cfg.InteractionsKey))
+	if len(cfg.InteractionsKey) != 3 {
+		t.Fatalf("InteractionsKey length = %d, want 3", len(cfg.InteractionsKey))
 	}
 	first := cfg.InteractionsKey[0]
 	if first.APIKey != "interactions-key-1" {
@@ -293,8 +330,12 @@ func assertSanitizedInteractionsKeys(t *testing.T, cfg *Config) {
 	if len(first.Models) != 1 || first.Models[0].Name != "gemini-2.5-pro" || first.Models[0].Alias != "g25p" {
 		t.Fatalf("models = %#v, want gemini-2.5-pro alias g25p", first.Models)
 	}
-	if cfg.InteractionsKey[1].BaseURL != "https://other-interactions.example.com" {
-		t.Fatalf("second base url = %q, want https://other-interactions.example.com", cfg.InteractionsKey[1].BaseURL)
+	if cfg.InteractionsKey[1].BaseURL != "https://interactions.example.com" ||
+		cfg.InteractionsKey[1].Prefix != "duplicate" {
+		t.Fatalf("second route = %#v, want distinct prefix route", cfg.InteractionsKey[1])
+	}
+	if cfg.InteractionsKey[2].BaseURL != "https://other-interactions.example.com" {
+		t.Fatalf("third base url = %q, want https://other-interactions.example.com", cfg.InteractionsKey[2].BaseURL)
 	}
 }
 

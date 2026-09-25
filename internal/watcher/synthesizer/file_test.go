@@ -1,6 +1,8 @@
 package synthesizer
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
 
 func TestNewFileSynthesizer(t *testing.T) {
@@ -407,6 +410,91 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 	}
 }
 
+func codexPlanJWT(t *testing.T, planType string) string {
+	t.Helper()
+	claims, errMarshal := json.Marshal(map[string]any{
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_plan_type": planType,
+		},
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal JWT claims: %v", errMarshal)
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`)) + "." +
+		base64.RawURLEncoding.EncodeToString(claims) + ".signature"
+}
+
+func TestFileSynthesizerCodexPlanTypeMetadataThenJWT(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]any
+		want     string
+	}{
+		{
+			name: "explicit metadata wins",
+			metadata: map[string]any{
+				"type":      "codex",
+				"plan_type": " team ",
+				"id_token":  codexPlanJWT(t, "free"),
+			},
+			want: "team",
+		},
+		{
+			name: "JWT fallback",
+			metadata: map[string]any{
+				"type":     "codex",
+				"id_token": codexPlanJWT(t, "plus"),
+			},
+			want: "plus",
+		},
+		{
+			name: "invalid JWT leaves attribute absent",
+			metadata: map[string]any{
+				"type":     "codex",
+				"id_token": "invalid",
+			},
+		},
+		{
+			name:     "missing plan leaves attribute absent",
+			metadata: map[string]any{"type": "codex"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw, errMarshal := json.Marshal(test.metadata)
+			if errMarshal != nil {
+				t.Fatalf("marshal auth metadata: %v", errMarshal)
+			}
+			authDir := t.TempDir()
+			auths, errSynthesize := SynthesizeAuthFile(
+				&SynthesisContext{
+					Config:  &config.Config{},
+					AuthDir: authDir,
+					Now:     time.Now(),
+				},
+				filepath.Join(authDir, "codex.json"),
+				raw,
+			)
+			if errSynthesize != nil {
+				t.Fatalf("SynthesizeAuthFile() error = %v", errSynthesize)
+			}
+			if len(auths) != 1 {
+				t.Fatalf("SynthesizeAuthFile() auth count = %d, want 1", len(auths))
+			}
+			got, present := auths[0].Attributes["plan_type"]
+			if test.want == "" {
+				if present {
+					t.Fatalf("plan_type = %q, want absent", got)
+				}
+				return
+			}
+			if !present || got != test.want {
+				t.Fatalf("plan_type = %q present=%t, want %q", got, present, test.want)
+			}
+		})
+	}
+}
+
 func TestFileSynthesizer_Synthesize_OAuthExcludedModelsMerged(t *testing.T) {
 	tempDir := t.TempDir()
 	authData := map[string]any{
@@ -792,5 +880,235 @@ func TestBuildGeminiVirtualID(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+type multiAuthParserFunc func(
+	context.Context,
+	pluginapi.AuthParseRequest,
+) ([]*coreauth.Auth, bool, error)
+
+func (f multiAuthParserFunc) ParseAuth(
+	context.Context,
+	pluginapi.AuthParseRequest,
+) (*coreauth.Auth, bool, error) {
+	return nil, false, nil
+}
+
+func (f multiAuthParserFunc) ParseAuths(
+	ctx context.Context,
+	req pluginapi.AuthParseRequest,
+) ([]*coreauth.Auth, bool, error) {
+	return f(ctx, req)
+}
+
+func TestSynthesizeAuthFileRejectsInvalidSourceWeightBeforePluginParser(t *testing.T) {
+	called := false
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: t.TempDir(),
+		Now:     time.Now(),
+		PluginAuthParser: multiAuthParserFunc(func(
+			context.Context,
+			pluginapi.AuthParseRequest,
+		) ([]*coreauth.Auth, bool, error) {
+			called = true
+			return []*coreauth.Auth{{ID: "plugin-a", Provider: "plugin"}}, true, nil
+		}),
+	}
+	fullPath := filepath.Join(ctx.AuthDir, "plugin.json")
+
+	if _, errSynthesize := SynthesizeAuthFile(
+		ctx,
+		fullPath,
+		[]byte(`{"type":"plugin","weight":1.5}`),
+	); errSynthesize == nil {
+		t.Fatal("SynthesizeAuthFile() error = nil, want invalid source weight error")
+	}
+	if called {
+		t.Fatal("plugin parser called for invalid source weight")
+	}
+}
+
+func TestSynthesizeAuthFileFiltersInvalidPluginChildWeight(t *testing.T) {
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "plugin.json")
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Now(),
+		PluginAuthParser: multiAuthParserFunc(func(
+			context.Context,
+			pluginapi.AuthParseRequest,
+		) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{
+				{ID: "invalid", Provider: "plugin", Metadata: map[string]any{"weight": 1.5}},
+				{ID: "valid", Provider: "plugin"},
+			}, true, nil
+		}),
+	}
+
+	auths, errSynthesize := SynthesizeAuthFile(
+		ctx,
+		fullPath,
+		[]byte(`{"type":"plugin","weight":4}`),
+	)
+	if errSynthesize != nil || len(auths) != 1 {
+		t.Fatalf("SynthesizeAuthFile() len=%d err=%v", len(auths), errSynthesize)
+	}
+	if auths[0].ID != "valid" || auths[0].Attributes[coreauth.AttributeWeight] != "4" {
+		t.Fatalf("filtered auth = %#v, want valid child with source weight", auths[0])
+	}
+}
+
+func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "plugin.json")
+	raw := []byte(`{"type":"plugin","excluded_models":["model-a"],"proxy-url":"http://proxy.test","headers":{"X-Test":"value"}}`)
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+		PluginAuthParser: multiAuthParserFunc(func(
+			_ context.Context,
+			req pluginapi.AuthParseRequest,
+		) ([]*coreauth.Auth, bool, error) {
+			if req.Provider != "plugin" || req.Path != fullPath || req.FileName != "plugin.json" {
+				t.Fatalf("ParseAuths request = %#v", req)
+			}
+			return []*coreauth.Auth{
+				{
+					ID:       "plugin-a",
+					Provider: "plugin",
+					FileName: req.FileName,
+					Metadata: map[string]any{
+						"type": "plugin", "request-retry": 2,
+						"headers": map[string]any{"X-Test": "value"},
+					},
+				},
+				nil,
+				{
+					ID:       "plugin-b",
+					Provider: "plugin",
+					FileName: req.FileName,
+					Metadata: map[string]any{"type": "plugin", "account": "b", "headers": map[string]any{"X-Test": "value"}},
+				},
+			}, true, nil
+		}),
+	}
+
+	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, raw)
+	if errSynthesize != nil {
+		t.Fatal(errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want 2", len(auths))
+	}
+	for _, auth := range auths {
+		if !coreauth.IsPluginVirtualAuth(auth) {
+			t.Fatalf("auth %s missing plugin virtual marker", auth.ID)
+		}
+		if auth.Attributes[coreauth.AttributeVirtualSource] != fullPath ||
+			auth.Attributes[coreauth.AttributePath] != fullPath ||
+			auth.Attributes[coreauth.AttributeSource] != fullPath {
+			t.Fatalf("auth %s source attributes = %#v", auth.ID, auth.Attributes)
+		}
+		if auth.Attributes[coreauth.PersistedSHA256Attribute] == "" ||
+			auth.Attributes[coreauth.PersistedReadAtAttribute] == "" {
+			t.Fatalf("auth %s missing persisted source identity: %#v", auth.ID, auth.Attributes)
+		}
+		if auth.Attributes["header:X-Test"] != "value" || auth.Attributes["auth_kind"] != "oauth" ||
+			auth.ProxyURL != "http://proxy.test" {
+			t.Fatalf(
+				"auth %s inherited values: attributes=%#v proxy=%q",
+				auth.ID,
+				auth.Attributes,
+				auth.ProxyURL,
+			)
+		}
+	}
+	if auths[0].EnsureIndex() == "" || auths[0].EnsureIndex() == auths[1].EnsureIndex() {
+		t.Fatalf("plugin indexes = %q/%q", auths[0].EnsureIndex(), auths[1].EnsureIndex())
+	}
+	if auths[0].Metadata["request_retry"] != 2 {
+		t.Fatalf("canonical child metadata = %#v", auths[0].Metadata)
+	}
+	if _, legacy := auths[0].Metadata["request-retry"]; legacy {
+		t.Fatalf("legacy child metadata was retained: %#v", auths[0].Metadata)
+	}
+}
+
+func TestSynthesizeAuthFileAppliesSourceDisabledToPluginMultiAuths(t *testing.T) {
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "plugin.json")
+	ctx := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC),
+		PluginAuthParser: multiAuthParserFunc(func(
+			context.Context,
+			pluginapi.AuthParseRequest,
+		) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{
+				{ID: "plugin-a", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+				{ID: "plugin-b", Provider: "plugin", Metadata: map[string]any{"type": "plugin"}},
+			}, true, nil
+		}),
+	}
+	auths, errSynthesize := SynthesizeAuthFile(ctx, fullPath, []byte(`{"type":"plugin","disabled":true}`))
+	if errSynthesize != nil {
+		t.Fatal(errSynthesize)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("SynthesizeAuthFile() len = %d, want 2", len(auths))
+	}
+	for _, auth := range auths {
+		if !auth.Disabled || auth.Status != coreauth.StatusDisabled {
+			t.Fatalf("auth %s disabled/status = %t/%s", auth.ID, auth.Disabled, auth.Status)
+		}
+		if disabled, _ := auth.Metadata["disabled"].(bool); !disabled {
+			t.Fatalf("auth %s metadata disabled = %#v", auth.ID, auth.Metadata["disabled"])
+		}
+	}
+}
+
+func TestSynthesizeAuthFilePluginHandledEmptyAndDuplicateIDs(t *testing.T) {
+	tempDir := t.TempDir()
+	fullPath := filepath.Join(tempDir, "plugin.json")
+	raw := []byte(`{"type":"plugin"}`)
+
+	emptyContext := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Now(),
+		PluginAuthParser: multiAuthParserFunc(func(
+			context.Context,
+			pluginapi.AuthParseRequest,
+		) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{}, true, nil
+		}),
+	}
+	auths, errSynthesize := SynthesizeAuthFile(emptyContext, fullPath, raw)
+	if errSynthesize != nil || len(auths) != 0 {
+		t.Fatalf("handled empty auths = %#v err=%v", auths, errSynthesize)
+	}
+
+	duplicateContext := &SynthesisContext{
+		Config:  &config.Config{},
+		AuthDir: tempDir,
+		Now:     time.Now(),
+		PluginAuthParser: multiAuthParserFunc(func(
+			context.Context,
+			pluginapi.AuthParseRequest,
+		) ([]*coreauth.Auth, bool, error) {
+			return []*coreauth.Auth{
+				{ID: "duplicate", Provider: "plugin"},
+				{ID: "duplicate", Provider: "plugin"},
+			}, true, nil
+		}),
+	}
+	if _, errSynthesize = SynthesizeAuthFile(duplicateContext, fullPath, raw); errSynthesize == nil ||
+		!strings.Contains(errSynthesize.Error(), "duplicate auth id") {
+		t.Fatalf("duplicate IDs error = %v", errSynthesize)
 	}
 }

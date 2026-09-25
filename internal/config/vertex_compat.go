@@ -45,6 +45,12 @@ type VertexCompatKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// DisableCooling 覆盖全局冷却策略，nil 继承，false 明确启用冷却
+	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
+
+	// RequestRetry 指定额外重试轮数，nil 或负值继承，零禁用额外重试
+	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 }
 
 func (k VertexCompatKey) GetAPIKey() string  { return k.APIKey }

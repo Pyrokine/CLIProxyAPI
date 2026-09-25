@@ -175,6 +175,39 @@ func structEntryExists[T any](entry T, existing []T, r structListResource[T]) bo
 	return false
 }
 
+func findUniqueStructEntryMatchIndex[T any](
+	list []T,
+	r structListResource[T],
+	matchValue string,
+	secondaryValue string,
+	hasSecondary bool,
+) (int, error) {
+	targetIndex := -1
+	for i := range list {
+		match := r.matchKey(&list[i])
+		if r.trimMatch {
+			match = strings.TrimSpace(match)
+		}
+		if match != matchValue {
+			continue
+		}
+		if hasSecondary && r.secondaryMatchKey != nil {
+			secondary := r.secondaryMatchKey(&list[i])
+			if r.trimSecondaryMatch {
+				secondary = strings.TrimSpace(secondary)
+			}
+			if secondary != secondaryValue {
+				continue
+			}
+		}
+		if targetIndex != -1 {
+			return -1, newConfigMutationError(http.StatusBadRequest, "multiple items match; index is required")
+		}
+		targetIndex = i
+	}
+	return targetIndex, nil
+}
+
 func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 	matchValue, hasMatch := deleteStructEntryMatch(c, r)
 	secondaryValue, hasSecondary := deleteStructEntrySecondaryMatch(c, r)
@@ -233,20 +266,22 @@ func deleteStructEntry[T any](h *Handler, c *gin.Context, r structListResource[T
 						return errResolve
 					}
 				}
-				out := make([]T, 0, len(list))
-				for i := range list {
-					matched := r.matchKey(&list[i]) == resolvedMatch
-					if matched && hasSecondary && r.secondaryMatchKey != nil {
-						matched = r.secondaryMatchKey(&list[i]) == resolvedSecondary
-					}
-					if !matched {
-						out = append(out, list[i])
-					}
+				targetIndex, errMatch := findUniqueStructEntryMatchIndex(
+					list, r, resolvedMatch, resolvedSecondary, hasSecondary,
+				)
+				if errMatch != nil {
+					return errMatch
 				}
-				if r.strictDelete && len(out) == len(list) {
-					return newConfigMutationError(http.StatusNotFound, "item not found")
+				if targetIndex == -1 {
+					if r.strictDelete {
+						return newConfigMutationError(http.StatusNotFound, "item not found")
+					}
+					r.setList(next, list)
+					r.sanitize(next)
+					return nil
 				}
-				r.setList(next, out)
+				list = append(list[:targetIndex], list[targetIndex+1:]...)
+				r.setList(next, list)
 				r.sanitize(next)
 				return nil
 			}
@@ -366,6 +401,11 @@ func patchStructEntry[T any](
 		}
 	}
 
+	secondaryValue, hasSecondary := deleteStructEntrySecondaryMatch(c, r)
+	if r.trimSecondaryMatch {
+		secondaryValue = strings.TrimSpace(secondaryValue)
+	}
+
 	if _, ok := h.mutateConfig(
 		c, func(next *config.Config) error {
 			list := r.getList(next)
@@ -381,16 +421,19 @@ func patchStructEntry[T any](
 				if match != "" {
 					if r.matchQueryParam == "api-key" {
 						var errResolve error
-						match, errResolve = resolveStructMatchPlaceholder(list, r, match, "", false)
+						match, errResolve = resolveStructMatchPlaceholder(
+							list, r, match, secondaryValue, hasSecondary,
+						)
 						if errResolve != nil {
 							return errResolve
 						}
 					}
-					for i := range list {
-						if r.matchKey(&list[i]) == match {
-							targetIndex = i
-							break
-						}
+					var errMatch error
+					targetIndex, errMatch = findUniqueStructEntryMatchIndex(
+						list, r, match, secondaryValue, hasSecondary,
+					)
+					if errMatch != nil {
+						return errMatch
 					}
 				}
 			} else if envelope.Index != nil && *envelope.Index >= 0 && *envelope.Index < len(list) {
@@ -457,7 +500,7 @@ var geminiKeyResource = structListResource[config.GeminiKey]{
 		}
 		return -1
 	},
-	postMatchSecondary: true,
+	postEntryEqual:     geminiKeyRouteEqual,
 	trimMatch:          true,
 	trimSecondaryMatch: true,
 	strictDelete:       true,
@@ -483,7 +526,7 @@ var interactionsKeyResource = structListResource[config.GeminiKey]{
 		}
 		return -1
 	},
-	postMatchSecondary: true,
+	postEntryEqual:     geminiKeyRouteEqual,
 	trimMatch:          true,
 	trimSecondaryMatch: true,
 	strictDelete:       true,

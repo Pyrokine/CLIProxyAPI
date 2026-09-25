@@ -154,6 +154,16 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			),
 		)
 	}
+	if oldCfg.Codex.OrphanDelegationCompatibility != newCfg.Codex.OrphanDelegationCompatibility {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"codex.orphan-delegation-compatibility: %t -> %t",
+				oldCfg.Codex.OrphanDelegationCompatibility,
+				newCfg.Codex.OrphanDelegationCompatibility,
+			),
+		)
+	}
 	oldLiveRelay := oldCfg.Codex.LiveMediaRelay
 	newLiveRelay := newCfg.Codex.LiveMediaRelay
 	if oldLiveRelay.Enabled != newLiveRelay.Enabled {
@@ -232,6 +242,48 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			),
 		)
 	}
+	oldPool := oldCfg.Antigravity.ConnectionPool
+	newPool := newCfg.Antigravity.ConnectionPool
+	if !reflect.DeepEqual(oldPool.Enabled, newPool.Enabled) {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"antigravity.connection-pool.enabled: %s -> %s",
+				formatOptionalConfigValue(oldPool.Enabled),
+				formatOptionalConfigValue(newPool.Enabled),
+			),
+		)
+	}
+	if oldPool.IdleConnTimeout != newPool.IdleConnTimeout {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"antigravity.connection-pool.idle-conn-timeout: %q -> %q",
+				oldPool.IdleConnTimeout,
+				newPool.IdleConnTimeout,
+			),
+		)
+	}
+	if !reflect.DeepEqual(oldPool.MaxIdleConnsPerHost, newPool.MaxIdleConnsPerHost) {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"antigravity.connection-pool.max-idle-conns-per-host: %s -> %s",
+				formatOptionalConfigValue(oldPool.MaxIdleConnsPerHost),
+				formatOptionalConfigValue(newPool.MaxIdleConnsPerHost),
+			),
+		)
+	}
+	if !reflect.DeepEqual(oldCfg.Devin.SensitiveWords, newCfg.Devin.SensitiveWords) {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"devin.sensitive-words: %d -> %d",
+				len(oldCfg.Devin.SensitiveWords),
+				len(newCfg.Devin.SensitiveWords),
+			),
+		)
+	}
 	if oldCfg.XAI.InjectXSearch != newCfg.XAI.InjectXSearch {
 		changes = append(
 			changes,
@@ -291,6 +343,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.GeminiKey {
 			o := oldCfg.GeminiKey[i]
 			n := newCfg.GeminiKey[i]
+			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
+				changes = append(changes, fmt.Sprintf("gemini[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+			}
+			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
+				changes = append(changes, fmt.Sprintf("gemini[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+			}
+			if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
+				changes = append(changes, fmt.Sprintf("gemini[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf(
@@ -339,6 +400,19 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		}
 	}
 
+	for i := 0; i < min(len(oldCfg.InteractionsKey), len(newCfg.InteractionsKey)); i++ {
+		o, n := oldCfg.InteractionsKey[i], newCfg.InteractionsKey[i]
+		if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
+			changes = append(changes, fmt.Sprintf("interactions[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+		}
+		if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
+			changes = append(changes, fmt.Sprintf("interactions[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+		}
+		if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
+			changes = append(changes, fmt.Sprintf("interactions[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+		}
+	}
+
 	// Claude keys (do not print key material)
 	if len(oldCfg.ClaudeKey) != len(newCfg.ClaudeKey) {
 		changes = append(
@@ -348,6 +422,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.ClaudeKey {
 			o := oldCfg.ClaudeKey[i]
 			n := newCfg.ClaudeKey[i]
+			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
+				changes = append(changes, fmt.Sprintf("claude[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+			}
+			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
+				changes = append(changes, fmt.Sprintf("claude[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+			}
+			if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
+				changes = append(changes, fmt.Sprintf("claude[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf(
@@ -393,6 +476,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 					),
 				)
 			}
+			oldProfile, _ := config.NormalizeClaudeFingerprintProfile(o.FingerprintProfile)
+			newProfile, _ := config.NormalizeClaudeFingerprintProfile(n.FingerprintProfile)
+			if oldProfile != newProfile {
+				changes = append(changes, fmt.Sprintf("claude[%d].fingerprint-profile: updated", i))
+			}
 			if o.RebuildMidSystemMessage != n.RebuildMidSystemMessage {
 				changes = append(
 					changes,
@@ -437,6 +525,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.CodexKey {
 			o := oldCfg.CodexKey[i]
 			n := newCfg.CodexKey[i]
+			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
+				changes = append(changes, fmt.Sprintf("codex[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+			}
+			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
+				changes = append(changes, fmt.Sprintf("codex[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+			}
+			if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
+				changes = append(changes, fmt.Sprintf("codex[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf(
@@ -500,6 +597,15 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.XAIKey {
 			o := oldCfg.XAIKey[i]
 			n := newCfg.XAIKey[i]
+			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
+				changes = append(changes, fmt.Sprintf("xai[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+			}
+			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
+				changes = append(changes, fmt.Sprintf("xai[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+			}
+			if !reflect.DeepEqual(o.RequestScopedErrors, n.RequestScopedErrors) {
+				changes = append(changes, fmt.Sprintf("xai[%d].request-scoped-errors: updated (%d -> %d entries)", i, len(o.RequestScopedErrors), len(n.RequestScopedErrors)))
+			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf("xai[%d].base-url: %s -> %s", i, formatURL(o.BaseURL), formatURL(n.BaseURL)),
@@ -526,11 +632,6 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if o.Websockets != n.Websockets {
 				changes = append(changes, fmt.Sprintf("xai[%d].websockets: %t -> %t", i, o.Websockets, n.Websockets))
-			}
-			if o.DisableCooling != n.DisableCooling {
-				changes = append(
-					changes, fmt.Sprintf("xai[%d].disable-cooling: %t -> %t", i, o.DisableCooling, n.DisableCooling),
-				)
 			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("xai[%d].api-key: updated", i))
@@ -564,6 +665,11 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		changes = append(changes, entries...)
 	}
 	if entries, _ := oAuthModelAliasChanges(oldCfg.OAuthModelAlias, newCfg.OAuthModelAlias); len(entries) > 0 {
+		changes = append(changes, entries...)
+	}
+	if entries, _ := DiffOAuthRequestScopedErrorsChanges(
+		oldCfg.OAuthRequestScopedErrors, newCfg.OAuthRequestScopedErrors,
+	); len(entries) > 0 {
 		changes = append(changes, entries...)
 	}
 
@@ -680,6 +786,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 		for i := range oldCfg.VertexCompatAPIKey {
 			o := oldCfg.VertexCompatAPIKey[i]
 			n := newCfg.VertexCompatAPIKey[i]
+			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
+				changes = append(changes, fmt.Sprintf("vertex[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
+			}
+			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
+				changes = append(changes, fmt.Sprintf("vertex[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
+			}
 			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
 				changes = append(
 					changes, fmt.Sprintf(
@@ -807,4 +919,11 @@ func formatURL(raw string) string {
 		return host
 	}
 	return scheme + "://" + host
+}
+
+func formatOptionalConfigValue[T bool | int](value *T) string {
+	if value == nil {
+		return "inherit"
+	}
+	return fmt.Sprint(*value)
 }

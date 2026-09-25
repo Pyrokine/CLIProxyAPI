@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 	"sync"
@@ -73,26 +74,104 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 			}
 		}
 	}
+	updates := []AuthUpdate{update}
+	w.stampAuthUpdatesLocked(updates)
 	w.clientsMutex.Unlock()
 	if w.getAuthQueue() == nil {
 		return false
 	}
-	w.dispatchAuthUpdates([]AuthUpdate{update})
+	w.dispatchAuthUpdates(updates)
 	return true
 }
 
+func (w *Watcher) dispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (bool, uint64) {
+	if w == nil || update == nil || update.Auth == nil || strings.TrimSpace(update.Auth.ID) == "" {
+		return false, 0
+	}
+	path := ""
+	if update.Auth.Attributes != nil {
+		path = update.Auth.Attributes[coreauth.AttributePath]
+		if path == "" {
+			path = update.Auth.Attributes[coreauth.AttributeSource]
+		}
+	}
+	normalized := w.normalizeAuthPath(path)
+	if normalized == "" {
+		return false, 0
+	}
+
+	clone := update.Auth.Clone()
+	w.clientsMutex.Lock()
+	if w.fileAuthsByPath == nil {
+		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
+	}
+	pathAuths := w.fileAuthsByPath[normalized]
+	if pathAuths == nil {
+		pathAuths = make(map[string]*coreauth.Auth)
+		w.fileAuthsByPath[normalized] = pathAuths
+	}
+	pathAuths[clone.ID] = nil
+	if w.currentAuths == nil {
+		w.currentAuths = make(map[string]*coreauth.Auth)
+	}
+	w.currentAuths[clone.ID] = clone
+	if update.ID == "" {
+		update.ID = clone.ID
+	}
+	updateCopy := *update
+	updateCopy.Auth = clone.Clone()
+	updates := []AuthUpdate{updateCopy}
+	w.stampAuthUpdatesLocked(updates)
+	revision := updates[0].revision
+	update.revision = revision
+	w.clientsMutex.Unlock()
+
+	if w.getAuthQueue() == nil {
+		return false, revision
+	}
+	w.dispatchAuthUpdates(updates)
+	return true, revision
+}
+
 func (w *Watcher) refreshAuthState(force bool) {
-	w.clientsMutex.RLock()
+	w.clientsMutex.Lock()
+	w.activeAuthScans++
 	cfg := w.config
 	authDir := w.authDir
 	parser := w.pluginAuthParser
-	w.clientsMutex.RUnlock()
+	previousRevisions := maps.Clone(w.authRevisions)
+	previousFiles := maps.Clone(w.fileObservations)
+	w.clientsMutex.Unlock()
+
 	auths, errSnapshot := snapshotCoreAuthsFunc(cfg, authDir, parser)
 	w.clientsMutex.Lock()
+	w.activeAuthScans--
 	if errSnapshot != nil && w.currentAuths != nil {
 		w.clientsMutex.Unlock()
 		log.Errorf("failed to refresh auth snapshot; retaining current auth state: %v", errSnapshot)
 		return
+	}
+	changedDuringScan := func(auth *coreauth.Auth) bool {
+		if auth == nil {
+			return false
+		}
+		path := auth.Attributes[coreauth.AttributePath]
+		if path == "" {
+			path = auth.Attributes[coreauth.AttributeSource]
+		}
+		normalized := w.normalizeAuthPath(path)
+		return previousRevisions[auth.ID] != w.authRevisions[auth.ID] ||
+			previousFiles[normalized] != w.fileObservations[normalized]
+	}
+	for index, auth := range auths {
+		if changedDuringScan(auth) {
+			auths[index] = nil
+		}
+	}
+	for _, auth := range w.currentAuths {
+		if changedDuringScan(auth) {
+			auths = append(auths, auth.Clone())
+		}
 	}
 	if len(w.runtimeAuths) > 0 {
 		for _, a := range w.runtimeAuths {
@@ -113,29 +192,6 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 			continue
 		}
 		newState[auth.ID] = auth.Clone()
-	}
-	if w.currentAuths == nil {
-		w.currentAuths = newState
-		if w.authQueue == nil {
-			return nil
-		}
-		updates := make([]AuthUpdate, 0, len(newState))
-		for id, auth := range newState {
-			updates = append(
-				updates,
-				AuthUpdate{
-					Action:            AuthUpdateActionAdd,
-					ID:                id,
-					Auth:              auth.Clone(),
-					AllowAuthRecreate: allowAuthRecreateForUpdate(auth),
-				},
-			)
-		}
-		return updates
-	}
-	if w.authQueue == nil {
-		w.currentAuths = newState
-		return nil
 	}
 	updates := make([]AuthUpdate, 0, len(newState)+len(w.currentAuths))
 	for id, auth := range newState {
@@ -167,15 +223,41 @@ func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) [
 		}
 	}
 	w.currentAuths = newState
+	w.stampAuthUpdatesLocked(updates)
+	if w.authQueue == nil {
+		return nil
+	}
 	return updates
+}
+
+// stampAuthUpdatesLocked records revisions even when no consumer is attached.
+func (w *Watcher) stampAuthUpdatesLocked(updates []AuthUpdate) {
+	if len(updates) == 0 {
+		return
+	}
+	if w.authRevisions == nil {
+		w.authRevisions = make(map[string]uint64)
+	}
+	for index := range updates {
+		update := &updates[index]
+		if update.ID == "" && update.Auth != nil {
+			update.ID = update.Auth.ID
+		}
+		if update.ID == "" {
+			continue
+		}
+		w.authRevisions[update.ID]++
+		update.revision = w.authRevisions[update.ID]
+	}
 }
 
 func (w *Watcher) dispatchAuthUpdates(updates []AuthUpdate) {
 	if len(updates) == 0 {
 		return
 	}
-	queue := w.getAuthQueue()
-	if queue == nil {
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.authQueue == nil {
 		return
 	}
 	baseTS := time.Now().UnixNano()
@@ -184,6 +266,9 @@ func (w *Watcher) dispatchAuthUpdates(updates []AuthUpdate) {
 		w.pendingUpdates = make(map[string]AuthUpdate)
 	}
 	for idx, update := range updates {
+		if update.revision != 0 && update.revision < w.authRevisions[update.ID] {
+			continue
+		}
 		key := w.authUpdateKey(update, baseTS+int64(idx))
 		if _, exists := w.pendingUpdates[key]; !exists {
 			w.pendingOrder = append(w.pendingOrder, key)

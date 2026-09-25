@@ -18,7 +18,7 @@ openai-compatibility:
 	if !cfg.SaveCooldownStatus {
 		t.Fatal("SaveCooldownStatus = false, want true")
 	}
-	if len(cfg.OpenAICompatibility) != 1 || !cfg.OpenAICompatibility[0].DisableCooling {
+	if len(cfg.OpenAICompatibility) != 1 || cfg.OpenAICompatibility[0].DisableCooling == nil || !*cfg.OpenAICompatibility[0].DisableCooling {
 		t.Fatalf("OpenAICompatibility = %#v, want disable-cooling true", cfg.OpenAICompatibility)
 	}
 }

@@ -3,13 +3,15 @@ package access
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"sync"
 )
 
 // Manager coordinates authentication providers.
 type Manager struct {
-	mu        sync.RWMutex
-	providers []Provider
+	mu         sync.RWMutex
+	providers  []Provider
+	generation uint64
 }
 
 // NewManager constructs an empty manager.
@@ -25,30 +27,72 @@ func (m *Manager) SetProviders(providers []Provider) {
 	cloned := make([]Provider, len(providers))
 	copy(cloned, providers)
 	m.mu.Lock()
+	if !sameProviderInstances(m.providers, cloned) {
+		m.generation++
+	}
 	m.providers = cloned
 	m.mu.Unlock()
 }
 
+func sameProviderInstances(current, next []Provider) bool {
+	if len(current) != len(next) {
+		return false
+	}
+	for i, provider := range current {
+		other := next[i]
+		if reflect.TypeOf(provider) != reflect.TypeOf(other) {
+			return false
+		}
+		value := reflect.ValueOf(provider)
+		if value.IsValid() && value.Kind() == reflect.Pointer {
+			if value.Pointer() != reflect.ValueOf(other).Pointer() {
+				return false
+			}
+		} else if !reflect.DeepEqual(provider, other) {
+			return false
+		}
+	}
+	return true
+}
+
+// Generation changes whenever the active provider instances change.
+func (m *Manager) Generation() uint64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.generation
+}
+
 // Providers returns a snapshot of the active providers.
 func (m *Manager) Providers() []Provider {
+	providers, _ := m.providerSnapshot()
+	return providers
+}
+
+func (m *Manager) providerSnapshot() ([]Provider, uint64) {
 	if m == nil {
-		return nil
+		return nil, 0
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	snapshot := make([]Provider, len(m.providers))
 	copy(snapshot, m.providers)
-	return snapshot
+	return snapshot, m.generation
 }
 
 // Authenticate evaluates providers until one succeeds.
 func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *AuthError) {
-	if m == nil {
-		return nil, nil
-	}
-	providers := m.Providers()
+	result, _, err := m.AuthenticateWithGeneration(ctx, r)
+	return result, err
+}
+
+// AuthenticateWithGeneration returns the provider generation that authenticated the request.
+func (m *Manager) AuthenticateWithGeneration(ctx context.Context, r *http.Request) (*Result, uint64, *AuthError) {
+	providers, generation := m.providerSnapshot()
 	if len(providers) == 0 {
-		return nil, nil
+		return nil, generation, nil
 	}
 
 	var (
@@ -62,7 +106,7 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *
 		}
 		res, authErr := provider.Authenticate(ctx, r)
 		if authErr == nil {
-			return res, nil
+			return res, generation, nil
 		}
 		if IsAuthErrorCode(authErr, AuthErrorCodeNotHandled) {
 			continue
@@ -75,14 +119,14 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (*Result, *
 			invalid = true
 			continue
 		}
-		return nil, authErr
+		return nil, generation, authErr
 	}
 
 	if invalid {
-		return nil, NewInvalidCredentialError()
+		return nil, generation, NewInvalidCredentialError()
 	}
 	if missing {
-		return nil, NewNoCredentialsError()
+		return nil, generation, NewNoCredentialsError()
 	}
-	return nil, NewNoCredentialsError()
+	return nil, generation, NewNoCredentialsError()
 }

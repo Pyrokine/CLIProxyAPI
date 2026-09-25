@@ -61,10 +61,10 @@ func TestOpenAICompatibilityPromptCacheKeyChanged(t *testing.T) {
 
 func TestOpenAICompatibilityDisableCoolingChanged(t *testing.T) {
 	oldList := []config.OpenAICompatibility{{Name: "provider-a"}}
-	newList := []config.OpenAICompatibility{{Name: "provider-a", DisableCooling: true}}
+	newList := []config.OpenAICompatibility{{Name: "provider-a", DisableCooling: new(true)}}
 
 	changes := openAICompatibility(oldList, newList)
-	expectContains(t, changes, "provider updated: provider-a (disable-cooling false -> true)")
+	expectContains(t, changes, "provider updated: provider-a (disable-cooling inherit -> true)")
 }
 
 func TestOpenAICompatibilityPromptCacheKeyChangedWithDuplicateNames(t *testing.T) {

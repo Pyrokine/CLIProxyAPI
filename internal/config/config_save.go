@@ -138,6 +138,7 @@ func SaveConfigPreserveCommentsWithDigest(configFile string, cfg *Config) (strin
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-request-scoped-errors")
 	if modelsExternal {
 		removeMapKey(original.Content[0], "model-catalog")
 	} else {

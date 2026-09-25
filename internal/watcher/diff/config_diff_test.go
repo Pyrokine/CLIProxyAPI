@@ -615,6 +615,41 @@ func TestBuildConfigChangeDetailsIncludesAntigravitySensitiveWords(t *testing.T)
 	expectContains(t, changes, "antigravity.sensitive-words: 1 -> 2")
 }
 
+func TestBuildConfigChangeDetailsIncludesAntigravityPoolAndCodexOrphanSettings(t *testing.T) {
+	disabled := false
+	zero := 0
+	oldCfg := &config.Config{}
+	newCfg := &config.Config{
+		Antigravity: config.AntigravityConfig{
+			ConnectionPool: config.AntigravityConnectionPoolConfig{
+				Enabled:             &disabled,
+				IdleConnTimeout:     "30s",
+				MaxIdleConnsPerHost: &zero,
+			},
+		},
+		Codex: config.CodexConfig{OrphanDelegationCompatibility: true},
+	}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "antigravity.connection-pool.enabled: inherit -> false")
+	expectContains(t, changes, `antigravity.connection-pool.idle-conn-timeout: "" -> "30s"`)
+	expectContains(t, changes, "antigravity.connection-pool.max-idle-conns-per-host: inherit -> 0")
+	expectContains(t, changes, "codex.orphan-delegation-compatibility: false -> true")
+
+	negative := -3
+	changedCfg := *newCfg
+	changedCfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost = &negative
+	changes = BuildConfigChangeDetails(newCfg, &changedCfg)
+	expectContains(t, changes, "antigravity.connection-pool.max-idle-conns-per-host: 0 -> -3")
+}
+
+func TestBuildConfigChangeDetailsIncludesDevinSensitiveWords(t *testing.T) {
+	changes := BuildConfigChangeDetails(
+		&config.Config{Devin: config.DevinConfig{SensitiveWords: []string{"old"}}},
+		&config.Config{Devin: config.DevinConfig{SensitiveWords: []string{"old", "new"}}},
+	)
+	expectContains(t, changes, "devin.sensitive-words: 1 -> 2")
+}
+
 func TestBuildConfigChangeDetailsIncludesXAIInjectXSearch(t *testing.T) {
 	changes := BuildConfigChangeDetails(
 		&config.Config{},

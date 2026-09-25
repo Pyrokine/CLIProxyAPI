@@ -19,8 +19,10 @@ import (
 
 // Auth performs xAI OAuth discovery, token exchange, and refresh.
 type Auth struct {
-	httpClient   *http.Client
-	refreshGroup singleflight.Group
+	httpClient      *http.Client
+	refreshGroup    singleflight.Group
+	minPollInterval time.Duration
+	maxPollDuration time.Duration
 }
 
 // NewXAIAuth creates an xAI OAuth helper using config proxy settings.
@@ -265,9 +267,23 @@ func (a *Auth) pollForToken(ctx context.Context, deviceCode *DeviceCodeResponse)
 		return nil, err
 	}
 
-	interval := max(time.Duration(deviceCode.Interval)*time.Second, defaultPollInterval)
+	minInterval := defaultPollInterval
+	if a != nil && a.minPollInterval > 0 {
+		minInterval = a.minPollInterval
+	}
+	interval := time.Duration(deviceCode.Interval) * time.Second
+	if a != nil && a.minPollInterval > 0 && deviceCode.Interval <= 0 {
+		interval = a.minPollInterval
+	} else if interval < minInterval {
+		interval = minInterval
+	}
+
+	pollDuration := MaxPollDuration
+	if a != nil && a.maxPollDuration > 0 {
+		pollDuration = a.maxPollDuration
+	}
 	now := time.Now()
-	deadline := now.Add(MaxPollDuration)
+	deadline := now.Add(pollDuration)
 	if deviceCode.ExpiresIn > 0 {
 		deviceDeadline := now.Add(time.Duration(deviceCode.ExpiresIn) * time.Second)
 		if deviceDeadline.Before(deadline) {
@@ -377,7 +393,11 @@ func (a *Auth) exchangeDeviceCode(
 		case "authorization_pending":
 			return nil, interval, true, nil
 		case "slow_down":
-			return nil, interval + defaultPollInterval, true, nil
+			step := defaultPollInterval
+			if a != nil && a.minPollInterval > 0 {
+				step = a.minPollInterval
+			}
+			return nil, interval + step, true, nil
 		case "expired_token":
 			return nil, interval, false, fmt.Errorf("xai device code expired")
 		case "access_denied":

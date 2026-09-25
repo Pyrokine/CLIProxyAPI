@@ -134,6 +134,9 @@ enable-gemini-cli-endpoint: false
 # Default is false (disabled).
 passthrough-headers: false
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
+# Individual API-key entries can override this via request-retry. OAuth/token JSON files use request_retry.
+# Example OAuth/token JSON: {"type":"codex","access_token":"...","request_retry":0}
+# 0 disables retries for that credential; omit the field or set a negative value to keep this global setting.
 request-retry: 3
 # Maximum number of different credentials to try for one failed request.
 # Set to 0 to keep legacy behavior (try all available credentials).
@@ -153,6 +156,13 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
     strategy: "round-robin" # round-robin (default), weighted-round-robin, quota-aware, fill-first
+    # Keep requests from the same explicit or inferred session on one credential.
+    session-affinity: false
+    # Expire inactive session bindings after this duration.
+    session-affinity-ttl: "1h"
+    # Subagents inherit the parent credential by default across Claude, Codex, Antigravity, Gemini, and generic harnesses.
+    # Set false to distribute subagents through the configured fallback strategy. Ignored when session-affinity is false.
+    session-affinity-subagents: true
 # CORS allowed origins. Empty = allow all (*) for CLI tool compatibility.
 # Set to restrict browser access: ["http://localhost:5173", "http://127.0.0.1:5173"]
 # cors-allowed-origins: []
@@ -187,6 +197,11 @@ codex:
     disable-codex-cloaking: false
     # Optimize official Codex multi-agent v2 requests and collaboration tools.
     optimize-multi-agent-v2: false
+    # Enable opt-in compatibility for orphan Codex delegation outputs.
+    # Converts orphan function_call_output items from codex_app/create_thread and
+    # codex_app/send_message_to_thread into standard user messages when the request
+    # header contains X-Openai-Subagent: collab_spawn.
+    orphan-delegation-compatibility: false
     # Optional in-process WebRTC gateway for Codex Live audio and oai-events.
     live-media-relay:
         enabled: false
@@ -230,10 +245,16 @@ redis-usage-queue-retention-seconds: 60
 # gemini-api-key:
 #   - api-key: "AIzaSy...01"
 #     prefix: "test" # optional: require calls like "test/gemini-3-pro-preview" to target this credential
+#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080"
+#     request-scoped-errors: # optional: ordered upstream status/body rules; actions are documented below
+#       - status: 400
+#         match: ["maximum_context_length"]
+#         match-regexr: ["^context_length_exceeded"]
+#         action: "stop"
 #     models:
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "gemini-flash"    # client alias mapped to the upstream model
@@ -253,10 +274,15 @@ redis-usage-queue-retention-seconds: 60
 # interactions-api-key:
 #   - api-key: "AIzaSy...03"
 #     prefix: "native" # optional: require calls like "native/gemini-2.5-flash" to target this credential
+#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
 #     base-url: "https://generativelanguage.googleapis.com"
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080"
+#     request-scoped-errors:
+#       - status: 400
+#         match: ["maximum_context_length"]
+#         action: "continue"
 #     models:
 #       - name: "gemini-2.5-flash" # upstream model name
 #         alias: "native-gemini-flash" # client alias mapped to the upstream model
@@ -271,11 +297,16 @@ redis-usage-queue-retention-seconds: 60
 # codex-api-key:
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
+#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
 #     alpha-search: false # optional: allow this key to serve /v1/alpha/search via base-url + /alpha/search
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     request-scoped-errors:
+#       - status: 429
+#         match: ["rate_limit_exceeded"]
+#         action: "continue-and-cooldown"
 #     models:
 #       - name: "gpt-5-codex"   # upstream model name
 #         alias: "codex-latest" # client alias mapped to the upstream model
@@ -298,6 +329,15 @@ redis-usage-queue-retention-seconds: 60
 #   sensitive-words: # optional: words to obfuscate with zero-width characters in system instructions
 #     - "API"
 #     - "proxy"
+#   connection-pool:             # optional: upstream HTTP connection pool settings
+#     enabled: false             # whether to enable connection pooling (default: false)
+#     idle-conn-timeout: "30s"   # idle keep-alive timeout (default: 30s, capped at 210s)
+#     max-idle-conns-per-host: 2 # max idle connections per host per credential (default: 2)
+
+# Devin request behavior
+# devin:
+#   sensitive-words: # optional: remove matching system-prompt lines, then obfuscate remaining matches
+#     - "sensitive phrase"
 
 # xAI request behavior
 # xai:
@@ -309,12 +349,17 @@ redis-usage-queue-retention-seconds: 60
 # xai-api-key:
 #   - api-key: "xai-..."
 #     prefix: "xai" # optional: require calls like "xai/grok-4.5" to target this credential
+#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
 #     base-url: "https://api.x.ai/v1"
 #     websockets: true # optional: enable upstream websocket transport for downstream websocket requests
 #     disable-cooling: false # optional: disable auth/model cooldown scheduling for this credential
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
+#     request-scoped-errors:
+#       - status: 500
+#         match: ["upstream_overloaded"]
+#         action: "stop-and-cooldown"
 #     models:
 #       - name: "grok-4.5"
 #         alias: "grok-latest"
@@ -332,10 +377,15 @@ redis-usage-queue-retention-seconds: 60
 #   - api-key: "sk-atSM..." # use the official claude API key, no need to set the base url
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/claude-sonnet-latest" to target this credential
+#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
 #     base-url: "https://www.example.com" # use the custom claude API endpoint
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+#     request-scoped-errors:
+#       - status: 400
+#         match: ["context_length_exceeded"]
+#         action: "stop"
 #     models:
 #       - name: "claude-3-5-sonnet-20241022" # upstream model name
 #         alias: "claude-sonnet-latest"      # client alias mapped to the upstream model
@@ -361,13 +411,18 @@ redis-usage-queue-retention-seconds: 60
 #       cache-user-id: true          # optional: default is false; set true to reuse cached
 #                                    # user_id per API key instead of generating a random
 #                                    # one each request
-#     experimental-cch-signing: false # optional: sign the final /v1/messages body with Claude Code cch algorithm
+#     fingerprint-profile: ""       # 默认为空，API key 保留调用方身份
+#                                    # claude-code-cli 启用 CLI 请求身份，oauth-cli 为兼容名称
+#                                    # 不改变真实 OAuth 行为或增加账号权限
+#     OAuth/token JSON uses the canonical "fingerprint_profile" key; legacy "fingerprint-profile" remains readable.
+#     Example: {"type":"kimi","access_token":"...","refresh_token":"...","fingerprint_profile":"claude-code-cli"}
+#     experimental-cch-signing: false # 仅兼容旧配置，不能开启签名
 
-# Default headers for Claude API requests. Update when Claude Code releases new versions.
-# These are used as fallbacks when the client does not send its own headers.
+# Claude 请求身份默认值用于 CLI profile 和真实 OAuth
+# 不覆盖默认模式下的调用方身份
 # claude-header-defaults:
-#   user-agent: "claude-cli/2.1.220 (external, cli)"
-#   package-version: "0.94.0"
+#   user-agent: "claude-cli/2.1.258 (external, cli)"
+#   package-version: "0.112.1"
 #   runtime-version: "v26.3.0"
 #   os: "MacOS"
 #   arch: "arm64"
@@ -387,6 +442,11 @@ redis-usage-queue-retention-seconds: 60
 #     base-url: "https://openrouter.ai/api/v1" # The base URL of the provider.
 #     support-prompt-cache-key: false # optional: derive prompt_cache_key for requests with session identity
 #     disable-cooling: false # optional: disable auth/model cooldown scheduling for this provider
+#     request-retry: 3 # optional: 0 disables retries; omit or set < 0 to use the global value
+#     request-scoped-errors:
+#       - status: 422
+#         match: ["invalid_prompt"]
+#         action: "continue"
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     api-key-entries:
@@ -412,6 +472,7 @@ redis-usage-queue-retention-seconds: 60
 #   - api-key: "vk-123..."                        # x-goog-api-key header
 #     prefix: "test"                # optional: require calls like "test/vertex-pro"
 #                                    # to target this credential
+#     request-retry: 3               # optional: 0 disables retries; omit or set < 0 to use the global value
 #     base-url: "https://example.com/api"         # e.g. https://zenmux.ai/api
 #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
 #     headers:
@@ -467,6 +528,8 @@ redis-usage-queue-retention-seconds: 60
 #   qoder:                            # plugin provider keys are supported for OAuth plugins
 #     - name: "qmodel_latest"
 #       alias: "qlatest"
+# Per-auth OAuth/token JSON uses the canonical "model_aliases" key; legacy "model-aliases" remains readable.
+# Example: {"type":"codex","email":"user@example.com","model_aliases":[{"name":"gpt-5.3-codex-spark","alias":"gpt-5.5"}]}
 
 # OAuth provider excluded models
 # oauth-excluded-models:
@@ -491,6 +554,24 @@ redis-usage-queue-retention-seconds: 60
 #     - "tstars2.0"
 #   kimi:
 #     - "kimi-k2-thinking"
+
+# OAuth provider request-scoped error rules
+# Rules are evaluated in order; the first valid match wins.
+# Actions:
+#   stop: stop fallback without changing availability
+#   stop-and-cooldown: stop fallback and force cooldown
+#   continue: continue only when replay is already safe
+#   continue-and-cooldown: continue when safe and force cooldown
+# oauth-request-scoped-errors:
+#   vertex:
+#     - status: 400
+#       match:
+#         - "maximum_context_length"
+#         - "context_length_exceeded"
+#       match-regexr:
+#         - "maximum_context_length$"
+#         - "^context_length_exceeded"
+#       action: "stop"
 
 # Optional payload configuration
 # payload:
@@ -535,3 +616,11 @@ redis-usage-queue-retention-seconds: 60
 #       params: # JSON paths (gjson/sjson syntax) to remove from the payload
 #         - "generationConfig.thinkingConfig.thinkingBudget"
 #         - "generationConfig.responseJsonSchema"
+#     - models:
+#         - name: "gpt-*"
+#           protocol: "codex"
+#       params:
+#         # Flat tools array (standard OpenAI format or Codex CLI < 0.154):
+#         - 'tools.#(name=="apply_patch")'
+#         # Nested additional_tools structure in input[] (Codex CLI >= 0.154 "Responses Lite"):
+#         - 'input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="apply_patch")#'

@@ -49,7 +49,7 @@ func reconcileProviders(oldCfg, newCfg *config.Config, existing []sdkaccess.Prov
 		*list = append(*list, id)
 	}
 
-	for _, provider := range result {
+	for index, provider := range result {
 		providerID := identifierFromProvider(provider)
 		if providerID == "" {
 			continue
@@ -59,6 +59,11 @@ func reconcileProviders(oldCfg, newCfg *config.Config, existing []sdkaccess.Prov
 		existingProvider, exists := existingMap[providerID]
 		if !exists {
 			appendChange(&added, providerID)
+			continue
+		}
+		if isInlineProvider(providerID) && reflect.TypeOf(existingProvider) == reflect.TypeOf(provider) &&
+			reflect.DeepEqual(existingProvider, provider) {
+			result[index] = existingProvider
 			continue
 		}
 		if !providerInstanceEqual(existingProvider, provider) {

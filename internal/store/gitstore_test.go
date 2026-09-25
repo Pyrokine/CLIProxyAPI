@@ -17,6 +17,14 @@ import (
 	"github.com/go-git/go-git/v6/plumbing/object"
 )
 
+type callbackTokenStorage struct {
+	save func(string) error
+}
+
+func (s *callbackTokenStorage) SaveTokenToFile(path string) error {
+	return s.save(path)
+}
+
 func cleanupTestGitRepository(t *testing.T, repo *git.Repository) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -369,32 +377,48 @@ func TestGitTokenStoreSaveRollsBackLocalStateWhenPushIsUncertain(t *testing.T) {
 	}
 }
 
-func TestGitTokenStorePersistsDisabledCredentialWithoutExistingFile(t *testing.T) {
+func TestGitTokenStoreRequiresCreationIntentForMissingDisabledCredential(t *testing.T) {
 	remoteDir := filepath.Join(t.TempDir(), "remote.git")
 	if _, err := git.PlainInit(remoteDir, true); err != nil {
 		t.Fatalf("initialize remote repository: %v", err)
 	}
+	authDir := filepath.Join(t.TempDir(), "auths")
 	store := NewGitTokenStore(remoteDir, "", "", "")
-	store.SetBaseDir(filepath.Join(t.TempDir(), "auths"))
+	store.SetBaseDir(authDir)
+	errReachedStorage := errors.New("reached token storage")
+	storageReached := false
 	auth := &cliproxyauth.Auth{
 		ID:       "disabled.json",
 		FileName: "disabled.json",
 		Disabled: true,
+		Storage: &callbackTokenStorage{save: func(string) error {
+			storageReached = true
+			return errReachedStorage
+		}},
 		Metadata: map[string]any{"type": "codex"},
 	}
+
 	path, errSave := store.Save(context.Background(), auth)
 	if errSave != nil {
-		t.Fatalf("Save() error = %v", errSave)
+		t.Fatalf("runtime Save() error = %v", errSave)
 	}
-	if path == "" {
-		t.Fatal("Save() returned an empty path for disabled credential")
+	if path != "" {
+		t.Fatalf("runtime Save() path = %q, want empty", path)
 	}
-	listed, errList := store.List(context.Background())
-	if errList != nil {
-		t.Fatalf("List() error = %v", errList)
+	if storageReached {
+		t.Fatal("runtime Save() reached token storage for a missing disabled credential")
 	}
-	if len(listed) != 1 || listed[0] == nil || !listed[0].Disabled || listed[0].Status != cliproxyauth.StatusDisabled {
-		t.Fatalf("disabled credential round trip = %#v", listed)
+	if _, errStat := os.Stat(authDir); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("runtime Save() auth directory stat error = %v, want os.ErrNotExist", errStat)
+	}
+
+	ctx := cliproxyauth.WithAuthCreationIntent(context.Background())
+	_, errSave = store.Save(ctx, auth)
+	if !errors.Is(errSave, errReachedStorage) {
+		t.Fatalf("creation-intent Save() error = %v, want token storage sentinel", errSave)
+	}
+	if !storageReached {
+		t.Fatal("creation-intent Save() did not reach token storage")
 	}
 }
 

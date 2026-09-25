@@ -123,7 +123,11 @@ func (a *ClaudeAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 		return nil, fmt.Errorf("claude token storage missing account information")
 	}
 
-	fileName := fmt.Sprintf("claude-%s.json", tokenStorage.Email)
+	fileName := claude.CredentialFileName(
+		tokenStorage.Email,
+		tokenStorage.OrganizationUUID,
+		tokenStorage.AccountUUID,
+	)
 	metadata := map[string]any{
 		"email": tokenStorage.Email,
 	}

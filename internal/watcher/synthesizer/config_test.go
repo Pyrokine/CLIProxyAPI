@@ -756,6 +756,40 @@ func TestConfigSynthesizer_RouteIdentityStableAcrossReorderAndDelete(t *testing.
 		buildConfig func([]string) *config.Config
 	}{
 		{
+			name:     "gemini",
+			provider: "gemini",
+			buildConfig: func(proxyURLs []string) *config.Config {
+				keys := make([]config.GeminiKey, 0, len(proxyURLs))
+				for _, proxyURL := range proxyURLs {
+					keys = append(
+						keys, config.GeminiKey{
+							APIKey:   "shared-gemini-key",
+							BaseURL:  "https://gemini.example.com",
+							ProxyURL: proxyURL,
+						},
+					)
+				}
+				return &config.Config{GeminiKey: keys}
+			},
+		},
+		{
+			name:     "interactions",
+			provider: "gemini-interactions",
+			buildConfig: func(proxyURLs []string) *config.Config {
+				keys := make([]config.GeminiKey, 0, len(proxyURLs))
+				for _, proxyURL := range proxyURLs {
+					keys = append(
+						keys, config.GeminiKey{
+							APIKey:   "shared-interactions-key",
+							BaseURL:  "https://interactions.example.com",
+							ProxyURL: proxyURL,
+						},
+					)
+				}
+				return &config.Config{InteractionsKey: keys}
+			},
+		},
+		{
 			name:     "claude",
 			provider: "claude",
 			buildConfig: func(proxyURLs []string) *config.Config {
@@ -846,6 +880,83 @@ func TestConfigSynthesizer_RouteIdentityStableAcrossReorderAndDelete(t *testing.
 				}
 			},
 		)
+	}
+}
+
+func TestConfigSynthesizer_GeminiStyleIdentityIncludesPrefixAndSortedHeaders(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		config   func(config.GeminiKey) *config.Config
+	}{
+		{
+			name:     "gemini",
+			provider: "gemini",
+			config: func(entry config.GeminiKey) *config.Config {
+				return &config.Config{GeminiKey: []config.GeminiKey{entry}}
+			},
+		},
+		{
+			name:     "interactions",
+			provider: "gemini-interactions",
+			config: func(entry config.GeminiKey) *config.Config {
+				return &config.Config{InteractionsKey: []config.GeminiKey{entry}}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			identity := func(entry config.GeminiKey) string {
+				t.Helper()
+				auths, err := NewConfigSynthesizer().Synthesize(
+					&SynthesisContext{
+						Config:      test.config(entry),
+						Now:         time.Unix(1_700_000_000, 0),
+						IDGenerator: NewStableIDGenerator(),
+					},
+				)
+				if err != nil {
+					t.Fatalf("synthesize auth: %v", err)
+				}
+				for _, auth := range auths {
+					if auth.Provider == test.provider {
+						return auth.ID
+					}
+				}
+				t.Fatalf("provider %q auth not found", test.provider)
+				return ""
+			}
+
+			firstHeaders := make(map[string]string, 2)
+			firstHeaders["X-B"] = "2"
+			firstHeaders["X-A"] = "1"
+			secondHeaders := make(map[string]string, 2)
+			secondHeaders["X-A"] = "1"
+			secondHeaders["X-B"] = "2"
+			base := config.GeminiKey{
+				APIKey:   "shared-key",
+				BaseURL:  "https://gateway.example/v1",
+				ProxyURL: "https://proxy.example",
+				Prefix:   "team-a",
+				Headers:  firstHeaders,
+			}
+			sameRoute := base
+			sameRoute.Headers = secondHeaders
+			if identity(base) != identity(sameRoute) {
+				t.Fatal("header insertion order changed the stable auth ID")
+			}
+
+			differentPrefix := base
+			differentPrefix.Prefix = "team-b"
+			if identity(base) == identity(differentPrefix) {
+				t.Fatal("different prefixes received the same stable auth ID")
+			}
+			differentHeader := base
+			differentHeader.Headers = map[string]string{"X-A": "1", "X-B": "3"}
+			if identity(base) == identity(differentHeader) {
+				t.Fatal("different header values received the same stable auth ID")
+			}
+		})
 	}
 }
 

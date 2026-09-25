@@ -14,7 +14,7 @@ func TestOpenAICompatibilityDisableCoolingMetadata(t *testing.T) {
 				OpenAICompatibility: []config.OpenAICompatibility{
 					{
 						Name:           "compat",
-						DisableCooling: true,
+						DisableCooling: new(true),
 						APIKeyEntries: []config.OpenAICompatibilityAPIKey{
 							{
 								APIKey: "test-key",

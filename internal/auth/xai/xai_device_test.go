@@ -152,6 +152,7 @@ func TestPollForTokenStopsAtDeviceExpiryBeforeNextInterval(t *testing.T) {
 				},
 			),
 		},
+		maxPollDuration: 10 * time.Millisecond,
 	}
 
 	started := time.Now()
@@ -167,8 +168,8 @@ func TestPollForTokenStopsAtDeviceExpiryBeforeNextInterval(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "expired") {
 		t.Fatalf("PollForToken() error = %v, want expired", err)
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("PollForToken() elapsed = %s, want device deadline near 1s", elapsed)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("PollForToken() elapsed = %s, want bounded test deadline", elapsed)
 	}
 	if requests != 1 {
 		t.Fatalf("token requests = %d, want 1 immediate request", requests)
@@ -187,6 +188,7 @@ func TestPollForTokenCancelsInFlightRequestAtDeviceExpiry(t *testing.T) {
 				},
 			),
 		},
+		maxPollDuration: 10 * time.Millisecond,
 	}
 
 	_, err := auth.pollForToken(
@@ -204,6 +206,59 @@ func TestPollForTokenCancelsInFlightRequestAtDeviceExpiry(t *testing.T) {
 	case <-requestCancelled:
 	case <-time.After(time.Second):
 		t.Fatal("token request context was not cancelled at device expiry")
+	}
+}
+
+func TestPollForTokenRetriesOAuthPendingStatesWithoutPhysicalDelay(t *testing.T) {
+	for _, oauthState := range []string{"authorization_pending", "slow_down"} {
+		t.Run(oauthState, func(t *testing.T) {
+			requests := 0
+			auth := &Auth{
+				httpClient: &http.Client{Transport: xaiRoundTripFunc(
+					func(req *http.Request) (*http.Response, error) {
+						requests++
+						if requests == 1 {
+							return xaiJSONResponse(req, http.StatusBadRequest, map[string]any{"error": oauthState}), nil
+						}
+						return xaiJSONResponse(req, http.StatusOK, map[string]any{
+							"access_token": "access-1",
+							"token_type":   "Bearer",
+							"expires_in":   3600,
+						}), nil
+					},
+				)},
+				minPollInterval: time.Millisecond,
+			}
+			started := time.Now()
+			token, err := auth.pollForToken(context.Background(), &DeviceCodeResponse{
+				DeviceCode:    "device-abc",
+				ExpiresIn:     60,
+				TokenEndpoint: "https://auth.x.ai/oauth2/token",
+			})
+			if err != nil {
+				t.Fatalf("pollForToken() error = %v", err)
+			}
+			if token.AccessToken != "access-1" || requests != 2 {
+				t.Fatalf("pollForToken() = token %#v after %d requests", token, requests)
+			}
+			if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+				t.Fatalf("pollForToken() elapsed = %s, want injected short interval", elapsed)
+			}
+		})
+	}
+}
+
+func TestXAIAuthProductionPollingDefaultsRemainUnchanged(t *testing.T) {
+	auth := NewXAIAuth(nil)
+	if auth.minPollInterval != 0 || auth.maxPollDuration != 0 {
+		t.Fatalf(
+			"poll overrides = interval:%s duration:%s, want zero-value production defaults",
+			auth.minPollInterval,
+			auth.maxPollDuration,
+		)
+	}
+	if defaultPollInterval != 5*time.Second || MaxPollDuration != 30*time.Minute {
+		t.Fatalf("production polling defaults = %s/%s, want 5s/30m", defaultPollInterval, MaxPollDuration)
 	}
 }
 

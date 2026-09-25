@@ -206,6 +206,13 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
+		if _, errStat := os.Stat(path); errors.Is(errStat, fs.ErrNotExist) {
+			return "", nil
+		} else if errStat != nil {
+			return "", fmt.Errorf("object store: stat disabled credential: %w", errStat)
+		}
+	}
 	if err = secureAuthDirectory(filepath.Dir(path)); err != nil {
 		return "", fmt.Errorf("object store: secure auth directory: %w", err)
 	}
@@ -298,14 +305,12 @@ func (s *ObjectTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, erro
 			if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
 				return nil
 			}
-			auth, err := s.readAuthFile(ctx, path, dir)
-			if err != nil {
-				log.WithError(err).Warnf("object store: skip auth %s", path)
+			auths, errRead := s.readAuthFiles(ctx, path, dir)
+			if errRead != nil {
+				log.WithError(errRead).Warnf("object store: skip auth %s", path)
 				return nil
 			}
-			if auth != nil {
-				entries = append(entries, auth)
-			}
+			entries = append(entries, auths...)
 			return nil
 		},
 	)
@@ -781,6 +786,46 @@ func (s *ObjectTokenStore) resolveDeletePath(id string) (string, error) {
 	return filepath.Join(s.authDir, clean), nil
 }
 
+func (s *ObjectTokenStore) readAuthFiles(ctx context.Context, path, baseDir string) ([]*cliproxyauth.Auth, error) {
+	data, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return nil, fmt.Errorf("read file: %w", errRead)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	metadata := make(map[string]any)
+	if errJSON := json.Unmarshal(data, &metadata); errJSON != nil {
+		return nil, fmt.Errorf("unmarshal auth json: %w", errJSON)
+	}
+	cliproxyauth.NormalizeCredentialMetadata(metadata)
+	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, errWeight
+	}
+	provider := strings.TrimSpace(valueAsString(metadata["type"]))
+	info, errStat := os.Stat(path)
+	if errStat != nil {
+		return nil, fmt.Errorf("stat auth file: %w", errStat)
+	}
+	id := internalauth.FileAuthID(path, baseDir)
+	auths, handled, errParse := sdkauth.ParsePluginAuthFiles(ctx, provider, path, id, data)
+	if errParse != nil {
+		return nil, errParse
+	}
+	if handled {
+		for _, auth := range auths {
+			auth.CreatedAt = info.ModTime()
+			auth.UpdatedAt = info.ModTime()
+		}
+		return auths, nil
+	}
+	auth, errBuiltIn := s.readAuthFile(sdkauth.WithPluginAuthParser(ctx, nil), path, baseDir)
+	if errBuiltIn != nil || auth == nil {
+		return nil, errBuiltIn
+	}
+	return []*cliproxyauth.Auth{auth}, nil
+}
+
 func (s *ObjectTokenStore) readAuthFile(ctx context.Context, path, baseDir string) (*cliproxyauth.Auth, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -792,6 +837,10 @@ func (s *ObjectTokenStore) readAuthFile(ctx context.Context, path, baseDir strin
 	metadata := make(map[string]any)
 	if err = json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
+	}
+	cliproxyauth.NormalizeCredentialMetadata(metadata)
+	if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+		return nil, errWeight
 	}
 	provider := strings.TrimSpace(valueAsString(metadata["type"]))
 	info, err := os.Stat(path)

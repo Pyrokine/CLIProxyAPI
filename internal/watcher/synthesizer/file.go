@@ -12,6 +12,7 @@ import (
 	"time"
 
 	authfile "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
@@ -102,14 +103,19 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		return nil, fmt.Errorf("parse auth JSON: %w", errUnmarshal)
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, errWeight
+	}
+	if _, _, errProfile := coreauth.ClaudeFingerprintProfile(&coreauth.Auth{Metadata: metadata}); errProfile != nil {
+		return nil, errProfile
 	}
 	t, _ := metadata["type"].(string)
 	provider := strings.ToLower(strings.TrimSpace(t))
 	if ctx.PluginAuthParser != nil {
-		auth, handled, errParse := ctx.PluginAuthParser.ParseAuth(
-			context.Background(), pluginapi.AuthParseRequest{
+		auths, handled, errParse := parsePluginFileAuths(
+			ctx.PluginAuthParser,
+			pluginapi.AuthParseRequest{
 				Provider: provider,
 				Path:     fullPath,
 				FileName: filepath.Base(fullPath),
@@ -120,25 +126,59 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 			return nil, fmt.Errorf("parse plugin auth: %w", errParse)
 		}
 		if handled {
-			if auth == nil || strings.TrimSpace(auth.ID) == "" {
-				return nil, fmt.Errorf("plugin auth parser returned an invalid auth")
+			auths = compactPluginAuths(auths)
+			if len(auths) == 0 {
+				return nil, nil
 			}
-			auth.CreatedAt = now
-			auth.UpdatedAt = now
-			if auth.Attributes == nil {
-				auth.Attributes = make(map[string]string)
-			}
-			auth.Attributes["path"] = fullPath
-			auth.Attributes["source"] = fullPath
 			perAccountExcluded := extractExcludedModelsFromMetadata(metadata)
-			ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
-			if err := coreauth.ApplyCustomHeadersFromMetadata(auth); err != nil {
-				return nil, err
+			disabled, _ := metadata["disabled"].(bool)
+			seenIDs := make(map[string]struct{}, len(auths))
+			for index, auth := range auths {
+				coreauth.NormalizeCredentialMetadata(auth.Metadata)
+				if strings.TrimSpace(auth.ID) == "" {
+					return nil, fmt.Errorf("plugin auth parser returned an auth without an id")
+				}
+				if _, exists := seenIDs[auth.ID]; exists {
+					return nil, fmt.Errorf("plugin auth parser returned duplicate auth id %q", auth.ID)
+				}
+				seenIDs[auth.ID] = struct{}{}
+				if len(auths) > 1 {
+					coreauth.MarkPluginVirtualAuth(auth, fullPath, index)
+				}
+				auth.CreatedAt = now
+				auth.UpdatedAt = now
+				if auth.Attributes == nil {
+					auth.Attributes = make(map[string]string)
+				}
+				auth.Attributes[coreauth.AttributePath] = fullPath
+				auth.Attributes[coreauth.AttributeSource] = fullPath
+				auth.Attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+				if disabled {
+					auth.Disabled = true
+					auth.Status = coreauth.StatusDisabled
+					if auth.Metadata == nil {
+						auth.Metadata = make(map[string]any)
+					}
+					auth.Metadata["disabled"] = true
+				}
+				if proxyURL, ok := metadata["proxy_url"].(string); ok && strings.TrimSpace(auth.ProxyURL) == "" {
+					auth.ProxyURL = strings.TrimSpace(proxyURL)
+				}
+				if prefix, ok := metadata["prefix"].(string); ok && strings.TrimSpace(auth.Prefix) == "" {
+					auth.Prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+				}
+				ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
+				if errHeaders := coreauth.ApplyCustomHeadersFromMetadata(auth); errHeaders != nil {
+					return nil, errHeaders
+				}
+				if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
+					return nil, errWeight
+				}
+				if errProfile := coreauth.ApplyClaudeFingerprintProfileMetadata(auth, metadata); errProfile != nil {
+					return nil, errProfile
+				}
 			}
-			if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
-				return nil, errWeight
-			}
-			return []*coreauth.Auth{auth}, nil
+			return auths, nil
 		}
 	}
 	if provider == "" {
@@ -200,6 +240,9 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 	if errWeight := coreauth.ApplyAuthWeightMetadata(a, metadata); errWeight != nil {
 		return nil, errWeight
 	}
+	if errProfile := coreauth.ApplyClaudeFingerprintProfileMetadata(a, metadata); errProfile != nil {
+		return nil, errProfile
+	}
 	// Read priority from auth file
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {
@@ -213,6 +256,18 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 		}
 	}
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+	if provider == "codex" {
+		if planType, ok := metadata["plan_type"].(string); ok && strings.TrimSpace(planType) != "" {
+			a.Attributes["plan_type"] = strings.TrimSpace(planType)
+		} else if idToken, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idToken) != "" {
+			claims, errParse := codex.ParseJWTToken(idToken)
+			if errParse == nil && claims != nil {
+				if planType := strings.TrimSpace(claims.AuthInfo.ChatgptPlanType); planType != "" {
+					a.Attributes["plan_type"] = planType
+				}
+			}
+		}
+	}
 	if provider == "gemini-cli" {
 		if virtualAuths := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtualAuths) > 0 {
 			for _, v := range virtualAuths {
@@ -225,6 +280,40 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 		}
 	}
 	return []*coreauth.Auth{a}, nil
+}
+
+func parsePluginFileAuths(
+	parser PluginAuthParser,
+	req pluginapi.AuthParseRequest,
+) ([]*coreauth.Auth, bool, error) {
+	if parser == nil {
+		return nil, false, nil
+	}
+	if multiParser, ok := parser.(PluginMultiAuthParser); ok {
+		return multiParser.ParseAuths(context.Background(), req)
+	}
+	auth, handled, errParse := parser.ParseAuth(context.Background(), req)
+	if errParse != nil || !handled || auth == nil {
+		return nil, handled, errParse
+	}
+	return []*coreauth.Auth{auth}, true, nil
+}
+
+func compactPluginAuths(auths []*coreauth.Auth) []*coreauth.Auth {
+	if len(auths) == 0 {
+		return nil
+	}
+	out := auths[:0]
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if errWeight := coreauth.ValidateAuthWeight(auth); errWeight != nil {
+			continue
+		}
+		out = append(out, auth)
+	}
+	return out
 }
 
 // synthesizeGeminiVirtualAuths creates virtual Auth entries for multi-project Gemini credentials.

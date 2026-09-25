@@ -13,6 +13,11 @@ type PluginAuthParser interface {
 	ParseAuth(context.Context, pluginapi.AuthParseRequest) (*coreauth.Auth, bool, error)
 }
 
+// PluginMultiAuthParser expands one source into multiple plugin runtime auths.
+type PluginMultiAuthParser interface {
+	ParseAuths(context.Context, pluginapi.AuthParseRequest) ([]*coreauth.Auth, bool, error)
+}
+
 // SynthesisContext provides the context needed for auth synthesis.
 type SynthesisContext struct {
 	// Config is the current configuration

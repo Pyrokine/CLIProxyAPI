@@ -11,6 +11,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
 
 func TestFileTokenStoreDeleteIfVersionPreservesNewerCredential(t *testing.T) {
@@ -79,7 +80,7 @@ func TestFileTokenStoreListUsesRelativeIDWithRelativeBaseDir(t *testing.T) {
 	}
 }
 
-func TestFileTokenStorePersistsDisabledCredentialWithoutExistingFile(t *testing.T) {
+func TestFileTokenStoreRequiresCreationIntentForMissingDisabledCredential(t *testing.T) {
 	dir := t.TempDir()
 	store := NewFileTokenStore()
 	store.SetBaseDir(dir)
@@ -90,11 +91,19 @@ func TestFileTokenStorePersistsDisabledCredentialWithoutExistingFile(t *testing.
 		Metadata: map[string]any{"type": "codex"},
 	}
 	path, errSave := store.Save(context.Background(), auth)
+	if errSave != nil || path != "" {
+		t.Fatalf("runtime Save() path=%q error=%v, want skipped", path, errSave)
+	}
+	if _, errStat := os.Stat(filepath.Join(dir, auth.FileName)); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("runtime Save() recreated disabled credential: %v", errStat)
+	}
+
+	path, errSave = store.Save(cliproxyauth.WithAuthCreationIntent(context.Background()), auth)
 	if errSave != nil {
-		t.Fatalf("Save() error = %v", errSave)
+		t.Fatalf("creation Save() error = %v", errSave)
 	}
 	if path == "" {
-		t.Fatal("Save() returned an empty path for disabled credential")
+		t.Fatal("creation Save() returned an empty path for disabled credential")
 	}
 	raw, errRead := os.ReadFile(path)
 	if errRead != nil {
@@ -332,80 +341,214 @@ func TestFileTokenStoreSaveStopsWhenMetadataSetterCancelsContext(t *testing.T) {
 	}
 }
 
-func TestExtractAccessToken(t *testing.T) {
-	t.Parallel()
+type fileStoreMultiAuthParserFunc func(
+	context.Context,
+	pluginapi.AuthParseRequest,
+) ([]*cliproxyauth.Auth, bool, error)
 
-	tests := []struct {
-		name     string
-		metadata map[string]any
-		expected string
-	}{
-		{
-			"antigravity top-level access_token",
-			map[string]any{"access_token": "tok-abc"},
-			"tok-abc",
-		},
-		{
-			"gemini nested token.access_token",
-			map[string]any{
-				"token": map[string]any{"access_token": "tok-nested"},
+func (f fileStoreMultiAuthParserFunc) ParseAuth(
+	context.Context,
+	pluginapi.AuthParseRequest,
+) (*cliproxyauth.Auth, bool, error) {
+	return nil, false, nil
+}
+
+func (f fileStoreMultiAuthParserFunc) ParseAuths(
+	ctx context.Context,
+	req pluginapi.AuthParseRequest,
+) ([]*cliproxyauth.Auth, bool, error) {
+	return f(ctx, req)
+}
+
+func TestParsePluginAuthFilesRejectsInvalidSourceWeightBeforeParser(t *testing.T) {
+	called := false
+	parser := fileStoreMultiAuthParserFunc(func(
+		context.Context,
+		pluginapi.AuthParseRequest,
+	) ([]*cliproxyauth.Auth, bool, error) {
+		called = true
+		return []*cliproxyauth.Auth{{ID: "plugin-a", Provider: "plugin"}}, true, nil
+	})
+	ctx := WithPluginAuthParser(context.Background(), parser)
+
+	_, handled, errParse := ParsePluginAuthFiles(
+		ctx,
+		"plugin",
+		"plugin.json",
+		"plugin.json",
+		[]byte(`{"type":"plugin","weight":1.5}`),
+	)
+	if errParse == nil || !handled {
+		t.Fatalf("ParsePluginAuthFiles() handled=%t err=%v, want handled weight error", handled, errParse)
+	}
+	if called {
+		t.Fatal("plugin parser called for invalid source weight")
+	}
+}
+
+func TestParsePluginAuthFilesFiltersInvalidChildWeight(t *testing.T) {
+	parser := fileStoreMultiAuthParserFunc(func(
+		context.Context,
+		pluginapi.AuthParseRequest,
+	) ([]*cliproxyauth.Auth, bool, error) {
+		return []*cliproxyauth.Auth{
+			{ID: "invalid", Provider: "plugin", Metadata: map[string]any{"weight": 1.5}},
+			{ID: "valid", Provider: "plugin"},
+		}, true, nil
+	})
+	ctx := WithPluginAuthParser(context.Background(), parser)
+
+	auths, handled, errParse := ParsePluginAuthFiles(
+		ctx,
+		"plugin",
+		"plugin.json",
+		"plugin.json",
+		[]byte(`{"type":"plugin","weight":4}`),
+	)
+	if errParse != nil || !handled || len(auths) != 1 {
+		t.Fatalf("ParsePluginAuthFiles() handled=%t len=%d err=%v", handled, len(auths), errParse)
+	}
+	if auths[0].ID != "valid" || auths[0].Attributes[cliproxyauth.AttributeWeight] != "4" {
+		t.Fatalf("filtered auth = %#v, want valid child with source weight", auths[0])
+	}
+}
+
+func TestFileTokenStoreListExpandsPluginMultiAuths(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "plugin.json")
+	raw := []byte(`{"type":"plugin","disabled":true,"weight":3,"proxy-url":"http://proxy.test","headers":{"X-Test":"value"}}`)
+	if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	parser := fileStoreMultiAuthParserFunc(func(
+		_ context.Context,
+		req pluginapi.AuthParseRequest,
+	) ([]*cliproxyauth.Auth, bool, error) {
+		if req.Provider != "plugin" || req.Path != path || req.FileName != "plugin.json" {
+			t.Fatalf("ParseAuths request = %#v", req)
+		}
+		return []*cliproxyauth.Auth{
+			{
+				ID:       "plugin-a",
+				Provider: "plugin",
+				FileName: req.FileName,
+				Metadata: map[string]any{
+					"type": "plugin", "account": "a", "request-retry": 2,
+					"headers": map[string]any{"X-Test": "value"},
+				},
 			},
-			"tok-nested",
-		},
-		{
-			"top-level takes precedence over nested",
-			map[string]any{
-				"access_token": "tok-top",
-				"token":        map[string]any{"access_token": "tok-nested"},
+			nil,
+			{
+				ID:       "plugin-b",
+				Provider: "plugin",
+				FileName: req.FileName,
+				Metadata: map[string]any{"type": "plugin", "account": "b", "headers": map[string]any{"X-Test": "value"}},
 			},
-			"tok-top",
-		},
-		{
-			"empty metadata",
-			map[string]any{},
-			"",
-		},
-		{
-			"whitespace-only access_token",
-			map[string]any{"access_token": "   "},
-			"",
-		},
-		{
-			"wrong type access_token",
-			map[string]any{"access_token": 12345},
-			"",
-		},
-		{
-			"token is not a map",
-			map[string]any{"token": "not-a-map"},
-			"",
-		},
-		{
-			"nested whitespace-only",
-			map[string]any{
-				"token": map[string]any{"access_token": "  "},
-			},
-			"",
-		},
-		{
-			"fallback to nested when top-level empty",
-			map[string]any{
-				"access_token": "",
-				"token":        map[string]any{"access_token": "tok-fallback"},
-			},
-			"tok-fallback",
-		},
+		}, true, nil
+	})
+	ctx := WithPluginAuthParser(context.Background(), parser)
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+
+	first, errList := store.List(ctx)
+	if errList != nil {
+		t.Fatal(errList)
+	}
+	second, errList := store.List(ctx)
+	if errList != nil {
+		t.Fatal(errList)
+	}
+	if len(first) != 2 || len(second) != 2 {
+		t.Fatalf("List() lengths = %d/%d, want 2/2", len(first), len(second))
+	}
+	for index := range first {
+		if !cliproxyauth.IsPluginVirtualAuth(first[index]) {
+			t.Fatalf("auth %s missing plugin virtual marker", first[index].ID)
+		}
+		if first[index].Attributes[cliproxyauth.AttributeVirtualSource] != path ||
+			first[index].Attributes[cliproxyauth.AttributePath] != path ||
+			first[index].Attributes[cliproxyauth.AttributeSource] != path {
+			t.Fatalf("auth %s source attributes = %#v", first[index].ID, first[index].Attributes)
+		}
+		if !first[index].Disabled || first[index].Status != cliproxyauth.StatusDisabled {
+			t.Fatalf("auth %s disabled/status = %t/%s", first[index].ID, first[index].Disabled, first[index].Status)
+		}
+		if first[index].Attributes[cliproxyauth.AttributeWeight] != "3" ||
+			first[index].Attributes["header:X-Test"] != "value" ||
+			first[index].ProxyURL != "http://proxy.test" {
+			t.Fatalf(
+				"auth %s inherited values: attributes=%#v proxy=%q",
+				first[index].ID,
+				first[index].Attributes,
+				first[index].ProxyURL,
+			)
+		}
+		if first[index].EnsureIndex() == "" || first[index].EnsureIndex() != second[index].EnsureIndex() {
+			t.Fatalf(
+				"auth %s indexes = %q/%q, want stable non-empty index",
+				first[index].ID,
+				first[index].EnsureIndex(),
+				second[index].EnsureIndex(),
+			)
+		}
+	}
+	if first[0].EnsureIndex() == first[1].EnsureIndex() {
+		t.Fatalf("plugin child indexes collide: %q", first[0].EnsureIndex())
+	}
+	if first[0].Metadata["request_retry"] != 2 {
+		t.Fatalf("canonical child metadata = %#v", first[0].Metadata)
+	}
+	if _, legacy := first[0].Metadata["request-retry"]; legacy {
+		t.Fatalf("legacy child metadata was retained: %#v", first[0].Metadata)
+	}
+}
+
+func TestPluginVirtualAuthPersistenceDoesNotOverwriteSource(t *testing.T) {
+	baseDir := t.TempDir()
+	path := filepath.Join(baseDir, "plugin.json")
+	original := []byte(`{"type":"plugin","accounts":["a","b"],"secret":"source-secret"}`)
+	if errWrite := os.WriteFile(path, original, 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	parser := fileStoreMultiAuthParserFunc(func(
+		_ context.Context,
+		req pluginapi.AuthParseRequest,
+	) ([]*cliproxyauth.Auth, bool, error) {
+		return []*cliproxyauth.Auth{
+			{ID: "plugin-a", Provider: "plugin", FileName: req.FileName, Metadata: map[string]any{"type": "plugin", "account": "a"}},
+			{ID: "plugin-b", Provider: "plugin", FileName: req.FileName, Metadata: map[string]any{"type": "plugin", "account": "b"}},
+		}, true, nil
+	})
+	ctx := WithPluginAuthParser(context.Background(), parser)
+	store := NewFileTokenStore()
+	store.SetBaseDir(baseDir)
+	auths, errList := store.List(ctx)
+	if errList != nil || len(auths) != 2 {
+		t.Fatalf("List() len=%d err=%v", len(auths), errList)
 	}
 
-	for _, tt := range tests {
-		t.Run(
-			tt.name, func(t *testing.T) {
-				t.Parallel()
-				got := extractAccessToken(tt.metadata)
-				if got != tt.expected {
-					t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
-				}
-			},
-		)
+	auths[0].Metadata["secret"] = "child-overwrite"
+	if savedPath, errSave := store.Save(context.Background(), auths[0]); errSave != nil || savedPath != path {
+		t.Fatalf("Save(virtual) path=%q err=%v", savedPath, errSave)
+	}
+	current, errRead := os.ReadFile(path)
+	if errRead != nil || string(current) != string(original) {
+		t.Fatalf("source changed after direct virtual Save: %s err=%v", current, errRead)
+	}
+
+	manager := cliproxyauth.NewManager(store, nil, nil)
+	for _, auth := range auths {
+		if _, errRegister := manager.Register(cliproxyauth.WithSkipPersist(context.Background()), auth); errRegister != nil {
+			t.Fatal(errRegister)
+		}
+	}
+	updated := auths[1].Clone()
+	updated.Metadata["secret"] = "manager-overwrite"
+	if result, errUpdate := manager.Update(context.Background(), updated); errUpdate != nil || result == nil {
+		t.Fatalf("Manager.Update(virtual) result=%#v err=%v", result, errUpdate)
+	}
+	current, errRead = os.ReadFile(path)
+	if errRead != nil || string(current) != string(original) {
+		t.Fatalf("source changed after manager virtual update: %s err=%v", current, errRead)
 	}
 }

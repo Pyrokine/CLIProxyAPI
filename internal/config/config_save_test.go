@@ -139,10 +139,18 @@ func TestSaveConfigPreserveCommentsReplacesFileAtomically(t *testing.T) {
 
 func TestSaveConfigPreserveCommentsCreatesMissingFile(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	enabled := false
+	maxIdle := 0
 	cfg := &Config{
 		Host:  "127.0.0.1",
 		Port:  9090,
 		Debug: true,
+		Antigravity: AntigravityConfig{
+			ConnectionPool: AntigravityConnectionPoolConfig{
+				Enabled:             &enabled,
+				MaxIdleConnsPerHost: &maxIdle,
+			},
+		},
 	}
 	cfg.APIKeys = []string{"sk-created"}
 
@@ -162,6 +170,144 @@ func TestSaveConfigPreserveCommentsCreatesMissingFile(t *testing.T) {
 	}
 	if loaded.Port != 9090 || !loaded.Debug || len(loaded.APIKeys) != 1 || loaded.APIKeys[0] != "sk-created" {
 		t.Fatalf("created config = %#v", loaded)
+	}
+	pool := loaded.Antigravity.ConnectionPool
+	if pool.Enabled == nil || *pool.Enabled || pool.MaxIdleConnsPerHost == nil || *pool.MaxIdleConnsPerHost != 0 {
+		t.Fatalf("created pool = %#v, want explicit false and zero", pool)
+	}
+}
+
+func TestSaveConfigAddsExplicitAntigravityPoolFalseAndZero(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("host: 127.0.0.1\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	enabled := false
+	maxIdle := 0
+	cfg := &Config{
+		Host: "127.0.0.1",
+		Antigravity: AntigravityConfig{
+			ConnectionPool: AntigravityConnectionPoolConfig{
+				Enabled:             &enabled,
+				MaxIdleConnsPerHost: &maxIdle,
+			},
+		},
+	}
+	if err := SaveConfigPreserveComments(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfigPreserveComments: %v", err)
+	}
+	loaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	pool := loaded.Antigravity.ConnectionPool
+	if pool.Enabled == nil || *pool.Enabled || pool.MaxIdleConnsPerHost == nil || *pool.MaxIdleConnsPerHost != 0 {
+		t.Fatalf("saved pool = %#v, want explicit false and zero", pool)
+	}
+}
+
+func TestSaveConfigPreservesAntigravityPoolYAMLAndReloadSemantics(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	initial := []byte(`# keep pool comment
+antigravity:
+  connection-pool:
+    enabled: false
+    idle-conn-timeout: ""
+    max-idle-conns-per-host: 0
+    future-options: {}
+codex:
+  orphan-delegation-compatibility: true
+`)
+	if err := os.WriteFile(configPath, initial, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	pool := cfg.Antigravity.ConnectionPool
+	if pool.Enabled == nil || *pool.Enabled || pool.MaxIdleConnsPerHost == nil || *pool.MaxIdleConnsPerHost != 0 {
+		t.Fatalf("loaded pool = %#v, want explicit false and zero", pool)
+	}
+	if !cfg.Codex.OrphanDelegationCompatibility {
+		t.Fatal("orphan delegation setting was not loaded")
+	}
+	cfg, err = Clone(cfg)
+	if err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	negative := -3
+	cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost = &negative
+	if err = SaveConfigPreserveComments(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfigPreserveComments: %v", err)
+	}
+	written, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	text := string(written)
+	for _, expected := range []string{
+		"# keep pool comment",
+		"enabled: false",
+		"idle-conn-timeout: \"\"",
+		"max-idle-conns-per-host: -3",
+		"future-options: {}",
+		"orphan-delegation-compatibility: true",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("saved config missing %q:\n%s", expected, text)
+		}
+	}
+
+	reloaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	reloadedPool := reloaded.Antigravity.ConnectionPool
+	if reloadedPool.Enabled == nil || *reloadedPool.Enabled || reloadedPool.MaxIdleConnsPerHost == nil ||
+		*reloadedPool.MaxIdleConnsPerHost != -3 {
+		t.Fatalf("reloaded pool = %#v, want explicit false and negative max idle", reloadedPool)
+	}
+	if !reloaded.Codex.OrphanDelegationCompatibility {
+		t.Fatal("orphan delegation setting was not preserved across save and reload")
+	}
+}
+
+func TestSaveConfigPreservesEmptyAntigravityConnectionPoolMap(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	initial := []byte("antigravity:\n  connection-pool: {}\n")
+	if err := os.WriteFile(configPath, initial, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Antigravity.ConnectionPool.Enabled != nil || cfg.Antigravity.ConnectionPool.MaxIdleConnsPerHost != nil {
+		t.Fatalf("empty pool gained explicit values: %#v", cfg.Antigravity.ConnectionPool)
+	}
+	cfg, err = Clone(cfg)
+	if err != nil {
+		t.Fatalf("Clone: %v", err)
+	}
+	if err = SaveConfigPreserveComments(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfigPreserveComments: %v", err)
+	}
+	written, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+	if !strings.Contains(string(written), "connection-pool: {}") {
+		t.Fatalf("empty connection-pool map was not preserved:\n%s", written)
+	}
+	reloaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if reloaded.Antigravity.ConnectionPool.Enabled != nil ||
+		reloaded.Antigravity.ConnectionPool.MaxIdleConnsPerHost != nil {
+		t.Fatalf("reloaded empty pool gained explicit values: %#v", reloaded.Antigravity.ConnectionPool)
 	}
 }
 

@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -122,6 +123,59 @@ func SanitizeOAuthModelAliasMap(entries map[string][]OAuthModelAlias) map[string
 	return out
 }
 
+// SanitizeOAuthRequestScopedErrors normalizes global OAuth request-scoped error rules.
+func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
+	if cfg == nil || len(cfg.OAuthRequestScopedErrors) == 0 {
+		return
+	}
+	out := make(map[string][]RequestScopedErrorRule, len(cfg.OAuthRequestScopedErrors))
+	for rawChannel, rules := range cfg.OAuthRequestScopedErrors {
+		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if channel == "" || len(rules) == 0 {
+			continue
+		}
+		clean := make([]RequestScopedErrorRule, 0, len(rules))
+		for _, rule := range rules {
+			match := trimNonEmptyStrings(rule.Match)
+			matchRegexr := trimNonEmptyStrings(rule.MatchRegexr)
+			action := strings.ToLower(strings.TrimSpace(rule.Action))
+			if rule.Status <= 0 || (len(match) == 0 && len(matchRegexr) == 0) || action == "" {
+				continue
+			}
+			clean = append(clean, RequestScopedErrorRule{
+				Status:      rule.Status,
+				Match:       match,
+				MatchRegexr: matchRegexr,
+				Action:      action,
+			})
+		}
+		if len(clean) > 0 {
+			out[channel] = clean
+		}
+	}
+	if len(out) == 0 {
+		cfg.OAuthRequestScopedErrors = nil
+		return
+	}
+	cfg.OAuthRequestScopedErrors = out
+}
+
+func trimNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // SanitizeOpenAICompatibility removes OpenAI-compatibility provider entries that are
 // not actionable, specifically those missing a BaseURL. It trims whitespace before
 // evaluation and preserves the relative order of remaining entries.
@@ -206,7 +260,7 @@ func (cfg *Config) SanitizeXAIKeys() {
 		e.ProxyURL = strings.TrimSpace(e.ProxyURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
-		if e.APIKey == "" || e.BaseURL == "" {
+		if e.BaseURL == "" {
 			continue
 		}
 		out = append(out, e)
@@ -221,69 +275,89 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	}
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
+		if profile, ok := NormalizeClaudeFingerprintProfile(entry.FingerprintProfile); ok {
+			entry.FingerprintProfile = profile
+		}
 		entry.Prefix = NormalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
 }
 
+func sanitizeGeminiKeyEntries(entries []GeminiKey) []GeminiKey {
+	seen := make(map[string]struct{}, len(entries))
+	out := entries[:0]
+	for i := range entries {
+		entry := entries[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.Prefix = NormalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		if entry.APIKey == "" && entry.BaseURL == "" {
+			continue
+		}
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		uniqueKey := formatGeminiKeyDedupID(entry)
+		if _, exists := seen[uniqueKey]; exists {
+			continue
+		}
+		seen[uniqueKey] = struct{}{}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func formatGeminiKeyDedupID(entry GeminiKey) string {
+	var b strings.Builder
+	b.WriteString(entry.APIKey)
+	b.WriteByte(0)
+	b.WriteString(entry.BaseURL)
+	b.WriteByte(0)
+	b.WriteString(entry.ProxyURL)
+	b.WriteByte(0)
+	b.WriteString(entry.Prefix)
+	b.WriteByte(0)
+	b.WriteString(FormatSortedHeaders(entry.Headers))
+	return b.String()
+}
+
+// FormatSortedHeaders serializes headers deterministically with null byte separators.
+func FormatSortedHeaders(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, key := range keys {
+		b.WriteString(key)
+		b.WriteByte(0)
+		b.WriteString(headers[key])
+		b.WriteByte(0)
+	}
+	return b.String()
+}
+
 // SanitizeGeminiKeys deduplicates and normalizes Gemini credentials.
+// It uses API key, base URL, proxy URL, prefix, and custom headers as the uniqueness key.
 func (cfg *Config) SanitizeGeminiKeys() {
 	if cfg == nil {
 		return
 	}
-
-	seen := make(map[[2]string]struct{}, len(cfg.GeminiKey))
-	out := cfg.GeminiKey[:0]
-	for i := range cfg.GeminiKey {
-		entry := cfg.GeminiKey[i]
-		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		if entry.APIKey == "" {
-			continue
-		}
-		entry.Prefix = NormalizeModelPrefix(entry.Prefix)
-		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-		entry.Headers = NormalizeHeaders(entry.Headers)
-		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		uniqueKey := [2]string{entry.APIKey, entry.BaseURL}
-		if _, exists := seen[uniqueKey]; exists {
-			continue
-		}
-		seen[uniqueKey] = struct{}{}
-		out = append(out, entry)
-	}
-	cfg.GeminiKey = out
+	cfg.GeminiKey = sanitizeGeminiKeyEntries(cfg.GeminiKey)
 }
 
 // SanitizeInteractionsKeys deduplicates and normalizes native Interactions credentials.
-// It uses API key + base URL as the uniqueness key.
+// It uses API key, base URL, proxy URL, prefix, and custom headers as the uniqueness key.
 func (cfg *Config) SanitizeInteractionsKeys() {
-	if cfg == nil || len(cfg.InteractionsKey) == 0 {
+	if cfg == nil {
 		return
 	}
-
-	seen := make(map[[2]string]struct{}, len(cfg.InteractionsKey))
-	out := cfg.InteractionsKey[:0]
-	for i := range cfg.InteractionsKey {
-		entry := cfg.InteractionsKey[i]
-		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		if entry.APIKey == "" {
-			continue
-		}
-		entry.Prefix = NormalizeModelPrefix(entry.Prefix)
-		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-		entry.Headers = NormalizeHeaders(entry.Headers)
-		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		uniqueKey := [2]string{entry.APIKey, entry.BaseURL}
-		if _, exists := seen[uniqueKey]; exists {
-			continue
-		}
-		seen[uniqueKey] = struct{}{}
-		out = append(out, entry)
-	}
-	cfg.InteractionsKey = out
+	cfg.InteractionsKey = sanitizeGeminiKeyEntries(cfg.InteractionsKey)
 }
 
 // NormalizeModelPrefix trims whitespace and surrounding slashes from a model route prefix.

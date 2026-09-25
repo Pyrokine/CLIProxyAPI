@@ -30,6 +30,14 @@ type CredentialStorage struct {
 
 	// Prefix optionally namespaces models for this credential.
 	Prefix string `json:"prefix,omitempty"`
+
+	// Metadata holds arbitrary key-value pairs injected before persistence.
+	Metadata map[string]any `json:"-"`
+}
+
+// SetMetadata injects metadata before the credential is persisted.
+func (s *CredentialStorage) SetMetadata(metadata map[string]any) {
+	s.Metadata = metadata
 }
 
 // SaveTokenToFile writes the credential payload to the given file path in JSON format.
@@ -43,7 +51,7 @@ func (s *CredentialStorage) SaveTokenToFile(authFilePath string) error {
 	}
 	// Ensure we tag the file with the provider type.
 	s.Type = "vertex"
-	if errSave := auth.SaveTokenJSON(authFilePath, s, nil); errSave != nil {
+	if errSave := auth.SaveTokenJSON(authFilePath, s, s.Metadata); errSave != nil {
 		return fmt.Errorf("vertex credential: save token file: %w", errSave)
 	}
 	return nil

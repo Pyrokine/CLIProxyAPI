@@ -196,7 +196,7 @@ func newPostgresStoreForTest(t *testing.T) (*PostgresStore, *postgresTestState) 
 	}, state
 }
 
-func TestPostgresStorePersistsDisabledCredentialWithoutExistingFile(t *testing.T) {
+func TestPostgresStorePersistsDisabledCredentialWithCreationIntent(t *testing.T) {
 	store, _ := newPostgresStoreForTest(t)
 	auth := &cliproxyauth.Auth{
 		ID:       "disabled.json",
@@ -204,7 +204,8 @@ func TestPostgresStorePersistsDisabledCredentialWithoutExistingFile(t *testing.T
 		Disabled: true,
 		Metadata: map[string]any{"type": "codex"},
 	}
-	path, errSave := store.Save(context.Background(), auth)
+	ctx := cliproxyauth.WithAuthCreationIntent(context.Background())
+	path, errSave := store.Save(ctx, auth)
 	if errSave != nil {
 		t.Fatalf("Save() error = %v", errSave)
 	}

@@ -7,6 +7,118 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestClonePreservesIndependentSessionAffinitySubagents(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name  string
+		value *bool
+	}{
+		{name: "unset"},
+		{name: "enabled", value: new(true)},
+		{name: "disabled", value: new(false)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &Config{}
+			cfg.Routing.SessionAffinitySubagents = test.value
+			cloned, err := Clone(cfg)
+			if err != nil {
+				t.Fatalf("Clone: %v", err)
+			}
+			got := cloned.Routing.SessionAffinitySubagents
+			if test.value == nil {
+				if got != nil {
+					t.Fatalf("cloned value = %v, want nil", *got)
+				}
+				return
+			}
+			if got == nil || *got != *test.value {
+				t.Fatalf("cloned value = %v, want %v", got, *test.value)
+			}
+			if got == test.value {
+				t.Fatal("Clone reused the source bool pointer")
+			}
+			*got = !*got
+			if *test.value != (test.name == "enabled") {
+				t.Fatal("mutating clone changed source bool")
+			}
+		})
+	}
+}
+
+func TestClonePreservesIndependentAntigravityConnectionPoolPointers(t *testing.T) {
+	t.Parallel()
+
+	falseValue := false
+	trueValue := true
+	zero := 0
+	negative := -3
+	for _, test := range []struct {
+		name    string
+		enabled *bool
+		maxIdle *int
+	}{
+		{name: "unset"},
+		{name: "explicit false and zero", enabled: &falseValue, maxIdle: &zero},
+		{name: "enabled and negative", enabled: &trueValue, maxIdle: &negative},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &Config{
+				Antigravity: AntigravityConfig{
+					ConnectionPool: AntigravityConnectionPoolConfig{
+						Enabled:             test.enabled,
+						IdleConnTimeout:     "",
+						MaxIdleConnsPerHost: test.maxIdle,
+					},
+				},
+			}
+			cloned, err := Clone(cfg)
+			if err != nil {
+				t.Fatalf("Clone: %v", err)
+			}
+			got := cloned.Antigravity.ConnectionPool
+			if test.enabled == nil {
+				if got.Enabled != nil {
+					t.Fatalf("Enabled = %v, want nil", *got.Enabled)
+				}
+			} else {
+				if got.Enabled == nil || *got.Enabled != *test.enabled {
+					t.Fatalf("Enabled = %v, want %v", got.Enabled, *test.enabled)
+				}
+				if got.Enabled == test.enabled {
+					t.Fatal("Clone reused the source enabled pointer")
+				}
+			}
+			if test.maxIdle == nil {
+				if got.MaxIdleConnsPerHost != nil {
+					t.Fatalf("MaxIdleConnsPerHost = %v, want nil", *got.MaxIdleConnsPerHost)
+				}
+			} else {
+				if got.MaxIdleConnsPerHost == nil || *got.MaxIdleConnsPerHost != *test.maxIdle {
+					t.Fatalf("MaxIdleConnsPerHost = %v, want %v", got.MaxIdleConnsPerHost, *test.maxIdle)
+				}
+				if got.MaxIdleConnsPerHost == test.maxIdle {
+					t.Fatal("Clone reused the source max-idle pointer")
+				}
+			}
+		})
+	}
+}
+
+func TestParseConfigPreservesExplicitSessionAffinitySubagentsFalse(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := ParseConfigBytes([]byte("routing:\n  session-affinity: true\n  session-affinity-subagents: false\n"))
+	if err != nil {
+		t.Fatalf("ParseConfigBytes: %v", err)
+	}
+	if cfg.Routing.SessionAffinitySubagents == nil || *cfg.Routing.SessionAffinitySubagents {
+		t.Fatalf("session-affinity-subagents = %v, want explicit false", cfg.Routing.SessionAffinitySubagents)
+	}
+}
+
 func TestCloneCreatesIndependentConfig(t *testing.T) {
 	cfg, err := ParseConfigBytes(
 		[]byte(`
@@ -36,6 +148,9 @@ antigravity:
   sensitive-words:
     - API
     - proxy
+devin:
+  sensitive-words:
+    - sensitive phrase
 `),
 	)
 	if err != nil {
@@ -68,6 +183,7 @@ antigravity:
 	cloned.OAuthExcludedModels["codex"][0] = "changed-model"
 	cloned.ModelCatalog.Models[0].Aliases[0] = "changed-model-alias"
 	cloned.Antigravity.SensitiveWords[0] = "changed-sensitive-word"
+	cloned.Devin.SensitiveWords[0] = "changed-devin-sensitive-word"
 	plugin := cloned.Plugins.Configs["sample"]
 	*plugin.Enabled = false
 	plugin.Raw.Content[3].Content[1].Value = "changed-plugin-value"
@@ -91,6 +207,9 @@ antigravity:
 	}
 	if got := cfg.Antigravity.SensitiveWords[0]; got != "API" {
 		t.Fatalf("source Antigravity sensitive word = %q, want API", got)
+	}
+	if got := cfg.Devin.SensitiveWords[0]; got != "sensitive phrase" {
+		t.Fatalf("source Devin sensitive word = %q, want sensitive phrase", got)
 	}
 	if cfg.Home.NodeID != "node-a" {
 		t.Fatalf("source Home = %#v", cfg.Home)

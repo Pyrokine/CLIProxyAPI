@@ -20,7 +20,7 @@ func TestC04SynthesizeXAIAPIKeyWithoutDuplicatingOAuth(t *testing.T) {
 					BaseURL:        "https://api.x.ai/v1",
 					ProxyURL:       "http://proxy.local",
 					Websockets:     true,
-					DisableCooling: true,
+					DisableCooling: new(true),
 					Headers:        map[string]string{"X-Custom": "value"},
 					Models:         []config.XAIModel{{Name: "grok-4.5", Alias: "grok-latest"}},
 				},

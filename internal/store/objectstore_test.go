@@ -63,7 +63,7 @@ func successfulObjectPut(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-func TestObjectTokenStorePersistsDisabledCredentialWithoutExistingFile(t *testing.T) {
+func TestObjectTokenStorePersistsDisabledCredentialWithCreationIntent(t *testing.T) {
 	store := newObjectStoreForTest(t, http.HandlerFunc(successfulObjectPut))
 	auth := &cliproxyauth.Auth{
 		ID:       "disabled.json",
@@ -71,7 +71,8 @@ func TestObjectTokenStorePersistsDisabledCredentialWithoutExistingFile(t *testin
 		Disabled: true,
 		Metadata: map[string]any{"type": "codex"},
 	}
-	path, errSave := store.Save(context.Background(), auth)
+	ctx := cliproxyauth.WithAuthCreationIntent(context.Background())
+	path, errSave := store.Save(ctx, auth)
 	if errSave != nil {
 		t.Fatalf("Save() error = %v", errSave)
 	}

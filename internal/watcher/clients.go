@@ -179,6 +179,7 @@ func (w *Watcher) reloadClientsWithConfig(
 }
 
 func (w *Watcher) addOrUpdateClient(path string) {
+	w.observeAuthFile(path)
 	unlockFile := authfile.LockFileMutation(path)
 	defer unlockFile()
 	readAt := time.Now()
@@ -301,6 +302,7 @@ func (w *Watcher) addOrUpdateClient(path string) {
 }
 
 func (w *Watcher) removeClient(path string) {
+	w.observeAuthFile(path)
 	unlockFile := authfile.LockFileMutation(path)
 	defer unlockFile()
 	if _, errStat := os.Stat(path); errStat == nil {
@@ -374,6 +376,7 @@ func (w *Watcher) computePerPathUpdatesLocked(oldByID, newByID map[string]*corea
 		delete(w.currentAuths, id)
 		updates = append(updates, AuthUpdate{Action: AuthUpdateActionDelete, ID: id})
 	}
+	w.stampAuthUpdatesLocked(updates)
 	return updates
 }
 

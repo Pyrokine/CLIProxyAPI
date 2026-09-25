@@ -242,6 +242,13 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (save
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if auth.Disabled && !cliproxyauth.HasAuthCreationIntent(ctx) {
+		if _, errStat := os.Stat(path); errors.Is(errStat, fs.ErrNotExist) {
+			return "", nil
+		} else if errStat != nil {
+			return "", fmt.Errorf("postgres store: stat disabled credential: %w", errStat)
+		}
+	}
 	if err = secureAuthDirectory(filepath.Dir(path)); err != nil {
 		return "", fmt.Errorf("postgres store: secure auth directory: %w", err)
 	}
@@ -352,18 +359,25 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			log.WithError(err).Warnf("postgres store: skipping auth %s with invalid json", id)
 			continue
 		}
+		cliproxyauth.NormalizeCredentialMetadata(metadata)
+		if errWeight := cliproxyauth.ValidateAuthWeight(&cliproxyauth.Auth{Metadata: metadata}); errWeight != nil {
+			log.WithError(errWeight).Warnf("postgres store: skipping auth %s with invalid weight", id)
+			continue
+		}
 		provider := strings.TrimSpace(valueAsString(metadata["type"]))
 		fileName := internalauth.FileAuthID(path, s.authDir)
-		pluginAuth, handled, errParse := sdkauth.ParsePluginAuthFile(
+		pluginAuths, handled, errParse := sdkauth.ParsePluginAuthFiles(
 			ctx, provider, path, fileName, []byte(payload),
 		)
 		if errParse != nil {
 			return nil, errParse
 		}
 		if handled {
-			pluginAuth.CreatedAt = createdAt
-			pluginAuth.UpdatedAt = updatedAt
-			auths = append(auths, pluginAuth)
+			for _, pluginAuth := range pluginAuths {
+				pluginAuth.CreatedAt = createdAt
+				pluginAuth.UpdatedAt = updatedAt
+			}
+			auths = append(auths, pluginAuths...)
 			continue
 		}
 		if provider == "" {

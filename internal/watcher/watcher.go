@@ -58,6 +58,9 @@ type Watcher struct {
 	pluginAuthParser     synthesizer.PluginAuthParser
 	usageQueue           *redisqueue.Queue
 	currentAuths         map[string]*coreauth.Auth
+	authRevisions        map[string]uint64
+	fileObservations     map[string]uint64
+	activeAuthScans      int
 	runtimeAuths         map[string]*coreauth.Auth
 	dispatchMu           sync.Mutex
 	dispatchCond         *sync.Cond
@@ -88,6 +91,19 @@ type AuthUpdate struct {
 	ID                string
 	Auth              *coreauth.Auth
 	AllowAuthRecreate bool
+	revision          uint64
+}
+
+// Revision returns the watcher-local ordering assigned to this update.
+func (u AuthUpdate) Revision() uint64 {
+	return u.revision
+}
+
+// SetRevision assigns watcher-local ordering to an update bridge.
+func (u *AuthUpdate) SetRevision(revision uint64) {
+	if u != nil {
+		u.revision = revision
+	}
 }
 
 const (
@@ -284,6 +300,11 @@ func (w *Watcher) notifyUsageRefresh() {
 // Returns true if the update was enqueued; false if no queue is configured.
 func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchRuntimeAuthUpdate(update)
+}
+
+// DispatchPersistedAuthUpdateWithRevision pushes an already-persisted file auth update and returns its revision.
+func (w *Watcher) DispatchPersistedAuthUpdateWithRevision(update *AuthUpdate) (bool, uint64) {
+	return w.dispatchPersistedAuthUpdateWithRevision(update)
 }
 
 // SnapshotCoreAuths converts current clients snapshot into core auth entries.

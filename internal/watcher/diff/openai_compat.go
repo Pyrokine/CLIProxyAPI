@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -110,10 +111,14 @@ func describeOpenAICompatibilityUpdate(oldEntry, newEntry config.OpenAICompatibi
 			),
 		)
 	}
-	if oldEntry.DisableCooling != newEntry.DisableCooling {
-		details = append(
-			details, fmt.Sprintf("disable-cooling %t -> %t", oldEntry.DisableCooling, newEntry.DisableCooling),
-		)
+	if !reflect.DeepEqual(oldEntry.DisableCooling, newEntry.DisableCooling) {
+		details = append(details, fmt.Sprintf("disable-cooling %s -> %s", formatOptionalConfigValue(oldEntry.DisableCooling), formatOptionalConfigValue(newEntry.DisableCooling)))
+	}
+	if !reflect.DeepEqual(oldEntry.RequestRetry, newEntry.RequestRetry) {
+		details = append(details, fmt.Sprintf("request-retry %s -> %s", formatOptionalConfigValue(oldEntry.RequestRetry), formatOptionalConfigValue(newEntry.RequestRetry)))
+	}
+	if !reflect.DeepEqual(oldEntry.RequestScopedErrors, newEntry.RequestScopedErrors) {
+		details = append(details, fmt.Sprintf("request-scoped-errors updated (%d -> %d entries)", len(oldEntry.RequestScopedErrors), len(newEntry.RequestScopedErrors)))
 	}
 	if !equalStringMap(oldEntry.Headers, newEntry.Headers) {
 		details = append(details, "headers updated")

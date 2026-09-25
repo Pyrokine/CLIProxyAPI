@@ -54,7 +54,7 @@ func TestC04ParseXAIAPIKey(t *testing.T) {
 	if entry.APIKey != "xai-key" || entry.BaseURL != "https://api.x.ai/v1" || entry.ProxyURL != "http://proxy.local" {
 		t.Fatalf("normalized entry = %+v", entry)
 	}
-	if entry.Prefix != "team-xai" || !entry.Websockets || !entry.DisableCooling {
+	if entry.Prefix != "team-xai" || !entry.Websockets || entry.DisableCooling == nil || !*entry.DisableCooling {
 		t.Fatalf("routing fields = %+v", entry)
 	}
 	if entry.Weight == nil || *entry.Weight != 2 {

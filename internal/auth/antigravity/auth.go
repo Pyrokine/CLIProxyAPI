@@ -50,6 +50,26 @@ type userInfo struct {
 	Email string `json:"email"`
 }
 
+// HTTPStatusError preserves the upstream HTTP response status.
+type HTTPStatusError struct {
+	StatusCodeValue int
+	Message         string
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func (e *HTTPStatusError) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCodeValue
+}
+
 // Auth handles Antigravity OAuth authentication
 type Auth struct {
 	httpClient *http.Client
@@ -171,10 +191,11 @@ func (o *Auth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI stri
 			return nil, fmt.Errorf("antigravity token exchange: read response: %w", errRead)
 		}
 		body := strings.TrimSpace(string(bodyBytes))
-		if body == "" {
-			return nil, fmt.Errorf("antigravity token exchange: request failed: status %d", resp.StatusCode)
+		message := fmt.Sprintf("antigravity token exchange: request failed: status %d", resp.StatusCode)
+		if body != "" {
+			message = fmt.Sprintf("%s: %s", message, body)
 		}
-		return nil, fmt.Errorf("antigravity token exchange: request failed: status %d: %s", resp.StatusCode, body)
+		return nil, &HTTPStatusError{StatusCodeValue: resp.StatusCode, Message: message}
 	}
 
 	var token TokenResponse
@@ -213,10 +234,11 @@ func (o *Auth) FetchUserInfo(ctx context.Context, accessToken string) (string, e
 			return "", fmt.Errorf("antigravity userinfo: read response: %w", errRead)
 		}
 		body := strings.TrimSpace(string(bodyBytes))
-		if body == "" {
-			return "", fmt.Errorf("antigravity userinfo: request failed: status %d", resp.StatusCode)
+		message := fmt.Sprintf("antigravity userinfo: request failed: status %d", resp.StatusCode)
+		if body != "" {
+			message = fmt.Sprintf("%s: %s", message, body)
 		}
-		return "", fmt.Errorf("antigravity userinfo: request failed: status %d: %s", resp.StatusCode, body)
+		return "", &HTTPStatusError{StatusCodeValue: resp.StatusCode, Message: message}
 	}
 	var info userInfo
 	if errDecode := json.NewDecoder(resp.Body).Decode(&info); errDecode != nil {
@@ -271,9 +293,12 @@ func (o *Auth) FetchProjectID(ctx context.Context, accessToken string) (string, 
 	}
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return "", fmt.Errorf(
-			"request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)),
-		)
+		return "", &HTTPStatusError{
+			StatusCodeValue: resp.StatusCode,
+			Message: fmt.Sprintf(
+				"request failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)),
+			),
+		}
 	}
 
 	var loadResp map[string]any
@@ -387,7 +412,10 @@ func (o *Auth) onboardUser(ctx context.Context, accessToken, tierID string) (str
 		if len(responseErr) > 200 {
 			responseErr = responseErr[:200]
 		}
-		return "", fmt.Errorf("http %d: %s", resp.StatusCode, responseErr)
+		return "", &HTTPStatusError{
+			StatusCodeValue: resp.StatusCode,
+			Message:         fmt.Sprintf("http %d: %s", resp.StatusCode, responseErr),
+		}
 	}
 
 	return "", fmt.Errorf("onboard user did not complete after %d attempts", maxAttempts)
