@@ -1,5 +1,65 @@
 # Changelog
 
+## v7.3.2-aug.1 - 2026-09-25
+
+### Release Basis
+
+- Upstream semantic basis: v7.3.2 (`7fa443dc8bf8ca2f1ffd81c2472deb31b097b697`)
+- Fork point with upstream v7.3.2: `09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- Previous local release: v7.2.127-aug.1
+- Local release: v7.3.2-aug.1
+- Bundled management panel: v1.23.1-aug.1
+
+### What's Changed
+
+- feat (models): Update sourced model capabilities and prices for Claude, Codex, Gemini, DeepSeek, xAI and image models; keep unconfirmed or non-runtime models out of the default requestable inventory
+- feat (credentials): Preserve credential identity and configuration across watcher updates, storage backends and management changes; restore durable and runtime state after partial plugin OAuth failures
+- feat (routing): Carry quota freshness and cooldown identity through scheduling, refresh and retries without consuming active-reset credits during status checks; keep session affinity within the highest available credential priority and exclude prior-request diagnostics from cooldown responses
+- feat (plugins): Extend ABI and RPC compatibility for auth, quota, request observers, affinity and plugin lifecycle
+- feat (management): Integrate plugin OAuth, credential refresh, network-scoped proxy calls and guarded update state with Home runtime registration
+- feat (usage): Preserve request attribution and accounting across asynchronous delivery, diagnostics and logs
+- feat (protocols): Update Claude, OpenAI, Gemini, Codex, Antigravity and Interactions translation, including streaming tools, signatures and terminal errors
+- feat (runtime): Update provider execution, reasoning replay, WebSocket transport, image handling and dynamic request headers
+- fix (realtime): Revoke client secrets after access-provider changes without rejecting unrelated configuration reloads; honor ordinary keys with an `ek_` prefix, enforce API-key restrictions (including rejecting hard-limit policies that Realtime cannot meter), and reject malformed session requests
+- feat (devin): Add OAuth, model catalog, execution, quota and session isolation support
+- fix (server): Connect management and model routes to current runtime state, and retain trusted Codex client versions without sending a fabricated version for other clients
+
+### Compatibility
+
+- Docker release builds use the published CPAM v1.23.1-aug.1 `management.html`; publish that panel before the backend tag
+- Existing credential stores remain supported through the current storage adapters
+- Real paid Provider inference and active quota reset were not part of the local release checks
+
+---
+
+### 版本依据
+
+- 上游语义基线：v7.3.2（`7fa443dc8bf8ca2f1ffd81c2472deb31b097b697`）
+- 与上游 v7.3.2 的分叉点：`09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- 上一个本地版本：v7.2.127-aug.1
+- 本地发布版本：v7.3.2-aug.1
+- 内置管理面板：v1.23.1-aug.1
+
+### 更新内容
+
+- feat (models)：更新 Claude、Codex、Gemini、DeepSeek、xAI 和图片模型的来源、能力与价格；未经确认或没有运行时凭证的模型不进入默认可请求目录
+- feat (credentials)：在 watcher 更新、存储后端和管理操作之间保留凭证身份与配置；插件 OAuth 部分保存失败时恢复持久化与运行时状态
+- feat (routing)：调度、刷新和重试期间传递 quota 新鲜度与 cooldown 身份，状态检查不消耗主动重置次数；会话粘性仅在当前最高可用凭证优先级内生效，冷却错误不向其他请求返回历史诊断
+- feat (plugins)：扩展 auth、quota、请求观察、affinity 和生命周期相关的 ABI 与 RPC 兼容能力
+- feat (management)：融合插件 OAuth、凭证刷新、限定网络范围的代理请求、更新保护状态与 Home 运行时注册
+- feat (usage)：在异步交付、诊断与日志路径保留请求归属和使用统计
+- feat (protocols)：更新 Claude、OpenAI、Gemini、Codex、Antigravity 与 Interactions 转译，包括流式工具调用、签名和终态错误
+- feat (runtime)：更新 Provider 执行、推理重放、WebSocket 传输、图片处理和动态请求头
+- fix (realtime)：认证 Provider 变更后撤销临时密钥，无关配置刷新不误撤销；支持以 `ek_` 开头的普通 API key，执行当前 API key 限制，无法计量的 Realtime 请求不绕过硬额度策略，并拒绝无效 session JSON
+- feat (devin)：增加 OAuth、模型目录、执行、quota 和 session 隔离支持
+- fix (server)：管理与模型路由使用当前运行时状态；透传受信 Codex 客户端版本，不为其他客户端伪造版本号
+
+### 兼容性
+
+- Docker 正式构建使用已发布的 CPAM v1.23.1-aug.1 `management.html`，后端 tag 发布前须先发布前端
+- 现有凭证存储继续通过当前存储适配器支持
+- 本地发版检查没有发起真实付费 Provider 推理或主动重置配额
+
 ## v7.2.127-aug.1 - 2026-09-13
 
 ### Release Basis

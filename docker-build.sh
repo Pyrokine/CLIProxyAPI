@@ -189,7 +189,7 @@ case "$choice" in
     export CLI_PROXY_IMAGE="cli-proxy-api:local"
 
     echo "Preparing management panel asset..."
-    PANEL_TAG="${PANEL_TAG:-v1.22.2-aug.1}" ./scripts/prepare-management-panel.sh
+    PANEL_TAG="${PANEL_TAG:-v1.23.1-aug.1}" ./scripts/prepare-management-panel.sh
 
     echo "Building the Docker image..."
     docker compose build \
