@@ -30,10 +30,14 @@ const (
 type HTTPDoer = httpfetch.Doer
 
 type Client struct {
-	HTTPClient  HTTPDoer
-	RegistryURL string
-	UserAgent   string
-	Auth        []AuthConfig
+	HTTPClient HTTPDoer
+	// NetworkScope distinguishes request state for different proxy or egress configurations.
+	NetworkScope string
+	RateLimiter  *GitHubRateLimiter
+	RegistryURL  string
+	UserAgent    string
+	Auth         []AuthConfig
+	preparedAuth *preparedPluginStoreAuth
 }
 
 type Release struct {
@@ -189,22 +193,39 @@ func (c Client) releaseAssetAPIAuthenticated(apiURL string) bool {
 
 func (c Client) get(ctx context.Context, requestURL string, accept string, kind string, maxSize int64) ([]byte, error) {
 	currentURL := strings.TrimSpace(requestURL)
+	limiter := c.githubRateLimiter()
 	for redirects := 0; ; redirects++ {
-		if errURL := validatePluginStoreRequestURL(c.Auth, currentURL, kind); errURL != nil {
-			return nil, errURL
+		if errContext := ctx.Err(); errContext != nil {
+			return nil, errContext
 		}
-		headers := http.Header{
-			"Accept":     []string{accept},
-			"User-Agent": []string{c.userAgent()},
-		}
-		if errAuth := applyPluginStoreAuth(headers, c.Auth, currentURL, kind); errAuth != nil {
+		headers, authenticated, errAuth := c.authHeaders(currentURL, kind)
+		if errAuth != nil {
 			return nil, errAuth
 		}
+		rateKey := githubRateLimitKey(currentURL, c.NetworkScope, headers, authenticated)
+		if errLimit := limiter.check(rateKey); errLimit != nil {
+			return nil, errLimit
+		}
+		if headers.Get("Accept") == "" {
+			headers.Set("Accept", accept)
+		}
+		if headers.Get("User-Agent") == "" {
+			headers.Set("User-Agent", c.userAgent())
+		}
 		resp, errDo := pluginStoreGetNoRedirect(ctx, c.httpClient(), currentURL, headers)
+		if authenticated {
+			for name := range headers {
+				headers.Del(name)
+			}
+			if resp != nil && resp.Request != nil {
+				resp.Request.Header = nil
+			}
+		}
 		if errDo != nil {
 			return nil, errDo
 		}
 		if pluginStoreRedirectStatus(resp.StatusCode) {
+			_ = limiter.observe(rateKey, resp.StatusCode, resp.Header, nil)
 			nextURL, errRedirect := pluginStoreRedirectURL(resp, currentURL)
 			if errClose := resp.Body.Close(); errClose != nil {
 				log.WithError(errClose).Debug("failed to close plugin store redirect body")
@@ -218,7 +239,7 @@ func (c Client) get(ctx context.Context, requestURL string, accept string, kind 
 			currentURL = nextURL
 			continue
 		}
-		return readPluginStoreResponse(resp, maxSize)
+		return readPluginStoreResponse(resp, maxSize, authenticated, limiter, rateKey)
 	}
 }
 
@@ -311,16 +332,36 @@ func maxPluginStoreAssetSize(asset ReleaseAsset) int64 {
 	return maxPluginStoreArtifactBytes
 }
 
-func readPluginStoreResponse(resp *http.Response, maxSize int64) ([]byte, error) {
+func readPluginStoreResponse(
+	resp *http.Response,
+	maxSize int64,
+	authenticated bool,
+	limiter *GitHubRateLimiter,
+	rateKey string,
+) ([]byte, error) {
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
 			log.WithError(errClose).Debug("failed to close plugin store response body")
 		}
 	}()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		// Apply header-based limits before reading a potentially slow body.
+		if errLimit := limiter.observe(rateKey, resp.StatusCode, resp.Header, nil); errLimit != nil {
+			return nil, errLimit
+		}
+		if authenticated && (rateKey == "" || resp.StatusCode != http.StatusForbidden) {
+			return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if errLimit := limiter.observe(rateKey, resp.StatusCode, resp.Header, body); errLimit != nil {
+			return nil, errLimit
+		}
+		if authenticated {
+			return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
+		}
 		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	_ = limiter.observe(rateKey, resp.StatusCode, resp.Header, nil)
 	if maxSize > 0 && resp.ContentLength > maxSize {
 		return nil, fmt.Errorf("response exceeds maximum allowed size of %d bytes", maxSize)
 	}

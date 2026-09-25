@@ -117,6 +117,9 @@ func TestResetQuotaConsumesCodexResetCredit(t *testing.T) {
 				if got := r.Header.Get("Authorization"); got != "Bearer access-token" {
 					t.Fatalf("Authorization = %q", got)
 				}
+				if got := r.UserAgent(); got != "codex-tui/0.149.1 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.149.1)" {
+					t.Errorf("User-Agent = %q", got)
+				}
 				var body map[string]string
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					t.Fatalf("decode request: %v", err)

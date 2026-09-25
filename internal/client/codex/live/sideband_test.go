@@ -273,7 +273,11 @@ func TestHandleSidebandReusesRetainedHomeSelection(t *testing.T) {
 	handler.sidebandAPIBaseURL = websocketURL(upstreamServer.URL, "/v1")
 	router := newTestGinEngine()
 	router.POST("/v1/live", handler.Handle)
-	router.GET("/v1/live/:call_id", handler.HandleSideband)
+	sidebandDone := make(chan struct{})
+	router.GET("/v1/live/:call_id", func(c *gin.Context) {
+		handler.HandleSideband(c)
+		close(sidebandDone)
+	})
 	server := httptest.NewServer(router)
 	defer server.Close()
 
@@ -325,7 +329,14 @@ func TestHandleSidebandReusesRetainedHomeSelection(t *testing.T) {
 	_, _, _ = client.ReadMessage()
 	_ = client.Close()
 
-	waitForSessionRemoval(t, handler, "call-123")
+	select {
+	case <-sidebandDone:
+	case <-time.After(time.Second):
+		t.Fatal("Home sideband handler did not complete")
+	}
+	if _, ok := handler.sessions.peek("call-123"); ok {
+		t.Fatal("Home live session was not removed")
+	}
 	if calls := dispatcher.calls.Load(); calls != 1 {
 		t.Fatalf("Home dispatch calls after sideband = %d, want 1", calls)
 	}

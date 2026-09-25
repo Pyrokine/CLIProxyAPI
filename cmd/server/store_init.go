@@ -203,6 +203,13 @@ func initStoreAndConfig(
 	}, nil
 }
 
+func normalizeHomePort(port int) int {
+	if port <= 0 {
+		return 8317
+	}
+	return port
+}
+
 func initHomeConfig(
 	wd string,
 	configPath string,
@@ -248,7 +255,7 @@ func initHomeConfig(
 		parsed = &config.Config{}
 	}
 	parsed.Home = homeCfg
-	parsed.Port = 8317
+	parsed.Port = normalizeHomePort(parsed.Port)
 	config.ApplyHomeRuntimeConfig(parsed)
 
 	ctxHomePlugins, cancelHomePlugins := context.WithTimeout(context.Background(), 30*time.Second)

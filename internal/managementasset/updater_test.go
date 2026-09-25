@@ -2,6 +2,7 @@ package managementasset
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,4 +103,70 @@ func TestDownloadAssetRejectsOversizedBody(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("downloadAsset() error = %v, want oversized error", err)
 	}
+}
+
+func TestFetchReleaseAssetUsesGitHubTokenOnlyForGitHubAPI(t *testing.T) {
+	tests := []struct {
+		name        string
+		url         string
+		gitHubToken string
+		wantAuth    string
+	}{
+		{
+			name:        "GitHub API",
+			url:         "https://api.github.com/repos/example/repository/releases/latest",
+			gitHubToken: "github-token",
+			wantAuth:    "Bearer github-token",
+		},
+		{
+			name: "fallback variables are ignored",
+			url:  "https://api.github.com/repos/example/repository/releases/latest",
+		},
+		{
+			name:        "custom host",
+			url:         "https://releases.example/releases/latest",
+			gitHubToken: "github-token",
+		},
+		{
+			name:        "GitHub API alternate port",
+			url:         "https://api.github.com:8443/repos/example/repository/releases/latest",
+			gitHubToken: "github-token",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GITHUB_TOKEN", tt.gitHubToken)
+			t.Setenv("GITSTORE_GIT_URL", "https://github.com/example/auth-store.git")
+			t.Setenv("GITSTORE_GIT_TOKEN", "git-store-token")
+			t.Setenv("GH_TOKEN", "gh-token")
+			client := &http.Client{
+				Transport: roundTripFunc(
+					func(request *http.Request) (*http.Response, error) {
+						if got := request.Header.Get("Authorization"); got != tt.wantAuth {
+							t.Fatalf("Authorization = %q, want %q", got, tt.wantAuth)
+						}
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Header:     make(http.Header),
+							Body: io.NopCloser(
+								strings.NewReader(
+									`{"assets":[{"name":"management.html","browser_download_url":"https://downloads.example/management.html","digest":"sha256:abc"}]}`,
+								),
+							),
+							Request: request,
+						}, nil
+					},
+				),
+			}
+			if _, _, errFetch := fetchReleaseAsset(context.Background(), client, tt.url); errFetch != nil {
+				t.Fatalf("fetchReleaseAsset() error = %v", errFetch)
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
 }

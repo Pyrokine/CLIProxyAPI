@@ -44,13 +44,18 @@ var (
 )
 
 type liveSession struct {
-	callID        string
-	authID        string
-	model         string
-	homeSelection *auth.HomeDispatchSelection
-	media         mediaRelaySession
-	resources     *liveSessionResources
-	token         uint64
+	callID                string
+	authID                string
+	model                 string
+	sessionID             string
+	parentSessionID       string
+	ownerPrincipal        string
+	ownerProvider         string
+	clientSecretPrincipal string
+	homeSelection         *auth.HomeDispatchSelection
+	media                 mediaRelaySession
+	resources             *liveSessionResources
+	token                 uint64
 }
 
 type liveSessionResources struct {
@@ -321,27 +326,56 @@ const (
 // HandleSideband relays live session sideband WebSocket frames bidirectionally.
 func (h *Handler) HandleSideband(c *gin.Context) {
 	if h == nil || h.authManager == nil || h.sessions == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex live sideband unavailable"})
+		writeLiveError(c, http.StatusServiceUnavailable, "Codex live sideband unavailable")
 		return
 	}
 	if !websocket.IsWebSocketUpgrade(c.Request) {
-		c.JSON(http.StatusUpgradeRequired, gin.H{"error": "WebSocket upgrade required"})
+		writeLiveError(c, http.StatusUpgradeRequired, "WebSocket upgrade required")
 		return
 	}
 
 	style, callID, ok := sidebandTarget(c)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid Codex live call ID"})
+		writeLiveError(c, http.StatusBadRequest, "Invalid Codex live call ID")
 		return
 	}
 	session, claim := h.sessions.claim(callID)
 	switch claim {
 	case sessionClaimBusy:
-		c.JSON(http.StatusConflict, gin.H{"error": "Codex live session already joining"})
+		writeLiveError(c, http.StatusConflict, "Codex live session already joining")
 		return
 	case sessionClaimAcquired:
 	default:
-		c.JSON(http.StatusNotFound, gin.H{"error": "Codex live session not found"})
+		writeLiveError(c, http.StatusNotFound, "Codex live session not found")
+		return
+	}
+	if principal, hasClientSecret := c.Get(ClientSecretPrincipalContextKey); hasClientSecret {
+		principalValue, _ := principal.(string)
+		if session.clientSecretPrincipal == "" || principalValue != session.clientSecretPrincipal {
+			h.sessions.release(session)
+			writeRealtimeError(
+				c,
+				http.StatusForbidden,
+				"Realtime client secret is not valid for this call",
+				"invalid_request_error",
+				"realtime_client_secret_scope_mismatch",
+			)
+			return
+		}
+	} else if ownerPrincipal, ownerProvider := requestOwner(c); session.ownerPrincipal != "" &&
+		(ownerPrincipal != session.ownerPrincipal || ownerProvider != session.ownerProvider) {
+		h.sessions.release(session)
+		writeRealtimeError(
+			c,
+			http.StatusForbidden,
+			"Realtime call belongs to another API principal",
+			"invalid_request_error",
+			"realtime_call_scope_mismatch",
+		)
+		return
+	}
+	if !h.authorizeRealtimeModel(c, session.model) {
+		h.sessions.release(session)
 		return
 	}
 	consumeSession := false
@@ -354,24 +388,39 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	}()
 
 	ctx := util.WithGinContext(c.Request.Context(), c)
+	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
+	selectionMetadata := liveSelectionMetadata(c, map[string]any{
+		coreexecutor.ExecutionSessionMetadataKey: session.callID,
+	})
+	ctx = enrichLiveSessionContext(
+		ctx,
+		liveSelectionHeaders(c),
+		nil,
+		selectionMetadata,
+	)
+	if session.sessionID != "" {
+		metadata := logging.GetClientRequestMetadata(ctx)
+		metadata.SessionID = session.sessionID
+		metadata.ParentSessionID = session.parentSessionID
+		ctx = logging.WithClientRequestMetadata(ctx, metadata)
+		ctx = util.WithSessionID(ctx, metadata.SessionID)
+	}
 	var selection *auth.HomeDispatchSelection
 	var selected *auth.Auth
 	var errSelect error
 	if session.homeSelection != nil {
 		if !session.homeSelection.Active() {
 			consumeSession = true
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex live Home selection unavailable"})
+			writeLiveError(c, http.StatusServiceUnavailable, "Codex live Home selection unavailable")
 			return
 		}
 		selection = session.homeSelection
 		selected = selection.CloneAuth()
 	} else {
+		selectionMetadata[coreexecutor.PinnedAuthMetadataKey] = session.authID
 		selectionOpts := coreexecutor.Options{
-			Headers: c.Request.Header.Clone(),
-			Metadata: map[string]any{
-				coreexecutor.PinnedAuthMetadataKey:       session.authID,
-				coreexecutor.ExecutionSessionMetadataKey: callID,
-			},
+			Headers:  liveSelectionHeaders(c),
+			Metadata: selectionMetadata,
 		}
 		selection, selected, errSelect = h.selectOAuth(ctx, session.model, selectionOpts)
 	}
@@ -380,7 +429,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		return
 	}
 	if selected == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth unavailable"})
+		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
 		return
 	}
 
@@ -389,7 +438,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		if errAttempt != nil {
 			consumeSession = true
 			runtimeexecutor.RecordAPIWebsocketError(ctx, h.configSnapshot(), "attempt", errAttempt)
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex live sideband session unavailable"})
+			writeLiveError(c, http.StatusServiceUnavailable, "Codex live sideband session unavailable")
 			return
 		}
 		ctx = attemptCtx
@@ -403,14 +452,14 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	req, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, upstreamHTTPURL, nil)
 	if errRequest != nil {
 		runtimeexecutor.RecordAPIWebsocketError(ctx, cfg, "request", errRequest)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Codex live sideband request unavailable"})
+		writeLiveError(c, http.StatusBadGateway, "Codex live sideband request unavailable")
 		return
 	}
 	req.Header = protocolHeaders(c.Request.Header)
 	setAccountHeader(req.Header, selected)
 	if errPrepare := h.authManager.PrepareHttpRequest(ctx, selected, req); errPrepare != nil {
 		runtimeexecutor.RecordAPIWebsocketError(ctx, cfg, "auth", errPrepare)
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Codex live sideband auth unavailable"})
+		writeLiveError(c, http.StatusBadGateway, "Codex live sideband auth unavailable")
 		return
 	}
 
@@ -429,7 +478,15 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 	dialer.Subprotocols = websocket.Subprotocols(c.Request)
 	upstream, handshakeResponse, errDial := dialer.DialContext(ctx, upstreamURL, req.Header)
 	if errDial != nil {
-		handleSidebandDialError(c, ctx, cfg, handshakeResponse, errDial)
+		responseBody := handleSidebandDialError(c, ctx, cfg, handshakeResponse, errDial)
+		if selection != nil && handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
+			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", session.model, responseBody)
+			diagnostic := string(responseBody)
+			if len(responseBody) == 0 {
+				diagnostic = errDial.Error()
+			}
+			log.WithField("status", handshakeResponse.StatusCode).Warnf("codex live sideband upstream handshake failed: %s", logging.SafeDiagnosticForLog(diagnostic))
+		}
 		return
 	}
 	if handshakeResponse != nil {
@@ -451,7 +508,7 @@ func (h *Handler) HandleSideband(c *gin.Context) {
 		if errBind := selection.Bind(closeUpstream); errBind != nil {
 			consumeSession = true
 			runtimeexecutor.RecordAPIWebsocketError(ctx, cfg, "bind", errBind)
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex live sideband session unavailable"})
+			writeLiveError(c, http.StatusServiceUnavailable, "Codex live sideband session unavailable")
 			return
 		}
 	} else {
@@ -558,8 +615,9 @@ func handleSidebandDialError(
 	cfg *config.Config,
 	response *http.Response,
 	errDial error,
-) {
+) []byte {
 	status := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
+	var responseBody []byte
 	if response != nil {
 		if response.StatusCode > 0 {
 			status = response.StatusCode
@@ -571,13 +629,30 @@ func handleSidebandDialError(
 			callResponseHeaders(response.Header),
 		)
 		if response.Body != nil {
+			var errRead error
+			responseBody, errRead = readLimitedBody(response.Body)
+			if errRead != nil {
+				runtimeexecutor.RecordAPIWebsocketError(ctx, cfg, "read", errRead)
+				log.WithError(errRead).Warn("codex live sideband: read rejected handshake body")
+			}
+			runtimeexecutor.AppendAPIWebsocketResponse(ctx, cfg, responseBody)
 			if errClose := response.Body.Close(); errClose != nil {
 				log.Errorf("codex live sideband: close rejected handshake body error: %v", errClose)
 			}
 		}
 	}
 	runtimeexecutor.RecordAPIWebsocketError(ctx, cfg, "dial", errDial)
-	c.JSON(status, gin.H{"error": "Codex live sideband upstream unavailable"})
+	if response != nil && response.StatusCode == http.StatusUnauthorized {
+		c.Header("Content-Type", response.Header.Get("Content-Type"))
+		c.Status(status)
+		if _, errWrite := c.Writer.Write(responseBody); errWrite != nil {
+			runtimeexecutor.RecordAPIWebsocketError(ctx, cfg, "write", errWrite)
+			log.WithError(errWrite).Warn("codex live sideband: write rejected handshake body")
+		}
+		return responseBody
+	}
+	writeLiveError(c, status, "Codex live sideband upstream unavailable")
+	return nil
 }
 
 func websocketCloseFunc(name string, conn *websocket.Conn) func() error {

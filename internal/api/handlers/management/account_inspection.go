@@ -644,7 +644,9 @@ func (s *accountInspectionService) inspectAccounts(ctx context.Context, target s
 		probeTarget, hasProbeTarget := probeTargets[inspectionProbeBindingKey(auth.FileName, auth.Index)]
 		entry := quotaStatus.Credentials[probeTarget.EntryKey]
 		if entry == nil {
-			entry = quotaStatus.Credentials[quota.EntryKey(quota.CredentialType(provider), auth.FileName)]
+			entry = quotaStatus.Credentials[quota.BindingEntryKey(
+				quota.CredentialType(provider), auth.FileName, auth.Index,
+			)]
 		}
 		if entry == nil {
 			entry = quotaStatus.Credentials[auth.FileName]

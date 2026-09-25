@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,22 +28,27 @@ import (
 )
 
 const (
-	// pluginReleaseCacheTTL bounds how long a resolved latest release version is
-	// reused before the GitHub API is queried again.
-	pluginReleaseCacheTTL = 10 * time.Minute
-	// pluginReleaseFailureCacheTTL throttles retries after a failed lookup so a
-	// rate-limited or unreachable API is not hammered on every listing.
-	pluginReleaseFailureCacheTTL         = 30 * time.Second
-	pluginStoreHTTPTimeout               = 30 * time.Second
-	pluginStoreInstallRequestMaxBytes    = 16 * 1024
-	pluginStoreReleasePageSize           = 50
-	pluginLatestVersionLookupConcurrency = 8
+	pluginReleaseCacheTTL             = time.Hour
+	pluginReleaseFailureCacheTTL      = 30 * time.Second
+	pluginReleaseLookupConcurrency    = 2
+	pluginStoreHTTPTimeout            = 30 * time.Second
+	pluginStoreInstallRequestMaxBytes = 16 * 1024
+	pluginStoreReleasePageSize        = 50
 )
 
-type pluginReleaseCacheEntry struct {
-	version   string
-	expiresAt time.Time
+type pluginReleaseLookup struct {
+	done     chan struct{}
+	version  string
+	canceled bool
 }
+
+type pluginReleaseCacheEntry struct {
+	version     string
+	nextCheckAt time.Time
+	inflight    *pluginReleaseLookup
+}
+
+var pluginReleaseLookupSlots = make(chan struct{}, pluginReleaseLookupConcurrency)
 
 type pluginStoreListResponse struct {
 	PluginsEnabled bool                   `json:"plugins_enabled"`
@@ -63,6 +69,7 @@ type pluginStoreSourceErr struct {
 	SourceName string `json:"source_name"`
 	SourceURL  string `json:"source_url"`
 	Message    string `json:"message"`
+	cause      error
 }
 
 type pluginStoreListEntry struct {
@@ -166,6 +173,9 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 	}
 	plugins, sourceErrors := h.fetchSourcedPlugins(c.Request.Context(), proxyURL, storeAuth, sources)
 	if len(plugins) == 0 && len(sourceErrors) > 0 {
+		if writePluginStoreRateLimit(c, sourceErrors[0].cause) {
+			return
+		}
 		c.JSON(
 			http.StatusBadGateway, gin.H{"error": "plugin_store_registry_failed", "message": sourceErrors[0].Message},
 		)
@@ -177,16 +187,28 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 		return
 	}
 
-	latestInput := make([]pluginstore.Plugin, 0, len(plugins))
-	for _, item := range plugins {
-		latestInput = append(latestInput, item.plugin)
-	}
-	client := h.newPluginStoreClient(proxyURL, "", storeAuth)
-	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
 	pluginSourceCounts := make(map[string]int, len(plugins))
 	for _, item := range plugins {
 		pluginSourceCounts[item.plugin.ID]++
 	}
+	// Catalog browsing must not spend GitHub quota on uninstalled plugins or
+	// sources that cannot update the installed plugin. Positional placeholders
+	// keep release versions aligned with catalog entries.
+	latestInput := make([]pluginstore.Plugin, len(plugins))
+	for index, item := range plugins {
+		status := statuses[item.plugin.ID]
+		_, _, sourceAllowsUpdate := pluginStoreInstallSourceStatus(
+			status,
+			sources,
+			item.source.ID,
+			pluginSourceCounts[item.plugin.ID],
+		)
+		if status.Installed && sourceAllowsUpdate {
+			latestInput[index] = item.plugin
+		}
+	}
+	client := h.newPluginStoreClient(proxyURL, "", storeAuth)
+	latestVersions := h.latestPluginVersions(c.Request.Context(), client, latestInput)
 
 	entries := make([]pluginStoreListEntry, 0, len(plugins))
 	for index, item := range plugins {
@@ -199,10 +221,12 @@ func (h *Handler) ListPluginStore(c *gin.Context) {
 			pluginSourceCounts[plugin.ID],
 		)
 		installedVersion := status.InstalledVersion
-		// Fall back to the registry version when the latest release is unknown.
+		// Fall back to the registry version when no successful release lookup exists.
 		storeVersion := plugin.Version
 		if latestVersions[index] != "" {
 			storeVersion = latestVersions[index]
+		} else if cachedVersion := h.cachedPluginVersion(client, plugin); cachedVersion != "" {
+			storeVersion = cachedVersion
 		}
 		entries = append(
 			entries, pluginStoreListEntry{
@@ -279,6 +303,9 @@ func (h *Handler) ListPluginStoreReleases(c *gin.Context) {
 
 	releases, errReleases := client.FetchReleases(c.Request.Context(), plugin, pluginStoreReleasePageSize)
 	if errReleases != nil {
+		if writePluginStoreRateLimit(c, errReleases) {
+			return
+		}
 		c.JSON(
 			http.StatusBadGateway,
 			gin.H{"error": "plugin_release_versions_failed", "message": errReleases.Error()},
@@ -382,6 +409,9 @@ func (h *Handler) installPluginFromStore(c *gin.Context, goos, goarch string) {
 		return
 	}
 	if errPrepare != nil {
+		if writePluginStoreRateLimit(c, errPrepare) {
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": "plugin_install_failed", "message": errPrepare.Error()})
 		return
 	}
@@ -861,9 +891,32 @@ func preparePluginStoreGitHubRelease(
 		if errPrepare == nil {
 			return prepared, nil
 		}
+		var rateLimit *pluginstore.RateLimitError
+		if errors.As(errPrepare, &rateLimit) || ctx.Err() != nil {
+			return pluginstore.PreparedInstall{}, errPrepare
+		}
 		errs = append(errs, fmt.Errorf("%s: %w", tag, errPrepare))
 	}
 	return pluginstore.PreparedInstall{}, fmt.Errorf("prepare release by tag: %w", errors.Join(errs...))
+}
+
+func writePluginStoreRateLimit(c *gin.Context, err error) bool {
+	var rateLimit *pluginstore.RateLimitError
+	if !errors.As(err, &rateLimit) {
+		return false
+	}
+	retryAfter := rateLimit.RetryAfterSeconds(time.Now())
+	c.Header("Retry-After", strconv.FormatInt(retryAfter, 10))
+	c.JSON(
+		http.StatusTooManyRequests,
+		gin.H{
+			"error":       "plugin_store_rate_limited",
+			"message":     rateLimit.Error(),
+			"retry_after": retryAfter,
+			"retry_at":    rateLimit.RetryAt.UTC().Format(time.RFC3339),
+		},
+	)
+	return true
 }
 
 func pluginStoreManifestForInstall(
@@ -1041,7 +1094,12 @@ func (h *Handler) newPluginStoreClient(
 		registryURL = pluginstore.DefaultRegistryURL
 	}
 	if httpClient != nil {
-		return pluginstore.Client{HTTPClient: httpClient, RegistryURL: registryURL, Auth: storeAuth}
+		return pluginstore.Client{
+			HTTPClient:   httpClient,
+			NetworkScope: strings.TrimSpace(proxyURL),
+			RegistryURL:  registryURL,
+			Auth:         storeAuth,
+		}
 	}
 	client := &http.Client{Timeout: pluginStoreHTTPTimeout}
 	if strings.TrimSpace(proxyURL) != "" {
@@ -1051,7 +1109,12 @@ func (h *Handler) newPluginStoreClient(
 		client.Transport = http.DefaultTransport
 	}
 	client.Transport = proxyutil.PublicHostTransport(client.Transport)
-	return pluginstore.Client{HTTPClient: client, RegistryURL: registryURL, Auth: storeAuth}
+	return pluginstore.Client{
+		HTTPClient:   client,
+		NetworkScope: strings.TrimSpace(proxyURL),
+		RegistryURL:  registryURL,
+		Auth:         storeAuth,
+	}
 }
 
 func (h *Handler) fetchSourcedPlugins(
@@ -1072,6 +1135,7 @@ func (h *Handler) fetchSourcedPlugins(
 					SourceName: source.Name,
 					SourceURL:  source.URL,
 					Message:    errRegistry.Error(),
+					cause:      errRegistry,
 				},
 			)
 			continue
@@ -1101,6 +1165,9 @@ func (h *Handler) findPluginStoreInstallTarget(
 			client := h.newPluginStoreClient(proxyURL, source.URL, storeAuth)
 			registry, errRegistry := client.FetchRegistry(ctx)
 			if errRegistry != nil {
+				if writePluginStoreRateLimit(c, errRegistry) {
+					return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
+				}
 				c.JSON(
 					http.StatusBadGateway,
 					gin.H{"error": "plugin_store_registry_failed", "message": errRegistry.Error()},
@@ -1133,6 +1200,9 @@ func (h *Handler) findPluginStoreInstallTarget(
 	}
 	if len(matches) == 0 {
 		if len(plugins) == 0 && len(sourceErrors) > 0 {
+			if writePluginStoreRateLimit(c, sourceErrors[0].cause) {
+				return pluginstore.Source{}, pluginstore.Plugin{}, pluginstore.Client{}, false
+			}
 			c.JSON(
 				http.StatusBadGateway,
 				gin.H{"error": "plugin_store_registry_failed", "message": sourceErrors[0].Message},
@@ -1240,87 +1310,137 @@ func pluginAuthConfigured(
 	return pluginstore.PluginAuthConfigured(source, plugin, storeAuth)
 }
 
-// latestPluginVersions resolves the latest release version of each registry
-// plugin concurrently, returning results positionally aligned with plugins.
-// Unresolved entries are left empty so callers can fall back gracefully.
+func pluginReleaseKey(client pluginstore.Client, plugin pluginstore.Plugin) string {
+	if pluginstore.PluginInstallType(plugin) != pluginstore.InstallTypeGitHubRelease ||
+		strings.TrimSpace(plugin.Repository) == "" {
+		return ""
+	}
+	key, errKey := client.LatestReleaseCacheKey(plugin)
+	if errKey != nil {
+		return ""
+	}
+	return key
+}
+
+// cachedPluginVersion returns the last successful lookup without network activity.
+func (h *Handler) cachedPluginVersion(client pluginstore.Client, plugin pluginstore.Plugin) string {
+	if h == nil {
+		return ""
+	}
+	key := pluginReleaseKey(client, plugin)
+	if key == "" {
+		return ""
+	}
+	h.pluginReleaseCacheMu.Lock()
+	defer h.pluginReleaseCacheMu.Unlock()
+	return h.pluginReleaseCache[key].version
+}
+
+// latestPluginVersions preserves catalog order, including skipped placeholders.
 func (h *Handler) latestPluginVersions(
 	ctx context.Context,
 	client pluginstore.Client,
 	plugins []pluginstore.Plugin,
 ) []string {
 	versions := make([]string, len(plugins))
-	if len(plugins) == 0 {
-		return versions
-	}
-
-	workerCount := min(len(plugins), pluginLatestVersionLookupConcurrency)
-
-	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for range workerCount {
-		wg.Go(func() {
-			for index := range jobs {
-				versions[index] = h.latestPluginVersion(ctx, client, plugins[index])
-			}
-		})
-	}
-
-sendJobs:
-	for index := range plugins {
-		select {
-		case <-ctx.Done():
-			break sendJobs
-		case jobs <- index:
+	for index, plugin := range plugins {
+		if pluginReleaseKey(client, plugin) == "" {
+			continue
 		}
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			versions[index] = h.latestPluginVersion(ctx, client, plugins[index])
+		}(index)
 	}
-	close(jobs)
 	wg.Wait()
 	return versions
 }
 
-// latestPluginVersion returns the plugin's latest release version, caching
-// lookups per repository so repeated listings do not exhaust the GitHub API
-// rate limit. Failed lookups are cached for a shorter interval and reported
-// as an empty version.
+// latestPluginVersion shares cache entries and in-flight work across concurrent
+// catalog requests while retaining the last successful version after failures.
 func (h *Handler) latestPluginVersion(
 	ctx context.Context,
 	client pluginstore.Client,
 	plugin pluginstore.Plugin,
 ) string {
-	if pluginstore.PluginInstallType(plugin) != pluginstore.InstallTypeGitHubRelease {
+	if h == nil || pluginstore.PluginInstallType(plugin) != pluginstore.InstallTypeGitHubRelease {
 		return ""
 	}
-	repository := strings.TrimSpace(plugin.Repository)
-	if repository == "" {
+	client, key, errPrepare := client.PrepareLatestRelease(plugin)
+	if errPrepare != nil {
 		return ""
 	}
-	now := time.Now()
-	h.pluginReleaseCacheMu.Lock()
-	entry, found := h.pluginReleaseCache[repository]
-	h.pluginReleaseCacheMu.Unlock()
-	if found && now.Before(entry.expiresAt) {
-		return entry.version
+
+	var entry pluginReleaseCacheEntry
+	var lookup *pluginReleaseLookup
+	for {
+		h.pluginReleaseCacheMu.Lock()
+		entry = h.pluginReleaseCache[key]
+		if time.Now().Before(entry.nextCheckAt) || ctx.Err() != nil {
+			h.pluginReleaseCacheMu.Unlock()
+			return entry.version
+		}
+		if pending := entry.inflight; pending != nil {
+			h.pluginReleaseCacheMu.Unlock()
+			select {
+			case <-pending.done:
+				if pending.canceled && ctx.Err() == nil {
+					continue
+				}
+				return pending.version
+			case <-ctx.Done():
+				return entry.version
+			}
+		}
+		if h.pluginReleaseCache == nil {
+			h.pluginReleaseCache = make(map[string]pluginReleaseCacheEntry)
+		}
+		lookup = &pluginReleaseLookup{done: make(chan struct{})}
+		entry.inflight = lookup
+		h.pluginReleaseCache[key] = entry
+		h.pluginReleaseCacheMu.Unlock()
+		break
 	}
 
-	version := ""
-	ttl := pluginReleaseFailureCacheTTL
-	release, errRelease := client.FetchLatestRelease(ctx, plugin)
-	if errRelease != nil {
-		log.WithError(errRelease).WithField("plugin_id", plugin.ID).Warn("pluginstore: failed to fetch latest release")
-	} else if latestVersion, errVersion := pluginstore.ReleaseVersion(release); errVersion != nil {
-		log.WithError(errVersion).WithField("plugin_id", plugin.ID).Warn("pluginstore: invalid latest release tag")
-	} else {
-		version = latestVersion
-		ttl = pluginReleaseCacheTTL
+	select {
+	case pluginReleaseLookupSlots <- struct{}{}:
+		if ctx.Err() == nil {
+			release, errRelease := client.FetchLatestRelease(ctx, plugin)
+			version := ""
+			if errRelease == nil {
+				version, errRelease = pluginstore.ReleaseVersion(release)
+			}
+			if ctx.Err() == nil {
+				ttl := pluginReleaseFailureCacheTTL
+				if errRelease != nil {
+					log.WithError(errRelease).WithField("plugin_id", plugin.ID).Warn(
+						"pluginstore: failed to fetch latest release",
+					)
+				} else {
+					entry.version = version
+					ttl = pluginReleaseCacheTTL
+				}
+				entry.nextCheckAt = time.Now().Add(ttl)
+				var rateLimit *pluginstore.RateLimitError
+				if errors.As(errRelease, &rateLimit) {
+					entry.nextCheckAt = rateLimit.RetryAt
+				}
+			}
+		}
+		<-pluginReleaseLookupSlots
+	case <-ctx.Done():
 	}
 
 	h.pluginReleaseCacheMu.Lock()
-	if h.pluginReleaseCache == nil {
-		h.pluginReleaseCache = make(map[string]pluginReleaseCacheEntry)
-	}
-	h.pluginReleaseCache[repository] = pluginReleaseCacheEntry{version: version, expiresAt: now.Add(ttl)}
+	entry.inflight = nil
+	h.pluginReleaseCache[key] = entry
+	lookup.version = entry.version
+	lookup.canceled = ctx.Err() != nil
+	close(lookup.done)
 	h.pluginReleaseCacheMu.Unlock()
-	return version
+	return entry.version
 }
 
 func pluginFilePath(pluginsDir string, id string, desiredVersions ...map[string]string) (string, error) {

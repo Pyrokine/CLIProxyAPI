@@ -578,7 +578,7 @@ func (s *managementStateStore) loadQuotaEntries(ctx context.Context) (map[string
 			return nil, err
 		}
 		if entryKey == "" {
-			entryKey = quota.EntryKey(entry.Type, entry.FileName)
+			entryKey = quota.BindingEntryKey(entry.Type, entry.FileName, entry.AuthIndex)
 		}
 		if entryKey != "" {
 			entries[entryKey] = entry
@@ -591,7 +591,7 @@ func (s *managementStateStore) loadQuotaEntries(ctx context.Context) (map[string
 }
 
 func (s *managementStateStore) saveQuotaEntry(ctx context.Context, entry quota.EntryState) error {
-	entryKey := quota.EntryKey(entry.Type, entry.FileName)
+	entryKey := quota.BindingEntryKey(entry.Type, entry.FileName, entry.AuthIndex)
 	if s == nil || s.db == nil || entryKey == "" {
 		return nil
 	}

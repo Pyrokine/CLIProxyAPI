@@ -2,12 +2,25 @@ package home
 
 import "time"
 
+// AuthDispatchConstraints carries request-scoped Home selection restrictions.
+type AuthDispatchConstraints struct {
+	RetryRound       int      `json:"retry_round,omitempty"`
+	ExcludedAuthIDs  []string `json:"excluded_auth_ids,omitempty"`
+	PinnedAuthID     string   `json:"pinned_auth_id,omitempty"`
+	CredentialPolicy string   `json:"credential_policy,omitempty"`
+	ParentSessionID  string   `json:"parent_session_id,omitempty"`
+}
+
 type authDispatchRequest struct {
+	RetryRound          int               `json:"retry_round,omitempty"`
+	ExcludedAuthIDs     []string          `json:"excluded_auth_ids,omitempty"`
+	PinnedAuthID        string            `json:"pinned_auth_id,omitempty"`
 	Type                string            `json:"type"`
 	Model               string            `json:"model"`
 	Count               int               `json:"count"`
 	ConcurrencyProtocol int               `json:"concurrency_protocol,omitempty"`
 	SessionID           string            `json:"session_id,omitempty"`
+	ParentSessionID     string            `json:"parent_session_id,omitempty"`
 	Headers             map[string]string `json:"headers,omitempty"`
 	CredentialPolicy    string            `json:"credential_policy,omitempty"`
 }

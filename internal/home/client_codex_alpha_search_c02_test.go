@@ -11,7 +11,7 @@ func TestAuthDispatchRequestIncludesCredentialPolicy(t *testing.T) {
 		"session-c02",
 		nil,
 		1,
-		"codex_alpha_search_v1",
+		AuthDispatchConstraints{CredentialPolicy: "codex_alpha_search_v1"},
 	)
 	raw, errMarshal := json.Marshal(request)
 	if errMarshal != nil {

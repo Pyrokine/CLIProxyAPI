@@ -145,7 +145,7 @@ func TestRunUpdateGuardSucceedsAfterThreeHealthSamples(t *testing.T) {
 	defer server.Close()
 
 	session, token := prepareArmedUpdateGuardSession(
-		t, store, server.URL, clock.now(), "v9.9.8", targetVersion,
+		t, store, server.URL, clock.now(), "v9.9.8+dirty.123abc", targetVersion,
 	)
 	tokenValue.Store(token)
 	runtime := updateGuardTestRuntime(clock, session.ExecutablePath)
@@ -195,7 +195,7 @@ func TestRunUpdateGuardRollsBackAfterTargetVersionFailure(t *testing.T) {
 	store := openUpdateGuardTestStore(t)
 	clock := &updateGuardTestClock{current: time.Date(2026, 9, 5, 13, 0, 0, 0, time.UTC)}
 	attemptID := "0123456789abcdef0123456789abcdef"
-	previousVersion := "v9.9.8"
+	previousVersion := "v9.9.8+dirty.123abc"
 	targetVersion := "v9.9.9"
 	var tokenValue atomic.Value
 	var restored atomic.Bool

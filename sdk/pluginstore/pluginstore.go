@@ -401,6 +401,13 @@ func NewClientWithAuth(httpClient HTTPDoer, registryURL string, auth []AuthConfi
 	}
 }
 
+// WithNetworkScope returns a copy with the proxy or egress identity used for
+// shared GitHub API cooldowns. It does not configure the HTTP transport.
+func (c Client) WithNetworkScope(networkScope string) Client {
+	c.inner.NetworkScope = strings.TrimSpace(networkScope)
+	return c
+}
+
 func DefaultSource() Source {
 	return fromInternalSource(internalpluginstore.DefaultSource())
 }

@@ -377,6 +377,13 @@ func resolveReleaseURL(repo, version string) string {
 	return strings.TrimSuffix(defaultManagementReleaseURL, "/releases/latest") + suffix
 }
 
+func gitHubReleaseURL(releaseURL string) bool {
+	parsed, errParse := url.Parse(strings.TrimSpace(releaseURL))
+	return errParse == nil && strings.EqualFold(parsed.Scheme, "https") &&
+		strings.EqualFold(parsed.Hostname(), "api.github.com") &&
+		(parsed.Port() == "" || parsed.Port() == "443")
+}
+
 func fetchReleaseAsset(ctx context.Context, client *http.Client, releaseURL string) (*releaseAsset, string, error) {
 	if strings.TrimSpace(releaseURL) == "" {
 		releaseURL = defaultManagementReleaseURL
@@ -388,9 +395,10 @@ func fetchReleaseAsset(ctx context.Context, client *http.Client, releaseURL stri
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", httpUserAgent)
-	gitURL := strings.ToLower(strings.TrimSpace(os.Getenv("GITSTORE_GIT_URL")))
-	if tok := strings.TrimSpace(os.Getenv("GITSTORE_GIT_TOKEN")); tok != "" && strings.Contains(gitURL, "github.com") {
-		req.Header.Set("Authorization", "Bearer "+tok)
+	if gitHubReleaseURL(releaseURL) {
+		if token := util.GitHubToken(); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 	}
 
 	resp, err := client.Do(req)

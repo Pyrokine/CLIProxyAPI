@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"encoding/pem"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
@@ -110,5 +112,30 @@ func TestClientCancelAuthSessionRejectsMissingDecision(t *testing.T) {
 	_, err := client.cancelAuthSession("state-1")
 	if err == nil || !strings.Contains(err.Error(), "missing cancelled field") {
 		t.Fatalf("CancelAuthSession() error = %v", err)
+	}
+}
+
+func TestClientRefreshAllAuthFilesUsesExplicitBulkMode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v0/management/auth-files/refresh" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var payload map[string]bool
+		if errDecode := json.NewDecoder(r.Body).Decode(&payload); errDecode != nil {
+			t.Fatalf("decode request: %v", errDecode)
+		}
+		if !payload["all"] || len(payload) != 1 {
+			t.Fatalf("request body = %#v", payload)
+		}
+		time.Sleep(10 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	httpClient := server.Client()
+	httpClient.Timeout = time.Millisecond
+	client := &Client{baseURL: server.URL, http: httpClient}
+	if err := client.refreshAllAuthFiles(); err != nil {
+		t.Fatalf("refreshAllAuthFiles() error = %v", err)
 	}
 }

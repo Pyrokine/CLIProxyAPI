@@ -102,6 +102,15 @@ func (c *Client) SetSecretKey(secretKey string) {
 }
 
 func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, error) {
+	return c.doRequestWithTimeout(method, path, body, 0)
+}
+
+func (c *Client) doRequestWithTimeout(
+	method,
+	path string,
+	body io.Reader,
+	timeout time.Duration,
+) ([]byte, int, error) {
 	rawURL := c.baseURL + path
 	req, err := http.NewRequest(method, rawURL, body)
 	if err != nil {
@@ -113,7 +122,13 @@ func (c *Client) doRequest(method, path string, body io.Reader) ([]byte, int, er
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.http.Do(req)
+	httpClient := c.http
+	if timeout > 0 && (httpClient.Timeout == 0 || httpClient.Timeout < timeout) {
+		clientCopy := *httpClient
+		clientCopy.Timeout = timeout
+		httpClient = &clientCopy
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -235,6 +250,26 @@ func (c *Client) patchAuthFileFields(name string, fields map[string]any) error {
 	body, _ := json.Marshal(fields)
 	_, err := c.patch("/v0/management/auth-files/fields", strings.NewReader(string(body)))
 	return err
+}
+
+func (c *Client) refreshAllAuthFiles() error {
+	body, errMarshal := json.Marshal(map[string]bool{"all": true})
+	if errMarshal != nil {
+		return errMarshal
+	}
+	_, status, errRequest := c.doRequestWithTimeout(
+		http.MethodPost,
+		"/v0/management/auth-files/refresh",
+		strings.NewReader(string(body)),
+		35*time.Second,
+	)
+	if errRequest != nil {
+		return errRequest
+	}
+	if status >= http.StatusBadRequest {
+		return fmt.Errorf("HTTP %d", status)
+	}
+	return nil
 }
 
 // getLogs fetches log lines from the server.

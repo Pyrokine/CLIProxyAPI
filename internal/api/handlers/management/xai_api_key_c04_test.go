@@ -27,7 +27,7 @@ func TestC04XAIAPIKeyManagementCRUDAndValidation(t *testing.T) {
 	if create.Code != http.StatusCreated {
 		t.Fatalf("POST status = %d, body=%s", create.Code, create.Body.String())
 	}
-	if len(h.cfg.XAIKey) != 1 || !h.cfg.XAIKey[0].DisableCooling {
+	if len(h.cfg.XAIKey) != 1 || h.cfg.XAIKey[0].DisableCooling == nil || !*h.cfg.XAIKey[0].DisableCooling {
 		t.Fatalf("created xAI config = %+v", h.cfg.XAIKey)
 	}
 	get := runConfigListRequest(h.GetXAIKeys, http.MethodGet, "/xai-api-key", "")
@@ -46,7 +46,7 @@ func TestC04XAIAPIKeyManagementCRUDAndValidation(t *testing.T) {
 	if patch.Code != http.StatusOK {
 		t.Fatalf("PATCH status = %d, body=%s", patch.Code, patch.Body.String())
 	}
-	if h.cfg.XAIKey[0].Priority != 7 || h.cfg.XAIKey[0].Websockets || h.cfg.XAIKey[0].DisableCooling {
+	if h.cfg.XAIKey[0].Priority != 7 || h.cfg.XAIKey[0].Websockets || h.cfg.XAIKey[0].DisableCooling == nil || *h.cfg.XAIKey[0].DisableCooling {
 		t.Fatalf("patched xAI config = %+v", h.cfg.XAIKey[0])
 	}
 

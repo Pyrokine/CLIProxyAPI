@@ -19,6 +19,26 @@ func TestCloudDeployHomeConfigIsAvailableWithoutLocalFile(t *testing.T) {
 	}
 }
 
+func TestNormalizeHomePort(t *testing.T) {
+	tests := []struct {
+		name string
+		port int
+		want int
+	}{
+		{name: "negative defaults", port: -1, want: 8317},
+		{name: "zero defaults", port: 0, want: 8317},
+		{name: "default preserved", port: 8317, want: 8317},
+		{name: "custom preserved", port: 9090, want: 9090},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := normalizeHomePort(test.port); got != test.want {
+				t.Fatalf("normalizeHomePort(%d) = %d, want %d", test.port, got, test.want)
+			}
+		})
+	}
+}
+
 func TestModelCatalogUpdaterPlan(t *testing.T) {
 	tests := []struct {
 		name            string

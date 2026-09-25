@@ -4,11 +4,29 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 )
+
+type testNetConnWrapper struct {
+	net.Conn
+	closeCalled bool
+}
+
+func (c *testNetConnWrapper) Close() error {
+	c.closeCalled = true
+	return nil
+}
+
+func (c *testNetConnWrapper) NetConn() net.Conn {
+	return c.Conn
+}
 
 func TestAuthDispatchRequestIncludesCount(t *testing.T) {
 	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"User-Agent": {"codex-cli"}}, 2)
@@ -158,6 +176,90 @@ func TestRedisOptionsHomeTLSEnabledUsesExplicitServerName(t *testing.T) {
 	}
 }
 
+func TestCloseDetachedClientsClosesUnderlyingTLSConnAndUntracks(t *testing.T) {
+	raw, peer := net.Pipe()
+	defer func() { _ = raw.Close() }()
+	defer func() { _ = peer.Close() }()
+
+	transport := &testNetConnWrapper{Conn: raw}
+	tlsConn := tls.Client(transport, &tls.Config{MinVersion: tls.VersionTLS12, ServerName: "home.example.com"})
+	client := New(config.HomeConfig{Enabled: true})
+	dispatchConn := &homeDispatchConn{Conn: tlsConn, client: client}
+	client.connections = map[*homeDispatchConn]struct{}{dispatchConn: {}}
+
+	closeDetachedClients(nil, nil, []*homeDispatchConn{dispatchConn})
+	dispatchConn.untrack()
+	dispatchConn.untrack()
+
+	if got := dispatchConn.NetConn(); got != tlsConn {
+		t.Fatalf("NetConn() = %T, want original TLS connection", got)
+	}
+	if transport.closeCalled {
+		t.Fatal("TLS wrapper Close was called instead of the underlying transport")
+	}
+	client.mu.Lock()
+	remaining := len(client.connections)
+	client.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("tracked connections = %d, want 0", remaining)
+	}
+	if errDeadline := peer.SetReadDeadline(time.Now().Add(time.Second)); errDeadline != nil {
+		if !errors.Is(errDeadline, io.ErrClosedPipe) {
+			t.Fatalf("set peer deadline: %v", errDeadline)
+		}
+	} else {
+		var buffer [1]byte
+		if _, errRead := peer.Read(buffer[:]); errRead == nil {
+			t.Fatal("underlying transport remained open")
+		}
+	}
+}
+
+func TestHomeOperationTimeoutOverrideIsTestScopedAndPreservedAcrossLifetime(t *testing.T) {
+	production := New(config.HomeConfig{Enabled: true, Host: "127.0.0.1", Port: 6379})
+	options, err := production.redisOptionsLocked("127.0.0.1:6379")
+	if err != nil {
+		t.Fatalf("redisOptionsLocked() error = %v", err)
+	}
+	if production.testOperationTimeout != 0 || options.DialTimeout != homeRedisOperationTimeout ||
+		options.ReadTimeout != homeRedisOperationTimeout || options.WriteTimeout != homeRedisOperationTimeout {
+		t.Fatalf(
+			"production timeouts = override:%s dial:%s read:%s write:%s",
+			production.testOperationTimeout,
+			options.DialTimeout,
+			options.ReadTimeout,
+			options.WriteTimeout,
+		)
+	}
+	_, heartbeat := production.subscriptionParameters()
+	if want := (config.CredentialConcurrencyConfig{}).WithDefaults().CPAHeartbeatTimeout; heartbeat != want {
+		t.Fatalf("production heartbeat timeout = %s, want %s", heartbeat, want)
+	}
+
+	production.testOperationTimeout = 20 * time.Millisecond
+	testOptions, err := production.redisOptionsLocked("127.0.0.1:6379")
+	if err != nil {
+		t.Fatalf("redisOptionsLocked(test override) error = %v", err)
+	}
+	if testOptions.DialTimeout != 20*time.Millisecond || testOptions.ReadTimeout != 20*time.Millisecond ||
+		testOptions.WriteTimeout != 20*time.Millisecond {
+		t.Fatalf(
+			"test timeouts = dial:%s read:%s write:%s, want 20ms",
+			testOptions.DialTimeout,
+			testOptions.ReadTimeout,
+			testOptions.WriteTimeout,
+		)
+	}
+	_, heartbeat = production.subscriptionParameters()
+	if heartbeat != 20*time.Millisecond {
+		t.Fatalf("test heartbeat timeout = %s, want 20ms", heartbeat)
+	}
+	next := production.NewLifetime()
+	if next == nil || next.testOperationTimeout != 20*time.Millisecond {
+		t.Fatalf("NewLifetime() test timeout = %#v", next)
+	}
+}
+
 func TestRefreshClusterNodesDisabledSkipsRedisCommand(t *testing.T) {
 	client := New(
 		config.HomeConfig{
@@ -200,5 +302,27 @@ func TestFailoverAfterReconnectFailureDisabledDoesNotSwitchToClusterNode(t *test
 	}
 	if got, _ := client.addr(); got != "seed.example.com:8327" {
 		t.Fatalf("addr() = %q, want seed.example.com:8327", got)
+	}
+}
+
+func TestAuthDispatchRequestRetryConstraints(t *testing.T) {
+	constraints := AuthDispatchConstraints{
+		RetryRound: 2, ExcludedAuthIDs: []string{"synthetic-a"}, PinnedAuthID: " synthetic-b ",
+		CredentialPolicy: "codex_alpha_search_v1", ParentSessionID: " parent-session ",
+	}
+	request := newAuthDispatchRequest("synthetic-model", "synthetic-session", nil, 1, constraints)
+	constraints.ExcludedAuthIDs[0] = "changed"
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["retry_round"] != float64(2) || payload["pinned_auth_id"] != "synthetic-b" ||
+		payload["credential_policy"] != "codex_alpha_search_v1" || payload["parent_session_id"] != "parent-session" ||
+		payload["excluded_auth_ids"].([]any)[0] != "synthetic-a" {
+		t.Fatalf("wire=%s", raw)
 	}
 }

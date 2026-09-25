@@ -524,7 +524,10 @@ func (h *Handler) attachUpdateFailure(
 }
 
 var validVersion = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
-var comparableUpdateVersion = regexp.MustCompile(`(?i)^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-aug\.([0-9]+))?$`)
+var validBuildVersion = regexp.MustCompile(`^[a-zA-Z0-9._-]+(?:\+[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*)?$`)
+var comparableUpdateVersion = regexp.MustCompile(
+	`(?i)^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:-aug\.([0-9]+))?(?:\+[a-z0-9-]+(?:\.[a-z0-9-]+)*)?$`,
+)
 
 type parsedUpdateVersion struct {
 	major        uint64

@@ -10,6 +10,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/watcher/synthesizer"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/gin-gonic/gin"
 )
 
 func TestPostProviderEntryAppendsToCurrentList(t *testing.T) {
@@ -65,7 +66,7 @@ func TestPostProviderEntryRejectsDuplicate(t *testing.T) {
 		h.PostGeminiKey,
 		http.MethodPost,
 		"/gemini-api-key",
-		`{"api-key":"existing-secret","prefix":"replacement"}`,
+		`{"api-key":"existing-secret","prefix":"existing"}`,
 	)
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("PostGeminiKey status = %d, want 409: %s", recorder.Code, recorder.Body.String())
@@ -98,6 +99,91 @@ func TestPostProviderEntryUsesFullRouteIdentity(t *testing.T) {
 				t.Fatalf(
 					"PostGeminiKey duplicate route status = %d, want 409: %s", recorder.Code, recorder.Body.String(),
 				)
+			}
+		},
+	)
+
+	t.Run(
+		"gemini style route dimensions", func(t *testing.T) {
+			resources := []struct {
+				name string
+				set  func(*config.Config, []config.GeminiKey)
+				get  func(*config.Config) []config.GeminiKey
+				post func(*Handler, *gin.Context)
+				path string
+			}{
+				{
+					name: "gemini",
+					set:  func(cfg *config.Config, entries []config.GeminiKey) { cfg.GeminiKey = entries },
+					get:  func(cfg *config.Config) []config.GeminiKey { return cfg.GeminiKey },
+					post: (*Handler).PostGeminiKey,
+					path: "/gemini-api-key",
+				},
+				{
+					name: "interactions",
+					set:  func(cfg *config.Config, entries []config.GeminiKey) { cfg.InteractionsKey = entries },
+					get:  func(cfg *config.Config) []config.GeminiKey { return cfg.InteractionsKey },
+					post: (*Handler).PostInteractionsKey,
+					path: "/interactions-api-key",
+				},
+			}
+			for _, resource := range resources {
+				resource := resource
+				for _, route := range []struct {
+					name       string
+					body       string
+					wantStatus int
+				}{
+					{
+						name:       "different proxy",
+						body:       `{"api-key":"shared-secret","base-url":"https://gateway.example/v1","proxy-url":"https://proxy-b.example","prefix":"team-a","headers":{"X-A":"1","X-B":"2"}}`,
+						wantStatus: http.StatusCreated,
+					},
+					{
+						name:       "different prefix",
+						body:       `{"api-key":"shared-secret","base-url":"https://gateway.example/v1","proxy-url":"https://proxy-a.example","prefix":"team-b","headers":{"X-A":"1","X-B":"2"}}`,
+						wantStatus: http.StatusCreated,
+					},
+					{
+						name:       "different header value",
+						body:       `{"api-key":"shared-secret","base-url":"https://gateway.example/v1","proxy-url":"https://proxy-a.example","prefix":"team-a","headers":{"X-A":"1","X-B":"3"}}`,
+						wantStatus: http.StatusCreated,
+					},
+					{
+						name:       "same normalized route",
+						body:       `{"api-key":" shared-secret ","base-url":" https://gateway.example/v1 ","proxy-url":" https://proxy-a.example ","prefix":" /team-a/ ","headers":{"X-B":"2","X-A":"1"}}`,
+						wantStatus: http.StatusConflict,
+					},
+				} {
+					route := route
+					t.Run(resource.name+"/"+route.name, func(t *testing.T) {
+						cfg := &config.Config{}
+						resource.set(
+							cfg,
+							[]config.GeminiKey{{
+								APIKey:   "shared-secret",
+								BaseURL:  "https://gateway.example/v1",
+								ProxyURL: "https://proxy-a.example",
+								Prefix:   "team-a",
+								Headers:  map[string]string{"X-A": "1", "X-B": "2"},
+							}},
+						)
+						h := newConfigListTestHandler(t, cfg)
+						recorder := runConfigListRequest(
+							func(c *gin.Context) { resource.post(h, c) }, http.MethodPost, resource.path, route.body,
+						)
+						if recorder.Code != route.wantStatus {
+							t.Fatalf("status = %d, want %d: %s", recorder.Code, route.wantStatus, recorder.Body.String())
+						}
+						wantCount := 2
+						if route.wantStatus == http.StatusConflict {
+							wantCount = 1
+						}
+						if got := len(resource.get(h.configSnapshot())); got != wantCount {
+							t.Fatalf("credential count = %d, want %d", got, wantCount)
+						}
+					})
+				}
 			}
 		},
 	)
@@ -337,7 +423,7 @@ func TestPatchProviderEntriesUpdatesAllEditableFields(t *testing.T) {
 				t.Fatalf("PatchOpenAICompat status = %d, want 200: %s", recorder.Code, recorder.Body.String())
 			}
 			updated := h.configSnapshot().OpenAICompatibility[0]
-			if updated.Priority != 10 || updated.Prefix != "o" || !updated.Disabled || !updated.SupportPromptCacheKey || !updated.DisableCooling ||
+			if updated.Priority != 10 || updated.Prefix != "o" || !updated.Disabled || !updated.SupportPromptCacheKey || updated.DisableCooling == nil || !*updated.DisableCooling ||
 				len(updated.APIKeyEntries) != 1 || updated.APIKeyEntries[0].APIKey != "openai-secret" ||
 				len(updated.Models) != 1 || updated.Models[0].Alias != "openai-alias" ||
 				updated.Models[0].DisplayName != "OpenAI Alias" || updated.Models[0].MaxContextLength != 262144 ||
@@ -392,8 +478,14 @@ func TestPatchProviderUsesAuthIndexAfterListReorder(t *testing.T) {
 			name: "gemini",
 			original: &config.Config{
 				GeminiKey: []config.GeminiKey{
-					{APIKey: "gemini-first", Prefix: "first"},
-					{APIKey: "gemini-second", Prefix: "second"},
+					{
+						APIKey: "shared-gemini-key", BaseURL: "https://gemini.example", Prefix: "first",
+						ProxyURL: "https://proxy-a.example",
+					},
+					{
+						APIKey: "shared-gemini-key", BaseURL: "https://gemini.example", Prefix: "second",
+						ProxyURL: "https://proxy-b.example",
+					},
 				},
 			},
 			reorder:   func(cfg *config.Config) { cfg.GeminiKey[0], cfg.GeminiKey[1] = cfg.GeminiKey[1], cfg.GeminiKey[0] },

@@ -124,49 +124,59 @@ func pluginGitHubReleaseAuthConfigured(plugin Plugin, auth []AuthConfig) bool {
 }
 
 func applyPluginStoreAuth(headers http.Header, auth []AuthConfig, requestURL string, kind string) error {
+	_, errApply := applyPluginStoreAuthForClient(headers, auth, requestURL, kind)
+	return errApply
+}
+
+func applyPluginStoreAuthForClient(
+	headers http.Header,
+	auth []AuthConfig,
+	requestURL string,
+	kind string,
+) (bool, error) {
 	item, ok := matchingAuthConfig(auth, requestURL, kind)
 	if !ok {
-		return nil
+		return false, nil
 	}
 	switch strings.ToLower(strings.TrimSpace(item.Type)) {
 	case "", AuthTypeNone:
-		return nil
+		return false, nil
 	case AuthTypeBearer:
 		token, errToken := envValueRequired(item.TokenEnv, "token-env")
 		if errToken != nil {
-			return errToken
+			return false, errToken
 		}
 		headers.Set("Authorization", "Bearer "+token)
 	case AuthTypeBasic:
 		username, errUsername := envValueRequired(item.UsernameEnv, "username-env")
 		if errUsername != nil {
-			return errUsername
+			return false, errUsername
 		}
 		password, errPassword := envValueRequired(item.PasswordEnv, "password-env")
 		if errPassword != nil {
-			return errPassword
+			return false, errPassword
 		}
 		encoded := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
 		headers.Set("Authorization", "Basic "+encoded)
 	case AuthTypeHeader:
 		if strings.TrimSpace(item.HeaderName) == "" {
-			return fmt.Errorf("plugin store auth missing header-name")
+			return false, fmt.Errorf("plugin store auth missing header-name")
 		}
 		value, errValue := envValueRequired(item.HeaderValueEnv, "header-value-env")
 		if errValue != nil {
-			return errValue
+			return false, errValue
 		}
 		headers.Set(item.HeaderName, value)
 	case AuthTypeGitHubToken:
 		token, errToken := envValueRequired(item.TokenEnv, "token-env")
 		if errToken != nil {
-			return errToken
+			return false, errToken
 		}
 		headers.Set("Authorization", "Bearer "+token)
 	default:
-		return fmt.Errorf("unsupported plugin store auth type %q", item.Type)
+		return false, fmt.Errorf("unsupported plugin store auth type %q", item.Type)
 	}
-	return nil
+	return true, nil
 }
 
 func validatePluginStoreRequestURL(auth []AuthConfig, requestURL string, kind string) error {

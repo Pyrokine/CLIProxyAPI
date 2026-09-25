@@ -23,6 +23,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )
@@ -39,6 +40,9 @@ var liveProtocolHeaders = []string{
 	"Session-Id",
 	"Thread-Id",
 	"Originator",
+	"OpenAI-Safety-Identifier",
+	"OpenAI-Organization",
+	"OpenAI-Project",
 	"X-Oai-Attestation",
 }
 
@@ -50,6 +54,7 @@ type Handler struct {
 	authManager          *auth.Manager
 	configProvider       ConfigProvider
 	sessions             *sessionStore
+	clientSecrets        *clientSecretStore
 	sidebandAPIBaseURL   string
 	mediaRelayMu         sync.RWMutex
 	mediaRelay           mediaRelayFactory
@@ -65,6 +70,7 @@ func NewHandler(authManager *auth.Manager, configProvider ConfigProvider) *Handl
 		authManager:        authManager,
 		configProvider:     configProvider,
 		sessions:           newSessionStore(),
+		clientSecrets:      newClientSecretStore(),
 		sidebandAPIBaseURL: defaultSidebandAPIBaseURL,
 	}
 	if errUpdate := handler.UpdateConfig(handler.configSnapshot()); errUpdate != nil {
@@ -153,18 +159,25 @@ func (h *Handler) currentMediaRelay() (mediaRelayFactory, error) {
 	return relay, relayErr
 }
 
-// Close releases all active Codex live sessions.
+// Close releases all active Codex live sessions and client secrets.
 func (h *Handler) Close() error {
-	if h == nil || h.sessions == nil {
+	if h == nil {
 		return nil
 	}
-	return h.sessions.closeAll("server_stopped")
+	var errClose error
+	if h.sessions != nil {
+		errClose = h.sessions.closeAll("server_stopped")
+	}
+	if h.clientSecrets != nil {
+		h.clientSecrets.close()
+	}
+	return errClose
 }
 
 // Handle forwards a WebRTC SDP bootstrap request to the Codex realtime calls endpoint.
 func (h *Handler) Handle(c *gin.Context) {
 	if h == nil || h.authManager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth manager unavailable"})
+		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth manager unavailable")
 		return
 	}
 
@@ -174,27 +187,46 @@ func (h *Handler) Handle(c *gin.Context) {
 		if errors.Is(errRead, errBodyTooLarge) {
 			status = http.StatusRequestEntityTooLarge
 		}
-		c.JSON(status, gin.H{"error": errRead.Error()})
+		writeLiveError(c, status, errRead.Error())
 		return
 	}
 	upstreamBody, upstreamContentType, model, errPayload := prepareCallRequest(body, c.GetHeader("Content-Type"))
+	requestedModel := model
+	if errPayload == nil {
+		upstreamBody, upstreamContentType, model, errPayload = applyClientSecretCallSession(
+			upstreamBody,
+			upstreamContentType,
+			model,
+			clientSecretSession(c),
+		)
+	}
+	if errPayload == nil {
+		upstreamBody, model, errPayload = rewriteCallRequestModel(upstreamBody, upstreamContentType, model)
+	}
 	if errPayload != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errPayload.Error()})
+		writeLiveError(c, http.StatusBadRequest, errPayload.Error())
+		return
+	}
+	if !h.authorizeRealtimeModel(c, requestedModel) || !h.authorizeRealtimeModel(c, model) {
 		return
 	}
 	runtimeConfig, mediaRelay, mediaRelayErr := h.currentRuntime()
 	if mediaRelayErr != nil {
 		log.WithError(mediaRelayErr).Warn("codex live media relay unavailable")
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex live media relay unavailable"})
+		writeLiveError(c, http.StatusServiceUnavailable, "Codex live media relay unavailable")
 		return
 	}
 	var mediaSession mediaRelaySession
 	mediaRetained := false
 
 	ctx := util.WithGinContext(c.Request.Context(), c)
+	selectionHeaders := liveSelectionHeaders(c)
+	selectionMetadata := liveSelectionMetadata(c, nil)
+	ctx = enrichLiveSessionContext(ctx, selectionHeaders, body, selectionMetadata)
 	selectionOpts := coreexecutor.Options{
-		Headers:         c.Request.Header.Clone(),
+		Headers:         selectionHeaders,
 		OriginalRequest: body,
+		Metadata:        selectionMetadata,
 	}
 	selection, selected, errSelect := h.selectOAuth(ctx, model, selectionOpts)
 	if errSelect != nil {
@@ -205,7 +237,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		if selection != nil {
 			selection.End("missing_auth")
 		}
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Codex auth unavailable"})
+		writeLiveError(c, http.StatusServiceUnavailable, "Codex auth unavailable")
 		return
 	}
 
@@ -213,7 +245,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		attemptCtx, releaseAttempt, errAttempt := selection.AttemptContext(ctx)
 		if errAttempt != nil {
 			selection.End("attempt_bind_failed")
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errAttempt.Error()})
+			writeLiveError(c, http.StatusServiceUnavailable, errAttempt.Error())
 			return
 		}
 		ctx = attemptCtx
@@ -230,7 +262,7 @@ func (h *Handler) Handle(c *gin.Context) {
 	if mediaRelay != nil {
 		clientOffer, errSDP := callRequestSDP(upstreamBody, upstreamContentType)
 		if errSDP != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errSDP.Error()})
+			writeLiveError(c, http.StatusBadRequest, errSDP.Error())
 			return
 		}
 		var upstreamOffer string
@@ -245,9 +277,10 @@ func (h *Handler) Handle(c *gin.Context) {
 		)
 		if errSDP != nil {
 			log.WithError(errSDP).Warn("codex live media session creation failed")
-			c.JSON(
+			writeLiveError(
+				c,
 				clienterror.HTTPStatusFromErrorOr(errSDP, http.StatusBadGateway),
-				gin.H{"error": "Failed to create Codex live media session"},
+				"Failed to create Codex live media session",
 			)
 			return
 		}
@@ -264,7 +297,7 @@ func (h *Handler) Handle(c *gin.Context) {
 			upstreamOffer,
 		)
 		if errSDP != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errSDP.Error()})
+			writeLiveError(c, http.StatusBadRequest, errSDP.Error())
 			return
 		}
 	}
@@ -279,7 +312,7 @@ func (h *Handler) Handle(c *gin.Context) {
 		if selection != nil {
 			selection.End("request_build_failed")
 		}
-		c.JSON(clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), gin.H{"error": errRequest.Error()})
+		writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
 		return
 	}
 
@@ -298,8 +331,10 @@ func (h *Handler) Handle(c *gin.Context) {
 		if selection != nil {
 			selection.End("attempt_canceled")
 		}
-		c.JSON(
-			clienterror.HTTPStatusFromErrorOr(errContext, http.StatusRequestTimeout), gin.H{"error": errContext.Error()},
+		writeLiveError(
+			c,
+			clienterror.HTTPStatusFromErrorOr(errContext, http.StatusRequestTimeout),
+			errContext.Error(),
 		)
 		return
 	}
@@ -309,7 +344,7 @@ func (h *Handler) Handle(c *gin.Context) {
 			selection.End("request_failed")
 		}
 		runtimeexecutor.RecordAPIResponseError(ctx, runtimeConfig, errRequest)
-		c.JSON(clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), gin.H{"error": errRequest.Error()})
+		writeLiveError(c, clienterror.HTTPStatusFromErrorOr(errRequest, http.StatusBadGateway), errRequest.Error())
 		return
 	}
 
@@ -329,8 +364,11 @@ func (h *Handler) Handle(c *gin.Context) {
 	defer func() { _ = closeResponseBody() }()
 	if selection != nil {
 		if errBind := selection.Bind(closeResponseBody); errBind != nil {
+			if resp.StatusCode == http.StatusUnauthorized {
+				h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model)
+			}
 			selection.End("response_bind_failed")
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
+			writeLiveError(c, http.StatusServiceUnavailable, errBind.Error())
 			return
 		}
 	}
@@ -338,6 +376,10 @@ func (h *Handler) Handle(c *gin.Context) {
 	responseHeaders := callResponseHeaders(resp.Header)
 	runtimeexecutor.RecordAPIResponseMetadata(ctx, runtimeConfig, resp.StatusCode, responseHeaders)
 	responseBody, errResponse := readLimitedBody(resp.Body)
+	runtimeexecutor.AppendAPIResponseChunk(ctx, runtimeConfig, responseBody)
+	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+		h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", model, responseBody)
+	}
 	if errResponse != nil {
 		runtimeexecutor.RecordAPIResponseError(ctx, runtimeConfig, errResponse)
 		message := "Failed to read Codex live response"
@@ -346,35 +388,42 @@ func (h *Handler) Handle(c *gin.Context) {
 			message = "Codex live response body too large"
 			status = http.StatusBadGateway
 		}
-		c.JSON(status, gin.H{"error": message})
+		writeLiveError(c, status, message)
 		return
 	}
-	runtimeexecutor.AppendAPIResponseChunk(ctx, runtimeConfig, responseBody)
+	if selection != nil && resp.StatusCode == http.StatusUnauthorized {
+		log.WithField("status", resp.StatusCode).Warnf("codex live upstream request failed: %s", logging.SafeDiagnosticForLog(string(responseBody)))
+	}
 	responseBodyToWrite := responseBody
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	callID := ""
 	if success {
 		callID = callIDFromLocation(resp.Header.Get("Location"))
 		if callID == "" && mediaSession != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "Codex live response is missing a valid call ID"})
+			writeLiveError(c, http.StatusBadGateway, "Codex live response is missing a valid call ID")
 			return
 		}
 		if mediaSession != nil {
 			mediaSession.SetCallID(callID)
 		}
+		if callID != "" && c.Request != nil && c.Request.URL != nil &&
+			strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
+			responseHeaders.Set("Location", "/v1/realtime/calls/"+callID)
+		}
 	}
 	if success && mediaSession != nil {
 		upstreamAnswer, errSDP := callResponseSDP(responseBody, resp.Header.Get("Content-Type"))
 		if errSDP != nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": errSDP.Error()})
+			writeLiveError(c, http.StatusBadGateway, errSDP.Error())
 			return
 		}
 		downstreamAnswer, errAnswer := mediaSession.AcceptUpstreamAnswer(ctx, upstreamAnswer)
 		if errAnswer != nil {
 			log.WithError(errAnswer).Warn("codex live media answer failed")
-			c.JSON(
+			writeLiveError(
+				c,
 				clienterror.HTTPStatusFromErrorOr(errAnswer, http.StatusBadGateway),
-				gin.H{"error": "Failed to establish Codex live media session"},
+				"Failed to establish Codex live media session",
 			)
 			return
 		}
@@ -386,7 +435,18 @@ func (h *Handler) Handle(c *gin.Context) {
 	sessionStored := false
 	if success && h.sessions != nil {
 		if callID != "" {
-			session := liveSession{authID: selected.ID, model: model, media: mediaSession}
+			clientMetadata := logging.GetClientRequestMetadata(ctx)
+			session := liveSession{
+				authID:          selected.ID,
+				model:           model,
+				media:           mediaSession,
+				sessionID:       clientMetadata.SessionID,
+				parentSessionID: clientMetadata.ParentSessionID,
+			}
+			session.ownerPrincipal, session.ownerProvider = requestOwner(c)
+			if principal, ok := c.Get(ClientSecretPrincipalContextKey); ok {
+				session.clientSecretPrincipal, _ = principal.(string)
+			}
 			if selection != nil {
 				if mediaSession != nil {
 					if errBind := selection.Bind(
@@ -395,7 +455,7 @@ func (h *Handler) Handle(c *gin.Context) {
 						},
 					); errBind != nil {
 						selection.End("media_bind_failed")
-						c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
+						writeLiveError(c, http.StatusServiceUnavailable, errBind.Error())
 						return
 					}
 				}
@@ -406,7 +466,7 @@ func (h *Handler) Handle(c *gin.Context) {
 					},
 				); errBind != nil {
 					selection.End("session_drain_bind_failed")
-					c.JSON(http.StatusServiceUnavailable, gin.H{"error": errBind.Error()})
+					writeLiveError(c, http.StatusServiceUnavailable, errBind.Error())
 					return
 				}
 				selection.Retain()
@@ -457,6 +517,73 @@ func (h *Handler) configSnapshot() *config.Config {
 	return h.configProvider()
 }
 
+// RealtimeModelAllowed applies the issuer's current model and provider restrictions.
+func RealtimeModelAllowed(cfg *config.Config, principal, requestedModel string) bool {
+	if cfg == nil {
+		return true
+	}
+	rule, hasRule := cfg.APIKeyRule(principal)
+	if !hasRule {
+		return true
+	}
+	canonicalModel := codexRealtimeModel(requestedModel)
+	mappedModel, mapped, err := cfg.ResolveAPIKeyModel(principal, requestedModel)
+	if err != nil || (mapped && codexRealtimeModel(mappedModel) != canonicalModel) || len(rule.Limits) > 0 {
+		return false
+	}
+	return !cfg.APIKeyBlocksModel(principal, requestedModel) &&
+		!cfg.APIKeyBlocksModel(principal, canonicalModel) &&
+		cfg.APIKeyAllowsCanonicalModel(principal, canonicalModel) &&
+		len(cfg.FilterAPIKeyProviders(principal, []string{"codex"})) > 0
+}
+
+func (h *Handler) authorizeRealtimeModel(c *gin.Context, requestedModel string) bool {
+	principal, _ := requestOwner(c)
+	if RealtimeModelAllowed(h.configSnapshot(), principal, requestedModel) {
+		return true
+	}
+	writeRealtimeError(c, http.StatusForbidden, "Realtime request is not permitted by this API key policy", "permission_error", "realtime_api_key_restricted")
+	return false
+}
+
+func liveSelectionMetadata(c *gin.Context, metadata map[string]any) map[string]any {
+	principal, _ := requestOwner(c)
+	callerScope := coresession.CallerScope(principal)
+	if callerScope == "" {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = make(map[string]any)
+	}
+	metadata[coreexecutor.CallerScopeMetadataKey] = callerScope
+	return metadata
+}
+
+func enrichLiveSessionContext(
+	ctx context.Context,
+	headers http.Header,
+	payload []byte,
+	metadata map[string]any,
+) context.Context {
+	clientMetadata := logging.GetClientRequestMetadata(ctx)
+	if info, ok := coresession.ExtractSessionInfo(headers, payload, metadata); ok {
+		clientMetadata.SessionID = info.SessionID
+		clientMetadata.ParentSessionID = info.ParentSessionID
+		if clientMetadata.SessionID == clientMetadata.ParentSessionID {
+			clientMetadata.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, clientMetadata)
+		return util.WithSessionID(ctx, clientMetadata.SessionID)
+	}
+	if clientMetadata.SessionID != "" || clientMetadata.ParentSessionID != "" || util.SessionIDFromContext(ctx) != "" {
+		clientMetadata.SessionID = ""
+		clientMetadata.ParentSessionID = ""
+		ctx = logging.WithClientRequestMetadata(ctx, clientMetadata)
+		return util.WithSessionID(ctx, "")
+	}
+	return ctx
+}
+
 func (h *Handler) selectOAuth(
 	ctx context.Context,
 	model string,
@@ -497,13 +624,13 @@ func readLimitedBody(body io.Reader) ([]byte, error) {
 		return nil, nil
 	}
 	payload, errRead := io.ReadAll(io.LimitReader(body, maxBodySize+1))
-	if errRead != nil {
-		return nil, errRead
-	}
 	if len(payload) > maxBodySize {
-		return nil, errBodyTooLarge
+		payload = payload[:maxBodySize]
+		if errRead == nil {
+			errRead = errBodyTooLarge
+		}
 	}
-	return payload, nil
+	return payload, errRead
 }
 
 func prepareCallRequest(body []byte, contentType string) ([]byte, string, string, error) {
@@ -520,6 +647,84 @@ func prepareCallRequest(body []byte, contentType string) ([]byte, string, string
 		contentType = "application/json"
 	}
 	return body, contentType, model, nil
+}
+
+func applyClientSecretCallSession(
+	body []byte,
+	contentType, model string,
+	session json.RawMessage,
+) ([]byte, string, string, error) {
+	if len(session) == 0 {
+		return body, contentType, model, nil
+	}
+	mediaType, _, errMediaType := mime.ParseMediaType(contentType)
+	if errMediaType == nil && (strings.EqualFold(mediaType, "application/sdp") ||
+		strings.EqualFold(mediaType, "text/plain")) {
+		encoded, errEncode := encodeCallRequest(string(body), session)
+		if errEncode != nil {
+			return nil, "", "", errEncode
+		}
+		return encoded, "application/json", modelFromJSON(session), nil
+	}
+	if errMediaType != nil || !strings.EqualFold(mediaType, "application/json") {
+		return nil, "", "", errors.New("realtime client secrets require an SDP or JSON call request")
+	}
+	var payload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		return nil, "", "", fmt.Errorf("failed to decode Realtime call request: %w", errUnmarshal)
+	}
+	if payload == nil {
+		return nil, "", "", errors.New("realtime call request must be a JSON object")
+	}
+	payload["session"] = append(json.RawMessage(nil), session...)
+	encoded, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return nil, "", "", fmt.Errorf("failed to encode Realtime call request: %w", errMarshal)
+	}
+	return encoded, "application/json", modelFromJSON(session), nil
+}
+
+func rewriteCallRequestModel(body []byte, contentType, model string) ([]byte, string, error) {
+	upstreamModel := codexRealtimeModel(model)
+	mediaType, _, errMediaType := mime.ParseMediaType(contentType)
+	if errMediaType != nil || !strings.EqualFold(mediaType, "application/json") || len(bytes.TrimSpace(body)) == 0 {
+		return body, upstreamModel, nil
+	}
+	var payload map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(body, &payload); errUnmarshal != nil {
+		return nil, "", fmt.Errorf("failed to decode Realtime call request: %w", errUnmarshal)
+	}
+	if payload == nil {
+		return nil, "", errors.New("realtime call request must be a JSON object")
+	}
+	encodedModel, errMarshal := json.Marshal(upstreamModel)
+	if errMarshal != nil {
+		return nil, "", fmt.Errorf("failed to encode Realtime model: %w", errMarshal)
+	}
+	if sessionJSON, ok := payload["session"]; ok && len(sessionJSON) > 0 {
+		var session map[string]json.RawMessage
+		if errUnmarshal := json.Unmarshal(sessionJSON, &session); errUnmarshal != nil {
+			return nil, "", fmt.Errorf("failed to decode Realtime session: %w", errUnmarshal)
+		}
+		if session == nil {
+			return nil, "", errors.New("realtime session must be a JSON object")
+		}
+		session["model"] = encodedModel
+		encodedSession, errEncode := json.Marshal(session)
+		if errEncode != nil {
+			return nil, "", fmt.Errorf("failed to encode Realtime session: %w", errEncode)
+		}
+		payload["session"] = encodedSession
+	} else if _, ok := payload["model"]; ok {
+		payload["model"] = encodedModel
+	} else {
+		return body, upstreamModel, nil
+	}
+	encoded, errMarshal := json.Marshal(payload)
+	if errMarshal != nil {
+		return nil, "", fmt.Errorf("failed to encode Realtime call request: %w", errMarshal)
+	}
+	return encoded, upstreamModel, nil
 }
 
 func multipartCallRequest(body []byte, boundary string) ([]byte, string, string, error) {
@@ -709,7 +914,7 @@ func headersForLogging(source http.Header) http.Header {
 
 func callResponseHeaders(source http.Header) http.Header {
 	headers := make(http.Header)
-	for _, name := range []string{"Content-Type", "Location"} {
+	for _, name := range []string{"Content-Type", "Location", "Retry-After", "X-Request-Id", "OpenAI-Request-Id"} {
 		for _, value := range source.Values(name) {
 			headers.Add(name, value)
 		}
@@ -725,10 +930,26 @@ func writeResponseHeaders(destination, source http.Header) {
 	}
 }
 
+func writeLiveError(c *gin.Context, status int, message string) {
+	if c != nil && c.Request != nil && c.Request.URL != nil &&
+		strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
+		errorType := "api_error"
+		if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+			errorType = "invalid_request_error"
+		}
+		if status == http.StatusUnauthorized {
+			errorType = "authentication_error"
+		}
+		writeRealtimeError(c, status, message, errorType, "realtime_request_failed")
+		return
+	}
+	c.JSON(status, gin.H{"error": message})
+}
+
 func writeSelectionError(c *gin.Context, err error) {
 	status := clienterror.HTTPStatusFromErrorOr(err, http.StatusServiceUnavailable)
 	for _, value := range auth.SafeResponseHeaders(err).Values("Retry-After") {
 		c.Writer.Header().Add("Retry-After", value)
 	}
-	c.JSON(status, gin.H{"error": err.Error()})
+	writeLiveError(c, status, err.Error())
 }

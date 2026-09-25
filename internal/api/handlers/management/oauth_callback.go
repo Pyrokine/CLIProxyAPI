@@ -19,6 +19,7 @@ type oauthCallbackRequest struct {
 }
 
 func (h *Handler) PostOAuthCallback(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	if h.configSnapshot() == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "handler not initialized"})
 		return
@@ -27,12 +28,6 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	var req oauthCallbackRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
-		return
-	}
-
-	canonicalProvider, err := normalizeOAuthProvider(req.Provider)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "unsupported provider"})
 		return
 	}
 
@@ -83,6 +78,11 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"status": "error", "error": "oauth flow is not pending"})
 		return
 	}
+	canonicalProvider, err := normalizeOAuthCallbackProviderForPendingSession(req.Provider, state)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "unsupported provider"})
+		return
+	}
 	if !strings.EqualFold(sessionProvider, canonicalProvider) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "provider does not match state"})
 		return
@@ -99,5 +99,5 @@ func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	}
 	log.WithField("provider", canonicalProvider).Info("OAuth callback accepted")
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "phase": "accepted"})
 }

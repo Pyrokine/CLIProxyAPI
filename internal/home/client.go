@@ -187,15 +187,16 @@ type Client struct {
 	limiter     atomic.Pointer[config.CredentialConcurrencyConfig]
 	managed     bool
 
-	heartbeatOK       atomic.Bool
-	dispatchFenced    atomic.Bool
-	ambiguousDispatch atomic.Bool
-	casUnsupported    atomic.Bool
-	recoveryState     atomic.Uint32
-	instanceID        string
-	legacyMembership  bool
-	clusterNodes      []clusterNode
-	reconnectFailures int
+	heartbeatOK          atomic.Bool
+	dispatchFenced       atomic.Bool
+	ambiguousDispatch    atomic.Bool
+	casUnsupported       atomic.Bool
+	testOperationTimeout time.Duration
+	recoveryState        atomic.Uint32
+	instanceID           string
+	legacyMembership     bool
+	clusterNodes         []clusterNode
+	reconnectFailures    int
 }
 
 func New(homeCfg config.HomeConfig) *Client {
@@ -215,13 +216,14 @@ func (c *Client) NewLifetime() *Client {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	next := &Client{
-		homeCfg:           c.homeCfg,
-		seedHost:          c.seedHost,
-		seedPort:          c.seedPort,
-		clusterNodes:      append([]clusterNode(nil), c.clusterNodes...),
-		reconnectFailures: c.reconnectFailures,
-		instanceID:        c.instanceID,
-		legacyMembership:  c.legacyMembership,
+		homeCfg:              c.homeCfg,
+		seedHost:             c.seedHost,
+		seedPort:             c.seedPort,
+		clusterNodes:         append([]clusterNode(nil), c.clusterNodes...),
+		reconnectFailures:    c.reconnectFailures,
+		testOperationTimeout: c.testOperationTimeout,
+		instanceID:           c.instanceID,
+		legacyMembership:     c.legacyMembership,
 	}
 	next.recoveryState.Store(c.recoveryState.Load())
 	return next
@@ -325,7 +327,7 @@ func (c *Client) AbortAmbiguousDispatch() {
 	c.release = nil
 	c.mu.Unlock()
 	for _, conn := range connections {
-		_ = conn.Close()
+		_ = closeUnderlyingTransport(conn)
 	}
 	if commandClient != nil {
 		go func() {
@@ -379,7 +381,7 @@ func closeDetachedClients(
 	connections []*homeDispatchConn,
 ) {
 	for _, conn := range connections {
-		_ = conn.Close()
+		_ = closeUnderlyingTransport(conn)
 	}
 	if commandClient != nil {
 		_ = commandClient.Close()
@@ -511,12 +513,30 @@ func (c *Client) redisOptionsLocked(addr string) (*redis.Options, error) {
 	if errTLS != nil {
 		return nil, errTLS
 	}
+	dialTimeout := homeRedisOperationTimeout
+	readTimeout := homeRedisOperationTimeout
+	writeTimeout := homeRedisOperationTimeout
+	if c.testOperationTimeout > 0 {
+		dialTimeout = c.testOperationTimeout
+		readTimeout = c.testOperationTimeout
+		writeTimeout = c.testOperationTimeout
+	} else if c.cmdOptions != nil {
+		if c.cmdOptions.DialTimeout > 0 {
+			dialTimeout = c.cmdOptions.DialTimeout
+		}
+		if c.cmdOptions.ReadTimeout > 0 {
+			readTimeout = c.cmdOptions.ReadTimeout
+		}
+		if c.cmdOptions.WriteTimeout > 0 {
+			writeTimeout = c.cmdOptions.WriteTimeout
+		}
+	}
 	options := &redis.Options{
 		Addr:                  addr,
 		TLSConfig:             tlsConfig,
-		DialTimeout:           homeRedisOperationTimeout,
-		ReadTimeout:           homeRedisOperationTimeout,
-		WriteTimeout:          homeRedisOperationTimeout,
+		DialTimeout:           dialTimeout,
+		ReadTimeout:           readTimeout,
+		WriteTimeout:          writeTimeout,
 		MaxRetries:            -1,
 		DialerRetries:         1,
 		ContextTimeoutEnabled: true,
@@ -561,9 +581,9 @@ func (c *Client) trackedRedisDialer(
 	}
 }
 
-func (c *homeDispatchConn) Close() error {
-	if c == nil || c.Conn == nil {
-		return net.ErrClosed
+func (c *homeDispatchConn) untrack() {
+	if c == nil {
+		return
 	}
 	c.once.Do(
 		func() {
@@ -574,7 +594,43 @@ func (c *homeDispatchConn) Close() error {
 			}
 		},
 	)
+}
+
+func (c *homeDispatchConn) Close() error {
+	if c == nil || c.Conn == nil {
+		return net.ErrClosed
+	}
+	c.untrack()
 	return c.Conn.Close()
+}
+
+func (c *homeDispatchConn) NetConn() net.Conn {
+	if c == nil {
+		return nil
+	}
+	return c.Conn
+}
+
+func closeUnderlyingTransport(conn net.Conn) error {
+	if conn == nil {
+		return net.ErrClosed
+	}
+	current := conn
+	for {
+		if dispatchConn, ok := current.(*homeDispatchConn); ok {
+			dispatchConn.untrack()
+		}
+		unwrapper, ok := current.(interface{ NetConn() net.Conn })
+		if !ok {
+			break
+		}
+		next := unwrapper.NetConn()
+		if next == nil || next == current {
+			break
+		}
+		current = next
+	}
+	return current.Close()
 }
 
 func cloneRedisOptions(options *redis.Options) *redis.Options {
@@ -1176,14 +1232,14 @@ func newAuthDispatchRequest(
 	requestedModel, sessionID string,
 	headers http.Header,
 	count int,
-	credentialPolicies ...string,
+	constraints ...AuthDispatchConstraints,
 ) authDispatchRequest {
 	if count <= 0 {
 		count = 1
 	}
-	credentialPolicy := ""
-	if len(credentialPolicies) > 0 {
-		credentialPolicy = credentialPolicies[0]
+	constraint := AuthDispatchConstraints{}
+	if len(constraints) > 0 {
+		constraint = constraints[0]
 	}
 	return authDispatchRequest{
 		Type:                "auth",
@@ -1191,8 +1247,12 @@ func newAuthDispatchRequest(
 		Count:               count,
 		ConcurrencyProtocol: 1,
 		SessionID:           strings.TrimSpace(sessionID),
+		ParentSessionID:     strings.TrimSpace(constraint.ParentSessionID),
 		Headers:             headersToLowerMap(headers),
-		CredentialPolicy:    strings.TrimSpace(credentialPolicy),
+		CredentialPolicy:    strings.TrimSpace(constraint.CredentialPolicy),
+		RetryRound:          max(constraint.RetryRound, 0),
+		ExcludedAuthIDs:     append([]string(nil), constraint.ExcludedAuthIDs...),
+		PinnedAuthID:        strings.TrimSpace(constraint.PinnedAuthID),
 	}
 }
 
@@ -1202,7 +1262,7 @@ func (c *Client) RPopAuth(
 	headers http.Header,
 	count int,
 ) ([]byte, error) {
-	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, "")
+	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, AuthDispatchConstraints{})
 }
 
 // RPopAuthWithPolicy requests a Home credential constrained by the supplied fixed policy.
@@ -1213,7 +1273,12 @@ func (c *Client) RPopAuthWithPolicy(
 	count int,
 	credentialPolicy string,
 ) ([]byte, error) {
-	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, credentialPolicy)
+	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, AuthDispatchConstraints{CredentialPolicy: credentialPolicy})
+}
+
+// RPopAuthWithConstraints requests a credential for one bounded retry round.
+func (c *Client) RPopAuthWithConstraints(ctx context.Context, requestedModel, sessionID string, headers http.Header, count int, constraints AuthDispatchConstraints) ([]byte, error) {
+	return c.rPopAuth(ctx, requestedModel, sessionID, headers, count, constraints)
 }
 
 func (c *Client) rPopAuth(
@@ -1221,7 +1286,7 @@ func (c *Client) rPopAuth(
 	requestedModel, sessionID string,
 	headers http.Header,
 	count int,
-	credentialPolicy string,
+	constraints AuthDispatchConstraints,
 ) ([]byte, error) {
 	if c == nil || c.dispatchFenced.Load() {
 		return nil, errDispatchFenced
@@ -1236,7 +1301,7 @@ func (c *Client) rPopAuth(
 	if requestedModel == "" {
 		return nil, fmt.Errorf("home: requested model is empty")
 	}
-	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count, credentialPolicy)
+	req := newAuthDispatchRequest(requestedModel, sessionID, headers, count, constraints)
 	keyBytes, errMarshal := json.Marshal(&req)
 	if errMarshal != nil {
 		return nil, errMarshal
@@ -1524,13 +1589,19 @@ func (c *Client) subscriptionParameters() ([]string, time.Duration) {
 	cfg := c.lifecycle.WithDefaults()
 	instanceID := c.instanceID
 	legacyMembership := c.legacyMembership
+	testTimeout := c.testOperationTimeout
 	c.mu.Unlock()
+
+	timeout := cfg.CPAHeartbeatTimeout
+	if testTimeout > 0 && cfg.LifecycleConfigRevision == 0 {
+		timeout = testTimeout
+	}
 
 	args := []string{redisChannelConfig}
 	if cfg.LifecycleConfigRevision > 0 {
 		args = append(args, strconv.FormatInt(cfg.LifecycleConfigRevision, 10))
 		if legacyMembership {
-			return args, cfg.CPAHeartbeatTimeout
+			return args, timeout
 		}
 		state := recoveryState(c.recoveryState.Load())
 		if state == recoveryStateTakeoverEligible || state == recoveryStateSwitchingTakeover {
@@ -1538,7 +1609,7 @@ func (c *Client) subscriptionParameters() ([]string, time.Duration) {
 		}
 		args = append(args, instanceID)
 	}
-	return args, cfg.CPAHeartbeatTimeout
+	return args, timeout
 }
 
 func (c *Client) markMembershipTakeoverEligible() {

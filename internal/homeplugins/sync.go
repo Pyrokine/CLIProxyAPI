@@ -629,17 +629,19 @@ func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
 var newPluginStoreClient = func(cfg *config.Config) sdkpluginstore.Client {
 	client := &http.Client{Timeout: homePluginStoreHTTPTimeout}
 	var storeAuth []sdkpluginstore.AuthConfig
-	if cfg != nil && strings.TrimSpace(cfg.ProxyURL) != "" {
-		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: strings.TrimSpace(cfg.ProxyURL)}, client)
+	var proxyURL string
+	if cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+		storeAuth = cfg.Plugins.StoreAuth
+	}
+	if proxyURL != "" {
+		util.SetProxy(&sdkconfig.SDKConfig{ProxyURL: proxyURL}, client)
 	}
 	if client.Transport == nil {
 		client.Transport = http.DefaultTransport
 	}
 	client.Transport = proxyutil.PublicHostTransport(client.Transport)
-	if cfg != nil {
-		storeAuth = cfg.Plugins.StoreAuth
-	}
-	return sdkpluginstore.NewClientWithAuth(client, "", storeAuth)
+	return sdkpluginstore.NewClientWithAuth(client, "", storeAuth).WithNetworkScope(proxyURL)
 }
 
 func pluginConfigEnabled(item config.PluginInstanceConfig) bool {

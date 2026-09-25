@@ -139,6 +139,7 @@ func main() {
 	flag.BoolVar(&lf.antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&lf.kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
 	flag.BoolVar(&lf.xaiLogin, "xai-login", false, "Login to xAI using OAuth device code flow")
+	flag.BoolVar(&lf.devinLogin, "devin-login", false, "Login to Devin using OAuth")
 	flag.StringVar(&lf.projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", defaultConfigPath, "Configure File Path")
 	flag.StringVar(&lf.vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -341,7 +342,7 @@ func main() {
 		log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
 	}
 
-	commandMode := lf.vertexImport != "" || lf.login || lf.codexLogin || lf.codexDeviceLogin || lf.claudeLogin || lf.qwenLogin || lf.iflowLogin || lf.iflowCookie || lf.antigravityLogin || lf.kimiLogin || lf.xaiLogin
+	commandMode := lf.vertexImport != "" || lf.login || lf.codexLogin || lf.codexDeviceLogin || lf.claudeLogin || lf.qwenLogin || lf.iflowLogin || lf.iflowCookie || lf.antigravityLogin || lf.kimiLogin || lf.xaiLogin || lf.devinLogin
 	homeMode := cfg.Home.Enabled
 	serverOptions := []sdkapi.ServerOption(nil)
 	if shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, false, homeMode) {

@@ -295,6 +295,16 @@ func TestPostOAuthCallbackUsesSessionAuthDirectory(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("PostOAuthCallback() status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
+	if recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", recorder.Header().Get("Cache-Control"))
+	}
+	var callbackResponse map[string]string
+	if errDecode := json.Unmarshal(recorder.Body.Bytes(), &callbackResponse); errDecode != nil {
+		t.Fatalf("decode callback response: %v", errDecode)
+	}
+	if callbackResponse["phase"] != "accepted" {
+		t.Fatalf("callback response = %#v", callbackResponse)
+	}
 	fileName := ".oauth-codex-state-1.oauth"
 	if _, errStat := os.Stat(filepath.Join(authDirAtStart, fileName)); errStat != nil {
 		t.Fatalf("callback file missing from session auth directory: %v", errStat)
@@ -326,7 +336,8 @@ func TestGetAuthStatusRejectsUnknownState(t *testing.T) {
 		t.Fatalf("status code = %d, want %d", response.Code, http.StatusOK)
 	}
 	payload := decodeOAuthSessionResponse(t, response)
-	if payload["status"] != "error" || payload["error"] != "unknown or expired state" {
+	if payload["status"] != "error" || payload["phase"] != "expired" ||
+		payload["error"] != "unknown or expired state" {
 		t.Fatalf("response = %#v", payload)
 	}
 }
@@ -448,4 +459,107 @@ func decodeOAuthSessionResponse(t *testing.T, recorder *httptest.ResponseRecorde
 		t.Fatalf("decode response: %v", err)
 	}
 	return payload
+}
+
+func TestGetAuthStatusDistinguishesCallbackAndPersistencePhases(t *testing.T) {
+	previous := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	t.Cleanup(func() { oauthSessions = previous })
+
+	authDir := t.TempDir()
+	registerOAuthSessionForAuthDir("state-1", "devin", "", authDir)
+	response := performOAuthSessionRequest(t, http.MethodGet, "/?state=state-1", (&Handler{}).GetAuthStatus)
+	payload := decodeOAuthSessionResponse(t, response)
+	if payload["status"] != "wait" || payload["phase"] != "pending" {
+		t.Fatalf("pending response = %#v", payload)
+	}
+
+	filePath, errWrite := WriteOAuthCallbackFileForPendingSession("devin", "state-1", "code-1", "")
+	if errWrite != nil {
+		t.Fatalf("WriteOAuthCallbackFileForPendingSession() error = %v", errWrite)
+	}
+	response = performOAuthSessionRequest(t, http.MethodGet, "/?state=state-1", (&Handler{}).GetAuthStatus)
+	payload = decodeOAuthSessionResponse(t, response)
+	if payload["status"] != "wait" || payload["phase"] != "accepted" {
+		t.Fatalf("accepted response = %#v", payload)
+	}
+
+	if errClaim := guardOAuthSessionPendingForSave("state-1", "devin"); errClaim != nil {
+		t.Fatalf("guardOAuthSessionPendingForSave() error = %v", errClaim)
+	}
+	response = performOAuthSessionRequest(t, http.MethodGet, "/?state=state-1", (&Handler{}).GetAuthStatus)
+	payload = decodeOAuthSessionResponse(t, response)
+	if payload["status"] != "wait" || payload["phase"] != "saving" {
+		t.Fatalf("saving response = %#v", payload)
+	}
+
+	completeOAuthSession("state-1")
+	response = performOAuthSessionRequest(t, http.MethodGet, "/?state=state-1", (&Handler{}).GetAuthStatus)
+	payload = decodeOAuthSessionResponse(t, response)
+	if payload["status"] != "ok" || payload["phase"] != "success" {
+		t.Fatalf("success response = %#v", payload)
+	}
+	if errRemove := os.Remove(filePath); errRemove != nil {
+		t.Fatalf("remove callback file: %v", errRemove)
+	}
+}
+
+func TestOAuthSessionCancellationAfterCallbackRemovesPublishedFile(t *testing.T) {
+	previous := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	t.Cleanup(func() { oauthSessions = previous })
+
+	authDir := t.TempDir()
+	registerOAuthSessionForAuthDir("state-1", "devin", "", authDir)
+	filePath, errWrite := WriteOAuthCallbackFileForPendingSession("devin", "state-1", "code-1", "")
+	if errWrite != nil {
+		t.Fatalf("WriteOAuthCallbackFileForPendingSession() error = %v", errWrite)
+	}
+	if !cancelOAuthSession("state-1") {
+		t.Fatal("cancelOAuthSession returned false")
+	}
+	if _, errStat := os.Stat(filePath); !errors.Is(errStat, os.ErrNotExist) {
+		t.Fatalf("cancelled callback file remains: %v", errStat)
+	}
+	if errClaim := guardOAuthSessionPendingForSave("state-1", "devin"); !errors.Is(errClaim, errOAuthSessionNotPending) {
+		t.Fatalf("guardOAuthSessionPendingForSave() error = %v", errClaim)
+	}
+}
+
+func TestWriteOAuthCallbackFilePublishesClosedSecureFileAtomically(t *testing.T) {
+	previous := oauthSessions
+	oauthSessions = newOAuthSessionStore(time.Minute)
+	t.Cleanup(func() { oauthSessions = previous })
+
+	authDir := t.TempDir()
+	registerOAuthSessionForAuthDir("state-1", "devin", "", authDir)
+	filePath, errWrite := WriteOAuthCallbackFileForPendingSession("devin", "state-1", "code-1", "")
+	if errWrite != nil {
+		t.Fatalf("WriteOAuthCallbackFileForPendingSession() error = %v", errWrite)
+	}
+	info, errStat := os.Stat(filePath)
+	if errStat != nil {
+		t.Fatalf("stat callback file: %v", errStat)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("callback mode = %04o, want 0600", info.Mode().Perm())
+	}
+	data, errRead := os.ReadFile(filePath)
+	if errRead != nil {
+		t.Fatalf("read callback file: %v", errRead)
+	}
+	var payload oauthCallbackFilePayload
+	if errDecode := json.Unmarshal(data, &payload); errDecode != nil {
+		t.Fatalf("decode callback file: %v", errDecode)
+	}
+	if payload.State != "state-1" || payload.Code != "code-1" {
+		t.Fatalf("callback payload = %#v", payload)
+	}
+	entries, errReadDir := os.ReadDir(authDir)
+	if errReadDir != nil {
+		t.Fatalf("read auth dir: %v", errReadDir)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(filePath) {
+		t.Fatalf("auth dir entries = %#v", entries)
+	}
 }

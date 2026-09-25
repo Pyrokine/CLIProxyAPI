@@ -86,6 +86,7 @@ type apiCallResponse struct {
 //     An unsaved credential used only for $TOKEN$ replacement in this request.
 //     It is never persisted and takes precedence over auth_index token resolution.
 //   - data (optional): Raw request body as string (useful for POST/PUT/PATCH).
+//     Supports the same $TOKEN$ placeholder; JSON string values are escaped after substitution.
 //
 // Proxy selection (highest priority first):
 //  1. Request proxy_url / proxyUrl / ProxyUrl
@@ -144,6 +145,14 @@ func (h *Handler) APICall(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only http and https schemes are allowed"})
 		return
 	}
+
+	proxyURL := firstNonEmptyString(body.ProxyURLSnake, body.ProxyURLCamel, body.ProxyURLPascal)
+	if proxyURL != "" {
+		if _, errProxy := proxyutil.Parse(proxyURL); errProxy != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid proxy_url"})
+			return
+		}
+	}
 	_, private := resolveAndCheckHost(parsedURL.Hostname())
 	if private {
 		c.JSON(http.StatusForbidden, gin.H{"error": "requests to private/internal addresses are not allowed"})
@@ -151,7 +160,6 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
-	proxyURL := firstNonEmptyString(body.ProxyURLSnake, body.ProxyURLCamel, body.ProxyURLPascal)
 	draftToken := firstNonEmptyString(body.DraftTokenSnake, body.DraftTokenCamel)
 	if len(draftToken) > maxAPICallDraftTokenSize {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "draft token is too large"})
@@ -168,17 +176,19 @@ func (h *Handler) APICall(c *gin.Context) {
 		return
 	}
 
-	// Check if any header uses $TOKEN$ — if so, restrict target URL to known provider domains
-	// to prevent token exfiltration to arbitrary URLs (e.g., httpbin.org reflection).
-	hasTokenPlaceholder := false
+	// Requests carrying a credential placeholder are limited to known provider
+	// endpoints so the selected credential cannot be sent to an arbitrary host.
+	headerHasTokenPlaceholder := false
 	for _, value := range reqHeaders {
 		if strings.Contains(value, "$TOKEN$") {
-			hasTokenPlaceholder = true
+			headerHasTokenPlaceholder = true
 			break
 		}
 	}
+	bodyHasTokenPlaceholder := strings.Contains(body.Data, "$TOKEN$")
+	hasTokenPlaceholder := headerHasTokenPlaceholder || bodyHasTokenPlaceholder
 	if draftToken != "" && !hasTokenPlaceholder {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "draft token requires a $TOKEN$ header placeholder"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "draft token requires a $TOKEN$ header or body placeholder"})
 		return
 	}
 	if hasTokenPlaceholder {
@@ -192,24 +202,20 @@ func (h *Handler) APICall(c *gin.Context) {
 		}
 	}
 
-	var token string
-	var tokenErr error
-	if hasTokenPlaceholder {
-		token, tokenErr = h.resolveAPICallToken(c.Request.Context(), cfg, auth, draftToken)
-	}
-	if hasTokenPlaceholder && token == "" {
-		if tokenErr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "auth token refresh failed"})
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "auth token not found"})
+	token, replacedData, errToken := substituteAPICallToken(
+		reqHeaders,
+		body.Data,
+		func() (string, error) {
+			return h.resolveAPICallTokenWithProxy(
+				c.Request.Context(), cfg, auth, draftToken, proxyURL,
+			)
+		},
+	)
+	if errToken != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errToken.Error()})
 		return
 	}
-	for key, value := range reqHeaders {
-		if strings.Contains(value, "$TOKEN$") {
-			reqHeaders[key] = strings.ReplaceAll(value, "$TOKEN$", token)
-		}
-	}
+	body.Data = replacedData
 
 	var requestBody io.Reader
 	if body.Data != "" {
@@ -241,6 +247,9 @@ func (h *Handler) APICall(c *gin.Context) {
 		if hasTokenPlaceholder {
 			if errTransport := validateTokenTransportURL(redirectReq.URL); errTransport != nil {
 				return errTransport
+			}
+			if bodyHasTokenPlaceholder && !strings.EqualFold(parsedURL.Hostname(), redirectReq.URL.Hostname()) {
+				return fmt.Errorf("cross-host redirect blocked for token-bearing request body")
 			}
 			if !isAllowedTokenRedirectTarget(parsedURL, redirectReq.URL) {
 				return fmt.Errorf("redirect to untrusted domain blocked (token protection)")
@@ -291,6 +300,45 @@ func validateTokenTransportURL(target *url.URL) error {
 	return nil
 }
 
+func substituteAPICallToken(
+	headers map[string]string,
+	data string,
+	resolve func() (string, error),
+) (string, string, error) {
+	hasPlaceholder := strings.Contains(data, "$TOKEN$")
+	if !hasPlaceholder {
+		for _, value := range headers {
+			if strings.Contains(value, "$TOKEN$") {
+				hasPlaceholder = true
+				break
+			}
+		}
+	}
+	if !hasPlaceholder {
+		return "", data, nil
+	}
+
+	token, errResolve := resolve()
+	if errResolve != nil {
+		return "", data, errors.New("auth token refresh failed")
+	}
+	if token == "" {
+		return "", data, errors.New("auth token not found")
+	}
+	for key, value := range headers {
+		headers[key] = strings.ReplaceAll(value, "$TOKEN$", token)
+	}
+	if strings.Contains(data, "$TOKEN$") {
+		replacement := token
+		if json.Valid([]byte(data)) {
+			encoded, _ := json.Marshal(token)
+			replacement = string(encoded[1 : len(encoded)-1])
+		}
+		data = strings.ReplaceAll(data, "$TOKEN$", replacement)
+	}
+	return token, data, nil
+}
+
 func firstNonEmptyString(values ...*string) string {
 	for _, v := range values {
 		if v == nil {
@@ -310,14 +358,45 @@ func tokenValueForAuth(auth *coreauth.Auth) string {
 	if v := tokenValueFromMetadata(auth.Metadata); v != "" {
 		return v
 	}
+	devinProvider := isDevinProvider(auth.Provider)
+	if devinProvider {
+		if v := firstMetadataString(auth.Metadata, "api_key", "session_token"); v != "" {
+			return v
+		}
+	}
 	if auth.Attributes != nil {
 		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
 			return v
+		}
+		if devinProvider {
+			if v := strings.TrimSpace(auth.Attributes["session_token"]); v != "" {
+				return v
+			}
 		}
 	}
 	if shared := geminicli.ResolveSharedCredential(auth.Runtime); shared != nil {
 		if v := tokenValueFromMetadata(shared.MetadataSnapshot()); v != "" {
 			return v
+		}
+	}
+	return ""
+}
+
+func isDevinProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "devin", "cognition":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstMetadataString(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := metadata[key].(string); ok {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
 		}
 	}
 	return ""
@@ -345,16 +424,35 @@ func (h *Handler) resolveAPICallToken(
 	auth *coreauth.Auth,
 	draftToken string,
 ) (string, error) {
+	return h.resolveAPICallTokenWithProxy(ctx, cfg, auth, draftToken, "")
+}
+
+func (h *Handler) resolveAPICallTokenWithProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+	draftToken string,
+	requestProxyURL string,
+) (string, error) {
 	if draftToken != "" {
 		return draftToken, nil
 	}
-	return h.resolveTokenForAuth(ctx, cfg, auth)
+	return h.resolveTokenForAuthWithProxy(ctx, cfg, auth, requestProxyURL)
 }
 
 func (h *Handler) resolveTokenForAuth(
 	ctx context.Context,
 	cfg *config.Config,
 	auth *coreauth.Auth,
+) (string, error) {
+	return h.resolveTokenForAuthWithProxy(ctx, cfg, auth, "")
+}
+
+func (h *Handler) resolveTokenForAuthWithProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	auth *coreauth.Auth,
+	requestProxyURL string,
 ) (string, error) {
 	if auth == nil {
 		return "", nil
@@ -363,19 +461,19 @@ func (h *Handler) resolveTokenForAuth(
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	switch provider {
 	case "claude", "anthropic":
-		token, errToken := h.refreshClaudeOAuthAccessToken(ctx, cfg, auth)
+		token, errToken := h.refreshClaudeOAuthAccessToken(ctx, cfg, auth, requestProxyURL)
 		return token, errToken
 	case "codex":
-		token, errToken := h.refreshCodexOAuthAccessToken(ctx, cfg, auth)
+		token, errToken := h.refreshCodexOAuthAccessToken(ctx, cfg, auth, requestProxyURL)
 		return token, errToken
 	case "gemini", "gemini-cli":
-		token, errToken := h.refreshGeminiOAuthAccessToken(ctx, cfg, auth)
+		token, errToken := h.refreshGeminiOAuthAccessToken(ctx, cfg, auth, requestProxyURL)
 		return token, errToken
 	case "antigravity":
-		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, cfg, auth)
+		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, cfg, auth, requestProxyURL)
 		return token, errToken
 	case "xai", "x-ai", "grok":
-		token, errToken := h.refreshXAIOAuthAccessToken(ctx, cfg, auth)
+		token, errToken := h.refreshXAIOAuthAccessToken(ctx, cfg, auth, requestProxyURL)
 		return token, errToken
 	default:
 		return tokenValueForAuth(auth), nil
@@ -480,6 +578,7 @@ func (h *Handler) refreshClaudeOAuthAccessToken(
 	ctx context.Context,
 	cfg *config.Config,
 	auth *coreauth.Auth,
+	requestProxyURL string,
 ) (string, error) {
 	current := tokenValueForAuth(auth)
 	if current != "" && !tokenExpired(auth.Metadata) {
@@ -490,7 +589,7 @@ func (h *Handler) refreshClaudeOAuthAccessToken(
 		return current, nil
 	}
 	before := auth.Clone()
-	svc := claudeauth.NewAuth(cfg)
+	svc := claudeauth.NewAuthWithProxyURL(cfg, h.apiCallProxyURL(cfg, auth, requestProxyURL))
 	td, err := svc.RefreshTokens(ctx, refreshToken)
 	if err != nil {
 		return "", err
@@ -527,6 +626,7 @@ func (h *Handler) refreshCodexOAuthAccessToken(
 	ctx context.Context,
 	cfg *config.Config,
 	auth *coreauth.Auth,
+	requestProxyURL string,
 ) (string, error) {
 	current := tokenValueForAuth(auth)
 	if current != "" && !tokenExpired(auth.Metadata) {
@@ -537,7 +637,8 @@ func (h *Handler) refreshCodexOAuthAccessToken(
 		return current, nil
 	}
 	before := auth.Clone()
-	svc := codexauth.NewAuth(cfg)
+	proxyCfg := apiCallConfigWithProxy(cfg, h.apiCallProxyURL(cfg, auth, requestProxyURL))
+	svc := codexauth.NewAuth(proxyCfg)
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
 		return "", err
@@ -567,6 +668,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(
 	ctx context.Context,
 	cfg *config.Config,
 	auth *coreauth.Auth,
+	requestProxyURL string,
 ) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -587,7 +689,7 @@ func (h *Handler) refreshGeminiOAuthAccessToken(
 	ctxToken := ctx
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(cfg, auth, ""),
+		Transport: h.apiCallTransport(cfg, auth, requestProxyURL),
 	}
 	ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 
@@ -614,6 +716,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(
 	ctx context.Context,
 	cfg *config.Config,
 	auth *coreauth.Auth,
+	requestProxyURL string,
 ) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -656,7 +759,7 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(
 
 	httpClient := &http.Client{
 		Timeout:   defaultAPICallTimeout,
-		Transport: h.apiCallTransport(cfg, auth, ""),
+		Transport: h.apiCallTransport(cfg, auth, requestProxyURL),
 	}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
@@ -721,6 +824,7 @@ func (h *Handler) refreshXAIOAuthAccessToken(
 	ctx context.Context,
 	cfg *config.Config,
 	auth *coreauth.Auth,
+	requestProxyURL string,
 ) (string, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -738,7 +842,7 @@ func (h *Handler) refreshXAIOAuthAccessToken(
 	}
 	before := auth.Clone()
 	tokenEndpoint := stringValue(auth.Metadata, "token_endpoint")
-	svc := xaiauth.NewXAIAuthWithProxyURL(cfg, auth.ProxyURL)
+	svc := xaiauth.NewXAIAuthWithProxyURL(cfg, h.apiCallProxyURL(cfg, auth, requestProxyURL))
 	td, err := svc.RefreshTokens(ctx, refreshToken, tokenEndpoint)
 	if err != nil {
 		return "", err
@@ -989,53 +1093,65 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 func (h *Handler) apiCallTransport(
 	cfg *config.Config,
 	auth *coreauth.Auth,
-	proxyURL string,
+	requestProxyURL string,
 ) http.RoundTripper {
-	var proxyCandidates []string
-	if proxyStr := strings.TrimSpace(proxyURL); proxyStr != "" {
-		proxyCandidates = append(proxyCandidates, proxyStr)
-	}
-	if auth != nil {
-		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
-			proxyCandidates = append(proxyCandidates, proxyStr)
-		}
-	}
-	if cfg != nil {
-		if proxyStr := strings.TrimSpace(cfg.ProxyURL); proxyStr != "" {
-			proxyCandidates = append(proxyCandidates, proxyStr)
-		}
-	}
-
-	for _, proxyStr := range proxyCandidates {
-		if transport := buildProxyTransport(proxyStr); transport != nil {
-			return transport
-		}
-	}
-
-	transport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok || transport == nil {
-		return &http.Transport{Proxy: nil}
-	}
-	clone := transport.Clone()
-	clone.Proxy = nil
-	return clone
-}
-
-func buildProxyTransport(proxyStr string) *http.Transport {
-	setting, errParse := proxyutil.Parse(proxyStr)
-	if errParse != nil {
-		log.WithError(errParse).Debug("parse proxy URL failed")
-		return nil
-	}
-	if setting.Mode != proxyutil.ModeProxy || setting.URL == nil {
-		return nil
-	}
-	transport, _, errBuild := proxyutil.BuildHTTPTransport(proxyStr)
+	setting := apiCallProxySetting(cfg, auth, requestProxyURL)
+	transport, _, errBuild := proxyutil.BuildHTTPTransport(setting.Raw)
 	if errBuild != nil {
 		log.WithError(errBuild).Debug("build proxy transport failed")
-		return nil
+		return proxyutil.NewDirectTransport()
+	}
+	if transport == nil {
+		return proxyutil.NewDirectTransport()
 	}
 	return transport
+}
+
+func (h *Handler) apiCallProxyURL(
+	cfg *config.Config,
+	auth *coreauth.Auth,
+	requestProxyURL string,
+) string {
+	return apiCallProxySetting(cfg, auth, requestProxyURL).Raw
+}
+
+func apiCallProxySetting(
+	cfg *config.Config,
+	auth *coreauth.Auth,
+	requestProxyURL string,
+) proxyutil.Setting {
+	if requestProxyURL = strings.TrimSpace(requestProxyURL); requestProxyURL != "" {
+		setting, errParse := proxyutil.Parse(requestProxyURL)
+		if errParse == nil {
+			return setting
+		}
+		return proxyutil.Setting{Raw: "direct", Mode: proxyutil.ModeDirect}
+	}
+
+	candidates := make([]string, 0, 2)
+	if auth != nil {
+		candidates = append(candidates, auth.ProxyURL)
+	}
+	if cfg != nil {
+		candidates = append(candidates, cfg.ProxyURL)
+	}
+	for _, candidate := range candidates {
+		setting, errParse := proxyutil.Parse(candidate)
+		if errParse == nil && setting.Mode != proxyutil.ModeInherit {
+			return setting
+		}
+	}
+	return proxyutil.Setting{Raw: "direct", Mode: proxyutil.ModeDirect}
+}
+
+func apiCallConfigWithProxy(cfg *config.Config, proxyURL string) *config.Config {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	cloned := *cfg
+	cloned.SDKConfig = cfg.SDKConfig
+	cloned.ProxyURL = strings.TrimSpace(proxyURL)
+	return &cloned
 }
 
 func isPrivateHost(hostname string) bool {
@@ -1075,8 +1191,11 @@ func isAllowedTokenTargetURL(target *url.URL) bool {
 		return false
 	}
 	hostname := strings.ToLower(strings.TrimSpace(target.Hostname()))
-	if hostname == "api.deepseek.com" && !isDefaultHTTPSPort(target) {
-		return false
+	switch hostname {
+	case "api.deepseek.com", "api.devin.ai", "server.codeium.com":
+		if !isDefaultHTTPSPort(target) {
+			return false
+		}
 	}
 	return isAllowedTokenTarget(hostname)
 }
@@ -1090,7 +1209,8 @@ func isDefaultHTTPSPort(target *url.URL) bool {
 // preventing $TOKEN$ credential exfiltration to arbitrary domains.
 func isAllowedTokenTarget(hostname string) bool {
 	hostname = strings.ToLower(strings.TrimSpace(hostname))
-	if hostname == "api.deepseek.com" {
+	switch hostname {
+	case "api.deepseek.com", "api.devin.ai", "server.codeium.com":
 		return true
 	}
 	allowed := []string{

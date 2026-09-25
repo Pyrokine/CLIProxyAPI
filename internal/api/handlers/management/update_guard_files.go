@@ -20,7 +20,7 @@ func validateUpdateGuardSession(
 	if session.SchemaVersion != updateGuardStateSchemaVersion || !isUpdateAttemptID(session.AttemptID) {
 		return fmt.Errorf("invalid update session identity")
 	}
-	if !validVersion.MatchString(session.TargetVersion) || !validVersion.MatchString(session.PreviousVersion) {
+	if !validVersion.MatchString(session.TargetVersion) || !validBuildVersion.MatchString(session.PreviousVersion) {
 		return fmt.Errorf("invalid update session version")
 	}
 	for _, value := range []string{session.ExecutablePath, session.BackupPath, session.StateDBPath} {

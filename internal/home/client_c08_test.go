@@ -94,6 +94,7 @@ func newC08RedisCommandClient(
 			DisableClusterDiscovery: true,
 		},
 	)
+	client.testOperationTimeout = 50 * time.Millisecond
 	options := &redis.Options{
 		Addr:                  listener.Addr().String(),
 		Protocol:              2,

@@ -1530,6 +1530,62 @@ func TestUploadAuthFile_MultipartBatch(t *testing.T) {
 	}
 }
 
+func TestUploadAuthFile_MultipartPartialUsesMultiStatus(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	authDir := t.TempDir()
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	h := NewHandler(
+		&config.Config{AuthDir: authDir},
+		"",
+		manager,
+		withEnvSecret(""),
+		withTokenStore(store),
+	)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, file := range []struct {
+		name    string
+		content string
+	}{
+		{name: "claude.json", content: `{"type":"anthropic"}`},
+		{name: "invalid.txt", content: `{"type":"anthropic"}`},
+	} {
+		part, errCreate := writer.CreateFormFile("file", file.name)
+		if errCreate != nil {
+			t.Fatal(errCreate)
+		}
+		if _, errWrite := part.Write([]byte(file.content)); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+	}
+	if errClose := writer.Close(); errClose != nil {
+		t.Fatal(errClose)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/auth-files", &body)
+	ctx.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	h.UploadAuthFile(ctx)
+
+	if recorder.Code != http.StatusMultiStatus {
+		t.Fatalf("expected 207, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var payload struct {
+		Status   string  `json:"status"`
+		Uploaded int     `json:"uploaded"`
+		Failed   []gin.H `json:"failed"`
+	}
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &payload); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	if payload.Status != "partial" || payload.Uploaded != 1 || len(payload.Failed) != 1 {
+		t.Fatalf("partial upload response = %#v", payload)
+	}
+}
+
 func TestUploadAuthFile_InvalidName(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	authDir := t.TempDir()

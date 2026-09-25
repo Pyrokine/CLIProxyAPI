@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,6 +159,111 @@ func TestResolveTokenForAuth_Antigravity_RefreshesExpiredToken(t *testing.T) {
 	store.mu.Unlock()
 	if got := tokenValueFromMetadata(persisted.Metadata); got != "new-token" {
 		t.Fatalf("expected persisted metadata updated, got %q", got)
+	}
+}
+
+func TestResolveTokenForAuthUsesRequestProxyForOAuthRefresh(t *testing.T) {
+	var proxyCalls atomic.Int32
+	proxy := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			proxyCalls.Add(1)
+			if request.URL.String() != "http://oauth.example/token" {
+				t.Fatalf("proxy target = %s", request.URL)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"proxied-token","refresh_token":"rt2","expires_in":3600}`))
+		}),
+	)
+	t.Cleanup(proxy.Close)
+
+	originalURL := antigravityOAuthTokenURL
+	antigravityOAuthTokenURL = "http://oauth.example/token"
+	t.Cleanup(func() { antigravityOAuthTokenURL = originalURL })
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "antigravity-proxy.json",
+		FileName: "antigravity-proxy.json",
+		Provider: "antigravity",
+		ProxyURL: "http://credential-proxy.invalid:8080",
+		Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "rt",
+			"expired":       time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	cfg := &config.Config{}
+	cfg.ProxyURL = "http://global-proxy.invalid:8080"
+	h := &Handler{authManager: manager}
+	token, errResolve := h.resolveTokenForAuthWithProxy(
+		context.Background(),
+		cfg,
+		auth,
+		proxy.URL,
+	)
+	if errResolve != nil || token != "proxied-token" {
+		t.Fatalf("token = %q, error = %v", token, errResolve)
+	}
+	if proxyCalls.Load() != 1 {
+		t.Fatalf("OAuth proxy calls = %d, want 1", proxyCalls.Load())
+	}
+	if got := proxyURLForTransport(t, h.apiCallTransport(cfg, auth, proxy.URL)); got != proxy.URL {
+		t.Fatalf("main request proxy = %q, want OAuth proxy %q", got, proxy.URL)
+	}
+}
+
+func TestResolveTokenForAuthDirectDoesNotInheritOAuthProxy(t *testing.T) {
+	var inheritedProxyCalls atomic.Int32
+	inheritedProxy := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			inheritedProxyCalls.Add(1)
+			http.Error(w, "unexpected inherited proxy", http.StatusBadGateway)
+		}),
+	)
+	t.Cleanup(inheritedProxy.Close)
+	tokenServerCalls := 0
+	tokenServer := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			tokenServerCalls++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"direct-token","refresh_token":"rt2","expires_in":3600}`))
+		}),
+	)
+	t.Cleanup(tokenServer.Close)
+
+	originalURL := antigravityOAuthTokenURL
+	antigravityOAuthTokenURL = tokenServer.URL
+	t.Cleanup(func() { antigravityOAuthTokenURL = originalURL })
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "antigravity-direct.json",
+		FileName: "antigravity-direct.json",
+		Provider: "antigravity",
+		ProxyURL: inheritedProxy.URL,
+		Metadata: map[string]any{
+			"access_token":  "expired-token",
+			"refresh_token": "rt",
+			"expired":       time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatal(errRegister)
+	}
+	cfg := &config.Config{}
+	cfg.ProxyURL = inheritedProxy.URL
+	h := &Handler{authManager: manager}
+	token, errResolve := h.resolveTokenForAuthWithProxy(context.Background(), cfg, auth, "direct")
+	if errResolve != nil || token != "direct-token" {
+		t.Fatalf("token = %q, error = %v", token, errResolve)
+	}
+	if tokenServerCalls != 1 || inheritedProxyCalls.Load() != 0 {
+		t.Fatalf("direct refresh calls = %d, inherited proxy calls = %d", tokenServerCalls, inheritedProxyCalls.Load())
 	}
 }
 
@@ -517,6 +623,10 @@ func TestIsAllowedTokenTarget(t *testing.T) {
 		{"x.ai", true},
 		{"auth.x.ai", true},
 		{"cli-chat-proxy.grok.com", true},
+		{"api.devin.ai", true},
+		{"server.codeium.com", true},
+		{"sub.server.codeium.com", false},
+		{"server.codeium.com.evil.com", false},
 		{"evil.com", false},
 	}
 	for _, tt := range tests {
@@ -656,6 +766,95 @@ func TestValidateAPICallHeadersRejectsHostOverride(t *testing.T) {
 	}
 }
 
+func TestSubstituteAPICallTokenResolvesOnceAndEscapesJSON(t *testing.T) {
+	headers := map[string]string{
+		"Authorization": "Bearer $TOKEN$",
+		"X-Token":       "$TOKEN$:$TOKEN$",
+	}
+	const token = "line1\"\\line2\n\tend"
+	calls := 0
+	resolved, data, errSubstitute := substituteAPICallToken(
+		headers,
+		`{"metadata":{"apiKey":"$TOKEN$","again":"$TOKEN$"}}`,
+		func() (string, error) {
+			calls++
+			return token, nil
+		},
+	)
+	if errSubstitute != nil {
+		t.Fatalf("substituteAPICallToken() error = %v", errSubstitute)
+	}
+	if calls != 1 {
+		t.Fatalf("token resolver calls = %d, want 1", calls)
+	}
+	if resolved != token || headers["Authorization"] != "Bearer "+token || headers["X-Token"] != token+":"+token {
+		t.Fatalf("resolved token or headers mismatch: token=%q headers=%#v", resolved, headers)
+	}
+	var payload struct {
+		Metadata struct {
+			APIKey string `json:"apiKey"`
+			Again  string `json:"again"`
+		} `json:"metadata"`
+	}
+	if errDecode := json.Unmarshal([]byte(data), &payload); errDecode != nil {
+		t.Fatalf("substituted body is invalid JSON: %v; body=%q", errDecode, data)
+	}
+	if payload.Metadata.APIKey != token || payload.Metadata.Again != token {
+		t.Fatalf("substituted body token mismatch: %#v", payload.Metadata)
+	}
+}
+
+func TestSubstituteAPICallTokenKeepsNonJSONTextRaw(t *testing.T) {
+	multilineText := strings.Join([]string{"line1", "line2"}, "\n")
+	_, data, errSubstitute := substituteAPICallToken(
+		nil,
+		"prefix=$TOKEN$",
+		func() (string, error) { return multilineText, nil },
+	)
+	if errSubstitute != nil {
+		t.Fatalf("substituteAPICallToken() error = %v", errSubstitute)
+	}
+	if data != "prefix="+multilineText {
+		t.Fatalf("substituted body = %q, want raw multiline text", data)
+	}
+}
+
+func TestTokenValueForAuthSupportsKnownDevinFieldsOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		auth *coreauth.Auth
+		want string
+	}{
+		{
+			name: "metadata api key",
+			auth: &coreauth.Auth{Provider: "devin", Metadata: map[string]any{"api_key": "metadata-api"}},
+			want: "metadata-api",
+		},
+		{
+			name: "metadata session token",
+			auth: &coreauth.Auth{Provider: "cognition", Metadata: map[string]any{"session_token": "metadata-session"}},
+			want: "metadata-session",
+		},
+		{
+			name: "attribute session token",
+			auth: &coreauth.Auth{Provider: "devin", Attributes: map[string]string{"session_token": "attribute-session"}},
+			want: "attribute-session",
+		},
+		{
+			name: "unrelated provider ignores Devin session token",
+			auth: &coreauth.Auth{Provider: "other", Metadata: map[string]any{"session_token": "secret"}},
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tokenValueForAuth(tt.auth); got != tt.want {
+				t.Fatalf("tokenValueForAuth() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveAPICallTokenPrefersDraftToken(t *testing.T) {
 	h := &Handler{}
 	auth := &coreauth.Auth{Attributes: map[string]string{"api_key": "stored-token"}}
@@ -679,7 +878,7 @@ func TestAPICallRejectsDraftTokenWithoutPlaceholder(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("APICall status = %d, want 400: %s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "requires a $TOKEN$ header placeholder") {
+	if !strings.Contains(recorder.Body.String(), "requires a $TOKEN$ header or body placeholder") {
 		t.Fatalf("APICall body = %s", recorder.Body.String())
 	}
 }
@@ -736,6 +935,146 @@ func TestAPICallRejectsDraftTokenForUnknownTarget(t *testing.T) {
 	)
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("APICall status = %d, want 403: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAPICallBodyTokenUsesSameTransportRestrictions(t *testing.T) {
+	tests := []struct {
+		name       string
+		targetURL  string
+		draftToken string
+		wantStatus int
+		wantError  string
+	}{
+		{
+			name:       "missing token",
+			targetURL:  "https://api.devin.ai/v1/status",
+			wantStatus: http.StatusBadRequest,
+			wantError:  "auth token not found",
+		},
+		{
+			name:       "HTTP target",
+			targetURL:  "http://api.devin.ai/v1/status",
+			draftToken: "draft-token",
+			wantStatus: http.StatusBadRequest,
+			wantError:  "requires HTTPS",
+		},
+		{
+			name:       "unknown target",
+			targetURL:  "https://example.com/v1/status",
+			draftToken: "draft-token",
+			wantStatus: http.StatusForbidden,
+			wantError:  "known provider domains",
+		},
+		{
+			name:       "Devin alternate port",
+			targetURL:  "https://api.devin.ai:8443/v1/status",
+			draftToken: "draft-token",
+			wantStatus: http.StatusForbidden,
+			wantError:  "known provider domains",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, errMarshal := json.Marshal(
+				map[string]any{
+					"method":     http.MethodPost,
+					"url":        tt.targetURL,
+					"data":       `{"token":"$TOKEN$"}`,
+					"draftToken": tt.draftToken,
+				},
+			)
+			if errMarshal != nil {
+				t.Fatal(errMarshal)
+			}
+			h := newConfigListTestHandler(t, &config.Config{})
+			recorder := runConfigListRequest(h.APICall, http.MethodPost, "/api-call", string(payload))
+			if recorder.Code != tt.wantStatus || !strings.Contains(recorder.Body.String(), tt.wantError) {
+				t.Fatalf("APICall status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestAPICallReplacesBodyTokenForKnownDevinEndpoint(t *testing.T) {
+	const token = "line1\"\\line2\nend"
+	requestCount := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requestCount++
+		var payload map[string]string
+		if errDecode := json.NewDecoder(request.Body).Decode(&payload); errDecode != nil {
+			t.Fatalf("decode body: %v", errDecode)
+		}
+		if payload["token"] != token {
+			t.Fatalf("body token = %q, want %q", payload["token"], token)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(server.Close)
+	installAPICallTLSTestTransport(t, server)
+
+	data, errData := json.Marshal(map[string]string{"token": "$TOKEN$"})
+	if errData != nil {
+		t.Fatal(errData)
+	}
+	body, errBody := json.Marshal(map[string]any{
+		"method":     http.MethodPost,
+		"url":        "https://server.codeium.com/exa.seat_management_pb.SeatManagementService/GetUserStatus",
+		"data":       string(data),
+		"draftToken": token,
+	})
+	if errBody != nil {
+		t.Fatal(errBody)
+	}
+	h := newConfigListTestHandler(t, &config.Config{})
+	recorder := runConfigListRequest(h.APICall, http.MethodPost, "/api-call", string(body))
+	if recorder.Code != http.StatusOK || requestCount != 1 {
+		t.Fatalf("status=%d requests=%d body=%s", recorder.Code, requestCount, recorder.Body.String())
+	}
+}
+
+func TestAPICallBlocksCrossHostRedirectForBodyToken(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewTLSServer(
+		http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			requestCount++
+			body, errRead := io.ReadAll(request.Body)
+			if errRead != nil {
+				t.Fatalf("ReadAll() error = %v", errRead)
+			}
+			if string(body) != `{"token":"draft-token"}` {
+				t.Fatalf("request body = %q", body)
+			}
+			http.Redirect(
+				w,
+				request,
+				"https://server.codeium.com/redirected",
+				http.StatusTemporaryRedirect,
+			)
+		}),
+	)
+	t.Cleanup(server.Close)
+	installAPICallTLSTestTransport(t, server)
+
+	payload, errMarshal := json.Marshal(
+		map[string]any{
+			"method":     http.MethodPost,
+			"url":        "https://api.devin.ai/status",
+			"data":       `{"token":"$TOKEN$"}`,
+			"draftToken": "draft-token",
+		},
+	)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	h := newConfigListTestHandler(t, &config.Config{})
+	recorder := runConfigListRequest(h.APICall, http.MethodPost, "/api-call", string(payload))
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("APICall status = %d, want 502: %s", recorder.Code, recorder.Body.String())
+	}
+	if requestCount != 1 {
+		t.Fatalf("request count = %d, want 1", requestCount)
 	}
 }
 
@@ -962,6 +1301,43 @@ func TestPinnedTransport_NonTransport(t *testing.T) {
 	got := pinnedTransport(custom, "host", "1.2.3.4")
 	if got != custom {
 		t.Fatal("expected custom RoundTripper returned unchanged")
+	}
+}
+
+func TestAPICallRejectsInvalidRequestProxyBeforeTargetValidation(t *testing.T) {
+	h := newConfigListTestHandler(t, &config.Config{})
+	recorder := runConfigListRequest(
+		h.APICall,
+		http.MethodPost,
+		"/api-call",
+		`{"method":"GET","url":"http://127.0.0.1/private","proxy_url":"not-a-proxy"}`,
+	)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("APICall status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "invalid proxy_url") {
+		t.Fatalf("APICall body = %s", recorder.Body.String())
+	}
+}
+
+func TestAPICallTransportExplicitDirectDoesNotInherit(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.ProxyURL = "http://1.1.1.1:8080"
+	h := &Handler{cfg: cfg}
+	auth := &coreauth.Auth{ProxyURL: "http://8.8.4.4:8080"}
+	for _, mode := range []string{"direct", "none"} {
+		t.Run(mode, func(t *testing.T) {
+			transport, ok := h.apiCallTransport(cfg, auth, mode).(*http.Transport)
+			if !ok {
+				t.Fatalf("transport type = %T, want *http.Transport", h.apiCallTransport(cfg, auth, mode))
+			}
+			if transport.Proxy != nil {
+				t.Fatalf("%s request proxy inherited a lower-priority proxy", mode)
+			}
+			if got := h.apiCallProxyURL(cfg, auth, mode); got != mode {
+				t.Fatalf("OAuth proxy = %q, want %q", got, mode)
+			}
+		})
 	}
 }
 

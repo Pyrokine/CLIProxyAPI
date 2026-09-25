@@ -442,6 +442,14 @@ func (m *authTabModel) handleNormalInput(msg tea.KeyMsg) (authTabModel, tea.Cmd)
 		return *m, m.startEdit(1) // proxy_url
 	case "3":
 		return *m, m.startEdit(2) // priority
+	case "R":
+		m.status = ""
+		return *m, func() tea.Msg {
+			if err := m.client.refreshAllAuthFiles(); err != nil {
+				return authActionMsg{err: err}
+			}
+			return authActionMsg{action: t("credentials_refreshed")}
+		}
 	case "r":
 		m.status = ""
 		return *m, m.fetchFiles

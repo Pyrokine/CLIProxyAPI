@@ -49,6 +49,7 @@ import (
 var (
 	lastRefreshKeys                  = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 	errAuthFileChangedDuringDeletion = errors.New("auth file changed during deletion")
+	errPluginVirtualAuth             = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
 )
 
 const (
@@ -59,6 +60,7 @@ const (
 
 type callbackForwarder struct {
 	provider string
+	port     int
 	server   *http.Server
 	done     chan struct{}
 }
@@ -151,6 +153,7 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
 	}
+	actualPort := ln.Addr().(*net.TCPAddr).Port
 
 	handler := http.HandlerFunc(
 		func(w http.ResponseWriter, r *http.Request) {
@@ -183,15 +186,16 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 
 	forwarder := &callbackForwarder{
 		provider: provider,
+		port:     actualPort,
 		server:   srv,
 		done:     done,
 	}
 
 	callbackForwardersMu.Lock()
-	callbackForwarders[port] = forwarder
+	callbackForwarders[actualPort] = forwarder
 	callbackForwardersMu.Unlock()
 
-	log.Infof("callback forwarder for %s listening on %s", provider, addr)
+	log.Infof("callback forwarder for %s listening on 127.0.0.1:%d", provider, actualPort)
 
 	return forwarder, nil
 }
@@ -287,12 +291,18 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	nameFilter := strings.TrimSpace(c.Query("name"))
 	authIndexFilter := strings.TrimSpace(c.Query("auth_index"))
 	auths := h.authManager.List()
+	observedAt := time.Now().UTC()
+	cooldownsKnown := !h.authManager.HomeEnabled()
 	files := make([]gin.H, 0, len(auths))
 	for _, auth := range auths {
 		if !matchesAuthFileLookup(auth, nameFilter, authIndexFilter) {
 			continue
 		}
 		if entry := h.buildAuthFileEntry(auth); entry != nil {
+			entry["cooldowns"] = nil
+			if cooldownsKnown {
+				entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
+			}
 			files = append(files, entry)
 		}
 	}
@@ -303,7 +313,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 			return strings.ToLower(nameI) < strings.ToLower(nameJ)
 		},
 	)
-	c.JSON(200, gin.H{"files": files})
+	c.JSON(200, gin.H{"observed_at": observedAt, "files": files})
 }
 
 func matchesAuthFileLookup(auth *coreauth.Auth, name, authIndex string) bool {
@@ -591,7 +601,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
-	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
+	if accountType, account := authFileAccountInfo(auth); accountType != "" || account != "" {
 		if accountType != "" {
 			entry["account_type"] = accountType
 		}
@@ -647,6 +657,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if disableCooling, ok := authMetadataBool(auth, "disable_cooling", "disable-cooling"); ok {
 		entry["disable_cooling"] = disableCooling
+	}
+	if retry, ok := auth.RequestRetryOverride(); ok {
+		entry["request_retry"] = retry
 	}
 	if usingAPI, ok := authMetadataBool(auth, "using_api"); ok {
 		entry["using_api"] = usingAPI
@@ -917,6 +930,19 @@ func syncAuthFileWebsocketsAttribute(auth *coreauth.Auth) {
 	auth.Attributes["websockets"] = strconv.FormatBool(websockets)
 }
 
+func authFileAccountInfo(auth *coreauth.Auth) (string, string) {
+	if auth == nil {
+		return "", ""
+	}
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "devin") {
+		if email := authEmail(auth); email != "" {
+			return "oauth", email
+		}
+		return "", ""
+	}
+	return auth.AccountInfo()
+}
+
 func authEmail(auth *coreauth.Auth) string {
 	if auth == nil {
 		return ""
@@ -1028,6 +1054,50 @@ func applyPersistedAuthDigest(auth *coreauth.Auth, data []byte) error {
 	return nil
 }
 
+func authsFromUploadedFile(
+	ctx context.Context,
+	parser uploadedAuthParser,
+	authDir,
+	path string,
+	data []byte,
+) ([]*coreauth.Auth, bool, bool, error) {
+	if parser != nil {
+		metadata := make(map[string]any)
+		if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+			return nil, false, false, fmt.Errorf("invalid auth file: %w", errUnmarshal)
+		}
+		coreauth.NormalizeCredentialMetadata(metadata)
+		if _, _, errProfile := coreauth.ClaudeFingerprintProfile(&coreauth.Auth{Metadata: metadata}); errProfile != nil {
+			return nil, false, false, errProfile
+		}
+		provider, _ := metadata["type"].(string)
+		parseCtx := sdkAuth.WithPluginAuthParser(ctx, parser)
+		auths, handled, errParse := sdkAuth.ParsePluginAuthFiles(
+			parseCtx,
+			strings.TrimSpace(provider),
+			path,
+			filepath.Base(path),
+			data,
+		)
+		if errParse != nil {
+			return nil, false, false, fmt.Errorf("parse plugin auth: %w", errParse)
+		}
+		if handled {
+			for _, auth := range auths {
+				if errDigest := applyPersistedAuthDigest(auth, data); errDigest != nil {
+					return nil, false, true, errDigest
+				}
+			}
+			return auths, false, true, nil
+		}
+	}
+	auth, hasLastRefresh, errAuth := authFromFile(authDir, path, data)
+	if errAuth != nil || auth == nil {
+		return nil, hasLastRefresh, false, errAuth
+	}
+	return []*coreauth.Auth{auth}, hasLastRefresh, false, nil
+}
+
 func authFromUploadedFile(
 	ctx context.Context,
 	parser uploadedAuthParser,
@@ -1035,38 +1105,11 @@ func authFromUploadedFile(
 	path string,
 	data []byte,
 ) (*coreauth.Auth, bool, error) {
-	if parser != nil {
-		metadata := make(map[string]any)
-		if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
-			return nil, false, fmt.Errorf("invalid auth file: %w", errUnmarshal)
-		}
-		provider, _ := metadata["type"].(string)
-		auth, handled, errParse := parser.ParseAuth(
-			ctx,
-			pluginapi.AuthParseRequest{
-				Provider: strings.TrimSpace(provider),
-				Path:     path,
-				FileName: filepath.Base(path),
-				RawJSON:  data,
-			},
-		)
-		if errParse != nil {
-			return nil, false, fmt.Errorf("parse plugin auth: %w", errParse)
-		}
-		if handled {
-			if auth == nil || strings.TrimSpace(auth.ID) == "" {
-				return nil, false, fmt.Errorf("plugin auth parser returned an invalid auth")
-			}
-			if errDigest := applyPersistedAuthDigest(auth, data); errDigest != nil {
-				return nil, false, errDigest
-			}
-			if errHeaders := coreauth.ApplyCustomHeadersFromMetadata(auth); errHeaders != nil {
-				return nil, false, errHeaders
-			}
-			return auth, false, nil
-		}
+	auths, hasLastRefresh, _, errParse := authsFromUploadedFile(ctx, parser, authDir, path, data)
+	if errParse != nil || len(auths) == 0 {
+		return nil, hasLastRefresh, errParse
 	}
-	return authFromFile(authDir, path, data)
+	return auths[0], hasLastRefresh, nil
 }
 
 func persistUploadedAuthFile(
@@ -1101,6 +1144,134 @@ func persistUploadedAuthFile(
 	return nil
 }
 
+func (h *Handler) disableSupersededFileAuths(
+	ctx context.Context,
+	path string,
+	updated *coreauth.Auth,
+) error {
+	if h == nil || h.authManager == nil || updated == nil {
+		return nil
+	}
+	syncCtx := coreauth.WithSkipPersist(context.WithoutCancel(ctx))
+	for _, candidate := range h.authManager.List() {
+		if candidate == nil || candidate.ID == updated.ID || !authMatchesPath(candidate, path) {
+			continue
+		}
+		candidate.Disabled = true
+		candidate.Status = coreauth.StatusDisabled
+		candidate.StatusMessage = "superseded by file-backed auth sync"
+		candidate.UpdatedAt = updated.UpdatedAt
+		disabledAuth, errUpdate := h.authManager.Update(syncCtx, candidate)
+		if errUpdate != nil {
+			return fmt.Errorf("disable superseded auth %s: %w", candidate.ID, errUpdate)
+		}
+		if disabledAuth == nil {
+			return fmt.Errorf("disable superseded auth %s: update was superseded", candidate.ID)
+		}
+		h.syncQuotaSchedulerForAuth(disabledAuth)
+		if h.postAuthPersistHook != nil {
+			if errHook := h.postAuthPersistHook(syncCtx, disabledAuth); errHook != nil {
+				return fmt.Errorf("synchronize superseded auth %s: %w", candidate.ID, errHook)
+			}
+		}
+	}
+	return nil
+}
+
+func (h *Handler) publishUploadedPluginAuths(
+	ctx context.Context,
+	path string,
+	data []byte,
+	auths []*coreauth.Auth,
+) error {
+	if h == nil || h.authManager == nil {
+		return fmt.Errorf("core auth manager unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	publicationCtx := coreauth.WithAllowAuthRecreate(
+		coreauth.WithSkipPersist(context.WithoutCancel(ctx)),
+	)
+	updatedAuths := make([]*coreauth.Auth, 0, len(auths))
+	if len(auths) == 0 {
+		if errPersist := persistUploadedAuthFile(ctx, h.tokenStore, path, data); errPersist != nil {
+			return errPersist
+		}
+	} else {
+		first := auths[0]
+		updated, errMutate := h.authManager.MutatePersistentAuth(
+			coreauth.WithAllowAuthRecreate(ctx),
+			first.ID,
+			func(persistCtx context.Context) (*coreauth.Auth, error) {
+				if errPersist := persistUploadedAuthFile(persistCtx, h.tokenStore, path, data); errPersist != nil {
+					return nil, errPersist
+				}
+				return first, nil
+			},
+		)
+		if errMutate != nil {
+			return errMutate
+		}
+		if updated == nil {
+			return fmt.Errorf("persisted plugin auth mutation was superseded")
+		}
+		updatedAuths = append(updatedAuths, updated)
+
+		for _, auth := range auths[1:] {
+			var (
+				published  *coreauth.Auth
+				errPublish error
+			)
+			if _, exists := h.authManager.GetByID(auth.ID); exists {
+				published, errPublish = h.authManager.Update(publicationCtx, auth)
+			} else {
+				published, errPublish = h.authManager.Register(publicationCtx, auth)
+			}
+			if errPublish != nil {
+				return fmt.Errorf("publish plugin auth %s: %w", auth.ID, errPublish)
+			}
+			if published == nil {
+				return fmt.Errorf("publish plugin auth %s: update was superseded", auth.ID)
+			}
+			updatedAuths = append(updatedAuths, published)
+		}
+	}
+
+	currentIDs := make(map[string]struct{}, len(updatedAuths))
+	for _, auth := range updatedAuths {
+		currentIDs[auth.ID] = struct{}{}
+	}
+	removeCtx := coreauth.WithRuntimeOnlyRemove(publicationCtx)
+	for _, candidate := range findAuthsByPath(h.authManager.List(), path) {
+		if _, current := currentIDs[candidate.ID]; current {
+			continue
+		}
+		removed, errRemove := h.authManager.RemoveIfGeneration(
+			removeCtx,
+			candidate.ID,
+			candidate.Generation,
+		)
+		if errRemove != nil {
+			return fmt.Errorf("remove stale plugin auth %s: %w", candidate.ID, errRemove)
+		}
+		if !removed {
+			return fmt.Errorf("remove stale plugin auth %s: update was superseded", candidate.ID)
+		}
+	}
+
+	h.syncQuotaSchedulerRemoval(path)
+	for _, auth := range updatedAuths {
+		h.syncQuotaSchedulerForAuth(auth)
+		if h.postAuthPersistHook != nil {
+			if errHook := h.postAuthPersistHook(publicationCtx, auth); errHook != nil {
+				return fmt.Errorf("failed to synchronize plugin auth %s: %w", auth.ID, errHook)
+			}
+		}
+	}
+	return nil
+}
+
 func (h *Handler) saveUploadedAuth(ctx context.Context, authDir, path string, data []byte) error {
 	if h == nil || h.authManager == nil {
 		return fmt.Errorf("core auth manager unavailable")
@@ -1109,10 +1280,17 @@ func (h *Handler) saveUploadedAuth(ctx context.Context, authDir, path string, da
 	if candidate, ok := h.pluginHost.(uploadedAuthParser); ok {
 		parser = candidate
 	}
-	auth, _, errValidate := authFromUploadedFile(ctx, parser, authDir, path, data)
+	auths, _, pluginHandled, errValidate := authsFromUploadedFile(ctx, parser, authDir, path, data)
 	if errValidate != nil {
 		return errValidate
 	}
+	if pluginHandled {
+		return h.publishUploadedPluginAuths(ctx, path, data, auths)
+	}
+	if len(auths) != 1 || auths[0] == nil {
+		return fmt.Errorf("uploaded auth file did not produce an auth")
+	}
+	auth := auths[0]
 	mutationCtx := coreauth.WithAllowAuthRecreate(ctx)
 	updated, errMutate := h.authManager.MutatePersistentAuth(
 		mutationCtx,
@@ -1131,20 +1309,15 @@ func (h *Handler) saveUploadedAuth(ctx context.Context, authDir, path string, da
 		return fmt.Errorf("persisted auth mutation was superseded")
 	}
 
-	syncCtx := coreauth.WithSkipPersist(context.WithoutCancel(mutationCtx))
-	for _, candidate := range h.authManager.List() {
-		if candidate == nil || candidate.ID == updated.ID || !authMatchesPath(candidate, path) {
-			continue
-		}
-		candidate.Disabled = true
-		candidate.Status = coreauth.StatusDisabled
-		candidate.StatusMessage = "superseded by file-backed auth sync"
-		candidate.UpdatedAt = updated.UpdatedAt
-		if _, errUpdate := h.authManager.Update(syncCtx, candidate); errUpdate != nil {
-			return errUpdate
-		}
+	if errSync := h.disableSupersededFileAuths(mutationCtx, path, updated); errSync != nil {
+		return errSync
 	}
 	h.syncQuotaSchedulerForAuth(updated)
+	if h.postAuthPersistHook != nil {
+		if errHook := h.postAuthPersistHook(ctx, updated); errHook != nil {
+			return fmt.Errorf("failed to synchronize auth runtime: %w", errHook)
+		}
+	}
 	return nil
 }
 
@@ -1190,10 +1363,12 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			uploadedFiles = append(uploadedFiles, filepath.Base(dst))
 		}
 		status := "ok"
+		statusCode := http.StatusOK
 		if len(failed) > 0 {
 			status = "partial"
+			statusCode = http.StatusMultiStatus
 		}
-		c.JSON(200, gin.H{"status": status, "uploaded": len(uploadedFiles), "files": uploadedFiles, "failed": failed})
+		c.JSON(statusCode, gin.H{"status": status, "uploaded": len(uploadedFiles), "files": uploadedFiles, "failed": failed})
 		return
 	}
 	dst, errV := validateAuthFileName(authDir, c.Query("name"))
@@ -1272,6 +1447,10 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		failed := make([]gin.H, 0)
 		for _, rawName := range body.Names {
 			name := strings.TrimSpace(rawName)
+			if _, childIdentity := h.lookupPluginVirtualChildIdentity(name, ""); childIdentity {
+				failed = append(failed, gin.H{"name": name, "error": errPluginVirtualAuth.Error()})
+				continue
+			}
 			full, errV := validateAuthFileName(authDir, name)
 			if errV != nil {
 				failed = append(failed, gin.H{"name": name, "error": errV.Error()})
@@ -1295,14 +1474,22 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 			deletedFiles = append(deletedFiles, filepath.Base(full))
 		}
 		status := "ok"
+		statusCode := http.StatusOK
 		if len(failed) > 0 {
 			status = "partial"
+			statusCode = http.StatusMultiStatus
 		}
-		c.JSON(200, gin.H{"status": status, "deleted": len(deletedFiles), "files": deletedFiles, "failed": failed})
+		c.JSON(statusCode, gin.H{"status": status, "deleted": len(deletedFiles), "files": deletedFiles, "failed": failed})
 		return
 	}
 
-	full, errV := validateAuthFileName(authDir, c.Query("name"))
+	name := strings.TrimSpace(c.Query("name"))
+	authIndex := strings.TrimSpace(c.Query("auth_index"))
+	if _, childIdentity := h.lookupPluginVirtualChildIdentity(name, authIndex); childIdentity {
+		c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
+		return
+	}
+	full, errV := validateAuthFileName(authDir, name)
 	if errV != nil {
 		c.JSON(400, gin.H{"error": errV.Error()})
 		return
@@ -1339,6 +1526,9 @@ func normalizeAuthProvider(provider string) string {
 	if provider == "anthropic" {
 		return string(quota.TypeClaude)
 	}
+	if provider == "cognition" {
+		return string(quota.TypeDevin)
+	}
 	return provider
 }
 
@@ -1356,6 +1546,8 @@ func quotaCredentialTypeForProvider(provider string) (quota.CredentialType, bool
 		return quota.TypeKimi, true
 	case string(quota.TypeXAI), "x-ai", "grok":
 		return quota.TypeXAI, true
+	case string(quota.TypeDevin), "cognition":
+		return quota.TypeDevin, true
 	default:
 		return "", false
 	}
@@ -1389,6 +1581,220 @@ func authMatchesPath(auth *coreauth.Auth, path string) bool {
 		return true
 	}
 	return authFilePathsEqual(authAttribute(auth, "source"), path)
+}
+
+func pluginVirtualSourcePath(auth *coreauth.Auth) string {
+	if auth == nil || auth.Attributes == nil {
+		return ""
+	}
+	if source := strings.TrimSpace(auth.Attributes[coreauth.AttributeVirtualSource]); source != "" {
+		return source
+	}
+	if source := strings.TrimSpace(auth.Attributes[coreauth.AttributeSource]); source != "" {
+		return source
+	}
+	return strings.TrimSpace(auth.Attributes[coreauth.AttributePath])
+}
+
+func pluginVirtualChildIdentity(auth *coreauth.Auth, name, authIndex string) bool {
+	if !coreauth.IsPluginVirtualAuth(auth) {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	authIndex = strings.TrimSpace(authIndex)
+	if authIndex != "" {
+		return true
+	}
+	return name != "" && name != strings.TrimSpace(auth.FileName)
+}
+
+func (h *Handler) lookupPluginVirtualChildIdentity(name, authIndex string) (*coreauth.Auth, bool) {
+	if h == nil || h.authManager == nil {
+		return nil, false
+	}
+	name = strings.TrimSpace(name)
+	authIndex = strings.TrimSpace(authIndex)
+	for _, auth := range h.authManager.List() {
+		if !coreauth.IsPluginVirtualAuth(auth) {
+			continue
+		}
+		index := strings.TrimSpace(auth.EnsureIndex())
+		if authIndex != "" && authIndex == index || name != "" &&
+			(name == strings.TrimSpace(auth.ID) || name == index) {
+			return auth, true
+		}
+	}
+	return nil, false
+}
+
+func (h *Handler) updatePluginVirtualAuthStatus(
+	ctx context.Context,
+	target *coreauth.Auth,
+	disabled bool,
+) error {
+	if h == nil || h.authManager == nil || target == nil {
+		return fmt.Errorf("core auth manager unavailable")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sourcePath := pluginVirtualSourcePath(target)
+	if sourcePath == "" {
+		return fmt.Errorf("plugin virtual auth source path is empty")
+	}
+	data, errRead := os.ReadFile(sourcePath)
+	if errRead != nil {
+		return fmt.Errorf("read plugin auth source: %w", errRead)
+	}
+	metadata := make(map[string]any)
+	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+		return fmt.Errorf("parse plugin auth source: %w", errUnmarshal)
+	}
+	coreauth.NormalizeCredentialMetadata(metadata)
+	metadata["disabled"] = disabled
+	updatedRaw, errMarshal := json.Marshal(metadata)
+	if errMarshal != nil {
+		return fmt.Errorf("encode plugin auth source: %w", errMarshal)
+	}
+
+	h.mu.RLock()
+	pluginHost := h.pluginHost
+	h.mu.RUnlock()
+	parser, ok := pluginHost.(sdkAuth.PluginAuthParser)
+	if !ok || parser == nil {
+		return fmt.Errorf("plugin auth parser unavailable")
+	}
+	provider, _ := metadata["type"].(string)
+	parseCtx := sdkAuth.WithPluginAuthParser(ctx, parser)
+	parsed, handled, errParse := sdkAuth.ParsePluginAuthFiles(
+		parseCtx,
+		provider,
+		sourcePath,
+		filepath.Base(sourcePath),
+		updatedRaw,
+	)
+	if errParse != nil {
+		return fmt.Errorf("parse updated plugin auth source: %w", errParse)
+	}
+	if !handled || len(parsed) == 0 {
+		return fmt.Errorf("plugin auth parser no longer owns source %s", filepath.Base(sourcePath))
+	}
+
+	currentByID := make(map[string]*coreauth.Auth)
+	for _, auth := range findAuthsByPath(h.authManager.List(), sourcePath) {
+		if coreauth.IsPluginVirtualAuth(auth) {
+			currentByID[auth.ID] = auth
+		}
+	}
+	if len(currentByID) != len(parsed) {
+		return fmt.Errorf("plugin auth identities changed while updating source status")
+	}
+	snapshot := pluginLoginTargetSnapshot{path: sourcePath, existed: true, persisted: data}
+	for _, auth := range parsed {
+		current := currentByID[auth.ID]
+		if current == nil || !coreauth.IsPluginVirtualAuth(auth) || current.EnsureIndex() != auth.EnsureIndex() {
+			return fmt.Errorf("plugin auth identities changed while updating source status")
+		}
+		snapshot.runtime = append(snapshot.runtime, current.Clone())
+	}
+
+	store := h.tokenStoreSnapshot()
+	if store == nil {
+		return fmt.Errorf("token store unavailable")
+	}
+	sourceRecord := &coreauth.Auth{
+		ID:       authIDForPath(sourcePath, h.authDirSnapshot()),
+		Provider: strings.TrimSpace(provider),
+		FileName: filepath.Base(sourcePath),
+		Disabled: disabled,
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			coreauth.AttributePath:          sourcePath,
+			coreauth.AttributeSource:        sourcePath,
+			coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+		},
+		Metadata: metadata,
+	}
+	if disabled {
+		sourceRecord.Status = coreauth.StatusDisabled
+	}
+	if _, errSave := store.Save(ctx, sourceRecord); errSave != nil {
+		if errors.Is(errSave, coreauth.ErrAuthDurableStateUncertain) {
+			return errors.Join(fmt.Errorf("persist plugin auth source status: %w", errSave),
+				h.restorePluginLoginPersisted(ctx, h.authDirSnapshot(), snapshot))
+		}
+		return fmt.Errorf("persist plugin auth source status: %w", errSave)
+	}
+	restoreOnFailure := func(failure error) error {
+		persistError := h.restorePluginLoginPersisted(ctx, h.authDirSnapshot(), snapshot)
+		restoreCtx := coreauth.WithSkipPersist(context.WithoutCancel(ctx))
+		var runtimeError error
+		for _, previous := range snapshot.runtime {
+			restored, errUpdate := h.authManager.Update(restoreCtx, previous.Clone())
+			if errUpdate != nil {
+				runtimeError = errors.Join(runtimeError, fmt.Errorf("restore plugin auth %s: %w", previous.ID, errUpdate))
+				continue
+			}
+			if restored == nil {
+				runtimeError = errors.Join(runtimeError, fmt.Errorf("plugin auth %s changed during rollback", previous.ID))
+				continue
+			}
+			h.syncQuotaSchedulerForAuth(restored)
+			if h.postAuthPersistHook != nil {
+				if errHook := h.postAuthPersistHook(restoreCtx, restored); errHook != nil {
+					runtimeError = errors.Join(runtimeError, fmt.Errorf("restore plugin auth runtime %s: %w", previous.ID, errHook))
+				}
+			}
+		}
+		return errors.Join(failure, persistError, runtimeError)
+	}
+
+	digest, errDigest := coreauth.DigestPersistedJSON(updatedRaw)
+	if errDigest != nil {
+		return restoreOnFailure(fmt.Errorf("digest plugin auth source: %w", errDigest))
+	}
+	now := time.Now().UTC()
+	digestText := hex.EncodeToString(digest[:])
+	publicationCtx := coreauth.WithSkipPersist(context.WithoutCancel(ctx))
+	for _, parsedAuth := range parsed {
+		current := currentByID[parsedAuth.ID]
+		next := current.Clone()
+		next.Disabled = parsedAuth.Disabled
+		next.Status = parsedAuth.Status
+		next.StatusMessage = parsedAuth.StatusMessage
+		if next.Metadata == nil {
+			next.Metadata = make(map[string]any)
+		}
+		if parsedAuth.Metadata != nil {
+			if value, exists := parsedAuth.Metadata["disabled"]; exists {
+				next.Metadata["disabled"] = value
+			} else {
+				delete(next.Metadata, "disabled")
+			}
+		} else {
+			delete(next.Metadata, "disabled")
+		}
+		if next.Attributes == nil {
+			next.Attributes = make(map[string]string)
+		}
+		next.Attributes[coreauth.PersistedSHA256Attribute] = digestText
+		next.Attributes[coreauth.PersistedReadAtAttribute] = now.Format(time.RFC3339Nano)
+		next.UpdatedAt = now
+		updated, errUpdate := h.authManager.Update(publicationCtx, next)
+		if errUpdate != nil {
+			return restoreOnFailure(fmt.Errorf("publish plugin auth source status: %w", errUpdate))
+		}
+		if updated == nil {
+			return restoreOnFailure(fmt.Errorf("plugin auth source status update was superseded"))
+		}
+		h.syncQuotaSchedulerForAuth(updated)
+		if h.postAuthPersistHook != nil {
+			if errHook := h.postAuthPersistHook(publicationCtx, updated); errHook != nil {
+				return restoreOnFailure(fmt.Errorf("failed to synchronize auth runtime: %w", errHook))
+			}
+		}
+	}
+	return nil
 }
 
 func findAuthsByPath(auths []*coreauth.Auth, path string) []*coreauth.Auth {
@@ -1448,7 +1854,7 @@ func (h *Handler) syncQuotaSchedulerForAuth(auth *coreauth.Auth) {
 		}
 	}
 	h.quotaScheduler.RegisterBinding(fileName, credType, auth.Index, credentialRevision)
-	h.quotaScheduler.SetDisabled(fileName, credType, auth.Disabled)
+	h.quotaScheduler.SetBindingDisabled(fileName, credType, auth.Index, auth.Disabled)
 }
 
 func (h *Handler) syncQuotaSchedulerRemoval(path string) {
@@ -1478,6 +1884,7 @@ func authFromFile(authDir, path string, data []byte) (*coreauth.Auth, bool, erro
 	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
 		return nil, false, fmt.Errorf("invalid auth file: %w", errUnmarshal)
 	}
+	coreauth.NormalizeCredentialMetadata(metadata)
 	if errWeight := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); errWeight != nil {
 		return nil, false, errWeight
 	}
@@ -1560,6 +1967,9 @@ func authFromFile(authDir, path string, data []byte) (*coreauth.Auth, bool, erro
 	}
 	if errWeight := coreauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
 		return nil, false, errWeight
+	}
+	if errProfile := coreauth.ApplyClaudeFingerprintProfileMetadata(auth, metadata); errProfile != nil {
+		return nil, false, errProfile
 	}
 	if hasLastRefresh {
 		auth.LastRefreshedAt = lastRefresh
@@ -1647,11 +2057,26 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
+	h.authStatusMu.Lock()
+	defer h.authStatusMu.Unlock()
+
 	ctx := c.Request.Context()
 
 	targetAuth, _ := h.lookupAuthFile(name, authIndex)
 	if targetAuth == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+	if coreauth.IsPluginVirtualAuth(targetAuth) {
+		if pluginVirtualChildIdentity(targetAuth, name, authIndex) {
+			c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
+			return
+		}
+		if errUpdate := h.updatePluginVirtualAuthStatus(ctx, targetAuth, *req.Disabled); errUpdate != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update plugin auth source: %v", errUpdate)})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 		return
 	}
 
@@ -1666,12 +2091,27 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+	updatedAuth, errUpdate := h.authManager.Update(coreauth.WithDurableAuthPublication(ctx), targetAuth)
+	if errUpdate != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", errUpdate)})
+		return
+	}
+	if updatedAuth == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "auth update was superseded"})
 		return
 	}
 
-	h.syncQuotaSchedulerForAuth(targetAuth)
+	h.syncQuotaSchedulerForAuth(updatedAuth)
+	if h.postAuthPersistHook != nil {
+		if errHook := h.postAuthPersistHook(ctx, updatedAuth); errHook != nil {
+			log.Errorf("post-auth persist hook failed for status update on %s: %v", targetAuth.ID, errHook)
+			c.JSON(
+				http.StatusInternalServerError,
+				gin.H{"error": fmt.Sprintf("failed to synchronize auth runtime: %v", errHook)},
+			)
+			return
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
@@ -1692,12 +2132,16 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		Weight               json.RawMessage   `json:"weight"`
 		Headers              map[string]string `json:"headers"`
 		Note                 *string           `json:"note"`
-		DisableCooling       *bool             `json:"disable_cooling"`
-		DisableCoolingLegacy *bool             `json:"disable-cooling"`
+		DisableCooling       json.RawMessage   `json:"disable_cooling"`
+		DisableCoolingLegacy json.RawMessage   `json:"disable-cooling"`
+		RequestRetry         json.RawMessage   `json:"request_retry"`
+		RequestRetryLegacy   json.RawMessage   `json:"request-retry"`
 		Websockets           *bool             `json:"websockets"`
 		UsingAPI             *bool             `json:"using_api"`
 		ExcludedModels       *[]string         `json:"excluded_models"`
 		ExcludedModelsLegacy *[]string         `json:"excluded-models"`
+		FingerprintProfile   json.RawMessage   `json:"fingerprint_profile"`
+		FingerprintLegacy    json.RawMessage   `json:"fingerprint-profile"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -1710,6 +2154,9 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name or auth-index is required"})
 		return
 	}
+
+	h.authStatusMu.Lock()
+	defer h.authStatusMu.Unlock()
 
 	ctx := c.Request.Context()
 
@@ -1743,12 +2190,35 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
 		return
 	}
-	if authIndex != "" && name != "" && name != targetAuth.ID && name != targetAuth.FileName {
+	if (authIndex != "" && authIndex != targetAuth.ID && authIndex != targetAuth.Index) ||
+		(name != "" && name != targetAuth.ID && name != targetAuth.FileName) {
 		c.JSON(http.StatusConflict, gin.H{"error": "auth file identity mismatch"})
+		return
+	}
+	if coreauth.IsPluginVirtualAuth(targetAuth) {
+		c.JSON(http.StatusConflict, gin.H{"error": errPluginVirtualAuth.Error()})
 		return
 	}
 
 	changed := false
+	profileRaw := req.FingerprintProfile
+	if len(profileRaw) == 0 {
+		profileRaw = req.FingerprintLegacy
+	}
+	if len(profileRaw) > 0 {
+		var value any
+		if err := json.Unmarshal(profileRaw, &value); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid fingerprint-profile"})
+			return
+		}
+		if err := coreauth.ApplyClaudeFingerprintProfileMetadata(targetAuth, map[string]any{
+			coreauth.AttributeClaudeFingerprintProfile: value,
+		}); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		changed = true
+	}
 	if req.Prefix != nil {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
@@ -1875,16 +2345,37 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 		changed = true
 	}
-	disableCooling := req.DisableCooling
-	if disableCooling == nil {
-		disableCooling = req.DisableCoolingLegacy
+	coolingRaw, retryRaw := req.DisableCooling, req.RequestRetry
+	if len(coolingRaw) == 0 {
+		coolingRaw = req.DisableCoolingLegacy
 	}
-	if disableCooling != nil {
+	if len(retryRaw) == 0 {
+		retryRaw = req.RequestRetryLegacy
+	}
+	var cooling *bool
+	var retry *int
+	if err := (credentialOverridesPatch{DisableCooling: coolingRaw, RequestRetry: retryRaw}).apply(&cooling, &retry); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(coolingRaw) > 0 || len(retryRaw) > 0 {
 		if targetAuth.Metadata == nil {
 			targetAuth.Metadata = make(map[string]any)
 		}
-		targetAuth.Metadata["disable_cooling"] = *disableCooling
-		delete(targetAuth.Metadata, "disable-cooling")
+		if len(coolingRaw) > 0 {
+			delete(targetAuth.Metadata, "disable_cooling")
+			delete(targetAuth.Metadata, "disable-cooling")
+			if cooling != nil {
+				targetAuth.Metadata["disable_cooling"] = *cooling
+			}
+		}
+		if len(retryRaw) > 0 {
+			delete(targetAuth.Metadata, "request_retry")
+			delete(targetAuth.Metadata, "request-retry")
+			if retry != nil && *retry >= 0 {
+				targetAuth.Metadata["request_retry"] = *retry
+			}
+		}
 		changed = true
 	}
 	if req.UsingAPI != nil {
@@ -1928,9 +2419,23 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 
 	targetAuth.UpdatedAt = time.Now()
 
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+	updatedAuth, errUpdate := h.authManager.Update(coreauth.WithDurableAuthPublication(ctx), targetAuth)
+	if errUpdate != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", errUpdate)})
 		return
+	}
+	if updatedAuth == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "auth update was superseded"})
+		return
+	}
+	if h.postAuthPersistHook != nil {
+		if errHook := h.postAuthPersistHook(ctx, updatedAuth); errHook != nil {
+			c.JSON(
+				http.StatusInternalServerError,
+				gin.H{"error": fmt.Sprintf("failed to synchronize auth runtime: %v", errHook)},
+			)
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -1991,8 +2496,22 @@ func (h *Handler) deleteAuthFile(ctx context.Context, authDir, path string) erro
 	if len(matched) == 0 {
 		return h.deleteTokenRecord(ctx, path)
 	}
+	pluginVirtual := false
 	for _, auth := range matched {
-		removed, errRemove := h.authManager.RemoveIfGeneration(ctx, auth.ID, auth.Generation)
+		if coreauth.IsPluginVirtualAuth(auth) {
+			pluginVirtual = true
+			break
+		}
+	}
+	removeCtx := ctx
+	if pluginVirtual {
+		if errDelete := h.deleteTokenRecord(ctx, path); errDelete != nil {
+			return errDelete
+		}
+		removeCtx = coreauth.WithRuntimeOnlyRemove(coreauth.WithSkipPersist(context.WithoutCancel(ctx)))
+	}
+	for _, auth := range matched {
+		removed, errRemove := h.authManager.RemoveIfGeneration(removeCtx, auth.ID, auth.Generation)
 		if errRemove != nil {
 			return errRemove
 		}
@@ -2124,7 +2643,16 @@ func (h *Handler) saveTokenRecord(
 	}
 
 	if h.authManager == nil {
-		return save(ctx)
+		savedPath, errSave := save(ctx)
+		if errSave != nil {
+			return savedPath, errSave
+		}
+		if h.postAuthPersistHook != nil {
+			if errHook := h.postAuthPersistHook(ctx, record); errHook != nil {
+				return savedPath, fmt.Errorf("failed to synchronize auth runtime: %w", errHook)
+			}
+		}
+		return savedPath, nil
 	}
 
 	var savedPath string
@@ -2161,20 +2689,15 @@ func (h *Handler) saveTokenRecord(
 		return "", fmt.Errorf("persisted auth mutation was superseded")
 	}
 
-	syncCtx := coreauth.WithSkipPersist(mutationCtx)
-	for _, candidate := range h.authManager.List() {
-		if candidate == nil || candidate.ID == updated.ID || !authMatchesPath(candidate, targetPath) {
-			continue
-		}
-		candidate.Disabled = true
-		candidate.Status = coreauth.StatusDisabled
-		candidate.StatusMessage = "superseded by file-backed auth sync"
-		candidate.UpdatedAt = updated.UpdatedAt
-		if _, errUpdate := h.authManager.Update(syncCtx, candidate); errUpdate != nil {
-			return "", errUpdate
-		}
+	if errSync := h.disableSupersededFileAuths(mutationCtx, targetPath, updated); errSync != nil {
+		return "", errSync
 	}
 	h.syncQuotaSchedulerForAuth(updated)
+	if h.postAuthPersistHook != nil {
+		if errHook := h.postAuthPersistHook(ctx, updated); errHook != nil {
+			return savedPath, fmt.Errorf("failed to synchronize auth runtime: %w", errHook)
+		}
+	}
 	return savedPath, nil
 }
 
@@ -3349,24 +3872,31 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 
-	_, status, completed, ok := getOAuthSessionDetails(state)
+	h.authStatusMu.Lock()
+	defer h.authStatusMu.Unlock()
+
+	session, ok := getOAuthSessionIntegrationDetails(state)
 	if !ok {
-		c.JSON(http.StatusOK, gin.H{"status": "error", "error": "unknown or expired state"})
+		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "expired", "error": "unknown or expired state"})
 		return
 	}
 	if !verifyOAuthNonce(state, c.Query("nonce")) {
-		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "error": "nonce mismatch"})
+		c.JSON(http.StatusUnauthorized, gin.H{"status": "error", "phase": "error", "error": "nonce mismatch"})
 		return
 	}
-	if completed {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	if session.Completed {
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "phase": "success"})
 		return
 	}
-	if status != "" {
-		c.JSON(http.StatusOK, gin.H{"status": "error", "error": status})
+	if session.Status != "" {
+		c.JSON(http.StatusOK, gin.H{"status": "error", "phase": "error", "error": session.Status})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+	if session.Source == oauthSessionSourcePlugin {
+		h.pollPluginOAuthSession(c, state, session)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "wait", "phase": oauthSessionPhase(session)})
 }
 
 func (h *Handler) CancelAuthSession(c *gin.Context) {

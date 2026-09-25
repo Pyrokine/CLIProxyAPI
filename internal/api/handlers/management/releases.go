@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,8 +195,10 @@ func githubGet(ctx context.Context, client *http.Client, url string) ([]byte, er
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", releasesUserAgent)
-	if token := lookupGitHubToken(); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if isGitHubAPIRequestURL(url) {
+		if token := util.GitHubToken(); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -210,13 +212,9 @@ func githubGet(ctx context.Context, client *http.Client, url string) ([]byte, er
 	return io.ReadAll(io.LimitReader(resp.Body, 256<<20))
 }
 
-func lookupGitHubToken() string {
-	for _, key := range []string{"GITSTORE_GIT_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"} {
-		if v, ok := os.LookupEnv(key); ok {
-			if t := strings.TrimSpace(v); t != "" {
-				return t
-			}
-		}
-	}
-	return ""
+func isGitHubAPIRequestURL(rawURL string) bool {
+	parsed, errParse := url.Parse(strings.TrimSpace(rawURL))
+	return errParse == nil && strings.EqualFold(parsed.Scheme, "https") &&
+		strings.EqualFold(parsed.Hostname(), "api.github.com") &&
+		(parsed.Port() == "" || parsed.Port() == "443")
 }

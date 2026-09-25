@@ -44,6 +44,8 @@ func (*apiKeyFirstSelector) Pick(
 }
 
 type captureExecutor struct {
+	calls        atomic.Int32
+	refreshCalls atomic.Int32
 	request      *http.Request
 	body         []byte
 	selectedAuth *auth.Auth
@@ -72,7 +74,8 @@ func (*captureExecutor) ExecuteStream(
 	return nil, nil
 }
 
-func (*captureExecutor) Refresh(_ context.Context, credential *auth.Auth) (*auth.Auth, error) {
+func (e *captureExecutor) Refresh(_ context.Context, credential *auth.Auth) (*auth.Auth, error) {
+	e.refreshCalls.Add(1)
 	return credential, nil
 }
 
@@ -96,6 +99,7 @@ func (e *captureExecutor) HttpRequest(
 	credential *auth.Auth,
 	req *http.Request,
 ) (*http.Response, error) {
+	e.calls.Add(1)
 	e.request = req.Clone(req.Context())
 	e.selectedAuth = credential.Clone()
 	body, errRead := io.ReadAll(req.Body)
@@ -166,9 +170,11 @@ func (*homeDispatcher) AbortAmbiguousDispatch() {}
 type trackedResponseBody struct {
 	io.Reader
 	closed atomic.Bool
+	closes atomic.Int32
 }
 
 func (b *trackedResponseBody) Close() error {
+	b.closes.Add(1)
 	b.closed.Store(true)
 	return nil
 }
@@ -591,6 +597,20 @@ func TestPrepareCallRequestRejectsInvalidSessionJSON(t *testing.T) {
 		[]byte(body), "multipart/form-data; boundary="+boundary,
 	); errPrepare == nil {
 		t.Fatal("prepareCallRequest() accepted invalid session JSON")
+	}
+}
+
+func TestRewriteCallRequestModelRejectsNullObjects(t *testing.T) {
+	for _, body := range []string{
+		`null`,
+		`{"session":null}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			_, _, err := rewriteCallRequestModel([]byte(body), "application/json", defaultLiveModel)
+			if err == nil {
+				t.Fatalf("rewriteCallRequestModel(%s) accepted a null object", body)
+			}
+		})
 	}
 }
 
