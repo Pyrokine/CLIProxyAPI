@@ -21,6 +21,7 @@ import (
 	helps "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -35,17 +36,29 @@ var (
 )
 
 type hostHTTPClient struct {
-	host     *Host
-	auth     *coreauth.Auth
-	provider string
+	host            *Host
+	auth            *coreauth.Auth
+	provider        string
+	requestProxyURL string
 }
 
 func (h *Host) newHTTPClient(auth *coreauth.Auth, providers ...string) pluginapi.HostHTTPClient {
+	return h.newHTTPClientWithProxy(auth, "", providers...)
+}
+
+func (h *Host) newHTTPClientWithProxy(auth *coreauth.Auth, requestProxyURL string, providers ...string) pluginapi.HostHTTPClient {
 	provider := ""
 	if len(providers) > 0 {
 		provider = providers[0]
 	}
-	return &hostHTTPClient{host: h, auth: auth, provider: provider}
+	return &hostHTTPClient{host: h, auth: auth, provider: provider, requestProxyURL: strings.TrimSpace(requestProxyURL)}
+}
+
+func (c *hostHTTPClient) proxyContext(ctx context.Context) context.Context {
+	if c == nil {
+		return cliproxyexecutor.WithoutRequestProxyURL(ctx)
+	}
+	return cliproxyexecutor.WithRequestProxyURL(ctx, c.requestProxyURL)
 }
 
 func (c *hostHTTPClient) Do(ctx context.Context, req pluginapi.HTTPRequest) (pluginapi.HTTPResponse, error) {
@@ -228,15 +241,15 @@ func (c *hostHTTPClient) newHTTPClientForRequest(
 ) (*http.Client, func(), error) {
 	profile := cloneHTTPWireProfile(req.WireProfile)
 	if profile == nil || !profile.HTTP1Only && !profile.DisableAutoCompression && len(profile.HeaderProfile) == 0 {
-		client := helps.NewProxyAwareHTTPClient(ctx, cfg, c.auth, 0)
+		client := helps.NewProxyAwareHTTPClient(c.proxyContext(ctx), cfg, c.auth, 0)
 		if client == nil {
 			client = &http.Client{}
 		}
 		return client, nil, nil
 	}
 
-	proxyString := ""
-	if c.auth != nil {
+	proxyString := strings.TrimSpace(c.requestProxyURL)
+	if proxyString == "" && c.auth != nil {
 		proxyString = strings.TrimSpace(c.auth.ProxyURL)
 	}
 	if proxyString == "" && cfg != nil {

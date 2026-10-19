@@ -79,18 +79,21 @@ const (
 	MethodQuotaFetch      = "quota.fetch"
 	MethodQuotaReset      = "quota.reset"
 
-	MethodHostAffinityLookup     = "host.affinity.lookup"
-	MethodHostHTTPDo             = "host.http.do"
-	MethodHostHTTPDoStream       = "host.http.do_stream"
-	MethodHostHTTPStreamRead     = "host.http.stream_read"
-	MethodHostHTTPStreamClose    = "host.http.stream_close"
-	MethodHostModelExecute       = "host.model.execute"
-	MethodHostModelExecuteStream = "host.model.execute_stream"
-	MethodHostModelStreamRead    = "host.model.stream_read"
-	MethodHostModelStreamClose   = "host.model.stream_close"
-	MethodHostStreamEmit         = "host.stream.emit"
-	MethodHostStreamClose        = "host.stream.close"
-	MethodHostLog                = "host.log"
+	MethodHostAffinityLookup       = "host.affinity.lookup"
+	MethodHostRoutingResetCooldown = "host.routing.reset_cooldown"
+	MethodHostHTTPDo               = "host.http.do"
+	MethodHostHTTPDoStream         = "host.http.do_stream"
+	MethodHostHTTPOperationOpen    = "host.http.operation_open"
+	MethodHostHTTPCancel           = "host.http.cancel"
+	MethodHostHTTPStreamRead       = "host.http.stream_read"
+	MethodHostHTTPStreamClose      = "host.http.stream_close"
+	MethodHostModelExecute         = "host.model.execute"
+	MethodHostModelExecuteStream   = "host.model.execute_stream"
+	MethodHostModelStreamRead      = "host.model.stream_read"
+	MethodHostModelStreamClose     = "host.model.stream_close"
+	MethodHostStreamEmit           = "host.stream.emit"
+	MethodHostStreamClose          = "host.stream.close"
+	MethodHostLog                  = "host.log"
 )
 
 type Envelope struct {
@@ -100,7 +103,31 @@ type Envelope struct {
 }
 
 type Error struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable,omitempty"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+func (e *Error) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func (e *Error) StatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.HTTPStatus
+}
+
+// NewErrorEnvelope encodes a failed plugin response with an optional HTTP status.
+func NewErrorEnvelope(code, message string, httpStatus ...int) ([]byte, error) {
+	response := &Error{Code: code, Message: message}
+	if len(httpStatus) > 0 {
+		response.HTTPStatus = httpStatus[0]
+	}
+	return json.Marshal(Envelope{OK: false, Error: response})
 }

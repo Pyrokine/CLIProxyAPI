@@ -63,6 +63,38 @@ func (e *stubRefreshCompatExecutor) HttpRequest(
 
 func (e *stubRefreshCompatExecutor) PrepareRequest(*http.Request, *coreauth.Auth) error { return nil }
 
+type scopedRefreshCompatExecutor struct {
+	stubRefreshCompatExecutor
+	apiKey *stubRefreshCompatExecutor
+}
+
+func (e *scopedRefreshCompatExecutor) ForAPIKey() coreauth.ProviderExecutor {
+	return e.apiKey
+}
+
+func TestPluginRefreshCompatExecutorForAPIKeyKeepsRefreshOwner(t *testing.T) {
+	apiKey := &stubRefreshCompatExecutor{id: "provider"}
+	inner := &scopedRefreshCompatExecutor{
+		stubRefreshCompatExecutor: stubRefreshCompatExecutor{id: "provider"},
+		apiKey:                    apiKey,
+	}
+	host := New()
+	wrapped := NewPluginRefreshCompatExecutor(inner, host).(*pluginRefreshCompatExecutor)
+	selected, ok := wrapped.ForAPIKey().(*pluginRefreshCompatExecutor)
+	if !ok || selected == nil || selected.host != host || selected.inner != apiKey {
+		t.Fatalf("ForAPIKey() = %#v, want scoped inner with original plugin refresh owner", selected)
+	}
+	if wrapped.inner != inner {
+		t.Fatal("ForAPIKey() changed the original executor")
+	}
+	if _, err := selected.Execute(context.Background(), nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	if apiKey.executeCalls != 1 || inner.executeCalls != 0 {
+		t.Fatalf("execute calls = scoped %d, original %d", apiKey.executeCalls, inner.executeCalls)
+	}
+}
+
 func TestPluginRefreshCompatExecutorNamespacedCredentialUsesPluginAuthProvider(t *testing.T) {
 	refreshCalls := 0
 	host := newHostWithRecords(

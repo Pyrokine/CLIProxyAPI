@@ -34,6 +34,11 @@ func (h *Host) PickAuth(ctx context.Context, req pluginapi.SchedulerPickRequest)
 	return resp, true, nil
 }
 
+func (h *Host) SchedulerWantsAcrossPriorities() bool {
+	record := h.schedulerRecord()
+	return record != nil && schedulerWantsAcrossPriorities(record.plugin.Capabilities)
+}
+
 func (h *Host) schedulerRecord() *capabilityRecord {
 	if h == nil {
 		return nil
@@ -81,6 +86,17 @@ func normalizeSchedulerResponse(
 ) (pluginapi.SchedulerPickResponse, bool, string) {
 	resp.AuthID = strings.TrimSpace(resp.AuthID)
 	resp.DelegateBuiltin = strings.TrimSpace(resp.DelegateBuiltin)
+	resp.RejectCode = strings.TrimSpace(resp.RejectCode)
+	resp.RejectReason = strings.TrimSpace(resp.RejectReason)
+	if resp.Reject {
+		if resp.RejectCode == "" {
+			resp.RejectCode = "auth_unavailable"
+		}
+		if resp.RejectReason == "" {
+			resp.RejectReason = "scheduler rejected candidate selection"
+		}
+		return resp, true, ""
+	}
 
 	hasAuthID := resp.AuthID != ""
 	hasDelegate := resp.DelegateBuiltin != ""

@@ -214,14 +214,18 @@ func TestAuthMultiRecordResponsesPreserveNativeAndRPCCompatibility(t *testing.T)
 
 func TestHostModelTypesPreserveFields(t *testing.T) {
 	request := HostModelExecutionRequest{
-		EntryProtocol: "openai",
-		ExitProtocol:  "claude",
-		Model:         "gpt-test",
-		Stream:        true,
-		Body:          []byte(`{"input":"hello"}`),
-		Headers:       http.Header{"X-Test": []string{"one", "two"}},
-		Query:         url.Values{"alt": []string{"beta"}},
-		Alt:           "chat",
+		EntryProtocol:  "openai",
+		ExitProtocol:   "claude",
+		Model:          "gpt-test",
+		Stream:         true,
+		Body:           []byte(`{"input":"hello"}`),
+		Headers:        http.Header{"X-Test": []string{"one", "two"}},
+		Query:          url.Values{"alt": []string{"beta"}},
+		Alt:            "chat",
+		ForcedProvider: "claude",
+		AuthID:         "auth-1",
+		ProxyURL:       "socks5://localhost:1080",
+		Path:           "/v1/images/generations",
 	}
 	rawRequest, errMarshalRequest := json.Marshal(request)
 	if errMarshalRequest != nil {
@@ -230,6 +234,7 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 	requestJSON := string(rawRequest)
 	for _, field := range []string{
 		"entry_protocol", "exit_protocol", "model", "stream", "body", "headers", "query", "alt",
+		"forced_provider", "auth_id", "proxy_url", "path",
 	} {
 		if !strings.Contains(requestJSON, `"`+field+`"`) {
 			t.Fatalf("HostModelExecutionRequest JSON missing field %q: %s", field, requestJSON)
@@ -246,7 +251,10 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 		string(decodedRequest.Body) != string(request.Body) ||
 		decodedRequest.Headers.Get("X-Test") != "one" ||
 		decodedRequest.Query.Get("alt") != "beta" ||
-		decodedRequest.Alt != request.Alt {
+		decodedRequest.Alt != request.Alt ||
+		decodedRequest.ForcedProvider != request.ForcedProvider ||
+		decodedRequest.AuthID != request.AuthID || decodedRequest.ProxyURL != request.ProxyURL ||
+		decodedRequest.Path != request.Path {
 		t.Fatalf("HostModelExecutionRequest round trip = %#v", decodedRequest)
 	}
 	if got := decodedRequest.Headers.Values("X-Test"); len(got) != 2 || got[1] != "two" {
@@ -367,6 +375,21 @@ func TestHostModelTypesPreserveFields(t *testing.T) {
 	}
 }
 
+func TestRequestInterceptPathRoundTrip(t *testing.T) {
+	original := RequestInterceptResponse{Path: "/v1/images/edits"}
+	raw, errMarshal := json.Marshal(original)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	if !strings.Contains(string(raw), `"path":"/v1/images/edits"`) {
+		t.Fatalf("interceptor response path missing from JSON: %s", raw)
+	}
+	var decoded RequestInterceptResponse
+	if errUnmarshal := json.Unmarshal(raw, &decoded); errUnmarshal != nil || decoded.Path != original.Path {
+		t.Fatalf("interceptor path round trip = %+v, %v", decoded, errUnmarshal)
+	}
+}
+
 func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	request := SchedulerPickRequest{
 		Plugin:    Metadata{Name: "scheduler-plugin"},
@@ -434,6 +457,50 @@ func TestSchedulerTypesExposeRoutingFields(t *testing.T) {
 	}
 }
 
+func TestSchedulerPickResponseAcceptsLegacyAndSnakeCase(t *testing.T) {
+	for _, tc := range []struct {
+		payload string
+		want    SchedulerPickResponse
+	}{
+		{`{"AuthID":"legacy","Handled":true}`, SchedulerPickResponse{AuthID: "legacy", Handled: true}},
+		{`{"auth_id":"snake","handled":true}`, SchedulerPickResponse{AuthID: "snake", Handled: true}},
+		{`{"DelegateBuiltin":"round-robin","Handled":true}`, SchedulerPickResponse{DelegateBuiltin: "round-robin", Handled: true}},
+		{`{"delegate_builtin":"fill-first","handled":true}`, SchedulerPickResponse{DelegateBuiltin: "fill-first", Handled: true}},
+		{`{"AuthID":"legacy","Handled":true,"Reject":true,"RejectCode":"policy","RejectReason":"blocked"}`,
+			SchedulerPickResponse{AuthID: "legacy", Handled: true, Reject: true, RejectCode: "policy", RejectReason: "blocked"}},
+		{`{"auth_id":"snake","handled":true,"reject":true,"reject_code":"quota","reject_reason":"exhausted"}`,
+			SchedulerPickResponse{AuthID: "snake", Handled: true, Reject: true, RejectCode: "quota", RejectReason: "exhausted"}},
+	} {
+		var response SchedulerPickResponse
+		if err := json.Unmarshal([]byte(tc.payload), &response); err != nil {
+			t.Fatalf("decode scheduler response: %v", err)
+		}
+		if response != tc.want {
+			t.Fatalf("scheduler response = %#v, want %#v", response, tc.want)
+		}
+	}
+	response := SchedulerPickResponse{
+		AuthID: "old", DelegateBuiltin: "round-robin", Handled: true,
+		Reject: true, RejectCode: "old", RejectReason: "old",
+	}
+	if err := json.Unmarshal([]byte(`{"handled":false,"reject":false,"auth_id":"","delegate_builtin":"","reject_code":"","reject_reason":""}`), &response); err != nil {
+		t.Fatalf("decode explicit false: %v", err)
+	}
+	if response != (SchedulerPickResponse{}) {
+		t.Fatalf("explicit false and empty values did not overwrite prior decision: %#v", response)
+	}
+
+	response = SchedulerPickResponse{AuthID: "keep", DelegateBuiltin: "fill-first", Handled: true, RejectCode: "keep", RejectReason: "keep"}
+	want := response
+	want.Reject = true
+	if err := json.Unmarshal([]byte(`{"reject":true}`), &response); err != nil {
+		t.Fatalf("decode partial decision: %v", err)
+	}
+	if response != want {
+		t.Fatalf("omitted fields changed: %#v, want %#v", response, want)
+	}
+}
+
 func TestQuotaPayloadAcceptsCamelAndSnakeCase(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
@@ -443,6 +510,10 @@ func TestQuotaPayloadAcceptsCamelAndSnakeCase(t *testing.T) {
 			name: "camel case",
 			raw: `{
 				"subscription":{"plan":"pro","tierName":"Pro","tierId":"tier-pro"},
+				"summary":[
+					{"key":"credits_used","label":"Credits used","value":1740.28,"unit":"credits","format":"number"},
+					{"key":"charged","label":"Charged","value":29.61,"format":"currency","currency":"USD"}
+				],
 				"serverTimeOffsetMs":123,
 				"groups":[{"displayName":"Requests","buckets":[{
 					"window":"daily","remainingFraction":0.8,"resetTime":"2026-09-23T00:00:00Z"
@@ -472,6 +543,20 @@ func TestQuotaPayloadAcceptsCamelAndSnakeCase(t *testing.T) {
 				response.Groups[0].Buckets[0].RemainingFraction != 0.8 ||
 				response.Groups[0].Buckets[0].ResetTime != "2026-09-23T00:00:00Z" {
 				t.Fatalf("quota response = %#v", response)
+			}
+			if testCase.name == "camel case" {
+				want := []QuotaMetric{
+					{Key: "credits_used", Label: "Credits used", Value: 1740.28, Unit: "credits", Format: "number"},
+					{Key: "charged", Label: "Charged", Value: 29.61, Format: "currency", Currency: "USD"},
+				}
+				if len(response.Summary) != len(want) {
+					t.Fatalf("quota summary = %#v, want %#v", response.Summary, want)
+				}
+				for i, metric := range want {
+					if response.Summary[i] != metric {
+						t.Fatalf("quota summary metric %d = %#v, want %#v", i, response.Summary[i], metric)
+					}
+				}
 			}
 		})
 	}

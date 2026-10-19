@@ -16,6 +16,8 @@ import "C"
 import (
 	"context"
 	"unsafe"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 )
 
 //export cliproxyHostCall
@@ -47,9 +49,10 @@ func cliproxyHostCall(
 		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	}
 	ctx := withHostCallbackPluginID(context.Background(), entry.pluginID)
+	ctx = withHostCallbackInstanceID(withHostCallbackInstance(ctx, entry.instance), id)
 	resp, errCall := entry.host.callFromPlugin(ctx, C.GoString(method), requestBytes)
 	if errCall != nil {
-		resp = marshalRPCError("host_call_failed", errCall.Error())
+		resp = marshalRPCError("host_call_failed", errCall.Error(), clienterror.HTTPStatusFromError(errCall))
 	}
 	if len(resp) == 0 || response == nil {
 		return 0

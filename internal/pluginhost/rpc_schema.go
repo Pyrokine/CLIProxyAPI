@@ -25,6 +25,7 @@ type rpcCapabilities struct {
 	FrontendAuthProvider          bool                         `json:"frontend_auth_provider"`
 	FrontendAuthProviderExclusive bool                         `json:"frontend_auth_provider_exclusive"`
 	Scheduler                     bool                         `json:"scheduler"`
+	SchedulerAcrossPriorities     bool                         `json:"scheduler_across_priorities,omitempty"`
 	Executor                      bool                         `json:"executor"`
 	ExecutorModelScope            pluginapi.ExecutorModelScope `json:"executor_model_scope"`
 	ExecutorInputFormats          []string                     `json:"executor_input_formats,omitempty"`
@@ -147,6 +148,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		FrontendAuthProvider:          caps.FrontendAuthProvider != nil,
 		FrontendAuthProviderExclusive: caps.FrontendAuthProvider != nil && caps.FrontendAuthProviderExclusive,
 		Scheduler:                     caps.Scheduler != nil,
+		SchedulerAcrossPriorities:     schedulerWantsAcrossPriorities(caps),
 		Executor:                      caps.Executor != nil,
 		ExecutorModelScope:            normalizedExecutorModelScope(caps),
 		ExecutorInputFormats:          append([]string(nil), caps.ExecutorInputFormats...),
@@ -167,6 +169,19 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
 		ManagementAPI:                 caps.ManagementAPI != nil,
 		QuotaProvider:                 caps.QuotaProvider != nil,
 	}
+}
+
+func schedulerWantsAcrossPriorities(caps pluginapi.Capabilities) bool {
+	if caps.Scheduler == nil {
+		return false
+	}
+	if caps.SchedulerAcrossPriorities {
+		return true
+	}
+	if scheduler, ok := caps.Scheduler.(interface{ SchedulerWantsAcrossPriorities() bool }); ok {
+		return scheduler.SchedulerWantsAcrossPriorities()
+	}
+	return false
 }
 
 func marshalRPCResult(v any) ([]byte, error) {

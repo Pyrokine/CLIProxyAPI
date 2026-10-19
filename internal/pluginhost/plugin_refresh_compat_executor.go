@@ -46,6 +46,25 @@ func UnwrapPluginRefreshCompatExecutor(executor coreauth.ProviderExecutor) (core
 	return wrapper.inner, true
 }
 
+func (e *pluginRefreshCompatExecutor) SupportsApplyPatch() bool {
+	if e == nil || e.inner == nil {
+		return false
+	}
+	support, ok := e.inner.(coreauth.ApplyPatchSupport)
+	return ok && support.SupportsApplyPatch()
+}
+
+func (e *pluginRefreshCompatExecutor) ForAPIKey() coreauth.ProviderExecutor {
+	if e == nil {
+		return nil
+	}
+	view := *e
+	if scoped, ok := e.inner.(coreauth.APIKeyConfigExecutor); ok {
+		view.inner = scoped.ForAPIKey()
+	}
+	return &view
+}
+
 func (e *pluginRefreshCompatExecutor) Identifier() string {
 	if e == nil {
 		return ""

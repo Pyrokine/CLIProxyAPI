@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	xcurrency "golang.org/x/text/currency"
 )
 
 const maxQuotaProbeResponseBytes = 10 << 20
@@ -773,10 +774,63 @@ func normalizeQuotaProbeResponse(data []byte) (pluginapi.QuotaFetchResponse, err
 			}
 		}
 	}
+	response.Summary = filterUsableQuotaSummary(data)
 	if errValidate := validateQuotaFetchResponse(response); errValidate != nil {
 		return pluginapi.QuotaFetchResponse{}, errValidate
 	}
 	return response, nil
+}
+
+func filterUsableQuotaSummary(data []byte) []pluginapi.QuotaMetric {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	summaryValue, canonical := raw["summary"]
+	if !canonical {
+		alias := ""
+		for key, value := range raw {
+			if strings.EqualFold(key, "summary") && (alias == "" || key < alias) {
+				summaryValue = value
+				alias = key
+			}
+		}
+	}
+	summary := gjson.ParseBytes(summaryValue)
+	if !summary.IsArray() {
+		return nil
+	}
+	metrics := make([]pluginapi.QuotaMetric, 0, len(summary.Array()))
+	for _, item := range summary.Array() {
+		key := item.Get("key")
+		label := item.Get("label")
+		value := item.Get("value")
+		if key.Type != gjson.String || label.Type != gjson.String || value.Type != gjson.Number ||
+			strings.TrimSpace(key.String()) == "" || strings.TrimSpace(label.String()) == "" ||
+			math.IsNaN(value.Float()) || math.IsInf(value.Float(), 0) {
+			continue
+		}
+		metric := pluginapi.QuotaMetric{Key: strings.TrimSpace(key.String()), Label: strings.TrimSpace(label.String()), Value: value.Float()}
+		if unit := item.Get("unit"); unit.Type == gjson.String {
+			metric.Unit = strings.TrimSpace(unit.String())
+		}
+		if format := item.Get("format"); format.Type == gjson.String {
+			switch strings.TrimSpace(format.String()) {
+			case "number":
+				metric.Format = "number"
+			case "currency":
+				if currency := item.Get("currency"); currency.Type == gjson.String {
+					code := strings.ToUpper(strings.TrimSpace(currency.String()))
+					if _, err := xcurrency.ParseISO(code); err == nil {
+						metric.Format = "currency"
+						metric.Currency = code
+					}
+				}
+			}
+		}
+		metrics = append(metrics, metric)
+	}
+	return metrics
 }
 
 func firstGJSONValue(parent gjson.Result, paths ...string) string {
@@ -825,8 +879,16 @@ func validateQuotaFetchResponse(response pluginapi.QuotaFetchResponse) error {
 			hasBucket = true
 		}
 	}
-	if !hasSubscription && !hasBucket {
-		return fmt.Errorf("quota response contains no subscription or numeric bucket")
+	hasSummary := false
+	for _, metric := range response.Summary {
+		if strings.TrimSpace(metric.Key) == "" || strings.TrimSpace(metric.Label) == "" ||
+			math.IsNaN(metric.Value) || math.IsInf(metric.Value, 0) {
+			return fmt.Errorf("quota summary contains an invalid metric")
+		}
+		hasSummary = true
+	}
+	if !hasSubscription && !hasBucket && !hasSummary {
+		return fmt.Errorf("quota response contains no subscription, numeric bucket or summary")
 	}
 	return nil
 }
@@ -892,6 +954,7 @@ func mapQuotaProbeResponse(data []byte, mapping map[string]any) (pluginapi.Quota
 			response.Groups = append(response.Groups, group)
 		}
 	}
+	response.Summary = filterUsableQuotaSummary(data)
 	if errValidate := validateQuotaFetchResponse(response); errValidate != nil {
 		return pluginapi.QuotaFetchResponse{}, fmt.Errorf("quota probe mapping did not produce a usable response: %w", errValidate)
 	}

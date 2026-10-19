@@ -20,6 +20,7 @@ import (
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginstore"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	sdkaccess "github.com/Pyrokine/CLIProxyAPI/v6/sdk/access"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -392,18 +393,37 @@ func (h *Host) RegisterModels(ctx context.Context, modelRegistry modelRegistry) 
 	h.commitModelClients(token, modelRegistry, registrations, nextClients, nextProviders, nextModelRegistrations)
 }
 
-func (h *Host) HasOAuthModelProvider() bool {
+func (h *Host) HasOAuthModelProvider(provider string) bool {
 	if h == nil {
 		return false
 	}
+	provider = normalizeProviderID(provider)
+	if provider == "" {
+		return false
+	}
 	for _, record := range h.activeRecords() {
-		if record.plugin.Capabilities.ModelProvider != nil &&
-			!h.isPluginFused(record.id) &&
-			executorScopeAllowsOAuthModels(record.plugin.Capabilities) {
+		if h.authModelProviderMatches(record, provider) {
 			return true
 		}
 	}
 	return false
+}
+
+func (h *Host) authModelProviderMatches(record capabilityRecord, provider string) bool {
+	caps := record.plugin.Capabilities
+	if caps.ModelProvider == nil || h.isPluginFused(record.id) || !executorScopeAllowsOAuthModels(caps) {
+		return false
+	}
+	if caps.AuthProvider != nil {
+		identifier, ok := h.callAuthProviderIdentifier(record.id, caps.AuthProvider)
+		return ok && normalizeProviderID(identifier) == provider
+	}
+	candidate := normalizeProviderID(h.modelProvider(record.id))
+	if candidate == "" && caps.Executor != nil {
+		identifier, ok := h.executorProvider(record, caps.Executor)
+		return ok && normalizeProviderID(identifier) == provider
+	}
+	return candidate == provider
 }
 
 func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModelResult {
@@ -416,34 +436,10 @@ func (h *Host) ModelsForAuth(ctx context.Context, auth *coreauth.Auth) AuthModel
 	}
 	snapshot := h.Snapshot()
 	for _, record := range h.activeRecordsFromSnapshot(snapshot) {
+		if !h.authModelProviderMatches(record, providerKey) {
+			continue
+		}
 		modelProvider := record.plugin.Capabilities.ModelProvider
-		if modelProvider == nil || h.isPluginFused(record.id) {
-			continue
-		}
-		if !executorScopeAllowsOAuthModels(record.plugin.Capabilities) {
-			continue
-		}
-		authProvider := record.plugin.Capabilities.AuthProvider
-		if authProvider != nil {
-			identifier, okIdentifier := h.callAuthProviderIdentifier(record.id, authProvider)
-			if !okIdentifier || normalizeProviderID(identifier) != providerKey {
-				continue
-			}
-		} else {
-			recordProvider := normalizeProviderID(h.modelProvider(record.id))
-			if recordProvider == "" {
-				executor := record.plugin.Capabilities.Executor
-				if executor != nil {
-					candidate, okCandidate := h.executorProvider(record, executor)
-					if okCandidate {
-						recordProvider = candidate
-					}
-				}
-			}
-			if recordProvider != providerKey {
-				continue
-			}
-		}
 		operationToken, okToken := h.capturePluginOperationToken(record, h.currentApplyGeneration())
 		if !okToken {
 			continue
@@ -547,6 +543,19 @@ func (h *Host) AuthModelResultCurrent(result AuthModelResult) bool {
 		return true
 	}
 	return result.operationToken.pluginID != "" && h.pluginOperationTokenCurrent(result.operationToken)
+}
+
+// PublishAuthModelsIfCurrent 将模型发布与插件失效按同一锁顺序串行执行
+func (h *Host) PublishAuthModelsIfCurrent(result AuthModelResult, publish func() bool) bool {
+	if h == nil || publish == nil {
+		return false
+	}
+	h.publicationMu.Lock()
+	defer h.publicationMu.Unlock()
+	if !h.AuthModelResultCurrent(result) {
+		return false
+	}
+	return publish()
 }
 
 func authModelUpdateHasValue(data pluginapi.AuthData) bool {
@@ -808,8 +817,8 @@ func (h *Host) interceptRequest(
 ) pluginapi.RequestInterceptResponse {
 	current := pluginapi.RequestInterceptResponse{
 		Headers: cloneHeader(req.Headers),
-		Body:    bytes.Clone(req.Body),
 	}
+	currentBody := req.Body
 	skipPluginID = strings.TrimSpace(skipPluginID)
 	for _, record := range h.activeRecords() {
 		interceptor := record.plugin.Capabilities.RequestInterceptor
@@ -818,8 +827,14 @@ func (h *Host) interceptRequest(
 		}
 		nextReq := req
 		nextReq.Headers = cloneHeader(current.Headers)
-		nextReq.Body = bytes.Clone(current.Body)
+		nextReq.Body = bytes.Clone(currentBody)
 		nextReq.Metadata = cloneInterceptorMetadata(req.Metadata)
+		if current.Path != "" {
+			if nextReq.Metadata == nil {
+				nextReq.Metadata = make(map[string]any, 1)
+			}
+			nextReq.Metadata[coreexecutor.RequestPathMetadataKey] = current.Path
+		}
 		if resp, ok := h.callRequestInterceptor(
 			ctx, record.id, method, func(
 				callCtx context.Context,
@@ -830,7 +845,11 @@ func (h *Host) interceptRequest(
 		); ok {
 			current.Headers = mergeHeaders(current.Headers, resp.Headers, resp.ClearHeaders)
 			if len(resp.Body) > 0 {
-				current.Body = bytes.Clone(resp.Body)
+				currentBody = bytes.Clone(resp.Body)
+				current.Body = currentBody
+			}
+			if path := strings.TrimSpace(resp.Path); path != "" {
+				current.Path = path
 			}
 			if resp.Terminate {
 				current.Terminate = true
@@ -2036,17 +2055,24 @@ func (a *executorAdapter) prepareExecutorCall(
 	if errInput != nil {
 		return preparedExecutorCall{}, errInput
 	}
-	outputFormat, errOutput := a.selectExecutorOutputFormat(requestedFormat, inputFormat)
+	outputFormat, errOutput := a.selectExecutorOutputFormat(requestedFormat, inputFormat, opts.Stream)
 	if errOutput != nil {
 		return preparedExecutorCall{}, errOutput
 	}
 
 	nativeReq := req
 	nativeOpts := opts
+	if len(nativeOpts.OriginalRequest) == 0 {
+		nativeOpts.OriginalRequest = bytes.Clone(req.Payload)
+	}
 	if inputRequested != "" && inputRequested != inputFormat {
-		nativeReq.Payload = sdktranslator.TranslateRequestWithContext(
+		translated, errTranslate := sdktranslator.TranslateRequestChecked(
 			ctx, inputRequested, inputFormat, req.Model, req.Payload, opts.Stream,
 		)
+		if errTranslate != nil {
+			return preparedExecutorCall{}, errTranslate
+		}
+		nativeReq.Payload = translated
 	}
 	nativeReq.Format = outputFormat
 	nativeOpts.SourceFormat = inputFormat
@@ -2109,7 +2135,7 @@ func (a *executorAdapter) selectExecutorInputFormat(requested sdktranslator.Form
 	return "", fmt.Errorf("plugin executor %s does not support input format %q", a.Identifier(), requested)
 }
 
-func (a *executorAdapter) selectExecutorOutputFormat(requested, inputFormat sdktranslator.Format) (
+func (a *executorAdapter) selectExecutorOutputFormat(requested, inputFormat sdktranslator.Format, stream bool) (
 	sdktranslator.Format,
 	error,
 ) {
@@ -2120,23 +2146,27 @@ func (a *executorAdapter) selectExecutorOutputFormat(requested, inputFormat sdkt
 		return requested, nil
 	}
 	if executorFormatContains(a.outputFormats, inputFormat) && a.executorResponseTranslationAvailable(
-		inputFormat, requested,
+		inputFormat, requested, stream,
 	) {
 		return inputFormat, nil
 	}
 	for _, format := range a.outputFormats {
-		if requested == "" || a.executorResponseTranslationAvailable(format, requested) {
+		if requested == "" || a.executorResponseTranslationAvailable(format, requested, stream) {
 			return format, nil
 		}
 	}
 	return "", fmt.Errorf("plugin executor %s does not support output format %q", a.Identifier(), requested)
 }
 
-func (a *executorAdapter) executorResponseTranslationAvailable(from, to sdktranslator.Format) bool {
+func (a *executorAdapter) executorResponseTranslationAvailable(from, to sdktranslator.Format, stream bool) bool {
 	if from == "" || to == "" || from == to {
 		return true
 	}
-	if sdktranslator.HasResponseTransformer(to, from) {
+	if stream {
+		if sdktranslator.HasStreamResponseTransformer(to, from) {
+			return true
+		}
+	} else if sdktranslator.HasNonStreamResponseTransformer(to, from) {
 		return true
 	}
 	return a != nil && a.host.hasResponseTranslator()
@@ -2221,6 +2251,12 @@ func (a *executorAdapter) translateExecutorStreamChunks(
 					return
 				}
 				frames := a.translateExecutorStreamPayload(ctx, prepared, chunk.Payload, &param)
+				if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil {
+					_ = sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{
+						Err: coreauth.NewRequestScopedError(errTranslate.Error(), http.StatusBadGateway),
+					})
+					return
+				}
 				for _, frame := range frames {
 					if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
 						return
@@ -2295,6 +2331,12 @@ func (a *executorAdapter) emitTranslatedExecutorStreamTail(
 		return
 	}
 	frames := a.translateExecutorStreamPayload(ctx, prepared, []byte("data: [DONE]"), param)
+	if errTranslate := sdktranslator.ResponseTranslationError(param); errTranslate != nil {
+		_ = sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{
+			Err: coreauth.NewRequestScopedError(errTranslate.Error(), http.StatusBadGateway),
+		})
+		return
+	}
 	for _, frame := range frames {
 		if !sendExecutorPluginStreamChunk(ctx, out, pluginapi.ExecutorStreamChunk{Payload: frame}) {
 			return
@@ -2333,29 +2375,49 @@ func (a *executorAdapter) Execute(
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) {
 		return coreexecutor.Response{}, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+	var reporter *runtimeexecutor.PluginExecutorUsageReporter
+	var observedUsage coreusage.Detail
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.Execute", recovered)
 			resp = coreexecutor.Response{}
 			err = fmt.Errorf("plugin executor %s panic: %v", a.Identifier(), recovered)
 		}
+		if err != nil {
+			reporter.PublishFailureWithDetail(ctx, observedUsage, err)
+		}
 	}()
 
+	modelName := strings.TrimSpace(thinking.ParseSuffix(req.Model).ModelName)
+	if modelName == "" {
+		modelName = req.Model
+	}
+	reporter = runtimeexecutor.NewPluginExecutorUsageReporter(ctx, a, modelName, auth)
 	prepared, errPrepare := a.prepareExecutorCall(ctx, req, opts)
 	if errPrepare != nil {
 		return coreexecutor.Response{}, errPrepare
 	}
+	reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
 	pluginResp, errExecute := a.executor.Execute(
 		ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts),
 	)
 	if errExecute != nil {
 		return coreexecutor.Response{}, errExecute
 	}
-	return coreexecutor.Response{
-		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
+	internallogging.MarkFirstResponseByte(ctx)
+	observedUsage = runtimeexecutor.ParsePluginExecutorResponseUsage(prepared.outputFormat.String(), pluginResp.Payload)
+	var param any
+	payload := a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, &param)
+	if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil {
+		return coreexecutor.Response{}, coreauth.NewRequestScopedError(errTranslate.Error(), http.StatusBadGateway)
+	}
+	resp = coreexecutor.Response{
+		Payload:  payload,
 		Metadata: cloneAnyMap(pluginResp.Metadata),
 		Headers:  cloneHeader(pluginResp.Headers),
-	}, nil
+	}
+	reporter.Publish(ctx, observedUsage)
+	return resp, nil
 }
 
 func (a *executorAdapter) ExecuteStream(
@@ -2367,28 +2429,181 @@ func (a *executorAdapter) ExecuteStream(
 	if a == nil || a.executor == nil || a.host.isPluginFused(a.pluginID) {
 		return nil, fmt.Errorf("plugin executor %s is unavailable", a.Identifier())
 	}
+	var reporter *runtimeexecutor.PluginExecutorUsageReporter
+	var cancelStream context.CancelFunc
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			a.host.fusePlugin(a.pluginID, "Executor.ExecuteStream", recovered)
 			result = nil
 			err = fmt.Errorf("plugin executor %s stream panic: %v", a.Identifier(), recovered)
 		}
+		if err != nil {
+			if cancelStream != nil {
+				cancelStream()
+			}
+			reporter.PublishFailure(ctx, err)
+		}
 	}()
 
+	modelName := strings.TrimSpace(thinking.ParseSuffix(req.Model).ModelName)
+	if modelName == "" {
+		modelName = req.Model
+	}
+	reporter = runtimeexecutor.NewPluginExecutorUsageReporter(ctx, a, modelName, auth)
 	prepared, errPrepare := a.prepareExecutorCall(ctx, req, opts)
 	if errPrepare != nil {
 		return nil, errPrepare
 	}
+	reporter.SetTranslatedReasoningEffort(prepared.req.Payload, prepared.inputFormat.String())
+	reporter.MarkStream()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	streamCtx, cancelStream := context.WithCancel(ctx)
 	pluginResp, errExecuteStream := a.executor.ExecuteStream(
-		ctx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts),
+		streamCtx, buildExecutorRequest(a.host, a.provider, auth, prepared.req, prepared.opts),
 	)
 	if errExecuteStream != nil {
+		cancelStream()
 		return nil, errExecuteStream
 	}
 	return &coreexecutor.StreamResult{
 		Headers: cloneHeader(pluginResp.Headers),
-		Chunks:  mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, pluginResp.Chunks)),
+		Chunks:  a.observeAndTranslateExecutorStream(ctx, prepared, pluginResp.Chunks, reporter, cancelStream),
 	}, nil
+}
+
+func (a *executorAdapter) observeAndTranslateExecutorStream(
+	ctx context.Context,
+	prepared preparedExecutorCall,
+	in <-chan pluginapi.ExecutorStreamChunk,
+	reporter *runtimeexecutor.PluginExecutorUsageReporter,
+	cancelStream context.CancelFunc,
+) <-chan coreexecutor.StreamChunk {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if in == nil {
+		cancelStream()
+		reporter.PublishFailure(ctx, fmt.Errorf("plugin executor %s stream closed before first payload", a.Identifier()))
+		return mapExecutorStreamChunks(ctx, nil)
+	}
+
+	observationCtx, cancelObservation := context.WithCancel(ctx)
+	observed := make(chan pluginapi.ExecutorStreamChunk)
+	usage := runtimeexecutor.NewPluginExecutorStreamUsage(prepared.outputFormat.String())
+	observedDone := make(chan struct{})
+	var streamErr error
+	go func() {
+		defer close(observedDone)
+		defer close(observed)
+		var pending []byte
+		var oversized bool
+		defer func() {
+			if len(pending) > 0 && !oversized {
+				usage.ObserveLine(pending)
+			}
+		}()
+
+		for {
+			select {
+			case <-observationCtx.Done():
+				return
+			case chunk, ok := <-in:
+				if !ok {
+					return
+				}
+				if chunk.Err != nil {
+					streamErr = chunk.Err
+				} else if len(chunk.Payload) > 0 {
+					internallogging.MarkFirstResponseByte(ctx)
+					payload := chunk.Payload
+					for len(payload) > 0 {
+						end := bytes.IndexByte(payload, '\n')
+						if end < 0 {
+							if !oversized && len(pending)+len(payload) > 64*1024 {
+								pending = nil
+								oversized = true
+								log.Warn("pluginhost: executor stream usage line exceeds 64 KiB; skipping the line")
+							} else if !oversized {
+								pending = append(pending, payload...)
+							}
+							break
+						}
+						if !oversized && len(pending)+end <= 64*1024 {
+							pending = append(pending, payload[:end]...)
+							usage.ObserveLine(pending)
+						} else if !oversized {
+							log.Warn("pluginhost: executor stream usage line exceeds 64 KiB; skipping the line")
+						}
+						pending = pending[:0]
+						oversized = false
+						payload = payload[end+1:]
+					}
+				}
+				select {
+				case observed <- chunk:
+				case <-observationCtx.Done():
+					return
+				}
+				if streamErr != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	mapped := mapExecutorStreamChunks(ctx, a.translateExecutorStreamChunks(ctx, prepared, observed))
+	out := make(chan coreexecutor.StreamChunk)
+	go func() {
+		defer close(out)
+		var hasPayload bool
+		var mappedErr error
+		defer func() {
+			cancelObservation()
+			cancelStream()
+			<-observedDone
+			detail, found := usage.Detail()
+			switch {
+			case streamErr != nil:
+				reporter.PublishFailureWithDetail(ctx, detail, streamErr)
+			case ctx.Err() != nil:
+				reporter.PublishFailureWithDetail(ctx, detail, ctx.Err())
+			case mappedErr != nil:
+				reporter.PublishFailureWithDetail(ctx, detail, mappedErr)
+			case !hasPayload:
+				reporter.PublishFailureWithDetail(ctx, detail, fmt.Errorf("plugin executor %s stream closed before first payload", a.Identifier()))
+			case found:
+				reporter.Publish(ctx, detail)
+			default:
+				reporter.EnsurePublished(ctx)
+			}
+		}()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-mapped:
+				if !ok {
+					return
+				}
+				if len(chunk.Payload) > 0 {
+					hasPayload = true
+				}
+				mappedErr = chunk.Err
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					return
+				}
+				if mappedErr != nil {
+					return
+				}
+			}
+		}
+	}()
+	return out
 }
 
 func (a *executorAdapter) ShouldRefreshAfterUnauthorized(auth *coreauth.Auth) bool {
@@ -2440,8 +2655,13 @@ func (a *executorAdapter) CountTokens(
 	if errCountTokens != nil {
 		return coreexecutor.Response{}, errCountTokens
 	}
+	var param any
+	payload := a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, &param)
+	if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil {
+		return coreexecutor.Response{}, coreauth.NewRequestScopedError(errTranslate.Error(), http.StatusBadGateway)
+	}
 	return coreexecutor.Response{
-		Payload:  a.translateExecutorResponse(ctx, prepared, pluginResp.Payload, false, nil),
+		Payload:  payload,
 		Metadata: cloneAnyMap(pluginResp.Metadata),
 		Headers:  cloneHeader(pluginResp.Headers),
 	}, nil
@@ -2549,12 +2769,19 @@ func (a *usageAdapter) HandleUsage(ctx context.Context, record coreusage.Record)
 	if sessionID == "" || sessionID == parentSessionID {
 		parentSessionID = ""
 	}
+	traceID := strings.TrimSpace(record.RequestID)
+	if traceID == "" {
+		traceID = strings.TrimSpace(internallogging.GetRequestID(ctx))
+	}
 	plugin.HandleUsage(
 		ctx, pluginapi.UsageRecord{
+			RequestID:           strings.TrimSpace(record.ExecutionID),
+			TraceID:             traceID,
 			Provider:            record.Provider,
 			BaseURL:             record.BaseURL,
 			ExecutorType:        record.ExecutorType,
 			Model:               record.Model,
+			ResponseModel:       strings.TrimSpace(record.ResponseModel),
 			Stream:              record.Stream,
 			Alias:               record.Alias,
 			APIKey:              record.APIKey,
@@ -2894,7 +3121,7 @@ func buildExecutorRequest(
 		StorageJSON:     storageJSONFromAuth(auth),
 		AuthMetadata:    cloneAnyMap(authMetadata(auth)),
 		AuthAttributes:  authAttributes(auth),
-		HTTPClient:      host.newHTTPClient(auth, provider),
+		HTTPClient:      host.newHTTPClientWithProxy(auth, opts.ProxyURL, provider),
 	}
 }
 

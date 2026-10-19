@@ -10,12 +10,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"unsafe"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"golang.org/x/sys/windows"
 )
 
@@ -59,6 +61,9 @@ type dynamicLibraryClient struct {
 	tempPath string
 	hostAPI  *windowsHostAPI
 	hostCtx  *uintptr
+	host     *Host
+	pluginID string
+	instance *hostCallbackInstance
 	api      windowsPluginAPI
 }
 
@@ -83,13 +88,18 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 		return nil, errProc
 	}
 	id := windowsHostCallbackID.Add(1)
+	instance := &hostCallbackInstance{id: id}
+	host.registerHostCallbackInstance(file.ID, instance)
 	hostCtx := new(uintptr)
 	*hostCtx = id
-	windowsHostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID})
+	windowsHostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID, instance: instance})
 	client := &dynamicLibraryClient{
 		dll:      dll,
 		tempPath: loadPath,
 		hostCtx:  hostCtx,
+		host:     host,
+		pluginID: file.ID,
+		instance: instance,
 		hostAPI: &windowsHostAPI{
 			abiVersion: pluginHostABIVersion,
 			hostCtx:    uintptr(unsafe.Pointer(hostCtx)),
@@ -229,14 +239,29 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 	if len(request) > 0 {
 		requestPtr = uintptr(unsafe.Pointer(&request[0]))
 	}
-	var response windowsBuffer
+	responseMem, errAlloc := windows.LocalAlloc(
+		windows.LMEM_FIXED|windows.LMEM_ZEROINIT,
+		uint32(unsafe.Sizeof(windowsBuffer{})),
+	)
+	if errAlloc != nil {
+		return nil, fmt.Errorf("allocate plugin response buffer: %w", errAlloc)
+	}
+	if responseMem == 0 {
+		return nil, fmt.Errorf("allocate plugin response buffer")
+	}
+	defer func() {
+		_, _ = windows.LocalFree(windows.Handle(responseMem))
+	}()
+	response := (*windowsBuffer)(unsafe.Pointer(responseMem))
 	rc, _, _ := syscall.SyscallN(
 		c.api.call,
 		uintptr(unsafe.Pointer(methodBytes)),
 		requestPtr,
 		uintptr(len(request)),
-		uintptr(unsafe.Pointer(&response)),
+		responseMem,
 	)
+	runtime.KeepAlive(methodBytes)
+	runtime.KeepAlive(request)
 	var out []byte
 	if response.ptr != 0 && response.len > 0 {
 		out = unsafe.Slice((*byte)(unsafe.Pointer(response.ptr)), response.len)
@@ -246,9 +271,27 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 		_, _, _ = syscall.SyscallN(c.api.freeBuffer, response.ptr, response.len)
 	}
 	if rc != 0 {
+		if isPluginErrorEnvelope(out) {
+			return out, nil
+		}
 		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, rc, string(out))
 	}
 	return out, nil
+}
+
+func (c *dynamicLibraryClient) callbackInstance() *hostCallbackInstance {
+	if c == nil {
+		return nil
+	}
+	return c.instance
+}
+
+func (c *dynamicLibraryClient) cancelHostHTTPResources() {
+	if c == nil || c.host == nil {
+		return
+	}
+	c.instance.closed.Store(true)
+	c.host.closeHostCallbackInstances(c.pluginID, []*hostCallbackInstance{c.instance})
 }
 
 func (c *dynamicLibraryClient) Shutdown() {
@@ -266,6 +309,7 @@ func (c *dynamicLibraryClient) close(releaseDLL bool) {
 	if c == nil {
 		return
 	}
+	c.cancelHostHTTPResources()
 	if c.api.shutdown != 0 {
 		_, _, _ = syscall.SyscallN(c.api.shutdown)
 		c.api.shutdown = 0
@@ -314,9 +358,10 @@ func windowsHostCall(
 		request = append([]byte(nil), request...)
 	}
 	ctx := withHostCallbackPluginID(context.Background(), entry.pluginID)
+	ctx = withHostCallbackInstanceID(withHostCallbackInstance(ctx, entry.instance), id)
 	resp, errCall := entry.host.callFromPlugin(ctx, windowsString(methodPtr), request)
 	if errCall != nil {
-		resp = marshalRPCError("host_call_failed", errCall.Error())
+		resp = marshalRPCError("host_call_failed", errCall.Error(), clienterror.HTTPStatusFromError(errCall))
 	}
 	if len(resp) == 0 || responsePtr == 0 {
 		return 0

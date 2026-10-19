@@ -9,6 +9,7 @@ import (
 
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 type affinityLookupManager interface {
@@ -89,4 +90,41 @@ func (h *Host) callHostAffinityLookup(_ context.Context, request []byte) ([]byte
 	default:
 		return nil, fmt.Errorf("unsupported affinity lookup status %q", status)
 	}
+}
+
+func (h *Host) callHostRoutingResetCooldown(ctx context.Context, request []byte) ([]byte, error) {
+	var req pluginapi.HostRoutingResetCooldownRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, fmt.Errorf("decode host routing reset cooldown request: %w", err)
+	}
+	authIndex := strings.TrimSpace(req.AuthIndex)
+	if authIndex == "" {
+		return nil, fmt.Errorf("auth_index is required")
+	}
+	manager, ok := h.currentAffinityManager().(*coreauth.Manager)
+	if !ok || manager == nil {
+		return nil, fmt.Errorf("core auth manager unavailable")
+	}
+	for _, auth := range manager.List() {
+		if auth == nil || strings.TrimSpace(auth.Index) != authIndex {
+			continue
+		}
+		updated, models, err := manager.ResetCooldown(coreauth.WithSkipPersist(ctx), auth.ID)
+		if err != nil {
+			return nil, fmt.Errorf("reset cooldown: %w", err)
+		}
+		if updated == nil {
+			break
+		}
+		log.WithFields(log.Fields{
+			"plugin_id":  hostCallbackPluginIDFromContext(ctx),
+			"auth_index": updated.Index,
+			"models":     len(models),
+		}).Info("pluginhost: plugin reset credential cooldown")
+		return marshalRPCResult(pluginapi.HostRoutingResetCooldownResponse{
+			AuthIndex: updated.Index,
+			Models:    models,
+		})
+	}
+	return nil, fmt.Errorf("auth not found for auth_index %s", authIndex)
 }

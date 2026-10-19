@@ -459,6 +459,7 @@ func cloneQuotaFetchResponse(src pluginapi.QuotaFetchResponse) pluginapi.QuotaFe
 		subscription := *src.Subscription
 		out.Subscription = &subscription
 	}
+	out.Summary = append([]pluginapi.QuotaMetric(nil), src.Summary...)
 	if len(src.Groups) == 0 {
 		out.Groups = nil
 		return out

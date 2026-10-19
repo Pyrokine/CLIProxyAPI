@@ -14,6 +14,7 @@ import (
 	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
@@ -29,6 +30,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 					UserAgent:       "redis-test-client/1.0",
 					SessionID:       "slot:worker",
 					ParentSessionID: "slot:root",
+					NodeKind:        "compaction",
+					IsCompaction:    true,
 				},
 			)
 			internallogging.SetResponseStatus(ctx, http.StatusOK)
@@ -46,6 +49,9 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 					BaseURL:             " https://upstream.example/v1 ",
 					ExecutorType:        "OpenAICompatExecutor",
 					Model:               "gpt-5.4",
+					ResponseModel:       "gpt-5.4-preview",
+					RequestID:           "inbound-request-id",
+					ExecutionID:         "execution-attempt-id",
 					Stream:              true,
 					Alias:               "client-gpt",
 					APIKey:              "test-key",
@@ -74,6 +80,7 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireStringField(t, payload, "base_url", "https://upstream.example/v1")
 			requireStringField(t, payload, "executor_type", "OpenAICompatExecutor")
 			requireStringField(t, payload, "model", "gpt-5.4")
+			requireStringField(t, payload, "response_model", "gpt-5.4-preview")
 			requireBoolField(t, payload, "stream", true)
 			requireStringField(t, payload, "alias", "client-gpt")
 			requireStringField(t, payload, "endpoint", "POST /v1/chat/completions")
@@ -81,6 +88,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireStringField(t, payload, "api_key", util.HideAPIKey("test-key"))
 			requireMissingField(t, payload, "user_api_key")
 			requireStringField(t, payload, "request_id", "ctx-request-id")
+			requireStringField(t, payload, "trace_id", "inbound-request-id")
+			requireStringField(t, payload, "execution_id", "execution-attempt-id")
 			requireStringField(t, payload, "reasoning_effort", "medium")
 			requireStringField(t, payload, "service_tier", "flex")
 			requireStringField(t, payload, "request_service_tier", "flex")
@@ -90,6 +99,9 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 			requireStringField(t, payload, "user_agent", "redis-test-client/1.0")
 			requireStringField(t, payload, "session_id", coresession.NormalizeToCanonicalUUID("slot:worker"))
 			requireStringField(t, payload, "parent_session_id", coresession.NormalizeToCanonicalUUID("slot:root"))
+			requireStringField(t, payload, "node_kind", "compaction")
+			requireBoolField(t, payload, "is_compaction", true)
+			requireMissingField(t, payload, "is_fork")
 			requireBoolField(t, payload, "generate", false)
 			requireIntField(t, payload, "accounting_version", coreusage.TokenAccountingSchemaVersion)
 			requireIntField(t, payload, "ttft_ms", 250)
@@ -129,6 +141,8 @@ func TestUsageQueuePluginSessionParentFallbackIsSameOrigin(t *testing.T) {
 				ctx := internallogging.WithClientRequestMetadata(context.Background(), internallogging.ClientRequestMetadata{
 					SessionID:       "session:old-child",
 					ParentSessionID: "session:old-parent",
+					NodeKind:        "fork",
+					IsFork:          true,
 				})
 				test.record.Provider = "openai"
 				test.record.Model = "gpt-test"
@@ -136,6 +150,9 @@ func TestUsageQueuePluginSessionParentFallbackIsSameOrigin(t *testing.T) {
 				payload := popSinglePayload(t)
 				requireStringField(t, payload, "session_id", coresession.NormalizeToCanonicalUUID(test.record.SessionID))
 				requireMissingField(t, payload, "parent_session_id")
+				requireMissingField(t, payload, "node_kind")
+				requireMissingField(t, payload, "is_fork")
+				requireMissingField(t, payload, "is_compaction")
 			})
 		})
 	}
@@ -236,6 +253,9 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndFailureAndGinRequestID(t 
 			requireStringField(t, payload, "api_key", util.HideAPIKey("test-key"))
 			requireMissingField(t, payload, "user_api_key")
 			requireStringField(t, payload, "request_id", "gin-request-id")
+			requireStringField(t, payload, "trace_id", "gin-request-id")
+			requireExecutionUUIDField(t, payload)
+			requireMissingField(t, payload, "response_model")
 			requireBoolField(t, payload, "failed", true)
 			requireFailField(t, payload, http.StatusInternalServerError, "upstream failed")
 		},
@@ -346,6 +366,76 @@ func TestUsageQueuePluginPublishesInvalidTokenTotalsAsInconsistent(t *testing.T)
 			},
 		)
 	}
+}
+
+func TestUsageQueuePluginExecutionID(t *testing.T) {
+	for _, async := range []bool{false, true} {
+		for _, test := range []struct {
+			name, recordID, contextID, want string
+		}{
+			{name: "generated"},
+			{name: "whitespace", recordID: " \t ", contextID: " \n "},
+			{name: "context", contextID: " context-execution ", want: "context-execution"},
+			{name: "record", recordID: " record-execution ", want: "record-execution"},
+			{name: "record overrides context", recordID: "record-execution", contextID: "context-execution", want: "record-execution"},
+		} {
+			path := "direct/"
+			if async {
+				path = "publisher/"
+			}
+			t.Run(path+test.name, func(t *testing.T) {
+				withEnabledQueue(t, func() {
+					ctx := internallogging.WithRequestID(context.Background(), "http-request-id")
+					ctx = coreusage.WithExecutionID(ctx, test.contextID)
+					plugin := NewUsagePluginForQueue(defaultQueue)
+					var publish func(coreusage.Record) error
+					if async {
+						manager := coreusage.NewManager(16)
+						defer manager.Stop()
+						manager.Register(plugin)
+						ctx = coreusage.WithManager(ctx, manager)
+						publish = func(record coreusage.Record) error { return coreusage.PublishRecord(ctx, record) }
+					} else {
+						publish = func(record coreusage.Record) error {
+							plugin.HandleUsage(ctx, record)
+							return nil
+						}
+					}
+					var previous string
+					for range 2 {
+						if err := publish(coreusage.Record{Provider: "fixture", Model: "fixture-model", RequestID: "trace-id", ExecutionID: test.recordID}); err != nil {
+							t.Fatal(err)
+						}
+						payload := waitForSinglePayload(t, 2*time.Second)
+						requireStringField(t, payload, "request_id", "http-request-id")
+						requireStringField(t, payload, "trace_id", "trace-id")
+						if test.want != "" {
+							requireStringField(t, payload, "execution_id", test.want)
+							continue
+						}
+						id := requireExecutionUUIDField(t, payload)
+						if id == previous {
+							t.Fatal("separate records reused an execution ID")
+						}
+						previous = id
+					}
+				})
+			})
+		}
+	}
+}
+
+func requireExecutionUUIDField(t *testing.T, payload map[string]json.RawMessage) string {
+	t.Helper()
+	var id string
+	if err := json.Unmarshal(payload["execution_id"], &id); err != nil {
+		t.Fatalf("decode execution_id: %v", err)
+	}
+	parsed, err := uuid.Parse(id)
+	if err != nil || parsed.Version() != 4 || parsed.Variant() != uuid.RFC4122 || parsed.String() != id {
+		t.Fatalf("execution_id = %q, want a canonical UUID v4: %v", id, err)
+	}
+	return id
 }
 
 func withEnabledQueue(t *testing.T, fn func()) {

@@ -84,6 +84,8 @@ type Capabilities struct {
 	FrontendAuthProviderExclusive bool
 	// Scheduler chooses an auth candidate before the built-in scheduler runs.
 	Scheduler Scheduler
+	// SchedulerAcrossPriorities includes available candidates from every priority tier.
+	SchedulerAcrossPriorities bool
 	// Executor sends requests to an upstream provider or local backend.
 	Executor ProviderExecutor
 	// ExecutorModelScope declares whether Executor serves static models, OAuth auth models, or both.
@@ -536,6 +538,64 @@ type SchedulerPickResponse struct {
 	DelegateBuiltin string
 	// Handled reports whether the plugin made a scheduling decision.
 	Handled bool
+	// Reject terminates candidate selection when Handled is true.
+	Reject bool
+	// RejectReason describes why the scheduler rejected the selection.
+	RejectReason string
+	// RejectCode identifies the rejection; empty defaults to auth_unavailable.
+	RejectCode string
+}
+
+// UnmarshalJSON accepts the existing Go-style fields and snake_case plugin responses.
+func (r *SchedulerPickResponse) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		AuthID          *string `json:"AuthID"`
+		AltAuthID       *string `json:"auth_id"`
+		DelegateBuiltin *string `json:"DelegateBuiltin"`
+		AltDelegate     *string `json:"delegate_builtin"`
+		Handled         *bool   `json:"Handled"`
+		AltHandled      *bool   `json:"handled"`
+		Reject          *bool   `json:"Reject"`
+		AltReject       *bool   `json:"reject"`
+		RejectReason    *string `json:"RejectReason"`
+		AltRejectReason *string `json:"reject_reason"`
+		RejectCode      *string `json:"RejectCode"`
+		AltRejectCode   *string `json:"reject_code"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if raw.AuthID != nil {
+		r.AuthID = *raw.AuthID
+	} else if raw.AltAuthID != nil {
+		r.AuthID = *raw.AltAuthID
+	}
+	if raw.DelegateBuiltin != nil {
+		r.DelegateBuiltin = *raw.DelegateBuiltin
+	} else if raw.AltDelegate != nil {
+		r.DelegateBuiltin = *raw.AltDelegate
+	}
+	if raw.Handled != nil {
+		r.Handled = *raw.Handled
+	} else if raw.AltHandled != nil {
+		r.Handled = *raw.AltHandled
+	}
+	if raw.Reject != nil {
+		r.Reject = *raw.Reject
+	} else if raw.AltReject != nil {
+		r.Reject = *raw.AltReject
+	}
+	if raw.RejectReason != nil {
+		r.RejectReason = *raw.RejectReason
+	} else if raw.AltRejectReason != nil {
+		r.RejectReason = *raw.AltRejectReason
+	}
+	if raw.RejectCode != nil {
+		r.RejectCode = *raw.RejectCode
+	} else if raw.AltRejectCode != nil {
+		r.RejectCode = *raw.AltRejectCode
+	}
+	return nil
 }
 
 // ProviderExecutor handles model execution, streaming, HTTP bridging, and token counting.
@@ -573,6 +633,14 @@ type HostModelExecutionRequest struct {
 	Query url.Values `json:"query"`
 	// Alt carries an alternate route or mode suffix when present.
 	Alt string `json:"alt"`
+	// ForcedProvider restricts execution to a provider allowed by the model and API key.
+	ForcedProvider string `json:"forced_provider,omitempty"`
+	// AuthID locks execution to one credential.
+	AuthID string `json:"auth_id,omitempty"`
+	// ProxyURL overrides the proxy for this request.
+	ProxyURL string `json:"proxy_url,omitempty"`
+	// Path overrides the request path for a host model execution.
+	Path string `json:"path,omitempty"`
 }
 
 // HostModelExecutionResponse describes a non-streaming host model execution response.
@@ -647,6 +715,18 @@ type HostAffinityLookupResponse struct {
 	Disabled bool `json:"disabled,omitempty"`
 	// Unavailable reports whether the bound credential is unavailable.
 	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// HostRoutingResetCooldownRequest 指定需要清除本地路由冷却的凭证
+// 清除本地冷却不恢复上游配额，也不消耗主动重置次数
+type HostRoutingResetCooldownRequest struct {
+	AuthIndex string `json:"auth_index"`
+}
+
+// HostRoutingResetCooldownResponse 返回凭证索引和恢复本地路由的模型
+type HostRoutingResetCooldownResponse struct {
+	AuthIndex string   `json:"auth_index"`
+	Models    []string `json:"models,omitempty"`
 }
 
 // HTTPWireProfile configures transport-level wire representation for plugin HTTP requests.
@@ -908,6 +988,8 @@ type RequestInterceptRequest struct {
 
 // RequestInterceptResponse returns request modifications.
 type RequestInterceptResponse struct {
+	// Path overrides the target request path when set.
+	Path string `json:"path,omitempty"`
 	// Headers replaces matching current request headers and preserves headers not mentioned here.
 	Headers http.Header
 	// Body replaces the current request body only when non-empty.
@@ -1228,6 +1310,10 @@ type ManagementResponse struct {
 
 // UsageRecord describes request usage and billing metadata.
 type UsageRecord struct {
+	// RequestID identifies the model execution shared with lifecycle events.
+	RequestID string
+	// TraceID identifies the inbound HTTP request when available.
+	TraceID string
 	// Provider identifies the upstream provider.
 	Provider string
 	// BaseURL is the configured upstream base URL when available.
@@ -1236,6 +1322,8 @@ type UsageRecord struct {
 	ExecutorType string
 	// Model is the model used for the request.
 	Model string
+	// ResponseModel is the model reported by the upstream response, empty when unknown.
+	ResponseModel string
 	// Stream reports whether the request used streaming execution.
 	Stream bool
 	// Alias is the user-facing model alias when one was used.
@@ -1424,9 +1512,20 @@ func (b *QuotaBucket) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// QuotaMetric is a provider-defined numeric account summary for management UI rendering.
+type QuotaMetric struct {
+	Key      string  `json:"key"`
+	Label    string  `json:"label"`
+	Value    float64 `json:"value"`
+	Unit     string  `json:"unit,omitempty"`
+	Format   string  `json:"format,omitempty"`
+	Currency string  `json:"currency,omitempty"`
+}
+
 // QuotaFetchResponse carries normalized quota information.
 type QuotaFetchResponse struct {
 	Subscription       *QuotaSubscription `json:"subscription,omitempty"`
+	Summary            []QuotaMetric      `json:"summary,omitempty"`
 	ServerTimeOffsetMs int64              `json:"serverTimeOffsetMs,omitempty"`
 	Groups             []QuotaGroup       `json:"groups,omitempty"`
 }

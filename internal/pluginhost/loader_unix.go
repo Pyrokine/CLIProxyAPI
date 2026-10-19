@@ -98,10 +98,13 @@ var (
 type dynamicLibraryLoader struct{}
 
 type dynamicLibraryClient struct {
-	handle  unsafe.Pointer
-	hostAPI *C.cliproxy_host_api
-	hostCtx unsafe.Pointer
-	api     C.cliproxy_plugin_api
+	handle   unsafe.Pointer
+	hostAPI  *C.cliproxy_host_api
+	hostCtx  unsafe.Pointer
+	host     *Host
+	pluginID string
+	instance *hostCallbackInstance
+	api      C.cliproxy_plugin_api
 }
 
 func defaultPluginLoader() pluginLoader {
@@ -137,14 +140,19 @@ func (dynamicLibraryLoader) Open(file pluginFile, host *Host) (pluginClient, err
 		return nil, fmt.Errorf("allocate host context")
 	}
 	id := hostCallbackID.Add(1)
+	instance := &hostCallbackInstance{id: id}
+	host.registerHostCallbackInstance(file.ID, instance)
 	*(*C.uintptr_t)(hostCtx) = C.uintptr_t(id)
-	hostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID})
+	hostCallbackEntries.Store(id, dynamicHostCallbackEntry{host: host, pluginID: file.ID, instance: instance})
 	C.cliproxy_set_host_api(hostAPI, C.uint32_t(pluginHostABIVersion), hostCtx)
 
 	client := &dynamicLibraryClient{
-		handle:  handle,
-		hostAPI: hostAPI,
-		hostCtx: hostCtx,
+		handle:   handle,
+		hostAPI:  hostAPI,
+		hostCtx:  hostCtx,
+		host:     host,
+		pluginID: file.ID,
+		instance: instance,
 	}
 	rc := C.cliproxy_call_init(initSymbol, hostAPI, &client.api)
 	if rc != 0 {
@@ -191,15 +199,34 @@ func (c *dynamicLibraryClient) Call(ctx context.Context, method string, request 
 		C.cliproxy_free_plugin_buffer(c.api.free_buffer, response.ptr, response.len)
 	}
 	if rc != 0 {
+		if isPluginErrorEnvelope(out) {
+			return out, nil
+		}
 		return nil, fmt.Errorf("plugin call %s returned %d: %s", method, int(rc), string(out))
 	}
 	return out, nil
+}
+
+func (c *dynamicLibraryClient) callbackInstance() *hostCallbackInstance {
+	if c == nil {
+		return nil
+	}
+	return c.instance
+}
+
+func (c *dynamicLibraryClient) cancelHostHTTPResources() {
+	if c == nil || c.host == nil {
+		return
+	}
+	c.instance.closed.Store(true)
+	c.host.closeHostCallbackInstances(c.pluginID, []*hostCallbackInstance{c.instance})
 }
 
 func (c *dynamicLibraryClient) Shutdown() {
 	if c == nil {
 		return
 	}
+	c.cancelHostHTTPResources()
 	if c.api.shutdown != nil {
 		C.cliproxy_shutdown_plugin(c.api.shutdown)
 		c.api.shutdown = nil

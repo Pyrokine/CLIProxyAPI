@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,10 +12,62 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	"github.com/gin-gonic/gin"
 	"gopkg.in/yaml.v3"
 )
+
+func TestListPluginsPublishesOAuthRouteProvider(t *testing.T) {
+	cfg := &config.Config{Plugins: config.PluginsConfig{Enabled: true, Dir: t.TempDir()}}
+	h := NewHandler(cfg, "", nil)
+	h.pluginHost = &fakePluginRuntimeHost{registered: []pluginhost.RegisteredPluginInfo{
+		{ID: "binary-name", SupportsOAuth: true, OAuthProvider: "custom-provider"},
+		{ID: "without-oauth"},
+		{ID: "claude", SupportsOAuth: true},
+	}}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/plugins", nil)
+	h.ListPlugins(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("list status = %d; body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response pluginListResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Plugins) != 3 {
+		t.Fatalf("plugins = %d, want 3", len(response.Plugins))
+	}
+	for _, info := range response.Plugins {
+		switch info.ID {
+		case "binary-name":
+			if !info.SupportsOAuth || info.OAuthProvider != "custom-provider" || !info.EffectiveEnabled {
+				t.Fatalf("OAuth route provider was not published: %#v", info)
+			}
+		case "claude":
+			if info.OAuthProvider != "" {
+				t.Fatalf("empty declared provider was replaced by a binary alias: %#v", info)
+			}
+		default:
+			if info.SupportsOAuth || info.OAuthProvider != "" {
+				t.Fatalf("plugin without OAuth advertised a login route: %#v", info)
+			}
+		}
+	}
+	var payload struct {
+		Plugins []map[string]json.RawMessage `json:"plugins"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range payload.Plugins {
+		if _, exists := info["oauth_provider"]; !exists {
+			t.Fatal("explicitly empty provider was omitted, allowing legacy alias inference")
+		}
+	}
+}
 
 func TestPluginConfigMutationsSyncRuntimeBeforeResponse(t *testing.T) {
 	testCases := []struct {

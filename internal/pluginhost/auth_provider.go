@@ -16,6 +16,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 func (h *Host) hostConfigSummaryLocked() pluginapi.HostConfigSummary {
@@ -424,9 +425,47 @@ func (h *Host) refreshAuth(
 	data.Prefix = auth.Prefix
 	data.ProxyURL = auth.ProxyURL
 	data.Disabled = auth.Disabled
-	data.Attributes = cloneStringMap(auth.Attributes)
+	attributes := cloneStringMap(auth.Attributes)
+	if attributes == nil {
+		attributes = make(map[string]string)
+	}
+	maps.Copy(attributes, data.Attributes)
+	for _, key := range []string{
+		coreauth.AttributePath, coreauth.AttributeSource, coreauth.AttributeSourceBackend,
+		coreauth.AttributeAuthKind, coreauth.AttributeConfigIndex, coreauth.AttributeRuntimeOnly,
+		coreauth.AttributePluginVirtual, coreauth.AttributeVirtualSource, coreauth.AttributeAuthIndexSeed,
+		coreauth.AttributeFilePriority,
+	} {
+		if value, exists := auth.Attributes[key]; exists {
+			attributes[key] = value
+		} else {
+			delete(attributes, key)
+		}
+	}
+	if auth.Attributes[coreauth.AttributeSourceBackend] == coreauth.AuthSourceFile &&
+		auth.Attributes[coreauth.AttributeFilePriority] == "true" {
+		if priority, exists := auth.Attributes["priority"]; exists {
+			attributes["priority"] = priority
+		} else {
+			delete(attributes, "priority")
+		}
+	} else {
+		delete(attributes, coreauth.AttributeFilePriority)
+	}
+	data.Attributes = attributes
 	if len(data.Metadata) == 0 {
 		data.Metadata = cloneAnyMap(auth.Metadata)
+	}
+	if auth.Attributes[coreauth.AttributeSourceBackend] == coreauth.AuthSourceFile &&
+		auth.Attributes[coreauth.AttributeFilePriority] == "true" {
+		if data.Metadata == nil {
+			data.Metadata = make(map[string]any)
+		}
+		if priority, ok := auth.Metadata["priority"]; ok {
+			data.Metadata["priority"] = priority
+		} else {
+			delete(data.Metadata, "priority")
+		}
 	}
 	if len(data.StorageJSON) == 0 {
 		data.StorageJSON = storageJSONFromAuth(auth)
@@ -436,13 +475,14 @@ func (h *Host) refreshAuth(
 	} else {
 		data.NextRefreshAfter = pluginResp.NextRefreshAfter
 	}
-	providerUpdate := h.authDataToCoreAuth(data, "", data.FileName)
+	providerUpdate := h.authDataToCoreAuth(data, auth.Attributes[coreauth.AttributePath], data.FileName)
 	if providerUpdate == nil {
 		return nil, true, fmt.Errorf("auth provider refresh returned invalid auth data")
 	}
 	next := auth.Clone()
 	next.Storage = providerUpdate.Storage
 	next.Metadata = providerUpdate.Metadata
+	next.Attributes = providerUpdate.Attributes
 	next.NextRefreshAfter = providerUpdate.NextRefreshAfter
 	next.RefreshCommit = &pluginRefreshCommitGuard{host: h, token: token}
 	return next, true, nil
@@ -467,9 +507,34 @@ type pluginTokenStorage struct {
 	meta     map[string]any
 }
 
+func (s *pluginTokenStorage) CloneForPersistence() coreauth.TokenStorage {
+	if s == nil {
+		return nil
+	}
+	copyStorage := *s
+	copyStorage.rawJSON = bytes.Clone(s.rawJSON)
+	copyStorage.meta = cloneAnyMap(s.meta)
+	return &copyStorage
+}
+
 func (s *pluginTokenStorage) SetMetadata(meta map[string]any) {
 	if s == nil {
 		return
+	}
+	if _, hadPriority := s.meta["priority"]; hadPriority {
+		if _, hasPriority := meta["priority"]; !hasPriority && len(s.rawJSON) > 0 {
+			var raw map[string]any
+			if errUnmarshal := json.Unmarshal(s.rawJSON, &raw); errUnmarshal != nil {
+				log.WithError(errUnmarshal).Warn("pluginhost: invalid token storage while clearing file priority")
+			} else {
+				delete(raw, "priority")
+				if cleaned, errMarshal := json.Marshal(raw); errMarshal == nil {
+					s.rawJSON = cleaned
+				} else {
+					log.WithError(errMarshal).Warn("pluginhost: failed to clear file priority from token storage")
+				}
+			}
+		}
 	}
 	s.meta = cloneAnyMap(meta)
 }
@@ -600,8 +665,11 @@ func pluginAuthDataToCoreAuth(data pluginapi.AuthData, path, fileName string, au
 	}
 	path = strings.TrimSpace(path)
 	if path != "" {
-		attributes["path"] = path
-		attributes["source"] = path
+		attributes[coreauth.AttributePath] = path
+		attributes[coreauth.AttributeSource] = path
+		if attributes[coreauth.AttributeSourceBackend] == "" {
+			attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourceFile
+		}
 	}
 	fileName = strings.TrimSpace(firstNonEmpty(data.FileName, fileName))
 	if fileName != "" && attributes["source"] == "" {

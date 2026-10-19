@@ -58,7 +58,9 @@ type pendingPluginLoad struct {
 }
 
 type pluginInitialization struct {
-	done chan struct{}
+	done              chan struct{}
+	closed            bool
+	callbackInstances map[*hostCallbackInstance]struct{}
 }
 
 type modelExecutor interface {
@@ -162,6 +164,7 @@ type Host struct {
 	pluginLoadAttempts           *pluginLoadAttemptRegistry
 	streams                      *streamBridge
 	httpStreams                  *hostHTTPStreamBridge
+	httpOperations               *hostHTTPOperationBridge
 	modelStreams                 *modelStreamBridge
 	callbackContexts             *callbackContextRegistry
 	shutdownContext              context.Context
@@ -204,6 +207,7 @@ func New() *Host {
 		pluginLoadAttempts:        defaultPluginLoadAttemptRegistry(),
 		streams:                   newStreamBridge(),
 		httpStreams:               newHostHTTPStreamBridge(),
+		httpOperations:            newHostHTTPOperationBridge(),
 		modelStreams:              newModelStreamBridge(),
 		callbackContexts:          newCallbackContextRegistry(),
 		shutdownContext:           shutdownContext,
@@ -218,6 +222,55 @@ func newForTest(loader pluginLoader) *Host {
 	h.loader = loader
 	h.pluginLoadAttempts = &pluginLoadAttemptRegistry{}
 	return h
+}
+
+func (h *Host) registerHostCallbackInstance(pluginID string, instance *hostCallbackInstance) {
+	if h == nil || instance == nil {
+		return
+	}
+	h.mu.Lock()
+	initialization := h.initializing[pluginID]
+	if initialization != nil {
+		if initialization.callbackInstances == nil {
+			initialization.callbackInstances = make(map[*hostCallbackInstance]struct{})
+		}
+		initialization.callbackInstances[instance] = struct{}{}
+	}
+	closed := initialization != nil && initialization.closed || h.shutdownContext != nil && h.shutdownContext.Err() != nil
+	if closed {
+		instance.closed.Store(true)
+	}
+	h.mu.Unlock()
+	if closed {
+		h.closeHostCallbackInstances(pluginID, []*hostCallbackInstance{instance})
+	}
+}
+
+func closePluginInitializationLocked(initialization *pluginInitialization) []*hostCallbackInstance {
+	if initialization == nil || initialization.closed {
+		return nil
+	}
+	initialization.closed = true
+	instances := make([]*hostCallbackInstance, 0, len(initialization.callbackInstances))
+	for instance := range initialization.callbackInstances {
+		instance.closed.Store(true)
+		instances = append(instances, instance)
+	}
+	return instances
+}
+
+func (h *Host) closeHostCallbackInstances(pluginID string, instances []*hostCallbackInstance) {
+	for _, instance := range instances {
+		if h.httpOperations != nil {
+			h.httpOperations.closeInstance(pluginID, instance)
+		}
+		if instance.id != 0 && h.httpStreams != nil {
+			h.httpStreams.closeInstance(pluginID, instance.id)
+		}
+		if h.modelStreams != nil {
+			h.modelStreams.closeInstance(pluginID, instance.id)
+		}
+	}
 }
 
 // SetUsageManager assigns the service-owned usage dispatcher.
@@ -495,7 +548,9 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 			h.runtimeConfig = cfg
 		}
 		h.mu.Unlock()
-		h.clearRuntimeRoutesForApply(generation)
+		if h.clearRuntimeRoutesForApply(generation) {
+			h.detachUnselectedPlugins(ctx, generation, nil)
+		}
 		return nil
 	}
 
@@ -599,6 +654,15 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 		initialization := &pluginInitialization{done: make(chan struct{})}
 		h.initializing[file.ID] = initialization
 		h.mu.Unlock()
+		stopInitializationCancel := context.AfterFunc(ctx, func() {
+			h.mu.Lock()
+			var instances []*hostCallbackInstance
+			if h.initializing[file.ID] == initialization {
+				instances = closePluginInitializationLocked(initialization)
+			}
+			h.mu.Unlock()
+			h.closeHostCallbackInstances(file.ID, instances)
+		})
 
 		if previous != nil {
 			restoreRequired, errQuiesce := h.callQuiesce(ctx, previous)
@@ -607,6 +671,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 			}
 			if errQuiesce != nil || ctx.Err() != nil {
 				h.finishAbortedInitialization(file.ID, initialization)
+				stopInitializationCancel()
 				if errQuiesce != nil {
 					return fmt.Errorf("pluginhost: quiesce replacement plugin %s: %w", file.ID, errQuiesce)
 				}
@@ -639,6 +704,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 			retirementDone = h.trackRetiredPluginLocked(loaded)
 		}
 		h.mu.Unlock()
+		stopInitializationCancel()
 		if errLoad != nil {
 			h.shutdownPreparedDiscardedPlugin(loaded, retirementDone)
 			log.Warnf("pluginhost: failed to load plugin %s from %s: %v", file.ID, file.Path, errLoad)
@@ -823,6 +889,12 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 	h.refreshUsagePlugins(records)
 	h.publicationMu.Unlock()
 
+	selectedPlugins := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		selectedPlugins[record.id] = struct{}{}
+	}
+	h.detachUnselectedPlugins(ctx, generation, selectedPlugins)
+
 	for _, record := range records {
 		if _, loadedNow := loadedNowPlugins[record.id]; !loadedNow {
 			continue
@@ -833,6 +905,7 @@ func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) (err error) 
 	}
 	h.refreshThinkingProviders(records)
 	h.republishExternalAdapters(ctx)
+	cancelHostHTTPResourcesForTargets(retiredTargets)
 	shutdownCtx, cancelShutdown := boundedPluginShutdownContext(ctx)
 	if errWait := h.waitUsageRetirementsForTargets(shutdownCtx, retiredTargets); errWait != nil {
 		log.WithError(errWait).Warn("pluginhost: usage retirement wait timed out")
@@ -943,6 +1016,53 @@ func (h *Host) clearRuntimeRoutesForApply(generation uint64) bool {
 	h.clearThinkingProviders()
 	h.clearAccessProvidersForPublication()
 	return true
+}
+
+func (h *Host) detachUnselectedPlugins(ctx context.Context, generation uint64, selected map[string]struct{}) {
+	h.mu.Lock()
+	if !h.configApplyCurrentLocked(generation) {
+		h.mu.Unlock()
+		return
+	}
+	ids := make(map[string]struct{}, len(h.loaded)+len(h.retired)+len(h.pendingLoaded)+len(h.loading))
+	for id := range h.loaded {
+		ids[id] = struct{}{}
+	}
+	for id := range h.retired {
+		ids[id] = struct{}{}
+	}
+	for id := range h.pendingLoaded {
+		ids[id] = struct{}{}
+	}
+	for id := range h.loading {
+		ids[id] = struct{}{}
+	}
+	identities := make([]PluginRuntimeIdentity, 0, len(ids))
+	for id := range ids {
+		if _, keep := selected[id]; keep {
+			continue
+		}
+		identities = append(identities, PluginRuntimeIdentity{
+			ID:               id,
+			Path:             h.activePluginPaths[id],
+			Version:          h.activePluginVersions[id],
+			PluginGeneration: h.pluginGenerations[id],
+			OperationEpoch:   h.pluginOperationEpochLocked(id),
+		})
+	}
+	h.mu.Unlock()
+	sort.Slice(identities, func(i, j int) bool { return identities[i].ID < identities[j].ID })
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for _, identity := range identities {
+		shutdownCtx, cancel := boundedPluginShutdownContext(context.WithoutCancel(ctx))
+		_, errUnload := h.unloadPluginContext(shutdownCtx, identity.ID, &identity)
+		cancel()
+		if errUnload != nil && !errors.Is(errUnload, ErrPluginRuntimeSuperseded) {
+			log.WithError(errUnload).WithField("plugin_id", identity.ID).Warn("pluginhost: plugin shutdown deferred")
+		}
+	}
 }
 
 // InvalidateRuntime removes plugin capabilities without waiting for plugin lifecycle calls.
@@ -1250,6 +1370,7 @@ func (h *Host) unloadPluginContext(
 
 	h.publicationMu.Lock()
 	targets := make([]pluginUnloadTarget, 0)
+	var initializationInstances []*hostCallbackInstance
 	h.mu.Lock()
 	if expectedIdentity != nil && !h.pluginRuntimeIdentityCurrentLocked(*expectedIdentity) {
 		h.mu.Unlock()
@@ -1285,6 +1406,7 @@ func (h *Host) unloadPluginContext(
 		h.publicationMu.Unlock()
 		return false, nil
 	}
+	initializationInstances = closePluginInitializationLocked(h.initializing[id])
 	delete(h.loaded, id)
 	h.retired[id] = loadedPluginsFromTargets(targets)
 	if !initializationPending {
@@ -1307,6 +1429,14 @@ func (h *Host) unloadPluginContext(
 	h.unregisterThinkingProvider(id)
 	h.unregisterAccessProviders(id)
 	h.publicationMu.Unlock()
+	h.closeHostCallbackInstances(id, initializationInstances)
+	cancelHostHTTPResourcesForTargets(targets)
+	if h.httpOperations != nil {
+		h.httpOperations.cancelPlugin(id)
+	}
+	if h.httpStreams != nil {
+		h.httpStreams.closePlugin(id)
+	}
 
 	waitErr := h.waitUsageRetirementsForTargets(ctx, targets)
 	completedTargets, shutdownErr := shutdownPluginTargets(ctx, targets)
@@ -1380,9 +1510,11 @@ func (h *Host) ShutdownAllContext(ctx context.Context) error {
 		h.retired[plugin.id] = append(h.retired[plugin.id], plugin)
 	}
 	initializingIDs := make([]string, 0, len(h.initializing))
+	initializationInstances := make(map[string][]*hostCallbackInstance, len(h.initializing))
 	h.loading = make(map[string]struct{}, len(h.initializing))
-	for id := range h.initializing {
+	for id, initialization := range h.initializing {
 		initializingIDs = append(initializingIDs, id)
+		initializationInstances[id] = closePluginInitializationLocked(initialization)
 		h.loading[id] = struct{}{}
 	}
 	sort.Strings(initializingIDs)
@@ -1409,6 +1541,16 @@ func (h *Host) ShutdownAllContext(ctx context.Context) error {
 	h.clearThinkingProviders()
 	h.clearAccessProvidersForPublication()
 	h.publicationMu.Unlock()
+	for _, id := range initializingIDs {
+		h.closeHostCallbackInstances(id, initializationInstances[id])
+	}
+	cancelHostHTTPResourcesForTargets(targets)
+	if h.httpOperations != nil {
+		h.httpOperations.cancelAll()
+	}
+	if h.httpStreams != nil {
+		h.httpStreams.closeAll()
+	}
 	waitErr := h.waitAllUsageRetirementsContext(ctx)
 	completedTargets, shutdownErr := shutdownPluginTargets(ctx, targets)
 	h.removeRetiredPluginTargets(completedTargets)
@@ -1465,6 +1607,14 @@ func (h *Host) takeRetiredPluginTargetsLocked(id string) []pluginUnloadTarget {
 		targets = append(targets, pluginUnloadTargetFromLoaded(lp))
 	}
 	return targets
+}
+
+func cancelHostHTTPResourcesForTargets(targets []pluginUnloadTarget) {
+	for _, target := range targets {
+		if scoped, ok := target.client.(interface{ cancelHostHTTPResources() }); ok {
+			scoped.cancelHostHTTPResources()
+		}
+	}
 }
 
 func shutdownPluginTargets(

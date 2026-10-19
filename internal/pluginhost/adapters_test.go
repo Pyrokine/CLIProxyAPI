@@ -2270,6 +2270,60 @@ func TestInterceptRequestChainsByPriorityAndHeaders(t *testing.T) {
 	}
 }
 
+func TestInterceptRequestWithoutBodyChangePreservesOriginalBody(t *testing.T) {
+	body := []byte("original")
+	host := newHostWithRecords(
+		capabilityRecord{
+			id:       "headers-only",
+			priority: 20,
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor: requestInterceptorFunc(
+						func(
+							_ context.Context,
+							req pluginapi.RequestInterceptRequest,
+						) (pluginapi.RequestInterceptResponse, error) {
+							if string(req.Body) != "original" {
+								t.Fatalf("body = %q, want original", req.Body)
+							}
+							req.Body[0] = 'X'
+							return pluginapi.RequestInterceptResponse{
+								Headers: http.Header{"X-Plugin": []string{"yes"}},
+							}, nil
+						},
+					),
+				},
+			},
+		},
+		capabilityRecord{
+			id:       "observer",
+			priority: 10,
+			plugin: pluginapi.Plugin{
+				Capabilities: pluginapi.Capabilities{
+					RequestInterceptor: requestInterceptorFunc(
+						func(
+							_ context.Context,
+							req pluginapi.RequestInterceptRequest,
+						) (pluginapi.RequestInterceptResponse, error) {
+							if string(req.Body) != "original" || req.Headers.Get("X-Plugin") != "yes" {
+								t.Fatalf("unexpected next request: body = %q, headers = %#v", req.Body, req.Headers)
+							}
+							return pluginapi.RequestInterceptResponse{}, nil
+						},
+					),
+				},
+			},
+		},
+	)
+
+	got := host.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{
+		Body: body,
+	})
+	if got.Body != nil || string(body) != "original" || got.Headers.Get("X-Plugin") != "yes" {
+		t.Fatalf("unexpected response: body = %q, headers = %#v, original = %q", got.Body, got.Headers, body)
+	}
+}
+
 func TestInterceptRequestAfterAuthPassesTargetFormat(t *testing.T) {
 	host := newHostWithRecords(
 		capabilityRecord{
@@ -2305,6 +2359,33 @@ func TestInterceptRequestAfterAuthPassesTargetFormat(t *testing.T) {
 
 	if string(got.Body) != "body|after" {
 		t.Fatalf("body = %q, want body|after", got.Body)
+	}
+}
+
+func TestInterceptRequestChainsPathWithoutMutatingInput(t *testing.T) {
+	metadata := map[string]any{coreexecutor.RequestPathMetadataKey: "/v1/chat/completions"}
+	host := newHostWithRecords(
+		capabilityRecord{id: "first", priority: 20, plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				if req.Metadata[coreexecutor.RequestPathMetadataKey] != "/v1/chat/completions" {
+					t.Fatalf("initial interceptor metadata = %#v", req.Metadata)
+				}
+				return pluginapi.RequestInterceptResponse{Path: " /v1/images/generations "}, nil
+			}),
+		}}},
+		capabilityRecord{id: "second", priority: 10, plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{
+			RequestInterceptor: requestInterceptorFunc(func(_ context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+				if req.Metadata[coreexecutor.RequestPathMetadataKey] != "/v1/images/generations" {
+					t.Fatalf("path not propagated to next interceptor: %#v", req.Metadata)
+				}
+				req.Metadata[coreexecutor.RequestPathMetadataKey] = "/mutated"
+				return pluginapi.RequestInterceptResponse{Path: "/v1/images/edits"}, nil
+			}),
+		}}},
+	)
+	result := host.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{Metadata: metadata})
+	if result.Path != "/v1/images/edits" || result.Body != nil || metadata[coreexecutor.RequestPathMetadataKey] != "/v1/chat/completions" {
+		t.Fatalf("interceptor path = %q, body = %q, input metadata = %#v", result.Path, result.Body, metadata)
 	}
 }
 
@@ -2919,6 +3000,15 @@ func TestRPCWebSocketObserverRequiresSchemaFourAndSanitizesEvent(t *testing.T) {
 	}
 	if _, ok := captured.Metadata["token"]; ok {
 		t.Fatalf("RPC websocket metadata retained token: %#v", captured.Metadata)
+	}
+}
+
+func TestQuotaResponseSummaryIsNotAliased(t *testing.T) {
+	response := pluginapi.QuotaFetchResponse{Summary: []pluginapi.QuotaMetric{{Key: "credits_used", Value: 1740.28}}}
+	copied := cloneQuotaFetchResponse(response)
+	copied.Summary[0].Value = 0
+	if response.Summary[0].Value != 1740.28 {
+		t.Fatalf("quota response summary was mutated: %#v", response.Summary)
 	}
 }
 
@@ -3971,6 +4061,26 @@ func TestResponseHooksKeepPayloadOrTryNextOnErrorAndEmptyBody(t *testing.T) {
 	}
 }
 
+func TestUsageAdapterSeparatesExecutionIDAndHTTPTraceID(t *testing.T) {
+	var captured pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) { captured = record })
+	host := newHostWithRecords(capabilityRecord{
+		id: "usage-identity", plugin: pluginapi.Plugin{Capabilities: pluginapi.Capabilities{UsagePlugin: plugin}},
+	})
+	record := coreusage.Record{
+		ExecutionID: "b5db448b-3d6d-495c-9c71-f925b68926cb",
+		RequestID:   "http-parent-1",
+		Provider:    "codex",
+		Model:       "gpt-6-luna",
+	}
+	adapter := &usageAdapter{host: host, pluginID: "usage-identity", plugin: plugin}
+	adapter.HandleUsage(context.Background(), record)
+	if captured.RequestID != record.ExecutionID || captured.TraceID != record.RequestID ||
+		captured.RequestID == captured.TraceID || record.RequestID != "http-parent-1" {
+		t.Fatalf("usage identity = %#v, original HTTP request ID = %q", captured, record.RequestID)
+	}
+}
+
 func TestUsageAdapterPropagatesServiceTiers(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -4093,6 +4203,27 @@ func TestUsageAdapterPropagatesDeliveryTarget(t *testing.T) {
 
 	if captured.BaseURL != "https://upstream.example/v1" || !captured.Stream {
 		t.Fatalf("captured target = baseURL:%q stream:%t", captured.BaseURL, captured.Stream)
+	}
+}
+
+func TestUsageAdapterPreservesResponseModel(t *testing.T) {
+	var captured pluginapi.UsageRecord
+	plugin := usagePluginFunc(func(_ context.Context, record pluginapi.UsageRecord) {
+		captured = record
+	})
+	adapter := &usageAdapter{pluginID: "usage-response-model", plugin: plugin}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{
+		Model:         "client-model",
+		ResponseModel: "provider-model",
+	})
+	if captured.Model != "client-model" || captured.ResponseModel != "provider-model" {
+		t.Fatalf("captured models = (%q, %q)", captured.Model, captured.ResponseModel)
+	}
+
+	adapter.HandleUsage(context.Background(), coreusage.Record{Model: "client-model"})
+	if captured.ResponseModel != "" {
+		t.Fatalf("missing upstream response model = %q, want empty", captured.ResponseModel)
 	}
 }
 
@@ -5620,6 +5751,316 @@ func TestExecutorAdapterMethods(t *testing.T) {
 	}
 }
 
+func registerExecutorUsageCapture(t *testing.T) <-chan coreusage.Record {
+	t.Helper()
+	records := make(chan coreusage.Record, 4)
+	coreusage.RegisterNamedPlugin(t.Name(), coreUsagePluginFunc(func(_ context.Context, record coreusage.Record) {
+		records <- record
+	}))
+	t.Cleanup(func() { coreusage.UnregisterNamedPlugin(t.Name()).Wait() })
+	return records
+}
+
+func readExecutorUsageRecord(t *testing.T, records <-chan coreusage.Record) coreusage.Record {
+	t.Helper()
+	select {
+	case record := <-records:
+		return record
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for plugin executor usage")
+		return coreusage.Record{}
+	}
+}
+
+func assertNoSecondExecutorUsage(t *testing.T, records <-chan coreusage.Record) {
+	t.Helper()
+	select {
+	case record := <-records:
+		t.Fatalf("plugin executor published a second usage record: %#v", record)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestExecutorAdapterManagerEmptyStreamPublishesOneFailedRecord(t *testing.T) {
+	const requestedFormat sdktranslator.Format = "pluginhost-empty-stream-request"
+	const nativeFormat sdktranslator.Format = "pluginhost-empty-stream-native"
+	sdktranslator.Register(requestedFormat, nativeFormat, nil, sdktranslator.ResponseTransform{
+		Stream: func(context.Context, string, []byte, []byte, []byte, *any) [][]byte {
+			return nil
+		},
+	})
+
+	for _, testCase := range []struct {
+		name       string
+		translated bool
+		input      func() <-chan pluginapi.ExecutorStreamChunk
+	}{
+		{name: "nil channel", input: func() <-chan pluginapi.ExecutorStreamChunk { return nil }},
+		{name: "closed channel", input: func() <-chan pluginapi.ExecutorStreamChunk {
+			chunks := make(chan pluginapi.ExecutorStreamChunk)
+			close(chunks)
+			return chunks
+		}},
+		{name: "translated empty", translated: true, input: func() <-chan pluginapi.ExecutorStreamChunk {
+			chunks := make(chan pluginapi.ExecutorStreamChunk, 1)
+			chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"usage\":{\"input_tokens\":3,\"output_tokens\":4}}\n\n")}
+			close(chunks)
+			return chunks
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			records := registerExecutorUsageCapture(t)
+			model := "plugin-usage-empty-" + strings.ReplaceAll(testCase.name, " ", "-")
+			auth := &coreauth.Auth{ID: "selected-" + model, Provider: "plugin-provider", Status: coreauth.StatusActive}
+			format := sdktranslator.FormatOpenAI
+			adapter := &executorAdapter{host: New(), pluginID: "empty-stream", provider: auth.Provider}
+			if testCase.translated {
+				format = requestedFormat
+				adapter.inputFormats = []sdktranslator.Format{requestedFormat}
+				adapter.outputFormats = []sdktranslator.Format{nativeFormat}
+			} else {
+				adapter.inputFormats = []sdktranslator.Format{format}
+				adapter.outputFormats = []sdktranslator.Format{format}
+			}
+			calls := 0
+			adapter.executor = &fakeExecutor{executeStream: func(_ context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+				calls++
+				if req.AuthID != auth.ID {
+					t.Fatalf("executor auth = %q, want %q", req.AuthID, auth.ID)
+				}
+				return pluginapi.ExecutorStreamResponse{Chunks: testCase.input()}, nil
+			}}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetRetryConfig(0, 0, 1)
+			manager.RegisterExecutor(adapter)
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("register selected credential: %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+			result, errExecute := manager.ExecuteStream(context.Background(), []string{auth.Provider},
+				coreexecutor.Request{Model: model, Format: format, Payload: []byte(`{"model":"` + model + `"}`)},
+				coreexecutor.Options{Stream: true, SourceFormat: format, ResponseFormat: format})
+			if errExecute != nil || result == nil || result.Chunks == nil {
+				t.Fatalf("Manager.ExecuteStream() = %#v, %v", result, errExecute)
+			}
+			select {
+			case chunk, ok := <-result.Chunks:
+				var bootstrapErr *coreauth.Error
+				if !ok || !errors.As(chunk.Err, &bootstrapErr) || bootstrapErr.Code != "empty_stream" {
+					t.Fatalf("manager empty stream result = %#v, want empty_stream", chunk)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("manager did not return empty_stream")
+			}
+			if calls != 1 {
+				t.Fatalf("plugin called %d times, want one selected attempt", calls)
+			}
+			selected, found := manager.GetByID(auth.ID)
+			if !found || selected == nil {
+				t.Fatal("selected credential missing after stream attempt")
+			}
+			record := readExecutorUsageRecord(t, records)
+			if !record.Failed || !record.Stream || record.AuthID != auth.ID || record.AuthIndex != selected.Index {
+				t.Fatalf("empty stream usage = %#v, want one failed record attributed to selected auth", record)
+			}
+			if testCase.translated && (record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4) {
+				t.Fatalf("translated empty stream discarded native usage: %#v", record.Detail)
+			}
+			assertNoSecondExecutorUsage(t, records)
+		})
+	}
+}
+
+func TestExecutorAdapterPublishesSelectedAuthResponsesUsage(t *testing.T) {
+	records := registerExecutorUsageCapture(t)
+	auth := &coreauth.Auth{ID: "selected-credential", Provider: "plugin-provider", Index: "selected-index"}
+	adapter := &executorAdapter{
+		host: New(), pluginID: "usage-plugin", provider: "plugin-provider",
+		executor: &fakeExecutor{
+			execute: func(_ context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+				if req.AuthID != auth.ID {
+					t.Fatalf("plugin received auth %q, want %q", req.AuthID, auth.ID)
+				}
+				return pluginapi.ExecutorResponse{Payload: []byte(`{"usage":{"input_tokens":7,"output_tokens":9,"output_tokens_details":{"reasoning_tokens":2}},"service_tier":"priority"}`)}, nil
+			},
+		},
+		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+	}
+	req := coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1","service_tier":"flex"}`)}
+	resp, err := adapter.Execute(context.Background(), auth, req, coreexecutor.Options{})
+	if err != nil || len(resp.Payload) == 0 {
+		t.Fatalf("Execute() = %#v, %v", resp, err)
+	}
+	record := readExecutorUsageRecord(t, records)
+	if record.Provider != "plugin-provider" || record.AuthID != auth.ID || record.AuthIndex != auth.Index || record.Stream || record.Failed {
+		t.Fatalf("usage identity/outcome = %#v", record)
+	}
+	if record.Detail.InputTokens != 7 || record.Detail.OutputTokens != 9 || record.Detail.ReasoningTokens != 2 || record.Detail.TotalTokens != 16 {
+		t.Fatalf("usage detail = %#v, want 7 input and 9 output tokens", record.Detail)
+	}
+	if record.RequestServiceTier != "flex" || record.ResponseServiceTier != "priority" {
+		t.Fatalf("usage service tiers = %q/%q, want flex/priority", record.RequestServiceTier, record.ResponseServiceTier)
+	}
+	assertNoSecondExecutorUsage(t, records)
+}
+
+func TestExecutorAdapterPublishesStreamUsageAcrossChunks(t *testing.T) {
+	records := registerExecutorUsageCapture(t)
+	chunks := make(chan pluginapi.ExecutorStreamChunk, 4)
+	chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte(`data: {"type":"response.completed","usage":{"input_tokens":`)}
+	chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("5,\"output_tokens\":8},\"service_tier\":\"priority\"}\n\n")}
+	close(chunks)
+	adapter := &executorAdapter{
+		host: New(), pluginID: "stream-usage", provider: "plugin-provider",
+		executor: &fakeExecutor{executeStream: func(_ context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
+		}},
+		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+	}
+	auth := &coreauth.Auth{ID: "stream-selected", Provider: "plugin-provider", Index: "stream-index"}
+	result, err := adapter.ExecuteStream(context.Background(), auth,
+		coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1"}`)},
+		coreexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var delivered []byte
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		delivered = append(delivered, chunk.Payload...)
+	}
+	if !bytes.Contains(delivered, []byte(`"input_tokens":5`)) {
+		t.Fatalf("stream delivered = %q, missing split usage event", delivered)
+	}
+	record := readExecutorUsageRecord(t, records)
+	if record.AuthID != auth.ID || record.AuthIndex != auth.Index || !record.Stream || record.Failed ||
+		record.Detail.InputTokens != 5 || record.Detail.OutputTokens != 8 || record.Detail.TotalTokens != 13 || record.ResponseServiceTier != "priority" {
+		t.Fatalf("stream usage = %#v, want selected credential and upstream token usage", record)
+	}
+	assertNoSecondExecutorUsage(t, records)
+}
+
+func TestExecutorAdapterPublishesPartialStreamUsageOnError(t *testing.T) {
+	records := registerExecutorUsageCapture(t)
+	streamErr := errors.New("plugin stream failed")
+	chunks := make(chan pluginapi.ExecutorStreamChunk, 3)
+	chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: {\"usage\":{\"input_tokens\":3,\"output_tokens\":4},\"service_tier\":\"flex\"}\n\n")}
+	chunks <- pluginapi.ExecutorStreamChunk{Err: streamErr}
+	close(chunks)
+	adapter := &executorAdapter{
+		host: New(), pluginID: "stream-failure", provider: "plugin-provider",
+		executor: &fakeExecutor{executeStream: func(_ context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
+		}},
+		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+	}
+	auth := &coreauth.Auth{ID: "failure-selected", Provider: "plugin-provider", Index: "failure-index"}
+	result, err := adapter.ExecuteStream(context.Background(), auth,
+		coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1"}`)},
+		coreexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var gotErr error
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			gotErr = chunk.Err
+		}
+	}
+	if !errors.Is(gotErr, streamErr) {
+		t.Fatalf("stream error = %v, want %v", gotErr, streamErr)
+	}
+	record := readExecutorUsageRecord(t, records)
+	if record.AuthID != auth.ID || record.AuthIndex != auth.Index || !record.Stream || !record.Failed ||
+		record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 || record.ResponseServiceTier != "flex" {
+		t.Fatalf("failed stream usage = %#v, want partial tokens and failed outcome", record)
+	}
+	assertNoSecondExecutorUsage(t, records)
+}
+
+func TestExecutorAdapterPublishesCanceledStreamUsage(t *testing.T) {
+	records := registerExecutorUsageCapture(t)
+	chunks := make(chan pluginapi.ExecutorStreamChunk)
+	adapter := &executorAdapter{
+		host: New(), pluginID: "stream-cancellation", provider: "plugin-provider",
+		executor: &fakeExecutor{executeStream: func(_ context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+			return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
+		}},
+		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAIResponse},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	auth := &coreauth.Auth{ID: "cancel-selected", Provider: "plugin-provider", Index: "cancel-index"}
+	result, err := adapter.ExecuteStream(ctx, auth,
+		coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: []byte(`{"model":"model-1"}`)},
+		coreexecutor.Options{Stream: true})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	cancel()
+	select {
+	case <-result.Chunks:
+	case <-time.After(time.Second):
+		t.Fatal("canceled stream did not close")
+	}
+	record := readExecutorUsageRecord(t, records)
+	if record.AuthID != auth.ID || !record.Stream || !record.Failed {
+		t.Fatalf("canceled stream usage = %#v, want selected auth failed", record)
+	}
+	assertNoSecondExecutorUsage(t, records)
+}
+
+func TestExecutorAdapterPublishesSelectedAuthFailure(t *testing.T) {
+	records := registerExecutorUsageCapture(t)
+	execErr := errors.New("plugin execution failed")
+	adapter := &executorAdapter{
+		host: New(), pluginID: "usage-failure", provider: "plugin-provider",
+		executor: &fakeExecutor{execute: func(_ context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{}, execErr
+		}},
+		inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
+	}
+	auth := &coreauth.Auth{ID: "failed-selected", Provider: "plugin-provider", Index: "failed-index"}
+	_, err := adapter.Execute(context.Background(), auth,
+		coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAI, Payload: []byte(`{"model":"model-1"}`)},
+		coreexecutor.Options{})
+	if !errors.Is(err, execErr) {
+		t.Fatalf("Execute() error = %v, want %v", err, execErr)
+	}
+	record := readExecutorUsageRecord(t, records)
+	if record.AuthID != auth.ID || record.AuthIndex != auth.Index || !record.Failed || record.Detail.TotalTokens != 0 {
+		t.Fatalf("failed executor usage = %#v, want failed selected credential", record)
+	}
+	assertNoSecondExecutorUsage(t, records)
+}
+
+func TestExecutorAdapterReturnsCheckedRequestTranslationFailure(t *testing.T) {
+	const source sdktranslator.Format = "pluginhost-checked-error-source"
+	const target sdktranslator.Format = "pluginhost-checked-error-target"
+	rejected := errors.New("unsupported request content")
+	sdktranslator.RegisterCheckedRequest(source, target, func(string, []byte, bool) ([]byte, error) {
+		return nil, rejected
+	})
+	called := false
+	adapter := &executorAdapter{
+		host: New(), pluginID: "checked-translation", provider: "test",
+		inputFormats: []sdktranslator.Format{target}, outputFormats: []sdktranslator.Format{target},
+		executor: &fakeExecutor{execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			called = true
+			return pluginapi.ExecutorResponse{}, nil
+		}},
+	}
+	req := coreexecutor.Request{Model: "m", Format: source, Payload: []byte(`{"input":[]}`)}
+	opts := coreexecutor.Options{SourceFormat: source, ResponseFormat: target}
+	if _, err := adapter.Execute(context.Background(), nil, req, opts); !errors.Is(err, rejected) || called {
+		t.Fatalf("Execute() error = %v, executor called = %v; want translation rejection", err, called)
+	}
+}
+
 func TestExecutorAdapterUsesResponseFormatForOutputTranslation(t *testing.T) {
 	claudeResponse := []byte(`{"id":"msg_1","type":"message","model":"claude-test","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`)
 	openAIRequest := []byte(`{"model":"model-1","messages":[{"role":"user","content":"hi"}]}`)
@@ -6495,4 +6936,219 @@ func (failingReadCloser) Read(p []byte) (int, error) {
 
 func (failingReadCloser) Close() error {
 	return nil
+}
+
+func TestHasAuthModelProviderDoesNotRunDiscovery(t *testing.T) {
+	for _, mode := range []string{"auth", "executor", "registered", "static-only", "fused", "unloaded", "no-model-provider"} {
+		t.Run(mode, func(t *testing.T) {
+			calls := 0
+			caps := pluginapi.Capabilities{
+				ModelProvider: modelProviderFunc{
+					staticModels: func(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+						t.Error("ownership lookup called StaticModels")
+						return pluginapi.ModelResponse{}, nil
+					},
+					modelsForAuth: func(context.Context, pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+						calls++
+						return pluginapi.ModelResponse{Provider: "antigravity", Models: []pluginapi.ModelInfo{{ID: "plugin-model"}}, AuthUpdate: pluginapi.AuthData{Metadata: map[string]any{"access_token": "rotated"}}}, nil
+					},
+				},
+			}
+			switch mode {
+			case "executor", "static-only":
+				caps.Executor = &fakeExecutor{identifier: "antigravity"}
+				caps.ExecutorModelScope = pluginapi.ExecutorModelScopeOAuth
+				if mode == "static-only" {
+					caps.ExecutorModelScope = pluginapi.ExecutorModelScopeStatic
+				}
+			case "registered":
+			default:
+				caps.AuthProvider = fakeAuthProvider{identifier: "antigravity"}
+			}
+			if mode == "no-model-provider" {
+				caps.ModelProvider = nil
+			}
+			host := newHostWithRecords(capabilityRecord{id: "ownership", plugin: pluginapi.Plugin{Capabilities: caps}})
+			if mode == "registered" {
+				host.modelProviders["ownership"] = "antigravity"
+			}
+			if mode == "fused" {
+				host.fused["ownership"] = "test"
+			}
+			if mode == "unloaded" {
+				host.snapshot.Store(emptySnapshot())
+			}
+			want := mode == "auth" || mode == "executor" || mode == "registered"
+			for range 100 {
+				if got := host.HasOAuthModelProvider(" ANTIGRAVITY "); got != want {
+					t.Fatalf("ownership=%v, want %v", got, want)
+				}
+			}
+			if calls != 0 || host.HasOAuthModelProvider("claude") || host.HasOAuthModelProvider("") {
+				t.Fatal("ownership lookup executed discovery or matched an unrelated provider")
+			}
+			// The normal registration path must still consume discovery and auth updates.
+			result := host.ModelsForAuth(t.Context(), &coreauth.Auth{ID: "account", Provider: "antigravity"})
+			if result.Handled != want {
+				t.Fatal("ownership lookup disagrees with per-auth dispatch")
+			}
+			if want && (calls != 1 || result.Auth == nil || result.Auth.Metadata["access_token"] != "rotated" || len(result.Models) != 1) {
+				t.Fatal("normal discovery lost model or credential updates")
+			}
+		})
+	}
+	var host *Host
+	if host.HasOAuthModelProvider("antigravity") {
+		t.Fatal("nil host claims model ownership")
+	}
+}
+
+func TestExecutorAdapterResponseTranslationOutcome(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		stream   bool
+		original bool
+	}{
+		{name: "nonstream", original: true},
+		{name: "stream", stream: true, original: true},
+		{name: "nonstream-original-omitted"},
+		{name: "stream-original-omitted", stream: true},
+	} {
+		stream, mode := testCase.stream, testCase.name
+		for _, valid := range []bool{false, true} {
+			name := mode + "/invalid"
+			arguments := `{"input":42}`
+			if valid {
+				name = mode + "/valid"
+				arguments = `{"input":"*** Begin Patch\n*** End Patch"}`
+			}
+			t.Run(name, func(t *testing.T) {
+				records := registerExecutorUsageCapture(t)
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				request := []byte(`{"model":"model-1","input":[{"role":"user","content":"synthetic"}],"tools":[{"type":"custom","name":"apply_patch"}]}`)
+				auth := &coreauth.Auth{ID: "synthetic-translation", Provider: "plugin-provider", Index: "synthetic-index"}
+				function := map[string]any{"name": "apply_patch", "arguments": arguments}
+				message := map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"id": "call_1", "type": "function", "function": function}}}
+				usage := map[string]any{"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
+				payload, err := json.Marshal(map[string]any{"id": "chatcmpl_synthetic", "model": "model-1", "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": "tool_calls"}}, "usage": usage})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var producerContext context.Context
+				adapter := &executorAdapter{
+					host: New(), pluginID: "synthetic-translation", provider: auth.Provider,
+					inputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI}, outputFormats: []sdktranslator.Format{sdktranslator.FormatOpenAI},
+					executor: &fakeExecutor{
+						execute: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+							return pluginapi.ExecutorResponse{Payload: payload}, nil
+						},
+						executeStream: func(sourceCtx context.Context, _ pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+							producerContext = sourceCtx
+							chunks := make(chan pluginapi.ExecutorStreamChunk, 3)
+							call := map[string]any{"index": 0, "id": "call_1", "type": "function", "function": function}
+							first, errMarshal := json.Marshal(map[string]any{"id": "chatcmpl_synthetic", "model": "model-1", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "tool_calls": []any{call}}, "finish_reason": nil}}, "usage": usage})
+							if errMarshal != nil {
+								t.Fatal(errMarshal)
+							}
+							last, errMarshal := json.Marshal(map[string]any{"id": "chatcmpl_synthetic", "model": "model-1", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}}, "usage": usage})
+							if errMarshal != nil {
+								t.Fatal(errMarshal)
+							}
+							chunks <- pluginapi.ExecutorStreamChunk{Payload: append(append([]byte("data: "), first...), '\n', '\n')}
+							chunks <- pluginapi.ExecutorStreamChunk{Payload: append(append([]byte("data: "), last...), '\n', '\n')}
+							chunks <- pluginapi.ExecutorStreamChunk{Payload: []byte("data: [DONE]\n\n")}
+							close(chunks)
+							return pluginapi.ExecutorStreamResponse{Chunks: chunks}, nil
+						},
+					},
+				}
+				req := coreexecutor.Request{Model: "model-1", Format: sdktranslator.FormatOpenAIResponse, Payload: request}
+				opts := coreexecutor.Options{Stream: stream, SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: request}
+				if !testCase.original {
+					opts.OriginalRequest = nil
+				}
+				var executionErr error
+				if stream {
+					result, errExecute := adapter.ExecuteStream(ctx, auth, req, opts)
+					executionErr = errExecute
+					if errExecute == nil {
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								executionErr = chunk.Err
+							}
+						}
+					}
+				} else {
+					_, executionErr = adapter.Execute(ctx, auth, req, opts)
+				}
+				if stream {
+					select {
+					case <-producerContext.Done():
+					case <-time.After(time.Second):
+						t.Error("plugin source context remains active after stream completion")
+					}
+					if ctx.Err() != nil {
+						t.Errorf("stream completion canceled caller context: %v", ctx.Err())
+					}
+				}
+				if valid && executionErr != nil {
+					t.Errorf("valid translated response failed: %v", executionErr)
+				}
+				if !valid {
+					statusError, ok := executionErr.(interface{ StatusCode() int })
+					if !ok || statusError.StatusCode() != http.StatusBadGateway {
+						t.Errorf("invalid tool translation error = %v, want SDK 502", executionErr)
+					}
+					if scoped, ok := executionErr.(coreexecutor.RequestScopedError); !ok || !scoped.IsRequestScoped() {
+						t.Errorf("translation error can affect credential availability: %v", executionErr)
+					}
+				}
+				record := readExecutorUsageRecord(t, records)
+				if record.Failed == valid || record.AuthID != auth.ID || record.Stream != stream {
+					t.Errorf("translation usage outcome = %#v, valid=%v stream=%v", record, valid, stream)
+				}
+				if record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 {
+					t.Errorf("translation discarded observed usage: %#v", record.Detail)
+				}
+				assertNoSecondExecutorUsage(t, records)
+			})
+		}
+	}
+}
+
+func TestExecutorAdapterCountReturnsResponseTranslationFailure(t *testing.T) {
+	const requested sdktranslator.Format = "plugin-count-translation-client"
+	const native sdktranslator.Format = "plugin-count-translation-native"
+	sdktranslator.Register(requested, native, nil, sdktranslator.ResponseTransform{
+		NonStream: func(_ context.Context, _ string, _, _, _ []byte, param *any) []byte {
+			if param != nil {
+				*param = executorResponseFailureState{}
+			}
+			return []byte(`{"count":7}`)
+		},
+	})
+	adapter := &executorAdapter{
+		host: New(), pluginID: "synthetic-count-translation", provider: "plugin-provider",
+		inputFormats: []sdktranslator.Format{requested}, outputFormats: []sdktranslator.Format{native},
+		executor: &fakeExecutor{countTokens: func(context.Context, pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
+			return pluginapi.ExecutorResponse{Payload: []byte(`{"count":7}`)}, nil
+		}},
+	}
+	response, err := adapter.CountTokens(context.Background(), &coreauth.Auth{},
+		coreexecutor.Request{Model: "model-1", Payload: []byte(`{"input":"synthetic"}`)},
+		coreexecutor.Options{SourceFormat: requested, ResponseFormat: requested})
+	status, ok := err.(interface{ StatusCode() int })
+	if !ok || status.StatusCode() != http.StatusBadGateway || len(response.Payload) != 0 {
+		t.Fatalf("count translation result = %#v, %v; want empty response and SDK 502", response, err)
+	}
+	if scoped, ok := err.(coreexecutor.RequestScopedError); !ok || !scoped.IsRequestScoped() {
+		t.Fatalf("count translation error can affect credential availability: %v", err)
+	}
+}
+
+type executorResponseFailureState struct{}
+
+func (executorResponseFailureState) ResponseTranslationError() error {
+	return errors.New("synthetic response translation failed")
 }

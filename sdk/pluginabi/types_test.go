@@ -46,6 +46,49 @@ func TestEnvelopeRoundTrip(t *testing.T) {
 	}
 }
 
+func TestErrorEnvelopePreservesHTTPStatus(t *testing.T) {
+	var _ error = (*Error)(nil)
+	var _ interface{ StatusCode() int } = (*Error)(nil)
+
+	raw, errMarshal := NewErrorEnvelope("insufficient_quota", "plan limit reached", 403)
+	if errMarshal != nil {
+		t.Fatalf("NewErrorEnvelope(): %v", errMarshal)
+	}
+	var envelope Envelope
+	if errUnmarshal := json.Unmarshal(raw, &envelope); errUnmarshal != nil {
+		t.Fatalf("unmarshal envelope: %v", errUnmarshal)
+	}
+	if envelope.OK || envelope.Error == nil || envelope.Error.Code != "insufficient_quota" ||
+		envelope.Error.Error() != "plan limit reached" || envelope.Error.StatusCode() != 403 {
+		t.Fatalf("error envelope = %#v", envelope)
+	}
+
+	legacy, errLegacy := NewErrorEnvelope("plugin_failed", "unavailable")
+	if errLegacy != nil {
+		t.Fatalf("NewErrorEnvelope() without status: %v", errLegacy)
+	}
+	var legacyEnvelope Envelope
+	if errUnmarshal := json.Unmarshal(legacy, &legacyEnvelope); errUnmarshal != nil {
+		t.Fatalf("unmarshal legacy envelope: %v", errUnmarshal)
+	}
+	if legacyEnvelope.Error == nil || legacyEnvelope.Error.StatusCode() != 0 {
+		t.Fatalf("legacy error envelope = %#v, want no HTTP status", legacyEnvelope)
+	}
+	var legacyWire struct {
+		Error map[string]json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(legacy, &legacyWire); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := legacyWire.Error["http_status"]; exists {
+		t.Fatalf("legacy error envelope contains omitted HTTP status: %s", legacy)
+	}
+	var nilError *Error
+	if nilError.Error() != "" || nilError.StatusCode() != 0 {
+		t.Fatal("nil error must have an empty message and no HTTP status")
+	}
+}
+
 func TestMethodNamesAreStable(t *testing.T) {
 	tests := []struct {
 		name string
@@ -66,6 +109,10 @@ func TestMethodNamesAreStable(t *testing.T) {
 		{"MethodQuotaReset", MethodQuotaReset, "quota.reset"},
 		{"MethodHostAffinityLookup", MethodHostAffinityLookup, "host.affinity.lookup"},
 		{"MethodHostHTTPDo", MethodHostHTTPDo, "host.http.do"},
+		{"MethodHostHTTPDoStream", MethodHostHTTPDoStream, "host.http.do_stream"},
+		{"MethodHostRoutingResetCooldown", MethodHostRoutingResetCooldown, "host.routing.reset_cooldown"},
+		{"MethodHostHTTPOperationOpen", MethodHostHTTPOperationOpen, "host.http.operation_open"},
+		{"MethodHostHTTPCancel", MethodHostHTTPCancel, "host.http.cancel"},
 		{"MethodHostHTTPStreamRead", MethodHostHTTPStreamRead, "host.http.stream_read"},
 		{"MethodHostModelExecute", MethodHostModelExecute, "host.model.execute"},
 		{"MethodHostModelExecuteStream", MethodHostModelExecuteStream, "host.model.execute_stream"},

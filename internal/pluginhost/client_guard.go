@@ -12,6 +12,7 @@ const pluginShutdownTimeout = 15 * time.Second
 type guardedPluginClient struct {
 	mu              sync.Mutex
 	inner           pluginClient
+	instance        *hostCallbackInstance
 	calls           int
 	closed          bool
 	shutdownStarted bool
@@ -19,10 +20,29 @@ type guardedPluginClient struct {
 }
 
 func newGuardedPluginClient(inner pluginClient) pluginClient {
+	instance := pluginCallbackInstance(inner)
+	if instance == nil {
+		instance = &hostCallbackInstance{}
+	}
 	return &guardedPluginClient{
 		inner:        inner,
+		instance:     instance,
 		shutdownDone: make(chan struct{}),
 	}
+}
+
+func pluginCallbackInstance(client pluginClient) *hostCallbackInstance {
+	if provider, ok := client.(interface{ callbackInstance() *hostCallbackInstance }); ok {
+		return provider.callbackInstance()
+	}
+	return nil
+}
+
+func (c *guardedPluginClient) callbackInstance() *hostCallbackInstance {
+	if c == nil {
+		return nil
+	}
+	return c.instance
 }
 
 func (c *guardedPluginClient) Call(ctx context.Context, method string, request []byte) ([]byte, error) {
@@ -62,6 +82,19 @@ func (c *guardedPluginClient) release() {
 
 func (c *guardedPluginClient) Shutdown() {
 	_ = c.shutdownContext(context.Background())
+}
+
+func (c *guardedPluginClient) cancelHostHTTPResources() {
+	if c == nil {
+		return
+	}
+	c.instance.closed.Store(true)
+	c.mu.Lock()
+	inner := c.inner
+	c.mu.Unlock()
+	if scoped, ok := inner.(interface{ cancelHostHTTPResources() }); ok {
+		scoped.cancelHostHTTPResources()
+	}
 }
 
 func (c *guardedPluginClient) shutdownContext(ctx context.Context) error {

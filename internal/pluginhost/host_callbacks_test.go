@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -59,6 +60,36 @@ func (e *fakeHostModelExecutor) ExecuteModelStream(
 	req handlers.ModelExecutionRequest,
 ) (handlers.ModelExecutionStream, *handlers.ErrorMessage) {
 	return e.executeModelStream(ctx, req)
+}
+
+func TestModelExecutionErrorKeepsStatusAndCause(t *testing.T) {
+	cause := errors.New("provider denied access")
+	err := modelExecutionError(&handlers.ErrorMessage{StatusCode: http.StatusForbidden, Error: cause})
+	if !errors.Is(err, cause) {
+		t.Fatalf("model execution cause = %v, want original error", err)
+	}
+	if status := clienterror.HTTPStatusFromError(err); status != http.StatusForbidden {
+		t.Fatalf("model execution status = %d, want 403", status)
+	}
+
+	err = modelExecutionError(&handlers.ErrorMessage{StatusCode: http.StatusTooManyRequests})
+	if status := clienterror.HTTPStatusFromError(err); status != http.StatusTooManyRequests {
+		t.Fatalf("status-only model execution = %d, want 429", status)
+	}
+}
+
+func TestHostModelCallbacksRejectInvalidProxyBeforeExecuting(t *testing.T) {
+	host := New()
+	for _, method := range []string{pluginabi.MethodHostModelExecute, pluginabi.MethodHostModelExecuteStream} {
+		req, errMarshal := json.Marshal(pluginapi.HostModelExecutionRequest{ProxyURL: "file:///tmp/proxy", Stream: method == pluginabi.MethodHostModelExecuteStream})
+		if errMarshal != nil {
+			t.Fatal(errMarshal)
+		}
+		_, errCall := host.callFromPlugin(context.Background(), method, req)
+		if errCall == nil || errCall.Error() != "invalid proxy_url" || clienterror.HTTPStatusFromError(errCall) != http.StatusBadRequest {
+			t.Fatalf("%s invalid proxy error = %v, want HTTP 400", method, errCall)
+		}
+	}
 }
 
 func TestHostAffinityLookupValidatesRequiredFields(t *testing.T) {
@@ -216,9 +247,9 @@ func TestDecodeHostHTTPRequestPrefersNestedWireProfileAndClonesIt(t *testing.T) 
 			"wire_profile":{"disable_auto_compression":true,"header_profile":["Nested-Header"]}
 		}
 	}`)
-	decoded, _, errDecode := decodeHostHTTPRequestWithCallbackID(raw)
+	decoded, _, _, errDecode := decodeHostHTTPRequest(raw)
 	if errDecode != nil {
-		t.Fatalf("decodeHostHTTPRequestWithCallbackID() error = %v", errDecode)
+		t.Fatalf("decodeHostHTTPRequest() error = %v", errDecode)
 	}
 	if decoded.WireProfile == nil || decoded.WireProfile.HTTP1Only ||
 		!decoded.WireProfile.DisableAutoCompression ||
@@ -233,9 +264,9 @@ func TestDecodeHostHTTPRequestPrefersNestedWireProfileAndClonesIt(t *testing.T) 
 	if errMarshal != nil {
 		t.Fatalf("json.Marshal() error = %v", errMarshal)
 	}
-	cloned, _, errClone := decodeHostHTTPRequestWithCallbackID(encoded)
+	cloned, _, _, errClone := decodeHostHTTPRequest(encoded)
 	if errClone != nil {
-		t.Fatalf("decodeHostHTTPRequestWithCallbackID() clone error = %v", errClone)
+		t.Fatalf("decodeHostHTTPRequest() clone error = %v", errClone)
 	}
 	profile.HeaderProfile[0] = "Mutated"
 	if cloned.WireProfile == nil || cloned.WireProfile.HeaderProfile[0] != "Original" {
@@ -1063,13 +1094,17 @@ func TestHostModelExecuteCallback(t *testing.T) {
 
 	rawReq, errMarshal := json.Marshal(
 		rpcHostModelExecutionRequest{
-			EntryProtocol: "openai",
-			ExitProtocol:  "claude",
-			Model:         "model-1",
-			Body:          []byte(`{"request":true}`),
-			Headers:       http.Header{"X-Request": []string{"yes"}},
-			Query:         url.Values{"alt": []string{"sse"}},
-			Alt:           "raw",
+			EntryProtocol:  "openai",
+			ExitProtocol:   "claude",
+			Model:          "model-1",
+			Body:           []byte(`{"request":true}`),
+			Headers:        http.Header{"X-Request": []string{"yes"}},
+			Query:          url.Values{"alt": []string{"sse"}},
+			Alt:            "raw",
+			ForcedProvider: "claude",
+			AuthID:         "auth-1",
+			ProxyURL:       " socks5://localhost:1080 ",
+			Path:           " /v1/images/generations ",
 		},
 	)
 	if errMarshal != nil {
@@ -1104,6 +1139,10 @@ func TestHostModelExecuteCallback(t *testing.T) {
 	}
 	if got.Alt != "raw" {
 		t.Fatalf("alt = %q, want raw", got.Alt)
+	}
+	if got.ForcedProvider != "claude" || got.AuthID != "auth-1" || got.ProxyURL != "socks5://localhost:1080" ||
+		got.Path != "/v1/images/generations" {
+		t.Fatalf("model routing = (%q, %q, %q, %q)", got.ForcedProvider, got.AuthID, got.ProxyURL, got.Path)
 	}
 }
 

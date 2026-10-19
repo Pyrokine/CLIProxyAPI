@@ -32,6 +32,7 @@ type pluginListEntry struct {
 	Enabled          bool                    `json:"enabled"`
 	EffectiveEnabled bool                    `json:"effective_enabled"`
 	SupportsOAuth    bool                    `json:"supports_oauth"`
+	OAuthProvider    string                  `json:"oauth_provider"`
 	SupportsQuota    bool                    `json:"supports_quota"`
 	QuotaProvider    string                  `json:"quota_provider,omitempty"`
 	Logo             string                  `json:"logo"`
@@ -143,6 +144,7 @@ func (h *Handler) ListPlugins(c *gin.Context) {
 			entry.ID = id
 			entry.Registered = true
 			entry.SupportsOAuth = info.SupportsOAuth
+			entry.OAuthProvider = info.OAuthProvider
 			if quotaInfo, supportsQuota := quotaProvidersByPlugin[id]; supportsQuota {
 				entry.SupportsQuota = true
 				entry.QuotaProvider = quotaInfo.Provider

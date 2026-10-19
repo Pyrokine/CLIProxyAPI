@@ -13,9 +13,10 @@ import (
 )
 
 type rpcPluginAdapter struct {
-	id     string
-	host   *Host
-	client pluginClient
+	id       string
+	host     *Host
+	client   pluginClient
+	instance *hostCallbackInstance
 }
 
 type rpcAuthProvider struct {
@@ -44,12 +45,17 @@ type rpcResponseNormalizer struct {
 }
 
 type rpcError struct {
-	Code    string
-	message string
+	Code       string
+	message    string
+	httpStatus int
 }
 
 func (e rpcError) Error() string {
 	return e.message
+}
+
+func (e rpcError) StatusCode() int {
+	return e.httpStatus
 }
 
 func normalizedPluginSchemaVersion(version uint32) uint32 {
@@ -83,12 +89,13 @@ func registerRPCPlugin(
 	if schemaVersion > pluginabi.SchemaVersion {
 		return pluginapi.Plugin{}, fmt.Errorf("plugin schema version %d is not supported", resp.SchemaVersion)
 	}
-	adapter := &rpcPluginAdapter{id: id, host: host, client: client}
+	adapter := &rpcPluginAdapter{id: id, host: host, client: client, instance: pluginCallbackInstance(client)}
 	plugin := pluginapi.Plugin{
 		Metadata:      resp.Metadata,
 		SchemaVersion: schemaVersion,
 		Capabilities: pluginapi.Capabilities{
 			FrontendAuthProviderExclusive: resp.Capabilities.FrontendAuthProvider && resp.Capabilities.FrontendAuthProviderExclusive,
+			SchedulerAcrossPriorities:     resp.Capabilities.Scheduler && resp.Capabilities.SchedulerAcrossPriorities,
 			ExecutorModelScope:            resp.Capabilities.ExecutorModelScope,
 			ExecutorInputFormats:          append([]string(nil), resp.Capabilities.ExecutorInputFormats...),
 			ExecutorOutputFormats:         append([]string(nil), resp.Capabilities.ExecutorOutputFormats...),
@@ -180,6 +187,9 @@ func callPlugin[T any](ctx context.Context, client pluginClient, method string, 
 	}
 	out, errDecode := decodeEnvelopeResult[T](envelope)
 	if errDecode != nil {
+		if !envelope.OK {
+			return zero, errDecode
+		}
 		return zero, fmt.Errorf("decode plugin result %s: %w", method, errDecode)
 	}
 	return out, nil
@@ -316,6 +326,14 @@ func decodeRPCEnvelope[T any](raw []byte) (T, error) {
 	return decodeEnvelopeResult[T](envelope)
 }
 
+func isPluginErrorEnvelope(raw []byte) bool {
+	var envelope pluginabi.Envelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return false
+	}
+	return !envelope.OK && envelope.Error != nil
+}
+
 func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 	var zero T
 	if !envelope.OK {
@@ -324,7 +342,11 @@ func decodeEnvelopeResult[T any](envelope pluginabi.Envelope) (T, error) {
 			if message == "" {
 				message = "plugin call failed"
 			}
-			return zero, rpcError{Code: strings.TrimSpace(envelope.Error.Code), message: message}
+			return zero, rpcError{
+				Code:       strings.TrimSpace(envelope.Error.Code),
+				message:    message,
+				httpStatus: envelope.Error.HTTPStatus,
+			}
 		}
 		return zero, fmt.Errorf("plugin call failed")
 	}
@@ -345,16 +367,8 @@ func marshalRPCEnvelope(result json.RawMessage) ([]byte, error) {
 	return json.Marshal(pluginabi.Envelope{OK: true, Result: result})
 }
 
-func marshalRPCError(code, message string) []byte {
-	raw, _ := json.Marshal(
-		pluginabi.Envelope{
-			OK: false,
-			Error: &pluginabi.Error{
-				Code:    code,
-				Message: message,
-			},
-		},
-	)
+func marshalRPCError(code, message string, httpStatus ...int) []byte {
+	raw, _ := pluginabi.NewErrorEnvelope(code, message, httpStatus...)
 	return raw
 }
 
@@ -362,7 +376,7 @@ func (a *rpcPluginAdapter) openHostCallbackContext(ctx context.Context) (string,
 	if a == nil || a.host == nil {
 		return "", func() {}
 	}
-	return a.host.openCallbackContextForPlugin(ctx, a.id)
+	return a.host.openCallbackContextForPluginInstance(ctx, a.id, a.instance)
 }
 
 func (a *rpcPluginAdapter) RegisterModels(

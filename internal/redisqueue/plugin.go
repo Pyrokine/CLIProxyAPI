@@ -11,6 +11,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
 	coreusage "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/google/uuid"
 )
 
 func init() {
@@ -105,6 +106,17 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	}
 	apiKey := util.HideAPIKey(strings.TrimSpace(record.APIKey))
 	requestID := strings.TrimSpace(internallogging.GetRequestID(ctx))
+	traceID := strings.TrimSpace(record.RequestID)
+	if traceID == "" {
+		traceID = requestID
+	}
+	executionID := strings.TrimSpace(record.ExecutionID)
+	if executionID == "" {
+		executionID = coreusage.ExecutionIDFromContext(ctx)
+	}
+	if executionID == "" {
+		executionID = uuid.NewString()
+	}
 	reasoningEffort := strings.TrimSpace(record.ReasoningEffort)
 	if reasoningEffort == "" {
 		reasoningEffort = coreusage.ReasoningEffortFromContext(ctx)
@@ -149,6 +161,13 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 	if sessionID == "" || sessionID == parentSessionID {
 		parentSessionID = ""
 	}
+	var nodeKind string
+	var isFork, isCompaction bool
+	if sessionID != "" && sessionID == coresession.NormalizeToCanonicalUUID(clientMetadata.SessionID) {
+		nodeKind = strings.TrimSpace(clientMetadata.NodeKind)
+		isFork = clientMetadata.IsFork
+		isCompaction = clientMetadata.IsCompaction
+	}
 
 	failed := record.Failed
 	if !failed {
@@ -189,12 +208,18 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 			AuthType:            authType,
 			APIKey:              apiKey,
 			RequestID:           requestID,
+			ExecutionID:         executionID,
+			TraceID:             traceID,
 			SessionID:           sessionID,
 			ParentSessionID:     parentSessionID,
+			NodeKind:            nodeKind,
+			IsFork:              isFork,
+			IsCompaction:        isCompaction,
 			ReasoningEffort:     reasoningEffort,
 			ServiceTier:         requestServiceTier,
 			RequestServiceTier:  requestServiceTier,
 			ResponseServiceTier: responseServiceTier,
+			ResponseModel:       strings.TrimSpace(record.ResponseModel),
 		},
 	)
 	if err != nil {
@@ -217,12 +242,18 @@ type queuedUsageDetail struct {
 	AuthType            string                   `json:"auth_type"`
 	APIKey              string                   `json:"api_key"`
 	RequestID           string                   `json:"request_id"`
+	ExecutionID         string                   `json:"execution_id,omitempty"`
+	TraceID             string                   `json:"trace_id,omitempty"`
 	SessionID           string                   `json:"session_id,omitempty"`
 	ParentSessionID     string                   `json:"parent_session_id,omitempty"`
+	NodeKind            string                   `json:"node_kind,omitempty"`
+	IsFork              bool                     `json:"is_fork,omitempty"`
+	IsCompaction        bool                     `json:"is_compaction,omitempty"`
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
 	RequestServiceTier  string                   `json:"request_service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+	ResponseModel       string                   `json:"response_model,omitempty"`
 }
 
 type requestDetail struct {
