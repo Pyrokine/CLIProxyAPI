@@ -284,9 +284,23 @@ func MapToolName(toolNameMap map[string]string, name string) string {
 // Exact duplicate names share a mapping. Distinct names that sanitize to the same value receive
 // deterministic hash suffixes so every declaration remains addressable within the 64-byte limit.
 func SanitizedFunctionNameMap(rawJSON []byte) map[string]string {
-	names := functionNamesFromRequest(rawJSON)
+	return sanitizedFunctionNameMap(functionNamesFromRequest(rawJSON), SanitizeFunctionName, nil)
+}
+
+// ClaudeFunctionNameMap 为请求中的工具分配互不冲突的 Claude 名称
+func ClaudeFunctionNameMap(rawJSON []byte) map[string]string {
+	return sanitizedFunctionNameMap(functionNamesFromRequest(rawJSON), SanitizeClaudeFunctionName, nil)
+}
+
+// ChatFunctionNameMap 将完整工具身份映射为 Chat 可接受的名称，历史名称不改变已分配的声明
+func ChatFunctionNameMap(names []string, historyNames ...string) map[string]string {
+	declared := sanitizedFunctionNameMap(names, SanitizeClaudeFunctionName, nil)
+	return sanitizedFunctionNameMap(historyNames, SanitizeClaudeFunctionName, declared)
+}
+
+func sanitizedFunctionNameMap(names []string, sanitize func(string) string, out map[string]string) map[string]string {
 	if len(names) == 0 {
-		return nil
+		return out
 	}
 
 	uniqueNames := make(map[string]struct{}, len(names))
@@ -295,11 +309,14 @@ func SanitizedFunctionNameMap(rawJSON []byte) map[string]string {
 		if name == "" {
 			continue
 		}
+		if _, exists := out[name]; exists {
+			continue
+		}
 		if _, exists := uniqueNames[name]; exists {
 			continue
 		}
 		uniqueNames[name] = struct{}{}
-		baseCounts[SanitizeFunctionName(name)]++
+		baseCounts[sanitize(name)]++
 	}
 
 	sortedNames := make([]string, 0, len(uniqueNames))
@@ -308,10 +325,15 @@ func SanitizedFunctionNameMap(rawJSON []byte) map[string]string {
 	}
 	sort.Strings(sortedNames)
 
-	out := make(map[string]string, len(sortedNames))
-	used := make(map[string]string, len(sortedNames))
+	if out == nil {
+		out = make(map[string]string, len(sortedNames))
+	}
+	used := make(map[string]string, len(out)+len(sortedNames))
+	for original, mapped := range out {
+		used[mapped] = original
+	}
 	for _, name := range sortedNames {
-		base := SanitizeFunctionName(name)
+		base := sanitize(name)
 		mapped := base
 		_, baseUsed := used[base]
 		if baseCounts[base] > 1 || baseUsed {
@@ -337,7 +359,11 @@ func MapSanitizedFunctionName(nameMap map[string]string, name string) string {
 // DisambiguatedToolNameMap builds a sanitized-name → original-name map using the
 // same collision-aware mapping as SanitizedFunctionNameMap.
 func DisambiguatedToolNameMap(rawJSON []byte) map[string]string {
-	forward := SanitizedFunctionNameMap(rawJSON)
+	return ReverseToolNameMap(SanitizedFunctionNameMap(rawJSON))
+}
+
+// ReverseToolNameMap 还原经过名称映射的工具身份，原样保留的名称不重复记录
+func ReverseToolNameMap(forward map[string]string) map[string]string {
 	if len(forward) == 0 {
 		return nil
 	}

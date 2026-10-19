@@ -109,7 +109,7 @@ func (identity *ResponsesToolIdentity) ResolveDeclaration(
 		return ResponsesToolDeclaration{}, ErrResponsesToolNameUnknown
 	}
 	if namespace != "" {
-		qualifiedName := qualifyResponsesToolName(namespace, name)
+		qualifiedName := QualifyResponsesNamespaceToolName(namespace, name)
 		if declaration, ok := identity.resolve(qualifiedName); ok {
 			return declaration, nil
 		}
@@ -138,7 +138,7 @@ func (identity *ResponsesToolIdentity) ResolveName(name, namespace string) strin
 		return ""
 	}
 	if namespace != "" {
-		qualifiedName := qualifyResponsesToolName(namespace, name)
+		qualifiedName := QualifyResponsesNamespaceToolName(namespace, name)
 		if _, ok := identity.resolve(qualifiedName); ok {
 			return qualifiedName
 		}
@@ -158,8 +158,8 @@ func (identity *ResponsesToolIdentity) ResolveName(name, namespace string) strin
 // IsCustom reports whether the winning declaration for a provider-facing name
 // is a Responses custom tool.
 func (identity *ResponsesToolIdentity) IsCustom(qualifiedName string) bool {
-	declaration, ok := identity.resolve(qualifiedName)
-	return ok && declaration.Kind == ResponsesCustomTool
+	declaration, err := identity.ResolveDeclaration(qualifiedName, "")
+	return err == nil && declaration.Kind == ResponsesCustomTool
 }
 
 // SingleCustomName returns the only emitted tool name when it is custom.
@@ -176,7 +176,7 @@ func (identity *ResponsesToolIdentity) SingleCustomName() (string, bool) {
 func (identity *ResponsesToolIdentity) SetToolCallIdentity(item []byte, qualifiedName, itemPath string) []byte {
 	name := strings.TrimSpace(qualifiedName)
 	namespace := ""
-	if declaration, ok := identity.resolve(name); ok {
+	if declaration, err := identity.ResolveDeclaration(name, ""); err == nil {
 		name = declaration.Name
 		namespace = declaration.Namespace
 	}
@@ -191,9 +191,11 @@ func (identity *ResponsesToolIdentity) collect(tools gjson.Result, sourcePriorit
 		toolType := strings.TrimSpace(tool.Get("type").String())
 		if toolType == "namespace" {
 			childNamespace := joinResponsesNamespace(namespace, tool.Get("name").String())
-			if childNamespace != "" {
-				identity.collect(tool.Get("tools"), sourcePriority, childNamespace, false)
+			children := tool.Get("tools")
+			if !children.IsArray() {
+				children = tool.Get("children")
 			}
+			identity.collect(children, sourcePriority, childNamespace, false)
 			continue
 		}
 
@@ -215,7 +217,7 @@ func (identity *ResponsesToolIdentity) collect(tools gjson.Result, sourcePriorit
 				Kind:           kind,
 				Name:           name,
 				Namespace:      namespace,
-				QualifiedName:  qualifyResponsesToolName(namespace, name),
+				QualifiedName:  QualifyResponsesNamespaceToolName(namespace, name),
 				Raw:            tool.Raw,
 				SourcePriority: sourcePriority,
 				Direct:         direct && namespace == "",
@@ -284,9 +286,9 @@ func joinResponsesNamespace(parent, child string) string {
 	return parent + "__" + child
 }
 
-// qualifyResponsesToolName returns the stable flattened provider-facing name
+// QualifyResponsesNamespaceToolName returns the stable flattened provider-facing name
 // for a Responses namespace child.
-func qualifyResponsesToolName(namespace, name string) string {
+func QualifyResponsesNamespaceToolName(namespace, name string) string {
 	name = strings.TrimSpace(name)
 	namespace = strings.TrimSpace(strings.TrimSuffix(namespace, "__"))
 	if name == "" || namespace == "" {
@@ -349,6 +351,10 @@ func ParseResponsesCustomToolInput(arguments string) (string, bool) {
 func UnwrapResponsesCustomToolInput(arguments string) string {
 	if input, ok := ParseResponsesCustomToolInput(arguments); ok {
 		return input
+	}
+	var input ResponsesPatchInput
+	if _, err := input.Push(arguments); err == nil {
+		return input.Input()
 	}
 	return arguments
 }

@@ -199,14 +199,18 @@ func MaskSensitiveQuery(raw string) string {
 		if err != nil {
 			decodedKey = keyPart
 		}
-		if !IsSensitiveFieldName(decodedKey) {
+		secret := strings.ToLower(strings.TrimSpace(decodedKey))
+		if secret != "code" && secret != "state" && !IsSensitiveFieldName(decodedKey) {
 			continue
 		}
-		decodedValue, err := url.QueryUnescape(valuePart)
-		if err != nil {
-			decodedValue = valuePart
+		masked := "***"
+		if secret != "code" && secret != "state" {
+			decodedValue, err := url.QueryUnescape(valuePart)
+			if err != nil {
+				decodedValue = valuePart
+			}
+			masked = HideAPIKey(strings.TrimSpace(decodedValue))
 		}
-		masked := HideAPIKey(strings.TrimSpace(decodedValue))
 		parts[i] = keyPart + "=" + url.QueryEscape(masked)
 		changed = true
 	}

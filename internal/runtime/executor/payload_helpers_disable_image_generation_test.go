@@ -13,7 +13,7 @@ func TestApplyPayloadConfigDisableImageGenerationPassthroughKeepsTools(t *testin
 		DisableImageGeneration: config.DisableImageGenerationPassthrough,
 	}
 
-	out := applyPayloadConfigWithRequest(cfg, "", "", "", "", payload, nil, "", "/v1/responses", nil)
+	out := applyPayloadConfigWithRequest(cfg, "", "", "", "", payload, nil, "", "/v1/responses", nil, "openai-compat")
 
 	if !gjson.GetBytes(out, `tools.#(type=="image_generation")`).Exists() {
 		t.Fatalf("image_generation tool was removed: %s", out)
@@ -29,7 +29,7 @@ func TestApplyPayloadConfigDisableImageGenerationChatKeepsImagesEndpoint(t *test
 		DisableImageGeneration: config.DisableImageGenerationChat,
 	}
 
-	out := applyPayloadConfigWithRequest(cfg, "", "", "", "", payload, nil, "", "/v1/images/generations", nil)
+	out := applyPayloadConfigWithRequest(cfg, "", "", "", "", payload, nil, "", "/v1/images/generations", nil, "openai-compat")
 
 	if !gjson.GetBytes(out, `tools.#(type=="image_generation")`).Exists() {
 		t.Fatalf("image_generation tool was removed for images endpoint: %s", out)
@@ -45,7 +45,7 @@ func TestApplyPayloadConfigDisableImageGenerationAllStripsTools(t *testing.T) {
 		DisableImageGeneration: config.DisableImageGenerationAll,
 	}
 
-	out := applyPayloadConfigWithRequest(cfg, "", "", "", "", payload, nil, "", "/v1/images/generations", nil)
+	out := applyPayloadConfigWithRequest(cfg, "", "", "", "", payload, nil, "", "/v1/images/generations", nil, "openai-compat")
 
 	if gjson.GetBytes(out, `tools.#(type=="image_generation")`).Exists() {
 		t.Fatalf("image_generation tool still exists: %s", out)

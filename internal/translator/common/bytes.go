@@ -1,6 +1,8 @@
 package common
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -238,4 +240,15 @@ func AppendSSEEventBytes(out []byte, event string, payload []byte, trailingNewli
 		out = append(out, '\n')
 	}
 	return out
+}
+
+// SetStringWithoutHTMLEscape writes a JSON string without replacing HTML characters with Unicode escapes.
+func SetStringWithoutHTMLEscape(data []byte, path, value string) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, fmt.Errorf("encode JSON string: %w", err)
+	}
+	return sjson.SetRawBytes(data, path, bytes.TrimSuffix(buf.Bytes(), []byte{'\n'}))
 }

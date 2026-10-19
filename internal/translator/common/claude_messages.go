@@ -2,6 +2,7 @@ package common
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -82,6 +83,15 @@ func (a *ClaudeMessageAccumulator) Messages() [][]byte {
 // tool_use IDs. Partial matches are allowed, and only matched result slots are
 // replaced, so text, image, and unmatched result blocks keep their positions.
 func AlignClaudeToolResults(content gjson.Result, toolUseIDs []string) gjson.Result {
+	return alignToolResults(content, toolUseIDs, "type", "tool_result", "tool_use_id")
+}
+
+// AlignGeminiFunctionResponses 按调用 ID 排列结果，保留文本、图片和未匹配结果的位置
+func AlignGeminiFunctionResponses(parts gjson.Result, toolUseIDs []string) gjson.Result {
+	return alignToolResults(parts, toolUseIDs, "functionResponse", "", "functionResponse.id")
+}
+
+func alignToolResults(content gjson.Result, toolUseIDs []string, typePath, typeName, idPath string) gjson.Result {
 	if !content.IsArray() || len(toolUseIDs) == 0 {
 		return content
 	}
@@ -104,10 +114,11 @@ func AlignClaudeToolResults(content gjson.Result, toolUseIDs []string) gjson.Res
 	matchedSlots := make([]int, 0, len(parts))
 	matchedResults := make([]matchedResult, 0, len(parts))
 	for index, part := range parts {
-		if part.Get("type").String() != "tool_result" {
+		resultType := part.Get(typePath)
+		if !resultType.Exists() || typeName != "" && resultType.String() != typeName {
 			continue
 		}
-		order, exists := orderByID[part.Get("tool_use_id").String()]
+		order, exists := orderByID[part.Get(idPath).String()]
 		if !exists {
 			continue
 		}
@@ -130,6 +141,37 @@ func AlignClaudeToolResults(content gjson.Result, toolUseIDs []string) gjson.Res
 		ordered[slot] = []byte(matchedResults[index].part.Raw)
 	}
 	return gjson.ParseBytes(JoinRawArray(ordered))
+}
+
+// ClaudeToolResultContent 提取工具结果中的内联图片，合并文本并保留其他 JSON 内容
+func ClaudeToolResultContent(content gjson.Result) (gjson.Result, []gjson.Result) {
+	if !content.IsArray() || len(content.Array()) == 0 {
+		return content, nil
+	}
+
+	var texts []string
+	var images []gjson.Result
+	var remaining [][]byte
+	allText := true
+	for _, part := range content.Array() {
+		source := part.Get("source")
+		if part.Get("type").String() == "image" && source.Get("type").String() == "base64" &&
+			source.Get("media_type").String() != "" && source.Get("data").String() != "" {
+			images = append(images, source)
+			continue
+		}
+		remaining = append(remaining, []byte(part.Raw))
+		if part.Get("type").String() == "text" && part.Get("text").Type == gjson.String {
+			texts = append(texts, part.Get("text").String())
+		} else {
+			allText = false
+		}
+	}
+	if !allText {
+		return gjson.ParseBytes(JoinRawArray(remaining)), images
+	}
+	result, _ := sjson.SetBytes([]byte(`{"text":""}`), "text", strings.Join(texts, "\n"))
+	return gjson.ParseBytes(result), images
 }
 
 func claudeMessageContentParts(content gjson.Result) [][]byte {

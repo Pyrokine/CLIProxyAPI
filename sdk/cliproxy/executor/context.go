@@ -50,6 +50,14 @@ func WithStreamDeliveryAcknowledgement(ctx context.Context) context.Context {
 	return context.WithValue(ctx, streamDeliveryAcknowledgementContextKey{}, true)
 }
 
+// WithoutStreamDeliveryAcknowledgement prevents nested executions from inheriting the caller's transport acknowledgment.
+func WithoutStreamDeliveryAcknowledgement(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithValue(ctx, streamDeliveryAcknowledgementContextKey{}, false)
+}
+
 // StreamDeliveryAcknowledgement reports whether downstream delivery controls stream completion.
 func StreamDeliveryAcknowledgement(ctx context.Context) bool {
 	if ctx == nil {

@@ -33,6 +33,21 @@ func TestResponsesToolIdentityRoundTripNamespaceCustom(t *testing.T) {
 	}
 }
 
+func TestResponsesToolIdentityCollectsNamespaceChildren(t *testing.T) {
+	request := []byte(`{"tools":[
+		{"type":"namespace","name":"mcp__files","children":[{"type":"function","name":"read_file","description":"Read"}]},
+		{"type":"namespace","name":"mcp__editor","tools":[{"type":"function","name":"edit"}],"children":[{"type":"function","name":"ignored"}]}
+	]}`)
+	identity := NewResponsesToolIdentity(request)
+	declarations := identity.Declarations()
+	if len(declarations) != 2 || declarations[0].QualifiedName != "mcp__files__read_file" || declarations[1].QualifiedName != "mcp__editor__edit" {
+		t.Fatalf("namespace declarations = %#v", declarations)
+	}
+	if got := identity.ResolveName("read_file", "mcp__files"); got != "mcp__files__read_file" {
+		t.Fatalf("child qualified name = %q", got)
+	}
+}
+
 func TestResponsesToolIdentityCollisionUsesDirectTopLevelDeclaration(t *testing.T) {
 	request := []byte(`{
 		"tools":[
@@ -243,5 +258,63 @@ func TestResponsesToolIdentityResolutionIsDeterministicWithDirectName(t *testing
 		if declaration.QualifiedName != "lookup" || declaration.Kind != ResponsesFunctionTool {
 			t.Fatalf("resolved declaration = %#v", declaration)
 		}
+	}
+}
+
+func TestResponsesToolIdentityRestoresLocalAliases(t *testing.T) {
+	for _, test := range []struct {
+		name, request, tool, wantName, namespace string
+		custom                                   bool
+	}{
+		{
+			name: "unique function", request: `{"tools":[{"type":"namespace","name":"first","tools":[{"type":"function","name":"lookup"}]}]}`,
+			tool: "lookup", wantName: "lookup", namespace: "first",
+		},
+		{
+			name: "unique custom", request: `{"tools":[{"type":"namespace","name":"first","tools":[{"type":"custom","name":"lookup"}]}]}`,
+			tool: "lookup", wantName: "lookup", namespace: "first", custom: true,
+		},
+		{
+			name: "ambiguous", request: `{"tools":[{"type":"namespace","name":"first","tools":[{"type":"custom","name":"lookup"}]},{"type":"namespace","name":"second","tools":[{"type":"function","name":"lookup"}]}]}`,
+			tool: "lookup", wantName: "lookup",
+		},
+		{
+			name: "direct function", request: `{"tools":[{"type":"namespace","name":"first","tools":[{"type":"custom","name":"lookup"}]},{"type":"function","name":"lookup"}]}`,
+			tool: "lookup", wantName: "lookup",
+		},
+		{
+			name: "direct custom", request: `{"tools":[{"type":"namespace","name":"first","tools":[{"type":"function","name":"lookup"}]},{"type":"custom","name":"lookup"}]}`,
+			tool: "lookup", wantName: "lookup", custom: true,
+		},
+		{
+			name: "exact qualified", request: `{"tools":[{"type":"namespace","name":"first","tools":[{"type":"custom","name":"lookup"}]},{"type":"namespace","name":"second","tools":[{"type":"function","name":"lookup"}]}]}`,
+			tool: "first__lookup", wantName: "lookup", namespace: "first", custom: true,
+		},
+		{
+			name: "unknown", request: `{"tools":[{"type":"namespace","name":"first","tools":[{"type":"custom","name":"lookup"}]}]}`,
+			tool: "unknown", wantName: "unknown",
+		},
+		{name: "nil identity", tool: "lookup", wantName: "lookup"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var identity *ResponsesToolIdentity
+			if test.request != "" {
+				identity = NewResponsesToolIdentity([]byte(test.request))
+			}
+			if custom := identity.IsCustom(test.tool); custom != test.custom {
+				t.Errorf("custom = %t, want %t", custom, test.custom)
+			}
+			for _, itemPath := range []string{"", "item"} {
+				item := identity.SetToolCallIdentity([]byte(`{"name":"old","namespace":"old","item":{"name":"old","namespace":"old"}}`), test.tool, itemPath)
+				value := gjson.ParseBytes(item)
+				if itemPath != "" {
+					value = value.Get(itemPath)
+				}
+				if value.Get("name").String() != test.wantName || value.Get("namespace").String() != test.namespace ||
+					(test.namespace == "" && value.Get("namespace").Exists()) {
+					t.Fatalf("identity = %s, want name %q, namespace %q", value.Raw, test.wantName, test.namespace)
+				}
+			}
+		})
 	}
 }

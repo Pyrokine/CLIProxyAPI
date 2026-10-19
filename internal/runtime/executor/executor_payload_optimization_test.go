@@ -2,9 +2,20 @@ package executor
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/sjson"
+	"io"
 	"mime/multipart"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tidwall/gjson"
 )
@@ -65,7 +76,7 @@ func TestCodexMultipartImageEditAppendsExistingImages(t *testing.T) {
 	}
 
 	output, _, errRewrite := codexRewriteOpenAIImageEditMultipartToJSON(
-		body.Bytes(), "gpt-image-1.5", writer.Boundary(), false,
+		body.Bytes(), writer.Boundary(),
 	)
 	if errRewrite != nil {
 		t.Fatalf("rewrite multipart payload: %v", errRewrite)
@@ -203,5 +214,192 @@ func BenchmarkNormalizeKimiToolMessageLinksLargeCanonicalPayload(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		benchmarkExecutorPayloadOutput, _ = normalizeKimiToolMessageLinks(input)
+	}
+}
+
+func TestPayloadRuleSourceContextReachesProviderConsumers(t *testing.T) {
+	for _, tc := range []struct {
+		name, model, path string
+		create            func(*config.Config) coreauth.ProviderExecutor
+		compact           bool
+	}{
+		{"claude", "claude-sonnet-4-6", "configured_marker", func(cfg *config.Config) coreauth.ProviderExecutor { return NewClaudeExecutor(cfg) }, false},
+		{"codex", "gpt-5.4", "configured_marker", func(cfg *config.Config) coreauth.ProviderExecutor { return &codexExecutor{cfg: cfg} }, false},
+		{"codex-compact", "gpt-5.4", "configured_marker", func(cfg *config.Config) coreauth.ProviderExecutor { return &codexExecutor{cfg: cfg} }, true},
+		{"gemini-cli", "gemini-2.5-pro", "request.configured_marker", func(cfg *config.Config) coreauth.ProviderExecutor { return NewGeminiCLIExecutor(cfg) }, false},
+		{"iflow", "gpt-4o", "configured_marker", func(cfg *config.Config) coreauth.ProviderExecutor { return NewIFlowExecutor(cfg) }, false},
+		{"kimi", "kimi-k2.5", "configured_marker", func(cfg *config.Config) coreauth.ProviderExecutor { return NewKimiExecutor(cfg) }, false},
+		{"qwen", "qwen3-coder-plus", "configured_marker", func(cfg *config.Config) coreauth.ProviderExecutor { return NewQwenExecutor(cfg) }, false},
+	} {
+		for _, matching := range []bool{false, true} {
+			for _, stream := range []bool{false, true} {
+				if tc.compact && stream {
+					continue
+				}
+				t.Run(fmt.Sprintf("%s/matching=%t/stream=%t", tc.name, matching, stream), func(t *testing.T) {
+					var outgoing []byte
+					calls := 0
+					ctx := util.WithRoundTripper(context.Background(), protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+						calls++
+						var err error
+						outgoing, err = io.ReadAll(req.Body)
+						if err != nil {
+							return nil, err
+						}
+						return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":{"message":"synthetic request captured"}}`)), Request: req}, nil
+					}))
+					cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+						Models: []config.PayloadModelRule{{Name: "*", FromProtocol: "openai", Headers: map[string]string{"X-Rule": "enabled"}}},
+						Params: map[string]any{"configured_marker": true},
+					}}}}
+					executor := tc.create(cfg)
+					auth := &coreauth.Auth{ID: "synthetic-source-context-" + tc.name, Provider: executor.Identifier(),
+						Attributes: map[string]string{"api_key": "synthetic-key", "base_url": "https://fixture.invalid"},
+						Metadata: map[string]any{"access_token": "synthetic-token", "project_id": "synthetic-project", "expired": time.Now().Add(time.Hour).Format(time.RFC3339),
+							"token": map[string]any{"access_token": "synthetic-token", "token_type": "Bearer", "expiry": time.Now().Add(time.Hour).Format(time.RFC3339)}},
+					}
+					opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Stream: stream, Headers: make(http.Header)}
+					if matching {
+						opts.Headers.Set("X-Rule", "enabled")
+					}
+					if tc.compact {
+						opts.Alt = "responses/compact"
+					}
+					req := cliproxyexecutor.Request{Model: tc.model, Payload: []byte(`{"model":"` + tc.model + `","messages":[{"role":"user","content":"hi"}]}`)}
+					var err error
+					if stream {
+						_, err = executor.ExecuteStream(ctx, auth, req, opts)
+					} else {
+						_, err = executor.Execute(ctx, auth, req, opts)
+					}
+					if calls != 1 || err == nil {
+						t.Fatalf("synthetic request calls=%d error=%v, want one captured error response", calls, err)
+					}
+					if got := gjson.GetBytes(outgoing, tc.path).Bool(); got != matching {
+						t.Errorf("configured marker=%t want=%t for source/header gates; outgoing=%s", got, matching, outgoing)
+					}
+				})
+			}
+		}
+	}
+	for _, upstream := range []bool{false, true} {
+		for _, matching := range []bool{false, true} {
+			t.Run(fmt.Sprintf("claude-count/upstream=%t/matching=%t", upstream, matching), func(t *testing.T) {
+				var outgoing []byte
+				calls := 0
+				ctx := util.WithRoundTripper(context.Background(), protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					var err error
+					outgoing, err = io.ReadAll(req.Body)
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"input_tokens":7}`)), Request: req}, err
+				}))
+				system := strings.Repeat("synthetic configured system words ", 80)
+				rule := config.PayloadRule{Models: []config.PayloadModelRule{{Name: "*", FromProtocol: "claude", Headers: map[string]string{"X-Rule": "enabled"}}}, Params: map[string]any{"system": system}}
+				cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{rule}}}
+				auth := &coreauth.Auth{Attributes: map[string]string{"api_key": "synthetic-key", "base_url": "https://fixture.invalid"}}
+				if upstream {
+					auth.Attributes["base_url"] = "https://api.anthropic.com"
+				}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, Headers: make(http.Header)}
+				if matching {
+					opts.Headers.Set("X-Rule", "enabled")
+				}
+				req := cliproxyexecutor.Request{Model: "claude-sonnet-4-6", Payload: []byte(`{"model":"claude-sonnet-4-6","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}`)}
+				actual, err := NewClaudeExecutor(cfg).CountTokens(ctx, auth, req, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if upstream {
+					if calls != 1 || (gjson.GetBytes(outgoing, "system").String() == system) != matching {
+						t.Fatalf("count upstream calls=%d system=%s, want configured=%t", calls, gjson.GetBytes(outgoing, "system").Raw, matching)
+					}
+					return
+				}
+				if calls != 0 {
+					t.Fatalf("local token count dispatched %d requests", calls)
+				}
+				rule.Models = []config.PayloadModelRule{{Name: "*", Headers: map[string]string{"X-Rule": "enabled"}}}
+				referenceCfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{rule}}}
+				reference, err := NewClaudeExecutor(referenceCfg).CountTokens(ctx, auth, req, opts)
+				if err != nil || !bytes.Equal(actual.Payload, reference.Payload) {
+					t.Fatalf("local count did not consume source-scoped system: actual=%s reference=%s error=%v", actual.Payload, reference.Payload, err)
+				}
+			})
+		}
+	}
+}
+
+func TestRetainedProviderCountsUseConfiguredPayload(t *testing.T) {
+	longText := strings.Repeat("synthetic configured count words ", 90)
+	for _, tc := range []struct {
+		name   string
+		create func(*config.Config) coreauth.ProviderExecutor
+	}{
+		{"iflow", func(cfg *config.Config) coreauth.ProviderExecutor { return NewIFlowExecutor(cfg) }},
+		{"qwen", func(cfg *config.Config) coreauth.ProviderExecutor { return NewQwenExecutor(cfg) }},
+	} {
+		for _, mode := range []string{"control", "override", "default-original-omission"} {
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				ctx := util.WithRoundTripper(context.Background(), protectedUtlsRoundTripFunc(func(*http.Request) (*http.Response, error) {
+					t.Error("local count attempted a transport request")
+					return nil, fmt.Errorf("unexpected transport request")
+				}))
+				messages := []any{map[string]any{"role": "user", "content": longText}}
+				rule := config.PayloadRule{Models: []config.PayloadModelRule{{Name: "*", FromProtocol: "openai", Headers: map[string]string{"X-Rule": "enabled"}}}, Params: map[string]any{"messages": messages}}
+				cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{rule}}}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Headers: make(http.Header)}
+				payload := []byte(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+				referencePayload := bytes.Clone(payload)
+				if mode != "control" {
+					opts.Headers.Set("X-Rule", "enabled")
+					var err error
+					referencePayload, err = sjson.SetBytes(referencePayload, "messages", messages)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mode == "default-original-omission" {
+					cfg.Payload.Override = nil
+					cfg.Payload.Default = []config.PayloadRule{rule}
+					opts.OriginalRequest = []byte(`{"model":"gpt-4o"}`)
+				}
+				actual, err := tc.create(cfg).CountTokens(ctx, nil, cliproxyexecutor.Request{Model: "gpt-4o", Payload: payload}, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				refOpts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}
+				reference, err := tc.create(&config.Config{}).CountTokens(ctx, nil, cliproxyexecutor.Request{Model: "gpt-4o", Payload: referencePayload}, refOpts)
+				if err != nil || !bytes.Equal(actual.Payload, reference.Payload) {
+					t.Errorf("configured count=%s want final-body count=%s error=%v", actual.Payload, reference.Payload, err)
+				}
+			})
+		}
+	}
+	for _, matching := range []bool{false, true} {
+		t.Run(fmt.Sprintf("gemini-cli/matching=%t", matching), func(t *testing.T) {
+			var outgoing []byte
+			calls := 0
+			ctx := util.WithRoundTripper(context.Background(), protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				var err error
+				outgoing, err = io.ReadAll(req.Body)
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"totalTokens":7}`)), Request: req}, err
+			}))
+			contents := []any{map[string]any{"role": "user", "parts": []any{map[string]any{"text": longText}}}}
+			cfg := &config.Config{Payload: config.PayloadConfig{Override: []config.PayloadRule{{
+				Models: []config.PayloadModelRule{{Name: "*", FromProtocol: "openai", Headers: map[string]string{"X-Rule": "enabled"}}}, Params: map[string]any{"contents": contents},
+			}}}}
+			auth := &coreauth.Auth{ID: "synthetic-cli-count", Metadata: map[string]any{"project_id": "synthetic-project", "token": map[string]any{
+				"access_token": "synthetic-token", "token_type": "Bearer", "expiry": time.Now().Add(time.Hour).Format(time.RFC3339),
+			}}}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI, Headers: make(http.Header)}
+			if matching {
+				opts.Headers.Set("X-Rule", "enabled")
+			}
+			_, err := NewGeminiCLIExecutor(cfg).CountTokens(ctx, auth, cliproxyexecutor.Request{Model: "gemini-2.5-pro", Payload: []byte(`{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hi"}]}`)}, opts)
+			if err != nil || calls != 1 || (gjson.GetBytes(outgoing, "request.contents.0.parts.0.text").String() == longText) != matching {
+				t.Errorf("count request calls=%d configured=%t error=%v body=%s", calls, matching, err, outgoing)
+			}
+		})
 	}
 }

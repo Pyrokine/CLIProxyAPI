@@ -42,6 +42,10 @@ type usageReporter struct {
 	sourceRedacted  bool
 	reasoningEffort string
 	serviceTier     string
+	modelMu         sync.RWMutex
+	responseModel   string
+	upstreamModel   string
+	modelFinal      bool
 	generate        bool
 	thinking        *usage.Thinking
 	requestedAt     time.Time
@@ -96,6 +100,59 @@ func newUsageReporter(
 	return reporter
 }
 
+// PluginExecutorUsageReporter publishes usage for the credential selected by a plugin executor.
+type PluginExecutorUsageReporter struct {
+	reporter *usageReporter
+}
+
+func NewPluginExecutorUsageReporter(
+	ctx context.Context,
+	providerOrExecutor any,
+	model string,
+	auth *cliproxyauth.Auth,
+) *PluginExecutorUsageReporter {
+	if auth == nil {
+		return nil
+	}
+	return &PluginExecutorUsageReporter{reporter: newUsageReporter(ctx, providerOrExecutor, model, auth)}
+}
+
+func (r *PluginExecutorUsageReporter) SetTranslatedReasoningEffort(payload []byte, format string) {
+	if r != nil {
+		r.reporter.setTranslatedReasoningEffort(payload, format)
+	}
+}
+
+func (r *PluginExecutorUsageReporter) MarkStream() {
+	if r != nil {
+		r.reporter.markStream()
+	}
+}
+
+func (r *PluginExecutorUsageReporter) Publish(ctx context.Context, detail usage.Detail) {
+	if r != nil {
+		r.reporter.publish(ctx, detail)
+	}
+}
+
+func (r *PluginExecutorUsageReporter) PublishFailure(ctx context.Context, err error) {
+	if r != nil {
+		r.reporter.publishFailure(ctx, err)
+	}
+}
+
+func (r *PluginExecutorUsageReporter) PublishFailureWithDetail(ctx context.Context, detail usage.Detail, err error) {
+	if r != nil {
+		r.reporter.publishFailureWithDetail(ctx, detail, err)
+	}
+}
+
+func (r *PluginExecutorUsageReporter) EnsurePublished(ctx context.Context) {
+	if r != nil {
+		r.reporter.ensurePublished(ctx)
+	}
+}
+
 func selectedAuthBaseURL(auth *cliproxyauth.Auth) string {
 	if auth == nil || auth.Attributes == nil {
 		return ""
@@ -117,6 +174,65 @@ func (r *usageReporter) setTranslatedReasoningEffort(payload []byte, format stri
 	if serviceTier, ok := explicitServiceTierFromPayload(payload); ok {
 		r.serviceTier = serviceTier
 	}
+	if model := gjson.GetBytes(payload, "model"); model.Type == gjson.String {
+		r.setUpstreamModel(model.String())
+	}
+}
+
+func (r *usageReporter) setUpstreamModel(model string) {
+	if r == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if !validResponseModel(model) {
+		return
+	}
+	r.modelMu.Lock()
+	r.upstreamModel = model
+	r.modelMu.Unlock()
+}
+
+func (r *usageReporter) observeResponseModel(payload []byte) {
+	if r == nil {
+		return
+	}
+	model, terminal := responseModelEvent(payload, r.provider)
+	if model == "" && !terminal {
+		return
+	}
+	r.modelMu.Lock()
+	defer r.modelMu.Unlock()
+	if r.modelFinal {
+		return
+	}
+	if model != "" {
+		r.responseModel = model
+	}
+	r.modelFinal = terminal
+}
+
+func (r *usageReporter) setResponseModel(model string) {
+	if r == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if !validResponseModel(model) {
+		return
+	}
+	r.modelMu.Lock()
+	if !r.modelFinal {
+		r.responseModel = model
+	}
+	r.modelMu.Unlock()
+}
+
+func (r *usageReporter) responseModelSnapshot() (string, string) {
+	if r == nil {
+		return "", ""
+	}
+	r.modelMu.RLock()
+	defer r.modelMu.RUnlock()
+	return r.responseModel, r.upstreamModel
 }
 
 func (r *usageReporter) trackHTTPClient(client *http.Client) *http.Client {
@@ -340,6 +456,10 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 				}
 			}
 			detail = normalizeUsageDetailTotal(detail, r.provider, r.executorType)
+			responseModel, expectedModel := r.responseModelSnapshot()
+			if !failed {
+				r.warnModelSubstitution(publishCtx, expectedModel, responseModel)
+			}
 			r.publishRecord(
 				publishCtx, usage.Record{
 					Provider:            r.provider,
@@ -360,6 +480,7 @@ func (r *usageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 					ServiceTier:         r.serviceTier,
 					RequestServiceTier:  r.serviceTier,
 					ResponseServiceTier: strings.TrimSpace(detail.ResponseServiceTier),
+					ResponseModel:       responseModel,
 					Generate:            new(r.generate),
 					RequestedAt:         r.requestedAt,
 					Latency:             r.latency(),
@@ -395,6 +516,10 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 				fail = failFromErrors(errContext)
 				publishCtx = context.WithoutCancel(ctx)
 			}
+			responseModel, expectedModel := r.responseModelSnapshot()
+			if !failed {
+				r.warnModelSubstitution(publishCtx, expectedModel, responseModel)
+			}
 			r.publishRecord(
 				publishCtx, usage.Record{
 					Provider:           r.provider,
@@ -413,6 +538,7 @@ func (r *usageReporter) ensurePublished(ctx context.Context) {
 					ReasoningEffort:    r.reasoningEffort,
 					ServiceTier:        r.serviceTier,
 					RequestServiceTier: r.serviceTier,
+					ResponseModel:      responseModel,
 					Generate:           new(r.generate),
 					RequestedAt:        r.requestedAt,
 					Latency:            r.latency(),
@@ -448,15 +574,19 @@ func (r *usageReporter) finalizeRecord(ctx context.Context, record usage.Record)
 	if record.RequestID == "" {
 		record.RequestID = logging.GetRequestID(ctx)
 	}
+	if record.ExecutionID == "" {
+		record.ExecutionID = usage.ExecutionIDFromContext(ctx)
+	}
 	if record.TotalDurationMs <= 0 && record.Latency > 0 {
 		record.TotalDurationMs = record.Latency.Milliseconds()
 	}
 	if record.TimeToFirstByteMs <= 0 && !record.RequestedAt.IsZero() {
-		if firstByte := logging.GetFirstResponseByteAt(ctx); !firstByte.IsZero() {
-			elapsed := firstByte.Sub(record.RequestedAt)
-			if elapsed > 0 {
-				record.TimeToFirstByteMs = elapsed.Milliseconds()
-			}
+		firstResponse := logging.GetFirstResponseTokenAt(ctx)
+		if firstResponse.IsZero() {
+			firstResponse = logging.GetFirstResponseByteAt(ctx)
+		}
+		if elapsed := firstResponse.Sub(record.RequestedAt); elapsed > 0 {
+			record.TimeToFirstByteMs = elapsed.Milliseconds()
 		}
 	}
 	record.Completed = !record.Failed
@@ -581,14 +711,24 @@ func resolveUsageSource(
 }
 
 type streamUsageBuffer struct {
-	detail          usage.Detail
-	hasUsage        bool
-	hasTier         bool
-	pending         []byte
-	pendingOverflow bool
+	geminiPromptTokens  int64
+	geminiToolUseTokens int64
+	detail              usage.Detail
+	hasUsage            bool
+	hasTier             bool
+	pending             []byte
+	pendingOverflow     bool
+	modelReporter       *usageReporter
+	modelLines          [][]byte
+	modelBytes          int
+	modelOverflow       bool
 }
 
-const maxStreamUsageLineBytes = 50 << 20
+const (
+	maxStreamUsageLineBytes  = 50 << 20
+	maxStreamModelEventBytes = 64 << 10
+	maxStreamModelEventLines = 2048
+)
 
 var (
 	openAIStreamUsageMarker = []byte(`"usage"`)
@@ -613,10 +753,72 @@ func (b *streamUsageBuffer) observe(detail usage.Detail, hasUsage bool, hasTier 
 	}
 }
 
+func (b *streamUsageBuffer) observeGeminiStream(line []byte) {
+	if b == nil {
+		return
+	}
+	root := gjson.ParseBytes(jsonPayload(line))
+	node := firstValidUsageObject(root, geminiUsageTokenFieldsExist,
+		"response.usageMetadata", "usageMetadata", "response.usage_metadata", "usage_metadata",
+		"response.cpaUsageMetadata", "cpaUsageMetadata")
+	if !node.Exists() {
+		return
+	}
+	incoming := parseGeminiFamilyUsageDetail(node)
+	if b.hasUsage && node.Get("promptTokenCount").Exists() && node.Get("candidatesTokenCount").Exists() &&
+		node.Get("totalTokenCount").Exists() && !hasNonZeroTokenUsage(incoming) {
+		return
+	}
+	next := b.detail
+	promptTokens, toolUseTokens := b.geminiPromptTokens, b.geminiToolUseTokens
+	if value := firstExistingUsageNode(node, "promptTokenCount"); value.Exists() {
+		promptTokens = value.Int()
+	}
+	if value := firstExistingUsageNode(node, "toolUsePromptTokenCount"); value.Exists() {
+		toolUseTokens = value.Int()
+	}
+	inputTokens, ok := usage.AddNonNegativeInt64(promptTokens, toolUseTokens)
+	toolUseNode := node.Get("toolUsePromptTokenCount")
+	if !ok || (toolUseNode.Exists() && !validUsageTokenNode(toolUseNode)) {
+		log.Warn("usage: rejected invalid or overflowing Gemini stream input detail")
+		if !b.hasUsage {
+			b.observe(incoming, true, false)
+		}
+		return
+	}
+	next.InputTokens = inputTokens
+	for _, field := range []struct {
+		path   string
+		target *int64
+	}{
+		{"candidatesTokenCount", &next.OutputTokens},
+		{"thoughtsTokenCount", &next.ReasoningTokens},
+		{"cachedContentTokenCount", &next.CachedTokens},
+		{"cachedContentTokenCount", &next.CacheReadTokens},
+	} {
+		if value := firstExistingUsageNode(node, field.path); value.Exists() {
+			*field.target = value.Int()
+		}
+	}
+	if total := firstExistingUsageNode(node, "totalTokenCount"); total.Exists() {
+		next.TotalTokens = total.Int()
+	} else {
+		var ok bool
+		next.TotalTokens, ok = usage.AddNonNegativeInt64(next.InputTokens, next.OutputTokens, next.ReasoningTokens)
+		if !ok {
+			log.Warn("usage: rejected overflowing Gemini stream token detail")
+			return
+		}
+	}
+	b.geminiPromptTokens, b.geminiToolUseTokens = promptTokens, toolUseTokens
+	b.observe(next, true, false)
+}
+
 func (b *streamUsageBuffer) observeOpenAIStream(line []byte) {
 	if b == nil {
 		return
 	}
+	b.observeOpenAIResponseModel(line)
 	payload := jsonPayload(line)
 	if len(payload) == 0 {
 		return
@@ -638,6 +840,48 @@ func (b *streamUsageBuffer) observeOpenAIStream(line []byte) {
 	}
 	detail.ResponseServiceTier = extractResponseServiceTierFromValidJSON(payload)
 	b.observe(detail, hasUsage, detail.ResponseServiceTier != "")
+}
+
+func (b *streamUsageBuffer) observeOpenAIResponseModel(line []byte) {
+	if b.modelReporter == nil {
+		return
+	}
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		b.flushOpenAIResponseModel()
+		return
+	}
+	if b.modelOverflow {
+		return
+	}
+	if len(trimmed) > maxStreamModelEventBytes {
+		b.modelOverflow = true
+		b.modelLines = nil
+		b.modelBytes = 0
+		return
+	}
+	b.modelReporter.observeResponseModel(trimmed)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return
+	}
+	data := bytes.TrimSpace(trimmed[len("data:"):])
+	if b.modelBytes+len(data)+32 > maxStreamModelEventBytes || len(b.modelLines) >= maxStreamModelEventLines {
+		b.modelOverflow = true
+		b.modelLines = nil
+		b.modelBytes = 0
+		return
+	}
+	b.modelLines = append(b.modelLines, bytes.Clone(data))
+	b.modelBytes += len(data) + 32
+}
+
+func (b *streamUsageBuffer) flushOpenAIResponseModel() {
+	if b.modelReporter != nil && !b.modelOverflow && len(b.modelLines) > 1 {
+		b.modelReporter.observeResponseModel(bytes.Join(b.modelLines, []byte("\n")))
+	}
+	b.modelLines = nil
+	b.modelBytes = 0
+	b.modelOverflow = false
 }
 
 func (b *streamUsageBuffer) observeOpenAIStreamChunk(chunk []byte) {
@@ -680,6 +924,9 @@ func (b *streamUsageBuffer) observeOpenAIStreamChunk(chunk []byte) {
 func (b *streamUsageBuffer) discardOversizedOpenAIStreamLine() {
 	b.pending = nil
 	b.pendingOverflow = true
+	b.modelOverflow = true
+	b.modelLines = nil
+	b.modelBytes = 0
 	log.Warnf("stream usage SSE line exceeded %d bytes and was ignored", maxStreamUsageLineBytes)
 }
 
@@ -690,6 +937,7 @@ func (b *streamUsageBuffer) flushOpenAIStream() {
 	if !b.pendingOverflow && len(b.pending) > 0 {
 		b.observeOpenAIStream(b.pending)
 	}
+	b.flushOpenAIResponseModel()
 	b.pending = nil
 	b.pendingOverflow = false
 }
@@ -711,6 +959,111 @@ func (b *streamUsageBuffer) detailValue() (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	return b.detail, true
+}
+
+// PluginExecutorStreamUsage collects completed usage events before response translation.
+type PluginExecutorStreamUsage struct {
+	protocol string
+	openAI   streamUsageBuffer
+	claude   claudeStreamUsageBuffer
+}
+
+func NewPluginExecutorStreamUsage(protocol string) *PluginExecutorStreamUsage {
+	return &PluginExecutorStreamUsage{protocol: strings.ToLower(strings.TrimSpace(protocol))}
+}
+
+// ObserveLine accepts one complete SSE line or one complete JSON payload.
+func (b *PluginExecutorStreamUsage) ObserveLine(line []byte) {
+	if b == nil {
+		return
+	}
+	switch b.protocol {
+	case "claude":
+		b.claude.observe(line)
+	case "gemini":
+		b.openAI.observeGeminiStream(line)
+	case "interactions", "interactions-response":
+		if detail, hasUsage, hasTier := parseInteractionsStreamUsageState(line); hasUsage || hasTier {
+			b.openAI.observe(detail, hasUsage, hasTier)
+		}
+	case "antigravity":
+		b.openAI.observeGeminiStream(line)
+	case "codex", "openai-response":
+		payload := jsonPayload(line)
+		if len(payload) > 0 && gjson.ValidBytes(payload) {
+			if detail, ok := parseCodexUsage(payload); ok && hasNonZeroTokenUsage(detail) {
+				b.openAI.observe(detail, true, detail.ResponseServiceTier != "")
+				return
+			}
+		}
+		b.openAI.observeOpenAIStream(line)
+	default:
+		b.openAI.observeOpenAIStream(line)
+	}
+}
+
+func (b *PluginExecutorStreamUsage) Detail() (usage.Detail, bool) {
+	if b == nil {
+		return usage.Detail{}, false
+	}
+	if b.protocol == "claude" {
+		return b.claude.detailValue()
+	}
+	return b.openAI.detailValue()
+}
+
+func hasNonZeroTokenUsage(detail usage.Detail) bool {
+	return detail.InputTokens != 0 ||
+		detail.OutputTokens != 0 ||
+		detail.ReasoningTokens != 0 ||
+		detail.CachedTokens != 0 ||
+		detail.CacheReadTokens != 0 ||
+		detail.CacheCreationTokens != 0 ||
+		detail.TotalTokens != 0 ||
+		detail.TokenBreakdown.TotalTokens != 0
+}
+
+// ParsePluginExecutorResponseUsage reads native plugin response usage before translation.
+func ParsePluginExecutorResponseUsage(protocol string, payload []byte) usage.Detail {
+	if len(payload) == 0 {
+		return usage.Detail{}
+	}
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "claude":
+		root := gjson.ParseBytes(payload)
+		node := root.Get("usage")
+		if !node.Exists() {
+			node = root.Get("message.usage")
+		}
+		if !node.Exists() || !gjson.ValidBytes(payload) {
+			return usage.Detail{}
+		}
+		return parseClaudeUsageNode(node)
+	case "gemini":
+		return parseGeminiUsage(payload)
+	case "interactions", "interactions-response":
+		return parseInteractionsUsage(payload)
+	case "antigravity":
+		return parseAntigravityUsage(payload)
+	case "codex", "openai-response":
+		detail, ok := parseCodexUsage(payload)
+		if ok && hasNonZeroTokenUsage(detail) {
+			return detail
+		}
+		openAIDetail := parseOpenAIUsage(payload)
+		if hasNonZeroTokenUsage(openAIDetail) {
+			if openAIDetail.ResponseServiceTier == "" {
+				openAIDetail.ResponseServiceTier = detail.ResponseServiceTier
+			}
+			return openAIDetail
+		}
+		if ok {
+			return detail
+		}
+		return openAIDetail
+	default:
+		return parseOpenAIUsage(payload)
+	}
 }
 
 func parseCodexUsage(data []byte) (usage.Detail, bool) {
@@ -1007,6 +1360,15 @@ func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 		CachedTokens:    cachedTokens,
 		CacheReadTokens: cachedTokens,
 	}
+	toolUseTokens := node.Get("toolUsePromptTokenCount")
+	inputTokens, ok := usage.AddNonNegativeInt64(detail.InputTokens, toolUseTokens.Int())
+	if !ok || (toolUseTokens.Exists() && !validUsageTokenNode(toolUseTokens)) {
+		log.Warn("usage: rejected invalid or overflowing Gemini input detail")
+		detail = usage.EnsureTokenBreakdownForProvider(usage.Detail{TotalTokens: detail.TotalTokens}, "gemini", "")
+		detail.TokenBreakdown.Quality = usage.TokenAccountingQualityInconsistent
+		return detail
+	}
+	detail.InputTokens = inputTokens
 	if detail.TotalTokens == 0 {
 		total, ok := usage.AddNonNegativeInt64(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens)
 		if !ok {
@@ -1081,6 +1443,21 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 	if !cacheRead.Exists() && detail.CachedTokens > 0 {
 		detail.CacheReadTokens = detail.CachedTokens
 	}
+	var toolUseTokens gjson.Result
+	for _, field := range []string{"total_tool_use_tokens", "tool_use_tokens", "toolUsePromptTokenCount"} {
+		if value := node.Get(field); value.Exists() {
+			toolUseTokens = value
+			break
+		}
+	}
+	inputTokens, ok := usage.AddNonNegativeInt64(detail.InputTokens, toolUseTokens.Int())
+	if !ok || (toolUseTokens.Exists() && !validUsageTokenNode(toolUseTokens)) {
+		log.Warn("usage: rejected invalid or overflowing Interactions input detail")
+		detail = usage.EnsureTokenBreakdownForProvider(usage.Detail{TotalTokens: detail.TotalTokens}, "interactions", "")
+		detail.TokenBreakdown.Quality = usage.TokenAccountingQualityInconsistent
+		return detail
+	}
+	detail.InputTokens = inputTokens
 	if detail.TotalTokens == 0 {
 		total, ok := usage.AddNonNegativeInt64(detail.InputTokens, detail.OutputTokens, detail.ReasoningTokens)
 		if !ok {
@@ -1151,6 +1528,7 @@ func geminiUsageTokenFieldsExist(node gjson.Result) bool {
 	}
 	for _, path := range []string{
 		"promptTokenCount",
+		"toolUsePromptTokenCount",
 		"candidatesTokenCount",
 		"thoughtsTokenCount",
 		"totalTokenCount",
@@ -1169,6 +1547,7 @@ func interactionsUsageTokenFieldsExist(node gjson.Result) bool {
 	}
 	for _, path := range []string{
 		"input_tokens", "prompt_tokens", "total_input_tokens",
+		"total_tool_use_tokens", "tool_use_tokens", "toolUsePromptTokenCount",
 		"output_tokens", "completion_tokens", "total_output_tokens",
 		"reasoning_tokens", "total_thought_tokens", "thoughtsTokenCount",
 		"total_tokens", "totalTokenCount", "promptTokenCount", "candidatesTokenCount",
@@ -1281,21 +1660,6 @@ func parseAntigravityUsage(data []byte) usage.Detail {
 		return usage.Detail{}
 	}
 	return parseGeminiFamilyUsageDetail(node)
-}
-
-func parseAntigravityStreamUsage(line []byte) (usage.Detail, bool) {
-	payload := jsonPayload(line)
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return usage.Detail{}, false
-	}
-	root := gjson.ParseBytes(payload)
-	node := firstValidUsageObject(
-		root, geminiUsageTokenFieldsExist, "response.usageMetadata", "usageMetadata", "usage_metadata",
-	)
-	if !node.Exists() {
-		return usage.Detail{}, false
-	}
-	return parseGeminiFamilyUsageDetail(node), true
 }
 
 var stopChunkWithoutUsage sync.Map

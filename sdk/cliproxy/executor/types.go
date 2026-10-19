@@ -54,6 +54,14 @@ const (
 	ParentSessionIDMetadataKey = "parent_session_id"
 	// IsForkMetadataKey marks a request as a fork rather than a subagent.
 	IsForkMetadataKey = "session_is_fork"
+	// IsCompactionMetadataKey marks an LCP continuation after context compaction.
+	IsCompactionMetadataKey = "is_compaction"
+	// NodeKindMetadataKey identifies the session topology kind.
+	NodeKindMetadataKey = "node_kind"
+	// LCPTailFingerprintsMetadataKey carries trailing turns for compaction matching.
+	LCPTailFingerprintsMetadataKey = "lcp_tail_fingerprints"
+	// LCPEnvironmentDigestMetadataKey isolates LCP matching by system instructions.
+	LCPEnvironmentDigestMetadataKey = "lcp_environment_digest"
 	// LCPAccessGenerationMetadataKey records the matched generation for stale-result protection.
 	LCPAccessGenerationMetadataKey = "lcp_access_generation"
 	// LCPFingerprintMetadataKey carries bounded turn fingerprints through request execution.
@@ -465,6 +473,8 @@ type Options struct {
 	RequestAfterAuthInterceptor RequestAfterAuthInterceptor
 	// WebSocketResponseObserver receives raw upstream WebSocket response events during execution.
 	WebSocketResponseObserver WebSocketResponseObserver
+	// ProxyURL overrides credential and global proxies for this execution only.
+	ProxyURL string
 }
 
 // ResponseFormatOrSource returns the response target format for an execution.

@@ -91,6 +91,29 @@ func TestRegistryTranslateRequestAppliesSummaryIntent(t *testing.T) {
 	}
 }
 
+func TestRegistryChatEffortDoesNotForceClaudeSummaryDisplay(t *testing.T) {
+	registry := NewRegistry()
+	registry.Register(FormatOpenAI, FormatClaude, func(_ string, _ []byte, _ bool) []byte {
+		return []byte(`{"model":"claude-sonnet-5","thinking":{"type":"adaptive"}}`)
+	}, ResponseTransform{})
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "effort only", body: `{"reasoning_effort":"high"}`},
+		{name: "explicit summary", body: `{"reasoning_effort":"high","reasoning":{"summary":"auto"}}`, want: "summarized"},
+		{name: "explicit exclusion", body: `{"reasoning_effort":"high","reasoning":{"exclude":true}}`, want: "omitted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := registry.TranslateRequest(FormatOpenAI, FormatClaude, "claude-sonnet-5", []byte(tc.body), false)
+			if got := gjson.GetBytes(out, "thinking.display").String(); got != tc.want {
+				t.Fatalf("thinking.display = %q, want %q; body=%s", got, tc.want, out)
+			}
+		})
+	}
+}
+
 func TestRegistryTranslateRequestDoesNotActivateClaudeForDisabledSummary(t *testing.T) {
 	registry := NewRegistry()
 	registry.Register(

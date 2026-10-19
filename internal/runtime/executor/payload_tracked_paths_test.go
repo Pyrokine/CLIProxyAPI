@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -29,7 +30,7 @@ func TestPayloadTracksIndependentPathOwnership(t *testing.T) {
 			case "filter":
 				cfg.Payload.Filter = []config.PayloadFilterRule{{Models: models, Params: []string{"diagnostics", "context_management.mode"}}}
 			}
-			out, touched := applyPayloadConfigWithRootTracked(cfg, "test-model", "claude", "", payload, payload, "", "diagnostics", "context_management", "untouched")
+			out, touched := applyPayloadConfigWithRootTracked(cfg, "test-model", "claude", "", payload, payload, "", "claude", nil, "diagnostics", "context_management", "untouched")
 			if !touched["diagnostics"] || !touched["context_management"] || touched["untouched"] {
 				t.Fatalf("ownership = %v", touched)
 			}
@@ -45,8 +46,63 @@ func TestPayloadSkippedDefaultDoesNotOwnDiagnostics(t *testing.T) {
 		Models: []config.PayloadModelRule{{Name: "test-model"}}, Params: map[string]any{"diagnostics": false},
 	}}}}
 	payload := []byte(`{"diagnostics":true}`)
-	out, touched := applyPayloadConfigWithRootTracked(cfg, "test-model", "claude", "", payload, payload, "", "diagnostics")
+	out, touched := applyPayloadConfigWithRootTracked(cfg, "test-model", "claude", "", payload, payload, "", "claude", nil, "diagnostics")
 	if touched["diagnostics"] || string(out) != string(payload) {
 		t.Fatal("skipped default acquired ownership or changed caller data")
+	}
+}
+
+func applyPayloadConfigWithRoot(
+	cfg *config.Config,
+	model, protocol, root string,
+	payload, original []byte,
+	requestedModel, targetExecutor string,
+	headers http.Header,
+) []byte {
+	out, _ := applyPayloadConfigWithRootTracked(
+		cfg,
+		model,
+		protocol,
+		root,
+		payload,
+		original,
+		requestedModel,
+		targetExecutor,
+		headers,
+		"",
+	)
+	return out
+}
+
+func applyPayloadConfigWithRootTracked(
+	cfg *config.Config,
+	model, protocol, root string,
+	payload, original []byte,
+	requestedModel, targetExecutor string,
+	headers http.Header,
+	trackedPaths ...string,
+) ([]byte, map[string]bool) {
+	return applyPayloadConfigWithRequestTracked(
+		cfg,
+		model,
+		protocol,
+		"",
+		root,
+		payload,
+		original,
+		requestedModel,
+		"",
+		headers,
+		targetExecutor,
+		trackedPaths...,
+	)
+}
+
+func TestPayloadFilterOwnsAbsentQueryTarget(t *testing.T) {
+	cfg := &config.Config{Payload: config.PayloadConfig{Filter: []config.PayloadFilterRule{{Models: []config.PayloadModelRule{{Name: "*"}}, Params: []string{`tools.#(type=="image_generation")#`}}}}}
+	payload := []byte(`{"input":"synthetic"}`)
+	out, touched := applyPayloadConfigWithRequestTracked(cfg, "gpt-5.4", "codex", "codex", "", payload, payload, "", "", nil, "codex", "tools", "input")
+	if !touched["tools"] || touched["input"] || string(out) != string(payload) {
+		t.Fatalf("absent filter ownership=%v payload=%s", touched, out)
 	}
 }

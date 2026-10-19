@@ -18,49 +18,6 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// applyPayloadConfigWithRoot behaves like applyPayloadConfigWithRequest but omits
-// fromProtocol and headers. Suitable for callers that do not have header/protocol context.
-func applyPayloadConfigWithRoot(
-	cfg *config.Config,
-	model, protocol, root string,
-	payload, original []byte,
-	requestedModel string,
-) []byte {
-	out, _ := applyPayloadConfigWithRootTracked(
-		cfg,
-		model,
-		protocol,
-		root,
-		payload,
-		original,
-		requestedModel,
-		"",
-	)
-	return out
-}
-
-func applyPayloadConfigWithRootTracked(
-	cfg *config.Config,
-	model, protocol, root string,
-	payload, original []byte,
-	requestedModel string,
-	trackedPaths ...string,
-) ([]byte, map[string]bool) {
-	return applyPayloadConfigWithRequestTracked(
-		cfg,
-		model,
-		protocol,
-		"",
-		root,
-		payload,
-		original,
-		requestedModel,
-		"",
-		nil,
-		trackedPaths...,
-	)
-}
-
 // applyPayloadConfigWithRequest applies payload config using source protocol and request header gates.
 // requestPath is the inbound HTTP request path used for endpoint-scoped gates (e.g., DisableImageGenerationChat).
 func applyPayloadConfigWithRequest(
@@ -70,6 +27,7 @@ func applyPayloadConfigWithRequest(
 	requestedModel string,
 	requestPath string,
 	headers http.Header,
+	targetExecutor string,
 ) []byte {
 	out, _ := applyPayloadConfigWithRequestTracked(
 		cfg,
@@ -82,6 +40,7 @@ func applyPayloadConfigWithRequest(
 		requestedModel,
 		requestPath,
 		headers,
+		targetExecutor,
 		"",
 	)
 	return out
@@ -95,9 +54,16 @@ func applyPayloadConfigWithRequestTracked(
 	requestedModel string,
 	requestPath string,
 	headers http.Header,
+	targetExecutor string,
 	trackedPaths ...string,
 ) ([]byte, map[string]bool) {
-	if cfg == nil || len(payload) == 0 {
+	if len(payload) == 0 {
+		return payload, nil
+	}
+	if targetExecutor != "codex" && targetExecutor != "codex-websockets" && targetExecutor != "codex_websockets" {
+		payload = normalizeCodexToolIntegerTypes(payload, headers)
+	}
+	if cfg == nil {
 		return payload, nil
 	}
 	out := payload
@@ -253,6 +219,7 @@ func applyPayloadConfigWithRequestTracked(
 			if fullPath == "" {
 				continue
 			}
+			markTouched(fullPath)
 			resolvedPaths := resolvePayloadRulePaths(out, fullPath)
 			for _, resolvedPath := range slices.Backward(resolvedPaths) {
 
@@ -985,6 +952,13 @@ func payloadRawValue(value any) ([]byte, bool) {
 		}
 		return raw, true
 	}
+}
+
+func originalRequestPayload(req cliproxyexecutor.Request, opts cliproxyexecutor.Options) []byte {
+	if len(opts.OriginalRequest) > 0 {
+		return opts.OriginalRequest
+	}
+	return req.Payload
 }
 
 func payloadRequestedModel(opts cliproxyexecutor.Options, fallback string) string {

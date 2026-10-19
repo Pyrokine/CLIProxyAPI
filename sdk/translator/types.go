@@ -8,6 +8,9 @@ import "context"
 // It returns the converted request payload as a byte slice.
 type RequestTransform func(model string, rawJSON []byte, stream bool) []byte
 
+// CheckedRequestTransform rejects a request when its content cannot be represented in the target schema.
+type CheckedRequestTransform func(model string, rawJSON []byte, stream bool) ([]byte, error)
+
 // ResponseStreamTransform is a function type that converts a streaming response from a source schema to a target schema.
 // It takes a context, the model name, the raw JSON of the original and converted requests, the raw JSON of the current response chunk, and an optional parameter.
 // It returns a slice of byte chunks containing the converted streaming response.

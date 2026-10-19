@@ -109,3 +109,77 @@ func TestSSEEventDataWritesCompleteFrame(t *testing.T) {
 		t.Fatalf("SSEEventData() = %q, want %q", got, want)
 	}
 }
+
+func TestSetStringWithoutHTMLEscape(t *testing.T) {
+	value := `call(<div data-x="&">)\nline`
+	got, err := SetStringWithoutHTMLEscape([]byte(`{"output":{}}`), "output.arguments", value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := gjson.GetBytes(got, "output.arguments").String(); actual != value {
+		t.Fatalf("arguments = %q, want %q: %s", actual, value, got)
+	}
+	if !bytes.Contains(got, []byte(`<`)) || !bytes.Contains(got, []byte(`>`)) ||
+		!bytes.Contains(got, []byte(`&`)) {
+		t.Fatalf("HTML characters were escaped: %s", got)
+	}
+	for _, test := range []struct {
+		name, data, path, value, want string
+	}{
+		{
+			name: "command redirection", data: `{"arguments":""}`, path: "arguments",
+			value: `gh issue view 5802 --json number,title,body,url,state,labels,assignees 2>&1 | head -100`,
+			want:  `{"arguments":"gh issue view 5802 --json number,title,body,url,state,labels,assignees 2>&1 | head -100"}`,
+		},
+		{
+			name: "JSON arguments", data: `{"arguments":""}`, path: "arguments",
+			value: `{"command": "gh issue view 5802 2>&1 | head -100", "timeout": 60}`,
+			want:  `{"arguments":"{\"command\": \"gh issue view 5802 2>&1 | head -100\", \"timeout\": 60}"}`,
+		},
+		{
+			name: "HTML", data: `{"type":"function_call","name":"bash","arguments":""}`, path: "arguments",
+			value: `{"html": "<tag>&value</tag>"}`,
+			want:  `{"type":"function_call","name":"bash","arguments":"{\"html\": \"<tag>&value</tag>\"}"}`,
+		},
+		{
+			name: "nested", data: `{"item":{"arguments":""}}`, path: "item.arguments", value: "2>&1",
+			want: `{"item":{"arguments":"2>&1"}}`,
+		},
+		{
+			name: "empty", data: `{"arguments":"old"}`, path: "arguments", value: "", want: `{"arguments":""}`,
+		},
+		{
+			name: "control characters", data: `{"arguments":""}`, path: "arguments", value: "line1\nline2\t\\path\\to\\file",
+			want: `{"arguments":"line1\nline2\t\\path\\to\\file"}`,
+		},
+		{
+			name: "Unicode", data: `{"arguments":""}`, path: "arguments", value: "你好，世界！🚀 <&>",
+			want: `{"arguments":"你好，世界！🚀 <&>"}`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := SetStringWithoutHTMLEscape([]byte(test.data), test.path, test.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != test.want {
+				t.Fatalf("JSON = %s, want %s", got, test.want)
+			}
+			if actual := gjson.GetBytes(got, test.path); !actual.Exists() || actual.String() != test.value {
+				t.Fatalf("decoded value = %q, want %q", actual.String(), test.value)
+			}
+		})
+	}
+}
+
+func TestSSEEventDataConcatenatedFrames(t *testing.T) {
+	frames := bytes.Split(append(SSEEventData("event1", []byte(`{"a":1}`)),
+		SSEEventData("event2", []byte(`{"b":2}`))...), []byte("\n\n"))
+	if len(frames) != 3 || len(frames[2]) != 0 {
+		t.Fatalf("frame count = %d, want two complete frames and an empty suffix", len(frames))
+	}
+	if string(frames[0]) != "event: event1\ndata: {\"a\":1}" ||
+		string(frames[1]) != "event: event2\ndata: {\"b\":2}" {
+		t.Fatalf("unexpected frames: %q", frames)
+	}
+}

@@ -3,11 +3,14 @@ package helps
 import (
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
+
+const configurationUpdatesChangedMetadataKey = "cliproxy.normalized_configuration_updates_changed"
 
 // ApplyThinkingWithSourcePayload preserves summary visibility from the original
 // client payload while applying thinking configuration to the translated target
@@ -24,27 +27,28 @@ func ApplyThinkingWithSourcePayload(
 		fromFormat,
 		toFormat,
 	)
-	if len(requests) > 0 {
-		if modelInfo, ok := cliproxyauth.ResolvedAPIKeyModelInfo(requests[0]); ok {
-			return thinking.ApplyThinkingWithModelInfoAndSummary(
-				body,
-				originalSourcePayload,
-				model,
-				fromFormat,
-				toFormat,
-				providerKey,
-				modelInfo,
-				summary,
-			)
-		}
+	source := currentSourcePayload
+	if len(source) == 0 {
+		source = originalSourcePayload
 	}
-	return thinking.ApplyThinkingWithSummary(
-		body,
-		model,
-		fromFormat,
-		toFormat,
-		providerKey,
-		summary,
+	var modelInfo *registry.ModelInfo
+	var bound, updatesChanged bool
+	if len(requests) > 0 {
+		modelInfo, bound = cliproxyauth.ResolvedModelInfo(requests[0])
+		updatesChanged, _ = requests[0].Metadata[configurationUpdatesChangedMetadataKey].(bool)
+	}
+	if !bound {
+		lookupProvider := strings.ToLower(strings.TrimSpace(providerKey))
+		if lookupProvider == "" {
+			lookupProvider = strings.ToLower(strings.TrimSpace(toFormat))
+			if lookupProvider == "openai-response" {
+				lookupProvider = "codex"
+			}
+		}
+		modelInfo = registry.LookupModelInfo(thinking.ParseSuffix(model).ModelName, lookupProvider)
+	}
+	return thinking.ApplyThinkingWithModelInfoAndSummary(
+		body, source, model, fromFormat, toFormat, providerKey, modelInfo, summary, updatesChanged,
 	)
 }
 
@@ -65,8 +69,8 @@ func translatedRequestSummaryConfig(
 		return targetSummary
 	}
 
-	currentSummary := thinking.ExtractSummaryConfig(currentSourcePayload, fromFormat)
-	originalSummary := thinking.ExtractSummaryConfig(originalSourcePayload, fromFormat)
+	currentSummary := thinking.ExtractTranslatedSummaryConfig(currentSourcePayload, fromFormat, toFormat)
+	originalSummary := thinking.ExtractTranslatedSummaryConfig(originalSourcePayload, fromFormat, toFormat)
 	if currentSummary.Mode == thinking.SummaryUnspecified {
 		return originalSummary
 	}

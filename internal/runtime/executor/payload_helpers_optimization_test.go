@@ -37,7 +37,7 @@ func TestApplyPayloadConfigReusesCanonicalOverrides(t *testing.T) {
 		},
 	}
 	input := []byte(`{"model":"gpt-test","stream":true,"metadata":{"source":"executor"},"messages":[]}`)
-	output := applyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "")
+	output := applyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "openai-compat", nil)
 	if &output[0] != &input[0] {
 		t.Fatal("canonical payload overrides caused a payload copy")
 	}
@@ -55,7 +55,7 @@ func TestApplyPayloadConfigNormalizesByteSliceOverride(t *testing.T) {
 		},
 	}
 	input := []byte(`{"value":"YWJj"}`)
-	output := applyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "")
+	output := applyPayloadConfigWithRoot(cfg, "gpt-test", "openai", "", input, nil, "", "openai-compat", nil)
 	value := gjson.GetBytes(output, "value")
 	if value.Type != gjson.String || value.String() != "abc" {
 		t.Fatalf("value = %s, want string abc", value.Raw)

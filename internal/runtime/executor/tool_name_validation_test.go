@@ -119,7 +119,7 @@ func TestCodexResponsesBodyAllowsValidUndeclaredClaudeHistoryToolName(t *testing
 		sdktranslator.FormatClaude,
 		cliproxyexecutor.Options{},
 		req,
-		true,
+		true, false,
 	)
 	if err != nil {
 		t.Fatalf("codexResponsesBody() error = %v", err)
@@ -182,7 +182,7 @@ func TestCodexResponsesBodyRejectsInvalidClaudeHistoryToolName(t *testing.T) {
 		sdktranslator.FormatClaude,
 		cliproxyexecutor.Options{},
 		req,
-		true,
+		true, false,
 	)
 	if err == nil {
 		t.Fatal("codexResponsesBody() error = nil, want local validation error")

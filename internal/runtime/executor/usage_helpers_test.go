@@ -192,6 +192,25 @@ func TestInteractionsUsageReporterDoesNotDoubleCountCacheAliases(t *testing.T) {
 	}
 }
 
+func TestUsageReporterPreservesHTTPAndExecutionIDs(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
+	registerTestUsagePlugin(t, plugin)
+
+	ctx := logging.WithRequestID(context.Background(), "http-request-id")
+	ctx = usage.WithExecutionID(ctx, "model-execution-id")
+	reporter := newUsageReporter(ctx, testUsageExecutor{}, "gpt-test", nil)
+	reporter.publish(ctx, usage.Detail{})
+
+	select {
+	case got := <-plugin.records:
+		if got.RequestID != "http-request-id" || got.ExecutionID != "model-execution-id" {
+			t.Fatalf("usage IDs = (%q, %q), want separate HTTP and execution IDs", got.RequestID, got.ExecutionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for usage record")
+	}
+}
+
 func TestUsageReporterIncludesRuntimeMetadata(t *testing.T) {
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 1)}
 	registerTestUsagePlugin(t, plugin)
@@ -319,6 +338,156 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
+	}
+}
+
+func TestParsePluginExecutorResponseUsageResponsesShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		protocol string
+		payload  string
+		input    int64
+		output   int64
+		total    int64
+		tier     string
+	}{
+		{
+			name: "top-level usage with tier", protocol: "openai-response",
+			payload: `{"service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`,
+			input:   34, output: 499, total: 533, tier: "default",
+		},
+		{
+			name: "Codex protocol top-level usage", protocol: "codex",
+			payload: `{"response":{"service_tier":"priority"},"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`,
+			input:   3, output: 4, total: 7, tier: "priority",
+		},
+		{
+			name: "nested response usage wins", protocol: "openai-response",
+			payload: `{"service_tier":"priority","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"response":{"usage":{"input_tokens":18,"output_tokens":22,"total_tokens":40}}}`,
+			input:   18, output: 22, total: 40, tier: "priority",
+		},
+		{
+			name: "tier-only response", protocol: "openai-response",
+			payload: `{"service_tier":"default"}`, tier: "default",
+		},
+		{
+			name: "Claude message usage", protocol: "claude",
+			payload: `{"message":{"usage":{"input_tokens":6,"output_tokens":8}}}`,
+			input:   6, output: 8, total: 14,
+		},
+		{
+			name: "Gemini usage", protocol: "gemini",
+			payload: `{"usageMetadata":{"promptTokenCount":6,"candidatesTokenCount":8}}`,
+			input:   6, output: 8, total: 14,
+		},
+		{
+			name: "Interactions usage", protocol: "interactions-response",
+			payload: `{"interaction":{"usage":{"input_tokens":6,"output_tokens":8}}}`,
+			input:   6, output: 8, total: 14,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParsePluginExecutorResponseUsage(tc.protocol, []byte(tc.payload))
+			if got.InputTokens != tc.input || got.OutputTokens != tc.output || got.TotalTokens != tc.total || got.ResponseServiceTier != tc.tier {
+				t.Fatalf("usage = %+v, want input=%d output=%d total=%d tier=%q", got, tc.input, tc.output, tc.total, tc.tier)
+			}
+		})
+	}
+}
+
+func TestPluginExecutorStreamUsageKeepsTopLevelResponsesTokens(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lines []string
+		input int64
+		tier  string
+	}{
+		{
+			name:  "tier and top-level usage in same event",
+			lines: []string{`data: {"type":"response.completed","service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`},
+			input: 34, tier: "default",
+		},
+		{
+			name:  "tier before top-level usage",
+			lines: []string{`data: {"service_tier":"priority"}`, `data: {"type":"response.completed","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`},
+			input: 34, tier: "priority",
+		},
+		{
+			name:  "nested zero does not hide top-level usage",
+			lines: []string{`data: {"response":{"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}},"service_tier":"flex","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`},
+			input: 34, tier: "flex",
+		},
+		{
+			name:  "nested nonzero usage wins",
+			lines: []string{`data: {"service_tier":"priority","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"response":{"usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}}`},
+			input: 34, tier: "priority",
+		},
+		{
+			name:  "later tier-only event preserves tokens",
+			lines: []string{`data: {"usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`, `data: {"service_tier":"default"}`},
+			input: 34, tier: "default",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buffer := NewPluginExecutorStreamUsage("openai-response")
+			for _, line := range tc.lines {
+				buffer.ObserveLine([]byte(line))
+			}
+			got, ok := buffer.Detail()
+			if !ok || got.InputTokens != tc.input || got.OutputTokens != 499 || got.TotalTokens != 533 || got.ResponseServiceTier != tc.tier {
+				t.Fatalf("detail = %+v ok=%v, want input=%d output=499 total=533 tier=%q", got, ok, tc.input, tc.tier)
+			}
+		})
+	}
+}
+
+func TestPluginExecutorUsageReporterAttributesSelectedAuthOnce(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+	registerTestUsagePlugin(t, plugin)
+	ctx := usage.WithStream(context.Background(), false)
+	auth := &cliproxyauth.Auth{
+		ID: "selected-auth-1", Provider: "test-provider", FileName: "selected-auth-1.json",
+		Attributes: map[string]string{"base_url": "https://selected.test/v1", "type": "oauth"},
+	}
+	reporter := NewPluginExecutorUsageReporter(ctx, testUsageExecutor{}, "gpt-test", auth)
+	reporter.SetTranslatedReasoningEffort([]byte(`{"model":"gpt-test","service_tier":"priority"}`), "openai-response")
+	reporter.Publish(ctx, ParsePluginExecutorResponseUsage("openai-response", []byte(`{"service_tier":"default","usage":{"input_tokens":34,"output_tokens":499,"total_tokens":533}}`)))
+	reporter.EnsurePublished(ctx)
+	reporter.PublishFailure(ctx, errors.New("late failure"))
+	select {
+	case got := <-plugin.records:
+		if got.AuthID != auth.ID || got.AuthIndex != auth.EnsureIndex() || got.ExecutorType != "testUsageExecutor" || got.BaseURL != "https://selected.test/v1" || got.Failed || got.Stream {
+			t.Fatalf("selected auth record = %+v", got)
+		}
+		if got.Detail.InputTokens != 34 || got.Detail.OutputTokens != 499 || got.Detail.TotalTokens != 533 || got.ServiceTier != "priority" || got.ResponseServiceTier != "default" {
+			t.Fatalf("usage detail = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for plugin executor usage record")
+	}
+	select {
+	case got := <-plugin.records:
+		t.Fatalf("duplicate plugin executor usage record: %+v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+}
+
+func TestPluginExecutorUsageReporterPreservesPartialStreamUsageOnFailure(t *testing.T) {
+	plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+	registerTestUsagePlugin(t, plugin)
+	ctx := usage.WithStream(context.Background(), false)
+	auth := &cliproxyauth.Auth{ID: "selected-auth-2", Provider: "test-provider"}
+	reporter := NewPluginExecutorUsageReporter(ctx, testUsageExecutor{}, "gpt-test", auth)
+	reporter.MarkStream()
+	reporter.PublishFailureWithDetail(ctx, usage.Detail{InputTokens: 34, OutputTokens: 3, TotalTokens: 37, ResponseServiceTier: "flex"}, errors.New("stream interrupted"))
+	reporter.EnsurePublished(ctx)
+	select {
+	case got := <-plugin.records:
+		if got.AuthID != auth.ID || !got.Failed || !got.Stream || got.Detail.InputTokens != 34 || got.Detail.OutputTokens != 3 || got.Detail.TotalTokens != 37 || got.ResponseServiceTier != "flex" {
+			t.Fatalf("failed stream usage record = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for failed stream usage record")
 	}
 }
 
@@ -564,6 +733,45 @@ func TestStreamUsageBufferHandlesSplitSSELines(t *testing.T) {
 	detail, ok := buffer.detailValue()
 	if !ok || detail.InputTokens != 4 || detail.OutputTokens != 5 || detail.ResponseServiceTier != "default" {
 		t.Fatalf("detail = %+v ok=%v", detail, ok)
+	}
+}
+
+func TestStreamUsageBufferObservesSplitResponseModels(t *testing.T) {
+	reporter := &usageReporter{provider: "openai-compat", model: "requested-model"}
+	buffer := streamUsageBuffer{modelReporter: reporter}
+	buffer.observeOpenAIStreamChunk([]byte("data: {\"object\":\"chat.completion.chunk\",\"model\":\"served-"))
+	buffer.observeOpenAIStreamChunk([]byte("v1\"}\ndata: {\"object\":\"chat.completion.chunk\",\"model\":\"served-v2\",\"choices\":[{\"finish_reason\":\"stop\"}]}"))
+	buffer.flushOpenAIStream()
+	buffer.observeOpenAIStreamChunk([]byte("\ndata: {\"model\":\"ignored\"}\n"))
+
+	served, _ := reporter.responseModelSnapshot()
+	if served != "served-v2" {
+		t.Fatalf("chunked response model = %q, want served-v2", served)
+	}
+}
+
+func TestStreamUsageBufferObservesMultilineResponseModel(t *testing.T) {
+	reporter := &usageReporter{provider: "openai-compat", model: "requested-model"}
+	buffer := streamUsageBuffer{modelReporter: reporter}
+	buffer.observeOpenAIStreamChunk([]byte("event: response.completed\ndata: {\"type\":\"response.completed\",\n"))
+	buffer.observeOpenAIStreamChunk([]byte("data: \"response\":{\"model\":\"served-multiline\"}}\n\n"))
+
+	served, _ := reporter.responseModelSnapshot()
+	if served != "served-multiline" {
+		t.Fatalf("multiline response model = %q, want served-multiline", served)
+	}
+}
+
+func TestStreamUsageBufferSkipsOversizedModelEvent(t *testing.T) {
+	reporter := &usageReporter{provider: "openai-compat", model: "requested-model"}
+	buffer := streamUsageBuffer{modelReporter: reporter}
+	buffer.observeOpenAIStreamChunk(append([]byte("data: "), bytes.Repeat([]byte("x"), maxStreamModelEventBytes)...))
+	buffer.observeOpenAIStreamChunk([]byte("\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"served-after-overflow\"}}\n\n"))
+	buffer.flushOpenAIStream()
+
+	served, _ := reporter.responseModelSnapshot()
+	if served != "served-after-overflow" || len(buffer.modelLines) != 0 || buffer.modelOverflow {
+		t.Fatalf("response model after oversized event = %q, lines=%d overflow=%t", served, len(buffer.modelLines), buffer.modelOverflow)
 	}
 }
 

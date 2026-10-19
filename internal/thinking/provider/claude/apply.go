@@ -169,6 +169,20 @@ func (a *applier) effectiveMaxTokens(body []byte, modelInfo *registry.ModelInfo)
 }
 
 func applyCompatibleClaude(body []byte, config thinking.Config) ([]byte, error) {
+	if config.Mode == thinking.ModeLevel {
+		if config.Level == "" {
+			return body, nil
+		}
+		if gjson.GetBytes(body, "thinking.type").String() == "adaptive" {
+			return sjson.SetBytes(body, "output_config.effort", string(config.Level))
+		}
+		budget, ok := thinking.ConvertLevelToBudget(string(config.Level))
+		if !ok {
+			return body, nil
+		}
+		config.Mode = thinking.ModeBudget
+		config.Budget = budget
+	}
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
 		return body, nil
 	}

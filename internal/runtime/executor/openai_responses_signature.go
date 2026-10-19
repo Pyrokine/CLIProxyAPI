@@ -11,13 +11,50 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+func openaiResponsesReasoningSummaryIsEmpty(summary gjson.Result) bool {
+	return !summary.Exists() || summary.Type == gjson.Null || summary.IsArray() && len(summary.Array()) == 0
+}
+
+func promoteOpenAIResponsesReasoningTextToSummary(itemRaw string, content gjson.Result) (string, error) {
+	var summary strings.Builder
+	summary.WriteByte('[')
+	count := 0
+	for _, part := range content.Array() {
+		if part.Get("type").String() != "reasoning_text" || part.Get("text").String() == "" {
+			continue
+		}
+		value, err := sjson.Set(`{"type":"summary_text"}`, "text", part.Get("text").String())
+		if err != nil {
+			return itemRaw, err
+		}
+		if count > 0 {
+			summary.WriteByte(',')
+		}
+		summary.WriteString(value)
+		count++
+	}
+	if count == 0 {
+		return itemRaw, nil
+	}
+	summary.WriteByte(']')
+	return sjson.SetRaw(itemRaw, "summary", summary.String())
+}
+
 func sanitizeOpenAIResponsesReasoningEncryptedContent(
 	ctx context.Context,
 	provider string,
 	body []byte,
-	preserveEmptyEncryptedContent ...bool,
+	isCompat ...bool,
 ) []byte {
-	preserveEmpty := len(preserveEmptyEncryptedContent) > 0 && preserveEmptyEncryptedContent[0]
+	compat := len(isCompat) > 0 && isCompat[0]
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, compat, compat)
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(ctx context.Context, provider string, body []byte) []byte {
+	return sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx, provider, body, false, true)
+}
+
+func sanitizeOpenAIResponsesReasoningEncryptedContentWithOptions(ctx context.Context, provider string, body []byte, isCompat, keepForeign bool) []byte {
 	inputResult := util.GetGJSONBytesNoCopy(body, "input")
 	if !inputResult.Exists() || !inputResult.IsArray() {
 		return body
@@ -64,26 +101,43 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(
 		if itemID == "" {
 			itemID = fmt.Sprintf("input[%d]", index)
 		}
+		nextItem := item.Raw
+		changed := false
+		content := item.Get("content")
+		if !isCompat && content.IsArray() && len(content.Array()) > 0 {
+			if openaiResponsesReasoningSummaryIsEmpty(item.Get("summary")) {
+				promoted, err := promoteOpenAIResponsesReasoningTextToSummary(nextItem, content)
+				if err != nil {
+					logWithRequestID(ctx).Debugf("%s: failed to promote reasoning text at input[%d]: %v", provider, index, err)
+				} else {
+					nextItem = promoted
+				}
+			}
+			cleared, err := sjson.SetRaw(nextItem, "content", "[]")
+			if err != nil {
+				logWithRequestID(ctx).Debugf("%s: failed to clear reasoning content at input[%d]: %v", provider, index, err)
+			} else {
+				nextItem = cleared
+				changed = true
+			}
+		}
 
 		if !encryptedContent.Exists() {
-			if stripOrphanReasoningIDs && item.Get("id").Exists() {
-				nextItem, err := sjson.Delete(item.Raw, "id")
+			if !isCompat && stripOrphanReasoningIDs && item.Get("id").Exists() {
+				withoutID, err := sjson.Delete(nextItem, "id")
 				if err != nil {
-					logWithRequestID(ctx).Debugf(
-						"%s: failed to drop orphan reasoning id at input[%d]: %v", provider, index, err,
-					)
-					keep(item.Raw)
-					continue
+					logWithRequestID(ctx).Debugf("%s: failed to drop orphan reasoning id at input[%d]: %v", provider, index, err)
+				} else {
+					nextItem = withoutID
+					changed = true
 				}
-				startRebuild(index)
-				keep(nextItem)
-				logWithRequestID(ctx).Debugf(
-					"%s: dropped orphan reasoning id at input[%d] item_id=%q reason=missing encrypted_content with store disabled",
-					provider, index, itemID,
-				)
+			}
+			if !changed {
+				keep(item.Raw)
 				continue
 			}
-			keep(item.Raw)
+			startRebuild(index)
+			keep(nextItem)
 			continue
 		}
 
@@ -91,14 +145,20 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(
 		switch encryptedContent.Type {
 		case gjson.String:
 			rawSignature := encryptedContent.String()
-			if preserveEmpty && rawSignature == "" {
+			if isCompat && rawSignature == "" {
 				keep(item.Raw)
 				continue
 			}
 			if rawSignature != strings.TrimSpace(rawSignature) {
 				reason = "encrypted_content has leading or trailing whitespace"
 			} else if _, err := signature.InspectGPTReasoningSignature(rawSignature); err != nil {
-				reason = err.Error()
+				_, accepted := signature.CompatibleSignatureForProviderWithOptions(
+					signature.ProviderGPT, rawSignature, signature.BlockKindGPTReasoning,
+					signature.SignatureCompatibilityOptions{PreserveUnknownNonEmpty: true},
+				)
+				if !keepForeign || !accepted {
+					reason = err.Error()
+				}
 			}
 		case gjson.Null:
 			reason = "encrypted_content is null"
@@ -106,19 +166,30 @@ func sanitizeOpenAIResponsesReasoningEncryptedContent(
 			reason = fmt.Sprintf("encrypted_content must be a string, got %s", encryptedContent.Type.String())
 		}
 		if reason == "" {
-			keep(item.Raw)
+			if !changed {
+				keep(item.Raw)
+				continue
+			}
+			startRebuild(index)
+			keep(nextItem)
 			continue
 		}
 
-		nextItem, err := sjson.Delete(item.Raw, "encrypted_content")
+		withoutSignature, err := sjson.Delete(nextItem, "encrypted_content")
 		if err != nil {
 			logWithRequestID(ctx).Debugf(
 				"%s: failed to drop invalid reasoning encrypted_content at input[%d]: %v", provider, index, err,
 			)
-			keep(item.Raw)
+			if !changed {
+				keep(item.Raw)
+				continue
+			}
+			startRebuild(index)
+			keep(nextItem)
 			continue
 		}
-		if stripOrphanReasoningIDs && item.Get("id").Exists() {
+		nextItem = withoutSignature
+		if !isCompat && stripOrphanReasoningIDs && item.Get("id").Exists() {
 			if nextID, errID := sjson.Delete(nextItem, "id"); errID != nil {
 				logWithRequestID(ctx).Debugf(
 					"%s: failed to drop reasoning id after invalid encrypted_content at input[%d]: %v",

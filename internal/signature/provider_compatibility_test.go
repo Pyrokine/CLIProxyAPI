@@ -61,6 +61,27 @@ func TestDecideCompatibilityPreservesNativeSignatures(t *testing.T) {
 	}
 }
 
+func TestSignatureCompatibilityRejectsNestedProviderPrefixes(t *testing.T) {
+	claude := validClaudeThinkingSignatureForTest()
+	for _, payload := range []string{claude, base64.StdEncoding.EncodeToString([]byte(claude))} {
+		if got := DetectProvider("claude#" + payload); got != ProviderClaude {
+			t.Fatalf("single prefix provider = %v, want Claude", got)
+		}
+		for _, prefix := range []string{"claude#claude#", "anthropic#claude#", "claude#opaque#"} {
+			raw := prefix + payload
+			if got := DetectProvider(raw); got != providerUnknown {
+				t.Fatalf("nested prefix provider = %v, want unknown", got)
+			}
+			if normalized, ok := CompatibleSignatureForProvider(ProviderClaude, raw, BlockKindClaudeThinking); ok || normalized != "" {
+				t.Fatal("native Claude accepted nested prefix")
+			}
+			if normalized, ok := CompatibleAntigravityClaudeThinkingSignature(raw); ok || normalized != "" {
+				t.Fatal("Antigravity accepted nested prefix")
+			}
+		}
+	}
+}
+
 func TestDecideCompatibilityCrossProviderActions(t *testing.T) {
 	claudeSig := validClaudeThinkingSignatureForTest()
 	geminiSig := validGeminiThoughtSignatureForTest()

@@ -94,13 +94,13 @@ func TestCodexResponsesBodyUsesRequestScopedTranslatorHooks(t *testing.T) {
 			Model:   "gpt-5.5",
 			Payload: []byte(`{"model":"gpt-5.5","input":[]}`),
 		},
-		false,
+		false, false,
 	)
 	if err != nil {
 		t.Fatalf("codexResponsesBody() error = %v", err)
 	}
-	if hooks.requestCalls.Load() != 2 {
-		t.Fatalf("request hook calls = %d, want 2", hooks.requestCalls.Load())
+	if hooks.requestCalls.Load() != 1 {
+		t.Fatalf("request hook calls = %d, want 1", hooks.requestCalls.Load())
 	}
 	if !gjson.GetBytes(prepared.Body, "plugin_normalized").Bool() {
 		t.Fatalf("prepared body did not retain request hook output: %s", prepared.Body)
@@ -128,13 +128,13 @@ func TestCodexResponsesBodyCompatUsesRequestScopedTranslatorHooks(t *testing.T) 
 				"cliproxy.resolved_api_key_model_info": &registry.ModelInfo{IsCompat: true},
 			},
 		},
-		false,
+		false, false,
 	)
 	if err != nil {
 		t.Fatalf("codexResponsesBody() error = %v", err)
 	}
-	if hooks.requestCalls.Load() != 2 {
-		t.Fatalf("request hook calls = %d, want 2", hooks.requestCalls.Load())
+	if hooks.requestCalls.Load() != 1 {
+		t.Fatalf("request hook calls = %d, want 1", hooks.requestCalls.Load())
 	}
 	if !gjson.GetBytes(prepared.Body, "plugin_normalized").Bool() {
 		t.Fatalf("prepared body did not retain request hook output: %s", prepared.Body)
@@ -157,7 +157,7 @@ func TestXAICountTokensUsesRequestScopedTranslatorHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CountTokens() error = %v", err)
 	}
-	if hooks.requestCalls.Load() != 2 {
-		t.Fatalf("request hook calls = %d, want 2", hooks.requestCalls.Load())
+	if hooks.requestCalls.Load() != 1 {
+		t.Fatalf("request hook calls = %d, want 1", hooks.requestCalls.Load())
 	}
 }

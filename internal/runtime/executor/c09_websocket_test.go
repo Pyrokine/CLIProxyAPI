@@ -119,7 +119,7 @@ func TestC09ProviderSessionUseRejectsInvalidExplicitIDs(t *testing.T) {
 		nil,
 		request,
 		invalidPromptCachePayload,
-		invalidPromptCachePayload,
+		invalidPromptCachePayload, nil,
 	)
 	if err != nil {
 		t.Fatalf("cacheHelper() error = %v", err)

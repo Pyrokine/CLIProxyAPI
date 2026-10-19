@@ -137,6 +137,22 @@ func ExtractExplicitSummaryConfig(body []byte, format string) SummaryConfig {
 	return config
 }
 
+// ExtractTranslatedSummaryConfig ignores Chat effort as a Claude display choice.
+func ExtractTranslatedSummaryConfig(body []byte, sourceFormat, targetFormat string) SummaryConfig {
+	source := strings.ToLower(strings.TrimSpace(sourceFormat))
+	target := strings.ToLower(strings.TrimSpace(targetFormat))
+	if source == "openai" && target == "claude" {
+		return ExtractExplicitSummaryConfig(body, source)
+	}
+	return ExtractSummaryConfig(body, source)
+}
+
+// ApplyTranslatedSummaryToClaude copies explicit visibility intent to a Claude request.
+func ApplyTranslatedSummaryToClaude(out, source []byte, sourceFormat, model string) []byte {
+	config := ExtractTranslatedSummaryConfig(source, sourceFormat, "claude")
+	return ApplySummaryConfigForModel(out, "claude", model, config)
+}
+
 // ApplySummaryConfig writes canonical summary intent in the target protocol.
 func ApplySummaryConfig(body []byte, format string, config SummaryConfig) []byte {
 	return ApplySummaryConfigForModel(body, format, "", config)

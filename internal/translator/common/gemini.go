@@ -1,6 +1,9 @@
 package common
 
 import (
+	"strings"
+
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -114,4 +117,143 @@ func geminiContentParts(content []byte) [][]byte {
 		rawParts = append(rawParts, []byte(part.Raw))
 	}
 	return rawParts
+}
+
+// ContentHasGeminiFunctionCall reports whether a content turn contains a tool call.
+func ContentHasGeminiFunctionCall(content []byte) bool {
+	for _, part := range gjson.GetBytes(content, "parts").Array() {
+		if part.Get("functionCall").Exists() || part.Get("function_call").Exists() {
+			return true
+		}
+	}
+	return false
+}
+
+// SplitGeminiFunctionResponseTurns keeps tool results adjacent to their preceding model call.
+func SplitGeminiFunctionResponseTurns(contents [][]byte) [][]byte {
+	if len(contents) == 0 {
+		return contents
+	}
+
+	split := make([][]byte, 0, len(contents))
+	for _, content := range contents {
+		if gjson.GetBytes(content, "role").String() != "user" || !ContentHasGeminiFunctionResponse(content) {
+			split = append(split, content)
+			continue
+		}
+		var responses, other [][]byte
+		for _, part := range gjson.GetBytes(content, "parts").Array() {
+			if part.Get("functionResponse").Exists() || part.Get("function_response").Exists() {
+				responses = append(responses, []byte(part.Raw))
+			} else {
+				other = append(other, []byte(part.Raw))
+			}
+		}
+		if len(other) == 0 {
+			split = append(split, content)
+			continue
+		}
+		responseTurn, responseErr := sjson.SetRawBytes(content, "parts", JoinRawArray(responses))
+		otherTurn, otherErr := sjson.SetRawBytes(content, "parts", JoinRawArray(other))
+		if responseErr != nil || otherErr != nil {
+			log.WithFields(log.Fields{"response_error": responseErr, "other_error": otherErr}).Warn("Gemini tool response turn could not be separated")
+			split = append(split, content)
+			continue
+		}
+		split = append(split, responseTurn, otherTurn)
+	}
+
+	ordered := make([][]byte, 0, len(split))
+	for index := 0; index < len(split); {
+		if gjson.GetBytes(split[index], "role").String() != "user" {
+			ordered = append(ordered, split[index])
+			index++
+			continue
+		}
+		previousModelCalledTool := len(ordered) > 0 &&
+			gjson.GetBytes(ordered[len(ordered)-1], "role").String() == "model" &&
+			ContentHasGeminiFunctionCall(ordered[len(ordered)-1])
+		end := index
+		for end < len(split) && gjson.GetBytes(split[end], "role").String() == "user" {
+			end++
+		}
+		if !previousModelCalledTool {
+			ordered = append(ordered, split[index:end]...)
+			index = end
+			continue
+		}
+		var responses, other [][]byte
+		var responseTurn []byte
+		for _, turn := range split[index:end] {
+			if ContentHasGeminiFunctionResponse(turn) {
+				if responseTurn == nil {
+					responseTurn = turn
+				}
+				responses = append(responses, geminiContentParts(turn)...)
+			} else {
+				other = append(other, turn)
+			}
+		}
+		if len(responses) > 0 && end-index > 1 {
+			combined, err := sjson.SetRawBytes(responseTurn, "parts", JoinRawArray(responses))
+			if err != nil {
+				log.WithError(err).Warn("Gemini tool responses could not be combined")
+				ordered = append(ordered, split[index:end]...)
+			} else {
+				ordered = append(ordered, combined)
+				ordered = append(ordered, other...)
+			}
+		} else {
+			ordered = append(ordered, split[index:end]...)
+		}
+		index = end
+	}
+	return ordered
+}
+
+// ContainsJSONRef reports whether a schema reference appears in a nested function result.
+func ContainsJSONRef(value gjson.Result) bool {
+	if !value.IsObject() && !value.IsArray() {
+		return false
+	}
+	found := false
+	value.ForEach(func(key, child gjson.Result) bool {
+		if value.IsObject() && key.String() == "$ref" && child.Type == gjson.String {
+			found = true
+			return false
+		}
+		if ContainsJSONRef(child) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// SetGeminiFunctionResponseResult keeps JSON Schema references opaque to Gemini's media parser.
+func SetGeminiFunctionResponseResult(part []byte, path string, result gjson.Result) []byte {
+	if !result.Exists() {
+		part, _ = sjson.SetBytes(part, path, "")
+		return part
+	}
+	if ContainsJSONRef(result) {
+		target := path
+		if strings.HasSuffix(path, "response") {
+			target += ".result"
+		}
+		part, _ = sjson.SetBytes(part, target, result.Raw)
+		return part
+	}
+	part, _ = sjson.SetRawBytes(part, path, []byte(result.Raw))
+	return part
+}
+
+// SetGeminiFunctionResponseRaw converts a raw tool result using the same reference handling.
+func SetGeminiFunctionResponseRaw(part []byte, path string, rawJSON string) []byte {
+	if strings.TrimSpace(rawJSON) == "" {
+		part, _ = sjson.SetBytes(part, path, "")
+		return part
+	}
+	return SetGeminiFunctionResponseResult(part, path, gjson.Parse(rawJSON))
 }

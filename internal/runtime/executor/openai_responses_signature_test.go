@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"encoding/base64"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -82,6 +83,50 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContent_NoopReturnsOriginalBod
 	}
 	if len(got) > 0 && len(body) > 0 && &got[0] != &body[0] {
 		t.Fatalf("noop path should return the original body slice")
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(t *testing.T) {
+	const museSignature = "Q-PaDg-mock-muse-spark-encrypted-reasoning-payload"
+	body := []byte(`{"store":false,"input":[` +
+		`{"id":"rs_muse","type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"cleartext thinking"}],"encrypted_content":"` + museSignature + `"},` +
+		`{"id":"rs_gemini","type":"reasoning","encrypted_content":"skip_thought_signature_validator"},` +
+		`{"id":"rs_badprefix","type":"reasoning","encrypted_content":"claude#invalid"},` +
+		`{"id":"rs_empty","type":"reasoning","encrypted_content":""},` +
+		`{"id":"rs_orphan","type":"reasoning"}]}`)
+
+	got := sanitizeOpenAIResponsesReasoningEncryptedContentKeepForeign(context.Background(), "meta executor", body)
+	if value := gjson.GetBytes(got, "input.0.encrypted_content").String(); value != museSignature {
+		t.Fatalf("foreign signature = %q, want %q; body=%s", value, museSignature, got)
+	}
+	if value := gjson.GetBytes(got, "input.0.id").String(); value != "rs_muse" {
+		t.Fatalf("foreign reasoning id = %q, want rs_muse; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "input.0.summary.0.text").String(); value != "cleartext thinking" {
+		t.Fatalf("promoted reasoning summary = %q; body=%s", value, got)
+	}
+	if len(gjson.GetBytes(got, "input.0.content").Array()) != 0 {
+		t.Fatalf("raw reasoning content remained on strict Responses request: %s", got)
+	}
+	for _, index := range []int{1, 2, 3} {
+		path := "input." + strconv.Itoa(index)
+		if gjson.GetBytes(got, path+".encrypted_content").Exists() || gjson.GetBytes(got, path+".id").Exists() {
+			t.Fatalf("incompatible or empty encrypted content remained at %s: %s", path, got)
+		}
+	}
+	if gjson.GetBytes(got, "input.4.id").Exists() {
+		t.Fatalf("orphan reasoning id remained: %s", got)
+	}
+
+	strict := sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "codex", body)
+	if gjson.GetBytes(strict, "input.0.encrypted_content").Exists() {
+		t.Fatalf("strict Codex unexpectedly accepted foreign signature: %s", strict)
+	}
+	compat := sanitizeOpenAIResponsesReasoningEncryptedContent(context.Background(), "compat", body, true)
+	if gjson.GetBytes(compat, "input.0.encrypted_content").String() != museSignature ||
+		gjson.GetBytes(compat, "input.0.content.0.text").String() != "cleartext thinking" ||
+		!gjson.GetBytes(compat, "input.3.encrypted_content").Exists() {
+		t.Fatalf("compat request lost replayed reasoning content: %s", compat)
 	}
 }
 

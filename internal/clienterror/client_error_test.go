@@ -17,6 +17,13 @@ type statusError struct {
 func (e statusError) Error() string   { return e.body }
 func (e statusError) StatusCode() int { return e.status }
 
+type upstreamBodyError struct {
+	statusError
+	responseBody string
+}
+
+func (e upstreamBodyError) ResponseBody() []byte { return []byte(e.responseBody) }
+
 type directBodyError struct {
 	body   []byte
 	direct bool
@@ -247,6 +254,36 @@ func TestIsRequestFault(t *testing.T) {
 			name:   "model not found code prefix",
 			status: http.StatusBadRequest,
 			err:    errors.New("model_not_found: unknown model"),
+		},
+		{
+			name: "item not persisted", status: http.StatusNotFound,
+			err: errors.New("Item with id 'rs_1' not found. Items are not persisted when `store` is set to false."),
+			want: true,
+		},
+		{
+			name: "Claude stale thread", status: http.StatusNotFound,
+			err: errors.New(`{"error":{"type":"not_found_error","message":"No thread state was found for the requested previous_message_id."}}`),
+			want: true,
+		},
+		{
+			name: "Claude stale thread in response body",
+			err: upstreamBodyError{
+				statusError: statusError{status: http.StatusNotFound, body: "upstream failure"},
+				responseBody: `{"error":{"type":"not_found_error","message":"No thread state was found for previous_message_id."}}`,
+			},
+			want: true,
+		},
+		{
+			name: "Claude stale thread plain text", status: http.StatusNotFound,
+			err: errors.New("No thread state was found for previous_message_id."), want: true,
+		},
+		{
+			name: "unrelated Claude 404", status: http.StatusNotFound,
+			err: errors.New(`{"error":{"type":"not_found_error","message":"Not Found"}}`),
+		},
+		{
+			name: "Claude thread server failure", status: http.StatusInternalServerError,
+			err: errors.New(`{"error":{"type":"not_found_error","message":"No thread state was found for previous_message_id."}}`),
 		},
 		{name: "quota", status: http.StatusTooManyRequests, err: errors.New("quota")},
 		{name: "transport", status: http.StatusBadGateway, err: errors.New("unexpected EOF")},

@@ -464,6 +464,7 @@ func TestXAIExecutorUsesResolvedModelIsCompat(t *testing.T) {
 		}
 		prepared, err := executor.prepareResponsesRequestWithContext(
 			context.Background(),
+			nil,
 			request,
 			cliproxyexecutor.Options{
 				SourceFormat:   sdktranslator.FormatOpenAIResponse,

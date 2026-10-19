@@ -6,12 +6,27 @@ import (
 )
 
 type sessionIDContextKey struct{}
+type inferredSessionIDContextKey struct{}
 
 // WithSessionID 保存内部会话标识，空值明确覆盖父 context 的标识
 func WithSessionID(ctx context.Context, sessionID string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx = context.WithValue(ctx, inferredSessionIDContextKey{}, false)
+	return context.WithValue(ctx, sessionIDContextKey{}, strings.TrimSpace(sessionID))
+}
+
+// WithInferredSessionID 更新请求派生的会话，保留调用方显式指定的值与空值
+func WithInferredSessionID(ctx context.Context, sessionID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	inferred, _ := ctx.Value(inferredSessionIDContextKey{}).(bool)
+	if HasExplicitSessionID(ctx) && !inferred {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, inferredSessionIDContextKey{}, true)
 	return context.WithValue(ctx, sessionIDContextKey{}, strings.TrimSpace(sessionID))
 }
 

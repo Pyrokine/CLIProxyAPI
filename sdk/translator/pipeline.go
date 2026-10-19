@@ -1,15 +1,21 @@
 package translator
 
-import "slices"
+import (
+	"context"
+	"slices"
 
-import "context"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+)
 
 // RequestEnvelope represents a request in the translation pipeline.
 type RequestEnvelope struct {
-	Format Format
-	Model  string
-	Stream bool
-	Body   []byte
+	Format                      Format
+	Model                       string
+	ModelInfo                   *registry.ModelInfo
+	Stream                      bool
+	Body                        []byte
+	Err                         error
+	ConfigurationUpdatesChanged bool
 }
 
 // ResponseEnvelope represents a response in the translation pipeline.
@@ -68,10 +74,8 @@ func (p *Pipeline) TranslateRequest(ctx context.Context, from, to Format, req Re
 	error,
 ) {
 	terminal := func(ctx context.Context, input RequestEnvelope) (RequestEnvelope, error) {
-		translated := p.registry.TranslateRequest(from, to, input.Model, input.Body, input.Stream)
-		input.Body = translated
-		input.Format = to
-		return input, nil
+		translated := p.registry.TranslateRequestEnvelope(ctx, from, to, input)
+		return translated, translated.Err
 	}
 
 	handler := terminal

@@ -14,7 +14,7 @@ func TestEnsureCacheControl(t *testing.T) {
 	t.Run(
 		"String System Prompt", func(t *testing.T) {
 			input := []byte(`{"model": "claude-3-5-sonnet", "system": "This is a long system prompt", "messages": []}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 
 			res := gjson.GetBytes(output, "system.0.cache_control.type")
 			if res.String() != "ephemeral" {
@@ -29,7 +29,7 @@ func TestEnsureCacheControl(t *testing.T) {
 			input := []byte(
 				`{"model": "claude-3-5-sonnet", "system": [{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}], "messages": []}`,
 			)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 
 			// cache_control should only be on the LAST element
 			res0 := gjson.GetBytes(output, "system.0.cache_control")
@@ -57,7 +57,7 @@ func TestEnsureCacheControl(t *testing.T) {
 			"system": "System prompt",
 			"messages": []
 		}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 
 			if gjson.GetBytes(output, "tools.0.cache_control").Exists() ||
 				gjson.GetBytes(output, "tools.1.cache_control").Exists() {
@@ -85,7 +85,7 @@ func TestEnsureCacheControl(t *testing.T) {
 			"system": [{"type": "text", "text": "System"}],
 			"messages": []
 		}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 
 			// Tool already has cache_control - should not be changed
 			tool0Cache := gjson.GetBytes(output, "tools.0.cache_control.type")
@@ -114,7 +114,7 @@ func TestEnsureCacheControl(t *testing.T) {
 			],
 			"messages": [{"role": "user", "content": "Hi"}]
 		}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 
 			if gjson.GetBytes(output, "tools.0.cache_control").Exists() {
 				t.Errorf("only the last tool may host the fallback breakpoint: %s", string(output))
@@ -145,7 +145,7 @@ func TestEnsureCacheControl(t *testing.T) {
 					"tools": [{"name": "tool1", "description": "Tool", "input_schema": {"type": "object"}}],
 					"messages": [{"role": "user", "content": "Hi"}]
 				}`)
-					output := ensureCacheControl(input)
+					output := ensureCacheControl(input, false)
 
 					if got := gjson.GetBytes(output, "tools.0.cache_control.type").String(); got != "ephemeral" {
 						t.Errorf("an unusable system prompt must still yield a tools breakpoint: %s", string(output))
@@ -189,7 +189,7 @@ func TestEnsureCacheControl(t *testing.T) {
 		}`, toolsJSON.String(),
 			)
 
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 
 			for i := range 50 {
 				path := fmt.Sprintf("tools.%d.cache_control", i)
@@ -215,7 +215,7 @@ func TestEnsureCacheControl(t *testing.T) {
 	t.Run(
 		"Empty Tools Array", func(t *testing.T) {
 			input := []byte(`{"model": "claude-3-5-sonnet", "tools": [], "system": "Test", "messages": []}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 
 			// System should still get cache_control
 			systemCache := gjson.GetBytes(output, "system.0.cache_control.type")
@@ -239,7 +239,7 @@ func TestEnsureCacheControl(t *testing.T) {
 				{"role": "user", "content": "Third user"}
 			]
 		}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 
 			if got := gjson.GetBytes(output, "messages.4.content.0.cache_control.type").String(); got != "ephemeral" {
 				t.Errorf("cache_control.type on latest user = %q, want ephemeral. Output: %s", got, string(output))
@@ -264,7 +264,7 @@ func TestEnsureCacheControl(t *testing.T) {
 				{"role": "user", "content": [{"type": "text", "text": "Second user"}]}
 			]
 		}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 
 			if got := gjson.GetBytes(output, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
 				t.Errorf("existing cache_control should be preserved. Output: %s", string(output))
@@ -284,7 +284,7 @@ func TestEnsureCacheControl(t *testing.T) {
 				{"role": "system", "content": "Internal system"}
 			]
 		}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 			systemContent := gjson.GetBytes(output, "messages.2.content")
 			if !systemContent.IsArray() || len(systemContent.Array()) != 1 {
 				t.Fatalf("trailing string system was not replaced by one text block: %s", output)
@@ -310,7 +310,7 @@ func TestEnsureCacheControl(t *testing.T) {
 				{"role": "system", "content": [{"type": "text", "text": "Internal 1"}, {"type": "text", "text": "Internal 2"}]}
 			]
 		}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 			if gjson.GetBytes(output, "messages.2.content.1.cache_control").Exists() {
 				t.Fatalf("array-content trailing system must not be marked: %s", output)
 			}
@@ -328,7 +328,7 @@ func TestEnsureCacheControl(t *testing.T) {
 				{"role": "assistant", "content": "Assistant prefill"}
 			]
 		}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 			if got := gjson.GetBytes(output, "messages.1.content.0.cache_control.type").String(); got != "ephemeral" {
 				t.Fatalf("trailing assistant cache_control.type = %q, want ephemeral. Output: %s", got, output)
 			}
@@ -351,7 +351,7 @@ func TestEnsureCacheControl(t *testing.T) {
 					]}
 				]
 			}`)
-				output := ensureCacheControl(input)
+				output := ensureCacheControl(input, false)
 				if got := gjson.GetBytes(output, "messages.0.content.0.cache_control.type").String(); got != "ephemeral" {
 					t.Fatalf("preceding user cache_control.type = %q, want fallback ephemeral. Output: %s", got, output)
 				}
@@ -371,7 +371,7 @@ func TestEnsureCacheControl(t *testing.T) {
 			"system": [{"type": "text", "text": "System"}],
 			"messages": [{"role": "user", "content": [{"type": "text", "text": "User"}]}]
 		}`)
-			output := ensureCacheControl(input)
+			output := ensureCacheControl(input, false)
 			want := []byte(`"cache_control":{"type":"ephemeral"}`)
 			if got := bytes.Count(output, want); got != 2 {
 				t.Fatalf("native cache_control wire shape count = %d, want 2. Output: %s", got, output)
@@ -497,7 +497,7 @@ func TestCacheControlOrder(t *testing.T) {
 		]
 	}`)
 
-	output := ensureCacheControl(input)
+	output := ensureCacheControl(input, false)
 
 	// A usable system prompt covers the tools prefix, so default native
 	// placement does not add a redundant tools marker.

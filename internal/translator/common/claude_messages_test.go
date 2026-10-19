@@ -152,3 +152,59 @@ func TestAlignClaudeToolResultsMatchesRawIDsExactly(t *testing.T) {
 		t.Fatalf("raw ID call_a result = %q, want underscore", got)
 	}
 }
+
+func TestAlignGeminiFunctionResponsesPreservesOtherSlots(t *testing.T) {
+	parts := gjson.Parse(`[
+		{"functionResponse":{"id":"call_a","name":"second","response":{"result":"underscore"}}},
+		{"text":"keep text"},
+		{"functionResponse":{"id":"external","name":"external","response":{"result":{"$ref":"#/Item"}}}},
+		{"inlineData":{"mime_type":"image/png","data":"image"}},
+		{"functionResponse":{"id":"call.a","name":"first","response":{"result":"dot"}}}
+	]`)
+	aligned := AlignGeminiFunctionResponses(parts, []string{"call.a", "missing", "call_a"})
+	for path, want := range map[string]string{
+		"0.functionResponse.id":                   "call.a",
+		"0.functionResponse.response.result":      "dot",
+		"1.text":                                  "keep text",
+		"2.functionResponse.id":                   "external",
+		"2.functionResponse.response.result.$ref": "#/Item",
+		"3.inlineData.data":                       "image",
+		"4.functionResponse.id":                   "call_a",
+		"4.functionResponse.response.result":      "underscore",
+	} {
+		if got := aligned.Get(path).String(); got != want {
+			t.Fatalf("%s=%q, want %q; parts=%s", path, got, want, aligned.Raw)
+		}
+	}
+}
+
+func TestClaudeToolResultContent(t *testing.T) {
+	for _, tc := range []struct {
+		name, input, want string
+		images            []string
+	}{
+		{"string", `"alpha\nquoted"`, `"alpha\nquoted"`, nil},
+		{"object", `{"value":1}`, `{"value":1}`, nil},
+		{"number", `42`, `42`, nil},
+		{"null", `null`, `null`, nil},
+		{"empty array", `[]`, `[]`, nil},
+		{"text blocks", `[{"type":"text","text":"alpha"},{"type":"text","text":"beta"}]`, `{"text":"alpha\nbeta"}`, nil},
+		{"text and images", `[{"type":"text","text":"alpha"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"one"}},{"type":"text","text":"beta"},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"two"}}]`, `{"text":"alpha\nbeta"}`, []string{"one", "two"}},
+		{"image only", `[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"one"}}]`, `{"text":""}`, []string{"one"}},
+		{"opaque blocks", `[{"type":"text","text":"alpha"},{"$ref":"#/Item"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"one"}}]`, `[{"type":"text","text":"alpha"},{"$ref":"#/Item"}]`, []string{"one"}},
+		{"URL image preserved as JSON", `[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}]`, `[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}]`, nil},
+		{"incomplete image preserved as JSON", `[{"type":"image","source":{"type":"base64","media_type":"image/png"}}]`, `[{"type":"image","source":{"type":"base64","media_type":"image/png"}}]`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, images := ClaudeToolResultContent(gjson.Parse(tc.input))
+			if result.Raw != tc.want || len(images) != len(tc.images) {
+				t.Fatalf("result=%s, images=%v, want %s and %v", result.Raw, images, tc.want, tc.images)
+			}
+			for index, data := range tc.images {
+				if source := images[index]; source.Get("type").String() != "base64" || source.Get("media_type").String() == "" || source.Get("data").String() != data {
+					t.Fatalf("image[%d]=%s, want base64 data %q", index, source.Raw, data)
+				}
+			}
+		})
+	}
+}

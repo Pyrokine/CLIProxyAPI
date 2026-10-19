@@ -2,14 +2,19 @@ package conformance_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 
+	internalsignature "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
+	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator"
 	codexclaude "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/claude"
 	codexchat "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/openai/chat-completions"
 	codexresponses "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/codex/openai/responses"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -43,6 +48,435 @@ type normalizedResponse struct {
 	StopReason        string
 	TerminalCount     int
 	StopMetadataCount int
+}
+
+func TestClaudeGeminiDropsEmptyTurns(t *testing.T) {
+	for _, target := range []struct {
+		name    string
+		format  sdktranslator.Format
+		path    string
+		content string
+	}{
+		{"Gemini", sdktranslator.FormatGemini, "contents", `[{"type":"text","text":""}]`},
+		{"GeminiCLI", sdktranslator.FormatGeminiCLI, "request.contents", `[]`},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", target.name, stream), func(t *testing.T) {
+				input := []byte(fmt.Sprintf(`{"messages":[
+					{"role":"user","content":"hello"},
+					{"role":"assistant","content":%s},
+					{"role":"user","content":[]},
+					{"role":"assistant","content":[{"type":"thinking","thinking":"reason","signature":"opaque-client-signature"}]},
+					{"role":"user","content":"continue"}
+				]}`, target.content))
+				body, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatClaude, target.format, "gemini-3-pro", input, stream)
+				if err != nil {
+					t.Fatalf("empty-turn translation failed: %v", err)
+				}
+				contents := gjson.GetBytes(body, target.path).Array()
+				if len(contents) != 2 {
+					t.Fatalf("contents length = %d, want 2 nonempty turns: %s", len(contents), body)
+				}
+				for index, text := range []string{"hello", "continue"} {
+					if contents[index].Get("role").String() != "user" || contents[index].Get("parts.#").Int() != 1 || contents[index].Get("parts.0.text").String() != text {
+						t.Fatalf("contents.%d = %s, want user turn with text %q", index, contents[index].Raw, text)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestClaudeGeminiRequestContract(t *testing.T) {
+	cases := []struct {
+		name, input string
+		values      map[string]string
+		reminders   map[string]string
+	}{
+		{
+			name:   "tool input JSON is not a schema",
+			input:  `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{"url":{"type":"string","format":"uri","value":"keep"}}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}]}`,
+			values: map[string]string{"contents.0.parts.0.functionCall.args.url.type": "string", "contents.0.parts.0.functionCall.args.url.format": "uri", "contents.0.parts.0.functionCall.args.url.value": "keep"},
+		},
+		{
+			name:   "parallel calls with mixed text",
+			input:  `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call.a","name":"first","input":{}},{"type":"tool_use","id":"call_a","name":"second","input":{}}]},{"role":"user","content":[{"type":"text","text":"before"},{"type":"tool_result","tool_use_id":"call_a","content":"two"},{"type":"tool_result","tool_use_id":"call.a","content":"one"},{"type":"text","text":"after"}]}]}`,
+			values: map[string]string{"contents.#": "2", "contents.0.parts.0.functionCall.id": "call.a", "contents.0.parts.1.functionCall.id": "call_a", "contents.1.parts.0.text": "before", "contents.1.parts.1.text": "after", "contents.1.parts.2.functionResponse.id": "call.a", "contents.1.parts.2.functionResponse.name": "first", "contents.1.parts.2.functionResponse.response.result": "one", "contents.1.parts.3.functionResponse.id": "call_a", "contents.1.parts.3.functionResponse.name": "second"},
+		},
+		{
+			name:      "instructions between calls and results",
+			input:     `{"system":"top","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{}}]},{"role":"system","content":"system rule"},{"role":"developer","content":[{"type":"text","text":"developer rule"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"done"}]}]}`,
+			values:    map[string]string{"systemInstruction.parts.0.text": "top", "contents.#": "3", "contents.2.role": "user", "contents.2.parts.#": "3", "contents.2.parts.2.functionResponse.id": "call_1", "contents.2.parts.2.functionResponse.name": "lookup"},
+			reminders: map[string]string{"contents.2.parts.0.text": "system rule", "contents.2.parts.1.text": "developer rule"},
+		},
+		{
+			name:      "consecutive user and instructions",
+			input:     `{"messages":[{"role":"user","content":"hello"},{"role":"system","content":"system rule"},{"role":"developer","content":"developer rule"}]}`,
+			values:    map[string]string{"contents.#": "1", "contents.0.role": "user", "contents.0.parts.#": "3", "contents.0.parts.0.text": "hello"},
+			reminders: map[string]string{"contents.0.parts.1.text": "system rule", "contents.0.parts.2.text": "developer rule"},
+		},
+		{
+			name:   "structured result and trailing text keep image slot",
+			input:  `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"alpha"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}]},{"type":"text","text":"after"}]}]}`,
+			values: map[string]string{"contents.1.parts.#": "3", "contents.1.parts.0.text": "after", "contents.1.parts.1.{image}.mime_type": "image/png", "contents.1.parts.1.{image}.data": "aGVsbG8=", "contents.1.parts.2.functionResponse.id": "toolu_1", "contents.1.parts.2.functionResponse.name": "lookup", "contents.1.parts.2.functionResponse.response.result.text": "alpha"},
+		},
+		{
+			name:   "string result is not double encoded",
+			input:  `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"old-prefix-1","name":"lookup","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"old-prefix-1","content":"alpha"}]}]}`,
+			values: map[string]string{"contents.0.parts.0.functionCall.name": "lookup", "contents.1.parts.0.functionResponse.name": "lookup", "contents.1.parts.0.functionResponse.response.result": "alpha"},
+		},
+		{
+			name:   "JSON result stays structured",
+			input:  `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":{"value":42}}]}]}`,
+			values: map[string]string{"contents.1.parts.0.functionResponse.response.result.value": "42"},
+		},
+		{
+			name:   "JSON reference stays opaque",
+			input:  `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"lookup","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":{"schema":{"$ref":"#/Item"}}}]}]}`,
+			values: map[string]string{"contents.1.parts.0.functionResponse.response.result": `{"schema":{"$ref":"#/Item"}}`},
+		},
+		{
+			name:   "opaque ID and sanitized tool name",
+			input:  `{"tools":[{"name":"1 search/tool","input_schema":{"type":"object","properties":{}}}],"tool_choice":{"type":"tool","name":"1 search/tool"},"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"cpa_gemini_0123456789abcdef0123456789abcdef","name":"1 search/tool","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"cpa_gemini_0123456789abcdef0123456789abcdef","content":"done"}]}]}`,
+			values: map[string]string{"tools.0.functionDeclarations.0.name": "_1_search_tool", "toolConfig.functionCallingConfig.allowedFunctionNames.0": "_1_search_tool", "contents.0.parts.0.functionCall.id": "cpa_gemini_0123456789abcdef0123456789abcdef", "contents.0.parts.0.functionCall.name": "_1_search_tool", "contents.1.parts.0.functionResponse.id": "cpa_gemini_0123456789abcdef0123456789abcdef", "contents.1.parts.0.functionResponse.name": "_1_search_tool"},
+		},
+		{
+			name:   "reused ID resolves against current call group",
+			input:  `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"first","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"one"}]},{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"second","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"two"}]}]}`,
+			values: map[string]string{"contents.#": "4", "contents.1.parts.0.functionResponse.name": "first", "contents.3.parts.0.functionResponse.name": "second", "contents.3.parts.0.functionResponse.response.result": "two"},
+		},
+		{
+			name:      "parallel results across user messages",
+			input:     `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"first","input":{}},{"type":"tool_use","id":"call_2","name":"second","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"two"}]},{"role":"system","content":"middle"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"one"}]}]}`,
+			values:    map[string]string{"contents.#": "2", "contents.1.parts.1.functionResponse.id": "call_1", "contents.1.parts.1.functionResponse.name": "first", "contents.1.parts.2.functionResponse.id": "call_2", "contents.1.parts.2.functionResponse.name": "second"},
+			reminders: map[string]string{"contents.1.parts.0.text": "middle"},
+		},
+	}
+	for _, target := range []struct {
+		name, root, image string
+		format            sdktranslator.Format
+	}{
+		{"Gemini", "", "inline_data", sdktranslator.FormatGemini},
+		{"GeminiCLI", "request", "inlineData", sdktranslator.FormatGeminiCLI},
+	} {
+		for _, stream := range []bool{false, true} {
+			for _, tc := range cases {
+				t.Run(fmt.Sprintf("%s/stream=%t/%s", target.name, stream, tc.name), func(t *testing.T) {
+					input := []byte(tc.input)
+					body, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatClaude, target.format, "gemini-3-flash-preview", input, stream)
+					if err != nil || !gjson.ValidBytes(body) {
+						t.Fatalf("registered checked translation=(%s, %v)", body, err)
+					}
+					legacy := sdktranslator.TranslateRequest(sdktranslator.FormatClaude, target.format, "gemini-3-flash-preview", input, stream)
+					if string(legacy) != string(body) {
+						t.Fatalf("registered byte and checked bodies differ: byte=%s, checked=%s", legacy, body)
+					}
+					if err := internalsignature.ValidateGeminiFunctionCallPairing(body); err != nil {
+						t.Fatalf("registered translation produced invalid pairing: %v; body=%s", err, body)
+					}
+					root := gjson.ParseBytes(body)
+					if target.root != "" {
+						root = root.Get(target.root)
+					}
+					for path, want := range tc.values {
+						path = strings.ReplaceAll(path, "{image}", target.image)
+						if got := root.Get(path).String(); got != want {
+							t.Fatalf("%s=%q, want %q; body=%s", path, got, want, body)
+						}
+					}
+					for path, text := range tc.reminders {
+						want := text
+						if target.format == sdktranslator.FormatGemini {
+							want = "<system-reminder>\n" + text + "\n</system-reminder>"
+						}
+						if got := root.Get(path).String(); got != want {
+							t.Fatalf("%s=%q, want %q; body=%s", path, got, want, body)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestClaudeGeminiUserTurnAttachmentContract(t *testing.T) {
+	cases := []struct {
+		name, content, errorType, data string
+	}{
+		{"container upload", `{"type":"container_upload","file_id":"file-1"}`, "container_upload", ""},
+		{"file document", `{"type":"document","source":{"type":"file","file_id":"file-1"}}`, "document", ""},
+		{"URL image", `{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}}`, "image", ""},
+		{"file image", `{"type":"image","source":{"type":"file","file_id":"file-1"}}`, "image", ""},
+		{"empty text", `{"type":"text","text":""},{"type":"image","source":{"type":"file","file_id":"file-1"}}`, "image", ""},
+		{"whitespace text", `{"type":"text","text":" \n\t "},{"type":"image","source":{"type":"file","file_id":"file-1"}}`, "image", ""},
+		{"NBSP text", `{"type":"text","text":" "},{"type":"image","source":{"type":"file","file_id":"file-1"}}`, "image", ""},
+		{"trailing whitespace", `{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}},{"type":"text","text":"  "}`, "image", ""},
+		{"incomplete base64", `{"type":"image","source":{"type":"base64","media_type":"image/png","data":""}}`, "image", ""},
+		{"base64 image", `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}`, "", "aGVsbG8="},
+		{"base64 PDF", `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0xLjQK"}}`, "", "JVBERi0xLjQK"},
+		{"real text beside whitespace and attachment", `{"type":"text","text":"  "},{"type":"text","text":"keep"},{"type":"image","source":{"type":"file","file_id":"file-1"}}`, "", ""},
+	}
+	for _, target := range []struct {
+		name, root, image string
+		format            sdktranslator.Format
+	}{
+		{"Gemini", "", "inline_data", sdktranslator.FormatGemini},
+		{"GeminiCLI", "request", "inlineData", sdktranslator.FormatGeminiCLI},
+	} {
+		for _, stream := range []bool{false, true} {
+			for _, tc := range cases {
+				t.Run(fmt.Sprintf("%s/stream=%t/%s", target.name, stream, tc.name), func(t *testing.T) {
+					input := []byte(`{"system":"top","messages":[{"role":"user","content":"history"},{"role":"assistant","content":"answer"},{"role":"system","content":"system reminder"},{"role":"developer","content":"developer reminder"},{"role":"user","content":[` + tc.content + `]}]}`)
+					body, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatClaude, target.format, "gemini-3-flash-preview", input, stream)
+					if tc.errorType != "" {
+						var unsupported *translatorcommon.UnsupportedPartError
+						if !errors.As(err, &unsupported) || unsupported.Type != tc.errorType || unsupported.StatusCode() != 400 || !unsupported.IsRequestScoped() || len(body) != 0 {
+							t.Fatalf("emptied user turn=(%s, %v), want request-scoped 400 for %s", body, err, tc.errorType)
+						}
+						if want := "unsupported content part: " + tc.errorType; err.Error() != want {
+							t.Fatalf("error=%q, want %q", err.Error(), want)
+						}
+						return
+					}
+					if err != nil || !gjson.ValidBytes(body) {
+						t.Fatalf("sendable user turn=(%s, %v)", body, err)
+					}
+					root := gjson.ParseBytes(body)
+					if target.root != "" {
+						root = root.Get(target.root)
+					}
+					parts := root.Get("contents.2.parts")
+					if tc.data != "" {
+						if got := parts.Get("#(" + target.image + ")." + target.image + ".data").String(); got != tc.data {
+							t.Fatalf("inline bytes=%q, want %q; body=%s", got, tc.data, body)
+						}
+					} else if got := parts.Get(`#(text=="keep").text`).String(); got != "keep" {
+						t.Fatalf("real user text was not preserved: %s", body)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestUnsupportedUserAttachmentConformance(t *testing.T) {
+	claudeFileID := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"earlier"}]},{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file-1"}}]},{"role":"user","content":[{"type":"text","text":"later"}]}]}`)
+	openAIFileID := []byte(`{"messages":[{"role":"user","content":"earlier"},{"role":"user","content":[{"type":"file","file":{"file_id":"file-1"}}]},{"role":"user","content":"later"}]}`)
+	openAIEmptyFile := []byte(`{"messages":[{"role":"user","content":"earlier"},{"role":"user","content":[{"type":"file","file":{"filename":"missing.pdf"}}]},{"role":"user","content":"later"}]}`)
+	responsesFileID := []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"earlier"}]},{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-1"}]},{"type":"message","role":"user","content":[{"type":"input_text","text":"later"}]}]}`)
+	tests := []struct {
+		name       string
+		from, to   sdktranslator.Format
+		input      []byte
+		partType   string
+		validInput []byte
+		validPath  string
+	}{
+		{"Claude/Codex", sdktranslator.FormatClaude, sdktranslator.FormatCodex, claudeFileID, "document", []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}}]}]}`), "input.0.content.0.file_data"},
+		{"Claude/Gemini", sdktranslator.FormatClaude, sdktranslator.FormatGemini, claudeFileID, "document", []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}}]}]}`), "contents.0.parts.0.inline_data.data"},
+		{"Claude/OpenAI", sdktranslator.FormatClaude, sdktranslator.FormatOpenAI, claudeFileID, "document", []byte(`{"messages":[{"role":"user","content":[{"type":"document","filename":"document.pdf","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}}]}]}`), "messages.0.content.0.file.file_data"},
+		{"Claude/Interactions", sdktranslator.FormatClaude, sdktranslator.FormatInteractions, claudeFileID, "document", []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}}]}]}`), "input.0.content.0.data"},
+		{"OpenAI/Claude", sdktranslator.FormatOpenAI, sdktranslator.FormatClaude, openAIFileID, "file", []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}}]}]}`), "messages.0.content.0.source.data"},
+		{"OpenAI/Gemini", sdktranslator.FormatOpenAI, sdktranslator.FormatGemini, openAIFileID, "file", []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}}]}]}`), "contents.0.parts.0.inlineData.data"},
+		{"OpenAI/Interactions", sdktranslator.FormatOpenAI, sdktranslator.FormatInteractions, openAIFileID, "file", []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}}]}]}`), "input.0.content.0.data"},
+		{"Responses/Claude", sdktranslator.FormatOpenAIResponse, sdktranslator.FormatClaude, responsesFileID, "input_file", []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_file","filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}]}]}`), "messages.0.content.0.source.data"},
+		{"Responses/Interactions", sdktranslator.FormatOpenAIResponse, sdktranslator.FormatInteractions, responsesFileID, "input_file", []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_file","filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}]}]}`), "input.0.content.0.data"},
+		{"Claude/Antigravity", sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, claudeFileID, "document", []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}}]}]}`), "request.contents.0.parts.0.inlineData.data"},
+		{"Claude/GeminiCLI", sdktranslator.FormatClaude, sdktranslator.FormatGeminiCLI, claudeFileID, "document", []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"aGVsbG8="}}]}]}`), "request.contents.0.parts.0.inlineData.data"},
+		{"OpenAI/Codex", sdktranslator.FormatOpenAI, sdktranslator.FormatCodex, openAIEmptyFile, "file", []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}}]}]}`), "input.0.content.0.file_data"},
+		{"OpenAI/Antigravity", sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, openAIFileID, "file", []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}}]}]}`), "request.contents.0.parts.0.inlineData.data"},
+		{"OpenAI/GeminiCLI", sdktranslator.FormatOpenAI, sdktranslator.FormatGeminiCLI, openAIFileID, "file", []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}}]}]}`), "request.contents.0.parts.0.inlineData.data"},
+		{"Responses/Gemini", sdktranslator.FormatOpenAIResponse, sdktranslator.FormatGemini, responsesFileID, "input_file", []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_file","filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}]}]}`), "contents.0.parts.0.inline_data.data"},
+		{"Responses/Antigravity", sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, responsesFileID, "input_file", []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_file","filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}]}]}`), "request.contents.0.parts.0.inline_data.data"},
+		{"Responses/GeminiCLI", sdktranslator.FormatOpenAIResponse, sdktranslator.FormatGeminiCLI, responsesFileID, "input_file", []byte(`{"input":[{"type":"message","role":"user","content":[{"type":"input_file","filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}]}]}`), "request.contents.0.parts.0.inline_data.data"},
+	}
+	for _, tt := range tests {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, stream), func(t *testing.T) {
+				body, err := sdktranslator.TranslateRequestChecked(context.Background(), tt.from, tt.to, "test-model", tt.input, stream)
+				var unsupported *translatorcommon.UnsupportedPartError
+				if !errors.As(err, &unsupported) || unsupported.Type != tt.partType || unsupported.StatusCode() != 400 || !unsupported.IsRequestScoped() || len(body) != 0 {
+					t.Fatalf("unsupported user turn = (%s, %v), want request-scoped 400 for %s", body, err, tt.partType)
+				}
+				body, err = sdktranslator.TranslateRequestChecked(context.Background(), tt.from, tt.to, "test-model", tt.validInput, stream)
+				if err != nil || gjson.GetBytes(body, tt.validPath).String() == "" {
+					t.Fatalf("valid inline document = (%s, %v), want preserved %s", body, err, tt.validPath)
+				}
+			})
+		}
+	}
+}
+
+func TestMixedUserAttachmentPreservesText(t *testing.T) {
+	claude := []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file-1"}},{"type":"text","text":"keep"}]}]}`)
+	chat := []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-1"}},{"type":"text","text":"keep"}]}]}`)
+	responses := []byte(`{"input":[{"role":"user","content":[{"type":"input_file","file_id":"file-1"},{"type":"input_text","text":"keep"}]}]}`)
+	for _, tt := range []struct {
+		name     string
+		from, to sdktranslator.Format
+		input    []byte
+		textPath string
+	}{
+		{"Claude/Antigravity", sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, claude, "request.contents.0.parts.0.text"},
+		{"Claude/GeminiCLI", sdktranslator.FormatClaude, sdktranslator.FormatGeminiCLI, claude, "request.contents.0.parts.0.text"},
+		{"OpenAI/Codex", sdktranslator.FormatOpenAI, sdktranslator.FormatCodex, chat, "input.0.content.1.text"},
+		{"OpenAI/Interactions", sdktranslator.FormatOpenAI, sdktranslator.FormatInteractions, chat, "input.0.content.0.text"},
+		{"OpenAI/Antigravity", sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, chat, "request.contents.0.parts.0.text"},
+		{"OpenAI/GeminiCLI", sdktranslator.FormatOpenAI, sdktranslator.FormatGeminiCLI, chat, "request.contents.0.parts.0.text"},
+		{"Responses/Gemini", sdktranslator.FormatOpenAIResponse, sdktranslator.FormatGemini, responses, "contents.0.parts.0.text"},
+		{"Responses/Interactions", sdktranslator.FormatOpenAIResponse, sdktranslator.FormatInteractions, responses, "input.0.content.0.text"},
+		{"Responses/Antigravity", sdktranslator.FormatOpenAIResponse, sdktranslator.FormatAntigravity, responses, "request.contents.0.parts.0.text"},
+		{"Responses/GeminiCLI", sdktranslator.FormatOpenAIResponse, sdktranslator.FormatGeminiCLI, responses, "request.contents.0.parts.0.text"},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, stream), func(t *testing.T) {
+				body, err := sdktranslator.TranslateRequestChecked(context.Background(), tt.from, tt.to, "test-model", tt.input, stream)
+				if err != nil || gjson.GetBytes(body, tt.textPath).String() != "keep" {
+					t.Fatalf("mixed user text = (%s, %v), want keep at %s", body, err, tt.textPath)
+				}
+				if tt.name == "OpenAI/Codex" {
+					parts := gjson.GetBytes(body, "input.0.content").Array()
+					if len(parts) != 2 || parts[0].Get("type").String() != "input_file" || parts[0].Get("file_id").String() != "file-1" {
+						t.Fatalf("supported file reference or content order changed: %s", body)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestUnsupportedUserAttachmentRejectsBlankText(t *testing.T) {
+	claude := []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file-1"}},{"type":"text","text":" \n\t "}]}]}`)
+	chat := []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-1"}},{"type":"text","text":" \n\t "}]}]}`)
+	for _, tt := range []struct {
+		name     string
+		from, to sdktranslator.Format
+		input    []byte
+		partType string
+	}{
+		{"Claude/Gemini", sdktranslator.FormatClaude, sdktranslator.FormatGemini, claude, "document"},
+		{"Claude/GeminiCLI", sdktranslator.FormatClaude, sdktranslator.FormatGeminiCLI, claude, "document"},
+		{"Claude/Antigravity", sdktranslator.FormatClaude, sdktranslator.FormatAntigravity, claude, "document"},
+		{"OpenAI/Gemini", sdktranslator.FormatOpenAI, sdktranslator.FormatGemini, chat, "file"},
+		{"OpenAI/Antigravity", sdktranslator.FormatOpenAI, sdktranslator.FormatAntigravity, chat, "file"},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tt.name, stream), func(t *testing.T) {
+				body, err := sdktranslator.TranslateRequestChecked(context.Background(), tt.from, tt.to, "test-model", tt.input, stream)
+				var unsupported *translatorcommon.UnsupportedPartError
+				if !errors.As(err, &unsupported) || unsupported.Type != tt.partType || len(body) != 0 {
+					t.Fatalf("blank text must not hide unsupported attachment: body=%s, err=%v", body, err)
+				}
+			})
+		}
+	}
+}
+
+func TestResponsesAudioToInteractions(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			input := []byte(`{"input":[{"role":"user","content":[{"type":"input_audio","input_audio":{"format":"wav","data":"aGVsbG8="}}]}]}`)
+			body, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatOpenAIResponse, sdktranslator.FormatInteractions, "test-model", input, stream)
+			if err != nil || gjson.GetBytes(body, "input.0.content.0.mime_type").String() != "audio/wav" ||
+				gjson.GetBytes(body, "input.0.content.0.data").String() != "aGVsbG8=" {
+				t.Fatalf("audio translation = (%s, %v), want inline WAV", body, err)
+			}
+		})
+	}
+}
+
+func TestInteractionsUserAttachmentsConformance(t *testing.T) {
+	targets := []struct {
+		name     string
+		format   sdktranslator.Format
+		textPath string
+		filePath string
+	}{
+		{"Codex", sdktranslator.FormatCodex, "input.0.content.0.text", "input.0.content.0.file_data"},
+		{"Gemini", sdktranslator.FormatGemini, "contents.0.parts.0.text", "contents.0.parts.0.inlineData.data"},
+		{"Antigravity", sdktranslator.FormatAntigravity, "request.contents.0.parts.0.text", "request.contents.0.parts.0.inlineData.data"},
+	}
+	unsupported := []struct {
+		name, input, partType string
+	}{
+		{"separate user turn", `{"input":[{"type":"user_input","content":[{"type":"text","text":"before"}]},{"type":"model_output","content":[{"type":"text","text":"reply"}]},{"type":"user_input","content":[{"type":"file","file":{"file_id":"file-1"}}]},{"type":"model_output","content":[{"type":"text","text":"reply"}]},{"type":"user_input","content":[{"type":"text","text":"after"}]}]}`, "file"},
+		{"nested user after model", `{"input":{"role":"model","steps":[{"type":"model_output","content":[{"type":"image_url","image_url":{"url":""}}]},{"role":"user","steps":[{"type":"user_input","content":[{"type":"image_url","image_url":{"url":""}}]}]}]}}`, "image_url"},
+		{"unknown attachment type", `{"input":[{"type":"user_input","content":[{"type":"binary","mime_type":"application/pdf","data":"aGVsbG8="}]}]}`, "binary"},
+		{"unknown after instruction", `{"input":[{"type":"user_input","content":[{"type":"text","text":"before"}]},{"role":"system","content":[{"type":"text","text":"instruction"}]},{"type":"user_input","content":[{"type":"binary","data":"aGVsbG8="}]}]}`, "binary"},
+		{"unknown before instruction", `{"input":[{"type":"user_input","content":[{"type":"binary","data":"aGVsbG8="}]},{"role":"developer","content":[{"type":"text","text":"instruction"}]},{"type":"user_input","content":[{"type":"text","text":"after"}]}]}`, "binary"},
+		{"nested type system", `{"input":[{"type":"user_input","content":[{"type":"binary","data":"aGVsbG8="}]},{"type":"system","steps":[{"type":"user_input","content":[{"type":"text","text":"instruction"}]}]}]}`, "binary"},
+		{"nested type developer", `{"input":[{"type":"user_input","content":[{"type":"binary","data":"aGVsbG8="}]},{"type":"developer","steps":[{"type":"user_input","content":[{"type":"text","text":"instruction"}]}]}]}`, "binary"},
+		{"instruction type wins over user role", `{"input":[{"type":"user_input","content":[{"type":"binary","data":"aGVsbG8="}]},{"type":"system","role":"user","content":[{"type":"text","text":"instruction"}]}]}`, "binary"},
+		{"empty audio", `{"input":[{"type":"user_input","content":[{"type":"input_audio","input_audio":{"format":"wav"}}]}]}`, "input_audio"},
+		{"empty native inline data", `{"input":[{"type":"user_input","parts":[{"inlineData":{"mimeType":"application/pdf","data":""}}]}]}`, "inline_data"},
+		{"native object ignored", `{"input":[{"type":"user_input","parts":{"inlineData":{"mimeType":"application/pdf","data":"aGVsbG8="}}}]}`, "inline_data"},
+	}
+	for _, target := range targets {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", target.name, stream), func(t *testing.T) {
+				translate := func(input string) ([]byte, error) {
+					return sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatInteractions, target.format, "test-model", []byte(input), stream)
+				}
+				for _, tt := range unsupported {
+					t.Run(tt.name, func(t *testing.T) {
+						body, err := translate(tt.input)
+						var rejected *translatorcommon.UnsupportedPartError
+						if !errors.As(err, &rejected) || rejected.Type != tt.partType || rejected.StatusCode() != 400 || !rejected.IsRequestScoped() || len(body) != 0 {
+							t.Fatalf("unsupported user turn = (%s, %v), want request-scoped 400 for %s", body, err, tt.partType)
+						}
+					})
+				}
+				body, err := translate(`{"input":[{"type":"user_input","content":[{"type":"file","file":{"file_id":"file-1"}},{"type":"text","text":"keep"}]}]}`)
+				if err != nil || gjson.GetBytes(body, target.textPath).String() != "keep" {
+					t.Fatalf("mixed user turn = (%s, %v), want retained text", body, err)
+				}
+				body, err = translate(`{"input":[{"type":"user_input","content":[{"type":"file","file":{"file_id":"file-1"}}]},{"type":"user_input","content":[{"type":"text","text":"keep"}]}]}`)
+				if err != nil || gjson.GetBytes(body, target.textPath).String() != "keep" {
+					t.Fatalf("adjacent user steps = (%s, %v), want retained text", body, err)
+				}
+				body, err = translate(`{"input":[{"type":"user_input","content":[{"type":"binary","data":"aGVsbG8="},{"type":"text","text":"keep"}]}]}`)
+				if err != nil || gjson.GetBytes(body, target.textPath).String() != "keep" {
+					t.Fatalf("unknown attachment with text = (%s, %v), want retained text", body, err)
+				}
+				body, err = translate(`{"input":[{"type":"user_input","content":[{"type":"binary","data":"aGVsbG8="}]},{"type":"user_input","content":[{"type":"text","text":"keep"}]}]}`)
+				if err != nil || gjson.GetBytes(body, target.textPath).String() != "keep" {
+					t.Fatalf("adjacent unknown attachment and text = (%s, %v), want retained text", body, err)
+				}
+				body, err = translate(`{"input":[{"type":"user_input","content":[{"type":"file","file":{"filename":"document.pdf","file_data":"data:application/pdf;base64,aGVsbG8="}}]}]}`)
+				if err != nil || gjson.GetBytes(body, target.filePath).String() == "" {
+					t.Fatalf("valid file = (%s, %v), want preserved document", body, err)
+				}
+				body, err = translate(`{"input":[{"type":"user_input","content":[{"type":"text","text":"keep"}],"parts":[{"type":"image","mime_type":"image/png","data":"aGVsbG8="}]}]}`)
+				if target.name == "Codex" {
+					if err != nil || gjson.GetBytes(body, target.textPath).String() != "keep" {
+						t.Fatalf("Codex content precedence = (%s, %v), want retained text", body, err)
+					}
+					body, err = translate(`{"input":[{"type":"user_input","parts":[{"type":"image","mime_type":"image/png","data":"aGVsbG8="}],"text":"keep"}]}`)
+					if err != nil || gjson.GetBytes(body, target.textPath).String() != "keep" {
+						t.Fatalf("Codex text fallback = (%s, %v), want retained text", body, err)
+					}
+				} else {
+					var rejected *translatorcommon.UnsupportedPartError
+					if !errors.As(err, &rejected) || rejected.Type != "image" || len(body) != 0 {
+						t.Fatalf("native parts precedence = (%s, %v), want request-scoped image rejection", body, err)
+					}
+				}
+			})
+		}
+	}
+	for _, target := range targets[1:] {
+		t.Run(target.name+"/native files", func(t *testing.T) {
+			for _, tt := range []struct{ input, path string }{
+				{`{"input":[{"type":"user_input","parts":[{"inlineData":{"mimeType":"application/pdf","data":"aGVsbG8="}}]}]}`, target.filePath},
+				{`{"input":[{"type":"user_input","parts":[{"fileData":{"mimeType":"application/pdf","fileUri":"gs://bucket/document.pdf"}}]}]}`, strings.Replace(target.filePath, "inlineData.data", "fileData.fileUri", 1)},
+			} {
+				body, err := sdktranslator.TranslateRequestChecked(context.Background(), sdktranslator.FormatInteractions, target.format, "test-model", []byte(tt.input), false)
+				if err != nil || gjson.GetBytes(body, tt.path).String() == "" {
+					t.Fatalf("native file = (%s, %v), want preserved %s", body, err, tt.path)
+				}
+			}
+		})
+	}
 }
 
 func TestToolOnlyRequestConformance(t *testing.T) {

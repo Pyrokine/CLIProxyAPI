@@ -55,9 +55,21 @@ func TestApplyXAIReasoningReplayCacheInsertsCachedReasoningAndToolCall(t *testin
 
 	valid := validGrokEncryptedContentForExecutorTest()
 	model := "grok-4.3"
-	sessionKey := "execution:xai-session-1"
+	body := []byte(`{
+		"model":"grok-4.3",
+		"input":[
+			{"type":"function_call_output","call_id":"call_1","output":"ok"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]
+	}`)
+	req := cliproxyexecutor.Request{Model: model, Payload: body}
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "xai-session-1"}}
+	wantScope := xaiReasoningReplayScopeFromRequest(context.Background(), xaiReplayTestAuth, sdktranslator.FormatClaude, req, opts, body)
+	if !wantScope.valid() {
+		t.Fatal("expected credential-scoped replay")
+	}
 	if ok := internalcache.XAIReasoningReplayItems(
-		model, sessionKey, [][]byte{
+		model, wantScope.sessionKey, [][]byte{
 			[]byte(fmt.Sprintf(
 				`{"type":"reasoning","encrypted_content":%q,"summary":[{"type":"summary_text","text":"old"}]}`, valid,
 			)),
@@ -66,20 +78,8 @@ func TestApplyXAIReasoningReplayCacheInsertsCachedReasoningAndToolCall(t *testin
 	); !ok {
 		t.Fatal("XAIReasoningReplayItems returned false")
 	}
-
-	body := []byte(`{
-		"model":"grok-4.3",
-		"input":[
-			{"type":"function_call_output","call_id":"call_1","output":"ok"},
-			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
-		]
-	}`)
 	updated, scope := applyXAIReasoningReplayCache(
-		context.Background(),
-		sdktranslator.FormatClaude,
-		cliproxyexecutor.Request{Model: model, Payload: body},
-		cliproxyexecutor.Options{Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "xai-session-1"}},
-		body,
+		context.Background(), xaiReplayTestAuth, sdktranslator.FormatClaude, req, opts, body,
 	)
 
 	if !scope.valid() {

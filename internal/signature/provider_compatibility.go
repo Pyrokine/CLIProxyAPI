@@ -119,6 +119,9 @@ func DetectProvider(rawSignature string) Provider {
 		return providerUnknown
 	}
 	if prefixedProvider, unprefixed, ok := splitProviderPrefix(sig); ok {
+		if strings.Contains(unprefixed, "#") {
+			return providerUnknown
+		}
 		switch prefixedProvider {
 		case ProviderGemini:
 			if IsGeminiBypass(unprefixed) {
@@ -128,7 +131,8 @@ func DetectProvider(rawSignature string) Provider {
 				return ProviderGemini
 			}
 		case ProviderClaude:
-			if isValidClaudeCAISSignature(unprefixed) || isValidClaudeSignature(unprefixed, true) {
+			if isValidClaudeCAISSignature(unprefixed) || isValidAntigravityClaudeCAQSSignature(unprefixed) ||
+				isValidClaudeSignature(unprefixed, true) {
 				return ProviderClaude
 			}
 		case ProviderGPT:
@@ -147,7 +151,8 @@ func DetectProvider(rawSignature string) Provider {
 	if isValidGPTReasoningSignature(sig) {
 		return ProviderGPT
 	}
-	if isValidClaudeCAISSignature(sig) || isValidClaudeSignature(sig, true) {
+	if isValidClaudeCAISSignature(sig) || isValidAntigravityClaudeCAQSSignature(sig) ||
+		isValidClaudeSignature(sig, true) {
 		return ProviderClaude
 	}
 	if isRecognizedGeminiSignature(sig) {
@@ -175,6 +180,11 @@ func decideCompatibilityWithOptions(
 	}
 	detected := DetectProvider(rawSignature)
 	decision := CompatibilityDecision{TargetProvider: targetProvider, DetectedProvider: detected, BlockKind: blockKind}
+	if targetProvider == ProviderClaude && strings.HasPrefix(PayloadWithoutProviderPrefix(rawSignature), "Q") {
+		decision.Action = actionDropBlock
+		decision.Reason = "Antigravity CAQS wrapper requires Antigravity replay"
+		return decision
+	}
 	if providerMatchesTarget(targetProvider, detected) {
 		decision.Compatible = true
 		decision.Action = actionPreserve
@@ -249,7 +259,14 @@ func CompatibleAntigravityClaudeThinkingSignature(rawSignature string) (string, 
 	if DetectProvider(rawSignature) != ProviderClaude {
 		return "", false
 	}
-	normalized, err := normalizeClaudeSignature(PayloadWithoutProviderPrefix(rawSignature), true)
+	payload := PayloadWithoutProviderPrefix(rawSignature)
+	if strings.HasPrefix(payload, "Q") {
+		if !isValidAntigravityClaudeCAQSSignature(payload) {
+			return "", false
+		}
+		return payload, true
+	}
+	normalized, err := normalizeClaudeSignature(payload, true)
 	if err != nil {
 		return "", false
 	}

@@ -969,3 +969,126 @@ func logWithRequestID(ctx context.Context) *log.Entry {
 	}
 	return log.WithField("request_id", requestID)
 }
+
+func observeResponseTokenEvent(ctx context.Context, payload []byte) {
+	if ctx == nil || !logging.GetFirstResponseTokenAt(ctx).IsZero() || !isResponseTokenEvent(payload) {
+		return
+	}
+	logging.MarkFirstResponseToken(ctx)
+}
+
+func isResponseTokenEvent(payload []byte) bool {
+	payload = bytes.TrimSpace(payload)
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return true
+	}
+	if !gjson.ValidBytes(payload) {
+		data, present, valid := sseDataPayload(payload)
+		if !present || !valid {
+			return false
+		}
+		payload = data
+	}
+	if isOpenAICompatTokenEvent(payload) {
+		return true
+	}
+	root := gjson.ParseBytes(payload)
+	return isResponsesTokenEvent(root) || isClaudeTokenEvent(root) || isGeminiTokenEvent(root)
+}
+
+func isResponsesTokenEvent(root gjson.Result) bool {
+	switch root.Get("type").String() {
+	case "response.reasoning_summary_text.delta", "response.reasoning.delta", "response.reasoning_text.delta",
+		"response.output_text.delta", "response.text.delta", "response.function_call_arguments.delta",
+		"response.custom_tool_call_input.delta", "response.code_interpreter_call_code.delta",
+		"response.mcp_call_arguments.delta", "response.shell_call_command.delta", "response.refusal.delta",
+		"response.audio.transcript.delta":
+		return root.Get("delta").String() != ""
+	case "response.audio.delta":
+		return root.Get("delta").String() != "" || root.Get("data").String() != ""
+	case "response.image_generation_call.partial_image":
+		return root.Get("partial_image_b64").String() != ""
+	case "response.reasoning_summary_text.done", "response.reasoning_text.done", "response.output_text.done":
+		return root.Get("text").String() != ""
+	case "response.refusal.done":
+		return root.Get("refusal").String() != ""
+	case "response.function_call_arguments.done", "response.mcp_call_arguments.done":
+		return root.Get("arguments").String() != ""
+	case "response.custom_tool_call_input.done":
+		return root.Get("input").String() != ""
+	case "response.code_interpreter_call_code.done":
+		return root.Get("code").String() != ""
+	case "response.shell_call_command.added", "response.shell_call_command.done":
+		return root.Get("command").String() != ""
+	case "response.reasoning_summary_part.done":
+		return root.Get("part.text").String() != ""
+	case "response.content_part.done":
+		return root.Get("part.text").String() != "" || root.Get("part.refusal").String() != ""
+	case "response.output_item.done":
+		item := root.Get("item")
+		switch item.Get("type").String() {
+		case "function_call":
+			return item.Get("arguments").String() != ""
+		case "custom_tool_call":
+			return item.Get("input").String() != ""
+		case "message":
+			for _, content := range item.Get("content").Array() {
+				if content.Get("text").String() != "" || content.Get("refusal").String() != "" {
+					return true
+				}
+			}
+		}
+	case "response.completed", "response.done", "response.incomplete", "response.failed", "error":
+		return true
+	}
+	return false
+}
+
+func isClaudeTokenEvent(root gjson.Result) bool {
+	switch root.Get("type").String() {
+	case "content_block_delta":
+		for _, key := range []string{"text", "thinking", "partial_json", "signature"} {
+			if root.Get("delta."+key).String() != "" {
+				return true
+			}
+		}
+	case "content_block_start":
+		return root.Get("content_block.text").String() != "" || root.Get("content_block.thinking").String() != ""
+	case "message_delta":
+		return root.Get("delta.stop_reason").String() != ""
+	case "message_stop":
+		return true
+	}
+	for _, block := range root.Get("content").Array() {
+		if block.Get("text").String() != "" || block.Get("thinking").String() != "" ||
+			(block.Get("type").String() == "tool_use" && block.Get("name").String() != "") {
+			return true
+		}
+	}
+	return false
+}
+
+func isGeminiTokenEvent(root gjson.Result) bool {
+	if root.Get("response.error").Exists() {
+		return true
+	}
+	candidates := root.Get("candidates")
+	if !candidates.Exists() {
+		candidates = root.Get("response.candidates")
+	}
+	for _, candidate := range candidates.Array() {
+		for _, part := range candidate.Get("content.parts").Array() {
+			if part.Get("text").String() != "" || part.Get("thoughtText").String() != "" ||
+				part.Get("functionCall.name").String() != "" || part.Get("inlineData.data").String() != "" {
+				return true
+			}
+			if thought := part.Get("thought"); thought.Type == gjson.String && thought.String() != "" {
+				return true
+			}
+		}
+		if candidate.Get("finishReason").String() != "" {
+			return true
+		}
+	}
+	return false
+}

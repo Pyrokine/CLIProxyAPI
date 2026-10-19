@@ -91,6 +91,92 @@ func TestSanitizedFunctionNameMapReadsSupportedToolShapes(t *testing.T) {
 	}
 }
 
+func TestClaudeAndChatFunctionNameMaps(t *testing.T) {
+	names := []string{"tool/name", "tool:name", "tool.name", "1tool", strings.Repeat("x", 64) + "a", strings.Repeat("x", 64) + "b"}
+	forward := ChatFunctionNameMap(names)
+	names = append(names, forward["tool/name"])
+	forward = ChatFunctionNameMap(names)
+	seen := make(map[string]bool)
+	for original, mapped := range forward {
+		if mapped == "" || len(mapped) > 64 || claudeToolUseIDSanitizer.MatchString(mapped) || seen[mapped] {
+			t.Fatalf("invalid or ambiguous alias for %q: %q", original, mapped)
+		}
+		seen[mapped] = true
+	}
+	if len(seen) != len(names) || forward["1tool"] != "1tool" {
+		t.Fatalf("lost tools or applied Gemini-only prefix rule: %v", forward)
+	}
+	var tools []string
+	for index := len(names) - 1; index >= 0; index-- {
+		encoded, err := json.Marshal(names[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools = append(tools, `{"name":`+string(encoded)+`}`)
+	}
+	fromRequest := ClaudeFunctionNameMap([]byte(`{"tools":[` + strings.Join(tools, ",") + `]}`))
+	reverse := ReverseToolNameMap(fromRequest)
+	for original, mapped := range forward {
+		if fromRequest[original] != mapped || RestoreSanitizedToolName(reverse, mapped) != original {
+			t.Fatalf("order changed mapping or reverse lost %q: forward=%v reverse=%v", original, forward, reverse)
+		}
+	}
+}
+
+func TestChatFunctionNameMapPreservesDeclarationsWithHistory(t *testing.T) {
+	declarations := []string{"tool_x", "a.b", "a_b", strings.Repeat("x", 70)}
+	declared := ChatFunctionNameMap(declarations)
+	history := []string{"tool.x", "history.name", "history_name", declarations[1], declarations[3], "", "history.name"}
+	forward := ChatFunctionNameMap(declarations, history...)
+	for original, mapped := range declared {
+		if forward[original] != mapped {
+			t.Fatalf("history changed declaration %q: %q, want %q", original, forward[original], mapped)
+		}
+	}
+	if forward["tool_x"] != "tool_x" || !strings.HasPrefix(forward["tool.x"], "tool_x_") {
+		t.Fatalf("history stole a declared name: %v", forward)
+	}
+	reverse := ReverseToolNameMap(forward)
+	seen := make(map[string]bool)
+	for original, mapped := range forward {
+		if mapped == "" || len(mapped) > 64 || SanitizeClaudeFunctionName(mapped) != mapped || seen[mapped] || RestoreSanitizedToolName(reverse, mapped) != original {
+			t.Fatalf("history mapping is invalid or irreversible: %q -> %q", original, mapped)
+		}
+		seen[mapped] = true
+	}
+	for left, right := 0, len(history)-1; left < right; left, right = left+1, right-1 {
+		history[left], history[right] = history[right], history[left]
+	}
+	reordered := ChatFunctionNameMap(declarations, history...)
+	for original, mapped := range forward {
+		if reordered[original] != mapped {
+			t.Fatalf("history order changed %q: %q, want %q", original, reordered[original], mapped)
+		}
+	}
+	if ChatFunctionNameMap(nil, "") != nil {
+		t.Fatal("empty identities allocated a mapping")
+	}
+}
+
+func TestChatFunctionNameMapReservesDeclaredHashNames(t *testing.T) {
+	history := []string{"tool.name", "tool_name"}
+	aliases := ChatFunctionNameMap(nil, history...)
+	declarations := []string{aliases[history[0]], aliases[history[1]], "tool_name"}
+	forward := ChatFunctionNameMap(declarations, history...)
+	for _, name := range declarations {
+		if forward[name] != name {
+			t.Fatalf("declared hash name changed: %q -> %q", name, forward[name])
+		}
+	}
+	seen := make(map[string]bool)
+	for original, mapped := range forward {
+		if seen[mapped] || RestoreSanitizedToolName(ReverseToolNameMap(forward), mapped) != original {
+			t.Fatalf("history collided with reserved hash name: %v", forward)
+		}
+		seen[mapped] = true
+	}
+}
+
 func TestDeduplicateFunctionDeclarations(t *testing.T) {
 	raw := []byte(`[
 		{"name":"lookup","description":"first"},

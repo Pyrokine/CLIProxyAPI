@@ -102,6 +102,28 @@ func TestMergeAdjacentGeminiUserContentsPreservesToolBoundaries(t *testing.T) {
 	}
 }
 
+func TestSplitGeminiFunctionResponseTurnsCombinesParallelResults(t *testing.T) {
+	contents := [][]byte{
+		[]byte(`{"role":"model","parts":[{"functionCall":{"name":"first","id":"a"}},{"function_call":{"name":"second","id":"b"}}]}`),
+		[]byte(`{"role":"user","turn_metadata":"preserved","parts":[{"functionResponse":{"id":"a","name":"first","response":{"result":1},"extra":"kept"}}]}`),
+		[]byte(`{"role":"user","parts":[{"function_response":{"id":"b","name":"second","response":{"result":2}}}]}`),
+	}
+	result := MergeAdjacentGeminiUserContents(SplitGeminiFunctionResponseTurns(contents))
+	if len(result) != 2 || string(result[0]) != string(contents[0]) {
+		t.Fatalf("parallel response turns = %s, want two turns", JoinRawArray(result))
+	}
+	if len(gjson.GetBytes(result[1], "parts").Array()) != 2 ||
+		gjson.GetBytes(result[1], "parts.0.functionResponse.id").String() != "a" ||
+		gjson.GetBytes(result[1], "parts.0.functionResponse.extra").String() != "kept" ||
+		gjson.GetBytes(result[1], "parts.1.function_response.id").String() != "b" ||
+		gjson.GetBytes(result[1], "turn_metadata").String() != "preserved" {
+		t.Fatalf("parallel response order or metadata changed: %s", result[1])
+	}
+	if unmatched := SplitGeminiFunctionResponseTurns(contents[1:]); len(unmatched) != 2 {
+		t.Fatalf("results without preceding calls must remain separate: %s", JoinRawArray(unmatched))
+	}
+}
+
 func TestMergeAdjacentGeminiUserContentsDropsOnlyEmptyContents(t *testing.T) {
 	contents := [][]byte{
 		nil,
