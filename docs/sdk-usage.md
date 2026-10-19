@@ -3,7 +3,7 @@
 The `sdk/cliproxy` package embeds CLIProxyAPI in another Go process. It exposes the service lifecycle, configuration,
 authentication, routing, translation, plugins, and hot reload without requiring the CLI entry point.
 
-The public SDK targets Go 1.27 and uses the `/v6` module path.
+The public SDK requires Go 1.27.2 and uses the `/v6` module path.
 
 ## Install
 

@@ -37,7 +37,8 @@ Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB
 ## Highlights
 
 - OpenAI, Gemini, Claude, and Codex-compatible API endpoints
-- OAuth and API-key access for supported providers
+- OAuth and API-key access for supported providers, including Meta Muse accounts and Meta Model API keys
+- Kimi.com and Kimi.ai device login, and Devin account login through `--devin-login`
 - Multiple-account routing, round-robin selection, and configurable provider prefixes
 - Streaming and non-streaming responses, function calls, tools, and text and image input
 - Dynamic OpenAI model metadata and compatible Responses endpoints
@@ -84,7 +85,7 @@ Before exposing the service outside localhost, read the [production deployment g
 
 ## Development
 
-The root module targets Go 1.27.0. Install dependencies from `go.mod` and run the baseline checks before opening a pull
+The root module requires Go 1.27.2. Install dependencies from `go.mod` and run the baseline checks before opening a pull
 request:
 
 ```bash
@@ -95,7 +96,7 @@ go vet ./...
 go build ./cmd/server
 ```
 
-Release-candidate validation also runs the race detector, Staticcheck v0.8.1, govulncheck v1.7.0, and `CGO_ENABLED=0`
+Release-candidate validation also runs the race detector, Staticcheck v0.8.2, govulncheck v1.7.0, and `CGO_ENABLED=0`
 builds for Linux AMD64 and ARM64
 
 ## Version and release behavior

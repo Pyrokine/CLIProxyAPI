@@ -35,7 +35,8 @@ GLM CODING PLAN 是专为AI编码打造的订阅套餐，每月最低仅需20元
 ## 核心能力
 
 - 提供 OpenAI、Gemini、Claude 与 Codex 兼容 API
-- 支持已接入提供商的 OAuth 与 API Key 认证
+- 支持已接入提供商的 OAuth 与 API Key 认证，包括 Meta Muse 账户和 Meta Model API Key
+- 支持 Kimi.com、Kimi.ai 设备授权，以及通过 `--devin-login` 登录 Devin 账户
 - 支持多账户路由、轮询选择和提供商前缀
 - 支持流式与非流式响应、函数调用、工具和多模态输入
 - 返回动态 OpenAI 模型元数据，并提供兼容的 Responses 端点
@@ -79,7 +80,7 @@ Compose 会把 `./config` 挂载到 `/CLIProxyAPI/config`，管理接口可以�
 
 ## 开发检查
 
-根 module 使用 Go 1.27.0。按 `go.mod` 安装依赖，并在提交 Pull Request 前执行基础检查：
+根 module 要求 Go 1.27.2；按 `go.mod` 安装依赖，并在提交 Pull Request 前执行基础检查：
 
 ```bash
 go mod verify
@@ -89,7 +90,7 @@ go vet ./...
 go build ./cmd/server
 ```
 
-发布候选验证还会执行 race detector、Staticcheck v0.8.1、govulncheck v1.7.0，以及 Linux AMD64 和 ARM64 的 `CGO_ENABLED=0` 构建
+发布候选验证还会执行 race detector、Staticcheck v0.8.2、govulncheck v1.7.0，以及 Linux AMD64 和 ARM64 的 `CGO_ENABLED=0` 构建
 
 ## 版本与发布行为
 

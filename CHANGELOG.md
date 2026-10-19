@@ -1,5 +1,275 @@
 # Changelog
 
+## v8.0.23-aug.1 - 2026-10-19
+
+### Release basis
+
+- Upstream release: v8.0.23 (`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`)
+- Fork point: `09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- Previous local release: v7.3.2-aug.1
+- Paired release: CPAM v1.26.0-aug.1
+
+### Changes
+
+- Preserve exact credential numbers when saving files and comparing quota identities; keep ordinary numeric settings compatible
+- Restore quota after metadata normalization only when the source material can be verified; isolate legacy numeric identities whose precision cannot be proven
+- Keep plugin authentication available when quota metadata cannot be validated, with an explicit quota warning
+- Keep quota windows, credits, reset allowances and observation times across credential enable/disable changes and restart recovery, while isolating credential replacements
+- Stop adding successful image records when a text response only reports unused image statistics; retain completed image calls with zero reported usage
+- Use consistent account scope for quota, reset-credit details and subscription queries; retain available results and identify failed auxiliary queries
+
+- Update provider authentication, model metadata, and protocol conversion while retaining the `/v6` SDK module, `/v0/management` API, and flat configuration format
+- Preserve tool identity, signatures, namespaces, and delivery state across streaming and non-streaming responses
+- Keep optional Codex `apply_patch` capability negotiation disabled by default; supported translators convert tool declarations, history, and responses without executing patches on the server
+- Preserve plugin OAuth identity and nested model callback ownership, and release streams when their callback, context, or plugin instance ends
+- Query plugin models by the target provider without triggering unrelated discovery
+- Preserve plugin error messages and HTTP status codes across RPC and native calls; keep request buffers valid during reentrant Windows callbacks
+- Classify delivery errors caused by context cancellation as canceled; retain failed status for independent downstream write errors
+- Return failure from `-t` for invalid configuration without replacing the source configuration with its last-good copy
+- Skip empty Claude turns when translating to Gemini and Gemini CLI while preserving attachment rejection
+- Preserve Gemini and Gemini CLI tool call IDs, result ordering across user messages, structured results, and per-message attachment errors; schema cleanup no longer changes ordinary tool input JSON
+- Retain valid signatures in Gemini tool continuations and keep standalone signatures separate
+- Preserve pending Gemini tool pairing when an unmatched result becomes user text; retain media defaults for generic MIME types and reject invalid data URLs in base64 sources
+- Preserve Claude tool pairing for interrupted calls, late results, and colliding IDs; retain image results, cache controls, and reversible tool names
+- Use declared wire names for Claude tool additions, removals and inline replacements; preserve caller-owned MCP and server tools
+- Restore redacted reasoning, recognize prefill restrictions across model versions, and report unsupported content without logging request payloads; byte request conversion returns no body on attachment errors
+- Deduplicate repeated complete Gemini function-call snapshots in streaming and non-streaming responses; preserve call identity and reject conflicting snapshots with an SDK 502 error
+- Preserve late and interleaved Claude tool calls; validate fragmented arguments against complete snapshots and return SDK 502 errors for conflicting input
+- Convert native Claude Messages JSON while preserving model identity, content order, citations, reasoning signatures, and cache usage
+- Mark Claude Responses incomplete when the token limit is reached or the provider pauses the turn
+- Reject Responses requests when conversion removes all usable content from any user message, returning an error before contacting the provider
+- Preserve tool namespaces and reversible names across Responses and Chat declarations, history, tool choices, and responses
+- Return a failure for inconsistent custom apply_patch calls instead of a completed response; HTTP errors do not expose internal conflict details
+- Preserve valid Codex audio, file references, stringified image tool results, and reversible tool names
+- Apply final payload rules to Codex local token counts and select the tokenizer from the final model
+- Deliver remaining tool arguments from complete snapshots; reject conflicting snapshots with SDK 502 errors over HTTP and WebSocket
+- Return generated Codex images across streaming and non-streaming responses
+- Preserve Gemini inline media and file references when translating to Codex
+- Keep Interactions URI attachments and developer instructions; reject user turns emptied by unsupported media
+- Preserve HTTP(S) Interactions images and documents, ordered tool results, structured payloads, and reversible tool names in Claude conversions
+- Report Claude provider errors as failed Interactions and ignore later response frames
+- Preserve Gemini and Antigravity Interactions parallel tool history and thought summaries
+- Preserve late Interactions tool identities and ordinary argument prefixes; reject inconsistent source identities, snapshots and stop boundaries, and report premature source EOF as failure
+- Preserve explicit zero cache usage fields and valid continuation signatures
+- Retain valid signatures with visible text, tool calls, and inline media; return no byte request body after attachment rejection
+- Preserve HTTP(S), file ID and inline image inputs when translating Claude requests to Codex
+- Keep tool-result ordering, explicit tool choices and typed web search sources
+- Preserve compatible Grok reasoning and Schema unions; reject conflicting completed tool arguments without a successful stream ending
+- Finalize Gemini Responses when a complete, consistent usage tail arrives; preserve the finish reason and mark the active message incomplete for `MAX_TOKENS`; use `cpaUsageMetadata` only when `usageMetadata` is absent
+- Refresh Devin metadata independently in Home mode; `local-model` still disables remote catalog refresh
+- Use valid GLM-5.2 1M request model identifiers while retaining catalog thinking levels and output token limits
+- Measure first-token latency from effective output across Chat, Responses, Claude Messages and Gemini streams, excluding keepalive and metadata-only frames
+- Honor per-request proxy selection for protected TLS requests; retain integer fields in Codex Desktop tools sent to Google providers
+- Keep the served image model in usage records after completion; ignore late model metadata while preserving image stream bytes, usage and service tier
+- Apply quota-aware routing changes immediately, including supported aliases and session affinity, without restarting the service
+- Preserve newer saved credential settings when an older watcher update arrives
+- Keep Home authoritative for account models while preserving plugin model discovery
+- Apply reasoning updates to custom Claude models while retaining manual or adaptive mode
+- Preserve normalized Claude thinking settings and keep summary display changes independent
+- Exclude management endpoints from ordinary request logs and retain full request identifiers
+- Preserve the entry request for SDK callers that omit OriginalRequest, including custom tool declarations and validation
+- Report an empty native tool translation as failure instead of a successful empty response
+- Record failed Gemini Interactions as failures across response formats and retain observed usage
+- Close canceled or failed xAI WebSocket attempts and confirm downstream delivery before recording success
+- Apply Meta subscription quota exhaustion to the credential while preserving its retry deadline
+- Preserve Meta response failures and observed usage through translation, EOF, cancellation and completion
+- Honor explicit positive retry delays for 404 responses while retaining the default for missing or invalid hints
+- Keep sendable Devin text and tool results together and omit prompts emptied by unsupported media
+- Respect original JSON and multipart image fields; apply automatic Codex image tools only for the final model and configured tool policy
+- Apply configured payload rules after provider request preparation and use the same source format and request path for local token counts
+- Return plugin response translation failures as request-scoped errors, retain observed usage and release the source stream when execution ends
+- Preserve Home Anthropic model types, display names, token limits and RFC3339 creation timestamps
+- Apply the Opus 5.5 fallback for the final Claude model while preserving explicit caller and payload-rule choices
+- Reserve one positive cache-control budget slot for non-null Claude threads
+- Attach cc_turn_origin=human to signed Claude main-session billing tags
+- Return HTTP 413 for oversized AI Studio request bodies instead of forwarding truncated content
+- Cancel AI Studio relay readers when translation fails or output ends
+- Report failed AI Studio provider responses as errors while preserving observed usage
+- Record failed AI Studio request preparation exactly once
+- Continue safe unauthorized recovery with a healthy credential when the current credential cannot recover
+- Honor downstream commitment when handling unauthorized execution results
+- Enforce active quota recovery deadlines independently of availability and retry flags
+- Use the first real user text block for Claude multipart request fingerprints
+- Match native UTF-16 code-unit sampling for Claude fingerprints
+- Assign recovery deadlines to exact-model HTTP 429 limits while keeping sibling models available
+- Preserve terminal upstream WebSocket errors that arrive before request activation
+- Derive Codex OAuth routing hints from the final model and service tier while preserving valid header overrides
+- Normalize both max_context_length and maxContextLength in Home model metadata
+- Repair Claude tool IDs before applying final payload rules
+- Keep credential cooldown model projections consistent with actual scheduling decisions
+- Keep credential cooldown state separate from independent model quota deadlines and backoff
+- Clear active rejected-access fingerprints after a successful same-token credential renewal
+- Preserve explicit Responses streaming error sequence numbers and exact integer error details
+- Handle incremental WebSocket prewarm locally for SSE upstreams without discarding prior turns
+- Preserve Responses stream write and short-write failure causes in usage records
+- Preserve observed upstream stream failures when request cleanup cancels execution
+- Preserve operator-owned Claude system content through automatic reporting and cache processing while retaining OAuth CCH signing
+- Distinguish client tools named advisor from server-side advisor calls
+- Exclude native Claude hints from unconfirmed caller passthrough while preserving ordinary transport headers
+- Preserve successful Claude completion after the terminal frame is delivered, including a trailing upstream read error
+- Verify stale credit rejection after Antigravity credentials are removed and recreated
+- Remove internal prompt cache options before signing Claude OAuth bodies so CCH matches the sent body
+- Accept complete named terminal snapshots on native Gemini and Vertex Interactions streams while preserving translated-response validation
+- Return HTTP 502 for empty Claude upstream responses instead of returning successful empty output
+- Preserve explicitly configured input IDs in Codex HTTP and WebSocket requests, including streaming requests
+- Evaluate Claude payload conditions after forced-tool thinking cleanup while preserving final model and tool validation
+- Accept complete Gemini and Vertex Interactions requires_action snapshots as terminal responses while rejecting missing steps and unfinished snapshots
+- Write the Devin client name to metadata field 1 and remove obsolete field 28 without changing credential and device metadata
+- Apply xAI compact payload overrides after built-in cleanup across HTTP, streaming triggers, and WebSocket triggers
+- Preserve explicit xAI thinking overrides after model-capability checks and keep existing cleanup when no override is configured
+- Return xAI HTTP response translation failures as failed outcomes, retain observed token usage, and publish successful usage only after conversion and stream completion
+- Propagate Kimi and Kimi.ai Chat and Responses translation failures in streaming and non-streaming requests without losing observed token usage
+- Reject empty non-streaming translations across Codex HTTP, compact, WebSocket, OpenAI-compatible, Qwen, iFlow, Gemini CLI, and Devin without recording successful usage
+- Reject empty xAI compact response translations with HTTP 502 and retain observed token usage as failed usage
+- Honor configured generation, tool, and safety settings in Gemini token-count requests
+- Record the actual response model in Codex image usage, preserving an earlier model when the terminal event omits it
+- Honor configured model, service tier, and cache overrides or field removal for Codex image generation and editing in standard and streamed responses
+- Require Go 1.27.2 and use `golang.org/x/net` v0.60.0; use Staticcheck v0.8.2 for the updated toolchain
+
+### Compatibility
+
+Model catalog entries describe supported identifiers and routing capabilities; access still depends on the account and provider
+
+The Go SDK module remains `/v6`; the binary release tag is not a compatible Go module version, so pin SDK dependencies to the release commit
+
+Linux and macOS core packages built with `CGO_ENABLED=0` cannot load standard dynamic-library plugins; use a compatible native-plugin build when those plugins are required
+
+### 中文
+
+### 版本依据
+
+- 上游版本：v8.0.23（`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`）
+- 分叉点：`09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- 上一个本地版本：v7.3.2-aug.1
+- 配套版本：CPAM v1.26.0-aug.1
+
+#### 更新内容
+
+- 保存凭证文件和比较配额身份时保留数字精度，常规数值设置保持兼容
+- 元数据归一化后仅恢复可证明对应当前材料的配额，无法验证数字精度的旧版本保持失效
+- 配额身份校验失败时保留插件认证，并记录明确告警
+- 凭证启停与重启恢复保留配额窗口、Credit、重置次数和观测时间，凭证材料替换继续隔离旧数据
+- 文本响应中未使用的生图统计不再增加成功调用记录，保留已完成但用量为零的生图调用
+- Codex 配额、重置明细与订阅查询使用同一账号范围，保留已取得的数据并标明附加查询失败
+
+- 更新 Provider 认证、模型元数据与协议转换，保留 `/v6` SDK module、`/v0/management` API 和 flat 配置格式
+- 在流式与非流式响应中保留工具身份、signature、namespace 和交付状态
+- Codex `apply_patch` 能力协商默认关闭，支持的转换器处理工具声明、历史与响应，服务端不执行 patch
+- 保留插件 OAuth 身份和嵌套模型回调归属，回调、上下文或插件实例结束时释放流
+- 按目标 Provider 查询插件模型，不触发无关 Provider 的发现
+- 保留 RPC 与原生插件的业务错误和 HTTP 状态，Windows 重入回调期间保持请求缓冲有效
+- 上下文取消造成的交付错误记为 canceled，独立下游写入错误仍记为 failed
+- `-t` 遇到无效配置时返回失败，不用 last-good 副本覆盖源配置
+- Claude 转 Gemini 和 GeminiCLI 时跳过空消息，保留附件拒绝
+- Gemini 和 GeminiCLI 保留工具调用 ID、跨 user 消息的结果顺序、结构化结果及逐消息附件错误，Schema 清理不再改写普通工具输入 JSON
+- Gemini 响应保留合法工具续段 signature，连续独立 signature 分别返回
+- Gemini 未匹配工具结果转为 user 文本时保留待完成调用的配对，通用 MIME 使用媒体默认类型，拒绝 base64 source 中的非法 data URL
+- Claude 保留中断调用、晚到结果与冲突 ID 的工具配对，以及图片结果、缓存控制和可逆工具名称
+- Claude 的工具添加、删除和内联替换使用声明对应的传输名称，保留调用方 MCP 与服务端工具
+- 恢复 redacted reasoning，按模型版本识别 prefill 限制，报告不支持的内容且不记录请求正文；附件转换失败时 byte 请求入口不返回正文
+- Gemini 流式与非流式响应中的重复完整工具快照只交付一次，保留调用身份，快照冲突返回 SDK 502 错误
+- 保留晚到和交错的 Claude 工具调用，验证分段参数与完整快照一致性，输入冲突返回 SDK 502 错误
+- 支持原生 Claude Messages JSON，保留模型、内容顺序、引用、reasoning signature 和缓存用量
+- Claude Responses 达到 token 上限或 Provider 暂停回合时返回 incomplete
+- Responses 转换使任一 user 消息失去全部可发送内容时，返回请求错误，不调用 Provider
+- Responses 与 Chat 的声明、历史、工具选择和响应保留工具 namespace 与可逆名称
+- custom apply_patch 调用不一致时返回失败，不返回 completed；HTTP 错误不暴露内部冲突信息
+- 保留 Codex 合法音频、文件引用、字符串化图片工具结果和可逆工具名称
+- Codex 本地 token 计数应用最终 payload 规则，并根据最终 model 选择 tokenizer
+- 从完整快照交付尚未发送的工具参数；冲突快照经 SDK、HTTP 和 WebSocket 返回 502 错误
+- Codex 流式与非流式响应交付生成图像
+- Gemini 转为 Codex 时保留内联媒体和文件引用
+- 保留 Interactions URI 附件与 developer instruction，媒体无法交付且 user turn 无内容时返回请求错误
+- Claude 与 Interactions 转换保留 HTTP(S) 图片和文档、工具结果顺序、结构化内容及可逆工具名称
+- Claude 上游错误返回 Interactions 失败状态，失败后不再交付后续内容
+- Gemini 和 Antigravity 的 Interactions 转换保留并行工具历史及 thought summary
+- 保留 Interactions 晚到的工具身份和普通工具参数前缀，拒绝源身份、快照和停止边界矛盾，源流在终态前结束时返回失败
+- 保留显式零缓存用量和有效续段签名
+- 合法 signature 与文本、工具调用和内联媒体一同保留；附件拒绝时 byte 请求入口不返回正文
+- Claude 请求转为 Codex 时保留 HTTP(S)、file ID 和内联图片
+- 保留工具结果顺序、指定工具选择及内建搜索来源
+- 保留兼容的 Grok reasoning 和 Schema 联合类型；完整工具参数冲突时返回失败，不发送成功终态
+- Gemini Responses 收到完整且一致的用量尾帧后返回终态，保留原 finish reason，`MAX_TOKENS` 时将活动消息标为 incomplete；`usageMetadata` 缺失时使用 `cpaUsageMetadata`
+- Home 独立刷新 Devin 元数据，`local-model` 仍禁止远端目录刷新
+- GLM-5.2 1M 请求使用有效模型标识，保留目录中的 thinking 档位与输出 token 上限
+- Chat、Responses、Claude Messages 和 Gemini 的首个 token 耗时按有效输出计算，忽略保活与纯元数据帧
+- 受保护 TLS 请求遵循逐请求代理选择，向 Google Provider 发送 Codex Desktop 工具参数时保留整数类型
+- 图像流完成后保持用量记录中的返回模型，忽略迟到模型元数据，保留原始图像流、用量和 service tier
+- quota-aware 调度策略修改即时生效，支持既有别名与 session affinity，无需重启服务
+- 旧 watcher 更新到达时保留较新的已保存凭证设置
+- Home 模式由 Home 提供账号模型，保留插件模型发现
+- 自定义 Claude 模型应用 reasoning 更新，保留 manual 或 adaptive 模式
+- Claude 请求保留归一化后的思考设置，摘要显示变化不改变思考强度
+- 管理路径不生成普通请求日志，请求标识继续完整保留
+- SDK 调用省略 OriginalRequest 时保留入口请求，继续验证客户端工具声明与参数
+- 原生工具转换未返回正文时报告失败，不记为成功响应
+- Gemini Interactions 失败状态在各响应格式中保持失败，保留已观察用量
+- xAI WebSocket 请求取消或交付失败时关闭连接，交付确认后才记录成功
+- Meta 订阅额度耗尽按凭证限制，保留实际重试时间
+- Meta 转换、EOF、取消和完成过程保留实际失败状态与已观察用量
+- 404 响应采用明确有效的重试时间，缺失或无效时保留原默认值
+- Devin 连续 user 消息保留可发送文本和工具结果，省略媒体丢弃后无内容的 prompt
+- 图像默认值遵循原始 JSON 与 multipart 字段，Codex 自动生图工具遵循最终模型与 tools 配置
+- Provider 请求准备完成后应用 payload 配置，本地 token 计数使用相同来源协议与请求路径
+- 插件响应转换失败返回请求级错误，保留已观察用量，执行结束时释放源流
+- Home Anthropic 模型目录保留类型、显示名、token 上限及 RFC3339 创建时间
+- 按最终 Claude 型号设置 Opus 5.5 自动回退，保留调用方及 payload 规则的显式选择
+- 非 null Claude thread 从正数 cache-control 预算中预留一个名额
+- 为签名 Claude 主会话的 billing 标签添加 cc_turn_origin=human
+- AI Studio 请求正文超限时返回 HTTP 413，保持完整正文语义
+- AI Studio 翻译失败或输出结束时取消对应 relay 读取
+- AI Studio 上游失败响应返回错误并保留已观察用量
+- AI Studio 请求准备失败时记录一次失败用量
+- 当前凭证无法恢复认证时，按安全重派规则选择健康凭证
+- 已向下游交付响应时，按终态处理认证失败结果
+- 按有效额度恢复期限决定可选状态，独立处理可用性与重试标志
+- Claude 多段消息指纹使用首个真实用户文本块
+- Claude 指纹按原生 UTF-16 代码单元取样
+- 为精确模型的 HTTP 429 限流设置恢复期限，保留其他模型的可用性
+- 保留请求激活前到达的 WebSocket 上游终态错误
+- 依据最终模型和服务等级生成 Codex OAuth 路由提示，保留有效请求头覆盖
+- Home 模型元数据同时识别 max_context_length 与 maxContextLength
+- Claude 工具 ID 在最终 payload 规则应用前完成修复
+- 凭证冷却的模型状态展示与实际调度判断保持一致
+- 凭证冷却独立维护自身期限与退避，保留独立模型额度状态
+- 同 token 凭证成功续期后清除当前拒绝访问指纹
+- Responses 流式错误保留显式序号和精确整数详情
+- SSE 上游的增量 WebSocket 预热在本地处理，并保留此前回合
+- Responses 流式用量记录保留写入和短写失败的实际原因
+- 请求清理取消执行时，保留已观察到的上游流式失败
+- Claude 配置的 system 内容经自动 reporting 和缓存处理后保持原文，OAuth 仍完成 CCH 签名
+- 区分名为 advisor 的客户端工具与服务端 advisor 调用
+- 未确认调用方的透传请求排除 Claude 原生提示头，并保留普通传输头部
+- 保留 Claude 完整终态交付后的成功结果，尾部读取错误按已完成状态处理
+- 验证 Antigravity 凭证删除重建后拒绝旧额度结果
+- Claude OAuth 在最终 CCH 签名前清理内部缓存选项，签名与实际发送正文一致
+- Gemini 与 Vertex 原生 Interactions 流识别具名完整终态快照，转换响应保持原有完整性校验
+- Claude 上游返回空正文时返回 HTTP 502，空响应按失败处理
+- Codex HTTP 和 WebSocket 的普通、流式请求保留配置明确指定的 input ID
+- Claude 条件规则观察强制工具处理后的 thinking 状态，保留最终模型与工具校验
+- Gemini 和 Vertex Interactions 接受完整 requires_action 终态快照，继续拒绝缺失 steps 和未完成快照
+- Devin 客户端名称写入 metadata field 1，移除旧 field 28，保留凭证与设备元数据
+- xAI compact 在内建清理后应用配置覆盖，HTTP、流式触发与 WebSocket 触发使用同一规则
+- xAI 模型能力校验后保留明确配置的 thinking 覆盖值，无配置时保持既有清理行为
+- xAI HTTP 响应翻译失败按失败返回并保留已观察 token，转换及流结束成功后发布成功用量
+- Kimi 和 Kimi.ai 的 Chat、Responses 普通与流式请求传递翻译失败，保留已观察 token 用量
+- Codex HTTP、compact、WebSocket、OpenAI-compatible、Qwen、iFlow、Gemini CLI 和 Devin 拒绝空的非流式翻译结果，并记录失败用量
+- xAI compact 响应翻译结果为空时返回 502，并按失败记录已观察 token 用量
+- Gemini token 计数请求保留显式配置的生成参数、工具与安全设置
+- Codex 图像用量记录实际响应模型，终态缺少模型时保留早期值
+- Codex 图像生成和编辑的普通及流式请求保留模型、服务等级与缓存配置的覆盖和字段删除
+- 要求 Go 1.27.2，使用 `golang.org/x/net` v0.60.0，更新后的工具链使用 Staticcheck v0.8.2
+
+#### 兼容性
+
+模型目录说明支持的标识与路由能力，实际访问权限仍由账号和 Provider 决定
+
+Go SDK module 保持 `/v6`，二进制发布 tag 不满足 Go module 的版本约束，SDK 依赖应固定发行提交
+
+Linux 和 macOS 的 `CGO_ENABLED=0` 核心包不能加载标准动态库插件，需要这些插件时使用兼容的原生插件构建
+
+Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v7.3.2-aug.1...v8.0.23-aug.1
+
 ## v7.3.2-aug.1 - 2026-09-25
 
 ### Release Basis
