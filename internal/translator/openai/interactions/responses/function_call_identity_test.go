@@ -35,6 +35,64 @@ func TestResponsesFunctionCallPreservesItemAndCallIDs(t *testing.T) {
 	}
 }
 
+func TestInteractionsToolArgumentsPreserveHTMLInResponses(t *testing.T) {
+	arguments := `{"command":"2>&1 <work>"}`
+	interaction := []byte(`{"id":"response-1","model":"test","steps":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":` + arguments + `}]}`)
+	response := convertInteractionsResponseToOpenAIResponsesNonStream(context.Background(), "test", nil, nil, interaction, nil)
+	if got := gjson.GetBytes(response, "output.0.arguments").String(); got != arguments ||
+		!bytes.Contains(response, []byte(`2>&1 <work>`)) {
+		t.Fatalf("non-stream arguments = %q in %s", got, response)
+	}
+
+	request := convertInteractionsRequestToOpenAIResponses("test", []byte(`{"input":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":`+arguments+`}]}`), false)
+	if got := gjson.GetBytes(request, "input.0.arguments").String(); got != arguments ||
+		!bytes.Contains(request, []byte(`2>&1 <work>`)) {
+		t.Fatalf("request arguments = %q in %s", got, request)
+	}
+
+	var stream any
+	streamEvents := make(map[string]int)
+	for _, event := range [][]byte{
+		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool"}}`),
+		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":"{\"command\":\"2>&1 <work>\"}"}}`),
+		[]byte(`data: {"event_type":"step.stop","index":0}`),
+		[]byte(`data: {"event_type":"interaction.completed","interaction":{"id":"response-1","model":"test","status":"completed"}}`),
+	} {
+		for _, output := range convertInteractionsResponseToOpenAIResponses(context.Background(), "test", nil, nil, event, &stream) {
+			payload := responseEventPayload(output)
+			eventType := payload.Get("type").String()
+			switch eventType {
+			case "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed":
+				streamEvents[eventType]++
+				if !bytes.Contains(output, []byte(`2>&1 <work>`)) {
+					t.Fatalf("%s escaped stream tool arguments: %s", eventType, output)
+				}
+			}
+		}
+	}
+	for _, eventType := range []string{"response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"} {
+		if streamEvents[eventType] != 1 {
+			t.Fatalf("%s count=%d, want one", eventType, streamEvents[eventType])
+		}
+	}
+
+	var reverse any
+	chunks := convertOpenAIResponsesResponseToInteractions(context.Background(), "test", nil, nil,
+		[]byte(`data: {"type":"response.function_call_arguments.delta","output_index":0,"item_id":"item-1","delta":"{\"command\":\"2>&1 <work>\"}"}`), &reverse)
+	var found bool
+	for _, chunk := range chunks {
+		if responseEventPayload(chunk).Get("delta.type").String() == "arguments_delta" {
+			found = true
+			if !bytes.Contains(chunk, []byte(`2>&1 <work>`)) {
+				t.Fatalf("reverse arguments escaped in %s", chunk)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no reverse argument delta in %q", chunks)
+	}
+}
+
 func TestInteractionsFunctionCallStreamEmitsArgumentsDoneAndCompletedItem(t *testing.T) {
 	var state any
 	start := convertInteractionsResponseToOpenAIResponses(
@@ -208,7 +266,7 @@ func TestInteractionsFunctionCallStreamEventsAreIdempotent(t *testing.T) {
 	var events [][]byte
 	for _, input := range [][]byte{
 		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":{"value":1}}}`),
-		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-2","call_id":"call-2","name":"other","arguments":{"value":2}}}`),
+		[]byte(`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"item-1","call_id":"call-1","name":"tool","arguments":{"value":1}}}`),
 		[]byte(`data: {"event_type":"step.stop","index":0}`),
 		[]byte(`data: {"event_type":"step.delta","index":0,"delta":{"type":"arguments_delta","arguments":",\"late\":true"}}`),
 		[]byte(`data: {"event_type":"step.stop","index":0}`),

@@ -4,6 +4,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/translator"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
 
 func init() {
@@ -15,6 +16,11 @@ func init() {
 			Stream:    convertInteractionsResponseToOpenAIResponses,
 			NonStream: convertInteractionsResponseToOpenAIResponsesNonStream,
 		},
+	)
+	sdktranslator.RegisterCheckedRequest(
+		sdktranslator.FormatOpenAIResponse,
+		sdktranslator.FormatInteractions,
+		convertOpenAIResponsesRequestToInteractionsChecked,
 	)
 	translator.Register(
 		constant.Interactions,

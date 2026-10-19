@@ -119,8 +119,8 @@ func TestCPA09OpenAIStreamEmitsDelayedUsageAndTerminalOnce(t *testing.T) {
 		if event.Type != "message_delta" {
 			continue
 		}
-		if got := gjson.Get(event.Payload, "usage.input_tokens").Int(); got != 6 {
-			t.Fatalf("usage.input_tokens = %d, want 6", got)
+		if got := gjson.Get(event.Payload, "usage.input_tokens").Int(); got != 4 {
+			t.Fatalf("usage.input_tokens = %d, want 4", got)
 		}
 		if got := gjson.Get(event.Payload, "usage.cache_read_input_tokens").Int(); got != 4 {
 			t.Fatalf("cache_read_input_tokens = %d, want 4", got)

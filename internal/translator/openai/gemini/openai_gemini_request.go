@@ -135,16 +135,7 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					}
 
 					// Handle inline data (e.g., images)
-					if inlineData := part.Get("inlineData"); inlineData.Exists() {
-						mimeType := inlineData.Get("mimeType").String()
-						if mimeType == "" {
-							mimeType = "application/octet-stream"
-						}
-						data := inlineData.Get("data").String()
-						imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-
-						contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
-						contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
+					if contentPart := geminiInlineDataContentPart(part); contentPart != nil {
 						msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
 						hasContent = true
 					}
@@ -199,18 +190,8 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							}
 
 							// Handle inline data (e.g., images)
-							if inlineData := part.Get("inlineData"); inlineData.Exists() {
+							if contentPart := geminiInlineDataContentPart(part); contentPart != nil {
 								onlyTextContent = false
-
-								mimeType := inlineData.Get("mimeType").String()
-								if mimeType == "" {
-									mimeType = "application/octet-stream"
-								}
-								data := inlineData.Get("data").String()
-								imageURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
-
-								contentPart := []byte(`{"type":"image_url","image_url":{"url":""}}`)
-								contentPart, _ = sjson.SetBytes(contentPart, "image_url.url", imageURL)
 								contentWrapper, _ = sjson.SetRawBytes(contentWrapper, "arr.-1", contentPart)
 								contentPartsCount++
 							}
@@ -342,5 +323,65 @@ func ConvertGeminiRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		}
 	}
 
+	return out
+}
+
+func geminiInlineDataContentPart(part gjson.Result) []byte {
+	inline := part.Get("inlineData")
+	if !inline.Exists() {
+		inline = part.Get("inline_data")
+	}
+	if !inline.Exists() {
+		return nil
+	}
+	mimeType := inline.Get("mimeType").String()
+	if mimeType == "" {
+		mimeType = inline.Get("mime_type").String()
+	}
+	mimeType = strings.ToLower(strings.TrimSpace(mimeType))
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	data := inline.Get("data").String()
+	dataURL := fmt.Sprintf("data:%s;base64,%s", mimeType, data)
+	var out []byte
+	switch {
+	case strings.HasPrefix(mimeType, "image/"):
+		out = []byte(`{"type":"image_url","image_url":{"url":""}}`)
+		out, _ = sjson.SetBytes(out, "image_url.url", dataURL)
+	case strings.HasPrefix(mimeType, "audio/"):
+		format := strings.TrimPrefix(mimeType, "audio/")
+		switch format {
+		case "wave", "x-wav":
+			format = "wav"
+		case "mpeg":
+			format = "mp3"
+		case "ogg":
+			format = "opus"
+		case "pcm", "l16":
+			format = "pcm16"
+		}
+		out = []byte(`{"type":"input_audio","input_audio":{"data":"","format":""}}`)
+		out, _ = sjson.SetBytes(out, "input_audio.data", data)
+		out, _ = sjson.SetBytes(out, "input_audio.format", format)
+	case strings.HasPrefix(mimeType, "video/"):
+		out = []byte(`{"type":"video_url","video_url":{"url":""}}`)
+		out, _ = sjson.SetBytes(out, "video_url.url", dataURL)
+	default:
+		filename := "document.bin"
+		switch mimeType {
+		case "application/pdf":
+			filename = "document.pdf"
+		case "text/plain":
+			filename = "document.txt"
+		case "text/csv":
+			filename = "document.csv"
+		case "application/json":
+			filename = "document.json"
+		}
+		out = []byte(`{"type":"file","file":{"filename":"","file_data":""}}`)
+		out, _ = sjson.SetBytes(out, "file.filename", filename)
+		out, _ = sjson.SetBytes(out, "file.file_data", dataURL)
+	}
 	return out
 }

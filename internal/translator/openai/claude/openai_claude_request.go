@@ -6,6 +6,7 @@
 package claude
 
 import (
+	"encoding/base64"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
@@ -35,6 +36,22 @@ func convertClaudeRequestToOpenAI(
 	stream bool,
 	preserveThinkingBlocks bool,
 ) []byte {
+	body, _ := convertClaudeRequestToOpenAIChecked(modelName, inputRawJSON, stream, preserveThinkingBlocks)
+	return body
+}
+
+// ConvertClaudeRequestToOpenAIWithCompatReturningError reports unsupported user attachments.
+func ConvertClaudeRequestToOpenAIWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertClaudeRequestToOpenAIChecked(modelName, inputRawJSON, stream, true)
+}
+
+func convertClaudeRequestToOpenAIChecked(
+	modelName string,
+	inputRawJSON []byte,
+	stream bool,
+	preserveThinkingBlocks bool,
+) ([]byte, error) {
+	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
 	// Base OpenAI Chat Completions API template
 	out := []byte(`{"model":"","messages":[]}`)
@@ -85,6 +102,8 @@ func convertClaudeRequestToOpenAI(
 					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
 						out, _ = sjson.SetBytes(out, "reasoning_effort", effort)
 					}
+				} else if effort := root.Get("output_config.effort"); effort.Type == gjson.String && strings.TrimSpace(effort.String()) != "" {
+					out, _ = sjson.SetBytes(out, "reasoning_effort", strings.ToLower(strings.TrimSpace(effort.String())))
 				} else {
 					// No budget_tokens specified, default to "auto" for enabled thinking
 					if effort, ok := thinking.ConvertBudgetToLevel(-1); ok && effort != "" {
@@ -147,6 +166,7 @@ func convertClaudeRequestToOpenAI(
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		var pendingToolUseIDs []string
 		var pendingSystemReminders [][]byte
+		toolNameByID := make(map[string]string)
 
 		messages.ForEach(func(_, message gjson.Result) bool {
 			role := message.Get("role").String()
@@ -186,19 +206,28 @@ func convertClaudeRequestToOpenAI(
 							}
 						}
 					case "redacted_thinking":
-					case "text", "image":
+					case "text", "image", "document", "container_upload":
 						if contentItem, ok := convertClaudeContentPart(part); ok {
 							contentItems = append(contentItems, []byte(contentItem))
+						} else if role == "user" {
+							switch part.Get("type").String() {
+							case "image", "document", "container_upload":
+								drops.Drop(part.Get("type").String())
+							}
 						}
 					case "tool_use":
 						if role == "assistant" {
 							toolUseID := part.Get("id").String()
+							toolName := part.Get("name").String()
 							if toolUseID != "" {
 								pendingToolUseIDs = append(pendingToolUseIDs, toolUseID)
+								if toolName != "" {
+									toolNameByID[toolUseID] = toolName
+								}
 							}
 							toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 							toolCall, _ = sjson.SetBytes(toolCall, "id", toolUseID)
-							toolCall, _ = sjson.SetBytes(toolCall, "function.name", part.Get("name").String())
+							toolCall, _ = sjson.SetBytes(toolCall, "function.name", toolName)
 							if input := part.Get("input"); input.Exists() {
 								toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", input.Raw)
 							} else {
@@ -207,8 +236,12 @@ func convertClaudeRequestToOpenAI(
 							toolCalls = append(toolCalls, gjson.ParseBytes(toolCall).Value())
 						}
 					case "tool_result":
+						toolUseID := part.Get("tool_use_id").String()
 						toolResult := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
-						toolResult, _ = sjson.SetBytes(toolResult, "tool_call_id", part.Get("tool_use_id").String())
+						toolResult, _ = sjson.SetBytes(toolResult, "tool_call_id", toolUseID)
+						if toolName := toolNameByID[toolUseID]; toolName != "" {
+							toolResult, _ = sjson.SetBytes(toolResult, "name", toolName)
+						}
 						text, images := convertClaudeToolResultContent(part.Get("content"))
 						toolResult, _ = sjson.SetBytes(toolResult, "content", text)
 						toolResults = append(toolResults, toolResult)
@@ -221,6 +254,9 @@ func convertClaudeRequestToOpenAI(
 				hasReasoning := len(reasoningParts) > 0
 				hasToolCalls := len(toolCalls) > 0
 				hasToolResults := len(toolResults) > 0
+				if role == "user" {
+					drops.EndTurn(len(contentItems) + len(toolResults) + len(relayedToolImages))
+				}
 				if precedingToolCallsPending && !hasToolResults && len(pendingSystemReminders) > 0 {
 					messageItems = append(messageItems, pendingSystemReminders...)
 					pendingSystemReminders = nil
@@ -283,6 +319,7 @@ func convertClaudeRequestToOpenAI(
 	}
 
 	if len(messageItems) > 0 {
+		messageItems = translatorcommon.AlignOpenAIToolCallMessages(messageItems)
 		out = translatorcommon.SetRawArrayItems(out, "messages", messageItems)
 	}
 
@@ -307,10 +344,11 @@ func convertClaudeRequestToOpenAI(
 						[]byte(`{"type":"object","properties":{}}`),
 					)
 				} else {
+					schema := gjson.ParseBytes(util.NormalizeClaudeToolInputSchema([]byte(inputSchema.Raw)))
 					openAIToolJSON, _ = sjson.SetRawBytes(
 						openAIToolJSON,
 						"function.parameters",
-						util.NormalizeClaudeToolInputSchema([]byte(inputSchema.Raw)),
+						[]byte(normalizeOpenAIBooleanSubschemas(schema)),
 					)
 				}
 
@@ -325,21 +363,32 @@ func convertClaudeRequestToOpenAI(
 	}
 
 	// Tool choice mapping - convert Anthropic tool_choice to OpenAI format
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		switch toolChoice.Get("type").String() {
+	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() && toolChoice.Type != gjson.Null {
+		choiceType := toolChoice.Get("type").String()
+		if choiceType == "" && toolChoice.Type == gjson.String {
+			choiceType = toolChoice.String()
+		}
+		switch choiceType {
 		case "auto":
 			out, _ = sjson.SetBytes(out, "tool_choice", "auto")
 		case "any":
 			out, _ = sjson.SetBytes(out, "tool_choice", "required")
+		case "none":
+			out, _ = sjson.SetBytes(out, "tool_choice", "none")
 		case "tool":
-			// Specific tool choice
 			toolName := toolChoice.Get("name").String()
-			toolChoiceJSON := []byte(`{"type":"function","function":{"name":""}}`)
-			toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "function.name", toolName)
-			out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+			if toolName != "" {
+				toolChoiceJSON := []byte(`{"type":"function","function":{"name":""}}`)
+				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "function.name", toolName)
+				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+			} else {
+				out, _ = sjson.SetBytes(out, "tool_choice", "none")
+			}
 		default:
-			// Default to auto if not specified
-			out, _ = sjson.SetBytes(out, "tool_choice", "auto")
+			out, _ = sjson.SetBytes(out, "tool_choice", "none")
+		}
+		if toolChoice.Get("disable_parallel_tool_use").Type == gjson.True {
+			out, _ = sjson.SetBytes(out, "parallel_tool_calls", false)
 		}
 	}
 
@@ -348,6 +397,43 @@ func convertClaudeRequestToOpenAI(
 		out, _ = sjson.SetBytes(out, "user", user.String())
 	}
 
+	return out, drops.Err()
+}
+
+func normalizeOpenAIBooleanSubschemas(schema gjson.Result) string {
+	if schema.Type == gjson.True {
+		return "{}"
+	}
+	if schema.IsArray() {
+		parts := make([]string, 0, len(schema.Array()))
+		for _, child := range schema.Array() {
+			parts = append(parts, normalizeOpenAIBooleanSubschemas(child))
+		}
+		return "[" + strings.Join(parts, ",") + "]"
+	}
+	if !schema.IsObject() {
+		return schema.Raw
+	}
+	out := schema.Raw
+	for _, keyword := range util.SchemaMapKeywords {
+		children := schema.Get(keyword)
+		if !children.IsObject() {
+			continue
+		}
+		var parts []string
+		children.ForEach(func(key, child gjson.Result) bool {
+			parts = append(parts, key.Raw+":"+normalizeOpenAIBooleanSubschemas(child))
+			return true
+		})
+		out, _ = sjson.SetRaw(out, keyword, "{"+strings.Join(parts, ",")+"}")
+	}
+	for _, keyword := range util.SchemaValueKeywords {
+		child := schema.Get(keyword)
+		if !child.Exists() || keyword == "additionalProperties" && child.Type == gjson.True {
+			continue
+		}
+		out, _ = sjson.SetRaw(out, keyword, normalizeOpenAIBooleanSubschemas(child))
+	}
 	return out
 }
 
@@ -413,6 +499,24 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 		imageContent, _ = sjson.SetBytes(imageContent, "image_url.url", imageURL)
 
 		return string(imageContent), true
+
+	case "document", "container_upload":
+		source := part.Get("source")
+		if source.Get("type").String() != "base64" {
+			return "", false
+		}
+		data, err := base64.StdEncoding.DecodeString(strings.TrimSpace(source.Get("data").String()))
+		if err != nil || len(data) == 0 {
+			return "", false
+		}
+		mimeType := source.Get("media_type").String()
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+		file := []byte(`{"type":"file","file":{"filename":"","file_data":""}}`)
+		file, _ = sjson.SetBytes(file, "file.filename", part.Get("filename").String())
+		file, _ = sjson.SetBytes(file, "file.file_data", "data:"+mimeType+";base64,"+base64.StdEncoding.EncodeToString(data))
+		return string(file), true
 
 	default:
 		return "", false

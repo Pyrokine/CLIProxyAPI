@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -98,6 +100,7 @@ func (e *OpenAICompatExecutor) Execute(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (resp cliproxyexecutor.Response, err error) {
+	opts.OriginalRequest = originalRequestPayload(req, opts)
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImages(ctx, auth, req, opts, endpointPath)
 	}
@@ -127,7 +130,7 @@ func (e *OpenAICompatExecutor) Execute(
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	normalizeToolResults := helps.ShouldNormalizeOpenAIToolResultsForModel(
-		e.resolveCompatConfig(auth), baseModel, requestedModel,
+		e.resolveCompatConfig(auth, req), baseModel, requestedModel,
 	)
 	originalPayload := originalPayloadSource
 	translatedPayload := req.Payload
@@ -135,37 +138,35 @@ func (e *OpenAICompatExecutor) Execute(
 		originalPayload = helps.NormalizeClaudeToolResultsTextOnly(originalPayload)
 		translatedPayload = helps.NormalizeClaudeToolResultsTextOnly(translatedPayload)
 	}
-	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		originalPayload,
-		opts.Stream,
-		isCompat,
+	originalTranslated, translated, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, translatedPayload, opts.Stream, isCompat, &req,
 	)
-	translated := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		translatedPayload,
-		opts.Stream,
-		isCompat,
-	)
-	translated = applyPayloadConfigWithRoot(
-		e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel,
-	)
+	if err != nil {
+		return resp, err
+	}
 	if normalizeToolResults {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
 	if opts.Alt != "responses/compact" {
+		translated, err = helps.NormalizeOpenAIMaxTokens(
+			translated, helps.ShouldUseMaxCompletionTokensForModel(e.resolveCompatConfig(auth, req), baseModel, requestedModel),
+		)
+		if err != nil {
+			return resp, err
+		}
 		translated = e.applyPromptCacheKey(auth, from, baseModel, req, opts, translated, ctx)
 	}
+
+	translated, err = helps.ApplyThinkingWithSourcePayload(
+		translated, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
+	)
+	if err != nil {
+		return resp, err
+	}
+	translated = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated,
+		requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -176,13 +177,6 @@ func (e *OpenAICompatExecutor) Execute(
 			translated,
 			isCompat,
 		)
-	}
-
-	translated, err = helps.ApplyThinkingWithSourcePayload(
-		translated, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
-	)
-	if err != nil {
-		return resp, err
 	}
 	reporter.setTranslatedReasoningEffort(translated, to.String())
 
@@ -234,12 +228,22 @@ func (e *OpenAICompatExecutor) Execute(
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, body)
+	observeResponseTokenEvent(ctx, body)
+	reporter.observeResponseModel(body)
+	// 将响应转换为调用方指定的格式
+	var param any
+	out := sdktranslator.TranslateNonStream(ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), req.Model, opts.OriginalRequest, translated, body, &param)
+	if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil || len(out) == 0 {
+		if errTranslate == nil {
+			errTranslate = markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload"})
+		}
+		recordAPIResponseError(ctx, e.cfg, errTranslate)
+		reporter.publishFailureWithDetail(ctx, parseOpenAIUsage(body), errTranslate)
+		return resp, errTranslate
+	}
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
-	// Translate response back to source format when needed
-	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -264,6 +268,16 @@ func (e *OpenAICompatExecutor) executeImages(
 
 	payload, contentType, errPrepare := prepareOpenAICompatImagesPayload(
 		req.Payload, baseModel, opts.Headers.Get("Content-Type"), false,
+		func(payload []byte) []byte {
+			original := opts.OriginalRequest
+			if !json.Valid(original) {
+				original = payload
+			}
+			return applyPayloadConfigWithRequest(
+				e.cfg, baseModel, "openai", opts.SourceFormat.String(), "", payload, original,
+				payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
+			)
+		},
 	)
 	if errPrepare != nil {
 		err = errPrepare
@@ -323,6 +337,8 @@ func (e *OpenAICompatExecutor) executeImages(
 		return resp, err
 	}
 
+	observeResponseTokenEvent(ctx, body)
+	reporter.observeResponseModel(body)
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	reporter.ensurePublished(ctx)
 	resp = cliproxyexecutor.Response{Payload: body, Headers: httpResp.Header.Clone()}
@@ -335,6 +351,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (_ *cliproxyexecutor.StreamResult, err error) {
+	opts.OriginalRequest = originalRequestPayload(req, opts)
 	if endpointPath := openAICompatImageEndpointPath(opts); endpointPath != "" {
 		return e.executeImagesStream(ctx, auth, req, opts, endpointPath)
 	}
@@ -351,6 +368,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	}
 
 	from := opts.SourceFormat
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	isCompat := helps.APIKeyModelIsCompat(req)
 	originalPayloadSource := req.Payload
@@ -359,7 +377,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	normalizeToolResults := helps.ShouldNormalizeOpenAIToolResultsForModel(
-		e.resolveCompatConfig(auth), baseModel, requestedModel,
+		e.resolveCompatConfig(auth, req), baseModel, requestedModel,
 	)
 	originalPayload := originalPayloadSource
 	translatedPayload := req.Payload
@@ -367,33 +385,22 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 		originalPayload = helps.NormalizeClaudeToolResultsTextOnly(originalPayload)
 		translatedPayload = helps.NormalizeClaudeToolResultsTextOnly(translatedPayload)
 	}
-	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		originalPayload,
-		true,
-		isCompat,
+	originalTranslated, translated, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, translatedPayload, true, isCompat, &req,
 	)
-	translated := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		translatedPayload,
-		true,
-		isCompat,
-	)
-	translated = applyPayloadConfigWithRoot(
-		e.cfg, baseModel, to.String(), "", translated, originalTranslated, requestedModel,
-	)
+	if err != nil {
+		return nil, err
+	}
+	// Request usage by default; explicit payload rules retain final control.
+	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
 	if normalizeToolResults {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
+	}
+	translated, err = helps.NormalizeOpenAIMaxTokens(
+		translated, helps.ShouldUseMaxCompletionTokensForModel(e.resolveCompatConfig(auth, req), baseModel, requestedModel),
+	)
+	if err != nil {
+		return nil, err
 	}
 	translated = e.applyPromptCacheKey(auth, from, baseModel, req, opts, translated, ctx)
 
@@ -403,10 +410,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	if err != nil {
 		return nil, err
 	}
+	translated = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated,
+		requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
 
-	// Request usage data in the final streaming chunk so that token statistics
-	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
 	reporter.setTranslatedReasoningEffort(translated, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
@@ -430,7 +438,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translated, e.Identifier(), auth)
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := reporter.trackHTTPClient(newProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
@@ -454,61 +462,143 @@ func (e *OpenAICompatExecutor) ExecuteStream(
 	go func() {
 		defer close(out)
 		var streamUsage streamUsageBuffer
+		terminalDelivered := false
 		defer func() {
-			streamUsage.publish(ctx, reporter)
-			reporter.ensurePublished(ctx)
+			publishCtx := ctx
+			if terminalDelivered && errors.Is(ctx.Err(), context.Canceled) {
+				publishCtx = context.WithoutCancel(ctx)
+			}
+			streamUsage.publish(publishCtx, reporter)
+			reporter.ensurePublished(publishCtx)
 			if errClose := httpResp.Body.Close(); errClose != nil {
 				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
 		}()
 		scanner := bufio.NewScanner(httpResp.Body)
+		scanner.Split(scanSSEFrame)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			appendAPIResponseChunk(ctx, e.cfg, line)
-			streamUsage.observeOpenAIStream(line)
-			trimmedLine := bytes.TrimSpace(line)
-			if len(trimmedLine) == 0 {
-				continue
+		sourceDone := false
+		publishStreamError := func(streamErr error) {
+			recordAPIResponseError(ctx, e.cfg, streamErr)
+			reporter.publishFailureWithDetail(ctx, streamUsage.detail, streamErr)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: streamErr})
+		}
+		sendTranslated := func(data []byte) bool {
+			if isOpenAICompatTokenEvent(data) {
+				logging.MarkFirstResponseToken(ctx)
 			}
-
-			if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
-				if bytes.HasPrefix(trimmedLine, []byte(":")) || bytes.HasPrefix(trimmedLine, []byte("event:")) ||
-					bytes.HasPrefix(trimmedLine, []byte("id:")) || bytes.HasPrefix(trimmedLine, []byte("retry:")) {
-					continue
-				}
-				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
-					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
-					recordAPIResponseError(ctx, e.cfg, streamErr)
-					reporter.publishFailure(ctx, streamErr)
-					_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: streamErr})
-					return
-				}
-				continue
-			}
-
-			// OpenAI-compatible streams must use SSE data lines.
 			chunks := sdktranslator.TranslateStream(
-				ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param,
+				ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, data, &param,
 			)
-			for i := range chunks {
-				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
-					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+			if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil {
+				publishStreamError(errTranslate)
+				return false
+			}
+			for _, chunk := range chunks {
+				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunk}) {
+					if errStream := scannerOrContextError(ctx, scanner); errStream != nil &&
+						!(terminalDelivered && errors.Is(errStream, context.Canceled)) {
 						recordAPIResponseError(ctx, e.cfg, errStream)
 						reporter.publishFailure(ctx, errStream)
 					}
+					return false
+				}
+				if responseFormat == sdktranslator.FormatOpenAIResponse {
+					for _, line := range bytes.Split(chunk, []byte("\n")) {
+						switch gjson.GetBytes(jsonPayload(line), "type").String() {
+						case "response.completed", "response.incomplete":
+							terminalDelivered = true
+						}
+					}
+				}
+			}
+			return true
+		}
+		for scanner.Scan() {
+			frame := scanner.Bytes()
+			appendAPIResponseChunk(ctx, e.cfg, frame)
+			data, hasData, _ := sseDataPayload(frame)
+			if !hasData {
+				for _, line := range bytes.Split(frame, []byte("\n")) {
+					trimmed := bytes.TrimSpace(line)
+					if bytes.HasPrefix(trimmed, []byte("{")) || bytes.HasPrefix(trimmed, []byte("[")) {
+						publishStreamError(statusErr{code: http.StatusBadGateway, msg: string(trimmed)})
+						return
+					}
+				}
+				continue
+			}
+			if len(data) == 0 {
+				continue
+			}
+			observeResponseTokenEvent(ctx, data)
+			reporter.observeResponseModel(data)
+			streamUsage.observeOpenAIStream(data)
+			if bytes.Equal(data, []byte("[DONE]")) {
+				sourceDone = true
+			}
+			if !sendTranslated(encodeSSEDataFrame(data)) {
+				return
+			}
+		}
+		if errScan := markResponseStarted(scanner.Err()); errScan != nil && !terminalDelivered {
+			publishStreamError(errScan)
+			return
+		}
+		if errContext := ctx.Err(); errContext != nil && !terminalDelivered {
+			publishStreamError(markResponseStarted(errContext))
+			return
+		}
+		if responseFormat != sdktranslator.FormatOpenAIResponse || terminalDelivered {
+			return
+		}
+		if !sourceDone && ctx.Err() == nil {
+			if state, ok := param.(interface{ CanFinalizeResponseStream() bool }); ok && state.CanFinalizeResponseStream() {
+				if !sendTranslated([]byte("data: [DONE]")) {
 					return
 				}
 			}
 		}
-		if errScan := markResponseStarted(scanner.Err()); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx, errScan)
-			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+		if !terminalDelivered {
+			publishStreamError(statusErr{code: http.StatusBadGateway, msg: "upstream stream closed before a completed response"})
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func isOpenAICompatTokenEvent(payload []byte) bool {
+	payload = bytes.TrimSpace(payload)
+	if bytes.HasPrefix(payload, []byte("data:")) {
+		payload = bytes.TrimSpace(payload[len("data:"):])
+	}
+	if bytes.Equal(payload, []byte("[DONE]")) {
+		return true
+	}
+	if !gjson.ValidBytes(payload) {
+		return false
+	}
+	if gjson.GetBytes(payload, "error").Exists() {
+		return true
+	}
+	for _, choice := range gjson.GetBytes(payload, "choices").Array() {
+		for _, body := range []gjson.Result{choice.Get("delta"), choice.Get("message")} {
+			if body.Get("content").String() != "" || body.Get("reasoning_content").String() != "" ||
+				body.Get("reasoning").String() != "" || body.Get("refusal").String() != "" {
+				return true
+			}
+			for _, tool := range body.Get("tool_calls").Array() {
+				if tool.Get("function.arguments").String() != "" || tool.Get("function.name").String() != "" ||
+					tool.Get("custom.input").String() != "" {
+					return true
+				}
+			}
+		}
+		if choice.Get("finish_reason").String() != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(
@@ -531,6 +621,16 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 
 	payload, contentType, errPrepare := prepareOpenAICompatImagesPayload(
 		req.Payload, baseModel, opts.Headers.Get("Content-Type"), true,
+		func(payload []byte) []byte {
+			original := opts.OriginalRequest
+			if !json.Valid(original) {
+				original = payload
+			}
+			return applyPayloadConfigWithRequest(
+				e.cfg, baseModel, "openai", opts.SourceFormat.String(), "", payload, original,
+				payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
+			)
+		},
 	)
 	if errPrepare != nil {
 		err = errPrepare
@@ -591,7 +691,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		var streamUsage streamUsageBuffer
+		streamUsage := streamUsageBuffer{modelReporter: reporter}
 		defer func() {
 			streamUsage.flushOpenAIStream()
 			streamUsage.publish(ctx, reporter)
@@ -637,26 +737,27 @@ func (e *OpenAICompatExecutor) CountTokens(
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	translated := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		req.Payload,
-		false,
-		helps.APIKeyModelIsCompat(req),
-	)
-
-	modelForCounting := baseModel
-
-	translated, err := helps.ApplyThinkingWithSourcePayload(
-		translated, req.Payload, req.Payload, req.Model, from.String(), to.String(), e.Identifier(), req,
+	originalPayloadSource := originalRequestPayload(req, opts)
+	originalTranslated, translated, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayloadSource, req.Payload, false, helps.APIKeyModelIsCompat(req), &req,
 	)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+
+	modelForCounting := baseModel
+
+	translated, err = helps.ApplyThinkingWithSourcePayload(
+		translated, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
+	)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+
+	translated = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated,
+		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
 
 	enc, err := tokenizerForModel(modelForCounting)
 	if err != nil {
@@ -669,7 +770,7 @@ func (e *OpenAICompatExecutor) CountTokens(
 	}
 
 	usageJSON := buildOpenAIUsageJSON(count)
-	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
+	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, usageJSON)
 	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
 }
 
@@ -717,7 +818,7 @@ func openAICompatImageEndpointPath(opts cliproxyexecutor.Options) string {
 	return openAICompatDefaultImageEndpoint
 }
 
-func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType string, stream bool) (
+func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType string, stream bool, configure ...func([]byte) []byte) (
 	[]byte,
 	string,
 	error,
@@ -733,6 +834,9 @@ func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType 
 		} else {
 			payload, _ = sjson.DeleteBytes(payload, "stream")
 		}
+		if len(configure) > 0 {
+			payload = configure[0](payload)
+		}
 		return payload, "application/json", nil
 	}
 
@@ -744,7 +848,7 @@ func prepareOpenAICompatImagesPayload(payload []byte, model string, contentType 
 	if boundary == "" {
 		return nil, "", fmt.Errorf("multipart boundary is missing")
 	}
-	return rewriteOpenAICompatImagesMultipartPayload(payload, model, boundary, stream)
+	return rewriteOpenAICompatImagesMultipartPayload(payload, model, boundary, stream, configure...)
 }
 
 func cloneOpenAICompatMIMEHeader(src textproto.MIMEHeader) textproto.MIMEHeader {
@@ -755,7 +859,7 @@ func cloneOpenAICompatMIMEHeader(src textproto.MIMEHeader) textproto.MIMEHeader 
 	return dst
 }
 
-func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, boundary string, stream bool) (
+func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, boundary string, stream bool, configure ...func([]byte) []byte) (
 	out []byte,
 	contentType string,
 	err error,
@@ -778,20 +882,44 @@ func rewriteOpenAICompatImagesMultipartPayload(payload []byte, model string, bou
 			_ = writer.Close()
 		}
 	}()
+	delete(form.Value, "model")
+	delete(form.Value, "stream")
 	if model != "" {
-		if errWrite := writer.WriteField("model", model); errWrite != nil {
-			return nil, "", fmt.Errorf("write model field failed: %w", errWrite)
-		}
+		form.Value["model"] = []string{model}
 	}
 	if stream {
-		if errWrite := writer.WriteField("stream", "true"); errWrite != nil {
-			return nil, "", fmt.Errorf("write stream field failed: %w", errWrite)
+		form.Value["stream"] = []string{"true"}
+	}
+	if len(configure) > 0 {
+		fields := make(map[string]any, len(form.Value))
+		for key, values := range form.Value {
+			if len(values) == 1 {
+				fields[key] = values[0]
+			} else {
+				fields[key] = values
+			}
 		}
+		encoded, errEncode := json.Marshal(fields)
+		if errEncode != nil {
+			return nil, "", fmt.Errorf("encode multipart fields failed: %w", errEncode)
+		}
+		configured := configure[0](encoded)
+		if !gjson.ValidBytes(configured) || !gjson.ParseBytes(configured).IsObject() {
+			return nil, "", fmt.Errorf("configured multipart fields must be a JSON object")
+		}
+		form.Value = make(map[string][]string)
+		gjson.ParseBytes(configured).ForEach(func(key, value gjson.Result) bool {
+			if value.IsArray() {
+				for _, item := range value.Array() {
+					form.Value[key.String()] = append(form.Value[key.String()], item.String())
+				}
+			} else {
+				form.Value[key.String()] = []string{value.String()}
+			}
+			return true
+		})
 	}
 	for key, values := range form.Value {
-		if key == "model" || key == "stream" {
-			continue
-		}
 		for _, value := range values {
 			if errWrite := writer.WriteField(key, value); errWrite != nil {
 				return nil, "", fmt.Errorf("write form field %s failed: %w", key, errWrite)
@@ -846,7 +974,7 @@ func (e *OpenAICompatExecutor) applyPromptCacheKey(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	compat := e.resolveCompatConfig(auth)
+	compat := e.resolveCompatConfig(auth, req)
 	if compat == nil || !compat.SupportPromptCacheKey {
 		return translated
 	}
@@ -920,9 +1048,41 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 	return
 }
 
-func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
+func (e *OpenAICompatExecutor) resolveCompatConfig(
+	auth *cliproxyauth.Auth, req cliproxyexecutor.Request,
+) *config.OpenAICompatibility {
 	if auth == nil || e.cfg == nil {
 		return nil
+	}
+	if e.cfg.Home.Enabled {
+		var options struct {
+			SupportPromptCacheKey bool                              `json:"support-prompt-cache-key"`
+			Models                []config.OpenAICompatibilityModel `json:"models"`
+		}
+		if raw, exists := auth.Metadata["credential_options"]; exists {
+			if data, errMarshal := json.Marshal(raw); errMarshal == nil {
+				if errDecode := json.Unmarshal(data, &options); errDecode != nil {
+					log.Warn("home credential options cannot be decoded")
+				}
+			} else {
+				log.Warn("home credential options cannot be decoded")
+			}
+		}
+		if raw, exists := auth.Attributes["support_prompt_cache_key"]; exists {
+			if value, errParse := strconv.ParseBool(raw); errParse == nil {
+				options.SupportPromptCacheKey = value
+			} else {
+				log.Warn("home credential prompt cache option is invalid")
+			}
+		}
+		if model, configured := cliproxyauth.ResolvedHomeModelOptions(req); configured {
+			options.Models = []config.OpenAICompatibilityModel{model}
+		}
+		return &config.OpenAICompatibility{
+			Name:                  auth.Attributes["compat_name"],
+			SupportPromptCacheKey: options.SupportPromptCacheKey,
+			Models:                options.Models,
+		}
 	}
 	if auth.Attributes != nil {
 		if rawIndex := strings.TrimSpace(auth.Attributes["config_index"]); rawIndex != "" {

@@ -131,7 +131,14 @@ func TestInteractionsResponsesStreamValidatesLateSignature(t *testing.T) {
 		[]byte(`data: {"event_type":"step.stop","index":0}`),
 		&state,
 	)
-	if got := responseEventPayload(stop[0]).Get("item.encrypted_content").String(); got != validGPT {
+	var itemDone gjson.Result
+	for _, event := range stop {
+		payload := responseEventPayload(event)
+		if payload.Get("type").String() == "response.output_item.done" {
+			itemDone = payload
+		}
+	}
+	if got := itemDone.Get("item.encrypted_content").String(); got != validGPT {
 		t.Fatalf("done signature = %q, want %q; events=%q", got, validGPT, stop)
 	}
 	terminal := convertInteractionsResponseToOpenAIResponses(

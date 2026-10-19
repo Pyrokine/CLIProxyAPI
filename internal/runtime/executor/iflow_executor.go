@@ -39,10 +39,10 @@ type IFlowExecutor struct {
 
 // iflowRequest holds the prepared artifacts shared by Execute and ExecuteStream.
 type iflowRequest struct {
-	from, to sdktranslator.Format
-	body     []byte
-	httpReq  *http.Request
-	reporter *usageReporter
+	responseFormat, to sdktranslator.Format
+	body               []byte
+	httpReq            *http.Request
+	reporter           *usageReporter
 }
 
 // NewIFlowExecutor constructs a new executor instance.
@@ -111,11 +111,14 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, isStream)
-	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, isStream)
+	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, isStream, helps.APIKeyModelIsCompat(req),
+	)
+	if err != nil {
+		return nil, err
+	}
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	var err error
 	body, err = helps.ApplyThinkingWithSourcePayload(
 		body, req.Payload, originalPayloadSource, req.Model, from.String(), "iflow", e.Identifier(), req,
 	)
@@ -132,7 +135,7 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 		}
 	}
 	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier())
 	reporter.setTranslatedReasoningEffort(body, e.Identifier())
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
@@ -145,11 +148,11 @@ func (e *IFlowExecutor) prepareIFlowRequest(
 	recordUpstreamRequest(ctx, e.cfg, endpoint, httpReq.Header.Clone(), body, e.Identifier(), auth)
 
 	return &iflowRequest{
-		from:     from,
-		to:       to,
-		body:     body,
-		httpReq:  httpReq,
-		reporter: reporter,
+		responseFormat: cliproxyexecutor.ResponseFormatOrSource(opts),
+		to:             to,
+		body:           body,
+		httpReq:        httpReq,
+		reporter:       reporter,
 	}, nil
 }
 
@@ -160,6 +163,7 @@ func (e *IFlowExecutor) Execute(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (resp cliproxyexecutor.Response, err error) {
+	opts.OriginalRequest = originalRequestPayload(req, opts)
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -201,16 +205,26 @@ func (e *IFlowExecutor) Execute(
 		return resp, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
-	prepared.reporter.publish(ctx, parseOpenAIUsage(data))
-	// Ensure usage is recorded even if upstream omits usage metadata.
-	prepared.reporter.ensurePublished(ctx)
+	observeResponseTokenEvent(ctx, data)
+	prepared.reporter.observeResponseModel(data)
 
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
 	// the original model name in the response for client compatibility.
 	out := sdktranslator.TranslateNonStream(
-		ctx, prepared.to, prepared.from, req.Model, opts.OriginalRequest, prepared.body, data, &param,
+		ctx, prepared.to, prepared.responseFormat, req.Model, opts.OriginalRequest, prepared.body, data, &param,
 	)
+	if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil || len(out) == 0 {
+		if errTranslate == nil {
+			errTranslate = markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "upstream response translation returned an empty payload"})
+		}
+		recordAPIResponseError(ctx, e.cfg, errTranslate)
+		prepared.reporter.publishFailureWithDetail(ctx, parseOpenAIUsage(data), errTranslate)
+		return resp, errTranslate
+	}
+	prepared.reporter.publish(ctx, parseOpenAIUsage(data))
+	// Ensure usage is recorded even if upstream omits usage metadata.
+	prepared.reporter.ensurePublished(ctx)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -222,6 +236,7 @@ func (e *IFlowExecutor) ExecuteStream(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (_ *cliproxyexecutor.StreamResult, err error) {
+	opts.OriginalRequest = originalRequestPayload(req, opts)
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -257,7 +272,7 @@ func (e *IFlowExecutor) ExecuteStream(
 	out := make(chan cliproxyexecutor.StreamChunk)
 	reporter := prepared.reporter
 	body := prepared.body
-	from := prepared.from
+	from := prepared.responseFormat
 	to := prepared.to
 	go func() {
 		defer close(out)
@@ -276,10 +291,18 @@ func (e *IFlowExecutor) ExecuteStream(
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
+			observeResponseTokenEvent(ctx, line)
+			reporter.observeResponseModel(line)
 			streamUsage.observeOpenAIStream(line)
 			chunks := sdktranslator.TranslateStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
+			if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil {
+				recordAPIResponseError(ctx, e.cfg, errTranslate)
+				reporter.publishFailureWithDetail(ctx, streamUsage.detail, errTranslate)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errTranslate})
+				return
+			}
 			for i := range chunks {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
@@ -292,8 +315,28 @@ func (e *IFlowExecutor) ExecuteStream(
 		}
 		if errScan := markResponseStarted(scanner.Err()); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx, errScan)
+			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+			return
+		}
+		if errContext := ctx.Err(); errContext != nil {
+			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errContext)
+			return
+		}
+		if from == sdktranslator.FormatOpenAIResponse {
+			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param)
+			if errTranslate := sdktranslator.ResponseTranslationError(&param); errTranslate != nil {
+				recordAPIResponseError(ctx, e.cfg, errTranslate)
+				reporter.publishFailureWithDetail(ctx, streamUsage.detail, errTranslate)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errTranslate})
+				return
+			}
+			if !sendStreamPayloads(ctx, out, chunks) {
+				if errStream := ctx.Err(); errStream != nil {
+					recordAPIResponseError(ctx, e.cfg, errStream)
+					reporter.publishFailureWithDetail(ctx, streamUsage.detail, errStream)
+				}
+			}
 		}
 	}()
 
@@ -310,8 +353,15 @@ func (e *IFlowExecutor) CountTokens(
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
-
+	originalPayload := originalRequestPayload(req, opts)
+	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, false, helps.APIKeyModelIsCompat(req),
+	)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated,
+		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier())
 	enc, err := tokenizerForModel(baseModel)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("iflow executor: tokenizer init failed: %w", err)
@@ -323,7 +373,7 @@ func (e *IFlowExecutor) CountTokens(
 	}
 
 	usageJSON := buildOpenAIUsageJSON(count)
-	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
+	translated := sdktranslator.TranslateTokenCount(ctx, to, cliproxyexecutor.ResponseFormatOrSource(opts), count, usageJSON)
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
 

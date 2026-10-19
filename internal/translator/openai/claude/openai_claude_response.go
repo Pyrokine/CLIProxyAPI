@@ -144,7 +144,19 @@ func effectiveOpenAIFinishReason(param *convertOpenAIResponseToAnthropicParams) 
 	if param == nil {
 		return ""
 	}
+	if param.FinishReason == "length" || param.FinishReason == "content_filter" {
+		return param.FinishReason
+	}
 	if param.SawToolCall {
+		for _, call := range param.ToolCallsAccumulator {
+			if call == nil || call.Arguments.Len() == 0 {
+				continue
+			}
+			arguments := util.FixJSON(strings.TrimSpace(call.Arguments.String()))
+			if !gjson.Valid(arguments) || !gjson.Parse(arguments).IsObject() {
+				return "length"
+			}
+		}
 		return "tool_calls"
 	}
 	return param.FinishReason
@@ -184,8 +196,8 @@ func convertOpenAIStreamingChunkToAnthropic(
 			param.MessageStarted = true
 		}
 
-		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
-			for _, text := range collectOpenAIReasoningTexts(reasoning) {
+		if reasoning := delta; reasoning.Exists() {
+			for _, text := range collectOpenAIObjectReasoningTexts(reasoning) {
 				if text == "" {
 					continue
 				}
@@ -274,9 +286,7 @@ func convertOpenAIStreamingChunkToAnthropic(
 	if finishReason := root.Get("choices.0.finish_reason"); finishReason.Exists() && finishReason.String() != "" {
 		reason := finishReason.String()
 		switch {
-		case param.SawToolCall:
-			param.FinishReason = "tool_calls"
-		case reason == "tool_calls":
+		case reason == "tool_calls" && !param.SawToolCall:
 			param.FinishReason = "stop"
 		default:
 			param.FinishReason = reason
@@ -294,7 +304,7 @@ func convertOpenAIStreamingChunkToAnthropic(
 		(param.FinishReason != "" || param.SawToolCall || param.TextContentBlockStarted ||
 			param.ThinkingContentBlockStarted || param.ContentAccumulator.Len() > 0 ||
 			len(param.InterleavedContentChunks) > 0)
-	if !param.MessageDeltaSent && (param.FinishReason != "" || trailingUsage) && hasUsage {
+	if !param.MessageDeltaSent && trailingUsage {
 		finalizeOpenAIAnthropicContentBlocks(param, &results)
 		emitAnthropicMessageDelta(param, &results)
 		emitMessageStopIfNeeded(param, &results)
@@ -325,8 +335,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0] // Take first choice
 
-		reasoningNode := choice.Get("message.reasoning_content")
-		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
+		for _, reasoningText := range collectOpenAIObjectReasoningTexts(choice.Get("message")) {
 			if reasoningText == "" {
 				continue
 			}
@@ -607,6 +616,15 @@ func toolCallAccumulatorIndexes(accumulators map[int]*toolCallAccumulator) []int
 	return indexes
 }
 
+func collectOpenAIObjectReasoningTexts(node gjson.Result) []string {
+	for _, field := range []string{"reasoning_content", "reasoning", "reasoning_text", "reasoning_details"} {
+		if texts := collectOpenAIReasoningTexts(node.Get(field)); len(texts) > 0 {
+			return texts
+		}
+	}
+	return nil
+}
+
 func collectOpenAIReasoningTexts(node gjson.Result) []string {
 	var texts []string
 	if !node.Exists() {
@@ -801,15 +819,13 @@ func convertOpenAIResponseToClaudeNonStream(
 				}
 			}
 
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
-				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
-					if reasoningText == "" {
-						continue
-					}
-					block := []byte(`{"type":"thinking","thinking":""}`)
-					block, _ = sjson.SetBytes(block, "thinking", reasoningText)
-					out, _ = sjson.SetRawBytes(out, "content.-1", block)
+			for _, reasoningText := range collectOpenAIObjectReasoningTexts(message) {
+				if reasoningText == "" {
+					continue
 				}
+				block := []byte(`{"type":"thinking","thinking":""}`)
+				block, _ = sjson.SetBytes(block, "thinking", reasoningText)
+				out, _ = sjson.SetRawBytes(out, "content.-1", block)
 			}
 
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
@@ -880,15 +896,14 @@ func extractOpenAIUsage(usage gjson.Result) (int64, int64, int64, int64) {
 	outputTokens := usage.Get("completion_tokens").Int()
 	cachedTokens := usage.Get("prompt_tokens_details.cached_tokens").Int()
 	cacheWriteTokens := usage.Get("prompt_tokens_details.cache_write_tokens").Int()
-	if cacheWriteTokens == 0 {
+	if cacheWriteTokens <= 0 {
 		cacheWriteTokens = usage.Get("prompt_tokens_details.cache_creation_tokens").Int()
 	}
 
-	if cachedTokens > 0 {
-		if inputTokens >= cachedTokens {
-			inputTokens -= cachedTokens
-		} else {
-			inputTokens = 0
+	inputTokens = max(int64(0), inputTokens)
+	for _, deduction := range []int64{cachedTokens, cacheWriteTokens} {
+		if deduction > 0 {
+			inputTokens = max(int64(0), inputTokens-deduction)
 		}
 	}
 

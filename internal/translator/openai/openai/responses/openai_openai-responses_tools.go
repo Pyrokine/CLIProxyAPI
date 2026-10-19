@@ -4,9 +4,41 @@ import (
 	"strings"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func responsesChatToolNameMap(identity *translatorcommon.ResponsesToolIdentity, request []byte) map[string]string {
+	declarations := identity.Declarations()
+	names := make([]string, 0, len(declarations))
+	for _, declaration := range declarations {
+		names = append(names, declaration.QualifiedName)
+	}
+	root := gjson.ParseBytes(request)
+	var historyNames []string
+	for _, item := range root.Get("input").Array() {
+		if kind := item.Get("type").String(); kind == "function_call" || kind == "custom_tool_call" {
+			historyNames = append(historyNames, identity.ResolveName(item.Get("name").String(), item.Get("namespace").String()))
+		}
+	}
+	name, namespace := responsesToolChoiceName(root.Get("tool_choice"))
+	historyNames = append(historyNames, identity.ResolveName(name, namespace))
+	return util.ChatFunctionNameMap(names, historyNames...)
+}
+
+func responsesToolChoiceName(choice gjson.Result) (string, string) {
+	var name, namespace string
+	for _, prefix := range []string{"", "function.", "custom."} {
+		if name == "" {
+			name = choice.Get(prefix + "name").String()
+		}
+		if namespace == "" {
+			namespace = choice.Get(prefix + "namespace").String()
+		}
+	}
+	return name, namespace
+}
 
 func convertResponsesDeclarationToOpenAIChat(declaration translatorcommon.ResponsesToolDeclaration) ([]byte, bool) {
 	tool := gjson.Parse(declaration.Raw)
@@ -34,10 +66,12 @@ func convertResponsesDeclarationToOpenAIChat(declaration translatorcommon.Respon
 }
 
 func responsesToolDescription(tool gjson.Result) string {
-	if description := strings.TrimSpace(tool.Get("description").String()); description != "" {
-		return description
+	for _, path := range []string{"description", "function.description"} {
+		if description := tool.Get(path).String(); strings.TrimSpace(description) != "" {
+			return description
+		}
 	}
-	return strings.TrimSpace(tool.Get("function.description").String())
+	return ""
 }
 
 func responsesToolParameters(tool gjson.Result) gjson.Result {

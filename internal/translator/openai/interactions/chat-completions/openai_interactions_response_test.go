@@ -7,6 +7,26 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestInteractionsFailedEventToOpenAIChatError(t *testing.T) {
+	for _, event := range []string{
+		`{"event_type":"response.failed","error":{"type":"api_error","code":"resource_exhausted","message":"model capacity exhausted"}}`,
+		`{"event_type":"interaction.failed","response":{"error":{"type":"api_error","code":"resource_exhausted","message":"model capacity exhausted"}}}`,
+	} {
+		var state any
+		out := convertInteractionsResponseToOpenAI(context.Background(), "test-model", nil, nil, []byte(event), &state)
+		if len(out) != 1 || gjson.GetBytes(out[0], "error.type").String() != "api_error" ||
+			gjson.GetBytes(out[0], "error.message").String() != "model capacity exhausted" ||
+			gjson.GetBytes(out[0], "error.code").String() != "resource_exhausted" {
+			t.Fatalf("failed event = %q, want OpenAI error", out)
+		}
+		completed := convertInteractionsResponseToOpenAI(context.Background(), "test-model", nil, nil,
+			[]byte(`{"event_type":"interaction.completed"}`), &state)
+		if len(completed) != 0 {
+			t.Fatalf("completed after failure = %q", completed)
+		}
+	}
+}
+
 func TestInteractionsToolCallUsesDenseOpenAIStreamIndex(t *testing.T) {
 	var state any
 	convertInteractionsResponseToOpenAI(

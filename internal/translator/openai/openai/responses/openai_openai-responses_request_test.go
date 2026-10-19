@@ -6,6 +6,27 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestResponsesToolDescriptionPreservesGrammarWhitespace(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "top level", body: `{"description":" \nOriginal patch grammar:\nstart: patch\r\n\n "}`, want: " \nOriginal patch grammar:\nstart: patch\r\n\n "},
+		{name: "nested", body: `{"function":{"description":" \nstart: patch\r\n\n "}}`, want: " \nstart: patch\r\n\n "},
+		{name: "top level wins", body: `{"description":"  first\n","function":{"description":"second"}}`, want: "  first\n"},
+		{name: "blank top level", body: `{"description":" \r\n","function":{"description":"  nested\n "}}`, want: "  nested\n "},
+		{name: "both blank", body: `{"description":" \r\n","function":{"description":"\t "}}`},
+		{name: "missing", body: `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := responsesToolDescription(gjson.Parse(tc.body)); got != tc.want {
+				t.Fatalf("description = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletionsAggregatesContinuousFunctionCalls(t *testing.T) {
 	inputJSON := []byte(`{
 		"input": [

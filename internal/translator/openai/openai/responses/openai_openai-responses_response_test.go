@@ -2,9 +2,11 @@ package responses
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -21,6 +23,41 @@ func openAIResponsesSSEData(t *testing.T, chunk []byte) (string, gjson.Result) {
 		t.Fatalf("invalid SSE data JSON: %q", dataLine)
 	}
 	return event, gjson.Parse(dataLine)
+}
+
+func TestOpenAIChatToolArgumentsKeepHTMLCharactersInResponses(t *testing.T) {
+	arguments := `{"command":"2>&1 <work>"}`
+	chatResponse := []byte(`{"id":"chatcmpl_1","created":1,"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"command\":\"2>&1 <work>\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	out := convertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-test", nil, nil, chatResponse, nil)
+	if got := gjson.GetBytes(out, "output.0.arguments").String(); got != arguments ||
+		!strings.Contains(string(out), `2>&1 <work>`) {
+		t.Fatalf("non-stream tool arguments = %q in %s", got, out)
+	}
+
+	chunks := [][]byte{
+		[]byte(`data: {"id":"chatcmpl_1","created":1,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"command\":\"2>&1 <work>\"}"}}]},"finish_reason":null}]}`),
+		[]byte(`data: {"id":"chatcmpl_1","created":1,"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`),
+		[]byte(`data: [DONE]`),
+	}
+	var state any
+	counts := make(map[string]int)
+	for _, chunk := range chunks {
+		for _, output := range convertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-test", nil, nil, chunk, &state) {
+			event, _ := openAIResponsesSSEData(t, output)
+			switch event {
+			case "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed":
+				counts[event]++
+				if !strings.Contains(string(output), `2>&1 <work>`) {
+					t.Fatalf("%s escaped tool argument HTML: %s", event, output)
+				}
+			}
+		}
+	}
+	for _, event := range []string{"response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed"} {
+		if counts[event] != 1 {
+			t.Fatalf("%s count=%d, want one", event, counts[event])
+		}
+	}
 }
 
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesCreatedIncludesOriginalRequestModel(t *testing.T) {
@@ -490,5 +527,105 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesMultipleReasoningI
 	}
 	if reasoningIDs[0] == reasoningIDs[1] {
 		t.Fatalf("reasoning item IDs must be distinct: %v", reasoningIDs)
+	}
+}
+
+func TestResponsesChatDeferredPatchIdentityValidation(t *testing.T) {
+	patch := `{"tools":[{"type":"custom","name":"apply_patch"}]}`
+	for _, test := range []struct {
+		name, request string
+		ids, names    []string
+		wantFailure   bool
+	}{
+		{name: "return to first ID", request: patch, ids: []string{"c1", "c2", "c1"}, names: []string{"", "", "apply_patch"}, wantFailure: true},
+		{name: "keep second ID", request: patch, ids: []string{"c1", "c2", "c2"}, names: []string{"", "", "apply_patch"}, wantFailure: true},
+		{name: "omit final ID", request: patch, ids: []string{"c1", "c2", ""}, names: []string{"", "", "apply_patch"}, wantFailure: true},
+		{name: "infer at terminal", request: patch, ids: []string{"c1", "c2", "c1"}, names: []string{"", "", ""}, wantFailure: true},
+		{name: "name conflict before ID", request: patch, ids: []string{"", "", "c1"}, names: []string{"apply_patch", "other", "other"}, wantFailure: true},
+		{name: "ID conflict after preview", request: patch, ids: []string{"c1", "c2", "c1"}, names: []string{"apply_patch", "apply_patch", "apply_patch"}, wantFailure: true},
+		{name: "repeated identity", request: patch, ids: []string{"c1", "c1", "c1"}, names: []string{"apply_patch", "apply_patch", "apply_patch"}},
+		{name: "ordinary function", request: `{"tools":[{"type":"function","name":"apply_patch"}]}`, ids: []string{"c1", "c2", "c1"}, names: []string{"", "", "apply_patch"}},
+		{name: "function winner", request: `{"tools":[{"type":"function","name":"apply_patch"},{"type":"custom","name":"apply_patch"}]}`, ids: []string{"c1", "c2", "c1"}, names: []string{"", "", "apply_patch"}},
+		{name: "other custom", request: `{"tools":[{"type":"custom","name":"edit"}]}`, ids: []string{"c1", "c2", "c1"}, names: []string{"", "", "edit"}},
+		{name: "unrelated function beside patch", request: `{"tools":[{"type":"custom","name":"apply_patch"},{"type":"function","name":"lookup"}]}`, ids: []string{"c1", "c2", "c1"}, names: []string{"", "", "lookup"}},
+		{name: "namespace patch", request: `{"tools":[{"type":"namespace","name":"editor","tools":[{"type":"custom","name":"apply_patch"}]}]}`, ids: []string{"c1", "c2", "c1"}, names: []string{"", "", "editor__apply_patch"}, wantFailure: true},
+		{name: "additional patch", request: `{"input":[{"type":"additional_tools","tools":[{"type":"custom","name":"apply_patch"}]}]}`, ids: []string{"c1", "c2", "c1"}, names: []string{"", "", "apply_patch"}, wantFailure: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var param any
+			var output [][]byte
+			feed := func(chunk string) {
+				output = append(output, sdktranslator.TranslateStream(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse, "offline", []byte(test.request), nil, []byte(chunk), &param)...)
+			}
+			for index := range test.ids {
+				arguments := ""
+				if index == 1 {
+					arguments = `{"input":"complete input"}`
+				}
+				feed(fmt.Sprintf(`data: {"id":"r","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":%q,"function":{"name":%q,"arguments":%q}}]}}]}`, test.ids[index], test.names[index], arguments))
+			}
+			feed(`data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`)
+			feed("data: [DONE]")
+			failures, completions := 0, 0
+			var item gjson.Result
+			for _, frame := range output {
+				kind, event := openAIResponsesSSEData(t, frame)
+				switch kind {
+				case "response.failed":
+					failures++
+					if event.Get("response.error.code").String() != "invalid_tool_arguments" {
+						t.Fatalf("unexpected failure: %s", event.Raw)
+					}
+				case "response.completed":
+					completions++
+					item = event.Get("response.output.0")
+				}
+			}
+			err := sdktranslator.ResponseTranslationError(&param)
+			if test.wantFailure {
+				if failures != 1 || completions != 0 || err == nil || err.(interface{ StatusCode() int }).StatusCode() != 502 {
+					t.Fatalf("conflicting patch identity accepted: failures=%d completions=%d error=%v", failures, completions, err)
+				}
+			} else if failures != 0 || completions != 1 || err != nil || item.Get("call_id").String() != "c1" {
+				t.Fatalf("unrelated tool changed: failures=%d completions=%d item=%s error=%v", failures, completions, item.Raw, err)
+			}
+			if late := sdktranslator.TranslateStream(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse, "offline", []byte(test.request), nil, []byte("data: [DONE]"), &param); len(late) != 0 {
+				t.Fatalf("terminal state emitted additional events: %q", late)
+			}
+		})
+	}
+}
+
+func TestResponsesChatReasoningOnlyRequiresFinishReason(t *testing.T) {
+	for _, reason := range []string{"", "stop", "length"} {
+		t.Run("finish="+reason, func(t *testing.T) {
+			var param any
+			chunks := []string{`data: {"id":"r","choices":[{"index":0,"delta":{"reasoning_content":"thinking"}}]}`}
+			if reason != "" {
+				chunks = append(chunks, fmt.Sprintf(`data: {"choices":[{"index":0,"delta":{},"finish_reason":%q}]}`, reason))
+			}
+			chunks = append(chunks, "data: [DONE]")
+			terminal := ""
+			for _, chunk := range chunks {
+				for _, frame := range sdktranslator.TranslateStream(context.Background(), sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse, "offline", []byte(`{}`), nil, []byte(chunk), &param) {
+					kind, _ := openAIResponsesSSEData(t, frame)
+					if kind == "response.completed" || kind == "response.incomplete" {
+						if terminal != "" {
+							t.Fatalf("duplicate terminal: %s", frame)
+						}
+						terminal = kind
+					}
+				}
+			}
+			want := ""
+			if reason == "stop" {
+				want = "response.completed"
+			} else if reason == "length" {
+				want = "response.incomplete"
+			}
+			if terminal != want {
+				t.Fatalf("reasoning terminal=%q, want %q", terminal, want)
+			}
+		})
 	}
 }

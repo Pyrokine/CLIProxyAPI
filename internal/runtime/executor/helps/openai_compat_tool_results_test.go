@@ -38,6 +38,46 @@ func TestNormalizeOpenAIToolResultsTextOnly(t *testing.T) {
 	}
 }
 
+func TestNormalizeOpenAIToolImageRelaysTextOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		tool  string
+		extra string
+		want  string
+	}{
+		{"image-only", claudeToolResultImagePlaceholder, "", openAIToolResultImageOmittedText},
+		{"text-and-image", "tool text", "", "tool text\n\n" + openAIToolResultImageOmittedText},
+		{"extra-user-text", "tool text", `,{"type":"text","text":"real user text"}`, "tool text\n\n" + openAIToolResultImageOmittedText},
+		{"existing-marker", openAIToolResultImageOmittedText, "", openAIToolResultImageOmittedText},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"messages":[{"role":"tool","tool_call_id":"fixture-call","content":"` + tc.tool + `"},{"role":"user","content":[{"type":"text","text":"` + claudeToolResultImageRelayNotice + `"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}` + tc.extra + `]},{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://fixture.invalid/user.png"}}]}]}`)
+			got := NormalizeOpenAIToolResultsTextOnly(body)
+			if content := gjson.GetBytes(got, "messages.0.content").String(); content != tc.want {
+				t.Fatalf("tool text = %q, want %q", content, tc.want)
+			}
+			messages := gjson.GetBytes(got, "messages").Array()
+			wantCount := 2
+			if tc.extra != "" {
+				wantCount = 3
+				if messages[1].Get("content.#").Int() != 1 || messages[1].Get("content.0.text").String() != "real user text" {
+					t.Fatalf("real text was not retained: %s", got)
+				}
+			}
+			if len(messages) != wantCount || messages[len(messages)-1].Get("content.0.image_url.url").String() != "https://fixture.invalid/user.png" {
+				t.Fatalf("normal user image or relay count changed: %s", got)
+			}
+			if again := NormalizeOpenAIToolResultsTextOnly(got); string(again) != string(got) {
+				t.Fatalf("normalization is not idempotent: %s", again)
+			}
+		})
+	}
+	quotedNotice := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"` + claudeToolResultImageRelayNotice + `"},{"type":"image_url","image_url":{"url":"https://fixture.invalid/user.png"}}]}]}`)
+	if got := NormalizeOpenAIToolResultsTextOnly(quotedNotice); string(got) != string(quotedNotice) {
+		t.Fatal("user image without a preceding tool was treated as a synthetic relay")
+	}
+}
+
 func TestNormalizeClaudeToolResultsTextOnly(t *testing.T) {
 	input := []byte(`{"messages":[
 		{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"inspect_image","input":{}}]},

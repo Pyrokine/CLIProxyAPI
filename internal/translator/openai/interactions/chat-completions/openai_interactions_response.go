@@ -110,8 +110,8 @@ func convertInteractionsResponseToOpenAINonStream(
 	}
 	if sawToolCall {
 		out, _ = sjson.SetBytes(out, "choices.0.message.content", nil)
-		out, _ = sjson.SetBytes(out, "choices.0.finish_reason", "tool_calls")
 	}
+	out, _ = sjson.SetBytes(out, "choices.0.finish_reason", interactionsChatFinishReason(root, sawToolCall))
 	if environmentID := interactionEnvironmentID(interaction, root); environmentID != "" {
 		out, _ = sjson.SetBytes(out, "environment_id", environmentID)
 	}
@@ -129,7 +129,7 @@ func convertInteractionsEventToOpenAIChat(
 		return nil
 	}
 	root := gjson.ParseBytes(payload)
-	if !root.Exists() {
+	if !root.Exists() || st.Completed {
 		return nil
 	}
 	switch root.Get("event_type").String() {
@@ -146,6 +146,9 @@ func convertInteractionsEventToOpenAIChat(
 	case "interaction.completed", "finish":
 		st.EnvironmentID = firstNonEmpty(interactionEnvironmentID(root.Get("interaction"), root), st.EnvironmentID)
 		return appendOpenAIChatCompleted(nil, root, st)
+	case "response.failed", "interaction.failed":
+		st.Completed = true
+		return interactionsFailedToOpenAIChat(root)
 	case "done":
 		return nil
 	}
@@ -237,14 +240,55 @@ func appendOpenAIChatCompleted(out [][]byte, root gjson.Result, st *interactions
 	}
 	out = ensureOpenAIChatStarted(out, st)
 	chunk := openAIChatBaseChunk(st)
-	finishReason := "stop"
-	if st.SawToolCall {
-		finishReason = "tool_calls"
-	}
-	chunk, _ = sjson.SetBytes(chunk, "choices.0.finish_reason", finishReason)
+	chunk, _ = sjson.SetBytes(chunk, "choices.0.finish_reason", interactionsChatFinishReason(root, st.SawToolCall))
 	chunk = setOpenAIChatUsageFromInteractions(chunk, "usage", translatorcommon.InteractionsUsage(root))
 	st.Completed = true
 	return append(out, chunk)
+}
+
+func interactionsChatFinishReason(root gjson.Result, sawToolCall bool) string {
+	reason := firstNonEmpty(
+		root.Get("interaction.finish_reason").String(), root.Get("finish_reason").String(),
+		root.Get("interaction.incomplete_details.reason").String(), root.Get("incomplete_details.reason").String(),
+	)
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "length", "max_tokens", "max_output_tokens":
+		return "length"
+	case "content_filter":
+		return "content_filter"
+	}
+	if firstNonEmpty(root.Get("interaction.status").String(), root.Get("status").String()) == "incomplete" {
+		return "length"
+	}
+	if sawToolCall {
+		return "tool_calls"
+	}
+	return "stop"
+}
+
+func interactionsFailedToOpenAIChat(root gjson.Result) [][]byte {
+	errNode := root.Get("error")
+	if !errNode.Exists() {
+		errNode = root.Get("interaction.error")
+	}
+	if !errNode.Exists() {
+		errNode = root.Get("response.error")
+	}
+	message := errNode.Get("message").String()
+	if message == "" {
+		message = "upstream execution failed"
+	}
+	errType := errNode.Get("type").String()
+	if errType == "" {
+		errType = "server_error"
+	}
+	out := []byte(`{"error":{"message":"","type":""}}`)
+	out, _ = sjson.SetBytes(out, "error.message", message)
+	out, _ = sjson.SetBytes(out, "error.type", errType)
+	if code := errNode.Get("code").String(); code != "" {
+		out, _ = sjson.SetBytes(out, "error.code", code)
+	}
+	return [][]byte{out}
 }
 
 func openAIChatBaseChunk(st *interactionsToOpenAIChatStreamState) []byte {

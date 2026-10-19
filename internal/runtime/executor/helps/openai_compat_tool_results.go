@@ -6,11 +6,16 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
-const openAIToolResultImageOmittedText = "[image omitted: unsupported by upstream]"
+const (
+	openAIToolResultImageOmittedText = "[image omitted: unsupported by upstream]"
+	claudeToolResultImageRelayNotice = "Images returned by the preceding tool call(s):"
+	claudeToolResultImagePlaceholder = "[Tool returned image content; the images follow in the next user message.]"
+)
 
 // ShouldNormalizeOpenAIToolResultsForModel reports whether the selected model
 // explicitly excludes image input through its input-modalities configuration.
@@ -29,34 +34,92 @@ func ShouldNormalizeOpenAIToolResultsForModel(
 	return normalize
 }
 
-// NormalizeOpenAIToolResultsTextOnly converts tool message content to strings.
-// Text parts are preserved and image parts are replaced with a short marker.
+// NormalizeOpenAIToolResultsTextOnly 保留工具文本，用省略提示替换工具图像与其合成转发消息
 func NormalizeOpenAIToolResultsTextOnly(payload []byte) []byte {
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.Exists() || !messages.IsArray() {
+	if !gjson.ValidBytes(payload) {
 		return payload
 	}
-
-	out := payload
-	messageIndex := 0
-	messages.ForEach(
-		func(_, message gjson.Result) bool {
-			if message.Get("role").String() == "tool" {
-				content := message.Get("content")
-				if content.Exists() && content.Type != gjson.String {
-					path := fmt.Sprintf("messages.%d.content", messageIndex)
-					if updated, errSet := sjson.SetBytes(
-						out, path, flattenOpenAIToolResultContent(content),
-					); errSet == nil {
-						out = updated
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+	result := make([]string, 0, len(messages.Array()))
+	lastTool := -1
+	marked := false
+	changed := false
+	setText := func(raw, text string) string {
+		updated, err := sjson.SetBytes([]byte(raw), "content", text)
+		if err != nil {
+			log.Warn("text-only tool result normalization failed")
+			return raw
+		}
+		changed = true
+		return string(updated)
+	}
+	for _, message := range messages.Array() {
+		raw := message.Raw
+		content := message.Get("content")
+		switch message.Get("role").String() {
+		case "tool":
+			if content.Exists() && content.Type != gjson.String {
+				raw = setText(raw, flattenOpenAIToolResultContent(content))
+			} else if content.String() == claudeToolResultImagePlaceholder {
+				raw = setText(raw, openAIToolResultImageOmittedText)
+				marked = true
+			}
+			lastTool = len(result)
+		case "user":
+			if lastTool >= 0 && content.IsArray() {
+				parts := make([]string, 0)
+				notice, images := false, false
+				for _, part := range content.Array() {
+					if part.Get("type").String() == "text" && part.Get("text").String() == claudeToolResultImageRelayNotice {
+						notice = true
+					} else if isOpenAIImageToolResultPart(part) {
+						images = true
+					} else {
+						parts = append(parts, part.Raw)
 					}
 				}
+				if notice && images {
+					if !marked {
+						text := gjson.Get(result[lastTool], "content").String()
+						if !strings.Contains(text, openAIToolResultImageOmittedText) {
+							if text != "" {
+								text += "\n\n"
+							}
+							result[lastTool] = setText(result[lastTool], text+openAIToolResultImageOmittedText)
+						}
+					}
+					lastTool, marked = -1, false
+					if len(parts) == 0 {
+						changed = true
+						continue
+					}
+					updated, err := sjson.SetRawBytes([]byte(raw), "content", []byte("["+strings.Join(parts, ",")+"]"))
+					if err != nil {
+						log.Warn("text-only tool image relay normalization failed")
+						return payload
+					}
+					raw = string(updated)
+					changed = true
+				}
 			}
-			messageIndex++
-			return true
-		},
-	)
-	return out
+			lastTool, marked = -1, false
+		default:
+			lastTool, marked = -1, false
+		}
+		result = append(result, raw)
+	}
+	if !changed {
+		return payload
+	}
+	updated, err := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(result, ",")+"]"))
+	if err != nil {
+		log.Warn("text-only tool messages normalization failed")
+		return payload
+	}
+	return updated
 }
 
 // NormalizeClaudeToolResultsTextOnly removes image parts before Claude requests
