@@ -34,12 +34,12 @@ func convertGeminiCLIResponseToOpenAIResponsesNonStream(
 	}
 
 	requestResult := gjson.GetBytes(originalRequestRawJSON, "request")
-	if responseResult.Exists() {
+	if requestResult.Exists() {
 		originalRequestRawJSON = []byte(requestResult.Raw)
 	}
 
 	requestResult = gjson.GetBytes(requestRawJSON, "request")
-	if responseResult.Exists() {
+	if requestResult.Exists() {
 		requestRawJSON = []byte(requestResult.Raw)
 	}
 

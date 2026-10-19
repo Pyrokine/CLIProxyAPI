@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // TokenStorage stores OAuth2 token information for Google Gemini API authentication.
@@ -35,6 +36,14 @@ type TokenStorage struct {
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.
 	Metadata map[string]any `json:"-"`
+}
+
+func (ts *TokenStorage) CloneForPersistence() coreauth.TokenStorage {
+	if ts == nil {
+		return nil
+	}
+	copyStorage := *ts
+	return &copyStorage
 }
 
 // SetMetadata injects metadata before the token is persisted.

@@ -95,6 +95,7 @@ func convertGeminiResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 			p.UnixTimestamp = parsedTime.Unix()
 		}
 	}
+	p.Usage.Update(root.Get("cpaUsageMetadata"))
 	p.Usage.Update(root.Get("usageMetadata"))
 
 	// Initialize the OpenAI SSE base template.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ type interactionsToGeminiStreamState struct {
 	ID             string
 	Model          string
 	ServiceTier    string
+	Completed      bool
 	StepNames      map[int]string
 	StepIDs        map[int]string
 	StepTypes      map[int]string
@@ -124,7 +126,7 @@ func convertInteractionsEventToGemini(modelName string, rawJSON []byte, st *inte
 		return nil
 	}
 	root := gjson.ParseBytes(payload)
-	if !root.Exists() {
+	if !root.Exists() || st.Completed {
 		return nil
 	}
 	switch root.Get("event_type").String() {
@@ -150,9 +152,61 @@ func convertInteractionsEventToGemini(modelName string, rawJSON []byte, st *inte
 		chunk := buildInteractionsGeminiChunk(
 			st, modelName, nil, "STOP", translatorcommon.InteractionsUsage(root), true,
 		)
+		st.Completed = true
 		return [][]byte{chunk}
+	case "response.failed", "interaction.failed":
+		st.Completed = true
+		errNode := root.Get("error")
+		if !errNode.Exists() {
+			errNode = root.Get("interaction.error")
+		}
+		if !errNode.Exists() {
+			errNode = root.Get("response.error")
+		}
+		message := errNode.Get("message").String()
+		if message == "" {
+			message = "upstream execution failed"
+		}
+		code := firstNonEmptyInteractionString(errNode.Get("code").String(), root.Get("code").String(), errNode.Get("status").String())
+		statusCode, statusName := interactionsGeminiErrorStatus(code)
+		out := []byte(`{"error":{"code":500,"message":"","status":"INTERNAL"}}`)
+		out, _ = sjson.SetBytes(out, "error.code", statusCode)
+		out, _ = sjson.SetBytes(out, "error.message", message)
+		out, _ = sjson.SetBytes(out, "error.status", statusName)
+		return [][]byte{out}
 	}
 	return nil
+}
+
+func interactionsGeminiErrorStatus(code string) (int, string) {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "400", "invalid_argument":
+		return 400, "INVALID_ARGUMENT"
+	case "401", "unauthenticated":
+		return 401, "UNAUTHENTICATED"
+	case "403", "permission_denied":
+		return 403, "PERMISSION_DENIED"
+	case "404", "not_found":
+		return 404, "NOT_FOUND"
+	case "429", "resource_exhausted", "rate_limit_exceeded":
+		return 429, "RESOURCE_EXHAUSTED"
+	case "499", "canceled", "cancelled":
+		return 499, "CANCELLED"
+	case "503", "unavailable":
+		return 503, "UNAVAILABLE"
+	case "504", "deadline_exceeded":
+		return 504, "DEADLINE_EXCEEDED"
+	case "500", "internal":
+		return 500, "INTERNAL"
+	default:
+		if number, err := strconv.Atoi(strings.TrimSpace(code)); err == nil && number >= 400 && number < 600 {
+			if number >= 500 {
+				return number, "INTERNAL"
+			}
+			return number, "INVALID_ARGUMENT"
+		}
+		return 500, "INTERNAL"
+	}
 }
 
 func rememberInteractionsGeminiStep(root gjson.Result, st *interactionsToGeminiStreamState) {
@@ -368,7 +422,7 @@ func interactionsFunctionResponseStepToGeminiPart(step gjson.Result) []byte {
 	if id := firstNonEmptyInteractionString(step.Get("call_id").String(), step.Get("id").String()); id != "" {
 		part, _ = sjson.SetBytes(part, "functionResponse.id", id)
 	}
-	part = setInteractionsGeminiRawObject(
+	part = setInteractionsGeminiFunctionResponse(
 		part, "functionResponse.response", firstExistingInteractionResult(step, "result", "response"),
 	)
 	return part
@@ -497,6 +551,20 @@ func setInteractionsGeminiRawObject(out []byte, path string, value gjson.Result)
 		out, _ = sjson.SetRawBytes(out, path, []byte(value.Raw))
 	}
 	return out
+}
+
+func setInteractionsGeminiFunctionResponse(out []byte, path string, value gjson.Result) []byte {
+	if !value.Exists() {
+		out, _ = sjson.SetRawBytes(out, path, []byte(`{}`))
+		return out
+	}
+	if value.Type == gjson.String {
+		raw := strings.TrimSpace(value.String())
+		if raw != "" && gjson.Valid(raw) {
+			return translatorcommon.SetGeminiFunctionResponseRaw(out, path, raw)
+		}
+	}
+	return translatorcommon.SetGeminiFunctionResponseResult(out, path, value)
 }
 
 func firstNonEmptyInteractionString(values ...string) string {

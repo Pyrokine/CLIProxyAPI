@@ -10,6 +10,26 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestInteractionsFailedEventToGeminiError(t *testing.T) {
+	for _, event := range []string{
+		`{"event_type":"response.failed","error":{"code":"resource_exhausted","message":"model capacity exhausted"}}`,
+		`{"event_type":"interaction.failed","interaction":{"error":{"code":"429","message":"model capacity exhausted"}}}`,
+		`{"event_type":"response.failed","response":{"error":{"code":"429","message":"model capacity exhausted"}}}`,
+	} {
+		var state any
+		out := convertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil, []byte(event), &state)
+		if len(out) != 1 || gjson.GetBytes(out[0], "error.code").Int() != 429 ||
+			gjson.GetBytes(out[0], "error.message").String() != "model capacity exhausted" {
+			t.Fatalf("failed event = %s, want Gemini error 429; output=%q", event, out)
+		}
+		completed := convertInteractionsResponseToGemini(context.Background(), "gemini-test", nil, nil,
+			[]byte(`{"event_type":"interaction.completed"}`), &state)
+		if len(completed) != 0 {
+			t.Fatalf("completed after failure = %q", completed)
+		}
+	}
+}
+
 func TestConvertGeminiResponseToInteractionsNonStreamSnakeCaseUsage(t *testing.T) {
 	out := convertGeminiResponseToInteractionsNonStream(
 		context.Background(),
@@ -156,6 +176,19 @@ func gptInteractionsSignatureForTest() string {
 	payload := make([]byte, 1+8+16+16+32)
 	payload[0] = 0x80
 	return base64.RawURLEncoding.EncodeToString(payload)
+}
+
+func TestInteractionsFunctionResponseStepKeepsSchemaReferencesOpaque(t *testing.T) {
+	for _, raw := range []string{
+		`{"type":"function_result","name":"lookup","result":{"schema":{"$ref":"#/components/schemas/Item"}}}`,
+		`{"type":"function_result","name":"lookup","result":"{\"schema\":{\"$ref\":\"#/components/schemas/Item\"}}"}`,
+	} {
+		part := interactionsFunctionResponseStepToGeminiPart(gjson.Parse(raw))
+		result := gjson.GetBytes(part, "functionResponse.response.result")
+		if result.Type != gjson.String || result.String() != `{"schema":{"$ref":"#/components/schemas/Item"}}` {
+			t.Fatalf("function result with $ref = %s, part = %s", result.Raw, part)
+		}
+	}
 }
 
 func TestInteractionsFunctionArgumentsAreAssembledAtStepStop(t *testing.T) {

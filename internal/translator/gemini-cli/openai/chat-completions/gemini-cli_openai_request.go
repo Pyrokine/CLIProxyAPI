@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -26,7 +26,13 @@ const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
 //
 // Returns:
 //   - []byte: The transformed request data in Gemini CLI API format
-func convertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bool) []byte {
+func convertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, stream bool) []byte {
+	out, _ := convertOpenAIRequestToGeminiCLIChecked(modelName, inputRawJSON, stream)
+	return out
+}
+
+func convertOpenAIRequestToGeminiCLIChecked(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
+	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
 	// Base envelope (no default thinkingConfig)
 	out := []byte(`{"project":"","request":{"contents":[]},"model":"gemini-2.5-pro"}`)
@@ -176,46 +182,47 @@ func convertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 				// Build single user content node to avoid splitting into multiple contents
 				node := []byte(`{"role":"user","parts":[]}`)
 				if content.Type == gjson.String {
-					node, _ = sjson.SetBytes(node, "parts.0.text", content.String())
+					if content.String() != "" {
+						node, _ = sjson.SetBytes(node, "parts.0.text", content.String())
+					}
 				} else if content.IsArray() {
-					items := content.Array()
-					p := 0
-					for _, item := range items {
+					partCount := 0
+					for _, item := range content.Array() {
+						partIndex := "parts." + itoa(partCount)
 						switch item.Get("type").String() {
 						case "text":
-							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", item.Get("text").String())
-							p++
+							if text := item.Get("text").String(); text != "" {
+								node, _ = sjson.SetBytes(node, partIndex+".text", text)
+								partCount++
+							}
 						case "image_url":
-							imageURL := item.Get("image_url.url").String()
-							if len(imageURL) > 5 {
-								pieces := strings.SplitN(imageURL[5:], ";", 2)
-								if len(pieces) == 2 && len(pieces[1]) > 7 {
-									mime := pieces[0]
-									data := pieces[1][7:]
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mime)
-									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
-									node, _ = sjson.SetBytes(
-										node, "parts."+itoa(p)+".thoughtSignature", geminiCLIFunctionThoughtSignature,
-									)
-									p++
-								}
+							mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData("", "", item.Get("image_url.url").String())
+							if ok && strings.HasPrefix(mimeType, "image/") {
+								node, _ = sjson.SetBytes(node, partIndex+".inlineData.mime_type", mimeType)
+								node, _ = sjson.SetBytes(node, partIndex+".inlineData.data", data)
+								node, _ = sjson.SetBytes(node, partIndex+".thoughtSignature", geminiCLIFunctionThoughtSignature)
+								partCount++
+							} else {
+								drops.Drop("image_url")
 							}
 						case "file":
-							filename := item.Get("file.filename").String()
-							fileData := item.Get("file.file_data").String()
-							ext := ""
-							if sp := strings.Split(filename, "."); len(sp) > 1 {
-								ext = sp[len(sp)-1]
-							}
-							if mimeType, ok := misc.MimeTypes[ext]; ok {
-								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mimeType)
-								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", fileData)
-								p++
+							mimeType, data, ok := translatorcommon.NormalizeOpenAIFileData(
+								item.Get("file.filename").String(), "", item.Get("file.file_data").String(),
+							)
+							if ok {
+								node, _ = sjson.SetBytes(node, partIndex+".inlineData.mime_type", mimeType)
+								node, _ = sjson.SetBytes(node, partIndex+".inlineData.data", data)
+								partCount++
 							} else {
-								log.Warnf("Unknown file name extension '%s' in user message, skip", ext)
+								drops.Drop("file")
 							}
+						case "input_audio", "audio", "video", "video_url", "input_file":
+							drops.Drop(item.Get("type").String())
 						}
 					}
+				}
+				if role == "user" {
+					drops.EndTurn(len(gjson.GetBytes(node, "parts").Array()))
 				}
 				out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 			} else if role == "assistant" {
@@ -420,7 +427,10 @@ func convertOpenAIRequestToGeminiCLI(modelName string, inputRawJSON []byte, _ bo
 		}
 	}
 
-	return common.AttachDefaultSafetySettings(out, "request.safetySettings")
+	if err := drops.Err(); err != nil {
+		return nil, err
+	}
+	return common.AttachDefaultSafetySettings(out, "request.safetySettings"), nil
 }
 
 // itoa converts int to string without strconv import for few usages.

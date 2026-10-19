@@ -6,6 +6,15 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertInteractionsRequestToGeminiKeepsSchemaReferencesOpaque(t *testing.T) {
+	payload := []byte(`{"input":[{"type":"function_result","name":"lookup","call_id":"call-1","result":{"schema":{"$ref":"#/components/schemas/Item"}}}]}`)
+	out := convertInteractionsRequestToGemini("gemini-3-flash", payload, false)
+	result := gjson.GetBytes(out, "contents.0.parts.0.functionResponse.response.result")
+	if result.Type != gjson.String || result.String() != `{"schema":{"$ref":"#/components/schemas/Item"}}` {
+		t.Fatalf("function result with $ref = %s, output = %s", result.Raw, out)
+	}
+}
+
 func TestConvertInteractionsRequestToGeminiRequiresBooleanIncludeThoughts(t *testing.T) {
 	for _, body := range []string{
 		`{"generation_config":{"include_thoughts":"true"},"input":"hello"}`,

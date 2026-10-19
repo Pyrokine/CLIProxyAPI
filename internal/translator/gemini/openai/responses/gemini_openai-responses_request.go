@@ -1,10 +1,14 @@
 package responses
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
@@ -25,11 +29,18 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	return converted
 }
 
+// ConvertOpenAIResponsesRequestToGeminiChecked preserves translation errors across bridge converters.
+func ConvertOpenAIResponsesRequestToGeminiChecked(modelName string, body []byte, stream bool, nativeWebSearch ...*bool) ([]byte, error) {
+	return convertOpenAIResponsesRequestToGemini(modelName, body, stream, nativeWebSearch...)
+}
+
 func convertOpenAIResponsesRequestToGemini(
 	modelName string,
 	inputRawJSON []byte,
 	stream bool,
+	nativeWebSearch ...*bool,
 ) ([]byte, error) {
+	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
 
 	// Note: stream parameter is part of the fixed method signature
@@ -42,20 +53,37 @@ func convertOpenAIResponsesRequestToGemini(
 	root := gjson.ParseBytes(rawJSON)
 	toolRegistry := newGeminiResponsesToolRegistry(rawJSON)
 	functionDeclarations := buildGeminiResponsesFunctionDeclarations(toolRegistry)
-	if len(functionDeclarations) > 0 {
-		geminiTools := []byte(`[{"functionDeclarations":[]}]`)
-		geminiTools, _ = sjson.SetRawBytes(
-			geminiTools, "0.functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations),
-		)
-		out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
-	}
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		toolConfig, ok, errToolChoice := convertResponsesToolChoiceToGemini(toolChoice, toolRegistry)
-		if errToolChoice != nil {
-			return nil, errToolChoice
+	var toolBlocks [][]byte
+	if hasResponsesWebSearchTool(root) && modelSupportsResponsesWebSearch(modelName, nativeWebSearch...) && allowsResponsesWebSearchChoice(root) {
+		googleSearch := []byte(`{"googleSearch":{}}`)
+		domains, errDomains := responsesWebSearchAllowedDomains(root)
+		if errDomains != nil {
+			return nil, errDomains
 		}
-		if ok {
-			out, _ = sjson.SetRawBytes(out, "toolConfig.functionCallingConfig", toolConfig)
+		if len(domains) > 0 {
+			googleSearch, _ = sjson.SetBytes(googleSearch, "googleSearch.includedDomains", domains)
+		}
+		toolBlocks = append(toolBlocks, googleSearch)
+	}
+	if len(functionDeclarations) > 0 {
+		functionTool := []byte(`{"functionDeclarations":[]}`)
+		functionTool, _ = sjson.SetRawBytes(
+			functionTool, "functionDeclarations", translatorcommon.JoinRawArray(functionDeclarations),
+		)
+		toolBlocks = append(toolBlocks, functionTool)
+	}
+	if len(toolBlocks) > 0 {
+		out, _ = sjson.SetRawBytes(out, "tools", translatorcommon.JoinRawArray(toolBlocks))
+	}
+	if len(functionDeclarations) > 0 {
+		if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
+			toolConfig, ok, errToolChoice := convertResponsesToolChoiceToGemini(toolChoice, toolRegistry)
+			if errToolChoice != nil {
+				return nil, errToolChoice
+			}
+			if ok {
+				out, _ = sjson.SetRawBytes(out, "toolConfig.functionCallingConfig", toolConfig)
+			}
 		}
 	}
 
@@ -118,6 +146,9 @@ func convertOpenAIResponsesRequestToGemini(
 			itemRole := item.Get("role").String()
 			if itemType == "" && itemRole != "" {
 				itemType = "message"
+			} else if isResponsesContentPartType(itemType) && itemRole == "" {
+				itemType = "message"
+				itemRole = "user"
 			}
 
 			switch itemType {
@@ -144,30 +175,13 @@ func convertOpenAIResponsesRequestToGemini(
 						continue
 					}
 
-					var developerParts [][]byte
-					if contentArray := item.Get("content"); contentArray.Exists() {
-						if contentArray.IsArray() {
-							contentArray.ForEach(
-								func(_, contentItem gjson.Result) bool {
-									if text := contentItem.Get("text").String(); text != "" {
-										part := []byte(`{"text":""}`)
-										part, _ = sjson.SetBytes(part, "text", text)
-										developerParts = append(developerParts, part)
-									}
-									return true
-								},
-							)
-						} else if contentArray.Type == gjson.String && contentArray.String() != "" {
-							part := []byte(`{"text":""}`)
-							part, _ = sjson.SetBytes(part, "text", contentArray.String())
-							developerParts = append(developerParts, part)
-						}
-					}
-					if len(developerParts) > 0 {
+					if reminder := geminiResponsesReminderText(item.Get("content")); reminder != "" {
+						part := []byte(`{"text":""}`)
+						part, _ = sjson.SetBytes(part, "text", reminder)
 						if len(pendingFunctionCallIDs) > 0 {
-							pendingDeveloperParts = append(pendingDeveloperParts, developerParts...)
+							pendingDeveloperParts = append(pendingDeveloperParts, part)
 						} else {
-							contentItems = append(contentItems, geminiContent("user", developerParts))
+							contentItems = append(contentItems, geminiContent("user", [][]byte{part}))
 						}
 					}
 					continue
@@ -203,12 +217,25 @@ func convertOpenAIResponsesRequestToGemini(
 					}
 				}
 
-				// Handle regular messages
-				// Note: In Responses format, model outputs may appear as content items with type "output_text"
-				// even when the message.role is "user". We split such items into distinct Gemini messages
-				// with roles derived from the content type to match docs/convert-2.md.
-				if contentArray := item.Get("content"); contentArray.Exists() && contentArray.IsArray() {
+				// Handle regular messages and top-level content parts.
+				contentArray := item.Get("content")
+				var partsToProcess []gjson.Result
+				if contentArray.IsArray() {
+					partsToProcess = contentArray.Array()
+				} else if isResponsesContentPartType(item.Get("type").String()) {
+					partsToProcess = append(partsToProcess, item)
+					for i+1 < len(normalized) {
+						next := normalized[i+1]
+						if next.Get("role").String() != "" || !isResponsesContentPartType(next.Get("type").String()) {
+							break
+						}
+						partsToProcess = append(partsToProcess, next)
+						i++
+					}
+				}
+				if len(partsToProcess) > 0 {
 					currentRole := ""
+					sendable := 0
 					currentParts := make([][]byte, 0)
 
 					flush := func() {
@@ -220,113 +247,68 @@ func convertOpenAIResponsesRequestToGemini(
 						currentParts = currentParts[:0]
 					}
 
-					contentArray.ForEach(
-						func(_, contentItem gjson.Result) bool {
-							contentType := contentItem.Get("type").String()
-							if contentType == "" {
-								contentType = "input_text"
-							}
+					for _, contentItem := range partsToProcess {
+						contentType := contentItem.Get("type").String()
+						if contentType == "" {
+							contentType = "input_text"
+						}
 
-							effRole := "user"
-							if itemRole != "" {
-								switch strings.ToLower(itemRole) {
-								case "assistant", "model":
-									effRole = "model"
-								default:
-									effRole = strings.ToLower(itemRole)
-								}
-							}
-							if contentType == "output_text" {
+						effRole := "user"
+						if itemRole != "" {
+							switch strings.ToLower(itemRole) {
+							case "assistant", "model":
 								effRole = "model"
+							default:
+								effRole = strings.ToLower(itemRole)
 							}
-							if effRole == "assistant" {
-								effRole = "model"
-							}
+						}
+						if contentType == "output_text" {
+							effRole = "model"
+						}
+						if effRole == "assistant" {
+							effRole = "model"
+						}
 
-							if currentRole != "" && effRole != currentRole {
-								flush()
-								currentRole = ""
-							}
-							if currentRole == "" {
-								currentRole = effRole
-							}
+						if currentRole != "" && effRole != currentRole {
+							flush()
+							currentRole = ""
+						}
+						if currentRole == "" {
+							currentRole = effRole
+						}
 
-							var partJSON []byte
-							switch contentType {
-							case "input_text", "output_text":
-								if text := contentItem.Get("text"); text.Exists() {
-									partJSON = []byte(`{"text":""}`)
-									partJSON, _ = sjson.SetBytes(partJSON, "text", text.String())
-								}
-							case "input_image":
-								imageURL := contentItem.Get("image_url").String()
-								if imageURL == "" {
-									imageURL = contentItem.Get("url").String()
-								}
-								if imageURL != "" {
-									mimeType := "application/octet-stream"
-									data := ""
-									if after, ok := strings.CutPrefix(imageURL, "data:"); ok {
-										trimmed := after
-										mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-										if len(mediaAndData) == 2 {
-											if mediaAndData[0] != "" {
-												mimeType = mediaAndData[0]
-											}
-											data = mediaAndData[1]
-										} else {
-											mediaAndData = strings.SplitN(trimmed, ",", 2)
-											if len(mediaAndData) == 2 {
-												if mediaAndData[0] != "" {
-													mimeType = mediaAndData[0]
-												}
-												data = mediaAndData[1]
-											}
-										}
-									}
-									if data != "" {
-										partJSON = []byte(`{"inline_data":{"mime_type":"","data":""}}`)
-										partJSON, _ = sjson.SetBytes(partJSON, "inline_data.mime_type", mimeType)
-										partJSON, _ = sjson.SetBytes(partJSON, "inline_data.data", data)
-									}
-								}
-							case "input_audio":
-								audioData := contentItem.Get("data").String()
-								audioFormat := contentItem.Get("format").String()
-								if audioData != "" {
-									audioMimeMap := map[string]string{
-										"mp3":       "audio/mpeg",
-										"wav":       "audio/wav",
-										"ogg":       "audio/ogg",
-										"flac":      "audio/flac",
-										"aac":       "audio/aac",
-										"webm":      "audio/webm",
-										"pcm16":     "audio/pcm",
-										"g711_ulaw": "audio/basic",
-										"g711_alaw": "audio/basic",
-									}
-									mimeType := "audio/wav"
-									if audioFormat != "" {
-										if mapped, ok := audioMimeMap[audioFormat]; ok {
-											mimeType = mapped
-										} else {
-											mimeType = "audio/" + audioFormat
-										}
-									}
-									partJSON = []byte(`{"inline_data":{"mime_type":"","data":""}}`)
-									partJSON, _ = sjson.SetBytes(partJSON, "inline_data.mime_type", mimeType)
-									partJSON, _ = sjson.SetBytes(partJSON, "inline_data.data", audioData)
-								}
+						var partJSON []byte
+						switch contentType {
+						case "input_text", "output_text", "text":
+							if text := contentItem.Get("text"); text.Exists() {
+								partJSON = []byte(`{"text":""}`)
+								partJSON, _ = sjson.SetBytes(partJSON, "text", text.String())
 							}
+						default:
+							var errMedia error
+							partJSON, errMedia = openAIResponsesPartFromBlock(contentItem)
+							if errMedia != nil {
+								var unsupported *translatorcommon.UnsupportedPartError
+								if effRole == "user" && errors.As(errMedia, &unsupported) {
+									drops.Drop(unsupported.Type)
+									continue
+								}
+								return nil, errMedia
+							}
+						}
 
-							if len(partJSON) > 0 {
-								currentParts = append(currentParts, partJSON)
+						if len(partJSON) > 0 {
+							currentParts = append(currentParts, partJSON)
+							if effRole == "user" && translatorcommon.GeminiPartIsSendable(partJSON) {
+								sendable++
 							}
-							return true
-						},
-					)
+						}
+					}
 
 					flush()
+					if itemRole == "user" || itemRole == "" {
+						drops.EndTurn(sendable)
+					}
 				} else if contentArray.Type == gjson.String {
 					effRole := "user"
 					if itemRole != "" {
@@ -374,10 +356,14 @@ func convertOpenAIResponsesRequestToGemini(
 					consumedFunctionOutputIndexes[consumedIndex] = true
 				}
 				end := i + len(consumedIndexes)
-				hasSubsequent := responsesHasSubsequentTurn(normalized[end:])
 				outputByCallID := make(map[string]gjson.Result)
 				var extraOutputs []gjson.Result
-				anyMatched := false
+				var standaloneOutputContents [][]byte
+				appendStandaloneOutput := func(output gjson.Result) {
+					if parts := buildOpenAIResponsesStandaloneOutputTextParts(output); len(parts) > 0 {
+						standaloneOutputContents = append(standaloneOutputContents, geminiContent("user", parts))
+					}
+				}
 				for _, output := range orderedOutputs {
 					callID := translatorcommon.ExtractResponsesCallID(output)
 					if callID != "" {
@@ -386,23 +372,18 @@ func convertOpenAIResponsesRequestToGemini(
 						extraOutputs = append(extraOutputs, output)
 					}
 				}
-				for _, pendingID := range pendingFunctionCallIDs {
-					if _, ok := outputByCallID[pendingID]; ok {
-						anyMatched = true
-						break
-					}
-				}
 
 				responseParts := make([][]byte, 0, len(pendingFunctionCallIDs)+len(extraOutputs))
 				stillPending := make([]string, 0, len(pendingFunctionCallIDs))
 				for _, pendingID := range pendingFunctionCallIDs {
 					if output, ok := outputByCallID[pendingID]; ok {
-						responseParts = append(
-							responseParts,
-							buildOpenAIResponsesFunctionResponseParts(output, functionNamesByCallID)...,
-						)
+						parts, errOutput := buildOpenAIResponsesFunctionResponseParts(output, functionNamesByCallID)
+						if errOutput != nil {
+							return nil, errOutput
+						}
+						responseParts = append(responseParts, parts...)
 						delete(outputByCallID, pendingID)
-					} else if (hasSubsequent || anyMatched) && !responsesHasMatchingOutput(normalized[end:], pendingID) {
+					} else if !responsesHasMatchingOutput(normalized[end:], pendingID) {
 						responseParts = append(
 							responseParts,
 							buildOpenAIResponsesSynthesizedFunctionResponsePart(pendingID, functionNamesByCallID),
@@ -414,24 +395,19 @@ func convertOpenAIResponsesRequestToGemini(
 				for _, output := range orderedOutputs {
 					callID := translatorcommon.ExtractResponsesCallID(output)
 					if _, remaining := outputByCallID[callID]; remaining {
-						responseParts = append(
-							responseParts,
-							buildOpenAIResponsesFunctionResponseParts(output, functionNamesByCallID)...,
-						)
+						appendStandaloneOutput(output)
 						delete(outputByCallID, callID)
 					}
 				}
 				for _, output := range extraOutputs {
-					responseParts = append(
-						responseParts,
-						buildOpenAIResponsesFunctionResponseParts(output, functionNamesByCallID)...,
-					)
+					appendStandaloneOutput(output)
 				}
 
 				pendingFunctionCallIDs = stillPending
 				if len(responseParts) > 0 {
 					contentItems = append(contentItems, geminiContent("user", responseParts))
 				}
+				contentItems = append(contentItems, standaloneOutputContents...)
 				if len(pendingFunctionCallIDs) == 0 && len(pendingDeveloperParts) > 0 {
 					contentItems = append(contentItems, geminiContent("user", pendingDeveloperParts))
 					pendingDeveloperParts = nil
@@ -544,10 +520,12 @@ func convertOpenAIResponsesRequestToGemini(
 		}
 	}
 
-	result := common.CleanToolSchemas(out)
-	result = common.AttachDefaultSafetySettings(result, "safetySettings")
+	result := common.AttachDefaultSafetySettings(out, "safetySettings")
 	if useGeminiNativeReasoningLayout {
 		result = sigcompat.SanitizeGeminiRequestThoughtSignatures(result, "contents")
+	}
+	if err := drops.Err(); err != nil {
+		return nil, err
 	}
 	return stripTrailingOpenAIResponsesModelPrefill(result), nil
 }
@@ -644,7 +622,7 @@ func buildGeminiResponsesFunctionDeclarations(registry *geminiResponsesToolRegis
 			functionDeclaration, _ = sjson.SetRawBytes(
 				functionDeclaration,
 				"parametersJsonSchema",
-				[]byte(util.CleanJSONSchemaForGemini(parameters.Raw)),
+				[]byte(util.CleanJSONSchemaForGeminiJSONSchema(parameters.Raw)),
 			)
 		}
 		functionDeclarations = append(functionDeclarations, functionDeclaration)
@@ -790,6 +768,29 @@ func convertResponsesToolChoiceToGemini(
 		config, _ = sjson.SetBytes(config, "allowedFunctionNames", allowedNames)
 	}
 	return config, true, nil
+}
+
+func geminiResponsesReminderText(content gjson.Result) string {
+	var texts []string
+	switch {
+	case content.Type == gjson.String:
+		texts = append(texts, content.String())
+	case content.IsArray():
+		for _, part := range content.Array() {
+			if part.Type == gjson.String {
+				texts = append(texts, part.String())
+			} else if text := part.Get("text").String(); text != "" {
+				texts = append(texts, text)
+			}
+		}
+	case content.IsObject():
+		texts = append(texts, content.Get("text").String())
+	}
+	text := strings.Join(texts, "\n")
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	return "<system-reminder>\n" + text + "\n</system-reminder>"
 }
 
 func geminiContent(role string, parts [][]byte) []byte {
@@ -1159,58 +1160,183 @@ func geminiResponsesInlineDataPart(mimeType, data string) []byte {
 }
 
 func parseOpenAIResponsesDataURL(dataURL string) (string, string) {
-	mimeType := "application/octet-stream"
-	trimmed, ok := strings.CutPrefix(dataURL, "data:")
-	if !ok {
-		return mimeType, ""
+	dataURL = strings.TrimSpace(dataURL)
+	if len(dataURL) < 5 || !strings.EqualFold(dataURL[:5], "data:") {
+		return "", ""
 	}
-	mediaAndData := strings.SplitN(trimmed, ";base64,", 2)
-	if len(mediaAndData) == 2 {
-		if mediaAndData[0] != "" {
-			mimeType = mediaAndData[0]
+	metadata, payload, found := strings.Cut(dataURL[5:], ",")
+	if !found || strings.TrimSpace(payload) == "" {
+		return "", ""
+	}
+	mimeType := ""
+	fields := strings.Split(metadata, ";")
+	if len(fields) > 0 {
+		mimeType = strings.TrimSpace(fields[0])
+	}
+	isBase64 := false
+	for _, field := range fields[1:] {
+		if strings.EqualFold(strings.TrimSpace(field), "base64") {
+			isBase64 = true
+			break
 		}
-		return mimeType, mediaAndData[1]
 	}
-	mediaAndData = strings.SplitN(trimmed, ",", 2)
-	if len(mediaAndData) == 2 {
-		if mediaAndData[0] != "" {
-			mimeType = mediaAndData[0]
+	if !isBase64 {
+		return "", ""
+	}
+	payload = strings.TrimSpace(payload)
+	if _, err := base64.StdEncoding.DecodeString(payload); err != nil {
+		if _, err = base64.RawStdEncoding.DecodeString(payload); err != nil {
+			return "", ""
 		}
-		return mimeType, mediaAndData[1]
 	}
-	return mimeType, ""
+	return mimeType, payload
 }
 
-func openAIResponsesImageFromBlock(block gjson.Result) (string, string, bool) {
-	switch block.Get("type").String() {
-	case "input_image", "image_url", "image":
-		imageURL := ""
-		switch {
-		case block.Get("image_url.url").Exists():
-			imageURL = block.Get("image_url.url").String()
-		case block.Get("image_url").Type == gjson.String:
-			imageURL = block.Get("image_url").String()
-		case block.Get("url").Exists():
-			imageURL = block.Get("url").String()
-		}
-		if imageURL != "" {
-			mimeType, data := parseOpenAIResponsesDataURL(imageURL)
-			if data != "" {
-				return mimeType, data, true
-			}
-		}
-		if block.Get("source.type").String() == "base64" {
-			data := block.Get("source.data").String()
-			mimeType := block.Get("source.media_type").String()
-			if mimeType == "" {
-				mimeType = "image/png"
-			}
-			if data != "" {
-				return mimeType, data, true
-			}
+func isResponsesContentPartType(itemType string) bool {
+	switch strings.ToLower(strings.TrimSpace(itemType)) {
+	case "input_text", "output_text", "text", "input_image", "image_url", "image",
+		"input_audio", "audio", "input_video", "video_url", "video", "input_file", "file":
+		return true
+	default:
+		return false
+	}
+}
+
+func firstNonEmptyMediaValue(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
 		}
 	}
-	return "", "", false
+	return ""
+}
+
+func mediaMIMEType(kind, format, filename string) string {
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "application/octet-stream" || format == "binary/octet-stream" {
+		format = ""
+	}
+	if strings.Contains(format, "/") {
+		return format
+	}
+	if format == "" {
+		format = strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+	}
+	switch format {
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "wav":
+		return "audio/wav"
+	case "mp3", "mpeg":
+		if kind == "audio" {
+			return "audio/mpeg"
+		}
+	case "mov", "quicktime":
+		return "video/quicktime"
+	case "avi", "x-msvideo":
+		return "video/x-msvideo"
+	case "pcm", "pcm16":
+		return "audio/pcm"
+	case "opus":
+		return "audio/opus"
+	case "g711_ulaw", "g711_alaw":
+		return "audio/basic"
+	}
+	if mapped := misc.MimeTypes[format]; mapped != "" && mapped != "application/octet-stream" && mapped != "binary/octet-stream" {
+		return mapped
+	}
+	switch kind {
+	case "image":
+		return "image/png"
+	case "audio":
+		return "audio/wav"
+	case "video":
+		return "video/mp4"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func openAIResponsesPartFromBlock(block gjson.Result) ([]byte, error) {
+	blockType := strings.ToLower(strings.TrimSpace(block.Get("type").String()))
+	kind := ""
+	switch blockType {
+	case "input_image", "image_url", "image":
+		kind = "image"
+	case "input_audio", "audio":
+		kind = "audio"
+	case "input_video", "video_url", "video":
+		kind = "video"
+	case "input_file", "file":
+		kind = "file"
+	default:
+		return nil, nil
+	}
+
+	filename := firstNonEmptyMediaValue(block.Get("filename").String(), block.Get("file.filename").String())
+	format := ""
+	for _, candidate := range []string{
+		block.Get(kind + ".format").String(), block.Get("input_" + kind + ".format").String(),
+		block.Get(kind + ".mime_type").String(), block.Get("input_" + kind + ".mime_type").String(),
+		block.Get("format").String(), block.Get("mime_type").String(),
+	} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" && candidate != "application/octet-stream" && candidate != "binary/octet-stream" {
+			format = candidate
+			break
+		}
+	}
+	mediaURL := firstNonEmptyMediaValue(
+		block.Get(kind+"_url.url").String(), block.Get(kind+"_url").String(),
+		block.Get("file.file_url").String(), block.Get("url").String(),
+	)
+	if mediaURL != "" && (strings.HasPrefix(strings.ToLower(mediaURL), "https://") ||
+		strings.HasPrefix(strings.ToLower(mediaURL), "http://") || strings.HasPrefix(strings.ToLower(mediaURL), "gs://")) {
+		parsedURL, err := url.Parse(mediaURL)
+		if err != nil || parsedURL.Host == "" {
+			return nil, fmt.Errorf("invalid %s media URI", blockType)
+		}
+		if filename == "" {
+			filename = filepath.Base(parsedURL.Path)
+		}
+		part := []byte(`{"file_data":{"mime_type":"","file_uri":""}}`)
+		part, _ = sjson.SetBytes(part, "file_data.mime_type", mediaMIMEType(kind, format, filename))
+		part, _ = sjson.SetBytes(part, "file_data.file_uri", mediaURL)
+		return part, nil
+	}
+	data := mediaURL
+	if data == "" {
+		data = firstNonEmptyMediaValue(
+			block.Get("input_"+kind+".data").String(), block.Get(kind+".data").String(),
+			block.Get("file.file_data").String(), block.Get("file_data").String(), block.Get("data").String(),
+		)
+	}
+	if data == "" && block.Get("source.type").String() == "base64" {
+		data = firstNonEmptyMediaValue(block.Get("source.data").String())
+		if format == "" {
+			format = block.Get("source.media_type").String()
+		}
+	}
+	if data == "" {
+		if block.Get("file_id").String() != "" || block.Get("file.file_id").String() != "" {
+			return nil, &translatorcommon.UnsupportedPartError{Type: blockType}
+		}
+		return nil, fmt.Errorf("missing %s media data", blockType)
+	}
+	mimeType := mediaMIMEType(kind, format, filename)
+	if strings.HasPrefix(strings.ToLower(data), "data:") {
+		parsedType, payload := parseOpenAIResponsesDataURL(data)
+		if payload == "" {
+			return nil, fmt.Errorf("invalid %s data URL", blockType)
+		}
+		if parsedType != "" && parsedType != "application/octet-stream" && parsedType != "binary/octet-stream" {
+			mimeType = parsedType
+		}
+		data = payload
+	} else if strings.Contains(data, "://") {
+		return nil, fmt.Errorf("unsupported %s media URI", blockType)
+	}
+	return geminiResponsesInlineDataPart(mimeType, data), nil
 }
 
 type openAIResponsesOutputBlock struct {
@@ -1219,16 +1345,22 @@ type openAIResponsesOutputBlock struct {
 	raw    string
 }
 
-func parseOpenAIResponsesArrayOutput(output gjson.Result) (string, bool, [][]byte) {
+func parseOpenAIResponsesArrayOutput(output gjson.Result) (string, bool, [][]byte, error) {
 	var imageParts [][]byte
 	var nonImageEntries []openAIResponsesOutputBlock
 	hasContentBlock := false
 	hasNonTextBlock := false
+	var errMedia error
 	output.ForEach(
 		func(_, block gjson.Result) bool {
-			if mimeType, data, ok := openAIResponsesImageFromBlock(block); ok {
+			part, err := openAIResponsesPartFromBlock(block)
+			if err != nil {
+				errMedia = err
+				return false
+			}
+			if len(part) > 0 {
 				hasContentBlock = true
-				imageParts = append(imageParts, geminiResponsesInlineDataPart(mimeType, data))
+				imageParts = append(imageParts, part)
 				return true
 			}
 			blockType := block.Get("type").String()
@@ -1253,38 +1385,72 @@ func parseOpenAIResponsesArrayOutput(output gjson.Result) (string, bool, [][]byt
 			return true
 		},
 	)
-
+	if errMedia != nil {
+		return "", false, nil, errMedia
+	}
 	if !hasContentBlock {
-		return output.Raw, true, nil
+		return output.Raw, true, nil, nil
 	}
 	switch len(nonImageEntries) {
 	case 0:
-		return "", false, imageParts
+		return "", false, imageParts, nil
 	case 1:
 		if nonImageEntries[0].isText {
-			return nonImageEntries[0].text, false, imageParts
+			return nonImageEntries[0].text, false, imageParts, nil
 		}
-		return nonImageEntries[0].raw, true, imageParts
+		return nonImageEntries[0].raw, true, imageParts, nil
 	default:
 		if !hasNonTextBlock {
 			texts := make([]string, len(nonImageEntries))
 			for index, entry := range nonImageEntries {
 				texts[index] = entry.text
 			}
-			return strings.Join(texts, "\n"), false, imageParts
+			return strings.Join(texts, "\n"), false, imageParts, nil
 		}
 		rawItems := make([][]byte, len(nonImageEntries))
 		for index, entry := range nonImageEntries {
 			rawItems[index] = []byte(entry.raw)
 		}
-		return string(translatorcommon.JoinRawArray(rawItems)), true, imageParts
+		return string(translatorcommon.JoinRawArray(rawItems)), true, imageParts, nil
 	}
+}
+
+func buildOpenAIResponsesStandaloneOutputTextParts(item gjson.Result) [][]byte {
+	output := item.Get("output")
+	if !output.Exists() {
+		log.Warn("Gemini Responses orphan tool output has no content")
+		return nil
+	}
+	values := []gjson.Result{output}
+	if output.IsArray() {
+		values = output.Array()
+	}
+	parts := make([][]byte, 0, len(values))
+	for _, value := range values {
+		text := value.String()
+		if value.IsObject() {
+			if partText := value.Get("text"); partText.Type == gjson.String {
+				text = partText.String()
+			} else {
+				text = value.Raw
+			}
+		} else if value.IsArray() {
+			text = value.Raw
+		}
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		part := []byte(`{"text":""}`)
+		part, _ = sjson.SetBytes(part, "text", text)
+		parts = append(parts, part)
+	}
+	return parts
 }
 
 func buildOpenAIResponsesFunctionResponseParts(
 	item gjson.Result,
 	functionNamesByCallID map[string]string,
-) [][]byte {
+) ([][]byte, error) {
 	callID := translatorcommon.ExtractResponsesCallID(item)
 	functionName := openAIResponsesGeminiToolName(item)
 	if matchedName, ok := functionNamesByCallID[callID]; ok {
@@ -1303,28 +1469,35 @@ func buildOpenAIResponsesFunctionResponseParts(
 		if value != "" && value != "null" {
 			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", value)
 		}
-		return [][]byte{functionResponse}
+		return [][]byte{functionResponse}, nil
 	}
 
 	var imageParts [][]byte
 	switch {
 	case output.IsArray():
-		result, rawResult, images := parseOpenAIResponsesArrayOutput(output)
+		result, rawResult, images, errMedia := parseOpenAIResponsesArrayOutput(output)
+		if errMedia != nil {
+			return nil, errMedia
+		}
 		imageParts = images
 		if rawResult {
-			functionResponse, _ = sjson.SetRawBytes(
-				functionResponse, "functionResponse.response.result", []byte(result),
+			functionResponse = translatorcommon.SetGeminiFunctionResponseRaw(
+				functionResponse, "functionResponse.response.result", result,
 			)
 		} else {
 			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", result)
 		}
 	case output.IsObject():
-		if mimeType, data, ok := openAIResponsesImageFromBlock(output); ok {
-			imageParts = append(imageParts, geminiResponsesInlineDataPart(mimeType, data))
+		part, errMedia := openAIResponsesPartFromBlock(output)
+		if errMedia != nil {
+			return nil, errMedia
+		}
+		if len(part) > 0 {
+			imageParts = append(imageParts, part)
 			functionResponse, _ = sjson.SetBytes(functionResponse, "functionResponse.response.result", "")
 		} else {
-			functionResponse, _ = sjson.SetRawBytes(
-				functionResponse, "functionResponse.response.result", []byte(output.Raw),
+			functionResponse = translatorcommon.SetGeminiFunctionResponseResult(
+				functionResponse, "functionResponse.response.result", output,
 			)
 		}
 	case output.Raw != "" && output.Raw != "null":
@@ -1333,17 +1506,20 @@ func buildOpenAIResponsesFunctionResponseParts(
 		)
 	}
 
-	for _, imagePart := range imageParts {
-		inlineData := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
-		inlineData, _ = sjson.SetBytes(
-			inlineData, "inlineData.mimeType", gjson.GetBytes(imagePart, "inline_data.mime_type").String(),
-		)
-		inlineData, _ = sjson.SetBytes(
-			inlineData, "inlineData.data", gjson.GetBytes(imagePart, "inline_data.data").String(),
-		)
-		functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.parts.-1", inlineData)
+	for _, mediaPart := range imageParts {
+		if inline := gjson.GetBytes(mediaPart, "inline_data"); inline.Exists() {
+			inlineData := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
+			inlineData, _ = sjson.SetBytes(inlineData, "inlineData.mimeType", inline.Get("mime_type").String())
+			inlineData, _ = sjson.SetBytes(inlineData, "inlineData.data", inline.Get("data").String())
+			functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.parts.-1", inlineData)
+		} else if fileData := gjson.GetBytes(mediaPart, "file_data"); fileData.Exists() {
+			filePart := []byte(`{"fileData":{"mimeType":"","fileUri":""}}`)
+			filePart, _ = sjson.SetBytes(filePart, "fileData.mimeType", fileData.Get("mime_type").String())
+			filePart, _ = sjson.SetBytes(filePart, "fileData.fileUri", fileData.Get("file_uri").String())
+			functionResponse, _ = sjson.SetRawBytes(functionResponse, "functionResponse.parts.-1", filePart)
+		}
 	}
-	return [][]byte{functionResponse}
+	return [][]byte{functionResponse}, nil
 }
 
 func buildOpenAIResponsesSynthesizedFunctionResponsePart(
@@ -1368,17 +1544,6 @@ func responsesHasMatchingOutput(items []gjson.Result, callID string) bool {
 	}
 	for _, item := range items {
 		if isOpenAIResponsesToolOutput(item) && translatorcommon.ExtractResponsesCallID(item) == callID {
-			return true
-		}
-	}
-	return false
-}
-
-func responsesHasSubsequentTurn(items []gjson.Result) bool {
-	for _, item := range items {
-		itemType := item.Get("type").String()
-		if itemType == "message" || itemType == "" && item.Get("role").String() != "" ||
-			isOpenAIResponsesToolCall(item) {
 			return true
 		}
 	}

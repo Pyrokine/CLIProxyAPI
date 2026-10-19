@@ -6,7 +6,14 @@ import (
 )
 
 func convertOpenAIResponsesRequestToGeminiCLI(modelName string, inputRawJSON []byte, stream bool) []byte {
-	rawJSON := inputRawJSON
-	rawJSON = geminiresp.ConvertOpenAIResponsesRequestToGemini(modelName, rawJSON, stream)
-	return geminiclgemini.ConvertGeminiRequestToGeminiCLI(modelName, rawJSON, stream)
+	out, _ := convertOpenAIResponsesRequestToGeminiCLIChecked(modelName, inputRawJSON, stream)
+	return out
+}
+
+func convertOpenAIResponsesRequestToGeminiCLIChecked(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	geminiRequest, err := geminiresp.ConvertOpenAIResponsesRequestToGeminiChecked(modelName, inputRawJSON, stream)
+	if err != nil {
+		return nil, err
+	}
+	return geminiclgemini.ConvertGeminiRequestToGeminiCLI(modelName, geminiRequest, stream), nil
 }

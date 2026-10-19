@@ -32,7 +32,7 @@ func TestConvertGeminiResponseToOpenAIResponsesCreatedIncludesOriginalRequestMod
 	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]}}],"responseId":"gemini_1"}`)
 
 	var state any
-	outputs := ConvertGeminiResponseToOpenAIResponses(
+	outputs := translateGeminiFrameWithEOF(
 		context.Background(),
 		"fallback-model",
 		originalRequest,
@@ -71,7 +71,7 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 	var out [][]byte
 	for _, line := range in {
 		out = append(
-			out, ConvertGeminiResponseToOpenAIResponses(
+			out, translateGeminiFrameWithEOF(
 				context.Background(), "test-model", originalReq, nil, []byte(line), &param,
 			)...,
 		)
@@ -223,7 +223,7 @@ func TestConvertGeminiResponseToOpenAIResponses_ConsecutiveSignedVisibleTextPres
 	done := make(map[string]string)
 	var completed gjson.Result
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -315,7 +315,7 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedVisibleThenUnsignedPreserv
 	var param any
 	var completed gjson.Result
 	for _, line := range lines {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -351,7 +351,7 @@ func TestConvertGeminiResponseToOpenAIResponses_LeadingCarrierDoesNotCrossSigned
 	var param any
 	var streamOutput gjson.Result
 	for _, line := range lines {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -422,7 +422,7 @@ func TestConvertGeminiResponseToOpenAIResponses_TrailingCarrierDirectionSurvives
 	var param any
 	var completed gjson.Result
 	for _, line := range lines {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -462,7 +462,7 @@ func TestConvertGeminiResponseToOpenAIResponses_VisibleSignatureDoesNotOverwrite
 	done := make(map[string]string)
 	var completed gjson.Result
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -523,7 +523,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FlushesVisibleSignatureBeforeLat
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -552,7 +552,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionAndTrailingSignaturesRou
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -599,7 +599,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionThenTrailingSignatureHas
 
 	var param any
 	var streamOutput gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+	for _, chunk := range translateGeminiFrameWithEOF(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, append([]byte("data: "), raw...), &param,
 	) {
 		event, data := parseSSEEvent(t, chunk)
@@ -667,7 +667,7 @@ func TestConvertGeminiResponseToOpenAIResponses_InterleavedThoughtAndTextPreserv
 	var param any
 	var doneTypes []string
 	var completed gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+	for _, chunk := range translateGeminiFrameWithEOF(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, line, &param,
 	) {
 		event, data := parseSSEEvent(t, chunk)
@@ -713,7 +713,7 @@ func TestConvertGeminiResponseToOpenAIResponses_LeadingEmptyAndSignedTextRoundTr
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -751,7 +751,7 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedTextAndTrailingSignatureRo
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -786,7 +786,7 @@ func TestConvertGeminiResponseToOpenAIResponses_PreservesMultipleLeadingEmptySig
 	line := []byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"","thoughtSignature":"` + testResponsesGeminiThoughtSignature + `"},{"text":"","thoughtSignature":"` + signature2 + `"}]},"finishReason":"STOP"}],"responseId":"leading-empty-signatures"}}`)
 	var param any
 	var completed gjson.Result
-	for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+	for _, chunk := range translateGeminiFrameWithEOF(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, line, &param,
 	) {
 		event, data := parseSSEEvent(t, chunk)
@@ -831,7 +831,7 @@ func TestConvertGeminiResponseToOpenAIResponses_DistinctSignedThoughtsUseDistinc
 	done := make(map[string]string)
 	var completed gjson.Result
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -896,7 +896,7 @@ func TestConvertGeminiResponseToOpenAIResponses_VisibleSignatureCompletesActiveR
 	var out [][]byte
 	for _, line := range in {
 		out = append(
-			out, ConvertGeminiResponseToOpenAIResponses(
+			out, translateGeminiFrameWithEOF(
 				context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 			)...,
 		)
@@ -940,7 +940,7 @@ func TestConvertGeminiResponseToOpenAIResponses_LateThoughtSignatureIsImmutable(
 	var param any
 	var addedID, addedSignature, doneID, doneSignature, doneText string
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -971,7 +971,7 @@ func TestConvertGeminiResponseToOpenAIResponses_LateThoughtSignatureIsImmutable(
 
 func TestConvertGeminiResponseToOpenAIResponsesDoneFailsStartedStreamWithoutFinishReasonOnce(t *testing.T) {
 	var param any
-	ConvertGeminiResponseToOpenAIResponses(
+	translateGeminiFrameWithEOF(
 		context.Background(),
 		"gemini-3.6-flash-high",
 		nil,
@@ -979,7 +979,7 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneFailsStartedStreamWithoutFini
 		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"unsigned thought","thought":true}]}}],"responseId":"done-finalize"}}`),
 		&param,
 	)
-	out := ConvertGeminiResponseToOpenAIResponses(
+	out := translateGeminiFrameWithEOF(
 		context.Background(),
 		"gemini-3.6-flash-high",
 		nil,
@@ -1013,7 +1013,7 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneFailsStartedStreamWithoutFini
 			failedCount,
 		)
 	}
-	if duplicate := ConvertGeminiResponseToOpenAIResponses(
+	if duplicate := translateGeminiFrameWithEOF(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("[DONE]"), &param,
 	); len(duplicate) != 0 {
 		t.Fatalf("duplicate DONE emitted %d events", len(duplicate))
@@ -1022,7 +1022,7 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneFailsStartedStreamWithoutFini
 
 func TestConvertGeminiResponseToOpenAIResponsesDoneClosesMessageBeforeFailure(t *testing.T) {
 	var param any
-	ConvertGeminiResponseToOpenAIResponses(
+	translateGeminiFrameWithEOF(
 		context.Background(),
 		"gemini-3.6-flash-high",
 		nil,
@@ -1030,7 +1030,7 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneClosesMessageBeforeFailure(t 
 		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]}}],"responseId":"done-message"}}`),
 		&param,
 	)
-	out := ConvertGeminiResponseToOpenAIResponses(
+	out := translateGeminiFrameWithEOF(
 		context.Background(),
 		"gemini-3.6-flash-high",
 		nil,
@@ -1072,27 +1072,31 @@ func TestConvertGeminiResponseToOpenAIResponsesDoneClosesMessageBeforeFailure(t 
 func TestConvertGeminiResponseToOpenAIResponsesFinishReasonThenDoneIsIdempotent(t *testing.T) {
 	var param any
 	out := ConvertGeminiResponseToOpenAIResponses(
-		context.Background(),
-		"gemini-3.6-flash-high",
-		nil,
-		nil,
+		context.Background(), "gemini-3.6-flash-high", nil, nil,
 		[]byte(`data: {"response":{"candidates":[{"content":{"parts":[{"text":"answer"}]},"finishReason":"STOP"}],"responseId":"finish-then-done"}}`),
 		&param,
 	)
+	for _, chunk := range out {
+		if event, _ := parseSSEEvent(t, chunk); event == "response.completed" {
+			t.Fatal("finish reason completed before usage tail")
+		}
+	}
+	out = ConvertGeminiResponseToOpenAIResponses(
+		context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("data: [DONE]"), &param,
+	)
 	completedCount := 0
 	for _, chunk := range out {
-		event, _ := parseSSEEvent(t, chunk)
-		if event == "response.completed" {
+		if event, _ := parseSSEEvent(t, chunk); event == "response.completed" {
 			completedCount++
 		}
 	}
 	if completedCount != 1 {
-		t.Fatalf("finish reason emitted %d completion events", completedCount)
+		t.Fatalf("DONE emitted %d completion events", completedCount)
 	}
 	if duplicate := ConvertGeminiResponseToOpenAIResponses(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, []byte("data: [DONE]"), &param,
 	); len(duplicate) != 0 {
-		t.Fatalf("DONE after finish reason emitted %d events", len(duplicate))
+		t.Fatalf("duplicate DONE emitted %d events", len(duplicate))
 	}
 	if late := ConvertGeminiResponseToOpenAIResponses(
 		context.Background(), "gemini-3.6-flash-high", nil, nil,
@@ -1104,7 +1108,7 @@ func TestConvertGeminiResponseToOpenAIResponsesFinishReasonThenDoneIsIdempotent(
 
 func TestConvertGeminiResponseToOpenAIResponsesBareDoneBeforeStartEmitsNothing(t *testing.T) {
 	var param any
-	out := ConvertGeminiResponseToOpenAIResponses(
+	out := translateGeminiFrameWithEOF(
 		context.Background(),
 		"gemini-3.6-flash-high",
 		nil,
@@ -1149,7 +1153,7 @@ func TestConvertGeminiResponseToOpenAIResponses_PreservesTextAroundFunction(t *t
 	var out [][]byte
 	for _, line := range in {
 		out = append(
-			out, ConvertGeminiResponseToOpenAIResponses(
+			out, translateGeminiFrameWithEOF(
 				context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 			)...,
 		)
@@ -1202,7 +1206,7 @@ func TestConvertGeminiResponseToOpenAIResponses_PendingSignatureBeforeFunctionRo
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -1270,7 +1274,7 @@ func TestConvertGeminiResponseToOpenAIResponses_SignedTextBeforeSignedFunctionRo
 	var param any
 	var completed gjson.Result
 	for _, line := range in {
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -1342,7 +1346,7 @@ func TestConvertGeminiResponseToOpenAIResponses_DetachedSignatureAfterVisibleTex
 	var out [][]byte
 	for _, line := range in {
 		out = append(
-			out, ConvertGeminiResponseToOpenAIResponses(
+			out, translateGeminiFrameWithEOF(
 				context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 			)...,
 		)
@@ -1381,7 +1385,7 @@ func TestConvertGeminiResponseToOpenAIResponses_DetachedSignatureAfterVisibleTex
 func TestConvertGeminiResponseToOpenAIResponses_GeminiToolSignature(t *testing.T) {
 	line := `data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"thoughtSignature":"` + testResponsesGeminiThoughtSignature + `","functionCall":{"id":"native-id","name":"run_command","args":{"command":"true"}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15},"modelVersion":"gemini-3.6-flash","responseId":"resp_tool_sig"}}`
 	var param any
-	out := ConvertGeminiResponseToOpenAIResponses(
+	out := translateGeminiFrameWithEOF(
 		context.Background(), "gemini-3.6-flash-high", nil, nil, []byte(line), &param,
 	)
 	var doneTypes []string
@@ -1435,7 +1439,7 @@ func TestConvertGeminiResponseToOpenAIResponses_ReasoningEncryptedContent(t *tes
 	var out [][]byte
 	for _, line := range in {
 		out = append(
-			out, ConvertGeminiResponseToOpenAIResponses(
+			out, translateGeminiFrameWithEOF(
 				context.Background(), "test-model", nil, nil, []byte(line), &param,
 			)...,
 		)
@@ -1479,7 +1483,7 @@ func TestConvertGeminiResponseToOpenAIResponses_FunctionCallEventOrder(t *testin
 	var out [][]byte
 	for _, line := range in {
 		out = append(
-			out, ConvertGeminiResponseToOpenAIResponses(
+			out, translateGeminiFrameWithEOF(
 				context.Background(), "test-model", nil, nil, []byte(line), &param,
 			)...,
 		)
@@ -1599,7 +1603,7 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 	var out [][]byte
 	for _, line := range in {
 		out = append(
-			out, ConvertGeminiResponseToOpenAIResponses(
+			out, translateGeminiFrameWithEOF(
 				context.Background(), "test-model", nil, nil, []byte(line), &param,
 			)...,
 		)
@@ -1653,7 +1657,7 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 func TestConvertGeminiResponseToOpenAIResponsesMessageOutputItemDoneFields(t *testing.T) {
 	chunk := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"responseId":"message-fields"}`)
 	var state any
-	for _, output := range ConvertGeminiResponseToOpenAIResponses(
+	for _, output := range translateGeminiFrameWithEOF(
 		context.Background(), "gemini-test", nil, nil, chunk, &state,
 	) {
 		event, data := parseSSEEvent(t, output)
@@ -1681,7 +1685,7 @@ func TestConvertGeminiResponseToOpenAIResponsesRestoresNamespacedCustomTool(t *t
 		}]
 	}`)
 	var state any
-	first := ConvertGeminiResponseToOpenAIResponses(
+	first := translateGeminiFrameWithEOF(
 		context.Background(),
 		"fallback-model",
 		request,
@@ -1692,7 +1696,7 @@ func TestConvertGeminiResponseToOpenAIResponsesRestoresNamespacedCustomTool(t *t
 	if len(first) != 2 {
 		t.Fatalf("metadata events = %d, want created and in_progress", len(first))
 	}
-	second := ConvertGeminiResponseToOpenAIResponses(
+	second := translateGeminiFrameWithEOF(
 		context.Background(),
 		"fallback-model",
 		request,
@@ -1768,7 +1772,7 @@ func TestConvertGeminiResponseToOpenAIResponsesNonStreamRestoresNamespacedCustom
 
 func TestConvertGeminiResponseToOpenAIResponsesPreservesTextAndAudioOrder(t *testing.T) {
 	var state any
-	output := ConvertGeminiResponseToOpenAIResponses(
+	output := translateGeminiFrameWithEOF(
 		context.Background(),
 		"gemini-model",
 		nil,
@@ -1831,7 +1835,7 @@ func TestConvertGeminiResponseToOpenAIResponsesTerminalClassification(t *testing
 		}`)
 		var state any
 		var terminal gjson.Result
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(), "model", nil, nil, response, &state,
 		) {
 			event, data := parseSSEEvent(t, chunk)
@@ -1863,7 +1867,7 @@ func TestConvertGeminiResponseToOpenAIResponsesTerminalClassification(t *testing
 	t.Run("provider error is failed", func(t *testing.T) {
 		var state any
 		var failed gjson.Result
-		for _, chunk := range ConvertGeminiResponseToOpenAIResponses(
+		for _, chunk := range translateGeminiFrameWithEOF(
 			context.Background(),
 			"model",
 			nil,
@@ -1888,7 +1892,7 @@ func TestConvertGeminiResponseToOpenAIResponsesTerminalClassification(t *testing
 
 	t.Run("empty stop emits no terminal", func(t *testing.T) {
 		var state any
-		output := ConvertGeminiResponseToOpenAIResponses(
+		output := translateGeminiFrameWithEOF(
 			context.Background(),
 			"model",
 			nil,

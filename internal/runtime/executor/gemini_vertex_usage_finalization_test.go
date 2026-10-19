@@ -195,6 +195,59 @@ func TestVertexStreamCancellationWinsOverBufferedUsage(t *testing.T) {
 	}
 }
 
+func TestVertexStreamCanceledReadAfterTerminalPreservesUsage(t *testing.T) {
+	for _, terminal := range []struct {
+		name, reason string
+	}{
+		{"completed", "STOP"},
+		{"incomplete", "MAX_TOKENS"},
+	} {
+		t.Run(terminal.name, func(t *testing.T) {
+			plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
+			registerTestUsagePlugin(t, plugin)
+			ctx, cancel := context.WithCancel(usage.WithRequestedModelAlias(context.Background(), "vertex-"+terminal.name))
+			defer cancel()
+			reporter := newUsageReporter(ctx, "vertex", "gemini-test", nil)
+			payload := `data: {"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"` + terminal.reason + `"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"totalTokenCount":7}}` + "\n"
+			client := &http.Client{Transport: vertexUsageRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+					Body: io.NopCloser(&terminalErrorReader{data: []byte(payload), err: context.Canceled})}, nil
+			})}
+			httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://example.com/stream", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream, err := (&GeminiVertexExecutor{}).handleVertexStreamResponse(ctx, client, httpReq,
+				sdktranslator.FormatGemini, sdktranslator.FormatGemini,
+				cliproxyexecutor.Request{Model: "gemini-test"}, cliproxyexecutor.Options{}, nil, reporter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			terminalReceived := false
+			for chunk := range stream.Chunks {
+				if chunk.Err != nil {
+					t.Fatalf("stream error after terminal: %v", chunk.Err)
+				}
+				if isGeminiStreamTerminalChunk(chunk.Payload) {
+					terminalReceived = true
+					cancel()
+				}
+			}
+			if !terminalReceived {
+				t.Fatal("terminal chunk was not delivered")
+			}
+			select {
+			case record := <-plugin.records:
+				if record.Failed || record.Detail.InputTokens != 3 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 7 {
+					t.Fatalf("usage after terminal cancellation = %+v", record)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for usage after terminal")
+			}
+		})
+	}
+}
+
 func TestVertexStreamReadErrorWinsOverBufferedUsage(t *testing.T) {
 	plugin := &captureUsagePlugin{records: make(chan usage.Record, 2)}
 	registerTestUsagePlugin(t, plugin)

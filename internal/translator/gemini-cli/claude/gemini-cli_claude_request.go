@@ -8,6 +8,7 @@ package claude
 import (
 	"strings"
 
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
@@ -18,7 +19,13 @@ const geminiCLIClaudeThoughtSignature = "skip_thought_signature_validator"
 
 // convertClaudeRequestToCLI converts a Claude request to the Gemini CLI request schema.
 // It maps system instructions, messages, tools, and generation settings; stream is currently unused.
-func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []byte {
+func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, stream bool) []byte {
+	out, _ := convertClaudeRequestToCLIChecked(modelName, inputRawJSON, stream)
+	return out
+}
+
+func convertClaudeRequestToCLIChecked(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
+	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
 
 	// Build output Gemini CLI request JSON
@@ -55,17 +62,36 @@ func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 
 	// contents
 	if messagesResult := gjson.GetBytes(rawJSON, "messages"); messagesResult.IsArray() {
+		var contentItems [][]byte
+		toolNameByID := make(map[string]string)
+		var pendingToolUseIDs []string
+		userRunStart := 0
+		flushUserRun := func() {
+			merged := translatorcommon.MergeAdjacentGeminiContents(contentItems[userRunStart:])
+			if len(merged) > 0 {
+				parts := translatorcommon.AlignGeminiFunctionResponses(gjson.GetBytes(merged[0], "parts"), pendingToolUseIDs)
+				merged[0], _ = sjson.SetRawBytes(merged[0], "parts", []byte(parts.Raw))
+			}
+			contentItems = append(contentItems[:userRunStart], merged...)
+			userRunStart = len(contentItems)
+		}
 		messagesResult.ForEach(
 			func(_, messageResult gjson.Result) bool {
 				roleResult := messageResult.Get("role")
 				if roleResult.Type != gjson.String {
 					return true
 				}
-				role := roleResult.String()
+				originalRole := roleResult.String()
+				role := originalRole
 				if role == "assistant" {
 					role = "model"
-				} else if role == "system" {
+				} else if role == "system" || role == "developer" {
 					role = "user"
+				}
+				if role != "user" {
+					flushUserRun()
+					clear(toolNameByID)
+					pendingToolUseIDs = nil
 				}
 
 				contentJSON := []byte(`{"role":"","parts":[]}`)
@@ -82,13 +108,21 @@ func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 								contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 
 							case "tool_use":
-								functionName := contentResult.Get("name").String()
+								functionName := util.SanitizeFunctionName(contentResult.Get("name").String())
+								toolUseID := contentResult.Get("id").String()
 								functionArgs := contentResult.Get("input").String()
 								argsResult := gjson.Parse(functionArgs)
 								if argsResult.IsObject() && gjson.Valid(functionArgs) {
 									part := []byte(`{"thoughtSignature":"","functionCall":{"name":"","args":{}}}`)
 									part, _ = sjson.SetBytes(part, "thoughtSignature", geminiCLIClaudeThoughtSignature)
 									part, _ = sjson.SetBytes(part, "functionCall.name", functionName)
+									if toolUseID != "" {
+										part, _ = sjson.SetBytes(part, "functionCall.id", toolUseID)
+										if originalRole == "assistant" {
+											toolNameByID[toolUseID] = functionName
+											pendingToolUseIDs = append(pendingToolUseIDs, toolUseID)
+										}
+									}
 									part, _ = sjson.SetRawBytes(part, "functionCall.args", []byte(functionArgs))
 									contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
 								}
@@ -98,43 +132,69 @@ func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 								if toolCallID == "" {
 									return true
 								}
-								funcName := toolCallID
-								toolCallIDs := strings.Split(toolCallID, "-")
-								if len(toolCallIDs) > 1 {
-									funcName = strings.Join(toolCallIDs[0:len(toolCallIDs)-1], "-")
-								}
-								responseData := contentResult.Get("content").Raw
-								part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
-								part, _ = sjson.SetBytes(part, "functionResponse.name", funcName)
-								part, _ = sjson.SetBytes(part, "functionResponse.response.result", responseData)
-								contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
-
-							case "image":
-								source := contentResult.Get("source")
-								if source.Get("type").String() == "base64" {
-									mimeType := source.Get("media_type").String()
-									data := source.Get("data").String()
-									if mimeType != "" && data != "" {
-										part := []byte(`{"inlineData":{"mime_type":"","data":""}}`)
-										part, _ = sjson.SetBytes(part, "inlineData.mime_type", mimeType)
-										part, _ = sjson.SetBytes(part, "inlineData.data", data)
-										contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
+								funcName := toolNameByID[toolCallID]
+								if funcName == "" {
+									funcName = toolCallID
+									toolCallIDs := strings.Split(toolCallID, "-")
+									if len(toolCallIDs) > 1 {
+										funcName = strings.Join(toolCallIDs[:len(toolCallIDs)-1], "-")
 									}
+								}
+								result, images := translatorcommon.ClaudeToolResultContent(contentResult.Get("content"))
+								part := []byte(`{"functionResponse":{"name":"","response":{"result":""}}}`)
+								part, _ = sjson.SetBytes(part, "functionResponse.id", toolCallID)
+								part, _ = sjson.SetBytes(part, "functionResponse.name", util.SanitizeFunctionName(funcName))
+								part = translatorcommon.SetGeminiFunctionResponseRaw(part, "functionResponse.response.result", result.Raw)
+								contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
+								for _, source := range images {
+									imagePart := []byte(`{"inlineData":{"mime_type":"","data":""}}`)
+									imagePart, _ = sjson.SetBytes(imagePart, "inlineData.mime_type", source.Get("media_type").String())
+									imagePart, _ = sjson.SetBytes(imagePart, "inlineData.data", source.Get("data").String())
+									contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", imagePart)
+								}
+
+							case "image", "document", "container_upload":
+								source := contentResult.Get("source")
+								mimeType := source.Get("media_type").String()
+								data := source.Get("data").String()
+								if source.Get("type").String() == "base64" && mimeType != "" && data != "" {
+									part := []byte(`{"inlineData":{"mime_type":"","data":""}}`)
+									part, _ = sjson.SetBytes(part, "inlineData.mime_type", mimeType)
+									part, _ = sjson.SetBytes(part, "inlineData.data", data)
+									contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
+								} else if role == "user" {
+									drops.Drop(contentResult.Get("type").String())
 								}
 							}
 							return true
 						},
 					)
-					out, _ = sjson.SetRawBytes(out, "request.contents.-1", contentJSON)
+					parts := gjson.GetBytes(contentJSON, "parts").Array()
+					if role == "user" {
+						rawParts := make([][]byte, 0, len(parts))
+						for _, part := range parts {
+							rawParts = append(rawParts, []byte(part.Raw))
+						}
+						drops.EndTurn(translatorcommon.CountSendableGeminiParts(rawParts))
+						contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts", translatorcommon.JoinRawArray(translatorcommon.ReorderGeminiUserParts(rawParts)))
+					}
+					if len(parts) > 0 {
+						contentItems = append(contentItems, contentJSON)
+					}
 				} else if contentsResult.Type == gjson.String {
 					part := []byte(`{"text":""}`)
 					part, _ = sjson.SetBytes(part, "text", contentsResult.String())
 					contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts.-1", part)
-					out, _ = sjson.SetRawBytes(out, "request.contents.-1", contentJSON)
+					contentItems = append(contentItems, contentJSON)
+				}
+				if role != "user" {
+					userRunStart = len(contentItems)
 				}
 				return true
 			},
 		)
+		flushUserRun()
+		out, _ = sjson.SetRawBytes(out, "request.contents", translatorcommon.JoinRawArray(contentItems))
 	}
 
 	// tools
@@ -153,6 +213,7 @@ func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 					tool, _ = sjson.DeleteBytes(tool, "cache_control")
 					tool, _ = sjson.DeleteBytes(tool, "defer_loading")
 					tool, _ = sjson.DeleteBytes(tool, "eager_input_streaming")
+					tool, _ = sjson.SetBytes(tool, "name", util.SanitizeFunctionName(toolResult.Get("name").String()))
 					if gjson.ValidBytes(tool) && gjson.ParseBytes(tool).IsObject() {
 						if !hasTools {
 							out, _ = sjson.SetRawBytes(out, "request.tools", []byte(`[{"functionDeclarations":[]}]`))
@@ -192,7 +253,7 @@ func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
 			if toolChoiceName != "" {
 				out, _ = sjson.SetBytes(
-					out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{toolChoiceName},
+					out, "request.toolConfig.functionCallingConfig.allowedFunctionNames", []string{util.SanitizeFunctionName(toolChoiceName)},
 				)
 			}
 		}
@@ -234,5 +295,8 @@ func convertClaudeRequestToCLI(modelName string, inputRawJSON []byte, _ bool) []
 	}
 
 	out = common.AttachDefaultSafetySettings(out, "request.safetySettings")
-	return out
+	if err := drops.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

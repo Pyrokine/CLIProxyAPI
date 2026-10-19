@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"testing"
@@ -8,6 +9,84 @@ import (
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
 )
+
+func TestInteractionsClaudeUsageAndStopReasons(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		for _, tool := range []bool{false, true} {
+			for _, tc := range []struct{ terminal, want string }{
+				{`"status":"incomplete"`, "max_tokens"},
+				{`"finish_reason":"length"`, "max_tokens"},
+				{`"finish_reason":"max_tokens"`, "max_tokens"},
+				{`"status":"completed"`, "end_turn"},
+			} {
+				steps := `[]`
+				if tool {
+					steps = `[{"type":"function_call","id":"fixture-tool","name":"lookup","arguments":{}}]`
+				}
+				body := `{"id":"fixture-interaction",` + tc.terminal + `,"steps":` + steps + `,"usage":{"total_input_tokens":100,"total_cached_tokens":40,"cache_creation_tokens":10,"total_output_tokens":8}}`
+				if nested {
+					body = `{"interaction":` + body + `}`
+				}
+				want := tc.want
+				if tool && want == "end_turn" {
+					want = "tool_use"
+				}
+				out := convertInteractionsResponseToClaudeNonStream(context.Background(), "fixture-model", nil, nil, []byte(body), nil)
+				if gjson.GetBytes(out, "stop_reason").String() != want || gjson.GetBytes(out, "usage.input_tokens").Int() != 50 ||
+					gjson.GetBytes(out, "usage.cache_read_input_tokens").Int() != 40 || gjson.GetBytes(out, "usage.cache_creation_input_tokens").Int() != 10 || gjson.GetBytes(out, "usage.output_tokens").Int() != 8 {
+					t.Fatalf("non-stream result = %s", out)
+				}
+				state := &interactionsToClaudeStreamState{SawToolCall: tool}
+				events := appendClaudeMessageDelta(nil, gjson.Parse(body), state)
+				var delta gjson.Result
+				for _, event := range events {
+					payload := gjson.ParseBytes(interactionsSSEPayload(event))
+					if payload.Get("type").String() == "message_delta" {
+						delta = payload
+					}
+				}
+				if delta.Get("delta.stop_reason").String() != want || delta.Get("usage.input_tokens").Int() != 50 || delta.Get("usage.cache_read_input_tokens").Int() != 40 {
+					t.Fatalf("stream delta = %s", delta.Raw)
+				}
+			}
+		}
+	}
+	for _, tc := range []struct {
+		usage string
+		want  int64
+	}{
+		{`{"input_tokens":100,"total_input_tokens":200,"total_cached_tokens":40}`, 100},
+		{`{"total_input_tokens":10,"total_cached_tokens":40}`, 0},
+		{`{"prompt_tokens":100,"cache_read_tokens":40,"cache_write_tokens":10}`, 50},
+		{`{"total_input_tokens":100,"total_cached_tokens":0}`, 100},
+	} {
+		out := setClaudeUsageFromInteractions([]byte(`{}`), "usage", gjson.Parse(tc.usage))
+		if gjson.GetBytes(out, "usage.input_tokens").Int() != tc.want {
+			t.Fatalf("usage = %s, want input %d", out, tc.want)
+		}
+	}
+}
+
+func TestInteractionsFailedEventToClaudeError(t *testing.T) {
+	for _, event := range []string{
+		`{"event_type":"response.failed","error":{"type":"api_error","message":"model capacity exhausted"}}`,
+		`{"event_type":"interaction.failed","response":{"error":{"type":"api_error","message":"model capacity exhausted"}}}`,
+	} {
+		var state any
+		out := convertInteractionsResponseToClaude(context.Background(), "claude-test", nil, nil, []byte(event), &state)
+		if len(out) != 1 || !bytes.Contains(out[0], []byte("event: error")) ||
+			!bytes.Contains(out[0], []byte("model capacity exhausted")) {
+			t.Fatalf("failed event = %q, want Claude error SSE", out)
+		}
+		for _, following := range []string{`{"event_type":"interaction.completed"}`, `[DONE]`} {
+			completed := convertInteractionsResponseToClaude(context.Background(), "claude-test", nil, nil,
+				[]byte(following), &state)
+			if len(completed) != 0 {
+				t.Fatalf("events after failure = %q", completed)
+			}
+		}
+	}
+}
 
 func TestInteractionsToClaudePreservesRecognizedProviderSignatures(t *testing.T) {
 	tests := []struct {

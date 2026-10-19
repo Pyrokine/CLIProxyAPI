@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -52,6 +53,32 @@ func getVertexAction(model string, isStream bool) string {
 		return "streamGenerateContent"
 	}
 	return "generateContent"
+}
+
+func isGeminiStreamTerminalChunk(chunk []byte) bool {
+	for _, line := range bytes.Split(chunk, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if bytes.Equal(trimmed, []byte("data: [DONE]")) || bytes.Equal(trimmed, []byte("[DONE]")) {
+			return true
+		}
+		payload := jsonPayload(line)
+		if len(payload) == 0 {
+			continue
+		}
+		switch gjson.GetBytes(payload, "type").String() {
+		case "response.completed", "response.incomplete", "response.done", "message_stop":
+			return true
+		}
+		for _, path := range []string{
+			"choices.0.finish_reason", "response.choices.0.finish_reason",
+			"candidates.0.finishReason", "response.candidates.0.finishReason",
+		} {
+			if reason := gjson.GetBytes(payload, path); reason.Exists() && strings.TrimSpace(reason.String()) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // convertImagenToGeminiResponse converts Imagen API response to Gemini format
@@ -183,8 +210,8 @@ type GeminiVertexExecutor struct {
 
 // vertexGeminiBody holds the translated payload and format metadata produced by prepareVertexGeminiBody.
 type vertexGeminiBody struct {
-	from, to sdktranslator.Format
-	body     []byte
+	responseFormat, to sdktranslator.Format
+	body               []byte
 }
 
 // NewGeminiVertexExecutor creates a new Vertex AI Gemini executor instance.
@@ -200,6 +227,32 @@ func NewGeminiVertexExecutor(cfg *config.Config) *GeminiVertexExecutor {
 
 // Identifier returns the executor identifier.
 func (e *GeminiVertexExecutor) Identifier() string { return "vertex" }
+
+func isNativeVertexInteractionsAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if flag := strings.TrimSpace(auth.Attributes["interactions"]); strings.EqualFold(flag, "true") || flag == "1" {
+		return true
+	}
+	for _, name := range []string{"interactions", "native_interactions"} {
+		if flag, ok := auth.Metadata[name].(bool); ok && flag {
+			return true
+		}
+	}
+	return false
+}
+
+func (*GeminiVertexExecutor) RequestToFormatForAuth(
+	auth *cliproxyauth.Auth,
+	_ cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+) sdktranslator.Format {
+	if !opts.CountTokens && opts.Alt != "responses/compact" && opts.SourceFormat == sdktranslator.FormatInteractions && isNativeVertexInteractionsAuth(auth) {
+		return sdktranslator.FormatInteractions
+	}
+	return ""
+}
 
 // prepareVertexGeminiBody translates and configures the request payload for Vertex AI Gemini endpoints.
 // This is the shared translation logic used by all execute* and executeStream* methods.
@@ -218,10 +271,12 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, originalPayload, isStream)
-	body := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, isStream)
-
-	var err error
+	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, isStream, helps.APIKeyModelIsCompat(req), &req,
+	)
+	if err != nil {
+		return nil, err
+	}
 	body, err = helps.ApplyThinkingWithSourcePayload(
 		body, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
 	)
@@ -231,7 +286,6 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 
 	body = fixGeminiImageAspectRatio(baseModel, body)
 	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = stripVertexOpenAIResponsesToolCallIDs(body, from.String())
 	body = signature.SanitizeGeminiRequestThoughtSignatures(body, "contents")
@@ -241,11 +295,18 @@ func (e *GeminiVertexExecutor) prepareVertexGeminiBody(
 		action, _ := req.Metadata["action"].(string)
 		isCountTokens = action == "countTokens"
 	}
-	if !isCountTokens {
+	if isCountTokens {
+		body, _ = sjson.DeleteBytes(body, "tools")
+		body, _ = sjson.DeleteBytes(body, "generationConfig")
+		body, _ = sjson.DeleteBytes(body, "safetySettings")
+	} else {
 		body = helps.EnsureGeminiTrailingUserContent(body, "contents")
 	}
+	body, _ = sjson.DeleteBytes(body, "session_id")
+	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body,
+		originalTranslated, requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier())
 
-	return &vertexGeminiBody{from: from, to: to, body: body}, nil
+	return &vertexGeminiBody{responseFormat: cliproxyexecutor.ResponseFormatOrSource(opts), to: to, body: body}, nil
 }
 
 // PrepareRequest injects Vertex credentials into the outgoing HTTP request.
@@ -300,8 +361,12 @@ func (e *GeminiVertexExecutor) Execute(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (resp cliproxyexecutor.Response, err error) {
+	opts.OriginalRequest = originalRequestPayload(req, opts)
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
+	if opts.SourceFormat == sdktranslator.FormatInteractions && isNativeVertexInteractionsAuth(auth) {
+		return (&GeminiExecutor{cfg: e.cfg, identifier: e.Identifier()}).executeInteractions(ctx, auth, req, opts)
 	}
 	// Try API key authentication first
 	apiKey, baseURL := vertexAPICreds(auth)
@@ -326,8 +391,12 @@ func (e *GeminiVertexExecutor) ExecuteStream(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (*cliproxyexecutor.StreamResult, error) {
+	opts.OriginalRequest = originalRequestPayload(req, opts)
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	}
+	if opts.SourceFormat == sdktranslator.FormatInteractions && isNativeVertexInteractionsAuth(auth) {
+		return (&GeminiExecutor{cfg: e.cfg, identifier: e.Identifier()}).executeInteractionsStream(ctx, auth, req, opts)
 	}
 	// Try API key authentication first
 	apiKey, baseURL := vertexAPICreds(auth)
@@ -352,6 +421,13 @@ func (e *GeminiVertexExecutor) CountTokens(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
+	countMetadata := make(map[string]any, len(req.Metadata)+1)
+	for key, value := range req.Metadata {
+		countMetadata[key] = value
+	}
+	countMetadata["action"] = "countTokens"
+	req.Metadata = countMetadata
+
 	// Try API key authentication first
 	apiKey, baseURL := vertexAPICreds(auth)
 
@@ -401,8 +477,15 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 		if errImagen != nil {
 			return resp, errImagen
 		}
-		body = imagenBody
-		from = opts.SourceFormat
+		originalImagen := bytes.Clone(imagenBody)
+		if len(opts.OriginalRequest) > 0 && !bytes.Equal(opts.OriginalRequest, req.Payload) {
+			originalImagen, _ = convertToImagenRequest(opts.OriginalRequest)
+		}
+		body, _ = sjson.DeleteBytes(imagenBody, "session_id")
+		body = applyPayloadConfigWithRequest(e.cfg, baseModel, sdktranslator.FormatGemini.String(),
+			opts.SourceFormat.String(), "", body, originalImagen, payloadRequestedModel(opts, req.Model),
+			payloadRequestPath(opts), opts.Headers, e.Identifier())
+		from = cliproxyexecutor.ResponseFormatOrSource(opts)
 		to = sdktranslator.FromString("gemini")
 	} else {
 		// Standard Gemini translation flow
@@ -411,7 +494,7 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 			return resp, errPrep
 		}
 		body = prepared.body
-		from = prepared.from
+		from = prepared.responseFormat
 		to = prepared.to
 	}
 
@@ -429,7 +512,6 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 	if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
-	body, _ = sjson.DeleteBytes(body, "session_id")
 	reporter.setTranslatedReasoningEffort(body, to.String())
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -476,7 +558,8 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 		return resp, errRead
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.publish(ctx, parseGeminiUsage(data))
+	observeResponseTokenEvent(ctx, data)
+	reporter.observeResponseModel(data)
 
 	// For Imagen models, convert response to Gemini format before translation
 	// This ensures Imagen responses use the same format as gemini-3-pro-image-preview
@@ -487,6 +570,12 @@ func (e *GeminiVertexExecutor) executeWithServiceAccount(
 	// Standard Gemini translation (works for both Gemini and converted Imagen responses)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	if errTranslate := geminiResponseError(&param, out); errTranslate != nil {
+		recordAPIResponseError(ctx, e.cfg, errTranslate)
+		reporter.publishFailureWithDetail(ctx, parseGeminiUsage(data), errTranslate)
+		return resp, errTranslate
+	}
+	reporter.publish(ctx, parseGeminiUsage(data))
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -508,7 +597,7 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 	if errPrep != nil {
 		return resp, errPrep
 	}
-	from := prepared.from
+	from := prepared.responseFormat
 	to := prepared.to
 	body := prepared.body
 
@@ -527,7 +616,6 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 	if opts.Alt != "" && action != "countTokens" {
 		url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 	}
-	body, _ = sjson.DeleteBytes(body, "session_id")
 	reporter.setTranslatedReasoningEffort(body, to.String())
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -571,9 +659,16 @@ func (e *GeminiVertexExecutor) executeWithAPIKey(
 		return resp, errRead
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.publish(ctx, parseGeminiUsage(data))
+	observeResponseTokenEvent(ctx, data)
+	reporter.observeResponseModel(data)
 	var param any
 	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, body, data, &param)
+	if errTranslate := geminiResponseError(&param, out); errTranslate != nil {
+		recordAPIResponseError(ctx, e.cfg, errTranslate)
+		reporter.publishFailureWithDetail(ctx, parseGeminiUsage(data), errTranslate)
+		return resp, errTranslate
+	}
+	reporter.publish(ctx, parseGeminiUsage(data))
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -596,7 +691,7 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(
 	if errPrep != nil {
 		return nil, errPrep
 	}
-	from := prepared.from
+	from := prepared.responseFormat
 	to := prepared.to
 	body := prepared.body
 
@@ -614,7 +709,6 @@ func (e *GeminiVertexExecutor) executeStreamWithServiceAccount(
 			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 		}
 	}
-	body, _ = sjson.DeleteBytes(body, "session_id")
 	reporter.setTranslatedReasoningEffort(body, to.String())
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -652,7 +746,7 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 	if errPrep != nil {
 		return nil, errPrep
 	}
-	from := prepared.from
+	from := prepared.responseFormat
 	to := prepared.to
 	body := prepared.body
 
@@ -670,7 +764,6 @@ func (e *GeminiVertexExecutor) executeStreamWithAPIKey(
 			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 		}
 	}
-	body, _ = sjson.DeleteBytes(body, "session_id")
 	reporter.setTranslatedReasoningEffort(body, to.String())
 
 	httpReq, errNewReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -724,14 +817,26 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 	go func() {
 		defer close(out)
 		var streamUsage streamUsageBuffer
+		terminalDelivered := false
+		streamError := func(scanner *bufio.Scanner) error {
+			err := scannerOrContextError(ctx, scanner)
+			if terminalDelivered && errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		}
 		defer func() {
-			if errStream := scannerOrContextError(ctx, nil); errStream != nil {
+			if errStream := streamError(nil); errStream != nil {
 				recordAPIResponseError(ctx, e.cfg, errStream)
 				reporter.publishFailure(ctx, errStream)
 				return
 			}
-			streamUsage.publish(ctx, reporter)
-			reporter.ensurePublished(ctx)
+			publishCtx := ctx
+			if terminalDelivered {
+				publishCtx = context.WithoutCancel(ctx)
+			}
+			streamUsage.publish(publishCtx, reporter)
+			reporter.ensurePublished(publishCtx)
 		}()
 		defer func() {
 			if errClose := httpResp.Body.Close(); errClose != nil {
@@ -741,29 +846,54 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, streamScannerBuffer)
 		var param any
+		receivedResponse := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseGeminiStreamUsage(line); ok {
-				streamUsage.observe(detail, true, false)
+			observeResponseTokenEvent(ctx, line)
+			reporter.observeResponseModel(line)
+			streamUsage.observeGeminiStream(line)
+			payload := jsonPayload(line)
+			if len(payload) == 0 {
+				continue
 			}
+			if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+				break
+			}
+			receivedResponse = true
 			lines := sdktranslator.TranslateStream(
 				ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param,
 			)
 			for i := range lines {
 				if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
-					if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+					if errStream := streamError(scanner); errStream != nil {
 						recordAPIResponseError(ctx, e.cfg, errStream)
 						reporter.publishFailure(ctx, errStream)
 					}
 					return
 				}
+				if isGeminiStreamTerminalChunk(lines[i]) {
+					terminalDelivered = true
+				}
+			}
+			if errTranslate := geminiResponseError(&param, lines...); errTranslate != nil {
+				recordAPIResponseError(ctx, e.cfg, errTranslate)
+				reporter.publishFailureWithDetail(ctx, streamUsage.detail, errTranslate)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errTranslate})
+				return
 			}
 		}
-		if errScan := scannerOrContextError(ctx, scanner); errScan != nil {
+		if errScan := streamError(scanner); errScan != nil {
 			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx, errScan)
 			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errScan})
+			return
+		}
+		if !receivedResponse {
+			errEmpty := markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "gemini executor: empty upstream stream"})
+			recordAPIResponseError(ctx, e.cfg, errEmpty)
+			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errEmpty)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errEmpty})
 			return
 		}
 		lines := sdktranslator.TranslateStream(
@@ -771,12 +901,21 @@ func (e *GeminiVertexExecutor) handleVertexStreamResponse(
 		)
 		for i := range lines {
 			if !sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Payload: lines[i]}) {
-				if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
+				if errStream := streamError(scanner); errStream != nil {
 					recordAPIResponseError(ctx, e.cfg, errStream)
 					reporter.publishFailure(ctx, errStream)
 				}
 				return
 			}
+			if isGeminiStreamTerminalChunk(lines[i]) {
+				terminalDelivered = true
+			}
+		}
+		if errTranslate := geminiResponseError(&param, lines...); errTranslate != nil {
+			recordAPIResponseError(ctx, e.cfg, errTranslate)
+			reporter.publishFailureWithDetail(ctx, streamUsage.detail, errTranslate)
+			_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: errTranslate})
+			return
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -793,27 +932,13 @@ func (e *GeminiVertexExecutor) countTokensWithServiceAccount(
 ) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("gemini")
-
-	translatedReq := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
-
-	translatedReq, err := helps.ApplyThinkingWithSourcePayload(
-		translatedReq, req.Payload, req.Payload, req.Model, from.String(), to.String(), e.Identifier(), req,
-	)
+	prepared, err := e.prepareVertexGeminiBody(ctx, req, opts, baseModel, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-
-	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
-	translatedReq = helps.SetStringIfDifferent(translatedReq, "model", baseModel)
-	translatedReq = stripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
-	translatedReq = signature.SanitizeGeminiRequestThoughtSignatures(translatedReq, "contents")
+	from, to := prepared.responseFormat, prepared.to
+	translatedReq := prepared.body
 	respCtx := util.WithAlt(ctx, opts.Alt)
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
-	translatedReq = helps.EnsureGeminiLeadingUserContent(translatedReq, "contents")
 
 	baseURL := vertexBaseURL(location)
 	url := fmt.Sprintf(
@@ -879,27 +1004,13 @@ func (e *GeminiVertexExecutor) countTokensWithAPIKey(
 ) (cliproxyexecutor.Response, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	from := opts.SourceFormat
-	to := sdktranslator.FromString("gemini")
-
-	translatedReq := sdktranslator.TranslateRequestWithContext(ctx, from, to, baseModel, req.Payload, false)
-
-	translatedReq, err := helps.ApplyThinkingWithSourcePayload(
-		translatedReq, req.Payload, req.Payload, req.Model, from.String(), to.String(), e.Identifier(), req,
-	)
+	prepared, err := e.prepareVertexGeminiBody(ctx, req, opts, baseModel, false)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-
-	translatedReq = fixGeminiImageAspectRatio(baseModel, translatedReq)
-	translatedReq = helps.SetStringIfDifferent(translatedReq, "model", baseModel)
-	translatedReq = stripVertexOpenAIResponsesToolCallIDs(translatedReq, from.String())
-	translatedReq = signature.SanitizeGeminiRequestThoughtSignatures(translatedReq, "contents")
+	from, to := prepared.responseFormat, prepared.to
+	translatedReq := prepared.body
 	respCtx := util.WithAlt(ctx, opts.Alt)
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "tools")
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "generationConfig")
-	translatedReq, _ = sjson.DeleteBytes(translatedReq, "safetySettings")
-	translatedReq = helps.EnsureGeminiLeadingUserContent(translatedReq, "contents")
 
 	// For API key auth, use simpler URL format without project/location
 	if baseURL == "" {
@@ -1023,6 +1134,7 @@ func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	string,
 	error,
 ) {
+	ctx = cliproxyexecutor.WithoutRequestProxyURL(ctx)
 	if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 	}

@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -21,6 +25,85 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
+
+func TestExecutorsRejectUnsupportedUserAttachmentBeforeUpstream(t *testing.T) {
+	var upstreamCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	claudeFile := []byte(`{"messages":[{"role":"user","content":[{"type":"container_upload","file_id":"file-not-stored"}]}]}`)
+	openAIFile := []byte(`{"messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-not-stored"}}]}]}`)
+	interactionsFile := []byte(`{"input":[{"type":"user_input","content":[{"type":"file","file":{"file_id":"file-not-stored"}}]}]}`)
+	geminiFile := []byte(`{"contents":[{"role":"user","parts":[{"fileData":{"mimeType":"application/pdf"}}]}]}`)
+	withKey := func(provider string) *cliproxyauth.Auth {
+		return &cliproxyauth.Auth{Provider: provider, Attributes: map[string]string{
+			"api_key": "offline-test-key", "base_url": server.URL,
+		}}
+	}
+	cases := []struct {
+		name     string
+		executor cliproxyauth.ProviderExecutor
+		auth     *cliproxyauth.Auth
+		from     sdktranslator.Format
+		payload  []byte
+		partType string
+	}{
+		{"Claude/OpenAI compatibility", NewOpenAICompatExecutor("openai-compatibility", &config.Config{}), withKey("openai-compatibility"), sdktranslator.FormatClaude, claudeFile, "container_upload"},
+		{"Claude/Codex", NewCodexAutoExecutor(&config.Config{}), withKey("codex"), sdktranslator.FormatClaude, claudeFile, "container_upload"},
+		{"Interactions/Codex", NewCodexAutoExecutor(&config.Config{}), withKey("codex"), sdktranslator.FormatInteractions, interactionsFile, "file"},
+		{"Interactions/Gemini", NewGeminiExecutor(&config.Config{}), withKey("gemini"), sdktranslator.FormatInteractions, interactionsFile, "file"},
+		{"Gemini/GeminiInteractions", NewGeminiInteractionsExecutor(&config.Config{}), withKey("gemini-interactions"), sdktranslator.FormatGemini, geminiFile, "fileData"},
+		{"Interactions/Antigravity", NewAntigravityExecutor(&config.Config{}), withKey("antigravity"), sdktranslator.FormatInteractions, interactionsFile, "file"},
+		{"OpenAI/Claude", NewClaudeExecutor(&config.Config{}), withKey("claude"), sdktranslator.FormatOpenAI, openAIFile, "file"},
+		{"OpenAI/Gemini", NewGeminiExecutor(&config.Config{}), withKey("gemini"), sdktranslator.FormatOpenAI, openAIFile, "file"},
+		{"OpenAI/GeminiInteractions", NewGeminiInteractionsExecutor(&config.Config{}), withKey("gemini-interactions"), sdktranslator.FormatOpenAI, openAIFile, "file"},
+		{"OpenAI/Vertex", NewGeminiVertexExecutor(&config.Config{}), withKey("vertex"), sdktranslator.FormatOpenAI, openAIFile, "file"},
+		{"Claude/Qwen", NewQwenExecutor(&config.Config{}), withKey("qwen"), sdktranslator.FormatClaude, claudeFile, "container_upload"},
+		{"Claude/iFlow", NewIFlowExecutor(&config.Config{}), withKey("iflow"), sdktranslator.FormatClaude, claudeFile, "container_upload"},
+		{"OpenAI/AIStudio", NewAIStudioExecutor(&config.Config{}, "aistudio", nil), withKey("aistudio"), sdktranslator.FormatOpenAI, openAIFile, "file"},
+		{"Claude/Antigravity", NewAntigravityExecutor(&config.Config{}), withKey("antigravity"), sdktranslator.FormatClaude, claudeFile, "container_upload"},
+		{"Claude/GeminiCLI", NewGeminiCLIExecutor(&config.Config{}), withKey("gemini-cli"), sdktranslator.FormatClaude, claudeFile, "container_upload"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			req := cliproxyexecutor.Request{Model: "test-model", Payload: tt.payload}
+			for _, method := range []string{"Execute", "ExecuteStream", "CountTokens"} {
+				t.Run(method, func(t *testing.T) {
+					ctx := context.Background()
+					opts := cliproxyexecutor.Options{SourceFormat: tt.from, Stream: method == "ExecuteStream"}
+					var err error
+					switch method {
+					case "Execute":
+						_, err = tt.executor.Execute(ctx, tt.auth, req, opts)
+					case "ExecuteStream":
+						_, err = tt.executor.ExecuteStream(ctx, tt.auth, req, opts)
+					case "CountTokens":
+						_, err = tt.executor.CountTokens(ctx, tt.auth, req, opts)
+					}
+					var unsupported *translatorcommon.UnsupportedPartError
+					if !errors.As(err, &unsupported) || unsupported.Type != tt.partType || unsupported.StatusCode() != http.StatusBadRequest || !unsupported.IsRequestScoped() {
+						t.Fatalf("%s error = %v, want request-scoped 400 for %s", method, err, tt.partType)
+					}
+				})
+			}
+		})
+	}
+	_, err := NewAntigravityExecutor(&config.Config{}).Execute(
+		context.Background(), withKey("antigravity"),
+		cliproxyexecutor.Request{Model: "claude-sonnet-4", Payload: claudeFile},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
+	)
+	var unsupported *translatorcommon.UnsupportedPartError
+	if !errors.As(err, &unsupported) || unsupported.Type != "container_upload" {
+		t.Fatalf("Antigravity Claude bridge error = %v, want unsupported container_upload", err)
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls = %d, want zero", upstreamCalls)
+	}
+}
 
 type geminiInteractionsRoundTripper func(*http.Request) (*http.Response, error)
 
@@ -733,4 +816,365 @@ func TestPrepareGeminiCountTokensPreservesTrailingModelTurn(t *testing.T) {
 		t.Fatalf("prepareGeminiRequest() error = %v", errPrepare)
 	}
 	assertGeminiBoundaryRoles(t, prepared.body, []string{"user", "model"})
+}
+
+func TestGeminiFailedCompletionUsesFailureAccounting(t *testing.T) {
+	for _, provider := range []string{"gemini", "vertex"} {
+		for _, sample := range []struct {
+			name, wire string
+			stream     bool
+			valid      bool
+		}{
+			{name: "nonstream-empty"},
+			{name: "nonstream-malformed", wire: `{"invalid"`},
+			{name: "stream-empty", stream: true},
+			{name: "stream-progress-only", stream: true, wire: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n"},
+			{name: "nonstream-complete", valid: true, wire: `{"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}}`},
+			{name: "stream-complete", valid: true, stream: true, wire: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":3,\"totalTokenCount\":5}}\n\n"},
+		} {
+			t.Run(provider+"/"+sample.name, func(t *testing.T) {
+				capture := &captureUsagePlugin{records: make(chan usage.Record, 4)}
+				registerTestUsagePlugin(t, capture)
+				calls := 0
+				ctx := usage.WithRequestedModelAlias(context.Background(), t.Name())
+				ctx = util.WithRoundTripper(ctx, geminiInteractionsRoundTripper(func(req *http.Request) (*http.Response, error) {
+					calls++
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sample.wire)), Request: req}, nil
+				}))
+				var executor cliproxyauth.ProviderExecutor = NewGeminiExecutor(&config.Config{})
+				if provider == "vertex" {
+					executor = NewGeminiVertexExecutor(&config.Config{})
+				}
+				auth := &cliproxyauth.Auth{ID: t.Name(), Provider: provider, Attributes: map[string]string{"api_key": "synthetic-token", "base_url": "https://synthetic.invalid"}}
+				payload := []byte(`{"model":"gemini-2.5-flash","input":"hello"}`)
+				req := cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: payload}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: payload, Stream: sample.stream}
+				var err error
+				if sample.stream {
+					var result *cliproxyexecutor.StreamResult
+					result, err = executor.ExecuteStream(ctx, auth, req, opts)
+					if err == nil {
+						for chunk := range result.Chunks {
+							if chunk.Err != nil {
+								err = chunk.Err
+							}
+						}
+					}
+				} else {
+					_, err = executor.Execute(ctx, auth, req, opts)
+				}
+				if calls != 1 {
+					t.Fatalf("dispatches=%d, want 1", calls)
+				}
+				var status interface{ StatusCode() int }
+				if sample.valid {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else if !errors.As(err, &status) || status.StatusCode() != http.StatusBadGateway {
+					t.Fatalf("failed completion returned %v, want 502", err)
+				}
+				select {
+				case record := <-capture.records:
+					if record.Failed == sample.valid {
+						t.Fatalf("failed=%t, valid completion=%t", record.Failed, sample.valid)
+					}
+					if sample.valid && record.Detail.TotalTokens != 5 {
+						t.Fatalf("valid completion lost usage: %+v", record.Detail)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("usage record was not delivered")
+				}
+			})
+		}
+	}
+}
+
+func TestGeminiResponseErrorPreservesSSEFrames(t *testing.T) {
+	for _, sample := range []struct {
+		name, payload string
+		failed        bool
+	}{
+		{name: "pretty JSON", payload: "{\n\"status\":\"completed\",\n\"output\":[]\n}"},
+		{name: "multiline SSE", payload: "event: response.completed\ndata: {\ndata: \"type\":\"response.completed\",\ndata: \"response\":{\"status\":\"completed\"}\ndata: }\n\n"},
+		{name: "packed SSE", payload: "event: response.created\ndata: {\"type\":\"response.created\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\"}\n\n"},
+		{name: "CRLF SSE", payload: "event: response.completed\r\ndata: {\r\ndata: \"type\":\"response.completed\"\r\ndata: }\r\n\r\n"},
+		{name: "keepalive", payload: ": keep-alive\n\n"},
+		{name: "failed multiline SSE", failed: true, payload: "event: response.failed\ndata: {\ndata: \"type\":\"response.failed\",\ndata: \"response\":{\"status\":\"failed\"}\ndata: }\n\n"},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			var param any
+			err := geminiResponseError(&param, []byte(sample.payload))
+			if (err != nil) != sample.failed {
+				t.Fatalf("error=%v, failed payload=%t", err, sample.failed)
+			}
+		})
+	}
+}
+
+func TestGeminiInteractionsStopsAtFirstDoneMarker(t *testing.T) {
+	for _, provider := range []string{"gemini-interactions", "vertex"} {
+		t.Run(provider, func(t *testing.T) {
+			wire := "event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"done-control\",\"status\":\"completed\",\"steps\":[],\"usage\":{\"total_input_tokens\":2,\"total_output_tokens\":3,\"total_tokens\":5}}}\n\n" +
+				"data: [DONE]\n\ndata: [DONE]\n\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":{\"id\":\"late-event\"}}\n\n"
+			calls := 0
+			ctx := util.WithRoundTripper(context.Background(), geminiInteractionsRoundTripper(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(wire)), Request: req}, nil
+			}))
+			var executor cliproxyauth.ProviderExecutor = NewGeminiInteractionsExecutor(&config.Config{})
+			if provider == "vertex" {
+				executor = NewGeminiVertexExecutor(&config.Config{})
+			}
+			auth := &cliproxyauth.Auth{ID: t.Name(), Provider: provider, Attributes: map[string]string{"api_key": "synthetic-token", "base_url": "https://synthetic.invalid", "interactions": "true"}}
+			result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: []byte(`{"input":"hello"}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output strings.Builder
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+				output.Write(chunk.Payload)
+			}
+			if calls != 1 || strings.Count(output.String(), "[DONE]") != 1 || strings.Contains(output.String(), "late-event") {
+				t.Fatalf("calls=%d, output=%s", calls, output.String())
+			}
+		})
+	}
+}
+
+func TestGeminiNativePatchFailureDeliversGeneratedFrames(t *testing.T) {
+	for _, provider := range []string{"gemini-interactions", "vertex"} {
+		t.Run(provider, func(t *testing.T) {
+			wire := "data: {\"event_type\":\"interaction.start\",\"interaction\":{\"id\":\"native-patch\"}}\n\n" +
+				"data: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"function_call\",\"id\":\"item-patch\",\"call_id\":\"call-patch\",\"name\":\"apply_patch\",\"arguments\":{\"input\":7}}}\n\n" +
+				"data: {\"event_type\":\"step.stop\",\"index\":0}\n\ndata: [DONE]\n\n"
+			calls := 0
+			ctx := util.WithRoundTripper(context.Background(), geminiInteractionsRoundTripper(func(request *http.Request) (*http.Response, error) {
+				calls++
+				if !strings.HasSuffix(request.URL.Path, "/interactions") {
+					t.Errorf("upstream path=%s", request.URL.Path)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(wire)), Request: request}, nil
+			}))
+			var executor cliproxyauth.ProviderExecutor = NewGeminiInteractionsExecutor(&config.Config{})
+			if provider == "vertex" {
+				executor = NewGeminiVertexExecutor(&config.Config{})
+			}
+			auth := &cliproxyauth.Auth{ID: t.Name(), Provider: provider, Attributes: map[string]string{"api_key": "synthetic-token", "base_url": "https://synthetic.invalid", "interactions": "true"}}
+			original := []byte(`{"model":"gemini-2.5-flash","input":"patch a file","tools":[{"type":"custom","name":"apply_patch"}]}`)
+			payload := []byte(`{"model":"gemini-2.5-flash","input":"patch a file","tools":[{"type":"function","name":"apply_patch","parameters":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}}]}`)
+			result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatOpenAIResponse, OriginalRequest: original, Stream: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output strings.Builder
+			var failure error
+			for chunk := range result.Chunks {
+				output.Write(chunk.Payload)
+				if chunk.Err != nil {
+					failure = chunk.Err
+				}
+			}
+			var status interface{ StatusCode() int }
+			if calls != 1 || !errors.As(failure, &status) || status.StatusCode() != http.StatusBadGateway || strings.Count(output.String(), `"type":"response.failed"`) != 1 || strings.Contains(output.String(), `"type":"response.completed"`) || strings.Contains(output.String(), "[DONE]") {
+				t.Fatalf("dispatches=%d, error=%v, output=%s", calls, failure, output.String())
+			}
+		})
+	}
+}
+
+func TestGeminiEffectiveTokenTimingAtExecutor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		part string
+	}{
+		{"text", `{"text":"hello"}`},
+		{"thought", `{"text":"thinking","thought":true}`},
+		{"function", `{"functionCall":{"name":"lookup","args":{"query":"hello"}}}`},
+		{"image", `{"inlineData":{"mimeType":"image/png","data":"aGk="}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &captureUsagePlugin{records: make(chan usage.Record, 4)}
+			registerTestUsagePlugin(t, capture)
+			usage.StartDefault(context.Background())
+			synctest.Test(t, func(t *testing.T) {
+				transport := openAICompatTTFTRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+					time.Sleep(250 * time.Millisecond)
+					reader, writer := io.Pipe()
+					go func() {
+						defer func() { _ = writer.Close() }()
+						write := func(payload string) bool {
+							_, err := io.WriteString(writer, payload)
+							return err == nil
+						}
+						if !write(": keepalive\n\ndata: {\"modelVersion\":\"gemini-2.5-flash\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[]}}]}\n\n") {
+							return
+						}
+						time.Sleep(84 * time.Second)
+						if !write("data: {\"modelVersion\":\"gemini-2.5-flash\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[" + tc.part + "]}}]}\n\n") {
+							return
+						}
+						time.Sleep(2 * time.Second)
+						write("data: {\"modelVersion\":\"gemini-2.5-flash\",\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":1,\"totalTokenCount\":6}}\n\n")
+					}()
+					return &http.Response{StatusCode: http.StatusOK,
+						Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: reader, Request: req}, nil
+				})
+				ctx := util.WithRoundTripper(logging.WithResponseTimingHolder(context.Background()), http.RoundTripper(transport))
+				auth := &cliproxyauth.Auth{Provider: "gemini", Attributes: map[string]string{
+					"api_key": "synthetic", "base_url": "http://example.invalid"}}
+				result, err := NewGeminiExecutor(&config.Config{}).ExecuteStream(ctx, auth,
+					cliproxyexecutor.Request{Model: "gemini-2.5-flash",
+						Payload: []byte(`{"model":"gemini-2.5-flash","contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)},
+					cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini, Stream: true})
+				if err != nil {
+					t.Fatalf("ExecuteStream: %v", err)
+				}
+				var delivered strings.Builder
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream: %v", chunk.Err)
+					}
+					delivered.Write(chunk.Payload)
+				}
+				if !strings.Contains(delivered.String(), tc.part) {
+					t.Fatalf("effective content was not delivered: %s", delivered.String())
+				}
+			})
+			record := awaitOpenAICompatUsage(t, capture)
+			if got := time.Duration(record.TimeToFirstByteMs) * time.Millisecond; got != 84*time.Second+250*time.Millisecond {
+				t.Fatalf("effective-token TTFT = %v, want 84.25s", got)
+			}
+			if record.Failed || record.Detail.TotalTokens != 6 || record.ResponseModel != "gemini-2.5-flash" {
+				t.Fatalf("published stream record = %#v", record)
+			}
+		})
+	}
+}
+
+func TestGeminiInteractionsSSETerminalSnapshotFormats(t *testing.T) {
+	complete := `{"id":"flat-terminal","status":"completed","steps":[]}`
+	for _, test := range []struct {
+		name, frame                string
+		terminal, done, nativeOnly bool
+	}{
+		{name: "named-flat", frame: "event: interaction.completed\ndata: " + complete + "\n\n", terminal: true, nativeOnly: true},
+		{name: "nested", frame: `data: {"event_type":"interaction.completed","interaction":` + complete + "}\n\n", terminal: true},
+		{name: "unnamed-flat", frame: "data: " + complete + "\n\n"},
+		{name: "wrong-event", frame: "event: interaction.created\ndata: " + complete + "\n\n"},
+		{name: "missing-id", frame: "event: interaction.completed\ndata: {\"status\":\"completed\",\"steps\":[]}\n\n"},
+		{name: "missing-steps", frame: "event: interaction.completed\ndata: {\"id\":\"flat-terminal\",\"status\":\"completed\"}\n\n"},
+		{name: "incomplete-status", frame: "event: interaction.completed\ndata: {\"id\":\"flat-terminal\",\"status\":\"in_progress\",\"steps\":[]}\n\n"},
+		{name: "named-flat-action", frame: "event: interaction.completed\ndata: " + strings.Replace(complete, "completed", "requires_action", 1) + "\n\n", terminal: true, nativeOnly: true},
+		{name: "nested-action", frame: `data: {"event_type":"interaction.completed","interaction":` + strings.Replace(complete, "completed", "requires_action", 1) + `}`, terminal: true},
+		{name: "action-missing-steps", frame: `data: {"event_type":"interaction.completed","interaction":{"id":"action","status":"requires_action"}}`},
+		{name: "action-missing-id", frame: `data: {"event_type":"interaction.completed","interaction":{"status":"requires_action","steps":[]}}`},
+		{name: "action-in-progress", frame: `data: {"event_type":"interaction.completed","interaction":{"id":"action","status":"in_progress","steps":[]}}`},
+		{name: "done-data", frame: "data: [DONE]\n\n", terminal: true, done: true},
+		{name: "done-event", frame: "event: done\n\n", terminal: true, done: true},
+	} {
+		for _, format := range []sdktranslator.Format{sdktranslator.FormatInteractions, sdktranslator.FormatClaude} {
+			t.Run(test.name+"/"+format.String(), func(t *testing.T) {
+				terminal, done := geminiInteractionsSSEDone([]byte(test.frame), format == sdktranslator.FormatInteractions)
+				want := test.terminal && (!test.nativeOnly || format == sdktranslator.FormatInteractions)
+				if terminal != want || done != test.done {
+					t.Fatalf("terminal=%t done=%t; want %t/%t", terminal, done, want, test.done)
+				}
+			})
+		}
+	}
+}
+
+func TestGeminiInteractionsNamedSnapshotAtExecutor(t *testing.T) {
+	for _, provider := range []string{"gemini-interactions", "vertex"} {
+		t.Run(provider, func(t *testing.T) {
+			capture := &captureUsagePlugin{records: make(chan usage.Record, 4)}
+			registerTestUsagePlugin(t, capture)
+			usage.StartDefault(context.Background())
+			wire := "event: interaction.completed\ndata: {\"id\":\"flat-terminal\",\"status\":\"completed\",\"steps\":[{\"type\":\"model_output\",\"content\":[{\"type\":\"text\",\"text\":\"native-answer\"}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":3,\"total_tokens\":5}}\n\n"
+			calls := 0
+			ctx := util.WithRoundTripper(context.Background(), geminiInteractionsRoundTripper(func(request *http.Request) (*http.Response, error) {
+				calls++
+				if request.URL.Host != "synthetic.invalid" || !strings.HasSuffix(request.URL.Path, "/interactions") {
+					return nil, errors.New("unexpected request " + request.URL.String())
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Request: request, Body: io.NopCloser(strings.NewReader(wire))}, nil
+			}))
+			var executor cliproxyauth.ProviderExecutor = NewGeminiInteractionsExecutor(&config.Config{})
+			if provider == "vertex" {
+				executor = NewGeminiVertexExecutor(&config.Config{})
+			}
+			auth := &cliproxyauth.Auth{ID: t.Name(), Provider: provider, Attributes: map[string]string{"api_key": "synthetic-token", "base_url": "https://synthetic.invalid", "interactions": "true"}}
+			result, err := executor.ExecuteStream(ctx, auth, cliproxyexecutor.Request{Model: "gemini-3.8-flash", Payload: []byte(`{"input":"hello"}`)}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: sdktranslator.FormatInteractions, Stream: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var output strings.Builder
+			for chunk := range result.Chunks {
+				if chunk.Err != nil {
+					t.Fatal(chunk.Err)
+				}
+				output.Write(chunk.Payload)
+			}
+			if calls != 1 || output.String() != wire {
+				t.Fatalf("calls=%d, output=%q", calls, output.String())
+			}
+			select {
+			case record := <-capture.records:
+				if record.Failed || record.Detail.InputTokens != 2 || record.Detail.OutputTokens != 3 || record.Detail.TotalTokens != 5 {
+					t.Fatalf("usage=%+v", record)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("native snapshot usage missing")
+			}
+		})
+	}
+}
+
+func TestGeminiInteractionsActionSnapshotTerminatesStream(t *testing.T) {
+	for _, provider := range []string{"gemini-interactions", "vertex"} {
+		for _, format := range []sdktranslator.Format{sdktranslator.FormatInteractions, sdktranslator.FormatOpenAI, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatClaude, sdktranslator.FormatGemini} {
+			for _, status := range []string{"completed", "requires_action"} {
+				t.Run(fmt.Sprintf("%s/%s/%s", provider, format, status), func(t *testing.T) {
+					snapshot := fmt.Sprintf(`{"id":"interaction-action","status":%q,"steps":[{"type":"function_call","id":"call-action","name":"lookup","arguments":{"q":"x"}}],"usage":{"total_input_tokens":2,"total_output_tokens":3,"total_tokens":5}}`, status)
+					wire := "event: interaction.created\ndata: {\"event_type\":\"interaction.created\",\"interaction\":{\"id\":\"interaction-action\"}}\n\n" +
+						"event: step.start\ndata: {\"event_type\":\"step.start\",\"index\":0,\"step\":{\"type\":\"function_call\",\"id\":\"call-action\",\"name\":\"lookup\",\"arguments\":{}}}\n\n" +
+						"event: step.delta\ndata: {\"event_type\":\"step.delta\",\"index\":0,\"delta\":{\"type\":\"arguments_delta\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}\n\n" +
+						"event: step.stop\ndata: {\"event_type\":\"step.stop\",\"index\":0}\n\n" +
+						"event: interaction.completed\ndata: {\"event_type\":\"interaction.completed\",\"interaction\":" + snapshot + "}\n\n"
+					calls := 0
+					ctx := util.WithRoundTripper(t.Context(), googlePayloadTransport(func(request *http.Request) (*http.Response, error) {
+						calls++
+						if !strings.HasSuffix(request.URL.Path, "/interactions") {
+							t.Errorf("unexpected endpoint: %s", request.URL.Path)
+						}
+						return googlePayloadResponse(request, wire), nil
+					}))
+					var executor cliproxyauth.ProviderExecutor = NewGeminiInteractionsExecutor(&config.Config{})
+					if provider == "vertex" {
+						executor = NewGeminiVertexExecutor(&config.Config{})
+					}
+					result, err := executor.ExecuteStream(ctx, googlePayloadAuth(provider),
+						cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: []byte(`{"input":"lookup x","tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}]}`)},
+						cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatInteractions, ResponseFormat: format, Stream: true})
+					if err != nil {
+						t.Fatal(err)
+					}
+					var output bytes.Buffer
+					for chunk := range result.Chunks {
+						output.Write(chunk.Payload)
+						if chunk.Err != nil {
+							err = chunk.Err
+						}
+					}
+					if err != nil || calls != 1 || !strings.Contains(output.String(), "lookup") {
+						t.Fatalf("status=%s error=%v calls=%d output=%s", status, err, calls, output.String())
+					}
+				})
+			}
+		}
+	}
 }

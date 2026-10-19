@@ -117,9 +117,7 @@ func convertInteractionsResponseToClaudeNonStream(
 			return true
 		},
 	)
-	if sawToolCall {
-		out, _ = sjson.SetBytes(out, "stop_reason", "tool_use")
-	}
+	out, _ = sjson.SetBytes(out, "stop_reason", interactionsClaudeStopReason(root, sawToolCall))
 	out = setClaudeUsageFromInteractions(out, "usage", translatorcommon.InteractionsUsage(root))
 	return out
 }
@@ -133,7 +131,7 @@ func convertInteractionsEventToClaude(modelName string, rawJSON []byte, st *inte
 		return appendClaudeMessageStop(nil, st)
 	}
 	root := gjson.ParseBytes(payload)
-	if !root.Exists() {
+	if !root.Exists() || st.Done {
 		return nil
 	}
 	switch root.Get("event_type").String() {
@@ -150,6 +148,8 @@ func convertInteractionsEventToClaude(modelName string, rawJSON []byte, st *inte
 		return appendClaudeContentBlockStop(nil, st)
 	case "interaction.completed", "finish":
 		return appendClaudeMessageDelta(nil, root, st)
+	case "response.failed", "interaction.failed":
+		return appendClaudeError(nil, root, st)
 	case "done":
 		return appendClaudeMessageStop(nil, st)
 	}
@@ -304,9 +304,7 @@ func appendClaudeMessageDelta(out [][]byte, root gjson.Result, st *interactionsT
 	out = appendClaudeMessageStart(out, st)
 	out = appendClaudeContentBlockStop(out, st)
 	payload := []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
-	if st.SawToolCall {
-		payload, _ = sjson.SetBytes(payload, "delta.stop_reason", "tool_use")
-	}
+	payload, _ = sjson.SetBytes(payload, "delta.stop_reason", interactionsClaudeStopReason(root, st.SawToolCall))
 	payload = setClaudeUsageFromInteractions(payload, "usage", translatorcommon.InteractionsUsage(root))
 	out = append(out, translatorcommon.AppendSSEEventBytes(nil, "message_delta", payload, 3))
 	st.Completed = true
@@ -329,15 +327,66 @@ func appendClaudeMessageStop(out [][]byte, st *interactionsToClaudeStreamState) 
 	return out
 }
 
+func appendClaudeError(out [][]byte, root gjson.Result, st *interactionsToClaudeStreamState) [][]byte {
+	out = appendClaudeContentBlockStop(out, st)
+	st.Completed = true
+	st.Done = true
+	errNode := root.Get("error")
+	if !errNode.Exists() {
+		errNode = root.Get("interaction.error")
+	}
+	if !errNode.Exists() {
+		errNode = root.Get("response.error")
+	}
+	message := errNode.Get("message").String()
+	if message == "" {
+		message = "upstream execution failed"
+	}
+	errType := errNode.Get("type").String()
+	if errType == "" {
+		errType = "api_error"
+	}
+	payload := []byte(`{"type":"error","error":{"type":"","message":""}}`)
+	payload, _ = sjson.SetBytes(payload, "error.type", errType)
+	payload, _ = sjson.SetBytes(payload, "error.message", message)
+	return append(out, translatorcommon.AppendSSEEventBytes(nil, "error", payload, 3))
+}
+
+func interactionsClaudeStopReason(root gjson.Result, sawToolCall bool) string {
+	status := firstNonEmpty(root.Get("interaction.status").String(), root.Get("status").String())
+	finish := firstNonEmpty(root.Get("interaction.finish_reason").String(), root.Get("finish_reason").String())
+	if status == "incomplete" || finish == "length" || finish == "max_tokens" {
+		return "max_tokens"
+	}
+	if sawToolCall {
+		return "tool_use"
+	}
+	return "end_turn"
+}
+
 func setClaudeUsageFromInteractions(out []byte, path string, usage gjson.Result) []byte {
 	if !usage.Exists() {
 		return out
 	}
-	if v, ok := firstUsageInt(usage, "input_tokens", "total_input_tokens"); ok {
-		out, _ = sjson.SetBytes(out, path+".input_tokens", v)
+	cached, hasCached := firstUsageInt(usage, "cache_read_input_tokens", "cache_read_tokens", "cached_tokens", "total_cached_tokens")
+	cacheWrite, hasCacheWrite := firstUsageInt(usage, "cache_creation_input_tokens", "cache_creation_tokens", "cache_write_tokens")
+	input, hasInput := firstUsageInt(usage, "input_tokens")
+	if !hasInput {
+		if total, ok := firstUsageInt(usage, "total_input_tokens", "prompt_tokens"); ok {
+			input, hasInput = max(int64(0), total-max(int64(0), cached)-max(int64(0), cacheWrite)), true
+		}
+	}
+	if hasInput {
+		out, _ = sjson.SetBytes(out, path+".input_tokens", input)
 	}
 	if v, ok := firstUsageInt(usage, "output_tokens", "total_output_tokens"); ok {
 		out, _ = sjson.SetBytes(out, path+".output_tokens", v)
+	}
+	if hasCached {
+		out, _ = sjson.SetBytes(out, path+".cache_read_input_tokens", max(int64(0), cached))
+	}
+	if hasCacheWrite {
+		out, _ = sjson.SetBytes(out, path+".cache_creation_input_tokens", max(int64(0), cacheWrite))
 	}
 	return out
 }

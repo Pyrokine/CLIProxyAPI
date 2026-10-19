@@ -114,7 +114,7 @@ func convertCliResponseToOpenAI(_ context.Context, _ string, _, _, rawJSON []byt
 			)
 		}
 		// Include cached token count if present (indicates prompt caching is working)
-		if cachedTokenCount > 0 {
+		if usageResult.Get("cachedContentTokenCount").Exists() {
 			var err error
 			template, err = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokenCount)
 			if err != nil {

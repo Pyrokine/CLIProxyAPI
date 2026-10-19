@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // CredentialStorage stores the service account JSON for Vertex AI access.
@@ -33,6 +34,14 @@ type CredentialStorage struct {
 
 	// Metadata holds arbitrary key-value pairs injected before persistence.
 	Metadata map[string]any `json:"-"`
+}
+
+func (s *CredentialStorage) CloneForPersistence() coreauth.TokenStorage {
+	if s == nil {
+		return nil
+	}
+	copyStorage := *s
+	return &copyStorage
 }
 
 // SetMetadata injects metadata before the credential is persisted.

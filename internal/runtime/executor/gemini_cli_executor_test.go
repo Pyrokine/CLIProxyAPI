@@ -45,17 +45,17 @@ func TestGeminiCLIExecutorRefreshBuildsPrimaryPersistenceForVirtualCredential(t 
 	previousTokenParser := geminiTokenAndConfigFromMetadata
 	geminiTokenAndConfigFromMetadata = func(metadata map[string]any) (map[string]any, *oauth2.Token, *oauth2.Config) {
 		return map[string]any{"refresh_token": "old-refresh"}, &oauth2.Token{
-				AccessToken:  "old-access",
-				RefreshToken: "old-refresh",
-				TokenType:    "Bearer",
-				Expiry:       time.Now().Add(time.Hour),
-			}, &oauth2.Config{
-				ClientID:     "client-id",
-				ClientSecret: "client-secret",
-				Endpoint: oauth2.Endpoint{
-					TokenURL: tokenServer.URL,
-				},
-			}
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+			TokenType:    "Bearer",
+			Expiry:       time.Now().Add(time.Hour),
+		}, &oauth2.Config{
+			ClientID:     "client-id",
+			ClientSecret: "client-secret",
+			Endpoint: oauth2.Endpoint{
+				TokenURL: tokenServer.URL,
+			},
+		}
 	}
 	t.Cleanup(func() { geminiTokenAndConfigFromMetadata = previousTokenParser })
 
@@ -208,5 +208,40 @@ func TestCleanGeminiCLIRequestSchemas(t *testing.T) {
 		output, "request.tools.0.functionDeclarations.0.parameters.properties.mode.description",
 	).Exists() {
 		t.Fatalf("enum description was not preserved after cleanup: %s", output)
+	}
+}
+
+func TestParseRetryDelayHumanDuration(t *testing.T) {
+	for _, test := range []struct {
+		text  string
+		want  time.Duration
+		valid bool
+	}{
+		{"1h43m56s", time.Hour + 43*time.Minute + 56*time.Second, true},
+		{"20s", 20 * time.Second, true}, {"0.25s", 250 * time.Millisecond, true},
+		{"1ms", time.Millisecond, true}, {"373.801628ms", 373801628 * time.Nanosecond, true},
+		{".25s", 250 * time.Millisecond, true}, {"0s", 0, true},
+		{"1month", 0, false}, {"1snope", 0, false}, {"-1s", 0, false},
+	} {
+		t.Run(test.text, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{"error": map[string]any{"message": "Your quota will reset after " + test.text + "."}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := parseRetryDelay(body)
+			if !test.valid {
+				if err == nil || got != nil {
+					t.Fatalf("invalid reset duration accepted: %v, %v", got, err)
+				}
+				return
+			}
+			if err != nil || got == nil || *got != test.want {
+				t.Fatalf("retry delay = %v, %v, want %v", got, err, test.want)
+			}
+		})
+	}
+	got, err := parseRetryDelay([]byte(`{"error":{"message":"Your quota will reset after 1h.","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"2s"}]}}`))
+	if err != nil || got == nil || *got != 2*time.Second {
+		t.Fatalf("structured retry priority = %v, %v", got, err)
 	}
 }
