@@ -2,6 +2,8 @@ package responses
 
 import (
 	"bytes"
+	"strconv"
+	"strings"
 
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -20,7 +22,6 @@ func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool)
 			"0.content.0.text", inputResult.String(),
 		)
 		rawJSON, _ = sjson.SetRawBytes(rawJSON, "input", input)
-		inputResult = util.GetGJSONBytesNoCopy(rawJSON, "input")
 	}
 
 	rawJSON = setCodexRequiredBool(rawJSON, "stream", true)
@@ -37,10 +38,18 @@ func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool)
 		"top_p",
 		"stream_options",
 	)
-	if serviceTier := gjson.GetBytes(
-		rawJSON, "service_tier",
-	); serviceTier.Exists() && serviceTier.String() != "priority" {
-		rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
+	if serviceTier := gjson.GetBytes(rawJSON, "service_tier"); serviceTier.Exists() {
+		tier := strings.ToLower(strings.TrimSpace(serviceTier.String()))
+		if tier == "fast" {
+			tier = "priority"
+		}
+		if serviceTier.Type == gjson.String && (tier == "priority" || tier == "ultrafast") {
+			if serviceTier.String() != tier {
+				rawJSON, _ = sjson.SetBytes(rawJSON, "service_tier", tier)
+			}
+		} else {
+			rawJSON = deleteCodexRequestFields(rawJSON, "service_tier")
+		}
 	}
 
 	rawJSON = deleteCodexRequestFields(
@@ -56,8 +65,14 @@ func ConvertOpenAIResponsesRequestToCodex(_ string, inputRawJSON []byte, _ bool)
 	rawJSON = deleteCodexRequestFields(rawJSON, "user")
 
 	// Convert role "system" to "developer" in input array to comply with Codex API requirements.
-	rawJSON = convertSystemRoleToDeveloperWithInput(rawJSON, inputResult)
+	rawJSON = convertSystemRoleToDeveloperWithInput(rawJSON, util.GetGJSONBytesNoCopy(rawJSON, "input"))
 	rawJSON = normalizeCodexBuiltinTools(rawJSON)
+	for index, item := range util.GetGJSONBytesNoCopy(rawJSON, "input").Array() {
+		arguments := item.Get("arguments")
+		if item.Get("type").String() == "function_call" && arguments.Type == gjson.String && strings.TrimSpace(arguments.String()) == "" {
+			rawJSON, _ = sjson.SetBytes(rawJSON, "input."+strconv.Itoa(index)+".arguments", "{}")
+		}
+	}
 
 	return rawJSON
 }
@@ -78,17 +93,31 @@ func setCodexRequiredBool(rawJSON []byte, path string, value bool) []byte {
 func setCodexRequiredInclude(rawJSON []byte) []byte {
 	current := gjson.GetBytes(rawJSON, "include")
 	values := current.Array()
-	if current.IsArray() && len(values) == 1 &&
-		values[0].Type == gjson.String &&
-		values[0].String() == "reasoning.encrypted_content" {
+	includeSources := false
+	for _, value := range values {
+		if current.IsArray() && value.Type == gjson.String && value.String() == "web_search_call.action.sources" {
+			includeSources = true
+			break
+		}
+	}
+	expected := []string{"reasoning.encrypted_content"}
+	if includeSources {
+		expected = append(expected, "web_search_call.action.sources")
+	}
+	matches := current.IsArray() && len(values) == len(expected)
+	if matches {
+		for index, value := range values {
+			if value.Type != gjson.String || value.String() != expected[index] {
+				matches = false
+				break
+			}
+		}
+	}
+	if matches {
 		return rawJSON
 	}
 
-	updated, err := sjson.SetRawBytes(
-		rawJSON,
-		"include",
-		[]byte(`["reasoning.encrypted_content"]`),
-	)
+	updated, err := sjson.SetBytes(rawJSON, "include", expected)
 	if err != nil {
 		return rawJSON
 	}
@@ -125,8 +154,11 @@ func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
 	inputItems := make([][]byte, 0, len(input.Array()))
 	for _, item := range input.Array() {
 		itemRaw := []byte(item.Raw)
-		content := item.Get("content")
-		if content.IsArray() {
+		for _, path := range []string{"content", "output"} {
+			content := item.Get(path)
+			if !content.IsArray() {
+				continue
+			}
 			parts := make([][]byte, 0, len(content.Array()))
 			contentChanged := false
 			for _, part := range content.Array() {
@@ -140,14 +172,16 @@ func stripCodexResponsesCacheBreakpoints(rawJSON []byte) []byte {
 				parts = append(parts, partRaw)
 			}
 			if contentChanged {
-				if updated, err := sjson.SetRawBytes(
-					itemRaw,
-					"content",
-					translatorcommon.JoinRawArray(parts),
-				); err == nil {
+				if updated, err := sjson.SetRawBytes(itemRaw, path, translatorcommon.JoinRawArray(parts)); err == nil {
 					itemRaw = updated
 					changed = true
 				}
+			}
+		}
+		if item.Get("prompt_cache_breakpoint").Exists() {
+			if updated, err := sjson.DeleteBytes(itemRaw, "prompt_cache_breakpoint"); err == nil {
+				itemRaw = updated
+				changed = true
 			}
 		}
 		inputItems = append(inputItems, itemRaw)

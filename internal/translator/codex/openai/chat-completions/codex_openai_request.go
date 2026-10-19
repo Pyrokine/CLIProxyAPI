@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -27,6 +29,12 @@ import (
 // Returns:
 //   - []byte: The transformed request data in OpenAI Responses API format
 func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+	out, _ := convertOpenAIRequestToCodexChecked(modelName, inputRawJSON, stream)
+	return out
+}
+
+func convertOpenAIRequestToCodexChecked(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
 	// Start with empty JSON object
 	out := []byte(`{"instructions":""}`)
@@ -65,7 +73,10 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Model
 	out, _ = sjson.SetBytes(out, "model", modelName)
 	if value := gjson.GetBytes(rawJSON, "service_tier"); value.Type == gjson.String {
-		if tier := strings.TrimSpace(value.String()); tier != "" {
+		if tier := strings.ToLower(strings.TrimSpace(value.String())); tier != "" {
+			if tier == "fast" {
+				tier = "priority"
+			}
 			out, _ = sjson.SetBytes(out, "service_tier", tier)
 		}
 	}
@@ -73,31 +84,17 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Build request-local tool metadata and name shortening map.
 	tools := gjson.GetBytes(rawJSON, "tools")
 	toolResults := tools.Array()
-	originalToolNameMap := map[string]string{}
+	originalToolNameMap := buildShortNameMap(rawJSON)
 	customToolNames := map[string]struct{}{}
 	functionToolNames := map[string]struct{}{}
 	if tools.IsArray() && len(toolResults) > 0 {
-		var names []string
-		seenNames := map[string]struct{}{}
 		for _, tool := range toolResults {
-			var name string
 			switch tool.Get("type").String() {
 			case "function":
-				name = tool.Get("function.name").String()
-				functionToolNames[name] = struct{}{}
+				functionToolNames[tool.Get("function.name").String()] = struct{}{}
 			case "custom":
-				name = tool.Get("name").String()
-				customToolNames[name] = struct{}{}
+				customToolNames[tool.Get("name").String()] = struct{}{}
 			}
-			if name != "" {
-				if _, seen := seenNames[name]; !seen {
-					names = append(names, name)
-					seenNames[name] = struct{}{}
-				}
-			}
-		}
-		if len(names) > 0 {
-			originalToolNameMap = buildShortNameMap(names)
 		}
 		// A normalized function envelope cannot disambiguate declarations that share a name.
 		// Preserve function behavior for such ambiguous names.
@@ -113,10 +110,17 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		case "function":
 			name = toolCall.Get("function.name").String()
 			callType = "function"
+			input = toolCall.Get("function.arguments").String()
 			if _, custom := customToolNames[name]; custom {
 				callType = "custom"
+				if name == "apply_patch" {
+					var patchInput translatorcommon.ResponsesPatchInput
+					if _, err := patchInput.Finish(input); err == nil {
+						input = patchInput.Input()
+					}
+				}
 			}
-			return callType, name, toolCall.Get("function.arguments").String(), true
+			return callType, name, input, true
 		default:
 			return "", "", "", false
 		}
@@ -223,6 +227,9 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 						it := items[j]
 						switch it.Get("type").String() {
 						case "text":
+							if it.Get("text").String() == "" {
+								continue
+							}
 							partType := "input_text"
 							if role == "assistant" {
 								partType = "output_text"
@@ -233,29 +240,47 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 							msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 						case "image_url":
 							if role == "user" {
-								part := []byte(`{}`)
-								part, _ = sjson.SetBytes(part, "type", "input_image")
-								if u := it.Get("image_url.url"); u.Exists() {
-									part, _ = sjson.SetBytes(part, "image_url", u.String())
+								if imageURL := it.Get("image_url.url").String(); imageURL != "" {
+									part := []byte(`{"type":"input_image"}`)
+									part, _ = sjson.SetBytes(part, "image_url", imageURL)
+									msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
+								} else {
+									drops.Drop("image_url")
 								}
-								msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 							}
 						case "file":
 							if role == "user" {
-								fileData := it.Get("file.file_data").String()
-								filename := it.Get("file.filename").String()
-								if fileData != "" {
-									part := []byte(`{}`)
-									part, _ = sjson.SetBytes(part, "type", "input_file")
-									part, _ = sjson.SetBytes(part, "file_data", fileData)
-									if filename != "" {
-										part, _ = sjson.SetBytes(part, "filename", filename)
+								parts := appendToolOutputContentPart([]byte(`[]`), it)
+								part := gjson.GetBytes(parts, "0")
+								if part.Get("type").String() == "input_file" {
+									msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(part.Raw))
+								} else {
+									drops.Drop("file")
+								}
+							}
+						case "input_audio":
+							if role == "user" {
+								audio := it.Get("input_audio")
+								if data := audio.Get("data"); data.Type == gjson.String && data.String() != "" {
+									part := []byte(`{"type":"input_audio"}`)
+									part, _ = sjson.SetBytes(part, "data", data.String())
+									if format := audio.Get("format"); format.Exists() {
+										part, _ = sjson.SetRawBytes(part, "format", []byte(format.Raw))
 									}
 									msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
+								} else {
+									drops.Drop("input_audio")
 								}
+							}
+						case "audio", "input_file", "video", "video_url":
+							if role == "user" {
+								drops.Drop(it.Get("type").String())
 							}
 						}
 					}
+				}
+				if role == "user" {
+					drops.EndTurn(len(gjson.GetBytes(msg, "content").Array()))
 				}
 
 				// Don't emit empty assistant messages when only tool_calls
@@ -481,10 +506,25 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	}
 
 	out, _ = sjson.SetBytes(out, "store", false)
-	return out
+	if err := drops.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func setToolCallOutputContent(funcOutput []byte, content gjson.Result) []byte {
+	if content.Type == gjson.String && gjson.Valid(content.String()) {
+		parts := gjson.Parse(content.String())
+		if parts.IsArray() {
+			for _, part := range parts.Array() {
+				converted := appendToolOutputContentPart([]byte(`[]`), part)
+				if gjson.GetBytes(converted, "0.type").String() == "input_image" {
+					content = parts
+					break
+				}
+			}
+		}
+	}
 	switch {
 	case content.Type == gjson.String:
 		funcOutput, _ = sjson.SetBytes(funcOutput, "output", content.String())
@@ -506,7 +546,12 @@ func setToolCallOutputContent(funcOutput []byte, content gjson.Result) []byte {
 
 func appendToolOutputContentPart(output []byte, item gjson.Result) []byte {
 	switch item.Get("type").String() {
-	case "text":
+	case "input_image":
+		if item.Get("image_url").String() == "" && item.Get("file_id").String() == "" {
+			return appendToolOutputFallbackPart(output, item)
+		}
+		output, _ = sjson.SetRawBytes(output, "-1", []byte(item.Raw))
+	case "text", "input_text":
 		part := []byte(`{}`)
 		part, _ = sjson.SetBytes(part, "type", "input_text")
 		part, _ = sjson.SetBytes(part, "text", item.Get("text").String())
@@ -569,77 +614,69 @@ func appendToolOutputFallbackPart(output []byte, item gjson.Result) []byte {
 	return output
 }
 
-// shortenNameIfNeeded applies the simple shortening rule for a single name.
-// If the name length exceeds 64, it will try to preserve the "mcp__" prefix and last segment.
-// Otherwise, it truncates to 64 characters.
+// shortenNameIfNeeded 保留长 MCP 名称的末段，并限制字符与长度
 func shortenNameIfNeeded(name string) string {
-	const limit = 64
-	if len(name) <= limit {
-		return name
-	}
-	if strings.HasPrefix(name, "mcp__") {
-		// Keep prefix and last segment after '__'
-		idx := strings.LastIndex(name, "__")
-		if idx > 0 {
-			candidate := "mcp__" + name[idx+2:]
-			if len(candidate) > limit {
-				return candidate[:limit]
-			}
-			return candidate
+	if len(name) > 64 && strings.HasPrefix(name, "mcp__") {
+		if index := strings.LastIndex(name, "__"); index > 0 {
+			name = "mcp__" + name[index+2:]
 		}
 	}
-	return name[:limit]
+	return util.SanitizeClaudeFunctionName(name)
 }
 
-// buildShortNameMap generates unique short names (<=64) for the given list of names.
-// It preserves the "mcp__" prefix with the last segment when possible and ensures uniqueness
-// by appending suffixes like "~1", "~2" if needed.
-func buildShortNameMap(names []string) map[string]string {
+// buildShortNameMap 优先分配声明名称，历史和工具选择不改变已分配的名称
+func buildShortNameMap(rawJSON []byte) map[string]string {
+	var names []string
+	for _, tool := range gjson.GetBytes(rawJSON, "tools").Array() {
+		switch tool.Get("type").String() {
+		case "function":
+			names = append(names, tool.Get("function.name").String())
+		case "custom":
+			names = append(names, tool.Get("name").String())
+		}
+	}
+	for _, message := range gjson.GetBytes(rawJSON, "messages").Array() {
+		if message.Get("role").String() != "assistant" {
+			continue
+		}
+		for _, call := range message.Get("tool_calls").Array() {
+			switch call.Get("type").String() {
+			case "function":
+				names = append(names, call.Get("function.name").String())
+			case "custom":
+				names = append(names, call.Get("custom.name").String())
+			}
+		}
+	}
+	choice := gjson.GetBytes(rawJSON, "tool_choice")
+	switch choice.Get("type").String() {
+	case "function":
+		names = append(names, choice.Get("function.name").String())
+	case "custom":
+		names = append(names, choice.Get("name").String())
+	}
+
 	const limit = 64
 	used := map[string]struct{}{}
 	m := map[string]string{}
-
-	baseCandidate := func(n string) string {
-		if len(n) <= limit {
-			return n
+	for _, name := range names {
+		if name == "" {
+			continue
 		}
-		if strings.HasPrefix(n, "mcp__") {
-			idx := strings.LastIndex(n, "__")
-			if idx > 0 {
-				candidate := "mcp__" + n[idx+2:]
-				if len(candidate) > limit {
-					candidate = candidate[:limit]
-				}
-				return candidate
+		if _, exists := m[name]; exists {
+			continue
+		}
+		base := shortenNameIfNeeded(name)
+		candidate := base
+		for index := 1; ; index++ {
+			if _, exists := used[candidate]; !exists {
+				break
 			}
+			suffix := "_" + strconv.Itoa(index)
+			candidate = base[:min(len(base), max(limit-len(suffix), 0))] + suffix
 		}
-		return n[:limit]
-	}
-
-	makeUnique := func(candidate string) string {
-		if _, ok := used[candidate]; !ok {
-			return candidate
-		}
-		base := candidate
-		for i := 1; ; i++ {
-			suffix := "_" + strconv.Itoa(i)
-			allowed := max(limit-len(suffix), 0)
-			tmp := base
-			if len(tmp) > allowed {
-				tmp = tmp[:allowed]
-			}
-			tmp = tmp + suffix
-			if _, ok := used[tmp]; !ok {
-				return tmp
-			}
-		}
-	}
-
-	for _, n := range names {
-		candidate := baseCandidate(n)
-		uniq := makeUnique(candidate)
-		used[uniq] = struct{}{}
-		m[n] = uniq
+		used[candidate] = struct{}{}
+		m[name] = candidate
 	}
 	return m
 }

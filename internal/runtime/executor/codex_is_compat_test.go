@@ -19,7 +19,12 @@ func TestCodexResponsesBodyUsesResolvedModelIsCompat(t *testing.T) {
 		SourceFormat: sdktranslator.FormatOpenAIResponse,
 		Headers:      http.Header{"User-Agent": []string{"codex-tui/0.145.0"}},
 	}
-	payload := []byte(`{"model":"compat-model","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
+	payload := []byte(`{"model":"compat-model","input":[{"type":"agent_message",` +
+		`"author":"/root","recipient":"/root/worker",` +
+		`"internal_chat_message_metadata_passthrough":{"turn_id":"one"},` +
+		`"content":[{"type":"encrypted_content","encrypted_content":"task"}]},` +
+		`{"type":"message","role":"user","author":"/root/worker","recipient":"/root",` +
+		`"internal_chat_message_metadata_passthrough":{"turn_id":"two"},"content":"reply"}]}`)
 
 	build := func(isCompat bool) codexResponsesBodyResult {
 		t.Helper()
@@ -40,7 +45,7 @@ func TestCodexResponsesBodyUsesResolvedModelIsCompat(t *testing.T) {
 			sdktranslator.FormatOpenAIResponse,
 			opts,
 			req,
-			false,
+			false, false,
 		)
 		if err != nil {
 			t.Fatalf("codexResponsesBody() error = %v", err)
@@ -48,8 +53,13 @@ func TestCodexResponsesBodyUsesResolvedModelIsCompat(t *testing.T) {
 		return prepared
 	}
 
-	if got := gjson.GetBytes(build(false).Body, "input.0.type").String(); got != "agent_message" {
+	native := build(false)
+	if got := gjson.GetBytes(native.Body, "input.0.type").String(); got != "agent_message" {
 		t.Fatalf("non-compat input type = %q, want agent_message", got)
+	}
+	if !gjson.GetBytes(native.Body, "input.0.author").Exists() ||
+		!gjson.GetBytes(native.Body, "input.1.internal_chat_message_metadata_passthrough").Exists() {
+		t.Fatalf("native Codex metadata was removed: %s", native.Body)
 	}
 	compat := build(true)
 	if got := gjson.GetBytes(compat.Body, "input.0.type").String(); got != "message" {
@@ -57,6 +67,35 @@ func TestCodexResponsesBodyUsesResolvedModelIsCompat(t *testing.T) {
 	}
 	if got := gjson.GetBytes(compat.Body, "input.0.content.0.text").String(); got != "task" {
 		t.Fatalf("compat input text = %q, want task; output=%s", got, compat.Body)
+	}
+	for _, path := range []string{
+		"input.0.author", "input.0.recipient", "input.0.internal_chat_message_metadata_passthrough",
+		"input.1.author", "input.1.recipient", "input.1.internal_chat_message_metadata_passthrough",
+	} {
+		if gjson.GetBytes(compat.Body, path).Exists() {
+			t.Fatalf("compat request retained %s: %s", path, compat.Body)
+		}
+	}
+
+	cfg.Codex.OptimizeMultiAgentV2 = false
+	compatWithoutOptimization := build(true)
+	if got := gjson.GetBytes(compatWithoutOptimization.Body, "input.0.type").String(); got != "message" {
+		t.Fatalf("disabled optimization skipped compat normalization: type=%q body=%s", got, compatWithoutOptimization.Body)
+	}
+	if gjson.GetBytes(compatWithoutOptimization.Body, "input.0.role").String() != "user" ||
+		gjson.GetBytes(compatWithoutOptimization.Body, "input.0.content.0.type").String() != "input_text" ||
+		gjson.GetBytes(compatWithoutOptimization.Body, "input.0.content.0.text").String() != "task" ||
+		gjson.GetBytes(compatWithoutOptimization.Body, "input.0.content.0.encrypted_content").Exists() {
+		t.Fatalf("disabled optimization lost compat task content: %s", compatWithoutOptimization.Body)
+	}
+	if gjson.GetBytes(compatWithoutOptimization.Body, "input.0.author").Exists() ||
+		gjson.GetBytes(compatWithoutOptimization.Body, "input.1.internal_chat_message_metadata_passthrough").Exists() {
+		t.Fatalf("disabled optimization retained compat metadata: %s", compatWithoutOptimization.Body)
+	}
+	nativeWithoutOptimization := build(false)
+	if gjson.GetBytes(nativeWithoutOptimization.Body, "input.0.type").String() != "agent_message" ||
+		!gjson.GetBytes(nativeWithoutOptimization.Body, "input.0.author").Exists() {
+		t.Fatalf("disabled optimization changed native Codex input: %s", nativeWithoutOptimization.Body)
 	}
 }
 
@@ -94,7 +133,7 @@ func TestCodexResponsesBodyAppliesIndependentOrphanDelegationCompatibility(t *te
 		sdktranslator.FormatOpenAIResponse,
 		opts,
 		req,
-		false,
+		false, false,
 	)
 	if err != nil {
 		t.Fatalf("codexResponsesBody() error = %v", err)

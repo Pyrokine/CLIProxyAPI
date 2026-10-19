@@ -9,6 +9,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,6 +50,11 @@ type convertCodexResponseToClaudeParams struct {
 	LastWebSearchToolUseID   string
 	MessageStarted           bool
 	TerminalEmitted          bool
+	responseError            error
+}
+
+func (params *convertCodexResponseToClaudeParams) ResponseTranslationError() error {
+	return params.responseError
 }
 
 type codexClaudeTextBlock struct {
@@ -63,6 +69,7 @@ type codexClaudeFunctionBlock struct {
 	CallID                 string
 	Name                   string
 	Arguments              string
+	ArgumentsDone          bool
 	EmittedArgumentsLength int
 	Started                bool
 	Done                   bool
@@ -104,7 +111,7 @@ func ConvertCodexResponseToClaude(
 	output := make([]byte, 0, 512)
 	rootResult := gjson.ParseBytes(rawJSON)
 	params := (*param).(*convertCodexResponseToClaudeParams)
-	if params.TerminalEmitted {
+	if params.TerminalEmitted || params.responseError != nil {
 		return [][]byte{output}
 	}
 
@@ -184,7 +191,9 @@ func ConvertCodexResponseToClaude(
 		case "function_call":
 			block := codexClaudeFunctionBlockForEvent(params, rootResult, itemResult, true)
 			updateCodexClaudeFunctionIdentity(params, block, rootResult, itemResult)
-			updateCodexClaudeFunctionArguments(block, itemResult.Get("arguments").String(), false)
+			if arguments := itemResult.Get("arguments"); arguments.Exists() {
+				params.responseError = updateCodexClaudeFunctionArguments(block, arguments.String(), false)
+			}
 			block.Done = true
 		case "reasoning":
 			output = append(output, stopOpenCodexClaudeTextBlocks(params)...)
@@ -200,10 +209,12 @@ func ConvertCodexResponseToClaude(
 		}
 	case "response.function_call_arguments.delta":
 		block := codexClaudeFunctionBlockForEvent(params, rootResult, gjson.Result{}, true)
-		updateCodexClaudeFunctionArguments(block, rootResult.Get("delta").String(), true)
+		params.responseError = updateCodexClaudeFunctionArguments(block, rootResult.Get("delta").String(), true)
 	case "response.function_call_arguments.done":
 		block := codexClaudeFunctionBlockForEvent(params, rootResult, gjson.Result{}, true)
-		updateCodexClaudeFunctionArguments(block, rootResult.Get("arguments").String(), false)
+		if arguments := rootResult.Get("arguments"); arguments.Exists() {
+			params.responseError = updateCodexClaudeFunctionArguments(block, arguments.String(), false)
+		}
 	case "response.web_search_call.searching",
 		"response.web_search_call.completed",
 		"response.web_search_call.in_progress":
@@ -213,6 +224,9 @@ func ConvertCodexResponseToClaude(
 		output = append(output, emitPendingCodexThinkingBlock(params)...)
 		output = append(output, stopOpenCodexClaudeTextBlocks(params)...)
 		output = hydrateCodexClaudeFunctionBlocksFromTerminal(output, params, originalRequestRawJSON, responseData)
+		if params.responseError != nil {
+			return nil
+		}
 		if len(params.FunctionBlockQueue) == 0 {
 			output = appendDeferredCodexClaudeStreamEvents(
 				output,
@@ -251,6 +265,9 @@ func ConvertCodexResponseToClaude(
 		params.TerminalEmitted = true
 	}
 
+	if params.responseError != nil {
+		return nil
+	}
 	if !params.TerminalEmitted {
 		output = appendCodexClaudeFunctionBlockQueue(output, params, originalRequestRawJSON)
 		if len(params.FunctionBlockQueue) == 0 {
@@ -626,17 +643,24 @@ func updateCodexClaudeFunctionIdentity(
 	addCodexClaudeFunctionAliases(params, block, codexClaudeBlockKeys(rootResult, itemResult))
 }
 
-func updateCodexClaudeFunctionArguments(block *codexClaudeFunctionBlock, arguments string, delta bool) {
-	if block == nil || arguments == "" {
-		return
+func updateCodexClaudeFunctionArguments(block *codexClaudeFunctionBlock, arguments string, delta bool) error {
+	if block == nil || (delta && arguments == "") {
+		return nil
 	}
 	if delta {
+		if block.ArgumentsDone || block.Done || block.Stopped {
+			return fmt.Errorf("codex tool call %d received input after completion", block.Index)
+		}
 		block.Arguments += arguments
-		return
+		return nil
 	}
-	if block.Arguments == "" || strings.HasPrefix(arguments, block.Arguments) {
-		block.Arguments = arguments
+	if !strings.HasPrefix(arguments, block.Arguments) ||
+		((block.ArgumentsDone || block.Stopped) && arguments != block.Arguments) {
+		return fmt.Errorf("codex tool call %d conflicts with delivered input", block.Index)
 	}
+	block.Arguments = arguments
+	block.ArgumentsDone = true
+	return nil
 }
 
 func shouldDeferCodexClaudeStreamEvent(eventType string, rootResult gjson.Result) bool {
@@ -783,11 +807,7 @@ func startCodexClaudeFunctionBlock(
 		shortenCodexCallIDIfNeeded(util.SanitizeClaudeToolID(callID)),
 	)
 	start, _ = sjson.SetBytes(start, "content_block.name", name)
-	output := translatorcommon.AppendSSEEventBytes(nil, "content_block_start", start, 2)
-
-	delta := []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":""}}`)
-	delta, _ = sjson.SetBytes(delta, "index", block.Index)
-	return translatorcommon.AppendSSEEventBytes(output, "content_block_delta", delta, 2)
+	return translatorcommon.AppendSSEEventBytes(nil, "content_block_start", start, 2)
 }
 
 func flushCodexClaudeFunctionArguments(block *codexClaudeFunctionBlock) []byte {
@@ -840,11 +860,19 @@ func hydrateCodexClaudeFunctionBlocksFromTerminal(
 			}
 			addCodexClaudeFunctionAliases(params, block, keys)
 			updateCodexClaudeFunctionIdentity(params, block, gjson.Result{}, itemResult)
-			updateCodexClaudeFunctionArguments(block, itemResult.Get("arguments").String(), false)
+			if arguments := itemResult.Get("arguments"); arguments.Exists() {
+				if err := updateCodexClaudeFunctionArguments(block, arguments.String(), false); err != nil {
+					params.responseError = err
+					return false
+				}
+			}
 			block.Done = true
 			return true
 		},
 	)
+	if params.responseError != nil {
+		return output
+	}
 	for _, block := range params.FunctionBlockQueue {
 		if block == nil || block.Stopped {
 			continue
@@ -1168,15 +1196,14 @@ func extractResponsesUsage(usage gjson.Result) (int64, int64, int64, int64) {
 	outputTokens := usage.Get("output_tokens").Int()
 	cachedTokens := usage.Get("input_tokens_details.cached_tokens").Int()
 	cacheWriteTokens := usage.Get("input_tokens_details.cache_write_tokens").Int()
-	if cacheWriteTokens == 0 {
+	if cacheWriteTokens <= 0 {
 		cacheWriteTokens = usage.Get("input_tokens_details.cache_creation_tokens").Int()
 	}
 
-	if cachedTokens > 0 {
-		if inputTokens >= cachedTokens {
-			inputTokens -= cachedTokens
-		} else {
-			inputTokens = 0
+	inputTokens = max(int64(0), inputTokens)
+	for _, deduction := range []int64{cachedTokens, cacheWriteTokens} {
+		if deduction > 0 {
+			inputTokens = max(int64(0), inputTokens-deduction)
 		}
 	}
 

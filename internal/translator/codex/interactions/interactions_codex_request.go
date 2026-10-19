@@ -6,12 +6,31 @@ import (
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 func convertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+	out, err := convertInteractionsRequestToCodexChecked(modelName, inputRawJSON, stream)
+	if err != nil {
+		log.WithError(err).Warn("Interactions to Codex request translation rejected")
+		return nil
+	}
+	return out
+}
+
+func convertInteractionsRequestToCodexChecked(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	root := gjson.ParseBytes(inputRawJSON)
+	if err := translatorcommon.RejectDroppedInteractionsUserAttachments(root.Get("input"), false, func(part gjson.Result, native bool) []byte {
+		if native {
+			return nil
+		}
+		return interactionsCodexMessagePart(part, "user")
+	}); err != nil {
+		return nil, err
+	}
 	out := []byte(`{"model":"","instructions":"","input":[]}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 	if stream || root.Get("stream").Bool() {
@@ -22,7 +41,7 @@ func convertInteractionsRequestToCodex(modelName string, inputRawJSON []byte, st
 	out = appendInteractionsInputToCodex(out, root.Get("input"))
 	out = copyInteractionsToolsToCodex(out, root)
 	out = copyInteractionsCodexTopLevel(out, root)
-	return out
+	return out, nil
 }
 
 func copyInteractionsSystemToCodex(out []byte, root gjson.Result) []byte {
@@ -199,7 +218,7 @@ func appendInteractionsInputToCodex(out []byte, input gjson.Result) []byte {
 		return out
 	}
 	if steps := input.Get("steps"); steps.Exists() && steps.IsArray() {
-		defaultRole := interactionsCodexDefaultRole(input.Get("role").String(), "user")
+		defaultRole := interactionsCodexDefaultRole(input, "user")
 		steps.ForEach(
 			func(_, step gjson.Result) bool {
 				out = appendInteractionsStepToCodex(out, step, defaultRole)
@@ -216,7 +235,7 @@ func appendInteractionsStepToCodex(out []byte, step gjson.Result, defaultRole st
 		return appendInteractionsTextToCodex(out, defaultRole, step.String())
 	}
 	if steps := step.Get("steps"); steps.Exists() && steps.IsArray() {
-		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
+		role := interactionsCodexDefaultRole(step, defaultRole)
 		steps.ForEach(
 			func(_, nested gjson.Result) bool {
 				out = appendInteractionsStepToCodex(out, nested, role)
@@ -236,7 +255,7 @@ func appendInteractionsStepToCodex(out []byte, step gjson.Result, defaultRole st
 	case "thought", "reasoning":
 		return appendInteractionsThoughtToCodex(out, step)
 	case "user_input", "message", "":
-		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
+		role := interactionsCodexDefaultRole(step, defaultRole)
 		if content := step.Get("content"); content.Exists() {
 			return appendInteractionsContentToCodexItem(out, content, role)
 		}
@@ -244,7 +263,7 @@ func appendInteractionsStepToCodex(out []byte, step gjson.Result, defaultRole st
 			return appendInteractionsTextToCodex(out, role, text.String())
 		}
 	default:
-		role := interactionsCodexDefaultRole(step.Get("role").String(), defaultRole)
+		role := interactionsCodexDefaultRole(step, defaultRole)
 		if content := step.Get("content"); content.Exists() {
 			return appendInteractionsContentToCodexItem(out, content, role)
 		}
@@ -438,16 +457,22 @@ func interactionsCodexMessagePart(part gjson.Result, role string) []byte {
 	case "image":
 		return interactionsCodexImagePart(part)
 	case "image_url":
+		url := part.Get("image_url.url").String()
+		if strings.TrimSpace(url) == "" {
+			return nil
+		}
 		item := []byte(`{"type":"input_image","image_url":""}`)
-		item, _ = sjson.SetBytes(item, "image_url", part.Get("image_url.url").String())
+		item, _ = sjson.SetBytes(item, "image_url", url)
 		return item
 	case "audio":
 		return interactionsCodexAudioPart(part)
 	case "input_audio":
-		item := []byte(`{"type":"input_audio","input_audio":{}}`)
-		if audio := part.Get("input_audio"); audio.Exists() {
-			item, _ = sjson.SetRawBytes(item, "input_audio", []byte(audio.Raw))
+		audio := part.Get("input_audio")
+		if strings.TrimSpace(audio.Get("data").String()) == "" {
+			return nil
 		}
+		item := []byte(`{"type":"input_audio","input_audio":{}}`)
+		item, _ = sjson.SetRawBytes(item, "input_audio", []byte(audio.Raw))
 		return item
 	case "video", "document", "file":
 		return interactionsCodexFilePart(part)
@@ -469,12 +494,7 @@ func interactionsCodexMessagePart(part gjson.Result, role string) []byte {
 }
 
 func interactionsCodexImagePart(part gjson.Result) []byte {
-	if url := part.Get("url"); url.Exists() {
-		item := []byte(`{"type":"input_image","image_url":""}`)
-		item, _ = sjson.SetBytes(item, "image_url", url.String())
-		return item
-	}
-	if fileURI := firstString(part, "file_uri", "fileUri"); fileURI != "" {
+	if fileURI := firstString(part, "url", "file_uri", "fileUri", "uri"); fileURI != "" {
 		item := []byte(`{"type":"input_image","image_url":""}`)
 		item, _ = sjson.SetBytes(item, "image_url", fileURI)
 		return item
@@ -509,7 +529,7 @@ func interactionsCodexFilePart(part gjson.Result) []byte {
 		return item
 	}
 	mimeType := firstString(part, "mime_type", "mimeType")
-	if fileURI := firstString(part, "file_uri", "fileUri", "url"); fileURI != "" {
+	if fileURI := firstString(part, "file_uri", "fileUri", "uri", "url"); fileURI != "" {
 		item := []byte(`{"type":"input_file","file_url":"","filename":""}`)
 		item, _ = sjson.SetBytes(item, "file_url", fileURI)
 		item, _ = sjson.SetBytes(item, "filename", codexFileNameFromMIME(mimeType))
@@ -659,8 +679,12 @@ func interactionsCodexOutputString(value gjson.Result) string {
 	return ""
 }
 
-func interactionsCodexDefaultRole(role, fallback string) string {
-	switch strings.ToLower(strings.TrimSpace(role)) {
+func interactionsCodexDefaultRole(step gjson.Result, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(step.Get("type").String())) {
+	case "developer", "system":
+		return "developer"
+	}
+	switch strings.ToLower(strings.TrimSpace(step.Get("role").String())) {
 	case "model", "assistant":
 		return "assistant"
 	case "developer", "system":
@@ -740,8 +764,10 @@ func shortenCodexToolNameIfNeeded(name string) string {
 
 func firstString(root gjson.Result, paths ...string) string {
 	for _, path := range paths {
-		if value := root.Get(path); value.Exists() {
-			return value.String()
+		if value := root.Get(path); value.Type == gjson.String {
+			if text := strings.TrimSpace(value.String()); text != "" {
+				return text
+			}
 		}
 	}
 	return ""

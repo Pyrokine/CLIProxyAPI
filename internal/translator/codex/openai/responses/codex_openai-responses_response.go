@@ -99,6 +99,9 @@ func setResponsesModel(rawJSON []byte, modelName string, originalRequestRawJSON,
 func ConvertCodexResponseToOpenAIResponsesNonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
 	rootResult := gjson.ParseBytes(rawJSON)
 	responseType := rootResult.Get("type").String()
+	if responseType == "" && rootResult.Get("output").IsArray() {
+		return rawJSON
+	}
 	if responseType != "response.completed" && responseType != "response.incomplete" {
 		return []byte{}
 	}

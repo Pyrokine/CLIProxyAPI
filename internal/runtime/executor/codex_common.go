@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -92,11 +93,16 @@ func codexPromptCacheModelName(model string) string {
 
 // codexResponsesBodyResult holds the outputs of codexResponsesBody.
 type codexResponsesBodyResult struct {
-	Body                  []byte
-	OriginalPayload       []byte
-	OptimizedMultiAgentV2 bool
-	MultiAgentV2Conflict  bool
-	Native                bool
+	Body                   []byte
+	OriginalPayload        []byte
+	OptimizedMultiAgentV2  bool
+	MultiAgentV2Conflict   bool
+	Native                 bool
+	baseModel              string
+	requestedModel         string
+	from                   sdktranslator.Format
+	originalTranslated     []byte
+	imageGenerationEnabled bool
 }
 
 // codexResponsesBody translates and prepares the request body for a Codex /responses call.
@@ -115,6 +121,7 @@ func codexResponsesBody(
 	opts cliproxyexecutor.Options,
 	req cliproxyexecutor.Request,
 	streaming bool,
+	deferPayloadRules bool,
 ) (codexResponsesBodyResult, error) {
 	to := sdktranslator.FromString("codex")
 	isCompat := helps.APIKeyModelIsCompat(req)
@@ -129,30 +136,14 @@ func codexResponsesBody(
 		reasoningSummaryDelivery = gjson.GetBytes(originalPayloadSource, "stream_options.reasoning_summary_delivery")
 	}
 	originalPayload := originalPayloadSource
-	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		cfg,
-		from,
-		to,
-		baseModel,
-		originalPayload,
-		streaming,
-		isCompat,
+	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, cfg, from, to, baseModel, originalPayload, req.Payload, streaming, isCompat, &req,
 	)
-	body := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		cfg,
-		from,
-		to,
-		baseModel,
-		req.Payload,
-		streaming,
-		isCompat,
-	)
+	if err != nil {
+		return codexResponsesBodyResult{}, err
+	}
 
-	body, err := helps.ApplyThinkingWithSourcePayload(
+	body, err = helps.ApplyThinkingWithSourcePayload(
 		body, req.Payload, originalPayloadSource, model, from.String(), to.String(), executorID, req,
 	)
 	if err != nil {
@@ -160,7 +151,6 @@ func codexResponsesBody(
 	}
 
 	requestedModel := payloadRequestedModel(opts, model)
-	body = applyPayloadConfigWithRoot(cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 	body, _ = sjson.SetBytes(body, "stream", true)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(
@@ -173,35 +163,26 @@ func codexResponsesBody(
 	if err != nil {
 		return codexResponsesBodyResult{}, err
 	}
-	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
-	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body = normalizeCodexInstructions(body, nativeRequest)
 	if streaming && reasoningSummaryDelivery.Exists() {
 		body, _ = sjson.SetBytes(body, "stream_options.reasoning_summary_delivery", reasoningSummaryDelivery.Value())
 	}
-	if cfg == nil || cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
+	prepared := codexResponsesBodyResult{
+		Body:                   body,
+		OriginalPayload:        originalPayload,
+		Native:                 nativeRequest,
+		baseModel:              baseModel,
+		requestedModel:         requestedModel,
+		from:                   from,
+		originalTranslated:     bytes.Clone(originalTranslated),
+		imageGenerationEnabled: (cfg == nil || cfg.DisableImageGeneration == config.DisableImageGenerationOff) && !isCodexFreePlanAuth(auth),
 	}
-	body = normalizeCodexParallelToolCalls(body, opts.Headers)
-	multiAgentV2Conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
-	body, optimizedMultiAgentV2 := helps.OptimizeCodexMultiAgentV2Request(
-		ctx,
-		opts.Headers,
-		body,
-		cfg,
-		isCompat,
-	)
-	if err = validateCodexResponsesToolNames(body, sourceFormatEqual(from, sdktranslator.FormatClaude)); err != nil {
-		return codexResponsesBodyResult{}, statusErr{code: http.StatusBadRequest, msg: "codex executor: " + err.Error()}
+	if !deferPayloadRules {
+		if err := prepared.finalize(ctx, cfg, req, opts, executorID); err != nil {
+			return codexResponsesBodyResult{}, err
+		}
 	}
-
-	return codexResponsesBodyResult{
-		Body:                  body,
-		OriginalPayload:       originalPayload,
-		OptimizedMultiAgentV2: optimizedMultiAgentV2,
-		MultiAgentV2Conflict:  multiAgentV2Conflict,
-		Native:                nativeRequest,
-	}, nil
+	return prepared, nil
 }
 
 func preserveCodexPreviousResponseID(body []byte, requestPayload []byte) ([]byte, error) {
@@ -221,4 +202,64 @@ func preserveCodexPreviousResponseID(body []byte, requestPayload []byte) ([]byte
 		return nil, fmt.Errorf("codex executor: previous_response_id was not preserved")
 	}
 	return updated, nil
+}
+
+func codexPayloadFinalizer(
+	ctx context.Context,
+	cfg *config.Config,
+	prepared *codexResponsesBodyResult,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	executorID string,
+) func([]byte) ([]byte, error) {
+	opts.Headers = opts.Headers.Clone()
+	return func(body []byte) ([]byte, error) {
+		prepared.Body = body
+		if err := prepared.finalize(ctx, cfg, req, opts, executorID); err != nil {
+			return nil, err
+		}
+		return prepared.Body, nil
+	}
+}
+
+func (p *codexResponsesBodyResult) finalize(
+	ctx context.Context,
+	cfg *config.Config,
+	req cliproxyexecutor.Request,
+	opts cliproxyexecutor.Options,
+	executorID string,
+) error {
+	to := sdktranslator.FormatCodex
+	if opts.Alt == "responses/compact" {
+		to = sdktranslator.FormatOpenAIResponse
+	}
+	body, touched := applyPayloadConfigWithRequestTracked(cfg, p.baseModel, to.String(), p.from.String(), "", p.Body, p.originalTranslated,
+		p.requestedModel, payloadRequestPath(opts), opts.Headers, executorID, "tools")
+	if p.imageGenerationEnabled && !touched["tools"] {
+		body = ensureImageGenerationTool(body, gjson.GetBytes(body, "model").String(), nil, opts.Headers)
+	}
+	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex", body, helps.APIKeyModelIsCompat(req))
+	if opts.Alt == "responses/compact" {
+		body, _ = sjson.DeleteBytes(body, "stream")
+	} else {
+		body, _ = sjson.SetBytes(body, "stream", true)
+		body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
+		body, _ = sjson.DeleteBytes(body, "safety_identifier")
+		var err error
+		body, err = preserveCodexPreviousResponseID(body, req.Payload)
+		if err != nil {
+			return err
+		}
+	}
+	body = helps.NormalizeCodexToolSchemas(body)
+	body = normalizeCodexParallelToolCalls(body, opts.Headers)
+	conflict := helps.HasCodexMultiAgentV2NamespaceConflict(body)
+	body, optimized := helps.OptimizeCodexMultiAgentV2Request(ctx, opts.Headers, body, cfg, helps.APIKeyModelIsCompat(req))
+	if err := validateCodexResponsesToolNames(body, sourceFormatEqual(p.from, sdktranslator.FormatClaude)); err != nil {
+		return statusErr{code: http.StatusBadRequest, msg: "codex executor: " + err.Error()}
+	}
+	p.Body = body
+	p.OptimizedMultiAgentV2 = optimized
+	p.MultiAgentV2Conflict = conflict
+	return nil
 }

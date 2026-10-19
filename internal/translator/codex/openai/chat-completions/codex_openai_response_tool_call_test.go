@@ -111,8 +111,15 @@ func TestConvertCodexResponseToOpenAIInterleavedToolCallsUseIdentity(t *testing.
 		t.Fatalf("custom done arguments = %q, want patch; chunk=%s", got, out[0])
 	}
 
-	for _, event := range []string{
+	out = sendCodexToolCallEvent(
+		t, &param,
 		`{"type":"response.function_call_arguments.done","item_id":"fc_1","output_index":0,"arguments":"{\"query\":\"test\"}"}`,
+	)
+	if len(out) != 1 || gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.index").Int() != 0 ||
+		gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String() != `"test"}` {
+		t.Fatalf("function snapshot tail not delivered: %s", out)
+	}
+	for _, event := range []string{
 		`{"type":"response.output_item.done","output_index":0,"item":{"id":"fc_1","type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{\"query\":\"test\"}"}}`,
 		`{"type":"response.output_item.done","output_index":1,"item":{"id":"ctc_2","type":"custom_tool_call","call_id":"call_apply","name":"ApplyPatch","input":"patch"}}`,
 	} {

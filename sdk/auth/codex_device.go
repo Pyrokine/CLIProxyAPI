@@ -274,12 +274,14 @@ func (a *CodexAuthenticator) buildAuthRecord(
 		return nil, fmt.Errorf("codex token storage missing account information")
 	}
 
-	planType := ""
+	planType := strings.TrimSpace(tokenStorage.PlanType)
 	subscriptionActiveUntil := ""
 	hashAccountID := ""
 	if tokenStorage.IDToken != "" {
 		if claims, errParse := codex.ParseJWTToken(tokenStorage.IDToken); errParse == nil && claims != nil {
-			planType = strings.TrimSpace(claims.AuthInfo.ChatgptPlanType)
+			if claimPlan := strings.TrimSpace(claims.AuthInfo.ChatgptPlanType); claimPlan != "" {
+				planType = claimPlan
+			}
 			switch value := claims.AuthInfo.ChatgptSubscriptionActiveUntil.(type) {
 			case string:
 				subscriptionActiveUntil = strings.TrimSpace(value)
@@ -295,15 +297,17 @@ func (a *CodexAuthenticator) buildAuthRecord(
 			}
 		}
 	}
+	if planType == "" {
+		planType = codex.DefaultPlanType
+	}
+	tokenStorage.PlanType = planType
 
 	fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
 	metadata := map[string]any{
-		"email": tokenStorage.Email,
+		"email":     tokenStorage.Email,
+		"plan_type": planType,
 	}
-	attributes := make(map[string]string)
-	if planType != "" {
-		attributes["plan_type"] = planType
-	}
+	attributes := map[string]string{"plan_type": planType}
 	if subscriptionActiveUntil != "" && subscriptionActiveUntil != "0" {
 		attributes["chatgpt_subscription_active_until"] = subscriptionActiveUntil
 		metadata["chatgpt_subscription_active_until"] = subscriptionActiveUntil

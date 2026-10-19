@@ -3,6 +3,7 @@ package helps
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -167,6 +168,95 @@ func TestNormalizeCodexToolSchemasStripsOnlySchemaUnicodePatterns(t *testing.T) 
 	}
 }
 
+func TestNormalizeCodexToolSchemasStripsOctalNULPatternsOnlyFromSchemas(t *testing.T) {
+	input := []byte(`{"tools":[{"type":"function","name":"Artifact","parameters":{
+		"type":"object",
+		"description":{"pattern":"^[^\\0]*$"},
+		"default":{"pattern":"^[^\\0]*$"},
+		"properties":{
+			"file_paths":{"type":"array","items":{"type":"string","minLength":1,"pattern":"^[^\\0]*$"}},
+			"literal":{"type":"string","pattern":"^\\\\0$"},
+			"hex_nul":{"type":"string","pattern":"^[^\\x00]*$"}
+		},
+		"patternProperties":{"\\0":{"type":"string"},"^ok$":{"type":"string","pattern":"^[0-9]+$"}}
+	}}]}`)
+
+	output := NormalizeCodexToolSchemas(input)
+	params := gjson.GetBytes(output, "tools.0.parameters")
+	if params.Get("properties.file_paths.items.pattern").Exists() {
+		t.Fatalf("octal NUL pattern was not removed: %s", output)
+	}
+	if got := params.Get("properties.file_paths.items.minLength").Int(); got != 1 {
+		t.Fatalf("item schema changed: %s", output)
+	}
+	if got := params.Get("properties.literal.pattern").String(); got != `^\\0$` {
+		t.Fatalf("escaped literal pattern changed: %q", got)
+	}
+	if got := params.Get("properties.hex_nul.pattern").String(); got != `^[^\x00]*$` {
+		t.Fatalf("hex NUL pattern changed: %q", got)
+	}
+	if got := params.Get("description.pattern").String(); got != `^[^\0]*$` {
+		t.Fatalf("description changed: %q", got)
+	}
+	if got := params.Get("default.pattern").String(); got != `^[^\0]*$` {
+		t.Fatalf("default changed: %q", got)
+	}
+	var decoded map[string]any
+	if errUnmarshal := json.Unmarshal([]byte(params.Raw), &decoded); errUnmarshal != nil {
+		t.Fatal(errUnmarshal)
+	}
+	patternProperties := decoded["patternProperties"].(map[string]any)
+	if _, exists := patternProperties[`\0`]; exists {
+		t.Fatalf("octal NUL patternProperties key was not removed: %s", output)
+	}
+	if _, exists := patternProperties["^ok$"]; !exists {
+		t.Fatalf("valid patternProperties key was removed: %s", output)
+	}
+	if !bytes.Equal(output, NormalizeCodexToolSchemas(output)) {
+		t.Fatalf("normalization is not idempotent: %s", output)
+	}
+}
+
+func TestNormalizeCodexToolSchemasPreservesMixedToolList(t *testing.T) {
+	const unionTool = `{"type":"function","name":"choose","parameters":{"type":"object",` +
+		`"properties":{"action":{"oneOf":[{"const":"a"},{"const":"b"},{"const":"c"},` +
+		`{"const":"d"},{"const":"e"},{"const":"f"},{"const":"g"},{"const":"h"}]}}}}`
+	const unchangedTool = `{"type":"function", "name":"read", "parameters":{"type":"object"}}`
+	input := []byte("{\r\n  \"metadata\": {\"large\": 900719925474099312345},\r\n  \"tools\": [\n\t" +
+		unionTool + ",\n\t" + unchangedTool + ",\n\t" +
+		`{"type":"namespace","tools":[` + unionTool + ", " + unionTool + "]}" +
+		"\n  ], \"after\": \"untouched\"\r\n}")
+	original := bytes.Clone(input)
+
+	output := NormalizeCodexToolSchemas(input)
+	if !bytes.Equal(input, original) {
+		t.Fatal("normalization modified the caller's request")
+	}
+	for _, path := range []string{
+		"tools.0.parameters.properties.action", "tools.2.tools.0.parameters.properties.action",
+		"tools.2.tools.1.parameters.properties.action",
+	} {
+		if got := gjson.GetBytes(output, path+".enum"); len(got.Array()) != 8 {
+			t.Fatalf("%s enum = %s, want eight values", path, got.Raw)
+		}
+		if gjson.GetBytes(output, path+".oneOf").Exists() {
+			t.Fatalf("%s oneOf remains: %s", path, output)
+		}
+	}
+	for _, preserved := range []string{
+		`"metadata": {"large": 900719925474099312345}`,
+		unchangedTool,
+		`], "after": "untouched"`,
+	} {
+		if !bytes.Contains(output, []byte(preserved)) {
+			t.Fatalf("unchanged request section %q was rewritten: %s", preserved, output)
+		}
+	}
+	if !bytes.Equal(output, NormalizeCodexToolSchemas(output)) {
+		t.Fatalf("normalization is not idempotent: %s", output)
+	}
+}
+
 func TestNormalizeCodexToolSchemasHandlesNamespaceAndMalformedParameters(t *testing.T) {
 	input := []byte(`{"tools":[{"type":"namespace","name":"agents","tools":[` +
 		`{"type":"function","name":"spawn","parameters":{"type":"object","properties":{` +
@@ -187,5 +277,17 @@ func TestNormalizeCodexToolSchemasHandlesNamespaceAndMalformedParameters(t *test
 	invalid := []byte(`{"tools":[`)
 	if got := NormalizeCodexToolSchemas(invalid); !bytes.Equal(got, invalid) {
 		t.Fatalf("invalid payload changed: %s", got)
+	}
+}
+
+func BenchmarkNormalizeCodexToolSchemasManyTools(b *testing.B) {
+	const changedTool = `{"type":"function","parameters":{"type":"object","properties":{"action":` +
+		`{"oneOf":[{"const":"a"},{"const":"b"},{"const":"c"},{"const":"d"},` +
+		`{"const":"e"},{"const":"f"},{"const":"g"},{"const":"h"}]}}}}`
+	body := []byte(`{"tools":[` + strings.TrimSuffix(strings.Repeat(changedTool+",", 128), ",") + `]}`)
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for i := 0; i < b.N; i++ {
+		NormalizeCodexToolSchemas(body)
 	}
 }

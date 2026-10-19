@@ -69,18 +69,20 @@ func RewriteCodexSpawnAgentDescription(
 	return updated
 }
 
-// RewriteCodexMultiAgentV2Input converts official Codex multi-agent input into
-// standard Responses API messages when multi-agent v2 optimization is enabled.
+// RewriteCodexMultiAgentV2Input converts eligible Codex multi-agent input into
+// Responses messages and removes unsupported metadata for compatibility models.
 func RewriteCodexMultiAgentV2Input(
 	ctx context.Context,
 	headers http.Header,
 	payload []byte,
 	cfg *config.Config,
+	isCompat ...bool,
 ) []byte {
-	if !codexMultiAgentV2Enabled(ctx, headers, cfg) {
+	compatMode := len(isCompat) > 0 && isCompat[0]
+	if !compatMode && !codexMultiAgentV2Enabled(ctx, headers, cfg) {
 		return payload
 	}
-	return rewriteCodexAgentMessageInput(payload)
+	return rewriteCodexAgentMessageInput(payload, compatMode)
 }
 
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
@@ -213,9 +215,11 @@ func headerValueCaseInsensitive(headers http.Header, name string) string {
 func IsCodexClientUserAgent(userAgent string) bool {
 	userAgent = strings.TrimSpace(userAgent)
 	return strings.HasPrefix(userAgent, "Codex Desktop/") ||
+		strings.HasPrefix(userAgent, "codex-desktop/") ||
 		strings.HasPrefix(userAgent, "codex-tui/") ||
 		userAgent == "codex_cli_rs" ||
-		strings.HasPrefix(userAgent, "codex_cli_rs/")
+		strings.HasPrefix(userAgent, "codex_cli_rs/") ||
+		strings.HasPrefix(userAgent, "codex_exec/")
 }
 
 func isCodexMultiAgentClient(userAgent string) bool {
@@ -623,9 +627,9 @@ func codexToolsHaveOptimizedCollaborationConflict(tools gjson.Result) bool {
 	}
 	for _, tool := range tools.Array() {
 		name := strings.TrimSpace(tool.Get("name").String())
-		if name == codexOptimizedCollaborationNamespace || strings.HasPrefix(
-			name, codexOptimizedCollaborationNamePrefix,
-		) {
+		if name == codexOptimizedCollaborationNamespace ||
+			strings.HasPrefix(name, codexOptimizedCollaborationNamePrefix) ||
+			strings.HasPrefix(name, codexOptimizedCollaborationDotPrefix) {
 			return true
 		}
 		if strings.TrimSpace(tool.Get("type").String()) == "namespace" && codexToolsHaveOptimizedCollaborationConflict(tool.Get("tools")) {
@@ -710,9 +714,8 @@ func restoreCodexCollaborationValue(value any) bool {
 				)
 				changed = true
 			case isToolCall && strings.HasPrefix(name, codexOptimizedCollaborationDotPrefix):
-				typed["name"] = codexCollaborationNamespace + "." + strings.TrimPrefix(
-					name, codexOptimizedCollaborationDotPrefix,
-				)
+				typed["name"] = strings.TrimPrefix(name, codexOptimizedCollaborationDotPrefix)
+				typed["namespace"] = codexCollaborationNamespace
 				changed = true
 			}
 		}
@@ -728,7 +731,7 @@ func restoreCodexCollaborationValue(value any) bool {
 	return changed
 }
 
-func rewriteCodexAgentMessageInput(payload []byte) []byte {
+func rewriteCodexAgentMessageInput(payload []byte, compatMode bool) []byte {
 	input := gjson.GetBytes(payload, "input")
 	if !input.IsArray() {
 		return payload
@@ -736,18 +739,29 @@ func rewriteCodexAgentMessageInput(payload []byte) []byte {
 
 	updated := rewriteCodexAgentMessageContent(payload)
 	for itemIndex, item := range input.Array() {
-		if strings.TrimSpace(item.Get("type").String()) != "agent_message" {
-			continue
-		}
 		itemPath := fmt.Sprintf("input.%d", itemIndex)
-		var errSet error
-		updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user")
-		if errSet != nil {
-			return payload
+		if strings.TrimSpace(item.Get("type").String()) == "agent_message" {
+			var errSet error
+			updated, errSet = sjson.SetBytes(updated, itemPath+".role", "user")
+			if errSet != nil {
+				return payload
+			}
+			updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message")
+			if errSet != nil {
+				return payload
+			}
 		}
-		updated, errSet = sjson.SetBytes(updated, itemPath+".type", "message")
-		if errSet != nil {
-			return payload
+		if compatMode {
+			for _, field := range []string{"author", "recipient", "internal_chat_message_metadata_passthrough"} {
+				if !item.Get(field).Exists() {
+					continue
+				}
+				var errDelete error
+				updated, errDelete = sjson.DeleteBytes(updated, itemPath+"."+field)
+				if errDelete != nil {
+					return payload
+				}
+			}
 		}
 	}
 	return updated

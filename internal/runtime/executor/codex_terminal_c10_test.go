@@ -196,7 +196,7 @@ func TestCodexResponsesBodyPreservesSequentialReasoningSummaryDelivery(t *testin
 	prepared, err := codexResponsesBody(
 		context.Background(), cfg, &cliproxyauth.Auth{}, "gpt-5.6-sol", "gpt-5.6-sol", "codex", from,
 		cliproxyexecutor.Options{SourceFormat: from},
-		cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: payload}, true,
+		cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: payload}, true, false,
 	)
 	if err != nil {
 		t.Fatalf("codexResponsesBody() error = %v", err)

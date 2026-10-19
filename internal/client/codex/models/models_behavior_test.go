@@ -843,17 +843,14 @@ func TestCodexClientModelsResponse_UnrelatedProviderCannotWidenSearchTool(t *tes
 	if got, _ := entry["prefer_websockets"].(bool); got {
 		t.Errorf("prefer_websockets = %v, want false for non-Codex provider", got)
 	}
-	if _, exists := entry["apply_patch_tool_type"]; exists {
-		t.Errorf("apply_patch_tool_type should be deleted for non-Codex provider, got %#v", entry["apply_patch_tool_type"])
+	for _, field := range []string{"apply_patch_tool_type", "upgrade", "availability_nux"} {
+		value, exists := entry[field]
+		if !exists || value != nil {
+			t.Errorf("%s = %#v, want present null for non-Codex provider", field, value)
+		}
 	}
 	if tiers, okTiers := entry["service_tiers"].([]any); !okTiers || len(tiers) != 0 {
 		t.Errorf("service_tiers = %#v, want empty array for non-Codex provider", entry["service_tiers"])
-	}
-	if _, exists := entry["upgrade"]; exists {
-		t.Errorf("upgrade should be deleted for non-Codex provider")
-	}
-	if _, exists := entry["availability_nux"]; exists {
-		t.Errorf("availability_nux should be deleted for non-Codex provider")
 	}
 	// Reasoning levels must NOT be widened beyond provider's registered capabilities
 	levels, okLevels := entry["supported_reasoning_levels"].([]any)
@@ -943,17 +940,14 @@ func TestCodexClientModelsResponse_MixedProvidersRestrictProtocolCapabilities(t 
 			if got, _ := entry["prefer_websockets"].(bool); got {
 				t.Errorf("prefer_websockets = %v, want false for mixed provider", got)
 			}
-			if _, exists := entry["apply_patch_tool_type"]; exists {
-				t.Errorf("apply_patch_tool_type should be deleted for mixed provider")
+			for _, field := range []string{"apply_patch_tool_type", "upgrade", "availability_nux"} {
+				value, exists := entry[field]
+				if !exists || value != nil {
+					t.Errorf("%s = %#v, want present null for mixed provider", field, value)
+				}
 			}
 			if tiers, okTiers := entry["service_tiers"].([]any); !okTiers || len(tiers) != 0 {
 				t.Errorf("service_tiers = %#v, want empty array for mixed provider", entry["service_tiers"])
-			}
-			if _, exists := entry["upgrade"]; exists {
-				t.Errorf("upgrade should be deleted for mixed provider")
-			}
-			if _, exists := entry["availability_nux"]; exists {
-				t.Errorf("availability_nux should be deleted for mixed provider")
 			}
 			// Reasoning levels must NOT be widened to ultra/max/xhigh regardless of registration order
 			levels, okLevels := entry["supported_reasoning_levels"].([]any)

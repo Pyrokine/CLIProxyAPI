@@ -5,6 +5,7 @@ package codex
 
 import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // TokenStorage stores OAuth2 token information for OpenAI Codex API authentication.
@@ -19,6 +20,8 @@ type TokenStorage struct {
 	RefreshToken string `json:"refresh_token"`
 	// AccountID is the OpenAI account identifier associated with this token.
 	AccountID string `json:"account_id"`
+	// PlanType is the subscription tier used when selecting available models.
+	PlanType string `json:"plan_type,omitempty"`
 	// LastRefresh is the timestamp of the last token refresh operation.
 	LastRefresh string `json:"last_refresh"`
 	// Email is the OpenAI account email address associated with this token.
@@ -31,6 +34,14 @@ type TokenStorage struct {
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.
 	Metadata map[string]any `json:"-"`
+}
+
+func (ts *TokenStorage) CloneForPersistence() coreauth.TokenStorage {
+	if ts == nil {
+		return nil
+	}
+	copyStorage := *ts
+	return &copyStorage
 }
 
 // SetMetadata injects metadata before the token is persisted.

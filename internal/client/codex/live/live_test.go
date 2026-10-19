@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -995,6 +997,80 @@ func TestHandlerUpdatesMediaRelayConfig(t *testing.T) {
 	}
 	if relay, errRelay := handler.currentMediaRelay(); relay != nil || errRelay != nil {
 		t.Fatalf("disabled media relay = %#v, error = %v", relay, errRelay)
+	}
+}
+
+func TestHandlerClearsICEServersFromBothConfigEntrypoints(t *testing.T) {
+	const base = "codex:\n  live-media-relay:\n    enabled: true\n    max-sessions: 2\n"
+	const populated = base + "    ice-servers:\n      - urls: [\"turn:relay.example.org:3478?transport=udp\"]\n        username: test-turn-user\n        credential: test-turn-secret\n"
+	for _, entrypoint := range []string{"disk", "bytes"} {
+		for _, form := range []struct {
+			name string
+			yaml string
+		}{
+			{name: "omitted", yaml: base},
+			{name: "empty", yaml: base + "    ice-servers: []\n"},
+		} {
+			t.Run(entrypoint+"/"+form.name, func(t *testing.T) {
+				configPath := filepath.Join(t.TempDir(), "config.yaml")
+				load := func(raw string) *config.Config {
+					t.Helper()
+					var cfg *config.Config
+					var err error
+					if entrypoint == "disk" {
+						if errWrite := os.WriteFile(configPath, []byte(raw), 0o600); errWrite != nil {
+							t.Fatalf("write config: %v", errWrite)
+						}
+						cfg, err = config.LoadConfigOptional(configPath, false)
+					} else {
+						cfg, err = config.ParseConfigBytes([]byte(raw))
+					}
+					if err != nil {
+						t.Fatalf("load config: %v", err)
+					}
+					return cfg
+				}
+				current := load(form.yaml)
+				handler := NewHandler(nil, func() *config.Config { return current })
+				t.Cleanup(func() {
+					if errClose := handler.Close(); errClose != nil {
+						t.Errorf("close handler: %v", errClose)
+					}
+				})
+				relay := func() *pionMediaRelay {
+					t.Helper()
+					factory, errRelay := handler.currentMediaRelay()
+					concrete, ok := factory.(*pionMediaRelay)
+					if errRelay != nil || !ok || concrete == nil {
+						t.Fatalf("media relay type = %T, error = %v", factory, errRelay)
+					}
+					return concrete
+				}
+				if len(current.Codex.LiveMediaRelay.ICEServers) != 0 || len(relay().configuration.ICEServers) != 0 {
+					t.Fatal("initial empty config installed ICE servers")
+				}
+				current = load(populated)
+				if errUpdate := handler.UpdateConfig(current); errUpdate != nil {
+					t.Fatalf("install ICE servers: %v", errUpdate)
+				}
+				previous := relay()
+				if servers := previous.configuration.ICEServers; len(servers) != 1 ||
+					servers[0].Username != "test-turn-user" || servers[0].Credential != "test-turn-secret" {
+					t.Fatalf("populated config did not install the test ICE server: %#v", servers)
+				}
+				current = load(form.yaml)
+				if errUpdate := handler.UpdateConfig(current); errUpdate != nil {
+					t.Fatalf("clear ICE servers: %v", errUpdate)
+				}
+				cleared := relay()
+				if len(current.Codex.LiveMediaRelay.ICEServers) != 0 || len(cleared.configuration.ICEServers) != 0 {
+					t.Fatal("cleared config retained ICE servers for new sessions")
+				}
+				if cleared == previous || cleared.limiter != previous.limiter || len(previous.configuration.ICEServers) != 1 {
+					t.Fatal("config update did not replace the factory while retaining its limiter and prior configuration")
+				}
+			})
+		}
 	}
 }
 

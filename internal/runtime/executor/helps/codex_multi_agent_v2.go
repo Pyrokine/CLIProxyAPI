@@ -6,6 +6,7 @@ import (
 
 	multiagentv2 "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/codex/optimize-multi-agent-v2"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
 
@@ -15,7 +16,7 @@ func rewriteCodexMultiAgentV2Input(
 	payload []byte,
 	cfg *config.Config,
 ) []byte {
-	return multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+	return multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg, true)
 }
 
 func rewriteCodexOrphanDelegationInput(
@@ -36,8 +37,17 @@ func translateRequestWithCodexMultiAgentV2(
 	model string,
 	payload []byte,
 	stream bool,
-) []byte {
-	return multiagentv2.TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream)
+	modelInfo *registry.ModelInfo,
+) sdktranslator.RequestEnvelope {
+	if from == sdktranslator.FormatOpenAIResponse {
+		payload = multiagentv2.RewriteCodexOrphanDelegationInputForConfig(ctx, headers, payload, cfg)
+		if to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
+			payload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+		}
+	}
+	return sdktranslator.TranslateRequestEnvelope(ctx, from, to, sdktranslator.RequestEnvelope{
+		Format: from, Model: model, ModelInfo: modelInfo, Body: payload, Stream: stream,
+	})
 }
 
 // HasCodexMultiAgentV2NamespaceConflict reports whether the request defines
@@ -65,6 +75,7 @@ func OptimizeCodexMultiAgentV2Request(
 			headers,
 			updated,
 			cfg,
+			true,
 		)
 	}
 	return updated, optimized

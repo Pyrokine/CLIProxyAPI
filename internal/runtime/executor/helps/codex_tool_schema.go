@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"math/big"
-	"strconv"
 	"strings"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -17,52 +16,55 @@ import (
 const codexComplexUnionBranchThreshold = 8
 
 // NormalizeCodexToolSchemas simplifies pure constant unions in Codex tool schemas
-// and removes Unicode property escapes unsupported by the upstream schema parser.
+// and removes pattern escapes unsupported by upstream schema validators.
 func NormalizeCodexToolSchemas(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
-	if !tools.Exists() || !tools.IsArray() || len(tools.Array()) == 0 {
+	updatedTools, changed := normalizeCodexToolList(gjson.GetBytes(body, "tools"))
+	if !changed {
 		return body
 	}
+	updatedBody, errSet := sjson.SetRawBytes(body, "tools", updatedTools)
+	if errSet != nil {
+		return body
+	}
+	log.Debug("codex: normalized tool schemas to prevent upstream failure")
+	return updatedBody
+}
 
-	changed := false
-	for i, tool := range tools.Array() {
-		updatedTool, toolChanged := normalizeCodexTool(tool)
-		if !toolChanged {
-			continue
-		}
-		var errSet error
-		body, errSet = sjson.SetRawBytes(body, "tools."+strconv.Itoa(i), updatedTool)
-		if errSet == nil {
-			changed = true
-		}
+func normalizeCodexToolList(tools gjson.Result) ([]byte, bool) {
+	if !tools.IsArray() {
+		return nil, false
 	}
-	if changed {
-		log.Debug("codex: normalized tool schemas to prevent upstream failure")
+	var updated []byte
+	offset := 0
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		updatedTool, changed := normalizeCodexTool(tool)
+		if !changed {
+			return true
+		}
+		if updated == nil {
+			updated = make([]byte, 0, len(tools.Raw))
+		}
+		start := tool.Index - tools.Index
+		updated = append(updated, tools.Raw[offset:start]...)
+		updated = append(updated, updatedTool...)
+		offset = start + len(tool.Raw)
+		return true
+	})
+	if updated == nil {
+		return nil, false
 	}
-	return body
+	return append(updated, tools.Raw[offset:]...), true
 }
 
 func normalizeCodexTool(tool gjson.Result) ([]byte, bool) {
 	switch tool.Get("type").String() {
 	case "namespace":
-		nestedTools := tool.Get("tools")
-		if !nestedTools.IsArray() || len(nestedTools.Array()) == 0 {
+		updatedTools, changed := normalizeCodexToolList(tool.Get("tools"))
+		if !changed {
 			return nil, false
 		}
-		changed := false
-		raw := []byte(tool.Raw)
-		for i, nestedTool := range nestedTools.Array() {
-			updatedNested, nestedChanged := normalizeCodexTool(nestedTool)
-			if !nestedChanged {
-				continue
-			}
-			var errSet error
-			raw, errSet = sjson.SetRawBytes(raw, "tools."+strconv.Itoa(i), updatedNested)
-			if errSet == nil {
-				changed = true
-			}
-		}
-		return raw, changed
+		updated, errSet := sjson.SetRawBytes([]byte(tool.Raw), "tools", updatedTools)
+		return updated, errSet == nil
 	case "function", "custom":
 	default:
 		return nil, false
@@ -118,7 +120,8 @@ func stripCodexIncompatiblePatterns(raw []byte) ([]byte, bool) {
 	rawText := string(raw)
 	if !strings.Contains(rawText, `\p{`) &&
 		!strings.Contains(rawText, `\P{`) &&
-		!strings.Contains(rawText, `\u`) {
+		!strings.Contains(rawText, `\u`) &&
+		!strings.Contains(rawText, `\\0`) {
 		return raw, false
 	}
 

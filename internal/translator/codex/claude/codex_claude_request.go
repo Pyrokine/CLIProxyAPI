@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -52,10 +54,30 @@ func ConvertClaudeRequestToCodexWithCompat(modelName string, inputRawJSON []byte
 func convertClaudeRequestToCodex(
 	modelName string,
 	inputRawJSON []byte,
-	_ bool,
+	stream bool,
 	preserveCompatThinkingBlocks bool,
 ) []byte {
+	body, err := convertClaudeRequestToCodexChecked(modelName, inputRawJSON, stream, preserveCompatThinkingBlocks)
+	if err != nil {
+		log.WithError(err).Warn("Claude to Codex request translation rejected")
+		return nil
+	}
+	return body
+}
+
+// ConvertClaudeRequestToCodexWithCompatReturningError reports unsupported user attachments.
+func ConvertClaudeRequestToCodexWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertClaudeRequestToCodexChecked(modelName, inputRawJSON, stream, true)
+}
+
+func convertClaudeRequestToCodexChecked(
+	modelName string,
+	inputRawJSON []byte,
+	_ bool,
+	preserveCompatThinkingBlocks bool,
+) ([]byte, error) {
 	rootResult := gjson.ParseBytes(inputRawJSON)
+	var drops translatorcommon.UserTurnDrops
 	inputItems := translatorcommon.NewRawArrayItems(rootResult.Get("messages.#").Int())
 
 	toolsResult := rootResult.Get("tools")
@@ -111,6 +133,12 @@ func convertClaudeRequestToCodex(
 	messagesResult := rootResult.Get("messages")
 	if messagesResult.IsArray() {
 		messageResults := messagesResult.Array()
+		var pendingToolUseIDs []string
+		var pendingSystemReminders [][]byte
+		flushSystemReminders := func() {
+			inputItems = append(inputItems, pendingSystemReminders...)
+			pendingSystemReminders = nil
+		}
 
 		for i := range messageResults {
 			messageResult := messageResults[i]
@@ -119,10 +147,20 @@ func convertClaudeRequestToCodex(
 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(messageResult.Get("content")); ok {
 					message := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
 					message, _ = sjson.SetBytes(message, "content.0.text", reminderText)
-					inputItems = append(inputItems, message)
+					if len(pendingToolUseIDs) > 0 {
+						pendingSystemReminders = append(pendingSystemReminders, message)
+					} else {
+						inputItems = append(inputItems, message)
+					}
 				}
 				continue
 			}
+
+			messageContentsResult := messageResult.Get("content")
+			if messageRole == "user" && len(pendingToolUseIDs) > 0 {
+				messageContentsResult = translatorcommon.AlignClaudeToolResults(messageContentsResult, pendingToolUseIDs)
+			}
+			pendingToolUseIDs = nil
 
 			newMessage := func() []byte {
 				msg := []byte(`{"type":"message","role":"","content":[]}`)
@@ -130,6 +168,7 @@ func convertClaudeRequestToCodex(
 				return msg
 			}
 
+			turnSendable := 0
 			message := newMessage()
 			contentIndex := 0
 			hasContent := false
@@ -144,6 +183,10 @@ func convertClaudeRequestToCodex(
 			}
 
 			appendTextContent := func(text string) {
+				flushSystemReminders()
+				if strings.TrimSpace(text) != "" {
+					turnSendable++
+				}
 				partType := "input_text"
 				if messageRole == "assistant" {
 					partType = "output_text"
@@ -154,14 +197,17 @@ func convertClaudeRequestToCodex(
 				hasContent = true
 			}
 
-			appendImageContent := func(dataURL string) {
-				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.type", contentIndex), "input_image")
-				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.image_url", contentIndex), dataURL)
+			appendImageContent := func(part []byte) {
+				flushSystemReminders()
+				turnSendable++
+				message, _ = sjson.SetRawBytes(message, fmt.Sprintf("content.%d", contentIndex), part)
 				contentIndex++
 				hasContent = true
 			}
 
 			appendDocumentContent := func(dataURL string) {
+				flushSystemReminders()
+				turnSendable++
 				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.type", contentIndex), "input_file")
 				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.file_data", contentIndex), dataURL)
 				message, _ = sjson.SetBytes(message, fmt.Sprintf("content.%d.filename", contentIndex), "document.pdf")
@@ -189,6 +235,12 @@ func convertClaudeRequestToCodex(
 						options,
 					)
 				}
+				if !ok && signatureValue.Type == gjson.String &&
+					strings.Contains(strings.ToLower(thinking.ParseSuffix(modelName).ModelName), "grok") {
+					if _, err := sigcompat.InspectGrokEncryptedContent(rawSignature); err == nil {
+						replaySignature, ok = rawSignature, true
+					}
+				}
 				if !ok && preserveCompatThinkingBlocks && strings.TrimSpace(rawSignature) == "" {
 					replaySignature = rawSignature
 					ok = true
@@ -203,7 +255,6 @@ func convertClaudeRequestToCodex(
 				inputItems = append(inputItems, reasoningItem)
 			}
 
-			messageContentsResult := messageResult.Get("content")
 			if messageContentsResult.IsArray() {
 				messageContentResults := messageContentsResult.Array()
 				for j := range messageContentResults {
@@ -216,42 +267,27 @@ func convertClaudeRequestToCodex(
 					case "thinking":
 						appendReasoningContent(messageContentResult)
 					case "image":
-						sourceResult := messageContentResult.Get("source")
-						if sourceResult.Exists() {
-							data := sourceResult.Get("data").String()
-							if data == "" {
-								data = sourceResult.Get("base64").String()
-							}
-							if data != "" {
-								mediaType := sourceResult.Get("media_type").String()
-								if mediaType == "" {
-									mediaType = sourceResult.Get("mime_type").String()
-								}
-								if mediaType == "" {
-									mediaType = "application/octet-stream"
-								}
-								dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
-								appendImageContent(dataURL)
-							}
+						if part, ok := claudeImageInputPart(messageContentResult.Get("source")); ok {
+							appendImageContent(part)
+						} else if messageRole == "user" {
+							drops.Drop(contentType)
 						}
-					case "document":
+					case "document", "container_upload":
 						sourceResult := messageContentResult.Get("source")
-						if sourceResult.Get("type").String() != "base64" {
-							continue
-						}
 						mediaType := strings.TrimSpace(sourceResult.Get("media_type").String())
-						if !strings.EqualFold(mediaType, "application/pdf") {
-							continue
-						}
 						data := sourceResult.Get("data").String()
 						if data == "" {
 							data = sourceResult.Get("base64").String()
 						}
-						if data != "" {
+						if sourceResult.Get("type").String() == "base64" &&
+							strings.EqualFold(mediaType, "application/pdf") && data != "" {
 							appendDocumentContent(fmt.Sprintf("data:%s;base64,%s", mediaType, data))
+						} else if messageRole == "user" {
+							drops.Drop(contentType)
 						}
 					case "tool_use":
 						flushMessage()
+						pendingToolUseIDs = append(pendingToolUseIDs, messageContentResult.Get("id").String())
 						functionCallMessage := []byte(`{"type":"function_call"}`)
 						functionCallMessage, _ = sjson.SetBytes(
 							functionCallMessage, "call_id",
@@ -286,32 +322,9 @@ func convertClaudeRequestToCodex(
 							for k := range contentResults {
 								toolResultContentType := contentResults[k].Get("type").String()
 								if toolResultContentType == "image" {
-									sourceResult := contentResults[k].Get("source")
-									if sourceResult.Exists() {
-										data := sourceResult.Get("data").String()
-										if data == "" {
-											data = sourceResult.Get("base64").String()
-										}
-										if data != "" {
-											mediaType := sourceResult.Get("media_type").String()
-											if mediaType == "" {
-												mediaType = sourceResult.Get("mime_type").String()
-											}
-											if mediaType == "" {
-												mediaType = "application/octet-stream"
-											}
-											dataURL := fmt.Sprintf("data:%s;base64,%s", mediaType, data)
-
-											toolResultContent, _ = sjson.SetBytes(
-												toolResultContent, fmt.Sprintf("%d.type", toolResultContentIndex),
-												"input_image",
-											)
-											toolResultContent, _ = sjson.SetBytes(
-												toolResultContent, fmt.Sprintf("%d.image_url", toolResultContentIndex),
-												dataURL,
-											)
-											toolResultContentIndex++
-										}
+									if part, ok := claudeImageInputPart(contentResults[k].Get("source")); ok {
+										toolResultContent, _ = sjson.SetRawBytes(toolResultContent, strconv.Itoa(toolResultContentIndex), part)
+										toolResultContentIndex++
 									}
 								} else if toolResultContentType == "text" {
 									toolResultContent, _ = sjson.SetBytes(
@@ -340,6 +353,7 @@ func convertClaudeRequestToCodex(
 						}
 
 						inputItems = append(inputItems, functionCallOutputMessage)
+						turnSendable++
 					}
 				}
 				flushMessage()
@@ -347,19 +361,36 @@ func convertClaudeRequestToCodex(
 				appendTextContent(messageContentsResult.String())
 				flushMessage()
 			}
+			flushSystemReminders()
+			if messageRole == "user" {
+				drops.EndTurn(turnSendable)
+			}
 		}
-
+		flushSystemReminders()
 	}
 
 	// Convert tools declarations to the expected format for the Codex API.
 	outputTools := make([][]byte, 0, len(toolResults))
+	hasWebSearchTool := false
+	webSearchToolNames := make(map[string]struct{})
 	if hasTools {
 		for i := range toolResults {
 			toolResult := toolResults[i]
 			// Special handling: map Claude web search tool to Codex web_search
-			if toolResult.Get("type").String() == "web_search_20250305" {
-				// Replace the tool content entirely with {"type":"web_search"}
-				outputTools = append(outputTools, []byte(`{"type":"web_search"}`))
+			toolType := toolResult.Get("type").String()
+			if toolType == "web_search_20250305" || toolType == "web_search_20260209" {
+				hasWebSearchTool = true
+				if name := toolResult.Get("name").String(); name != "" {
+					webSearchToolNames[name] = struct{}{}
+				}
+				tool := []byte(`{"type":"web_search"}`)
+				if domains := toolResult.Get("allowed_domains"); domains.IsArray() {
+					tool, _ = sjson.SetRawBytes(tool, "filters.allowed_domains", []byte(domains.Raw))
+				}
+				if location := toolResult.Get("user_location"); location.IsObject() {
+					tool, _ = sjson.SetRawBytes(tool, "user_location", []byte(location.Raw))
+				}
+				outputTools = append(outputTools, tool)
 				continue
 			}
 			tool := []byte(toolResult.Raw)
@@ -462,7 +493,36 @@ func convertClaudeRequestToCodex(
 			}
 			output = append(output, outputTools[i]...)
 		}
-		output = append(output, `],"tool_choice":"auto"`...)
+		output = append(output, `],"tool_choice":`...)
+		choice := rootResult.Get("tool_choice")
+		choiceType := choice.Get("type").String()
+		if choice.Type == gjson.String {
+			choiceType = choice.String()
+		}
+		switch choiceType {
+		case "any":
+			output = append(output, `"required"`...)
+		case "none":
+			output = append(output, `"none"`...)
+		case "tool":
+			name := choice.Get("name").String()
+			if _, ok := webSearchToolNames[name]; ok {
+				output = append(output, `{"type":"web_search"}`...)
+			} else if name != "" {
+				if short, ok := toolNameMap[name]; ok {
+					name = short
+				} else {
+					name = shortenNameIfNeeded(name)
+				}
+				output = append(output, `{"type":"function","name":`...)
+				output = appendJSONString(output, name)
+				output = append(output, '}')
+			} else {
+				output = append(output, `"auto"`...)
+			}
+		default:
+			output = append(output, `"auto"`...)
+		}
 	}
 	output = append(output, `,"parallel_tool_calls":`...)
 	output = strconv.AppendBool(output, parallelToolCalls)
@@ -478,8 +538,12 @@ func convertClaudeRequestToCodex(
 		output = append(output, `,"service_tier":`...)
 		output = appendJSONString(output, serviceTier)
 	}
-	output = append(output, `,"stream":true,"store":false,"include":["reasoning.encrypted_content"]}`...)
-	return output
+	output = append(output, `,"stream":true,"store":false,"include":["reasoning.encrypted_content"`...)
+	if hasWebSearchTool {
+		output = append(output, `,"web_search_call.action.sources"`...)
+	}
+	output = append(output, ']', '}')
+	return output, drops.Err()
 }
 
 func mapClaudeOutputFormatToCodex(format gjson.Result) []byte {
@@ -617,12 +681,71 @@ func buildShortNameMap(names []string) map[string]string {
 	return m
 }
 
-// normalizeToolParameters returns an object input schema accepted by Codex and
-// removes schema dialect metadata and unsupported Unicode property escapes.
+// normalizeToolParameters 保留 Schema 类型和字面值，移除不支持的方言元数据与正则转义
 func normalizeToolParameters(raw string) string {
 	raw = strings.TrimSpace(raw)
-	if raw == "" || raw == "null" || !gjson.Valid(raw) {
+	if !gjson.Valid(raw) || !gjson.Parse(raw).IsObject() {
 		return `{"type":"object","properties":{}}`
 	}
-	return string(util.NormalizeClaudeToolInputSchema([]byte(raw)))
+	normalized := util.NormalizeClaudeSchemaDialect([]byte(raw))
+	schema := gjson.ParseBytes(normalized)
+	schemaType := schema.Get("type")
+	isObject := schemaType.String() == "object"
+	if !schemaType.Exists() || schemaType.Type == gjson.Null || schemaType.String() == "" {
+		normalized, _ = sjson.SetBytes(normalized, "type", "object")
+		isObject = true
+	} else if schemaType.IsArray() {
+		for _, item := range schemaType.Array() {
+			if item.String() == "object" {
+				isObject = true
+				break
+			}
+		}
+	}
+	if properties := schema.Get("properties"); isObject && (!properties.Exists() || properties.Type == gjson.Null) {
+		normalized, _ = sjson.SetRawBytes(normalized, "properties", []byte(`{}`))
+	}
+	return string(normalized)
+}
+
+func claudeImageInputPart(source gjson.Result) ([]byte, bool) {
+	if !source.IsObject() {
+		return nil, false
+	}
+	part := []byte(`{"type":"input_image"}`)
+	data := source.Get("data")
+	if data.Type != gjson.String || data.String() == "" {
+		data = source.Get("base64")
+	}
+	switch {
+	case data.Type == gjson.String && strings.TrimSpace(data.String()) != "":
+		mediaType := source.Get("media_type").String()
+		if mediaType == "" {
+			mediaType = source.Get("mime_type").String()
+		}
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		part, _ = sjson.SetBytes(part, "image_url", fmt.Sprintf("data:%s;base64,%s", mediaType, data.String()))
+	case source.Get("type").String() == "url":
+		imageURL := source.Get("url")
+		if imageURL.Type != gjson.String {
+			return nil, false
+		}
+		value := strings.TrimSpace(imageURL.String())
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return nil, false
+		}
+		part, _ = sjson.SetBytes(part, "image_url", value)
+	case source.Get("type").String() == "file":
+		fileID := source.Get("file_id")
+		if fileID.Type != gjson.String || strings.TrimSpace(fileID.String()) == "" {
+			return nil, false
+		}
+		part, _ = sjson.SetBytes(part, "file_id", fileID.String())
+	default:
+		return nil, false
+	}
+	return part, true
 }

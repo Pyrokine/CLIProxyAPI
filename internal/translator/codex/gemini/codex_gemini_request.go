@@ -6,6 +6,7 @@
 package gemini
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -34,7 +36,17 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in Codex API format
-func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) []byte {
+func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+	body, err := convertGeminiRequestToCodexChecked(modelName, inputRawJSON, stream)
+	if err != nil {
+		log.WithError(err).Warn("Gemini to Codex request translation rejected")
+		return nil
+	}
+	return body
+}
+
+func convertGeminiRequestToCodexChecked(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
+	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
 	// Base template
 	out := []byte(`{"model":"","instructions":"","input":[]}`)
@@ -106,7 +118,10 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			role := item.Get("role").String()
 			if role == "model" {
 				role = "assistant"
+			} else if role == "" {
+				role = "user"
 			}
+			sendable := 0
 
 			parts := item.Get("parts")
 			if !parts.IsArray() {
@@ -132,7 +147,25 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					part, _ = sjson.SetBytes(part, "text", t.String())
 					msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
 					out, _ = sjson.SetRawBytes(out, "input.-1", msg)
+					if strings.TrimSpace(t.String()) != "" {
+						sendable++
+					}
 					continue
+				}
+
+				for _, key := range []string{"inlineData", "inline_data", "fileData", "file_data"} {
+					if p.Get(key).Exists() {
+						if part := geminiMediaPartToCodex(p); len(part) > 0 {
+							msg := []byte(`{"type":"message","role":"","content":[]}`)
+							msg, _ = sjson.SetBytes(msg, "role", role)
+							msg, _ = sjson.SetRawBytes(msg, "content.-1", part)
+							out, _ = sjson.SetRawBytes(out, "input.-1", msg)
+							sendable++
+						} else if role != "assistant" {
+							drops.Drop(key)
+						}
+						break
+					}
 				}
 
 				// function call from model
@@ -156,6 +189,7 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					toolCalls.Add(functionName, id)
 					fn, _ = sjson.SetBytes(fn, "call_id", id)
 					out, _ = sjson.SetRawBytes(out, "input.-1", fn)
+					sendable++
 					continue
 				}
 
@@ -175,8 +209,12 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 					}
 					fno, _ = sjson.SetBytes(fno, "call_id", id)
 					out, _ = sjson.SetRawBytes(out, "input.-1", fno)
+					sendable++
 					continue
 				}
+			}
+			if role != "assistant" {
+				drops.EndTurn(sendable)
 			}
 		}
 	}
@@ -280,7 +318,71 @@ func ConvertGeminiRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		out, _ = sjson.SetBytes(out, fullPath, normalizedType)
 	}
 
-	return out
+	return out, drops.Err()
+}
+
+func geminiMediaPartToCodex(part gjson.Result) []byte {
+	for _, key := range []string{"inlineData", "inline_data", "fileData", "file_data"} {
+		source := part.Get(key)
+		if !source.IsObject() {
+			continue
+		}
+		mime := source.Get("mimeType")
+		if mime.Type != gjson.String || strings.TrimSpace(mime.String()) == "" {
+			mime = source.Get("mime_type")
+		}
+		mimeType := strings.ToLower(strings.TrimSpace(mime.String()))
+		if mime.Type != gjson.String || mimeType == "" {
+			return nil
+		}
+		filename := "attachment"
+		if mimeType == "application/pdf" {
+			filename = "document.pdf"
+		}
+		if key == "fileData" || key == "file_data" {
+			fileURI := source.Get("fileUri")
+			if fileURI.Type != gjson.String || strings.TrimSpace(fileURI.String()) == "" {
+				fileURI = source.Get("file_uri")
+			}
+			uri := strings.TrimSpace(fileURI.String())
+			if fileURI.Type != gjson.String || uri == "" || strings.HasPrefix(mimeType, "audio/") {
+				return nil
+			}
+			if strings.HasPrefix(mimeType, "image/") {
+				body, _ := json.Marshal(map[string]string{"type": "input_image", "image_url": uri})
+				return body
+			}
+			body, _ := json.Marshal(map[string]string{"type": "input_file", "file_url": uri, "filename": filename})
+			return body
+		}
+		data := source.Get("data")
+		if data.Type != gjson.String || strings.TrimSpace(data.String()) == "" {
+			return nil
+		}
+		switch {
+		case strings.HasPrefix(mimeType, "image/"):
+			body, _ := json.Marshal(map[string]string{"type": "input_image", "image_url": fmt.Sprintf("data:%s;base64,%s", mimeType, data.String())})
+			return body
+		case strings.HasPrefix(mimeType, "audio/"):
+			format := "mp3"
+			switch mimeType {
+			case "audio/wav", "audio/wave", "audio/x-wav":
+				format = "wav"
+			case "audio/flac":
+				format = "flac"
+			case "audio/opus", "audio/ogg":
+				format = "opus"
+			case "audio/pcm", "audio/l16":
+				format = "pcm16"
+			}
+			body, _ := json.Marshal(map[string]any{"type": "input_audio", "input_audio": map[string]string{"data": data.String(), "format": format}})
+			return body
+		default:
+			body, _ := json.Marshal(map[string]string{"type": "input_file", "file_data": fmt.Sprintf("data:%s;base64,%s", mimeType, data.String()), "filename": filename})
+			return body
+		}
+	}
+	return nil
 }
 
 func setCodexToolChoiceFromGeminiToolConfig(out []byte, functionCallingConfig gjson.Result) []byte {

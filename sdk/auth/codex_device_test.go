@@ -38,6 +38,36 @@ func TestCodexBuildAuthRecordStoresPlanTypeAttribute(t *testing.T) {
 	}
 }
 
+func TestCodexBuildAuthRecordKeepsStoredPlanWhenClaimIsMissing(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		storedPlan string
+		claimPlan  string
+		want       string
+	}{
+		{name: "stored subscription", storedPlan: "plus", want: "plus"},
+		{name: "token claim wins", storedPlan: "plus", claimPlan: "team", want: "team"},
+		{name: "missing subscription defaults to free", want: codexauth.DefaultPlanType},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record, err := NewCodexAuthenticator().buildAuthRecord(&codexauth.Auth{}, &codexauth.AuthBundle{
+				TokenData: codexauth.TokenData{
+					IDToken: codexDeviceTestJWT(t, tc.claimPlan, "account-123", ""),
+					Email:   "codex@example.com", PlanType: tc.storedPlan,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			storage, ok := record.Storage.(*codexauth.TokenStorage)
+			if !ok || storage.PlanType != tc.want || record.Attributes["plan_type"] != tc.want ||
+				record.Metadata["plan_type"] != tc.want {
+				t.Fatalf("record plan = (%v, %v, %v), want %q", storage, record.Attributes, record.Metadata, tc.want)
+			}
+		})
+	}
+}
+
 func codexDeviceTestJWT(t *testing.T, planType string, accountID string, subscriptionActiveUntil string) string {
 	t.Helper()
 	encode := func(value any) string {

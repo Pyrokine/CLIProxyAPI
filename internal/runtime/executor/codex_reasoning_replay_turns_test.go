@@ -167,7 +167,7 @@ func TestCodexPromptCacheMatchesAcrossHTTPAndWebsocket(t *testing.T) {
 		nil,
 		req,
 		req.Payload,
-		rawJSON,
+		rawJSON, nil,
 		headers,
 	)
 	if err != nil {

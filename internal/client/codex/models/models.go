@@ -2,6 +2,7 @@
 package models
 
 import (
+	"bytes"
 	"encoding/json"
 	"sort"
 	"strconv"
@@ -21,6 +22,8 @@ type ProvidersForModelFunc func(string) []string
 // WebSearchCapabilityForModelFunc returns explicit conservative capability
 // metadata for an exact public model ID. nil means unknown.
 type WebSearchCapabilityForModelFunc func(string) *bool
+
+type ApplyPatchCapabilityForModelFunc func(string) bool
 
 var (
 	codexClientModelTemplatesMu       sync.Mutex
@@ -85,7 +88,12 @@ func BuildResponseForClientWithCPACapabilities(
 	webSearchCapabilityForModel WebSearchCapabilityForModelFunc,
 	optimizeMultiAgentV2 bool,
 	clientVersion string,
+	applyPatchCapabilities ...ApplyPatchCapabilityForModelFunc,
 ) map[string]any {
+	var applyPatchCapability ApplyPatchCapabilityForModelFunc
+	if len(applyPatchCapabilities) > 0 {
+		applyPatchCapability = applyPatchCapabilities[0]
+	}
 	return map[string]any{
 		"models": buildCodexClientModels(
 			availableModels,
@@ -93,8 +101,20 @@ func BuildResponseForClientWithCPACapabilities(
 			webSearchCapabilityForModel,
 			optimizeMultiAgentV2,
 			clientVersion,
+			applyPatchCapability,
 		),
 	}
+}
+
+// MarshalCompact serializes a Codex client catalog without HTML escaping or a trailing newline.
+func MarshalCompact(payload any) ([]byte, error) {
+	var body bytes.Buffer
+	encoder := json.NewEncoder(&body)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(payload); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(body.Bytes(), []byte{'\n'}), nil
 }
 
 func buildCodexClientModels(
@@ -103,6 +123,7 @@ func buildCodexClientModels(
 	webSearchCapabilityForModel WebSearchCapabilityForModelFunc,
 	optimizeMultiAgentV2 bool,
 	clientVersion string,
+	applyPatchCapabilityForModel ApplyPatchCapabilityForModelFunc,
 ) []map[string]any {
 	templates, defaultTemplate, err := loadCodexClientModelTemplates()
 	if err != nil || defaultTemplate == nil {
@@ -145,6 +166,8 @@ func buildCodexClientModels(
 			if optimizeMultiAgentV2 {
 				entry["multi_agent_version"] = "v2"
 			}
+			applyCodexClientDevinDisplayName(entry, id, model, providersForModel)
+			applyCodexClientApplyPatchCapability(entry, id, applyPatchCapabilityForModel)
 			result = append(result, entry)
 			continue
 		}
@@ -156,6 +179,8 @@ func buildCodexClientModels(
 		applyCPAWebSearchCapability(entry, id, webSearchCapabilityForModel, clientVersion)
 		sanitizeCodexClientReasoningMetadata(entry, clientVersion)
 		applyCodexClientVisibilityOverride(entry, id)
+		applyCodexClientDevinDisplayName(entry, id, model, providersForModel)
+		applyCodexClientApplyPatchCapability(entry, id, applyPatchCapabilityForModel)
 		result = append(result, entry)
 	}
 
@@ -292,6 +317,50 @@ func applyCodexClientDisplayName(entry map[string]any, model map[string]any) {
 	if displayName := stringModelValue(model, "display_name"); displayName != "" {
 		entry["display_name"] = displayName
 	}
+}
+
+func applyCodexClientDevinDisplayName(
+	entry map[string]any,
+	id string,
+	model map[string]any,
+	providersForModel ProvidersForModelFunc,
+) {
+	if !isCodexClientDevinModel(id, model, providersForModel) {
+		return
+	}
+	displayName := stringModelValue(entry, "display_name")
+	if displayName == "" {
+		displayName = id
+	}
+	if strings.HasSuffix(strings.ToLower(displayName), "(devin)") {
+		displayName = strings.TrimSpace(displayName[:len(displayName)-len("(devin)")])
+	}
+	entry["display_name"] = displayName + " (Devin)"
+}
+
+func isCodexClientDevinModel(id string, model map[string]any, providersForModel ProvidersForModelFunc) bool {
+	lowerID := strings.ToLower(strings.TrimSpace(id))
+	if strings.HasPrefix(lowerID, "devin/") || strings.Contains(lowerID, "/devin/") ||
+		strings.EqualFold(stringModelValue(model, "type"), "devin") ||
+		strings.EqualFold(stringModelValue(model, "owned_by"), "cognition") {
+		return true
+	}
+	lookupIDs := []string{id}
+	if index := strings.Index(id, "/"); index != -1 {
+		lookupIDs = append(lookupIDs, strings.TrimSpace(id[index+1:]))
+	}
+	for _, lookupID := range lookupIDs {
+		if info := registry.LookupModelInfo(lookupID); info != nil &&
+			(strings.EqualFold(info.Type, "devin") || strings.EqualFold(info.OwnedBy, "cognition")) {
+			return true
+		}
+	}
+	for _, provider := range codexClientProviders(id, providersForModel) {
+		if strings.EqualFold(strings.TrimSpace(provider), "devin") {
+			return true
+		}
+	}
+	return false
 }
 
 func applyCodexClientDescription(entry map[string]any, model map[string]any) {
@@ -500,6 +569,12 @@ func applyCodexClientProviderCapabilities(
 	templateModel bool,
 	providersForModel ProvidersForModelFunc,
 ) {
+	if providersForModel != nil {
+		entry["supports_reasoning_effort_updates"] = isPureCodexProvider(id, providersForModel) &&
+			registry.GetGlobalRegistry().SupportsConfigurationUpdates(id)
+	} else if !templateModel {
+		entry["supports_reasoning_effort_updates"] = false
+	}
 	if !templateModel {
 		applyCodexClientSearchToolSupport(entry, id, false, providersForModel)
 		return
@@ -507,13 +582,41 @@ func applyCodexClientProviderCapabilities(
 	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
 		entry["supports_search_tool"] = false
 		entry["prefer_websockets"] = false
-		delete(entry, "apply_patch_tool_type")
 		entry["service_tiers"] = []any{}
-		delete(entry, "upgrade")
-		delete(entry, "availability_nux")
+		nullCodexClientRequiredOptions(entry)
 		return
 	}
 	applyCodexClientSearchToolSupport(entry, id, true, providersForModel)
+}
+
+func applyCodexClientApplyPatchCapability(entry map[string]any, id string, capability ApplyPatchCapabilityForModelFunc) {
+	if capability == nil {
+		return
+	}
+	entry["apply_patch_tool_type"] = nil
+	if isCodexClientNonTextModel(id) {
+		return
+	}
+	var supportsText bool
+	switch modalities := entry["input_modalities"].(type) {
+	case []any:
+		for _, modality := range modalities {
+			supportsText = supportsText || modality == "text"
+		}
+	case []string:
+		for _, modality := range modalities {
+			supportsText = supportsText || modality == "text"
+		}
+	}
+	if supportsText && capability(strings.TrimSpace(id)) {
+		entry["apply_patch_tool_type"] = "freeform"
+	}
+}
+
+func nullCodexClientRequiredOptions(entry map[string]any) {
+	entry["apply_patch_tool_type"] = nil
+	entry["upgrade"] = nil
+	entry["availability_nux"] = nil
 }
 
 func isPureCodexProvider(id string, providersForModel ProvidersForModelFunc) bool {
@@ -624,9 +727,7 @@ func applyCodexClientModelMetadata(
 		entry["multi_agent_version"] = "v2"
 	}
 	entry["service_tiers"] = []any{}
-	delete(entry, "apply_patch_tool_type")
-	delete(entry, "upgrade")
-	delete(entry, "availability_nux")
+	nullCodexClientRequiredOptions(entry)
 
 	if contextWindow > 0 {
 		entry["context_window"] = contextWindow
@@ -636,9 +737,28 @@ func applyCodexClientModelMetadata(
 		}
 	}
 
-	applyCodexClientBaseInstructions(entry, model)
 	if plans, ok := model["available_in_plans"]; ok {
 		entry["available_in_plans"] = cloneCodexClientModelValue(plans)
+	}
+	useCompactCodexClientInstructions(entry, model)
+}
+
+const codexClientFallbackInstructions = "You are Codex, a coding agent. You and the user share one workspace."
+
+func useCompactCodexClientInstructions(entry, model map[string]any) {
+	instructions := stringModelValue(model, "base_instructions")
+	if instructions == "" {
+		instructions = codexClientFallbackInstructions
+	}
+	entry["base_instructions"] = instructions
+	entry["model_messages"] = map[string]any{
+		"instructions_template":  instructions,
+		"instructions_variables": nil,
+		"approvals":              nil,
+		"collaboration_modes":    nil,
+		"auto_review":            nil,
+		"permissions":            nil,
+		"multi_agent":            nil,
 	}
 }
 
@@ -689,13 +809,18 @@ func codexClientInputModalities(model map[string]any) ([]string, bool) {
 }
 
 func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
-	target := strings.TrimSpace(id)
-	if index := strings.Index(target, "/"); index != -1 {
+	if isCodexClientNonTextModel(id) {
+		entry["visibility"] = "hide"
+	}
+}
+
+func isCodexClientNonTextModel(id string) bool {
+	target := strings.ToLower(strings.TrimSpace(id))
+	if index := strings.LastIndex(target, "/"); index != -1 {
 		target = strings.TrimSpace(target[index+1:])
 	}
 	if registry.IsCodexImageModel(target) {
-		entry["visibility"] = "hide"
-		return
+		return true
 	}
 	switch target {
 	case "grok-imagine-image-quality",
@@ -703,8 +828,12 @@ func applyCodexClientVisibilityOverride(entry map[string]any, id string) {
 		"grok-imagine-image-2.0",
 		"grok-imagine-video",
 		"grok-imagine-video-1.5",
-		"grok-imagine-video-1.5-preview":
-		entry["visibility"] = "hide"
+		"grok-imagine-video-1.5-preview",
+		"grok-tts",
+		"grok-voice-tts-1.0":
+		return true
+	default:
+		return false
 	}
 }
 

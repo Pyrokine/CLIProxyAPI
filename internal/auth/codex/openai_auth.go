@@ -40,12 +40,16 @@ type Auth struct {
 	httpClient *http.Client
 }
 
-// NewAuth creates a new Auth service instance.
-// It initializes an HTTP client with proxy settings from the provided configuration.
-func NewAuth(cfg *config.Config) *Auth {
-	return &Auth{
-		httpClient: util.SetProxy(&cfg.SDKConfig, &http.Client{}),
+// NewAuth 创建认证服务，已提供的 HTTP client 保留其传输与超时配置
+func NewAuth(cfg *config.Config, httpClients ...*http.Client) *Auth {
+	if len(httpClients) > 0 && httpClients[0] != nil {
+		return &Auth{httpClient: httpClients[0]}
 	}
+	client := &http.Client{}
+	if cfg != nil {
+		client = util.SetProxy(&cfg.SDKConfig, client)
+	}
+	return &Auth{httpClient: client}
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE (Proof Key for Code Exchange).
@@ -166,6 +170,7 @@ func (o *Auth) ExchangeCodeForTokensWithRedirect(
 		RefreshToken: tokenResp.RefreshToken,
 		AccountID:    accountID,
 		Email:        email,
+		PlanType:     claims.GetPlanType(),
 		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}
 
@@ -270,6 +275,7 @@ func (o *Auth) refreshTokensSingleFlight(ctx context.Context, refreshToken strin
 		RefreshToken: tokenResp.RefreshToken,
 		AccountID:    accountID,
 		Email:        email,
+		PlanType:     claims.GetPlanType(),
 		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
 	}, nil
 }
@@ -277,6 +283,10 @@ func (o *Auth) refreshTokensSingleFlight(ctx context.Context, refreshToken strin
 // CreateTokenStorage creates a new TokenStorage from an AuthBundle.
 // It populates the storage struct with token data, user information, and timestamps.
 func (o *Auth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
+	planType := strings.TrimSpace(bundle.TokenData.PlanType)
+	if planType == "" {
+		planType = DefaultPlanType
+	}
 	storage := &TokenStorage{
 		IDToken:      bundle.TokenData.IDToken,
 		AccessToken:  bundle.TokenData.AccessToken,
@@ -284,6 +294,7 @@ func (o *Auth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 		AccountID:    bundle.TokenData.AccountID,
 		LastRefresh:  bundle.LastRefresh,
 		Email:        bundle.TokenData.Email,
+		PlanType:     planType,
 		Expire:       bundle.TokenData.Expire,
 	}
 

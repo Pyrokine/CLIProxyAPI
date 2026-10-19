@@ -189,6 +189,34 @@ func TestCodexClientModelsHidesOfficialGPTImageModels(t *testing.T) {
 	}
 }
 
+func TestCodexClientModelsHidesSpeechModels(t *testing.T) {
+	modelIDs := []string{"grok-tts", "grok-voice-tts-1.0", "xai/grok-tts", "xai/grok-voice-tts-1.0", "tenant/GROK-TTS"}
+	input := make([]map[string]any, 0, len(modelIDs)+1)
+	for _, modelID := range append(modelIDs, "grok-4") {
+		input = append(input, map[string]any{"id": modelID, "supportedInputModalities": []string{"text"}})
+	}
+	response := BuildResponseForClientWithCPACapabilities(input, nil, nil, false, "", func(string) bool { return true })
+	models, ok := response["models"].([]map[string]any)
+	if !ok || len(models) != len(input) {
+		t.Fatalf("models = %#v, want %d models", response["models"], len(input))
+	}
+	for _, model := range models {
+		modelID, _ := model["slug"].(string)
+		t.Run(modelID, func(t *testing.T) {
+			wantVisibility, wantPatch := "hide", any(nil)
+			if modelID == "grok-4" {
+				wantVisibility, wantPatch = "list", "freeform"
+			}
+			if model["visibility"] != wantVisibility {
+				t.Fatalf("visibility = %v, want %s", model["visibility"], wantVisibility)
+			}
+			if model["apply_patch_tool_type"] != wantPatch {
+				t.Fatalf("apply_patch_tool_type = %v, want %v", model["apply_patch_tool_type"], wantPatch)
+			}
+		})
+	}
+}
+
 func TestCodexClientModelsUsesUpdatedGPT55Template(t *testing.T) {
 	bySlug := codexClientModelsBySlug(t, []map[string]any{{"id": "gpt-5.5"}})
 	model := bySlug["gpt-5.5"]
@@ -489,8 +517,11 @@ func TestCodexClientTemplateAliasUsesCanonicalMetadataWithoutInventingCapabiliti
 	if got, _ := model["prefer_websockets"].(bool); got {
 		t.Fatalf("prefer_websockets = %v, want false", got)
 	}
-	if _, exists := model["apply_patch_tool_type"]; exists {
-		t.Fatalf("apply_patch_tool_type = %#v, want absent", model["apply_patch_tool_type"])
+	for _, field := range []string{"apply_patch_tool_type", "upgrade", "availability_nux"} {
+		value, exists := model[field]
+		if !exists || value != nil {
+			t.Fatalf("%s = %#v, want present null", field, value)
+		}
 	}
 }
 

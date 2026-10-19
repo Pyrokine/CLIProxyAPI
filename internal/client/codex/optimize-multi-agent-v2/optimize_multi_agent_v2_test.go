@@ -2,6 +2,7 @@ package multiagentv2
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,6 +31,16 @@ func TestIsCodexMultiAgentClient(t *testing.T) {
 			want:      true,
 		},
 		{
+			name:      "hyphenated Codex Desktop",
+			userAgent: "codex-desktop/0.159.0",
+			want:      true,
+		},
+		{
+			name:      "embedded hyphenated token",
+			userAgent: "proxy codex-desktop/0.159.0",
+			want:      false,
+		},
+		{
 			name:      "codex tui",
 			userAgent: "codex-tui/0.145.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.145.0)",
 			want:      true,
@@ -42,6 +53,11 @@ func TestIsCodexMultiAgentClient(t *testing.T) {
 		{
 			name:      "bare codex cli rs",
 			userAgent: "codex_cli_rs",
+			want:      true,
+		},
+		{
+			name:      "codex exec",
+			userAgent: "codex_exec/0.153.2 (Mac OS 26.6.2; arm64) unknown (codex_exec; 0.153.2)",
 			want:      true,
 		},
 		{
@@ -435,6 +451,43 @@ func TestOptimizeCodexMultiAgentV2RequestNormalizesAgentMessageContentOnly(t *te
 	}
 }
 
+func TestOptimizeCodexMultiAgentV2RequestSkipsDotPrefixConflict(t *testing.T) {
+	collaboration := `{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object"}}]}`
+	reserved := `{"type":"function","name":"collaboration-optimize.send_message","parameters":{"type":"object"}}`
+	for name, payload := range map[string]string{
+		"top level":        `{"tools":[` + collaboration + `,` + reserved + `]}`,
+		"nested namespace": `{"tools":[` + collaboration + `,{"type":"namespace","name":"user","tools":[` + reserved + `]}]}`,
+		"additional tools": `{"tools":[` + collaboration + `],"input":[{"type":"additional_tools","tools":[` + reserved + `]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !HasCodexMultiAgentV2NamespaceConflict([]byte(payload)) {
+				t.Fatal("reserved dotted name was not recognized as a conflict")
+			}
+			output, optimized := OptimizeCodexMultiAgentV2Request(context.Background(),
+				http.Header{"User-Agent": {"codex_cli_rs/0.154.0"}}, []byte(payload),
+				&config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}})
+			if optimized || gjson.GetBytes(output, "tools.0.name").String() != codexCollaborationNamespace {
+				t.Fatalf("reserved dotted name allowed namespace optimization: %s", output)
+			}
+		})
+	}
+}
+
+func TestRewriteCodexMultiAgentV2InputCompatWithoutConfig(t *testing.T) {
+	payload := []byte(`{"input":[{"type":"agent_message","author":"sender","recipient":"worker","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
+	output := RewriteCodexMultiAgentV2Input(context.Background(), nil, payload, nil, true)
+	if gjson.GetBytes(output, "input.0.type").String() != "message" ||
+		gjson.GetBytes(output, "input.0.role").String() != "user" ||
+		gjson.GetBytes(output, "input.0.content.0.text").String() != "task" {
+		t.Fatalf("compatibility normalization requires a config or client identity: %s", output)
+	}
+	for _, field := range []string{"author", "recipient"} {
+		if gjson.GetBytes(output, "input.0."+field).Exists() {
+			t.Fatalf("compatibility metadata %s was preserved: %s", field, output)
+		}
+	}
+}
+
 func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	t.Parallel()
 
@@ -459,8 +512,11 @@ func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	if name := gjson.GetBytes(got, "response.output.1.name").String(); name != "collaboration__send_message" {
 		t.Fatalf("qualified function name = %q, want collaboration__send_message", name)
 	}
-	if name := gjson.GetBytes(got, "response.output.2.name").String(); name != "collaboration.send_message" {
-		t.Fatalf("dotted function name = %q, want collaboration.send_message", name)
+	if name := gjson.GetBytes(got, "response.output.2.name").String(); name != "send_message" {
+		t.Fatalf("dotted function name = %q, want send_message", name)
+	}
+	if namespace := gjson.GetBytes(got, "response.output.2.namespace").String(); namespace != codexCollaborationNamespace {
+		t.Fatalf("dotted function namespace = %q, want collaboration", namespace)
 	}
 	if name := gjson.GetBytes(got, "response.tools.0.name").String(); name != codexCollaborationNamespace {
 		t.Fatalf("namespace tool name = %q, want collaboration", name)
@@ -577,6 +633,51 @@ func TestRewriteCodexMultiAgentV2InputConditions(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestRewriteCodexMultiAgentV2InputStripsCompatMetadata(t *testing.T) {
+	payload := []byte(`{"input":[{"type":"agent_message","author":"/root","recipient":"/root/worker",` +
+		`"content":[{"type":"encrypted_content","encrypted_content":"task"}],` +
+		`"internal_chat_message_metadata_passthrough":{"turn_id":"one"}},` +
+		`{"type":"message","role":"user","author":"/root/worker","recipient":"/root",` +
+		`"content":"reply","internal_chat_message_metadata_passthrough":{"turn_id":"two"}}]}`)
+	for _, test := range []struct {
+		name         string
+		optimize     bool
+		compat       bool
+		userAgent    string
+		wantItemType string
+	}{
+		{name: "compat optimization", optimize: true, compat: true, userAgent: "curl/8.7.1", wantItemType: "message"},
+		{name: "compat without optimization", compat: true, userAgent: "curl/8.7.1", wantItemType: "message"},
+		{name: "native Codex", optimize: true, userAgent: "codex-tui/0.145.0", wantItemType: "message"},
+		{name: "unrelated client", optimize: true, userAgent: "curl/8.7.1", wantItemType: "agent_message"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: test.optimize}}
+			headers := http.Header{"User-Agent": []string{test.userAgent}}
+			output := RewriteCodexMultiAgentV2Input(context.Background(), headers, payload, cfg, test.compat)
+			if got := gjson.GetBytes(output, "input.0.type").String(); got != test.wantItemType {
+				t.Fatalf("agent message type = %q, want %q: %s", got, test.wantItemType, output)
+			}
+			if test.wantItemType == "message" {
+				if gjson.GetBytes(output, "input.0.role").String() != "user" ||
+					gjson.GetBytes(output, "input.0.content.0.type").String() != "input_text" ||
+					gjson.GetBytes(output, "input.0.content.0.text").String() != "task" ||
+					gjson.GetBytes(output, "input.0.content.0.encrypted_content").Exists() {
+					t.Fatalf("agent message content was not preserved as text: %s", output)
+				}
+			}
+			for i := 0; i < 2; i++ {
+				for _, field := range []string{"author", "recipient", "internal_chat_message_metadata_passthrough"} {
+					result := gjson.GetBytes(output, fmt.Sprintf("input.%d.%s", i, field))
+					if result.Exists() == test.compat {
+						t.Fatalf("compat=%t, input.%d.%s present=%t: %s", test.compat, i, field, result.Exists(), output)
+					}
+				}
+			}
+		})
 	}
 }
 

@@ -614,3 +614,32 @@ func makeNormalizedResponsesRequestForBenchmark(contentBytes int) []byte {
 	builder.WriteString(`"}]}`)
 	return []byte(builder.String())
 }
+
+func TestCodexSourcesRequireExplicitArrayInclude(t *testing.T) {
+	for _, tc := range []struct {
+		include string
+		sources bool
+	}{
+		{`"web_search_call.action.sources"`, false},
+		{`{"source":"web_search_call.action.sources"}`, false},
+		{`null`, false},
+		{`[]`, false},
+		{`["web_search_call.action.sources"]`, true},
+		{`["web_search_call.action.sources","web_search_call.action.sources",1]`, true},
+	} {
+		t.Run(tc.include, func(t *testing.T) {
+			out := ConvertOpenAIResponsesRequestToCodex("fixture-model", []byte(`{"input":"hello","include":`+tc.include+`}`), true)
+			include := gjson.GetBytes(out, "include").Array()
+			want := 1
+			if tc.sources {
+				want = 2
+			}
+			if len(include) != want || include[0].String() != "reasoning.encrypted_content" {
+				t.Fatalf("include changed: %s", out)
+			}
+			if tc.sources && include[1].String() != "web_search_call.action.sources" {
+				t.Fatalf("sources include missing: %s", out)
+			}
+		})
+	}
+}

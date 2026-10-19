@@ -806,7 +806,7 @@ func TestConvertCodexResponseToClaudeMapsCacheWriteAndReasoningUsage(t *testing.
 	}
 	usage := messageDeltas[0].Data.Get("usage")
 	for path, want := range map[string]int64{
-		"input_tokens":                          200,
+		"input_tokens":                          50,
 		"output_tokens":                         50,
 		"cache_read_input_tokens":               800,
 		"cache_creation_input_tokens":           150,

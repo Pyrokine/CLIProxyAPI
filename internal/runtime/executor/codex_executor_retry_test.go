@@ -3,15 +3,21 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	codexauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -124,6 +130,13 @@ func TestCodexUsageLimitClassificationAcrossTransports(t *testing.T) {
 			if got := statusErrCode(err); got != http.StatusTooManyRequests {
 				t.Fatalf("status = %d, want 429; error=%v", got, err)
 			}
+			classified, ok := err.(cliproxyexecutor.ExecutionDispositionError)
+			if !ok {
+				t.Fatal("quota error lost its execution disposition")
+			}
+			if scope := classified.ExecutionDisposition().EffectScope; scope != cliproxyexecutor.StateEffectScopeQuotaFamily {
+				t.Fatalf("quota scope = %s, want quota family", scope)
+			}
 			if strings.Contains(test.name, "without reset") {
 				if retry := err.(interface{ RetryAfter() *time.Duration }).RetryAfter(); retry != nil {
 					t.Fatalf("retryAfter = %v, want nil", *retry)
@@ -133,6 +146,85 @@ func TestCodexUsageLimitClassificationAcrossTransports(t *testing.T) {
 			retryable, supportsRetry := err.(interface{ RetryAfter() *time.Duration })
 			if !supportsRetry || retryable.RetryAfter() == nil || *retryable.RetryAfter() != 7*time.Second {
 				t.Fatalf("retryAfter = %#v, want 7s", err)
+			}
+		})
+	}
+}
+
+func TestCodexRefreshUpdatesPlanTypeForRuntimeAndPersistence(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+
+	for _, tc := range []struct {
+		name      string
+		oldPlan   string
+		claimPlan string
+		wantPlan  string
+		wantFree  bool
+	}{
+		{name: "downgrade", oldPlan: "pro", claimPlan: "free", wantPlan: "free", wantFree: true},
+		{name: "upgrade", oldPlan: "free", claimPlan: "team", wantPlan: "team"},
+		{name: "missing claim", oldPlan: "pro", wantPlan: "free", wantFree: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := []byte(`{"email":"example@test.invalid","https://api.openai.com/auth":{"chatgpt_account_id":"account-refreshed","chatgpt_plan_type":"` + tc.claimPlan + `"}}`)
+			idToken := "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".signature"
+			response := fmt.Sprintf(`{"id_token":%q,"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}`, idToken)
+			http.DefaultTransport = proxyTestRoundTripper(func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodPost || req.URL.String() != "https://auth.openai.com/oauth/token" {
+					return nil, fmt.Errorf("unexpected token endpoint: %s %s", req.Method, req.URL)
+				}
+				if err := req.ParseForm(); err != nil {
+					return nil, err
+				}
+				if req.Form.Get("refresh_token") != "old-refresh" {
+					return nil, fmt.Errorf("unexpected refresh token in mock request")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(response)), Header: make(http.Header), Request: req}, nil
+			})
+
+			storage := &codexauth.TokenStorage{PlanType: tc.oldPlan, AccessToken: "old-access", RefreshToken: "old-refresh"}
+			auth := &cliproxyauth.Auth{
+				Provider:   "codex",
+				Metadata:   map[string]any{"refresh_token": "old-refresh", "plan_type": tc.oldPlan},
+				Attributes: map[string]string{"plan_type": tc.oldPlan},
+				Storage:    storage,
+			}
+			refreshed, err := newCodexExecutor(&config.Config{}).Refresh(context.Background(), auth)
+			if err != nil {
+				t.Fatalf("Refresh() error = %v", err)
+			}
+			if refreshed.Metadata["plan_type"] != tc.wantPlan || refreshed.Attributes["plan_type"] != tc.wantPlan {
+				t.Fatalf("refreshed plan: metadata=%v attributes=%q, want %q", refreshed.Metadata["plan_type"], refreshed.Attributes["plan_type"], tc.wantPlan)
+			}
+			if got := isCodexFreePlanAuth(refreshed); got != tc.wantFree {
+				t.Fatalf("free plan eligibility = %t, want %t", got, tc.wantFree)
+			}
+			if refreshed.Metadata["account_id"] != "account-refreshed" || refreshed.Metadata["access_token"] != "new-access" {
+				t.Fatal("refreshed claims or access token were not applied")
+			}
+			if storage.PlanType != tc.oldPlan || storage.AccessToken != "old-access" {
+				t.Fatal("original token storage was mutated")
+			}
+			updatedStorage, ok := refreshed.Storage.(*codexauth.TokenStorage)
+			if !ok || updatedStorage == storage || updatedStorage.PlanType != tc.wantPlan || updatedStorage.AccessToken != "new-access" {
+				t.Fatalf("refreshed token storage = %#v, want distinct storage with plan %q", refreshed.Storage, tc.wantPlan)
+			}
+			cliproxyauth.PrepareAuthForPersistence(refreshed)
+			path := filepath.Join(t.TempDir(), "codex-test.json")
+			if err := updatedStorage.SaveTokenToFile(path); err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved map[string]any
+			if err := json.Unmarshal(file, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved["plan_type"] != tc.wantPlan {
+				t.Fatalf("persisted plan = %v, want %q", saved["plan_type"], tc.wantPlan)
 			}
 		})
 	}

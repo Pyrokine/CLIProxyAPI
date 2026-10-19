@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// DefaultPlanType limits an account without a verified subscription claim to free models.
+const DefaultPlanType = "free"
+
 // JWTClaims represents the claims section of a JSON Web Token (JWT).
 // It includes standard claims like issuer, subject, and expiration time, as well as
 // custom claims specific to OpenAI's authentication.
@@ -99,4 +102,14 @@ func (c *JWTClaims) getUserEmail() string {
 // It retrieves the unique identifier for the user's ChatGPT account.
 func (c *JWTClaims) GetAccountID() string {
 	return c.AuthInfo.ChatgptAccountID
+}
+
+// GetPlanType returns the account tier, defaulting to free when the claim is absent.
+func (c *JWTClaims) GetPlanType() string {
+	if c != nil {
+		if plan := strings.TrimSpace(c.AuthInfo.ChatgptPlanType); plan != "" {
+			return plan
+		}
+	}
+	return DefaultPlanType
 }
