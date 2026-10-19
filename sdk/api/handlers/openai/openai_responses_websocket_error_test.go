@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
@@ -556,4 +557,26 @@ func boolToInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func TestResponsesWebsocketCloseReasonPreservesValidUTF8(t *testing.T) {
+	for _, test := range []struct{ name, reason, want string }{
+		{"ascii", "message too big", "message too big"},
+		{"invalid_short", "a\xff\xfeb", "a��b"},
+		{"invalid_long", strings.Repeat("\xff", 200), strings.Repeat("�", 41)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, err := runResponsesWebsocketForwardError(t, nil, &handlers.ErrorMessage{
+				StatusCode: http.StatusRequestEntityTooLarge,
+				Error:      &websocket.CloseError{Code: websocket.CloseMessageTooBig, Text: test.reason},
+			})
+			var closed *websocket.CloseError
+			if !errors.As(err, &closed) || closed.Code != websocket.CloseMessageTooBig {
+				t.Fatalf("websocket close = %v, want code 1009", err)
+			}
+			if !utf8.ValidString(closed.Text) || closed.Text != test.want || len(closed.Text) > wsCloseReasonMaxBytes {
+				t.Fatalf("close reason = %q, want %q", closed.Text, test.want)
+			}
+		})
+	}
 }

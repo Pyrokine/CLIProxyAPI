@@ -13,6 +13,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
+	"github.com/google/uuid"
 )
 
 type capturedUsageRecord struct {
@@ -89,6 +90,82 @@ func assertNoDeferredRecord(t *testing.T, records <-chan capturedUsageRecord, mo
 		case <-deadline:
 			return
 		}
+	}
+}
+
+func TestExecutionIDContextDoesNotReplaceHTTPID(t *testing.T) {
+	ctx := internallogging.WithRequestID(context.Background(), "inbound-http-id")
+	ctx = WithExecutionID(ctx, " model-execution-id ")
+	if got := ExecutionIDFromContext(ctx); got != "model-execution-id" {
+		t.Fatalf("execution ID = %q", got)
+	}
+	if got := internallogging.GetRequestID(ctx); got != "inbound-http-id" {
+		t.Fatalf("HTTP request ID = %q", got)
+	}
+	if got := ExecutionIDFromContext(context.Background()); got != "" {
+		t.Fatalf("unexpected execution ID = %q", got)
+	}
+}
+
+func TestUsageManagerSharesExecutionIDAcrossPlugins(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		contextID  string
+		recordID   string
+		httpID     string
+		recordHTTP string
+		wantID     string
+		wantHTTP   string
+		nilContext bool
+	}{
+		{name: "generated", nilContext: true},
+		{name: "http-context", httpID: "inbound-http-id", wantHTTP: "inbound-http-id"},
+		{name: "whitespace", recordID: " \t", recordHTTP: " \t", httpID: "inbound-http-id", wantHTTP: "inbound-http-id"},
+		{name: "context", contextID: " context-execution ", httpID: "inbound-http-id", wantID: "context-execution", wantHTTP: "inbound-http-id"},
+		{name: "record", contextID: "context-execution", recordID: " record-execution ", httpID: "inbound-http-id", recordHTTP: " stored-http-id ", wantID: "record-execution", wantHTTP: "stored-http-id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(2)
+			defer manager.Stop()
+			first := make(chan capturedUsageRecord, 2)
+			second := make(chan capturedUsageRecord, 2)
+			manager.Register(&deferredCapturePlugin{records: first})
+			manager.RegisterNamed("second", &deferredCapturePlugin{records: second})
+			var ctx context.Context
+			if !tc.nilContext {
+				ctx = internallogging.WithRequestID(context.Background(), tc.httpID)
+				ctx = WithExecutionID(ctx, tc.contextID)
+			}
+			record := Record{Model: tc.name, ExecutionID: tc.recordID, RequestID: tc.recordHTTP}
+			previous := ""
+			for range 2 {
+				if err := manager.Publish(ctx, record); err != nil {
+					t.Fatal(err)
+				}
+				left := waitForDeferredRecord(t, first, tc.name).record
+				right := waitForDeferredRecord(t, second, tc.name).record
+				if left.ExecutionID == "" || left.ExecutionID != right.ExecutionID {
+					t.Fatalf("plugins received different or empty execution IDs: %q, %q", left.ExecutionID, right.ExecutionID)
+				}
+				if left.RequestID != tc.wantHTTP || right.RequestID != tc.wantHTTP {
+					t.Fatalf("HTTP IDs = %q, %q; want %q", left.RequestID, right.RequestID, tc.wantHTTP)
+				}
+				if tc.wantID != "" {
+					if left.ExecutionID != tc.wantID {
+						t.Fatalf("execution ID = %q, want %q", left.ExecutionID, tc.wantID)
+					}
+				} else {
+					id, err := uuid.Parse(left.ExecutionID)
+					if err != nil || id.Version() != 4 || id.String() != left.ExecutionID || left.ExecutionID == previous {
+						t.Fatalf("generated execution ID is not an independent canonical UUID v4: %q", left.ExecutionID)
+					}
+				}
+				previous = left.ExecutionID
+			}
+			if record.ExecutionID != tc.recordID || record.RequestID != tc.recordHTTP {
+				t.Fatal("publication changed the caller record")
+			}
+		})
 	}
 }
 

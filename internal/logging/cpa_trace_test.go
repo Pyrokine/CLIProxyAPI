@@ -2,6 +2,7 @@ package logging
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -134,6 +135,29 @@ func TestSetGinCPATraceIDNoopsWithoutRequestID(t *testing.T) {
 	SetGinCPATraceID(c, "auth-index")
 	if got := recorder.Header().Get(CPATraceIDHeader); got != "" {
 		t.Fatalf("trace ID without request ID = %q", got)
+	}
+}
+
+type traceFlushErrorWriter struct {
+	*httptest.ResponseRecorder
+	err error
+}
+
+func (w *traceFlushErrorWriter) FlushError() error { return w.err }
+
+func TestCPATraceResponseWriterReportsFlushErrorAndSetsTraceID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	flushFailure := errors.New("transport flush failed")
+	transport := &traceFlushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: flushFailure}
+	c, _ := gin.CreateTestContext(transport)
+	state := &cpaTraceState{}
+	state.set("test-trace")
+	c.Writer = &cpaTraceResponseWriter{ResponseWriter: c.Writer, state: state}
+	if err := http.NewResponseController(c.Writer).Flush(); !errors.Is(err, flushFailure) {
+		t.Fatalf("flush error = %v", err)
+	}
+	if got := transport.Result().Header.Get(CPATraceIDHeader); got != "test-trace" {
+		t.Fatalf("trace header = %q", got)
 	}
 }
 

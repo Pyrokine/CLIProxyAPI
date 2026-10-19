@@ -351,16 +351,23 @@ func TestOAuthTabIgnoresStaleCallbackSubmitResult(t *testing.T) {
 }
 
 func TestOAuthProvidersHaveCanonicalCallbackKeys(t *testing.T) {
-	keys := make(map[string]string, len(oauthProviders))
+	providers := make(map[string]oauthProvider, len(oauthProviders))
 	for _, provider := range oauthProviders {
-		keys[provider.name] = provider.key
+		providers[provider.name] = provider
 	}
-	for name, want := range map[string]string{
-		"Gemini CLI": "gemini",
-		"IFlow":      "iflow",
+	for _, tc := range []struct {
+		name, key, path string
+		device          bool
+	}{
+		{name: "Gemini CLI", key: "gemini", path: "gemini-cli-auth-url"},
+		{name: "IFlow", key: "iflow", path: "iflow-auth-url"},
+		{name: "Kimi (kimi.com)", key: "kimi", path: "kimi-auth-url", device: true},
+		{name: "Kimi (kimi.ai)", key: "kimi-ai", path: "kimi-ai-auth-url", device: true},
+		{name: "Meta", key: "meta", path: "meta-auth-url", device: true},
 	} {
-		if got := keys[name]; got != want {
-			t.Fatalf("provider %q key = %q, want %q", name, got, want)
+		provider, ok := providers[tc.name]
+		if !ok || provider.key != tc.key || provider.apiPath != tc.path || provider.deviceFlow != tc.device {
+			t.Fatalf("provider %q = %+v, want key=%q path=%q device=%t", tc.name, provider, tc.key, tc.path, tc.device)
 		}
 	}
 }

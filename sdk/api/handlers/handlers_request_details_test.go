@@ -95,6 +95,37 @@ func TestEnrichContextWithSessionHierarchyReplacesAndClearsMetadata(t *testing.T
 	}
 }
 
+func TestEnrichContextWithSessionHierarchyPublishesLCPNodeKind(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind string
+		compaction bool
+	}{
+		{name: "compaction", kind: "compaction", compaction: true},
+		{name: "fork", kind: "fork", compaction: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := EnrichContextWithSessionHierarchy(context.Background(), nil, nil, map[string]any{
+				coreexecutor.CanonicalSessionIDMetadataKey:   "lcp:v1:child",
+				coreexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:child",
+				coreexecutor.ParentSessionIDMetadataKey:      "lcp:v1:root",
+				coreexecutor.NodeKindMetadataKey:             tc.kind,
+				coreexecutor.IsCompactionMetadataKey:         tc.compaction,
+				coreexecutor.IsForkMetadataKey:               !tc.compaction,
+			})
+			metadata := internallogging.GetClientRequestMetadata(ctx)
+			if metadata.SessionID != "lcp:v1:child" || metadata.ParentSessionID != "lcp:v1:root" ||
+				metadata.NodeKind != tc.kind || metadata.IsCompaction != tc.compaction || metadata.IsFork == tc.compaction {
+				t.Fatalf("session node metadata = %+v", metadata)
+			}
+			ctx = EnrichContextWithSessionHierarchy(ctx, nil, nil, nil)
+			metadata = internallogging.GetClientRequestMetadata(ctx)
+			if metadata.SessionID != "" || metadata.ParentSessionID != "" || metadata.NodeKind != "" || metadata.IsFork || metadata.IsCompaction {
+				t.Fatalf("stale session node metadata = %+v", metadata)
+			}
+		})
+	}
+}
+
 func TestGetContextWithCancelUsesResolvedClientAddress(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	recorder := httptest.NewRecorder()

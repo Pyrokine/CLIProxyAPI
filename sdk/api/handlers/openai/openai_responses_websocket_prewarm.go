@@ -17,10 +17,9 @@ import (
 
 func shouldHandleResponsesWebsocketPrewarmLocally(
 	rawJSON []byte,
-	lastRequest []byte,
 	allowIncrementalInputWithPreviousResponseID bool,
 ) bool {
-	if allowIncrementalInputWithPreviousResponseID || len(lastRequest) != 0 {
+	if allowIncrementalInputWithPreviousResponseID {
 		return false
 	}
 	if strings.TrimSpace(gjson.GetBytes(rawJSON, "type").String()) != wsRequestTypeCreate {

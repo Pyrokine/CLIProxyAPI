@@ -420,3 +420,75 @@ func TestApplyManagementConfigCommitUsesHeldCommitSequence(t *testing.T) {
 		t.Fatal("management config callback reacquired the commit sequence")
 	}
 }
+
+func TestConfigCommitUpdatesQuotaAwareRoutingStrategy(t *testing.T) {
+	strategies := []struct {
+		name string
+		kind string
+	}{
+		{name: "round-robin", kind: "round-robin"},
+		{name: "fill-first", kind: "fill-first"},
+		{name: "weighted-round-robin", kind: "weighted-round-robin"},
+		{name: "quota-aware", kind: "quota-aware"},
+		{name: "quotaaware", kind: "quota-aware"},
+		{name: "qa", kind: "quota-aware"},
+	}
+	for _, previous := range strategies[:4] {
+		for _, next := range strategies {
+			for _, affinity := range []bool{false, true} {
+				affinityName := "direct"
+				if affinity {
+					affinityName = "session-affinity"
+				}
+				t.Run(previous.name+"/"+next.name+"/"+affinityName, func(t *testing.T) {
+					before := &config.Config{}
+					before.Routing.Strategy = previous.name
+					before.Routing.SessionAffinity = affinity
+					selector := newRoutingSelector(previous.name)
+					if affinity {
+						selector = coreauth.NewSessionAffinitySelector(selector)
+					}
+					manager := coreauth.NewManager(nil, selector, nil)
+					t.Cleanup(func() { manager.SetSelector(nil) })
+					service := &Service{cfg: before, coreManager: manager}
+					after := &config.Config{}
+					after.Routing.Strategy = next.name
+					after.Routing.SessionAffinity = affinity
+					if err := service.applyManagementConfigCommit(context.Background(), internalapi.ManagementConfigCommit{
+						Config: after, Generation: 1,
+					}); err != nil {
+						t.Fatal(err)
+					}
+					current := manager.Selector()
+					if previous.kind == next.kind && current != selector {
+						t.Fatal("equivalent strategy replaced the current selector")
+					}
+					if affinity {
+						wrapped, ok := current.(*coreauth.SessionAffinitySelector)
+						if !ok {
+							t.Fatalf("selector = %T, want session affinity", current)
+						}
+						current = wrapped.FallbackSelector()
+					}
+					kind := ""
+					switch current.(type) {
+					case *coreauth.RoundRobinSelector:
+						kind = "round-robin"
+					case *coreauth.FillFirstSelector:
+						kind = "fill-first"
+					case *coreauth.WeightedRoundRobinSelector:
+						kind = "weighted-round-robin"
+					case *coreauth.QuotaAwareSelector:
+						kind = "quota-aware"
+					}
+					if kind != next.kind {
+						t.Fatalf("routing %q -> %q uses %T, want %s", previous.name, next.name, current, next.kind)
+					}
+					if service.cfg.Routing.Strategy != next.name {
+						t.Fatal("committed routing strategy was not published")
+					}
+				})
+			}
+		}
+	}
+}

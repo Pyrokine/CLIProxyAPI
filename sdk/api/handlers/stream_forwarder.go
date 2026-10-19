@@ -53,6 +53,9 @@ type StreamForwardOptions struct {
 	// WriteChunk writes a single data chunk to the response body. It should not flush.
 	WriteChunk func(chunk []byte)
 
+	// WriteChunkError is used when the caller can report downstream write failures.
+	WriteChunkError func(chunk []byte) error
+
 	// WriteTerminalError writes an error payload to the response body when streaming fails
 	// after headers have already been committed. It should not flush.
 	WriteTerminalError func(errMsg *ErrorMessage)
@@ -88,9 +91,22 @@ func (h *BaseAPIHandler) ForwardStream(
 		return
 	}
 
-	writeChunk := opts.WriteChunk
+	writeChunk := opts.WriteChunkError
 	if writeChunk == nil {
-		writeChunk = func([]byte) {}
+		writeChunk = func(chunk []byte) error {
+			if opts.WriteChunk != nil {
+				opts.WriteChunk(chunk)
+			}
+			return nil
+		}
+	}
+	flush := func() bool {
+		if err := FlushStreamResponse(c.Writer, flusher); err != nil {
+			MarkStreamRequestFailure(c, err)
+			cancel(err)
+			return false
+		}
+		return true
 	}
 
 	writeKeepAlive := opts.WriteKeepAlive
@@ -136,7 +152,9 @@ func (h *BaseAPIHandler) ForwardStream(
 					if opts.WriteTerminalError != nil {
 						opts.WriteTerminalError(terminalErr)
 					}
-					flusher.Flush()
+					if !flush() {
+						return
+					}
 					cancel(terminalErr.Error)
 					return
 				}
@@ -146,17 +164,27 @@ func (h *BaseAPIHandler) ForwardStream(
 				if opts.DoneError != nil {
 					if err := opts.DoneError(); err != nil {
 						MarkStreamRequestFailure(c, err)
-						flusher.Flush()
+						if !flush() {
+							return
+						}
 						cancel(err)
 						return
 					}
 				}
-				flusher.Flush()
+				if !flush() {
+					return
+				}
 				cancel(nil)
 				return
 			}
-			writeChunk(chunk)
-			flusher.Flush()
+			if err := writeChunk(chunk); err != nil {
+				MarkStreamRequestFailure(c, err)
+				cancel(err)
+				return
+			}
+			if !flush() {
+				return
+			}
 		case errMsg, ok := <-errs:
 			if !ok {
 				errs = nil
@@ -167,7 +195,9 @@ func (h *BaseAPIHandler) ForwardStream(
 				MarkStreamRequestFailure(c, errMsg.Error)
 				if opts.WriteTerminalError != nil {
 					opts.WriteTerminalError(errMsg)
-					flusher.Flush()
+					if !flush() {
+						return
+					}
 				}
 			}
 			var execErr error
@@ -184,7 +214,9 @@ func (h *BaseAPIHandler) ForwardStream(
 				return
 			}
 			if result.Written {
-				flusher.Flush()
+				if !flush() {
+					return
+				}
 				if opts.OnKeepAliveFlush != nil {
 					opts.OnKeepAliveFlush()
 				}

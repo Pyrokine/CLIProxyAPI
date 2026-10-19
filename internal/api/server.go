@@ -403,6 +403,8 @@ type Server struct {
 	// server is the underlying HTTP server.
 	server *http.Server
 
+	listenerMu sync.Mutex
+
 	// muxBaseListener is the shared TCP listener used to serve both HTTP and Redis protocol traffic.
 	muxBaseListener net.Listener
 
@@ -533,6 +535,10 @@ func NewServer(
 
 	// Create gin engine
 	engine := gin.New()
+	// Proxy-aware address checks use ResolveClientAddress with explicitly trusted peers.
+	if errTrusted := engine.SetTrustedProxies(nil); errTrusted != nil {
+		log.WithError(errTrusted).Error("failed to disable Gin forwarded client IP handling")
+	}
 	if optionState.engineConfigurator != nil {
 		optionState.engineConfigurator(engine)
 	}
@@ -665,6 +671,7 @@ func NewServer(
 	}
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	auth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
 	// Initialize management handler first (to get internalToken for quota scheduler)
 	s.mgmt = managementHandlers.NewHandler(
 		cfg,
@@ -745,13 +752,13 @@ func NewServer(
 			case quota.TypeClaude:
 				return fetchClaudeQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeCodex:
-				return fetchCodexQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
+				return fetchCodexQuotaResultContext(ctx, localAPICall, entry.AuthIndex, codexQuotaAccountID(authManager, entry.AuthIndex))
 			case quota.TypeGeminiCli:
 				return fetchGeminiQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeAntigravity:
 				return fetchAntigravityQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeKimi:
-				return fetchKimiQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
+				return fetchKimiQuotaResultContext(ctx, localAPICall, authManager, entry.AuthIndex)
 			case quota.TypeXAI:
 				return fetchXAIQuotaResultContext(ctx, localAPICall, entry.AuthIndex)
 			case quota.TypeDevin:
@@ -761,13 +768,13 @@ func NewServer(
 			}
 		},
 	)
+	s.mgmt.SetQuotaScheduler(quotaScheduler)
 	if authManager != nil {
 		registerAuthManagerForQuota(quotaScheduler, authManager)
 		authManager.SetQuotaSchedulingProvider(authQuotaSchedulingProvider{scheduler: quotaScheduler})
 	} else if cfg.AuthDir != "" {
 		registerAuthFilesForQuota(quotaScheduler, cfg.AuthDir)
 	}
-	s.mgmt.SetQuotaScheduler(quotaScheduler)
 	s.quotaScheduler = quotaScheduler
 
 	if quotaCfg.Enabled {
@@ -1058,6 +1065,10 @@ func (s *Server) setupRoutes() {
 	v1.Use(s.publicAuthMiddlewares()...)
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
+		v1.GET("/models/*model", func(c *gin.Context) {
+			c.Set(handlers.ModelDetailIDContextKey, strings.TrimPrefix(c.Param("model"), "/"))
+			s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers)(c)
+		})
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
 		v1.POST("/completions", openaiHandlers.Completions)
 		v1.POST("/messages", claudeCodeHandlers.ClaudeMessages)
@@ -1216,6 +1227,16 @@ func (s *Server) setupRoutes() {
 	)
 
 	// OAuth callback endpoints (reuse main server port)
+	s.engine.GET(
+		"/v0/management/oauth-callback",
+		s.authPolicyReadLockMiddleware(),
+		requireTLSForAuthRequest(s.managementConfigSnapshot),
+		noStoreMiddleware(),
+		s.managementAvailabilityMiddleware(),
+		s.oauthCallbackRateLimitMiddleware(),
+		authPolicyUnlockMiddleware(),
+		s.mgmt.GetOAuthCallback,
+	)
 	// These endpoints receive provider redirects and persist
 	// the short-lived code/state for the waiting goroutine.
 	for _, cb := range []struct{ path, provider string }{
@@ -1394,6 +1415,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 
 		mgmt.POST("/reset-quota", s.mgmt.ResetQuota)
+		mgmt.POST("/routing/cooldown/reset", s.mgmt.ResetCooldown)
 		mgmt.GET("/quota/status", s.mgmt.GetQuotaStatus)
 		mgmt.POST("/quota/refresh", s.mgmt.PostQuotaRefresh)
 		mgmt.GET("/quota/refresh-tasks", s.mgmt.GetQuotaRefreshTasks)
@@ -1488,6 +1510,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/xai-api-key", s.mgmt.PatchXAIKey)
 		mgmt.DELETE("/xai-api-key", s.mgmt.DeleteXAIKey)
 
+		mgmt.GET("/meta-api-key", s.mgmt.GetMetaKeys)
+		mgmt.PUT("/meta-api-key", s.mgmt.PutMetaKeys)
+		mgmt.POST("/meta-api-key", s.mgmt.PostMetaKey)
+		mgmt.PATCH("/meta-api-key", s.mgmt.PatchMetaKey)
+		mgmt.DELETE("/meta-api-key", s.mgmt.DeleteMetaKey)
+
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
 		mgmt.POST("/openai-compatibility", s.mgmt.PostOpenAICompat)
@@ -1562,7 +1590,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/qwen-auth-url", s.mgmt.RequestQwenToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
+		mgmt.GET("/kimi-ai-auth-url", s.mgmt.RequestKimiAIToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
+		mgmt.GET("/meta-auth-url", s.mgmt.RequestMetaToken)
 		mgmt.GET("/devin-auth-url", s.mgmt.RequestDevinToken)
 		mgmt.GET("/iflow-auth-url", s.mgmt.RequestIFlowToken)
 		mgmt.POST("/iflow-auth-url", s.mgmt.RequestIFlowCookieToken)
@@ -2237,9 +2267,10 @@ func grokModelsFromHomeEntries(entries []homeModelEntry) []grokbuild.ModelInfo {
 	for _, entry := range entries {
 		models = append(
 			models, grokbuild.ModelInfo{
-				ID:            entry.id,
-				DisplayName:   entry.displayName,
-				ContextLength: entry.contextLength,
+				ID:              entry.id,
+				DisplayName:     entry.displayName,
+				ContextLength:   entry.contextLength,
+				ReasoningLevels: append([]string(nil), entry.reasoningLevels...),
 			},
 		)
 	}
@@ -2260,11 +2291,7 @@ func grokModelsFromRegistryMaps(models []map[string]any) []grokbuild.ModelInfo {
 			DisplayName:   strings.TrimSpace(displayName),
 			ContextLength: modelMapInt(model, "max_context_length", "context_length"),
 		}
-		if thinking, ok := model["thinking"].(*registry.ThinkingSupport); ok && thinking != nil {
-			info.ReasoningLevels = append([]string(nil), thinking.Levels...)
-		} else if thinking, ok := model["thinking"].(registry.ThinkingSupport); ok {
-			info.ReasoningLevels = append([]string(nil), thinking.Levels...)
-		}
+		info.ReasoningLevels = modelMapReasoningLevels(model)
 		out = append(out, info)
 	}
 	return out
@@ -2290,6 +2317,16 @@ func modelMapInt(model map[string]any, keys ...string) int {
 		}
 	}
 	return 0
+}
+
+func modelMapReasoningLevels(model map[string]any) []string {
+	if thinking, ok := model["thinking"].(*registry.ThinkingSupport); ok && thinking != nil {
+		return append([]string(nil), thinking.Levels...)
+	}
+	if thinking, ok := model["thinking"].(registry.ThinkingSupport); ok {
+		return append([]string(nil), thinking.Levels...)
+	}
+	return nil
 }
 
 func (s *Server) handleGrokModels(c *gin.Context) {
@@ -2343,20 +2380,68 @@ func (s *Server) writeHomeCodexClientModels(c *gin.Context, catalog *modelcatalo
 	if s == nil || s.handlers == nil || c == nil || catalog == nil {
 		return
 	}
-	models := s.handlers.FilterModelsForCurrentAPIKey(c, catalog.Models())
+	routes := catalog.Routes()
+	devinIDs := make(map[string]struct{})
+	for _, route := range routes {
+		if strings.EqualFold(route.Provider, "devin") {
+			if id, ok := route.Model["id"].(string); ok {
+				devinIDs[id] = struct{}{}
+			}
+		}
+	}
+	available := make([]map[string]any, 0, len(routes))
+	reasoningUpdates := make(map[string]bool, len(routes))
+	for _, route := range routes {
+		model := route.Model
+		if id, ok := model["id"].(string); ok {
+			if _, hasDevin := devinIDs[id]; hasDevin {
+				model["type"] = "devin"
+			}
+			supported, explicit := model["support_configuration_update"].(bool)
+			supported = explicit && supported && strings.EqualFold(route.Provider, "codex")
+			id = strings.TrimSpace(id)
+			if previous, exists := reasoningUpdates[id]; exists {
+				supported = supported && previous
+			}
+			reasoningUpdates[id] = supported
+		}
+		available = append(available, model)
+	}
+	models := s.handlers.FilterModelsForCurrentAPIKey(c, available)
 	cfg := s.configSnapshot()
 	optimizeMultiAgentV2 := cfg != nil && cfg.Codex.OptimizeMultiAgentV2
-	s.handlers.WriteModelListResponse(
-		c,
-		constant.OpenAI,
-		codexmodels.BuildResponseForClientWithCPACapabilities(
-			models,
-			nil,
-			catalog.ResponsesWebSearchCapability,
-			optimizeMultiAgentV2,
-			c.Query("client_version"),
-		),
+	payload := codexmodels.BuildResponseForClientWithCPACapabilities(
+		models,
+		nil,
+		catalog.ResponsesWebSearchCapability,
+		optimizeMultiAgentV2,
+		c.Query("client_version"),
+		func(model string) bool {
+			if cfg == nil || !cfg.Client.Codex.EnableApplyPatch || s.handlers.AuthManager == nil {
+				return false
+			}
+			var providers []string
+			for _, route := range routes {
+				if id, _ := route.Model["id"].(string); strings.TrimSpace(id) == model {
+					providers = append(providers, route.Provider)
+				}
+			}
+			return s.handlers.AuthManager.SupportsApplyPatchForProviders(providers)
+		},
 	)
+	for _, model := range payload["models"].([]map[string]any) {
+		id, _ := model["slug"].(string)
+		model["supports_reasoning_effort_updates"] = reasoningUpdates[strings.TrimSpace(id)]
+	}
+	body, err := codexmodels.MarshalCompact(payload)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{Error: handlers.ErrorDetail{
+			Message: "Failed to encode model catalog",
+			Type:    "server_error",
+		}})
+		return
+	}
+	s.handlers.WriteModelListResponseBody(c, constant.OpenAI, body)
 }
 
 func (s *Server) geminiModelsHandler(geminiHandler *gemini.APIHandler) gin.HandlerFunc {
@@ -2382,11 +2467,13 @@ func (s *Server) geminiGetHandler(geminiHandler *gemini.APIHandler) gin.HandlerF
 }
 
 type homeModelEntry struct {
-	id            string
-	created       int64
-	ownedBy       string
-	displayName   string
-	contextLength int
+	id                  string
+	created             int64
+	ownedBy             string
+	displayName         string
+	contextLength       int
+	maxCompletionTokens int
+	reasoningLevels     []string
 }
 
 func (s *Server) handleHomeModels(c *gin.Context) {
@@ -2402,16 +2489,29 @@ func (s *Server) handleHomeModels(c *gin.Context) {
 	if isClaude {
 		out := make([]map[string]any, 0, len(entries))
 		for _, entry := range entries {
+			displayName := entry.displayName
+			if displayName == "" {
+				displayName = entry.id
+			}
+			maxInput := entry.contextLength
+			if maxInput <= 0 {
+				maxInput = 200000
+			}
+			maxOutput := entry.maxCompletionTokens
+			if maxOutput <= 0 {
+				maxOutput = 64000
+			}
 			model := map[string]any{
-				"id":       entry.id,
-				"object":   "model",
-				"owned_by": entry.ownedBy,
+				"id":               entry.id,
+				"object":           "model",
+				"type":             "model",
+				"owned_by":         entry.ownedBy,
+				"display_name":     displayName,
+				"max_input_tokens": maxInput,
+				"max_tokens":       maxOutput,
 			}
 			if entry.created > 0 {
-				model["created_at"] = entry.created
-			}
-			if entry.displayName != "" {
-				model["display_name"] = entry.displayName
+				model["created_at"] = time.Unix(entry.created, 0).UTC().Format(time.RFC3339)
 			}
 			out = append(out, model)
 		}
@@ -2516,6 +2616,23 @@ func (s *Server) loadHomeModelCatalog(c *gin.Context) (*modelcatalog.HomeCatalog
 		return nil, false
 	}
 
+	var homeError struct {
+		Error *struct {
+			Type string `json:"type"`
+		} `json:"error"`
+	}
+	if errDecodeError := json.Unmarshal(raw, &homeError); errDecodeError == nil && homeError.Error != nil {
+		status, message, errorType := http.StatusBadGateway, "home models request failed", "server_error"
+		switch homeError.Error.Type {
+		case "no_credentials":
+			status, message, errorType = http.StatusUnauthorized, "Missing API key", "authentication_error"
+		case "invalid_credential":
+			status, message, errorType = http.StatusUnauthorized, "Invalid API key", "authentication_error"
+		}
+		c.JSON(status, handlers.ErrorResponse{Error: handlers.ErrorDetail{Message: message, Type: errorType}})
+		return nil, false
+	}
+
 	catalog, errDecode := modelcatalog.DecodeHomeCatalog(raw)
 	if errDecode != nil {
 		c.JSON(
@@ -2591,11 +2708,13 @@ func homeModelEntries(catalog *modelcatalog.HomeCatalog) []homeModelEntry {
 			displayName, _ = model["displayName"].(string)
 		}
 		entries = append(entries, homeModelEntry{
-			id:            id,
-			created:       modelMapInt64(model, "created"),
-			ownedBy:       strings.TrimSpace(ownedBy),
-			displayName:   strings.TrimSpace(displayName),
-			contextLength: modelMapInt(model, "max_context_length", "context_length"),
+			id:                  id,
+			created:             modelMapInt64(model, "created"),
+			ownedBy:             strings.TrimSpace(ownedBy),
+			displayName:         strings.TrimSpace(displayName),
+			contextLength:       modelMapInt(model, "max_context_length", "context_length"),
+			maxCompletionTokens: modelMapInt(model, "max_completion_tokens"),
+			reasoningLevels:     modelMapReasoningLevels(model),
 		})
 	}
 	return entries
@@ -2628,9 +2747,30 @@ func (s *Server) StartWithReady(ready chan<- struct{}) error {
 	return s.start(ready)
 }
 
+func (s *Server) publishListeners(base net.Listener, httpListener *muxListener, redirect *http.Server) bool {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	if s.stopping.Load() {
+		return false
+	}
+	s.muxBaseListener = base
+	s.muxHTTPListener = httpListener
+	s.redirectSrv = redirect
+	return true
+}
+
+func (s *Server) listeners() (net.Listener, *muxListener, *http.Server) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	return s.muxBaseListener, s.muxHTTPListener, s.redirectSrv
+}
+
 func (s *Server) start(ready chan<- struct{}) error {
 	if s == nil || s.server == nil {
 		return fmt.Errorf("failed to start HTTP server: server not initialized")
+	}
+	if s.stopping.Load() {
+		return http.ErrServerClosed
 	}
 
 	listener, errListen := net.Listen("tcp", s.server.Addr)
@@ -2652,6 +2792,7 @@ func (s *Server) start(ready chan<- struct{}) error {
 				"Prefer Authorization header or x-api-key. This option remains for backward compatibility with scripted clients.",
 		)
 	}
+	var redirectSrv *http.Server
 	if useTLS {
 		cert := strings.TrimSpace(cfg.TLS.Cert)
 		key := strings.TrimSpace(cfg.TLS.Key)
@@ -2674,7 +2815,7 @@ func (s *Server) start(ready chan<- struct{}) error {
 		if redirectPort > 0 {
 			httpsAddr := s.server.Addr
 			redirectAddr := fmt.Sprintf(":%d", redirectPort)
-			redirectSrv := &http.Server{
+			redirectSrv = &http.Server{
 				Addr:         redirectAddr,
 				ReadTimeout:  5 * time.Second,
 				WriteTimeout: 10 * time.Second,
@@ -2686,13 +2827,6 @@ func (s *Server) start(ready chan<- struct{}) error {
 					},
 				),
 			}
-			s.redirectSrv = redirectSrv
-			go func() {
-				log.Debugf("Starting HTTP→HTTPS redirect on %s → %s", redirectAddr, httpsAddr)
-				if err := redirectSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-					log.Warnf("HTTP redirect listener stopped: %v", err)
-				}
-			}()
 		}
 
 		tlsConfig := &tls.Config{
@@ -2710,8 +2844,21 @@ func (s *Server) start(ready chan<- struct{}) error {
 	}
 
 	httpListener := newMuxListener(listener.Addr(), 1024)
-	s.muxBaseListener = listener
-	s.muxHTTPListener = httpListener
+	if !s.publishListeners(listener, httpListener, redirectSrv) {
+		_ = httpListener.Close()
+		if errClose := listener.Close(); errClose != nil {
+			log.Debugf("failed to close shared listener after shutdown: %v", errClose)
+		}
+		return http.ErrServerClosed
+	}
+	if redirectSrv != nil {
+		go func() {
+			log.Debugf("Starting HTTP→HTTPS redirect on %s → %s", redirectSrv.Addr, s.server.Addr)
+			if err := redirectSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Warnf("HTTP redirect listener stopped: %v", err)
+			}
+		}()
+	}
 
 	httpErrCh := make(chan error, 1)
 	acceptErrCh := make(chan error, 1)
@@ -2728,14 +2875,10 @@ func (s *Server) start(ready chan<- struct{}) error {
 
 	select {
 	case errServe := <-httpErrCh:
-		if s.muxBaseListener != nil {
-			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
-				log.Debugf("failed to close shared listener after HTTP serve exit: %v", errClose)
-			}
+		if errClose := listener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			log.Debugf("failed to close shared listener after HTTP serve exit: %v", errClose)
 		}
-		if s.muxHTTPListener != nil {
-			_ = s.muxHTTPListener.Close()
-		}
+		_ = httpListener.Close()
 		errAccept := <-acceptErrCh
 		errServe = normalizeHTTPServeError(errServe)
 		errAccept = normalizeListenerError(errAccept)
@@ -2747,13 +2890,9 @@ func (s *Server) start(ready chan<- struct{}) error {
 		}
 		return nil
 	case errAccept := <-acceptErrCh:
-		if s.muxHTTPListener != nil {
-			_ = s.muxHTTPListener.Close()
-		}
-		if s.muxBaseListener != nil {
-			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
-				log.Debugf("failed to close shared listener after accept loop exit: %v", errClose)
-			}
+		_ = httpListener.Close()
+		if errClose := listener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			log.Debugf("failed to close shared listener after accept loop exit: %v", errClose)
 		}
 		errServe := <-httpErrCh
 		errServe = normalizeHTTPServeError(errServe)
@@ -2841,11 +2980,12 @@ func (s *Server) BeginShutdown() {
 	if s.usageQueue != nil {
 		s.usageQueue.Close()
 	}
-	if s.muxHTTPListener != nil {
-		_ = s.muxHTTPListener.Close()
+	base, httpListener, _ := s.listeners()
+	if httpListener != nil {
+		_ = httpListener.Close()
 	}
-	if s.muxBaseListener != nil {
-		if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+	if base != nil {
+		if errClose := base.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
 			log.Debugf("failed to close shared listener: %v", errClose)
 		}
 	}
@@ -2900,14 +3040,6 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 
-	if s.muxHTTPListener != nil {
-		_ = s.muxHTTPListener.Close()
-	}
-	if s.muxBaseListener != nil {
-		if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
-			log.Debugf("failed to close shared listener: %v", errClose)
-		}
-	}
 	if errWaitRedis := s.waitForRedisConnections(ctx); errWaitRedis != nil {
 		shutdownErrors = append(shutdownErrors, errWaitRedis)
 	}
@@ -2931,7 +3063,8 @@ func (s *Server) Stop(ctx context.Context) error {
 	if err := shutdownServer(s.server, "HTTP server"); err != nil {
 		shutdownErrors = append(shutdownErrors, err)
 	}
-	if err := shutdownServer(s.redirectSrv, "redirect server"); err != nil {
+	_, _, redirectSrv := s.listeners()
+	if err := shutdownServer(redirectSrv, "redirect server"); err != nil {
 		shutdownErrors = append(shutdownErrors, err)
 	}
 
@@ -3174,6 +3307,9 @@ func (s *Server) updateClients(ctx context.Context, cfg *config.Config, _ uint64
 	if oldCfg == nil || oldCfg.DisableCooling != cfg.DisableCooling {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	}
+	if oldCfg == nil || oldCfg.TransientErrorCooldownSeconds != cfg.TransientErrorCooldownSeconds {
+		auth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
+	}
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
 		s.handlers.AuthManager.SetRetryConfig(
@@ -3249,6 +3385,7 @@ func (s *Server) updateClients(ctx context.Context, cfg *config.Config, _ uint64
 	claudeAPIKeyCount := len(cfg.ClaudeKey)
 	codexAPIKeyCount := len(cfg.CodexKey)
 	xaiAPIKeyCount := len(cfg.XAIKey)
+	metaAPIKeyCount := len(cfg.MetaKey)
 	vertexAICompatCount := len(cfg.VertexCompatAPIKey)
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {
@@ -3259,15 +3396,16 @@ func (s *Server) updateClients(ctx context.Context, cfg *config.Config, _ uint64
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
-	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + vertexAICompatCount + openAICompatCount
+	total := authEntries + geminiAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + xaiAPIKeyCount + metaAPIKeyCount + vertexAICompatCount + openAICompatCount
 	fmt.Printf(
-		"server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d Vertex-compat + %d OpenAI-compat)\n",
+		"server clients and configuration updated: %d clients (%d auth entries + %d Gemini API keys + %d Claude API keys + %d Codex keys + %d xAI keys + %d Meta API keys + %d Vertex-compat + %d OpenAI-compat)\n",
 		total,
 		authEntries,
 		geminiAPIKeyCount,
 		claudeAPIKeyCount,
 		codexAPIKeyCount,
 		xaiAPIKeyCount,
+		metaAPIKeyCount,
 		vertexAICompatCount,
 		openAICompatCount,
 	)

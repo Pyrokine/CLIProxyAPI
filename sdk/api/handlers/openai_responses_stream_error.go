@@ -86,11 +86,15 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 	trimmed := strings.TrimSpace(errText)
 	if trimmed != "" && json.Valid([]byte(trimmed)) {
 		var payload map[string]any
-		if err := json.Unmarshal([]byte(trimmed), &payload); err == nil {
+		decoder := json.NewDecoder(strings.NewReader(trimmed))
+		decoder.UseNumber()
+		if err := decoder.Decode(&payload); err == nil {
 			if t, ok := payload["type"].(string); ok && strings.TrimSpace(t) == "error" {
 				message, code = extractErrorFields(payload, message, code)
-				if v, ok := payload["sequence_number"].(float64); ok && sequenceNumber == 0 {
-					sequenceNumber = int(v)
+			}
+			if value, ok := payload["sequence_number"].(json.Number); ok && sequenceNumber == 0 {
+				if number, err := value.Int64(); err == nil && number >= 0 && int64(int(number)) == number {
+					sequenceNumber = int(number)
 				}
 			}
 			if e, ok := payload["error"].(map[string]any); ok {
@@ -132,7 +136,9 @@ func BuildOpenAIResponsesStreamErrorChunk(status int, errText string, sequenceNu
 
 func openAIResponsesStreamFailedErrorDetail(status int, errText, code, message string) map[string]any {
 	var payload map[string]any
-	if errUnmarshal := json.Unmarshal([]byte(strings.TrimSpace(errText)), &payload); errUnmarshal == nil {
+	decoder := json.NewDecoder(strings.NewReader(strings.TrimSpace(errText)))
+	decoder.UseNumber()
+	if errDecode := decoder.Decode(&payload); errDecode == nil && json.Valid([]byte(errText)) {
 		if errorDetail, ok := payload["error"].(map[string]any); ok {
 			return errorDetail
 		}
@@ -144,7 +150,7 @@ func openAIResponsesStreamFailedErrorDetail(status int, errText, code, message s
 	}
 
 	errorType := "invalid_request_error"
-	if status >= http.StatusInternalServerError {
+	if status == http.StatusRequestTimeout || status >= http.StatusInternalServerError {
 		errorType = "server_error"
 	}
 	return map[string]any{

@@ -8,8 +8,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	codexmodels "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/codex/models"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	runtimeexecutor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
@@ -661,6 +663,100 @@ func TestRefreshModelClientsReprojectsExistingXAIAuths(t *testing.T) {
 	}
 }
 
+func TestModelRefreshCancelsAfterNativeCredentialMutation(t *testing.T) {
+	for _, mutation := range []string{"update", "disable", "route", "prefix", "replace", "merge", "remove", "reload", "config-proxy"} {
+		t.Run(mutation, func(t *testing.T) {
+			previousFetch := fetchAntigravityModels
+			started, canceled := make(chan struct{}), make(chan struct{})
+			fetchAntigravityModels = func(
+				ctx context.Context,
+				_ *coreauth.Auth,
+				_ *config.Config,
+			) runtimeexecutor.ModelDiscoveryResult {
+				close(started)
+				<-ctx.Done()
+				close(canceled)
+				return runtimeexecutor.ModelDiscoveryResult{
+					Outcome: runtimeexecutor.ModelDiscoveryInconclusive,
+					Err:     ctx.Err(),
+				}
+			}
+			t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+			auth := &coreauth.Auth{
+				ID: "native-model-refresh-" + mutation, Provider: "antigravity", Status: coreauth.StatusActive,
+				Metadata: map[string]any{"access_token": "synthetic-access-token"},
+			}
+			service := newModelRefreshTestService(t, &config.Config{}, auth)
+			service.registerModelsForAuth(auth)
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("model discovery did not start")
+			}
+			switch mutation {
+			case "update", "disable", "route", "prefix", "replace", "merge":
+				current, _ := service.coreManager.GetByID(auth.ID)
+				updated := current.Clone()
+				switch mutation {
+				case "disable":
+					updated.Disabled = true
+				case "route":
+					updated.ProxyURL = "http://synthetic-proxy.invalid"
+				case "prefix":
+					updated.Prefix = "synthetic-prefix"
+				default:
+					updated.Metadata["access_token"] = "synthetic-rotated-token"
+				}
+				var err error
+				switch mutation {
+				case "replace":
+					_, err = service.coreManager.Register(t.Context(), updated)
+				case "merge":
+					_, err = service.coreManager.MergePersistentUpdate(t.Context(), current, updated)
+				default:
+					_, err = service.coreManager.Update(t.Context(), updated)
+				}
+				if err != nil {
+					t.Fatalf("mutate auth: %v", err)
+				}
+			case "remove":
+				if err := service.coreManager.Remove(coreauth.WithSkipPersist(t.Context()), auth.ID); err != nil {
+					t.Fatalf("remove auth: %v", err)
+				}
+			case "reload":
+				service.coreManager.SetStore(&blockingModelRefreshStore{})
+				if err := service.coreManager.Load(t.Context()); err != nil {
+					t.Fatalf("reload auth: %v", err)
+				}
+			case "config-proxy":
+				next := &config.Config{}
+				next.ProxyURL = "http://synthetic-config-proxy.invalid"
+				service.publishConfig(next)
+			}
+			select {
+			case <-canceled:
+			case <-time.After(time.Second):
+				t.Fatal("native credential mutation did not cancel connected model discovery")
+			}
+			stopCtx, cancelStop := context.WithTimeout(t.Context(), time.Second)
+			defer cancelStop()
+			if err := service.stopModelRefreshWorkers(stopCtx); err != nil {
+				t.Fatalf("stop canceled model discovery: %v", err)
+			}
+			service.modelRefreshMu.Lock()
+			active, pending := len(service.modelRefreshActive), len(service.modelRefreshPending)
+			service.modelRefreshMu.Unlock()
+			if active != 0 || pending != 0 {
+				t.Fatalf("canceled discovery retained work: active=%d pending=%d", active, pending)
+			}
+			if current, ok := service.coreManager.GetByID(auth.ID); ok &&
+				(current.LastError != nil || current.Quota.Exceeded || len(current.ModelStates) != 0) {
+				t.Fatal("credential invalidation recorded an upstream model failure")
+			}
+		})
+	}
+}
+
 func TestModelRefreshRejectsStaleAuthIdentity(t *testing.T) {
 	previousFetch := fetchAntigravityModels
 	started := make(chan struct{})
@@ -716,16 +812,10 @@ func TestModelRefreshRejectsStalePluginSnapshot(t *testing.T) {
 	auth := &coreauth.Auth{ID: "plugin-stale-snapshot", Provider: "plugin-provider", Status: coreauth.StatusActive}
 	service := newModelRefreshTestService(t, &config.Config{}, auth)
 	service.pluginHost = pluginhost.New()
-	service.modelRefreshVersion = map[string]uint64{auth.ID: 1}
-	identity, errIdentity := service.buildModelRefreshIdentity(auth, service.cfg, true)
-	if errIdentity != nil {
-		t.Fatalf("buildModelRefreshIdentity() error = %v", errIdentity)
-	}
+	job := currentModelRefreshJob(t, service, auth.ID, true, 1)
 	service.publishModelRefreshResult(
 		context.Background(),
-		modelRefreshJob{
-			auth: auth.Clone(), cfg: service.cfg, identity: identity, version: 1, tryPlugin: true,
-		},
+		job,
 		modelDiscoveryResultFromPlugin(
 			pluginhost.AuthModelResult{
 				Provider: "plugin-provider",
@@ -768,7 +858,10 @@ func TestPluginModelRefreshPersistenceDoesNotHoldPublicationLock(t *testing.T) {
 	}
 	pluginAuth := registered.Clone()
 	pluginAuth.Metadata["token"] = "new"
-	job := modelRefreshJob{auth: registered.Clone(), cfg: service.cfg, version: 1}
+	job := modelRefreshJob{
+		auth: registered.Clone(), cfg: service.cfg, version: 1,
+		registryEpoch: GlobalModelRegistry().ClientRegistrationEpoch(auth.ID),
+	}
 	done := make(chan struct{})
 	store.mu.Lock()
 	store.block = true
@@ -857,7 +950,10 @@ func TestPluginModelRefreshPreservesLatestRuntimeState(t *testing.T) {
 	pluginAuth.ModelStates = nil
 	service.publishModelRefreshResult(
 		context.Background(),
-		modelRefreshJob{auth: jobAuth.Clone(), cfg: service.cfg, version: 1},
+		modelRefreshJob{
+			auth: jobAuth.Clone(), cfg: service.cfg, version: 1,
+			registryEpoch: GlobalModelRegistry().ClientRegistrationEpoch(auth.ID),
+		},
 		modelDiscoveryResultFromPlugin(
 			pluginhost.AuthModelResult{
 				Provider: "plugin-provider",
@@ -884,6 +980,373 @@ func TestPluginModelRefreshPreservesLatestRuntimeState(t *testing.T) {
 	}
 }
 
+func TestModelRefreshFailureBackoffWindowsAndRetention(t *testing.T) {
+	for _, sample := range []struct {
+		name   string
+		random func(int64) int64
+	}{
+		{"lower", func(int64) int64 { return 0 }},
+		{"middle", func(n int64) int64 { return n / 2 }},
+		{"upper", func(n int64) int64 { return n - 1 }},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			var state modelRefreshFailureState
+			for i := range 300 {
+				window := []time.Duration{2, 4, 8, 16, 30}[min(i, 4)] * time.Minute
+				state = nextModelRefreshFailure(state, now, sample.random)
+				delay := state.nextRetry.Sub(now)
+				expected := window/2 + time.Duration(sample.random(int64(window/2)+1))
+				if delay != expected || state.failures != uint8(min(i+1, 5)) || !state.lastFailure.Equal(now) {
+					t.Fatalf("attempt %d: state=%+v delay=%s want=%s", i+1, state, delay, expected)
+				}
+				now = state.nextRetry
+			}
+			state = nextModelRefreshFailure(state, state.nextRetry.Add(time.Minute), sample.random)
+			if state.failures != 5 {
+				t.Fatal("expired retry deadline discarded failure history")
+			}
+			state = nextModelRefreshFailure(state, state.lastFailure.Add(2*modelRefreshCacheTTL+time.Nanosecond), sample.random)
+			if state.failures != 1 {
+				t.Fatal("inactive failure history did not reset")
+			}
+		})
+	}
+}
+
+func TestAntigravityModelRefreshBackoffLifecycle(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		var success atomic.Bool
+		previousFetch := fetchAntigravityModels
+		fetchAntigravityModels = func(context.Context, *coreauth.Auth, *config.Config) runtimeexecutor.ModelDiscoveryResult {
+			calls.Add(1)
+			if success.Load() {
+				return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryComplete, Models: []*registry.ModelInfo{{ID: "synthetic-backoff-model"}}}
+			}
+			return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryFailed, Err: fmt.Errorf("synthetic discovery failure")}
+		}
+		t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+		auth := &coreauth.Auth{ID: "synthetic-backoff-lifecycle", Provider: "antigravity", Status: coreauth.StatusActive, Metadata: map[string]any{"access_token": "synthetic-initial"}}
+		service := newModelRefreshTestService(t, &config.Config{}, auth)
+		service.registerModelsForAuth(auth)
+		synctest.Wait()
+		for attempt := range 8 {
+			service.modelRefreshMu.Lock()
+			state, exists := service.modelRefreshFailures[auth.ID]
+			service.modelRefreshMu.Unlock()
+			window := []time.Duration{2, 4, 8, 16, 30}[min(attempt, 4)] * time.Minute
+			delay := state.nextRetry.Sub(state.lastFailure)
+			if !exists || calls.Load() != int32(attempt+1) || state.failures != uint8(min(attempt+1, 5)) || delay < window/2 || delay > window {
+				t.Fatalf("attempt %d: calls=%d state=%+v", attempt+1, calls.Load(), state)
+			}
+			time.Sleep(time.Until(state.nextRetry) - time.Nanosecond)
+			service.refreshExternalModelClients(t.Context())
+			service.registerModelsForAuth(auth)
+			synctest.Wait()
+			if calls.Load() != int32(attempt+1) {
+				t.Fatal("periodic or registration refresh bypassed the retry deadline")
+			}
+			if attempt == 7 {
+				success.Store(true)
+			}
+			time.Sleep(time.Nanosecond)
+			synctest.Wait()
+		}
+		service.modelRefreshMu.Lock()
+		_, failed := service.modelRefreshFailures[auth.ID]
+		cached := service.modelRefreshCache[auth.ID]
+		service.modelRefreshMu.Unlock()
+		if calls.Load() != 9 || failed || !GlobalModelRegistry().ClientSupportsModel(auth.ID, "synthetic-backoff-model") {
+			t.Fatal("successful retry did not publish the catalog and reset failure history")
+		}
+		success.Store(false)
+		time.Sleep(modelRefreshCacheTTL)
+		synctest.Wait()
+		service.modelRefreshMu.Lock()
+		failure := service.modelRefreshFailures[auth.ID]
+		retained := service.modelRefreshCache[auth.ID]
+		service.modelRefreshMu.Unlock()
+		if calls.Load() != 10 || failure.failures != 1 || !retained.observedAt.Equal(cached.observedAt) || !GlobalModelRegistry().ClientSupportsModel(auth.ID, "synthetic-backoff-model") {
+			t.Fatal("failed refresh discarded the last catalog or inherited the pre-success failure count")
+		}
+		rotated, _ := service.coreManager.GetByID(auth.ID)
+		rotated.Metadata["access_token"] = "synthetic-rotated"
+		rotated, err := service.coreManager.Update(t.Context(), rotated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		service.registerModelsForAuth(rotated)
+		synctest.Wait()
+		service.modelRefreshMu.Lock()
+		rotatedFailure := service.modelRefreshFailures[auth.ID]
+		service.modelRefreshMu.Unlock()
+		if calls.Load() != 11 || rotatedFailure.failures != 1 || rotatedFailure.identityKey == failure.identityKey {
+			t.Fatal("rotated credentials inherited the previous retry history")
+		}
+	})
+}
+
+func TestAntigravityModelRefreshPreservesRetryDeadlines(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		type observation struct {
+			id      string
+			elapsed time.Duration
+		}
+		observed := make(chan observation, 2)
+		previousFetch := fetchAntigravityModels
+		fetchAntigravityModels = func(_ context.Context, auth *coreauth.Auth, _ *config.Config) runtimeexecutor.ModelDiscoveryResult {
+			observed <- observation{auth.ID, time.Since(start)}
+			return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryComplete}
+		}
+		t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+		service := newModelRefreshTestService(t, &config.Config{},
+			&coreauth.Auth{ID: "synthetic-early-retry", Provider: "antigravity", Status: coreauth.StatusActive},
+			&coreauth.Auth{ID: "synthetic-late-retry", Provider: "antigravity", Status: coreauth.StatusActive})
+		deadlines := map[string]time.Duration{"synthetic-early-retry": 70 * time.Second, "synthetic-late-retry": 110 * time.Second}
+		service.modelRefreshFailures = make(map[string]modelRefreshFailureState)
+		for id, deadline := range deadlines {
+			job := currentModelRefreshJob(t, service, id, false, 1)
+			service.modelRefreshFailures[id] = modelRefreshFailureState{identityKey: job.identity.key, jobVersion: job.version, failures: 1, lastFailure: start, nextRetry: start.Add(deadline)}
+		}
+		service.modelRefreshMu.Lock()
+		service.ensureModelRefreshWorkersLocked()
+		service.modelRefreshMu.Unlock()
+		synctest.Wait()
+		time.Sleep(65 * time.Second)
+		service.modelRefreshMu.Lock()
+		service.wakeModelRefreshWorkerLocked()
+		service.modelRefreshMu.Unlock()
+		synctest.Wait()
+		if len(observed) != 0 {
+			t.Fatal("a retry started before its deadline")
+		}
+		time.Sleep(65 * time.Second)
+		synctest.Wait()
+		if len(observed) != 2 {
+			t.Fatalf("observed %d retries", len(observed))
+		}
+		for range 2 {
+			got := <-observed
+			if got.elapsed != deadlines[got.id] {
+				t.Errorf("%s retried at %s, want %s", got.id, got.elapsed, deadlines[got.id])
+			}
+		}
+	})
+}
+
+func TestAntigravityModelRefreshFailureCleanup(t *testing.T) {
+	for _, action := range []string{"remove", "disable", "stop"} {
+		t.Run(action, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var calls atomic.Int32
+				previousFetch := fetchAntigravityModels
+				fetchAntigravityModels = func(context.Context, *coreauth.Auth, *config.Config) runtimeexecutor.ModelDiscoveryResult {
+					calls.Add(1)
+					return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryFailed, Err: fmt.Errorf("synthetic discovery failure")}
+				}
+				t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+				auth := &coreauth.Auth{ID: "synthetic-failure-cleanup-" + action, Provider: "antigravity", Status: coreauth.StatusActive}
+				service := newModelRefreshTestService(t, &config.Config{}, auth)
+				service.registerModelsForAuth(auth)
+				synctest.Wait()
+				service.modelRefreshMu.Lock()
+				_, failed := service.modelRefreshFailures[auth.ID]
+				service.modelRefreshMu.Unlock()
+				if !failed || calls.Load() != 1 {
+					t.Fatal("initial failure did not create retry state")
+				}
+				switch action {
+				case "remove":
+					service.applyCoreAuthRemoval(t.Context(), auth.ID)
+				case "disable":
+					disabled, _ := service.coreManager.GetByID(auth.ID)
+					disabled.Disabled = true
+					disabled, err := service.coreManager.Update(t.Context(), disabled)
+					if err != nil {
+						t.Fatal(err)
+					}
+					service.registerModelsForAuth(disabled)
+				case "stop":
+					if err := service.stopModelRefreshWorkers(t.Context()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				time.Sleep(3 * time.Minute)
+				synctest.Wait()
+				service.modelRefreshMu.Lock()
+				remaining := len(service.modelRefreshFailures) + len(service.modelRefreshCache) + len(service.modelRefreshPending) + len(service.modelRefreshActive)
+				service.modelRefreshMu.Unlock()
+				if remaining != 0 || calls.Load() != 1 {
+					t.Fatalf("%s retained retry work: state=%d calls=%d", action, remaining, calls.Load())
+				}
+			})
+		})
+	}
+}
+
+func TestAntigravityModelRefreshTimeoutDoesNotChangeAvailability(t *testing.T) {
+	for _, outcome := range []string{"timeout", "cancel", "credential-change"} {
+		t.Run(outcome, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				previousFetch := fetchAntigravityModels
+				fetchAntigravityModels = func(ctx context.Context, _ *coreauth.Auth, _ *config.Config) runtimeexecutor.ModelDiscoveryResult {
+					<-ctx.Done()
+					return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryInconclusive, Err: ctx.Err()}
+				}
+				t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+				auth := &coreauth.Auth{ID: "synthetic-discovery-availability-" + outcome, Provider: "antigravity", Status: coreauth.StatusActive, Metadata: map[string]any{"access_token": "synthetic-initial"}}
+				service := newModelRefreshTestService(t, &config.Config{}, auth)
+				retry := time.Hour
+				service.coreManager.MarkResult(t.Context(), coreauth.Result{AuthID: auth.ID, Model: "synthetic-cooling-model", Error: &coreauth.Error{HTTPStatus: 429, Message: "synthetic existing cooldown"}, RetryAfter: &retry})
+				before, _ := service.coreManager.GetByID(auth.ID)
+				service.registerModelsForAuth(before)
+				synctest.Wait()
+				switch outcome {
+				case "cancel":
+					service.cancelModelRefresh(auth.ID)
+				case "credential-change":
+					updated := before.Clone()
+					updated.Metadata["access_token"] = "synthetic-updated"
+					if _, err := service.coreManager.Update(t.Context(), updated); err != nil {
+						t.Fatal(err)
+					}
+				}
+				time.Sleep(modelRefreshTimeout)
+				synctest.Wait()
+				service.modelRefreshMu.Lock()
+				failure, failed := service.modelRefreshFailures[auth.ID]
+				service.modelRefreshMu.Unlock()
+				if failed != (outcome == "timeout") || failed && failure.failures != 1 {
+					t.Fatalf("%s retry state = %+v, present=%t", outcome, failure, failed)
+				}
+				after, _ := service.coreManager.GetByID(auth.ID)
+				if after.Status != before.Status || !reflect.DeepEqual(after.LastError, before.LastError) || !reflect.DeepEqual(after.Quota, before.Quota) || !reflect.DeepEqual(after.ModelStates, before.ModelStates) {
+					t.Fatal("model discovery changed credential availability or model cooldown")
+				}
+			})
+		})
+	}
+}
+
+func TestAntigravityModelRefreshHonorsCacheLifetime(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprintf("empty=%t", empty), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var calls atomic.Int32
+				previousFetch := fetchAntigravityModels
+				fetchAntigravityModels = func(context.Context, *coreauth.Auth, *config.Config) runtimeexecutor.ModelDiscoveryResult {
+					calls.Add(1)
+					result := runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryComplete}
+					if !empty {
+						result.Models = []*registry.ModelInfo{{ID: "synthetic-cached-model"}}
+					}
+					return result
+				}
+				t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+				auth := &coreauth.Auth{ID: "synthetic-cache-lifetime", Provider: "antigravity", Status: coreauth.StatusActive}
+				service := newModelRefreshTestService(t, &config.Config{}, auth)
+				service.registerModelsForAuth(auth)
+				synctest.Wait()
+				if calls.Load() != 1 {
+					t.Fatalf("initial discovery calls = %d", calls.Load())
+				}
+				for range 10 {
+					service.registerModelsForAuth(auth)
+					synctest.Wait()
+				}
+				if calls.Load() != 1 {
+					t.Errorf("fresh authoritative catalog was fetched again: calls=%d", calls.Load())
+				}
+				time.Sleep(3*time.Hour - time.Nanosecond)
+				synctest.Wait()
+				if calls.Load() != 1 {
+					t.Errorf("catalog refreshed before its TTL: calls=%d", calls.Load())
+				}
+				time.Sleep(time.Nanosecond)
+				synctest.Wait()
+				if calls.Load() != 2 {
+					t.Errorf("expired catalog was not refreshed without a config change: calls=%d", calls.Load())
+				}
+			})
+		})
+	}
+}
+
+func TestAntigravityModelRefreshThrottlesFailedRegistrations(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		previousFetch := fetchAntigravityModels
+		fetchAntigravityModels = func(context.Context, *coreauth.Auth, *config.Config) runtimeexecutor.ModelDiscoveryResult {
+			calls.Add(1)
+			return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryFailed, Err: fmt.Errorf("synthetic discovery failure")}
+		}
+		t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+		auth := &coreauth.Auth{ID: "synthetic-registration-backoff", Provider: "antigravity", Status: coreauth.StatusActive}
+		service := newModelRefreshTestService(t, &config.Config{}, auth)
+		service.registerModelsForAuth(auth)
+		synctest.Wait()
+		for range 10 {
+			service.registerModelsForAuth(auth)
+			synctest.Wait()
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("registration bypassed failure retry deadline: calls=%d", calls.Load())
+		}
+	})
+}
+
+func TestAntigravityModelRefreshRetriesWithoutCatalogChanges(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var calls atomic.Int32
+		previousFetch := fetchAntigravityModels
+		fetchAntigravityModels = func(context.Context, *coreauth.Auth, *config.Config) runtimeexecutor.ModelDiscoveryResult {
+			if calls.Add(1) == 1 {
+				return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryFailed, Err: fmt.Errorf("synthetic first failure")}
+			}
+			return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryComplete, Models: []*registry.ModelInfo{{ID: "synthetic-retry-model"}}}
+		}
+		t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+		auth := &coreauth.Auth{ID: "synthetic-autonomous-retry", Provider: "antigravity", Status: coreauth.StatusActive}
+		service := newModelRefreshTestService(t, &config.Config{}, auth)
+		service.registerModelsForAuth(auth)
+		synctest.Wait()
+		time.Sleep(3 * time.Minute)
+		synctest.Wait()
+		if calls.Load() != 2 || !GlobalModelRegistry().ClientSupportsModel(auth.ID, "synthetic-retry-model") {
+			t.Fatalf("failed catalog was not retried independently: calls=%d", calls.Load())
+		}
+	})
+}
+
+func TestAntigravityModelRefreshDoesNotMigrateCatalogAcrossProject(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID: "synthetic-project-migration", Provider: "antigravity", Status: coreauth.StatusActive,
+		Metadata: map[string]any{"project_id": "synthetic-old-project"},
+	}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+	service.publishModelRefreshResult(context.Background(), job, modelDiscoveryResult{
+		source: modelDiscoverySourceAntigravity, outcome: modelDiscoveryAuthoritativePositive,
+		models: []*ModelInfo{{ID: "synthetic-old-project-model"}},
+	})
+	job = currentModelRefreshJob(t, service, auth.ID, false, 2)
+	updated := job.auth.Clone()
+	updated.Metadata["project_id"] = "synthetic-new-project"
+	service.publishModelRefreshResult(context.Background(), job, modelDiscoveryResult{
+		source: modelDiscoverySourceAntigravity, outcome: modelDiscoveryInconclusive,
+		auth: updated, err: fmt.Errorf("synthetic incomplete response"),
+	})
+	current, ok := service.coreManager.GetByID(auth.ID)
+	if !ok || current.Metadata["project_id"] != "synthetic-new-project" {
+		t.Fatal("discovery credential update was not applied")
+	}
+	if _, exists := service.modelRefreshCache[auth.ID]; exists || GlobalModelRegistry().ClientSupportsModel(auth.ID, "synthetic-old-project-model") {
+		t.Fatal("catalog from the old project crossed into the refreshed project")
+	}
+}
+
 func currentModelRefreshJob(
 	t *testing.T,
 	service *Service,
@@ -907,11 +1370,56 @@ func currentModelRefreshJob(
 	service.modelRefreshVersion[authID] = version
 	service.modelRefreshMu.Unlock()
 	return modelRefreshJob{
-		auth:      auth,
-		cfg:       service.cfg,
-		identity:  identity,
-		version:   version,
-		tryPlugin: tryPlugin,
+		auth:          auth,
+		cfg:           service.cfg,
+		identity:      identity,
+		version:       version,
+		registryEpoch: GlobalModelRegistry().ClientRegistrationEpoch(authID),
+		tryPlugin:     tryPlugin,
+	}
+}
+
+func TestAntigravityDiscoveryWebSearchCapabilityReachesClientCatalog(t *testing.T) {
+	auth := &coreauth.Auth{
+		ID: "antigravity-web-search-discovery", Provider: "antigravity", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"auth_kind": "oauth"},
+	}
+	service := newModelRefreshTestService(t, &config.Config{}, auth)
+	job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+	supported, unsupported := true, false
+	service.publishModelRefreshResult(context.Background(), job, modelDiscoveryResult{
+		source: modelDiscoverySourceAntigravity, outcome: modelDiscoveryAuthoritativePositive,
+		models: []*ModelInfo{
+			fromRegistryModelInfo(&registry.ModelInfo{ID: "ag-search-discovered", SupportsWebSearch: true,
+				NativeCapabilities: &registry.NativeCapabilities{WebSearch: &supported}}),
+			fromRegistryModelInfo(&registry.ModelInfo{ID: "ag-search-denied",
+				NativeCapabilities: &registry.NativeCapabilities{WebSearch: &unsupported}}),
+		},
+	})
+	catalog := registry.GetGlobalRegistry()
+	for _, test := range []struct {
+		id   string
+		want bool
+	}{
+		{id: "ag-search-discovered", want: true},
+		{id: "ag-search-denied", want: false},
+	} {
+		if !catalog.ClientSupportsModel(auth.ID, test.id) {
+			t.Fatalf("discovered model %q not registered", test.id)
+		}
+		capability := catalog.GetResponsesWebSearchCapability(test.id)
+		if capability == nil || *capability != test.want {
+			t.Fatalf("%s capability = %v, want %t", test.id, capability, test.want)
+		}
+		response := codexmodels.BuildResponseForClient([]map[string]any{{"id": test.id}}, catalog.GetModelProviders, false, "cpa")
+		models, ok := response["models"].([]map[string]any)
+		if !ok || len(models) != 1 {
+			t.Fatalf("%s client models = %#v", test.id, response["models"])
+		}
+		meta, ok := models[0]["cpa_capabilities"].(map[string]any)
+		if !ok || meta["web_search"] != test.want {
+			t.Fatalf("%s client search capability = %#v, want %t", test.id, meta, test.want)
+		}
 	}
 }
 
@@ -1072,6 +1580,7 @@ func TestModelRefreshKeepsAuthoritativeResultUntilAuthoritativeEmpty(t *testing.
 		t.Fatal("authoritative model was not registered")
 	}
 
+	job = currentModelRefreshJob(t, service, auth.ID, false, 2)
 	service.publishModelRefreshResult(
 		context.Background(),
 		job,
@@ -1089,6 +1598,7 @@ func TestModelRefreshKeepsAuthoritativeResultUntilAuthoritativeEmpty(t *testing.
 		t.Fatal("inconclusive refresh removed the authoritative model")
 	}
 
+	job = currentModelRefreshJob(t, service, auth.ID, false, 3)
 	service.publishModelRefreshResult(
 		context.Background(),
 		job,
@@ -1139,6 +1649,8 @@ func TestModelRefreshCacheIsolatesCredentialPositiveAndNegativeResults(t *testin
 		t.Fatalf("credential caches = %#v", service.modelRefreshCache)
 	}
 
+	firstJob = currentModelRefreshJob(t, service, first.ID, false, 2)
+	secondJob = currentModelRefreshJob(t, service, second.ID, false, 2)
 	service.publishModelRefreshResult(
 		context.Background(),
 		secondJob,
@@ -1179,6 +1691,7 @@ func TestPartialModelRefreshDoesNotReplaceAuthoritativeCache(t *testing.T) {
 			models:  []*ModelInfo{{ID: "complete-model"}},
 		},
 	)
+	job = currentModelRefreshJob(t, service, auth.ID, false, 2)
 	service.publishModelRefreshResult(
 		context.Background(),
 		job,
@@ -1229,7 +1742,7 @@ func TestModelRefreshCacheDoesNotCrossAuthGeneration(t *testing.T) {
 			observedAt: time.Now().UTC(),
 		},
 	}
-	service.projectModelDiscoveryLocked(job.auth, service.cfg, service.modelRefreshCache[auth.ID])
+	service.projectModelDiscoveryLocked(job.auth, service.cfg, service.modelRefreshCache[auth.ID], job.registryEpoch)
 
 	updated := job.auth.Clone()
 	updated.Metadata["credential"] = "second"
@@ -1278,7 +1791,7 @@ func TestModelRefreshReusesCacheAcrossUnrelatedConfigUpdate(t *testing.T) {
 			observedAt: time.Now().UTC(),
 		},
 	}
-	service.projectModelDiscoveryLocked(job.auth, service.cfg, service.modelRefreshCache[auth.ID])
+	service.projectModelDiscoveryLocked(job.auth, service.cfg, service.modelRefreshCache[auth.ID], job.registryEpoch)
 
 	nextCfg := &config.Config{Debug: true}
 	service.publishConfig(nextCfg)
@@ -1292,8 +1805,18 @@ func TestModelRefreshReusesCacheAcrossUnrelatedConfigUpdate(t *testing.T) {
 	}
 	select {
 	case <-started:
+		t.Fatal("unrelated config update fetched a fresh catalog again")
+	default:
+	}
+	service.modelRefreshMu.Lock()
+	cached.observedAt = time.Now().Add(-modelRefreshCacheTTL)
+	service.modelRefreshCache[auth.ID] = cached
+	service.modelRefreshMu.Unlock()
+	service.registerModelsForAuth(job.auth)
+	select {
+	case <-started:
 	case <-time.After(time.Second):
-		t.Fatal("config refresh discovery did not start")
+		t.Fatal("expired catalog refresh did not start")
 	}
 }
 
@@ -1590,7 +2113,8 @@ func TestPluginAuthUpdateMigratesCacheOnlyForSameSubject(t *testing.T) {
 			models: []*ModelInfo{{ID: "cached-plugin-model"}}, observedAt: time.Now().UTC(),
 		},
 	}
-	service.projectModelDiscoveryLocked(job.auth, service.cfg, service.modelRefreshCache[auth.ID])
+	service.projectModelDiscoveryLocked(job.auth, service.cfg, service.modelRefreshCache[auth.ID], job.registryEpoch)
+	job = currentModelRefreshJob(t, service, auth.ID, false, 1)
 
 	pluginAuth := job.auth.Clone()
 	pluginAuth.Metadata["token"] = "new"
@@ -1651,5 +2175,235 @@ func TestPluginAuthUpdateMigratesCacheOnlyForSameSubject(t *testing.T) {
 	}
 	if !GlobalModelRegistry().ClientSupportsModel(auth.ID, "cached-plugin-model") {
 		t.Fatal("immutable plugin fields removed the same-subject cached model")
+	}
+}
+
+func TestModelRefreshCoalescingRetainsPublicationOwnership(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(fmt.Sprintf("active=%t", active), func(t *testing.T) {
+			auth := &coreauth.Auth{ID: "synthetic-coalesced-epoch", Provider: "antigravity", Status: coreauth.StatusActive}
+			service := newModelRefreshTestService(t, &config.Config{}, auth)
+			service.modelRefreshStop = func() {}
+			job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+			if active {
+				service.modelRefreshActive = map[string]modelRefreshJob{auth.ID: job}
+			} else {
+				service.modelRefreshPending = map[string]modelRefreshJob{auth.ID: job}
+			}
+			modelRegistry := GlobalModelRegistry()
+			modelRegistry.RegisterClient(auth.ID, auth.Provider, []*ModelInfo{{ID: "external-publisher-model"}})
+			epoch := modelRegistry.ClientRegistrationEpoch(auth.ID)
+			service.scheduleExternalModelRefresh(job.auth, false)
+			if modelRegistry.ClientRegistrationEpoch(auth.ID) != epoch ||
+				!modelRegistry.ClientSupportsModel(auth.ID, "external-publisher-model") {
+				t.Fatal("coalesced admission replaced a newer model publication")
+			}
+		})
+	}
+}
+
+func TestModelRefreshDoesNotAdoptLaterRegistryEpoch(t *testing.T) {
+	for _, provider := range []string{"antigravity", "openai-compatibility"} {
+		for _, negative := range []bool{false, true} {
+			for _, removed := range []bool{false, true} {
+				name := provider
+				if negative {
+					name += "/negative"
+				} else {
+					name += "/positive"
+				}
+				if removed {
+					name += "/removed"
+				} else {
+					name += "/replaced"
+				}
+				t.Run(name, func(t *testing.T) {
+					auth := &coreauth.Auth{ID: "synthetic-epoch-" + provider, Provider: provider, Status: coreauth.StatusActive}
+					service := newModelRefreshTestService(t, &config.Config{}, auth)
+					modelRegistry := GlobalModelRegistry()
+					modelRegistry.RegisterClient(auth.ID, provider, []*ModelInfo{{ID: "original-model"}})
+					job := currentModelRefreshJob(t, service, auth.ID, false, 1)
+					modelRegistry.RegisterClient(auth.ID, provider, []*ModelInfo{{ID: "external-publisher-model"}})
+					if removed {
+						modelRegistry.UnregisterClient(auth.ID)
+					}
+					externalEpoch := modelRegistry.ClientRegistrationEpoch(auth.ID)
+					result := modelDiscoveryResult{
+						source: modelDiscoverySourceAntigravity, provider: provider,
+						outcome: modelDiscoveryAuthoritativePositive, models: []*ModelInfo{{ID: "late-discovered-model"}},
+					}
+					if provider == "openai-compatibility" {
+						result.source = modelDiscoverySourcePlugin
+					}
+					if negative {
+						result.outcome, result.models = modelDiscoveryAuthoritativeNegative, nil
+					}
+					service.publishModelRefreshResult(t.Context(), job, result)
+					if modelRegistry.ClientRegistrationEpoch(auth.ID) != externalEpoch ||
+						modelRegistry.ClientSupportsModel(auth.ID, "late-discovered-model") ||
+						modelRegistry.ClientSupportsModel(auth.ID, "external-publisher-model") == removed {
+						t.Fatal("late discovery replaced a newer registry publication")
+					}
+					if models := registry.GetGlobalRegistry().GetModelsForClient(auth.ID); removed && len(models) != 0 {
+						t.Fatalf("late discovery restored removed registry models: %#v", models)
+					}
+					service.modelRefreshMu.Lock()
+					_, cached := service.modelRefreshCache[auth.ID]
+					service.modelRefreshMu.Unlock()
+					if cached {
+						t.Fatal("rejected discovery remained in the authoritative cache")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestModelRefreshQueuedJobRetainsRegistrationEpoch(t *testing.T) {
+	previousFetch := fetchAntigravityModels
+	started := make(chan struct{}, modelRefreshWorkerCount)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	fetchAntigravityModels = func(ctx context.Context, auth *coreauth.Auth, _ *config.Config) runtimeexecutor.ModelDiscoveryResult {
+		if auth.ID == "synthetic-queued-epoch" {
+			return runtimeexecutor.ModelDiscoveryResult{
+				Outcome: runtimeexecutor.ModelDiscoveryComplete, Models: []*registry.ModelInfo{{ID: "late-queued-model"}},
+			}
+		}
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryInconclusive}
+	}
+	t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+	auths := make([]*coreauth.Auth, 0, modelRefreshWorkerCount+1)
+	for index := range modelRefreshWorkerCount {
+		auths = append(auths, &coreauth.Auth{
+			ID: "synthetic-epoch-blocker-" + string(rune('a'+index)), Provider: "antigravity", Status: coreauth.StatusActive,
+		})
+	}
+	target := &coreauth.Auth{ID: "synthetic-queued-epoch", Provider: "antigravity", Status: coreauth.StatusActive}
+	auths = append(auths, target)
+	service := newModelRefreshTestService(t, &config.Config{}, auths...)
+	for _, auth := range auths[:modelRefreshWorkerCount] {
+		service.registerModelsForAuth(auth)
+	}
+	for range modelRefreshWorkerCount {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("blocking discovery did not start")
+		}
+	}
+	service.registerModelsForAuth(target)
+	modelRegistry := GlobalModelRegistry()
+	modelRegistry.RegisterClient(target.ID, target.Provider, []*ModelInfo{{ID: "external-publisher-model"}})
+	externalEpoch := modelRegistry.ClientRegistrationEpoch(target.ID)
+	releaseOnce.Do(func() { close(release) })
+	waitForModelRefreshCondition(t, func() bool {
+		service.modelRefreshMu.Lock()
+		defer service.modelRefreshMu.Unlock()
+		return len(service.modelRefreshPending) == 0 && len(service.modelRefreshActive) == 0
+	})
+	if modelRegistry.ClientRegistrationEpoch(target.ID) != externalEpoch ||
+		!modelRegistry.ClientSupportsModel(target.ID, "external-publisher-model") ||
+		modelRegistry.ClientSupportsModel(target.ID, "late-queued-model") {
+		t.Fatal("queued discovery adopted a later publisher's registration epoch")
+	}
+}
+
+func TestHomeAuthRuntimeKeepsStandaloneDiscoveryDisabled(t *testing.T) {
+	for _, homeEnabled := range []bool{false, true} {
+		for _, entry := range []string{"post-persist-hook", "config-reprojection", "model-registration"} {
+			name := "standalone/" + entry
+			if homeEnabled {
+				name = "home/" + entry
+			}
+			t.Run(name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					var probes atomic.Int32
+					previousFetch := fetchAntigravityModels
+					fetchAntigravityModels = func(context.Context, *coreauth.Auth, *config.Config) runtimeexecutor.ModelDiscoveryResult {
+						probes.Add(1)
+						return runtimeexecutor.ModelDiscoveryResult{
+							Outcome: runtimeexecutor.ModelDiscoveryComplete,
+							Models:  []*registry.ModelInfo{{ID: "standalone-probe-model"}},
+						}
+					}
+					t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+					cfg := &config.Config{}
+					cfg.Home.Enabled = homeEnabled
+					auth := &coreauth.Auth{
+						ID: "home-discovery-boundary", Provider: "antigravity", Status: coreauth.StatusActive,
+						Attributes: map[string]string{coreauth.AttributePath: "/synthetic/antigravity.json"},
+						Metadata:   map[string]any{"access_token": "synthetic-token", "project_id": "synthetic-project"},
+					}
+					service := newModelRefreshTestService(t, cfg, auth)
+					current, ok := service.coreManager.GetByID(auth.ID)
+					if !ok {
+						t.Fatal("registered auth is missing")
+					}
+					switch entry {
+					case "post-persist-hook":
+						if err := service.runtimeAuthSyncHook()(t.Context(), current); err != nil {
+							t.Fatal(err)
+						}
+					case "config-reprojection":
+						service.reprojectModelsForCurrentAuths()
+					case "model-registration":
+						service.registerModelsForAuth(current)
+					}
+					synctest.Wait()
+					want := int32(1)
+					if homeEnabled {
+						want = 0
+					}
+					if got := probes.Load(); got != want {
+						t.Fatalf("standalone discovery calls = %d, want %d for Home=%v", got, want, homeEnabled)
+					}
+					if homeEnabled && GlobalModelRegistry().ClientSupportsModel(auth.ID, "standalone-probe-model") {
+						t.Fatal("Home auth published a standalone discovery model")
+					}
+				})
+			})
+		}
+	}
+}
+
+func TestHomeModelDiscoveryDoesNotFallbackToStandalone(t *testing.T) {
+	for _, homeEnabled := range []bool{false, true} {
+		name := "standalone"
+		if homeEnabled {
+			name = "home"
+		}
+		t.Run(name, func(t *testing.T) {
+			var probes atomic.Int32
+			previousFetch := fetchAntigravityModels
+			fetchAntigravityModels = func(context.Context, *coreauth.Auth, *config.Config) runtimeexecutor.ModelDiscoveryResult {
+				probes.Add(1)
+				return runtimeexecutor.ModelDiscoveryResult{Outcome: runtimeexecutor.ModelDiscoveryComplete}
+			}
+			t.Cleanup(func() { fetchAntigravityModels = previousFetch })
+			cfg := &config.Config{}
+			cfg.Home.Enabled = homeEnabled
+			service := &Service{cfg: cfg}
+			result := service.discoverModelsForRefresh(t.Context(), modelRefreshJob{
+				auth: &coreauth.Auth{ID: "home-direct-discovery", Provider: "antigravity"},
+				cfg:  cfg,
+			})
+			want := int32(1)
+			if homeEnabled {
+				want = 0
+				if result.outcome != modelDiscoveryInconclusive {
+					t.Errorf("Home discovery outcome = %s, want inconclusive", result.outcome)
+				}
+			}
+			if got := probes.Load(); got != want {
+				t.Fatalf("standalone fallback calls = %d, want %d for Home=%v", got, want, homeEnabled)
+			}
+		})
 	}
 }

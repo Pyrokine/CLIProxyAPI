@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -60,6 +61,10 @@ var (
 
 const (
 	modelRefreshWorkerCount       = 4
+	modelRefreshCacheTTL          = 3 * time.Hour
+	modelRefreshRetryBase         = time.Minute
+	modelRefreshRetryMax          = 30 * time.Minute
+	modelRefreshScanInterval      = time.Minute
 	pluginRuntimeRetryMaxAttempts = 5
 )
 
@@ -111,20 +116,47 @@ type modelDiscoveryResult struct {
 }
 
 type modelRefreshCacheEntry struct {
-	identity   modelRefreshIdentity
-	source     modelDiscoverySource
-	outcome    modelDiscoveryOutcome
-	provider   string
-	models     []*ModelInfo
-	observedAt time.Time
+	identity      modelRefreshIdentity
+	source        modelDiscoverySource
+	outcome       modelDiscoveryOutcome
+	provider      string
+	models        []*ModelInfo
+	observedAt    time.Time
+	registryEpoch uint64
+	pluginResult  pluginhost.AuthModelResult
+}
+
+type modelRefreshFailureState struct {
+	identityKey string
+	jobVersion  uint64
+	failures    uint8
+	lastFailure time.Time
+	nextRetry   time.Time
+}
+
+func nextModelRefreshFailure(previous modelRefreshFailureState, now time.Time, randomInt64N func(int64) int64) modelRefreshFailureState {
+	if now.Sub(previous.lastFailure) > 2*modelRefreshCacheTTL {
+		previous.failures = 0
+	}
+	failures := min(previous.failures, 4) + 1
+	window := min(2*modelRefreshRetryBase<<(failures-1), modelRefreshRetryMax)
+	half := window / 2
+	delay := half + time.Duration(randomInt64N(int64(half)+1))
+	return modelRefreshFailureState{
+		identityKey: previous.identityKey,
+		failures:    failures,
+		lastFailure: now,
+		nextRetry:   now.Add(delay),
+	}
 }
 
 type modelRefreshJob struct {
-	auth      *coreauth.Auth
-	cfg       *config.Config
-	identity  modelRefreshIdentity
-	version   uint64
-	tryPlugin bool
+	auth          *coreauth.Auth
+	cfg           *config.Config
+	identity      modelRefreshIdentity
+	version       uint64
+	registryEpoch uint64
+	tryPlugin     bool
 }
 
 type serviceAuthApplyLock struct {
@@ -245,20 +277,22 @@ type Service struct {
 	homePluginSyncMu    sync.Mutex
 	homePluginSyncKey   string
 
-	modelRefreshMu          sync.Mutex
-	modelRefreshCancel      map[string]context.CancelFunc
-	modelRefreshVersion     map[string]uint64
-	modelRefreshSeq         uint64
-	modelRefreshCache       map[string]modelRefreshCacheEntry
-	modelRefreshPending     map[string]modelRefreshJob
-	modelRefreshActive      map[string]modelRefreshJob
-	modelRefreshGroup       singleflight.Group
-	modelRefreshWake        chan struct{}
-	modelRefreshStop        context.CancelFunc
-	modelRefreshWorkers     sync.WaitGroup
-	modelRefreshDiscoveries sync.WaitGroup
-	modelRefreshSlots       chan struct{}
-	modelRefreshClosed      bool
+	modelRefreshMu           sync.Mutex
+	modelRefreshCancel       map[string]context.CancelFunc
+	modelRefreshVersion      map[string]uint64
+	modelRefreshSeq          uint64
+	modelRefreshCache        map[string]modelRefreshCacheEntry
+	modelRefreshFailures     map[string]modelRefreshFailureState
+	modelRefreshPending      map[string]modelRefreshJob
+	modelRefreshActive       map[string]modelRefreshJob
+	modelRefreshGroup        singleflight.Group
+	modelRefreshWake         chan struct{}
+	modelRefreshScheduleWake chan struct{}
+	modelRefreshStop         context.CancelFunc
+	modelRefreshWorkers      sync.WaitGroup
+	modelRefreshDiscoveries  sync.WaitGroup
+	modelRefreshSlots        chan struct{}
+	modelRefreshClosed       bool
 
 	pluginRuntimeRetryMu     sync.Mutex
 	pluginRuntimeRetryCancel context.CancelFunc
@@ -511,10 +545,7 @@ func (s *Service) syncPluginModelRuntime(ctx context.Context) {
 	modelRegistry := s.pluginModelRegistry()
 	s.pluginHost.RegisterModels(ctx, modelRegistry)
 	s.pluginHost.RegisterExecutors(s.coreManager, modelRegistry)
-	for _, auth := range s.coreManager.List() {
-		s.registerModelsForAuth(auth)
-	}
-	s.coreManager.RefreshSchedulerAll()
+	s.reprojectModelsForCurrentAuths()
 }
 
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
@@ -856,18 +887,26 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	if !s.coreManager.AuthRecreationIntentCurrent(ctx, auth.ID) {
 		return nil
 	}
+	existing, hadExisting := s.coreManager.GetByID(auth.ID)
+	if hadExisting && auth.Generation > 0 && auth.Generation < existing.Generation {
+		log.Debugf("skipping stale auth snapshot %s: generation %d < %d", auth.ID, auth.Generation, existing.Generation)
+		return s.publishCoreAuthRuntime(ctx, existing)
+	}
 	s.cancelModelRefresh(auth.ID)
 
 	op := "register"
 	var updated *coreauth.Auth
 	var err error
-	existing, hadExisting := s.coreManager.GetByID(auth.ID)
 	if hadExisting {
 		auth.CreatedAt = existing.CreatedAt
 		auth.LastRefreshedAt = existing.LastRefreshedAt
 		auth.NextRefreshAfter = existing.NextRefreshAfter
 		op = "update"
-		updated, err = s.coreManager.Update(ctx, auth)
+		if auth.Generation > 0 {
+			updated, err = s.coreManager.MergePersistentUpdate(ctx, existing, auth)
+		} else {
+			updated, err = s.coreManager.Update(ctx, auth)
+		}
 	} else {
 		updated, err = s.coreManager.Register(ctx, auth)
 	}
@@ -879,8 +918,12 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		return fmt.Errorf("%s auth %s: %w", op, auth.ID, err)
 	}
 	if updated == nil {
-		if _, ok := s.coreManager.GetByID(auth.ID); !ok {
+		current, ok := s.coreManager.GetByID(auth.ID)
+		if !ok {
 			GlobalModelRegistry().UnregisterClient(auth.ID)
+		} else if auth.Generation > 0 {
+			log.Debugf("auth %s changed during runtime update; publishing current state", auth.ID)
+			return s.publishCoreAuthRuntime(ctx, current)
 		}
 		return nil
 	}
@@ -1210,6 +1253,10 @@ func (s *Service) ensureExecutorsForAuthWithConfigContext(
 		return publish(executor.NewIFlowExecutor(cfg))
 	case "kimi":
 		return publish(executor.NewKimiExecutor(cfg))
+	case "kimi-ai":
+		return publish(executor.NewKimiAIExecutor(cfg))
+	case "meta":
+		return publish(executor.NewMetaExecutor(cfg))
 	case "xai":
 		return publish(executor.NewXAIAutoExecutor(cfg))
 	default:
@@ -1340,37 +1387,81 @@ func (s *Service) reprojectModelsForCurrentAuths() {
 	if s == nil || s.coreManager == nil {
 		return
 	}
-	for _, snapshot := range s.coreManager.List() {
-		if snapshot == nil || strings.TrimSpace(snapshot.ID) == "" {
-			continue
-		}
-		id := snapshot.ID
-		unlockApply, errLock := s.lockAuthApply(context.Background(), id)
-		if errLock != nil {
-			continue
-		}
-		stable := false
-		for range 8 {
-			current, ok := s.coreManager.GetByID(id)
-			if !ok || current == nil {
-				GlobalModelRegistry().UnregisterClient(id)
-				stable = true
-				break
+	processed := make(map[string]uint64)
+	for range 8 {
+		for _, snapshot := range s.coreManager.List() {
+			if snapshot == nil || strings.TrimSpace(snapshot.ID) == "" {
+				continue
 			}
-			s.registerModelsForAuth(current)
-			latest, latestOK := s.coreManager.GetByID(id)
-			if latestOK && latest != nil && latest.Generation == current.Generation {
-				s.coreManager.RefreshSchedulerEntry(id)
-				stable = true
-				break
+			if generation, ok := processed[snapshot.ID]; ok && generation == snapshot.Generation {
+				continue
+			}
+			if generation, ok := s.reprojectModelsForAuthID(snapshot.ID, true); ok {
+				processed[snapshot.ID] = generation
 			}
 		}
-		if !stable {
-			GlobalModelRegistry().UnregisterClient(id)
-			s.coreManager.RefreshSchedulerEntry(id)
+		pending := false
+		for _, current := range s.coreManager.List() {
+			if current == nil || strings.TrimSpace(current.ID) == "" {
+				continue
+			}
+			if generation, ok := processed[current.ID]; !ok || generation != current.Generation {
+				pending = true
+				break
+			}
 		}
-		unlockApply()
+		if !pending {
+			return
+		}
 	}
+	for _, current := range s.coreManager.List() {
+		if current == nil || strings.TrimSpace(current.ID) == "" {
+			continue
+		}
+		if generation, ok := processed[current.ID]; !ok || generation != current.Generation {
+			GlobalModelRegistry().UnregisterClient(current.ID)
+			s.coreManager.RefreshSchedulerEntry(current.ID)
+			log.WithField("auth_id", current.ID).Warn("auth changed repeatedly during batch model reprojection")
+		}
+	}
+}
+
+func (s *Service) onRefreshBindingChange(before, after *coreauth.Auth) {
+	if before == nil || after == nil || !strings.EqualFold(after.Provider, "codex") ||
+		strings.EqualFold(strings.TrimSpace(before.Attributes["plan_type"]), strings.TrimSpace(after.Attributes["plan_type"])) {
+		return
+	}
+	s.reprojectModelsForAuthID(after.ID, false)
+}
+
+func (s *Service) reprojectModelsForAuthID(id string, allowExternal bool) (uint64, bool) {
+	if s == nil || s.coreManager == nil || strings.TrimSpace(id) == "" {
+		return 0, false
+	}
+	unlockApply, errLock := s.lockAuthApply(context.Background(), id)
+	if errLock != nil {
+		GlobalModelRegistry().UnregisterClient(id)
+		log.WithError(errLock).Warnf("could not reproject models for auth %s", id)
+		return 0, false
+	}
+	defer unlockApply()
+	for range 8 {
+		current, ok := s.coreManager.GetByID(id)
+		if !ok || current == nil {
+			GlobalModelRegistry().UnregisterClient(id)
+			return 0, false
+		}
+		s.registerModelsForAuthWithMode(current, allowExternal)
+		latest, latestOK := s.coreManager.GetByID(id)
+		if latestOK && latest != nil && latest.Generation == current.Generation {
+			s.coreManager.RefreshSchedulerEntry(id)
+			return current.Generation, true
+		}
+	}
+	GlobalModelRegistry().UnregisterClient(id)
+	s.coreManager.RefreshSchedulerEntry(id)
+	log.Warnf("auth %s changed repeatedly during model reprojection", id)
+	return 0, false
 }
 
 // rebindExecutors refreshes provider executors so they observe the latest configuration.
@@ -1435,6 +1526,8 @@ func (s *Service) registerHomeExecutors() {
 	s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(cfg))
 	s.coreManager.RegisterExecutor(executor.NewDevinExecutor(cfg))
 	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(cfg))
+	s.coreManager.RegisterExecutor(executor.NewKimiAIExecutor(cfg))
+	s.coreManager.RegisterExecutor(executor.NewMetaExecutor(cfg))
 	s.coreManager.RegisterExecutor(executor.NewQwenExecutor(cfg))
 	s.coreManager.RegisterExecutor(executor.NewIFlowExecutor(cfg))
 	s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(cfg))
@@ -1488,11 +1581,15 @@ func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 		logHomeConfigChanges(baseCfg, &merged)
 		prepared, syncKey, didSync, errPrepare := s.prepareHomePlugins(ctx, &merged)
 		if didSync && errPrepare != nil {
-			log.Warnf("failed to prepare home plugins: %v", errPrepare)
+			return errors.Join(
+				fmt.Errorf("cliproxy: failed to prepare home plugins: %w", errPrepare),
+				prepared.Close(),
+			)
 		}
 		var (
 			report  homeplugins.SyncReport
 			errSync error
+			errLoad error
 		)
 		errApply := s.applyExternalConfigUpdate(
 			func() error {
@@ -1511,19 +1608,16 @@ func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 				if didSync {
 					report, errSync = prepared.Apply(s.pluginHost)
 					if errSync != nil {
-						log.Warnf("failed to sync home plugins: %v", errSync)
+						return fmt.Errorf("cliproxy: failed to sync home plugins: %w", errSync)
 					}
 				}
 				if errApplyRuntime := s.applyConfigUpdateRuntime(ctx, &merged); errApplyRuntime != nil {
 					return fmt.Errorf("cliproxy: failed to apply home config update: %w", errApplyRuntime)
 				}
 				if didSync {
-					errLoad := homeplugins.MarkLoadResults(&report, s.pluginHost)
+					errLoad = homeplugins.MarkLoadResults(&report, s.pluginHost)
 					if errLoad != nil {
 						log.Warnf("failed to load home plugins after config update: %v", errLoad)
-					}
-					if errSync == nil && errLoad == nil {
-						s.markHomePluginsSynced(syncKey)
 					}
 				}
 				return nil
@@ -1542,7 +1636,16 @@ func (s *Service) applyHomeOverlayWithClient(ctx context.Context, remoteCfg *con
 			return errApply
 		}
 		if didSync {
-			s.reportHomePluginStatusWithClient(ctx, &merged, report, client)
+			if errReport := s.reportHomePluginStatusWithClient(ctx, &merged, report, client); errReport != nil {
+				return fmt.Errorf("cliproxy: failed to report home plugin status: %w", errReport)
+			}
+			if errSync == nil && errLoad == nil {
+				s.cfgMu.RLock()
+				if s.cfg == &merged {
+					s.markHomePluginsSynced(syncKey)
+				}
+				s.cfgMu.RUnlock()
+			}
 		}
 		s.processHomePluginTasksWithClient(ctx, &merged, client)
 		return nil
@@ -1595,10 +1698,7 @@ func (s *Service) applyModelCatalogRuntimeUpdate(nextCfg *config.Config) error {
 	}
 	s.coreManager.SetConfig(nextCfg)
 	s.coreManager.SetOAuthModelAlias(nextCfg.OAuthModelAlias)
-	for _, auth := range s.coreManager.List() {
-		s.registerModelsForAuth(auth)
-	}
-	s.coreManager.RefreshSchedulerAll()
+	s.reprojectModelsForCurrentAuths()
 	return s.syncPluginRuntime(context.Background())
 }
 
@@ -1907,6 +2007,8 @@ func (s *Service) applyConfigUpdateRuntimeGenerationOptions(
 			return "fill-first"
 		case "weighted-round-robin", "weightedroundrobin", "wrr":
 			return "weighted-round-robin"
+		case "quota-aware", "quotaaware", "qa":
+			return "quota-aware"
 		default:
 			return "round-robin"
 		}
@@ -2655,6 +2757,7 @@ func modelRefreshMappingRevision(cfg *config.Config) (string, error) {
 	payload := []any{
 		cfg.ForceModelPrefix,
 		cfg.OAuthModelAlias,
+		cfg.OAuthSettings,
 		cfg.OAuthExcludedModels,
 		cfg.ModelCatalog.Models,
 	}
@@ -2668,7 +2771,7 @@ func modelRefreshMappingRevision(cfg *config.Config) (string, error) {
 
 func modelRefreshEndpointIdentity(auth *coreauth.Auth, cfg *config.Config, provider string) string {
 	values := make([]string, 0, 8)
-	for _, key := range []string{"base_url", "endpoint", "api_base", "api_endpoint", "host"} {
+	for _, key := range []string{"base_urls", "base_url", "endpoint", "api_base", "api_endpoint", "host"} {
 		value := ""
 		if auth != nil && auth.Attributes != nil {
 			value = strings.TrimSpace(auth.Attributes[key])
@@ -2684,8 +2787,12 @@ func modelRefreshEndpointIdentity(auth *coreauth.Auth, cfg *config.Config, provi
 	if len(values) == 0 && strings.EqualFold(provider, "antigravity") {
 		values = append(
 			values,
-			"base_url=https://daily-cloudcode-pa.googleapis.com|https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"base_url=https://daily-cloudcode-pa.googleapis.com",
 		)
+	}
+	if auth != nil && strings.EqualFold(provider, "antigravity") {
+		project, _ := auth.Metadata["project_id"].(string)
+		values = append(values, "project_id="+strings.TrimSpace(project))
 	}
 	if auth != nil && strings.TrimSpace(auth.ProxyURL) != "" {
 		values = append(values, "auth_proxy="+strings.TrimSpace(auth.ProxyURL))
@@ -2795,17 +2902,18 @@ func (s *Service) registerPluginDiscoveredModels(
 	cfg *config.Config,
 	providerKey string,
 	models []*ModelInfo,
-) {
+	expectedEpoch uint64,
+) bool {
 	if s == nil || a == nil || cfg == nil {
-		return
+		return false
 	}
 	if activeProvider := strings.ToLower(strings.TrimSpace(a.Provider)); activeProvider != "" {
 		providerKey = activeProvider
 	}
-	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
+	authKind := a.AuthKind()
 	if authKind == "" {
 		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
-			authKind = "apikey"
+			authKind = coreauth.AuthKindAPIKey
 		}
 	}
 	excluded := oauthExcludedModelsForConfig(cfg, providerKey, authKind)
@@ -2815,18 +2923,13 @@ func (s *Service) registerPluginDiscoveredModels(
 		}
 	}
 	models = applyExcludedModels(models, excluded)
-	models = applyOAuthModelAlias(cfg, providerKey, authKind, models)
+	models = applyOAuthModelAlias(cfg, providerKey, authKind, a.Attributes, models)
 	models = applyExcludedModels(models, excluded)
 	models = catalogEnabledModelsForConfig(cfg, models)
-	if len(models) == 0 {
-		GlobalModelRegistry().UnregisterClient(a.ID)
-		return
-	}
-	GlobalModelRegistry().RegisterClient(
-		a.ID,
-		providerKey,
-		applyModelPrefixes(models, a.Prefix, cfg.ForceModelPrefix),
-	)
+	models = applyOAuthSettings(cfg, providerKey, authKind, models)
+	models = applyModelPrefixes(models, a.Prefix, cfg.ForceModelPrefix)
+	_, applied := GlobalModelRegistry().ReplaceClientModels(a.ID, providerKey, expectedEpoch, models)
+	return applied
 }
 
 func (s *Service) cancelModelRefresh(id string) {
@@ -2852,6 +2955,7 @@ func (s *Service) cancelModelRefresh(id string) {
 	delete(s.modelRefreshPending, id)
 	delete(s.modelRefreshActive, id)
 	delete(s.modelRefreshCache, id)
+	delete(s.modelRefreshFailures, id)
 	delete(s.modelRefreshVersion, id)
 }
 
@@ -2877,6 +2981,7 @@ func (s *Service) cancelAllModelRefreshesLocked(clearCache bool) {
 		for id := range s.modelRefreshCache {
 			delete(s.modelRefreshCache, id)
 		}
+		clear(s.modelRefreshFailures)
 	}
 }
 
@@ -2934,10 +3039,14 @@ func (s *Service) ensureModelRefreshWorkersLocked() {
 	if s.modelRefreshSlots == nil {
 		s.modelRefreshSlots = make(chan struct{}, modelRefreshWorkerCount)
 	}
-	s.modelRefreshWorkers.Add(modelRefreshWorkerCount)
+	if s.modelRefreshScheduleWake == nil {
+		s.modelRefreshScheduleWake = make(chan struct{}, 1)
+	}
+	s.modelRefreshWorkers.Add(modelRefreshWorkerCount + 1)
 	for range modelRefreshWorkerCount {
 		go s.modelRefreshWorker(ctx)
 	}
+	go s.runModelRefreshSchedule(ctx)
 }
 
 func (s *Service) wakeModelRefreshWorkerLocked() {
@@ -2945,6 +3054,106 @@ func (s *Service) wakeModelRefreshWorkerLocked() {
 	case s.modelRefreshWake <- struct{}{}:
 	default:
 	}
+	select {
+	case s.modelRefreshScheduleWake <- struct{}{}:
+	default:
+	}
+}
+
+func (s *Service) nextModelRefreshDelay() time.Duration {
+	now := time.Now()
+	next := now.Add(modelRefreshScanInterval)
+	s.modelRefreshMu.Lock()
+	defer s.modelRefreshMu.Unlock()
+	for _, entry := range s.modelRefreshCache {
+		if entry.source == modelDiscoverySourceAntigravity {
+			if expiry := entry.observedAt.Add(modelRefreshCacheTTL); expiry.After(now) && expiry.Before(next) {
+				next = expiry
+			}
+		}
+	}
+	for _, failure := range s.modelRefreshFailures {
+		if failure.nextRetry.After(now) && failure.nextRetry.Before(next) {
+			next = failure.nextRetry
+		}
+	}
+	return next.Sub(now)
+}
+
+func (s *Service) refreshExternalModelClients(ctx context.Context) {
+	if s.coreManager == nil {
+		return
+	}
+	for _, auth := range s.coreManager.List() {
+		if ctx.Err() != nil {
+			return
+		}
+		if !isAntigravityAuth(auth) || auth.Disabled {
+			continue
+		}
+		if _, tryPlugin := s.externalModelRefreshMode(auth, true); !tryPlugin {
+			s.scheduleExternalModelRefresh(auth, false)
+		}
+	}
+	s.modelRefreshMu.Lock()
+	defer s.modelRefreshMu.Unlock()
+	for id, failure := range s.modelRefreshFailures {
+		auth, exists := s.coreManager.GetByID(id)
+		if !exists || auth.Disabled {
+			delete(s.modelRefreshFailures, id)
+			delete(s.modelRefreshCache, id)
+		} else if time.Since(failure.lastFailure) > 2*modelRefreshCacheTTL {
+			delete(s.modelRefreshFailures, id)
+		}
+	}
+}
+
+func (s *Service) runModelRefreshSchedule(ctx context.Context) {
+	defer s.modelRefreshWorkers.Done()
+	delay := s.nextModelRefreshDelay()
+	deadline := time.Now().Add(delay)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.modelRefreshScheduleWake:
+			delay = s.nextModelRefreshDelay()
+			if earlier := time.Now().Add(delay); earlier.Before(deadline) {
+				deadline = earlier
+				timer.Reset(delay)
+			}
+			continue
+		case <-timer.C:
+			s.refreshExternalModelClients(ctx)
+		}
+		delay = s.nextModelRefreshDelay()
+		deadline = time.Now().Add(delay)
+		timer.Reset(delay)
+	}
+}
+
+func (s *Service) recordModelRefreshFailureLocked(identity modelRefreshIdentity, version uint64) {
+	if identity.provider != "antigravity" || identity.tryPlugin {
+		return
+	}
+	if s.modelRefreshFailures == nil {
+		s.modelRefreshFailures = make(map[string]modelRefreshFailureState)
+	}
+	previous := s.modelRefreshFailures[identity.authID]
+	if previous.identityKey != identity.key {
+		previous = modelRefreshFailureState{identityKey: identity.key}
+	} else if previous.jobVersion == version {
+		return
+	}
+	failure := nextModelRefreshFailure(previous, time.Now(), rand.Int64N)
+	failure.jobVersion = version
+	s.modelRefreshFailures[identity.authID] = failure
+	log.WithFields(log.Fields{
+		"auth_id": identity.authID, "failures": failure.failures, "next_retry": failure.nextRetry,
+	}).Warn("model discovery scheduled a retry")
+	s.wakeModelRefreshWorkerLocked()
 }
 
 func (s *Service) nextModelRefreshJob(
@@ -3008,6 +3217,21 @@ func (s *Service) modelRefreshWorker(ctx context.Context) {
 }
 
 func (s *Service) executeModelRefreshJob(ctx context.Context, job modelRefreshJob) {
+	changes, unsubscribe := s.coreManager.WatchAuthChanges(job.auth.ID)
+	defer unsubscribe()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer func() {
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return
+		}
+		s.modelRefreshMu.Lock()
+		defer s.modelRefreshMu.Unlock()
+		if _, current := s.modelRefreshJobCurrentLocked(job, job.auth); current {
+			s.recordModelRefreshFailureLocked(job.identity, job.version)
+		}
+	}()
+
 	s.modelRefreshMu.Lock()
 	_, current := s.modelRefreshJobCurrentLocked(job, job.auth)
 	s.modelRefreshMu.Unlock()
@@ -3021,23 +3245,33 @@ func (s *Service) executeModelRefreshJob(ctx context.Context, job modelRefreshJo
 			return s.runModelDiscovery(ctx, job), nil
 		},
 	)
-	select {
-	case <-ctx.Done():
-		logModelRefreshContextError(job.auth.ID, "discovery", ctx.Err())
-		return
-	case sharedResult := <-resultCh:
-		if sharedResult.Err != nil {
-			log.WithError(sharedResult.Err).WithField("auth_id", job.auth.ID).Warn(
-				"model discovery singleflight failed",
-			)
+	for {
+		select {
+		case <-ctx.Done():
+			logModelRefreshContextError(job.auth.ID, "discovery", ctx.Err())
+			return
+		case _, watching := <-changes:
+			s.modelRefreshMu.Lock()
+			_, current = s.modelRefreshJobCurrentLocked(job, job.auth)
+			s.modelRefreshMu.Unlock()
+			if !watching || !current {
+				return
+			}
+		case sharedResult := <-resultCh:
+			if sharedResult.Err != nil {
+				log.WithError(sharedResult.Err).WithField("auth_id", job.auth.ID).Warn(
+					"model discovery singleflight failed",
+				)
+				return
+			}
+			result, ok := sharedResult.Val.(modelDiscoveryResult)
+			if !ok {
+				log.WithField("auth_id", job.auth.ID).Error("model discovery returned an invalid result")
+				return
+			}
+			s.publishModelRefreshResult(ctx, job, cloneModelDiscoveryResult(result))
 			return
 		}
-		result, ok := sharedResult.Val.(modelDiscoveryResult)
-		if !ok {
-			log.WithField("auth_id", job.auth.ID).Error("model discovery returned an invalid result")
-			return
-		}
-		s.publishModelRefreshResult(ctx, job, cloneModelDiscoveryResult(result))
 	}
 }
 
@@ -3094,7 +3328,8 @@ func (s *Service) discoverModelsForRefresh(ctx context.Context, job modelRefresh
 	if pluginResult.Handled {
 		return modelDiscoveryResultFromPlugin(pluginResult)
 	}
-	if strings.EqualFold(strings.TrimSpace(job.auth.Provider), "antigravity") {
+	if strings.EqualFold(strings.TrimSpace(job.auth.Provider), "antigravity") &&
+		(job.cfg == nil || !job.cfg.Home.Enabled) {
 		fetched := fetchAntigravityModels(ctx, job.auth, job.cfg)
 		result := modelDiscoveryResult{
 			source:       modelDiscoverySourceAntigravity,
@@ -3204,7 +3439,8 @@ func (s *Service) modelRefreshJobCurrentLocked(
 	expectedAuth *coreauth.Auth,
 ) (*coreauth.Auth, bool) {
 	id := strings.TrimSpace(job.auth.ID)
-	if s.modelRefreshVersion[id] != job.version {
+	if s.modelRefreshVersion[id] != job.version ||
+		GlobalModelRegistry().ClientRegistrationEpoch(id) != job.registryEpoch {
 		return nil, false
 	}
 	s.cfgMu.RLock()
@@ -3296,6 +3532,7 @@ func (s *Service) publishModelRefreshResult(
 	}
 	if !job.identity.sameSubject(activeIdentity) {
 		delete(s.modelRefreshCache, id)
+		delete(s.modelRefreshFailures, id)
 		s.projectDefaultModelRefreshLocked(activeAuth, job.cfg)
 		log.WithFields(
 			log.Fields{"auth_id": id, "outcome": result.outcome},
@@ -3303,23 +3540,35 @@ func (s *Service) publishModelRefreshResult(
 		return
 	}
 
+	pluginResult := result.pluginResult
+	pluginResult.Models, pluginResult.Auth, pluginResult.Err = nil, nil, nil
 	switch result.outcome {
 	case modelDiscoveryAuthoritativePositive, modelDiscoveryAuthoritativeNegative:
 		entry := modelRefreshCacheEntry{
-			identity:   activeIdentity,
-			source:     result.source,
-			outcome:    result.outcome,
-			provider:   result.provider,
-			models:     cloneModelInfos(result.models),
-			observedAt: time.Now().UTC(),
+			identity:      activeIdentity,
+			source:        result.source,
+			outcome:       result.outcome,
+			provider:      result.provider,
+			models:        cloneModelInfos(result.models),
+			observedAt:    time.Now().UTC(),
+			registryEpoch: job.registryEpoch + 1,
+			pluginResult:  pluginResult,
 		}
-		s.modelRefreshCache[id] = entry
-		s.projectModelDiscoveryLocked(activeAuth, job.cfg, entry)
+		if s.projectModelDiscoveryLocked(activeAuth, job.cfg, entry, job.registryEpoch) {
+			s.modelRefreshCache[id] = entry
+			delete(s.modelRefreshFailures, id)
+			s.wakeModelRefreshWorkerLocked()
+		}
 	case modelDiscoveryPartial, modelDiscoveryInconclusive, modelDiscoveryFailure:
+		if result.source == modelDiscoverySourceAntigravity && !errors.Is(result.err, context.Canceled) {
+			s.recordModelRefreshFailureLocked(activeIdentity, job.version)
+		}
 		if hasCached {
 			cached.identity = activeIdentity
-			s.modelRefreshCache[id] = cached
-			s.projectModelDiscoveryLocked(activeAuth, job.cfg, cached)
+			cached.registryEpoch = job.registryEpoch + 1
+			if s.projectModelDiscoveryLocked(activeAuth, job.cfg, cached, job.registryEpoch) {
+				s.modelRefreshCache[id] = cached
+			}
 			log.WithError(result.err).WithFields(
 				log.Fields{
 					"auth_id":   id,
@@ -3334,11 +3583,14 @@ func (s *Service) publishModelRefreshResult(
 				activeAuth,
 				job.cfg,
 				modelRefreshCacheEntry{
-					source:   result.source,
-					outcome:  modelDiscoveryPartial,
-					provider: result.provider,
-					models:   cloneModelInfos(result.models),
+					identity:     activeIdentity,
+					source:       result.source,
+					outcome:      modelDiscoveryPartial,
+					provider:     result.provider,
+					models:       cloneModelInfos(result.models),
+					pluginResult: pluginResult,
 				},
+				job.registryEpoch,
 			)
 		}
 		log.WithError(result.err).WithFields(
@@ -3351,23 +3603,44 @@ func (s *Service) projectModelDiscoveryLocked(
 	auth *coreauth.Auth,
 	cfg *config.Config,
 	entry modelRefreshCacheEntry,
-) {
+	expectedEpoch uint64,
+) bool {
 	if auth == nil {
-		return
+		return false
 	}
-	if entry.outcome == modelDiscoveryAuthoritativeNegative {
-		GlobalModelRegistry().UnregisterClient(auth.ID)
-	} else {
+	modelRegistry := GlobalModelRegistry()
+	publish := func() bool {
+		if entry.outcome == modelDiscoveryAuthoritativeNegative {
+			_, applied := modelRegistry.ReplaceClientModels(auth.ID, auth.Provider, expectedEpoch, nil)
+			return applied
+		}
 		switch entry.source {
 		case modelDiscoverySourceAntigravity:
-			s.registerAntigravityModels(auth, cfg, cloneModelInfos(entry.models))
+			return s.registerAntigravityModels(auth, cfg, cloneModelInfos(entry.models), expectedEpoch)
 		case modelDiscoverySourcePlugin:
-			s.registerPluginDiscoveredModels(auth, cfg, entry.provider, cloneModelInfos(entry.models))
+			return s.registerPluginDiscoveredModels(auth, cfg, entry.provider, cloneModelInfos(entry.models), expectedEpoch)
 		}
+		return false
+	}
+	var applied bool
+	if entry.pluginResult.Snapshot != nil {
+		applied = s.pluginHost != nil && s.pluginHost.PublishAuthModelsIfCurrent(entry.pluginResult, publish)
+		if !applied {
+			if cached, ok := s.modelRefreshCache[auth.ID]; ok && cached.identity == entry.identity {
+				delete(s.modelRefreshCache, auth.ID)
+			}
+		}
+	} else {
+		applied = publish()
+	}
+	if !applied {
+		log.WithField("auth_id", auth.ID).Warn("model discovery publication was rejected")
+		return false
 	}
 	if s.coreManager != nil {
 		s.coreManager.RefreshSchedulerEntry(auth.ID)
 	}
+	return true
 }
 
 func (s *Service) scheduleExternalModelRefresh(a *coreauth.Auth, tryPlugin bool) {
@@ -3376,9 +3649,11 @@ func (s *Service) scheduleExternalModelRefresh(a *coreauth.Auth, tryPlugin bool)
 	}
 	auth := a.Clone()
 	id := strings.TrimSpace(auth.ID)
+	s.modelRefreshMu.Lock()
 	if s.coreManager != nil {
 		current, ok := s.coreManager.GetByID(id)
 		if !ok || current == nil || current.Disabled {
+			s.modelRefreshMu.Unlock()
 			s.cancelModelRefresh(id)
 			GlobalModelRegistry().UnregisterClient(id)
 			s.coreManager.RefreshSchedulerEntry(id)
@@ -3386,15 +3661,15 @@ func (s *Service) scheduleExternalModelRefresh(a *coreauth.Auth, tryPlugin bool)
 		}
 		auth = current
 	} else if auth.Disabled {
+		s.modelRefreshMu.Unlock()
 		GlobalModelRegistry().UnregisterClient(id)
 		return
 	}
 
-	s.modelRefreshMu.Lock()
 	s.cfgMu.RLock()
 	cfg := s.cfg
 	s.cfgMu.RUnlock()
-	if cfg == nil {
+	if cfg == nil || (cfg.Home.Enabled && !tryPlugin) {
 		s.modelRefreshMu.Unlock()
 		return
 	}
@@ -3430,12 +3705,10 @@ func (s *Service) scheduleExternalModelRefresh(a *coreauth.Auth, tryPlugin bool)
 	}
 
 	if pending, ok := s.modelRefreshPending[id]; ok && pending.identity.key == identity.key {
-		s.projectCachedModelRefreshLocked(auth, cfg, identity)
 		s.modelRefreshMu.Unlock()
 		return
 	}
 	if active, ok := s.modelRefreshActive[id]; ok && active.identity.key == identity.key {
-		s.projectCachedModelRefreshLocked(auth, cfg, identity)
 		s.modelRefreshMu.Unlock()
 		return
 	}
@@ -3457,14 +3730,33 @@ func (s *Service) scheduleExternalModelRefresh(a *coreauth.Auth, tryPlugin bool)
 	}
 	version := s.modelRefreshSeq
 	s.modelRefreshVersion[id] = version
-	s.modelRefreshPending[id] = modelRefreshJob{
-		auth:      auth,
-		cfg:       cfg,
-		identity:  identity,
-		version:   version,
-		tryPlugin: tryPlugin,
+	now := time.Now()
+	if failure, ok := s.modelRefreshFailures[id]; ok {
+		if failure.identityKey != identity.key {
+			delete(s.modelRefreshFailures, id)
+		} else if now.Before(failure.nextRetry) {
+			if entry, cached := s.modelRefreshCache[id]; cached && entry.identity == identity {
+				s.projectCachedModelRefreshLocked(auth, cfg, identity)
+			}
+			s.modelRefreshMu.Unlock()
+			return
+		}
+	}
+	if entry, cached := s.modelRefreshCache[id]; cached && entry.identity == identity &&
+		entry.source == modelDiscoverySourceAntigravity && now.Before(entry.observedAt.Add(modelRefreshCacheTTL)) {
+		s.projectCachedModelRefreshLocked(auth, cfg, identity)
+		s.modelRefreshMu.Unlock()
+		return
 	}
 	s.projectCachedModelRefreshLocked(auth, cfg, identity)
+	s.modelRefreshPending[id] = modelRefreshJob{
+		auth:          auth,
+		cfg:           cfg,
+		identity:      identity,
+		version:       version,
+		registryEpoch: GlobalModelRegistry().ClientRegistrationEpoch(id),
+		tryPlugin:     tryPlugin,
+	}
 	s.wakeModelRefreshWorkerLocked()
 	s.modelRefreshMu.Unlock()
 }
@@ -3479,7 +3771,17 @@ func (s *Service) projectCachedModelRefreshLocked(
 	}
 	entry, ok := s.modelRefreshCache[auth.ID]
 	if ok && entry.identity == identity {
-		s.projectModelDiscoveryLocked(auth, cfg, entry)
+		epoch := GlobalModelRegistry().ClientRegistrationEpoch(auth.ID)
+		if entry.registryEpoch == epoch {
+			if s.coreManager != nil {
+				s.coreManager.RefreshSchedulerEntry(auth.ID)
+			}
+			return
+		}
+		if s.projectModelDiscoveryLocked(auth, cfg, entry, epoch) {
+			entry.registryEpoch = epoch + 1
+			s.modelRefreshCache[auth.ID] = entry
+		}
 		return
 	}
 	if ok {
@@ -3506,14 +3808,15 @@ func (s *Service) registerAntigravityModels(
 	a *coreauth.Auth,
 	cfg *config.Config,
 	models []*ModelInfo,
-) {
+	expectedEpoch uint64,
+) bool {
 	if s == nil || a == nil || cfg == nil {
-		return
+		return false
 	}
-	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
+	authKind := a.AuthKind()
 	if authKind == "" {
 		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
-			authKind = "apikey"
+			authKind = coreauth.AuthKindAPIKey
 		}
 	}
 	excluded := oauthExcludedModelsForConfig(cfg, "antigravity", authKind)
@@ -3523,16 +3826,14 @@ func (s *Service) registerAntigravityModels(
 		}
 	}
 	models = applyExcludedModels(models, excluded)
-	models = applyOAuthModelAlias(cfg, "antigravity", authKind, models)
+	models = applyOAuthModelAlias(cfg, "antigravity", authKind, a.Attributes, models)
 	models = s.appendPluginModels("antigravity", models)
 	models = applyExcludedModels(models, excluded)
 	models = catalogEnabledModelsForConfig(cfg, models)
-	if len(models) == 0 {
-		GlobalModelRegistry().UnregisterClient(a.ID)
-		return
-	}
+	models = applyOAuthSettings(cfg, "antigravity", authKind, models)
 	models = applyModelPrefixes(models, a.Prefix, cfg.ForceModelPrefix)
-	GlobalModelRegistry().RegisterClient(a.ID, "antigravity", models)
+	_, applied := GlobalModelRegistry().ReplaceClientModels(a.ID, "antigravity", expectedEpoch, models)
+	return applied
 }
 
 func oauthExcludedModelsForConfig(cfg *config.Config, provider, authKind string) []string {
@@ -3585,7 +3886,7 @@ func (s *Service) externalModelRefreshMode(a *coreauth.Auth, allowExternal bool)
 	if _, _, compatDetected := openAICompatInfoFromAuth(a); compatDetected {
 		provider = "openai-compatibility"
 	}
-	tryPlugin := s.pluginHost != nil && s.pluginHost.HasOAuthModelProvider()
+	tryPlugin := s.pluginHost != nil && s.pluginHost.HasOAuthModelProvider(provider)
 	return tryPlugin || provider == "antigravity", tryPlugin
 }
 
@@ -3615,10 +3916,10 @@ func (s *Service) registerModelsForAuthWithConfig(a *coreauth.Auth, cfg *config.
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
-	authKind := strings.ToLower(strings.TrimSpace(a.Attributes["auth_kind"]))
+	authKind := a.AuthKind()
 	if authKind == "" {
 		if kind, _ := a.AccountInfo(); strings.EqualFold(kind, "api_key") {
-			authKind = "apikey"
+			authKind = coreauth.AuthKindAPIKey
 		}
 	}
 	if a.Attributes != nil {
@@ -3676,8 +3977,11 @@ func (s *Service) registerModelsForAuthWithConfig(a *coreauth.Auth, cfg *config.
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
 		models = fromRegistryModelInfos(registry.GetGeminiVertexModels())
 		if authKind == "apikey" {
-			if entry := resolveConfigVertexCompatKey(cfg, a); entry != nil && len(entry.Models) > 0 {
-				models = buildVertexCompatConfigModels(entry)
+			if entry := resolveConfigVertexCompatKey(cfg, a); entry != nil {
+				if len(entry.Models) > 0 {
+					models = buildVertexCompatConfigModels(entry)
+				}
+				excluded = entry.ExcludedModels
 			}
 		}
 		models = applyExcludedModels(models, excluded)
@@ -3713,13 +4017,24 @@ func (s *Service) registerModelsForAuthWithConfig(a *coreauth.Auth, cfg *config.
 		case "pro":
 			models = fromRegistryModelInfos(registry.GetCodexProModels())
 		default:
-			models = fromRegistryModelInfos(registry.GetCodexProModels())
-		}
-		if entry := resolveConfigCodexKey(cfg, a); entry != nil {
-			if len(entry.Models) > 0 {
-				models = buildCodexConfigModels(entry)
-			}
 			if authKind == "apikey" {
+				models = fromRegistryModelInfos(registry.GetCodexProModels())
+			} else {
+				models = fromRegistryModelInfos(registry.GetCodexFreeModels())
+			}
+		}
+		if authKind == "apikey" {
+			for _, model := range models {
+				if model != nil {
+					model.SupportConfigurationUpdate = false
+				}
+			}
+		}
+		if authKind == "apikey" {
+			if entry := resolveConfigCodexKey(cfg, a); entry != nil {
+				if len(entry.Models) > 0 {
+					models = buildCodexConfigModels(entry)
+				}
 				excluded = entry.ExcludedModels
 			}
 		}
@@ -3730,8 +4045,19 @@ func (s *Service) registerModelsForAuthWithConfig(a *coreauth.Auth, cfg *config.
 	case "iflow":
 		models = fromRegistryModelInfos(registry.GetIFlowModels())
 		models = applyExcludedModels(models, excluded)
-	case "kimi":
+	case "kimi", "kimi-ai":
 		models = fromRegistryModelInfos(registry.GetKimiModels())
+		models = applyExcludedModels(models, excluded)
+	case "meta":
+		models = fromRegistryModelInfos(registry.GetMetaModels())
+		if authKind == "apikey" {
+			if entry := resolveConfigMetaKey(cfg, a); entry != nil {
+				if len(entry.Models) > 0 {
+					models = buildMetaConfigModels(entry)
+				}
+				excluded = entry.ExcludedModels
+			}
+		}
 		models = applyExcludedModels(models, excluded)
 	case "devin":
 		models = fromRegistryModelInfos(registry.GetDevinModels())
@@ -3833,7 +4159,7 @@ func (s *Service) registerModelsForAuthWithConfig(a *coreauth.Auth, cfg *config.
 			}
 		}
 	}
-	models = applyOAuthModelAlias(cfg, provider, authKind, models)
+	models = applyOAuthModelAlias(cfg, provider, authKind, a.Attributes, models)
 	key := provider
 	if key == "" {
 		key = strings.ToLower(strings.TrimSpace(a.Provider))
@@ -3841,6 +4167,7 @@ func (s *Service) registerModelsForAuthWithConfig(a *coreauth.Auth, cfg *config.
 	models = s.appendPluginModels(key, models)
 	models = applyExcludedModels(models, excluded)
 	models = catalogEnabledModelsForConfig(cfg, models)
+	models = applyOAuthSettings(cfg, provider, authKind, models)
 	if len(models) > 0 {
 		GlobalModelRegistry().RegisterClient(
 			a.ID, key, applyModelPrefixes(models, a.Prefix, cfg != nil && cfg.ForceModelPrefix),
@@ -4035,6 +4362,16 @@ func resolveConfigXAIKey(cfg *config.Config, auth *coreauth.Auth) *config.XAIKey
 		attrBase = strings.TrimSpace(auth.Attributes["base_url"])
 	}
 	return resolveConfigKey(cfg.XAIKey, attrKey, attrBase)
+}
+
+func resolveConfigMetaKey(cfg *config.Config, auth *coreauth.Auth) *config.MetaKey {
+	if auth == nil || cfg == nil || !coreauth.IsConfigAPIKeyAuth(auth) {
+		return nil
+	}
+	if entry := configEntryForAuthIndex(auth, cfg.MetaKey); entry != nil {
+		return entry
+	}
+	return resolveConfigKey(cfg.MetaKey, strings.TrimSpace(auth.Attributes["api_key"]), strings.TrimSpace(auth.Attributes["base_url"]))
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {
@@ -4423,7 +4760,22 @@ func buildCodexConfigModels(entry *config.CodexKey) []*ModelInfo {
 	if entry == nil {
 		return nil
 	}
-	return buildConfigModels(entry.Models, "openai", "openai")
+	models := buildConfigModels(entry.Models, "openai", "openai")
+	configured := make(map[string]bool, len(entry.Models))
+	for _, model := range entry.Models {
+		alias := strings.TrimSpace(model.Alias)
+		if alias == "" {
+			alias = strings.TrimSpace(model.Name)
+		}
+		key := strings.ToLower(alias)
+		if _, exists := configured[key]; key != "" && !exists {
+			configured[key] = model.SupportConfigurationUpdate
+		}
+	}
+	for _, model := range models {
+		model.SupportConfigurationUpdate = configured[strings.ToLower(model.ID)]
+	}
+	return models
 }
 
 func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
@@ -4431,6 +4783,13 @@ func buildXAIConfigModels(entry *config.XAIKey) []*ModelInfo {
 		return nil
 	}
 	return buildConfigModels(entry.Models, "xai", "xai")
+}
+
+func buildMetaConfigModels(entry *config.MetaKey) []*ModelInfo {
+	if entry == nil {
+		return nil
+	}
+	return buildConfigModels(entry.Models, "meta", "meta")
 }
 
 func rewriteModelInfoName(name, oldID, newID string) string {
@@ -4459,15 +4818,33 @@ func rewriteModelInfoName(name, oldID, newID string) string {
 	return name
 }
 
-func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
-	if cfg == nil || len(models) == 0 {
+func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, attributes map[string]string, models []*ModelInfo) []*ModelInfo {
+	if len(models) == 0 {
 		return models
 	}
 	channel := coreauth.OAuthModelAliasChannel(provider, authKind)
-	if channel == "" || len(cfg.OAuthModelAlias) == 0 {
+	if channel == "" {
 		return models
 	}
-	aliases := cfg.OAuthModelAlias[channel]
+	aliases := coreauth.OAuthModelAliasesFromAttributes(attributes)
+	if cfg != nil {
+		global := cfg.OAuthModelAlias[channel]
+		if len(aliases) == 0 {
+			aliases = global
+		} else if len(global) > 0 {
+			seen := make(map[string]struct{}, len(aliases)+len(global))
+			for _, entry := range aliases {
+				seen[strings.ToLower(entry.Alias)] = struct{}{}
+			}
+			for _, entry := range global {
+				key := strings.ToLower(strings.TrimSpace(entry.Alias))
+				if _, exists := seen[key]; !exists {
+					seen[key] = struct{}{}
+					aliases = append(aliases, entry)
+				}
+			}
+		}
+	}
 	if len(aliases) == 0 {
 		return models
 	}
@@ -4570,6 +4947,36 @@ func applyOAuthModelAlias(cfg *config.Config, provider, authKind string, models 
 				continue
 			}
 			seen[key] = struct{}{}
+			out = append(out, model)
+		}
+	}
+	return out
+}
+
+func applyOAuthSettings(cfg *config.Config, provider, authKind string, models []*ModelInfo) []*ModelInfo {
+	if cfg == nil || len(models) == 0 {
+		return models
+	}
+	channel := coreauth.OAuthModelAliasChannel(provider, authKind)
+	if channel == "" {
+		return models
+	}
+	settings := cfg.OAuthSettings[channel]
+	if len(settings) == 0 {
+		return models
+	}
+	out := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		setting := config.ResolveOAuthModelSetting(settings, model.ID, model.CatalogName, model.Name)
+		if setting != nil && setting.MaxContextLength > 0 {
+			copy := *model
+			copy.ContextLength = setting.MaxContextLength
+			copy.MaxContextLength = setting.MaxContextLength
+			out = append(out, &copy)
+		} else {
 			out = append(out, model)
 		}
 	}

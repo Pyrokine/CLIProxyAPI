@@ -34,12 +34,14 @@ type LogFormatter struct{}
 var logFieldOrder = []string{
 	"provider", "model", "version", "mode", "budget", "level", "original_mode", "original_value", "min", "max",
 	"clamped_to", "status", "phase", "duration", "error",
-	"auth_index", "credential", "connection", "proxy_scheme", "remote_transport",
+	"auth_index", "auth_id", "credential", "connection", "proxy_scheme", "remote_transport",
 	"media_session_id", "call_id", "peer", "state", "reason",
+	"plugin_id", "plugin_name", "active_version", "retired_version", "path", "active_path", "retired_path",
 }
 
 var quotedLogFields = map[string]struct{}{
 	"auth_index":       {},
+	"auth_id":          {},
 	"credential":       {},
 	"connection":       {},
 	"proxy_scheme":     {},
@@ -52,8 +54,9 @@ var quotedLogFields = map[string]struct{}{
 }
 
 func formatLogFieldValue(key string, value any) string {
-	if _, quoted := quotedLogFields[key]; quoted {
-		if stringValue, ok := value.(string); ok {
+	if stringValue, ok := value.(string); ok {
+		needsEscape := strings.IndexFunc(stringValue, func(r rune) bool { return !strconv.IsPrint(r) }) >= 0
+		if _, quoted := quotedLogFields[key]; quoted || needsEscape {
 			return strconv.Quote(stringValue)
 		}
 	}
@@ -87,7 +90,12 @@ func (m *LogFormatter) Format(entry *log.Entry) ([]byte, error) {
 	var fieldsStr string
 	if len(entry.Data) > 0 {
 		var fields []string
+		pluginID, _ := entry.Data["plugin_id"].(string)
+		pluginID = strings.TrimSpace(pluginID)
 		for _, k := range logFieldOrder {
+			if (k == "path" || k == "active_path" || k == "retired_path") && pluginID == "" {
+				continue
+			}
 			if v, ok := entry.Data[k]; ok {
 				fields = append(fields, fmt.Sprintf("%s=%s", k, formatLogFieldValue(k, v)))
 			}

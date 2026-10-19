@@ -29,6 +29,22 @@ func TestSummaryIntentTranslation(t *testing.T) {
 			wantExists: true,
 		},
 		{
+			name: "Chat effort leaves Claude display unspecified",
+			from: sdktranslator.FormatOpenAI,
+			to:   sdktranslator.FormatClaude,
+			body: `{"model":"claude-sonnet-5","reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`,
+			path: "thinking.display",
+		},
+		{
+			name:       "Chat explicit summary enables Claude display",
+			from:       sdktranslator.FormatOpenAI,
+			to:         sdktranslator.FormatClaude,
+			body:       `{"model":"claude-sonnet-5","reasoning_effort":"high","reasoning":{"summary":"auto"},"messages":[{"role":"user","content":"hi"}]}`,
+			path:       "thinking.display",
+			want:       "summarized",
+			wantExists: true,
+		},
+		{
 			name: "Responses effort leaves Gemini summary absent",
 			from: sdktranslator.FormatOpenAIResponse,
 			to:   sdktranslator.FormatGemini,

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/httpwire"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
@@ -325,7 +327,7 @@ func disallowFreeAuthFromContext(ctx context.Context) bool {
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
-// If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
+// Valid JSON error text retains its payload and is compacted for single-line SSE data.
 func BuildErrorResponseBody(status int, errText string) []byte {
 	if status <= 0 {
 		status = http.StatusInternalServerError
@@ -335,8 +337,11 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 	}
 
 	trimmed := strings.TrimSpace(errText)
-	if trimmed != "" && json.Valid([]byte(trimmed)) {
-		return []byte(trimmed)
+	if trimmed != "" {
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, []byte(trimmed)); err == nil {
+			return compact.Bytes()
+		}
 	}
 
 	errType := "invalid_request_error"
@@ -354,6 +359,9 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 	case http.StatusNotFound:
 		errType = "invalid_request_error"
 		code = "model_not_found"
+	case http.StatusRequestTimeout:
+		errType = "server_error"
+		code = "request_timeout"
 	default:
 		if status >= http.StatusInternalServerError {
 			errType = "server_error"
@@ -461,21 +469,9 @@ func EnrichContextWithSessionHierarchy(
 	payload []byte,
 	metadata map[string]any,
 ) context.Context {
-	clientMetadata := logging.GetClientRequestMetadata(ctx)
-	if info, ok := coresession.ExtractSessionInfo(headers, payload, metadata); ok {
-		clientMetadata.SessionID = info.SessionID
-		clientMetadata.ParentSessionID = info.ParentSessionID
-		if clientMetadata.SessionID == clientMetadata.ParentSessionID {
-			clientMetadata.ParentSessionID = ""
-		}
-		ctx = logging.WithClientRequestMetadata(ctx, clientMetadata)
-		return util.WithSessionID(ctx, clientMetadata.SessionID)
-	}
-	if clientMetadata.SessionID != "" || clientMetadata.ParentSessionID != "" || util.SessionIDFromContext(ctx) != "" {
-		clientMetadata.SessionID = ""
-		clientMetadata.ParentSessionID = ""
-		ctx = logging.WithClientRequestMetadata(ctx, clientMetadata)
-		return util.WithSessionID(ctx, "")
+	ctx = enrichContextWithSessionHierarchy(ctx, headers, payload, metadata)
+	if util.HasExplicitSessionID(ctx) {
+		return util.WithSessionID(ctx, logging.GetClientRequestMetadata(ctx).SessionID)
 	}
 	return ctx
 }
@@ -486,7 +482,30 @@ func enrichContextWithSessionHierarchy(
 	payload []byte,
 	metadata map[string]any,
 ) context.Context {
-	return EnrichContextWithSessionHierarchy(ctx, headers, payload, metadata)
+	clientMetadata := logging.GetClientRequestMetadata(ctx)
+	if info, ok := coresession.ExtractSessionInfo(headers, payload, metadata); ok {
+		clientMetadata.SessionID = info.SessionID
+		clientMetadata.ParentSessionID = info.ParentSessionID
+		clientMetadata.NodeKind = info.NodeKind
+		clientMetadata.IsFork = info.IsFork
+		clientMetadata.IsCompaction = info.IsCompaction
+		if clientMetadata.SessionID == clientMetadata.ParentSessionID {
+			clientMetadata.ParentSessionID = ""
+		}
+		ctx = logging.WithClientRequestMetadata(ctx, clientMetadata)
+		return util.WithInferredSessionID(ctx, clientMetadata.SessionID)
+	}
+	if clientMetadata.SessionID != "" || clientMetadata.ParentSessionID != "" || clientMetadata.NodeKind != "" ||
+		clientMetadata.IsFork || clientMetadata.IsCompaction || util.SessionIDFromContext(ctx) != "" {
+		clientMetadata.SessionID = ""
+		clientMetadata.ParentSessionID = ""
+		clientMetadata.NodeKind = ""
+		clientMetadata.IsFork = false
+		clientMetadata.IsCompaction = false
+		ctx = logging.WithClientRequestMetadata(ctx, clientMetadata)
+		return util.WithInferredSessionID(ctx, "")
+	}
+	return ctx
 }
 
 func pluginExecutionMetadata(metadata map[string]any) map[string]any {
@@ -528,6 +547,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 			if requestPath == "" && ginCtx.Request.URL != nil {
 				requestPath = strings.TrimSpace(ginCtx.Request.URL.Path)
 			}
+		}
+		if path, _ := ctx.Value(modelExecutionPathContextKey{}).(string); path != "" {
+			requestPath = path
 		}
 	}
 
@@ -867,6 +889,9 @@ func (h *BaseAPIHandler) FilterModelsForCurrentAPIKey(c *gin.Context, models []m
 	return filtered
 }
 
+// ModelDetailIDContextKey selects a model from the final, plugin-filtered catalog.
+const ModelDetailIDContextKey = "cliproxy.model_detail_id"
+
 // WriteModelListResponse applies response interceptors to a successful model catalog response.
 func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat string, payload any) {
 	if c == nil {
@@ -880,11 +905,25 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		}})
 		return
 	}
+	h.WriteModelListResponseBody(c, sourceFormat, body)
+}
+
+// WriteModelListResponseBody applies response interceptors to a pre-encoded JSON model catalog.
+func (h *BaseAPIHandler) WriteModelListResponseBody(c *gin.Context, sourceFormat string, body []byte) {
+	if c == nil {
+		return
+	}
 	ctx := context.Background()
 	var requestHeaders http.Header
 	if c.Request != nil {
 		ctx = c.Request.Context()
 		requestHeaders = c.Request.Header
+	}
+	requestID := logging.GetRequestID(ctx)
+	var lifecycle *requestLifecycleTracker
+	if _, detail := c.Get(ModelDetailIDContextKey); detail {
+		lifecycle = h.newRequestLifecycleTracker(ctx, requestID, sourceFormat, "", "", false, nil, "")
+		requestID = lifecycle.requestID()
 	}
 	body, responseHeaders := h.applyResponseInterceptors(
 		ctx,
@@ -898,10 +937,49 @@ func (h *BaseAPIHandler) WriteModelListResponse(c *gin.Context, sourceFormat str
 		nil,
 		body,
 		http.StatusOK,
-		logging.GetRequestID(ctx),
+		requestID,
 		"",
+		false,
 	)
 	WriteUpstreamHeaders(c.Writer.Header(), responseHeaders)
+	if modelID, detail := c.Get(ModelDetailIDContextKey); detail {
+		c.Writer.Header().Del("Content-Length")
+		var catalog struct {
+			Data   []json.RawMessage `json:"data"`
+			Models []json.RawMessage `json:"models"`
+		}
+		if err := json.Unmarshal(body, &catalog); err != nil {
+			lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusBadGateway, err)
+			c.JSON(http.StatusBadGateway, ErrorResponse{Error: ErrorDetail{Message: "Invalid model catalog", Type: "api_error"}})
+			return
+		}
+		var selected json.RawMessage
+		for _, model := range append(catalog.Data, catalog.Models...) {
+			var item struct {
+				ID   string `json:"id"`
+				Slug string `json:"slug"`
+			}
+			if err := json.Unmarshal(model, &item); err != nil {
+				continue
+			}
+			if item.ID == "" {
+				item.ID = item.Slug
+			}
+			if item.ID != "" && item.ID == modelID {
+				selected = model
+				break
+			}
+		}
+		if selected == nil {
+			lifecycle.complete(pluginapi.RequestCompletionFailed, http.StatusNotFound, nil)
+			c.JSON(http.StatusNotFound, ErrorResponse{Error: ErrorDetail{
+				Message: "Model not found", Type: "invalid_request_error", Code: "model_not_found",
+			}})
+			return
+		}
+		body = selected
+	}
+	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	c.Data(http.StatusOK, "application/json; charset=utf-8", body)
 }
 
@@ -1066,7 +1144,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 			parentCtx = logging.WithRequestOutcomeState(parentCtx, outcomeState)
 		}
 	}
-	newCtx, cancel := context.WithCancel(parentCtx)
+	newCtx, cancel := context.WithCancelCause(parentCtx)
 
 	endpoint := ""
 	if c != nil && c.Request != nil {
@@ -1090,7 +1168,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 		clientMetadata := logging.ExtractClientRequestMetadata(c.Request)
 		clientMetadata.SessionID, clientMetadata.ParentSessionID = extractSessionIDsFromRequest(c.Request)
 		newCtx = logging.WithClientRequestMetadata(newCtx, clientMetadata)
-		newCtx = util.WithSessionID(newCtx, clientMetadata.SessionID)
+		newCtx = util.WithInferredSessionID(newCtx, clientMetadata.SessionID)
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
 	newCtx = logging.WithResponseHeadersHolder(newCtx)
@@ -1101,7 +1179,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 		go func() {
 			select {
 			case <-requestCtx.Done():
-				cancel()
+				cancel(context.Cause(requestCtx))
 			case <-watchCtx.Done():
 			}
 		}()
@@ -1111,20 +1189,23 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 	newCtx = sdktranslator.WithPluginHooks(newCtx, h.TranslatorPluginHooks)
 	newCtx = context.WithValue(newCtx, handlerContextKey{}, handler)
 	return newCtx, func(params ...any) {
+		var cause error
+		if len(params) == 1 {
+			cause, _ = params[0].(error)
+		}
+		defer cancel(cause)
 		if c != nil {
 			logging.SetResponseStatus(cancelCtx, c.Writer.Status())
 		}
 		if h.requestLoggingEnabled() && len(params) == 1 {
 			if captured, exists := c.Get(logging.APIResponseCapturedContextKey); exists {
 				if capturedBool, ok := captured.(bool); ok && capturedBool {
-					cancel()
 					return
 				}
 			}
 			if existingBytes := requestLogContextBytes(c, "API_RESPONSE"); len(bytes.TrimSpace(existingBytes)) > 0 {
 				switch params[0].(type) {
 				case error, string:
-					cancel()
 					return
 				}
 			}
@@ -1144,14 +1225,12 @@ func (h *BaseAPIHandler) GetContextWithCancel(
 				existingBytes := requestLogContextBytes(c, "API_RESPONSE")
 				trimmedPayload := bytes.TrimSpace(payload)
 				if len(trimmedPayload) > 0 && bytes.Contains(existingBytes, trimmedPayload) {
-					cancel()
 					return
 				}
 				appendAPIResponse(c, payload)
 			}
 		}
 
-		cancel()
 	}
 }
 
@@ -1271,7 +1350,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(
 	alt string,
 ) ([]byte, http.Header, *ErrorMessage) {
 	return h.executeNonStream(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, nil, nil, "", h.AuthManager.Execute,
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, false, nil, nil, "", h.AuthManager.Execute,
 	)
 }
 
@@ -1283,7 +1362,7 @@ func (h *BaseAPIHandler) ExecuteImageWithAuthManager(
 	alt string,
 ) ([]byte, http.Header, *ErrorMessage) {
 	return h.executeNonStream(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, true, nil, nil, "", h.AuthManager.Execute,
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, true, false, nil, nil, "", h.AuthManager.Execute,
 	)
 }
 
@@ -1296,7 +1375,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(
 	alt string,
 ) ([]byte, http.Header, *ErrorMessage) {
 	return h.executeNonStream(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, nil, nil, "", h.AuthManager.ExecuteCount,
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, false, nil, nil, "", h.AuthManager.ExecuteCount,
 	)
 }
 
@@ -1305,7 +1384,7 @@ func (h *BaseAPIHandler) executeNonStream(
 	handlerType, responseType, modelName string,
 	rawJSON []byte,
 	alt string,
-	allowImageModel bool,
+	allowImageModel, internalExecution bool,
 	requestHeaders http.Header,
 	requestQuery url.Values,
 	skipPluginID string,
@@ -1352,6 +1431,7 @@ func (h *BaseAPIHandler) executeNonStream(
 		ResponseFormat:              sdktranslator.FromString(responseType),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle, skipPluginID),
 		WebSocketResponseObserver:   h.webSocketResponseObserver(lifecycle, skipPluginID),
+		ProxyURL:                    coreexecutor.RequestProxyURL(ctx),
 
 		Metadata: reqMeta}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
@@ -1375,11 +1455,11 @@ func (h *BaseAPIHandler) executeNonStream(
 	executedReq, executedOpts := afterAuthCapture.apply(req, opts)
 	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
 	rawResponseHeaders := cloneHeader(resp.Headers)
-	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.ConfigSnapshot()))
+	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, internalExecution || PassthroughHeadersEnabled(h.ConfigSnapshot()))
 	body, responseHeaders := h.applyResponseInterceptors(
 		ctx, responseType, normalizedModel, modelName, executedOpts, rawResponseHeaders, responseHeaders,
 		executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, lifecycle.requestID(),
-		skipPluginID,
+		skipPluginID, internalExecution,
 	)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
@@ -1394,7 +1474,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(
 	rawJSON []byte,
 	alt string,
 ) (<-chan []byte, http.Header, <-chan *ErrorMessage) {
-	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, false, nil, nil, "")
+	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, false, false, nil, nil, "")
 }
 
 // ExecuteStreamChunksWithAuthManager preserves per-chunk delivery acknowledgements.
@@ -1406,7 +1486,7 @@ func (h *BaseAPIHandler) ExecuteStreamChunksWithAuthManager(
 ) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *ErrorMessage) {
 	ctx = coreexecutor.WithStreamDeliveryAcknowledgement(ctx)
 	return h.executeStreamChunksWithAuthManager(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, nil, nil, "",
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, false, false, nil, nil, "",
 	)
 }
 
@@ -1417,7 +1497,7 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(
 	rawJSON []byte,
 	alt string,
 ) (<-chan []byte, http.Header, <-chan *ErrorMessage) {
-	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, true, nil, nil, "")
+	return h.executeStreamWithAuthManager(ctx, handlerType, handlerType, modelName, rawJSON, alt, true, false, nil, nil, "")
 }
 
 // ExecuteImageStreamChunksWithAuthManager preserves image-stream delivery acknowledgements.
@@ -1429,7 +1509,7 @@ func (h *BaseAPIHandler) ExecuteImageStreamChunksWithAuthManager(
 ) (<-chan coreexecutor.StreamChunk, http.Header, <-chan *ErrorMessage) {
 	ctx = coreexecutor.WithStreamDeliveryAcknowledgement(ctx)
 	return h.executeStreamChunksWithAuthManager(
-		ctx, handlerType, handlerType, modelName, rawJSON, alt, true, nil, nil, "",
+		ctx, handlerType, handlerType, modelName, rawJSON, alt, true, false, nil, nil, "",
 	)
 }
 
@@ -1438,13 +1518,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(
 	handlerType, responseType, modelName string,
 	rawJSON []byte,
 	alt string,
-	allowImageModel bool,
+	allowImageModel, internalExecution bool,
 	requestHeaders http.Header,
 	requestQuery url.Values,
 	skipPluginID string,
 ) (<-chan []byte, http.Header, <-chan *ErrorMessage) {
 	chunks, headers, errs := h.executeStreamChunksWithAuthManager(
-		ctx, handlerType, responseType, modelName, rawJSON, alt, allowImageModel,
+		ctx, handlerType, responseType, modelName, rawJSON, alt, allowImageModel, internalExecution,
 		requestHeaders, requestQuery, skipPluginID,
 	)
 	return flattenStreamChunks(ctx, chunks), headers, errs
@@ -1486,7 +1566,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 	handlerType, responseType, modelName string,
 	rawJSON []byte,
 	alt string,
-	allowImageModel bool,
+	allowImageModel, internalExecution bool,
 	requestHeaders http.Header,
 	requestQuery url.Values,
 	skipPluginID string,
@@ -1536,6 +1616,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		ResponseFormat:              sdktranslator.FromString(responseType),
 		RequestAfterAuthInterceptor: h.requestAfterAuthInterceptor(afterAuthCapture, lifecycle, skipPluginID),
 		WebSocketResponseObserver:   h.webSocketResponseObserver(lifecycle, skipPluginID),
+		ProxyURL:                    coreexecutor.RequestProxyURL(ctx),
 
 		Metadata: reqMeta}
 	ctx = enrichContextWithSessionHierarchy(ctx, opts.Headers, req.Payload, opts.Metadata)
@@ -1567,7 +1648,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 	}
 	executedReq, executedOpts := executedRequest()
 	ctx = enrichContextWithSessionHierarchy(ctx, executedOpts.Headers, executedReq.Payload, executedOpts.Metadata)
-	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.ConfigSnapshot())
+	passthroughHeadersEnabled := internalExecution || PassthroughHeadersEnabled(h.ConfigSnapshot())
 	interceptorHost := h.interceptorHost()
 	streamInterceptorsActive := streamInterceptorsEnabled(interceptorHost)
 	rawStreamHeaders := cloneHeader(streamResult.Headers)
@@ -1650,16 +1731,30 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		}
 	}
 	readInitialStreamChunks()
+	responseHeaders := make(chan http.Header, 1)
+	headersPublished := false
+	publishHeaders := func() {
+		if headersPublished {
+			return
+		}
+		headersPublished = true
+		responseHeaders <- cloneHeader(upstreamHeaders)
+	}
 
 	go func() {
 		completionOutcome := pluginapi.RequestCompletionSucceeded
 		completionStatus := http.StatusOK
 		var completionErr error
 		defer func() {
+			if completionOutcome == pluginapi.RequestCompletionFailed && ctx != nil && ctx.Err() != nil && errors.Is(completionErr, ctx.Err()) {
+				completionOutcome = pluginapi.RequestCompletionCanceled
+				completionStatus = 0
+			}
 			lifecycle.complete(completionOutcome, completionStatus, completionErr)
 		}()
 		defer close(dataChan)
 		defer close(errChan)
+		defer publishHeaders()
 		if streamCanceledBeforeRead {
 			reservation.markUnknown(ctx)
 			completionOutcome = pluginapi.RequestCompletionCanceled
@@ -1707,6 +1802,9 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 				completionErr = errDelivery
 				return
 			}
+			if completionErr != nil {
+				return
+			}
 			completionOutcome = pluginapi.RequestCompletionCanceled
 			completionStatus = 0
 			if ctx != nil {
@@ -1715,6 +1813,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		}
 
 		sendErr := func(msg *ErrorMessage) bool {
+			publishHeaders()
 			var sourceAcknowledge func(error)
 			if msg != nil {
 				sourceAcknowledge = msg.Acknowledge
@@ -1736,6 +1835,7 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		}
 
 		sendData := func(chunk coreexecutor.StreamChunk) bool {
+			publishHeaders()
 			sourceAcknowledge := chunk.Acknowledge
 			chunk.Acknowledge = trackAcknowledgement(sourceAcknowledge)
 			if ctx == nil {
@@ -1960,7 +2060,18 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 			}
 		}
 	}()
-	return dataChan, upstreamHeaders, errChan
+	if upstreamHeaders == nil {
+		return dataChan, nil, errChan
+	}
+	if ctx == nil {
+		return dataChan, <-responseHeaders, errChan
+	}
+	select {
+	case snapshot := <-responseHeaders:
+		return dataChan, snapshot, errChan
+	case <-ctx.Done():
+		return dataChan, nil, errChan
+	}
 }
 
 func cloneByteSlices(src [][]byte) [][]byte {
@@ -2186,10 +2297,18 @@ func mergeRequestInterceptorHeaders(current, updates http.Header, clear []string
 		out = make(http.Header)
 	}
 	for _, key := range clear {
-		out.Del(key)
+		for name := range out {
+			if strings.EqualFold(name, key) {
+				delete(out, name)
+			}
+		}
 	}
 	for key, values := range updates {
-		out.Del(key)
+		for name := range out {
+			if strings.EqualFold(name, key) {
+				delete(out, name)
+			}
+		}
 		for _, value := range values {
 			out.Add(key, value)
 		}
@@ -2253,6 +2372,23 @@ func interceptStreamChunk(
 	return host.InterceptStreamChunk(ctx, req)
 }
 
+func overrideRequestPathMetadata(opts *coreexecutor.Options, path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return true
+	}
+	if !validModelExecutionPath(path) {
+		return false
+	}
+	metadata := maps.Clone(opts.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]any, 1)
+	}
+	metadata[coreexecutor.RequestPathMetadataKey] = path
+	opts.Metadata = metadata
+	return true
+}
+
 func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(
 	ctx context.Context,
 	handlerType, requestedModel string,
@@ -2282,6 +2418,9 @@ func (h *BaseAPIHandler) applyRequestInterceptorsBeforeAuth(
 	if len(resp.Body) > 0 {
 		req.Payload = cloneBytes(resp.Body)
 		opts.OriginalRequest = cloneBytes(resp.Body)
+	}
+	if !overrideRequestPathMetadata(&opts, resp.Path) {
+		return req, opts, modelExecutionModeError("invalid request path")
 	}
 	if resp.Terminate {
 		return req, opts, requestTerminationError(resp)
@@ -2403,6 +2542,45 @@ func (h *BaseAPIHandler) applyRequestInterceptorsAfterAuth(
 		nextReq.Payload = cloneBytes(resp.Body)
 		nextOpts.OriginalRequest = cloneBytes(resp.Body)
 	}
+	previousPayload := req.Options.OriginalRequest
+	if len(previousPayload) == 0 {
+		previousPayload = req.Request.Payload
+	}
+	currentPayload := nextOpts.OriginalRequest
+	if len(currentPayload) == 0 {
+		currentPayload = nextReq.Payload
+	}
+	previousSession, _ := coresession.ExtractSessionInfo(req.Options.Headers, previousPayload, nil)
+	currentSession, _ := coresession.ExtractSessionInfo(nextOpts.Headers, currentPayload, nil)
+	if previousSession.SessionID != currentSession.SessionID ||
+		previousSession.ParentSessionID != currentSession.ParentSessionID ||
+		previousSession.NodeKind != currentSession.NodeKind ||
+		previousSession.IsFork != currentSession.IsFork ||
+		previousSession.IsCompaction != currentSession.IsCompaction ||
+		len(resp.Body) > 0 && !bytes.Equal(resp.Body, req.Request.Payload) {
+		nextReq.Metadata = maps.Clone(nextReq.Metadata)
+		nextOpts.Metadata = maps.Clone(nextOpts.Metadata)
+		for _, key := range []string{
+			coreexecutor.CanonicalSessionIDMetadataKey, coreexecutor.ParentSessionIDMetadataKey,
+			coreexecutor.DerivedSessionIDMetadataKey, coreexecutor.LCPAffinitySessionIDMetadataKey,
+			coreexecutor.LCPFingerprintMetadataKey, coreexecutor.LCPMinPrefixLengthMetadataKey,
+			coreexecutor.LCPTailFingerprintsMetadataKey, coreexecutor.LCPEnvironmentDigestMetadataKey,
+			coreexecutor.LCPAccessGenerationMetadataKey, coreexecutor.NodeKindMetadataKey,
+			coreexecutor.IsForkMetadataKey, coreexecutor.IsCompactionMetadataKey,
+			coreexecutor.SessionAffinityProviderMetadataKey, coreexecutor.SessionAffinityModelMetadataKey,
+		} {
+			delete(nextReq.Metadata, key)
+			delete(nextOpts.Metadata, key)
+		}
+		nextReq, nextOpts = coresession.Enrich(nextReq, nextOpts)
+	}
+	if !overrideRequestPathMetadata(&nextOpts, resp.Path) {
+		return coreexecutor.RequestAfterAuthInterceptResponse{
+			Terminate:    true,
+			StatusCode:   http.StatusBadRequest,
+			ResponseBody: BuildErrorResponseBody(http.StatusBadRequest, "invalid request path"),
+		}
+	}
 	return coreexecutor.RequestAfterAuthInterceptResponse{
 		Request:         nextReq,
 		Options:         nextOpts,
@@ -2423,6 +2601,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(
 	statusCode int,
 	requestID,
 	skipPluginID string,
+	internalExecution bool,
 ) ([]byte, http.Header) {
 	host := h.interceptorHost()
 	if host == nil {
@@ -2447,7 +2626,7 @@ func (h *BaseAPIHandler) applyResponseInterceptors(
 	responseHeaders = downstreamHeadersAfterInterceptors(
 		rawResponseHeaders,
 		mergeRequestInterceptorHeaders(rawResponseHeaders, resp.Headers, resp.ClearHeaders),
-		PassthroughHeadersEnabled(h.ConfigSnapshot()),
+		internalExecution || PassthroughHeadersEnabled(h.ConfigSnapshot()),
 	)
 	if len(resp.Body) > 0 {
 		body = cloneBytes(resp.Body)
@@ -2478,6 +2657,14 @@ func supportsContext1M(modelName string, providers []string) bool {
 
 func requiresContext1MCapabilityValidation(providers []string) bool {
 	return len(providers) > 0
+}
+
+func (h *BaseAPIHandler) SupportsApplyPatchModel(model string) bool {
+	if h == nil || h.AuthManager == nil {
+		return false
+	}
+	providers, _, err := h.getRequestDetails(model)
+	return err == nil && h.AuthManager.SupportsApplyPatchForProviders(providers)
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (
@@ -2695,7 +2882,7 @@ func WriteStreamBytes(writer io.Writer, parts ...[]byte) error {
 // FlushStreamResponse flushes buffered response bytes and returns observable flush failures.
 func FlushStreamResponse(writer http.ResponseWriter, flusher http.Flusher) error {
 	if writer != nil {
-		err := http.NewResponseController(writer).Flush()
+		err := httpwire.FlushResponse(writer)
 		if err == nil || !errors.Is(err, http.ErrNotSupported) {
 			return err
 		}
@@ -2798,6 +2985,11 @@ func (h *BaseAPIHandler) WriteErrorResponseWithError(c *gin.Context, msg *ErrorM
 	}
 	if msg != nil && msg.DirectResponse {
 		return h.writeDirectErrorResponse(c, status, msg)
+	}
+	if msg != nil && msg.Error != nil {
+		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
+			c.Writer.Header().Add("Retry-After", value)
+		}
 	}
 	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.ConfigSnapshot()) {
 		for key, values := range msg.Addon {

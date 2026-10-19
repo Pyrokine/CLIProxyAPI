@@ -212,6 +212,9 @@ func TestPrepareAPIKeyExecutionMapsAndReservesCanonicalRequest(t *testing.T) {
 	if got := coreusage.APIKeyReservationFromContext(ctx); got != lifecycle.id {
 		t.Fatalf("reservation context = %q, want %q", got, lifecycle.id)
 	}
+	if got := coreusage.ExecutionIDFromContext(ctx); got != "execution-1" {
+		t.Fatalf("execution context ID = %q, want execution-1", got)
+	}
 }
 
 func TestPrepareAPIKeyExecutionFailsClosed(t *testing.T) {

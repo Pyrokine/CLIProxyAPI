@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
@@ -174,6 +175,26 @@ func TestOpenAIModels_UsesRequestedClientVersion(t *testing.T) {
 			}
 			t.Fatalf("model %q missing from response", modelID)
 		})
+	}
+}
+
+func TestOpenAIModelsCodexCatalogUsesCompactJSON(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	reg := registry.GetGlobalRegistry()
+	clientID := "test-codex-client-compact-json"
+	reg.RegisterClient(clientID, "codex", []*registry.ModelInfo{{
+		ID: "test-codex-compact-json", DisplayName: "Model <tag>&",
+	}})
+	t.Cleanup(func() { reg.UnregisterClient(clientID) })
+
+	handler := NewAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil))
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.156.0", nil)
+	handler.OpenAIModels(ctx)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `Model <tag>&`) ||
+		strings.Contains(recorder.Body.String(), "u003c") || strings.HasSuffix(recorder.Body.String(), "\n") {
+		t.Fatalf("Codex catalog status = %d body = %s", recorder.Code, recorder.Body.String())
 	}
 }
 

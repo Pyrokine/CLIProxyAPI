@@ -12,6 +12,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	coresession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -47,12 +48,17 @@ type Record struct {
 	ServiceTier         string
 	RequestServiceTier  string
 	ResponseServiceTier string
+	// ResponseModel is the model reported by the provider, if present.
+	ResponseModel string
 	// Generate reports whether the client requested actual generation.
 	// nil or true means generation is enabled; only an explicit false disables generation.
-	Generate          *bool
-	RequestedAt       time.Time
-	Latency           time.Duration
-	RequestID         string
+	Generate    *bool
+	RequestedAt time.Time
+	Latency     time.Duration
+	// RequestID identifies the inbound HTTP request used by persisted request logs.
+	RequestID string
+	// ExecutionID identifies the model execution shared with plugin lifecycle events.
+	ExecutionID       string
 	ClientIP          string
 	XForwardedFor     string
 	UserAgent         string
@@ -75,6 +81,7 @@ type generateContextKey struct{}
 type streamContextKey struct{}
 type deferredRecordContextKey struct{}
 type managerContextKey struct{}
+type executionIDContextKey struct{}
 
 // WithManager routes usage records published with ctx through manager.
 func WithManager(ctx context.Context, manager *Manager) context.Context {
@@ -94,6 +101,26 @@ func ManagerFromContext(ctx context.Context) *Manager {
 	}
 	manager, _ := ctx.Value(managerContextKey{}).(*Manager)
 	return manager
+}
+
+// WithExecutionID associates an execution attempt with its request lifecycle.
+func WithExecutionID(ctx context.Context, executionID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if executionID = strings.TrimSpace(executionID); executionID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, executionIDContextKey{}, executionID)
+}
+
+// ExecutionIDFromContext returns the ID shared by usage and request lifecycle events.
+func ExecutionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(executionIDContextKey{}).(string)
+	return id
 }
 
 // DeferredRecord delays the main usage record until the response handler knows
@@ -351,6 +378,15 @@ func deferredRecordWithOutcome(record Record, err error) Record {
 
 func prepareRecordForDelivery(ctx context.Context, record Record) Record {
 	record = cloneRecord(record)
+	if record.ExecutionID = strings.TrimSpace(record.ExecutionID); record.ExecutionID == "" {
+		record.ExecutionID = ExecutionIDFromContext(ctx)
+	}
+	if record.ExecutionID == "" {
+		record.ExecutionID = uuid.NewString()
+	}
+	if record.RequestID = strings.TrimSpace(record.RequestID); record.RequestID == "" {
+		record.RequestID = strings.TrimSpace(internallogging.GetRequestID(ctx))
+	}
 	record.BaseURL = strings.TrimSpace(record.BaseURL)
 	if !record.Stream {
 		record.Stream = StreamFromContext(ctx)

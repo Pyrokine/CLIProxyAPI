@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -470,7 +469,7 @@ func isAPIWebsocketUpgrade(req *http.Request) bool {
 		return false
 	}
 	path := req.URL.Path
-	if path == "/v1/responses" || path == "/v1/realtime" {
+	if path == "/v1/responses" || path == "/responses" || path == "/backend-api/codex/responses" || path == "/v1/realtime" {
 		return true
 	}
 	return hasSinglePathSegment(path, "/v1/live/") ||
@@ -517,8 +516,7 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*requestInfo, error) 
 	method := c.Request.Method
 
 	// Capture headers
-	headers := make(map[string][]string)
-	maps.Copy(headers, c.Request.Header)
+	headers := c.Request.Header.Clone()
 
 	// Capture request body
 	var body []byte
@@ -663,7 +661,7 @@ func decodeCapturedZstdRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bo
 }
 
 func shouldLogRequest(path string) bool {
-	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/management") {
+	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/v8/management") || strings.HasPrefix(path, "/management") {
 		return false
 	}
 

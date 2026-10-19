@@ -26,8 +26,10 @@ var oauthProviders = []oauthProvider{
 	{name: "Codex (OpenAI)", key: "codex", apiPath: "codex-auth-url", emoji: "🟩"},
 	{name: "Antigravity", key: "antigravity", apiPath: "antigravity-auth-url", emoji: "🟪"},
 	{name: "Qwen", key: "qwen", apiPath: "qwen-auth-url", emoji: "🟨"},
-	{name: "Kimi", key: "kimi", apiPath: "kimi-auth-url", emoji: "🟫", deviceFlow: true},
+	{name: "Kimi (kimi.com)", key: "kimi", apiPath: "kimi-auth-url", emoji: "🟫", deviceFlow: true},
+	{name: "Kimi (kimi.ai)", key: "kimi-ai", apiPath: "kimi-ai-auth-url", emoji: "🟫", deviceFlow: true},
 	{name: "xAI", key: "xai", apiPath: "xai-auth-url", emoji: "⬛", deviceFlow: true},
+	{name: "Meta", key: "meta", apiPath: "meta-auth-url", emoji: "🔵", deviceFlow: true},
 	{name: "IFlow", key: "iflow", apiPath: "iflow-auth-url", emoji: "⬜"},
 }
 

@@ -291,11 +291,12 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 	router.POST("/v1/images/edits", h.ImagesEdits)
 
 	tests := []struct {
-		name        string
-		model       string
-		wantModel   string
-		wantQuality string
-		request     func(t *testing.T) *http.Request
+		name            string
+		model           string
+		wantModel       string
+		wantQuality     string
+		wantAspectRatio string
+		request         func(t *testing.T) *http.Request
 	}{
 		{
 			name:      "generations provider prefix case and suffix",
@@ -349,15 +350,17 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 			},
 		},
 		{
-			name:      "xai quality generations provider prefix case and suffix",
-			model:     "XAI/Grok-Imagine-Image-Quality(HIGH)",
-			wantModel: "grok-imagine-image-quality",
+			name:            "xai quality generations provider prefix case and suffix",
+			model:           "XAI/Grok-Imagine-Image-Quality(HIGH)",
+			wantModel:       "grok-imagine-image-quality",
+			wantQuality:     "high",
+			wantAspectRatio: "9:20",
 			request: func(t *testing.T) *http.Request {
 				t.Helper()
 				req := httptest.NewRequest(
 					http.MethodPost,
 					"/v1/images/generations",
-					strings.NewReader(`{"model":"XAI/Grok-Imagine-Image-Quality(HIGH)","prompt":"draw"}`),
+					strings.NewReader(`{"model":"XAI/Grok-Imagine-Image-Quality(HIGH)","prompt":"draw","aspect_ratio":"9:20","quality":" high "}`),
 				)
 				req.Header.Set("Content-Type", "application/json")
 				return req
@@ -379,16 +382,18 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 			},
 		},
 		{
-			name:      "xai image 2 JSON edits preserve canonical ID",
-			model:     "XAI/Grok-Imagine-Image-2.0",
-			wantModel: "grok-imagine-image-2.0",
+			name:            "xai image 2 JSON edits preserve canonical ID",
+			model:           "XAI/Grok-Imagine-Image-2.0",
+			wantModel:       "grok-imagine-image-2.0",
+			wantQuality:     "low",
+			wantAspectRatio: "20:9",
 			request: func(t *testing.T) *http.Request {
 				t.Helper()
 				req := httptest.NewRequest(
 					http.MethodPost,
 					"/v1/images/edits",
 					strings.NewReader(
-						`{"model":"XAI/Grok-Imagine-Image-2.0","prompt":"edit","images":[{"image_url":"data:image/png;base64,iVBORw0KGgo="}]}`,
+						`{"model":"XAI/Grok-Imagine-Image-2.0","prompt":"edit","images":[{"image_url":"data:image/png;base64,iVBORw0KGgo="}],"size":"20:9","quality":"low"}`,
 					),
 				)
 				req.Header.Set("Content-Type", "application/json")
@@ -396,13 +401,21 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 			},
 		},
 		{
-			name:      "xai image 2 multipart edits preserve canonical ID",
-			model:     "grok-imagine-image-2.0",
-			wantModel: "grok-imagine-image-2.0",
+			name:            "xai image 2 multipart edits preserve canonical ID",
+			model:           "grok-imagine-image-2.0",
+			wantModel:       "grok-imagine-image-2.0",
+			wantQuality:     "medium",
+			wantAspectRatio: "9:20",
 			request: func(t *testing.T) *http.Request {
 				t.Helper()
 				body := &bytes.Buffer{}
 				writer := multipart.NewWriter(body)
+				if err := writer.WriteField("quality", "medium"); err != nil {
+					t.Fatalf("WriteField quality: %v", err)
+				}
+				if err := writer.WriteField("aspect_ratio", "9:20"); err != nil {
+					t.Fatalf("WriteField aspect_ratio: %v", err)
+				}
 				if err := writer.WriteField("model", "grok-imagine-image-2.0"); err != nil {
 					t.Fatalf("WriteField model: %v", err)
 				}
@@ -517,6 +530,13 @@ func TestImagesEndpointsNormalizeBuiltinModelRouting(t *testing.T) {
 				}
 				if executor.model != tt.wantModel {
 					t.Fatalf("executor model = %q, want %q; payload=%s", executor.model, tt.wantModel, executor.payload)
+				}
+				if tt.wantAspectRatio != "" {
+					got := gjson.GetBytes(executor.payload, "aspect_ratio").String()
+					multipartValue := []byte("\r\n" + tt.wantAspectRatio + "\r\n")
+					if got != tt.wantAspectRatio && !bytes.Contains(executor.payload, multipartValue) {
+						t.Fatalf("aspect_ratio = %q, want %q; payload=%s", got, tt.wantAspectRatio, executor.payload)
+					}
 				}
 				if tt.wantQuality != "" {
 					quality := gjson.GetBytes(executor.payload, "quality").String()

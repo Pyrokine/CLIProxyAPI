@@ -8,6 +8,7 @@ import (
 
 	internalapi "github.com/Pyrokine/CLIProxyAPI/v6/internal/api"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
@@ -236,7 +237,7 @@ func TestApplyOAuthModelAlias_Rename(t *testing.T) {
 		{ID: "gpt-5", Name: "models/gpt-5"},
 	}
 
-	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", nil, models)
 	if len(out) != 1 {
 		t.Fatalf("expected 1 model, got %d", len(out))
 	}
@@ -259,7 +260,7 @@ func TestApplyOAuthModelAliasUsesConfiguredDisplayName(t *testing.T) {
 	}
 	models := []*ModelInfo{{ID: "gpt-5.5", DisplayName: "GPT-5.5"}}
 
-	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", nil, models)
 	if len(out) != 1 {
 		t.Fatalf("models length = %d, want 1", len(out))
 	}
@@ -280,7 +281,7 @@ func TestApplyOAuthModelAlias_ForkAddsAlias(t *testing.T) {
 		{ID: "gpt-5", Name: "models/gpt-5", DisplayName: "Upstream GPT Five"},
 	}
 
-	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", nil, models)
 	if len(out) != 2 {
 		t.Fatalf("expected 2 models, got %d", len(out))
 	}
@@ -337,7 +338,7 @@ func TestApplyExcludedModelsCanFilterGeneratedAlias(t *testing.T) {
 	}
 	models := []*ModelInfo{{ID: "gpt-5.2"}}
 
-	aliased := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	aliased := applyOAuthModelAlias(cfg, "codex", "oauth", nil, models)
 	out := applyExcludedModels(aliased, []string{"py-gpt"})
 	if len(out) != 1 {
 		t.Fatalf("expected generated alias to be filtered, got %d models", len(out))
@@ -360,7 +361,7 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 		{ID: "gpt-5", Name: "models/gpt-5"},
 	}
 
-	out := applyOAuthModelAlias(cfg, "codex", "oauth", models)
+	out := applyOAuthModelAlias(cfg, "codex", "oauth", nil, models)
 	if len(out) != 3 {
 		t.Fatalf("expected 3 models, got %d", len(out))
 	}
@@ -378,5 +379,37 @@ func TestApplyOAuthModelAlias_ForkAddsMultipleAliases(t *testing.T) {
 	}
 	if out[2].Name != "models/g5-2" {
 		t.Fatalf("expected forked model name %q, got %q", "models/g5-2", out[2].Name)
+	}
+}
+
+func TestApplyOAuthModelAliasUsesCredentialBeforeGlobalInModelPublication(t *testing.T) {
+	auth := &coreauth.Auth{Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
+	if err := coreauth.SetOAuthModelAliasesAttribute(auth, []config.OAuthModelAlias{
+		{Name: "credential-model", Alias: "shared", Fork: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{OAuthModelAlias: map[string][]config.OAuthModelAlias{
+		"codex": {
+			{Name: "global-model", Alias: "shared"},
+			{Name: "global-model", Alias: "global-alias", Fork: true},
+		},
+	}}
+	models := []*ModelInfo{{ID: "credential-model"}, {ID: "global-model"}}
+	published := applyOAuthModelAlias(cfg, "codex", "oauth", auth.Attributes, models)
+	if len(published) != 4 || published[0].ID != "credential-model" || published[1].ID != "shared" ||
+		published[2].ID != "global-model" || published[3].ID != "global-alias" {
+		t.Fatalf("published aliases = %#v", published)
+	}
+	for _, model := range published {
+		if model.ID == "shared" && model.CatalogName != "credential-model" {
+			t.Fatalf("per-credential alias points to %q", model.CatalogName)
+		}
+	}
+	if got := applyOAuthModelAlias(nil, "codex", "oauth", auth.Attributes, models); len(got) != 3 || got[1].ID != "shared" {
+		t.Fatalf("per-credential aliases without config = %#v", got)
+	}
+	if got := applyOAuthModelAlias(cfg, "codex", "api_key", auth.Attributes, models); len(got) != 2 || got[0].ID != "credential-model" {
+		t.Fatalf("API key published OAuth aliases: %#v", got)
 	}
 }

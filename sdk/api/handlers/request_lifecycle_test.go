@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
@@ -88,6 +90,33 @@ func (h *lifecycleTestHost) CompleteRequest(ctx context.Context, completion plug
 	}
 }
 
+func TestRequestInterceptorWithoutBodyChangeKeepsOriginalRequest(t *testing.T) {
+	host := &lifecycleTestHost{interceptRequestAfterAuth: func(
+		_ context.Context,
+		req pluginapi.RequestInterceptRequest,
+	) pluginapi.RequestInterceptResponse {
+		if string(req.Body) != "payload" {
+			t.Fatalf("request body = %q, want payload", req.Body)
+		}
+		return pluginapi.RequestInterceptResponse{Headers: http.Header{"X-Plugin": {"yes"}}}
+	}}
+	handler := &BaseAPIHandler{PluginHost: host}
+	request := coreexecutor.Request{Payload: []byte("payload")}
+	options := coreexecutor.Options{OriginalRequest: []byte("original")}
+
+	response := handler.applyRequestInterceptorsAfterAuth(
+		context.Background(), coreexecutor.RequestAfterAuthInterceptRequest{
+			Request: request,
+			Options: options,
+		}, nil, "",
+	)
+	if string(response.Request.Payload) != "payload" || string(response.Options.OriginalRequest) != "original" ||
+		response.Options.Headers.Get("X-Plugin") != "yes" {
+		t.Fatalf("unexpected response: payload = %q, original = %q, headers = %#v",
+			response.Request.Payload, response.Options.OriginalRequest, response.Options.Headers)
+	}
+}
+
 func TestWriteModelListResponseAppliesResponseInterceptor(t *testing.T) {
 	var captured pluginapi.ResponseInterceptRequest
 	host := &lifecycleTestHost{interceptResponse: func(
@@ -121,6 +150,31 @@ func TestWriteModelListResponseAppliesResponseInterceptor(t *testing.T) {
 	if recorder.Header().Get("X-Plugin-Model-List") != "applied" ||
 		!strings.Contains(recorder.Body.String(), `"id":"rewritten"`) {
 		t.Fatalf("intercepted response headers=%v body=%s", recorder.Header(), recorder.Body.String())
+	}
+}
+
+func TestWriteModelListResponseBodyPreservesInterceptor(t *testing.T) {
+	var captured []byte
+	host := &lifecycleTestHost{interceptResponse: func(
+		_ context.Context,
+		req pluginapi.ResponseInterceptRequest,
+	) pluginapi.ResponseInterceptResponse {
+		captured = append([]byte(nil), req.Body...)
+		return pluginapi.ResponseInterceptResponse{
+			Headers: http.Header{"X-Plugin-Model-List": {"applied"}},
+			Body:    req.Body,
+		}
+	}}
+	handler := &BaseAPIHandler{PluginHost: host}
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(http.MethodGet, "/v1/models?client_version=0.156.0", nil)
+	body := []byte(`{"models":[{"display_name":"Model <tag>"}]}`)
+
+	handler.WriteModelListResponseBody(ginContext, "openai", body)
+	if string(captured) != string(body) || recorder.Body.String() != string(body) ||
+		recorder.Header().Get("X-Plugin-Model-List") != "applied" {
+		t.Fatalf("captured=%s response=%s headers=%v", captured, recorder.Body.String(), recorder.Header())
 	}
 }
 
@@ -636,6 +690,70 @@ func TestHandlerLifecycleCompletesStreamOnce(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestHandlerLifecycleClassifiesCanceledDeliveryAcknowledgements(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		err         error
+		wantOutcome pluginapi.RequestCompletionOutcome
+		wantStatus  int
+	}{
+		{name: "canceled", err: context.Canceled, wantOutcome: pluginapi.RequestCompletionCanceled},
+		{name: "wrapped canceled", err: fmt.Errorf("nested delivery: %w", context.Canceled), wantOutcome: pluginapi.RequestCompletionCanceled},
+		{name: "write failure", err: errors.New("downstream write failed"), wantOutcome: pluginapi.RequestCompletionFailed, wantStatus: http.StatusInternalServerError},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			model := "handler-lifecycle-canceled-delivery-" + strings.ReplaceAll(testCase.name, " ", "-")
+			source := make(chan coreexecutor.StreamChunk, 1)
+			source <- coreexecutor.StreamChunk{Payload: []byte(`{"chunk":true}`)}
+			t.Cleanup(func() { close(source) })
+			executor := &lifecycleCaptureExecutor{
+				stream: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+					return &coreexecutor.StreamResult{Chunks: source}, nil
+				},
+			}
+			handler := newLifecycleHandler(t, model, executor)
+			completions := make(chan pluginapi.RequestCompletion, 2)
+			handler.SetPluginHost(&lifecycleTestHost{
+				completeRequest: func(_ context.Context, completion pluginapi.RequestCompletion) {
+					completions <- completion
+				},
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			dataChan, _, errChan := handler.ExecuteStreamChunksWithAuthManager(
+				ctx, "openai", model, []byte(`{"model":"`+model+`","stream":true}`), "",
+			)
+			select {
+			case payload := <-dataChan:
+				if payload.Acknowledge == nil {
+					t.Fatal("payload acknowledgement is nil")
+				}
+				payload.Acknowledge(testCase.err)
+			case <-time.After(time.Second):
+				t.Fatal("missing initial stream payload")
+			}
+			cancel()
+			for range dataChan {
+			}
+			for range errChan {
+			}
+			select {
+			case completion := <-completions:
+				if completion.Outcome != testCase.wantOutcome || completion.StatusCode != testCase.wantStatus || completion.Error != testCase.err.Error() {
+					t.Fatalf("completion = %#v, want outcome %s, status %d, error %q", completion, testCase.wantOutcome, testCase.wantStatus, testCase.err.Error())
+				}
+			case <-time.After(time.Second):
+				t.Fatal("missing stream completion")
+			}
+			select {
+			case completion := <-completions:
+				t.Fatalf("duplicate stream completion = %#v", completion)
+			default:
+			}
+		})
 	}
 }
 
@@ -1248,5 +1366,384 @@ func TestWriteErrorResponseMapsContextStatuses(t *testing.T) {
 				}
 			},
 		)
+	}
+}
+
+func TestPublicAuthSelectionErrorDoesNotDiscloseCause(t *testing.T) {
+	for _, test := range []struct{ name, input, forbiddenRaw string }{
+		{"multi word password", "password = correct horse battery staple", "battery staple"},
+		{"multi word credentials", "credentials: alice secret", "alice secret"},
+		{"unix customer path", "open /mnt/secrets/alice: permission denied", "alice"},
+		{"cookie value", "Cookie: sessionid=COOKIESECRET", "COOKIESECRET"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			model := "isolated-selection-error-model"
+			executor := &lifecycleCaptureExecutor{
+				execute: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (coreexecutor.Response, error) {
+					return coreexecutor.Response{}, coreauth.WithCause(
+						&coreauth.Error{Code: "auth_unavailable", Message: "no auth available", HTTPStatus: http.StatusServiceUnavailable},
+						errors.New(test.input),
+					)
+				},
+			}
+			handler := newLifecycleHandler(t, model, executor)
+			handler.AuthManager.SetRetryConfig(0, 0, 1)
+			router := gin.New()
+			router.POST("/v1/chat/completions", func(c *gin.Context) {
+				_, _, errMsg := handler.ExecuteWithAuthManager(c.Request.Context(), "openai", model, []byte(fmt.Sprintf(`{"model":%q}`, model)), "")
+				if errMsg == nil {
+					t.Fatal("expected an exhausted selection error")
+				}
+				handler.WriteErrorResponse(c, errMsg)
+			})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+			if response.Code != http.StatusServiceUnavailable {
+				t.Errorf("status=%d want 503", response.Code)
+			}
+			if strings.Contains(response.Body.String(), test.forbiddenRaw) {
+				t.Errorf("public response disclosed synthetic sensitive text %q: %s", test.forbiddenRaw, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestAuthSelectionWithoutCredentialsReturns503(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprint(streaming), func(t *testing.T) {
+			const model = "claude-sonnet-4-6"
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.SetRetryConfig(0, 0, 1)
+			manager.RegisterExecutor(&lifecycleCaptureExecutor{provider: "claude"})
+			registry.GetGlobalRegistry().RegisterClient("isolated-no-auth", "claude", []*registry.ModelInfo{{ID: model}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("isolated-no-auth") })
+			handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+			router := gin.New()
+			router.POST("/v1/chat/completions", func(c *gin.Context) {
+				var errMsg *ErrorMessage
+				if streaming {
+					data, _, errs := handler.ExecuteStreamWithAuthManager(c.Request.Context(), "openai", model, []byte(`{"model":"claude-sonnet-4-6","stream":true}`), "")
+					if data != nil {
+						for range data {
+						}
+					}
+					for item := range errs {
+						if item != nil {
+							errMsg = item
+						}
+					}
+				} else {
+					_, _, errMsg = handler.ExecuteWithAuthManager(c.Request.Context(), "openai", model, []byte(`{"model":"claude-sonnet-4-6"}`), "")
+				}
+				if errMsg == nil {
+					t.Fatal("expected no-auth error")
+				}
+				handler.WriteErrorResponse(c, errMsg)
+			})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+			if response.Code != http.StatusServiceUnavailable {
+				t.Errorf("status=%d want 503; body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+func TestAfterAuthPatchPreservesOriginalSessionInputs(t *testing.T) {
+	for _, name := range []string{"clear-session", "original-request", "lcp-hierarchy", "path-body"} {
+		t.Run(name, func(t *testing.T) {
+			request := coreexecutor.Request{Model: "gpt-5.6-luna"}
+			options := coreexecutor.Options{Headers: make(http.Header), Metadata: make(map[string]any)}
+			var patch pluginapi.RequestInterceptResponse
+			switch name {
+			case "clear-session":
+				options.Headers.Set("X-Session-ID", "initial-session")
+				options.Metadata[coreexecutor.CanonicalSessionIDMetadataKey] = "session:initial-session"
+				options.Metadata[coreexecutor.ParentSessionIDMetadataKey] = "session:initial-parent"
+				patch.ClearHeaders = []string{"X-Session-ID"}
+			case "original-request":
+				options.OriginalRequest = []byte(`{"session_id":"important-session"}`)
+				options.Metadata[coreexecutor.CanonicalSessionIDMetadataKey] = "session:important-session"
+				patch.Headers = http.Header{"X-Trace-ID": {"trace-abc"}}
+			case "lcp-hierarchy":
+				request.Payload = []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+				options.Metadata[coreexecutor.LCPAffinitySessionIDMetadataKey] = "lcp:v1:child-fork-123"
+				options.Metadata[coreexecutor.CanonicalSessionIDMetadataKey] = "lcp:v1:child-fork-123"
+				options.Metadata[coreexecutor.ParentSessionIDMetadataKey] = "lcp:v1:parent-trunk-000"
+				patch.Headers = http.Header{"X-Trace-ID": {"trace-xyz"}}
+			case "path-body":
+				request.Model = "gpt-image-2.5"
+				request.Payload = []byte(`{"model":"gpt-image-2.5","prompt":"edit this"}`)
+				options.Metadata[coreexecutor.RequestPathMetadataKey] = "/v1/images/edits"
+				patch.Path = "/v1/images/generations"
+				patch.Body = []byte(`{"model":"gpt-image-2.5","prompt":"rewritten for generations"}`)
+			}
+			calls := 0
+			handler := &BaseAPIHandler{PluginHost: &lifecycleTestHost{
+				interceptRequestAfterAuth: func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+					calls++
+					return patch
+				},
+			}}
+			result := handler.applyRequestInterceptorsAfterAuth(context.Background(), coreexecutor.RequestAfterAuthInterceptRequest{
+				Request: request, Options: options,
+			}, nil, "")
+			if calls != 1 || !result.Handled || result.Terminate {
+				t.Fatalf("patch consumer not reached: calls=%d, result=%+v", calls, result)
+			}
+			switch name {
+			case "clear-session":
+				if len(result.Options.Headers) != 0 {
+					t.Fatalf("headers not cleared: %v", result.Options.Headers)
+				}
+				if _, exists := result.Options.Metadata[coreexecutor.CanonicalSessionIDMetadataKey]; exists {
+					t.Error("canonical session was not cleared from metadata after interceptor cleared headers")
+				}
+				if _, exists := result.Options.Metadata[coreexecutor.ParentSessionIDMetadataKey]; exists {
+					t.Error("parent session was not cleared from metadata after interceptor cleared headers")
+				}
+			case "original-request":
+				if result.Options.Metadata[coreexecutor.CanonicalSessionIDMetadataKey] != "session:important-session" {
+					t.Fatalf("original request session changed: %+v", result.Options.Metadata)
+				}
+			case "lcp-hierarchy":
+				if result.Options.Metadata[coreexecutor.CanonicalSessionIDMetadataKey] != "lcp:v1:child-fork-123" || result.Options.Metadata[coreexecutor.ParentSessionIDMetadataKey] != "lcp:v1:parent-trunk-000" {
+					t.Fatalf("LCP hierarchy changed: %+v", result.Options.Metadata)
+				}
+			case "path-body":
+				if string(result.Request.Payload) != `{"model":"gpt-image-2.5","prompt":"rewritten for generations"}` || result.Options.Metadata[coreexecutor.RequestPathMetadataKey] != "/v1/images/generations" {
+					t.Fatalf("path/body rewrite lost: request=%+v, metadata=%+v", result.Request, result.Options.Metadata)
+				}
+			}
+		})
+	}
+}
+
+func TestAfterAuthSessionClearingReachesExecutor(t *testing.T) {
+	for _, operation := range []string{"execute", "count", "stream"} {
+		t.Run(operation, func(t *testing.T) {
+			model := "audit-post-auth-clearing-" + operation
+			called := 0
+			capture := func(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, options coreexecutor.Options) (coreexecutor.Response, error) {
+				called++
+				metadata := logging.GetClientRequestMetadata(ctx)
+				if options.Headers.Get("X-Session-ID") != "" {
+					t.Error("cleared header reached executor")
+				}
+				if metadata.SessionID != "" || metadata.ParentSessionID != "" || options.Metadata[coreexecutor.CanonicalSessionIDMetadataKey] != nil {
+					t.Errorf("cleared session still reached executor: session=%q parent=%q canonical=%v utility=%q", metadata.SessionID, metadata.ParentSessionID, options.Metadata[coreexecutor.CanonicalSessionIDMetadataKey], util.SessionIDFromContext(ctx))
+				}
+				return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+			}
+			executor := &lifecycleCaptureExecutor{execute: capture, executeCount: capture,
+				stream: func(ctx context.Context, auth *coreauth.Auth, request coreexecutor.Request, options coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+					_, _ = capture(ctx, auth, request, options)
+					chunks := make(chan coreexecutor.StreamChunk, 1)
+					chunks <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+					close(chunks)
+					return &coreexecutor.StreamResult{Chunks: chunks}, nil
+				},
+			}
+			handler := newLifecycleHandler(t, model, executor)
+			handler.PluginHost = &lifecycleTestHost{interceptRequestAfterAuth: func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+				return pluginapi.RequestInterceptResponse{ClearHeaders: []string{"X-Session-ID"}}
+			}}
+			ctx := context.Background()
+			request := ModelExecutionRequest{EntryProtocol: "openai", Model: model, Body: []byte(`{"model":"` + model + `"}`), Headers: http.Header{"X-Session-ID": {"initial-session"}}}
+			if operation == "stream" {
+				request.Stream = true
+				result, err := handler.ExecuteModelStream(ctx, request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for range result.Chunks {
+				}
+			} else if operation == "count" {
+				if _, _, err := handler.executeNonStream(ctx, "openai", "openai", model, request.Body, "", false, false, request.Headers, nil, "", handler.AuthManager.ExecuteCount); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := handler.ExecuteModel(ctx, request); err != nil {
+				t.Fatal(err)
+			}
+			if called != 1 {
+				t.Fatalf("executor calls=%d, want 1", called)
+			}
+		})
+	}
+}
+
+func TestAfterAuthSessionClearingPreservesCallerAndExecutionSessions(t *testing.T) {
+	for _, operation := range []string{"execute", "count", "stream"} {
+		for _, session := range []string{"inferred", "caller", "caller-empty", "execution"} {
+			t.Run(operation+"/"+session, func(t *testing.T) {
+				ctx := context.Background()
+				wantUtility, wantCanonical := "", ""
+				switch session {
+				case "caller":
+					ctx = util.WithSessionID(ctx, "caller-session")
+					wantUtility = "caller-session"
+				case "caller-empty":
+					ctx = util.WithSessionID(ctx, "")
+				case "execution":
+					ctx = WithExecutionSessionID(ctx, "active-execution")
+					wantUtility, wantCanonical = "execution:active-execution", "execution:active-execution"
+				}
+				calls := 0
+				capture := func(ctx context.Context, _ *coreauth.Auth, _ coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+					calls++
+					metadata := logging.GetClientRequestMetadata(ctx)
+					if metadata.SessionID != wantCanonical || metadata.ParentSessionID != "" || util.SessionIDFromContext(ctx) != wantUtility {
+						t.Errorf("session=%q parent=%q utility=%q, want canonical=%q utility=%q", metadata.SessionID, metadata.ParentSessionID, util.SessionIDFromContext(ctx), wantCanonical, wantUtility)
+					}
+					if opts.Headers.Get("X-Session-ID") != "" {
+						t.Error("cleared session header reached executor")
+					}
+					return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+				}
+				executor := &lifecycleCaptureExecutor{execute: capture, executeCount: capture, stream: func(ctx context.Context, auth *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+					_, _ = capture(ctx, auth, req, opts)
+					chunks := make(chan coreexecutor.StreamChunk, 1)
+					chunks <- coreexecutor.StreamChunk{Payload: []byte("data: [DONE]\n\n")}
+					close(chunks)
+					return &coreexecutor.StreamResult{Chunks: chunks}, nil
+				}}
+				model := "postauth-session-" + operation + "-" + session
+				handler := newLifecycleHandler(t, model, executor)
+				handler.PluginHost = &lifecycleTestHost{interceptRequestAfterAuth: func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+					return pluginapi.RequestInterceptResponse{ClearHeaders: []string{"X-Session-ID"}}
+				}}
+				req := ModelExecutionRequest{EntryProtocol: "openai", Model: model, Body: []byte(`{"model":"` + model + `"}`), Headers: http.Header{"X-Session-ID": {"initial-session"}}}
+				if operation == "stream" {
+					req.Stream = true
+					result, err := handler.ExecuteModelStream(ctx, req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for range result.Chunks {
+					}
+				} else if operation == "count" {
+					if _, _, err := handler.executeNonStream(ctx, "openai", "openai", model, req.Body, "", false, false, req.Headers, nil, "", handler.AuthManager.ExecuteCount); err != nil {
+						t.Fatal(err)
+					}
+				} else if _, err := handler.ExecuteModel(ctx, req); err != nil {
+					t.Fatal(err)
+				}
+				if calls != 1 {
+					t.Fatalf("executor calls=%d, want 1", calls)
+				}
+			})
+		}
+	}
+}
+
+func TestAfterAuthBodyChangeRefreshesSessionMetadata(t *testing.T) {
+	handler := &BaseAPIHandler{PluginHost: &lifecycleTestHost{interceptRequestAfterAuth: func(context.Context, pluginapi.RequestInterceptRequest) pluginapi.RequestInterceptResponse {
+		return pluginapi.RequestInterceptResponse{Body: []byte(`{"session_id":"replacement","messages":[{"role":"user","content":"new request"}]}`)}
+	}}}
+	metadata := map[string]any{
+		coreexecutor.CanonicalSessionIDMetadataKey:   "lcp:v1:old",
+		coreexecutor.ParentSessionIDMetadataKey:      "lcp:v1:parent",
+		coreexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:old",
+		coreexecutor.LCPFingerprintMetadataKey:       []string{"old"},
+		coreexecutor.IsForkMetadataKey:               true,
+		coreexecutor.IsCompactionMetadataKey:         true,
+		coreexecutor.NodeKindMetadataKey:             "fork",
+	}
+	result := handler.applyRequestInterceptorsAfterAuth(context.Background(), coreexecutor.RequestAfterAuthInterceptRequest{
+		Request: coreexecutor.Request{Payload: []byte(`{"messages":[{"role":"user","content":"old request"}]}`), Metadata: metadata},
+		Options: coreexecutor.Options{Metadata: metadata},
+	}, nil, "")
+	for _, got := range []map[string]any{result.Request.Metadata, result.Options.Metadata} {
+		if got[coreexecutor.CanonicalSessionIDMetadataKey] != "session:replacement" {
+			t.Fatalf("replacement session missing: %+v", got)
+		}
+		for _, key := range []string{coreexecutor.ParentSessionIDMetadataKey, coreexecutor.LCPAffinitySessionIDMetadataKey, coreexecutor.LCPFingerprintMetadataKey, coreexecutor.IsForkMetadataKey, coreexecutor.IsCompactionMetadataKey, coreexecutor.NodeKindMetadataKey} {
+			if _, exists := got[key]; exists {
+				t.Errorf("stale metadata %q retained: %+v", key, got)
+			}
+		}
+	}
+	if metadata[coreexecutor.CanonicalSessionIDMetadataKey] != "lcp:v1:old" {
+		t.Fatal("caller metadata changed")
+	}
+}
+
+func TestGetContextWithCancelPreservesFailureCause(t *testing.T) {
+	for _, failure := range []error{io.ErrClosedPipe, io.ErrShortWrite, context.Canceled, nil} {
+		t.Run(fmt.Sprint(failure), func(t *testing.T) {
+			handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+			ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ginCtx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			ctx, cancel := handler.GetContextWithCancel(nil, ginCtx, context.Background())
+			cancel(failure)
+			want := failure
+			if want == nil {
+				want = context.Canceled
+			}
+			if ctx.Err() != context.Canceled || !errors.Is(context.Cause(ctx), want) {
+				t.Fatalf("cancellation = %v, cause = %v, want %v", ctx.Err(), context.Cause(ctx), want)
+			}
+			cancel()
+			if !errors.Is(context.Cause(ctx), want) {
+				t.Fatalf("cleanup changed cause to %v", context.Cause(ctx))
+			}
+		})
+	}
+}
+
+func TestHandlerLifecyclePreservesUpstreamFailureAfterCleanup(t *testing.T) {
+	upstreamFailure := errors.New("upstream stream read failed")
+	source := make(chan coreexecutor.StreamChunk, 2)
+	source <- coreexecutor.StreamChunk{Payload: []byte(`{"chunk":true}`)}
+	source <- coreexecutor.StreamChunk{Err: upstreamFailure}
+	t.Cleanup(func() { close(source) })
+	executor := &lifecycleCaptureExecutor{
+		stream: func(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+			return &coreexecutor.StreamResult{Chunks: source}, nil
+		},
+	}
+	handler := newLifecycleHandler(t, "handler-upstream-error-cleanup", executor)
+	completions := make(chan pluginapi.RequestCompletion, 2)
+	handler.SetPluginHost(&lifecycleTestHost{
+		completeRequest: func(_ context.Context, completion pluginapi.RequestCompletion) {
+			completions <- completion
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	data, _, errs := handler.ExecuteStreamChunksWithAuthManager(ctx, "openai", "handler-upstream-error-cleanup", []byte(`{"stream":true}`), "")
+	select {
+	case chunk := <-data:
+		if chunk.Acknowledge == nil {
+			t.Fatal("missing payload acknowledgement")
+		}
+		chunk.Acknowledge(nil)
+	case <-time.After(time.Second):
+		t.Fatal("missing initial payload")
+	}
+	select {
+	case failure := <-errs:
+		if failure == nil || !errors.Is(failure.Error, upstreamFailure) {
+			t.Fatalf("upstream failure = %#v", failure)
+		}
+		cancel()
+		if failure.Acknowledge != nil {
+			failure.Acknowledge(nil)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing upstream failure")
+	}
+	select {
+	case completion := <-completions:
+		if completion.Outcome != pluginapi.RequestCompletionFailed || completion.Error != upstreamFailure.Error() || completion.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("cleanup replaced upstream failure: %#v", completion)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing failure completion")
+	}
+	select {
+	case completion := <-completions:
+		t.Fatalf("duplicate completion: %#v", completion)
+	default:
 	}
 }

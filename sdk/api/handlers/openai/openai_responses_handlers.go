@@ -70,6 +70,7 @@ type responsesStreamFrameWriter struct {
 	deferredBytes int
 	holding       bool
 	deferTerminal bool
+	failedWritten bool
 	err           error
 }
 
@@ -82,6 +83,9 @@ func (w *responsesStreamFrameWriter) writeFrames(frames [][]byte) {
 			if err := writeResponsesSSEChunk(w.writer, frame); err != nil {
 				w.err = err
 				return
+			}
+			if payload, hasData, valid := responsesSSEDataPayload(frame); hasData && valid && gjson.GetBytes(payload, "type").String() == "response.failed" {
+				w.failedWritten = true
 			}
 			continue
 		}
@@ -672,6 +676,7 @@ func (h *ResponsesAPIHandler) forwardResponsesStreamChunksWithMode(
 	if acc == nil {
 		acc = newResponsesSSEFrameAccumulator()
 	}
+	acc.isCodexClient = isCodexResponsesClientRequest(c)
 	frameWriter := &responsesStreamFrameWriter{writer: c.Writer, deferTerminal: deferTerminal}
 	doneError := func() error {
 		if err := acc.Err(); err != nil {
@@ -696,6 +701,9 @@ func (h *ResponsesAPIHandler) forwardResponsesStreamChunksWithMode(
 				frameWriter.discardDeferred()
 				if err := doneError(); err != nil {
 					return err
+				}
+				if frameWriter.failedWritten {
+					return nil
 				}
 				return writeResponsesStreamTerminalError(c, errMsg)
 			},

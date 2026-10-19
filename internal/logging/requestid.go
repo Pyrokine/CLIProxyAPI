@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"io"
 	"os"
 	"strconv"
 	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	log "github.com/sirupsen/logrus"
 )
 
 // requestIDKey is the context key for storing/retrieving request IDs.
@@ -34,9 +36,14 @@ var requestIDFallbackPrefix = func() [8]byte {
 // generateRequestID creates a new 128-bit hexadecimal request ID.
 func generateRequestID() string {
 	var id [16]byte
-	if n, err := readRequestIDRandom(id[:]); err == nil && n == len(id) {
+	n, err := readRequestIDRandom(id[:])
+	if err == nil && n == len(id) {
 		return hex.EncodeToString(id[:])
 	}
+	if err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	log.WithError(err).Warn("request ID random source failed; using process-scoped fallback")
 
 	copy(id[:8], requestIDFallbackPrefix[:])
 	binary.BigEndian.PutUint64(id[8:], requestIDFallbackCounter.Add(1))

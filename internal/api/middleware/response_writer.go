@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/httpwire"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/gin-gonic/gin"
@@ -226,8 +227,12 @@ func (w *responseWriterWrapper) WriteHeaderNow() {
 }
 
 func (w *responseWriterWrapper) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *responseWriterWrapper) FlushError() error {
 	w.commitHeaders()
-	w.ResponseWriter.Flush()
+	return httpwire.FlushResponse(w.ResponseWriter)
 }
 
 func (w *responseWriterWrapper) commitHeaders() {

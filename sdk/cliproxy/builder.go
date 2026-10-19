@@ -338,6 +338,7 @@ func (b *Builder) Build() (*Service, error) {
 		serverOptions:      append([]sdkapi.ServerOption(nil), b.serverOptions...),
 	}
 	service.usageStatisticsEnabled.Store(b.cfg.UsageStatisticsEnabled)
+	coreManager.SetRefreshBindingObserver(service.onRefreshBindingChange)
 	coreManager.SetHomeClientProvider(
 		func() coreauth.HomeClient {
 			client := service.currentHomeClient()
@@ -363,6 +364,13 @@ func (s *Service) runtimeAuthSyncHook() coreauth.PostAuthHook {
 
 		s.authUpdateMu.Lock()
 		defer s.authUpdateMu.Unlock()
+
+		if s.coreManager != nil && auth.Generation != 0 {
+			current, ok := s.coreManager.GetByID(auth.ID)
+			if !ok || current.Generation > auth.Generation {
+				return nil
+			}
+		}
 
 		action := AuthUpdateActionAdd
 		if s.coreManager != nil {

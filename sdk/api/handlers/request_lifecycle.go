@@ -10,6 +10,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 	"github.com/google/uuid"
@@ -168,7 +169,16 @@ func executionErrorMessage(err error) *ErrorMessage {
 			err,
 		)
 	}
-	status := clienterror.HTTPStatusFromErrorOr(err, http.StatusInternalServerError)
+	status := clienterror.HTTPStatusFromError(err)
+	if status <= 0 {
+		var authErr *coreauth.Error
+		if errors.As(err, &authErr) && authErr != nil &&
+			(authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable") {
+			status = http.StatusServiceUnavailable
+		} else {
+			status = http.StatusInternalServerError
+		}
+	}
 	if body, direct := clienterror.ResponseBodyFromError(err); direct {
 		contentType := http.DetectContentType(body)
 		if json.Valid(body) {

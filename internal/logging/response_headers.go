@@ -23,8 +23,9 @@ type responseHeadersHolder struct {
 }
 
 type responseTimingHolder struct {
-	mu                sync.RWMutex
-	firstResponseByte time.Time
+	mu                 sync.RWMutex
+	firstResponseByte  time.Time
+	firstResponseToken time.Time
 }
 
 func WithEndpoint(ctx context.Context, endpoint string) context.Context {
@@ -120,6 +121,34 @@ func GetFirstResponseByteAt(ctx context.Context) time.Time {
 	holder.mu.RLock()
 	defer holder.mu.RUnlock()
 	return holder.firstResponseByte
+}
+
+func MarkFirstResponseToken(ctx context.Context) {
+	if ctx == nil {
+		return
+	}
+	holder, ok := ctx.Value(responseTimingKey{}).(*responseTimingHolder)
+	if !ok || holder == nil {
+		return
+	}
+	holder.mu.Lock()
+	defer holder.mu.Unlock()
+	if holder.firstResponseToken.IsZero() {
+		holder.firstResponseToken = time.Now()
+	}
+}
+
+func GetFirstResponseTokenAt(ctx context.Context) time.Time {
+	if ctx == nil {
+		return time.Time{}
+	}
+	holder, ok := ctx.Value(responseTimingKey{}).(*responseTimingHolder)
+	if !ok || holder == nil {
+		return time.Time{}
+	}
+	holder.mu.RLock()
+	defer holder.mu.RUnlock()
+	return holder.firstResponseToken
 }
 
 func GetResponseStatus(ctx context.Context) int {

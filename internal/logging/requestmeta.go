@@ -17,6 +17,9 @@ type ClientRequestMetadata struct {
 	UserAgent       string
 	SessionID       string
 	ParentSessionID string
+	NodeKind        string
+	IsFork          bool
+	IsCompaction    bool
 }
 
 // ExtractClientRequestMetadata captures the bounded request metadata allowed in usage records.

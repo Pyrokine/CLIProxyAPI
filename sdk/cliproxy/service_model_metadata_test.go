@@ -8,6 +8,64 @@ import (
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
+func TestBuildCodexConfigModelsConfigurationUpdateCapability(t *testing.T) {
+	models := buildCodexConfigModels(&internalconfig.CodexKey{Models: []internalconfig.CodexModel{
+		{Name: "gpt-5.5", Alias: "supported", SupportConfigurationUpdate: true},
+		{Name: "gpt-5.5", Alias: "disabled", SupportConfigurationUpdate: false},
+		{Name: "gpt-5.5", Alias: "DEFAULT"},
+		{Name: "gpt-5.5", Alias: "default", SupportConfigurationUpdate: true},
+		{Name: "other-model", SupportConfigurationUpdate: true},
+	}})
+	want := map[string]bool{"supported": true, "disabled": false, "DEFAULT": false, "other-model": true}
+	if len(models) != len(want) {
+		t.Fatalf("models = %#v, want %d", models, len(want))
+	}
+	for _, model := range models {
+		if enabled, ok := want[model.ID]; !ok || model.SupportConfigurationUpdate != enabled {
+			t.Errorf("model %q support_configuration_update = %t, want %t", model.ID, model.SupportConfigurationUpdate, enabled)
+		}
+	}
+}
+
+func TestRegisterCodexConfigurationUpdateCapabilityIsCredentialScoped(t *testing.T) {
+	cfg := &internalconfig.Config{CodexKey: []internalconfig.CodexKey{{
+		APIKey: "config-key", BaseURL: "https://codex.example/v1",
+		Models: []internalconfig.CodexModel{{Name: "gpt-5.5", Alias: "configured", SupportConfigurationUpdate: true}},
+	}}}
+	catalog := registry.GetGlobalRegistry()
+	for _, id := range []string{"codex-config-update-api-key", "codex-config-update-oauth"} {
+		catalog.UnregisterClient(id)
+		id := id
+		t.Cleanup(func() { catalog.UnregisterClient(id) })
+	}
+	service := &Service{cfg: cfg}
+	service.registerModelsForAuthWithConfig(&coreauth.Auth{
+		ID: "codex-config-update-api-key", Provider: "codex", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"source": "config:codex[0]", "auth_kind": "apikey", "api_key": "config-key", "base_url": "https://codex.example/v1", coreauth.AttributeConfigIndex: "0"},
+	}, cfg)
+	service.registerModelsForAuthWithConfig(&coreauth.Auth{
+		ID: "codex-config-update-oauth", Provider: "codex", Status: coreauth.StatusActive,
+		Attributes: map[string]string{"source": "oauth.json", "auth_kind": "oauth", "api_key": "config-key", "base_url": "https://codex.example/v1", "plan_type": "pro"},
+	}, cfg)
+	configured := catalog.GetModelInfoForClient("codex-config-update-api-key", "configured")
+	if configured == nil || !configured.SupportConfigurationUpdate {
+		t.Fatalf("API key model capability = %+v, want true", configured)
+	}
+	if leaked := catalog.GetModelInfoForClient("codex-config-update-oauth", "configured"); leaked != nil {
+		t.Fatalf("API key model registered for OAuth account: %+v", leaked)
+	}
+	staticModels := registry.GetCodexProModels()
+	if len(staticModels) == 0 {
+		t.Fatal("Codex OAuth catalog is empty")
+	}
+	for _, static := range staticModels {
+		registered := catalog.GetModelInfoForClient("codex-config-update-oauth", static.ID)
+		if registered == nil || registered.SupportConfigurationUpdate != static.SupportConfigurationUpdate {
+			t.Fatalf("OAuth model %q capability = %+v, want %t", static.ID, registered, static.SupportConfigurationUpdate)
+		}
+	}
+}
+
 func TestBuildCodexConfigModels_PreservesStaticMetadata(t *testing.T) {
 	models := buildCodexConfigModels(
 		&internalconfig.CodexKey{

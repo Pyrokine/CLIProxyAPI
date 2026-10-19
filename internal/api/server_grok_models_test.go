@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/client/grokbuild"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/modelcatalog"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 )
 
@@ -93,6 +94,31 @@ func TestModelsDispatchKeepsOrdinaryOpenAIResponse(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("registered ordinary model missing: %s", recorder.Body.String())
+	}
+}
+
+func TestHomeGrokCatalogPreservesReasoningEfforts(t *testing.T) {
+	catalog, err := modelcatalog.DecodeHomeCatalog([]byte(`{"x-ai":[{"id":"grok-4.7"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := homeModelEntries(catalog)
+	models := grokModelsFromHomeEntries(entries)
+	response := grokbuild.BuildResponse(models)
+	want := []string{"low", "medium", "high", "xhigh"}
+	if len(response.Data) != 1 || response.Data[0].ID != "grok-4.7" ||
+		len(response.Data[0].ReasoningEfforts) != len(want) {
+		t.Fatalf("Home Grok response = %#v", response)
+	}
+	for index, effort := range response.Data[0].ReasoningEfforts {
+		if effort.Value != want[index] {
+			t.Fatalf("effort %d = %q, want %q", index, effort.Value, want[index])
+		}
+	}
+	models[0].ReasoningLevels[0] = "changed"
+	if entries[0].reasoningLevels[0] != want[0] ||
+		homeModelEntries(catalog)[0].reasoningLevels[0] != want[0] {
+		t.Fatal("Grok response mutated Home catalog reasoning levels")
 	}
 }
 

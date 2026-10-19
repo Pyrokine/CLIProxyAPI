@@ -9,15 +9,18 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
+	codexmodels "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/codex/models"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
-	responsesconverter "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
+	_ "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -142,16 +145,25 @@ func (h *APIHandler) OpenAIModels(c *gin.Context) {
 	if _, ok := c.Request.URL.Query()["client_version"]; ok {
 		cfg := h.ConfigSnapshot()
 		optimizeMultiAgentV2 := cfg != nil && cfg.CodexOptimizeMultiAgentV2
-		h.WriteModelListResponse(
-			c,
-			h.HandlerType(),
-			codexClientModelsResponse(
-				models,
-				registry.GetGlobalRegistry().GetModelProviders,
-				optimizeMultiAgentV2,
-				c.Query("client_version"),
-			),
+		payload := codexClientModelsResponseWithCPACapabilities(
+			models,
+			registry.GetGlobalRegistry().GetModelProviders,
+			registry.GetGlobalRegistry().GetResponsesWebSearchCapability,
+			optimizeMultiAgentV2,
+			c.Query("client_version"),
+			func(model string) bool {
+				return cfg != nil && cfg.Client.Codex.EnableApplyPatch && h.SupportsApplyPatchModel(model)
+			},
 		)
+		body, err := codexmodels.MarshalCompact(payload)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, handlers.ErrorResponse{Error: handlers.ErrorDetail{
+				Message: "Failed to encode model catalog",
+				Type:    "server_error",
+			}})
+			return
+		}
+		h.WriteModelListResponseBody(c, h.HandlerType(), body)
 		return
 	}
 	h.WriteModelListResponse(c, h.HandlerType(), gin.H{
@@ -189,7 +201,14 @@ func (h *APIHandler) ChatCompletions(c *gin.Context) {
 	// Convert them to Chat Completions so downstream translators preserve tool metadata.
 	if shouldTreatAsResponsesFormat(rawJSON) {
 		modelName := gjson.GetBytes(rawJSON, "model").String()
-		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
+		rawJSON, err = sdktranslator.TranslateRequestChecked(c.Request.Context(), sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, modelName, rawJSON, stream)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{
+				Message: err.Error(),
+				Type:    "invalid_request_error",
+			}})
+			return
+		}
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
 	}
 
@@ -704,6 +723,23 @@ func (h *APIHandler) handleStreamResult(
 	initial ...coreexecutor.StreamChunk,
 ) {
 	lifecycle := newOpenAIChatStreamLifecycle()
+	writeTerminalError := func(errMsg *handlers.ErrorMessage) error {
+		if errMsg == nil {
+			return nil
+		}
+		status := http.StatusInternalServerError
+		if errMsg.StatusCode > 0 {
+			status = errMsg.StatusCode
+		}
+		errText := http.StatusText(status)
+		if errMsg.Error != nil && errMsg.Error.Error() != "" {
+			errText = errMsg.Error.Error()
+		}
+		body := handlers.BuildErrorResponseBody(status, errText)
+		return handlers.WriteStreamBytes(
+			c.Writer, []byte("data: "), body, []byte("\n\n"),
+		)
+	}
 	h.ForwardStreamChunks(
 		c, flusher, cancel, data, errs, handlers.StreamChunkForwardOptions{
 			RequireTerminal: true,
@@ -721,26 +757,13 @@ func (h *APIHandler) handleStreamResult(
 					c.Writer, []byte("data: "), chunk, []byte("\n\n"),
 				)
 			},
-			WriteTerminalError: func(errMsg *handlers.ErrorMessage) error {
-				if errMsg == nil {
-					return nil
-				}
-				status := http.StatusInternalServerError
-				if errMsg.StatusCode > 0 {
-					status = errMsg.StatusCode
-				}
-				errText := http.StatusText(status)
-				if errMsg.Error != nil && errMsg.Error.Error() != "" {
-					errText = errMsg.Error.Error()
-				}
-				body := handlers.BuildErrorResponseBody(status, errText)
-				return handlers.WriteStreamBytes(
-					c.Writer, []byte("data: "), body, []byte("\n\n"),
-				)
-			},
+			WriteTerminalError: writeTerminalError,
 			WriteDone: func() error {
 				if err := lifecycle.finalize(); err != nil {
-					return err
+					return errors.Join(err, writeTerminalError(&handlers.ErrorMessage{
+						StatusCode: http.StatusBadGateway,
+						Error:      err,
+					}))
 				}
 				return handlers.WriteStreamBytes(c.Writer, []byte("data: [DONE]\n\n"))
 			},

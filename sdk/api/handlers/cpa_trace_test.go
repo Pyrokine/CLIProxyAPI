@@ -3,13 +3,16 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
@@ -47,6 +50,32 @@ func TestRequestExecutionMetadataSkipsWebsocketTraceCallback(t *testing.T) {
 	meta := requestExecutionMetadata(ctx)
 	if _, exists := meta[coreexecutor.SelectedAuthIndexCallbackMetadataKey]; exists {
 		t.Fatal("unexpected selected auth index callback for websocket upgrade")
+	}
+}
+
+func TestWriteErrorResponseEmitsSafeRetryAfterWithoutPassthrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodGet, "/", nil)
+
+	handler := NewBaseAPIHandlers(&config.SDKConfig{}, nil)
+	handler.WriteErrorResponse(ginCtx, &ErrorMessage{
+		StatusCode: http.StatusTooManyRequests,
+		Error: fmt.Errorf("auth selection: %w", coreauth.NewHomeConcurrencyBusyError(
+			"credential concurrency limit exceeded", 1500*time.Millisecond,
+		)),
+		Addon: http.Header{
+			"Retry-After":    {"999"},
+			"X-Upstream-Key": {"must-not-leak"},
+		},
+	})
+
+	if got := recorder.Header().Get("Retry-After"); got != "2" {
+		t.Fatalf("Retry-After = %q, want 2", got)
+	}
+	if got := recorder.Header().Get("X-Upstream-Key"); got != "" {
+		t.Fatalf("unexpected upstream header: %q", got)
 	}
 }
 

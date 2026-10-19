@@ -1651,7 +1651,7 @@ func (l *FileRequestLogger) logRequestWithSources(
 		responseToWrite = response
 	}
 
-	published, writeErr := writeRequestLogAtomicallyWithResult(
+	published, publishedPath, writeErr := writeRequestLogAtomicallyWithResult(
 		l, filePath, func(logFile io.Writer) error {
 			return l.writeNonStreamingLog(
 				logFile, url, method, requestHeaders, body, websocketTimeline, websocketTimelineSource,
@@ -1663,7 +1663,7 @@ func (l *FileRequestLogger) logRequestWithSources(
 		},
 	)
 	if published {
-		l.recordRequestLogAvailable(requestID, RequestLogLocationLocal, filename)
+		l.recordRequestLogAvailable(requestID, RequestLogLocationLocal, filepath.Base(publishedPath))
 		artifactRecorded = true
 	}
 	if writeErr != nil {
@@ -2611,7 +2611,7 @@ func writeRequestLogAtomically(
 	path string,
 	writeLog func(io.Writer) error,
 ) error {
-	_, err := writeRequestLogAtomicallyWithResult(logger, path, writeLog)
+	_, _, err := writeRequestLogAtomicallyWithResult(logger, path, writeLog)
 	return err
 }
 
@@ -2619,17 +2619,17 @@ func writeRequestLogAtomicallyWithResult(
 	logger *FileRequestLogger,
 	path string,
 	writeLog func(io.Writer) error,
-) (published bool, err error) {
+) (published bool, publishedPath string, err error) {
 	if strings.TrimSpace(path) == "" {
-		return false, fmt.Errorf("request log path is required")
+		return false, "", fmt.Errorf("request log path is required")
 	}
 	if writeLog == nil {
-		return false, fmt.Errorf("request log writer is required")
+		return false, "", fmt.Errorf("request log writer is required")
 	}
 	slotReserved := false
 	if logger != nil {
 		if !logger.reserveFinalTempFileSlot() {
-			return false, fmt.Errorf(
+			return false, "", fmt.Errorf(
 				"request log publish cleanup capacity reached %d files",
 				maxPendingRequestLogTempFiles,
 			)
@@ -2644,7 +2644,7 @@ func writeRequestLogAtomicallyWithResult(
 	dir := filepath.Dir(path)
 	lease, errLease := createRequestLogTempLease(dir, "request-log-final-")
 	if errLease != nil {
-		return false, fmt.Errorf("create request log publish lease: %w", errLease)
+		return false, "", fmt.Errorf("create request log publish lease: %w", errLease)
 	}
 	tempPath := strings.TrimSuffix(lease.path, responseBodyLeaseSuffix) + ".tmp"
 	defer func() {
@@ -2671,18 +2671,34 @@ func writeRequestLogAtomicallyWithResult(
 
 	file, errCreate := os.OpenFile(tempPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if errCreate != nil {
-		return false, errCreate
+		return false, "", errCreate
 	}
 	writeErr := writeLog(file)
 	writeErr = errors.Join(writeErr, file.Sync(), file.Close())
 	if writeErr != nil {
-		return false, writeErr
+		return false, "", writeErr
 	}
-	if errLink := os.Link(tempPath, path); errLink != nil {
-		return false, errLink
+	for sequence := 0; sequence <= 1000; sequence++ {
+		candidate := path
+		if sequence > 0 {
+			filename := filepath.Base(path)
+			extension := filepath.Ext(filename)
+			base := strings.TrimSuffix(filename, extension)
+			if lastDash := strings.LastIndex(base, "-"); lastDash >= 0 {
+				base = fmt.Sprintf("%s_%d%s", base[:lastDash], sequence, base[lastDash:])
+			} else {
+				base = fmt.Sprintf("%s_%d", base, sequence)
+			}
+			candidate = filepath.Join(dir, base+extension)
+		}
+		if errLink := os.Link(tempPath, candidate); errLink == nil {
+			published = true
+			return true, candidate, nil
+		} else if !errors.Is(errLink, os.ErrExist) {
+			return false, "", errLink
+		}
 	}
-	published = true
-	return true, nil
+	return false, "", fmt.Errorf("too many conflicting request log files for %s", path)
 }
 
 func writeAll(w io.Writer, data []byte) error {
@@ -3387,7 +3403,7 @@ func (w *fileStreamingLogWriter) Close() error {
 				return
 			}
 
-			published, errWrite := writeRequestLogAtomicallyWithResult(w.logger, w.logFilePath, w.writeFinalLog)
+			published, publishedPath, errWrite := writeRequestLogAtomicallyWithResult(w.logger, w.logFilePath, w.writeFinalLog)
 			w.closeErr = errWrite
 			if w.logger == nil {
 				return
@@ -3396,7 +3412,7 @@ func (w *fileStreamingLogWriter) Close() error {
 				w.logger.recordRequestLogAvailable(
 					w.requestID,
 					RequestLogLocationLocal,
-					filepath.Base(w.logFilePath),
+					filepath.Base(publishedPath),
 				)
 				return
 			}

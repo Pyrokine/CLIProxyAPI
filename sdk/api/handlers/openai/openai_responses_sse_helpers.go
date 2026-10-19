@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 )
 
 func responsesSSEFrameLen(chunk []byte) int {
@@ -57,6 +58,32 @@ func responsesSSEHasField(chunk []byte, prefix []byte) bool {
 		}
 	}
 	return false
+}
+
+func responsesSSEEventName(frame []byte) string {
+	var event string
+	for len(frame) > 0 {
+		line := frame
+		if index := bytes.IndexByte(frame, '\n'); index >= 0 {
+			line = frame[:index]
+			frame = frame[index+1:]
+		} else {
+			frame = nil
+		}
+		line = bytes.TrimRight(line, "\r")
+		if bytes.HasPrefix(line, []byte("event:")) {
+			event = strings.TrimSpace(string(line[len("event:"):]))
+		}
+	}
+	return event
+}
+
+func shouldFilterPrivateResponsesSSEEvent(event string, isCodexClient bool) bool {
+	event = strings.TrimSpace(event)
+	if strings.HasPrefix(event, "responsesapi.") || event == "codex.rate_limits" {
+		return true
+	}
+	return !isCodexClient && strings.HasPrefix(event, "codex.")
 }
 
 func responsesSSEDataPayload(chunk []byte) ([]byte, bool, bool) {

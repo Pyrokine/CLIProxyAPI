@@ -17,25 +17,13 @@ func CodexClientModelsResponseForClient(models []map[string]any, clientVersion s
 	return codexmodels.BuildResponseForClient(models, nil, enabled, clientVersion)
 }
 
-func codexClientModelsResponse(
-	models []map[string]any,
-	providersForModel codexClientProvidersForModelFunc,
-	optimizeMultiAgentV2 bool,
-	clientVersions ...string,
-) map[string]any {
-	clientVersion := ""
-	if len(clientVersions) > 0 {
-		clientVersion = clientVersions[0]
-	}
-	return codexmodels.BuildResponseForClient(models, providersForModel, optimizeMultiAgentV2, clientVersion)
-}
-
 func codexClientModelsResponseWithCPACapabilities(
 	models []map[string]any,
 	providersForModel codexClientProvidersForModelFunc,
 	webSearchCapabilityForModel codexClientWebSearchCapabilityForModelFunc,
 	optimizeMultiAgentV2 bool,
 	clientVersion string,
+	applyPatchCapabilityForModel ...codexmodels.ApplyPatchCapabilityForModelFunc,
 ) map[string]any {
 	return codexmodels.BuildResponseForClientWithCPACapabilities(
 		models,
@@ -43,5 +31,6 @@ func codexClientModelsResponseWithCPACapabilities(
 		webSearchCapabilityForModel,
 		optimizeMultiAgentV2,
 		clientVersion,
+		applyPatchCapabilityForModel...,
 	)
 }

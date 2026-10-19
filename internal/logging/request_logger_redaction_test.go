@@ -533,26 +533,70 @@ func TestWriteRequestLogAtomicallyDoesNotReplaceExistingFile(t *testing.T) {
 	if errWrite := os.WriteFile(path, []byte("old-content"), 0o600); errWrite != nil {
 		t.Fatalf("write old request log: %v", errWrite)
 	}
-	published, errWrite := writeRequestLogAtomicallyWithResult(
+	published, publishedPath, errWrite := writeRequestLogAtomicallyWithResult(
 		nil, path, func(writer io.Writer) error {
 			_, err := writer.Write([]byte("new-content"))
 			return err
 		},
 	)
-	if errWrite == nil || !errors.Is(errWrite, os.ErrExist) {
-		t.Fatalf("writeRequestLogAtomicallyWithResult error = %v, want file exists", errWrite)
+	if errWrite != nil || !published || publishedPath != filepath.Join(logsDir, "request_1.log") {
+		t.Fatalf("unique request log = (%t, %q, %v)", published, publishedPath, errWrite)
 	}
-	if published {
-		t.Fatal("writeRequestLogAtomicallyWithResult reported an existing file as published")
-	}
-	got, errRead := os.ReadFile(path)
-	if errRead != nil {
-		t.Fatalf("read existing request log: %v", errRead)
-	}
-	if string(got) != "old-content" {
-		t.Fatalf("existing request log = %q", got)
+	for fileName, want := range map[string]string{path: "old-content", publishedPath: "new-content"} {
+		got, errRead := os.ReadFile(fileName)
+		if errRead != nil || string(got) != want {
+			t.Fatalf("request log %q = %q, error %v, want %q", fileName, got, errRead, want)
+		}
 	}
 	assertNoRequestLogPublishArtifacts(t, logsDir)
+}
+
+func TestWriteRequestLogAtomicallyKeepsConcurrentCollisions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v1_chat_completions-2026-09-23T120000-00000000.log")
+	const workers = 20
+	results := make(chan string, workers)
+	errs := make(chan error, workers)
+	var pending sync.WaitGroup
+	for index := range workers {
+		pending.Add(1)
+		go func() {
+			defer pending.Done()
+			content := fmt.Sprintf("worker-%d", index)
+			published, actual, err := writeRequestLogAtomicallyWithResult(nil, path, func(writer io.Writer) error {
+				_, errWrite := io.WriteString(writer, content)
+				return errWrite
+			})
+			if err != nil || !published {
+				errs <- fmt.Errorf("publish %q: published=%t error=%v", content, published, err)
+				return
+			}
+			results <- actual
+		}()
+	}
+	pending.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool, workers)
+	contents := make(map[string]bool, workers)
+	for actual := range results {
+		if seen[actual] || !strings.HasSuffix(actual, "-00000000.log") {
+			t.Fatalf("duplicate or malformed request log path: %q", actual)
+		}
+		seen[actual] = true
+		content, err := os.ReadFile(actual)
+		if err != nil || contents[string(content)] {
+			t.Fatalf("request log %q: content=%q error=%v", actual, content, err)
+		}
+		contents[string(content)] = true
+	}
+	if len(seen) != workers {
+		t.Fatalf("saved request logs = %d, want %d", len(seen), workers)
+	}
+	assertNoRequestLogPublishArtifacts(t, dir)
 }
 
 func TestWriteRequestLogAtomicallyKeepsLeaseWhenTempCleanupFails(t *testing.T) {

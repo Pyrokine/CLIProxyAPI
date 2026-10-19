@@ -287,7 +287,7 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
 	if maxBytes <= 0 {
 		return ""
 	}
-	reason = strings.TrimSpace(reason)
+	reason = strings.Map(func(r rune) rune { return r }, strings.TrimSpace(reason))
 	if len(reason) <= maxBytes {
 		return reason
 	}
@@ -311,11 +311,23 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	passthroughSessionID := uuid.NewString()
+	socketCtx, cancelSocket := context.WithCancelCause(c.Request.Context())
+	defer cancelSocket(nil)
+	c.Request = c.Request.WithContext(socketCtx)
+	localInterrupt := newResponsesLocalInterrupt()
+	wsTimelineLog := newWebsocketTimelineRecorder(c)
+	input, readerDone := readResponsesWebsocketInput(socketCtx, cancelSocket, conn, func(payload []byte) error {
+		return h.forwardResponsesWebsocketInterrupt(socketCtx, passthroughSessionID, payload)
+	}, localInterrupt, writer, wsTimelineLog)
 	clientRemoteAddr := responsesWebsocketClientIP(c)
 	log.Infof("responses websocket: client connected id=%s remote=%s", passthroughSessionID, clientRemoteAddr)
 	var wsTerminateErr error
-	wsTimelineLog := newWebsocketTimelineRecorder(c)
 	defer func() {
+		cancelSocket(nil)
+		if errClose := conn.Close(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
+			log.Warnf("responses websocket: close connection error: %v", errClose)
+		}
+		<-readerDone
 		releaseResponsesWebsocketToolCaches(downstreamSessionKey)
 		markResponsesWebsocketTransportFailure(c, wsTerminateErr)
 		if wsTerminateErr != nil {
@@ -329,9 +341,6 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			log.Infof("responses websocket: upstream execution session closed id=%s", passthroughSessionID)
 		}
 		setWebsocketTimelineBody(c, wsTimelineLog.String())
-		if errClose := conn.Close(); errClose != nil && !isWebsocketConnectionClosedError(errClose) {
-			log.Warnf("responses websocket: close connection error: %v", errClose)
-		}
 	}()
 
 	var lastRequest []byte
@@ -355,22 +364,30 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	upstreamWebsocketAuthID := ""
 
 	for {
-		msgType, payload, errReadMessage := conn.ReadMessage()
-		if errReadMessage != nil {
-			wsTerminateErr = errReadMessage
-			if websocket.IsCloseError(
-				errReadMessage, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived,
-			) {
-				log.Infof(
-					"responses websocket: client disconnected id=%s error=%v", passthroughSessionID, errReadMessage,
-				)
+		var payload []byte
+		select {
+		case received, ok := <-input:
+			if !ok {
+				wsTerminateErr = context.Cause(socketCtx)
 			} else {
-				// log.Warnf("responses websocket: read message failed id=%s error=%v", passthroughSessionID, errReadMessage)
+				payload = received
 			}
+		case <-socketCtx.Done():
+			wsTerminateErr = context.Cause(socketCtx)
+		}
+		if errors.Is(wsTerminateErr, context.Canceled) {
+			wsTerminateErr = nil
 			return
 		}
-		if msgType != websocket.TextMessage && msgType != websocket.BinaryMessage {
-			continue
+		if wsTerminateErr != nil {
+			if websocket.IsCloseError(
+				wsTerminateErr, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseNoStatusReceived,
+			) {
+				log.Infof(
+					"responses websocket: client disconnected id=%s error=%v", passthroughSessionID, wsTerminateErr,
+				)
+			}
+			return
 		}
 		appendWebsocketEvent(wsTimelineLog, "request", payload)
 
@@ -485,6 +502,9 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 
 		var requestJSON []byte
 		var errMsg *handlers.ErrorMessage
+		isPrewarm := (rawPreviousResponseID == "" || rawPreviousResponseID == previousLastResponseID || prewarmContinuation) && shouldHandleResponsesWebsocketPrewarmLocally(
+			payload, allowIncrementalInputWithPreviousResponseID,
+		)
 		switch {
 		case pendingPrewarmID != "" && rawPreviousResponseID != "":
 			if rawPreviousResponseID != pendingPrewarmID {
@@ -492,7 +512,7 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			} else {
 				requestJSON, _, errMsg = normalizeResponsesWebsocketPrewarmFollowup(payload, previousLastRequest)
 			}
-		case pendingPrewarmID != "" &&
+		case isPrewarm && rawPreviousResponseID == "" || pendingPrewarmID != "" &&
 			strings.TrimSpace(gjson.GetBytes(payload, "type").String()) == wsRequestTypeCreate:
 			input := gjson.GetBytes(payload, "input")
 			if input.Exists() && !input.IsArray() {
@@ -551,12 +571,25 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			continue
 		}
 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
-		if shouldHandleResponsesWebsocketPrewarmLocally(
-			payload, previousLastRequest, allowIncrementalInputWithPreviousResponseID,
-		) {
+		if isPrewarm {
 			if updated, errDelete := sjson.DeleteBytes(requestJSON, "generate"); errDelete == nil {
 				requestJSON = updated
 			}
+			if upstreamMode == responsesWebsocketUpstreamModeWS && h != nil && h.AuthManager != nil {
+				h.AuthManager.CloseExecutionSession(passthroughSessionID)
+			}
+			upstreamMode = responsesWebsocketUpstreamModeUnknown
+			upstreamWebsocketAuthID = ""
+			pinnedAuthID = ""
+			pinnedAuthSupportsContinuation = false
+			pinnedResponseID = ""
+			responseOwners = make(map[string]responsesWebsocketResponseOwner)
+			lastResponseOwnerAuthID = ""
+			lastResponseOwnerSupportsContinuation = false
+			forceTranscriptReplayNextRequest = false
+			replacementRetryRequest = nil
+			replacementRetryOwnerID = ""
+			replacementRetryOwnerSupportsContinuation = false
 			lastRequest = bytes.Clone(requestJSON)
 			lastResponseOutput = []byte("[]")
 			lastResponseID = ""
@@ -664,6 +697,7 @@ func (h *ResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				preserveCompletionOutput: preserveNativeOutput.Load,
 				toolCacheTurn:            toolCacheTurn,
 				suppressError:            replayPinnedAuthFailure,
+				localInterrupt:           localInterrupt,
 			},
 		)
 		rememberResponsesWebsocketResponseOwner(
@@ -1642,6 +1676,7 @@ type responsesWebsocketForwardOptions struct {
 	toolCacheTurn            *responsesWebsocketToolCacheTurn
 	suppressError            func(*handlers.ErrorMessage) bool
 	keepAliveInterval        *time.Duration
+	localInterrupt           *responsesLocalInterrupt
 }
 
 func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
@@ -1710,9 +1745,19 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
 		defer keepAliveTicker.Stop()
 		keepAliveC = keepAliveTicker.C
 	}
+	if opts.localInterrupt != nil {
+		opts.localInterrupt.begin()
+		defer opts.localInterrupt.end()
+	}
+	localFrames := opts.localInterrupt.framesChan()
 
 	for {
 		select {
+		case interruptPayload := <-localFrames:
+			return completeResponsesWebsocketLocalInterrupt(
+				c, writer, wsTimelineLog, cancel, interruptPayload,
+				outputItemsByIndex, outputItemsFallback, pendingToolCallIDs,
+			)
 		case <-c.Request.Context().Done():
 			cancel(c.Request.Context().Err())
 			return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), nil, c.Request.Context().Err()
@@ -1780,6 +1825,9 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
 			for i := range payloads {
 				collectResponsesWebsocketOutputItem(payloads[i], outputItemsByIndex, &outputItemsFallback)
 				eventType := gjson.GetBytes(payloads[i], "type").String()
+				if eventType == "response.created" && opts.localInterrupt != nil {
+					opts.localInterrupt.setResponseID(gjson.GetBytes(payloads[i], "response.id").String())
+				}
 				if isResponsesWebsocketCompletionEvent(eventType) &&
 					(opts.preserveCompletionOutput == nil || !opts.preserveCompletionOutput()) {
 					payloads[i] = restoreResponsesWebsocketCompletionOutput(
@@ -1808,7 +1856,7 @@ func (h *ResponsesAPIHandler) forwardResponsesWebsocket(
 					}
 					return completedOutput, completedResponseID, sortedStringSet(pendingToolCallIDs), payloadErrMsg, errTerminate
 				}
-				if isResponsesWebsocketCompletionEvent(eventType) {
+				if isResponsesWebsocketCompletionEvent(eventType) || eventType == "response.incomplete" {
 					if eventType == wsEventTypeCompleted {
 						payloads[i], _ = sjson.SetBytes(payloads[i], "type", wsEventTypeDone)
 					}
@@ -2333,6 +2381,7 @@ type websocketTimelineSource interface {
 }
 
 type websocketTimelineRecorder struct {
+	mu           sync.Mutex
 	context      *gin.Context
 	source       websocketTimelineSource
 	sourceFailed bool
@@ -2371,6 +2420,8 @@ func appendWebsocketEvent(recorder *websocketTimelineRecorder, eventType string,
 	if recorder == nil {
 		return
 	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
 	if recorder.fallback == nil {
 		recorder.fallback = internallogging.NewBoundedLogBuffer()
 	}
@@ -2433,7 +2484,12 @@ func (r *websocketTimelineRecorder) moveSourceToFallback() {
 }
 
 func (r *websocketTimelineRecorder) String() string {
-	if r == nil || r.fallback == nil {
+	if r == nil {
+		return ""
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fallback == nil {
 		return ""
 	}
 	return r.fallback.String()

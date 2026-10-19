@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/httpwire"
 	"github.com/gin-gonic/gin"
 )
 
@@ -151,8 +152,12 @@ func (w *cpaTraceResponseWriter) WriteString(data string) (int, error) {
 }
 
 func (w *cpaTraceResponseWriter) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *cpaTraceResponseWriter) FlushError() error {
 	w.applyTraceHeader()
-	w.ResponseWriter.Flush()
+	return httpwire.FlushResponse(w.ResponseWriter)
 }
 
 func (w *cpaTraceResponseWriter) applyTraceHeader() {

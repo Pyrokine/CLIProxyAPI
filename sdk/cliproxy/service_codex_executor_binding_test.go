@@ -19,23 +19,27 @@ func TestRegisterModelsForAuth_CodexPlanControlsFrontierModels(t *testing.T) {
 	}
 
 	tests := []struct {
+		name      string
 		plan      string
+		authKind  string
 		wantSol   bool
 		wantAstra bool
 	}{
-		{plan: "free", wantSol: false, wantAstra: false},
-		{plan: "plus", wantSol: true, wantAstra: true},
-		{plan: "team", wantSol: true, wantAstra: true},
-		{plan: "pro", wantSol: true, wantAstra: true},
+		{name: "missing-oauth", wantSol: false, wantAstra: false},
+		{name: "missing-api-key", authKind: "apikey", wantSol: true, wantAstra: true},
+		{name: "free", plan: "free", wantSol: false, wantAstra: false},
+		{name: "plus", plan: "plus", wantSol: true, wantAstra: true},
+		{name: "team", plan: "team", wantSol: true, wantAstra: true},
+		{name: "pro", plan: "pro", wantSol: true, wantAstra: true},
 	}
 	for _, test := range tests {
 		t.Run(
-			test.plan, func(t *testing.T) {
+			test.name, func(t *testing.T) {
 				auth := &coreauth.Auth{
-					ID:         "codex-" + test.plan + "-plan",
-					Provider:   "codex",
-					Status:     coreauth.StatusActive,
-					Attributes: map[string]string{"plan_type": test.plan},
+					ID:       "codex-" + test.name + "-plan",
+					Provider: "codex",
+					Status:   coreauth.StatusActive,
+					Attributes: map[string]string{"plan_type": test.plan, "auth_kind": test.authKind},
 				}
 				service.registerModelsForAuth(auth)
 				t.Cleanup(func() { GlobalModelRegistry().UnregisterClient(auth.ID) })

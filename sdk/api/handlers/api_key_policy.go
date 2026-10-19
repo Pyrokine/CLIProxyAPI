@@ -43,6 +43,7 @@ func (h *BaseAPIHandler) prepareAPIKeyExecution(
 	*apiKeyReservationLifecycle,
 	*ErrorMessage,
 ) {
+	ctx = coreusage.WithExecutionID(ctx, executionID)
 	rawAPIKey := apiKeyFromContext(ctx)
 	identity := coreusage.APIKeyIdentityFromContext(ctx)
 	if identity == "" {
@@ -84,21 +85,36 @@ func (h *BaseAPIHandler) prepareAPIKeyExecution(
 			Error:      errors.New("requested model is disabled"),
 		}
 	}
-	if !hasRule {
-		return ctx, providers, canonicalModel, nil, nil
+	if hasRule {
+		if h.apiKeyBlocksModel(rawAPIKey, requestedModel) || h.apiKeyBlocksModel(rawAPIKey, mappedModel) ||
+			h.apiKeyBlocksModel(rawAPIKey, canonicalModel) {
+			return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusForbidden, time.Time{})
+		}
+		if !cfg.APIKeyAllowsCanonicalModel(rawAPIKey, canonicalModel) {
+			return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusForbidden, time.Time{})
+		}
+		providers = cfg.FilterAPIKeyProviders(rawAPIKey, providers)
+		if len(providers) == 0 {
+			return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusForbidden, time.Time{})
+		}
 	}
-	if h.apiKeyBlocksModel(rawAPIKey, requestedModel) || h.apiKeyBlocksModel(rawAPIKey, mappedModel) ||
-		h.apiKeyBlocksModel(rawAPIKey, canonicalModel) {
-		return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusForbidden, time.Time{})
+	if forcedProvider, _ := ctx.Value(forcedModelProviderContextKey{}).(string); forcedProvider != "" {
+		allowed := false
+		for _, provider := range providers {
+			if strings.EqualFold(strings.TrimSpace(provider), forcedProvider) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			if hasRule {
+				return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusForbidden, time.Time{})
+			}
+			return ctx, nil, "", nil, modelExecutionModeError("forced_provider is unavailable for model")
+		}
+		providers = []string{forcedProvider}
 	}
-	if !cfg.APIKeyAllowsCanonicalModel(rawAPIKey, canonicalModel) {
-		return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusForbidden, time.Time{})
-	}
-	providers = cfg.FilterAPIKeyProviders(rawAPIKey, providers)
-	if len(providers) == 0 {
-		return ctx, nil, "", nil, apiKeyPolicyError(handlerType, http.StatusForbidden, time.Time{})
-	}
-	if len(compiled.limits) == 0 {
+	if !hasRule || len(compiled.limits) == 0 {
 		return ctx, providers, canonicalModel, nil, nil
 	}
 	store := h.apiKeyPolicyStoreSnapshot()

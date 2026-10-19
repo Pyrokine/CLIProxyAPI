@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -46,6 +47,27 @@ func TestExtractRequestBodySupportsStringOverride(t *testing.T) {
 	body := wrapper.extractRequestBody(c)
 	if string(body) != "override-as-string" {
 		t.Fatalf("request body = %q, want %q", string(body), "override-as-string")
+	}
+}
+
+type responseFlushErrorWriter struct {
+	*httptest.ResponseRecorder
+	err error
+}
+
+func (w *responseFlushErrorWriter) FlushError() error { return w.err }
+
+func TestResponseWriterWrapperReportsFlushError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	flushFailure := errors.New("transport flush failed")
+	transport := &responseFlushErrorWriter{ResponseRecorder: httptest.NewRecorder(), err: flushFailure}
+	c, _ := gin.CreateTestContext(transport)
+	c.Writer = newResponseWriterWrapper(c.Writer, nil, &requestInfo{}, nil, false)
+	if err := http.NewResponseController(c.Writer).Flush(); !errors.Is(err, flushFailure) {
+		t.Fatalf("flush error = %v", err)
+	}
+	if c.Writer.Status() != http.StatusOK || !c.Writer.Written() {
+		t.Fatalf("Gin response was not committed: status=%d written=%t", c.Writer.Status(), c.Writer.Written())
 	}
 }
 

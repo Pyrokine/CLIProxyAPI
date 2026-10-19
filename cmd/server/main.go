@@ -137,7 +137,9 @@ func main() {
 		"Override OAuth callback port (defaults to provider-specific port)",
 	)
 	flag.BoolVar(&lf.antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
-	flag.BoolVar(&lf.kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&lf.kimiLogin, "kimi-login", false, "Login to Kimi.com using OAuth")
+	flag.BoolVar(&lf.kimiAILogin, "kimi-ai-login", false, "Login to Kimi.ai using OAuth")
+	flag.BoolVar(&lf.metaLogin, "meta-login", false, "Login to Meta using OAuth device code flow")
 	flag.BoolVar(&lf.xaiLogin, "xai-login", false, "Login to xAI using OAuth device code flow")
 	flag.BoolVar(&lf.devinLogin, "devin-login", false, "Login to Devin using OAuth")
 	flag.StringVar(&lf.projectID, "project_id", "", "Project ID (Gemini only, not required)")
@@ -192,17 +194,43 @@ func main() {
 	); bootstrapCfg != nil {
 		if errApply := pluginHost.ApplyConfig(context.Background(), bootstrapCfg); errApply != nil {
 			log.Errorf("failed to apply bootstrap plugin config: %v", errApply)
-			return
+			os.Exit(1)
 		}
 		pluginHost.RegisterCommandLineFlags(context.Background(), flag.CommandLine)
 	}
 
 	flag.Parse()
 
+	// -t validates the requested file without startup fallback or configuration writes.
+	if testConfig {
+		configFilePath := defaultPluginBootstrapConfigPath(configPath)
+		data, errReadConfig := os.ReadFile(configFilePath)
+		if errReadConfig != nil {
+			log.Errorf("failed to load config: %v", errReadConfig)
+			os.Exit(1)
+		}
+		cfg, errParseConfig := config.ParseConfigBytes(data)
+		if errParseConfig != nil {
+			log.Errorf("failed to load config: %v", errParseConfig)
+			os.Exit(1)
+		}
+		warnings := config.ValidateConfig(cfg)
+		if len(warnings) == 0 {
+			fmt.Printf("%s: configuration is valid\n", configFilePath)
+		} else {
+			fmt.Printf("%s: configuration has %d warning(s):\n", configFilePath, len(warnings))
+			for _, w := range warnings {
+				fmt.Printf("  - %s\n", w)
+			}
+			os.Exit(1)
+		}
+		return
+	}
+
 	wd, err := os.Getwd()
 	if err != nil {
 		log.Errorf("failed to get working directory: %v", err)
-		return
+		os.Exit(1)
 	}
 
 	// Load environment variables from .env if present.
@@ -246,21 +274,6 @@ func main() {
 		}
 	}()
 
-	// -t: test configuration and exit
-	if testConfig {
-		warnings := config.ValidateConfig(cfg)
-		if len(warnings) == 0 {
-			fmt.Printf("%s: configuration is valid\n", configFilePath)
-		} else {
-			fmt.Printf("%s: configuration has %d warning(s):\n", configFilePath, len(warnings))
-			for _, w := range warnings {
-				fmt.Printf("  - %s\n", w)
-			}
-			os.Exit(1)
-		}
-		return
-	}
-
 	// Cloud deploy mode: check configuration availability
 	var configFileExists bool
 	if isCloudDeploy {
@@ -270,10 +283,11 @@ func main() {
 	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
-		return
+		os.Exit(1)
 	}
 
 	log.Infof(
@@ -283,7 +297,7 @@ func main() {
 
 	if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
 		log.Errorf("failed to resolve auth directory: %v", errResolveAuthDir)
-		return
+		os.Exit(1)
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}
@@ -296,7 +310,7 @@ func main() {
 	configaccess.Register(&cfg.SDKConfig)
 	if errApply := pluginHost.ApplyConfig(context.Background(), cfg); errApply != nil {
 		log.Errorf("failed to apply plugin config: %v", errApply)
-		return
+		os.Exit(1)
 	}
 	if result.configLoadedFromHome {
 		errHomePluginLoad := homeplugins.MarkLoadResults(&result.homePluginSyncReport, pluginHost)
@@ -309,7 +323,7 @@ func main() {
 		}
 		if errHomePluginLoad != nil {
 			log.Errorf("failed to load home plugins: %v", errHomePluginLoad)
-			return
+			os.Exit(1)
 		}
 	}
 	if result.homeClient != nil {
@@ -342,7 +356,7 @@ func main() {
 		log.Info("Local model mode: using embedded model catalog, remote model updates disabled")
 	}
 
-	commandMode := lf.vertexImport != "" || lf.login || lf.codexLogin || lf.codexDeviceLogin || lf.claudeLogin || lf.qwenLogin || lf.iflowLogin || lf.iflowCookie || lf.antigravityLogin || lf.kimiLogin || lf.xaiLogin || lf.devinLogin
+	commandMode := lf.isLoginMode()
 	homeMode := cfg.Home.Enabled
 	serverOptions := []sdkapi.ServerOption(nil)
 	if shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, false, homeMode) {
@@ -392,20 +406,22 @@ func main() {
 	}
 }
 
-// modelCatalogUpdaterPlan decides which remote model catalogs should refresh.
-// Codex client templates still refresh under Home mode because the model list
-// comes from Home IDs while template metadata stays edge-local.
-func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient bool) {
+// modelCatalogUpdaterPlan 决定远端目录的刷新策略
+// Home 的模型 ID 来自控制中心，Codex 模板和 Devin 元数据在本机刷新
+func modelCatalogUpdaterPlan(localModel, homeEnabled bool) (startModels, startCodexClient, startDevin bool) {
 	if localModel {
-		return false, false
+		return false, false, false
 	}
-	return !homeEnabled, true
+	return !homeEnabled, true, true
 }
 
 func startModelCatalogUpdaters(localModel, homeEnabled bool, refreshHours int) {
-	startModels, startCodexClient := modelCatalogUpdaterPlan(localModel, homeEnabled)
+	startModels, startCodexClient, startDevin := modelCatalogUpdaterPlan(localModel, homeEnabled)
 	if startCodexClient {
 		registry.StartCodexClientModelsUpdater(context.Background(), refreshHours)
+	}
+	if startDevin && !startModels {
+		registry.StartDevinModelsUpdater(context.Background(), refreshHours)
 	}
 	if startModels {
 		registry.StartModelsUpdater(context.Background(), refreshHours)

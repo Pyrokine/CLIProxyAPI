@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,10 +10,13 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
@@ -322,6 +326,35 @@ func TestResponsesWebsocketHandlesPrewarmLocally(t *testing.T) {
 		gjson.GetBytes(errorPayload, "error.code").String() != "previous_response_not_found" {
 		t.Fatalf("wrong prewarm parent was accepted: %s", errorPayload)
 	}
+
+	secondPrewarm := []byte(`{"type":"response.create","model":"test","generate":false,"input":[{"type":"message","id":"new-base","role":"developer","content":"new"}]}`)
+	if errWrite := client.WriteMessage(websocket.TextMessage, secondPrewarm); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	_, created, errRead = client.ReadMessage()
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	_, done, errRead = client.ReadMessage()
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	secondID := gjson.GetBytes(created, "response.id").String()
+	if !strings.HasPrefix(secondID, "resp_prewarm_") || secondID == prewarmID ||
+		gjson.GetBytes(done, "response.id").String() != secondID {
+		t.Fatalf("mid-session prewarm did not create a new transcript root: created=%s done=%s", created, done)
+	}
+	oldParent := []byte(`{"type":"response.create","previous_response_id":"` + prewarmID + `","input":[]}`)
+	if errWrite := client.WriteMessage(websocket.TextMessage, oldParent); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	_, errorPayload, errRead = client.ReadMessage()
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if gjson.GetBytes(errorPayload, "error.code").String() != "previous_response_not_found" {
+		t.Fatalf("old prewarm parent was accepted after reset: %s", errorPayload)
+	}
 }
 
 func TestForwardResponsesWebsocketEmitsPingAndPreservesNativeCompletion(t *testing.T) {
@@ -438,5 +471,127 @@ func assertResponsesWebsocketJSONEqual(t *testing.T, got []byte, want string) {
 	}
 	if !reflect.DeepEqual(gotValue, wantValue) {
 		t.Fatalf("JSON differs:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+type prewarmCaptureExecutor struct {
+	compactCaptureExecutor
+	mu       sync.Mutex
+	payloads [][]byte
+}
+
+func (e *prewarmCaptureExecutor) ExecuteStream(
+	_ context.Context,
+	_ *coreauth.Auth,
+	req cliproxyexecutor.Request,
+	_ cliproxyexecutor.Options,
+) (*cliproxyexecutor.StreamResult, error) {
+	e.mu.Lock()
+	e.payloads = append(e.payloads, bytes.Clone(req.Payload))
+	call := len(e.payloads)
+	e.mu.Unlock()
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(
+		`{"type":"response.completed","response":{"id":"generated-%d","status":"completed","output":[{"type":"message","id":"output-%d"}]}}`, call, call,
+	))}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func TestResponsesWebsocketIncrementalPrewarmKeepsHistoryWithoutExecution(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, warmups := range []int{1, 2} {
+		for _, emptyFollowup := range []bool{false, true} {
+			t.Run(fmt.Sprintf("warmups_%d_empty_%t", warmups, emptyFollowup), func(t *testing.T) {
+				executor := &prewarmCaptureExecutor{}
+				manager := coreauth.NewManager(nil, nil, nil)
+				manager.RegisterExecutor(executor)
+				const model = "incremental-prewarm-model"
+				auth := &coreauth.Auth{ID: t.Name(), Provider: executor.Identifier(), Status: coreauth.StatusActive}
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+				registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+				t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+				handler := NewResponsesAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager))
+				router := gin.New()
+				router.GET("/v1/responses", handler.ResponsesWebsocket)
+				server := httptest.NewServer(router)
+				defer server.Close()
+				client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = client.Close() }()
+				if err = client.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				send := func(body string) {
+					t.Helper()
+					if errWrite := client.WriteMessage(websocket.TextMessage, []byte(body)); errWrite != nil {
+						t.Fatal(errWrite)
+					}
+				}
+				read := func(event string) []byte {
+					t.Helper()
+					_, body, errRead := client.ReadMessage()
+					if errRead != nil {
+						t.Fatal(errRead)
+					}
+					if gjson.GetBytes(body, "type").String() != event {
+						t.Fatalf("event = %s, want %s", body, event)
+					}
+					return body
+				}
+				send(`{"type":"response.create","model":"` + model + `","input":[{"type":"message","id":"initial-user"}]}`)
+				responseID := gjson.GetBytes(read(wsEventTypeDone), "response.id").String()
+				wantIDs := []string{"initial-user", "output-1"}
+				for index := 1; index <= warmups; index++ {
+					id := fmt.Sprintf("warmup-%d", index)
+					send(fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"generate":false,"input":[{"type":"message","id":%q}]}`, responseID, id))
+					created := read("response.created")
+					responseID = gjson.GetBytes(created, "response.id").String()
+					done := read(wsEventTypeDone)
+					if !strings.HasPrefix(responseID, "resp_prewarm_") || gjson.GetBytes(done, "response.id").String() != responseID ||
+						len(gjson.GetBytes(done, "response.output").Array()) != 0 || gjson.GetBytes(done, "response.usage.total_tokens").Int() != 0 {
+						t.Fatalf("prewarm events = %s %s", created, done)
+					}
+					executor.mu.Lock()
+					calls := len(executor.payloads)
+					executor.mu.Unlock()
+					if calls != 1 {
+						t.Fatalf("upstream calls after prewarm = %d, want 1", calls)
+					}
+					wantIDs = append(wantIDs, id)
+				}
+				input := `[]`
+				if !emptyFollowup {
+					input = `[{"type":"message","id":"followup"}]`
+					wantIDs = append(wantIDs, "followup")
+				}
+				send(fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"input":%s}`, responseID, input))
+				read(wsEventTypeDone)
+				executor.mu.Lock()
+				payloads := append([][]byte(nil), executor.payloads...)
+				executor.mu.Unlock()
+				if len(payloads) != 2 {
+					t.Fatalf("upstream calls = %d, want 2", len(payloads))
+				}
+				forwarded := payloads[1]
+				if gjson.GetBytes(forwarded, "previous_response_id").Exists() || gjson.GetBytes(forwarded, "generate").Exists() ||
+					gjson.GetBytes(forwarded, "model").String() != model {
+					t.Fatalf("forwarded metadata = %s", forwarded)
+				}
+				items := gjson.GetBytes(forwarded, "input").Array()
+				if len(items) != len(wantIDs) {
+					t.Fatalf("forwarded history = %s, want IDs %v", forwarded, wantIDs)
+				}
+				for index, id := range wantIDs {
+					if items[index].Get("id").String() != id {
+						t.Fatalf("history[%d] = %s, want %s", index, items[index].Raw, id)
+					}
+				}
+			})
+		}
 	}
 }

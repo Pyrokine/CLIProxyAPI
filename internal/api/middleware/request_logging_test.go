@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -703,4 +705,128 @@ func assertErrorRequestLogExists(t *testing.T, logsDir string) {
 		}
 	}
 	t.Fatal("error request log was not created")
+}
+
+type requestIDCapturingLogger struct {
+	lastLogRequestID       string
+	lastStreamingRequestID string
+	underlying             logging.RequestLogger
+}
+
+func (s *requestIDCapturingLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
+	s.lastLogRequestID = requestID
+	if s.underlying != nil {
+		return s.underlying.LogRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors, requestID, requestTimestamp, apiResponseTimestamp)
+	}
+	return nil
+}
+
+func (s *requestIDCapturingLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (logging.StreamingLogWriter, error) {
+	s.lastStreamingRequestID = requestID
+	if s.underlying != nil {
+		return s.underlying.LogStreamingRequest(url, method, headers, body, requestID)
+	}
+	return nil, nil
+}
+
+func (s *requestIDCapturingLogger) IsEnabled() bool {
+	return true
+}
+
+func TestManagementV8RequestsAreNotLogged(t *testing.T) {
+	for _, path := range []string{"/v8/management/config", "/v8/management/config.yaml", "/v8/management/config/api-keys/codex", "/v8/management/oauth/auth-url"} {
+		if shouldLogRequest(path) {
+			t.Errorf("management config request would be logged: %s", path)
+		}
+	}
+}
+
+func TestRequestLoggingManagementExclusion(t *testing.T) {
+	for _, path := range []string{
+		"/v0/management/config", "/management/config", "/v8/management/config",
+		"/v8/management/config.yaml", "/v8/management/config/api-keys/codex",
+		"/v8/management/oauth/auth-url", "/v1/chat/completions",
+	} {
+		t.Run(path, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			logsDir := t.TempDir()
+			logger := logging.NewFileRequestLogger(true, logsDir, "", 10)
+			router := gin.New()
+			router.Use(logging.GinLogrusLogger())
+			router.Use(RequestLoggingMiddleware(logger))
+			router.POST(path, func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{"ok": true})
+			})
+			request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"value":"synthetic-management-test"}`))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", response.Code)
+			}
+			entries, err := os.ReadDir(logsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if path == "/v1/chat/completions" {
+				want = 1
+			}
+			if len(entries) != want {
+				t.Fatalf("request log files = %d, want %d for path %s", len(entries), want, path)
+			}
+		})
+	}
+}
+
+func TestRequestLoggingPreservesCanonicalRequestID(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		name := "non-streaming"
+		if streaming {
+			name = "streaming"
+		}
+		t.Run(name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			logsDir := t.TempDir()
+			spy := &requestIDCapturingLogger{underlying: logging.NewFileRequestLogger(true, logsDir, "", 10)}
+			var handlerID string
+			router := gin.New()
+			router.Use(logging.GinLogrusLogger())
+			router.Use(RequestLoggingMiddleware(spy))
+			router.POST("/v1/responses", func(c *gin.Context) {
+				handlerID = logging.GetGinRequestID(c)
+				if streaming {
+					c.Header("Content-Type", "text/event-stream")
+					c.Writer.WriteHeader(http.StatusOK)
+					_, _ = c.Writer.Write([]byte("data: chunk\n\n"))
+					return
+				}
+				c.JSON(http.StatusOK, gin.H{"output": "hello"})
+			})
+			request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"input":"ping"}`))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", response.Code)
+			}
+			id := spy.lastLogRequestID
+			if streaming {
+				id = spy.lastStreamingRequestID
+			}
+			if len(id) != 32 || id != handlerID {
+				t.Fatalf("logger request ID = %s, handler request ID = %s; want the same full 128-bit identifier", id, handlerID)
+			}
+			if _, err := hex.DecodeString(id); err != nil {
+				t.Fatalf("request ID is not hexadecimal: %v", err)
+			}
+			entries, err := os.ReadDir(logsDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || !strings.HasSuffix(entries[0].Name(), "-"+id+".log") {
+				t.Fatalf("request log filename does not preserve the full request ID: %v", entries)
+			}
+		})
+	}
 }

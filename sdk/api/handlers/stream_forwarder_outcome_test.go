@@ -40,6 +40,55 @@ func (w *failingStreamResponseWriter) Flush() {
 	w.flushes++
 }
 
+type failingStreamFlushWriter struct {
+	gin.ResponseWriter
+	err error
+}
+
+func (w *failingStreamFlushWriter) FlushError() error { return w.err }
+
+func TestForwardStreamDeliveryFailures(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		writer func(*gin.Context, error) gin.ResponseWriter
+	}{
+		{
+			name: "write failure",
+			writer: func(c *gin.Context, err error) gin.ResponseWriter {
+				return &failingStreamResponseWriter{ResponseWriter: c.Writer, err: err}
+			},
+		},
+		{
+			name: "flush failure",
+			writer: func(c *gin.Context, err error) gin.ResponseWriter {
+				return &failingStreamFlushWriter{ResponseWriter: c.Writer, err: err}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, state := newStreamOutcomeTestContext(t)
+			failure := errors.New(test.name)
+			c.Writer = test.writer(c, failure)
+			data := make(chan []byte, 1)
+			data <- []byte("event: message\n\n")
+			close(data)
+			keepAlive := time.Duration(0)
+			var canceledWith error
+			NewBaseAPIHandlers(nil, nil).ForwardStream(c, c.Writer, func(err error) { canceledWith = err }, data, nil,
+				StreamForwardOptions{
+					KeepAliveInterval: &keepAlive,
+					WriteChunkError:   func(chunk []byte) error { return WriteStreamBytes(c.Writer, chunk) },
+				})
+			if !errors.Is(canceledWith, failure) {
+				t.Fatalf("cancel error = %v, want %v", canceledWith, failure)
+			}
+			if outcome := state.Snapshot(); !outcome.Failed || outcome.Reason != failure.Error() {
+				t.Fatalf("request outcome = %+v, want stream delivery failure", outcome)
+			}
+		})
+	}
+}
+
 func TestForwardStreamHeartbeatWriteFailureCancelsWithoutFlush(t *testing.T) {
 	ginContext, state := newStreamOutcomeTestContext(t)
 	wantErr := errors.New("heartbeat write failed")

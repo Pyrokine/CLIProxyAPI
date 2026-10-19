@@ -55,25 +55,25 @@ func (s *Service) reportHomePluginStatusWithClient(
 	cfg *config.Config,
 	report homeplugins.SyncReport,
 	client *home.Client,
-) {
+) error {
 	if s == nil || cfg == nil {
-		return
+		return nil
 	}
 	if client == nil {
 		log.Warn("failed to report home plugin status: home client is unavailable")
-		return
+		return fmt.Errorf("home client is unavailable")
 	}
 	nodeID := strings.TrimSpace(cfg.Home.NodeID)
 	if nodeID == "" {
 		log.Warn("failed to report home plugin status: node id is empty")
-		return
+		return fmt.Errorf("home node id is empty")
 	}
 	report.NodeID = nodeID
 	report.UpdatedAt = time.Now().UTC()
 	raw, errMarshal := json.Marshal(report)
 	if errMarshal != nil {
 		log.Warnf("failed to marshal home plugin status: %v", errMarshal)
-		return
+		return errMarshal
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -82,7 +82,9 @@ func (s *Service) reportHomePluginStatusWithClient(
 	defer cancel()
 	if errReport := client.RPushPluginStatus(reportCtx, raw); errReport != nil {
 		log.Warnf("failed to report home plugin status: %v", errReport)
+		return errReport
 	}
+	return nil
 }
 
 func (s *Service) processHomePluginTasksWithClient(ctx context.Context, cfg *config.Config, client *home.Client) {

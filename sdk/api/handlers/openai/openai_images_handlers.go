@@ -70,6 +70,7 @@ type sseFrameAccumulator struct {
 	pending              []byte
 	maxPending           int
 	validateDataJSON     bool
+	isCodexClient        bool
 	sawResponsesTerminal bool
 	err                  error
 }
@@ -90,7 +91,14 @@ func (a *sseFrameAccumulator) appendFrame(frames *[][]byte, frame []byte) bool {
 		if a.sawResponsesTerminal {
 			return true
 		}
+		if shouldFilterPrivateResponsesSSEEvent(responsesSSEEventName(frame), a.isCodexClient) {
+			return true
+		}
 		payload, hasData, valid := responsesSSEDataPayload(frame)
+		if hasData && valid && !bytes.Equal(payload, []byte("[DONE]")) &&
+			shouldFilterPrivateResponsesSSEEvent(gjson.GetBytes(payload, "type").String(), a.isCodexClient) {
+			return true
+		}
 		if hasData && !valid {
 			a.pending = nil
 			a.err = fmt.Errorf("responses SSE stream ended with malformed data")
@@ -935,6 +943,10 @@ func xaiImagesAspectRatio(raw string, fallback string) string {
 		return "3:2"
 	case "2:3":
 		return "2:3"
+	case "9:20":
+		return "9:20"
+	case "20:9":
+		return "20:9"
 	default:
 		return fallback
 	}
@@ -953,6 +965,10 @@ func xaiImagesAspectRatioFromSize(size string, fallback string) string {
 		return "3:2"
 	case "1024x1536", "2:3":
 		return "2:3"
+	case "9:20":
+		return "9:20"
+	case "20:9":
+		return "20:9"
 	default:
 		return fallback
 	}
@@ -981,6 +997,7 @@ func buildXAIImagesBaseRequest(
 	responseFormat string,
 	aspectRatio string,
 	resolution string,
+	quality string,
 	n int64,
 ) []byte {
 	req := []byte(`{}`)
@@ -992,6 +1009,9 @@ func buildXAIImagesBaseRequest(
 	}
 	if resolution != "" {
 		req, _ = sjson.SetBytes(req, "resolution", resolution)
+	}
+	if quality := strings.TrimSpace(quality); quality != "" {
+		req, _ = sjson.SetBytes(req, "quality", quality)
 	}
 	if n > 0 {
 		req, _ = sjson.SetBytes(req, "n", n)
@@ -1008,11 +1028,12 @@ func buildXAIImagesGenerationsRequest(rawJSON []byte, model string, responseForm
 		aspectRatio = xaiImagesDefaultAspectRatio
 	}
 	resolution := xaiImagesResolution(gjson.GetBytes(rawJSON, "resolution").String(), size, xaiImagesDefaultResolution)
+	quality := gjson.GetBytes(rawJSON, "quality").String()
 	n := int64(0)
 	if v := gjson.GetBytes(rawJSON, "n"); v.Exists() && v.Type == gjson.Number {
 		n = v.Int()
 	}
-	return buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, n)
+	return buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, quality, n)
 }
 
 func buildXAIImagesEditRequest(
@@ -1022,9 +1043,10 @@ func buildXAIImagesEditRequest(
 	responseFormat string,
 	aspectRatio string,
 	resolution string,
+	quality string,
 	n int64,
 ) []byte {
-	req := buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, n)
+	req := buildXAIImagesBaseRequest(model, prompt, responseFormat, aspectRatio, resolution, quality, n)
 	trimmedImages := make([]string, 0, len(images))
 	for _, img := range images {
 		if strings.TrimSpace(img) != "" {
@@ -1077,15 +1099,16 @@ func collectXAIImagesFromJSON(rawJSON []byte) []string {
 	return images
 }
 
-func xaiImagesEditOptionsFromJSON(rawJSON []byte) (aspectRatio string, resolution string, n int64) {
+func xaiImagesEditOptionsFromJSON(rawJSON []byte) (aspectRatio string, resolution string, quality string, n int64) {
 	size := strings.TrimSpace(gjson.GetBytes(rawJSON, "size").String())
 	aspectRatio = xaiImagesAspectRatio(gjson.GetBytes(rawJSON, "aspect_ratio").String(), "")
 	aspectRatio = xaiImagesAspectRatioFromSize(size, aspectRatio)
 	resolution = xaiImagesResolution(gjson.GetBytes(rawJSON, "resolution").String(), size, "")
+	quality = gjson.GetBytes(rawJSON, "quality").String()
 	if v := gjson.GetBytes(rawJSON, "n"); v.Exists() && v.Type == gjson.Number {
 		n = v.Int()
 	}
-	return aspectRatio, resolution, n
+	return aspectRatio, resolution, quality, n
 }
 
 func extractXAIImagesResponse(payload []byte) (results []xaiImageResult, createdAt int64, usageRaw []byte, err error) {
@@ -1889,7 +1912,7 @@ func (h *APIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		aspectRatio = xaiImagesAspectRatioFromSize(c.PostForm("size"), aspectRatio)
 		resolution := xaiImagesResolution(c.PostForm("resolution"), c.PostForm("size"), "")
 		n := parseIntField(c.PostForm("n"), 0)
-		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, n)
+		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, images, responseFormat, aspectRatio, resolution, c.PostForm("quality"), n)
 		h.handleXAIImages(c, xaiReq, imageModel, responseFormat, "image_edit", stream)
 		return
 	}
@@ -2005,8 +2028,8 @@ func (h *APIHandler) imagesEditsFromJSON(c *gin.Context) {
 			)
 			return
 		}
-		aspectRatio, resolution, n := xaiImagesEditOptionsFromJSON(rawJSON)
-		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, xaiImages, responseFormat, aspectRatio, resolution, n)
+		aspectRatio, resolution, quality, n := xaiImagesEditOptionsFromJSON(rawJSON)
+		xaiReq := buildXAIImagesEditRequest(imageModel, prompt, xaiImages, responseFormat, aspectRatio, resolution, quality, n)
 		h.handleXAIImages(c, xaiReq, imageModel, responseFormat, "image_edit", stream)
 		return
 	}

@@ -16,13 +16,16 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	claudemodels "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/claude/models"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/constant"
 	internallogging "github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/api/handlers"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 	"github.com/gin-gonic/gin"
@@ -244,14 +247,7 @@ func (h *CodeAPIHandler) ClaudeMessages(c *gin.Context) {
 		if errorStatus == http.StatusRequestTimeout {
 			message = "Request body timed out before it was fully received"
 		}
-		c.JSON(
-			errorStatus, handlers.ErrorResponse{
-				Error: handlers.ErrorDetail{
-					Message: message,
-					Type:    "invalid_request_error",
-				},
-			},
-		)
+		h.WriteErrorResponse(c, &handlers.ErrorMessage{StatusCode: errorStatus, Error: errors.New(message)})
 		return
 	}
 
@@ -284,14 +280,7 @@ func (h *CodeAPIHandler) ClaudeCountTokens(c *gin.Context) {
 		if errorStatus == http.StatusRequestTimeout {
 			message = "Request body timed out before it was fully received"
 		}
-		c.JSON(
-			errorStatus, handlers.ErrorResponse{
-				Error: handlers.ErrorDetail{
-					Message: message,
-					Type:    "invalid_request_error",
-				},
-			},
-		)
+		h.WriteErrorResponse(c, &handlers.ErrorMessage{StatusCode: errorStatus, Error: errors.New(message)})
 		return
 	}
 
@@ -632,12 +621,12 @@ func (h *CodeAPIHandler) forwardClaudeStreamWithLifecycle(
 	h.ForwardStream(
 		c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 			KeepAliveInterval: &keepAliveInterval,
-			WriteChunk: func(chunk []byte) {
+			WriteChunkError: func(chunk []byte) error {
 				if len(chunk) == 0 || lifecycle.terminalSeen {
-					return
+					return nil
 				}
 				lifecycle.observe(chunk)
-				_, _ = c.Writer.Write(chunk)
+				return handlers.WriteStreamBytes(c.Writer, chunk)
 			},
 			WriteKeepAlive: func() handlers.KeepAliveWriteResult {
 				if lifecycle.terminalSeen {
@@ -856,8 +845,13 @@ func (lifecycle *claudeStreamLifecycle) finalizeError(errorBytes []byte) []byte 
 }
 
 type claudeErrorDetail struct {
-	Type    string `json:"type"`
-	Message string `json:"message"`
+	Type    string              `json:"type"`
+	Message string              `json:"message"`
+	Details *claudeErrorDetails `json:"details,omitempty"`
+}
+
+type claudeErrorDetails struct {
+	ErrorCode string `json:"error_code"`
 }
 
 type claudeErrorResponse struct {
@@ -866,11 +860,135 @@ type claudeErrorResponse struct {
 }
 
 func (h *CodeAPIHandler) toClaudeError(msg *handlers.ErrorMessage) claudeErrorResponse {
-	return claudeErrorResponse{
-		Type: "error",
-		Error: claudeErrorDetail{
-			Type:    "api_error",
-			Message: msg.Error.Error(),
-		},
+	status := http.StatusInternalServerError
+	message := http.StatusText(status)
+	var originalError error
+	if msg != nil {
+		originalError = msg.Error
+		if msg.StatusCode > 0 {
+			status = msg.StatusCode
+			message = http.StatusText(status)
+		}
+		if msg.Error != nil {
+			if text := strings.TrimSpace(claudeErrorText(msg.Error)); text != "" {
+				message = text
+			}
+		}
+	}
+
+	errType := claudeErrorTypeFromStatus(status)
+	if json.Valid([]byte(message)) {
+		payload := gjson.Parse(message)
+		if errPayload := payload.Get("error"); errPayload.IsObject() {
+			if value := strings.TrimSpace(errPayload.Get("type").String()); value != "" {
+				errType = value
+			}
+			if value := strings.TrimSpace(errPayload.Get("message").String()); value != "" {
+				message = value
+			} else if value := strings.TrimSpace(errPayload.Get("code").String()); value != "" {
+				message = value
+			}
+		} else {
+			if value := strings.TrimSpace(payload.Get("type").String()); value != "" && value != "error" {
+				errType = value
+			}
+			if value := strings.TrimSpace(payload.Get("message").String()); value != "" {
+				message = value
+			}
+		}
+	}
+
+	response := claudeErrorResponse{Type: "error", Error: claudeErrorDetail{Type: errType, Message: message}}
+	if clienterror.IsClaudeThreadNotFound(status, originalError) {
+		response.Error.Details = &claudeErrorDetails{ErrorCode: "thread_not_found"}
+	}
+	return response
+}
+
+func claudeErrorText(err error) string {
+	var body interface{ ResponseBody() []byte }
+	if errors.As(err, &body) && body != nil && len(body.ResponseBody()) > 0 {
+		return string(body.ResponseBody())
+	}
+	return err.Error()
+}
+
+// WriteErrorResponse writes a Claude-compatible error response.
+func (h *CodeAPIHandler) WriteErrorResponse(c *gin.Context, msg *handlers.ErrorMessage) {
+	_ = h.WriteErrorResponseWithError(c, msg)
+}
+
+func (h *CodeAPIHandler) WriteErrorResponseWithError(c *gin.Context, msg *handlers.ErrorMessage) error {
+	status := http.StatusInternalServerError
+	if msg != nil && msg.StatusCode > 0 {
+		status = msg.StatusCode
+	}
+	if msg != nil && msg.DirectResponse {
+		if !clienterror.IsClaudeThreadNotFound(status, errors.New(string(msg.Body))) {
+			return h.BaseAPIHandler.WriteErrorResponseWithError(c, msg)
+		}
+		body, err := json.Marshal(h.toClaudeError(&handlers.ErrorMessage{
+			StatusCode: status,
+			Error:      errors.New(string(msg.Body)),
+		}))
+		if err != nil {
+			return err
+		}
+		marked := *msg
+		marked.Body = body
+		return h.BaseAPIHandler.WriteErrorResponseWithError(c, &marked)
+	}
+
+	if msg != nil && msg.Error != nil {
+		for _, value := range coreauth.SafeResponseHeaders(msg.Error).Values("Retry-After") {
+			c.Writer.Header().Add("Retry-After", value)
+		}
+	}
+	body, err := json.Marshal(h.toClaudeError(msg))
+	if err != nil {
+		return err
+	}
+	encoded := handlers.ErrorMessage{StatusCode: status, Error: errors.New(string(body))}
+	if msg != nil {
+		encoded.Addon = msg.Addon
+	}
+	return h.BaseAPIHandler.WriteErrorResponseWithError(c, &encoded)
+}
+
+func (h *CodeAPIHandler) WriteAcknowledgedStreamError(
+	c *gin.Context,
+	flusher http.Flusher,
+	msg *handlers.ErrorMessage,
+) error {
+	err := handlers.DeliverStreamResponse(c.Writer, flusher, func() error {
+		return h.WriteErrorResponseWithError(c, msg)
+	})
+	handlers.AcknowledgeStreamError(msg, err)
+	return err
+}
+
+func claudeErrorTypeFromStatus(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "authentication_error"
+	case http.StatusPaymentRequired:
+		return "billing_error"
+	case http.StatusForbidden:
+		return "permission_error"
+	case http.StatusNotFound:
+		return "not_found_error"
+	case http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		return "timeout_error"
+	case 529:
+		return "overloaded_error"
+	default:
+		if status >= http.StatusInternalServerError {
+			return "api_error"
+		}
+		return "invalid_request_error"
 	}
 }
