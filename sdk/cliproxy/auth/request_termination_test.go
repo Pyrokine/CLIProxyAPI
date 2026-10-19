@@ -54,7 +54,7 @@ func TestApplyRequestAfterAuthInterceptorReturnsTerminationBeforeHandledRequest(
 		},
 	}
 
-	gotReq, gotOpts, errIntercept := applyRequestAfterAuthInterceptor(
+	_, gotReq, gotOpts, errIntercept := applyRequestAfterAuthInterceptor(
 		context.Background(),
 		nil,
 		"codex",

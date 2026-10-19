@@ -1,6 +1,9 @@
 package auth
 
-import "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+import (
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+)
 
 const AttributeClaudeFingerprintProfile = "fingerprint_profile"
 const legacyClaudeFingerprintProfile = "fingerprint-profile"
@@ -14,7 +17,15 @@ func ClaudeFingerprintProfile(auth *Auth) (string, bool, error) {
 		profile, err := config.ParseClaudeFingerprintProfile(raw)
 		return profile, true, err
 	}
-	return claudeFingerprintProfileMetadata(auth.Metadata)
+	raw, exists := util.ReadClaudeMetadataValue(&auth.Metadata, AttributeClaudeFingerprintProfile)
+	if !exists {
+		raw, exists = util.ReadClaudeMetadataValue(&auth.Metadata, legacyClaudeFingerprintProfile)
+	}
+	if !exists {
+		return "", false, nil
+	}
+	profile, err := config.ParseClaudeFingerprintProfile(raw)
+	return profile, true, err
 }
 
 func claudeFingerprintProfileMetadata(metadata map[string]any) (string, bool, error) {

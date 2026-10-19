@@ -1,16 +1,17 @@
 package auth
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"os"
 	"path/filepath"
+
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 )
 
 // Store abstracts persistence of Auth state across restarts.
@@ -18,6 +19,8 @@ type Store interface {
 	// List returns all auth records stored in the backend.
 	List(ctx context.Context) ([]*Auth, error)
 	// Save persists the provided auth record, replacing any existing one with same ID.
+	// Storage implementations must not mutate shared nested values in place.
+	// Storage that sets metadata must provide an independent CloneForPersistence.
 	Save(ctx context.Context, auth *Auth) (string, error)
 	// Delete removes the auth record identified by id.
 	Delete(ctx context.Context, id string) error
@@ -43,30 +46,93 @@ type VersionedStore interface {
 
 // DigestPersistedJSON returns a whitespace-independent digest of persisted JSON.
 func DigestPersistedJSON(raw []byte) ([sha256.Size]byte, error) {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.UseNumber()
-	var value any
-	if err := decoder.Decode(&value); err != nil {
+	value, err := util.DecodeJSON(raw)
+	if err != nil {
 		return [sha256.Size]byte{}, err
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			return [sha256.Size]byte{}, fmt.Errorf("persisted JSON has multiple values")
-		}
-		return [sha256.Size]byte{}, err
-	}
-	canonical, err := json.Marshal(value)
+	canonical, err := json.Marshal(normalizeCredentialNumbers(value))
 	if err != nil {
 		return [sha256.Size]byte{}, err
 	}
 	return sha256.Sum256(canonical), nil
 }
 
-// PrepareAuthForPersistence applies manager-owned metadata to the storage payload.
-func PrepareAuthForPersistence(auth *Auth) {
+// DecodeCredentialMetadata 无损解析凭证对象，保留大整数及高精度小数
+func DecodeCredentialMetadata(raw []byte) (map[string]any, error) {
+	value, err := util.DecodeJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	metadata, ok := value.(map[string]any)
+	if !ok || metadata == nil {
+		return nil, fmt.Errorf("credential JSON is not an object")
+	}
+	for key, item := range metadata {
+		metadata[key] = normalizeCredentialNumbers(item)
+	}
+	return metadata, nil
+}
+
+func normalizeCredentialNumbers(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			typed[key] = normalizeCredentialNumbers(item)
+		}
+	case []any:
+		for index, item := range typed {
+			typed[index] = normalizeCredentialNumbers(item)
+		}
+	case json.Number:
+		number, err := typed.Float64()
+		if err != nil || number >= 1<<53 || number <= -(1<<53) {
+			return typed
+		}
+		encoded, err := json.Marshal(number)
+		if err == nil && util.JSONEqual([]byte(typed), encoded) {
+			return number
+		}
+	}
+	return value
+}
+
+// BindPersistedAuthDigest 保存完整文件摘要，并记录可证明的配额材料对应
+// 材料无效时清除旧证明并返回错误，保留文件版本用于 CAS
+func BindPersistedAuthDigest(auth *Auth, digest [sha256.Size]byte) error {
 	if auth == nil {
-		return
+		return fmt.Errorf("auth is nil")
+	}
+	attributes := maps.Clone(auth.Attributes)
+	if attributes == nil {
+		attributes = make(map[string]string)
+	}
+	value := hex.EncodeToString(digest[:])
+	attributes[PersistedSHA256Attribute] = value
+	auth.Attributes = attributes
+	auth.quotaPersistedRevision = ""
+	auth.quotaPersistedSHA256 = ""
+	revision, _, err := QuotaCredentialRevisions(auth)
+	if err != nil {
+		return err
+	}
+	auth.quotaPersistedRevision = revision
+	auth.quotaPersistedSHA256 = value
+	return nil
+}
+
+// PrepareAuthForPersistence applies manager-owned metadata to an independent storage snapshot.
+func PrepareAuthForPersistence(auth *Auth) error {
+	if auth == nil {
+		return nil
+	}
+	if storage, ok := auth.Storage.(PersistenceTokenStorage); ok {
+		copyStorage := storage.CloneForPersistence()
+		if copyStorage == nil {
+			return fmt.Errorf("token storage %T returned a nil persistence copy", auth.Storage)
+		}
+		auth.Storage = copyStorage
+	} else if _, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+		return fmt.Errorf("token storage %T must implement CloneForPersistence", auth.Storage)
 	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
@@ -76,6 +142,7 @@ func PrepareAuthForPersistence(auth *Auth) {
 	if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 		setter.SetMetadata(auth.Metadata)
 	}
+	return nil
 }
 
 // PersistedVersionForAuth identifies the content Store.Save was asked to persist.
@@ -95,8 +162,8 @@ func PersistedVersionForAuth(path string, auth *Auth) (PersistedVersion, error) 
 		if errMarshal != nil {
 			err = errMarshal
 		} else {
-			merged := make(map[string]any)
-			if errUnmarshal := json.Unmarshal(storageRaw, &merged); errUnmarshal != nil {
+			merged, errUnmarshal := DecodeCredentialMetadata(storageRaw)
+			if errUnmarshal != nil {
 				err = errUnmarshal
 			} else {
 				maps.Copy(merged, auth.Metadata)

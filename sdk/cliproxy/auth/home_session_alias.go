@@ -9,6 +9,7 @@ import (
 	internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	cliproxysession "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/session"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
 
 const (
@@ -252,8 +253,11 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 		} else if lcpID := sessionMetadataString(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey); lcpID != "" {
 			primary = lcpID
 		} else {
-			primary, fallback = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
-			hasAuthoritativeInput = primary != ""
+			primary, fallback = m.homeLCPSessionIDs(opts)
+			if primary == "" {
+				primary, fallback = extractSessionIDs(opts.Headers, opts.OriginalRequest, opts.Metadata)
+				hasAuthoritativeInput = primary != ""
+			}
 		}
 	}
 	if primary == "" || m == nil {
@@ -294,6 +298,70 @@ func (m *Manager) homeDispatchSessionIDs(opts cliproxyexecutor.Options) (string,
 		parentSessionID = ""
 	}
 	return canonical, parentSessionID
+}
+
+func (m *Manager) homeLCPSessionIDs(opts cliproxyexecutor.Options) (string, string) {
+	if opts.Metadata == nil || m == nil {
+		return "", ""
+	}
+	selector, ok := m.Selector().(*SessionAffinitySelector)
+	if !ok || selector == nil || selector.matcher == nil {
+		return "", ""
+	}
+	provider := sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityProviderMetadataKey)
+	if provider == "" {
+		provider = providerFromSourceFormat(opts.SourceFormat)
+	}
+	model := sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityModelMetadataKey)
+	if model == "" {
+		model = sessionMetadataString(opts.Metadata, cliproxyexecutor.RequestedModelMetadataKey)
+	}
+	if model == "" {
+		return "", ""
+	}
+	namespace := lcpAffinityNamespace(provider, model, opts.Metadata)
+	if namespace == "" {
+		return "", ""
+	}
+	turns := cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest)
+	fingerprints, minimum, tails, envDigest := selector.matcher.PrepareExt(turns)
+	if len(fingerprints) == 0 || minimum <= 0 || minimum > len(fingerprints) {
+		return "", ""
+	}
+	setSessionAffinityNamespaceMetadata(opts.Metadata, provider, model)
+	setLCPMetadata(opts.Metadata, fingerprints, minimum, tails, envDigest)
+	match, ok := selector.matcher.ResolveFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum)
+	if !ok {
+		return "", ""
+	}
+	setLCPMatchMetadata(opts.Metadata, match.SessionID, match.ParentSessionID, match.IsFork, match.IsCompaction, match.AccessNumber)
+	return match.SessionID, match.ParentSessionID
+}
+
+func (m *Manager) bindHomeLCPSelection(opts cliproxyexecutor.Options, authID string) {
+	if m == nil || sessionMetadataString(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey) == "" {
+		return
+	}
+	selector, ok := m.Selector().(*SessionAffinitySelector)
+	if !ok || selector == nil {
+		return
+	}
+	provider := sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityProviderMetadataKey)
+	model := sessionMetadataString(opts.Metadata, cliproxyexecutor.SessionAffinityModelMetadataKey)
+	selector.rememberLCP(provider, model, opts, authID)
+}
+
+func providerFromSourceFormat(format sdktranslator.Format) string {
+	switch format {
+	case sdktranslator.FormatGemini, sdktranslator.FormatAntigravity:
+		return "google"
+	case sdktranslator.FormatClaude:
+		return "claude"
+	case sdktranslator.FormatInteractions:
+		return "devin"
+	default:
+		return "openai"
+	}
 }
 
 func (m *Manager) homeDispatchSessionID(opts cliproxyexecutor.Options) string {

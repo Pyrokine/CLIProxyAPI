@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executionregistry"
 )
 
@@ -139,11 +140,13 @@ func (r *executionResources) Close() error {
 
 // HomeDispatchSelection keeps a Home execution scope separate from its auth.
 type HomeDispatchSelection struct {
-	Auth            *Auth
-	Executor        ProviderExecutor
-	Provider        string
-	requestRetry    int
-	hasRequestRetry bool
+	Auth                       *Auth
+	Executor                   ProviderExecutor
+	Provider                   string
+	requestRetry               int
+	hasRequestRetry            bool
+	modelInfo                  *registry.ModelInfo
+	configurationUpdateSupport *bool
 
 	authMu           sync.RWMutex
 	scope            *executionregistry.Scope

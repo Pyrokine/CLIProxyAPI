@@ -74,6 +74,60 @@ func TestWithSkipPersist_DisablesRegisterPersistence(t *testing.T) {
 	}
 }
 
+func TestConfigAPIKeysSkipPersistence(t *testing.T) {
+	for _, source := range []string{"config", "config:fixture[synthetic]", "file"} {
+		for _, operation := range []string{"Register", "Update", "MergePersistentUpdate", "MarkResult"} {
+			t.Run(source+"/"+operation, func(t *testing.T) {
+				store := &countingStore{}
+				manager := NewManager(store, nil, nil)
+				base, err := manager.Register(WithSkipPersist(t.Context()), &Auth{
+					ID: "config-persistence", Provider: "fixture", Status: StatusActive,
+					Attributes: map[string]string{"source": source, "api_key": "synthetic-key"},
+					Metadata:   map[string]any{"request_retry": 1},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				next := base.Clone()
+				next.Label = "updated"
+				switch operation {
+				case "Register":
+					_, err = manager.Register(t.Context(), next)
+				case "Update":
+					_, err = manager.Update(t.Context(), next)
+				case "MergePersistentUpdate":
+					_, err = manager.MergePersistentUpdate(t.Context(), base, next)
+				case "MarkResult":
+					manager.MarkResult(t.Context(), Result{
+						AuthID: base.ID, AuthGeneration: base.Generation, Provider: base.Provider, Success: true,
+					})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantSaves := int32(0)
+				if source == "file" {
+					wantSaves = 1
+				}
+				if got := store.saveCount.Load(); got != wantSaves {
+					t.Fatalf("Save count = %d, want %d", got, wantSaves)
+				}
+				current, ok := manager.GetByID(base.ID)
+				if !ok || current == nil {
+					t.Fatal("credential was not published")
+				}
+				if operation == "MarkResult" {
+					if current.Success != 1 {
+						t.Fatal("request accounting was not published")
+					}
+				} else if current.Label != next.Label {
+					t.Fatal("credential update was not published")
+				}
+			})
+		}
+	}
+}
+
 func TestRegisterReturnsPersistError(t *testing.T) {
 	persistErr := errors.New("persist failed")
 	store := &countingStore{saveErr: persistErr}

@@ -16,6 +16,11 @@ type disabledTestTokenStorage struct {
 	saves    int
 }
 
+func (s *disabledTestTokenStorage) CloneForPersistence() cliproxyauth.TokenStorage {
+	copyStorage := *s
+	return &copyStorage
+}
+
 func (s *disabledTestTokenStorage) SetMetadata(metadata map[string]any) {
 	s.metadata = metadata
 }
@@ -94,7 +99,8 @@ func TestFileTokenStoreDisabledStorageRequiresCreationIntentForMissingFile(t *te
 	if errSave != nil || savedPath != path {
 		t.Fatalf("creation-intent Save() path/error = %q/%v, want %q", savedPath, errSave, path)
 	}
-	if storage.saves != 1 {
-		t.Fatalf("creation-intent Save() storage calls = %d, want 1", storage.saves)
+	savedStorage, ok := auth.Storage.(*disabledTestTokenStorage)
+	if !ok || savedStorage == storage || savedStorage.saves != 1 || storage.saves != 0 {
+		t.Fatalf("creation-intent Save() did not use an independent storage copy: %v, original saves=%d", auth.Storage, storage.saves)
 	}
 }

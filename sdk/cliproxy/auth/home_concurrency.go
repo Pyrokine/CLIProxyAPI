@@ -289,17 +289,25 @@ func verifyAccountedHomeConcurrencyIdentity(tuple homeConcurrencyTuple, auth *Au
 	return nil
 }
 
-// SafeResponseHeaders 返回 Home 调度错误中可信的重试响应头
+// SafeResponseHeaders returns trusted, locally computed retry headers.
 func SafeResponseHeaders(err error) http.Header {
 	var cooldown *homeDispatchRetryAfterError
 	if errors.As(err, &cooldown) {
 		return safeRetryAfterHeader(cooldown.retryAfter)
 	}
 	var busy *HomeConcurrencyBusyError
-	if !errors.As(err, &busy) || busy == nil {
-		return nil
+	if errors.As(err, &busy) && busy != nil {
+		return busy.SafeResponseHeaders()
 	}
-	return busy.SafeResponseHeaders()
+	var modelCooldown *modelCooldownError
+	if errors.As(err, &modelCooldown) && modelCooldown != nil {
+		return safeRetryAfterHeader(modelCooldown.resetIn)
+	}
+	var unavailable *authUnavailableError
+	if errors.As(err, &unavailable) && unavailable != nil {
+		return safeRetryAfterHeader(unavailable.retryAfter)
+	}
+	return nil
 }
 
 func safeRetryAfterHeader(retryAfter time.Duration) http.Header {

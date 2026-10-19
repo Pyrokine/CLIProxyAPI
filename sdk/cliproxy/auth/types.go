@@ -25,6 +25,14 @@ type TokenStorage interface {
 	SaveTokenToFile(authFilePath string) error
 }
 
+// PersistenceTokenStorage creates an independent token object for a store save.
+// Token storage that supports SetMetadata must implement this interface so a
+// save cannot mutate the credential already published to request handlers.
+type PersistenceTokenStorage interface {
+	TokenStorage
+	CloneForPersistence() TokenStorage
+}
+
 // RefreshCommitGuard publishes a refreshed credential against its provider owner.
 type RefreshCommitGuard interface {
 	CommitRefresh(func() bool) bool
@@ -98,6 +106,8 @@ type Auth struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	// LastRefreshedAt records the last successful refresh time in UTC.
 	LastRefreshedAt time.Time `json:"last_refreshed_at"`
+	// RefreshFailures counts consecutive invalid-grant refresh failures in memory.
+	RefreshFailures int `json:"-"`
 	// NextRefreshAfter is the earliest time a refresh should retrigger.
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
@@ -126,8 +136,15 @@ type Auth struct {
 	Success     int64 `json:"-"`
 	Failed      int64 `json:"-"`
 
-	recentRequests recentRequestRing
-	indexAssigned  bool
+	recentRequests            recentRequestRing
+	indexAssigned             bool
+	credentialGeneration      uint64
+	creditsHintManager        *Manager
+	creditsHintRemovalEpoch   uint64
+	creditsHintGeneration     uint64
+	rejectedAccessTokenSHA256 string
+	quotaPersistedRevision    string
+	quotaPersistedSHA256      string
 }
 
 const (
@@ -372,6 +389,10 @@ func (a *Auth) Clone() *Auth {
 	return &copyAuth
 }
 
+func (a *Auth) hasRejectedAccessToken() bool {
+	return a != nil && a.rejectedAccessTokenSHA256 != "" && a.rejectedAccessTokenSHA256 == AccessTokenSHA256(a)
+}
+
 func stableAuthIndex(seed string) string {
 	seed = strings.TrimSpace(seed)
 	if seed == "" {
@@ -448,13 +469,15 @@ func (a *Auth) indexSeed() string {
 			apiPrefix = "codex-api-key"
 		case strings.EqualFold(provider, "xai"):
 			apiPrefix = "xai-api-key"
+		case strings.EqualFold(provider, "meta"):
+			apiPrefix = "meta-api-key"
 		case strings.EqualFold(provider, "claude"):
 			apiPrefix = "claude-api-key"
 		}
 	}
 	if apiPrefix != "" {
 		parts := []string{apiPrefix, strings.TrimSpace(baseURL), strings.TrimSpace(apiKey)}
-		if source != "" {
+		if source != "" && apiPrefix != "meta-api-key" {
 			parts = append(parts, source)
 		}
 		return strings.Join(parts, "\x00")

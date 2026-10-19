@@ -151,6 +151,90 @@ func TestManagerMarkResultRejectsStaleCredentialGeneration(t *testing.T) {
 	}
 }
 
+func TestManagerMarkResultKeepsInFlightQuotaAfterLabelUpdate(t *testing.T) {
+	manager, selected := newExecutionOutcomeTestManager(t, &Auth{
+		ID: "in-flight-label", Provider: "provider-a", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "test-token"},
+	})
+	retryAfter := time.Hour
+	failure := executionResult(
+		selected, selected.Provider, "model-a",
+		executionOutcomeStatusError{status: http.StatusTooManyRequests, retryAfter: &retryAfter},
+		cliproxyexecutor.DispatchPhaseMaybeSent,
+	)
+
+	renamed := selected.Clone()
+	renamed.Label = "new label"
+	updated, err := manager.Update(WithSkipPersist(context.Background()), renamed)
+	if err != nil || updated == nil || updated.Generation == selected.Generation ||
+		updated.credentialGeneration != selected.credentialGeneration {
+		t.Fatalf("Update(label) = (%#v, %v)", updated, err)
+	}
+	manager.SetResultPolicy(ResultPolicyFunc(func(_ context.Context, result Result) Result {
+		result.AuthGeneration = 0
+		result.generationSnapshot = resultGenerationSnapshot{}
+		return result
+	}))
+	manager.MarkResult(context.Background(), failure)
+
+	current := getExecutionOutcomeTestAuth(t, manager, selected.ID)
+	state := current.ModelStates["model-a"]
+	if current.Label != "new label" || current.Failed != 1 || state == nil ||
+		!state.Quota.Exceeded || !state.Unavailable {
+		t.Fatalf("in-flight 429 after label update = %#v", current)
+	}
+}
+
+func TestManagerMarkResultCountsInFlightRequestFaultAfterLabelUpdate(t *testing.T) {
+	manager, selected := newExecutionOutcomeTestManager(t, &Auth{
+		ID: "in-flight-neutral-label", Provider: "provider-a", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "test-token"},
+	})
+	result := executionResult(
+		selected, selected.Provider, "model-a", context.Canceled,
+		cliproxyexecutor.DispatchPhaseMaybeSent,
+	)
+	renamed := selected.Clone()
+	renamed.Label = "new label"
+	if _, err := manager.Update(WithSkipPersist(context.Background()), renamed); err != nil {
+		t.Fatalf("Update(label) error = %v", err)
+	}
+	manager.MarkResult(context.Background(), result)
+
+	current := getExecutionOutcomeTestAuth(t, manager, selected.ID)
+	if current.Failed != 1 || current.Unavailable || len(current.ModelStates) != 0 {
+		t.Fatalf("request fault after label update = %#v", current)
+	}
+}
+
+func TestManagerMarkResultRejectsOldResultAfterSameTokenRecreation(t *testing.T) {
+	manager, selected := newExecutionOutcomeTestManager(t, &Auth{
+		ID: "same-token-recreation", Provider: "provider-a", Status: StatusActive,
+		Metadata: map[string]any{"access_token": "test-token"},
+	})
+	failure := executionResult(
+		selected, selected.Provider, "model-a",
+		executionOutcomeStatusError{status: http.StatusTooManyRequests},
+		cliproxyexecutor.DispatchPhaseMaybeSent,
+	)
+	if err := manager.Remove(WithSkipPersist(context.Background()), selected.ID); err != nil {
+		t.Fatalf("Remove() error = %v", err)
+	}
+	recreated, err := manager.Register(WithAllowAuthRecreate(context.Background()), &Auth{
+		ID: selected.ID, Provider: selected.Provider, Status: StatusActive,
+		Metadata: map[string]any{"access_token": "test-token"},
+	})
+	if err != nil || recreated == nil || recreated.credentialGeneration == selected.credentialGeneration {
+		t.Fatalf("Register(recreate) = (%#v, %v)", recreated, err)
+	}
+	manager.MarkResult(context.Background(), failure)
+
+	current := getExecutionOutcomeTestAuth(t, manager, selected.ID)
+	if current.Failed != 0 || len(current.ModelStates) != 0 {
+		t.Fatalf("old result changed recreated credential: %#v", current)
+	}
+}
+
 func TestManagerMarkResultRejectsStaleExactModelGeneration(t *testing.T) {
 	manager, before := newExecutionOutcomeTestManager(
 		t, &Auth{

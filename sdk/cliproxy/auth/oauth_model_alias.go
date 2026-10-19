@@ -1,11 +1,16 @@
 package auth
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
-	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
+
+const oauthModelAliasesAttributeKey = "model_aliases"
 
 type modelAliasEntry interface {
 	GetName() string
@@ -91,6 +96,65 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]config.OAuthModelAlias
 	m.oauthModelAlias.Store(table)
 }
 
+// SetOAuthModelAliasesAttribute stores per-credential OAuth model aliases used by model routing.
+func SetOAuthModelAliasesAttribute(auth *Auth, aliases []config.OAuthModelAlias) error {
+	if auth == nil {
+		return fmt.Errorf("credential is nil")
+	}
+	clean := config.SanitizeOAuthModelAliasMap(map[string][]config.OAuthModelAlias{"credential": aliases})["credential"]
+	if len(clean) != len(aliases) {
+		return fmt.Errorf("invalid or duplicate credential model_aliases entry")
+	}
+	if len(clean) == 0 {
+		delete(auth.Attributes, oauthModelAliasesAttributeKey)
+		return nil
+	}
+	encoded, err := json.Marshal(clean)
+	if err != nil {
+		return fmt.Errorf("encode credential model aliases: %w", err)
+	}
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes[oauthModelAliasesAttributeKey] = string(encoded)
+	return nil
+}
+
+// OAuthModelAliasesFromMetadata reads and validates aliases from a credential file.
+func OAuthModelAliasesFromMetadata(metadata map[string]any) ([]config.OAuthModelAlias, error) {
+	raw, found := metadata[oauthModelAliasesAttributeKey]
+	if !found || raw == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("encode credential model_aliases: %w", err)
+	}
+	var aliases []config.OAuthModelAlias
+	if err = json.Unmarshal(encoded, &aliases); err != nil {
+		return nil, fmt.Errorf("invalid credential model_aliases: %w", err)
+	}
+	clean := config.SanitizeOAuthModelAliasMap(map[string][]config.OAuthModelAlias{"credential": aliases})["credential"]
+	if len(clean) != len(aliases) {
+		return nil, fmt.Errorf("invalid or duplicate credential model_aliases entry")
+	}
+	return clean, nil
+}
+
+// OAuthModelAliasesFromAttributes reads the per-credential aliases for model publication.
+func OAuthModelAliasesFromAttributes(attributes map[string]string) []config.OAuthModelAlias {
+	raw := strings.TrimSpace(attributes[oauthModelAliasesAttributeKey])
+	if raw == "" {
+		return nil
+	}
+	var aliases []config.OAuthModelAlias
+	if err := json.Unmarshal([]byte(raw), &aliases); err != nil {
+		log.Warn("invalid credential model aliases attribute")
+		return nil
+	}
+	return config.SanitizeOAuthModelAliasMap(map[string][]config.OAuthModelAlias{"credential": aliases})["credential"]
+}
+
 // applyOAuthModelAlias resolves the upstream model from OAuth model alias.
 // If an alias exists, the returned model is the upstream model.
 func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string {
@@ -108,9 +172,9 @@ func modelAliasLookupCandidates(requestedModel string) (string, []string) {
 	if base == "" {
 		base = requestedModel
 	}
-	candidates := []string{base}
+	candidates := []string{requestedModel}
 	if base != requestedModel {
-		candidates = append(candidates, requestedModel)
+		candidates = append(candidates, base)
 	}
 	return base, candidates
 }
@@ -129,19 +193,16 @@ func resolveModelAliasResultFromConfigModels(
 		return OAuthModelAliasResult{}
 	}
 
-	for i := range models {
-		name := strings.TrimSpace(models[i].GetName())
-		alias := strings.TrimSpace(models[i].GetAlias())
-		if name == "" || alias == "" {
-			continue
-		}
-		forceMapping := false
-		if forceEntry, ok := models[i].(modelForceMappingEntry); ok {
-			forceMapping = forceEntry.GetForceMapping()
-		}
-		for _, candidate := range candidates {
-			if candidate == "" || !strings.EqualFold(alias, candidate) {
+	for _, candidate := range candidates {
+		for i := range models {
+			name := strings.TrimSpace(models[i].GetName())
+			alias := strings.TrimSpace(models[i].GetAlias())
+			if name == "" || alias == "" || !strings.EqualFold(alias, candidate) {
 				continue
+			}
+			forceMapping := false
+			if forceEntry, ok := models[i].(modelForceMappingEntry); ok {
+				forceMapping = forceEntry.GetForceMapping()
 			}
 			if strings.EqualFold(name, baseModel) && !forceMapping {
 				return OAuthModelAliasResult{}
@@ -172,7 +233,38 @@ func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) s
 }
 
 func (m *Manager) resolveOAuthModelAliasWithResult(auth *Auth, requestedModel string) OAuthModelAliasResult {
-	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, modelAliasChannel(auth))
+	channel := modelAliasChannel(auth)
+	if channel == "" {
+		return OAuthModelAliasResult{}
+	}
+	if result := resolveUpstreamModelFromAliases(OAuthModelAliasesFromAttributes(auth.Attributes), requestedModel); result.UpstreamModel != "" {
+		return result
+	}
+	return resolveUpstreamModelFromAliasTable(m, auth, requestedModel, channel)
+}
+
+func resolveUpstreamModelFromAliases(aliases []config.OAuthModelAlias, requestedModel string) OAuthModelAliasResult {
+	baseModel, candidates := modelAliasLookupCandidates(requestedModel)
+	for _, candidate := range candidates {
+		for _, entry := range aliases {
+			if !strings.EqualFold(entry.Alias, candidate) {
+				continue
+			}
+			if strings.EqualFold(entry.Name, baseModel) && !entry.ForceMapping {
+				return OAuthModelAliasResult{}
+			}
+			originalAlias := requestedModel
+			if entry.ForceMapping {
+				originalAlias = oauthModelAliasForceMappingResponseModel(entry.Alias)
+			}
+			return OAuthModelAliasResult{
+				UpstreamModel: thinking.PreserveRequestModelDecorations(entry.Name, requestedModel),
+				ForceMapping:  entry.ForceMapping,
+				OriginalAlias: originalAlias,
+			}
+		}
+	}
+	return OAuthModelAliasResult{}
 }
 
 func (m *Manager) applyOAuthModelAliasWithResult(auth *Auth, requestedModel string) OAuthModelAliasResult {
@@ -250,13 +342,10 @@ func modelAliasChannel(auth *Auth) string {
 		return ""
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
-	authKind := ""
-	if auth.Attributes != nil {
-		authKind = strings.ToLower(strings.TrimSpace(auth.Attributes["auth_kind"]))
-	}
+	authKind := auth.AuthKind()
 	if authKind == "" {
 		if kind, _ := auth.AccountInfo(); strings.EqualFold(kind, "api_key") {
-			authKind = "apikey"
+			authKind = AuthKindAPIKey
 		}
 	}
 	return OAuthModelAliasChannel(provider, authKind)

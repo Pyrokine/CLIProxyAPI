@@ -96,6 +96,60 @@ func TestWrapStreamResultWaitsForPayloadAndTerminalAcknowledgements(t *testing.T
 	}
 }
 
+func TestWrapStreamResultForwardsExecutorTerminalOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		ackErr  error
+		success bool
+	}{
+		{name: "delivered", success: true},
+		{name: "downstream failure", ackErr: errors.New("downstream write failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hook := newStreamDeliveryResultHook()
+			manager := NewManager(nil, nil, hook)
+			originalAcknowledged := make(chan error, 1)
+			source := make(chan coreexecutor.StreamChunk, 2)
+			source <- coreexecutor.StreamChunk{Payload: []byte("payload")}
+			source <- coreexecutor.StreamChunk{Terminal: true, Acknowledge: func(err error) {
+				originalAcknowledged <- err
+			}}
+			close(source)
+
+			stream := manager.wrapStreamResult(
+				coreexecutor.WithStreamDeliveryAcknowledgement(context.Background()),
+				&Auth{ID: "runtime-stream", Provider: "codex"}, "codex", "gpt-5",
+				nil, nil, source, OAuthModelAliasResult{},
+			)
+			payload := <-stream.Chunks
+			if string(payload.Payload) != "payload" {
+				t.Fatalf("payload chunk = %#v", payload)
+			}
+			payload.Acknowledge(nil)
+			terminal := <-stream.Chunks
+			if !terminal.Terminal || terminal.Acknowledge == nil {
+				t.Fatalf("terminal chunk = %#v", terminal)
+			}
+			assertNoStreamDeliveryResult(t, hook)
+			terminal.Acknowledge(tc.ackErr)
+			if acknowledged := <-originalAcknowledged; !errors.Is(acknowledged, tc.ackErr) {
+				t.Fatalf("source terminal acknowledgement = %v, want %v", acknowledged, tc.ackErr)
+			}
+			for chunk := range stream.Chunks {
+				t.Fatalf("duplicate terminal chunk = %#v", chunk)
+			}
+			select {
+			case result := <-hook.result:
+				if result.Success != tc.success {
+					t.Fatalf("result = %#v, want success %t", result, tc.success)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("terminal delivery result was not recorded")
+			}
+		})
+	}
+}
+
 func TestWrapStreamResultTreatsDeliveryFailureAsRequestScoped(t *testing.T) {
 	hook := newStreamDeliveryResultHook()
 	manager := NewManager(nil, nil, hook)

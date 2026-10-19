@@ -1,6 +1,7 @@
 package quota
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"sync"
@@ -70,6 +71,8 @@ type FetchResult struct {
 	Completeness       FetchCompleteness
 	AuthoritativeEmpty bool
 	PartialError       string
+	// Enrich 在用量发布后查询可选详情，沿用同一次刷新及其取消范围
+	Enrich func(context.Context) (FetchResult, error)
 }
 
 // RefreshTarget identifies one provider credential binding for a refresh attempt.

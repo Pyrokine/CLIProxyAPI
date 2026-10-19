@@ -140,6 +140,10 @@ func extractRequestScopedErrorRules(
 		if entry := resolveXAIAPIKeyConfig(cfg, auth); entry != nil {
 			return entry.RequestScopedErrors
 		}
+	case "meta":
+		if entry := resolveAPIKeyConfig(cfg.MetaKey, auth); entry != nil {
+			return entry.RequestScopedErrors
+		}
 	}
 
 	providerKey := ""

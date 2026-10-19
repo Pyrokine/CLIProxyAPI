@@ -197,11 +197,15 @@ func TestExtractRequestScopedErrorRulesPrecedenceAndSources(t *testing.T) {
 		XAIKey: []internalconfig.CodexKey{{
 			APIKey: "a", BaseURL: "https://api.x.ai/v1", RequestScopedErrors: rule,
 		}},
+		MetaKey: []internalconfig.MetaKey{{
+			APIKey: "m", BaseURL: "https://api.meta.ai/v1", RequestScopedErrors: rule,
+		}},
 		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
 			Name: "compat", BaseURL: "https://example.test", RequestScopedErrors: rule,
 		}},
 		OAuthRequestScopedErrors: map[string][]internalconfig.RequestScopedErrorRule{
 			"vertex": {{Status: 400, Match: []string{"oauth"}, Action: "continue"}},
+			"meta":   {{Status: 400, Match: []string{"meta-oauth"}, Action: "stop"}},
 		},
 	}
 	for _, test := range []struct {
@@ -213,6 +217,7 @@ func TestExtractRequestScopedErrorRulesPrecedenceAndSources(t *testing.T) {
 		{name: "claude", auth: &Auth{Provider: "claude", Attributes: map[string]string{"api_key": "c"}}},
 		{name: "codex", auth: &Auth{Provider: "codex", Attributes: map[string]string{"api_key": "x", "base_url": "https://api.openai.com/v1"}}},
 		{name: "xai", auth: &Auth{Provider: "xai", Attributes: map[string]string{"api_key": "a", "base_url": "https://api.x.ai/v1"}}},
+		{name: "meta", auth: &Auth{Provider: "meta", Attributes: map[string]string{"api_key": "m", "base_url": "https://api.meta.ai/v1"}}},
 		{name: "openai compatibility", auth: &Auth{Provider: "compat", Attributes: map[string]string{AttributeConfigIndex: "0", "provider_key": "compat", "compat_name": "compat"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -226,6 +231,10 @@ func TestExtractRequestScopedErrorRulesPrecedenceAndSources(t *testing.T) {
 	oauth := &Auth{Provider: " Vertex ", Attributes: map[string]string{"auth_kind": "oauth"}}
 	if rules := extractRequestScopedErrorRules(oauth, cfg); len(rules) != 1 || rules[0].Match[0] != "oauth" {
 		t.Fatalf("OAuth rules = %#v", rules)
+	}
+	metaOAuth := &Auth{Provider: "meta", Attributes: map[string]string{"auth_kind": "oauth", "api_key": "m"}}
+	if rules := extractRequestScopedErrorRules(metaOAuth, cfg); len(rules) != 1 || rules[0].Match[0] != "meta-oauth" {
+		t.Fatalf("Meta OAuth rules = %#v", rules)
 	}
 	apiKey := &Auth{Provider: "vertex", Attributes: map[string]string{"auth_kind": "apikey"}}
 	if rules := extractRequestScopedErrorRules(apiKey, cfg); len(rules) != 0 {

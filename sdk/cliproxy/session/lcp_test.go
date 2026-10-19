@@ -293,8 +293,12 @@ func TestMerklePrefixMatcherEvictsToConfiguredBounds(t *testing.T) {
 	if groupCount > 3 || prefixCount > 6 {
 		t.Fatalf("matcher bounds = groups:%d prefixes:%d, want <= 3 and <= 6", groupCount, prefixCount)
 	}
-	if match, ok := matcher.Match(namespace, sequences[0]); ok {
-		t.Fatalf("oldest trajectory remains after eviction: %+v", match)
+	fingerprints, _ := matcher.Prepare(sequences[0])
+	matcher.mu.Lock()
+	oldest := matcher.namespaces[namespace].groups[sequenceKey(fingerprints)]
+	matcher.mu.Unlock()
+	if oldest != nil {
+		t.Fatalf("oldest trajectory remained indexed after eviction: %+v", oldest)
 	}
 	if match, ok := matcher.Match(namespace, sequences[len(sequences)-1]); !ok || match.AuthID != "auth-4" {
 		t.Fatalf("newest trajectory = %+v, ok=%v", match, ok)

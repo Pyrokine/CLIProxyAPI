@@ -37,6 +37,33 @@ func (e *operationTestExecutor) ExecuteStream(ctx context.Context, auth *Auth, r
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
 
+func TestRequestToFormatMatchesExecutionTranslation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider string
+		opts     cliproxyexecutor.Options
+		want     sdktranslator.Format
+	}{
+		{name: "meta", provider: "meta", want: sdktranslator.FormatCodex},
+		{name: "codex", provider: "codex", want: sdktranslator.FormatCodex},
+		{name: "gemini-cli", provider: "gemini-cli", want: sdktranslator.FormatGeminiCLI},
+		{name: "image", provider: "codex", opts: cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-image")}, want: sdktranslator.FromString("openai-image")},
+		{name: "video", provider: "xai", opts: cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-video")}, want: sdktranslator.FromString("openai-video")},
+		{name: "speech", provider: "claude", opts: cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-speech")}, want: sdktranslator.FromString("openai-speech")},
+		{name: "compact", provider: "xai", opts: cliproxyexecutor.Options{Alt: "responses/compact"}, want: sdktranslator.FormatOpenAIResponse},
+		{name: "compact stream", provider: "xai", opts: cliproxyexecutor.Options{Alt: "responses/compact", Stream: true}, want: sdktranslator.FormatCodex},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := requestToFormat(nil, tc.provider, nil, cliproxyexecutor.Request{}, tc.opts); got != tc.want {
+				t.Fatalf("requestToFormat() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := requestToFormat(&operationTestExecutor{}, "meta", nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{Alt: "responses/compact"}); got != sdktranslator.FormatOpenAI {
+		t.Fatalf("executor format override = %q, want openai", got)
+	}
+}
+
 func TestManagerOwnsCountOperationAcrossInterceptor(t *testing.T) {
 	for _, mode := range []string{"execute", "count", "stream"} {
 		t.Run(mode, func(t *testing.T) {

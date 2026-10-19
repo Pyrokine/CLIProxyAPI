@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -191,7 +192,11 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 		return false
 	}
 	auth := m.auths[authID]
-	if auth == nil || auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth) {
+	terminalRecord := strings.TrimSpace(record.Model) == "" && record.NextRetryAfter.IsZero() &&
+		record.LastError != nil && record.LastError.StatusCode() == http.StatusUnauthorized &&
+		isInvalidGrantResultError(record.LastError)
+	if auth == nil || hasTerminalUnauthorizedAuthFailure(auth) ||
+		((auth.Disabled || auth.Status == StatusDisabled || m.cooldownDisabledForAuth(auth)) && !terminalRecord) {
 		return false
 	}
 	if binding := strings.TrimSpace(record.BindingSHA256); binding != "" &&
@@ -224,7 +229,9 @@ func (m *Manager) restoreCooldownRecordLocked(record CooldownStateRecord, now ti
 			effectKey = auth.ID
 		}
 		auth.Unavailable = true
-		auth.Status = StatusError
+		if !auth.Disabled && auth.Status != StatusDisabled {
+			auth.Status = StatusError
+		}
 		auth.NextRetryAfter = record.NextRetryAfter
 		applyCooldownFields(&auth.Quota, quota)
 		auth.StateEffectScope = effectScope
@@ -368,7 +375,7 @@ func (m *Manager) clearDisabledCooldownStates(cfg *internalconfig.Config) bool {
 }
 
 func clearCooldownStateForAuth(auth *Auth, now time.Time) bool {
-	if auth == nil {
+	if auth == nil || hasTerminalUnauthorizedAuthFailure(auth) {
 		return false
 	}
 	changed := false
@@ -429,13 +436,20 @@ func (m *Manager) cooldownStateRecordsForAuthWithConfigLocked(
 	now time.Time,
 	cfg *internalconfig.Config,
 ) []CooldownStateRecord {
-	if auth == nil || auth.ID == "" || auth.Disabled || auth.Status == StatusDisabled ||
-		quotaCooldownDisabledForAuthWithConfig(auth, cfg) {
+	if auth == nil || auth.ID == "" {
+		return nil
+	}
+	terminal := hasTerminalUnauthorizedAuthFailure(auth)
+	skipCooldown := auth.Disabled || auth.Status == StatusDisabled || quotaCooldownDisabledForAuthWithConfig(auth, cfg)
+	if skipCooldown && !terminal {
 		return nil
 	}
 	records := make([]CooldownStateRecord, 0, 1+len(auth.ModelStates))
 	if record, ok := authCooldownStateRecord(auth, now); ok {
 		records = append(records, record)
+	}
+	if skipCooldown {
+		return records
 	}
 	for model, state := range auth.ModelStates {
 		if record, ok := modelCooldownStateRecord(auth, model, state, now); ok {

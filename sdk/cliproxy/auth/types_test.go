@@ -153,6 +153,22 @@ func TestEnsureIndexUsesCredentialIdentity(t *testing.T) {
 	}
 }
 
+func TestEnsureIndexMetaKeyStableAcrossConfigSources(t *testing.T) {
+	makeAuth := func(key, baseURL, source string) *Auth {
+		return &Auth{Provider: "meta", Attributes: map[string]string{
+			"api_key": key, "base_url": baseURL, "source": source,
+		}}
+	}
+	original := makeAuth("same-key", "https://api.meta.ai/v1", "config:meta[first]")
+	reordered := makeAuth("same-key", "https://api.meta.ai/v1", "config:meta[second]")
+	otherKey := makeAuth("different-key", "https://api.meta.ai/v1", "config:meta[first]")
+	otherBase := makeAuth("same-key", "https://proxy.example.test/v1", "config:meta[first]")
+	index := original.EnsureIndex()
+	if index == "" || index != reordered.EnsureIndex() || index == otherKey.EnsureIndex() || index == otherBase.EnsureIndex() {
+		t.Fatalf("Meta API key indexes must depend on credential identity, not config position: %q %q %q %q", index, reordered.Index, otherKey.Index, otherBase.Index)
+	}
+}
+
 func TestEnsureIndexPrefersExplicitSeedWithoutChangingLegacyFileIdentity(t *testing.T) {
 	t.Parallel()
 

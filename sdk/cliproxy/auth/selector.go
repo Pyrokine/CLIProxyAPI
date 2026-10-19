@@ -200,23 +200,23 @@ func (s *SessionAffinitySelector) pickLCPAffinity(
 		return nil, false
 	}
 	turns := cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest)
-	fingerprints, minimum := s.matcher.Prepare(turns)
+	fingerprints, minimum, tails, envDigest := s.matcher.PrepareExt(turns)
 	if len(fingerprints) == 0 || minimum <= 0 || minimum > len(fingerprints) {
 		return nil, false
 	}
-	setLCPMetadata(opts.Metadata, fingerprints, minimum)
-	match, ok := s.matcher.MatchFingerprints(namespace, fingerprints, minimum)
+	setLCPMetadata(opts.Metadata, fingerprints, minimum, tails, envDigest)
+	match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum)
 	if !ok {
 		return nil, false
 	}
 	auth := authByID(available, match.AuthID)
-	if auth == nil || !s.matcher.TouchFingerprints(namespace, fingerprints, minimum, match.AuthID) {
+	if auth == nil || !s.matcher.TouchFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum, match.AuthID) {
 		return nil, false
 	}
-	if bound, boundOK := s.matcher.MatchFingerprints(namespace, fingerprints, minimum); boundOK {
+	if bound, boundOK := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum); boundOK {
 		match = bound
 	}
-	setLCPMatchMetadata(opts.Metadata, match.SessionID, match.ParentSessionID, match.IsFork, match.AccessNumber)
+	setLCPMatchMetadata(opts.Metadata, match.SessionID, match.ParentSessionID, match.IsFork, match.IsCompaction, match.AccessNumber)
 	publishSessionAffinitySelection(opts, auth, provider, model, "session_affinity_lcp")
 	return auth, true
 }
@@ -268,11 +268,13 @@ func (s *SessionAffinitySelector) rememberLCP(
 	if namespace == "" || minimum <= 0 || minimum > len(fingerprints) {
 		return false
 	}
-	result := s.matcher.BindFingerprintsWithResult(namespace, fingerprints, minimum, authID)
+	tails, _ := opts.Metadata[cliproxyexecutor.LCPTailFingerprintsMetadataKey].([]string)
+	envDigest := sessionMetadataString(opts.Metadata, cliproxyexecutor.LCPEnvironmentDigestMetadataKey)
+	result := s.matcher.BindFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum, authID)
 	if result.SessionID == "" {
 		return false
 	}
-	setLCPMatchMetadata(opts.Metadata, result.SessionID, result.ParentSessionID, result.IsFork, result.AccessNumber)
+	setLCPMatchMetadata(opts.Metadata, result.SessionID, result.ParentSessionID, result.IsFork, result.IsCompaction, result.AccessNumber)
 	return true
 }
 
@@ -300,7 +302,17 @@ func (s *SessionAffinitySelector) RecordResult(
 		namespace := lcpAffinityNamespace(provider, model, opts.Metadata)
 		if prepared && namespace != "" && minimum > 0 && minimum <= len(fingerprints) {
 			if success {
-				s.matcher.TouchFingerprints(namespace, fingerprints, minimum, authID)
+				if opts.ExecutionLifecycle != nil {
+					s.matcher.CompleteSessionSelection(
+						namespace, fingerprints,
+						sessionMetadataString(opts.Metadata, cliproxyexecutor.LCPAffinitySessionIDMetadataKey),
+						authID, metadataUint64(opts.Metadata, cliproxyexecutor.LCPAccessGenerationMetadataKey),
+					)
+				} else {
+					tails, _ := opts.Metadata[cliproxyexecutor.LCPTailFingerprintsMetadataKey].([]string)
+					envDigest := sessionMetadataString(opts.Metadata, cliproxyexecutor.LCPEnvironmentDigestMetadataKey)
+					s.matcher.TouchFingerprintsWithContext(namespace, fingerprints, tails, envDigest, minimum, authID)
+				}
 			} else {
 				s.matcher.RemoveFingerprintsBefore(
 					namespace, fingerprints, authID,
@@ -419,7 +431,8 @@ func (s *SessionAffinitySelector) LookupAffinity(
 				continue
 			}
 			namespaceProvider, namespaceModel, _, parsed := parseLCPNamespace(namespace)
-			if parsed && ((provider != "mixed" && namespaceProvider != "mixed" && namespaceProvider != provider) ||
+			if parsed && ((provider != "mixed" && namespaceProvider != "mixed" &&
+				canonicalLCPProvider(namespaceProvider) != canonicalLCPProvider(provider)) ||
 				(modelKey != "" && namespaceModel != modelKey)) {
 				continue
 			}
@@ -547,8 +560,22 @@ func isSubagentSession(primaryID, parentID string) bool {
 	return isHierarchyParent(primaryID, parentID)
 }
 
-func lcpAffinityNamespace(provider, model string, metadata map[string]any) string {
+func canonicalLCPProvider(provider string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
+	switch provider {
+	case "google", "gemini", "vertex", "aistudio":
+		return "google"
+	case "codex", "openai":
+		return "openai"
+	case "claude", "anthropic":
+		return "claude"
+	default:
+		return provider
+	}
+}
+
+func lcpAffinityNamespace(provider, model string, metadata map[string]any) string {
+	provider = canonicalLCPProvider(provider)
 	callerScope := sessionMetadataString(metadata, cliproxyexecutor.CallerScopeMetadataKey)
 	if provider == "" || callerScope == "" {
 		return ""
@@ -612,25 +639,36 @@ func setCanonicalSessionMetadata(metadata map[string]any, sessionID, parentID st
 	}
 }
 
-func setLCPMetadata(metadata map[string]any, fingerprints []string, minimum int) {
+func setLCPMetadata(metadata map[string]any, fingerprints []string, minimum int, tails []string, envDigest string) {
 	if metadata == nil {
 		return
 	}
 	metadata[cliproxyexecutor.LCPFingerprintMetadataKey] = fingerprints
 	metadata[cliproxyexecutor.LCPMinPrefixLengthMetadataKey] = minimum
+	metadata[cliproxyexecutor.LCPTailFingerprintsMetadataKey] = tails
+	metadata[cliproxyexecutor.LCPEnvironmentDigestMetadataKey] = envDigest
 }
 
-func setLCPMatchMetadata(metadata map[string]any, sessionID, parentID string, isFork bool, accessNumber uint64) {
+func setLCPMatchMetadata(metadata map[string]any, sessionID, parentID string, isFork, isCompaction bool, accessNumber uint64) {
 	if metadata == nil {
 		return
 	}
 	metadata[cliproxyexecutor.LCPAffinitySessionIDMetadataKey] = sessionID
 	setCanonicalSessionMetadata(metadata, sessionID, parentID)
 	metadata[cliproxyexecutor.LCPAccessGenerationMetadataKey] = accessNumber
-	if isFork {
+	switch {
+	case isFork:
 		metadata[cliproxyexecutor.IsForkMetadataKey] = true
-	} else {
+		delete(metadata, cliproxyexecutor.IsCompactionMetadataKey)
+		metadata[cliproxyexecutor.NodeKindMetadataKey] = "fork"
+	case isCompaction:
 		delete(metadata, cliproxyexecutor.IsForkMetadataKey)
+		metadata[cliproxyexecutor.IsCompactionMetadataKey] = true
+		metadata[cliproxyexecutor.NodeKindMetadataKey] = "compaction"
+	default:
+		delete(metadata, cliproxyexecutor.IsForkMetadataKey)
+		delete(metadata, cliproxyexecutor.IsCompactionMetadataKey)
+		delete(metadata, cliproxyexecutor.NodeKindMetadataKey)
 	}
 }
 
@@ -925,18 +963,18 @@ func collectAvailableByPriority(
 		}
 		reasonCode := "blocked"
 		retryAfterMS := int64(0)
+		if next.After(now) {
+			if earliest.IsZero() || next.Before(earliest) {
+				earliest = next
+			}
+			retryAfterMS = next.Sub(now).Milliseconds()
+		}
 		// None and other blocked reasons retain the generic blocked route reason.
 		// noinspection GoSwitchMissingCasesForIotaConsts
 		switch reason {
 		case blockReasonCooldown:
 			reasonCode = "cooldown"
 			cooldownCount++
-			if !next.IsZero() && (earliest.IsZero() || next.Before(earliest)) {
-				earliest = next
-			}
-			if next.After(now) {
-				retryAfterMS = next.Sub(now).Milliseconds()
-			}
 		case blockReasonDisabled:
 			reasonCode = "disabled"
 		}
@@ -975,7 +1013,7 @@ func getAvailableAuths(
 			resetIn := max(earliest.Sub(now), 0)
 			return nil, newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr)
 		}
-		return nil, WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
+		return nil, newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 	}
 
 	bestPriority := 0
@@ -1447,6 +1485,9 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth.Disabled || auth.Status == StatusDisabled {
 		return true, blockReasonDisabled, time.Time{}
 	}
+	if hasTerminalUnauthorizedAuthFailure(auth) || auth.hasRejectedAccessToken() {
+		return true, blockReasonOther, time.Time{}
+	}
 	if expiresAt, ok := auth.AccessTokenExpirationTime(); ok && !expiresAt.IsZero() && !expiresAt.After(now) {
 		return true, blockReasonOther, time.Time{}
 	}
@@ -1506,18 +1547,18 @@ func unavailableRoutingBlock(
 	nextRecoverAt,
 	now time.Time,
 ) (bool, blockReason, time.Time) {
-	if !unavailable {
-		return false, blockReasonNone, time.Time{}
-	}
-	if nextRetryAfter.IsZero() {
-		return true, blockReasonOther, time.Time{}
-	}
-	if !nextRetryAfter.After(now) {
-		return false, blockReasonNone, time.Time{}
-	}
 	next := nextRetryAfter
 	if quotaExceeded && nextRecoverAt.After(next) {
 		next = nextRecoverAt
+	}
+	if !unavailable && (!quotaExceeded || !next.After(now)) {
+		return false, blockReasonNone, time.Time{}
+	}
+	if next.IsZero() {
+		return true, blockReasonOther, time.Time{}
+	}
+	if !next.After(now) {
+		return false, blockReasonNone, time.Time{}
 	}
 	if quotaExceeded {
 		return true, blockReasonCooldown, next

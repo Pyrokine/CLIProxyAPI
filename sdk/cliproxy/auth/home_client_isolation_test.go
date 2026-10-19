@@ -47,6 +47,28 @@ func (c *isolatedHomeClient) GetRefreshAuth(context.Context, string, string) ([]
 	return []byte(c.label + "-refresh"), nil
 }
 
+func TestManagerWithoutHomeUsesLocalScope(t *testing.T) {
+	previous := home.Current()
+	home.ClearCurrent()
+	t.Cleanup(func() { home.SetCurrent(previous) })
+
+	manager := NewManager(nil, nil, nil)
+	if client := manager.homeDispatcher(); client != nil {
+		t.Errorf("missing Home dispatcher returned a non-nil interface: %T", client)
+	}
+	if client := currentHomeRuntimeRefreshClient(); client != nil {
+		t.Errorf("missing Home refresh client returned a non-nil interface: %T", client)
+	}
+	ctx := manager.withHomeRefreshClient(context.Background())
+	scope, ok := home.ClientScopeFromContext(ctx)
+	if !ok || scope.Enabled || scope.Client != nil || scope.ID == "" {
+		t.Errorf("default manager did not retain local KV scope: %+v, found=%t", scope, ok)
+	}
+	if client, found := HomeRefreshClientFromContext(ctx); !found || client != nil {
+		t.Errorf("missing request-scoped Home refresh client = %T, found=%t", client, found)
+	}
+}
+
 func TestManagerHomeClientsAreIsolated(t *testing.T) {
 	globalClient := &isolatedHomeClient{label: "global"}
 	previousDispatcher := currentHomeDispatcher

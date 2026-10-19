@@ -160,6 +160,18 @@ func (s *Scheduler) Restore(entries map[string]EntryState) {
 		if current, exists := s.history[key]; exists && entryGenerationPrecedes(state, current) {
 			continue
 		}
+		if state.Status == statusLoading {
+			state.Status = StatusIdle
+			state.Error = "quota refresh interrupted by server restart"
+			state.LastError = state.Error
+			state.LastErrorAt = cloneTime(&now)
+			state.StateRevision++
+			if len(state.Data) > 0 || state.SuccessfulEmpty {
+				state.Freshness = freshnessStale
+			} else {
+				state.Freshness = FreshnessOutdated
+			}
+		}
 		s.history[key] = cloneEntryState(state)
 	}
 	for key, state := range s.history {
@@ -180,18 +192,6 @@ func (s *Scheduler) Restore(entries map[string]EntryState) {
 			resetEntryForBindingLocked(entry, generation)
 		default:
 			restoreEntryStateLocked(entry, state)
-			if entry.Status == statusLoading {
-				entry.Status = StatusIdle
-				entry.Error = "quota refresh interrupted by server restart"
-				entry.LastError = entry.Error
-				entry.LastErrorAt = cloneTime(&now)
-				entry.StateRevision++
-				if len(entry.Data) > 0 || entry.SuccessfulEmpty {
-					entry.Freshness = freshnessStale
-				} else {
-					entry.Freshness = FreshnessOutdated
-				}
-			}
 		}
 		if entry.Generation == state.Generation && entry.StateRevision < stateRevision {
 			entry.StateRevision = stateRevision
@@ -256,10 +256,23 @@ func (s *Scheduler) RegisterBinding(
 	credType CredentialType,
 	authIndex,
 	credentialRevision string,
+	equivalentRevisions ...string,
 ) {
 	fileName = strings.TrimSpace(fileName)
 	authIndex = strings.TrimSpace(authIndex)
 	credentialRevision = strings.TrimSpace(credentialRevision)
+	revisionMatches := func(revision string) bool {
+		revision = strings.TrimSpace(revision)
+		if revision == credentialRevision {
+			return true
+		}
+		for _, equivalent := range equivalentRevisions {
+			if revision != "" && revision == equivalent {
+				return true
+			}
+		}
+		return false
+	}
 	key := BindingEntryKey(credType, fileName, authIndex)
 	if key == "" {
 		return
@@ -289,7 +302,7 @@ func (s *Scheduler) RegisterBinding(
 
 	if existing := s.entries[key]; existing != nil {
 		existing.mu.Lock()
-		if existing.AuthIndex != authIndex || existing.credentialRevision != credentialRevision {
+		if existing.AuthIndex != authIndex || !revisionMatches(existing.credentialRevision) {
 			generation := existing.Generation + 1
 			if previous := s.history[key]; previous.Generation >= generation {
 				generation = previous.Generation + 1
@@ -297,6 +310,9 @@ func (s *Scheduler) RegisterBinding(
 			existing.AuthIndex = authIndex
 			existing.credentialRevision = credentialRevision
 			resetEntryForBindingLocked(existing, generation)
+		} else if existing.credentialRevision != credentialRevision {
+			existing.credentialRevision = credentialRevision
+			existing.StateRevision++
 		}
 		state = existing.snapshotLocked()
 		s.history[key] = cloneEntryState(state)
@@ -313,7 +329,15 @@ func (s *Scheduler) RegisterBinding(
 
 	entry := newEntryForBinding(fileName, credType, authIndex, credentialRevision, now)
 	if previous, exists := s.history[key]; exists {
-		if !previous.Tombstone && bindingMatches(previous, authIndex, credentialRevision) {
+		matches := bindingMatches(previous, authIndex, credentialRevision)
+		if len(equivalentRevisions) > 0 {
+			matches = previous.AuthIndex == authIndex && revisionMatches(previous.CredentialRevision)
+		}
+		if !previous.Tombstone && matches {
+			if previous.CredentialRevision != credentialRevision {
+				previous.CredentialRevision = credentialRevision
+				previous.StateRevision++
+			}
 			restoreEntryStateLocked(entry, previous)
 		} else {
 			resetEntryForBindingLocked(entry, previous.Generation+1)
@@ -1119,6 +1143,62 @@ func (s *Scheduler) executeRefresh(
 	result.Freshness = state.Freshness
 	result.SuccessfulEmpty = state.SuccessfulEmpty
 	result.CompletedAt = completedAt
+	if result.Outcome == RefreshOutcomeSucceeded && fetchResult.Enrich != nil {
+		result = s.enrichRefresh(ctx, target, entry, state.StateRevision, fetchResult, result)
+	}
+	return result
+}
+
+func (s *Scheduler) enrichRefresh(
+	ctx context.Context,
+	target RefreshTarget,
+	entry *Entry,
+	revision uint64,
+	fetched FetchResult,
+	result RefreshResult,
+) RefreshResult {
+	if ctx.Err() != nil || !s.refreshTargetIsCurrent(target, entry) {
+		return result
+	}
+	enriched, err := fetched.Enrich(ctx)
+	now := time.Now().UTC()
+	if err == nil && len(enriched.Data) == 0 {
+		err = errors.New("optional quota details returned no data")
+	}
+	if err == nil {
+		enriched, err = normalizeFetchResult(enriched, now)
+	}
+	if err != nil {
+		log.WithError(err).Warnf("quota: optional details refresh failed for %s", target.FileName)
+		enriched = fetched
+		enriched.Completeness = FetchPartial
+		if enriched.PartialError != "" {
+			enriched.PartialError += "; "
+		}
+		enriched.PartialError += "quota refreshed, but optional details could not be updated"
+	}
+
+	s.mu.Lock()
+	if s.entries[target.EntryKey] != entry {
+		s.mu.Unlock()
+		return result
+	}
+	entry.mu.Lock()
+	if ctx.Err() != nil || !refreshTargetMatchesEntryLocked(target, entry) || entry.StateRevision != revision {
+		entry.mu.Unlock()
+		s.mu.Unlock()
+		return result
+	}
+	entry.StateRevision++
+	applyRefreshSuccessLocked(entry, enriched, now, s.cfg)
+	state := entry.snapshotLocked()
+	s.history[target.EntryKey] = cloneEntryState(state)
+	s.updatedAt = now
+	entry.mu.Unlock()
+	s.mu.Unlock()
+	s.persist(state)
+	result.Freshness = state.Freshness
+	result.CompletedAt = now
 	return result
 }
 

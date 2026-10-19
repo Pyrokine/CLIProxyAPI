@@ -79,6 +79,33 @@ func TestMergeExistingAuthMetadataPreservesCredentialSettings(t *testing.T) {
 	}
 }
 
+func TestMergeExistingAuthMetadataDoesNotRestoreMetaDCA(t *testing.T) {
+	for _, tc := range []struct {
+		metadata map[string]any
+		wantDCA  any
+	}{
+		{metadata: map[string]any{"access_token": "dca:new"}},
+		{metadata: map[string]any{"access_token": "dca:new", "dca_token": "dca:new"}, wantDCA: "dca:new"},
+	} {
+		auth := &Auth{Provider: "meta", Metadata: tc.metadata}
+		err := MergeExistingAuthMetadata(auth, map[string]any{
+			"dca_token": "dca:old", "dca_expired": "old expiry",
+			"dca_expires_at": int64(42), "api_key": "old-key", "priority": 3,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, field := range []string{"dca_expired", "dca_expires_at", "api_key"} {
+			if _, exists := auth.Metadata[field]; exists {
+				t.Fatalf("restored old Meta field %s: %#v", field, auth.Metadata)
+			}
+		}
+		if auth.Metadata["dca_token"] != tc.wantDCA || auth.Metadata["priority"] != 3 {
+			t.Fatalf("Meta DCA or priority changed: %#v", auth.Metadata)
+		}
+	}
+}
+
 func TestMergeExistingAuthMetadataKeepsExplicitDisabledState(t *testing.T) {
 	target := &Auth{Disabled: true, Status: StatusDisabled, Metadata: map[string]any{"disabled": false}}
 	if errMerge := MergeExistingAuthMetadata(target, map[string]any{"disabled": true}); errMerge != nil {

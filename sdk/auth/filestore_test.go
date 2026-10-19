@@ -7,12 +7,74 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
+
+func TestFileTokenStorePersistsAdjacentLargeIntegerReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex-number.json")
+	if err := os.WriteFile(path, []byte(`{"type":"codex","access_token":"synthetic","credential_serial":9007199254740992,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+	ctx := WithPluginAuthParser(context.Background(), nil)
+	auths, err := store.List(ctx)
+	if err != nil || len(auths) != 1 {
+		t.Fatalf("read source: count=%d err=%v", len(auths), err)
+	}
+	auths[0].Metadata["credential_serial"] = json.Number("9007199254740993")
+	if _, err := store.Save(ctx, auths[0]); err != nil {
+		t.Fatal(err)
+	}
+	auths, err = store.List(ctx)
+	if err != nil || len(auths) != 1 || auths[0].Metadata["credential_serial"] != json.Number("9007199254740993") {
+		t.Fatalf("changed exact material was not persisted: %v", err)
+	}
+}
+
+func TestFileTokenStoreQuotaMaterialIdentity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex-material.json")
+	store := NewFileTokenStore()
+	store.SetBaseDir(dir)
+	ctx := WithPluginAuthParser(context.Background(), nil)
+	var previous string
+	for _, serial := range []string{"7", "9007199254740992", "9007199254740993"} {
+		raw := []byte(`{"type":"codex","access_token":"synthetic","priority":7,"request-retry":1,"credential_serial":` + serial + `}`)
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		auths, err := store.List(ctx)
+		if err != nil || len(auths) != 1 {
+			t.Fatalf("read exact source: count=%d err=%v", len(auths), err)
+		}
+		auth := auths[0]
+		revision, equivalent, err := cliproxyauth.QuotaCredentialRevisions(auth)
+		if err != nil || revision == previous || slices.Contains(equivalent, auth.Attributes[cliproxyauth.PersistedSHA256Attribute]) != (serial == "7") {
+			t.Fatalf("source material or numeric legacy isolation changed: %v", err)
+		}
+		auth.Disabled = true
+		auth.Metadata["disabled"] = true
+		if _, err := store.Save(ctx, auth); err != nil {
+			t.Fatal(err)
+		}
+		auths, err = store.List(ctx)
+		if err != nil || len(auths) != 1 {
+			t.Fatalf("read status update: count=%d err=%v", len(auths), err)
+		}
+		after, _, err := cliproxyauth.QuotaCredentialRevisions(auths[0])
+		if err != nil || after != revision || auths[0].Attributes["priority"] != "7" {
+			t.Fatalf("status persistence changed exact material or priority: %v", err)
+		}
+		previous = revision
+	}
+}
 
 func TestFileTokenStoreDeleteIfVersionPreservesNewerCredential(t *testing.T) {
 	dir := t.TempDir()
@@ -77,6 +139,39 @@ func TestFileTokenStoreListUsesRelativeIDWithRelativeBaseDir(t *testing.T) {
 	}
 	if len(auths) != 1 || auths[0] == nil || auths[0].ID != "shared.json" {
 		t.Fatalf("FileTokenStore.List() = %#v", auths)
+	}
+}
+
+func TestFileTokenStoreListAppliesBuiltInFilePriority(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		priority string
+		want     string
+	}{
+		{name: "numeric", priority: "5", want: "5"},
+		{name: "string", priority: `" 8 "`, want: "8"},
+		{name: "invalid", priority: `"invalid"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "codex.json")
+			if err := os.WriteFile(path, []byte(`{"type":"codex","priority":`+test.priority+`}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := NewFileTokenStore()
+			store.SetBaseDir(dir)
+			auths, err := store.List(WithPluginAuthParser(context.Background(), nil))
+			if err != nil || len(auths) != 1 {
+				t.Fatalf("List() = %#v, error = %v", auths, err)
+			}
+			if got := auths[0].Attributes["priority"]; got != test.want {
+				t.Fatalf("priority = %q, want %q", got, test.want)
+			}
+			_, inherited := auths[0].Attributes[cliproxyauth.AttributeFilePriority]
+			if inherited != (test.want != "") {
+				t.Fatalf("file priority marker = %t, want %t", inherited, test.want != "")
+			}
+		})
 	}
 }
 
@@ -280,6 +375,11 @@ type cancellingFileTokenStorage struct {
 	saved  bool
 }
 
+func (s *cancellingFileTokenStorage) CloneForPersistence() cliproxyauth.TokenStorage {
+	copyStorage := *s
+	return &copyStorage
+}
+
 func (s *cancellingFileTokenStorage) SetMetadata(_ map[string]any) {
 	s.cancel()
 }
@@ -413,10 +513,57 @@ func TestParsePluginAuthFilesFiltersInvalidChildWeight(t *testing.T) {
 	}
 }
 
+func TestParsePluginAuthFilesRetainsAuthWhenQuotaProofIsUnavailable(t *testing.T) {
+	parser := fileStoreMultiAuthParserFunc(func(
+		context.Context,
+		pluginapi.AuthParseRequest,
+	) ([]*cliproxyauth.Auth, bool, error) {
+		return []*cliproxyauth.Auth{{
+			ID: "plugin-a", Provider: "plugin",
+			Metadata: map[string]any{"serial": float64(9007199254740992)},
+		}}, true, nil
+	})
+	ctx := WithPluginAuthParser(context.Background(), parser)
+	auths, handled, err := ParsePluginAuthFiles(ctx, "plugin", "plugin.json", "plugin.json", []byte(`{"type":"plugin","serial":9007199254740993}`))
+	if err != nil || !handled || len(auths) != 1 {
+		t.Fatalf("quota proof failure rejected plugin authentication: count=%d, handled=%v, error=%v", len(auths), handled, err)
+	}
+	if len(auths[0].Attributes[cliproxyauth.PersistedSHA256Attribute]) != 64 {
+		t.Fatal("plugin auth lost its full source digest")
+	}
+	if _, _, err := cliproxyauth.QuotaCredentialRevisions(auths[0]); err == nil {
+		t.Fatal("rounded plugin metadata was accepted for quota restoration")
+	}
+}
+
+func TestParsePluginAuthFilesRetainsPluginPriorityWhenFileValueIsInvalid(t *testing.T) {
+	parser := fileStoreMultiAuthParserFunc(func(
+		context.Context,
+		pluginapi.AuthParseRequest,
+	) ([]*cliproxyauth.Auth, bool, error) {
+		return []*cliproxyauth.Auth{{
+			ID: "plugin-a", Provider: "plugin",
+			Attributes: map[string]string{"priority": "7", cliproxyauth.AttributeFilePriority: "true"},
+			Metadata:   map[string]any{"priority": 7},
+		}}, true, nil
+	})
+	ctx := WithPluginAuthParser(context.Background(), parser)
+	auths, handled, err := ParsePluginAuthFiles(ctx, "plugin", "plugin.json", "plugin.json", []byte(`{"type":"plugin","priority":"invalid"}`))
+	if err != nil || !handled || len(auths) != 1 {
+		t.Fatalf("ParsePluginAuthFiles() = %#v, handled=%t, error=%v", auths, handled, err)
+	}
+	if auths[0].Attributes["priority"] != "7" || auths[0].Metadata["priority"] != 7 {
+		t.Fatalf("plugin priority changed: %+v", auths[0])
+	}
+	if _, inherited := auths[0].Attributes[cliproxyauth.AttributeFilePriority]; inherited {
+		t.Fatal("invalid file priority left an inherited marker")
+	}
+}
+
 func TestFileTokenStoreListExpandsPluginMultiAuths(t *testing.T) {
 	baseDir := t.TempDir()
 	path := filepath.Join(baseDir, "plugin.json")
-	raw := []byte(`{"type":"plugin","disabled":true,"weight":3,"proxy-url":"http://proxy.test","headers":{"X-Test":"value"}}`)
+	raw := []byte(`{"type":"plugin","disabled":true,"weight":3,"priority":4,"proxy-url":"http://proxy.test","headers":{"X-Test":"value"}}`)
 	if errWrite := os.WriteFile(path, raw, 0o600); errWrite != nil {
 		t.Fatal(errWrite)
 	}
@@ -474,6 +621,9 @@ func TestFileTokenStoreListExpandsPluginMultiAuths(t *testing.T) {
 			t.Fatalf("auth %s disabled/status = %t/%s", first[index].ID, first[index].Disabled, first[index].Status)
 		}
 		if first[index].Attributes[cliproxyauth.AttributeWeight] != "3" ||
+			first[index].Attributes["priority"] != "4" ||
+			first[index].Attributes[cliproxyauth.AttributeFilePriority] != "true" ||
+			first[index].Metadata["priority"] != float64(4) ||
 			first[index].Attributes["header:X-Test"] != "value" ||
 			first[index].ProxyURL != "http://proxy.test" {
 			t.Fatalf(

@@ -21,6 +21,54 @@ func (*affinityUnsupportedPluginScheduler) PickAuth(
 	return pluginapi.SchedulerPickResponse{}, false, nil
 }
 
+func TestLCPProviderAliasesShareNamespaceWithoutCrossProviderAuth(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		storedProvider string
+		lookupProvider string
+	}{
+		{name: "google gemini", storedProvider: "google", lookupProvider: "gemini"},
+		{name: "openai codex", storedProvider: "openai", lookupProvider: "codex"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			selector := NewSessionAffinitySelector(nil)
+			defer selector.Stop()
+			manager := NewManager(nil, selector, nil)
+			const model = "lcp-alias-model"
+			auth, err := manager.Register(WithSkipPersist(context.Background()), &Auth{
+				ID: "lcp-alias-auth", Provider: test.lookupProvider,
+			})
+			if err != nil {
+				t.Fatalf("Register() error = %v", err)
+			}
+			opts := cliproxyexecutor.Options{
+				SourceFormat:    "openai",
+				OriginalRequest: []byte(`{"messages":[{"role":"user","content":"one"},{"role":"user","content":"two"},{"role":"user","content":"three"},{"role":"user","content":"four"},{"role":"user","content":"five"}]}`),
+				Metadata:        map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "lcp-alias-scope"},
+			}
+			namespace := lcpAffinityNamespace(test.storedProvider, model, opts.Metadata)
+			sessionID := selector.matcher.Bind(namespace, cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest), auth.ID)
+			if sessionID == "" {
+				t.Fatal("LCP session was not bound")
+			}
+			if found, state := manager.LookupSessionAffinity(test.lookupProvider, model, sessionID); state != "bound" || found == nil || found.ID != auth.ID {
+				t.Fatalf("alias lookup = (%#v, %q)", found, state)
+			}
+			if found, state := manager.LookupSessionAffinity(test.storedProvider, model, sessionID); state != "unbound" || found != nil {
+				t.Fatalf("lookup crossed credential provider = (%#v, %q)", found, state)
+			}
+			if selected, matched := selector.pickLCPAffinity(test.lookupProvider, model, opts, []*Auth{auth}); !matched || selected == nil || selected.ID != auth.ID {
+				t.Fatalf("alias route = (%#v, %t)", selected, matched)
+			}
+			legacyNamespace := "lcp:v1::" + test.lookupProvider + "::" + model + "::lcp-alias-scope"
+			legacySession := selector.matcher.Bind(legacyNamespace, cliproxysession.ExtractCanonicalTurns(opts.SourceFormat, opts.OriginalRequest), auth.ID)
+			if id, state := selector.LookupAffinity(test.storedProvider, model, legacySession); state != "bound" || id != auth.ID {
+				t.Fatalf("legacy namespace lookup = (%q, %q)", id, state)
+			}
+		})
+	}
+}
+
 func TestLookupSessionAffinityIsReadOnlyAndReturnsDetachedAuth(t *testing.T) {
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
 		Fallback: &RoundRobinSelector{},

@@ -236,7 +236,7 @@ func TestRefreshFailurePublicationGuardsGenerationExecutorAndOwner(t *testing.T)
 	if errUpdate != nil {
 		t.Fatalf("Update() error = %v", errUpdate)
 	}
-	if manager.publishRefreshError(staleGeneration, executor, nil, failure, time.Now()) {
+	if manager.publishRefreshError(staleGeneration, executor, nil, failure, time.Now(), false) {
 		t.Fatal("stale generation published refresh failure")
 	}
 	current, _ := manager.GetByID(registered.ID)
@@ -247,7 +247,7 @@ func TestRefreshFailurePublicationGuardsGenerationExecutorAndOwner(t *testing.T)
 	ownerExpected := updated.Clone()
 	replacement := &routingRefreshTestExecutor{provider: provider}
 	manager.RegisterExecutor(replacement)
-	if manager.publishRefreshError(ownerExpected, executor, nil, failure, time.Now()) {
+	if manager.publishRefreshError(ownerExpected, executor, nil, failure, time.Now(), false) {
 		t.Fatal("replaced executor owner published refresh failure")
 	}
 	current, _ = manager.GetByID(registered.ID)
@@ -256,7 +256,7 @@ func TestRefreshFailurePublicationGuardsGenerationExecutorAndOwner(t *testing.T)
 	}
 
 	guard := &rejectingRefreshGuard{}
-	if manager.publishRefreshError(current.Clone(), replacement, guard, failure, time.Now()) {
+	if manager.publishRefreshError(current.Clone(), replacement, guard, failure, time.Now(), false) {
 		t.Fatal("rejected RefreshCommitGuard published refresh failure")
 	}
 	if guard.calls != 1 {

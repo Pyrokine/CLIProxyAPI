@@ -333,12 +333,12 @@ func hasExplicitSession(headers map[string][]string, payload []byte) bool {
 	if len(payload) == 0 {
 		return false
 	}
-	root := util.ParseGJSONBytesNoCopy(payload)
+	root := newSessionObject(util.ParseGJSONBytesNoCopy(payload))
 	requestRoot := root
 	request := root.Get("request")
 	hasNestedRequest := request.Exists() && !root.Get("contents").Exists()
 	if hasNestedRequest {
-		requestRoot = request
+		requestRoot = newSessionObject(request)
 	}
 	for _, path := range []string{
 		"session_id", "sessionId", "sessionID", "child_session_id", "childSessionId",

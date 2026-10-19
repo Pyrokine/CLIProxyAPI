@@ -81,6 +81,24 @@ func TestAuthDispatchRequestFiltersHeaders(t *testing.T) {
 	}
 }
 
+func TestAuthDispatchRequestIncludesNodeKind(t *testing.T) {
+	req := newAuthDispatchRequest("gpt-5.4", "session-1", http.Header{"X-Node-Kind": {" compaction "}}, 1)
+	if req.NodeKind != "compaction" {
+		t.Fatalf("node kind = %q, want compaction", req.NodeKind)
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal auth dispatch request: %v", err)
+	}
+	var payload map[string]any
+	if err = json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("unmarshal auth dispatch request: %v", err)
+	}
+	if payload["node_kind"] != "compaction" {
+		t.Fatalf("node_kind = %#v, want compaction", payload["node_kind"])
+	}
+}
+
 func TestAuthDispatchRequestDefaultsCountToOne(t *testing.T) {
 	req := newAuthDispatchRequest("gpt-5.4", "", nil, 0)
 

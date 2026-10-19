@@ -60,6 +60,23 @@ func TestStreamRewriterFinishFlushesCodexResponsesEventChunk(t *testing.T) {
 	}
 }
 
+func TestStreamRewriterFinishFlushesSinglePendingEvent(t *testing.T) {
+	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "public-model"})
+	partial := "event: response.created\n" + `data: {"type":"response.created","response":{"model":"upstream-model"}}`
+	if output := rewriter.RewriteChunk([]byte(partial)); len(output) != 0 {
+		t.Fatalf("partial event = %q, want buffered", output)
+	}
+	got := string(rewriter.Finish())
+	if strings.Count(got, "event: response.created") != 1 ||
+		strings.Count(got, `"model":"public-model"`) != 1 ||
+		!strings.HasSuffix(got, "\n\n") {
+		t.Fatalf("flushed event = %q, want one rewritten SSE event", got)
+	}
+	if again := rewriter.Finish(); len(again) != 0 {
+		t.Fatalf("second flush = %q, want empty", again)
+	}
+}
+
 func TestStreamRewriterRewriteChunkCodexResponsesLineChunks(t *testing.T) {
 	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "gpt-5.4-fast"})
 	lines := [][]byte{
@@ -178,6 +195,28 @@ func TestRewriteSSEPayloadLinesCodexResponsesLiveFrame(t *testing.T) {
 	}
 	if strings.Contains(got, `"model":"gpt-5.4"`) {
 		t.Fatalf("rewritten chunk still contains upstream model: %q", got)
+	}
+}
+
+func TestStreamRewriterTracksPathsAndLogsCompletionOnce(t *testing.T) {
+	rewriter := NewStreamRewriter(StreamRewriteOptions{RewriteModel: "public-model"})
+	chunk := []byte(`data: {"model":"upstream-model","response":{"model":"upstream-model"}}` + "\n\n")
+	for range 2 {
+		if rewritten := rewriter.RewriteChunk(chunk); !strings.Contains(string(rewritten), `"model":"public-model"`) {
+			t.Fatalf("rewritten event = %q", rewritten)
+		}
+	}
+	if rewriter.rewrittenEvents != 2 || len(rewriter.loggedPaths) != 2 || rewriter.finishedLogged {
+		t.Fatalf("stream rewrite state before completion: events=%d paths=%v completed=%t",
+			rewriter.rewrittenEvents, rewriter.loggedPaths, rewriter.finishedLogged)
+	}
+	rewriter.RewriteChunk([]byte("data: [DONE]\n\n"))
+	if !rewriter.finishedLogged || rewriter.rewrittenEvents != 2 {
+		t.Fatalf("stream completion state: events=%d completed=%t", rewriter.rewrittenEvents, rewriter.finishedLogged)
+	}
+	rewriter.Finish()
+	if !rewriter.finishedLogged || rewriter.rewrittenEvents != 2 {
+		t.Fatalf("repeated completion state: events=%d completed=%t", rewriter.rewrittenEvents, rewriter.finishedLogged)
 	}
 }
 

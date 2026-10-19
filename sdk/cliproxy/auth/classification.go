@@ -15,14 +15,15 @@ const (
 	AuthSourceObjectStore = "objectstore"
 	AuthSourcePostgres    = "postgres"
 
-	AttributeAPIKey           = "api_key"
-	AttributeAuthKind         = "auth_kind"
-	AttributeCodexAlphaSearch = "codex_alpha_search"
-	AttributeConfigIndex      = "config_index"
-	AttributePath             = "path"
-	AttributeRuntimeOnly      = "runtime_only"
-	AttributeSource           = "source"
-	AttributeSourceBackend    = "source_backend"
+	AttributeAPIKey               = "api_key"
+	AttributeAuthKind             = "auth_kind"
+	AttributeCodexAlphaSearch     = "codex_alpha_search"
+	AttributeCodexDisableCloaking = "codex_disable_cloaking"
+	AttributeConfigIndex          = "config_index"
+	AttributePath                 = "path"
+	AttributeRuntimeOnly          = "runtime_only"
+	AttributeSource               = "source"
+	AttributeSourceBackend        = "source_backend"
 )
 
 // AuthKind returns the credential kind using explicit metadata first and legacy
@@ -37,7 +38,7 @@ func (a *Auth) AuthKind() string {
 	if kind := normalizeAuthKind(authMetadataString(a, AttributeAuthKind)); kind != "" {
 		return kind
 	}
-	if authAttribute(a, AttributeAPIKey) != "" {
+	if authAttribute(a, AttributeAPIKey) != "" || authMetadataString(a, AttributeAPIKey) != "" {
 		return AuthKindAPIKey
 	}
 	if authHasOAuthMetadata(a) {
@@ -75,6 +76,11 @@ func (a *Auth) AuthSourceKind() string {
 		return AuthSourceFile
 	}
 	return ""
+}
+
+// IsConfigAPIKeyAuth reports whether an API key was synthesized from configuration.
+func IsConfigAPIKeyAuth(auth *Auth) bool {
+	return auth != nil && auth.AuthKind() == AuthKindAPIKey && auth.AuthSourceKind() == AuthSourceConfig
 }
 
 func normalizeAuthKind(kind string) string {

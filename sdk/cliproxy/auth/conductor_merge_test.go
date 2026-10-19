@@ -1743,7 +1743,7 @@ func TestUpdateDoesNotOverwriteConcurrentResultState(t *testing.T) {
 	store.block = true
 	store.mu.Unlock()
 	updated := registered.Clone()
-	updated.Metadata["token"] = "new"
+	updated.Label = "new label"
 	updateDone := make(chan error, 1)
 	go func() {
 		_, errUpdate := manager.Update(context.Background(), updated)
@@ -1789,7 +1789,7 @@ func TestUpdateDoesNotOverwriteConcurrentResultState(t *testing.T) {
 	}
 
 	current, ok := manager.GetByID(original.ID)
-	if !ok || current.Metadata["token"] != "new" {
+	if !ok || current.Metadata["token"] != "old" || current.Label != "new label" {
 		t.Fatalf("persistent update was lost: %#v", current)
 	}
 	state := current.ModelStates["plugin-model"]

@@ -98,6 +98,11 @@ func executionDispositionForError(
 		} else {
 			disposition.Outcome = cliproxyexecutor.ExecutionOutcomeUnknown
 		}
+	case isTransientTransportError(err):
+		disposition.DispatchPhase = cliproxyexecutor.DispatchPhaseNotSent
+		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing
+		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNextAuth
+		disposition.EffectScope = cliproxyexecutor.StateEffectScopeRequest
 	case isConnectionLifecycleError(err):
 		disposition.Outcome = cliproxyexecutor.ExecutionOutcomeUnknown
 		disposition.RetryDirective = cliproxyexecutor.RetryDirectiveNoRetry
@@ -635,7 +640,8 @@ func activeQuotaFamilyForModel(auth *Auth, model string) string {
 }
 
 func retryDirectiveAllowsRefresh(disposition cliproxyexecutor.ExecutionDisposition) bool {
-	return disposition.Outcome == cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing &&
+	return disposition.DispatchPhase != cliproxyexecutor.DispatchPhaseDownstreamCommitted &&
+		disposition.Outcome == cliproxyexecutor.ExecutionOutcomeRejectedBeforeProcessing &&
 		disposition.RetryDirective == cliproxyexecutor.RetryDirectiveSameAuthAfterRefresh
 }
 

@@ -8,12 +8,15 @@ import (
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/clienterror"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
 type homePreparedAttempt struct {
 	ctx         context.Context
 	auth        *Auth
+	executor    ProviderExecutor
 	request     cliproxyexecutor.Request
 	options     cliproxyexecutor.Options
 	aliasResult OAuthModelAliasResult
@@ -40,6 +43,13 @@ func (m *Manager) prepareHomeAttempt(
 	attemptCtx := contextWithRequestedModelAlias(ctx, opts, routeModel)
 	prepareStarted := time.Now()
 	preparedAuth, errPrepare := m.prepareRequestAuth(attemptCtx, selection.Executor, auth)
+	var preparedExecutor ProviderExecutor
+	if errPrepare == nil {
+		if preparedAuth == nil {
+			preparedAuth = auth.Clone()
+		}
+		preparedExecutor, errPrepare = executorForAuth(selection.Executor, preparedAuth)
+	}
 	warnLogUpstreamFailure(attemptCtx, auth, selection.Provider, routeModel, prepareStarted, errPrepare, cliproxyexecutor.DispatchPhaseNotSent)
 	if errPrepare != nil {
 		resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errPrepare, "prepare_failed")
@@ -55,12 +65,9 @@ func (m *Manager) prepareHomeAttempt(
 		)
 		return homePreparedAttempt{}, errPrepare
 	}
-	if preparedAuth == nil {
-		preparedAuth = auth.Clone()
-	}
 	preserveHomeRoutingAttributes(preparedAuth, auth)
 	if rt := m.roundTripperFor(preparedAuth); rt != nil {
-		attemptCtx = context.WithValue(attemptCtx, roundTripperContextKey{}, rt)
+		attemptCtx = util.WithRoundTripper(attemptCtx, rt)
 	}
 
 	execReq := req
@@ -76,8 +83,8 @@ func (m *Manager) prepareHomeAttempt(
 	execOpts := opts
 	execOpts.ExecutionLifecycle = selection
 	var errIntercept error
-	execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(
-		attemptCtx, selection.Executor, selection.Provider, preparedAuth, execReq, execOpts, routeModel,
+	attemptCtx, execReq, execOpts, errIntercept = applyRequestAfterAuthInterceptor(
+		attemptCtx, preparedExecutor, selection.Provider, preparedAuth, execReq, execOpts, routeModel,
 	)
 	if errIntercept != nil {
 		resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errIntercept, "request_intercepted")
@@ -94,9 +101,19 @@ func (m *Manager) prepareHomeAttempt(
 		)
 		return homePreparedAttempt{}, errIntercept
 	}
-	execReq, errIntercept = attachResolvedAPIKeyModelInfo(
-		execReq, preparedAuth, routeModel, aliasResult.UpstreamModel,
-	)
+	localRouteModel := routeModel
+	if selection.modelInfo != nil && thinking.HasContext1MTag(routeModel) {
+		if !modelInfoSupportsContext1M(selection.modelInfo) {
+			errIntercept = context1MModelSupportError(routeModel)
+		} else {
+			localRouteModel = thinking.ParseSuffix(routeModel).ModelName
+		}
+	}
+	if errIntercept == nil {
+		execReq, errIntercept = attachResolvedAPIKeyModelInfo(
+			execReq, preparedAuth, localRouteModel, execReq.Model,
+		)
+	}
 	if errIntercept != nil {
 		resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errIntercept, "model_not_supported")
 		publishAuthRouteTraceEvent(
@@ -112,6 +129,9 @@ func (m *Manager) prepareHomeAttempt(
 		)
 		return homePreparedAttempt{}, errIntercept
 	}
+	execReq = attachResolvedHomeModelInfo(
+		execReq, preparedAuth, routeModel, selection.modelInfo, selection.configurationUpdateSupport,
+	)
 	execReq = sanitizeDownstreamWebsocketFallbackRequest(attemptCtx, preparedAuth, execReq)
 	publishSelectedAuthMetadata(opts.Metadata, preparedAuth)
 	if opts.Stream {
@@ -129,10 +149,27 @@ func (m *Manager) prepareHomeAttempt(
 	return homePreparedAttempt{
 		ctx:         attemptCtx,
 		auth:        preparedAuth,
+		executor:    preparedExecutor,
 		request:     execReq,
 		options:     execOpts,
 		aliasResult: aliasResult,
 	}, nil
+}
+
+func validateHomeExecutionProvider(selection *HomeDispatchSelection, providers []string) error {
+	if selection == nil {
+		return &Error{Code: "auth_not_found", Message: "home returned no auth selection"}
+	}
+	for _, provider := range providers {
+		if strings.EqualFold(strings.TrimSpace(provider), strings.TrimSpace(selection.Provider)) {
+			return nil
+		}
+	}
+	selection.End("provider_not_requested")
+	return &Error{
+		Code: "provider_not_allowed", Message: "home selected a provider not allowed by request",
+		HTTPStatus: http.StatusForbidden,
+	}
 }
 
 // RefreshHomeSelectionAfterUnauthorized 只读取 Home 已安装的新 token 快照，不刷新或修改凭证
@@ -157,6 +194,7 @@ func (m *Manager) RefreshHomeSelectionAfterUnauthorized(
 
 func (m *Manager) executeHome(
 	ctx context.Context,
+	providers []string,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 	countTokens bool,
@@ -180,10 +218,8 @@ func (m *Manager) executeHome(
 			return cliproxyexecutor.Response{}, err
 		}
 		attemptOrdinal, previousAttempt := nextRouteTraceAttempt(opts)
-		attemptOpts := withRouteTraceAttempt(opts, attemptOrdinal, previousAttempt)
-		selection, errSelection := m.pickHomeDispatchSelection(
-			ctx, routeModel, withHomeAuthCount(attemptOpts, count),
-		)
+		attemptOpts := withHomeAuthCount(withRouteTraceAttempt(opts, attemptOrdinal, previousAttempt), count)
+		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, attemptOpts)
 		if errSelection != nil {
 			returnedErr := errSelection
 			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) || (lastErr != nil && isHomeCooldownError(errSelection)) {
@@ -207,6 +243,9 @@ func (m *Manager) executeHome(
 				},
 			)
 			return cliproxyexecutor.Response{}, returnedErr
+		}
+		if errProvider := validateHomeExecutionProvider(selection, providers); errProvider != nil {
+			return cliproxyexecutor.Response{}, errProvider
 		}
 		auth := selection.CloneAuthForRoute(routeModel)
 		if auth == nil || selection.Executor == nil {
@@ -261,6 +300,7 @@ func (m *Manager) executeHome(
 			selection.End("attempt_bind_failed")
 			return cliproxyexecutor.Response{}, errAttempt
 		}
+		m.bindHomeLCPSelection(attemptOpts, auth.ID)
 		attempt, errPrepare := m.prepareHomeAttempt(attemptCtx, selection, auth, req, attemptOpts, routeModel)
 		if errPrepare != nil {
 			releaseAttempt()
@@ -271,6 +311,7 @@ func (m *Manager) executeHome(
 			result := executionResult(
 				auth, selection.Provider, routeModel, errPrepare, cliproxyexecutor.DispatchPhaseNotSent,
 			)
+			result.Options = cloneExecutorOptions(attemptOpts)
 			m.recordHomeExecutionResult(attemptCtx, result, countTokens)
 			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errPrepare, "prepare_failed")
 			recordedEvent := cliproxyexecutor.RouteTraceEvent{
@@ -323,11 +364,11 @@ func (m *Manager) executeHome(
 		}
 		execute := func(current homePreparedAttempt) (cliproxyexecutor.Response, error) {
 			if countTokens {
-				return selection.Executor.CountTokens(
+				return current.executor.CountTokens(
 					current.ctx, current.auth, current.request, externalRouteTraceOptions(current.options),
 				)
 			}
-			return selection.Executor.Execute(
+			return current.executor.Execute(
 				current.ctx, current.auth, current.request, externalRouteTraceOptions(current.options),
 			)
 		}
@@ -358,6 +399,7 @@ func (m *Manager) executeHome(
 			phase = cliproxyexecutor.DispatchPhaseMaybeSent
 		}
 		result := executionResult(attempt.auth, selection.Provider, routeModel, errExecute, phase)
+		result.Options = cloneExecutorOptions(attempt.options)
 		decision := requestScopedActionDecision{err: errExecute}
 		compactRequestFault := false
 		if errExecute != nil {
@@ -502,7 +544,7 @@ func (m *Manager) startHomeStreamAttempt(
 	selection *HomeDispatchSelection,
 	routeModel string,
 ) (*cliproxyexecutor.StreamResult, error) {
-	streamResult, errStream := selection.Executor.ExecuteStream(
+	streamResult, errStream := attempt.executor.ExecuteStream(
 		attempt.ctx, attempt.auth, attempt.request, externalRouteTraceOptions(attempt.options),
 	)
 	if errStream != nil {
@@ -529,11 +571,12 @@ func (m *Manager) startHomeStreamAttempt(
 		close(closedCh)
 		remaining = closedCh
 	}
-	return m.wrapStreamResult(
+	return m.wrapStreamResultWithOptions(
 		attempt.ctx,
 		attempt.auth.Clone(),
 		selection.Provider,
 		routeModel,
+		attempt.options,
 		streamResult.Headers,
 		buffered,
 		remaining,
@@ -543,6 +586,7 @@ func (m *Manager) startHomeStreamAttempt(
 
 func (m *Manager) executeHomeStream(
 	ctx context.Context,
+	providers []string,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (*cliproxyexecutor.StreamResult, error) {
@@ -565,10 +609,8 @@ func (m *Manager) executeHomeStream(
 			return nil, err
 		}
 		attemptOrdinal, previousAttempt := nextRouteTraceAttempt(opts)
-		attemptOpts := withRouteTraceAttempt(opts, attemptOrdinal, previousAttempt)
-		selection, errSelection := m.pickHomeDispatchSelection(
-			ctx, routeModel, withHomeAuthCount(attemptOpts, count),
-		)
+		attemptOpts := withHomeAuthCount(withRouteTraceAttempt(opts, attemptOrdinal, previousAttempt), count)
+		selection, errSelection := m.pickHomeDispatchSelection(ctx, routeModel, attemptOpts)
 		if errSelection != nil {
 			returnedErr := errSelection
 			if shouldReturnLastErrorOnPickFailure(true, lastErr, errSelection) || (lastErr != nil && isHomeCooldownError(errSelection)) {
@@ -592,6 +634,9 @@ func (m *Manager) executeHomeStream(
 				},
 			)
 			return nil, returnedErr
+		}
+		if errProvider := validateHomeExecutionProvider(selection, providers); errProvider != nil {
+			return nil, errProvider
 		}
 		auth := selection.CloneAuthForRoute(routeModel)
 		if auth == nil || selection.Executor == nil {
@@ -646,6 +691,7 @@ func (m *Manager) executeHomeStream(
 			selection.End("attempt_bind_failed")
 			return nil, errAttempt
 		}
+		m.bindHomeLCPSelection(attemptOpts, auth.ID)
 		attempt, errPrepare := m.prepareHomeAttempt(attemptCtx, selection, auth, req, attemptOpts, routeModel)
 		if errPrepare != nil {
 			releaseAttempt()
@@ -656,6 +702,7 @@ func (m *Manager) executeHomeStream(
 			result := executionResult(
 				auth, selection.Provider, routeModel, errPrepare, cliproxyexecutor.DispatchPhaseNotSent,
 			)
+			result.Options = cloneExecutorOptions(attemptOpts)
 			m.recordHomeExecutionResult(attemptCtx, result, false)
 			resultCode, httpStatus, retryAfterMS := routeTraceError(opts.Metadata, errPrepare, "prepare_failed")
 			recordedEvent := cliproxyexecutor.RouteTraceEvent{
@@ -715,6 +762,7 @@ func (m *Manager) executeHomeStream(
 			return wrapHomeOwnedStream(attempt.ctx, streamResult, selection, releaseAttempt, !retained), nil
 		}
 		result := executionResult(attempt.auth, selection.Provider, routeModel, errStream, failurePhase)
+		result.Options = cloneExecutorOptions(attempt.options)
 		result.RetryAfter = retryAfterFromError(errStream)
 		decision := m.applyRequestScopedErrorRule(attempt.auth, errStream, &result)
 		errStream = decision.err

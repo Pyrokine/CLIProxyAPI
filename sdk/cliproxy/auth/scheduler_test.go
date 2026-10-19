@@ -236,8 +236,69 @@ func TestSchedulerPick_TransientUnavailabilityIsNotQuotaCooldown(t *testing.T) {
 		t.Fatalf("pickSingle() error = %T, do not report a transient error as quota cooldown", errPick)
 	}
 	var authErr *Error
-	if !errors.As(errPick, &authErr) || authErr.Code != "auth_unavailable" {
-		t.Fatalf("pickSingle() error = %#v, want auth_unavailable", errPick)
+	if !errors.As(errPick, &authErr) || authErr.Code != "auth_unavailable" ||
+		authErr.HTTPStatus != http.StatusServiceUnavailable || !authErr.Retryable {
+		t.Fatalf("pickSingle() error = %#v, want retryable 503 auth_unavailable", errPick)
+	}
+	if SafeResponseHeaders(errPick).Get("Retry-After") == "" {
+		t.Fatalf("transient auth_unavailable is missing Retry-After: %v", errPick)
+	}
+}
+
+func TestUnavailableRetryAfterRemainsGenericWithBlockedCandidates(t *testing.T) {
+	const (
+		provider = "gemini"
+		model    = "test-retry-after-model"
+	)
+	registerSchedulerModels(t, provider, model, "temporarily-blocked", "disabled-blocked")
+	deadline := time.Now().Add(time.Minute)
+	candidates := []*Auth{
+		{
+			ID: "temporarily-blocked", Provider: provider,
+			ModelStates: map[string]*ModelState{
+				model: {Status: StatusError, Unavailable: true, NextRetryAfter: deadline},
+			},
+		},
+		{ID: "disabled-blocked", Provider: provider, Disabled: true, Status: StatusDisabled},
+	}
+	scheduler := newSchedulerForTest(&RoundRobinSelector{}, candidates...)
+	_, schedulerErr := scheduler.pickSingle(context.Background(), provider, model, cliproxyexecutor.Options{}, nil)
+	_, selectorErr := getAvailableAuths(candidates, provider, model, cliproxyexecutor.Options{}, time.Now())
+	for _, err := range []error{schedulerErr, selectorErr} {
+		if err == nil {
+			t.Fatal("blocked selection returned no error")
+		}
+		if _, isCooldown := errors.AsType[*modelCooldownError](err); isCooldown {
+			t.Fatalf("mixed blocked candidates were reported as model_cooldown: %v", err)
+		}
+		var authErr *Error
+		if !errors.As(err, &authErr) || authErr.Code != "auth_unavailable" ||
+			authErr.HTTPStatus != http.StatusServiceUnavailable || !authErr.Retryable {
+			t.Fatalf("blocked selection error = %v, want retryable 503 auth_unavailable", err)
+		}
+		if SafeResponseHeaders(err).Get("Retry-After") == "" {
+			t.Fatalf("blocked selection omitted local retry deadline: %v", err)
+		}
+	}
+}
+
+func TestAuthUnavailableSafeHeadersUseOnlyLocalDeadline(t *testing.T) {
+	now := time.Now()
+	cause := errors.New("upstream Retry-After: 999")
+	err := newAuthUnavailableErrorWithCause(now.Add(1500*time.Millisecond), now, cause)
+	wrapped := errors.Join(errors.New("selection failed"), err)
+	if got := SafeResponseHeaders(wrapped).Get("Retry-After"); got != "2" {
+		t.Fatalf("safe Retry-After = %q, want 2", got)
+	}
+	if got := SafeResponseHeaders(wrapped); len(got) != 1 {
+		t.Fatalf("safe response headers = %v, want only Retry-After", got)
+	}
+	if SafeResponseHeaders(newAuthUnavailableErrorWithCause(now, now, cause)) != nil {
+		t.Fatal("deadline-free selection manufactured Retry-After")
+	}
+	var authErr *Error
+	if !errors.As(wrapped, &authErr) || authErr.HTTPStatus != http.StatusServiceUnavailable {
+		t.Fatalf("wrapped error lost auth status: %v", wrapped)
 	}
 }
 

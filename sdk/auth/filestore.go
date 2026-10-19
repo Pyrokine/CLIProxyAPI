@@ -84,8 +84,8 @@ func ParsePluginAuthFiles(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	var metadata map[string]any
-	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+	metadata, errUnmarshal := cliproxyauth.DecodeCredentialMetadata(data)
+	if errUnmarshal != nil {
 		return nil, true, fmt.Errorf("parse plugin auth metadata: %w", errUnmarshal)
 	}
 	cliproxyauth.NormalizeCredentialMetadata(metadata)
@@ -108,6 +108,10 @@ func ParsePluginAuthFiles(
 	auths = compactPluginAuths(auths)
 	if len(auths) == 0 {
 		return nil, true, nil
+	}
+	persistedDigest, errDigest := cliproxyauth.DigestPersistedJSON(data)
+	if errDigest != nil {
+		return nil, true, errDigest
 	}
 	path = strings.TrimSpace(path)
 	disabled, _ := metadata["disabled"].(bool)
@@ -152,8 +156,17 @@ func ParsePluginAuthFiles(
 		if errWeight := cliproxyauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
 			return nil, true, errWeight
 		}
+		cliproxyauth.ApplyAuthPriorityMetadata(auth, metadata)
+		if _, inherited := auth.Attributes[cliproxyauth.AttributeFilePriority]; inherited {
+			if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+				setter.SetMetadata(auth.Metadata)
+			}
+		}
 		if errProfile := cliproxyauth.ApplyClaudeFingerprintProfileMetadata(auth, metadata); errProfile != nil {
 			return nil, true, errProfile
+		}
+		if errBind := cliproxyauth.BindPersistedAuthDigest(auth, persistedDigest); errBind != nil {
+			log.WithError(errBind).Warn("auth file: quota material proof unavailable")
 		}
 	}
 	return auths, true, nil
@@ -293,7 +306,9 @@ func (s *FileTokenStore) saveWithBaseDir(
 		return "", err
 	}
 
-	cliproxyauth.PrepareAuthForPersistence(auth)
+	if errPrepare := cliproxyauth.PrepareAuthForPersistence(auth); errPrepare != nil {
+		return "", errPrepare
+	}
 	switch {
 	case auth.Storage != nil:
 		if err = ctx.Err(); err != nil {
@@ -456,8 +471,8 @@ func (s *FileTokenStore) readAuthFiles(ctx context.Context, path, baseDir string
 	if len(data) == 0 {
 		return nil, nil
 	}
-	metadata := make(map[string]any)
-	if errJSON := json.Unmarshal(data, &metadata); errJSON != nil {
+	metadata, errJSON := cliproxyauth.DecodeCredentialMetadata(data)
+	if errJSON != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", errJSON)
 	}
 	cliproxyauth.NormalizeCredentialMetadata(metadata)
@@ -498,8 +513,8 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 	if len(data) == 0 {
 		return nil, nil
 	}
-	metadata := make(map[string]any)
-	if err = json.Unmarshal(data, &metadata); err != nil {
+	metadata, err := cliproxyauth.DecodeCredentialMetadata(data)
+	if err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
 	cliproxyauth.NormalizeCredentialMetadata(metadata)
@@ -565,11 +580,19 @@ func (s *FileTokenStore) readAuthFile(ctx context.Context, path, baseDir string)
 	if errWeight := cliproxyauth.ApplyAuthWeightMetadata(auth, metadata); errWeight != nil {
 		return nil, errWeight
 	}
+	cliproxyauth.ApplyAuthPriorityMetadata(auth, metadata)
 	if errProfile := cliproxyauth.ApplyClaudeFingerprintProfileMetadata(auth, metadata); errProfile != nil {
 		return nil, errProfile
 	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
+	}
+	digest, errDigest := cliproxyauth.DigestPersistedJSON(data)
+	if errDigest != nil {
+		return nil, errDigest
+	}
+	if errBind := cliproxyauth.BindPersistedAuthDigest(auth, digest); errBind != nil {
+		log.WithError(errBind).Warn("auth file: quota material proof unavailable")
 	}
 	return auth, nil
 }

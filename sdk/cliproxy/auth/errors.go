@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -19,6 +21,8 @@ const requestScopedErrorCode = ErrorCodeRequestScoped
 const ErrorCodeConnectionLifecycle = "connection_lifecycle"
 
 const connectionLifecycleErrorCode = ErrorCodeConnectionLifecycle
+
+const transientTransportErrorCode = "transient_transport"
 
 // ErrorCodeForceCooldown marks failures that must apply cooldown state.
 const ErrorCodeForceCooldown = "force_cooldown"
@@ -143,7 +147,7 @@ func (e *errorWithCause) Error() string {
 	if e.cause == nil {
 		return baseText
 	}
-	summary := logging.SafeDiagnosticForLog(e.cause.Error())
+	summary := logging.SafeErrorDiagnostic(e.cause)
 	if summary == "" || strings.Contains(baseText, summary) {
 		return baseText
 	}
@@ -223,6 +227,32 @@ func (e *errorWithCause) MarshalJSON() ([]byte, error) {
 		return []byte("null"), nil
 	}
 	return json.Marshal(e.base)
+}
+
+type authUnavailableError struct {
+	*errorWithCause
+	retryAfter time.Duration
+}
+
+func newAuthUnavailableErrorWithCause(next, now time.Time, cause error) error {
+	base := &Error{Code: "auth_unavailable", Message: "no auth available"}
+	if !next.After(now) {
+		return WithCause(base, cause)
+	}
+	base.HTTPStatus = http.StatusServiceUnavailable
+	base.Retryable = true
+	return &authUnavailableError{
+		errorWithCause: &errorWithCause{base: base, cause: cause},
+		retryAfter:     next.Sub(now),
+	}
+}
+
+func (e *authUnavailableError) RetryAfter() *time.Duration {
+	if e == nil || e.retryAfter <= 0 {
+		return nil
+	}
+	value := e.retryAfter
+	return &value
 }
 
 // WithCause wraps an auth error with the upstream cause used to exhaust selection.

@@ -706,6 +706,31 @@ func TestSchedulerCredentialRevisionChangeDropsPreviousQuota(t *testing.T) {
 	}
 }
 
+func TestSchedulerRestoresInterruptedRefreshBeforeRegistration(t *testing.T) {
+	observedAt := time.Now().UTC().Add(-time.Minute)
+	key := EntryKey(TypeCodex, "codex.json")
+	for _, registerFirst := range []bool{false, true} {
+		scheduler := NewScheduler(DefaultConfig(), nil)
+		if registerFirst {
+			scheduler.RegisterBinding("codex.json", TypeCodex, "auth-1", "strict")
+		}
+		scheduler.Restore(map[string]EntryState{key: {
+			FileName: "codex.json", Type: TypeCodex, AuthIndex: "auth-1", CredentialRevision: "strict",
+			Generation: 4, StateRevision: 9, Status: statusLoading, Freshness: FreshnessFresh,
+			Data: []byte(`{"remaining":5}`), ObservedAt: &observedAt, LastSuccessAt: &observedAt,
+		}})
+		if !registerFirst {
+			scheduler.RegisterBinding("codex.json", TypeCodex, "auth-1", "strict")
+		}
+		entry := scheduler.GetStatus().Credentials[key]
+		if entry == nil || entry.Status != StatusIdle || entry.Freshness != freshnessStale ||
+			entry.Generation != 4 || entry.StateRevision != 10 || entry.LastErrorAt == nil || entry.LastError == "" ||
+			string(entry.Data) != `{"remaining":5}` || entry.ObservedAt == nil || !entry.ObservedAt.Equal(observedAt) {
+			t.Fatalf("registerFirst=%v restored interrupted refresh incorrectly: %#v", registerFirst, entry)
+		}
+	}
+}
+
 func TestSchedulerMissingCredentialRevisionDoesNotRestoreKnownBinding(t *testing.T) {
 	key := EntryKey(TypeClaude, "claude.json")
 	scheduler := NewScheduler(DefaultConfig(), nil)
@@ -873,6 +898,130 @@ func TestSchedulerFinalizerFailureKeepsPreviousSnapshot(t *testing.T) {
 	if string(after.Data) != `{"revision":1}` || after.Freshness != freshnessStale ||
 		after.LastSuccessAt == nil || before.LastSuccessAt == nil || !after.LastSuccessAt.Equal(*before.LastSuccessAt) {
 		t.Fatalf("finalizer failure replaced last-known-good: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestSchedulerEnrichmentPreservesQuotaOnFailure(t *testing.T) {
+	for _, name := range []string{"error", "empty", "invalid"} {
+		t.Run(name, func(t *testing.T) {
+			finalizerCalls := 0
+			scheduler := NewSchedulerWithResult(DefaultConfig(), func(context.Context, *Entry) (FetchResult, error) {
+				return FetchResult{Data: []byte(`{"remaining":42}`), Source: "fixture_billing",
+					Enrich: func(context.Context) (FetchResult, error) {
+						switch name {
+						case "error":
+							return FetchResult{}, errors.New("fixture plan request failed")
+						case "empty":
+							return FetchResult{AuthoritativeEmpty: true}, nil
+						default:
+							return FetchResult{Data: []byte("not-json")}, nil
+						}
+					}}, nil
+			})
+			scheduler.SetRefreshContextFinalizer(func(context.Context, RefreshAttempt) error {
+				finalizerCalls++
+				return nil
+			})
+			scheduler.Register("fixture.json", TypeXAI, "fixture-auth")
+			scheduler.RefreshNow([]string{"fixture.json"})
+			entry := scheduler.GetStatus().Credentials[EntryKey(TypeXAI, "fixture.json")]
+			if entry.Status != StatusSuccess || string(entry.Data) != `{"remaining":42}` ||
+				entry.Freshness != freshnessPartial || entry.LastError == "" || finalizerCalls != 1 {
+				t.Fatalf("optional failure changed quota or repeated finalization: state=%+v finalizers=%d", entry, finalizerCalls)
+			}
+		})
+	}
+}
+
+func TestSchedulerEnrichmentRejectsLateTargetChanges(t *testing.T) {
+	for _, change := range []string{"binding", "delete", "new-result", "refresh", "cancel", "unrelated"} {
+		t.Run(change, func(t *testing.T) {
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			refreshEntered := make(chan struct{})
+			releaseRefresh := make(chan struct{})
+			calls := 0
+			scheduler := NewSchedulerWithResult(DefaultConfig(), func(context.Context, *Entry) (FetchResult, error) {
+				calls++
+				if calls > 1 {
+					if change == "refresh" {
+						close(refreshEntered)
+						<-releaseRefresh
+					}
+					return FetchResult{Data: []byte(`{"remaining":21}`)}, nil
+				}
+				return FetchResult{Data: []byte(`{"remaining":42}`), Enrich: func(context.Context) (FetchResult, error) {
+					close(entered)
+					<-release
+					return FetchResult{Data: []byte(`{"remaining":42,"plan":"fixture"}`)}, nil
+				}}, nil
+			})
+			key := EntryKey(TypeXAI, "fixture.json")
+			scheduler.RegisterBinding("fixture.json", TypeXAI, "fixture-auth", "revision-1")
+			targets, _ := scheduler.ResolveRefreshTargets([]string{key})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan RefreshResult, 1)
+			go func() { done <- scheduler.refreshTarget(ctx, targets[0], nil, false) }()
+			<-entered
+			billing := scheduler.GetStatus().Credentials[key]
+			if billing.Status != StatusSuccess || string(billing.Data) != `{"remaining":42}` {
+				close(release)
+				<-done
+				t.Fatalf("billing unavailable during optional query: %+v", billing)
+			}
+			secondDone := make(chan RefreshResult, 1)
+			switch change {
+			case "binding":
+				scheduler.RegisterBinding("fixture.json", TypeXAI, "fixture-auth", "revision-2")
+			case "delete":
+				scheduler.Unregister("fixture.json")
+				scheduler.RegisterBinding("fixture.json", TypeXAI, "fixture-auth", "revision-1")
+			case "new-result":
+				_ = scheduler.refreshTarget(context.Background(), targets[0], nil, false)
+			case "refresh":
+				go func() { secondDone <- scheduler.refreshTarget(context.Background(), targets[0], nil, false) }()
+				<-refreshEntered
+			case "cancel":
+				cancel()
+			case "unrelated":
+				scheduler.Register("other.json", TypeXAI, "other-auth")
+				scheduler.Unregister("other.json")
+			}
+			expected := scheduler.GetStatus().Credentials[key]
+			close(release)
+			<-done
+			after := scheduler.GetStatus().Credentials[key]
+			if change == "refresh" {
+				close(releaseRefresh)
+				<-secondDone
+			}
+			if change == "unrelated" {
+				if string(after.Data) != `{"remaining":42,"plan":"fixture"}` || after.StateRevision <= expected.StateRevision {
+					t.Fatalf("unrelated change discarded valid plan: %+v", after)
+				}
+			} else if string(after.Data) != string(expected.Data) || after.StateRevision != expected.StateRevision ||
+				after.Generation != expected.Generation || after.Status != expected.Status {
+				t.Fatalf("late plan overwrote %s: before=%+v after=%+v", change, expected, after)
+			}
+		})
+	}
+}
+
+func TestSchedulerProbeDoesNotRequestOptionalQuotaDetails(t *testing.T) {
+	enrichmentCalls := 0
+	scheduler := NewSchedulerWithResult(DefaultConfig(), func(context.Context, *Entry) (FetchResult, error) {
+		return FetchResult{Data: []byte(`{"remaining":42}`), Enrich: func(context.Context) (FetchResult, error) {
+			enrichmentCalls++
+			return FetchResult{}, errors.New("probe must not enrich quota")
+		}}, nil
+	})
+	scheduler.Register("fixture.json", TypeXAI, "fixture-auth")
+	targets, _ := scheduler.ResolveRefreshTargets([]string{"fixture.json"})
+	result := scheduler.ProbeTarget(context.Background(), targets[0])
+	entry := scheduler.GetStatus().Credentials[targets[0].EntryKey]
+	if result.Outcome != ProbeOutcomePassed || enrichmentCalls != 0 || len(entry.Data) != 0 || entry.Status != StatusIdle {
+		t.Fatalf("probe requested or published optional quota: result=%+v calls=%d state=%+v", result, enrichmentCalls, entry)
 	}
 }
 

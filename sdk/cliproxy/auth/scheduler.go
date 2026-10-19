@@ -467,6 +467,7 @@ func (s *authScheduler) pickSingleWithPredicate(
 	opts cliproxyexecutor.Options,
 	tried map[string]struct{},
 	requestPredicate func(*Auth) bool,
+	strategyOverride ...schedulerStrategy,
 ) (*Auth, error) {
 	if s == nil {
 		return nil, &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -478,7 +479,11 @@ func (s *authScheduler) pickSingleWithPredicate(
 
 	var traceEvents []cliproxyexecutor.RouteTraceEvent
 	s.mu.Lock()
-	decision := newRouteDecisionDraft(opts, []string{providerKey}, model, s.strategy)
+	strategy := s.strategy
+	if len(strategyOverride) > 0 {
+		strategy = strategyOverride[0]
+	}
+	decision := newRouteDecisionDraft(opts, []string{providerKey}, model, strategy)
 	defer func() {
 		appendRouteDecisionEvent(&traceEvents, opts, decision)
 		s.mu.Unlock()
@@ -541,7 +546,7 @@ func (s *authScheduler) pickSingleWithPredicate(
 		if entry == nil || entry.auth == nil {
 			return false
 		}
-		if schedulerStrategyUsesWeights(s.strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
+		if schedulerStrategyUsesWeights(strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
 			traceExclusion(entry, "weight_non_positive")
 			return false
 		}
@@ -561,7 +566,7 @@ func (s *authScheduler) pickSingleWithPredicate(
 		}
 		return true
 	}
-	if s.strategy == schedulerStrategyQuotaAware {
+	if strategy == schedulerStrategyQuotaAware {
 		priority, okPriority := shard.highestReadyPriorityLocked(preferWebsocket, predicate)
 		if okPriority {
 			entries := shard.readyEntriesAtPriorityLocked(preferWebsocket, priority, predicate)
@@ -577,17 +582,17 @@ func (s *authScheduler) pickSingleWithPredicate(
 					s.captureQuotaInFlightLeaseLocked(ctx, picked, providerKey, time.Now())
 					s.markCheckpointDirtyLocked()
 					matchedRules := shard.routeDecisionSelectionRulesLocked(
-						picked, preferWebsocket, s.strategy, true,
+						picked, preferWebsocket, strategy, true,
 					)
 					matchedRules = append(matchedRules, quotaRules...)
 					appendSchedulerSelection(
-						&traceEvents, opts, decision, picked, providerKey, model, s.strategy, matchedRules...,
+						&traceEvents, opts, decision, picked, providerKey, model, strategy, matchedRules...,
 					)
 					return picked, nil
 				}
 			}
 		}
-	} else if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	} else if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
 		s.markCheckpointDirtyLocked()
 		appendSchedulerSelection(
 			&traceEvents,
@@ -596,8 +601,8 @@ func (s *authScheduler) pickSingleWithPredicate(
 			picked,
 			providerKey,
 			model,
-			s.strategy,
-			shard.routeDecisionSelectionRulesLocked(picked, preferWebsocket, s.strategy, true)...,
+			strategy,
+			shard.routeDecisionSelectionRulesLocked(picked, preferWebsocket, strategy, true)...,
 		)
 		return picked, nil
 	}
@@ -622,6 +627,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 	opts cliproxyexecutor.Options,
 	tried map[string]struct{},
 	requestPredicate func(*Auth) bool,
+	strategyOverride ...schedulerStrategy,
 ) (*Auth, string, error) {
 	if s == nil {
 		return nil, "", &Error{Code: "auth_not_found", Message: "no auth available"}
@@ -632,7 +638,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 	}
 	if len(normalized) == 1 {
 		picked, errPick := s.pickSingleWithPredicate(
-			ctx, normalized[0], model, opts, tried, requestPredicate,
+			ctx, normalized[0], model, opts, tried, requestPredicate, strategyOverride...,
 		)
 		return picked, normalized[0], errPick
 	}
@@ -641,7 +647,11 @@ func (s *authScheduler) pickMixedWithPredicate(
 
 	var traceEvents []cliproxyexecutor.RouteTraceEvent
 	s.mu.Lock()
-	decision := newRouteDecisionDraft(opts, normalized, model, s.strategy)
+	strategy := s.strategy
+	if len(strategyOverride) > 0 {
+		strategy = strategyOverride[0]
+	}
+	decision := newRouteDecisionDraft(opts, normalized, model, strategy)
 	defer func() {
 		appendRouteDecisionEvent(&traceEvents, opts, decision)
 		s.mu.Unlock()
@@ -705,7 +715,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 			if entry == nil || entry.auth == nil || entry.auth.ID != pinnedAuthID {
 				return false
 			}
-			if schedulerStrategyUsesWeights(s.strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
+			if schedulerStrategyUsesWeights(strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
 				traceExclusion(entry, "weight_non_positive")
 				return false
 			}
@@ -722,7 +732,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 			}
 			return !ok
 		}
-		if s.strategy == schedulerStrategyQuotaAware {
+		if strategy == schedulerStrategyQuotaAware {
 			priority, okPriority := shard.highestReadyPriorityLocked(false, predicate)
 			if okPriority {
 				entries := shard.readyEntriesAtPriorityLocked(false, priority, predicate)
@@ -738,17 +748,17 @@ func (s *authScheduler) pickMixedWithPredicate(
 						s.captureQuotaInFlightLeaseLocked(ctx, picked, providerKey, time.Now())
 						s.markCheckpointDirtyLocked()
 						matchedRules := shard.routeDecisionSelectionRulesLocked(
-							picked, false, s.strategy, false,
+							picked, false, strategy, false,
 						)
 						matchedRules = append(matchedRules, quotaRules...)
 						appendSchedulerSelection(
-							&traceEvents, opts, decision, picked, providerKey, model, s.strategy, matchedRules...,
+							&traceEvents, opts, decision, picked, providerKey, model, strategy, matchedRules...,
 						)
 						return picked, providerKey, nil
 					}
 				}
 			}
-		} else if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		} else if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
 			s.markCheckpointDirtyLocked()
 			appendSchedulerSelection(
 				&traceEvents,
@@ -757,8 +767,8 @@ func (s *authScheduler) pickMixedWithPredicate(
 				picked,
 				providerKey,
 				model,
-				s.strategy,
-				shard.routeDecisionSelectionRulesLocked(picked, false, s.strategy, false)...,
+				strategy,
+				shard.routeDecisionSelectionRulesLocked(picked, false, strategy, false)...,
 			)
 			return picked, providerKey, nil
 		}
@@ -793,7 +803,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 		if entry == nil || entry.auth == nil {
 			return false
 		}
-		if schedulerStrategyUsesWeights(s.strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
+		if schedulerStrategyUsesWeights(strategy) && (entry.meta == nil || entry.meta.weight <= 0) {
 			traceExclusion(entry, "weight_non_positive")
 			return false
 		}
@@ -854,14 +864,14 @@ func (s *authScheduler) pickMixedWithPredicate(
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
 
-	if s.strategy == schedulerStrategyFillFirst {
+	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
 			picked := shard.pickReadyAtPriorityLocked(
-				preferWebsocketByProvider[providerIndex], bestPriority, s.strategy, predicate,
+				preferWebsocketByProvider[providerIndex], bestPriority, strategy, predicate,
 			)
 			if picked != nil {
 				appendSchedulerSelection(
@@ -871,9 +881,9 @@ func (s *authScheduler) pickMixedWithPredicate(
 					picked,
 					providerKey,
 					model,
-					s.strategy,
+					strategy,
 					shard.routeDecisionSelectionRulesLocked(
-						picked, preferWebsocketByProvider[providerIndex], s.strategy, false,
+						picked, preferWebsocketByProvider[providerIndex], strategy, false,
 					)...,
 				)
 				return picked, providerKey, nil
@@ -883,7 +893,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 	}
 
 	cursorKey := mixedSchedulerCursorKey(normalized, modelKey)
-	if s.strategy == schedulerStrategyQuotaAware {
+	if strategy == schedulerStrategyQuotaAware {
 		entries := make([]*scheduledAuth, 0)
 		for providerIndex, shard := range candidateShards {
 			if shard == nil {
@@ -924,7 +934,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 				matchedRules = candidateShards[providerIndex].routeDecisionSelectionRulesLocked(
 					picked.auth,
 					preferWebsocketByProvider[providerIndex],
-					s.strategy,
+					strategy,
 					false,
 				)
 			}
@@ -938,14 +948,14 @@ func (s *authScheduler) pickMixedWithPredicate(
 				picked.auth,
 				picked.meta.providerKey,
 				model,
-				s.strategy,
+				strategy,
 				matchedRules...,
 			)
 			return picked.auth, picked.meta.providerKey, nil
 		}
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, predicate)
 	}
-	if s.strategy == schedulerStrategyWeightedRoundRobin {
+	if strategy == schedulerStrategyWeightedRoundRobin {
 		entries := make([]*scheduledAuth, 0)
 		for providerIndex, shard := range candidateShards {
 			if shard == nil {
@@ -986,7 +996,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 				matchedRules = candidateShards[providerIndex].routeDecisionSelectionRulesLocked(
 					picked.auth,
 					preferWebsocketByProvider[providerIndex],
-					s.strategy,
+					strategy,
 					false,
 				)
 			}
@@ -998,7 +1008,7 @@ func (s *authScheduler) pickMixedWithPredicate(
 				picked.auth,
 				picked.meta.providerKey,
 				model,
-				s.strategy,
+				strategy,
 				matchedRules...,
 			)
 			return picked.auth, picked.meta.providerKey, nil
@@ -1047,9 +1057,9 @@ func (s *authScheduler) pickMixedWithPredicate(
 		selected,
 		providerKey,
 		model,
-		s.strategy,
+		strategy,
 		candidateShards[providerIndex].routeDecisionSelectionRulesLocked(
-			selected, preferWebsocketByProvider[providerIndex], s.strategy, false,
+			selected, preferWebsocketByProvider[providerIndex], strategy, false,
 		)...,
 	)
 	return selected, providerKey, nil
@@ -1115,7 +1125,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(
 		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownErrorWithCause(model, "", resetIn, lastCandidateErr)
 	}
-	return WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
+	return newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 }
 
 // normalizeProviderKeys lowercases, trims, and de-duplicates provider keys while preserving order.
@@ -1874,7 +1884,7 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 		resetIn := max(earliest.Sub(now), 0)
 		return newModelCooldownErrorWithCause(model, providerForError, resetIn, lastCandidateErr)
 	}
-	return WithCause(&Error{Code: "auth_unavailable", Message: "no auth available"}, lastCandidateErr)
+	return newAuthUnavailableErrorWithCause(earliest, now, lastCandidateErr)
 }
 
 type candidateErrorSnapshot struct {
@@ -2010,11 +2020,11 @@ func (m *modelScheduler) availabilitySummaryLocked(predicate func(*scheduledAuth
 		if entry == nil || entry.auth == nil {
 			continue
 		}
-		if entry.state != scheduledStateCooldown {
-			continue
+		if entry.state == scheduledStateCooldown {
+			cooldownCount++
 		}
-		cooldownCount++
-		if !entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
+		if (entry.state == scheduledStateCooldown || entry.state == scheduledStateBlocked) &&
+			!entry.nextRetryAt.IsZero() && (earliest.IsZero() || entry.nextRetryAt.Before(earliest)) {
 			earliest = entry.nextRetryAt
 		}
 	}

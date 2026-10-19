@@ -89,8 +89,24 @@ func (m *Manager) pickHomeDispatchSelection(
 		}
 	}
 
-	sessionID := m.homeDispatchSessionID(opts)
+	sessionID, parentSessionID := m.homeDispatchSessionIDs(opts)
+	constraints.ParentSessionID = parentSessionID
+	if sessionID != "" && opts.Metadata != nil {
+		opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = sessionID
+		if parentSessionID != "" {
+			opts.Metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = parentSessionID
+		} else {
+			delete(opts.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey)
+		}
+	}
 	dispatchHeaders := homeDispatchHeaders(ctx, opts.Headers)
+	if kind := sessionMetadataString(opts.Metadata, cliproxyexecutor.NodeKindMetadataKey); kind != "" {
+		dispatchHeaders = dispatchHeaders.Clone()
+		if dispatchHeaders == nil {
+			dispatchHeaders = make(http.Header)
+		}
+		dispatchHeaders.Set("X-Node-Kind", kind)
+	}
 	credentialPolicy := credentialPolicyFromContext(ctx)
 	var raw []byte
 	var errRPop error
@@ -192,6 +208,12 @@ func (m *Manager) pickHomeDispatchSelection(
 		endScope()
 		return nil, &Error{
 			Code: "invalid_auth", Message: "home returned invalid auth payload", HTTPStatus: http.StatusBadGateway,
+		}
+	}
+	if dispatch.ModelInfo != nil && dispatch.ModelInfo.registryModelInfo() == nil {
+		endScope()
+		return nil, &Error{
+			Code: "invalid_auth", Message: "home returned model info without id", HTTPStatus: http.StatusBadGateway,
 		}
 	}
 	auth := dispatch.Auth
@@ -296,6 +318,10 @@ func (m *Manager) pickHomeDispatchSelection(
 	}
 	if concurrencyPresent {
 		selection.accountedModel = concurrencyTuple.Model
+	}
+	selection.modelInfo = dispatch.ModelInfo.registryModelInfo()
+	if dispatch.ModelInfo != nil {
+		selection.configurationUpdateSupport = dispatch.ModelInfo.SupportConfigurationUpdate
 	}
 	if dispatch.RequestRetry != nil {
 		selection.requestRetry, selection.hasRequestRetry = max(*dispatch.RequestRetry, 0), true

@@ -112,3 +112,29 @@ func TestRefreshAuthForRequestUsesExecutorKeyAndPublishesResult(t *testing.T) {
 		t.Fatalf("published routing = provider %q attributes %#v", published.Provider, published.Attributes)
 	}
 }
+
+func TestAutoRefreshUsesCredentialExecutorKey(t *testing.T) {
+	for _, provider := range []string{"plugin-provider", " OPENAI-COMPATIBLE-CUSTOM "} {
+		t.Run(provider, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			executor := &executorKeyRefreshExecutor{id: "openai-compatible-custom"}
+			manager.RegisterExecutor(executor)
+			registered, err := manager.Register(t.Context(), &Auth{
+				ID: "synthetic-auto-refresh-key", Provider: provider,
+				Attributes: map[string]string{"compat_name": "custom", "provider_key": executor.Identifier()},
+				Metadata: map[string]any{
+					"access_token": "old-token", "refresh_token": "synthetic-refresh-token", "refresh_interval_seconds": 1,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.checkRefreshes(t.Context())
+			manager.refreshWorkers.Wait()
+			current, _ := manager.GetByID(registered.ID)
+			if executor.refreshCalls.Load() != 1 || current.Metadata["access_token"] != "refreshed-token" {
+				t.Fatalf("auto refresh did not use credential executor: calls=%d", executor.refreshCalls.Load())
+			}
+		})
+	}
+}

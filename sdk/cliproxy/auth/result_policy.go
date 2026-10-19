@@ -31,6 +31,8 @@ type resultPolicyHolder struct {
 type resultGenerationSnapshot struct {
 	valid                     bool
 	quotaFamily               string
+	credentialGeneration      uint64
+	accessTokenSHA256         string
 	credentialStateGeneration uint64
 	exactModelStateGeneration uint64
 	quotaFamilyGeneration     uint64
@@ -45,6 +47,8 @@ func captureResultGenerationSnapshot(auth *Auth, model string) resultGenerationS
 	return resultGenerationSnapshot{
 		valid:                     true,
 		quotaFamily:               family,
+		credentialGeneration:      auth.credentialGeneration,
+		accessTokenSHA256:         AccessTokenSHA256(auth),
 		credentialStateGeneration: normalizedStateGeneration(auth.StateGeneration),
 		exactModelStateGeneration: stateGenerationForDisposition(
 			auth,

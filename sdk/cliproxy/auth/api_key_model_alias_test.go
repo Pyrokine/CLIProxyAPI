@@ -177,6 +177,11 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 				APIKey: "codex-key", Models: []internalconfig.CodexModel{{Name: "o3", Alias: "o"}},
 			},
 		},
+		MetaKey: []internalconfig.MetaKey{
+			{
+				APIKey: "meta-key", Models: []internalconfig.CodexModel{{Name: "muse-spark-1.3", Alias: "muse-latest"}},
+			},
+		},
 	}
 
 	mgr := NewManager(nil, nil, nil)
@@ -192,6 +197,9 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 	_, _ = mgr.Register(
 		ctx, &Auth{ID: "codex-auth", Provider: "codex", Attributes: map[string]string{"api_key": "codex-key"}},
 	)
+	_, _ = mgr.Register(
+		ctx, &Auth{ID: "meta-auth", Provider: "meta", Attributes: map[string]string{"api_key": "meta-key"}},
+	)
 
 	tests := []struct {
 		authID, input, want string
@@ -199,6 +207,7 @@ func TestAPIKeyModelAlias_MultipleProviders(t *testing.T) {
 		{"gemini-auth", "gp", "gemini-2.5-pro"},
 		{"claude-auth", "cs4", "claude-sonnet-4"},
 		{"codex-auth", "o", "o3"},
+		{"meta-auth", "muse-latest", "muse-spark-1.3"},
 	}
 
 	for _, tt := range tests {

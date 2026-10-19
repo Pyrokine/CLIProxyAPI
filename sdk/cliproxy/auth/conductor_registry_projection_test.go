@@ -317,3 +317,104 @@ func TestManagerMarkResultPublishesCredentialQuotaAcrossRegisteredModels(t *test
 		}
 	}
 }
+
+func TestClientModelProjectionMatchesRoutingBlocks(t *testing.T) {
+	now := time.Now()
+	future := now.Add(time.Hour)
+	past := now.Add(-time.Minute)
+	for _, test := range []struct {
+		name string
+		auth *Auth
+	}{
+		{name: "credential non-quota", auth: &Auth{
+			Status: StatusError, Unavailable: true, NextRetryAfter: future,
+			StateEffectScope: cliproxyexecutor.StateEffectScopeCredential,
+			LastError:        &Error{HTTPStatus: http.StatusUnauthorized},
+			ModelStates:      map[string]*ModelState{"other-model": {Status: StatusActive}},
+		}},
+		{name: "error credential scope", auth: &Auth{
+			Status: StatusError, Unavailable: true, NextRetryAfter: future,
+			LastError:   &Error{HTTPStatus: http.StatusUnauthorized, EffectScope: cliproxyexecutor.StateEffectScopeCredential},
+			ModelStates: map[string]*ModelState{"other-model": {Status: StatusActive}},
+		}},
+		{name: "expired credential", auth: &Auth{
+			Status: StatusError, Unavailable: true, NextRetryAfter: past,
+			StateEffectScope: cliproxyexecutor.StateEffectScopeCredential,
+		}},
+		{name: "active exact model", auth: &Auth{ModelStates: map[string]*ModelState{
+			"route-model": {Status: StatusError, Unavailable: true, NextRetryAfter: future},
+		}}},
+		{name: "expired exact model", auth: &Auth{ModelStates: map[string]*ModelState{
+			"route-model": {Status: StatusError, Unavailable: true, NextRetryAfter: past},
+		}}},
+		{name: "disabled credential", auth: &Auth{Disabled: true}},
+		{name: "cooling disabled", auth: &Auth{ModelStates: map[string]*ModelState{
+			"route-model": {Status: StatusError, Quota: QuotaState{Exceeded: true, Reason: "quota"}},
+		}}},
+		{name: "clean credential", auth: &Auth{Status: StatusActive}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			blocked, _, _ := isAuthBlockedForModel(test.auth, "route-model", now)
+			projection := clientModelProjectionForAuth(test.auth, "route-model", now)
+			if projection.Suspended != blocked {
+				t.Fatalf("projection suspended=%t, routing blocked=%t", projection.Suspended, blocked)
+			}
+			if projection.QuotaExceeded {
+				t.Fatalf("non-quota routing block became quota exhaustion: %+v", projection)
+			}
+		})
+	}
+}
+
+func TestManagerMarkResultPublishesCredentialFailureAcrossRegisteredModels(t *testing.T) {
+	for _, existingModelState := range []bool{false, true} {
+		name := "without model state"
+		if existingModelState {
+			name = "with unrelated model state"
+		}
+		t.Run(name, func(t *testing.T) {
+			manager := NewManager(nil, nil, nil)
+			const authID = "credential-failure-projection-auth"
+			const provider = "credential-failure-projection-provider"
+			const modelA, modelB = "credential-failure-model-a", "credential-failure-model-b"
+			auth := &Auth{ID: authID, Provider: provider, Status: StatusActive}
+			if existingModelState {
+				auth.ModelStates = map[string]*ModelState{modelB: {Status: StatusActive}}
+			}
+			registered, errRegister := manager.Register(context.Background(), auth)
+			if errRegister != nil {
+				t.Fatalf("Register: %v", errRegister)
+			}
+			reg := registerProjectionTestClient(t, authID, provider,
+				&registry.ModelInfo{ID: modelA}, &registry.ModelInfo{ID: modelB})
+			failure := executionResult(registered, provider, modelA,
+				&Error{HTTPStatus: http.StatusUnauthorized, Message: "temporary unauthorized"},
+				cliproxyexecutor.DispatchPhaseResponseStarted)
+			manager.MarkResult(context.Background(), failure)
+			current, ok := manager.GetByID(authID)
+			if !ok || current.StateEffectScope != cliproxyexecutor.StateEffectScopeCredential ||
+				!current.NextRetryAfter.After(time.Now()) {
+				t.Fatalf("credential failure state missing: %+v", current)
+			}
+			for _, model := range []string{modelA, modelB} {
+				blocked, _, _ := isAuthBlockedForModel(current, model, time.Now())
+				if !blocked || !reg.IsModelSuspendedForClient(authID, model) {
+					t.Fatalf("model %s: routing blocked=%t, registry suspended=%t", model,
+						blocked, reg.IsModelSuspendedForClient(authID, model))
+				}
+				if reg.IsModelQuotaExceededForClient(authID, model) {
+					t.Fatalf("credential authentication failure became quota exhaustion for %s", model)
+				}
+			}
+			manager.mu.Lock()
+			generation := manager.nextAuthGenerationLocked()
+			manager.mu.Unlock()
+			manager.publishClientModelProjections(current, generation, current.NextRetryAfter.Add(time.Second))
+			for _, model := range []string{modelA, modelB} {
+				if reg.IsModelSuspendedForClient(authID, model) {
+					t.Fatalf("expired credential cooldown still suspended %s", model)
+				}
+			}
+		})
+	}
+}

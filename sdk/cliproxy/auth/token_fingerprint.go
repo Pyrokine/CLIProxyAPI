@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"strings"
 )
@@ -124,6 +125,112 @@ func credentialBindingSHA256(auth *Auth) string {
 		return ""
 	}
 	return credentialBindingMaterialSHA256(material)
+}
+
+// QuotaCredentialRevisions 返回排除启停状态的配额版本及可证明等价的旧文件摘要
+func QuotaCredentialRevisions(auth *Auth) (string, []string, error) {
+	if auth == nil {
+		return "", nil, fmt.Errorf("quota credential is nil")
+	}
+	material := make(map[string]any)
+	var raw []byte
+	if storage, ok := auth.Storage.(interface{ RawJSON() []byte }); ok {
+		raw = storage.RawJSON()
+	} else if auth.Storage != nil {
+		var err error
+		raw, err = json.Marshal(auth.Storage)
+		if err != nil {
+			return "", nil, fmt.Errorf("encode quota credential storage: %w", err)
+		}
+	}
+	if len(raw) > 0 {
+		var err error
+		material, err = DecodeCredentialMetadata(raw)
+		if err != nil {
+			return "", nil, fmt.Errorf("decode quota credential storage: %w", err)
+		}
+	}
+	maps.Copy(material, auth.Metadata)
+	delete(material, "disabled")
+	fingerprint := func(value any) (string, bool, error) {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return "", false, fmt.Errorf("encode quota credential material: %w", err)
+		}
+		precise, err := validateQuotaMaterialNumbers(value)
+		if err != nil {
+			return "", false, err
+		}
+		if precise {
+			encoded = append([]byte("quota-json-number-v1\x00"), encoded...)
+		}
+		digest := sha256.Sum256(encoded)
+		return hex.EncodeToString(digest[:]), precise, nil
+	}
+	apiKey := strings.TrimSpace(auth.Attributes[AttributeAPIKey])
+	revision, precise, err := fingerprint(map[string]any{
+		"provider": strings.ToLower(strings.TrimSpace(auth.Provider)),
+		"api_key":  apiKey,
+		"metadata": material,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	equivalent := []string{revision}
+	// 高精度材料使用独立版本，旧摘要无法证明其原始数字
+	if precise {
+		return revision, equivalent, nil
+	}
+	persistedKey, _ := material[AttributeAPIKey].(string)
+	if apiKey != "" && strings.TrimSpace(persistedKey) != apiKey {
+		return revision, equivalent, nil
+	}
+	if auth.quotaPersistedRevision == revision && auth.quotaPersistedSHA256 != "" {
+		equivalent = append(equivalent, auth.quotaPersistedSHA256)
+	}
+	legacy, _, err := fingerprint(material)
+	if err != nil {
+		return "", nil, err
+	}
+	equivalent = append(equivalent, legacy)
+	for _, disabled := range []bool{false, true} {
+		material["disabled"] = disabled
+		legacy, _, err = fingerprint(material)
+		if err != nil {
+			return "", nil, err
+		}
+		equivalent = append(equivalent, legacy)
+	}
+	return revision, equivalent, nil
+}
+
+func validateQuotaMaterialNumbers(value any) (bool, error) {
+	var precise bool
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, item := range typed {
+			contains, err := validateQuotaMaterialNumbers(item)
+			if err != nil {
+				return false, err
+			}
+			precise = precise || contains
+		}
+	case []any:
+		for _, item := range typed {
+			contains, err := validateQuotaMaterialNumbers(item)
+			if err != nil {
+				return false, err
+			}
+			precise = precise || contains
+		}
+	case json.Number:
+		return true, nil
+	case float64:
+		if typed >= 1<<53 || typed <= -(1<<53) {
+			return false, fmt.Errorf("quota credential metadata contains a float64 outside the exact integer range")
+		}
+	}
+	return precise, nil
 }
 
 func credentialBindingMetadata(auth *Auth) map[string]any {

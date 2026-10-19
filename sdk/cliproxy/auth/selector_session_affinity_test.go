@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 )
@@ -172,6 +174,51 @@ func TestSessionAffinityLCPExtensionAndBranch(t *testing.T) {
 	}
 }
 
+func TestSessionAffinityLCPCompactionPropagatesToExecutionContext(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: affinityLastSelector{}, TTL: time.Hour})
+	defer selector.Stop()
+	auths := []*Auth{{ID: "a"}}
+	request := func(messages string) cliproxyexecutor.Options {
+		return cliproxyexecutor.Options{
+			OriginalRequest: []byte(`{"messages":[` + messages + `]}`),
+			SourceFormat:    sdktranslator.FormatOpenAI,
+			Metadata:        map[string]any{cliproxyexecutor.CallerScopeMetadataKey: "compaction-test"},
+		}
+	}
+	parent := request(`{"role":"user","content":"one"},{"role":"user","content":"two"},{"role":"user","content":"three"},{"role":"user","content":"four"},{"role":"user","content":"five"}`)
+	if selected, err := selector.Pick(context.Background(), "openai", "model", parent, auths); err != nil || selected == nil {
+		t.Fatalf("parent selection = %#v, error = %v", selected, err)
+	}
+	parentID := sessionMetadataString(parent.Metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey)
+	if parentID == "" {
+		t.Fatal("parent session was not bound")
+	}
+
+	compacted := request(`{"role":"user","content":"summary of one to three"},{"role":"user","content":"four"},{"role":"user","content":"five"},{"role":"user","content":"six"}`)
+	if selected, err := selector.Pick(context.Background(), "openai", "model", compacted, auths); err != nil || selected == nil || selected.ID != "a" {
+		t.Fatalf("compaction selection = %#v, error = %v", selected, err)
+	}
+	if !metadataBool(compacted.Metadata, cliproxyexecutor.IsCompactionMetadataKey) ||
+		metadataBool(compacted.Metadata, cliproxyexecutor.IsForkMetadataKey) ||
+		sessionMetadataString(compacted.Metadata, cliproxyexecutor.NodeKindMetadataKey) != "compaction" ||
+		sessionMetadataString(compacted.Metadata, cliproxyexecutor.ParentSessionIDMetadataKey) != parentID {
+		t.Fatalf("compaction metadata = %#v", compacted.Metadata)
+	}
+	ctx := syncMetadataSessionToContext(context.Background(), compacted.Metadata)
+	clientMeta := logging.GetClientRequestMetadata(ctx)
+	if clientMeta.SessionID == "" || clientMeta.SessionID == parentID || clientMeta.ParentSessionID != parentID ||
+		clientMeta.NodeKind != "compaction" || !clientMeta.IsCompaction || clientMeta.IsFork ||
+		util.SessionIDFromContext(ctx) != clientMeta.SessionID {
+		t.Fatalf("execution session metadata = %#v", clientMeta)
+	}
+	cleared := logging.GetClientRequestMetadata(syncMetadataSessionToContext(ctx, nil))
+	if cleared.SessionID != "" || cleared.ParentSessionID != "" || cleared.NodeKind != "" || cleared.IsCompaction || cleared.IsFork {
+		t.Fatalf("stale compaction metadata persisted: %#v", cleared)
+	}
+}
+
 func TestSessionAffinityRecordResultDoesNotDeleteReboundExplicitSession(t *testing.T) {
 	t.Parallel()
 
@@ -210,4 +257,20 @@ func TestSessionAffinityConcurrentStop(t *testing.T) {
 		}()
 	}
 	done.Wait()
+}
+
+func TestSessionContextSynchronizationPreservesExplicitCallerOverrides(t *testing.T) {
+	for _, value := range []string{"", "caller-session"} {
+		ctx := util.WithSessionID(context.Background(), value)
+		ctx = syncMetadataSessionToContext(ctx, map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey:   "lcp:v1:current",
+			cliproxyexecutor.LCPAffinitySessionIDMetadataKey: "lcp:v1:current",
+		})
+		if got := util.SessionIDFromContext(ctx); got != value {
+			t.Fatalf("caller override=%q, want %q", got, value)
+		}
+		if got := logging.GetClientRequestMetadata(ctx).SessionID; got != "lcp:v1:current" {
+			t.Fatalf("canonical report=%q, want current LCP session", got)
+		}
+	}
 }

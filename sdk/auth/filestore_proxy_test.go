@@ -96,6 +96,9 @@ func TestFileTokenStoreNormalizesLegacyCredentialMetadata(t *testing.T) {
 		if auths[0].Metadata["request_retry"] != float64(2) || auths[0].Metadata["disable_cooling"] != true {
 			t.Fatalf("normalized listed metadata = %#v", auths[0].Metadata)
 		}
+		if retry, specified := auths[0].RequestRetryOverride(); !specified || retry != 2 {
+			t.Fatalf("numeric retry override = %d, specified=%v", retry, specified)
+		}
 		for _, legacyKey := range []string{"request-retry", "disable-cooling"} {
 			if _, exists := auths[0].Metadata[legacyKey]; exists {
 				t.Fatalf("listed metadata retained %q: %#v", legacyKey, auths[0].Metadata)

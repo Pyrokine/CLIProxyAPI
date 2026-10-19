@@ -30,12 +30,18 @@ func rewriteSSEPayloadLines(payload []byte, targetModel string) []byte {
 	if targetModel == "" || len(payload) == 0 {
 		return payload
 	}
+	return rewriteSSEPayloadLinesWith(payload, func(data []byte) []byte {
+		return rewriteModelInResponse(data, targetModel)
+	})
+}
+
+func rewriteSSEPayloadLinesWith(payload []byte, rewrite func([]byte) []byte) []byte {
 	lines := bytes.Split(payload, []byte("\n"))
 	out := make([][]byte, 0, len(lines))
 	for _, line := range lines {
 		prefix, jsonData, ok := extractSSEDataLine(line)
 		if ok && len(jsonData) > 0 && jsonData[0] == '{' && gjson.ValidBytes(jsonData) {
-			rewritten := rewriteModelInResponse(jsonData, targetModel)
+			rewritten := rewrite(jsonData)
 			line = append(append([]byte{}, prefix...), rewritten...)
 		}
 		out = append(out, line)
@@ -54,13 +60,61 @@ type StreamRewriteOptions struct {
 
 // StreamRewriter rewrites model names in streaming SSE responses.
 type StreamRewriter struct {
-	options    StreamRewriteOptions
-	pendingBuf []byte
+	options         StreamRewriteOptions
+	pendingBuf      []byte
+	loggedPaths     map[string]struct{}
+	rewrittenEvents int
+	finishedLogged  bool
 }
 
 // NewStreamRewriter creates a new stream rewriter.
 func NewStreamRewriter(options StreamRewriteOptions) *StreamRewriter {
 	return &StreamRewriter{options: options}
+}
+
+func (r *StreamRewriter) rewriteModel(data []byte) []byte {
+	if r == nil || r.options.RewriteModel == "" || len(data) == 0 {
+		return data
+	}
+	rewrote := false
+	for _, path := range modelFieldPaths {
+		if !gjson.GetBytes(data, path).Exists() {
+			continue
+		}
+		updated, err := sjson.SetBytes(data, path, r.options.RewriteModel)
+		if err != nil {
+			log.WithError(err).Warnf("response rewriter: model rewrite failed at %s", path)
+			continue
+		}
+		data = updated
+		rewrote = true
+		if _, logged := r.loggedPaths[path]; !logged {
+			if r.loggedPaths == nil {
+				r.loggedPaths = make(map[string]struct{})
+			}
+			r.loggedPaths[path] = struct{}{}
+			log.Debugf("response rewriter: stream started, rewrote model at path %s to %s", path, r.options.RewriteModel)
+		}
+	}
+	if rewrote {
+		r.rewrittenEvents++
+	}
+	return data
+}
+
+func (r *StreamRewriter) rewriteSSEPayloadLines(payload []byte) []byte {
+	if r == nil || r.options.RewriteModel == "" || len(payload) == 0 {
+		return payload
+	}
+	return rewriteSSEPayloadLinesWith(payload, r.rewriteModel)
+}
+
+func (r *StreamRewriter) logFinishedOnce() {
+	if r == nil || r.finishedLogged || r.rewrittenEvents == 0 {
+		return
+	}
+	r.finishedLogged = true
+	log.Debugf("response rewriter: stream finished, rewrote %d events to %s", r.rewrittenEvents, r.options.RewriteModel)
 }
 
 // RewriteChunk rewrites model names in a single SSE chunk.
@@ -80,7 +134,7 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 
 	trimmed := bytes.TrimSpace(chunk)
 	if len(trimmed) > 0 && trimmed[0] == '{' && gjson.ValidBytes(trimmed) {
-		return rewriteModelInResponse(trimmed, r.options.RewriteModel)
+		return r.rewriteModel(trimmed)
 	}
 
 	lastDoubleNewline := bytes.LastIndex(chunk, []byte("\n\n"))
@@ -138,7 +192,7 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 				pendingEvent = nil
 			}
 
-			rewritten := rewriteModelInResponse(jsonData, r.options.RewriteModel)
+			rewritten := r.rewriteModel(jsonData)
 			result = append(result, append(dataPrefix, rewritten...))
 			continue
 		}
@@ -156,7 +210,10 @@ func (r *StreamRewriter) RewriteChunk(chunk []byte) []byte {
 
 	joined := bytes.Join(result, []byte("\n"))
 	if len(joined) == 0 && len(chunk) > 0 {
-		return rewriteSSEPayloadLines(chunk, r.options.RewriteModel)
+		return r.rewriteSSEPayloadLines(chunk)
+	}
+	if bytes.Contains(chunk, []byte("[DONE]")) {
+		r.logFinishedOnce()
 	}
 	return joined
 }
@@ -183,10 +240,20 @@ func extractSSEDataLine(line []byte) (prefix []byte, jsonData []byte, ok bool) {
 
 // Finish flushes any buffered partial SSE data at the end of a stream.
 func (r *StreamRewriter) Finish() []byte {
-	if len(r.pendingBuf) == 0 {
+	if r == nil {
 		return nil
 	}
-	chunk := r.RewriteChunk(r.pendingBuf)
+	if len(r.pendingBuf) == 0 {
+		r.logFinishedOnce()
+		return nil
+	}
+	pending := append(bytes.Clone(r.pendingBuf), '\n', '\n')
 	r.pendingBuf = nil
-	return chunk
+	out := r.RewriteChunk(pending)
+	if len(r.pendingBuf) > 0 {
+		out = append(out, r.rewriteSSEPayloadLines(r.pendingBuf)...)
+		r.pendingBuf = nil
+	}
+	r.logFinishedOnce()
+	return out
 }

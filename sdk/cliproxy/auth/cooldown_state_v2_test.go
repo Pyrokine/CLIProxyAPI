@@ -199,3 +199,52 @@ func TestManagerRestoreCooldownStateWithoutDeadlineRemainsBlocked(t *testing.T) 
 		t.Fatalf("state after operator action = %+v", updated)
 	}
 }
+
+func TestNotFoundRetryAfterStateDeadline(t *testing.T) {
+	const short, long, zero, negative = 5 * time.Minute, 20 * time.Hour, time.Duration(0), -time.Minute
+	for _, scope := range []cliproxyexecutor.StateEffectScope{cliproxyexecutor.StateEffectScopeExactModel, cliproxyexecutor.StateEffectScopeCredential} {
+		for _, tc := range []struct {
+			name          string
+			retry         *time.Duration
+			disabled      bool
+			priorDuration time.Duration
+			wantDuration  time.Duration
+		}{
+			{"default", nil, false, 0, 12 * time.Hour},
+			{"short-explicit", new(short), false, 0, short},
+			{"long-explicit", new(long), false, 0, long},
+			{"zero", new(zero), false, 0, 12 * time.Hour},
+			{"negative", new(negative), false, 0, 12 * time.Hour},
+			{"disabled", new(short), true, 0, 0},
+			{"existing-deadline", new(short), false, long, long},
+			{"expired-deadline", new(short), false, -time.Minute, short},
+		} {
+			t.Run(string(scope)+"/"+tc.name, func(t *testing.T) {
+				now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+				auth := &Auth{ID: "synthetic-404", Provider: "meta", Status: StatusActive, ModelStates: map[string]*ModelState{"model-a": {Status: StatusActive}}}
+				if tc.priorDuration != 0 {
+					if scope == cliproxyexecutor.StateEffectScopeCredential {
+						auth.NextRetryAfter = now.Add(tc.priorDuration)
+					} else {
+						auth.ModelStates["model-a"].NextRetryAfter = now.Add(tc.priorDuration)
+					}
+				}
+				result := Result{AuthID: auth.ID, Provider: auth.Provider, Model: "model-a", RetryAfter: tc.retry,
+					Error:       &Error{HTTPStatus: http.StatusNotFound, Message: "synthetic upstream not found"},
+					Disposition: cliproxyexecutor.ExecutionDisposition{EffectScope: scope}}
+				applyResultStateLocked(auth, result, now, tc.disabled)
+				deadline, unavailable := auth.NextRetryAfter, auth.Unavailable
+				if scope == cliproxyexecutor.StateEffectScopeExactModel {
+					deadline, unavailable = auth.ModelStates["model-a"].NextRetryAfter, auth.ModelStates["model-a"].Unavailable
+				}
+				want := time.Time{}
+				if tc.wantDuration != 0 {
+					want = now.Add(tc.wantDuration)
+				}
+				if !deadline.Equal(want) || unavailable == tc.disabled {
+					t.Errorf("deadline=%v unavailable=%t, want %v unavailable=%t", deadline, unavailable, want, !tc.disabled)
+				}
+			})
+		}
+	}
+}

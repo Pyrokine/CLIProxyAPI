@@ -20,6 +20,69 @@ func schedulerAuthVersionForTest(t *testing.T, scheduler *authScheduler, authID 
 	return version
 }
 
+func TestManagerSyncSchedulerKeepsAuthSnapshotCurrent(t *testing.T) {
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	const authID = "scheduler-rebuild-current-auth"
+	registered, err := manager.Register(WithSkipPersist(context.Background()), &Auth{
+		ID: authID, Provider: "gemini",
+	})
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	manager.scheduler.mu.Lock()
+	released := false
+	defer func() {
+		if !released {
+			manager.scheduler.mu.Unlock()
+		}
+	}()
+	syncDone := make(chan struct{})
+	go func() {
+		manager.syncScheduler()
+		close(syncDone)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if !manager.mu.TryLock() {
+			break
+		}
+		manager.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("scheduler rebuild did not hold the manager read lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	resultDone := make(chan struct{})
+	go func() {
+		manager.MarkResult(context.Background(), Result{
+			AuthID: authID, AuthGeneration: registered.Generation, Success: true,
+		})
+		close(resultDone)
+	}()
+	manager.scheduler.mu.Unlock()
+	released = true
+	select {
+	case <-syncDone:
+	case <-time.After(time.Second):
+		t.Fatal("scheduler rebuild did not finish")
+	}
+	select {
+	case <-resultDone:
+	case <-time.After(time.Second):
+		t.Fatal("result publication did not finish")
+	}
+	current, ok := manager.GetByID(authID)
+	if !ok || current.Success != 1 {
+		t.Fatalf("current auth = %#v, want successful result", current)
+	}
+	got := schedulerAuthSnapshotForTest(manager.scheduler, "gemini", authID)
+	if got == nil || got.Generation != current.Generation || got.Success != 1 {
+		t.Fatalf("scheduled auth = %#v, current auth = %#v", got, current)
+	}
+}
+
 func TestManagerRemovePublishesSchedulerTombstoneGeneration(t *testing.T) {
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	authID := "manager-removal-publication-auth"

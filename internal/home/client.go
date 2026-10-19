@@ -1248,6 +1248,7 @@ func newAuthDispatchRequest(
 		ConcurrencyProtocol: 1,
 		SessionID:           strings.TrimSpace(sessionID),
 		ParentSessionID:     strings.TrimSpace(constraint.ParentSessionID),
+		NodeKind:            strings.TrimSpace(headers.Get("X-Node-Kind")),
 		Headers:             headersToLowerMap(headers),
 		CredentialPolicy:    strings.TrimSpace(constraint.CredentialPolicy),
 		RetryRound:          max(constraint.RetryRound, 0),

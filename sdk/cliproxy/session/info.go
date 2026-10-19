@@ -23,9 +23,55 @@ type SessionInfo struct {
 	AuthID          string         `json:"auth_id,omitempty"`
 	Provider        string         `json:"provider,omitempty"`
 	Model           string         `json:"model,omitempty"`
+	NodeKind        string         `json:"node_kind,omitempty"`
 	IsFork          bool           `json:"is_fork,omitempty"`
+	IsCompaction    bool           `json:"is_compaction,omitempty"`
 	IsSubagent      bool           `json:"is_subagent,omitempty"`
 	Metadata        map[string]any `json:"metadata,omitempty"`
+}
+
+type sessionObject struct {
+	result     gjson.Result
+	fields     map[string]gjson.Result
+	duplicates map[string]bool
+}
+
+func newSessionObject(result gjson.Result) sessionObject {
+	object := sessionObject{result: result}
+	if result.Type != gjson.JSON {
+		return object
+	}
+	result.ForEach(func(key, value gjson.Result) bool {
+		if object.fields == nil {
+			object.fields = make(map[string]gjson.Result)
+		}
+		if _, exists := object.fields[key.Str]; exists {
+			if object.duplicates == nil {
+				object.duplicates = make(map[string]bool)
+			}
+			object.duplicates[key.Str] = true
+		} else {
+			object.fields[key.Str] = value
+		}
+		return true
+	})
+	return object
+}
+
+func (object sessionObject) Exists() bool {
+	return object.result.Exists()
+}
+
+func (object sessionObject) Get(path string) gjson.Result {
+	key, remaining, nested := strings.Cut(path, ".")
+	if nested && object.duplicates[key] {
+		return object.result.Get(path)
+	}
+	value := object.fields[key]
+	if nested && value.Exists() {
+		return value.Get(remaining)
+	}
+	return value
 }
 
 var parentSessionPaths = []string{
@@ -205,16 +251,16 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 	return extractMetadataSession(info, metadata)
 }
 
-func sessionRoots(payload []byte) (root, requestRoot gjson.Result, hasNestedRequest bool) {
+func sessionRoots(payload []byte) (root, requestRoot sessionObject, hasNestedRequest bool) {
 	if len(payload) == 0 {
-		return gjson.Result{}, gjson.Result{}, false
+		return sessionObject{}, sessionObject{}, false
 	}
-	root = util.ParseGJSONBytesNoCopy(payload)
+	root = newSessionObject(util.ParseGJSONBytesNoCopy(payload))
 	requestRoot = root
 	request := root.Get("request")
 	hasNestedRequest = request.Exists() && !root.Get("contents").Exists()
 	if hasNestedRequest {
-		requestRoot = request
+		requestRoot = newSessionObject(request)
 	}
 	return root, requestRoot, hasNestedRequest
 }
@@ -223,7 +269,7 @@ func buildClaudeInfo(
 	info SessionInfo,
 	sessionID, parentCandidate string,
 	headers http.Header,
-	root, requestRoot gjson.Result,
+	root, requestRoot sessionObject,
 	hasNestedRequest bool,
 	payload []byte,
 ) (SessionInfo, bool) {
@@ -241,7 +287,7 @@ func buildClaudeMetadataInfo(
 	info SessionInfo,
 	sessionID, parentSessionID, agentID string,
 	headers http.Header,
-	root, requestRoot gjson.Result,
+	root, requestRoot sessionObject,
 	hasNestedRequest bool,
 ) (SessionInfo, bool) {
 	info.ClientType = "claude"
@@ -280,7 +326,7 @@ func buildClaudeMetadataInfo(
 func extractCodexInfo(
 	info SessionInfo,
 	headers http.Header,
-	root, requestRoot gjson.Result,
+	root, requestRoot sessionObject,
 	hasNestedRequest bool,
 	parentCandidate string,
 ) (SessionInfo, bool) {
@@ -366,9 +412,9 @@ func extractCodexInfo(
 				info.AgentName = agentName
 			}
 		}
-		if parentID != "" && parentID != childSessionID {
+		if parentID != "" && "codex:"+parentID != info.SessionID {
 			info.ParentSessionID = "codex:" + parentID
-		} else if parentCandidate != "" && parentCandidate != childSessionID {
+		} else if parentCandidate != "" && "codex:"+parentCandidate != info.SessionID {
 			info.ParentSessionID = "codex:" + parentCandidate
 		}
 		info.IsSubagent = true
@@ -398,7 +444,7 @@ func buildPrefixedInfo(info SessionInfo, clientType, prefix, sessionID, parentID
 	return info
 }
 
-func markBodyLineage(info *SessionInfo, root, requestRoot gjson.Result, hasNestedRequest bool) {
+func markBodyLineage(info *SessionInfo, root, requestRoot sessionObject, hasNestedRequest bool) {
 	if info == nil || info.ParentSessionID == "" {
 		return
 	}
@@ -422,14 +468,20 @@ func extractMetadataSession(info SessionInfo, metadata map[string]any) (SessionI
 		info.AgentName = "main"
 		if parentID := normalizedMetadataSessionCandidate(metadata, cliproxyexecutor.ParentSessionIDMetadataKey); parentID != "" && parentID != lcpID {
 			info.ParentSessionID = parentID
-			info.IsFork = true
+			if isCompaction, _ := metadata[cliproxyexecutor.IsCompactionMetadataKey].(bool); isCompaction {
+				info.IsCompaction = true
+				info.NodeKind = "compaction"
+			} else {
+				info.IsFork = true
+				info.NodeKind = "fork"
+			}
 		}
 		return finalizeSessionInfo(info)
 	}
 	return SessionInfo{}, false
 }
 
-func firstSessionPath(root, requestRoot gjson.Result, hasNestedRequest bool, paths ...string) string {
+func firstSessionPath(root, requestRoot sessionObject, hasNestedRequest bool, paths ...string) string {
 	for _, path := range paths {
 		if value := normalizedSessionCandidate(root.Get(path).String()); value != "" {
 			return value
@@ -512,7 +564,9 @@ func finalizeSessionInfo(info SessionInfo) (SessionInfo, bool) {
 	if info.ParentSessionID == info.SessionID {
 		info.ParentSessionID = ""
 		info.IsFork = false
+		info.IsCompaction = false
 		info.IsSubagent = false
+		info.NodeKind = ""
 	}
 	if info.AgentName == "" {
 		info.AgentName = "main"
