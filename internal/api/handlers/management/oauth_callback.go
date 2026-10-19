@@ -18,16 +18,38 @@ type oauthCallbackRequest struct {
 	Error       string `json:"error"`
 }
 
+func (h *Handler) GetOAuthCallback(c *gin.Context) {
+	req := oauthCallbackRequest{
+		Provider: strings.TrimSpace(c.Query("provider")),
+		Code:     strings.TrimSpace(c.Query("code")),
+		State:    strings.TrimSpace(c.Query("state")),
+		Error:    strings.TrimSpace(c.Query("error")),
+	}
+	if req.Error == "" {
+		req.Error = strings.TrimSpace(c.Query("error_description"))
+	}
+	if req.Provider == "" {
+		if session, ok := oauthSessions.get(req.State); ok {
+			req.Provider = session.Provider
+		}
+	}
+	h.handleOAuthCallback(c, req)
+}
+
 func (h *Handler) PostOAuthCallback(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	if h.configSnapshot() == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "handler not initialized"})
-		return
-	}
-
 	var req oauthCallbackRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
+		return
+	}
+	h.handleOAuthCallback(c, req)
+}
+
+func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) {
+	c.Header("Cache-Control", "no-store")
+	if h == nil || h.configSnapshot() == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "handler not initialized"})
 		return
 	}
 

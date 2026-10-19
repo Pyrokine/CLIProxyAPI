@@ -134,6 +134,7 @@ type Handler struct {
 	commitMu                       sync.Mutex
 	runtimeCommitMu                sync.Mutex
 	authStatusMu                   sync.Mutex
+	pluginVirtualStatusMu          sync.Mutex
 	mu                             sync.RWMutex
 	configGeneration               uint64
 	configCommitted                ConfigCommittedFunc
@@ -170,6 +171,7 @@ type Handler struct {
 	postAuthHook                   coreauth.PostAuthHook
 	postAuthPersistHook            coreauth.PostAuthHook
 	quotaScheduler                 *quota.Scheduler
+	metaQuotaGeneration            atomic.Uint64
 	quotaRefreshTasks              *quotaRefreshTaskService
 	pluginHost                     pluginRuntimeHost
 	pluginRuntimeSync              func(context.Context, *config.Config) error

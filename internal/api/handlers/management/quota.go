@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -40,9 +41,17 @@ func (h *Handler) PutSwitchPreviewModel(c *gin.Context) {
 	h.updateBoolField(c, func(cfg *config.Config, v bool) { cfg.QuotaExceeded.SwitchPreviewModel = v })
 }
 
-// ResetQuota clears quota and cooldown routing state for one auth index.
+// ResetQuota consumes a Codex reset credit before clearing local quota and cooldown state.
 func (h *Handler) ResetQuota(c *gin.Context) {
-	cfg := h.configSnapshot()
+	h.resetQuota(c, true)
+}
+
+// ResetCooldown clears only local quota and cooldown routing state.
+func (h *Handler) ResetCooldown(c *gin.Context) {
+	h.resetQuota(c, false)
+}
+
+func (h *Handler) resetQuota(c *gin.Context, consumeCodexCredit bool) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
@@ -68,16 +77,20 @@ func (h *Handler) ResetQuota(c *gin.Context) {
 		return
 	}
 
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		if err := h.consumeCodexResetCredit(c.Request.Context(), cfg, auth); err != nil {
+	if consumeCodexCredit && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		if err := h.consumeCodexResetCredit(c.Request.Context(), h.configSnapshot(), auth); err != nil {
 			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("failed to consume Codex reset credit: %v", err)})
 			return
 		}
 	}
 
-	updated, models, err := h.authManager.ResetQuota(c.Request.Context(), auth.ID)
+	reset := h.authManager.ResetCooldown
+	if consumeCodexCredit {
+		reset = h.authManager.ResetQuota
+	}
+	updated, models, err := reset(c.Request.Context(), auth.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to reset quota: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to clear local routing state: %v", err)})
 		return
 	}
 	if updated == nil {
@@ -137,6 +150,15 @@ func (h *Handler) consumeCodexResetCredit(
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("upstream returned status %d", resp.StatusCode)
+	}
+	var confirmation struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<10)).Decode(&confirmation); err != nil {
+		return fmt.Errorf("decode reset credit confirmation: %w", err)
+	}
+	if confirmation.Code != "reset" && confirmation.Code != "already_redeemed" {
+		return fmt.Errorf("upstream did not confirm reset credit consumption")
 	}
 	return nil
 }

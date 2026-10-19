@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/quota"
@@ -18,18 +20,103 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// GetQuotaStatus returns the cached quota status for all credentials.
+// GetQuotaStatus returns cached quota data and available Meta subscription metadata.
 func (h *Handler) GetQuotaStatus(c *gin.Context) {
-	if h.quotaScheduler == nil {
-		c.JSON(
-			http.StatusOK, quota.StatusResponse{
-				Credentials: make(map[string]*quota.Entry),
-				ByProvider:  make(map[string]quota.ProviderStatusSummary),
-			},
-		)
-		return
+	status := quota.StatusResponse{
+		Credentials: make(map[string]*quota.Entry),
+		ByProvider:  make(map[string]quota.ProviderStatusSummary),
 	}
-	c.JSON(http.StatusOK, h.quotaScheduler.GetStatus())
+	if h.quotaScheduler != nil {
+		status = h.quotaScheduler.GetStatus()
+	}
+	if h.authManager != nil {
+		observedAt := time.Now().UTC()
+		generation := uint64(observedAt.UnixMicro())
+		for {
+			previous := h.metaQuotaGeneration.Load()
+			if generation <= previous {
+				generation = previous + 1
+			}
+			if h.metaQuotaGeneration.CompareAndSwap(previous, generation) {
+				break
+			}
+		}
+		if status.Credentials == nil {
+			status.Credentials = make(map[string]*quota.Entry)
+		}
+		if status.ByProvider == nil {
+			status.ByProvider = make(map[string]quota.ProviderStatusSummary)
+		}
+		for _, auth := range h.authManager.List() {
+			if auth == nil || !strings.EqualFold(auth.Provider, "meta") || !strings.EqualFold(auth.Attributes["auth_kind"], "oauth") {
+				continue
+			}
+			index := auth.EnsureIndex()
+			if index == "" {
+				continue
+			}
+			if auth.Generation == 0 {
+				log.WithField("auth_index", index).Warn("Meta credential has no published version; omitting subscription status")
+				continue
+			}
+			data := struct {
+				PlanName             string   `json:"planName,omitempty"`
+				IsSubscriptionActive *bool    `json:"isSubscriptionActive,omitempty"`
+				Windows              []string `json:"windows"`
+				Available            bool     `json:"available"`
+				Reason               string   `json:"reason"`
+			}{Windows: []string{}, Reason: "usage_not_provided"}
+			if plan, ok := auth.Metadata["subs_tier_name"].(string); ok && safeMetaPlanName(plan) {
+				data.PlanName = strings.TrimSpace(plan)
+			}
+			if active, ok := auth.Metadata["is_subs_active"].(bool); ok {
+				data.IsSubscriptionActive = &active
+			}
+			encoded, err := json.Marshal(data)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode Meta subscription status"})
+				return
+			}
+			status.Credentials["meta::"+index] = &quota.Entry{
+				Type:          quota.CredentialType("meta"),
+				AuthIndex:     index,
+				Generation:    generation,
+				StateRevision: auth.Generation,
+				Status:        quota.StatusIdle,
+				Freshness:     quota.FreshnessOutdated,
+				Source:        "meta_subscription_metadata",
+				ObservedAt:    &observedAt,
+				Data:          encoded,
+				Disabled:      auth.Disabled,
+			}
+			if observedAt.After(status.UpdatedAt) {
+				status.UpdatedAt = observedAt
+			}
+			summary := status.ByProvider["meta"]
+			summary.Provider = "meta"
+			summary.CredentialCount++
+			summary.Idle++
+			summary.Outdated++
+			if auth.Disabled {
+				summary.Disabled++
+			}
+			status.ByProvider["meta"] = summary
+		}
+	}
+	c.JSON(http.StatusOK, status)
+}
+
+func safeMetaPlanName(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != ' ' && r != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // PostQuotaRefresh creates a persistent quota refresh task.

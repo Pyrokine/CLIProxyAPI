@@ -379,7 +379,7 @@ func resolveReleaseURL(repo, version string) string {
 
 func gitHubReleaseURL(releaseURL string) bool {
 	parsed, errParse := url.Parse(strings.TrimSpace(releaseURL))
-	return errParse == nil && strings.EqualFold(parsed.Scheme, "https") &&
+	return errParse == nil && parsed.User == nil && strings.EqualFold(parsed.Scheme, "https") &&
 		strings.EqualFold(parsed.Hostname(), "api.github.com") &&
 		(parsed.Port() == "" || parsed.Port() == "443")
 }

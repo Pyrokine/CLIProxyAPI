@@ -132,6 +132,24 @@ func TestFetchReleaseAssetUsesGitHubTokenOnlyForGitHubAPI(t *testing.T) {
 			url:         "https://api.github.com:8443/repos/example/repository/releases/latest",
 			gitHubToken: "github-token",
 		},
+		{
+			name:        "GitHub API explicit HTTPS port",
+			url:         "https://api.github.com:443/repos/example/repository/releases/latest",
+			gitHubToken: "github-token",
+			wantAuth:    "Bearer github-token",
+		},
+		{
+			name:        "GitHub API userinfo uses only URL credentials",
+			url:         "https://user@api.github.com/repos/example/repository/releases/latest",
+			gitHubToken: "github-token",
+			wantAuth:    "Basic dXNlcjo=",
+		},
+		{
+			name:        "GitHub API username and password use only URL credentials",
+			url:         "https://user:pass@api.github.com/repos/example/repository/releases/latest",
+			gitHubToken: "github-token",
+			wantAuth:    "Basic dXNlcjpwYXNz",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

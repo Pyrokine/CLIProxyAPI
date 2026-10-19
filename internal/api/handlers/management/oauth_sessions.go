@@ -587,6 +587,10 @@ func normalizeOAuthProvider(provider string) (string, error) {
 		return "qwen", nil
 	case "kimi":
 		return "kimi", nil
+	case "kimi-ai", "kimi.ai":
+		return "kimi-ai", nil
+	case "meta", "muse":
+		return "meta", nil
 	case "xai", "x-ai", "x.ai", "grok":
 		return "xai", nil
 	case "devin", "cognition":

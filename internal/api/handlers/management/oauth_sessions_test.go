@@ -316,8 +316,12 @@ func TestPostOAuthCallbackUsesSessionAuthDirectory(t *testing.T) {
 
 func TestNormalizeOAuthProviderIncludesDeviceProviders(t *testing.T) {
 	for input, want := range map[string]string{
-		"grok": "xai",
-		"kimi": "kimi",
+		"grok":    "xai",
+		"kimi":    "kimi",
+		"kimi.ai": "kimi-ai",
+		"kimi-ai": "kimi-ai",
+		"meta":    "meta",
+		"muse":    "meta",
 	} {
 		got, err := normalizeOAuthProvider(input)
 		if err != nil || got != want {

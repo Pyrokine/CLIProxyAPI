@@ -899,6 +899,19 @@ func TestAPICallRejectsPlaceholderWithoutToken(t *testing.T) {
 	}
 }
 
+func TestAPICallRejectsMissingAuthIndexWithPlaceholder(t *testing.T) {
+	h := newConfigListTestHandler(t, &config.Config{})
+	recorder := runConfigListRequest(
+		h.APICall,
+		http.MethodPost,
+		"/api-call",
+		`{"auth_index":"unknown-index","method":"GET","url":"https://api.openai.com/v1/models","header":{"Authorization":"Bearer $TOKEN$"}}`,
+	)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "auth credential not found for auth_index") {
+		t.Fatalf("missing auth index: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestAPICallRejectsDraftTokenOverHTTP(t *testing.T) {
 	h := newConfigListTestHandler(t, &config.Config{})
 	recorder := runConfigListRequest(

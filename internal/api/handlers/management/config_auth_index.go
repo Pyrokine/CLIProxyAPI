@@ -13,6 +13,7 @@ type configAuthIndexViews struct {
 	interactions   []string
 	claude         []string
 	codex          []string
+	meta           []string
 	xai            []string
 	vertex         []string
 	openAIEntries  [][]string
@@ -24,6 +25,7 @@ type configAuthIndexResponse struct {
 	Interactions   []string   `json:"interactions"`
 	Claude         []string   `json:"claude"`
 	Codex          []string   `json:"codex"`
+	Meta           []string   `json:"meta"`
 	XAI            []string   `json:"xai"`
 	Vertex         []string   `json:"vertex"`
 	OpenAIEntries  [][]string `json:"openai-entries"`
@@ -36,6 +38,7 @@ func (views configAuthIndexViews) response() configAuthIndexResponse {
 		Interactions:   views.interactions,
 		Claude:         views.claude,
 		Codex:          views.codex,
+		Meta:           views.meta,
 		XAI:            views.xai,
 		Vertex:         views.vertex,
 		OpenAIEntries:  views.openAIEntries,
@@ -113,6 +116,7 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 		interactions:   make([]string, len(cfg.InteractionsKey)),
 		claude:         make([]string, len(cfg.ClaudeKey)),
 		codex:          make([]string, len(cfg.CodexKey)),
+		meta:           make([]string, len(cfg.MetaKey)),
 		xai:            make([]string, len(cfg.XAIKey)),
 		vertex:         make([]string, len(cfg.VertexCompatAPIKey)),
 		openAIEntries:  make([][]string, len(cfg.OpenAICompatibility)),
@@ -135,6 +139,7 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 		interactions []string
 		claude       []string
 		codex        []string
+		meta         []string
 		xai          []string
 		vertex       []string
 		openAI       []string
@@ -154,6 +159,8 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 			queues.claude = append(queues.claude, index)
 		case strings.HasPrefix(auth.ID, "codex:apikey:"):
 			queues.codex = append(queues.codex, index)
+		case strings.HasPrefix(auth.ID, "meta:apikey:"):
+			queues.meta = append(queues.meta, index)
 		case strings.HasPrefix(auth.ID, "xai:apikey:"):
 			queues.xai = append(queues.xai, index)
 		case strings.HasPrefix(auth.ID, "vertex:apikey:"):
@@ -199,6 +206,13 @@ func (h *Handler) buildConfigAuthIndexViews(cfg *config.Config) configAuthIndexV
 			continue
 		}
 		views.codex[i] = nextAuthIndex(queues.codex, &codexCursor)
+	}
+	metaCursor := 0
+	for i := range cfg.MetaKey {
+		if strings.TrimSpace(cfg.MetaKey[i].APIKey) == "" {
+			continue
+		}
+		views.meta[i] = nextAuthIndex(queues.meta, &metaCursor)
 	}
 	xaiCursor := 0
 	for i := range cfg.XAIKey {
@@ -293,6 +307,22 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 		out[i] = codexKeyWithAuthIndex{
 			CodexKey:  cfg.CodexKey[i],
 			AuthIndex: views.codex[i],
+		}
+	}
+	return out
+}
+
+func (h *Handler) metaKeysWithAuthIndex() []codexKeyWithAuthIndex {
+	cfg := h.configSnapshot()
+	if cfg == nil {
+		return nil
+	}
+	views := h.buildConfigAuthIndexViews(cfg)
+	out := make([]codexKeyWithAuthIndex, len(cfg.MetaKey))
+	for i := range cfg.MetaKey {
+		out[i] = codexKeyWithAuthIndex{
+			CodexKey:  cfg.MetaKey[i],
+			AuthIndex: views.meta[i],
 		}
 	}
 	return out

@@ -73,6 +73,58 @@ func TestPatchAuthFileStatusInvokesPersistHook(t *testing.T) {
 	}
 }
 
+func TestPatchAuthFileStatusDoesNotHoldLockDuringPersistHook(t *testing.T) {
+	manager := coreauth.NewManager(&memoryAuthStore{}, nil, nil)
+	for _, id := range []string{"status-a.json", "status-b.json"} {
+		if _, err := manager.Register(t.Context(), &coreauth.Auth{
+			ID: id, FileName: id, Provider: "qwen", Status: coreauth.StatusActive,
+			Metadata: map[string]any{"type": "qwen"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler := NewHandler(&config.Config{}, "", manager)
+	hookStarted := make(chan struct{})
+	releaseHook := make(chan struct{})
+	handler.SetPostAuthPersistHook(func(_ context.Context, auth *coreauth.Auth) error {
+		if auth.ID == "status-a.json" {
+			close(hookStarted)
+			<-releaseHook
+		}
+		return nil
+	})
+	doneA := make(chan int, 1)
+	go func() {
+		response := runConfigListRequest(handler.PatchAuthFileStatus, http.MethodPatch, "/auth-files/status", `{"name":"status-a.json","disabled":true}`)
+		doneA <- response.Code
+	}()
+	t.Cleanup(func() {
+		close(releaseHook)
+		select {
+		case <-doneA:
+		case <-time.After(2 * time.Second):
+		}
+	})
+	select {
+	case <-hookStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first status hook did not start")
+	}
+	doneB := make(chan int, 1)
+	go func() {
+		response := runConfigListRequest(handler.PatchAuthFileStatus, http.MethodPatch, "/auth-files/status", `{"name":"status-b.json","disabled":true}`)
+		doneB <- response.Code
+	}()
+	select {
+	case code := <-doneB:
+		if code != http.StatusOK {
+			t.Fatalf("second status=%d, want 200", code)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unrelated status update blocked by the first persist hook")
+	}
+}
+
 type cancelingManagementAuthStore struct {
 	memoryAuthStore
 	cancel context.CancelFunc

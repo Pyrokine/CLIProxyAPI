@@ -427,6 +427,9 @@ func TestLoadOrCreateConfigYAMLRedactionKeyRejectsWritableStateSymlink(t *testin
 	if err := os.Mkdir(target, 0o755); err != nil {
 		t.Fatalf("mkdir target: %v", err)
 	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatalf("chmod target: %v", err)
+	}
 	if err := os.Symlink(target, filepath.Join(writablePath, "management-state")); err != nil {
 		t.Fatalf("symlink management state: %v", err)
 	}

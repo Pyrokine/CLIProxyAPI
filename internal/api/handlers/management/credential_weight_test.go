@@ -55,6 +55,12 @@ func TestPatchProviderCredentialWeight(t *testing.T) {
 			patch: (*Handler).PatchCodexKey,
 			get:   func(cfg *config.Config) *int { return cfg.CodexKey[0].Weight },
 		},
+		{
+			name:  "meta",
+			cfg:   &config.Config{MetaKey: []config.MetaKey{{APIKey: "fixture-key"}}},
+			patch: (*Handler).PatchMetaKey,
+			get:   func(cfg *config.Config) *int { return cfg.MetaKey[0].Weight },
+		},
 	}
 
 	for _, test := range tests {

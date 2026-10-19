@@ -32,6 +32,8 @@ type structListResource[T any] struct {
 	stableMatchIndex         func(h *Handler, cfg *config.Config, value string) int
 	postMatchSecondary       bool // include secondary match key when detecting duplicate POST entries
 	postEntryEqual           func(left, right *T) bool
+	reconcilePut             func(entry *T, existing []T)
+	reconcilePatch           func(entry *T, existing *T, raw json.RawMessage) error
 	trimMatch                bool                // whether to TrimSpace match values in Delete
 	trimSecondaryMatch       bool                // whether to TrimSpace secondary match values in Delete
 	filter                   func(entry *T) bool // optional PUT filter (nil = keep all)
@@ -71,6 +73,11 @@ func putStructList[T any](h *Handler, c *gin.Context, r structListResource[T]) {
 			arr, matches, err = resolveStructListAPIKeyPlaceholders(arr, existing, r)
 			if err != nil {
 				return err
+			}
+			if r.reconcilePut != nil {
+				for i := range arr {
+					r.reconcilePut(&arr[i], existing)
+				}
 			}
 			if r.validate != nil {
 				for i := range arr {
@@ -463,6 +470,11 @@ func patchStructEntry[T any](
 			); errResolve != nil {
 				return errResolve
 			}
+			if r.reconcilePatch != nil {
+				if errReconcile := r.reconcilePatch(&entry, &list[targetIndex], envelope.Value); errReconcile != nil {
+					return errReconcile
+				}
+			}
 			if r.validate != nil {
 				if errValidate := r.validate(&entry, &list[targetIndex]); errValidate != nil {
 					return errValidate
@@ -554,7 +566,69 @@ var claudeKeyResource = structListResource[config.ClaudeKey]{
 		return -1
 	},
 	postEntryEqual:     claudeKeyRouteEqual,
+	reconcilePut:       preserveClaudeCloakMode,
+	reconcilePatch:     reconcileClaudeCloakPatch,
 	trimSecondaryMatch: true,
+}
+
+func reconcileClaudeCloakPatch(entry, previous *config.ClaudeKey, raw json.RawMessage) error {
+	if entry == nil || previous == nil || entry.Cloak == nil {
+		return nil
+	}
+	if strings.TrimSpace(entry.APIKey) == strings.TrimSpace(previous.APIKey) &&
+		strings.TrimSpace(entry.BaseURL) == strings.TrimSpace(previous.BaseURL) &&
+		strings.TrimSpace(entry.Prefix) == strings.TrimSpace(previous.Prefix) &&
+		strings.TrimSpace(entry.ProxyURL) == strings.TrimSpace(previous.ProxyURL) {
+		return nil
+	}
+	var patch struct {
+		Cloak json.RawMessage `json:"cloak"`
+	}
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		return err
+	}
+	if len(patch.Cloak) > 0 && strings.TrimSpace(string(patch.Cloak)) != "null" {
+		var explicit struct {
+			Mode *string `json:"mode"`
+		}
+		if err := json.Unmarshal(patch.Cloak, &explicit); err != nil {
+			return err
+		}
+		if explicit.Mode != nil {
+			return nil
+		}
+	}
+	cloak := *entry.Cloak
+	cloak.Mode = ""
+	entry.Cloak = &cloak
+	return nil
+}
+
+func preserveClaudeCloakMode(entry *config.ClaudeKey, existing []config.ClaudeKey) {
+	if entry == nil || (entry.Cloak != nil && strings.TrimSpace(entry.Cloak.Mode) != "") {
+		return
+	}
+	var previous *config.ClaudeKey
+	for i := range existing {
+		candidate := &existing[i]
+		if strings.TrimSpace(candidate.APIKey) != strings.TrimSpace(entry.APIKey) ||
+			strings.TrimSpace(candidate.BaseURL) != strings.TrimSpace(entry.BaseURL) ||
+			strings.TrimSpace(candidate.Prefix) != strings.TrimSpace(entry.Prefix) ||
+			strings.TrimSpace(candidate.ProxyURL) != strings.TrimSpace(entry.ProxyURL) {
+			continue
+		}
+		if previous != nil {
+			return
+		}
+		previous = candidate
+	}
+	if previous == nil || previous.Cloak == nil || strings.TrimSpace(previous.Cloak.Mode) == "" {
+		return
+	}
+	if entry.Cloak == nil {
+		entry.Cloak = &config.CloakConfig{}
+	}
+	entry.Cloak.Mode = previous.Cloak.Mode
 }
 
 var openAICompatResource = structListResource[config.OpenAICompatibility]{
@@ -628,6 +702,31 @@ var codexKeyResource = structListResource[config.CodexKey]{
 	postEntryEqual:     codexKeyRouteEqual,
 	trimSecondaryMatch: true,
 	filter:             func(e *config.CodexKey) bool { return e.BaseURL != "" },
+}
+
+var metaKeyResource = structListResource[config.MetaKey]{
+	configKey:                "meta-api-key",
+	getList:                  func(cfg *config.Config) []config.MetaKey { return cfg.MetaKey },
+	setList:                  func(cfg *config.Config, list []config.MetaKey) { cfg.MetaKey = list },
+	sanitize:                 func(cfg *config.Config) { cfg.SanitizeMetaKeys() },
+	normalize:                normalizeMetaKey,
+	validate:                 validateMetaKey,
+	matchKey:                 func(entry *config.MetaKey) string { return entry.APIKey },
+	secondaryMatchKey:        func(entry *config.MetaKey) string { return entry.BaseURL },
+	matchQueryParam:          "api-key",
+	secondaryMatchQueryParam: "base-url",
+	stableMatchBodyField:     "auth-index",
+	stableMatchIndex: func(h *Handler, cfg *config.Config, value string) int {
+		views := h.buildConfigAuthIndexViews(cfg)
+		for i := range views.meta {
+			if views.meta[i] == value {
+				return i
+			}
+		}
+		return -1
+	},
+	postEntryEqual:     codexKeyRouteEqual,
+	trimSecondaryMatch: true,
 }
 
 var xaiKeyResource = structListResource[config.XAIKey]{

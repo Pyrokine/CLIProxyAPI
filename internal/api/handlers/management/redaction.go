@@ -85,6 +85,17 @@ func shouldRedactMapKey(parent string) bool {
 	return ok
 }
 
+func isConfigAPIKeyProviderSchema(fieldName, parentFieldName, semanticPath string) bool {
+	if fieldName != "config-api-key" || parentFieldName != "providers" {
+		return false
+	}
+	path := "$/document"
+	for _, name := range [...]string{"auth", "providers", "config-api-key"} {
+		path += "/mapping@" + configYAMLSemanticMapKey(&yaml.Node{Kind: yaml.ScalarNode, Value: name}, false) + "/value"
+	}
+	return semanticPath == path
+}
+
 const (
 	configYAMLPlaceholderPrefix       = "__CLI_PROXY_CONFIG_SECRET_"
 	configYAMLAnchorPlaceholderPrefix = "cpa_config_anchor_"
@@ -722,16 +733,19 @@ func visitConfigYAMLContextNode(
 	case yaml.MappingNode:
 		redactMapKeys := shouldRedactMapKey(fieldName)
 		redactKeys := valueSensitive || redactMapKeys
+		providerSchema := isConfigAPIKeyProviderSchema(fieldName, parentFieldName, semanticPath)
 		for index := 0; index+1 < len(node.Content); index += 2 {
 			entryOrdinalPath := fmt.Sprintf("%s/mapping%d", ordinalPath, index/2)
 			keyNode := node.Content[index]
 			valueNode := node.Content[index+1]
 			_, childFieldName, hasFieldName := yamlSemanticScalar(keyNode)
-			entrySemanticPath := semanticPath + "/mapping@" + configYAMLSemanticMapKey(keyNode, redactKeys)
+			structuredKey := providerSchema && valueNode.Kind == yaml.SequenceNode &&
+				(childFieldName == "api-key-entries" || childFieldName == "api-keys")
+			entrySemanticPath := semanticPath + "/mapping@" + configYAMLSemanticMapKey(keyNode, redactKeys && !structuredKey)
 			if !hasFieldName || redactMapKeys {
 				childFieldName = ""
 			}
-			if redactKeys {
+			if redactKeys && !structuredKey {
 				if err := visitConfigYAMLContextNode(
 					keyNode,
 					"",
@@ -751,7 +765,7 @@ func visitConfigYAMLContextNode(
 				fieldName,
 				entryOrdinalPath+"/value",
 				entrySemanticPath+"/value",
-				valueSensitive,
+				valueSensitive && !structuredKey,
 				seen,
 				visit,
 			); err != nil {

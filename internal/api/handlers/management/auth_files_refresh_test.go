@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	metaauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/meta"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -218,12 +219,19 @@ type bulkRefreshExecutor struct {
 	calls         atomic.Int32
 	entered       chan struct{}
 	release       chan struct{}
+	deadlines     chan time.Duration
 }
 
 func (*bulkRefreshExecutor) Identifier() string { return "bulk-refresh-test" }
 
 func (e *bulkRefreshExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	e.calls.Add(1)
+	if e.deadlines != nil {
+		deadline, ok := ctx.Deadline()
+		if ok {
+			e.deadlines <- time.Until(deadline)
+		}
+	}
 	current := e.current.Add(1)
 	defer e.current.Add(-1)
 	for {
@@ -374,6 +382,32 @@ func TestRefreshAllAuthFilesBoundsWorkersAndSkipsDisabled(t *testing.T) {
 	}
 }
 
+func TestRefreshAllAuthFilesLimitsEachCredentialSeparately(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &bulkRefreshExecutor{deadlines: make(chan time.Duration, 1)}
+	handler, _ := newBulkRefreshHandler(t, executor, 1)
+	router := gin.New()
+	router.POST("/auth-files/refresh", handler.RefreshAuthFile)
+	request := httptest.NewRequest(http.MethodPost, "/auth-files/refresh", strings.NewReader(`{"all":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	select {
+	case remaining := <-executor.deadlines:
+		if remaining < authFileRefreshTimeout-time.Second || remaining > authFileRefreshTimeout {
+			t.Fatalf("credential deadline = %v, want %v", remaining, authFileRefreshTimeout)
+		}
+	default:
+		t.Fatal("credential refresh did not receive a deadline")
+	}
+	if authFileRefreshBatchTimeout <= authFileRefreshTimeout {
+		t.Fatal("bulk refresh must allow multiple credential rounds")
+	}
+}
+
 func TestRefreshAllAuthFilesCancellationReturnsPerItemResults(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	executor := &bulkRefreshExecutor{}
@@ -403,5 +437,160 @@ func TestRefreshAllAuthFilesCancellationReturnsPerItemResults(t *testing.T) {
 		if result.Success || result.Error != "credential_refresh_cancelled" || result.AuthIndex == "" {
 			t.Fatalf("cancelled result = %+v", result)
 		}
+	}
+}
+
+func TestMetaManualRefreshCapabilityDoesNotExposeTokens(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		attributes map[string]string
+		metadata   map[string]any
+		storage    coreauth.TokenStorage
+		available  bool
+	}{
+		{name: "API key only", attributes: map[string]string{"api_key": "secret-api-key"}},
+		{name: "DCA in attributes", attributes: map[string]string{"dca_token": "dca:secret-attribute"}, available: true},
+		{name: "DCA in metadata", metadata: map[string]any{"dca_token": "dca:secret-metadata"}, available: true},
+		{name: "legacy DCA access token", metadata: map[string]any{"access_token": "dca:secret-legacy"}, available: true},
+		{name: "DCA in storage", storage: &metaauth.MetaTokenStorage{DCAToken: "dca:secret-storage"}, available: true},
+		{
+			name:       "config API key with DCA",
+			attributes: map[string]string{"source_backend": "config", "auth_kind": "apikey", "api_key": "secret-api-key"},
+			metadata:   map[string]any{"dca_token": "dca:secret-config"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			auth := &coreauth.Auth{
+				ID: "meta-fixture.json", FileName: "meta-fixture.json", Provider: "meta",
+				Status: coreauth.StatusActive, Attributes: test.attributes, Metadata: test.metadata,
+				Storage: test.storage,
+			}
+			if got := metaManualRefreshAvailable(auth); got != test.available {
+				t.Fatalf("manual refresh available = %t, want %t", got, test.available)
+			}
+			if test.name == "config API key with DCA" {
+				auth.Attributes["path"] = "/missing/meta-fixture.json"
+			} else {
+				if auth.Attributes == nil {
+					auth.Attributes = make(map[string]string)
+				}
+				auth.Attributes["runtime_only"] = "true"
+			}
+			entry := (&Handler{}).buildAuthFileEntry(auth)
+			if entry == nil || entry["manual_refresh_available"] != test.available {
+				t.Fatalf("Meta list entry capability = %v, want %t", entry, test.available)
+			}
+			encoded, err := json.Marshal(entry)
+			if err != nil {
+				t.Fatalf("marshal list entry: %v", err)
+			}
+			for _, secret := range []string{"secret-api-key", "dca:secret-attribute", "dca:secret-metadata", "dca:secret-legacy", "dca:secret-storage", "dca:secret-config"} {
+				if strings.Contains(string(encoded), secret) {
+					t.Fatalf("Meta list entry exposed a token: %s", encoded)
+				}
+			}
+		})
+	}
+}
+
+type metaSafeRefreshExecutor struct{ safeRefreshExecutor }
+
+func (*metaSafeRefreshExecutor) Identifier() string { return "meta" }
+
+func TestRefreshAuthFileRejectsMetaWithoutDCA(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &metaSafeRefreshExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	register := func(id, token string) *coreauth.Auth {
+		t.Helper()
+		attributes := map[string]string{"auth_kind": "oauth", "api_key": "secret-api-key"}
+		if token != "" {
+			attributes["dca_token"] = token
+		}
+		auth, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID: id, FileName: id + ".json", Provider: "meta", Status: coreauth.StatusActive,
+			Attributes: attributes,
+		})
+		if err != nil {
+			t.Fatalf("register Meta auth: %v", err)
+		}
+		return auth
+	}
+	apiKeyOnly := register("meta-static", "")
+	refreshable := register("meta-oauth", "dca:secret-refresh")
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{}, manager)
+	router := gin.New()
+	router.POST("/auth-files/refresh", handler.RefreshAuthFile)
+	postRefresh := func(auth *coreauth.Auth) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"name": auth.FileName, "auth_index": auth.EnsureIndex()})
+		if err != nil {
+			t.Fatalf("encode refresh request: %v", err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/auth-files/refresh", strings.NewReader(string(body)))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		return response
+	}
+	unavailable := postRefresh(apiKeyOnly)
+	if unavailable.Code != http.StatusConflict || !strings.Contains(unavailable.Body.String(), "credential_refresh_unavailable") || executor.lastAuthID != "" {
+		t.Fatalf("API-key-only refresh: status=%d, body=%s, called=%s", unavailable.Code, unavailable.Body.String(), executor.lastAuthID)
+	}
+	available := postRefresh(refreshable)
+	if available.Code != http.StatusOK || executor.lastAuthID != refreshable.ID {
+		t.Fatalf("DCA refresh: status=%d, body=%s, called=%s", available.Code, available.Body.String(), executor.lastAuthID)
+	}
+	if strings.Contains(available.Body.String(), "secret-") || strings.Contains(unavailable.Body.String(), "secret-") {
+		t.Fatalf("refresh response exposed Meta credential: %s / %s", available.Body.String(), unavailable.Body.String())
+	}
+}
+
+type metaBulkRefreshExecutor struct{ bulkRefreshExecutor }
+
+func (*metaBulkRefreshExecutor) Identifier() string { return "meta" }
+
+func TestRefreshAllAuthFilesOnlyAttemptsMintableMeta(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &metaBulkRefreshExecutor{}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	for _, test := range []struct {
+		id         string
+		attributes map[string]string
+		metadata   map[string]any
+	}{
+		{id: "meta-dca", attributes: map[string]string{"auth_kind": "oauth"}, metadata: map[string]any{"dca_token": "dca:fixture"}},
+		{id: "meta-api-key", attributes: map[string]string{"auth_kind": "oauth", "api_key": "fixture-api-key"}},
+		{id: "meta-config", attributes: map[string]string{"auth_kind": "apikey", "source_backend": "config", "api_key": "fixture-api-key"}, metadata: map[string]any{"dca_token": "dca:fixture"}},
+	} {
+		_, err := manager.Register(context.Background(), &coreauth.Auth{
+			ID: test.id, FileName: test.id + ".json", Provider: "meta", Status: coreauth.StatusActive,
+			Attributes: test.attributes, Metadata: test.metadata,
+		})
+		if err != nil {
+			t.Fatalf("register %s: %v", test.id, err)
+		}
+	}
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{}, manager)
+	router := gin.New()
+	router.POST("/auth-files/refresh", handler.RefreshAuthFile)
+	request := httptest.NewRequest(http.MethodPost, "/auth-files/refresh", strings.NewReader(`{"all":true}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("bulk Meta refresh: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload authFileRefreshBatchResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode Meta refresh result: %v", err)
+	}
+	if len(payload.Results) != 1 || payload.Results[0].FileName != "meta-dca.json" || !payload.Results[0].Success || executor.calls.Load() != 1 {
+		t.Fatalf("Meta batch result = %+v, calls = %d", payload.Results, executor.calls.Load())
+	}
+	if strings.Contains(response.Body.String(), "dca:fixture") || strings.Contains(response.Body.String(), "fixture-api-key") {
+		t.Fatalf("bulk Meta response exposed credential: %s", response.Body.String())
 	}
 }

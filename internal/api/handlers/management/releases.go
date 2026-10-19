@@ -214,7 +214,7 @@ func githubGet(ctx context.Context, client *http.Client, url string) ([]byte, er
 
 func isGitHubAPIRequestURL(rawURL string) bool {
 	parsed, errParse := url.Parse(strings.TrimSpace(rawURL))
-	return errParse == nil && strings.EqualFold(parsed.Scheme, "https") &&
+	return errParse == nil && parsed.User == nil && strings.EqualFold(parsed.Scheme, "https") &&
 		strings.EqualFold(parsed.Hostname(), "api.github.com") &&
 		(parsed.Port() == "" || parsed.Port() == "443")
 }

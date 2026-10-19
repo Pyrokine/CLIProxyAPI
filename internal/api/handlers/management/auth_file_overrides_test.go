@@ -139,3 +139,95 @@ func TestAuthFileCredentialOverridesPersistAndReload(t *testing.T) {
 		}
 	}
 }
+
+func TestAuthFileModelAliasesAndErrorRulesPersistAndReload(t *testing.T) {
+	for _, withStorage := range []bool{false, true} {
+		t.Run(fmt.Sprintf("storage_%t", withStorage), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "synthetic.json")
+			store := sdkauth.NewFileTokenStore()
+			store.SetBaseDir(dir)
+			manager := coreauth.NewManager(store, nil, nil)
+			auth := &coreauth.Auth{
+				ID: "synthetic.json", FileName: "synthetic.json", Provider: "codex", Status: coreauth.StatusActive,
+				Attributes: map[string]string{"path": path},
+				Metadata:   map[string]any{"type": "codex", "access_token": "synthetic-token"},
+			}
+			if withStorage {
+				auth.Storage = &codex.TokenStorage{AccessToken: "synthetic-token"}
+			}
+			if _, err := manager.Register(t.Context(), auth); err != nil {
+				t.Fatal(err)
+			}
+			h := &Handler{authManager: manager}
+			patch := func(fields string, status int) {
+				t.Helper()
+				resp := runConfigListRequest(h.PatchAuthFileFields, http.MethodPatch, "/auth-files/fields",
+					`{"name":"synthetic.json",`+fields+`}`)
+				if resp.Code != status {
+					t.Fatalf("PATCH %s: status=%d body=%s", fields, resp.Code, resp.Body.String())
+				}
+			}
+			patch(`"model_aliases":[{"name":"gpt-5","alias":"local-gpt","fork":true,"force-mapping":true}],"request_scoped_errors":[{"status":429,"match":["quota"],"action":"stop","future_key":"preserved"}]`, http.StatusOK)
+			current, found := manager.GetByID(auth.ID)
+			if !found || current == nil {
+				t.Fatal("credential missing after update")
+			}
+			aliases := coreauth.OAuthModelAliasesFromAttributes(current.Attributes)
+			if len(aliases) != 1 || aliases[0].Alias != "local-gpt" || !aliases[0].ForceMapping {
+				t.Fatalf("runtime aliases = %#v", aliases)
+			}
+			if _, ok := current.Metadata["request_scoped_errors"]; !ok {
+				t.Fatal("runtime request rules missing")
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted map[string]any
+			if err := json.Unmarshal(data, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			rules, ok := persisted["request_scoped_errors"].([]any)
+			if !ok || len(rules) != 1 || rules[0].(map[string]any)["future_key"] != "preserved" || persisted["access_token"] != "synthetic-token" {
+				t.Fatalf("persisted credential fields = %#v", persisted)
+			}
+			reloaded, err := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{AuthDir: dir, Config: &config.Config{}, Now: time.Now()}, path, data)
+			if err != nil || len(reloaded) != 1 || len(coreauth.OAuthModelAliasesFromAttributes(reloaded[0].Attributes)) != 1 {
+				t.Fatalf("reload auths=%#v error=%v", reloaded, err)
+			}
+			for _, invalid := range []string{
+				`"model_aliases":[{"name":"a","alias":"same"},{"name":"b","alias":"same"}]`,
+				`"request_scoped_errors":[{"status":429,"match-regexr":["("],"action":"continue"}]`,
+			} {
+				patch(invalid, http.StatusBadRequest)
+				after, err := os.ReadFile(path)
+				if err != nil || !bytes.Equal(data, after) {
+					t.Fatalf("invalid PATCH changed file: err=%v", err)
+				}
+			}
+			patch(`"model_aliases":[],"request_scoped_errors":[]`, http.StatusOK)
+			cleared, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persisted = make(map[string]any)
+			if err := json.Unmarshal(cleared, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := persisted["model_aliases"]; ok {
+				t.Fatal("model aliases persisted after clearing")
+			}
+			if _, ok := persisted["request_scoped_errors"]; ok {
+				t.Fatal("request rules persisted after clearing")
+			}
+			current, _ = manager.GetByID(auth.ID)
+			if len(coreauth.OAuthModelAliasesFromAttributes(current.Attributes)) != 0 {
+				t.Fatalf("runtime alias after clear = %#v", current.Attributes)
+			}
+			if _, ok := current.Metadata["request_scoped_errors"]; ok {
+				t.Fatal("runtime request rules remained after clearing")
+			}
+		})
+	}
+}

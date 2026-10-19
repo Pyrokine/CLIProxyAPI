@@ -194,9 +194,10 @@ func patchClaudeCloak(raw json.RawMessage, dst **config.CloakConfig) error {
 	}
 
 	var patch struct {
-		Mode           *string   `json:"mode"`
-		StrictMode     *bool     `json:"strict-mode"`
-		SensitiveWords *[]string `json:"sensitive-words"`
+		Mode           *string         `json:"mode"`
+		StrictMode     *bool           `json:"strict-mode"`
+		SensitiveWords *[]string       `json:"sensitive-words"`
+		CacheUserID    json.RawMessage `json:"cache-user-id"`
 	}
 	if err := json.Unmarshal(raw, &patch); err != nil {
 		return err
@@ -215,6 +216,13 @@ func patchClaudeCloak(raw json.RawMessage, dst **config.CloakConfig) error {
 	}
 	if patch.SensitiveWords != nil {
 		next.SensitiveWords = append([]string(nil), *patch.SensitiveWords...)
+	}
+	if len(patch.CacheUserID) > 0 {
+		var cacheUserID *bool
+		if err := json.Unmarshal(patch.CacheUserID, &cacheUserID); err != nil {
+			return fmt.Errorf("cache-user-id must be a boolean or null")
+		}
+		next.CacheUserID = cacheUserID
 	}
 	*dst = &next
 	return nil
@@ -870,6 +878,7 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 				Headers        *map[string]string          `json:"headers"`
 				Models         *[]config.VertexCompatModel `json:"models"`
 				ExcludedModels *[]string                   `json:"excluded-models"`
+				Interactions   json.RawMessage             `json:"interactions"`
 			}
 			if err := json.Unmarshal(raw, &p); err != nil {
 				return err
@@ -894,6 +903,13 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 			setHeaders(p.Headers, &entry.Headers)
 			if p.Models != nil {
 				entry.Models = append([]config.VertexCompatModel(nil), *p.Models...)
+			}
+			if len(p.Interactions) > 0 {
+				var value *bool
+				if err := json.Unmarshal(p.Interactions, &value); err != nil {
+					return fmt.Errorf("interactions must be a boolean or null")
+				}
+				entry.Interactions = value
 			}
 			setExcludedModels(p.ExcludedModels, &entry.ExcludedModels)
 			return nil
@@ -1206,7 +1222,7 @@ func (h *Handler) PutCodexKeys(c *gin.Context)   { putStructList(h, c, codexKeyR
 func (h *Handler) PostCodexKey(c *gin.Context)   { postStructEntry(h, c, codexKeyResource) }
 func (h *Handler) DeleteCodexKey(c *gin.Context) { deleteStructEntry(h, c, codexKeyResource) }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
-	patchStructEntry(h, c, codexKeyResource, patchCodexStyleKey)
+	patchStructEntry(h, c, codexKeyResource, patchCodexKey)
 }
 
 // xai-api-key: []XAIKey
@@ -1219,6 +1235,36 @@ func (h *Handler) PostXAIKey(c *gin.Context)   { postStructEntry(h, c, xaiKeyRes
 func (h *Handler) DeleteXAIKey(c *gin.Context) { deleteStructEntry(h, c, xaiKeyResource) }
 func (h *Handler) PatchXAIKey(c *gin.Context) {
 	patchStructEntry(h, c, xaiKeyResource, patchCodexStyleKey)
+}
+
+func (h *Handler) GetMetaKeys(c *gin.Context) {
+	writeRedactedJSON(c, http.StatusOK, gin.H{"meta-api-key": h.metaKeysWithAuthIndex()})
+}
+func (h *Handler) PutMetaKeys(c *gin.Context)   { putStructList(h, c, metaKeyResource) }
+func (h *Handler) PostMetaKey(c *gin.Context)   { postStructEntry(h, c, metaKeyResource) }
+func (h *Handler) DeleteMetaKey(c *gin.Context) { deleteStructEntry(h, c, metaKeyResource) }
+func (h *Handler) PatchMetaKey(c *gin.Context) {
+	patchStructEntry(h, c, metaKeyResource, patchCodexStyleKey)
+}
+
+func patchCodexKey(entry *config.CodexKey, raw json.RawMessage) error {
+	if err := patchCodexStyleKey(entry, raw); err != nil {
+		return err
+	}
+	var patch struct {
+		DisableCodexCloaking json.RawMessage `json:"disable-codex-cloaking"`
+	}
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		return err
+	}
+	if len(patch.DisableCodexCloaking) > 0 {
+		var value *bool
+		if err := json.Unmarshal(patch.DisableCodexCloaking, &value); err != nil {
+			return fmt.Errorf("disable-codex-cloaking must be a boolean or null")
+		}
+		entry.DisableCodexCloaking = value
+	}
+	return nil
 }
 
 func patchCodexStyleKey(entry *config.CodexKey, raw json.RawMessage) error {
@@ -1317,6 +1363,7 @@ func codexKeyRouteEqual(left, right *config.CodexKey) bool {
 		maps.Equal(left.Headers, right.Headers) &&
 		diff.ComputeExcludedModelsHash(left.ExcludedModels) == diff.ComputeExcludedModelsHash(right.ExcludedModels) &&
 		reflect.DeepEqual(left.DisableCooling, right.DisableCooling) &&
+		reflect.DeepEqual(left.DisableCodexCloaking, right.DisableCodexCloaking) &&
 		reflect.DeepEqual(left.RequestRetry, right.RequestRetry) &&
 		reflect.DeepEqual(left.RequestScopedErrors, right.RequestScopedErrors)
 }
@@ -1430,9 +1477,31 @@ func validateCodexKey(entry *config.CodexKey, existing *config.CodexKey) error {
 	return validateConfigHeaders(entry.Headers, existingHeaders)
 }
 
+func validateMetaKey(entry *config.MetaKey, existing *config.MetaKey) error {
+	if entry == nil {
+		return nil
+	}
+	if entry.DisableCodexCloaking != nil {
+		return fmt.Errorf("disable-codex-cloaking is only supported for codex-api-key")
+	}
+	apiKey := strings.TrimSpace(entry.APIKey)
+	if apiKey == "" || strings.HasPrefix(strings.ToLower(apiKey), "dca:") {
+		return fmt.Errorf("meta API key is required; DCA tokens require OAuth storage")
+	}
+	if proxyURL := strings.TrimSpace(entry.ProxyURL); proxyURL != "" {
+		if err := proxyutil.ValidateProxyURL(proxyURL); err != nil {
+			return fmt.Errorf("invalid proxy-url: %w", err)
+		}
+	}
+	return validateCodexKey(entry, existing)
+}
+
 func validateXAIKey(entry *config.XAIKey, existing *config.XAIKey) error {
 	if entry == nil {
 		return nil
+	}
+	if entry.DisableCodexCloaking != nil {
+		return fmt.Errorf("disable-codex-cloaking is only supported for codex-api-key")
 	}
 	if err := validateResolvedAPIKeyPlaceholder(entry.APIKey); err != nil {
 		return err
@@ -1516,6 +1585,7 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.Cloak = config.NormalizeCloakConfig(entry.Cloak)
 	entry.Models = normalizeModels(
 		entry.Models, func(m *config.ClaudeModel) (*string, *string) {
 			return &m.Name, &m.Alias
@@ -1542,6 +1612,18 @@ func normalizeCodexKey(entry *config.CodexKey) {
 
 func normalizeXAIKey(entry *config.XAIKey) {
 	normalizeCodexKey(entry)
+}
+
+func normalizeMetaKey(entry *config.MetaKey) {
+	if entry == nil {
+		return
+	}
+	normalizeCodexKey(entry)
+	if entry.BaseURL == "" {
+		entry.BaseURL = "https://api.meta.ai/v1"
+	}
+	entry.Websockets = false
+	entry.AlphaSearch = false
 }
 
 func normalizeVertexCompatKey(entry *config.VertexCompatKey) {

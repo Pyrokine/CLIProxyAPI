@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -179,6 +180,63 @@ codex:
 		if !strings.Contains(string(restored), secret) {
 			t.Fatalf("restoreConfigYAMLPlaceholders omitted ICE secret %q: %s", secret, restored)
 		}
+	}
+}
+
+func TestConfigYAMLKeepsConfigAPIKeySchemaWithoutExposingSecrets(t *testing.T) {
+	source := []byte(`auth:
+  providers:
+    config-api-key:
+      api-key-entries:
+        - api-key: synthetic-key-only
+          label: primary
+      private-note: hidden-provider-note
+api-keys:
+  - synthetic-key-only
+plugins:
+  configs:
+    sample:
+      config-api-key:
+        custom-field: hidden-plugin-value
+debug: false
+`)
+	redacted, err := redactConfigYAML(source)
+	if err != nil {
+		t.Fatalf("redactConfigYAML: %v", err)
+	}
+	for _, visible := range []string{"api-key-entries:", "api-key:", "label: primary"} {
+		if !strings.Contains(string(redacted), visible) {
+			t.Fatalf("redactConfigYAML hid schema field %q: %s", visible, redacted)
+		}
+	}
+	for _, secret := range []string{"synthetic-key-only", "private-note", "hidden-provider-note", "custom-field", "hidden-plugin-value"} {
+		if strings.Contains(string(redacted), secret) {
+			t.Fatalf("redactConfigYAML kept secret %q: %s", secret, redacted)
+		}
+	}
+	var config struct {
+		Auth struct {
+			Providers map[string]struct {
+				Entries []struct {
+					APIKey string `yaml:"api-key"`
+				} `yaml:"api-key-entries"`
+			} `yaml:"providers"`
+		} `yaml:"auth"`
+	}
+	if err = yaml.Unmarshal(redacted, &config); err != nil {
+		t.Fatalf("decode redacted YAML: %v", err)
+	}
+	entries := config.Auth.Providers["config-api-key"].Entries
+	if len(entries) != 1 || !strings.HasPrefix(entries[0].APIKey, configYAMLPlaceholderPrefix) {
+		t.Fatalf("redacted API key entries = %#v, want one placeholder", entries)
+	}
+	updated := bytes.Replace(redacted, []byte("debug: false"), []byte("debug: true"), 1)
+	restored, err := restoreConfigYAMLPlaceholders(updated, source)
+	if err != nil {
+		t.Fatalf("restoreConfigYAMLPlaceholders: %v", err)
+	}
+	if !strings.Contains(string(restored), "debug: true") || !strings.Contains(string(restored), "api-key: synthetic-key-only") {
+		t.Fatalf("restored config lost edited setting or API key: %s", restored)
 	}
 }
 

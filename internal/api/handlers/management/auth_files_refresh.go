@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	metaauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/meta"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/gin-gonic/gin"
@@ -18,6 +19,7 @@ import (
 
 const (
 	authFileRefreshTimeout        = 30 * time.Second
+	authFileRefreshBatchTimeout   = 4*time.Minute + 30*time.Second
 	defaultAuthFileRefreshWorkers = 16
 )
 
@@ -68,6 +70,10 @@ func (h *Handler) RefreshAuthFile(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "auth_file_not_found"})
 		return
 	}
+	if isMetaAuthFile(targetAuth) && !metaManualRefreshAvailable(targetAuth) {
+		c.JSON(http.StatusConflict, gin.H{"error": "credential_refresh_unavailable"})
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), authFileRefreshTimeout)
 	defer cancel()
@@ -98,7 +104,7 @@ func (h *Handler) RefreshAuthFile(c *gin.Context) {
 }
 
 func (h *Handler) refreshAllAuthFiles(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), authFileRefreshTimeout)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), authFileRefreshBatchTimeout)
 	defer cancel()
 
 	targets := refreshableAuthFiles(h.authManager.List())
@@ -143,13 +149,41 @@ func (h *Handler) refreshAllAuthFiles(c *gin.Context) {
 	c.JSON(http.StatusOK, authFileRefreshBatchResponse{Results: results})
 }
 
+func isMetaAuthFile(auth *coreauth.Auth) bool {
+	return auth != nil && strings.EqualFold(auth.Provider, "meta")
+}
+
+func metaManualRefreshAvailable(auth *coreauth.Auth) bool {
+	if auth == nil || coreauth.IsConfigAPIKeyAuth(auth) {
+		return false
+	}
+	if strings.TrimSpace(auth.Attributes["dca_token"]) != "" ||
+		strings.HasPrefix(strings.TrimSpace(auth.Attributes["access_token"]), "dca:") {
+		return true
+	}
+	if token, ok := auth.Metadata["dca_token"].(string); ok && strings.TrimSpace(token) != "" {
+		return true
+	}
+	if token, ok := auth.Metadata["access_token"].(string); ok && strings.HasPrefix(strings.TrimSpace(token), "dca:") {
+		return true
+	}
+	if storage, ok := auth.Storage.(*metaauth.MetaTokenStorage); ok && storage != nil {
+		return strings.TrimSpace(storage.DCAToken) != "" || strings.HasPrefix(strings.TrimSpace(storage.AccessToken), "dca:")
+	}
+	return false
+}
+
 func refreshableAuthFiles(auths []*coreauth.Auth) []*coreauth.Auth {
 	targets := make([]*coreauth.Auth, 0, len(auths))
 	for _, auth := range auths {
 		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
 			continue
 		}
-		if auth.Runtime == nil && authFileRefreshCredential(auth) == "" {
+		if isMetaAuthFile(auth) {
+			if !metaManualRefreshAvailable(auth) {
+				continue
+			}
+		} else if auth.Runtime == nil && authFileRefreshCredential(auth) == "" {
 			continue
 		}
 		targets = append(targets, auth)
@@ -202,7 +236,9 @@ func (h *Handler) refreshAuthFileJob(ctx context.Context, auth *coreauth.Auth) a
 			Error:              refreshErrorCode(ctx, errCtx),
 		}
 	}
-	result, errRefresh := h.authManager.ForceRefreshAuth(ctx, auth.ID)
+	jobCtx, cancel := context.WithTimeout(ctx, authFileRefreshTimeout)
+	defer cancel()
+	result, errRefresh := h.authManager.ForceRefreshAuth(jobCtx, auth.ID)
 	if errRefresh == nil {
 		return authFileRefreshBatchItem{ForceRefreshResult: result, Success: true}
 	}
@@ -216,7 +252,7 @@ func (h *Handler) refreshAuthFileJob(ctx context.Context, auth *coreauth.Auth) a
 	}).Warn("bulk credential refresh failed")
 	return authFileRefreshBatchItem{
 		ForceRefreshResult: result,
-		Error:              refreshErrorCode(ctx, errRefresh),
+		Error:              refreshErrorCode(jobCtx, errRefresh),
 	}
 }
 

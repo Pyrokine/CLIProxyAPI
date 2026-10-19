@@ -197,3 +197,110 @@ func TestListAuthFilesUsesNullCooldownsWhenHomeOwnsState(t *testing.T) {
 		t.Fatalf("home cooldowns = %s", payload.Files[0].Cooldowns)
 	}
 }
+
+func TestListAuthFilesReconcilesCooldownWithoutChangingAuthState(t *testing.T) {
+	now := time.Now().UTC()
+	expired := now.Add(-10 * time.Minute)
+	future := now.Add(10 * time.Minute)
+	for _, tc := range []struct {
+		name            string
+		auth            *coreauth.Auth
+		wantStatus      coreauth.Status
+		wantUnavailable bool
+		wantMessage     string
+		wantRetry       bool
+	}{
+		{
+			name: "expired credential quota",
+			auth: &coreauth.Auth{Status: coreauth.StatusError, StatusMessage: "credential_quota", Unavailable: true,
+				NextRetryAfter: expired, Quota: coreauth.QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: expired}},
+			wantStatus: coreauth.StatusActive,
+		},
+		{
+			name: "expired model cooldown",
+			auth: &coreauth.Auth{Status: coreauth.StatusError, StatusMessage: "rate limit exceeded", Unavailable: true,
+				NextRetryAfter: expired, ModelStates: map[string]*coreauth.ModelState{"model": {
+					Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: expired,
+				}}},
+			wantStatus: coreauth.StatusActive,
+		},
+		{
+			name: "expired access token",
+			auth: &coreauth.Auth{Status: coreauth.StatusError, StatusMessage: "token expired", Unavailable: true,
+				NextRetryAfter: expired, Metadata: map[string]any{"type": "codex", "access_token": "expired", "expired": expired.Format(time.RFC3339)}},
+			wantStatus: coreauth.StatusError, wantUnavailable: true, wantMessage: "token expired",
+		},
+		{
+			name: "terminal unauthorized",
+			auth: &coreauth.Auth{Status: coreauth.StatusError, StatusMessage: "unauthorized", Unavailable: true,
+				NextRetryAfter: expired, LastError: &coreauth.Error{HTTPStatus: http.StatusUnauthorized}},
+			wantStatus: coreauth.StatusError, wantUnavailable: true, wantMessage: "unauthorized",
+		},
+		{
+			name: "refresh retry with valid access token",
+			auth: &coreauth.Auth{Status: coreauth.StatusError, StatusMessage: "credential_quota", Unavailable: true,
+				NextRetryAfter: expired, NextRefreshAfter: future, LastError: &coreauth.Error{HTTPStatus: http.StatusUnauthorized},
+				Quota:    coreauth.QuotaState{Exceeded: true, Reason: "credential_quota", NextRecoverAt: expired},
+				Metadata: map[string]any{"type": "codex", "access_token": "valid", "expired": future.Format(time.RFC3339)}},
+			wantStatus: coreauth.StatusActive,
+		},
+		{
+			name: "one model remains schedulable",
+			auth: &coreauth.Auth{Status: coreauth.StatusError, StatusMessage: "model cooldown", Unavailable: true,
+				ModelStates: map[string]*coreauth.ModelState{
+					"cooling": {Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: future},
+					"ready":   {Status: coreauth.StatusActive},
+				}},
+			wantStatus: coreauth.StatusActive,
+		},
+		{
+			name: "all models blocked",
+			auth: &coreauth.Auth{Status: coreauth.StatusError, StatusMessage: "model failure", Unavailable: true,
+				ModelStates: map[string]*coreauth.ModelState{
+					"cooling": {Status: coreauth.StatusError, Unavailable: true, NextRetryAfter: future},
+					"blocked": {Status: coreauth.StatusError, Unavailable: true},
+				}},
+			wantStatus: coreauth.StatusError, wantUnavailable: true, wantMessage: "model failure",
+		},
+		{
+			name:       "active auth with inactive retry timestamp",
+			auth:       &coreauth.Auth{Status: coreauth.StatusActive, NextRetryAfter: future},
+			wantStatus: coreauth.StatusActive,
+		},
+		{
+			name:       "active credential cooldown",
+			auth:       &coreauth.Auth{Status: coreauth.StatusError, StatusMessage: "rate limited", Unavailable: true, NextRetryAfter: future},
+			wantStatus: coreauth.StatusError, wantUnavailable: true, wantMessage: "rate limited", wantRetry: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := coreauth.NewManager(nil, nil, nil)
+			tc.auth.ID, tc.auth.Provider = "credential", "codex"
+			registerCooldownTestAuth(t, manager, tc.auth)
+			before, _ := manager.GetByID(tc.auth.ID)
+			body := requestAuthFileList(t, NewHandlerWithoutConfigFilePath(&config.Config{}, manager))
+			var payload struct {
+				Files []struct {
+					Status         coreauth.Status `json:"status"`
+					StatusMessage  string          `json:"status_message"`
+					Unavailable    bool            `json:"unavailable"`
+					NextRetryAfter *time.Time      `json:"next_retry_after"`
+				} `json:"files"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil || len(payload.Files) != 1 {
+				t.Fatalf("decode auth file response: %v, %s", err, body)
+			}
+			file := payload.Files[0]
+			if file.Status != tc.wantStatus || file.StatusMessage != tc.wantMessage || file.Unavailable != tc.wantUnavailable ||
+				(file.NextRetryAfter != nil) != tc.wantRetry {
+				t.Fatalf("auth file state = %+v, want status=%s, message=%q, unavailable=%t, retry=%t",
+					file, tc.wantStatus, tc.wantMessage, tc.wantUnavailable, tc.wantRetry)
+			}
+			after, _ := manager.GetByID(tc.auth.ID)
+			if after.Status != before.Status || after.Unavailable != before.Unavailable ||
+				!after.NextRetryAfter.Equal(before.NextRetryAfter) {
+				t.Fatalf("listing mutated auth state: before=%+v, after=%+v", before, after)
+			}
+		})
+	}
+}

@@ -253,6 +253,70 @@ func TestPostProviderEntryUsesFullRouteIdentity(t *testing.T) {
 	)
 }
 
+func TestCodexConfigurationUpdateCapabilityMutations(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		support bool
+	}{{"enabled", true}, {"disabled", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newConfigListTestHandler(t, &config.Config{})
+			payload := func(support bool) string {
+				body, err := json.Marshal(map[string]any{
+					"api-key": "test-codex-key", "base-url": "https://codex.example/v1",
+					"models": []map[string]any{{
+						"name": "model", "alias": "alias", "support-configuration-update": support,
+					}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(body)
+			}
+			assertCapabilities := func(want ...bool) {
+				t.Helper()
+				recorder := runConfigListRequest(h.GetCodexKeys, http.MethodGet, "/codex-api-key", "")
+				var response map[string][]config.CodexKey
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("GET status = %d: %s", recorder.Code, recorder.Body.String())
+				}
+				if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				entries := response["codex-api-key"]
+				if len(entries) != len(want) {
+					t.Fatalf("GET entries = %d, want %d", len(entries), len(want))
+				}
+				for i, support := range want {
+					if len(entries[i].Models) != 1 || entries[i].Models[0].SupportConfigurationUpdate != support {
+						t.Fatalf("GET entry %d models = %+v, want capability %t", i, entries[i].Models, support)
+					}
+				}
+			}
+			recorder := runConfigListRequest(h.PutCodexKeys, http.MethodPut, "/codex-api-key", "["+payload(tc.support)+"]")
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("PUT status = %d: %s", recorder.Code, recorder.Body.String())
+			}
+			assertCapabilities(tc.support)
+			recorder = runConfigListRequest(h.PatchCodexKey, http.MethodPatch, "/codex-api-key",
+				`{"index":0,"value":`+payload(!tc.support)+`}`)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("PATCH status = %d: %s", recorder.Code, recorder.Body.String())
+			}
+			assertCapabilities(!tc.support)
+			recorder = runConfigListRequest(h.PostCodexKey, http.MethodPost, "/codex-api-key", payload(tc.support))
+			if recorder.Code != http.StatusCreated {
+				t.Fatalf("POST distinct capability status = %d, want 201: %s", recorder.Code, recorder.Body.String())
+			}
+			assertCapabilities(!tc.support, tc.support)
+			recorder = runConfigListRequest(h.PostCodexKey, http.MethodPost, "/codex-api-key", payload(tc.support))
+			if recorder.Code != http.StatusConflict {
+				t.Fatalf("POST duplicate capability status = %d, want 409: %s", recorder.Code, recorder.Body.String())
+			}
+			assertCapabilities(!tc.support, tc.support)
+		})
+	}
+}
+
 func TestPostProviderEntryNormalizesPrefixBeforeDuplicateCheck(t *testing.T) {
 	t.Run(
 		"claude", func(t *testing.T) {

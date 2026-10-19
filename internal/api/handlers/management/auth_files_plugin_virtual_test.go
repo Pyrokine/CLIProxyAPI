@@ -10,7 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/pluginhost"
@@ -181,6 +183,73 @@ func TestPatchAuthFileStatusUpdatesPluginVirtualSource(t *testing.T) {
 	}
 	if hookCalls != 4 {
 		t.Fatalf("post-persist hook calls = %d, want 4", hookCalls)
+	}
+}
+
+func TestPatchPluginVirtualStatusDoesNotBlockOtherAuths(t *testing.T) {
+	handler, manager, _, _, _ := newPluginVirtualManagementHandler(t)
+	if _, err := manager.Register(coreauth.WithSkipPersist(t.Context()), &coreauth.Auth{
+		ID: "ordinary.json", FileName: "ordinary.json", Provider: "qwen", Status: coreauth.StatusActive,
+		Metadata: map[string]any{"type": "qwen"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	handler.SetPostAuthPersistHook(func(_ context.Context, auth *coreauth.Auth) error {
+		if auth.ID == "plugin-a" && auth.Disabled {
+			close(started)
+			<-release
+		}
+		return nil
+	})
+	pluginDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		pluginDone <- patchPluginVirtualStatus(t, handler, `{"name":"plugin-source.json","disabled":true}`)
+	}()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("plugin runtime hook did not start")
+	}
+	ordinaryDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		ordinaryDone <- runConfigListRequest(handler.PatchAuthFileStatus, http.MethodPatch,
+			"/auth-files/status", `{"name":"ordinary.json","disabled":true}`)
+	}()
+	select {
+	case response := <-ordinaryDone:
+		if response.Code != http.StatusOK {
+			t.Fatalf("ordinary status = %d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("plugin runtime hook blocked an unrelated status update")
+	}
+	secondPluginDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		secondPluginDone <- patchPluginVirtualStatus(t, handler, `{"name":"plugin-source.json","disabled":false}`)
+	}()
+	select {
+	case <-secondPluginDone:
+		t.Fatal("second update bypassed the plugin source transaction")
+	case <-time.After(50 * time.Millisecond):
+	}
+	releaseOnce.Do(func() { close(release) })
+	for _, done := range []<-chan *httptest.ResponseRecorder{pluginDone, secondPluginDone} {
+		select {
+		case response := <-done:
+			if response.Code != http.StatusOK {
+				t.Fatalf("plugin status = %d body=%s", response.Code, response.Body.String())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("plugin status did not complete after runtime hook")
+		}
+	}
+	current, ok := manager.GetByID("plugin-a")
+	if !ok || current.Disabled {
+		t.Fatalf("latest plugin status was not applied: %#v", current)
 	}
 }
 
@@ -433,5 +502,68 @@ func TestDeleteAuthFileRemovesPluginVirtualSourceAndChildren(t *testing.T) {
 		if auth, ok := manager.GetByID(id); ok || auth != nil {
 			t.Fatalf("auth %s still registered: %#v", id, auth)
 		}
+	}
+}
+
+func TestDeletePluginVirtualSourceNameCollision(t *testing.T) {
+	for _, mode := range []string{"single", "batch"} {
+		t.Run(mode, func(t *testing.T) {
+			authDir := t.TempDir()
+			sourcePath := filepath.Join(authDir, "plugin-a.json")
+			raw := []byte(`{"type":"plugin-provider","accounts":[{"id":"a.json"},{"id":"b"}]}`)
+			if err := os.WriteFile(sourcePath, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			host := &pluginVirtualManagementHost{}
+			parseCtx := sdkAuth.WithPluginAuthParser(context.Background(), host)
+			auths, handled, err := sdkAuth.ParsePluginAuthFiles(parseCtx, "plugin-provider", sourcePath, "plugin-a.json", raw)
+			if err != nil || !handled || len(auths) != 2 {
+				t.Fatalf("ParsePluginAuthFiles() handled=%t len=%d err=%v", handled, len(auths), err)
+			}
+			store := sdkAuth.NewFileTokenStore()
+			store.SetBaseDir(authDir)
+			manager := coreauth.NewManager(store, nil, nil)
+			for _, auth := range auths {
+				if _, err := manager.Register(coreauth.WithSkipPersist(context.Background()), auth); err != nil {
+					t.Fatal(err)
+				}
+			}
+			handler := NewHandler(&config.Config{AuthDir: authDir}, "", manager, withTokenStore(store))
+			handler.pluginHost = host
+			t.Cleanup(func() { _ = handler.Close() })
+			child, ok := manager.GetByID("plugin-a.json")
+			if !ok || child == nil || child.FileName != "plugin-a.json" || !coreauth.IsPluginVirtualAuth(child) {
+				t.Fatalf("virtual source identity = %#v", child)
+			}
+			blocked := httptest.NewRecorder()
+			blockedCtx, _ := gin.CreateTestContext(blocked)
+			blockedCtx.Request = httptest.NewRequest(http.MethodDelete,
+				"/v0/management/auth-files?name=plugin-a.json&auth_index="+url.QueryEscape(child.EnsureIndex()), nil)
+			handler.DeleteAuthFile(blockedCtx)
+			if blocked.Code != http.StatusConflict {
+				t.Fatalf("indexed virtual child delete status=%d body=%s", blocked.Code, blocked.Body.String())
+			}
+			if _, err := os.Stat(sourcePath); err != nil || len(manager.List()) != 2 {
+				t.Fatalf("blocked deletion changed the source: stat=%v auths=%d", err, len(manager.List()))
+			}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			if mode == "single" {
+				ctx.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?name=plugin-a.json", nil)
+			} else {
+				ctx.Request = httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files", strings.NewReader(`{"names":["plugin-a.json"]}`))
+				ctx.Request.Header.Set("Content-Type", "application/json")
+			}
+			handler.DeleteAuthFile(ctx)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("source delete status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			if _, err := os.Stat(sourcePath); !os.IsNotExist(err) {
+				t.Fatalf("deleted source stat error=%v", err)
+			}
+			if auths := manager.List(); len(auths) != 0 {
+				t.Fatalf("source deletion retained runtime identities: %#v", auths)
+			}
+		})
 	}
 }

@@ -366,6 +366,54 @@ func TestPluginQuotaEndpointsAndPluginListExposeCapability(t *testing.T) {
 	}
 }
 
+func TestListAuthFilesAdvertisesQuotaWithoutExposingProbeConfiguration(t *testing.T) {
+	host := &managementQuotaHost{pluginID: "quota-plugin", provider: "quota-provider"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	for _, auth := range []*coreauth.Auth{
+		{ID: "plugin", FileName: "plugin.json", Provider: "quota-provider", Attributes: map[string]string{"runtime_only": "true"}},
+		{ID: "probe", FileName: "probe.json", Provider: "probe-provider", Attributes: map[string]string{"runtime_only": "true"},
+			Metadata: map[string]any{pluginapi.QuotaProbeMetadataKey: map[string]any{"url": "https://quota.example.test/usage"}}},
+		{ID: "plain", FileName: "plain.json", Provider: "plain-provider", Attributes: map[string]string{"runtime_only": "true"}},
+	} {
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register %s: %v", auth.ID, err)
+		}
+	}
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	handler.pluginHost = host
+	ctx, recorder := quotaTestContext(http.MethodGet, "/auth-files", "")
+	handler.ListAuthFiles(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("list status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var result struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode auth files: %v", err)
+	}
+	if len(result.Files) != 3 || host.fetchCalls != 0 || host.resetCalls != 0 {
+		t.Fatalf("files=%d fetch=%d reset=%d", len(result.Files), host.fetchCalls, host.resetCalls)
+	}
+	byName := make(map[string]map[string]any, len(result.Files))
+	for _, file := range result.Files {
+		name, _ := file["name"].(string)
+		byName[name] = file
+		if _, exposed := file["quota_probe"]; exposed {
+			t.Fatalf("%s exposed quota probe configuration", name)
+		}
+	}
+	if byName["plugin.json"]["supports_quota"] != true || byName["plugin.json"]["quota_provider"] != "quota-provider" {
+		t.Fatalf("plugin file = %#v", byName["plugin.json"])
+	}
+	if byName["probe.json"]["supports_quota"] != true || byName["probe.json"]["quota_provider"] != nil {
+		t.Fatalf("probe file = %#v", byName["probe.json"])
+	}
+	if byName["plain.json"]["supports_quota"] != nil {
+		t.Fatalf("plain file = %#v", byName["plain.json"])
+	}
+}
+
 func TestNormalizeQuotaProbeResponsePreservesUnknownNumericFields(t *testing.T) {
 	response, errNormalize := normalizeQuotaProbeResponse([]byte(`{
 		"subscription":{"tier_name":"Team"},

@@ -52,6 +52,24 @@ func TestGitHubGetUsesOnlyGitHubTokenForGitHubAPI(t *testing.T) {
 			requestURL:  "https://api.github.com:8443/releases",
 			gitHubToken: "github-token",
 		},
+		{
+			name:          "explicit HTTPS port receives GitHub token",
+			requestURL:    "https://api.github.com:443/releases",
+			gitHubToken:   "github-token",
+			wantAuthorize: "Bearer github-token",
+		},
+		{
+			name:          "userinfo uses only URL credentials",
+			requestURL:    "https://user@api.github.com/releases",
+			gitHubToken:   "github-token",
+			wantAuthorize: "Basic dXNlcjo=",
+		},
+		{
+			name:          "username and password use only URL credentials",
+			requestURL:    "https://user:pass@api.github.com/releases",
+			gitHubToken:   "github-token",
+			wantAuthorize: "Basic dXNlcjpwYXNz",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

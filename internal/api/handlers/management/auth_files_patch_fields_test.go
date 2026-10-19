@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -212,6 +213,53 @@ func TestPatchAuthFileFieldsUpdatesWebsockets(t *testing.T) {
 	}
 }
 
+func TestPatchAuthFileFieldsPreservesFilePrioritySource(t *testing.T) {
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "plugin.json",
+		FileName: "plugin.json",
+		Provider: "plugin",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{"type": "plugin"},
+		Attributes: map[string]string{
+			coreauth.AttributeSourceBackend: coreauth.AuthSourceFile,
+		},
+	}
+	if _, err := manager.Register(t.Context(), auth); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{authManager: manager}
+	for _, tc := range []struct {
+		priority      int
+		wantInherited bool
+	}{
+		{priority: 7, wantInherited: true},
+		{priority: 0, wantInherited: false},
+	} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPatch, "/auth-files/fields", bytes.NewBufferString(
+			fmt.Sprintf(`{"name":"plugin.json","priority":%d}`, tc.priority),
+		))
+		c.Request.Header.Set("Content-Type", "application/json")
+		h.PatchAuthFileFields(c)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("priority=%d: status=%d body=%s", tc.priority, recorder.Code, recorder.Body.String())
+		}
+		updated, ok := manager.GetByID(auth.ID)
+		if !ok || updated == nil || (updated.Attributes[coreauth.AttributeFilePriority] == "true") != tc.wantInherited {
+			t.Fatalf("priority=%d: published auth=%#v", tc.priority, updated)
+		}
+		store.mu.Lock()
+		persisted := store.items[auth.ID]
+		store.mu.Unlock()
+		if persisted == nil || (persisted.Attributes[coreauth.AttributeFilePriority] == "true") != tc.wantInherited {
+			t.Fatalf("priority=%d: persisted auth=%#v", tc.priority, persisted)
+		}
+	}
+}
+
 func TestPatchAuthFileFieldsUpdatesHeadersAndNote(t *testing.T) {
 	manager := coreauth.NewManager(nil, nil, nil)
 	auth := &coreauth.Auth{
@@ -399,5 +447,110 @@ func TestPatchAPIKeyAliasAcceptsValidKey(t *testing.T) {
 	}
 	if h.cfg.APIKeyAliases["sk-valid123"] != "valid_alias" {
 		t.Fatalf("alias not stored: %#v", h.cfg.APIKeyAliases)
+	}
+}
+
+func TestPatchAuthFileFieldsPreservesUnchangedRequestRules(t *testing.T) {
+	const valid = `{"status":429,"action":"continue","match":["limit"],"future":{"enabled":true}}`
+	for _, field := range []string{"request_scoped_errors", "request-scoped-errors"} {
+		for _, test := range []struct {
+			name, original, requested string
+			wantOK                    bool
+		}{
+			{"unchanged inert rows and new rule", `[{}, {"status":0,"action":"legacy","match":[""]}]`, `[{}, {"match":[""],"action":"legacy","status":0}, ` + valid + `]`, true},
+			{"reordered inert rows", `[{}, {"status":0,"action":"legacy"}]`, `[{"action":"legacy","status":0}, ` + valid + `, {}]`, true},
+			{"duplicate original rows", `[{}, {}]`, `[{}, ` + valid + `, {}]`, true},
+			{"new duplicate inert row", `[{}]`, `[{}, {}, ` + valid + `]`, false},
+			{"new inert row", `[]`, `[{}, ` + valid + `]`, false},
+			{"changed inert row", `[{}]`, `[{"status":503}, ` + valid + `]`, false},
+			{"new invalid regex", `[]`, `[{"status":429,"action":"continue","match-regexr":["["]}]`, false},
+			{"new empty match", `[]`, `[{"status":429,"action":"continue","match":[""]}]`, false},
+			{"literal whitespace match", `[]`, `[{"status":429,"action":"continue","match":[" "]}]`, true},
+			{"literal whitespace regex", `[]`, `[{"status":429,"action":"continue","match-regexr":[" "]}]`, true},
+			{"normalized action spelling", `[]`, `[{"status":429,"action":" CONTINUE ","match":["limit"]}]`, true},
+			{"unknown action", `[]`, `[{"status":429,"action":"future","match":["limit"]}]`, false},
+			{"replaced opaque policy", `{"future":true}`, `[` + valid + `]`, true},
+			{"clear opaque policy", `{"future":true}`, `[]`, true},
+			{"clear legacy rules", `[{}, {"status":0}]`, `[]`, true},
+			{"null row", `[null]`, `[null, ` + valid + `]`, false},
+		} {
+			t.Run(field+"/"+test.name, func(t *testing.T) {
+				store := &memoryAuthStore{}
+				manager := coreauth.NewManager(store, nil, nil)
+				var original any
+				if err := json.Unmarshal([]byte(test.original), &original); err != nil {
+					t.Fatal(err)
+				}
+				metadata := map[string]any{field: original, "fixture_extension": "preserved"}
+				auth := &coreauth.Auth{ID: "fixture-rules", Provider: "codex", FileName: "fixture.json", Status: coreauth.StatusActive, Metadata: metadata}
+				if _, err := manager.Register(context.Background(), auth); err != nil {
+					t.Fatal(err)
+				}
+				initial, ok := manager.GetByID(auth.ID)
+				if !ok {
+					t.Fatal("registered credential missing")
+				}
+				originalJSON, err := json.Marshal(initial.Metadata)
+				if err != nil {
+					t.Fatal(err)
+				}
+				published := 0
+				h := &Handler{authManager: manager, postAuthPersistHook: func(context.Context, *coreauth.Auth) error {
+					published++
+					return nil
+				}}
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodPatch, "/auth-files/fields", bytes.NewBufferString(
+					fmt.Sprintf(`{"name":"fixture.json","auth-index":"fixture-rules",%q:%s}`, field, test.requested),
+				))
+				c.Request.Header.Set("Content-Type", "application/json")
+				h.PatchAuthFileFields(c)
+				wantStatus := http.StatusBadRequest
+				if test.wantOK {
+					wantStatus = http.StatusOK
+				}
+				if recorder.Code != wantStatus {
+					t.Fatalf("status=%d, want %d; response=%s", recorder.Code, wantStatus, recorder.Body.String())
+				}
+				updated, ok := manager.GetByID(auth.ID)
+				if !ok {
+					t.Fatal("updated credential missing")
+				}
+				store.mu.Lock()
+				persisted := store.items[auth.ID]
+				store.mu.Unlock()
+				for name, record := range map[string]*coreauth.Auth{"runtime": updated, "persisted": persisted} {
+					if record == nil {
+						t.Fatalf("%s credential missing", name)
+					}
+					actual, errMarshal := json.Marshal(record.Metadata)
+					if errMarshal != nil {
+						t.Fatal(errMarshal)
+					}
+					if !test.wantOK {
+						if !bytes.Equal(actual, originalJSON) || published != 0 {
+							t.Fatalf("rejected request changed %s state: %s; publications=%d", name, actual, published)
+						}
+						continue
+					}
+					var requested []any
+					if err = json.Unmarshal([]byte(test.requested), &requested); err != nil {
+						t.Fatal(err)
+					}
+					expected := map[string]any{"fixture_extension": "preserved"}
+					if len(requested) > 0 {
+						expected["request_scoped_errors"] = requested
+					}
+					wanted, errMarshal := json.Marshal(expected)
+					if errMarshal != nil {
+						t.Fatal(errMarshal)
+					}
+					if !bytes.Equal(actual, wanted) || published != 1 {
+						t.Fatalf("%s rules=%s, want %s; publications=%d", name, actual, wanted, published)
+					}
+				}
+			})
+		}
 	}
 }
