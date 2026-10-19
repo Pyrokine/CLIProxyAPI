@@ -307,7 +307,8 @@ func appendAntigravityPartToInteractionsStream(
 		delta := []byte(`{"index":0,"delta":{"text":"","type":"text"},"event_type":"step.delta"}`)
 		delta, _ = sjson.SetBytes(delta, "index", st.ActiveStepIndex)
 		delta, _ = sjson.SetBytes(delta, "delta.text", text.String())
-		return append(out, translatorcommon.SSEEventData("step.delta", delta))
+		out = append(out, translatorcommon.SSEEventData("step.delta", delta))
+		return appendAntigravityThoughtSignature(out, st, part)
 	}
 	if fc := part.Get("functionCall"); fc.Exists() {
 		out = appendAntigravityThoughtSignature(out, st, part)
@@ -394,18 +395,19 @@ func antigravityPartToInteractionsStep(part gjson.Result) []byte {
 		}
 		return step
 	}
-	if signature := antigravityThoughtSignature(part); signature != "" {
-		step := []byte(`{"type":"thought","content":[]}`)
-		step, _ = sjson.SetBytes(step, "signature", signature)
-		return step
-	}
+	var step []byte
 	if inline := part.Get("inlineData"); inline.Exists() {
-		return antigravityInlineDataToInteractionsStep(inline)
+		step = antigravityInlineDataToInteractionsStep(inline)
+	} else if inline := part.Get("inline_data"); inline.Exists() {
+		step = antigravityInlineDataToInteractionsStep(inline)
 	}
-	if inline := part.Get("inline_data"); inline.Exists() {
-		return antigravityInlineDataToInteractionsStep(inline)
+	if signature := antigravityThoughtSignature(part); signature != "" {
+		if len(step) == 0 {
+			step = []byte(`{"type":"thought","content":[]}`)
+		}
+		step, _ = sjson.SetBytes(step, "signature", signature)
 	}
-	return nil
+	return step
 }
 
 func antigravityInlineDataToInteractionsStep(inline gjson.Result) []byte {
@@ -556,7 +558,7 @@ func antigravityThoughtSignature(part gjson.Result) string {
 	if part.Get("functionCall").Exists() {
 		blockKind = sigcompat.BlockKindGeminiFunctionCall
 	}
-	for _, path := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature"} {
+	for _, path := range []string{"thoughtSignature", "thought_signature", "extra_content.google.thought_signature", "signature"} {
 		rawSignature := strings.TrimSpace(part.Get(path).String())
 		if rawSignature == "" {
 			continue

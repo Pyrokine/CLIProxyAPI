@@ -10,6 +10,7 @@ import (
 	antigravitychat "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/antigravity/openai/chat-completions"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	"github.com/tidwall/gjson"
 )
 
@@ -49,8 +50,13 @@ func buildRequestBodyFromRawPayload(t *testing.T, modelName string, payload []by
 
 	executor := &AntigravityExecutor{}
 	auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "test-project"}}
+	payload, err := executor.prepareAntigravityRequestPayload(context.Background(), auth,
+		cliproxyexecutor.Request{Model: modelName}, cliproxyexecutor.Options{}, payload, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
 	req, err := executor.buildRequest(
-		context.Background(), auth, "token", modelName, payload, false, "", "https://example.com",
+		context.Background(), auth, "token", payload, false, "", "https://example.com",
 	)
 	if err != nil {
 		t.Fatalf("buildRequest error: %v", err)
@@ -559,6 +565,33 @@ func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T
 					}
 				},
 			)
+		}
+	}
+}
+
+func TestSanitizeAntigravityRequestSchemasNormalizesTrueBooleanSubschemas(t *testing.T) {
+	payload := `{"request":{"tools":[{"functionDeclarations":[{"name":"t","parametersJsonSchema":{
+		"type":"object","properties":{
+			"flag":true,"disabled":false,
+			"nested":{"type":"object","properties":{"flag":true}},
+			"tags":{"type":"array","items":true},
+			"variants":{"anyOf":[true,{"type":"string"}]},
+			"large":9007199254740993
+		},"additionalProperties":true
+	}}]}]}}`
+	for _, useAntigravitySchema := range []bool{false, true} {
+		output := sanitizeAntigravityRequestSchemas(payload, useAntigravitySchema)
+		params := gjson.Get(output, "request.tools.0.functionDeclarations.0.parameters")
+		for _, path := range []string{"properties.flag", "properties.nested.properties.flag", "properties.tags.items"} {
+			if got := params.Get(path); !got.IsObject() || got.Raw != "{}" {
+				t.Errorf("antigravity=%t: %s = %s, want {}; output=%s", useAntigravitySchema, path, got.Raw, output)
+			}
+		}
+		if got := params.Get("properties.disabled"); got.Type != gjson.False {
+			t.Errorf("antigravity=%t: false schema changed: %s", useAntigravitySchema, got.Raw)
+		}
+		if got := params.Get("properties.large"); got.Raw != "9007199254740993" {
+			t.Errorf("antigravity=%t: large integer changed: %s", useAntigravitySchema, got.Raw)
 		}
 	}
 }

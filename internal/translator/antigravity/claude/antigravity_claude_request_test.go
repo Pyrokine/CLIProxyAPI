@@ -1968,24 +1968,22 @@ func TestConvertClaudeRequestToAntigravityAlignsOnlyMatchedParallelResultSlots(t
 	}`)
 
 	out := convertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
-	parts := gjson.GetBytes(out, "request.contents.1.parts").Array()
-	if len(parts) != 5 {
-		t.Fatalf("result parts count = %d, want 5; output=%s", len(parts), out)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want model, results, user text; output=%s", len(contents), out)
 	}
-	if got := parts[0].Get("text").String(); got != "keep-first" {
-		t.Fatalf("text slot moved or changed: %q; output=%s", got, out)
+	parts := contents[1].Get("parts").Array()
+	if len(parts) != 3 {
+		t.Fatalf("result parts count = %d, want 3; output=%s", len(parts), out)
 	}
-	if got := parts[1].Get("functionResponse.id").String(); got != "call_a" {
-		t.Fatalf("first matched result = %q, want call_a; output=%s", got, out)
+	for index, id := range []string{"call_a", "unmatched", "call_b"} {
+		if got := parts[index].Get("functionResponse.id").String(); got != id {
+			t.Fatalf("result %d = %q, want %q; output=%s", index, got, id, out)
+		}
 	}
-	if got := parts[2].Get("inlineData.data").String(); got != "IMAGE" {
-		t.Fatalf("image slot moved or changed: %q; output=%s", got, out)
-	}
-	if got := parts[3].Get("functionResponse.id").String(); got != "unmatched" {
-		t.Fatalf("unmatched result slot moved or changed: %q; output=%s", got, out)
-	}
-	if got := parts[4].Get("functionResponse.id").String(); got != "call_b" {
-		t.Fatalf("second matched result = %q, want call_b; output=%s", got, out)
+	userParts := contents[2].Get("parts").Array()
+	if len(userParts) != 2 || userParts[0].Get("text").String() != "keep-first" || userParts[1].Get("inlineData.data").String() != "IMAGE" {
+		t.Fatalf("user text and image changed: %s", contents[2].Raw)
 	}
 }
 
@@ -2007,24 +2005,26 @@ func TestConvertClaudeRequestToAntigravityDeduplicatesRawToolResultIDs(t *testin
 	}`)
 
 	out := convertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
-	parts := gjson.GetBytes(out, "request.contents.1.parts").Array()
-	if len(parts) != 4 {
-		t.Fatalf("deduplicated parts count = %d, want 4; output=%s", len(parts), out)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want model, results, user text; output=%s", len(contents), out)
 	}
-	if got := parts[0].Get("text").String(); got != "keep-first" {
-		t.Fatalf("text slot moved or changed: %q; output=%s", got, out)
+	parts := contents[1].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("deduplicated result count = %d, want 2; output=%s", len(parts), out)
 	}
-	if got := parts[1].Get("functionResponse.id").String(); got != "call.a" {
+	if got := parts[0].Get("functionResponse.id").String(); got != "call.a" {
 		t.Fatalf("first raw result ID = %q, want call.a; output=%s", got, out)
 	}
-	if got := parts[1].Get("functionResponse.response.result").String(); got != "new" {
+	if got := parts[0].Get("functionResponse.response.result").String(); got != "new" {
 		t.Fatalf("deduplicated result = %q, want new; output=%s", got, out)
 	}
-	if got := parts[2].Get("inlineData.data").String(); got != "IMAGE" {
-		t.Fatalf("image slot moved or changed: %q; output=%s", got, out)
-	}
-	if got := parts[3].Get("functionResponse.id").String(); got != "call_a" {
+	if got := parts[1].Get("functionResponse.id").String(); got != "call_a" {
 		t.Fatalf("distinct raw result ID = %q, want call_a; output=%s", got, out)
+	}
+	userParts := contents[2].Get("parts").Array()
+	if len(userParts) != 2 || userParts[0].Get("text").String() != "keep-first" || userParts[1].Get("inlineData.data").String() != "IMAGE" {
+		t.Fatalf("user text and image changed: %s", contents[2].Raw)
 	}
 }
 
@@ -2044,18 +2044,22 @@ func TestConvertClaudeRequestToAntigravityKeepsPendingResultsAcrossDeveloperMess
 	}`)
 
 	out := convertClaudeRequestToAntigravity("claude-sonnet-4-5", input, false)
-	parts := gjson.GetBytes(out, "request.contents.1.parts").Array()
-	if len(parts) != 3 {
-		t.Fatalf("merged developer/result parts count = %d, want 3; output=%s", len(parts), out)
+	contents := gjson.GetBytes(out, "request.contents").Array()
+	if len(contents) != 3 {
+		t.Fatalf("contents count = %d, want model, results, reminder; output=%s", len(contents), out)
 	}
-	if !strings.Contains(parts[0].Get("text").String(), "permission notice") {
-		t.Fatalf("developer notice missing; output=%s", out)
+	parts := contents[1].Get("parts").Array()
+	if len(parts) != 2 {
+		t.Fatalf("results count = %d, want 2; output=%s", len(parts), out)
 	}
-	if got := parts[1].Get("functionResponse.id").String(); got != "call_a" {
+	if got := parts[0].Get("functionResponse.id").String(); got != "call_a" {
 		t.Fatalf("first result = %q, want call_a; output=%s", got, out)
 	}
-	if got := parts[2].Get("functionResponse.id").String(); got != "call_b" {
+	if got := parts[1].Get("functionResponse.id").String(); got != "call_b" {
 		t.Fatalf("second result = %q, want call_b; output=%s", got, out)
+	}
+	if !strings.Contains(contents[2].Get("parts.0.text").String(), "permission notice") {
+		t.Fatalf("developer notice missing: %s", contents[2].Raw)
 	}
 }
 

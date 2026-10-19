@@ -102,11 +102,37 @@ func mapClaudeFunctionNameToAntigravity(functionNameMap map[string]string, name 
 
 // convertClaudeRequestToAntigravity converts a Claude request to the Gemini CLI request schema.
 // It maps system instructions, messages, tools, and generation settings; stream is currently unused.
-func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
+func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
+	out, _ := convertClaudeRequestToAntigravityChecked(modelName, inputRawJSON, stream)
+	return out
+}
+
+func convertClaudeRequestToAntigravityChecked(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
 	enableThoughtTranslate := true
+	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
 	if shouldBuildAntigravityWebSearchRequest(modelName, rawJSON) {
-		return buildAntigravityWebSearchRequest(modelName, rawJSON)
+		for _, message := range gjson.GetBytes(rawJSON, "messages").Array() {
+			if message.Get("role").String() != "user" {
+				continue
+			}
+			sendable := 0
+			for _, part := range message.Get("content").Array() {
+				switch part.Get("type").String() {
+				case "text":
+					if part.Get("text").String() != "" {
+						sendable++
+					}
+				case "image", "document", "container_upload", "input_audio":
+					drops.Drop(part.Get("type").String())
+				}
+			}
+			drops.EndTurn(sendable)
+		}
+		if err := drops.Err(); err != nil {
+			return nil, err
+		}
+		return buildAntigravityWebSearchRequest(modelName, rawJSON), nil
 	}
 	functionNameMap := util.SanitizedFunctionNameMap(rawJSON)
 
@@ -536,12 +562,12 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								}
 
 								if nonImageCount == 1 {
-									functionResponseJSON, _ = sjson.SetRawBytes(
-										functionResponseJSON, "response.result", []byte(lastNonImageRaw),
+									functionResponseJSON = translatorcommon.SetGeminiFunctionResponseRaw(
+										functionResponseJSON, "response.result", lastNonImageRaw,
 									)
 								} else if nonImageCount > 1 {
-									functionResponseJSON, _ = sjson.SetRawBytes(
-										functionResponseJSON, "response.result", filteredJSON,
+									functionResponseJSON = translatorcommon.SetGeminiFunctionResponseRaw(
+										functionResponseJSON, "response.result", string(filteredJSON),
 									)
 								} else {
 									functionResponseJSON, _ = sjson.SetBytes(
@@ -579,13 +605,13 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 										functionResponseJSON, "response.result", "",
 									)
 								} else {
-									functionResponseJSON, _ = sjson.SetRawBytes(
-										functionResponseJSON, "response.result", []byte(functionResponseResult.Raw),
+									functionResponseJSON = translatorcommon.SetGeminiFunctionResponseResult(
+										functionResponseJSON, "response.result", functionResponseResult,
 									)
 								}
 							} else if functionResponseResult.Raw != "" {
-								functionResponseJSON, _ = sjson.SetRawBytes(
-									functionResponseJSON, "response.result", []byte(functionResponseResult.Raw),
+								functionResponseJSON = translatorcommon.SetGeminiFunctionResponseResult(
+									functionResponseJSON, "response.result", functionResponseResult,
 								)
 							} else {
 								// A missing content field leaves Raw empty, which causes
@@ -597,21 +623,22 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							partJSON, _ = sjson.SetRawBytes(partJSON, "functionResponse", functionResponseJSON)
 							partItems = append(partItems, partJSON)
 						}
-					} else if contentTypeResult.Type == gjson.String && contentTypeResult.String() == "image" {
+					} else if contentTypeResult.Type == gjson.String &&
+						(contentTypeResult.String() == "image" || contentTypeResult.String() == "document" ||
+							contentTypeResult.String() == "container_upload") {
 						sourceResult := contentResult.Get("source")
-						if sourceResult.Get("type").String() == "base64" {
-							inlineDataJSON := []byte(`{}`)
-							if mimeType := sourceResult.Get("media_type").String(); mimeType != "" {
-								inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "mimeType", mimeType)
-							}
-							if data := sourceResult.Get("data").String(); data != "" {
-								inlineDataJSON, _ = sjson.SetBytes(inlineDataJSON, "data", data)
-							}
-
-							partJSON := []byte(`{}`)
-							partJSON, _ = sjson.SetRawBytes(partJSON, "inlineData", inlineDataJSON)
+						mimeType := sourceResult.Get("media_type").String()
+						data := sourceResult.Get("data").String()
+						if sourceResult.Get("type").String() == "base64" && mimeType != "" && data != "" {
+							partJSON := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
+							partJSON, _ = sjson.SetBytes(partJSON, "inlineData.mimeType", mimeType)
+							partJSON, _ = sjson.SetBytes(partJSON, "inlineData.data", data)
 							partItems = append(partItems, partJSON)
+						} else if originalRole == "user" {
+							drops.Drop(contentTypeResult.String())
 						}
+					} else if contentTypeResult.String() == "input_audio" && originalRole == "user" {
+						drops.Drop("input_audio")
 					}
 				}
 
@@ -620,6 +647,9 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					clearPendingDetachedSignature()
 				}
 
+				if originalRole == "user" {
+					drops.EndTurn(translatorcommon.CountSendableGeminiParts(partItems))
+				}
 				if len(partItems) == 0 {
 					continue
 				}
@@ -782,7 +812,12 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		for _, content := range contentResults {
 			contentItems = append(contentItems, []byte(content.Raw))
 		}
-		contentsJSON = translatorcommon.JoinRawArray(translatorcommon.MergeAdjacentGeminiContents(contentItems))
+		if util.IsClaudeModel(modelName) {
+			contentItems = translatorcommon.SplitGeminiFunctionResponseTurns(contentItems)
+			contentsJSON = translatorcommon.JoinRawArray(translatorcommon.MergeAdjacentGeminiUserContents(contentItems))
+		} else {
+			contentsJSON = translatorcommon.JoinRawArray(translatorcommon.MergeAdjacentGeminiContents(contentItems))
+		}
 		out, _ = sjson.SetRawBytes(out, "request.contents", contentsJSON)
 	}
 	if toolDeclCount > 0 && !isToolChoiceNone {
@@ -853,5 +888,8 @@ func convertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out = signature.SanitizeGeminiRequestThoughtSignatures(out, "request.contents")
 	}
 
-	return out
+	if err := drops.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

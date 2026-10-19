@@ -86,6 +86,40 @@ func TestConvertOpenAIRequestToAntigravityDeduplicatesAndDisambiguatesTools(t *t
 	}
 }
 
+func TestConvertOpenAIRequestToAntigravityScopesRepeatedToolIDs(t *testing.T) {
+	inputJSON := `{"messages":[
+		{"role":"assistant","tool_calls":[{"id":"call_reused","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"call_reused","content":"first result"},
+		{"role":"user","content":"continue"},
+		{"role":"assistant","tool_calls":[{"id":"call_reused","type":"function","function":{"name":"calculate","arguments":"{}"}}]},
+		{"role":"tool","tool_call_id":"call_reused","content":"second result"}
+	]}`
+	out := ConvertOpenAIRequestToAntigravity("gemini-3-flash", []byte(inputJSON), false)
+	var calls, results []gjson.Result
+	for _, turn := range gjson.GetBytes(out, "request.contents").Array() {
+		for _, part := range turn.Get("parts").Array() {
+			if call := part.Get("functionCall"); call.Exists() {
+				calls = append(calls, call)
+			}
+			if result := part.Get("functionResponse"); result.Exists() {
+				results = append(results, result)
+			}
+		}
+	}
+	if len(calls) != 2 || len(results) != 2 {
+		t.Fatalf("function calls = %d, results = %d, want 2 each; output=%s", len(calls), len(results), out)
+	}
+	for index, want := range []struct{ name, result string }{
+		{name: "lookup", result: "first result"},
+		{name: "calculate", result: "second result"},
+	} {
+		if calls[index].Get("name").String() != want.name || results[index].Get("name").String() != want.name ||
+			results[index].Get("response.result").String() != want.result {
+			t.Fatalf("turn %d call = %s, result = %s; want %s / %s", index, calls[index].Raw, results[index].Raw, want.name, want.result)
+		}
+	}
+}
+
 func TestNormalizeAntigravityOpenAIThinkingConfigReusesCanonicalConfig(t *testing.T) {
 	input := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"high","thinkingBudget":8192}}}}`)
 
@@ -399,11 +433,11 @@ func TestConvertOpenAIRequestToAntigravityKeepsMidSessionDeveloperInUserBoundary
 		t.Fatalf("system instruction part count = %d, want 1; output=%s", got, out)
 	}
 	contents := gjson.GetBytes(out, "request.contents").Array()
-	if len(contents) != 3 {
-		t.Fatalf("contents count = %d, want 3; output=%s", len(contents), out)
+	if len(contents) != 4 {
+		t.Fatalf("contents count = %d, want 4; output=%s", len(contents), out)
 	}
 	parts := contents[2].Get("parts").Array()
-	if len(parts) != 2 || parts[0].Get("text").String() != "mid-session notice" || parts[1].Get("text").String() != "second user" {
+	if len(parts) != 1 || parts[0].Get("text").String() != "<system-reminder>\nmid-session notice\n</system-reminder>" || contents[3].Get("parts.0.text").String() != "second user" {
 		t.Fatalf("mid-session developer/user order changed; output=%s", out)
 	}
 }

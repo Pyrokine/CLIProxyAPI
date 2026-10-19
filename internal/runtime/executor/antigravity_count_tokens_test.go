@@ -332,9 +332,9 @@ func TestTranslateAntigravityRequestPairTranslatesEqualDistinctInputsTwice(t *te
 	originalPayload := []byte(`{"model":"gpt-5.5","input":[]}`)
 	payload := bytes.Clone(originalPayload)
 	executor := NewAntigravityExecutor(&config.Config{})
-	original, working := executor.translateAntigravityRequestPair(
+	original, working, err := executor.translateAntigravityRequestPair(
 		ctx,
-		cliproxyexecutor.Request{Model: "gpt-5.5", Payload: payload},
+		&cliproxyexecutor.Request{Model: "gpt-5.5", Payload: payload},
 		nil,
 		sdktranslator.FormatOpenAIResponse,
 		sdktranslator.FormatAntigravity,
@@ -343,6 +343,9 @@ func TestTranslateAntigravityRequestPairTranslatesEqualDistinctInputsTwice(t *te
 		payload,
 		false,
 	)
+	if err != nil {
+		t.Fatalf("translateAntigravityRequestPair() error = %v", err)
+	}
 	if hooks.requestCalls.Load() != 2 {
 		t.Fatalf("request hook calls = %d, want 2", hooks.requestCalls.Load())
 	}
@@ -359,9 +362,9 @@ func TestTranslateAntigravityRequestPairClonesReusedTranslation(t *testing.T) {
 	payload := []byte(`{"request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
 	ctx := sdktranslator.WithPluginHooks(context.Background(), nil)
 	executor := NewAntigravityExecutor(&config.Config{})
-	original, working := executor.translateAntigravityRequestPair(
+	original, working, err := executor.translateAntigravityRequestPair(
 		ctx,
-		cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: payload},
+		&cliproxyexecutor.Request{Model: "gemini-2.5-flash", Payload: payload},
 		nil,
 		sdktranslator.FormatAntigravity,
 		sdktranslator.FormatAntigravity,
@@ -370,6 +373,9 @@ func TestTranslateAntigravityRequestPairClonesReusedTranslation(t *testing.T) {
 		payload,
 		false,
 	)
+	if err != nil {
+		t.Fatalf("translateAntigravityRequestPair() error = %v", err)
+	}
 	if len(original) == 0 || !bytes.Equal(original, working) {
 		t.Fatalf("translated pair = (%s, %s), want identical non-empty payloads", original, working)
 	}

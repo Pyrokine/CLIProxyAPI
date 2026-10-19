@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -61,16 +62,20 @@ func TestAntigravityBuildRequestRoutesImageGeneration(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			executor := &AntigravityExecutor{}
 			auth := &cliproxyauth.Auth{Metadata: map[string]any{"project_id": "test-project"}}
+			payload, err := executor.prepareAntigravityRequestPayload(context.Background(), auth,
+				cliproxyexecutor.Request{Model: "gemini-3.1-flash-image"},
+				cliproxyexecutor.Options{Metadata: map[string]any{"session_id": "derived-session-id"}}, test.payload, test.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
 			req, err := executor.buildRequest(
 				context.Background(),
 				auth,
 				"token",
-				"gemini-3.1-flash-image",
-				test.payload,
+				payload,
 				false,
 				"",
 				"https://example.com",
-				"derived-session-id",
 			)
 			if err != nil {
 				t.Fatalf("buildRequest error: %v", err)
@@ -156,8 +161,13 @@ func buildRequestBodyFromPayload(t *testing.T, modelName string) map[string]any 
 		}
 	}`)
 
+	payload, err := executor.prepareAntigravityRequestPayload(context.Background(), auth,
+		cliproxyexecutor.Request{Model: modelName}, cliproxyexecutor.Options{}, payload, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
 	req, err := executor.buildRequest(
-		context.Background(), auth, "token", modelName, payload, false, "", "https://example.com",
+		context.Background(), auth, "token", payload, false, "", "https://example.com",
 	)
 	if err != nil {
 		t.Fatalf("buildRequest error: %v", err)

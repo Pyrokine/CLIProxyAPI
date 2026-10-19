@@ -1,9 +1,12 @@
 package responses
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
+	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	antigravgemini "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/antigravity/gemini"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
@@ -12,13 +15,144 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+const antigravityWebSearchSystemInstruction = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar."
+
+func antigravitySupportsNativeResponsesWebSearch(model string, modelInfo *registry.ModelInfo) bool {
+	if modelInfo != nil && modelInfo.NativeCapabilities != nil && modelInfo.NativeCapabilities.WebSearch != nil {
+		return *modelInfo.NativeCapabilities.WebSearch
+	}
+	model = strings.TrimSpace(thinking.ParseSuffix(strings.TrimSpace(model)).ModelName)
+	if model == "" {
+		return false
+	}
+	for _, info := range registry.GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+		if info == nil || !strings.EqualFold(strings.TrimSpace(thinking.ParseSuffix(info.ID).ModelName), model) {
+			continue
+		}
+		if info.NativeCapabilities != nil && info.NativeCapabilities.WebSearch != nil && !*info.NativeCapabilities.WebSearch {
+			return false
+		}
+		return info.SupportsWebSearch
+	}
+	return false
+}
+
 func convertOpenAIResponsesRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
+	out, _ := convertOpenAIResponsesRequestToAntigravityChecked(modelName, inputRawJSON, stream, nil)
+	return out
+}
+
+func convertOpenAIResponsesRequestToAntigravityChecked(
+	modelName string, inputRawJSON []byte, stream bool, modelInfo *registry.ModelInfo,
+) ([]byte, error) {
+	tools := gjson.GetBytes(inputRawJSON, "tools").Array()
+	nativeWebSearch := len(tools) > 0 && antigravitySupportsNativeResponsesWebSearch(modelName, modelInfo)
+	for _, tool := range tools {
+		switch strings.ToLower(strings.TrimSpace(tool.Get("type").String())) {
+		case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+		default:
+			nativeWebSearch = false
+		}
+	}
 	rawJSON, outputsByCallID := normalizeOpenAIResponsesBridgeRequest(inputRawJSON)
-	rawJSON = geminiresp.ConvertOpenAIResponsesRequestToGemini(modelName, rawJSON, stream)
-	rawJSON = restoreOpenAIResponsesToolOutputs(rawJSON, outputsByCallID)
-	out := antigravgemini.ConvertGeminiRequestToAntigravity(modelName, rawJSON, stream)
+	geminiRequest, err := geminiresp.ConvertOpenAIResponsesRequestToGeminiChecked(modelName, rawJSON, stream, &nativeWebSearch)
+	if err != nil {
+		return nil, err
+	}
+	geminiRequest = restoreOpenAIResponsesToolOutputs(geminiRequest, outputsByCallID)
+	geminiRequest = restoreOpenAIResponsesClaudeReasoning(geminiRequest, rawJSON, modelName)
+	out := antigravgemini.ConvertGeminiRequestToAntigravity(modelName, geminiRequest, stream)
+	if search := gjson.GetBytes(geminiRequest, "tools.0.googleSearch"); nativeWebSearch && search.Exists() {
+		out, err = applyAntigravityResponsesWebSearch(out, search)
+		if err != nil {
+			return nil, err
+		}
+	}
 	summaryConfig := thinking.ExtractSummaryConfig(inputRawJSON, "openai-response")
-	return thinking.ApplySummaryConfig(out, "antigravity", summaryConfig)
+	return thinking.ApplySummaryConfig(out, "antigravity", summaryConfig), nil
+}
+
+func restoreOpenAIResponsesClaudeReasoning(geminiRequest, request []byte, model string) []byte {
+	if sigcompat.ProviderFromModelName(model) != sigcompat.ProviderClaude {
+		return geminiRequest
+	}
+	signatures := make(map[string][]string)
+	items := gjson.GetBytes(request, "input").Array()
+	for index, item := range items {
+		if item.Get("type").String() != "reasoning" {
+			continue
+		}
+		text := item.Get("summary.0.text").String()
+		if text == "" {
+			continue
+		}
+		rawSignature := item.Get("encrypted_content").String()
+		if strings.TrimSpace(rawSignature) == "" && index+1 < len(items) {
+			next := items[index+1]
+			if next.Get("type").String() == "reasoning" && strings.Contains(next.Get("id").String(), "_detached_after_") &&
+				strings.TrimSpace(next.Get("summary.0.text").String()) == "" {
+				rawSignature = next.Get("encrypted_content").String()
+			}
+		}
+		signature, compatible := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSignature)
+		if !compatible {
+			signature = ""
+		}
+		signatures[text] = append(signatures[text], signature)
+	}
+	for contentIndex, content := range gjson.GetBytes(geminiRequest, "contents").Array() {
+		if content.Get("role").String() != "model" {
+			continue
+		}
+		for partIndex, part := range content.Get("parts").Array() {
+			if !part.Get("thought").Bool() {
+				continue
+			}
+			text := part.Get("text").String()
+			queue := signatures[text]
+			if len(queue) == 0 {
+				continue
+			}
+			signatures[text] = queue[1:]
+			if queue[0] != "" {
+				path := fmt.Sprintf("contents.%d.parts.%d.thoughtSignature", contentIndex, partIndex)
+				geminiRequest, _ = sjson.SetBytes(geminiRequest, path, queue[0])
+			}
+		}
+	}
+	return geminiRequest
+}
+
+func applyAntigravityResponsesWebSearch(payload []byte, search gjson.Result) ([]byte, error) {
+	tool, err := sjson.SetRawBytes([]byte(`{"googleSearch":{}}`), "googleSearch", []byte(search.Raw))
+	if err != nil {
+		return nil, err
+	}
+	tool, err = sjson.SetBytes(tool, "googleSearch.enhancedContent.imageSearch.maxResultCount", 5)
+	if err != nil {
+		return nil, err
+	}
+	payload, err = sjson.SetBytes(payload, "requestType", "web_search")
+	if err != nil {
+		return nil, err
+	}
+	payload, err = sjson.SetRawBytes(payload, "request.tools", translatorcommon.JoinRawArray([][]byte{tool}))
+	if err != nil {
+		return nil, err
+	}
+	instruction := gjson.GetBytes(payload, "request.systemInstruction")
+	for _, part := range instruction.Get("parts").Array() {
+		if part.Get("text").String() == antigravityWebSearchSystemInstruction {
+			return payload, nil
+		}
+	}
+	if !instruction.Exists() {
+		payload, err = sjson.SetBytes(payload, "request.systemInstruction.role", "user")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return sjson.SetBytes(payload, "request.systemInstruction.parts.-1", map[string]string{"text": antigravityWebSearchSystemInstruction})
 }
 
 func normalizeOpenAIResponsesBridgeRequest(inputRawJSON []byte) ([]byte, map[string]gjson.Result) {
@@ -42,6 +176,14 @@ func normalizeOpenAIResponsesBridgeRequest(inputRawJSON []byte) ([]byte, map[str
 	)
 	items = reorderOpenAIResponsesToolOutputSlots(items)
 
+	callIDs := make(map[string]struct{})
+	for _, item := range items {
+		if isOpenAIResponsesToolCall(item.Get("type").String()) {
+			if callID := translatorcommon.ExtractResponsesCallID(item); callID != "" {
+				callIDs[callID] = struct{}{}
+			}
+		}
+	}
 	itemJSONs := make([][]byte, 0, len(items))
 	outputsByCallID := make(map[string]gjson.Result)
 	for _, item := range items {
@@ -50,6 +192,9 @@ func normalizeOpenAIResponsesBridgeRequest(inputRawJSON []byte) ([]byte, map[str
 		if isOpenAIResponsesToolOutput(normalizedItem.Get("type").String()) {
 			if callID := translatorcommon.ExtractResponsesCallID(normalizedItem); callID != "" {
 				outputsByCallID[callID] = normalizedItem.Get("output")
+				if _, matched := callIDs[callID]; matched {
+					itemJSON, _ = sjson.SetBytes(itemJSON, "output", "")
+				}
 			}
 		}
 		itemJSONs = append(itemJSONs, itemJSON)

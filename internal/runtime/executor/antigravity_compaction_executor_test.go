@@ -77,6 +77,10 @@ func TestAntigravityCompactionSessionIDPriority(t *testing.T) {
 	if got := antigravityCompactionSessionID(req, opts); got != "codex:header-session" {
 		t.Fatalf("session ID = %q, want explicit Session-Id", got)
 	}
+	opts.Headers = http.Header{"session_id": {"underscore-session"}}
+	if got := antigravityCompactionSessionID(req, opts); got != "codex:underscore-session" {
+		t.Fatalf("session ID = %q, want explicit session_id", got)
+	}
 }
 
 func TestAntigravityCompactionScopeTracksCredentialOwnerAcrossTokenRotation(t *testing.T) {

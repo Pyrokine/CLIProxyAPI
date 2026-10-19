@@ -260,9 +260,14 @@ func StripInvalidGeminiSignatureThinkingBlocks(payload []byte) []byte {
 }
 
 func hasValidClaudeSignature(sig string) bool {
+	rawSignature := sig
 	sig = stripSignatureCachePrefix(sig)
 	if sig == "" {
 		return false
+	}
+	if sig[0] == 'Q' {
+		_, compatible := sigcompat.CompatibleAntigravityClaudeThinkingSignature(rawSignature)
+		return compatible
 	}
 	return sig[0] == 'E' || sig[0] == 'R'
 }

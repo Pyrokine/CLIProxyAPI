@@ -529,6 +529,38 @@ func TestConvertAntigravityResponseToClaudeNonStreamEmptyCandidateReturnsContent
 	}
 }
 
+func TestConvertAntigravityResponseToClaudeUsageSeparatesCachedInput(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		metadata  string
+		input     int64
+		cached    int64
+		hasCached bool
+	}{
+		{"cached", `{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"cachedContentTokenCount":4,"totalTokenCount":15}`, 6, 4, true},
+		{"zero-cache", `{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"cachedContentTokenCount":0,"totalTokenCount":15}`, 10, 0, true},
+		{"cache-exceeds-prompt", `{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"cachedContentTokenCount":14,"totalTokenCount":15}`, 0, 14, true},
+		{"invalid-cache", `{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"cachedContentTokenCount":-1,"totalTokenCount":15}`, 10, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := []byte(`{"model":"claude-sonnet-4-6"}`)
+			raw := []byte(`{"response":{"candidates":[{"finishReason":"STOP","content":{"parts":[{"text":"answer"}]}}],"usageMetadata":` + tc.metadata + `}}`)
+			var param any
+			nonStream := convertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", request, request, raw, &param)
+			stream := bytes.Join(convertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", request, request, raw, &param), nil)
+			for _, rawUsage := range []string{gjson.GetBytes(nonStream, "usage").Raw,
+				gjson.Get(sseDataForEvent(t, string(stream), "message_start"), "message.usage").Raw,
+				gjson.Get(sseDataForEvent(t, string(stream), "message_delta"), "usage").Raw} {
+				tokenUsage := gjson.Parse(rawUsage)
+				if tokenUsage.Get("input_tokens").Int() != tc.input || tokenUsage.Get("output_tokens").Int() != 5 ||
+					tokenUsage.Get("cache_read_input_tokens").Exists() != tc.hasCached || tokenUsage.Get("cache_read_input_tokens").Int() != tc.cached {
+					t.Errorf("usage=%s", rawUsage)
+				}
+			}
+		})
+	}
+}
+
 func TestConvertAntigravityResponseToClaudeStreamEmptyCandidateClosesMessage(t *testing.T) {
 	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
 	responseJSON := testEmptyAntigravityResponse()

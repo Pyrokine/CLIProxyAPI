@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	antigravitygemini "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/antigravity/gemini"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
@@ -34,7 +35,13 @@ func mapOpenAIFunctionNameToAntigravity(functionNameMap map[string]string, name 
 //
 // Returns:
 //   - []byte: The transformed request data in Gemini CLI API format
-func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ bool) []byte {
+func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, stream bool) []byte {
+	out, _ := convertOpenAIRequestToAntigravityChecked(modelName, inputRawJSON, stream)
+	return out
+}
+
+func convertOpenAIRequestToAntigravityChecked(modelName string, inputRawJSON []byte, _ bool) ([]byte, error) {
+	var drops translatorcommon.UserTurnDrops
 	rawJSON := inputRawJSON
 	functionNameMap := util.SanitizedFunctionNameMap(rawJSON)
 	// Base envelope (no default thinkingConfig)
@@ -119,44 +126,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	messages := gjson.GetBytes(rawJSON, "messages")
 	if messages.IsArray() {
 		arr := messages.Array()
-		// First pass: assistant tool_calls id->name map
-		tcID2Name := map[string]string{}
-		for i := range arr {
-			m := arr[i]
-			if m.Get("role").String() == "assistant" {
-				tcs := m.Get("tool_calls")
-				if tcs.IsArray() {
-					for _, tc := range tcs.Array() {
-						if tc.Get("type").String() == "function" {
-							id := tc.Get("id").String()
-							name := tc.Get("function.name").String()
-							if id != "" && name != "" {
-								tcID2Name[id] = name
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// Second pass build systemInstruction/tool responses cache.
-		// Keeping the typed gjson result distinguishes JSON-shaped strings from
-		// actual objects and arrays.
-		toolResponses := make(map[string]gjson.Result)
-		for i := range arr {
-			m := arr[i]
-			role := m.Get("role").String()
-			if role == "tool" {
-				toolCallID := m.Get("tool_call_id").String()
-				if toolCallID != "" {
-					toolResponses[toolCallID] = m.Get("content")
-				}
-			}
-		}
-
 		systemPartIndex := 0
 		hasEncounteredConversation := false
-		hasDemotedSystemMessage := false
 		for i := range arr {
 			m := arr[i]
 			role := m.Get("role").String()
@@ -195,11 +166,22 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					}
 				}
 			} else if role == "user" || isSystemMessage {
+				isDemotedSystem := isSystemMessage && hasEncounteredConversation
 				hasEncounteredConversation = true
-				hasDemotedSystemMessage = hasDemotedSystemMessage || isSystemMessage
 				// Build one user content node without changing a mid-session
 				// system/developer message into a global instruction.
 				node := []byte(`{"role":"user","parts":[]}`)
+				if isDemotedSystem {
+					reminderContent := content
+					if content.IsObject() && content.Get("type").String() == "text" {
+						reminderContent = content.Get("text")
+					}
+					if reminder, ok := translatorcommon.ClaudeMessageSystemReminderText(reminderContent); ok {
+						node, _ = sjson.SetBytes(node, "parts.0.text", reminder)
+						out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
+					}
+					continue
+				}
 				if content.Type == gjson.String {
 					node, _ = sjson.SetBytes(node, "parts.0.text", content.String())
 				} else if content.IsObject() && content.Get("type").String() == "text" {
@@ -222,6 +204,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								part, _ = sjson.SetBytes(part, "thoughtSignature", geminiCLIFunctionThoughtSignature)
 								node, _ = sjson.SetRawBytes(node, "parts."+itoa(p), part)
 								p++
+							} else if role == "user" {
+								drops.Drop("image_url")
 							}
 						case "video_url":
 							if part, ok := antigravityOpenAIDataURLPart(
@@ -229,6 +213,8 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 							); ok {
 								node, _ = sjson.SetRawBytes(node, "parts."+itoa(p), part)
 								p++
+							} else if role == "user" {
+								drops.Drop("video_url")
 							}
 						case "file":
 							filename := item.Get("file.filename").String()
@@ -240,6 +226,9 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", data)
 								p++
 							} else {
+								if role == "user" {
+									drops.Drop("file")
+								}
 								log.Warn("Invalid file data or unknown file name extension in user message, skip")
 							}
 						case "input_audio":
@@ -268,9 +257,24 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.mime_type", mimeType)
 								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".inlineData.data", audioData)
 								p++
+							} else if role == "user" {
+								drops.Drop("input_audio")
+							}
+						case "input_file", "audio", "video":
+							if role == "user" {
+								drops.Drop(item.Get("type").String())
 							}
 						}
 					}
+				}
+				if role == "user" {
+					sendable := 0
+					for _, part := range gjson.GetBytes(node, "parts").Array() {
+						if translatorcommon.GeminiPartIsSendable([]byte(part.Raw)) {
+							sendable++
+						}
+					}
+					drops.EndTurn(sendable)
 				}
 				if len(gjson.GetBytes(node, "parts").Array()) > 0 {
 					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
@@ -318,12 +322,23 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				// Tool calls -> single model content with functionCall parts
 				tcs := m.Get("tool_calls")
 				if tcs.IsArray() {
-					fIDs := make([]string, 0)
+					type assistantToolCall struct{ rawID, id, name string }
+					toolCalls := make([]assistantToolCall, 0, len(tcs.Array()))
+					usedIDs := make(map[string]bool, len(tcs.Array()))
 					for _, tc := range tcs.Array() {
 						if tc.Get("type").String() != "function" {
 							continue
 						}
-						fid := tc.Get("id").String()
+						rawID := tc.Get("id").String()
+						fid := rawID
+						if sigcompat.ProviderFromModelName(modelName) == sigcompat.ProviderClaude {
+							base := util.SanitizeClaudeToolID(rawID)
+							fid = base
+							for suffix := 1; usedIDs[fid]; suffix++ {
+								fid = fmt.Sprintf("%s_%d", base, suffix)
+							}
+							usedIDs[fid] = true
+						}
 						functionName := mapOpenAIFunctionNameToAntigravity(
 							functionNameMap,
 							tc.Get("function.name").String(),
@@ -344,33 +359,35 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						)
 						p++
 						if fid != "" {
-							fIDs = append(fIDs, fid)
+							toolCalls = append(toolCalls, assistantToolCall{rawID: rawID, id: fid, name: functionName})
 						}
 					}
 					if p > 0 {
 						out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 					}
 
-					// Append a single tool content combining name + response per function
+					// Keep tool results associated with the assistant turn that issued the calls.
+					turnToolResponses := make(map[string]gjson.Result, len(toolCalls))
+					for j := i + 1; j < len(arr) && arr[j].Get("role").String() != "assistant"; j++ {
+						if arr[j].Get("role").String() == "tool" {
+							if callID := arr[j].Get("tool_call_id").String(); callID != "" {
+								turnToolResponses[callID] = arr[j].Get("content")
+							}
+						}
+					}
 					toolNode := []byte(`{"role":"user","parts":[]}`)
 					pp := 0
-					for _, fid := range fIDs {
-						if name, ok := tcID2Name[fid]; ok {
-							toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.id", fid)
-							toolNode, _ = sjson.SetBytes(
-								toolNode,
-								"parts."+itoa(pp)+".functionResponse.name",
-								mapOpenAIFunctionNameToAntigravity(functionNameMap, name),
-							)
-							response, exists := toolResponses[fid]
-							toolNode = setAntigravityOpenAIToolResponse(
-								toolNode,
-								"parts."+itoa(pp)+".functionResponse.response.result",
-								response,
-								exists,
-							)
-							pp++
-						}
+					for _, call := range toolCalls {
+						toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.id", call.id)
+						toolNode, _ = sjson.SetBytes(toolNode, "parts."+itoa(pp)+".functionResponse.name", call.name)
+						response, exists := turnToolResponses[call.rawID]
+						toolNode = setAntigravityOpenAIToolResponse(
+							toolNode,
+							"parts."+itoa(pp)+".functionResponse.response.result",
+							response,
+							exists,
+						)
+						pp++
 					}
 					if pp > 0 {
 						out, _ = sjson.SetRawBytes(out, "request.contents.-1", toolNode)
@@ -379,9 +396,6 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					out, _ = sjson.SetRawBytes(out, "request.contents.-1", node)
 				}
 			}
-		}
-		if hasDemotedSystemMessage {
-			out = mergeAntigravityOpenAIUserContents(out)
 		}
 	}
 
@@ -535,7 +549,10 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	out = applyOpenAIToolChoiceToAntigravity(out, rawJSON, functionNameMap)
 	out = antigravitygemini.SanitizeAntigravityClaudeGeminiRequestSignatures(modelName, out)
 	out = common.AttachDefaultSafetySettings(out, "request.safetySettings")
-	return applyOpenAIThinkingCompatibilityToAntigravity(out, rawJSON)
+	if err := drops.Err(); err != nil {
+		return nil, err
+	}
+	return applyOpenAIThinkingCompatibilityToAntigravity(out, rawJSON), nil
 }
 
 func antigravityOpenAIDataURLPart(dataURL, requiredMIMEPrefix string) ([]byte, bool) {
@@ -566,23 +583,6 @@ func setAntigravityOpenAIToolResponse(
 	if response.Raw != "" {
 		payload, _ = sjson.SetRawBytes(payload, path, []byte(response.Raw))
 	}
-	return payload
-}
-
-func mergeAntigravityOpenAIUserContents(payload []byte) []byte {
-	contents := gjson.GetBytes(payload, "request.contents")
-	if !contents.IsArray() {
-		return payload
-	}
-	contentItems := make([][]byte, 0, len(contents.Array()))
-	for _, content := range contents.Array() {
-		contentItems = append(contentItems, []byte(content.Raw))
-	}
-	payload, _ = sjson.SetRawBytes(
-		payload,
-		"request.contents",
-		translatorcommon.JoinRawArray(translatorcommon.MergeAdjacentGeminiContents(contentItems)),
-	)
 	return payload
 }
 
@@ -690,6 +690,9 @@ func normalizeAntigravityOpenAIThinkingConfig(out []byte) []byte {
 		if gjson.GetBytes(out, path).Exists() {
 			out, _ = sjson.DeleteBytes(out, path)
 		}
+	}
+	if include := gjson.GetBytes(out, "request.generationConfig.thinkingConfig.includeThoughts"); include.Exists() && include.Type != gjson.True && include.Type != gjson.False {
+		out, _ = sjson.DeleteBytes(out, "request.generationConfig.thinkingConfig.includeThoughts")
 	}
 	return out
 }

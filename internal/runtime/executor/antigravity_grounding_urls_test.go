@@ -2,12 +2,15 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -71,5 +74,43 @@ func TestResolveAntigravityGroundingURLsResolvesVertexRedirects(t *testing.T) {
 		output, "response.candidates.0.groundingMetadata.groundingChunks.1.web.uri",
 	).String(); got != "https://already.example/source" {
 		t.Fatalf("non-vertex uri = %q", got)
+	}
+}
+
+func TestAntigravityTypedSearchResolvesGroundingAtConsumer(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		format    sdktranslator.Format
+		tool      string
+		wantCalls int
+	}{
+		{"claude", sdktranslator.FormatClaude, "web_search_20250305", 1},
+		{"responses", sdktranslator.FormatOpenAIResponse, "web_search", 1},
+		{"responses_dated", sdktranslator.FormatOpenAIResponse, "web_search_2025_08_26", 1},
+		{"preview", sdktranslator.FormatOpenAIResponse, "web_search_preview", 1},
+		{"preview_dated", sdktranslator.FormatOpenAIResponse, "web_search_preview_2025_03_11", 1},
+		{"ordinary_function", sdktranslator.FormatOpenAI, "function", 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			ctx := util.WithRoundTripper(context.Background(), groundingURLRoundTripper(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if req.Method != http.MethodHead || req.URL.String() != "https://vertexaisearch.cloud.google.com/grounding-api-redirect/synthetic" {
+					return nil, fmt.Errorf("unexpected request %s %s", req.Method, req.URL)
+				}
+				return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"https://example.com/article"}}, Body: http.NoBody, Request: req}, nil
+			}))
+			original := []byte(fmt.Sprintf(`{"tools":[{"type":%q,"name":"web_search"}]}`, test.tool))
+			response := []byte(`{"response":{"candidates":[{"groundingMetadata":{"groundingChunks":[{"web":{"uri":"https://vertexaisearch.cloud.google.com/grounding-api-redirect/synthetic"}}]}}]}}`)
+			output := NewAntigravityExecutor(&config.Config{}).resolveWebSearchGroundingURLs(ctx, nil, test.format, original,
+				[]byte(`{"requestType":"web_search","request":{"tools":[{"googleSearch":{}}]}}`), response)
+			want := "https://vertexaisearch.cloud.google.com/grounding-api-redirect/synthetic"
+			if test.wantCalls > 0 {
+				want = "https://example.com/article"
+			}
+			if calls != test.wantCalls || gjson.GetBytes(output, "response.candidates.0.groundingMetadata.groundingChunks.0.web.uri").String() != want {
+				t.Fatalf("grounding callbacks=%d, want %d; payload=%s", calls, test.wantCalls, output)
+			}
+		})
 	}
 }

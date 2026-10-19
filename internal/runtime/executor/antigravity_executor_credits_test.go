@@ -2,14 +2,18 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
@@ -195,4 +199,81 @@ func TestUpdateAntigravityCreditsBalance_LoadCodeAssistHint(t *testing.T) {
 	if gotAPIClient != antigravityLoadCodeAssistAPIClient {
 		t.Fatalf("X-Goog-Api-Client = %q, want %q", gotAPIClient, antigravityLoadCodeAssistAPIClient)
 	}
+}
+
+func TestAntigravityCreditsRejectReplacedCredentialResults(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		resetAntigravityCreditsRetryState()
+		release := make(chan struct{})
+		var once sync.Once
+		defer once.Do(func() { close(release) })
+		tokenCalls, oldCalls, newCalls := 0, 0, 0
+		oldCtx, cancel := context.WithCancel(util.WithRoundTripper(context.Background(), groundingURLRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path == "/token" {
+				tokenCalls++
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Request: req, Body: io.NopCloser(strings.NewReader(`{"access_token":"old-access","expires_in":3600}`))}, nil
+			}
+			if req.URL.Path != antigravityLoadCodeAssistPath {
+				return nil, fmt.Errorf("unexpected path %s", req.URL)
+			}
+			oldCalls++
+			<-release
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Request: req, Body: io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"10","minimumCreditAmountForUsage":"50"}]}}`))}, nil
+		})))
+		defer cancel()
+		cfg := &config.Config{QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true}}
+		exec := NewAntigravityExecutor(cfg)
+		manager := cliproxyauth.NewManager(nil, nil, nil)
+		manager.SetHomeClientProvider(func() cliproxyauth.HomeClient { return nil })
+		manager.SetConfig(cfg)
+		manager.RegisterExecutor(exec)
+		auth := &cliproxyauth.Auth{ID: t.Name(), Provider: "antigravity", Attributes: map[string]string{"base_url": "https://synthetic.invalid"}, Metadata: map[string]any{"refresh_token": t.Name() + "-old-refresh", "project_id": "synthetic-project"}}
+		if _, err := manager.Register(oldCtx, auth); err != nil {
+			t.Fatal(err)
+		}
+		results := make(chan error, 1)
+		go func() { _, err := manager.ForceRefreshAuth(oldCtx, auth.ID); results <- err }()
+		synctest.Wait()
+		select {
+		case err := <-results:
+			if err != nil {
+				t.Fatal(err)
+			}
+		default:
+			t.Fatal("token refresh blocked")
+		}
+		if tokenCalls != 1 || oldCalls != 1 {
+			t.Fatalf("old callbacks token=%d credits=%d", tokenCalls, oldCalls)
+		}
+		cancel()
+		updated, _ := manager.GetByID(auth.ID)
+		replacement := updated.Clone()
+		replacement.Metadata["access_token"] = "replacement-access"
+		replacement.Metadata["refresh_token"] = t.Name() + "-replacement-refresh"
+		newCtx := util.WithRoundTripper(context.Background(), groundingURLRoundTripper(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != antigravityLoadCodeAssistPath {
+				return nil, fmt.Errorf("unexpected new path %s", req.URL)
+			}
+			newCalls++
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Request: req, Body: io.NopCloser(strings.NewReader(`{"paidTier":{"id":"tier","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"1500","minimumCreditAmountForUsage":"50"}]}}`))}, nil
+		}))
+		if _, err := manager.Update(newCtx, replacement); err != nil {
+			t.Fatal(err)
+		}
+		exec.updateAntigravityCreditsBalance(newCtx, replacement, "replacement-access")
+		hint, ok := cliproxyauth.GetAntigravityCreditsHint(auth.ID)
+		if newCalls != 1 || !ok || hint.CreditAmount != 1500 {
+			t.Fatalf("new balance not published: callbacks=%d hint=%+v", newCalls, hint)
+		}
+		once.Do(func() { close(release) })
+		synctest.Wait()
+		current, _ := manager.GetByID(auth.ID)
+		hint, ok = cliproxyauth.GetAntigravityCreditsHint(auth.ID)
+		if metaStringValue(current.Metadata, "access_token") != "replacement-access" {
+			t.Fatal("manager lost replacement credential")
+		}
+		if !ok || hint.CreditAmount != 1500 || !hint.Available {
+			t.Fatalf("old canceled refresh overwrote the current manager credential balance: %+v; want 1500 available=true", hint)
+		}
+	})
 }

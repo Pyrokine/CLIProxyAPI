@@ -1353,6 +1353,23 @@ func TestAntigravityReasoningReplayScopePrefersStableSessionOverExecutionUUID(t 
 	}
 }
 
+func TestAntigravityReasoningReplayScopeUsesUnderscoreSessionHeader(t *testing.T) {
+	for _, header := range []string{"Session_id", "session_id"} {
+		t.Run(header, func(t *testing.T) {
+			opts := cliproxyexecutor.Options{
+				Headers:  http.Header{header: {"stable-session"}},
+				Metadata: map[string]any{cliproxyexecutor.ExecutionSessionMetadataKey: "socket-uuid"},
+			}
+			scope := antigravityReasoningReplayScopeFromRequest(
+				context.Background(), "gemini-3.6-flash-high", cliproxyexecutor.Request{}, opts, nil,
+			)
+			if got := scope.sessionKey; got != "responses:stable-session" {
+				t.Fatalf("session key = %q, want stable Responses session", got)
+			}
+		})
+	}
+}
+
 func TestAntigravityReasoningReplayScopeKeepsExecutionAheadOfPromptCacheKey(t *testing.T) {
 	opts := cliproxyexecutor.Options{
 		OriginalRequest: []byte(`{"prompt_cache_key":"shared-cache-bucket"}`),

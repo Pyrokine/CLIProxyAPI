@@ -11,6 +11,15 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestConvertInteractionsRequestToAntigravityKeepsSchemaReferencesOpaque(t *testing.T) {
+	payload := []byte(`{"input":[{"type":"function_result","name":"lookup","call_id":"call-1","result":{"schema":{"$ref":"#/components/schemas/Item"}}}]}`)
+	out := convertInteractionsRequestToAntigravity("gemini-3-flash", payload, false)
+	result := gjson.GetBytes(out, "request.contents.0.parts.0.functionResponse.response.result")
+	if result.Type != gjson.String || result.String() != `{"schema":{"$ref":"#/components/schemas/Item"}}` {
+		t.Fatalf("function result with $ref = %s, output = %s", result.Raw, out)
+	}
+}
+
 func TestConvertInteractionsRequestToAntigravityEffortDoesNotSetSummary(t *testing.T) {
 	out := convertInteractionsRequestToAntigravity(
 		"gemini-3-flash",

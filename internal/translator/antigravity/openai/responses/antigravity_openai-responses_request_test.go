@@ -249,7 +249,7 @@ func TestConvertOpenAIResponsesRequestToAntigravityPreservesMidSessionDeveloperA
 			responseIDs = append(responseIDs, response.Get("id").String())
 		}
 	}
-	if len(texts) < 3 || texts[len(texts)-2] != "permission notice" || texts[len(texts)-1] != "keep user text" {
+	if len(texts) < 3 || texts[len(texts)-2] != "<system-reminder>\npermission notice\n</system-reminder>" || texts[len(texts)-1] != "keep user text" {
 		t.Fatalf("developer/user text order changed: %v; output=%s", texts, out)
 	}
 	if len(responseIDs) != 2 || responseIDs[0] != "call_a" || responseIDs[1] != "call_b" {

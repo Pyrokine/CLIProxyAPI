@@ -119,8 +119,10 @@ func antigravityReasoningReplayClientSessionKey(
 			return scope
 		}
 	}
-	if value := cliproxysession.NormalizeExplicitID(opts.Headers.Get("Session-Id")); value != "" {
-		return "responses:" + value
+	for _, name := range []string{"Session-Id", "Session_id"} {
+		if value := cliproxysession.ExplicitHeaderValue(opts.Headers, name); value != "" {
+			return "responses:" + value
+		}
 	}
 	for _, raw := range [][]byte{opts.OriginalRequest, req.Payload} {
 		if len(raw) == 0 {

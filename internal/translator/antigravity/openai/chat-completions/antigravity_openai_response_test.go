@@ -8,17 +8,37 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestConvertAntigravityResponseToOpenAIIncludesZeroCompletionTokensWhenMissing(t *testing.T) {
-	var param any
-	chunk := []byte(`{"response":{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}}`)
-
-	result := convertAntigravityResponseToOpenAI(context.Background(), "model", nil, nil, chunk, &param)
-	if len(result) != 1 {
-		t.Fatalf("result count = %d, want 1", len(result))
-	}
-	completionTokens := gjson.GetBytes(result[0], "usage.completion_tokens")
-	if !completionTokens.Exists() || completionTokens.Int() != 0 {
-		t.Fatalf("completion_tokens = %s, want present with value 0; output: %s", completionTokens.Raw, result[0])
+func TestConvertAntigravityResponseToOpenAIIncludesThoughtTokensInCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		chunk      string
+		completion int64
+	}{
+		{name: "thought only", chunk: `{"response":{"usageMetadata":{"promptTokenCount":16,"thoughtsTokenCount":42,"totalTokenCount":58}}}`, completion: 42},
+		{name: "thought and candidate", chunk: `{"response":{"usageMetadata":{"promptTokenCount":16,"candidatesTokenCount":5,"thoughtsTokenCount":42,"totalTokenCount":63}}}`, completion: 47},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var param any
+			payload := []byte(tc.chunk)
+			result := convertAntigravityResponseToOpenAI(context.Background(), "model", nil, nil, payload, &param)
+			if len(result) != 1 {
+				t.Fatalf("result count = %d, want 1", len(result))
+			}
+			completion := gjson.GetBytes(result[0], "usage.completion_tokens")
+			if !completion.Exists() || completion.Int() != tc.completion {
+				t.Fatalf("completion_tokens = %s, want %d; output: %s", completion.Raw, tc.completion, result[0])
+			}
+			if reasoning := gjson.GetBytes(result[0], "usage.completion_tokens_details.reasoning_tokens").Int(); reasoning != 42 {
+				t.Fatalf("reasoning_tokens = %d, want 42", reasoning)
+			}
+			if total := gjson.GetBytes(result[0], "usage.total_tokens").Int(); total != 16+tc.completion {
+				t.Fatalf("total_tokens = %d, want %d", total, 16+tc.completion)
+			}
+			nonStream := convertAntigravityResponseToOpenAINonStream(context.Background(), "model", nil, nil, payload, nil)
+			if got := gjson.GetBytes(nonStream, "usage.completion_tokens").Int(); got != tc.completion {
+				t.Fatalf("non-stream completion_tokens = %d, want %d", got, tc.completion)
+			}
+		})
 	}
 }
 

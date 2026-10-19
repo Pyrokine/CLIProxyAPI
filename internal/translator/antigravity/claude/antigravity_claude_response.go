@@ -17,6 +17,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
 	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	geminiopenai "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/gemini/openai"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 
@@ -42,27 +43,22 @@ func formatClaudeSignatureValue(modelName, rawSignature string) string {
 // This structure tracks the current state of the response translation process to ensure
 // proper sequencing of SSE events and transitions between different content types.
 type params struct {
-	HasFirstResponse     bool              // Indicates if the initial message_start event has been sent
-	ResponseType         int               // Current response type: 0=none, 1=content, 2=thinking, 3=function
-	ResponseIndex        int               // Index counter for content blocks in the streaming response
-	HasFinishReason      bool              // Tracks whether a finish reason has been observed
-	FinishReason         string            // The finish reason string returned by the provider
-	HasUsageMetadata     bool              // Tracks whether usage metadata has been observed
-	PromptTokenCount     int64             // Cached prompt token count from usage metadata
-	CandidatesTokenCount int64             // Cached candidate token count from usage metadata
-	ThoughtsTokenCount   int64             // Cached thinking token count from usage metadata
-	TotalTokenCount      int64             // Cached total token count from usage metadata
-	CachedTokenCount     int64             // Cached content token count (indicates prompt caching)
-	HasSentFinalEvents   bool              // Indicates if final content/message events have been sent
-	HasSentMessageStop   bool              // Indicates if the terminal message_stop event has been sent
-	HasToolUse           bool              // Indicates if tool use was observed in the stream
-	HasContent           bool              // Tracks whether any content (text, thinking, or tool use) has been output
-	ToolNameMap          map[string]string // Maps provider-facing names back to client-facing names.
-	HasSemanticContent   bool
-	LastSemanticKind     string
-	HasWebSearchTool     bool
-	WebSearchRequests    int64
-	WebSearchTextBuffer  strings.Builder
+	HasFirstResponse    bool   // Indicates if the initial message_start event has been sent
+	ResponseType        int    // Current response type: 0=none, 1=content, 2=thinking, 3=function
+	ResponseIndex       int    // Index counter for content blocks in the streaming response
+	HasFinishReason     bool   // Tracks whether a finish reason has been observed
+	FinishReason        string // The finish reason string returned by the provider
+	Usage               geminiopenai.GeminiUsage
+	HasSentFinalEvents  bool              // Indicates if final content/message events have been sent
+	HasSentMessageStop  bool              // Indicates if the terminal message_stop event has been sent
+	HasToolUse          bool              // Indicates if tool use was observed in the stream
+	HasContent          bool              // Tracks whether any content (text, thinking, or tool use) has been output
+	ToolNameMap         map[string]string // Maps provider-facing names back to client-facing names.
+	HasSemanticContent  bool
+	LastSemanticKind    string
+	HasWebSearchTool    bool
+	WebSearchRequests   int64
+	WebSearchTextBuffer strings.Builder
 
 	// Signature caching support
 	CurrentThinkingText   strings.Builder // Accumulates thinking text for signature caching
@@ -124,8 +120,18 @@ func convertAntigravityResponseToClaude(
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
 
 	params := (*param).(*params)
-	if params.HasSentMessageStop ||
-		(params.HasSentFinalEvents && !bytes.Equal(rawJSON, []byte("[DONE]"))) {
+	if params.HasSentMessageStop {
+		return [][]byte{}
+	}
+	previousUsage := params.Usage
+	params.Usage.Update(gjson.GetBytes(rawJSON, "response.cpaUsageMetadata"))
+	params.Usage.Update(gjson.GetBytes(rawJSON, "response.usageMetadata"))
+	if params.HasSentFinalEvents && !bytes.Equal(rawJSON, []byte("[DONE]")) {
+		if params.Usage != previousUsage {
+			var output []byte
+			appendFinalEvents(params, &output, false)
+			return [][]byte{output}
+		}
 		return [][]byte{}
 	}
 
@@ -251,20 +257,21 @@ func convertAntigravityResponseToClaude(
 		// This follows the Claude Code API specification for streaming message initialization
 		messageStartTemplate := []byte(`{"type": "message_start", "message": {"id": "msg_1nZdL29xx5MUA1yADyHTEsnR8uuvGzszyY", "type": "message", "role": "assistant", "content": [], "model": "claude-3-5-sonnet-20241022", "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 0, "output_tokens": 0}}}`)
 
-		// Use cpaUsageMetadata within the message_start event for Claude.
-		if promptTokenCount := gjson.GetBytes(
-			rawJSON, "response.cpaUsageMetadata.promptTokenCount",
-		); promptTokenCount.Exists() {
+		// message_start 使用已收到的用量，缓存命中单独计数
+		if params.Usage.Seen {
 			messageStartTemplate, _ = sjson.SetBytes(
-				messageStartTemplate, "message.usage.input_tokens", promptTokenCount.Int(),
+				messageStartTemplate, "message.usage.input_tokens", max(params.Usage.PromptTokens-params.Usage.CachedTokens, 0),
 			)
-		}
-		if candidatesTokenCount := gjson.GetBytes(
-			rawJSON, "response.cpaUsageMetadata.candidatesTokenCount",
-		); candidatesTokenCount.Exists() && !webSearchStreamMode {
-			messageStartTemplate, _ = sjson.SetBytes(
-				messageStartTemplate, "message.usage.output_tokens", candidatesTokenCount.Int(),
-			)
+			if params.Usage.HasCachedTokens {
+				messageStartTemplate, _ = sjson.SetBytes(
+					messageStartTemplate, "message.usage.cache_read_input_tokens", params.Usage.CachedTokens,
+				)
+			}
+			if !webSearchStreamMode {
+				messageStartTemplate, _ = sjson.SetBytes(
+					messageStartTemplate, "message.usage.output_tokens", params.Usage.OutputTokens(),
+				)
+			}
 		}
 
 		// Override default values with actual response metadata if available from the Gemini CLI response
@@ -497,23 +504,11 @@ func convertAntigravityResponseToClaude(
 		params.FinishReason = finishReasonResult.String()
 	}
 
-	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
-		params.HasUsageMetadata = true
-		params.CachedTokenCount = usageResult.Get("cachedContentTokenCount").Int()
-		params.PromptTokenCount = usageResult.Get("promptTokenCount").Int() - params.CachedTokenCount
-		params.CandidatesTokenCount = usageResult.Get("candidatesTokenCount").Int()
-		params.ThoughtsTokenCount = usageResult.Get("thoughtsTokenCount").Int()
-		params.TotalTokenCount = usageResult.Get("totalTokenCount").Int()
-		if params.CandidatesTokenCount == 0 && params.TotalTokenCount > 0 {
-			params.CandidatesTokenCount = max(params.TotalTokenCount-params.PromptTokenCount-params.ThoughtsTokenCount, 0)
-		}
-	}
-
 	if webSearchStreamMode && !params.HasWebSearchTool && params.HasFinishReason && params.WebSearchTextBuffer.Len() > 0 {
 		appendBufferedWebSearchTextBlock(params, appendEvent)
 	}
 
-	if params.HasUsageMetadata && params.HasFinishReason {
+	if params.Usage.Seen && params.HasFinishReason {
 		appendFinalEvents(params, &output, false)
 	}
 
@@ -557,11 +552,11 @@ func appendBufferedWebSearchTextBlock(params *params, appendEvent func(string, s
 }
 
 func appendFinalEvents(params *params, output *[]byte, force bool) {
-	if params.HasSentFinalEvents {
+	if params.HasSentFinalEvents && force {
 		return
 	}
 
-	if !params.HasUsageMetadata && !force {
+	if !params.Usage.Seen && !force {
 		return
 	}
 
@@ -578,23 +573,26 @@ func appendFinalEvents(params *params, output *[]byte, force bool) {
 		params.ResponseType = 0
 	}
 
-	stopReason := resolveStopReason(params)
-	usageOutputTokens := params.CandidatesTokenCount + params.ThoughtsTokenCount
-	if usageOutputTokens == 0 && params.TotalTokenCount > 0 {
-		usageOutputTokens = max(params.TotalTokenCount-params.PromptTokenCount, 0)
+	usageOutputTokens := params.Usage.OutputTokens()
+	if usageOutputTokens == 0 && params.Usage.TotalTokens > 0 {
+		usageOutputTokens = max(params.Usage.TotalTokens-params.Usage.PromptTokens, 0)
 	}
 
 	delta := []byte(fmt.Sprintf(
-		`{"type":"message_delta","delta":{"stop_reason":"%s","stop_sequence":null},"usage":{"input_tokens":%d,"output_tokens":%d}}`,
-		stopReason, params.PromptTokenCount, usageOutputTokens,
+		`{"type":"message_delta","delta":{},"usage":{"input_tokens":%d,"output_tokens":%d}}`,
+		max(params.Usage.PromptTokens-params.Usage.CachedTokens, 0), usageOutputTokens,
 	))
+	if !params.HasSentFinalEvents {
+		delta, _ = sjson.SetBytes(delta, "delta.stop_reason", resolveStopReason(params))
+		delta, _ = sjson.SetBytes(delta, "delta.stop_sequence", nil)
+	}
 	if params.WebSearchRequests > 0 {
 		delta, _ = sjson.SetBytes(delta, "usage.server_tool_use.web_search_requests", params.WebSearchRequests)
 	}
 	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)
-	if params.CachedTokenCount > 0 {
+	if params.Usage.HasCachedTokens {
 		var err error
-		delta, err = sjson.SetBytes(delta, "usage.cache_read_input_tokens", params.CachedTokenCount)
+		delta, err = sjson.SetBytes(delta, "usage.cache_read_input_tokens", params.Usage.CachedTokens)
 		if err != nil {
 			log.Warnf("antigravity claude response: failed to set cache_read_input_tokens: %v", err)
 		}
@@ -639,25 +637,23 @@ func convertAntigravityResponseToClaudeNonStream(
 	modelName := gjson.GetBytes(requestRawJSON, "model").String()
 
 	root := gjson.ParseBytes(rawJSON)
-	promptTokens := root.Get("response.usageMetadata.promptTokenCount").Int()
-	candidateTokens := root.Get("response.usageMetadata.candidatesTokenCount").Int()
-	thoughtTokens := root.Get("response.usageMetadata.thoughtsTokenCount").Int()
-	totalTokens := root.Get("response.usageMetadata.totalTokenCount").Int()
-	cachedTokens := root.Get("response.usageMetadata.cachedContentTokenCount").Int()
-	outputTokens := candidateTokens + thoughtTokens
-	if outputTokens == 0 && totalTokens > 0 {
-		outputTokens = max(totalTokens-promptTokens, 0)
+	var tokenUsage geminiopenai.GeminiUsage
+	tokenUsage.Update(root.Get("response.cpaUsageMetadata"))
+	tokenUsage.Update(root.Get("response.usageMetadata"))
+	outputTokens := tokenUsage.OutputTokens()
+	if outputTokens == 0 && tokenUsage.TotalTokens > 0 {
+		outputTokens = max(tokenUsage.TotalTokens-tokenUsage.PromptTokens, 0)
 	}
 
 	responseJSON := []byte(`{"id":"","type":"message","role":"assistant","model":"","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}`)
 	responseJSON, _ = sjson.SetBytes(responseJSON, "id", root.Get("response.responseId").String())
 	responseJSON, _ = sjson.SetBytes(responseJSON, "model", root.Get("response.modelVersion").String())
-	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.input_tokens", promptTokens)
+	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.input_tokens", max(tokenUsage.PromptTokens-tokenUsage.CachedTokens, 0))
 	responseJSON, _ = sjson.SetBytes(responseJSON, "usage.output_tokens", outputTokens)
 	// Add cache_read_input_tokens if cached tokens are present (indicates prompt caching is working)
-	if cachedTokens > 0 {
+	if tokenUsage.HasCachedTokens {
 		var err error
-		responseJSON, err = sjson.SetBytes(responseJSON, "usage.cache_read_input_tokens", cachedTokens)
+		responseJSON, err = sjson.SetBytes(responseJSON, "usage.cache_read_input_tokens", tokenUsage.CachedTokens)
 		if err != nil {
 			log.Warnf("antigravity claude response: failed to set cache_read_input_tokens: %v", err)
 		}
@@ -907,8 +903,8 @@ func convertAntigravityResponseToClaudeNonStream(
 	}
 	responseJSON, _ = sjson.SetBytes(responseJSON, "stop_reason", stopReason)
 
-	if promptTokens == 0 && outputTokens == 0 {
-		if usageMeta := root.Get("response.usageMetadata"); !usageMeta.Exists() {
+	if tokenUsage.PromptTokens == 0 && outputTokens == 0 {
+		if !root.Get("response.usageMetadata").Exists() && !root.Get("response.cpaUsageMetadata").Exists() {
 			responseJSON, _ = sjson.DeleteBytes(responseJSON, "usage")
 		}
 	}
