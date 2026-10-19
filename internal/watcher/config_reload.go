@@ -211,7 +211,7 @@ func (w *Watcher) reloadConfigSnapshot(snapshot *configSnapshot) bool {
 	forceAuthRefresh := oldConfig != nil &&
 		(oldConfig.ForceModelPrefix != newConfig.ForceModelPrefix || !reflect.DeepEqual(
 			oldConfig.OAuthModelAlias, newConfig.OAuthModelAlias,
-		) || retryConfigChanged)
+		) || !reflect.DeepEqual(oldConfig.OAuthSettings, newConfig.OAuthSettings) || retryConfigChanged)
 
 	if !w.configSnapshotIsCurrent(snapshot) {
 		log.Infof("config changed before reload publication; scheduling the latest snapshot")

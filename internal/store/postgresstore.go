@@ -274,7 +274,9 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (save
 		}
 	}()
 
-	cliproxyauth.PrepareAuthForPersistence(auth)
+	if errPrepare := cliproxyauth.PrepareAuthForPersistence(auth); errPrepare != nil {
+		return "", errPrepare
+	}
 	switch {
 	case auth.Storage != nil:
 		fileMutated = true

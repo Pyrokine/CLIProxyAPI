@@ -105,6 +105,43 @@ func TestOpenAICompatibility_RemovedAndUnchanged(t *testing.T) {
 	expectContains(t, changes, "provider removed: provider-a (api-keys=1, models=1)")
 }
 
+func TestOpenAICompatibilityRedactsEndpointLabels(t *testing.T) {
+	const endpoint = "https://fixture-user:fixture-pass@compat.example:8443/private?token=fixture-token#fixture-fragment"
+	entry := config.OpenAICompatibility{BaseURL: endpoint}
+	changed := entry
+	changed.Disabled = true
+	for _, tc := range []struct {
+		name       string
+		old, new   []config.OpenAICompatibility
+		labelCount int
+	}{
+		{"added", nil, []config.OpenAICompatibility{entry}, 1},
+		{"removed", []config.OpenAICompatibility{entry}, nil, 1},
+		{"updated", []config.OpenAICompatibility{entry}, []config.OpenAICompatibility{changed}, 1},
+		{"duplicates", []config.OpenAICompatibility{entry, entry}, []config.OpenAICompatibility{changed, changed}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			details := BuildConfigChangeDetails(
+				&config.Config{OpenAICompatibility: tc.old},
+				&config.Config{OpenAICompatibility: tc.new},
+			)
+			joined := strings.Join(details, "\n")
+			if count := strings.Count(joined, "https://compat.example:8443"); count != tc.labelCount {
+				t.Fatalf("redacted labels = %d, want %d: %s", count, tc.labelCount, joined)
+			}
+			for _, secret := range []string{"fixture-user", "fixture-pass", "/private", "fixture-token", "fixture-fragment"} {
+				if strings.Contains(joined, secret) {
+					t.Fatalf("config change details leaked %q: %s", secret, joined)
+				}
+			}
+		})
+	}
+	key, label := openAICompatKey(entry, 0)
+	if key != "base:"+endpoint || label != "https://compat.example:8443" || entry.BaseURL != endpoint {
+		t.Fatalf("unexpected identity or display label: %q / %q", key, label)
+	}
+}
+
 func TestOpenAICompatKeyFallbacks(t *testing.T) {
 	entry := config.OpenAICompatibility{
 		BaseURL: "http://base",

@@ -74,6 +74,10 @@ func ApplyAuthExcludedModelsMeta(auth *coreauth.Auth, cfg *config.Config, perKey
 	}
 	if authKindKey == "apikey" {
 		add(perKey)
+		if _, disabled := seen["*"]; disabled {
+			auth.Disabled = true
+			auth.Status = coreauth.StatusDisabled
+		}
 	} else {
 		// For OAuth: merge per-account excluded models with global provider-level exclusions
 		add(perKey)

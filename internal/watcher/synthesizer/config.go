@@ -23,6 +23,16 @@ func stableConfigAuthRouteIdentity(parts ...any) (string, error) {
 	return string(data), nil
 }
 
+func configAuthRouteExcludedModelsHash(models []string) string {
+	filtered := make([]string, 0, len(models))
+	for _, model := range models {
+		if strings.TrimSpace(model) != "*" {
+			filtered = append(filtered, model)
+		}
+	}
+	return diff.ComputeExcludedModelsHash(filtered)
+}
+
 func appendCredentialOverrideIdentity(parts []string, cooling *bool, retry *int) []string {
 	if cooling != nil {
 		parts = append(parts, "disable-cooling="+strconv.FormatBool(*cooling))
@@ -115,6 +125,11 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 		return nil, err
 	}
 	out = append(out, codexKeys...)
+	metaKeys, err := s.synthesizeCodexStyleKeys(ctx, ctx.Config.MetaKey, "meta")
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, metaKeys...)
 	xaiKeys, err := s.synthesizeXAIKeys(ctx)
 	if err != nil {
 		return nil, err
@@ -231,7 +246,7 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) ([]*core
 		proxyURL := strings.TrimSpace(ck.ProxyURL)
 		headers := config.NormalizeHeaders(ck.Headers)
 		modelsHash := diff.ComputeClaudeModelsHash(ck.Models)
-		excludedModelsHash := diff.ComputeExcludedModelsHash(ck.ExcludedModels)
+		excludedModelsHash := configAuthRouteExcludedModelsHash(ck.ExcludedModels)
 		profile, errProfile := config.ParseClaudeFingerprintProfile(ck.FingerprintProfile)
 		if errProfile != nil {
 			return nil, fmt.Errorf("claude-api-key[%d]: %w", i, errProfile)
@@ -333,11 +348,14 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(
 		if key == "" && base == "" {
 			continue
 		}
+		if provider != "codex" && entry.DisableCodexCloaking != nil {
+			return nil, fmt.Errorf("%s-api-key[%d]: disable-codex-cloaking is only supported for Codex", provider, i)
+		}
 		prefix := strings.TrimSpace(entry.Prefix)
 		proxyURL := strings.TrimSpace(entry.ProxyURL)
 		headers := config.NormalizeHeaders(entry.Headers)
 		modelsHash := diff.ComputeCodexModelsHash(entry.Models)
-		excludedModelsHash := diff.ComputeExcludedModelsHash(entry.ExcludedModels)
+		excludedModelsHash := configAuthRouteExcludedModelsHash(entry.ExcludedModels)
 		idParts := []string{key, base}
 		disableCooling := entry.DisableCooling != nil && *entry.DisableCooling
 		if entry.Priority != 0 || entry.Weight != nil || prefix != "" || proxyURL != "" || modelsHash != "" ||
@@ -364,6 +382,14 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(
 			coolingIdentity = nil
 		}
 		idParts = appendCredentialOverrideIdentity(idParts, coolingIdentity, entry.RequestRetry)
+		if provider == "codex" {
+			if entry.AlphaSearch {
+				idParts = append(idParts, "alpha-search=true")
+			}
+			if entry.DisableCodexCloaking != nil {
+				idParts = append(idParts, "disable-codex-cloaking="+strconv.FormatBool(*entry.DisableCodexCloaking))
+			}
+		}
 		id, token := idGen.next(provider+":apikey", idParts...)
 		attrs := map[string]string{
 			"source":                      fmt.Sprintf("config:%s[%s]", provider, token),
@@ -382,8 +408,13 @@ func (s *ConfigSynthesizer) synthesizeCodexStyleKeys(
 		if entry.Websockets {
 			attrs["websockets"] = "true"
 		}
-		if provider == "codex" && entry.AlphaSearch {
-			attrs[coreauth.AttributeCodexAlphaSearch] = "true"
+		if provider == "codex" {
+			if entry.AlphaSearch {
+				attrs[coreauth.AttributeCodexAlphaSearch] = "true"
+			}
+			if entry.DisableCodexCloaking != nil {
+				attrs[coreauth.AttributeCodexDisableCloaking] = strconv.FormatBool(*entry.DisableCodexCloaking)
+			}
 		}
 		if modelsHash != "" {
 			attrs["models_hash"] = modelsHash
@@ -554,6 +585,9 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) ([]*co
 		if hash := diff.ComputeVertexCompatModelsHash(compat.Models); hash != "" {
 			attrs["models_hash"] = hash
 		}
+		if compat.Interactions != nil && *compat.Interactions {
+			attrs["interactions"] = "true"
+		}
 		if err := addConfigHeadersToAttrs(compat.Headers, attrs); err != nil {
 			return nil, err
 		}
@@ -569,7 +603,7 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) ([]*co
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
-		ApplyAuthExcludedModelsMeta(a, cfg, nil, "apikey")
+		ApplyAuthExcludedModelsMeta(a, cfg, compat.ExcludedModels, "apikey")
 		out = append(out, a)
 	}
 	return out, nil

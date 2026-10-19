@@ -114,6 +114,9 @@ type Config struct {
 	// SaveCooldownStatus persists runtime cooldown state independently of auth credentials.
 	SaveCooldownStatus bool `yaml:"save-cooldown-status" json:"save-cooldown-status"`
 
+	// TransientErrorCooldownSeconds 控制临时上游错误的冷却时长，0 使用默认值，负数停用
+	TransientErrorCooldownSeconds int `yaml:"transient-error-cooldown-seconds" json:"transient-error-cooldown-seconds"`
+
 	// AuthAutoRefreshWorkers overrides the core auth auto-refresh concurrency.
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
@@ -155,6 +158,9 @@ type Config struct {
 	// XAIKey defines native xAI API key configurations.
 	XAIKey []XAIKey `yaml:"xai-api-key" json:"xai-api-key"`
 
+	// MetaKey defines native Meta Muse API key configurations.
+	MetaKey []MetaKey `yaml:"meta-api-key" json:"meta-api-key"`
+
 	// Antigravity configures provider-wide Antigravity request behavior.
 	Antigravity AntigravityConfig `yaml:"antigravity" json:"antigravity"`
 
@@ -165,6 +171,8 @@ type Config struct {
 	XAI XAIConfig `yaml:"xai" json:"xai"`
 
 	Codex CodexConfig `yaml:"codex" json:"codex"`
+
+	Claude ClaudeConfig `yaml:"claude" json:"claude"`
 
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
@@ -194,6 +202,9 @@ type Config struct {
 	// gemini-api-key, interactions-api-key, codex-api-key, xai-api-key, claude-api-key,
 	// openai-compatibility, and vertex-api-key.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
+
+	// OAuthSettings overrides model metadata only for OAuth/file-backed credentials.
+	OAuthSettings map[string][]OAuthModelSetting `yaml:"oauth-settings,omitempty" json:"oauth-settings,omitempty"`
 
 	// OAuthRequestScopedErrors defines per-provider error rules for OAuth/file-backed auth entries.
 	OAuthRequestScopedErrors map[string][]RequestScopedErrorRule `yaml:"oauth-request-scoped-errors,omitempty" json:"oauth-request-scoped-errors,omitempty"`
@@ -351,6 +362,12 @@ type DevinConfig struct {
 type XAIConfig struct {
 	// InjectXSearch injects xAI's native x_search tool when the request does not declare it.
 	InjectXSearch bool `yaml:"inject-x-search" json:"inject-x-search"`
+}
+
+// ClaudeConfig configures provider-wide Claude request behavior.
+type ClaudeConfig struct {
+	// ModelLevelCooling limits Claude quota cooldowns to the requested model.
+	ModelLevelCooling bool `yaml:"model-level-cooling" json:"model-level-cooling"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -540,6 +557,38 @@ type OAuthModelAlias struct {
 	DisplayName string `yaml:"display-name,omitempty" json:"display-name,omitempty"`
 
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+}
+
+// OAuthModelSetting overrides metadata for one OAuth model or its client-facing alias.
+type OAuthModelSetting struct {
+	Name             string `yaml:"name" json:"name"`
+	Alias            string `yaml:"alias,omitempty" json:"alias,omitempty"`
+	MaxContextLength int    `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
+}
+
+// ResolveOAuthModelSetting prefers an explicit alias over a model name; later rules of equal specificity win.
+func ResolveOAuthModelSetting(settings []OAuthModelSetting, modelID, catalogName, modelName string) *OAuthModelSetting {
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	catalog := strings.ToLower(strings.TrimSpace(catalogName))
+	name := strings.ToLower(strings.TrimSpace(modelName))
+	var aliasMatch, nameMatch *OAuthModelSetting
+	for i := range settings {
+		entry := &settings[i]
+		entryName := strings.ToLower(strings.TrimSpace(entry.Name))
+		if entryName == "" {
+			continue
+		}
+		alias := strings.ToLower(strings.TrimSpace(entry.Alias))
+		if alias != "" && alias == id {
+			aliasMatch = entry
+		} else if (alias == "" || alias == id) && (id == entryName || catalog == entryName || name == entryName) {
+			nameMatch = entry
+		}
+	}
+	if aliasMatch != nil {
+		return aliasMatch
+	}
+	return nameMatch
 }
 
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
@@ -746,6 +795,9 @@ type CodexKey struct {
 	// DisableCooling 覆盖全局冷却策略，nil 继承，false 明确启用冷却
 	DisableCooling *bool `yaml:"disable-cooling,omitempty" json:"disable-cooling,omitempty"`
 
+	// DisableCodexCloaking overrides the global Codex cloaking setting for this key.
+	DisableCodexCloaking *bool `yaml:"disable-codex-cloaking,omitempty" json:"disable-codex-cloaking,omitempty"`
+
 	// RequestRetry 指定额外重试轮数，nil 或负值继承，零禁用额外重试
 	RequestRetry *int `yaml:"request-retry,omitempty" json:"request-retry,omitempty"`
 
@@ -776,6 +828,9 @@ type CodexModel struct {
 	// IsCompat preserves compatibility-only message fields for API-key models.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
 
+	// SupportConfigurationUpdate enables configuration_update for a Codex API-key model.
+	SupportConfigurationUpdate bool `yaml:"support-configuration-update,omitempty" json:"support-configuration-update,omitempty"`
+
 	// Thinking overrides the upstream model's thinking capability.
 	Thinking *registry.ThinkingSupport `yaml:"thinking,omitempty" json:"thinking,omitempty"`
 }
@@ -795,6 +850,9 @@ type XAIKey = CodexKey
 
 // XAIModel uses the Codex model mapping structure for xAI models.
 type XAIModel = CodexModel
+
+// MetaKey uses the Codex API key structure for native Meta Muse execution.
+type MetaKey = CodexKey
 
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
@@ -940,6 +998,9 @@ type OpenAICompatibilityModel struct {
 	// MaxContextLength overrides the context window advertised to Codex clients.
 	MaxContextLength int `yaml:"max-context-length,omitempty" json:"max-context-length,omitempty"`
 
+	// UseMaxCompletionTokens selects max_completion_tokens for this upstream model.
+	UseMaxCompletionTokens bool `yaml:"use-max-completion-tokens,omitempty" json:"use-max-completion-tokens,omitempty"`
+
 	// Image marks this model as callable through /v1/images/generations and /v1/images/edits.
 	Image bool `yaml:"image,omitempty" json:"image,omitempty"`
 
@@ -961,6 +1022,9 @@ func (m OpenAICompatibilityModel) GetAlias() string         { return m.Alias }
 func (m OpenAICompatibilityModel) GetDisplayName() string   { return m.DisplayName }
 func (m OpenAICompatibilityModel) GetMaxContextLength() int { return m.MaxContextLength }
 func (m OpenAICompatibilityModel) GetIsCompat() bool        { return m.IsCompat }
+func (m OpenAICompatibilityModel) GetUseMaxCompletionTokens() bool {
+	return m.UseMaxCompletionTokens
+}
 func (m OpenAICompatibilityModel) GetThinking() *registry.ThinkingSupport {
 	return m.Thinking
 }

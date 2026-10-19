@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,32 @@ import (
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
 )
+
+func TestFileSynthesizerQuotaMaterialIdentity(t *testing.T) {
+	dir := t.TempDir()
+	ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: dir, Now: time.Now(), IDGenerator: NewStableIDGenerator()}
+	var previous string
+	for _, serial := range []string{"7", "9007199254740992", "9007199254740993"} {
+		raw := []byte(`{"type":"codex","access_token":"synthetic","priority":7,"request-retry":1,"credential_serial":` + serial + `}`)
+		auths, err := SynthesizeAuthFile(ctx, filepath.Join(dir, "codex-material.json"), raw)
+		if err != nil || len(auths) != 1 {
+			t.Fatalf("synthesize exact source: count=%d err=%v", len(auths), err)
+		}
+		auth := auths[0]
+		revision, equivalent, err := coreauth.QuotaCredentialRevisions(auth)
+		if err != nil || revision == previous || slices.Contains(equivalent, auth.Attributes[coreauth.PersistedSHA256Attribute]) != (serial == "7") {
+			t.Fatalf("source material or numeric legacy isolation changed: %v", err)
+		}
+		var expected any = json.Number(serial)
+		if serial == "7" {
+			expected = float64(7)
+		}
+		if auth.Metadata["credential_serial"] != expected || auth.Attributes["priority"] != "7" {
+			t.Fatal("synthesized numeric material or priority changed")
+		}
+		previous = revision
+	}
+}
 
 func TestNewFileSynthesizer(t *testing.T) {
 	synth := NewFileSynthesizer()
@@ -119,8 +146,11 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	if v, ok := auths[0].Metadata["disable_cooling"].(bool); !ok || !v {
 		t.Errorf("expected disable_cooling true, got %v", auths[0].Metadata["disable_cooling"])
 	}
-	if v, ok := auths[0].Metadata["request_retry"].(float64); !ok || int(v) != 2 {
+	if auths[0].Metadata["request_retry"] != float64(2) {
 		t.Errorf("expected request_retry 2, got %v", auths[0].Metadata["request_retry"])
+	}
+	if retry, specified := auths[0].RequestRetryOverride(); !specified || retry != 2 {
+		t.Errorf("numeric retry override = %d, specified=%v", retry, specified)
 	}
 	if auths[0].Status != coreauth.StatusActive {
 		t.Errorf("expected status active, got %s", auths[0].Status)
@@ -130,6 +160,37 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 	if digest := auths[0].Attributes[coreauth.PersistedSHA256Attribute]; len(digest) != 64 {
 		t.Fatalf("synthesized persisted digest = %q", digest)
+	}
+}
+
+func TestFileSynthesizerSeparatesKimiServiceCredentials(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"kimi-domestic.json":      `{"type":"kimi","domain":"kimi.com","access_token":"test-domestic"}`,
+		"kimi-international.json": `{"type":"kimi-ai","domain":"kimi.ai","access_token":"test-international"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	auths, err := NewFileSynthesizer().Synthesize(&SynthesisContext{Config: &config.Config{}, AuthDir: dir, Now: time.Now()})
+	if err != nil || len(auths) != 2 {
+		t.Fatalf("Kimi credentials: auths=%#v error=%v", auths, err)
+	}
+	byProvider := map[string]*coreauth.Auth{}
+	for _, auth := range auths {
+		byProvider[auth.Provider] = auth
+	}
+	for provider, wantURL := range map[string]string{
+		"kimi": "https://api.kimi.com/coding", "kimi-ai": "https://api.kimi.ai/coding",
+	} {
+		auth := byProvider[provider]
+		if auth == nil || auth.Attributes["base_url"] != wantURL || auth.Attributes["domain"] == "" {
+			t.Fatalf("%s credential = %#v", provider, auth)
+		}
+	}
+	if byProvider["kimi"].EnsureIndex() == byProvider["kimi-ai"].EnsureIndex() {
+		t.Fatal("Kimi domestic and international credentials share an auth index")
 	}
 }
 
@@ -193,6 +254,33 @@ func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 
 	if auths[0].Provider != "gemini-cli" {
 		t.Errorf("gemini should be mapped to gemini-cli, got %s", auths[0].Provider)
+	}
+}
+
+func TestSynthesizeGeminiVirtualAuthInheritsCredentialAliasesAndRules(t *testing.T) {
+	ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: t.TempDir(), Now: time.Now()}
+	data := []byte(`{"type":"gemini","project_id":"first,second","model-aliases":[{"name":"gemini-2.5-pro","alias":"project-pro","fork":true}],"request-scoped-errors":[{"status":429,"match":["quota"],"action":"stop"}]}`)
+	auths, err := SynthesizeAuthFile(ctx, filepath.Join(ctx.AuthDir, "gemini.json"), data)
+	if err != nil || len(auths) != 3 {
+		t.Fatalf("auths = %#v error = %v", auths, err)
+	}
+	for _, auth := range auths {
+		aliases := coreauth.OAuthModelAliasesFromAttributes(auth.Attributes)
+		if len(aliases) != 1 || aliases[0].Alias != "project-pro" {
+			t.Fatalf("credential %s aliases = %#v", auth.ID, aliases)
+		}
+		if _, ok := auth.Metadata["request_scoped_errors"]; !ok {
+			t.Fatalf("credential %s lost request rules", auth.ID)
+		}
+	}
+}
+
+func TestSynthesizeAuthFileRejectsInvalidCredentialAliases(t *testing.T) {
+	ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: t.TempDir(), Now: time.Now()}
+	_, err := SynthesizeAuthFile(ctx, filepath.Join(ctx.AuthDir, "invalid.json"),
+		[]byte(`{"type":"claude","model_aliases":[{"name":"claude-sonnet-5-5"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "model_aliases") {
+		t.Fatalf("invalid credential aliases: %v", err)
 	}
 }
 
@@ -397,13 +485,13 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 					if !ok {
 						t.Fatal("expected priority attribute to be set")
 					}
-					if value != tt.want {
-						t.Fatalf("expected priority %q, got %q", tt.want, value)
+					if value != tt.want || auths[0].Attributes[coreauth.AttributeFilePriority] != "true" {
+						t.Fatalf("file priority = %#v, want %q with file marker", auths[0].Attributes, tt.want)
 					}
 					return
 				}
-				if ok {
-					t.Fatalf("expected priority attribute to be absent, got %q", value)
+				if ok || auths[0].Attributes[coreauth.AttributeFilePriority] != "" {
+					t.Fatalf("invalid priority should not be inherited: %#v", auths[0].Attributes)
 				}
 			},
 		)
@@ -448,15 +536,17 @@ func TestFileSynthesizerCodexPlanTypeMetadataThenJWT(t *testing.T) {
 			want: "plus",
 		},
 		{
-			name: "invalid JWT leaves attribute absent",
+			name: "invalid JWT defaults to free",
 			metadata: map[string]any{
 				"type":     "codex",
 				"id_token": "invalid",
 			},
+			want: "free",
 		},
 		{
-			name:     "missing plan leaves attribute absent",
+			name:     "missing plan defaults to free",
 			metadata: map[string]any{"type": "codex"},
+			want:     "free",
 		},
 	}
 	for _, test := range tests {
@@ -482,12 +572,6 @@ func TestFileSynthesizerCodexPlanTypeMetadataThenJWT(t *testing.T) {
 				t.Fatalf("SynthesizeAuthFile() auth count = %d, want 1", len(auths))
 			}
 			got, present := auths[0].Attributes["plan_type"]
-			if test.want == "" {
-				if present {
-					t.Fatalf("plan_type = %q, want absent", got)
-				}
-				return
-			}
 			if !present || got != test.want {
 				t.Fatalf("plan_type = %q present=%t, want %q", got, present, test.want)
 			}
@@ -961,10 +1045,19 @@ func TestSynthesizeAuthFileFiltersInvalidPluginChildWeight(t *testing.T) {
 	}
 }
 
+type filePriorityTestStorage struct{ metadata map[string]any }
+
+func (*filePriorityTestStorage) SaveTokenToFile(string) error { return nil }
+
+func (storage *filePriorityTestStorage) SetMetadata(metadata map[string]any) {
+	storage.metadata = metadata
+}
+
 func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 	tempDir := t.TempDir()
 	fullPath := filepath.Join(tempDir, "plugin.json")
-	raw := []byte(`{"type":"plugin","excluded_models":["model-a"],"proxy-url":"http://proxy.test","headers":{"X-Test":"value"}}`)
+	raw := []byte(`{"type":"plugin","priority":11,"excluded_models":["model-a"],"proxy-url":"http://proxy.test","headers":{"X-Test":"value"},"model_aliases":[{"name":"real","alias":"short","fork":true}],"request_scoped_errors":[{"status":429,"match":["quota"],"action":"stop"}]}`)
+	storage := &filePriorityTestStorage{}
 	ctx := &SynthesisContext{
 		Config:  &config.Config{},
 		AuthDir: tempDir,
@@ -978,9 +1071,11 @@ func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 			}
 			return []*coreauth.Auth{
 				{
-					ID:       "plugin-a",
-					Provider: "plugin",
-					FileName: req.FileName,
+					ID:         "plugin-a",
+					Provider:   "plugin",
+					FileName:   req.FileName,
+					Storage:    storage,
+					Attributes: map[string]string{"priority": "3"},
 					Metadata: map[string]any{
 						"type": "plugin", "request-retry": 2,
 						"headers": map[string]any{"X-Test": "value"},
@@ -1017,6 +1112,13 @@ func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 			auth.Attributes[coreauth.PersistedReadAtAttribute] == "" {
 			t.Fatalf("auth %s missing persisted source identity: %#v", auth.ID, auth.Attributes)
 		}
+		aliases := coreauth.OAuthModelAliasesFromAttributes(auth.Attributes)
+		if len(aliases) != 1 || aliases[0].Alias != "short" {
+			t.Fatalf("plugin %s model aliases = %#v", auth.ID, aliases)
+		}
+		if _, present := auth.Metadata["request_scoped_errors"]; !present {
+			t.Fatalf("plugin %s lost source request rules", auth.ID)
+		}
 		if auth.Attributes["header:X-Test"] != "value" || auth.Attributes["auth_kind"] != "oauth" ||
 			auth.ProxyURL != "http://proxy.test" {
 			t.Fatalf(
@@ -1026,6 +1128,14 @@ func TestSynthesizeAuthFileExpandsPluginMultiAuths(t *testing.T) {
 				auth.ProxyURL,
 			)
 		}
+	}
+	for _, auth := range auths {
+		if auth.Attributes["priority"] != "11" || auth.Attributes[coreauth.AttributeFilePriority] != "true" {
+			t.Fatalf("plugin %s did not inherit file priority: %#v", auth.ID, auth.Attributes)
+		}
+	}
+	if storage.metadata["priority"] != float64(11) {
+		t.Fatalf("plugin storage did not receive file priority: %#v", storage.metadata)
 	}
 	if auths[0].EnsureIndex() == "" || auths[0].EnsureIndex() == auths[1].EnsureIndex() {
 		t.Fatalf("plugin indexes = %q/%q", auths[0].EnsureIndex(), auths[1].EnsureIndex())

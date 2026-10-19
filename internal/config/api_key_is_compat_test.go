@@ -1,10 +1,44 @@
 package config
 
 import (
+	"encoding/json"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
+
+func TestOpenAICompatibilityUseMaxCompletionTokensDecoding(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		raw    string
+		decode func([]byte, any) error
+	}{
+		{name: "YAML", raw: "openai-compatibility:\n  - name: synthetic\n    models:\n      - name: explicit-true\n        use-max-completion-tokens: true\n      - name: explicit-false\n        use-max-completion-tokens: false\n      - name: omitted\n", decode: yaml.Unmarshal},
+		{name: "JSON", raw: `{"openai-compatibility":[{"name":"synthetic","models":[{"name":"explicit-true","use-max-completion-tokens":true},{"name":"explicit-false","use-max-completion-tokens":false},{"name":"omitted"}]}]}`, decode: json.Unmarshal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg Config
+			if err := tc.decode([]byte(tc.raw), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			cloned, err := Clone(&cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, value := range []*Config{&cfg, cloned} {
+				if len(value.OpenAICompatibility) != 1 || len(value.OpenAICompatibility[0].Models) != 3 {
+					t.Fatalf("OpenAI-compatible models = %+v", value.OpenAICompatibility)
+				}
+				for i, model := range value.OpenAICompatibility[0].Models {
+					want := i == 0
+					if model.UseMaxCompletionTokens != want || model.GetUseMaxCompletionTokens() != want {
+						t.Fatalf("model %d capability = %+v, want %t", i, model, want)
+					}
+				}
+			}
+		})
+	}
+}
 
 func TestAPIKeyModelIsCompatConfigDecoding(t *testing.T) {
 	const yamlConfig = `gemini-api-key:

@@ -35,6 +35,7 @@ func ComputeOpenAICompatModelsHash(models []config.OpenAICompatibilityModel) str
 						normalizeModelModalitiesForHash(model.OutputModalities), ",",
 					) +
 						"|is-compat=" + strconv.FormatBool(model.IsCompat) +
+						"|use-max-completion-tokens=" + strconv.FormatBool(model.UseMaxCompletionTokens) +
 						thinkingHashSuffix(model.Thinking),
 				)
 			}
@@ -73,13 +74,17 @@ func ComputeCodexModelsHash(models []config.CodexModel) string {
 				if name == "" && alias == "" {
 					continue
 				}
+				configurationUpdate := ""
+				if model.SupportConfigurationUpdate {
+					configurationUpdate = "|support-configuration-update=true"
+				}
 				out(
 					strings.ToLower(name) + "|" + strings.ToLower(alias) +
 						"|display-name=" + strings.TrimSpace(model.DisplayName) +
 						"|max-context-length=" + strconv.Itoa(model.MaxContextLength) +
 						"|force-mapping=" + strconv.FormatBool(model.ForceMapping) +
 						"|is-compat=" + strconv.FormatBool(model.IsCompat) +
-						thinkingHashSuffix(model.Thinking),
+						thinkingHashSuffix(model.Thinking) + configurationUpdate,
 				)
 			}
 		},

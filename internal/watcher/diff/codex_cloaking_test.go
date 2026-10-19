@@ -13,3 +13,12 @@ func TestBuildConfigChangeDetailsCodexCloaking(t *testing.T) {
 	changes := BuildConfigChangeDetails(oldCfg, newCfg)
 	expectContains(t, changes, "codex.disable-codex-cloaking: false -> true")
 }
+
+func TestBuildConfigChangeDetailsCodexKeyCloaking(t *testing.T) {
+	oldCfg := &config.Config{CodexKey: []config.CodexKey{{APIKey: "test-key", BaseURL: "https://example.test"}}}
+	disabled := false
+	newCfg := &config.Config{CodexKey: []config.CodexKey{{
+		APIKey: "test-key", BaseURL: "https://example.test", DisableCodexCloaking: &disabled,
+	}}}
+	expectContains(t, BuildConfigChangeDetails(oldCfg, newCfg), "codex[0].disable-codex-cloaking: inherit -> false")
+}

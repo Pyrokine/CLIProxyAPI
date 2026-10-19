@@ -123,6 +123,44 @@ func SanitizeOAuthModelAliasMap(entries map[string][]OAuthModelAlias) map[string
 	return out
 }
 
+// SanitizeOAuthSettings normalizes channels and keeps the last rule for each model and alias.
+func (cfg *Config) SanitizeOAuthSettings() {
+	if cfg == nil || len(cfg.OAuthSettings) == 0 {
+		return
+	}
+	out := make(map[string][]OAuthModelSetting, len(cfg.OAuthSettings))
+	for rawChannel, settings := range cfg.OAuthSettings {
+		channel := strings.ToLower(strings.TrimSpace(rawChannel))
+		if channel == "" {
+			continue
+		}
+		seen := make(map[string]struct{}, len(settings))
+		reversed := make([]OAuthModelSetting, 0, len(settings))
+		for i := len(settings) - 1; i >= 0; i-- {
+			entry := settings[i]
+			entry.Name = strings.TrimSpace(entry.Name)
+			entry.Alias = strings.TrimSpace(entry.Alias)
+			if entry.Name == "" {
+				continue
+			}
+			key := strings.ToLower(entry.Name) + "->" + strings.ToLower(entry.Alias)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			reversed = append(reversed, entry)
+		}
+		if len(reversed) > 0 {
+			clean := make([]OAuthModelSetting, len(reversed))
+			for i := range reversed {
+				clean[len(reversed)-1-i] = reversed[i]
+			}
+			out[channel] = clean
+		}
+	}
+	cfg.OAuthSettings = out
+}
+
 // SanitizeOAuthRequestScopedErrors normalizes global OAuth request-scoped error rules.
 func (cfg *Config) SanitizeOAuthRequestScopedErrors() {
 	if cfg == nil || len(cfg.OAuthRequestScopedErrors) == 0 {
@@ -245,6 +283,26 @@ func (cfg *Config) SanitizeCodexKeys() {
 	cfg.CodexKey = out
 }
 
+func (cfg *Config) SanitizeMetaKeys() {
+	if cfg == nil || len(cfg.MetaKey) == 0 {
+		return
+	}
+	for i := range cfg.MetaKey {
+		entry := &cfg.MetaKey[i]
+		entry.APIKey = strings.TrimSpace(entry.APIKey)
+		entry.Prefix = NormalizeModelPrefix(entry.Prefix)
+		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+		if entry.BaseURL == "" {
+			entry.BaseURL = "https://api.meta.ai/v1"
+		}
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+		entry.Headers = NormalizeHeaders(entry.Headers)
+		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.Websockets = false
+		entry.AlphaSearch = false
+	}
+}
+
 // SanitizeXAIKeys normalizes xAI API key entries and removes unusable entries.
 func (cfg *Config) SanitizeXAIKeys() {
 	if cfg == nil || len(cfg.XAIKey) == 0 {
@@ -268,6 +326,16 @@ func (cfg *Config) SanitizeXAIKeys() {
 	cfg.XAIKey = out
 }
 
+// NormalizeCloakConfig 清理 cloak 配置中的字段空白
+func NormalizeCloakConfig(cloak *CloakConfig) *CloakConfig {
+	if cloak == nil {
+		return nil
+	}
+	cloak.Mode = strings.TrimSpace(cloak.Mode)
+	cloak.SensitiveWords = trimNonEmptyStrings(cloak.SensitiveWords)
+	return cloak
+}
+
 // SanitizeClaudeKeys normalizes headers for Claude credentials.
 func (cfg *Config) SanitizeClaudeKeys() {
 	if cfg == nil || len(cfg.ClaudeKey) == 0 {
@@ -281,6 +349,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 		entry.Prefix = NormalizeModelPrefix(entry.Prefix)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.Cloak = NormalizeCloakConfig(entry.Cloak)
 	}
 }
 

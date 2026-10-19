@@ -399,6 +399,76 @@ func TestConfigSynthesizer_CodexKeys(t *testing.T) {
 	}
 }
 
+func TestConfigSynthesizer_CodexKeyCloakingOverride(t *testing.T) {
+	cfg := &config.Config{
+		CodexKey: []config.CodexKey{
+			{APIKey: "codex-inherit", BaseURL: "https://api.openai.com"},
+			{APIKey: "codex-disabled", BaseURL: "https://api.openai.com", DisableCodexCloaking: new(true)},
+			{APIKey: "codex-enabled", BaseURL: "https://api.openai.com", DisableCodexCloaking: new(false)},
+		},
+		XAIKey:  []config.XAIKey{{APIKey: "xai-key", BaseURL: "https://api.x.ai"}},
+		MetaKey: []config.MetaKey{{APIKey: "LLM|meta-key", BaseURL: "https://api.meta.ai/v1"}},
+	}
+	ctx := &SynthesisContext{Config: cfg, Now: time.Now(), IDGenerator: NewStableIDGenerator()}
+	auths, err := NewConfigSynthesizer().Synthesize(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := make(map[string]string, len(auths))
+	for _, auth := range auths {
+		values[auth.Provider+":"+auth.Attributes["api_key"]] = auth.Attributes[coreauth.AttributeCodexDisableCloaking]
+	}
+	if len(auths) != 5 || values["codex:codex-inherit"] != "" || values["codex:codex-disabled"] != "true" ||
+		values["codex:codex-enabled"] != "false" || values["xai:xai-key"] != "" || values["meta:LLM|meta-key"] != "" {
+		t.Fatalf("Codex cloaking auth attributes = %+v", values)
+	}
+}
+
+func TestConfigSynthesizer_RejectsCodexCloakingOnOtherProviders(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		config *config.Config
+	}{
+		{"xai", &config.Config{XAIKey: []config.XAIKey{{APIKey: "xai-key", BaseURL: "https://api.x.ai", DisableCodexCloaking: new(true)}}}},
+		{"meta", &config.Config{MetaKey: []config.MetaKey{{APIKey: "LLM|meta-key", BaseURL: "https://api.meta.ai/v1", DisableCodexCloaking: new(false)}}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := &SynthesisContext{Config: tc.config, Now: time.Now(), IDGenerator: NewStableIDGenerator()}
+			if _, err := NewConfigSynthesizer().Synthesize(ctx); err == nil || !strings.Contains(err.Error(), "disable-codex-cloaking") {
+				t.Fatalf("unsupported %s override error = %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestConfigSynthesizer_MetaKeys(t *testing.T) {
+	ctx := &SynthesisContext{
+		Config: &config.Config{MetaKey: []config.MetaKey{
+			{},
+			{APIKey: "LLM|meta-test", BaseURL: "https://api.meta.ai/v1", Priority: 4},
+		}},
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := NewConfigSynthesizer().Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("Synthesize(): %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("Meta auth count = %d, want 1", len(auths))
+	}
+	auth := auths[0]
+	if !strings.HasPrefix(auth.ID, "meta:apikey:") || auth.Provider != "meta" || auth.Label != "meta-apikey" {
+		t.Fatalf("Meta auth identity = (%q, %q, %q)", auth.ID, auth.Provider, auth.Label)
+	}
+	if auth.Attributes["api_key"] != "LLM|meta-test" || auth.Attributes["base_url"] != "https://api.meta.ai/v1" ||
+		auth.Attributes["auth_kind"] != "apikey" || auth.Attributes["priority"] != "4" ||
+		auth.Attributes[coreauth.AttributeConfigIndex] != "1" {
+		t.Fatal("Meta auth attributes do not match configuration")
+	}
+}
+
 func TestConfigSynthesizer_CodexKeys_PreservesSourceConfigIndex(t *testing.T) {
 	synth := NewConfigSynthesizer()
 	ctx := &SynthesisContext{
@@ -960,6 +1030,21 @@ func TestConfigSynthesizer_GeminiStyleIdentityIncludesPrefixAndSortedHeaders(t *
 	}
 }
 
+func TestConfigSynthesizer_DefaultCodexRouteIdentity(t *testing.T) {
+	auths, err := NewConfigSynthesizer().Synthesize(&SynthesisContext{
+		Config: &config.Config{CodexKey: []config.CodexKey{{
+			APIKey: "shared-codex-key", BaseURL: "https://codex.example.com",
+		}}},
+		Now: time.Unix(1_700_000_000, 0), IDGenerator: NewStableIDGenerator(),
+	})
+	if err != nil {
+		t.Fatalf("Synthesize() error = %v", err)
+	}
+	if len(auths) != 1 || auths[0].ID != "codex:apikey:36d7726d8c70" {
+		t.Fatalf("default Codex route did not retain its existing identity: %#v", auths)
+	}
+}
+
 func TestConfigSynthesizer_RoutingMetadataStableAcrossReorderAndDelete(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -1017,6 +1102,32 @@ func TestConfigSynthesizer_RoutingMetadataStableAcrossReorderAndDelete(t *testin
 			},
 		},
 		{
+			name:         "codex configuration update capability",
+			provider:     "codex",
+			identityAttr: "models_hash",
+			configureCodex: func(key *config.CodexKey, variant string) {
+				key.Models = []config.CodexModel{{
+					Name: "model", Alias: "alias", SupportConfigurationUpdate: variant == "a",
+				}}
+			},
+		},
+		{
+			name:         "codex alpha search capability",
+			provider:     "codex",
+			identityAttr: coreauth.AttributeCodexAlphaSearch,
+			configureCodex: func(key *config.CodexKey, variant string) {
+				key.AlphaSearch = variant == "a"
+			},
+		},
+		{
+			name:         "codex cloaking override",
+			provider:     "codex",
+			identityAttr: coreauth.AttributeCodexDisableCloaking,
+			configureCodex: func(key *config.CodexKey, variant string) {
+				key.DisableCodexCloaking = new(variant == "a")
+			},
+		},
+		{
 			name:         "codex excluded models",
 			provider:     "codex",
 			identityAttr: "excluded_models_hash",
@@ -1068,7 +1179,7 @@ func TestConfigSynthesizer_RoutingMetadataStableAcrossReorderAndDelete(t *testin
 							continue
 						}
 						identity := auth.Attributes[tt.identityAttr]
-						if identity == "" {
+						if identity == "" && tt.identityAttr != coreauth.AttributeCodexAlphaSearch {
 							t.Fatalf("%s auth missing %s", tt.provider, tt.identityAttr)
 						}
 						ids[identity] = auth.ID

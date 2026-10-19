@@ -58,6 +58,16 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			fmt.Sprintf("save-cooldown-status: %t -> %t", oldCfg.SaveCooldownStatus, newCfg.SaveCooldownStatus),
 		)
 	}
+	if oldCfg.Client.Codex.EnableApplyPatch != newCfg.Client.Codex.EnableApplyPatch {
+		changes = append(
+			changes,
+			fmt.Sprintf(
+				"client.codex.enable-apply-patch: %t -> %t",
+				oldCfg.Client.Codex.EnableApplyPatch,
+				newCfg.Client.Codex.EnableApplyPatch,
+			),
+		)
+	}
 	if oldCfg.ClaudeCode.DisableCloakingModelList != newCfg.ClaudeCode.DisableCloakingModelList {
 		changes = append(
 			changes,
@@ -528,6 +538,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			if !reflect.DeepEqual(o.DisableCooling, n.DisableCooling) {
 				changes = append(changes, fmt.Sprintf("codex[%d].disable-cooling: %s -> %s", i, formatOptionalConfigValue(o.DisableCooling), formatOptionalConfigValue(n.DisableCooling)))
 			}
+			if !reflect.DeepEqual(o.DisableCodexCloaking, n.DisableCodexCloaking) {
+				changes = append(changes, fmt.Sprintf("codex[%d].disable-codex-cloaking: %s -> %s", i, formatOptionalConfigValue(o.DisableCodexCloaking), formatOptionalConfigValue(n.DisableCodexCloaking)))
+			}
 			if !reflect.DeepEqual(o.RequestRetry, n.RequestRetry) {
 				changes = append(changes, fmt.Sprintf("codex[%d].request-retry: %s -> %s", i, formatOptionalConfigValue(o.RequestRetry), formatOptionalConfigValue(n.RequestRetry)))
 			}
@@ -588,6 +601,13 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 				)
 			}
 		}
+	}
+
+	// Meta API keys (do not print key material)
+	if len(oldCfg.MetaKey) != len(newCfg.MetaKey) {
+		changes = append(changes, fmt.Sprintf("meta-api-key count: %d -> %d", len(oldCfg.MetaKey), len(newCfg.MetaKey)))
+	} else if !reflect.DeepEqual(oldCfg.MetaKey, newCfg.MetaKey) {
+		changes = append(changes, "meta-api-key entries: updated")
 	}
 
 	// xAI keys (do not print key material)
@@ -666,6 +686,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	}
 	if entries, _ := oAuthModelAliasChanges(oldCfg.OAuthModelAlias, newCfg.OAuthModelAlias); len(entries) > 0 {
 		changes = append(changes, entries...)
+	}
+	if !reflect.DeepEqual(oldCfg.OAuthSettings, newCfg.OAuthSettings) {
+		changes = append(changes, fmt.Sprintf("oauth-settings: updated (%d -> %d channels)", len(oldCfg.OAuthSettings), len(newCfg.OAuthSettings)))
 	}
 	if entries, _ := DiffOAuthRequestScopedErrorsChanges(
 		oldCfg.OAuthRequestScopedErrors, newCfg.OAuthRequestScopedErrors,

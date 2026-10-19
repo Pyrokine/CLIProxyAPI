@@ -71,15 +71,16 @@ func TestBuildAPIKeyClientsCounts(t *testing.T) {
 		ClaudeKey: []config.ClaudeKey{{APIKey: "c1"}},
 		CodexKey:  []config.CodexKey{{APIKey: "x1"}, {APIKey: "x2"}},
 		XAIKey:    []config.XAIKey{{APIKey: "xai-1"}},
+		MetaKey:   []config.MetaKey{{APIKey: "LLM|meta-1"}},
 		OpenAICompatibility: []config.OpenAICompatibility{
 			{APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "o1"}, {APIKey: "o2"}}},
 			{Disabled: true, APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "skip-me"}}},
 		},
 	}
 
-	gemini, vertex, claude, codex, xai, compat := BuildAPIKeyClients(cfg)
-	if gemini != 3 || vertex != 1 || claude != 1 || codex != 2 || xai != 1 || compat != 2 {
-		t.Fatalf("unexpected counts: %d %d %d %d %d %d", gemini, vertex, claude, codex, xai, compat)
+	gemini, vertex, claude, codex, xai, meta, compat := BuildAPIKeyClients(cfg)
+	if gemini != 3 || vertex != 1 || claude != 1 || codex != 2 || xai != 1 || meta != 1 || compat != 2 {
+		t.Fatalf("unexpected counts: %d %d %d %d %d %d %d", gemini, vertex, claude, codex, xai, meta, compat)
 	}
 }
 
@@ -1148,6 +1149,46 @@ func TestHandleEventRemoveDebounceSkips(t *testing.T) {
 	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Remove})
 	if atomic.LoadInt32(&reloads) != 0 {
 		t.Fatalf("expected remove to be debounced, got %d", reloads)
+	}
+}
+
+func TestHandleEventAtomicReplaceDelayedStatPreservesClient(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	authFile := filepath.Join(authDir, "token.json")
+	oldSum := sha256.Sum256([]byte(`{"type":"demo","v":1}`))
+	var reloads atomic.Int32
+	w := &Watcher{
+		authDir:        authDir,
+		configPath:     filepath.Join(tmpDir, "config.yaml"),
+		lastAuthHashes: make(map[string]string),
+		reloadCallback: func(*config.Config) bool { reloads.Add(1); return true },
+	}
+	w.SetConfig(&config.Config{AuthDir: authDir})
+	normalized := w.normalizeAuthPath(authFile)
+	w.lastAuthHashes[normalized] = hexString(oldSum[:])
+	auth := &coreauth.Auth{ID: "token.json", FileName: "token.json", Provider: "demo", Status: coreauth.StatusActive}
+	w.currentAuths = map[string]*coreauth.Auth{"token.json": auth}
+	w.fileAuthsByPath = map[string]map[string]*coreauth.Auth{normalized: {"token.json": auth}}
+
+	errChan := make(chan error, 1)
+	go func() {
+		time.Sleep(replaceCheckDelay + 10*time.Millisecond)
+		errChan <- os.WriteFile(authFile, []byte(`{"type":"demo","v":2}`), 0o644)
+	}()
+	w.handleEvent(fsnotify.Event{Name: authFile, Op: fsnotify.Rename})
+	if err := <-errChan; err != nil {
+		t.Fatal(err)
+	}
+	w.clientsMutex.RLock()
+	_, known := w.lastAuthHashes[normalized]
+	_, current := w.currentAuths["token.json"]
+	w.clientsMutex.RUnlock()
+	if !known || !current || reloads.Load() != 1 {
+		t.Fatalf("delayed replacement lost client: known=%t current=%t reloads=%d", known, current, reloads.Load())
 	}
 }
 

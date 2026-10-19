@@ -91,6 +91,29 @@ oauth-request-scoped-errors:
 	}
 }
 
+func TestParseConfigOAuthRequestScopedErrorChannels(t *testing.T) {
+	channels := []string{"vertex", "aistudio", "antigravity", "claude", "codex", "kimi", "xai", "meta"}
+	var source strings.Builder
+	source.WriteString("oauth-request-scoped-errors:\n")
+	for _, channel := range channels {
+		source.WriteString("  " + channel + ":\n    - status: 400\n      match: [context_length_exceeded]\n      action: stop\n")
+	}
+	cfg, err := ParseConfigBytes([]byte(source.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.OAuthRequestScopedErrors) != len(channels) {
+		t.Fatalf("OAuth channels = %d, want %d", len(cfg.OAuthRequestScopedErrors), len(channels))
+	}
+	for _, channel := range channels {
+		rules := cfg.OAuthRequestScopedErrors[channel]
+		if len(rules) != 1 || rules[0].Status != 400 || rules[0].Action != "stop" ||
+			len(rules[0].Match) != 1 || rules[0].Match[0] != "context_length_exceeded" {
+			t.Fatalf("%s rules = %+v", channel, rules)
+		}
+	}
+}
+
 func TestSanitizeOAuthRequestScopedErrorsKeepsRuntimeInvalidValues(t *testing.T) {
 	cfg := &Config{OAuthRequestScopedErrors: map[string][]RequestScopedErrorRule{
 		" Vertex ": {

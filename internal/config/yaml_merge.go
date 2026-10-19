@@ -85,6 +85,10 @@ func mergeNodePreserve(dst, src *yaml.Node, path ...[]string) {
 			copyNodeShallow(dst, src)
 		}
 		mergeMappingPreserve(dst, src, currentPath)
+		if len(currentPath) > 0 && currentPath[len(currentPath)-1] == "headers" ||
+			len(currentPath) == 2 && currentPath[0] == "claude-api-key" && currentPath[1] == "cloak" {
+			pruneMissingMapKeys(dst, src)
+		}
 	case yaml.SequenceNode:
 		// Preserve explicit null style if dst was null and src is empty sequence
 		if dst.Kind == yaml.ScalarNode && dst.Tag == "!!null" && len(src.Content) == 0 {
@@ -430,6 +434,53 @@ func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {
 	pruneMissingMapKeys(dstVal, srcVal)
 }
 
+func prunePluginConfigMappings(dstRoot, srcRoot *yaml.Node) {
+	if dstRoot == nil || srcRoot == nil || dstRoot.Kind != yaml.MappingNode || srcRoot.Kind != yaml.MappingNode {
+		return
+	}
+	dstPluginIndex := findMapKeyIndex(dstRoot, "plugins")
+	srcPluginIndex := findMapKeyIndex(srcRoot, "plugins")
+	if dstPluginIndex < 0 || srcPluginIndex < 0 {
+		return
+	}
+	dstPlugins := dstRoot.Content[dstPluginIndex+1]
+	srcPlugins := srcRoot.Content[srcPluginIndex+1]
+	pruneMappingToGeneratedKeys(dstPlugins, srcPlugins, "configs")
+	if dstPlugins.Kind != yaml.MappingNode || srcPlugins.Kind != yaml.MappingNode {
+		return
+	}
+	dstConfigIndex := findMapKeyIndex(dstPlugins, "configs")
+	srcConfigIndex := findMapKeyIndex(srcPlugins, "configs")
+	if dstConfigIndex >= 0 && srcConfigIndex >= 0 {
+		dstConfigs := dstPlugins.Content[dstConfigIndex+1]
+		srcConfigs := srcPlugins.Content[srcConfigIndex+1]
+		pruneMissingMapKeysRecursively(dstConfigs, srcConfigs)
+		if dstConfigs != nil && dstConfigs.Kind == yaml.MappingNode && len(dstConfigs.Content) == 0 &&
+			srcConfigs != nil && srcConfigs.Kind == yaml.MappingNode && len(srcConfigs.Content) == 0 {
+			removeMapKey(dstPlugins, "configs")
+		}
+	}
+}
+
+func pruneMissingMapKeysRecursively(dst, src *yaml.Node) {
+	if dst == nil || src == nil || dst.Kind != src.Kind {
+		return
+	}
+	switch src.Kind {
+	case yaml.MappingNode:
+		pruneMissingMapKeys(dst, src)
+		for i := 0; i+1 < len(src.Content); i += 2 {
+			if index := findMapKeyIndex(dst, src.Content[i].Value); index >= 0 {
+				pruneMissingMapKeysRecursively(dst.Content[index+1], src.Content[i+1])
+			}
+		}
+	case yaml.SequenceNode:
+		for i := 0; i < len(dst.Content) && i < len(src.Content); i++ {
+			pruneMissingMapKeysRecursively(dst.Content[i], src.Content[i])
+		}
+	}
+}
+
 func pruneMissingMapKeys(dstMap, srcMap *yaml.Node) {
 	if dstMap == nil || srcMap == nil || dstMap.Kind != yaml.MappingNode || srcMap.Kind != yaml.MappingNode {
 		return
@@ -492,11 +543,32 @@ func normalizeCollectionNodeStyles(node *yaml.Node) {
 // represents a known default value that should not be written to the config file.
 // This prevents non-zero defaults from polluting the config.
 func isKnownDefaultValue(path []string, node *yaml.Node) bool {
+	if len(path) == 1 && path[0] == "plugins" && node != nil && node.Kind == yaml.MappingNode {
+		if index := findMapKeyIndex(node, "configs"); index >= 0 && index+1 < len(node.Content) {
+			configs := node.Content[index+1]
+			if configs != nil && configs.Kind == yaml.MappingNode && len(configs.Content) > 0 {
+				return false
+			}
+		}
+	}
+	if len(path) >= 2 && path[0] == "plugins" && path[1] == "configs" {
+		return false
+	}
+	if len(path) == 2 && path[0] == "claude-api-key" && path[1] == "cloak" &&
+		node != nil && node.Kind == yaml.MappingNode && findMapKeyIndex(node, "cache-user-id") >= 0 {
+		return false
+	}
+	if len(path) == 3 && path[0] == "claude-api-key" && path[1] == "cloak" &&
+		path[2] == "cache-user-id" && node != nil && node.Tag == "!!bool" {
+		return false
+	}
 	// 凭证覆盖项的 false 和零带有明确语义，不能按全局默认值省略
 	if len(path) == 2 && node != nil && node.Kind == yaml.ScalarNode {
 		switch path[0] {
-		case "claude-api-key", "codex-api-key", "xai-api-key", "gemini-api-key", "interactions-api-key", "vertex-api-key", "openai-compatibility":
+		case "claude-api-key", "codex-api-key", "xai-api-key", "gemini-api-key", "interactions-api-key", "vertex-api-key", "meta-api-key", "openai-compatibility":
 			if (path[1] == "disable-cooling" && node.Tag == "!!bool") ||
+				(path[0] == "codex-api-key" && path[1] == "disable-codex-cloaking" && node.Tag == "!!bool") ||
+				(path[0] == "vertex-api-key" && path[1] == "interactions" && node.Tag == "!!bool") ||
 				(path[1] == "request-retry" && node.Tag == "!!int") {
 				return false
 			}
@@ -571,7 +643,7 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 // pruneKnownDefaultsInNewNode removes default-valued descendants from a new node
 // before it is appended into the destination YAML tree.
 func pruneKnownDefaultsInNewNode(path []string, node *yaml.Node) {
-	if node == nil {
+	if node == nil || len(path) >= 2 && path[0] == "plugins" && path[1] == "configs" {
 		return
 	}
 

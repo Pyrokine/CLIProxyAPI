@@ -22,6 +22,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	if errValidate := validateCredentialWeightYAML(data); errValidate != nil {
 		return nil, fmt.Errorf("validate config payload: %w", errValidate)
 	}
+	if errValidate := validateTransientErrorCooldownYAML(data); errValidate != nil {
+		return nil, fmt.Errorf("validate config payload: %w", errValidate)
+	}
 
 	var cfg Config
 	cfg.Host = "127.0.0.1"
@@ -60,6 +63,9 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 		return nil, errValidate
 	}
 	if errValidate := validateXAIKeys(cfg.XAIKey); errValidate != nil {
+		return nil, errValidate
+	}
+	if errValidate := validateMetaKeys(cfg.MetaKey); errValidate != nil {
 		return nil, errValidate
 	}
 	if err := validateImageArtifactCacheConfig(cfg.ImageArtifactCache); err != nil {
@@ -118,12 +124,14 @@ func ParseConfigBytes(data []byte) (*Config, error) {
 	cfg.SanitizeVertexCompatKeys()
 	cfg.SanitizeCodexKeys()
 	cfg.SanitizeXAIKeys()
+	cfg.SanitizeMetaKeys()
 	cfg.sanitizeCodexHeaderDefaults()
 	cfg.sanitizeClaudeHeaderDefaults()
 	cfg.SanitizeClaudeKeys()
 	cfg.SanitizeOpenAICompatibility()
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeOAuthModelAlias()
+	cfg.SanitizeOAuthSettings()
 	cfg.SanitizeOAuthRequestScopedErrors()
 	cfg.sanitizeModelCatalog()
 	cfg.sanitizePayloadRules()
@@ -151,6 +159,30 @@ func validateXAIKeys(entries []XAIKey) error {
 		}
 		if errValidate := validateXAIHeaders(entry.Headers); errValidate != nil {
 			return fmt.Errorf("xai-api-key[%d].headers: %w", i, errValidate)
+		}
+	}
+	return nil
+}
+
+func validateMetaKeys(entries []MetaKey) error {
+	for i := range entries {
+		entry := entries[i]
+		apiKey := strings.TrimSpace(entry.APIKey)
+		if apiKey == "" || strings.HasPrefix(strings.ToLower(apiKey), "dca:") {
+			return fmt.Errorf("meta-api-key[%d].api-key requires a Meta API key; DCA tokens require OAuth storage", i)
+		}
+		if baseURL := strings.TrimSpace(entry.BaseURL); baseURL != "" {
+			if err := proxyutil.ValidateHTTPURL(baseURL); err != nil {
+				return fmt.Errorf("meta-api-key[%d].base-url: %w", i, err)
+			}
+		}
+		if proxyURL := strings.TrimSpace(entry.ProxyURL); proxyURL != "" {
+			if err := proxyutil.ValidateProxyURL(proxyURL); err != nil {
+				return fmt.Errorf("meta-api-key[%d].proxy-url: %w", i, err)
+			}
+		}
+		if err := validateXAIHeaders(entry.Headers); err != nil {
+			return fmt.Errorf("meta-api-key[%d].headers: %w", i, err)
 		}
 	}
 	return nil

@@ -2,20 +2,19 @@ package synthesizer
 
 import (
 	"context"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	authfile "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/codex"
+	kimiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/Pyrokine/CLIProxyAPI/v6/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 // FileSynthesizer generates Auth entries from OAuth JSON files.
@@ -78,15 +77,13 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) ([
 	if errDigest != nil {
 		return nil, errDigest
 	}
-	digestText := hex.EncodeToString(digest[:])
 	for _, auth := range auths {
 		if auth == nil {
 			continue
 		}
-		if auth.Attributes == nil {
-			auth.Attributes = make(map[string]string)
+		if err := coreauth.BindPersistedAuthDigest(auth, digest); err != nil {
+			log.WithError(err).Warn("auth file: quota material proof unavailable")
 		}
-		auth.Attributes[coreauth.PersistedSHA256Attribute] = digestText
 		auth.Attributes[coreauth.PersistedReadAtAttribute] = ctx.Now.Format(time.RFC3339Nano)
 	}
 	return auths, nil
@@ -99,8 +96,8 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 
 	now := ctx.Now
 	cfg := ctx.Config
-	var metadata map[string]any
-	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+	metadata, errUnmarshal := coreauth.DecodeCredentialMetadata(data)
+	if errUnmarshal != nil {
 		return nil, fmt.Errorf("parse auth JSON: %w", errUnmarshal)
 	}
 	coreauth.NormalizeCredentialMetadata(metadata)
@@ -109,6 +106,10 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 	}
 	if _, _, errProfile := coreauth.ClaudeFingerprintProfile(&coreauth.Auth{Metadata: metadata}); errProfile != nil {
 		return nil, errProfile
+	}
+	perAccountModelAliases, errAliases := coreauth.OAuthModelAliasesFromMetadata(metadata)
+	if errAliases != nil {
+		return nil, errAliases
 	}
 	t, _ := metadata["type"].(string)
 	provider := strings.ToLower(strings.TrimSpace(t))
@@ -168,6 +169,18 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 					auth.Prefix = strings.Trim(strings.TrimSpace(prefix), "/")
 				}
 				ApplyAuthExcludedModelsMeta(auth, cfg, perAccountExcluded, "oauth")
+				if rules, specified := metadata["request_scoped_errors"]; specified {
+					if auth.Metadata == nil {
+						auth.Metadata = make(map[string]any)
+					}
+					auth.Metadata["request_scoped_errors"] = rules
+				}
+				coreauth.ApplyAuthPriorityMetadata(auth, metadata)
+				if _, inherited := auth.Attributes[coreauth.AttributeFilePriority]; inherited {
+					if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
+						setter.SetMetadata(auth.Metadata)
+					}
+				}
 				if errHeaders := coreauth.ApplyCustomHeadersFromMetadata(auth); errHeaders != nil {
 					return nil, errHeaders
 				}
@@ -176,6 +189,11 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 				}
 				if errProfile := coreauth.ApplyClaudeFingerprintProfileMetadata(auth, metadata); errProfile != nil {
 					return nil, errProfile
+				}
+				if _, specified := metadata["model_aliases"]; specified {
+					if errAliases := coreauth.SetOAuthModelAliasesAttribute(auth, perAccountModelAliases); errAliases != nil {
+						return nil, errAliases
+					}
 				}
 			}
 			return auths, nil
@@ -234,6 +252,24 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	if provider == "kimi" || provider == "kimi-ai" || provider == "kimi.ai" || provider == "kimi.com" {
+		if baseURL, ok := metadata["base_url"].(string); ok {
+			a.Attributes["base_url"] = strings.TrimSpace(baseURL)
+		}
+		if domain, ok := metadata["domain"].(string); ok {
+			a.Attributes["domain"] = strings.TrimSpace(domain)
+		}
+		domain := kimiauth.ResolveKimiDomainFromAuth(a)
+		a.Attributes["domain"] = domain
+		if a.Attributes["base_url"] == "" {
+			a.Attributes["base_url"] = kimiauth.ResolveKimiAPIBaseURL(domain)
+		}
+		if domain == kimiauth.KimiAIDomain {
+			a.Provider = "kimi-ai"
+		} else {
+			a.Provider = "kimi"
+		}
+	}
 	if err := coreauth.ApplyCustomHeadersFromMetadata(a); err != nil {
 		return nil, err
 	}
@@ -243,30 +279,22 @@ func synthesizeFileAuthsRaw(ctx *SynthesisContext, fullPath string, data []byte)
 	if errProfile := coreauth.ApplyClaudeFingerprintProfileMetadata(a, metadata); errProfile != nil {
 		return nil, errProfile
 	}
-	// Read priority from auth file
-	if rawPriority, ok := metadata["priority"]; ok {
-		switch v := rawPriority.(type) {
-		case float64:
-			a.Attributes["priority"] = strconv.Itoa(int(v))
-		case string:
-			priority := strings.TrimSpace(v)
-			if _, errAtoi := strconv.Atoi(priority); errAtoi == nil {
-				a.Attributes["priority"] = priority
-			}
-		}
-	}
+	coreauth.ApplyAuthPriorityMetadata(a, metadata)
 	ApplyAuthExcludedModelsMeta(a, cfg, perAccountExcluded, "oauth")
+	if errAliases := coreauth.SetOAuthModelAliasesAttribute(a, perAccountModelAliases); errAliases != nil {
+		return nil, errAliases
+	}
 	if provider == "codex" {
-		if planType, ok := metadata["plan_type"].(string); ok && strings.TrimSpace(planType) != "" {
-			a.Attributes["plan_type"] = strings.TrimSpace(planType)
+		planType := codex.DefaultPlanType
+		if savedPlan, ok := metadata["plan_type"].(string); ok && strings.TrimSpace(savedPlan) != "" {
+			planType = strings.TrimSpace(savedPlan)
 		} else if idToken, ok := metadata["id_token"].(string); ok && strings.TrimSpace(idToken) != "" {
 			claims, errParse := codex.ParseJWTToken(idToken)
-			if errParse == nil && claims != nil {
-				if planType := strings.TrimSpace(claims.AuthInfo.ChatgptPlanType); planType != "" {
-					a.Attributes["plan_type"] = planType
-				}
+			if errParse == nil {
+				planType = claims.GetPlanType()
 			}
 		}
+		a.Attributes["plan_type"] = planType
 	}
 	if provider == "gemini-cli" {
 		if virtualAuths := synthesizeGeminiVirtualAuths(a, metadata, now); len(virtualAuths) > 0 {
@@ -366,6 +394,9 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 		if weight, hasWeight := primary.Attributes[coreauth.AttributeWeight]; hasWeight {
 			attrs[coreauth.AttributeWeight] = weight
 		}
+		if aliases, hasAliases := primary.Attributes["model_aliases"]; hasAliases {
+			attrs["model_aliases"] = aliases
+		}
 		metadataCopy := map[string]any{
 			"email":             email,
 			"project_id":        projectID,
@@ -382,6 +413,9 @@ func synthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			metadataCopy["request_retry"] = v
 		} else if v, ok := metadata["request-retry"]; ok {
 			metadataCopy["request_retry"] = v
+		}
+		if rules, ok := metadata["request_scoped_errors"]; ok {
+			metadataCopy["request_scoped_errors"] = rules
 		}
 		if note, ok := metadata["note"].(string); ok {
 			if note = strings.TrimSpace(note); note != "" {

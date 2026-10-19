@@ -138,6 +138,7 @@ func SaveConfigPreserveCommentsWithDigest(configFile string, cfg *Config) (strin
 
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-excluded-models")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
+	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-settings")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-request-scoped-errors")
 	if modelsExternal {
 		removeMapKey(original.Content[0], "model-catalog")
@@ -149,6 +150,7 @@ func SaveConfigPreserveCommentsWithDigest(configFile string, cfg *Config) (strin
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
+	prunePluginConfigMappings(original.Content[0], generated.Content[0])
 	if modelsExternal {
 		removeMapKey(original.Content[0], "oauth-model-alias")
 		removeMapKey(original.Content[0], "model-catalog")

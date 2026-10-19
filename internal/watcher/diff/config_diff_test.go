@@ -8,6 +8,26 @@ import (
 	sdkconfig "github.com/Pyrokine/CLIProxyAPI/v6/sdk/config"
 )
 
+func TestBuildConfigChangeDetailsClientCodexEnableApplyPatch(t *testing.T) {
+	oldCfg, newCfg := &config.Config{}, &config.Config{}
+	newCfg.Client.Codex.EnableApplyPatch = true
+	for _, tc := range []struct {
+		old, new *config.Config
+		want     string
+	}{
+		{oldCfg, newCfg, "client.codex.enable-apply-patch: false -> true"},
+		{newCfg, oldCfg, "client.codex.enable-apply-patch: true -> false"},
+	} {
+		changes := BuildConfigChangeDetails(tc.old, tc.new)
+		if len(changes) != 1 || changes[0] != tc.want {
+			t.Fatalf("changes = %v, want [%s]", changes, tc.want)
+		}
+	}
+	if changes := BuildConfigChangeDetails(newCfg, newCfg); len(changes) != 0 {
+		t.Fatalf("unchanged client setting produced changes: %v", changes)
+	}
+}
+
 func TestBuildConfigChangeDetailsIncludesPayloadChanges(t *testing.T) {
 	oldCfg := &config.Config{}
 	newCfg := &config.Config{
@@ -164,6 +184,9 @@ func TestBuildConfigChangeDetailsRedactsEndpointURLs(t *testing.T) {
 			PanelGitHubRepository: "https://old-user:old-pass@old-panel.example/private?token=old-token",
 			CPAGitHubRepository:   "https://old-user:old-pass@old-cpa.example/private?token=old-token",
 		},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			BaseURL: "https://old-user:old-pass@old-compat.example/v1?token=old-token",
+		}},
 	}
 	newCfg := &config.Config{
 		GeminiKey: []config.GeminiKey{{BaseURL: "https://new-user:new-pass@new.example/v1?token=new-token"}},
@@ -171,9 +194,14 @@ func TestBuildConfigChangeDetailsRedactsEndpointURLs(t *testing.T) {
 			PanelGitHubRepository: "https://new-user:new-pass@new-panel.example/private?token=new-token",
 			CPAGitHubRepository:   "https://new-user:new-pass@new-cpa.example/private?token=new-token",
 		},
+		OpenAICompatibility: []config.OpenAICompatibility{{
+			BaseURL: "https://new-user:new-pass@new-compat.example/v1?token=new-token",
+		}},
 	}
 
 	details := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, details, "  provider removed: https://old-compat.example (api-keys=0, models=0)")
+	expectContains(t, details, "  provider added: https://new-compat.example (api-keys=0, models=0)")
 	expectContains(t, details, "gemini[0].base-url: https://old.example -> https://new.example")
 	expectContains(
 		t,
@@ -281,6 +309,34 @@ func TestBuildConfigChangeDetails_SecretsAndCounts(t *testing.T) {
 	details := BuildConfigChangeDetails(oldCfg, newCfg)
 	expectContains(t, details, "api-keys count: 1 -> 3")
 	expectContains(t, details, "remote-management.secret-key: created")
+}
+
+func TestBuildConfigChangeDetailsOAuthSettingsRedacted(t *testing.T) {
+	oldCfg := &config.Config{OAuthSettings: map[string][]config.OAuthModelSetting{
+		"codex": {{Name: "internal-model", Alias: "public-alias", MaxContextLength: 8192}},
+	}}
+	newCfg := &config.Config{OAuthSettings: map[string][]config.OAuthModelSetting{
+		"codex": {{Name: "internal-model", Alias: "private-alias", MaxContextLength: 16384}},
+	}}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "oauth-settings: updated (1 -> 1 channels)")
+	if strings.Contains(strings.Join(changes, " "), "private-alias") {
+		t.Fatal("OAuth settings diff disclosed a model alias")
+	}
+}
+
+func TestBuildConfigChangeDetailsMetaKeysRedacted(t *testing.T) {
+	oldCfg := &config.Config{MetaKey: []config.MetaKey{{APIKey: "LLM|old-secret"}}}
+	newCfg := &config.Config{MetaKey: []config.MetaKey{{APIKey: "LLM|new-secret"}}}
+	changes := BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "meta-api-key entries: updated")
+	if strings.Contains(strings.Join(changes, " "), "secret") {
+		t.Fatal("Meta key diff disclosed API key material")
+	}
+
+	newCfg.MetaKey = append(newCfg.MetaKey, config.MetaKey{APIKey: "LLM|another-secret"})
+	changes = BuildConfigChangeDetails(oldCfg, newCfg)
+	expectContains(t, changes, "meta-api-key count: 1 -> 2")
 }
 
 func TestBuildConfigChangeDetails_FlagsAndKeys(t *testing.T) {

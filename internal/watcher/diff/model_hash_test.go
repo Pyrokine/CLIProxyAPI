@@ -99,6 +99,23 @@ func TestComputeClaudeModelsHash_Empty(t *testing.T) {
 	}
 }
 
+func TestComputeCodexModelsHash_ConfigurationUpdateCapability(t *testing.T) {
+	base := config.CodexModel{Name: "model", Alias: "alias"}
+	withoutSupport := ComputeCodexModelsHash([]config.CodexModel{base})
+	if want := "49a3a5b69ae7f02d63f46ca952e614f07f381136d1aa68701543d2062ed65760"; withoutSupport != want {
+		t.Fatalf("default capability changed the existing hash: got %q, want %q", withoutSupport, want)
+	}
+	base.SupportConfigurationUpdate = true
+	withSupport := ComputeCodexModelsHash([]config.CodexModel{base})
+	if withSupport == withoutSupport {
+		t.Fatal("configuration update capability did not change the model hash")
+	}
+	base.SupportConfigurationUpdate = false
+	if got := ComputeCodexModelsHash([]config.CodexModel{base}); got != withoutSupport {
+		t.Fatalf("explicit false differs from the default: got %q, want %q", got, withoutSupport)
+	}
+}
+
 func TestComputeCodexModelsHash_Empty(t *testing.T) {
 	if got := ComputeCodexModelsHash(nil); got != "" {
 		t.Fatalf("expected empty hash for nil models, got %q", got)

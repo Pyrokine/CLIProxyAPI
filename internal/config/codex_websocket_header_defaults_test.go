@@ -6,6 +6,25 @@ import (
 	"testing"
 )
 
+func TestLoadConfigOptionalCodexOptions(t *testing.T) {
+	for _, value := range []string{"true", "false", "null"} {
+		t.Run(value, func(t *testing.T) {
+			data := []byte("codex:\n  disable-codex-cloaking: true\n  identity-confuse: true\n  optimize-multi-agent-v2: " + value + "\n")
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfigOptional(path, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.Codex.DisableCodexCloaking || !cfg.Codex.IdentityConfuse || cfg.Codex.OptimizeMultiAgentV2 != (value == "true") {
+				t.Fatalf("Codex options = %+v", cfg.Codex)
+			}
+		})
+	}
+}
+
 func TestLoadConfigOptional_ClaudeHeaderDefaults(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")

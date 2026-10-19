@@ -17,6 +17,9 @@ type VertexCompatKey struct {
 	// Maps to the x-goog-api-key header.
 	APIKey string `yaml:"api-key" json:"api-key"`
 
+	// Interactions 为此凭证启用 Vertex 原生 Interactions 路由，nil 和 false 保持原路径
+	Interactions *bool `yaml:"interactions,omitempty" json:"interactions,omitempty"`
+
 	// Priority controls selection preference when multiple credentials match.
 	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`

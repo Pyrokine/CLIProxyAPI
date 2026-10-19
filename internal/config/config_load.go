@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -90,6 +91,30 @@ func validateImageArtifactCacheConfig(cfg ImageArtifactCache) error {
 	return nil
 }
 
+func validateTransientErrorCooldownYAML(data []byte) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	if len(document.Content) == 0 {
+		return nil
+	}
+	value, _, err := configYAMLEffectiveMappingValue(document.Content[0], "transient-error-cooldown-seconds", nil)
+	if err != nil || value == nil {
+		return err
+	}
+	if _, _, err := configYAMLScalarValue(value, nil); err != nil {
+		return err
+	}
+	for value.Kind == yaml.AliasNode {
+		value = value.Alias
+	}
+	if value.Kind == yaml.ScalarNode && (value.Tag == "!!int" || value.Tag == "!!null") {
+		return nil
+	}
+	return fmt.Errorf("transient-error-cooldown-seconds must be an integer")
+}
+
 // LoadConfigOptional reads YAML from configFile.
 // If optional is true and the file is missing, it returns an empty Config.
 // If optional is true and the file is empty or invalid, it returns an empty Config.
@@ -125,6 +150,14 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			return cfgOptional, nil
 		}
 		return nil, errValidate
+	}
+
+	if errValidate := validateTransientErrorCooldownYAML(data); errValidate != nil {
+		if optional {
+			log.Warnf("invalid optional configuration; waiting for a valid configuration: %v", errValidate)
+			return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
+		}
+		return nil, fmt.Errorf("failed to validate config file: %w", errValidate)
 	}
 
 	// Unmarshal the YAML data into the Config struct.
@@ -187,6 +220,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if optional {
 			return &Config{CredentialInFlight: DefaultCredentialInFlightConfig()}, nil
 		}
+		return nil, errValidate
+	}
+	if errValidate := validateMetaKeys(cfg.MetaKey); errValidate != nil {
 		return nil, errValidate
 	}
 	if err = validateImageArtifactCacheConfig(cfg.ImageArtifactCache); err != nil {
@@ -262,6 +298,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex and xAI keys.
 	cfg.SanitizeCodexKeys()
 	cfg.SanitizeXAIKeys()
+	cfg.SanitizeMetaKeys()
 	cfg.sanitizeCodexHeaderDefaults()
 	cfg.sanitizeClaudeHeaderDefaults()
 
@@ -276,6 +313,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+	cfg.SanitizeOAuthSettings()
 
 	// Normalize OAuth request-scoped error rules.
 	cfg.SanitizeOAuthRequestScopedErrors()

@@ -8,6 +8,9 @@ import internalconfig "github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 
 type SDKConfig = internalconfig.SDKConfig
 
+type ClientConfig = internalconfig.ClientConfig
+type CodexClientConfig = internalconfig.CodexClientConfig
+
 type Config = internalconfig.Config
 
 type StreamingConfig = internalconfig.StreamingConfig
@@ -19,6 +22,7 @@ type RemoteManagement = internalconfig.RemoteManagement
 type HomeConfig = internalconfig.HomeConfig
 type HomeTLSConfig = internalconfig.HomeTLSConfig
 type OAuthModelAlias = internalconfig.OAuthModelAlias
+type OAuthModelSetting = internalconfig.OAuthModelSetting
 type PayloadConfig = internalconfig.PayloadConfig
 type PayloadRule = internalconfig.PayloadRule
 type PayloadFilterRule = internalconfig.PayloadFilterRule
@@ -28,6 +32,7 @@ type GeminiKey = internalconfig.GeminiKey
 type CodexKey = internalconfig.CodexKey
 type XAIKey = internalconfig.XAIKey
 type XAIModel = internalconfig.XAIModel
+type MetaKey = internalconfig.MetaKey
 type ClaudeKey = internalconfig.ClaudeKey
 type VertexCompatKey = internalconfig.VertexCompatKey
 type VertexCompatModel = internalconfig.VertexCompatModel
@@ -50,6 +55,11 @@ func LoadConfig(configFile string) (*Config, error) { return internalconfig.Load
 // noinspection GoUnusedExportedFunction
 func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	return internalconfig.LoadConfigOptional(configFile, optional)
+}
+
+// ResolveOAuthModelSetting selects the OAuth-only model metadata override for a model.
+func ResolveOAuthModelSetting(settings []OAuthModelSetting, modelID, catalogName, modelName string) *OAuthModelSetting {
+	return internalconfig.ResolveOAuthModelSetting(settings, modelID, catalogName, modelName)
 }
 
 // ParseConfigBytes parses a YAML configuration payload.
