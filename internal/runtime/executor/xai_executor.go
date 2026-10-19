@@ -15,10 +15,12 @@ import (
 	"time"
 
 	xaiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/xai"
+	multiagentv2 "github.com/Pyrokine/CLIProxyAPI/v6/internal/client/codex/optimize-multi-agent-v2"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -99,6 +101,10 @@ func (e *XAIExecutor) Identifier() string {
 	return "xai"
 }
 
+func (e *XAIExecutor) SupportsApplyPatch() bool {
+	return e != nil
+}
+
 // PrepareRequest injects xAI credentials into the outgoing HTTP request.
 func (e *XAIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
 	if req == nil {
@@ -147,7 +153,7 @@ func (e *XAIExecutor) Execute(
 		return e.executeCompact(ctx, auth, req, opts)
 	}
 	if endpointPath := xaiImageEndpointPath(opts); endpointPath != "" {
-		return e.executeImages(ctx, auth, req, endpointPath, opts.Headers)
+		return e.executeImages(ctx, auth, req, endpointPath, opts)
 	}
 	if xaiIsVideoRequest(opts) {
 		return e.executeVideos(ctx, auth, req, opts)
@@ -156,7 +162,7 @@ func (e *XAIExecutor) Execute(
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
 
-	prepared, err := e.prepareResponsesRequestWithContext(ctx, req, opts, true, sdktranslator.FormatCodex)
+	prepared, err := e.prepareResponsesRequestWithContext(ctx, auth, req, opts, true, sdktranslator.FormatCodex)
 	if err != nil {
 		return resp, err
 	}
@@ -207,6 +213,12 @@ func (e *XAIExecutor) Execute(
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 
+	var observedUsage streamUsageBuffer
+	defer func() {
+		if err != nil {
+			reporter.publishFailureWithDetail(ctx, observedUsage.detail, err)
+		}
+	}()
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
 	responseNormalizer := prepared.newResponseNormalizer()
@@ -214,39 +226,55 @@ func (e *XAIExecutor) Execute(
 		if !bytes.HasPrefix(line, xaiDataTag) {
 			continue
 		}
-		for _, eventData := range xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):])) {
-			eventData = responseNormalizer.normalize(eventData)
-			if len(eventData) == 0 {
-				continue
+		for _, eventRaw := range xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):])) {
+			if detail, ok := parseCodexUsage(eventRaw); ok {
+				observedUsage.observe(detail, true, detail.ResponseServiceTier != "")
 			}
-			switch gjson.GetBytes(eventData, "type").String() {
-			case "response.output_item.done":
-				xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-			case "error", "response.error", "response.failed":
-				if eventErr, ok := parseCodexEventError(eventData); ok {
-					recordAPIResponseError(ctx, e.cfg, eventErr)
-					reporter.publishFailure(ctx, eventErr)
-					return resp, eventErr
+			for _, eventData := range responseNormalizer.normalize(eventRaw) {
+				if len(eventData) == 0 {
+					continue
 				}
-				return resp, markResponseStarted(
-					statusErr{code: http.StatusBadGateway, msg: "xai executor: invalid upstream tool call"},
-				)
-			case "response.completed", "response.incomplete":
-				eventType := gjson.GetBytes(eventData, "type").String()
-				if detail, ok := parseCodexUsage(eventData); ok {
-					reporter.publish(ctx, detail)
+				observeResponseTokenEvent(ctx, eventData)
+				reporter.observeResponseModel(eventData)
+				switch gjson.GetBytes(eventData, "type").String() {
+				case "response.output_item.done":
+					xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+				case "error", "response.error", "response.failed":
+					if eventErr, ok := parseCodexEventError(eventData); ok {
+						recordAPIResponseError(ctx, e.cfg, eventErr)
+						reporter.publishFailureWithDetail(ctx, observedUsage.detail, eventErr)
+						return resp, eventErr
+					}
+					return resp, markResponseStarted(
+						statusErr{code: http.StatusBadGateway, msg: "xai executor: invalid upstream tool call"},
+					)
+				case "response.completed", "response.incomplete":
+					eventType := gjson.GetBytes(eventData, "type").String()
+					terminalData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+					terminalData = xaiNormalizeReasoningSummaryData(terminalData)
+					var param any
+					out := sdktranslator.TranslateNonStream(
+						ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body,
+						terminalData, &param,
+					)
+					translationErr := sdktranslator.ResponseTranslationError(&param)
+					if translationErr == nil && len(out) == 0 {
+						translationErr = fmt.Errorf("xai executor: response translation returned an empty payload")
+					}
+					if translationErr != nil {
+						err = markResponseStarted(statusErr{code: http.StatusBadGateway, msg: translationErr.Error()})
+						recordAPIResponseError(ctx, e.cfg, err)
+						return resp, err
+					}
+					if err = ctx.Err(); err != nil {
+						return resp, err
+					}
+					observedUsage.publish(ctx, reporter)
+					if eventType == "response.completed" {
+						cacheXAIReasoningReplayFromCompleted(ctx, prepared.reasoningReplayScope, terminalData)
+					}
+					return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 				}
-				terminalData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-				terminalData = xaiNormalizeReasoningSummaryData(terminalData)
-				if eventType == "response.completed" {
-					cacheXAIReasoningReplayFromCompleted(ctx, prepared.reasoningReplayScope, terminalData)
-				}
-				var param any
-				out := sdktranslator.TranslateNonStream(
-					ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body,
-					terminalData, &param,
-				)
-				return cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}, nil
 			}
 		}
 	}
@@ -265,15 +293,31 @@ func (e *XAIExecutor) executeCompact(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (resp cliproxyexecutor.Response, err error) {
-	prepared, data, headers, errCompact := e.executeCompactRequest(ctx, auth, req, opts)
+	prepared, data, headers, reporter, errCompact := e.executeCompactRequest(ctx, auth, req, opts)
 	if errCompact != nil {
 		return resp, errCompact
 	}
+	defer reporter.trackFailure(ctx, &err)
 
 	var param any
 	out := sdktranslator.TranslateNonStream(
 		ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body, data, &param,
 	)
+	translationErr := sdktranslator.ResponseTranslationError(&param)
+	if translationErr == nil && len(out) == 0 {
+		translationErr = fmt.Errorf("xai executor: compact response translation returned an empty payload")
+	}
+	if translationErr != nil {
+		err = markResponseStarted(statusErr{code: http.StatusBadGateway, msg: translationErr.Error()})
+		reporter.publishFailureWithDetail(ctx, parseOpenAIUsage(data), err)
+		return resp, err
+	}
+	if err = ctx.Err(); err != nil {
+		reporter.publishFailureWithDetail(ctx, parseOpenAIUsage(data), err)
+		return resp, err
+	}
+	reporter.publish(ctx, parseOpenAIUsage(data))
+	clearXAIReasoningReplayAfterCompaction(ctx, prepared.reasoningReplayScope)
 	return cliproxyexecutor.Response{Payload: out, Headers: headers}, nil
 }
 
@@ -282,23 +326,14 @@ func (e *XAIExecutor) executeCompactRequest(
 	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
-) (*xaiPreparedRequest, []byte, http.Header, error) {
+) (*xaiPreparedRequest, []byte, http.Header, *usageReporter, error) {
 	token, _ := xaiCreds(auth)
 	baseURL := xaiCompactBaseURL(auth)
 
-	prepared, err := e.prepareResponsesRequestWithContext(ctx, req, opts, false, sdktranslator.FormatOpenAIResponse)
+	opts.Alt = "responses/compact"
+	prepared, err := e.prepareResponsesRequestWithContext(ctx, auth, req, opts, false, sdktranslator.FormatOpenAIResponse)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	prepared.body, _ = sjson.DeleteBytes(prepared.body, "stream")
-	prepared.body, _ = sjson.DeleteBytes(prepared.body, "tools")
-	prepared.body = normalizeXAIToolChoiceForTools(prepared.body)
-	for _, field := range []string{"max_output_tokens", "temperature", "top_p", "top_k", "stop"} {
-		prepared.body, _ = sjson.DeleteBytes(prepared.body, field)
-	}
-	prepared.body = xaiRemoveInputItemsByType(prepared.body, "compaction_trigger")
-	if previousResponseID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()); previousResponseID != "" {
-		prepared.body, _ = sjson.SetBytes(prepared.body, "previous_response_id", previousResponseID)
+		return nil, nil, nil, nil, err
 	}
 
 	reporter := newUsageReporter(ctx, e, prepared.baseModel, auth)
@@ -308,7 +343,7 @@ func (e *XAIExecutor) executeCompactRequest(
 	requestURL := strings.TrimSuffix(baseURL, "/") + "/responses/compact"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(prepared.body))
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID, opts.Headers)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
@@ -317,7 +352,7 @@ func (e *XAIExecutor) executeCompactRequest(
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -329,7 +364,7 @@ func (e *XAIExecutor) executeCompactRequest(
 	data, err := readXAIResponseBody(httpResp.Body, maxXAIResponseBodyBytes)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
 
@@ -340,13 +375,17 @@ func (e *XAIExecutor) executeCompactRequest(
 		)
 		clearXAIReasoningReplayOnInvalidSignature(ctx, prepared.reasoningReplayScope, httpResp.StatusCode, data)
 		err = xaiStatusErr(httpResp.StatusCode, data, httpResp.Header)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
-	reporter.publish(ctx, parseOpenAIUsage(data))
-	reporter.ensurePublished(ctx)
-	clearXAIReasoningReplayAfterCompaction(ctx, prepared.reasoningReplayScope)
-	return prepared, data, httpResp.Header.Clone(), nil
+	observeResponseTokenEvent(ctx, data)
+	reporter.observeResponseModel(data)
+	if _, _, err = validateXAIWebsocketCompactionResponse(data); err != nil {
+		err = markResponseStarted(err)
+		reporter.publishFailureWithDetail(ctx, parseOpenAIUsage(data), err)
+		return nil, nil, nil, nil, err
+	}
+	return prepared, data, httpResp.Header.Clone(), reporter, nil
 }
 
 func (e *XAIExecutor) executeCompactionTriggerStream(
@@ -354,11 +393,12 @@ func (e *XAIExecutor) executeCompactionTriggerStream(
 	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
-) (*cliproxyexecutor.StreamResult, error) {
-	prepared, data, headers, err := e.executeCompactRequest(ctx, auth, req, opts)
+) (_ *cliproxyexecutor.StreamResult, err error) {
+	prepared, data, headers, reporter, err := e.executeCompactRequest(ctx, auth, req, opts)
 	if err != nil {
 		return nil, err
 	}
+	defer reporter.trackFailure(ctx, &err)
 
 	headers = headers.Clone()
 	if headers == nil {
@@ -372,6 +412,12 @@ func (e *XAIExecutor) executeCompactionTriggerStream(
 		out <- cliproxyexecutor.StreamChunk{Payload: chunk}
 	}
 	close(out)
+	if err = ctx.Err(); err != nil {
+		reporter.publishFailureWithDetail(ctx, parseOpenAIUsage(data), err)
+		return nil, err
+	}
+	reporter.publish(ctx, parseOpenAIUsage(data))
+	clearXAIReasoningReplayAfterCompaction(ctx, prepared.reasoningReplayScope)
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
 }
 
@@ -571,7 +617,7 @@ func (e *XAIExecutor) executeImages(
 	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	endpointPath string,
-	clientHeaders http.Header,
+	opts cliproxyexecutor.Options,
 ) (resp cliproxyexecutor.Response, err error) {
 	model := strings.TrimSpace(gjson.GetBytes(req.Payload, "model").String())
 	if model == "" {
@@ -586,13 +632,21 @@ func (e *XAIExecutor) executeImages(
 		endpointPath = xaiDefaultImageEndpointPath
 	}
 
-	payload := normalizeXAIImageRefs(req.Payload)
+	original := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		original = opts.OriginalRequest
+	}
+	payload := applyPayloadConfigWithRequest(
+		e.cfg, model, "openai", opts.SourceFormat.String(), "", req.Payload, original,
+		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
+	)
+	payload = normalizeXAIImageRefs(payload)
 	upstreamURL := strings.TrimSuffix(baseURL, "/") + endpointPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(payload))
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, "", clientHeaders)
+	applyXAIHeaders(httpReq, auth, token, false, "", opts.Headers)
 	e.recordXAIRequest(ctx, auth, upstreamURL, httpReq.Header.Clone(), payload)
 
 	httpClient := reporter.trackHTTPClient(newProxyAwareHTTPClient(ctx, e.cfg, auth, 0))
@@ -624,6 +678,8 @@ func (e *XAIExecutor) executeImages(
 		return resp, err
 	}
 
+	observeResponseTokenEvent(ctx, data)
+	reporter.observeResponseModel(data)
 	reporter.ensurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
@@ -644,10 +700,10 @@ func (e *XAIExecutor) executeVideos(
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
 
-	payload := normalizeXAIImageRefs(req.Payload)
+	payload := req.Payload
 	method := http.MethodPost
 	endpointPath := xaiVideosGenerationsPath
-	var body io.Reader = bytes.NewReader(payload)
+	var body io.Reader
 
 	switch path := xaiVideoEndpointPath(opts); path {
 	case xaiVideosGenerationsPath, xaiVideosEditsPath, xaiVideosExtensionsPath:
@@ -656,8 +712,19 @@ func (e *XAIExecutor) executeVideos(
 		if requestID := strings.TrimSpace(gjson.GetBytes(payload, "request_id").String()); requestID != "" {
 			method = http.MethodGet
 			endpointPath = xaiVideosPath + "/" + url.PathEscape(requestID)
-			body = nil
 		}
+	}
+	if method == http.MethodPost {
+		original := req.Payload
+		if len(opts.OriginalRequest) > 0 {
+			original = opts.OriginalRequest
+		}
+		payload = applyPayloadConfigWithRequest(
+			e.cfg, model, "openai", opts.SourceFormat.String(), "", payload, original,
+			payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier(),
+		)
+		payload = normalizeXAIImageRefs(payload)
+		body = bytes.NewReader(payload)
 	}
 	requestURL := strings.TrimSuffix(baseURL, "/") + endpointPath
 	httpReq, err := http.NewRequestWithContext(ctx, method, requestURL, body)
@@ -705,6 +772,8 @@ func (e *XAIExecutor) executeVideos(
 		return resp, err
 	}
 
+	observeResponseTokenEvent(ctx, data)
+	reporter.observeResponseModel(data)
 	reporter.ensurePublished(ctx)
 	return cliproxyexecutor.Response{Payload: data, Headers: httpResp.Header.Clone()}, nil
 }
@@ -725,7 +794,7 @@ func (e *XAIExecutor) ExecuteStream(
 	token, _ := xaiCreds(auth)
 	baseURL := xaiChatBaseURL(auth)
 
-	prepared, err := e.prepareResponsesRequestWithContext(ctx, req, opts, true, sdktranslator.FormatCodex)
+	prepared, err := e.prepareResponsesRequestWithContext(ctx, auth, req, opts, true, sdktranslator.FormatCodex)
 	if err != nil {
 		return nil, err
 	}
@@ -778,16 +847,30 @@ func (e *XAIExecutor) ExecuteStream(
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800)
 		var param any
+		var observedUsage streamUsageBuffer
+		defer func() {
+			if errContext := ctx.Err(); errContext != nil {
+				reporter.publishFailureWithDetail(ctx, observedUsage.detail, errContext)
+			}
+		}()
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		var pendingEventLine []byte
 		responseNormalizer := prepared.newResponseNormalizer()
 		sawTerminal := false
+		var completedReplay []byte
 		emitTranslatedLine := func(translatedLine []byte) bool {
 			chunks := sdktranslator.TranslateStream(
 				ctx, prepared.to, prepared.responseFormat, req.Model, prepared.originalPayload, prepared.body,
 				translatedLine, &param,
 			)
+			if translationErr := sdktranslator.ResponseTranslationError(&param); translationErr != nil {
+				translationErr = markResponseStarted(statusErr{code: http.StatusBadGateway, msg: translationErr.Error()})
+				recordAPIResponseError(ctx, e.cfg, translationErr)
+				reporter.publishFailureWithDetail(ctx, observedUsage.detail, translationErr)
+				_ = sendStreamChunk(ctx, out, cliproxyexecutor.StreamChunk{Err: translationErr})
+				return false
+			}
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -813,54 +896,59 @@ func (e *XAIExecutor) ExecuteStream(
 			}
 			if bytes.HasPrefix(line, xaiDataTag) {
 				eventDataList := xaiNormalizeReasoningSummaryDataEvents(bytes.TrimSpace(line[len(xaiDataTag):]))
-				for _, eventData := range eventDataList {
-					eventData = responseNormalizer.normalize(eventData)
-					if len(eventData) == 0 {
-						pendingEventLine = nil
-						continue
+				for _, eventRaw := range eventDataList {
+					if detail, ok := parseCodexUsage(eventRaw); ok {
+						observedUsage.observe(detail, true, detail.ResponseServiceTier != "")
 					}
-					eventName := gjson.GetBytes(eventData, "type").String()
-					switch eventName {
-					case "response.output_item.done":
-						xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
-					case "error", "response.error", "response.failed":
-						eventErr, ok := parseCodexEventError(eventData)
-						if !ok {
-							eventErr = markResponseStarted(
-								statusErr{
-									code: http.StatusBadGateway,
-									msg:  "xai executor: upstream returned an unrecognized error event",
-								},
-							)
+					for _, eventData := range responseNormalizer.normalize(eventRaw) {
+						if len(eventData) == 0 {
+							pendingEventLine = nil
+							continue
 						}
-						recordAPIResponseError(ctx, e.cfg, eventErr)
-						reporter.publishFailure(ctx, eventErr)
-						select {
-						case out <- cliproxyexecutor.StreamChunk{Err: eventErr}:
-						case <-ctx.Done():
+						observeResponseTokenEvent(ctx, eventData)
+						reporter.observeResponseModel(eventData)
+						eventName := gjson.GetBytes(eventData, "type").String()
+						switch eventName {
+						case "response.output_item.done":
+							xaiCollectOutputItemDone(eventData, outputItemsByIndex, &outputItemsFallback)
+						case "error", "response.error", "response.failed":
+							eventErr, ok := parseCodexEventError(eventData)
+							if !ok {
+								eventErr = markResponseStarted(
+									statusErr{
+										code: http.StatusBadGateway,
+										msg:  "xai executor: upstream returned an unrecognized error event",
+									},
+								)
+							}
+							recordAPIResponseError(ctx, e.cfg, eventErr)
+							reporter.publishFailureWithDetail(ctx, observedUsage.detail, eventErr)
+							select {
+							case out <- cliproxyexecutor.StreamChunk{Err: eventErr}:
+							case <-ctx.Done():
+							}
+							return
+						case "response.completed", "response.incomplete":
+							sawTerminal = true
+							eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
+							eventData = xaiNormalizeReasoningSummaryData(eventData)
+							eventName = gjson.GetBytes(eventData, "type").String()
+							if eventName == "response.completed" {
+								completedReplay = bytes.Clone(eventData)
+							} else {
+								completedReplay = nil
+							}
 						}
-						return
-					case "response.completed", "response.incomplete":
-						sawTerminal = true
-						if detail, ok := parseCodexUsage(eventData); ok {
-							reporter.publish(ctx, detail)
+						if pendingEventLine != nil && !emitTranslatedLine(
+							xaiNormalizeReasoningSummaryEventLine(
+								pendingEventLine, eventName,
+							),
+						) {
+							return
 						}
-						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
-						eventData = xaiNormalizeReasoningSummaryData(eventData)
-						eventName = gjson.GetBytes(eventData, "type").String()
-						if eventName == "response.completed" {
-							cacheXAIReasoningReplayFromCompleted(ctx, prepared.reasoningReplayScope, eventData)
+						if !emitTranslatedLine(append([]byte("data: "), eventData...)) {
+							return
 						}
-					}
-					if pendingEventLine != nil && !emitTranslatedLine(
-						xaiNormalizeReasoningSummaryEventLine(
-							pendingEventLine, eventName,
-						),
-					) {
-						return
-					}
-					if !emitTranslatedLine(append([]byte("data: "), eventData...)) {
-						return
 					}
 				}
 				pendingEventLine = nil
@@ -884,7 +972,7 @@ func (e *XAIExecutor) ExecuteStream(
 		if errScan := scanner.Err(); errScan != nil {
 			errScan = markResponseStarted(errScan)
 			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx, errScan)
+			reporter.publishFailureWithDetail(ctx, observedUsage.detail, errScan)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
 			case <-ctx.Done():
@@ -896,10 +984,31 @@ func (e *XAIExecutor) ExecuteStream(
 				fmt.Errorf("xai stream ended before response.completed or response.incomplete"),
 			)
 			recordAPIResponseError(ctx, e.cfg, errIncomplete)
-			reporter.publishFailure(ctx, errIncomplete)
+			reporter.publishFailureWithDetail(ctx, observedUsage.detail, errIncomplete)
 			select {
 			case out <- cliproxyexecutor.StreamChunk{Err: errIncomplete}:
 			case <-ctx.Done():
+			}
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		observedUsage.publish(ctx, reporter)
+		reporter.ensurePublished(ctx)
+		if ctx.Err() == nil && len(completedReplay) > 0 {
+			if cliproxyexecutor.StreamDeliveryAcknowledgement(ctx) {
+				terminal := cliproxyexecutor.StreamChunk{
+					Terminal: true,
+					Acknowledge: func(errDelivery error) {
+						if errDelivery == nil && ctx.Err() == nil {
+							cacheXAIReasoningReplayFromCompleted(ctx, prepared.reasoningReplayScope, completedReplay)
+						}
+					},
+				}
+				_ = sendStreamChunk(ctx, out, terminal)
+			} else {
+				cacheXAIReasoningReplayFromCompleted(ctx, prepared.reasoningReplayScope, completedReplay)
 			}
 		}
 	}()
@@ -909,12 +1018,12 @@ func (e *XAIExecutor) ExecuteStream(
 // CountTokens estimates token count for xAI Responses requests.
 func (e *XAIExecutor) CountTokens(
 	ctx context.Context,
-	_ *cliproxyauth.Auth,
+	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (cliproxyexecutor.Response, error) {
 	prepared, err := e.prepareResponsesRequestWithContext(
-		ctx, req, opts, false, sdktranslator.FormatCodex,
+		ctx, auth, req, opts, false, sdktranslator.FormatCodex,
 	)
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
@@ -1127,6 +1236,9 @@ func applyXAIRefreshToken(
 		auth.Attributes["base_url"] = configuredBaseURL
 	}
 	if storage, ok := auth.Storage.(*xaiauth.TokenStorage); ok && storage != nil {
+		copyStorage := *storage
+		storage = &copyStorage
+		auth.Storage = storage
 		storage.Type = "xai"
 		storage.AuthKind = "oauth"
 		storage.AccessToken = tokenData.AccessToken
@@ -1166,6 +1278,7 @@ type xaiPreparedRequest struct {
 	to                    sdktranslator.Format
 	originalPayload       []byte
 	body                  []byte
+	patchDeclarations     []byte
 	toolIdentity          *xaiToolIdentityNormalizer
 	dispatcherState       *xaiNamespaceDispatcherState
 	filterInternalXSearch bool
@@ -1178,15 +1291,17 @@ func (e *XAIExecutor) prepareResponsesRequest(
 	opts cliproxyexecutor.Options,
 	stream bool,
 ) (*xaiPreparedRequest, error) {
-	return e.prepareResponsesRequestWithContext(context.Background(), req, opts, stream, sdktranslator.FormatCodex)
+	return e.prepareResponsesRequestWithContext(context.Background(), nil, req, opts, stream, sdktranslator.FormatCodex)
 }
 
 func (e *XAIExecutor) prepareResponsesRequestWithContext(
 	ctx context.Context,
+	auth *cliproxyauth.Auth,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 	stream bool,
 	to sdktranslator.Format,
+	websocketBaseURL ...string,
 ) (*xaiPreparedRequest, error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 	from := opts.SourceFormat
@@ -1197,32 +1312,21 @@ func (e *XAIExecutor) prepareResponsesRequestWithContext(
 		originalPayloadSource = opts.OriginalRequest
 	}
 	originalPayload := bytes.Clone(originalPayloadSource)
-	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		originalPayload,
-		stream,
-		isCompat,
+	translationOriginal := originalPayload
+	translationPayload := bytes.Clone(req.Payload)
+	if from == sdktranslator.FormatOpenAIResponse {
+		translationOriginal = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, opts.Headers, translationOriginal, e.cfg)
+		translationPayload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, opts.Headers, translationPayload, e.cfg)
+	}
+	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, translationOriginal, translationPayload, stream, isCompat, &req,
 	)
+	if err != nil {
+		return nil, err
+	}
 	originalTranslated = preserveXAIResponsesOutputControls(originalTranslated, originalPayload, from)
-	body := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		bytes.Clone(req.Payload),
-		stream,
-		isCompat,
-	)
 	body = preserveXAIResponsesOutputControls(body, req.Payload, from)
 
-	var err error
 	body, err = helps.ApplyThinkingWithSourcePayload(
 		body, req.Payload, originalPayloadSource, req.Model, from.String(), e.Identifier(), e.Identifier(), req,
 	)
@@ -1230,24 +1334,59 @@ func (e *XAIExecutor) prepareResponsesRequestWithContext(
 		return nil, err
 	}
 
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	requestPath := payloadRequestPath(opts)
-	body = applyPayloadConfigWithRequest(
-		e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath,
-		opts.Headers,
-	)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = helps.SetBoolIfDifferent(body, "stream", stream)
 	body, _ = sjson.DeleteBytes(body, "previous_response_id")
 	body, _ = sjson.DeleteBytes(body, "prompt_cache_retention")
 	body, _ = sjson.DeleteBytes(body, "safety_identifier")
 	body, _ = sjson.DeleteBytes(body, "stream_options")
-	body = promoteXAIAdditionalTools(body)
+	body = normalizeCodexInstructions(body)
+	sessionID := xaiExecutionSessionID(req, opts)
+	if sessionID == "" && xaiRequiresIsolatedConversation(baseModel) {
+		sessionID = uuid.NewString()
+	}
+	if sessionID != "" {
+		body = helps.SetStringIfDifferent(body, "prompt_cache_key", sessionID)
+	}
+	if len(websocketBaseURL) > 0 {
+		if previousID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()); previousID != "" {
+			body, _ = sjson.SetBytes(body, "previous_response_id", previousID)
+		}
+		body = buildXAIWebsocketRequestBody(body)
+	}
+	body = sanitizeXAIResponsesBody(body, baseModel, req)
+	if opts.Alt == "responses/compact" {
+		body, _ = sjson.DeleteBytes(body, "stream")
+		body, _ = sjson.DeleteBytes(body, "tools")
+		body = normalizeXAIToolChoiceForTools(body)
+		for _, field := range []string{"max_output_tokens", "temperature", "top_p", "top_k", "stop"} {
+			body, _ = sjson.DeleteBytes(body, field)
+		}
+		body = xaiRemoveInputItemsByType(body, "compaction_trigger")
+		if previousResponseID := strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()); previousResponseID != "" {
+			body, _ = sjson.SetBytes(body, "previous_response_id", previousResponseID)
+		}
+	}
+	requestedModel := payloadRequestedModel(opts, req.Model)
+	requestPath := payloadRequestPath(opts)
+	body = applyPayloadConfigWithRequest(
+		e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath,
+		opts.Headers, e.Identifier(),
+	)
+	patchDeclarations := bytes.Clone(body)
 	toolIdentity := newXAIToolIdentityNormalizer(body)
-	willInjectXSearch := e.cfg != nil && e.cfg.XAI.InjectXSearch
+	body, err = translatorcommon.NormalizeResponsesPatchTools(body)
+	if err != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: err.Error()}
+	}
+	body = promoteXAIAdditionalTools(body)
+	willInjectXSearch := e.cfg != nil && e.cfg.XAI.InjectXSearch && opts.Alt != "responses/compact"
 	var dispatcherState *xaiNamespaceDispatcherState
 	if xaiShouldFoldNamespaceTools(body, willInjectXSearch) {
-		body, dispatcherState = foldXAINamespaceTools(body)
+		body, dispatcherState, err = foldXAINamespaceTools(body)
+		if err != nil {
+			return nil, statusErr{code: http.StatusBadRequest, msg: err.Error()}
+		}
 		dispatcherState.registerDeclarations(toolIdentity)
 		body = dispatcherState.normalizeToolChoice(body)
 	}
@@ -1260,27 +1399,23 @@ func (e *XAIExecutor) prepareResponsesRequestWithContext(
 		return nil, err
 	}
 	body = normalizeXAIToolChoiceForTools(body)
-	if willInjectXSearch && !xaiToolChoiceRequiresImageGenerationOnly(body) {
-		body = ensureXAINativeXSearchTool(body)
+	if !xaiToolChoiceRequiresHostedToolOnly(body) {
+		if xaiRequestHasNativeXSearch(body) || willInjectXSearch {
+			body = ensureXAINativeXSearchTool(body)
+		}
 	}
 	body = clampXAIToolsLimit(body, xaiMaxTools, dispatcherState)
 	var replayScope xaiReasoningReplayScope
-	body, replayScope = applyXAIReasoningReplayCache(ctx, from, req, opts, body)
+	body, replayScope = applyXAIReasoningReplayCache(ctx, auth, from, req, opts, body, websocketBaseURL...)
 	body = dispatcherState.normalizeInputHistory(body)
 	body = toolIdentity.normalizeInputHistory(body)
+	body, err = toolIdentity.aliasClientWebSearchInput(body)
+	if err != nil {
+		return nil, statusErr{code: http.StatusBadRequest, msg: err.Error()}
+	}
 	body = normalizeXAIInputReasoningItems(body)
 	body = sanitizeXAIInputEncryptedContent(ctx, body, isCompat)
-	body = normalizeCodexInstructions(body)
-	body = sanitizeXAIResponsesBody(body, baseModel)
 	body = normalizeXAIImageRefs(body)
-
-	sessionID := xaiExecutionSessionID(req, opts)
-	if sessionID == "" && xaiRequiresIsolatedConversation(baseModel) {
-		sessionID = uuid.NewString()
-	}
-	if sessionID != "" {
-		body = helps.SetStringIfDifferent(body, "prompt_cache_key", sessionID)
-	}
 
 	return &xaiPreparedRequest{
 		baseModel:             baseModel,
@@ -1289,6 +1424,7 @@ func (e *XAIExecutor) prepareResponsesRequestWithContext(
 		to:                    to,
 		originalPayload:       originalPayload,
 		body:                  body,
+		patchDeclarations:     patchDeclarations,
 		toolIdentity:          toolIdentity,
 		dispatcherState:       dispatcherState,
 		filterInternalXSearch: xaiRequestHasNativeXSearch(body),
@@ -1520,6 +1656,11 @@ func xaiExecutionSessionID(req cliproxyexecutor.Request, opts cliproxyexecutor.O
 		).String(),
 	); value != "" {
 		return value
+	}
+	for _, metadata := range []map[string]any{opts.Metadata, req.Metadata} {
+		if value := cliproxysession.NormalizeExplicitID(xaiMetadataString(metadata, cliproxyexecutor.CanonicalSessionIDMetadataKey)); value != "" {
+			return cliproxysession.NormalizeToCanonicalUUID(value)
+		}
 	}
 	return helps.DerivedSessionUUID("xai", opts.Metadata, req.Metadata)
 }
@@ -1868,13 +2009,17 @@ func normalizeXAIImageGeneration(body []byte, model string) ([]byte, error) {
 }
 
 func normalizeXAIForcedImageGenerationToolChoice(body []byte) []byte {
+	return normalizeXAIForcedHostedToolChoice(body, xaiImageGenerationToolType)
+}
+
+func normalizeXAIForcedHostedToolChoice(body []byte, toolType string) []byte {
 	choice := gjson.GetBytes(body, "tool_choice")
 	if !choice.IsObject() {
 		return body
 	}
 	choiceType := strings.TrimSpace(choice.Get("type").String())
-	if choiceType == xaiImageGenerationToolType {
-		body = xaiKeepOnlyImageGenerationTools(body)
+	if choiceType == toolType {
+		body = xaiKeepOnlyHostedTools(body, toolType)
 		return xaiSetToolChoiceString(body, "required")
 	}
 	if choiceType != "allowed_tools" {
@@ -1887,7 +2032,7 @@ func normalizeXAIForcedImageGenerationToolChoice(body []byte) []byte {
 	filtered := make([][]byte, 0, len(allowed.Array()))
 	stripped := false
 	for _, tool := range allowed.Array() {
-		if strings.TrimSpace(tool.Get("type").String()) == xaiImageGenerationToolType {
+		if strings.TrimSpace(tool.Get("type").String()) == toolType {
 			stripped = true
 			continue
 		}
@@ -1901,7 +2046,7 @@ func normalizeXAIForcedImageGenerationToolChoice(body []byte) []byte {
 		if mode != "auto" {
 			mode = "required"
 		}
-		body = xaiKeepOnlyImageGenerationTools(body)
+		body = xaiKeepOnlyHostedTools(body, toolType)
 		return xaiSetToolChoiceString(body, mode)
 	}
 	updated, err := sjson.SetRawBytes(body, "tool_choice.tools", helps.JoinRawJSONArray(filtered))
@@ -1911,14 +2056,14 @@ func normalizeXAIForcedImageGenerationToolChoice(body []byte) []byte {
 	return updated
 }
 
-func xaiKeepOnlyImageGenerationTools(body []byte) []byte {
+func xaiKeepOnlyHostedTools(body []byte, toolType string) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() {
 		return body
 	}
 	kept := make([][]byte, 0, 1)
 	for _, tool := range tools.Array() {
-		if strings.TrimSpace(tool.Get("type").String()) == xaiImageGenerationToolType {
+		if strings.TrimSpace(tool.Get("type").String()) == toolType {
 			kept = append(kept, []byte(tool.Raw))
 		}
 	}
@@ -1932,7 +2077,7 @@ func xaiKeepOnlyImageGenerationTools(body []byte) []byte {
 	return updated
 }
 
-func xaiToolChoiceRequiresImageGenerationOnly(body []byte) bool {
+func xaiToolChoiceRequiresHostedToolOnly(body []byte) bool {
 	choice := gjson.GetBytes(body, "tool_choice")
 	if choice.Type != gjson.String || (choice.String() != "required" && choice.String() != "auto") {
 		return false
@@ -1941,8 +2086,12 @@ func xaiToolChoiceRequiresImageGenerationOnly(body []byte) bool {
 	if !tools.IsArray() || len(tools.Array()) == 0 {
 		return false
 	}
-	for _, tool := range tools.Array() {
-		if strings.TrimSpace(tool.Get("type").String()) != xaiImageGenerationToolType {
+	toolType := strings.TrimSpace(tools.Array()[0].Get("type").String())
+	if toolType != xaiImageGenerationToolType && toolType != xaiWebSearchToolType {
+		return false
+	}
+	for _, tool := range tools.Array()[1:] {
+		if strings.TrimSpace(tool.Get("type").String()) != toolType {
 			return false
 		}
 	}
@@ -1957,12 +2106,16 @@ func xaiSetToolChoiceString(body []byte, value string) []byte {
 	return updated
 }
 
-func sanitizeXAIResponsesBody(body []byte, model string) []byte {
+func sanitizeXAIResponsesBody(body []byte, model string, req cliproxyexecutor.Request) []byte {
 	body, _ = sjson.DeleteBytes(body, "stop")
 	body = removeXAIEncryptedReasoningInclude(body)
-	if !xaiSupportsReasoningEffort(model) {
+	supportsReasoningEffort := xaiSupportsReasoningEffort(model)
+	if info, ok := cliproxyauth.ResolvedModelInfo(req); ok {
+		supportsReasoningEffort = info.Thinking != nil && len(info.Thinking.Levels) > 0
+	}
+	if !supportsReasoningEffort {
 		if gjson.GetBytes(body, "reasoning.effort").Exists() {
-			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in model registry)", model)
+			log.Debugf("xai: stripping reasoning.effort for model %s (no thinking levels in resolved capabilities)", model)
 		}
 		body, _ = sjson.DeleteBytes(body, "reasoning.effort")
 		if reasoning := gjson.GetBytes(
@@ -1984,8 +2137,15 @@ type xaiNamespaceDispatcherState struct {
 }
 
 type xaiPreparedResponseNormalizer struct {
-	identity   *xaiToolIdentityResponseNormalizer
-	dispatcher *xaiNamespaceDispatcherResponseNormalizer
+	identity            *xaiToolIdentityResponseNormalizer
+	dispatcher          *xaiNamespaceDispatcherResponseNormalizer
+	patch               *translatorcommon.ResponsesPatchBridge
+	restorePatchTools   bool
+	patchNamespaces     map[string]bool
+	patchDispatcherCall map[string]*xaiPatchDispatcherCall
+	sourceClosed        bool
+	sentinelSeen        bool
+	failed              bool
 }
 
 type xaiNamespaceDispatcherResponseNormalizer struct {
@@ -1998,26 +2158,100 @@ func (p *xaiPreparedRequest) newResponseNormalizer() *xaiPreparedResponseNormali
 	if p == nil {
 		return &xaiPreparedResponseNormalizer{}
 	}
-	return &xaiPreparedResponseNormalizer{
+	normalizer := &xaiPreparedResponseNormalizer{
 		identity: p.toolIdentity.newResponseNormalizer(p.filterInternalXSearch),
 		dispatcher: &xaiNamespaceDispatcherResponseNormalizer{
 			state:             p.dispatcherState,
 			dispatcherItemIDs: make(map[string]string),
 		},
+		patch:             translatorcommon.NewResponsesPatchBridge(p.patchDeclarations),
+		restorePatchTools: p.responseFormat == sdktranslator.FormatOpenAIResponse || p.responseFormat == sdktranslator.FormatCodex,
 	}
+	if normalizer.patch != nil {
+		normalizer.identity.allowDeferredNames = true
+		normalizer.patchNamespaces = make(map[string]bool)
+		normalizer.patchDispatcherCall = make(map[string]*xaiPatchDispatcherCall)
+		for _, declaration := range translatorcommon.NewResponsesToolIdentity(p.patchDeclarations).Declarations() {
+			if declaration.Name == "apply_patch" && declaration.Kind == translatorcommon.ResponsesCustomTool {
+				normalizer.patchNamespaces[declaration.Namespace] = true
+			}
+		}
+	}
+	return normalizer
 }
 
-func (n *xaiPreparedResponseNormalizer) normalize(event []byte) []byte {
+func (n *xaiPreparedResponseNormalizer) normalize(event []byte) [][]byte {
 	if n == nil {
-		return event
+		return [][]byte{event}
 	}
-	if n.identity != nil {
-		event = n.identity.normalize(event)
+	if n.failed {
+		return nil
 	}
-	if len(event) == 0 || n.dispatcher == nil {
-		return event
+	if n.sourceClosed {
+		switch gjson.GetBytes(event, "type").String() {
+		case "response.failed", "response.error", "error":
+			n.failed = true
+			return [][]byte{event}
+		}
+		if !n.sentinelSeen && bytes.Equal(bytes.TrimSpace(event), []byte("[DONE]")) {
+			n.sentinelSeen = true
+			return [][]byte{event}
+		}
+		return nil
 	}
-	return n.dispatcher.normalize(event)
+	patchActive := n.patch != nil
+	defer func() {
+		if patchActive && (n.sourceClosed || n.failed) {
+			n.identity = nil
+			n.dispatcher = nil
+			n.patch = nil
+			n.patchNamespaces = nil
+			n.patchDispatcherCall = nil
+		}
+	}()
+	var normalized [][]byte
+	for _, item := range n.normalizePatchDispatcher(event) {
+		if n.identity != nil {
+			item = n.identity.normalize(item)
+		}
+		if n.dispatcher != nil {
+			item = n.dispatcher.normalize(item)
+		}
+		if len(item) == 0 {
+			continue
+		}
+		items, err := n.patch.Transform(item)
+		if err != nil {
+			n.failed = true
+			n.patchDispatcherCall = nil
+			return [][]byte{invalidXAIToolCallEvent(err.Error())}
+		}
+		if !n.restorePatchTools {
+			items = [][]byte{item}
+		}
+		for _, output := range items {
+			kind := gjson.GetBytes(output, "type").String()
+			if patchActive && kind == "response.done" {
+				output, _ = sjson.SetBytes(output, "type", "response.completed")
+				kind = "response.completed"
+			}
+			if patchActive && (kind == "response.completed" || kind == "response.incomplete") {
+				n.sourceClosed = true
+			}
+			if kind == "response.failed" || kind == "response.error" || kind == "error" {
+				n.failed = true
+				n.patchDispatcherCall = nil
+			}
+			if kind == "response.custom_tool_call_input.delta" {
+				call := n.patchDispatcherCall["item:"+gjson.GetBytes(output, "item_id").String()]
+				if call != nil && call.dispatcher.namespace != "" {
+					continue
+				}
+			}
+			normalized = append(normalized, output)
+		}
+	}
+	return normalized
 }
 
 func (n *xaiNamespaceDispatcherResponseNormalizer) normalize(event []byte) []byte {
@@ -2174,10 +2408,10 @@ func xaiCountFlattenedTools(tools gjson.Result) int {
 	return count
 }
 
-func foldXAINamespaceTools(body []byte) ([]byte, *xaiNamespaceDispatcherState) {
+func foldXAINamespaceTools(body []byte) ([]byte, *xaiNamespaceDispatcherState, error) {
 	tools := gjson.GetBytes(body, "tools")
 	if !tools.IsArray() {
-		return body, nil
+		return body, nil, nil
 	}
 	state := &xaiNamespaceDispatcherState{dispatchers: make(map[string]xaiNamespaceDispatcher)}
 	folded := make([]json.RawMessage, 0, len(tools.Array()))
@@ -2187,7 +2421,10 @@ func foldXAINamespaceTools(body []byte) ([]byte, *xaiNamespaceDispatcherState) {
 			folded = append(folded, json.RawMessage(tool.Raw))
 			continue
 		}
-		dispatcher, ref := buildXAINamespaceDispatcher(tool)
+		dispatcher, ref, err := buildXAINamespaceDispatcher(tool)
+		if err != nil {
+			return nil, nil, err
+		}
 		if len(dispatcher) == 0 {
 			changed = true
 			continue
@@ -2197,27 +2434,27 @@ func foldXAINamespaceTools(body []byte) ([]byte, *xaiNamespaceDispatcherState) {
 		changed = true
 	}
 	if !changed {
-		return body, nil
+		return body, nil, nil
 	}
 	raw, err := json.Marshal(folded)
 	if err != nil {
-		return body, nil
+		return nil, nil, fmt.Errorf("xai: marshal namespace dispatchers: %w", err)
 	}
 	updated, err := sjson.SetRawBytes(body, "tools", raw)
 	if err != nil {
-		return body, nil
+		return nil, nil, fmt.Errorf("xai: set namespace dispatchers: %w", err)
 	}
 	if len(state.dispatchers) == 0 {
-		return updated, nil
+		return updated, nil, nil
 	}
-	return updated, state
+	return updated, state, nil
 }
 
-func buildXAINamespaceDispatcher(tool gjson.Result) ([]byte, xaiNamespaceDispatcher) {
+func buildXAINamespaceDispatcher(tool gjson.Result) ([]byte, xaiNamespaceDispatcher, error) {
 	namespace := strings.TrimSpace(tool.Get("name").String())
 	ref := xaiNamespaceDispatcher{namespace: namespace, children: make(map[string]struct{})}
 	if namespace == "" {
-		return nil, ref
+		return nil, ref, nil
 	}
 	description := strings.TrimSpace(tool.Get("description").String())
 	toolNames := make([]string, 0)
@@ -2234,7 +2471,7 @@ func buildXAINamespaceDispatcher(tool gjson.Result) ([]byte, xaiNamespaceDispatc
 		ref.children[childName] = struct{}{}
 		toolNames = append(toolNames, childName)
 		entry := "- " + childName
-		if childDescription := strings.TrimSpace(child.Get("description").String()); childDescription != "" {
+		if childDescription := child.Get("description").String(); strings.TrimSpace(childDescription) != "" {
 			entry += ": " + childDescription
 		}
 		parameters := child.Get("parameters")
@@ -2242,9 +2479,14 @@ func buildXAINamespaceDispatcher(tool gjson.Result) ([]byte, xaiNamespaceDispatc
 			parameters = child.Get("input_schema")
 		}
 		if parameters.IsObject() {
-			inlined, _ := inlineXAILocalRefs([]byte(parameters.Raw))
-			inlined, _ = sjson.DeleteBytes(inlined, "$defs")
-			inlined, _ = sjson.DeleteBytes(inlined, "definitions")
+			inlined, _, err := inlineXAILocalRefs([]byte(parameters.Raw))
+			if err != nil {
+				return nil, ref, fmt.Errorf("xai: namespace %q tool %q: %w", namespace, childName, err)
+			}
+			inlined, _, err = normalizeXAIObjectFunctionSchema(inlined)
+			if err != nil {
+				return nil, ref, fmt.Errorf("xai: namespace %q tool %q: %w", namespace, childName, err)
+			}
 			trimmed := strings.TrimSpace(string(inlined))
 			if trimmed != "" && trimmed != "{}" && trimmed != `{"type":"object","properties":{}}` {
 				entry += "\n  Parameters: " + trimmed
@@ -2288,9 +2530,9 @@ func buildXAINamespaceDispatcher(tool gjson.Result) ([]byte, xaiNamespaceDispatc
 	}
 	raw, err := json.Marshal(dispatcher)
 	if err != nil {
-		return nil, ref
+		return nil, ref, fmt.Errorf("xai: marshal namespace %q: %w", namespace, err)
 	}
-	return raw, ref
+	return raw, ref, nil
 }
 
 func (s *xaiNamespaceDispatcherState) registerDeclarations(normalizer *xaiToolIdentityNormalizer) {
@@ -2298,6 +2540,9 @@ func (s *xaiNamespaceDispatcherState) registerDeclarations(normalizer *xaiToolId
 		return
 	}
 	for name := range s.dispatchers {
+		if name == xaiWebSearchToolType {
+			normalizer.dispatcherWebSearch = true
+		}
 		normalizer.clientDeclaredTools[xaiClientToolKey{name: name, toolType: xaiFunctionToolType}] = struct{}{}
 	}
 }
@@ -2439,93 +2684,160 @@ func normalizeXAIToolChoiceForTools(body []byte) []byte {
 	return body
 }
 
-func inlineXAILocalRefs(schema []byte) ([]byte, bool) {
-	if !bytes.Contains(schema, []byte(`"$ref"`)) {
-		return schema, false
-	}
+func inlineXAILocalRefs(schema []byte) ([]byte, bool, error) {
 	decoder := json.NewDecoder(bytes.NewReader(schema))
 	decoder.UseNumber()
 	var root any
 	if err := decoder.Decode(&root); err != nil {
-		return schema, false
+		return nil, false, fmt.Errorf("invalid parameters schema: %w", err)
 	}
-	resolved, changed := resolveXAILocalRefs(root, root, make(map[string]bool))
+	resolved, changed, err := resolveXAILocalRefs(root, root, map[string]bool{"#": true})
+	if err != nil {
+		return nil, false, err
+	}
 	if !changed {
-		return schema, false
+		return schema, false, nil
+	}
+	if object, ok := resolved.(map[string]any); ok {
+		defs, hasDefs := object["$defs"]
+		definitions, hasDefinitions := object["definitions"]
+		delete(object, "$defs")
+		delete(object, "definitions")
+		withoutDefinitions, err := json.Marshal(object)
+		if err != nil {
+			return nil, false, err
+		}
+		if bytes.Contains(withoutDefinitions, []byte(`"$ref"`)) ||
+			bytes.Contains(withoutDefinitions, []byte(`"$dynamicRef"`)) ||
+			bytes.Contains(withoutDefinitions, []byte(`"$recursiveRef"`)) {
+			if hasDefs {
+				object["$defs"] = defs
+			}
+			if hasDefinitions {
+				object["definitions"] = definitions
+			}
+		}
 	}
 	raw, err := json.Marshal(resolved)
 	if err != nil {
-		return schema, false
+		return nil, false, fmt.Errorf("marshal resolved parameters schema: %w", err)
 	}
-	return raw, true
+	return raw, true, nil
 }
 
-func resolveXAILocalRefs(root, value any, active map[string]bool) (any, bool) {
+func resolveXAILocalRefs(root, value any, active map[string]bool) (any, bool, error) {
 	switch typed := value.(type) {
 	case map[string]any:
-		if ref, ok := typed["$ref"].(string); ok && strings.HasPrefix(ref, "#/") {
-			if target, found := lookupXAIJSONPointer(root, ref); found {
-				if active[ref] {
-					fallback := map[string]any{"type": "object", "description": "Cyclic local reference " + ref}
-					for key, child := range typed {
-						if key == "$ref" {
-							continue
-						}
-						fallback[key] = child
-					}
-					return fallback, true
-				}
-				active[ref] = true
-				resolvedTarget, _ := resolveXAILocalRefs(root, target, active)
+		if ref, ok := typed["$ref"].(string); ok && (ref == "#" || strings.HasPrefix(ref, "#/")) {
+			target, found := lookupXAIJSONPointer(root, ref)
+			if !found {
+				return nil, false, fmt.Errorf("unresolved local reference %q", ref)
+			}
+			if active[ref] {
+				return typed, false, nil
+			}
+			active[ref] = true
+			resolvedTarget, _, err := resolveXAILocalRefs(root, target, active)
+			if err != nil {
 				delete(active, ref)
-				if resolvedMap, ok := resolvedTarget.(map[string]any); ok {
-					merged := make(map[string]any, len(resolvedMap)+len(typed)-1)
-					for key, child := range resolvedMap {
-						merged[key] = child
-					}
-					for key, child := range typed {
-						if key == "$ref" {
-							continue
-						}
-						resolvedChild, _ := resolveXAILocalRefs(root, child, active)
-						merged[key] = resolvedChild
-					}
-					return merged, true
+				return nil, false, err
+			}
+			siblings := make(map[string]any)
+			for key, child := range typed {
+				if key == "$ref" || key == "$defs" || key == "definitions" {
+					continue
+				}
+				resolvedChild, _, err := resolveXAILocalRefs(root, child, active)
+				if err != nil {
+					delete(active, ref)
+					return nil, false, err
+				}
+				siblings[key] = resolvedChild
+			}
+			delete(active, ref)
+			resolvedMap, isObject := resolvedTarget.(map[string]any)
+			var merged map[string]any
+			if isObject {
+				merged = make(map[string]any, len(resolvedMap)+len(typed))
+				for key, child := range resolvedMap {
+					merged[key] = child
 				}
 			}
+			if len(siblings) > 0 {
+				if !isObject {
+					merged = map[string]any{"allOf": []any{resolvedTarget, siblings}}
+				} else {
+					allOf, exists := merged["allOf"]
+					branches, valid := allOf.([]any)
+					if exists && !valid {
+						return nil, false, fmt.Errorf("referenced schema allOf must be an array")
+					}
+					merged["allOf"] = append(append([]any(nil), branches...), siblings)
+				}
+			}
+			if merged != nil {
+				for _, key := range []string{"$defs", "definitions"} {
+					if definitions, exists := typed[key]; exists {
+						merged[key] = definitions
+					}
+				}
+				return merged, true, nil
+			}
+			return resolvedTarget, true, nil
 		}
 		out := make(map[string]any, len(typed))
 		changed := false
 		for key, child := range typed {
-			resolvedChild, childChanged := resolveXAILocalRefs(root, child, active)
+			if key == "$defs" || key == "definitions" {
+				out[key] = child
+				continue
+			}
+			resolvedChild, childChanged, err := resolveXAILocalRefs(root, child, active)
+			if err != nil {
+				return nil, false, err
+			}
 			out[key] = resolvedChild
 			changed = changed || childChanged
 		}
-		return out, changed
+		return out, changed, nil
 	case []any:
 		out := make([]any, len(typed))
 		changed := false
 		for index, child := range typed {
-			resolvedChild, childChanged := resolveXAILocalRefs(root, child, active)
+			resolvedChild, childChanged, err := resolveXAILocalRefs(root, child, active)
+			if err != nil {
+				return nil, false, err
+			}
 			out[index] = resolvedChild
 			changed = changed || childChanged
 		}
-		return out, changed
+		return out, changed, nil
 	default:
-		return value, false
+		return value, false, nil
 	}
 }
 
 func lookupXAIJSONPointer(root any, ref string) (any, bool) {
+	if ref == "#" {
+		return root, true
+	}
 	current := root
 	for _, segment := range strings.Split(strings.TrimPrefix(ref, "#/"), "/") {
 		segment = strings.ReplaceAll(strings.ReplaceAll(segment, "~1", "/"), "~0", "~")
-		node, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		current, ok = node[segment]
-		if !ok {
+		switch node := current.(type) {
+		case map[string]any:
+			var found bool
+			current, found = node[segment]
+			if !found {
+				return nil, false
+			}
+		case []any:
+			index, err := strconv.Atoi(segment)
+			if err != nil || index < 0 || index >= len(node) || strconv.Itoa(index) != segment {
+				return nil, false
+			}
+			current = node[index]
+		default:
 			return nil, false
 		}
 	}
@@ -2546,13 +2858,15 @@ func normalizeXAITool(tool gjson.Result, namespaceName string) ([]byte, bool, er
 	if toolType == xaiFunctionToolType || toolType == xaiCustomToolType {
 		parameters := gjson.GetBytes(raw, "parameters")
 		if parameters.IsObject() {
-			if inlined, refsChanged := inlineXAILocalRefs([]byte(parameters.Raw)); refsChanged {
+			inlined, refsChanged, err := inlineXAILocalRefs([]byte(parameters.Raw))
+			if err != nil {
+				return nil, false, fmt.Errorf("xai: inline local refs for tool %q: %w", tool.Get("name").String(), err)
+			}
+			if refsChanged {
 				updated, err := sjson.SetRawBytes(raw, "parameters", inlined)
 				if err != nil {
 					return nil, false, fmt.Errorf("xai: inline local refs for tool %q: %w", tool.Get("name").String(), err)
 				}
-				updated, _ = sjson.DeleteBytes(updated, "parameters.$defs")
-				updated, _ = sjson.DeleteBytes(updated, "parameters.definitions")
 				raw = updated
 				changed = true
 			}
@@ -2708,21 +3022,56 @@ func normalizeXAIObjectFunctionSchema(schema []byte) ([]byte, bool, error) {
 
 func normalizeXAIObjectSchemaBranch(branch map[string]any) (map[string]any, bool, bool) {
 	branchType, hasType := branch["type"]
+	changed := false
 	if hasType {
-		normalizedType, objectAllowed, changed := normalizeXAIObjectSchemaType(branchType)
+		normalizedType, objectAllowed, typeChanged := normalizeXAIObjectSchemaType(branchType)
 		if !objectAllowed {
 			return nil, false, false
 		}
-		if changed {
+		if typeChanged {
 			branch["type"] = normalizedType
+			changed = true
 		}
-		return branch, true, changed
 	}
-	if !xaiSchemaUsesObjectKeywords(branch) {
-		return nil, false, false
+	unionFound := false
+	for _, unionName := range []string{"anyOf", "oneOf"} {
+		rawUnion, exists := branch[unionName]
+		if !exists {
+			continue
+		}
+		branches, ok := rawUnion.([]any)
+		if !ok || len(branches) == 0 {
+			return nil, false, false
+		}
+		unionFound = true
+		objectBranches := make([]any, 0, len(branches))
+		for _, value := range branches {
+			child, ok := value.(map[string]any)
+			if !ok {
+				continue
+			}
+			normalized, valid, childChanged := normalizeXAIObjectSchemaBranch(child)
+			if valid {
+				objectBranches = append(objectBranches, normalized)
+				changed = changed || childChanged
+			}
+		}
+		if len(objectBranches) == 0 {
+			return nil, false, false
+		}
+		if len(objectBranches) != len(branches) {
+			branch[unionName] = objectBranches
+			changed = true
+		}
 	}
-	branch["type"] = "object"
-	return branch, true, true
+	if !hasType {
+		if !unionFound && !xaiSchemaUsesObjectKeywords(branch) {
+			return nil, false, false
+		}
+		branch["type"] = "object"
+		changed = true
+	}
+	return branch, true, changed
 }
 
 func normalizeXAIObjectSchemaType(schemaType any) (string, bool, bool) {
@@ -2911,44 +3260,67 @@ func xaiPatchCompletedOutput(
 	outputItemsByIndex map[int64][]byte,
 	outputItemsFallback [][]byte,
 ) []byte {
-	outputResult := gjson.GetBytes(eventData, "response.output")
-	shouldPatchOutput := (!outputResult.Exists() || !outputResult.IsArray() || len(outputResult.Array()) == 0) && (len(outputItemsByIndex) > 0 || len(outputItemsFallback) > 0)
-	if !shouldPatchOutput {
+	if len(outputItemsByIndex) == 0 && len(outputItemsFallback) == 0 {
 		return eventData
 	}
-
 	indexes := make([]int64, 0, len(outputItemsByIndex))
-	for idx := range outputItemsByIndex {
-		indexes = append(indexes, idx)
+	for index := range outputItemsByIndex {
+		indexes = append(indexes, index)
 	}
-	slices.Sort(
-		indexes,
-	)
+	slices.Sort(indexes)
+	items := make([][]byte, 0, len(indexes)+len(outputItemsFallback))
+	for _, index := range indexes {
+		items = append(items, outputItemsByIndex[index])
+	}
+	items = append(items, outputItemsFallback...)
 
-	outputArray := []byte("[]")
-	var buf bytes.Buffer
-	buf.WriteByte('[')
-	wrote := false
-	for _, idx := range indexes {
-		if wrote {
-			buf.WriteByte(',')
+	identities := func(item gjson.Result) [2]string {
+		var keys [2]string
+		if id := item.Get("id"); id.Type == gjson.String && id.String() != "" {
+			keys[0] = "item:" + id.String()
 		}
-		buf.Write(outputItemsByIndex[idx])
-		wrote = true
-	}
-	for _, item := range outputItemsFallback {
-		if wrote {
-			buf.WriteByte(',')
+		if callID := item.Get("call_id"); callID.Type == gjson.String && callID.String() != "" {
+			keys[1] = "call:" + callID.String()
 		}
-		buf.Write(item)
-		wrote = true
+		return keys
 	}
-	buf.WriteByte(']')
-	if wrote {
-		outputArray = buf.Bytes()
+	output := gjson.GetBytes(eventData, "response.output").Array()
+	positions := make(map[string]int, len(items))
+	indexed := items[:0]
+	for _, item := range items {
+		keys := identities(gjson.ParseBytes(item))
+		if len(output) > 0 && keys == [2]string{} {
+			continue
+		}
+		for _, key := range keys {
+			if key != "" {
+				positions[key] = len(indexed)
+			}
+		}
+		indexed = append(indexed, item)
 	}
-
-	patched, _ := sjson.SetRawBytes(eventData, "response.output", outputArray)
+	items = indexed
+	seen := make(map[int]bool, len(items))
+	var additional [][]byte
+	for _, item := range output {
+		position, exists := 0, false
+		for _, key := range identities(item) {
+			if position, exists = positions[key]; exists {
+				break
+			}
+		}
+		if exists {
+			items[position] = []byte(item.Raw)
+			seen[position] = true
+		} else {
+			additional = append(additional, []byte(item.Raw))
+		}
+	}
+	if len(seen) == len(items) {
+		return eventData
+	}
+	items = append(items, additional...)
+	patched, _ := sjson.SetRawBytes(eventData, "response.output", translatorcommon.JoinRawArray(items))
 	return patched
 }
 

@@ -3,10 +3,11 @@ package xai
 import "net/http"
 
 const (
-	ShellTokenAuthHeader            = "X-XAI-Token-Auth"
-	ShellTokenAuthValue             = "xai-grok-cli"
-	ShellClientVersionHeader        = "x-grok-client-version"
-	ShellClientVersionValue         = "0.2.120"
+	ShellTokenAuthHeader     = "X-XAI-Token-Auth"
+	ShellTokenAuthValue      = "xai-grok-cli"
+	ShellClientVersionHeader = "x-grok-client-version"
+	// Chat proxy rejects outdated Grok CLI versions with HTTP 426.
+	ShellClientVersionValue         = "1.0.46"
 	ShellClientIdentifierHeader     = "x-grok-client-identifier"
 	ShellClientIdentifierValue      = "grok-shell"
 	ShellAuthenticateResponseHeader = "x-authenticateresponse"

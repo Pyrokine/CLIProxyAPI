@@ -7,13 +7,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
+	codexauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/codex"
 	devinauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/devin"
+	kimiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/kimi"
 	xaiauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/xai"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
@@ -24,11 +30,12 @@ import (
 )
 
 const (
-	claudeUsageURL   = "https://api.anthropic.com/api/oauth/usage"
+	claudeUsageURL   = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
 	claudeProfileURL = "https://api.anthropic.com/api/oauth/profile"
 
 	codexUsageURL                 = "https://chatgpt.com/backend-api/wham/usage"
 	codexRateLimitResetCreditsURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+	codexSubscriptionsURL         = "https://chatgpt.com/backend-api/subscriptions"
 
 	geminiQuotaURL      = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
 	geminiCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:getCodeAssistSubscription"
@@ -39,11 +46,13 @@ const (
 	xaiBillingURL        = "https://cli-chat-proxy.grok.com/v1/billing"
 	xaiBillingCreditsURL = xaiBillingURL + "?format=credits"
 	xaiSubscriptionURL   = "https://cli-chat-proxy.grok.com/v1/user?include=subscription"
+	xaiSettingsURL       = "https://cli-chat-proxy.grok.com/v1/settings"
 )
 
 var claudeHeaders = map[string]string{
 	"Authorization":  "Bearer $TOKEN$",
 	"Content-Type":   "application/json",
+	"User-Agent":     "claude-cli/2.1.280 (external, cli)",
 	"anthropic-beta": "oauth-2025-04-20",
 }
 
@@ -157,7 +166,7 @@ func fetchCodexQuotaContext(
 	apiCall quota.InternalAPICallContextFunc,
 	authIndex string,
 ) ([]byte, error) {
-	result, err := fetchCodexQuotaResultContext(ctx, apiCall, authIndex)
+	result, err := fetchCodexQuotaResultContext(ctx, apiCall, authIndex, "")
 	if err != nil {
 		return nil, err
 	}
@@ -167,14 +176,25 @@ func fetchCodexQuotaContext(
 func fetchCodexQuotaResultContext(
 	ctx context.Context,
 	apiCall quota.InternalAPICallContextFunc,
-	authIndex string,
+	authIndex, accountID string,
 ) (quota.FetchResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	accountID = strings.TrimSpace(accountID)
+	hasAccountID := accountID != "" && len(accountID) <= 256 && strings.IndexFunc(accountID, unicode.IsControl) < 0
+	usageHeaders := maps.Clone(codexHeaders)
+	resetCreditsHeaders := maps.Clone(codexResetCreditsHeaders)
+	if hasAccountID {
+		usageHeaders["Chatgpt-Account-Id"] = accountID
+		resetCreditsHeaders["Chatgpt-Account-Id"] = accountID
+	}
 	resp, err := apiCall(
 		ctx,
 		quota.APICallRequest{
 			URL:       codexUsageURL,
-			Method:    "GET",
-			Header:    codexHeaders,
+			Method:    http.MethodGet,
+			Header:    usageHeaders,
 			AuthIndex: authIndex,
 		},
 	)
@@ -183,51 +203,132 @@ func fetchCodexQuotaResultContext(
 		return quota.FetchResult{}, fmt.Errorf("codex usage request failed: %w", err)
 	}
 	if resp == nil {
-		return quota.FetchResult{}, fmt.Errorf("codex usage returned empty response")
+		return quota.FetchResult{}, errors.New("codex usage returned empty response")
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return quota.FetchResult{}, fmt.Errorf("codex usage returned status %d", resp.StatusCode)
 	}
 
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(resp.Body, &payload); err != nil {
-		return newQuotaFetchResult(resp.Body, "codex_usage", observedAt, ""), nil
+		return quota.FetchResult{}, fmt.Errorf("codex usage payload is invalid: %w", err)
 	}
 	if payload == nil {
 		return quota.FetchResult{}, errors.New("codex usage returned null payload")
 	}
 
-	partialError := ""
+	partialErrors := make([]string, 0, 2)
 	resetCreditsResp, resetCreditsErr := apiCall(
 		ctx,
 		quota.APICallRequest{
 			URL:       codexRateLimitResetCreditsURL,
-			Method:    "GET",
-			Header:    codexResetCreditsHeaders,
+			Method:    http.MethodGet,
+			Header:    resetCreditsHeaders,
 			AuthIndex: authIndex,
 		},
 	)
-	if resetCreditsErr != nil {
-		partialError = "codex reset credits request failed"
-		encoded, _ := json.Marshal(resetCreditsErr.Error())
-		payload["rate_limit_reset_credits_error"] = encoded
-	} else if resetCreditsResp == nil {
-		partialError = "codex reset credits returned empty response"
-		encoded, _ := json.Marshal(partialError)
-		payload["rate_limit_reset_credits_error"] = encoded
-	} else if resetCreditsResp.StatusCode < 200 || resetCreditsResp.StatusCode >= 300 {
-		partialError = fmt.Sprintf("codex reset credits returned status %d", resetCreditsResp.StatusCode)
-		encoded, _ := json.Marshal(partialError)
-		payload["rate_limit_reset_credits_error"] = encoded
-	} else {
+	resetCreditsError := ""
+	switch {
+	case resetCreditsErr != nil:
+		resetCreditsError = "codex reset credits request failed"
+	case resetCreditsResp == nil:
+		resetCreditsError = "codex reset credits returned empty response"
+	case resetCreditsResp.StatusCode < http.StatusOK || resetCreditsResp.StatusCode >= http.StatusMultipleChoices:
+		resetCreditsError = fmt.Sprintf("codex reset credits returned status %d", resetCreditsResp.StatusCode)
+	default:
 		payload["rate_limit_reset_credits_details"] = resetCreditsResp.Body
+	}
+	if resetCreditsError != "" {
+		partialErrors = append(partialErrors, resetCreditsError)
+		payload["rate_limit_reset_credits_error"] = json.RawMessage(strconv.Quote(resetCreditsError))
+	}
+
+	subscriptionError := ""
+	if !hasAccountID {
+		subscriptionError = "codex subscription account is unavailable"
+	} else {
+		subscriptionCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		subscriptionResp, subscriptionErr := apiCall(subscriptionCtx, quota.APICallRequest{
+			URL:       codexSubscriptionsURL + "?account_id=" + url.QueryEscape(accountID),
+			Method:    http.MethodGet,
+			AuthIndex: authIndex,
+			Header: map[string]string{
+				"Authorization":      codexHeaders["Authorization"],
+				"Content-Type":       codexHeaders["Content-Type"],
+				"User-Agent":         codexHeaders["User-Agent"],
+				"Chatgpt-Account-Id": accountID,
+			},
+		})
+		cancel()
+		switch {
+		case subscriptionErr != nil:
+			subscriptionError = "codex subscription request failed"
+		case subscriptionResp == nil:
+			subscriptionError = "codex subscription returned empty response"
+		case subscriptionResp.StatusCode < http.StatusOK || subscriptionResp.StatusCode >= http.StatusMultipleChoices:
+			subscriptionError = fmt.Sprintf("codex subscription returned status %d", subscriptionResp.StatusCode)
+		default:
+			activeUntil, errParse := parseCodexSubscriptionActiveUntil(subscriptionResp.Body)
+			if errParse != nil {
+				subscriptionError = "codex subscription did not provide a valid active_until"
+			} else {
+				payload["subscription_active_until"] = json.RawMessage(strconv.Quote(activeUntil))
+				payload["subscription_active_until_source"] = json.RawMessage(`"codex_subscriptions"`)
+			}
+		}
+	}
+	if subscriptionError != "" {
+		partialErrors = append(partialErrors, subscriptionError)
+		payload["subscription_error"] = json.RawMessage(strconv.Quote(subscriptionError))
 	}
 
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return quota.FetchResult{}, err
 	}
-	return newQuotaFetchResult(data, "codex_usage", observedAt, partialError), nil
+	return newQuotaFetchResult(data, "codex_usage", observedAt, strings.Join(partialErrors, "; ")), nil
+}
+
+func parseCodexSubscriptionActiveUntil(body []byte) (string, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		var encoded string
+		if json.Unmarshal(body, &encoded) != nil || json.Unmarshal([]byte(encoded), &payload) != nil {
+			return "", errors.New("invalid subscription payload")
+		}
+	}
+	if payload == nil {
+		return "", errors.New("missing subscription payload")
+	}
+	value := payload["active_until"]
+	if len(value) == 0 || string(value) == "null" {
+		value = payload["activeUntil"]
+	}
+	if len(value) == 0 || string(value) == "null" {
+		return "", errors.New("missing active_until")
+	}
+	var raw string
+	if err := json.Unmarshal(value, &raw); err != nil {
+		raw = string(value)
+	}
+	raw = strings.TrimSpace(raw)
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed.UTC().Format(time.RFC3339Nano), nil
+	}
+	unixValue, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || unixValue <= 0 {
+		return "", errors.New("invalid active_until")
+	}
+	var date time.Time
+	if unixValue >= 1_000_000_000_000 {
+		date = time.UnixMilli(unixValue)
+	} else {
+		date = time.Unix(unixValue, 0)
+	}
+	if date.Year() < 2000 || date.Year() > 9999 {
+		return "", errors.New("active_until is outside supported dates")
+	}
+	return date.UTC().Format(time.RFC3339Nano), nil
 }
 
 func fetchGeminiQuotaResultContext(
@@ -383,8 +484,20 @@ func fetchAntigravityQuotaResultContext(
 func fetchKimiQuotaResultContext(
 	ctx context.Context,
 	apiCall quota.InternalAPICallContextFunc,
+	authManager *coreauth.Manager,
 	authIndex string,
 ) (quota.FetchResult, error) {
+	auth := quotaAuthByIndex(authManager, authIndex)
+	if auth == nil {
+		return quota.FetchResult{}, fmt.Errorf("kimi credential %q is unavailable", authIndex)
+	}
+	credentialType, recognized := quotaCredentialTypeForProvider(auth.Provider)
+	if !recognized || credentialType != quota.TypeKimi {
+		return quota.FetchResult{}, fmt.Errorf("credential %q is not a Kimi account", authIndex)
+	}
+	if kimiauth.IsKimiAIAuth(auth) {
+		return quota.FetchResult{}, fmt.Errorf("kimi.ai usage endpoint is not verified for credential %q", authIndex)
+	}
 	resp, err := apiCall(
 		ctx,
 		quota.APICallRequest{
@@ -452,6 +565,22 @@ func quotaAuthByIndex(authManager *coreauth.Manager, authIndex string) *coreauth
 	return nil
 }
 
+func codexQuotaAccountID(authManager *coreauth.Manager, authIndex string) string {
+	auth := quotaAuthByIndex(authManager, authIndex)
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return ""
+	}
+	if storage, ok := auth.Storage.(*codexauth.TokenStorage); ok {
+		if accountID := strings.TrimSpace(storage.AccountID); accountID != "" {
+			return accountID
+		}
+	}
+	if accountID, ok := auth.Metadata["account_id"].(string); ok {
+		return strings.TrimSpace(accountID)
+	}
+	return ""
+}
+
 func fetchXAIQuota(apiCall quota.InternalAPICallFunc, authIndex string) ([]byte, error) {
 	return fetchXAIQuotaContext(context.Background(), backgroundQuotaAPICall(apiCall), authIndex)
 }
@@ -465,6 +594,12 @@ func fetchXAIQuotaContext(
 	if err != nil {
 		return nil, err
 	}
+	if result.Enrich != nil {
+		result, err = result.Enrich(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return result.Data, nil
 }
 
@@ -473,99 +608,144 @@ func fetchXAIQuotaResultContext(
 	apiCall quota.InternalAPICallContextFunc,
 	authIndex string,
 ) (quota.FetchResult, error) {
-	billingResp, billingFormat, err := fetchXAIBillingContext(ctx, apiCall, authIndex)
 	observedAt := time.Now().UTC()
+	payload, partialErrors, err := fetchXAIBillingSnapshotsContext(ctx, apiCall, authIndex, observedAt)
 	if err != nil {
 		return quota.FetchResult{}, err
-	}
-	payload, err := normalizeXAIBilling(billingResp.Body, billingFormat, observedAt)
-	if err != nil {
-		return quota.FetchResult{}, fmt.Errorf("xai billing payload is invalid: %w", err)
-	}
-
-	partialError := ""
-	subscriptionResp, subscriptionErr := apiCall(
-		ctx, quota.APICallRequest{
-			URL:       xaiSubscriptionURL,
-			Method:    http.MethodGet,
-			Header:    xaiQuotaHeaders(),
-			AuthIndex: authIndex,
-		},
-	)
-	switch {
-	case subscriptionErr != nil:
-		partialError = "xai subscription request failed"
-		payload.addAuxiliaryError("subscription", "request_failed", 0)
-	case subscriptionResp == nil:
-		partialError = "xai subscription returned empty response"
-		payload.addAuxiliaryError("subscription", "empty_response", 0)
-	case subscriptionResp.StatusCode < http.StatusOK || subscriptionResp.StatusCode >= http.StatusMultipleChoices:
-		partialError = fmt.Sprintf("xai subscription returned status %d", subscriptionResp.StatusCode)
-		payload.addAuxiliaryError(
-			"subscription",
-			fmt.Sprintf("status_%d", subscriptionResp.StatusCode),
-			subscriptionResp.StatusCode,
-		)
-	case payload.applySubscription(subscriptionResp.Body) != nil:
-		partialError = "xai subscription payload is invalid"
-		payload.addAuxiliaryError("subscription", "invalid_payload", subscriptionResp.StatusCode)
 	}
 
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return quota.FetchResult{}, fmt.Errorf("marshal xai billing payload: %w", err)
 	}
-	return newQuotaFetchResult(encoded, "xai_billing", observedAt, partialError), nil
+	result := newQuotaFetchResult(encoded, "xai_billing", observedAt, strings.Join(partialErrors, "; "))
+	result.Enrich = func(ctx context.Context) (quota.FetchResult, error) {
+		planCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		for _, source := range []struct {
+			name string
+			url  string
+		}{
+			{name: "subscription", url: xaiSubscriptionURL},
+			{name: "settings", url: xaiSettingsURL},
+		} {
+			response, requestErr := apiCall(planCtx, quota.APICallRequest{
+				URL: source.url, Method: http.MethodGet, Header: xaiQuotaHeaders(), AuthIndex: authIndex,
+			})
+			switch {
+			case requestErr != nil:
+				partialErrors = append(partialErrors, "xai "+source.name+" request failed")
+				payload.addAuxiliaryError(source.name, "request_failed", 0)
+			case response == nil:
+				partialErrors = append(partialErrors, "xai "+source.name+" returned empty response")
+				payload.addAuxiliaryError(source.name, "empty_response", 0)
+			case response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices:
+				partialErrors = append(partialErrors, fmt.Sprintf("xai %s returned status %d", source.name, response.StatusCode))
+				payload.addAuxiliaryError(source.name, fmt.Sprintf("status_%d", response.StatusCode), response.StatusCode)
+			case payload.applySubscription(response.Body, source.name) != nil:
+				partialErrors = append(partialErrors, "xai "+source.name+" payload is invalid")
+				payload.addAuxiliaryError(source.name, "invalid_payload", response.StatusCode)
+			}
+		}
+		encoded, err := json.Marshal(payload)
+		if err != nil {
+			return quota.FetchResult{}, fmt.Errorf("marshal xai billing payload: %w", err)
+		}
+		return newQuotaFetchResult(encoded, "xai_billing", observedAt, strings.Join(partialErrors, "; ")), nil
+	}
+	return result, nil
 }
 
-func fetchXAIBilling(apiCall quota.InternalAPICallFunc, authIndex string) (*quota.APICallResponse, string, error) {
-	return fetchXAIBillingContext(context.Background(), backgroundQuotaAPICall(apiCall), authIndex)
-}
-
-func fetchXAIBillingContext(
+func fetchXAIBillingSnapshotsContext(
 	ctx context.Context,
 	apiCall quota.InternalAPICallContextFunc,
 	authIndex string,
-) (*quota.APICallResponse, string, error) {
-	resp, err := apiCall(
-		ctx, quota.APICallRequest{
-			URL:       xaiBillingCreditsURL,
-			Method:    http.MethodGet,
-			Header:    xaiQuotaHeaders(),
-			AuthIndex: authIndex,
-		},
-	)
-	if err != nil {
-		return nil, "", fmt.Errorf("xai billing credits request failed: %w", err)
-	}
-	if resp == nil {
-		return nil, "", fmt.Errorf("xai billing credits returned empty response")
-	}
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		return resp, "credits", nil
-	}
-	if !xaiCreditsFormatUnsupported(resp) {
-		return nil, "", fmt.Errorf("xai billing credits returned status %d", resp.StatusCode)
+	observedAt time.Time,
+) (*xaiQuotaPayload, []string, error) {
+	creditsResp, creditsErr := apiCall(ctx, quota.APICallRequest{
+		URL: xaiBillingCreditsURL, Method: http.MethodGet, Header: xaiQuotaHeaders(), AuthIndex: authIndex,
+	})
+	var weekly *xaiQuotaPayload
+	weeklyError, weeklyCode, weeklyStatus := "", "", 0
+	switch {
+	case creditsErr != nil:
+		weeklyError, weeklyCode = "xai weekly credits request failed", "request_failed"
+	case creditsResp == nil:
+		weeklyError, weeklyCode = "xai weekly credits returned empty response", "empty_response"
+	case creditsResp.StatusCode == http.StatusUnauthorized || creditsResp.StatusCode == http.StatusForbidden ||
+		creditsResp.StatusCode == http.StatusTooManyRequests:
+		return nil, nil, fmt.Errorf("xai weekly credits returned status %d", creditsResp.StatusCode)
+	case creditsResp.StatusCode < http.StatusOK || creditsResp.StatusCode >= http.StatusMultipleChoices:
+		weeklyStatus = creditsResp.StatusCode
+		if xaiCreditsFormatUnsupported(creditsResp) {
+			weeklyError, weeklyCode = "xai weekly credits format unsupported", "credits_format_unsupported"
+		} else if creditsResp.StatusCode >= http.StatusInternalServerError {
+			weeklyError, weeklyCode = fmt.Sprintf("xai weekly credits returned status %d", weeklyStatus), fmt.Sprintf("status_%d", weeklyStatus)
+		} else {
+			return nil, nil, fmt.Errorf("xai weekly credits returned status %d", weeklyStatus)
+		}
+	default:
+		var err error
+		weekly, err = normalizeXAIBilling(creditsResp.Body, "credits", observedAt)
+		if err != nil {
+			weeklyError, weeklyCode = "xai weekly credits payload is invalid", "invalid_payload"
+		} else if weekly.Normalized.Weekly.PeriodType != "weekly" {
+			weeklyError, weeklyCode = "xai weekly billing period unavailable", "period_unavailable"
+			if weekly.Normalized.Weekly.UsagePercent == nil {
+				weekly = nil
+			}
+		}
 	}
 
-	resp, err = apiCall(
-		ctx, quota.APICallRequest{
-			URL:       xaiBillingURL,
-			Method:    http.MethodGet,
-			Header:    xaiQuotaHeaders(),
-			AuthIndex: authIndex,
-		},
-	)
-	if err != nil {
-		return nil, "", fmt.Errorf("xai billing fallback request failed: %w", err)
+	monthlyResp, monthlyErr := apiCall(ctx, quota.APICallRequest{
+		URL: xaiBillingURL, Method: http.MethodGet, Header: xaiQuotaHeaders(), AuthIndex: authIndex,
+	})
+	monthlyError, monthlyCode, monthlyStatus := "", "", 0
+	var payload *xaiQuotaPayload
+	if weekly != nil {
+		payload = weekly
+		payload.retainWeeklyBilling()
 	}
-	if resp == nil {
-		return nil, "", fmt.Errorf("xai billing fallback returned empty response")
+	switch {
+	case monthlyErr != nil:
+		monthlyError, monthlyCode = "xai monthly billing request failed", "request_failed"
+	case monthlyResp == nil:
+		monthlyError, monthlyCode = "xai monthly billing returned empty response", "empty_response"
+	case monthlyResp.StatusCode < http.StatusOK || monthlyResp.StatusCode >= http.StatusMultipleChoices:
+		monthlyStatus = monthlyResp.StatusCode
+		monthlyError = fmt.Sprintf("xai monthly billing returned status %d", monthlyStatus)
+		monthlyCode = fmt.Sprintf("status_%d", monthlyStatus)
+	case payload != nil:
+		if err := payload.applyMonthlyBilling(monthlyResp.Body, observedAt); err != nil {
+			monthlyError, monthlyCode = "xai monthly billing payload is invalid", "invalid_payload"
+		}
+	default:
+		var err error
+		payload, err = normalizeXAIBilling(monthlyResp.Body, "legacy", observedAt)
+		if err != nil || payload.Normalized.Monthly.PeriodType != "monthly" {
+			payload = nil
+			monthlyError, monthlyCode = "xai monthly billing payload is invalid", "invalid_payload"
+		} else {
+			payload.Normalized.UsagePercent = payload.Normalized.Monthly.UsagePercent
+			delete(payload.ValueSource, "usage_percent")
+			if source := payload.ValueSource["monthly.usage_percent"]; source != "" {
+				payload.ValueSource["usage_percent"] = source
+			}
+		}
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, "", fmt.Errorf("xai billing fallback returned status %d", resp.StatusCode)
+	if payload == nil {
+		return nil, nil, fmt.Errorf("xai billing has no usable window: %s; %s", weeklyError, monthlyError)
 	}
-	return resp, "legacy", nil
+	partialErrors := make([]string, 0, 2)
+	if weeklyError != "" {
+		partialErrors = append(partialErrors, weeklyError)
+		payload.addAuxiliaryError("weekly_billing", weeklyCode, weeklyStatus)
+	}
+	if monthlyError != "" {
+		partialErrors = append(partialErrors, monthlyError)
+		payload.addAuxiliaryError("monthly_billing", monthlyCode, monthlyStatus)
+	}
+	return payload, partialErrors, nil
 }
 
 func xaiCreditsFormatUnsupported(resp *quota.APICallResponse) bool {
@@ -650,18 +830,6 @@ func (p authQuotaSchedulingProvider) Snapshots(
 	return result
 }
 
-func quotaCredentialRevision(auth *coreauth.Auth) string {
-	if auth == nil {
-		return ""
-	}
-	if auth.Attributes != nil {
-		if digest := strings.ToLower(strings.TrimSpace(auth.Attributes[coreauth.PersistedSHA256Attribute])); digest != "" {
-			return digest
-		}
-	}
-	return strings.TrimSpace(auth.Index)
-}
-
 func registerAuthManagerForQuota(scheduler *quota.Scheduler, authManager *coreauth.Manager) int {
 	if scheduler == nil || authManager == nil {
 		return 0
@@ -683,7 +851,13 @@ func registerAuthManagerForQuota(scheduler *quota.Scheduler, authManager *coreau
 		if auth.Index == "" {
 			continue
 		}
-		scheduler.RegisterBinding(fileName, credType, auth.Index, quotaCredentialRevision(auth))
+		revision, equivalent, err := coreauth.QuotaCredentialRevisions(auth)
+		if err != nil {
+			scheduler.UnregisterBinding(fileName, credType, auth.Index)
+			log.WithError(err).Warnf("quota: cannot fingerprint credential %s", fileName)
+			continue
+		}
+		scheduler.RegisterBinding(fileName, credType, auth.Index, revision, equivalent...)
 		scheduler.SetBindingDisabled(fileName, credType, auth.Index, auth.Disabled)
 		registered++
 	}
@@ -713,15 +887,44 @@ func registerAuthFilesForQuota(scheduler *quota.Scheduler, authDir string) {
 
 		// Compute auth_index the same way as sdk/cliproxy/auth: sha256("file:" + name)[:8]
 		authIndex := computeAuthIndex(name)
-		credentialRevision := authIndex
-		if data, errRead := os.ReadFile(filepath.Join(authDir, name)); errRead == nil {
-			digest := sha256.Sum256(data)
-			credentialRevision = hex.EncodeToString(digest[:])
-		} else {
+		data, errRead := os.ReadFile(filepath.Join(authDir, name))
+		if errRead != nil {
+			scheduler.UnregisterBinding(name, credType, authIndex)
 			log.WithError(errRead).Warnf("quota: cannot fingerprint auth file %s", name)
+			continue
 		}
-
-		scheduler.RegisterBinding(name, credType, authIndex, credentialRevision)
+		metadata, errMetadata := coreauth.DecodeCredentialMetadata(data)
+		if errMetadata != nil {
+			scheduler.UnregisterBinding(name, credType, authIndex)
+			log.WithError(errMetadata).Warnf("quota: auth file %s is not a valid JSON object", name)
+			continue
+		}
+		provider, _ := metadata["type"].(string)
+		if strings.TrimSpace(provider) == "" {
+			provider = string(credType)
+		}
+		disabled, _ := metadata["disabled"].(bool)
+		coreauth.NormalizeCredentialMetadata(metadata)
+		auth := &coreauth.Auth{Provider: provider, Metadata: metadata, Disabled: disabled}
+		persistedDigest, errDigest := coreauth.DigestPersistedJSON(data)
+		if errDigest == nil {
+			errDigest = coreauth.BindPersistedAuthDigest(auth, persistedDigest)
+		}
+		if errDigest != nil {
+			scheduler.UnregisterBinding(name, credType, authIndex)
+			log.WithError(errDigest).Warnf("quota: cannot bind persisted auth file %s", name)
+			continue
+		}
+		revision, equivalent, err := coreauth.QuotaCredentialRevisions(auth)
+		if err != nil {
+			scheduler.UnregisterBinding(name, credType, authIndex)
+			log.WithError(err).Warnf("quota: cannot fingerprint auth file %s", name)
+			continue
+		}
+		digest := sha256.Sum256(data)
+		equivalent = append(equivalent, hex.EncodeToString(digest[:]))
+		scheduler.RegisterBinding(name, credType, authIndex, revision, equivalent...)
+		scheduler.SetBindingDisabled(name, credType, authIndex, disabled)
 		registered++
 	}
 
@@ -740,7 +943,7 @@ func quotaCredentialTypeForProvider(provider string) (quota.CredentialType, bool
 		return quota.TypeGeminiCli, true
 	case "antigravity":
 		return quota.TypeAntigravity, true
-	case "kimi":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		return quota.TypeKimi, true
 	case "xai", "x-ai", "grok":
 		return quota.TypeXAI, true

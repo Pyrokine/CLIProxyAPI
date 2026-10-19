@@ -67,6 +67,60 @@ func TestNormalizeXAIObjectFunctionSchemaRootUnions(t *testing.T) {
 	}
 }
 
+func TestNormalizeXAIToolResolvesDeepObjectUnionReferences(t *testing.T) {
+	tool := gjson.Parse(`{"type":"function","name":"lookup","parameters":{"anyOf":[{"$ref":"#/$defs/wrapper"},{"type":"string"}],"$defs":{"wrapper":{"oneOf":[{"$ref":"#/$defs/query"},{"type":"null"}]},"query":{"type":"object","properties":{"term":{"type":"string"}},"required":["term"]}}}}`)
+	updated, changed, err := normalizeXAITool(tool, "")
+	if err != nil || !changed {
+		t.Fatalf("normalizeXAITool() = (%s, %v, %v)", updated, changed, err)
+	}
+	for path, want := range map[string]string{
+		"parameters.type":                                 "object",
+		"parameters.anyOf.0.type":                         "object",
+		"parameters.anyOf.0.oneOf.0.type":                 "object",
+		"parameters.anyOf.0.oneOf.0.properties.term.type": "string",
+	} {
+		if got := gjson.GetBytes(updated, path).String(); got != want {
+			t.Fatalf("%s = %q, want %q; tool=%s", path, got, want, updated)
+		}
+	}
+	if gjson.GetBytes(updated, "parameters.$defs").Exists() ||
+		gjson.GetBytes(updated, "parameters.anyOf.1").Exists() ||
+		gjson.GetBytes(updated, "parameters.anyOf.0.oneOf.1").Exists() {
+		t.Fatalf("references or non-object union branches remain: %s", updated)
+	}
+}
+
+func TestNormalizeXAIToolRejectsCyclicRootsWithoutObjectShape(t *testing.T) {
+	for _, parameters := range []string{
+		`{"$ref":"#/$defs/Loop","$defs":{"Loop":{"$ref":"#/$defs/Loop"}}}`,
+		`{"$ref":"#/$defs/A","$defs":{"A":{"$ref":"#/$defs/B"},"B":{"$ref":"#/$defs/A"}}}`,
+		`{"anyOf":[{"$ref":"#/$defs/Loop"},{"type":"null"}],"$defs":{"Loop":{"$ref":"#/$defs/Loop"}}}`,
+	} {
+		tool := gjson.Parse(`{"type":"function","name":"cyclic","parameters":` + parameters + `}`)
+		if _, _, err := normalizeXAITool(tool, ""); err == nil {
+			t.Fatalf("cyclic schema without object shape accepted: %s", parameters)
+		}
+	}
+}
+
+func TestNormalizeXAIToolPreservesRecursiveObjectShape(t *testing.T) {
+	for _, parameters := range []string{
+		`{"$ref":"#/$defs/Node","$defs":{"Node":{"type":"object","properties":{"child":{"$ref":"#/$defs/Node"}}}}}`,
+		`{"$ref":"#/$defs/Alias","$defs":{"Alias":{"$ref":"#/$defs/Node"},"Node":{"properties":{"child":{"$ref":"#/$defs/Alias"}}}}}`,
+	} {
+		tool := gjson.Parse(`{"type":"function","name":"recursive","parameters":` + parameters + `}`)
+		normalized, changed, err := normalizeXAITool(tool, "")
+		if err != nil || !changed {
+			t.Fatalf("recursive object = (%s, %v, %v)", normalized, changed, err)
+		}
+		if gjson.GetBytes(normalized, "parameters.type").String() != "object" ||
+			gjson.GetBytes(normalized, "parameters.properties.child.$ref").String() == "" ||
+			!gjson.GetBytes(normalized, "parameters.$defs").Exists() {
+			t.Fatalf("recursive object reference or definition lost: %s", normalized)
+		}
+	}
+}
+
 func TestNormalizeXAIObjectFunctionSchemaRejectsInvalidRoots(t *testing.T) {
 	t.Parallel()
 
@@ -127,12 +181,12 @@ func TestXAIRequestPreparationPreservesControlsAndPathParity(t *testing.T) {
 		t.Fatalf("HTTP prepare error = %v", err)
 	}
 	wsPrepared, err := newXAIWebsocketsExecutor(&config.Config{}).prepareResponsesWebsocketRequest(
-		context.Background(), req, opts,
+		context.Background(), nil, req, opts,
 	)
 	if err != nil {
 		t.Fatalf("WebSocket prepare error = %v", err)
 	}
-	if !bytes.Equal(httpPrepared.body, wsPrepared.body) {
+	if !bytes.Equal(buildXAIWebsocketRequestBody(httpPrepared.body), wsPrepared.body) {
 		t.Fatalf("HTTP/WS prepared bodies differ:\nHTTP=%s\nWS=%s", httpPrepared.body, wsPrepared.body)
 	}
 
@@ -197,24 +251,29 @@ func TestXAIResponsesPreparationNormalizesDeepSpecialKeyImages(t *testing.T) {
 func TestXAIRequestPreparationRejectsInvalidSchemaAcrossHTTPAndWebSocket(t *testing.T) {
 	t.Parallel()
 
-	payload := []byte(`{"model":"grok-4.3","input":"hello","tools":[{"type":"function","name":"bad","parameters":{"anyOf":[{"type":"string"},{"type":"null"}]}}]}`)
-	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
-	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+	for _, parameters := range []string{
+		`{"anyOf":[{"type":"string"},{"type":"null"}]}`,
+		`{"$ref":"#/$defs/Loop","$defs":{"Loop":{"$ref":"#/$defs/Loop"}}}`,
+	} {
+		payload := []byte(`{"model":"grok-4.3","input":"hello","tools":[{"type":"function","name":"bad","parameters":` + parameters + `}]}`)
+		req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
+		opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
 
-	_, httpErr := newXAIExecutor(&config.Config{}).prepareResponsesRequest(req, opts, true)
-	_, wsErr := newXAIWebsocketsExecutor(&config.Config{}).prepareResponsesWebsocketRequest(
-		context.Background(), req, opts,
-	)
-	for path, err := range map[string]error{"HTTP": httpErr, "WebSocket": wsErr} {
-		if err == nil {
-			t.Fatalf("%s prepare error = nil", path)
-		}
-		status, ok := err.(interface{ StatusCode() int })
-		if !ok || status.StatusCode() != http.StatusBadRequest {
-			t.Fatalf("%s prepare error = %T %v, want status 400", path, err, err)
-		}
-		if !strings.Contains(err.Error(), "no valid object branch") {
-			t.Fatalf("%s prepare error = %q", path, err)
+		_, httpErr := newXAIExecutor(&config.Config{}).prepareResponsesRequest(req, opts, true)
+		_, wsErr := newXAIWebsocketsExecutor(&config.Config{}).prepareResponsesWebsocketRequest(
+			context.Background(), nil, req, opts,
+		)
+		for path, err := range map[string]error{"HTTP": httpErr, "WebSocket": wsErr} {
+			if err == nil {
+				t.Fatalf("%s prepare error = nil for %s", path, parameters)
+			}
+			status, ok := err.(interface{ StatusCode() int })
+			if !ok || status.StatusCode() != http.StatusBadRequest {
+				t.Fatalf("%s prepare error = %T %v, want status 400", path, err, err)
+			}
+			if !strings.Contains(err.Error(), "no valid object branch") {
+				t.Fatalf("%s prepare error = %q", path, err)
+			}
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/misc"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // TokenStorage stores xAI OAuth credentials on disk.
@@ -33,6 +34,14 @@ type TokenStorage struct {
 	AuthKind      string `json:"auth_kind,omitempty"`
 
 	Metadata map[string]any `json:"-"`
+}
+
+func (ts *TokenStorage) CloneForPersistence() coreauth.TokenStorage {
+	if ts == nil {
+		return nil
+	}
+	copyStorage := *ts
+	return &copyStorage
 }
 
 // SetMetadata allows the token store to merge status fields before saving.

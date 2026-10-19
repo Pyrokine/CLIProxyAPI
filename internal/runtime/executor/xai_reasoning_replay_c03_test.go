@@ -2,13 +2,101 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	internalcache "github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/home"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+func TestXAIReasoningProofPrecedesMultipleToolCallsAcrossClientFormats(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+	completed := []byte(fmt.Sprintf(`{"response":{"output":[{"type":"reasoning","summary":[],"encrypted_content":%q},{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"function_call","call_id":"call_2","name":"lookup","arguments":"{}"}]}}`, validGrokEncryptedContentForExecutorTest()))
+	for _, tt := range []struct {
+		name   string
+		format sdktranslator.Format
+		body   []byte
+	}{
+		{"Chat", sdktranslator.FormatOpenAI, []byte(`{"prompt_cache_key":"multi-tool-chat","messages":[{"role":"user","content":"earlier"},{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a"},{"role":"tool","tool_call_id":"call_2","content":"b"},{"role":"user","content":"continue"}]}`)},
+		{"Messages", sdktranslator.FormatClaude, []byte(`{"prompt_cache_key":"multi-tool-messages","messages":[{"role":"user","content":"earlier"},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"a"},{"type":"tool_result","tool_use_id":"call_2","content":"b"},{"type":"text","text":"continue"}]}]}`)},
+		{"Responses", sdktranslator.FormatOpenAIResponse, []byte(`{"prompt_cache_key":"multi-tool-responses","input":[{"role":"user","content":"earlier"},{"type":"function_call_output","call_id":"call_1","output":"a"},{"type":"function_call_output","call_id":"call_2","output":"b"},{"role":"user","content":"continue"}]}`)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := xaiC03ContextWithAPIKey("multi-tool-caller")
+			req := cliproxyexecutor.Request{Model: "grok-4.6", Payload: tt.body}
+			opts := cliproxyexecutor.Options{SourceFormat: tt.format}
+			scope := xaiReasoningReplayScopeFromRequest(ctx, xaiReplayTestAuth, tt.format, req, opts, tt.body)
+			if !scope.valid() {
+				t.Fatalf("invalid replay scope for %s", tt.name)
+			}
+			cacheXAIReasoningReplayFromCompleted(ctx, scope, completed)
+			prepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequestWithContext(ctx, xaiReplayTestAuth, req, opts, false, sdktranslator.FormatCodex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := gjson.GetBytes(prepared.body, "input").Array()
+			reasoningIndex, firstCallIndex, outputCount := -1, -1, 0
+			calls := map[string]int{}
+			for index, item := range input {
+				switch item.Get("type").String() {
+				case "reasoning":
+					if reasoningIndex >= 0 {
+						t.Fatalf("duplicate reasoning proof: %s", prepared.body)
+					}
+					reasoningIndex = index
+				case "function_call":
+					calls[item.Get("call_id").String()]++
+					if firstCallIndex < 0 {
+						firstCallIndex = index
+					}
+				case "function_call_output":
+					outputCount++
+				}
+			}
+			if len(input) == 0 || input[0].Get("role").String() != "user" ||
+				reasoningIndex <= 0 || firstCallIndex != reasoningIndex+1 ||
+				calls["call_1"] != 1 || calls["call_2"] != 1 || outputCount != 2 {
+				t.Fatalf("multi-tool proof/calls/order not preserved: %s", prepared.body)
+			}
+		})
+	}
+}
+
+func TestXAIChatReplayKeepsDistinctProofsBesideTheirToolCalls(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+	first := validGrokEncryptedContentForExecutorTest()
+	second := "A" + first[1:]
+	completed := []byte(fmt.Sprintf(`{"response":{"output":[{"type":"reasoning","summary":[],"encrypted_content":%q},{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"reasoning","summary":[],"encrypted_content":%q},{"type":"function_call","call_id":"call_2","name":"lookup","arguments":"{}"}]}}`, first, second))
+	ctx := xaiC03ContextWithAPIKey("two-proofs-caller")
+	request := cliproxyexecutor.Request{Model: "grok-4.6", Payload: []byte(`{"prompt_cache_key":"two-proofs-session","messages":[{"role":"user","content":"earlier"},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}},{"id":"call_2","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"a"},{"role":"tool","tool_call_id":"call_2","content":"b"},{"role":"user","content":"continue"}]}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, xaiReplayTestAuth, opts.SourceFormat, request, opts, request.Payload)
+	cacheXAIReasoningReplayFromCompleted(ctx, scope, completed)
+	prepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequestWithContext(ctx, xaiReplayTestAuth, request, opts, false, sdktranslator.FormatCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := gjson.GetBytes(prepared.body, "input").Array()
+	for index, item := range input {
+		if item.Get("type").String() != "function_call" {
+			continue
+		}
+		want := first
+		if item.Get("call_id").String() == "call_2" {
+			want = second
+		}
+		if index == 0 || input[index-1].Get("encrypted_content").String() != want {
+			t.Fatalf("proof for %s does not immediately precede call: %s", item.Get("call_id").String(), prepared.body)
+		}
+	}
+}
 
 func TestXAIC03ReplayDropsAssistantWhenToolAnchorHasNoMatchingOutput(t *testing.T) {
 	body := []byte(`{"input":[{"role":"user","content":"new turn"}]}`)

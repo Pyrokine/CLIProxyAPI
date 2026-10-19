@@ -43,6 +43,8 @@ type xaiNormalizedBilling struct {
 	UsagePercent    *float64            `json:"usage_percent"`
 	UsagePeriod     xaiNormalizedPeriod `json:"usage_period"`
 	BillingPeriod   xaiNormalizedPeriod `json:"billing_period"`
+	Weekly          xaiNormalizedWindow `json:"weekly"`
+	Monthly         xaiNormalizedWindow `json:"monthly"`
 	ProductUsage    []xaiProductUsage   `json:"product_usage"`
 	AmountUnit      string              `json:"amount_unit"`
 	Currency        *string             `json:"currency"`
@@ -54,6 +56,13 @@ type xaiNormalizedPeriod struct {
 	RawType *string `json:"raw_type"`
 	Start   *string `json:"start"`
 	End     *string `json:"end"`
+}
+
+type xaiNormalizedWindow struct {
+	UsagePercent *float64 `json:"usage_percent"`
+	PeriodType   string   `json:"period_type"`
+	PeriodStart  *string  `json:"period_start"`
+	PeriodEnd    *string  `json:"period_end"`
 }
 
 type xaiProductUsage struct {
@@ -88,6 +97,7 @@ func normalizeXAIBilling(body []byte, billingFormat string, syncedAt time.Time) 
 	planTier, planTierSource := xaiBillingString(sources, "subscriptionTier", "subscription_tier")
 	monthlyLimit, monthlyLimitSource := xaiBillingNumber(sources, "monthlyLimit", "monthly_limit")
 	includedUsed, includedUsedSource := xaiBillingNumber(sources, "includedUsed", "included_used", "used")
+	monthlyUsed, monthlyUsedSource := xaiBillingNumber(sources, "used")
 	totalUsed, totalUsedSource := xaiBillingNumber(sources, "totalUsed", "total_used")
 	onDemandCap, onDemandCapSource := xaiBillingNumber(
 		sources,
@@ -99,6 +109,7 @@ func normalizeXAIBilling(body []byte, billingFormat string, syncedAt time.Time) 
 	onDemandUsed, onDemandUsedSource := xaiBillingNumber(sources, "onDemandUsed", "on_demand_used")
 	prepaidBalance, prepaidBalanceSource := xaiBillingNumber(sources, "prepaidBalance", "prepaid_balance")
 	usagePercent, usagePercentSource := xaiBillingNumber(sources, "creditUsagePercent", "credit_usage_percent")
+	weeklyPercent, weeklyPercentSource := usagePercent, usagePercentSource
 	onDemandEnabled, onDemandEnabledSource := xaiBillingBool(sources, "onDemandEnabled", "on_demand_enabled")
 	remaining, remainingSource := xaiBillingNumber(sources, "remaining", "remainingCredits", "remaining_credits")
 
@@ -106,28 +117,35 @@ func normalizeXAIBilling(body []byte, billingFormat string, syncedAt time.Time) 
 	usedSource := totalUsedSource
 	if used == nil && includedUsed != nil && onDemandUsed != nil {
 		value := *includedUsed + *onDemandUsed
-		used = &value
-		usedSource = "derived:included_used+on_demand_used"
+		if !math.IsInf(value, 0) && !math.IsNaN(value) {
+			used = &value
+			usedSource = "derived:included_used+on_demand_used"
+		}
 	} else if used == nil && includedUsed != nil {
 		value := *includedUsed
 		used = &value
 		usedSource = includedUsedSource
 	}
 	if remaining == nil && monthlyLimit != nil && includedUsed != nil {
-		value := math.Max(0, *monthlyLimit-*includedUsed)
-		remaining = &value
-		remainingSource = "derived:monthly_limit-included_used"
+		value := *monthlyLimit - *includedUsed
+		if !math.IsInf(value, 0) && !math.IsNaN(value) {
+			value = math.Max(0, value)
+			remaining = &value
+			remainingSource = "derived:monthly_limit-included_used"
+		}
 	}
 	if usagePercent == nil {
 		switch {
 		case monthlyLimit != nil && *monthlyLimit > 0 && includedUsed != nil:
-			value := *includedUsed / *monthlyLimit * 100
-			usagePercent = &value
-			usagePercentSource = "derived:included_used/monthly_limit"
+			usagePercent = xaiBillingPercent(includedUsed, monthlyLimit)
+			if usagePercent != nil {
+				usagePercentSource = "derived:included_used/monthly_limit"
+			}
 		case onDemandCap != nil && *onDemandCap > 0 && onDemandUsed != nil:
-			value := *onDemandUsed / *onDemandCap * 100
-			usagePercent = &value
-			usagePercentSource = "derived:on_demand_used/on_demand_cap"
+			usagePercent = xaiBillingPercent(onDemandUsed, onDemandCap)
+			if usagePercent != nil {
+				usagePercentSource = "derived:on_demand_used/on_demand_cap"
+			}
 		}
 	}
 
@@ -171,6 +189,35 @@ func normalizeXAIBilling(body []byte, billingFormat string, syncedAt time.Time) 
 		return nil, fmt.Errorf("payload contains no billing fields")
 	}
 
+	weekly := xaiNormalizedWindow{PeriodType: "unknown"}
+	monthly := xaiNormalizedWindow{PeriodType: "unknown"}
+	if billingFormat == "credits" {
+		weekly = xaiNormalizedWindow{
+			UsagePercent: weeklyPercent,
+			PeriodType:   usagePeriod.Type,
+			PeriodStart:  usagePeriod.Start,
+			PeriodEnd:    usagePeriod.End,
+		}
+		xaiSetBillingSource(valueSource, "weekly.usage_percent", weeklyPercent, weeklyPercentSource)
+		if usagePeriod.RawType != nil {
+			valueSource["weekly.period_type"] = currentPeriodSource + ".type"
+		}
+		xaiSetBillingSource(valueSource, "weekly.period_start", weekly.PeriodStart, currentPeriodSource+".start")
+		xaiSetBillingSource(valueSource, "weekly.period_end", weekly.PeriodEnd, currentPeriodSource+".end")
+	} else {
+		if monthlyUsed != nil || monthlyLimit != nil || billingStart != nil || billingEnd != nil {
+			monthly.PeriodType = "monthly"
+			valueSource["monthly.period_type"] = "derived:billing_" + billingFormat
+		}
+		monthly.PeriodStart, monthly.PeriodEnd = billingStart, billingEnd
+		monthly.UsagePercent = xaiBillingPercent(monthlyUsed, monthlyLimit)
+		if monthly.UsagePercent != nil {
+			valueSource["monthly.usage_percent"] = "derived:" + monthlyUsedSource + "/" + monthlyLimitSource
+		}
+		xaiSetBillingSource(valueSource, "monthly.period_start", monthly.PeriodStart, billingStartSource)
+		xaiSetBillingSource(valueSource, "monthly.period_end", monthly.PeriodEnd, billingEndSource)
+	}
+
 	xaiSetBillingSource(valueSource, "plan_code", planCode, planCodeSource)
 	xaiSetBillingSource(valueSource, "plan_name", planName, planNameSource)
 	xaiSetBillingSource(valueSource, "plan_tier", planTier, planTierSource)
@@ -208,6 +255,8 @@ func normalizeXAIBilling(body []byte, billingFormat string, syncedAt time.Time) 
 			UsagePercent:    usagePercent,
 			UsagePeriod:     usagePeriod,
 			BillingPeriod:   billingPeriod,
+			Weekly:          weekly,
+			Monthly:         monthly,
 			ProductUsage:    productUsage,
 			AmountUnit:      amountUnit,
 			Currency:        currency,
@@ -216,19 +265,93 @@ func normalizeXAIBilling(body []byte, billingFormat string, syncedAt time.Time) 
 	}, nil
 }
 
-func (p *xaiQuotaPayload) applySubscription(body []byte) error {
+func (p *xaiQuotaPayload) retainWeeklyBilling() {
 	if p == nil {
-		return fmt.Errorf("xai subscription: quota payload is nil")
+		return
+	}
+	p.Normalized.Monthly = xaiNormalizedWindow{PeriodType: "unknown"}
+	p.Normalized.MonthlyLimit = nil
+	p.Normalized.Used = nil
+	p.Normalized.IncludedUsed = nil
+	p.Normalized.Remaining = nil
+	p.Normalized.BillingPeriod = xaiNormalizedPeriod{Type: "unknown"}
+	p.Normalized.AmountUnit = "unknown"
+	p.Normalized.Currency = nil
+	p.Normalized.UsagePercent = p.Normalized.Weekly.UsagePercent
+	for _, field := range []string{
+		"monthly_limit", "used", "included_used", "remaining", "billing_period_start", "billing_period_end",
+		"amount_unit", "currency", "monthly.usage_percent", "monthly.period_type", "monthly.period_start", "monthly.period_end",
+		"usage_percent",
+	} {
+		delete(p.ValueSource, field)
+	}
+	if source := p.ValueSource["weekly.usage_percent"]; source != "" {
+		p.ValueSource["usage_percent"] = source
+	}
+}
+
+func (p *xaiQuotaPayload) applyMonthlyBilling(body []byte, syncedAt time.Time) error {
+	monthly, err := normalizeXAIBilling(body, "legacy", syncedAt)
+	if err != nil {
+		return err
+	}
+	if monthly.Normalized.Monthly.PeriodType != "monthly" {
+		return fmt.Errorf("monthly billing response has no monthly fields")
+	}
+	if p.Normalized.PlanCode == nil {
+		p.Normalized.PlanCode = monthly.Normalized.PlanCode
+		xaiSetBillingSource(p.ValueSource, "plan_code", p.Normalized.PlanCode, monthly.ValueSource["plan_code"])
+	}
+	if p.Normalized.PlanName == nil {
+		p.Normalized.PlanName = monthly.Normalized.PlanName
+		xaiSetBillingSource(p.ValueSource, "plan_name", p.Normalized.PlanName, monthly.ValueSource["plan_name"])
+	}
+	if p.Normalized.PlanTier == nil {
+		p.Normalized.PlanTier = monthly.Normalized.PlanTier
+		xaiSetBillingSource(p.ValueSource, "plan_tier", p.Normalized.PlanTier, monthly.ValueSource["plan_tier"])
+	}
+	p.Normalized.Monthly = monthly.Normalized.Monthly
+	p.Normalized.MonthlyLimit = monthly.Normalized.MonthlyLimit
+	p.Normalized.Used = monthly.Normalized.Used
+	p.Normalized.IncludedUsed = monthly.Normalized.IncludedUsed
+	p.Normalized.Remaining = monthly.Normalized.Remaining
+	p.Normalized.BillingPeriod = monthly.Normalized.BillingPeriod
+	p.Normalized.AmountUnit = monthly.Normalized.AmountUnit
+	p.Normalized.Currency = monthly.Normalized.Currency
+	for _, field := range []string{
+		"monthly_limit", "used", "included_used", "remaining", "billing_period_start", "billing_period_end",
+		"amount_unit", "currency", "monthly.usage_percent", "monthly.period_type", "monthly.period_start", "monthly.period_end",
+	} {
+		if source := monthly.ValueSource[field]; source != "" {
+			p.ValueSource[field] = source
+		}
+	}
+	return nil
+}
+
+func (p *xaiQuotaPayload) applySubscription(body []byte, name string) error {
+	if p == nil {
+		return fmt.Errorf("xai %s: quota payload is nil", name)
 	}
 	root, err := xaiBillingObject(body)
 	if err != nil {
-		return fmt.Errorf("xai subscription: %w", err)
+		return fmt.Errorf("xai %s: %w", name, err)
 	}
-	sources := []xaiBillingValueSource{{name: "subscription", values: root}}
-	if user := xaiBillingMap(root["user"]); user != nil {
-		sources = append([]xaiBillingValueSource{{name: "subscription.user", values: user}}, sources...)
+	sources := []xaiBillingValueSource{{name: name, values: root}}
+	nestedKey := "user"
+	if name == "settings" {
+		nestedKey = "settings"
 	}
-	tier, source := xaiBillingString(sources, "subscriptionTier", "subscription_tier")
+	if nested := xaiBillingMap(root[nestedKey]); nested != nil {
+		sources = append([]xaiBillingValueSource{{name: name + "." + nestedKey, values: nested}}, sources...)
+	}
+	tier, source := xaiBillingString(sources, "subscriptionTierDisplay", "subscription_tier_display")
+	if tier == nil {
+		if name == "settings" && p.Normalized.PlanTier != nil {
+			return nil
+		}
+		tier, source = xaiBillingString(sources, "subscriptionTier", "subscription_tier")
+	}
 	if tier != nil {
 		p.Normalized.PlanTier = tier
 		p.ValueSource["plan_tier"] = source
@@ -322,6 +445,17 @@ func xaiBillingNumberValue(value any) *float64 {
 		return xaiBillingNumberValue(typed["val"])
 	}
 	return nil
+}
+
+func xaiBillingPercent(used, limit *float64) *float64 {
+	if used == nil || limit == nil || *limit <= 0 {
+		return nil
+	}
+	percent := *used / *limit * 100
+	if math.IsNaN(percent) || math.IsInf(percent, 0) {
+		return nil
+	}
+	return &percent
 }
 
 func xaiBillingString(sources []xaiBillingValueSource, keys ...string) (*string, string) {

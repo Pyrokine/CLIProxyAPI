@@ -12,8 +12,11 @@ import (
 	internalcache "github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -30,12 +33,14 @@ func (s xaiReasoningReplayScope) valid() bool {
 
 func applyXAIReasoningReplayCache(
 	ctx context.Context,
+	auth *cliproxyauth.Auth,
 	from sdktranslator.Format,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 	body []byte,
+	websocketBaseURL ...string,
 ) ([]byte, xaiReasoningReplayScope) {
-	scope := xaiReasoningReplayScopeFromRequest(ctx, from, req, opts, body)
+	scope := xaiReasoningReplayScopeFromRequest(ctx, auth, from, req, opts, body, websocketBaseURL...)
 	if !scope.valid() {
 		return body, scope
 	}
@@ -47,23 +52,108 @@ func applyXAIReasoningReplayCache(
 	if !ok {
 		return body, scope
 	}
-	items = filterXAIReasoningReplayItemsForInput(body, items)
+	cachedItems := items
+	items = filterXAIReasoningReplayItemsForInput(body, cachedItems)
 	if len(items) == 0 {
 		return body, scope
 	}
-	updated, ok := insertCodexReasoningReplayItems(body, items)
+	updated, paired := xaiPairChatReasoningWithToolCalls(body, cachedItems, items)
+	if paired {
+		return updated, scope
+	}
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAI) {
+		return body, scope
+	}
+	updated, ok = insertCodexReasoningReplayItems(body, items)
 	if !ok {
 		return body, scope
 	}
 	return updated, scope
 }
 
+func xaiPairChatReasoningWithToolCalls(body []byte, cachedItems, filtered [][]byte) ([]byte, bool) {
+	inputResult := gjson.GetBytes(body, "input")
+	if !inputResult.IsArray() {
+		return body, false
+	}
+	input := inputResult.Array()
+	callIndexes := make(map[string]int)
+	outputs := make(map[string]bool)
+	for index, item := range input {
+		switch item.Get("type").String() {
+		case "function_call", "custom_tool_call":
+			for _, id := range codexReplayComparableCallIDs(item.Get("call_id").String()) {
+				callIndexes[item.Get("type").String()+":"+id] = index
+			}
+		case "function_call_output", "custom_tool_call_output":
+			for _, id := range codexReplayComparableCallIDs(item.Get("call_id").String()) {
+				outputs[strings.TrimSuffix(item.Get("type").String(), "_output")+":"+id] = true
+			}
+		}
+	}
+	remaining := make(map[string]int)
+	for _, raw := range filtered {
+		if gjson.GetBytes(raw, "type").String() != "reasoning" {
+			return body, false
+		}
+		remaining[gjson.GetBytes(raw, "encrypted_content").String()]++
+	}
+	insertions := make(map[int][][]byte)
+	var pending [][]byte
+	for _, raw := range cachedItems {
+		item := gjson.ParseBytes(raw)
+		switch item.Get("type").String() {
+		case "reasoning":
+			proof := item.Get("encrypted_content").String()
+			if remaining[proof] > 0 {
+				pending = append(pending, raw)
+				remaining[proof]--
+			}
+		case "function_call", "custom_tool_call":
+			if len(pending) == 0 {
+				continue
+			}
+			anchor := -1
+			for _, id := range codexReplayComparableCallIDs(item.Get("call_id").String()) {
+				key := item.Get("type").String() + ":" + id
+				if index, ok := callIndexes[key]; ok && outputs[key] {
+					anchor = index
+					break
+				}
+			}
+			if anchor < 0 {
+				return body, false
+			}
+			insertions[anchor] = append(insertions[anchor], pending...)
+			pending = nil
+		case "message":
+			if len(pending) > 0 {
+				return body, false
+			}
+		}
+	}
+	if len(pending) > 0 || len(insertions) == 0 {
+		return body, false
+	}
+	merged := make([]string, 0, len(input)+len(filtered))
+	for index, item := range input {
+		for _, proof := range insertions[index] {
+			merged = append(merged, string(proof))
+		}
+		merged = append(merged, item.Raw)
+	}
+	updated, err := sjson.SetRawBytes(body, "input", []byte("["+strings.Join(merged, ",")+"]"))
+	return updated, err == nil
+}
+
 func xaiReasoningReplayScopeFromRequest(
 	ctx context.Context,
+	auth *cliproxyauth.Auth,
 	from sdktranslator.Format,
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 	body []byte,
+	websocketBaseURL ...string,
 ) xaiReasoningReplayScope {
 	if !xaiReasoningReplayEnabledForSource(from) {
 		return xaiReasoningReplayScope{}
@@ -72,12 +162,52 @@ func xaiReasoningReplayScopeFromRequest(
 		strings.TrimSpace(gjson.GetBytes(req.Payload, "previous_response_id").String()) != "" {
 		return xaiReasoningReplayScope{}
 	}
-	sessionKey := codexReasoningReplaySessionKey(ctx, from, req, opts, body)
-	sessionKey = xaiReasoningReplayIsolateSessionKey(ctx, sessionKey)
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAI) && !xaiChatHasExplicitReplaySession(ctx, req, opts, body) {
+		return xaiReasoningReplayScope{}
+	}
+	sessionKey := xaiReasoningReplayIsolateSessionKey(ctx, codexReasoningReplaySessionKey(ctx, from, req, opts, body))
+	token, _ := xaiCreds(auth)
+	if sessionKey == "" || token == "" {
+		return xaiReasoningReplayScope{}
+	}
+	plane := "cli"
+	if xaiUsingAPI(auth) {
+		plane = "api"
+	}
+	transport := "http"
+	baseURL := xaiChatBaseURL(auth)
+	if opts.Alt == "responses/compact" || xaiInputHasItemType(req.Payload, "compaction_trigger") {
+		transport = "compact"
+		baseURL = xaiCompactBaseURL(auth)
+	}
+	if len(websocketBaseURL) > 0 {
+		transport = "websocket"
+		baseURL = websocketBaseURL[0]
+	}
+	if strings.TrimSpace(baseURL) == "" {
+		return xaiReasoningReplayScope{}
+	}
+	credential := sha256.Sum256([]byte(token + "\x00" + plane + "\x00" + transport + "\x00" + xaiNormalizeBaseURL(baseURL)))
 	return xaiReasoningReplayScope{
 		modelName:  thinking.ParseSuffix(req.Model).ModelName,
-		sessionKey: sessionKey,
+		sessionKey: "credential:" + hex.EncodeToString(credential[:16]) + ":" + sessionKey,
 	}
+}
+
+func xaiChatHasExplicitReplaySession(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, body []byte) bool {
+	if metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey) != "" ||
+		metadataString(req.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey) != "" ||
+		codexReasoningReplaySessionKeyFromPayload(body) != "" ||
+		codexReasoningReplaySessionKeyFromPayload(req.Payload) != "" ||
+		codexReasoningReplaySessionKeyFromHeaders(opts.Headers) != "" {
+		return true
+	}
+	if ctx != nil {
+		if ginCtx, ok := util.GinContextValue(ctx).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			return codexReasoningReplaySessionKeyFromHeaders(ginCtx.Request.Header) != ""
+		}
+	}
+	return false
 }
 
 func xaiReasoningReplayIsolateSessionKey(ctx context.Context, sessionKey string) string {
@@ -98,6 +228,7 @@ func xaiReasoningReplayIsolateSessionKey(ctx context.Context, sessionKey string)
 
 func xaiReasoningReplayEnabledForSource(from sdktranslator.Format) bool {
 	return sourceFormatEqual(from, sdktranslator.FormatClaude) ||
+		sourceFormatEqual(from, sdktranslator.FormatOpenAI) ||
 		sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse)
 }
 

@@ -11,8 +11,8 @@ func TestApplyShellIdentityHeaders(t *testing.T) {
 
 	want := map[string]string{
 		"X-XAI-Token-Auth":         "xai-grok-cli",
-		"x-grok-client-version":    "0.2.120",
-		"User-Agent":               "xai-grok-workspace/0.2.120",
+		"x-grok-client-version":    "1.0.46",
+		"User-Agent":               "xai-grok-workspace/1.0.46",
 		"x-grok-client-identifier": "grok-shell",
 		"x-authenticateresponse":   "authenticate-response",
 	}
@@ -28,7 +28,7 @@ func TestShellIdentityHeaderValuesReturnsIndependentCopy(t *testing.T) {
 	first["User-Agent"] = "changed"
 
 	second := ShellIdentityHeaderValues()
-	if got := second["User-Agent"]; got != "xai-grok-workspace/0.2.120" {
+	if got := second["User-Agent"]; got != "xai-grok-workspace/1.0.46" {
 		t.Fatalf("User-Agent = %q", got)
 	}
 }

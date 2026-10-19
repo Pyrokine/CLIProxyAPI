@@ -140,11 +140,8 @@ func TestXAIToolIdentityPromotesAdditionalToolsAndNormalizesChoices(t *testing.T
 	if err != nil {
 		t.Fatalf("normalizeDeclarations() forced error = %v", err)
 	}
-	if got := gjson.GetBytes(forced, "tool_choice.type").String(); got != "allowed_tools" {
-		t.Fatalf("forced web_search choice type = %q, want allowed_tools; body=%s", got, forced)
-	}
-	if got := gjson.GetBytes(forced, "tool_choice.mode").String(); got != "required" {
-		t.Fatalf("forced web_search choice mode = %q, want required; body=%s", got, forced)
+	if got := gjson.GetBytes(forced, "tool_choice").String(); got != "required" {
+		t.Fatalf("forced web_search choice = %q, want required; body=%s", got, forced)
 	}
 }
 
@@ -299,11 +296,11 @@ func TestXAIToolIdentityHTTPWebSocketParity(t *testing.T) {
 		t.Fatalf("HTTP prepare error = %v", err)
 	}
 	wsExecutor := newXAIWebsocketsExecutor(&config.Config{})
-	wsPrepared, err := wsExecutor.prepareResponsesWebsocketRequest(context.Background(), req, opts)
+	wsPrepared, err := wsExecutor.prepareResponsesWebsocketRequest(context.Background(), nil, req, opts)
 	if err != nil {
 		t.Fatalf("WebSocket prepare error = %v", err)
 	}
-	if !bytes.Equal(httpPrepared.body, wsPrepared.body) {
+	if !bytes.Equal(buildXAIWebsocketRequestBody(httpPrepared.body), wsPrepared.body) {
 		t.Fatalf("HTTP/WS prepared bodies differ:\nHTTP=%s\nWS=%s", httpPrepared.body, wsPrepared.body)
 	}
 

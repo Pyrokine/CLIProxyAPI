@@ -19,6 +19,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+var xaiReplayTestAuth = &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"api_key": "offline-replay-credential"}}
+
 func xaiC03ContextWithAPIKey(apiKey string) context.Context {
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ginCtx.Set("apiKey", apiKey)
@@ -31,10 +33,10 @@ func TestXAIC03ReplayScopeIsolatesCallerAPIKeys(t *testing.T) {
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
 
 	scopeA := xaiReasoningReplayScopeFromRequest(
-		xaiC03ContextWithAPIKey("caller-a"), opts.SourceFormat, req, opts, payload,
+		xaiC03ContextWithAPIKey("caller-a"), xaiReplayTestAuth, opts.SourceFormat, req, opts, payload,
 	)
 	scopeB := xaiReasoningReplayScopeFromRequest(
-		xaiC03ContextWithAPIKey("caller-b"), opts.SourceFormat, req, opts, payload,
+		xaiC03ContextWithAPIKey("caller-b"), xaiReplayTestAuth, opts.SourceFormat, req, opts, payload,
 	)
 	if !scopeA.valid() || !scopeB.valid() {
 		t.Fatalf("caller-isolated scopes must be valid: A=%+v B=%+v", scopeA, scopeB)
@@ -48,6 +50,25 @@ func TestXAIC03ReplayScopeIsolatesCallerAPIKeys(t *testing.T) {
 	}
 }
 
+func TestXAIC03ChatReplayRequiresExplicitConversationIdentity(t *testing.T) {
+	ctx := xaiC03ContextWithAPIKey("caller-a")
+	body := []byte(`{"input":[{"role":"user","content":"hello"}]}`)
+	request := cliproxyexecutor.Request{Model: "grok-4.6", Payload: []byte(`{"messages":[{"role":"user","content":"hello"}]}`)}
+	options := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}
+	if scope := xaiReasoningReplayScopeFromRequest(ctx, xaiReplayTestAuth, options.SourceFormat, request, options, body); scope.valid() {
+		t.Fatalf("chat without conversation identity has replay scope %+v", scope)
+	}
+	request.Payload = []byte(`{"prompt_cache_key":"conversation-1","messages":[{"role":"user","content":"hello"}]}`)
+	scope := xaiReasoningReplayScopeFromRequest(ctx, xaiReplayTestAuth, options.SourceFormat, request, options, body)
+	if !scope.valid() || !strings.Contains(scope.sessionKey, "conversation-1") {
+		t.Fatalf("chat with explicit conversation identity has scope %+v", scope)
+	}
+	other := xaiReasoningReplayScopeFromRequest(xaiC03ContextWithAPIKey("caller-b"), xaiReplayTestAuth, options.SourceFormat, request, options, body)
+	if !other.valid() || other.sessionKey == scope.sessionKey {
+		t.Fatalf("chat callers share replay scope: A=%+v B=%+v", scope, other)
+	}
+}
+
 func TestXAIC03ReplayCacheDoesNotCrossCallerAPIKeys(t *testing.T) {
 	internalcache.ClearXAIReasoningReplayCache()
 	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
@@ -56,7 +77,7 @@ func TestXAIC03ReplayCacheDoesNotCrossCallerAPIKeys(t *testing.T) {
 	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
 	scopeA := xaiReasoningReplayScopeFromRequest(
-		xaiC03ContextWithAPIKey("caller-a"), opts.SourceFormat, req, opts, payload,
+		xaiC03ContextWithAPIKey("caller-a"), xaiReplayTestAuth, opts.SourceFormat, req, opts, payload,
 	)
 	seedXAIReasoningReplay(t, scopeA)
 
@@ -71,7 +92,7 @@ func TestXAIC03ReplayCacheDoesNotCrossCallerAPIKeys(t *testing.T) {
 	} {
 		t.Run(
 			tc.name, func(t *testing.T) {
-				updated, _ := applyXAIReasoningReplayCache(tc.ctx, opts.SourceFormat, req, opts, payload)
+				updated, _ := applyXAIReasoningReplayCache(tc.ctx, xaiReplayTestAuth, opts.SourceFormat, req, opts, payload)
 				got := gjson.GetBytes(updated, "input.0.type").String() == "reasoning"
 				if got != tc.want {
 					t.Fatalf("reasoning replay injected = %v, want %v; body=%s", got, tc.want, updated)
@@ -81,12 +102,130 @@ func TestXAIC03ReplayCacheDoesNotCrossCallerAPIKeys(t *testing.T) {
 	}
 }
 
+func TestXAIC03ReplaySeparatesSelectedCredentialsAndPlanes(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	ctx := xaiC03ContextWithAPIKey("shared-caller")
+	payload := []byte(`{"prompt_cache_key":"shared-session","input":[{"type":"function_call_output","call_id":"call_1","output":"ok"},{"role":"user","content":"continue"}]}`)
+	req := cliproxyexecutor.Request{Model: "grok-4.6", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+	auth := &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"api_key": "credential-a", "base_url": "https://gateway.example/v1"}}
+	scope := xaiReasoningReplayScopeFromRequest(ctx, auth, opts.SourceFormat, req, opts, payload)
+	if !scope.valid() || strings.Contains(scope.sessionKey, "credential-a") {
+		t.Fatalf("invalid or unhashed credential scope: %+v", scope)
+	}
+	proof := validGrokEncryptedContentForExecutorTest()
+	items := [][]byte{
+		[]byte(`{"type":"reasoning","summary":[],"encrypted_content":""}`),
+		[]byte(`{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}`),
+	}
+	items[0], _ = sjson.SetBytes(items[0], "encrypted_content", proof)
+	if !internalcache.XAIReasoningReplayItems(scope.modelName, scope.sessionKey, items) {
+		t.Fatal("failed to seed credential-scoped replay")
+	}
+
+	for _, tt := range []struct {
+		name string
+		auth *cliproxyauth.Auth
+		want bool
+	}{
+		{"same credential", auth, true},
+		{"different credential", &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"api_key": "credential-b", "base_url": "https://gateway.example/v1"}}, false},
+		{"different endpoint", &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"api_key": "credential-a", "base_url": "https://other.example/v1"}}, false},
+		{"different plane", &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{"api_key": "credential-a", "base_url": "https://gateway.example/v1", "using_api": "false"}}, false},
+		{"missing credential", &cliproxyauth.Auth{Provider: "xai"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequestWithContext(ctx, tt.auth, req, opts, false, sdktranslator.FormatCodex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := gjson.GetBytes(prepared.body, "input.0.encrypted_content").String() == proof
+			if got != tt.want {
+				t.Fatalf("replay injected = %t, want %t; body=%s", got, tt.want, prepared.body)
+			}
+			if tt.want && prepared.reasoningReplayScope.sessionKey != scope.sessionKey {
+				t.Fatalf("request scope = %q, want %q", prepared.reasoningReplayScope.sessionKey, scope.sessionKey)
+			}
+		})
+	}
+}
+
+func TestXAIC03ReplaySeparatesPhysicalTransports(t *testing.T) {
+	internalcache.ClearXAIReasoningReplayCache()
+	t.Cleanup(internalcache.ClearXAIReasoningReplayCache)
+
+	ctx := xaiC03ContextWithAPIKey("shared-caller")
+	payload := []byte(`{"model":"grok-4.6","prompt_cache_key":"shared-session","input":[{"role":"user","content":"continue"}]}`)
+	req := cliproxyexecutor.Request{Model: "grok-4.6", Payload: payload}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}
+	for _, tt := range []struct {
+		name string
+		auth *cliproxyauth.Auth
+	}{
+		{"CLI chat versus API WebSocket", &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{
+			"auth_kind": "oauth", "api_key": "offline-replay-token",
+		}}},
+		{"same custom endpoint across transports", &cliproxyauth.Auth{Provider: "xai", Attributes: map[string]string{
+			"auth_kind": "oauth", "api_key": "offline-replay-token", "base_url": "https://gateway.example/v1",
+		}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, websocketBaseURL := xaiCreds(tt.auth)
+			if websocketBaseURL == "" {
+				websocketBaseURL = xaiauth.DefaultAPIBaseURL
+			}
+			httpScope := xaiReasoningReplayScopeFromRequest(ctx, tt.auth, opts.SourceFormat, req, opts, payload)
+			websocketScope := xaiReasoningReplayScopeFromRequest(ctx, tt.auth, opts.SourceFormat, req, opts, payload, websocketBaseURL)
+			compactOpts := opts
+			compactOpts.Alt = "responses/compact"
+			compactScope := xaiReasoningReplayScopeFromRequest(ctx, tt.auth, opts.SourceFormat, req, compactOpts, payload)
+			if !httpScope.valid() || !websocketScope.valid() || !compactScope.valid() ||
+				httpScope.sessionKey == websocketScope.sessionKey || httpScope.sessionKey == compactScope.sessionKey ||
+				websocketScope.sessionKey == compactScope.sessionKey {
+				t.Fatalf("physical replay scopes overlap: HTTP=%+v WebSocket=%+v compact=%+v", httpScope, websocketScope, compactScope)
+			}
+			seedXAIReasoningReplay(t, httpScope)
+			httpPrepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequestWithContext(
+				ctx, tt.auth, req, opts, false, sdktranslator.FormatCodex,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if httpPrepared.reasoningReplayScope.sessionKey != httpScope.sessionKey ||
+				gjson.GetBytes(httpPrepared.body, "input.0.type").String() != "reasoning" {
+				t.Fatalf("HTTP replay not isolated to its route: scope=%+v body=%s", httpPrepared.reasoningReplayScope, httpPrepared.body)
+			}
+			websocketPrepared, err := newXAIWebsocketsExecutor(&config.Config{}).prepareResponsesWebsocketRequest(ctx, tt.auth, req, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if websocketPrepared.reasoningReplayScope.sessionKey != websocketScope.sessionKey ||
+				gjson.GetBytes(websocketPrepared.body, "input.0.type").String() == "reasoning" {
+				t.Fatalf("WebSocket reused HTTP proof: scope=%+v body=%s", websocketPrepared.reasoningReplayScope, websocketPrepared.body)
+			}
+			compactPrepared, err := newXAIExecutor(&config.Config{}).prepareResponsesRequestWithContext(
+				ctx, tt.auth, req, compactOpts, false, sdktranslator.FormatOpenAIResponse,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if compactPrepared.reasoningReplayScope.sessionKey != compactScope.sessionKey ||
+				gjson.GetBytes(compactPrepared.body, "input.0.type").String() == "reasoning" {
+				t.Fatalf("compact reused HTTP proof: scope=%+v body=%s", compactPrepared.reasoningReplayScope, compactPrepared.body)
+			}
+			internalcache.ClearXAIReasoningReplayCache()
+		})
+	}
+}
+
 func TestXAIC03ReplayScopeDisablesUnisolatedSessions(t *testing.T) {
 	payload := []byte(`{"model":"grok-4.3","prompt_cache_key":"shared-session","input":[{"role":"user","content":"hello"}]}`)
 	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
 	for _, source := range []sdktranslator.Format{sdktranslator.FormatClaude, sdktranslator.FormatOpenAIResponse} {
 		scope := xaiReasoningReplayScopeFromRequest(
-			context.Background(), source, req, cliproxyexecutor.Options{SourceFormat: source}, payload,
+			context.Background(), xaiReplayTestAuth, source, req, cliproxyexecutor.Options{SourceFormat: source}, payload,
 		)
 		if scope.valid() {
 			t.Fatalf("source %s without caller API key has replay scope %+v", source.String(), scope)
@@ -94,15 +233,15 @@ func TestXAIC03ReplayScopeDisablesUnisolatedSessions(t *testing.T) {
 	}
 
 	trusted := xaiReasoningReplayScopeFromRequest(
-		context.Background(), sdktranslator.FormatClaude, req, cliproxyexecutor.Options{
+		context.Background(), xaiReplayTestAuth, sdktranslator.FormatClaude, req, cliproxyexecutor.Options{
 			SourceFormat: sdktranslator.FormatClaude,
 			Metadata: map[string]any{
 				cliproxyexecutor.ExecutionSessionMetadataKey: "trusted-session",
 			},
 		}, payload,
 	)
-	if trusted.sessionKey != "execution:trusted-session" {
-		t.Fatalf("trusted execution scope = %q, want execution:trusted-session", trusted.sessionKey)
+	if !strings.HasSuffix(trusted.sessionKey, ":execution:trusted-session") {
+		t.Fatalf("trusted execution scope = %q, want credential-isolated execution:trusted-session", trusted.sessionKey)
 	}
 }
 
@@ -111,6 +250,7 @@ func TestXAIC03ReplayScopeSkipsIncrementalWebsocketHistory(t *testing.T) {
 	payload := []byte(`{"model":"grok-4.3","prompt_cache_key":"session","previous_response_id":"resp_1","input":[{"role":"user","content":"next"}]}`)
 	scope := xaiReasoningReplayScopeFromRequest(
 		ctx,
+		xaiReplayTestAuth,
 		sdktranslator.FormatOpenAIResponse,
 		cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload},
 		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse},
@@ -186,14 +326,14 @@ func TestXAIC03CompactClearsOnlyCorrespondingReplay(t *testing.T) {
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Alt: "responses/compact"}
 	payload := []byte(`{"model":"grok-4.3","prompt_cache_key":"compact-session","input":[{"role":"user","content":"compact"}]}`)
 	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
-	scope := xaiReasoningReplayScopeFromRequest(ctx, opts.SourceFormat, req, opts, payload)
+	scope := xaiReasoningReplayScopeFromRequest(ctx, auth, opts.SourceFormat, req, opts, payload)
 	otherPayload := []byte(`{"model":"grok-4.3","prompt_cache_key":"other-session","input":[{"role":"user","content":"keep"}]}`)
 	otherReq := cliproxyexecutor.Request{Model: "grok-4.3", Payload: otherPayload}
-	otherScope := xaiReasoningReplayScopeFromRequest(ctx, opts.SourceFormat, otherReq, opts, otherPayload)
+	otherScope := xaiReasoningReplayScopeFromRequest(ctx, auth, opts.SourceFormat, otherReq, opts, otherPayload)
 
 	seedXAIReasoningReplay(t, scope)
 	seedXAIReasoningReplay(t, otherScope)
-	if _, _, _, err := exec.executeCompactRequest(ctx, auth, req, opts); err != nil {
+	if _, err := exec.Execute(ctx, auth, req, opts); err != nil {
 		t.Fatalf("executeCompactRequest error: %v", err)
 	}
 	if _, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey); ok {
@@ -236,10 +376,10 @@ func TestXAIC03CompactFailureRetainsReplay(t *testing.T) {
 	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, Alt: "responses/compact"}
 	payload := []byte(`{"model":"grok-4.3","prompt_cache_key":"compact-session","input":[{"role":"user","content":"compact"}]}`)
 	req := cliproxyexecutor.Request{Model: "grok-4.3", Payload: payload}
-	scope := xaiReasoningReplayScopeFromRequest(ctx, opts.SourceFormat, req, opts, payload)
+	scope := xaiReasoningReplayScopeFromRequest(ctx, auth, opts.SourceFormat, req, opts, payload)
 	seedXAIReasoningReplay(t, scope)
 
-	if _, _, _, err := exec.executeCompactRequest(ctx, auth, req, opts); err == nil {
+	if _, err := exec.Execute(ctx, auth, req, opts); err == nil {
 		t.Fatal("executeCompactRequest error = nil, want upstream failure")
 	}
 	if _, ok := internalcache.GetXAIReasoningReplayItems(scope.modelName, scope.sessionKey); !ok {
