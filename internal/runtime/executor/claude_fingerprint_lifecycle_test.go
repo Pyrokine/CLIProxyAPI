@@ -122,7 +122,7 @@ func TestClaudeFingerprintPayloadRulesReclassifyHelpers(t *testing.T) {
 func TestClaudeFingerprintNativeCallerOwnsCloaking(t *testing.T) {
 	payload, _ := sjson.SetBytes([]byte(fingerprintPayload), "metadata.user_id", `{"device_id":"`+strings.Repeat("a", 64)+`","account_uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}`)
 	opts := fingerprintOptions()
-	opts.Headers = http.Header{"User-Agent": {"claude-cli/2.1.258 (external, cli)"}, "X-App": {"cli"}, "Anthropic-Beta": {"claude-code-20250219"}}
+	opts.Headers = http.Header{"User-Agent": {"claude-cli/2.1.280 (external, cli)"}, "X-App": {"cli"}, "Anthropic-Beta": {"claude-code-20250219"}}
 	a := fingerprintAuth("claude-code-cli", "https://gateway.invalid")
 	a.Attributes["cloak_mode"] = "always"
 	cr, err := NewClaudeExecutor(&config.Config{}).prepareClaudeRequest(context.Background(), a, fingerprintRequest(string(payload)), opts, false)

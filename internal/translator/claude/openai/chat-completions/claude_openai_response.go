@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -28,6 +29,7 @@ type convertAnthropicResponseToOpenAIParams struct {
 	Usage        claudeUsageTokens
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator map[int]*toolCallAccumulator
+	ToolNamesReverseMap  map[string]string
 	NextToolCallIndex    int
 }
 
@@ -90,12 +92,16 @@ type toolCallAccumulator struct {
 //
 // Returns:
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
-func convertClaudeResponseToOpenAI(_ context.Context, modelName string, _, _, rawJSON []byte, param *any) [][]byte {
+func convertClaudeResponseToOpenAI(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
+		if !gjson.ValidBytes(originalRequestRawJSON) {
+			originalRequestRawJSON = requestRawJSON
+		}
 		*param = &convertAnthropicResponseToOpenAIParams{
-			CreatedAt:    0,
-			ResponseID:   "",
-			FinishReason: "",
+			CreatedAt:           0,
+			ResponseID:          "",
+			FinishReason:        "",
+			ToolNamesReverseMap: util.ReverseToolNameMap(util.ClaudeFunctionNameMap(originalRequestRawJSON)),
 		}
 	}
 
@@ -156,7 +162,10 @@ func convertClaudeResponseToOpenAI(_ context.Context, modelName string, _, _, ra
 			if blockType == "tool_use" {
 				// Start of tool call - initialize accumulator to track arguments
 				toolCallID := contentBlock.Get("id").String()
-				toolName := contentBlock.Get("name").String()
+				toolName := util.RestoreSanitizedToolName(
+					(*param).(*convertAnthropicResponseToOpenAIParams).ToolNamesReverseMap,
+					contentBlock.Get("name").String(),
+				)
 				index := int(root.Get("index").Int())
 
 				if (*param).(*convertAnthropicResponseToOpenAIParams).ToolCallsAccumulator == nil {
@@ -324,7 +333,11 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 //
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
-func convertClaudeResponseToOpenAINonStream(_ context.Context, _ string, _, _, rawJSON []byte, _ *any) []byte {
+func convertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+	if !gjson.ValidBytes(originalRequestRawJSON) {
+		originalRequestRawJSON = requestRawJSON
+	}
+	toolNamesReverseMap := util.ReverseToolNameMap(util.ClaudeFunctionNameMap(originalRequestRawJSON))
 	chunks := make([][]byte, 0)
 
 	lines := bytes.SplitSeq(rawJSON, []byte("\n"))
@@ -346,6 +359,30 @@ func convertClaudeResponseToOpenAINonStream(_ context.Context, _ string, _, _, r
 	var reasoningParts []string
 	usageTokens := claudeUsageTokens{}
 	toolCallsAccumulator := make(map[int]*toolCallAccumulator)
+
+	if native := gjson.ParseBytes(rawJSON); native.Get("type").String() == "message" && native.Get("content").IsArray() {
+		messageID = native.Get("id").String()
+		model = native.Get("model").String()
+		createdAt = time.Now().Unix()
+		stopReason = native.Get("stop_reason").String()
+		usageTokens.merge(native.Get("usage"))
+		for index, block := range native.Get("content").Array() {
+			switch block.Get("type").String() {
+			case "text":
+				contentParts = append(contentParts, block.Get("text").String())
+			case "thinking":
+				reasoningParts = append(reasoningParts, block.Get("thinking").String())
+			case "tool_use":
+				call := &toolCallAccumulator{ID: block.Get("id").String(), Name: block.Get("name").String()}
+				arguments := block.Get("input").Raw
+				if arguments == "" {
+					arguments = "{}"
+				}
+				call.Arguments.WriteString(arguments)
+				toolCallsAccumulator[index] = call
+			}
+		}
+	}
 
 	for _, chunk := range chunks {
 		root := gjson.ParseBytes(chunk)
@@ -480,7 +517,7 @@ func convertClaudeResponseToOpenAINonStream(_ context.Context, _ string, _, _, r
 
 			out, _ = sjson.SetBytes(out, idPath, accumulator.ID)
 			out, _ = sjson.SetBytes(out, typePath, "function")
-			out, _ = sjson.SetBytes(out, namePath, accumulator.Name)
+			out, _ = sjson.SetBytes(out, namePath, util.RestoreSanitizedToolName(toolNamesReverseMap, accumulator.Name))
 			out, _ = sjson.SetBytes(out, argumentsPath, arguments)
 			toolCallsCount++
 		}

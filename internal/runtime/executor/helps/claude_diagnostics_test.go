@@ -100,3 +100,75 @@ func TestClaudeDiagnosticsRejectsLateOlderCommit(t *testing.T) {
 		t.Fatalf("previous message = %q, want newer completed generation", previous)
 	}
 }
+
+func TestClaudeJSONPrefilterKeepsClassifications(t *testing.T) {
+	titles := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{"plain system title", `{"system":"Return a short title for this session"}`, true},
+		{"escaped system title", `{"system":"naming a\u0020coding session"}`, true},
+		{"title schema", `{"output_config":{"format":{"schema":{"properties":{"title":{}}}}},"messages":[{"role":"user","content":"<session>test</session>"}]}`, true},
+		{"ordinary user request", `{"messages":[{"role":"user","content":"Return a short title"}]}`, false},
+		{"unrelated request", `{"system":"You are a coding assistant"}`, false},
+	}
+	for _, tt := range titles {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isClaudeTitleHelperRequest([]byte(tt.payload)); got != tt.want {
+				t.Fatalf("title helper = %t, want %t", got, tt.want)
+			}
+		})
+	}
+
+	ttls := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{"tool", `{"tools":[{"cache_control":{"ttl":"1h"}}]}`, true},
+		{"system", `{"system":[{"cache_control":{"ttl":"1h"}}]}`, true},
+		{"escaped digit in message", `{"messages":[{"content":[{"cache_control":{"ttl":"\u0031h"}}]}]}`, true},
+		{"escaped letter in tool", `{"tools":[{"cache_control":{"ttl":"1\u0068"}}]}`, true},
+		{"unrelated one hour text", `{"system":[{"cache_control":{"ttl":"5m"}}],"note":"1h"}`, false},
+		{"no one hour", `{"system":[{"cache_control":{"ttl":"5m"}}]}`, false},
+		{"malformed payload", `{"system":[{"cache_control":{"ttl":"1h"}}]`, false},
+	}
+	for _, tt := range ttls {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClaudePayloadHas1hTTL([]byte(tt.payload)); got != tt.want {
+				t.Fatalf("one-hour TTL = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPinClaudeSessionDateResetsWithContinuityGeneration(t *testing.T) {
+	resetClaudeDiagnosticsForTest()
+	defer resetClaudeDiagnosticsForTest()
+
+	key, _, _ := BeginClaudeDiagnostics("credential", "session")
+	if first := PinClaudeSessionDate(key, "2026-08-01"); first != "2026-08-01" {
+		t.Fatalf("first date = %q", first)
+	}
+	if second := PinClaudeSessionDate(key, "2026-08-02"); second != "2026-08-01" {
+		t.Fatalf("second date = %q, want original date", second)
+	}
+	other, _, _ := BeginClaudeDiagnostics("credential", "other-session")
+	if otherDate := PinClaudeSessionDate(other, "2026-08-02"); otherDate != "2026-08-02" {
+		t.Fatalf("other session date = %q", otherDate)
+	}
+
+	claudeDiagnosticsState.Lock()
+	entry := claudeDiagnosticsState.entries[key]
+	entry.expiresAt = time.Now().Add(-time.Second)
+	claudeDiagnosticsState.entries[key] = entry
+	claudeDiagnosticsState.Unlock()
+	BeginClaudeDiagnostics("credential", "session")
+	if resetDate := PinClaudeSessionDate(key, "2026-08-02"); resetDate != "2026-08-02" {
+		t.Fatalf("date after expiry = %q, want new date", resetDate)
+	}
+	if unknown := PinClaudeSessionDate("unknown", "2026-08-03"); unknown != "2026-08-03" {
+		t.Fatalf("unknown session date = %q", unknown)
+	}
+}

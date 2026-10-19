@@ -67,23 +67,27 @@ func TestConvertGeminiRequestToClaudeAcceptsInlineDataAliases(t *testing.T) {
 }
 
 func TestConvertGeminiRequestToClaudeSplitsInlineDataByMIME(t *testing.T) {
-	out := ConvertGeminiRequestToClaude(
-		"claude-sonnet-5",
-		[]byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}`),
-		false,
-	)
-
-	if got := gjson.GetBytes(out, "messages.0.content.0.type").String(); got != "text" {
-		t.Fatalf("audio fallback type = %q, want text. Output: %s", got, out)
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.1.type").String(); got != "text" {
-		t.Fatalf("video fallback type = %q, want text. Output: %s", got, out)
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.2.type").String(); got != "document" {
-		t.Fatalf("PDF content type = %q, want document. Output: %s", got, out)
-	}
-	if got := gjson.GetBytes(out, "messages.0.content.2.source.media_type").String(); got != "application/pdf" {
-		t.Fatalf("PDF media_type = %q, want application/pdf. Output: %s", got, out)
+	for _, role := range []string{"user", "model"} {
+		t.Run(role, func(t *testing.T) {
+			out := ConvertGeminiRequestToClaude("claude-sonnet-5", []byte(`{"contents":[{"role":"`+role+`","parts":[{"inlineData":{"mimeType":"audio/wav","data":"UklGRg=="}},{"inlineData":{"mimeType":"video/mp4","data":"AAAAIGZ0eXA="}},{"inlineData":{"mimeType":"application/pdf","data":"JVBERi0="}}]}]}`), false)
+			parts := gjson.GetBytes(out, "messages.0.content").Array()
+			wantCount := 1
+			if role == "model" {
+				wantCount = 3
+			}
+			if len(parts) != wantCount {
+				t.Fatalf("content count = %d, want %d; %s", len(parts), wantCount, out)
+			}
+			for _, part := range parts[:len(parts)-1] {
+				if part.Get("type").String() != "text" {
+					t.Fatalf("assistant media placeholder missing: %s", out)
+				}
+			}
+			pdf := parts[len(parts)-1]
+			if pdf.Get("type").String() != "document" || pdf.Get("source.media_type").String() != "application/pdf" {
+				t.Fatalf("PDF content changed: %s", out)
+			}
+		})
 	}
 }
 

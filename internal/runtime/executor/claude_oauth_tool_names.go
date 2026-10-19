@@ -274,6 +274,18 @@ func remapOAuthToolNamesWithBatchedEdits(body []byte, mcpAliases claudeMCPAliasO
 								}
 								recordRename(toolName, newName)
 							}
+						case "tool_addition", "tool_removal":
+							if namePath := claudeToolChangeNamePath(part); namePath != "" {
+								nameResult := part.Get(namePath)
+								changeToolName := nameResult.String()
+								if newName, renamed := rewriteName(changeToolName); renamed {
+									if !appendStringEdit(nameResult, newName) {
+										validOffsets = false
+										return false
+									}
+									recordRename(changeToolName, newName)
+								}
+							}
 						case "tool_result":
 							nestedContent := part.Get("content")
 							if nestedContent.Exists() && nestedContent.IsArray() {
@@ -547,6 +559,15 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 								body, _ = sjson.SetBytes(body, path, newName)
 								recordRename(toolName, newName)
 							}
+						case "tool_addition", "tool_removal":
+							if namePath := claudeToolChangeNamePath(part); namePath != "" {
+								changeToolName := part.Get(namePath).String()
+								if newName, renamed := rewriteName(changeToolName); renamed {
+									changePath := fmt.Sprintf("messages.%d.content.%d.%s", msgIndex.Int(), contentIndex.Int(), namePath)
+									body, _ = sjson.SetBytes(body, changePath, newName)
+									recordRename(changeToolName, newName)
+								}
+							}
 						case "tool_result":
 							// Handle nested tool_reference blocks inside tool_result.content[]
 							toolID := part.Get("tool_use_id").String()
@@ -599,6 +620,19 @@ func remapOAuthToolNamesWithOptionsLegacy(body []byte, mcpAliases claudeMCPAlias
 	}
 
 	return body, reverseMap
+}
+
+func claudeToolChangeNamePath(part gjson.Result) string {
+	switch part.Get("tool.type").String() {
+	case "tool_reference":
+		return "tool.name"
+	case "tool_definition":
+		if part.Get("type").String() != "tool_addition" || helps.IsClaudeServerToolType(part.Get("tool.definition.type").String()) {
+			return ""
+		}
+		return "tool.definition.name"
+	}
+	return ""
 }
 
 type claudeMCPAliasParts struct {
@@ -799,6 +833,29 @@ func (resolver claudeMCPAliasResolver) resolve(name string) (string, bool, error
 	if matchCount > 1 {
 		return "", false, claudeMCPAliasRestoreError{fmt.Errorf(
 			"cannot restore Claude OAuth MCP tool alias %q: semantic suffix matches multiple declared tools", name,
+		)}
+	}
+
+	passthrough := "mcp__" + suffix
+	if original, exists := resolver.exact[passthrough]; exists && original == passthrough {
+		return original, true, nil
+	}
+	for alias, original := range resolver.exact {
+		if alias != original || !strings.HasPrefix(original, "mcp__") {
+			continue
+		}
+		_, tool, ok := strings.Cut(strings.TrimPrefix(original, "mcp__"), "__")
+		if ok && tool == suffix {
+			matchedOriginal = original
+			matchCount++
+		}
+	}
+	if matchCount == 1 {
+		return matchedOriginal, true, nil
+	}
+	if matchCount > 1 {
+		return "", false, claudeMCPAliasRestoreError{fmt.Errorf(
+			"cannot restore Claude OAuth MCP tool alias %q: passthrough tool suffix matches multiple declared tools", name,
 		)}
 	}
 

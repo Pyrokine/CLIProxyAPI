@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
@@ -397,7 +398,7 @@ func TestConsumeClaudeStreamReportsUnsafeMangledAlias(t *testing.T) {
 		reverseMap,
 		false,
 		http.StatusOK,
-		func(line []byte) [][]byte { return [][]byte{line} },
+		func(line []byte) ([][]byte, error) { return [][]byte{line}, nil },
 		nil,
 	)
 
@@ -727,6 +728,169 @@ func TestRemapOAuthToolNamesForwardsOriginalAfterAliasSpaceExhaustion(t *testing
 	}
 	if len(reverseMap) != 0 {
 		t.Fatalf("reverseMap = %v, want empty after allocation exhaustion", reverseMap)
+	}
+}
+
+func TestClaudeExecutorRestoresOAuthToolNamesAcrossThreadContinuation(t *testing.T) {
+	var aliasMu sync.Mutex
+	var alias string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch gjson.GetBytes(body, "thread.type").String() {
+		case "create":
+			aliasMu.Lock()
+			alias = gjson.GetBytes(body, "tools.0.name").String()
+			aliasMu.Unlock()
+		case "continue":
+			if gjson.GetBytes(body, "thread.previous_message_id").String() != "msg-one" ||
+				gjson.GetBytes(body, "tools").Exists() {
+				http.Error(w, "unexpected continuation", http.StatusBadRequest)
+				return
+			}
+		default:
+			http.Error(w, "missing thread type", http.StatusBadRequest)
+			return
+		}
+		aliasMu.Lock()
+		responseAlias := alias
+		aliasMu.Unlock()
+		_, _ = fmt.Fprintf(w, `{"id":"msg-one","type":"message","role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"tool-one","name":%q,"input":{}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}}`, responseAlias)
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{
+		ID: "claude-thread-auth", Provider: "claude",
+		Attributes: map[string]string{"api_key": "sk-ant-oat01-test", "base_url": server.URL},
+		Metadata: map[string]any{
+			"account_uuid":      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			"claude_device_ids": []string{strings.Repeat("a", 64)},
+		},
+	}
+	executor := NewClaudeExecutor(&config.Config{})
+	for _, tc := range []struct {
+		name, body string
+	}{
+		{name: "create", body: `{"model":"claude-opus-4-7","thread":{"type":"create"},"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Read","input_schema":{"type":"object"}}],"max_tokens":16}`},
+		{name: "continue", body: `{"model":"claude-opus-4-7","thread":{"type":"continue","previous_message_id":"msg-one"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"ok"}]}],"max_tokens":16}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response, err := executor.Execute(context.Background(), auth,
+				cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: []byte(tc.body)},
+				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aliasMu.Lock()
+			selectedAlias := alias
+			aliasMu.Unlock()
+			if selectedAlias == "" || selectedAlias == "Read" {
+				t.Fatalf("create did not alias Read: %q", selectedAlias)
+			}
+			if got := gjson.GetBytes(response.Payload, "content.0.name").String(); got != "Read" {
+				t.Fatalf("%s tool name = %q, want Read; response=%s", tc.name, got, response.Payload)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutorStreamedOAuthToolNamesAcrossThreadContinuation(t *testing.T) {
+	var aliasMu sync.Mutex
+	var alias string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if !gjson.GetBytes(body, "stream").Bool() {
+			http.Error(w, "expected stream request", http.StatusBadRequest)
+			return
+		}
+		threadType := gjson.GetBytes(body, "thread.type").String()
+		incomplete := strings.Contains(string(body), `"incomplete"`)
+		aliasMu.Lock()
+		if threadType == "create" {
+			alias = gjson.GetBytes(body, "tools.0.name").String()
+		}
+		responseAlias := alias
+		aliasMu.Unlock()
+		if responseAlias == "" || (threadType == "continue" &&
+			(gjson.GetBytes(body, "thread.previous_message_id").String() != "msg-one" ||
+				gjson.GetBytes(body, "tools").Exists())) {
+			http.Error(w, "unexpected tool or thread state", http.StatusBadRequest)
+			return
+		}
+		messageID := "msg-one"
+		if incomplete {
+			messageID = "msg-incomplete"
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"message_start\",\"message\":{\"id\":%q,\"model\":\"claude-opus-4-7\"}}\n", messageID)
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-one\",\"name\":%q,\"input\":{}}}\n", responseAlias)
+		_, _ = fmt.Fprint(w, "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":1}}\n")
+		if !incomplete {
+			_, _ = fmt.Fprint(w, "data: {\"type\":\"message_stop\"}\n\n")
+		}
+	}))
+	defer server.Close()
+
+	auth := &cliproxyauth.Auth{
+		ID: "claude-stream-thread-auth", Provider: "claude",
+		Attributes: map[string]string{"api_key": "sk-ant-oat01-test", "base_url": server.URL},
+		Metadata: map[string]any{
+			"account_uuid":      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			"claude_device_ids": []string{strings.Repeat("a", 64)},
+		},
+	}
+	executor := NewClaudeExecutor(&config.Config{})
+	run := func(body string) (string, error) {
+		result, err := executor.ExecuteStream(context.Background(), auth,
+			cliproxyexecutor.Request{Model: "claude-opus-4-7", Payload: []byte(body)},
+			cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+		if err != nil {
+			return "", err
+		}
+		var output strings.Builder
+		for chunk := range result.Chunks {
+			if chunk.Err != nil {
+				return output.String(), chunk.Err
+			}
+			output.Write(chunk.Payload)
+		}
+		return output.String(), nil
+	}
+	create := `{"model":"claude-opus-4-7","thread":{"type":"create"},"messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Read","input_schema":{"type":"object"}}],"max_tokens":16}`
+	continuation := `{"model":"claude-opus-4-7","thread":{"type":"continue","previous_message_id":"msg-one"},"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"ok"}]}],"max_tokens":16}`
+	for _, payload := range []string{create, continuation} {
+		output, err := run(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(output, `"name":"Read"`) {
+			t.Fatalf("tool name not restored: %s", output)
+		}
+	}
+	aliasMu.Lock()
+	createdAlias := alias
+	aliasMu.Unlock()
+	if createdAlias == "Read" || createdAlias == "" {
+		t.Fatalf("tool was not aliased for upstream: %q", createdAlias)
+	}
+
+	incomplete := strings.Replace(create, `"content":"hi"`, `"content":"incomplete"`, 1)
+	if _, err := run(incomplete); err == nil {
+		t.Fatal("incomplete stream returned without an error")
+	}
+	missing := strings.Replace(continuation, "msg-one", "msg-incomplete", 1)
+	_, err := run(missing)
+	var requestErr cliproxyexecutor.RequestScopedError
+	if !errors.As(err, &requestErr) || !requestErr.IsRequestScoped() {
+		t.Fatalf("incomplete stream stored continuation state: %v", err)
 	}
 }
 

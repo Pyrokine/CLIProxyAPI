@@ -120,7 +120,8 @@ func isClaudeRefreshRetryable(err error) bool {
 	if httpErr, ok := errors.AsType[*refreshHTTPError](err); ok {
 		return httpErr.Retryable()
 	}
-	return true
+	// The token may have been consumed before a transport or decoding failure.
+	return false
 }
 
 // tokenResponse represents the response structure from Anthropic's OAuth token endpoint.
@@ -642,6 +643,7 @@ func (o *Auth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 //   - error: An error if all retry attempts fail
 func (o *Auth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, maxRetries int) (*TokenData, error) {
 	var lastErr error
+	attempts := 0
 
 	for attempt := range maxRetries {
 		if attempt > 0 {
@@ -654,6 +656,7 @@ func (o *Auth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, 
 		}
 
 		TokenData, err := o.RefreshTokens(ctx, refreshToken)
+		attempts++
 		if err == nil {
 			return TokenData, nil
 		}
@@ -665,5 +668,5 @@ func (o *Auth) RefreshTokensWithRetry(ctx context.Context, refreshToken string, 
 		}
 	}
 
-	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", maxRetries, lastErr)
+	return nil, fmt.Errorf("token refresh failed after %d attempts: %w", attempts, lastErr)
 }

@@ -213,23 +213,22 @@ func TestClaudeExecutor_PayloadOverrideDoesNotClaimMatchingCallerTurn(t *testing
 	assertMidSystemRejected(t, err, upstream)
 }
 
-// Cloaking relocates a caller's system prompt into a role=system turn for models
-// that accept one. A payload rule can then rewrite the model to one that does
-// not. Because the caller never wrote that turn, CPA must reconcile its own
-// placement through the legacy reminder path instead of returning 400.
-func TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt(t *testing.T) {
+// A payload rule can rewrite the model after the caller's system prompt has
+// been placed. OAuth must relocate its inserted turn when the new model rejects
+// it; API keys can retain the caller prompt in the top-level system field.
+func TestClaudeExecutor_PayloadOverridePreservesCallerSystemByCredential(t *testing.T) {
 	for _, test := range []struct {
 		name string
-		send func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error
+		send func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, auth *cliproxyauth.Auth, payload []byte) error
 	}{
-		{name: "execute", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error {
-			_, err := ex.Execute(ctx, midSystemAuth(), cliproxyexecutor.Request{
+		{name: "execute", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, auth *cliproxyauth.Auth, payload []byte) error {
+			_, err := ex.Execute(ctx, auth, cliproxyexecutor.Request{
 				Model: "claude-sonnet-5", Payload: payload,
 			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 			return err
 		}},
-		{name: "execute stream", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, payload []byte) error {
-			result, err := ex.ExecuteStream(ctx, midSystemAuth(), cliproxyexecutor.Request{
+		{name: "execute stream", send: func(t *testing.T, ex *ClaudeExecutor, ctx context.Context, auth *cliproxyauth.Auth, payload []byte) error {
+			result, err := ex.ExecuteStream(ctx, auth, cliproxyexecutor.Request{
 				Model: "claude-sonnet-5", Payload: payload,
 			}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 			if err != nil {
@@ -243,43 +242,127 @@ func TestClaudeExecutor_PayloadOverrideReconcilesRelocatedSystemPrompt(t *testin
 			return nil
 		}},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			upstream := &midSystemUpstream{}
-			cfg := midSystemConfig()
-			cfg.Payload.Override = []config.PayloadRule{{
-				Models: []config.PayloadModelRule{{Name: "*"}},
-				Params: map[string]any{"model": "claude-haiku-4-5-20251001"},
-			}}
-			ex := NewClaudeExecutor(cfg)
+		for _, credential := range []struct {
+			name         string
+			key          string
+			wantTopLevel bool
+		}{
+			{name: "api key", key: "key-123", wantTopLevel: true},
+			{name: "OAuth", key: "sk-ant-oat01-test"},
+		} {
+			t.Run(test.name+"/"+credential.name, func(t *testing.T) {
+				upstream := &midSystemUpstream{}
+				cfg := midSystemConfig()
+				if !credential.wantTopLevel {
+					cfg.ClaudeKey = append(cfg.ClaudeKey, config.ClaudeKey{APIKey: credential.key})
+				}
+				cfg.Payload.Override = []config.PayloadRule{{
+					Models: []config.PayloadModelRule{{Name: "*"}},
+					Params: map[string]any{"model": "claude-haiku-4-5-20251001"},
+				}}
+				ex := NewClaudeExecutor(cfg)
 
-			// Only a top-level system prompt: the caller never writes a
-			// role=system turn.
-			payload := []byte(`{"model":"claude-sonnet-5","max_tokens":32,` +
-				`"system":[{"type":"text","text":"Caller top"}],` +
-				`"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+				// The caller never writes a role=system turn.
+				payload := []byte(`{"model":"claude-sonnet-5","max_tokens":32,` +
+					`"system":[{"type":"text","text":"Caller top"}],` +
+					`"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+				auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": credential.key, "cloak_mode": "always"}}
+				if !credential.wantTopLevel {
+					auth.Metadata = map[string]any{
+						"account_uuid":      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+						"claude_device_ids": []string{strings.Repeat("a", 64)},
+					}
+				}
 
-			if err := test.send(t, ex, upstream.context(t, nil), payload); err != nil {
-				t.Fatalf("request error = %v, want CPA's inserted turn reconciled", err)
-			}
-			if !upstream.called {
-				t.Fatal("expected reconciled request to reach upstream")
-			}
-			if got := gjson.GetBytes(upstream.body, "model").String(); got != "claude-haiku-4-5-20251001" {
-				t.Fatalf("upstream model = %q, want payload override preserved", got)
-			}
-			if gjson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists() {
-				t.Fatalf("reconciled body still carries role=system; body=%s", upstream.body)
-			}
-			if !strings.Contains(gjson.GetBytes(upstream.body, "messages.0.content").Raw, "<system-reminder>") ||
-				!strings.Contains(gjson.GetBytes(upstream.body, "messages.0.content").Raw, "Caller top") {
-				t.Fatalf("caller system prompt was not replayed as a legacy reminder; body=%s", upstream.body)
-			}
-		})
+				if err := test.send(t, ex, upstream.context(t, nil), auth, payload); err != nil {
+					t.Fatalf("request error = %v, want caller system preserved", err)
+				}
+				if !upstream.called {
+					t.Fatal("expected request to reach upstream")
+				}
+				if got := gjson.GetBytes(upstream.body, "model").String(); got != "claude-haiku-4-5-20251001" {
+					t.Fatalf("upstream model = %q, want payload override preserved", got)
+				}
+				if gjson.GetBytes(upstream.body, `messages.#(role=="system")`).Exists() {
+					t.Fatalf("reconciled body still carries role=system; body=%s", upstream.body)
+				}
+				if credential.wantTopLevel {
+					if !strings.Contains(gjson.GetBytes(upstream.body, "system").Raw, "Caller top") ||
+						strings.Contains(gjson.GetBytes(upstream.body, "messages.0.content").Raw, "Caller top") {
+						t.Fatalf("API key caller prompt was not kept at top level; body=%s", upstream.body)
+					}
+				} else if !strings.Contains(gjson.GetBytes(upstream.body, "messages.0.content").Raw, "<system-reminder>") ||
+					!strings.Contains(gjson.GetBytes(upstream.body, "messages.0.content").Raw, "Caller top") {
+					t.Fatalf("OAuth caller prompt was not replayed as a legacy reminder; body=%s", upstream.body)
+				}
+			})
+		}
 	}
 }
 
 // A confirmed native caller owns its wire. It gates the turn on the model
 // itself, so CPA forwards the body untouched and lets the upstream answer.
+func TestClaudeExecutor_EffortDirectiveAfterCompaction(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5-5","max_tokens":64,` +
+		`"system":[{"type":"text","text":"caller guidance"}],` +
+		`"output_config":{"effort":"medium"},"thinking":{"type":"adaptive"},` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"<conversation-checkpoint>Earlier we said hello.</conversation-checkpoint>"}]},` +
+		`{"role":"system","content":[],"output_config":{"effort":"low"}},` +
+		`{"role":"user","content":[{"type":"text","text":"Reply with just: ok"}]}]}`)
+	for _, path := range []string{"execute", "stream", "count tokens"} {
+		t.Run(path, func(t *testing.T) {
+			upstream := &midSystemUpstream{}
+			ctx := upstream.context(t, http.Header{"Anthropic-Beta": []string{"mid-conversation-output-config-2026-07-01"}})
+			auth := &cliproxyauth.Auth{
+				ID:         "effort-directive-oauth",
+				Attributes: map[string]string{"api_key": "sk-ant-oat-effort-directive", "cloak_mode": "always"},
+				Metadata: map[string]any{
+					"account_uuid":      "11111111-2222-4333-8444-555555555555",
+					"claude_device_ids": []string{strings.Repeat("0", 63) + "1"},
+				},
+			}
+			ex := NewClaudeExecutor(&config.Config{})
+			req := cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+			switch path {
+			case "execute":
+				if _, err := ex.Execute(ctx, auth, req, opts); err != nil {
+					t.Fatal(err)
+				}
+			case "stream":
+				result, err := ex.ExecuteStream(ctx, auth, req, opts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatal(chunk.Err)
+					}
+				}
+			case "count tokens":
+				if _, err := ex.CountTokens(ctx, auth, req, opts); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !upstream.called {
+				t.Fatal("upstream request was not sent")
+			}
+			if got := gjson.GetBytes(upstream.body, "messages.1").Raw; got != gjson.GetBytes(payload, "messages.1").Raw {
+				t.Fatalf("caller effort directive moved or changed on the wire: %s", upstream.body)
+			}
+			if got := gjson.GetBytes(upstream.body, "messages.#.role").Raw; got != `["user","system","user","system"]` {
+				t.Fatalf("wire roles = %s, want [user, directive, user, caller system]: %s", got, upstream.body)
+			}
+			if got := gjson.GetBytes(upstream.body, "messages.3.content.0.text").String(); got != "caller guidance" {
+				t.Fatalf("caller guidance missing from trailing system message: %s", upstream.body)
+			}
+			if strings.Contains(gjson.GetBytes(upstream.body, "system").Raw, "caller guidance") {
+				t.Fatalf("OAuth caller guidance remains at top level: %s", upstream.body)
+			}
+		})
+	}
+}
+
 func TestClaudeExecutor_ConfirmedNativeLegacyMidSystemMessageForwarded(t *testing.T) {
 	upstream := &midSystemUpstream{}
 	ex := NewClaudeExecutor(midSystemConfig())

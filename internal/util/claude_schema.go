@@ -119,9 +119,8 @@ func mergeClaudeSchemaRequired(root map[string]json.RawMessage, branchRequired j
 	}
 }
 
-// NormalizeClaudeSchemaDialect removes unsupported dialect metadata and Unicode
-// property escapes only from schema positions. User properties with matching
-// names remain intact.
+// NormalizeClaudeSchemaDialect removes unsupported dialect metadata and pattern
+// escapes only from schema positions. User properties with matching names remain intact.
 func NormalizeClaudeSchemaDialect(schema []byte) []byte {
 	root, ok := decodeSchemaJSON(string(schema))
 	if !ok || root == nil || !normalizeClaudeSchemaNode(root) {
@@ -245,16 +244,18 @@ func claudeSchemaMissesRequired(value any) bool {
 	return false
 }
 
-// HasUnsupportedUnicodePropertyEscape reports whether a regular expression string
-// contains unescaped Unicode property escape sequences (\p{...} or \P{...}).
+// HasUnsupportedUnicodePropertyEscape reports whether a pattern contains an
+// unescaped Unicode property escape (\p{...} or \P{...}) or an octal NUL escape (\0).
 func HasUnsupportedUnicodePropertyEscape(pattern string) bool {
 	for i := 0; i < len(pattern); i++ {
 		if pattern[i] != '\\' {
 			continue
 		}
-		if i+2 < len(pattern) &&
-			(pattern[i+1] == 'p' || pattern[i+1] == 'P') &&
-			pattern[i+2] == '{' {
+		if i+1 >= len(pattern) {
+			break
+		}
+		if pattern[i+1] == '0' || (i+2 < len(pattern) &&
+			(pattern[i+1] == 'p' || pattern[i+1] == 'P') && pattern[i+2] == '{') {
 			return true
 		}
 		i++

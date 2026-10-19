@@ -6,6 +6,123 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestConvertOpenAIRequestToClaudeToolChoiceConstraints(t *testing.T) {
+	tools := `"tools":[{"type":"function","function":{"name":"one","strict":true}},{"type":"function","function":{"name":"two","strict":false}}]`
+	for _, test := range []struct {
+		name, choice, parallel, wantType, wantName string
+		toolCount                                  int
+		serial, wantError                          bool
+	}{
+		{name: "none", choice: `"none"`, wantType: "none", toolCount: 2},
+		{name: "object none", choice: `{"type":"none"}`, parallel: "false", wantType: "none", toolCount: 2},
+		{name: "auto serial", choice: `"auto"`, parallel: "false", wantType: "auto", toolCount: 2, serial: true},
+		{name: "required serial", choice: `"required"`, parallel: "false", wantType: "any", toolCount: 2, serial: true},
+		{name: "specific serial", choice: `{"type":"function","function":{"name":"two"}}`, parallel: "false", wantType: "tool", wantName: "two", toolCount: 2, serial: true},
+		{name: "omitted serial", parallel: "false", wantType: "auto", toolCount: 2, serial: true},
+		{name: "omitted parallel", parallel: "true", toolCount: 2},
+		{name: "null parallel", choice: "null", parallel: "null", toolCount: 2},
+		{name: "allowed auto", choice: `{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"function","function":{"name":"two"}}]}}`, wantType: "auto", wantName: "two", toolCount: 1},
+		{name: "allowed required", choice: `{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[{"type":"function","name":"two"}]}}`, parallel: "false", wantType: "any", wantName: "two", toolCount: 1, serial: true},
+		{name: "allowed empty", choice: `{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}`, wantType: "none"},
+		{name: "allowed unavailable", choice: `{"type":"allowed_tools","tools":[{"type":"function","name":"missing"}]}`, wantType: "none"},
+		{name: "required empty rejected", choice: `{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[]}}`, wantError: true},
+		{name: "unknown choice rejected", choice: `{"type":"custom"}`, wantError: true},
+		{name: "missing function rejected", choice: `{"type":"function"}`, wantError: true},
+		{name: "invalid mode rejected", choice: `{"type":"allowed_tools","mode":"custom","tools":[]}`, wantError: true},
+		{name: "invalid tools rejected", choice: `{"type":"allowed_tools","tools":null}`, wantError: true},
+		{name: "nonfunction allowed rejected", choice: `{"type":"allowed_tools","tools":[{"type":"web_search","name":"one"}]}`, wantError: true},
+		{name: "array choice rejected", choice: `[]`, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"messages":[{"role":"user","content":"fixture"}],` + tools
+			if test.choice != "" {
+				body += `,"tool_choice":` + test.choice
+			}
+			if test.parallel != "" {
+				body += `,"parallel_tool_calls":` + test.parallel
+			}
+			out, err := convertOpenAIRequestToClaudeChecked("claude-sonnet-4-5", []byte(body+`}`), false, false)
+			if test.wantError {
+				requestError, ok := err.(claudeToolChoiceError)
+				if !ok || requestError.StatusCode() != 400 || !requestError.IsRequestScoped() || len(out) != 0 {
+					t.Fatalf("invalid choice result=%s error=%v", out, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := gjson.GetBytes(out, "tool_choice.type").String(); got != test.wantType {
+				t.Fatalf("choice=%s, want %s; body=%s", got, test.wantType, out)
+			}
+			if got := gjson.GetBytes(out, "tools.#").Int(); got != int64(test.toolCount) {
+				t.Fatalf("tools=%d, want %d; body=%s", got, test.toolCount, out)
+			}
+			if gjson.GetBytes(out, "tool_choice.disable_parallel_tool_use").Exists() != test.serial ||
+				gjson.GetBytes(out, "tool_choice.disable_parallel_tool_use").Bool() != test.serial {
+				t.Fatalf("parallel constraint changed: %s", out)
+			}
+			if test.wantName != "" {
+				path := "tools.0.name"
+				if test.wantType == "tool" {
+					path = "tool_choice.name"
+				}
+				if gjson.GetBytes(out, path).String() != test.wantName {
+					t.Fatalf("tool identity changed: %s", out)
+				}
+			}
+			if test.toolCount == 2 && (!gjson.GetBytes(out, "tools.0.strict").Bool() || gjson.GetBytes(out, "tools.1.strict").Type != gjson.False) {
+				t.Fatalf("strict flags changed: %s", out)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIRequestToClaudeToolResultCacheControl(t *testing.T) {
+	for _, test := range []struct{ name, content, messageCache, ttl string }{
+		{"string", `"fixture"`, `{"type":"ephemeral","ttl":"5m"}`, "5m"},
+		{"part wins", `[{"type":"text","text":"fixture","cache_control":{"type":"ephemeral","ttl":"1h","future":true}}]`, `{"type":"ephemeral","ttl":"5m"}`, "1h"},
+		{"first valid part", `[{"type":"text","text":"first","cache_control":{"type":" ephemeral "}},{"type":"text","text":"second","cache_control":{"type":"ephemeral","ttl":"5m"}}]`, `{"type":"ephemeral","ttl":"1h"}`, "5m"},
+		{"invalid part does not hide message", `[{"type":"text","text":"fixture","cache_control":{"type":null}}]`, `{"type":"ephemeral","ttl":"5m"}`, "5m"},
+		{"object", `{"type":"text","text":"fixture","cache_control":{"type":"ephemeral","ttl":"1h"}}`, `null`, "1h"},
+		{"raw object", `{"number":9007199254740993}`, `{"type":"ephemeral","ttl":"5m"}`, "5m"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := `{"messages":[{"role":"user","content":[{"type":"text","text":"cached user","cache_control":{"type":"ephemeral","ttl":"1h"}}]},{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"one","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":"stale"},{"role":"tool","tool_call_id":"call_1","content":` + test.content + `,"cache_control":` + test.messageCache + `}]}`
+			out, err := convertOpenAIRequestToClaudeChecked("claude-sonnet-4-5", []byte(body), false, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").String() != "1h" {
+				t.Fatalf("ordinary user marker lost: %s", out)
+			}
+			results := 0
+			for _, message := range gjson.GetBytes(out, "messages").Array() {
+				for _, block := range message.Get("content").Array() {
+					if block.Get("type").String() != "tool_result" {
+						continue
+					}
+					results++
+					if block.Get("cache_control.ttl").String() != test.ttl || block.Get("tool_use_id").String() != "call_1" {
+						t.Fatalf("tool_result marker or ID lost: %s", out)
+					}
+					for _, part := range block.Get("content").Array() {
+						if part.Get("cache_control").Exists() {
+							t.Fatalf("tool_result nested marker survived: %s", out)
+						}
+					}
+					if test.name == "part wins" && !block.Get("cache_control.future").Bool() {
+						t.Fatalf("caller marker fields changed: %s", out)
+					}
+				}
+			}
+			if results != 1 {
+				t.Fatalf("duplicate raw tool result emitted: %s", out)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIRequestToClaudeDropsTemperature(t *testing.T) {
 	inputJSON := `{
 		"model": "gpt-4.1",

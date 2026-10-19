@@ -22,22 +22,33 @@ import (
 	"golang.org/x/net/proxy"
 )
 
-type claudeHTTP2ClientConn interface {
+type claudeHTTPClientConn interface {
 	RoundTrip(*http.Request) (*http.Response, error)
 	Close() error
 }
 
 type claudeUtlsRoundTripper struct {
 	dialer            proxy.Dialer
-	connectionFactory func(context.Context, string, string) (claudeHTTP2ClientConn, error)
+	connectionFactory func(context.Context, string, string) (claudeHTTPClientConn, error)
 }
 
 type closeConnectionBody struct {
 	io.ReadCloser
+	ctx             context.Context
 	closeConnection func() error
 	stopContext     func() bool
 	once            sync.Once
 	err             error
+}
+
+func (b *closeConnectionBody) Read(data []byte) (int, error) {
+	count, err := b.ReadCloser.Read(data)
+	if err != nil && b.ctx != nil {
+		if errContext := b.ctx.Err(); errContext != nil {
+			err = errContext
+		}
+	}
+	return count, err
 }
 
 func (b *closeConnectionBody) Close() error {
@@ -68,12 +79,16 @@ func newCloseConnectionBody(
 ) *closeConnectionBody {
 	wrapped := &closeConnectionBody{
 		ReadCloser:      body,
+		ctx:             ctx,
 		closeConnection: closeConnection,
 	}
 	if ctx != nil {
+		initialized := make(chan struct{})
 		wrapped.stopContext = context.AfterFunc(ctx, func() {
+			<-initialized
 			_ = wrapped.Close()
 		})
+		close(initialized)
 	}
 	return wrapped
 }
@@ -132,7 +147,7 @@ func (t *claudeUtlsRoundTripper) createConnection(
 	ctx context.Context,
 	host string,
 	addr string,
-) (claudeHTTP2ClientConn, error) {
+) (claudeHTTPClientConn, error) {
 	if t.connectionFactory != nil {
 		return t.connectionFactory(ctx, host, addr)
 	}
@@ -158,53 +173,50 @@ func (t *claudeUtlsRoundTripper) createConnection(
 		}
 		return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
 	}
-	if protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol != "h2" {
-		if errClose := tlsConn.Close(); errClose != nil {
-			return nil, fmt.Errorf(
-				"utls: upstream negotiated %q instead of HTTP/2; close connection: %v",
-				protocol,
-				errClose,
-			)
-		}
-		return nil, fmt.Errorf("utls: upstream negotiated %q instead of HTTP/2", protocol)
-	}
-
-	protocols := new(http.Protocols)
-	protocols.SetHTTP2(true)
-	transport := &http.Transport{
-		Protocols: protocols,
-		DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
-			return &utlsHTTPConn{UConn: tlsConn}, nil
-		},
-	}
-	return initializeClaudeHTTP2ClientConn(
-		ctx,
-		addr,
-		tlsConn,
-		func(ctx context.Context, scheme, address string) (claudeHTTP2ClientConn, error) {
-			return transport.NewClientConn(ctx, scheme, address)
-		},
-	)
+	return initializeClaudeHTTPClientConn(ctx, addr, tlsConn, nil)
 }
 
-func initializeClaudeHTTP2ClientConn(
+func initializeClaudeHTTPClientConn(
 	ctx context.Context,
 	addr string,
 	tlsConn *utls.UConn,
-	initialize func(context.Context, string, string) (claudeHTTP2ClientConn, error),
-) (claudeHTTP2ClientConn, error) {
-	h2Conn, errClientConn := initialize(ctx, "https", addr)
+	initialize func(context.Context, string, string) (claudeHTTPClientConn, error),
+) (claudeHTTPClientConn, error) {
+	protocols := new(http.Protocols)
+	switch protocol := tlsConn.ConnectionState().NegotiatedProtocol; protocol {
+	case "h2":
+		protocols.SetHTTP2(true)
+	case "", "http/1.1":
+		protocols.SetHTTP1(true)
+	default:
+		if errClose := tlsConn.Close(); errClose != nil {
+			return nil, fmt.Errorf("utls: unsupported negotiated protocol %q; close connection: %v", protocol, errClose)
+		}
+		return nil, fmt.Errorf("utls: unsupported negotiated protocol %q", protocol)
+	}
+	if initialize == nil {
+		transport := &http.Transport{
+			Protocols: protocols,
+			DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
+				return &utlsHTTPConn{UConn: tlsConn}, nil
+			},
+		}
+		initialize = func(ctx context.Context, scheme, address string) (claudeHTTPClientConn, error) {
+			return transport.NewClientConn(ctx, scheme, address)
+		}
+	}
+	httpConn, errClientConn := initialize(ctx, "https", addr)
 	if errClientConn != nil {
 		if errClose := tlsConn.Close(); errClose != nil {
 			return nil, fmt.Errorf(
-				"utls: initialize HTTP/2 connection: %w; close TLS connection: %v",
+				"utls: initialize HTTP connection: %w; close TLS connection: %v",
 				errClientConn,
 				errClose,
 			)
 		}
-		return nil, fmt.Errorf("utls: initialize HTTP/2 connection: %w", errClientConn)
+		return nil, fmt.Errorf("utls: initialize HTTP connection: %w", errClientConn)
 	}
-	return h2Conn, nil
+	return httpConn, nil
 }
 
 func (t *claudeUtlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -221,19 +233,19 @@ func (t *claudeUtlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 		port = "443"
 	}
 	addr := net.JoinHostPort(pinnedAddr, port)
-	h2Conn, errConnect := t.createConnection(req.Context(), hostname, addr)
+	httpConn, errConnect := t.createConnection(req.Context(), hostname, addr)
 	if errConnect != nil {
 		return nil, errConnect
 	}
-	resp, errRoundTrip := h2Conn.RoundTrip(req)
+	resp, errRoundTrip := httpConn.RoundTrip(req)
 	if errRoundTrip != nil {
-		if errClose := h2Conn.Close(); errClose != nil {
+		if errClose := httpConn.Close(); errClose != nil {
 			log.Debugf("utls: close connection after round trip failure: %v", errClose)
 		}
 		return nil, errRoundTrip
 	}
 	if resp == nil {
-		if errClose := h2Conn.Close(); errClose != nil {
+		if errClose := httpConn.Close(); errClose != nil {
 			log.Debugf("utls: close connection after empty response: %v", errClose)
 		}
 		return nil, fmt.Errorf("utls: upstream returned an empty response")
@@ -241,7 +253,7 @@ func (t *claudeUtlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 	if resp.Body == nil {
 		resp.Body = http.NoBody
 	}
-	resp.Body = newCloseConnectionBody(req.Context(), resp.Body, h2Conn.Close)
+	resp.Body = newCloseConnectionBody(req.Context(), resp.Body, httpConn.Close)
 	return resp, nil
 }
 
@@ -268,13 +280,7 @@ func newProtectedUtlsHTTPClient(
 	auth *cliproxyauth.Auth,
 	timeout time.Duration,
 ) *http.Client {
-	proxyURL := ""
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+	proxyURL := effectiveProxyURL(ctx, cfg, auth)
 
 	var chromeTransport http.RoundTripper = newClaudeUtlsRoundTripper(proxyURL)
 	var anthropicTransport = cachedClaudeCodeRoundTripper(proxyURL)

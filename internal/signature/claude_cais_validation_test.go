@@ -23,6 +23,8 @@ type claudeCAISTestParts struct {
 	includeChannelID          bool
 	channelID                 uint64
 	channelIDAsBytes          bool
+	includeInfrastructure     bool
+	infrastructure            uint64
 	includeChannelVersion     bool
 	includeSignature          bool
 	signatureLen              int
@@ -63,6 +65,10 @@ func (p claudeCAISTestParts) encode() string {
 			channelBlock = protowire.AppendTag(channelBlock, 1, protowire.VarintType)
 			channelBlock = protowire.AppendVarint(channelBlock, p.channelID)
 		}
+	}
+	if p.includeInfrastructure {
+		channelBlock = protowire.AppendTag(channelBlock, 2, protowire.VarintType)
+		channelBlock = protowire.AppendVarint(channelBlock, p.infrastructure)
 	}
 	if p.includeChannelVersion {
 		channelBlock = protowire.AppendTag(channelBlock, 3, protowire.VarintType)

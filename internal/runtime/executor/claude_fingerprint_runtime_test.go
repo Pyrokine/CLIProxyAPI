@@ -53,7 +53,7 @@ func TestClaudeFingerprintWirePolicy(t *testing.T) {
 				t.Fatal(err)
 			}
 			body, _ := io.ReadAll(cr.httpReq.Body)
-			if got := strings.HasPrefix(cr.httpReq.Header.Get("User-Agent"), "claude-cli/2.1.258"); got != test.cli {
+			if got := strings.HasPrefix(cr.httpReq.Header.Get("User-Agent"), "claude-cli/2.1.280"); got != test.cli {
 				t.Fatalf("UA=%q", cr.httpReq.Header.Get("User-Agent"))
 			}
 			if got := strings.Contains(gjson.GetBytes(body, "system.0.text").String(), "cch="); got != test.sign {
@@ -326,7 +326,7 @@ func TestClaudeFingerprintCancellationAuthority(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	out := make(chan cliproxyexecutor.StreamChunk, 1)
-	consumeClaudeStream(ctx, nil, &fingerprintCanceledReader{}, out, nil, true, false, map[string]string{"alias": "original"}, false, 200, func(line []byte) [][]byte { return [][]byte{line} }, nil)
+	consumeClaudeStream(ctx, nil, &fingerprintCanceledReader{}, out, nil, true, false, map[string]string{"alias": "original"}, false, 200, func(line []byte) ([][]byte, error) { return [][]byte{line}, nil }, nil)
 	for len(out) > 0 {
 		if err := (<-out).Err; err != nil && !errors.Is(err, context.Canceled) {
 			t.Fatalf("delegated cancellation=%v", err)

@@ -29,6 +29,15 @@ func SanitizeClaudeToolID(id string) string {
 	return s
 }
 
+// SanitizeClaudeFunctionName 将工具名称限制为 Claude 接受的字符和长度
+func SanitizeClaudeFunctionName(name string) string {
+	sanitized := claudeToolUseIDSanitizer.ReplaceAllString(name, "_")
+	if len(sanitized) > 64 {
+		sanitized = sanitized[:64]
+	}
+	return sanitized
+}
+
 // GeminiClaudeToolUseID returns a stable Claude-facing ID for a provider-native
 // Gemini function call. The opaque ID binds replay to the original call semantics.
 func GeminiClaudeToolUseID(callID, name, argsRaw string) string {

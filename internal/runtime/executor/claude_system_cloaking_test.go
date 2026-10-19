@@ -22,6 +22,33 @@ import (
 
 var claudeSystemCloakingTestTime = time.Date(2026, time.August, 28, 12, 0, 0, 0, time.UTC)
 
+func TestClaudeCodeTimezone(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured string
+		credential string
+		want       string
+	}{
+		{name: "default", want: time.Local.String()},
+		{name: "configured", configured: "Asia/Singapore", want: "Asia/Singapore"},
+		{name: "configured local", configured: "Local", want: time.Local.String()},
+		{name: "credential override", configured: "Asia/Singapore", credential: "UTC", want: "UTC"},
+		{name: "invalid credential", configured: "UTC", credential: "Invalid/Timezone", want: "UTC"},
+		{name: "invalid configuration", configured: "Invalid/Timezone", want: time.Local.String()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{ClaudeHeaderDefaults: config.ClaudeHeaderDefaults{Timezone: tc.configured}}
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"timezone": tc.credential}}
+			if got := claudeCodeTimezone(cfg, auth).String(); got != tc.want {
+				t.Fatalf("timezone = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := claudeCodeTimezone(nil, nil); got != time.Local {
+		t.Fatalf("missing configuration timezone = %v, want local", got)
+	}
+}
+
 func cloakClaudeSystemForTest(payload []byte, strictMode bool) []byte {
 	return checkClaudeSystemInstructionsWithSigningModeAt(
 		payload,
@@ -31,6 +58,7 @@ func cloakClaudeSystemForTest(payload []byte, strictMode bool) []byte {
 		"cli",
 		"",
 		claudeSystemCloakingTestTime,
+		false,
 	)
 }
 
@@ -81,7 +109,7 @@ func TestCollectForwardedClaudeSystemPromptBlocksPreservesCallerIdentity(t *test
 	]`)
 
 	blocks := collectForwardedClaudeSystemPromptBlocks(system)
-	if !reflect.DeepEqual(blocks, []string{claudeCodeCLIIdentity, "caller rule"}) {
+	if !reflect.DeepEqual(blocks, []claudeForwardedSystemBlock{{text: claudeCodeCLIIdentity}, {text: "caller rule"}}) {
 		t.Fatalf("forwarded blocks = %#v", blocks)
 	}
 }
@@ -195,7 +223,7 @@ func TestRelocateClaudeSystemPromptForCountTokensPreservesBoundaries(t *testing.
 				payload := []byte(`{"model":"` + test.model + `","system":[` +
 					`{"type":"text","text":"first guidance"},{"type":"text","text":"second guidance"}],` +
 					`"messages":[{"role":"user","content":"hi"}]}`)
-				out := relocateClaudeSystemPromptForCountTokens(payload, test.strictMode)
+				out := relocateClaudeSystemPromptForCountTokens(payload, test.strictMode, false)
 				if gjson.GetBytes(out, "system").Exists() {
 					t.Fatalf("count_tokens system must be absent: %s", out)
 				}
@@ -227,6 +255,41 @@ func TestRelocateClaudeSystemPromptForCountTokensPreservesBoundaries(t *testing.
 				assertClaudeSystemTestMessage(t, out, 2, "second guidance")
 			},
 		)
+	}
+}
+
+func TestClaudeCallerSystemPlacementByCredentialAndHistory(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		messages        string
+		keepTopLevel    bool
+		wantTopLevel    bool
+		wantSystemTurns int
+	}{
+		{"api key terminal user", `[{"role":"user","content":"hi"}]`, true, true, 0},
+		{"api key adjacent user turns", `[{"role":"user","content":"first"},{"role":"user","content":"last"}]`, true, true, 0},
+		{"api key after assistant", `[{"role":"user","content":"first"},{"role":"assistant","content":"reply"},{"role":"user","content":"last"}]`, true, false, 1},
+		{"OAuth terminal user", `[{"role":"user","content":"hi"}]`, false, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"caller directive"}],"messages":` + tc.messages + `}`)
+			out := checkClaudeSystemInstructionsWithSigningModeAt(payload, false, false, "2.1.220", "cli", "", claudeSystemCloakingTestTime, false, tc.keepTopLevel)
+			counted := relocateClaudeSystemPromptForCountTokens(payload, false, false, tc.keepTopLevel)
+			for name, wire := range map[string][]byte{"messages": out, "count_tokens": counted} {
+				if present := strings.Contains(gjson.GetBytes(wire, "system").Raw, "caller directive"); present != tc.wantTopLevel {
+					t.Fatalf("%s top-level caller system = %v, want %v; body=%s", name, present, tc.wantTopLevel, wire)
+				}
+				systemTurns := 0
+				for _, message := range gjson.GetBytes(wire, "messages").Array() {
+					if message.Get("role").String() == "system" {
+						systemTurns++
+					}
+				}
+				if systemTurns != tc.wantSystemTurns {
+					t.Fatalf("%s system turns = %d, want %d; body=%s", name, systemTurns, tc.wantSystemTurns, wire)
+				}
+			}
+		})
 	}
 }
 
@@ -325,6 +388,52 @@ func TestApplyCloakingHandlesNonTextCallerSystemByMode(t *testing.T) {
 	}
 }
 
+func TestApplyCloakingSelectsCredentialSystemPlacement(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"caller directive"}],"messages":[{"role":"user","content":"hi"}]}`)
+	for _, tc := range []struct {
+		name       string
+		key        string
+		keepSystem bool
+	}{
+		{"API key", "sk-ant-api03-test", true},
+		{"OAuth token", "sk-ant-oat-test", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": tc.key, "fingerprint_profile": "claude-code-cli"}}
+			body, cloaked, err := applyCloaking(context.Background(), &config.Config{}, auth, payload, "claude-opus-5", tc.key, false)
+			if err != nil || !cloaked {
+				t.Fatalf("applyCloaking() = (%s, %v, %v)", body, cloaked, err)
+			}
+			if got := strings.Contains(gjson.GetBytes(body, "system").Raw, "caller directive"); got != tc.keepSystem {
+				t.Fatalf("top-level caller system = %v, want %v; body=%s", got, tc.keepSystem, body)
+			}
+		})
+	}
+}
+
+func TestClaudeCountTokensPreservesAPIKeyTerminalSystem(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5","system":[{"type":"text","text":"caller directive"}],"messages":[{"role":"user","content":"hi"}]}`)
+	var upstreamBody []byte
+	ctx := util.WithRoundTripper(context.Background(), protectedUtlsRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+		var err error
+		upstreamBody, err = io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read CountTokens request: %v", err)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"input_tokens":1}`)), Request: req}, nil
+	}))
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-ant-api03-test", "fingerprint_profile": "claude-code-cli"}}
+	_, err := NewClaudeExecutor(&config.Config{}).countTokensUpstream(ctx, auth,
+		cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload},
+		cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatalf("countTokensUpstream() error: %v", err)
+	}
+	if gjson.GetBytes(upstreamBody, "system.0.text").String() != "caller directive" || gjson.GetBytes(upstreamBody, "messages.#").Int() != 1 {
+		t.Fatalf("CountTokens moved terminal caller system out of top-level: %s", upstreamBody)
+	}
+}
+
 func TestClaudeCountTokensRejectsNonTextCallerSystemBeforeUpstream(t *testing.T) {
 	upstreamCalled := false
 	roundTripper := protectedUtlsRoundTripFunc(
@@ -390,6 +499,99 @@ func TestClaudeCurrentDateFollowsAllLeadingToolResults(t *testing.T) {
 	assertClaudeSystemTestUserText(t, content[3], "continue")
 }
 
+func TestClaudeEffortDirectiveSystemInsertion(t *testing.T) {
+	const directive = `{"role":"system","content":[],"output_config":{"effort":"low"}}`
+	const user = `{"role":"user","content":"next"}`
+	for _, test := range []struct {
+		name     string
+		tail     string
+		insertAt int
+	}{
+		{name: "after compacted history", tail: directive + "," + user, insertAt: 3},
+		{name: "before assistant", tail: directive + "," + user + `,{"role":"assistant","content":"answer"}`, insertAt: 3},
+		{name: "multiple directives", tail: directive + "," + directive + "," + user, insertAt: 4},
+		{name: "terminal directive", tail: directive, insertAt: 2},
+		{name: "content-bearing system", tail: `{"role":"system","content":[{"type":"text","text":"rule"}],"output_config":{"effort":"low"}},` + user, insertAt: 1},
+		{name: "empty system without output config", tail: `{"role":"system","content":[]},` + user, insertAt: 1},
+		{name: "string content", tail: `{"role":"system","content":"","output_config":{"effort":"low"}},` + user, insertAt: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := []byte(`{"messages":[{"role":"user","content":"summary"},` + test.tail + `]}`)
+			before := gjson.GetBytes(payload, "messages").Array()
+			out := insertClaudeMidConversationSystemMessages(payload, []claudeForwardedSystemBlock{{text: "first guidance"}, {text: "second guidance"}})
+			after := gjson.GetBytes(out, "messages").Array()
+			if len(after) != len(before)+2 {
+				t.Fatalf("message count = %d, want %d: %s", len(after), len(before)+2, out)
+			}
+			assertClaudeSystemTestMessage(t, out, test.insertAt, "first guidance")
+			assertClaudeSystemTestMessage(t, out, test.insertAt+1, "second guidance")
+			for index, message := range before {
+				at := index
+				if index >= test.insertAt {
+					at += 2
+				}
+				if after[at].Raw != message.Raw {
+					t.Fatalf("caller message %d moved or changed: %s", index, out)
+				}
+			}
+			if second := insertClaudeMidConversationSystemMessages(out, []claudeForwardedSystemBlock{{text: "first guidance"}, {text: "second guidance"}}); !bytes.Equal(out, second) {
+				t.Fatalf("system insertion is not idempotent:\nfirst: %s\nsecond: %s", out, second)
+			}
+		})
+	}
+}
+
+func TestClaudeEffortDirectiveSystemPlacementPolicies(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5-5","system":[{"type":"text","text":"caller guidance"}],` +
+		`"messages":[{"role":"user","content":"summary"},` +
+		`{"role":"system","content":[],"output_config":{"effort":"low"}},` +
+		`{"role":"user","content":"next"}]}`)
+	for _, keepTopLevel := range []bool{false, true} {
+		for _, test := range []struct {
+			name string
+			out  []byte
+		}{
+			{name: "messages", out: checkClaudeSystemInstructionsWithSigningModeAt(payload, false, false, "2.1.220", "cli", "", claudeSystemCloakingTestTime, false, keepTopLevel)},
+			{name: "count tokens", out: relocateClaudeSystemPromptForCountTokens(payload, false, false, keepTopLevel)},
+		} {
+			t.Run(test.name+"/keep="+strconv.FormatBool(keepTopLevel), func(t *testing.T) {
+				if got := gjson.GetBytes(test.out, "messages.1").Raw; got != gjson.GetBytes(payload, "messages.1").Raw {
+					t.Fatalf("caller effort directive moved or changed: %s", test.out)
+				}
+				if keepTopLevel {
+					if got := gjson.GetBytes(test.out, "messages.#").Int(); got != 3 {
+						t.Fatalf("message count = %d, want 3: %s", got, test.out)
+					}
+					if !strings.Contains(gjson.GetBytes(test.out, "system").Raw, "caller guidance") {
+						t.Fatalf("caller guidance missing from top-level system: %s", test.out)
+					}
+					return
+				}
+				if got := gjson.GetBytes(test.out, "messages.#").Int(); got != 4 {
+					t.Fatalf("message count = %d, want 4: %s", got, test.out)
+				}
+				assertClaudeSystemTestMessage(t, test.out, 3, "caller guidance")
+				if strings.Contains(gjson.GetBytes(test.out, "system").Raw, "caller guidance") {
+					t.Fatalf("caller guidance remains at top level: %s", test.out)
+				}
+			})
+		}
+	}
+
+	// This snapshot must be independent of the insertion helper's output.
+	after := []byte(`{"messages":[{"role":"user","content":"summary"},` +
+		`{"role":"system","content":[],"output_config":{"effort":"low"}},` +
+		`{"role":"user","content":"next"},` +
+		`{"role":"system","content":[{"type":"text","text":"caller guidance"}]}]}`)
+	state := captureClaudeCodeSystemPlacement(payload, after, true)
+	if state.insertAt != 3 || len(state.insertedRaw) != 1 || len(state.blocks) != 1 || state.blocks[0].text != "caller guidance" {
+		t.Fatalf("captured placement = %+v, want inserted caller guidance at index 3", state)
+	}
+	if got := captureClaudeCodeSystemPlacement(payload, payload, true); len(got.insertedRaw) != 0 {
+		t.Fatalf("caller-owned messages must not be claimed: %+v", got)
+	}
+}
+
 func TestClaudeCurrentDateOrderingEdgeCases(t *testing.T) {
 	t.Run("empty message list remains unchanged", func(t *testing.T) {
 		input := []byte(`{"messages":[]}`)
@@ -433,7 +635,7 @@ func TestClaudeSystemInsertionFollowsToolResultsAndIsIdempotent(t *testing.T) {
 		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},` +
 		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"ok"},{"type":"text","text":"continue"}]}` +
 		`]}`)
-	texts := []string{"first guidance", "second guidance"}
+	texts := []claudeForwardedSystemBlock{{text: "first guidance"}, {text: "second guidance"}}
 
 	first := prependClaudeSystemRemindersToFirstUserMessage(payload, texts)
 	second := prependClaudeSystemRemindersToFirstUserMessage(first, texts)
@@ -448,7 +650,7 @@ func TestClaudeSystemInsertionFollowsToolResultsAndIsIdempotent(t *testing.T) {
 		)
 	}
 	for index, text := range texts {
-		if got := content[index+1].Get("text").String(); got != claudeCallerSystemReminder(text) {
+		if got := content[index+1].Get("text").String(); got != claudeCallerSystemReminder(text.text) {
 			t.Fatalf("content[%d].text = %q", index+1, got)
 		}
 	}
@@ -461,8 +663,8 @@ func TestClaudeSystemInsertionFollowsToolResultsAndIsIdempotent(t *testing.T) {
 	if got := gjson.GetBytes(first, "messages.#").Int(); got != 4 {
 		t.Fatalf("message count = %d, want assistant, user, and two system messages: %s", got, first)
 	}
-	assertClaudeSystemTestMessage(t, first, 2, texts[0])
-	assertClaudeSystemTestMessage(t, first, 3, texts[1])
+	assertClaudeSystemTestMessage(t, first, 2, texts[0].text)
+	assertClaudeSystemTestMessage(t, first, 3, texts[1].text)
 }
 
 func TestInjectClaudeCodeContextManagementRespectsThinkingAndCallerOwnership(t *testing.T) {
@@ -744,6 +946,7 @@ func TestApplyPayloadConfigWithRequestTrackedReportsContextManagementTouches(t *
 					"claude-opus-5",
 					"",
 					nil,
+					"claude",
 					"context_management",
 				)
 				if touched["context_management"] != test.wantTouched {

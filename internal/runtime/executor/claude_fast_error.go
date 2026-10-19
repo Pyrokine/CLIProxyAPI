@@ -125,7 +125,7 @@ func wrapClaudeFastRequestError(fastRequest bool, status int, err error) error {
 	return &claudeFastRequestError{cause: err, status: status}
 }
 
-func newClaudeFastDirectResponseError(resp *http.Response, body []byte) error {
+func newClaudeFastDirectResponseError(resp *http.Response, body []byte, modelLevelCooling bool) error {
 	if resp == nil {
 		return nil
 	}
@@ -135,7 +135,7 @@ func newClaudeFastDirectResponseError(resp *http.Response, body []byte) error {
 
 	var rateLimit *claudeRateLimitError
 	if resp.StatusCode == http.StatusTooManyRequests {
-		rateLimit = claudeRateLimitErrorFrom(classifyClaudeUpstreamError(resp.StatusCode, body, resp.Header))
+		rateLimit = claudeRateLimitErrorFrom(classifyClaudeUpstreamError(resp.StatusCode, body, modelLevelCooling, resp.Header))
 	}
 	return &claudeFastDirectResponseError{
 		response: &cliproxyexecutor.RequestTerminatedError{

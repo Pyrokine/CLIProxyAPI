@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	claudeauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -69,30 +71,28 @@ func claudeBillingFingerprintMessageText(payload []byte) string {
 	if content.Type == gjson.String {
 		return content.String()
 	}
-	var text string
 	for _, part := range content.Array() {
 		if part.Get("type").String() == "text" {
 			candidate := part.Get("text").String()
 			if !isClaudeCodeCurrentDateReminder(candidate) && !isClaudeCodeContextReminder(candidate) {
-				text = candidate
+				return candidate
 			}
 		}
 	}
-	return text
+	return ""
 }
 
 func computeClaudeFingerprint(messageText, version string) string {
-	indices := [3]int{4, 7, 20}
-	runes := []rune(messageText)
-	var selected strings.Builder
-	for _, index := range indices {
-		if index < len(runes) {
-			selected.WriteRune(runes[index])
-		} else {
-			selected.WriteRune('0')
+	units := utf16.Encode([]rune(messageText))
+	var sampled [3]uint16
+	for i, index := range [...]int{4, 7, 20} {
+		sampled[i] = '0'
+		if index < len(units) {
+			sampled[i] = units[index]
 		}
 	}
-	hash := sha256.Sum256([]byte(claudeFingerprintSalt + selected.String() + version))
+	input := claudeFingerprintSalt + string(utf16.Decode(sampled[:])) + version
+	hash := sha256.Sum256([]byte(input))
 	return hex.EncodeToString(hash[:])[:3]
 }
 
@@ -163,6 +163,18 @@ func isClaudeFable51Model(model string) bool {
 	return false
 }
 
+func applyClaudeCloakThinkingDisplay(body []byte, callerOwned bool) []byte {
+	if callerOwned || len(body) == 0 || gjson.GetBytes(body, "thinking.display").Exists() ||
+		!claudeModelUsesProgressDisplay(gjson.GetBytes(body, "model").String()) {
+		return body
+	}
+	switch gjson.GetBytes(body, "thinking.type").String() {
+	case "adaptive", "enabled":
+		body, _ = sjson.SetBytes(body, "thinking.display", "updates")
+	}
+	return body
+}
+
 func checkClaudeSystemInstructionsWithSigningModeAt(
 	payload []byte,
 	strictMode bool,
@@ -171,12 +183,19 @@ func checkClaudeSystemInstructionsWithSigningModeAt(
 	entrypoint string,
 	workload string,
 	now time.Time,
+	explicitCacheMode bool,
+	keepCallerSystemTopLevel ...bool,
 ) []byte {
 	system := gjson.GetBytes(payload, "system")
 	messageText := claudeBillingFingerprintMessageText(payload)
 	billingText := generateClaudeBillingHeader(cchSigning, version, messageText, entrypoint, workload)
 	billingBlock := buildClaudeTextBlock(billingText, nil)
-	agentBlock := buildClaudeTextBlock(claudeCodeCLIIdentity, map[string]string{"type": "ephemeral"})
+	explicitCacheMode = explicitCacheMode || isExplicitPromptCacheMode(payload)
+	var cacheControl map[string]string
+	if !explicitCacheMode {
+		cacheControl = map[string]string{"type": "ephemeral"}
+	}
+	agentBlock := buildClaudeTextBlock(claudeCodeCLIIdentity, cacheControl)
 	systemBlocks := []string{billingBlock, agentBlock}
 	if isClaudeFable51Model(gjson.GetBytes(payload, "model").String()) &&
 		!helps.IsClaudeProbeOrHelperRequest(payload) {
@@ -191,40 +210,47 @@ func checkClaudeSystemInstructionsWithSigningModeAt(
 		[]byte("["+strings.Join(systemBlocks, ",")+"]"),
 	)
 	if strictMode {
-		return injectClaudeCodeCurrentDate(payload, now)
+		return injectClaudeCodeCurrentDate(payload, now, explicitCacheMode)
 	}
 
-	forwardedSystemBlocks := collectForwardedClaudeSystemPromptBlocks(system)
+	forwardedSystemBlocks := collectForwardedClaudeSystemPromptBlocks(system, explicitCacheMode)
 	if len(forwardedSystemBlocks) == 0 {
-		return injectClaudeCodeCurrentDate(payload, now)
+		return injectClaudeCodeCurrentDate(payload, now, explicitCacheMode)
 	}
 	if claudeHistoryHasAdvisorCallOrResult(payload) {
 		for _, block := range forwardedSystemBlocks {
-			systemBlocks = append(systemBlocks, buildClaudeTextBlock(block, nil))
+			systemBlocks = append(systemBlocks, block.textBlock(block.text, nil))
 		}
 		payload, _ = sjson.SetRawBytes(
 			payload,
 			"system",
 			[]byte("["+strings.Join(systemBlocks, ",")+"]"),
 		)
-		return injectClaudeCodeCurrentDate(payload, now)
+		return injectClaudeCodeCurrentDate(payload, now, explicitCacheMode)
 	}
 	if claudeUsesLegacySystemReminder(payload) {
 		payload = prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
+	} else if len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0] &&
+		claudeMidConversationSystemMessagesAtEnd(payload) {
+		for _, block := range forwardedSystemBlocks {
+			systemBlocks = append(systemBlocks, block.textBlock(block.text, cacheControl))
+		}
+		payload, _ = sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(systemBlocks, ",")+"]"))
 	} else {
-		payload = insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks)
+		payload = insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks, explicitCacheMode)
 	}
-	return injectClaudeCodeCurrentDate(payload, now)
+	return injectClaudeCodeCurrentDate(payload, now, explicitCacheMode)
 }
 
-func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool) []byte {
+func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode, explicitCacheMode bool, keepCallerSystemTopLevel ...bool) []byte {
 	system := gjson.GetBytes(payload, "system")
+	explicitCacheMode = explicitCacheMode || isExplicitPromptCacheMode(payload)
 	if !system.Exists() {
 		return payload
 	}
-	var forwardedSystemBlocks []string
+	var forwardedSystemBlocks []claudeForwardedSystemBlock
 	if !strictMode {
-		forwardedSystemBlocks = collectForwardedClaudeSystemPromptBlocks(system)
+		forwardedSystemBlocks = collectForwardedClaudeSystemPromptBlocks(system, explicitCacheMode)
 	}
 	if len(forwardedSystemBlocks) == 0 {
 		updated, _ := sjson.DeleteBytes(payload, "system")
@@ -233,13 +259,26 @@ func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool) [
 	if claudeHistoryHasAdvisorCallOrResult(payload) {
 		blocks := make([]string, 0, len(forwardedSystemBlocks))
 		for _, block := range forwardedSystemBlocks {
-			blocks = append(blocks, buildClaudeTextBlock(block, nil))
+			blocks = append(blocks, block.textBlock(block.text, nil))
 		}
 		updated, _ := sjson.SetRawBytes(
 			payload,
 			"system",
 			[]byte("["+strings.Join(blocks, ",")+"]"),
 		)
+		return updated
+	}
+	if len(keepCallerSystemTopLevel) > 0 && keepCallerSystemTopLevel[0] &&
+		claudeMidConversationSystemMessagesAtEnd(payload) {
+		blocks := make([]string, 0, len(forwardedSystemBlocks))
+		var cacheControl map[string]string
+		if !explicitCacheMode {
+			cacheControl = map[string]string{"type": "ephemeral"}
+		}
+		for _, block := range forwardedSystemBlocks {
+			blocks = append(blocks, block.textBlock(block.text, cacheControl))
+		}
+		updated, _ := sjson.SetRawBytes(payload, "system", []byte("["+strings.Join(blocks, ",")+"]"))
 		return updated
 	}
 	updated, errDelete := sjson.DeleteBytes(payload, "system")
@@ -250,7 +289,7 @@ func relocateClaudeSystemPromptForCountTokens(payload []byte, strictMode bool) [
 	if claudeUsesLegacySystemReminder(payload) {
 		return prependClaudeSystemRemindersToFirstUserMessage(payload, forwardedSystemBlocks)
 	}
-	return insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks)
+	return insertClaudeMidConversationSystemMessages(payload, forwardedSystemBlocks, explicitCacheMode)
 }
 
 var claudeLegacySystemReminderModels = map[string]struct{}{
@@ -387,13 +426,25 @@ func validateClaudeCallerSystemBlocks(system gjson.Result) error {
 	return blockErr
 }
 
-func collectForwardedClaudeSystemPromptBlocks(system gjson.Result) []string {
-	var blocks []string
-	appendText := func(text string, injectedIdentity bool) {
+type claudeForwardedSystemBlock struct {
+	text         string
+	cacheControl string
+}
+
+func (block claudeForwardedSystemBlock) textBlock(text string, cacheControl map[string]string) string {
+	if block.cacheControl == "" {
+		return buildClaudeTextBlock(text, cacheControl)
+	}
+	return `{"type":"text","text":` + marshalClaudeJSONString(text) + `,"cache_control":` + block.cacheControl + "}"
+}
+
+func collectForwardedClaudeSystemPromptBlocks(system gjson.Result, explicitCacheMode ...bool) []claudeForwardedSystemBlock {
+	var blocks []claudeForwardedSystemBlock
+	appendText := func(text string, injectedIdentity bool, cacheControl string) {
 		if strings.TrimSpace(text) == "" || util.IsClaudeCodeAttributionSystemText(text) || injectedIdentity {
 			return
 		}
-		blocks = append(blocks, text)
+		blocks = append(blocks, claudeForwardedSystemBlock{text: text, cacheControl: cacheControl})
 	}
 	if system.IsArray() {
 		system.ForEach(
@@ -402,13 +453,17 @@ func collectForwardedClaudeSystemPromptBlocks(system gjson.Result) []string {
 					text := part.Get("text").String()
 					injectedIdentity := strings.TrimSpace(text) == claudeCodeCLIIdentity &&
 						part.Get("cache_control.type").String() == "ephemeral"
-					appendText(text, injectedIdentity)
+					cacheControl := ""
+					if len(explicitCacheMode) > 0 && explicitCacheMode[0] {
+						cacheControl = part.Get("cache_control").Raw
+					}
+					appendText(text, injectedIdentity, cacheControl)
 				}
 				return true
 			},
 		)
 	} else if system.Type == gjson.String {
-		appendText(system.String(), false)
+		appendText(system.String(), false, "")
 	}
 	return blocks
 }
@@ -425,7 +480,7 @@ func claudeHistoryHasAdvisorCallOrResult(payload []byte) bool {
 				switch block.Get("type").String() {
 				case "advisor_tool_result", "advisor_redacted_result":
 					return true
-				case "server_tool_use", "tool_use":
+				case "server_tool_use":
 					if block.Get("name").String() == "advisor" {
 						return true
 					}
@@ -473,14 +528,15 @@ func marshalClaudeJSONString(value string) string {
 	return strings.TrimSuffix(encoded.String(), "\n")
 }
 
-func prependClaudeSystemRemindersToFirstUserMessage(payload []byte, texts []string) []byte {
+func prependClaudeSystemRemindersToFirstUserMessage(payload []byte, texts []claudeForwardedSystemBlock) []byte {
 	firstUserIdx := firstClaudeUserMessageIndex(payload)
 	if firstUserIdx < 0 || len(texts) == 0 {
 		return payload
 	}
-	reminderTexts := make([]string, 0, len(texts))
-	for _, text := range texts {
-		reminderTexts = append(reminderTexts, claudeCallerSystemReminder(text))
+	reminderTexts := make([]claudeForwardedSystemBlock, 0, len(texts))
+	for _, block := range texts {
+		block.text = claudeCallerSystemReminder(block.text)
+		reminderTexts = append(reminderTexts, block)
 	}
 	contentPath := fmt.Sprintf("messages.%d.content", firstUserIdx)
 	content := gjson.GetBytes(payload, contentPath)
@@ -489,16 +545,17 @@ func prependClaudeSystemRemindersToFirstUserMessage(payload []byte, texts []stri
 		existing := make(map[string]int, len(blocks))
 		for _, block := range blocks {
 			if block.Get("type").String() == "text" {
-				existing[block.Get("text").String()]++
+				existing[block.Get("text").String()+"\x00"+block.Get("cache_control").Raw]++
 			}
 		}
 		reminderBlocks := make([]string, 0, len(reminderTexts))
-		for _, reminderText := range reminderTexts {
-			if existing[reminderText] > 0 {
-				existing[reminderText]--
+		for _, block := range reminderTexts {
+			key := block.text + "\x00" + block.cacheControl
+			if existing[key] > 0 {
+				existing[key]--
 				continue
 			}
-			reminderBlocks = append(reminderBlocks, buildClaudeTextBlock(reminderText, nil))
+			reminderBlocks = append(reminderBlocks, block.textBlock(block.text, nil))
 		}
 		if len(reminderBlocks) == 0 {
 			return payload
@@ -520,8 +577,8 @@ func prependClaudeSystemRemindersToFirstUserMessage(payload []byte, texts []stri
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte("["+strings.Join(rawBlocks, ",")+"]"))
 	} else if content.Type == gjson.String {
 		rawBlocks := make([]string, 0, len(reminderTexts)+1)
-		for _, reminderText := range reminderTexts {
-			rawBlocks = append(rawBlocks, buildClaudeTextBlock(reminderText, nil))
+		for _, block := range reminderTexts {
+			rawBlocks = append(rawBlocks, block.textBlock(block.text, nil))
 		}
 		rawBlocks = append(rawBlocks, buildClaudeTextBlock(content.String(), nil))
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte("["+strings.Join(rawBlocks, ",")+"]"))
@@ -540,7 +597,36 @@ func claudeCallerSystemReminder(text string) string {
 	return reminder.String()
 }
 
-func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) []byte {
+func claudeLeadingUserRunEnd(messages []gjson.Result, firstUserIndex int) int {
+	insertAt := firstUserIndex + 1
+	for insertAt < len(messages) {
+		message := messages[insertAt]
+		content := message.Get("content")
+		if message.Get("role").String() != "user" &&
+			!(message.Get("role").String() == "system" && message.Get("output_config").Exists() &&
+				content.IsArray() && len(content.Array()) == 0) {
+			break
+		}
+		insertAt++
+	}
+	return insertAt
+}
+
+func claudeMidConversationSystemMessagesAtEnd(payload []byte) bool {
+	firstUser := firstClaudeUserMessageIndex(payload)
+	if firstUser < 0 {
+		return false
+	}
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return false
+	}
+	items := messages.Array()
+	insertAt := claudeLeadingUserRunEnd(items, firstUser)
+	return insertAt == len(items) || insertAt > firstUser+1
+}
+
+func insertClaudeMidConversationSystemMessages(payload []byte, texts []claudeForwardedSystemBlock, explicitCacheMode ...bool) []byte {
 	firstUserIdx := firstClaudeUserMessageIndex(payload)
 	if firstUserIdx < 0 || len(texts) == 0 {
 		return payload
@@ -550,15 +636,13 @@ func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) [
 		return payload
 	}
 	messageBlocks := messages.Array()
-	insertAt := firstUserIdx + 1
-	for insertAt < len(messageBlocks) && messageBlocks[insertAt].Get("role").String() == "user" {
-		insertAt++
-	}
+	insertAt := claudeLeadingUserRunEnd(messageBlocks, firstUserIdx)
 	if len(messageBlocks)-insertAt >= len(texts) {
 		matches := true
-		for index, text := range texts {
+		for index, block := range texts {
 			message := messageBlocks[insertAt+index]
-			if message.Get("role").String() != "system" || claudeMessageContentText(message.Get("content")) != text {
+			if message.Get("role").String() != "system" || claudeMessageContentText(message.Get("content")) != block.text ||
+				(block.cacheControl != "" && message.Get("content.0.cache_control").Raw != block.cacheControl) {
 				matches = false
 				break
 			}
@@ -568,8 +652,12 @@ func insertClaudeMidConversationSystemMessages(payload []byte, texts []string) [
 		}
 	}
 	systemMessages := make([]string, 0, len(texts))
-	for _, text := range texts {
-		content := "[" + buildClaudeTextBlock(text, map[string]string{"type": "ephemeral"}) + "]"
+	var cacheControl map[string]string
+	if !isExplicitPromptCacheMode(payload) && (len(explicitCacheMode) == 0 || !explicitCacheMode[0]) {
+		cacheControl = map[string]string{"type": "ephemeral"}
+	}
+	for _, block := range texts {
+		content := "[" + block.textBlock(block.text, cacheControl) + "]"
 		systemMessages = append(systemMessages, `{"role":"system","content":`+content+"}")
 	}
 	rawMessages := make([]string, 0, len(messageBlocks)+len(systemMessages))
@@ -608,18 +696,20 @@ func claudeMessageContentText(content gjson.Result) string {
 type claudeCodeSystemPlacementState struct {
 	insertAt    int
 	insertedRaw []string
-	texts       []string
+	blocks      []claudeForwardedSystemBlock
 }
 
 func captureClaudeCodeSystemPlacement(
 	before,
 	after []byte,
 	cloaked bool,
+	explicitCacheMode ...bool,
 ) claudeCodeSystemPlacementState {
 	if !cloaked || claudeUsesLegacySystemReminder(before) {
 		return claudeCodeSystemPlacementState{}
 	}
-	texts := collectForwardedClaudeSystemPromptBlocks(gjson.GetBytes(before, "system"))
+	explicit := isExplicitPromptCacheMode(before, after) || (len(explicitCacheMode) > 0 && explicitCacheMode[0])
+	texts := collectForwardedClaudeSystemPromptBlocks(gjson.GetBytes(before, "system"), explicit)
 	if len(texts) == 0 {
 		return claudeCodeSystemPlacementState{}
 	}
@@ -632,11 +722,7 @@ func captureClaudeCodeSystemPlacement(
 	if firstUserIndex < 0 {
 		return claudeCodeSystemPlacementState{}
 	}
-	insertAt := firstUserIndex + 1
-	for insertAt < len(beforeMessages) &&
-		beforeMessages[insertAt].Get("role").String() == "user" {
-		insertAt++
-	}
+	insertAt := claudeLeadingUserRunEnd(beforeMessages, firstUserIndex)
 	if insertAt+len(texts) > len(afterMessages) {
 		return claudeCodeSystemPlacementState{}
 	}
@@ -644,7 +730,7 @@ func captureClaudeCodeSystemPlacement(
 	for index, text := range texts {
 		message := afterMessages[insertAt+index]
 		if message.Get("role").String() != "system" ||
-			claudeMessageContentText(message.Get("content")) != text {
+			claudeMessageContentText(message.Get("content")) != text.text {
 			return claudeCodeSystemPlacementState{}
 		}
 		insertedRaw[index] = message.Raw
@@ -652,7 +738,7 @@ func captureClaudeCodeSystemPlacement(
 	return claudeCodeSystemPlacementState{
 		insertAt:    insertAt,
 		insertedRaw: insertedRaw,
-		texts:       append([]string(nil), texts...),
+		blocks:      texts,
 	}
 }
 
@@ -687,7 +773,7 @@ func reconcileClaudeCodeSystemPlacementAfterPayload(
 	if errSet != nil {
 		return payload
 	}
-	return prependClaudeSystemRemindersToFirstUserMessage(updated, state.texts)
+	return prependClaudeSystemRemindersToFirstUserMessage(updated, state.blocks)
 }
 
 type claudeCodeFableState struct {
@@ -787,8 +873,7 @@ func appendClaudeFableReportingBlock(body []byte) []byte {
 func reconcileClaudeCodeFableModelAfterPayload(
 	body []byte,
 	state claudeCodeFableState,
-	payloadTouchedFallbacks,
-	payloadTouchedDisplay,
+	payloadTouchedPaths map[string]bool,
 	cloaked,
 	isProbeOrHelper bool,
 ) []byte {
@@ -796,44 +881,53 @@ func reconcileClaudeCodeFableModelAfterPayload(
 		return body
 	}
 	if isProbeOrHelper {
-		if state.injectedFallbacks && !payloadTouchedFallbacks {
+		if state.injectedFallbacks && !payloadTouchedPaths["fallbacks"] {
 			body, _ = sjson.DeleteBytes(body, "fallbacks")
 		}
-		if state.injectedDisplay && !payloadTouchedDisplay {
+		if state.injectedDisplay && !payloadTouchedPaths["thinking.display"] {
 			body, _ = sjson.DeleteBytes(body, "thinking.display")
 		}
-		if state.injectedReporting {
+		if state.injectedReporting && !payloadTouchedPaths["system"] {
 			body = removeClaudeFableReportingBlock(body)
 		}
 		return body
 	}
-	if isClaudeFable51Model(gjson.GetBytes(body, "model").String()) {
-		if !gjson.GetBytes(body, "fallbacks").Exists() && !payloadTouchedFallbacks {
-			body, _ = sjson.SetRawBytes(
-				body,
-				"fallbacks",
-				[]byte(`[{"model":"claude-opus-5"}]`),
-			)
+	model := gjson.GetBytes(body, "model").String()
+	fallback := ""
+	switch {
+	case isClaudeFable51Model(model):
+		fallback = "claude-opus-5"
+	case isClaudeOpus55Model(model):
+		fallback = "claude-opus-4-8"
+	}
+	if !payloadTouchedPaths["fallbacks"] {
+		if state.injectedFallbacks && gjson.GetBytes(body, "fallbacks.0.model").String() != fallback {
+			body, _ = sjson.DeleteBytes(body, "fallbacks")
 		}
+		if fallback != "" && !gjson.GetBytes(body, "fallbacks").Exists() {
+			body, _ = sjson.SetRawBytes(body, "fallbacks", []byte(`[{"model":"`+fallback+`"}]`))
+		}
+	}
+	if isClaudeFable51Model(model) {
 		thinkingType := gjson.GetBytes(body, "thinking.type").String()
-		if thinkingType == "adaptive" &&
-			!gjson.GetBytes(body, "thinking.display").Exists() &&
-			!payloadTouchedDisplay {
-			body, _ = sjson.SetBytes(body, "thinking.display", "updates")
-		} else if thinkingType != "adaptive" &&
-			state.injectedDisplay &&
-			!payloadTouchedDisplay {
+		if thinkingType != "adaptive" && thinkingType != "enabled" &&
+			state.injectedDisplay && !payloadTouchedPaths["thinking.display"] {
 			body, _ = sjson.DeleteBytes(body, "thinking.display")
 		}
-		return appendClaudeFableReportingBlock(body)
+		body = applyClaudeCloakThinkingDisplay(body, payloadTouchedPaths["thinking.display"])
+		if !payloadTouchedPaths["system"] {
+			body = appendClaudeFableReportingBlock(body)
+		}
+		return body
 	}
-	if state.injectedFallbacks && !payloadTouchedFallbacks {
-		body, _ = sjson.DeleteBytes(body, "fallbacks")
-	}
-	if state.injectedDisplay && !payloadTouchedDisplay {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	thinkingActive := thinkingType == "adaptive" || thinkingType == "enabled"
+	if state.injectedDisplay && !payloadTouchedPaths["thinking.display"] &&
+		(!thinkingActive || !claudeModelUsesProgressDisplay(gjson.GetBytes(body, "model").String())) {
 		body, _ = sjson.DeleteBytes(body, "thinking.display")
 	}
-	if state.injectedReporting {
+	body = applyClaudeCloakThinkingDisplay(body, payloadTouchedPaths["thinking.display"])
+	if state.injectedReporting && !payloadTouchedPaths["system"] {
 		body = removeClaudeFableReportingBlock(body)
 	}
 	return body
@@ -847,6 +941,8 @@ func claudeCodeTimezone(cfg *config.Config, auth *cliproxyauth.Auth) *time.Locat
 	if timezone := claudeCredentialTimezone(auth); timezone != "" {
 		if location, errLocation := time.LoadLocation(timezone); errLocation == nil {
 			return location
+		} else {
+			log.Warnf("invalid Claude credential timezone %q: %v", timezone, errLocation)
 		}
 	}
 	if cfg == nil {
@@ -858,6 +954,7 @@ func claudeCodeTimezone(cfg *config.Config, auth *cliproxyauth.Auth) *time.Locat
 	}
 	location, errLocation := time.LoadLocation(timezone)
 	if errLocation != nil {
+		log.Warnf("invalid Claude configured timezone %q: %v", timezone, errLocation)
 		return time.Local
 	}
 	return location
@@ -919,7 +1016,7 @@ func isClaudeCodeCurrentDateReminder(text string) bool {
 	)
 }
 
-func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
+func injectClaudeCodeCurrentDate(payload []byte, now time.Time, explicitCacheMode ...bool) []byte {
 	firstUserIdx := firstClaudeUserMessageIndex(payload)
 	if firstUserIdx < 0 {
 		return payload
@@ -927,8 +1024,12 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 	contentPath := fmt.Sprintf("messages.%d.content", firstUserIdx)
 	content := gjson.GetBytes(payload, contentPath)
 	dateBlock := buildClaudeTextBlock(claudeCodeCurrentDateReminder(now), nil)
+	var cacheControl map[string]string
+	if !isExplicitPromptCacheMode(payload) && (len(explicitCacheMode) == 0 || !explicitCacheMode[0]) {
+		cacheControl = map[string]string{"type": "ephemeral"}
+	}
 	if content.Type == gjson.String {
-		userBlock := buildClaudeTextBlock(content.String(), map[string]string{"type": "ephemeral"})
+		userBlock := buildClaudeTextBlock(content.String(), cacheControl)
 		payload, _ = sjson.SetRawBytes(payload, contentPath, []byte("["+dateBlock+","+userBlock+"]"))
 		return payload
 	}
@@ -944,7 +1045,7 @@ func injectClaudeCodeCurrentDate(payload []byte, now time.Time) []byte {
 			if isClaudeCodeCurrentDateReminder(text) {
 				continue
 			}
-			if !actualTextCached && !isClaudeCodeContextReminder(text) {
+			if cacheControl != nil && !actualTextCached && !isClaudeCodeContextReminder(text) {
 				rawBlocks = append(rawBlocks, withClaudeEphemeralCacheControl(block.Raw))
 				actualTextCached = true
 				continue
@@ -1046,6 +1147,7 @@ func reconcileClaudeCodeContextManagement(
 
 type claudeWirePolicy struct {
 	Cloak bool
+	OAuth bool
 }
 
 type claudeCloakSettings struct {
@@ -1088,8 +1190,10 @@ func resolveClaudeWirePolicy(
 			settings.cacheUserID = *cloakCfg.CacheUserID
 		}
 	}
+	fingerprint := resolveClaudeFingerprintPolicy(cfg, auth, apiKey)
 	policy := claudeWirePolicy{
-		Cloak: !confirmedClaudeCode && resolveClaudeFingerprintPolicy(cfg, auth, apiKey).ProfileClaudeCodeCLI,
+		Cloak: !confirmedClaudeCode && fingerprint.ProfileClaudeCodeCLI,
+		OAuth: fingerprint.AuthIsOAuthToken,
 	}
 	if confirmedClaudeCode {
 		return policy, settings

@@ -18,10 +18,8 @@ func fixtureAuth() *cliproxyauth.Auth {
 	return &cliproxyauth.Auth{Attributes: attrs}
 }
 
-// A caller the cloak does not recognize (a Claude Code newer than the pinned
-// profile) keeps betas the proxy does not manage: dropping them fails whole
-// turns whose features need the missing authorization, e.g. per-turn effort
-// directives with per-turn-control-2026-07-01 (#5738).
+// A caller newer than the pinned profile keeps unknown betas, while the proxy
+// assembles recognized feature betas in the current Claude Code wire order.
 func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas(t *testing.T) {
 	t.Parallel()
 
@@ -31,15 +29,55 @@ func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas(t *testing.T) {
 		t.Fatalf("NewRequest() error = %v", errReq)
 	}
 	incoming := http.Header{}
-	incoming.Set("Anthropic-Beta", "per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01")
+	incoming.Set("Anthropic-Beta", "message-threads-2026-08-12")
 	if errHeaders := applyClaudeHeaders(req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil, []byte(`{"model":"claude-fable-5-1"}`), &config.Config{}, incoming, false); errHeaders != nil {
 		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
 	}
 	betas := req.Header.Get("Anthropic-Beta")
-	for _, want := range []string{"per-turn-control-2026-07-01", "mid-conversation-tool-changes-2026-07-01"} {
-		if !strings.Contains(betas, want) {
-			t.Fatalf("Anthropic-Beta = %q, want unmanaged caller beta %q forwarded", betas, want)
-		}
+	if !strings.Contains(betas, "message-threads-2026-08-12") {
+		t.Fatalf("Anthropic-Beta = %q, want unknown caller beta forwarded", betas)
+	}
+	wantOrder := claudeMidConvSystemBeta + "," + claudePerTurnControlBeta + "," +
+		claudeMidConvToolChangesBeta + "," + claudeMidConvSystemClearAtBeta + "," + claudeEffortBeta
+	if !strings.Contains(betas, wantOrder) {
+		t.Fatalf("Anthropic-Beta = %q, want feature beta order %q", betas, wantOrder)
+	}
+}
+
+func TestApplyClaudeHeadersPreservesNativeGatewayHintsOnly(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		requestClass string
+		confirmed    bool
+	}{
+		{name: "native main", requestClass: "main", confirmed: true},
+		{name: "native auxiliary", requestClass: "auxiliary", confirmed: true},
+		{name: "unconfirmed", requestClass: "main"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			incoming := http.Header{
+				"x-claude-code-request-class":       {test.requestClass},
+				"x-claude-code-agent-type":          {"builtin"},
+				"x-claude-code-prev-tool-durations": {"5"},
+				"x-claude-code-compaction":          {"false"},
+				"x-claude-code-context-compacted":   {"false"},
+			}
+			req, err := http.NewRequest(http.MethodPost, "https://api.anthropic.com/v1/messages", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			auth := fixtureAuth()
+			if err := applyClaudeHeaders(req, auth, auth.Attributes[cliproxyauth.AttributeAPIKey], false, nil,
+				[]byte(`{"model":"claude-opus-5-5"}`), &config.Config{}, incoming, test.confirmed); err != nil {
+				t.Fatal(err)
+			}
+			for header, values := range incoming {
+				got := req.Header.Get(header)
+				if test.confirmed && got != values[0] || !test.confirmed && got != "" {
+					t.Errorf("confirmed=%t: %s = %q", test.confirmed, header, got)
+				}
+			}
+		})
 	}
 }
 
@@ -64,9 +102,7 @@ func TestApplyClaudeHeaders_StillGatesManagedCallerBetas(t *testing.T) {
 	}
 }
 
-// TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas_OAuth verifies the exact
-// scenario reported in #5738: an OAuth credential with an unconfirmed client
-// sending a per-turn effort directive turn.
+// OAuth credentials preserve unknown caller betas alongside model-gated betas.
 func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas_OAuth(t *testing.T) {
 	t.Parallel()
 
@@ -79,7 +115,7 @@ func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas_OAuth(t *testing.T) {
 		t.Fatalf("NewRequest() error = %v", errReq)
 	}
 	incoming := http.Header{}
-	incoming.Set("Anthropic-Beta", "per-turn-control-2026-07-01,mid-conversation-system-2026-04-07")
+	incoming.Set("Anthropic-Beta", "message-threads-2026-08-12,mid-conversation-system-2026-04-07")
 	body := []byte(`{
 		"model": "claude-fable-5-1",
 		"max_tokens": 16,
@@ -93,7 +129,8 @@ func TestApplyClaudeHeaders_ForwardsUnmanagedCallerBetas_OAuth(t *testing.T) {
 		t.Fatalf("applyClaudeHeaders() error = %v", errHeaders)
 	}
 	betas := req.Header.Get("Anthropic-Beta")
-	if !strings.Contains(betas, "per-turn-control-2026-07-01") {
-		t.Fatalf("Anthropic-Beta = %q, want unmanaged caller beta %q forwarded on OAuth", betas, "per-turn-control-2026-07-01")
+	if !strings.Contains(betas, "message-threads-2026-08-12") ||
+		!strings.Contains(betas, claudeMidConvSystemBeta+","+claudePerTurnControlBeta+","+claudeMidConvToolChangesBeta) {
+		t.Fatalf("Anthropic-Beta = %q, want unknown beta plus OAuth model-gated betas", betas)
 	}
 }

@@ -608,6 +608,9 @@ func TestConvertOpenAIResponsesRequestToClaudeServiceTierAndTokenDefaults(t *tes
 		{"fable default", "claude-fable-5-1", `{"input":"hi"}`, 64000, ""},
 		{"registered maximum", "claude-3-5-haiku-20241022", `{"max_output_tokens":128000,"input":"hi"}`, 8192, ""},
 		{"null keeps default", "claude-fable-5-1", `{"max_output_tokens":null,"input":"hi"}`, 64000, ""},
+		{"opus 5.5 uses registry limit", "claude-opus-5-5", `{"input":"hi"}`, 128000, ""},
+		{"opus 5.5 null uses registry limit", "claude-opus-5-5", `{"max_output_tokens":null,"input":"hi"}`, 128000, ""},
+		{"sonnet 4.6 uses registry limit", "claude-sonnet-4-6", `{"input":"hi"}`, 64000, ""},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -617,6 +620,35 @@ func TestConvertOpenAIResponsesRequestToClaudeServiceTierAndTokenDefaults(t *tes
 			}
 			if got := gjson.GetBytes(out, "speed").String(); got != test.wantSpeed {
 				t.Fatalf("speed = %q, want %q; output=%s", got, test.wantSpeed, out)
+			}
+		})
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToClaudeStringInput(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		request    string
+		wantText   string
+		wantSystem string
+	}{
+		{name: "plain text", request: `{"input":"hi"}`, wantText: "hi"},
+		{name: "instructions", request: `{"instructions":"Be concise.","input":"hello world"}`, wantText: "hello world", wantSystem: "Be concise."},
+		{name: "escaped Unicode text", request: `{"input":"line 1\n\"line 2\"\n你好，世界 🌍"}`, wantText: "line 1\n\"line 2\"\n你好，世界 🌍"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, preserveThinking := range []bool{false, true} {
+				out, err := convertOpenAIResponsesRequestToClaudeChecked("claude-sonnet-4-6", []byte(tc.request), false, preserveThinking)
+				if err != nil {
+					t.Fatalf("translate Responses string: %v", err)
+				}
+				messages := gjson.GetBytes(out, "messages").Array()
+				if len(messages) != 1 || messages[0].Get("role").String() != "user" || messages[0].Get("content").String() != tc.wantText {
+					t.Fatalf("messages = %s, want one user message with %q", out, tc.wantText)
+				}
+				if got := gjson.GetBytes(out, "system.0.text").String(); got != tc.wantSystem {
+					t.Fatalf("system = %q, want %q; output=%s", got, tc.wantSystem, out)
+				}
 			}
 		})
 	}

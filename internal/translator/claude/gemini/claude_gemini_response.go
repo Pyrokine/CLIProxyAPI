@@ -14,6 +14,7 @@ import (
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -21,6 +22,13 @@ import (
 var (
 	dataTag = []byte("data:")
 )
+
+func geminiClaudeToolNameMap(request []byte) map[string]string {
+	if nested := gjson.GetBytes(request, "request"); nested.IsObject() {
+		request = []byte(nested.Raw)
+	}
+	return util.ReverseToolNameMap(util.ClaudeFunctionNameMap(request))
+}
 
 func geminiResponseSignature(rawSignature string, blockKind signature.BlockKind) string {
 	if strings.TrimSpace(rawSignature) == "" {
@@ -104,6 +112,7 @@ type convertAnthropicResponseToGeminiParams struct {
 	ToolUseIDs         map[int]string           // provider-visible tool ID per block index
 	ToolUseSignatures  map[int]string           // Gemini thought signature per tool block index
 	ThinkingSignatures map[int]*strings.Builder // raw Claude signature fragments per thinking block index
+	ToolNames          map[string]string
 }
 
 // ConvertClaudeResponseToGemini converts Claude Code streaming response format to Gemini format.
@@ -120,12 +129,13 @@ type convertAnthropicResponseToGeminiParams struct {
 //
 // Returns:
 //   - [][]byte: A slice of Gemini-compatible JSON responses
-func ConvertClaudeResponseToGemini(_ context.Context, modelName string, _, _, rawJSON []byte, param *any) [][]byte {
+func ConvertClaudeResponseToGemini(_ context.Context, modelName string, originalRequestRawJSON, _, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &convertAnthropicResponseToGeminiParams{
 			Model:      modelName,
 			CreatedAt:  0,
 			ResponseID: "",
+			ToolNames:  geminiClaudeToolNameMap(originalRequestRawJSON),
 		}
 	}
 
@@ -182,7 +192,7 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, _, _, ra
 					params.ToolUseNames = map[int]string{}
 				}
 				if name := cb.Get("name"); name.Exists() {
-					params.ToolUseNames[idx] = name.String()
+					params.ToolUseNames[idx] = util.RestoreSanitizedToolName(params.ToolNames, name.String())
 				}
 				if toolID := strings.TrimSpace(cb.Get("id").String()); toolID != "" {
 					if params.ToolUseIDs == nil {
@@ -388,7 +398,7 @@ func ConvertClaudeResponseToGemini(_ context.Context, modelName string, _, _, ra
 //
 // Returns:
 //   - []byte: A Gemini-compatible JSON response containing all message content and metadata
-func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string, _, _, rawJSON []byte, _ *any) []byte {
+func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string, originalRequestRawJSON, _, rawJSON []byte, _ *any) []byte {
 	// Base Gemini response template for non-streaming with default values
 	template := []byte(`{"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"trafficType":"PROVISIONED_THROUGHPUT"},"modelVersion":"","createTime":"","responseId":""}`)
 
@@ -422,6 +432,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 		ToolUseArgs:       nil,
 		ToolUseIDs:        nil,
 		ToolUseSignatures: nil,
+		ToolNames:         geminiClaudeToolNameMap(originalRequestRawJSON),
 	}
 
 	// Process each streaming event and collect parts
@@ -461,7 +472,7 @@ func ConvertClaudeResponseToGeminiNonStream(_ context.Context, modelName string,
 						newParam.ToolUseNames = map[int]string{}
 					}
 					if name := cb.Get("name"); name.Exists() {
-						newParam.ToolUseNames[idx] = name.String()
+						newParam.ToolUseNames[idx] = util.RestoreSanitizedToolName(newParam.ToolNames, name.String())
 					}
 					if toolID := strings.TrimSpace(cb.Get("id").String()); toolID != "" {
 						if newParam.ToolUseIDs == nil {

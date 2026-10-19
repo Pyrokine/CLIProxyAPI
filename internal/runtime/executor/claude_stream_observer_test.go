@@ -15,6 +15,7 @@ import (
 type recordingClaudeStreamObserver struct {
 	lines    []string
 	outcomes []claudeStreamOutcome
+	onFinish func(claudeStreamOutcome)
 }
 
 func (o *recordingClaudeStreamObserver) ObserveClaudeSSELine(line []byte) {
@@ -23,6 +24,9 @@ func (o *recordingClaudeStreamObserver) ObserveClaudeSSELine(line []byte) {
 
 func (o *recordingClaudeStreamObserver) FinishClaudeStream(outcome claudeStreamOutcome) {
 	o.outcomes = append(o.outcomes, outcome)
+	if o.onFinish != nil {
+		o.onFinish(outcome)
+	}
 }
 
 func consumeClaudeStreamForObserverTest(
@@ -56,8 +60,8 @@ func consumeClaudeStreamReaderForObserverTest(
 		nil,
 		false,
 		http.StatusOK,
-		func(line []byte) [][]byte {
-			return [][]byte{append([]byte(nil), line...)}
+		func(line []byte) ([][]byte, error) {
+			return [][]byte{append([]byte(nil), line...)}, nil
 		},
 		observer,
 	)
@@ -162,5 +166,50 @@ func TestConsumeClaudeStreamObserverReportsOneCompleteOutcome(t *testing.T) {
 		if chunk.Err != nil {
 			t.Fatalf("complete stream error = %v", chunk.Err)
 		}
+	}
+}
+
+func TestConsumeClaudeStreamTerminalReadErrorRequiresDeliveredFrame(t *testing.T) {
+	start := `data: {"type":"message_start","message":{"id":"msg","model":"claude-test"}}`
+	delta := `data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`
+	stop := `data: {"type":"message_stop"}`
+	for _, test := range []struct {
+		name      string
+		body      string
+		converted bool
+		outcome   claudeStreamOutcome
+		failed    bool
+	}{
+		{name: "complete-raw-frame", body: start + "\n" + delta + "\n" + stop + "\n\n", outcome: claudeStreamOutcomeComplete},
+		{name: "complete-converted-frame", body: start + "\n" + delta + "\n" + stop + "\n", converted: true, outcome: claudeStreamOutcomeComplete},
+		{name: "unterminated-raw-frame", body: start + "\n" + delta + "\n" + stop + "\n", outcome: claudeStreamOutcomeReadFailure, failed: true},
+		{name: "missing-terminal", body: start + "\n" + delta + "\n\n", outcome: claudeStreamOutcomeReadFailure, failed: true},
+		{name: "missing-start", body: stop + "\n\n", outcome: claudeStreamOutcomeIncomplete, failed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			observer := &recordingClaudeStreamObserver{}
+			out := make(chan cliproxyexecutor.StreamChunk, 32)
+			consumeClaudeStream(ctx, &config.Config{}, &terminalErrorReader{data: []byte(test.body), err: io.ErrUnexpectedEOF}, out,
+				newUsageReporter(ctx, NewClaudeExecutor(&config.Config{}), "claude-test", nil), false, false, nil, false, http.StatusOK,
+				func(line []byte) ([][]byte, error) {
+					payload := append([]byte(nil), line...)
+					if test.converted && strings.Contains(string(line), `"type":"message_stop"`) {
+						payload = append(payload, '\n', '\n')
+					}
+					return [][]byte{payload}, nil
+				}, observer)
+			close(out)
+			if len(observer.outcomes) != 1 || observer.outcomes[0] != test.outcome {
+				t.Fatalf("outcomes = %v, want %v", observer.outcomes, test.outcome)
+			}
+			failed := false
+			for chunk := range out {
+				failed = failed || chunk.Err != nil
+			}
+			if failed != test.failed {
+				t.Fatalf("stream failure = %t, want %t", failed, test.failed)
+			}
+		})
 	}
 }

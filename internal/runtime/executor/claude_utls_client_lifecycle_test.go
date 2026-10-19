@@ -17,6 +17,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	utls "github.com/refraction-networking/utls"
 )
 
@@ -94,6 +95,52 @@ func waitForClaudeClose(t *testing.T, count *atomic.Int32) {
 	}
 	if count.Load() == 0 {
 		t.Fatal("connection was not closed")
+	}
+}
+
+func TestCloseConnectionBodyReadPreservesContextError(t *testing.T) {
+	bodyErr := errors.New("http2: response body closed")
+	for _, state := range []string{"active", "canceled", "deadline"} {
+		t.Run(state, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			if state == "deadline" {
+				cancel()
+				ctx, cancel = context.WithDeadline(context.Background(), time.Unix(1, 0))
+			}
+			defer cancel()
+			reader, writer := io.Pipe()
+			defer reader.Close()
+			defer writer.Close()
+			if err := writer.CloseWithError(bodyErr); err != nil {
+				t.Fatal(err)
+			}
+			body := &trackedClaudeBody{Reader: reader}
+			var closed atomic.Int32
+			wrapped := newCloseConnectionBody(ctx, body, func() error {
+				closed.Add(1)
+				return nil
+			})
+			defer wrapped.Close()
+			if state == "canceled" {
+				cancel()
+			}
+			_, errRead := io.ReadAll(wrapped)
+			want := bodyErr
+			if state == "canceled" {
+				want = context.Canceled
+			} else if state == "deadline" {
+				want = context.DeadlineExceeded
+			}
+			if !errors.Is(errRead, want) {
+				t.Fatalf("read error = %v, want %v", errRead, want)
+			}
+			if err := wrapped.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if closed.Load() != 1 || body.closeCount.Load() != 1 {
+				t.Fatalf("connection/body closes = %d/%d, want 1/1", closed.Load(), body.closeCount.Load())
+			}
+		})
 	}
 }
 
@@ -304,11 +351,11 @@ func TestInitializeClaudeHTTP2ClientConnClosesTLSOnFailure(t *testing.T) {
 	tlsConn := utls.UClient(trackedConn, &utls.Config{ServerName: "8.8.8.8"}, utls.HelloChrome_Auto)
 	initializeErr := errors.New("initialize HTTP/2 failed")
 
-	connection, errConnect := initializeClaudeHTTP2ClientConn(
+	connection, errConnect := initializeClaudeHTTPClientConn(
 		t.Context(),
 		"8.8.8.8:443",
 		tlsConn,
-		func(context.Context, string, string) (claudeHTTP2ClientConn, error) {
+		func(context.Context, string, string) (claudeHTTPClientConn, error) {
 			return nil, initializeErr
 		},
 	)
@@ -343,7 +390,7 @@ func TestClaudeUtlsRoundTripperClosesFailedAndEmptyResponses(t *testing.T) {
 				},
 			}
 			roundTripper := &claudeUtlsRoundTripper{
-				connectionFactory: func(context.Context, string, string) (claudeHTTP2ClientConn, error) {
+				connectionFactory: func(context.Context, string, string) (claudeHTTPClientConn, error) {
 					return connection, nil
 				},
 			}
@@ -373,7 +420,7 @@ func TestClaudeUtlsRoundTripperUsesNoBodyForNilResponseBody(t *testing.T) {
 		},
 	}
 	roundTripper := &claudeUtlsRoundTripper{
-		connectionFactory: func(context.Context, string, string) (claudeHTTP2ClientConn, error) {
+		connectionFactory: func(context.Context, string, string) (claudeHTTPClientConn, error) {
 			return connection, nil
 		},
 	}
@@ -405,7 +452,7 @@ func TestClaudeUtlsRoundTripperClosesUnreadBodyWhenContextEnds(t *testing.T) {
 		},
 	}
 	roundTripper := &claudeUtlsRoundTripper{
-		connectionFactory: func(context.Context, string, string) (claudeHTTP2ClientConn, error) {
+		connectionFactory: func(context.Context, string, string) (claudeHTTPClientConn, error) {
 			return connection, nil
 		},
 	}
@@ -509,7 +556,7 @@ func TestClaudeUtlsRoundTripperKeepsConcurrentConnectionsIndependent(t *testing.
 	var connectionsMu sync.Mutex
 	var connections []*fakeClaudeHTTP2ClientConn
 	roundTripper := &claudeUtlsRoundTripper{
-		connectionFactory: func(context.Context, string, string) (claudeHTTP2ClientConn, error) {
+		connectionFactory: func(context.Context, string, string) (claudeHTTPClientConn, error) {
 			connection := &fakeClaudeHTTP2ClientConn{
 				roundTrip: func(*http.Request) (*http.Response, error) {
 					return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
@@ -547,5 +594,70 @@ func TestClaudeUtlsRoundTripperKeepsConcurrentConnectionsIndependent(t *testing.
 	}
 	if got := connections[1].closeCount.Load(); got != 1 {
 		t.Fatalf("second close count = %d, want 1", got)
+	}
+}
+
+func TestProtectedUtlsHTTPClientRequestProxyOverride(t *testing.T) {
+	for _, factory := range []struct {
+		name string
+		make func(context.Context, *config.Config, *cliproxyauth.Auth, time.Duration) *http.Client
+	}{
+		{name: "protected", make: newProtectedUtlsHTTPClient},
+		{name: "claude", make: newClaudeUtlsHTTPClient},
+	} {
+		for _, sample := range []string{"proxy", "direct", "invalid"} {
+			t.Run(factory.name+"/"+sample, func(t *testing.T) {
+				var requestCalls, authCalls, configCalls, contextCalls, directCalls atomic.Int32
+				server := func(name string, calls *atomic.Int32) *httptest.Server {
+					result := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+						calls.Add(1)
+						writer.Header().Set("X-Claude-Test-Transport", name)
+						writer.WriteHeader(http.StatusOK)
+					}))
+					t.Cleanup(result.Close)
+					return result
+				}
+				requestProxy := server("request", &requestCalls)
+				authProxy := server("auth", &authCalls)
+				configProxy := server("config", &configCalls)
+				destination := server("direct", &directCalls)
+				ctx := util.WithRoundTripper(t.Context(), protectedUtlsRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+					contextCalls.Add(1)
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"X-Claude-Test-Transport": {"context"}}, Body: http.NoBody, Request: request}, nil
+				}))
+				override := requestProxy.URL
+				if sample == "direct" {
+					override = "direct"
+				} else if sample == "invalid" {
+					override = "file:///invalid-proxy"
+				}
+				ctx = cliproxyexecutor.WithRequestProxyURL(ctx, override)
+				client := factory.make(ctx, &config.Config{ProxyURL: configProxy.URL}, &cliproxyauth.Auth{ProxyURL: authProxy.URL}, time.Second)
+				request, err := http.NewRequestWithContext(ctx, http.MethodGet, destination.URL+"/request-proxy", nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response, err := client.Do(request)
+				if response != nil {
+					defer response.Body.Close()
+				}
+				if sample == "invalid" {
+					if err == nil || requestCalls.Load()+authCalls.Load()+configCalls.Load()+contextCalls.Load()+directCalls.Load() != 0 {
+						t.Fatalf("invalid override: error=%v, calls=%d/%d/%d/%d/%d", err, requestCalls.Load(), authCalls.Load(), configCalls.Load(), contextCalls.Load(), directCalls.Load())
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, wantRequest, wantDirect := "request", int32(1), int32(0)
+				if sample == "direct" {
+					want, wantRequest, wantDirect = "direct", 0, 1
+				}
+				if response.Header.Get("X-Claude-Test-Transport") != want || requestCalls.Load() != wantRequest || directCalls.Load() != wantDirect || authCalls.Load()+configCalls.Load()+contextCalls.Load() != 0 {
+					t.Fatalf("transport=%q, want %q, calls=%d/%d/%d/%d/%d", response.Header.Get("X-Claude-Test-Transport"), want, requestCalls.Load(), authCalls.Load(), configCalls.Load(), contextCalls.Load(), directCalls.Load())
+				}
+			})
+		}
 	}
 }

@@ -7,6 +7,7 @@ package geminiCLI
 
 import (
 	claudegemini "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/claude/gemini"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -28,6 +29,15 @@ import (
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
 func convertGeminiCLIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
+	out, err := convertGeminiCLIRequestToClaudeChecked(modelName, inputRawJSON, stream)
+	if err != nil {
+		log.Warnf("gemini-cli to claude request rejected: %v", err)
+		return nil
+	}
+	return out
+}
+
+func convertGeminiCLIRequestToClaudeChecked(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	rawJSON := inputRawJSON
 
 	modelResult := gjson.GetBytes(rawJSON, "model")
@@ -43,5 +53,5 @@ func convertGeminiCLIRequestToClaude(modelName string, inputRawJSON []byte, stre
 		rawJSON, _ = sjson.DeleteBytes(rawJSON, "systemInstruction")
 	}
 	// Delegate to the Gemini-to-Claude conversion function for further processing
-	return claudegemini.ConvertGeminiRequestToClaude(modelName, rawJSON, stream)
+	return claudegemini.ConvertGeminiRequestToClaudeChecked(modelName, rawJSON, stream)
 }

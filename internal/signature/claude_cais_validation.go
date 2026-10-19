@@ -15,13 +15,15 @@ const (
 )
 
 type claudeCAISSignatureInfo struct {
-	FirstByte       byte
-	EnvelopeVersion uint64
-	ChannelID       uint64
-	ModelText       string
-	BlockKind       string
-	ContextID       string
-	SignatureLen    int
+	FirstByte            byte
+	EnvelopeVersion      uint64
+	Infrastructure       *uint64
+	ChannelID            uint64
+	ModelText            string
+	BlockKind            string
+	ContextID            string
+	SignatureLen         int
+	SignatureInContainer bool
 }
 
 func isValidClaudeCAISSignature(rawSignature string) bool {
@@ -45,6 +47,46 @@ func inspectClaudeCAISSignature(rawSignature string) (*claudeCAISSignatureInfo, 
 	if err != nil {
 		return nil, fmt.Errorf("invalid Claude CAIS signature: base64 decode failed: %w", err)
 	}
+	return inspectClaudeCAISPayload(decoded, false)
+}
+
+func isValidAntigravityClaudeCAQSSignature(rawSignature string) bool {
+	if !strings.HasPrefix(rawSignature, "Q") {
+		return false
+	}
+	_, err := inspectAntigravityClaudeCAQSSignature(rawSignature)
+	return err == nil
+}
+
+func inspectAntigravityClaudeCAQSSignature(rawSignature string) (*claudeCAISSignatureInfo, error) {
+	sig := PayloadWithoutProviderPrefix(rawSignature)
+	if len(sig) == 0 || len(sig) > maxSignatureLen || sig[0] != 'Q' || strings.ContainsAny(sig, "\r\n") {
+		return nil, fmt.Errorf("invalid Antigravity CAQS wrapper")
+	}
+	inner, err := base64.StdEncoding.Strict().DecodeString(sig)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Antigravity CAQS encoding: %w", err)
+	}
+	innerText := string(inner)
+	if len(innerText) == 0 || innerText[0] != 'C' || strings.ContainsAny(innerText, " \t\r\n#") {
+		return nil, fmt.Errorf("invalid Antigravity CAQS inner encoding")
+	}
+	decoded, err := base64.StdEncoding.Strict().DecodeString(innerText)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Antigravity CAQS inner encoding: %w", err)
+	}
+	info, err := inspectClaudeCAISPayload(decoded, true)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Antigravity CAQS payload: %w", err)
+	}
+	if info.EnvelopeVersion != 4 || info.ChannelID != 18 || info.Infrastructure == nil ||
+		*info.Infrastructure != 2 || info.BlockKind != "thinking" || !info.SignatureInContainer {
+		return nil, fmt.Errorf("unsupported Antigravity CAQS envelope or channel schema")
+	}
+	return info, nil
+}
+
+func inspectClaudeCAISPayload(decoded []byte, rejectDuplicateMessages bool) (*claudeCAISSignatureInfo, error) {
 	if len(decoded) == 0 {
 		return nil, fmt.Errorf("invalid Claude CAIS signature: empty after decode")
 	}
@@ -59,7 +101,8 @@ func inspectClaudeCAISSignature(rawSignature string) (*claudeCAISSignatureInfo, 
 	info := &claudeCAISSignatureInfo{FirstByte: decoded[0]}
 	var container []byte
 	haveEnvelopeVersion := false
-	err = walkClaudeProtobufFields(
+	haveContainer := false
+	err := walkClaudeProtobufFields(
 		decoded, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 			switch num {
 			case 1:
@@ -70,6 +113,10 @@ func inspectClaudeCAISSignature(rawSignature string) (*claudeCAISSignatureInfo, 
 				info.EnvelopeVersion = value
 				haveEnvelopeVersion = true
 			case 2:
+				if rejectDuplicateMessages && haveContainer {
+					return fmt.Errorf("invalid Antigravity CAQS signature: duplicate container")
+				}
+				haveContainer = true
 				value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS top-level field 2 container")
 				if errField != nil {
 					return errField
@@ -94,10 +141,15 @@ func inspectClaudeCAISSignature(rawSignature string) (*claudeCAISSignatureInfo, 
 	}
 
 	var channelBlock, containerSignatureBytes []byte
+	haveChannelBlock := false
 	err = walkClaudeProtobufFields(
 		container, func(num protowire.Number, typ protowire.Type, raw []byte) error {
 			switch num {
 			case 1:
+				if rejectDuplicateMessages && haveChannelBlock {
+					return fmt.Errorf("invalid Antigravity CAQS signature: duplicate channel block")
+				}
+				haveChannelBlock = true
 				value, errField := decodeClaudeCAISBytes(raw, typ, "CAIS container field 1 channel block")
 				if errField != nil {
 					return errField
@@ -131,6 +183,12 @@ func inspectClaudeCAISSignature(rawSignature string) (*claudeCAISSignatureInfo, 
 				}
 				info.ChannelID = value
 				haveChannelID = true
+			case 2:
+				value, errField := decodeClaudeCAISVarint(raw, typ, "CAIS channel field 2 infrastructure")
+				if errField != nil {
+					return errField
+				}
+				info.Infrastructure = &value
 			case 3:
 				if _, errField := decodeClaudeCAISVarint(raw, typ, "CAIS channel field 3 version"); errField != nil {
 					return errField
@@ -190,6 +248,7 @@ func inspectClaudeCAISSignature(rawSignature string) (*claudeCAISSignatureInfo, 
 	}
 	if !haveSignatureBytes && info.EnvelopeVersion >= 4 && len(containerSignatureBytes) > 0 {
 		info.SignatureLen = len(containerSignatureBytes)
+		info.SignatureInContainer = true
 		haveSignatureBytes = true
 	}
 	switch {

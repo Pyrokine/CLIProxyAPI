@@ -11,6 +11,7 @@ import (
 
 	claudeauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
@@ -66,14 +67,14 @@ func TestClaudeBillingFingerprintEdgeCases(t *testing.T) {
 		t.Fatalf("user message with only reminder: got %q, want empty", got)
 	}
 
-	// 5. Multiple text blocks: skips reminder, takes real text
+	// 5. Multiple text blocks: skips reminder, takes first real text
 	multiPart := []byte(`{"messages":[{"role":"user","content":[
 		{"type":"text","text":"<system-reminder>date</system-reminder>"},
 		{"type":"text","text":"real user question"},
 		{"type":"text","text":"additional context"}
 	]}]}`)
-	if got := claudeBillingFingerprintMessageText(multiPart); got != "additional context" {
-		t.Fatalf("multi-part user message: got %q, want %q", got, "additional context")
+	if got := claudeBillingFingerprintMessageText(multiPart); got != "real user question" {
+		t.Fatalf("multi-part user message: got %q, want %q", got, "real user question")
 	}
 }
 
@@ -702,5 +703,61 @@ func TestClaudeCloakedColdStartToolContinuationUsesDeterministicPromptID(t *test
 	p2 := extractTag(sys2, "cc_prompt_id=")
 	if p1 == "" || p1 != p2 {
 		t.Fatalf("cold start tool continuation prompt IDs differ between failure and retry: %q != %q", p1, p2)
+	}
+}
+
+func TestClaudeCloakedRequestKeepsPinnedDateAfterCalendarChange(t *testing.T) {
+	helps.ResetClaudeDiagnosticsForTest()
+	defer helps.ResetClaudeDiagnosticsForTest()
+
+	auth := &cliproxyauth.Auth{
+		ID:         "date-pin-auth",
+		Attributes: map[string]string{"api_key": "sk-ant-oat-test-date-pin"},
+		Metadata: map[string]any{
+			"account_uuid": "11111111-2222-4333-8444-555555555555",
+			claudeauth.DeviceIDsMetadataKey: []string{
+				"0000000000000000000000000000000000000000000000000000000000000001",
+			},
+		},
+	}
+	payload := []byte(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}],"max_tokens":100}`)
+	options := cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Headers:      http.Header{"X-Session-ID": {"date-pin-session"}},
+	}
+	sessionID := helps.ClaudeAgentSessionUUIDForRequest(options.Headers, payload, payload, false)
+	key, _, _, _, _ := helps.BeginClaudeContinuity(claudeDiagnosticsCredentialIdentity(auth), sessionID, true, "")
+	const pinnedDate = "2020-01-02"
+	helps.PinClaudeSessionDate(key, pinnedDate)
+
+	executor := NewClaudeExecutor(&config.Config{})
+	prepared, err := executor.prepareClaudeRequest(context.Background(), auth,
+		cliproxyexecutor.Request{Model: "claude-opus-5", Payload: payload}, options, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.httpReq.Body.Close()
+	body, err := io.ReadAll(prepared.httpReq.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	date := gjson.GetBytes(body, "messages.0.content.0.text").String()
+	if !strings.Contains(date, "Today's date is "+pinnedDate) {
+		t.Fatalf("cloaked request lost pinned date: %s", body)
+	}
+}
+
+func TestComputeFingerprintUsesNativeUTF16Indices(t *testing.T) {
+	for _, tt := range []struct {
+		name, text, want string
+	}{
+		{name: "emoji before sampled positions", text: "😀abcdefghijklmnopqrstuvwxyz", want: "dac"},
+		{name: "sampled high surrogate", text: "abc😀abcdefghijklmnop", want: "695"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := computeClaudeFingerprint(tt.text, "2.1.280"); got != tt.want {
+				t.Errorf("fingerprint = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

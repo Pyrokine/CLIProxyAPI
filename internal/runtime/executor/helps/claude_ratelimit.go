@@ -2,6 +2,7 @@ package helps
 
 import (
 	cryptorand "crypto/rand"
+	"math"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -12,10 +13,11 @@ import (
 const (
 	defaultClaudeRateLimitFuzzMinSeconds = 1
 	defaultClaudeRateLimitFuzzMaxSeconds = 30
+	maxClaudeRateLimitWindow             = 7*24*time.Hour + time.Hour
 )
 
 // ClaudeHeadersIndicateUnifiedRateLimitRejection reports whether Anthropic
-// rejected a shared 5-hour, 7-day, or aggregate unified rate-limit window.
+// rejected a shared 5-hour, 7-day, or aggregate window rather than only overage.
 func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 	if headers == nil {
 		return false
@@ -33,22 +35,49 @@ func ClaudeHeadersIndicateUnifiedRateLimitRejection(headers http.Header) bool {
 		return false
 	}
 	status7dOI := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status")
-	return !isClaudeFableOnlyRejection(status5h, status7d, status7dOI)
+	return !isClaudeOverageOnlyRejection(headers, unifiedStatus, status5h, status7d, status7dOI)
 }
 
 func isClaudeRateLimitWindowAllowed(status string) bool {
 	return status == "allowed" || status == "allowed_warning"
 }
 
-func isClaudeFableOnlyRejection(status5h, status7d, status7dOI string) bool {
-	return isClaudeRateLimitWindowAllowed(status5h) &&
-		isClaudeRateLimitWindowAllowed(status7d) &&
-		status7dOI == "rejected"
+func isClaudeOverageOnlyRejection(headers http.Header, unifiedStatus, status5h, status7d, status7dOI string) bool {
+	if status5h == "rejected" || status7d == "rejected" {
+		return false
+	}
+	overageStatus := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-Overage-Status")
+	disabledReason := strings.TrimSpace(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-Overage-Disabled-Reason"))
+	claim := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-Representative-Claim")
+	if status7dOI != "rejected" && overageStatus != "rejected" && disabledReason == "" && !strings.Contains(claim, "overage") {
+		return false
+	}
+	if isClaudeRateLimitWindowAllowed(status5h) && isClaudeRateLimitWindowAllowed(status7d) {
+		return true
+	}
+	if (status5h == "" && isClaudeRateLimitWindowAllowed(status7d) &&
+		isClaudeRateLimitUtilizationHealthy(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-5h-Utilization"))) ||
+		(status7d == "" && isClaudeRateLimitWindowAllowed(status5h) &&
+			isClaudeRateLimitUtilizationHealthy(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-7d-Utilization"))) {
+		return true
+	}
+	if unifiedStatus == "rejected" && status5h == "" && status7d == "" && strings.Contains(claim, "overage") {
+		util5h := strings.TrimSpace(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-5h-Utilization"))
+		util7d := strings.TrimSpace(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-7d-Utilization"))
+		return (util5h == "" || isClaudeRateLimitUtilizationHealthy(util5h)) &&
+			(util7d == "" || isClaudeRateLimitUtilizationHealthy(util7d))
+	}
+	return false
+}
+
+func isClaudeRateLimitUtilizationHealthy(raw string) bool {
+	value, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	return err == nil && !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0 && value < 1
 }
 
 // ParseClaudeRateLimitReset returns the latest applicable future reset plus a
 // bounded grace period. It ignores reset headers for windows that are not
-// rejected and avoids applying week-long shared cooldowns to Fable-only limits.
+// rejected and avoids shared cooldowns for overage-only limits.
 func ParseClaudeRateLimitReset(headers http.Header, now time.Time) *time.Duration {
 	return parseClaudeRateLimitResetWithFuzz(
 		headers,
@@ -72,11 +101,13 @@ func parseClaudeRateLimitResetWithFuzz(
 	status5h := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-5h-Status")
 	status7d := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-7d-Status")
 	status7dOI := claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-7d_oi-Status")
-	fableOnly := isClaudeFableOnlyRejection(status5h, status7d, status7dOI)
+	overageOnly := isClaudeOverageOnlyRejection(headers, unifiedStatus, status5h, status7d, status7dOI)
 
 	deadlines := make([]time.Time, 0, 5)
-	if deadline, ok := parseClaudeRetryAfter(getClaudeHeader(headers, "Retry-After"), now); ok && deadline.After(now) {
-		deadlines = append(deadlines, deadline)
+	if !overageOnly {
+		if deadline, ok := parseClaudeRetryAfter(getClaudeHeader(headers, "Retry-After"), now); ok && deadline.After(now) {
+			deadlines = append(deadlines, deadline)
+		}
 	}
 	if status5h == "rejected" {
 		if deadline, ok := parseClaudeReset(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-5h-Reset")); ok && deadline.After(now) {
@@ -88,18 +119,30 @@ func parseClaudeRateLimitResetWithFuzz(
 			deadlines = append(deadlines, deadline)
 		}
 	}
-	if status7dOI == "rejected" && !fableOnly {
+	if status7dOI == "rejected" && !overageOnly {
 		if deadline, ok := parseClaudeReset(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-7d_oi-Reset")); ok && deadline.After(now) {
 			deadlines = append(deadlines, deadline)
 		}
 	}
-	sharedRejected := !fableOnly &&
+	sharedRejected := !overageOnly &&
 		(unifiedStatus == "rejected" || status5h == "rejected" || status7d == "rejected")
 	if sharedRejected {
-		if deadline, ok := parseClaudeReset(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-Reset")); ok && deadline.After(now) {
+		unifiedReset := getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-Reset")
+		deadline, valid := parseClaudeReset(unifiedReset)
+		overageReset, validOverage := parseClaudeReset(getClaudeHeader(headers, "Anthropic-Ratelimit-Unified-Overage-Reset"))
+		billingBoundary := strings.Contains(claudeRateLimitHeaderStatus(headers, "Anthropic-Ratelimit-Unified-Representative-Claim"), "overage") &&
+			valid && validOverage && deadline.Equal(overageReset)
+		if valid && deadline.After(now) && !billingBoundary {
 			deadlines = append(deadlines, deadline)
 		}
 	}
+	kept := deadlines[:0]
+	for _, deadline := range deadlines {
+		if delay := deadline.Sub(now); delay > 0 && delay <= maxClaudeRateLimitWindow {
+			kept = append(kept, deadline)
+		}
+	}
+	deadlines = kept
 	if len(deadlines) == 0 {
 		return nil
 	}

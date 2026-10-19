@@ -69,7 +69,6 @@ func TestClassifyClaudeUpstreamRateLimitScope(t *testing.T) {
 			},
 			body:      rateLimitBody,
 			wantScope: cliproxyexecutor.StateEffectScopeExactModel,
-			wantRetry: true,
 		},
 		{
 			name:              "Fast entitlement rejection is request scoped",
@@ -80,7 +79,7 @@ func TestClassifyClaudeUpstreamRateLimitScope(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := classifyClaudeUpstreamError(http.StatusTooManyRequests, []byte(test.body), test.headers)
+			err := classifyClaudeUpstreamError(http.StatusTooManyRequests, []byte(test.body), false, test.headers)
 			if err == nil {
 				t.Fatal("classifyClaudeUpstreamError() = nil")
 			}
@@ -133,6 +132,7 @@ func TestClaudeFastDirectResponsePreservesRateLimitScope(t *testing.T) {
 		wantScope         cliproxyexecutor.StateEffectScope
 		wantRequestScoped bool
 		wantCredential    bool
+		modelLevelCooling bool
 	}{
 		{
 			name:      "ordinary 429",
@@ -152,6 +152,13 @@ func TestClaudeFastDirectResponsePreservesRateLimitScope(t *testing.T) {
 			wantCredential: true,
 		},
 		{
+			name:              "shared 429 with model-level cooling",
+			headers:           http.Header{"Retry-After": {"60"}, "Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}, "X-Upstream": {"preserved"}},
+			body:              body,
+			wantScope:         cliproxyexecutor.StateEffectScopeExactModel,
+			modelLevelCooling: true,
+		},
+		{
 			name:              "Fast entitlement 429",
 			headers:           http.Header{"Retry-After": {"60"}, "X-Upstream": {"preserved"}},
 			body:              `{"type":"error","error":{"type":"rate_limit_error","message":"Fast request rejected"}}`,
@@ -165,7 +172,7 @@ func TestClaudeFastDirectResponsePreservesRateLimitScope(t *testing.T) {
 				StatusCode: http.StatusTooManyRequests,
 				Header:     test.headers,
 			}
-			err := newClaudeFastDirectResponseError(response, []byte(test.body))
+			err := newClaudeFastDirectResponseError(response, []byte(test.body), test.modelLevelCooling)
 			var direct *cliproxyexecutor.RequestTerminatedError
 			if !errors.As(err, &direct) || direct == nil {
 				t.Fatalf("error = %T, want RequestTerminatedError", err)
@@ -204,8 +211,10 @@ func TestClaudeRateLimitParityAcrossEntrypoints(t *testing.T) {
 		requestBody    string
 		responseBody   string
 		headers        http.Header
-		wantScope      cliproxyexecutor.StateEffectScope
-		wantCredential bool
+		wantScope         cliproxyexecutor.StateEffectScope
+		wantCredential    bool
+		wantRetry         bool
+		modelLevelCooling bool
 	}{
 		{
 			name:         "ordinary model rejection",
@@ -219,6 +228,7 @@ func TestClaudeRateLimitParityAcrossEntrypoints(t *testing.T) {
 				"Anthropic-Ratelimit-Unified-7d-Status": {"allowed_warning"},
 			},
 			wantScope: cliproxyexecutor.StateEffectScopeExactModel,
+			wantRetry: true,
 		},
 		{
 			name:         "shared rejection overrides Fast entitlement text",
@@ -233,6 +243,33 @@ func TestClaudeRateLimitParityAcrossEntrypoints(t *testing.T) {
 			},
 			wantScope:      cliproxyexecutor.StateEffectScopeCredential,
 			wantCredential: true,
+			wantRetry:      true,
+		},
+		{
+			name:              "shared rejection with model-level cooling",
+			model:             "claude-opus-4-7",
+			requestBody:       `{"model":"claude-opus-4-7","max_tokens":16,"messages":[{"role":"user","content":"reply OK"}]}`,
+			responseBody:      `{"type":"error","error":{"type":"rate_limit_error","message":"shared rate limit"}}`,
+			headers:            http.Header{"Content-Type": {"application/json"}, "Retry-After": {"60"}, "Anthropic-Ratelimit-Unified-5h-Status": {"rejected"}},
+			wantScope:         cliproxyexecutor.StateEffectScopeExactModel,
+			wantRetry:         true,
+			modelLevelCooling: true,
+		},
+		{
+			name:         "overage spend cap with omitted 5h window",
+			model:        "claude-sonnet-4-5",
+			requestBody:  `{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"reply OK"}]}`,
+			responseBody: `{"type":"error","error":{"type":"rate_limit_error","message":"overage spend cap reached"}}`,
+			headers: http.Header{
+				"Content-Type":                                     {"application/json"},
+				"Retry-After":                                      {"60"},
+				"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+				"Anthropic-Ratelimit-Unified-7d-Status":            {"allowed"},
+				"Anthropic-Ratelimit-Unified-5h-Utilization":       {"0.00"},
+				"Anthropic-Ratelimit-Unified-Overage-Status":       {"rejected"},
+				"Anthropic-Ratelimit-Unified-Representative-Claim": {"seven_day_overage_included"},
+			},
+			wantScope: cliproxyexecutor.StateEffectScopeExactModel,
 		},
 		{
 			name:         "Fable-only rejection",
@@ -278,7 +315,9 @@ func TestClaudeRateLimitParityAcrossEntrypoints(t *testing.T) {
 						SourceFormat:   sdktranslator.FormatClaude,
 						ResponseFormat: sdktranslator.FormatClaude,
 					}
-					executor := NewClaudeExecutor(&config.Config{})
+					executor := NewClaudeExecutor(&config.Config{Claude: config.ClaudeConfig{
+						ModelLevelCooling: scenario.modelLevelCooling,
+					}})
 
 					var err error
 					switch entrypoint {
@@ -312,11 +351,15 @@ func TestClaudeRateLimitParityAcrossEntrypoints(t *testing.T) {
 						t.Fatalf("credential scoped = %v, want %v", gotCredential, scenario.wantCredential)
 					}
 					var retryAfter interface{ RetryAfter() *time.Duration }
-					if !errors.As(err, &retryAfter) || retryAfter == nil || retryAfter.RetryAfter() == nil {
-						t.Fatalf("error = %T %v, want RetryAfter", err, err)
+					if !errors.As(err, &retryAfter) || retryAfter == nil {
+						t.Fatalf("error = %T %v, want RetryAfter provider", err, err)
 					}
-					if got := *retryAfter.RetryAfter(); got < 61*time.Second || got > 90*time.Second {
-						t.Fatalf("RetryAfter = %v, want [61s, 90s]", got)
+					gotRetry := retryAfter.RetryAfter()
+					if (gotRetry != nil) != scenario.wantRetry {
+						t.Fatalf("RetryAfter() = %v, want present %t", gotRetry, scenario.wantRetry)
+					}
+					if gotRetry != nil && (*gotRetry < 61*time.Second || *gotRetry > 90*time.Second) {
+						t.Fatalf("RetryAfter() = %v, want [61s, 90s]", *gotRetry)
 					}
 				})
 			}
@@ -336,6 +379,17 @@ func TestClaudeModelScopedRateLimitDoesNotBlockSiblingModel(t *testing.T) {
 			headers: http.Header{
 				"Anthropic-Ratelimit-Unified-5h-Status": {"allowed"},
 				"Anthropic-Ratelimit-Unified-7d-Status": {"allowed_warning"},
+			},
+		},
+		{
+			name:        "overage-only spend cap",
+			targetModel: "claude-sonnet-4-5",
+			headers: http.Header{
+				"Retry-After":                                         {"60"},
+				"Anthropic-Ratelimit-Unified-Status":                  {"rejected"},
+				"Anthropic-Ratelimit-Unified-7d-Status":               {"allowed"},
+				"Anthropic-Ratelimit-Unified-5h-Utilization":          {"0.00"},
+				"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": {"org_spend_cap_reached"},
 			},
 		},
 		{

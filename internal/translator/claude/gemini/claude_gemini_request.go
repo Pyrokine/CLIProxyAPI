@@ -15,6 +15,7 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -38,13 +39,30 @@ import (
 // Returns:
 //   - []byte: The transformed request data in Claude Code API format
 func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
+	out, err := ConvertGeminiRequestToClaudeChecked(modelName, inputRawJSON, stream)
+	if err != nil {
+		log.Warnf("gemini to claude request rejected: %v", err)
+		return nil
+	}
+	return out
+}
+
+func ConvertGeminiRequestToClaudeChecked(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
 	rawJSON := inputRawJSON
+	var drops translatorcommon.UserTurnDrops
 
 	// Base Claude message payload
 	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
 	out, _ = sjson.SetBytes(out, "metadata.user_id", deriveClaudeMetadataUserID(modelName, rawJSON))
 
 	root := gjson.ParseBytes(rawJSON)
+	toolNames := util.ClaudeFunctionNameMap(rawJSON)
+	mapToolName := func(name string) string {
+		if mapped := toolNames[name]; mapped != "" {
+			return mapped
+		}
+		return util.SanitizeClaudeFunctionName(name)
+	}
 	messageAccumulator := translatorcommon.NewClaudeMessageAccumulator(
 		int(root.Get("contents.#").Int()) + 1,
 	)
@@ -171,7 +189,11 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// System instruction conversion to Claude Code format
-	if sysInstr := root.Get("system_instruction"); sysInstr.Exists() {
+	sysInstr := root.Get("systemInstruction")
+	if !sysInstr.Exists() {
+		sysInstr = root.Get("system_instruction")
+	}
+	if sysInstr.Exists() {
 		if parts := sysInstr.Get("parts"); parts.Exists() && parts.IsArray() {
 			var systemText strings.Builder
 			parts.ForEach(
@@ -216,6 +238,7 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					role = "user"
 				}
 
+				sendable := 0
 				// Create message structure in Claude Code format
 				msg := []byte(`{"role":"","content":[]}`)
 				msg, _ = sjson.SetBytes(msg, "role", role)
@@ -232,6 +255,9 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 								textContent := []byte(`{"type":"text","text":""}`)
 								textContent, _ = sjson.SetBytes(textContent, "text", text.String())
 								msg, _ = sjson.SetRawBytes(msg, "content.-1", textContent)
+								if strings.TrimSpace(text.String()) != "" {
+									sendable++
+								}
 								return true
 							}
 
@@ -246,11 +272,12 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 								}
 								toolCalls.Add(functionName, toolID)
 								toolUse, _ = sjson.SetBytes(toolUse, "id", toolID)
-								toolUse, _ = sjson.SetBytes(toolUse, "name", functionName)
+								toolUse, _ = sjson.SetBytes(toolUse, "name", mapToolName(functionName))
 								if args := fc.Get("args"); args.Exists() && args.IsObject() {
 									toolUse, _ = sjson.SetRawBytes(toolUse, "input", []byte(args.Raw))
 								}
 								msg, _ = sjson.SetRawBytes(msg, "content.-1", toolUse)
+								sendable++
 								return true
 							}
 
@@ -272,21 +299,28 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 									toolResult, _ = sjson.SetBytes(toolResult, "content", response.Raw)
 								}
 								msg, _ = sjson.SetRawBytes(msg, "content.-1", toolResult)
+								sendable++
 								return true
 							}
 
 							// Inline data conversion to Claude Code content format
 							if inlineData := geminiClaudeInlineData(part); inlineData.Exists() {
-								if contentPart, ok := claudeContentPartFromGeminiInlineData(inlineData); ok {
+								if contentPart, ok := claudeContentPartFromGeminiInlineData(inlineData, role == "assistant"); ok {
 									msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
+									sendable++
+								} else if role != "assistant" {
+									drops.Drop("inlineData")
 								}
 								return true
 							}
 
 							// File data conversion to Claude Code content format
 							if fileData := geminiClaudeFileData(part); fileData.Exists() {
-								if contentPart, ok := claudeContentPartFromGeminiFileData(fileData); ok {
+								if contentPart, ok := claudeContentPartFromGeminiFileData(fileData, role == "assistant"); ok {
 									msg, _ = sjson.SetRawBytes(msg, "content.-1", contentPart)
+									sendable++
+								} else if role != "assistant" {
+									drops.Drop("fileData")
 								}
 								return true
 							}
@@ -294,6 +328,10 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							return true
 						},
 					)
+				}
+
+				if role != "assistant" {
+					drops.EndTurn(sendable)
 				}
 
 				// Only add message if it has content
@@ -318,10 +356,10 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 				if funcDecls := tool.Get("functionDeclarations"); funcDecls.Exists() && funcDecls.IsArray() {
 					funcDecls.ForEach(
 						func(_, funcDecl gjson.Result) bool {
-							anthropicTool := []byte(`{"name":"","description":"","input_schema":{}}`)
+							anthropicTool := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
 
 							if name := funcDecl.Get("name"); name.Exists() {
-								anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", name.String())
+								anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", mapToolName(name.String()))
 							}
 							if desc := funcDecl.Get("description"); desc.Exists() {
 								anthropicTool, _ = sjson.SetBytes(anthropicTool, "description", desc.String())
@@ -350,25 +388,37 @@ func ConvertGeminiRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	}
 
 	// Tool config mapping from Gemini format to Claude Code format
-	if toolConfig := root.Get("tool_config"); toolConfig.Exists() {
-		if funcCalling := toolConfig.Get("function_calling_config"); funcCalling.Exists() {
-			if mode := funcCalling.Get("mode"); mode.Exists() {
-				switch mode.String() {
-				case "AUTO":
-					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
-				case "NONE":
-					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
-				case "ANY":
-					out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
-				}
-			}
+	toolConfig := root.Get("toolConfig")
+	if !toolConfig.Exists() {
+		toolConfig = root.Get("tool_config")
+	}
+	funcCalling := toolConfig.Get("functionCallingConfig")
+	if !funcCalling.Exists() {
+		funcCalling = toolConfig.Get("function_calling_config")
+	}
+	switch funcCalling.Get("mode").String() {
+	case "AUTO":
+		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
+	case "NONE":
+		out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
+	case "ANY":
+		allowedNames := funcCalling.Get("allowedFunctionNames")
+		if !allowedNames.Exists() {
+			allowedNames = funcCalling.Get("allowed_function_names")
+		}
+		if names := allowedNames.Array(); allowedNames.IsArray() && len(names) == 1 {
+			choice := []byte(`{"type":"tool","name":""}`)
+			choice, _ = sjson.SetBytes(choice, "name", mapToolName(names[0].String()))
+			out, _ = sjson.SetRawBytes(out, "tool_choice", choice)
+		} else {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
 		}
 	}
 
 	// Stream setting configuration
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	return out
+	return out, drops.Err()
 }
 
 func deriveClaudeMetadataUserID(modelName string, rawJSON []byte) string {
@@ -463,7 +513,7 @@ func geminiClaudeFileData(part gjson.Result) gjson.Result {
 	return part.Get("file_data")
 }
 
-func claudeContentPartFromGeminiInlineData(inlineData gjson.Result) ([]byte, bool) {
+func claudeContentPartFromGeminiInlineData(inlineData gjson.Result, keepPlaceholder bool) ([]byte, bool) {
 	mimeType := inlineData.Get("mimeType").String()
 	if mimeType == "" {
 		mimeType = inlineData.Get("mime_type").String()
@@ -485,11 +535,14 @@ func claudeContentPartFromGeminiInlineData(inlineData gjson.Result) ([]byte, boo
 		documentContent, _ = sjson.SetBytes(documentContent, "source.data", data)
 		return documentContent, true
 	default:
+		if !keepPlaceholder {
+			return nil, false
+		}
 		return claudeTextContentPart(fmt.Sprintf("Media content: inline data (Type: %s)", mimeType)), true
 	}
 }
 
-func claudeContentPartFromGeminiFileData(fileData gjson.Result) ([]byte, bool) {
+func claudeContentPartFromGeminiFileData(fileData gjson.Result, keepPlaceholder bool) ([]byte, bool) {
 	fileURI := fileData.Get("fileUri").String()
 	if fileURI == "" {
 		fileURI = fileData.Get("file_uri").String()
@@ -515,6 +568,9 @@ func claudeContentPartFromGeminiFileData(fileData gjson.Result) ([]byte, bool) {
 		}
 		return documentContent, true
 	default:
+		if !keepPlaceholder {
+			return nil, false
+		}
 		fileInfo := "File: " + fileURI
 		if mimeType != "" {
 			fileInfo += " (Type: " + mimeType + ")"

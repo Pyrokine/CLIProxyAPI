@@ -68,6 +68,7 @@ const (
 	claudeCodeHelperShapeNone claudeCodeHelperShape = iota
 	claudeCodeHelperShapeMinimal
 	claudeCodeHelperShapeStructured
+	claudeCodeHelperShapeTitle280
 )
 
 var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
@@ -92,6 +93,13 @@ var measuredClaudeCodeHelperBetaProfiles = map[string]claudeCodeHelperShape{
 		false,
 		"structured-outputs-2025-12-15",
 	): claudeCodeHelperShapeStructured,
+	claudeCodeHelperBetaProfile(
+		true,
+		"structured-outputs-2025-12-15",
+		"server-side-fallback-2026-06-01",
+		"fallback-credit-2026-06-01",
+		"cache-diagnosis-2026-04-07",
+	): claudeCodeHelperShapeTitle280,
 }
 
 // ClaudeCodeRequestDetection records the strong signals and first-party
@@ -294,6 +302,8 @@ func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
 		"max_tokens", "thinking", "temperature", "output_config", "stream",
 	}):
 		shape = claudeCodeHelperShapeStructured
+	case claudeJSONObjectHasKeys(payload, []string{"model", "max_tokens", "messages", "metadata", "output_config"}):
+		shape = claudeCodeHelperShapeTitle280
 	default:
 		return claudeCodeHelperShapeNone
 	}
@@ -316,6 +326,20 @@ func measuredClaudeCodeHelperBodyShape(payload []byte) claudeCodeHelperShape {
 			return shape
 		}
 		return claudeCodeHelperShapeNone
+	}
+	if shape == claudeCodeHelperShapeTitle280 {
+		outputConfig := gjson.GetBytes(payload, "output_config")
+		format := outputConfig.Get("format")
+		schema := format.Get("schema")
+		if maxTokens.Raw != "80" || message.Get("content").Type != gjson.String ||
+			!claudeJSONObjectHasKeys([]byte(outputConfig.Raw), []string{"format"}) ||
+			!claudeJSONObjectHasKeys([]byte(format.Raw), []string{"type", "schema"}) ||
+			format.Get("type").String() != "json_schema" ||
+			!claudeJSONObjectHasKeys([]byte(schema.Raw), []string{"type"}) ||
+			schema.Get("type").String() != "object" {
+			return claudeCodeHelperShapeNone
+		}
+		return shape
 	}
 
 	content := message.Get("content")

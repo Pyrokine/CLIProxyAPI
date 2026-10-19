@@ -15,13 +15,14 @@ func copyClaudeCallerFingerprintHeaders(dst, src http.Header) {
 	}
 	for name, values := range src {
 		lowerName := strings.ToLower(strings.TrimSpace(name))
+		if strings.HasPrefix(lowerName, "x-claude-code-") || strings.HasPrefix(lowerName, "x-claude-remote-") {
+			continue
+		}
 		if lowerName != "accept" && lowerName != "accept-encoding" &&
 			lowerName != "user-agent" && lowerName != "x-app" &&
 			lowerName != "x-client-request-id" &&
 			!strings.HasPrefix(lowerName, "anthropic-") &&
 			!strings.HasPrefix(lowerName, "x-stainless-") &&
-			!strings.HasPrefix(lowerName, "x-claude-code-") &&
-			!strings.HasPrefix(lowerName, "x-claude-remote-") &&
 			lowerName != "x-client-app" &&
 			lowerName != "x-anthropic-additional-protection" {
 			continue

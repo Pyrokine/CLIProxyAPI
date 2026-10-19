@@ -20,6 +20,12 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+type claudeToolChoiceError string
+
+func (e claudeToolChoiceError) Error() string       { return string(e) }
+func (claudeToolChoiceError) StatusCode() int       { return 400 }
+func (claudeToolChoiceError) IsRequestScoped() bool { return true }
+
 // convertOpenAIRequestToClaudeDefault parses and transforms an OpenAI Chat Completions API request into Claude Code API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the Claude Code API.
@@ -53,8 +59,30 @@ func convertOpenAIRequestToClaude(
 	stream bool,
 	preserveThinkingBlocks bool,
 ) []byte {
+	body, _ := convertOpenAIRequestToClaudeChecked(modelName, inputRawJSON, stream, preserveThinkingBlocks)
+	return body
+}
+
+// ConvertOpenAIRequestToClaudeWithCompatReturningError reports unsupported user attachments.
+func ConvertOpenAIRequestToClaudeWithCompatReturningError(modelName string, inputRawJSON []byte, stream bool) ([]byte, error) {
+	return convertOpenAIRequestToClaudeChecked(modelName, inputRawJSON, stream, true)
+}
+
+func convertOpenAIRequestToClaudeChecked(
+	modelName string,
+	inputRawJSON []byte,
+	stream bool,
+	preserveThinkingBlocks bool,
+) ([]byte, error) {
 	rawJSON := inputRawJSON
 	root := gjson.ParseBytes(rawJSON)
+	functionNameMap := util.ClaudeFunctionNameMap(rawJSON)
+	mapFunctionName := func(name string) string {
+		if mapped := functionNameMap[name]; mapped != "" {
+			return mapped
+		}
+		return util.SanitizeClaudeFunctionName(name)
+	}
 
 	// Base Claude Code API template with a deterministic request identity.
 	out := []byte(`{"model":"","max_tokens":32000,"messages":[],"metadata":{}}`)
@@ -164,6 +192,7 @@ func convertOpenAIRequestToClaude(
 	// Process messages and transform them to Claude Code format
 	systemBlocks := make([][]byte, 0)
 	var messageBlocks [][]byte
+	var drops translatorcommon.UserTurnDrops
 	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
 		lastToolMessage := make(map[string]gjson.Result)
 		messages.ForEach(func(_, message gjson.Result) bool {
@@ -238,9 +267,14 @@ func convertOpenAIRequestToClaude(
 					} else if contentResult.Exists() && contentResult.IsArray() {
 						contentResult.ForEach(
 							func(_, part gjson.Result) bool {
-								claudePart := convertOpenAIContentPartToClaudePart(part)
+								claudePart := convertOpenAIContentPartToClaudePart(part, true)
 								if claudePart != "" {
 									msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(claudePart))
+								} else if role == "user" {
+									switch part.Get("type").String() {
+									case "file", "input_audio":
+										drops.Drop(part.Get("type").String())
+									}
 								}
 								return true
 							},
@@ -262,7 +296,7 @@ func convertOpenAIRequestToClaude(
 									function := toolCall.Get("function")
 									toolUse := []byte(`{"type":"tool_use","id":"","name":"","input":{}}`)
 									toolUse, _ = sjson.SetBytes(toolUse, "id", toolCallID)
-									toolUse, _ = sjson.SetBytes(toolUse, "name", function.Get("name").String())
+									toolUse, _ = sjson.SetBytes(toolUse, "name", mapFunctionName(function.Get("name").String()))
 
 									// Parse arguments for the tool call
 									if args := function.Get("arguments"); args.Exists() {
@@ -288,6 +322,16 @@ func convertOpenAIRequestToClaude(
 						)
 					}
 
+					if role == "user" {
+						sendable := 0
+						for _, part := range gjson.GetBytes(msg, "content").Array() {
+							if part.Get("type").String() != "text" || strings.TrimSpace(part.Get("text").String()) != "" {
+								sendable++
+							}
+						}
+						drops.EndTurn(sendable)
+					}
+					msg = translatorcommon.AttachMessageCacheControl(msg, message)
 					messageAccumulator.Append(msg)
 
 				case "tool":
@@ -316,6 +360,7 @@ func convertOpenAIRequestToClaude(
 					} else {
 						msg, _ = sjson.SetBytes(msg, "content.0.content", toolResultContent)
 					}
+					msg = translatorcommon.AttachToolMessageCacheControl(msg, targetMessage)
 					messageAccumulator.Append(msg)
 				}
 				return true
@@ -343,6 +388,37 @@ func convertOpenAIRequestToClaude(
 		out = translatorcommon.SetRawArrayItems(out, "messages", messageBlocks)
 	}
 
+	toolChoice := root.Get("tool_choice")
+	isAllowedTools := toolChoice.IsObject() && toolChoice.Get("type").String() == "allowed_tools"
+	allowedNames := make(map[string]struct{})
+	allowedMode := "auto"
+	if isAllowedTools {
+		allowed := toolChoice.Get("allowed_tools")
+		if !allowed.Exists() {
+			allowed = toolChoice
+		}
+		toolList := allowed.Get("tools")
+		if !allowed.IsObject() || !toolList.IsArray() {
+			return nil, claudeToolChoiceError("tool_choice allowed_tools requires a tools array")
+		}
+		for _, tool := range toolList.Array() {
+			name := tool.Get("function.name")
+			if !name.Exists() {
+				name = tool.Get("name")
+			}
+			if tool.Get("type").String() != "function" || name.Type != gjson.String || strings.TrimSpace(name.String()) == "" {
+				return nil, claudeToolChoiceError("allowed_tools supports named function tools only")
+			}
+			allowedNames[name.String()] = struct{}{}
+		}
+		if mode := allowed.Get("mode"); mode.Exists() {
+			allowedMode = strings.ToLower(strings.TrimSpace(mode.String()))
+			if mode.Type != gjson.String || (allowedMode != "auto" && allowedMode != "required") {
+				return nil, claudeToolChoiceError("allowed_tools mode must be auto or required")
+			}
+		}
+	}
+
 	// Tools mapping: OpenAI tools -> Claude Code tools
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		hasAnthropicTools := false
@@ -350,8 +426,13 @@ func convertOpenAIRequestToClaude(
 			func(_, tool gjson.Result) bool {
 				if tool.Get("type").String() == "function" {
 					function := tool.Get("function")
+					if isAllowedTools {
+						if _, allowed := allowedNames[function.Get("name").String()]; !allowed {
+							return true
+						}
+					}
 					anthropicTool := []byte(`{"name":"","description":"","input_schema":{"type":"object","properties":{}}}`)
-					anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", function.Get("name").String())
+					anthropicTool, _ = sjson.SetBytes(anthropicTool, "name", mapFunctionName(function.Get("name").String()))
 					anthropicTool, _ = sjson.SetBytes(
 						anthropicTool, "description", function.Get("description").String(),
 					)
@@ -371,6 +452,17 @@ func convertOpenAIRequestToClaude(
 						)
 					}
 
+					anthropicTool = translatorcommon.AttachCacheControl(anthropicTool, tool)
+					if !gjson.GetBytes(anthropicTool, "cache_control").Exists() {
+						anthropicTool = translatorcommon.AttachCacheControl(anthropicTool, function)
+					}
+					strict := function.Get("strict")
+					if !strict.Exists() {
+						strict = tool.Get("strict")
+					}
+					if strict.Type == gjson.True || strict.Type == gjson.False {
+						anthropicTool, _ = sjson.SetBytes(anthropicTool, "strict", strict.Bool())
+					}
 					out, _ = sjson.SetRawBytes(out, "tools.-1", anthropicTool)
 					hasAnthropicTools = true
 				}
@@ -384,43 +476,63 @@ func convertOpenAIRequestToClaude(
 	}
 
 	// Tool choice mapping from OpenAI format to Claude Code format
-	if toolChoice := root.Get("tool_choice"); toolChoice.Exists() {
-		switch toolChoice.Type {
-		case gjson.String:
-			choice := toolChoice.String()
-			switch choice {
-			case "none":
-				// Don't set tool_choice, Claude Code will not use tools
-			case "auto":
-				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
-			case "required":
-				out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+	if isAllowedTools {
+		if gjson.GetBytes(out, "tools.#").Int() == 0 {
+			if allowedMode == "required" {
+				return nil, claudeToolChoiceError("required allowed_tools has no available function tools")
 			}
-		case gjson.JSON:
-			// Specific tool choice mapping
-			if toolChoice.Get("type").String() == "function" {
-				functionName := toolChoice.Get("function.name").String()
-				toolChoiceJSON := []byte(`{"type":"tool","name":""}`)
-				toolChoiceJSON, _ = sjson.SetBytes(toolChoiceJSON, "name", functionName)
-				out, _ = sjson.SetRawBytes(out, "tool_choice", toolChoiceJSON)
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"none"}`))
+		} else if allowedMode == "required" {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+		} else {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
+		}
+	} else if toolChoice.Exists() && toolChoice.Type != gjson.Null {
+		choiceType := toolChoice.String()
+		if toolChoice.IsObject() {
+			choiceType = toolChoice.Get("type").String()
+		} else if toolChoice.Type != gjson.String {
+			return nil, claudeToolChoiceError("tool_choice must be a string or object")
+		}
+		switch choiceType {
+		case "none", "auto":
+			out, _ = sjson.SetBytes(out, "tool_choice.type", choiceType)
+		case "required", "any":
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"any"}`))
+		case "function":
+			name := toolChoice.Get("function.name")
+			if !name.Exists() {
+				name = toolChoice.Get("name")
 			}
+			if name.Type != gjson.String || strings.TrimSpace(name.String()) == "" {
+				return nil, claudeToolChoiceError("function tool_choice requires a name")
+			}
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"tool"}`))
+			out, _ = sjson.SetBytes(out, "tool_choice.name", mapFunctionName(name.String()))
 		default:
+			return nil, claudeToolChoiceError("unsupported tool_choice type")
+		}
+	}
+	if root.Get("parallel_tool_calls").Type == gjson.False && gjson.GetBytes(out, "tool_choice.type").String() != "none" {
+		if !gjson.GetBytes(out, "tool_choice").Exists() && gjson.GetBytes(out, "tools.#").Int() > 0 {
+			out, _ = sjson.SetRawBytes(out, "tool_choice", []byte(`{"type":"auto"}`))
+		}
+		if gjson.GetBytes(out, "tool_choice").Exists() {
+			out, _ = sjson.SetBytes(out, "tool_choice.disable_parallel_tool_use", true)
 		}
 	}
 
-	return out
+	return thinking.ApplyTranslatedSummaryToClaude(out, rawJSON, "openai", modelName), drops.Err()
 }
 
-func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
+func convertOpenAIContentPartToClaudePart(part gjson.Result, cacheControl bool) string {
+	var converted []byte
 	switch part.Get("type").String() {
 	case "text":
-		textPart := []byte(`{"type":"text","text":""}`)
-		textPart, _ = sjson.SetBytes(textPart, "text", part.Get("text").String())
-		return string(textPart)
-
+		converted = []byte(`{"type":"text","text":""}`)
+		converted, _ = sjson.SetBytes(converted, "text", part.Get("text").String())
 	case "image_url":
-		return convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String())
-
+		converted = []byte(convertOpenAIImageURLToClaudePart(part.Get("image_url.url").String()))
 	case "file":
 		fileData := part.Get("file.file_data").String()
 		if strings.HasPrefix(fileData, "data:") {
@@ -429,15 +541,19 @@ func convertOpenAIContentPartToClaudePart(part gjson.Result) string {
 			if semicolonIdx != -1 && commaIdx != -1 && commaIdx > semicolonIdx {
 				mediaType := strings.TrimPrefix(fileData[:semicolonIdx], "data:")
 				data := fileData[commaIdx+1:]
-				docPart := []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
-				docPart, _ = sjson.SetBytes(docPart, "source.media_type", mediaType)
-				docPart, _ = sjson.SetBytes(docPart, "source.data", data)
-				return string(docPart)
+				converted = []byte(`{"type":"document","source":{"type":"base64","media_type":"","data":""}}`)
+				converted, _ = sjson.SetBytes(converted, "source.media_type", mediaType)
+				converted, _ = sjson.SetBytes(converted, "source.data", data)
 			}
 		}
 	}
-
-	return ""
+	if len(converted) == 0 {
+		return ""
+	}
+	if cacheControl {
+		converted = translatorcommon.AttachCacheControl(converted, part)
+	}
+	return string(converted)
 }
 
 func convertOpenAIImageURLToClaudePart(imageURL string) string {
@@ -491,7 +607,7 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 					return true
 				}
 
-				claudePart := convertOpenAIContentPartToClaudePart(part)
+				claudePart := convertOpenAIContentPartToClaudePart(part, false)
 				if claudePart != "" {
 					claudeContent, _ = sjson.SetRawBytes(claudeContent, "-1", []byte(claudePart))
 					partCount++
@@ -508,7 +624,7 @@ func convertOpenAIToolResultContent(content gjson.Result) (string, bool) {
 	}
 
 	if content.IsObject() {
-		claudePart := convertOpenAIContentPartToClaudePart(content)
+		claudePart := convertOpenAIContentPartToClaudePart(content, false)
 		if claudePart != "" {
 			claudeContent := []byte("[]")
 			claudeContent, _ = sjson.SetRawBytes(claudeContent, "-1", []byte(claudePart))

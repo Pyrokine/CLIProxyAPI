@@ -4,14 +4,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"strings"
-	"sync"
 )
 
 const (
-	DeviceIDsMetadataKey = "claude_device_ids"
-	DevicePoolSize       = 1
-	claudeDeviceIDByteSize     = 32
+	DeviceIDsMetadataKey   = "claude_device_ids"
+	DevicePoolSize         = 1
+	claudeDeviceIDByteSize = 32
 )
 
 // claudeDevicePoolMu guards every concurrent access to a Claude credential's
@@ -20,7 +20,7 @@ const (
 // concurrent read/write, so the account-profile and refresh paths have to take
 // the same lock as the pool paths. Reaching into Auth.Metadata directly from a
 // request path is a data race even when the keys differ.
-var claudeDevicePoolMu sync.Mutex
+var claudeDevicePoolMu = util.ClaudeMetadataMutex()
 
 // GenerateDeviceIDPool creates the fixed-size device pool stored with a Claude credential.
 func GenerateDeviceIDPool() ([]string, error) {

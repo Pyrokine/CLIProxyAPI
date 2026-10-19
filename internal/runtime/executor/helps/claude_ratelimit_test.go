@@ -47,6 +47,51 @@ func TestClaudeHeadersIndicateUnifiedRateLimitRejection(t *testing.T) {
 			"Anthropic-Ratelimit-Unified-7d-Status":    {"allowed"},
 			"Anthropic-Ratelimit-Unified-7d_oi-Status": {"rejected"},
 		}, want: false},
+		{name: "overage-only spend cap with both shared windows allowed", header: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":                  {"rejected"},
+			"Anthropic-Ratelimit-Unified-5h-Status":               {"allowed"},
+			"Anthropic-Ratelimit-Unified-7d-Status":               {"allowed_warning"},
+			"Anthropic-Ratelimit-Unified-Overage-Status":          {"rejected"},
+			"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": {"org_spend_cap_reached"},
+		}, want: false},
+		{name: "overage claim with omitted healthy 5h", header: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+			"Anthropic-Ratelimit-Unified-7d-Status":            {"allowed"},
+			"Anthropic-Ratelimit-Unified-5h-Utilization":       {"0.00"},
+			"Anthropic-Ratelimit-Unified-Representative-Claim": {"seven_day_overage_included"},
+		}, want: false},
+		{name: "overage claim with omitted healthy 7d", header: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":                  {"rejected"},
+			"Anthropic-Ratelimit-Unified-5h-Status":               {"allowed"},
+			"Anthropic-Ratelimit-Unified-7d-Utilization":          {"0.75"},
+			"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": {"org_spend_cap_reached"},
+		}, want: false},
+		{name: "overage claim without shared status is model scoped", header: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+			"Anthropic-Ratelimit-Unified-Representative-Claim": {"overage"},
+		}, want: false},
+		{name: "overage claim with exhausted shared utilization is credential scoped", header: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+			"Anthropic-Ratelimit-Unified-Representative-Claim": {"overage"},
+			"Anthropic-Ratelimit-Unified-5h-Utilization":       {"1.0"},
+		}, want: true},
+		{name: "missing healthy utilization cannot prove overage-only", header: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":                  {"rejected"},
+			"Anthropic-Ratelimit-Unified-7d-Status":               {"allowed"},
+			"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": {"org_spend_cap_reached"},
+		}, want: true},
+		{name: "nonfinite utilization cannot prove overage-only", header: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+			"Anthropic-Ratelimit-Unified-7d-Status":            {"allowed"},
+			"Anthropic-Ratelimit-Unified-5h-Utilization":       {"NaN"},
+			"Anthropic-Ratelimit-Unified-Representative-Claim": {"seven_day_overage_included"},
+		}, want: true},
+		{name: "shared rejection takes priority over overage", header: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":         {"rejected"},
+			"Anthropic-Ratelimit-Unified-5h-Status":      {"rejected"},
+			"Anthropic-Ratelimit-Unified-7d-Status":      {"allowed"},
+			"Anthropic-Ratelimit-Unified-Overage-Status": {"rejected"},
+		}, want: true},
 		{name: "combined shared and Fable rejection", header: http.Header{
 			"Anthropic-Ratelimit-Unified-Status":       {"rejected"},
 			"Anthropic-Ratelimit-Unified-5h-Status":    {"rejected"},
@@ -140,7 +185,7 @@ func TestParseClaudeRateLimitResetWindowSelection(t *testing.T) {
 		assertClaudeResetDuration(t, got, 7*24*time.Hour, time.Millisecond)
 	})
 
-	t.Run("Fable-only uses Retry-After instead of week-long resets", func(t *testing.T) {
+	t.Run("Fable-only ignores Retry-After and week-long resets", func(t *testing.T) {
 		header := http.Header{
 			"Retry-After":                              {"60"},
 			"Anthropic-Ratelimit-Unified-Status":       {"rejected"},
@@ -150,8 +195,25 @@ func TestParseClaudeRateLimitResetWindowSelection(t *testing.T) {
 			"Anthropic-Ratelimit-Unified-7d_oi-Reset":  {strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10)},
 			"Anthropic-Ratelimit-Unified-Reset":        {strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10)},
 		}
-		got := parseClaudeRateLimitResetWithFuzz(header, now, 0, 0)
-		assertClaudeResetDuration(t, got, time.Minute, time.Millisecond)
+		if got := parseClaudeRateLimitResetWithFuzz(header, now, 0, 0); got != nil {
+			t.Fatalf("Fable-only reset = %v, want nil", *got)
+		}
+	})
+
+	t.Run("overage-only ignores Retry-After and shared reset", func(t *testing.T) {
+		header := http.Header{
+			"Retry-After":                                         {"60"},
+			"Anthropic-Ratelimit-Unified-Status":                  {"rejected"},
+			"Anthropic-Ratelimit-Unified-7d-Status":               {"allowed"},
+			"Anthropic-Ratelimit-Unified-5h-Utilization":          {"0.00"},
+			"Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": {"org_spend_cap_reached"},
+			"Anthropic-Ratelimit-Unified-7d_oi-Status":            {"rejected"},
+			"Anthropic-Ratelimit-Unified-7d_oi-Reset":             {strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10)},
+			"Anthropic-Ratelimit-Unified-Reset":                   {strconv.FormatInt(now.Add(7*24*time.Hour).Unix(), 10)},
+		}
+		if got := parseClaudeRateLimitResetWithFuzz(header, now, 0, 0); got != nil {
+			t.Fatalf("overage-only reset = %v, want nil", *got)
+		}
 	})
 
 	t.Run("Fable-only reset without Retry-After falls back", func(t *testing.T) {
@@ -183,6 +245,55 @@ func TestParseClaudeRateLimitResetRejectsInvalidCandidates(t *testing.T) {
 		if got := parseClaudeRateLimitResetWithFuzz(header, now, 0, 0); got != nil {
 			t.Fatalf("case %d: expected nil, got %v", index, *got)
 		}
+	}
+}
+
+func TestClaudeOverageBillingResetIsNotCooldown(t *testing.T) {
+	now := time.Date(2026, time.October, 7, 20, 46, 4, 0, time.UTC)
+	billingReset := strconv.FormatInt(now.Add(25*24*time.Hour).Unix(), 10)
+	fiveHourReset := strconv.FormatInt(now.Add(5*time.Hour).Unix(), 10)
+	for _, tc := range []struct {
+		name    string
+		headers http.Header
+		want    time.Duration
+	}{
+		{name: "overage without shared status", headers: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+			"Anthropic-Ratelimit-Unified-Representative-Claim": {"overage"},
+			"Anthropic-Ratelimit-Unified-Reset":                {billingReset},
+			"Anthropic-Ratelimit-Unified-Overage-Reset":        {billingReset},
+			"Retry-After": {"10800"},
+		}},
+		{name: "five hour rejection with monthly reset", headers: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+			"Anthropic-Ratelimit-Unified-5h-Status":            {"rejected"},
+			"Anthropic-Ratelimit-Unified-5h-Reset":             {fiveHourReset},
+			"Anthropic-Ratelimit-Unified-Reset":                {billingReset},
+			"Anthropic-Ratelimit-Unified-Representative-Claim": {"five_hour"},
+		}, want: 5 * time.Hour},
+		{name: "overage reset with short retry after", headers: http.Header{
+			"Anthropic-Ratelimit-Unified-Status":               {"rejected"},
+			"Anthropic-Ratelimit-Unified-5h-Status":            {"rejected"},
+			"Anthropic-Ratelimit-Unified-Representative-Claim": {"overage"},
+			"Anthropic-Ratelimit-Unified-Reset":                {billingReset},
+			"Anthropic-Ratelimit-Unified-Overage-Reset":        {billingReset},
+			"Retry-After": {"60"},
+		}, want: time.Minute},
+		{name: "implausible retry after", headers: http.Header{
+			"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"},
+			"Retry-After":                           {"2034192"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseClaudeRateLimitResetWithFuzz(tc.headers, now, 0, 0)
+			if tc.want == 0 {
+				if got != nil {
+					t.Fatalf("cooldown = %v, want nil", *got)
+				}
+				return
+			}
+			assertClaudeResetDuration(t, got, tc.want, time.Second)
+		})
 	}
 }
 

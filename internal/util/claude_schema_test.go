@@ -264,6 +264,9 @@ func TestHasUnsupportedUnicodePropertyEscape(t *testing.T) {
 		`^\\\p{L}+$`: true,
 		`^[a-z]+$`:   false,
 		`\p`:         false,
+		`^[^\0]*$`:   true,
+		`^[^\x00]*$`: false,
+		`^\\0$`:      false,
 	}
 	for pattern, want := range tests {
 		if got := HasUnsupportedUnicodePropertyEscape(pattern); got != want {

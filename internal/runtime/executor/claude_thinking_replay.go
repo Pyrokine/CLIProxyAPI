@@ -233,10 +233,11 @@ func (o *claudeThinkingReplayStreamObserver) FinishClaudeStream(outcome claudeSt
 	// noinspection GoSwitchMissingCasesForIotaConsts
 	switch outcome {
 	case claudeStreamOutcomeComplete:
+		finalizeCtx := context.WithoutCancel(o.ctx)
 		if content, completed := o.accumulator.content(); completed {
-			cacheClaudeThinkingReplayContent(o.ctx, o.scope, content)
+			cacheClaudeThinkingReplayContent(finalizeCtx, o.scope, content)
 		} else if o.accumulator.discardOldOnComplete {
-			clearClaudeThinkingReplayContent(o.ctx, o.scope)
+			clearClaudeThinkingReplayContent(finalizeCtx, o.scope)
 		}
 	case claudeStreamOutcomeUpstreamError:
 		if o.scope.replayApplied && o.accumulator.rejectsReplayState() {

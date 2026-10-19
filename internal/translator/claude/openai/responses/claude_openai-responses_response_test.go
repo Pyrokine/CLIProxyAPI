@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -27,6 +28,98 @@ func parseClaudeResponsesSSEEvent(t *testing.T, chunk []byte) (string, gjson.Res
 	}
 
 	return event, gjson.Parse(data)
+}
+
+func TestClaudeResponsesStopReasonStatus(t *testing.T) {
+	for _, tc := range []struct {
+		reason, status, details string
+	}{
+		{reason: "pause_turn", status: "incomplete", details: "null"},
+		{reason: " PAUSE_TURN ", status: "incomplete", details: "null"},
+		{reason: "max_tokens", status: "incomplete", details: `{"reason":"max_output_tokens"}`},
+		{reason: "end_turn", status: "completed", details: "null"},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			chunks := [][]byte{
+				[]byte(`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":3}}}`),
+				[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+				[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"answer"}}`),
+				[]byte(`data: {"type":"content_block_stop","index":0}`),
+				[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"` + tc.reason + `"},"usage":{"output_tokens":2}}`),
+				[]byte(`data: {"type":"message_stop"}`),
+			}
+			check := func(t *testing.T, response gjson.Result) {
+				t.Helper()
+				if got := response.Get("status").String(); got != tc.status {
+					t.Fatalf("status = %q, want %q", got, tc.status)
+				}
+				if got := response.Get("incomplete_details").Raw; got != tc.details && !(tc.status == "completed" && got == "") {
+					t.Fatalf("incomplete_details = %s, want %s", got, tc.details)
+				}
+				if got := response.Get("output.0.status").String(); got != tc.status {
+					t.Fatalf("output status = %q, want %q", got, tc.status)
+				}
+				if got := response.Get("usage.total_tokens").Int(); got != 5 {
+					t.Fatalf("usage total = %d, want 5", got)
+				}
+			}
+			t.Run("stream", func(t *testing.T) {
+				var state any
+				var terminals int
+				for _, chunk := range chunks {
+					for _, output := range convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &state) {
+						event, data := parseClaudeResponsesSSEEvent(t, output)
+						if event != "response.completed" && event != "response.incomplete" {
+							continue
+						}
+						terminals++
+						if event != "response."+tc.status {
+							t.Fatalf("terminal event = %q, want response.%s", event, tc.status)
+						}
+						check(t, data.Get("response"))
+					}
+				}
+				if terminals != 1 {
+					t.Fatalf("terminal count = %d, want 1", terminals)
+				}
+			})
+			t.Run("buffered", func(t *testing.T) {
+				out := convertClaudeResponseToOpenAIResponsesNonStream(
+					context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil,
+				)
+				check(t, gjson.ParseBytes(out))
+			})
+		})
+	}
+}
+
+func TestClaudeToolArgumentsKeepHTMLCharactersInResponses(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_1","model":"claude-test","usage":{"input_tokens":1,"output_tokens":0}}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"lookup","input":{}}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"2>&1 <work>\"}"}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+	var state any
+	var rawNonStream []byte
+	for _, chunk := range chunks {
+		rawNonStream = append(rawNonStream, chunk...)
+		rawNonStream = append(rawNonStream, '\n', '\n')
+		for _, output := range convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &state) {
+			event, _ := parseClaudeResponsesSSEEvent(t, output)
+			switch event {
+			case "response.function_call_arguments.delta", "response.function_call_arguments.done", "response.output_item.done", "response.completed":
+				if !strings.Contains(string(output), `2>&1 <work>`) {
+					t.Fatalf("%s escaped tool argument HTML: %s", event, output)
+				}
+			}
+		}
+	}
+	out := convertClaudeResponseToOpenAIResponsesNonStream(context.Background(), "claude-test", nil, nil, rawNonStream, nil)
+	if !strings.Contains(string(out), `2>&1 <work>`) {
+		t.Fatalf("non-stream tool arguments escaped: %s", out)
+	}
 }
 
 func TestConvertClaudeResponseToOpenAIResponsesCreatedIncludesOriginalRequestModel(t *testing.T) {
@@ -121,6 +214,60 @@ func TestConvertClaudeResponseToOpenAIResponsesSuppressesSignatureDeltaPassthrou
 	if len(outputs) != 0 {
 		t.Fatalf("expected signature_delta to be suppressed, got %d chunks", len(outputs))
 	}
+}
+
+func TestClaudeResponsesAdjacentTextBlocksShareMessage(t *testing.T) {
+	chunks := [][]byte{
+		[]byte(`data: {"type":"message_start","message":{"id":"msg_adjacent"}}`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first"}}`),
+		[]byte(`data: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"url":"https://example.com/a"}}}`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" second"}}`),
+		[]byte(`data: {"type":"content_block_delta","index":1,"delta":{"type":"citations_delta","citation":{"url":"https://example.com/b"}}}`),
+		[]byte(`data: {"type":"content_block_stop","index":1}`),
+		[]byte(`data: {"type":"message_stop"}`),
+	}
+	check := func(t *testing.T, output gjson.Result) {
+		t.Helper()
+		messages := output.Get("output").Array()
+		if len(messages) != 1 || messages[0].Get("type").String() != "message" {
+			t.Fatalf("adjacent text output = %s, want one message", output.Get("output").Raw)
+		}
+		if got := messages[0].Get("content.0.text").String(); got != "first second" {
+			t.Fatalf("adjacent message text = %q, want first second", got)
+		}
+		if got := messages[0].Get("content.0.annotations.#").Int(); got != 2 {
+			t.Fatalf("adjacent message citations = %d, want 2", got)
+		}
+	}
+	t.Run("stream", func(t *testing.T) {
+		var state any
+		var completed gjson.Result
+		added := 0
+		for _, chunk := range chunks {
+			for _, eventChunk := range convertClaudeResponseToOpenAIResponses(context.Background(), "claude-test", nil, nil, chunk, &state) {
+				event, response := parseClaudeResponsesSSEEvent(t, eventChunk)
+				if event == "response.output_item.added" {
+					added++
+				}
+				if event == "response.completed" {
+					completed = response.Get("response")
+				}
+			}
+		}
+		if added != 1 || !completed.Exists() {
+			t.Fatalf("adjacent text added items = %d, completed = %t", added, completed.Exists())
+		}
+		check(t, completed)
+	})
+	t.Run("buffered", func(t *testing.T) {
+		out := convertClaudeResponseToOpenAIResponsesNonStream(
+			context.Background(), "claude-test", nil, nil, bytes.Join(chunks, []byte("\n")), nil,
+		)
+		check(t, gjson.ParseBytes(out))
+	})
 }
 
 func TestConvertClaudeResponseToOpenAIResponsesAggregatesTextBlocksUntilMessageStop(t *testing.T) {

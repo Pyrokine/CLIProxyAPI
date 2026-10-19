@@ -1,6 +1,7 @@
 package helps
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -32,6 +33,7 @@ type claudeDiagnosticsEntry struct {
 	previousMessageID string
 	previousRequestID string
 	promptID          string
+	pinnedDate        string
 	minimumSequence   uint64
 	committedSequence uint64
 	lastAccess        uint64
@@ -114,6 +116,26 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 	entry.expiresAt = now.Add(claudeDiagnosticsTTL)
 	claudeDiagnosticsState.entries[key] = entry
 	return key, sequence, entry.previousMessageID, entry.previousRequestID, activePromptID
+}
+
+// PinClaudeSessionDate keeps the first calendar date for a live continuity session.
+func PinClaudeSessionDate(key, date string) string {
+	key = strings.TrimSpace(key)
+	date = strings.TrimSpace(date)
+	if key == "" || date == "" {
+		return date
+	}
+	claudeDiagnosticsState.Lock()
+	defer claudeDiagnosticsState.Unlock()
+	entry, ok := claudeDiagnosticsState.entries[key]
+	if !ok {
+		return date
+	}
+	if entry.pinnedDate == "" {
+		entry.pinnedDate = date
+		claudeDiagnosticsState.entries[key] = entry
+	}
+	return entry.pinnedDate
 }
 
 // BeginClaudeDiagnostics starts one request generation for a stable credential
@@ -331,7 +353,30 @@ func isClaudeTitleHelperInstruction(body []byte) bool {
 	return false
 }
 
+// jsonMayContainASCII skips JSON walks unless a needle or printable ASCII escape is present.
+func jsonMayContainASCII(body []byte, needles ...string) bool {
+	for rest := body; ; {
+		index := bytes.Index(rest, []byte(`\u00`))
+		if index < 0 || index+4 >= len(rest) {
+			break
+		}
+		if firstHexDigit := rest[index+4]; firstHexDigit >= '2' && firstHexDigit <= '7' {
+			return true
+		}
+		rest = rest[index+4:]
+	}
+	for _, needle := range needles {
+		if bytes.Contains(body, []byte(needle)) {
+			return true
+		}
+	}
+	return false
+}
+
 func isClaudeTitleHelperRequest(body []byte) bool {
+	if !jsonMayContainASCII(body, "output_config", "naming a coding session", "Return a short title", "Write the title in the predominant language") {
+		return false
+	}
 	props := gjson.GetBytes(body, "output_config.format.schema.properties")
 	if props.Exists() {
 		if props.Get("title").Exists() && len(props.Map()) == 1 {
@@ -407,7 +452,7 @@ func IsClaudeSubagentRequest(headers http.Header, body []byte) bool {
 
 // ClaudePayloadHas1hTTL reports whether any cache breakpoint explicitly uses a one-hour TTL.
 func ClaudePayloadHas1hTTL(payload []byte) bool {
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+	if len(payload) == 0 || !jsonMayContainASCII(payload, `"1h"`) || !gjson.ValidBytes(payload) {
 		return false
 	}
 	has1h := false
@@ -472,7 +517,7 @@ func StripClaudeBillingTags(body []byte) []byte {
 	return body
 }
 
-// InjectClaudeBillingTags appends cc_prev_req and cc_prompt_id to the billing header in body if present.
+// InjectClaudeBillingTags 向已有 billing header 写入连续请求和主会话来源标签
 func InjectClaudeBillingTags(body []byte, prevReq, promptID string) []byte {
 	system := gjson.GetBytes(body, "system")
 	if !system.IsArray() || len(system.Array()) == 0 {
@@ -493,6 +538,10 @@ func InjectClaudeBillingTags(body []byte, prevReq, promptID string) []byte {
 	}
 	if promptID != "" {
 		cleaned += " cc_prompt_id=" + promptID + ";"
+	}
+	if !IsClaudeSubagentRequest(nil, body) && !IsClaudeProbeOrHelperRequest(body) &&
+		!strings.Contains(cleaned, "cc_turn_origin=") {
+		cleaned += " cc_turn_origin=human;"
 	}
 	updated, err := sjson.SetBytes(body, "system.0.text", cleaned)
 	if err == nil {

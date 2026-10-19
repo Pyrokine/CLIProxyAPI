@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"net/http"
 	"strings"
 	"time"
@@ -17,6 +18,12 @@ const (
 	claudeCodeBeta                   = "claude-code-20250219"
 	claudeContext1MBeta              = "context-1m-2025-08-07"
 	claudeMidConvSystemBeta          = "mid-conversation-system-2026-04-07"
+	claudePerTurnControlBeta         = "per-turn-control-2026-07-01"
+	claudePerTurnTimingBeta          = "timing-2026-09-09"
+	claudeMidConvToolChangesBeta     = "mid-conversation-tool-changes-2026-07-01"
+	claudeInlineToolsBeta            = "inline-tools-2026-09-15"
+	claudeMidConvSystemClearAtBeta   = "mid-conversation-system-clear-at-2026-08-21"
+	claudeDangerousToolUseBeta       = "dangerous-tool-use-2026-09-03"
 	claudeAdvisorToolBeta            = "advisor-tool-2026-03-01"
 	claudeAdvancedToolUseBeta        = "advanced-tool-use-2025-11-20"
 	claudeEffortBeta                 = "effort-2025-11-24"
@@ -24,7 +31,10 @@ const (
 	claudeFallbackCreditBeta         = "fallback-credit-2026-06-01"
 	claudeStructuredOutputsBeta      = "structured-outputs-2025-12-15"
 	claudeThinkingDisplayUpdatesBeta = "thinking-display-updates-2026-08-18"
+	claudeThinkingBindingBeta        = "thinking-binding-controls-2026-08-01"
+	claudeThinkingResumptionBeta     = "thinking-resumption-2026-07-17"
 	claudeExtendedCacheTTLBeta       = "extended-cache-ttl-2025-04-11"
+	claudePromptCachingEvictBeta     = "prompt-caching-evict-2026-05-12"
 	claudeCacheDiagnosisBeta         = "cache-diagnosis-2026-04-07"
 	claudeRedactThinkingBeta         = "redact-thinking-2026-02-12"
 	claudeAFKModeBeta                = "afk-mode-2026-01-31"
@@ -52,6 +62,12 @@ var claudeManagedBetaSet = func() map[string]bool {
 		claudeCodeBeta,
 		claudeContext1MBeta,
 		claudeMidConvSystemBeta,
+		claudePerTurnControlBeta,
+		claudePerTurnTimingBeta,
+		claudeMidConvToolChangesBeta,
+		claudeInlineToolsBeta,
+		claudeMidConvSystemClearAtBeta,
+		claudeDangerousToolUseBeta,
 		claudeAdvisorToolBeta,
 		claudeAdvancedToolUseBeta,
 		claudeEffortBeta,
@@ -59,7 +75,10 @@ var claudeManagedBetaSet = func() map[string]bool {
 		claudeFallbackCreditBeta,
 		claudeStructuredOutputsBeta,
 		claudeThinkingDisplayUpdatesBeta,
+		claudeThinkingBindingBeta,
+		claudeThinkingResumptionBeta,
 		claudeExtendedCacheTTLBeta,
+		claudePromptCachingEvictBeta,
 		claudeCacheDiagnosisBeta,
 		claudeRedactThinkingBeta,
 		claudeAFKModeBeta,
@@ -78,7 +97,7 @@ func isManagedClaudeBeta(beta string) bool {
 }
 
 func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool) string {
-	betas := make([]string, 0, len(claudeCodeCLIConstantBetas)+len(claudeCodeTrailingBetas)+9)
+	betas := make([]string, 0, len(claudeCodeCLIConstantBetas)+len(claudeCodeTrailingBetas)+18)
 	betas = append(betas, claudeCodeBeta)
 	if oauthToken {
 		betas = append(betas, claudeOAuthBeta)
@@ -94,12 +113,37 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	}
 	if !claudeUsesLegacySystemReminder(body) {
 		betas = append(betas, claudeMidConvSystemBeta)
+		if claudeIncludePerTurnControl(body, requested) {
+			betas = append(betas, claudePerTurnControlBeta)
+		}
+		if claudeIncludePerTurnTiming(body, requested) {
+			betas = append(betas, claudePerTurnTimingBeta)
+		}
+		if !isClaudeSonnet5Model(gjson.GetBytes(body, "model").String()) {
+			betas = append(betas, claudeMidConvToolChangesBeta)
+		}
+		if claudeIncludeInlineTools(body, requested) {
+			betas = append(betas, claudeInlineToolsBeta)
+		}
+	} else {
+		if claudeIncludePerTurnControl(body, requested) {
+			betas = append(betas, claudePerTurnControlBeta)
+		}
+		if claudeIncludePerTurnTiming(body, requested) {
+			betas = append(betas, claudePerTurnTimingBeta)
+		}
 	}
 	if requested[claudeAdvisorToolBeta] || claudeBodyHasAdvisorTool(body) {
 		betas = append(betas, claudeAdvisorToolBeta)
 	}
 	if requested[claudeAdvancedToolUseBeta] || claudeBodyUsesAdvancedToolUse(body) {
 		betas = append(betas, claudeAdvancedToolUseBeta)
+	}
+	if !claudeUsesLegacySystemReminder(body) && claudeIncludeMidConvClearAt(body, requested) {
+		betas = append(betas, claudeMidConvSystemClearAtBeta)
+	}
+	if requested[claudeDangerousToolUseBeta] || gjson.GetBytes(body, "safeguards").Exists() {
+		betas = append(betas, claudeDangerousToolUseBeta)
 	}
 	if claudeRequestSupportsEffort(body, requested) {
 		betas = append(betas, claudeEffortBeta)
@@ -108,16 +152,24 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 	if !probeOrHelper && (requested[claudeServerSideFallbackBeta] || gjson.GetBytes(body, "fallbacks").Exists()) {
 		betas = append(betas, claudeServerSideFallbackBeta)
 	}
-	if requested[claudeFallbackCreditBeta] || oauthToken {
+	if requested[claudeFallbackCreditBeta] || gjson.GetBytes(body, "fallback_credit_token").Exists() ||
+		(oauthToken && gjson.GetBytes(body, "fallbacks").Exists()) {
 		betas = append(betas, claudeFallbackCreditBeta)
 	}
 	if requested[claudeStructuredOutputsBeta] {
 		betas = append(betas, claudeStructuredOutputsBeta)
 	}
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	if requested[claudeThinkingBindingBeta] || gjson.GetBytes(body, "thinking.block_binding").Exists() ||
+		(claudeModelUsesProgressDisplay(gjson.GetBytes(body, "model").String()) && thinkingType == "adaptive") {
+		betas = append(betas, claudeThinkingBindingBeta)
+	}
 	if !probeOrHelper && thinkingType != "disabled" &&
 		(requested[claudeThinkingDisplayUpdatesBeta] || claudeThinkingDisplayUpdates(body)) {
 		betas = append(betas, claudeThinkingDisplayUpdatesBeta)
+	}
+	if requested[claudeThinkingResumptionBeta] {
+		betas = append(betas, claudeThinkingResumptionBeta)
 	}
 	if claudeRequestUsesFastMode(body, requested) {
 		betas = append(betas, claudeFastModeBeta)
@@ -131,6 +183,9 @@ func claudeCodeCLIBetas(body []byte, requested map[string]bool, oauthToken bool)
 		if includeExtended {
 			betas = append(betas, claudeExtendedCacheTTLBeta)
 		}
+	}
+	if requested[claudePromptCachingEvictBeta] || bytes.Contains(body, []byte(`"evict_on_complete"`)) {
+		betas = append(betas, claudePromptCachingEvictBeta)
 	}
 	if diagnostics := gjson.GetBytes(body, "diagnostics"); diagnostics.IsObject() {
 		betas = append(betas, claudeCacheDiagnosisBeta)
@@ -150,6 +205,103 @@ func claudeThinkingDisplayUpdates(body []byte) bool {
 
 func isClaudeHaikuModel(model string) bool {
 	return strings.Contains(strings.ToLower(model), "haiku")
+}
+
+func claudeCanonicalModel(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if slash := strings.LastIndexByte(model, '/'); slash >= 0 {
+		model = model[slash+1:]
+	}
+	return model
+}
+
+func isClaudeSonnet55Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	return model == "claude-sonnet-5-5" || strings.HasPrefix(model, "claude-sonnet-5-5-") || strings.HasPrefix(model, "claude-sonnet-5-5[")
+}
+
+func isClaudeSonnet5Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	if isClaudeSonnet55Model(model) {
+		return false
+	}
+	return model == "claude-sonnet-5" || strings.HasPrefix(model, "claude-sonnet-5-") || strings.HasPrefix(model, "claude-sonnet-5[")
+}
+
+func isClaudeOpus55Model(model string) bool {
+	model = claudeCanonicalModel(model)
+	return model == "claude-opus-5-5" || strings.HasPrefix(model, "claude-opus-5-5[")
+}
+
+func claudeModelUsesProgressDisplay(model string) bool {
+	return isClaudeOpus55Model(model) || isClaudeFable51Model(model) ||
+		isClaudeSonnet5Model(model) || isClaudeSonnet55Model(model)
+}
+
+func claudeModelHasPerTurnEffort(model string) bool {
+	model = claudeCanonicalModel(model)
+	return isClaudeOpus55Model(model) || strings.HasPrefix(model, "claude-fable-5-1")
+}
+
+func claudeIncludePerTurnControl(body []byte, requested map[string]bool) bool {
+	return requested[claudePerTurnControlBeta] || claudeModelHasPerTurnEffort(gjson.GetBytes(body, "model").String())
+}
+
+func claudeIncludePerTurnTiming(body []byte, requested map[string]bool) bool {
+	if requested[claudePerTurnTimingBeta] {
+		return true
+	}
+	model := claudeCanonicalModel(gjson.GetBytes(body, "model").String())
+	if !claudeModelHasPerTurnEffort(model) && !strings.HasPrefix(model, "claude-mythos-5-1") {
+		return false
+	}
+	if gjson.GetBytes(body, "output_config.timing").Exists() {
+		return true
+	}
+	found := false
+	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
+		if message.Get("output_config.timing").Exists() {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func claudeIncludeInlineTools(body []byte, requested map[string]bool) bool {
+	if requested[claudeInlineToolsBeta] {
+		return true
+	}
+	found := false
+	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
+		message.Get("content").ForEach(func(_, block gjson.Result) bool {
+			if strings.EqualFold(strings.TrimSpace(block.Get("type").String()), "tool_addition") &&
+				block.Get("tool.definition").Exists() {
+				found = true
+				return false
+			}
+			return true
+		})
+		return !found
+	})
+	return found
+}
+
+func claudeIncludeMidConvClearAt(body []byte, requested map[string]bool) bool {
+	if requested[claudeMidConvSystemClearAtBeta] ||
+		claudeModelUsesProgressDisplay(gjson.GetBytes(body, "model").String()) {
+		return true
+	}
+	found := false
+	gjson.GetBytes(body, "messages").ForEach(func(_, message gjson.Result) bool {
+		if message.Get("clear_at").Exists() {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func claudeRequestSupportsEffort(body []byte, requested map[string]bool) bool {
@@ -305,13 +457,19 @@ func withClaudeAdvisorToolBeta(betas string) string {
 	for index, beta := range parts {
 		switch beta {
 		case claudeAdvancedToolUseBeta,
+			claudeMidConvSystemClearAtBeta,
+			claudeDangerousToolUseBeta,
 			claudeEffortBeta,
 			claudeServerSideFallbackBeta,
 			claudeFallbackCreditBeta,
 			claudeStructuredOutputsBeta,
+			claudeThinkingBindingBeta,
+			claudeThinkingDisplayUpdatesBeta,
+			claudeThinkingResumptionBeta,
 			claudeFastModeBeta,
 			claudeAFKModeBeta,
 			claudeExtendedCacheTTLBeta,
+			claudePromptCachingEvictBeta,
 			claudeCacheDiagnosisBeta:
 			insertAt = index
 		}
@@ -365,20 +523,18 @@ func (e *claudeRateLimitError) ExecutionDisposition() cliproxyexecutor.Execution
 	}
 }
 
-func classifyClaudeUpstreamError(statusCode int, body []byte, headers ...http.Header) error {
+func classifyClaudeUpstreamError(statusCode int, body []byte, modelLevelCooling bool, headers ...http.Header) error {
 	err := statusErr{code: statusCode, msg: string(body)}
 	var responseHeaders http.Header
 	if len(headers) > 0 {
 		responseHeaders = headers[0]
 		err = err.withUpstreamResponse(responseHeaders)
-		if retryAfter := helps.ParseClaudeRateLimitReset(responseHeaders, time.Now()); retryAfter != nil {
-			err.retryAfter = retryAfter
-		}
+		err.retryAfter = helps.ParseClaudeRateLimitReset(responseHeaders, time.Now())
 	}
 	if statusCode != http.StatusTooManyRequests {
 		return err
 	}
-	if helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(responseHeaders) {
+	if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(responseHeaders) {
 		return &claudeRateLimitError{
 			statusErr:   err,
 			effectScope: cliproxyexecutor.StateEffectScopeCredential,

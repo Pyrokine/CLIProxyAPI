@@ -36,12 +36,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ClaudeExecutor is a stateless executor for Anthropic Claude over the messages API.
+// ClaudeExecutor routes Anthropic Claude requests over the messages API.
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
 	cfg                 *config.Config
 	requestLogProvider  string
 	oauthProfileFetcher claudeOAuthProfileFetcher
+	oauthToolAliases    claudeOAuthToolAliasStore
 }
 
 const claudeFingerprintSalt = "59cf53e54c78"
@@ -55,6 +56,10 @@ func shouldSanitizeClaudeMessagesForUpstream(baseModel string) bool {
 func NewClaudeExecutor(cfg *config.Config) *ClaudeExecutor { return &ClaudeExecutor{cfg: cfg} }
 
 func (e *ClaudeExecutor) Identifier() string { return "claude" }
+
+func (e *ClaudeExecutor) modelLevelCooling() bool {
+	return e != nil && e.cfg != nil && e.cfg.Claude.ModelLevelCooling
+}
 
 func (e *ClaudeExecutor) upstreamRequestLogProvider() string {
 	if provider := strings.TrimSpace(e.requestLogProvider); provider != "" {
@@ -115,6 +120,7 @@ type claudeRequest struct {
 	translationStream        bool // whether the upstream response uses SSE
 	bodyForTranslation       []byte
 	oauthToolNamesReverseMap map[string]string
+	oauthToolAliasScope      string
 	diagnosticsState         claudeDiagnosticsRequestState
 	fastRequest              bool
 	httpReq                  *http.Request
@@ -268,7 +274,7 @@ func consumeClaudeStream(
 	reverseMap map[string]string,
 	fastRequest bool,
 	statusCode int,
-	transform func([]byte) [][]byte,
+	transform func([]byte) ([][]byte, error),
 	observer claudeStreamObserver,
 ) {
 	var streamUsage claudeStreamUsageBuffer
@@ -277,17 +283,24 @@ func consumeClaudeStream(
 		if observer != nil {
 			observer.FinishClaudeStream(outcome)
 		}
-		if !streamUsage.publish(ctx, reporter) {
-			reporter.ensurePublished(ctx)
+		publishCtx := ctx
+		if outcome == claudeStreamOutcomeComplete {
+			publishCtx = context.WithoutCancel(ctx)
+		}
+		if !streamUsage.publish(publishCtx, reporter) {
+			reporter.ensurePublished(publishCtx)
 		}
 	}()
 
 	validator := &claudeStreamingValidator{}
+	terminalDelivered := false
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(nil, maxClaudeResponseBytes)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		appendAPIResponseChunk(ctx, cfg, line)
+		observeResponseTokenEvent(ctx, line)
+		reporter.observeResponseModel(line)
 		if observer != nil {
 			observer.ObserveClaudeSSELine(line)
 		}
@@ -313,7 +326,14 @@ func consumeClaudeStream(
 			}
 			line = restoredLine
 		}
-		if !sendStreamPayloads(ctx, out, transform(bytes.Clone(line))) {
+		payloads, errTranslate := transform(bytes.Clone(line))
+		if errTranslate != nil {
+			outcome = claudeStreamOutcomeValidationFailure
+			errTranslate = wrapClaudeFastRequestError(fastRequest, statusCode, markResponseStarted(errTranslate))
+			sendClaudeStreamError(ctx, cfg, out, reporter, &streamUsage, errTranslate)
+			return
+		}
+		if ctx.Err() != nil || !sendStreamPayloads(ctx, out, payloads) {
 			if errStream := scannerOrContextError(ctx, scanner); errStream != nil {
 				canceled := false
 				if cancelErr := newClaudeOAuthCancellationError(
@@ -333,8 +353,12 @@ func consumeClaudeStream(
 			outcome = claudeStreamOutcomeCanceled
 			return
 		}
+		if validator.hasMessageStop && ((len(payloads) > 0 && bytes.HasSuffix(payloads[len(payloads)-1], []byte("\n\n"))) || len(bytes.TrimSpace(line)) == 0) {
+			terminalDelivered = true
+			break
+		}
 	}
-	if errScan := scanner.Err(); errScan != nil {
+	if errScan := scanner.Err(); errScan != nil && !terminalDelivered {
 		if ctx != nil && ctx.Err() != nil {
 			outcome = claudeStreamOutcomeCanceled
 		} else {
@@ -361,19 +385,11 @@ func consumeClaudeStream(
 }
 
 func sendClaudeCancellationResult(out chan cliproxyexecutor.StreamChunk, err error) {
-	chunk := cliproxyexecutor.StreamChunk{Err: err}
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
 	select {
-	case out <- chunk:
-		return
-	default:
-	}
-	select {
-	case <-out:
-	default:
-	}
-	select {
-	case out <- chunk:
-	default:
+	case out <- cliproxyexecutor.StreamChunk{Err: err}:
+	case <-timer.C:
 	}
 }
 
@@ -439,31 +455,17 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 			req.Metadata,
 		)
 	}
-	originalTranslated := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		originalPayload,
-		upstreamStream,
-		isCompat,
+	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, upstreamStream, isCompat, &req,
 	)
-	body := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		req.Payload,
-		upstreamStream,
-		isCompat,
-	)
+	if err != nil {
+		return nil, err
+	}
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
+	body = helps.NormalizeClaudeToolCallIDs(body)
+	preThinkingErr := claudeSonnet55ThinkingError(body)
 
-	body, err := helps.ApplyThinkingWithSourcePayload(
+	body, err = helps.ApplyThinkingWithSourcePayload(
 		body, req.Payload, originalPayloadSource, req.Model, from.String(), to.String(), e.Identifier(), req,
 	)
 	if err != nil {
@@ -475,6 +477,7 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 
 	// Apply cloaking (system prompt injection, fake user ID, sensitive word obfuscation)
 	// based on client type and configuration.
+	explicitCacheMode := isExplicitPromptCacheMode(originalPayload, req.Payload, body)
 	bodyBeforeCloaking := body
 	initialProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(bodyBeforeCloaking)
 	var cloaked bool
@@ -486,6 +489,7 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 		baseModel,
 		apiKey,
 		confirmedClaudeCode,
+		explicitCacheMode,
 	)
 	if err != nil {
 		return nil, err
@@ -494,6 +498,7 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 		bodyBeforeCloaking,
 		body,
 		cloaked,
+		explicitCacheMode,
 	)
 	fableState := captureClaudeCodeFableState(
 		bodyBeforeCloaking,
@@ -510,18 +515,23 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 		body, contextManagementState.automaticallyInjected = injectClaudeCodeContextManagement(body)
 	}
 
+	body = disableThinkingIfToolChoiceForced(body)
+	body = reconcileClaudeCodeContextManagement(body, contextManagementState)
+
 	requestedModel := payloadRequestedModel(opts, req.Model)
 	var touchedPayloadPaths map[string]bool
-	body, touchedPayloadPaths = applyPayloadConfigWithRootTracked(
+	body, touchedPayloadPaths = applyPayloadConfigWithRequestTracked(
 		e.cfg,
 		baseModel,
 		to.String(),
+		from.String(),
 		"",
 		body,
 		originalTranslated,
 		requestedModel,
+		payloadRequestPath(opts), opts.Headers, e.Identifier(),
 		"context_management", "diagnostics", "system", "messages", "max_tokens", "output_config", "tools",
-		"fallbacks", "thinking.display",
+		"fallbacks", "thinking.type", "thinking.display",
 	)
 	contextManagementState.payloadRuleTouched = touchedPayloadPaths["context_management"]
 	body = reconcileClaudeCodeSystemPlacementAfterPayload(body, systemPlacementState)
@@ -537,24 +547,31 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 	body = reconcileClaudeCodeFableModelAfterPayload(
 		body,
 		fableState,
-		touchedPayloadPaths["fallbacks"],
-		touchedPayloadPaths["thinking.display"],
+		touchedPayloadPaths,
 		cloaked,
 		isProbeOrHelper,
 	)
 
+	if isClaudeSonnet55Model(gjson.GetBytes(body, "model").String()) &&
+		!touchedPayloadPaths["thinking.type"] && preThinkingErr != nil {
+		return nil, preThinkingErr
+	}
+	body, err = normalizeClaudeSonnet55Request(body)
+	if err != nil {
+		return nil, err
+	}
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 	body = reconcileClaudeCodeContextManagement(body, contextManagementState)
 	body = normalizeClaudeSamplingForUpstream(body, confirmedClaudeCode)
 
-	cpaOwnsCacheControl := shouldEnsureCacheControl(
+	cpaOwnsCacheControl := !explicitCacheMode && shouldEnsureCacheControl(
 		body,
 		cloaked,
 		confirmedClaudeCode,
 	)
 	if cpaOwnsCacheControl {
-		body = ensureCacheControl(body)
+		body = ensureCacheControl(body, touchedPayloadPaths["system"])
 	}
 
 	// Enforce Anthropic's cache_control block limit (max 4 breakpoints per request).
@@ -572,13 +589,15 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 		(!isSubagent || subagent1h) &&
 		!isProbeOrHelper {
 		body = upgradeClaudeCacheControlTTL(body, claudeCacheControlTTL1h)
-	} else if isProbeOrHelper || (isSubagent && !subagent1h) {
+	} else if !explicitCacheMode && (isProbeOrHelper || (isSubagent && !subagent1h)) {
 		body = stripClaudeCacheControlTTL(body)
 	}
 
 	// Normalize TTL values to prevent ordering violations under prompt-caching-scope-2026-01-05.
 	// A 1h-TTL block must not appear after a 5m-TTL block in evaluation order (tools→system→messages).
-	body = normalizeCacheControlTTL(body)
+	if !explicitCacheMode {
+		body = normalizeCacheControlTTL(body)
+	}
 	// Payload rules may rewrite stream. Keep the request body, transport headers,
 	// response parser, and downstream response format on one authority.
 	streamField := gjson.GetBytes(body, "stream")
@@ -613,6 +632,18 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 			}
 			body, diagnosticsState = prepareClaudeContinuity(body, continuityBody, auth, claudeSessionID, hasExecutionMetadata,
 				claudeCCHSigningEnabled(apiKey, fingerprint.ProfileClaudeCodeCLI, baseURL), isAnthropicUpstreamBase(baseURL), touchedPayloadPaths["diagnostics"])
+			if diagnosticsState.key != "" {
+				current := claudeCodeCurrentTime(e.cfg, auth)
+				currentDate := current.Format("2006-01-02")
+				pinnedDate := helps.PinClaudeSessionDate(diagnosticsState.key, currentDate)
+				if pinnedDate != currentDate && !touchedPayloadPaths["messages"] {
+					pinnedTime, errDate := time.ParseInLocation("2006-01-02", pinnedDate, current.Location())
+					if errDate != nil {
+						return nil, fmt.Errorf("claude executor: invalid pinned session date: %w", errDate)
+					}
+					body = injectClaudeCodeCurrentDate(body, pinnedTime, explicitCacheMode)
+				}
+			}
 		}
 		_, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
 		if len(settings.sensitiveWords) > 0 {
@@ -629,11 +660,15 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 	bodyForTranslation := body
 	bodyForUpstream := body
 	var oauthToolNamesReverseMap map[string]string
+	var oauthToolAliasScope string
 	if fingerprint.ProfileClaudeCodeCLI && cloaked {
-		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(
-			bodyForUpstream,
-			resolveClaudeMCPAliasOptions(ctx),
+		oauthToolAliasScope = claudeOAuthToolAliasScope(ctx, auth)
+		bodyForUpstream, oauthToolNamesReverseMap, err = e.prepareClaudeOAuthToolNamesForRequest(
+			bodyForUpstream, resolveClaudeMCPAliasOptions(ctx), oauthToolAliasScope,
 		)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if fingerprint.ProfileClaudeCodeCLI {
 		bodyForUpstream, err = applyClaudeCLIIdentity(bodyForUpstream, auth, apiKey, claudeSessionID, fingerprint)
@@ -643,6 +678,15 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 	}
 	if !fingerprint.ProfileClaudeCodeCLI && isKimiMessagesUpstream(auth, baseURL) {
 		bodyForUpstream = stripKimiClaudeAttribution(bodyForUpstream)
+	}
+	bodyForUpstream = finalizeClaudeCompactionSummaryBody(ctx, bodyForUpstream)
+	bodyForUpstream, err = sanitizeClaudeWebSearchDomains(bodyForUpstream)
+	if err != nil {
+		return nil, err
+	}
+	bodyForUpstream, err = stripPromptCacheOptions(bodyForUpstream)
+	if err != nil {
+		return nil, fmt.Errorf("remove Claude prompt cache options: %w", err)
 	}
 	if claudeCCHSigningEnabled(apiKey, fingerprint.ProfileClaudeCodeCLI, baseURL) {
 		fallback := ""
@@ -703,6 +747,7 @@ func (e *ClaudeExecutor) prepareClaudeRequest(
 		translationStream:        upstreamStream,
 		bodyForTranslation:       bodyForTranslation,
 		oauthToolNamesReverseMap: oauthToolNamesReverseMap,
+		oauthToolAliasScope:      oauthToolAliasScope,
 		diagnosticsState:         diagnosticsState,
 		fastRequest:              fastRequest,
 		httpReq:                  httpReq,
@@ -754,10 +799,10 @@ func (e *ClaudeExecutor) openClaudeResponse(
 			log.Errorf("response body close error: %v", errClose)
 		}
 		if request.fastRequest {
-			return nil, nil, newClaudeFastDirectResponseError(httpResp, body)
+			return nil, nil, newClaudeFastDirectResponseError(httpResp, body, e.modelLevelCooling())
 		}
 		return nil, nil, claudeUpstreamHTTPError{
-			classifyClaudeUpstreamError(httpResp.StatusCode, body, httpResp.Header),
+			classifyClaudeUpstreamError(httpResp.StatusCode, body, e.modelLevelCooling(), httpResp.Header),
 		}
 	}
 	decodedBody, errDecode := decodeResponseBody(httpResp.Body, claudeResponseContentEncoding(httpResp.Header))
@@ -779,8 +824,13 @@ func (e *ClaudeExecutor) Execute(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (resp cliproxyexecutor.Response, err error) {
-	if opts.Alt == "responses/compact" {
-		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	opts.OriginalRequest = originalRequestPayload(req, opts)
+	compactionScope, compactionRequested, errCompaction := e.prepareClaudeCompaction(auth, &req, &opts)
+	if errCompaction != nil {
+		return resp, errCompaction
+	}
+	if compactionRequested {
+		return e.executeClaudeCompaction(ctx, auth, req, opts, compactionScope)
 	}
 
 	req, thinkingReplayScope := prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
@@ -818,8 +868,8 @@ func (e *ClaudeExecutor) Execute(
 		return resp, wrapClaudeFastRequestError(cr.fastRequest, httpResp.StatusCode, markResponseStarted(err))
 	}
 	appendAPIResponseChunk(ctx, e.cfg, data)
+	var streamUsage claudeStreamUsageBuffer
 	if cr.translationStream {
-		var streamUsage claudeStreamUsageBuffer
 		validator := &claudeStreamingValidator{}
 		lines := bytes.Split(data, []byte("\n"))
 		for index, line := range lines {
@@ -829,6 +879,8 @@ func (e *ClaudeExecutor) Execute(
 				err = wrapClaudeFastRequestError(cr.fastRequest, httpResp.StatusCode, markResponseStarted(errValidate))
 				return resp, err
 			}
+			observeResponseTokenEvent(ctx, line)
+			cr.reporter.observeResponseModel(line)
 			streamUsage.observe(line)
 			if len(cr.oauthToolNamesReverseMap) > 0 {
 				restoredLine, errRestore := restoreClaudeOAuthToolNamesFromStreamLine(
@@ -853,14 +905,10 @@ func (e *ClaudeExecutor) Execute(
 			err = wrapClaudeFastRequestError(cr.fastRequest, httpResp.StatusCode, markResponseStarted(errValidate))
 			return resp, err
 		}
-		if !streamUsage.publish(ctx, cr.reporter) {
-			cr.reporter.ensurePublished(ctx)
-		}
-		commitClaudeDiagnostics(cr.diagnosticsState, claudeMessageIDFromSSE(data))
 		data = bytes.Join(lines, []byte("\n"))
-		cacheClaudeThinkingReplayResponse(ctx, thinkingReplayScope, data)
 	} else {
-		cr.reporter.publish(ctx, parseClaudeUsage(data))
+		observeResponseTokenEvent(ctx, data)
+		cr.reporter.observeResponseModel(data)
 		if len(cr.oauthToolNamesReverseMap) > 0 {
 			var errRestore error
 			data, errRestore = restoreClaudeOAuthToolNamesFromResponse(
@@ -874,8 +922,6 @@ func (e *ClaudeExecutor) Execute(
 				return resp, err
 			}
 		}
-		commitClaudeDiagnostics(cr.diagnosticsState, claudeMessageIDFromResponse(data))
-		cacheClaudeThinkingReplayResponse(ctx, thinkingReplayScope, data)
 	}
 	var param any
 	out := sdktranslator.TranslateNonStream(
@@ -888,6 +934,31 @@ func (e *ClaudeExecutor) Execute(
 		data,
 		&param,
 	)
+	errTranslate := sdktranslator.ResponseTranslationError(&param)
+	if errTranslate == nil && len(out) == 0 {
+		errTranslate = wrapClaudeFastRequestError(cr.fastRequest, httpResp.StatusCode, markResponseStarted(statusErr{code: http.StatusBadGateway, msg: "claude executor: upstream returned empty response"}))
+	}
+	if errTranslate != nil {
+		recordAPIResponseError(ctx, e.cfg, errTranslate)
+		if cr.translationStream {
+			streamUsage.publishFailure(ctx, cr.reporter, errTranslate)
+		} else {
+			cr.reporter.publishFailureWithDetail(ctx, parseClaudeUsage(data), errTranslate)
+		}
+		return resp, errTranslate
+	}
+	messageID := claudeMessageIDFromResponse(data)
+	if cr.translationStream {
+		messageID = claudeMessageIDFromSSE(data)
+		if !streamUsage.publish(ctx, cr.reporter) {
+			cr.reporter.ensurePublished(ctx)
+		}
+	} else {
+		cr.reporter.publish(ctx, parseClaudeUsage(data))
+	}
+	commitClaudeDiagnostics(cr.diagnosticsState, messageID)
+	e.rememberClaudeOAuthToolAliases(cr.bodyForTranslation, cr.oauthToolNamesReverseMap, messageID, cr.oauthToolAliasScope)
+	cacheClaudeThinkingReplayResponse(ctx, thinkingReplayScope, data)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -898,8 +969,13 @@ func (e *ClaudeExecutor) ExecuteStream(
 	req cliproxyexecutor.Request,
 	opts cliproxyexecutor.Options,
 ) (*cliproxyexecutor.StreamResult, error) {
-	if opts.Alt == "responses/compact" {
-		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
+	opts.OriginalRequest = originalRequestPayload(req, opts)
+	compactionScope, compactionRequested, errCompaction := e.prepareClaudeCompaction(auth, &req, &opts)
+	if errCompaction != nil {
+		return nil, errCompaction
+	}
+	if compactionRequested {
+		return e.executeClaudeCompactionStream(ctx, auth, req, opts, compactionScope)
 	}
 
 	req, thinkingReplayScope := prepareClaudeThinkingReplayRequest(ctx, auth, req, opts)
@@ -945,14 +1021,23 @@ func (e *ClaudeExecutor) executeStreamWithObserver(
 		observer,
 		newClaudeDiagnosticsStreamObserver(cr.diagnosticsState),
 	)
-	out := make(chan cliproxyexecutor.StreamChunk, 1)
-	transform := func(line []byte) [][]byte {
-		return [][]byte{append(line, '\n')}
+	if cr.oauthToolAliasScope != "" {
+		observer = combineClaudeStreamObservers(observer, &claudeOAuthToolAliasStreamObserver{
+			executor: e, request: cr.bodyForTranslation,
+			aliases: cr.oauthToolNamesReverseMap, scope: cr.oauthToolAliasScope,
+		})
+	}
+	out := make(chan cliproxyexecutor.StreamChunk)
+	transform := func(line []byte) ([][]byte, error) {
+		if gjson.GetBytes(jsonPayload(line), "type").String() == "message_stop" {
+			return [][]byte{append(line, '\n', '\n')}, nil
+		}
+		return [][]byte{append(line, '\n')}, nil
 	}
 	if cr.responseFormat != cr.to {
 		var param any
-		transform = func(line []byte) [][]byte {
-			return sdktranslator.TranslateStream(
+		transform = func(line []byte) ([][]byte, error) {
+			chunks := sdktranslator.TranslateStream(
 				ctx,
 				cr.to,
 				cr.responseFormat,
@@ -962,6 +1047,7 @@ func (e *ClaudeExecutor) executeStreamWithObserver(
 				line,
 				&param,
 			)
+			return chunks, sdktranslator.ResponseTranslationError(&param)
 		}
 	}
 	go func() {
@@ -1007,17 +1093,20 @@ func (e *ClaudeExecutor) CountTokens(
 	to := sdktranslator.FromString("claude")
 	stream := from != to
 	isCompat := helps.APIKeyModelIsCompat(req)
-	body := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		req.Payload,
-		stream,
-		isCompat,
+	originalPayload := req.Payload
+	if len(opts.OriginalRequest) > 0 {
+		originalPayload = opts.OriginalRequest
+	}
+	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, stream, isCompat, &req,
 	)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	body = helps.SetStringIfDifferent(body, "model", baseModel)
+	body = helps.NormalizeClaudeToolCallIDs(body)
+	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated,
+		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier())
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
@@ -1028,7 +1117,19 @@ func (e *ClaudeExecutor) CountTokens(
 			isCompat,
 		)
 	}
-	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
+	body, err = normalizeClaudeSonnet55Request(body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	body, err = stripPromptCacheOptions(body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("remove Claude prompt cache options: %w", err)
+	}
+	body, err = sanitizeClaudeWebSearchDomains(body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	if errValidate := validateClaudeTokenCountRequest(body, false); errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
 	count, err := countClaudeInputTokens(body)
@@ -1052,7 +1153,7 @@ func newClaudeTokenCountValidationError(message string) error {
 	return claudeTokenCountValidationError{statusErr{code: http.StatusBadRequest, msg: message}}
 }
 
-func validateClaudeTokenCountRequest(body []byte) error {
+func validateClaudeTokenCountRequest(body []byte, allowMidSystem bool) error {
 	if !gjson.ValidBytes(body) {
 		return newClaudeTokenCountValidationError("invalid Claude token count request JSON")
 	}
@@ -1069,8 +1170,12 @@ func validateClaudeTokenCountRequest(body []byte) error {
 			return newClaudeTokenCountValidationError("Claude token count request messages must contain objects")
 		}
 		role := message.Get("role").String()
-		if role != "user" && role != "assistant" {
-			return newClaudeTokenCountValidationError("Claude token count request message role must be user or assistant")
+		if role != "user" && role != "assistant" && !(allowMidSystem && role == "system") {
+			allowed := "Claude token count request message role must be user or assistant"
+			if allowMidSystem {
+				allowed = "Claude token count request message role must be user, assistant, or system"
+			}
+			return newClaudeTokenCountValidationError(allowed)
 		}
 		content := message.Get("content")
 		if content.Type == gjson.String {
@@ -1130,23 +1235,37 @@ func (e *ClaudeExecutor) countTokensUpstream(
 	// Use streaming translation to preserve function calling, except for claude.
 	stream := from != to
 	isCompat := helps.APIKeyModelIsCompat(req)
-	body := helps.TranslateRequestWithAPIKeyModelCompatibility(
-		ctx,
-		opts.Headers,
-		e.cfg,
-		from,
-		to,
-		baseModel,
-		req.Payload,
-		stream,
-		isCompat,
+	originalTranslated, body, err := helps.TranslateRequestPairWithAPIKeyModelCompatibilityChecked(
+		ctx, opts.Headers, e.cfg, from, to, baseModel, originalPayload, req.Payload, stream, isCompat, &req,
 	)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
+	body = helps.NormalizeClaudeToolCallIDs(body)
+	body = applyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated,
+		payloadRequestedModel(opts, req.Model), payloadRequestPath(opts), opts.Headers, e.Identifier())
+	if isClaudeSonnet55Model(baseModel) {
+		if errThinking := claudeSonnet55ThinkingError(body); errThinking != nil {
+			return cliproxyexecutor.Response{}, errThinking
+		}
+		body, err = normalizeClaudeSonnet55Request(body)
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+		body, err = helps.ApplyThinkingWithSourcePayload(
+			body, req.Payload, originalPayload, req.Model, from.String(), to.String(), e.Identifier(), req,
+		)
+		if err != nil {
+			return cliproxyexecutor.Response{}, err
+		}
+	}
 	if rebuildMidSystemMessageEnabled(e.cfg, auth) {
 		body = rebuildMidSystemMessagesToTopLevel(body)
 	}
 
 	directAnthropic := isAnthropicUpstreamBase(baseURL)
+	explicitCacheMode := isExplicitPromptCacheMode(originalPayload, req.Payload, body)
 	var cloaked bool
 	if directAnthropic || fingerprint.ProfileClaudeCodeCLI {
 		policy, settings := resolveClaudeWirePolicy(e.cfg, auth, apiKey, confirmedClaudeCode)
@@ -1157,7 +1276,7 @@ func (e *ClaudeExecutor) countTokensUpstream(
 					return cliproxyexecutor.Response{}, errSystem
 				}
 			}
-			body = relocateClaudeSystemPromptForCountTokens(body, settings.strictMode)
+			body = relocateClaudeSystemPromptForCountTokens(body, settings.strictMode, explicitCacheMode, !policy.OAuth)
 			if len(settings.sensitiveWords) > 0 {
 				matcher := buildSensitiveWordMatcher(settings.sensitiveWords)
 				body = obfuscateSensitiveWords(body, matcher)
@@ -1167,7 +1286,9 @@ func (e *ClaudeExecutor) countTokensUpstream(
 
 	// Keep count_tokens requests compatible with Anthropic cache-control constraints too.
 	body = enforceCacheControlLimit(body, 4)
-	body = normalizeCacheControlTTL(body)
+	if !explicitCacheMode {
+		body = normalizeCacheControlTTL(body)
+	}
 
 	// Extract betas from body and convert to header (for count_tokens too)
 	var extraBetas []string
@@ -1192,6 +1313,14 @@ func (e *ClaudeExecutor) countTokensUpstream(
 	if !fingerprint.ProfileClaudeCodeCLI && isKimiMessagesUpstream(auth, baseURL) {
 		body = stripKimiClaudeAttribution(body)
 	}
+	body, err = normalizeClaudeSonnet55Request(body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	body, err = stripPromptCacheOptions(body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, fmt.Errorf("remove Claude prompt cache options: %w", err)
+	}
 	if errMidSystem := validateClaudeMidSystemMessageModel(
 		body,
 		confirmedClaudeCode,
@@ -1199,7 +1328,11 @@ func (e *ClaudeExecutor) countTokensUpstream(
 	); errMidSystem != nil {
 		return cliproxyexecutor.Response{}, errMidSystem
 	}
-	if errValidate := validateClaudeTokenCountRequest(body); errValidate != nil {
+	body, err = sanitizeClaudeWebSearchDomains(body)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	if errValidate := validateClaudeTokenCountRequest(body, true); errValidate != nil {
 		return cliproxyexecutor.Response{}, errValidate
 	}
 	url := fmt.Sprintf("%s/v1/messages/count_tokens?beta=true", baseURL)
@@ -1263,7 +1396,7 @@ func (e *ClaudeExecutor) countTokensUpstream(
 		if errClose := errBody.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
-		return cliproxyexecutor.Response{}, classifyClaudeUpstreamError(resp.StatusCode, b, resp.Header)
+		return cliproxyexecutor.Response{}, classifyClaudeUpstreamError(resp.StatusCode, b, e.modelLevelCooling(), resp.Header)
 	}
 	decodedBody, err := decodeResponseBody(resp.Body, claudeResponseContentEncoding(resp.Header))
 	if err != nil {
@@ -1376,6 +1509,51 @@ func appendClaudeFastModeBeta(body []byte, betas []string) []string {
 		}
 	}
 	return append(betas, claudeFastModeBeta)
+}
+
+type claudeSonnet55RequestError struct {
+	statusErr
+}
+
+func (claudeSonnet55RequestError) IsRequestScoped() bool { return true }
+
+func newClaudeSonnet55RequestError(message string) error {
+	return claudeSonnet55RequestError{statusErr{code: http.StatusBadRequest, msg: message}}
+}
+
+func normalizeClaudeSonnet55Request(body []byte) ([]byte, error) {
+	if !isClaudeSonnet55Model(gjson.GetBytes(body, "model").String()) {
+		return body, nil
+	}
+	if choice := gjson.GetBytes(body, "tool_choice.type").String(); choice == "any" || choice == "tool" {
+		return body, newClaudeSonnet55RequestError(`claude-sonnet-5-5 does not support tool_choice type "any" or "tool"`)
+	}
+
+	if gjson.GetBytes(body, "thinking.type").String() == "disabled" {
+		body, _ = sjson.SetBytes(body, "thinking.type", "between_tools")
+		for _, field := range []string{"thinking.display", "thinking.budget_tokens", "thinking.block_binding"} {
+			body, _ = sjson.DeleteBytes(body, field)
+		}
+	}
+	return body, claudeSonnet55ThinkingError(body)
+}
+
+func claudeSonnet55ThinkingError(body []byte) error {
+	switch gjson.GetBytes(body, "thinking.type").String() {
+	case "enabled":
+		return newClaudeSonnet55RequestError("claude-sonnet-5-5 does not support manual thinking budgets")
+	case "between_tools":
+		for _, field := range []string{"thinking.display", "thinking.budget_tokens", "thinking.block_binding"} {
+			if gjson.GetBytes(body, field).Exists() {
+				return newClaudeSonnet55RequestError("claude-sonnet-5-5 between_tools does not accept " + field)
+			}
+		}
+		if effort := gjson.GetBytes(body, "output_config.effort"); effort.Exists() &&
+			effort.String() != "low" && effort.String() != "medium" && effort.String() != "high" {
+			return newClaudeSonnet55RequestError("claude-sonnet-5-5 between_tools supports only low, medium, or high effort")
+		}
+	}
+	return nil
 }
 
 // disableThinkingIfToolChoiceForced checks if tool_choice forces tool use and disables thinking.
@@ -1818,7 +1996,7 @@ func applyClaudeHeadersWithNativeProfile(
 			baseBetas = withoutClaudeBeta(baseBetas, claudeEffortBeta)
 		}
 		requestProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(body)
-		if requestProbeOrHelper {
+		if requestProbeOrHelper && !helperProfile {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
 			baseBetas = withoutClaudeBeta(baseBetas, claudeThinkingDisplayUpdatesBeta)
 			baseBetas = withoutClaudeBeta(baseBetas, claudeExtendedCacheTTLBeta)
@@ -1837,7 +2015,7 @@ func applyClaudeHeadersWithNativeProfile(
 			baseBetas = withClaudeExtendedCacheTTLBeta(baseBetas)
 		}
 		if isClaudeHaikuModel(gjson.GetBytes(body, "model").String()) &&
-			!gjson.GetBytes(body, "fallbacks").Exists() {
+			!gjson.GetBytes(body, "fallbacks").Exists() && !helperProfile {
 			baseBetas = withoutClaudeBeta(baseBetas, claudeServerSideFallbackBeta)
 		}
 		if strings.TrimSpace(baseBetas) == "" {
@@ -1961,6 +2139,19 @@ func applyClaudeHeadersWithNativeProfile(
 	} {
 		if value := helps.HeaderValueCaseInsensitive(incomingHeaders, header); value != "" {
 			r.Header.Set(header, value)
+		}
+	}
+	if confirmedClaudeCode {
+		for _, header := range []string{
+			"X-Claude-Code-Request-Class",
+			"X-Claude-Code-Agent-Type",
+			"X-Claude-Code-Prev-Tool-Durations",
+			"X-Claude-Code-Compaction",
+			"X-Claude-Code-Context-Compacted",
+		} {
+			if value := helps.HeaderValueCaseInsensitive(incomingHeaders, header); value != "" {
+				r.Header.Set(header, value)
+			}
 		}
 	}
 	if isAnthropicBase ||
@@ -2369,6 +2560,7 @@ func applyCloaking(
 	model string,
 	apiKey string,
 	confirmedClaudeCode bool,
+	explicitCacheMode ...bool,
 ) ([]byte, bool, error) {
 	policy, settings := resolveClaudeWirePolicy(cfg, auth, apiKey, confirmedClaudeCode)
 	if !policy.Cloak {
@@ -2391,8 +2583,14 @@ func applyCloaking(
 		"cli",
 		getClaudeWorkloadFromContext(ctx),
 		claudeCodeCurrentTime(cfg, auth),
+		isExplicitPromptCacheMode(payload) || (len(explicitCacheMode) > 0 && explicitCacheMode[0]),
+		!policy.OAuth,
 	)
 	isProbeOrHelper := helps.IsClaudeProbeOrHelperRequest(payload)
+	if isClaudeOpus55Model(gjson.GetBytes(payload, "model").String()) &&
+		!isProbeOrHelper && !gjson.GetBytes(payload, "fallbacks").Exists() {
+		payload, _ = sjson.SetRawBytes(payload, "fallbacks", []byte(`[{"model":"claude-opus-4-8"}]`))
+	}
 	if isClaudeFable51Model(gjson.GetBytes(payload, "model").String()) &&
 		!isProbeOrHelper {
 		if !gjson.GetBytes(payload, "fallbacks").Exists() {
@@ -2402,10 +2600,9 @@ func applyCloaking(
 				[]byte(`[{"model":"claude-opus-5"}]`),
 			)
 		}
-		if gjson.GetBytes(payload, "thinking.type").String() == "adaptive" &&
-			!gjson.GetBytes(payload, "thinking.display").Exists() {
-			payload, _ = sjson.SetBytes(payload, "thinking.display", "updates")
-		}
+	}
+	if !isProbeOrHelper {
+		payload = applyClaudeCloakThinkingDisplay(payload, false)
 	}
 	if !fingerprint.ProfileClaudeCodeCLI {
 		if strings.HasPrefix(model, "gpt-") {
@@ -2429,11 +2626,13 @@ func applyCloaking(
 // no cacheable system prompt exists, so translated requests still cover a large tools
 // prefix without adding the redundant tools marker that native Claude Code omits.
 // Each section injects independently and enforceCacheControlLimit applies the API cap.
-func ensureCacheControl(payload []byte) []byte {
+func ensureCacheControl(payload []byte, systemOwned bool) []byte {
 	if !claudePayloadHasCacheableSystem(payload) {
 		payload = injectToolsCacheControl(payload)
 	}
-	payload = injectSystemCacheControl(payload)
+	if !systemOwned {
+		payload = injectSystemCacheControl(payload)
+	}
 	payload = injectMessagesCacheControl(payload)
 	return payload
 }
@@ -2450,6 +2649,22 @@ func claudePayloadHasCacheableSystem(payload []byte) bool {
 	default:
 		return false
 	}
+}
+
+func isExplicitPromptCacheMode(payloads ...[]byte) bool {
+	for _, payload := range payloads {
+		if strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "prompt_cache_options.mode").String()), "explicit") {
+			return true
+		}
+	}
+	return false
+}
+
+func stripPromptCacheOptions(payload []byte) ([]byte, error) {
+	if !gjson.GetBytes(payload, "prompt_cache_options").Exists() {
+		return payload, nil
+	}
+	return sjson.DeleteBytes(payload, "prompt_cache_options")
 }
 
 func shouldEnsureCacheControl(payload []byte, cloaked, confirmedClaudeCode bool) bool {
@@ -2692,6 +2907,11 @@ func normalizeCacheControlTTL(payload []byte) []byte {
 func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload
+	}
+
+	thread := gjson.GetBytes(payload, "thread")
+	if thread.Exists() && thread.Type != gjson.Null && maxBlocks > 0 {
+		maxBlocks--
 	}
 
 	total := countCacheControls(payload)
@@ -3076,4 +3296,28 @@ func injectSystemCacheControl(payload []byte) []byte {
 	}
 
 	return payload
+}
+
+func sanitizeClaudeWebSearchDomains(body []byte) ([]byte, error) {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return body, nil
+	}
+	for index, tool := range tools.Array() {
+		if !strings.HasPrefix(tool.Get("type").String(), "web_search_") {
+			continue
+		}
+		for _, field := range []string{"allowed_domains", "blocked_domains"} {
+			value := tool.Get(field)
+			if !value.IsArray() || len(value.Array()) != 0 {
+				continue
+			}
+			var err error
+			body, err = sjson.DeleteBytes(body, fmt.Sprintf("tools.%d.%s", index, field))
+			if err != nil {
+				return nil, fmt.Errorf("normalize Claude web search domains: %w", err)
+			}
+		}
+	}
+	return body, nil
 }

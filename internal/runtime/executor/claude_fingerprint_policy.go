@@ -64,9 +64,11 @@ func claudeCCHSigningEnabled(apiKey string, cliFingerprint bool, origin string) 
 }
 
 func isKimiMessagesUpstream(auth *cliproxyauth.Auth, endpoint string) bool {
-	if auth != nil && strings.EqualFold(auth.Provider, "kimi") {
+	if auth != nil && (strings.EqualFold(strings.TrimSpace(auth.Provider), "kimi") ||
+		strings.EqualFold(strings.TrimSpace(auth.Provider), "kimi-ai")) {
 		return true
 	}
-	u, err := url.Parse(endpoint)
-	return err == nil && strings.EqualFold(u.Hostname(), "api.kimi.com")
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	return err == nil && (strings.EqualFold(u.Hostname(), "api.kimi.com") ||
+		strings.EqualFold(u.Hostname(), "api.kimi.ai"))
 }

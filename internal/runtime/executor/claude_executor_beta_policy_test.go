@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
@@ -59,6 +60,225 @@ func TestApplyClaudeHeaders_ConfirmedClientKeepsOAuthCredentialBetas(t *testing.
 		if !strings.Contains(got, want) {
 			t.Fatalf("Anthropic-Beta = %q, want caller beta %s preserved", got, want)
 		}
+	}
+}
+
+func TestClaudeCodeCLIBetasSonnetToolChanges(t *testing.T) {
+	for _, test := range []struct {
+		model string
+		want  bool
+	}{
+		{model: "claude-sonnet-5", want: false},
+		{model: "claude-sonnet-5-20260901", want: false},
+		{model: "claude-sonnet-5[1m]", want: false},
+		{model: "claude-sonnet-5-5", want: true},
+		{model: "claude-sonnet-5-5-20260928", want: true},
+		{model: "claude-sonnet-5-5[1m]", want: true},
+		{model: "anthropic/CLAUDE-SONNET-5-5[1m]", want: true},
+		{model: "claude-sonnet-4-6", want: false},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			body := []byte(`{"model":"` + test.model + `"}`)
+			betas := strings.Split(claudeCodeCLIBetas(body, nil, false), ",")
+			systemIndex := -1
+			toolsIndex := -1
+			for i, beta := range betas {
+				switch beta {
+				case claudeMidConvSystemBeta:
+					systemIndex = i
+				case claudeMidConvToolChangesBeta:
+					toolsIndex = i
+				}
+			}
+			if got := toolsIndex >= 0; got != test.want {
+				t.Fatalf("model %q tool changes beta = %v, want %v; betas=%v", test.model, got, test.want, betas)
+			}
+			if test.want && toolsIndex != systemIndex+1 {
+				t.Fatalf("model %q tool changes beta should follow mid-conversation system: %v", test.model, betas)
+			}
+		})
+	}
+}
+
+func TestClaudeCodeCLIBetas280FeatureGates(t *testing.T) {
+	const common = "claude-code-20250219,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12," +
+		"thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05"
+	for _, test := range []struct {
+		name      string
+		body      string
+		requested map[string]bool
+		oauth     bool
+		want      string
+	}{
+		{
+			name: "opus 5.5 advertises model capabilities",
+			body: `{"model":"claude-opus-5-5","thinking":{"type":"adaptive"}}`,
+			want: common + ",mid-conversation-system-2026-04-07,per-turn-control-2026-07-01," +
+				"mid-conversation-tool-changes-2026-07-01,mid-conversation-system-clear-at-2026-08-21," +
+				"effort-2025-11-24,thinking-binding-controls-2026-08-01",
+		},
+		{
+			name: "fable has control but no unrequested timing",
+			body: `{"model":"claude-fable-5-1"}`,
+			want: common + ",mid-conversation-system-2026-04-07,per-turn-control-2026-07-01," +
+				"mid-conversation-tool-changes-2026-07-01,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24",
+		},
+		{
+			name: "Sonnet 5 omits tool changes",
+			body: `{"model":"claude-sonnet-5"}`,
+			want: common + ",mid-conversation-system-2026-04-07,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24",
+		},
+		{
+			name: "Sonnet 5.5 keeps tool changes",
+			body: `{"model":"claude-sonnet-5-5"}`,
+			want: common + ",mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01," +
+				"mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24",
+		},
+		{
+			name:      "all body-gated features keep wire order",
+			body:      `{"model":"claude-opus-5-5","safeguards":[{}],"thinking":{"type":"adaptive","block_binding":{"prefix_mismatch_behavior":"omit"}},"messages":[{"role":"system","clear_at":"next_user_message","content":[{"type":"tool_addition","tool":{"definition":{"name":"bash"}}}]},{"role":"user","content":"x","output_config":{"timing":{"now":"2026-09-23T00:00:00Z"}}}],"cache_control":{"type":"ephemeral","evict_on_complete":true}}`,
+			requested: map[string]bool{claudeThinkingResumptionBeta: true},
+			want: common + ",mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,timing-2026-09-09," +
+				"mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15," +
+				"mid-conversation-system-clear-at-2026-08-21,dangerous-tool-use-2026-09-03,effort-2025-11-24," +
+				"thinking-binding-controls-2026-08-01,thinking-resumption-2026-07-17,prompt-caching-evict-2026-05-12",
+		},
+		{
+			name:      "legacy model keeps only explicitly requested per-turn betas",
+			body:      `{"model":"claude-opus-4-6","messages":[{"role":"user","clear_at":"next_user_message","content":[{"type":"tool_addition","tool":{"definition":{"name":"bash"}}}]}]}`,
+			requested: map[string]bool{claudePerTurnControlBeta: true, claudePerTurnTimingBeta: true},
+			want:      common + ",per-turn-control-2026-07-01,timing-2026-09-09,effort-2025-11-24",
+		},
+		{
+			name: "unsupported model timing is not inferred from body",
+			body: `{"model":"claude-opus-5","output_config":{"timing":{"now":"2026-09-23T00:00:00Z"}}}`,
+			want: common + ",mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24",
+		},
+		{
+			name: "incomplete inline tool does not enable beta",
+			body: `{"model":"claude-opus-5","messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"name":"bash"}}]}]}`,
+			want: common + ",mid-conversation-system-2026-04-07,mid-conversation-tool-changes-2026-07-01,effort-2025-11-24",
+		},
+		{
+			name:  "OAuth alone does not enable fallback credit",
+			body:  `{"model":"claude-opus-4-6"}`,
+			oauth: true,
+			want: "claude-code-20250219,oauth-2025-04-20," + strings.TrimPrefix(common, "claude-code-20250219,") +
+				",effort-2025-11-24,extended-cache-ttl-2025-04-11",
+		},
+		{
+			name: "fallback credit token enables beta without OAuth",
+			body: `{"model":"claude-opus-4-6","fallback_credit_token":"synthetic"}`,
+			want: common + ",effort-2025-11-24,fallback-credit-2026-06-01",
+		},
+		{
+			name:  "OAuth fallback enables both fallback betas",
+			body:  `{"model":"claude-fable-5-1","fallbacks":[{"model":"claude-opus-5"}]}`,
+			oauth: true,
+			want: "claude-code-20250219,oauth-2025-04-20," + strings.TrimPrefix(common, "claude-code-20250219,") +
+				",mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01," +
+				"mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24," +
+				"server-side-fallback-2026-06-01,fallback-credit-2026-06-01,extended-cache-ttl-2025-04-11",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := claudeCodeCLIBetas([]byte(test.body), test.requested, test.oauth); got != test.want {
+				t.Fatalf("claudeCodeCLIBetas() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestApplyClaudeHeadersSonnetToolChanges(t *testing.T) {
+	for _, test := range []struct {
+		model string
+		want  bool
+	}{
+		{model: "claude-sonnet-5", want: false},
+		{model: "claude-sonnet-5-5", want: true},
+		{model: "claude-sonnet-5-5-20260928", want: true},
+	} {
+		t.Run(test.model, func(t *testing.T) {
+			body := []byte(`{"model":"` + test.model + `"}`)
+			for _, explicit := range []bool{false, true} {
+				incoming := http.Header{}
+				if explicit {
+					incoming.Set("Anthropic-Beta", claudeMidConvToolChangesBeta)
+				}
+				req := newClaudeHeaderTestRequest(t, nil)
+				if err := applyClaudeHeaders(req, claudeOAuthAuthForBetaPolicy(), claudeRaceProbeOAuthKey, false, nil, body, nil, incoming, false); err != nil {
+					t.Fatalf("applyClaudeHeaders() error = %v", err)
+				}
+				betas := strings.Split(req.Header.Get("Anthropic-Beta"), ",")
+				contains := false
+				for _, beta := range betas {
+					contains = contains || beta == claudeMidConvToolChangesBeta
+				}
+				if contains != test.want {
+					t.Fatalf("explicit=%t outbound Anthropic-Beta = %v, want tool changes = %v", explicit, betas, test.want)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyClaudeHeaders280FeatureGates(t *testing.T) {
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key": "synthetic-key", "fingerprint_profile": "claude-code-cli",
+	}}
+	body := []byte(`{"model":"claude-fable-5-1","thinking":{"type":"adaptive","display":"updates"},"messages":[{"role":"system","content":[{"type":"tool_addition","tool":{"definition":{"name":"bash"}}}]}]}`)
+	incoming := http.Header{"Anthropic-Beta": {"future-caller-beta"}}
+	req := newClaudeHeaderTestRequest(t, nil)
+	if err := applyClaudeHeaders(req, auth, "synthetic-key", false, nil, body, nil, incoming, false); err != nil {
+		t.Fatal(err)
+	}
+	want := claudeCodeCLIBetas(body, nil, true) + ",future-caller-beta"
+	if got := req.Header.Get("Anthropic-Beta"); got != want {
+		t.Fatalf("outbound Anthropic-Beta = %q, want %q", got, want)
+	}
+	for _, beta := range []string{
+		claudePerTurnControlBeta, claudeMidConvSystemClearAtBeta, claudeInlineToolsBeta,
+		claudeThinkingBindingBeta, claudeThinkingDisplayUpdatesBeta,
+	} {
+		if !isManagedClaudeBeta(beta) || !strings.Contains(want, beta) {
+			t.Fatalf("missing managed feature beta %q from outbound header %q", beta, want)
+		}
+	}
+	for _, beta := range []string{
+		claudePerTurnTimingBeta, claudeDangerousToolUseBeta,
+		claudeThinkingResumptionBeta, claudePromptCachingEvictBeta,
+	} {
+		if !isManagedClaudeBeta(beta) || strings.Contains(want, beta) {
+			t.Fatalf("unrequested feature beta %q in outbound header %q", beta, want)
+		}
+	}
+}
+
+func TestWithClaudeAdvisorToolBetaPrecedes280CapabilityBetas(t *testing.T) {
+	betas := claudeCodeBeta + "," + claudeMidConvToolChangesBeta + "," +
+		claudeMidConvSystemClearAtBeta + "," + claudeThinkingBindingBeta + "," +
+		claudePromptCachingEvictBeta
+	want := claudeCodeBeta + "," + claudeMidConvToolChangesBeta + "," +
+		claudeAdvisorToolBeta + "," + claudeMidConvSystemClearAtBeta + "," +
+		claudeThinkingBindingBeta + "," + claudePromptCachingEvictBeta
+	if got := withClaudeAdvisorToolBeta(betas); got != want {
+		t.Fatalf("withClaudeAdvisorToolBeta() = %q, want %q", got, want)
+	}
+}
+
+func TestApplyClaudeHeadersPreservesNewerNativeClientVersion(t *testing.T) {
+	incoming := http.Header{"User-Agent": {"claude-cli/2.1.281 (external, cli)"}, "X-App": {"cli"}}
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key", "fingerprint_profile": "claude-code-cli"}}
+	req := newClaudeHeaderTestRequest(t, nil)
+	if err := applyClaudeHeaders(req, auth, "test-key", false, nil,
+		[]byte(`{"model":"claude-sonnet-5-5"}`), nil, incoming, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := req.Header.Get("User-Agent"); got != "claude-cli/2.1.281 (external, cli)" {
+		t.Fatalf("native User-Agent = %q, want caller version 2.1.281", got)
+	}
+	if version := helps.DefaultClaudeVersion(nil); version != "2.1.280" {
+		t.Fatalf("default CLI version = %q, want 2.1.280", version)
 	}
 }
 
@@ -252,7 +472,7 @@ func TestClassifyClaudeUpstreamError_FastModeCreditsIsRequestScoped(t *testing.T
 		[]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Fast mode requires usage credits"}}`),
 	}
 	for _, body := range bodies {
-		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, body)
+		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, body, false)
 
 		scoped, ok := err.(cliproxyexecutor.RequestScopedError)
 		if !ok || !scoped.IsRequestScoped() {
@@ -277,7 +497,7 @@ func TestClassifyClaudeUpstreamError_RealRateLimitStaysCredentialScoped(t *testi
 		[]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"This organization has exceeded its usage limit."}}`),
 	}
 	for _, body := range cases {
-		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, body)
+		err := classifyClaudeUpstreamError(http.StatusTooManyRequests, body, false)
 		if scoped, ok := err.(cliproxyexecutor.RequestScopedError); ok && scoped.IsRequestScoped() {
 			t.Fatalf("genuine rate limit was misclassified as request-scoped: %s", body)
 		}
@@ -288,7 +508,7 @@ func TestClassifyClaudeUpstreamError_OtherStatusesUnaffected(t *testing.T) {
 	body := []byte(`{"error":{"message":"Usage credits are required for fast mode."}}`)
 	// Only 429 carries the entitlement refusal; a 500 mentioning it is still a
 	// credential-scoped failure worth rotating away from.
-	err := classifyClaudeUpstreamError(http.StatusInternalServerError, body)
+	err := classifyClaudeUpstreamError(http.StatusInternalServerError, body, false)
 	if scoped, ok := err.(cliproxyexecutor.RequestScopedError); ok && scoped.IsRequestScoped() {
 		t.Fatal("non-429 status was misclassified as request-scoped")
 	}

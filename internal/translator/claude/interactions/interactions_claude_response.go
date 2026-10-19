@@ -10,6 +10,7 @@ import (
 
 	sigcompat "github.com/Pyrokine/CLIProxyAPI/v6/internal/signature"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -30,6 +31,7 @@ type claudeToInteractionsStreamState struct {
 	ActiveStepOpen     bool
 	CurrentStepByIndex map[int]string
 	ToolNames          map[int]string
+	ToolNamesReverse   map[string]string
 	ToolIDs            map[int]string
 	ToolArgs           map[int]*strings.Builder
 	Signatures         map[int]string
@@ -42,14 +44,16 @@ func convertClaudeResponseToInteractions(
 	param *any,
 ) [][]byte {
 	_ = ctx
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	if param == nil {
 		var local any
 		param = &local
 	}
 	if *param == nil {
-		*param = &claudeToInteractionsStreamState{Model: modelName}
+		*param = &claudeToInteractionsStreamState{
+			Model:            modelName,
+			ToolNamesReverse: util.ReverseToolNameMap(interactionsClaudeFunctionNameMap(originalRequestRawJSON)),
+		}
 	}
 	st := (*param).(*claudeToInteractionsStreamState)
 	st.Model = firstNonEmptyString(st.Model, modelName)
@@ -64,13 +68,21 @@ func convertClaudeResponseToInteractionsNonStream(
 	_ *any,
 ) []byte {
 	_ = ctx
-	_ = originalRequestRawJSON
 	_ = requestRawJSON
 	root := gjson.ParseBytes(rawJSON)
-	if root.Exists() && root.Get("content").Exists() {
-		return convertClaudeMessageToInteractions(modelName, root)
+	var out []byte
+	if root.Exists() && (root.Get("content").Exists() || root.Get("type").String() == "error") {
+		out = convertClaudeMessageToInteractions(modelName, root)
+	} else {
+		out = convertClaudeSSEToInteractionsNonStream(modelName, rawJSON)
 	}
-	return convertClaudeSSEToInteractionsNonStream(modelName, rawJSON)
+	reverse := util.ReverseToolNameMap(interactionsClaudeFunctionNameMap(originalRequestRawJSON))
+	for index, step := range gjson.GetBytes(out, "steps").Array() {
+		if step.Get("type").String() == "function_call" {
+			out, _ = sjson.SetBytes(out, fmt.Sprintf("steps.%d.name", index), util.RestoreSanitizedToolName(reverse, step.Get("name").String()))
+		}
+	}
+	return out
 }
 
 func convertClaudeMessageToInteractions(modelName string, root gjson.Result) []byte {
@@ -79,6 +91,16 @@ func convertClaudeMessageToInteractions(modelName string, root gjson.Result) []b
 		out, "id", firstNonEmptyString(root.Get("id").String(), fmt.Sprintf("interaction_%d", time.Now().UnixNano())),
 	)
 	out, _ = sjson.SetBytes(out, "model", firstNonEmptyString(root.Get("model").String(), modelName))
+	if root.Get("type").String() == "error" {
+		out, _ = sjson.SetBytes(out, "status", "failed")
+		errNode := root.Get("error")
+		if errNode.IsObject() {
+			out, _ = sjson.SetRawBytes(out, "error", []byte(errNode.Raw))
+		} else {
+			out, _ = sjson.SetRawBytes(out, "error", []byte(`{"type":"api_error","message":"upstream execution failed"}`))
+		}
+		return out
+	}
 	root.Get("content").ForEach(
 		func(_, part gjson.Result) bool {
 			if step := claudeContentBlockToInteractionsStep(part); len(step) > 0 {
@@ -130,6 +152,8 @@ func convertClaudeSSEToInteractionsNonStream(modelName string, rawJSON []byte) [
 			}
 		case "message_delta":
 			mergeClaudeUsage(st, root.Get("usage"))
+		case "error":
+			return convertClaudeMessageToInteractions(modelName, root)
 		}
 	}
 	out = setInteractionsUsageFromClaude(out, "usage", claudeMergedUsage(st))
@@ -137,6 +161,9 @@ func convertClaudeSSEToInteractionsNonStream(modelName string, rawJSON []byte) [
 }
 
 func convertClaudeEventToInteractions(modelName string, rawJSON []byte, st *claudeToInteractionsStreamState) [][]byte {
+	if st.Done {
+		return nil
+	}
 	payload := claudeInteractionsSSEPayload(rawJSON)
 	if len(payload) == 0 {
 		return nil
@@ -191,7 +218,10 @@ func claudeContentBlockStartToInteractions(
 	}
 	if stepType == "function_call" {
 		if name := block.Get("name").String(); name != "" {
+			name = util.RestoreSanitizedToolName(st.ToolNamesReverse, name)
 			st.ToolNames[index] = name
+			data, _ := sjson.SetBytes([]byte(block.Raw), "name", name)
+			block = gjson.ParseBytes(data)
 		}
 		if id := block.Get("id").String(); id != "" {
 			st.ToolIDs[index] = id
@@ -593,6 +623,7 @@ func appendClaudeInteractionsCompleted(
 		return out
 	}
 	out = appendClaudeInteractionsCreated(out, st, modelName)
+	out = appendClaudeInteractionsStepStop(out, st)
 	now := time.Now().UTC().Format(time.RFC3339)
 	completed := []byte(`{"interaction":{"id":"","status":"completed","usage":{},"created":"","updated":"","service_tier":"standard","object":"interaction","model":""},"event_type":"interaction.completed"}`)
 	completed, _ = sjson.SetBytes(completed, "interaction.id", st.ID)
@@ -604,7 +635,20 @@ func appendClaudeInteractionsCompleted(
 		usage = root.Get("usage")
 	}
 	completed = setInteractionsUsageFromClaude(completed, "interaction.usage", usage)
-	out = append(out, translatorcommon.SSEEventData("interaction.completed", completed))
+	eventType := "interaction.completed"
+	if root.Get("type").String() == "error" {
+		eventType = "interaction.failed"
+		completed, _ = sjson.SetBytes(completed, "event_type", eventType)
+		completed, _ = sjson.SetBytes(completed, "interaction.status", "failed")
+		errNode := root.Get("error")
+		if errNode.IsObject() {
+			completed, _ = sjson.SetRawBytes(completed, "interaction.error", []byte(errNode.Raw))
+		} else {
+			completed, _ = sjson.SetRawBytes(completed, "interaction.error", []byte(`{"type":"api_error","message":"upstream execution failed"}`))
+		}
+		st.Done = true
+	}
+	out = append(out, translatorcommon.SSEEventData(eventType, completed))
 	st.Completed = true
 	return out
 }

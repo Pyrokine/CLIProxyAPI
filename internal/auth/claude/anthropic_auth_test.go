@@ -88,6 +88,47 @@ func TestRefreshTokensWithRetry429BlocksImmediateReplay(t *testing.T) {
 	}
 }
 
+func TestRefreshTokensWithRetryDoesNotReplayAmbiguousFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		transport roundTripFunc
+	}{
+		{
+			name: "transport",
+			transport: func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("connection lost after request")
+			},
+		},
+		{
+			name: "decoding",
+			transport: func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"access_token":`)),
+					Request:    req,
+				}, nil
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resetClaudeRefreshState()
+			defer resetClaudeRefreshState()
+			var calls int
+			auth := &Auth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				return tt.transport(req)
+			})}}
+			_, err := auth.RefreshTokensWithRetry(context.Background(), "single-use-token", 3)
+			if err == nil || !strings.Contains(err.Error(), "after 1 attempts") || calls != 1 {
+				t.Fatalf("RefreshTokensWithRetry() = %v, calls = %d; want one attempt", err, calls)
+			}
+		})
+	}
+	if !isClaudeRefreshRetryable(&refreshHTTPError{status: http.StatusServiceUnavailable, retryable: true}) {
+		t.Fatal("explicit retryable HTTP response must remain retryable")
+	}
+}
+
 func TestRefreshTokensDeduplicatesConcurrentRefresh(t *testing.T) {
 	resetClaudeRefreshState()
 	defer resetClaudeRefreshState()

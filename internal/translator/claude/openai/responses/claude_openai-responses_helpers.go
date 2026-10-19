@@ -3,10 +3,13 @@ package responses
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/thinking"
 	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -179,14 +182,154 @@ func stripTrailingClaudeThinkingBlocks(messages [][]byte) [][]byte {
 	return messages
 }
 
+var claudeResponsesModelID = regexp.MustCompile(`^(?:claude-)?(fable|opus|sonnet)(?:-([0-9]{1,2})(?:[-.]([0-9]{1,2}))?(?:-[0-9]{8})?(?:-thinking)?)?$`)
+
 func claudeModelRejectsAssistantPrefill(modelName string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(modelName))
-	for _, family := range []string{"fable", "opus-5", "sonnet-4-6"} {
-		if strings.Contains(normalized, family) {
-			return true
+	normalized := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
+	normalized = normalized[strings.LastIndex(normalized, "/")+1:]
+	model := claudeResponsesModelID.FindStringSubmatch(normalized)
+	if len(model) == 0 {
+		return false
+	}
+	major, _ := strconv.Atoi(model[2])
+	minor, _ := strconv.Atoi(model[3])
+	return model[1] == "fable" || model[1] == "opus" && major >= 5 ||
+		model[1] == "sonnet" && (major > 4 || major == 4 && minor >= 6)
+}
+
+func claudeResponsesFunctionNameMap(identity *translatorcommon.ResponsesToolIdentity, root gjson.Result) map[string]string {
+	declarations := identity.Declarations()
+	names := make([]string, 0, len(declarations))
+	for _, declaration := range declarations {
+		names = append(names, declaration.QualifiedName)
+	}
+	var historyNames []string
+	for _, item := range root.Get("input").Array() {
+		switch item.Get("type").String() {
+		case "function_call", "custom_tool_call":
+			historyNames = append(historyNames, identity.ResolveName(item.Get("name").String(), item.Get("namespace").String()))
 		}
 	}
-	return false
+	return util.ChatFunctionNameMap(names, historyNames...)
+}
+
+func responsesClaudeInputImagePart(part gjson.Result) []byte {
+	url := part.Get("image_url").String()
+	if url == "" {
+		url = part.Get("url").String()
+	}
+	if url == "" {
+		return nil
+	}
+	var converted []byte
+	if source, inline := strings.CutPrefix(url, "data:"); inline {
+		mediaType, data, base64 := strings.Cut(source, ";base64,")
+		if !base64 || data == "" {
+			return nil
+		}
+		if mediaType == "" {
+			mediaType = "application/octet-stream"
+		}
+		converted = []byte(`{"type":"image","source":{"type":"base64","media_type":"","data":""}}`)
+		converted, _ = sjson.SetBytes(converted, "source.media_type", mediaType)
+		converted, _ = sjson.SetBytes(converted, "source.data", data)
+	} else {
+		converted = []byte(`{"type":"image","source":{"type":"url","url":""}}`)
+		converted, _ = sjson.SetBytes(converted, "source.url", url)
+	}
+	return translatorcommon.AttachCacheControl(converted, part)
+}
+
+func responsesClaudeToolOutputParts(output gjson.Result) [][]byte {
+	var parts [][]byte
+	appendText := func(text string, source gjson.Result) {
+		if text == "" {
+			return
+		}
+		part := []byte(`{"type":"text","text":""}`)
+		part, _ = sjson.SetBytes(part, "text", text)
+		parts = append(parts, translatorcommon.AttachCacheControl(part, source))
+	}
+	if !output.IsArray() {
+		appendText(translatorcommon.ResponsesToolOutputText(output), gjson.Result{})
+		return parts
+	}
+	for _, part := range output.Array() {
+		if part.Get("type").String() == "input_image" {
+			if image := responsesClaudeInputImagePart(part); len(image) > 0 {
+				parts = append(parts, image)
+				continue
+			}
+		}
+		if part.Type == gjson.String {
+			appendText(part.String(), gjson.Result{})
+		} else if text := part.Get("text"); text.Type == gjson.String {
+			appendText(text.String(), part)
+		} else {
+			appendText(part.Raw, part)
+		}
+	}
+	return parts
+}
+
+func claudeThinkingSeparatorForToolUse(parts [][]byte) []byte {
+	if len(parts) == 0 || gjson.GetBytes(parts[len(parts)-1], "type").String() != "web_search_tool_result" {
+		return nil
+	}
+	for index := len(parts) - 1; index >= 0; index-- {
+		if gjson.GetBytes(parts[index], "type").String() == "thinking" {
+			return parts[index]
+		}
+	}
+	return nil
+}
+
+func claudeMessageInvariantProblems(messages [][]byte) []string {
+	var problems []string
+	if len(messages) > 0 && gjson.GetBytes(messages[0], "role").String() != "user" {
+		problems = append(problems, "first message is not user")
+	}
+	pending := make(map[string]struct{})
+	for index, message := range messages {
+		root := gjson.ParseBytes(message)
+		content := root.Get("content")
+		switch root.Get("role").String() {
+		case "assistant":
+			for id := range pending {
+				problems = append(problems, "tool_use "+id+" has no following user tool_result")
+			}
+			clear(pending)
+			for _, block := range content.Array() {
+				if block.Get("type").String() == "tool_use" {
+					pending[block.Get("id").String()] = struct{}{}
+				}
+			}
+		case "user":
+			leading := true
+			for _, block := range content.Array() {
+				if block.Get("type").String() != "tool_result" {
+					leading = false
+					continue
+				}
+				id := block.Get("tool_use_id").String()
+				if !leading {
+					problems = append(problems, "messages["+strconv.Itoa(index)+"] tool_result after non-tool_result block")
+				}
+				if _, exists := pending[id]; !exists {
+					problems = append(problems, "tool_result "+id+" has no tool_use in the previous message")
+				}
+				delete(pending, id)
+			}
+			for id := range pending {
+				problems = append(problems, "tool_use "+id+" has no tool_result in messages["+strconv.Itoa(index)+"]")
+			}
+			clear(pending)
+		}
+	}
+	for id := range pending {
+		problems = append(problems, "tool_use "+id+" has no following user tool_result")
+	}
+	return problems
 }
 
 func normalizeCodexAgentMessages(payload []byte) []byte {
