@@ -1,6 +1,6 @@
 module github.com/router-for-me/CLIProxyAPIPlugins/jshandler
 
-go 1.27.0
+go 1.27.2
 
 require (
 	github.com/Pyrokine/CLIProxyAPI/v6 v6.0.0
