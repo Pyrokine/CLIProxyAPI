@@ -9,14 +9,17 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// DoKimiLogin triggers the OAuth device flow for Kimi (Moonshot AI) and saves tokens.
-// It initiates the device flow authentication, displays the verification URL for the user,
-// and waits for authorization before saving the tokens.
-//
-// Parameters:
-//   - cfg: The application configuration containing proxy and auth directory settings
-//   - options: Login options including browser behavior settings
-func DoKimiLogin(cfg *config.Config, options *LoginOptions) {
+// DoKimiLogin starts the selected Kimi OAuth device flow and saves its credentials.
+func DoKimiLogin(cfg *config.Config, options *LoginOptions, provider string) {
+	displayName := "Kimi.com"
+	switch provider {
+	case "kimi":
+	case "kimi-ai":
+		displayName = "Kimi.ai"
+	default:
+		log.Errorf("unsupported Kimi login provider: %s", provider)
+		return
+	}
 	if options == nil {
 		options = &LoginOptions{}
 	}
@@ -28,9 +31,9 @@ func DoKimiLogin(cfg *config.Config, options *LoginOptions) {
 		Prompt:    options.Prompt,
 	}
 
-	record, savedPath, err := manager.Login(context.Background(), "kimi", cfg, authOpts)
+	record, savedPath, err := manager.Login(context.Background(), provider, cfg, authOpts)
 	if err != nil {
-		log.Errorf("Kimi authentication failed: %v", err)
+		log.Errorf("%s authentication failed: %v", displayName, err)
 		return
 	}
 
@@ -40,5 +43,5 @@ func DoKimiLogin(cfg *config.Config, options *LoginOptions) {
 	if record != nil && record.Label != "" {
 		fmt.Printf("Authenticated as %s\n", record.Label)
 	}
-	fmt.Println("Kimi authentication successful!")
+	fmt.Printf("%s authentication successful!\n", displayName)
 }

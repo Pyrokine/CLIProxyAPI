@@ -4,10 +4,12 @@
 package kimi
 
 import (
+	"maps"
 	"strings"
 	"time"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/auth"
+	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // TokenStorage stores OAuth2 token information for Kimi API authentication.
@@ -24,12 +26,24 @@ type TokenStorage struct {
 	DeviceID string `json:"device_id,omitempty"`
 	// Expired is the RFC3339 timestamp when the access token expires.
 	Expired string `json:"expired,omitempty"`
-	// Type indicates the authentication provider type, always "kimi" for this storage.
+	// Type identifies the Kimi provider.
 	Type string `json:"type"`
+	// Domain identifies the Kimi service used for OAuth.
+	Domain string `json:"domain,omitempty"`
+	// BaseURL is the matching API endpoint.
+	BaseURL string `json:"base_url,omitempty"`
 
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.
 	Metadata map[string]any `json:"-"`
+}
+
+func (ts *TokenStorage) CloneForPersistence() coreauth.TokenStorage {
+	if ts == nil {
+		return nil
+	}
+	copyStorage := *ts
+	return &copyStorage
 }
 
 // SetMetadata injects metadata before the token is persisted.
@@ -37,10 +51,22 @@ func (ts *TokenStorage) SetMetadata(meta map[string]any) {
 	ts.Metadata = meta
 }
 
-// BuildMetadata constructs the standard metadata map for a Kimi auth bundle.
+// BuildMetadata constructs the standard metadata map for a Kimi Code auth bundle.
 func BuildMetadata(bundle *AuthBundle) map[string]any {
+	return BuildMetadataForDomain(bundle, KimiDefaultDomain)
+}
+
+// BuildMetadataForDomain includes the provider and API endpoint for the selected Kimi service.
+func BuildMetadataForDomain(bundle *AuthBundle, domain string) map[string]any {
+	domain = kimiDomain(domain)
+	provider := "kimi"
+	if IsKimiAIDomain(domain) {
+		provider = "kimi-ai"
+	}
 	metadata := map[string]any{
-		"type":          "kimi",
+		"type":          provider,
+		"domain":        domain,
+		"base_url":      ResolveKimiAPIBaseURL(domain),
 		"access_token":  bundle.TokenData.AccessToken,
 		"refresh_token": bundle.TokenData.RefreshToken,
 		"token_type":    bundle.TokenData.TokenType,
@@ -96,6 +122,21 @@ type DeviceCodeResponse struct {
 
 // SaveTokenToFile serializes the token storage to a JSON file.
 func (ts *TokenStorage) SaveTokenToFile(authFilePath string) error {
-	ts.Type = "kimi"
-	return auth.SaveTokenJSON(authFilePath, ts, ts.Metadata)
+	if IsKimiAIDomain(ts.Type) || IsKimiAIDomain(ts.Domain) {
+		ts.Type = "kimi-ai"
+		ts.Domain = KimiAIDomain
+	} else {
+		ts.Type = "kimi"
+		ts.Domain = KimiDefaultDomain
+	}
+	if ts.BaseURL == "" {
+		ts.BaseURL = ResolveKimiAPIBaseURL(ts.Domain)
+	}
+	metadata := maps.Clone(ts.Metadata)
+	for _, field := range []string{
+		"type", "domain", "base_url", "access_token", "refresh_token", "token_type", "scope", "device_id", "expired",
+	} {
+		delete(metadata, field)
+	}
+	return auth.SaveTokenJSON(authFilePath, ts, metadata)
 }

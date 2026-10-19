@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -53,6 +54,52 @@ func waitForKimiUsageRecord(t *testing.T, records <-chan usage.Record, alias str
 	}
 }
 
+func TestKimiAIChatRecordsFinalNativeReasoningEffort(t *testing.T) {
+	for _, effort := range []string{"high", "none", "auto"} {
+		t.Run(effort, func(t *testing.T) {
+			plugin := &captureUsagePlugin{records: make(chan usage.Record, 4)}
+			registerTestUsagePlugin(t, plugin)
+			alias := "kimi-ai-native-" + effort
+			ctx := usage.WithRequestedModelAlias(context.Background(), alias)
+			var body []byte
+			ctx = util.WithRoundTripper(ctx, kimiTokenRoundTripper(func(req *http.Request) (*http.Response, error) {
+				var err error
+				body, err = io.ReadAll(req.Body)
+				if err != nil {
+					return nil, err
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader(`{"id":"fixture-response","object":"chat.completion","model":"kimi-k3","choices":[{"index":0,"message":{"role":"assistant","content":"fixture"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))}, nil
+			}))
+			executor := NewKimiAIExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Provider: "kimi-ai", Metadata: map[string]any{"access_token": "fixture-key"}}
+			payload := []byte(`{"model":"kimi-k3","messages":[{"role":"user","content":"fixture"}],"reasoning_effort":"` + effort + `"}`)
+			if _, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload},
+				cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}); err != nil {
+				t.Fatal(err)
+			}
+			wantType := "enabled"
+			if effort == "none" {
+				wantType = "disabled"
+			}
+			if gjson.GetBytes(body, "thinking.type").String() != wantType {
+				t.Fatalf("final native thinking = %s", body)
+			}
+			wantEffort := effort
+			if effort == "auto" {
+				wantEffort = "low"
+			}
+			if wantType == "enabled" && gjson.GetBytes(body, "thinking.effort").String() != wantEffort {
+				t.Fatalf("final native effort changed: %s", body)
+			}
+			record := waitForKimiUsageRecord(t, plugin.records, alias)
+			if record.Provider != "kimi-ai" || record.ReasoningEffort != wantEffort {
+				t.Fatalf("usage provider=%q effort=%q, want kimi-ai/%s; body=%s", record.Provider, record.ReasoningEffort, wantEffort, body)
+			}
+		})
+	}
+}
+
 func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
 	cfg := &config.Config{}
 	executor := NewKimiExecutor(cfg)
@@ -91,6 +138,50 @@ func TestKimiExecutorRequestToFormatMatchesWireProtocol(t *testing.T) {
 				t.Fatalf("RequestToFormat() = %q, want %q", got, testCase.want)
 			}
 		})
+	}
+}
+
+func TestKimiExecutorResponsesNormalizesCompleteToolBatch(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, provider := range []string{"kimi", "kimi-ai"} {
+			t.Run(provider+"/"+map[bool]string{false: "non-stream", true: "stream"}[stream], func(t *testing.T) {
+				var upstreamBody []byte
+				ctx := util.WithRoundTripper(context.Background(), kimiTokenRoundTripper(func(req *http.Request) (*http.Response, error) {
+					var err error
+					upstreamBody, err = io.ReadAll(req.Body)
+					if err != nil {
+						return nil, err
+					}
+					body := `{"id":"fixture-response","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`
+					if stream {
+						body = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + body + "}\n\n"
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+				}))
+				payload := []byte(`{"input":[{"type":"function_call","call_id":"a","name":"one","arguments":"{}"},{"type":"function_call","call_id":"b","name":"two","arguments":"{}"},{"role":"developer","content":"keep"},{"type":"function_call_output","call_id":"a","output":"first"},{"type":"function_call_output","call_id":"b","output":"second"}]}`)
+				exec := NewKimiExecutor(&config.Config{})
+				auth := &cliproxyauth.Auth{Provider: provider, Metadata: map[string]any{"access_token": "fixture-key"}}
+				req := cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse, ResponseFormat: sdktranslator.FormatOpenAIResponse, Stream: stream}
+				if stream {
+					result, err := exec.ExecuteStream(ctx, auth, req, opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for chunk := range result.Chunks {
+						if chunk.Err != nil {
+							t.Fatal(chunk.Err)
+						}
+					}
+				} else if _, err := exec.Execute(ctx, auth, req, opts); err != nil {
+					t.Fatal(err)
+				}
+				items := gjson.GetBytes(upstreamBody, "input").Array()
+				if len(items) != 5 || items[2].Get("call_id").String() != "a" || items[3].Get("call_id").String() != "b" || items[4].Get("role").String() != "developer" {
+					t.Fatalf("outbound batch order = %s", upstreamBody)
+				}
+			})
+		}
 	}
 }
 
@@ -1049,5 +1140,133 @@ func TestNormalizeKimiToolMessageLinks_PreservesAssistantWithToolLinkOrReasoning
 	}
 	if got := messages[3].Get("content.0.text").String(); got != " visible " {
 		t.Fatalf("messages.3.content.0.text = %q, want %q", got, " visible ")
+	}
+}
+
+func TestKimiResponseTranslationFailureMatchesUsage(t *testing.T) {
+	for _, provider := range []string{"kimi", "kimi-ai"} {
+		for _, mode := range []struct {
+			name   string
+			format sdktranslator.Format
+			stream bool
+			path   string
+		}{
+			{"chat", sdktranslator.FormatOpenAI, false, "/v1/chat/completions"},
+			{"chat-stream", sdktranslator.FormatOpenAI, true, "/v1/chat/completions"},
+			{"responses", sdktranslator.FormatOpenAIResponse, false, "/v1/responses"},
+			{"responses-stream", sdktranslator.FormatOpenAIResponse, true, "/v1/responses"},
+		} {
+			for _, tc := range []struct {
+				name       string
+				errorState bool
+				output     []byte
+				failed     bool
+			}{
+				{"empty-with-error", true, nil, true},
+				{"output-with-error", true, []byte(`{"error":"translation rejected"}`), true},
+				{"empty-without-error", false, nil, true},
+				{"success", false, []byte(`{"result":"ok"}`), false},
+			} {
+				if mode.stream && tc.name == "empty-without-error" {
+					continue
+				}
+				t.Run(provider+"/"+mode.name+"/"+tc.name, func(t *testing.T) {
+					format := sdktranslator.Format("formal-" + provider + "-" + mode.name + "-" + tc.name)
+					setState := func(param *any) {
+						if tc.errorState {
+							*param = xaiCompactTranslationFailure{}
+						}
+					}
+					sdktranslator.Register(format, mode.format, nil, sdktranslator.ResponseTransform{
+						NonStream: func(_ context.Context, _ string, _, _, _ []byte, param *any) []byte {
+							setState(param)
+							return bytes.Clone(tc.output)
+						},
+						Stream: func(_ context.Context, _ string, _, _, raw []byte, param *any) [][]byte {
+							if !bytes.HasPrefix(raw, []byte("data:")) {
+								return nil
+							}
+							setState(param)
+							if len(tc.output) == 0 {
+								return nil
+							}
+							return [][]byte{bytes.Clone(tc.output)}
+						},
+					})
+					t.Cleanup(func() { sdktranslator.Register(format, mode.format, nil, sdktranslator.ResponseTransform{}) })
+					ctx, finish := xaiOutcomeContext(t)
+					calls := 0
+					ctx = util.WithRoundTripper(ctx, xaiOutcomeTransport(func(req *http.Request) (*http.Response, error) {
+						calls++
+						if req.URL.Host != "kimi-fixture.invalid" || req.URL.Path != mode.path {
+							return nil, errors.New("unexpected synthetic target: " + req.URL.String())
+						}
+						body := `{"id":"kimi-chat","choices":[{"message":{"role":"assistant","content":"ok"},"delta":{"content":"ok"}}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`
+						if mode.format == sdktranslator.FormatOpenAIResponse {
+							body = `{"id":"kimi-response","object":"response","status":"completed","output":[],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}`
+							if mode.stream {
+								body = `{"type":"response.completed","response":` + body + `}`
+							}
+						}
+						if mode.stream {
+							body = "data: " + body + "\n\n"
+						}
+						return xaiOutcomeHTTPResponse(req, body), nil
+					}))
+					exec := NewKimiExecutor(&config.Config{})
+					if provider == "kimi-ai" {
+						exec = NewKimiAIExecutor(&config.Config{})
+					}
+					auth := &cliproxyauth.Auth{ID: "kimi-translation-synthetic", Provider: provider, Attributes: map[string]string{"base_url": "https://kimi-fixture.invalid/v1", "api_key": "synthetic-fixture"}}
+					payload := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
+					if mode.format == sdktranslator.FormatOpenAIResponse {
+						payload = []byte(`{"input":"hello"}`)
+					}
+					req := cliproxyexecutor.Request{Model: "kimi-k3", Payload: payload}
+					opts := cliproxyexecutor.Options{SourceFormat: mode.format, ResponseFormat: format, Stream: mode.stream}
+					var output []byte
+					var resultErr error
+					if mode.stream {
+						result, err := exec.ExecuteStream(ctx, auth, req, opts)
+						if err != nil {
+							t.Fatal(err)
+						}
+						for chunk := range result.Chunks {
+							output = append(output, chunk.Payload...)
+							if chunk.Err != nil {
+								resultErr = chunk.Err
+							}
+						}
+					} else {
+						response, err := exec.Execute(ctx, auth, req, opts)
+						output, resultErr = response.Payload, err
+					}
+					if tc.failed {
+						if statusErrCode(resultErr) != http.StatusBadGateway || len(output) != 0 {
+							t.Errorf("translation failure accepted: error=%v output=%s", resultErr, output)
+						}
+						if tc.errorState && resultErr != nil && !strings.Contains(resultErr.Error(), "translation rejected") {
+							t.Errorf("translation reason lost: %v", resultErr)
+						}
+					} else if resultErr != nil || !bytes.Equal(output, tc.output) {
+						t.Errorf("success changed: error=%v output=%s", resultErr, output)
+					}
+					if calls != 1 {
+						t.Errorf("calls=%d, want 1", calls)
+					}
+					records := finish()
+					if len(records) != 1 {
+						t.Fatalf("usage records=%d, want 1", len(records))
+					}
+					record := records[0]
+					if record.Failed != tc.failed || record.Completed == tc.failed || record.Detail.InputTokens != 7 || record.Detail.OutputTokens != 3 || record.Detail.TotalTokens != 10 {
+						t.Errorf("usage contradicts final outcome: %+v", record)
+					}
+					if tc.failed && record.Fail.Body == "" {
+						t.Errorf("failure reason missing: %+v", record)
+					}
+				})
+			}
+		}
 	}
 }
