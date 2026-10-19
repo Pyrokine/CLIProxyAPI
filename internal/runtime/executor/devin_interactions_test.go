@@ -1,8 +1,12 @@
 package executor
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	sdktranslator "github.com/Pyrokine/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 func TestParseDevinInteractionsPayloadPreservesHistoryAndTools(t *testing.T) {
@@ -67,6 +71,47 @@ func TestParseDevinInteractionsPayloadPreservesHistoryAndTools(t *testing.T) {
 	if parsed.tools[0].Description != "Read a file without rewriting task_id." ||
 		!strings.Contains(string(parsed.tools[0].Parameters), `"task_id"`) {
 		t.Fatalf("tool definition was rewritten: %#v", parsed.tools[0])
+	}
+}
+
+func TestDevinInteractionResultPrefersCallIDOverUnrelatedStepID(t *testing.T) {
+	payload := []byte(`{"input":[{"type":"function_call","id":"item-1","call_id":"call-1","name":"read_file","arguments":{}},{"type":"function_result","id":"step-id","call_id":"call-1","result":"found"}]}`)
+	parsed := parseDevinInteractionsPayload(payload, nil)
+	if len(parsed.prompts) != 2 || len(parsed.prompts[0].ToolCalls) != 1 {
+		t.Fatalf("tool prompts = %#v", parsed.prompts)
+	}
+	if parsed.prompts[0].ToolCalls[0].ID != "call-1" || parsed.prompts[1].ToolCallID != "call-1" || parsed.prompts[1].Content != "found" {
+		t.Fatalf("tool call/result pairing = %#v", parsed.prompts)
+	}
+}
+
+func TestDevinToolResultPairingFromTranslatedRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format sdktranslator.Format
+		body   string
+		id     string
+		result string
+	}{
+		{
+			name: "Claude", format: sdktranslator.FormatClaude, id: "toolu_abc_123", result: "file.txt",
+			body: `{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_abc_123","name":"bash","input":{"command":"ls"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc_123","content":"file.txt"}]}]}`,
+		},
+		{
+			name: "OpenAI", format: sdktranslator.FormatOpenAI, id: "call_xyz_456", result: "package main",
+			body: `{"messages":[{"role":"assistant","tool_calls":[{"id":"call_xyz_456","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"main.go\"}"}}]},{"role":"tool","tool_call_id":"call_xyz_456","content":"package main"}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			translated, err := sdktranslator.TranslateRequestChecked(context.Background(), tc.format, sdktranslator.FormatInteractions, "devin/swe-2", []byte(tc.body), false)
+			if err != nil {
+				t.Fatalf("translate tool history: %v", err)
+			}
+			prompts := parseDevinInteractionsPayload(translated, nil).prompts
+			if len(prompts) != 2 || len(prompts[0].ToolCalls) != 1 || prompts[0].ToolCalls[0].ID != tc.id || prompts[1].ToolCallID != tc.id || prompts[1].Content != tc.result {
+				t.Fatalf("translated tool call/result pairing = %#v, payload = %s", prompts, translated)
+			}
+		})
 	}
 }
 
@@ -163,5 +208,51 @@ func TestParseDevinMessagesFallbackPreservesToolCallIdentity(t *testing.T) {
 	}
 	if len(parsed.tools) != 1 || parsed.tools[0].Name != "lookup" || string(parsed.tools[0].Parameters) != `{"type":"object"}` {
 		t.Fatalf("tools = %#v", parsed.tools)
+	}
+}
+
+func TestDevinDirectToolDeclarationsPreserveAliases(t *testing.T) {
+	for _, tools := range []string{
+		`[{"function_declarations":[{"name":"lookup","parameters":{"type":"object"}}]}]`,
+		`[{"functionDeclarations":[{"name":"lookup","parametersJsonSchema":{"type":"object"}}]}]`,
+		`[{"name":"lookup","parametersJsonSchema":{"type":"object"}}]`,
+		`[{"function":{"name":"lookup","parametersJsonSchema":{"type":"object"}}}]`,
+		`[{"type":"namespace","name":"mcp__codex_app","children":[{"name":"automation_update"},{"name":"lookup","parameters":{"type":"object"}}]}]`,
+	} {
+		parsed := parseDevinTools(gjson.Parse(tools))
+		if len(parsed) != 1 || parsed[0].Name != "lookup" || string(parsed[0].Parameters) != `{"type":"object"}` {
+			t.Errorf("tool declarations changed: %s -> %+v", tools, parsed)
+		}
+	}
+}
+
+func TestDevinToolResultProjectionPreservesBusinessValues(t *testing.T) {
+	for _, test := range []struct{ input, want string }{
+		{`{"content":"package main"}`, `{"content":"package main"}`},
+		{`{"content":{"file":"main.go"}}`, `{"content":{"file":"main.go"}}`},
+		{`{"output":"permission denied","exit_code":1}`, `{"output":"permission denied","exit_code":1}`},
+		{`{"type":"text","text":"business","exit_code":1}`, `{"type":"text","text":"business","exit_code":1}`},
+		{`{"content":["first","second"]}`, `{"content":["first","second"]}`},
+		{`[{"type":"text","text":"block"},"quoted"]`, "block\n\"quoted\""},
+		{`{"content":{"type":"text","text":"wrapped"},"cache_control":{"type":"ephemeral"}}`, "wrapped"},
+		{`{"output":{"type":"text","text":"wrapped"}}`, "wrapped"},
+		{`[{"type":"tool_result","content":""}]`, ""},
+		{`"   "`, "   "},
+		{`""`, ""},
+	} {
+		got, images := devinToolResultContent(gjson.Parse(test.input))
+		if got != test.want || len(images) != 0 {
+			t.Errorf("result %s -> %q, want %q; images=%d", test.input, got, test.want, len(images))
+		}
+	}
+}
+
+func TestDevinOriginalToolResultImagesFollowCallIdentity(t *testing.T) {
+	encoded := devinContractPNG(t, 9)
+	payload := []byte(`{"input":[{"type":"function_call","id":"call_image","name":"screenshot","arguments":{}},{"type":"function_result","call_id":"call_image","result":"captured"}]}`)
+	original := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_image","name":"screenshot","input":{}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_image","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + encoded + `"}}]}]}]}`)
+	parsed := parseDevinInteractionsPayload(payload, original)
+	if len(parsed.prompts) != 2 || parsed.prompts[1].ToolCallID != "call_image" || len(parsed.prompts[1].Images) != 1 || parsed.prompts[1].Images[0].Base64Data != encoded {
+		t.Fatalf("original tool image association changed: %+v", parsed.prompts)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/cache"
+	translatorcommon "github.com/Pyrokine/CLIProxyAPI/v6/internal/translator/common"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protowire"
 )
@@ -55,10 +56,13 @@ type DevinToolCall struct {
 
 // DevinToolCallDelta represents one streamed tool call fragment.
 type DevinToolCallDelta struct {
-	ID        string
-	Name      string
-	Arguments string
-	Index     int
+	ID               string
+	Name             string
+	Arguments        string
+	InvalidJSONStr   string
+	InvalidJSONErr   string
+	IsCustomToolCall bool
+	Index            int
 }
 
 // DevinImage represents an image attachment in request history.
@@ -237,14 +241,13 @@ func BuildDevinClientMetadataBytes(sessionToken, deviceSeed, osName string) []by
 	}
 	fingerprint := GenerateDevinDeviceFingerprint(deviceSeed)
 	metadata := make([]byte, 0, 1024)
-	metadata = appendDevinStringField(metadata, 1, "devin-cli")
+	metadata = appendDevinStringField(metadata, 1, DevinDefaultClientName)
 	metadata = appendDevinStringField(metadata, 2, DevinDefaultClientVersion)
 	metadata = appendDevinStringField(metadata, 3, sessionToken)
 	metadata = appendDevinStringField(metadata, 4, "en")
 	metadata = appendDevinStringField(metadata, 5, osName)
 	metadata = appendDevinStringField(metadata, 7, DevinDefaultClientVersion)
 	metadata = appendDevinStringField(metadata, 12, DevinDefaultClientName)
-	metadata = appendDevinStringField(metadata, 28, DevinDefaultClientName)
 	metadata = appendDevinStringField(metadata, 31, fingerprint)
 	return metadata
 }
@@ -359,12 +362,17 @@ func BuildDevinGetChatMessageRequest(
 	request = appendDevinBytesField(request, 8, completion)
 
 	for _, tool := range tools {
-		encoded := make([]byte, 0, len(tool.Name)+len(tool.Description)+len(tool.Parameters)+16)
-		if tool.Name != "" {
-			encoded = appendDevinStringField(encoded, 1, tool.Name)
+		if tool.Name == "" || translatorcommon.IsDevinCodexAppAutomationUpdate("", tool.Name) {
+			continue
 		}
-		if tool.Description != "" {
-			encoded = appendDevinStringField(encoded, 2, tool.Description)
+		description := strings.ReplaceAll(
+			tool.Description, "Takes a task_id parameter identifying the task", "Takes a taskId parameter identifying the task",
+		)
+		description = translatorcommon.SanitizeDevinToolDescription(tool.Name, description)
+		encoded := make([]byte, 0, len(tool.Name)+len(description)+len(tool.Parameters)+16)
+		encoded = appendDevinStringField(encoded, 1, tool.Name)
+		if description != "" {
+			encoded = appendDevinStringField(encoded, 2, description)
 		}
 		if len(tool.Parameters) > 0 {
 			encoded = appendDevinBytesField(encoded, 3, tool.Parameters)
@@ -522,8 +530,9 @@ func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
 			return result, protowire.ParseError(consumed)
 		}
 		position += consumed
-		if (number >= 1 && number <= 3 && wireType != protowire.BytesType) ||
-			(number == 4 && wireType != protowire.VarintType) {
+		if ((number >= 1 && number <= 3) || number == 5) && wireType != protowire.BytesType ||
+			number == 4 && wireType != protowire.VarintType && wireType != protowire.BytesType ||
+			number == 6 && wireType != protowire.VarintType {
 			return result, fmt.Errorf("tool call field %d has unexpected wire type %d", number, wireType)
 		}
 		switch wireType {
@@ -533,11 +542,14 @@ func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
 				return result, protowire.ParseError(size)
 			}
 			position += size
-			if number == 4 {
+			switch number {
+			case 4:
 				if value > uint64(math.MaxInt) {
 					return result, fmt.Errorf("tool call index overflows int: %d", value)
 				}
 				result.Index = int(value)
+			case 6:
+				result.IsCustomToolCall = value != 0
 			}
 		case protowire.BytesType:
 			value, size := protowire.ConsumeBytes(data[position:])
@@ -552,6 +564,10 @@ func parseDevinToolCallDelta(data []byte) (DevinToolCallDelta, error) {
 				result.Name = string(value)
 			case 3:
 				result.Arguments = string(value)
+			case 4:
+				result.InvalidJSONStr = string(value)
+			case 5:
+				result.InvalidJSONErr = string(value)
 			}
 		default:
 			size := protowire.ConsumeFieldValue(number, wireType, data[position:])
@@ -632,7 +648,11 @@ func ParseDevinTrailerError(payload []byte) (int, error) {
 	case "unauthenticated":
 		statusCode = http.StatusUnauthorized
 	case "permission_denied":
-		statusCode = http.StatusForbidden
+		if strings.Contains(messageLower, "high demand") {
+			statusCode = http.StatusTooManyRequests
+		} else {
+			statusCode = http.StatusForbidden
+		}
 	case "resource_exhausted":
 		statusCode = http.StatusTooManyRequests
 	case "unavailable":

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -46,8 +47,29 @@ func TestBuildAuthorizationURLUsesPKCEAndState(t *testing.T) {
 	query := parsed.Query()
 	if query.Get("redirect_uri") != "http://127.0.0.1:1234/callback" ||
 		query.Get("code_challenge") != "challenge+/" ||
-		query.Get("code_challenge_method") != "S256" || query.Get("state") != "state value" {
+		query.Get("code_challenge_method") != "S256" || query.Get("state") != "state value" ||
+		query.Has("cli_pkce_marker") {
 		t.Fatalf("authorization query = %v", query)
+	}
+	if want := "redirect_uri=http%3A%2F%2F127.0.0.1%3A1234%2Fcallback&state=state+value&prompt=select_account&code_challenge=challenge%2B%2F&code_challenge_method=S256"; parsed.RawQuery != want {
+		t.Fatalf("authorization raw query = %q, want %q", parsed.RawQuery, want)
+	}
+}
+
+func TestBuildAuthorizationURLHeadlessOmitsCallbackAndSetsMarker(t *testing.T) {
+	service := NewDevinAuthService(nil)
+	for _, redirectURI := range []string{"", " \t"} {
+		authURL := service.BuildAuthorizationURL(redirectURI, "challenge", "state")
+		parsed, err := url.Parse(authURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsed.Query().Has("redirect_uri") || parsed.Query().Get("cli_pkce_marker") != "1" {
+			t.Fatalf("headless authorization query = %v", parsed.Query())
+		}
+		if want := "state=state&prompt=select_account&code_challenge=challenge&code_challenge_method=S256&cli_pkce_marker=1"; parsed.RawQuery != want {
+			t.Fatalf("headless authorization raw query = %q, want %q", parsed.RawQuery, want)
+		}
 	}
 }
 
@@ -146,6 +168,37 @@ func TestOAuthServerReceivesCallbackAndHonorsContext(t *testing.T) {
 	cancel()
 	if _, err = cancelledServer.WaitForCallbackWithContext(ctx, time.Minute); err == nil {
 		t.Fatal("cancelled wait error = nil")
+	}
+}
+
+func TestOAuthCallbackPreservesErrorDescription(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		code        string
+		description string
+		want        string
+	}{
+		{name: "code and description", code: "access_denied", description: "user denied", want: "access_denied: user denied"},
+		{name: "description only", description: "user denied", want: "user denied"},
+		{name: "HTML description", code: "access_denied", description: "<script>alert(1)</script>", want: "access_denied: <script>alert(1)</script>"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := NewOAuthServer(0)
+			query := url.Values{"error": {test.code}, "error_description": {test.description}, "state": {"expected-state"}}
+			request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/callback?"+query.Encode(), nil)
+			response := httptest.NewRecorder()
+			server.handleCallback(response, request)
+			result, err := server.WaitForCallbackWithContext(context.Background(), time.Second)
+			if err != nil || result == nil || result.Error != test.want || result.State != "expected-state" {
+				t.Fatalf("callback result = %+v, error = %v, want %q", result, err, test.want)
+			}
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), html.EscapeString(test.want)) {
+				t.Fatalf("callback response = %d %s, want escaped rejection", response.Code, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "<script>") {
+				t.Fatalf("callback response contains unescaped description: %s", response.Body.String())
+			}
+		})
 	}
 }
 

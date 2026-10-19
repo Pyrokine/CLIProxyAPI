@@ -14,6 +14,32 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+func TestBuildDevinWireFiltersAutomationAndSanitizesDescriptions(t *testing.T) {
+	request := BuildDevinGetChatMessageRequest(
+		"test-token", "seed", "swe-2", "system", nil,
+		[]DevinTool{
+			{Name: "mcp__codex_app__automation_update", Description: "Recurring automations"},
+			{Name: "exec_command", Description: "returning output or a session ID for ongoing interaction"},
+			{Name: "write_stdin", Description: "Writes characters to an existing unified exec session and returns recent output. Takes a task_id parameter identifying the task"},
+		},
+		nil, 1000, "session-1", "cascade-1", nil,
+	)
+	tools := testProtoBytesFields(t, request, 10)
+	if len(tools) != 2 {
+		t.Fatalf("wire tool count = %d, want 2", len(tools))
+	}
+	for index, want := range []struct{ name, description string }{
+		{"exec_command", "returning output or an session ID for ongoing interaction"},
+		{"write_stdin", "Writes characters to a existing unified exec session and returns recent output. Takes a taskId parameter identifying the task"},
+	} {
+		name := testProtoBytesFields(t, tools[index], 1)
+		description := testProtoBytesFields(t, tools[index], 2)
+		if len(name) != 1 || len(description) != 1 || string(name[0]) != want.name || string(description[0]) != want.description {
+			t.Fatalf("wire tool %d = name %q description %q, want %q/%q", index, name, description, want.name, want.description)
+		}
+	}
+}
+
 type repeatedByteReader byte
 
 func (reader repeatedByteReader) Read(buffer []byte) (int, error) {
@@ -275,6 +301,24 @@ func TestParseDevinFrameDecodesContentToolAndUsage(t *testing.T) {
 	}
 }
 
+func TestParseDevinFrameRecognizesFinalCustomToolWireFields(t *testing.T) {
+	tool := appendDevinStringField(nil, 1, "call-1")
+	tool = appendDevinStringField(tool, 2, "apply_patch")
+	tool = appendDevinStringField(tool, 4, "*** Begin Patch\n*** End Patch")
+	tool = appendDevinStringField(tool, 5, "not JSON")
+	tool = appendDevinVarintField(tool, 6, 1)
+	frame, err := ParseDevinFrame(appendDevinBytesField(nil, 6, tool))
+	if err != nil || len(frame.ToolCallDeltas) != 1 {
+		t.Fatalf("ParseDevinFrame custom tool = %+v, %v", frame, err)
+	}
+	call := frame.ToolCallDeltas[0]
+	if call.ID != "call-1" || call.Name != "apply_patch" ||
+		call.InvalidJSONStr != "*** Begin Patch\n*** End Patch" ||
+		call.InvalidJSONErr != "not JSON" || !call.IsCustomToolCall {
+		t.Fatalf("custom tool fields = %+v", call)
+	}
+}
+
 func TestParseDevinFrameRejectsMalformedProtobuf(t *testing.T) {
 	wrongWireType := appendDevinVarintField(nil, 3, 1)
 	truncatedBytes := protowire.AppendTag(nil, 3, protowire.BytesType)
@@ -302,6 +346,10 @@ func TestParseDevinTrailerErrorIsStrict(t *testing.T) {
 		{name: "missing code", payload: `{"error":{"message":"failed"}}`, wantStatus: http.StatusBadGateway, wantError: true},
 		{name: "quota", payload: `{"error":{"code":"failed_precondition","message":"monthly ACU quota exhausted"}}`, wantStatus: http.StatusTooManyRequests, wantError: true},
 		{name: "unauthenticated", payload: `{"error":{"code":"unauthenticated","message":"expired"}}`, wantStatus: http.StatusUnauthorized, wantError: true},
+		{name: "high demand", payload: `{"error":{"code":"permission_denied","message":"The model is currently in high demand; retry soon"}}`, wantStatus: http.StatusTooManyRequests, wantError: true},
+		{name: "high demand case-insensitive", payload: `{"error":{"code":"permission_denied","message":"HIGH DEMAND: retry soon"}}`, wantStatus: http.StatusTooManyRequests, wantError: true},
+		{name: "genuine permission denial", payload: `{"error":{"code":"permission_denied","message":"model access denied"}}`, wantStatus: http.StatusForbidden, wantError: true},
+		{name: "resource exhausted", payload: `{"error":{"code":"resource_exhausted","message":"rate limit"}}`, wantStatus: http.StatusTooManyRequests, wantError: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -409,4 +457,34 @@ func testProtoVarintFields(t *testing.T, data []byte) map[protowire.Number]uint6
 		position += size
 	}
 	return values
+}
+
+func TestBuildDevinClientMetadataCurrentFieldLayout(t *testing.T) {
+	for _, osName := range []string{"linux", "windows"} {
+		t.Run(osName, func(t *testing.T) {
+			metadata := BuildDevinClientMetadataBytes("synthetic-session", "synthetic-seed", osName)
+			for _, field := range []struct {
+				number   protowire.Number
+				expected string
+			}{
+				{1, DevinDefaultClientName},
+				{2, DevinDefaultClientVersion},
+				{3, "synthetic-session"},
+				{5, osName},
+				{7, DevinDefaultClientVersion},
+				{12, DevinDefaultClientName},
+			} {
+				values := testProtoBytesFields(t, metadata, field.number)
+				if len(values) != 1 || string(values[0]) != field.expected {
+					t.Errorf("metadata field %d = %q, want %q", field.number, values, field.expected)
+				}
+			}
+			if values := testProtoBytesFields(t, metadata, 28); len(values) != 0 {
+				t.Errorf("obsolete metadata field 28 remains: %q", values)
+			}
+			if values := testProtoBytesFields(t, metadata, 31); len(values) != 1 || len(values[0]) != DevinFingerprintHexLen {
+				t.Errorf("device fingerprint changed: %q", values)
+			}
+		})
+	}
 }

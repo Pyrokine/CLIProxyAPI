@@ -34,6 +34,14 @@ func TestSanitizeDevinSystemPromptDeletesMatchingLines(t *testing.T) {
 	}
 }
 
+func TestSanitizeDevinSystemPromptRemovesCodexCLIIdentityDirectives(t *testing.T) {
+	prompt := "keep system guidance\nCodex refers to the open-source agentic coding interface\n- Don’t output ANSI escape codes directly — the CLI renderer applies them.\nkeep tool guidance"
+	got := SanitizeDevinSystemPrompt(prompt, nil)
+	if got != "keep system guidance\nkeep tool guidance" {
+		t.Fatalf("sanitized system prompt = %q", got)
+	}
+}
+
 func TestSanitizeDevinSystemPromptLeavesUnconfiguredContentUnchanged(t *testing.T) {
 	const prompt = "ordinary user-defined system text\nwith tool guidance"
 	if got := SanitizeDevinSystemPrompt(prompt, nil); got != prompt {

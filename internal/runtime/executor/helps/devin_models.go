@@ -41,6 +41,9 @@ var devinStandardLevelOrder = []string{"minimal", "low", "medium", "high", "xhig
 
 // HasDevinEffortSuffix reports whether model ends with a recognized Devin UID suffix.
 func HasDevinEffortSuffix(model string) bool {
+	if strings.HasSuffix(strings.ToLower(strings.TrimSpace(model)), "-slow") {
+		return true
+	}
 	_, _, _, found := splitDevinModelSuffix(model)
 	return found
 }
@@ -137,6 +140,9 @@ func ResolveDevinChatModel(rawModel string, thinkingLevel string, budgetTokens i
 	defaultEffort := selectDefaultDevinEffort(canonicalBase, allowedLevels)
 	resolvedEffort := clampDevinEffort(effort, allowedLevels, defaultEffort)
 	uid := canonicalBase + "-" + resolvedEffort
+	if canonicalBase == "glm-5-2-1m" {
+		uid = "glm-5-2-" + resolvedEffort + "-1m"
+	}
 	if priority {
 		uid += "-priority"
 	}
@@ -146,6 +152,12 @@ func ResolveDevinChatModel(rawModel string, thinkingLevel string, budgetTokens i
 func splitDevinModelSuffix(model string) (string, string, bool, bool) {
 	trimmed := strings.TrimSpace(model)
 	lower := strings.ToLower(trimmed)
+	switch lower {
+	case "glm-5-2-none-1m":
+		return "glm-5-2-1m", "none", false, true
+	case "glm-5-2-max-1m":
+		return "glm-5-2-1m", "max", false, true
+	}
 	for _, candidate := range devinModelSuffixes {
 		if strings.HasSuffix(lower, candidate.suffix) && len(trimmed) > len(candidate.suffix) {
 			return strings.TrimSpace(trimmed[:len(trimmed)-len(candidate.suffix)]), candidate.effort, candidate.priority, true

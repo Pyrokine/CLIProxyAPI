@@ -23,18 +23,39 @@ func TestParseDevinUsageFieldPreservesZeroPresenceAndHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseDevinUsageField(): %v", err)
 	}
-	if usage.PromptTokens != 58 || usage.CompletionTokens != 0 || usage.CachedTokens != 0 {
-		t.Fatalf("usage tokens = %d/%d/%d, want 58/0/0", usage.PromptTokens, usage.CompletionTokens, usage.CachedTokens)
+	if usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.CachedTokens != 0 || usage.CacheWriteTokens != 58 {
+		t.Fatalf("usage tokens = %+v, want 0 prompt, 0 completion, 0 cached, 58 cache write", usage)
 	}
-	if !usage.PromptTokensPresent || !usage.CompletionTokensPresent || !usage.CachedTokensPresent {
-		t.Fatalf("usage presence = %t/%t/%t, want all present", usage.PromptTokensPresent, usage.CompletionTokensPresent, usage.CachedTokensPresent)
+	if !usage.PromptTokensPresent || !usage.CompletionTokensPresent || !usage.CachedTokensPresent ||
+		!usage.CacheWriteTokensPresent {
+		t.Fatalf("usage presence = %+v, want all token fields present", usage)
 	}
 	if usage.RequestID != "request-123" || usage.Headers["Request-Id"] != "request-123" ||
 		usage.ModelName != "model-name" || usage.StatusCode != 66 {
 		t.Fatalf("usage metadata = %+v", usage)
 	}
-	if usage.InputTokens() != 58 || usage.TotalTokens() != 58 {
-		t.Fatalf("usage totals = %d/%d, want 58/58", usage.InputTokens(), usage.TotalTokens())
+	if usage.InputTokens() != 0 || usage.TotalTokens() != 0 {
+		t.Fatalf("usage totals = %d/%d, want 0/0 with cache writes separate", usage.InputTokens(), usage.TotalTokens())
+	}
+}
+
+func TestParseDevinUsageFieldAccumulatesCacheWritesAndRejectsOverflow(t *testing.T) {
+	data := appendDevinVarintField(nil, 4, 0)
+	data = appendDevinVarintField(data, 4, 5)
+	data = appendDevinVarintField(data, 4, 7)
+	parsed, err := parseDevinUsageField(data)
+	if err != nil || !parsed.CacheWriteTokensPresent || parsed.CacheWriteTokens != 12 ||
+		parsed.PromptTokensPresent || parsed.PromptTokens != 0 {
+		t.Fatalf("repeated cache writes = %+v, error = %v", parsed, err)
+	}
+	for _, values := range [][]uint64{{uint64(math.MaxInt64) + 1}, {math.MaxInt64, 1}} {
+		wire := []byte(nil)
+		for _, value := range values {
+			wire = appendDevinVarintField(wire, 4, value)
+		}
+		if _, err := parseDevinUsageField(wire); err == nil {
+			t.Fatalf("cache write field 4 values %v should overflow", values)
+		}
 	}
 }
 

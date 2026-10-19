@@ -82,15 +82,23 @@ func (service *DevinAuthService) SetServerBaseURL(baseURL string) {
 
 // BuildAuthorizationURL constructs the Devin PKCE authorization URL.
 func (service *DevinAuthService) BuildAuthorizationURL(redirectURI, codeChallenge, state string) string {
-	values := url.Values{}
-	values.Set("redirect_uri", strings.TrimSpace(redirectURI))
-	values.Set("code_challenge", strings.TrimSpace(codeChallenge))
-	values.Set("code_challenge_method", "S256")
-	values.Set("prompt", "select_account")
-	if strings.TrimSpace(state) != "" {
-		values.Set("state", strings.TrimSpace(state))
+	redirectURI = strings.TrimSpace(redirectURI)
+	parts := []string{}
+	if redirectURI != "" {
+		parts = append(parts, "redirect_uri="+url.QueryEscape(redirectURI))
 	}
-	return strings.TrimRight(service.appBaseURL, "/") + "/auth/cli/continue?" + values.Encode()
+	if state = strings.TrimSpace(state); state != "" {
+		parts = append(parts, "state="+url.QueryEscape(state))
+	}
+	parts = append(parts,
+		"prompt=select_account",
+		"code_challenge="+url.QueryEscape(strings.TrimSpace(codeChallenge)),
+		"code_challenge_method=S256",
+	)
+	if redirectURI == "" {
+		parts = append(parts, "cli_pkce_marker=1")
+	}
+	return strings.TrimRight(service.appBaseURL, "/") + "/auth/cli/continue?" + strings.Join(parts, "&")
 }
 
 // ExchangeCodeForToken exchanges an OAuth authorization code for a session token.
@@ -311,6 +319,13 @@ func (server *OAuthServer) handleCallback(response http.ResponseWriter, request 
 		Code:  strings.TrimSpace(query.Get("code")),
 		State: strings.TrimSpace(query.Get("state")),
 		Error: strings.TrimSpace(query.Get("error")),
+	}
+	if description := strings.TrimSpace(query.Get("error_description")); description != "" {
+		if result.Error == "" {
+			result.Error = description
+		} else {
+			result.Error += ": " + description
+		}
 	}
 	if result.Error == "" && result.Code == "" {
 		result.Error = "missing authorization code"

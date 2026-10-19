@@ -81,6 +81,8 @@ func SanitizeDevinSystemPrompt(prompt string, matcher *SensitiveWordMatcher) str
 			strings.Contains(trimmed, "destructive techniques, DoS attacks") ||
 			strings.Contains(trimmed, "Claude Code is available as a CLI") ||
 			strings.Contains(trimmed, "Fast mode for Claude Code") ||
+			strings.Contains(trimmed, "Codex refers to the open-source agentic coding interface") ||
+			strings.Contains(trimmed, "- Don’t output ANSI escape codes directly — the CLI renderer applies them.") ||
 			matcher.Matches(trimmed) {
 			continue
 		}

@@ -14,6 +14,7 @@ type DevinUsage struct {
 	PromptTokens            int64             `json:"prompt_tokens"`
 	CompletionTokens        int64             `json:"completion_tokens"`
 	CachedTokens            int64             `json:"cached_tokens"`
+	CacheWriteTokens        int64             `json:"cache_write_tokens,omitempty"`
 	StatusCode              uint64            `json:"status_code,omitempty"`
 	RequestID               string            `json:"request_id,omitempty"`
 	ModelName               string            `json:"model_name,omitempty"`
@@ -21,6 +22,7 @@ type DevinUsage struct {
 	PromptTokensPresent     bool              `json:"-"`
 	CompletionTokensPresent bool              `json:"-"`
 	CachedTokensPresent     bool              `json:"-"`
+	CacheWriteTokensPresent bool              `json:"-"`
 }
 
 // InputTokens returns uncached plus cached input tokens.
@@ -56,6 +58,10 @@ func (usage *DevinUsage) FillMissingTokenMetrics(fallback *DevinUsage) {
 		usage.CachedTokens = fallback.CachedTokens
 		usage.CachedTokensPresent = true
 	}
+	if !usage.CacheWriteTokensPresent && fallback.CacheWriteTokensPresent {
+		usage.CacheWriteTokens = fallback.CacheWriteTokens
+		usage.CacheWriteTokensPresent = true
+	}
 }
 
 func mergeDevinUsage(dst, src *DevinUsage) {
@@ -73,6 +79,10 @@ func mergeDevinUsage(dst, src *DevinUsage) {
 	if src.CachedTokensPresent {
 		dst.CachedTokens = src.CachedTokens
 		dst.CachedTokensPresent = true
+	}
+	if src.CacheWriteTokensPresent {
+		dst.CacheWriteTokens = src.CacheWriteTokens
+		dst.CacheWriteTokensPresent = true
 	}
 	if src.StatusCode != 0 {
 		dst.StatusCode = src.StatusCode
@@ -113,16 +123,26 @@ func parseDevinUsageField(data []byte) (*DevinUsage, error) {
 			}
 			position += size
 			switch number {
-			case 2, 4:
+			case 2:
 				converted, err := devinTokenCount(value)
 				if err != nil {
-					return nil, fmt.Errorf("usage prompt field %d: %w", number, err)
+					return nil, fmt.Errorf("usage prompt tokens: %w", err)
 				}
 				if usage.PromptTokens > math.MaxInt64-converted {
 					return nil, fmt.Errorf("usage prompt token count overflows int64")
 				}
 				usage.PromptTokens += converted
 				usage.PromptTokensPresent = true
+			case 4:
+				converted, err := devinTokenCount(value)
+				if err != nil {
+					return nil, fmt.Errorf("usage cache write tokens: %w", err)
+				}
+				if usage.CacheWriteTokens > math.MaxInt64-converted {
+					return nil, fmt.Errorf("usage cache write token count overflows int64")
+				}
+				usage.CacheWriteTokens += converted
+				usage.CacheWriteTokensPresent = true
 			case 3:
 				converted, err := devinTokenCount(value)
 				if err != nil {

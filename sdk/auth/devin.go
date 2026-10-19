@@ -65,58 +65,83 @@ func (authenticator *DevinAuthenticator) Login(
 		return nil, fmt.Errorf("generate Devin OAuth state: %w", err)
 	}
 
-	callbackPort := authenticator.CallbackPort
-	if opts.CallbackPort > 0 {
-		callbackPort = opts.CallbackPort
-	}
-	oauthServer := devinauth.NewOAuthServer(callbackPort)
-	actualPort, err := oauthServer.Start()
-	if err != nil {
-		return nil, fmt.Errorf("start Devin OAuth callback server: %w", err)
-	}
-	defer func() {
-		stopContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if stopErr := oauthServer.Stop(stopContext); stopErr != nil {
-			log.Warnf("Devin OAuth server stop error: %v", stopErr)
-		}
-	}()
-
 	client := util.SetProxy(&cfg.SDKConfig, &http.Client{Timeout: devinHTTPTimeout})
 	service := devinauth.NewDevinAuthService(client)
-	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", actualPort)
-	authURL := service.BuildAuthorizationURL(redirectURI, pkce.CodeChallenge, state)
-	openBrowserForAuth("Devin", authURL, actualPort, opts.NoBrowser)
-	fmt.Println("Waiting for Devin authentication callback...")
+	var authCode, pastedToken string
+	if opts.NoBrowser {
+		if opts.Prompt == nil {
+			return nil, fmt.Errorf("devin authentication in no-browser mode requires an interactive prompt")
+		}
+		authURL := service.BuildAuthorizationURL("", pkce.CodeChallenge, state)
+		fmt.Printf("Visit the following URL to continue Devin authentication:\n%s\n\n", authURL)
+		manualInput, manualErrors := misc.AsyncPrompt(opts.Prompt, "Paste the Devin authorization code or session token: ")
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case promptErr := <-manualErrors:
+			return nil, fmt.Errorf("read Devin authentication input: %w", promptErr)
+		case input := <-manualInput:
+			var accepted bool
+			authCode, pastedToken, accepted, err = parseDevinManualLoginInput(input, state)
+			if err != nil {
+				return nil, err
+			}
+			if !accepted {
+				return nil, fmt.Errorf("invalid Devin authorization code or session token")
+			}
+		}
+	} else {
+		callbackPort := authenticator.CallbackPort
+		if opts.CallbackPort > 0 {
+			callbackPort = opts.CallbackPort
+		}
+		oauthServer := devinauth.NewOAuthServer(callbackPort)
+		actualPort, startErr := oauthServer.Start()
+		if startErr != nil {
+			return nil, fmt.Errorf("start Devin OAuth callback server: %w", startErr)
+		}
+		defer func() {
+			stopContext, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if stopErr := oauthServer.Stop(stopContext); stopErr != nil {
+				log.Warnf("Devin OAuth server stop error: %v", stopErr)
+			}
+		}()
 
-	loginContext, cancelLogin := context.WithCancel(ctx)
-	defer cancelLogin()
-	callbackResults := make(chan *devinauth.OAuthResult, 1)
-	callbackErrors := make(chan error, 1)
-	go func() {
-		result, waitErr := oauthServer.WaitForCallbackWithContext(loginContext, devinLoginTimeout)
-		if waitErr != nil {
+		redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", actualPort)
+		authURL := service.BuildAuthorizationURL(redirectURI, pkce.CodeChallenge, state)
+		openBrowserForAuth("Devin", authURL, actualPort, false)
+		fmt.Println("Waiting for Devin authentication callback...")
+
+		loginContext, cancelLogin := context.WithCancel(ctx)
+		defer cancelLogin()
+		callbackResults := make(chan *devinauth.OAuthResult, 1)
+		callbackErrors := make(chan error, 1)
+		go func() {
+			result, waitErr := oauthServer.WaitForCallbackWithContext(loginContext, devinLoginTimeout)
+			if waitErr != nil {
+				select {
+				case callbackErrors <- waitErr:
+				case <-loginContext.Done():
+				}
+				return
+			}
 			select {
-			case callbackErrors <- waitErr:
+			case callbackResults <- result:
 			case <-loginContext.Done():
 			}
-			return
-		}
-		select {
-		case callbackResults <- result:
-		case <-loginContext.Done():
-		}
-	}()
+		}()
 
-	authCode, pastedToken, err := waitForDevinLoginResult(
-		loginContext,
-		state,
-		opts.Prompt,
-		callbackResults,
-		callbackErrors,
-	)
-	if err != nil {
-		return nil, err
+		authCode, pastedToken, err = waitForDevinLoginResult(
+			loginContext,
+			state,
+			opts.Prompt,
+			callbackResults,
+			callbackErrors,
+		)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var sessionToken string
@@ -142,7 +167,7 @@ func parseDevinManualLoginInput(input, expectedState string) (
 	accepted bool,
 	err error,
 ) {
-	input = strings.TrimSpace(input)
+	input = strings.TrimSpace(strings.Trim(strings.TrimSpace(input), "\"'"))
 	if input == "" {
 		return "", "", false, nil
 	}
@@ -150,11 +175,19 @@ func parseDevinManualLoginInput(input, expectedState string) (
 		return "", input, true, nil
 	}
 	parsed, parseErr := misc.ParseOAuthCallback(input)
-	if parseErr == nil && parsed != nil && parsed.Code != "" {
-		if parsed.State != expectedState {
-			return "", "", false, fmt.Errorf("devin OAuth state mismatch")
+	if parseErr == nil && parsed != nil {
+		if parsed.Error != "" {
+			if parsed.ErrorDescription != "" {
+				return "", "", false, fmt.Errorf("devin OAuth error: %s: %s", parsed.Error, parsed.ErrorDescription)
+			}
+			return "", "", false, fmt.Errorf("devin OAuth error: %s", parsed.Error)
 		}
-		return parsed.Code, "", true, nil
+		if parsed.Code != "" {
+			if parsed.State != "" && parsed.State != expectedState {
+				return "", "", false, fmt.Errorf("devin OAuth state mismatch")
+			}
+			return parsed.Code, "", true, nil
+		}
 	}
 	if !strings.ContainsAny(input, " \t\r\n/?#=") {
 		return input, "", true, nil
