@@ -58,8 +58,8 @@ func TestDecodeHomeCatalogKeepsSameIDRoutesSeparate(t *testing.T) {
 	assertHomeMetadata(t, byProvider["gemini"], 654321, 3456, []string{"low"})
 
 	capability := catalog.ResponsesWebSearchCapability("shared-model")
-	if capability == nil || *capability {
-		t.Fatalf("web search capability = %v, want known unsupported", capability)
+	if capability == nil || !*capability {
+		t.Fatalf("web search capability = %v, want known supported", capability)
 	}
 	response := codexmodels.BuildResponseForClientWithCPACapabilities(
 		catalog.Models(),
@@ -73,8 +73,8 @@ func TestDecodeHomeCatalogKeepsSameIDRoutesSeparate(t *testing.T) {
 		t.Fatalf("Codex projection = %#v, want one public same-ID model", response["models"])
 	}
 	capabilities, ok := projected[0]["cpa_capabilities"].(map[string]any)
-	if !ok || capabilities["web_search"] != false {
-		t.Fatalf("Codex capabilities = %#v, want web_search=false", projected[0]["cpa_capabilities"])
+	if !ok || capabilities["web_search"] != true {
+		t.Fatalf("Codex capabilities = %#v, want web_search=true", projected[0]["cpa_capabilities"])
 	}
 }
 

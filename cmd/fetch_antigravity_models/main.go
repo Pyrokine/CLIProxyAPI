@@ -121,19 +121,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: failed to list auth files: %v\n", err)
 		os.Exit(1)
 	}
-	chosen := findAntigravityAuth(auths)
-	if chosen == nil {
-		fmt.Fprintf(os.Stderr, "error: no enabled antigravity auth found in %s\n", authsDir)
-		os.Exit(1)
-	}
-
-	authIndex, identity := safeAuthIdentity(chosen)
-	fmt.Printf("Using auth: auth_index=%s identity=%s\n", authIndex, identity)
 	fmt.Println("Fetching Antigravity model list from upstream...")
-
-	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	models, err := fetchModels(fetchCtx, chosen)
+	models, err := fetchModels(ctx, auths, defaultAntigravityFetchBaseURLs(), nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: failed to fetch Antigravity models: %v\n", err)
 		os.Exit(1)
@@ -157,18 +146,6 @@ func main() {
 	fmt.Printf("Model list saved to: %s\n", outputPath)
 }
 
-func findAntigravityAuth(auths []*coreauth.Auth) *coreauth.Auth {
-	for _, auth := range auths {
-		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled {
-			continue
-		}
-		if strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
-			return auth
-		}
-	}
-	return nil
-}
-
 func safeAuthIdentity(auth *coreauth.Auth) (string, string) {
 	if auth == nil {
 		return "", ""
@@ -190,8 +167,46 @@ func defaultAntigravityFetchBaseURLs() []string {
 	return []string{antigravityBaseURLDaily, antigravityBaseURLProd, antigravitySandboxBaseURLDaily}
 }
 
-func fetchModels(ctx context.Context, auth *coreauth.Auth) ([]modelEntry, error) {
-	return fetchModelsFromBaseURLs(ctx, auth, defaultAntigravityFetchBaseURLs(), nil)
+func fetchModels(ctx context.Context, auths []*coreauth.Auth, baseURLs []string, client *http.Client) ([]modelEntry, error) {
+	var candidates, backups []*coreauth.Auth
+	for _, auth := range auths {
+		if auth == nil || auth.Disabled || auth.Status == coreauth.StatusDisabled ||
+			!strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+			continue
+		}
+		if strings.Contains(auth.ID, ".back") || strings.Contains(auth.FileName, ".back") {
+			backups = append(backups, auth)
+		} else {
+			candidates = append(candidates, auth)
+		}
+	}
+	if len(candidates) == 0 {
+		candidates = backups
+	}
+	if len(candidates) == 0 {
+		return nil, errors.New("no enabled antigravity auth found")
+	}
+	var failures []error
+	for _, auth := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		authIndex, identity := safeAuthIdentity(auth)
+		fmt.Printf("Using auth: auth_index=%s identity=%s\n", authIndex, identity)
+		fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		models, err := fetchModelsFromBaseURLs(fetchCtx, auth, baseURLs, client)
+		cancel()
+		if err == nil && len(models) > 0 {
+			return models, nil
+		}
+		if err == nil {
+			err = errors.New("no models returned")
+		}
+		err = safeRequestError(err, authStringValues(auth)...)
+		fmt.Fprintf(os.Stderr, "warning: auth_index=%s model fetch failed: %v\n", authIndex, err)
+		failures = append(failures, fmt.Errorf("auth_index=%s: %w", authIndex, err))
+	}
+	return nil, errors.Join(failures...)
 }
 
 func fetchModelsFromBaseURLs(

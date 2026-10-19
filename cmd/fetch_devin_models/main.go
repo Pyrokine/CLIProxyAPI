@@ -24,6 +24,7 @@ import (
 	devinauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/devin"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/logging"
+	"github.com/Pyrokine/CLIProxyAPI/v6/internal/registry"
 	executor "github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/util"
@@ -464,7 +465,7 @@ func parseSingleModelConfig(data []byte) (rawDevinModel, error) {
 	return model, nil
 }
 
-func vendorName(id uint64) string {
+func vendorName(id uint64, uid string) string {
 	switch id {
 	case 1:
 		return "cognition"
@@ -483,6 +484,9 @@ func vendorName(id uint64) string {
 	case 11:
 		return "nvidia"
 	default:
+		if strings.Contains(strings.ToLower(uid), "grok") {
+			return "xai"
+		}
 		return "devin"
 	}
 }
@@ -498,7 +502,7 @@ func formatRawModels(raw []rawDevinModel) []devinModelJSON {
 			ID:                        source.UID,
 			Object:                    "model",
 			Type:                      "devin",
-			OwnedBy:                   vendorName(source.VendorID),
+			OwnedBy:                   vendorName(source.VendorID, source.UID),
 			DisplayName:               source.Label,
 			ContextLength:             source.ContextLength,
 			MaxCompletionTokens:       helps.DevinDefaultMaxTokens,
@@ -515,6 +519,52 @@ func formatRawModels(raw []rawDevinModel) []devinModelJSON {
 	return models
 }
 
+func splitDevinUID(uid string) (string, string) {
+	if uid == "swe-1-6-slow" {
+		return uid, ""
+	}
+	if uid == "swe-1-6-fast" {
+		return "swe-1-6", ""
+	}
+	upper := strings.ToUpper(uid)
+	for _, suffix := range []struct {
+		name   string
+		effort string
+	}{
+		{"_NONE", "none"}, {"_MINIMAL", "minimal"}, {"_LOW", "low"},
+		{"_MEDIUM", "medium"}, {"_HIGH", "high"}, {"_XHIGH", "xhigh"},
+		{"_MAX", "max"}, {"_THINKING", "high"},
+	} {
+		if strings.HasSuffix(upper, suffix.name) {
+			return uid[:len(uid)-len(suffix.name)], suffix.effort
+		}
+	}
+	for _, suffix := range []struct {
+		name   string
+		effort string
+		readd  string
+	}{
+		{"-low-fast", "low", ""}, {"-medium-fast", "medium", ""},
+		{"-high-fast", "high", ""}, {"-xhigh-fast", "xhigh", ""},
+		{"-max-fast", "max", ""}, {"-none-fast", "none", ""},
+		{"-low-priority", "low", ""}, {"-medium-priority", "medium", ""},
+		{"-high-priority", "high", ""}, {"-xhigh-priority", "xhigh", ""},
+		{"-max-priority", "max", ""}, {"-none-priority", "none", ""},
+		{"-thinking-1m", "", "-1m"}, {"-thinking", "", ""},
+		{"-max-1m", "max", "-1m"}, {"-none-1m", "none", "-1m"},
+	} {
+		if strings.HasSuffix(uid, suffix.name) {
+			return strings.TrimSuffix(uid, suffix.name) + suffix.readd, suffix.effort
+		}
+	}
+	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		if strings.HasSuffix(uid, "-"+effort) {
+			return strings.TrimSuffix(uid, "-"+effort), effort
+		}
+	}
+	return uid, ""
+}
+
 func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 	type aggregateEntry struct {
 		baseID        string
@@ -525,30 +575,39 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 		levels        map[string]struct{}
 	}
 
-	knownSuffixes := []string{"-minimal", "-low", "-medium", "-high", "-xhigh", "-max", "-none", "-priority"}
 	grouped := make(map[string]*aggregateEntry)
 	for _, source := range raw {
-		baseID := source.UID
-		level := ""
-		for _, suffix := range knownSuffixes {
-			if strings.HasSuffix(baseID, suffix) {
-				level = strings.TrimPrefix(suffix, "-")
-				baseID = strings.TrimSuffix(baseID, suffix)
-				break
-			}
+		baseID, level := splitDevinUID(source.UID)
+		if baseID == "" {
+			baseID = source.UID
 		}
-
 		entry := grouped[baseID]
 		if entry == nil {
+			levels := make(map[string]struct{})
+			if known := registry.LookupDevinModel(baseID); known != nil && known.Thinking != nil {
+				for _, knownLevel := range known.Thinking.Levels {
+					if knownLevel != "" && knownLevel != "priority" {
+						levels[knownLevel] = struct{}{}
+					}
+				}
+			}
 			entry = &aggregateEntry{
 				baseID:        baseID,
 				displayName:   cleanDisplayName(source.Label),
 				vendorID:      source.VendorID,
 				contextLength: source.ContextLength,
 				multimodal:    source.Multimodal,
-				levels:        make(map[string]struct{}),
+				levels:        levels,
 			}
 			grouped[baseID] = entry
+		}
+		if baseID == source.UID {
+			if source.Label != "" {
+				entry.displayName = cleanDisplayName(source.Label)
+			}
+			if source.VendorID != 0 {
+				entry.vendorID = source.VendorID
+			}
 		}
 		if entry.displayName == "" {
 			entry.displayName = cleanDisplayName(source.Label)
@@ -560,7 +619,7 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 		if source.ContextLength > entry.contextLength {
 			entry.contextLength = source.ContextLength
 		}
-		if level != "" {
+		if level != "" && level != "priority" {
 			entry.levels[level] = struct{}{}
 		}
 	}
@@ -591,7 +650,7 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 			ID:                        entry.baseID,
 			Object:                    "model",
 			Type:                      "devin",
-			OwnedBy:                   vendorName(entry.vendorID),
+			OwnedBy:                   vendorName(entry.vendorID, entry.baseID),
 			DisplayName:               entry.displayName,
 			ContextLength:             entry.contextLength,
 			MaxCompletionTokens:       helps.DevinDefaultMaxTokens,
@@ -604,11 +663,28 @@ func aggregateModels(raw []rawDevinModel) []devinModelJSON {
 }
 
 func cleanDisplayName(label string) string {
-	clean := strings.TrimSpace(label)
-	for _, suffix := range []string{" Low", " Medium", " High", " XHigh", " Max", " Minimal", " None", " Priority"} {
-		clean = strings.TrimSuffix(clean, suffix)
+	name := strings.TrimSpace(label)
+	for {
+		changed := false
+		for _, suffix := range []string{
+			" Low Thinking Fast", " Medium Thinking Fast", " High Thinking Fast",
+			" XHigh Thinking Fast", " Max Thinking Fast", " No Thinking Fast",
+			" Low Fast", " Medium Fast", " High Fast", " XHigh Fast", " Max Fast",
+			" Low Thinking", " Medium Thinking", " High Thinking",
+			" XHigh Thinking", " Max Thinking", " No Thinking",
+			" Low", " Medium", " High", " XHigh", " Max", " None", " Minimal",
+			" Thinking", " Fast", " Priority",
+		} {
+			if strings.HasSuffix(strings.ToLower(name), strings.ToLower(suffix)) {
+				name = strings.TrimSpace(name[:len(name)-len(suffix)])
+				changed = true
+				break
+			}
+		}
+		if !changed {
+			return name
+		}
 	}
-	return clean
 }
 
 func sortLevels(levels []string) {
@@ -620,6 +696,7 @@ func sortLevels(levels []string) {
 		"high":    4,
 		"xhigh":   5,
 		"max":     6,
+		"fast":    7,
 	}
 	sort.SliceStable(levels, func(i, j int) bool {
 		left, leftKnown := rank[levels[i]]

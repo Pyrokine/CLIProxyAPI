@@ -108,15 +108,19 @@ func TestCatalogIncludesCurrentClaudeGeminiAndKimiModels(t *testing.T) {
 		return model
 	}
 
-	for _, modelID := range []string{"claude-fable-5-1", "claude-opus-5-5"} {
+	for _, modelID := range []string{"claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5"} {
 		model := lookup("claude", modelID)
 		if model.ContextLength != 1000000 || model.MaxCompletionTokens != 128000 {
 			t.Fatalf("%s token limits = %d/%d, want 1000000/128000", modelID, model.ContextLength, model.MaxCompletionTokens)
 		}
 		assertThinkingLevelsEqual(t, model.Thinking, []string{"low", "medium", "high", "xhigh", "max"})
-		if model.Thinking.ZeroAllowed || !model.Thinking.DynamicAllowed {
-			t.Fatalf("%s thinking flags = %+v, want always-on adaptive thinking", modelID, model.Thinking)
+		if model.Thinking.ZeroAllowed != (modelID == "claude-sonnet-5-5") || !model.Thinking.DynamicAllowed {
+			t.Fatalf("%s thinking flags = %+v, want adaptive thinking and Sonnet 5.5 none via between_tools", modelID, model.Thinking)
 		}
+	}
+	sonnet := lookup("claude", "claude-sonnet-5-5")
+	if sonnet.NativeCapabilities == nil || sonnet.NativeCapabilities.WebSearch == nil || !*sonnet.NativeCapabilities.WebSearch {
+		t.Fatalf("Sonnet 5.5 web search capability = %+v", sonnet.NativeCapabilities)
 	}
 
 	for _, channel := range []string{"gemini", "vertex", "aistudio"} {

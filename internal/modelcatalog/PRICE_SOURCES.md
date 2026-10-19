@@ -34,6 +34,13 @@ can still be read for audit evidence, but its request amount is marked `unpriced
 
 Media output priced per image, video duration, or another non-token unit is marked `unpriced` in this manifest.
 
+## 2026-10-09 model update
+
+| Models | Source | Manifest treatment |
+|---|---|---|
+| `claude-sonnet-5-5` | [Anthropic Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) | Complete global token rates: USD 2 input, USD 0.10 cache read, USD 2.50 5-minute cache write, USD 4 1-hour cache write, and USD 10 output per one million tokens. |
+| `gpt-6.1-sol` | [OpenAI GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol) | Public API reference price only. Base USD 2 input, USD 0.10 cache read, USD 2.50 cache write, and USD 10 output per one million tokens are `partial`; requests over 272K input tokens use higher rates that the current manifest cannot select automatically. This price record does not grant Codex plan access. |
+
 ## 2026-09-23 model update
 
 | Models | Source | Manifest treatment |

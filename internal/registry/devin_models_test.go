@@ -11,8 +11,8 @@ import (
 
 func TestEmbeddedDevinModelsAreNamespacedAndUsable(t *testing.T) {
 	models := GetDevinModels()
-	if len(models) != 39 {
-		t.Fatalf("GetDevinModels() count = %d, want 39", len(models))
+	if len(models) != 50 {
+		t.Fatalf("GetDevinModels() count = %d, want 50", len(models))
 	}
 	for _, model := range models {
 		if model == nil || !strings.HasPrefix(model.ID, "devin/") {
@@ -22,14 +22,47 @@ func TestEmbeddedDevinModelsAreNamespacedAndUsable(t *testing.T) {
 			t.Fatalf("invalid model metadata: %+v", model)
 		}
 	}
-	if model := LookupDevinModel("gpt-5-6-sol"); model == nil || model.ID != "devin/gpt-5-6-sol" {
-		t.Fatalf("LookupDevinModel() = %+v", model)
+	for _, id := range []string{
+		"gpt-5-6-sol", "claude-opus-5-5", "gpt-6-sol", "gpt-6-luna", "swe-1-7-lightning",
+		"glm-5-2-1m", "grok-4-7", "inkling", "claude-opus-4-6-1m", "claude-sonnet-4-6-1m",
+		"gemini-3-1-pro", "swe-1-6-slow",
+	} {
+		if model := LookupDevinModel(id); model == nil || model.ID != "devin/"+id {
+			t.Fatalf("LookupDevinModel(%q) = %+v", id, model)
+		}
+	}
+	if model := LookupStaticModelInfo(devinBuiltinSWE16SlowID); model == nil || model.ID != devinBuiltinSWE16SlowID {
+		t.Fatalf("LookupStaticModelInfo(%q) = %+v, want built-in", devinBuiltinSWE16SlowID, model)
 	}
 	if model := LookupStaticModelInfo("gpt-5-6-sol"); model != nil {
 		t.Fatalf("bare Devin model unexpectedly leaked into global static lookup: %+v", model)
 	}
 	if model := LookupStaticModelInfo("devin/gpt-5-6-sol"); model == nil || model.Type != "devin" {
 		t.Fatalf("namespaced Devin lookup = %+v", model)
+	}
+}
+
+func TestEmbeddedDevinPublicModelsUseUpstreamCompletionCap(t *testing.T) {
+	models, err := ValidateDevinModelsJSON(embeddedDevinModelsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyAliases := map[string]bool{
+		"devin/claude-haiku-4-5": true, "devin/claude-sonnet-4-5": true,
+		"devin/gpt-4-1": true, "devin/gemini-3-flash": true,
+	}
+	checked := 0
+	for _, model := range models {
+		if legacyAliases[model.ID] {
+			continue
+		}
+		checked++
+		if model.MaxCompletionTokens != 64000 {
+			t.Errorf("%s max completion tokens = %d, want 64000", model.ID, model.MaxCompletionTokens)
+		}
+	}
+	if checked != 45 {
+		t.Fatalf("checked %d upstream public models, want 45", checked)
 	}
 }
 
@@ -47,7 +80,7 @@ func TestValidateDevinModelsJSONNormalizesWithoutMutatingInput(t *testing.T) {
 		t.Fatalf("normalized identity = %+v", model)
 	}
 	if model.InputTokenLimit != 4096 || model.OutputTokenLimit != 1024 ||
-		len(model.Thinking.Levels) != 2 || model.Thinking.Levels[0] != "high" {
+		len(model.Thinking.Levels) != 2 || model.Thinking.Levels[0] != "low" || model.Thinking.Levels[1] != "high" {
 		t.Fatalf("normalized metadata = %+v", model)
 	}
 
@@ -114,6 +147,38 @@ func TestLoadDevinModelsUpdatesRevisionAndReturnsCopies(t *testing.T) {
 	models[0].ID = "mutated"
 	if got := LookupDevinModel("revision-test"); got == nil || got.ID != "devin/revision-test" {
 		t.Fatalf("catalog copy mutation changed store: %+v", got)
+	}
+	if got := LookupDevinModel("swe-1-6-slow"); got == nil || got.ContextLength != 200000 {
+		t.Fatalf("built-in model missing after dynamic update: %+v", got)
+	}
+}
+
+func TestValidateDevinModelsJSONAggregatesThinkingVariants(t *testing.T) {
+	payload := []byte(`{"devin":[
+		{"id":"claude-opus-5","display_name":"Claude Opus 5","context_length":200000,"max_completion_tokens":64000,"thinking":{"levels":["medium"]}},
+		{"id":"claude-opus-5-low-fast","display_name":"Claude Opus 5 Low Fast","context_length":1000000,"max_completion_tokens":64000,"supportedInputModalities":["text","image"]},
+		{"id":"claude-opus-5-high-fast","display_name":"Claude Opus 5 High Fast","context_length":1000000,"max_completion_tokens":64000}
+	]}`)
+	models, err := ValidateDevinModelsJSON(payload)
+	if err != nil {
+		t.Fatalf("ValidateDevinModelsJSON() error = %v", err)
+	}
+	if len(models) != 1 || models[0].ID != "devin/claude-opus-5" || models[0].DisplayName != "Claude Opus 5" ||
+		models[0].ContextLength != 1000000 || models[0].Thinking == nil ||
+		strings.Join(models[0].Thinking.Levels, ",") != "low,medium,high" ||
+		strings.Join(models[0].SupportedInputModalities, ",") != "text,image" {
+		t.Fatalf("aggregated model = %+v", models)
+	}
+	if got := LookupDevinModel("claude-opus-5-low-fast"); got == nil || got.ID != "devin/claude-opus-5" {
+		t.Fatalf("thinking variant lookup did not resolve base model: %+v", got)
+	}
+}
+
+func TestDevinBuiltinsReplaceCatalogDuplicates(t *testing.T) {
+	models := WithDevinBuiltins([]*ModelInfo{{ID: devinBuiltinSWE16SlowID, DisplayName: "obsolete"}})
+	if len(models) != 1 || models[0].ID != devinBuiltinSWE16SlowID ||
+		models[0].DisplayName != "SWE-1.6 Slow" || models[0].MaxCompletionTokens != 64000 {
+		t.Fatalf("built-in replacement = %+v", models)
 	}
 }
 

@@ -54,6 +54,7 @@ type staticModelsJSON struct {
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
 	Devin       []*ModelInfo `json:"devin"`
+	Meta        []*ModelInfo `json:"meta"`
 }
 
 type modelStore struct {
@@ -310,7 +311,7 @@ func fetchModelsFromRemote(ctx context.Context, current *staticModelsJSON) (*sta
 var modelCatalogSectionNames = []string{
 	"claude", "gemini", "vertex", "gemini-cli", "aistudio",
 	"codex-free", "codex-team", "codex-plus", "codex-pro",
-	"qwen", "iflow", "kimi", "antigravity", "xai", "devin",
+	"qwen", "iflow", "kimi", "antigravity", "xai", "devin", "meta",
 }
 
 func mergeRemoteModelsCatalog(data []byte, current *staticModelsJSON) (*staticModelsJSON, error) {
@@ -401,9 +402,13 @@ func detectChangedProviders(oldData, newData *staticModelsJSON) []string {
 		{"qwen", oldData.Qwen, newData.Qwen},
 		{"iflow", oldData.IFlow, newData.IFlow},
 		{"kimi", oldData.Kimi, newData.Kimi},
+		{"kimi-ai", oldData.Kimi, newData.Kimi},
+		{"kimi.ai", oldData.Kimi, newData.Kimi},
+		{"kimi.com", oldData.Kimi, newData.Kimi},
 		{"antigravity", oldData.Antigravity, newData.Antigravity},
 		{"xai", oldData.XAI, newData.XAI},
 		{"devin", oldData.Devin, newData.Devin},
+		{"meta", oldData.Meta, newData.Meta},
 	}
 
 	seen := make(map[string]bool, len(sections))
@@ -430,7 +435,9 @@ func modelSectionChanged(a, b []*ModelInfo) bool {
 		return false
 	}
 	for i := range a {
-		if a[i] != nil && b[i] != nil && !reflect.DeepEqual(a[i].NativeCapabilities, b[i].NativeCapabilities) {
+		if a[i] != nil && b[i] != nil &&
+			(!reflect.DeepEqual(a[i].NativeCapabilities, b[i].NativeCapabilities) ||
+				a[i].SupportConfigurationUpdate != b[i].SupportConfigurationUpdate) {
 			return true
 		}
 	}
@@ -534,6 +541,7 @@ func validateModelsCatalog(data *staticModelsJSON) error {
 		{name: "antigravity", models: data.Antigravity},
 		{name: "xai", models: data.XAI},
 		{name: "devin", models: data.Devin},
+		{name: "meta", models: data.Meta},
 	}
 
 	// Upstream occasionally ships a catalog with some providers removed (e.g. qwen

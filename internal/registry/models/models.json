@@ -308,6 +308,38 @@
             ]
         },
         {
+            "id": "claude-sonnet-5-5",
+            "native_capabilities": {
+                "web_search": true
+            },
+            "object": "model",
+            "created": 1790553600,
+            "owned_by": "anthropic",
+            "type": "claude",
+            "display_name": "Claude Sonnet 5.5",
+            "description": "Anthropic's agentic Sonnet model for coding, tool use, and enterprise workflows",
+            "context_length": 1000000,
+            "max_completion_tokens": 128000,
+            "thinking": {
+                "zero_allowed": true,
+                "dynamic_allowed": true,
+                "levels": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                ]
+            },
+            "supportedInputModalities": [
+                "text",
+                "image"
+            ],
+            "supportedOutputModalities": [
+                "text"
+            ]
+        },
+        {
             "id": "claude-fable-5",
             "object": "model",
             "created": 1781049600,
@@ -434,6 +466,9 @@
     "gemini": [
         {
             "id": "gemini-2.5-pro",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -467,6 +502,9 @@
         },
         {
             "id": "gemini-2.5-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -500,6 +538,9 @@
         },
         {
             "id": "gemini-2.5-flash-lite",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1753142400,
             "owned_by": "google",
@@ -533,6 +574,9 @@
         },
         {
             "id": "gemini-3.1-pro-preview",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1771459200,
             "owned_by": "google",
@@ -571,6 +615,9 @@
         },
         {
             "id": "gemini-3-flash-preview",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1765929600,
             "owned_by": "google",
@@ -610,6 +657,9 @@
         },
         {
             "id": "gemini-3-pro-image-preview",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1737158400,
             "owned_by": "google",
@@ -646,6 +696,9 @@
         },
         {
             "id": "gemini-3.5-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1779235200,
             "owned_by": "google",
@@ -685,6 +738,9 @@
         },
         {
             "id": "gemini-3.5-flash-lite",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1782864000,
             "owned_by": "google",
@@ -724,6 +780,9 @@
         },
         {
             "id": "gemini-3.6-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1782864000,
             "owned_by": "google",
@@ -763,6 +822,9 @@
         },
         {
             "id": "gemini-3.7-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "owned_by": "google",
             "type": "gemini",
@@ -794,6 +856,9 @@
         },
         {
             "id": "gemini-3.8-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "owned_by": "google",
             "type": "gemini",
@@ -902,6 +967,9 @@
     "vertex": [
         {
             "id": "gemini-2.5-pro",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -935,6 +1003,9 @@
         },
         {
             "id": "gemini-2.5-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -968,6 +1039,9 @@
         },
         {
             "id": "gemini-2.5-flash-image",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1763596800,
             "owned_by": "google",
@@ -1000,6 +1074,9 @@
         },
         {
             "id": "gemini-2.5-flash-lite",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1753142400,
             "owned_by": "google",
@@ -1033,6 +1110,9 @@
         },
         {
             "id": "gemini-3-pro",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1737158400,
             "owned_by": "google",
@@ -1070,6 +1150,9 @@
         },
         {
             "id": "gemini-3-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1765929600,
             "owned_by": "google",
@@ -1109,6 +1192,9 @@
         },
         {
             "id": "gemini-3.1-pro-preview",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1771459200,
             "owned_by": "google",
@@ -1147,6 +1233,9 @@
         },
         {
             "id": "gemini-3.1-flash-lite",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1776288000,
             "owned_by": "google",
@@ -1186,6 +1275,9 @@
         },
         {
             "id": "gemini-3-pro-image",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1737158400,
             "owned_by": "google",
@@ -1322,6 +1414,9 @@
         },
         {
             "id": "gemini-3.5-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1779235200,
             "owned_by": "google",
@@ -1361,6 +1456,9 @@
         },
         {
             "id": "gemini-3.1-pro",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1771459200,
             "owned_by": "google",
@@ -1399,6 +1497,9 @@
         },
         {
             "id": "gemini-3.5-flash-lite",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1782864000,
             "owned_by": "google",
@@ -1438,6 +1539,9 @@
         },
         {
             "id": "gemini-3.6-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1782864000,
             "owned_by": "google",
@@ -1477,6 +1581,9 @@
         },
         {
             "id": "gemini-3.7-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "owned_by": "google",
             "type": "gemini",
@@ -1507,6 +1614,9 @@
         },
         {
             "id": "gemini-3.8-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "owned_by": "google",
             "type": "gemini",
@@ -1614,6 +1724,9 @@
     "gemini-cli": [
         {
             "id": "gemini-2.5-pro",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -1647,6 +1760,9 @@
         },
         {
             "id": "gemini-2.5-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -1680,6 +1796,9 @@
         },
         {
             "id": "gemini-2.5-flash-lite",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1753142400,
             "owned_by": "google",
@@ -1713,6 +1832,9 @@
         },
         {
             "id": "gemini-3.1-pro-preview",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1771459200,
             "owned_by": "google",
@@ -1751,6 +1873,9 @@
         },
         {
             "id": "gemini-3-flash-preview",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1765929600,
             "owned_by": "google",
@@ -1792,6 +1917,9 @@
     "aistudio": [
         {
             "id": "gemini-2.5-pro",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -1825,6 +1953,9 @@
         },
         {
             "id": "gemini-2.5-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -1858,6 +1989,9 @@
         },
         {
             "id": "gemini-2.5-flash-lite",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1753142400,
             "owned_by": "google",
@@ -1891,6 +2025,9 @@
         },
         {
             "id": "gemini-3.1-pro-preview",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1771459200,
             "owned_by": "google",
@@ -1924,6 +2061,9 @@
         },
         {
             "id": "gemini-3-flash-preview",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1765929600,
             "owned_by": "google",
@@ -1957,6 +2097,9 @@
         },
         {
             "id": "gemini-pro-latest",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -1990,6 +2133,9 @@
         },
         {
             "id": "gemini-flash-latest",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1750118400,
             "owned_by": "google",
@@ -2023,6 +2169,9 @@
         },
         {
             "id": "gemini-flash-lite-latest",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1753142400,
             "owned_by": "google",
@@ -2057,6 +2206,9 @@
         },
         {
             "id": "gemini-2.5-flash-image",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1759363200,
             "owned_by": "google",
@@ -2084,6 +2236,9 @@
         },
         {
             "id": "gemini-3.5-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1779235200,
             "owned_by": "google",
@@ -2123,6 +2278,9 @@
         },
         {
             "id": "gemini-3.5-flash-lite",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1782864000,
             "owned_by": "google",
@@ -2162,6 +2320,9 @@
         },
         {
             "id": "gemini-3.6-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "created": 1782864000,
             "owned_by": "google",
@@ -2201,6 +2362,9 @@
         },
         {
             "id": "gemini-3.7-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "owned_by": "google",
             "type": "gemini",
@@ -2232,6 +2396,9 @@
         },
         {
             "id": "gemini-3.8-flash",
+            "native_capabilities": {
+                "web_search": true
+            },
             "object": "model",
             "owned_by": "google",
             "type": "gemini",
@@ -2340,6 +2507,7 @@
     "codex-free": [
         {
             "id": "gpt-6-luna",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1790035200,
             "owned_by": "openai",
@@ -2549,6 +2717,7 @@
         },
         {
             "id": "gpt-6-astra",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1783616400,
             "owned_by": "openai",
@@ -2583,6 +2752,7 @@
         },
         {
             "id": "gpt-6-sol",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1790035200,
             "owned_by": "openai",
@@ -2617,6 +2787,7 @@
         },
         {
             "id": "gpt-6-luna",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1790035200,
             "owned_by": "openai",
@@ -2827,6 +2998,7 @@
         },
         {
             "id": "gpt-6-astra",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1783616400,
             "owned_by": "openai",
@@ -2861,6 +3033,7 @@
         },
         {
             "id": "gpt-6-sol",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1790035200,
             "owned_by": "openai",
@@ -2895,6 +3068,7 @@
         },
         {
             "id": "gpt-6-luna",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1790035200,
             "owned_by": "openai",
@@ -3105,6 +3279,7 @@
         },
         {
             "id": "gpt-6-astra",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1783616400,
             "owned_by": "openai",
@@ -3139,6 +3314,7 @@
         },
         {
             "id": "gpt-6-sol",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1790035200,
             "owned_by": "openai",
@@ -3173,6 +3349,7 @@
         },
         {
             "id": "gpt-6-luna",
+            "support_configuration_update": true,
             "object": "model",
             "created": 1790035200,
             "owned_by": "openai",
@@ -4414,6 +4591,83 @@
             "supportedOutputModalities": [
                 "text"
             ]
+        }
+    ],
+    "meta": [
+        {
+            "id": "muse-spark-1.3",
+            "object": "model",
+            "created": 1788307200,
+            "owned_by": "meta",
+            "type": "meta",
+            "display_name": "Muse Spark 1.3",
+            "name": "muse-spark-1.3",
+            "description": "Meta Muse Spark 1.3 flagship reasoning and agentic coding model",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {"levels": ["minimal", "low", "medium", "high", "xhigh", "max"]},
+            "supportedInputModalities": ["text", "image"],
+            "supportedOutputModalities": ["text"]
+        },
+        {
+            "id": "muse-spark-1.3-contributor",
+            "object": "model",
+            "created": 1788307200,
+            "owned_by": "meta",
+            "type": "meta",
+            "display_name": "Muse Spark 1.3 Contributor",
+            "name": "muse-spark-1.3-contributor",
+            "description": "Meta Muse Spark 1.3 contributor model",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {"levels": ["minimal", "low", "medium", "high", "xhigh", "max"]},
+            "supportedInputModalities": ["text", "image"],
+            "supportedOutputModalities": ["text"]
+        },
+        {
+            "id": "muse-spark-1.2",
+            "object": "model",
+            "created": 1785888000,
+            "owned_by": "meta",
+            "type": "meta",
+            "display_name": "Muse Spark 1.2",
+            "name": "muse-spark-1.2",
+            "description": "Meta Muse Spark 1.2 reasoning and agentic coding model",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {"levels": ["minimal", "low", "medium", "high", "xhigh"]},
+            "supportedInputModalities": ["text", "image"],
+            "supportedOutputModalities": ["text"]
+        },
+        {
+            "id": "muse-spark-1.2-contributor",
+            "object": "model",
+            "created": 1785888000,
+            "owned_by": "meta",
+            "type": "meta",
+            "display_name": "Muse Spark 1.2 Contributor",
+            "name": "muse-spark-1.2-contributor",
+            "description": "Meta Muse Spark 1.2 contributor model",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {"levels": ["minimal", "low", "medium", "high", "xhigh"]},
+            "supportedInputModalities": ["text", "image"],
+            "supportedOutputModalities": ["text"]
+        },
+        {
+            "id": "muse-spark-1.1",
+            "object": "model",
+            "created": 1783555200,
+            "owned_by": "meta",
+            "type": "meta",
+            "display_name": "Muse Spark 1.1",
+            "name": "muse-spark-1.1",
+            "description": "Meta Muse Spark 1.1 reasoning model",
+            "context_length": 1048576,
+            "max_completion_tokens": 65536,
+            "thinking": {"levels": ["low", "medium", "high", "xhigh"]},
+            "supportedInputModalities": ["text"],
+            "supportedOutputModalities": ["text"]
         }
     ]
 }

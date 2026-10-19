@@ -124,6 +124,9 @@ func TestEmbeddedCodexClientModelsIncludeGPT6Astra(t *testing.T) {
 			astra["priority"],
 		)
 	}
+	if astra["supports_reasoning_effort_updates"] != true {
+		t.Fatalf("Astra reasoning effort updates = %v, want true", astra["supports_reasoning_effort_updates"])
+	}
 	if astra["default_reasoning_level"] != "medium" || astra["supported_in_api"] != true {
 		t.Fatalf(
 			"Astra client defaults = reasoning %v, supported_in_api %v",

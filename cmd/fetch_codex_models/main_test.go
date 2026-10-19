@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	codexauth "github.com/Pyrokine/CLIProxyAPI/v6/internal/auth/codex"
 	coreauth "github.com/Pyrokine/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
@@ -17,12 +19,38 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
-func TestCodexClientMetadata154(t *testing.T) {
-	if defaultClientVersion != "0.154.0" {
+func TestCodexClientMetadata159(t *testing.T) {
+	if defaultClientVersion != "0.159.0" {
 		t.Fatalf("defaultClientVersion = %q", defaultClientVersion)
 	}
-	if !strings.Contains(defaultCodexUserAgent, "codex_cli_rs/0.154.0") {
+	if !strings.Contains(defaultCodexUserAgent, "codex_cli_rs/0.159.0") {
 		t.Fatalf("defaultCodexUserAgent = %q", defaultCodexUserAgent)
+	}
+}
+
+func TestRefreshedCodexPlanUpdatesAuthMetadata(t *testing.T) {
+	makeIDToken := func(plan string) string {
+		claims := `{"https://api.openai.com/auth":{"chatgpt_plan_type":"` + plan + `"}}`
+		return "header." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".signature"
+	}
+	for _, tc := range []struct {
+		name, tokenPlan, idToken, want string
+	}{
+		{name: "refresh plan", tokenPlan: " team ", idToken: makeIDToken("plus"), want: "team"},
+		{name: "id token claim", idToken: makeIDToken("plus"), want: "plus"},
+		{name: "missing claim defaults to free", idToken: makeIDToken(""), want: codexauth.DefaultPlanType},
+		{name: "invalid token defaults to free", idToken: "invalid", want: codexauth.DefaultPlanType},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auth := &coreauth.Auth{Metadata: map[string]any{"plan_type": "stale-plus"}}
+			applyRefreshedCodexPlan(auth, &codexauth.TokenData{PlanType: tc.tokenPlan, IDToken: tc.idToken})
+			if got := auth.Metadata["plan_type"]; got != tc.want {
+				t.Fatalf("metadata plan_type = %v, want %q", got, tc.want)
+			}
+			if got := auth.Attributes["plan_type"]; got != tc.want {
+				t.Fatalf("attribute plan_type = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -49,7 +77,7 @@ func TestFindCodexAuthSkipsDisabledAndTokenlessCredentials(t *testing.T) {
 	}
 }
 
-func TestFetchModelsUses154MetadataAndFakeTransport(t *testing.T) {
+func TestFetchModelsUses159MetadataAndFakeTransport(t *testing.T) {
 	const accessToken = "codex-access-token-for-test"
 	const accountID = "account-test"
 	fixture := `{"models":[{"slug":"gpt-6-astra"},{"slug":"gpt-5.6-sol"}]}`

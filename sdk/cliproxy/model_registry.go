@@ -35,6 +35,7 @@ type ModelInfo struct {
 	SupportedInputModalities   []string            `json:"supportedInputModalities,omitempty"`
 	SupportedOutputModalities  []string            `json:"supportedOutputModalities,omitempty"`
 	SupportsWebSearch          bool                `json:"supports_web_search,omitempty"`
+	SupportConfigurationUpdate bool                `json:"-"`
 	NativeCapabilities         *NativeCapabilities `json:"-"`
 	Thinking                   *ThinkingSupport    `json:"thinking,omitempty"`
 	IsCompat                   bool                `json:"-"`
@@ -79,6 +80,7 @@ type ModelRegistry interface {
 // the interface implemented by existing registry consumers.
 type VersionedModelRegistry interface {
 	ModelRegistry
+	ReplaceClientModels(clientID, clientProvider string, expectedEpoch uint64, models []*ModelInfo) (uint64, bool)
 	ApplyClientModelProjections(
 		clientID string,
 		epoch uint64,
@@ -99,6 +101,13 @@ func (r *modelRegistryAdapter) RegisterClient(clientID, clientProvider string, m
 		return
 	}
 	r.inner.RegisterClient(clientID, clientProvider, toRegistryModelInfos(models))
+}
+
+func (r *modelRegistryAdapter) ReplaceClientModels(clientID, clientProvider string, expectedEpoch uint64, models []*ModelInfo) (uint64, bool) {
+	if r == nil || r.inner == nil {
+		return 0, false
+	}
+	return r.inner.ReplaceClientModels(clientID, clientProvider, expectedEpoch, toRegistryModelInfos(models))
 }
 
 func (r *modelRegistryAdapter) UnregisterClient(clientID string) {
@@ -264,6 +273,7 @@ func toRegistryModelInfo(model *ModelInfo) *registry.ModelInfo {
 		SupportedInputModalities:   append([]string(nil), model.SupportedInputModalities...),
 		SupportedOutputModalities:  append([]string(nil), model.SupportedOutputModalities...),
 		SupportsWebSearch:          model.SupportsWebSearch,
+		SupportConfigurationUpdate: model.SupportConfigurationUpdate,
 		NativeCapabilities:         toRegistryNativeCapabilities(model.NativeCapabilities),
 		Thinking:                   toRegistryThinkingSupport(model.Thinking),
 		IsCompat:                   model.IsCompat,
@@ -336,6 +346,7 @@ func fromRegistryModelInfo(model *registry.ModelInfo) *ModelInfo {
 		SupportedInputModalities:   append([]string(nil), model.SupportedInputModalities...),
 		SupportedOutputModalities:  append([]string(nil), model.SupportedOutputModalities...),
 		SupportsWebSearch:          model.SupportsWebSearch,
+		SupportConfigurationUpdate: model.SupportConfigurationUpdate,
 		NativeCapabilities:         fromRegistryNativeCapabilities(model.NativeCapabilities),
 		Thinking:                   fromRegistryThinkingSupport(model.Thinking),
 		IsCompat:                   model.IsCompat,

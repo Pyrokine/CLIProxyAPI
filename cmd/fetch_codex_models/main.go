@@ -33,8 +33,8 @@ import (
 const (
 	codexModelsBaseURL       = "https://chatgpt.com/backend-api/codex"
 	codexModelsPath          = "/models"
-	defaultClientVersion     = "0.154.0"
-	defaultCodexUserAgent    = "codex_cli_rs/0.154.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+	defaultClientVersion     = "0.159.0"
+	defaultCodexUserAgent    = "codex_cli_rs/0.159.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
 	defaultCodexOriginator   = "codex_cli_rs"
 	accessTokenRefreshLeeway = 30 * time.Second
 )
@@ -231,11 +231,29 @@ func ensureAccessToken(
 	auth.Metadata["expired"] = tokenData.Expire
 	auth.Metadata["type"] = "codex"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
+	applyRefreshedCodexPlan(auth, tokenData)
 
 	if _, errSave := store.Save(ctx, auth); errSave != nil {
 		return "", false, fmt.Errorf("save refreshed auth: %w", errSave)
 	}
 	return tokenData.AccessToken, true, nil
+}
+
+func applyRefreshedCodexPlan(auth *coreauth.Auth, tokenData *codexauth.TokenData) {
+	planType := strings.TrimSpace(tokenData.PlanType)
+	if planType == "" && tokenData.IDToken != "" {
+		if claims, err := codexauth.ParseJWTToken(tokenData.IDToken); err == nil && claims != nil {
+			planType = claims.GetPlanType()
+		}
+	}
+	if planType == "" {
+		planType = codexauth.DefaultPlanType
+	}
+	auth.Metadata["plan_type"] = planType
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["plan_type"] = planType
 }
 
 func fetchModels(

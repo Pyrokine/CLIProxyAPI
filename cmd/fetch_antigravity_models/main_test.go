@@ -30,11 +30,55 @@ func TestDefaultAntigravityFetchBaseURLs(t *testing.T) {
 	}
 }
 
-func TestFindAntigravityAuthSkipsDisabledCredentials(t *testing.T) {
-	disabled := &coreauth.Auth{Provider: "antigravity", Disabled: true}
-	enabled := &coreauth.Auth{Provider: " Antigravity "}
-	if got := findAntigravityAuth([]*coreauth.Auth{nil, disabled, enabled}); got != enabled {
-		t.Fatalf("findAntigravityAuth() = %p, want %p", got, enabled)
+func TestFetchModelsTriesEnabledCredentialsWithoutMergingCatalogs(t *testing.T) {
+	var calls []string
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		token := req.Header.Get("Authorization")
+		calls = append(calls, token)
+		if token == "Bearer fixture-valid" {
+			return response(http.StatusOK, antigravityFixture("fixture-catalog-model")), nil
+		}
+		return response(http.StatusUnauthorized, `{}`), nil
+	})}
+	auths := []*coreauth.Auth{
+		nil,
+		{ID: "backup.back.json", Provider: "antigravity", Metadata: map[string]any{"access_token": "fixture-backup"}},
+		{ID: "disabled", Provider: "antigravity", Disabled: true},
+		{ID: "status-disabled", Provider: "antigravity", Status: coreauth.StatusDisabled},
+		{ID: "unrelated", Provider: "codex"},
+		{ID: "invalid", Provider: "antigravity", Metadata: map[string]any{"access_token": "fixture-invalid"}},
+		{ID: "valid", Provider: " Antigravity ", Metadata: map[string]any{"access_token": "fixture-valid"}},
+		{ID: "unused", Provider: "antigravity", Metadata: map[string]any{"access_token": "fixture-unused"}},
+	}
+	models, err := fetchModels(context.Background(), auths, []string{"https://fixture.invalid"}, client)
+	if err != nil || len(models) != 1 || models[0].ID != "fixture-catalog-model" {
+		t.Fatalf("fetchModels: models=%v err=%v", models, err)
+	}
+	if want := []string{"Bearer fixture-invalid", "Bearer fixture-invalid", "Bearer fixture-valid"}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestFetchModelsBackupOnlyAndAllFailures(t *testing.T) {
+	for _, success := range []bool{true, false} {
+		client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			if success {
+				return response(http.StatusOK, antigravityFixture("fixture-backup-model")), nil
+			}
+			return nil, errors.New("fixture-backup-secret transport error")
+		})}
+		auths := []*coreauth.Auth{{ID: "fixture.back.json", Provider: "antigravity", Metadata: map[string]any{"access_token": "fixture-backup-secret"}}}
+		models, err := fetchModels(context.Background(), auths, []string{"https://fixture.invalid"}, client)
+		if success {
+			if err != nil || len(models) != 1 || models[0].ID != "fixture-backup-model" {
+				t.Fatalf("backup-only fetch: models=%v err=%v", models, err)
+			}
+		} else if models != nil || err == nil || strings.Contains(err.Error(), "fixture-backup-secret") {
+			t.Fatalf("failed fetch exposed credentials or returned a catalog: models=%v err=%v", models, err)
+		}
+	}
+	if models, err := fetchModels(context.Background(), nil, nil, nil); models != nil || err == nil {
+		t.Fatalf("empty auths: models=%v err=%v", models, err)
 	}
 }
 

@@ -147,7 +147,7 @@ func TestFetchAllRawDevinModelsAggregatesEnabledCredentialsWithFakeTransport(t *
 	if !reflect.DeepEqual(astra.SupportedInputModalities, []string{"text", "image"}) {
 		t.Fatalf("Astra modalities = %#v", astra.SupportedInputModalities)
 	}
-	if astra.Thinking == nil || !reflect.DeepEqual(astra.Thinking.Levels, []string{"low", "high"}) {
+	if astra.Thinking == nil || !reflect.DeepEqual(astra.Thinking.Levels, []string{"low", "medium", "high", "xhigh", "max"}) {
 		t.Fatalf("Astra thinking = %#v", astra.Thinking)
 	}
 
@@ -160,6 +160,51 @@ func TestFetchAllRawDevinModelsAggregatesEnabledCredentialsWithFakeTransport(t *
 			t.Fatalf("catalog leaked %q: %s", secret, encoded)
 		}
 	}
+}
+
+func TestAggregateDevinModelsPreservesEffortsAndGrokOwner(t *testing.T) {
+	raw := []rawDevinModel{
+		{UID: "grok-test-9-low-fast", Label: "Grok Test 9 Low Thinking Fast", ContextLength: 100000},
+		{UID: "grok-test-9-high-priority", Label: "Grok Test 9 High Priority", ContextLength: 200000},
+		{UID: "grok-test-9", Label: "Grok Test 9", ContextLength: 150000},
+		{UID: "claude-test-max-1m", Label: "Claude Test Max", ContextLength: 1000000, VendorID: 3},
+		{UID: "glm-test_HIGH", Label: "GLM Test High", ContextLength: 200000, VendorID: 9},
+		{UID: "swe-1-6-slow", Label: "SWE-1.6 Slow", ContextLength: 200000, VendorID: 1},
+	}
+	models := aggregateModels(raw)
+	byID := make(map[string]devinModelJSON, len(models))
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+	grok := byID["grok-test-9"]
+	if len(models) != 4 || grok.OwnedBy != "xai" || grok.DisplayName != "Grok Test 9" ||
+		grok.ContextLength != 200000 || grok.Thinking == nil ||
+		!reflect.DeepEqual(grok.Thinking.Levels, []string{"low", "high"}) {
+		t.Fatalf("Grok model = %+v; all = %+v", grok, models)
+	}
+	claude := byID["claude-test-1m"]
+	if claude.OwnedBy != "anthropic" || claude.Thinking == nil ||
+		!reflect.DeepEqual(claude.Thinking.Levels, []string{"max"}) {
+		t.Fatalf("Claude 1m model = %+v", claude)
+	}
+	glm := byID["glm-test"]
+	if glm.OwnedBy != "zhipu" || glm.Thinking == nil ||
+		!reflect.DeepEqual(glm.Thinking.Levels, []string{"high"}) {
+		t.Fatalf("GLM model = %+v", glm)
+	}
+	if byID["swe-1-6-slow"].ID != "swe-1-6-slow" {
+		t.Fatalf("SWE slow model missing: %+v", models)
+	}
+	rawModels := formatRawModels(raw)
+	for _, model := range rawModels {
+		if model.ID == raw[0].UID {
+			if model.OwnedBy != "xai" {
+				t.Fatalf("raw Grok model = %+v", model)
+			}
+			return
+		}
+	}
+	t.Fatal("raw Grok model missing")
 }
 
 func TestFetchAllRawDevinModelsPreservesSafeCredentialErrors(t *testing.T) {

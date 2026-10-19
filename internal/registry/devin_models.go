@@ -5,6 +5,8 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 
@@ -29,6 +31,7 @@ type devinModelsStore struct {
 var devinCatalogStore = &devinModelsStore{}
 
 var staticDevinModels = []*ModelInfo{
+	devinBuiltinSWE16SlowModelInfo(),
 	{
 		ID: "devin/swe-2", Object: "model", Type: "devin", OwnedBy: "cognition", DisplayName: "SWE-2",
 		ContextLength: 262000, MaxCompletionTokens: 128000,
@@ -86,6 +89,30 @@ var staticDevinModels = []*ModelInfo{
 	},
 }
 
+const devinBuiltinSWE16SlowID = "devin/swe-1-6-slow"
+
+func devinBuiltinSWE16SlowModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                         devinBuiltinSWE16SlowID,
+		Object:                     "model",
+		Type:                       "devin",
+		OwnedBy:                    "cognition",
+		DisplayName:                "SWE-1.6 Slow",
+		ContextLength:              200000,
+		MaxCompletionTokens:        64000,
+		InputTokenLimit:            200000,
+		OutputTokenLimit:           64000,
+		SupportedInputModalities:   []string{"text", "image"},
+		SupportedOutputModalities:  []string{"text"},
+		SupportedGenerationMethods: []string{"generateContent", "countTokens"},
+	}
+}
+
+// WithDevinBuiltins preserves catalog entries while replacing built-in model definitions.
+func WithDevinBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, devinBuiltinSWE16SlowModelInfo())
+}
+
 func init() {
 	if _, err := loadDevinModelsFromBytes(embeddedDevinModelsJSON, "embedded catalog"); err != nil {
 		log.Warnf("registry: failed to parse embedded Devin model catalog: %v", err)
@@ -103,10 +130,10 @@ func GetDevinModels() []*ModelInfo {
 	if catalog := getModels(); catalog != nil && len(catalog.Devin) > 0 {
 		validated, err := sanitizeAndValidateDevinModels(catalog.Devin)
 		if err == nil {
-			return validated
+			return WithDevinBuiltins(validated)
 		}
 	}
-	return cloneModelInfos(staticDevinModels)
+	return WithDevinBuiltins(cloneModelInfos(staticDevinModels))
 }
 
 // LookupDevinModel returns a model from the active Devin catalog.
@@ -116,12 +143,18 @@ func LookupDevinModel(modelID string) *ModelInfo {
 	if modelID == "" {
 		return nil
 	}
-	for _, model := range GetDevinModels() {
-		if model == nil {
-			continue
-		}
-		if strings.TrimPrefix(strings.ToLower(model.ID), "devin/") == modelID {
+	models := GetDevinModels()
+	for _, model := range models {
+		if model != nil && strings.TrimPrefix(strings.ToLower(model.ID), "devin/") == modelID {
 			return model
+		}
+	}
+	baseID, _ := splitDevinModelID(modelID)
+	if baseID != modelID {
+		for _, model := range models {
+			if model != nil && strings.TrimPrefix(strings.ToLower(model.ID), "devin/") == baseID {
+				return model
+			}
 		}
 	}
 	return nil
@@ -146,11 +179,36 @@ func GetDevinModelsRevision() uint64 {
 	return revision
 }
 
+func retainDevinPublicAliases(models []*ModelInfo) ([]*ModelInfo, error) {
+	embedded, err := ValidateDevinModelsJSON(embeddedDevinModelsJSON)
+	if err != nil {
+		return nil, fmt.Errorf("validate embedded Devin aliases: %w", err)
+	}
+	present := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		present[model.ID] = struct{}{}
+	}
+	for _, model := range embedded {
+		switch model.ID {
+		case "devin/claude-haiku-4-5", "devin/claude-sonnet-4-5", "devin/gpt-4-1", "devin/gemini-3-flash":
+			if _, exists := present[model.ID]; !exists {
+				models = append(models, model)
+			}
+		}
+	}
+	return models, nil
+}
+
 func loadDevinModelsFromBytes(data []byte, source string) (bool, error) {
 	models, err := ValidateDevinModelsJSON(data)
 	if err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
+	models, err = retainDevinPublicAliases(models)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", source, err)
+	}
+	models = WithDevinBuiltins(models)
 
 	rawJSON := append([]byte(nil), data...)
 	devinCatalogStore.mu.Lock()
@@ -188,9 +246,158 @@ func ValidateDevinModelsJSON(data []byte) ([]*ModelInfo, error) {
 	return nil, fmt.Errorf("expected a non-empty devin, models, or direct model array")
 }
 
+var devinThinkingLevelOrder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "fast"}
+
+var devinDisplayNameSuffixes = []string{
+	" Low Thinking Fast", " Medium Thinking Fast", " High Thinking Fast", " XHigh Thinking Fast",
+	" Max Thinking Fast", " No Thinking Fast", " Low Fast", " Medium Fast", " High Fast",
+	" XHigh Fast", " Max Fast", " Low Thinking", " Medium Thinking", " High Thinking",
+	" XHigh Thinking", " Max Thinking", " No Thinking", " Low", " Medium", " High",
+	" XHigh", " Max", " None", " Minimal", " Thinking", " Fast",
+}
+
+func splitDevinModelID(id string) (string, string) {
+	if id == "swe-1-6-slow" {
+		return id, ""
+	}
+	if id == "swe-1-6-fast" {
+		return "swe-1-6", ""
+	}
+	for _, level := range devinThinkingLevelOrder {
+		if suffix := "_" + level; strings.HasSuffix(id, suffix) {
+			return strings.TrimSuffix(id, suffix), level
+		}
+	}
+	if strings.HasSuffix(id, "_thinking") {
+		return strings.TrimSuffix(id, "_thinking"), "high"
+	}
+	for _, suffix := range []struct {
+		tail   string
+		readd  string
+		effort string
+	}{
+		{tail: "-thinking-1m", readd: "-1m"},
+		{tail: "-thinking"},
+		{tail: "-max-1m", readd: "-1m", effort: "max"},
+		{tail: "-none-1m", readd: "-1m", effort: "none"},
+	} {
+		if strings.HasSuffix(id, suffix.tail) {
+			return strings.TrimSuffix(id, suffix.tail) + suffix.readd, suffix.effort
+		}
+	}
+	for _, level := range devinThinkingLevelOrder {
+		for _, suffix := range []string{"-fast", "-priority"} {
+			if tail := "-" + level + suffix; strings.HasSuffix(id, tail) {
+				return strings.TrimSuffix(id, tail), level
+			}
+		}
+		if tail := "-" + level; strings.HasSuffix(id, tail) {
+			return strings.TrimSuffix(id, tail), level
+		}
+	}
+	return id, ""
+}
+
+func cleanDevinDisplayName(name string) string {
+	name = strings.TrimSpace(name)
+	for {
+		cleaned := false
+		for _, suffix := range devinDisplayNameSuffixes {
+			if strings.HasSuffix(strings.ToLower(name), strings.ToLower(suffix)) {
+				name = strings.TrimSpace(name[:len(name)-len(suffix)])
+				cleaned = true
+				break
+			}
+		}
+		if !cleaned {
+			return name
+		}
+	}
+}
+
+func aggregateDevinModels(models []*ModelInfo) []*ModelInfo {
+	type modelGroup struct {
+		model  *ModelInfo
+		levels map[string]struct{}
+	}
+	groups := make(map[string]*modelGroup, len(models))
+	order := make([]string, 0, len(models))
+	for _, model := range models {
+		id := strings.TrimPrefix(model.ID, "devin/")
+		base, effort := splitDevinModelID(id)
+		if base == "" {
+			base = id
+		}
+		key := "devin/" + base
+		group := groups[key]
+		if group == nil {
+			copyModel := cloneModelInfo(model)
+			copyModel.ID = key
+			if displayName := cleanDevinDisplayName(model.DisplayName); displayName != "" {
+				copyModel.DisplayName = displayName
+			}
+			group = &modelGroup{model: copyModel, levels: make(map[string]struct{})}
+			groups[key] = group
+			order = append(order, key)
+		}
+		if base == id {
+			if model.DisplayName != "" {
+				group.model.DisplayName = cleanDevinDisplayName(model.DisplayName)
+			}
+			if model.OwnedBy != "" {
+				group.model.OwnedBy = model.OwnedBy
+			}
+		}
+		group.model.ContextLength = max(group.model.ContextLength, model.ContextLength)
+		group.model.MaxCompletionTokens = max(group.model.MaxCompletionTokens, model.MaxCompletionTokens)
+		group.model.InputTokenLimit = max(group.model.InputTokenLimit, model.InputTokenLimit)
+		group.model.OutputTokenLimit = max(group.model.OutputTokenLimit, model.OutputTokenLimit)
+		for _, modality := range model.SupportedInputModalities {
+			if !slices.Contains(group.model.SupportedInputModalities, modality) {
+				group.model.SupportedInputModalities = append(group.model.SupportedInputModalities, modality)
+			}
+		}
+		for _, modality := range model.SupportedOutputModalities {
+			if !slices.Contains(group.model.SupportedOutputModalities, modality) {
+				group.model.SupportedOutputModalities = append(group.model.SupportedOutputModalities, modality)
+			}
+		}
+		for _, method := range model.SupportedGenerationMethods {
+			if !slices.Contains(group.model.SupportedGenerationMethods, method) {
+				group.model.SupportedGenerationMethods = append(group.model.SupportedGenerationMethods, method)
+			}
+		}
+		if model.Thinking != nil {
+			for _, level := range model.Thinking.Levels {
+				group.levels[level] = struct{}{}
+			}
+		}
+		if effort != "" {
+			group.levels[effort] = struct{}{}
+		}
+	}
+	out := make([]*ModelInfo, 0, len(order))
+	for _, key := range order {
+		group := groups[key]
+		if len(group.levels) > 0 {
+			levels := make([]string, 0, len(group.levels))
+			for level := range group.levels {
+				levels = append(levels, level)
+			}
+			sort.Slice(levels, func(i, j int) bool {
+				return slices.Index(devinThinkingLevelOrder, levels[i]) < slices.Index(devinThinkingLevelOrder, levels[j])
+			})
+			group.model.Thinking = &ThinkingSupport{Levels: levels}
+		}
+		out = append(out, group.model)
+	}
+	return out
+}
+
 func sanitizeAndValidateDevinModels(candidates []*ModelInfo) ([]*ModelInfo, error) {
 	seen := make(map[string]struct{}, len(candidates))
 	models := make([]*ModelInfo, 0, len(candidates))
+	ignoredInternalUIDs := 0
 	for index, candidate := range candidates {
 		if candidate == nil {
 			return nil, fmt.Errorf("model at index %d is null", index)
@@ -199,6 +406,10 @@ func sanitizeAndValidateDevinModels(candidates []*ModelInfo) ([]*ModelInfo, erro
 		modelID := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(model.ID)), "devin/")
 		if modelID == "" || strings.Contains(modelID, "/") {
 			return nil, fmt.Errorf("model at index %d has invalid id %q", index, model.ID)
+		}
+		if strings.HasPrefix(modelID, "model_") {
+			ignoredInternalUIDs++
+			continue
 		}
 		model.ID = "devin/" + modelID
 		if _, exists := seen[model.ID]; exists {
@@ -231,7 +442,13 @@ func sanitizeAndValidateDevinModels(candidates []*ModelInfo) ([]*ModelInfo, erro
 		}
 		models = append(models, model)
 	}
-	return models, nil
+	if ignoredInternalUIDs > 0 {
+		log.Warnf("registry: skipped %d internal Devin UIDs from public model catalog", ignoredInternalUIDs)
+	}
+	if len(models) == 0 {
+		return nil, fmt.Errorf("devin catalog contains no public models")
+	}
+	return aggregateDevinModels(models), nil
 }
 
 func normalizeDevinThinkingLevels(model *ModelInfo) error {

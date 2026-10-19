@@ -155,7 +155,7 @@ func buildHomeModelRoute(section, provider string, rawModel map[string]any) (Hom
 	if contextLength > 0 {
 		model["context_length"] = contextLength
 	}
-	maxContextLength := homeIntValue(model, "max_context_length")
+	maxContextLength := homeIntValue(model, "max_context_length", "maxContextLength")
 	if maxContextLength <= 0 && staticInfo != nil {
 		maxContextLength = staticInfo.MaxContextLength
 	}

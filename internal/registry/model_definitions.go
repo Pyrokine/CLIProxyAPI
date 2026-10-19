@@ -310,6 +310,7 @@ func legacyStaticLookupModelsByChannel(channel string) []*ModelInfo {
 // Supported channels:
 //   - claude
 //   - gemini
+//   - gemini-interactions
 //   - vertex
 //   - gemini-cli
 //   - aistudio
@@ -320,12 +321,13 @@ func legacyStaticLookupModelsByChannel(channel string) []*ModelInfo {
 //   - antigravity (returns static overrides only)
 //   - xai
 //   - devin
+//   - meta
 func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	key := strings.ToLower(strings.TrimSpace(channel))
 	switch key {
 	case "claude":
 		return GetClaudeModels()
-	case "gemini":
+	case "gemini", "gemini-interactions":
 		return GetGeminiModels()
 	case "vertex":
 		return GetGeminiVertexModels()
@@ -339,7 +341,7 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetQwenModels()
 	case "iflow":
 		return GetIFlowModels()
-	case "kimi":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		return GetKimiModels()
 	case "antigravity":
 		return getAntigravityModels()
@@ -347,6 +349,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetXAIModels()
 	case "devin":
 		return GetDevinModels()
+	case "meta", "muse":
+		return GetMetaModels()
 	default:
 		return nil
 	}
@@ -363,7 +367,7 @@ func GetEmbeddedStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 	switch key {
 	case "claude":
 		return cloneModelInfos(catalog.Claude)
-	case "gemini":
+	case "gemini", "gemini-interactions":
 		return cloneModelInfos(catalog.Gemini)
 	case "vertex":
 		return cloneModelInfos(catalog.Vertex)
@@ -377,7 +381,7 @@ func GetEmbeddedStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return cloneModelInfos(catalog.Qwen)
 	case "iflow":
 		return cloneModelInfos(catalog.IFlow)
-	case "kimi":
+	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		return cloneModelInfos(catalog.Kimi)
 	case "antigravity":
 		return cloneModelInfos(catalog.Antigravity)
@@ -385,6 +389,8 @@ func GetEmbeddedStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetEmbeddedXAIModels()
 	case "devin":
 		return cloneModelInfos(catalog.Devin)
+	case "meta", "muse":
+		return cloneModelInfos(catalog.Meta)
 	default:
 		return nil
 	}
@@ -437,6 +443,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetXAIModels(),
 		legacyStaticLookupModelsByChannel("codex"),
 		GetDevinModels(),
+		GetMetaModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {

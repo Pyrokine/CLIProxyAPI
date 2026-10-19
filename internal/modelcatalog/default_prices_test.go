@@ -17,6 +17,7 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 	cacheWriteAstra := 12.5
 	cacheWriteCyber := 15.625
 	cacheWriteGPT6Sol := 2.5
+	cacheWriteGPT61Sol := 2.5
 	cacheWriteGPT6Luna := 0.125
 	gptImage15Limitations := []string{
 		"Image input is USD 8 per one million tokens and cached image input is USD 2; the current manifest records the text-input and cached-text-input rates because it cannot distinguish input modality.",
@@ -64,6 +65,10 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 			Prompt: 2, Completion: 10, Cache: 0.2, CacheWrite: &cacheWriteGPT6Sol,
 			Status: PriceStatusPartial,
 		},
+		"gpt-6.1-sol": {
+			Prompt: 2, Completion: 10, Cache: 0.1, CacheWrite: &cacheWriteGPT61Sol,
+			Status: PriceStatusPartial,
+		},
 		"gpt-6-luna": {
 			Prompt: 0.1, Completion: 0.5, Cache: 0.01, CacheWrite: &cacheWriteGPT6Luna,
 			Status: PriceStatusPartial,
@@ -91,6 +96,9 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 		},
 		"claude-opus-5-5": {
 			Prompt: 4, Completion: 20, Cache: 0.2, Status: PriceStatusComplete,
+		},
+		"claude-sonnet-5-5": {
+			Prompt: 2, Completion: 10, Cache: 0.1, Status: PriceStatusComplete,
 		},
 		"grok-4.7": {
 			Prompt: 2, Completion: 6, Cache: 0.5, Status: PriceStatusPartial,
@@ -187,6 +195,17 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 			limitations: []string{
 				"Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
 			},
+		},
+		"gpt-6.1-sol": {
+			source:    "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+			checkedAt: "2026-10-09",
+			limitations: []string{
+				"Requests with more than 272K input tokens use 2x input and cache pricing and 1.5x output pricing; the current manifest does not select that tier automatically.",
+			},
+		},
+		"claude-sonnet-5-5": {
+			source:    "https://platform.claude.com/docs/en/models/sonnet-5-5/overview",
+			checkedAt: "2026-10-09",
 		},
 		"gpt-6-luna": {
 			source:    "https://developers.openai.com/api/docs/models/gpt-6-luna",
@@ -321,8 +340,8 @@ func TestDefaultPricesMatchCurrentPublishedRates(t *testing.T) {
 
 	// This contract test intentionally compares a compile-time manifest version.
 	// noinspection GoBoolExpressions
-	if DefaultsVersion != "2026-09-23.2" {
-		t.Fatalf("DefaultsVersion = %q, want 2026-09-23.2", DefaultsVersion)
+	if DefaultsVersion != "2026-10-09.1" {
+		t.Fatalf("DefaultsVersion = %q, want 2026-10-09.1", DefaultsVersion)
 	}
 }
 
@@ -431,7 +450,7 @@ func TestDefaultCatalogKeepsPriceManifestSeparateFromInventory(t *testing.T) {
 
 	catalog := DefaultFile()
 	aliases := catalog.ToOAuthModelAlias()
-	for _, name := range []string{"gpt-5", "gpt-5.6-cyber"} {
+	for _, name := range []string{"gpt-5", "gpt-5.6-cyber", "gpt-6.1-sol"} {
 		if _, ok := catalog.Price(name); !ok {
 			t.Errorf("default price manifest missing %q", name)
 		}
@@ -452,6 +471,10 @@ func TestDefaultCatalogKeepsPriceManifestSeparateFromInventory(t *testing.T) {
 	}
 	if _, ok := catalog.Price("gpt-6-astra"); !ok {
 		t.Fatal("default Astra price is missing")
+	}
+	sonnet, ok := catalog.Find("claude-sonnet-5-5")
+	if !ok || sonnet.Provider != "Claude" || sonnet.Channel != "claude" || !sonnet.Enabled {
+		t.Fatalf("default Sonnet 5.5 inventory model = %+v, %v", sonnet, ok)
 	}
 	for _, name := range []string{"glm-4.6", "qwen3-max-preview", "imagen-4.0-generate-001"} {
 		price, ok := catalog.Price(name)

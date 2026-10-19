@@ -18,10 +18,11 @@ A model in the embedded or management catalog is not requestable until an enable
 
 - Models: <https://platform.claude.com/docs/en/about-claude/models/overview>
 - Pricing: <https://platform.claude.com/docs/en/about-claude/pricing>
-- Default additions: `claude-opus-5-5`
-- Current adaptive models: `claude-fable-5-1`, `claude-opus-5-5`
+- Sonnet 5.5 migration: <https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5>
+- Default additions: `claude-opus-5-5`, `claude-sonnet-5-5`
+- Current adaptive models: `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`
 
-Both current models use always-on adaptive thinking. A client request that disables thinking is normalized to the lowest supported effort instead of publishing an unsupported disabled state. Restricted models are not added to the general default inventory.
+Fable 5.1 and Opus 5.5 use always-on adaptive thinking. Sonnet 5.5 accepts adaptive thinking or `between_tools`, but rejects `thinking.type=disabled` and forced tool choices. For Sonnet 5.5, catalog `zero_allowed` preserves the `none` request intent; the Claude executor sends `between_tools` instead of `disabled`. Restricted models are not added to the general default inventory.
 
 ## OpenAI and Codex
 
@@ -32,7 +33,7 @@ Both current models use always-on adaptive thinking. A client request that disab
 - Codex client manifest: <https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/codex_client_models.json>
 - Fallback catalog endpoints: <https://models.router-for.me/models.json> and <https://models.router-for.me/codex_client_models.json>
 
-OpenAI public API availability does not establish Codex OAuth or CLI plan entitlement. `gpt-5.3-codex` remains available for public API compatibility but is not reintroduced into the Codex plan inventory. `gpt-5.3-codex-spark` is removed from the default Codex inventory and client manifest, with exact-ID historical lookup retained.
+OpenAI public API availability does not establish Codex OAuth or CLI plan entitlement. The official `gpt-6.1-sol` API ID has a reference-price record but is not added to the embedded Codex plan inventory or client manifest without a reviewed Codex client template; a remote catalog may publish it for an eligible credential. `gpt-5.3-codex` remains available for public API compatibility but is not reintroduced into the Codex plan inventory. `gpt-5.3-codex-spark` is removed from the default Codex inventory and client manifest, with exact-ID historical lookup retained.
 
 Current Codex plan placement is:
 

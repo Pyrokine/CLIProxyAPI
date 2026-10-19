@@ -170,6 +170,23 @@ func GetClaudeModels() []*ModelInfo {
 			},
 		},
 		{
+			ID:                        "claude-sonnet-5-5",
+			Object:                    "model",
+			Created:                   1790553600,
+			OwnedBy:                   "anthropic",
+			Type:                      "claude",
+			DisplayName:               "Claude Sonnet 5.5",
+			Description:               "Anthropic's agentic Sonnet model for coding, tool use, and enterprise workflows",
+			ContextLength:             1000000,
+			MaxCompletionTokens:       128000,
+			SupportedInputModalities:  []string{"text", "image"},
+			SupportedOutputModalities: []string{"text"},
+			Thinking: &ThinkingSupport{
+				ZeroAllowed: true, DynamicAllowed: true,
+				Levels: []string{"low", "medium", "high", "xhigh", "max"},
+			},
+		},
+		{
 			ID:                        "claude-fable-5-1",
 			Object:                    "model",
 			Created:                   1788220800,
@@ -1432,6 +1449,11 @@ func GetKimiModels() []*ModelInfo {
 			Thinking:                  &ThinkingSupport{ZeroAllowed: true, Levels: []string{"low", "high", "max"}},
 		},
 	}
+}
+
+// GetMetaModels returns Meta Muse model definitions from the current catalog.
+func GetMetaModels() []*ModelInfo {
+	return getCatalogModels(func(data *staticModelsJSON) []*ModelInfo { return data.Meta })
 }
 
 func xaiModelsFromCatalog(data *staticModelsJSON) []*ModelInfo {
