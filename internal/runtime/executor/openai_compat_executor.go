@@ -124,6 +124,7 @@ func (e *OpenAICompatExecutor) Execute(
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
 	}
+	clineNonstream := endpoint == "/chat/completions" && isClineCompatEndpoint(baseURL)
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -163,6 +164,10 @@ func (e *OpenAICompatExecutor) Execute(
 	if err != nil {
 		return resp, err
 	}
+	if clineNonstream {
+		translated = helps.SetBoolIfDifferent(translated, "stream", true)
+		translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	}
 	translated = applyPayloadConfigWithRequest(
 		e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated,
 		requestedModel, payloadRequestPath(opts), opts.Headers, e.Identifier(),
@@ -197,9 +202,16 @@ func (e *OpenAICompatExecutor) Execute(
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	if clineNonstream && gjson.GetBytes(translated, "stream").Bool() {
+		httpReq.Header.Set("Accept", "text/event-stream")
+		httpReq.Header.Set("Cache-Control", "no-cache")
+	}
 	recordUpstreamRequest(ctx, e.cfg, url, httpReq.Header.Clone(), translated, e.Identifier(), auth)
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	if clineNonstream {
+		httpClient = reporter.trackHTTPClient(httpClient)
+	}
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		recordAPIResponseError(ctx, e.cfg, err)
@@ -221,13 +233,24 @@ func (e *OpenAICompatExecutor) Execute(
 		err = newUpstreamStatusErr(httpResp.StatusCode, b, httpResp.Header)
 		return resp, err
 	}
-	body, err := io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
-	if err != nil {
-		err = markResponseStarted(err)
-		recordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
+	var body []byte
+	if clineNonstream {
+		var observed streamUsageBuffer
+		body, err = e.readClineChatCompletion(ctx, httpResp, reporter, &observed)
+		if err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
+			reporter.publishFailureWithDetail(ctx, observed.detail, err)
+			return resp, err
+		}
+	} else {
+		body, err = io.ReadAll(io.LimitReader(httpResp.Body, 50<<20))
+		if err != nil {
+			err = markResponseStarted(err)
+			recordAPIResponseError(ctx, e.cfg, err)
+			return resp, err
+		}
+		appendAPIResponseChunk(ctx, e.cfg, body)
 	}
-	appendAPIResponseChunk(ctx, e.cfg, body)
 	observeResponseTokenEvent(ctx, body)
 	reporter.observeResponseModel(body)
 	// 将响应转换为调用方指定的格式
@@ -244,7 +267,16 @@ func (e *OpenAICompatExecutor) Execute(
 	reporter.publish(ctx, parseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(ctx)
-	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
+	responseHeaders := httpResp.Header.Clone()
+	if clineNonstream {
+		if responseHeaders == nil {
+			responseHeaders = make(http.Header)
+		}
+		responseHeaders.Set("Content-Type", "application/json")
+		responseHeaders.Del("Content-Length")
+		responseHeaders.Del("Content-Encoding")
+	}
+	resp = cliproxyexecutor.Response{Payload: out, Headers: responseHeaders}
 	return resp, nil
 }
 
