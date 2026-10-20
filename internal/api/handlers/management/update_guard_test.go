@@ -1057,6 +1057,96 @@ func TestRunUpdateGuardCommandDoesNotCreateStateDatabase(t *testing.T) {
 	}
 }
 
+func TestProbeUpdateHealthVersionIdentity(t *testing.T) {
+	const attemptID = "0123456789abcdef0123456789abcdef"
+	for _, testCase := range []struct {
+		name     string
+		actual   string
+		expected string
+		wantOK   bool
+	}{
+		{name: "release binary", actual: "8.0.23-aug.2", expected: "v8.0.23-aug.2", wantOK: true},
+		{name: "reverse prefix", actual: "v8.0.23-aug.2", expected: "8.0.23-aug.2", wantOK: true},
+		{name: "case and whitespace", actual: " V8.0.23-aug.2 ", expected: "v8.0.23-aug.2", wantOK: true},
+		{name: "prerelease", actual: "8.0.23-rc.1", expected: "v8.0.23-rc.1", wantOK: true},
+		{name: "same build", actual: "8.0.23+build.1", expected: "v8.0.23+build.1", wantOK: true},
+		{name: "development rollback", actual: "dev", expected: "dev", wantOK: true},
+		{name: "different release", actual: "8.0.23-aug.1", expected: "v8.0.23-aug.2"},
+		{name: "different build", actual: "8.0.23+build.2", expected: "v8.0.23+build.1"},
+		{name: "missing build", actual: "8.0.23", expected: "v8.0.23+build.1"},
+		{name: "repeated prefix", actual: "vv8.0.23", expected: "v8.0.23"},
+		{name: "development label", actual: "vdev", expected: "dev"},
+		{name: "missing version", actual: "", expected: "v8.0.23"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			body, err := json.Marshal(updateHealthResponse{Status: "ok", Version: testCase.actual, AttemptID: attemptID})
+			if err != nil {
+				t.Fatalf("encode health response: %v", err)
+			}
+			client := &http.Client{Transport: updateGuardRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(string(body)))}, nil
+			})}
+			session := updateGuardSession{AttemptID: attemptID, HealthBaseURL: "http://127.0.0.1:8317"}
+			err = probeUpdatePrivateHealth(context.Background(), client, session, "token", testCase.expected)
+			if (err == nil) != testCase.wantOK {
+				t.Fatalf("version identity actual=%q expected=%q: %v", testCase.actual, testCase.expected, err)
+			}
+		})
+	}
+}
+
+func TestUpdateHealthPreservesLegacyGuardVersionIdentity(t *testing.T) {
+	previousBuildVersion := buildinfo.Version
+	t.Cleanup(func() { buildinfo.Version = previousBuildVersion })
+	for _, testCase := range []struct {
+		name     string
+		actual   string
+		previous string
+		target   string
+		phase    string
+		want     string
+	}{
+		{name: "release binary", actual: "8.0.23-aug.2", previous: "dev", target: "v8.0.23-aug.2", phase: updatePhaseHealthCheck, want: "v8.0.23-aug.2"},
+		{name: "reverse prefix", actual: "v8.0.23-aug.2", previous: "dev", target: "8.0.23-aug.2", phase: updatePhaseHealthCheck, want: "8.0.23-aug.2"},
+		{name: "wrong release", actual: "8.0.23-aug.1", previous: "dev", target: "v8.0.23-aug.2", phase: updatePhaseHealthCheck, want: "8.0.23-aug.1"},
+		{name: "wrong build", actual: "8.0.23+build.2", previous: "dev", target: "v8.0.23+build.1", phase: updatePhaseHealthCheck, want: "8.0.23+build.2"},
+		{name: "development rollback", actual: "dev", previous: "dev", target: "v8.0.23-aug.2", phase: updatePhaseRollbackHealthCheck, want: "dev"},
+		{name: "release rollback", actual: "8.0.23-aug.1", previous: "v8.0.23-aug.1", target: "v8.0.23-aug.2", phase: updatePhaseRollbackHealthCheck, want: "v8.0.23-aug.1"},
+		{name: "same release reinstall", actual: "8.0.23-aug.2", previous: "8.0.23-aug.2", target: "v8.0.23-aug.2", phase: updatePhaseHealthCheck, want: "v8.0.23-aug.2"},
+		{name: "same release rollback", actual: "8.0.23-aug.2", previous: "8.0.23-aug.2", target: "v8.0.23-aug.2", phase: updatePhaseRollbackHealthCheck, want: "8.0.23-aug.2"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			buildinfo.Version = testCase.actual
+			store := openUpdateGuardTestStore(t)
+			session, token := prepareArmedUpdateGuardSession(t, store, "http://127.0.0.1:8317", time.Now().UTC(), testCase.previous, testCase.target)
+			_, err := store.transitionUpdateSession(context.Background(), session.AttemptID, session.Phase, func(next *updateGuardSession) {
+				next.Phase = testCase.phase
+			})
+			if err != nil {
+				t.Fatalf("set health phase: %v", err)
+			}
+			handler := &Handler{stateStore: store}
+			engine := gin.New()
+			engine.GET(updateHealthPath, handler.GetUpdateHealth)
+			request := httptest.NewRequest(http.MethodGet, updateHealthPath, nil)
+			request.RemoteAddr = "127.0.0.1:12345"
+			request.Header.Set(updateHealthTokenHeader, token)
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("health response status = %d", response.Code)
+			}
+			var payload updateHealthResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode health response: %v", err)
+			}
+			if payload.Status != "ok" || payload.AttemptID != session.AttemptID || payload.Version != testCase.want {
+				t.Fatalf("health identity = %#v, expected version %q", payload, testCase.want)
+			}
+		})
+	}
+}
+
 func TestProbeUpdateHealthRejectsOversizedOrWrongIdentity(t *testing.T) {
 	const attemptID = "0123456789abcdef0123456789abcdef"
 	validPayload := `{"status":"ok","version":"v2.0.0","attempt_id":"` + attemptID + `"}`

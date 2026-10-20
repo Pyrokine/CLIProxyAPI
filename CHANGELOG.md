@@ -1,5 +1,51 @@
 # Changelog
 
+## v8.0.23-aug.3 - 2026-10-20
+
+### Release basis
+
+- Upstream release: v8.0.23 (`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`)
+- Fork point: `09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- Previous local release: v8.0.23-aug.2
+- Paired management panel: CPAM v1.26.0-aug.3
+
+### Fixes
+
+- Handle Cline non-streaming Chat requests through a single upstream stream without increasing the original token limit
+- Preserve actual text, reasoning, tool calls, stop reasons and reported usage; unwrap successful `success/data` responses and report failed or incomplete responses as errors
+- Match update-health versions with or without the standard `v` prefix, including compatibility with older update guards; preserve full build identity and per-attempt authentication
+- Bundle the released CPAM v1.26.0-aug.3 panel in both Docker architectures
+
+### Compatibility
+
+- Database schemas remain management 4 and usage 9; this patch adds no schema migration
+- The Go SDK module remains `/v6` and the management API remains `/v0/management`
+- Existing core and native-plugin package distinctions remain unchanged
+
+### 中文
+
+### 版本依据
+
+- 上游版本：v8.0.23（`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`）
+- 分叉点：`09fec34e1cdfd99ac79be458fff29f94b834dbcc`
+- 上一个本地版本：v8.0.23-aug.2
+- 配套管理面板：CPAM v1.26.0-aug.3
+
+### 修复
+
+- Cline 非流式 Chat 请求通过一次上游流式请求处理，保持调用方原有 token 上限
+- 保留真实正文、思考、工具调用、停止原因和用量，正确读取成功的 `success/data` 包装，失败或不完整响应明确返回错误
+- 升级健康检查兼容标准 `v` 前缀及旧版更新守护程序，保留完整构建标识与逐次安装认证
+- 两种 Docker 架构均内置已发布的 CPAM v1.26.0-aug.3 面板
+
+### 兼容性
+
+- 数据库 schema 保持 management 4／usage 9，本补丁不增加迁移
+- Go SDK module 保持 `/v6`，管理 API 保持 `/v0/management`
+- core 与 native-plugin 安装包的能力区别保持不变
+
+**Full Changelog**: https://github.com/Pyrokine/CLIProxyAPI/compare/v8.0.23-aug.2...v8.0.23-aug.3
+
 ## v8.0.23-aug.2 - 2026-10-20
 
 ### Release basis

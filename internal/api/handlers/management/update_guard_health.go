@@ -112,10 +112,18 @@ func probeUpdatePrivateHealth(
 		return fmt.Errorf("decode private health response: %w", err)
 	}
 	if payload.Status != "ok" || payload.AttemptID != session.AttemptID ||
-		!strings.EqualFold(strings.TrimSpace(payload.Version), strings.TrimSpace(expectedVersion)) {
+		!strings.EqualFold(normalizeUpdateHealthVersion(payload.Version), normalizeUpdateHealthVersion(expectedVersion)) {
 		return fmt.Errorf("private health identity mismatch")
 	}
 	return nil
+}
+
+func normalizeUpdateHealthVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if len(version) > 1 && (version[0] == 'v' || version[0] == 'V') && version[1] >= '0' && version[1] <= '9' {
+		return version[1:]
+	}
+	return version
 }
 
 func newUpdateGuardHTTPClient(session updateGuardSession) (*http.Client, error) {
@@ -200,9 +208,18 @@ func (h *Handler) GetUpdateHealth(c *gin.Context) {
 		c.AbortWithStatus(http.StatusUnauthorized)
 		return
 	}
+	version := buildinfo.Version
+	expectedVersion := session.TargetVersion
+	switch session.Phase {
+	case updatePhaseRollingBack, updatePhaseRollbackRestarting, updatePhaseRollbackHealthCheck:
+		expectedVersion = session.PreviousVersion
+	}
+	if strings.EqualFold(normalizeUpdateHealthVersion(version), normalizeUpdateHealthVersion(expectedVersion)) {
+		version = expectedVersion
+	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(
 		http.StatusOK,
-		updateHealthResponse{Status: "ok", Version: buildinfo.Version, AttemptID: session.AttemptID},
+		updateHealthResponse{Status: "ok", Version: version, AttemptID: session.AttemptID},
 	)
 }
