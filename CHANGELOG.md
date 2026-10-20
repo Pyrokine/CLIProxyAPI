@@ -1,6 +1,6 @@
 # Changelog
 
-## v8.0.23-aug.1 - 2026-10-19
+## v8.0.23-aug.2 - 2026-10-20
 
 ### Release basis
 
@@ -10,6 +10,10 @@
 - Paired release: CPAM v1.26.0-aug.2
 
 ### Changes
+
+- Record canceled downstream delivery as canceled even before the request context is canceled; preserve upstream and write failures
+- Keep bootstrap replay tests from treating a closed channel as response data
+- Give race-test packages a finite 25-minute CI timeout while retaining all tests and the 45-minute job limit
 
 - Preserve exact credential numbers when saving files and comparing quota identities; keep ordinary numeric settings compatible
 - Restore quota after metadata normalization only when the source material can be verified; isolate legacy numeric identities whose precision cannot be proven
@@ -145,6 +149,10 @@ Linux and macOS core packages built with `CGO_ENABLED=0` cannot load standard dy
 
 #### 更新内容
 
+- 先收到下游取消确认时，仍按取消结束，避免误记为服务失败；上游错误和写入失败保持原结果
+- 修正流式重试测试将关闭通道误判为响应数据的问题
+- CI 的 race 测试使用 25 分钟包级时限，保留全部测试及 45 分钟任务上限
+
 - 保存凭证文件和比较配额身份时保留数字精度，常规数值设置保持兼容
 - 元数据归一化后仅恢复可证明对应当前材料的配额，无法验证数字精度的旧版本保持失效
 - 配额身份校验失败时保留插件认证，并记录明确告警
@@ -268,7 +276,7 @@ Go SDK module 保持 `/v6`，二进制发布 tag 不满足 Go module 的版本�
 
 Linux 和 macOS 的 `CGO_ENABLED=0` 核心包不能加载标准动态库插件，需要这些插件时使用兼容的原生插件构建
 
-Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v7.3.2-aug.1...v8.0.23-aug.1
+Full changelog: https://github.com/Pyrokine/CLIProxyAPI/compare/v7.3.2-aug.1...v8.0.23-aug.2
 
 ## v7.3.2-aug.1 - 2026-09-25
 

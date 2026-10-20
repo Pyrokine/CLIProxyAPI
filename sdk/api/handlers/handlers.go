@@ -1745,8 +1745,17 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		completionOutcome := pluginapi.RequestCompletionSucceeded
 		completionStatus := http.StatusOK
 		var completionErr error
+		var deliveryFailureMu sync.Mutex
+		var deliveryFailure error
+		currentDeliveryFailure := func() error {
+			deliveryFailureMu.Lock()
+			defer deliveryFailureMu.Unlock()
+			return deliveryFailure
+		}
 		defer func() {
-			if completionOutcome == pluginapi.RequestCompletionFailed && ctx != nil && ctx.Err() != nil && errors.Is(completionErr, ctx.Err()) {
+			if completionOutcome == pluginapi.RequestCompletionFailed &&
+				(errors.Is(currentDeliveryFailure(), context.Canceled) ||
+					(ctx != nil && ctx.Err() != nil && errors.Is(completionErr, ctx.Err()))) {
 				completionOutcome = pluginapi.RequestCompletionCanceled
 				completionStatus = 0
 			}
@@ -1770,8 +1779,6 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 		chunkIndex := 0
 		var historyChunks [][]byte
 		maxBootstrapRetries := StreamingBootstrapRetries(h.ConfigSnapshot())
-		var deliveryFailureMu sync.Mutex
-		var deliveryFailure error
 		recordDeliveryFailure := func(err error) {
 			if err == nil {
 				return
@@ -1781,11 +1788,6 @@ func (h *BaseAPIHandler) executeStreamChunksWithAuthManager(
 				deliveryFailure = err
 			}
 			deliveryFailureMu.Unlock()
-		}
-		currentDeliveryFailure := func() error {
-			deliveryFailureMu.Lock()
-			defer deliveryFailureMu.Unlock()
-			return deliveryFailure
 		}
 		trackAcknowledgement := func(acknowledge func(error)) func(error) {
 			return func(err error) {

@@ -695,14 +695,18 @@ func TestHandlerLifecycleCompletesStreamOnce(t *testing.T) {
 
 func TestHandlerLifecycleClassifiesCanceledDeliveryAcknowledgements(t *testing.T) {
 	for _, testCase := range []struct {
-		name        string
-		err         error
-		wantOutcome pluginapi.RequestCompletionOutcome
-		wantStatus  int
+		name          string
+		err           error
+		cancelContext bool
+		wantOutcome   pluginapi.RequestCompletionOutcome
+		wantStatus    int
 	}{
-		{name: "canceled", err: context.Canceled, wantOutcome: pluginapi.RequestCompletionCanceled},
-		{name: "wrapped canceled", err: fmt.Errorf("nested delivery: %w", context.Canceled), wantOutcome: pluginapi.RequestCompletionCanceled},
-		{name: "write failure", err: errors.New("downstream write failed"), wantOutcome: pluginapi.RequestCompletionFailed, wantStatus: http.StatusInternalServerError},
+		{name: "canceled", err: context.Canceled, cancelContext: true, wantOutcome: pluginapi.RequestCompletionCanceled},
+		{name: "wrapped canceled", err: fmt.Errorf("nested delivery: %w", context.Canceled), cancelContext: true, wantOutcome: pluginapi.RequestCompletionCanceled},
+		{name: "write failure", err: errors.New("downstream write failed"), cancelContext: true, wantOutcome: pluginapi.RequestCompletionFailed, wantStatus: http.StatusInternalServerError},
+		{name: "canceled before context", err: context.Canceled, wantOutcome: pluginapi.RequestCompletionCanceled},
+		{name: "wrapped canceled before context", err: fmt.Errorf("nested delivery: %w", context.Canceled), wantOutcome: pluginapi.RequestCompletionCanceled},
+		{name: "write failure before context", err: errors.New("downstream write failed"), wantOutcome: pluginapi.RequestCompletionFailed, wantStatus: http.StatusInternalServerError},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			model := "handler-lifecycle-canceled-delivery-" + strings.ReplaceAll(testCase.name, " ", "-")
@@ -735,7 +739,9 @@ func TestHandlerLifecycleClassifiesCanceledDeliveryAcknowledgements(t *testing.T
 			case <-time.After(time.Second):
 				t.Fatal("missing initial stream payload")
 			}
-			cancel()
+			if testCase.cancelContext {
+				cancel()
+			}
 			for range dataChan {
 			}
 			for range errChan {
@@ -1057,24 +1063,34 @@ func TestHandlerStreamBootstrapReplayBoundary(t *testing.T) {
 					}
 					terminal.Acknowledge(nil)
 				} else {
-					select {
-					case errMsg := <-errChan:
-						if errMsg == nil || errMsg.Acknowledge == nil || errMsg.Error == nil {
-							t.Fatalf("bootstrap error = %#v", errMsg)
-						}
-						errMsg.Acknowledge(nil)
-					case chunk := <-dataChan:
-						if chunk.Acknowledge != nil {
-							chunk.Acknowledge(nil)
-						}
-						for chunk = range dataChan {
+					bootstrapData := dataChan
+					timeout := time.After(time.Second)
+				waitForError:
+					for {
+						select {
+						case errMsg := <-errChan:
+							if errMsg == nil || errMsg.Acknowledge == nil || errMsg.Error == nil {
+								t.Fatalf("bootstrap error = %#v", errMsg)
+							}
+							errMsg.Acknowledge(nil)
+							break waitForError
+						case chunk, ok := <-bootstrapData:
+							if !ok {
+								bootstrapData = nil
+								continue
+							}
 							if chunk.Acknowledge != nil {
 								chunk.Acknowledge(nil)
 							}
+							for chunk = range dataChan {
+								if chunk.Acknowledge != nil {
+									chunk.Acknowledge(nil)
+								}
+							}
+							t.Fatalf("unsafe bootstrap retry produced data: %#v", chunk)
+						case <-timeout:
+							t.Fatal("bootstrap result timed out")
 						}
-						t.Fatalf("unsafe bootstrap retry produced data: %#v", chunk)
-					case <-time.After(time.Second):
-						t.Fatal("bootstrap result timed out")
 					}
 				}
 				for range dataChan {
