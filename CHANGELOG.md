@@ -7,7 +7,7 @@
 - Upstream release: v8.0.23 (`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`)
 - Fork point: `09fec34e1cdfd99ac79be458fff29f94b834dbcc`
 - Previous local release: v7.3.2-aug.1
-- Paired release: CPAM v1.26.0-aug.1
+- Paired release: CPAM v1.26.0-aug.2
 
 ### Changes
 
@@ -141,7 +141,7 @@ Linux and macOS core packages built with `CGO_ENABLED=0` cannot load standard dy
 - 上游版本：v8.0.23（`d318bcc3afb9ea8782862f5e8cdb541afdc9dfa5`）
 - 分叉点：`09fec34e1cdfd99ac79be458fff29f94b834dbcc`
 - 上一个本地版本：v7.3.2-aug.1
-- 配套版本：CPAM v1.26.0-aug.1
+- 配套版本：CPAM v1.26.0-aug.2
 
 #### 更新内容
 
