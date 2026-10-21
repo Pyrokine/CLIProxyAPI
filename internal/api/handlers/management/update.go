@@ -51,15 +51,16 @@ type updateRequest struct {
 }
 
 type updateCompatibilityResponse struct {
-	CurrentVersion        string                   `json:"current_version"`
-	TargetVersion         string                   `json:"target_version"`
-	MinPanelVersion       string                   `json:"min_panel_version"`
-	RequiresRestart       bool                     `json:"requires_restart"`
-	Compatible            bool                     `json:"compatible"`
-	AutomaticRetryBlocked bool                     `json:"automatic_retry_blocked"`
-	LastFailure           *updateFailureResponse   `json:"last_failure,omitempty"`
-	Warnings              []string                 `json:"warnings,omitempty"`
-	Usage                 updateUsageCompatibility `json:"usage"`
+	CurrentVersion          string                   `json:"current_version"`
+	TargetVersion           string                   `json:"target_version"`
+	MinPanelVersion         string                   `json:"min_panel_version"`
+	RequiresRestart         bool                     `json:"requires_restart"`
+	Compatible              bool                     `json:"compatible"`
+	SupportsClientAttemptID bool                     `json:"supports_client_attempt_id"`
+	AutomaticRetryBlocked   bool                     `json:"automatic_retry_blocked"`
+	LastFailure             *updateFailureResponse   `json:"last_failure,omitempty"`
+	Warnings                []string                 `json:"warnings,omitempty"`
+	Usage                   updateUsageCompatibility `json:"usage"`
 }
 
 type updateFailureResponse struct {
@@ -840,11 +841,12 @@ func (h *Handler) buildUpdateCompatibilityFromConfig(
 	cfg *config.Config,
 ) updateCompatibilityResponse {
 	compat := updateCompatibilityResponse{
-		CurrentVersion:  buildinfo.Version,
-		TargetVersion:   strings.TrimSpace(targetVersion),
-		MinPanelVersion: minPanelVersion,
-		RequiresRestart: true,
-		Compatible:      true,
+		CurrentVersion:          buildinfo.Version,
+		TargetVersion:           strings.TrimSpace(targetVersion),
+		MinPanelVersion:         minPanelVersion,
+		RequiresRestart:         true,
+		Compatible:              true,
+		SupportsClientAttemptID: true,
 	}
 	if order, ok := compareUpdateVersions(compat.TargetVersion, compat.CurrentVersion); ok && order < 0 {
 		compat.Compatible = false

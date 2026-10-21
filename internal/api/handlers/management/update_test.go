@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +15,28 @@ import (
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/config"
 	"github.com/Pyrokine/CLIProxyAPI/v6/internal/usage"
 )
+
+func TestBuildUpdateCompatibilityDeclaresClientAttemptSupport(t *testing.T) {
+	previousVersion := buildinfo.Version
+	buildinfo.Version = "v8.0.23-aug.4"
+	t.Cleanup(func() { buildinfo.Version = previousVersion })
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "events.db"), []byte("stub"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, handler := range []*Handler{nil, {}} {
+		for _, target := range []string{"v8.0.23-aug.3", "v8.0.23-aug.5"} {
+			compat := handler.buildUpdateCompatibilityFromConfig(context.Background(), target, &config.Config{UsageDataDir: dir})
+			data, err := json.Marshal(compat)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(data, []byte(`"supports_client_attempt_id":true`)) {
+				t.Fatalf("capability missing from compatibility response: %s", data)
+			}
+		}
+	}
+}
 
 func TestFindReleaseAssets(t *testing.T) {
 	assets := []githubReleaseAsset{

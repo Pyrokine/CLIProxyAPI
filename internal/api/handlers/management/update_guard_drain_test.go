@@ -231,6 +231,74 @@ func TestLegacyUpdateRecoveryDoesNotClaimCompleteIdentityVerification(t *testing
 	}
 }
 
+func TestLegacyGuardHealthRestoresAdmissionOnlyAfterGuardExit(t *testing.T) {
+	ctx := context.Background()
+	store := openUpdateGuardTestStore(t)
+	admission := executionregistry.NewAdmission()
+	handler := &Handler{stateStore: store, inferenceAdmission: admission}
+	engine := gin.New()
+	engine.GET("/healthz", func(c *gin.Context) { c.Status(http.StatusOK) })
+	engine.GET(updateHealthPath, handler.GetUpdateHealth)
+	server := httptest.NewServer(engine)
+	defer server.Close()
+	clock := &updateGuardTestClock{current: time.Now().UTC()}
+	session, token := prepareArmedUpdateGuardSession(t, store, server.URL, clock.now(), "v8.0.23-aug.3", "v8.0.23-aug.4")
+	legacy, err := store.transitionUpdateSession(ctx, session.AttemptID, session.Phase, func(next *updateGuardSession) {
+		next.SchemaVersion = 1
+		next.Phase = updatePhaseHealthCheck
+		next.OriginInstance = ""
+		next.BackupPath = next.ExecutablePath + ".bak"
+		next.PreviousIdentity = updateArtifactIdentity{}
+		next.TargetIdentity = updateArtifactIdentity{}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.db.ExecContext(ctx, "UPDATE state_items SET value=json_set(value, '$.schema_version', 1) WHERE key=?", updateHealthTokenStateKey); err != nil {
+		t.Fatal(err)
+	}
+	previousVersion := buildinfo.Version
+	buildinfo.Version = "8.0.23-aug.4"
+	t.Cleanup(func() { buildinfo.Version = previousVersion })
+	if err := handler.restoreUpdateAdmission(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !admission.Paused(session.AttemptID) {
+		t.Fatal("new process accepted inference before the legacy guard completed")
+	}
+	runtime := updateGuardTestRuntime(clock, session.ExecutablePath)
+	if err := verifyUpdateGuardHealth(ctx, *legacy, token, legacy.TargetVersion, runtime); err != nil {
+		t.Fatalf("legacy guard health contract failed: %v", err)
+	}
+	if _, err := store.transitionUpdateSession(ctx, session.AttemptID, legacy.Phase, func(next *updateGuardSession) {
+		next.Phase = updatePhaseSucceeded
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) { return false, nil }
+	if err := handler.reconcileExpiredUpdate(ctx, runtime); !errors.Is(err, errUpdateInProgress) || !admission.Paused(session.AttemptID) {
+		t.Fatalf("resumed while the legacy guard was still active: %v", err)
+	}
+	runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) {
+		return false, errors.New("systemd unavailable")
+	}
+	if err := handler.reconcileExpiredUpdate(ctx, runtime); err == nil || !admission.Paused(session.AttemptID) {
+		t.Fatal("resumed without proving that the legacy guard had stopped")
+	}
+	runtime.quiescent = func(context.Context, updateGuardSession) (bool, error) { return true, nil }
+	if err := handler.reconcileExpiredUpdate(ctx, runtime); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := admission.Acquire(ctx, nil)
+	if err != nil {
+		t.Fatalf("inference remained paused after the legacy guard exited: %v", err)
+	}
+	release()
+	if token, err := store.loadUpdateHealthToken(ctx); err != nil || token != nil {
+		t.Fatalf("legacy health authentication survived completed reconciliation: present=%t err=%v", token != nil, err)
+	}
+}
+
 func TestInstallingUpdateKeepsAdmissionPausedAfterConfirmationExpires(t *testing.T) {
 	store := openUpdateGuardTestStore(t)
 	admission := executionregistry.NewAdmission()

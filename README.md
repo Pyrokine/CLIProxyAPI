@@ -81,6 +81,8 @@ The guard has a five-minute runtime limit. Admission resumes after the server ve
 
 Health checks and rollback verify the same artifact identities. Backups are isolated by update attempt and removed only after a successful update. Failed recovery retains its backup and session identity and blocks another update until recovery is verified. Legacy sessions can recover their original backup path, with incomplete identity evidence reported as requiring manual verification.
 
+Update compatibility declares whether the running backend supports client-supplied attempt IDs. Install the new management panel before updating an older backend. The first upgrade uses that backend's existing guard; the new update protections apply when the updated backend starts a later upgrade.
+
 ## Documentation
 
 - [User guide](https://help.router-for.me/)
